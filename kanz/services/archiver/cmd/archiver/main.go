@@ -95,7 +95,13 @@ func run() int {
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
 
-	nc, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+	// ONE BusMetrics, CREATED BEFORE THE DIAL (#636). The connection's state and
+	// its transitions are only exported when DialNATS is given this; a service
+	// that publishes and never consumes contributes no kanz_bus_consume_total,
+	// so BusConsumerStalled cannot see it and this gauge is the only signal that
+	// its spine is gone.
+	busMetrics := bus.NewBusMetrics(obs.Registry)
+	nc, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		logger.Error("nats dial failed", "err", err)
 		return 2

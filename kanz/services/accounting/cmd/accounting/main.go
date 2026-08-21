@@ -133,6 +133,16 @@ func run() int {
 	// read path can count the materializations that could NOT be served from a
 	// checkpoint — the only signal that this job has stopped working.
 	snapMetrics := ledger.NewSnapshotMetrics(obs.Registry)
+	// ONE BusMetrics FOR THE PROCESS, created here and passed down (#636).
+	//
+	// It used to be constructed inside runConsumer AND runFXFeed, both of which
+	// receive the SAME *observability.Provider and run CONCURRENTLY whenever
+	// ACCOUNTING_NATS_URL is set and a live FX feed is configured.
+	// NewBusMetrics calls Registry.MustRegister, which panics on a duplicate
+	// collector — so that pair of goroutines crashed the process on startup, in a
+	// perfectly valid configuration, whichever of them registered second.
+	// Unit tests never saw it because nothing constructs this composition root.
+	busMetrics := bus.NewBusMetrics(obs.Registry)
 	// NO WithMetrics: /metrics moved to its own listener (#447). See the split
 	// below — an API that shares the scraped port is reachable from
 	// kanz-observability whatever the NetworkPolicy says.
@@ -151,7 +161,7 @@ func run() int {
 	// subscription/redemption/fee is replayable. A dial failure is fatal (a
 	// configured broker that won't connect is a misconfiguration).
 	if cfg.NATSURL != "" {
-		pub, closePub, err := buildCashPublisher(ctx, cfg, mesh)
+		pub, closePub, err := buildCashPublisher(ctx, cfg, mesh, busMetrics)
 		if err != nil {
 			logger.Error("cash publisher init failed", "err", err)
 			return 2
@@ -233,7 +243,7 @@ func run() int {
 		consumers.Add(1)
 		go func() {
 			defer consumers.Done()
-			if err := runConsumer(ctx, cfg, store, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runConsumer(ctx, cfg, store, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("fill consumer stopped with error", "err", err)
 				fatal.Raise(err)
 			}
@@ -246,7 +256,7 @@ func run() int {
 			consumers.Add(1)
 			go func() {
 				defer consumers.Done()
-				if err := runFXFeed(ctx, cfg, liveFX, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+				if err := runFXFeed(ctx, cfg, liveFX, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
 					logger.Error("FX feed stopped with error", "err", err)
 				}
 			}()
@@ -442,9 +452,8 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 // so a broken subscription brings folding down rather than running silently
 // degraded (book-of-record data loss must be loud). Idempotency is handled below
 // this layer (consumer dedup + ledger.Store.Append on the entry id).
-func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
-	busMetrics := bus.NewBusMetrics(obs.Registry)
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		return err
 	}
@@ -545,8 +554,8 @@ func cashProducerConfig(cfg config.Config) bus.ProducerConfig {
 
 // buildCashPublisher dials a producer connection and builds the WIRE-01f
 // cash-movement publisher. It returns a close func for the producer client.
-func buildCashPublisher(ctx context.Context, cfg config.Config, mesh *transport.Mesh) (*cashmove.Publisher, func(), error) {
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-producer", TLSConfig: mesh.Client})
+func buildCashPublisher(ctx context.Context, cfg config.Config, mesh *transport.Mesh, busMetrics *bus.BusMetrics) (*cashmove.Publisher, func(), error) {
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-producer", TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -598,9 +607,8 @@ func buildLiveFX(cfg config.Config, opts *[]server.Option) (*fxfeed.LiveFX, erro
 // valuation, completeness-gated) rather than stopping the service. The cache
 // must SEE every FX event, so it subscribes under a per-source broadcast group
 // distinct from the fill consumer's load-balanced group.
-func runFXFeed(ctx context.Context, cfg config.Config, liveFX *fxfeed.LiveFX, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
-	busMetrics := bus.NewBusMetrics(obs.Registry)
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-fx", TLSConfig: mesh.Client})
+func runFXFeed(ctx context.Context, cfg config.Config, liveFX *fxfeed.LiveFX, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-fx", TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		return err
 	}

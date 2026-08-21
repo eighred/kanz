@@ -155,7 +155,7 @@ func run() int {
 		defer func() { _ = mesh.Close() }()
 		logger.Info("bus transport", "mtls", mesh.Enabled())
 
-		client, cerr := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+		client, cerr := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
 		if cerr != nil {
 			logger.Error("bus dial failed", "err", cerr)
 			return 2

@@ -278,7 +278,7 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (fun
 // the event id via fund.Store.Append).
 func runConsumer(ctx context.Context, cfg config.Config, store fund.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		return err
 	}

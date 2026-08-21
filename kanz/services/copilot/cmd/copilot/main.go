@@ -236,7 +236,8 @@ func buildDecisionRecorder(ctx context.Context, cfg config.Config, reg prometheu
 		return nil, func() {}, err
 	}
 	logger.Info("bus transport", "mtls", mesh.Enabled())
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: "copilot", TLSConfig: mesh.Client})
+	busMetrics := bus.NewBusMetrics(reg)
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: "copilot", TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		_ = mesh.Close()
 		return nil, func() {}, err
@@ -247,7 +248,7 @@ func buildDecisionRecorder(ctx context.Context, cfg config.Config, reg prometheu
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:          "copilot",
 		ProducerVersion: version.String(),
-		Metrics:         bus.NewBusMetrics(reg),
+		Metrics:         busMetrics,
 	})
 	if err != nil {
 		_ = client.Close()

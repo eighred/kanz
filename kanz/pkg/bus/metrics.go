@@ -25,6 +25,26 @@ type BusMetrics struct {
 
 	backlogPollFailures *prometheus.CounterVec // subject, group, transport
 	backlogPollSuccess  *prometheus.GaugeVec   // subject, group, transport — unix seconds
+
+	// connected is the spine's USE signal: 1 while this client holds a live
+	// connection, 0 while it does not (#636). Until it existed, losing NATS was
+	// SILENT in twenty of twenty-one services — MaxReconnects defaults to -1, so
+	// the client buffers and heals forever and nothing upstream ever learns.
+	connected *prometheus.GaugeVec // client
+	// connectionEvents counts the transitions, and it is NOT redundant with the
+	// gauge. scrape_interval is 30s: a spine that drops and recovers inside one
+	// interval leaves the gauge reading 1 at every scrape, so flapping — the
+	// shape that precedes a real outage — is invisible to the gauge alone. A
+	// counter cannot miss an edge.
+	connectionEvents *prometheus.CounterVec // client, event
+	// consumeErrors counts ASYNCHRONOUS consume errors, which have no other
+	// surface anywhere. jetstream delivers missed heartbeats,
+	// ErrConsumerNotFound after a consumer is deleted, and
+	// ErrConsumerLeadershipChanged ONLY to a ConsumeErrHandler; with none
+	// registered they were discarded, and the subscription simply stopped
+	// delivering. A crash-loop is loud; this is the same loss arriving after the
+	// consumer is established, and it was silent.
+	consumeErrors *prometheus.CounterVec // subject, group
 }
 
 // NewBusMetrics builds and registers the bus collectors on reg.
@@ -153,6 +173,18 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 			Name: "kanz_bus_backlog_poll_last_success_timestamp_seconds",
 			Help: "Unix time of the last backlog poll that the broker answered. `time() - this` is the age of the newest real reading; it is the series that makes a MISSING kanz_bus_consumer_lag / kanz_bus_pending_messages attributable to a broker that stopped answering rather than to a subject nobody consumes.",
 		}, []string{"subject", "group", "transport"}),
+		connected: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kanz_bus_connected",
+			Help: "1 while this client holds a live NATS connection, 0 while it does not.",
+		}, []string{"client"}),
+		connectionEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kanz_bus_connection_events_total",
+			Help: "NATS connection transitions, by client and event (disconnected|reconnected|closed).",
+		}, []string{"client", "event"}),
+		consumeErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kanz_bus_consume_errors_total",
+			Help: "asynchronous JetStream consume errors, by subject and group.",
+		}, []string{"subject", "group"}),
 	}
 	reg.MustRegister(
 		m.publishTotal, m.publishLatency,
@@ -160,8 +192,44 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 		m.dlqParked, m.dlqRedrive,
 		m.consumerLag, m.pending,
 		m.backlogPollFailures, m.backlogPollSuccess,
+		m.connected, m.connectionEvents, m.consumeErrors,
 	)
 	return m
+}
+
+// setConnected records the connection state and the transition that produced it.
+//
+// BOTH, ALWAYS, and never one without the other: the gauge answers "is it up
+// right now" for an alert, and the counter answers "did it drop at all" for a
+// blip shorter than a scrape interval. A caller that set only the gauge would
+// leave flapping invisible, which is the failure mode that precedes the outage
+// rather than following it.
+//
+// event is "" for the initial connect, where there is no transition to count —
+// the gauge going to 1 at process start is not an edge anybody needs paging on.
+func (m *BusMetrics) setConnected(client string, up bool, event string) {
+	if m == nil {
+		return
+	}
+	v := 0.0
+	if up {
+		v = 1
+	}
+	m.connected.WithLabelValues(client).Set(v)
+	if event != "" {
+		m.connectionEvents.WithLabelValues(client, event).Inc()
+	}
+}
+
+// observeConsumeError records one asynchronous consume error. Distinct from
+// observeConsume's error result, which counts a HANDLER that failed on a
+// delivery that arrived: this counts the delivery path itself faulting, where
+// nothing arrived and nothing will until it recovers.
+func (m *BusMetrics) observeConsumeError(subject, group string) {
+	if m == nil {
+		return
+	}
+	m.consumeErrors.WithLabelValues(subject, group).Inc()
 }
 
 func result(err error) string {

@@ -107,12 +107,21 @@ func run() int {
 		}
 	}()
 
+	// ONE BusMetrics FOR THE PROCESS (#636). It used to be built inside runFeed
+	// AND runIngest, which receive the SAME *observability.Provider and both run
+	// whenever MARKET_DATA_FEED and a NATS URL are set — runFeed in a goroutine
+	// just below, runIngest on this one. NewBusMetrics calls Registry.MustRegister,
+	// which panics on a duplicate collector, so that pair crashed the process on
+	// startup in a perfectly valid configuration. No unit test constructs this
+	// composition root, so nothing caught it.
+	busMetrics := bus.NewBusMetrics(obs.Registry)
+
 	// Optional publisher (WIRE-01a): stream normalized market events ONTO the
 	// spine. Runs concurrently with the consumer below; both share ctx so SIGTERM
 	// stops them together. Empty MARKET_DATA_FEED ⇒ consumer-only (default).
 	if cfg.Feed != "" && cfg.NATSURL != "" {
 		go func() {
-			if err := runFeed(ctx, cfg, readiness, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runFeed(ctx, cfg, readiness, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("feed publisher stopped with error", "err", err)
 			}
 		}()
@@ -122,7 +131,7 @@ func run() int {
 
 	var runErr error
 	if cfg.NATSURL != "" {
-		if err := runIngest(ctx, cfg, readiness, logger, obs); err != nil {
+		if err := runIngest(ctx, cfg, readiness, logger, obs, busMetrics); err != nil {
 			logger.Error("ingestion stopped with error", "err", err)
 			runErr = err
 		}
@@ -152,8 +161,7 @@ func run() int {
 // blocks); the first non-cancellation error cancels the siblings and is
 // returned — fail-fast, so a broken subscription brings ingestion down rather
 // than running silently degraded.
-func runIngest(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
-	busMetrics := bus.NewBusMetrics(obs.Registry)
+func runIngest(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
 
 	st, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
@@ -177,7 +185,7 @@ func runIngest(ctx context.Context, cfg config.Config, readiness *server.Readine
 	}
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		return err
 	}
@@ -274,7 +282,7 @@ func runIngest(ctx context.Context, cfg config.Config, readiness *server.Readine
 // same seam a live vendor adapter binds — only the Adapter differs. Today the
 // dependency-free SimAdapter replays a synthetic session (offline/local feed);
 // a real Bloomberg/Refinitiv/ICE Source plugs in here where its SDK exists.
-func runFeed(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
+func runFeed(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
 	if cfg.Feed != "sim" {
 		return fmt.Errorf("market-data: unknown MARKET_DATA_FEED %q (want \"sim\" or empty)", cfg.Feed)
 	}
@@ -283,7 +291,6 @@ func runFeed(ctx context.Context, cfg config.Config, readiness *server.Readiness
 		instruments = []string{"AAPL", "MSFT", "GOOG"}
 	}
 
-	busMetrics := bus.NewBusMetrics(obs.Registry)
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
 	// plaintext client it refuses at the handshake.
 	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
@@ -292,7 +299,7 @@ func runFeed(ctx context.Context, cfg config.Config, readiness *server.Readiness
 	}
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-feed", TLSConfig: mesh.Client})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-feed", TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		return err
 	}

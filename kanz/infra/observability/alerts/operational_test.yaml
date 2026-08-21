@@ -864,3 +864,111 @@ tests:
       - eval_time: 40m
         alertname: InferencePoolSaturated
         exp_alerts: []
+
+  # ===========================================================================
+  # bus_connectivity (#636) — losing the spine says so
+  # ===========================================================================
+
+  # A process that lost the spine and has not got it back.
+  - interval: 30s
+    name: the spine is gone
+    input_series:
+      - series: 'kanz_bus_connected{namespace="kanz-services", pod="oms-0", client="oms"}'
+        values: '1 1 0x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: BusDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              namespace: kanz-services
+              pod: oms-0
+              client: oms
+            exp_annotations:
+              summary: "oms-0 has lost the NATS spine (oms)"
+              description: "This process has held no NATS connection for two minutes. It cannot publish, cannot receive fills, and cannot hear a declared halt — so it can no longer know whether it is safe to trade, which is the reason pkg/bus's doc says a trading process must learn about a disconnect. MaxReconnects is -1, so it will keep retrying and will NOT crash: the pod stays Ready and the process stays alive with nothing flowing. Check the broker first (kubectl -n kanz-messaging get pods), then this pod's egress and its NATS credentials."
+
+  # THE 2m HOLD, EXECUTED. A broker rolling restart takes the connection away for
+  # well under a minute; paging on that would make this rule noise.
+  - interval: 30s
+    name: a brief reconnect during a broker restart is not an outage
+    input_series:
+      - series: 'kanz_bus_connected{namespace="kanz-services", pod="oms-0", client="oms"}'
+        values: '1 1 0 0 1x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: BusDisconnected
+        exp_alerts: []
+
+  # FLAPPING THE GAUGE CANNOT SEE: connected reads 1 at every sample, and the
+  # counter still shows three drops.
+  - interval: 30s
+    name: repeated short drops the gauge misses
+    input_series:
+      - series: 'kanz_bus_connected{namespace="kanz-services", pod="gw-0", client="api-gateway"}'
+        values: '1x40'
+      - series: 'kanz_bus_connection_events_total{namespace="kanz-services", pod="gw-0", client="api-gateway", event="disconnected"}'
+        values: '0 1 2 3 3x40'
+    alert_rule_test:
+      # BusDisconnected must stay silent — the gauge never read 0. That is the
+      # whole reason the counter exists.
+      - eval_time: 12m
+        alertname: BusDisconnected
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: BusConnectionFlapping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              namespace: kanz-services
+              pod: gw-0
+              client: api-gateway
+              event: disconnected
+            exp_annotations:
+              summary: "gw-0 has reconnected to the spine repeatedly (api-gateway)"
+              description: "Three or more disconnects in fifteen minutes. Each one is brief enough that kanz_bus_connected is likely still reading 1 at every scrape, so BusDisconnected cannot fire on this — that rule sees state, this one sees edges. In-flight publishes are being buffered and redelivered across each gap, and consumers are re-establishing their durables each time. Look for a broker under memory pressure, a node draining repeatedly, or an unstable network path before it becomes a full outage."
+
+  # ONE reconnect is a broker restart, not a flap.
+  - interval: 30s
+    name: a single reconnect is not flapping
+    input_series:
+      - series: 'kanz_bus_connection_events_total{namespace="kanz-services", pod="gw-0", client="api-gateway", event="disconnected"}'
+        values: '0 1 1x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: BusConnectionFlapping
+        exp_alerts: []
+
+  # The delivery path faulting mid-run, which had no surface at all before #636.
+  - interval: 1m
+    name: asynchronous consume errors
+    input_series:
+      - series: 'kanz_bus_consume_errors_total{namespace="kanz-services", pod="compliance-0", subject="order.order.filled", group="compliance"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: BusAsyncConsumeErrors
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              namespace: kanz-services
+              pod: compliance-0
+              subject: order.order.filled
+              group: compliance
+            exp_annotations:
+              summary: "Asynchronous consume errors on order.order.filled (compliance)"
+              description: "JetStream has reported delivery-path errors on this subscription for fifteen minutes — missed heartbeats, a consumer that no longer exists, or a leadership change that did not settle. Deliveries on this subject may have STOPPED while the process stays healthy and Ready, so nothing else in this alerting layer will say so. Check whether the stream and consumer still exist (nats consumer info), which is the state that crash-looped compliance and tv-sync when it happened at startup instead of mid-run."
+
+  # A consumer that hit errors and RECOVERED must go quiet: the counter is flat.
+  - interval: 1m
+    name: a recovered consumer stops alerting
+    input_series:
+      - series: 'kanz_bus_consume_errors_total{namespace="kanz-services", pod="compliance-0", subject="order.order.filled", group="compliance"}'
+        values: '9x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: BusAsyncConsumeErrors
+        exp_alerts: []

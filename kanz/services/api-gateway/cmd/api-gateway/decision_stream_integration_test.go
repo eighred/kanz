@@ -116,7 +116,7 @@ func TestAGatewayDecisionReachesTheObservationStream(t *testing.T) {
 		Source:  "api-gateway",
 		NATSURL: natsURL,
 	}
-	producer, _, closeBus, err := buildBus(ctx, cfg, halt.NewGate(nil), logger)
+	producer, _, closeBus, err := buildBus(ctx, cfg, halt.NewGate(nil), logger, bus.NewBusMetrics(prometheus.NewRegistry()))
 	if err != nil {
 		t.Fatalf("buildBus: %v", err)
 	}

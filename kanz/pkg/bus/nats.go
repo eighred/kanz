@@ -77,6 +77,21 @@ type NATSConfig struct {
 	Password string
 	Token    string
 
+	// Metrics is the RED/USE exporter (OBS-01c). Supplying it is what puts this
+	// connection's state on kanz_bus_connected and its transitions on
+	// kanz_bus_connection_events_total (#636) — the only series anywhere that
+	// answer "is the spine up" for a service that merely PUBLISHES, and which
+	// therefore contributes no kanz_bus_consume_total for BusConsumerStalled to
+	// read.
+	//
+	// Nil is safe and logs are unaffected, so a caller that omits it is not
+	// silent — it is merely unalertable, which is why
+	// test/arch/bus_connection_observed_test.go requires every composition root
+	// under services/*/cmd/** to set it rather than leaving it to habit. Pass the
+	// SAME instance already handed to ProducerConfig/WithBusMetrics; the
+	// collectors are registered once by NewBusMetrics.
+	Metrics *BusMetrics
+
 	// OnDisconnect fires when the spine is lost. MaxReconnects defaults to -1
 	// (retry forever), which means a disconnect is otherwise SILENT: the client
 	// buffers and heals and nothing upstream ever learns the bus went away. A
@@ -84,6 +99,14 @@ type NATSConfig struct {
 	// itself stop flowing, so it can no longer know whether it is safe to trade.
 	// Wire this to halt.Gate.TripOnBusLoss to fail closed. err is nil on a
 	// clean close. Called on a NATS goroutine: do not block.
+	//
+	// IT IS NO LONGER WHAT DECIDES WHETHER ANYTHING IS OBSERVED (#636). Until
+	// this comment changed, the disconnect/closed handlers were installed only
+	// when this field was non-nil, and 23 of 24 composition roots left it nil —
+	// so for twenty services the nats.Conn could close for good with the process
+	// still running, /readyz still answering 200, and NOTHING written anywhere.
+	// The handlers are unconditional now; this hook is the extra TRADING response
+	// on top of them, not the switch that turns logging on.
 	OnDisconnect func(err error)
 	// OnReconnect fires when the spine returns. It deliberately does NOT reopen the
 	// halt gate — the wire is back, which is not the same as the book being safe.
@@ -140,20 +163,58 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 		nats.ReconnectWait(cfg.ReconnectWait),
 		nats.MaxReconnects(cfg.MaxReconnects),
 	}
-	if cfg.OnDisconnect != nil {
-		fn := cfg.OnDisconnect
-		opts = append(opts,
-			nats.DisconnectErrHandler(func(_ *nats.Conn, err error) { fn(err) }),
-			// A client that exhausts MaxReconnects closes for good without ever firing
-			// DisconnectErrHandler again, so the terminal case gets its own hook —
-			// otherwise the one disconnect that is permanent is the one we miss.
-			nats.ClosedHandler(func(c *nats.Conn) { fn(c.LastError()) }),
-		)
-	}
-	if cfg.OnReconnect != nil {
-		fn := cfg.OnReconnect
-		opts = append(opts, nats.ReconnectHandler(func(*nats.Conn) { fn() }))
-	}
+	// THE HANDLERS ARE UNCONDITIONAL (#636). They used to be installed only when
+	// the caller supplied OnDisconnect, and 23 of 24 composition roots supplied
+	// nothing — so in twenty services the nats.Conn could close for good while
+	// the process kept running, /readyz kept answering 200, and not one line was
+	// written anywhere. The Go NATS client logs nothing of its own, and
+	// MaxReconnects defaults to -1, so there is no crash to notice either.
+	//
+	// This package's own doc has always stated the requirement ("a trading
+	// process must learn"). What was missing was that meeting it depended on
+	// every future composition root remembering a field. It does not now: the
+	// caller's hook is called IN ADDITION to logging and metrics, and omitting it
+	// costs the trading response, not the observability.
+	//
+	// Logged at ERROR, not WARN. A trading process that cannot reach the spine
+	// cannot receive fills, cannot hear the halt FACT, and cannot publish — it is
+	// not degraded, it is disconnected from the thing it exists to talk to.
+	logConn := cfg.Logger
+	name := cfg.Name
+	metrics := cfg.Metrics
+	onDisconnect := cfg.OnDisconnect
+	onReconnect := cfg.OnReconnect
+	opts = append(opts,
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			metrics.setConnected(name, false, "disconnected")
+			logConn.Error("bus: DISCONNECTED from the NATS spine — this process cannot publish, "+
+				"cannot receive fills, and cannot hear a declared halt until it reconnects",
+				"client", name, "err", err)
+			if onDisconnect != nil {
+				onDisconnect(err)
+			}
+		}),
+		nats.ReconnectHandler(func(c *nats.Conn) {
+			metrics.setConnected(name, true, "reconnected")
+			logConn.Warn("bus: reconnected to the NATS spine",
+				"client", name, "url", c.ConnectedUrl())
+			if onReconnect != nil {
+				onReconnect()
+			}
+		}),
+		// A client that exhausts MaxReconnects closes for good without ever firing
+		// DisconnectErrHandler again, so the terminal case gets its own hook —
+		// otherwise the one disconnect that is permanent is the one we miss.
+		nats.ClosedHandler(func(c *nats.Conn) {
+			metrics.setConnected(name, false, "closed")
+			logConn.Error("bus: the NATS connection is CLOSED and will not retry — "+
+				"this process is permanently detached from the spine and must be restarted",
+				"client", name, "err", c.LastError())
+			if onDisconnect != nil {
+				onDisconnect(c.LastError())
+			}
+		}),
+	)
 	if cfg.TLSConfig != nil {
 		opts = append(opts, nats.Secure(cfg.TLSConfig))
 	}
@@ -167,6 +228,13 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nats connect: %w", err)
 	}
+	// SET IT UP FRONT, and with no event. Without this the gauge has no series
+	// until the FIRST disconnect, and a metric that does not exist is not zero —
+	// `kanz_bus_connected == 0` matches nothing, so an alert over it would stay
+	// silent for exactly the process that never managed to report. The empty
+	// event is deliberate: the gauge reaching 1 at startup is not a transition
+	// anyone should be paged about.
+	cfg.Metrics.setConnected(cfg.Name, true, "")
 	js, err := jetstream.New(conn)
 	if err != nil {
 		conn.Close()
@@ -302,7 +370,32 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 		if ackErr := m.Ack(); ackErr != nil {
 			logAckFailure(c.cfg.Logger, subject, group, ackErr)
 		}
-	})
+	},
+		// ASYNCHRONOUS CONSUME ERRORS HAVE NO OTHER SURFACE (#636). jetstream
+		// delivers missed heartbeats, ErrConsumerNotFound after a consumer is
+		// deleted, and ErrConsumerLeadershipChanged ONLY here — with no handler
+		// registered they are discarded, and the subscription simply STOPS
+		// DELIVERING while the process stays up and /readyz stays 200.
+		//
+		// That is the mid-run form of the failure
+		// test/arch/stateful_storage_durability_test.go was written for: the rig lost
+		// JetStream state on a host reboot and compliance and tv-sync crash-looped to
+		// ~495 restarts on "stream not found". A crash-loop is loud. The same loss
+		// arriving AFTER the consumer is established is silent, and that guard covers
+		// the storage, not the notification.
+		//
+		// It does NOT stop the subscription. These are recoverable by design — a
+		// leadership change resolves itself, a heartbeat gap usually does — and
+		// tearing down a working consumer on a transient fault would turn an
+		// observability gap into an outage. Logged and counted so the alert can see
+		// a fault that PERSISTS, which is the shape that does not recover.
+		jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+			c.cfg.Metrics.observeConsumeError(subject, group)
+			c.cfg.Logger.Error("bus: asynchronous consume error — deliveries may have stopped "+
+				"on this subscription while the process stays healthy",
+				"subject", subject, "group", group, "err", err)
+		}),
+	)
 	if err != nil {
 		return fmt.Errorf("nats: start consume: %w", err)
 	}
@@ -715,7 +808,32 @@ func (c *NATSClient) subscribeEphemeral(ctx context.Context, subject string, pol
 		if ackErr := m.Ack(); ackErr != nil {
 			logAckFailure(c.cfg.Logger, subject, "", ackErr)
 		}
-	})
+	},
+		// ASYNCHRONOUS CONSUME ERRORS HAVE NO OTHER SURFACE (#636). jetstream
+		// delivers missed heartbeats, ErrConsumerNotFound after a consumer is
+		// deleted, and ErrConsumerLeadershipChanged ONLY here — with no handler
+		// registered they are discarded, and the subscription simply STOPS
+		// DELIVERING while the process stays up and /readyz stays 200.
+		//
+		// That is the mid-run form of the failure
+		// test/arch/stateful_storage_durability_test.go was written for: the rig lost
+		// JetStream state on a host reboot and compliance and tv-sync crash-looped to
+		// ~495 restarts on "stream not found". A crash-loop is loud. The same loss
+		// arriving AFTER the consumer is established is silent, and that guard covers
+		// the storage, not the notification.
+		//
+		// It does NOT stop the subscription. These are recoverable by design — a
+		// leadership change resolves itself, a heartbeat gap usually does — and
+		// tearing down a working consumer on a transient fault would turn an
+		// observability gap into an outage. Logged and counted so the alert can see
+		// a fault that PERSISTS, which is the shape that does not recover.
+		jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+			c.cfg.Metrics.observeConsumeError(subject, "")
+			c.cfg.Logger.Error("bus: asynchronous consume error — deliveries may have stopped "+
+				"on this subscription while the process stays healthy",
+				"subject", subject, "group", "", "err", err)
+		}),
+	)
 	if err != nil {
 		return fmt.Errorf("nats: start broadcast consume: %w", err)
 	}
