@@ -782,17 +782,41 @@ spec:
 # that can reach this service directly sets its own principal header and trades
 # as anyone it names.
 #
-# So this rule admits exactly one peer, and observability is NOT among them. The
-# four services in allow-observability-scrape serve tenant-scoped reads on the
-# same port as /metrics, which is the exposure #232 could not close; this service
-# must not join that set, and it does not need to — nothing scrapes it yet.
+# So this rule admits exactly one peer, and observability is NOT among them —
+# but for a different reason than the four services in allow-observability-scrape,
+# and the difference is the whole arrangement. Those four serve tenant-scoped
+# reads on the SAME port as /metrics, which is the exposure #232 named and could
+# not close: the scrape policy has to admit that port, so a pod in
+# kanz-observability can choose a principal and use those routes.
 #
-# THE POLICY EXISTS BEFORE THE WORKLOAD, deliberately. There is no optimization
-# Deployment: no Dockerfile, no build matrix entry, no manifest. Writing the
-# constraint now means the day one lands it is already bounded, rather than
-# arriving open and waiting for someone to notice. test/arch's
-# tenantHeaderTrustingUndeployed asserts the workload is still absent and fails
-# when it appears, which is when the rest of this obligation comes due.
+# THE LISTENERS ARE SPLIT INSTEAD (#409). optimization serves its API on 8100 —
+# admitted only from app: api-gateway, by this rule — and /metrics on 8094, which
+# is what allow-observability-scrape admits and what the pod template annotates
+# as prometheus.io/port. Scraping it therefore reaches no route that reads a
+# principal. test/arch's tenantHeaderTrustingSplitListeners asserts exactly that
+# on every run: the API port must differ from the annotated metrics port and must
+# not appear in allow-observability-scrape's list.
+#
+# THIS PARAGRAPH USED TO SAY THE OPPOSITE, AND EVERY WORD OF IT WAS FALSE (#638).
+# It read: "THE POLICY EXISTS BEFORE THE WORKLOAD, deliberately. There is no
+# optimization Deployment: no Dockerfile, no build matrix entry, no manifest ...
+# test/arch's tenantHeaderTrustingUndeployed asserts the workload is still absent
+# and fails when it appears."
+#
+# By then the Dockerfile existed, build.yml and release.yml both built it, the
+# Deployment manifest existed, and tenantHeaderTrustingUndeployed existed NOWHERE
+# IN THE MODULE — a grep for it returned exactly one line, this comment. The
+# obligation it deferred had in fact been met, which is why nothing broke and why
+# nothing noticed.
+#
+# The harm was to the reader. This is the file where an auditor reads what the
+# platform's network authorization IS, and this block is the one explaining why a
+# service that authenticates nobody and stamps the issuer on every order command
+# is safe. A reader who trusted the paragraph concluded the service was not
+# deployed and stopped; one who checked the named guard found nothing and could
+# not tell whether it had been renamed, deleted, or never written.
+# test/arch/comments_cite_real_symbols_test.go now fails the build on a comment
+# in infra/**.yaml that names a test/arch symbol which does not exist.
 # THE MANDATE-CHANGE SURFACE (#562, #410 act two) — the ingress half, and it is a
 # CONTROL boundary rather than a read one.
 #
