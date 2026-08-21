@@ -1314,6 +1314,62 @@ data:
               }
             }
           }
+          # THE TENANT'S DURABLE LOG OF RECORD (#637). Until this entry existed
+          # the account above was a one-way street: the bridge carried order
+          # COMMANDS in, oms-acme published its FACTs back onto these same
+          # subjects, and NOTHING in the estate could hear them. Accounts are
+          # isolated by construction — the header of this file says so — and
+          # every platform consumer is a __system__ user. So an order was
+          # accepted, a fill happened, a position moved, and the events aged off
+          # this account's streams at their max-age with no copy anywhere.
+          #
+          # THAT IS A DR HOLE, NOT AN INTEGRATION GAP, which is why the archiver
+          # is the first consumer moved rather than the ledger or the risk
+          # engine. CLAUDE.md's one sequencing rule that outlives any issue is
+          # that real orders must never be placed against a store that may not be
+          # backed up; a tenant provisioned without this pod can place them, and
+          # every health check in the estate reads green while it does.
+          #
+          # AN EXPORT BACK TO __system__ WOULD NOT HAVE WORKED, and it is worth
+          # stating because it is the obvious fix. The platform archiver is
+          # pinned to ARCHIVER_TENANT=__system__ and internal/topic.For REFUSES
+          # any envelope whose tenant_id differs — it NACKs rather than misfiling
+          # into another tenant's Kafka prefix. Exporting acme's FACTs into
+          # __system__ would therefore produce an infinite redelivery loop at the
+          # Kafka boundary, not an archive. The archiver has to run INSIDE the
+          # account, serving that tenant, which is what ARCHIVER_TENANT and
+          # topic.Qualify were built for and never wired.
+          #
+          # THE ALLOW-LISTS ARE THE PLATFORM ARCHIVER'S, DERIVED NOT COPIED, for
+          # the same reason the two entries above say so: infra/deploy/tenants/
+          # acme/archiver-acme.yaml is rendered by internal/tenantgen from
+          # infra/deploy/archiver-deploy.yaml, so it is the SAME digest-pinned
+          # binary reading the same ARCHIVER_SUBJECTS defaults. Publish is the
+          # JetStream machinery and nothing else: archiver's own DLQ
+          # ("dlq.archiver") is a KAFKA topic, never a NATS subject, so no domain
+          # subject belongs here — and `deny: [">"]` would deny its own acks,
+          # which fails SILENTLY as infinite redelivery (see the platform entry).
+          #
+          # KAFKA IS THE OTHER HALF AND IT IS NOT IN THIS FILE. This pod produces
+          # to the tenant's PREFIXED topics (topic.Qualify -> "acme.order.order"),
+          # and Kafka auto-create is disabled, so without the prefixed ACL granted
+          # to this same SVID the publish fails hard and the consumer NACKs.
+          # infra/tenancy/tenantctl.sh's COMPUTE_KAFKA_SAS grants it;
+          # test/arch/tenant_compute_test.go fails the build if that list and
+          # internal/tenantgen's KafkaProducer set ever disagree.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/archiver-acme"
+            permissions: {
+              publish: { allow: ["$JS.API.>", "$JS.ACK.>"] }
+              subscribe: {
+                allow: [
+                  "order.>", "strategy.>", "execution.>", "accounting.>", "settlement.>",
+                  "compliance.breach.>", "compliance.mandate.>", "risk.portfolio.>", "risk.exposure.>",
+                  "risk.signal.>", "risk.command.>", "risk.position.>", "inference.>", "platform.>",
+                  "data.>", "_INBOX.>", "$JS.API.>",
+                ]
+              }
+            }
+          }
         ]
       }
     }

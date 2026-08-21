@@ -294,10 +294,15 @@ if step compute; then
     compute_missing="$compute_missing  - TENANT is '__system__' — that is the reserved platform tenant (infra/nats/tenancy.yaml), never a real tenant; choose a different TENANT id
 "
   fi
-  [ -f "../deploy/oms-deploy.yaml" ] || compute_missing="$compute_missing  - ../deploy/oms-deploy.yaml not found — the base this step renders is missing; the checkout looks incomplete
+  # Every base internal/tenantgen.Services declares, not just the OMS's: a
+  # missing base makes the generator refuse part-way, after it has already
+  # written the manifests it got to — a half-rendered tenant.
+  for base in oms-deploy.yaml archiver-deploy.yaml; do
+    [ -f "../deploy/$base" ] || compute_missing="$compute_missing  - ../deploy/$base not found — a base this step renders is missing; the checkout looks incomplete
 "
+  done
   if [ -n "$compute_missing" ]; then
-    echo "REFUSED: cannot render compute manifest for '$TENANT' — missing prerequisite(s):" >&2
+    echo "REFUSED: cannot render compute manifests for '$TENANT' — missing prerequisite(s):" >&2
     printf '%s' "$compute_missing" >&2
     exit 2
   fi
@@ -307,13 +312,16 @@ if step compute; then
   # every committed tenant manifest from the live base. Deterministic: a
   # rerun with an unchanged base always overwrites with the byte-identical
   # result, never a guess about whether an existing copy is stale.
-  OUT="../deploy/tenants/$TENANT/oms-$TENANT.yaml"
-  ( cd ../.. && go run ./cmd/kanz-tenantgen -tenant "$TENANT" \
-      -base infra/deploy/oms-deploy.yaml \
-      -out "infra/deploy/tenants/$TENANT/oms-$TENANT.yaml" )
-  echo "   wrote $OUT"
+  #
+  # It renders EVERY service internal/tenantgen.Services declares — the order
+  # path AND the consumers that must record what that order produces. It used to
+  # render the OMS alone, and a tenant with an OMS and no consumers publishes its
+  # FACTs into an account nothing else is a member of: orders in, nothing out,
+  # every service Ready throughout (#637). The tool prints each manifest's NATS
+  # and Kafka prerequisites as it writes it; do not skip them.
+  ( cd ../.. && go run ./cmd/kanz-tenantgen -tenant "$TENANT" )
 
-  # NATS user (SEC-M3): the OMS pod's SPIFFE ID is derived from its
+  # NATS user (SEC-M3): a compute pod's SPIFFE ID is derived from its
   # ServiceAccount, not from tenantctl.sh's per-tenant-namespace TENANT_SAS
   # pattern (compute lives in kanz-services, not tenant-$TENANT — ground
   # truth of MT-02's design). tenantctl.sh's own onboard_nats already
@@ -321,18 +329,20 @@ if step compute; then
   # (nats/tenancy.yaml's header: "Add a tenant by appending an account + user
   # keyed on the tenant workload's SPIFFE URI SAN, then 'nats-server --signal
   # reload'") — follow it here rather than inventing a second mechanism.
-  OMS_PRINCIPAL="spiffe://kanz.internal/ns/kanz-services/sa/oms-${TENANT}"
   echo ""
   echo "   MANUAL (same static-mode path as tenantctl.sh's onboard_nats): add BOTH"
   echo "   blocks to tenant $TENANT's account in infra/nats/tenancy.yaml:"
   echo ""
-  echo "     users: [ { user: \"${OMS_PRINCIPAL}\" } ]"
+  echo "     users: [ ... one entry per SPIFFE ID printed above ... ]"
   echo ""
   echo "     imports: ["
   echo "       { stream: { account: __system__, subject: \"tenant.${TENANT}.order.order.submit\" }"
   echo "         to: \"order.order.submit\" }"
   echo "       { stream: { account: __system__, subject: \"tenant.${TENANT}.order.order.cancel\" }"
   echo "         to: \"order.order.cancel\" }"
+  echo "       { stream: { account: __system__, subject: \"tenant.${TENANT}.order.order.approve\" }"
+  echo "         to: \"order.order.approve\" }"
+  echo "       { stream: { account: __system__, subject: \"platform.mode.changed\" } }"
   echo "     ]"
   echo ""
   echo "   then 'nats-server --signal reload'."
@@ -343,14 +353,19 @@ if step compute; then
   echo "       gateway and webhook-ingest publish tenant.${TENANT}.order.order.submit"
   echo "       into __system__, and accounts are isolated by construction — so the"
   echo "       pod sits idle, which looks exactly like a tenant that is not trading."
+  echo "       The LAST import is not prefixed and is not optional: there is one"
+  echo "       platform.mode.changed for the whole estate, and without it this"
+  echo "       tenant's OMS cannot resolve a stream for the halt FACT, latches its"
+  echo "       gate CLOSED and refuses every order (#635)."
   echo ""
-  echo "   Both are build-enforced: test/arch/tenant_compute_test.go fails if the user"
+  echo "   Both are build-enforced: test/arch/tenant_compute_test.go fails if a user"
   echo "   is missing, tenant_bridge_test.go if the imports are missing or name"
   echo "   another tenant's prefix."
 
   echo ""
-  echo "   THIS SCRIPT DID NOT DEPLOY ANYTHING. NEXT STEP: commit $OUT to main —"
-  echo "     git add $OUT && git commit -m 'tenant $TENANT: compute (MT-02)'"
+  echo "   THIS SCRIPT DID NOT DEPLOY ANYTHING. NEXT STEP: commit the rendered"
+  echo "   manifests to main — ALL of them, not just the OMS's:"
+  echo "     git add ../deploy/tenants/$TENANT && git commit -m 'tenant $TENANT: compute (MT-02)'"
   echo "   The commit — not this script — is what deploys the tenant's OMS."
 fi
 
