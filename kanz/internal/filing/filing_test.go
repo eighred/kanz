@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/eighred/kanz/internal/dec"
 )
 
 func rat(t *testing.T, s string) *big.Rat {
@@ -50,11 +52,10 @@ func TestFiledAndSignedAreTheSameString(t *testing.T) {
 		{"H_MILLIONTH", "1/1000000", "0.000001"},
 		// A tie at the eighth decimal, negative: halves round AWAY from zero.
 		{"I_TIE_NEG", "-1/200000000", "-0.00000001"},
-		// BELOW the platform's scale. This files as an exact zero, and that is
-		// deliberate and platform-wide (dec.ToProto uses the same scale of 8) — but
-		// it is worth pinning, because "too small to file" and "measured zero" look
-		// the same to the regulator and only the scale says which.
-		{"J_SUBSCALE", "1/1000000000", "0"},
+		// A value BELOW the platform's scale is no longer here: it is REFUSED rather
+		// than rendered, because "0" is a different claim and not a smaller number
+		// (#672). See TestABelowScaleValueIsRefusedRatherThanFiledAsZero. The case
+		// above (I_TIE_NEG) is the smallest magnitude this filing can still express.
 		// Far past int64, so nothing here may go through a fixed-width coefficient.
 		{"K_HUGE", "123456789012345678901234567890.123456789", "123456789012345678901234567890.12345679"},
 	}
@@ -226,4 +227,62 @@ func (*signerDownError) Error() string { return "audit chain unavailable" }
 func nan() float64 {
 	var zero float64
 	return zero / zero
+}
+
+// A VALUE TOO SMALL TO RENDER IS REFUSED, NOT FILED AS ZERO (#672).
+//
+// dec.Str renders at dec.Scale decimal places, so 1e-9 comes out as "0" — the
+// string Body serves and Canonical signs. The filing would then assert a measured
+// zero, and the signature would commit to it. A regulator receiving that cannot
+// tell it from a genuine zero, and nothing downstream can either.
+//
+// This is the nil/non-finite refusal one line up in Build, on a different cause:
+// there the value was not a number, here it is a number this filing cannot
+// express. Both would be signed as "0" without a refusal.
+func TestABelowScaleValueIsRefusedRatherThanFiledAsZero(t *testing.T) {
+	tmpl := []Field{{Code: "TINY", Label: "Sub-scale metric"}}
+
+	for _, c := range []struct {
+		name string
+		rat  string
+	}{
+		{"positive", "1/1000000000"},
+		// The negative arm matters on its own: Str trims "-0" to "0", so a negative
+		// sub-scale value files as a POSITIVE-looking zero.
+		{"negative", "-1/1000000000"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			v, ok := new(big.Rat).SetString(c.rat)
+			if !ok {
+				t.Fatalf("bad fixture %q", c.rat)
+			}
+			_, err := Build("TEST", tmpl, time.Unix(0, 0).UTC(), map[string]*big.Rat{"TINY": v}, nil)
+			if err == nil {
+				t.Fatalf("Build accepted %s, which renders as %q — the filing would assert a measured "+
+					"zero and sign it", c.rat, dec.Str(v))
+			}
+			if !strings.Contains(err.Error(), "TINY") {
+				t.Fatalf("the refusal must name the line item so an operator can go and look at it, got: %v", err)
+			}
+		})
+	}
+}
+
+// AND AN EXACT ZERO IS STILL FILEABLE. The refusal above keys on a value that is
+// non-zero yet renders as zero; a genuine measured zero is a legitimate figure and
+// must not be caught by it, or every clean report becomes an outage.
+func TestAnExactZeroIsStillFiled(t *testing.T) {
+	tmpl := []Field{{Code: "ZERO", Label: "A measured zero"}}
+	r, err := Build("TEST", tmpl, time.Unix(0, 0).UTC(),
+		map[string]*big.Rat{"ZERO": new(big.Rat)}, nil)
+	if err != nil {
+		t.Fatalf("a genuine zero must still file: %v", err)
+	}
+	v, ok := r.Lookup("ZERO")
+	if !ok {
+		t.Fatal("the filed report does not carry ZERO at all")
+	}
+	if got := dec.Str(v); got != "0" {
+		t.Fatalf("ZERO filed as %q, want \"0\"", got)
+	}
 }
