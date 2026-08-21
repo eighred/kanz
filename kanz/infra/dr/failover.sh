@@ -16,12 +16,49 @@
 # Requires: kubectl (+ cnpg plugin), the DR cluster reachable as $DR_CTX.
 set -eu
 
+# EVERY PATH BELOW IS RELATIVE TO THIS SCRIPT, NOT TO THE CALLER (#629).
+#
+# There was no cd, no dirname and no BASH_SOURCE, and the paths resolved only
+# with cwd=infra/dr — which no document states and NEITHER RUNBOOK USES. Both
+# invoke it from the module root (docs/runbooks/dr.md:33,
+# docs/runbooks/dr-drill.md:68), where `nats/` and `../nats/` are two
+# directories that do not exist. Under `set -eu` that aborted the cutover at
+# step 2 of 5: Postgres promoted, no spine, no services, no traffic — and the
+# only message named `../nats/`, two directories from the real path, because the
+# first arm's stderr went to /dev/null.
+#
+# This is the one line that makes the runbooks' documented invocation work.
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
 DR_CTX="${DR_CTX:?set DR_CTX to the DR cluster kube-context}"
 DATA_NS="${DATA_NS:-kanz-data}"
 MSG_NS="${MSG_NS:-kanz-messaging}"
 SVC_NS="${SVC_NS:-kanz-services}"
 STEP="${STEP:-all}"
 k() { kubectl --context "$DR_CTX" "$@"; }
+
+# wait_rollout_ready polls an Argo Rollout until readyReplicas reaches its
+# spec, or the deadline passes (#629).
+#
+# POLLING RATHER THAN `kubectl rollout status`, and the reason is not style:
+# that verb only understands Deployment, DaemonSet and StatefulSet. An Argo
+# Rollout needs the `kubectl argo rollouts` plugin, which this script's own
+# "Requires:" line does not list and a DR operator may not have. The status
+# subresource needs no plugin at all.
+wait_rollout_ready() {
+  name="$1"
+  deadline=$(( $(date +%s) + 300 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    want="$(k -n "$SVC_NS" get rollout "$name" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+    got="$(k -n "$SVC_NS" get rollout "$name" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+    if [ -n "$want" ] && [ "${got:-0}" -ge "$want" ]; then
+      echo "rollout \"$name\" ready (${got}/${want})"
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
 
 step() { [ "$STEP" = "all" ] || [ "$STEP" = "$1" ]; }
 
@@ -60,8 +97,41 @@ if step messaging; then
   echo "-- [2/5] Kafka (DR-01a) reachable + NATS streams"
   k -n "$MSG_NS" get pods -l app=kafka -o name | head -1 >/dev/null \
     || { echo "FATAL: DR Kafka not present — DR-01a replication must be running"; exit 1; }
-  k apply -f nats/ -n "$MSG_NS" 2>/dev/null || k apply -f ../nats/
-  k -n "$MSG_NS" wait --for=condition=complete job/nats-bootstrap --timeout=180s || true
+  # THE SPINE MANIFESTS ARE NAMED, ONE BY ONE, AND NEVER THE DIRECTORY (#629).
+  #
+  # This was `k apply -f nats/ ... || k apply -f ../nats/`. `infra/dr/nats/`
+  # contains only README.md and rebuild-job.yaml, so `apply -f nats/` applied the
+  # REBUILD job (in step 2, before any NATS exists to publish into — step 3 then
+  # deleted and re-applied it) and EXITED 0. The `||` therefore never fired, so
+  # ../nats/ was never applied: no namespace, no StatefulSet, no nats-bootstrap.
+  # The wait below then burned 180s on a Job that had never been created and
+  # discarded the result with `|| true`, and step 2 reported success with no
+  # spine standing.
+  #
+  # AND THE FALLBACK WOULD HAVE BEEN WORSE THAN THE BUG. `../nats/` also holds
+  # bootstrap-job-dev-plaintext.yaml, whose own first line reads "DEV-ONLY
+  # plaintext bootstrap. NEVER apply this to a cluster that has SPIRE." Applying
+  # the directory during a declared incident would have applied that too. This is
+  # the #92 shape a third time: a path convention that silently decides which
+  # manifests exist.
+  #
+  # tenancy.yaml IS REQUIRED AND IS THE EASY ONE TO MISS. nats.conf does
+  # `include "tenants.conf"`, which arrives from the nats-tenants ConfigMap that
+  # file defines — without it the broker does not start. It is excluded from the
+  # ApplicationSet on purpose ("applied by their own tooling"), which is exactly
+  # why naming files rather than a directory has to name it explicitly.
+  for m in namespace.yaml tenancy.yaml nats.yaml bootstrap-job.yaml; do
+    k apply -n "$MSG_NS" -f "../nats/$m"
+  done
+
+  # FATAL, NOT `|| true`. bootstrap-job.yaml is what creates every JetStream
+  # stream; a spine with no streams accepts no publish and binds no consumer, so
+  # continuing to step 3 would rebuild a log into nothing. The step above already
+  # treats a missing DR Kafka as fatal for the same reason.
+  k -n "$MSG_NS" wait --for=condition=complete job/nats-bootstrap --timeout=180s     || { echo "FATAL: nats-bootstrap did not complete — the DR spine has no JetStream streams," >&2
+         echo "       so nothing can be published or consumed. Check the Job's logs:" >&2
+         echo "       kubectl --context $DR_CTX -n $MSG_NS logs job/nats-bootstrap" >&2
+         exit 1; }
 fi
 
 # 3) Reconstruct the NATS live spine from the DR Kafka log (DR-01c).
@@ -180,6 +250,12 @@ if step services; then
   # duplicated the primary, and #153 deleted it.
   k -n "$SVC_NS" scale deploy -l '!kanz.io/singleton' --replicas=2
   k -n "$SVC_NS" scale deploy -l 'kanz.io/singleton'  --replicas=1
+  # ROLLOUTS TOO (#629). `deploy` resolves to deployments.apps and matches no
+  # Rollout, so risk-engine — the service that computes the fund's risk — was
+  # never scaled up by this step at all. Argo Rollouts serves the scale
+  # subresource, so `kubectl scale` works on it without the plugin.
+  k -n "$SVC_NS" scale rollout -l '!kanz.io/singleton' --replicas=2 2>/dev/null || true
+  k -n "$SVC_NS" scale rollout -l 'kanz.io/singleton'  --replicas=1 2>/dev/null || true
   # Wait on every service the DR drill exercises a synthetic transaction against
   # (PARITY-05e), not just risk + gateway — an unready book-of-record service is a
   # store that promoted but does not serve. A missing deploy is tolerated (|| true)
@@ -200,9 +276,32 @@ if step services; then
   # them here is a wait for ONE ready pod, which is what their manifests define as
   # healthy. `rollout status` is satisfied by the manifest's own count, so nothing
   # in this list needs to know which entries are singletons.
-  for d in risk-engine api-gateway accounting alternatives wealth datamaster oms venue-binance venue-okx regulatory tv-sync market-data; do
-    k -n "$SVC_NS" rollout status deploy/"$d" --timeout=300s || true
+  # risk-engine IS NOT IN THIS LIST, AND THAT IS THE FIX (#629). It is a
+  # kind: Rollout (infra/deploy/risk-engine-rollout.yaml) and there is no
+  # Deployment by that name anywhere, so `rollout status deploy/risk-engine`
+  # returned `deployments.apps "risk-engine" not found` on every run, forever —
+  # and `|| true` erased it. The service that computes the fund's risk was the
+  # one entry in this list whose check COULD NEVER PASS, and the script was
+  # written so that read identically to a pass.
+  notready=""
+  for d in api-gateway accounting alternatives wealth datamaster oms venue-binance venue-okx regulatory tv-sync market-data; do
+    k -n "$SVC_NS" rollout status deploy/"$d" --timeout=300s || notready="$notready deploy/$d"
   done
+  for r in risk-engine; do
+    wait_rollout_ready "$r" || notready="$notready rollout/$r"
+  done
+
+  # A FAILURE IS PRINTED NOW. The comment above argues for tolerating a MISSING
+  # workload so a partial topology does not wedge the failover, and that still
+  # holds — this does not abort. What it no longer does is stay silent: the same
+  # comment already admitted "a name missing from this list looks exactly like a
+  # name in it that failed: nothing is printed either way", and that is how a
+  # permanently-failing entry survived. Tolerating is not the same as hiding.
+  if [ -n "$notready" ]; then
+    echo "WARNING: not Ready within the wait:$notready" >&2
+    echo "         The region is promoted and traffic will shift in step 5 regardless." >&2
+    echo "         Check these before declaring the cutover complete." >&2
+  fi
 fi
 
 # 5) Shift traffic to the DR region. The global LB / DNS weight is the actual
