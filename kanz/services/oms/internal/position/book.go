@@ -26,6 +26,7 @@ import (
 
 	"github.com/eighred/kanz/internal/costbasis"
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/fillfact"
 )
 
 // key: a holding is identified by WHERE it sits, not just what it is (EXEC-M19a).
@@ -72,11 +73,12 @@ func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if fill.GetVenue() == "" {
-		return nil, ErrFillHasNoVenue
-	}
-	if !dec.IsPositive(fill.GetQuantity()) {
-		return nil, ErrFillQuantityNotPositive
+	// THE SAME VALIDATION THE POSTGRES BOOK USES (#631). This one checked venue
+	// and quantity and NOT fill_id, so the in-memory book folded a fill the
+	// durable book parked — two implementations of one contract inside a single
+	// package, disagreeing. It gains the identity check by sharing the rule.
+	if err := fillfact.Validate(fill); err != nil {
+		return nil, err
 	}
 	k := key{portfolioID, fill.GetVenue(), fill.GetInstrumentId()}
 	l := b.lots[k]

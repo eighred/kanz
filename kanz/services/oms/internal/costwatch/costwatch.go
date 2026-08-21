@@ -32,6 +32,7 @@ package costwatch
 import (
 	"context"
 	"errors"
+	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
 	"time"
 
@@ -52,8 +53,8 @@ import (
 // Event types this folds. Both carry the same three fields; the only difference
 // is whether the order is now terminal, which does not change the arithmetic.
 const (
-	EventTypeFilled          = "order.order.filled"
-	EventTypePartiallyFilled = "order.order.partially_filled"
+	EventTypeFilled          = fillfact.SubjectFilled
+	EventTypePartiallyFilled = fillfact.SubjectPartiallyFilled
 
 	// EventTypeCostRecorded is the durable half of this measurement (#436).
 	//

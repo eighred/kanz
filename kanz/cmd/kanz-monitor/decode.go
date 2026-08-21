@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/fillfact"
 
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -26,8 +27,8 @@ const (
 	eventTypeAccepted        = "order.order.accepted"
 	eventTypeRejected        = "order.order.rejected"
 	eventTypeRouted          = "order.order.routed"
-	eventTypePartiallyFilled = "order.order.partially_filled"
-	eventTypeFilled          = "order.order.filled"
+	eventTypePartiallyFilled = fillfact.SubjectPartiallyFilled
+	eventTypeFilled          = fillfact.SubjectFilled
 	eventTypeCancelled       = "order.order.cancelled"
 	eventTypeExpired         = "order.order.expired"
 	eventTypeOutcome         = "order.order.outcome"

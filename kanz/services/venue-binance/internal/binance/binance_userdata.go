@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/fillfact"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -130,10 +131,10 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		VenueExecutionId: strconv.FormatInt(rep.TradeID, 10),
 		ExecutedAt:       timestamppb.New(time.UnixMilli(rep.TransactTime).UTC()),
 	}
-	subject := "order.order.partially_filled"
+	subject := fillfact.SubjectPartiallyFilled
 	var payload proto.Message = &orderpb.OrderPartiallyFilled{OrderId: rep.ClientOrderID, Fill: fill, State: healed}
 	if rep.OrderStatus == "FILLED" {
-		subject = "order.order.filled"
+		subject = fillfact.SubjectFilled
 		payload = &orderpb.OrderFilled{OrderId: rep.ClientOrderID, Fill: fill, State: healed}
 	}
 	return i.pub.Publish(ctx, bus.Event{

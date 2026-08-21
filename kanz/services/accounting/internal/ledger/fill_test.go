@@ -18,7 +18,7 @@ func d(coeff int64, exp int32) *commonpb.Decimal {
 }
 
 func TestFromFillBuyDoubleEntry(t *testing.T) {
-	fill := &orderpb.Fill{
+	fill := &orderpb.Fill{Venue: "BINANCE",
 		FillId: "F1", OrderId: "O1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
 		Quantity:   d(100, 0),
 		Price:      d(150, 0),
@@ -42,7 +42,7 @@ func TestFromFillBuyDoubleEntry(t *testing.T) {
 }
 
 func TestFromFillSellDoubleEntry(t *testing.T) {
-	fill := &orderpb.Fill{
+	fill := &orderpb.Fill{Venue: "BINANCE",
 		FillId: "F2", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_SELL,
 		Quantity: d(40, 0), Price: d(160, 0),
 		Fee:        &commonpb.Money{Amount: d(2, 0), CurrencyCode: "USD"},
@@ -66,7 +66,7 @@ func TestFromFillSellDoubleEntry(t *testing.T) {
 // (exactly 50000.00 moved) — $40 of phantom NAV per BTC, permanent because the
 // journal is append-only. The fee's currency is on the wire; it must be read.
 func TestFromFillRefusesFeeInAnotherCurrency(t *testing.T) {
-	fill := &orderpb.Fill{
+	fill := &orderpb.Fill{Venue: "BINANCE",
 		FillId: "F3", InstrumentId: "BTC-USDT", Side: orderpb.Side_SIDE_BUY,
 		Quantity: d(1, 0), Price: d(50000, 0),
 		Fee:        &commonpb.Money{Amount: d(8, -4), CurrencyCode: "BTC"},
@@ -89,7 +89,7 @@ func TestFromFillRefusesFeeInAnotherCurrency(t *testing.T) {
 // A NON-ZERO fee with no currency stamp is refused too: "nobody stamped this" and
 // "stamped with the cash currency" must not look the same (#221).
 func TestFromFillRefusesUnstampedFee(t *testing.T) {
-	fill := &orderpb.Fill{
+	fill := &orderpb.Fill{Venue: "BINANCE",
 		FillId: "F4", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
 		Quantity: d(10, 0), Price: d(100, 0),
 		Fee: &commonpb.Money{Amount: d(5, 0)}, // currency_code unset
@@ -107,7 +107,7 @@ func TestFromFillZeroFeeIsCurrencyAgnostic(t *testing.T) {
 		"zero in BTC": {Amount: d(0, 0), CurrencyCode: "BTC"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			fill := &orderpb.Fill{
+			fill := &orderpb.Fill{Venue: "BINANCE",
 				FillId: "F5", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
 				Quantity: d(10, 0), Price: d(100, 0), Fee: fee,
 			}
