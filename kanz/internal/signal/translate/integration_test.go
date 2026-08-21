@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -86,47 +88,9 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 		t.Fatalf("producer: %v", err)
 	}
 
-	var mu sync.Mutex
-	got := map[string]*envelopepb.Envelope{}
 	consumer, err := bus.NewConsumer(client)
 	if err != nil {
 		t.Fatalf("consumer: %v", err)
-	}
-	collect := func(_ context.Context, env *envelopepb.Envelope, _ []byte) error {
-		mu.Lock()
-		defer mu.Unlock()
-		got[env.GetEventType()] = env
-		return nil
-	}
-	subCtx, stopSub := context.WithCancel(ctx)
-	defer stopSub()
-	// A Subscribe error must not be swallowed. A subscription that never started is
-	// indistinguishable from a subject nobody publishes to — which is the entire
-	// class of bug this test exists to catch.
-	subErr := make(chan error, 2)
-	go func() {
-		err := consumer.Subscribe(subCtx, translate.SubjectSignal, "translate-it-sig", collect)
-		if err != nil && subCtx.Err() == nil {
-			subErr <- fmt.Errorf("subscribe %s: %w", translate.SubjectSignal, err)
-		}
-	}()
-	// THE COMMAND IS SUBSCRIBED ON ITS TENANT-ROUTED WIRE SUBJECT, not the logical
-	// name. In production tenancy.yaml's per-account import remaps the prefix away
-	// before the tenant's OMS sees it; there is no account bridge on a bare test
-	// broker, so this reads the wire as __system__ would. Asserting the subject
-	// carries the tenant is half of what proves #632 is closed — the other half is
-	// that the tenant came from configuration, which cmdSubject encodes.
-	cmdSubject := bus.TenantRoutedSubject(itTenant, translate.SubjectSubmit)
-	go func() {
-		err := consumer.Subscribe(subCtx, cmdSubject, "translate-it-cmd", collect)
-		if err != nil && subCtx.Err() == nil {
-			subErr <- fmt.Errorf("subscribe %s: %w", cmdSubject, err)
-		}
-	}()
-	select {
-	case err := <-subErr:
-		t.Fatal(err)
-	case <-time.After(time.Second): // both subscriptions are up
 	}
 
 	tr, err := translate.New(translate.Options{
@@ -152,8 +116,9 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 	// command never landed, and the test timed out looking for it. The old test
 	// deleted and recreated its own stream each run, which wiped the dedup state and
 	// hid this entirely. Exactly-once is working; the test was replaying a command.
+	signalID := translate.DeterministicID(fmt.Sprintf("it-signal-%d", time.Now().UnixNano()))
 	res, err := tr.Emit(ctx, translate.Intent{
-		SignalID:     translate.DeterministicID(fmt.Sprintf("it-signal-%d", time.Now().UnixNano())),
+		SignalID:     signalID,
 		StrategyID:   "momentum",
 		FundID:       "fund-alpha",
 		InstrumentID: "BTC-USD",
@@ -173,10 +138,77 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 		t.Fatalf("OrderIDs = %v, want 1", res.OrderIDs)
 	}
 
-	waitFor(t, "both events to land", func() bool {
+	// WHERE THE COMMAND LANDED IS A FACT ABOUT THIS BROKER, SO IT IS MEASURED, NOT
+	// ASSUMED. See commandDeliverySubject: the wire subject is tenant-routed, and
+	// whether the broker keeps that prefix or rewrites it away depends on its
+	// tenancy arrangement. Guessing is what made this test pass on a bare local
+	// broker and time out in CI with no explanation.
+	wireSubject := bus.TenantRoutedSubject(itTenant, translate.SubjectSubmit)
+	cmdSubject := commandDeliverySubject(t, ctx, js, wireSubject, translate.SubjectSubmit, signalID)
+
+	// SUBSCRIBING AFTER THE PUBLISH IS DELIBERATE AND SAFE. bus.Subscribe creates a
+	// durable with the default DeliverAll policy, so it reads the stream from its
+	// first retained message rather than from now. Subscribing first meant racing a
+	// bare `time.After(time.Second)` that was commented "both subscriptions are up"
+	// and was in fact a guess — under -race on a loaded runner a slow
+	// CreateOrUpdateConsumer would have made this test fail as a timeout with the
+	// real error still sitting unread in a channel.
+	var mu sync.Mutex
+	got := map[string]*envelopepb.Envelope{}
+	// COLLECT ONLY THIS RUN'S EVENTS. correlation_id is the signal id (Emit sets it
+	// on both), and CI points every package at ONE broker whose EXECUTION stream
+	// already holds other tests' order commands. Keying on event_type alone would
+	// let a foreign SubmitOrder satisfy this test — and would make the tenant
+	// assertion below read someone else's envelope.
+	collect := func(_ context.Context, env *envelopepb.Envelope, _ []byte) error {
+		if env.GetCorrelationId() != signalID {
+			return nil // another test's traffic on a shared spine; ack and ignore
+		}
 		mu.Lock()
 		defer mu.Unlock()
-		return len(got) == 2
+		got[env.GetEventType()] = env
+		return nil
+	}
+	subCtx, stopSub := context.WithCancel(ctx)
+	defer stopSub()
+	// A Subscribe error must not be swallowed. A subscription that never started is
+	// indistinguishable from a subject nobody publishes to — which is the entire
+	// class of bug this test exists to catch. It is read INSIDE the wait loop below,
+	// not once at a fixed deadline, so an error arriving late still fails the test
+	// as itself rather than as a timeout.
+	subErr := make(chan error, 2)
+	for _, sub := range []struct{ subject, group string }{
+		{translate.SubjectSignal, "translate-it-sig"},
+		{cmdSubject, "translate-it-cmd"},
+	} {
+		go func() {
+			err := consumer.Subscribe(subCtx, sub.subject, sub.group, collect)
+			if err != nil && subCtx.Err() == nil {
+				subErr <- fmt.Errorf("subscribe %s: %w", sub.subject, err)
+			}
+		}()
+	}
+
+	waitFor(t, subErr, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(got) == 2 {
+			return ""
+		}
+		// NAME THE HALF THAT IS MISSING. "timed out waiting for both events to land"
+		// was the entire diagnosis this test offered for a real routing defect, and
+		// it did not say which of the two subjects went quiet.
+		var missing []string
+		for et, subject := range map[string]string{
+			translate.SubjectSignal: translate.SubjectSignal,
+			translate.SubjectSubmit: cmdSubject,
+		} {
+			if _, ok := got[et]; !ok {
+				missing = append(missing, et+" (subscribed on "+subject+")")
+			}
+		}
+		sort.Strings(missing)
+		return "never arrived: " + strings.Join(missing, ", ")
 	})
 
 	mu.Lock()
@@ -195,7 +227,84 @@ func TestIntegration_EmitReachesTheWire(t *testing.T) {
 			t.Errorf("%s payload_schema_ref = %q, want %q",
 				want.eventType, env.GetPayloadSchemaRef(), want.schemaRef)
 		}
+		// THE TENANT CAME FROM CONFIGURATION, READ BACK OFF A REAL BROKER (#632).
+		//
+		// This is the assertion that makes the test evidence rather than a delivery
+		// check. `acme` appears nowhere in the Intent; `fund-alpha` does. Until the
+		// FundAuthority existed the tenant WAS the fund id, so an envelope carrying
+		// "fund-alpha" here is the defect, live, on the wire.
+		//
+		// IT IS ON THE ENVELOPE, NOT THE SUBJECT, ON PURPOSE. A broker that maps the
+		// routing prefix away — which both the dev/CI broker and production's
+		// __system__ account do — erases the tenant from the subject by design. The
+		// envelope field survives every mapping, so it is the one place this property
+		// can be checked on any broker this test is pointed at.
+		if env.GetTenantId() != itTenant {
+			t.Errorf("%s envelope tenant_id = %q, want %q — the tenant must come from the "+
+				"strategy/fund binding, never from the caller-supplied fund_id (#632)",
+				want.eventType, env.GetTenantId(), itTenant)
+		}
 	}
+}
+
+// commandDeliverySubject returns the subject the order command was actually
+// STORED under, having asked the broker.
+//
+// THE TEST CANNOT ASSUME THIS, AND ASSUMING IT IS WHAT BROKE CI. translate
+// publishes the command on bus.TenantRoutedSubject(tenant, SubjectSubmit). What
+// happens next depends on the broker's tenancy arrangement, and the two this
+// repository actually runs disagree:
+//
+//   - test/backing/nats-dev.conf — the dev rig's broker, and the one CI starts —
+//     has a single account and carries `mappings` that rewrite
+//     `tenant.*.order.order.submit` to `order.order.submit` AT INGRESS, before
+//     stream matching. The command is stored in EXECUTION under the LOGICAL name
+//     and TENANT_ORDER stays empty. Production's __system__ account does the same
+//     thing for its own prefix (infra/nats/tenancy.yaml's `mappings` block).
+//   - a bare `nats-server -js`, which a developer runs locally, has no mappings.
+//     The prefix survives and TENANT_ORDER (or a bustest scratch stream) holds it.
+//
+// A test hard-coded to either one is a test that passes in one environment and
+// times out in the other with no explanation — which is exactly what happened.
+// Both destinations are correct; which one is in play is a property of the
+// deployment, so it is measured here and named in the failure if neither has it.
+//
+// IT MATCHES ON THIS RUN'S correlation_id, not on "a message exists". These
+// streams retain for 24h, so on any broker that is not freshly created — a
+// developer's, or the dev rig's — a PREVIOUS run's command sits on the other
+// candidate subject and would select a route this run never published to. That
+// is the same ambient-state dependence that let the original defect hide;
+// answering it with "some message is there" would only move it.
+func commandDeliverySubject(t *testing.T, ctx context.Context, js jetstream.JetStream, wire, logical, signalID string) string {
+	t.Helper()
+	for _, candidate := range []string{wire, logical} {
+		stream, err := bustest.StreamFor(ctx, js, candidate)
+		if err != nil {
+			continue // no stream carries it at all
+		}
+		st, err := js.Stream(ctx, stream)
+		if err != nil {
+			continue
+		}
+		msg, err := st.GetLastMsgForSubject(ctx, candidate)
+		if err != nil {
+			continue // nothing has ever been stored on this subject
+		}
+		env, _, err := bus.Unframe(msg.Data)
+		if err != nil {
+			continue // not one of ours; a foreign publisher on a shared spine
+		}
+		if env.GetCorrelationId() == signalID {
+			return candidate
+		}
+	}
+	t.Fatalf("this run's order command (correlation_id %s) reached NEITHER %q nor %q, on a "+
+		"publish the broker acked.\n\n"+
+		"Emit returned success, so a stream accepted the message — it is stored somewhere "+
+		"neither the tenant-routed wire subject nor the logical subject reaches. Check this "+
+		"broker's `mappings` against the two arrangements in this function's doc.",
+		signalID, wire, logical)
+	return ""
 }
 
 // itTenant is the tenant that owns fund-alpha in this test's binding table. It is
@@ -216,14 +325,33 @@ func itAuthority(t *testing.T) translate.FundAuthority {
 	return a
 }
 
-func waitFor(t *testing.T, what string, cond func() bool) {
+// waitFor polls until settled returns "" (satisfied), failing with whatever
+// reason it last reported.
+//
+// IT TAKES THE SUBSCRIPTION ERROR CHANNEL because a subscription that failed to
+// start produces the same silence as a subject nothing publishes to, and the
+// previous shape read that channel exactly once, at a one-second deadline. An
+// error arriving at 1.1s was never read: the test ran its full ten seconds and
+// reported a timeout while the real cause sat in a buffered channel.
+func waitFor(t *testing.T, subErr <-chan error, settled func() string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
+	reason := "nothing observed yet"
 	for time.Now().Before(deadline) {
-		if cond() {
+		select {
+		case err := <-subErr:
+			t.Fatalf("a subscription failed: %v", err)
+		default:
+		}
+		if reason = settled(); reason == "" {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s", what)
+	select {
+	case err := <-subErr:
+		t.Fatalf("a subscription failed: %v", err)
+	default:
+	}
+	t.Fatalf("timed out after 10s — %s", reason)
 }
