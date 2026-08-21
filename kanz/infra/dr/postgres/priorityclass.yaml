@@ -1,0 +1,56 @@
+---
+# A DATABASE IS NOT PREEMPTIBLE BY A BATCH JOB (#639).
+#
+# QoS and priority are two different mechanisms and only one of them was ever in
+# play here. QoS decides who the KUBELET evicts when a node runs out of memory;
+# priority decides who the SCHEDULER may evict to make room for something else.
+# Declaring resources on the six clusters answers the first. This file answers
+# the second, and without it a pod asking for a node the cluster is full of can
+# still displace the order book — because until now NOTHING in this estate
+# declared a PriorityClass at all.
+#
+# Every kanz workload therefore sat at globalDefault priority 0: the risk-engine
+# Rollout, the KEDA-scaled consumers, and the six CloudNativePG clusters holding
+# the order book, the IBOR ledger, the evidence chain, the venue mappings, the
+# schema registry and the platform's own credentials — all equally displaceable,
+# all equally displacing. The only priorityClassName in the repository is
+# node-exporter's, and that one is BORROWED (system-node-critical, a built-in),
+# which is why grepping for the field found something and finding something read
+# as "handled".
+#
+# THE VALUE, AND WHY IT IS NOT HIGHER. Kubernetes reserves two built-in classes
+# above anything a user should claim: system-cluster-critical (2000000000) and
+# system-node-critical (2000001000). A workload that outranks those competes with
+# the control plane and the CNI for the node it needs in order to run at all —
+# so a database that "wins" there loses anyway, on a node with no networking.
+# 1000000 sits far above the 0 every other kanz workload holds and far below both
+# reserved bands, which is the whole requirement.
+#
+# preemptionPolicy is left at the default (PreemptLowerPriority) DELIBERATELY.
+# The point is not merely that Postgres is scheduled first; it is that a full
+# cluster gives up something else to place it, which is the correct trade every
+# time the alternative is an unscheduled database.
+#
+# globalDefault: false, and that is load-bearing. A true here would silently
+# raise EVERY pod in the cluster that names no class — including the batch and
+# chaos workloads this exists to outrank — restoring the flat ordering it was
+# written to end, while looking like it had been configured.
+#
+# NOT DELIVERED BY ARGO CD, like everything else in infra/dr: that tree is
+# excluded from the sync surface for a stated reason (#625's
+# syncSurfaceExempt — primaries and replicas belong in two regions, gated on
+# #106), so this is applied by the DR runbook with the clusters it governs.
+# PriorityClass IS already on the AppProject's clusterResourceWhitelist, so
+# nothing blocks it the day infra/dr is synced.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: kanz-data-critical
+  labels: { app.kubernetes.io/part-of: kanz, app.kubernetes.io/component: dr }
+value: 1000000
+globalDefault: false
+description: >-
+  Durable state: the CloudNativePG clusters holding the order book, the ledgers,
+  the evidence chain and the platform credentials. Ranks above every other kanz
+  workload and below the two reserved system bands. Do not apply to stateless
+  services — a class everything holds is a class nobody holds.
