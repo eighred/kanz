@@ -22,10 +22,11 @@ import (
 	"github.com/eighred/kanz/internal/sustainability"
 )
 
-// Signer signs a filing's canonical bytes. It is the one-method seam both
-// regulatory.Signer and sustainability.Signer expose, so a single value (the
-// AUDIT-01 signer.ChainSigner, or a bare content-hash signer) drives every
-// framework's filing. The composition root injects the concrete signer.
+// Signer signs a filing's canonical bytes. It is internal/filing's one-method
+// seam — which regulatory.Signer and sustainability.Signer now alias — so a
+// single value (the AUDIT-01 signer.ChainSigner, or a bare content-hash signer)
+// drives every framework's filing. The composition root injects the concrete
+// signer.
 type Signer interface {
 	// Sign returns the report's signature — its position in the durable audit
 	// chain. An error means the chain link did NOT land, and the report must not be
@@ -129,7 +130,7 @@ func (s *Server) handleFRTB(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	out := regReport(rep)
+	out := rep.Body()
 	out["breakdown"] = map[string]float64{
 		"delta": breakdown.Delta, "vega": breakdown.Vega, "curvature": breakdown.Curvature,
 		"drc": breakdown.DRC, "rrao": breakdown.RRAO, "total": breakdown.Total,
@@ -147,7 +148,7 @@ func (s *Server) handleFormPF(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, regReport(rep))
+	writeJSON(w, http.StatusOK, rep.Body())
 }
 
 func (s *Server) handleAIFMD(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +161,7 @@ func (s *Server) handleAIFMD(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	out := regReport(rep)
+	out := rep.Body()
 	// Exact decimal strings, like the line items. The leverage ratios are a
 	// compliance threshold — they must not round on the way out.
 	out["breakdown"] = map[string]string{
@@ -180,7 +181,7 @@ func (s *Server) handleTCFD(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, climateReport(rep))
+	writeJSON(w, http.StatusOK, rep.Body())
 }
 
 func (s *Server) handleSFDR(w http.ResponseWriter, r *http.Request) {
@@ -193,41 +194,24 @@ func (s *Server) handleSFDR(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, climateReport(rep))
+	writeJSON(w, http.StatusOK, rep.Body())
 }
 
 // --- rendering ---------------------------------------------------------------
-
-// regReport renders a regulatory.Report (FRTB/FormPF/AIFMD) to the JSON body.
-func regReport(rep regulatory.Report) map[string]any {
-	items := make([]map[string]any, len(rep.LineItems))
-	for i, li := range rep.LineItems {
-		// The value is emitted as a decimal STRING, never a JSON number. A regulator
-		// parsing our filing must not have to guess which IEEE-754 double we meant by
-		// 0.1, and this is the same rendering the signature commits to.
-		items[i] = map[string]any{"code": li.Code, "label": li.Label, "value": dec.Str(li.Value)}
-	}
-	return map[string]any{
-		"framework":  string(rep.Framework),
-		"as_of":      rep.AsOf.UTC().Format(time.RFC3339),
-		"line_items": items,
-		"signature":  rep.Signature,
-	}
-}
-
-// climateReport renders a sustainability.Report (TCFD/SFDR) to the JSON body.
-func climateReport(rep sustainability.Report) map[string]any {
-	items := make([]map[string]any, len(rep.LineItems))
-	for i, li := range rep.LineItems {
-		items[i] = map[string]any{"code": li.Code, "label": li.Label, "value": li.Value}
-	}
-	return map[string]any{
-		"framework":  string(rep.Framework),
-		"as_of":      rep.AsOf.UTC().Format(time.RFC3339),
-		"line_items": items,
-		"signature":  rep.Signature,
-	}
-}
+//
+// There is no renderer here. internal/filing.Report.Body is THE filing body, and
+// it puts the []filing.LineItem into the map so encoding/json calls
+// LineItem.MarshalJSON — the same dec.Str rendering Report.Canonical signs.
+//
+// This file used to hold TWO hand-rolled renderers, regReport and climateReport,
+// and they had diverged: the climate one passed the *big.Rat straight to
+// encoding/json, whose TextMarshaler for big.Rat is RatString(). A WACI of
+// 1234.5678 was served as "5429686605511341/4398046511104" while the signature in
+// the same response committed to "1234.5678", so nothing the recipient could do
+// with the body reproduced the signature it carried. Both packages already had a
+// LineItem.MarshalJSON that did it correctly and neither was ever called (#633).
+// Do not add a third: give filing.Report.Body the extra keys instead, as the FRTB
+// and AIFMD handlers above do.
 
 // --- helpers -----------------------------------------------------------------
 

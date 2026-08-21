@@ -55,7 +55,7 @@ func TestComputeFRTB_AssemblesEveryCharge(t *testing.T) {
 }
 
 // FileFRTB produces a complete, signed filing whose total line item equals the
-// computed total, and Reconcile passes against that total and fails off it.
+// computed total, and ReconcileFRTB passes against that total and fails off it.
 func TestFileFRTB_SignedCompleteAndReconciles(t *testing.T) {
 	in := sampleInputs()
 	asOf := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
@@ -76,11 +76,11 @@ func TestFileFRTB_SignedCompleteAndReconciles(t *testing.T) {
 		t.Fatalf("filed total %v (ok=%v) != computed %v", filed, ok, res.Total)
 	}
 	// Reconciliation against the (independent) expected total passes within tol.
-	if delta, ok := rep.Reconcile(new(big.Rat).SetFloat64(res.Total), big.NewRat(1, 1)); !ok || delta.Sign() != 0 {
+	if delta, ok := ReconcileFRTB(rep, new(big.Rat).SetFloat64(res.Total), big.NewRat(1, 1)); !ok || delta.Sign() != 0 {
 		t.Fatalf("reconcile against exact total failed: delta=%v ok=%v", delta, ok)
 	}
 	// A total that disagrees beyond tolerance fails the reconciliation gate.
-	if _, ok := rep.Reconcile(new(big.Rat).SetFloat64(res.Total+1000), big.NewRat(1, 1)); ok {
+	if _, ok := ReconcileFRTB(rep, new(big.Rat).SetFloat64(res.Total+1000), big.NewRat(1, 1)); ok {
 		t.Fatal("reconcile should fail when the expected total is off by 1000 > tol")
 	}
 }
