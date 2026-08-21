@@ -147,9 +147,17 @@ type RebalanceProposal struct {
 	Targets        map[string]float64
 	Trades         []ProposedTrade
 	ExpectedReturn float64
-	ExpectedRisk   float64
-	Turnover       float64
-	AsOf           time.Time
+	// ExpectedRisk is the ex-ante √(wᵀΣw) of the target book, and is NIL when the
+	// covariance could not support one — see Result.ExpectedRisk for why it is a
+	// pointer. On the wire that is `"ExpectedRisk": null`, which no client reads
+	// as a riskless portfolio; the 0 it used to send does (#621).
+	ExpectedRisk *float64
+	// CovarianceQuality is WHAT WAS ESTABLISHED ABOUT Σ before the numbers above
+	// were computed. Like MandateStatus it is UNCHECKED by construction: Rebalance
+	// is handed no covariance, so a proposal it builds says nothing about one.
+	CovarianceQuality CovarianceQuality
+	Turnover          float64
+	AsOf              time.Time
 	// MandateStatus is WHETHER A MANDATE WAS CONSULTED AND WHAT IT SAID. Only
 	// CheckMandate, through Propose, may set it to anything but MandateUnchecked;
 	// a value arriving from outside this package's own pipeline is a claim its
@@ -208,6 +216,10 @@ func Rebalance(portfolioID string, current, target map[string]float64, nav float
 	// anything about compliance; the zero value says exactly that. It used to
 	// stamp MandateFeasible: true, which is how every proposal this platform ever
 	// built came out certified by a check that had not run.
+	//
+	// NO CovarianceQuality AND NO ExpectedRisk EITHER, for the same reason: it is
+	// handed no covariance. Both stay at their zero values — UNCHECKED and nil —
+	// and only Propose, which ran Optimize, overwrites them (#621).
 	return RebalanceProposal{
 		PortfolioID: portfolioID,
 		Targets:     target,
@@ -241,6 +253,7 @@ func Propose(ctx context.Context, portfolioID string, in MarketInputs, obj Objec
 	proposal.Objective = obj
 	proposal.ExpectedReturn = res.ExpectedReturn
 	proposal.ExpectedRisk = res.ExpectedRisk
+	proposal.CovarianceQuality = res.CovarianceQuality
 
 	status, violations := CheckMandate(ctx, res.Weights, nav, currency, classifier, engine, mandate, asOf)
 	proposal.MandateStatus = status
