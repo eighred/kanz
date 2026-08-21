@@ -10,8 +10,10 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"strings"
 
 	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -49,14 +51,36 @@ type RejectedOrder struct {
 // qtyExp is the Decimal scale order quantities are emitted at (1e-4 units).
 const qtyExp int32 = -4
 
+// ErrMandateUnchecked and ErrMandateInfeasible are the two ways a proposal fails
+// to become orders. They are DISTINCT ERRORS rather than an empty slice because
+// they are different operator problems: one means a control did not run, the
+// other means it ran and said no. ToOrders used to answer both — and a proposal
+// with no trades — with nil, so "refused" and "nothing to do" arrived at the
+// caller identically (#646).
+var (
+	ErrMandateUnchecked  = errors.New("no mandate check has run on this proposal")
+	ErrMandateInfeasible = errors.New("this proposal breaches its mandate")
+)
+
 // ToOrders maps a proposal's trades to SubmitOrder commands — a market order per
 // trade, issuer bound to CommandMetadata.issuer, order_id deterministic per
 // (portfolio, instrument) so a re-submit of the same proposal is idempotent on
 // the OMS bus dedup (EVT-17d). Pure: no gate, no publish (Materialize adds
-// those). A proposal flagged mandate-infeasible yields no orders.
-func ToOrders(p optimization.RebalanceProposal, issuer string) []*orderpb.SubmitOrder {
-	if !p.MandateFeasible {
-		return nil
+// those).
+//
+// THE MANDATE VERDICT IS THE GATE, AND ONLY MandateFeasible OPENS IT (#646).
+// The check used to be `if !p.MandateFeasible`, over a bool whose zero value was
+// overwritten with true by RebalanceProposal's own constructor — so an unchecked
+// proposal and a checked-and-clean one were the same value here, and this is the
+// line that decides whether a rebalance becomes live capital commands. An
+// unchecked proposal is now refused by name rather than admitted.
+func ToOrders(p optimization.RebalanceProposal, issuer string) ([]*orderpb.SubmitOrder, error) {
+	switch p.MandateStatus {
+	case optimization.MandateFeasible:
+	case optimization.MandateInfeasible:
+		return nil, fmt.Errorf("%w: %s", ErrMandateInfeasible, strings.Join(p.Violations, "; "))
+	default:
+		return nil, fmt.Errorf("%w (verdict: %s)", ErrMandateUnchecked, p.MandateStatus)
 	}
 	out := make([]*orderpb.SubmitOrder, 0, len(p.Trades))
 	for _, tr := range p.Trades {
@@ -75,23 +99,34 @@ func ToOrders(p optimization.RebalanceProposal, issuer string) []*orderpb.Submit
 			TimeInForce:  orderpb.TimeInForce_TIME_IN_FORCE_DAY,
 		})
 	}
-	return out
+	return out, nil
 }
 
 // Materialize maps the proposal to orders, re-checks each against the pre-trade
 // gate (deny-by-default — a gate error or BREACH rejects the order), and
 // publishes the admitted ones. The admitted/rejected split is returned so the
 // caller (and audit) sees exactly what went to the OMS and what the gate
-// refused. A nil gate skips the re-check (the optimizer's CheckMandate already
-// ran); a nil publisher dry-runs (mapping + gate only).
+// refused. A nil gate skips the re-check; a nil publisher dry-runs (mapping +
+// gate only).
 // tenantID is WHOSE proposal this is. It is a parameter and not something read
 // off the proposal because RebalanceProposal carries no tenant: without it the
 // gate's mandate lookup had only the portfolio name to go on, and two tenants
 // calling a portfolio "growth" got each other's limits (#243). An empty one is
 // refused by the gate rather than resolved to a guess.
+//
+// "A NIL GATE IS SAFE BECAUSE CheckMandate ALREADY RAN" used to be the reason
+// written on that parameter, and it was FALSE for the whole life of the
+// sentence: no caller on the service's route ran the check (#646). ToOrders now
+// ENFORCES the premise rather than resting on it — an unchecked proposal returns
+// ErrMandateUnchecked before the loop below starts, so nothing is published and
+// the caller is told which of the two refusals it was.
 func Materialize(ctx context.Context, p optimization.RebalanceProposal, tenantID, issuer, currency string, prices map[string]float64, gate Gate, pub Publisher) (MaterializeResult, error) {
 	var res MaterializeResult
-	for _, cmd := range ToOrders(p, issuer) {
+	cmds, err := ToOrders(p, issuer)
+	if err != nil {
+		return res, err
+	}
+	for _, cmd := range cmds {
 		if gate != nil {
 			decision, err := gate.Evaluate(ctx, orderDelta(cmd, tenantID, currency, prices))
 			if err != nil {

@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -13,8 +14,12 @@ import (
 
 func sampleProposal() optimization.RebalanceProposal {
 	return optimization.RebalanceProposal{
-		PortfolioID:     "PF",
-		MandateFeasible: true,
+		PortfolioID: "PF",
+		// A CHECKED-AND-CLEAN PROPOSAL, which only optimization.CheckMandate can
+		// produce. It is spelled out here so the non-vacuity is visible: the tests
+		// below assert that unchecked and infeasible proposals emit nothing, and
+		// they would all pass against a ToOrders that emitted nothing ever.
+		MandateStatus: optimization.MandateFeasible,
 		Trades: []optimization.ProposedTrade{
 			{InstrumentID: "AAA", Side: optimization.Buy, TargetWeight: 0.6, Quantity: 100},
 			{InstrumentID: "BBB", Side: optimization.Sell, TargetWeight: 0.1, Quantity: 50},
@@ -23,7 +28,10 @@ func sampleProposal() optimization.RebalanceProposal {
 }
 
 func TestToOrders_MapsTradesIssuerBound(t *testing.T) {
-	cmds := ToOrders(sampleProposal(), "alice@desk")
+	cmds, err := ToOrders(sampleProposal(), "alice@desk")
+	if err != nil {
+		t.Fatalf("a mandate-feasible proposal must materialize: %v", err)
+	}
 	if len(cmds) != 2 {
 		t.Fatalf("want 2 orders, got %d", len(cmds))
 	}
@@ -55,9 +63,59 @@ func TestToOrders_MapsTradesIssuerBound(t *testing.T) {
 
 func TestToOrders_InfeasibleProposalEmitsNothing(t *testing.T) {
 	p := sampleProposal()
-	p.MandateFeasible = false
-	if cmds := ToOrders(p, "alice"); len(cmds) != 0 {
+	p.MandateStatus = optimization.MandateInfeasible
+	p.Violations = []string{"instrument concentration over 50%"}
+	cmds, err := ToOrders(p, "alice")
+	if len(cmds) != 0 {
 		t.Fatalf("mandate-infeasible proposal must emit no orders, got %d", len(cmds))
+	}
+	if !errors.Is(err, ErrMandateInfeasible) {
+		t.Fatalf("an infeasible proposal must be refused as such, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "concentration") {
+		t.Errorf("the refusal drops the violation that caused it: %v", err)
+	}
+}
+
+// AN UNCHECKED PROPOSAL IS REFUSED, AND NOT AS AN INFEASIBLE ONE (#646).
+//
+// This is the line the whole issue turns on. The gate used to be
+// `if !p.MandateFeasible` over a bool that RebalanceProposal's own constructor
+// set to true, so a proposal nothing had evaluated and one that had passed every
+// rule were the same value here — and this function is what turns a proposal
+// into live capital commands.
+func TestToOrders_UncheckedProposalIsRefusedByName(t *testing.T) {
+	p := sampleProposal()
+	p.MandateStatus = optimization.MandateUnchecked // the zero value: what Rebalance produces
+	cmds, err := ToOrders(p, "alice")
+	if len(cmds) != 0 {
+		t.Fatalf("a proposal no mandate check has run on must emit no orders, got %d", len(cmds))
+	}
+	if !errors.Is(err, ErrMandateUnchecked) {
+		t.Fatalf("an unchecked proposal must be refused as UNCHECKED, got %v", err)
+	}
+	if errors.Is(err, ErrMandateInfeasible) {
+		t.Error("'nothing checked it' was reported as 'it breaches its mandate' — the two are " +
+			"different operator problems and must not share an error")
+	}
+}
+
+// The refusal must reach Materialize's caller as an error, not as a quiet empty
+// result: an armed publisher that saw zero commands and no error would report a
+// successful materialization of nothing.
+func TestMaterialize_RefusesAnUncheckedProposalLoudly(t *testing.T) {
+	pub := &recordingPublisher{}
+	p := sampleProposal()
+	p.MandateStatus = optimization.MandateUnchecked
+	res, err := Materialize(context.Background(), p, "t1", "alice", "USD", nil, nil, pub)
+	if !errors.Is(err, ErrMandateUnchecked) {
+		t.Fatalf("Materialize must propagate the refusal, got %v", err)
+	}
+	if len(pub.published) != 0 {
+		t.Fatalf("nothing may be published for an unchecked proposal, got %d", len(pub.published))
+	}
+	if len(res.Submitted) != 0 {
+		t.Fatalf("nothing may be reported as submitted, got %d", len(res.Submitted))
 	}
 }
 

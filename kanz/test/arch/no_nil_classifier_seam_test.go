@@ -118,15 +118,21 @@ var nilClassifierExempt = map[string]string{
 		"(optimization.Optimize then optimization.Rebalance) and OMITS the mandate check. WHAT IS " +
 		"MISSING IS THE SERVICE'S CONFIG, not a classifier: proposeRequest carries no mandate, " +
 		"Server holds no compliance.Engine and no mandate-registry client, and the composition " +
-		"root passes only server.WithAutoPublish. THE CONSEQUENCE IS ITS OWN DEFECT AND NOT THIS " +
-		"ISSUE'S: Rebalance hardcodes MandateFeasible=true, so every proposal the service returns " +
-		"is stamped feasible with no COMP-01 evaluation behind it — which is the same shape as " +
-		"#640 and needs its own fix rather than being folded into this one.",
+		"root passes only server.WithAutoPublish. THE CONSEQUENCE WAS ITS OWN DEFECT AND NOT THIS " +
+		"ISSUE'S, and it is FIXED: Rebalance used to hardcode MandateFeasible=true, so every " +
+		"proposal the service returned was stamped feasible with no COMP-01 evaluation behind it. " +
+		"#646 replaced the bool with the three-state MandateStatus whose zero value is " +
+		"MandateUnchecked, so the seam being dark now costs the service its ability to materialize " +
+		"orders instead of costing it the check — bridge.ToOrders refuses anything that is not " +
+		"MandateFeasible, and the HTTP surface refuses a caller-supplied verdict. Retiring THIS " +
+		"entry is what makes /v1/orders work again.",
 	"internal/optimization.CheckMandate": "#640 — dark because its ONLY caller is " +
 		"optimization.Propose, which is itself dark; see that entry for what the optimization " +
-		"service does instead. Note that bridge.Materialize's doc rests on this running ('a nil " +
-		"gate skips the re-check — the optimizer's CheckMandate already ran'), and its premise " +
-		"does not hold; the handler's second reason (the OMS re-runs the gate on admission) does.",
+		"service does instead. bridge.Materialize's doc USED TO REST on this running ('a nil gate " +
+		"skips the re-check — the optimizer's CheckMandate already ran') while the premise did not " +
+		"hold. #646 removed the claim and made ToOrders ENFORCE it: a proposal CheckMandate has " +
+		"not passed materializes into nothing, so this seam being dark is now a refusal rather " +
+		"than a silent pass.",
 	"internal/performance.BucketBySector": "#640 — Brinson sector attribution. TWO THINGS ARE " +
 		"MISSING and only one is reference data. performance.Classifier has NO implementation " +
 		"anywhere in the module, not even a StaticClassifier; and services/performance sidesteps " +

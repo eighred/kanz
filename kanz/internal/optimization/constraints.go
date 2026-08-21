@@ -132,12 +132,17 @@ func loFloor(longOnly bool) float64 {
 // CheckMandate projects the target weights into a compliance.Book (each weight ×
 // NAV becomes the position MarketValue) and runs the COMP-01 engine against the
 // mandate — the authoritative feasibility check reusing the exact rules the
-// pre-trade gate enforces. Returns feasible=false plus the breached rule messages
-// on a BREACH (WARN is admitted, matching the gate). A nil mandate is vacuously
-// feasible.
-func CheckMandate(ctx context.Context, weights map[string]float64, nav float64, currency string, classifier compliance.Classifier, engine *compliance.Engine, mandate *compliancepb.Mandate, asOf time.Time) (bool, []string) {
+// pre-trade gate enforces. Returns MandateInfeasible plus the breached rule
+// messages on a BREACH (WARN is admitted, matching the gate).
+//
+// A NIL MANDATE IS MandateUnchecked, NOT VACUOUSLY FEASIBLE (#646). It used to
+// return feasible=true, which made "this deployment holds no mandate for the
+// portfolio" and "every rule was satisfied" the same answer — the shape
+// compliance.Decision already refuses under its own name (Ungoverned) rather
+// than letting it fall through to a pass.
+func CheckMandate(ctx context.Context, weights map[string]float64, nav float64, currency string, classifier compliance.Classifier, engine *compliance.Engine, mandate *compliancepb.Mandate, asOf time.Time) (MandateStatus, []string) {
 	if mandate == nil {
-		return true, nil
+		return MandateUnchecked, nil
 	}
 	if engine == nil {
 		engine = compliance.NewEngine(nil)
@@ -161,9 +166,9 @@ func CheckMandate(ctx context.Context, weights map[string]float64, nav float64, 
 				msgs = append(msgs, v.GetMessage())
 			}
 		}
-		return false, msgs
+		return MandateInfeasible, msgs
 	}
-	return true, nil
+	return MandateFeasible, nil
 }
 
 // money builds a Money at cents precision in the given currency.

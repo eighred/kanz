@@ -7,10 +7,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	optimizationpb "github.com/eighred/kanz/kanz-schemas-go/optimization/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+
+	"github.com/eighred/kanz/internal/optimization"
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // fakeMaterializer records what the handler asked of it.
@@ -46,6 +50,45 @@ func serverWith(f *fakeMaterializer) (*Server, *fakeMaterializer) {
 	return s, f
 }
 
+// feasibleProposal is a proposal a mandate check has PASSED — the only state
+// bridge.ToOrders admits, and the state optimization.CheckMandate alone can
+// produce.
+//
+// IT IS BUILT IN GO RATHER THAN POSTED AS JSON, and the reason is the fix in
+// #646: the /v1/orders boundary refuses a caller-supplied mandate verdict, and
+// this service has no mandate source of its own, so no request body can carry a
+// proposal into the capital action below. The split is deliberate — the tests in
+// this file exercise what happens once a proposal IS approved (publish, tenant
+// scoping, the FACT, a partial failure), and server_test.go exercises the wire
+// boundary that decides whether anything gets that far. Neither substitutes for
+// the other, and the gap between them is exactly the wiring #646 leaves open.
+func feasibleProposal() optimization.RebalanceProposal {
+	return optimization.RebalanceProposal{
+		PortfolioID:   "PF",
+		MandateStatus: optimization.MandateFeasible,
+		Trades: []optimization.ProposedTrade{
+			{InstrumentID: "A", Side: optimization.Buy, Quantity: 100},
+		},
+	}
+}
+
+// materializeAs drives Server.materialize with the principal handleOrders would
+// have resolved. The principal comes from real headers through
+// auth.PrincipalFromHeaders rather than a hand-built struct, so a change to the
+// header contract breaks these tests instead of being papered over.
+func materializeAs(t *testing.T, s *Server, p optimization.RebalanceProposal, subject string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/orders", http.NoBody)
+	auth.SetPrincipalHeaders(req.Header, subject, "acme", []string{"pm"})
+	principal, ok := auth.PrincipalFromHeaders(req.Header)
+	if !ok || principal.Subject != subject {
+		t.Fatalf("the test principal did not survive the header round trip: %+v", principal)
+	}
+	rec := httptest.NewRecorder()
+	s.materialize(rec, req, p, principal)
+	return rec
+}
+
 // THE DEFAULT POSTURE IS THE ONE THAT MUST NEVER DRIFT (#409).
 //
 // A server built without WithAutoPublish publishes NOTHING. The bridge's own
@@ -54,7 +97,7 @@ func serverWith(f *fakeMaterializer) (*Server, *fakeMaterializer) {
 // must never acquire the opposite behaviour because someone added a parameter
 // and a caller passed the wrong thing.
 func TestWithoutTheSwitchNothingIsPublished(t *testing.T) {
-	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/orders", ordersBody, "alice")
+	rec := materializeAs(t, newTestServer(), feasibleProposal(), "alice")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -77,7 +120,7 @@ func TestWithoutTheSwitchNothingIsPublished(t *testing.T) {
 func TestArmedTheCommandsArePublished(t *testing.T) {
 	s, f := serverWith(&fakeMaterializer{armed: true})
 
-	rec := asPrincipal(t, s, http.MethodPost, "/v1/orders", ordersBody, "alice")
+	rec := materializeAs(t, s, feasibleProposal(), "alice")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -95,13 +138,37 @@ func TestArmedTheCommandsArePublished(t *testing.T) {
 	}
 }
 
+// NOT EVEN ARMED, AND NOT EVEN THROUGH THE FRONT DOOR (#646).
+//
+// This is the reachability assertion the two above cannot make: it goes through
+// the real router, with auto-publish armed, using the proposal shape a client
+// gets back from /v1/propose — and nothing reaches the bus, because nothing has
+// checked that proposal against a mandate. Before the fix this request emitted a
+// live SubmitOrder command, since RebalanceProposal's constructor stamped the
+// verdict the bridge gates on.
+func TestArmedAnUncheckedProposalStillPublishesNothing(t *testing.T) {
+	s, f := serverWith(&fakeMaterializer{armed: true})
+
+	rec := asPrincipal(t, s, http.MethodPost, "/v1/orders", ordersBody, "alice")
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("an unchecked proposal got %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if len(f.published) != 0 {
+		t.Fatalf("%d command(s) reached the bus from a proposal no mandate check has run on",
+			len(f.published))
+	}
+	if len(f.facts) != 0 {
+		t.Errorf("a ProposalMaterialized FACT was recorded for a refused proposal: %+v", f.facts)
+	}
+}
+
 // THE TENANT COMES FROM THE CALLER, per request. One handler serves every tenant
 // concurrently; a materializer that carried a tenant set at construction would
 // publish one customer's rebalance under another's.
 func TestTheMaterializerIsScopedToTheCallersTenant(t *testing.T) {
 	s, f := serverWith(&fakeMaterializer{armed: true})
 
-	if rec := asPrincipal(t, s, http.MethodPost, "/v1/orders", ordersBody, "alice"); rec.Code != http.StatusOK {
+	if rec := materializeAs(t, s, feasibleProposal(), "alice"); rec.Code != http.StatusOK {
 		t.Fatalf("got %d", rec.Code)
 	}
 	if f.tenant != "acme" {
@@ -115,7 +182,7 @@ func TestTheMaterializerIsScopedToTheCallersTenant(t *testing.T) {
 func TestADryRunStillEmitsTheFact(t *testing.T) {
 	s, f := serverWith(&fakeMaterializer{armed: false})
 
-	if rec := asPrincipal(t, s, http.MethodPost, "/v1/orders", ordersBody, "alice"); rec.Code != http.StatusOK {
+	if rec := materializeAs(t, s, feasibleProposal(), "alice"); rec.Code != http.StatusOK {
 		t.Fatalf("got %d", rec.Code)
 	}
 	if len(f.published) != 0 {
@@ -139,7 +206,7 @@ func TestADryRunStillEmitsTheFact(t *testing.T) {
 func TestTheFactCarriesThePrincipalAndTheOrderIDs(t *testing.T) {
 	s, f := serverWith(&fakeMaterializer{armed: true})
 
-	if rec := asPrincipal(t, s, http.MethodPost, "/v1/orders", ordersBody, "alice"); rec.Code != http.StatusOK {
+	if rec := materializeAs(t, s, feasibleProposal(), "alice"); rec.Code != http.StatusOK {
 		t.Fatalf("got %d", rec.Code)
 	}
 	if len(f.facts) != 1 {
@@ -167,7 +234,7 @@ func TestTheFactCarriesThePrincipalAndTheOrderIDs(t *testing.T) {
 func TestAPartialPublishIsReportedAsAFailure(t *testing.T) {
 	s, _ := serverWith(&fakeMaterializer{armed: true, publishErr: errors.New("broker unavailable")})
 
-	rec := asPrincipal(t, s, http.MethodPost, "/v1/orders", ordersBody, "alice")
+	rec := materializeAs(t, s, feasibleProposal(), "alice")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("got %d, want 502 — a rebalance that published only in part must not read as OK: %s",
 			rec.Code, rec.Body.String())
@@ -180,7 +247,7 @@ func TestAPartialPublishIsReportedAsAFailure(t *testing.T) {
 func TestALostFactDoesNotFailTheRequest(t *testing.T) {
 	s, f := serverWith(&fakeMaterializer{armed: true, recordErr: errors.New("bus down")})
 
-	rec := asPrincipal(t, s, http.MethodPost, "/v1/orders", ordersBody, "alice")
+	rec := materializeAs(t, s, feasibleProposal(), "alice")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200: the orders were published; failing here would tell the caller "+
 			"the trade did not happen", rec.Code)

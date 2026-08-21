@@ -5,13 +5,22 @@
 // arrive in the request, so the service needs no broker or database to serve the
 // optimize/propose path. A real deployment wires the bus publisher + pre-trade
 // gate behind the bridge seams at the composition root.
+//
+// IT CANNOT MATERIALIZE ANYTHING TODAY, AND THAT IS DELIBERATE (#646). No
+// mandate reaches this service — not in the request, not from a registry — so
+// /v1/propose returns proposals whose MandateStatus is UNCHECKED, and /v1/orders
+// refuses to turn an unchecked proposal into order commands. The route is kept,
+// and refuses out loud, rather than emitting capital commands certified by a
+// check that never ran; Server.materialize carries what wiring retires it.
 package server
 
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -208,6 +217,20 @@ type ordersRequest struct {
 	Issuer string `json:"issuer"`
 }
 
+// mandateVerdictFields are the Proposal fields that assert the OUTCOME OF A
+// COMPLIANCE CHECK. None of them is the caller's to set, for the reason written
+// above ordersRequest.Issuer, applied to the field that decides whether the
+// rebalance becomes live orders at all: this service authenticates nobody, so
+// any caller that reached it could certify its own proposal mandate-feasible and
+// bridge.ToOrders would emit the commands (#646). #409 moved the issuer to the
+// authenticated principal and left the constraint verdict exactly where the
+// issuer had been.
+//
+// "MandateFeasible" IS THE PRE-#646 NAME of MandateStatus and is listed so that a
+// client still sending it is REFUSED rather than ignored. An input the server
+// drops on the floor tells the caller the same lie as one it overrides.
+var mandateVerdictFields = []string{"MandateStatus", "MandateFeasible", "Violations"}
+
 // orderDTO is the JSON-friendly projection of a SubmitOrder command (protojson
 // for the full proto is heavier than this reporting surface needs).
 type orderDTO struct {
@@ -220,10 +243,6 @@ type orderDTO struct {
 }
 
 func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
-	var req ordersRequest
-	if !decode(w, r, &req) {
-		return
-	}
 	// WHO IS ASKING? The gateway is the sole identity authority on this platform:
 	// it verifies the token and injects the principal headers, and this service is
 	// reachable only through it (a NetworkPolicy is what makes trusting those
@@ -237,6 +256,22 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// THE RAW BODY, NOT JUST THE DECODED STRUCT. A field the caller must not set
+	// has to be seen as PRESENT, and a Go zero value cannot tell "absent" from
+	// "sent as the zero" — the same reason the issuer check below compares
+	// against the empty string rather than trusting a decoded value.
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var req ordersRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		// The decoder's own message is passed through: MandateStatus.UnmarshalJSON
+		// names the three legal verdicts, and a caller told only "invalid request
+		// body" would have to guess which field it meant.
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
+		return
+	}
 	if req.Issuer != "" && req.Issuer != principal.Subject {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "issuer is taken from the authenticated principal and must not be supplied in the body; " +
@@ -244,7 +279,62 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	cmds := bridge.ToOrders(req.Proposal, principal.Subject)
+	if field, supplied := suppliedMandateVerdict(body); supplied {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "the proposal field " + field + " states the outcome of a mandate check and must " +
+				"not be supplied in the body; it is the gate on whether this rebalance becomes live " +
+				"orders, and a caller that could set it would be certifying its own trade",
+		})
+		return
+	}
+	s.materialize(w, r, req.Proposal, principal)
+}
+
+// materialize turns an approved proposal into order commands, publishes them if
+// the switch is armed, and records the FACT. It is split out of handleOrders so
+// that the WIRE boundary (who is asking, which fields are not theirs to set) and
+// the CAPITAL ACTION are separately testable — the proposal it takes has already
+// been through that boundary.
+//
+// NO REQUEST GETS PAST ITS FIRST STATEMENT TODAY. bridge.ToOrders refuses a
+// proposal no mandate check has passed, and this service cannot produce a
+// checked one; see the refusal below for what wiring changes that. The publish
+// and FACT machinery beneath it is kept, and kept under test by calling this
+// method directly, because it is correct and its absence is what would have to
+// be rebuilt.
+func (s *Server) materialize(w http.ResponseWriter, r *http.Request, proposal optimization.RebalanceProposal,
+	principal *auth.Principal) {
+	cmds, err := bridge.ToOrders(proposal, principal.Subject)
+	if err != nil {
+		// A PROPOSAL WITH NO VERDICT DOES NOT MATERIALIZE, AND THE REFUSAL SAYS SO.
+		//
+		// This service has no mandate source: proposeRequest carries none, Server
+		// holds no compliance.Engine and no compliance.MandateSource, and the
+		// composition root passes only WithAutoPublish — so /v1/propose builds
+		// proposals that are MandateUnchecked and there is, today, no route through
+		// this service that produces a MandateFeasible one. Every /v1/orders request
+		// therefore ends here, and that is the honest state of the service rather
+		// than a bug in this handler: the alternative is turning an unchecked
+		// proposal into live SubmitOrder commands, which is what #646 is.
+		//
+		// RETIRING THIS means giving the service a mandate the caller did not
+		// supply — the OMS's pattern, which builds a compliance.MandateRegistry and
+		// replays the lifecycle.v1.ConfigChanged FACTs carrying each serialized
+		// Mandate into it, gating readiness on MandateRegistry.Arm — and then
+		// calling optimization.Propose instead of Optimize plus Rebalance. It is not
+		// done here because a mandate this service invented, or accepted from the
+		// requester, would be a control in name only.
+		s.logger.Warn("refused to materialize a rebalance proposal",
+			"portfolio_id", proposal.PortfolioID, "issuer", principal.Subject,
+			"verdict", proposal.MandateStatus.String(), "err", err)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":   err.Error(),
+			"verdict": proposal.MandateStatus.String(),
+			"detail": "orders are materialized only from a proposal a mandate check has passed. This " +
+				"service has no mandate source wired, so it cannot produce or certify one; see #646",
+		})
+		return
+	}
 
 	// AUTO-PUBLISH (#409). Off by default: the commands are built and returned,
 	// and nothing reaches the bus — the human-in-the-loop stance the bridge's own
@@ -272,16 +362,16 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 		// implementation, and the day the two disagreed nobody could say which
 		// one governed the trade.
 		if published {
-			result, perr = bridge.Materialize(ctx, req.Proposal, principal.Tenant, principal.Subject,
+			result, perr = bridge.Materialize(ctx, proposal, principal.Tenant, principal.Subject,
 				"", nil, nil, mat)
 		} else {
 			result = bridge.MaterializeResult{Submitted: cmds}
 		}
-		s.recordMaterialization(ctx, mat, req.Proposal, principal, published, result)
+		s.recordMaterialization(ctx, mat, proposal, principal, published, result)
 		if perr != nil {
 			s.logger.Error("auto-publish failed part-way through a rebalance — some commands are in "+
 				"flight and the rest are not",
-				"portfolio_id", req.Proposal.PortfolioID, "issuer", principal.Subject,
+				"portfolio_id", proposal.PortfolioID, "issuer", principal.Subject,
 				"submitted", len(result.Submitted), "err", perr)
 			writeJSON(w, http.StatusBadGateway, map[string]any{
 				"error":     "the rebalance was published only in part; the submitted orders are live",
@@ -383,6 +473,59 @@ func pow10(exp int32) float64 {
 		p /= 10
 	}
 	return p
+}
+
+// suppliedMandateVerdict reports the name of a proposal field that asserts a
+// mandate verdict, when the request body sets one.
+//
+// It reads the RAW body rather than the decoded proposal so that the pre-#646
+// spelling — which no longer maps to a Go field and would otherwise be discarded
+// without a word — is caught too. Values that assert nothing are allowed
+// through, so a client can echo a /v1/propose response back unchanged and get
+// the refusal that describes its actual problem (nothing checked it) rather than
+// one about a field it merely copied.
+func suppliedMandateVerdict(body []byte) (string, bool) {
+	var outer struct {
+		Proposal map[string]json.RawMessage `json:"proposal"`
+	}
+	if err := json.Unmarshal(body, &outer); err != nil {
+		return "", false // an unparseable body was already refused by the decode above
+	}
+	for _, name := range mandateVerdictFields {
+		for key, raw := range outer.Proposal {
+			// EqualFold because encoding/json matches keys case-insensitively: a
+			// case-sensitive check here would refuse "MandateStatus" and admit
+			// "mandatestatus", which the decoder honours.
+			if strings.EqualFold(key, name) && !assertsNoVerdict(raw) {
+				return key, true
+			}
+		}
+	}
+	return "", false
+}
+
+// assertsNoVerdict reports whether a raw JSON value makes no claim about a
+// mandate check — null, an empty list, and the UNCHECKED name itself, which are
+// exactly what /v1/propose puts on the wire. Everything else, INCLUDING false,
+// is a verdict: false was the pre-#646 spelling of infeasible.
+func assertsNoVerdict(raw json.RawMessage) bool {
+	switch strings.ToUpper(strings.TrimSpace(string(raw))) {
+	case "NULL", "[]", "\"\"", "\"UNCHECKED\"":
+		return true
+	}
+	return false
+}
+
+// readBody reads a bounded request body whole, for a handler that needs the raw
+// bytes as well as the decoded struct.
+func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
+		return nil, false
+	}
+	return b, true
 }
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
