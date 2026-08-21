@@ -2,8 +2,12 @@ package optimization
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
@@ -51,20 +55,108 @@ type ProposedTrade struct {
 	Notional      float64 // |Δw|·NAV
 }
 
+// MandateStatus is the outcome of the COMP-01 mandate check on a proposal, in
+// THREE states because two cannot hold the answer.
+//
+// The field used to be `MandateFeasible bool`, and a bool cannot tell "no
+// mandate was ever consulted" from "consulted, and it passed". It defaulted to
+// the second: Rebalance stamped every proposal it built as feasible, no caller
+// on the service's route ever ran CheckMandate, and the bridge that turns a
+// proposal into live order commands used that stamp as its only gate (#646).
+// The zero value is now MandateUnchecked, so a proposal cannot acquire a verdict
+// merely by being constructed, and ToOrders refuses anything that is not
+// MandateFeasible.
+type MandateStatus int
+
+const (
+	// MandateUnchecked is the ZERO VALUE: nothing has evaluated this proposal
+	// against a mandate. It is not a soft pass — it materializes into no orders,
+	// and the refusal names it.
+	MandateUnchecked MandateStatus = iota
+	// MandateFeasible means CheckMandate ran against a real mandate and found no
+	// BREACH. It is the ONLY state that may become order commands.
+	MandateFeasible
+	// MandateInfeasible means CheckMandate ran and found at least one BREACH;
+	// Violations carries the reasons. The proposal is still returned so the PM
+	// sees why, never silently dropped.
+	MandateInfeasible
+)
+
+// String renders the verdict. An out-of-range value renders as itself rather
+// than falling back to one of the three: a corrupt verdict that printed as
+// "UNCHECKED" would be indistinguishable from an honest one.
+func (s MandateStatus) String() string {
+	switch s {
+	case MandateUnchecked:
+		return "UNCHECKED"
+	case MandateFeasible:
+		return "FEASIBLE"
+	case MandateInfeasible:
+		return "INFEASIBLE"
+	}
+	return "MandateStatus(" + strconv.Itoa(int(s)) + ")"
+}
+
+// MarshalJSON renders the verdict as its NAME.
+//
+// A bare int on the wire would put the unchecked state on the wire as 0, which
+// reads as absent, false and "fine" in every JSON client there is — the same
+// collapse the bool had. An unknown value is an error rather than a number,
+// because a proposal whose verdict cannot be named must not leave this process.
+func (s MandateStatus) MarshalJSON() ([]byte, error) {
+	switch s {
+	case MandateUnchecked, MandateFeasible, MandateInfeasible:
+		return json.Marshal(s.String())
+	}
+	return nil, fmt.Errorf("optimization: refusing to serialize an unknown MandateStatus %d", int(s))
+}
+
+// UnmarshalJSON accepts ONLY the three names, case-insensitively, and an absent
+// or empty value as UNCHECKED.
+//
+// It exists so that a body carrying a verdict is DECODED IN ORDER TO BE REFUSED
+// (the treatment ordersRequest.Issuer already gets), never quietly reinterpreted.
+// A pre-#646 client sending the boolean true gets an error naming the three
+// legal values, not a silent MandateFeasible.
+func (s *MandateStatus) UnmarshalJSON(b []byte) error {
+	var name string
+	if err := json.Unmarshal(b, &name); err != nil {
+		return fmt.Errorf("optimization: a mandate verdict is one of UNCHECKED, FEASIBLE or "+
+			"INFEASIBLE, not %s", string(b))
+	}
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "", "UNCHECKED":
+		*s = MandateUnchecked
+	case "FEASIBLE":
+		*s = MandateFeasible
+	case "INFEASIBLE":
+		*s = MandateInfeasible
+	default:
+		return fmt.Errorf("optimization: unknown mandate verdict %q — it is one of UNCHECKED, "+
+			"FEASIBLE or INFEASIBLE", name)
+	}
+	return nil
+}
+
 // RebalanceProposal is the optimizer's output — target weights + the minimal
-// trade list to reach them, plus the ex-ante stats and the mandate feasibility.
+// trade list to reach them, plus the ex-ante stats and the mandate verdict.
 // The Go-native shape of optimization.v1.RebalanceProposal.
 type RebalanceProposal struct {
-	PortfolioID     string
-	Objective       Objective
-	Targets         map[string]float64
-	Trades          []ProposedTrade
-	ExpectedReturn  float64
-	ExpectedRisk    float64
-	Turnover        float64
-	AsOf            time.Time
-	MandateFeasible bool
-	Violations      []string
+	PortfolioID    string
+	Objective      Objective
+	Targets        map[string]float64
+	Trades         []ProposedTrade
+	ExpectedReturn float64
+	ExpectedRisk   float64
+	Turnover       float64
+	AsOf           time.Time
+	// MandateStatus is WHETHER A MANDATE WAS CONSULTED AND WHAT IT SAID. Only
+	// CheckMandate, through Propose, may set it to anything but MandateUnchecked;
+	// a value arriving from outside this package's own pipeline is a claim its
+	// bearer is not entitled to make, and the optimization service's HTTP surface
+	// refuses a request body that carries one.
+	MandateStatus MandateStatus
+	Violations    []string
 }
 
 // DefaultRebalanceThreshold is the minimum absolute weight change that warrants
@@ -111,13 +203,17 @@ func Rebalance(portfolioID string, current, target map[string]float64, nav float
 		})
 		gross += math.Abs(dw)
 	}
+	// NO MandateStatus HERE, AND THAT IS THE POINT (#646). Rebalance is handed no
+	// mandate, no engine and no classifier, so it is in no position to say
+	// anything about compliance; the zero value says exactly that. It used to
+	// stamp MandateFeasible: true, which is how every proposal this platform ever
+	// built came out certified by a check that had not run.
 	return RebalanceProposal{
-		PortfolioID:     portfolioID,
-		Targets:         target,
-		Trades:          trades,
-		Turnover:        gross / 2,
-		AsOf:            asOf,
-		MandateFeasible: true,
+		PortfolioID: portfolioID,
+		Targets:     target,
+		Trades:      trades,
+		Turnover:    gross / 2,
+		AsOf:        asOf,
 	}
 }
 
@@ -126,8 +222,13 @@ func Rebalance(portfolioID string, current, target map[string]float64, nav float
 // list — the one call a PM workflow / the OPT-01e service drives. The mandate
 // constraints are folded into the optimization box up front (a book you can't
 // hold, you can't optimize into) AND the result is re-checked against the full
-// mandate; an infeasible result is still returned (MandateFeasible=false +
+// mandate; an infeasible result is still returned (MandateInfeasible +
 // violations) so the PM sees why, never silently dropped.
+//
+// A NIL MANDATE DOES NOT PASS. CheckMandate reports MandateUnchecked for it, and
+// the proposal carries that verdict out — so "this deployment has no mandate for
+// the portfolio" and "the mandate was satisfied" are different answers, and only
+// the second materializes into orders.
 func Propose(ctx context.Context, portfolioID string, in MarketInputs, obj Objective, cons *ConstraintSet,
 	current map[string]float64, nav float64, prices map[string]float64, threshold float64,
 	classifier compliance.Classifier, engine *compliance.Engine, mandate *compliancepb.Mandate, currency string, asOf time.Time) (RebalanceProposal, error) {
@@ -141,8 +242,8 @@ func Propose(ctx context.Context, portfolioID string, in MarketInputs, obj Objec
 	proposal.ExpectedReturn = res.ExpectedReturn
 	proposal.ExpectedRisk = res.ExpectedRisk
 
-	feasible, violations := CheckMandate(ctx, res.Weights, nav, currency, classifier, engine, mandate, asOf)
-	proposal.MandateFeasible = feasible
+	status, violations := CheckMandate(ctx, res.Weights, nav, currency, classifier, engine, mandate, asOf)
+	proposal.MandateStatus = status
 	proposal.Violations = violations
 	return proposal, nil
 }
