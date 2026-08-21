@@ -116,11 +116,20 @@ func ComputeFRTB(in FRTBInputs) (FRTBResult, error) {
 	if err != nil {
 		return FRTBResult{}, fmt.Errorf("regulatory: FRTB curvature: %w", err)
 	}
+	// DRC IS GATED LIKE THE OTHER THREE NOW (#617). It was the one component of
+	// Total computed without an error return, so an empty DRCParams weighted
+	// every jump-to-default position to zero and this line contributed a silent
+	// 0 to a signed filing — the exact defect the paragraph above describes, on
+	// the fourth of five components.
+	drc, err := frtb.DRC(in.JTD, in.DRCParams)
+	if err != nil {
+		return FRTBResult{}, fmt.Errorf("regulatory: FRTB DRC: %w", err)
+	}
 	res := FRTBResult{
 		Delta:     delta,
 		Vega:      vega,
 		Curvature: curvature,
-		DRC:       frtb.DRC(in.JTD, in.DRCParams),
+		DRC:       drc,
 		RRAO:      frtb.RRAO(in.RRAO),
 	}
 	res.Total = res.Delta + res.Vega + res.Curvature + res.DRC + res.RRAO
