@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/eighred/kanz/internal/optimization"
 	"github.com/eighred/kanz/pkg/auth"
 )
 
@@ -79,13 +80,56 @@ func TestServer_Propose(t *testing.T) {
 	}
 }
 
-const ordersBody = `{"proposal":{"PortfolioID":"PF","MandateFeasible":true,
+// ordersBody is a proposal in the shape a client gets back from /v1/propose: no
+// mandate verdict on it, because nothing checked it. It used to carry
+// "MandateFeasible":true, which is what every proposal this service built said
+// about itself (#646).
+const ordersBody = `{"proposal":{"PortfolioID":"PF",
 		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`
 
-func TestServer_Orders(t *testing.T) {
+// A PROPOSAL NOTHING CHECKED DOES NOT BECOME ORDERS (#646).
+//
+// This request used to return 200 and a live SubmitOrder command. The verdict
+// bridge.ToOrders gates on was stamped true by RebalanceProposal's constructor,
+// and optimization.CheckMandate had never run anywhere in this platform — so the
+// gate on whether a rebalance becomes capital commands was answered by a field
+// nobody had computed.
+func TestOrdersRefuseAProposalNoMandateCheckHasRun(t *testing.T) {
 	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/orders", ordersBody, "alice")
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("an unchecked proposal got %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Error   string
+		Verdict string
+		Detail  string
+		Count   int
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Count != 0 {
+		t.Fatalf("%d order(s) were returned for a proposal no mandate check has run on", resp.Count)
+	}
+	if resp.Verdict != "UNCHECKED" {
+		t.Errorf("verdict = %q, want UNCHECKED — the refusal must say which of the three states "+
+			"the proposal was in, or an operator cannot tell 'nothing checked it' from 'it breached'",
+			resp.Verdict)
+	}
+	if !strings.Contains(resp.Error, "mandate") {
+		t.Errorf("the refusal does not say why: %s", rec.Body.String())
+	}
+}
+
+// THE ISSUER IS STILL BOUND TO THE AUTHENTICATED PRINCIPAL. This assertion used
+// to live on this route's 200; no request can reach a 200 here while the service
+// has no mandate source (#646), so it moved to autopublish_test.go, which drives
+// Server.materialize with an approved proposal. It is named here so a reader
+// looking for the AUTH-01c coverage on this route finds where it went.
+func TestOrdersBindTheIssuerToThePrincipal(t *testing.T) {
+	rec := materializeAs(t, newTestServer(), feasibleProposal(), "alice")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("orders: got %d body %s", rec.Code, rec.Body.String())
+		t.Fatalf("an approved proposal must materialize: %d %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		Count  int
@@ -95,11 +139,92 @@ func TestServer_Orders(t *testing.T) {
 	if resp.Count != 1 {
 		t.Fatalf("want 1 order, got %d", resp.Count)
 	}
-	// THE ASSERTION THAT MATTERS. The issuer is stamped on the command and is what
-	// the audit trail records as the person who moved the capital. It must be the
-	// AUTHENTICATED caller — a 200 with somebody else's name on it is the defect.
 	if resp.Orders[0].Issuer != "alice" {
 		t.Errorf("issuer = %q, want the authenticated principal alice", resp.Orders[0].Issuer)
+	}
+}
+
+// A BODY THAT CERTIFIES ITS OWN PROPOSAL IS REFUSED, NOT OVERRIDDEN (#646).
+//
+// RebalanceProposal has no json tags and ordersRequest.Proposal is a plain
+// decode of it, so the mandate verdict arrived off the request body — in the
+// same struct as the comment on ordersRequest.Issuer explaining that this
+// service authenticates nobody and therefore cannot accept an issuer from one.
+// #409 moved the issuer to the principal and left the constraint verdict where
+// the issuer had been.
+func TestOrdersRefuseABodySuppliedMandateVerdict(t *testing.T) {
+	cases := map[string]string{
+		"the current spelling":      `{"proposal":{"PortfolioID":"PF","MandateStatus":"FEASIBLE","Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`,
+		"the pre-#646 spelling":     `{"proposal":{"PortfolioID":"PF","MandateFeasible":true,"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`,
+		"json's case-insensitivity": `{"proposal":{"PortfolioID":"PF","mandatestatus":"feasible","Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`,
+		"a self-declared clean bill": `{"proposal":{"PortfolioID":"PF","Violations":[],"MandateStatus":"FEASIBLE",
+			"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/orders", body, "alice")
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("a body carrying its own mandate verdict got %d, want 400: %s",
+					rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "must not be supplied in the body") {
+				t.Errorf("the refusal does not say which field is not the caller's to set: %s",
+					rec.Body.String())
+			}
+		})
+	}
+}
+
+// A LOWER-CASE OR MIXED-CASE VERDICT IS NOT A LOOPHOLE. encoding/json matches
+// keys case-insensitively, so a check that compared field names exactly would
+// refuse "MandateStatus" and admit "mandatestatus" — which the decoder honours.
+func TestASuppliedVerdictIsDecodedWhateverItsCase(t *testing.T) {
+	body := []byte(`{"proposal":{"mandatestatus":"feasible"}}`)
+	var req ordersRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Proposal.MandateStatus != optimization.MandateFeasible {
+		t.Fatalf("non-vacuity: the decoder did not honour the lower-case key, so the refusal "+
+			"below proves nothing; got %s", req.Proposal.MandateStatus)
+	}
+	if _, supplied := suppliedMandateVerdict(body); !supplied {
+		t.Fatal("a lower-case verdict key was not seen as supplied, and the decoder honours it")
+	}
+}
+
+// AN ECHOED /v1/propose RESPONSE IS REFUSED FOR THE RIGHT REASON. A client that
+// round-trips the proposal it was handed is not doing anything wrong, so it must
+// be told what is actually missing (nothing checked this) rather than being sent
+// away over a field it merely copied back.
+func TestARoundTrippedProposalIsRefusedAsUncheckedNotAsForged(t *testing.T) {
+	s := newTestServer()
+	proposeBody := `{"portfolio_id":"PF","instruments":["A","B"],
+		"covariance":[[0.04,0],[0,0.04]],
+		"objective":{"Type":1},
+		"current_weights":{"A":1.0},"nav":100000,
+		"prices":{"A":10,"B":10}}`
+	proposed := do(t, s, http.MethodPost, "/v1/propose", proposeBody)
+	if proposed.Code != http.StatusOK {
+		t.Fatalf("propose: got %d body %s", proposed.Code, proposed.Body.String())
+	}
+	var asSeen struct{ MandateStatus string }
+	if err := json.Unmarshal(proposed.Body.Bytes(), &asSeen); err != nil {
+		t.Fatal(err)
+	}
+	if asSeen.MandateStatus != "UNCHECKED" {
+		t.Fatalf("/v1/propose reported MandateStatus %q — it consults no mandate and must say so",
+			asSeen.MandateStatus)
+	}
+
+	rec := asPrincipal(t, s, http.MethodPost, "/v1/orders",
+		`{"proposal":`+proposed.Body.String()+`}`, "alice")
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("an echoed proposal got %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "must not be supplied in the body") {
+		t.Error("a client echoing the proposal it was given was blamed for supplying a verdict; " +
+			"UNCHECKED asserts nothing and must pass through to the refusal that names the real problem")
 	}
 }
 
@@ -123,7 +248,7 @@ func TestOrdersWithoutAPrincipalAreRefused(t *testing.T) {
 // issuer and receives a 200 has been told their attribution was honoured, and it
 // was not. Refusing says which field is not theirs to set.
 func TestOrdersRefuseABodySuppliedIssuer(t *testing.T) {
-	body := `{"issuer":"mallory","proposal":{"PortfolioID":"PF","MandateFeasible":true,
+	body := `{"issuer":"mallory","proposal":{"PortfolioID":"PF",
 		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`
 	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/orders", body, "alice")
 	if rec.Code != http.StatusBadRequest {
@@ -137,12 +262,23 @@ func TestOrdersRefuseABodySuppliedIssuer(t *testing.T) {
 // An issuer echoing the caller's own subject is harmless and is allowed, so a
 // client that round-trips the field is not broken by this. It still has no
 // effect: the principal is what is used.
+//
+// The assertion is that the request is NOT refused as a forged issuer. It goes
+// on to be refused for want of a mandate check (#646), which is a different
+// answer with a different status, and conflating the two would let the issuer
+// rule rot behind it.
 func TestOrdersAllowAnIssuerThatEchoesTheCaller(t *testing.T) {
-	body := `{"issuer":"alice","proposal":{"PortfolioID":"PF","MandateFeasible":true,
+	body := `{"issuer":"alice","proposal":{"PortfolioID":"PF",
 		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`
 	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/orders", body, "alice")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	if rec.Code == http.StatusBadRequest {
+		t.Fatalf("an issuer echoing the caller was refused as forged: %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got %d, want 422 (unchecked mandate): %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "forged-issuer") {
+		t.Errorf("the refusal blames the issuer: %s", rec.Body.String())
 	}
 }
 

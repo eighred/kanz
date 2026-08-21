@@ -104,7 +104,9 @@ func run() int {
 	case cfg.AutoPublish:
 		logger.Warn("AUTO-PUBLISH IS ARMED — a materialized rebalance proposal's orders go straight to "+
 			"the bus with no human approval step. Every order is still attributed to the "+
-			"gateway-authenticated caller and re-checked by the OMS's pre-trade gate on admission",
+			"gateway-authenticated caller and re-checked by the OMS's pre-trade gate on admission. "+
+			"NOTHING CAN BE MATERIALIZED IN THIS BUILD: no mandate source is wired here, so every "+
+			"proposal the service builds is MandateUnchecked and /v1/orders refuses it (#646)",
 			"broker", cfg.NATSURL)
 		armed := publish.NewMaterializer(producer, autoPublished, factsLost)
 		serverOpts = append(serverOpts, server.WithAutoPublish(
@@ -114,13 +116,16 @@ func run() int {
 		// the FACT still gets recorded, so a dry run is visible rather than
 		// invisible. Say which mode this is so the two are never guessed at.
 		logger.Info("auto-publish is OFF — materialized proposals are returned to the caller and " +
-			"nothing is sent to the bus (set OPTIMIZATION_AUTO_PUBLISH=true to change that)")
+			"nothing is sent to the bus (set OPTIMIZATION_AUTO_PUBLISH=true to change that). No " +
+			"proposal can be materialized at all until a mandate source is wired: /v1/orders " +
+			"refuses one nothing has checked (#646)")
 		recorder := publish.NewRecorder(producer, factsLost)
 		serverOpts = append(serverOpts, server.WithAutoPublish(
 			func(tenant string) server.Materializer { return recorder.ForTenant(tenant) }))
 	default:
 		logger.Info("no broker configured — materialized proposals are returned to the caller and " +
-			"nothing is recorded on the bus")
+			"nothing is recorded on the bus. No proposal can be materialized at all until a " +
+			"mandate source is wired: /v1/orders refuses one nothing has checked (#646)")
 	}
 
 	readiness := &server.Readiness{}
