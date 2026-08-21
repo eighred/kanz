@@ -3,10 +3,8 @@ package indicator
 import (
 	"context"
 	"fmt"
-	"math"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"time"
-
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/store"
 )
@@ -222,26 +220,13 @@ func columns(bars []store.Bar) (closes, highs, lows []float64, ok bool) {
 	highs = make([]float64, len(bars))
 	lows = make([]float64, len(bars))
 	for i, b := range bars {
-		c, cok := decimalFloat(b.Close)
-		h, hok := decimalFloat(b.High)
-		l, lok := decimalFloat(b.Low)
+		c, cok := decutil.Float64(b.Close)
+		h, hok := decutil.Float64(b.High)
+		l, lok := decutil.Float64(b.Low)
 		if !cok || !hok || !lok {
 			return nil, nil, nil, false
 		}
 		closes[i], highs[i], lows[i] = c, h, l
 	}
 	return closes, highs, lows, true
-}
-
-// decimalFloat converts an exact Decimal to float64 for analytic use, refusing a
-// nil or a value that does not survive the conversion finitely.
-func decimalFloat(d *commonpb.Decimal) (float64, bool) {
-	if d == nil {
-		return 0, false
-	}
-	f := float64(d.GetCoefficient()) * math.Pow10(int(d.GetExponent()))
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0, false
-	}
-	return f, true
 }

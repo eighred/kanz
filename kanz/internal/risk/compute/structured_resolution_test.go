@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"testing"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -77,9 +78,9 @@ func TestStructMeasures_AnUnusableDealIsDeclinedWithItsOwnReason(t *testing.T) {
 	if !ok {
 		t.Fatalf("StructDuration missing from the set")
 	}
-	if decimalToFloat(dur.Value) != 0 || dur.Coverage.Contributed != 0 {
+	if decutil.Float64Or(dur.Value, 0) != 0 || dur.Coverage.Contributed != 0 {
 		t.Fatalf("value=%.4f contributed=%d — the fixture must price nothing",
-			decimalToFloat(dur.Value), dur.Coverage.Contributed)
+			decutil.Float64Or(dur.Value, 0), dur.Coverage.Contributed)
 	}
 	if len(dur.Coverage.Exclusions) != 1 || dur.Coverage.Exclusions[0].Reason != SkipUnusableDeal {
 		t.Errorf("exclusions = %+v, want one MBS_A:%s — an unusable deal must be attributable to "+

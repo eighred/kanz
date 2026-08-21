@@ -22,10 +22,9 @@ package liquidity
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"time"
-
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/risk/domain"
 )
@@ -141,8 +140,8 @@ func (m Model) LiquidationProfile(ctx context.Context, p *domain.Portfolio, prov
 		if !ok {
 			continue
 		}
-		notional := math.Abs(decimalToFloat(pos.MarketValue.GetAmount()))
-		days, liquid := m.DaysToLiquidate(decimalToFloat(pos.Quantity), spec)
+		notional := math.Abs(decutil.Float64Or(pos.MarketValue.GetAmount(), 0))
+		days, liquid := m.DaysToLiquidate(decutil.Float64Or(pos.Quantity, 0), spec)
 		prof.Positions = append(prof.Positions, PositionHorizon{
 			InstrumentID: string(pos.InstrumentID),
 			Days:         days,
@@ -163,13 +162,4 @@ func (m Model) LiquidationProfile(ctx context.Context, p *domain.Portfolio, prov
 		prof.WeightedDays = wSum / nSum
 	}
 	return prof
-}
-
-// decimalToFloat is the package's Decimal→float bridge (compute's equivalent is
-// package-private). Liquidity figures are float-domain statistics.
-func decimalToFloat(d *commonpb.Decimal) float64 {
-	if d == nil {
-		return 0
-	}
-	return float64(d.Coefficient) * math.Pow10(int(d.Exponent))
 }

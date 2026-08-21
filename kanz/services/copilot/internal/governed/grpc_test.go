@@ -2,6 +2,7 @@ package governed
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"testing"
 	"time"
 
@@ -154,7 +155,7 @@ func TestGRPCEvaluateScenario(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvaluateScenario: %v", err)
 	}
-	if gotPct == nil || decFloat(gotPct) > -0.049 || decFloat(gotPct) < -0.051 {
+	if gotPct == nil || decutil.Float64Or(gotPct, 0) > -0.049 || decutil.Float64Or(gotPct, 0) < -0.051 {
 		t.Fatalf("shock pct = %v, want ~-0.05", gotPct)
 	}
 	if r.Values["PnL"] != -2500 {

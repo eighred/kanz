@@ -3,6 +3,7 @@ package termsource
 import (
 	"context"
 	"errors"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"sort"
 	"time"
@@ -159,7 +160,7 @@ func toPool(p *referencepb.CollateralPool) (structured.Pool, bool) {
 	if p == nil {
 		return structured.Pool{}, false
 	}
-	balance, ok := decimalToFloat(p.GetOriginalBalance())
+	balance, ok := decutil.Float64(p.GetOriginalBalance())
 	if !ok || balance <= 0 {
 		return structured.Pool{}, false
 	}
@@ -234,7 +235,7 @@ func toTranches(in []*referencepb.Tranche) ([]structured.Tranche, bool) {
 			// cannot be the held one and makes every other index ambiguous.
 			return nil, false
 		}
-		balance, ok := decimalToFloat(t.GetOriginalBalance())
+		balance, ok := decutil.Float64(t.GetOriginalBalance())
 		if !ok || balance <= 0 {
 			return nil, false
 		}

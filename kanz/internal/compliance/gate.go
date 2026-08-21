@@ -581,7 +581,7 @@ func project(book *Book, d OrderDelta) (*Book, bool) {
 
 // negateDecimal flips a Decimal's sign. The coefficient is an int64 and math.MinInt64
 // has no positive counterpart, so that one value is refused by returning it
-// unchanged — it cannot arise from a real order (dec.InDomainDeep bounds the
+// unchanged — it cannot arise from a real order (decutil.InDomainDeep bounds the
 // exponent, and a coefficient that large is not a tradeable size), and inventing
 // a wrapped positive would be the #94 defect in a new place.
 func negateDecimal(d *commonpb.Decimal) *commonpb.Decimal {
@@ -602,7 +602,7 @@ func negateDecimal(d *commonpb.Decimal) *commonpb.Decimal {
 //
 // The whole analysis — why math/big, why the exponent is RAISED rather than
 // wrapped, why the alignment window is clamped, and what ok=false obliges the
-// caller to do — travelled with the code and now lives on dec.Add / dec.Mul.
+// caller to do — travelled with the code and now lives on decutil.Add / decutil.Mul.
 //
 // These two names stay as one-line wrappers on purpose. project() reads in the
 // gate's own vocabulary, and — the reason that matters — mul_test.go and

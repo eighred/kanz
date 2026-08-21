@@ -2,6 +2,7 @@ package liquidity
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 
 	"github.com/eighred/kanz/internal/risk/domain"
@@ -61,8 +62,8 @@ func (m Model) LiquidationCost(ctx context.Context, p *domain.Portfolio, provide
 		if !ok {
 			continue
 		}
-		notional := math.Abs(decimalToFloat(pos.MarketValue.GetAmount()))
-		days, _ := m.DaysToLiquidate(decimalToFloat(pos.Quantity), spec)
+		notional := math.Abs(decutil.Float64Or(pos.MarketValue.GetAmount(), 0))
+		days, _ := m.DaysToLiquidate(decutil.Float64Or(pos.Quantity, 0), spec)
 		cost += notional * m.CostFraction(days, spec.Spread)
 	}
 	return cost

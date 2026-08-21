@@ -14,10 +14,8 @@ package dataset
 
 import (
 	"context"
-	"math"
+	"github.com/eighred/kanz/internal/dec"
 	"time"
-
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/returns"
 	"github.com/eighred/kanz/internal/marketdata/store"
@@ -101,7 +99,7 @@ func (m *Materializer) Materialize(ctx context.Context, s Sample) (Row, error) {
 		return Row{}, err
 	}
 	if ok {
-		if f, fok := decimalToFloat(spot.Price); fok {
+		if f, fok := dec.Float64(spot.Price); fok {
 			row.Features["spot"] = f
 		} else {
 			row.Complete = false
@@ -159,17 +157,6 @@ func (m *Materializer) MaterializeAll(ctx context.Context, samples []Sample) ([]
 		out = append(out, row)
 	}
 	return out, nil
-}
-
-// decimalToFloat converts an exact common.v1.Decimal to float64 for use as a
-// model feature. Prices stay exact Decimal on the wire/store (double is banned,
-// EVT-10); the lossy conversion is confined to the ML feature plane, where a
-// float64 input is the contract.
-func decimalToFloat(d *commonpb.Decimal) (float64, bool) {
-	if d == nil {
-		return 0, false
-	}
-	return float64(d.GetCoefficient()) * math.Pow10(int(d.GetExponent())), true
 }
 
 func mean(xs []float64) float64 {

@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
@@ -322,7 +323,7 @@ func liquidationHorizonMeasure(ctx context.Context, provider liquidity.Provider,
 func lvarMeasure(ctx context.Context, provider liquidity.Provider, model liquidity.Model, baseVaR MeasureFunc, o *liquidityOptions) MeasureFunc {
 	return func(p *domain.Portfolio) v1.Measure {
 		base := baseVaR(p)
-		varFloat := decimalToFloat(base.Value)
+		varFloat := decutil.Float64Or(base.Value, 0)
 		lvar := model.LiquidityAdjustedVaR(ctx, varFloat, p, provider)
 		// INHERITED FIRST. LVaR is VaR widened by a cost; if the VaR underneath was
 		// computed over nothing, so is this, and a derived measure must not launder

@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"time"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
@@ -218,7 +219,7 @@ func factorValues(p *domain.Portfolio, model *factormodel.Model, providers Facto
 		} else {
 			cov.Contributed++
 		}
-		values[id] = decimalToFloat(pos.MarketValue.GetAmount())
+		values[id] = decutil.Float64Or(pos.MarketValue.GetAmount(), 0)
 	}
 	return values
 }

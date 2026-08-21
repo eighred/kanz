@@ -110,10 +110,9 @@ package liquiditysource
 import (
 	"context"
 	"fmt"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"time"
-
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/store"
 	"github.com/eighred/kanz/internal/risk/liquidity"
@@ -814,7 +813,7 @@ func (p *Provider) spreadFor(instrumentID string) (spread float64, assumed, ok b
 func dailyTotals(bars []store.Bar) (total float64, days int, ok bool) {
 	seen := map[int64]bool{}
 	for i := range bars {
-		v, vok := decimalToFloat(bars[i].Volume)
+		v, vok := decutil.Float64(bars[i].Volume)
 		if !vok || v < 0 {
 			return 0, 0, false
 		}
@@ -845,26 +844,6 @@ func (p *Provider) report(instrumentID, reason string, days int) {
 	if p.onResolution != nil {
 		p.onResolution(instrumentID, reason, days)
 	}
-}
-
-// decimalToFloat converts an exact common.v1.Decimal to the float the liquidity
-// analytics work in. ok is false for a nil decimal or a value that does not
-// survive the conversion finitely, so an absent volume is refused rather than
-// read as 0.
-//
-// THE DECIMAL BOUNDARY IS HERE, matching spotsource.decimalToFloat and
-// indicator.decimalFloat: volumes stay exact common.v1.Decimal in the store, and
-// the lossy conversion is confined to the analytics plane where liquidity.Model
-// takes float64 by contract.
-func decimalToFloat(d *commonpb.Decimal) (float64, bool) {
-	if d == nil {
-		return 0, false
-	}
-	f := float64(d.GetCoefficient()) * math.Pow10(int(d.GetExponent()))
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0, false
-	}
-	return f, true
 }
 
 // Construction errors. Named so a composition root can assert on them and a test

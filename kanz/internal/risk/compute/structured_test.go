@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"testing"
 	"time"
 
@@ -88,12 +89,12 @@ func TestRegisterStructuredRisk(t *testing.T) {
 
 	ms := ComputeMeasures(p, r, nil)
 	dur, ok := ms.Lookup(MeasureStructDuration)
-	if !ok || decimalToFloat(dur.Value) <= 0 {
-		t.Fatalf("StructDuration must be positive, got %.4f ok=%v", decimalToFloat(dur.Value), ok)
+	if !ok || decutil.Float64Or(dur.Value, 0) <= 0 {
+		t.Fatalf("StructDuration must be positive, got %.4f ok=%v", decutil.Float64Or(dur.Value, 0), ok)
 	}
 	wal, _ := ms.Lookup(MeasureStructWAL)
-	if decimalToFloat(wal.Value) <= 0 {
-		t.Fatalf("StructWAL must be positive, got %.4f", decimalToFloat(wal.Value))
+	if decutil.Float64Or(wal.Value, 0) <= 0 {
+		t.Fatalf("StructWAL must be positive, got %.4f", decutil.Float64Or(wal.Value, 0))
 	}
 	// THE COVERAGE OF A GOOD ANSWER MATTERS TOO (#572): the priced tranche is
 	// counted, and the equity beside it is reported as UNASSESSED rather than
@@ -136,7 +137,7 @@ func TestRegisterStructuredRisk_ADeclinedBookIsNotAnEmptyBook(t *testing.T) {
 		}
 		// THE FIXTURE HAS TO STILL PRODUCE THE ZERO or this test proves nothing:
 		// the coverage must be what separates the two responses.
-		if got := decimalToFloat(m.Value); got != 0 {
+		if got := decutil.Float64Or(m.Value, 0); got != 0 {
 			t.Fatalf("%s = %.4f, want 0 — the fixture is not exercising the case this test is about", name, got)
 		}
 		if m.Coverage.Contributed != 0 {
@@ -197,11 +198,11 @@ func TestStructMeasures_AnUnpriceableSpecIsExcludedRatherThanFoldedInAtZero(t *t
 	alone := book(staticStructured{"MBS_A": good}, "MBS_A")
 	mixed := book(staticStructured{"MBS_A": good, "MBS_B": unpriceable}, "MBS_A", "MBS_B")
 
-	want := decimalToFloat(alone.Value)
+	want := decutil.Float64Or(alone.Value, 0)
 	if want <= 0 {
 		t.Fatalf("the priceable fixture must have a positive duration, got %.4f", want)
 	}
-	if got := decimalToFloat(mixed.Value); got != want {
+	if got := decutil.Float64Or(mixed.Value, 0); got != want {
 		t.Errorf("StructDuration over one priceable and one unpriceable tranche = %.4f, want %.4f "+
 			"(the priceable one alone). A tranche the pricer refused was folded into the "+
 			"|MV|-weighted average at zero, which halves the book's measured rate risk and reports "+

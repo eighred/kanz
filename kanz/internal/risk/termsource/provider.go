@@ -3,10 +3,9 @@ package termsource
 import (
 	"context"
 	"errors"
-	"math/big"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"time"
 
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/terms"
@@ -119,11 +118,11 @@ func (p *Provider) OptionTerms(ctx context.Context, instrumentID string, asOf ti
 // strike prices as a forward and a zero multiplier makes every Greek zero, and
 // both would look like an option that simply has no risk.
 func toSpec(o *referencepb.OptionTerms) (compute.OptionSpec, bool) {
-	strike, ok := decimalToFloat(o.GetStrike())
+	strike, ok := decutil.Float64(o.GetStrike())
 	if !ok || strike <= 0 {
 		return compute.OptionSpec{}, false
 	}
-	mult, ok := decimalToFloat(o.GetContractMultiplier())
+	mult, ok := decutil.Float64(o.GetContractMultiplier())
 	if !ok || mult <= 0 {
 		return compute.OptionSpec{}, false
 	}
@@ -154,30 +153,6 @@ func toSpec(o *referencepb.OptionTerms) (compute.OptionSpec, bool) {
 		Exercise:     exercise,
 		Multiplier:   mult,
 	}, true
-}
-
-// decimalToFloat converts an exact decimal to the pricing layer's float. ok is
-// false for a nil decimal, so an absent term is refused rather than read as 0.
-func decimalToFloat(d *commonpb.Decimal) (float64, bool) {
-	if d == nil {
-		return 0, false
-	}
-	r := new(big.Rat).SetInt64(d.GetCoefficient())
-	scale := new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(abs32(d.GetExponent()))), nil))
-	if d.GetExponent() < 0 {
-		r.Quo(r, scale)
-	} else {
-		r.Mul(r, scale)
-	}
-	f, _ := r.Float64()
-	return f, true
-}
-
-func abs32(v int32) int32 {
-	if v < 0 {
-		return -v
-	}
-	return v
 }
 
 // Compile-time assertion for the fixed-income seam, alongside the option one
@@ -245,7 +220,7 @@ func (p *Provider) BondTerms(ctx context.Context, instrumentID string, asOf time
 // toBondSpec converts reference.v1.BondTerms to the float working shape the bond
 // library uses.
 func toBondSpec(b *referencepb.BondTerms) (compute.BondSpec, bool) {
-	face, ok := decimalToFloat(b.GetFaceValue())
+	face, ok := decutil.Float64(b.GetFaceValue())
 	if !ok || face <= 0 {
 		return compute.BondSpec{}, false
 	}
@@ -253,7 +228,7 @@ func toBondSpec(b *referencepb.BondTerms) (compute.BondSpec, bool) {
 	// denotes a zero-coupon bond". So this checks convertibility and sign, not
 	// non-zero, and a negative coupon is refused because it is not a bond this
 	// library models.
-	coupon, ok := decimalToFloat(b.GetCouponRate())
+	coupon, ok := decutil.Float64(b.GetCouponRate())
 	if !ok || coupon < 0 {
 		return compute.BondSpec{}, false
 	}

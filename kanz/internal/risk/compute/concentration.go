@@ -1,6 +1,7 @@
 package compute
 
 import (
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
@@ -32,7 +33,7 @@ func HHI(p *domain.Portfolio) v1.Measure {
 		if !pos.InBaseCurrency(base) {
 			continue
 		}
-		v := math.Abs(decimalToFloat(pos.MarketValue.Amount))
+		v := math.Abs(decutil.Float64Or(pos.MarketValue.Amount, 0))
 		sumSq += v * v
 		gross += v
 	}

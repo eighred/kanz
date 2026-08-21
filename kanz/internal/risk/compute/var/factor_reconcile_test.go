@@ -2,6 +2,7 @@ package varmodel
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/dec"
 	"math"
 	"math/rand"
 	"testing"
@@ -61,7 +62,7 @@ func TestFactorVaR_ReconcilesWithMonteCarlo(t *testing.T) {
 	r := compute.DefaultRegistry()
 	RegisterMonteCarlo(context.Background(), r, rp, Config{Confidence: 0.99, Draws: 50000, Seed: 11})
 	mc, _ := compute.ComputeMeasures(p, r, nil).Lookup(compute.MeasureVaR99)
-	mcVaR := decimalToFloat(mc.Value)
+	mcVaR := dec.Float64Or(mc.Value, 0)
 
 	if factorVaR <= 0 || mcVaR <= 0 {
 		t.Fatalf("both VaRs must be positive: factor=%.2f mc=%.2f", factorVaR, mcVaR)

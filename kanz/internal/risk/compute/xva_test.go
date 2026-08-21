@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"testing"
 	"time"
 
@@ -31,13 +32,13 @@ func TestRegisterXVA_CVAandPFE(t *testing.T) {
 	ms := ComputeMeasures(p, r, nil)
 
 	cva, ok := ms.Lookup(MeasureCVA)
-	if !ok || decimalToFloat(cva.Value) <= 0 {
-		t.Fatalf("CVA must be positive, got %.2f ok=%v", decimalToFloat(cva.Value), ok)
+	if !ok || decutil.Float64Or(cva.Value, 0) <= 0 {
+		t.Fatalf("CVA must be positive, got %.2f ok=%v", decutil.Float64Or(cva.Value, 0), ok)
 	}
 	pfe, _ := ms.Lookup(MeasurePFE)
 	// Peak PFE across the profile = 1,200,000.
-	if decimalToFloat(pfe.Value) != 1_200_000 {
-		t.Fatalf("PFE must be the peak 1,200,000, got %.2f", decimalToFloat(pfe.Value))
+	if decutil.Float64Or(pfe.Value, 0) != 1_200_000 {
+		t.Fatalf("PFE must be the peak 1,200,000, got %.2f", decutil.Float64Or(pfe.Value, 0))
 	}
 }
 
@@ -46,7 +47,7 @@ func TestRegisterXVA_NoProviderIsZero(t *testing.T) {
 	RegisterXVA(context.Background(), r, staticXVA{exp: nil})
 	ms := ComputeMeasures(domain.NewPortfolio("p1", "USD"), r, nil)
 	cva, _ := ms.Lookup(MeasureCVA)
-	if decimalToFloat(cva.Value) != 0 {
-		t.Fatalf("CVA with no provider must be 0, got %.2f", decimalToFloat(cva.Value))
+	if decutil.Float64Or(cva.Value, 0) != 0 {
+		t.Fatalf("CVA with no provider must be 0, got %.2f", decutil.Float64Or(cva.Value, 0))
 	}
 }
