@@ -148,6 +148,25 @@ func Build(framework string, template []Field, asOf time.Time, values map[string
 			// which reads as a real, measured zero.
 			return Report{}, fmt.Errorf("filing: %s report line item %q is not a finite number", framework, f.Code)
 		}
+		// A VALUE TOO SMALL TO RENDER IS NOT A ZERO (#672).
+		//
+		// dec.Str renders at dec.Scale decimal places, so anything below 10^-Scale
+		// comes out as "0" — and that string is what Body serves AND what Canonical
+		// signs. The signature then commits to "we measured zero" over a number the
+		// model reported as non-zero. It is the nil case one line up wearing a
+		// different hat: there the value was not a number, here it is a number this
+		// filing cannot express, and both would be FILED as a measured zero.
+		//
+		// REFUSED RATHER THAN WIDENED OR TOKENISED. Raising the scale moves the
+		// boundary without removing it, and a non-numeric token ("<0.00000001") is a
+		// wire-format change a regulator's parser has not agreed to. Refusing names
+		// the item and its exact value, which is what an operator needs in order to
+		// decide whether the figure is real or an artefact of an upstream unit.
+		if v.Sign() != 0 && dec.Str(v) == "0" {
+			return Report{}, fmt.Errorf("filing: %s report line item %q is %s, which renders as \"0\" "+
+				"at the filing scale of %d decimal places — filing it would assert a measured zero and "+
+				"sign that assertion", framework, f.Code, v.RatString(), dec.Scale)
+		}
 		items = append(items, LineItem{Code: f.Code, Label: f.Label, Value: v})
 	}
 	r := Report{Framework: framework, AsOf: asOf, LineItems: items}
