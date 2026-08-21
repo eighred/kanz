@@ -41,9 +41,76 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       max_connections: "100"   # mirrors the primary — see the header
+      # 25% of the memory request above — declared, not left to the
+      # operator's default, because no CloudNativePG version is pinned
+      # anywhere in this repository and an unreadable default is not a
+      # chosen value (#639, the #228 argument).
+      shared_buffers: "512MB"
+  # NOT BestEffort (#639). Six clusters holding the order book, the IBOR
+  # ledger, the evidence chain, the venue mappings, the schema registry and
+  # the platform's own credentials declared NO resources at all, in a
+  # namespace with no LimitRange to supply one. A pod with neither requests
+  # nor limits is BestEffort: the FIRST class kubelet evicts under node
+  # memory pressure and the first the scheduler preempts. The entire durable
+  # state of the platform was the most disposable thing on its nodes, while
+  # NATS and Kafka both declared theirs and every service inherited a default
+  # from the kanz-services LimitRange.
+  #
+  # MEMORY REQUEST == LIMIT, CPU REQUEST WITH NO LIMIT. The pod is therefore
+  # Burstable, not Guaranteed, and that is the deliberate half: Guaranteed
+  # requires a CPU ceiling, and a CPU ceiling on a database throttles it at
+  # exactly the load that produced the spike. Memory is the resource whose
+  # overshoot is fatal rather than slow, so that one is pinned; a pod at or
+  # under its memory request is not an eviction candidate. Preemption is a
+  # separate mechanism that QoS does not address at all, which is what
+  # priorityClassName below is for.
+  #
+  # DERIVED, NOT MEASURED — the same answer #228 gave for max_connections,
+  # and for the same reason: this estate cannot measure, and an operator
+  # default that cannot be read from here is not a value anyone chose.
+  #   backends = max_connections x 10Mi  (work_mem 4MB + ~3MB backend baseline)
+  #   request  = (backends + 336Mi) / 0.75, rounded up to 512Mi
+  #              where 336Mi = maintenance_work_mem + wal_buffers + OS, and
+  #              the 0.75 leaves shared_buffers its conventional 25%
+  #   cpu      = max(250m, max_connections x 2.5m)
+  # test/arch/postgres_resources_test.go RE-DERIVES all of it, so a
+  # max_connections change that leaves these stale fails the build.
+  resources:
+    requests: { cpu: "250m", memory: "2048Mi" }
+    limits: { memory: "2048Mi" }
+  # A database is not preemptible by a batch job. Nothing in this estate
+  # declared a PriorityClass at all before this (only node-exporter, which
+  # borrows the built-in system-node-critical), so every workload sat at
+  # priority 0 and the scheduler was free to evict Postgres to place
+  # anything. See priorityclass.yaml.
+  priorityClassName: kanz-data-critical
   storage:
     size: 50Gi
   replica:
@@ -71,9 +138,76 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       max_connections: "40"    # mirrors the primary — see the header
+      # 25% of the memory request above — declared, not left to the
+      # operator's default, because no CloudNativePG version is pinned
+      # anywhere in this repository and an unreadable default is not a
+      # chosen value (#639, the #228 argument).
+      shared_buffers: "256MB"
+  # NOT BestEffort (#639). Six clusters holding the order book, the IBOR
+  # ledger, the evidence chain, the venue mappings, the schema registry and
+  # the platform's own credentials declared NO resources at all, in a
+  # namespace with no LimitRange to supply one. A pod with neither requests
+  # nor limits is BestEffort: the FIRST class kubelet evicts under node
+  # memory pressure and the first the scheduler preempts. The entire durable
+  # state of the platform was the most disposable thing on its nodes, while
+  # NATS and Kafka both declared theirs and every service inherited a default
+  # from the kanz-services LimitRange.
+  #
+  # MEMORY REQUEST == LIMIT, CPU REQUEST WITH NO LIMIT. The pod is therefore
+  # Burstable, not Guaranteed, and that is the deliberate half: Guaranteed
+  # requires a CPU ceiling, and a CPU ceiling on a database throttles it at
+  # exactly the load that produced the spike. Memory is the resource whose
+  # overshoot is fatal rather than slow, so that one is pinned; a pod at or
+  # under its memory request is not an eviction candidate. Preemption is a
+  # separate mechanism that QoS does not address at all, which is what
+  # priorityClassName below is for.
+  #
+  # DERIVED, NOT MEASURED — the same answer #228 gave for max_connections,
+  # and for the same reason: this estate cannot measure, and an operator
+  # default that cannot be read from here is not a value anyone chose.
+  #   backends = max_connections x 10Mi  (work_mem 4MB + ~3MB backend baseline)
+  #   request  = (backends + 336Mi) / 0.75, rounded up to 512Mi
+  #              where 336Mi = maintenance_work_mem + wal_buffers + OS, and
+  #              the 0.75 leaves shared_buffers its conventional 25%
+  #   cpu      = max(250m, max_connections x 2.5m)
+  # test/arch/postgres_resources_test.go RE-DERIVES all of it, so a
+  # max_connections change that leaves these stale fails the build.
+  resources:
+    requests: { cpu: "250m", memory: "1024Mi" }
+    limits: { memory: "1024Mi" }
+  # A database is not preemptible by a batch job. Nothing in this estate
+  # declared a PriorityClass at all before this (only node-exporter, which
+  # borrows the built-in system-node-critical), so every workload sat at
+  # priority 0 and the scheduler was free to evict Postgres to place
+  # anything. See priorityclass.yaml.
+  priorityClassName: kanz-data-critical
   storage:
     size: 20Gi
   replica:
@@ -106,9 +240,76 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       max_connections: "200"   # mirrors the primary — see the header
+      # 25% of the memory request above — declared, not left to the
+      # operator's default, because no CloudNativePG version is pinned
+      # anywhere in this repository and an unreadable default is not a
+      # chosen value (#639, the #228 argument).
+      shared_buffers: "896MB"
+  # NOT BestEffort (#639). Six clusters holding the order book, the IBOR
+  # ledger, the evidence chain, the venue mappings, the schema registry and
+  # the platform's own credentials declared NO resources at all, in a
+  # namespace with no LimitRange to supply one. A pod with neither requests
+  # nor limits is BestEffort: the FIRST class kubelet evicts under node
+  # memory pressure and the first the scheduler preempts. The entire durable
+  # state of the platform was the most disposable thing on its nodes, while
+  # NATS and Kafka both declared theirs and every service inherited a default
+  # from the kanz-services LimitRange.
+  #
+  # MEMORY REQUEST == LIMIT, CPU REQUEST WITH NO LIMIT. The pod is therefore
+  # Burstable, not Guaranteed, and that is the deliberate half: Guaranteed
+  # requires a CPU ceiling, and a CPU ceiling on a database throttles it at
+  # exactly the load that produced the spike. Memory is the resource whose
+  # overshoot is fatal rather than slow, so that one is pinned; a pod at or
+  # under its memory request is not an eviction candidate. Preemption is a
+  # separate mechanism that QoS does not address at all, which is what
+  # priorityClassName below is for.
+  #
+  # DERIVED, NOT MEASURED — the same answer #228 gave for max_connections,
+  # and for the same reason: this estate cannot measure, and an operator
+  # default that cannot be read from here is not a value anyone chose.
+  #   backends = max_connections x 10Mi  (work_mem 4MB + ~3MB backend baseline)
+  #   request  = (backends + 336Mi) / 0.75, rounded up to 512Mi
+  #              where 336Mi = maintenance_work_mem + wal_buffers + OS, and
+  #              the 0.75 leaves shared_buffers its conventional 25%
+  #   cpu      = max(250m, max_connections x 2.5m)
+  # test/arch/postgres_resources_test.go RE-DERIVES all of it, so a
+  # max_connections change that leaves these stale fails the build.
+  resources:
+    requests: { cpu: "500m", memory: "3584Mi" }
+    limits: { memory: "3584Mi" }
+  # A database is not preemptible by a batch job. Nothing in this estate
+  # declared a PriorityClass at all before this (only node-exporter, which
+  # borrows the built-in system-node-critical), so every workload sat at
+  # priority 0 and the scheduler was free to evict Postgres to place
+  # anything. See priorityclass.yaml.
+  priorityClassName: kanz-data-critical
   storage:
     size: 75Gi              # tracks the primary (cluster.yaml) — tv_facts is append-only
   replica:
@@ -144,9 +345,76 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       max_connections: "50"    # mirrors the primary — see the header
+      # 25% of the memory request above — declared, not left to the
+      # operator's default, because no CloudNativePG version is pinned
+      # anywhere in this repository and an unreadable default is not a
+      # chosen value (#639, the #228 argument).
+      shared_buffers: "384MB"
+  # NOT BestEffort (#639). Six clusters holding the order book, the IBOR
+  # ledger, the evidence chain, the venue mappings, the schema registry and
+  # the platform's own credentials declared NO resources at all, in a
+  # namespace with no LimitRange to supply one. A pod with neither requests
+  # nor limits is BestEffort: the FIRST class kubelet evicts under node
+  # memory pressure and the first the scheduler preempts. The entire durable
+  # state of the platform was the most disposable thing on its nodes, while
+  # NATS and Kafka both declared theirs and every service inherited a default
+  # from the kanz-services LimitRange.
+  #
+  # MEMORY REQUEST == LIMIT, CPU REQUEST WITH NO LIMIT. The pod is therefore
+  # Burstable, not Guaranteed, and that is the deliberate half: Guaranteed
+  # requires a CPU ceiling, and a CPU ceiling on a database throttles it at
+  # exactly the load that produced the spike. Memory is the resource whose
+  # overshoot is fatal rather than slow, so that one is pinned; a pod at or
+  # under its memory request is not an eviction candidate. Preemption is a
+  # separate mechanism that QoS does not address at all, which is what
+  # priorityClassName below is for.
+  #
+  # DERIVED, NOT MEASURED — the same answer #228 gave for max_connections,
+  # and for the same reason: this estate cannot measure, and an operator
+  # default that cannot be read from here is not a value anyone chose.
+  #   backends = max_connections x 10Mi  (work_mem 4MB + ~3MB backend baseline)
+  #   request  = (backends + 336Mi) / 0.75, rounded up to 512Mi
+  #              where 336Mi = maintenance_work_mem + wal_buffers + OS, and
+  #              the 0.75 leaves shared_buffers its conventional 25%
+  #   cpu      = max(250m, max_connections x 2.5m)
+  # test/arch/postgres_resources_test.go RE-DERIVES all of it, so a
+  # max_connections change that leaves these stale fails the build.
+  resources:
+    requests: { cpu: "250m", memory: "1536Mi" }
+    limits: { memory: "1536Mi" }
+  # A database is not preemptible by a batch job. Nothing in this estate
+  # declared a PriorityClass at all before this (only node-exporter, which
+  # borrows the built-in system-node-critical), so every workload sat at
+  # priority 0 and the scheduler was free to evict Postgres to place
+  # anything. See priorityclass.yaml.
+  priorityClassName: kanz-data-critical
   storage:
     size: 100Gi
   replica:
@@ -182,9 +450,76 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       max_connections: "40"    # mirrors the primary — see the header
+      # 25% of the memory request above — declared, not left to the
+      # operator's default, because no CloudNativePG version is pinned
+      # anywhere in this repository and an unreadable default is not a
+      # chosen value (#639, the #228 argument).
+      shared_buffers: "256MB"
+  # NOT BestEffort (#639). Six clusters holding the order book, the IBOR
+  # ledger, the evidence chain, the venue mappings, the schema registry and
+  # the platform's own credentials declared NO resources at all, in a
+  # namespace with no LimitRange to supply one. A pod with neither requests
+  # nor limits is BestEffort: the FIRST class kubelet evicts under node
+  # memory pressure and the first the scheduler preempts. The entire durable
+  # state of the platform was the most disposable thing on its nodes, while
+  # NATS and Kafka both declared theirs and every service inherited a default
+  # from the kanz-services LimitRange.
+  #
+  # MEMORY REQUEST == LIMIT, CPU REQUEST WITH NO LIMIT. The pod is therefore
+  # Burstable, not Guaranteed, and that is the deliberate half: Guaranteed
+  # requires a CPU ceiling, and a CPU ceiling on a database throttles it at
+  # exactly the load that produced the spike. Memory is the resource whose
+  # overshoot is fatal rather than slow, so that one is pinned; a pod at or
+  # under its memory request is not an eviction candidate. Preemption is a
+  # separate mechanism that QoS does not address at all, which is what
+  # priorityClassName below is for.
+  #
+  # DERIVED, NOT MEASURED — the same answer #228 gave for max_connections,
+  # and for the same reason: this estate cannot measure, and an operator
+  # default that cannot be read from here is not a value anyone chose.
+  #   backends = max_connections x 10Mi  (work_mem 4MB + ~3MB backend baseline)
+  #   request  = (backends + 336Mi) / 0.75, rounded up to 512Mi
+  #              where 336Mi = maintenance_work_mem + wal_buffers + OS, and
+  #              the 0.75 leaves shared_buffers its conventional 25%
+  #   cpu      = max(250m, max_connections x 2.5m)
+  # test/arch/postgres_resources_test.go RE-DERIVES all of it, so a
+  # max_connections change that leaves these stale fails the build.
+  resources:
+    requests: { cpu: "250m", memory: "1024Mi" }
+    limits: { memory: "1024Mi" }
+  # A database is not preemptible by a batch job. Nothing in this estate
+  # declared a PriorityClass at all before this (only node-exporter, which
+  # borrows the built-in system-node-critical), so every workload sat at
+  # priority 0 and the scheduler was free to evict Postgres to place
+  # anything. See priorityclass.yaml.
+  priorityClassName: kanz-data-critical
   storage:
     size: 20Gi
   replica:
@@ -219,9 +554,76 @@ metadata:
 spec:
   instances: 2
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       max_connections: "50"    # mirrors the primary — see the header
+      # 25% of the memory request above — declared, not left to the
+      # operator's default, because no CloudNativePG version is pinned
+      # anywhere in this repository and an unreadable default is not a
+      # chosen value (#639, the #228 argument).
+      shared_buffers: "384MB"
+  # NOT BestEffort (#639). Six clusters holding the order book, the IBOR
+  # ledger, the evidence chain, the venue mappings, the schema registry and
+  # the platform's own credentials declared NO resources at all, in a
+  # namespace with no LimitRange to supply one. A pod with neither requests
+  # nor limits is BestEffort: the FIRST class kubelet evicts under node
+  # memory pressure and the first the scheduler preempts. The entire durable
+  # state of the platform was the most disposable thing on its nodes, while
+  # NATS and Kafka both declared theirs and every service inherited a default
+  # from the kanz-services LimitRange.
+  #
+  # MEMORY REQUEST == LIMIT, CPU REQUEST WITH NO LIMIT. The pod is therefore
+  # Burstable, not Guaranteed, and that is the deliberate half: Guaranteed
+  # requires a CPU ceiling, and a CPU ceiling on a database throttles it at
+  # exactly the load that produced the spike. Memory is the resource whose
+  # overshoot is fatal rather than slow, so that one is pinned; a pod at or
+  # under its memory request is not an eviction candidate. Preemption is a
+  # separate mechanism that QoS does not address at all, which is what
+  # priorityClassName below is for.
+  #
+  # DERIVED, NOT MEASURED — the same answer #228 gave for max_connections,
+  # and for the same reason: this estate cannot measure, and an operator
+  # default that cannot be read from here is not a value anyone chose.
+  #   backends = max_connections x 10Mi  (work_mem 4MB + ~3MB backend baseline)
+  #   request  = (backends + 336Mi) / 0.75, rounded up to 512Mi
+  #              where 336Mi = maintenance_work_mem + wal_buffers + OS, and
+  #              the 0.75 leaves shared_buffers its conventional 25%
+  #   cpu      = max(250m, max_connections x 2.5m)
+  # test/arch/postgres_resources_test.go RE-DERIVES all of it, so a
+  # max_connections change that leaves these stale fails the build.
+  resources:
+    requests: { cpu: "250m", memory: "1536Mi" }
+    limits: { memory: "1536Mi" }
+  # A database is not preemptible by a batch job. Nothing in this estate
+  # declared a PriorityClass at all before this (only node-exporter, which
+  # borrows the built-in system-node-critical), so every workload sat at
+  # priority 0 and the scheduler was free to evict Postgres to place
+  # anything. See priorityclass.yaml.
+  priorityClassName: kanz-data-critical
   storage:
     size: 10Gi
   replica:

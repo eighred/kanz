@@ -59,6 +59,40 @@ for f in "${rules[@]}"; do args+=(--from-file="$f"); done
 # from the ConfigMap too, and `create --dry-run | apply` is the only form that
 # removes keys. Patching would leave a retired alert firing forever.
 emit() {
+  # THE HEADER IS PART OF THE OUTPUT, not something a human re-attaches (#624).
+  #
+  # It was not, for one release, and the bug was in the instruction itself: the
+  # committed file said "regenerate with ./apply-rules.sh --emit >
+  # rules-configmap.yaml", and running exactly that DELETED the banner telling
+  # the next reader not to hand-edit the file. A generated artifact whose
+  # documented regeneration command destroys its own documentation loses that
+  # documentation on first use.
+  #
+  # Emitting it here also makes the command idempotent — `--emit` twice running
+  # produces byte-identical output — which is what lets the guard compare the
+  # committed file against this script rather than only against the rule tree.
+  cat <<'HEADER'
+# GENERATED — DO NOT EDIT BY HAND. Regenerate with:
+#
+#   ./apply-rules.sh --emit > rules-configmap.yaml
+#
+# THE RULES CONFIGMAP IS A SYNCED MANIFEST (#625). Until this file existed,
+# prometheus-rules was created only by apply-rules.sh, and apply-rules.sh had no
+# caller: Argo CD did not sync this tree, CI only ran the script's --list to
+# stage promtool inputs, and nothing else invoked it. Every alert here was
+# validated, guarded, proven-to-fire and loaded by NOTHING.
+#
+# prometheus.yaml mounts this ConfigMap NON-OPTIONALLY, deliberately: if it is
+# absent the pod stays in ContainerCreating and says so, rather than starting
+# clean, loading zero rules and serving a green /-/ready with every alert
+# silently missing.
+#
+# EDITING THIS FILE DIRECTLY IS THE ONE THING THAT BREAKS THE ARRANGEMENT — it
+# would become a second list, competing with the tree, which is the exact state
+# #230 ended. Add or change a *.rules.yaml and regenerate.
+# test/arch/observability_rules_reachable_test.go fails the build if this file
+# and the tree disagree.
+HEADER
   kubectl -n "$namespace" create configmap "$configmap" "${args[@]}" \
     --dry-run=client -o yaml
 }
