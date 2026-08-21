@@ -48,6 +48,16 @@ const schemaRefPortfolioCash = "accounting.v1.PortfolioCashBalance:1"
 // actions — nothing does, and a second computation is the drift this ruling
 // exists to prevent. What is missing is upstream of every consumer.
 //
+// SO THE ANNOUNCEMENT SAYS SO (#614). Every level published here carries an
+// EntrySourcePosture: which kinds of journal entry this deployment actually
+// feeds, and which it cannot. A consumer can then tell a whole number from a
+// partial one instead of inferring completeness from silence, and the pre-trade
+// gate's refusal can name the missing feed rather than reporting a spending
+// limit that was never reached. It corrects nothing and admits nothing — the
+// sign of the omission is not even knowable (foldCorpAct pays quantity x
+// per-unit, SIGNED, so an unfolded dividend understates a long book's cash and
+// overstates a short book's).
+//
 // A LEVEL, NOT A DELTA: idempotent on redelivery, and self-correcting after a
 // gap. The next announcement is right regardless of how many were missed, which
 // is what makes a lost publish survivable.
@@ -55,8 +65,50 @@ type Announcer struct {
 	store     ledger.Store
 	publisher Publisher
 	baseCcy   string
+	posture   EntrySourcePosture
 	logger    *slog.Logger
 	now       func() time.Time
+}
+
+// EntrySourcePosture is what the DEPLOYMENT feeds, stated on every announcement
+// (#614): the ledger entry-type names something in this process produces, and
+// the ones it can fold and nothing produces.
+//
+// IT DESCRIBES THE ESTATE AND NOT THE PORTFOLIO, so it is identical on every
+// portfolio's announcement. It rides along anyway because the consumer that
+// needs it is a pre-trade control reading a local view on the order-admission
+// path (#450 forbids it a synchronous call), and a posture fetched separately is
+// a second thing that can be stale, absent, or describe a different accounting
+// deployment than the balance came from.
+//
+// BOTH LISTS, so a statement that says nothing is detectable as such: an
+// EntrySourcePosture with both empty is not "everything is fed", it is a caller
+// that did not state a posture, and it is published as no statement at all
+// rather than as a clean bill of health.
+type EntrySourcePosture struct {
+	Produced   []string
+	Unproduced []string
+}
+
+// stated reports whether this posture says anything at all.
+func (p EntrySourcePosture) stated() bool { return len(p.Produced) > 0 || len(p.Unproduced) > 0 }
+
+// toProto renders the posture onto the wire, or nil when it says nothing.
+func (p EntrySourcePosture) toProto() *accountingpb.BalanceCompleteness {
+	if !p.stated() {
+		return nil
+	}
+	// Sorted, for the same reason byVenueAccount is: the announcement must be
+	// byte-stable for a given book, or every republish looks like a change to
+	// anything diffing them.
+	produced := append([]string(nil), p.Produced...)
+	unproduced := append([]string(nil), p.Unproduced...)
+	sort.Strings(produced)
+	sort.Strings(unproduced)
+	return &accountingpb.BalanceCompleteness{
+		ProducedEntryTypes:   produced,
+		UnproducedEntryTypes: unproduced,
+	}
 }
 
 // Publisher is the bus publish surface — satisfied by *bus.Producer.
@@ -67,7 +119,7 @@ type Publisher interface {
 // NewAnnouncer wires an Announcer. A nil publisher disables announcing, which the
 // Folder reports at startup rather than discovering silently (#418's lesson: an
 // unwired seam and a healthy one must not look the same).
-func NewAnnouncer(store ledger.Store, publisher Publisher, baseCcy string, logger *slog.Logger, now func() time.Time) *Announcer {
+func NewAnnouncer(store ledger.Store, publisher Publisher, baseCcy string, posture EntrySourcePosture, logger *slog.Logger, now func() time.Time) *Announcer {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -77,7 +129,18 @@ func NewAnnouncer(store ledger.Store, publisher Publisher, baseCcy string, logge
 	if baseCcy == "" {
 		baseCcy = "USD"
 	}
-	return &Announcer{store: store, publisher: publisher, baseCcy: baseCcy, logger: logger, now: now}
+	// AN UNSTATED POSTURE IS A DEFECT, NOT A DEFAULT (#614), so it is said out
+	// loud here rather than discovered by a downstream gate refusing an order it
+	// cannot explain. There is no safe fallback to substitute: this package cannot
+	// see the deployment's config, and inventing "everything is fed" would publish
+	// exactly the false assurance the field exists to abolish.
+	if publisher != nil && !posture.stated() {
+		logger.Error("accounting: announcing cash balances WITHOUT stating what they contain — every " +
+			"consumer will read these levels as UNSTATED completeness, and the pre-trade buying-power " +
+			"gate cannot tell a spending limit from a missing feed. Pass an EntrySourcePosture built " +
+			"from this deployment's entry sources (#614)")
+	}
+	return &Announcer{store: store, publisher: publisher, baseCcy: baseCcy, posture: posture, logger: logger, now: now}
 }
 
 // Announce recomputes portfolioID's cash from the journal and publishes it.
@@ -118,6 +181,7 @@ func (a *Announcer) Announce(ctx context.Context, portfolioID string) error {
 		ByVenueAccount: perAccount,
 		AsOf:           timestamppb.New(now),
 		KnowledgeTime:  timestamppb.New(now),
+		Completeness:   a.posture.toProto(),
 	}
 	return a.publisher.Publish(ctx, bus.Event{
 		Subject:          SubjectPortfolioCash,

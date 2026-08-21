@@ -248,3 +248,81 @@ func TestCorpactExemptionCitesAPostureFileThatExists(t *testing.T) {
 			corpactDarkPackage, corpactPostureFile, err)
 	}
 }
+
+// AND THE BALANCE ITSELF MUST CARRY THE POSTURE (#614).
+//
+// The gauge above tells an OPERATOR that corporate actions are unfed. It tells
+// the pre-trade buying-power gate nothing: that gate reads a balance off the bus
+// on the order-admission path, has no access to accounting's /metrics, and is
+// forbidden a synchronous call into accounting (#450). Without the posture on
+// the announcement it cannot tell a portfolio that is out of money from one
+// whose dividend was never counted, and it refuses both with the same sentence.
+//
+// consume.Announcer only publishes what it is given. An EntrySourcePosture with
+// both lists empty is published as NO STATEMENT — deliberately, so a caller that
+// forgot cannot masquerade as a clean bill of health — which means a composition
+// root that stops passing one degrades EVERY consumer to "unstated" while
+// `go build`, `go vet` and both services' whole suites stay green. That is the
+// composition-root blind spot this repository has shipped crashes through twice,
+// and the reason this is asserted here rather than in a unit test that
+// constructs its own Announcer.
+//
+// Asserted off the AST with comments excluded, for the reason the assertion
+// above is: main.go's own comment names the function, and a guard that grepped
+// raw source would match the explanation and keep passing with the argument
+// deleted.
+func TestAccountingAnnouncesTheEntrySourcePostureOnEveryBalance(t *testing.T) {
+	const (
+		constructor = "NewAnnouncer"
+		posture     = "entrySourceCompleteness"
+	)
+	path := filepath.Join(moduleRoot(t), "services", "accounting", "cmd", "accounting", "main.go")
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+
+	var constructed, stated bool
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != constructor {
+			return true
+		}
+		constructed = true
+		for _, arg := range call.Args {
+			inner, ok := arg.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			if id, ok := inner.Fun.(*ast.Ident); ok && id.Name == posture {
+				stated = true
+			}
+		}
+		return true
+	})
+
+	// Non-vacuity: a renamed or removed constructor would satisfy the assertion
+	// below by never reaching it.
+	if !constructed {
+		t.Fatalf("services/accounting/cmd/accounting/main.go never calls consume.%s — this guard "+
+			"found nothing to check. If the announcer moved, move this assertion with it.",
+			constructor)
+	}
+	if !stated {
+		t.Fatalf("consume.%s is constructed in main.go without %s(cfg).\n\n"+
+			"Every accounting.balance.portfolio announcement then carries no completeness, and "+
+			"every consumer reads it as UNSTATED. The one that matters is the pre-trade "+
+			"buying-power gate: it fails CLOSED on a balance that is short by every dividend, "+
+			"coupon and merger payment this platform has never ingested (#588), and without the "+
+			"posture its refusal is worded exactly like a mandate's spending limit being hit. "+
+			"Nothing else in the toolchain notices — the announcer still publishes, the suites "+
+			"stay green, and the only symptom is orders refused for a reason nobody can "+
+			"attribute (#614).", constructor, posture)
+	}
+}
