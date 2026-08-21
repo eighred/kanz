@@ -145,6 +145,26 @@ func (c *CashCompleteness) Incomplete() bool { return c != nil && len(c.OmittedE
 // Stated reports whether the producer said anything at all about completeness.
 func (c *CashCompleteness) Stated() bool { return c != nil }
 
+// Vouched reports whether the producer stated that the balance is WHOLE — it said
+// something, and what it said names nothing missing.
+//
+// THREE STATES COLLAPSE TO TWO HERE, DELIBERATELY, and only for the caller that
+// asks "may I rely on this number". Unstated and incomplete are different facts
+// with different operator actions — nobody wired the statement, versus a feed that
+// does not exist — and Stated/Incomplete keep them apart for the reader that needs
+// them. What they share is the only thing this predicate is about: the producer
+// did not vouch for the figure, so a control that spends against it is spending
+// against a number no one stands behind.
+func (c *CashCompleteness) Vouched() bool { return c.Stated() && !c.Incomplete() }
+
+// Omitted returns the entry types the producer named as missing, nil-safe.
+func (c *CashCompleteness) Omitted() []string {
+	if c == nil {
+		return nil
+	}
+	return c.OmittedEntryTypes
+}
+
 // BookFromSnapshot builds a Book from a domain.v1.PortfolioSnapshot — the
 // bootstrap shape both the gate's book source and the monitor consume.
 func BookFromSnapshot(s *domainpb.PortfolioSnapshot) *Book {
