@@ -49,7 +49,10 @@ func BlackLitterman(in BLInput) ([]float64, error) {
 	if !square(in.Covariance, n) || len(in.MarketWeights) != n {
 		return nil, ErrBLDims
 	}
-	if err := checkPSD(in.Covariance); err != nil {
+	// The rank is not consulted here: BL does not report a risk number, and the
+	// one matrix it inverts (M) is Σ-derived but not Σ, so a singular Σ surfaces
+	// as ErrBLSingular from solveLinear below rather than as a quality flag.
+	if _, err := psdRank(in.Covariance); err != nil {
 		return nil, err
 	}
 	if in.RiskAversion <= 0 {
