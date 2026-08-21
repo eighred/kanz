@@ -95,9 +95,55 @@ type Book struct {
 	// field; the OMS position book does not yet (its Snapshot says NAV is "a
 	// funded-book proxy until a cash/equity source lands"), so a deployment fed by
 	// the OMS book supplies nil until that link is wired.
-	Cash      *commonpb.Money
-	Positions []Position
+	Cash *commonpb.Money
+	// CashCompleteness is what the PRODUCER of Cash said that number contains
+	// (#614). nil means it said nothing.
+	//
+	// A BALANCE IS ONLY AS COMPLETE AS ITS INPUTS. accounting's ledger folds six
+	// kinds of journal entry and two of them have no producer anywhere in this
+	// platform (#588): no dividend, coupon or merger cash has ever reached the
+	// book, and no accrual has. Cash is therefore not the portfolio's money — it
+	// is the portfolio's money as far as the feeds that exist can see. Without
+	// this field a rule reading Cash cannot tell that from a whole number, and
+	// BuyingPowerRule turns the gap into a refusal that reads exactly like a
+	// spending limit being hit.
+	//
+	// IT DOES NOT CHANGE ANY VERDICT, and that is deliberate. The sign of the
+	// error is not knowable: an unfolded dividend understates the cash of a book
+	// that is LONG the instrument and OVERSTATES the cash of one that is SHORT it
+	// (accounting's foldCorpAct pays quantity x per-unit, signed). Correcting the
+	// number by this list would be guessing, and inflating buying power on a guess
+	// turns a control that refuses too much into one that admits what the fund
+	// cannot pay for. So it is carried into the EVIDENCE of a refusal and nowhere
+	// else: the refusal stands, and it says what it could not account for.
+	CashCompleteness *CashCompleteness
+	Positions        []Position
 }
+
+// CashCompleteness is a producer's statement about the balance it published —
+// which kinds of journal entry the deployment that computed it actually feeds
+// (#614).
+//
+// nil IS NOT "COMPLETE", IT IS "UNSTATED". A producer that says nothing has not
+// shown its number to be whole, and the two must not collapse into one answer;
+// that collapse is the whole defect this type exists to end. Only a non-nil
+// value with an empty OmittedEntryTypes means "everything this book folds is
+// fed".
+type CashCompleteness struct {
+	// OmittedEntryTypes names the kinds of journal entry the book of record can
+	// fold and NOTHING in the producing deployment produces, by the book's own
+	// entry-type names ("corporate_action", "accrual"). Empty means the producer
+	// stated that nothing is missing.
+	OmittedEntryTypes []string
+}
+
+// Incomplete reports whether the producer named something missing from the
+// balance. A nil receiver is NOT incomplete — it is unstated, which Stated
+// answers; a caller that needs to tell them apart must ask both.
+func (c *CashCompleteness) Incomplete() bool { return c != nil && len(c.OmittedEntryTypes) > 0 }
+
+// Stated reports whether the producer said anything at all about completeness.
+func (c *CashCompleteness) Stated() bool { return c != nil }
 
 // BookFromSnapshot builds a Book from a domain.v1.PortfolioSnapshot — the
 // bootstrap shape both the gate's book source and the monitor consume.

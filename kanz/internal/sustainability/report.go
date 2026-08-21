@@ -8,16 +8,12 @@ package sustainability
 // through a Signer seam the AUDIT-01 hash-chain wires into).
 
 import (
-	"encoding/json"
-	"math/big"
-
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"github.com/eighred/kanz/internal/dec"
 	"math"
-	"sort"
+	"math/big"
 	"time"
+
+	"github.com/eighred/kanz/internal/filing"
 )
 
 // GlidePath is a net-zero emissions trajectory: a linear decline from a base-year
@@ -88,134 +84,57 @@ const (
 	SFDR Framework = "SFDR"
 )
 
-type field struct{ Code, Label string }
-
 // templates lists the required line items per framework — a report is COMPLETE
 // only when every code has a value (the REG-01 completeness discipline).
-var templates = map[Framework][]field{
+var templates = map[Framework][]filing.Field{
 	TCFD: {
-		{"TCFD_WACI", "Weighted-average carbon intensity"},
-		{"TCFD_FINANCED_EMISSIONS", "Financed emissions (PCAF)"},
-		{"TCFD_IMPLIED_TEMP_RISE", "Implied temperature rise"},
-		{"TCFD_CLIMATE_VAR", "Climate value-at-risk"},
+		{Code: "TCFD_WACI", Label: "Weighted-average carbon intensity"},
+		{Code: "TCFD_FINANCED_EMISSIONS", Label: "Financed emissions (PCAF)"},
+		{Code: "TCFD_IMPLIED_TEMP_RISE", Label: "Implied temperature rise"},
+		{Code: "TCFD_CLIMATE_VAR", Label: "Climate value-at-risk"},
 	},
 	SFDR: {
-		{"SFDR_GHG_INTENSITY", "GHG intensity of investments"},
-		{"SFDR_CARBON_FOOTPRINT", "Carbon footprint"},
-		{"SFDR_FOSSIL_FUEL_EXPOSURE", "Exposure to fossil-fuel companies"},
+		{Code: "SFDR_GHG_INTENSITY", Label: "GHG intensity of investments"},
+		{Code: "SFDR_CARBON_FOOTPRINT", Label: "Carbon footprint"},
+		{Code: "SFDR_FOSSIL_FUEL_EXPOSURE", Label: "Exposure to fossil-fuel companies"},
 	},
 }
 
-// LineItem is one row of a report.
-// Value is an EXACT rational, matching internal/regulatory. The METRICS behind it
-// are model outputs (emissions intensity, implied temperature rise, climate VaR) —
-// float64 in the model, and honestly so: they are not exact base-10 quantities and
-// no type can make them so.
+// LineItem is one row of a filing — internal/filing's, not a second copy.
 //
-// What is exact is the FILED number: what the regulator receives and what the
-// signature commits to are one deterministic decimal string. It also means this
-// service emits a filed value ONE way — a decimal string — whether the filing is a
-// capital charge, a NAV, or a carbon intensity.
-type LineItem struct {
-	Code  string
-	Label string
-	Value *big.Rat
-}
-
-// MarshalJSON emits the value as a decimal STRING, never a JSON number — the same
-// rendering the signature commits to.
-func (l LineItem) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		Code  string `json:"code"`
-		Label string `json:"label"`
-		Value string `json:"value"`
-	}{Code: l.Code, Label: l.Label, Value: dec.Str(l.Value)})
-}
+// The METRICS behind it are model outputs (emissions intensity, implied
+// temperature rise, climate VaR) — float64 in the model, and honestly so: they
+// are not exact base-10 quantities and no type can make them so. What is exact is
+// the FILED number: what the regulator receives and what the signature commits to
+// are one deterministic decimal string, which is a property of internal/filing and
+// not of this package. It was NOT that while this package had its own copy: the
+// climate filing was served in rational a/b form while its signature committed to
+// the decimal (#633).
+type LineItem = filing.LineItem
 
 // Report is a point-in-time, signed climate disclosure.
-type Report struct {
-	Framework Framework
-	AsOf      time.Time
-	LineItems []LineItem
-	Signature string
-}
+type Report = filing.Report
 
 // Signer signs the canonical report bytes — the AUDIT-01 recorder seam. The
 // default HashSigner is a SHA-256 digest; a deployment injects the audit
 // hash-chain signer (shared discipline with REG-01 report signing).
-type Signer interface {
-	// Sign returns the signature, or an error if the report could not be recorded
-	// in the durable audit chain — in which case it must NOT be issued.
-	Sign(canonical []byte) (string, error)
-}
+type Signer = filing.Signer
 
 // HashSigner is the default content-hash Signer (tamper-evidence without a key).
-type HashSigner struct{}
-
-// Sign returns the hex SHA-256 of the canonical bytes.
-func (HashSigner) Sign(canonical []byte) (string, error) {
-	sum := sha256.Sum256(canonical)
-	return hex.EncodeToString(sum[:]), nil
-}
+type HashSigner = filing.HashSigner
 
 // BuildReport assembles a framework's climate report from values (code → amount)
-// as of asOf and signs it. It errors when the framework is unknown or any
-// templated line item is missing — so an incomplete disclosure never gets signed.
-// A nil signer defaults to HashSigner.
+// as of asOf and signs it. It errors when the framework is unknown, when any
+// templated line item is missing — so an incomplete disclosure never gets signed
+// — and when a value is nil, which is what exactOrNil returns for a non-finite
+// metric (NaN, ±Inf). That last refusal is new here: disclosure.go has always
+// said "a non-finite metric maps to nil, which BuildReport refuses", and it was
+// true of internal/regulatory's copy and false of this package's, so a NaN climate
+// metric was filed as 0 and SIGNED (#633). A nil signer defaults to HashSigner.
 func BuildReport(framework Framework, asOf time.Time, values map[string]*big.Rat, signer Signer) (Report, error) {
 	tmpl, ok := templates[framework]
 	if !ok {
 		return Report{}, fmt.Errorf("sustainability: unknown framework %q", framework)
 	}
-	if signer == nil {
-		signer = HashSigner{}
-	}
-	items := make([]LineItem, 0, len(tmpl))
-	for _, f := range tmpl {
-		v, ok := values[f.Code]
-		if !ok {
-			return Report{}, fmt.Errorf("sustainability: %s report missing required line item %q", framework, f.Code)
-		}
-		items = append(items, LineItem{Code: f.Code, Label: f.Label, Value: v})
-	}
-	r := Report{Framework: framework, AsOf: asOf, LineItems: items}
-	sig, err := signer.Sign(r.canonical())
-	if err != nil {
-		// The filing could not be recorded in the audit chain. Do not hand back a
-		// report claiming a chain position it does not have.
-		return Report{}, fmt.Errorf("%s: %w", framework, err)
-	}
-	r.Signature = sig
-	return r, nil
-}
-
-// canonical renders the report to deterministic bytes for signing: framework, the
-// RFC-3339 as-of, and the line items sorted by code — stable across runs so the
-// signature is reproducible for a point-in-time re-derivation.
-func (r Report) canonical() []byte {
-	lines := make([]string, 0, len(r.LineItems)+2)
-	lines = append(lines, string(r.Framework), r.AsOf.UTC().Format(time.RFC3339))
-	codes := make([]string, len(r.LineItems))
-	for i, li := range r.LineItems {
-		// Sign what you file: dec.Str is the same string the client receives.
-		codes[i] = li.Code + "=" + dec.Str(li.Value)
-	}
-	sort.Strings(codes)
-	lines = append(lines, codes...)
-	var b []byte
-	for _, l := range lines {
-		b = append(b, l...)
-		b = append(b, '\n')
-	}
-	return b
-}
-
-// Lookup returns a line item's value by code.
-func (r Report) Lookup(code string) (*big.Rat, bool) {
-	for _, li := range r.LineItems {
-		if li.Code == code {
-			return li.Value, true
-		}
-	}
-	return nil, false
+	return filing.Build(string(framework), tmpl, asOf, values, signer)
 }

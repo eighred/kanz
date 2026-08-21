@@ -22,6 +22,14 @@
 // on the accounting deployment: a 0 means no corporate action has been ingested
 // at all, not that none occurred.
 //
+// WHAT IS REPAIRED HERE IS THE SILENCE (#614). The announcement now carries the
+// producer's own statement of which entry types it feeds, and Balance keeps it,
+// so BuyingPowerRule can say that a refusal was measured against an incomplete
+// number instead of reporting it as a spending limit. The refusal still stands —
+// the sign of the missing cash is not knowable here (a dividend on a SHORT
+// position is cash OUT), so nothing may be added to the number on the strength
+// of it.
+//
 // It is read on the order-admission path, so it is an in-memory map and never a
 // query: a call into accounting from the pre-trade gate would put an
 // externally-owned latency in front of every order and turn a degraded
@@ -38,6 +46,7 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 
+	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/dec"
 )
 
@@ -76,6 +85,11 @@ type Balance struct {
 	// ByVenueAccount is cash per (venue_account_id, asset) — what
 	// execution.ExpectedBalances needs (#418). Keyed account → asset → amount.
 	ByVenueAccount map[string]map[string]*commonpb.Decimal
+	// Completeness is what the announcing deployment said Total contains (#614),
+	// or nil when it said nothing. It is carried, never acted on: see the package
+	// doc, and comp.CashCompleteness for why the number must not be corrected by
+	// it.
+	Completeness *comp.CashCompleteness
 }
 
 // View is the OMS's memory of the announced balances. Safe for concurrent use:
@@ -159,6 +173,20 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 		AsOf:           msg.GetAsOf().AsTime(),
 		ByVenueAccount: map[string]map[string]*commonpb.Decimal{},
 	}
+	// UNSTATED IS NOT COMPLETE. proto3 cannot tell an empty repeated field from an
+	// absent one, so a BalanceCompleteness naming neither produced nor unproduced
+	// types carries no statement and is dropped here — it must reach the gate as
+	// nil, which BuyingPowerRule reports as "unstated" rather than as a clean bill
+	// of health. An accounting old enough to predate the field lands in the same
+	// place, which is the correct place for it.
+	if cp := msg.GetCompleteness(); len(cp.GetProducedEntryTypes()) > 0 || len(cp.GetUnproducedEntryTypes()) > 0 {
+		b.Completeness = &comp.CashCompleteness{
+			// Copied, not aliased: the proto is freed with the payload, and a
+			// gate reading a slice that outlived its message is a bug that only
+			// shows up under load.
+			OmittedEntryTypes: append([]string(nil), cp.GetUnproducedEntryTypes()...),
+		}
+	}
 	for _, e := range msg.GetByVenueAccount() {
 		if e.GetVenueAccountId() == "" || e.GetAsset() == "" {
 			continue
@@ -207,16 +235,22 @@ func (v *View) Lookup(portfolioID string) (Balance, bool) {
 }
 
 // Spendable is the compliance BookSource's CashSource seam: the portfolio's
-// total in its base currency, or ok=false when UNKNOWN.
+// total in its base currency and what the producer said that total contains, or
+// ok=false when UNKNOWN.
 //
 // A narrower signature than Lookup on purpose. The gate needs one number, and a
 // seam that handed it the whole Balance would invite a caller to read the
 // per-account map for a decision the total is the right basis for — an exchange
 // account's holding is not what a portfolio may spend.
-func (v *View) Spendable(portfolioID string) (*commonpb.Decimal, string, bool) {
+//
+// COMPLETENESS TRAVELS WITH THE NUMBER, in one call, rather than through a second
+// accessor (#614). Two lookups can straddle a fold and describe two different
+// announcements, and a qualification that does not belong to the figure it
+// qualifies is worse than none.
+func (v *View) Spendable(portfolioID string) (*commonpb.Decimal, string, *comp.CashCompleteness, bool) {
 	b, ok := v.Lookup(portfolioID)
 	if !ok {
-		return nil, "", false
+		return nil, "", nil, false
 	}
-	return b.Total, b.Currency, true
+	return b.Total, b.Currency, b.Completeness, true
 }

@@ -217,6 +217,13 @@ func LeverageRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation
 // leverage denominator. A per-currency floor needs the FX layer and is a
 // different rule; approximating it here would make the simple case wrong
 // invisibly.
+//
+// A REFUSAL SAYS WHAT THE BALANCE WAS MISSING (#614). Book.CashCompleteness
+// carries the producer's own statement of which journal entry types its
+// deployment feeds, and every refusal here records it — see attributeCash. The
+// verdict is unchanged by it; what changes is that "the fund is out of money"
+// and "the platform never received the dividend" stop being the same sentence in
+// the audit trail.
 func BuyingPowerRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation {
 	bp := rule.GetBuyingPower()
 	if bp == nil {
@@ -233,13 +240,80 @@ func BuyingPowerRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violat
 	if after.Cmp(floor) >= 0 {
 		return nil
 	}
-	return &compliancepb.Violation{
+	v := &compliancepb.Violation{
 		Message: "order would spend below the permitted cash floor",
 		Evidence: map[string]string{
 			"cash_after": ratString(after),
 			"floor":      ratString(floor),
 			"currency":   c.Book.Cash.GetCurrencyCode(),
 		},
+	}
+	attributeCash(v, c.Book.CashCompleteness)
+	return v
+}
+
+// Evidence keys carrying what the refused balance was known to contain (#614).
+// Named constants because a test asserting on a literal and a rule writing a
+// different literal is a guard that checks nothing.
+const (
+	// EvidenceBalanceCompleteness is "complete", "incomplete" or "unstated".
+	EvidenceBalanceCompleteness = "balance_completeness"
+	// EvidenceBalanceOmits lists the entry types the balance is missing,
+	// comma-separated, and is present only when completeness is "incomplete".
+	EvidenceBalanceOmits = "balance_omits"
+)
+
+// attributeCash records, ON A REFUSAL, what the balance that caused it was known
+// to be missing (#614).
+//
+// # Why a refusal needs this at all
+//
+// BuyingPowerRule is the one control that asks whether the fund can AFFORD the
+// order, and the number it asks with is announced by accounting. Two of the six
+// journal entry types that number is folded from have no producer anywhere on
+// this platform (#588): nothing publishes a corporate action, so no dividend,
+// coupon or merger cash has ever reached the book, and nothing posts an accrual.
+// A portfolio that was paid a dividend is therefore refused on a balance that
+// does not contain it — and until now that refusal was spelled exactly like a
+// mandate's spending limit being hit. "Nothing configured" and "checked, and
+// fine" looked the same, which is the failure mode this platform designs
+// against.
+//
+// # It changes the WORDS and never the VERDICT
+//
+// The order is still refused. That is not timidity, it is the only answer that
+// is not a guess: the direction of the error is unknown. accounting's
+// foldCorpAct pays quantity x per-unit with the SIGN of the holding, so an
+// unfolded dividend understates the cash of a book that is long the instrument
+// and OVERSTATES the cash of one that is short it. Admitting the order — or
+// grossing the balance up by some assumed entitlement — would convert a control
+// that refuses too much into one that admits what the fund cannot pay for, and
+// that trade is strictly worse than the bug. What a reader gets instead is the
+// ability to tell the two refusals apart and to go and look at the feed.
+//
+// # Three answers, because the reader's next action differs
+//
+//	complete    the producer stated that everything it folds is fed. This is a
+//	            spending limit, and it was reached.
+//	incomplete  the producer named entry types nothing feeds. The refusal may be
+//	            an artifact of the missing feed; balance_omits says which one.
+//	unstated    nobody said. An accounting old enough to predate the statement,
+//	            or a composition root that forgot to pass it. Not evidence of
+//	            completeness — the absence of evidence either way.
+func attributeCash(v *compliancepb.Violation, cc *CashCompleteness) {
+	switch {
+	case !cc.Stated():
+		v.Evidence[EvidenceBalanceCompleteness] = "unstated"
+		v.Message = "order is below the permitted cash floor, but the balance's producer did not " +
+			"state what that balance contains — this refusal has not been shown to be a spending limit"
+	case cc.Incomplete():
+		v.Evidence[EvidenceBalanceCompleteness] = "incomplete"
+		v.Evidence[EvidenceBalanceOmits] = strings.Join(cc.OmittedEntryTypes, ",")
+		v.Message = "order is below the permitted cash floor of a balance the book of record says is " +
+			"INCOMPLETE — nothing feeds the entry types in balance_omits, so this refusal may be a " +
+			"missing feed rather than a spending limit"
+	default:
+		v.Evidence[EvidenceBalanceCompleteness] = "complete"
 	}
 }
 
