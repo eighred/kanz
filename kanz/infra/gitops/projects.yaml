@@ -18,7 +18,20 @@ spec:
     - { server: "*", namespace: kanz-services }
     - { server: "*", namespace: kanz-messaging }
     - { server: "*", namespace: kanz-data }
-    - { server: "*", namespace: observability }
+    # kanz-observability, NOT observability (#625). This entry read
+    # `observability` from the day it was written, while every manifest in
+    # infra/observability declares `kanz-observability` — node-exporter.yaml's
+    # Namespace, and apply-rules.sh's own `-n`.
+    #
+    # Nothing compared the two, because nothing had ever tried to sync that tree:
+    # an AppProject destination is consulted only when an Application targets it,
+    # and until #625 none did. Argo CD REFUSES a destination outside this list, so
+    # the component would never have synced — and the only place that says so is
+    # Argo's own UI, not this repository.
+    #
+    # TestEveryComponentNamespaceIsAllowedByTheAppProject now compares every
+    # component's namespace against this list, so the pair cannot drift again.
+    - { server: "*", namespace: kanz-observability }
   clusterResourceWhitelist:
     - { group: "", kind: Namespace }
     - { group: rbac.authorization.k8s.io, kind: ClusterRole }
