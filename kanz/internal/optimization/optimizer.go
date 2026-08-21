@@ -23,6 +23,7 @@ package optimization
 
 import (
 	"errors"
+	"fmt"
 	"math"
 )
 
@@ -65,6 +66,18 @@ type MarketInputs struct {
 	Instruments     []string
 	ExpectedReturns []float64
 	Covariance      [][]float64
+	// Observations is HOW MANY PERIODS Σ WAS ESTIMATED OVER. 0 means NOT STATED,
+	// which is a different answer from "few" and is reported as such: a Σ of full
+	// rank with no count behind it earns CovarianceFullRank, never
+	// CovarianceObserved.
+	//
+	// It exists because rank alone cannot separate the two ways a covariance goes
+	// degenerate. A sample covariance over T periods has rank at most min(T−1, n),
+	// so T ≤ n produces a singular Σ — identical, to every check this package had,
+	// to two genuinely collinear assets. It is also the only signal that catches a
+	// shrunk or factor-model Σ, which can be full rank while resting on three
+	// observations (#621).
+	Observations int
 }
 
 // Result is the optimized portfolio: target weights per instrument and the
@@ -72,7 +85,19 @@ type MarketInputs struct {
 type Result struct {
 	Weights        map[string]float64
 	ExpectedReturn float64 // μᵀw (0 when μ is absent)
-	ExpectedRisk   float64 // √(wᵀΣw)
+	// ExpectedRisk is √(wᵀΣw), and is NIL WHENEVER THE COVARIANCE CANNOT SUPPORT
+	// ONE — no Σ supplied, a rank-deficient Σ, or a Σ whose stated observation
+	// count does not exceed the universe. CovarianceQuality says which.
+	//
+	// THE POINTER IS THE MECHANISM, not ceremony (#621). As a float64 this field
+	// reported 0 for a covariance of all zeros, which is also what a genuinely
+	// riskless book reports and what SampleCovariance returned when handed fewer
+	// than two observations. A caller cannot tell those apart from a number, and
+	// the response this field lands in is what a PM approves capital against.
+	ExpectedRisk *float64
+	// CovarianceQuality is what was established about Σ before any of the above
+	// was computed. The zero value, CovarianceUnchecked, means nothing was.
+	CovarianceQuality CovarianceQuality
 }
 
 var (
@@ -84,15 +109,37 @@ var (
 	ErrNeedReturns = errors.New("optimization: objective requires expected returns")
 	// ErrNeedCovariance is returned when an objective needs Σ but none was supplied.
 	ErrNeedCovariance = errors.New("optimization: objective requires a covariance matrix")
+	// ErrNegativeObservations is returned when MarketInputs.Observations is
+	// negative. 0 legitimately means "not stated"; a negative count is a caller
+	// bug, and silently treating it as unstated would hide it.
+	ErrNegativeObservations = errors.New("optimization: observation count cannot be negative")
+	// ErrCovarianceEstimate is returned by SampleCovariance when it has no
+	// covariance to give — no series, ragged series, or fewer than two
+	// observations. It used to return a matrix of ZEROS for the last of these,
+	// which is a covariance asserting that nothing in the book moves (#621).
+	ErrCovarianceEstimate = errors.New("optimization: cannot estimate a covariance")
+	// ErrRiskContributions is returned when risk contributions are undefined —
+	// zero total variance, or an instrument of the universe with no weight.
+	ErrRiskContributions = errors.New("optimization: risk contributions are undefined")
 )
 
 // Optimize solves for the target weights of obj over in, restricted to cons
 // (nil ⇒ the default long-only, fully-invested, unbounded-above region). The
 // result weights are keyed by instrument id and sum to 1.
+//
+// It reports Result.CovarianceQuality on every success, and withholds
+// Result.ExpectedRisk unless that quality supports one. Two objectives refuse
+// rather than report: MaxSharpe and RiskParity have no defined answer on a
+// covariance the solver cannot invert, and both used to substitute the
+// EQUAL-WEIGHT SEED and return it as the tangency / risk-parity portfolio with no
+// flag (#621).
 func Optimize(in MarketInputs, obj Objective, cons *ConstraintSet) (Result, error) {
 	n := len(in.Instruments)
 	if n == 0 {
 		return Result{}, ErrNoUniverse
+	}
+	if in.Observations < 0 {
+		return Result{}, ErrNegativeObservations
 	}
 	if in.ExpectedReturns != nil && len(in.ExpectedReturns) != n {
 		return Result{}, ErrInputsMismatch
@@ -100,10 +147,13 @@ func Optimize(in MarketInputs, obj Objective, cons *ConstraintSet) (Result, erro
 	if in.Covariance != nil && (len(in.Covariance) != n || !square(in.Covariance, n)) {
 		return Result{}, ErrInputsMismatch
 	}
+	quality := CovarianceUnchecked
 	if in.Covariance != nil {
-		if err := checkPSD(in.Covariance); err != nil {
+		rank, err := psdRank(in.Covariance)
+		if err != nil {
 			return Result{}, err
 		}
+		quality = classifyCovariance(rank, n, in.Observations)
 	}
 	needsReturns := obj.Type == MaxReturn || obj.Type == MaxSharpe
 	needsCov := obj.Type != MaxReturn || obj.RiskAversion > 0
@@ -117,6 +167,7 @@ func Optimize(in MarketInputs, obj Objective, cons *ConstraintSet) (Result, erro
 	lo, hi := bounds(in.Instruments, cons)
 
 	var w []float64
+	var err error
 	switch obj.Type {
 	case MaxReturn:
 		if obj.RiskAversion > 0 {
@@ -127,46 +178,69 @@ func Optimize(in MarketInputs, obj Objective, cons *ConstraintSet) (Result, erro
 	case MinVariance:
 		w = minimizeQuadratic(in.Covariance, nil, 1, lo, hi)
 	case MaxSharpe:
-		w = maxSharpe(in.Covariance, in.ExpectedReturns, obj.RiskFreeRate, lo, hi)
+		w, err = maxSharpe(in.Covariance, in.ExpectedReturns, obj.RiskFreeRate, lo, hi)
 	case RiskParity:
-		w = riskParity(in.Covariance, lo, hi)
+		w, err = riskParity(in.Covariance, lo, hi)
 	case HRP:
 		// Covariance-only; bounds deliberately not applied (see the HRP comment).
 		w = hrp(in.Covariance)
 	default:
 		return Result{}, errors.New("optimization: unknown objective type")
 	}
+	if err != nil {
+		return Result{}, fmt.Errorf("%w (covariance: %s)", err, quality)
+	}
 
-	res := Result{Weights: make(map[string]float64, n)}
+	res := Result{Weights: make(map[string]float64, n), CovarianceQuality: quality}
 	for i, id := range in.Instruments {
 		res.Weights[id] = w[i]
 	}
 	if in.ExpectedReturns != nil {
 		res.ExpectedReturn = dot(in.ExpectedReturns, w)
 	}
-	if in.Covariance != nil {
-		res.ExpectedRisk = math.Sqrt(math.Max(quadForm(in.Covariance, w), 0))
+	// NO RISK NUMBER FROM A COVARIANCE THAT CANNOT CARRY ONE. √(wᵀΣw) is
+	// computable for any accepted Σ — the question is whether it MEANS anything,
+	// and on a rank-deficient or under-observed estimate it does not. Reporting it
+	// anyway is how an absence of data reached a proposal as zero risk (#621).
+	if quality.SupportsRisk() {
+		risk := math.Sqrt(math.Max(quadForm(in.Covariance, w), 0))
+		res.ExpectedRisk = &risk
 	}
 	return res, nil
 }
 
 // SampleCovariance estimates the Bessel-corrected sample covariance matrix from
 // per-instrument return series (returns[i] is instrument i's series, all the
-// same length). This is the optimizer's own estimator — the boundary-clean
-// stand-in for the MODEL-01e covariance a deployment may feed in instead. Fewer
-// than two observations ⇒ a zero matrix.
-func SampleCovariance(returns [][]float64) [][]float64 {
+// same length), and returns the OBSERVATION COUNT alongside it so the caller can
+// put it on MarketInputs.Observations. This is the optimizer's own estimator —
+// the boundary-clean stand-in for the MODEL-01e covariance a deployment may feed
+// in instead.
+//
+// IT REFUSES RATHER THAN RETURNING A ZERO MATRIX. Fewer than two observations
+// used to yield a matrix of zeros: a covariance asserting that no instrument in
+// the book moves and no pair co-moves, which passes the PSD check, produces an
+// ExpectedRisk of 0, and is indistinguishable from a genuinely riskless universe
+// (#621). Ragged series are refused too — the old loop indexed every series to
+// len(returns[0]) and panicked on a short one.
+func SampleCovariance(returns [][]float64) ([][]float64, int, error) {
 	n := len(returns)
+	if n == 0 {
+		return nil, 0, fmt.Errorf("%w: no return series", ErrCovarianceEstimate)
+	}
+	t := len(returns[0])
+	for i := range returns {
+		if len(returns[i]) != t {
+			return nil, 0, fmt.Errorf("%w: series %d has %d observations, series 0 has %d",
+				ErrCovarianceEstimate, i, len(returns[i]), t)
+		}
+	}
+	if t < 2 {
+		return nil, 0, fmt.Errorf("%w: %d observations, the Bessel correction needs at least 2",
+			ErrCovarianceEstimate, t)
+	}
 	cov := make([][]float64, n)
 	for i := range cov {
 		cov[i] = make([]float64, n)
-	}
-	if n == 0 {
-		return cov
-	}
-	t := len(returns[0])
-	if t < 2 {
-		return cov
 	}
 	means := make([]float64, n)
 	for i := range returns {
@@ -187,28 +261,46 @@ func SampleCovariance(returns [][]float64) [][]float64 {
 			cov[j][i] = c
 		}
 	}
-	return cov
+	return cov, t, nil
 }
 
 // RiskContributions returns each instrument's fractional contribution to total
 // portfolio risk: RCᵢ = wᵢ(Σw)ᵢ / (wᵀΣw). For a risk-parity solution these are
 // (approximately) equal — the OPT-01f equal-risk-contribution check.
-func RiskContributions(weights map[string]float64, in MarketInputs) map[string]float64 {
+//
+// IT REFUSES INSTEAD OF RETURNING AN EMPTY OR ZERO-FILLED MAP (#621). Zero total
+// variance means the fractions are 0/0 and the map used to come back empty,
+// which a ranging caller reads as "no instrument contributes risk". An
+// instrument of the universe missing from weights used to read as weight 0 —
+// "not supplied" collapsing into "not held" — so a mismatched pair of arguments
+// produced a plausible answer about the wrong book.
+func RiskContributions(weights map[string]float64, in MarketInputs) (map[string]float64, error) {
 	n := len(in.Instruments)
+	if in.Covariance == nil {
+		return nil, fmt.Errorf("%w: no covariance matrix", ErrRiskContributions)
+	}
+	if len(in.Covariance) != n || !square(in.Covariance, n) {
+		return nil, ErrInputsMismatch
+	}
 	w := make([]float64, n)
 	for i, id := range in.Instruments {
-		w[i] = weights[id]
+		v, ok := weights[id]
+		if !ok {
+			return nil, fmt.Errorf("%w: instrument %q of the universe has no weight", ErrRiskContributions, id)
+		}
+		w[i] = v
 	}
 	total := quadForm(in.Covariance, w)
-	out := make(map[string]float64, n)
 	if total <= 0 {
-		return out
+		return nil, fmt.Errorf("%w: total variance is %g, so every contribution is 0/0",
+			ErrRiskContributions, total)
 	}
 	sw := matVec(in.Covariance, w)
+	out := make(map[string]float64, n)
 	for i, id := range in.Instruments {
 		out[id] = w[i] * sw[i] / total
 	}
-	return out
+	return out, nil
 }
 
 func square(m [][]float64, n int) bool {

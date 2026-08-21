@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -328,5 +329,125 @@ func TestServer_Propose_BodyTooLarge(t *testing.T) {
 	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("oversized body ⇒ 400, got %d", rec.Code)
+	}
+}
+
+// AN ALL-ZERO COVARIANCE MUST NOT COME BACK AS A COMPUTED ZERO RISK (#621).
+//
+// This is the mutation #621 was filed with: the request below asserts that
+// neither instrument moves and neither pair co-moves. The matrix is symmetric
+// and PSD, so it passed every check the optimizer had, and the response carried
+// "ExpectedRisk":0 — the same bytes a genuinely riskless book produces.
+func TestProposeDoesNotReportZeroRiskFromAZeroCovariance(t *testing.T) {
+	body := `{"portfolio_id":"PF","instruments":["A","B"],
+		"covariance":[[0,0],[0,0]],
+		"objective":{"Type":1},
+		"current_weights":{"A":1.0},"nav":100000,
+		"prices":{"A":10,"B":10}}`
+	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
+	}
+	// THE RAW BYTES, not a struct: a *float64 decoded into a float64 field would
+	// read null back as 0 and this test would assert nothing.
+	raw := rec.Body.String()
+	if strings.Contains(raw, `"ExpectedRisk":0`) {
+		t.Fatalf("the response reports a computed zero risk for a covariance that carries no "+
+			"information: %s", raw)
+	}
+	var resp struct {
+		ExpectedRisk      *float64
+		CovarianceQuality string
+		Targets           map[string]float64
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	// NON-VACUITY: the optimization really ran and produced a book, so the nil
+	// below is a withheld number rather than an error path.
+	if len(resp.Targets) != 2 {
+		t.Fatalf("expected targets for both instruments, got %v", resp.Targets)
+	}
+	if resp.ExpectedRisk != nil {
+		t.Fatalf("ExpectedRisk is %v — an absence of data reached the response as a risk number",
+			*resp.ExpectedRisk)
+	}
+	if resp.CovarianceQuality != "RANK_DEFICIENT" {
+		t.Fatalf("CovarianceQuality is %q, want RANK_DEFICIENT — a null risk with nothing "+
+			"explaining it is only half the answer", resp.CovarianceQuality)
+	}
+}
+
+// The observation count reaches the optimizer from the request body, and a
+// covariance NOBODY VOUCHED FOR is a different answer from one checked against
+// its own sample size.
+func TestProposeReportsWhetherTheCovarianceWasVouchedFor(t *testing.T) {
+	const base = `{"portfolio_id":"PF","instruments":["A","B"],
+		"covariance":[[0.04,0],[0,0.04]],
+		"objective":{"Type":1},
+		"current_weights":{"A":1.0},"nav":100000,
+		"prices":{"A":10,"B":10}%s}`
+	cases := []struct {
+		name  string
+		extra string
+		want  string
+		risk  bool
+	}{
+		{"no observation count stated", "", "FULL_RANK", true},
+		{"250 observations over 2 assets", `,"observations":250`, "OBSERVED", true},
+		{"2 observations over 2 assets", `,"observations":2`, "UNDER_OBSERVED", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", fmt.Sprintf(base, tc.extra))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
+			}
+			var resp struct {
+				ExpectedRisk      *float64
+				CovarianceQuality string
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.CovarianceQuality != tc.want {
+				t.Fatalf("CovarianceQuality: got %q want %q", resp.CovarianceQuality, tc.want)
+			}
+			if got := resp.ExpectedRisk != nil; got != tc.risk {
+				t.Fatalf("risk reported = %v, want %v (quality %s)", got, tc.risk, resp.CovarianceQuality)
+			}
+			// Σ = diag(0.04, 0.04) ⇒ min-variance 50/50 ⇒ wᵀΣw = 2·0.25·0.04 = 0.02,
+			// √0.02 = 0.1414213562373095. Derived from the definition, not from the
+			// implementation.
+			if tc.risk {
+				if d := *resp.ExpectedRisk - 0.1414213562373095; d > 1e-6 || d < -1e-6 {
+					t.Fatalf("ExpectedRisk %.12f, want 0.1414213562373095", *resp.ExpectedRisk)
+				}
+			}
+		})
+	}
+}
+
+// A SINGULAR COVARIANCE DOES NOT COME BACK AS AN EQUAL-WEIGHT TANGENCY PORTFOLIO (#621).
+//
+// Two perfectly correlated assets and a max-Sharpe objective: solveLinear cannot
+// factor Σ, and maxSharpe used to substitute its own 1/n seed and return
+// {"A":0.5,"B":0.5} with a 200 and no flag on it.
+func TestProposeRefusesAnUndefinedTangencyPortfolio(t *testing.T) {
+	body := `{"portfolio_id":"PF","instruments":["A","B"],
+		"covariance":[[0.04,0.04],[0.04,0.04]],
+		"expected_returns":[0.05,0.10],
+		"objective":{"Type":2},
+		"current_weights":{"A":1.0},"nav":100000,
+		"prices":{"A":10,"B":10}}`
+	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("a singular Σ under MaxSharpe got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if raw := rec.Body.String(); !strings.Contains(raw, "tangency") {
+		t.Fatalf("the refusal must say what it could not compute, got %s", raw)
+	}
+	if raw := rec.Body.String(); strings.Contains(raw, `"Targets"`) {
+		t.Fatalf("a refused optimization returned a portfolio: %s", raw)
 	}
 }
