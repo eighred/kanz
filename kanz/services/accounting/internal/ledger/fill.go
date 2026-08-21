@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/fillfact"
 	"math/big"
 	"time"
 
@@ -35,6 +36,21 @@ import (
 // The effective time is the venue execution time; knowledge is when the book
 // ingests the fill.
 func FromFill(portfolioID string, fill *orderpb.Fill, cashCurrency string, knowledge time.Time) (*Event, error) {
+	// THE IBOR REFUSES WHAT THE POSITION BOOK REFUSES (#631). It refused none of
+	// them until now, and the fill_id case did not merely mis-book — it lost
+	// money silently: EntryID is "fill:" + FillId and Store.Append is ON CONFLICT
+	// DO NOTHING, so with an empty id the FIRST unidentified fill was journalled
+	// and every later one in that tenant was discarded as a duplicate, forever,
+	// with no error and no counter. The store's own empty-entry-id refusal sits
+	// two lines above that INSERT and could never fire, because "fill:" is not
+	// empty.
+	//
+	// Returning the error rather than skipping is what makes the delivery nack
+	// and park. A skip here would put the two books back into the state this
+	// fixes, with the ledger quietly dropping what the position book stops on.
+	if err := fillfact.Validate(fill); err != nil {
+		return nil, fmt.Errorf("ledger: refusing to book fill: %w", err)
+	}
 	qty := dec.FromProto(fill.GetQuantity())
 	price := dec.FromProto(fill.GetPrice())
 	fee, err := dec.MoneyIn(fill.GetFee(), cashCurrency)
