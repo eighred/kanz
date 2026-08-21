@@ -864,3 +864,223 @@ tests:
       - eval_time: 40m
         alertname: InferencePoolSaturated
         exp_alerts: []
+
+  # ===========================================================================
+  # dr_recoverability (#624) — is the backup still working?
+  # ===========================================================================
+  # Every rule in this group reads a CloudNativePG collector metric that nothing
+  # in this repository can verify: no CNPG version is pinned and the dev rig has
+  # no CNPG at all. These cases prove the EXPRESSIONS are right — that each fires
+  # on the failure it names and stays quiet on the healthy shape beside it. They
+  # cannot prove the metric NAMES match the deployed operator, which is what
+  # PostgresBackupTelemetryMissing exists to announce at runtime.
+
+  # A cluster whose daily 02:00 base backup stopped 27 hours ago.
+  - interval: 5m
+    name: the base backup stopped
+    input_series:
+      # The value is a unix timestamp; promtool starts time() at 0, so a backup
+      # recorded at t=0 is exactly as old as the evaluation time.
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="kanz-data", pod="kanz-orders-1"}'
+        values: '0x330'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: PostgresBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              namespace: kanz-data
+              pod: kanz-orders-1
+            exp_annotations:
+              summary: "No completed Postgres base backup for kanz-orders-1 in over 26 hours"
+              description: "The daily 02:00 ScheduledBackup has not produced a completed base backup for more than 26 hours. Point-in-time recovery is base backup + replayed WAL, so however healthy the WAL archive is, there is an ageing base to replay onto and the recoverable window is now bounded by whatever the last successful backup was. Check the Backup objects (kubectl -n kanz-data get backup), then the kanz-dr-s3 credentials and the bucket — that secret is created out of band and its rotation is invisible to this cluster until a backup tries to use it."
+
+  # THE 26h THRESHOLD, EXECUTED. A cluster backed up two hours ago must stay
+  # silent — otherwise this rule pages every night for a healthy estate.
+  - interval: 5m
+    name: a backup from two hours ago is not stale
+    input_series:
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="kanz-data", pod="kanz-books-1"}'
+        values: '90000x330'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: PostgresBackupStale
+        exp_alerts: []
+
+  # The newest thing the cluster did was fail a backup.
+  - interval: 1m
+    name: the most recent backup attempt failed
+    input_series:
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="kanz-data", pod="kanz-books-1"}'
+        values: '1000x60'
+      - series: 'cnpg_collector_last_failed_backup_timestamp{namespace="kanz-data", pod="kanz-books-1"}'
+        values: '2000x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PostgresBackupFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              namespace: kanz-data
+              pod: kanz-books-1
+            exp_annotations:
+              summary: "The most recent Postgres backup attempt for kanz-books-1 FAILED"
+              description: "The last failed backup is more recent than the last successful one, so the newest thing this cluster tried to do was fail. Every hour this persists is an hour added to the worst-case recovery point. Read the failure from the Backup object's status (kubectl -n kanz-data describe backup) rather than guessing: the common causes are an expired or rotated kanz-dr-s3 key, a bucket policy change, and the object store rejecting on quota."
+
+  # A cluster that failed a backup YESTERDAY and has succeeded since must be
+  # silent. Without the ordering this rule would latch on any historical failure.
+  - interval: 1m
+    name: an older failure followed by a success is not a failing backup
+    input_series:
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="kanz-data", pod="kanz-books-1"}'
+        values: '5000x60'
+      - series: 'cnpg_collector_last_failed_backup_timestamp{namespace="kanz-data", pod="kanz-books-1"}'
+        values: '2000x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PostgresBackupFailing
+        exp_alerts: []
+
+  # archive_command failing: the RPO killer with no other symptom.
+  - interval: 1m
+    name: WAL archiving is failing
+    input_series:
+      - series: 'cnpg_pg_stat_archiver_failed_count{namespace="kanz-data", pod="kanz-orders-1"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PostgresWALArchiveFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              namespace: kanz-data
+              pod: kanz-orders-1
+            exp_annotations:
+              summary: "Postgres WAL archiving is failing on kanz-orders-1 — the RPO is no longer bounded"
+              description: "pg_stat_archiver reports failed archive attempts over the last 15 minutes and has kept reporting them. cluster.yaml claims archive_timeout=30s bounds the object-store RPO to <=30s; that claim is void while this fires, and the real recovery point is the last WAL segment that reached the bucket. Postgres does NOT stop when archiving fails — it retains WAL in pg_wal and retries, so the second failure mode is the volume filling (10-100Gi depending on the cluster) and taking the primary down with it."
+
+  # A counter that recorded failures in the past and has been FLAT since must be
+  # silent: the archive recovered, and increase() over the window is what says so.
+  - interval: 1m
+    name: a flat archiver failure count is a recovered archive
+    input_series:
+      - series: 'cnpg_pg_stat_archiver_failed_count{namespace="kanz-data", pod="kanz-orders-1"}'
+        values: '17x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PostgresWALArchiveFailing
+        exp_alerts: []
+
+  # Both ends of the window look fresh; the span between them has collapsed.
+  - interval: 1m
+    name: the PITR window has collapsed to under a day
+    input_series:
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="kanz-data", pod="kanz-risk-1"}'
+        values: '100000x120'
+      - series: 'cnpg_collector_first_recoverability_point{namespace="kanz-data", pod="kanz-risk-1"}'
+        values: '50000x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: PostgresPITRWindowShrinking
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              namespace: kanz-data
+              pod: kanz-risk-1
+            exp_annotations:
+              summary: "Point-in-time recovery for kanz-risk-1 reaches back less than 24 hours"
+              description: "The span between the earliest recoverable point and the latest backup is under a day, against a declared retentionPolicy of 30d. Restoring to any instant before that window is no longer possible. On a newly bootstrapped cluster this is expected until the second base backup completes and clears by itself; on an established one it means retention is pruning what the policy says to keep, or the archive only recently began working — in which case the 30d in cluster.yaml is a number nobody can honour."
+
+  # A healthy 30-day window must be silent.
+  - interval: 1m
+    name: a thirty-day recovery window is healthy
+    input_series:
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="kanz-data", pod="kanz-risk-1"}'
+        values: '2600000x120'
+      - series: 'cnpg_collector_first_recoverability_point{namespace="kanz-data", pod="kanz-risk-1"}'
+        values: '8000x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: PostgresPITRWindowShrinking
+        exp_alerts: []
+
+  # The DR region falling outside the RPO it exists for.
+  - interval: 1m
+    name: the standby has fallen five minutes behind
+    input_series:
+      - series: 'cnpg_pg_replication_lag{namespace="kanz-data", pod="kanz-orders-2"}'
+        values: '600x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PostgresStandbyLagging
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              namespace: kanz-data
+              pod: kanz-orders-2
+            exp_annotations:
+              summary: "Postgres standby kanz-orders-2 is more than 5 minutes behind its primary"
+              description: "Replication lag has exceeded 300s for fifteen minutes. The DR-01e target is an RPO under one minute and the streaming replica is what delivers it, so this is the DR region silently falling outside the objective it exists for. Between quarterly drills nothing else looks at this number. If the standby has stopped entirely rather than fallen behind, the promotion in infra/dr/failover.sh will still succeed and will bring up data this far out of date."
+
+  # A standby a few seconds behind is a working standby.
+  - interval: 1m
+    name: a standby seconds behind is healthy
+    input_series:
+      - series: 'cnpg_pg_replication_lag{namespace="kanz-data", pod="kanz-orders-2"}'
+        values: '4x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PostgresStandbyLagging
+        exp_alerts: []
+
+  # THE RULE THAT CATCHES THE OTHER FIVE BEING WRONG. Postgres pods ARE being
+  # scraped and none of them export the backup metric — every rule above is
+  # evaluating an empty vector and cannot fire.
+  - interval: 1m
+    name: kanz-data is scraped but exports no backup telemetry
+    input_series:
+      - series: 'up{namespace="kanz-data", pod="kanz-orders-1", job="kanz-pods"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: PostgresBackupTelemetryMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+            exp_annotations:
+              summary: "Postgres pods in kanz-data are being scraped but report no backup telemetry"
+              description: "Prometheus has live targets in kanz-data and none of them export cnpg_collector_last_available_backup_timestamp, so every backup and recoverability alert in this group is evaluating an empty vector and CANNOT fire. Recoverability is currently unobserved, and it looks exactly like recoverability being fine. Either the CNPG metrics exporter is not running on 9187, or the metric names in this rule group are wrong for the CloudNativePG version actually deployed — check `kubectl -n kanz-data port-forward <pod> 9187:9187` and read /metrics before trusting any other rule here."
+
+  # THE DEV-RIG CASE, AND THE REASON THIS IS NOT THE absent() ANTI-PATTERN. A rig
+  # running postgres-dev.yaml has no CNPG and no kanz-data targets at all, so the
+  # gate is false and this stays silent. Without the `count(up{...}) > 0` clause
+  # it would fire permanently on every developer's cluster, which is precisely
+  # what got DataQualityMetricsMissing deleted.
+  - interval: 1m
+    name: a rig with no kanz-data targets stays silent
+    input_series:
+      - series: 'up{namespace="kanz-services", pod="api-gateway-1", job="kanz-pods"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: PostgresBackupTelemetryMissing
+        exp_alerts: []
+
+  # And once the exporter reports, it clears by itself.
+  - interval: 1m
+    name: telemetry present clears the missing-telemetry alert
+    input_series:
+      - series: 'up{namespace="kanz-data", pod="kanz-orders-1", job="kanz-pods"}'
+        values: '1x60'
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="kanz-data", pod="kanz-orders-1"}'
+        values: '90000x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: PostgresBackupTelemetryMissing
+        exp_alerts: []
