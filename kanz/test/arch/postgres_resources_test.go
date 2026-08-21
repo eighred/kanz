@@ -251,6 +251,7 @@ type pgResources struct {
 	RawMemReq         string
 	RawCPUReq         string
 	RawCPULimit       string
+	Annotations       map[string]string
 }
 
 // pgResourcesIn parses every kind: Cluster in one manifest STRUCTURALLY.
@@ -286,6 +287,9 @@ func pgResourcesIn(t *testing.T, root, rel string) []pgResources {
 					Limits   map[string]string `yaml:"limits"`
 				} `yaml:"resources"`
 				PriorityClassName string `yaml:"priorityClassName"`
+				InheritedMetadata struct {
+					Annotations map[string]string `yaml:"annotations"`
+				} `yaml:"inheritedMetadata"`
 			} `yaml:"spec"`
 		}
 		if err := dec.Decode(&doc); err != nil {
@@ -300,6 +304,7 @@ func pgResourcesIn(t *testing.T, root, rel string) []pgResources {
 			RawMemReq:         doc.Spec.Resources.Requests["memory"],
 			RawCPUReq:         doc.Spec.Resources.Requests["cpu"],
 			RawCPULimit:       doc.Spec.Resources.Limits["cpu"],
+			Annotations:       doc.Spec.InheritedMetadata.Annotations,
 		}
 		if v, ok := doc.Spec.PostgreSQL.Parameters["max_connections"]; ok {
 			c.MaxConnections, _ = strconv.Atoi(v)
@@ -364,4 +369,67 @@ func parseCPUMilli(t *testing.T, rel, cluster, v string) int {
 		t.Fatalf("%s %s: cpu %q is not a quantity", rel, cluster, v)
 	}
 	return n * 1000
+}
+
+// A DATABASE PROMETHEUS NEVER DISCOVERED CANNOT BE OBSERVED (#624).
+//
+// prometheus.yaml's kanz-pods job is OPT-IN: `action: keep` on
+// prometheus.io/scrape, so a pod without the annotation is not scraped. CNPG
+// runs its metrics exporter on 9187 and does NOT annotate its own pods, so
+// every Postgres pod in the estate was dropped at discovery — and with it every
+// backup, WAL-archive and replication-lag series.
+//
+// THE FAILURE IS SILENT IN THE WORST WAY. KanzScrapeTargetDown is `up == 0`,
+// and a pod that was never discovered has no `up` series at all: it is not
+// down, it is ABSENT, and absence of a target produces absence of an alert. The
+// entire dr_recoverability rule group evaluates empty vectors without it, so a
+// broken WAL archive and a healthy one emit the identical signal — none — on
+// the one store this repository calls unrecoverable.
+//
+// The port is checked, not just the scrape flag. kanz-pods takes the port FROM
+// the annotation and handles no path, so a wrong port aims the scrape at
+// Postgres's own 5432 — which does not speak HTTP, and surfaces as a DOWN row
+// rather than an error.
+func TestEveryPostgresClusterIsScraped(t *testing.T) {
+	root := moduleRoot(t)
+	const (
+		scrapeKey  = "prometheus.io/scrape"
+		portKey    = "prometheus.io/port"
+		exporterPt = "9187"
+	)
+
+	var checked int
+	var problems []string
+	for _, rel := range []string{
+		filepath.Join("infra", "dr", "postgres", "cluster.yaml"),
+		filepath.Join("infra", "dr", "postgres", "replica.yaml"),
+	} {
+		for _, c := range pgResourcesIn(t, root, rel) {
+			checked++
+			where := filepath.Base(rel) + " " + c.Name
+			if c.Annotations[scrapeKey] != "true" {
+				problems = append(problems, where+": spec.inheritedMetadata.annotations is missing "+
+					scrapeKey+`: "true", so its pods never enter the kanz-pods job. Nothing observes `+
+					"whether this cluster's backups or WAL archiving work, and because the pods are "+
+					"never DISCOVERED, KanzScrapeTargetDown cannot report it either")
+			}
+			if got := c.Annotations[portKey]; got != exporterPt {
+				problems = append(problems, fmt.Sprintf("%s: %s is %q, want %q (the CNPG metrics "+
+					"exporter). kanz-pods takes the scrape port from this annotation, so a wrong one "+
+					"points the scrape at a port that does not serve /metrics", where, portKey, got, exporterPt))
+			}
+		}
+	}
+
+	// NON-VACUITY: twelve clusters carry these today. A parser returning nothing
+	// would pass while the estate was entirely undiscovered.
+	if checked < 12 {
+		t.Fatalf("checked only %d cluster(s) across cluster.yaml and replica.yaml, want at least 12 — "+
+			"the parser is broken and this guard proves nothing", checked)
+	}
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("%d cluster(s) Prometheus will never discover:\n\n  %s",
+			len(problems), strings.Join(problems, "\n\n  "))
+	}
 }

@@ -104,6 +104,30 @@ metadata:
 spec:
   instances: 3
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       archive_timeout: "30s"   # RPO bound for the archived-WAL path
@@ -188,6 +212,30 @@ metadata:
 spec:
   instances: 3
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       archive_timeout: "30s"
@@ -299,6 +347,30 @@ metadata:
 spec:
   instances: 3
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       archive_timeout: "30s"   # RPO bound for the archived-WAL path
@@ -427,6 +499,30 @@ metadata:
 spec:
   instances: 3
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       archive_timeout: "30s"   # RPO bound for the archived-WAL path
@@ -546,6 +642,30 @@ metadata:
 spec:
   instances: 3
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       archive_timeout: "30s"   # RPO bound for the archived-WAL path
@@ -674,6 +794,30 @@ metadata:
 spec:
   instances: 3
   primaryUpdateStrategy: unsupervised
+  # SCRAPED, SO THE BACKUP CAN BE OBSERVED AT ALL (#624). CloudNativePG runs a
+  # metrics exporter on 9187 in every instance pod and does NOT annotate those
+  # pods itself. prometheus.yaml's kanz-pods job is OPT-IN by annotation
+  # (`action: keep` on prometheus.io/scrape), so without these two lines every
+  # Postgres pod in the estate was dropped at discovery.
+  #
+  # THAT IS WHY KanzScrapeTargetDown COULD NOT COVER THIS. It is `up == 0`, and a
+  # pod that was never DISCOVERED has no `up` series: it is not down, it is
+  # absent, and absence of a target produces absence of an alert. The declared
+  # continuous-backup contract above was therefore unobservable by construction —
+  # a broken WAL archive and a healthy one emitted the identical signal, none.
+  #
+  # inheritedMetadata, NOT spec.monitoring.enablePodMonitor: enablePodMonitor
+  # creates a PodMonitor custom resource, which needs the Prometheus OPERATOR to
+  # consume it. This estate runs plain Prometheus with annotation-driven
+  # discovery (infra/observability/prometheus.yaml), so a PodMonitor here would
+  # be a CR nothing reads — configuration that looks present and does nothing.
+  #
+  # No prometheus.io/path: the kanz-pods job deliberately handles no path
+  # annotation, and CNPG's exporter serves /metrics, which is what it assumes.
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
   postgresql:
     parameters:
       archive_timeout: "30s"
