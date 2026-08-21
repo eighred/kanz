@@ -430,10 +430,18 @@ func buildBus(ctx context.Context, cfg config.Config, gate *halt.Gate, logger *s
 		_ = mesh.Close()
 		return nil, nil, func() {}, err
 	}
-	// THE CONSUMER EXISTS FOR ONE SUBJECT: the halt FACT (#635). No DLQ and no
-	// bus metrics, because SubscribeBroadcast routes to neither — an unreadable
-	// control message must not be parked, it must leave the gate closed.
-	consumer, err := bus.NewConsumer(client)
+	// THE CONSUMER EXISTS FOR ONE SUBJECT: the halt FACT (#635).
+	//
+	// WithDLQ EVEN THOUGH THE BROADCAST PATH NEVER CONSULTS IT, for the reason
+	// venue-binance's identical consumer states: the exemption in
+	// test/arch/bus_dlq_test.go is for consumers that could NEVER hold a DLQ
+	// publisher, and this gateway plainly can. Skipping it on the grounds that
+	// today's only subscription is broadcast is exactly the loophole that guard
+	// names — the exemption would survive the day someone adds a queue
+	// subscription beside it, and the first event that needed parking would be
+	// lost instead. It needs no dlq.* grant: SubscribeBroadcast never routes
+	// there, so nothing is ever published.
+	consumer, err := bus.NewConsumer(client, bus.WithDLQ(client))
 	if err != nil {
 		_ = client.Close()
 		_ = mesh.Close()

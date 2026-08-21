@@ -80,6 +80,20 @@ data:
           # tenant's import of it resolves to nothing, the broker accepts the
           # config, and an approval that tenant sends is delivered NOWHERE.
           { stream: "tenant.*.order.order.approve" }
+          # THE PLATFORM KILL-SWITCH CROSSES THE SAME BOUNDARY (#635), and it is
+          # the one subject here that is NOT tenant-prefixed — deliberately. A
+          # halt is platform-wide by definition: one FACT, published once by
+          # cmd/kanz-halt, and every account that runs an order path must receive
+          # THAT one. Prefixing it per tenant would make the operator's single
+          # break-glass command reach only the platform account, which is the
+          # defect this export exists to close one account further out.
+          #
+          # WITHOUT THIS EXPORT a per-tenant OMS cannot resolve a stream for
+          # platform.mode.changed at all, halt.Arm fails, and — because the gate
+          # is deny-by-default — that tenant's OMS refuses every order. Loud, and
+          # a total outage for that tenant. The export and the per-account import
+          # below are both load-bearing.
+          { stream: "platform.mode.changed" }
         ]
 
         # __system__ RESOLVES ITS OWN PREFIX, which is what makes the gateway's
@@ -383,8 +397,10 @@ data:
           #
           # The two are deliberately enumerated rather than widened: the gateway
           # is the platform's sole identity authority, and `platform.>` would hand
-          # it platform.mode.changed — the kill switch that kanz-halt's entry
-          # above claims is its alone.
+          # it PUBLISH on platform.mode.changed — the kill switch that kanz-halt's
+          # entry above claims is its alone. It SUBSCRIBES that subject as of
+          # #635, which is the opposite direction and carries no such authority:
+          # hearing the brake is not being able to pull it.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway"
             permissions: {
               publish: {
@@ -399,9 +415,26 @@ data:
                   "order.order.submit", "order.order.cancel",
                   "tenant.*.order.order.approve", "order.order.approve",
                   "platform.authz.decision",
+                  # JETSTREAM MACHINERY, required from the moment this gateway
+                  # became a CONSUMER (#635). It now binds an ephemeral consumer
+                  # to platform.mode.changed so POST /v1/orders can refuse orders
+                  # during a declared halt. $JS.API.> resolves the stream and
+                  # creates the consumer — without it halt.Arm fails at startup,
+                  # which (deny-by-default) leaves the order route answering 423
+                  # to everyone. $JS.ACK.> is the separate space Msg.Ack()
+                  # publishes to, and its absence is the silent one: the gate
+                  # folds every ModeChanged, the ack is denied, and the broker
+                  # redelivers the same message forever while /healthz stays green.
+                  "$JS.API.>", "$JS.ACK.>",
                 ]
               }
-              subscribe: { allow: ["_INBOX.>"] }
+              # THE KILL SWITCH, SUBSCRIBE ONLY (#635). Until this line an
+              # operator's kanz-halt stopped TradingView signals while this
+              # gateway — the path authz.go calls the one that "reaches a live
+              # exchange" — kept minting order COMMANDs. A Go-side fix alone would
+              # not have worked: the gateway would have authenticated fine and
+              # silently received nothing.
+              subscribe: { allow: ["platform.mode.changed", "_INBOX.>"] }
             }
           }
           # copilot publishes ONE thing and subscribes to NOTHING (#352): the
@@ -876,6 +909,19 @@ data:
                   # two computations of a VaR and they will disagree at the worst
                   # possible moment.
                   "risk.portfolio.measures_computed",
+                  # THE PLATFORM KILL-SWITCH (#635). The OMS is the chokepoint
+                  # every order on this platform passes through — the gateway's,
+                  # webhook-ingest's, optimization's — so this one subscription is
+                  # what makes a declared halt refuse ALL of them rather than the
+                  # webhook channel alone. Consumed with SubscribeBroadcast, never
+                  # a queue group: a durable group would hand the operator's
+                  # resume to ONE replica and leave the others latched shut, and
+                  # it therefore needs no dlq.platform.mode.changed grant.
+                  #
+                  # SUBSCRIBE ONLY. Publishing this subject is kanz-halt's alone
+                  # (see its entry above); an OMS that could declare a halt could
+                  # declare a resume.
+                  "platform.mode.changed",
                   "_INBOX.>",
                 ]
               }
@@ -961,6 +1007,17 @@ data:
                   # that could publish a balance would be a second computation of a
                   # number only the ledger may compute.
                   "accounting.balance.portfolio",
+                  # THE PLATFORM KILL-SWITCH (#635). This adapter is the LAST
+                  # process between a command and a live exchange, and it heard
+                  # nothing about a declared halt until this line: kanz-halt
+                  # stopped webhook signals while this kept placing whatever the
+                  # OMS routed. It refuses venue.v1 Execute while halted and still
+                  # serves CancelOrder — a halt is not a cancel, and it must never
+                  # jam the exits.
+                  #
+                  # Consumed with SubscribeBroadcast (no dlq.* grant needed) and
+                  # SUBSCRIBE ONLY: publishing this subject is kanz-halt's alone.
+                  "platform.mode.changed",
                   "_INBOX.>",
                 ]
               }
@@ -1008,6 +1065,17 @@ data:
                   # that could publish a balance would be a second computation of a
                   # number only the ledger may compute.
                   "accounting.balance.portfolio",
+                  # THE PLATFORM KILL-SWITCH (#635). This adapter is the LAST
+                  # process between a command and a live exchange, and it heard
+                  # nothing about a declared halt until this line: kanz-halt
+                  # stopped webhook signals while this kept placing whatever the
+                  # OMS routed. It refuses venue.v1 Execute while halted and still
+                  # serves CancelOrder — a halt is not a cancel, and it must never
+                  # jam the exits.
+                  #
+                  # Consumed with SubscribeBroadcast (no dlq.* grant needed) and
+                  # SUBSCRIBE ONLY: publishing this subject is kanz-halt's alone.
+                  "platform.mode.changed",
                   "_INBOX.>",
                 ]
               }
@@ -1035,7 +1103,7 @@ data:
           # strategy.signal.received) and the order COMMAND its Translator fans
           # out per venue (SubjectSubmit = order.order.submit) — the second
           # governed write path onto the order book alongside api-gateway. It
-          # SUBSCRIBES the kill-switch (translate.SubjectModeChanged =
+          # SUBSCRIBES the kill-switch (halt.SubjectModeChanged =
           # platform.mode.changed) and the per-venue position spine
           # (subject.VenuePositionAll = risk.position.venue.changed.>, EXEC-
           # M19a) so its CLOSE path can flatten what is actually held at each
@@ -1087,6 +1155,17 @@ data:
           # submit path.
           { stream: { account: __system__, subject: "tenant.acme.order.order.approve" }
             to: "order.order.approve" }
+          # THE HALT (#635). No `to:` — the subject is the same on both sides
+          # because there is only ever ONE of these, for the whole platform.
+          #
+          # This account's own PLATFORM stream (`platform.>`, created by running
+          # nats-bootstrap on this account — see README "Per-tenant streams")
+          # captures the imported FACT, which is what lets this tenant's OMS bind
+          # a JetStream consumer to it. Without the import, halt.Arm cannot even
+          # resolve a stream: the OMS starts, latches its gate CLOSED, refuses
+          # every order and says so — which is fail-closed working, and still a
+          # total outage for this tenant. The line is not optional.
+          { stream: { account: __system__, subject: "platform.mode.changed" } }
         ]
 
         users: [

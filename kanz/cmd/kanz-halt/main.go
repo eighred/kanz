@@ -8,8 +8,23 @@
 // package for the subject. The one tool that must work while the system is on
 // fire cannot be coupled to the system that is on fire.
 //
-// The gate is DENY-BY-DEFAULT: every edge process (webhook-ingest, the alpha
-// Runner) boots CLOSED and refuses to trade until it hears an operator resume.
+// WHAT IT ACTUALLY STOPS, as of #635. Every process that can put an order in
+// front of an exchange folds this FACT through the one internal/platform/halt
+// Gate: api-gateway (POST /v1/orders and the approval that releases a held
+// order), the OMS (admission of any NEW order, from any publisher), both venue
+// adapters (the placement itself) and webhook-ingest (the TradingView
+// perimeter). Until #635 this doc said "every edge process (webhook-ingest, the
+// alpha Runner)", which was an accurate description of the code and an
+// inaccurate description of the line three above it — the OMS and the venue
+// adapters could not reach the gate at any depth.
+//
+// WHAT IT DOES NOT STOP, deliberately: cancels, at every layer, and orders
+// already resting at an exchange. A halt refuses NEW exposure; it is not a
+// cancel and not a flatten. An operator who needs the book closed has to close
+// it — this command stops the platform adding to it.
+//
+// The gate is DENY-BY-DEFAULT: every one of those processes boots CLOSED and
+// refuses to trade until it hears an operator resume.
 // That is not a bug to work around — it is the deployment sign-off. Bringing the
 // platform live is an explicit, attributable act, recorded in the append-only
 // log:
@@ -155,12 +170,21 @@ func run(args []string, out *os.File) error {
 
 	if opt.resume {
 		fmt.Fprintf(out, "RESUMED — system mode NORMAL, by %s: %s\n", mc.GetChangedBy(), mc.GetReason())
-		fmt.Fprintln(out, "Edge processes will trade again on their next cycle.")
+		fmt.Fprintln(out, "The order path reopens on each service's next delivery.")
 		return nil
 	}
+	// THE SCOPE IS PRINTED, not left to the operator's memory (#635). This is the
+	// sentence someone reads at 3am immediately after stopping the platform, and
+	// the two things it must not leave them guessing about are what is still
+	// running and what they still have to do themselves.
 	fmt.Fprintf(out, "HALTED — system mode HALTED, by %s: %s\n", mc.GetChangedBy(), mc.GetReason())
-	fmt.Fprintln(out, "Ingest and autonomous execution are paralyzed. This LATCHES:")
-	fmt.Fprintln(out, "only `kanz-halt --resume` reopens the gate.")
+	fmt.Fprintln(out, "STOPPED: no NEW order is admitted or placed — POST /v1/orders (423),")
+	fmt.Fprintln(out, "         the OMS (ORDER_REJECTED/PLATFORM_HALTED), both venue adapters,")
+	fmt.Fprintln(out, "         TradingView signals and the alpha runner.")
+	fmt.Fprintln(out, "NOT STOPPED: cancels, at every layer — deliberately, so you can still exit.")
+	fmt.Fprintln(out, "STILL LIVE: orders already resting at an exchange, and their fills. A halt is")
+	fmt.Fprintln(out, "         not a cancel — flattening the book is a separate act you must take.")
+	fmt.Fprintln(out, "This LATCHES: only `kanz-halt --resume` reopens the gate.")
 	return nil
 }
 
