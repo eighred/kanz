@@ -131,12 +131,56 @@ func run() int {
 			"fix", "set AUDIT_VERIFY_ROLES to the operator and monitoring roles")
 	}
 
+	// THE READ API DOES NOT SHARE THE SCRAPED PORT (#627).
+	//
+	// Every /v1 route here takes its tenant from X-Kanz-Principal-Tenant and
+	// serves that tenant's compliance record — against audit_log, which is
+	// deliberately NOT RLS'd because it is the cross-tenant record. The database
+	// will not save this surface; the handler is the boundary, and the boundary
+	// is only sound if the api-gateway is the only caller that can reach it.
+	//
+	// It was on :8083 with /metrics. allow-observability-scrape must admit
+	// whatever port serves /metrics, so the entire kanz-observability namespace
+	// could send a self-chosen tenant header to /v1/audit/events — and a
+	// self-chosen role to /v1/audit/verify, whose count is the estate-wide
+	// disclosure #118 exists to withhold. That was also the ONLY route into this
+	// service: no NetworkPolicy named audit and the gateway did not proxy it, so
+	// the compliance surface was dark to every legitimate reader and open to the
+	// one namespace that authenticates nothing.
+	//
+	// Ports do not swap the way accounting's did (#447): :8083 is shared with
+	// regulatory in allow-observability-scrape's list, so moving audit's metrics
+	// off it would widen the rule for no gain. It is the API that leaves.
+	if cfg.APIListen == cfg.Listen {
+		logger.Error("AUDIT_API_LISTEN and AUDIT_LISTEN are the same port — the split that keeps the "+
+			"tenant-scoped read API off the scraped port has collapsed, and every pod in "+
+			"kanz-observability can name its own tenant against a log that is not RLS'd (#627)",
+			"addr", cfg.Listen)
+		return 2
+	}
+
 	readiness := &server.Readiness{}
-	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger,
-		server.WithMetrics(obs.MetricsHandler()), server.WithStore(store),
+
+	// /metrics and the probes only: no store, so server.routes() mounts no /v1.
+	metricsSrv := httpserver.New(cfg.Listen, server.New(readiness, logger,
+		server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
+	go func() {
+		logger.Info("audit metrics listening", "addr", cfg.Listen)
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// Telemetry is not the book of record: a dead metrics listener must not
+			// take the audit projection down, but it must not be silent either.
+			logger.Error("metrics server failed — this pod is now unmonitored", "err", err)
+		}
+	}()
+
+	// PROBES STAY ON BOTH LISTENERS. kubelet reaches a pod from the node rather
+	// than from a namespace, so a probe is not subject to the NetworkPolicy that
+	// keeps everything else off the API port.
+	httpSrv := httpserver.New(cfg.APIListen, server.New(readiness, logger,
+		server.WithStore(store),
 		server.WithVerifyRoles(cfg.VerifyRoles)), httpserver.Standard())
 	go func() {
-		logger.Info("audit listening", "addr", cfg.Listen)
+		logger.Info("audit read API listening", "addr", cfg.APIListen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server failed", "err", err)
 			fatal.Raise(err)
@@ -160,6 +204,9 @@ func run() int {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
+	}
+	if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("metrics shutdown error", "err", err)
 	}
 
 	// The run loop's own error and any fatal raised from a goroutine answer the

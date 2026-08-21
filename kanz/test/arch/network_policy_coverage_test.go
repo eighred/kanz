@@ -907,8 +907,11 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // off an inbound request and serve the named tenant's data, mapped to the port
 // they serve it on.
 //
-// THE SET IS FOUR, NOT TWO. audit and tv-sync were the known pair; #222 added the
-// same trust to wealth and datamaster, and the guard below found them. Setting
+// THE SET IS THREE, AND IT WAS FOUR. audit and tv-sync were the known pair; #222
+// added the same trust to wealth and datamaster, and the guard below found them.
+// audit SPLIT in #627 and moved to the map below — the count is maintained here
+// rather than restated, because a set that says four while holding three is how
+// a reader concludes the remaining exposure is someone else's. Setting
 // the header is a different act and is deliberately NOT in scope: api-gateway
 // (proxy/backend.go) injects it as the identity authority, and copilot
 // (retrieval/lineage_catalog.go) forwards the caller's principal onward to
@@ -918,9 +921,8 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // EVERY ONE SERVES THAT SURFACE ON THE SAME PORT AS /metrics, so
 // allow-observability-scrape's port list — the fix for every other overreach in
 // that rule — cannot separate them. A pod in kanz-observability can still send a
-// self-chosen tenant header to audit's /v1/audit/events, tv-sync's
-// /broker/accounts, or wealth's and datamaster's :8080 routes and be served
-// another tenant's book. Removing the blanket rule would not close it either:
+// self-chosen tenant header to tv-sync's /broker/accounts, or wealth's and
+// datamaster's :8080 routes, and be served another tenant's book. Removing the blanket rule would not close it either:
 // allow-gateway-to-tv-sync and allow-gateway-to-phase7 each admit
 // kanz-observability to the same ports independently, for the same scrape.
 //
@@ -931,7 +933,6 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // cluster. This map is what keeps the residual named and bounded: a fifth service
 // adopting the trust has to be written down here, in a diff a reviewer sees.
 var tenantHeaderTrustingServices = map[string]int{
-	"audit":      8083,
 	"datamaster": 8080,
 	"tv-sync":    8091,
 	"wealth":     8080,
@@ -992,6 +993,28 @@ var tenantHeaderTrustingSplitListeners = map[string]int{
 	// admits; the API is on :8095, which it does not. The assertions below check
 	// both halves of that claim on every run.
 	"compliance": 8095,
+	// audit SPLIT (#627), and its case is different from the three above: they
+	// each traded a shared port for a surface the gateway genuinely proxied, so
+	// the exposure was the PRICE of something. audit's was the price of nothing.
+	//
+	// Nothing in this repository called its /v1 routes, no NetworkPolicy named
+	// app: audit, and the gateway did not proxy it — so the ONLY peer that could
+	// reach the tenant's compliance record was kanz-observability, through
+	// allow-observability-scrape's :8083. The surface was simultaneously dark to
+	// every legitimate reader and open to the one namespace that authenticates
+	// nothing and can choose its own principal.
+	//
+	// What it served that peer: /v1/audit/events and /v1/soc2/evidence take the
+	// tenant from X-Kanz-Principal-Tenant against audit_log, which is deliberately
+	// NOT RLS'd because it IS the cross-tenant record — so the database cannot
+	// catch what the handler lets through. /v1/audit/verify adds the estate-wide
+	// count #118 exists to withhold, gated by roles read from the same forgeable
+	// header.
+	//
+	// THE PORTS DID NOT SWAP, unlike accounting's (#447): :8083 is shared with
+	// regulatory in allow-observability-scrape's list, so moving audit's /metrics
+	// off it would have widened the rule for no gain. The API left instead.
+	"audit": 8102,
 }
 
 // tenantHeaderRead matches a READ of the tenant principal header — the act that

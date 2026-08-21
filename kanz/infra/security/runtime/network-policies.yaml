@@ -737,12 +737,13 @@ spec:
     # capital movement into a list this file calls "read-upstreams" would make
     # the rule's own name false, and the next reader would inherit that.
     #
-    # It shares port 8080 with the read group, which is the residual #447 tracks:
-    # allow-observability-scrape admits 8080 across every pod in this namespace,
-    # so the monitoring plane can reach this API too. accounting's own tenant
-    # gate narrows what that buys — the header must EQUAL the tenant its RLS pool
-    # is pinned to, so a caller cannot pivot to another book — but the fix is the
-    # second listener #447 describes, not this rule.
+    # IT NO LONGER SHARES 8080, AND THIS PARAGRAPH USED TO SAY IT DID. #447's
+    # second listener landed: the API is on 8101 — the port named below, outside
+    # allow-observability-scrape's list — and 8080 now serves accounting's
+    # /metrics and nothing else. The text describing the shared-port residual as
+    # open outlived the repair that closed it, on a rule whose subject is who may
+    # reach a capital movement, which is the reading a comment like this one is
+    # most likely to be trusted for.
     - to:
         - podSelector:
             matchLabels:
@@ -771,6 +772,23 @@ spec:
               app: compliance
       ports:
         - { protocol: TCP, port: 8095 }
+    # READING WHO DID WHAT (#627). Its own entry, and on 8102 rather than audit's
+    # 8083 for the reason the two arms above give: 8083 serves /metrics and
+    # allow-observability-scrape admits it namespace-wide, so the /v1 routes on
+    # that port were reachable by the whole monitoring plane — with a tenant
+    # header a pod there sets itself, against audit_log, which is deliberately NOT
+    # RLS'd because it is the cross-tenant compliance record.
+    #
+    # THIS ARM IS ALSO THE FIRST WAY IN. Until it existed no policy named
+    # app: audit at all, so the scrape rule was not merely the widest route to the
+    # tenant's compliance record — it was the ONLY one, and the gateway could not
+    # reach the surface its own principal header exists to protect.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: audit
+      ports:
+        - { protocol: TCP, port: 8102 }
 ---
 # MODEL PORTFOLIOS (#409) — the ingress half, and it is a capital boundary rather
 # than a read one.
@@ -1269,3 +1287,55 @@ spec:
               kubernetes.io/metadata.name: kanz-observability
       ports:
         - { protocol: TCP, port: 8080 }
+---
+# THE COMPLIANCE READ SURFACE (#627) — the ingress half, and the first policy in
+# this file that has ever named app: audit.
+#
+# THE GAP THIS CLOSES WAS BOTH DIRECTIONS AT ONCE. audit served /v1/audit/events,
+# /v1/audit/lineage, /v1/audit/reports, /v1/soc2/evidence and /v1/audit/verify on
+# :8083, the same port as /metrics. allow-observability-scrape must admit the
+# metrics port, so the kanz-observability namespace could reach every one of them
+# — and every one takes its tenant from X-Kanz-Principal-Tenant, which a pod
+# there sets for itself. audit_log is deliberately NOT RLS'd, because it IS the
+# cross-tenant compliance record, so the database does not narrow what that buys
+# the way accounting's tenant-pinned RLS pool narrows its own residual: the
+# handler is the entire boundary.
+#
+# And it was the ONLY route in. No rule here selected app: audit, and the gateway
+# did not proxy it, so the surface was dark to every legitimate reader while
+# remaining open to the one namespace that authenticates nothing. For wealth,
+# datamaster and tv-sync a shared port is the price of a surface the gateway
+# genuinely proxies; here the price bought nothing at all.
+#
+# THE API IS ON 8102 AND ADMITS EXACTLY ONE PEER. 8083 keeps /metrics and the
+# probes. The ports did not swap the way accounting's did — 8083 is shared with
+# regulatory in allow-observability-scrape's list, so moving audit's metrics off
+# it would have widened that rule for no gain.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-audit
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: audit
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8102 }
+    # The scrape reaches :8083, which now serves /metrics and the probes and
+    # nothing that reads a tenant header. Stated here rather than left to the
+    # blanket rule, so this policy carries the full set of callers audit expects.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8083 }
