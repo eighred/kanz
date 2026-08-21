@@ -152,7 +152,7 @@ func FileFRTB(in FRTBInputs, asOf time.Time, signer Signer) (Report, FRTBResult,
 	return rep, res, nil
 }
 
-// Reconcile checks a filing's total line item against an independently supplied
+// ReconcileFRTB checks a filing's total line item against an independently supplied
 // expected total (the regulator's worked example, or an independent recompute)
 // within tol. It is the reconciliation gate the sign-off package records: a
 // filing whose total does not reproduce the benchmark is NOT signed off, even
@@ -162,7 +162,12 @@ func FileFRTB(in FRTBInputs, asOf time.Time, signer Signer) (Report, FRTBResult,
 // are decimal figures, so a rational comparison is strictly stronger than a float
 // one: a delta that sits exactly on the tolerance boundary now decides
 // deterministically rather than on whichever way the last binary rounding fell.
-func (r Report) Reconcile(expectedTotal, tol *big.Rat) (delta *big.Rat, ok bool) {
+//
+// It is a package function rather than a method because Report is now an alias
+// for filing.Report (#633) and Go does not allow a method on a non-local type —
+// which is honest: this reconciliation is FRTB-specific (it looks up
+// FRTB_TOTAL), not a property of every filing.
+func ReconcileFRTB(r Report, expectedTotal, tol *big.Rat) (delta *big.Rat, ok bool) {
 	if expectedTotal == nil || tol == nil {
 		return nil, false
 	}

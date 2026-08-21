@@ -483,7 +483,13 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mes
 	if err != nil {
 		return err
 	}
-	announcer := consume.NewAnnouncer(store, announceProducer, cfg.BaseCurrency, logger, nil)
+	// AND EVERY ANNOUNCEMENT CARRIES THE POSTURE (#614). The gauge above is what an
+	// operator reads; this is what the pre-trade gate reads, and they are the same
+	// classification (classifyEntrySources) so they cannot disagree. Without it the
+	// consumer has to infer completeness from silence — and a balance short by
+	// every dividend looks exactly like a whole one.
+	announcer := consume.NewAnnouncer(store, announceProducer, cfg.BaseCurrency,
+		entrySourceCompleteness(cfg), logger, nil)
 	logger.Info("accounting: cash-balance announcements armed — downstream can see what each "+
 		"portfolio may spend", "subject", consume.SubjectPortfolioCash)
 

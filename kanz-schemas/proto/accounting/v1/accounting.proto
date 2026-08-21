@@ -308,6 +308,57 @@ message PortfolioCashBalance {
   // balance that has not moved.
   google.protobuf.Timestamp as_of = 5;
   google.protobuf.Timestamp knowledge_time = 6;
+
+  // completeness states WHICH KINDS OF JOURNAL ENTRY the deployment that
+  // produced this balance actually feeds (#614).
+  //
+  // A LEVEL IS ONLY AS COMPLETE AS ITS INPUTS, and this one is not complete
+  // today: the ledger folds corporate actions correctly and nothing in this
+  // platform publishes one (#588), so every announcement is missing the cash
+  // effect of every dividend, coupon and merger the fund has been party to.
+  // Without this field a consumer cannot tell that number from a whole one, and
+  // the pre-trade buying-power gate that reads it turns the gap into an order
+  // refusal that reads exactly like a spending limit being hit.
+  //
+  // A MESSAGE AND NOT A BARE LIST, because proto3 cannot tell an empty repeated
+  // field from an absent one — and "the producer said nothing is missing" must
+  // never look like "the producer did not say". An absent completeness means
+  // UNSTATED: a consumer has not been shown that this balance is whole, and it
+  // must not assume it is.
+  BalanceCompleteness completeness = 7;
+}
+
+// BalanceCompleteness is a producer's statement of what its balance contains
+// (#614) — the difference between "checked, and fine" and "nobody checked".
+//
+// IT DESCRIBES THE DEPLOYMENT, NOT THE PORTFOLIO. Whether anything publishes a
+// corporate action is a property of the estate, so this says the same thing on
+// every portfolio's announcement. It rides on the announcement anyway, because
+// the consumer that needs it is a pre-trade control reading a local view on the
+// order-admission path: a second lookup for the posture is a second thing that
+// can be stale, absent or wired to a different accounting deployment than the
+// balance came from.
+//
+// BOTH LISTS ARE SENT, so a message that says nothing is detectable. A
+// BalanceCompleteness with both lists empty carries no statement at all and a
+// consumer must treat it as UNSTATED, exactly as it treats the absent message.
+message BalanceCompleteness {
+  // produced_entry_types are the journal entry types something in the producing
+  // deployment actually feeds, by ledger entry-type name ("trade", "cash",
+  // "fee", ...). Sorted, so the announcement stays byte-stable.
+  repeated string produced_entry_types = 1;
+
+  // unproduced_entry_types are the journal entry types the book of record can
+  // fold and NOTHING in the producing deployment produces. Each one names cash
+  // and position effects the balance above is missing.
+  //
+  // The direction of the error is NOT knowable from this list. An unfolded
+  // dividend understates the cash of a portfolio that is LONG the instrument and
+  // overstates the cash of one that is SHORT it (ledger.foldCorpAct pays
+  // quantity x per-unit, signed). So a consumer must not correct the number by
+  // it — only report that the number is not whole, and say which feed would
+  // make it whole.
+  repeated string unproduced_entry_types = 2;
 }
 
 // VenueAccountCash is one exchange account's holding of one asset (#450).
