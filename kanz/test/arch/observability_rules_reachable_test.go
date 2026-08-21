@@ -390,3 +390,135 @@ func TestPromtoolHarnessesAreRunByDiscovery(t *testing.T) {
 	t.Logf("%d promtool harness(es) under infra/observability, all executed by discovery: %s",
 		len(harnessNames), strings.Join(harnessNames, ", "))
 }
+
+// THE COMMITTED ConfigMap IS THE TREE, OR THE BUILD FAILS (#625).
+//
+// Joint D, and it exists because the other three stopped being sufficient the
+// moment Argo CD started delivering this directory.
+//
+// A, B and C prove there is ONE derivation of the rule list — apply-rules.sh —
+// and that CI and the manifest agree with it. What reaches a CLUSTER, though, is
+// now rules-configmap.yaml: a generated artifact, committed, synced like any
+// other manifest. A generated file in git is a cache, and a cache that nothing
+// checks is a second list wearing the first one's name. Add a rule file, forget
+// to regenerate, and the tree and the ConfigMap disagree — with promtool still
+// green, because promtool tests the TREE.
+//
+// That is #230's failure exactly, one artifact further along: an alert that
+// parses, tests, reviews and merges, and loads nowhere.
+//
+// COMPARED SEMANTICALLY, NOT BYTE-FOR-BYTE. The committed file carries a header
+// saying it is generated and how to regenerate it, which a byte comparison
+// against `--emit` would forbid — and the property worth checking is not the
+// serialisation, it is that every rule file in the tree is in the ConfigMap with
+// its exact contents. It also means this guard needs no kubectl, so it runs
+// wherever `go test` does rather than only where the script can run.
+func TestCommittedRulesConfigMapMatchesTheTree(t *testing.T) {
+	obsDir := filepath.Join(moduleRoot(t), "infra", "observability")
+
+	var ruleFiles []string
+	err := filepath.Walk(obsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".rules.yaml") {
+			ruleFiles = append(ruleFiles, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", obsDir, err)
+	}
+	// NON-VACUITY. An empty tree would make every comparison below trivially true,
+	// which is the shape of a guard that reports fine after checking nothing.
+	if len(ruleFiles) < 2 {
+		t.Fatalf("found %d *.rules.yaml under infra/observability — expected at least 2 "+
+			"(the SLO pair). The tree moved and this guard proves nothing", len(ruleFiles))
+	}
+
+	raw, err := os.ReadFile(filepath.Join(obsDir, "rules-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("read infra/observability/rules-configmap.yaml: %v\n\n"+
+			"This file is what Argo CD delivers as the prometheus-rules ConfigMap. Without it the "+
+			"synced tree brings up a Prometheus whose non-optional rules mount cannot be satisfied, "+
+			"and the pod stays in ContainerCreating. Generate it with:\n"+
+			"  cd kanz/infra/observability && ./apply-rules.sh --emit > rules-configmap.yaml", err)
+	}
+	var cm struct {
+		Kind     string `yaml:"kind"`
+		Metadata struct {
+			Name      string `yaml:"name"`
+			Namespace string `yaml:"namespace"`
+		} `yaml:"metadata"`
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(raw, &cm); err != nil {
+		t.Fatalf("parse rules-configmap.yaml: %v", err)
+	}
+	if cm.Kind != "ConfigMap" {
+		t.Fatalf("rules-configmap.yaml declares kind %q, want ConfigMap", cm.Kind)
+	}
+
+	// The name and namespace are the script's, read from the script rather than
+	// restated — the same reasoning as joint C. A committed manifest naming a
+	// different ConfigMap than prometheus.yaml mounts is the ContainerCreating
+	// failure again, and it would be invisible until a cluster existed.
+	script := readFile(t, filepath.Join(obsDir, "apply-rules.sh"))
+	wantName := regexp.MustCompile(`(?m)^configmap="([a-z0-9-]+)"`).FindStringSubmatch(script)
+	if wantName == nil {
+		t.Fatal("apply-rules.sh no longer declares `configmap=\"...\"` at the start of a line — " +
+			"update this guard rather than dropping the check")
+	}
+	if cm.Metadata.Name != wantName[1] {
+		t.Errorf("rules-configmap.yaml is named %q but apply-rules.sh writes %q — "+
+			"prometheus.yaml mounts one of them and the pod will not start",
+			cm.Metadata.Name, wantName[1])
+	}
+	wantNS := regexp.MustCompile(`KANZ_OBSERVABILITY_NAMESPACE:-([a-z0-9-]+)`).FindStringSubmatch(script)
+	if wantNS != nil && cm.Metadata.Namespace != wantNS[1] {
+		t.Errorf("rules-configmap.yaml targets namespace %q but apply-rules.sh defaults to %q — "+
+			"Argo would apply it beside a Prometheus that cannot see it",
+			cm.Metadata.Namespace, wantNS[1])
+	}
+
+	// The set of keys, and every value.
+	want := map[string]string{}
+	for _, f := range ruleFiles {
+		want[filepath.Base(f)] = readFile(t, f)
+	}
+	var missing, extra, differing []string
+	for k := range want {
+		if _, ok := cm.Data[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	for k, got := range cm.Data {
+		w, ok := want[k]
+		if !ok {
+			extra = append(extra, k)
+			continue
+		}
+		if got != w {
+			differing = append(differing, k)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+	sort.Strings(differing)
+
+	if len(missing) > 0 {
+		t.Errorf("rule file(s) in the tree but NOT in the committed ConfigMap: %v\n\n"+
+			"These alerts are promtool-tested and load in no cluster. Regenerate:\n"+
+			"  cd kanz/infra/observability && ./apply-rules.sh --emit > rules-configmap.yaml", missing)
+	}
+	if len(extra) > 0 {
+		t.Errorf("key(s) in the committed ConfigMap with no rule file behind them: %v\n\n"+
+			"A rule file was deleted or renamed and the ConfigMap still carries it, so Prometheus "+
+			"loads alerts that no longer exist in this repository and nobody tests. Regenerate.", extra)
+	}
+	if len(differing) > 0 {
+		t.Errorf("rule file(s) whose committed copy differs from the tree: %v\n\n"+
+			"The cluster would load a DIFFERENT rule than the one promtool proved fires. "+
+			"Regenerate rather than editing rules-configmap.yaml by hand.", differing)
+	}
+}

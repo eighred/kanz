@@ -58,8 +58,31 @@ for f in "${rules[@]}"; do args+=(--from-file="$f"); done
 # Recreate rather than patch: a rule file DELETED from the repo must disappear
 # from the ConfigMap too, and `create --dry-run | apply` is the only form that
 # removes keys. Patching would leave a retired alert firing forever.
-kubectl -n "$namespace" create configmap "$configmap" "${args[@]}" \
-  --dry-run=client -o yaml | kubectl -n "$namespace" apply -f -
+emit() {
+  kubectl -n "$namespace" create configmap "$configmap" "${args[@]}" \
+    --dry-run=client -o yaml
+}
+
+# --emit prints the ConfigMap manifest instead of applying it, and is how
+# rules-configmap.yaml is regenerated (#625):
+#
+#   ./apply-rules.sh --emit > rules-configmap.yaml
+#
+# THE APPLY PATH BELOW IS THE SAME FUNCTION PIPED TO kubectl, on purpose. Argo CD
+# now delivers this tree, so the committed manifest is what reaches a cluster —
+# and if emitting and applying were two `create configmap` invocations, they
+# would be two derivations of the list, which is exactly the state #230 ended.
+# One function, two destinations.
+#
+# test/arch/observability_rules_reachable_test.go compares the committed manifest
+# against this directory's *.rules.yaml, so a rule file added without
+# regenerating fails the build rather than loading nowhere.
+if [ "${1:-}" = "--emit" ]; then
+  emit
+  exit 0
+fi
+
+emit | kubectl -n "$namespace" apply -f -
 
 echo "applied ${configmap} to ${namespace} with ${#rules[@]} rule file(s):"
 printf '  %s\n' "${rules[@]}"
