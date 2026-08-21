@@ -114,7 +114,7 @@ import (
 //
 // INVARIANT, PINNED BY TEST: a Measure returned from here with no Value ALWAYS
 // carries at least one exclusion. It has to be. riskview folds a measure whose
-// coverage excludes nothing, and dec.FromProto(nil) is zero — so an absent value
+// coverage excludes nothing, and decutil.FromProto(nil) is zero — so an absent value
 // with clean coverage would arrive at the gate as a confident, limit-passing
 // zero, by the one route the coverage discipline does not cover.
 

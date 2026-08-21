@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"strconv"
 	"testing"
 	"time"
@@ -99,11 +100,11 @@ func TestFIMeasures_AnUnresolvedBondIsNotAnEmptyBook(t *testing.T) {
 		// THE FIXTURE HAS TO BE THE #527 ONE or this test proves nothing: both
 		// values must still be the flattering zero, so that the coverage is the
 		// only thing telling them apart.
-		if got := decimalToFloat(u.Value); got != 0 {
+		if got := decutil.Float64Or(u.Value, 0); got != 0 {
 			t.Fatalf("%s over unresolved terms = %v, want 0 — the fixture is not exercising the "+
 				"case this test is about", name, got)
 		}
-		if got := decimalToFloat(n.Value); got != 0 {
+		if got := decutil.Float64Or(n.Value, 0); got != 0 {
 			t.Fatalf("%s over a book of non-bonds = %v, want 0", name, got)
 		}
 
@@ -197,7 +198,7 @@ func TestFIMeasures_APartiallyPricedBookKeepsItsNumberAndSaysSo(t *testing.T) {
 	p.SetPosition(aBondPosition("BOND_B", asOf))
 
 	dv01, _ := ComputeMeasures(p, r, nil).Lookup(MeasureDV01)
-	if decimalToFloat(dv01.Value) == 0 {
+	if decutil.Float64Or(dv01.Value, 0) == 0 {
 		t.Fatal("DV01 = 0 over a book with one priceable bond — the fixture is wrong")
 	}
 	if dv01.Coverage.Contributed != 1 || dv01.Coverage.ExcludedCount != 1 {
@@ -249,8 +250,8 @@ func TestFactorMeasures_NoModelIsAWholeBookExclusion(t *testing.T) {
 	if !ok {
 		t.Fatal("FactorVaR99 missing")
 	}
-	if decimalToFloat(m.Value) != 0 {
-		t.Fatalf("FactorVaR99 = %v with no model, want 0 — fixture wrong", decimalToFloat(m.Value))
+	if decutil.Float64Or(m.Value, 0) != 0 {
+		t.Fatalf("FactorVaR99 = %v with no model, want 0 — fixture wrong", decutil.Float64Or(m.Value, 0))
 	}
 	if m.Coverage.ExcludedCount != 1 || len(m.Coverage.Exclusions) != 1 {
 		t.Fatalf("coverage = %+v, want exactly one whole-book exclusion — inflating it to the "+
@@ -289,7 +290,7 @@ func TestLiquidityMeasures_NothingResolvedIsAMarkedZero(t *testing.T) {
 	}
 	// THE FIXTURE HAS TO KEEP SERVING THE ZERO, exactly as the FI case does, so
 	// that the coverage is the only thing distinguishing it from a flat book.
-	if got := decimalToFloat(h.Value); got != 0 {
+	if got := decutil.Float64Or(h.Value, 0); got != 0 {
 		t.Fatalf("horizon = %v, want 0 — the premise of this test is that the zero is served", got)
 	}
 	if h.Coverage.ExcludedCount == 0 {
@@ -345,8 +346,8 @@ func TestXVAMeasures_NoExposuresIsAMarkedZero(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: CVA missing", name)
 		}
-		if decimalToFloat(m.Value) != 0 {
-			t.Fatalf("%s: CVA = %v, want 0 — fixture wrong", name, decimalToFloat(m.Value))
+		if decutil.Float64Or(m.Value, 0) != 0 {
+			t.Fatalf("%s: CVA = %v, want 0 — fixture wrong", name, decutil.Float64Or(m.Value, 0))
 		}
 		if m.Coverage.ExcludedCount != 1 || len(m.Coverage.Exclusions) != 1 ||
 			m.Coverage.Exclusions[0].Reason != SkipNoExposures {

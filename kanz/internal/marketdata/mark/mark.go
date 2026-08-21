@@ -32,7 +32,7 @@ import (
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/eighred/kanz/internal/dec"
+	decutil "github.com/eighred/kanz/internal/dec"
 )
 
 // maxForwardSkew is how far AHEAD of our own clock a producer's timestamp may
@@ -163,7 +163,7 @@ func (s *Source) expired(e entry) bool {
 // Handle is the bus.EventHandler: it folds one MarketDataEvent's price. A Trade
 // updates the mark to the last trade price; a Quote to the bid/ask mid. Other
 // payloads (Bar) are ignored. Malformed events, non-positive prices, and prices
-// with an out-of-domain exponent (dec.FromProtoChecked) are all acked and
+// with an out-of-domain exponent (decutil.FromProtoChecked) are all acked and
 // folded as no-ops — a price monitor never wedges the partition, and it never
 // fabricates a price it could not safely compute.
 //
@@ -189,17 +189,17 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 	var price *big.Rat
 	switch {
 	case ev.GetTrade() != nil && ev.GetTrade().GetPrice() != nil:
-		p, ok := dec.FromProtoChecked(ev.GetTrade().GetPrice())
+		p, ok := decutil.FromProtoChecked(ev.GetTrade().GetPrice())
 		if !ok {
 			return nil // out-of-domain exponent: unusable, same as malformed input — never fabricate a price
 		}
 		price = p
 	case ev.GetQuote() != nil && ev.GetQuote().GetBidPrice() != nil && ev.GetQuote().GetAskPrice() != nil:
-		bid, ok := dec.FromProtoChecked(ev.GetQuote().GetBidPrice())
+		bid, ok := decutil.FromProtoChecked(ev.GetQuote().GetBidPrice())
 		if !ok {
 			return nil
 		}
-		ask, ok := dec.FromProtoChecked(ev.GetQuote().GetAskPrice())
+		ask, ok := decutil.FromProtoChecked(ev.GetQuote().GetAskPrice())
 		if !ok {
 			return nil
 		}

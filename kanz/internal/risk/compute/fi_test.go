@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"testing"
 	"time"
@@ -91,23 +92,23 @@ func TestRegisterFIRisk_PortfolioAggregation(t *testing.T) {
 		t.Fatal("DV01 measure missing")
 	}
 	wantDV01 := cr.DV01 * qty
-	if d := math.Abs(decimalToFloat(dv01.Value) - wantDV01); d > 0.5 {
-		t.Fatalf("portfolio DV01: got %.4f want %.4f", decimalToFloat(dv01.Value), wantDV01)
+	if d := math.Abs(decutil.Float64Or(dv01.Value, 0) - wantDV01); d > 0.5 {
+		t.Fatalf("portfolio DV01: got %.4f want %.4f", decutil.Float64Or(dv01.Value, 0), wantDV01)
 	}
 
 	// Single bond ⇒ MV-weighted duration is just the bond's effective duration.
 	dur, _ := ms.Lookup(MeasureDuration)
-	if d := math.Abs(decimalToFloat(dur.Value) - cr.EffectiveDuration); d > 1e-3 {
-		t.Fatalf("portfolio Duration: got %.4f want %.4f", decimalToFloat(dur.Value), cr.EffectiveDuration)
+	if d := math.Abs(decutil.Float64Or(dur.Value, 0) - cr.EffectiveDuration); d > 1e-3 {
+		t.Fatalf("portfolio Duration: got %.4f want %.4f", decutil.Float64Or(dur.Value, 0), cr.EffectiveDuration)
 	}
 	conv, _ := ms.Lookup(MeasureConvexity)
-	if decimalToFloat(conv.Value) <= 0 {
-		t.Fatalf("Convexity must be positive, got %.4f", decimalToFloat(conv.Value))
+	if decutil.Float64Or(conv.Value, 0) <= 0 {
+		t.Fatalf("Convexity must be positive, got %.4f", decutil.Float64Or(conv.Value, 0))
 	}
 	// SpreadDuration equals Duration for a bullet bond.
 	sd, _ := ms.Lookup(MeasureSpreadDuration)
-	if d := math.Abs(decimalToFloat(sd.Value) - decimalToFloat(dur.Value)); d > 1e-9 {
-		t.Fatalf("SpreadDuration should equal Duration for a bullet: %.6f vs %.6f", decimalToFloat(sd.Value), decimalToFloat(dur.Value))
+	if d := math.Abs(decutil.Float64Or(sd.Value, 0) - decutil.Float64Or(dur.Value, 0)); d > 1e-9 {
+		t.Fatalf("SpreadDuration should equal Duration for a bullet: %.6f vs %.6f", decutil.Float64Or(sd.Value, 0), decutil.Float64Or(dur.Value, 0))
 	}
 }
 
@@ -118,8 +119,8 @@ func TestRegisterFIRisk_NoBondsIsZero(t *testing.T) {
 	p.SetPosition(domain.Position{InstrumentID: "EQ", Quantity: dec(1, 0), MarketValue: &commonpb.Money{Amount: dec(5000, 0), CurrencyCode: "USD"}, AsOf: time.Now()})
 	ms := ComputeMeasures(p, r, nil)
 	dv01, _ := ms.Lookup(MeasureDV01)
-	if decimalToFloat(dv01.Value) != 0 {
-		t.Fatalf("DV01 with no bonds must be 0, got %.6f", decimalToFloat(dv01.Value))
+	if decutil.Float64Or(dv01.Value, 0) != 0 {
+		t.Fatalf("DV01 with no bonds must be 0, got %.6f", decutil.Float64Or(dv01.Value, 0))
 	}
 }
 
@@ -154,7 +155,7 @@ func TestRegisterFIRisk_ABondWithNoCurveIsReported(t *testing.T) {
 
 	ms := ComputeMeasures(p, r, nil)
 	dv01, _ := ms.Lookup(MeasureDV01)
-	if got := decimalToFloat(dv01.Value); got != 0 {
+	if got := decutil.Float64Or(dv01.Value, 0); got != 0 {
 		t.Fatalf("DV01 = %v with no curve, want 0 — the fixture is not exercising the skip", got)
 	}
 	if len(skipped) == 0 {

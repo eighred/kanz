@@ -9,10 +9,9 @@ package spotsource
 import (
 	"context"
 	"fmt"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"time"
-
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/store"
 	"github.com/eighred/kanz/internal/risk/compute"
@@ -295,7 +294,7 @@ func (p *Provider) Spot(ctx context.Context, instrumentID string, asOf time.Time
 		p.report(instrumentID, ReasonStale, age)
 		return 0, false
 	}
-	px, okPx := decimalToFloat(obs.Price)
+	px, okPx := decutil.Float64(obs.Price)
 	if !okPx || px <= 0 || math.IsInf(px, 0) || math.IsNaN(px) {
 		// REJECTED HERE EVEN THOUGH greeks.go ALSO REJECTS spot <= 0, and the
 		// duplication is deliberate. Upstream the rejection is anonymous — it
@@ -320,24 +319,6 @@ func (p *Provider) report(instrumentID, reason string, age time.Duration) {
 	if p.onUnresolved != nil {
 		p.onUnresolved(instrumentID, reason, age)
 	}
-}
-
-// decimalToFloat converts an exact common.v1.Decimal to the float the pricing
-// layer works in. ok is false for a nil decimal, so an absent price is refused
-// rather than read as 0.
-//
-// THE DECIMAL BOUNDARY IS HERE. Prices stay exact common.v1.Decimal on the wire
-// and in the store (double is banned for prices, EVT-10); Greeks are
-// float-derived analytics computed by Black-Scholes, so the lossy conversion is
-// confined to the analytics plane where a float64 input is the contract — the
-// same argument, and the same arithmetic, as dataset.decimalToFloat and
-// termsource.decimalToFloat. Converting anywhere else would put a float on a
-// path that is supposed to be exact.
-func decimalToFloat(d *commonpb.Decimal) (float64, bool) {
-	if d == nil {
-		return 0, false
-	}
-	return float64(d.GetCoefficient()) * math.Pow10(int(d.GetExponent())), true
 }
 
 // producedKinds is the set of PriceKinds ANY PRODUCTION PATH IN THIS ESTATE

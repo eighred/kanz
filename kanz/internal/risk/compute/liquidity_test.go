@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"testing"
 	"time"
@@ -47,11 +48,11 @@ func TestRegisterLiquidityRisk_LVaRNeverBelowVaR(t *testing.T) {
 	if !ok {
 		t.Fatal("LVaR99 missing")
 	}
-	if decimalToFloat(lv.Value) < decimalToFloat(v.Value) {
-		t.Fatalf("LVaR99 must be ≥ VaR99: %.2f < %.2f", decimalToFloat(lv.Value), decimalToFloat(v.Value))
+	if decutil.Float64Or(lv.Value, 0) < decutil.Float64Or(v.Value, 0) {
+		t.Fatalf("LVaR99 must be ≥ VaR99: %.2f < %.2f", decutil.Float64Or(lv.Value, 0), decutil.Float64Or(v.Value, 0))
 	}
 	// With a real liquidation cost the two diverge (LVaR strictly above VaR).
-	if decimalToFloat(lv.Value) <= decimalToFloat(v.Value) {
+	if decutil.Float64Or(lv.Value, 0) <= decutil.Float64Or(v.Value, 0) {
 		t.Fatalf("LVaR99 should exceed VaR99 given a positive liquidation cost")
 	}
 }
@@ -67,8 +68,8 @@ func TestRegisterLiquidityRisk_Horizon(t *testing.T) {
 		t.Fatal("LiquidationHorizon missing")
 	}
 	// (1,000,000×0.5 + 500,000×5)/1,500,000 = 2.0 days.
-	if d := math.Abs(decimalToFloat(h.Value) - 2.0); d > 1e-3 {
-		t.Fatalf("weighted horizon: got %.4f want 2.0", decimalToFloat(h.Value))
+	if d := math.Abs(decutil.Float64Or(h.Value, 0) - 2.0); d > 1e-3 {
+		t.Fatalf("weighted horizon: got %.4f want 2.0", decutil.Float64Or(h.Value, 0))
 	}
 }
 
@@ -85,13 +86,13 @@ func TestRegisterLiquidityRisk_StressWidens(t *testing.T) {
 
 	bh, _ := baseMS.Lookup(MeasureLiquidationHorizon)
 	sh, _ := stressedMS.Lookup(MeasureLiquidationHorizon)
-	if decimalToFloat(sh.Value) <= decimalToFloat(bh.Value) {
-		t.Fatalf("stress must widen horizon: %.4f !> %.4f", decimalToFloat(sh.Value), decimalToFloat(bh.Value))
+	if decutil.Float64Or(sh.Value, 0) <= decutil.Float64Or(bh.Value, 0) {
+		t.Fatalf("stress must widen horizon: %.4f !> %.4f", decutil.Float64Or(sh.Value, 0), decutil.Float64Or(bh.Value, 0))
 	}
 	bl, _ := baseMS.Lookup(MeasureLVaR99)
 	sl, _ := stressedMS.Lookup(MeasureLVaR99)
-	if decimalToFloat(sl.Value) <= decimalToFloat(bl.Value) {
-		t.Fatalf("stress must raise LVaR: %.2f !> %.2f", decimalToFloat(sl.Value), decimalToFloat(bl.Value))
+	if decutil.Float64Or(sl.Value, 0) <= decutil.Float64Or(bl.Value, 0) {
+		t.Fatalf("stress must raise LVaR: %.2f !> %.2f", decutil.Float64Or(sl.Value, 0), decutil.Float64Or(bl.Value, 0))
 	}
 }
 
@@ -236,7 +237,7 @@ func TestABookWhereNothingResolvedReportsZeroDaysAsASkipRatherThanAnAnswer(t *te
 	if !ok {
 		t.Fatal("LiquidationHorizon missing")
 	}
-	if got := decimalToFloat(h.Value); got != 0 {
+	if got := decutil.Float64Or(h.Value, 0); got != 0 {
 		t.Fatalf("horizon = %v, want 0 — the premise of this test is that the zero is served", got)
 	}
 	if n := obs.count(SkipNoLiquidHorizon); n != 1 {
@@ -356,10 +357,10 @@ func TestANilBaseVaRTracksTheRegistrysVaRModelRatherThanThePlaceholder(t *testin
 	if !ok {
 		t.Fatal("LVaR99 missing")
 	}
-	if got := decimalToFloat(v.Value); math.Abs(got-modelVaR) > 1e-6 {
+	if got := decutil.Float64Or(v.Value, 0); math.Abs(got-modelVaR) > 1e-6 {
 		t.Fatalf("VaR99 = %v, want the registered model's %v — the premise of this test", got, modelVaR)
 	}
-	if got := decimalToFloat(lv.Value); got < modelVaR {
+	if got := decutil.Float64Or(lv.Value, 0); got < modelVaR {
 		t.Fatalf("LVaR99 = %.2f is BELOW the registry's VaR99 %.2f — nil baseVaR captured the "+
 			"1%%-of-gross placeholder instead of the model the engine serves", got, modelVaR)
 	}
@@ -380,10 +381,10 @@ func TestAnExplicitBaseVaRIsNotOverriddenByTheRegistry(t *testing.T) {
 
 	ms := ComputeMeasures(p, r, []v1.MeasureName{MeasureLVaR99})
 	lv, _ := ms.Lookup(MeasureLVaR99)
-	if got := decimalToFloat(lv.Value); got >= 9_000_000 {
+	if got := decutil.Float64Or(lv.Value, 0); got >= 9_000_000 {
 		t.Fatalf("LVaR99 = %.2f — an explicitly passed baseVaR must not be replaced by the registry's", got)
 	}
-	if got := decimalToFloat(lv.Value); got < explicit {
+	if got := decutil.Float64Or(lv.Value, 0); got < explicit {
 		t.Fatalf("LVaR99 = %.2f is below the explicit base %.2f", got, explicit)
 	}
 }

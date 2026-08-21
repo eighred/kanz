@@ -2,6 +2,7 @@ package varmodel
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/dec"
 	"math"
 	"math/rand"
 	"sort"
@@ -69,7 +70,7 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 				continue
 			}
 			cover.Contributed++
-			values = append(values, decimalToFloat(pos.MarketValue.Amount))
+			values = append(values, dec.Float64Or(pos.MarketValue.Amount, 0))
 			series = append(series, r)
 			if minLen < 0 || len(r) < minLen {
 				minLen = len(r)

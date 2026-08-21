@@ -56,10 +56,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"time"
-
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/marketdata/indicator"
 	"github.com/eighred/kanz/internal/marketdata/store"
@@ -212,7 +210,7 @@ func (v *View) At(ctx context.Context, at time.Time) (alpha.Reading, error) {
 		Contiguous: len(run),
 	}
 	if len(run) > 0 {
-		reading.Close, reading.CloseOK = decimalFloat(run[len(run)-1].Close)
+		reading.Close, reading.CloseOK = decutil.Float64(run[len(run)-1].Close)
 	}
 
 	// Coverage is REPORTED, never a gate. AttestedWindowOf is the one place the
@@ -228,24 +226,4 @@ func (v *View) At(ctx context.Context, at time.Time) (alpha.Reading, error) {
 		Unknown:  att.Unknown,
 	}
 	return reading, nil
-}
-
-// decimalFloat converts an exact Decimal for analytic use, dividing by the power
-// of ten rather than multiplying by its inexact reciprocal — the same conversion
-// internal/alpha/outcome performs, for the same reason (#514's one-ULP drift).
-func decimalFloat(d *commonpb.Decimal) (float64, bool) {
-	if d == nil {
-		return 0, false
-	}
-	exp := int(d.GetExponent())
-	var f float64
-	if exp >= 0 {
-		f = float64(d.GetCoefficient()) * math.Pow10(exp)
-	} else {
-		f = float64(d.GetCoefficient()) / math.Pow10(-exp)
-	}
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0, false
-	}
-	return f, true
 }

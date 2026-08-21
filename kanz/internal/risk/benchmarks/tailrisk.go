@@ -2,6 +2,7 @@ package benchmarks
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/dec"
 	"math"
 	"time"
 
@@ -109,14 +110,7 @@ func tailPortfolio(values map[string]int64) *domain.Portfolio {
 
 // tailMeasure runs one measure over one fixture and returns the emitted value.
 func tailMeasure(m compute.ReturnsMeasure, p *domain.Portfolio, r legReturns) float64 {
-	return decimalFloat(m(context.Background(), p, r).Value)
-}
-
-func decimalFloat(d *commonpb.Decimal) float64 {
-	if d == nil {
-		return 0
-	}
-	return float64(d.Coefficient) * math.Pow10(int(d.Exponent))
+	return dec.Float64Or(m(context.Background(), p, r).Value, 0)
 }
 
 // varAt and esAt evaluate the two measures at a confidence over a single-leg

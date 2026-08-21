@@ -2,6 +2,7 @@ package optimization
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/dec"
 	"math"
 	"time"
 
@@ -97,7 +98,7 @@ func MandateConstraints(mandate *compliancepb.Mandate, longOnly bool) *Constrain
 		switch rule.GetType() {
 		case compliancepb.RuleType_RULE_TYPE_CONCENTRATION:
 			cl := rule.GetConcentration()
-			max := decToFloat(cl.GetMaxWeight())
+			max := dec.Float64Or(cl.GetMaxWeight(), 0)
 			switch cl.GetDimension() {
 			case compliancepb.Dimension_DIMENSION_INSTRUMENT:
 				if cl.GetBucket() != "" {
@@ -171,11 +172,4 @@ func money(amount float64, currency string) *commonpb.Money {
 		Amount:       &commonpb.Decimal{Coefficient: int64(math.Round(amount * 100)), Exponent: -2},
 		CurrencyCode: currency,
 	}
-}
-
-func decToFloat(d *commonpb.Decimal) float64 {
-	if d == nil {
-		return 0
-	}
-	return float64(d.GetCoefficient()) * math.Pow10(int(d.GetExponent()))
 }

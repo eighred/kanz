@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	decutil "github.com/eighred/kanz/internal/dec"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -60,6 +61,6 @@ func (rv *BondRevaluer) RevalueBond(ctx context.Context, instrumentID string, as
 	}
 	shocked := bond.PriceFromCurve(asOf, shift.Apply(c))
 	ratio := shocked / base
-	newAmount := decimalToFloat(baseMV.GetAmount()) * ratio
+	newAmount := decutil.Float64Or(baseMV.GetAmount(), 0) * ratio
 	return &commonpb.Money{Amount: floatToDecimal(newAmount, revalMoneyExp), CurrencyCode: baseMV.GetCurrencyCode()}, true
 }
