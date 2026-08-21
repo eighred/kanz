@@ -50,6 +50,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"os"
 	"time"
 
@@ -196,11 +197,11 @@ func householdEvent(opt options, hv *wealthpb.HouseholdValued) bus.Event {
 func parseFlags(args []string) (options, error) {
 	fs := flag.NewFlagSet("kanz-household", flag.ContinueOnError)
 	var opt options
-	fs.StringVar(&opt.natsURL, "nats", envOr("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
-	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
+	fs.StringVar(&opt.natsURL, "nats", env.Or("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
+	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", env.Or("SPIFFE_ENDPOINT_SOCKET", ""),
 		"SPIFFE Workload API socket for the operator SVID the production broker requires.\n"+
 			"Empty ⇒ a PLAINTEXT dial: fine against a local dev broker, refused by production.")
-	fs.StringVar(&opt.tenant, "tenant", envOr("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED (the bus rejects an untenanted envelope)")
+	fs.StringVar(&opt.tenant, "tenant", env.Or("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED (the bus rejects an untenanted envelope)")
 	fs.StringVar(&opt.file, "file", "", "path to the valuation, as protojson wealth.v1.HouseholdValued — REQUIRED")
 	fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)
 	fs.StringVar(&opt.reason, "reason", "", "why this valuation is being published, e.g. the advisor/custodial feed it transcribes — REQUIRED")
@@ -273,11 +274,4 @@ func loadValuation(path string) (*wealthpb.HouseholdValued, error) {
 	}
 
 	return &hv, nil
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }

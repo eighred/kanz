@@ -1,9 +1,9 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
-	"strings"
 
 	"github.com/eighred/kanz/internal/wealth"
 	"github.com/eighred/kanz/pkg/secret"
@@ -61,7 +61,7 @@ type Config struct {
 // Load reads the configuration from the environment with production-safe
 // defaults.
 func Load() (Config, error) {
-	subjects := splitList(os.Getenv("WEALTH_SUBJECTS"))
+	subjects := env.SplitList(os.Getenv("WEALTH_SUBJECTS"))
 	if len(subjects) == 0 {
 		subjects = []string{wealth.SubjectHouseholdAll}
 	}
@@ -78,48 +78,17 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Listen:       envOr("WEALTH_LISTEN", ":8080"),
-		LogLevel:     parseLevel(os.Getenv("WEALTH_LOG_LEVEL")),
+		Listen:       env.Or("WEALTH_LISTEN", ":8080"),
+		LogLevel:     env.ParseLevelOr(os.Getenv("WEALTH_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint: os.Getenv("WEALTH_OTLP_ENDPOINT"),
 		DatabaseURL:  databaseURL,
-		Tenant:       envOr("WEALTH_TENANT", "__system__"),
+		Tenant:       env.Or("WEALTH_TENANT", "__system__"),
 
 		AllowEphemeralBook: os.Getenv("WEALTH_ALLOW_EPHEMERAL_BOOK") == "true",
 		NATSURL:            os.Getenv("WEALTH_NATS_URL"),
-		Source:             envOr("WEALTH_SOURCE", "wealth"),
-		ConsumerGroup:      envOr("WEALTH_CONSUMER_GROUP", "wealth"),
+		Source:             env.Or("WEALTH_SOURCE", "wealth"),
+		ConsumerGroup:      env.Or("WEALTH_CONSUMER_GROUP", "wealth"),
 		Subjects:           subjects,
 		SPIFFESocket:       os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
-}
-
-// splitList parses a comma-separated env value into a trimmed, non-empty slice.
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

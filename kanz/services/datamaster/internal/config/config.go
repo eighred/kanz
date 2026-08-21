@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strconv"
@@ -152,17 +153,17 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen:          envOr("DATAMASTER_LISTEN", ":8080"),
-		LogLevel:        parseLevel(os.Getenv("DATAMASTER_LOG_LEVEL")),
+		Listen:          env.Or("DATAMASTER_LISTEN", ":8080"),
+		LogLevel:        env.ParseLevelOr(os.Getenv("DATAMASTER_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint:    os.Getenv("DATAMASTER_OTLP_ENDPOINT"),
 		DatabaseURL:     databaseURL,
-		Tenant:          envOr("DATAMASTER_TENANT", "__system__"),
+		Tenant:          env.Or("DATAMASTER_TENANT", "__system__"),
 		RefreshInterval: durationOr("DATAMASTER_REFRESH_INTERVAL", 5*time.Minute),
 		AllowSim:        boolOr("DATAMASTER_ALLOW_SIM", false),
 
 		AllowEphemeralMaster: boolOr("DATAMASTER_ALLOW_EPHEMERAL_MASTER", false),
 
-		Source:             envOr("DATAMASTER_SOURCE", "datamaster"),
+		Source:             env.Or("DATAMASTER_SOURCE", "datamaster"),
 		SPIFFESocket:       os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		NATSURL:            os.Getenv("DATAMASTER_NATS_URL"),
 		OutboxInterval:     durationOr("DATAMASTER_OUTBOX_INTERVAL", 0),
@@ -228,14 +229,6 @@ func parsePriorities(s string) (map[string]int, error) {
 	}
 	return out, nil
 }
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
 func boolOr(key string, def bool) bool {
 	v, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(key)))
 	if err != nil {
@@ -250,17 +243,4 @@ func durationOr(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

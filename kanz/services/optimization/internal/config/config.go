@@ -2,9 +2,9 @@ package config
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
-	"strings"
 )
 
 // Config is the optimization service runtime configuration, sourced from the
@@ -89,13 +89,13 @@ type Config struct {
 // defaults.
 func Load() (Config, error) {
 	cfg := Config{
-		Listen:        envOr("OPTIMIZATION_LISTEN", ":8100"),
-		MetricsListen: envOr("OPTIMIZATION_METRICS_LISTEN", ":8094"),
+		Listen:        env.Or("OPTIMIZATION_LISTEN", ":8100"),
+		MetricsListen: env.Or("OPTIMIZATION_METRICS_LISTEN", ":8094"),
 		NATSURL:       os.Getenv("OPTIMIZATION_NATS_URL"),
-		Source:        envOr("OPTIMIZATION_SOURCE", "optimization"),
+		Source:        env.Or("OPTIMIZATION_SOURCE", "optimization"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		AutoPublish:   os.Getenv("OPTIMIZATION_AUTO_PUBLISH") == "true",
-		LogLevel:      parseLevel(os.Getenv("OPTIMIZATION_LOG_LEVEL")),
+		LogLevel:      env.ParseLevelOr(os.Getenv("OPTIMIZATION_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint:  os.Getenv("OPTIMIZATION_OTLP_ENDPOINT"),
 	}
 
@@ -117,24 +117,4 @@ func Load() (Config, error) {
 			"says otherwise is worse than one that does neither")
 	}
 	return cfg, nil
-}
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

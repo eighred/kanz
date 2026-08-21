@@ -1,9 +1,9 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
-	"strings"
 )
 
 // Config is the performance service runtime configuration, sourced from the
@@ -25,28 +25,8 @@ type Config struct {
 // defaults.
 func Load() (Config, error) {
 	return Config{
-		Listen:       envOr("PERFORMANCE_LISTEN", ":8080"),
-		LogLevel:     parseLevel(os.Getenv("PERFORMANCE_LOG_LEVEL")),
+		Listen:       env.Or("PERFORMANCE_LISTEN", ":8080"),
+		LogLevel:     env.ParseLevelOr(os.Getenv("PERFORMANCE_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint: os.Getenv("PERFORMANCE_OTLP_ENDPOINT"),
 	}, nil
-}
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

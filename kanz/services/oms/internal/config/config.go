@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"math/big"
 	"os"
@@ -350,31 +351,55 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// OMS_PRICE_SUBJECTS IS READ STRICTLY, NOT THROUGH env.Or's DEFAULT (#641).
+	//
+	// env.Or treats a key that is set-but-blank as unset and returns the default,
+	// which is the estate's established convention: eight manifests carry
+	// `value: ""` to mean "not configured", and OMS_VENUE_ACCOUNTS in this very
+	// service is one of them.
+	//
+	// THIS KEY IS THE EXCEPTION AND MUST STAY ONE. An operator who sets it to " "
+	// or "," has said something, and quietly substituting the compiled-in default
+	// would hide it — while accepting the blank list is worse still, because a pod
+	// subscribing to nothing folds no marks and refuses every MARKET/STOP order
+	// forever. TestEmptyPriceSubjectsIsAnError exists for exactly that, and it
+	// caught this the moment the unified helper landed.
+	//
+	// Lookup returns the trimmed value and whether the key was set to anything
+	// meaningful, so a blank one reaches the len()==0 refusal below instead of the
+	// default.
+	priceSubjectsRaw := "market.*.trade,market.*.quote"
+	if v, ok := env.Lookup("OMS_PRICE_SUBJECTS"); ok {
+		priceSubjectsRaw = v
+	} else if _, set := os.LookupEnv("OMS_PRICE_SUBJECTS"); set {
+		priceSubjectsRaw = "" // set-but-blank: refuse below rather than fall back
+	}
+
 	cfg := Config{
-		Listen: envOr("OMS_LISTEN", ":8090"),
+		Listen: env.Or("OMS_LISTEN", ":8090"),
 		// NO DEFAULT, DELIBERATELY. A read surface that appears because nobody
 		// set a variable is a port opened by omission; the api-gateway has to be
 		// pointed at it either way, so naming it is one line of config and the
 		// difference between "serving" and "configured to serve".
 		GRPCListen:              os.Getenv("OMS_GRPC_LISTEN"),
-		LogLevel:                parseLevel(envOr("OMS_LOG_LEVEL", "info")),
-		Source:                  envOr("OMS_SOURCE", "oms"),
+		LogLevel:                env.ParseLevelOr(env.Or("OMS_LOG_LEVEL", "info"), slog.LevelInfo),
+		Source:                  env.Or("OMS_SOURCE", "oms"),
 		OTLPEndpoint:            os.Getenv("OMS_OTLP_ENDPOINT"),
 		NATSURL:                 os.Getenv("OMS_NATS_URL"),
-		ConsumerGroup:           envOr("OMS_CONSUMER_GROUP", "oms"),
+		ConsumerGroup:           env.Or("OMS_CONSUMER_GROUP", "oms"),
 		DatabaseURL:             databaseURL,
-		Tenant:                  envOr("OMS_TENANT", "__system__"),
+		Tenant:                  env.Or("OMS_TENANT", "__system__"),
 		RequireMandate:          os.Getenv("OMS_REQUIRE_MANDATE") == "true",
 		VenueAccounts:           os.Getenv("OMS_VENUE_ACCOUNTS"),
 		RequireVenueAccount:     os.Getenv("OMS_REQUIRE_VENUE_ACCOUNT") == "true",
 		RequireVerifiedAccount:  os.Getenv("OMS_REQUIRE_VERIFIED_ACCOUNT") == "true",
 		RequireOrderTypeSupport: os.Getenv("OMS_REQUIRE_ORDER_TYPE_SUPPORT") == "true",
-		SimVenueMIC:             envOr("OMS_SIM_VENUE_MIC", "XSIM"),
+		SimVenueMIC:             env.Or("OMS_SIM_VENUE_MIC", "XSIM"),
 		DefaultVenueMIC:         os.Getenv("OMS_DEFAULT_VENUE_MIC"),
 		VenueEndpoints:          os.Getenv("OMS_VENUE_ENDPOINTS"),
 		SPIFFESocket:            os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
-		BaseCurrency:            envOr("OMS_BASE_CURRENCY", "USD"),
-		PriceSubjects:           splitSubjects(envOr("OMS_PRICE_SUBJECTS", "market.*.trade,market.*.quote")),
+		BaseCurrency:            env.Or("OMS_BASE_CURRENCY", "USD"),
+		PriceSubjects:           splitSubjects(priceSubjectsRaw),
 	}
 
 	if len(cfg.PriceSubjects) == 0 {
@@ -382,7 +407,7 @@ func Load() (Config, error) {
 			"a pod subscribing to nothing folds no marks and refuses every MARKET/STOP order")
 	}
 
-	maxAge, err := time.ParseDuration(envOr("OMS_PRICE_MAX_AGE", "30s"))
+	maxAge, err := time.ParseDuration(env.Or("OMS_PRICE_MAX_AGE", "30s"))
 	if err != nil {
 		return Config{}, fmt.Errorf("OMS_PRICE_MAX_AGE: %w", err)
 	}
@@ -398,7 +423,7 @@ func Load() (Config, error) {
 	// bounded only by the next pod restart. "0" turns it off, and is the value an
 	// operator with a very large resting book sets deliberately after reading
 	// what a tick costs (see Config.SweepInterval).
-	sweepInterval, err := time.ParseDuration(envOr("OMS_SWEEP_INTERVAL", "60s"))
+	sweepInterval, err := time.ParseDuration(env.Or("OMS_SWEEP_INTERVAL", "60s"))
 	if err != nil {
 		return Config{}, fmt.Errorf("OMS_SWEEP_INTERVAL: %w", err)
 	}
@@ -416,7 +441,7 @@ func Load() (Config, error) {
 	//
 	// "0" turns the driver off, which means every parent order rests forever. It
 	// is a deliberate, stated choice and the OMS warns at boot when it is set.
-	scheduleInterval, err := time.ParseDuration(envOr("OMS_SCHEDULE_INTERVAL", "10s"))
+	scheduleInterval, err := time.ParseDuration(env.Or("OMS_SCHEDULE_INTERVAL", "10s"))
 	if err != nil {
 		return Config{}, fmt.Errorf("OMS_SCHEDULE_INTERVAL: %w", err)
 	}
@@ -432,7 +457,7 @@ func Load() (Config, error) {
 	// with the broker's own redelivery or with a live admission that has not yet
 	// taken its claim. Lowering it below those does not make recovery faster; it
 	// makes the compensator race the thing already recovering.
-	sweepMinAge, err := time.ParseDuration(envOr("OMS_SWEEP_MIN_AGE", "2m"))
+	sweepMinAge, err := time.ParseDuration(env.Or("OMS_SWEEP_MIN_AGE", "2m"))
 	if err != nil {
 		return Config{}, fmt.Errorf("OMS_SWEEP_MIN_AGE: %w", err)
 	}
@@ -453,7 +478,7 @@ func Load() (Config, error) {
 	// already committed, which would leave the OMS admitting orders and telling
 	// nobody — permanently, and with the store looking perfectly healthy. There
 	// is no off switch, so nobody can reach for one.
-	outboxInterval, err := time.ParseDuration(envOr("OMS_OUTBOX_INTERVAL", "1s"))
+	outboxInterval, err := time.ParseDuration(env.Or("OMS_OUTBOX_INTERVAL", "1s"))
 	if err != nil {
 		return Config{}, fmt.Errorf("OMS_OUTBOX_INTERVAL: %w", err)
 	}
@@ -586,13 +611,6 @@ func parseNotional(s string) (*big.Rat, string, error) {
 	return amount, currency, nil
 }
 
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
 // splitSubjects parses a comma-separated subject list, trimming whitespace and
 // dropping empty entries. An all-empty input yields an empty slice, which Load
 // rejects — subscribing to nothing is a silent trading outage, not a default.
@@ -605,17 +623,4 @@ func splitSubjects(s string) []string {
 		}
 	}
 	return out
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

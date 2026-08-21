@@ -44,6 +44,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"os"
 	"strings"
 	"time"
@@ -191,14 +192,14 @@ func run(args []string, out *os.File) error {
 func parseFlags(args []string) (options, error) {
 	fs := flag.NewFlagSet("kanz-halt", flag.ContinueOnError)
 	var opt options
-	fs.StringVar(&opt.natsURL, "nats", envOr("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
-	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
+	fs.StringVar(&opt.natsURL, "nats", env.Or("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
+	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", env.Or("SPIFFE_ENDPOINT_SOCKET", ""),
 		"SPIFFE Workload API socket for the operator SVID the production broker requires\n"+
 			"(e.g. unix:///run/spiffe/spire-agent.sock). Empty ⇒ a PLAINTEXT dial: fine against\n"+
 			"a local dev broker, refused by production. See infra/nats/halt-job.yaml.")
 	fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)
 	fs.StringVar(&opt.reason, "reason", "", "why the mode is changing; recorded in the FACT — REQUIRED")
-	fs.StringVar(&opt.tenant, "tenant", envOr("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED.\n"+
+	fs.StringVar(&opt.tenant, "tenant", env.Or("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED.\n"+
 		"\tAUDIT/ROUTING ONLY. The halt is PLATFORM-WIDE: the gate ignores this field\n"+
 		"\tand stops every tenant's execution. There is no per-tenant halt today.")
 	fs.StringVar(&opt.previous, "previous", "", "the mode in effect before this transition\n"+
@@ -272,11 +273,4 @@ func parseMode(s string) (lifecyclepb.OperatingMode, error) {
 		return lifecyclepb.OperatingMode_OPERATING_MODE_UNSPECIFIED,
 			fmt.Errorf("--previous %q: want normal|degraded|maintenance|halted", s)
 	}
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

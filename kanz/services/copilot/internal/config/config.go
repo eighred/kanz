@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strings"
@@ -136,41 +137,21 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Listen:          envOr("COPILOT_LISTEN", ":8080"),
-		LogLevel:        parseLevel(os.Getenv("COPILOT_LOG_LEVEL")),
-		ModelID:         envOr("COPILOT_MODEL_ID", llm.DefaultModelID),
+		Listen:          env.Or("COPILOT_LISTEN", ":8080"),
+		LogLevel:        env.ParseLevelOr(os.Getenv("COPILOT_LOG_LEVEL"), slog.LevelInfo),
+		ModelID:         env.Or("COPILOT_MODEL_ID", llm.DefaultModelID),
 		AnthropicAPIKey: anthropicAPIKey,
 		Provider:        strings.TrimSpace(os.Getenv("COPILOT_PROVIDER")),
 		AllowStub:       os.Getenv("COPILOT_ALLOW_STUB") == "true",
 
 		OpenRouterAPIKey:  openRouterAPIKey,
-		OpenRouterBaseURL: envOr("COPILOT_OPENROUTER_BASE_URL", DefaultOpenRouterBaseURL),
+		OpenRouterBaseURL: env.Or("COPILOT_OPENROUTER_BASE_URL", DefaultOpenRouterBaseURL),
 		PolicyPath:        os.Getenv("COPILOT_POLICY_PATH"),
 		LineageAddr:       os.Getenv("COPILOT_LINEAGE_ADDR"),
 		RiskQueryAddr:     os.Getenv("COPILOT_RISK_QUERY_ADDR"),
 		SPIFFESocket:      os.Getenv("COPILOT_SPIFFE_SOCKET"),
 		OTLPEndpoint:      os.Getenv("COPILOT_OTLP_ENDPOINT"),
 		NATSURL:           os.Getenv("COPILOT_NATS_URL"),
-		Tenant:            envOr("COPILOT_TENANT", bus.SystemTenant),
+		Tenant:            env.Or("COPILOT_TENANT", bus.SystemTenant),
 	}, nil
-}
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

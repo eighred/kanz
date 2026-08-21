@@ -96,6 +96,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"io"
 	"os"
 	"time"
@@ -316,7 +317,7 @@ func runApprove(args []string, out io.Writer) error {
 func parseFlags(sub string, args []string) (options, error) {
 	fs := flag.NewFlagSet("kanz-mandate "+sub, flag.ContinueOnError)
 	var opt options
-	fs.StringVar(&opt.tenant, "tenant", envOr("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED (the bus rejects an untenanted envelope)")
+	fs.StringVar(&opt.tenant, "tenant", env.Or("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED (the bus rejects an untenanted envelope)")
 	fs.StringVar(&opt.file, "file", "", "path to the mandate, as protojson compliance.v1.Mandate — REQUIRED")
 	fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)
 	switch sub {
@@ -326,8 +327,8 @@ func parseFlags(sub string, args []string) (options, error) {
 		fs.DurationVar(&opt.ttl, "ttl", dualcontrol.DefaultTTL, "how long the proposal stays approvable")
 	case "approve":
 		fs.StringVar(&opt.proposal, "proposal", "", "path to the proposal emitted by `kanz-mandate propose` — REQUIRED")
-		fs.StringVar(&opt.natsURL, "nats", envOr("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
-		fs.StringVar(&opt.spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
+		fs.StringVar(&opt.natsURL, "nats", env.Or("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
+		fs.StringVar(&opt.spiffeSocket, "spiffe-socket", env.Or("SPIFFE_ENDPOINT_SOCKET", ""),
 			"SPIFFE Workload API socket for the operator SVID the production broker requires.\n"+
 				"Empty ⇒ a PLAINTEXT dial: fine against a local dev broker, refused by production.")
 		fs.BoolVar(&opt.dryRun, "dry-run", false, "validate the approval and print, publish nothing")
@@ -410,11 +411,4 @@ func loadMandate(path, tenant string) (*compliancepb.Mandate, error) {
 			"The portfolio will be governed by a mandate that constrains nothing.")
 	}
 	return &m, nil
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }

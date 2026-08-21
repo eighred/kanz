@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strings"
@@ -79,13 +80,13 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen:        envOr("TV_SYNC_LISTEN", ":8091"),
-		LogLevel:      parseLevel(os.Getenv("TV_SYNC_LOG_LEVEL")),
+		Listen:        env.Or("TV_SYNC_LISTEN", ":8091"),
+		LogLevel:      env.ParseLevelOr(os.Getenv("TV_SYNC_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint:  os.Getenv("TV_SYNC_OTLP_ENDPOINT"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
-		NATSURL:       envOr("TV_SYNC_NATS_URL", "nats://localhost:4222"),
-		Source:        envOr("TV_SYNC_SOURCE", "tv-sync"),
-		ConsumerGroup: envOr("TV_SYNC_CONSUMER_GROUP", "tv-sync"),
+		NATSURL:       env.Or("TV_SYNC_NATS_URL", "nats://localhost:4222"),
+		Source:        env.Or("TV_SYNC_SOURCE", "tv-sync"),
+		ConsumerGroup: env.Or("TV_SYNC_CONSUMER_GROUP", "tv-sync"),
 		PriceSubjects: splitSubjects(priceSubjectsEnv()),
 		DatabaseURL:   databaseURL,
 		Tenant:        os.Getenv("TV_SYNC_TENANT"),
@@ -150,24 +151,4 @@ func splitSubjects(s string) []string {
 		}
 	}
 	return out
-}
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

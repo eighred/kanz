@@ -8,6 +8,8 @@ package config
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/pkg/secret"
 	"os"
 	"strings"
 )
@@ -108,9 +110,34 @@ func Load() (Config, error) {
 		)
 	}
 
+	// THE VAULT TOKEN GOES THROUGH pkg/secret LIKE EVERY OTHER MOUNTED SECRET (#641).
+	//
+	// This was a local readTokenOr(fileEnv, valueEnv) that read the mount path
+	// and discarded the read error, falling through to the plaintext env var on
+	// failure — the EIGHTEENTH copy of the defect #64 deleted. pkg/secret's own
+	// doc names it: fifteen of them discarded the read error, leaving a
+	// mounted-but-unreadable secret indistinguishable from one nobody
+	// configured.
+	//
+	// It matters more here than at the seventeen: this is the VAULT token, the
+	// credential that unlocks every other secret. A mis-mounted VAULT_TOKEN_FILE
+	// left the operator starting cleanly on whatever VAULT_TOKEN happened to
+	// hold, or on "".
+	//
+	// TestOnlyOnePlaceResolvesSecrets did not catch it, and the reason is worth
+	// keeping: that guard requires a key built from the mount-path suffix AND a
+	// file read, in one file. This helper took the full key name as a PARAMETER,
+	// so the suffix was never written as a literal and the pattern did not match.
+	// Filed as its own issue — the guard checks a weaker property than its name
+	// claims, and it greps raw source, so prose describing the defect trips it.
+	vaultToken, err := secret.Read("VAULT_TOKEN")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
-		GRPCListen:   envOr("OPERATOR_GRPC_LISTEN", ":9090"),
-		HealthListen: envOr("OPERATOR_HEALTH_LISTEN", ":8091"),
+		GRPCListen:   env.Or("OPERATOR_GRPC_LISTEN", ":9090"),
+		HealthListen: env.Or("OPERATOR_HEALTH_LISTEN", ":8091"),
 
 		ProvisionerImage:           os.Getenv("OPERATOR_PROVISIONER_IMAGE"),
 		K3sServerURL:               os.Getenv("OPERATOR_K3S_SERVER_URL"),
@@ -118,9 +145,9 @@ func Load() (Config, error) {
 		ProvisionerImagePullPolicy: imagePullPolicy,
 
 		SecretBackend:        os.Getenv("OPERATOR_SECRET_BACKEND"),
-		VenueSecretNamespace: envOr("OPERATOR_VENUE_SECRET_NAMESPACE", "kanz-services"),
+		VenueSecretNamespace: env.Or("OPERATOR_VENUE_SECRET_NAMESPACE", "kanz-services"),
 		VaultAddr:            os.Getenv("VAULT_ADDR"),
-		VaultToken:           readTokenOr("VAULT_TOKEN_FILE", "VAULT_TOKEN"),
+		VaultToken:           vaultToken,
 
 		VenueProof:     venueProof,
 		VenueBaseURLs:  venueBaseURLs(),
@@ -143,26 +170,4 @@ func venueBaseURLs() map[string]string {
 		out["binance"] = v
 	}
 	return out
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
-// readTokenOr reads the token from the file named by $fileEnv, if set and
-// readable, else falls back to $valueEnv. This mirrors the file-based secret
-// mounting convention (e.g. Vault Agent injector) without requiring the
-// token to ever be a plain environment variable in production.
-func readTokenOr(fileEnv, valueEnv string) string {
-	if path := os.Getenv(fileEnv); path != "" {
-		if b, err := os.ReadFile(path); err == nil {
-			if tok := strings.TrimSpace(string(b)); tok != "" {
-				return tok
-			}
-		}
-	}
-	return os.Getenv(valueEnv)
 }

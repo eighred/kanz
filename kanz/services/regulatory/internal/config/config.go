@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strings"
@@ -54,32 +55,12 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Listen:       envOr("REGULATORY_LISTEN", ":8083"),
-		LogLevel:     parseLevel(os.Getenv("REGULATORY_LOG_LEVEL")),
-		Signer:       strings.ToLower(envOr("REGULATORY_SIGNER", "chain")),
+		Listen:       env.Or("REGULATORY_LISTEN", ":8083"),
+		LogLevel:     env.ParseLevelOr(os.Getenv("REGULATORY_LOG_LEVEL"), slog.LevelInfo),
+		Signer:       strings.ToLower(env.Or("REGULATORY_SIGNER", "chain")),
 		DatabaseURL:  databaseURL,
 		OTLPEndpoint: os.Getenv("REGULATORY_OTLP_ENDPOINT"),
 
 		AllowEphemeralChain: os.Getenv("REGULATORY_ALLOW_EPHEMERAL_CHAIN") == "true",
 	}, nil
-}
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }
