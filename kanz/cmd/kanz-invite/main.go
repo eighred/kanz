@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"net/url"
 	"os"
 	"strings"
@@ -63,7 +64,7 @@ func run() int {
 	// ROLES ARE THE AUTHORITY BEING GRANTED, so an empty list is refused rather
 	// than treated as "none" — an invitation that grants nothing is never what
 	// somebody meant to type, and a typo'd flag would produce exactly that.
-	roleList := splitList(*roles)
+	roleList := env.SplitList(*roles)
 	if len(roleList) == 0 {
 		fmt.Fprintln(os.Stderr, "kanz-invite: -roles parsed to an empty list; an invitation that grants "+
 			"no authority creates an account that can do nothing")
@@ -86,7 +87,7 @@ func run() int {
 		return 1
 	}
 	inv, err := identity.NewInvite(uuid.NewString(), hash, *subject, *tenant,
-		roleList, splitList(*portfolios), *by, time.Now().UTC(), *ttl)
+		roleList, env.SplitList(*portfolios), *by, time.Now().UTC(), *ttl)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kanz-invite: %v\n", err)
 		return 2
@@ -127,17 +128,6 @@ func secretKind(appURL string) string {
 	}
 	return "token"
 }
-
-func splitList(v string) []string {
-	var out []string
-	for _, p := range strings.Split(v, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 func listOrNone(v []string) string {
 	if len(v) == 0 {
 		return "(none)"

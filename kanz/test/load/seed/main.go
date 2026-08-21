@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log"
 	"os"
 	"strconv"
@@ -46,9 +47,9 @@ const (
 )
 
 func main() {
-	url := envOr("SEED_NATS_URL", "nats://localhost:4222")
-	prefix := envOr("SEED_PORTFOLIO", "PF1")
-	tenant := envOr("SEED_TENANT", "load-test")
+	url := env.Or("SEED_NATS_URL", "nats://localhost:4222")
+	prefix := env.Or("SEED_PORTFOLIO", "PF1")
+	tenant := env.Or("SEED_TENANT", "load-test")
 	// SEED_PORTFOLIOS scales the seed to a production-shaped book count
 	// (PARITY-05d): >1 publishes <prefix>-0000..<prefix>-NNNN so the read mix
 	// and the sharded recompute (PARITY-05a) spread across many portfolios, not
@@ -166,13 +167,6 @@ func money(coefficient int64, exponent int32) *commonpb.Money {
 }
 
 func timestamp(t time.Time) *timestamppb.Timestamp { return timestamppb.New(t) }
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
 
 // envInt reads an int env var, returning def when unset or unparseable.
 func envInt(k string, def int) int {

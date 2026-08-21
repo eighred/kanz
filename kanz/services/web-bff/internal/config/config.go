@@ -8,6 +8,7 @@ package config
 
 import (
 	"errors"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strings"
@@ -73,12 +74,12 @@ type Config struct {
 // production-safe defaults, and validates the required values.
 func Load() (Config, error) {
 	cfg := Config{
-		Listen:        envOr("WEB_BFF_LISTEN", ":8084"),
-		LogLevel:      parseLevel(os.Getenv("WEB_BFF_LOG_LEVEL")),
+		Listen:        env.Or("WEB_BFF_LISTEN", ":8084"),
+		LogLevel:      env.ParseLevelOr(os.Getenv("WEB_BFF_LOG_LEVEL"), slog.LevelInfo),
 		Issuer:        strings.TrimRight(os.Getenv("WEB_BFF_SSO_ISSUER"), "/"),
-		ClientID:      envOr("WEB_BFF_CLIENT_ID", "kanz-web"),
+		ClientID:      env.Or("WEB_BFF_CLIENT_ID", "kanz-web"),
 		RedirectURL:   os.Getenv("WEB_BFF_REDIRECT_URL"),
-		Scope:         envOr("WEB_BFF_SCOPE", "openid profile"),
+		Scope:         env.Or("WEB_BFF_SCOPE", "openid profile"),
 		GatewayURL:    strings.TrimRight(os.Getenv("WEB_BFF_GATEWAY_URL"), "/"),
 		SessionTTL:    parseDuration(os.Getenv("WEB_BFF_SESSION_TTL"), time.Hour),
 		SecureCookies: os.Getenv("WEB_BFF_INSECURE_COOKIES") == "",
@@ -86,7 +87,7 @@ func Load() (Config, error) {
 
 		IdentityURL:        strings.TrimRight(os.Getenv("WEB_BFF_IDENTITY_URL"), "/"),
 		TrustedProxyHeader: os.Getenv("WEB_BFF_TRUSTED_PROXY_HEADER"),
-		TrustedProxies:     splitList(os.Getenv("WEB_BFF_TRUSTED_PROXIES")),
+		TrustedProxies:     env.SplitList(os.Getenv("WEB_BFF_TRUSTED_PROXIES")),
 		StaticDir:          os.Getenv("WEB_BFF_STATIC_DIR"),
 	}
 	if cfg.IdentityURL == "" {
@@ -119,14 +120,6 @@ func Load() (Config, error) {
 	}
 	return cfg, nil
 }
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
 func parseDuration(s string, def time.Duration) time.Duration {
 	if s == "" {
 		return def
@@ -136,28 +129,4 @@ func parseDuration(s string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
-}
-
-// splitList parses a comma-separated environment value, dropping blanks.
-func splitList(v string) []string {
-	var out []string
-	for _, p := range strings.Split(v, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }

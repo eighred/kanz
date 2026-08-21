@@ -1,9 +1,9 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/eighred/kanz/pkg/secret"
@@ -101,7 +101,7 @@ type Config struct {
 var DefaultSubjects = []string{"market.>"}
 
 func Load() (Config, error) {
-	subjects := splitList(os.Getenv("MARKET_DATA_SUBJECTS"))
+	subjects := env.SplitList(os.Getenv("MARKET_DATA_SUBJECTS"))
 	if len(subjects) == 0 {
 		subjects = DefaultSubjects
 	}
@@ -118,57 +118,25 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Listen:        envOr("MARKET_DATA_LISTEN", ":8082"),
-		LogLevel:      parseLevel(envOr("MARKET_DATA_LOG_LEVEL", "info")),
+		Listen:        env.Or("MARKET_DATA_LISTEN", ":8082"),
+		LogLevel:      env.ParseLevelOr(env.Or("MARKET_DATA_LOG_LEVEL", "info"), slog.LevelInfo),
 		NATSURL:       os.Getenv("MARKET_DATA_NATS_URL"),
-		Source:        envOr("MARKET_DATA_SOURCE", "market-data"),
-		ConsumerGroup: envOr("MARKET_DATA_CONSUMER_GROUP", "market-data"),
+		Source:        env.Or("MARKET_DATA_SOURCE", "market-data"),
+		ConsumerGroup: env.Or("MARKET_DATA_CONSUMER_GROUP", "market-data"),
 		Subjects:      subjects,
 		DatabaseURL:   databaseURL,
 		OTLPEndpoint:  os.Getenv("MARKET_DATA_OTLP_ENDPOINT"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 
 		Feed:            os.Getenv("MARKET_DATA_FEED"),
-		FeedInstruments: splitList(os.Getenv("MARKET_DATA_FEED_INSTRUMENTS")),
-		FeedAssetClass:  envOr("MARKET_DATA_FEED_ASSET_CLASS", "equity"),
-		Tenant:          envOr("MARKET_DATA_TENANT", "__system__"),
+		FeedInstruments: env.SplitList(os.Getenv("MARKET_DATA_FEED_INSTRUMENTS")),
+		FeedAssetClass:  env.Or("MARKET_DATA_FEED_ASSET_CLASS", "equity"),
+		Tenant:          env.Or("MARKET_DATA_TENANT", "__system__"),
 
 		RollupSeries:       os.Getenv("MARKET_DATA_ROLLUP_SERIES"),
 		RollupInterval:     rollupDur("MARKET_DATA_ROLLUP_INTERVAL", DefaultRollupInterval),
 		RollupWatermarkLag: rollupDur("MARKET_DATA_ROLLUP_WATERMARK_LAG", DefaultRollupWatermarkLag),
 	}, nil
-}
-
-// splitList parses a comma-separated env value into a trimmed, non-empty slice;
-// an empty or all-whitespace value yields nil.
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }
 
 // Rollup defaults.

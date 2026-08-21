@@ -1,9 +1,9 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
-	"strings"
 
 	"github.com/eighred/kanz/pkg/secret"
 )
@@ -99,7 +99,7 @@ type Config struct {
 var DefaultSubjects = []string{">"}
 
 func Load() (Config, error) {
-	subjects := splitList(os.Getenv("AUDIT_SUBJECTS"))
+	subjects := env.SplitList(os.Getenv("AUDIT_SUBJECTS"))
 	if len(subjects) == 0 {
 		subjects = DefaultSubjects
 	}
@@ -113,48 +113,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return Config{
-		Listen:            envOr("AUDIT_LISTEN", ":8083"),
-		LogLevel:          parseLevel(envOr("AUDIT_LOG_LEVEL", "info")),
+		Listen:            env.Or("AUDIT_LISTEN", ":8083"),
+		LogLevel:          env.ParseLevelOr(env.Or("AUDIT_LOG_LEVEL", "info"), slog.LevelInfo),
 		NATSURL:           os.Getenv("AUDIT_NATS_URL"),
-		Source:            envOr("AUDIT_SOURCE", "audit"),
-		ConsumerGroup:     envOr("AUDIT_CONSUMER_GROUP", "audit"),
+		Source:            env.Or("AUDIT_SOURCE", "audit"),
+		ConsumerGroup:     env.Or("AUDIT_CONSUMER_GROUP", "audit"),
 		Subjects:          subjects,
 		DatabaseURL:       databaseURL,
 		AllowEphemeralLog: os.Getenv("AUDIT_ALLOW_EPHEMERAL_LOG") == "true",
 
-		VerifyRoles:             splitList(os.Getenv("AUDIT_VERIFY_ROLES")),
+		VerifyRoles:             env.SplitList(os.Getenv("AUDIT_VERIFY_ROLES")),
 		AllowUnrestrictedVerify: os.Getenv("AUDIT_ALLOW_UNRESTRICTED_VERIFY") == "true",
 		OTLPEndpoint:            os.Getenv("AUDIT_OTLP_ENDPOINT"),
 		SPIFFESocket:            os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
-}
-
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

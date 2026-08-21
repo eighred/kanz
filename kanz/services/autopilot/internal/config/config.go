@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strings"
@@ -46,57 +47,26 @@ type Config struct {
 var DefaultSubjects = []string{"observation.>", "platform.>", "data.>"}
 
 func Load() (Config, error) {
-	subjects := splitList(os.Getenv("AUTOPILOT_SUBJECTS"))
+	subjects := env.SplitList(os.Getenv("AUTOPILOT_SUBJECTS"))
 	if len(subjects) == 0 {
 		subjects = DefaultSubjects
 	}
 	return Config{
-		Listen:        envOr("AUTOPILOT_LISTEN", ":8087"),
-		LogLevel:      parseLevel(envOr("AUTOPILOT_LOG_LEVEL", "info")),
+		Listen:        env.Or("AUTOPILOT_LISTEN", ":8087"),
+		LogLevel:      env.ParseLevelOr(env.Or("AUTOPILOT_LOG_LEVEL", "info"), slog.LevelInfo),
 		NATSURL:       os.Getenv("AUTOPILOT_NATS_URL"),
-		Source:        envOr("AUTOPILOT_SOURCE", "autopilot"),
-		ConsumerGroup: envOr("AUTOPILOT_CONSUMER_GROUP", "autopilot"),
+		Source:        env.Or("AUTOPILOT_SOURCE", "autopilot"),
+		ConsumerGroup: env.Or("AUTOPILOT_CONSUMER_GROUP", "autopilot"),
 		Subjects:      subjects,
 		AutoFailover:  truthy(os.Getenv("AUTOPILOT_AUTO_FAILOVER")),
 		OTLPEndpoint:  os.Getenv("AUTOPILOT_OTLP_ENDPOINT"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
 }
-
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 func truthy(s string) bool {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "1", "true", "yes", "on":
 		return true
 	}
 	return false
-}
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

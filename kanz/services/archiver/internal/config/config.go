@@ -5,9 +5,9 @@ package config
 
 import (
 	"errors"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
-	"strings"
 )
 
 // DefaultSubjects is what DATA-M1 archives: every stream carrying history that
@@ -74,14 +74,14 @@ type Config struct {
 // Load reads the environment and REFUSES to return a config that cannot archive.
 func Load() (Config, error) {
 	cfg := Config{
-		Listen:       envOr("ARCHIVER_LISTEN", ":8086"),
-		LogLevel:     parseLevel(envOr("ARCHIVER_LOG_LEVEL", "info")),
+		Listen:       env.Or("ARCHIVER_LISTEN", ":8086"),
+		LogLevel:     env.ParseLevelOr(env.Or("ARCHIVER_LOG_LEVEL", "info"), slog.LevelInfo),
 		Tenant:       os.Getenv("ARCHIVER_TENANT"),
 		NATSURL:      os.Getenv("ARCHIVER_NATS_URL"),
-		Brokers:      splitList(os.Getenv("ARCHIVER_KAFKA_BROKERS")),
-		Subjects:     splitList(os.Getenv("ARCHIVER_SUBJECTS")),
-		Group:        envOr("ARCHIVER_CONSUMER_GROUP", "archiver"),
-		Source:       envOr("ARCHIVER_SOURCE", "archiver"),
+		Brokers:      env.SplitList(os.Getenv("ARCHIVER_KAFKA_BROKERS")),
+		Subjects:     env.SplitList(os.Getenv("ARCHIVER_SUBJECTS")),
+		Group:        env.Or("ARCHIVER_CONSUMER_GROUP", "archiver"),
+		Source:       env.Or("ARCHIVER_SOURCE", "archiver"),
 		OTLPEndpoint: os.Getenv("ARCHIVER_OTLP_ENDPOINT"),
 		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}
@@ -98,34 +98,4 @@ func Load() (Config, error) {
 		return Config{}, errors.New("ARCHIVER_KAFKA_BROKERS is required: an archiver with no Kafka reports healthy and retains nothing")
 	}
 	return cfg, nil
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

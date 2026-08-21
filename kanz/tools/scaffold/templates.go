@@ -11,6 +11,7 @@ const mainTmpl = `// {{.Name}} binary entrypoint. TODO: describe what this servi
 package main
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"context"
 	"errors"
 	"log/slog"
@@ -107,31 +108,11 @@ type Config struct {
 
 func Load() (Config, error) {
 	return Config{
-		Listen:       envOr("{{.EnvPrefix}}_LISTEN", ":8090"),
-		LogLevel:     parseLevel(envOr("{{.EnvPrefix}}_LOG_LEVEL", "info")),
-		Source:       envOr("{{.EnvPrefix}}_SOURCE", "{{.Name}}"),
+		Listen:       env.Or("{{.EnvPrefix}}_LISTEN", ":8090"),
+		LogLevel:     env.ParseLevelOr(env.Or("{{.EnvPrefix}}_LOG_LEVEL", "info"), slog.LevelInfo),
+		Source:       env.Or("{{.EnvPrefix}}_SOURCE", "{{.Name}}"),
 		OTLPEndpoint: os.Getenv("{{.EnvPrefix}}_OTLP_ENDPOINT"),
 	}, nil
-}
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }
 `
 

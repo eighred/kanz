@@ -37,6 +37,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"io"
 	"os"
 	"os/signal"
@@ -165,8 +166,8 @@ func run(args []string, out io.Writer) error {
 func parseFlags(args []string) (options, error) {
 	fs := flag.NewFlagSet("kanz-redrive", flag.ContinueOnError)
 	var opt options
-	fs.StringVar(&opt.natsURL, "nats", envOr("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
-	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
+	fs.StringVar(&opt.natsURL, "nats", env.Or("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
+	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", env.Or("SPIFFE_ENDPOINT_SOCKET", ""),
 		"SPIFFE Workload API socket for the operator SVID the production broker requires.\n"+
 			"\tEmpty ⇒ a PLAINTEXT dial: fine against a local dev broker, refused by production.")
 	fs.StringVar(&opt.subject, "subject", "", "the DLQ subject to drain, e.g. dlq.order.order.submit — REQUIRED.\n"+
@@ -219,11 +220,4 @@ func parseFlags(args []string) (options, error) {
 		return opt, fmt.Errorf("--limit %d is negative; 0 means no limit", opt.limit)
 	}
 	return opt, nil
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

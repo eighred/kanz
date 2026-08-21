@@ -7,6 +7,7 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strings"
@@ -94,25 +95,25 @@ type Config struct {
 // Load reads and validates the environment.
 func Load() Config {
 	return Config{
-		Listen:           envOr("MARKET_INGEST_LISTEN", ":8091"),
-		LogLevel:         parseLevel(os.Getenv("MARKET_INGEST_LOG_LEVEL")),
+		Listen:           env.Or("MARKET_INGEST_LISTEN", ":8091"),
+		LogLevel:         env.ParseLevelOr(os.Getenv("MARKET_INGEST_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint:     os.Getenv("MARKET_INGEST_OTLP_ENDPOINT"),
 		SPIFFESocket:     os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
-		NATSURL:          envOr("MARKET_INGEST_NATS_URL", "nats://localhost:4222"),
-		Source:           envOr("MARKET_INGEST_SOURCE", "market-ingest"),
-		Tenant:           envOr("MARKET_INGEST_TENANT", "__system__"),
+		NATSURL:          env.Or("MARKET_INGEST_NATS_URL", "nats://localhost:4222"),
+		Source:           env.Or("MARKET_INGEST_SOURCE", "market-ingest"),
+		Tenant:           env.Or("MARKET_INGEST_TENANT", "__system__"),
 		Instruments:      parseList(os.Getenv("MARKET_INGEST_INSTRUMENTS")),
 		AllowSim:         os.Getenv("MARKET_INGEST_ALLOW_SIM") == "true",
 		SnapshotInterval: parseDuration(os.Getenv("MARKET_INGEST_SNAPSHOT_INTERVAL"), time.Second),
 		SnapshotDepth:    parseInt(os.Getenv("MARKET_INGEST_SNAPSHOT_DEPTH"), 20),
 
-		BinanceMIC:      envOr("MARKET_INGEST_BINANCE_MIC", "BINANCE"),
-		BinanceWSBase:   envOr("MARKET_INGEST_BINANCE_WS_BASE", "wss://stream.binance.com:9443"),
-		BinanceRESTBase: envOr("MARKET_INGEST_BINANCE_REST_BASE", "https://api.binance.com"),
+		BinanceMIC:      env.Or("MARKET_INGEST_BINANCE_MIC", "BINANCE"),
+		BinanceWSBase:   env.Or("MARKET_INGEST_BINANCE_WS_BASE", "wss://stream.binance.com:9443"),
+		BinanceRESTBase: env.Or("MARKET_INGEST_BINANCE_REST_BASE", "https://api.binance.com"),
 		BinanceSymbols:  parseSymbolMap(os.Getenv("MARKET_INGEST_BINANCE_SYMBOLS")),
 
-		OKXMIC:     envOr("MARKET_INGEST_OKX_MIC", "OKX"),
-		OKXWSURL:   envOr("MARKET_INGEST_OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public"),
+		OKXMIC:     env.Or("MARKET_INGEST_OKX_MIC", "OKX"),
+		OKXWSURL:   env.Or("MARKET_INGEST_OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public"),
 		OKXSymbols: parseSymbolMap(os.Getenv("MARKET_INGEST_OKX_SYMBOLS")),
 
 		DepthLimit:     parseInt(os.Getenv("MARKET_INGEST_DEPTH_LIMIT"), 1000),
@@ -149,14 +150,6 @@ func parseList(s string) []string {
 	}
 	return out
 }
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
 func parseDuration(s string, def time.Duration) time.Duration {
 	if s == "" {
 		return def
@@ -183,17 +176,4 @@ func parseInt(s string, def int) int {
 		return def
 	}
 	return n
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

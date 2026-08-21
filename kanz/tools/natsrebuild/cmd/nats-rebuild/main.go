@@ -25,10 +25,10 @@ package main
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -41,12 +41,12 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	brokers := splitList(envOr("NATS_REBUILD_KAFKA_BROKERS", "kafka:9092"))
-	natsURL := envOr("NATS_REBUILD_NATS_URL", "nats://nats:4222")
-	topics := splitList(os.Getenv("NATS_REBUILD_TOPICS"))
-	stateTopics := splitList(os.Getenv("NATS_REBUILD_STATE_TOPICS"))
+	brokers := env.SplitList(env.Or("NATS_REBUILD_KAFKA_BROKERS", "kafka:9092"))
+	natsURL := env.Or("NATS_REBUILD_NATS_URL", "nats://nats:4222")
+	topics := env.SplitList(os.Getenv("NATS_REBUILD_TOPICS"))
+	stateTopics := env.SplitList(os.Getenv("NATS_REBUILD_STATE_TOPICS"))
 	socket := os.Getenv("NATS_REBUILD_SPIFFE_SOCKET")
-	since, err := time.ParseDuration(envOr("NATS_REBUILD_SINCE", "24h"))
+	since, err := time.ParseDuration(env.Or("NATS_REBUILD_SINCE", "24h"))
 	if err != nil {
 		logger.Error("invalid NATS_REBUILD_SINCE", "err", err)
 		os.Exit(2)
@@ -130,21 +130,4 @@ func main() {
 	}
 	logger.Info("nats-rebuild complete", "tenants", report.Requested, "topics", len(targets),
 		"since", since.String(), "published", report.Published())
-}
-
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"os"
 	"time"
 
@@ -20,10 +21,10 @@ func main() {
 func run() error {
 	var cfg Config
 	fs := flag.NewFlagSet("kanz-monitor", flag.ContinueOnError)
-	fs.StringVar(&cfg.NATSURL, "nats", envOr("KANZ_NATS_URL", "nats://localhost:4222"), "spine URL to subscribe to (read-only)")
-	fs.StringVar(&cfg.GatewayURL, "gateway", envOr("KANZ_GATEWAY_URL", "http://localhost:8080"), "api-gateway base URL for /v1 reads + /metrics")
+	fs.StringVar(&cfg.NATSURL, "nats", env.Or("KANZ_NATS_URL", "nats://localhost:4222"), "spine URL to subscribe to (read-only)")
+	fs.StringVar(&cfg.GatewayURL, "gateway", env.Or("KANZ_GATEWAY_URL", "http://localhost:8080"), "api-gateway base URL for /v1 reads + /metrics")
 	fs.StringVar(&cfg.Token, "token", os.Getenv("KANZ_TOKEN"), "HS256 bearer for the gateway (see kanz-devtoken)")
-	fs.StringVar(&cfg.Tenant, "tenant", envOr("KANZ_TENANT", "__system__"), "tenant whose book to monitor")
+	fs.StringVar(&cfg.Tenant, "tenant", env.Or("KANZ_TENANT", "__system__"), "tenant whose book to monitor")
 	fs.DurationVar(&cfg.PollInterval, "poll", 2*time.Second, "poll interval for /metrics and /v1 reads")
 	fs.BoolVar(&cfg.Plaintext, "nats-plaintext", true, "dial NATS without TLS (dev rig). false ⇒ mesh mTLS")
 	fs.StringVar(&cfg.SPIFFESocket, "spiffe-socket", os.Getenv("SPIFFE_ENDPOINT_SOCKET"), "SPIFFE Workload API socket for the mesh SVID (required when --nats-plaintext=false)")
@@ -56,11 +57,4 @@ func validate(cfg Config) error {
 		return errors.New("--nats-plaintext=false requires --spiffe-socket (or $SPIFFE_ENDPOINT_SOCKET): mTLS was requested but there is no workload socket to obtain an SVID from, and dialing without one silently degrades to plaintext")
 	}
 	return nil
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }

@@ -2,9 +2,8 @@ package config
 
 import (
 	"errors"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
-	"os"
-	"strings"
 
 	"github.com/eighred/kanz/pkg/secret"
 )
@@ -29,32 +28,12 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen:      envOr("SCHEMA_REGISTRY_LISTEN", ":8080"),
+		Listen:      env.Or("SCHEMA_REGISTRY_LISTEN", ":8080"),
 		DatabaseURL: databaseURL,
-		LogLevel:    parseLevel(envOr("SCHEMA_REGISTRY_LOG_LEVEL", "info")),
+		LogLevel:    env.ParseLevelOr(env.Or("SCHEMA_REGISTRY_LOG_LEVEL", "info"), slog.LevelInfo),
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("SCHEMA_REGISTRY_DATABASE_URL is required")
 	}
 	return cfg, nil
-}
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

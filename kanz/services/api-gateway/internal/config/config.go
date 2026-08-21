@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strconv"
@@ -254,9 +255,9 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen:           envOr("API_GATEWAY_LISTEN", ":8080"),
-		LogLevel:         parseLevel(envOr("API_GATEWAY_LOG_LEVEL", "info")),
-		Source:           envOr("API_GATEWAY_SOURCE", "api-gateway"),
+		Listen:           env.Or("API_GATEWAY_LISTEN", ":8080"),
+		LogLevel:         env.ParseLevelOr(env.Or("API_GATEWAY_LOG_LEVEL", "info"), slog.LevelInfo),
+		Source:           env.Or("API_GATEWAY_SOURCE", "api-gateway"),
 		OTLPEndpoint:     os.Getenv("API_GATEWAY_OTLP_ENDPOINT"),
 		RiskEngineAddr:   os.Getenv("API_GATEWAY_RISK_ENGINE_ADDR"),
 		OMSReadAddr:      os.Getenv("API_GATEWAY_OMS_READ_ADDR"),
@@ -556,27 +557,6 @@ func (c Config) validateAuth() error {
 	}
 	return nil
 }
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
-}
-
 func parseFloat(s string) float64 {
 	f, _ := strconv.ParseFloat(s, 64)
 	return f
