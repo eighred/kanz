@@ -1,6 +1,28 @@
 package optimization
 
-import "math"
+import (
+	"errors"
+	"math"
+)
+
+// ErrTangencyUndefined and ErrRiskParityUndefined are the two objectives
+// REFUSING rather than substituting their seed (#621).
+//
+// Both solvers begin at the equal-weight vector and both used to fall back to it
+// silently: maxSharpe when solveLinear reported Σ singular, riskParity when the
+// portfolio variance reached zero. An equal-weight book is not the tangency
+// portfolio and not the equal-risk-contribution portfolio — for a singular Σ with
+// excess return in the null space the Sharpe ratio is unbounded, and where total
+// variance is zero the risk contributions are 0/0 — so what came back was a seed
+// wearing the name of an answer, with nothing in Result saying so. BlackLitterman
+// in this same package already refused the identical condition (ErrBLSingular).
+//
+// A caller that needs an allocation from an ill-conditioned Σ has HRP, which
+// never inverts it and is here for exactly this.
+var (
+	ErrTangencyUndefined   = errors.New("optimization: no tangency portfolio exists for this covariance")
+	ErrRiskParityUndefined = errors.New("optimization: risk contributions are undefined for this covariance")
+)
 
 // Numerical core of the optimizer (OPT-01b): a small, dependency-free,
 // deterministic solver behind the Solver seam. No gonum / no QP library — the
@@ -170,29 +192,30 @@ func maximizeLinear(mu []float64, lo, hi []float64) []float64 {
 // budget — then projects onto the box and refines with a few projected-gradient-
 // ascent steps on the Sharpe ratio so box constraints are respected. The
 // unconstrained tangency is exact (matches the closed form); the projection +
-// refinement handles binding bounds.
-func maxSharpe(sigma [][]float64, mu []float64, rf float64, lo, hi []float64) []float64 {
+// refinement handles binding bounds. A Σ the elimination cannot factor, or a
+// tangency direction that cannot be scaled to a fully-invested book, is
+// ErrTangencyUndefined — see the var block above for what used to happen instead.
+func maxSharpe(sigma [][]float64, mu []float64, rf float64, lo, hi []float64) ([]float64, error) {
 	n := len(mu)
 	excess := make([]float64, n)
 	for i := range mu {
 		excess[i] = mu[i] - rf
 	}
 	z, ok := solveLinear(sigma, excess)
-	var w []float64
-	if ok {
-		s := 0.0
-		for _, zi := range z {
-			s += zi
-		}
-		if math.Abs(s) > 1e-15 {
-			w = make([]float64, n)
-			for i := range z {
-				w[i] = z[i] / s
-			}
-		}
+	if !ok {
+		return nil, ErrTangencyUndefined
 	}
-	if w == nil {
-		w = equalSeed(n)
+	s := 0.0
+	for _, zi := range z {
+		s += zi
+	}
+	// Σ⁻¹(μ−rf) summing to zero has no scaling that meets the budget Σwᵢ = 1.
+	if math.Abs(s) <= 1e-15 {
+		return nil, ErrTangencyUndefined
+	}
+	w := make([]float64, n)
+	for i := range z {
+		w[i] = z[i] / s
 	}
 	w = projectBudgetBox(w, lo, hi)
 	// Projected-gradient-ascent refinement on S(w) for the constrained case.
@@ -218,7 +241,7 @@ func maxSharpe(sigma [][]float64, mu []float64, rf float64, lo, hi []float64) []
 		}
 		w = next
 	}
-	return w
+	return w, nil
 }
 
 // riskParity returns the equal-risk-contribution portfolio via the damped
@@ -227,8 +250,10 @@ func maxSharpe(sigma [][]float64, mu []float64, rf float64, lo, hi []float64) []
 // square-root damping is what makes it CONVERGE — the un-damped 1/(Σw)ᵢ fixed
 // point oscillates; the fixed point has every rcᵢ = 1/n (equal risk
 // contributions). Long-only and fully-invested by construction; box bounds are a
-// final projection.
-func riskParity(sigma [][]float64, lo, hi []float64) []float64 {
+// final projection. A zero total variance — the iterate lies in Σ's null space —
+// is ErrRiskParityUndefined, because the rcᵢ the whole update is built on are
+// then 0/0.
+func riskParity(sigma [][]float64, lo, hi []float64) ([]float64, error) {
 	n := len(sigma)
 	budget := 1.0 / float64(n)
 	w := equalSeed(n)
@@ -236,7 +261,7 @@ func riskParity(sigma [][]float64, lo, hi []float64) []float64 {
 		sw := matVec(sigma, w)
 		total := dot(w, sw)
 		if total <= 0 {
-			break
+			return nil, ErrRiskParityUndefined
 		}
 		next := make([]float64, n)
 		var s float64
@@ -253,7 +278,7 @@ func riskParity(sigma [][]float64, lo, hi []float64) []float64 {
 			s += next[i]
 		}
 		if s <= 0 {
-			break
+			return nil, ErrRiskParityUndefined
 		}
 		for i := 0; i < n; i++ {
 			next[i] /= s
@@ -264,7 +289,7 @@ func riskParity(sigma [][]float64, lo, hi []float64) []float64 {
 			break
 		}
 	}
-	return projectBudgetBox(w, lo, hi)
+	return projectBudgetBox(w, lo, hi), nil
 }
 
 // solveLinear solves A·x = b by Gaussian elimination with partial pivoting.

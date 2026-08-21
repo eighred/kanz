@@ -141,17 +141,23 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 // --- propose -----------------------------------------------------------------
 
 type proposeRequest struct {
-	PortfolioID     string                      `json:"portfolio_id"`
-	Instruments     []string                    `json:"instruments"`
-	ExpectedReturns []float64                   `json:"expected_returns"`
-	Covariance      [][]float64                 `json:"covariance"`
-	BlackLitterman  *blRequest                  `json:"black_litterman"`
-	Objective       optimization.Objective      `json:"objective"`
-	Constraints     *optimization.ConstraintSet `json:"constraints"`
-	Current         map[string]float64          `json:"current_weights"`
-	NAV             float64                     `json:"nav"`
-	Prices          map[string]float64          `json:"prices"`
-	Threshold       float64                     `json:"threshold"`
+	PortfolioID     string      `json:"portfolio_id"`
+	Instruments     []string    `json:"instruments"`
+	ExpectedReturns []float64   `json:"expected_returns"`
+	Covariance      [][]float64 `json:"covariance"`
+	// Observations is how many periods the supplied covariance was estimated
+	// over. Absent (0) means NOT STATED and is answered as such — the response
+	// carries CovarianceQuality FULL_RANK rather than OBSERVED, so a caller can
+	// tell a covariance nobody vouched for from one that was checked against its
+	// own sample size (#621).
+	Observations   int                         `json:"observations"`
+	BlackLitterman *blRequest                  `json:"black_litterman"`
+	Objective      optimization.Objective      `json:"objective"`
+	Constraints    *optimization.ConstraintSet `json:"constraints"`
+	Current        map[string]float64          `json:"current_weights"`
+	NAV            float64                     `json:"nav"`
+	Prices         map[string]float64          `json:"prices"`
+	Threshold      float64                     `json:"threshold"`
 }
 
 // blRequest is the optional Black-Litterman input on /v1/propose. Present ⇒ the
@@ -176,7 +182,12 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	in := optimization.MarketInputs{Instruments: req.Instruments, ExpectedReturns: req.ExpectedReturns, Covariance: req.Covariance}
+	in := optimization.MarketInputs{
+		Instruments:     req.Instruments,
+		ExpectedReturns: req.ExpectedReturns,
+		Covariance:      req.Covariance,
+		Observations:    req.Observations,
+	}
 	if req.BlackLitterman != nil {
 		mu, err := blMu(req)
 		if err != nil {
@@ -193,7 +204,12 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 	proposal := optimization.Rebalance(req.PortfolioID, req.Current, res.Weights, req.NAV, req.Prices, req.Threshold, time.Now())
 	proposal.Objective = req.Objective
 	proposal.ExpectedReturn = res.ExpectedReturn
+	// BOTH FIELDS OR NEITHER. ExpectedRisk is nil whenever the covariance could
+	// not support a risk number, and CovarianceQuality is what says why — a
+	// response carrying the first without the second would put a null on the wire
+	// with no explanation for it (#621).
 	proposal.ExpectedRisk = res.ExpectedRisk
+	proposal.CovarianceQuality = res.CovarianceQuality
 	writeJSON(w, http.StatusOK, proposal)
 }
 

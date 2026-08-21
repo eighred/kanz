@@ -79,7 +79,10 @@ func TestRiskParity_EqualRiskContribution(t *testing.T) {
 	in := MarketInputs{Instruments: []string{"A", "B"}, Covariance: diag(0.01, 0.04)}
 	res, _ := Optimize(in, Objective{Type: RiskParity}, nil)
 	approx(t, "w_A", res.Weights["A"], 2.0/3.0, 2e-3)
-	rc := RiskContributions(res.Weights, in)
+	rc, err := RiskContributions(res.Weights, in)
+	if err != nil {
+		t.Fatal(err)
+	}
 	approx(t, "equal risk contribution", rc["A"], rc["B"], 1e-3)
 	approx(t, "RC sum to 1", rc["A"]+rc["B"], 1, 1e-9)
 }
@@ -100,11 +103,22 @@ func TestSampleCovariance(t *testing.T) {
 	// Perfectly anti-correlated → off-diagonal negative, diagonals equal.
 	a := []float64{0.01, -0.01, 0.02, -0.02}
 	b := []float64{-0.01, 0.01, -0.02, 0.02}
-	cov := SampleCovariance([][]float64{a, b})
+	cov, obs, err := SampleCovariance([][]float64{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs != 4 {
+		t.Fatalf("four periods per series ⇒ 4 observations, got %d", obs)
+	}
 	if cov[0][1] >= 0 {
 		t.Fatalf("anti-correlated assets must have negative covariance, got %.6f", cov[0][1])
 	}
 	approx(t, "symmetric", cov[0][1], cov[1][0], 0)
+	// Derived outside Go from the definition, not read off this implementation:
+	// both means are 0, so Σ(a−ā)(b−b̄) = −(0.0001+0.0001+0.0004+0.0004) = −0.001
+	// and the Bessel-corrected estimate is −0.001/3 = −1/3000.
+	approx(t, "cov_ab", cov[0][1], -1.0/3000.0, 1e-15)
+	approx(t, "var_a", cov[0][0], 1.0/3000.0, 1e-15)
 }
 
 func TestOptimize_InputValidation(t *testing.T) {
@@ -136,9 +150,15 @@ func TestOptimize_HRP(t *testing.T) {
 	approx(t, "w_D", res.Weights["D"], 0.1, 1e-9)
 	approx(t, "sum", sumWeights(res.Weights), 1, 1e-9)
 	// ExpectedRisk = √(wᵀΣw); ExpectedReturn = 0 with no μ supplied.
-	if res.ExpectedRisk <= 0 {
-		t.Fatalf("HRP result should carry a positive ExpectedRisk, got %v", res.ExpectedRisk)
+	if res.ExpectedRisk == nil {
+		t.Fatalf("a full-rank Σ supports a risk number; got nil with quality %s", res.CovarianceQuality)
 	}
+	if *res.ExpectedRisk <= 0 {
+		t.Fatalf("HRP result should carry a positive ExpectedRisk, got %v", *res.ExpectedRisk)
+	}
+	// wᵀΣw derived outside Go from this exact Σ and w=[0.4,0.4,0.1,0.1]:
+	// 2(0.16·0.04) + 2(0.16·0.036) + 2(0.01·0.16) + 2(0.01·0.144) = 0.0304.
+	approx(t, "HRP ExpectedRisk", *res.ExpectedRisk, 0.17435595774162696, 1e-12)
 	approx(t, "no μ ⇒ zero expected return", res.ExpectedReturn, 0, 1e-12)
 }
 
