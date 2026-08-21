@@ -9,10 +9,15 @@ package translate
 // __system__, where the tenant's OMS — which lives in its own account — never
 // sees it. Nothing fails; the tenant simply looks like it is not trading.
 //
-// The tenant is resolved PER SIGNAL from TenantOf(fund_id). One webhook endpoint
-// serves many funds, so a service-level tenant would be the wrong one for all but
-// a single fund — which is exactly why the gateway's principal-derived value
-// could not just be copied here.
+// The tenant is resolved PER SIGNAL, from the FundAuthority binding table. One
+// webhook endpoint serves many funds, so a service-level tenant would be the wrong
+// one for all but a single fund — which is exactly why the gateway's
+// principal-derived value could not just be copied here.
+//
+// IT IS NOT THE fund_id, and this test is where that is pinned (#632). It used to
+// be: the seam was `TenantOf func(fundID) string`, nil-defaulting to identity, and
+// nobody assigned it — so this subject, the routing key onto a tenant's own broker
+// account, was a field of the request body.
 
 import (
 	"context"
@@ -35,14 +40,10 @@ func TestASignalOrderCarriesItsFundsTenantOnTheWire(t *testing.T) {
 		Alloc:     StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher: rec,
 		Gate:      OpenGate(nil),
-		// The fund→tenant map this endpoint serves. Without an explicit one the
-		// fund id IS the tenant, which would make this test agree with itself.
-		TenantOf: func(fundID string) string {
-			if fundID == "fund-alpha" {
-				return "acme"
-			}
-			return "other"
-		},
+		// The binding this endpoint serves: momentum → fund-alpha, owned by acme.
+		// The tenant is deliberately NOT the fund id, so a fix that quietly restored
+		// the identity default cannot make this test agree with itself.
+		Authority: boundAuthority(t),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

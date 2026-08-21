@@ -105,6 +105,17 @@ type Config struct {
 	Prices  ingest.StaticPrices
 	Equity  ingest.StaticEquity
 
+	// Authority is the strategy→fund→tenant binding — the ONLY thing that decides
+	// whose book a signal lands on (#632).
+	//
+	// It is built from the same two entries the secrets and the allocations come
+	// from, and applyBootstrap cross-checks them: a strategy that declares no funds,
+	// or names one no `funds` entry declares, or a fund that declares no tenant, is
+	// a LOAD ERROR. The service exits 2 rather than start, because the failure this
+	// replaces was precisely a deployment that had configured neither and looked
+	// identical to one that had.
+	Authority ingest.FundAuthority
+
 	// MaxQuantity bounds the RESOLVED base-asset quantity of one alert — units of
 	// the instrument, after size_type has been applied. See translate.Qty.
 	MaxQuantity ingest.Qty
@@ -116,9 +127,9 @@ type Config struct {
 // bootstrap is the JSON shape of the trading config file. All decimals are
 // strings (exact; no float).
 type bootstrap struct {
-	Strategies map[string]string        `json:"strategies"` // strategy_id -> hmac secret
+	Strategies map[string]strategyEntry `json:"strategies"` // strategy_id -> secret + the funds it may trade
 	Symbols    map[string]string        `json:"symbols"`    // tv symbol -> instrument_id
-	Funds      map[string][]venueWeight `json:"funds"`      // fund_id -> allocation
+	Funds      map[string]fundEntry     `json:"funds"`      // fund_id -> owning tenant + allocation
 	Prices     map[string]string        `json:"prices"`     // instrument_id -> price
 	Equity     map[string]string        `json:"equity"`     // fund_id -> NAV
 	// MaxQuantity is a bound on the RESOLVED base-asset quantity — "never more than
@@ -135,6 +146,83 @@ type bootstrap struct {
 type venueWeight struct {
 	Venue  string `json:"venue"`
 	Weight string `json:"weight"`
+}
+
+// strategyEntry is one sender: the secret that authenticates it, and the funds it
+// is entitled to trade.
+//
+// THE SECRET AND THE ENTITLEMENT ARE ONE DECLARATION, not two maps that happen to
+// share a key. That shape is the defect (#632): `strategies` (id → secret) and
+// `funds` (id → allocation) sat beside each other with no relation declared and
+// nothing cross-checking them, so the platform authenticated a STRATEGY and then
+// took the tenant from whatever `fund_id` the same request body carried. Written
+// this way, adding a strategy without deciding which funds it may trade is not
+// something an operator can forget — it does not parse.
+type strategyEntry struct {
+	Secret string   `json:"secret"`
+	Funds  []string `json:"funds"`
+}
+
+// UnmarshalJSON accepts the object form and REFUSES the retired bare-string form
+// loudly.
+//
+// json.Unmarshal would otherwise answer a pre-#632 file — `"strategies": {"dev":
+// "secret"}` — with a type error naming a Go type, which tells an operator
+// nothing about what changed or what to write. Worse, silently tolerating it
+// would leave the deployment with a strategy bound to NO funds, which now denies
+// every alert: a security fix that reads as an outage.
+func (e *strategyEntry) UnmarshalJSON(raw []byte) error {
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return fmt.Errorf("bootstrap config: a `strategies` entry is a bare secret string, which is "+
+			"the RETIRED pre-#632 shape. An HMAC authenticates the STRATEGY, never a fund — so a "+
+			"strategy that does not say which funds it may trade could name any fund in this file "+
+			"and have its orders published into that fund's tenant. Write "+
+			`{"<strategy_id>": {"secret": %q, "funds": ["<fund_id>", ...]}}`+" and decide, per "+
+			"strategy, whose capital it is allowed to commit", asString)
+	}
+	type plain strategyEntry // no recursion through this method
+	var p plain
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return err
+	}
+	*e = strategyEntry(p)
+	return nil
+}
+
+// fundEntry is one fund: the TENANT THAT OWNS IT and its venue allocation.
+//
+// The tenant is here — beside the allocation, in configuration — because it is
+// the routing key onto that tenant's own broker account and therefore the one
+// value a request must never be able to choose. Before #632 there was no such
+// key: `translate` defaulted to "the fund_id is the tenant" and no composition
+// root overrode it, so the wire subject of every signal-originated order was a
+// string out of the request body.
+type fundEntry struct {
+	Tenant string        `json:"tenant"`
+	Venues []venueWeight `json:"venues"`
+}
+
+// UnmarshalJSON accepts the object form and REFUSES the retired bare-array form
+// loudly — same reasoning as strategyEntry's, and the same failure if it were
+// tolerated: a fund with no tenant cannot be published for at all.
+func (f *fundEntry) UnmarshalJSON(raw []byte) error {
+	var asLegs []venueWeight
+	if err := json.Unmarshal(raw, &asLegs); err == nil {
+		return fmt.Errorf("bootstrap config: a `funds` entry is a bare venue array, which is the " +
+			"RETIRED pre-#632 shape. A fund must name the TENANT that owns it — that tenant is the " +
+			"broker subject a signal-originated order is routed on, and taking it from the request " +
+			"body (which is what happened when it was absent) let one strategy secret place orders " +
+			"in any tenant. Write " +
+			`{"<fund_id>": {"tenant": "<tenant_id>", "venues": [{"venue": "...", "weight": "..."}]}}`)
+	}
+	type plain fundEntry
+	var p plain
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return err
+	}
+	*f = fundEntry(p)
+	return nil
 }
 
 // Load reads env + the bootstrap file (WEBHOOK_INGEST_CONFIG) and validates it.
@@ -201,7 +289,16 @@ func loadBootstrap(path string) (*bootstrap, error) {
 }
 
 func (cfg *Config) applyBootstrap(b *bootstrap) error {
-	cfg.Secrets = ingest.StaticSecrets(b.Strategies)
+	cfg.Secrets = make(ingest.StaticSecrets, len(b.Strategies))
+	strategyFunds := make(map[string][]string, len(b.Strategies))
+	for id, s := range b.Strategies {
+		if strings.TrimSpace(s.Secret) == "" {
+			return fmt.Errorf("bootstrap config: strategy %q has no secret — an empty HMAC key "+
+				"authenticates a signature computed with an empty key, which any sender can produce", id)
+		}
+		cfg.Secrets[id] = s.Secret
+		strategyFunds[id] = s.Funds
+	}
 	cfg.Symbols = ingest.StaticSymbols(b.Symbols)
 
 	cfg.Prices = make(ingest.StaticPrices, len(b.Prices))
@@ -221,9 +318,11 @@ func (cfg *Config) applyBootstrap(b *bootstrap) error {
 		cfg.Equity[fund] = r
 	}
 	cfg.Alloc = make(ingest.StaticAllocation, len(b.Funds))
-	for fund, legs := range b.Funds {
-		out := make([]ingest.VenueAllocation, 0, len(legs))
-		for _, l := range legs {
+	fundTenant := make(map[string]string, len(b.Funds))
+	for fund, entry := range b.Funds {
+		fundTenant[fund] = entry.Tenant
+		out := make([]ingest.VenueAllocation, 0, len(entry.Venues))
+		for _, l := range entry.Venues {
 			w, err := dec.ParseRat(l.Weight)
 			if err != nil {
 				return fmt.Errorf("weight for fund %s venue %s: %w", fund, l.Venue, err)
@@ -271,6 +370,22 @@ func (cfg *Config) applyBootstrap(b *bootstrap) error {
 		}
 		cfg.MaxLeverage = r
 	}
+	// REFUSE TO START WITHOUT THE BINDING (#632).
+	//
+	// Every check that could have stopped the cross-tenant injection lives in
+	// NewFundAuthority, and it runs HERE — at config load, before the listener
+	// exists — so an unconfigured or incoherent deployment exits 2 instead of
+	// serving the internet with a tenant nobody chose. There is no per-signal
+	// fallback for it to fall back to; that fallback WAS the defect.
+	//
+	// LAST, so the two maps it cross-checks have both been read and every
+	// field-level error above (a bad weight, the retired max_size key) still reports
+	// itself rather than being pre-empted by a binding complaint about the same file.
+	authority, err := ingest.NewFundAuthority(fundTenant, strategyFunds)
+	if err != nil {
+		return err
+	}
+	cfg.Authority = authority
 	return nil
 }
 

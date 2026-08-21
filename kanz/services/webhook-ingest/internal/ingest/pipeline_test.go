@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,16 +56,75 @@ func sign(body, secret string) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
+// ingestTestAuthority is the strategy→fund→tenant binding every pipeline in this
+// package is built over (#632).
+//
+// `momentum` — the strategy whose secret the test authenticator holds — is bound
+// to fund-alpha only. `fund-victim` belongs to a DIFFERENT tenant and no strategy
+// here may trade it; that is the attacker's target in
+// TestPerimeter_ASignedAlertForAnotherTenantsFundIsForbidden.
+//
+// The tenants are deliberately NOT the fund ids. Before this change the tenant WAS
+// the fund id, so a test that used one string for both would pass whether or not
+// the defect was fixed.
+func ingestTestAuthority(t *testing.T) FundAuthority {
+	t.Helper()
+	a, err := NewFundAuthority(
+		map[string]string{"fund-alpha": "acme", "fund-victim": "globex"},
+		map[string][]string{"momentum": {"fund-alpha"}},
+	)
+	if err != nil {
+		t.Fatalf("NewFundAuthority: %v", err)
+	}
+	return a
+}
+
+// A PIPELINE WITH NO BINDING TABLE MUST NOT CONSTRUCT (#632).
+//
+// This is the state the estate was actually in: the tenant seam existed, no
+// composition root assigned it, and the nil default made every deployment look
+// configured while routing orders by a field of the request body. There is no
+// default now — the internet-facing binary refuses to start.
+func TestNewPipelineRefusesWithoutAFundAuthority(t *testing.T) {
+	_, err := NewPipeline(Options{
+		Auth:      NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now),
+		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
+		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
+		Equity:    StaticEquity{"fund-alpha": big.NewRat(1_000_000, 1)},
+		Positions: StaticPositions{},
+		Alloc:     StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
+		Publisher: &capture{},
+		Gate:      translate.OpenGate(nil),
+		// Authority deliberately absent — everything else is wired, which is exactly
+		// how this shipped.
+	})
+	if err == nil {
+		t.Fatal("NewPipeline accepted a nil FundAuthority. The perimeter cannot say whose capital " +
+			"a signal trades, and the tenant falls back to whatever the caller put in fund_id.")
+	}
+	// THIS LAYER'S OWN REFUSAL, not the translator's. translate.New would also
+	// reject a nil Authority, so an assertion on the word "FundAuthority" alone
+	// passes whether or not this check exists — measured, by deleting it. The
+	// perimeter states the operational fact only IT knows: the thing this binary
+	// authenticated is a strategy.
+	if !strings.Contains(err.Error(), "the HMAC authenticates the") {
+		t.Errorf("error %q is not the perimeter's own refusal — an operator reading a startup "+
+			"failure on the internet-facing pod needs to be told what the HMAC actually proved, "+
+			"which is the whole of #632", err)
+	}
+}
+
 // harness builds a pipeline over a two-venue fund with static price/equity.
 func harness(t *testing.T) (*Pipeline, *capture) {
 	t.Helper()
 	cap := &capture{}
 	auth := NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now)
 	p, err := NewPipeline(Options{
-		Auth:    auth,
-		Symbols: StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
-		Prices:  StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
-		Equity:  StaticEquity{"fund-alpha": big.NewRat(1_000_000, 1)},
+		Authority: ingestTestAuthority(t),
+		Auth:      auth,
+		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
+		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
+		Equity:    StaticEquity{"fund-alpha": big.NewRat(1_000_000, 1)},
 		Positions: StaticPositions{
 			"fund-alpha/BINANCE/BTC-USD": big.NewRat(3, 10), // long 0.3 for CLOSE test
 			"fund-alpha/OKX/BTC-USD":     big.NewRat(2, 10), // long 0.2
@@ -231,7 +291,8 @@ func TestHaltedGateRejectsValidWebhook(t *testing.T) {
 	auth := NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now)
 	gate := translate.NewGate(nil) // CLOSED — no lifecycle FACT has opened it
 	p, err := NewPipeline(Options{
-		Auth: auth, Symbols: StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
+		Authority: ingestTestAuthority(t),
+		Auth:      auth, Symbols: StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
 		Equity:    StaticEquity{"fund-alpha": big.NewRat(1_000_000, 1)},
 		Positions: StaticPositions{}, Alloc: StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
@@ -280,7 +341,8 @@ func TestIPAllowlistRejects(t *testing.T) {
 	_, cidr, _ := net.ParseCIDR("203.0.113.0/24")
 	auth := NewAuthenticator(StaticSecrets{"momentum": testSecret}, []*net.IPNet{cidr}, time.Minute, time.Now)
 	p, err := NewPipeline(Options{
-		Auth: auth, Symbols: StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
+		Authority: ingestTestAuthority(t),
+		Auth:      auth, Symbols: StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
 		Prices: StaticPrices{"BTC-USD": big.NewRat(50000, 1)}, Equity: StaticEquity{},
 		Positions: StaticPositions{}, Alloc: StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
 		Publisher: cap,
@@ -307,12 +369,41 @@ func TestUnknownSymbolRejected(t *testing.T) {
 	}
 }
 
-func TestUnmappedFundDenied(t *testing.T) {
-	p, _ := harness(t)
+// A FUND THIS STRATEGY IS NOT BOUND TO IS REFUSED BEFORE THE ALLOCATION IS EVEN
+// CONSULTED (#632).
+//
+// This test used to expect ErrNoAllocation, and that ordering was the whole
+// exposure: the ALLOCATION table was what bounded the blast radius, so any fund
+// the deployment happened to serve — including other tenants' — was reachable
+// with one strategy's secret, and only a fund NOBODY had configured was refused.
+// The binding is now the first substantive check, so an unknown fund and another
+// tenant's fund are one answer.
+func TestUnboundFundDenied(t *testing.T) {
+	p, cap := harness(t)
 	raw := `{"strategy_id":"momentum","fund_id":"ghost-fund","symbol":"BINANCE:BTCUSDT","action":"buy","size":"1","size_type":"absolute_qty","nonce":"n8",` + freshTS()
 	_, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
-	if !errors.Is(err, ErrNoAllocation) {
-		t.Fatalf("unmapped fund = %v, want ErrNoAllocation", err)
+	if !errors.Is(err, ErrUnboundFund) {
+		t.Fatalf("unbound fund = %v, want ErrUnboundFund", err)
+	}
+	if len(cap.events) != 0 {
+		t.Fatalf("%d event(s) published for an unbound fund", len(cap.events))
+	}
+}
+
+// AND THE SAME ANSWER FOR ANOTHER TENANT'S FUND, which the deployment serves in
+// full. `fund-victim` is in the binding table under tenant globex; momentum has
+// no claim on it. If this returned anything other than the refusal above, the
+// response would be a fund-id oracle.
+func TestAnotherTenantsFundIsRefusedIdentically(t *testing.T) {
+	p, cap := harness(t)
+	raw := `{"strategy_id":"momentum","fund_id":"fund-victim","symbol":"BINANCE:BTCUSDT","action":"buy","size":"1","size_type":"absolute_qty","nonce":"n8b",` + freshTS()
+	_, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
+	if !errors.Is(err, ErrUnboundFund) {
+		t.Fatalf("another tenant's fund = %v, want ErrUnboundFund — one strategy secret reached "+
+			"another tenant's book", err)
+	}
+	if len(cap.events) != 0 {
+		t.Fatalf("%d event(s) published for another tenant's fund", len(cap.events))
 	}
 }
 
@@ -335,10 +426,38 @@ func TestUnmappedFundDenied(t *testing.T) {
 // bound would refuse it on the retry anyway — the identical argument the halt
 // case already makes.
 func TestPerimeter_AnUnmappedFundIs400AndBurnsItsNonce(t *testing.T) {
-	p, cap := harness(t)
-	raw := `{"strategy_id":"momentum","fund_id":"ghost-fund","symbol":"BINANCE:BTCUSDT","action":"buy","size":"1","size_type":"absolute_qty","nonce":"ghost-400",` + freshTS()
+	// A BOUND FUND WITH NO ALLOCATION. Since #632 the binding is checked first, so
+	// an UNKNOWN fund never reaches the allocation table at all — the sentinel this
+	// test pins is now only reachable for a fund the strategy IS entitled to whose
+	// venue split is missing, which is what this harness constructs. (config.Load
+	// cannot produce that state: ValidateAllocation refuses an empty split at
+	// startup. The seam is still reachable from a dynamic AllocationPolicy and from
+	// the native alpha path, and its STATUS is what this pins.)
+	cap := &capture{}
+	authority, err := NewFundAuthority(
+		map[string]string{"fund-alpha": "acme", "fund-unallocated": "acme"},
+		map[string][]string{"momentum": {"fund-alpha", "fund-unallocated"}},
+	)
+	if err != nil {
+		t.Fatalf("NewFundAuthority: %v", err)
+	}
+	p, err := NewPipeline(Options{
+		Authority: authority,
+		Auth:      NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now),
+		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
+		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
+		Equity:    StaticEquity{"fund-unallocated": big.NewRat(1_000_000, 1)},
+		Positions: StaticPositions{},
+		Alloc:     StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
+		Publisher: cap,
+		Gate:      translate.OpenGate(nil),
+	})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	raw := `{"strategy_id":"momentum","fund_id":"fund-unallocated","symbol":"BINANCE:BTCUSDT","action":"buy","size":"1","size_type":"absolute_qty","nonce":"ghost-400",` + freshTS()
 
-	_, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
+	_, err = p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret))
 	if !errors.Is(err, ErrBadRequest) {
 		t.Fatalf("an unmapped fund = %v, want ErrBadRequest so the server answers 400. Unmapped it "+
 			"answers 502, which blames this platform for the sender's fund_id and invites a retry "+
@@ -354,6 +473,46 @@ func TestPerimeter_AnUnmappedFundIs400AndBurnsItsNonce(t *testing.T) {
 	}
 	if _, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret)); !errors.Is(err, ErrReplayed) {
 		t.Fatalf("redelivery for an unmapped fund = %v, want ErrReplayed", err)
+	}
+}
+
+// AN UNBOUND FUND ALSO BURNS ITS NONCE (#632). The binding table is static config
+// read at startup, so no redelivery of the identical body can ever resolve
+// differently — releasing it would let a prober re-enter the whole pipeline on
+// every retry instead of collapsing to ErrReplayed.
+func TestPerimeter_AnUnboundFundBurnsItsNonceAndCountsTheStrategy(t *testing.T) {
+	cap := &capture{}
+	var counted []string
+	p, err := NewPipeline(Options{
+		Authority: ingestTestAuthority(t),
+		Auth:      NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now),
+		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
+		Prices:    StaticPrices{"BTC-USD": big.NewRat(50000, 1)},
+		Equity:    StaticEquity{"fund-victim": big.NewRat(1_000_000, 1)},
+		Positions: StaticPositions{},
+		Alloc:     StaticAllocation{"fund-victim": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
+		Publisher: cap,
+		Gate:      translate.OpenGate(nil),
+		OnUnboundFund: func(strategyID string) {
+			counted = append(counted, strategyID)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	raw := `{"strategy_id":"momentum","fund_id":"fund-victim","symbol":"BINANCE:BTCUSDT","action":"buy","size":"1","size_type":"absolute_qty","nonce":"unbound-burn",` + freshTS()
+
+	if _, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret)); !errors.Is(err, ErrUnboundFund) {
+		t.Fatalf("first attempt = %v, want ErrUnboundFund", err)
+	}
+	// COUNTED, BY STRATEGY. A refusal nobody can see is a leaked secret nobody finds.
+	if len(counted) != 1 || counted[0] != "momentum" {
+		t.Errorf("OnUnboundFund saw %v, want exactly [momentum] — the operator's question is "+
+			"WHICH SENDER is reaching for a fund it does not own", counted)
+	}
+	if _, err := p.Process(context.Background(), []byte(raw), net.ParseIP("10.0.0.1"), sign(raw, testSecret)); !errors.Is(err, ErrReplayed) {
+		t.Fatalf("redelivery = %v, want ErrReplayed — the nonce was released, so a prober can "+
+			"re-enter the whole pipeline on every retry", err)
 	}
 }
 

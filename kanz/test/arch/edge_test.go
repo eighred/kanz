@@ -49,6 +49,17 @@ const (
 //	webhook-ingest — authenticates every signal by HMAC over the raw body. It has to
 //	                 be reachable: TradingView dials it, and nothing else can.
 //
+// WHAT "AUTHENTICATES" MEANS FOR THE SECOND ONE, stated because the difference
+// was a P0. The HMAC proves the sender holds a STRATEGY's secret — not a fund,
+// and not a tenant. Everything else about the request, `fund_id` included, is
+// caller-supplied text that happens to be covered by that signature. Being on
+// this list is therefore not a claim that a signed request may do whatever it
+// asks: the fund it names is checked against a configured strategy→fund→tenant
+// binding before any order is published (#632, translate.FundAuthority). Until
+// that binding existed the tenant WAS `fund_id`, and one leaked strategy secret
+// reached every tenant this deployment served — from an Ingress this file
+// approved.
+//
 // tv-sync is NOT here, and that is the point of this test.
 var publishable = map[string]bool{
 	"api-gateway":    true,
