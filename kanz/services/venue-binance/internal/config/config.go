@@ -2,9 +2,9 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
-	"strings"
 
 	"github.com/eighred/kanz/pkg/secret"
 )
@@ -106,45 +106,25 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		GRPCListen:   envOr("VENUE_BINANCE_GRPC_LISTEN", ":9000"),
-		HTTPListen:   envOr("VENUE_BINANCE_LISTEN", ":8091"),
-		LogLevel:     parseLevel(os.Getenv("VENUE_BINANCE_LOG_LEVEL")),
-		Source:       envOr("VENUE_BINANCE_SOURCE", "venue-binance"),
+		GRPCListen:   env.Or("VENUE_BINANCE_GRPC_LISTEN", ":9000"),
+		HTTPListen:   env.Or("VENUE_BINANCE_LISTEN", ":8091"),
+		LogLevel:     env.ParseLevelOr(os.Getenv("VENUE_BINANCE_LOG_LEVEL"), slog.LevelInfo),
+		Source:       env.Or("VENUE_BINANCE_SOURCE", "venue-binance"),
 		OTLPEndpoint: os.Getenv("VENUE_BINANCE_OTLP_ENDPOINT"),
 		NATSURL:      os.Getenv("VENUE_BINANCE_NATS_URL"),
 		DatabaseURL:  databaseURL,
-		Tenant:       envOr("VENUE_BINANCE_TENANT", "__system__"),
+		Tenant:       env.Or("VENUE_BINANCE_TENANT", "__system__"),
 		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 
-		MIC:                    envOr("BINANCE_MIC", "BINANCE"),
-		Account:                envOr("BINANCE_VENUE_ACCOUNT", envOr("BINANCE_MIC", "BINANCE")),
+		MIC:                    env.Or("BINANCE_MIC", "BINANCE"),
+		Account:                env.Or("BINANCE_VENUE_ACCOUNT", env.Or("BINANCE_MIC", "BINANCE")),
 		AccountUID:             os.Getenv("BINANCE_VENUE_ACCOUNT_UID"),
 		AllowUnverifiedAccount: os.Getenv("BINANCE_ALLOW_UNVERIFIED_ACCOUNT") == "true",
-		BaseURL:                envOr("BINANCE_BASE_URL", "https://testnet.binance.vision"),
-		WSBase:                 envOr("BINANCE_WS_BASE", "wss://testnet.binance.vision"),
+		BaseURL:                env.Or("BINANCE_BASE_URL", "https://testnet.binance.vision"),
+		WSBase:                 env.Or("BINANCE_WS_BASE", "wss://testnet.binance.vision"),
 		APIKey:                 apiKey,
 		APISecret:              apiSecret,
 		Symbols:                os.Getenv("BINANCE_SYMBOLS"),
 		RequireQuoteMatch:      os.Getenv("BINANCE_REQUIRE_QUOTE_MATCH") == "true",
 	}, nil
-}
-
-func envOr(k, def string) string {
-	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strconv"
@@ -84,7 +85,7 @@ type Config struct {
 var DefaultSubjects = []string{">"}
 
 func Load() (Config, error) {
-	subjects := splitList(os.Getenv("LINEAGE_SUBJECTS"))
+	subjects := env.SplitList(os.Getenv("LINEAGE_SUBJECTS"))
 	if len(subjects) == 0 {
 		subjects = DefaultSubjects
 	}
@@ -98,48 +99,18 @@ func Load() (Config, error) {
 		indexMax = n
 	}
 	return Config{
-		Listen:         envOr("LINEAGE_LISTEN", ":8086"),
-		LogLevel:       parseLevel(envOr("LINEAGE_LOG_LEVEL", "info")),
+		Listen:         env.Or("LINEAGE_LISTEN", ":8086"),
+		LogLevel:       env.ParseLevelOr(env.Or("LINEAGE_LOG_LEVEL", "info"), slog.LevelInfo),
 		NATSURL:        os.Getenv("LINEAGE_NATS_URL"),
-		Source:         envOr("LINEAGE_SOURCE", "lineage"),
-		ConsumerGroup:  envOr("LINEAGE_CONSUMER_GROUP", "lineage"),
+		Source:         env.Or("LINEAGE_SOURCE", "lineage"),
+		ConsumerGroup:  env.Or("LINEAGE_CONSUMER_GROUP", "lineage"),
 		Subjects:       subjects,
 		EventIndexMax:  indexMax,
 		PolicyFile:     os.Getenv("LINEAGE_POLICY_FILE"),
 		GovernanceFile: os.Getenv("LINEAGE_GOVERNANCE_FILE"),
 		OpenLineageURL: strings.TrimRight(os.Getenv("LINEAGE_OPENLINEAGE_URL"), "/"),
 		OTLPEndpoint:   os.Getenv("LINEAGE_OTLP_ENDPOINT"),
-		Tenant:         envOr("LINEAGE_TENANT", bus.SystemTenant),
+		Tenant:         env.Or("LINEAGE_TENANT", bus.SystemTenant),
 		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
-}
-
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

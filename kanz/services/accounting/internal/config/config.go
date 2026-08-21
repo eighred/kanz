@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
 	"os"
@@ -153,15 +154,15 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	subjects := splitList(os.Getenv("ACCOUNTING_FILL_SUBJECTS"))
+	subjects := env.SplitList(os.Getenv("ACCOUNTING_FILL_SUBJECTS"))
 	if len(subjects) == 0 {
 		subjects = DefaultFillSubjects
 	}
-	fxSubjects := splitList(os.Getenv("ACCOUNTING_FX_SUBJECTS"))
+	fxSubjects := env.SplitList(os.Getenv("ACCOUNTING_FX_SUBJECTS"))
 	if len(fxSubjects) == 0 {
 		fxSubjects = DefaultFXSubjects
 	}
-	cashSubjects := splitList(os.Getenv("ACCOUNTING_CASH_SUBJECTS"))
+	cashSubjects := env.SplitList(os.Getenv("ACCOUNTING_CASH_SUBJECTS"))
 	if len(cashSubjects) == 0 {
 		cashSubjects = DefaultCashSubjects
 	}
@@ -176,17 +177,17 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Listen:        envOr("ACCOUNTING_LISTEN", ":8101"),
-		MetricsListen: envOr("ACCOUNTING_METRICS_LISTEN", ":8080"),
-		LogLevel:      parseLevel(os.Getenv("ACCOUNTING_LOG_LEVEL")),
-		BaseCurrency:  envOr("ACCOUNTING_BASE_CURRENCY", "USD"),
+		Listen:        env.Or("ACCOUNTING_LISTEN", ":8101"),
+		MetricsListen: env.Or("ACCOUNTING_METRICS_LISTEN", ":8080"),
+		LogLevel:      env.ParseLevelOr(os.Getenv("ACCOUNTING_LOG_LEVEL"), slog.LevelInfo),
+		BaseCurrency:  env.Or("ACCOUNTING_BASE_CURRENCY", "USD"),
 		NATSURL:       os.Getenv("ACCOUNTING_NATS_URL"),
-		Source:        envOr("ACCOUNTING_SOURCE", "accounting"),
-		ConsumerGroup: envOr("ACCOUNTING_CONSUMER_GROUP", "accounting"),
+		Source:        env.Or("ACCOUNTING_SOURCE", "accounting"),
+		ConsumerGroup: env.Or("ACCOUNTING_CONSUMER_GROUP", "accounting"),
 		FillSubjects:  subjects,
 		CashSubjects:  cashSubjects,
 		DatabaseURL:   databaseURL,
-		Tenant:        envOr("ACCOUNTING_TENANT", "__system__"),
+		Tenant:        env.Or("ACCOUNTING_TENANT", "__system__"),
 
 		AllowEphemeralLedger: os.Getenv("ACCOUNTING_ALLOW_EPHEMERAL_LEDGER") == "true",
 
@@ -200,17 +201,6 @@ func Load() (Config, error) {
 		FXSubjects:         fxSubjects,
 		InstrumentCurrency: os.Getenv("ACCOUNTING_INSTRUMENT_CURRENCY"),
 	}, nil
-}
-
-// splitList parses a comma-separated env value into a trimmed, non-empty slice.
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // durationOr parses a Go duration from the environment, or returns def when
@@ -241,24 +231,4 @@ func intOr(key string, def int) (int, error) {
 		return 0, fmt.Errorf("config: %s=%q is not an integer: %w", key, raw, err)
 	}
 	return n, nil
-}
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

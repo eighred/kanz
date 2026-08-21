@@ -1,9 +1,9 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
-	"strings"
 
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/platform/subject"
@@ -74,33 +74,13 @@ func (Config) MandateSubject() string { return comp.SubjectMandateChanged }
 
 func Load() (Config, error) {
 	return Config{
-		Listen:        envOr("COMPLIANCE_LISTEN", ":8091"),
-		APIListen:     envOr("COMPLIANCE_API_LISTEN", ":8095"),
-		LogLevel:      parseLevel(envOr("COMPLIANCE_LOG_LEVEL", "info")),
-		Source:        envOr("COMPLIANCE_SOURCE", "compliance"),
+		Listen:        env.Or("COMPLIANCE_LISTEN", ":8091"),
+		APIListen:     env.Or("COMPLIANCE_API_LISTEN", ":8095"),
+		LogLevel:      env.ParseLevelOr(env.Or("COMPLIANCE_LOG_LEVEL", "info"), slog.LevelInfo),
+		Source:        env.Or("COMPLIANCE_SOURCE", "compliance"),
 		OTLPEndpoint:  os.Getenv("COMPLIANCE_OTLP_ENDPOINT"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 		NATSURL:       os.Getenv("COMPLIANCE_NATS_URL"),
-		ConsumerGroup: envOr("COMPLIANCE_CONSUMER_GROUP", "compliance"),
+		ConsumerGroup: env.Or("COMPLIANCE_CONSUMER_GROUP", "compliance"),
 	}, nil
-}
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

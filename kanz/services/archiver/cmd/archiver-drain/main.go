@@ -30,6 +30,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"io"
 	"log/slog"
 	"os"
@@ -188,7 +189,7 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&o.natsURL, "nats-url", os.Getenv("ARCHIVER_NATS_URL"), "NATS URL — used ONLY by the single-writer gate")
 	fs.StringVar(&o.brokers, "brokers", os.Getenv("ARCHIVER_KAFKA_BROKERS"), "comma-separated Kafka brokers")
 	fs.StringVar(&o.tenant, "tenant", os.Getenv("ARCHIVER_TENANT"), "tenant the routing table routes against")
-	fs.StringVar(&o.group, "group", envOr("ARCHIVER_CONSUMER_GROUP", "archiver"), "the ARCHIVER's durable consumer group — what the gate probes")
+	fs.StringVar(&o.group, "group", env.Or("ARCHIVER_CONSUMER_GROUP", "archiver"), "the ARCHIVER's durable consumer group — what the gate probes")
 	fs.StringVar(&o.subjects, "subjects", os.Getenv("ARCHIVER_SUBJECTS"), "comma-separated archived subjects (default: the archiver's own list)")
 	// --write, not --include-terminal. EVERY message here is ClassTerminal, so a
 	// flag required on 100% of runs stops being a decision and becomes muscle
@@ -200,11 +201,4 @@ func parseFlags(args []string) (options, error) {
 		return options{}, err
 	}
 	return o, nil
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

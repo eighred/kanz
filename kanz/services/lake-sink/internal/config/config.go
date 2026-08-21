@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strings"
@@ -42,12 +43,12 @@ type Config struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		Listen:        envOr("LAKE_SINK_LISTEN", ":8085"),
-		LogLevel:      parseLevel(envOr("LAKE_SINK_LOG_LEVEL", "info")),
-		Brokers:       splitList(os.Getenv("LAKE_SINK_BROKERS")),
-		Topics:        splitList(os.Getenv("LAKE_SINK_TOPICS")),
-		Source:        envOr("LAKE_SINK_SOURCE", "lake-sink"),
-		ConsumerGroup: envOr("LAKE_SINK_CONSUMER_GROUP", "lake-sink"),
+		Listen:        env.Or("LAKE_SINK_LISTEN", ":8085"),
+		LogLevel:      env.ParseLevelOr(env.Or("LAKE_SINK_LOG_LEVEL", "info"), slog.LevelInfo),
+		Brokers:       env.SplitList(os.Getenv("LAKE_SINK_BROKERS")),
+		Topics:        env.SplitList(os.Getenv("LAKE_SINK_TOPICS")),
+		Source:        env.Or("LAKE_SINK_SOURCE", "lake-sink"),
+		ConsumerGroup: env.Or("LAKE_SINK_CONSUMER_GROUP", "lake-sink"),
 		RegistryURL:   strings.TrimRight(os.Getenv("LAKE_SINK_REGISTRY_URL"), "/"),
 		OutputDir:     os.Getenv("LAKE_SINK_OUTPUT_DIR"),
 		OTLPEndpoint:  os.Getenv("LAKE_SINK_OTLP_ENDPOINT"),
@@ -62,34 +63,4 @@ func Load() (Config, error) {
 		return Config{}, errors.New("LAKE_SINK_OUTPUT_DIR is required")
 	}
 	return cfg, nil
-}
-
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

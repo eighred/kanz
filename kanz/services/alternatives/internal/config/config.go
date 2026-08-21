@@ -1,9 +1,9 @@
 package config
 
 import (
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
-	"strings"
 
 	"github.com/eighred/kanz/internal/alternatives"
 	"github.com/eighred/kanz/pkg/secret"
@@ -79,53 +79,22 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	subjects := splitList(os.Getenv("ALTERNATIVES_SUBJECTS"))
+	subjects := env.SplitList(os.Getenv("ALTERNATIVES_SUBJECTS"))
 	if len(subjects) == 0 {
 		subjects = alternatives.AllSubjects()
 	}
 	return Config{
-		Listen:       envOr("ALTERNATIVES_LISTEN", ":8080"),
-		LogLevel:     parseLevel(os.Getenv("ALTERNATIVES_LOG_LEVEL")),
+		Listen:       env.Or("ALTERNATIVES_LISTEN", ":8080"),
+		LogLevel:     env.ParseLevelOr(os.Getenv("ALTERNATIVES_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint: os.Getenv("ALTERNATIVES_OTLP_ENDPOINT"),
 		DatabaseURL:  databaseURL,
-		Tenant:       envOr("ALTERNATIVES_TENANT", "__system__"),
+		Tenant:       env.Or("ALTERNATIVES_TENANT", "__system__"),
 
 		AllowEphemeralJournal: os.Getenv("ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL") == "true",
 		NATSURL:               os.Getenv("ALTERNATIVES_NATS_URL"),
-		Source:                envOr("ALTERNATIVES_SOURCE", "alternatives"),
-		ConsumerGroup:         envOr("ALTERNATIVES_CONSUMER_GROUP", "alternatives"),
+		Source:                env.Or("ALTERNATIVES_SOURCE", "alternatives"),
+		ConsumerGroup:         env.Or("ALTERNATIVES_CONSUMER_GROUP", "alternatives"),
 		Subjects:              subjects,
 		SPIFFESocket:          os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
-}
-
-// splitList parses a comma-separated env value into a trimmed, non-empty slice.
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

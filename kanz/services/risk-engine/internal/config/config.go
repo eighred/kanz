@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strconv"
@@ -204,7 +205,7 @@ func Load() (Config, error) {
 	if nightly <= 0 {
 		nightly = DefaultCalibrationNightly
 	}
-	marketSubjects := splitList(os.Getenv("RISK_ENGINE_MARKET_SUBJECTS"))
+	marketSubjects := env.SplitList(os.Getenv("RISK_ENGINE_MARKET_SUBJECTS"))
 	if len(marketSubjects) == 0 {
 		marketSubjects = DefaultMarketSubjects
 	}
@@ -249,20 +250,20 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Listen:           envOr("RISK_ENGINE_LISTEN", ":8081"),
-		LogLevel:         parseLevel(envOr("RISK_ENGINE_LOG_LEVEL", "info")),
+		Listen:           env.Or("RISK_ENGINE_LISTEN", ":8081"),
+		LogLevel:         env.ParseLevelOr(env.Or("RISK_ENGINE_LOG_LEVEL", "info"), slog.LevelInfo),
 		NATSURL:          os.Getenv("RISK_ENGINE_NATS_URL"),
-		Source:           envOr("RISK_ENGINE_SOURCE", "risk-engine"),
-		Tenant:           envOr("RISK_ENGINE_TENANT", "__system__"),
+		Source:           env.Or("RISK_ENGINE_SOURCE", "risk-engine"),
+		Tenant:           env.Or("RISK_ENGINE_TENANT", "__system__"),
 		DatabaseURL:      databaseURL,
 		SnapshotInterval: parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
-		KafkaBrokers:     splitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
+		KafkaBrokers:     env.SplitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
 		MarketDataURL:    marketDataURL,
 
 		RequireValidatedAnalytics: requireValidated,
 
 		LiquidityVenue: strings.TrimSpace(os.Getenv("RISK_ENGINE_LIQUIDITY_VENUE")),
-		ShardMembers:   splitList(os.Getenv("RISK_ENGINE_SHARD_MEMBERS")),
+		ShardMembers:   env.SplitList(os.Getenv("RISK_ENGINE_SHARD_MEMBERS")),
 		// TRIMMED BECAUSE THE MEMBER LIST IS. splitList trims each member, so an
 		// id carrying the trailing space a YAML block scalar or a shell `export`
 		// leaves behind could never match one — and an id that matches nothing
@@ -317,18 +318,6 @@ func parseBoolDefault(key string, def bool, nearMisses ...string) (bool, error) 
 	return v, nil
 }
 
-// splitList parses a comma-separated env value into a trimmed, non-empty
-// slice; an empty or all-whitespace value yields nil.
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 // parseDuration parses a Go duration (e.g. "30s", "2m"); an empty or malformed
 // value yields 0, which the snapshotter maps to engine.DefaultSnapshotInterval.
 func parseDuration(s string) time.Duration {
@@ -340,24 +329,4 @@ func parseDuration(s string) time.Duration {
 		return 0
 	}
 	return d
-}
-
-func envOr(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(s) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

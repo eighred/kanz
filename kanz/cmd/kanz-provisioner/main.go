@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"os"
 	"time"
 )
@@ -54,7 +55,7 @@ func runJoin(j Joiner) error {
 	user := os.Getenv("PROVISION_SSH_USER")
 	serverURL := os.Getenv("K3S_SERVER_URL")
 	token := os.Getenv("K3S_TOKEN")
-	keyPath := envOr("PROVISION_SSH_KEY_FILE", "/etc/provision/ssh_key")
+	keyPath := env.Or("PROVISION_SSH_KEY_FILE", "/etc/provision/ssh_key")
 
 	if addr == "" || user == "" || serverURL == "" || token == "" {
 		return fmt.Errorf("missing required env (PROVISION_TARGET_ADDR, PROVISION_SSH_USER, K3S_SERVER_URL, K3S_TOKEN)")
@@ -67,11 +68,4 @@ func runJoin(j Joiner) error {
 	ctx, cancel := context.WithTimeout(context.Background(), provisionTimeout)
 	defer cancel()
 	return j.Join(ctx, Target{Addr: addr, User: user, Key: key}, K3sJoin{ServerURL: serverURL, Token: token})
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }

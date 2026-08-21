@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log"
 	"math/rand"
 	"os"
@@ -49,9 +50,9 @@ const (
 var instruments = []string{"AAPL", "MSFT", "TSLA", "NVDA"}
 
 func main() {
-	url := envOr("INGEST_NATS_URL", envOr("SEED_NATS_URL", "nats://localhost:4222"))
-	prefix := envOr("PORTFOLIO", "PF1")
-	tenant := envOr("SEED_TENANT", "load-test")
+	url := env.Or("INGEST_NATS_URL", env.Or("SEED_NATS_URL", "nats://localhost:4222"))
+	prefix := env.Or("PORTFOLIO", "PF1")
+	tenant := env.Or("SEED_TENANT", "load-test")
 	rate := envInt("RATE", 1000)          // events/sec
 	portfolios := envInt("PORTFOLIOS", 1) // book size (mirror the seed)
 	dur := envDuration("DURATION", time.Minute)
@@ -151,14 +152,6 @@ func tick(tenant, portfolio, instrument string, rng *rand.Rand) bus.Event {
 		Payload:          pos,
 	}
 }
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
 func envInt(k string, def int) int {
 	if v := os.Getenv(k); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

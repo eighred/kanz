@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strings"
@@ -177,18 +178,18 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		GRPCListen:   envOr("VENUE_OKX_GRPC_LISTEN", ":9000"),
-		HTTPListen:   envOr("VENUE_OKX_LISTEN", ":8092"),
-		LogLevel:     parseLevel(os.Getenv("VENUE_OKX_LOG_LEVEL")),
-		Source:       envOr("VENUE_OKX_SOURCE", "venue-okx"),
+		GRPCListen:   env.Or("VENUE_OKX_GRPC_LISTEN", ":9000"),
+		HTTPListen:   env.Or("VENUE_OKX_LISTEN", ":8092"),
+		LogLevel:     env.ParseLevelOr(os.Getenv("VENUE_OKX_LOG_LEVEL"), slog.LevelInfo),
+		Source:       env.Or("VENUE_OKX_SOURCE", "venue-okx"),
 		OTLPEndpoint: os.Getenv("VENUE_OKX_OTLP_ENDPOINT"),
 		NATSURL:      os.Getenv("VENUE_OKX_NATS_URL"),
 		DatabaseURL:  databaseURL,
-		Tenant:       envOr("VENUE_OKX_TENANT", "__system__"),
+		Tenant:       env.Or("VENUE_OKX_TENANT", "__system__"),
 		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 
-		MIC:                    envOr("OKX_MIC", "OKX"),
-		Account:                envOr("OKX_VENUE_ACCOUNT", envOr("OKX_MIC", "OKX")),
+		MIC:                    env.Or("OKX_MIC", "OKX"),
+		Account:                env.Or("OKX_VENUE_ACCOUNT", env.Or("OKX_MIC", "OKX")),
 		AccountUID:             os.Getenv("OKX_VENUE_ACCOUNT_UID"),
 		AllowUnverifiedAccount: os.Getenv("OKX_ALLOW_UNVERIFIED_ACCOUNT") == "true",
 		BaseURL:                baseURL,
@@ -212,26 +213,6 @@ func requiredEnv(k string) (string, error) {
 	return "", fmt.Errorf("%s is required and has no default: OKX exposes no demo hostname, "+
 		"so defaulting it would silently select the LIVE exchange (see #147). Set it explicitly "+
 		"to the endpoint you intend to trade against", k)
-}
-
-func envOr(k, def string) string {
-	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-		return v
-	}
-	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }
 
 // requiredOKXTradingMode reads OKX_TRADING_MODE and accepts only the two values

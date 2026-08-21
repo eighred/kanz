@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"math/big"
 	"net"
@@ -242,12 +243,12 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen:          envOr("WEBHOOK_INGEST_LISTEN", ":8090"),
-		LogLevel:        parseLevel(os.Getenv("WEBHOOK_INGEST_LOG_LEVEL")),
+		Listen:          env.Or("WEBHOOK_INGEST_LISTEN", ":8090"),
+		LogLevel:        env.ParseLevelOr(os.Getenv("WEBHOOK_INGEST_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint:    os.Getenv("WEBHOOK_INGEST_OTLP_ENDPOINT"),
 		SPIFFESocket:    os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
-		NATSURL:         envOr("WEBHOOK_INGEST_NATS_URL", "nats://localhost:4222"),
-		Source:          envOr("WEBHOOK_INGEST_SOURCE", "webhook-ingest"),
+		NATSURL:         env.Or("WEBHOOK_INGEST_NATS_URL", "nats://localhost:4222"),
+		Source:          env.Or("WEBHOOK_INGEST_SOURCE", "webhook-ingest"),
 		ReplayWindow:    parseDuration(os.Getenv("WEBHOOK_INGEST_REPLAY_WINDOW"), 5*time.Minute),
 		MaxSignalAge:    parseSignalAge(os.Getenv("WEBHOOK_INGEST_MAX_SIGNAL_AGE"), 2*time.Minute),
 		RequireSignalTS: os.Getenv("WEBHOOK_INGEST_REQUIRE_SIGNAL_TS") != "false",
@@ -412,13 +413,6 @@ func parseAllowlist(s string) ([]*net.IPNet, error) {
 	return out, nil
 }
 
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
 // parseSignalAge reads the freshness bound, and it does NOT use parseDuration
 // below — because that function maps every non-positive value to its default.
 //
@@ -452,17 +446,4 @@ func parseDuration(s string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

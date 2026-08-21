@@ -35,6 +35,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"io"
 	"os"
 	"os/signal"
@@ -168,9 +169,9 @@ func newSource(opt options) (backfill.Source, error) {
 func defaultVenueMIC(source string) string {
 	switch source {
 	case "binance":
-		return envOr("MARKET_INGEST_BINANCE_MIC", "BINANCE")
+		return env.Or("MARKET_INGEST_BINANCE_MIC", "BINANCE")
 	case "okx":
-		return envOr("MARKET_INGEST_OKX_MIC", "OKX")
+		return env.Or("MARKET_INGEST_OKX_MIC", "OKX")
 	default:
 		return ""
 	}
@@ -246,11 +247,4 @@ func parseFlags(args []string) (options, error) {
 		opt.venue = defaultVenueMIC(opt.source)
 	}
 	return opt, nil
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

@@ -56,6 +56,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/eighred/kanz/internal/env"
 	"os"
 	"time"
 
@@ -170,11 +171,11 @@ func run(args []string, out *os.File) error {
 func parseFlags(args []string) (options, error) {
 	fs := flag.NewFlagSet("kanz-altevent", flag.ContinueOnError)
 	var opt options
-	fs.StringVar(&opt.natsURL, "nats", envOr("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
-	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", envOr("SPIFFE_ENDPOINT_SOCKET", ""),
+	fs.StringVar(&opt.natsURL, "nats", env.Or("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
+	fs.StringVar(&opt.spiffeSocket, "spiffe-socket", env.Or("SPIFFE_ENDPOINT_SOCKET", ""),
 		"SPIFFE Workload API socket for the operator SVID the production broker requires.\n"+
 			"Empty ⇒ a PLAINTEXT dial: fine against a local dev broker, refused by production.")
-	fs.StringVar(&opt.tenant, "tenant", envOr("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED (the bus rejects an untenanted envelope)")
+	fs.StringVar(&opt.tenant, "tenant", env.Or("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED (the bus rejects an untenanted envelope)")
 	fs.StringVar(&opt.kind, "kind", "", "event kind: commit|call|distribution|navmark — REQUIRED, selects both the subject and the proto message")
 	fs.StringVar(&opt.file, "file", "", "path to the event, as protojson (the alternatives.v1 message -kind selects) — REQUIRED")
 	fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)
@@ -381,11 +382,4 @@ func setProvenance(payload proto.Message, by, reason string) {
 	case *altpb.NAVMark:
 		m.RecordedBy, m.Reason = by, reason
 	}
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }

@@ -8,6 +8,7 @@ package config
 
 import (
 	"errors"
+	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
 	"strconv"
@@ -92,8 +93,8 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{
-		Listen:            envOr("IDENTITY_LISTEN", ":8087"),
-		LogLevel:          parseLevel(os.Getenv("IDENTITY_LOG_LEVEL")),
+		Listen:            env.Or("IDENTITY_LISTEN", ":8087"),
+		LogLevel:          env.ParseLevelOr(os.Getenv("IDENTITY_LOG_LEVEL"), slog.LevelInfo),
 		DatabaseURL:       databaseURL,
 		SigningKeyFile:    os.Getenv("IDENTITY_SIGNING_KEY_FILE"),
 		AllowEphemeralKey: os.Getenv("IDENTITY_ALLOW_EPHEMERAL_KEY") == "true",
@@ -134,14 +135,6 @@ func Load() (Config, error) {
 	}
 	return cfg, nil
 }
-
-func envOr(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
-}
-
 func parseDuration(s string, def time.Duration) time.Duration {
 	if d, err := time.ParseDuration(strings.TrimSpace(s)); err == nil && d > 0 {
 		return d
@@ -154,17 +147,4 @@ func parseInt(s string, def int) int {
 		return n
 	}
 	return def
-}
-
-func parseLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn", "warning":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }
