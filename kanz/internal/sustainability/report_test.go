@@ -1,10 +1,13 @@
 package sustainability
 
 import (
-	"github.com/eighred/kanz/internal/dec"
+	"math"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/eighred/kanz/internal/dec"
 )
 
 func TestGlidePathTargetAndTracking(t *testing.T) {
@@ -95,4 +98,64 @@ func TestUnknownFramework(t *testing.T) {
 	if _, err := BuildReport(Framework("XYZ"), time.Now(), map[string]*big.Rat{}, nil); err == nil {
 		t.Fatal("unknown framework should error")
 	}
+}
+
+// TestNonFiniteMetricIsRefusedNotSigned pins the refusal disclosure.go has always
+// CLAIMED and this package did not have (#633).
+//
+// exactOrNil maps a non-finite model output to nil, because big.Rat.SetFloat64
+// returns nil for NaN/±Inf, and disclosure.go's comment reads "A non-finite metric
+// maps to nil, which BuildReport refuses." That was true of internal/regulatory's
+// BuildReport and false of this package's byte-identical copy, which checked only
+// that the KEY was present. A nil value therefore reached the line item, dec.Str
+// rendered it "0" into the canonical bytes and into the filing, and the disclosure
+// was SIGNED — a measured zero and an unrepresentable number looking identical to
+// the regulator, which is the #617 shape.
+//
+// Both halves are checked, because a unit-level refusal that nothing routes to is
+// not a refusal: the second half drives it through FileTCFD from a holdings book.
+func TestNonFiniteMetricIsRefusedNotSigned(t *testing.T) {
+	asOf := time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)
+
+	t.Run("BuildReport", func(t *testing.T) {
+		values := map[string]*big.Rat{
+			"TCFD_WACI":               exactOrNil(math.NaN()), // nil
+			"TCFD_FINANCED_EMISSIONS": dec.Rat("115"),
+			"TCFD_IMPLIED_TEMP_RISE":  dec.Rat("2.4"),
+			"TCFD_CLIMATE_VAR":        dec.Rat("50000"),
+		}
+		if values["TCFD_WACI"] != nil {
+			t.Fatalf("premise broken: exactOrNil(NaN) = %v, want nil — this test is asserting nothing", values["TCFD_WACI"])
+		}
+		rep, err := BuildReport(TCFD, asOf, values, nil)
+		if err == nil {
+			t.Fatalf("a NaN WACI was SIGNED as %q with the value filed as %q — "+
+				"a number that is not a number must never become an authoritative filing",
+				rep.Signature, dec.Str(nil))
+		}
+		if !strings.Contains(err.Error(), "TCFD_WACI") {
+			t.Errorf("the refusal must name the offending line item; got %q", err)
+		}
+	})
+
+	t.Run("FileTCFD", func(t *testing.T) {
+		// A holdings book carrying a non-finite market value — the data-quality shape
+		// this arrives in. It reaches WACI through the weight NaN/NaN.
+		in := DisclosureInputs{
+			Holdings: []Holding{{
+				InstrumentID: "ISS-1",
+				MarketValue:  math.NaN(),
+				Carbon:       CarbonMetrics{Scope1: 100, Revenue: 1000, EVIC: 2000000},
+			}},
+			GlidePath: GlidePath{BaseYear: 2020, TargetYear: 2050, BaseEmissions: 1000},
+			Year:      2035,
+		}
+		if v := in.TCFDValues()["TCFD_WACI"]; v != nil {
+			t.Fatalf("premise broken: a NaN market value gave a finite WACI %v — reroute this fixture", v)
+		}
+		rep, err := FileTCFD(in, asOf, nil)
+		if err == nil {
+			t.Fatalf("FileTCFD signed a disclosure over a non-finite metric: signature=%q", rep.Signature)
+		}
+	})
 }

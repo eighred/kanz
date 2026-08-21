@@ -1,14 +1,14 @@
 // Package signer is the AUDIT-01 hash-chain report signer (PARITY-04e). It
-// realizes the regulatory/sustainability `Signer` seam (`Sign(canonical []byte)
-// string`) with a real audit-chain link instead of the default bare SHA-256
+// realizes the internal/filing `Signer` seam (`Sign(canonical []byte) (string,
+// error)`) with a real audit-chain link instead of the default bare SHA-256
 // content hash: each signature folds in the previous signature (chain.Next), so
 // a report's signature is a position in the tamper-evident audit chain and is
 // verifiable by walking that chain — not just a standalone digest that proves
 // nothing about ordering or completeness.
 //
-// One value satisfies both internal/regulatory.Signer and
-// internal/sustainability.Signer implicitly (same one-method interface), so the
-// composition root injects it into REG-01 and CLIMATE-01 report building alike.
+// There is one seam to satisfy since #633: regulatory.Signer and
+// sustainability.Signer are both aliases of filing.Signer, so the composition
+// root injects this into REG-01 and CLIMATE-01 report building alike.
 // The signer owns the chaining math + head advancement; the durable append of
 // each link (to the AUDIT-01 store / a platform.audit FACT) is a sink seam wired
 // at the composition root, keeping this package free of the store's transport.
