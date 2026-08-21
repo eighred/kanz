@@ -187,7 +187,8 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// published, right through the declared halt.
 	haltGate := halt.NewGate(time.Now)
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{
-		URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client,
+		Metrics: busMetrics,
+		URL:     cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client,
 		// LOSING THE SPINE CLOSES THE GATE, the stance webhook-ingest has always
 		// taken. The halt FACT travels on this connection, and the ephemeral
 		// consumer carrying it may not survive a reconnect — so a dropped spine

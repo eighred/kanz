@@ -1039,6 +1039,75 @@ data:
             annotations:
               summary: "Postgres pods in kanz-data are being scraped but report no backup telemetry"
               description: "Prometheus has live targets in kanz-data and none of them export cnpg_collector_last_available_backup_timestamp, so every backup and recoverability alert in this group is evaluating an empty vector and CANNOT fire. Recoverability is currently unobserved, and it looks exactly like recoverability being fine. Either the CNPG metrics exporter is not running on 9187, or the metric names in this rule group are wrong for the CloudNativePG version actually deployed — check `kubectl -n kanz-data port-forward <pod> 9187:9187` and read /metrics before trusting any other rule here."
+
+      # ===========================================================================
+      - name: bus_connectivity
+      # ===========================================================================
+      # LOSING THE SPINE SAYS SO (#636). Before this group, it did not.
+      #
+      # pkg/bus states the requirement in its own doc — "a trading process must
+      # learn" — and one service of twenty-one did. The handlers that log a
+      # disconnect were installed only when a composition root passed OnDisconnect,
+      # and 23 of 24 NATSConfig literals passed nothing, so a nats.Conn could close
+      # for good with the process still running, /readyz still answering 200, and
+      # nothing written anywhere. MaxReconnects defaults to -1, so there is no crash
+      # to notice, and the Go NATS client logs nothing of its own.
+      #
+      # WHY BusConsumerStalled DOES NOT COVER THIS. That rule reads
+      # kanz_bus_consume_total, so it can only speak for a service that CONSUMES —
+      # the gateway, market-ingest and the venue adapters emitting fills publish and
+      # never consume, and are outside it entirely. It also decays by its own
+      # admission: "a stall lasting more than 24h takes the qualifier to zero too and
+      # this alert RESOLVES on its own", which is exactly an overnight spine loss on
+      # a quiet service.
+        rules:
+          # THE PROCESS IS DETACHED FROM THE SPINE RIGHT NOW.
+          #
+          # for: 2m rides out a broker rolling restart — NATS with 3 replicas moves
+          # leadership in seconds and the client reconnects — while still leaving a
+          # real outage announced long before the 24h window BusConsumerStalled needs.
+          - alert: BusDisconnected
+            expr: max by (namespace, pod, client) (kanz_bus_connected) == 0
+            for: 2m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "{{ $labels.pod }} has lost the NATS spine ({{ $labels.client }})"
+              description: "This process has held no NATS connection for two minutes. It cannot publish, cannot receive fills, and cannot hear a declared halt — so it can no longer know whether it is safe to trade, which is the reason pkg/bus's doc says a trading process must learn about a disconnect. MaxReconnects is -1, so it will keep retrying and will NOT crash: the pod stays Ready and the process stays alive with nothing flowing. Check the broker first (kubectl -n kanz-messaging get pods), then this pod's egress and its NATS credentials."
+
+          # FLAPPING, WHICH THE GAUGE ALONE CANNOT SEE.
+          #
+          # scrape_interval is 30s. A spine that drops and recovers inside one
+          # interval leaves kanz_bus_connected reading 1 at every scrape, so
+          # BusDisconnected above is structurally blind to it — and repeated short
+          # drops are what precedes a full outage rather than what follows it. A
+          # counter cannot miss an edge, which is why both exist.
+          #
+          # >= 3 in 15m, not > 0: one reconnect is a broker restart or a node moving,
+          # and paging on it would train the reader to ignore this rule.
+          - alert: BusConnectionFlapping
+            expr: increase(kanz_bus_connection_events_total{event="disconnected"}[15m]) >= 3
+            for: 5m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "{{ $labels.pod }} has reconnected to the spine repeatedly ({{ $labels.client }})"
+              description: "Three or more disconnects in fifteen minutes. Each one is brief enough that kanz_bus_connected is likely still reading 1 at every scrape, so BusDisconnected cannot fire on this — that rule sees state, this one sees edges. In-flight publishes are being buffered and redelivered across each gap, and consumers are re-establishing their durables each time. Look for a broker under memory pressure, a node draining repeatedly, or an unstable network path before it becomes a full outage."
+
+          # THE DELIVERY PATH FAULTING, WHICH HAS NO OTHER SURFACE ANYWHERE.
+          #
+          # jetstream reports missed heartbeats, ErrConsumerNotFound after a consumer
+          # is deleted, and ErrConsumerLeadershipChanged ONLY to a ConsumeErrHandler.
+          # Neither Consume call site registered one, so those errors were discarded
+          # and the subscription simply stopped delivering while the process stayed
+          # up. That is the mid-run form of the failure that crash-looped compliance
+          # and tv-sync to ~495 restarts on "stream not found" — loud when it happens
+          # at startup, silent when it arrives after the consumer is established.
+          - alert: BusAsyncConsumeErrors
+            expr: increase(kanz_bus_consume_errors_total[15m]) > 0
+            for: 15m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "Asynchronous consume errors on {{ $labels.subject }} ({{ $labels.group }})"
+              description: "JetStream has reported delivery-path errors on this subscription for fifteen minutes — missed heartbeats, a consumer that no longer exists, or a leadership change that did not settle. Deliveries on this subject may have STOPPED while the process stays healthy and Ready, so nothing else in this alerting layer will say so. Check whether the stream and consumer still exist (nats consumer info), which is the state that crash-looped compliance and tv-sync when it happened at startup instead of mid-run."
   slo.alerts.rules.yaml: |
     # SLO multi-window burn-rate alerts (SRE-01b) — over slo.recording.rules.yaml.
     #

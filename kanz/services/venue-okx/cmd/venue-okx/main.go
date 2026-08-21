@@ -170,7 +170,8 @@ func serve(cfg config.Config) error {
 	// disconnect watchdog.
 	gate := halt.NewGate(time.Now)
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{
-		URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client,
+		Metrics: busMetrics,
+		URL:     cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client,
 		// LOSING THE SPINE CLOSES THE GATE. The halt FACT travels on this
 		// connection; a dropped one means this process can no longer establish that
 		// placing an order is safe, and the ephemeral halt consumer may not survive

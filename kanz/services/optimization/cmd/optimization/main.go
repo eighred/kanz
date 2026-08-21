@@ -94,7 +94,7 @@ func run() int {
 	obs.Registry.MustRegister(factsLost)
 
 	var serverOpts []server.Option
-	producer, closeBus, err := buildBus(ctx, cfg, logger)
+	producer, closeBus, err := buildBus(ctx, cfg, logger, bus.NewBusMetrics(obs.Registry))
 	if err != nil {
 		logger.Error("bus init failed", "err", err)
 		return 2
@@ -193,7 +193,7 @@ func run() int {
 // principal on ctx (AUTH-01c). This service already refuses a body-supplied
 // issuer at the handler; this is the second, independent check, and it is what
 // makes the refusal structural rather than a handler's good manners.
-func buildBus(ctx context.Context, cfg config.Config, logger *slog.Logger) (*bus.Producer, func(), error) {
+func buildBus(ctx context.Context, cfg config.Config, logger *slog.Logger, busMetrics *bus.BusMetrics) (*bus.Producer, func(), error) {
 	if cfg.NATSURL == "" {
 		return nil, func() {}, nil
 	}
@@ -204,7 +204,7 @@ func buildBus(ctx context.Context, cfg config.Config, logger *slog.Logger) (*bus
 		return nil, func() {}, err
 	}
 	logger.Info("bus transport", "mtls", mesh.Enabled())
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		_ = mesh.Close()
 		return nil, func() {}, err

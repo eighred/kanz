@@ -201,7 +201,7 @@ func run() int {
 	// this route — the one authz.go calls the path that "reaches a live exchange"
 	// — kept publishing order COMMANDs.
 	gate := halt.NewGate(time.Now)
-	producer, consumer, closeBus, err := buildBus(ctx, cfg, gate, logger)
+	producer, consumer, closeBus, err := buildBus(ctx, cfg, gate, logger, bus.NewBusMetrics(obs.Registry))
 	if err != nil {
 		logger.Error("order write surface init failed", "err", err)
 		return 2
@@ -378,7 +378,7 @@ func run() int {
 // things now publish: the OMS-01d order write surface and the AUTH-01d decision
 // recorder. Dialling a second connection for the recorder would give one process
 // two client identities on a broker that authenticates per connection (SEC-M3).
-func buildBus(ctx context.Context, cfg config.Config, gate *halt.Gate, logger *slog.Logger) (*bus.Producer, *bus.Consumer, func(), error) {
+func buildBus(ctx context.Context, cfg config.Config, gate *halt.Gate, logger *slog.Logger, busMetrics *bus.BusMetrics) (*bus.Producer, *bus.Consumer, func(), error) {
 	if cfg.NATSURL == "" {
 		logger.Warn("api-gateway: order write surface disabled (no API_GATEWAY_NATS_URL)")
 		return nil, nil, func() {}, nil
@@ -391,7 +391,8 @@ func buildBus(ctx context.Context, cfg config.Config, gate *halt.Gate, logger *s
 	}
 	logger.Info("bus transport", "mtls", mesh.Enabled())
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{
-		URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client,
+		Metrics: busMetrics,
+		URL:     cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client,
 		// LOSING THE SPINE CLOSES THE GATE (#635), the same stance webhook-ingest
 		// has always taken. The halt FACT travels on this connection, so a dropped
 		// one means this process can no longer establish that trading is safe —
