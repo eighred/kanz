@@ -47,10 +47,13 @@ func TestCurvatureCharge_GainsNeverCreateCapital(t *testing.T) {
 // The MAR22 hedge-benefit example: long 100 BBB (RW 6%), short 50 BB (RW 15%)
 // in one bucket. HBR = 100/150; charge = 6 − (2/3)·7.5 = 1.
 func TestDRC_HedgeBenefitRatio(t *testing.T) {
-	got := DRC([]JTDPosition{
+	got, err := DRC([]JTDPosition{
 		{Obligor: "X", Bucket: "corporates", Rating: "BBB", Amount: 100},
 		{Obligor: "Y", Bucket: "corporates", Rating: "BB", Amount: -50},
 	}, DefaultDRCParams())
+	if err != nil {
+		t.Fatalf("DRC: %v", err)
+	}
 	if math.Abs(got-1.0) > 1e-9 {
 		t.Errorf("DRC: got %v want 1.0", got)
 	}
@@ -59,23 +62,32 @@ func TestDRC_HedgeBenefitRatio(t *testing.T) {
 func TestDRC_NettingAndBuckets(t *testing.T) {
 	p := DefaultDRCParams()
 	// Same obligor long 100 / short 40 nets to long 60 before weighting.
-	netted := DRC([]JTDPosition{
+	netted, err := DRC([]JTDPosition{
 		{Obligor: "X", Bucket: "corporates", Rating: "BBB", Amount: 100},
 		{Obligor: "X", Bucket: "corporates", Rating: "BBB", Amount: -40},
 	}, p)
+	if err != nil {
+		t.Fatalf("netting: %v", err)
+	}
 	if want := 0.06 * 60; math.Abs(netted-want) > 1e-9 {
 		t.Errorf("obligor netting: got %v want %v", netted, want)
 	}
 	// A short in ANOTHER bucket must not hedge: no cross-bucket netting.
-	cross := DRC([]JTDPosition{
+	cross, err := DRC([]JTDPosition{
 		{Obligor: "X", Bucket: "corporates", Rating: "BBB", Amount: 100},
 		{Obligor: "S", Bucket: "sovereigns", Rating: "BBB", Amount: -100},
 	}, p)
+	if err != nil {
+		t.Fatalf("cross-bucket: %v", err)
+	}
 	if want := 0.06 * 100; math.Abs(cross-want) > 1e-9 {
 		t.Errorf("cross-bucket: got %v want %v (short must not offset)", cross, want)
 	}
 	// Unrated falls back to the unrated weight.
-	unrated := DRC([]JTDPosition{{Obligor: "U", Bucket: "corporates", Rating: "NR?", Amount: 100}}, p)
+	unrated, err := DRC([]JTDPosition{{Obligor: "U", Bucket: "corporates", Rating: "NR?", Amount: 100}}, p)
+	if err != nil {
+		t.Fatalf("unrated fallback must still apply when UnratedWeight is non-zero: %v", err)
+	}
 	if want := p.UnratedWeight * 100; math.Abs(unrated-want) > 1e-9 {
 		t.Errorf("unrated: got %v want %v", unrated, want)
 	}
@@ -165,5 +177,70 @@ func TestValidateParams_Rejects(t *testing.T) {
 		if err := ValidateParams(p); !errors.Is(err, ErrParams) {
 			t.Errorf("%s: want ErrParams, got %v", name, err)
 		}
+	}
+}
+
+// AN EMPTY DRCParams IS REFUSED, NOT WEIGHTED TO ZERO (#617).
+//
+// DRCParams{} has a nil RiskWeight and a zero UnratedWeight, so every
+// jump-to-default position weighted to nothing: DRC contributed 0 to
+// FRTB_TOTAL and the filing was SIGNED. handleFRTB decodes DRCParams straight
+// from the request body, so `"drc_params": {}` reached the computation from
+// outside the process.
+//
+// It is the same defect #565 fixed for Delta, Vega and Curvature — DRC was the
+// one component of Total still computed without an error return.
+func TestDRC_RefusesAnEmptyParamTable(t *testing.T) {
+	pos := []JTDPosition{{Obligor: "X", Bucket: "corporates", Rating: "BBB", Amount: 1_000_000}}
+
+	got, err := DRC(pos, DRCParams{})
+	if err == nil {
+		t.Fatalf("DRC with an empty DRCParams returned %v and no error.\n\n"+
+			"A million of jump-to-default exposure contributed %v to FRTB_TOTAL, and the filing "+
+			"assembled on it would be signed — indistinguishable from a book with no default risk.",
+			got, got)
+	}
+	if !errors.Is(err, ErrUncovered) {
+		t.Errorf("DRC error = %v, want it to wrap ErrUncovered so callers can tell an uncovered "+
+			"table from any other failure", err)
+	}
+	if got != 0 {
+		t.Errorf("DRC returned %v alongside its error — a refused computation must produce no "+
+			"number a caller could file", got)
+	}
+}
+
+// A RATING MISSING FROM A TABLE THAT OTHERWISE COVERS THE BOOK IS THE QUIETER
+// HALF, and the one a "params is empty" check alone would miss: the aggregate
+// is computed correctly for every other rating, and this one position vanishes
+// inside it. Same shape as coversBuckets in sbm.go.
+func TestDRC_RefusesOneUncoveredRatingInsideAGoodTable(t *testing.T) {
+	p := DRCParams{RiskWeight: map[string]float64{"BBB": 0.06}} // UnratedWeight zero
+	_, err := DRC([]JTDPosition{
+		{Obligor: "X", Bucket: "corporates", Rating: "BBB", Amount: 100},
+		{Obligor: "Y", Bucket: "corporates", Rating: "CCC", Amount: 5_000_000},
+	}, p)
+	if err == nil {
+		t.Fatal("DRC accepted a rating the table does not cover. The BBB leg would be weighted " +
+			"correctly and the five-million CCC leg would contribute nothing, which is a filing " +
+			"that looks computed and is short by the whole uncovered exposure.")
+	}
+	if !strings.Contains(err.Error(), "CCC") {
+		t.Errorf("DRC error = %v, want it to name the uncovered rating — a responder needs to know "+
+			"WHICH rating is missing to fix the table", err)
+	}
+}
+
+// AND A DELIBERATE UNRATED WEIGHT STILL APPLIES. Weighting unrated exposure at
+// a stated rate is a supervisory choice; the refusal above must not break it,
+// or the fix would make a correct configuration unusable.
+func TestDRC_NonZeroUnratedWeightIsStillAFallback(t *testing.T) {
+	p := DRCParams{RiskWeight: map[string]float64{"BBB": 0.06}, UnratedWeight: 0.15}
+	got, err := DRC([]JTDPosition{{Obligor: "U", Bucket: "corporates", Rating: "NR?", Amount: 100}}, p)
+	if err != nil {
+		t.Fatalf("a non-zero UnratedWeight must still cover an unrated position: %v", err)
+	}
+	if want := 0.15 * 100; math.Abs(got-want) > 1e-9 {
+		t.Errorf("unrated fallback: got %v want %v", got, want)
 	}
 }
