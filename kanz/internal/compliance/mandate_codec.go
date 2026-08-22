@@ -43,6 +43,30 @@ func MandateConfigKey(tenantID, portfolioID string) string {
 	return MandateConfigKeyPrefix + tenantID + "/" + portfolioID
 }
 
+// ParseMandateConfigKey is the INVERSE of MandateConfigKey: it recovers the
+// (tenant, portfolio) a mandate ConfigChanged was filed under. ok is false for a
+// key outside the mandate namespace or one missing either half.
+//
+// IT EXISTS SO A FAILURE CAN BE ATTRIBUTED. When a mandate cannot be applied, the
+// config key is the ONLY thing left that names which portfolio just lost its
+// governance — the value did not decode, so the Mandate inside it cannot be asked
+// (#619). Without this the drop could only ever be a bare count.
+//
+// It splits on the FIRST "/", matching MandateConfigKey's construction: a tenant
+// id containing a slash would be ambiguous, and is rejected at publish time by
+// ValidateMandate rather than guessed at here.
+func ParseMandateConfigKey(key string) (tenantID, portfolioID string, ok bool) {
+	rest, found := strings.CutPrefix(key, MandateConfigKeyPrefix)
+	if !found {
+		return "", "", false
+	}
+	tenantID, portfolioID, found = strings.Cut(rest, "/")
+	if !found || tenantID == "" || portfolioID == "" {
+		return "", "", false
+	}
+	return tenantID, portfolioID, true
+}
+
 // SubjectMandateAll is the wildcard every mandate consumer subscribes to.
 const SubjectMandateAll = SubjectMandateChanged + ".>"
 
@@ -129,29 +153,89 @@ func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) (*compliancepb.Mand
 // gate and the post-trade monitor mount, so both resolve against one mandate
 // history. Its Handle matches bus.EventHandler.
 type MandateConsumer struct {
-	loader *MandateLoader
-	logger *slog.Logger
+	loader   *MandateLoader
+	reg      *MandateRegistry
+	logger   *slog.Logger
+	onReject func(tenantID, portfolioID string)
+}
+
+// MandateConsumerOption customizes a MandateConsumer.
+type MandateConsumerOption func(*MandateConsumer)
+
+// WithMandateRejectionObserver is called for every mandate this consumer could
+// not apply, with the portfolio it belonged to.
+//
+// IT TAKES THE PORTFOLIO because the operator's question is which mandate to go
+// and republish, and a bare total cannot answer it. Cardinality is bounded by the
+// number of portfolios under mandate — a set this platform already labels metrics
+// by — unlike a caller-supplied string.
+//
+// Nil ⇒ not counted. The loss is still recorded without it: the registry marks the
+// portfolio unreadable and the pre-trade gate refuses its orders, so a deployment
+// that forgets this seam still cannot trade through the hole.
+func WithMandateRejectionObserver(fn func(tenantID, portfolioID string)) MandateConsumerOption {
+	return func(c *MandateConsumer) { c.onReject = fn }
 }
 
 // NewMandateConsumer wraps a registry (logger defaults to slog.Default()).
-func NewMandateConsumer(reg *MandateRegistry, logger *slog.Logger) *MandateConsumer {
+func NewMandateConsumer(reg *MandateRegistry, logger *slog.Logger, opts ...MandateConsumerOption) *MandateConsumer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &MandateConsumer{loader: NewMandateLoader(reg), logger: logger}
+	c := &MandateConsumer{loader: NewMandateLoader(reg), reg: reg, logger: logger}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
-// Handle decodes a lifecycle.v1.ConfigChanged and applies it. A malformed
-// payload or unparseable mandate is a permanent defect (poison): logged and
-// acked rather than redelivered forever.
+// Handle decodes a lifecycle.v1.ConfigChanged and applies it.
+//
+// THE ACK IS STILL CORRECT, AND IS NOT WHAT WAS WRONG. Nacking poison on a
+// COMPACTED stream replays the identical bytes forever, so a bad mandate would
+// wedge the subscription and stop every LATER mandate from arriving — one broken
+// portfolio taking the rest down with it. What was wrong is what the ack left
+// behind: a log line, and nothing else.
+//
+// Because the stream is compacted, the message that just failed is the LAST one on
+// that portfolio's subject. Every consumer that boots from here on re-reads it and
+// fails the same way, so the portfolio is not un-mandated until someone notices —
+// it is un-governable until someone REPUBLISHES. That state is now recorded
+// against the portfolio, which makes its orders refuse rather than pass (#619).
 func (c *MandateConsumer) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []byte) error {
 	var cc lifecyclepb.ConfigChanged
 	if err := proto.Unmarshal(payload, &cc); err != nil {
-		c.logger.ErrorContext(ctx, "compliance: malformed ConfigChanged", "err", err)
+		// NO config_key SURVIVES A PAYLOAD THAT DID NOT DECODE, so there is no
+		// portfolio to mark — this is the one loss that can only ever be a count.
+		// It still has to move the registry off "complete", or the drop is exactly
+		// as invisible as it was before.
+		c.logger.ErrorContext(ctx, "compliance: malformed ConfigChanged — a mandate message was lost "+
+			"and no portfolio can be named for it, because the payload carries no readable config_key",
+			"err", err, "bytes", len(payload))
+		c.reg.Drop()
 		return nil
 	}
 	if _, err := c.loader.Apply(&cc); err != nil {
-		c.logger.ErrorContext(ctx, "compliance: bad mandate value", "err", err, "config_key", cc.GetConfigKey())
+		tenantID, portfolioID, ok := ParseMandateConfigKey(cc.GetConfigKey())
+		if !ok {
+			// The key is outside the mandate namespace or malformed. Apply only
+			// errors on a mandate key, so this means the key itself is corrupt.
+			c.logger.ErrorContext(ctx, "compliance: a mandate could not be applied and its config_key "+
+				"does not name a (tenant, portfolio), so the portfolio it governs cannot be marked",
+				"err", err, "config_key", cc.GetConfigKey())
+			c.reg.Drop()
+			return nil
+		}
+		c.logger.ErrorContext(ctx, "UNGOVERNABLE: a published mandate could not be applied, and the "+
+			"mandate stream is compacted — this portfolio has no readable mandate until one is "+
+			"republished, and its orders are now REFUSED rather than admitted",
+			"err", err, "tenant_id", tenantID, "portfolio_id", portfolioID,
+			"config_key", cc.GetConfigKey(),
+			"fix", "republish the mandate with `kanz-mandate --tenant "+tenantID+"`")
+		c.reg.Reject(tenantID, portfolioID, err)
+		if c.onReject != nil {
+			c.onReject(tenantID, portfolioID)
+		}
 		return nil
 	}
 	return nil

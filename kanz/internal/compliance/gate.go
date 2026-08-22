@@ -39,6 +39,7 @@ type PreTradeGate struct {
 	logger     *slog.Logger
 
 	requireMandate bool
+	onUnreadable   func(tenantID, portfolioID string)
 	onUngoverned   func(tenantID, portfolioID string)
 	onUnpriced     func(portfolioID, instrumentID string)
 	onUnaccounted  func(tenantID, portfolioID, omits string)
@@ -65,6 +66,13 @@ type PreTradeOption func(*PreTradeGate)
 // either way.
 func WithRequireMandate(require bool) PreTradeOption {
 	return func(g *PreTradeGate) { g.requireMandate = require }
+}
+
+// WithUnreadableObserver counts orders refused because the portfolio's published
+// mandate could not be applied (#619). Nil ⇒ not counted; the refusal itself does
+// not depend on this seam.
+func WithUnreadableObserver(fn func(tenantID, portfolioID string)) PreTradeOption {
+	return func(g *PreTradeGate) { g.onUnreadable = fn }
 }
 
 // WithUngovernedObserver is called for EVERY order against a portfolio no mandate
@@ -251,6 +259,19 @@ type Decision struct {
 	// exactly #243 — tenant B's order cleared against tenant A's concentration
 	// limits — and refusing is the only answer that is not a guess.
 	Unscoped bool
+
+	// Unreadable means a mandate for this portfolio WAS PUBLISHED and could not be
+	// applied, so — a fourth time — NO RULE WAS EVALUATED.
+	//
+	// It is refused REGARDLESS of requireMandate, for Unscoped's reason and one
+	// sharper. Ungoverned is a policy question: "nobody has written a mandate yet"
+	// is a state an operator may knowingly trade through. This is not. A mandate
+	// exists, the platform cannot read it, and the mandate stream is COMPACTED —
+	// the message that failed is the last one on that portfolio's subject, so every
+	// consumer that boots re-reads it and fails identically. The portfolio is not
+	// waiting to be governed, it is un-governable until someone republishes, and
+	// admitting on that is a guess about rules nobody has read (#619).
+	Unreadable bool
 }
 
 // NewPreTradeGate wires the gate. engine defaults to NewEngine(nil); a nil
@@ -318,6 +339,27 @@ func (g *PreTradeGate) noteUnscoped(tenantID, portfolioID string, err error) {
 }
 
 // firstTime reports whether key has not been warned about yet, and records it.
+// noteUnreadable makes a broken mandate audible, once per portfolio.
+//
+// It says REFUSING rather than warning about a gap, because unlike Ungoverned this
+// outcome does not depend on posture and the operator cannot choose to trade
+// through it. The fix is a republish, and the message names it: the portfolio is
+// stuck until the compacted subject carries a mandate that parses.
+func (g *PreTradeGate) noteUnreadable(tenantID, portfolioID string, err error) {
+	if g.onUnreadable != nil {
+		g.onUnreadable(tenantID, portfolioID)
+	}
+	if !g.firstTime("unreadable:" + tenantID + ":" + portfolioID) {
+		return
+	}
+	g.logger.Error("REFUSING orders: this portfolio has a published mandate that cannot be read",
+		"tenant_id", tenantID,
+		"portfolio_id", portfolioID,
+		"err", err,
+		"fix", "republish the mandate — the stream is compacted, so the broken message is the only "+
+			"one this portfolio's subject serves until it is replaced")
+}
+
 func (g *PreTradeGate) firstTime(key string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -485,6 +527,15 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 		if errors.Is(err, ErrMandateTenantUnresolved) {
 			g.noteUnscoped(d.TenantID, d.PortfolioID, err)
 			return Decision{Allowed: false, Unscoped: true}, nil
+		}
+		// ALSO TERMINAL, and for a sharper reason than the one above: the mandate
+		// stream is compacted, so the message that failed to apply is the last one
+		// this portfolio's subject will serve. A redelivery replays the identical
+		// bytes. Refuse it once, under its own flag, rather than redeliver the order
+		// forever against a mandate that will never parse.
+		if errors.Is(err, ErrMandateUnreadable) {
+			g.noteUnreadable(d.TenantID, d.PortfolioID, err)
+			return Decision{Allowed: false, Unreadable: true}, nil
 		}
 		return Decision{}, err
 	}
