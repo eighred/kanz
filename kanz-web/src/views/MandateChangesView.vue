@@ -8,6 +8,7 @@ import {
   mandates,
   renderRuleCount,
   renderVersion,
+  describeVersionRefusal,
   signable,
   type PendingMandateChange,
   type Reading,
@@ -149,6 +150,18 @@ function version(p: PendingMandateChange): string | null {
   return renderVersion(p)
 }
 
+/**
+ * versionRefusal says WHY the version could not be shown.
+ *
+ * It replaced a fixed "did not survive as an exact integer" in the template,
+ * which described the OLD contract where a uint64 rode a JSON number. Every
+ * refusal reachable now has a different cause, and naming the wrong one sends an
+ * operator to hunt a rounding bug instead of an out-of-date deployment (#606).
+ */
+function versionRefusal(p: PendingMandateChange): string {
+  return describeVersionRefusal(p) ?? ''
+}
+
 /** visibility states what is and is not readable about this change. */
 function visibility(p: PendingMandateChange): string {
   return describeVisibility(p)
@@ -279,11 +292,7 @@ async function sign() {
               </template>
               <template v-else>
                 <strong>VERSION NOT RENDERABLE</strong>
-                <span class="muted"
-                  ><br />compliance sent
-                  <code>{{ p.version === undefined ? 'nothing' : String(p.version) }}</code
-                  >, which did not survive as an exact integer</span
-                >
+                <span class="muted"><br />{{ versionRefusal(p) }}</span>
               </template>
               <br />
               <template v-if="rules(p) === '0'">

@@ -18,11 +18,13 @@ import { useSession } from '../stores/session'
 //      undone at the last step: compliance answers 409 while the portfolio goes on
 //      looking like its constraint is about to change when it is still the old one.
 //   2. AN UNRECOGNISED STATE IS A STATED ANOMALY, NOT WORK. Including empty.
-//   3. THE NUMBERS ARE NOT COERCED, IN EITHER DIRECTION. `rule_count` and
-//      `version` ride the wire as JSON numbers and both have a falsy/lossy trap:
-//      a legal 0 rule count means "constrains nothing" and disappears behind
-//      `v-if`, and a uint64 version above 2^53 is already rounded by JSON.parse.
-//      Neither may be printed as fact and neither may be Number()'d into one.
+//   3. THE NUMBERS ARE NOT COERCED, IN EITHER DIRECTION, AND THE TWO FIELDS ARE
+//      DIFFERENT WIRE TYPES. `rule_count` is a Go int and a JSON NUMBER whose
+//      legal 0 means "constrains nothing" and disappears behind `v-if`.
+//      `version` is a uint64 and a JSON STRING (#606) - it has to be, because
+//      JSON.parse would round anything above 2^53 before this code ran. Neither
+//      may be printed as fact and neither may be Number()'d into one; and a
+//      sweep that made the two agree would put the version back on a number.
 //   4. WHAT CANNOT BE SEEN IS SAID. This queue serves a digest, not a mandate,
 //      and no route expands one — so a signatory must be told before they sign,
 //      or the two names on the record belong to two people who never read the rule.
@@ -43,7 +45,7 @@ function entry(over: Partial<PendingMandateChange> = {}): PendingMandateChange {
     act: 'MANDATE_CHANGE',
     portfolio_id: 'PF1',
     mandate_id: 'MD1',
-    version: 7,
+    version: '7',
     rule_count: 3,
     proposer: 'user:bob',
     reason: 'raise the tech concentration cap after the mandate committee ruling',
@@ -232,7 +234,7 @@ describe('the numbers are not coerced, in either direction', () => {
   })
 
   it('renders an ordinary rule count and version exactly', async () => {
-    const wrapper = await open([entry({ version: 7, rule_count: 3 })])
+    const wrapper = await open([entry({ version: '7', rule_count: 3 })])
 
     const cell = becomesCell(wrapper)
     expect(cell.text()).toContain('version 7')
@@ -240,18 +242,42 @@ describe('the numbers are not coerced, in either direction', () => {
     expect(cell.classes()).not.toContain('state-bad')
   })
 
-  it('states a version that did not survive the wire rather than printing it', async () => {
-    // uint64 max. JSON.parse has ALREADY rounded this to 18446744073709552000
-    // before any of this code runs, and no client can recover the true value —
-    // so the only honest options are to print the damaged one as fact or to say
-    // it did not survive. On the field that pins which constraint an order is
-    // audited against, printing it is the defect.
-    const wrapper = await open([entry({ version: 18446744073709551615 })])
+  it('renders a version above 2^53 EXACTLY, because it arrives as a string', async () => {
+    // uint64 max. THIS IS THE WHOLE POINT OF THE SERVER-SIDE REPAIR (#606): as a
+    // JSON number JSON.parse had already rounded it to 18446744073709552000
+    // before any client code ran, and the only honest answer was to refuse it.
+    // As a decimal STRING it is exact, and refusing it now would throw the
+    // repair away and leave the queue blank on a perfectly good version.
+    const wrapper = await open([entry({ version: '18446744073709551615' })])
+
+    const cell = becomesCell(wrapper)
+    expect(cell.text()).toContain('version 18446744073709551615')
+    expect(cell.text()).not.toContain('VERSION NOT RENDERABLE')
+    expect(cell.classes()).not.toContain('state-bad')
+  })
+
+  it('REFUSES a version that arrives as a JSON number rather than coercing it', async () => {
+    // An older or proxied compliance still emitting a bare uint64. The value
+    // above 2^53 on that path is ALREADY damaged and a small one is not, and
+    // this client cannot tell them apart - so it refuses the shape, exactly as
+    // it refuses a stringly-typed rule count. Printing 7 would be harmless;
+    // printing 18446744073709552000 would be a fabricated fact.
+    const wrapper = await open([entry({ version: 7 as unknown as string })])
 
     const cell = becomesCell(wrapper)
     expect(cell.text()).toContain('VERSION NOT RENDERABLE')
-    expect(cell.text()).not.toContain('version 18446744073709552000')
     expect(cell.classes()).toContain('state-bad')
+
+    // THE EXACT TEXT, not merely a substring. A `toContain` pair passes with
+    // stray template characters left in the cell - this assertion exists because
+    // rewriting the refusal span left a loose '>' behind that every toContain in
+    // this file happily ignored, and a signatory would have read it.
+    expect(cell.text()).toBe(
+      'VERSION NOT RENDERABLE' +
+        'compliance sent the version as a JSON number (7), which cannot carry a uint64 ' +
+        'exactly - this deployment is serving an older body than the client expects' +
+        '3 rules',
+    )
   })
 
   it('says so when no version was stated at all, and never shows a zero', async () => {

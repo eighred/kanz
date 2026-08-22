@@ -95,13 +95,21 @@ export interface PendingMandateChange {
   /** The mandate's stable identity, unchanged across versions. */
   mandate_id?: string
   /**
-   * The version this change becomes — monotonic, uint64, and a JSON NUMBER.
+   * The version this change becomes - monotonic, uint64, and a JSON **STRING**.
    *
-   * Read it through renderVersion(). Above 2^53 the value is already damaged by
-   * JSON.parse before this module sees it, and printing the damaged one as fact
-   * is worse than saying it did not survive.
+   * IT IS A STRING BECAUSE A uint64 CANNOT RIDE A JSON NUMBER. JSON.parse is the
+   * only decoder a browser has and it parses every number as a float64, so
+   * 18446744073709551615 would arrive as 18446744073709552000 with the true
+   * value unrecoverable - on the field that pins WHICH constraint an order was
+   * audited against. compliance emits it through jsonUint64 (strconv.FormatUint)
+   * on all four bodies that carry a mandate, as protojson renders every uint64.
+   *
+   * Read it through renderVersion(), which refuses anything that is not a
+   * canonical decimal rather than coercing it. Contrast `rule_count` below,
+   * which is a Go int and correctly a JSON number: the two are different wire
+   * types on purpose, and a sweep that made them agree would reintroduce this.
    */
-  version?: number
+  version?: string
   /**
    * How many rules the proposed mandate carries — an int, and a JSON NUMBER.
    *
@@ -229,25 +237,81 @@ export function renderRuleCount(p: PendingMandateChange): string | null {
   return String(n)
 }
 
+/** UINT64_MAX is the largest version compliance can have issued. */
+const UINT64_MAX = 18446744073709551615n
+
+/** CANONICAL_UINT64 is what strconv.FormatUint emits: digits, no sign, no padding. */
+const CANONICAL_UINT64 = /^(0|[1-9][0-9]*)$/
+
 /**
- * renderVersion returns the version as text, or null when it did not survive.
+ * renderVersion returns the version as text, or null when it cannot be stated.
  *
- * THE DAMAGE HAPPENS BEFORE THIS FUNCTION AND CANNOT BE UNDONE HERE. `version` is
- * a uint64 that compliance emits as a JSON number, so a value above 2^53 is
- * already rounded by JSON.parse by the time any of this runs — 18446744073709551615
- * arrives as 18446744073709552000. This client cannot recover the true value; the
- * only honest options are to print the damaged one as fact or to say it did not
- * survive, and on the version that pins which constraint an order is audited
- * against, the second is the only defensible one.
+ * NO NUMBER IS EVER CONSTRUCTED HERE, which is the whole property - the same one
+ * ./decimal holds for a Decimal coefficient, and for the same reason. The value
+ * arrives as a decimal string and leaves as the identical string; there is no
+ * step at which a float64 could round it.
  *
- * (The repair is server-side and is not this PR's: compliance would have to emit
- * the version as a string, the way protojson already does for every uint64 it
- * marshals. Until then this reports rather than hides.)
+ * THE SERVER-SIDE HALF LANDED WITHOUT THIS ONE, and that is worth recording. The
+ * doc here used to say "the repair is server-side and is not this PR's", and this
+ * function opened with `typeof v !== 'number'`. compliance then MADE that repair
+ * - proposalJSON emits jsonUint64 - and nothing came back for the client, so the
+ * guard was ALWAYS true and every row on the signatory's queue read "VERSION NOT
+ * RENDERABLE", not only the ones above 2^53 it was written to protect (#606).
+ * test/arch/uint64_reaches_the_client_as_string_test.go is what now stops the two
+ * halves of this decision moving separately a third time.
+ *
+ * A JSON NUMBER IS REFUSED, NOT COERCED. It means an older or proxied compliance
+ * is still emitting a bare uint64 - and on that path a value above 2^53 has
+ * already been damaged by JSON.parse, indistinguishably from a small one that
+ * has not. Printing 7 would be harmless and printing 18446744073709552000 would
+ * be a fabricated fact, so this refuses the SHAPE rather than the magnitude. It
+ * is the discipline renderRuleCount already applies to a stringly-typed count.
+ *
+ * NULL IS NOT ZERO and no caller may substitute one: a version that cannot be
+ * stated must look unstatable, never like version 0.
  */
 export function renderVersion(p: PendingMandateChange): string | null {
   const v = p.version
-  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) return null
-  return String(v)
+  if (typeof v !== 'string' || !CANONICAL_UINT64.test(v)) return null
+  // Out of the uint64 domain: FormatUint cannot have produced it, so it is not a
+  // version this platform issued, and printing it would assert a fact nobody made.
+  if (BigInt(v) > UINT64_MAX) return null
+  return v
+}
+
+/**
+ * describeVersionRefusal states WHY a version could not be rendered, or null
+ * while it renders fine.
+ *
+ * THE MESSAGE IS THE REPAIR INSTRUCTION, which is why it is a function and not a
+ * fixed string in the template. The template used to say the version "did not
+ * survive as an exact integer" for every refusal - true of the old contract where
+ * a uint64 rode a JSON number, and wrong for every case that can occur now. An
+ * operator reading it would hunt a rounding bug when what they actually have is a
+ * stale compliance, or a proxy rewriting the body. A refusal that misnames its
+ * cause sends the fix to the wrong place (#606).
+ */
+export function describeVersionRefusal(p: PendingMandateChange): string | null {
+  if (renderVersion(p) !== null) return null
+  const v = p.version
+  if (v === undefined || v === null) {
+    return 'compliance sent no version for this change'
+  }
+  if (typeof v !== 'string') {
+    // The wire type, not the magnitude. See renderVersion on why the shape is
+    // what is refused: on this path a large value is already damaged and a small
+    // one is not, and nothing here can tell them apart.
+    return (
+      'compliance sent the version as a JSON number (' +
+      String(v) +
+      '), which cannot carry a uint64 exactly - this deployment is serving an ' +
+      'older body than the client expects'
+    )
+  }
+  if (CANONICAL_UINT64.test(v) && BigInt(v) > UINT64_MAX) {
+    return 'compliance sent ' + v + ', which is larger than a uint64 and cannot be a version it issued'
+  }
+  return 'compliance sent ' + JSON.stringify(v) + ', which is not a uint64 in decimal form'
 }
 
 export const mandates = {
