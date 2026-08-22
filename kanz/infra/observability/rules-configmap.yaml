@@ -1108,6 +1108,88 @@ data:
             annotations:
               summary: "Asynchronous consume errors on {{ $labels.subject }} ({{ $labels.group }})"
               description: "JetStream has reported delivery-path errors on this subscription for fifteen minutes — missed heartbeats, a consumer that no longer exists, or a leadership change that did not settle. Deliveries on this subject may have STOPPED while the process stays healthy and Ready, so nothing else in this alerting layer will say so. Check whether the stream and consumer still exist (nats consumer info), which is the state that crash-looped compliance and tv-sync when it happened at startup instead of mid-run."
+
+          # =====================================================================
+          # THE AUDIT HASH CHAIN (#665)
+          # =====================================================================
+          #
+          # The chain had a tamper check and nothing ran it. audit-deploy.yaml
+          # granted kanz-monitoring an authority on the strength of a schedule that
+          # did not exist, and the manifest's own words name what that left: "tamper
+          # detection depending on somebody remembering to look".
+          #
+          # THE CHECK NOW RUNS IN-PROCESS, on an interval, in services/audit. These
+          # three rules are what makes it DETECTION rather than a log line: the
+          # issue's own bar is that "a verifier that logs a failure into the same
+          # estate nobody is watching is not detection", so the output has to leave
+          # the system it attests to.
+          #
+          # THREE OUTCOMES, THREE RULES, and the separation is the point. An
+          # unreadable store is neither a pass nor a tamper: reported as intact it is
+          # a check that passes while the database is down, reported as broken it
+          # pages somebody to investigate a forgery that has not happened.
+
+          # A TAMPER. The loudest thing in this file.
+          #
+          # THRESHOLD IS ZERO BECAUSE THE EVENT IS NOT A RATE. One broken
+          # verification means a record in the compliance log does not hash to its
+          # successor — either the log was altered or the writer has a bug. Neither
+          # gets a budget.
+          #
+          # for: 0m, uniquely in this file. Every other rule here waits to see
+          # whether a condition persists, because a transient one is usually a
+          # restart. This condition cannot be transient: the verifier reached a
+          # verdict over the whole log, and the next scan an hour later would only
+          # confirm it. Waiting would delay the page by an hour and change nothing.
+          - alert: AuditChainTampered
+            expr: increase(kanz_audit_chain_verifications_total{outcome="broken"}[1h]) > 0
+            for: 0m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "The audit hash chain DID NOT VERIFY on {{ $labels.pod }}"
+              description: "A scheduled verification found the AUDIT-01b hash chain broken: a record in the compliance log does not hash to its successor. Every attestation derived from this log — SOC2 evidence, regulator reports, the /v1/audit/verify endpoint — is in question until this is explained. The pod's log carries the index of the first break. This is either tampering with the WORM store or a defect in the writer, and both are incidents."
+
+          # NOBODY IS VERIFYING. The rule that makes an in-process scheduler
+          # sufficient, and the one that would have caught the original defect.
+          #
+          # It fires for a verifier that STOPPED, one that is WEDGED, a pod that
+          # never started one, and a deployment where the interval was lengthened
+          # into silence — a superset of what "the CronJob did not run" would catch.
+          #
+          # THRESHOLD IS DERIVED FROM THE INTERVAL, not picked: verify.DefaultInterval
+          # is 1h, so 3h is three consecutive missed verifications. Two would page on
+          # a single slow whole-log scan overlapping a rolling restart; three cannot
+          # be one bad hour.
+          #
+          # THE GAUGE IS SEEDED AT ZERO, which is what makes this fire on a pod that
+          # has NEVER verified rather than staying silent for want of a series:
+          # time() - 0 is enormous. A gauge seeded with the current time at startup
+          # would have claimed a verification that never happened.
+          - alert: AuditChainNotBeingVerified
+            expr: time() - kanz_audit_chain_last_verified_timestamp_seconds > 10800
+            for: 10m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "No successful audit-chain verification on {{ $labels.pod }} for over three hours"
+              description: "The scheduled tamper check has not completed successfully in three hours — three consecutive missed runs at the default hourly interval. A value of exactly 0 means this pod has never completed one at all. The chain is not known to be intact OR broken: nothing is checking it, which is the state this alert exists to end (#665). Check whether the audit pod is healthy, whether its store is reachable, and whether AUDIT_VERIFY_INTERVAL was set longer than this window."
+
+          # THE CHECK ITSELF IS FAILING, which is neither of the above.
+          #
+          # Separate from AuditChainNotBeingVerified because it names the CAUSE: the
+          # staleness rule fires on any absence, this one says the verifier ran and
+          # could not read the log. An operator seeing both knows it is the store,
+          # not the scheduler.
+          #
+          # for: 1h — one failed scan is a connection blip during a whole-log read,
+          # and report.Verify holds a pool connection for its duration, so a single
+          # failure under load is expected rather than alarming.
+          - alert: AuditChainVerificationFailing
+            expr: increase(kanz_audit_chain_verifications_total{outcome="error"}[3h]) > 0
+            for: 1h
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Audit-chain verification cannot read the log on {{ $labels.pod }}"
+              description: "The scheduled tamper check ran and could not read the audit store, so NOTHING was verified — this is not a pass and not a tamper. report.Verify is a whole-log scan holding one pool connection, so this usually means the store is unreachable, the pool is exhausted, or the scan is timing out on a log that has outgrown it. While this persists the chain's integrity is unknown, and AuditChainNotBeingVerified will follow if it continues."
   slo.alerts.rules.yaml: |
     # SLO multi-window burn-rate alerts (SRE-01b) — over slo.recording.rules.yaml.
     #

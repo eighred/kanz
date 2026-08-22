@@ -1,11 +1,15 @@
 package config
 
 import (
-	"github.com/eighred/kanz/internal/env"
+	"fmt"
 	"log/slog"
 	"os"
+	"strings"
+	"time"
 
+	"github.com/eighred/kanz/internal/env"
 	"github.com/eighred/kanz/pkg/secret"
+	"github.com/eighred/kanz/services/audit/internal/verify"
 )
 
 // Config is the audit service runtime configuration, sourced from the
@@ -93,6 +97,15 @@ type Config struct {
 	// that from a chain that is fine.
 	AllowUnrestrictedVerify bool
 
+	// VerifyInterval is how often the hash chain is verified in-process (#665).
+	//
+	// AUDIT_VERIFY_INTERVAL overrides it; an unset or non-positive value keeps
+	// verify.DefaultInterval. THERE IS NO "OFF": lengthening it past the staleness
+	// threshold makes the staleness alert fire, which is the correct outcome for a
+	// chain nobody is verifying — it should be visible as such rather than
+	// configurable into silence.
+	VerifyInterval time.Duration
+
 	// OTLPEndpoint is the OTel collector for span export (OBS-01).
 	OTLPEndpoint string
 
@@ -117,11 +130,16 @@ func Load() (Config, error) {
 	// in-memory store — so a broken Vault mount used to produce an audit
 	// service that started clean, served queries, and lost the entire tamper-
 	// evidence log on restart. Nothing downstream would have reported it.
+	verifyInterval, err := durationOr("AUDIT_VERIFY_INTERVAL", verify.DefaultInterval)
+	if err != nil {
+		return Config{}, err
+	}
 	databaseURL, err := secret.Read("AUDIT_DATABASE_URL")
 	if err != nil {
 		return Config{}, err
 	}
 	return Config{
+		VerifyInterval:    verifyInterval,
 		Listen:            env.Or("AUDIT_LISTEN", ":8083"),
 		APIListen:         env.Or("AUDIT_API_LISTEN", ":8102"),
 		LogLevel:          env.ParseLevelOr(env.Or("AUDIT_LOG_LEVEL", "info"), slog.LevelInfo),
@@ -137,4 +155,28 @@ func Load() (Config, error) {
 		OTLPEndpoint:            os.Getenv("AUDIT_OTLP_ENDPOINT"),
 		SPIFFESocket:            os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
+}
+
+// durationOr parses a Go duration from the environment, or returns def when
+// unset.
+//
+// A MALFORMED VALUE IS AN ERROR, NEVER THE DEFAULT. Silently falling back would
+// leave the chain verifier on a schedule the operator did not choose while the
+// deployment reported a clean start — and on this schedule in particular, since
+// a mistyped interval that quietly became the default is indistinguishable from
+// one that was never set.
+//
+// (services/accounting states the same rule for the same reason; datamaster's
+// copy of this helper swallows the error instead, which is the defect this
+// wording warns about.)
+func durationOr(key string, def time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s=%q is not a duration: %w", key, raw, err)
+	}
+	return d, nil
 }
