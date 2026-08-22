@@ -81,9 +81,40 @@ tests:
         exp_samples:
           - labels: '{}'
             value: 1
-      # THE ANSWER #210 ASKED FOR.
-      - expr: round(slo:error_budget_consumed:ratio{service="api-gateway", slo="availability"}, 0.001)
+      # THE GATE'S EDGE, ASSERTED ON PURPOSE RATHER THAN DEPENDED ON BY ACCIDENT.
+      #
+      # slo:error_budget_consumed:ratio is gated on coverage >= 0.99, so it does
+      # not exist until the window is covered. These two pin exactly where that
+      # happens: absent at 27d (coverage 0.9643), present at 28d. Asserting the
+      # absence is the half that was missing — without it, "the gate works" and
+      # "the series never appears" look the same.
+      - expr: count(slo:error_budget_consumed:ratio)
+        eval_time: 27d
+        exp_samples: []
+      - expr: count(slo:error_budget_consumed:ratio)
         eval_time: 28d
+        exp_samples:
+          - labels: '{}'
+            value: 1
+
+      # THE ANSWER #210 ASKED FOR.
+      #
+      # EVALUATED AT 30d, NOT 28d, AND THE MOVE IS THE FIX FOR A CI FLAKE. This
+      # assertion used to sit at 28d — the exact tick at which the gated series
+      # comes into existence. One tick earlier it does not exist at all, so the
+      # assertion had ZERO MARGIN: any perturbation of that boundary tick makes
+      # the sample absent, and the symptom is `got: nil` rather than a wrong
+      # number. That is what CI reported on 2026-08-22 against a tree byte-identical
+      # to one that had passed eight seconds earlier.
+      #
+      # 30d is the settled time every other assertion in this file already uses,
+      # including all of the alert_rule_test cases. The claim is unchanged: the
+      # input rates are constant, so the 28d window at 30d covers days 2..30 and
+      # the ratio is the same 0.5. What changes is that proving it no longer
+      # depends on the tick where the gate opens — which the two assertions above
+      # now cover deliberately.
+      - expr: round(slo:error_budget_consumed:ratio{service="api-gateway", slo="availability"}, 0.001)
+        eval_time: 30d
         exp_samples:
           - labels: '{service="api-gateway", slo="availability"}'
             value: 0.5
@@ -127,8 +158,10 @@ tests:
       - series: 'prometheus_tsdb_lowest_timestamp_seconds{job="kanz-pods", app="prometheus"}'
         values: '0x30'
     promql_expr_test:
+      # 30d, not 28d — off the tick where the coverage gate opens. See the long
+      # note on the same assertion in the case above.
       - expr: round(slo:error_budget_consumed:ratio{service="api-gateway", slo="availability"}, 0.001)
-        eval_time: 28d
+        eval_time: 30d
         exp_samples:
           - labels: '{service="api-gateway", slo="availability"}'
             value: 1
