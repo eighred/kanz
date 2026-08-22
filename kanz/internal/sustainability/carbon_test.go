@@ -24,7 +24,7 @@ func TestWACIReconciliation(t *testing.T) {
 	h := sampleHoldings()
 	// intensity AAPL = (10+10)/100 = 0.2; XOM = (100+100)/100 = 2.0.
 	// WACI = 0.6*0.2 + 0.4*2.0 = 0.12 + 0.8 = 0.92.
-	waci := WeightedAverageCarbonIntensity(h)
+	waci, _ := WeightedAverageCarbonIntensity(h)
 	if !approx(waci, 0.92, 1e-9) {
 		t.Fatalf("WACI: want 0.92 got %v", waci)
 	}
@@ -48,14 +48,14 @@ func TestFinancedEmissionsIdentity(t *testing.T) {
 	// AAPL: 300/1000 * (10+10+30=50) = 0.3*50 = 15.
 	// XOM:  200/1000 * (100+100+300=500) = 0.2*500 = 100.
 	// total = 115.
-	if got := FinancedEmissions(h); !approx(got, 115, 1e-9) {
+	if got, _ := FinancedEmissions(h); !approx(got, 115, 1e-9) {
 		t.Fatalf("financed emissions: want 115 got %v", got)
 	}
 }
 
 func TestFinancedEmissionsSkipsNoEVIC(t *testing.T) {
 	h := []Holding{{InstrumentID: "X", MarketValue: 100, Carbon: CarbonMetrics{Scope1: 50}}} // EVIC 0
-	if got := FinancedEmissions(h); got != 0 {
+	if got, _ := FinancedEmissions(h); got != 0 {
 		t.Fatalf("no-EVIC holding should contribute 0, got %v", got)
 	}
 }
@@ -69,7 +69,9 @@ func TestWeightedAverageESG(t *testing.T) {
 }
 
 func TestEmptyBookDegradesToZero(t *testing.T) {
-	if WeightedAverageCarbonIntensity(nil) != 0 || FinancedEmissions(nil) != 0 {
+	waciEmpty, _ := WeightedAverageCarbonIntensity(nil)
+	feEmpty, _ := FinancedEmissions(nil)
+	if waciEmpty != 0 || feEmpty != 0 {
 		t.Fatal("empty book should give zero, not NaN/Inf")
 	}
 	if WeightedAverageESG(nil).Overall != 0 {

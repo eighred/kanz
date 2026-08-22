@@ -65,6 +65,25 @@ var orderViewDurable = prometheus.NewGauge(prometheus.GaugeOpts{
 	ConstLabels: prometheus.Labels{"venue": "binance"},
 })
 
+// markTickDropped counts reference-mark ticks this adapter fetched from the
+// exchange and could not put on the bus (#673).
+//
+// LABELLED BY INSTRUMENT because that is the question silence cannot answer.
+// The mark feed stopping and one instrument's mark stopping produce the same
+// downstream symptom — OMSPriceFeedStalled, or an order refused
+// PRICE_UNAVAILABLE — and they are a broker problem and a per-symbol problem
+// respectively.
+//
+// NOT REDUNDANT WITH kanz_bus_publish_total{subject="market.crypto.trade",
+// result="error"}, which also moves on these: that one is per subject, so it
+// cannot say WHICH instruments went dark, and no rule under infra/ watches it.
+// See execution.MarkTickPublisher for the rest of the argument.
+var markTickDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name:        "kanz_venue_mark_tick_dropped_total",
+	Help:        "reference-mark ticks the exchange answered that the bus did not accept, by MIC and instrument. Every increment is a price a downstream fold never saw; the adapter does not retry, so the next poll is the only retry.",
+	ConstLabels: prometheus.Labels{"venue": "binance"},
+}, []string{"mic", "instrument"})
+
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
 	// run() registers fires before this line. The non-zero code is what makes a
@@ -138,7 +157,7 @@ func serve(cfg config.Config) error {
 
 	balanceReconConfigured := balancerecon.NewGauge("binance")
 	marginSourceConfigured := venuemargin.NewGauge("binance")
-	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured, marginSourceConfigured)
+	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured, marginSourceConfigured, markTickDropped)
 
 	// The adapter's own order view — the state its workers read after the process
 	// split cut them off from the OMS store.
@@ -367,6 +386,15 @@ func serve(cfg config.Config) error {
 		Margin: venuemargin.Announce(marginSourceConfigured, logger, "binance", nil),
 		Closes: closes,
 		Tenant: cfg.Tenant,
+		// EVERY DROPPED MARK TICK IS COUNTED (#673). The ticker feed used to discard
+		// its publish error outright, so a broker refusing this subject — the
+		// realistic case here, since a time.Ticker has no inbound delivery to
+		// inherit a tenant from — looked exactly like an exchange with nothing to
+		// report. This is the alertable half; MarkTickPublisher's WARN is
+		// rate-limited on purpose and carries the reason.
+		OnMarkTickDropped: func(mic, instrumentID string) {
+			markTickDropped.WithLabelValues(mic, instrumentID).Inc()
+		},
 		Logger: logger,
 	})
 

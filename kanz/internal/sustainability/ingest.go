@@ -16,8 +16,16 @@ import (
 //
 // Coverage discipline: a row with no EVIC is normalized faithfully (its ESG is
 // still valid) and is NOT given an invented EVIC — the PCAF financed-emissions
-// aggregation already SKIPS a no-EVIC holding (carbon.go), so the gap is
-// surfaced as a Coverage metric rather than papered over.
+// aggregation SKIPS a no-EVIC holding (carbon.go) and returns the gap it skipped.
+//
+// THAT GAP IS REPORTED BY THE METRIC, NOT BY THIS INDEX (#618). This comment used
+// to say the gap was "surfaced as a Coverage metric", meaning IndexCoverage below
+// — which has never had a non-test caller, because the live disclosure path takes
+// []Holding straight off an HTTP body and never builds an Index. The record that
+// actually reaches a filing is sustainability.Coverage in coverage.go. IndexCoverage
+// remains the view over the VENDOR FEED (how much of what we ingested carries
+// EVIC), which is a different question from how much of a BOOK is covered, and is
+// the one an ops desk watching feed quality wants.
 
 // ESGRow is one vendor-native ESG/carbon row. Scores are 0–100 (higher better);
 // emissions are tCO2e; Revenue/EVIC are money (the intensity / PCAF denominators).
@@ -79,18 +87,22 @@ func (x *Index) Lookup(instrumentID string) (IssuerESG, bool) {
 	return v, ok
 }
 
-// Coverage reports the ESG-data coverage of the index — the data-quality view an
-// oversight desk watches. WithoutEVIC are the issuers the PCAF financed-emissions
-// aggregation will skip (the no-EVIC coverage gap, surfaced not hidden).
-type Coverage struct {
+// IndexCoverage reports the ESG-data coverage of the INDEX — the feed-quality view
+// an oversight desk watches, counted in vendor rows. It is deliberately NOT
+// sustainability.Coverage, which is weighted by a book's market value and is what
+// qualifies a filed metric: "62% of the rows we ingested carry EVIC" and "62% of
+// this portfolio's value carries EVIC" are different facts, and conflating them
+// under one name is how the filing came to cite a coverage record it never read
+// (#618). WithoutEVIC are the issuers PCAF attribution will skip.
+type IndexCoverage struct {
 	Total       int
 	WithEVIC    int
 	WithoutEVIC []string // instrument ids lacking EVIC, sorted
 }
 
-// Coverage computes the coverage metric over the index.
-func (x *Index) Coverage() Coverage {
-	c := Coverage{Total: len(x.byID)}
+// Coverage computes the feed-quality metric over the index.
+func (x *Index) Coverage() IndexCoverage {
+	c := IndexCoverage{Total: len(x.byID)}
 	for id, v := range x.byID {
 		if v.Carbon.EVIC > 0 {
 			c.WithEVIC++
