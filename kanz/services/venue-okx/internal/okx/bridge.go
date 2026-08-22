@@ -38,6 +38,12 @@ type (
 	// UserDataStream is the private-websocket transport seam (tests inject a fake).
 	UserDataStream = execution.UserDataStream
 
+	// MarkTickPublisher is the shared reference-mark tick publisher (#673). The
+	// ticker feed does not build the market.crypto.trade envelope itself and does
+	// not see the publish error: both connectors share one implementation, so a
+	// repair to either cannot land on only one venue.
+	MarkTickPublisher = execution.MarkTickPublisher
+
 	// The In-Flight Certainty seam. The registry is LOCAL to this process now: the
 	// gRPC CancelOrder handler writes it, this connector's healing watchdog reads
 	// it. Before the split the OMS wrote it through an in-process pointer — and
@@ -74,6 +80,8 @@ var (
 	NewWeightBucket       = execution.NewWeightBucket
 	NewExchangeHTTPClient = execution.NewExchangeHTTPClient
 	NewCloseRegistry      = execution.NewCloseRegistry
+
+	NewMarkTickPublisher = execution.NewMarkTickPublisher
 
 	// Exact base-10 helpers. Money and sizes are big.Rat-backed common.v1.Decimal;
 	// `double` is banned on any path moving capital, and these are the only way a

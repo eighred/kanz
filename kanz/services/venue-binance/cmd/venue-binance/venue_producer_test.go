@@ -26,6 +26,9 @@ import (
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/venue-binance/internal/config"
 )
@@ -134,5 +137,48 @@ func TestVenueProducerTenantIsTheServiceTenant(t *testing.T) {
 	if got := venueProducerConfig(cfg, nil).Tenant; got != cfg.Tenant {
 		t.Fatalf("venue producer tenant = %q, want the service tenant %q — the ticker feed has no "+
 			"other source of one", got, cfg.Tenant)
+	}
+}
+
+// THE COUNTER MUST SURVIVE REGISTRATION, BECAUSE THE ALTERNATIVE IS A CRASH LOOP
+// (#673). obs.Registry.MustRegister runs inside serve(), after config load and
+// before anything serves traffic — a bad metric name or a label that collides
+// with a const label panics there, and the pod restarts forever with a config
+// nobody changed. Nothing else in this package reaches that line: serve() dials
+// the exchange and a broker first. This asserts the collector on a throwaway
+// registry, which is the same validation MustRegister performs.
+func TestMarkTickDroppedCounterRegistersAndCounts(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(markTickDropped)
+
+	markTickDropped.WithLabelValues("BINANCE", "BTC-USD").Inc()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	var got *dto.MetricFamily
+	for _, f := range families {
+		if f.GetName() == "kanz_venue_mark_tick_dropped_total" {
+			got = f
+		}
+	}
+	if got == nil {
+		t.Fatal("kanz_venue_mark_tick_dropped_total exports no series after an increment — a registered " +
+			"collector nobody writes reads as ZERO on every dashboard and can never fire an alert")
+	}
+	labels := map[string]string{}
+	for _, l := range got.GetMetric()[0].GetLabel() {
+		labels[l.GetName()] = l.GetValue()
+	}
+	for name, want := range map[string]string{"venue": "binance", "mic": "BINANCE", "instrument": "BTC-USD"} {
+		if labels[name] != want {
+			t.Errorf("label %q = %q, want %q. These three labels are what this counter has that "+
+				"kanz_bus_publish_total{subject,result} does not: WHICH venue, WHICH exchange, and WHICH "+
+				"instrument went dark while the others kept publishing", name, labels[name], want)
+		}
+	}
+	if v := got.GetMetric()[0].GetCounter().GetValue(); v != 1 {
+		t.Errorf("counter = %v after one drop, want 1", v)
 	}
 }

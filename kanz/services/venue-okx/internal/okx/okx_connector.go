@@ -5,14 +5,9 @@ import (
 	"log/slog"
 	"time"
 
-	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
-	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"github.com/eighred/kanz/internal/venuemargin"
-	"github.com/eighred/kanz/pkg/bus"
 )
 
 // OKXConnector bundles the OKX venue with its background workers — the OKX
@@ -132,6 +127,7 @@ func (c *OKXConnector) runTicker(ctx context.Context, deps WorkerDeps) {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
+	ticks := NewMarkTickPublisher(deps.Publisher, deps.Logger, c.settings.MIC, deps.OnMarkTickDropped)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -139,14 +135,20 @@ func (c *OKXConnector) runTicker(ctx context.Context, deps WorkerDeps) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			c.pollTicker(ctx, deps.Publisher)
+			c.pollTicker(ctx, ticks)
 		}
 	}
 }
 
 // pollTicker publishes a market.v1.MarketDataEvent per instrument, feeding
 // tv-sync's MarkSource — the OKX analog of the Binance ticker feed.
-func (c *OKXConnector) pollTicker(ctx context.Context, pub Publisher) {
+//
+// It takes a *MarkTickPublisher rather than a bare Publisher because the
+// envelope and the failure handling are shared with Binance (#673): a tick that
+// does not reach the bus is counted and named there, once, for both venues. This
+// used to end in a discarded publish error, which made a subject the broker was
+// refusing indistinguishable from an exchange with nothing to say.
+func (c *OKXConnector) pollTicker(ctx context.Context, ticks *MarkTickPublisher) {
 	for instrument, instID := range c.settings.Symbols {
 		px, err := c.rest.tickerPrice(ctx, instID)
 		if err != nil {
@@ -160,15 +162,6 @@ func (c *OKXConnector) pollTicker(ctx context.Context, pub Publisher) {
 		if !ok {
 			continue
 		}
-		ev := &marketpb.MarketDataEvent{
-			InstrumentId: instrument, Symbol: instID, Mic: c.settings.MIC,
-			EventTime: timestamppb.Now(),
-			Data:      &marketpb.MarketDataEvent_Trade{Trade: &marketpb.Trade{Price: price}},
-		}
-		_ = pub.Publish(ctx, bus.Event{
-			Subject: "market.crypto.trade", EventType: "market.crypto.trade",
-			EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "market",
-			EventTime: time.Now().UTC(), PartitionKey: instrument, Payload: ev,
-		})
+		ticks.PublishTrade(ctx, instrument, instID, price)
 	}
 }

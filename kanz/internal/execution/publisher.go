@@ -152,5 +152,17 @@ type WorkerDeps struct {
 	CloseTimeout time.Duration
 	// HealInterval is the healing watchdog tick. <=0 ⇒ 500ms.
 	HealInterval time.Duration
-	Logger       *slog.Logger
+	// OnMarkTickDropped is called for EVERY reference-mark tick the exchange
+	// answered and the bus did not accept (#673). The composition root wires it
+	// to a counter labelled by instrument, so "which instruments went dark, and
+	// how often" is a number rather than an inference from silence.
+	//
+	// It is a FIELD ON WorkerDeps for the reason Margin is: a third venue adapter
+	// must not be able to omit it by accident. The counter is the alertable half
+	// of the signal — MarkTickPublisher's WARN is rate-limited by design and a
+	// log line is not a threshold — so nil here is a real reduction in what an
+	// operator can see, and the completeness guard in test/arch makes choosing
+	// nil a visible decision in a diff rather than a field nobody typed.
+	OnMarkTickDropped func(mic, instrumentID string)
+	Logger            *slog.Logger
 }
