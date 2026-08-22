@@ -49,6 +49,24 @@ var ledgerDurable = prometheus.NewGauge(prometheus.GaugeOpts{
 	Help: "1 if the IBOR journal is backed by Postgres (survives a restart), 0 if in-memory.",
 })
 
+// A CASH-BALANCE ANNOUNCEMENT THAT NEVER LEFT THIS PROCESS (#622). The fold
+// deliberately does not fail on it — the ledger is the book of record and
+// nacking would stall it — so this is the only estate-wide signal that the
+// announcements stopped.
+//
+// SEEDED AT ZERO, and the seeding is the half that is easy to skip: an
+// unseeded counter that never fires reads exactly like a counter nobody
+// registered, so an operator cannot tell "no announcements lost" from "no
+// metric". The alternative to knowing is inferring it from orders being
+// refused, because a consumer ages an unheard balance out to UNKNOWN and the
+// buying-power rule fails closed on it.
+var announcementsLost = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "kanz_accounting_cash_announcements_lost_total",
+	Help: "Cash-balance announcements that could not be published. Non-zero means downstream " +
+		"consumers are ageing these portfolios out to UNKNOWN, which refuses their orders " +
+		"under a buying-power mandate.",
+})
+
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
 	// run() registers fires before this line. The non-zero code is what makes a
@@ -493,8 +511,14 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mes
 	logger.Info("accounting: cash-balance announcements armed — downstream can see what each "+
 		"portfolio may spend", "subject", consume.SubjectPortfolioCash)
 
+	// Registered before anything can drop: a plain Counter exports at zero the
+	// moment it is registered, which is what makes "none lost" a readable answer
+	// rather than a missing series (#622).
+	obs.Registry.MustRegister(announcementsLost)
+
 	folder, err := consume.NewFolder(cfg.Tenant, store, cfg.BaseCurrency,
-		consume.WithAnnouncer(announcer), consume.WithLogger(logger))
+		consume.WithAnnouncer(announcer), consume.WithLogger(logger),
+		consume.WithAnnounceFailureObserver(func() { announcementsLost.Inc() }))
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package balancerecon
 
 import (
 	"context"
+	"log/slog"
 	"math/big"
 	"sync"
 	"time"
@@ -77,8 +78,19 @@ type View struct {
 	asOf   time.Time
 	seen   bool
 
-	onStale func(age time.Duration)
+	onStale   func(age time.Duration)
+	onDropped func(reason string)
+	logger    *slog.Logger
 }
+
+// Reasons a balance announcement was dropped. They are SEPARATE because they
+// send an operator to different places: a decode failure is a corrupt or
+// mis-typed publisher, an out-of-domain exponent is a producer emitting a number
+// this platform refuses to materialise (#95).
+const (
+	DropUndecodable = "undecodable"
+	DropOutOfDomain = "out_of_domain"
+)
 
 var _ execution.ExpectedBalances = (*View)(nil)
 
@@ -106,8 +118,33 @@ func WithViewOnStale(fn func(age time.Duration)) ViewOption {
 // NewView returns a view for one exchange account. Until an announcement
 // arrives every asset is UNKNOWN, so reconciliation skips rather than reporting
 // the whole account as a break on the first pass.
+// WithViewDropObserver counts announcements this view discarded, by reason.
+//
+// A DROP HERE IS OTHERWISE INVISIBLE. The ack is correct — nacking replays the
+// same bad bytes forever — but the balance then simply ages out to UNKNOWN and
+// reconciliation skips the account, with nothing pointing at why. lineage's
+// composition root states the rule: "A DROPPED AUDIT RECORD MUST BE COUNTED, NOT
+// SWALLOWED" (#622).
+//
+// Nil ⇒ not counted. The drop is still logged without it, so a deployment that
+// forgets this seam is noisy rather than silent.
+func WithViewDropObserver(fn func(reason string)) ViewOption {
+	return func(v *View) { v.onDropped = fn }
+}
+
+// WithViewLogger supplies the logger the view reports discarded announcements on.
+// Without it the view falls back to slog.Default() — it never drops silently.
+func WithViewLogger(l *slog.Logger) ViewOption {
+	return func(v *View) {
+		if l != nil {
+			v.logger = l
+		}
+	}
+}
+
 func NewView(account string, opts ...ViewOption) *View {
-	v := &View{account: account, maxAge: DefaultMaxAge, now: time.Now, assets: map[string]*big.Rat{}}
+	v := &View{account: account, maxAge: DefaultMaxAge, now: time.Now,
+		assets: map[string]*big.Rat{}, logger: slog.Default()}
 	for _, opt := range opts {
 		opt(v)
 	}
@@ -121,16 +158,24 @@ func NewView(account string, opts ...ViewOption) *View {
 // into them. Merging would leave an asset that fell to zero showing its last
 // non-zero figure forever, because a zero balance is announced by ABSENCE from
 // the map — and reconciliation would then report a permanent phantom break.
-func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
+func (v *View) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []byte) error {
 	var msg accountingpb.PortfolioCashBalance
 	if err := proto.Unmarshal(payload, &msg); err != nil {
 		// A permanent defect: nacking would replay the same bad bytes forever,
 		// while the balance simply ages out to unknown and reconciliation skips.
+		//
+		// THE ACK IS RIGHT AND THE SILENCE WAS NOT (#622). Ageing out to UNKNOWN
+		// is a state somebody then has to explain, and nothing here said the
+		// announcement had arrived and been discarded.
+		v.dropped(ctx, DropUndecodable, "the payload is not a decodable "+
+			"accounting.v1.PortfolioCashBalance", "err", err, "bytes", len(payload))
 		return nil
 	}
 	// OUT-OF-DOMAIN EXPONENTS ARE REFUSED BEFORE ANY NUMBER IS READ (#95):
 	// dec.FromProto materialises 10^abs(exponent).
 	if _, in := dec.InDomainDeep(&msg); !in {
+		v.dropped(ctx, DropOutOfDomain, "an amount carries an exponent outside the decimal "+
+			"domain, which cannot be materialised", "portfolio_id", msg.GetPortfolioId())
 		return nil
 	}
 
@@ -184,4 +229,19 @@ func (v *View) Balance(asset string) (*big.Rat, bool) {
 		return new(big.Rat), true
 	}
 	return new(big.Rat).Set(amount), true
+}
+
+// dropped records a discarded announcement: counted for the dashboard, logged
+// for the diagnosis.
+//
+// BOTH, NOT EITHER. The counter answers "is this happening" across every
+// account; the log answers "what was wrong with this one", and a reconciliation
+// break is investigated one account at a time.
+func (v *View) dropped(ctx context.Context, reason, why string, args ...any) {
+	if v.onDropped != nil {
+		v.onDropped(reason)
+	}
+	v.logger.ErrorContext(ctx, "balancerecon: cash balance announcement DISCARDED — this account's "+
+		"balance will age out to UNKNOWN and reconciliation will skip it: "+why,
+		append([]any{"venue_account_id", v.account, "reason", reason}, args...)...)
 }
