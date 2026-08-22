@@ -28,14 +28,33 @@ type Multiples struct {
 	RVPI float64
 }
 
+// ErrNoMultiples is returned when nothing has been drawn, so every multiple is a
+// division by zero.
+//
+// IT IS AN ERROR AND NOT A ZERO, and the two states it separates are not close
+// together (#623): a commitment with nothing called has no multiple at all, while
+// a fund that drew capital and returned none has TVPI 0.0 as a MEASURED FACT. One
+// is a fund that has not started; the other is a total loss. As zeros they were
+// the same three bytes on the wire.
+//
+// THE SIBLING METRIC IN THE SAME RESPONSE BODY ALREADY DID THIS. IRR returns an
+// error for its undefined case and handlePosition omits the key; the multiples
+// five lines above it emitted 0. This makes the two agree, which is the whole
+// repair — the doc here used to call the zero "the same degraded-to-zero
+// discipline the risk measures use", and those measures have since moved the
+// other way too (#509, #527: a measure computed over nothing must say so).
+var ErrNoMultiples = errors.New("alternatives: no capital has been called, so the multiples are undefined")
+
 // ComputeMultiples returns TVPI/DPI/RVPI from a position's paid-in (called),
-// distributed, and residual NAV. Paid-in of zero yields zero multiples (nothing
-// has been drawn — the multiples are undefined, reported as zero rather than
-// NaN/Inf, the same degraded-to-zero discipline the risk measures use).
-func ComputeMultiples(p *Position) Multiples {
+// distributed, and residual NAV, or ErrNoMultiples when nothing has been called.
+//
+// A ZERO RETURNED WITH A NIL ERROR IS A REAL ZERO and callers may report it as
+// one: capital drawn and nothing returned is a total loss, which is exactly the
+// figure an investor needs to see.
+func ComputeMultiples(p *Position) (Multiples, error) {
 	paidIn := ratToFloat(p.Called)
 	if paidIn <= 0 {
-		return Multiples{}
+		return Multiples{}, ErrNoMultiples
 	}
 	dist := ratToFloat(p.Distributed)
 	nav := ratToFloat(p.NAV)
@@ -43,7 +62,7 @@ func ComputeMultiples(p *Position) Multiples {
 		TVPI: (dist + nav) / paidIn,
 		DPI:  dist / paidIn,
 		RVPI: nav / paidIn,
-	}
+	}, nil
 }
 
 // IRRFlows builds the IRR cashflow stream for a position as of the NAV date: the

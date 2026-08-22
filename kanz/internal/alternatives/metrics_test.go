@@ -53,7 +53,10 @@ func TestMultiplesIdentity(t *testing.T) {
 		ev("e2", EventDistribution, "60", day(2021, 1, 1)),
 		ev("e3", EventNAVMark, "80", day(2022, 1, 1)),
 	})
-	m := ComputeMultiples(p)
+	m, err := ComputeMultiples(p)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !approx(m.DPI, 0.6, 1e-9) || !approx(m.RVPI, 0.8, 1e-9) || !approx(m.TVPI, 1.4, 1e-9) {
 		t.Fatalf("multiples: %+v", m)
 	}
@@ -63,10 +66,13 @@ func TestMultiplesIdentity(t *testing.T) {
 	}
 }
 
+// ZERO PAID-IN IS NOW A REFUSAL, NOT A ZERO (#623). The full reasoning, and the
+// total-loss case that must still report 0.0, are in multiples_undefined_test.go;
+// this asserts the shape here so the sibling assertions above stay honest.
 func TestMultiplesZeroPaidIn(t *testing.T) {
 	p := Replay("C1", []*Event{ev("e1", EventCommit, "1000", day(2020, 1, 1))})
-	if m := ComputeMultiples(p); m.TVPI != 0 || m.DPI != 0 || m.RVPI != 0 {
-		t.Fatalf("zero paid-in should give zero multiples, got %+v", m)
+	if _, err := ComputeMultiples(p); err == nil {
+		t.Fatal("zero paid-in must be undefined, not zero multiples")
 	}
 }
 

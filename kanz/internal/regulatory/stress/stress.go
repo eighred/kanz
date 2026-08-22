@@ -43,20 +43,89 @@ type ExpansionModel struct {
 	Beta map[string]map[string]float64
 }
 
+// FactorCoverage records which of the model's macro factors the scenario
+// actually carried.
+//
+// IT TRAVELS WITH THE SHOCKS, never beside them, for the reason the shocks need
+// it at all: s.Shocks[macro] on a missing key is 0, so "this factor does not
+// move" and "this scenario never mentioned this factor" produce the identical
+// vector. The first is a modelling statement; the second is missing data (#623).
+//
+// The consequence is downstream and one-directional. The vector feeds
+// ReverseStress, whose answer — how bad conditions must get before a breach — is
+// then understated in the direction the filer benefits from.
+type FactorCoverage struct {
+	// Required is every macro factor some asset class actually responds to,
+	// sorted. A factor whose beta is zero everywhere is NOT required: its absence
+	// changes no number, and reporting it would train a reader to skim this.
+	Required []string
+	// Supplied is the required factors the scenario carried, sorted. AN EXPLICIT
+	// ZERO COUNTS: a scenario stating "rates do not move" has supplied that
+	// factor, and that is exactly the case this type exists to tell apart.
+	Supplied []string
+	// Missing is the rest, sorted — the transmission channels that contributed
+	// nothing because nobody said what they did.
+	Missing []string
+}
+
+// Complete reports that the scenario carried every factor the model responds to.
+func (c FactorCoverage) Complete() bool { return len(c.Missing) == 0 }
+
+// Fraction is the supplied share of required factors, in [0,1]. A model with no
+// live factors is vacuously complete rather than a total failure — nothing is
+// missing when nothing is needed.
+func (c FactorCoverage) Fraction() float64 {
+	if len(c.Required) == 0 {
+		return 1
+	}
+	return float64(len(c.Supplied)) / float64(len(c.Required))
+}
+
 // Expand turns a macro scenario into per-asset-class return shocks (deterministic
-// order via the returned map; callers sort for display). Severity scales the
-// macro shocks before transmission.
-func (e ExpansionModel) Expand(s MacroScenario) map[string]float64 {
+// order via the returned map; callers sort for display) and the coverage of the
+// factors it was computed from. Severity scales the macro shocks before
+// transmission.
+//
+// THE SECOND RETURN IS THE REPAIR (#623). The shocks are unchanged — a missing
+// factor still transmits nothing, which is the only arithmetic available — but a
+// caller can now tell a deliberate single-factor scenario from a five-factor one
+// that arrived with four channels missing. It reports rather than refuses,
+// because a single-factor scenario is a legitimate thing to run and an error
+// would make the legitimate case unrunnable to catch the broken one.
+func (e ExpansionModel) Expand(s MacroScenario) (map[string]float64, FactorCoverage) {
 	sev := s.severity()
 	out := map[string]float64{}
+	required := map[string]bool{}
 	for assetClass, betas := range e.Beta {
 		var shock float64
 		for macro, beta := range betas {
+			if beta != 0 {
+				required[macro] = true
+			}
 			shock += beta * s.Shocks[macro] * sev
 		}
 		out[assetClass] = shock
 	}
-	return out
+	return out, coverageOf(required, s.Shocks)
+}
+
+// coverageOf splits the required factors by whether the scenario carried them.
+// Presence is tested with the comma-ok form, not against zero: an explicit zero
+// is data.
+func coverageOf(required map[string]bool, shocks map[string]float64) FactorCoverage {
+	var cov FactorCoverage
+	for macro := range required {
+		cov.Required = append(cov.Required, macro)
+		if _, ok := shocks[macro]; ok {
+			cov.Supplied = append(cov.Supplied, macro)
+		} else {
+			cov.Missing = append(cov.Missing, macro)
+		}
+	}
+	sort.Strings(cov.Required)
+	sort.Strings(cov.Supplied)
+	sort.Strings(cov.Missing)
+	return cov
 }
 
 // AssetClasses returns the model's asset classes in stable order.
