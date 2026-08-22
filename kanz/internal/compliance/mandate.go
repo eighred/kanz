@@ -52,8 +52,18 @@ type MandateRegistry struct {
 	// exists, filed under another tenant" are different operator problems and must
 	// not read the same in a log.
 	tenantsByPortfolio map[string]map[string]struct{}
-	armed              bool
-	onceOn             sync.Once
+	// rejected names the (tenant, portfolio) pairs whose mandate arrived and could
+	// NOT be applied, with the reason. A rejected key is not an absent one: the
+	// mandate stream is compacted, so the message that failed is the LAST one on
+	// that portfolio's subject and every consumer that boots re-reads it, forever
+	// (#619). Kept so Mandate can answer "unreadable" instead of "not found".
+	rejected map[mandateKey]error
+	// dropped counts messages that could not be attributed to a portfolio at all —
+	// a payload that is not a ConfigChanged names no config_key, so nothing can be
+	// marked. It is the reason Complete is not simply len(rejected) == 0.
+	dropped int
+	armed   bool
+	onceOn  sync.Once
 
 	// warnMu guards warned only; it is separate from mu so the resolution path
 	// never takes a write lock to say something.
@@ -82,6 +92,7 @@ func NewMandateRegistry(opts ...MandateRegistryOption) *MandateRegistry {
 	r := &MandateRegistry{
 		byKey:              make(map[mandateKey][]*compliancepb.Mandate),
 		tenantsByPortfolio: make(map[string]map[string]struct{}),
+		rejected:           make(map[mandateKey]error),
 		warned:             make(map[string]bool),
 		logger:             slog.Default(),
 	}
@@ -132,6 +143,88 @@ func (r *MandateRegistry) Armed() bool {
 	return r.armed
 }
 
+// ErrMandateUnreadable means a mandate for this portfolio WAS PUBLISHED and this
+// registry could not apply it.
+//
+// IT IS TERMINAL, and for a sharper reason than ErrMandateTenantUnresolved: the
+// mandate stream is COMPACTED, one message per (tenant, portfolio) subject. The
+// message that failed to decode is therefore the last one that subject will ever
+// serve until an operator republishes, so a redelivery replays the identical bytes
+// and every consumer that boots arms itself with the same failure. Retrying cannot
+// resolve it; only a new publish can.
+//
+// A caller MUST refuse on it, and must refuse REGARDLESS of any require-mandate
+// posture — see PreTradeGate and Decision.Unreadable for why this is not a policy
+// question (#619).
+var ErrMandateUnreadable = errors.New("mandate: a published mandate for this portfolio could not be applied")
+
+// Reject records that a mandate for (tenantID, portfolioID) arrived and could not
+// be applied. cause is surfaced in the lookup error, so the operator reading a
+// refused order learns what was wrong with the mandate rather than only that one
+// was.
+func (r *MandateRegistry) Reject(tenantID, portfolioID string, cause error) {
+	if tenantID == "" || portfolioID == "" {
+		// Nothing to file it under. Counted as an unattributable drop instead, so
+		// the registry still stops claiming completeness.
+		r.Drop()
+		return
+	}
+	if cause == nil {
+		cause = errors.New("unspecified")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rejected[mandateKey{tenant: tenantID, portfolio: portfolioID}] = cause
+}
+
+// Drop records a mandate message that could not be attributed to any portfolio —
+// a payload that is not a ConfigChanged carries no config_key, so there is no key
+// to mark. It exists so an unattributable loss still moves Complete off true.
+func (r *MandateRegistry) Drop() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dropped++
+}
+
+// Dropped is the number of unattributable mandate messages this registry lost.
+func (r *MandateRegistry) Dropped() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.dropped
+}
+
+// Rejections names every portfolio whose published mandate could not be applied,
+// sorted, as "tenant/portfolio" — the list an operator has to go and republish.
+func (r *MandateRegistry) Rejections() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.rejected))
+	for k := range r.rejected {
+		out = append(out, k.tenant+"/"+k.portfolio)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Complete reports that every mandate message this registry saw was applied.
+//
+// IT IS A DIFFERENT QUESTION FROM Armed. Armed says the initial replay finished;
+// Complete says nothing was lost doing it. A registry that folded 499 mandates and
+// dropped the 500th is ARMED and NOT COMPLETE, and reporting only the first is how
+// a service came to announce Ready over a hole in its own registry (#619).
+//
+// It deliberately does NOT gate readiness on its own. A single unparseable mandate
+// would then take the whole service down and stop the other 499 portfolios trading
+// — converting one broken mandate into an estate-wide outage. The per-portfolio
+// refusal in the gate is what fails closed, precisely, where the risk actually is;
+// this is what the health surface reports so the hole is visible while the rest of
+// the estate keeps working.
+func (r *MandateRegistry) Complete() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.dropped == 0 && len(r.rejected) == 0
+}
+
 // Put inserts a mandate version under (tenant, portfolio), keeping that pair's
 // history sorted by (effective_at, version). Re-putting the same version
 // replaces it (idempotent replay) — and because the key now carries the tenant,
@@ -157,6 +250,11 @@ func (r *MandateRegistry) Put(m *compliancepb.Mandate) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	k := mandateKey{tenant: m.GetTenantId(), portfolio: m.GetPortfolioId()}
+	// A REPAIR CLEARS THE MARK. The operator republishes a corrected mandate on the
+	// same compacted subject; if the rejection were sticky the portfolio would stay
+	// refused for the life of the process and the repair would be unreachable —
+	// a fix worse than the defect it replaced.
+	delete(r.rejected, k)
 	if r.tenantsByPortfolio[k.portfolio] == nil {
 		r.tenantsByPortfolio[k.portfolio] = make(map[string]struct{})
 	}
@@ -253,6 +351,19 @@ func (r *MandateRegistry) Mandate(_ context.Context, tenantID, portfolioID strin
 	}
 
 	r.mu.RLock()
+	// ASKED BEFORE THE VERSIONS, because a rejected key HAS no versions and would
+	// otherwise fall out of the len(vers) == 0 branch below as a plain miss — which
+	// is the collapse this exists to stop: "nobody wrote a mandate" and "a mandate
+	// was written and this registry could not read it" are different facts, and only
+	// the first is a posture question (#619).
+	if rejErr := r.rejected[mandateKey{tenant: tenantID, portfolio: portfolioID}]; rejErr != nil {
+		r.mu.RUnlock()
+		return nil, false, fmt.Errorf("%w: portfolio %q of tenant %q has a published mandate this "+
+			"registry could not apply (%v). The mandate stream is compacted, so that message is the "+
+			"LAST one on this portfolio's subject and every consumer that boots re-reads it: the "+
+			"portfolio is not merely un-mandated, it is un-governable until the mandate is "+
+			"republished", ErrMandateUnreadable, portfolioID, tenantID, rejErr)
+	}
 	vers := r.byKey[mandateKey{tenant: tenantID, portfolio: portfolioID}]
 	others := sortedTenants(r.tenantsByPortfolio[portfolioID])
 	if len(vers) == 0 && tenantID == bus.SystemTenant && len(others) == 1 {

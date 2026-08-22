@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/platform/httpserver"
@@ -198,7 +200,17 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// COMP-01f: mandate registry fed from the shared ConfigChanged stream, the
 	// point-in-time source the monitor resolves against.
 	mandateReg := comp.NewMandateRegistry(comp.WithMandateLogger(logger))
-	mandateConsumer := comp.NewMandateConsumer(mandateReg, logger)
+	// A mandate this monitor consumed and could not apply (#619). The stream is
+	// compacted, so the failure is permanent until the mandate is republished: the
+	// portfolio stops being evaluated post-trade, and nothing else says so.
+	mandateRejected := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_compliance_mandate_rejected_total",
+		Help: "Mandate messages this process consumed and could not apply. Each one leaves a " +
+			"portfolio unevaluated until the mandate is republished.",
+	})
+	obs.Registry.MustRegister(mandateRejected)
+	mandateConsumer := comp.NewMandateConsumer(mandateReg, logger,
+		comp.WithMandateRejectionObserver(func(string, string) { mandateRejected.Inc() }))
 
 	// COMP-01e: decisions to the audit stream. COMP-01d: the post-trade monitor.
 	recorder := audit.NewBusRecorder(producer, logger)
@@ -317,7 +329,20 @@ mandateArmWait:
 		}
 	}
 	if mandateReg.Armed() {
-		logger.Info("mandate registry armed — mandates in force are known", "subject", comp.SubjectMandateAll)
+		// ARMED IS NOT COMPLETE (#619) — see the OMS composition root for why this
+		// still reports ready rather than taking the service down over one bad
+		// mandate. Here the narrow failure is that the affected portfolio is not
+		// EVALUATED post-trade; the monitor refuses to check it and says so, rather
+		// than re-evaluating a live book and reporting it clean.
+		if !mandateReg.Complete() {
+			logger.Error("mandate registry armed WITH GAPS — some portfolios have a published mandate "+
+				"this pod could not apply and are NOT BEING MONITORED until it is republished",
+				"subject", comp.SubjectMandateAll,
+				"unreadable_portfolios", mandateReg.Rejections(),
+				"unattributable_drops", mandateReg.Dropped())
+		} else {
+			logger.Info("mandate registry armed — mandates in force are known", "subject", comp.SubjectMandateAll)
+		}
 		readiness.Set(true)
 	}
 

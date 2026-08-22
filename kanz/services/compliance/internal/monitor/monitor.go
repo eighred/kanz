@@ -128,6 +128,24 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 			}
 			return nil
 		}
+		// EQUALLY TERMINAL, and it must be listed here rather than fall to the
+		// retry below (#619). A mandate that failed to apply sits on a COMPACTED
+		// subject, so a redelivery re-reads the same bytes and fails identically —
+		// returning err would put this monitor in the exact redelivery loop the
+		// branch above exists to prevent, and one broken mandate would stop the
+		// monitor evaluating every OTHER portfolio.
+		//
+		// Nothing is declared clean: the portfolio's last status is left where it
+		// was, so a republished mandate still sees the transition.
+		if errors.Is(err, comp.ErrMandateUnreadable) {
+			if m.firstUngoverned(key) {
+				m.logger.ErrorContext(ctx, "NOT CHECKING this portfolio: its published mandate could "+
+					"not be applied, and the mandate stream is compacted, so nothing will check it "+
+					"until the mandate is republished",
+					"tenant_id", key.tenant, "portfolio_id", pid, "err", err)
+			}
+			return nil
+		}
 		return err // transient mandate lookup ⇒ retry
 	}
 	// The same two states the pre-trade gate distinguishes (EXEC-M14): a portfolio

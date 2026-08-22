@@ -258,7 +258,17 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// against the mandate stream (a MandateConsumer feeds the registry from the
 	// shared ConfigChanged subject) and projecting onto the live position book.
 	mandateReg := comp.NewMandateRegistry(comp.WithMandateLogger(logger))
-	mandateConsumer := comp.NewMandateConsumer(mandateReg, logger)
+	// The DROP itself, counted where it happens — at the consumer, once per bad
+	// mandate — rather than only per refused order. An estate with a broken mandate
+	// on a portfolio that is not trading today would otherwise show nothing at all.
+	mandateRejected := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_compliance_mandate_rejected_total",
+		Help: "Mandate messages this process consumed and could not apply. Each one leaves a " +
+			"portfolio un-governable until the mandate is republished.",
+	})
+	obs.Registry.MustRegister(mandateRejected)
+	mandateConsumer := comp.NewMandateConsumer(mandateReg, logger,
+		comp.WithMandateRejectionObserver(func(string, string) { mandateRejected.Inc() }))
 
 	// COMP-M2: the reference-mark source the pre-trade gate values MARKET/STOP
 	// orders from. It starts EMPTY and warms as the spine delivers, so a freshly
@@ -281,6 +291,20 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"OMS_REQUIRE_MANDATE, is being refused for want of one).",
 	})
 	obs.Registry.MustRegister(ungoverned)
+
+	// A MANDATE THAT WAS PUBLISHED AND COULD NOT BE READ (#619). Distinct from
+	// ungoverned above, and the distinction is the whole point: ungoverned means
+	// nobody wrote a mandate, which an operator may knowingly trade through. This
+	// means somebody wrote one and this process cannot apply it — and because the
+	// mandate stream is compacted, no redelivery and no restart will fix it. Only a
+	// republish will. The two counters must never be summed into one.
+	mandateUnreadable := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_compliance_unreadable_mandate_orders_total",
+		Help: "Orders REFUSED because the portfolio has a published mandate this process could not " +
+			"apply. Non-zero means a portfolio is un-governable until its mandate is republished; " +
+			"unlike an ungoverned portfolio this does not depend on OMS_REQUIRE_MANDATE.",
+	})
+	obs.Registry.MustRegister(mandateUnreadable)
 
 	// AN UNPRICED REFUSAL IS NOW COUNTED TOO (COMP-M2).
 	//
@@ -548,6 +572,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		// against.
 		comp.WithMarginSource(compliance.NewMarginSource(bindings, margins)),
 		comp.WithUngovernedObserver(func(string, string) { ungoverned.Inc() }),
+		comp.WithUnreadableObserver(func(string, string) { mandateUnreadable.Inc() }),
 		comp.WithUnaccountedObserver(func(_, _, omits string) {
 			// The posture, not the omitted list, is the label: entry-type names are a
 			// bounded set today but they come from the producing deployment, and a
@@ -1487,7 +1512,28 @@ mandateArmWait:
 		}
 	}
 	if mandateReg.Armed() {
-		logger.Info("pre-trade mandate registry armed — mandates in force are known", "subject", mandateSub)
+		// ARMED IS NOT COMPLETE (#619). The replay finished; that does not mean
+		// nothing was lost doing it. A registry that folded 499 mandates and dropped
+		// the 500th is armed, and reporting only that is how this pod came to
+		// announce Ready over a hole in its own registry.
+		//
+		// READINESS IS STILL SET. The alternative — refusing to report ready — turns
+		// one unparseable mandate into an estate-wide trading outage and stops the
+		// other 499 portfolios, which is a worse failure than the one being fixed.
+		// What fails closed is narrower and lands where the risk actually is: the
+		// affected portfolio's own orders are REFUSED by the pre-trade gate
+		// (Decision.Unreadable), regardless of OMS_REQUIRE_MANDATE. This log line and
+		// the two counters above are what stop the hole being silent.
+		if !mandateReg.Complete() {
+			logger.Error("pre-trade mandate registry armed WITH GAPS — some portfolios have a "+
+				"published mandate this pod could not apply, and their orders will be REFUSED until "+
+				"the mandate is republished. The rest of the estate trades normally.",
+				"subject", mandateSub,
+				"unreadable_portfolios", mandateReg.Rejections(),
+				"unattributable_drops", mandateReg.Dropped())
+		} else {
+			logger.Info("pre-trade mandate registry armed — mandates in force are known", "subject", mandateSub)
+		}
 		readiness.Set(true)
 	}
 
