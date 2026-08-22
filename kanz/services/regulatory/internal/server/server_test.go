@@ -285,6 +285,12 @@ func TestClimateFilingServesTheDecimalItSigned(t *testing.T) {
 				"TCFD_FINANCED_EMISSIONS": "617333.9",
 				"TCFD_IMPLIED_TEMP_RISE":  "3702.5034",
 				"TCFD_CLIMATE_VAR":        "433641.95",
+				// The data-coverage record travels with the numbers and is signed
+				// with them (#618). This fixture's one holding carries both vendor
+				// denominators, so the book is fully covered and both file as 1 —
+				// which is exactly what must NOT be assumed when it is absent.
+				"TCFD_WACI_DATA_COVERAGE":      "1",
+				"TCFD_EMISSIONS_DATA_COVERAGE": "1",
 			},
 		},
 		{
@@ -294,6 +300,10 @@ func TestClimateFilingServesTheDecimalItSigned(t *testing.T) {
 				"SFDR_GHG_INTENSITY":        "1234.5678",
 				"SFDR_CARBON_FOOTPRINT":     "617333.9",
 				"SFDR_FOSSIL_FUEL_EXPOSURE": "1",
+				// See the TCFD case: fully covered book, so both coverage items
+				// are 1 and are part of what the signature commits to.
+				"SFDR_GHG_INTENSITY_DATA_COVERAGE": "1",
+				"SFDR_EMISSIONS_DATA_COVERAGE":     "1",
 			},
 		},
 	} {

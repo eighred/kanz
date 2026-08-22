@@ -87,26 +87,40 @@ func WeightedAverageESG(holdings []Holding) ESGScore {
 // carbon intensity — Σ wᵢ·intensityᵢ — the headline TCFD/SFDR carbon number.
 // Reconciles exactly with the per-holding contributions (Σ wᵢ·intensityᵢ), the
 // property CLIMATE-01e pins.
-func WeightedAverageCarbonIntensity(holdings []Holding) float64 {
+//
+// IT RETURNS ITS COVERAGE (#618). A holding with no revenue figure has an
+// undefined intensity, which this degrades to zero — and it keeps its weight, so
+// it drags the portfolio number DOWN rather than out. That is the framework's
+// arithmetic and it is not being changed; what changes is that the caller now
+// also receives how much of the book the number rests on, and cannot obtain the
+// number without it.
+func WeightedAverageCarbonIntensity(holdings []Holding) (float64, Coverage) {
+	cov := IntensityCoverage(holdings)
 	total := totalValue(holdings)
 	if total <= 0 {
-		return 0
+		return 0, cov
 	}
 	var waci float64
 	for _, h := range holdings {
 		waci += abs(h.MarketValue) / total * h.Carbon.Intensity()
 	}
-	return waci
+	return waci, cov
 }
 
 // FinancedEmissions is the PCAF attributed absorption of issuer emissions to the
 // portfolio: Σ (MVᵢ / EVICᵢ) · totalEmissionsᵢ — each holding owns the share of
 // its issuer's emissions equal to its share of the issuer's enterprise value.
 // This is the absolute carbon footprint (tCO2e) the portfolio finances. A holding
-// with no EVIC contributes nothing (the attribution factor is undefined — skipped,
-// surfaced as a data-coverage gap a layer up rather than silently zero-weighted
-// into the total).
-func FinancedEmissions(holdings []Holding) float64 {
+// with no EVIC contributes nothing — the attribution factor is undefined, so it is
+// skipped rather than zero-weighted into the total.
+//
+// THAT SKIP IS RETURNED, NOT ASSUMED (#618). This comment used to end "surfaced as
+// a data-coverage gap a layer up", and the layer up was Index.Coverage, which has
+// never had a non-test caller: the live filing path takes []Holding straight off an
+// HTTP body and never builds an Index. So the gap was surfaced nowhere and the
+// understated total was signed. The second return is now that surface, and it is
+// not optional.
+func FinancedEmissions(holdings []Holding) (float64, Coverage) {
 	var financed float64
 	for _, h := range holdings {
 		if h.Carbon.EVIC <= 0 {
@@ -115,7 +129,7 @@ func FinancedEmissions(holdings []Holding) float64 {
 		attribution := h.MarketValue / h.Carbon.EVIC
 		financed += attribution * h.Carbon.TotalScopes()
 	}
-	return financed
+	return financed, AttributionCoverage(holdings)
 }
 
 // Contribution is one holding's contribution to WACI — its weight times its

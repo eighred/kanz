@@ -20,8 +20,8 @@ func TestClimateVaRNonNegativeAndMonotone(t *testing.T) {
 	mild := ClimateScenario{CarbonPrice: 50, PhysicalSeverity: 0.01}
 	harsh := ClimateScenario{CarbonPrice: 150, PhysicalSeverity: 0.05}
 
-	lossMild := mild.ClimateVaR(h)
-	lossHarsh := harsh.ClimateVaR(h)
+	lossMild, _ := mild.ClimateVaR(h)
+	lossHarsh, _ := harsh.ClimateVaR(h)
 	if lossMild < 0 || lossHarsh < 0 {
 		t.Fatal("climate-VaR is a loss magnitude, must be >= 0")
 	}
@@ -32,12 +32,16 @@ func TestClimateVaRNonNegativeAndMonotone(t *testing.T) {
 	}
 	// Monotone in carbon price alone.
 	hi := ClimateScenario{CarbonPrice: 200, PhysicalSeverity: 0.01}
-	if hi.ClimateVaR(h) <= mild.ClimateVaR(h) {
+	hiLoss, _ := hi.ClimateVaR(h)
+	mildLoss, _ := mild.ClimateVaR(h)
+	if hiLoss <= mildLoss {
 		t.Fatal("raising the carbon price should raise the loss")
 	}
 	// Monotone in physical severity alone.
 	phys := ClimateScenario{CarbonPrice: 50, PhysicalSeverity: 0.10}
-	if phys.ClimateVaR(h) <= mild.ClimateVaR(h) {
+	physLoss, _ := phys.ClimateVaR(h)
+	mildLoss2, _ := mild.ClimateVaR(h)
+	if physLoss <= mildLoss2 {
 		t.Fatal("raising physical severity should raise the loss")
 	}
 }

@@ -37,15 +37,17 @@ func TestFileTCFD_LiveMetricsSignedComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Signature == "" || len(rep.LineItems) != 4 {
+	if rep.Signature == "" || len(rep.LineItems) != 6 {
 		t.Fatalf("TCFD disclosure malformed: sig=%q items=%d", rep.Signature, len(rep.LineItems))
 	}
 	waci, _ := rep.Lookup("TCFD_WACI")
-	if waci.Cmp(new(big.Rat).SetFloat64(WeightedAverageCarbonIntensity(in.Holdings))) != 0 {
+	wantWACI, _ := WeightedAverageCarbonIntensity(in.Holdings)
+	if waci.Cmp(new(big.Rat).SetFloat64(wantWACI)) != 0 {
 		t.Fatalf("filed WACI %v != computed", waci)
 	}
 	fe, _ := rep.Lookup("TCFD_FINANCED_EMISSIONS")
-	if fe.Cmp(new(big.Rat).SetFloat64(FinancedEmissions(in.Holdings))) != 0 {
+	wantFE, _ := FinancedEmissions(in.Holdings)
+	if fe.Cmp(new(big.Rat).SetFloat64(wantFE)) != 0 {
 		t.Fatalf("filed financed emissions %v != computed", fe)
 	}
 	// The book overshoots its 2030 glide-path target, so implied rise > 1.5°C.
@@ -64,8 +66,8 @@ func TestFileSFDR_DerivesFootprintAndFossilShare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rep.LineItems) != 3 {
-		t.Fatalf("SFDR disclosure should have 3 line items, got %d", len(rep.LineItems))
+	if len(rep.LineItems) != 5 {
+		t.Fatalf("SFDR disclosure should have 5 line items, got %d", len(rep.LineItems))
 	}
 	// One of two equal-value holdings is fossil-flagged ⇒ 50% exposure.
 	fossil, _ := rep.Lookup("SFDR_FOSSIL_FUEL_EXPOSURE")

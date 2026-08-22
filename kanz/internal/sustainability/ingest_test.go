@@ -61,7 +61,7 @@ func TestIngest_HoldingsJoinAndPCAFSkip(t *testing.T) {
 
 	// PCAF financed emissions: AAPL contributes (1e6/3e6)·5300 ≈ 1766.7; XOM
 	// (no EVIC) and TSLA (no data) are skipped — the coverage gap, not zeroed-in.
-	fe := FinancedEmissions(holdings)
+	fe, _ := FinancedEmissions(holdings)
 	want := (1_000_000.0 / 3_000_000.0) * (100 + 200 + 5000)
 	if fe < want-0.5 || fe > want+0.5 {
 		t.Errorf("financed emissions = %.2f, want ~%.2f (only AAPL counts)", fe, want)

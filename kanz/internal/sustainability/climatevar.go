@@ -66,13 +66,19 @@ func (s ClimateScenario) InstrumentShocks(holdings []Holding) map[string]float64
 // — a positive loss number (the value at risk to the climate scenario). It is
 // monotone non-decreasing in the carbon price and the physical severity (a harsher
 // scenario never lowers the loss), the property CLIMATE-01e pins.
-func (s ClimateScenario) ClimateVaR(holdings []Holding) float64 {
+//
+// IT RETURNS THE ATTRIBUTION COVERAGE (#618), and shares it with financed
+// emissions because it shares the datum: TransitionShock returns 0 for a holding
+// with no EVIC, so an uncovered position takes the physical channel alone and the
+// loss comes out LOW. Understating a value-at-risk is the direction that matters,
+// and it looked identical to a book with no transition exposure.
+func (s ClimateScenario) ClimateVaR(holdings []Holding) (float64, Coverage) {
 	var loss float64
 	for _, h := range holdings {
 		shock := s.InstrumentShock(h.Carbon)
 		loss += abs(h.MarketValue) * abs(shock)
 	}
-	return loss
+	return loss, AttributionCoverage(holdings)
 }
 
 // NGFS-style named scenarios — the climate counterpart of the GFC/COVID library.
