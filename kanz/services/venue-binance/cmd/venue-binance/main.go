@@ -78,6 +78,25 @@ var orderViewDurable = prometheus.NewGauge(prometheus.GaugeOpts{
 // result="error"}, which also moves on these: that one is per subject, so it
 // cannot say WHICH instruments went dark, and no rule under infra/ watches it.
 // See execution.MarkTickPublisher for the rest of the argument.
+// balanceAnnouncementsDropped counts cash-balance announcements this adapter
+// discarded, by reason (#622).
+//
+// A DROP HERE WAS THE ONE GENUINELY SILENT SWALLOW ON THE NON-OMS SURFACE: the
+// ack is right (nacking replays the same bad bytes forever) but the balance then
+// ages out to UNKNOWN and reconciliation skips the account, with nothing saying
+// why. "unknown" is a state somebody has to explain, and this is the first thing
+// they can look at.
+//
+// PACKAGE-LEVEL so its registration is testable. MustRegister runs inside serve()
+// after the exchange and broker are dialled, so nothing else in this package
+// reaches that line — and a bad name or a colliding label panics there and
+// crash-loops the pod with a config nobody changed.
+var balanceAnnouncementsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "kanz_venue_binance_balance_announcements_dropped_total",
+	Help: "Cash-balance announcements this adapter discarded, by reason. Non-zero means the " +
+		"expected balance is ageing out to UNKNOWN and reconciliation is skipping this account.",
+}, []string{"reason"})
+
 var markTickDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name:        "kanz_venue_mark_tick_dropped_total",
 	Help:        "reference-mark ticks the exchange answered that the bus did not accept, by MIC and instrument. Every increment is a price a downstream fold never saw; the adapter does not retry, so the next poll is the only retry.",
@@ -292,7 +311,19 @@ func serve(cfg config.Config) error {
 	// so one pod would reconcile against a balance the other did not have. A
 	// balance is replicated STATE, the same argument the OMS makes for its price
 	// spine and mandate registry.
+	// SEEDED AT ZERO before anything can drop (#622): an unseeded counter that
+	// never fires is indistinguishable from a counter nobody registered, so an
+	// operator cannot tell "no announcements lost" from "no metric".
+	for _, reason := range []string{balancerecon.DropUndecodable, balancerecon.DropOutOfDomain} {
+		balanceAnnouncementsDropped.WithLabelValues(reason)
+	}
+	obs.Registry.MustRegister(balanceAnnouncementsDropped)
+
 	expectedBalances := balancerecon.NewView(cfg.Account,
+		balancerecon.WithViewLogger(logger),
+		balancerecon.WithViewDropObserver(func(reason string) {
+			balanceAnnouncementsDropped.WithLabelValues(reason).Inc()
+		}),
 		balancerecon.WithViewOnStale(func(age time.Duration) {
 			logger.Warn("venue-binance: expected balances are too old to reconcile against — "+
 				"reconciliation is SKIPPING assets rather than reporting false breaks",

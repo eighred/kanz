@@ -59,6 +59,9 @@ type Folder struct {
 	// reports at startup rather than leaving to be discovered.
 	announcer *Announcer
 	logger    *slog.Logger
+	// onAnnounceFailed counts announcements that never left this process. See
+	// WithAnnounceFailureObserver for why a log line alone was not enough.
+	onAnnounceFailed func()
 }
 
 // WithAnnouncer makes the folder publish a portfolio's cash level after each
@@ -79,6 +82,24 @@ func WithLogger(l *slog.Logger) FolderOption {
 // FolderOption customizes a Folder.
 type FolderOption func(*Folder)
 
+// WithAnnounceFailureObserver counts cash-balance announcements that never left
+// this process.
+//
+// THE SWALLOW IS ARGUED AND THE ARGUMENT HOLDS (see announce): the ledger write
+// is the book of record and nacking would turn a broker blip into a stalled
+// fold. That comment ends "It is LOUD instead" — and until now loud meant a log
+// line, so the claim rested on somebody scraping logs (#622).
+//
+// It matters because the downstream fallback is a REFUSAL: a consumer's
+// staleness bound ages the balance out to UNKNOWN and the buying-power rule
+// fails closed on it. So the visible symptom of lost announcements is orders
+// being denied, and an operator should not have to work backwards from that.
+//
+// Nil ⇒ not counted; the failure is still logged.
+func WithAnnounceFailureObserver(fn func()) FolderOption {
+	return func(f *Folder) { f.onAnnounceFailed = fn }
+}
+
 // announce publishes portfolioID's new cash level, and NEVER fails the fold.
 //
 // The ledger write has already committed and is the book of record; this
@@ -95,6 +116,9 @@ func (f *Folder) announce(ctx context.Context, portfolioID string) {
 		return
 	}
 	if err := f.announcer.Announce(ctx, portfolioID); err != nil {
+		if f.onAnnounceFailed != nil {
+			f.onAnnounceFailed()
+		}
 		f.logger.ErrorContext(ctx, "accounting: cash balance announcement failed — the ledger is "+
 			"correct and downstream consumers will age this portfolio's balance out to UNKNOWN, "+
 			"which refuses orders under a buying-power mandate",

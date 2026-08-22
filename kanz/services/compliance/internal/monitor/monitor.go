@@ -42,6 +42,8 @@ type bookKey struct{ tenant, portfolio string }
 
 // Monitor re-evaluates portfolios on every position change. Goroutine-safe.
 type Monitor struct {
+	onDroppedRecord func()
+
 	// warnedUngoverned names each ungoverned (tenant, portfolio) once (guarded by
 	// mu, which already protects the books below).
 	warnedUngoverned map[bookKey]bool
@@ -61,14 +63,34 @@ type Monitor struct {
 
 // NewMonitor wires the monitor. A nil engine defaults to comp.NewEngine(nil); a
 // nil recorder disables decision logging.
-func NewMonitor(engine *comp.Engine, mandates comp.MandateSource, classifier comp.Classifier, emitter *Emitter, recorder comp.DecisionRecorder, logger *slog.Logger) *Monitor {
+// MonitorOption customizes a Monitor.
+type MonitorOption func(*Monitor)
+
+// WithDroppedRecordObserver counts post-trade decision records that never
+// reached the audit trail.
+//
+// BEST-EFFORT IS RIGHT AND UNCOUNTED WAS NOT (#622). audit.go argues the
+// swallow — "an audit-sink outage must not become a trading outage" — and it is
+// correct. What it left behind was a log line, and this failure has a shape that
+// makes that insufficient: EventTime is stamped from Result.GetEvaluatedAt() and
+// the producer REFUSES a zero, so an upstream that forgets to stamp it makes
+// EVERY record fail rather than some. A sink failing every time looks exactly
+// like a sink that is quiet, which is #245 — the audit trail empty while trading
+// continues and every probe green.
+//
+// Nil ⇒ not counted; the recorder still logs each failure.
+func WithDroppedRecordObserver(fn func()) MonitorOption {
+	return func(m *Monitor) { m.onDroppedRecord = fn }
+}
+
+func NewMonitor(engine *comp.Engine, mandates comp.MandateSource, classifier comp.Classifier, emitter *Emitter, recorder comp.DecisionRecorder, logger *slog.Logger, opts ...MonitorOption) *Monitor {
 	if engine == nil {
 		engine = comp.NewEngine(nil)
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Monitor{
+	m := &Monitor{
 		engine:           engine,
 		mandates:         mandates,
 		classifier:       classifier,
@@ -80,6 +102,10 @@ func NewMonitor(engine *comp.Engine, mandates comp.MandateSource, classifier com
 		lastStatus:       make(map[bookKey]compliancepb.ComplianceStatus),
 		warnedUngoverned: make(map[bookKey]bool),
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Handle is the bus.EventHandler for position-changed FACTs. A malformed payload
@@ -173,13 +199,20 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 	}
 
 	if m.recorder != nil {
-		_ = m.recorder.Record(ctx, comp.DecisionRecord{
+		// COUNTED, NOT IGNORED (#622). The error is still not returned — an
+		// audit-sink outage must not become a trading outage — but a decision
+		// that never reached the trail is now visible as a number rather than
+		// only as a log line somebody has to be looking for.
+		recordErr := m.recorder.Record(ctx, comp.DecisionRecord{
 			Phase:   comp.PhasePostTrade,
 			Result:  res,
 			Allowed: false,
 			Issuer:  "compliance:monitor",
 			Trigger: trigger.String(),
 		})
+		if recordErr != nil && m.onDroppedRecord != nil {
+			m.onDroppedRecord()
+		}
 	}
 	if m.emitter != nil {
 		if err := m.emitter.EmitBreach(ctx, res, trigger, asOf); err != nil {

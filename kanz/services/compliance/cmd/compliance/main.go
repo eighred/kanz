@@ -34,6 +34,23 @@ import (
 	"github.com/eighred/kanz/services/compliance/internal/store"
 )
 
+// A POST-TRADE BREACH RECORD THAT NEVER REACHED THE AUDIT TRAIL (#622).
+//
+// The monitor writes it best-effort and that is right — an audit-sink outage
+// must not become a trading outage. What was missing is this number, and the
+// failure has a shape that makes a log line insufficient: the record's
+// EventTime comes from the decision's evaluated_at and the producer refuses a
+// zero, so an upstream that forgets to stamp it makes EVERY record fail. A
+// sink failing every time looks exactly like a sink that is quiet (#245) —
+// the audit trail empty while trading continues and every probe green.
+//
+// SEEDED AT ZERO so "no records lost" and "no metric" are different answers.
+var breachRecordsLost = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "kanz_compliance_breach_records_lost_total",
+	Help: "Post-trade breach decisions that could not be written to the audit trail. Non-zero " +
+		"means the compliance record is incomplete while monitoring continues.",
+})
+
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
 	// run() registers fires before this line. The non-zero code is what makes a
@@ -220,7 +237,13 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// and a SECTOR/ISSUER/ASSET_CLASS rule the monitor cannot resolve now emits a
 	// violation naming that, rather than re-evaluating a live book and reporting
 	// it clean (#640).
-	mon := monitor.NewMonitor(comp.NewEngine(nil), mandateReg, nil /*classifier*/, breachEmitter, recorder, logger)
+	// Registered before anything can drop: a plain Counter exports at zero the
+	// moment it is registered, which is what makes "none lost" a readable answer
+	// rather than a missing series (#622).
+	obs.Registry.MustRegister(breachRecordsLost)
+
+	mon := monitor.NewMonitor(comp.NewEngine(nil), mandateReg, nil /*classifier*/, breachEmitter, recorder, logger,
+		monitor.WithDroppedRecordObserver(func() { breachRecordsLost.Inc() }))
 
 	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
