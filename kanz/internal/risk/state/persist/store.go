@@ -80,10 +80,22 @@ type StateStore interface {
 	// ErrNotFound when none has been saved.
 	Load(ctx context.Context, id v1.PortfolioID) (PortfolioRecord, error)
 
-	// LoadAll returns every persisted portfolio record. This is the
-	// bootstrap read (PERS-01d) that rehydrates engine state before the
-	// log replay begins; order is unspecified.
-	LoadAll(ctx context.Context) ([]PortfolioRecord, error)
+	// LoadEach streams every persisted portfolio record to fn, one at a
+	// time, in ascending portfolio-id order. This is the bootstrap read
+	// (PERS-01d) that rehydrates engine state before the log replay
+	// begins. It returns the first error fn returns, and stops.
+	//
+	// IT IS A CALLBACK AND NOT A SLICE (#674). The previous shape,
+	// LoadAll(ctx) ([]PortfolioRecord, error), could only be implemented
+	// by materialising the whole estate: peak memory and startup time
+	// both scaled with total portfolio count, which makes recovery time a
+	// function of how large the book has grown. Handing records over one
+	// at a time is what makes a bounded implementation possible, and
+	// removing the slice-returning shape is what stops a well-meaning
+	// caller reintroducing the coupling.
+	//
+	// An implementation MUST NOT hold every record to satisfy this.
+	LoadEach(ctx context.Context, fn func(PortfolioRecord) error) error
 
 	// Ping checks store reachability for the readiness probe.
 	Ping(ctx context.Context) error

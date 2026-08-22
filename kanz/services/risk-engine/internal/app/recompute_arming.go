@@ -20,7 +20,7 @@ import (
 // emitted. If the process crashes in that window, the bus event is already
 // acked — nothing redelivers it — and the debounced recompute that would
 // have produced the FACT never ran. Bootstrap's restore+replay repopulates
-// the STATE (via LoadAll + the durable log), so the next live event for that
+// the STATE (via LoadEach + the durable log), so the next live event for that
 // portfolio will recompute correctly, but until then the pushed FACT for the
 // change that was in flight at crash time is simply missing.
 //

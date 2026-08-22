@@ -252,7 +252,7 @@ func TestPostgres_ResaveIdempotent(t *testing.T) {
 	}
 }
 
-func TestPostgres_LoadAll(t *testing.T) {
+func TestPostgres_LoadEach(t *testing.T) {
 	store := NewPostgres(newPool(t))
 	ctx := context.Background()
 	a := fullRecord()
@@ -267,19 +267,22 @@ func TestPostgres_LoadAll(t *testing.T) {
 		t.Fatalf("Save b: %v", err)
 	}
 
-	all, err := store.LoadAll(ctx)
-	if err != nil {
-		t.Fatalf("LoadAll: %v", err)
+	var all []PortfolioRecord
+	if err := store.LoadEach(ctx, func(rec PortfolioRecord) error {
+		all = append(all, rec)
+		return nil
+	}); err != nil {
+		t.Fatalf("LoadEach: %v", err)
 	}
 	if len(all) != 2 {
-		t.Fatalf("LoadAll = %d want 2", len(all))
+		t.Fatalf("LoadEach yielded %d want 2", len(all))
 	}
 	byID := map[v1.PortfolioID]PortfolioRecord{}
 	for _, r := range all {
 		byID[r.ID] = r
 	}
 	if len(byID["PORT-1"].Positions) != 2 || len(byID["PORT-2"].Positions) != 1 {
-		t.Errorf("LoadAll grouped positions wrong: %d / %d", len(byID["PORT-1"].Positions), len(byID["PORT-2"].Positions))
+		t.Errorf("LoadEach grouped positions wrong: %d / %d", len(byID["PORT-1"].Positions), len(byID["PORT-2"].Positions))
 	}
 	if len(byID["PORT-2"].AppliedKeys) != 1 {
 		t.Errorf("PORT-2 keys = %v", byID["PORT-2"].AppliedKeys)
@@ -347,8 +350,13 @@ func TestPostgres_RLSTenantIsolation(t *testing.T) {
 	if _, err := globex.Load(ctx, rec.ID); err != ErrNotFound {
 		t.Fatalf("globex Load of acme portfolio = %v want ErrNotFound", err)
 	}
-	if all, err := globex.LoadAll(ctx); err != nil || len(all) != 0 {
-		t.Fatalf("globex LoadAll = %v (err %v) want empty", all, err)
+	var crossTenant int
+	if err := globex.LoadEach(ctx, func(PortfolioRecord) error {
+		crossTenant++
+		return nil
+	}); err != nil || crossTenant != 0 {
+		t.Fatalf("globex LoadEach yielded %d record(s) (err %v) want none — RLS must scope the "+
+			"paged read exactly as it scoped the unbounded one", crossTenant, err)
 	}
 
 	// acme sees its own, stamped with its tenant.
@@ -369,7 +377,11 @@ func TestPostgres_RLSTenantIsolation(t *testing.T) {
 		t.Fatalf("globex Load = %+v (err %v) want tenant globex", gg, err)
 	}
 	// acme's row is untouched by globex's write.
-	if all, err := acme.LoadAll(ctx); err != nil || len(all) != 1 {
-		t.Fatalf("acme LoadAll = %v (err %v) want exactly its own row", all, err)
+	var own int
+	if err := acme.LoadEach(ctx, func(PortfolioRecord) error {
+		own++
+		return nil
+	}); err != nil || own != 1 {
+		t.Fatalf("acme LoadEach yielded %d record(s) (err %v) want exactly its own row", own, err)
 	}
 }

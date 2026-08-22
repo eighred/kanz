@@ -99,7 +99,7 @@ func TestRuntimeAcquireLoadsFromPostgresAndSurvivesHandoff(t *testing.T) {
 	}
 
 	// A replica that has never seen this portfolio. It boots with nothing —
-	// no LoadAll, no Restore — which is exactly the mid-life ownership gain.
+	// no LoadEach, no Restore — which is exactly the mid-life ownership gain.
 	replicaA := state.NewStore(state.WithRuntimeOwnership(sink))
 
 	// BEFORE THE ACQUIRE IT MUST REFUSE. Not an empty book, not a zero.

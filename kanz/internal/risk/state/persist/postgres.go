@@ -275,15 +275,57 @@ func (p *Postgres) loadAppliedKeys(ctx context.Context, id v1.PortfolioID) ([]st
 	return out, rows.Err()
 }
 
-// LoadAll returns every persisted record — the bootstrap read (PERS-01d).
-// Three table scans grouped in memory rather than N+1 per-portfolio reads.
-func (p *Postgres) LoadAll(ctx context.Context) ([]PortfolioRecord, error) {
+// loadPageSize is how many portfolios one bootstrap page carries.
+//
+// IT TRADES ROUND TRIPS AGAINST PEAK MEMORY, and the trade is worth stating
+// because this is the knob somebody will reach for.
+//
+// Peak is pageSize x record size, and a record is dominated by its positions. At
+// 256 a page is a few megabytes even for a book carrying a hundred positions per
+// portfolio, which is small enough to be uninteresting at boot. Round trips are
+// 3 per page plus one for the empty page that ends the walk: 4 queries for an
+// estate under 256 portfolios (against 3 before), and roughly 1,200 for 100,000
+// portfolios — one or two seconds, once, on the slowest path this process has.
+//
+// Raising it to 1024 would cut those round trips fourfold and take peak into the
+// tens of megabytes on a position-heavy book. That is the wrong direction for a
+// recovery path: the seconds are paid once per boot and are visible, while the
+// memory is what turned recovery time into a function of estate size in the first
+// place (#674).
+//
+// It is a CONST. The page size must not become a runtime-mutable knob —
+// paginateRecords takes it as a parameter so tests can page at 1 without one,
+// which is the shape that keeps a test-only var off a production struct.
+const loadPageSize = 256
+
+// LoadEach streams every persisted record to fn, one at a time — the bootstrap
+// read (PERS-01d).
+//
+// IT REPLACED LoadAll, WHICH RETURNED THE WHOLE ESTATE AS ONE SLICE (#674). That
+// read `FROM positions` and `FROM applied_keys` with no WHERE and no LIMIT, so
+// startup time and peak memory both scaled with total estate size — recovery
+// time as a function of how successful the platform is. The signature change is
+// the point: a caller can no longer receive every record at once, so the defect
+// cannot be reintroduced by a caller that means well.
+//
+// Each PAGE still costs three queries rather than N+1 per portfolio, which is
+// what the original grouped-scan shape was protecting and is worth keeping.
+func (p *Postgres) LoadEach(ctx context.Context, fn func(PortfolioRecord) error) error {
+	return paginateRecords(ctx, p.loadPage, loadPageSize, fn)
+}
+
+// loadPage returns up to limit records whose portfolio_id sorts after `after`,
+// with their positions and applied keys attached.
+func (p *Postgres) loadPage(ctx context.Context, after v1.PortfolioID, limit int) ([]PortfolioRecord, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT tenant_id, portfolio_id, display_name, base_currency, cash_balance,
 		       total_market_value, position_count, as_of,
 		       log_topic, log_partition, log_offset
 		FROM portfolios
-	`)
+		WHERE portfolio_id > $1
+		ORDER BY portfolio_id
+		LIMIT $2
+	`, string(after), limit)
 	if err != nil {
 		return nil, fmt.Errorf("query portfolios: %w", err)
 	}
@@ -328,10 +370,19 @@ func (p *Postgres) LoadAll(ctx context.Context) ([]PortfolioRecord, error) {
 	}
 	rows.Close()
 
-	if err := p.scanAllPositions(ctx, byID); err != nil {
+	if len(order) == 0 {
+		return nil, nil
+	}
+	// The page's ids, passed to both child reads so each is bounded by the page
+	// rather than by the estate.
+	pageIDs := make([]string, 0, len(order))
+	for _, id := range order {
+		pageIDs = append(pageIDs, string(id))
+	}
+	if err := p.scanPositions(ctx, pageIDs, byID); err != nil {
 		return nil, err
 	}
-	if err := p.scanAllAppliedKeys(ctx, byID); err != nil {
+	if err := p.scanAppliedKeys(ctx, pageIDs, byID); err != nil {
 		return nil, err
 	}
 
@@ -342,12 +393,19 @@ func (p *Postgres) LoadAll(ctx context.Context) ([]PortfolioRecord, error) {
 	return out, nil
 }
 
-func (p *Postgres) scanAllPositions(ctx context.Context, byID map[v1.PortfolioID]*PortfolioRecord) error {
+// scanPositions reads the positions of ONE PAGE of portfolios.
+//
+// The `= ANY($1)` is what bounds it. It used to be an unbounded `FROM positions`
+// scan, which on a sharded replica decoded every other replica's positions too,
+// only for bootstrap to discard them as ErrNotOwned (#674).
+func (p *Postgres) scanPositions(ctx context.Context, pageIDs []string, byID map[v1.PortfolioID]*PortfolioRecord) error {
 	rows, err := p.pool.Query(ctx, `
 		SELECT portfolio_id, instrument_id, quantity, average_price, market_value,
 		       market_value_uncertainty, realized_pnl, unrealized_pnl, as_of
-		FROM positions ORDER BY portfolio_id, instrument_id
-	`)
+		FROM positions
+		WHERE portfolio_id = ANY($1)
+		ORDER BY portfolio_id, instrument_id
+	`, pageIDs)
 	if err != nil {
 		return fmt.Errorf("query positions: %w", err)
 	}
@@ -389,11 +447,14 @@ func (p *Postgres) scanAllPositions(ctx context.Context, byID map[v1.PortfolioID
 	return rows.Err()
 }
 
-func (p *Postgres) scanAllAppliedKeys(ctx context.Context, byID map[v1.PortfolioID]*PortfolioRecord) error {
+// scanAppliedKeys reads the applied keys of ONE PAGE of portfolios. Bounded for
+// scanPositions' reason (#674).
+func (p *Postgres) scanAppliedKeys(ctx context.Context, pageIDs []string, byID map[v1.PortfolioID]*PortfolioRecord) error {
 	rows, err := p.pool.Query(ctx, `
 		SELECT portfolio_id, idempotency_key FROM applied_keys
+		WHERE portfolio_id = ANY($1)
 		ORDER BY portfolio_id, applied_at, idempotency_key
-	`)
+	`, pageIDs)
 	if err != nil {
 		return fmt.Errorf("query applied_keys: %w", err)
 	}

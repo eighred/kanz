@@ -102,7 +102,7 @@ func WithRuntimeOwnership(loader Loader) Option {
 // of this Store ignored it, and each of them is a way a portfolio this replica
 // does not own gets into its memory and back out to the estate:
 //
-//   - BOOT. Bootstrap.restore does LoadAll and Restores every record in the
+//   - BOOT. Bootstrap.restore streams LoadEach and Restores every record in the
 //     database, unfiltered. A sharded replica therefore starts holding an
 //     in-memory copy of EVERY portfolio, most of them somebody else's.
 //   - THE COPY THEN FREEZES. ShardFilter drops the live events for those, so

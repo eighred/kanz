@@ -126,16 +126,17 @@ func (b *Bootstrap) Run(ctx context.Context) error {
 // restore loads every durable record into the store and returns the per
 // (topic, partition) resume offsets derived from the snapshots' LogPositions.
 func (b *Bootstrap) restore(ctx context.Context) (map[resumeKey]int64, error) {
-	records, err := b.sink.LoadAll(ctx)
-	if err != nil {
-		return nil, err
-	}
 	resume := make(map[resumeKey]int64)
 	restored, foreign := 0, 0
-	for _, rec := range records {
+	// STREAMED, NOT MATERIALISED (#674). LoadEach hands over one record at a
+	// time; nothing here accumulates them, so peak memory during restore is one
+	// page of portfolios rather than the whole estate. What this function DOES
+	// retain is `resume`, which is keyed by (topic, partition) — bounded by the
+	// log's partition count, not by how many portfolios exist.
+	err := b.sink.LoadEach(ctx, func(rec persist.PortfolioRecord) error {
 		// A FOREIGN RECORD IS SKIPPED; ANY OTHER REFUSAL ABORTS BOOT (#110).
 		//
-		// LoadAll returns every portfolio in the tenant's database, which on a
+		// LoadEach streams every portfolio in the tenant's database, which on a
 		// SHARDED replica is mostly other replicas' portfolios. Restoring those
 		// used to be silent and was the origin of the corruption chain (see
 		// state.WithShardOwnership): the copy freezes, because ShardFilter drops
@@ -151,9 +152,9 @@ func (b *Bootstrap) restore(ctx context.Context) (map[resumeKey]int64, error) {
 		if err := b.store.Restore(rec.ToPortfolio(), rec.AppliedKeys); err != nil {
 			if errors.Is(err, state.ErrNotOwned) {
 				foreign++
-				continue
+				return nil
 			}
-			return nil, fmt.Errorf("restore %q: %w", rec.ID, err)
+			return fmt.Errorf("restore %q: %w", rec.ID, err)
 		}
 		restored++
 		if lp := rec.LogPosition; lp != nil && lp.Topic != "" {
@@ -163,6 +164,10 @@ func (b *Bootstrap) restore(ctx context.Context) (map[resumeKey]int64, error) {
 				resume[k] = start
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	b.foreign = foreign
 	// The two counts are reported separately and always, because "this replica
