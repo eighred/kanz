@@ -55,12 +55,16 @@ func TestBuildReportCompletenessAndSigning(t *testing.T) {
 		"TCFD_FINANCED_EMISSIONS": big.NewRat(115, 1),
 		"TCFD_IMPLIED_TEMP_RISE":  big.NewRat(12, 5), // 2.4, exactly
 		"TCFD_CLIMATE_VAR":        big.NewRat(50000, 1),
+		// The coverage items are templated too (#618), so a hand-built value map
+		// must carry them or the completeness gate refuses — which is the point.
+		tcfdIntensityCoverage:   big.NewRat(1, 1),
+		tcfdAttributionCoverage: big.NewRat(1, 1),
 	}
 	r, err := BuildReport(TCFD, asOf, values, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.LineItems) != 4 || r.Signature == "" {
+	if len(r.LineItems) != 6 || r.Signature == "" {
 		t.Fatalf("report incomplete: items=%d sig=%q", len(r.LineItems), r.Signature)
 	}
 	if v, ok := r.Lookup("TCFD_WACI"); !ok || v.Cmp(dec.Rat("92")) != 0 {
@@ -80,15 +84,31 @@ func TestReportSignatureDeterministicAndTamperEvident(t *testing.T) {
 		"SFDR_GHG_INTENSITY":        dec.Rat("92"),
 		"SFDR_CARBON_FOOTPRINT":     dec.Rat("115"),
 		"SFDR_FOSSIL_FUEL_EXPOSURE": dec.Rat("0.05"),
+		sfdrIntensityCoverage:       dec.Rat("1"),
+		sfdrAttributionCoverage:     dec.Rat("1"),
 	}
-	a, _ := BuildReport(SFDR, asOf, values, nil)
-	b, _ := BuildReport(SFDR, asOf, values, nil)
+	// THE ERRORS ARE CHECKED. They were discarded here, and when #618 added two
+	// templated items this fixture did not carry, both reports came back as the
+	// zero Report with an empty signature — and "" == "" made the TAMPER-EVIDENCE
+	// assertion pass a report that had never been built. A test that ignores the
+	// error of the thing it is testing can only fail for the wrong reason.
+	a, err := BuildReport(SFDR, asOf, values, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := BuildReport(SFDR, asOf, values, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if a.Signature != b.Signature {
 		t.Fatal("signature should be deterministic for the same content")
 	}
 	// Tamper: change a value ⇒ a different signature.
 	values["SFDR_CARBON_FOOTPRINT"] = dec.Rat("999")
-	c, _ := BuildReport(SFDR, asOf, values, nil)
+	c, err := BuildReport(SFDR, asOf, values, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if c.Signature == a.Signature {
 		t.Fatal("tampered report should produce a different signature")
 	}
@@ -150,7 +170,12 @@ func TestNonFiniteMetricIsRefusedNotSigned(t *testing.T) {
 			GlidePath: GlidePath{BaseYear: 2020, TargetYear: 2050, BaseEmissions: 1000},
 			Year:      2035,
 		}
-		if v := in.TCFDValues()["TCFD_WACI"]; v != nil {
+		vals, err := in.TCFDValues()
+		if err != nil {
+			t.Fatalf("premise broken: this fixture must reach BuildReport's non-finite refusal, "+
+				"not the coverage refusal ahead of it: %v", err)
+		}
+		if v := vals["TCFD_WACI"]; v != nil {
 			t.Fatalf("premise broken: a NaN market value gave a finite WACI %v — reroute this fixture", v)
 		}
 		rep, err := FileTCFD(in, asOf, nil)

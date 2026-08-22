@@ -86,17 +86,27 @@ const (
 
 // templates lists the required line items per framework — a report is COMPLETE
 // only when every code has a value (the REG-01 completeness discipline).
+// THE COVERAGE ITEMS ARE PART OF THE TEMPLATE (#618), which is what makes them
+// load-bearing rather than decorative: Build refuses a report with a templated
+// item missing, and Canonical signs every item it carries. So a WACI cannot be
+// filed without the share of the book behind it, and the signature commits to
+// both. A reader who re-canonicalizes the served body gets the coverage back as
+// part of what was attested.
 var templates = map[Framework][]filing.Field{
 	TCFD: {
 		{Code: "TCFD_WACI", Label: "Weighted-average carbon intensity"},
 		{Code: "TCFD_FINANCED_EMISSIONS", Label: "Financed emissions (PCAF)"},
 		{Code: "TCFD_IMPLIED_TEMP_RISE", Label: "Implied temperature rise"},
 		{Code: "TCFD_CLIMATE_VAR", Label: "Climate value-at-risk"},
+		{Code: tcfdIntensityCoverage, Label: "Share of NAV with issuer revenue data (WACI basis)"},
+		{Code: tcfdAttributionCoverage, Label: "Share of NAV with issuer EVIC data (emissions attribution basis)"},
 	},
 	SFDR: {
 		{Code: "SFDR_GHG_INTENSITY", Label: "GHG intensity of investments"},
 		{Code: "SFDR_CARBON_FOOTPRINT", Label: "Carbon footprint"},
 		{Code: "SFDR_FOSSIL_FUEL_EXPOSURE", Label: "Exposure to fossil-fuel companies"},
+		{Code: sfdrIntensityCoverage, Label: "Share of NAV with issuer revenue data (GHG intensity basis)"},
+		{Code: sfdrAttributionCoverage, Label: "Share of NAV with issuer EVIC data (carbon footprint basis)"},
 	},
 }
 
