@@ -1192,3 +1192,118 @@ tests:
       - eval_time: 30m
         alertname: BusAsyncConsumeErrors
         exp_alerts: []
+
+  # ===========================================================================
+  # AuditChainTampered — a verification that found the chain broken (#665).
+  # ===========================================================================
+  # One broken outcome is the whole condition: the verifier reached a verdict
+  # over the entire log, so there is no rate to wait for.
+  - interval: 1m
+    name: a scheduled verification found the hash chain broken
+    input_series:
+      - series: 'kanz_audit_chain_verifications_total{outcome="broken", pod="audit-0"}'
+        values: '0+0x30 1x60'
+      - series: 'kanz_audit_chain_verifications_total{outcome="intact", pod="audit-0"}'
+        values: '0+1x30 30x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: AuditChainTampered
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              outcome: broken
+              pod: audit-0
+            exp_annotations:
+              summary: "The audit hash chain DID NOT VERIFY on audit-0"
+              description: "A scheduled verification found the AUDIT-01b hash chain broken: a record in the compliance log does not hash to its successor. Every attestation derived from this log — SOC2 evidence, regulator reports, the /v1/audit/verify endpoint — is in question until this is explained. The pod's log carries the index of the first break. This is either tampering with the WORM store or a defect in the writer, and both are incidents."
+
+  # AND IT STAYS QUIET ON A HEALTHY CHAIN. Silence here is a distinct claim: a
+  # rule that fired on intact verifications would be silenced immediately.
+  - interval: 1m
+    name: a chain verifying cleanly does not page
+    input_series:
+      - series: 'kanz_audit_chain_verifications_total{outcome="intact", pod="audit-0"}'
+        values: '0+1x120'
+      - series: 'kanz_audit_chain_verifications_total{outcome="broken", pod="audit-0"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: AuditChainTampered
+        exp_alerts: []
+
+  # ===========================================================================
+  # AuditChainNotBeingVerified — the rule that would have caught #665 itself.
+  # ===========================================================================
+  # THE SEEDED ZERO IS THE CASE THAT MATTERS. A pod that has never completed a
+  # verification exports 0, and time() - 0 is enormous, so this fires rather than
+  # staying silent for want of a series. That is the whole reason the gauge is
+  # seeded at 0 instead of at startup time.
+  - interval: 1m
+    name: a pod that has never verified the chain
+    input_series:
+      - series: 'kanz_audit_chain_last_verified_timestamp_seconds{pod="audit-0"}'
+        values: '0x240'
+    alert_rule_test:
+      # 200m, NOT 30m. promtool's clock starts at the epoch, so time() at
+      # eval_time T is simply T in seconds — at 30m that is 1800, which is under
+      # the 10800s threshold and the rule correctly stays silent. The condition
+      # becomes true at 180m and `for: 10m` fires it from 190m.
+      - eval_time: 200m
+        alertname: AuditChainNotBeingVerified
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              pod: audit-0
+            exp_annotations:
+              summary: "No successful audit-chain verification on audit-0 for over three hours"
+              description: "The scheduled tamper check has not completed successfully in three hours — three consecutive missed runs at the default hourly interval. A value of exactly 0 means this pod has never completed one at all. The chain is not known to be intact OR broken: nothing is checking it, which is the state this alert exists to end (#665). Check whether the audit pod is healthy, whether its store is reachable, and whether AUDIT_VERIFY_INTERVAL was set longer than this window."
+
+  # A VERIFIER THAT KEEPS UP DOES NOT PAGE. The timestamp tracks evaluation time,
+  # so the age stays near zero.
+  - interval: 1m
+    name: a verifier keeping to its interval
+    input_series:
+      # Starts at the epoch offset promtool evaluates from and advances 60 per
+      # minute, i.e. keeps pace with wall clock.
+      - series: 'kanz_audit_chain_last_verified_timestamp_seconds{pod="audit-0"}'
+        values: '0+60x240'
+    alert_rule_test:
+      - eval_time: 200m
+        alertname: AuditChainNotBeingVerified
+        exp_alerts: []
+
+  # ===========================================================================
+  # AuditChainVerificationFailing — the verifier ran and could not read the log.
+  # ===========================================================================
+  - interval: 1m
+    name: verification cannot read the audit store
+    input_series:
+      - series: 'kanz_audit_chain_verifications_total{outcome="error", pod="audit-0"}'
+        values: '0+0x30 1+1x180'
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: AuditChainVerificationFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              outcome: error
+              pod: audit-0
+            exp_annotations:
+              summary: "Audit-chain verification cannot read the log on audit-0"
+              description: "The scheduled tamper check ran and could not read the audit store, so NOTHING was verified — this is not a pass and not a tamper. report.Verify is a whole-log scan holding one pool connection, so this usually means the store is unreachable, the pool is exhausted, or the scan is timing out on a log that has outgrown it. While this persists the chain's integrity is unknown, and AuditChainNotBeingVerified will follow if it continues."
+
+  # A SINGLE FAILED SCAN DOES NOT PAGE. report.Verify holds a pool connection for
+  # a whole-log read, so one failure under load is expected; `for: 1h` is what
+  # keeps that from being a page.
+  - interval: 1m
+    name: one transient read failure during a whole-log scan
+    input_series:
+      - series: 'kanz_audit_chain_verifications_total{outcome="error", pod="audit-0"}'
+        values: '0+0x30 1x30'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: AuditChainVerificationFailing
+        exp_alerts: []

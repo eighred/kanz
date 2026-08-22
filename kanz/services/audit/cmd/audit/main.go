@@ -31,6 +31,7 @@ import (
 	"github.com/eighred/kanz/services/audit/internal/audit"
 	"github.com/eighred/kanz/services/audit/internal/config"
 	"github.com/eighred/kanz/services/audit/internal/server"
+	"github.com/eighred/kanz/services/audit/internal/verify"
 )
 
 // auditLogDurable reports whether the tamper-evidence log survives a restart:
@@ -47,6 +48,48 @@ import (
 var auditLogDurable = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "kanz_audit_log_durable",
 	Help: "1 if the audit log is backed by the WORM Postgres store (survives a restart), 0 if in-memory.",
+})
+
+// THE SCHEDULED TAMPER CHECK'S OUTPUT (#665). Three series, and each answers a
+// question the others cannot.
+//
+// chainVerifications COUNTS BY OUTCOME, and the three outcomes are separate for
+// the reason verify.Outcome exists: an unreadable store is neither a pass nor a
+// tamper, and reporting it as either is worse than reporting that nothing was
+// checked. All three are SEEDED at startup — an unseeded CounterVec exports no
+// series until its first increment, so "no tampers" and "no metric" would be the
+// same empty answer on a dashboard, which is the defect this whole issue is.
+var chainVerifications = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "kanz_audit_chain_verifications_total",
+	Help: "Scheduled hash-chain verifications by outcome: intact, broken (a tamper), or error " +
+		"(the log could not be read, so nothing was verified).",
+}, []string{"outcome"})
+
+// chainLastVerified IS THE ONE THAT CATCHES A DEAD VERIFIER, and it is why an
+// in-process scheduler is sufficient here.
+//
+// It is SEEDED AT ZERO, which is not a "confident zero" — it is unambiguous.
+// Zero means the epoch, so `time() - kanz_audit_chain_last_verified_timestamp_seconds`
+// is enormous and the staleness alert fires on a pod that has never completed a
+// verification, exactly as it fires on one that has stopped. A gauge seeded with
+// time.Now() at startup would be the confident zero: it would claim a
+// verification that had not happened.
+//
+// IT MOVES ONLY ON A SUCCESSFUL VERIFICATION. A broken chain or an unreadable
+// store must not refresh it, or a chain that fails every hour would look
+// freshly checked forever.
+var chainLastVerified = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "kanz_audit_chain_last_verified_timestamp_seconds",
+	Help: "Unix time of the last verification that found the chain INTACT. 0 means this pod has " +
+		"never completed one; its age is what makes a stopped or never-started verifier alertable.",
+})
+
+// chainRecords is the attested length of the log — context for whoever reads an
+// alert, and the figure that makes a chain that stopped GROWING visible beside
+// one that stopped verifying.
+var chainRecords = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "kanz_audit_chain_records",
+	Help: "Records covered by the last completed verification.",
 })
 
 func main() {
@@ -94,7 +137,16 @@ func run() int {
 	// Registered before openStore so the posture is on /metrics from the first
 	// scrape, including the degraded one. A gauge nobody registered is a Set
 	// call into the void — exactly the silence this whole branch is about.
-	obs.Registry.MustRegister(auditLogDurable)
+	obs.Registry.MustRegister(auditLogDurable, chainVerifications, chainLastVerified, chainRecords)
+	// SEEDED BEFORE THE FIRST SCRAPE, all four. A series that appears only on its
+	// first event gives a dashboard nothing to draw and an alert nothing to
+	// evaluate until the thing it warns about has already happened — which reads
+	// exactly like a metric nobody wired (#622, #665).
+	for _, outcome := range []verify.Outcome{verify.OutcomeIntact, verify.OutcomeBroken, verify.OutcomeError} {
+		chainVerifications.WithLabelValues(string(outcome))
+	}
+	chainLastVerified.Set(0)
+	chainRecords.Set(0)
 
 	store, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
@@ -158,6 +210,37 @@ func run() int {
 			"addr", cfg.Listen)
 		return 2
 	}
+
+	// THE SCHEDULED TAMPER CHECK (#665). Started here, above both run modes, so a
+	// pod serving the read API only still verifies — the chain is the thing being
+	// attested and it does not stop needing checking because this replica has no
+	// projection to run.
+	//
+	// A FAILING VERIFICATION DOES NOT STOP THE SERVICE. Refusing to serve because
+	// the chain is broken would remove the read API a person needs in order to
+	// investigate the break. It is reported, loudly, and the estate decides.
+	chainVerifier := verify.New(store,
+		verify.WithInterval(cfg.VerifyInterval),
+		verify.WithLogger(logger),
+		verify.WithObserver(func(r verify.Result) {
+			chainVerifications.WithLabelValues(string(r.Outcome)).Inc()
+			if r.Outcome == verify.OutcomeIntact {
+				// ONLY an intact result refreshes the freshness gauge. A chain that
+				// fails every hour must not look freshly verified.
+				chainLastVerified.Set(float64(r.At.Unix()))
+			}
+			if r.Outcome != verify.OutcomeError {
+				chainRecords.Set(float64(r.Records))
+			}
+		}))
+	go func() {
+		if err := chainVerifier.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("audit: the scheduled chain verifier stopped", "err", err)
+		}
+	}()
+	logger.Info("audit: hash-chain verification scheduled",
+		"interval", cfg.VerifyInterval.String(),
+		"note", "a chain nobody verifies is alertable through kanz_audit_chain_last_verified_timestamp_seconds")
 
 	readiness := &server.Readiness{}
 

@@ -142,11 +142,37 @@ spec:
             # detection depending on somebody remembering to look" — written down
             # as though it had been prevented.
             #
-            # The grant is KEPT rather than dropped, because #627 moved this API
-            # behind the gateway and a scheduled verifier will authenticate through
-            # it holding exactly this role. Dropping it now would mean adding it
-            # back with the runner; leaving the claim uncorrected would mean the
-            # next reader believes the check runs.
+            # THE SCHEDULE NOW EXISTS, AND IT IS NOT THIS ROLE (#665). The tamper
+            # check runs IN-PROCESS on AUDIT_VERIFY_INTERVAL (default 1h), and its
+            # outcome leaves the pod as three metrics rather than as a log line:
+            # kanz_audit_chain_verifications_total{outcome}, seeded for all three
+            # outcomes, and kanz_audit_chain_last_verified_timestamp_seconds,
+            # seeded at 0 so a pod that has NEVER verified is alertable rather than
+            # invisible. AuditChainTampered / AuditChainNotBeingVerified /
+            # AuditChainVerificationFailing in infra/observability/alerts are what
+            # make it detection; each is proven to fire by the promtool harness
+            # beside them.
+            #
+            # WHY IN-PROCESS AND NOT A JOB CALLING THIS ENDPOINT. Two reasons, and
+            # the second is the substantive one. identity issues tokens through
+            # POST /login — a subject and an Argon2 credential against a user store
+            # — so a scheduled caller would need a pseudo-user holding a long-lived
+            # password with estate-wide read authority, which is a new credential
+            # pattern and a security decision rather than a wiring change. And the
+            # gateway hop would add a TRIGGER, not TRUST: /v1/audit/verify is
+            # computed by this service either way, so an external caller changes
+            # who schedules the check and not who attests to it, while adding a
+            # second failure mode (a CronJob that silently stops). The failure an
+            # external runner IS better at — this pod dying and taking the check
+            # with it — is what the staleness alert covers, and it covers the
+            # never-started and wedged cases too.
+            #
+            # SO kanz-monitoring IS NOW A GRANT WITH NO CALLER, and that is stated
+            # rather than quietly left. It is kept because the endpoint remains the
+            # way a monitoring plane or an auditor takes an attestation ON DEMAND,
+            # which is a different question from "is it being checked" — but if
+            # nothing ever does, it should be dropped rather than kept for a use
+            # nobody has. Reviewed with #665.
             #
             # The binary REFUSES TO START with neither this nor
             # AUDIT_ALLOW_UNRESTRICTED_VERIFY set, so a deployment that forgets
