@@ -20,8 +20,16 @@ import (
 // names the governed dataset the number came from.
 //
 // The *http.Client is injected so this package stays SPIFFE-free (the SVCWIRE-01c
-// stance): the composition root builds the mTLS client from the copilot SVID, or
-// a plaintext client for dev.
+// stance): the composition root builds the client, with an mTLS config from the
+// copilot SVID or a plaintext one for dev.
+//
+// THAT mTLS CONFIG IS INERT ON THIS HOP TODAY (#626). No HTTP listener in the
+// estate serves TLS — lineage included — and every in-mesh URL in infra/deploy is
+// http://, so a TLS config never reaches the wire. What keeps this call
+// trustworthy in both directions is a NetworkPolicy, not a peer SVID: see
+// pkg/auth/meshheader.go, which states that control once for the whole estate.
+// Worth knowing here specifically, because this hop carries the END USER's
+// principal onward and the receiving service applies PII governance to it.
 type LineageCatalog struct {
 	client  *http.Client
 	baseURL string

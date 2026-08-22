@@ -21,9 +21,27 @@ import (
 // in; tests pass a plain client against an httptest upstream.
 //
 // Identity propagation: the gateway is the sole identity authority, so it
-// forwards the verified principal over the mesh in auth.HeaderPrincipal*. The
-// upstream trusts them BECAUSE the connection is mutually authenticated to the
-// gateway's SVID (a non-mesh caller cannot reach the service).
+// forwards the verified principal over the mesh in auth.HeaderPrincipal*.
+//
+// WHAT MAKES THE UPSTREAM'S TRUST SOUND IS A NetworkPolicy, AND NOTHING ELSE
+// (#626). This comment used to say the upstream trusts those headers "BECAUSE
+// the connection is mutually authenticated to the gateway's SVID (a non-mesh
+// caller cannot reach the service)". That was never true of this hop. The
+// server-side mTLS helpers have five production call sites and all five feed
+// grpc.NewServer; no HTTP listener in the estate sets TLSConfig or calls
+// ServeTLS, there is no sidecar mesh under infra/, and every
+// API_GATEWAY_*_ADDR in api-gateway-deploy.yaml is an http:// URL. The client
+// below IS built with transport.ClientTLSConfig at the composition root, which
+// is what made the claim look checked — but a TLS config never reaches the wire
+// on a cleartext URL, so it is armed and inert.
+//
+// The single control, stated once for the whole estate, is in pkg/auth's
+// meshheader.go: an upstream may trust these headers ONLY because a
+// NetworkPolicy makes the gateway its only reachable caller. #232 tracks where
+// that is not yet enforced, and the policy set's own manifest records that
+// kindnetd does not enforce NetworkPolicy at all — so on a cluster with that CNI
+// the boundary currently has NO enforced layer, not one. Anyone weighing that
+// risk needs the count to be right.
 //
 // The header names and the upstream-side enforcement live in pkg/auth, NOT here
 // (#258): this package is services/api-gateway/internal, so the four services
@@ -35,15 +53,25 @@ import (
 // unbounded upstream.
 const maxRespBytes = 8 << 20 // 8 MiB
 
-// MeshBackend forwards to upstream services by base URL over a shared
-// (typically mTLS) HTTP client.
+// MeshBackend forwards to upstream services by base URL over a shared HTTP
+// client.
+//
+// THE CLIENT IS CONFIGURED FOR mTLS AND DOES NOT USE IT. cmd/api-gateway sets
+// transport.ClientTLSConfig on this transport, but every deployed base URL is
+// http://, so the handshake it describes never happens (#626). Said here as well
+// as in the package doc because this is the sentence a reader reaches for when
+// asking what protects the hop; see pkg/auth/meshheader.go for the control that
+// actually does, which is the NetworkPolicy.
 type MeshBackend struct {
 	bases  map[Service]string
 	client *http.Client
 }
 
-// NewMeshBackend builds a backend over per-service base URLs (e.g.
-// "https://wealth.kanz-services:8080") and an HTTP client. A service absent from
+// NewMeshBackend builds a backend over per-service base URLs and an HTTP client.
+//
+// The example used to read "https://wealth.kanz-services:8080". Every deployed
+// value is http:// (#626), and an example that disagrees with the manifest is
+// the same false assurance the package doc carried. A service absent from
 // bases forwards as ErrBackendUnavailable (so a partially-configured gateway
 // 503s only the unwired surfaces).
 //
