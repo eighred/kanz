@@ -92,9 +92,14 @@ func ParseCRIF(r io.Reader) ([]CRIFRecord, error) {
 	return out, nil
 }
 
-// CRIF RiskType → FRTB risk class, delta and vega families. Unmapped types
-// (margin-only rows like Risk_XCcyBasis, or DRC/RRAO rows handled elsewhere)
-// are skipped by the mappers.
+// CRIF RiskType -> FRTB risk class, delta and vega families.
+//
+// TOGETHER WITH crifHandledElsewhere THESE ARE THE KNOWN VOCABULARY, and a
+// RiskType outside all three is an ERROR rather than a skipped row (#623). The
+// doc here used to say unmapped types "are skipped by the mappers", which was a
+// closed-world assumption about a VENDOR'S vocabulary that nothing enforced: a
+// vendor adding a risk type, or a typo in an export, removed capital from a
+// signed filing with no signal. See mapSensitivities.
 var (
 	crifDeltaClass = map[string]string{
 		"Risk_IRCurve":    "GIRR",
@@ -112,26 +117,64 @@ var (
 		"Risk_FXVol":        "FX",
 		"Risk_CommodityVol": "Commodity",
 	}
+
+	// crifHandledElsewhere are RiskTypes this file KNOWS and deliberately does
+	// not turn into SBM sensitivities, each with the reason.
+	//
+	// IT IS DELIBERATELY SHORT, AND SHORT IS THE HONEST LENGTH. It holds what
+	// this repository can actually attest to. The DRC and RRAO charges are
+	// computed elsewhere in this package, but nothing here has ever seen a real
+	// CRIF export naming their RiskTypes, and guessing the vendor spelling of a
+	// row in order to pre-approve dropping it would be the same closed-world
+	// assumption this replaced, written down more confidently. The first live
+	// CRIF feed adds them, one at a time, each as a decision somebody made.
+	crifHandledElsewhere = map[string]string{
+		"Risk_XCcyBasis": "cross-currency basis is a MARGIN-ONLY row (ISDA SIMM) and carries no " +
+			"FRTB SBM charge; it is present in a CRIF export because the same file feeds margin.",
+	}
 )
+
+// ErrUnknownRiskType is returned when a CRIF row names a RiskType that is in
+// neither sensitivity family nor the handled-elsewhere list.
+//
+// IT IS AN ERROR AND NOT A SKIP, for ErrUncovered's reason one layer down (#565,
+// #623): a dropped row and a book with no such risk produce the same smaller
+// FRTB_TOTAL, and the second one gets signed. The failure is one-directional and
+// in the filer's favour, which is the direction nobody reports.
+var ErrUnknownRiskType = errors.New("frtb: CRIF row names a RiskType this mapping does not know")
 
 // DeltaSensitivities maps the CRIF's delta rows into SBM sensitivities: risk
 // class per RiskType, factor identified by Qualifier + tenor/name labels.
-func DeltaSensitivities(recs []CRIFRecord) []Sensitivity {
+//
+// It returns ErrUnknownRiskType if any row names a RiskType outside the known
+// vocabulary — including rows this family does not itself emit, because a vega
+// row is known to the CRIF even though only VegaSensitivities turns it into one.
+func DeltaSensitivities(recs []CRIFRecord) ([]Sensitivity, error) {
 	return mapSensitivities(recs, crifDeltaClass)
 }
 
 // VegaSensitivities maps the CRIF's vega rows into SBM sensitivities (the
 // vega charge runs the same aggregation under its own params).
-func VegaSensitivities(recs []CRIFRecord) []Sensitivity {
+func VegaSensitivities(recs []CRIFRecord) ([]Sensitivity, error) {
 	return mapSensitivities(recs, crifVegaClass)
 }
 
-func mapSensitivities(recs []CRIFRecord, classOf map[string]string) []Sensitivity {
+// mapSensitivities turns the rows this family owns into sensitivities, skips the
+// rows another family or another charge owns, and REFUSES anything it has never
+// heard of.
+//
+// The three-way split is the whole repair. Before, the second and third cases
+// were one `continue`, so "a vega row, correctly not a delta" and "a RiskType
+// nobody has ever seen" were the same silent outcome (#623).
+func mapSensitivities(recs []CRIFRecord, classOf map[string]string) ([]Sensitivity, error) {
 	var out []Sensitivity
 	for _, r := range recs {
 		class, ok := classOf[r.RiskType]
 		if !ok {
-			continue
+			if err := knownRiskType(r.RiskType); err != nil {
+				return nil, err
+			}
+			continue // known, and owned by another family or another charge
 		}
 		factor := r.Qualifier
 		if r.Label1 != "" {
@@ -147,5 +190,27 @@ func mapSensitivities(recs []CRIFRecord, classOf map[string]string) []Sensitivit
 			Amount:    r.Amount,
 		})
 	}
-	return out
+	return out, nil
+}
+
+// knownRiskType reports whether the CRIF vocabulary covers riskType at all.
+//
+// The union of BOTH sensitivity families plus the handled-elsewhere list is the
+// vocabulary — not the single family currently being mapped. Checking only the
+// caller's map would make every vega row unknown to DeltaSensitivities and fail
+// every real export.
+func knownRiskType(riskType string) error {
+	if _, ok := crifDeltaClass[riskType]; ok {
+		return nil
+	}
+	if _, ok := crifVegaClass[riskType]; ok {
+		return nil
+	}
+	if _, ok := crifHandledElsewhere[riskType]; ok {
+		return nil
+	}
+	return fmt.Errorf("%w: %q is neither a delta nor a vega risk class here, and is not listed as "+
+		"handled elsewhere. Dropping it would remove its capital from the filing silently. Map it "+
+		"to a risk class, or add it to crifHandledElsewhere with the reason it carries no SBM "+
+		"charge", ErrUnknownRiskType, riskType)
 }

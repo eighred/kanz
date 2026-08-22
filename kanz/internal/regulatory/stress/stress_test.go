@@ -14,7 +14,7 @@ func TestExpand_MacroToAssetClass(t *testing.T) {
 		Name:   "ADVERSE",
 		Shocks: map[string]float64{"EQUITY": -0.20, "GDP": -0.03, "CREDIT_SPREAD": 0.02},
 	}
-	out := model.Expand(sc)
+	out, _ := model.Expand(sc)
 	// Equity = 1.0·(−0.20) + 2.0·(−0.03) = −0.26.
 	if math.Abs(out["Equity"]-(-0.26)) > 1e-9 {
 		t.Fatalf("Equity shock: got %.4f want -0.26", out["Equity"])
@@ -25,8 +25,9 @@ func TestExpand_MacroToAssetClass(t *testing.T) {
 	}
 	// Severity scales the transmission linearly.
 	sc.Severity = 2
-	if math.Abs(model.Expand(sc)["Equity"]-(-0.52)) > 1e-9 {
-		t.Fatalf("severity 2 should double the shock to -0.52, got %.4f", model.Expand(sc)["Equity"])
+	scaled, _ := model.Expand(sc)
+	if math.Abs(scaled["Equity"]-(-0.52)) > 1e-9 {
+		t.Fatalf("severity 2 should double the shock to -0.52, got %.4f", scaled["Equity"])
 	}
 }
 

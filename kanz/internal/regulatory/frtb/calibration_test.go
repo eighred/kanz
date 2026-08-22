@@ -120,7 +120,10 @@ func TestParseCRIF_AndMappers(t *testing.T) {
 		t.Fatalf("records: got %d want 4", len(recs))
 	}
 
-	delta := DeltaSensitivities(recs)
+	delta, err := DeltaSensitivities(recs)
+	if err != nil {
+		t.Fatalf("the fixture's rows are all known to the CRIF vocabulary: %v", err)
+	}
 	if len(delta) != 2 {
 		t.Fatalf("delta rows: got %d want 2 (vol + basis rows excluded)", len(delta))
 	}
@@ -131,7 +134,10 @@ func TestParseCRIF_AndMappers(t *testing.T) {
 		t.Errorf("equity row mapped wrong: %+v", delta[1])
 	}
 
-	vega := VegaSensitivities(recs)
+	vega, err := VegaSensitivities(recs)
+	if err != nil {
+		t.Fatalf("the fixture's rows are all known to the CRIF vocabulary: %v", err)
+	}
 	if len(vega) != 1 || vega[0].RiskClass != "Equity" || vega[0].Amount != 300 {
 		t.Errorf("vega mapping wrong: %+v", vega)
 	}

@@ -80,7 +80,6 @@ func (s *Server) handlePosition(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	mult := alternatives.ComputeMultiples(pos)
 	out := map[string]any{
 		"commitment_id": pos.CommitmentID,
 		"committed":     pos.Committed.FloatString(2),
@@ -88,9 +87,21 @@ func (s *Server) handlePosition(w http.ResponseWriter, r *http.Request) {
 		"uncalled":      pos.Uncalled().FloatString(2),
 		"distributed":   pos.Distributed.FloatString(2),
 		"nav":           pos.NAV.FloatString(2),
-		"tvpi":          mult.TVPI,
-		"dpi":           mult.DPI,
-		"rvpi":          mult.RVPI,
+	}
+	// AN UNDEFINED MULTIPLE IS OMITTED, THE WAY AN UNDEFINED IRR ALREADY WAS
+	// (#623). These three used to be written unconditionally, so a commitment with
+	// nothing drawn served "tvpi": 0 — indistinguishable from a fund that drew
+	// capital and lost all of it. The two treatments now agree, which is the point:
+	// they were five lines apart in this one body and answered the same question
+	// differently.
+	//
+	// ABSENCE IS THE SIGNAL, and it is the one this surface already uses. A client
+	// reading these keys must treat a missing one as "not yet meaningful", never
+	// substitute zero — the substitution is the defect.
+	if mult, err := alternatives.ComputeMultiples(pos); err == nil {
+		out["tvpi"] = mult.TVPI
+		out["dpi"] = mult.DPI
+		out["rvpi"] = mult.RVPI
 	}
 	if irr, err := alternatives.IRR(alternatives.IRRFlows(pos)); err == nil {
 		out["irr"] = irr

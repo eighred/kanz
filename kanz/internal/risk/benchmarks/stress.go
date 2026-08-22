@@ -65,7 +65,7 @@ var baseScenario = stress.MacroScenario{
 func StressFramework() []validation.Case {
 	// Severity 1, computed by hand: EQUITY = 2.5·(−0.04) + (−1.5)·(−0.02) = −0.07;
 	// CREDIT = (−1.0)·(−0.04) + 0.5·(−0.02) = 0.03.
-	base := stressModel.Expand(withSeverity(baseScenario, 1))
+	base := expand(withSeverity(baseScenario, 1))
 
 	cases := []validation.Case{
 		{
@@ -85,14 +85,14 @@ func StressFramework() []validation.Case {
 			// clean multiplier the bisection would be searching a dimension that
 			// does not mean what its name says.
 			Name: "expansion_is_homogeneous_in_severity_definitional",
-			Got:  stressModel.Expand(withSeverity(baseScenario, 2))["EQUITY"],
+			Got:  expand(withSeverity(baseScenario, 2))["EQUITY"],
 			Want: 2 * base["EQUITY"], Tolerance: 1e-12,
 		},
 		{
 			// AND AT A FRACTIONAL SEVERITY, so the case above is not satisfied by an
 			// implementation that only handles integers.
 			Name: "expansion_scales_at_fractional_severity_definitional",
-			Got:  stressModel.Expand(withSeverity(baseScenario, 0.25))["CREDIT"],
+			Got:  expand(withSeverity(baseScenario, 0.25))["CREDIT"],
 			Want: 0.25 * base["CREDIT"], Tolerance: 1e-12,
 		},
 		{
@@ -100,8 +100,8 @@ func StressFramework() []validation.Case {
 			// the sum of each alone. The defining property of a linear transmission,
 			// and the one that fails if a factor is applied twice or dropped.
 			Name: "expansion_is_additive_across_macro_factors_definitional",
-			Got: stressModel.Expand(scenarioWith("gdp", -0.04))["EQUITY"] +
-				stressModel.Expand(scenarioWith("rates", -0.02))["EQUITY"],
+			Got: expand(scenarioWith("gdp", -0.04))["EQUITY"] +
+				expand(scenarioWith("rates", -0.02))["EQUITY"],
 			Want: base["EQUITY"], Tolerance: 1e-12,
 		},
 		{
@@ -109,7 +109,7 @@ func StressFramework() []validation.Case {
 			// unstressed scenario would report a loss under the baseline, which is
 			// the number every stress result is measured against.
 			Name: "an_unshocked_scenario_expands_to_zero_definitional",
-			Got:  math.Abs(stressModel.Expand(stress.MacroScenario{Name: "base", Severity: 1})["EQUITY"]),
+			Got:  math.Abs(expand(stress.MacroScenario{Name: "base", Severity: 1})["EQUITY"]),
 			Want: 0, Tolerance: 1e-12,
 		},
 		{
@@ -118,7 +118,24 @@ func StressFramework() []validation.Case {
 			// unset severity would expand every scenario to nothing and report a
 			// firm that is never stressed.
 			Name: "an_unset_severity_defaults_to_one_definitional",
-			Got:  stressModel.Expand(baseScenario)["EQUITY"], Want: -0.07, Tolerance: 1e-12,
+			Got:  expand(baseScenario)["EQUITY"], Want: -0.07, Tolerance: 1e-12,
+		},
+		{
+			// AN UNSHOCKED SCENARIO AND A SCENARIO WITH NO DATA EXPAND IDENTICALLY,
+			// and the case two above depends on that: it grades the baseline as
+			// zero. Both readings produce zero and only one of them is a stress
+			// result — so the coverage is what separates them, and it is graded
+			// here rather than left to a caller to notice (#623).
+			Name: "an_unshocked_scenario_reports_no_factor_coverage_definitional",
+			Got:  coverageOf(stress.MacroScenario{Name: "base", Severity: 1}).Fraction(),
+			Want: 0, Tolerance: 1e-12,
+		},
+		{
+			// And the severely-adverse scenario carries both factors the model
+			// responds to, so its expansion rests on nothing missing.
+			Name: "the_adverse_scenario_supplies_every_modelled_factor_definitional",
+			Got:  coverageOf(baseScenario).Fraction(),
+			Want: 1, Tolerance: 1e-12,
 		},
 		{
 			Name: "asset_classes_are_returned_in_stable_order_definitional",
@@ -196,6 +213,24 @@ func withSeverity(s stress.MacroScenario, sev float64) stress.MacroScenario {
 // scenarioWith builds a single-factor scenario at severity 1.
 func scenarioWith(factor string, shock float64) stress.MacroScenario {
 	return stress.MacroScenario{Name: factor, Shocks: map[string]float64{factor: shock}, Severity: 1}
+}
+
+// expand runs the transmission and DROPS the factor coverage.
+//
+// Legitimate here and nowhere near a filing: every case below grades the
+// ARITHMETIC of a linear map — homogeneity, additivity, sign preservation — and
+// those hold whatever the scenario supplied. The coverage record matters to a
+// caller deciding whether a stress RESULT can be relied on, and two cases below
+// grade it directly rather than leaving it unexercised (#623).
+func expand(sc stress.MacroScenario) map[string]float64 {
+	out, _ := stressModel.Expand(sc)
+	return out
+}
+
+// coverageOf runs the transmission and keeps only the coverage.
+func coverageOf(sc stress.MacroScenario) stress.FactorCoverage {
+	_, cov := stressModel.Expand(sc)
+	return cov
 }
 
 func firstOf(sev float64, _ bool) float64 { return sev }
