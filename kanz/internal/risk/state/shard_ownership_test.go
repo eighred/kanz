@@ -23,7 +23,7 @@ import (
 // The corruption these tests pin down needs no cluster to reason about and is
 // entirely a property of one replica:
 //
-//	Bootstrap.restore LoadAll's the whole database and Restores every record.
+//	Bootstrap.restore streams the whole database via LoadEach and Restores each record.
 //	ShardFilter then drops the live events for the ones this replica does not
 //	own, so those copies freeze at boot. Snapshotter.Checkpoint iterates
 //	store.IDs() and Saves every entry, and persist.Postgres.Save is an

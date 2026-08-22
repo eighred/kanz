@@ -16,7 +16,7 @@ import (
 
 // BOOT IS WHERE FOREIGN STATE GOT IN (#110).
 //
-// Bootstrap.restore reads LoadAll — every portfolio in the tenant's database,
+// Bootstrap.restore reads LoadEach — every portfolio in the tenant's database,
 // which on a sharded replica is mostly other replicas' books — and used to
 // Restore all of it. The copies then froze (ShardFilter drops their live
 // events) and Snapshotter.Checkpoint wrote them back over the owners' fresher

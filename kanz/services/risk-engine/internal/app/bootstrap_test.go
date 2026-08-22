@@ -48,8 +48,20 @@ func (m *memSink) Save(context.Context, persist.PortfolioRecord) error { return 
 func (m *memSink) Load(context.Context, v1.PortfolioID) (persist.PortfolioRecord, error) {
 	return persist.PortfolioRecord{}, persist.ErrNotFound
 }
-func (m *memSink) LoadAll(context.Context) ([]persist.PortfolioRecord, error) {
-	return m.recs, m.loadErr
+
+// LoadEach streams, exactly as the Postgres store now does (#674). It hands over
+// one record at a time from its OWN slice rather than returning that slice, so a
+// consumer that accumulates has to do so visibly, in its own code.
+func (m *memSink) LoadEach(_ context.Context, fn func(persist.PortfolioRecord) error) error {
+	if m.loadErr != nil {
+		return m.loadErr
+	}
+	for _, rec := range m.recs {
+		if err := fn(rec); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (m *memSink) Ping(context.Context) error { return nil }
 
@@ -273,14 +285,14 @@ func TestBootstrap_NoResumePositionSkipsReplay(t *testing.T) {
 	}
 }
 
-// A LoadAll failure aborts bootstrap — we must not run on partial state.
-func TestBootstrap_LoadAllErrorAborts(t *testing.T) {
+// A LoadEach failure aborts bootstrap — we must not run on partial state.
+func TestBootstrap_LoadEachErrorAborts(t *testing.T) {
 	store := state.NewStore()
 	sink := &memSink{loadErr: errors.New("db down")}
 	b := newBoot(t, store, sink, nil, &fakeSource{}, nil)
 
 	if err := b.Run(context.Background()); err == nil {
-		t.Fatal("expected LoadAll error to abort Run")
+		t.Fatal("expected LoadEach error to abort Run")
 	}
 }
 
