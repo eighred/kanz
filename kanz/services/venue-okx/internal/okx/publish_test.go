@@ -53,9 +53,12 @@ func (c *captureClient) Subscribe(context.Context, string, string, bus.Handler) 
 func (c *captureClient) Close() error { return nil }
 
 // realOKXProducer mirrors cmd/venue-okx's producer config, INCLUDING the Tenant
-// fallback. That field is load-bearing for the market-trade publish in
-// okx_connector.go, which sets no TenantID of its own AND discards its publish
-// error — so without the fallback those events would fail silently forever.
+// fallback. That field is load-bearing for the market-trade publish the ticker
+// feed makes: it sets no TenantID of its own, so without the fallback every one
+// of those events is refused. It used to discard the refusal too — #673 moved
+// that publish into execution.MarkTickPublisher, which counts and names it — but
+// the fallback is still the only thing standing between the feed and a broker
+// that says no.
 func realOKXProducer(t *testing.T) (*bus.Producer, *captureClient) {
 	t.Helper()
 	cc := &captureClient{}
@@ -212,10 +215,14 @@ func TestOKXReconBalanceReconciledEmitsAValidEnvelope(t *testing.T) {
 
 // THE TENANT FALLBACK IS LOAD-BEARING, AND ITS FAILURE WOULD BE SILENT.
 //
-// okx_connector.go's market-trade publish sets no TenantID and DISCARDS its
-// error (`_ = pub.Publish(...)`). So it depends entirely on the producer config
-// setting ProducerConfig.Tenant — and if that were ever dropped, every market
-// trade would be refused by the broker and nothing would say so.
+// The market-trade publish sets no TenantID, so it depends entirely on the
+// producer config setting ProducerConfig.Tenant — if that were ever dropped,
+// every market trade would be refused by the broker.
+//
+// "AND NOTHING WOULD SAY SO" WAS TRUE HERE UNTIL #673: the publish discarded its
+// error, so a broker refusing every tick left no line and no series. It now runs
+// through execution.MarkTickPublisher, which counts every drop and logs the
+// reason rate-limited.
 func TestAnOKXEventWithoutTheTenantFallbackIsRefused(t *testing.T) {
 	cc := &captureClient{}
 	prod, err := bus.NewProducer(cc, bus.ProducerConfig{
@@ -235,8 +242,8 @@ func TestAnOKXEventWithoutTheTenantFallbackIsRefused(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("an event with no TenantID published against a producer with no Tenant fallback. " +
-			"okx_connector.go relies on that fallback and DISCARDS its publish error, so if this ever " +
-			"succeeds silently the market-trade path has stopped being checked by anything")
+			"the market-trade path relies on that fallback, so if this ever succeeds silently the " +
+			"one thing standing between the mark feed and a broker refusal has stopped being checked")
 	}
 	if len(cc.sent) != 0 {
 		t.Errorf("a refused envelope still reached the transport (%d message(s))", len(cc.sent))
