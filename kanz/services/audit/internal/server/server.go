@@ -28,9 +28,20 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 // never from this package and never from the query string.
 //
 // This service authenticates NOTHING, and that is only safe behind the gateway.
-// It is reachable only in-cluster over the SVID-authorized mesh, with no
-// Ingress. EXPOSE IT DIRECTLY AND ANY CALLER READS EVERY TENANT'S AUDIT HISTORY
-// — audit_log is deliberately not RLS'd (it is the cross-tenant compliance
+// It has no Ingress, and what keeps the gateway its only caller is a
+// NetworkPolicy — see pkg/auth/meshheader.go, which states that control once for
+// the whole estate.
+//
+// IT IS NOT "the SVID-authorized mesh", WHICH IS WHAT THIS COMMENT USED TO SAY
+// (#626). No HTTP listener in this estate serves TLS, nothing calls ServeTLS, and
+// the gateway dials every upstream over http://; the five production users of the
+// server-side mTLS helpers are all gRPC. This file already named the real control
+// forty lines below, so it carried both stories at once and one of them was
+// imaginary — which is worse than either alone, because a reader who finds the
+// true one has no reason to doubt the other.
+//
+// EXPOSE IT DIRECTLY AND ANY CALLER READS EVERY TENANT'S AUDIT HISTORY —
+// audit_log is deliberately not RLS'd (it is the cross-tenant compliance
 // record), so the database will not save you here; this handler is the boundary.
 //
 // The header name and the refusal used to be declared here, and in three other

@@ -205,10 +205,22 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 // # This service authenticates NOTHING, and that is only safe behind the gateway
 //
 // It trusts that header because the caller can only be the gateway: the gateway
-// validates the token, and the mesh (mTLS, SVID-authorized) is what stops anyone
-// else reaching this port. EXPOSE THIS SERVICE DIRECTLY TO THE INTERNET AND ANY
-// CALLER CAN NAME ANY TENANT AND READ THAT TENANT'S BOOK — its positions, its
-// orders, its executions. There is no Ingress for tv-sync, deliberately; it is
+// validates the token, and a NetworkPolicy is what stops anyone else reaching
+// this port — the control pkg/auth/meshheader.go states for the whole estate.
+//
+// IT IS NOT "the mesh (mTLS, SVID-authorized)", WHICH IS WHAT THIS SAID (#626).
+// tv-sync serves plain HTTP through httpserver.New; no listener here sets
+// TLSConfig and the gateway dials http://tv-sync.kanz-services.svc:8091. The
+// claim was doubly misleading on THIS file, because tv-sync is one of the three
+// services test/arch/network_policy_coverage_test.go lists in
+// tenantHeaderTrustingServices — its ARM 3c residual says a pod in
+// kanz-observability can reach this very port and name any tenant, since
+// /metrics and this API share it. One guard recorded the exposure while this
+// comment told a reader mTLS had closed it.
+//
+// EXPOSE THIS SERVICE DIRECTLY TO THE INTERNET AND ANY CALLER CAN NAME ANY
+// TENANT AND READ THAT TENANT'S BOOK — its positions, its orders, its
+// executions. There is no Ingress for tv-sync, deliberately; it is
 // reachable only through /v1/broker/* on the gateway, which requires a principal.
 //
 // It used to read a bespoke "X-Tenant". Nothing set it, and any caller could. It
