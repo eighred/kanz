@@ -267,7 +267,16 @@ func serve(cfg config.Config) error {
 	// Checked HERE, at the composition root, because this is the last place both
 	// halves exist together: after this the symbol goes to the exchange and the id
 	// goes into the ledger, and nothing downstream ever sees both.
-	symbols := execution.StaticSymbolMap(parseSymbolMap(cfg.Symbols))
+	// REFUSED, NOT REPAIRED. ParseSymbolMap rejects a map it cannot represent
+	// faithfully — a malformed entry, a duplicated instrument, or two instruments
+	// claiming one exchange symbol. The last is the one that costs money: the
+	// platform would believe it holds two positions where the exchange holds one.
+	// The parser used to live here and in the other venue's main, byte-identical,
+	// and absorbed all three silently.
+	symbols, err := execution.ParseSymbolMap(cfg.Symbols)
+	if err != nil {
+		return fmt.Errorf("BINANCE_SYMBOLS: %w", err)
+	}
 	if bad := symbols.Mismatches(); len(bad) > 0 {
 		for _, in := range bad {
 			logger.Error("SYMBOL MAP MISDESCRIBES WHAT IT TRADES — this instrument is recorded under a quote asset "+
@@ -549,16 +558,3 @@ func venueProducerConfig(cfg config.Config, metrics *bus.BusMetrics) bus.Produce
 }
 
 // parseSymbolMap parses "BTC-USD=BTCUSDT,ETH-USD=ETHUSDT".
-func parseSymbolMap(s string) map[string]string {
-	out := map[string]string{}
-	for _, pair := range strings.Split(s, ",") {
-		pair = strings.TrimSpace(pair)
-		if pair == "" {
-			continue
-		}
-		if k, v, ok := strings.Cut(pair, "="); ok {
-			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
-		}
-	}
-	return out
-}

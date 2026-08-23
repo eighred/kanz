@@ -14,10 +14,10 @@ import (
 // dollars — and no layer compared them, because after this point the symbol goes
 // to the exchange and the id goes into the ledger and nothing sees both.
 //
-// These drive the SAME parseSymbolMap and the SAME execution.StaticSymbolMap the
+// These drive the SAME execution.ParseSymbolMap and the SAME StaticSymbolMap the
 // composition root uses, so the check cannot pass here and be absent there.
 func TestTheShippedMappingIsDetectedAsMisdescribing(t *testing.T) {
-	symbols := execution.StaticSymbolMap(parseSymbolMap("BTC-USD=BTC-USDT,ETH-USD=ETH-USDT"))
+	symbols := mustSymbols(t, "BTC-USD=BTC-USDT,ETH-USD=ETH-USDT")
 
 	bad := symbols.Mismatches()
 	if len(bad) != 2 {
@@ -37,7 +37,7 @@ func TestTheShippedMappingIsDetectedAsMisdescribing(t *testing.T) {
 // properly configured estate without refusing to start. Without this, the test
 // above is satisfied by a check that flags everything.
 func TestTheCorrectedMappingPasses(t *testing.T) {
-	symbols := execution.StaticSymbolMap(parseSymbolMap("BTC-USDT=BTC-USDT,ETH-USDT=ETH-USDT"))
+	symbols := mustSymbols(t, "BTC-USDT=BTC-USDT,ETH-USDT=ETH-USDT")
 
 	if bad := symbols.Mismatches(); len(bad) != 0 {
 		t.Fatalf("Mismatches() = %+v, want none — this is the mapping the manifests now ship", bad)
@@ -64,4 +64,16 @@ func TestQuoteMatchIsNotRequiredByDefault(t *testing.T) {
 		t.Error("RequireQuoteMatch defaults to true — a schema-level correctness check must not " +
 			"become a startup outage for every deployment that has not been corrected yet")
 	}
+}
+
+// mustSymbols parses through the production parser, so these fixtures are held
+// to the same refusals a deployment is — a fixture the real parser would reject
+// would otherwise assert behaviour no venue can reach.
+func mustSymbols(t *testing.T, spec string) execution.StaticSymbolMap {
+	t.Helper()
+	m, err := execution.ParseSymbolMap(spec)
+	if err != nil {
+		t.Fatalf("ParseSymbolMap(%q): %v", spec, err)
+	}
+	return m
 }
