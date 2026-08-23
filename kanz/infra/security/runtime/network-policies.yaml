@@ -1339,3 +1339,85 @@ spec:
               kubernetes.io/metadata.name: kanz-observability
       ports:
         - { protocol: TCP, port: 8083 }
+---
+# THE INSTRUMENT CLASSIFIER'S HOP (#640), and it is a NEW SHAPE for this file:
+# the first service-to-service read that is not the gateway proxying a caller.
+#
+# Three services need to resolve an instrument's sector, issuer and asset class,
+# and datamaster's golden security master is the one place on this estate that
+# can answer:
+#
+#   oms          the pre-trade gate, per holding, per order
+#   compliance   the post-trade monitor, per live book
+#   risk-engine  every named stress scenario's sector shocks, and the SECTOR
+#                dimension of a served ExposureSet
+#
+# Without both halves of this rule every lookup fails, the cache stays empty,
+# and all three degrade to REFUSING the classified dimensions — silently as far
+# as the network is concerned, because internal/refdata is asynchronous by
+# design and nothing blocks or errors on the request path. The only symptom is
+# kanz_instrument_classifier_wanted climbing while _resolved stays at zero,
+# which is precisely why that gauge exists.
+#
+# ENUMERATED, NOT NAMESPACE-WIDE, unlike the Postgres and Redis rules above.
+# Their argument is that the isolation which matters lives below the network —
+# a per-service DSN plus FORCE ROW LEVEL SECURITY. It does not apply here:
+# datamaster's ONLY tenant control on this surface is the caller's
+# X-Kanz-Principal-Tenant header (auth.RequireCallerTenantIs), which any pod
+# that can open the port may choose for itself. The set of workloads allowed to
+# reach it is therefore load-bearing, and it is three.
+#
+# THE PORT IS ALREADY WIDER THAN THESE THREE, and that is #232's gap rather than
+# this rule's: datamaster's tenant-scoped /v1 routes share :8080 with /metrics,
+# so allow-observability-scrape admits kanz-observability to the same surface.
+# This change does not widen it — it adds the three callers that have a reason
+# to be there. Splitting datamaster's listeners the way accounting (#447),
+# compliance (#562) and audit (#627) split theirs is the repair, and it is
+# tracked in tenantHeaderTrustingServices, not here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-classifier-reads-datamaster
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [oms, compliance, risk-engine]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: datamaster
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# The ingress half. default-deny-all selects every pod in this namespace for
+# BOTH directions, so the egress rule above alone leaves datamaster refusing the
+# connection it just permitted the client to open — the same trap the Postgres
+# pair at the top of this file documents.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-classifier-callers-to-datamaster
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: datamaster
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [oms, compliance, risk-engine]
+      ports:
+        - { protocol: TCP, port: 8080 }

@@ -139,6 +139,21 @@ spec:
             - { name: COMPLIANCE_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: COMPLIANCE_SOURCE, value: "compliance" }
             - { name: COMPLIANCE_CONSUMER_GROUP, value: "compliance" }
+            # Must match DATAMASTER_TENANT on the instance named below: datamaster
+            # serves one tenant and 404s every other caller.
+            - { name: COMPLIANCE_TENANT, value: "__system__" }
+            # THE INSTRUMENT CLASSIFIER (#640). datamaster is the estate's golden
+            # security master and the only place a sector, an issuer or an asset class
+            # can be resolved from. WITHOUT THIS LINE this pod starts cleanly, logs one
+            # WARN, exports kanz_instrument_classifier_wired 0, and the post-trade monitor
+            # REFUSES every SECTOR, ISSUER and ASSET_CLASS rule instead of evaluating it.
+            #
+            # It reads GET /v1/securities/{id} on a background cycle and answers from
+            # memory, so nothing on the monitor's fold waits on datamaster.
+            # allow-classifier-reads-datamaster in
+            # infra/security/runtime/network-policies.yaml is the other half: without
+            # that rule every lookup fails and the cache stays empty.
+            - { name: COMPLIANCE_DATAMASTER_URL, value: "http://datamaster.kanz-services.svc:8080" }
             # SEC-01a. infra/nats/nats.yaml serves `tls { verify: true,
             # verify_and_map: true }` — the bus is mTLS-ONLY. Without this socket the
             # mesh is disabled (transport.NewMesh("").Enabled() == false), the client

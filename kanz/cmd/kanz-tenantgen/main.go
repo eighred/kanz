@@ -85,6 +85,12 @@ func run(args []string) error {
 		fmt.Printf("wrote %s\n", outPath)
 		fmt.Printf("  NATS: tenancy.yaml's %q account must admit %s, or the pod authenticates and maps to NO account (SEC-M3)\n",
 			*tenant, svc.ComputeSPIFFEID(*tenant))
+		// WHAT THIS TENANT DOES NOT GET. A dropped variable is a capability the
+		// base deployment has and this render deliberately withholds, so it is
+		// printed beside the file rather than left to whoever diffs the two.
+		for _, d := range svc.DropEnv {
+			fmt.Printf("  WITHHELD: %s - %s\n", d.Name, d.Why)
+		}
 		if svc.KafkaProducer {
 			fmt.Printf("  KAFKA: that same principal needs the %q. PREFIXED ACL — tenantctl.sh's onboard grants it from COMPUTE_KAFKA_SAS\n", *tenant)
 		}

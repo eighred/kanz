@@ -75,43 +75,25 @@ import (
 // on top of it. Keys are "<callerPkg> -> <seamPkg>.<Func>" for a nil argument and
 // "<seamPkg>.<Func>" for a seam with no caller at all.
 var nilClassifierExempt = map[string]string{
-	"services/oms/cmd/oms -> internal/compliance.NewPreTradeGate": "#640 — the OMS pre-trade " +
-		"gate. NO PRODUCTION compliance.Classifier EXISTS TO PASS, and this is deliberately not " +
-		"repaired by inventing one. The reference data it would read is reference.v1." +
-		"InstrumentReference, whose only builder in this module is datamaster's " +
-		"feed.NormalizeReference — called from its own tests alone, never published to a subject, " +
-		"never persisted as protobuf, and never returned by an API. datamaster's golden_records " +
-		"table does resolve sector and asset_class from licensed vendor CSV drops, but it carries " +
-		"NO ISSUER AT ALL, its only read endpoint (handleSecurity) omits sector from the JSON it " +
-		"serves, and no consuming service has a client for it. Populating a StaticClassifier with " +
-		"plausible sectors instead would turn a control that cannot fire into one that is " +
-		"confidently wrong, which #345 rules out. WHAT IS FIXED: a mandate rule naming SECTOR, " +
-		"ISSUER or ASSET_CLASS is now REFUSED with a named reason rather than passed — see " +
-		"compliance.unresolvedDimension. Retire this entry by wiring a reference-data-backed " +
-		"Classifier, which needs an issuer column through datamaster's RefRow/VendorRecord/" +
-		"SecurityMaster chain and a read path that serves sector.",
-	"services/compliance/cmd/compliance -> services/compliance/internal/monitor.NewMonitor": "#640 " +
-		"— the post-trade monitor, blocked on exactly what the OMS gate is blocked on and " +
-		"retired by the same wiring. It re-evaluates live books rather than orders, so the " +
-		"consequence was a monitor reporting a fund CLEAN against a sector or issuer exclusion " +
-		"it could not evaluate. Same repair: unresolvedDimension makes it a violation.",
-	"internal/risk/engine.WithClassifier": "#640 — MODEL-01f, and the seam BOTH existing dark-seam " +
-		"guards were blind to: it takes a factor.Classifier rather than a *Registry or a " +
-		"*Providers, so the parameter rule in no_dark_measure_seam_test.go does not see it, and " +
-		"internal/risk/engine is imported constantly so the import rule does not either. " +
-		"services/risk-engine builds the engine with sharding.EngineOptions(), which returns at " +
-		"most engine.WithOwnership. No production factor.Classifier exists — factor's own package " +
-		"doc has said the reference-data store is 'not yet built' since MODEL-01f, and it still is " +
-		"not; see the OMS entry for what datamaster does and does not hold. WHAT IS FIXED: " +
-		"EvaluateScenario now REFUSES a scenario whose sector shocks cannot resolve " +
-		"(v1.ErrScenarioUnresolvable) instead of returning the unshocked book. Retire this entry " +
-		"by wiring the same reference-data-backed classifier the compliance seams need.",
-
-	// The five below were FOUND BY THIS GUARD when it first ran (#640). None of
-	// them is on the three paths the issue was filed about; all five are the same
-	// absence one door over, and they are recorded rather than quietly left out,
-	// because an exemption list that covers only the seams somebody already knew
-	// about is a list that will not catch the sixth.
+	// THE THREE SEAMS THIS GUARD WAS BUILT FOR ARE GONE FROM THIS MAP (#640).
+	//
+	// services/oms -> compliance.NewPreTradeGate, services/compliance ->
+	// monitor.NewMonitor and risk/engine.WithClassifier each carried an entry
+	// here saying the same thing: no production Classifier existed to pass,
+	// because the reference data lived in datamaster's golden_records with NO
+	// ISSUER COLUMN AT ALL, a read endpoint that omitted sector, and no client in
+	// any consuming service. All four of those are now built — the issuer runs
+	// through RefRow -> VendorRecord -> SecurityMaster, handleSecurity serves
+	// sector, issuer_id and as_of, and internal/refdata is the one cache both
+	// Classifier interfaces project from. The dead-entry check below is what
+	// removed them: it failed the moment the seams were wired, which is the
+	// retirement mechanism working rather than somebody remembering.
+	//
+	// The five below were FOUND BY THIS GUARD when it first ran. None of them is
+	// on the three paths the issue was filed about; all five are the same absence
+	// one door over, and they are recorded rather than quietly left out, because
+	// an exemption list that covers only the seams somebody already knew about is
+	// a list that will not catch the sixth.
 	"internal/optimization.Propose": "#640 — the OPT-01e mandate-aware rebalance. Its doc calls it " +
 		"'the one call a PM workflow / the OPT-01e service drives', and that is not true today: " +
 		"services/optimization's handlePropose reimplements the first two steps inline " +
@@ -141,15 +123,17 @@ var nilClassifierExempt = map[string]string{
 		"instrument-level returns into sector buckets. The client is the classifier. Retiring this " +
 		"needs a request shape carrying instrument-level rows as well as a classifier to bucket " +
 		"them with.",
-	"internal/risk/compute/factor.ComputeExposure": "#640 — the RISK-06 ExposureBySector " +
-		"completion. Its own doc states the condition ('the engine/query path uses this when a " +
-		"Classifier is wired; absent one it calls compute.ComputeExposure directly') without " +
-		"stating that the condition is NEVER met: engine.WithClassifier has no caller, so the " +
-		"engine takes the two-dimension branch unconditionally and SECTOR appears in no served " +
-		"ExposureSet. Retired by the same wiring as internal/risk/engine.WithClassifier. NOT to be " +
-		"confused with compute.ComputeExposure, a different two-dimension function that IS wired.",
-	"internal/risk/compute/factor.SectorExposure": "#640 — dark because its only non-test caller " +
-		"is factor.ComputeExposure, which is itself dark. One entry retires both.",
+	"internal/risk/compute/factor.SectorExposure": "#640 — NOT AN UNFILLED SEAM, and the only " +
+		"entry here that is a limit of the RULE rather than of the estate. Its caller is " +
+		"factor.ComputeExposure, which is WIRED: services/risk-engine passes " +
+		"app.NewFactorClassifier(refCache) to engine.WithClassifier, and EngineImpl.exposureSet " +
+		"takes the factor branch whenever that classifier is non-nil, so this runs on every served " +
+		"exposure read. It is reported dark because the rule requires a CROSS-PACKAGE non-test " +
+		"caller and its only caller is in its own package — the same one-level-up limitation the " +
+		"header names for a seam filled from another seam, seen from the other side. The old " +
+		"entry claimed 'one entry retires both', which was wrong: retiring ComputeExposure does " +
+		"not retire this. Retire it by widening the rule to same-package callers, not by moving " +
+		"code to satisfy a guard.",
 	"internal/sustainability.Screen": "#640 — ALT/CLIMATE-01b ESG exclusion screening. It is not " +
 		"blocked on a classifier at all: it TAKES one as a parameter and would work the moment a " +
 		"caller supplied a real one. WHAT IS MISSING IS A CALLER. services/regulatory imports " +

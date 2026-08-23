@@ -57,9 +57,31 @@ type Service struct {
 	// same list on the provisioning side; test/arch/tenant_compute_test.go fails
 	// the build if the two disagree.
 	KafkaProducer bool
+	// DropEnv names env vars the base sets that MUST NOT be carried into a
+	// per-tenant render, each with the reason.
+	//
+	// IT IS FOR DEPENDENCIES THAT EXIST ONLY FOR __system__. Copying such a
+	// variable through is worse than omitting it: the rendered pod points at a
+	// SINGLE-TENANT peer that will refuse it, and the refusal arrives wearing
+	// the vocabulary of a different fault. A dropped variable leaves the service
+	// in its own documented "not configured" posture, which every one of them
+	// states at startup.
+	//
+	// A NAME THAT IS NOT IN THE BASE IS AN ERROR, not a no-op — see Render. An
+	// entry that stopped matching would silently start carrying the variable it
+	// exists to remove.
+	DropEnv []DropEnvVar
 	// Why states what the tenant loses without this service. It is printed by
 	// cmd/kanz-tenantgen and quoted by the guards, so an operator reading a
 	// failure learns the consequence rather than the rule.
+	Why string
+}
+
+// DropEnvVar is one env var removed from a per-tenant render, and why.
+type DropEnvVar struct {
+	Name string
+	// Why is printed by cmd/kanz-tenantgen beside the rendered file, so the
+	// operator learns which capability the tenant does NOT have.
 	Why string
 }
 
@@ -84,6 +106,20 @@ var Services = []Service{
 		Base:      "infra/deploy/oms-deploy.yaml",
 		Container: "oms",
 		TenantEnv: "OMS_TENANT",
+		DropEnv: []DropEnvVar{{
+			Name: "OMS_DATAMASTER_URL",
+			Why: "THE SECURITY MASTER IS __system__-ONLY (#640). datamaster serves ONE tenant " +
+				"per instance and answers every other caller with a no-oracle 404, and this " +
+				"estate renders no per-tenant datamaster — so carrying the base's URL through " +
+				"would point this pod at an instance that refuses it. A 404 is refdata's word " +
+				"for \"the master does not hold this instrument\", so every lookup would come " +
+				"back as a REFERENCE-DATA GAP naming the tenant's whole book, sending an " +
+				"operator to load data that no instance was ever going to serve them. Dropped, " +
+				"the OMS runs its stated \"no reference-data source\" posture instead: one WARN " +
+				"at startup, kanz_instrument_classifier_wired 0, and a refusal that says " +
+				"classifier: unavailable. Retire this entry by rendering a per-tenant " +
+				"datamaster, at which point the URL becomes datamaster-<tenant>.",
+		}},
 		Why: "the tenant's ORDER PATH. Without it the tenant's account receives the order " +
 			"commands the bridge carries and nothing consumes them.",
 	},

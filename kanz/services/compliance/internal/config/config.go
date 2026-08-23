@@ -7,6 +7,7 @@ import (
 
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/platform/subject"
+	"github.com/eighred/kanz/internal/refdata"
 )
 
 // Config is the compliance service runtime configuration, sourced from the
@@ -18,6 +19,17 @@ type Config struct {
 	LogLevel     slog.Level
 	Source       string
 	OTLPEndpoint string
+	// Tenant is the tenant THIS DEPLOYMENT serves. It is not read from a caller's
+	// header: the only thing it addresses is the per-tenant datamaster instance
+	// this service asks for instrument classification, and that instance refuses
+	// any caller whose tenant is not its own. Defaults to __system__, the same
+	// convention the OMS and the risk engine use.
+	Tenant string
+	// RefData wires the instrument classifier the post-trade monitor resolves
+	// SECTOR, ISSUER and ASSET_CLASS mandate rules through (#640). Unwired, the
+	// monitor REFUSES those rules rather than reporting a fund clean against an
+	// exclusion it could not evaluate.
+	RefData refdata.Config
 
 	// APIListen serves the mandate-change routes (#562) and NOTHING ELSE.
 	//
@@ -73,7 +85,13 @@ func (Config) MonitorSubjects() []string {
 func (Config) MandateSubject() string { return comp.SubjectMandateChanged }
 
 func Load() (Config, error) {
+	refData, err := refdata.LoadConfig("COMPLIANCE")
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
+		Tenant:        env.Or("COMPLIANCE_TENANT", "__system__"),
+		RefData:       refData,
 		Listen:        env.Or("COMPLIANCE_LISTEN", ":8091"),
 		APIListen:     env.Or("COMPLIANCE_API_LISTEN", ":8095"),
 		LogLevel:      env.ParseLevelOr(env.Or("COMPLIANCE_LOG_LEVEL", "info"), slog.LevelInfo),

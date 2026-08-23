@@ -168,6 +168,22 @@ func (s *Server) callerOwnsThisInstance(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleSecurity returns the projected golden record for an instrument.
+//
+// # It withheld the classification it exists to master (#640)
+//
+// This body carried instrument_id, asset_class, currency_code, description and
+// the identifiers — and STOPPED. The two fields a compliance control actually
+// buckets on, sector and issuer_id, were resolved by master.Resolve, persisted
+// in golden_records, and then dropped on the way out, so the only read path to
+// the security master could not answer "what sector is this" at all. That is
+// half of why every SECTOR/ISSUER mandate on this estate was unresolvable: the
+// data existed one process away with no way to ask for it.
+//
+// SECTOR AND AS_OF ARE ALWAYS PRESENT, even when empty. An absent key and an
+// empty value would be the same on the wire, and they are different facts — the
+// master resolved no sector for this instrument, versus this endpoint does not
+// serve sectors. refdata.Client keys its refusal on the first, so it must be
+// able to see it.
 func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	if !s.callerOwnsThisInstance(w, r) {
 		return
@@ -183,11 +199,23 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "instrument not found"})
 		return
 	}
+	// RFC3339, and empty rather than "0001-01-01T00:00:00Z" for a record no
+	// vendor dated: a zero timestamp rendered as a real one reads as a 1st-century
+	// snapshot, and a point-in-time consumer would compare against it.
+	asOf := ""
+	if !sm.AsOf.IsZero() {
+		asOf = sm.AsOf.UTC().Format(time.RFC3339)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"instrument_id": sm.InstrumentID,
 		"asset_class":   sm.AssetClass,
 		"currency_code": sm.CurrencyCode,
 		"description":   sm.Description,
+		"issuer_id":     sm.IssuerID,
+		"sector": map[string]string{
+			"taxonomy": sm.Sector.Taxonomy, "code": sm.Sector.Code, "name": sm.Sector.Name,
+		},
+		"as_of": asOf,
 		"identifiers": map[string]string{
 			"isin": sm.Identifiers.ISIN, "cusip": sm.Identifiers.CUSIP,
 			"sedol": sm.Identifiers.SEDOL, "figi": sm.Identifiers.FIGI, "ric": sm.Identifiers.RIC,

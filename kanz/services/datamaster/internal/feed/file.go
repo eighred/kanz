@@ -84,6 +84,7 @@ func (s *FileRefSource) Fetch(ctx context.Context) ([]RefRow, error) {
 			SectorTaxonomy:  cols.get(rec, "sector_taxonomy"),
 			SectorCode:      cols.get(rec, "sector_code"),
 			SectorName:      cols.get(rec, "sector_name"),
+			IssuerID:        cols.get(rec, "issuer_id"),
 			Currency:        cols.get(rec, "currency"),
 			Description:     cols.get(rec, "description"),
 		}

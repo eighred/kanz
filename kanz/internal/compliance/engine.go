@@ -207,27 +207,32 @@ type Attributes struct {
 // re-evaluation reads the mapping in effect then). ok=false ⇒ unknown
 // instrument: the engine buckets it under the empty key rather than dropping it.
 //
-// NO PRODUCTION IMPLEMENTATION EXISTS, and a nil Classifier is what every
-// composition root passes today. That is SAFE because the three rules that need
-// one — ConcentrationRule, RestrictionRule and IssuerExclusionRule, on the
-// ISSUER, SECTOR and ASSET_CLASS dimensions — now REFUSE rather than pass; see
-// unresolvedDimension in rules.go. It was not safe before: an unresolvable
-// dimension put every holding in the empty bucket, and a sector cap approved a
-// book that was entirely in the capped sector (#640).
+// THE PRODUCTION IMPLEMENTATION IS refdata.Cache.Compliance (#640), which
+// reads datamaster's golden security master. Both composition roots that hold
+// one — the OMS pre-trade gate and the compliance post-trade monitor — wire it
+// when a master is configured.
+//
+// A NIL CLASSIFIER IS STILL A LEGAL POSTURE, and it means one specific thing:
+// this deployment has NO reference-data source. The three rules that need one —
+// ConcentrationRule, RestrictionRule and IssuerExclusionRule, on the ISSUER,
+// SECTOR and ASSET_CLASS dimensions — then REFUSE rather than pass; see
+// unresolvedDimension in rules.go, which spells that refusal differently from
+// the one a wired classifier gives for an instrument it does not know, because
+// the operator's next action differs. It was not safe before either existed: an
+// unresolvable dimension put every holding in the empty bucket, and a sector cap
+// approved a book that was entirely in the capped sector.
 type Classifier interface {
 	Classify(ctx context.Context, instrumentID string, asOf time.Time) (Attributes, bool)
 }
 
 // StaticClassifier is an in-memory Classifier backed by a fixed map.
 //
-// TESTS ARE ITS ONLY CONSTRUCTOR, and this doc used to claim otherwise — "the
-// composition root loads it from reference data" was written as a description of
-// an estate that has never had one (#640). The reference-data source it would be
-// loaded from does not exist: reference.v1.InstrumentReference is a schema whose
-// only builder, datamaster's feed.NormalizeReference, is called from tests
-// alone, is never published or persisted, and carries no issuer at all. Filling
-// this map with invented sectors to make the seam non-nil would turn a control
-// that silently passes into one that is confidently wrong, which #345 rules out.
+// TESTS ARE ITS ONLY CONSTRUCTOR AND THAT IS NOW CORRECT RATHER THAN A GAP. It
+// once carried "the composition root loads it from reference data", describing
+// an estate that had never had one; the production source it was waiting for is
+// refdata.Cache (#640), and a composition root reaching for this type instead
+// would be filling a compliance control from a map somebody typed. Use it to
+// pin rule behaviour against known classifications, never to arm a deployment.
 type StaticClassifier map[string]Attributes
 
 // Classify implements Classifier; asOf is ignored (a single snapshot).

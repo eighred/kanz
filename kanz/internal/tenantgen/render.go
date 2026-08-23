@@ -225,17 +225,45 @@ func transformDeployment(spec map[string]interface{}, svc Service, name, tenant 
 		if cname, _ := cm["name"].(string); cname != svc.Container {
 			continue
 		}
+		drop := make(map[string]string, len(svc.DropEnv))
+		for _, d := range svc.DropEnv {
+			drop[d.Name] = d.Why
+		}
 		env, _ := cm["env"].([]interface{})
+		kept := make([]interface{}, 0, len(env))
+		dropped := map[string]bool{}
 		for _, e := range env {
 			em, ok := e.(map[string]interface{})
 			if !ok {
+				kept = append(kept, e)
 				continue
 			}
-			if en, _ := em["name"].(string); en == svc.TenantEnv {
+			en, _ := em["name"].(string)
+			if _, remove := drop[en]; remove {
+				dropped[en] = true
+				continue
+			}
+			if en == svc.TenantEnv {
 				em["value"] = tenant
 				patchedEnv = true
 			}
+			kept = append(kept, e)
 		}
+		// A DECLARED DROP THAT MATCHED NOTHING IS AN ERROR. The base having
+		// renamed or removed the variable is exactly when this entry stops
+		// protecting anything, and a silent no-op would leave the reason recorded
+		// in services.go while the behaviour it describes had quietly ended — the
+		// dead-exemption failure mode the arch guards are built to refuse.
+		for _, d := range svc.DropEnv {
+			if !dropped[d.Name] {
+				return fmt.Errorf("Deployment %q: DropEnv names %s, which container %q does not "+
+					"set. Either the base renamed it — in which case update the entry — or the "+
+					"variable is gone and the entry must be deleted; a drop that matches nothing "+
+					"records a reason for behaviour that has stopped happening (%s)",
+					name, d.Name, svc.Container, d.Why)
+			}
+		}
+		cm["env"] = kept
 	}
 	if !patchedEnv {
 		return fmt.Errorf("Deployment %q: no %s env var found on a container named %q", name, svc.TenantEnv, svc.Container)

@@ -747,10 +747,53 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// EngineImpl, sharing the live store + cache + registry. Started only when
 	// an address is configured; stopped gracefully when ctx is canceled.
 	if cfg.GRPCListen != "" {
+		// THE INSTRUMENT CLASSIFIER (#640), and it is what makes the named
+		// scenario catalog work at all. Every scenario in internal/risk/scenario/
+		// library is built from SectorCurve, which emits v1.SectorShock
+		// exclusively — GFC_2008, COVID_2020 and the credit, factor, liquidity and
+		// climate stresses — so with this seam empty EvaluateScenario could only
+		// refuse. It reads the same golden security master the compliance gate
+		// does, through the same cache, so a sector a mandate buckets on and a
+		// sector a stress shocks are the same string.
+		//
+		// BUILT HERE AND NOT AT THE TOP OF run, because the classifier's only
+		// consumer is this query surface: a deployment with no GRPCListen serves
+		// no scenario and would be paying for a refresh cycle nothing reads.
+		refCache, err := cfg.RefData.NewCache(cfg.Tenant, "svc:risk-engine")
+		if err != nil {
+			logger.Error("risk-engine: the instrument classifier refused its configuration", "err", err)
+			return err
+		}
+		cfg.RefData.LogPosture(logger, "risk-engine")
+		engineOpts := sharding.EngineOptions()
+		if refCache != nil {
+			engineOpts = append(engineOpts, engine.WithClassifier(app.NewFactorClassifier(refCache)))
+			// The refresh cycle. It exits on ctx.Done like the calibration
+			// scheduler beside it; a failed cycle logs and retries, because a
+			// scenario that refuses is recoverable and a risk engine that exits is
+			// not.
+			go func() {
+				ticker := time.NewTicker(cfg.RefData.RefreshInterval)
+				defer ticker.Stop()
+				for {
+					if n, err := refCache.Refresh(ctx); err != nil {
+						logger.Error("risk-engine: the instrument reference refresh reported "+
+							"failures — scenarios shocking the sectors it could not resolve "+
+							"will be refused",
+							"err", err, "installed_despite_failures", n)
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+					}
+				}
+			}()
+		}
 		// WithOwnership: this Service fans out across every replica, so a query for
 		// a portfolio held elsewhere must be refused by name rather than answered
 		// from the local cache or reported as not-found (#110).
-		engineImpl := engine.New(store, registry, cache, risk.NewDetector(), sharding.EngineOptions()...)
+		engineImpl := engine.New(store, registry, cache, risk.NewDetector(), engineOpts...)
 		stopGRPC, err := serveQueryGRPC(ctx, cfg, mesh.Source, engineImpl, logger)
 		if err != nil {
 			return err
