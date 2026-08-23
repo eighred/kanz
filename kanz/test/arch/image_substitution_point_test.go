@@ -1,7 +1,9 @@
 package arch
 
 import (
+	"io/fs"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -46,21 +48,54 @@ func TestExactlyOneImageSubstitutionPoint(t *testing.T) {
 			"#81 was opened to end.")
 	}
 
-	// 2. NO SECOND MECHANISM. Walk every Argo CD Application/ApplicationSet and
-	//    look for the image-override surfaces: kustomize.images, kustomize's
-	//    newTag/newName, and helm parameters naming an image. Presence is not
-	//    automatically wrong — it is wrong unless somebody wrote down why.
+	// 2. NO SECOND MECHANISM. Look for the image-override surfaces —
+	//    kustomize.images, kustomize's newTag/newName, and helm parameters naming
+	//    an image — in EVERY Argo CD Application/ApplicationSet in the repository.
+	//    Presence is not automatically wrong; it is wrong unless somebody wrote
+	//    down why.
+	//
+	// DISCOVERED BY KIND, NOT READ FROM A LIST. This loop used to open three
+	// hard-coded paths — applicationset.yaml, preview-applicationset.yaml,
+	// bootstrap.yaml — which happened to be every Argo document in the repo on
+	// the day it was written, and made the guard's real property "none of these
+	// three files declares a second substitution point" rather than the one its
+	// name claims. A FOURTH FILE WAS INVISIBLE. Measured, not reasoned about: an
+	// ApplicationSet carrying `kustomize: {newTag: latest}` — which overrides
+	// EVERY pinned digest in the estate with a floating tag, the exact silent
+	// disagreement between git and the cluster this file's header describes —
+	// was added under infra/ and the WHOLE arch suite stayed green.
+	//
+	// It is the same lesson infraYAMLFiles already records one file over: "the
+	// two guards that came before this one each read a single hard-coded file,
+	// which is how a namespace with no policy at all stayed invisible". A guard
+	// against a mechanism arriving cannot enumerate the places it may arrive.
 	found := map[string]string{} // repo-relative file -> what was found
-	for _, rel := range []string{
-		filepath.Join("infra", "gitops", "applicationset.yaml"),
-		filepath.Join("infra", "gitops", "preview-applicationset.yaml"),
-		filepath.Join("infra", "gitops", "bootstrap.yaml"),
-	} {
-		body := readFile(t, filepath.Join(root, rel))
-		key := filepath.ToSlash(rel)
-		if mech := imageOverrideMechanism(t, body); mech != "" {
-			found[key] = mech
+	argoDocs := 0
+	for _, path := range repoYAMLFiles(t, root) {
+		body := readFile(t, path)
+		if !declaresArgoApplication(body) {
+			continue
 		}
+		argoDocs++
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			t.Fatalf("relativize %s: %v", path, err)
+		}
+		if mech := imageOverrideMechanism(t, body); mech != "" {
+			found[filepath.ToSlash(rel)] = mech
+		}
+	}
+
+	// NON-VACUITY ON THE DISCOVERY ITSELF. The three files above are known to be
+	// Argo documents, so finding fewer means the walk or the kind check is broken
+	// — and a broken discovery reports "no second substitution point" for the
+	// same reason an empty estate would, which is the failure mode this rewrite
+	// exists to end.
+	if argoDocs < 3 {
+		t.Fatalf("found only %d Argo Application/ApplicationSet document(s) in the repository — "+
+			"applicationset.yaml, preview-applicationset.yaml and bootstrap.yaml are all known to "+
+			"be Argo documents, so the walk or the kind check is broken, not the estate. A guard "+
+			"that discovers nothing cannot tell 'one substitution point' from 'none'", argoDocs)
 	}
 
 	for _, f := range sortedKeys(found) {
@@ -165,4 +200,81 @@ type appSource struct {
 			Name string `yaml:"name"`
 		} `yaml:"parameters"`
 	} `yaml:"helm"`
+}
+
+// repoYAMLFiles returns every YAML file in the repository, both extensions.
+//
+// THE WHOLE REPO, NOT infra/. An Argo Application is a plain manifest and
+// nothing confines one to infra/gitops — a bootstrap document under .github/,
+// a DR runbook's manifest, or a new directory nobody has thought of yet are all
+// places one can appear, and the guard above exists precisely for the file
+// nobody anticipated. infraYAMLFiles is the narrower sibling of this and is
+// deliberately not reused: it takes only ".yaml", so a rogue ".yml" would slip
+// past, and it stops at infra/.
+//
+// Directories that cannot hold a hand-written manifest are skipped so the walk
+// stays quick on a repo carrying node_modules and a web build.
+func repoYAMLFiles(t *testing.T, moduleRootDir string) []string {
+	t.Helper()
+	repoRoot := filepath.Dir(moduleRootDir)
+	skip := map[string]bool{
+		".git": true, "node_modules": true, "dist": true, "vendor": true,
+		"build": true, ".next": true, "coverage": true,
+	}
+	var files []string
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if skip[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", repoRoot, err)
+	}
+	// The same floor infraYAMLFiles carries, for the same reason: a walk that
+	// returns almost nothing makes every guard built on it pass by finding
+	// nothing.
+	if len(files) < 40 {
+		t.Fatalf("found only %d YAML files in the repository — the walk is broken, and every "+
+			"guard built on it would pass by finding nothing", len(files))
+	}
+	sort.Strings(files)
+	return files
+}
+
+// declaresArgoApplication reports whether a manifest carries an Argo CD
+// Application or ApplicationSet document.
+//
+// Decoded as a YAML stream and matched on apiVersion + kind, never grepped:
+// "kind: Application" appears in prose in this repository's README files, and a
+// guard that fires on documentation is one people learn to route around — the
+// same reasoning imageOverrideMechanism gives for parsing rather than grepping.
+// The apiVersion check is what keeps an unrelated CRD that happens to be called
+// Application out.
+func declaresArgoApplication(body string) bool {
+	dec := yaml.NewDecoder(strings.NewReader(body))
+	for {
+		var doc struct {
+			APIVersion string `yaml:"apiVersion"`
+			Kind       string `yaml:"kind"`
+		}
+		if err := dec.Decode(&doc); err != nil {
+			return false
+		}
+		if !strings.HasPrefix(doc.APIVersion, "argoproj.io/") {
+			continue
+		}
+		if doc.Kind == "Application" || doc.Kind == "ApplicationSet" {
+			return true
+		}
+	}
 }
