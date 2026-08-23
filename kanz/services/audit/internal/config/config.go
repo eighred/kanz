@@ -37,9 +37,16 @@ type Config struct {
 	// ConsumerGroup is the durable consumer name. A single group means the
 	// projection is processed once (the audit log must not double-count).
 	ConsumerGroup string
-	// Subjects are the subjects to materialize. Default ">" — the audit log is
-	// comprehensive by design (every decision/command/outcome/quality event);
-	// narrow per deployment via AUDIT_SUBJECTS only with a clear reason.
+	// Subjects are the subjects to materialize — ONE PER PROVISIONED STREAM, not
+	// a single ">". The audit log is comprehensive by design (every
+	// decision/command/outcome/quality event); narrow per deployment via
+	// AUDIT_SUBJECTS only with a clear reason.
+	//
+	// IT WAS ">" AND THAT MATERIALIZED ONE STREAM (#698). A subscription binds to
+	// exactly one stream, and the JetStream client resolved ">" by taking the
+	// first of the sixteen it matched, in the server's order, with no error. The
+	// other fifteen were never consumed — while this service reported Ready and
+	// its consume counter climbed from the one stream that did deliver.
 	Subjects []string
 
 	// DatabaseURL is the Postgres DSN for the durable, WORM audit log. Empty ⇒
@@ -117,8 +124,68 @@ type Config struct {
 	SPIFFESocket string
 }
 
-// DefaultSubjects materializes everything — audit completeness over economy.
-var DefaultSubjects = []string{">"}
+// DefaultSubjects materializes everything — audit completeness over economy —
+// by naming EVERY provisioned stream's subject space, one entry per stream.
+//
+// # Why an enumeration rather than ">"
+//
+// ">" reads as "everything" and delivered one sixteenth of it (#698):
+// pkg/bus.Subscribe binds one stream per subscription, and the client silently
+// returned the first match. pkg/bus now REFUSES a multi-stream subject, so this
+// list is not merely better — ">" no longer starts.
+//
+// # Why the list is safe to enumerate
+//
+// A list duplicating infra/nats/bootstrap-job.yaml is exactly the kind that goes
+// stale the day somebody provisions a seventeenth stream, and a stale list here
+// is a silent audit gap again. test/arch's TestAuditMaterializesEveryProvisionedStream
+// compares the two in BOTH directions on every build: a stream nothing here
+// covers fails, and an entry matching no stream fails. The enumeration is
+// checked, not remembered.
+//
+// # The entries are the streams' OWN subject sets
+//
+// Not the domain prefixes. `risk.>` would match both RISK and POSITION, which is
+// the multi-stream subject this whole change exists to refuse; the split between
+// them (POSITION is compacted, max-msgs-per-subject=1) is why they are separate
+// streams at all.
+var DefaultSubjects = []string{
+	"market.>",             // MARKET
+	"risk.portfolio.>",     // RISK
+	"risk.exposure.>",      // RISK
+	"risk.signal.>",        // RISK
+	"risk.command.>",       // RISK
+	"execution.>",          // EXECUTION
+	"strategy.>",           // EXECUTION
+	"order.>",              // EXECUTION
+	"optimization.>",       // EXECUTION
+	"tenant.*.order.>",     // TENANT_ORDER — the MT-02 command bridge
+	"inference.>",          // INFERENCE
+	"platform.>",           // PLATFORM
+	"data.>",               // DATA
+	"observability.>",      // OBSERVABILITY
+	"accounting.>",         // ACCOUNTING
+	"compliance.breach.>",  // COMPLIANCE
+	"settlement.>",         // SETTLEMENT
+	"alternatives.>",       // ALTERNATIVES
+	"compliance.mandate.>", // MANDATE
+	"wealth.>",             // WEALTH
+	"risk.position.>",      // POSITION
+	"dlq.>",                // DLQ — a dropped event is an audit fact of its own
+	// TENANT_FACT — every provisioned tenant's FACTs, arriving under a
+	// tfact.<tenant>. prefix through the #668 return path. THIS ENTRY IS THE
+	// TENANT'S COMPLIANCE TRAIL: NATS accounts are isolated by construction, so
+	// without it a tenant's orders, fills and ledger postings are recorded
+	// nowhere at all, while every service stays Ready — "this tenant produced no
+	// events" and "this tenant's events cannot reach me" being the same
+	// observable state.
+	//
+	// The projector needs no change: it takes TenantID off the ENVELOPE, which
+	// crosses the bridge unmodified, so a FACT arriving as
+	// tfact.acme.order.order.filled is folded under tenant acme by the same code
+	// path as a platform event. The prefix is transport, not identity.
+	"tfact.>",
+}
 
 func Load() (Config, error) {
 	subjects := env.SplitList(os.Getenv("AUDIT_SUBJECTS"))

@@ -131,11 +131,14 @@ var tenantBridgeExempt = map[string]string{
 		"accounting.kanz-services.svc, which is the __system__ instance — so the tenant's ledger " +
 		"would exist and no read route would reach it. That is not a regression (the reads are " +
 		"empty today) but it is a decision, and #668 carries it.",
-	"acme/audit": "#668 — audit is the one role here that is genuinely multi-tenant in code " +
-		"(internal/audit/projector.go takes TenantID off the envelope), so remedy 2 is the honest " +
-		"one for it: __system__ importing the tenant's FACTs under a tenant.<t>. PREFIX, with a " +
-		"tenant.> stream and an AUDIT_SUBJECTS change. Importing them unprefixed instead would " +
-		"deliver them to the platform archiver (NACKs forever) and platform accounting (#223).",
+	// RETIRED (#668) by the mechanism meant to retire it, not by anyone
+	// remembering. This entry read "remedy 2 is the honest one for it:
+	// __system__ importing the tenant's FACTs under a tenant.<t>. PREFIX, with a
+	// tenant.> stream and an AUDIT_SUBJECTS change". All three landed — under
+	// `tfact.<t>.` rather than `tenant.<t>.`, because the inbound command bridge
+	// already owns tenant.*.order.> and two streams may not claim overlapping
+	// subjects — and this guard's dead-entry arm then failed the build until the
+	// entry was deleted. The exemption could not be forgotten.
 	"acme/risk-engine": "#668 — same tenant-pinned shape as accounting, plus two kinds tenantgen " +
 		"refuses today: risk-engine deploys as an Argo Rollout with a canary analysis step and a KEDA " +
 		"ScaledObject, and the analysis template selects on `app: risk-engine`, which every tenant's " +
@@ -356,17 +359,37 @@ func systemImportsTenantUnderPrefix(system, tenantBlock, tenant string) bool {
 		if acct == nil || acct[1] != tenant {
 			continue
 		}
-		want := "tenant." + tenant
-		if p := importPrefix.FindStringSubmatch(entry); p != nil {
-			if p[1] == want || strings.HasPrefix(p[1], want+".") {
-				return true
-			}
+		// TENANT-SCOPED, NOT A PARTICULAR PREFIX WORD. What matters is that the
+		// subjects land somewhere scoped to THIS tenant rather than on the
+		// logical names __system__'s own consumers subscribe — the unprefixed
+		// import that is worse than none. Which prefix family carries them is a
+		// topology choice, and this guard was written when only `tenant.` existed:
+		// it hardcoded that word, so the OUTBOUND bridge landing under `tfact.`
+		// (#668 — the inbound command bridge already owns `tenant.*.order.>`, and
+		// two streams may not claim overlapping subjects) read as no bridge at all.
+		//
+		// The rule is therefore structural: the prefix's LAST token names the
+		// tenant. `tenant.acme` and `tfact.acme` both qualify; a bare `acme` does
+		// too; an absent prefix does not, and neither does one naming a different
+		// tenant.
+		if p := importPrefix.FindStringSubmatch(entry); p != nil && lastToken(p[1]) == tenant {
+			return true
 		}
 		if s := importSubject.FindStringSubmatch(entry); s != nil {
-			if strings.HasPrefix(s[1], want+".") {
+			if toks := strings.Split(s[1], "."); len(toks) > 2 && toks[1] == tenant {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// lastToken returns the final dot-separated token of a NATS subject prefix, or
+// "" for an empty one. `tfact.acme` -> `acme`.
+func lastToken(prefix string) string {
+	if prefix == "" {
+		return ""
+	}
+	toks := strings.Split(prefix, ".")
+	return toks[len(toks)-1]
 }

@@ -122,6 +122,26 @@ data:
     # __system__ mapping rewrites tenant.__system__.order.* to order.* BEFORE
     # subject matching, and the rewritten subject does not match tenant.*.
     ensure_stream TENANT_ORDER  "tenant.*.order.>" 24h
+    # THE TENANT RETURN PATH (#668). tenancy.yaml has __system__ import each
+    # tenant account's FACT subject spaces under a `tfact.<tenant>.` prefix; this
+    # binds them, so audit can materialize a tenant's compliance trail.
+    #
+    # WITHOUT THIS STREAM the imports resolve and the messages land on subjects
+    # NO STREAM CARRIES. A core-NATS delivery with no subscriber is dropped
+    # silently — there is no error on either side, and the tenant's FACTs would
+    # cross the account boundary and then evaporate. That is the same silence
+    # #668 exists to end, moved one hop further along.
+    #
+    # `tfact.*.>` AND NOT `tenant.*.>`: TENANT_ORDER above already owns
+    # `tenant.*.order.>` for the INBOUND command bridge, and two streams may not
+    # claim overlapping subjects. Reusing the prefix would put a tenant's order
+    # FACTs inside the command stream, sharing its 24h retention, with the
+    # direction of travel invisible in the subject.
+    #
+    # 168h, matching ACCOUNTING and COMPLIANCE rather than EXECUTION's 24h: this
+    # is the window audit has to materialize a tenant's compliance record before
+    # it ages off, and a weekend plus a bank holiday is longer than a day.
+    ensure_stream TENANT_FACT   "tfact.*.>"       168h
     ensure_stream INFERENCE     "inference.>"     24h
     ensure_stream PLATFORM      "platform.>"      168h
     ensure_stream DATA          "data.>"          168h

@@ -150,6 +150,47 @@ broker is broker-specific and keys on the envelope `tenant_id`:
   `{tenant}.`. `{tenant}` joins `replay`/`dlq` as a reserved leading segment;
   no domain may be named like a tenant.
 
+### Tenant FACT return prefix — `tfact.{tenant}.` (#668)
+
+`tenant.{tenant}.` above carries **commands INTO** a tenant account. It is
+one-directional, and for a long time nothing carried anything back: NATS
+accounts are isolated by construction, so every FACT a tenant's OMS published
+was visible to no platform service. A tenant got orders in and nothing out —
+no ledger, no positions, no audit trail — with every service Ready
+throughout, because *"this tenant produced no events"* and *"this tenant's
+events cannot reach me"* are the same observable state.
+
+The return path is the mirror image: each tenant account **exports** its FACT
+subject spaces, and `__system__` **imports** them under `tfact.{tenant}.`. The
+prefix exists only inside `__system__`; nothing in a tenant account ever sees
+it, so the 3-segment contract above still holds everywhere it is read, and
+`event_type` never carries it.
+
+**Why a second prefix rather than reusing `tenant.`.** The inbound bridge
+already owns `tenant.*.order.>` — that is the `TENANT_ORDER` stream's subject
+set — and two JetStream streams may not claim overlapping subjects. Importing
+a tenant's order FACTs under the same prefix would land them inside the
+*command* stream, sharing its 24h retention, with the direction of travel
+invisible in the subject. `tfact.` says outbound in the name and leaves the
+working command bridge untouched. It is bound by the `TENANT_FACT` stream at
+168h.
+
+`tfact` joins `tenant`/`replay`/`dlq` as a **reserved leading segment**: no
+domain may be named `tfact`.
+
+**It must not be imported unprefixed.** The logical names are what
+`__system__`'s own consumers subscribe: the platform archiver would NACK
+forever (`internal/topic.For` refuses an envelope whose `tenant_id` is not its
+own) and platform accounting would fold another tenant's event into
+`__system__`'s book (#223). An unprefixed import is worse than none.
+
+**Exporting a FACT space does not loop the commands back out.** A tenant's
+commands arrive on `order.order.submit` *inside* its account — the same space
+it exports — so a re-export would return every command to the platform as
+though the tenant had emitted it, double-counting the audit trail. NATS does
+not re-export what arrived by import; verified against nats-server v2.14.5 with
+both halves of the real `tenancy.yaml` loaded.
+
 The reserved tenant `__system__` carries cross-cutting platform/observability
 streams and pre-tenancy (untenanted) events; in Kafka those keep the
 **un-prefixed** legacy topic names. Provisioning lives in `kanz/infra/{nats,
