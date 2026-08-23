@@ -102,6 +102,20 @@ var Services = []Service{
 			"is that real orders must never be placed against a store that may not be backed up.",
 	},
 	{
+		Name:      "accounting",
+		Base:      "infra/deploy/accounting-deploy.yaml",
+		Container: "accounting",
+		TenantEnv: "ACCOUNTING_TENANT",
+		Why: "the tenant's BOOK OF RECORD. accounting folds the tenant's fills into ledger " +
+			"entries, and it is pinned to one tenant for the process lifetime by ACCOUNTING_TENANT " +
+			"and internal/pg.NewTenantPool (#97), so it cannot be reached by an export/import " +
+			"bridge the way audit can — it subscribes the LOGICAL subject names, and a " +
+			"tenant-prefixed subject arrives as nothing. Without a rendered instance inside the " +
+			"tenant's NATS account, the tenant's orders fill and NO LEDGER ENTRY IS POSTED: NAV, " +
+			"cash and the buying-power gate are all computed over an empty book, while every " +
+			"service reports Ready (#668).",
+	},
+	{
 		Name:      "oms",
 		Base:      "infra/deploy/oms-deploy.yaml",
 		Container: "oms",
@@ -148,11 +162,29 @@ func KafkaProducerNames() []string {
 	return out
 }
 
+// WorkloadName is the name a per-tenant render carries: "<service>-<tenant>".
+//
+// ONE RULE, IN ONE PLACE. It was spelled out four times — the object name and
+// the ServiceAccount suffix in render.go, the manifest path and the SPIFFE ID
+// here — and a fifth caller was about to arrive outside this package: the
+// api-gateway has to derive `accounting-acme.kanz-services.svc` from the shared
+// address to reach a tenant's own instance (#668). A naming rule the ROUTER and
+// the RENDERER each hold their own copy of is one that breaks the day a tenant
+// id contains something one of them normalises and the other does not — and it
+// breaks as a 503 against a Service that was rendered under a different name.
+//
+// The tenant is not validated here: callers that accept one from outside go
+// through validateTenant first, and the render path has already done so by the
+// time it names anything.
+func WorkloadName(service, tenant string) string {
+	return service + "-" + tenant
+}
+
 // ManifestPath is where a tenant's rendered manifest for svc lives, relative to
 // the module root. One rule, so the generator, the CLI, the provisioning script
 // and the drift guard cannot disagree about where a manifest is.
 func (s Service) ManifestPath(tenant string) string {
-	return path.Join("infra", "deploy", "tenants", tenant, s.Name+"-"+tenant+".yaml")
+	return path.Join("infra", "deploy", "tenants", tenant, WorkloadName(s.Name, tenant)+".yaml")
 }
 
 // ComputeSPIFFEID is the identity a rendered pod actually presents: the SPIRE
@@ -164,13 +196,24 @@ func (s Service) ManifestPath(tenant string) string {
 // A tenant's NATS account must admit this exact string or the pod authenticates
 // and maps to NO account, able to neither publish nor subscribe (SEC-M3).
 func (s Service) ComputeSPIFFEID(tenant string) string {
-	return "spiffe://kanz.internal/ns/kanz-services/sa/" + s.Name + "-" + tenant
+	return "spiffe://kanz.internal/ns/kanz-services/sa/" + WorkloadName(s.Name, tenant)
 }
 
-// validateTenant is the one place a tenant id is checked.
-func validateTenant(tenant string) error {
+// ValidateTenant is the one place a tenant id is checked.
+//
+// EXPORTED because the api-gateway checks the same ids (#668): it resolves a
+// tenant's own upstream by rewriting a hostname to tenantgen.WorkloadName, so an
+// id this package would refuse to render is one the gateway must refuse to
+// route to — it would name a Service that was never generated, and the only
+// symptom would be a 503 nobody can trace back to a typo in an env var. A second
+// regex at the edge is the copy this repository keeps paying for.
+func ValidateTenant(tenant string) error {
 	if !tenantIDRE.MatchString(tenant) {
 		return fmt.Errorf("tenantgen: invalid tenant id %q: must be lowercase alphanumeric with internal hyphens only", tenant)
 	}
 	return nil
 }
+
+// validateTenant is the in-package spelling, kept so the render path reads as it
+// did.
+func validateTenant(tenant string) error { return ValidateTenant(tenant) }

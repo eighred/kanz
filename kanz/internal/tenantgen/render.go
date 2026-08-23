@@ -151,7 +151,7 @@ func transform(doc map[string]interface{}, svc Service, tenant string) error {
 	if !ok || name == "" {
 		return fmt.Errorf("no metadata.name (kind=%q)", kind)
 	}
-	metadata["name"] = name + "-" + tenant
+	metadata["name"] = WorkloadName(name, tenant)
 	stampTenant(ensureMap(metadata, "labels"), tenant)
 
 	spec, _ := doc["spec"].(map[string]interface{})
@@ -202,7 +202,7 @@ func transformDeployment(spec map[string]interface{}, svc Service, name, tenant 
 	if sa == "" {
 		return fmt.Errorf("Deployment %q template has no serviceAccountName", name)
 	}
-	tmplSpec["serviceAccountName"] = sa + "-" + tenant
+	tmplSpec["serviceAccountName"] = WorkloadName(sa, tenant)
 
 	if spreads, ok := tmplSpec["topologySpreadConstraints"].([]interface{}); ok {
 		for _, s := range spreads {

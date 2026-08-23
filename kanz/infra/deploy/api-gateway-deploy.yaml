@@ -113,6 +113,22 @@ spec:
           ports:
             - { containerPort: 8080, name: http }
           env:
+            # WHICH TENANTS HAVE THEIR OWN INSTANCES (#668). MT-02 renders some
+            # services per tenant (internal/tenantgen.Services), each with its own
+            # Service, database scope and NATS account. This gateway dials one
+            # address per service and cannot read infra/deploy/tenants/ at runtime,
+            # so it is told here which tenants to route to their own.
+            #
+            # A SHORT LIST IS THE DANGEROUS ONE. A tenant wrongly INCLUDED 503s
+            # against a Service that does not exist — loud, and fixed in a minute.
+            # A tenant wrongly OMITTED is dialled at the SHARED address, which is
+            # the __system__ instance: its NAV, cash and ledger reads answer 200
+            # carrying the PLATFORM book's numbers, another tenant's fills returned
+            # to an authenticated caller as their own. Nothing at runtime can catch
+            # that — the address resolves, the upstream is healthy, the response is
+            # well-formed. test/arch's TestGatewayTenantUpstreamsMatchTheRenderedTenants
+            # compares this value against what is actually rendered.
+            - { name: API_GATEWAY_PER_TENANT_UPSTREAMS, value: "acme" }
             - { name: API_GATEWAY_LISTEN, value: ":8080" }
             # REQUIRED: the process exits 2 without it. The dial itself is lazy, so a
             # momentarily-unreachable risk-engine does not fail startup.

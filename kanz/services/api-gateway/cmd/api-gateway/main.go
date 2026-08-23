@@ -710,7 +710,15 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 		// the dev kind rig has no SPIRE.
 		logger.Warn("api-gateway: Phase-7 upstreams plaintext (no API_GATEWAY_SPIFFE_SOCKET)")
 	}
-	return proxy.New(proxy.NewMeshBackend(bases, &http.Client{Transport: tr}), proxyRoles(cfg)), nil
+	backend, err := proxy.NewMeshBackend(bases, &http.Client{Transport: tr}).
+		WithPerTenantUpstreams(cfg.PerTenantUpstreams)
+	if err != nil {
+		// A tenant id this gateway cannot route to is a typo in an env var, and
+		// the only symptom downstream would be a 503 against a Service that was
+		// never rendered. Refuse at boot, where the message can name the value.
+		return nil, err
+	}
+	return proxy.New(backend, proxyRoles(cfg)), nil
 }
 
 // proxyRoles is the ONE place the optional-capability roles are handed to the

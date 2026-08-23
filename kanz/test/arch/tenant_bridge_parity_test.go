@@ -125,20 +125,21 @@ var factConsumerRoles = []factConsumerRole{
 // Keyed "<tenant>/<role>" so a repair is retired one role at a time, and so
 // onboarding a second tenant does not silently inherit the first's permission.
 var tenantBridgeExempt = map[string]string{
-	"acme/accounting": "#668 — accounting is pinned to __system__ by ACCOUNTING_TENANT and its pool is " +
-		"bound to one tenant for the process lifetime (#97), so remedy 1 is the shape it needs. " +
-		"Rendering it per tenant lands the WRITE side only: the api-gateway dials one address, " +
-		"accounting.kanz-services.svc, which is the __system__ instance — so the tenant's ledger " +
-		"would exist and no read route would reach it. That is not a regression (the reads are " +
-		"empty today) but it is a decision, and #668 carries it.",
-	// RETIRED (#668) by the mechanism meant to retire it, not by anyone
-	// remembering. This entry read "remedy 2 is the honest one for it:
-	// __system__ importing the tenant's FACTs under a tenant.<t>. PREFIX, with a
-	// tenant.> stream and an AUDIT_SUBJECTS change". All three landed — under
-	// `tfact.<t>.` rather than `tenant.<t>.`, because the inbound command bridge
-	// already owns tenant.*.order.> and two streams may not claim overlapping
-	// subjects — and this guard's dead-entry arm then failed the build until the
-	// entry was deleted. The exemption could not be forgotten.
+	// RETIRED (#668). accounting now runs INSIDE the acme account — remedy 1,
+	// the only one open to it: it is pinned to one tenant by ACCOUNTING_TENANT
+	// and internal/pg.NewTenantPool (#97) and subscribes the LOGICAL subject
+	// names, so the tfact.<tenant>. bridge below reaches it as nothing at all.
+	// internal/tenantgen renders it, the manifest is committed under
+	// infra/deploy/tenants/acme/, and tenancy.yaml admits accounting-acme's SVID;
+	// this guard checks all three, and its dead-entry arm failed the build until
+	// this entry was deleted.
+	//
+	// RETIRED (#668) — acme/audit, by the same mechanism. Its entry read "remedy 2
+	// is the honest one for it: __system__ importing the tenant's FACTs under a
+	// tenant.<t>. PREFIX, with a tenant.> stream and an AUDIT_SUBJECTS change".
+	// All three landed — under `tfact.<t>.` rather than `tenant.<t>.`, because the
+	// inbound command bridge already owns tenant.*.order.> and two streams may not
+	// claim overlapping subjects. Neither exemption could be forgotten.
 	"acme/risk-engine": "#668 — same tenant-pinned shape as accounting, plus two kinds tenantgen " +
 		"refuses today: risk-engine deploys as an Argo Rollout with a canary analysis step and a KEDA " +
 		"ScaledObject, and the analysis template selects on `app: risk-engine`, which every tenant's " +
