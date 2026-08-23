@@ -1,6 +1,7 @@
 package venuemargin
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -38,6 +39,7 @@ var ErrUndated = errors.New("venuemargin: observation carries no observation tim
 type Reporter struct {
 	src     execution.VenueMarginSource
 	pub     execution.Publisher
+	symbols execution.SymbolMapper
 	venue   string
 	account string
 	tenant  string
@@ -49,8 +51,20 @@ type Reporter struct {
 
 // ReporterConfig configures a Reporter.
 type ReporterConfig struct {
-	Source  execution.VenueMarginSource
-	Pub     execution.Publisher
+	Source execution.VenueMarginSource
+	Pub    execution.Publisher
+	// Symbols resolves the exchange's own spelling back to this platform's
+	// instrument id, so a liquidation price can be paired with a mark (#408
+	// control 4). It is the adapter's OWN map, which is the only place the
+	// inversion is definable — execution.ParseSymbolMap refuses a many-to-one
+	// map precisely so that it is.
+	//
+	// NIL IS ALLOWED and degrades exactly one field: the account's maintenance
+	// margin and margin ratio are unaffected, and every liquidation price is
+	// published with no instrument_id and an `unmapped_venue_symbol` exclusion
+	// naming it. That is visible in the observation's coverage rather than
+	// silent, which is why it is not a construction error.
+	Symbols execution.SymbolMapper
 	Venue   string
 	Account string
 	Tenant  string
@@ -79,7 +93,7 @@ func NewReporter(cfg ReporterConfig) *Reporter {
 		cfg.Now = time.Now
 	}
 	return &Reporter{
-		src: cfg.Source, pub: cfg.Pub, venue: cfg.Venue, account: cfg.Account,
+		src: cfg.Source, pub: cfg.Pub, symbols: cfg.Symbols, venue: cfg.Venue, account: cfg.Account,
 		tenant: cfg.Tenant, now: cfg.Now,
 		onError: cfg.OnError, onUncovered: cfg.OnUncovered,
 	}
@@ -192,18 +206,37 @@ func (r *Reporter) build(obs execution.VenueMargin) (*collateralpb.VenueMarginSt
 		if p.Symbol == "" {
 			continue
 		}
+		// The exchange's spelling resolved back to ours, at the one place both
+		// halves exist (#408 control 4). Empty is a real answer — see below.
+		instrumentID := ""
+		if r.symbols != nil {
+			instrumentID, _ = execution.InstrumentFor(r.symbols, p.Symbol)
+		}
 		d, ok := toDecimal(p.LiquidationPrice)
 		if !ok {
-			// NAMED, NOT DROPPED. The exclusion carries the symbol so an operator
-			// can see which position's liquidation distance is unknowable. A
-			// position silently absent from the list is one nobody can tell apart
-			// from a position that does not exist.
-			exclude(p.Symbol, reasonFor(p.LiquidationPrice, SkipNoLiquidationPrice))
+			// NAMED, NOT DROPPED. The exclusion carries the instrument so an
+			// operator can see which position's liquidation distance is
+			// unknowable. A position silently absent from the list is one nobody
+			// can tell apart from a position that does not exist.
+			//
+			// It falls back to the venue symbol when the instrument could not be
+			// resolved, because a name an operator can search for beats an empty
+			// field — and the unmapped case gets its own exclusion below.
+			exclude(cmp.Or(instrumentID, p.Symbol), reasonFor(p.LiquidationPrice, SkipNoLiquidationPrice))
 			continue
 		}
 		msg.LiquidationPrices = append(msg.LiquidationPrices, &collateralpb.VenueLiquidationPrice{
-			VenueSymbol: p.Symbol, Price: d,
+			VenueSymbol: p.Symbol, InstrumentId: instrumentID, Price: d,
 		})
+		if instrumentID == "" {
+			// PUBLISHED, AND COUNTED AS UNCOVERED. The price is on the wire because
+			// an operator needs to know the fund holds a leveraged position in
+			// something this deployment cannot measure. It is NOT contributed,
+			// because no consumer can pair it with a mark, and coverage that
+			// counted it would claim an input the measure cannot use.
+			exclude(p.Symbol, SkipUnmappedVenueSymbol)
+			continue
+		}
 		cov.Contributed++
 	}
 	msg.Coverage = cov

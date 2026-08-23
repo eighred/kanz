@@ -230,6 +230,25 @@ message VenueLiquidationPrice {
   // exactly the position nobody is watching. Required.
   string venue_symbol = 1;
 
+  // instrument_id is what THIS PLATFORM calls the same thing, resolved by the
+  // adapter from its own symbol map (#408 control 4).
+  //
+  // WITHOUT IT NOTHING DOWNSTREAM CAN USE THIS PRICE. A liquidation price is
+  // only meaningful against a mark for the same instrument, and every consumer
+  // that holds marks — internal/risk/spotsource, the risk engine — is keyed by
+  // instrument_id. venue_symbol is the EXCHANGE's spelling, and the adapter's
+  // symbol table is instrument -> symbol, so inverting it anywhere else needs a
+  // copy of that adapter's configuration. Resolved here, at the one place both
+  // halves exist, it needs to be resolved nowhere else.
+  //
+  // EMPTY MEANS THE ADAPTER COULD NOT ATTRIBUTE IT, never "no instrument". The
+  // exchange reported a leveraged position in a symbol this deployment's map
+  // does not carry — which is worth publishing, because an operator needs to
+  // know the fund holds something it cannot measure — and the observation's
+  // coverage carries an `unmapped_venue_symbol` exclusion naming it. A consumer
+  // must skip an entry with no instrument_id rather than guess one.
+  string instrument_id = 3;
+
   // price is the exchange's liquidation price for the position, in the
   // instrument's quote currency. Required — a position whose liquidation price
   // the venue did not report is EXCLUDED from the list, never carried at zero.
