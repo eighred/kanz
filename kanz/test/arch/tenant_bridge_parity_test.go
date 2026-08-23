@@ -3,6 +3,7 @@ package arch
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -73,6 +74,16 @@ type factConsumerRole struct {
 	// Loses states what the tenant loses while this role has no path. It is
 	// printed on failure, so an operator reads the consequence, not the rule.
 	Loses string
+	// RemedyTwo states WHY this role can be satisfied by an export/import
+	// bridge, or is EMPTY when it cannot. Empty is the default and the safe one:
+	// only a consumer that is genuinely multi-tenant IN CODE can read a
+	// tenant-prefixed subject, and everything else must run inside the account.
+	//
+	// A STRING RATHER THAN A BOOL, deliberately. "audit: true" invites the next
+	// reader to write "accounting: true" and move on; a sentence has to be
+	// composed, and composing it is where somebody notices that accounting's pool
+	// is bound to one tenant for the process lifetime.
+	RemedyTwo string
 }
 
 var factConsumerRoles = []factConsumerRole{
@@ -90,6 +101,12 @@ var factConsumerRoles = []factConsumerRole{
 	{
 		Name:  "audit",
 		Loses: "no audit trail — the cross-tenant compliance record has no entry for a trade that happened",
+		RemedyTwo: "audit is the ONLY role here that is multi-tenant in code: " +
+			"internal/audit/projector.go takes TenantID off the ENVELOPE rather than from a " +
+			"*_TENANT env var, and audit_log is deliberately not RLS'd because it IS the " +
+			"cross-tenant record. So a subject arriving under a tenant.<t>. prefix is one it folds " +
+			"correctly. Its default subject set is \">\" (config.DefaultSubjects), which is what " +
+			"makes the prefixed space reachable without narrowing anything.",
 	},
 	{
 		Name:  "risk-engine",
@@ -162,14 +179,30 @@ func TestEveryRenderedTenantCanSendItsFactsBack(t *testing.T) {
 			continue
 		}
 
-		// REMEDY 2, measured once per tenant: the return path is two halves and
-		// BOTH are required — an export from the tenant account, and an import in
-		// __system__ naming that tenant. Either alone resolves to nothing: the
-		// broker accepts the config and delivers no message, which is the failure
-		// mode this whole file is about.
-		exported := strings.Contains(block, "exports:") &&
-			strings.Contains(system, "imports:") &&
-			strings.Contains(system, "tenant."+tenant+".")
+		// REMEDY 2: the return path is two halves and BOTH are required — an
+		// export from the tenant account, and an import in __system__ that names
+		// that account AND lands its subjects under a tenant prefix. Either alone
+		// resolves to nothing: the broker accepts the config and delivers no
+		// message, which is the failure mode this whole file is about.
+		//
+		// THIS USED TO BE THREE strings.Contains CALLS, and it was wrong in both
+		// directions at once — measured, with the natural config written out:
+		//
+		//	prefix: "tenant.acme"              -> NOT detected. That is the NATS
+		//	                                      syntax for exactly what remedy 2
+		//	                                      prescribes (the broker appends the
+		//	                                      dot), so the bridge could be built
+		//	                                      correctly and this guard would still
+		//	                                      demand an exemption for it.
+		//	subject: "tenant.acme.accounting.>" -> detected, and credited to EVERY
+		//	                                      role, because the old check ran once
+		//	                                      per tenant. An import carrying only
+		//	                                      audit's traffic marked accounting and
+		//	                                      risk-engine repaired.
+		//
+		// The second is the dangerous one: it turns this guard green on the exact
+		// state it exists to report.
+		exported := systemImportsTenantUnderPrefix(system, block, tenant)
 
 		for _, role := range factConsumerRoles {
 			key := tenant + "/" + role.Name
@@ -190,7 +223,18 @@ func TestEveryRenderedTenantCanSendItsFactsBack(t *testing.T) {
 				rendered = statErr == nil && accountUsers[tenant][svc.ComputeSPIFFEID(tenant)]
 			}
 
-			if rendered || exported {
+			// REMEDY 2 IS CREDITED ONLY TO A ROLE THAT CAN HONESTLY USE IT.
+			// This file's header has always said so — "only honest for a consumer
+			// that is genuinely multi-tenant in code" — and then credited the
+			// export to every role in the list. A tenant-pinned consumer cannot
+			// read a prefixed subject: accounting and risk-engine subscribe the
+			// LOGICAL names and are bound to one tenant by *_TENANT and
+			// internal/pg.NewTenantPool, so tenant.acme.accounting.> reaches them
+			// as nothing at all. Saying otherwise is how this guard would report a
+			// tenant's ledger repaired by an import that only carries audit's
+			// traffic.
+			viaExport := exported && role.RemedyTwo != ""
+			if rendered || viaExport {
 				if exempt {
 					how := "runs inside the " + tenant + " account"
 					if !rendered {
@@ -205,9 +249,16 @@ func TestEveryRenderedTenantCanSendItsFactsBack(t *testing.T) {
 			if exempt {
 				continue
 			}
+			why := "and the account exports nothing that __system__ imports under a tenant prefix"
+			if exported && role.RemedyTwo == "" {
+				why = "and although " + tenant + " DOES export to __system__ under a tenant prefix, that " +
+					"bridge cannot serve this role: it is tenant-pinned (a *_TENANT env var plus " +
+					"internal/pg.NewTenantPool, #97) and subscribes the LOGICAL subject names, so a " +
+					"tenant-prefixed subject reaches it as nothing. It needs remedy 1"
+			}
 			problems = append(problems, key+": compute is rendered for this tenant but its FACTs cannot "+
 				"reach "+role.Name+" — "+role.Name+" is not rendered into the "+tenant+" account "+
-				"(internal/tenantgen.Services), and the account exports nothing that __system__ imports.\n"+
+				"(internal/tenantgen.Services), "+why+".\n"+
 				"      consequence: "+role.Loses+".\n"+
 				"      and it is SILENT: a tenant that produced no events and a tenant whose events "+
 				"cannot arrive are the same observable state, so every service stays Ready throughout.")
@@ -250,4 +301,72 @@ func renderedTenants(t *testing.T, root string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// importEntry matches ONE entry inside an imports: [ ... ] list. NATS writes
+// these on a single line in this file, e.g.
+//
+//	{ stream: { account: acme, subject: "accounting.>" }, prefix: "tenant.acme" }
+//
+// so an entry is everything between a `{ stream:` and the matching close. The
+// pattern is deliberately loose about whitespace and key order, and strict about
+// the two things that decide whether the bridge works: WHICH ACCOUNT the subject
+// comes from, and WHERE it lands.
+var importEntry = regexp.MustCompile(`\{\s*stream:\s*\{[^}]*\}[^}]*\}`)
+
+var (
+	importAccount = regexp.MustCompile(`account:\s*"?([A-Za-z0-9_.-]+)"?`)
+	importPrefix  = regexp.MustCompile(`prefix:\s*"([^"]*)"`)
+	importSubject = regexp.MustCompile(`subject:\s*"([^"]*)"`)
+)
+
+// systemImportsTenantUnderPrefix reports whether __system__ imports FACTs from
+// the tenant's own account and lands them under that tenant's prefix.
+//
+// # Both halves, and the prefix, are load-bearing
+//
+// An export with no matching import — or an import with no export behind it —
+// resolves to nothing: the broker accepts the config and delivers no message,
+// which is the silent shape this whole file exists to report.
+//
+// The PREFIX is the third requirement and the one with teeth. Importing a
+// tenant's FACTs unprefixed would deliver them onto the logical subject names
+// that __system__'s OWN consumers subscribe: the platform archiver would NACK
+// forever (internal/topic.For refuses an envelope whose tenant_id is not its
+// own) and platform accounting would fold another tenant's event into
+// __system__'s book (#223). So an unprefixed import is worse than no import,
+// and must not read as a repair here.
+//
+// # Why both spellings are accepted
+//
+// NATS expresses "land it under a prefix" two ways, and the estate uses both:
+// `prefix: "tenant.acme"` (the broker appends the dot) and an explicitly
+// prefixed `subject: "tenant.acme.…"`. The check this replaced looked for the
+// literal `tenant.acme.` anywhere in the __system__ block, which recognised the
+// second and MISSED THE FIRST — the natural way to write exactly what remedy 2
+// prescribes.
+func systemImportsTenantUnderPrefix(system, tenantBlock, tenant string) bool {
+	// The export half. Without it the import below names a subject the tenant
+	// account never offers, and the broker is content to deliver nothing.
+	if !strings.Contains(tenantBlock, "exports:") {
+		return false
+	}
+	for _, entry := range importEntry.FindAllString(system, -1) {
+		acct := importAccount.FindStringSubmatch(entry)
+		if acct == nil || acct[1] != tenant {
+			continue
+		}
+		want := "tenant." + tenant
+		if p := importPrefix.FindStringSubmatch(entry); p != nil {
+			if p[1] == want || strings.HasPrefix(p[1], want+".") {
+				return true
+			}
+		}
+		if s := importSubject.FindStringSubmatch(entry); s != nil {
+			if strings.HasPrefix(s[1], want+".") {
+				return true
+			}
+		}
+	}
+	return false
 }
