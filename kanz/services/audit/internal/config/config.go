@@ -172,6 +172,19 @@ var DefaultSubjects = []string{
 	"wealth.>",             // WEALTH
 	"risk.position.>",      // POSITION
 	"dlq.>",                // DLQ — a dropped event is an audit fact of its own
+	// TENANT_FACT — every provisioned tenant's FACTs, arriving under a
+	// tfact.<tenant>. prefix through the #668 return path. THIS ENTRY IS THE
+	// TENANT'S COMPLIANCE TRAIL: NATS accounts are isolated by construction, so
+	// without it a tenant's orders, fills and ledger postings are recorded
+	// nowhere at all, while every service stays Ready — "this tenant produced no
+	// events" and "this tenant's events cannot reach me" being the same
+	// observable state.
+	//
+	// The projector needs no change: it takes TenantID off the ENVELOPE, which
+	// crosses the bridge unmodified, so a FACT arriving as
+	// tfact.acme.order.order.filled is folded under tenant acme by the same code
+	// path as a platform event. The prefix is transport, not identity.
+	"tfact.>",
 }
 
 func Load() (Config, error) {
