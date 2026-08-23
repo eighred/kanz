@@ -140,10 +140,23 @@ var tenantBridgeExempt = map[string]string{
 	// All three landed — under `tfact.<t>.` rather than `tenant.<t>.`, because the
 	// inbound command bridge already owns tenant.*.order.> and two streams may not
 	// claim overlapping subjects. Neither exemption could be forgotten.
-	"acme/risk-engine": "#668 — same tenant-pinned shape as accounting, plus two kinds tenantgen " +
-		"refuses today: risk-engine deploys as an Argo Rollout with a canary analysis step and a KEDA " +
-		"ScaledObject, and the analysis template selects on `app: risk-engine`, which every tenant's " +
-		"rollout would share.",
+	// RETIRED (#668). risk-engine now runs INSIDE the acme account, and both
+	// blockers its entry named are gone.
+	//
+	// The two kinds tenantgen refused are taught: a Rollout is a Deployment for
+	// every field this renders, and a ScaledObject needed only its
+	// scaleTargetRef.name suffixed — left alone, a tenant's autoscaler would
+	// have scaled the PLATFORM rollout from the tenant's own queue depth.
+	//
+	// THE SECOND BLOCKER WAS NOT REAL. This entry said "the analysis template
+	// selects on `app: risk-engine`, which every tenant's rollout would share".
+	// infra/deploy/analysis-template.yaml contains ZERO app selectors — every
+	// query filters on rollouts_pod_template_hash="{{args.canary-hash}}", which
+	// Argo sets per Rollout revision, so two tenants cannot collide through it.
+	// The template is deliberately NOT rendered per tenant and the rollout's
+	// templateName reference is deliberately NOT suffixed: it is one shared
+	// statement of what a healthy canary looks like, and a dangling reference
+	// would make Argo treat the analysis as FAILED and abort the rollout.
 }
 
 func TestEveryRenderedTenantCanSendItsFactsBack(t *testing.T) {

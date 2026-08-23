@@ -231,9 +231,17 @@ metadata:
   labels:
     app.kubernetes.io/part-of: kanz
 spec:
-  # RAISED FOR acme's OWN accounting (#668). A tenant's book of record is a
-  # rendered per-tenant workload (internal/tenantgen.Services), so onboarding a
-  # tenant now costs namespace capacity — and a quota that cannot fund the
+  # RAISED FOR acme's OWN accounting AND risk engine (#668). Both are rendered
+  # per-tenant workloads (internal/tenantgen.Services), so onboarding a tenant
+  # now costs namespace capacity.
+  #
+  # THE RISK ENGINE IS THE EXPENSIVE ONE, and the figure is worth reading before
+  # onboarding a second tenant: its Rollout carries replicas: 3 and its KEDA
+  # ScaledObject a maxReplicaCount of 12, so it is 3-12 pods per tenant against
+  # accounting's 2. acme alone moved the ceiling from 98 pods to 110 and from 101
+  # to 113 CPU — roughly a TWELFTH of the namespace for one tenant's risk. A
+  # third tenant does not fit in this quota and is not meant to look as though it
+  # does — and a quota that cannot fund the
   # declared ceiling does not degrade gracefully: the Deployment is admitted,
   # the ReplicaSet cannot create the pods, and the tenant's ledger simply never
   # starts while every existing workload stays healthy.
@@ -245,11 +253,11 @@ spec:
   # quota is under it. It reported exactly this shortfall and these are its
   # figures; do not round them by hand.
   hard:
-    requests.cpu: 50500m
-    requests.memory: 53248Mi
-    limits.cpu: "101"
-    limits.memory: 104Gi
-    pods: "98"
+    requests.cpu: 56500m
+    requests.memory: 59392Mi
+    limits.cpu: "113"
+    limits.memory: 116Gi
+    pods: "110"
 ---
 # LimitRange gives every pod sane defaults + a ceiling, so a container with no
 # explicit resources still gets requests (schedulable, quota-counted) and can't

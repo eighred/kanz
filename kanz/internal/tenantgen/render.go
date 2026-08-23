@@ -178,6 +178,54 @@ func transform(doc map[string]interface{}, svc Service, tenant string) error {
 			return err
 		}
 
+	case "Rollout":
+		// AN ARGO ROLLOUT IS A DEPLOYMENT FOR EVERY FIELD THIS RENDERS. Its
+		// spec.selector, spec.template and the pod spec beneath are the same
+		// shapes, so the same transform runs — a second near-copy of it would be
+		// the drift this package's own DropEnv/naming rules exist to prevent.
+		//
+		// WHAT IT MUST NOT TOUCH is the canary analysis. spec.strategy.canary
+		// references an AnalysisTemplate BY NAME (templateName:
+		// risk-engine-canary), and that template is NOT rendered per tenant: it
+		// is a shared statement of what a healthy canary looks like, and it takes
+		// the rollouts-pod-template-hash as an argument so its queries already
+		// scope to one rollout's canary pods. Renaming the reference here would
+		// point every tenant's rollout at an AnalysisTemplate that does not
+		// exist, and Argo treats a missing template as an analysis FAILURE —
+		// which aborts the rollout. A tenant's risk engine would be undeployable,
+		// and the symptom would be a rollback rather than a not-found.
+		//
+		// THE EXEMPTION THIS RETIRES CLAIMED OTHERWISE. It said "the analysis
+		// template selects on `app: risk-engine`, which every tenant's rollout
+		// would share". It does not: infra/deploy/analysis-template.yaml contains
+		// ZERO app selectors — every query filters on
+		// rollouts_pod_template_hash="{{args.canary-hash}}", which Argo sets
+		// per Rollout revision. Two tenants' rollouts cannot collide through it.
+		if err := transformDeployment(spec, svc, name, tenant); err != nil {
+			return err
+		}
+
+	case "ScaledObject":
+		if spec == nil {
+			return fmt.Errorf("ScaledObject %q has no spec", name)
+		}
+		// THE SCALE TARGET IS THE ONE FIELD THAT MATTERS, and getting it wrong is
+		// not a rendering bug — it is one tenant's autoscaler driving another
+		// tenant's workload. metadata.name is suffixed above like everything
+		// else; if scaleTargetRef.name were left pointing at "risk-engine", the
+		// tenant's ScaledObject would scale the PLATFORM rollout from the
+		// tenant's own queue depth, and KEDA would report it healthy while doing
+		// it.
+		ref, ok := spec["scaleTargetRef"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("ScaledObject %q has no spec.scaleTargetRef", name)
+		}
+		target, ok := ref["name"].(string)
+		if !ok || target == "" {
+			return fmt.Errorf("ScaledObject %q has no spec.scaleTargetRef.name", name)
+		}
+		ref["name"] = WorkloadName(target, tenant)
+
 	default:
 		return fmt.Errorf("unrecognized kind %q — teach transform() its selectors before this generator can render it", kind)
 	}

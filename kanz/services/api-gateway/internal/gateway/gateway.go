@@ -51,8 +51,12 @@ type Handler struct {
 	// reason (#406). It rides the SAME OMS connection as orders — one upstream,
 	// two contracts — so a deployment fronting an OMS has both or neither.
 	instruments venuepb.VenueQueryServiceClient
-	client      querypb.RiskQueryServiceClient
-	marshaler   protojson.MarshalOptions
+	// risk resolves the risk-engine client for the CALLER'S TENANT. A tenant with
+	// its own rendered engine (internal/tenantgen.Services) holds its own
+	// positions, so answering it from the platform engine would return another
+	// book's exposure and VaR as its own (#668). See riskclients.go.
+	risk      *riskClients
+	marshaler protojson.MarshalOptions
 	// logger receives the detail of every 5xx. It is the ONLY place that detail
 	// goes now: the client gets a constant, so if this is not wired the
 	// information is not merely hidden from the caller, it is destroyed. Never
@@ -78,7 +82,7 @@ func New(client querypb.RiskQueryServiceClient, orders orderpb.OrderQueryService
 		logger = slog.Default()
 	}
 	return &Handler{
-		client:      client,
+		risk:        newRiskClients(client),
 		approveRole: approveRole, orders: orders,
 		instruments: instruments,
 		logger:      logger,
@@ -147,7 +151,7 @@ func (h *Handler) Routes(mux *authz.Mux) {
 // backwards here would show an unrestricted reader an EMPTY list, which reads as
 // "the fund has no portfolios" rather than as a permission problem.
 func (h *Handler) listPortfolios(w http.ResponseWriter, r *http.Request) {
-	resp, err := h.client.ListPortfolios(r.Context(), &querypb.ListPortfoliosRequest{})
+	resp, err := h.riskFor(r).ListPortfolios(r.Context(), &querypb.ListPortfoliosRequest{})
 	if err != nil {
 		h.writeOwned(w, r, resp, err)
 		return
@@ -313,7 +317,7 @@ func (h *Handler) exposure(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid as_of: must be RFC3339")
 		return
 	}
-	resp, err := h.client.Exposure(r.Context(), &querypb.ExposureRequest{
+	resp, err := h.riskFor(r).Exposure(r.Context(), &querypb.ExposureRequest{
 		PortfolioId: id,
 		AsOf:        asOf,
 	})
@@ -330,7 +334,7 @@ func (h *Handler) measures(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid as_of: must be RFC3339")
 		return
 	}
-	resp, err := h.client.Measures(r.Context(), &querypb.MeasuresRequest{
+	resp, err := h.riskFor(r).Measures(r.Context(), &querypb.MeasuresRequest{
 		PortfolioId: id,
 		AsOf:        asOf,
 		Measures:    r.URL.Query()["measure"], // repeatable ?measure=VaR99&measure=Delta
@@ -349,12 +353,12 @@ func (h *Handler) scenario(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.PortfolioId = id // path wins over body, and the path is what was checked
-	resp, err := h.client.EvaluateScenario(r.Context(), &req)
+	resp, err := h.riskFor(r).EvaluateScenario(r.Context(), &req)
 	h.writeOwned(w, r, resp, err)
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
-	resp, err := h.client.Health(r.Context(), &querypb.HealthRequest{})
+	resp, err := h.riskFor(r).Health(r.Context(), &querypb.HealthRequest{})
 	h.write(w, r, resp, err)
 }
 
@@ -588,3 +592,33 @@ func httpStatus(err error) (code int, clientMsg, detail string) {
 
 // errBodyTooLarge guards the scenario JSON decode.
 var errBodyTooLarge = errors.New("request body too large")
+
+// riskFor returns the risk-engine client that owns this request's tenant.
+//
+// The tenant comes from the PRINCIPAL this gateway authenticated and injected,
+// never from anything the client sent, so a caller cannot choose whose book it
+// is answered from. No principal — an unauthenticated path, which the risk
+// routes do not have — falls back to the platform engine, the same answer a
+// tenant with no rendered engine gets.
+func (h *Handler) riskFor(r *http.Request) querypb.RiskQueryServiceClient {
+	tenant := ""
+	if p := middleware.PrincipalFromContext(r.Context()); p != nil {
+		tenant = p.Tenant
+	}
+	return h.risk.clientFor(tenant)
+}
+
+// WithPerTenantRisk attaches the per-tenant risk-engine clients, for tenants
+// that have their own rendered engine.
+//
+// BUILT ONCE AT STARTUP by the composition root and never mutated afterwards —
+// see riskclients.go for why a lazily-grown map keyed on a request-supplied
+// tenant would be a leak with an external trigger.
+func (h *Handler) WithPerTenantRisk(perTenant map[string]querypb.RiskQueryServiceClient) (*Handler, error) {
+	risk, err := h.risk.withPerTenant(perTenant)
+	if err != nil {
+		return nil, err
+	}
+	h.risk = risk
+	return h, nil
+}
