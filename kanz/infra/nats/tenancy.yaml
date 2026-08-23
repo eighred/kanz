@@ -1444,6 +1444,48 @@ data:
           # infra/tenancy/tenantctl.sh's COMPUTE_KAFKA_SAS grants it;
           # test/arch/tenant_compute_test.go fails the build if that list and
           # internal/tenantgen's KafkaProducer set ever disagree.
+          # THE TENANT'S BOOK OF RECORD (#668). Without this user, acme's fills are
+          # published into acme's account and NO LEDGER ENTRY IS POSTED for them:
+          # NAV, cash and the pre-trade buying-power gate are all computed over an
+          # empty book, and every service reports Ready throughout, because "this
+          # tenant traded nothing" and "this tenant's fills reach no accountant"
+          # are the same observable state.
+          #
+          # REMEDY 1, NOT THE EXPORT BRIDGE, and the distinction is enforced by
+          # test/arch/tenant_bridge_parity_test.go. accounting is pinned to one
+          # tenant for the process lifetime by ACCOUNTING_TENANT and
+          # internal/pg.NewTenantPool (#97), and it subscribes the LOGICAL subject
+          # names — so the tfact.<tenant>. space that carries this tenant's FACTs
+          # to audit reaches accounting as nothing at all. Account membership IS
+          # its return path.
+          #
+          # THE ALLOW-LISTS ARE THE PLATFORM ACCOUNTING'S, DERIVED NOT COPIED, for
+          # the reason the archiver entry below gives: infra/deploy/tenants/acme/
+          # accounting-acme.yaml is rendered by internal/tenantgen from
+          # infra/deploy/accounting-deploy.yaml, so it is the SAME digest-pinned
+          # binary reading the same subject defaults. The subjects are LOGICAL
+          # inside this account — the isolation is the account boundary, not the
+          # subject string — so they are identical to the platform user's above,
+          # which is what makes a drift between them a bug rather than a variant.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/accounting-acme"
+            permissions: {
+              publish: {
+                allow: [
+                  "accounting.cash.>",
+                  "accounting.balance.portfolio",
+                  "dlq.order.order.filled", "dlq.order.order.partially_filled",
+                  "dlq.accounting.cash.>", "dlq.market.fx.>",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [
+                  "order.order.filled", "order.order.partially_filled",
+                  "accounting.cash.>", "market.fx.>", "_INBOX.>",
+                ]
+              }
+            }
+          }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/archiver-acme"
             permissions: {
               publish: { allow: ["$JS.API.>", "$JS.ACK.>"] }

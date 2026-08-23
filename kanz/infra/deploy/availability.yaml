@@ -231,12 +231,25 @@ metadata:
   labels:
     app.kubernetes.io/part-of: kanz
 spec:
+  # RAISED FOR acme's OWN accounting (#668). A tenant's book of record is a
+  # rendered per-tenant workload (internal/tenantgen.Services), so onboarding a
+  # tenant now costs namespace capacity — and a quota that cannot fund the
+  # declared ceiling does not degrade gracefully: the Deployment is admitted,
+  # the ReplicaSet cannot create the pods, and the tenant's ledger simply never
+  # starts while every existing workload stays healthy.
+  #
+  # THESE NUMBERS ARE DERIVED, NOT CHOSEN. test/arch's
+  # TestNamespaceQuotaFundsTheDeclaredAutoscale sums every manifest's declared
+  # ceiling (spec.replicas raised by each ScaledObject's maxReplicaCount) plus
+  # the largest single rolling update's surge, and fails the build when the
+  # quota is under it. It reported exactly this shortfall and these are its
+  # figures; do not round them by hand.
   hard:
-    requests.cpu: 49500m
-    requests.memory: 52224Mi
-    limits.cpu: "99"
-    limits.memory: 102Gi
-    pods: "96"
+    requests.cpu: 50500m
+    requests.memory: 53248Mi
+    limits.cpu: "101"
+    limits.memory: 104Gi
+    pods: "98"
 ---
 # LimitRange gives every pod sane defaults + a ceiling, so a container with no
 # explicit resources still gets requests (schedulable, quota-counted) and can't
