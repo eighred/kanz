@@ -81,7 +81,14 @@ func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
 	if deps.Margin != nil {
 		go venuemargin.NewReporter(venuemargin.ReporterConfig{
 			Source: deps.Margin, Pub: deps.Publisher,
-			Venue: c.settings.MIC, Account: c.settings.Account, Tenant: deps.Tenant,
+			// THE ADAPTER'S OWN MAP, so a venue-reported liquidation price carries
+			// the instrument this platform calls it (#408 control 4). This is the
+			// only place the inversion is definable: the table is
+			// instrument -> symbol and lives here, and
+			// execution.ParseSymbolMap refuses a many-to-one map precisely so
+			// that inverting it has one answer.
+			Symbols: StaticSymbolMap(c.settings.Symbols),
+			Venue:   c.settings.MIC, Account: c.settings.Account, Tenant: deps.Tenant,
 			OnError: func(err error) {
 				// NOT FATAL AND NOT SILENT. A failed observation ages the account out
 				// to UNKNOWN, which every #408 control fails closed on — so the

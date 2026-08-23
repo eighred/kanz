@@ -111,6 +111,17 @@ const (
 	// operator can see WHICH position's liquidation distance is unknowable —
 	// dropping it silently would hide exactly the one nobody is watching.
 	SkipNoLiquidationPrice = "no_liquidation_price"
+
+	// SkipUnmappedVenueSymbol is a liquidation price the exchange reported for a
+	// symbol this deployment's symbol map does not carry, so it cannot be
+	// attributed to an instrument and no consumer can pair it with a mark.
+	//
+	// THE POSITION IS REAL AND THE PRICE IS PUBLISHED ANYWAY. The fund holds a
+	// leveraged position in something this deployment cannot measure, which is
+	// worth an operator's attention rather than a silent omission — and the
+	// usual cause is an instrument traded on the exchange by hand, or a symbol
+	// map that has fallen behind the account.
+	SkipUnmappedVenueSymbol = "unmapped_venue_symbol"
 	// SkipNotRepresentable: the venue's own figure will not survive conversion to
 	// a common.v1.Decimal (#94). Publishing a wrapped number would not report a
 	// smaller margin requirement, it would report a DIFFERENT one, so the

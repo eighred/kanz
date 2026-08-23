@@ -126,3 +126,38 @@ func (m StaticSymbolMap) Instrument(venueSymbol string) (string, bool) {
 	}
 	return found, true
 }
+
+// InstrumentFor is the inverse lookup over ANY SymbolMapper: which instrument
+// this platform calls the exchange's symbol.
+//
+// IT TAKES THE INTERFACE, NOT StaticSymbolMap, so a deployment with its own
+// mapper gets the inversion without implementing it — and, more to the point,
+// without implementing it DIFFERENTLY. The ambiguity rule below is the part
+// that must not be reimplemented: an arbitrary answer attributes a venue
+// position to the wrong instrument.
+//
+// It scans Instruments() rather than requiring a reverse index, because the map
+// is a deployment's tradeable set — tens of entries, not thousands — and it is
+// consulted once per position per margin poll, not on the order path.
+//
+// A NIL MAPPER ANSWERS NOT FOUND rather than panicking: a caller that has no
+// symbol map has no way to attribute a symbol, which is exactly what not-found
+// means here.
+func InstrumentFor(m SymbolMapper, venueSymbol string) (string, bool) {
+	if m == nil || venueSymbol == "" {
+		return "", false
+	}
+	found, n := "", 0
+	for _, in := range m.Instruments() {
+		if in.VenueSymbol == venueSymbol {
+			found, n = in.InstrumentID, n+1
+		}
+	}
+	if n != 1 {
+		// Zero: this deployment does not trade that symbol. More than one: the map
+		// is many-to-one, which ParseSymbolMap refuses but a hand-built mapper may
+		// still be. Both are "cannot attribute", and neither may guess.
+		return "", false
+	}
+	return found, true
+}

@@ -34,7 +34,13 @@ func (c *capturePub) Publish(_ context.Context, e bus.Event) error {
 func reporterOver(src *fakeSource, pub *capturePub, opts ...func(*ReporterConfig)) *Reporter {
 	cfg := ReporterConfig{
 		Source: src, Pub: pub, Venue: "OKX", Account: "acct-1", Tenant: "t1",
-		Now: func() time.Time { return observed.Add(time.Second) },
+		// A REAL ADAPTER HAS A SYMBOL MAP, and this fixture is one. Without it
+		// every liquidation price publishes with no instrument_id and is counted
+		// uncovered — correct behaviour, and not what most of these tests are
+		// about. TestAnUnmappedVenueSymbolIsPublishedAndCounted covers that path
+		// deliberately.
+		Symbols: execution.StaticSymbolMap{"BTC-USDT": "BTC-USDT-SWAP", "ETH-USDT": "ETH-USDT-SWAP"},
+		Now:     func() time.Time { return observed.Add(time.Second) },
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -185,9 +191,14 @@ func TestPositionWithoutALiquidationPriceIsNamedNotDropped(t *testing.T) {
 		t.Fatalf("liquidation prices = %d, want 1 — a position with no price must not be carried at zero",
 			len(msg.GetLiquidationPrices()))
 	}
+	// NAMED BY INSTRUMENT, NOT BY VENUE SYMBOL. The field is InstrumentId and it
+	// used to carry the exchange's spelling, because nothing here could resolve
+	// the other one; the adapter's symbol map now does (#408 control 4), so the
+	// exclusion names the id an operator greps their own book for. It falls back
+	// to the venue symbol only when the symbol cannot be attributed at all.
 	var named bool
 	for _, e := range msg.GetCoverage().GetExclusions() {
-		if e.GetInstrumentId() == "ETH-USDT-SWAP" && e.GetReason() == SkipNoLiquidationPrice {
+		if e.GetInstrumentId() == "ETH-USDT" && e.GetReason() == SkipNoLiquidationPrice {
 			named = true
 		}
 	}
