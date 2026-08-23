@@ -65,6 +65,11 @@ const maxRespBytes = 8 << 20 // 8 MiB
 type MeshBackend struct {
 	bases  map[Service]string
 	client *http.Client
+	// tenants resolves a per-tenant upstream for the services MT-02 renders per
+	// tenant. nil ⇒ every service is dialled at its shared address, which is the
+	// behaviour for a deployment that has onboarded no tenant. See
+	// backend_tenant.go.
+	tenants *tenantUpstreams
 }
 
 // NewMeshBackend builds a backend over per-service base URLs and an HTTP client.
@@ -98,6 +103,25 @@ func NewMeshBackend(bases map[Service]string, client *http.Client) *MeshBackend 
 	return &MeshBackend{bases: cleaned, client: client}
 }
 
+// WithPerTenantUpstreams names the tenants that have their own rendered
+// instances, so a caller from one is read from its own book rather than the
+// platform's (#668).
+//
+// AN EMPTY LIST IS THE CORRECT DEFAULT and leaves every service on its shared
+// address — a deployment that has onboarded no tenant. The danger is the list
+// being SHORT: an onboarded tenant left out of it reads the __system__ book and
+// gets a 200 carrying somebody else's numbers, which is why
+// test/arch/TestGatewayTenantUpstreamsMatchTheRenderedTenants compares it
+// against what infra/deploy/tenants/ actually renders.
+func (b *MeshBackend) WithPerTenantUpstreams(tenants []string) (*MeshBackend, error) {
+	u, err := newTenantUpstreams(tenants)
+	if err != nil {
+		return nil, err
+	}
+	b.tenants = u
+	return b, nil
+}
+
 // Configured reports whether any upstream is wired — main uses it to decide
 // between a live backend and the nil (all-503) backend.
 func (b *MeshBackend) Configured() bool { return len(b.bases) > 0 }
@@ -110,6 +134,13 @@ func (b *MeshBackend) Forward(ctx context.Context, req Request) (Response, error
 	base, ok := b.bases[req.Service]
 	if !ok {
 		return Response{}, ErrBackendUnavailable
+	}
+	// A TENANT WITH ITS OWN RENDERED INSTANCE IS READ FROM IT (#668). The
+	// principal is the authenticated caller this gateway injected upstream, so
+	// the tenant is the one the token carried, not anything the client chose.
+	// Everything else keeps the shared address unchanged.
+	if req.Principal != nil {
+		base, _ = b.tenants.resolve(base, req.Service, req.Principal.Tenant)
 	}
 	u, err := url.Parse(base + req.Path)
 	if err != nil {

@@ -146,6 +146,21 @@ type Config struct {
 	// reachable except through here, where the principal is authenticated and
 	// injected. Empty disables the routes rather than exposing them unauthenticated.
 	OptimizationAddr string
+	// PerTenantUpstreams names the tenants that have their OWN rendered instances
+	// of the MT-02 per-tenant services (internal/tenantgen.Services), so a read
+	// on behalf of one is dialled at <service>-<tenant> instead of the shared
+	// address (#668).
+	//
+	// EMPTY IS CORRECT for a deployment that has onboarded no tenant, and it is
+	// the default. THE DANGEROUS VALUE IS A SHORT ONE: an onboarded tenant left
+	// out is read from the __system__ instance, so a query for its NAV, cash or
+	// ledger returns a 200 carrying the PLATFORM book's numbers — somebody else's
+	// fills, presented as the caller's own. A tenant wrongly INCLUDED only 503s
+	// against a Service that does not exist, which is loud and cheap.
+	// test/arch/TestGatewayTenantUpstreamsMatchTheRenderedTenants compares this
+	// against infra/deploy/tenants/ so the short list cannot ship.
+	PerTenantUpstreams []string
+
 	// AccountingAddr is the book of record (#415). It fronts exactly one route —
 	// POST /v1/portfolios/{id}/cash-movements — behind authz.Fund. Empty disables
 	// it, the same shape as every other upstream here: a funding surface that is
@@ -273,43 +288,44 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen:           env.Or("API_GATEWAY_LISTEN", ":8080"),
-		LogLevel:         env.ParseLevelOr(env.Or("API_GATEWAY_LOG_LEVEL", "info"), slog.LevelInfo),
-		Source:           env.Or("API_GATEWAY_SOURCE", "api-gateway"),
-		OTLPEndpoint:     os.Getenv("API_GATEWAY_OTLP_ENDPOINT"),
-		RiskEngineAddr:   os.Getenv("API_GATEWAY_RISK_ENGINE_ADDR"),
-		OMSReadAddr:      os.Getenv("API_GATEWAY_OMS_READ_ADDR"),
-		SPIFFESocket:     os.Getenv("API_GATEWAY_SPIFFE_SOCKET"),
-		OIDCIssuer:       os.Getenv("API_GATEWAY_OIDC_ISSUER"),
-		OIDCAudience:     os.Getenv("API_GATEWAY_OIDC_AUDIENCE"),
-		OIDCJWKSURI:      os.Getenv("API_GATEWAY_OIDC_JWKS_URI"),
-		RevocationsURI:   os.Getenv("API_GATEWAY_REVOCATIONS_URI"),
-		OIDCTenantClaim:  os.Getenv("API_GATEWAY_OIDC_TENANT_CLAIM"),
-		OIDCRolesClaim:   os.Getenv("API_GATEWAY_OIDC_ROLES_CLAIM"),
-		JWTSecret:        jwtSecret,
-		AllowDevHS256:    allowDevHS256,
-		RequiredRole:     os.Getenv("API_GATEWAY_REQUIRED_ROLE"),
-		TradeRole:        os.Getenv("API_GATEWAY_TRADE_ROLE"),
-		OperatorAddr:     os.Getenv("API_GATEWAY_OPERATOR_ADDR"),
-		OperatorRole:     os.Getenv("API_GATEWAY_OPERATOR_ROLE"),
-		RateLimitPerSec:  parseFloat(os.Getenv("API_GATEWAY_RATE_LIMIT_PER_SEC")),
-		RateLimitBurst:   parseInt(os.Getenv("API_GATEWAY_RATE_LIMIT_BURST")),
-		MaxInFlight:      parseInt(os.Getenv("API_GATEWAY_MAX_IN_FLIGHT")),
-		QuotasFile:       os.Getenv("API_GATEWAY_QUOTAS_FILE"),
-		SigningSecret:    signingSecret,
-		NATSURL:          os.Getenv("API_GATEWAY_NATS_URL"),
-		WealthAddr:       os.Getenv("API_GATEWAY_WEALTH_ADDR"),
-		DataMasterAddr:   os.Getenv("API_GATEWAY_DATAMASTER_ADDR"),
-		CopilotAddr:      os.Getenv("API_GATEWAY_COPILOT_ADDR"),
-		TVSyncAddr:       os.Getenv("API_GATEWAY_TV_SYNC_ADDR"),
-		OptimizationAddr: os.Getenv("API_GATEWAY_OPTIMIZATION_ADDR"),
-		AccountingAddr:   os.Getenv("API_GATEWAY_ACCOUNTING_ADDR"),
-		FundRole:         os.Getenv("API_GATEWAY_FUND_ROLE"),
-		ApproveRole:      os.Getenv("API_GATEWAY_APPROVE_ROLE"),
-		ComplianceAddr:   os.Getenv("API_GATEWAY_COMPLIANCE_ADDR"),
-		MandateRole:      os.Getenv("API_GATEWAY_MANDATE_ROLE"),
-		AuditAddr:        os.Getenv("API_GATEWAY_AUDIT_ADDR"),
-		AuditRole:        os.Getenv("API_GATEWAY_AUDIT_ROLE"),
+		Listen:             env.Or("API_GATEWAY_LISTEN", ":8080"),
+		LogLevel:           env.ParseLevelOr(env.Or("API_GATEWAY_LOG_LEVEL", "info"), slog.LevelInfo),
+		Source:             env.Or("API_GATEWAY_SOURCE", "api-gateway"),
+		OTLPEndpoint:       os.Getenv("API_GATEWAY_OTLP_ENDPOINT"),
+		RiskEngineAddr:     os.Getenv("API_GATEWAY_RISK_ENGINE_ADDR"),
+		OMSReadAddr:        os.Getenv("API_GATEWAY_OMS_READ_ADDR"),
+		SPIFFESocket:       os.Getenv("API_GATEWAY_SPIFFE_SOCKET"),
+		OIDCIssuer:         os.Getenv("API_GATEWAY_OIDC_ISSUER"),
+		OIDCAudience:       os.Getenv("API_GATEWAY_OIDC_AUDIENCE"),
+		OIDCJWKSURI:        os.Getenv("API_GATEWAY_OIDC_JWKS_URI"),
+		RevocationsURI:     os.Getenv("API_GATEWAY_REVOCATIONS_URI"),
+		OIDCTenantClaim:    os.Getenv("API_GATEWAY_OIDC_TENANT_CLAIM"),
+		OIDCRolesClaim:     os.Getenv("API_GATEWAY_OIDC_ROLES_CLAIM"),
+		JWTSecret:          jwtSecret,
+		AllowDevHS256:      allowDevHS256,
+		RequiredRole:       os.Getenv("API_GATEWAY_REQUIRED_ROLE"),
+		TradeRole:          os.Getenv("API_GATEWAY_TRADE_ROLE"),
+		OperatorAddr:       os.Getenv("API_GATEWAY_OPERATOR_ADDR"),
+		OperatorRole:       os.Getenv("API_GATEWAY_OPERATOR_ROLE"),
+		RateLimitPerSec:    parseFloat(os.Getenv("API_GATEWAY_RATE_LIMIT_PER_SEC")),
+		RateLimitBurst:     parseInt(os.Getenv("API_GATEWAY_RATE_LIMIT_BURST")),
+		MaxInFlight:        parseInt(os.Getenv("API_GATEWAY_MAX_IN_FLIGHT")),
+		QuotasFile:         os.Getenv("API_GATEWAY_QUOTAS_FILE"),
+		SigningSecret:      signingSecret,
+		NATSURL:            os.Getenv("API_GATEWAY_NATS_URL"),
+		WealthAddr:         os.Getenv("API_GATEWAY_WEALTH_ADDR"),
+		DataMasterAddr:     os.Getenv("API_GATEWAY_DATAMASTER_ADDR"),
+		CopilotAddr:        os.Getenv("API_GATEWAY_COPILOT_ADDR"),
+		TVSyncAddr:         os.Getenv("API_GATEWAY_TV_SYNC_ADDR"),
+		OptimizationAddr:   os.Getenv("API_GATEWAY_OPTIMIZATION_ADDR"),
+		AccountingAddr:     os.Getenv("API_GATEWAY_ACCOUNTING_ADDR"),
+		PerTenantUpstreams: env.SplitList(os.Getenv("API_GATEWAY_PER_TENANT_UPSTREAMS")),
+		FundRole:           os.Getenv("API_GATEWAY_FUND_ROLE"),
+		ApproveRole:        os.Getenv("API_GATEWAY_APPROVE_ROLE"),
+		ComplianceAddr:     os.Getenv("API_GATEWAY_COMPLIANCE_ADDR"),
+		MandateRole:        os.Getenv("API_GATEWAY_MANDATE_ROLE"),
+		AuditAddr:          os.Getenv("API_GATEWAY_AUDIT_ADDR"),
+		AuditRole:          os.Getenv("API_GATEWAY_AUDIT_ROLE"),
 	}
 	if err := cfg.validateAuth(); err != nil {
 		return Config{}, err
