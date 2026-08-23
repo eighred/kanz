@@ -122,7 +122,25 @@ data:
         # prefix: the import is the boundary, and a wildcard would make adding an
         # account to this file silently widen what the platform ingests.
         imports: [
-          { stream: { account: acme, subject: "order.>" },              prefix: "tfact.acme" }
+          # ORDER FACTS, NAMED ONE BY ONE, MIRRORING acme's EXPORT. `order.>` here
+          # cannot be used: this account SENDS order commands to acme, so acme
+          # cannot offer that whole space back without forming a cycle the broker
+          # refuses — see the export block in the acme account for the measured
+          # detail. An import may not be wider than the export behind it either:
+          # `order.>` here against a narrower export is "stream import not
+          # authorized", which is the same outage with a different message.
+          { stream: { account: acme, subject: "order.order.accepted" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.submitted" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.routed" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.filled" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.partially_filled" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.cancelled" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.rejected" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.expired" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.healed" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.outcome" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.approved" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.pending_approval" }, prefix: "tfact.acme" }
           { stream: { account: acme, subject: "execution.>" },          prefix: "tfact.acme" }
           { stream: { account: acme, subject: "risk.position.>" },      prefix: "tfact.acme" }
           { stream: { account: acme, subject: "risk.portfolio.>" },     prefix: "tfact.acme" }
@@ -1253,7 +1271,45 @@ data:
         # exactly ONE message — the genuine FACT, not two. NATS does not
         # re-export what arrived by import.
         exports: [
-          { stream: "order.>" }
+          # ORDER FACTS ONLY, NAMED ONE BY ONE — `order.>` HERE FORMS A CYCLE AND
+          # THE BROKER REFUSES THE WHOLE CONFIG.
+          #
+          # This account IMPORTS its order COMMANDS from __system__ and remaps
+          # them onto the logical names (`to: "order.order.submit"` and its
+          # siblings below). Those land inside `order.>`, so exporting that space
+          # re-offers to __system__ the very subjects it just sent here, and
+          # nats-server reports:
+          #
+          #   Error adding stream import "order.>": import forms a cycle
+          #
+          # IT IS NON-DETERMINISTIC, which is what made it dangerous rather than
+          # merely wrong: the check runs while imports are added and its outcome
+          # depends on iteration order, so the same file was accepted most of the
+          # time and rejected the rest. Measured on the committed config: 1 in 8
+          # `nats-server -t` runs rejected it, and
+          # internal/platform/halt's tenancy integration test failed 3 runs in 6.
+          # A broker that starts most of the time is a broker that will not start
+          # during the one rollout nobody wants to be debugging.
+          #
+          # So the export names the FACTs and only the FACTs. The four command
+          # subjects — submit, cancel, approve, amend — are deliberately absent:
+          # three are what this account imports, and a command is not a fact the
+          # tenant produces in any case.
+          #
+          # test/arch/TestNoTenantExportsWhatItImports holds this deterministically,
+          # because the broker's own check cannot be relied on to fire.
+          { stream: "order.order.accepted" }
+          { stream: "order.order.submitted" }
+          { stream: "order.order.routed" }
+          { stream: "order.order.filled" }
+          { stream: "order.order.partially_filled" }
+          { stream: "order.order.cancelled" }
+          { stream: "order.order.rejected" }
+          { stream: "order.order.expired" }
+          { stream: "order.order.healed" }
+          { stream: "order.order.outcome" }
+          { stream: "order.order.approved" }
+          { stream: "order.order.pending_approval" }
           { stream: "execution.>" }
           { stream: "risk.position.>" }
           { stream: "risk.portfolio.>" }
