@@ -3,6 +3,7 @@ package venuemargin
 import (
 	"context"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -105,9 +106,28 @@ func (c Coverage) Complete() bool { return c.reported && c.excluded == 0 }
 type snapshot struct {
 	maintenanceMargin *big.Rat
 	marginRatio       *big.Rat
-	liquidation       map[string]*big.Rat
+	liquidation       map[string]openPosition
 	observedAt        time.Time
 	coverage          Coverage
+}
+
+// openPosition is one reported open position: the exchange's own symbol is the
+// key, and the instrument it was attributed to travels WITH the price.
+//
+// ATTRIBUTION IS PART OF THE OBSERVATION, NOT A LOOKUP EACH READER REPEATS. The
+// venue adapter is the one process holding both the exchange's symbols and the
+// instrument -> symbol table they came from, so it is the only place the
+// inversion is even defined (execution.InstrumentFor, #707/#708). A reader that
+// re-derived it would need a copy of that adapter's configuration — the second
+// answer #408 control 4's exemption exists to refuse.
+//
+// instrument is EMPTY when the adapter could not attribute the symbol, and that
+// is never "this position has no instrument". The position is still held: a
+// leveraged position this deployment cannot name is precisely the one an
+// operator must see, and the observation's Coverage carries the reason.
+type openPosition struct {
+	instrument string
+	price      *big.Rat
 }
 
 // accountKey is the routing dimension. THE ACCOUNT, NOT THE PORTFOLIO: the
@@ -225,7 +245,7 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 
 	snap := snapshot{
 		observedAt:  observedAt,
-		liquidation: map[string]*big.Rat{},
+		liquidation: map[string]openPosition{},
 		// PRESENCE, NOT JUST THE COUNT. msg.GetCoverage() is nil for a publisher
 		// that reports no coverage, and GetExcludedCount() on it is zero — the same
 		// zero a publisher that covered everything produces. Recording the presence
@@ -249,7 +269,10 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 		if lp.GetVenueSymbol() == "" || lp.GetPrice() == nil {
 			continue
 		}
-		snap.liquidation[lp.GetVenueSymbol()] = dec.FromProto(lp.GetPrice())
+		snap.liquidation[lp.GetVenueSymbol()] = openPosition{
+			instrument: lp.GetInstrumentId(),
+			price:      dec.FromProto(lp.GetPrice()),
+		}
 	}
 
 	v.mu.Lock()
@@ -272,19 +295,9 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 // nothing may act on; answering with it would let a gate satisfy its
 // completeness check from one poll and its numbers from another.
 func (v *View) Coverage(venue, account string) (Coverage, bool) {
-	v.mu.RLock()
-	snap, seen := v.byAcct[accountKey{venue: venue, account: account}]
-	v.mu.RUnlock()
-	if !seen {
+	snap, ok := v.currentSnapshot(venue, account)
+	if !ok {
 		return Coverage{}, false
-	}
-	if v.maxAge > 0 {
-		if age := v.now().UTC().Sub(snap.observedAt); age > v.maxAge {
-			if v.onStale != nil {
-				v.onStale(venue, account, age)
-			}
-			return Coverage{}, false
-		}
 	}
 	return snap.coverage, true
 }
@@ -319,29 +332,120 @@ func (v *View) MarginRatio(venue, account string) (Quantity, bool) {
 // A position the venue reported without a liquidation price is UNKNOWN here and
 // present in the observation's coverage — it is not absent-and-therefore-fine.
 func (v *View) LiquidationPrice(venue, account, venueSymbol string) (Quantity, bool) {
-	return v.lookup(venue, account, func(s snapshot) *big.Rat { return s.liquidation[venueSymbol] })
+	return v.lookup(venue, account, func(s snapshot) *big.Rat { return s.liquidation[venueSymbol].price })
 }
 
 func (v *View) lookup(venue, account string, pick func(snapshot) *big.Rat) (Quantity, bool) {
-	v.mu.RLock()
-	snap, seen := v.byAcct[accountKey{venue: venue, account: account}]
-	v.mu.RUnlock()
-	if !seen {
+	snap, ok := v.currentSnapshot(venue, account)
+	if !ok {
 		return Quantity{}, false
-	}
-	if v.maxAge > 0 {
-		if age := v.now().UTC().Sub(snap.observedAt); age > v.maxAge {
-			if v.onStale != nil {
-				v.onStale(venue, account, age)
-			}
-			return Quantity{}, false
-		}
 	}
 	val := pick(snap)
 	if val == nil {
 		return Quantity{}, false
 	}
 	return Quantity{value: new(big.Rat).Set(val), observedAt: snap.observedAt}, true
+}
+
+// currentSnapshot returns this account's folded state if it has been observed
+// AND that observation is still current.
+//
+// THE FRESHNESS RULE LIVES HERE, ONCE, because every reader of the fold must
+// apply the same one. Coverage, the quantity lookups and Liquidations each used
+// to carry their own copy of it; a reader that skipped it — or that drifted by
+// one comparison — would answer from an observation the rest of the package
+// treats as UNKNOWN, and the disagreement surfaces as a margin control passing
+// on a feed that has stopped. That is the failure this package exists to make
+// impossible, so it must not depend on each reader remembering.
+//
+// The stale hook fires from here for the same reason: an operator watching it
+// sees one event per read of a dead account, whichever reader asked.
+func (v *View) currentSnapshot(venue, account string) (snapshot, bool) {
+	v.mu.RLock()
+	snap, seen := v.byAcct[accountKey{venue: venue, account: account}]
+	v.mu.RUnlock()
+	if !seen {
+		return snapshot{}, false
+	}
+	if v.maxAge > 0 {
+		if age := v.now().UTC().Sub(snap.observedAt); age > v.maxAge {
+			if v.onStale != nil {
+				v.onStale(venue, account, age)
+			}
+			return snapshot{}, false
+		}
+	}
+	return snap, true
+}
+
+// Liquidation is one open leveraged position from a venue's margin observation.
+type Liquidation struct {
+	// VenueSymbol is the exchange's own spelling, always present — it is the key
+	// the venue reported the position under.
+	VenueSymbol string
+
+	// InstrumentID is the Kanz instrument the ADAPTER attributed the symbol to,
+	// or empty when it could not. Empty is "unattributed", never "no instrument":
+	// a consumer that must pair this price with a mark cannot use the position,
+	// and the account's Coverage says why it is missing.
+	InstrumentID string
+
+	// Price is the venue's liquidation price for the position, in the
+	// instrument's quote currency.
+	Price Quantity
+}
+
+// Liquidations returns every open position in this account's last CURRENT
+// observation, or ok=false when the account's margin state is UNKNOWN.
+//
+// # Why an enumerator, when LiquidationPrice already answers per symbol
+//
+// The two have opposite shapes. LiquidationPrice serves a caller that ALREADY
+// HOLDS the symbol — a compliance rule evaluating one order — and asking it is
+// how that rule checks the instrument in front of it. A risk measure starts from
+// a PORTFOLIO and has to find every position that could liquidate under it,
+// including the ones nobody thought to ask about. Symbol-by-symbol lookup cannot
+// enumerate, so such a caller would have to keep its own list of the symbols an
+// account holds: a second answer to "what is in this account", maintained by
+// someone who is not the exchange, going stale without saying so.
+//
+// # ok=false is UNKNOWN; an empty slice is a positive statement
+//
+// This is the distinction the package turns on. ok=false means never observed or
+// no longer current, and NOTHING may be concluded — least of all that the
+// account is flat. ok=true with no positions is the exchange saying this account
+// holds nothing leveraged, on which an exact-zero liquidation proximity is the
+// honest answer rather than a flattering one.
+//
+// # What the caller gets
+//
+// The slice is freshly built and each Price is a copy, so a caller cannot reach
+// back into the fold — the same guarantee the quantity lookups give, and it
+// matters more here because a slice looks borrowable. It is ordered by venue
+// symbol so that two reads of one observation cannot disagree about which
+// position is "worst" when two are equally close.
+func (v *View) Liquidations(venue, account string) ([]Liquidation, bool) {
+	snap, ok := v.currentSnapshot(venue, account)
+	if !ok {
+		return nil, false
+	}
+	out := make([]Liquidation, 0, len(snap.liquidation))
+	for symbol, pos := range snap.liquidation {
+		if pos.price == nil {
+			// Defensive: the fold refuses a priceless entry, so this is
+			// unreachable today. It stays because the alternative on a future
+			// fold that admits one is a Quantity wrapping a nil *big.Rat, which
+			// reads as a real liquidation price of zero.
+			continue
+		}
+		out = append(out, Liquidation{
+			VenueSymbol:  symbol,
+			InstrumentID: pos.instrument,
+			Price:        Quantity{value: new(big.Rat).Set(pos.price), observedAt: snap.observedAt},
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].VenueSymbol < out[j].VenueSymbol })
+	return out, true
 }
 
 // Stats reports how many venue accounts are held and how many are current, for
