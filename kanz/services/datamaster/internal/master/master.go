@@ -84,6 +84,14 @@ type VendorRecord struct {
 	Identifiers  Identifiers
 	AssetClass   string
 	Sector       Sector
+	// IssuerID is the legal entity that issued the instrument — the key the
+	// ISSUER (single-name concentration) exposure dimension buckets on. It
+	// mirrors reference.v1.InstrumentReference.issuer_id and is EMPTY for
+	// instruments that have no issuer (FX, a broad index), which is a different
+	// fact from a vendor that did not report one; survivorship cannot tell them
+	// apart, so a rule that needs it refuses on the empty value
+	// (compliance.unresolvedDimension) rather than bucketing under "".
+	IssuerID     string
 	CurrencyCode string
 	Description  string
 	AsOf         time.Time
@@ -97,6 +105,11 @@ type SecurityMaster struct {
 	Identifiers  Identifiers
 	AssetClass   string
 	Sector       Sector
+	// IssuerID is the resolved issuing entity — see VendorRecord.IssuerID. It
+	// is the field this record was MISSING (#640): an issuer-concentration or
+	// issuer-exclusion mandate had nothing on this estate to resolve against,
+	// because the golden record carried sector and asset class and stopped.
+	IssuerID     string
 	CurrencyCode string
 	Description  string
 	AsOf         time.Time
@@ -161,6 +174,9 @@ func Resolve(records []VendorRecord) (SecurityMaster, []IdentifierConflict) {
 		}
 		if sm.Description == "" && r.Description != "" {
 			sm.Description, sm.Provenance["description"] = r.Description, r.Vendor
+		}
+		if sm.IssuerID == "" && r.IssuerID != "" {
+			sm.IssuerID, sm.Provenance["issuer_id"] = r.IssuerID, r.Vendor
 		}
 		if sm.Sector.empty() && !r.Sector.empty() {
 			sm.Sector, sm.Provenance["sector"] = r.Sector, r.Vendor

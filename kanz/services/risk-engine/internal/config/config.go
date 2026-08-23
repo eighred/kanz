@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/pkg/secret"
 )
 
@@ -24,6 +25,10 @@ type Config struct {
 	NATSURL string
 	// Source is the producer identity stamped on emitted FACTs (EVT-17b).
 	Source string
+	// RefData wires the instrument classifier every named stress scenario's
+	// sector shocks resolve through (#640). Unwired, EvaluateScenario REFUSES a
+	// scenario carrying SectorShocks rather than returning the unshocked book.
+	RefData refdata.Config
 	// Tenant is the tenant_id stamped on emitted FACTs (MT-01a). The recomputer
 	// publishes derived risk events from a background ctx (debounced, async), so
 	// the triggering event's tenant can't propagate via ctx here — this is the
@@ -201,6 +206,12 @@ const DefaultCalibrationNightly = 24 * time.Hour
 var DefaultMarketSubjects = []string{"market.>"}
 
 func Load() (Config, error) {
+	// Read HERE so a malformed refresh interval stops Load with every other
+	// configuration error, rather than at the one line that builds the cache.
+	refData, err := refdata.LoadConfig("RISK_ENGINE")
+	if err != nil {
+		return Config{}, err
+	}
 	nightly := parseDuration(os.Getenv("RISK_ENGINE_CALIBRATION_NIGHTLY_INTERVAL"))
 	if nightly <= 0 {
 		nightly = DefaultCalibrationNightly
@@ -255,6 +266,7 @@ func Load() (Config, error) {
 		NATSURL:          os.Getenv("RISK_ENGINE_NATS_URL"),
 		Source:           env.Or("RISK_ENGINE_SOURCE", "risk-engine"),
 		Tenant:           env.Or("RISK_ENGINE_TENANT", "__system__"),
+		RefData:          refData,
 		DatabaseURL:      databaseURL,
 		SnapshotInterval: parseDuration(os.Getenv("RISK_ENGINE_SNAPSHOT_INTERVAL")),
 		KafkaBrokers:     env.SplitList(os.Getenv("RISK_ENGINE_KAFKA_BROKERS")),
