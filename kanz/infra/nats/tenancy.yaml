@@ -96,6 +96,46 @@ data:
           { stream: "platform.mode.changed" }
         ]
 
+        # THE RETURN PATH'S PLATFORM HALF (#668). The tenant account exports its
+        # FACT subject spaces; these land them here under `tfact.<tenant>.`, and
+        # the TENANT_FACT stream (bootstrap-job.yaml) binds `tfact.*.>` so audit
+        # can consume them.
+        #
+        # A SECOND PREFIX, NOT `tenant.`, AND THE REASON IS A COLLISION. The
+        # inbound command bridge already owns `tenant.*.order.>` — that is
+        # TENANT_ORDER's subject set. Importing a tenant's order FACTs under the
+        # same prefix would land `tenant.acme.order.order.accepted` inside the
+        # COMMAND stream: facts and commands sharing one log, one 24h retention,
+        # and no way to tell the direction of travel from the subject. `tfact.`
+        # says outbound in the name, leaves the working command bridge untouched,
+        # and needs no per-domain enumeration on the platform side.
+        #
+        # IT MUST NOT BE IMPORTED UNPREFIXED. The logical names are what
+        # __system__'s OWN consumers subscribe: the platform archiver would NACK
+        # forever (internal/topic.For refuses an envelope whose tenant_id is not
+        # its own) and platform accounting would fold another tenant's event into
+        # __system__'s book (#223). An unprefixed import is WORSE than none, and
+        # test/arch/tenant_bridge_parity_test.go does not read one as a repair.
+        #
+        # ONE ENTRY PER TENANT, never a wildcard `account:`. An account is named
+        # explicitly here for the same reason a tenant imports only its own
+        # prefix: the import is the boundary, and a wildcard would make adding an
+        # account to this file silently widen what the platform ingests.
+        imports: [
+          { stream: { account: acme, subject: "order.>" },              prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "execution.>" },          prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "risk.position.>" },      prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "risk.portfolio.>" },     prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "risk.exposure.>" },      prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "accounting.>" },         prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "compliance.breach.>" },  prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "compliance.mandate.>" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "settlement.>" },         prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "wealth.>" },             prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "alternatives.>" },       prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "dlq.>" },                prefix: "tfact.acme" }
+        ]
+
         # __system__ RESOLVES ITS OWN PREFIX, which is what makes the gateway's
         # publish path uniform: it always prefixes, with no runtime branch and no
         # list of "tenants that have accounts" to fall out of date. Without these
@@ -1182,6 +1222,53 @@ data:
       # connected on this account (see README "Per-tenant streams").
       acme {
         jetstream { max_memory: 64MB, max_file: 2GB, max_streams: 16, max_consumers: 256 }
+
+        # THE RETURN PATH (#668). Everything above this line carries COMMANDS IN;
+        # nothing carried anything back, and NATS accounts are isolated by
+        # construction — so every FACT this tenant's OMS published was visible to
+        # nobody. It accepted an order, wrote its rows, published the accepted
+        # FACT and the fills into an account no platform service is a member of:
+        # no audit trail, with every service healthy and Ready throughout,
+        # because "this tenant produced no events" and "this tenant's events
+        # cannot reach me" are the same observable state.
+        #
+        # WHAT THIS EXPORT IS AND IS NOT. It offers this tenant's FACT subject
+        # spaces to the platform account, which imports them under a `tfact.acme.`
+        # PREFIX (see __system__ above). It is remedy 2 in
+        # test/arch/tenant_bridge_parity_test.go, and it is honest for exactly one
+        # consumer — audit, which takes TenantID off the ENVELOPE rather than from
+        # a *_TENANT env var. accounting and risk-engine are tenant-pinned by
+        # internal/pg.NewTenantPool (#97) and subscribe the LOGICAL names, so a
+        # prefixed subject reaches them as nothing; they need remedy 1 and the
+        # guard refuses to credit them for this.
+        #
+        # EXPORTING order.> DOES NOT LOOP THE COMMANDS BACK OUT, and that is
+        # measured rather than assumed. The commands imported below land on
+        # `order.order.submit` INSIDE this account — the same space this exports —
+        # so a re-export would send every command back to the platform as though
+        # the tenant had emitted it, double-counting the audit trail. Verified
+        # against nats-server v2.14.5 with both halves configured: publishing
+        # tenant.acme.order.order.submit into __system__ delivered it here as
+        # order.order.submit and left the platform's TENANT_FACT stream holding
+        # exactly ONE message — the genuine FACT, not two. NATS does not
+        # re-export what arrived by import.
+        exports: [
+          { stream: "order.>" }
+          { stream: "execution.>" }
+          { stream: "risk.position.>" }
+          { stream: "risk.portfolio.>" }
+          { stream: "risk.exposure.>" }
+          { stream: "accounting.>" }
+          { stream: "compliance.breach.>" }
+          { stream: "compliance.mandate.>" }
+          { stream: "settlement.>" }
+          { stream: "wealth.>" }
+          { stream: "alternatives.>" }
+          # A DROPPED EVENT IS AN AUDIT FACT OF ITS OWN. Without this the one
+          # record that says "this tenant's event could not be processed" is the
+          # one the compliance trail never receives.
+          { stream: "dlq.>" }
+        ]
 
         # The other half of the bridge (#358). `to:` remaps the prefixed subject
         # onto the logical one, so this tenant's OMS subscribes

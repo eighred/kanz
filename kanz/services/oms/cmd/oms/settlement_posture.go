@@ -113,12 +113,16 @@ var settlementStages = []settlementStage{
 	},
 	{
 		stage:       "fail_publication",
-		entrypoints: []string{"EmitFails", "NewBusFailSink", "NewBusFailSinkWithClock"},
-		armedBy: "detected fails to publish, and a posttrade.FailEncoder over the settlement.v1 SDK " +
-			"(generated-not-committed, EVT-15a). THIS IS THE STAGE THE ESTATE ALREADY CLAIMS: the " +
-			"SETTLEMENT stream is provisioned and the oms workload holds the publish grant on " +
-			"settlement.instruction.fail, so the one stage with infrastructure behind it is the one " +
-			"with no process behind it",
+		entrypoints: []string{"EmitFails", "NewBusFailSink", "NewBusFailSinkWithClock", "EncodeFail"},
+		armedBy: "detected fails to publish. NOTHING ELSE: this entry used to also name \"a " +
+			"posttrade.FailEncoder over the settlement.v1 SDK (generated-not-committed, EVT-15a)\", " +
+			"and that half was never true — kanz-schemas/gen is not checked in AT ALL, so every " +
+			"generated package is generated-not-committed and settlement.v1 was always importable. " +
+			"posttrade.EncodeFail is now that mapping, concrete and tested, and the encoder seam it " +
+			"replaced is gone. THIS IS THE STAGE THE ESTATE ALREADY CLAIMS: the SETTLEMENT stream " +
+			"is provisioned and the oms workload holds the publish grant on " +
+			"settlement.instruction.fail, so the one stage with infrastructure behind it is still " +
+			"the one with no process behind it",
 	},
 }
 
