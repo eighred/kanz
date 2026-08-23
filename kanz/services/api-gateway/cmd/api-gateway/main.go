@@ -10,10 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -34,6 +37,7 @@ import (
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/revocation"
+	"github.com/eighred/kanz/internal/tenantgen"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/authbus"
@@ -189,6 +193,49 @@ func run() int {
 	}
 
 	handler := gateway.New(querypb.NewRiskQueryServiceClient(conn), ordersRead, instrumentsRead, cfg.ApproveRole, logger)
+
+	// PER-TENANT RISK ENGINES (#668). risk-engine holds its positions per
+	// deployment (pg.NewTenantPool with cfg.Tenant, #97), so a tenant with its
+	// own rendered engine has its own book — and answering it from the platform
+	// engine would return ANOTHER book's exposure and VaR as its own, with a 200.
+	// A risk number is what a limit is checked against, so this is the worst
+	// class of wrong answer available on this surface.
+	//
+	// BOUNDED AT STARTUP, one connection per configured tenant, all closed by the
+	// defers below. Not created on first sight of a tenant: that would be an
+	// unbounded map keyed by a string arriving on a request, held for the process
+	// lifetime, in the one process every request passes through.
+	//
+	// grpc.NewClient is LAZY, so this costs no sockets — a tenant that never
+	// queries never dials, and a tenant whose engine is down does not affect
+	// anyone else's startup.
+	if len(cfg.PerTenantUpstreams) > 0 {
+		perTenantRisk := make(map[string]querypb.RiskQueryServiceClient, len(cfg.PerTenantUpstreams))
+		for _, tenant := range cfg.PerTenantUpstreams {
+			addr, aerr := tenantRiskEngineAddr(cfg.RiskEngineAddr, tenant)
+			if aerr != nil {
+				logger.Error("api-gateway: cannot derive a per-tenant risk-engine address",
+					"tenant", tenant, "base", cfg.RiskEngineAddr, "err", aerr)
+				return 2
+			}
+			tconn, terr := dialUpstream(ctx, cfg, addr, logger)
+			if terr != nil {
+				// FATAL, matching the platform engine and the OMS read surface
+				// above: a risk route that half-exists answers a configuration
+				// error with a number, and "this portfolio has no exposure" is the
+				// most misleading answer this surface can give.
+				logger.Error("api-gateway: per-tenant risk-engine unusable", "tenant", tenant, "addr", addr, "err", terr)
+				return 2
+			}
+			defer func() { _ = tconn.Close() }()
+			perTenantRisk[tenant] = querypb.NewRiskQueryServiceClient(tconn)
+			logger.Info("api-gateway: per-tenant risk engine fronted", "tenant", tenant, "addr", addr)
+		}
+		if handler, err = handler.WithPerTenantRisk(perTenantRisk); err != nil {
+			logger.Error("api-gateway: per-tenant risk clients refused", "err", err)
+			return 2
+		}
+	}
 
 	// Order write surface (OMS-01d): publish order commands to the spine, with
 	// the AUTH-01c forged-issuer guard on the producer. Nil publisher ⇒ the
@@ -1237,4 +1284,43 @@ func edgePrincipal(p *auth.Principal) *middleware.Principal {
 		Portfolios: p.Portfolios,
 		IssuedAt:   p.IssuedAt,
 	}
+}
+
+// tenantRiskEngineAddr derives a tenant's risk-engine gRPC target from the
+// platform one, by suffixing the first hostname label with the tenant —
+// `risk-engine.kanz-services.svc:9090` becomes
+// `risk-engine-acme.kanz-services.svc:9090`.
+//
+// THE SAME RULE THE MANIFEST IS RENDERED BY. internal/tenantgen.WorkloadName is
+// what names the per-tenant Service, so deriving the address any other way is a
+// second spelling of one rule — and the failure is a dial against a Service that
+// was rendered under a different name, which surfaces as an unavailable upstream
+// rather than as anything pointing at the mismatch.
+//
+// A gRPC target is host:port with no scheme, so it is split directly rather than
+// through url.Parse, which would read the host as a path.
+func tenantRiskEngineAddr(base, tenant string) (string, error) {
+	if base == "" {
+		return "", fmt.Errorf("no platform risk-engine address to derive from")
+	}
+	host, port, err := net.SplitHostPort(base)
+	if err != nil {
+		// No port: the whole value is the host.
+		host, port = base, ""
+	}
+	label, rest, found := strings.Cut(host, ".")
+	if !found {
+		label, rest = host, ""
+	}
+	if label == "" {
+		return "", fmt.Errorf("%q has no hostname to suffix", base)
+	}
+	out := tenantgen.WorkloadName(label, tenant)
+	if rest != "" {
+		out += "." + rest
+	}
+	if port != "" {
+		out = net.JoinHostPort(out, port)
+	}
+	return out, nil
 }
