@@ -63,6 +63,7 @@ func NormalizeReference(sm master.SecurityMaster) *referencepb.InstrumentReferen
 			BloombergTicker: sm.Identifiers.BloombergTicker,
 		},
 		AssetClass:   assetClass(sm.AssetClass),
+		IssuerId:     sm.IssuerID,
 		CurrencyCode: sm.CurrencyCode,
 		Description:  sm.Description,
 	}

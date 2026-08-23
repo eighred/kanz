@@ -11,6 +11,7 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/pkg/secret"
 	"github.com/eighred/kanz/services/oms/internal/order"
 )
@@ -43,6 +44,11 @@ type Config struct {
 	// store (MT-01d). Defaults to __system__, the risk-engine convention; a
 	// per-tenant deployment overrides it.
 	Tenant string
+	// RefData wires the instrument classifier the pre-trade gate resolves SECTOR,
+	// ISSUER and ASSET_CLASS mandate rules through (#640). Unwired, those rules
+	// are REFUSED rather than passed — which is safe, and is not the same as
+	// working. See internal/refdata.
+	RefData refdata.Config
 	// RequireMandate refuses an order for a portfolio NO MANDATE GOVERNS, instead of
 	// admitting it. Default FALSE, and that default is a deliberate, uncomfortable
 	// choice: turning it on rejects every order for every portfolio nobody has run
@@ -351,6 +357,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// Read HERE rather than at the composition root, so a malformed refresh
+	// interval stops Load with every other configuration error instead of at the
+	// one line that builds the cache.
+	refData, err := refdata.LoadConfig("OMS")
+	if err != nil {
+		return Config{}, err
+	}
+
 	// OMS_PRICE_SUBJECTS IS READ STRICTLY, NOT THROUGH env.Or's DEFAULT (#641).
 	//
 	// env.Or treats a key that is set-but-blank as unset and returns the default,
@@ -389,6 +403,7 @@ func Load() (Config, error) {
 		ConsumerGroup:           env.Or("OMS_CONSUMER_GROUP", "oms"),
 		DatabaseURL:             databaseURL,
 		Tenant:                  env.Or("OMS_TENANT", "__system__"),
+		RefData:                 refData,
 		RequireMandate:          os.Getenv("OMS_REQUIRE_MANDATE") == "true",
 		VenueAccounts:           os.Getenv("OMS_VENUE_ACCOUNTS"),
 		RequireVenueAccount:     os.Getenv("OMS_REQUIRE_VENUE_ACCOUNT") == "true",

@@ -155,6 +155,22 @@ spec:
             - { name: RISK_ENGINE_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: RISK_ENGINE_KAFKA_BROKERS, value: "kafka.kanz-messaging.svc:9094" }
             - { name: RISK_ENGINE_SOURCE, value: "risk-engine" }
+            # Must match DATAMASTER_TENANT on the instance named below.
+            - { name: RISK_ENGINE_TENANT, value: "__system__" }
+            # THE INSTRUMENT CLASSIFIER (#640). datamaster is the estate's golden
+            # security master and the only place a sector, an issuer or an asset class
+            # can be resolved from. WITHOUT THIS LINE this pod starts cleanly, logs one
+            # WARN, exports kanz_instrument_classifier_wired 0, and every named stress scenario
+            # (GFC_2008, COVID_2020, the credit/factor/liquidity/climate stresses) is
+            # REFUSED, because each is built from sector shocks, and the SECTOR
+            # dimension appears in no served ExposureSet.
+            #
+            # It reads GET /v1/securities/{id} on a background cycle and answers from
+            # memory, so nothing on a scenario request waits on datamaster.
+            # allow-classifier-reads-datamaster in
+            # infra/security/runtime/network-policies.yaml is the other half: without
+            # that rule every lookup fails and the cache stays empty.
+            - { name: RISK_ENGINE_DATAMASTER_URL, value: "http://datamaster.kanz-services.svc:8080" }
             # THE QUERY SERVER STARTS ONLY WHEN THIS IS SET. cfg.GRPCListen has no
             # default and this manifest never set it, so risk-engine ran "probes +
             # ingestion only" (its own config comment) — the gRPC read surface the

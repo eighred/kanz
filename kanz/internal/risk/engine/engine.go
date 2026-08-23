@@ -86,17 +86,22 @@ func WithVolModel(vm compute.VolModel) EngineOption {
 }
 
 // WithClassifier wires the MODEL-01f factor model so MODEL-01h SectorShocks in
-// EvaluateScenario resolve each position's sector.
+// EvaluateScenario resolve each position's sector, and so exposureSet serves the
+// SECTOR dimension.
 //
-// IT HAS NO CALLER, AND EVERY NAMED SCENARIO DEPENDS ON IT. This doc used to say
-// nil "leaves SectorShocks as silent no-ops", which was accurate and read as a
-// tolerable default; it was not one. The scenario library builds GFC_2008,
-// COVID_2020 and the curve, factor, liquidity and climate stresses out of
-// SectorCurve, which emits SectorShocks exclusively, so with this unset the
-// whole catalog returned the unshocked book (#640). It is unset because no
-// production factor.Classifier exists — see factor.StaticClassifier — and
-// EvaluateScenario now refuses those requests rather than answering them.
-// test/arch/no_nil_classifier_seam_test.go is what keeps the gap tracked.
+// EVERY NAMED SCENARIO DEPENDS ON IT, and it had no caller at all until #640.
+// The scenario library builds GFC_2008, COVID_2020 and the curve, factor,
+// liquidity and climate stresses out of SectorCurve, which emits SectorShocks
+// exclusively — so with this unset the whole catalog first returned the
+// unshocked book, and then (once ErrScenarioUnresolvable landed) refused.
+// services/risk-engine now passes refdata.Cache.Factor when a security master
+// is configured.
+//
+// NIL REMAINS A LEGAL POSTURE and still means "this deployment has no
+// reference-data source": scenarios carrying sector shocks refuse, and
+// exposureSet serves the two dimensions compute.ComputeExposure produces rather
+// than inventing a third. test/arch/no_nil_classifier_seam_test.go keeps every
+// remaining nil tracked.
 func WithClassifier(c factor.Classifier) EngineOption {
 	return func(e *EngineImpl) { e.classifier = c }
 }
@@ -377,7 +382,22 @@ func (e *EngineImpl) refuseIfNotOwned(id v1.PortfolioID) error {
 func (e *EngineImpl) exposureSet(ctx context.Context, id v1.PortfolioID) (*domain.ExposureSet, *commonpb.LogPosition, bool) {
 	if p, found := e.store.Snapshot(id); found {
 		compute.PopulateUncertainty(ctx, p, e.volModel)
+		// THE SECTOR DIMENSION IS SERVED ONLY WHEN IT CAN BE RESOLVED (#640).
+		// factor.ComputeExposure layers ExposureBySector onto the instrument and
+		// currency dimensions compute.ComputeExposure produces; this branch used
+		// to be unreachable, because WithClassifier had no caller anywhere in the
+		// module and the RISK-06 doc's "the engine uses this when a Classifier is
+		// wired" described a condition that was never met.
+		//
+		// Positions the classifier cannot resolve land in factor.UnclassifiedSector
+		// rather than being dropped, so the sector totals still reconcile with
+		// gross — an operator reading a large UNCLASSIFIED bucket is being told
+		// about a reference-data gap, which is the honest answer and the one a
+		// silently absent dimension could not give.
 		es := compute.ComputeExposure(p)
+		if e.classifier != nil {
+			es = factor.ComputeExposure(ctx, p, e.classifier)
+		}
 		e.cache.StoreExposure(id, es)
 		return es, p.LogPosition(), true
 	}

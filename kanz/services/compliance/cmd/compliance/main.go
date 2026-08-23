@@ -232,17 +232,72 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// COMP-01e: decisions to the audit stream. COMP-01d: the post-trade monitor.
 	recorder := audit.NewBusRecorder(producer, logger)
 	breachEmitter := monitor.NewEmitter(producer)
-	// The classifier is nil for the reason the OMS gate's is — see the comment
-	// at its NewPreTradeGate call. No production compliance.Classifier exists,
-	// and a SECTOR/ISSUER/ASSET_CLASS rule the monitor cannot resolve now emits a
-	// violation naming that, rather than re-evaluating a live book and reporting
-	// it clean (#640).
+	// THE INSTRUMENT CLASSIFIER (#640) — the same cache the OMS gate wires, for
+	// the same reason and against the same source. This monitor re-evaluates LIVE
+	// BOOKS rather than orders, so the consequence of it being unwired was a
+	// monitor reporting a fund CLEAN against a sector or issuer exclusion it
+	// could not evaluate; unresolvedDimension made that a violation instead, and
+	// this makes it an evaluation.
+	//
+	// Nil when no master is configured, deliberately — see the OMS's comment for
+	// why "none wired" must not be spelled like "wired and does not know this
+	// instrument".
+	refCache, err := cfg.RefData.NewCache(cfg.Tenant, "svc:compliance")
+	if err != nil {
+		logger.Error("compliance: the instrument classifier refused its configuration", "err", err)
+		return err
+	}
+	cfg.RefData.LogPosture(logger, "compliance")
+	var classifier comp.Classifier
+	if refCache != nil {
+		classifier = refCache.Compliance()
+	}
+	refreshFailures := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_instrument_reference_refresh_failures_total",
+		Help: "Reference-data refresh cycles that reported at least one failed lookup. Registered " +
+			"before anything can fail so \"none\" is a zero series rather than a missing one.",
+	})
+	obs.Registry.MustRegister(refreshFailures)
+	// ZERO IS A READABLE ANSWER (#622): the gauge exists whether or not a master
+	// is wired, so an alert asking "is any classifier armed" finds a series.
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_instrument_classifier_wired",
+		Help: "1 when this pod has a reference-data source for instrument classification. ZERO " +
+			"MEANS EVERY SECTOR, ISSUER AND ASSET_CLASS MANDATE RULE IS REFUSED as unverifiable.",
+	}, func() float64 {
+		if refCache == nil {
+			return 0
+		}
+		return 1
+	}))
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_instrument_classifier_resolved",
+		Help: "Instruments this pod can currently classify. Held against " +
+			"kanz_instrument_classifier_wanted it is the difference between a warming cache and " +
+			"a reference-data gap.",
+	}, func() float64 {
+		if refCache == nil {
+			return 0
+		}
+		return float64(refCache.Stats().Resolved)
+	}))
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_instrument_classifier_wanted",
+		Help: "Instruments asked about and not yet resolved. Each one is a holding whose " +
+			"classified-dimension mandate rules are being REFUSED right now.",
+	}, func() float64 {
+		if refCache == nil {
+			return 0
+		}
+		return float64(refCache.Stats().Wanted)
+	}))
+
 	// Registered before anything can drop: a plain Counter exports at zero the
 	// moment it is registered, which is what makes "none lost" a readable answer
 	// rather than a missing series (#622).
 	obs.Registry.MustRegister(breachRecordsLost)
 
-	mon := monitor.NewMonitor(comp.NewEngine(nil), mandateReg, nil /*classifier*/, breachEmitter, recorder, logger,
+	mon := monitor.NewMonitor(comp.NewEngine(nil), mandateReg, classifier, breachEmitter, recorder, logger,
 		monitor.WithDroppedRecordObserver(func() { breachRecordsLost.Inc() }))
 
 	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
@@ -282,6 +337,35 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		once     sync.Once
 		firstErr error
 	)
+	// THE REFERENCE-DATA REFRESH CYCLE (#640). While it is not running, every
+	// classified dimension the monitor evaluates is refused. It logs and retries
+	// rather than terminating: a monitor that stops is a fund nothing is watching
+	// at all, which is strictly worse than one whose sector rules are refusing.
+	// The first cycle runs before the first tick so a fresh pod is not blind for
+	// a whole interval. Joined, like every goroutine in this frame.
+	if refCache != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(cfg.RefData.RefreshInterval)
+			defer ticker.Stop()
+			for {
+				if n, err := refCache.Refresh(ctx); err != nil {
+					refreshFailures.Inc()
+					logger.Error("compliance: the instrument reference refresh reported failures — "+
+						"the holdings it could not resolve will have their SECTOR, ISSUER and "+
+						"ASSET_CLASS mandate rules refused",
+						"err", err, "installed_despite_failures", n)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

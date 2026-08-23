@@ -181,7 +181,22 @@ spec:
             # what makes replicas: 2 safe — see the invariant at the top.
             - { name: OMS_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
             # MT-01d: scopes every order row via the app.tenant_id GUC (RLS).
+            # IT ALSO ADDRESSES THE SECURITY MASTER: datamaster serves ONE tenant per
+            # instance and answers a caller from any other with a no-oracle 404, so
+            # this value must match DATAMASTER_TENANT on the instance below.
             - { name: OMS_TENANT, value: "__system__" }
+            # THE INSTRUMENT CLASSIFIER (#640). datamaster is the estate's golden
+            # security master and the only place a sector, an issuer or an asset class
+            # can be resolved from. WITHOUT THIS LINE this pod starts cleanly, logs one
+            # WARN, exports kanz_instrument_classifier_wired 0, and every mandate rule naming
+            # the SECTOR, ISSUER or ASSET_CLASS dimension is REFUSED as unverifiable.
+            #
+            # It reads GET /v1/securities/{id} on a background cycle and answers from
+            # memory, so nothing on the order-admission path waits on datamaster.
+            # allow-classifier-reads-datamaster in
+            # infra/security/runtime/network-policies.yaml is the other half: without
+            # that rule every lookup fails and the cache stays empty.
+            - { name: OMS_DATAMASTER_URL, value: "http://datamaster.kanz-services.svc:8080" }
             # THE MANDATE POSTURE — a deployment decision, and it is stated in the
             # OMS's startup log either way (EXEC-M14).
             #

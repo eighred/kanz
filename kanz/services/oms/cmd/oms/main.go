@@ -549,19 +549,77 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"population whose orders that rule will refuse.",
 	}, func() float64 { _, live := margins.Stats(); return float64(live) }))
 
-	// THE CLASSIFIER SEAM IS NIL AND THAT IS A DECISION, not an oversight
-	// (#640). No production compliance.Classifier exists — the reference-data
-	// source it would read is a schema with no writer — and inventing a sector
-	// or issuer map to fill it would make a control confidently wrong instead of
-	// merely unarmed. What it must not be is QUIET: a mandate rule naming the
-	// SECTOR, ISSUER or ASSET_CLASS dimension is now REFUSED with a named reason
-	// (compliance.unresolvedDimension) rather than passed. That is only
-	// reachable for a portfolio whose mandate DECLARES such a rule, so nothing
-	// trading today changes; before it, a book 100% in one sector was admitted
-	// under a 10% cap on that sector and the audit trail recorded a pass.
-	// test/arch/no_nil_classifier_seam_test.go keeps this nil tracked.
+	// THE INSTRUMENT CLASSIFIER (#640). Until this, no production
+	// compliance.Classifier existed anywhere in the module and every seam was
+	// passed nil, so a mandate naming SECTOR, ISSUER or ASSET_CLASS could not be
+	// evaluated at all — first passing silently, then (once unresolvedDimension
+	// landed) refusing. It reads datamaster's golden security master, which is
+	// the estate's only reference-data source and now carries an issuer.
+	//
+	// LOOKUPS ARE MEMORY READS. The rule evaluators are handed context.TODO, so
+	// a classifier that dialled datamaster from inside them would put an
+	// uncancellable HTTP call on the order-admission path and couple admission to
+	// another service's availability. The cache is filled by the refresh cycle
+	// below instead.
+	//
+	// NIL WHEN NO MASTER IS CONFIGURED, deliberately, and it is the one place
+	// this seam may still be nil: "no reference source on this deployment" and
+	// "the source does not know this instrument" are different violations with
+	// different operator actions, and compliance.unresolvedDimension tells them
+	// apart only if the composition root does not collapse them here.
+	refCache, err := cfg.RefData.NewCache(cfg.Tenant, "svc:oms")
+	if err != nil {
+		logger.Error("oms: the instrument classifier refused its configuration", "err", err)
+		return false, err
+	}
+	cfg.RefData.LogPosture(logger, "oms")
+	var classifier comp.Classifier
+	if refCache != nil {
+		classifier = refCache.Compliance()
+	}
+	// ZERO IS A READABLE ANSWER, so the gauge is registered whether or not a
+	// master is wired: an alert asking "is any classifier armed" must find a
+	// series to read, not a missing one (#622).
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_instrument_classifier_wired",
+		Help: "1 when this pod has a reference-data source for instrument classification. ZERO " +
+			"MEANS EVERY SECTOR, ISSUER AND ASSET_CLASS MANDATE RULE IS REFUSED as unverifiable.",
+	}, func() float64 {
+		if refCache == nil {
+			return 0
+		}
+		return 1
+	}))
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_instrument_classifier_resolved",
+		Help: "Instruments this pod can currently classify. Held against " +
+			"kanz_instrument_classifier_wanted it is the difference between a warming cache and " +
+			"a reference-data gap.",
+	}, func() float64 {
+		if refCache == nil {
+			return 0
+		}
+		return float64(refCache.Stats().Resolved)
+	}))
+	refreshFailures := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_instrument_reference_refresh_failures_total",
+		Help: "Reference-data refresh cycles that reported at least one failed lookup. Registered " +
+			"before anything can fail so \"none\" is a zero series rather than a missing one.",
+	})
+	obs.Registry.MustRegister(refreshFailures)
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_instrument_classifier_wanted",
+		Help: "Instruments asked about and not yet resolved. Each one is a holding whose " +
+			"classified-dimension mandate rules are being REFUSED right now; persistently " +
+			"non-zero means the refresh is failing or the master does not hold the book.",
+	}, func() float64 {
+		if refCache == nil {
+			return 0
+		}
+		return float64(refCache.Stats().Wanted)
+	}))
 	preTrade := comp.NewPreTradeGate(
-		comp.NewEngine(nil), compliance.NewBookSource(book, cash, risk), mandateReg, nil, nil, logger,
+		comp.NewEngine(nil), compliance.NewBookSource(book, cash, risk), mandateReg, classifier, nil, logger,
 		comp.WithRequireMandate(cfg.RequireMandate),
 		// THE SOURCE IS ALWAYS WIRED, even on a deployment that binds no accounts
 		// and observes no margin. It answers UNKNOWN there, which refuses — and
@@ -1303,6 +1361,45 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// exists to protect. So it logs at ERROR, counts, and tries again next tick —
 	// and the counter is what makes a sweep that has been failing all day
 	// distinguishable from one that has found nothing to do.
+	// THE REFERENCE-DATA REFRESH CYCLE (#640). It is the ONLY thing that fills the
+	// classifier the pre-trade gate reads, so while it is not running every
+	// SECTOR, ISSUER and ASSET_CLASS mandate rule refuses.
+	//
+	// IT LOGS AT ERROR AND TRIES AGAIN, on the periodic sweep's reasoning below:
+	// this runs in a process that is already trading, and terminating it would
+	// refuse every order rather than the classified subset a failed cycle costs.
+	// The counter is what makes a refresh that has been failing all morning
+	// distinguishable from one with nothing to do.
+	//
+	// THE FIRST CYCLE RUNS BEFORE THE FIRST TICK. Without it the pod refuses every
+	// classified dimension for a whole interval after it starts admitting orders,
+	// which is a self-inflicted compliance outage on every deploy.
+	//
+	// JOINED, like every other goroutine in this frame: the deferred closers
+	// unwind on SIGTERM and must not run underneath a cycle still in flight.
+	if refCache != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(cfg.RefData.RefreshInterval)
+			defer ticker.Stop()
+			for {
+				if n, err := refCache.Refresh(ctx); err != nil {
+					refreshFailures.Inc()
+					logger.Error("oms: the instrument reference refresh reported failures — the "+
+						"holdings it could not resolve will have their SECTOR, ISSUER and "+
+						"ASSET_CLASS mandate rules refused",
+						"err", err, "installed_despite_failures", n)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
+
 	if cfg.SweepInterval > 0 {
 		wg.Add(1)
 		go func() {

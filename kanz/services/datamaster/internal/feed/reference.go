@@ -25,9 +25,16 @@ type RefRow struct {
 	ISIN, CUSIP, SEDOL, FIGI, RIC, BloombergTicker string
 	AssetClass                                     string // "EQUITY", "FIXED_INCOME", ... (reference.v1 vocabulary, sans prefix)
 	SectorTaxonomy, SectorCode, SectorName         string
-	Currency                                       string
-	Description                                    string
-	AsOf                                           time.Time
+	// IssuerID is the vendor's identifier for the ISSUING ENTITY, which this row
+	// did not carry at all until #640 — so the golden record could not carry one
+	// either, and an issuer-concentration limit had nothing to bucket on. It is
+	// deliberately NOT derived from the description or the ticker: an issuer key
+	// guessed from a security name silently merges two entities that share a
+	// prefix, which is a concentration limit measuring the wrong exposure.
+	IssuerID    string
+	Currency    string
+	Description string
+	AsOf        time.Time
 }
 
 // RefSource is the vendor reference-feed transport seam. The real Bloomberg /
@@ -111,6 +118,7 @@ func (a *ReferenceAdapter) decode(row RefRow, instrumentID string) master.Vendor
 		},
 		AssetClass:   row.AssetClass,
 		Sector:       master.Sector{Taxonomy: row.SectorTaxonomy, Code: row.SectorCode, Name: row.SectorName},
+		IssuerID:     row.IssuerID,
 		CurrencyCode: row.Currency,
 		Description:  row.Description,
 		AsOf:         row.AsOf,

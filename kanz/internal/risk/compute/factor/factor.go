@@ -11,9 +11,17 @@
 // — sector, asset_class). Classification is slowly-changing and point-in-time:
 // a sector reclassification carries an effective time, so a backtest reads the
 // mapping that was in effect then (the reference.v1 as_of SCD discipline), which
-// is why Classify takes an asOf. The production source is a reference-data store
-// (the reference mirror of MODEL-01b, not yet built); StaticClassifier is the
-// in-memory stand-in the engine loads from reference state/events meanwhile.
+// is why Classify takes an asOf. The production source is internal/refdata,
+// which projects datamaster's golden security master (#640) — the reference
+// mirror of MODEL-01b, and the thing this doc called "not yet built" for as long
+// as it was. StaticClassifier is now a TEST fixture only.
+//
+// ONE LIMIT OF THE REAL SOURCE, stated here because this doc is where the asOf
+// discipline is promised: the master keeps ONE snapshot per instrument, not an
+// SCD history. refdata refuses a question about a time before the snapshot's own
+// as_of rather than answering it with today's classification, so a backtest gets
+// a refusal instead of a reclassification that had not happened. Closing that
+// properly is the master's work, not the cache's.
 //
 // # Factor model scope
 //
@@ -70,18 +78,13 @@ type Classifier interface {
 // StaticClassifier is an in-memory Classifier backed by a fixed instrument→
 // classification map (asOf-independent).
 //
-// TESTS ARE ITS ONLY CONSTRUCTOR, and this doc used to claim otherwise — "the
-// engine loads it from reference data" described a composition root that has
-// never existed (#640). The reference-data store the package header calls "not
-// yet built" is still not built: reference.v1.InstrumentReference has one
-// builder in the module, datamaster's feed.NormalizeReference, whose only
-// callers are its own tests, and which nothing publishes or persists.
-//
-// SO risk/engine.WithClassifier IS UNCALLED AND SectorShocks CANNOT RESOLVE.
-// Filling this map with plausible sectors to make the seam non-nil would make
-// the whole named-scenario catalog report confident numbers derived from
-// invented reference data, which #345 rules out; EvaluateScenario refuses those
-// requests instead.
+// TESTS ARE ITS ONLY CONSTRUCTOR AND THAT IS NOW CORRECT RATHER THAN A GAP. It
+// once carried "the engine loads it from reference data", describing a
+// composition root that had never existed; the production source is
+// refdata.Cache.Factor (#640), which services/risk-engine passes to
+// engine.WithClassifier. A composition root reaching for this type instead
+// would make the whole named-scenario catalog report confident numbers derived
+// from a map somebody typed, which #345 rules out.
 type StaticClassifier map[string]Classification
 
 // Classify implements Classifier; asOf is ignored (the static map is a single
