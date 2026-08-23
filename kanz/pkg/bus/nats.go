@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -264,9 +265,9 @@ func (c *NATSClient) Publish(ctx context.Context, msg Message) error {
 }
 
 func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Handler) error {
-	stream, err := c.js.StreamNameBySubject(ctx, subject)
+	stream, err := c.streamForSubject(ctx, subject)
 	if err != nil {
-		return fmt.Errorf("nats: stream for subject %q: %w", subject, err)
+		return err
 	}
 	// ONE DURABLE PER (GROUP, SUBJECT) — not one per group.
 	//
@@ -871,3 +872,65 @@ func (c *NATSClient) subscribeEphemeral(ctx context.Context, subject string, pol
 
 var _ BroadcastSubscriber = (*NATSClient)(nil)
 var _ ReplaySubscriber = (*NATSClient)(nil)
+
+// streamForSubject resolves the ONE stream a subscription binds to, and REFUSES
+// a subject that matches more than one.
+//
+// # Why this is not jetstream.StreamNameBySubject
+//
+// That call ends `return resp.Streams[0], nil` — it takes the FIRST of however
+// many streams match, with no error and no warning, and the order is the
+// server's rather than anything this repository chooses. Subscribe then creates
+// the durable on that one stream, so every other matching stream is silently
+// never consumed (#698).
+//
+// It cost the compliance record. services/audit's DefaultSubjects is ">" with
+// the comment "materializes everything — audit completeness over economy", and
+// ">" matches all sixteen streams bootstrap-job.yaml provisions. Audit bound
+// one and materialized nothing from the other fifteen — while the subscription
+// succeeded, the pod reported Ready, and kanz_bus_consume_total climbed from the
+// one stream that did deliver. "This estate produced no compliance.breach FACTs"
+// and "audit is not subscribed to the stream carrying them" were the same
+// observable state.
+//
+// Worse, audit_log is hash-chained and #665 verifies that chain on a schedule.
+// A CHAIN OVER AN INCOMPLETE SET VERIFIES GREEN: integrity and completeness are
+// different properties and only one of them was being checked.
+//
+// # Why a refusal rather than a fan-out
+//
+// Binding one durable per matching stream would be the other repair, and it is
+// the wrong default here: it silently doubles a consumer's stream count when
+// somebody provisions a new stream under an existing prefix, and the group
+// semantics of "one message to one pod" become per-stream in a way no caller
+// asked for. A subscription is a statement about WHICH LOG this service reads,
+// so a subject that names several is a question the caller has to answer.
+// Callers that genuinely want every stream enumerate them — see audit.
+//
+// Every other subject in this module resolves to exactly one stream, so this
+// refusal changes no working subscription; it converts one silent 15/16 loss
+// into a startup failure that names what it found.
+func (c *NATSClient) streamForSubject(ctx context.Context, subject string) (string, error) {
+	var names []string
+	lister := c.js.StreamNames(ctx, jetstream.WithStreamListSubject(subject))
+	for name := range lister.Name() {
+		names = append(names, name)
+	}
+	if err := lister.Err(); err != nil {
+		return "", fmt.Errorf("nats: stream for subject %q: %w", subject, err)
+	}
+	switch len(names) {
+	case 1:
+		return names[0], nil
+	case 0:
+		return "", fmt.Errorf("nats: stream for subject %q: %w", subject, jetstream.ErrStreamNotFound)
+	default:
+		sort.Strings(names)
+		return "", fmt.Errorf("nats: subject %q matches %d streams (%s) and a subscription binds to "+
+			"exactly ONE. The JetStream client would have silently taken the first in the server's "+
+			"order and left the rest unconsumed, which is how audit materialized one stream while "+
+			"claiming to materialize everything (#698). Name the stream you mean by subscribing its "+
+			"own subject space, or subscribe each stream separately",
+			subject, len(names), strings.Join(names, ", "))
+	}
+}
