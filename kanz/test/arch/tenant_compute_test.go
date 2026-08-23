@@ -166,10 +166,13 @@ func TestTenantComputeGuard(t *testing.T) {
 	// OMS reported that arrangement as fully provisioned.
 	baseBytes := map[string][]byte{}
 	for _, svc := range tenantgen.Services {
-		basePath := filepath.Join(root, filepath.FromSlash(svc.Base))
-		b, err := os.ReadFile(basePath)
+		// Base AND Extra, through the package's own reader: a service whose
+		// definition is split across files (risk-engine's Rollout and its KEDA
+		// ScaledObject) renders from all of them, and a guard reading only Base
+		// would report permanent drift against a manifest that is correct.
+		b, err := tenantgen.ReadBases(root, svc)
 		if err != nil {
-			t.Fatalf("read %s (base for declared per-tenant service %q): %v", basePath, svc.Name, err)
+			t.Fatalf("bases for declared per-tenant service %q: %v", svc.Name, err)
 		}
 		baseBytes[svc.Name] = b
 	}

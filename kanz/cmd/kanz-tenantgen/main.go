@@ -66,10 +66,9 @@ func run(args []string) error {
 	}
 
 	for _, svc := range services {
-		basePath := filepath.Join(*root, filepath.FromSlash(svc.Base))
-		baseBytes, err := os.ReadFile(basePath)
+		baseBytes, err := tenantgen.ReadBases(*root, svc)
 		if err != nil {
-			return fmt.Errorf("read base %s: %w", basePath, err)
+			return err
 		}
 		rendered, err := tenantgen.Render(baseBytes, svc, *tenant)
 		if err != nil {

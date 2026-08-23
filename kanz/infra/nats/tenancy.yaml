@@ -122,7 +122,25 @@ data:
         # prefix: the import is the boundary, and a wildcard would make adding an
         # account to this file silently widen what the platform ingests.
         imports: [
-          { stream: { account: acme, subject: "order.>" },              prefix: "tfact.acme" }
+          # ORDER FACTS, NAMED ONE BY ONE, MIRRORING acme's EXPORT. `order.>` here
+          # cannot be used: this account SENDS order commands to acme, so acme
+          # cannot offer that whole space back without forming a cycle the broker
+          # refuses — see the export block in the acme account for the measured
+          # detail. An import may not be wider than the export behind it either:
+          # `order.>` here against a narrower export is "stream import not
+          # authorized", which is the same outage with a different message.
+          { stream: { account: acme, subject: "order.order.accepted" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.submitted" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.routed" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.filled" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.partially_filled" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.cancelled" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.rejected" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.expired" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.healed" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.outcome" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.approved" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.pending_approval" }, prefix: "tfact.acme" }
           { stream: { account: acme, subject: "execution.>" },          prefix: "tfact.acme" }
           { stream: { account: acme, subject: "risk.position.>" },      prefix: "tfact.acme" }
           { stream: { account: acme, subject: "risk.portfolio.>" },     prefix: "tfact.acme" }
@@ -1253,7 +1271,45 @@ data:
         # exactly ONE message — the genuine FACT, not two. NATS does not
         # re-export what arrived by import.
         exports: [
-          { stream: "order.>" }
+          # ORDER FACTS ONLY, NAMED ONE BY ONE — `order.>` HERE FORMS A CYCLE AND
+          # THE BROKER REFUSES THE WHOLE CONFIG.
+          #
+          # This account IMPORTS its order COMMANDS from __system__ and remaps
+          # them onto the logical names (`to: "order.order.submit"` and its
+          # siblings below). Those land inside `order.>`, so exporting that space
+          # re-offers to __system__ the very subjects it just sent here, and
+          # nats-server reports:
+          #
+          #   Error adding stream import "order.>": import forms a cycle
+          #
+          # IT IS NON-DETERMINISTIC, which is what made it dangerous rather than
+          # merely wrong: the check runs while imports are added and its outcome
+          # depends on iteration order, so the same file was accepted most of the
+          # time and rejected the rest. Measured on the committed config: 1 in 8
+          # `nats-server -t` runs rejected it, and
+          # internal/platform/halt's tenancy integration test failed 3 runs in 6.
+          # A broker that starts most of the time is a broker that will not start
+          # during the one rollout nobody wants to be debugging.
+          #
+          # So the export names the FACTs and only the FACTs. The four command
+          # subjects — submit, cancel, approve, amend — are deliberately absent:
+          # three are what this account imports, and a command is not a fact the
+          # tenant produces in any case.
+          #
+          # test/arch/TestNoTenantExportsWhatItImports holds this deterministically,
+          # because the broker's own check cannot be relied on to fire.
+          { stream: "order.order.accepted" }
+          { stream: "order.order.submitted" }
+          { stream: "order.order.routed" }
+          { stream: "order.order.filled" }
+          { stream: "order.order.partially_filled" }
+          { stream: "order.order.cancelled" }
+          { stream: "order.order.rejected" }
+          { stream: "order.order.expired" }
+          { stream: "order.order.healed" }
+          { stream: "order.order.outcome" }
+          { stream: "order.order.approved" }
+          { stream: "order.order.pending_approval" }
           { stream: "execution.>" }
           { stream: "risk.position.>" }
           { stream: "risk.portfolio.>" }
@@ -1325,6 +1381,46 @@ data:
           # rather than inventing them is what keeps this template correct as the
           # platform entry changes.
           { user: "spiffe://kanz.internal/ns/tenant-acme/sa/risk-engine"
+            permissions: {
+              publish: {
+                allow: [
+                  "risk.portfolio.exposure_recomputed", "risk.portfolio.measures_computed",
+                  "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
+                  "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [
+                  "risk.portfolio.revalued", "risk.position.changed.>", "risk.portfolio.snapshot",
+                  "market.>",
+                  "platform.model.registered",
+                  "_INBOX.>",
+                ]
+              }
+            }
+          }
+          # THE SAME ENGINE, THE OTHER DEPLOYMENT MODEL (#668). The entry above is
+          # the TENANT'S OWN risk engine, running in the tenant-acme namespace
+          # tenantctl.sh mints for a tenant's workloads (its `principal()`). This
+          # one is MT-02 COMPUTE: internal/tenantgen renders risk-engine-acme
+          # into kanz-services, and SPIRE templates its SVID from that pod's
+          # namespace and ServiceAccount, so it presents a DIFFERENT string
+          # (tenantctl.sh's `compute_principal()`). Both are legitimate and the
+          # two must not be conflated — admitting only the first leaves the
+          # rendered pod authenticating into NO account, consuming nothing, with
+          # every probe green (SEC-M3).
+          #
+          # Its grants are IDENTICAL to the entry above, and deliberately so:
+          # same binary, same subjects, same account. They are the platform
+          # risk-engine's, derived rather than invented, and
+          # TestEveryTenantNATSUserMirrorsItsPlatformPermissions holds all three
+          # in step — it named an extra subscribe on my first draft of the
+          # accounting entry.
+          #
+          # WITHOUT THIS the tenant's positions are published into this account
+          # and no engine folds them: exposure, VaR and every measure report on
+          # an empty book, which is indistinguishable from a flat one.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine-acme"
             permissions: {
               publish: {
                 allow: [
@@ -1444,6 +1540,48 @@ data:
           # infra/tenancy/tenantctl.sh's COMPUTE_KAFKA_SAS grants it;
           # test/arch/tenant_compute_test.go fails the build if that list and
           # internal/tenantgen's KafkaProducer set ever disagree.
+          # THE TENANT'S BOOK OF RECORD (#668). Without this user, acme's fills are
+          # published into acme's account and NO LEDGER ENTRY IS POSTED for them:
+          # NAV, cash and the pre-trade buying-power gate are all computed over an
+          # empty book, and every service reports Ready throughout, because "this
+          # tenant traded nothing" and "this tenant's fills reach no accountant"
+          # are the same observable state.
+          #
+          # REMEDY 1, NOT THE EXPORT BRIDGE, and the distinction is enforced by
+          # test/arch/tenant_bridge_parity_test.go. accounting is pinned to one
+          # tenant for the process lifetime by ACCOUNTING_TENANT and
+          # internal/pg.NewTenantPool (#97), and it subscribes the LOGICAL subject
+          # names — so the tfact.<tenant>. space that carries this tenant's FACTs
+          # to audit reaches accounting as nothing at all. Account membership IS
+          # its return path.
+          #
+          # THE ALLOW-LISTS ARE THE PLATFORM ACCOUNTING'S, DERIVED NOT COPIED, for
+          # the reason the archiver entry below gives: infra/deploy/tenants/acme/
+          # accounting-acme.yaml is rendered by internal/tenantgen from
+          # infra/deploy/accounting-deploy.yaml, so it is the SAME digest-pinned
+          # binary reading the same subject defaults. The subjects are LOGICAL
+          # inside this account — the isolation is the account boundary, not the
+          # subject string — so they are identical to the platform user's above,
+          # which is what makes a drift between them a bug rather than a variant.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/accounting-acme"
+            permissions: {
+              publish: {
+                allow: [
+                  "accounting.cash.>",
+                  "accounting.balance.portfolio",
+                  "dlq.order.order.filled", "dlq.order.order.partially_filled",
+                  "dlq.accounting.cash.>", "dlq.market.fx.>",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [
+                  "order.order.filled", "order.order.partially_filled",
+                  "accounting.cash.>", "market.fx.>", "_INBOX.>",
+                ]
+              }
+            }
+          }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/archiver-acme"
             permissions: {
               publish: { allow: ["$JS.API.>", "$JS.ACK.>"] }
