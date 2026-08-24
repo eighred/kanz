@@ -176,11 +176,35 @@ func servicesBuildingWithRedisTag(t *testing.T, servicesDir string) map[string]b
 		if rerr != nil {
 			continue // not every service ships an image
 		}
-		if reTagsRedis.Match(b) {
+		if reTagsRedis.Match(stripDockerfileComments(b)) {
 			out[e.Name()] = true
 		}
 	}
 	return out
+}
+
+// stripDockerfileComments removes comment lines before the -tags scan.
+//
+// THE GUARD USED TO MATCH ITS OWN DOCUMENTATION. Both Dockerfiles that carry the
+// tag also EXPLAIN it in a comment directly above the RUN line, and those
+// comments contain the literal string "-tags redis". Matching raw bytes, the
+// guard therefore reported a service as building with the tag when the RUN line
+// had lost it and only the prose remained — the precise half-wiring CHECK 2
+// calls "not exemptible", passing green.
+//
+// Found by mutation: deleting `-tags redis` from api-gateway's RUN line left
+// this guard passing. A guard that greps source must never be able to be
+// satisfied by a sentence describing what the code should do.
+func stripDockerfileComments(b []byte) []byte {
+	lines := strings.Split(string(b), "\n")
+	kept := lines[:0]
+	for _, ln := range lines {
+		if strings.HasPrefix(strings.TrimSpace(ln), "#") {
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	return []byte(strings.Join(kept, "\n"))
 }
 
 // servicesWiredToRedis maps service name -> the *_REDIS_URL variables the estate

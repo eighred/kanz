@@ -86,6 +86,7 @@ func mandateRouterFor(t *testing.T, role string, callerRoles ...string) (http.Ha
 		stubAuthenticator{principal: &middleware.Principal{
 			Subject: "user:someone", Tenant: fundingTenant, Roles: callerRoles,
 		}},
+		nil, // per-pod idempotency claims: these cases assert routing, not dedup
 	)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
@@ -281,6 +282,7 @@ func TestAMandateSignatoryOverNoComplianceUpstreamGets503(t *testing.T) {
 			Subject: "user:someone", Tenant: fundingTenant,
 			Roles: []string{baselineRole, mandateRole},
 		}},
+		nil, // per-pod idempotency claims: these cases assert routing, not dedup
 	)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)
@@ -326,6 +328,7 @@ func TestTheMandateRoutesForwardTheAuthenticatedPrincipal(t *testing.T) {
 			Subject: "operator:akif", Tenant: fundingTenant,
 			Roles: []string{baselineRole, mandateRole},
 		}},
+		nil, // per-pod idempotency claims: these cases assert routing, not dedup
 	)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)

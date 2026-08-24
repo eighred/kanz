@@ -118,6 +118,19 @@ type Config struct {
 	// signing is not enforced.
 	SigningSecret string
 
+	// RedisURL backs the CROSS-POD idempotency claim. Empty ⇒ the per-pod
+	// in-memory window, which is a real implementation and a weaker one.
+	//
+	// api-gateway runs replicas: 2, and the claim is what makes a repeated
+	// Idempotency-Key at-most-once. Per-pod, a client retry that lands on the
+	// other replica is not recognised as a retry — on /v1/orders that is a second
+	// live order from one client intent. The posture is logged at startup so the
+	// two cases do not look the same.
+	//
+	// The DSN carries a password, so it is a CSI/Vault file mount (SEC-01d) read
+	// through pkg/secret, never a plaintext value in the pod spec.
+	RedisURL string
+
 	// NATSURL is the spine the order write surface (OMS-01d) publishes commands
 	// to. Empty ⇒ the gateway is read-only (POST /v1/orders 503s).
 	NATSURL string
@@ -286,6 +299,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	redisURL, err := secret.Read("API_GATEWAY_REDIS_URL")
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		Listen:             env.Or("API_GATEWAY_LISTEN", ":8080"),
@@ -295,6 +312,7 @@ func Load() (Config, error) {
 		RiskEngineAddr:     os.Getenv("API_GATEWAY_RISK_ENGINE_ADDR"),
 		OMSReadAddr:        os.Getenv("API_GATEWAY_OMS_READ_ADDR"),
 		SPIFFESocket:       os.Getenv("API_GATEWAY_SPIFFE_SOCKET"),
+		RedisURL:           redisURL,
 		OIDCIssuer:         os.Getenv("API_GATEWAY_OIDC_ISSUER"),
 		OIDCAudience:       os.Getenv("API_GATEWAY_OIDC_AUDIENCE"),
 		OIDCJWKSURI:        os.Getenv("API_GATEWAY_OIDC_JWKS_URI"),
