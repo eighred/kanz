@@ -14,7 +14,7 @@
 //
 // Tier-B: a real bus.Producer over a fake bus.Client, so bus.Validate runs and
 // the assertions are on the wire bytes.
-package audit
+package compliancebus
 
 import (
 	"context"

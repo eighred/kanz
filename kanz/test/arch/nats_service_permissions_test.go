@@ -707,6 +707,22 @@ var crossPackagePublishSurfaces = map[string][]string{
 	// broker denying every authorization decision.
 	"api-gateway": {"pkg/authbus"},
 	"copilot":     {"pkg/authbus"},
+	// COMP-01e (#713): the compliance-decision publisher is internal/compliancebus,
+	// and BOTH of these services drive it.
+	//
+	// compliance's post-trade monitor holds the synchronous recorder. It used to
+	// live in services/compliance/internal/audit — inside that service's own tree,
+	// so this guard found it without being told. #713 promoted the package when the
+	// OMS became its second consumer, and WITHOUT THIS LINE THAT MOVE WOULD HAVE
+	// SILENTLY UNVERIFIED A GRANT THAT WAS PREVIOUSLY CHECKED: a promotion is
+	// exactly the edit that walks a publisher out of the tree this guard scans.
+	//
+	// oms holds the ASYNCHRONOUS one, on the pre-trade gate. Its composition root
+	// names compliancebus.SubjectDecision only in a log line; the bus.Event is
+	// built inside the shared package, so nothing in services/oms names the
+	// subject at a publish site at all.
+	"compliance": {"internal/compliancebus"},
+	"oms":        {"internal/compliancebus"},
 }
 
 // servicePublishedSubjects walks services/<svc> (recursively — a service is a

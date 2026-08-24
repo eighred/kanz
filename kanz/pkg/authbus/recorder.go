@@ -11,8 +11,6 @@ package authbus
 import (
 	"context"
 	"errors"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -20,6 +18,7 @@ import (
 
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/decisionq"
 )
 
 const (
@@ -45,14 +44,20 @@ type BusRecorder struct {
 	producer *bus.Producer
 	ctx      context.Context
 	now      func() time.Time
-	queue    chan *observationpb.DecisionLog
 	onErr    func(err error)
 	onDrop   func(*observationpb.DecisionLog)
 	tenant   string
 
-	wg       sync.WaitGroup
-	stopOnce sync.Once
-	dropped  atomic.Int64
+	// queue is the SHARED bounded queue (pkg/decisionq, #713). The machinery —
+	// the bound, the overflow accounting, the single ordered worker, the drain on
+	// Close — moved there when compliance became its second consumer. What did
+	// NOT move is publish below: the subject must stay a literal in this package
+	// or test/arch's nats_service_permissions_test.go can no longer resolve it,
+	// and this service's publish grant would stop being checked.
+	queue *decisionq.Queue[*observationpb.DecisionLog]
+	// size is applied at construction; kept so WithQueueSize can be passed in any
+	// order relative to the other options.
+	size int
 }
 
 // Option customizes a BusRecorder.
@@ -63,7 +68,7 @@ type Option func(*BusRecorder)
 func WithQueueSize(n int) Option {
 	return func(r *BusRecorder) {
 		if n > 0 {
-			r.queue = make(chan *observationpb.DecisionLog, n)
+			r.size = n
 		}
 	}
 }
@@ -122,13 +127,20 @@ func NewBusRecorder(producer *bus.Producer, opts ...Option) (*BusRecorder, error
 		producer: producer,
 		ctx:      context.Background(),
 		now:      time.Now,
-		queue:    make(chan *observationpb.DecisionLog, defaultQueueSize),
+		size:     defaultQueueSize,
 	}
 	for _, o := range opts {
 		o(r)
 	}
-	r.wg.Add(1)
-	go r.run()
+	// The overflow hook is bound AFTER the options, so WithOverflowHandler set in
+	// any position reaches the queue that reports to it.
+	r.queue = decisionq.New(r.publish,
+		decisionq.WithSize[*observationpb.DecisionLog](r.size),
+		decisionq.WithOverflowHandler(func(entry *observationpb.DecisionLog) {
+			if r.onDrop != nil {
+				r.onDrop(entry)
+			}
+		}))
 	return r, nil
 }
 
@@ -142,33 +154,16 @@ func (r *BusRecorder) Record(_ context.Context, entry *observationpb.DecisionLog
 	if entry == nil {
 		return nil
 	}
-	select {
-	case r.queue <- entry:
-	default:
-		r.dropped.Add(1)
-		if r.onDrop != nil {
-			r.onDrop(entry)
-		}
-	}
+	r.queue.Enqueue(entry)
 	return nil
 }
 
 // Dropped is the count of records shed on buffer overflow (a gauge for alerts).
-func (r *BusRecorder) Dropped() int64 { return r.dropped.Load() }
+func (r *BusRecorder) Dropped() int64 { return r.queue.Dropped() }
 
 // Close stops accepting records, drains the buffer, and waits for the worker.
 // Idempotent.
-func (r *BusRecorder) Close() {
-	r.stopOnce.Do(func() { close(r.queue) })
-	r.wg.Wait()
-}
-
-func (r *BusRecorder) run() {
-	defer r.wg.Done()
-	for entry := range r.queue {
-		r.publish(entry)
-	}
-}
+func (r *BusRecorder) Close() { r.queue.Close() }
 
 // publish maps a DecisionLog onto an OBSERVATION event on platform.authz.decision
 // and publishes it. Partitioned by the deciding principal so a subject's audit

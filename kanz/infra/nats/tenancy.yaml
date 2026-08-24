@@ -979,6 +979,33 @@ data:
                   # which is the only thing separating "not running on this
                   # deployment" from "running, and nothing has failed".
                   "settlement.instruction.fail",
+                  # THE PRE-TRADE COMPLIANCE DECISION (#713). Every order this
+                  # gate admits OR refuses is published as an
+                  # observation.v1.DecisionLog, so AUDIT-01's append-only,
+                  # hash-chained projection can answer "why was this trade
+                  # allowed" about the enforcement point that decides whether
+                  # capital MOVES. Until #713 the OMS recorded nowhere, and the
+                  # platform could say a breach had been OBSERVED while being
+                  # unable to say an order had been CHECKED.
+                  #
+                  # THE SAME SUBJECT THE COMPLIANCE SERVICE PUBLISHES, deliberately:
+                  # one trail, two enforcement points, distinguished by the record's
+                  # own `phase` attribute rather than by two subjects an auditor
+                  # would have to know to union. The publisher is the shared
+                  # internal/compliancebus, which is why services/oms names this
+                  # subject nowhere in its own tree — see
+                  # crossPackagePublishSurfaces in
+                  # test/arch/nats_service_permissions_test.go, without which this
+                  # grant would be present and unverified.
+                  #
+                  # NO dlq.platform.compliance.decision GRANT, and none is wanted.
+                  # The OMS's recorder is ASYNCHRONOUS: it publishes from a
+                  # background worker rather than inside a delivery, so there is no
+                  # message to park and no consumer to redeliver it. A publish that
+                  # fails is counted (kanz_compliance_decisions_dropped_total) and
+                  # logged with the order it gated, which is the honest end state
+                  # for a record whose subject has already been acted upon.
+                  "platform.compliance.decision",
                   "dlq.order.order.submit", "dlq.order.order.amend", "dlq.order.order.cancel",
                   # The approve command parks like its three siblings (#539): it
                   # is consumed through the same bus.WithDLQ consumer, so without
@@ -1508,6 +1535,9 @@ data:
                   "order.cost.recorded",
                   "risk.position.changed.>", "risk.position.venue.changed.>",
                   "settlement.instruction.fail",
+                  # The pre-trade compliance decision (#713) — mirrors the platform
+                  # grant above; the pod runs the same binary and will name it.
+                  "platform.compliance.decision",
                   "dlq.order.order.submit", "dlq.order.order.amend", "dlq.order.order.cancel",
                   "dlq.order.order.approve",
                   "dlq.order.order.filled", "dlq.order.order.partially_filled",

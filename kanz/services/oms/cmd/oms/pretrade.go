@@ -6,6 +6,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/compliancebus"
 	"github.com/eighred/kanz/internal/marketdata/mark"
 	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
@@ -82,6 +83,9 @@ type preTradeWiring struct {
 	// source does not know this instrument" are different violations with
 	// different operator actions, and collapsing them here would lose that.
 	Classifier *refdata.Cache
+	// CloseRecorder drains the decision recorder's queue on shutdown. NEVER nil:
+	// a no-op on the log arm, so the caller defers one thing rather than choosing.
+	CloseRecorder func()
 	// RefreshFailures counts refresh cycles that reported a failed lookup. It is
 	// returned rather than created at the loop, because it is REGISTERED
 	// unconditionally: a deployment with no master must still publish the series
@@ -97,7 +101,7 @@ type preTradeWiring struct {
 // deployment that named a security master this pod cannot reach it. That is a
 // startup failure by design: the alternative is a pod that admits orders while
 // every sector and issuer limit silently passes, which is #640 exactly.
-func buildPreTradeGate(cfg config.Config, deps preTradeDeps, reg prometheus.Registerer, logger *slog.Logger) (preTradeWiring, error) {
+func buildPreTradeGate(cfg config.Config, deps preTradeDeps, producer compliancebus.Bus, reg prometheus.Registerer, logger *slog.Logger) (preTradeWiring, error) {
 	// AN UNGOVERNED PORTFOLIO IS COUNTED AND ANNOUNCED (EXEC-M14).
 	//
 	// It used to be silent: an order for a portfolio nobody had put under mandate
@@ -221,22 +225,23 @@ func buildPreTradeGate(cfg config.Config, deps preTradeDeps, reg prometheus.Regi
 		return float64(refCache.Stats().Wanted)
 	}))
 
-	// THE DECISION RECORDER, WHICH WAS THE SECOND BARE NIL (#643).
+	// THE DECISION RECORDER, WHICH WAS THE SECOND BARE NIL (#643) AND IS NOW ON
+	// THE AUDIT CHAIN (#713).
 	//
-	// It is a LOG sink rather than the bus-backed one, and that is a decision
-	// rather than a placeholder. services/compliance's recorder publishes
-	// SYNCHRONOUSLY, and this service's order path is deliberately outbox-backed:
-	// FACTs are written in the same transaction as the order and drained by a
-	// relay, so nothing on the admission path waits for a broker. Putting a
-	// synchronous publish in front of every order would add broker latency to
-	// admission — a different decision, and one that needs an async recorder, a
-	// publish grant and an overflow metric before it is safe to make.
+	// ASYNCHRONOUS, and that is the whole reason this took two changes. The
+	// compliance service's recorder publishes SYNCHRONOUSLY, which suits the
+	// post-trade monitor and not this caller: order admission is deliberately
+	// outbox-backed — every FACT is written in the same transaction as the order
+	// and drained by a relay — so nothing on that path waits for a broker. A
+	// synchronous publish in front of every order would put broker latency into
+	// admission, a change to the TRADING path made for a REPORTING reason.
 	//
-	// What this fixes today is the thing that was indefensible: the gate recorded
-	// NOWHERE. kanz logs are stdout JSON shipped by the platform (OBS-01a), so
-	// every pre-trade decision now lands in the same pipeline as everything else,
-	// and the gauge below says which sink this build actually has.
-	recorder := comp.NewSlogRecorder(logger)
+	// WITHOUT A BUS IT FALLS BACK TO THE LOG RATHER THAN TO NOTHING. That is the
+	// api-gateway's rule for the same seam — "neither arm is a no-op, which is the
+	// point" — and it keeps a local run drivable without making an unrecorded gate
+	// look like a recorded one. Which arm this build took is on the posture gauge
+	// below and in the startup log, so the two are never guessed at.
+	recorder, closeRecorder := buildDecisionRecorder(producer, reg, logger)
 
 	gate := comp.NewPreTradeGate(
 		comp.NewEngine(nil), deps.Books, deps.Mandates, classifier, recorder, logger,
@@ -283,7 +288,69 @@ func buildPreTradeGate(cfg config.Config, deps preTradeDeps, reg prometheus.Regi
 	)
 
 	announceGatePosture(gate, reg, logger)
-	return preTradeWiring{Gate: gate, Classifier: refCache, RefreshFailures: refreshFailures}, nil
+	return preTradeWiring{
+		Gate: gate, Classifier: refCache, RefreshFailures: refreshFailures,
+		CloseRecorder: closeRecorder,
+	}, nil
+}
+
+// buildDecisionRecorder returns the COMP-01e recorder for the pre-trade gate and
+// the function that drains it on shutdown.
+//
+// WITH A PRODUCER it publishes every decision onto platform.compliance.decision,
+// off the caller's goroutine, so AUDIT-01's append-only projection is the system
+// of record. WITHOUT one it records to the log, which is weaker — not on the hash
+// chain, not queryable beside the FACTs it justified — and is not nothing.
+//
+// A DROP IS COUNTED, and the counter exists on both arms so that "this build has
+// no durable recorder" and "the durable recorder is keeping up" are not the same
+// absence. It is seeded at zero for the reason every counter here is: a series
+// that appears on its first increment reads as no-data to an alert, which cannot
+// fire on the transition that matters.
+func buildDecisionRecorder(producer compliancebus.Bus, reg prometheus.Registerer, logger *slog.Logger) (comp.DecisionRecorder, func()) {
+	dropped := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_compliance_decisions_dropped_total",
+		Help: "Pre-trade compliance decisions that did NOT reach the audit trail, by this process. " +
+			"Non-zero means the trail is missing decisions this gate did make WHILE THE ORDERS THEY " +
+			"GATED WENT AHEAD — the queue overflowed or the broker refused. Zero on a build with no " +
+			"bus does NOT mean the trail is complete: read it beside " +
+			"kanz_compliance_pretrade_recorder_durable, which is 0 there.",
+	})
+	durable := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "kanz_compliance_pretrade_recorder_durable",
+		Help: "1 when this pod's pre-trade decisions are published to the audit chain, 0 when they " +
+			"reach the LOG ONLY. Zero is a real posture, not a defect — but a decision that exists " +
+			"only in stdout is not on the AUDIT-01 hash chain and cannot be queried beside the FACTs " +
+			"it justified.",
+	})
+	reg.MustRegister(dropped, durable)
+
+	if producer == nil {
+		durable.Set(0)
+		logger.Warn("oms: pre-trade compliance decisions are recorded to the LOG ONLY — no bus is "+
+			"configured, so they are not on the AUDIT-01 hash chain and do not survive log "+
+			"retention (#713)",
+			"fix", "set OMS_NATS_URL", "metric", "kanz_compliance_pretrade_recorder_durable")
+		return comp.NewSlogRecorder(logger), func() {}
+	}
+	rec, err := compliancebus.NewAsyncRecorder(producer, logger,
+		compliancebus.WithOverflowHandler(func(comp.DecisionRecord) { dropped.Inc() }),
+		compliancebus.WithErrorHandler(func(error) { dropped.Inc() }),
+	)
+	if err != nil {
+		// Unreachable: NewAsyncRecorder errors only on a nil bus, excluded above.
+		// Degrade rather than refuse to start — an unrecorded gate is bad, an OMS
+		// that will not start is a trading outage.
+		durable.Set(0)
+		logger.Error("oms: the durable decision recorder could not be built — falling back to the log",
+			"err", err)
+		return comp.NewSlogRecorder(logger), func() {}
+	}
+	durable.Set(1)
+	logger.Info("oms: pre-trade compliance decisions publish to the audit chain",
+		"subject", compliancebus.SubjectDecision,
+		"counter", "kanz_compliance_decisions_dropped_total")
+	return rec, rec.Close
 }
 
 // announceGatePosture publishes which of the gate's controls this build actually

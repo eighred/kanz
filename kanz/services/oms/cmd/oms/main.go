@@ -32,7 +32,6 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
-	"github.com/eighred/kanz/services/oms/internal/approval"
 	"github.com/eighred/kanz/services/oms/internal/cashview"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 	"github.com/eighred/kanz/services/oms/internal/config"
@@ -482,10 +481,14 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		Mandates: mandateReg,
 		Margin:   compliance.NewMarginSource(bindings, margins),
 		Marks:    marks,
-	}, obs.Registry, logger)
+	}, producer, obs.Registry, logger)
 	if err != nil {
 		return false, err
 	}
+	// DRAINED ON THE WAY OUT (#713): the decisions still queued gated orders that
+	// were admitted, and discarding them would leave the audit trail short exactly
+	// across deploys and restarts.
+	defer wiring.CloseRecorder()
 	refCache, refreshFailures := wiring.Classifier, wiring.RefreshFailures
 
 	gate := compliance.NewCOMP01Gate(wiring.Gate, cfg.BaseCurrency,
@@ -504,46 +507,11 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// has no dual-control threshold" is a series on a dashboard rather than a
 	// missing metric — "nothing configured" and "checked, and fine" must not look
 	// the same, and neither must "nothing configured" and "this build has no gate".
-	dualControl, err := approval.NewGate(cfg.RequireDualControl, cfg.DualControlMinNotional, marks, obs.Registry)
+	dualControl, err := buildDualControlGate(cfg, marks, obs.Registry, logger)
 	if err != nil {
-		logger.Error("oms: dual-control gate refused its configuration", "err", err)
 		return false, err
 	}
-	if dualControl.Armed() {
-		// THE ENFORCING POSTURE, AND IT IS THE ONE THAT NEEDS A HUMAN ON THE OTHER
-		// END. An order at or above the threshold is written to order_proposals
-		// and does not trade until a DIFFERENT authenticated subject approves it.
-		// If nobody watches the pending queue, large orders stop being placed and
-		// expire — which is a trading outage, not a security posture, and the log
-		// says so at startup rather than leaving it to be discovered.
-		logger.Warn("oms: MAKER-CHECKER IS ENFORCING — an order at or above the threshold is HELD in "+
-			"order_proposals and is NOT admitted until a second, different authenticated subject "+
-			"approves it. Somebody must own the pending queue or these orders expire unfilled (#410)",
-			"threshold", dualControl.Threshold().FloatString(2), "currency", cfg.DualControlNotionalCurrency,
-			"ttl", dualcontrol.DefaultTTL.String(),
-			"metric", "kanz_oms_order_signatures_total")
-	} else if dualControl.Watching() {
-		logger.Info("oms: MAKER-CHECKER IS OBSERVING, NOT ENFORCING — orders at or above the threshold "+
-			"are admitted on ONE signature and counted. Set OMS_REQUIRE_DUAL_CONTROL=true to hold them "+
-			"once somebody owns the pending queue",
-			"threshold", dualControl.Threshold().FloatString(2), "currency", cfg.DualControlNotionalCurrency,
-			"metric", "kanz_oms_order_signatures_total")
-	} else {
-		logger.Warn("oms: NO DUAL-CONTROL THRESHOLD — every order, of any size, is committed on one " +
-			"person's authority (#410). Set OMS_DUAL_CONTROL_MIN_NOTIONAL (e.g. \"1000000 USD\") to " +
-			"start counting how much of the flow would need a second signature")
-	}
-
-	// State the posture, loudly, at startup. Which of these two lines is in the log is
-	// the difference between "an unmandated portfolio trades unconstrained" and "an
-	// unmandated portfolio cannot trade at all", and nobody should have to read the
-	// config to find out which one they deployed.
-	if cfg.RequireMandate {
-		logger.Info("pre-trade compliance: MANDATE REQUIRED — an order for a portfolio with no mandate is REJECTED (MANDATE_MISSING)")
-	} else {
-		logger.Warn("pre-trade compliance: MANDATE ADVISORY — an order for a portfolio with NO MANDATE is ADMITTED, unconstrained. " +
-			"Put every live portfolio under mandate with kanz-mandate, or set OMS_REQUIRE_MANDATE=true to refuse instead")
-	}
+	announceMandatePosture(cfg, logger)
 
 	// Orders that margin against an account nobody bound to their portfolio. Non-zero
 	// means some part of the book is sharing collateral with the rest of it.
