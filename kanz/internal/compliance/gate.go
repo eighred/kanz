@@ -27,8 +27,17 @@ import (
 //
 // The check is hypothetical: it projects the POST-trade book (current holdings
 // plus the order delta), evaluates the mandate against that, and rejects on
-// BREACH — a WARN passes (advisory). Every decision is recorded (COMP-01e),
-// pass or reject, so the audit trail is complete.
+// BREACH — a WARN passes (advisory). Every decision is recorded (COMP-01e), pass
+// or reject, THROUGH WHATEVER RECORDER THE COMPOSITION ROOT WIRED.
+//
+// CORRECTION (2026-08-24). That sentence used to end "so the audit trail is
+// complete", and it was FALSE wherever it mattered most: services/oms/cmd/oms
+// passed a bare nil for the recorder, so the enforcement point that decides
+// whether capital MOVES recorded nothing anywhere, while the post-trade monitor
+// recorded every breach it observed. The platform could say a breach had been
+// seen and could not say an order had been checked. The completeness of the
+// trail is a property of the WIRING, not of this type, so the type now reports
+// what it holds (Posture) rather than asserting what its callers did.
 type PreTradeGate struct {
 	engine     *Engine
 	books      BookSource
@@ -274,8 +283,14 @@ type Decision struct {
 	Unreadable bool
 }
 
-// NewPreTradeGate wires the gate. engine defaults to NewEngine(nil); a nil
-// recorder disables decision logging (the decision still flows).
+// NewPreTradeGate wires the gate. engine defaults to NewEngine(nil).
+//
+// A NIL SEAM IS STILL ACCEPTED AND IS NO LONGER INVISIBLE. A nil recorder
+// disables decision logging and a nil classifier passes every sector and issuer
+// limit (#640); both remain legal here, because this constructor cannot know
+// which controls a deployment is entitled to. What changed is that the gate
+// REPORTS them — see Posture, and #643 for the 1,400-line composition root in
+// which those two nils sat as bare arguments on one line for months.
 func NewPreTradeGate(engine *Engine, books BookSource, mandates MandateSource, classifier Classifier, recorder DecisionRecorder, logger *slog.Logger, opts ...PreTradeOption) *PreTradeGate {
 	if engine == nil {
 		engine = NewEngine(nil)
