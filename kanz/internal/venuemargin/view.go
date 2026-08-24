@@ -417,6 +417,25 @@ type Liquidation struct {
 // holds nothing leveraged, on which an exact-zero liquidation proximity is the
 // honest answer rather than a flattering one.
 //
+// # THE COVERAGE COMES BACK WITH THEM, FROM THE SAME OBSERVATION
+//
+// An enumerator answers "what is in this account", and that answer is only
+// meaningful alongside what the exchange could not tell us — a position missing
+// from this slice because the venue did not answer for it is invisible in the
+// slice itself. Returning the two together is the same discipline Quantity
+// applies to a value and its timestamp: the positions are UNREACHABLE without
+// the record that says what was left out of them.
+//
+// It is also the only way to get both from ONE snapshot. Calling Coverage
+// separately re-enters currentSnapshot, so an account that ages out between the
+// two calls yields positions from a current observation and no coverage — or, on
+// a fold that lands in between, a completeness record describing a different
+// observation than the positions came from. The OMS's adapter states the same
+// rule for the ratio ("a completeness check satisfied by one observation and a
+// number taken from another would be the stale book with an extra step"); this
+// makes it structural for the enumerating caller rather than a thing to
+// remember.
+//
 // # What the caller gets
 //
 // The slice is freshly built and each Price is a copy, so a caller cannot reach
@@ -424,10 +443,10 @@ type Liquidation struct {
 // matters more here because a slice looks borrowable. It is ordered by venue
 // symbol so that two reads of one observation cannot disagree about which
 // position is "worst" when two are equally close.
-func (v *View) Liquidations(venue, account string) ([]Liquidation, bool) {
+func (v *View) Liquidations(venue, account string) ([]Liquidation, Coverage, bool) {
 	snap, ok := v.currentSnapshot(venue, account)
 	if !ok {
-		return nil, false
+		return nil, Coverage{}, false
 	}
 	out := make([]Liquidation, 0, len(snap.liquidation))
 	for symbol, pos := range snap.liquidation {
@@ -445,7 +464,7 @@ func (v *View) Liquidations(venue, account string) ([]Liquidation, bool) {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].VenueSymbol < out[j].VenueSymbol })
-	return out, true
+	return out, snap.coverage, true
 }
 
 // Stats reports how many venue accounts are held and how many are current, for

@@ -98,6 +98,8 @@ spec:
               value: risk-engine
             - name: RISK_ENGINE_TENANT
               value: acme
+            - name: RISK_ENGINE_VENUE_ACCOUNTS
+              value: ""
             - name: RISK_ENGINE_DATAMASTER_URL
               value: http://datamaster.kanz-services.svc:8080
             - name: RISK_ENGINE_GRPC_LISTEN

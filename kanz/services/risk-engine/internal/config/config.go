@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/pkg/secret"
 )
@@ -131,6 +132,34 @@ type Config struct {
 	// venues runs one deployment per venue and reconciles above this layer, where
 	// the routing assumption is visible.
 	LiquidityVenue string
+
+	// VenueAccounts binds portfolios to the exchange accounts they may be
+	// liquidated in — the same deploy-time spec the OMS reads, in the same syntax,
+	// parsed by the same execution.ParseBindings:
+	//
+	//	RISK_ENGINE_VENUE_ACCOUNTS="tenant/portfolio@MIC=account,..."
+	//
+	// THE ENGINE READS IT BECAUSE THE MEASURE IS PER PORTFOLIO AND THE EXCHANGE
+	// MARGINS PER ACCOUNT. collateral.v1.VenueMarginState is published by a venue
+	// adapter, which holds one API credential and therefore IS one account; it
+	// cannot know which portfolio that account backs. Without this mapping
+	// LiquidationProximity has no boundary to measure a distance to, and the
+	// honest answer is a whole-book refusal — which is what it gives.
+	//
+	// IT MUST NAME THE SAME ACCOUNTS THE OMS SPENDS FROM. Two specs that disagree
+	// do not fail: they measure a real account that is not the one the portfolio
+	// trades in. What makes that visible rather than silent is that a bound
+	// account nobody observes ages out to UNKNOWN within venuemargin.DefaultMaxAge
+	// and the measure refuses with margin_unknown, per account, counted — so the
+	// divergence surfaces as refusals naming the account, not as a plausible
+	// number.
+	//
+	// Empty ⇒ the margin family stays dark: RegisterMarginRisk is called with no
+	// provider, fires no_margin_provider once, and
+	// kanz_risk_measure_live{family="margin"} reads 0. A registered measure that
+	// refuses on every portfolio forever would read as live, which is the one
+	// state an operator must not be shown.
+	VenueAccounts string
 
 	// OTLPEndpoint is the OTel collector (host:port) for span export (OBS-01).
 	// Empty ⇒ spans are created and trace context propagates, but are not
@@ -260,6 +289,20 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// THE SEGREGATION REFUSAL IS VALIDATED HERE, WHERE THE OMS VALIDATES ITS OWN.
+	//
+	// An account bound to two portfolios is one collateral pool the exchange will
+	// liquidate as one, and a proximity measured on it attributes one portfolio's
+	// distance-to-liquidation to another — a number that is not merely imprecise
+	// but wrong, in the direction that says a portfolio is safer than it is.
+	// ParseBindings is a pure function of a string already in hand, so this is the
+	// first thing that can fail and the only place it can be proven without a
+	// broker and a database.
+	venueAccounts := strings.TrimSpace(os.Getenv("RISK_ENGINE_VENUE_ACCOUNTS"))
+	if _, err := execution.ParseBindings(venueAccounts); err != nil {
+		return Config{}, fmt.Errorf("RISK_ENGINE_VENUE_ACCOUNTS is not a safe binding set: %w", err)
+	}
+
 	return Config{
 		Listen:           env.Or("RISK_ENGINE_LISTEN", ":8081"),
 		LogLevel:         env.ParseLevelOr(env.Or("RISK_ENGINE_LOG_LEVEL", "info"), slog.LevelInfo),
@@ -275,6 +318,7 @@ func Load() (Config, error) {
 		RequireValidatedAnalytics: requireValidated,
 
 		LiquidityVenue: strings.TrimSpace(os.Getenv("RISK_ENGINE_LIQUIDITY_VENUE")),
+		VenueAccounts:  venueAccounts,
 		ShardMembers:   env.SplitList(os.Getenv("RISK_ENGINE_SHARD_MEMBERS")),
 		// TRIMMED BECAUSE THE MEMBER LIST IS. splitList trims each member, so an
 		// id carrying the trailing space a YAML block scalar or a shell `export`

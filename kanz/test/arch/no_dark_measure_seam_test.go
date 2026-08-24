@@ -46,6 +46,39 @@ import (
 //	                      of the two measures: LVaR99 needs a spread and nothing in
 //	                      this repository persists a bid or an ask, so the provider
 //	                      declares ServesSpread()=false and compute declines it.
+//	RegisterMarginRisk    LiquidationProximity                       WIRED 2026-08-24
+//	                      (#408 control 4). Its exemption named two blockers and
+//	                      both are worth recording, because one was resolved and
+//	                      the other was ANSWERED RATHER THAN AGREED WITH.
+//	                      (b) VENUE SYMBOL -> MARK was simply out of date by the
+//	                      time this landed: #708 put instrument_id on
+//	                      collateral.v1.VenueLiquidationPrice so the venue adapter
+//	                      — the one process holding the symbol map — attributes at
+//	                      PUBLISH time, and #709 stopped the fold discarding it. No
+//	                      inversion of a one-way map is needed anywhere, least of
+//	                      all inside the risk module.
+//	                      (a) PORTFOLIO -> VENUE ACCOUNT was the real objection:
+//	                      "giving it a second copy would be a second answer that
+//	                      can disagree with the first". That is true, and the
+//	                      wiring takes the second copy anyway — RISK_ENGINE_VENUE_
+//	                      ACCOUNTS, parsed by the SAME execution.ParseBindings, so
+//	                      the shared-account refusal applies identically and the
+//	                      engine refuses to start on one. What makes it admissible
+//	                      is venue_account_bindings_agree_test.go, which fails the
+//	                      build when the two committed specs differ: the
+//	                      disagreement became a red build rather than a discovery.
+//	                      The alternative — relaying the join through a new
+//	                      per-portfolio FACT from the OMS — copies the whole margin
+//	                      payload onto the wire to carry one mapping, adds a hop
+//	                      that goes stale on its own schedule, and makes a risk
+//	                      measure depend on the OMS being alive.
+//	                      NOTE THE LIMIT, in the spirit of the entries above: the
+//	                      measure is REGISTERED, not exercised. #417 still holds —
+//	                      control 1 is unproven against a live venue (#70), so no
+//	                      leveraged position exists on this estate for it to have
+//	                      read yet, and every account is UNKNOWN until an adapter
+//	                      observes one. A registered measure that has never seen a
+//	                      position is not a measured book.
 //	RegisterGreeks        Delta, Gamma, Vega, Theta, Rho              0 callers
 //	RegisterXVA           CVA, DVA, FVA                               0 callers
 //	RegisterStructuredRisk StructDuration, StructConvexity, StructWAL   WIRED
@@ -143,22 +176,6 @@ var darkSeamExempt = map[string]string{
 		"dark by CHOICE rather than by a missing provider: it takes the same ReturnsProvider. " +
 		"Deciding whether to serve both is the open question, and until it is answered the platform " +
 		"ships a Monte-Carlo VaR nobody can request.",
-	"internal/risk/compute.RegisterMarginRisk": "#408 control 4 — LiquidationProximity. Needs a " +
-		"MarginProvider, and TWO PIECES OF ANOTHER SERVICE'S DEPLOY-TIME CONFIG are what is " +
-		"missing, neither of them a Go problem. (a) PORTFOLIO -> VENUE ACCOUNT: the bindings are " +
-		"execution.AccountBindings, parsed by execution.ParseBindings from the OMS's own " +
-		"environment at OMS startup, which is also where ErrAccountShared refuses to start on a " +
-		"shared account (#415). risk-engine holds no such config, and giving it a second copy " +
-		"would be a second answer that can disagree with the first — on precisely the mapping " +
-		"#415 made load-bearing. (b) VENUE SYMBOL -> MARK: collateral.v1." +
-		"VenueLiquidationPrice.venue_symbol is the exchange's own spelling and deliberately NOT a " +
-		"Kanz instrument_id, because the adapter's symbol map is a ONE-WAY instrument -> symbol " +
-		"table; inverting it needs the venue adapter's configuration, and internal/risk/spotsource " +
-		"is keyed by InstrumentID. So nothing inside the risk module can pair a liquidation price " +
-		"with a price to measure it against. Both are held by the OMS and the venue adapters, and " +
-		"the honest wiring is a provider built where they live rather than a third copy of either. " +
-		"NOTE also #417: control 1 is unproven against a live venue (#70), so no leveraged " +
-		"position exists on this estate for this measure to have read yet.",
 }
 
 // seamRef is a composition-root seam: an exported function that takes the

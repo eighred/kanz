@@ -157,6 +157,28 @@ spec:
             - { name: RISK_ENGINE_SOURCE, value: "risk-engine" }
             # Must match DATAMASTER_TENANT on the instance named below.
             - { name: RISK_ENGINE_TENANT, value: "__system__" }
+            # WHICH EXCHANGE ACCOUNT EACH PORTFOLIO IS LIQUIDATED IN (#408 control 4).
+            #
+            #   RISK_ENGINE_VENUE_ACCOUNTS="tenant/portfolio@MIC=account,..."
+            #
+            # The SAME spec, in the same syntax, as OMS_VENUE_ACCOUNTS on the OMS, and it
+            # must name the SAME accounts. The two do not fail when they disagree: this
+            # engine would measure a real account that is not the one the portfolio
+            # trades in. What makes that visible is that a bound account no venue
+            # adapter observes ages out within two minutes, so
+            # kanz_risk_margin_skipped_total{reason="margin_unknown"} climbs and the
+            # measure REFUSES — it does not report a plausible number.
+            #
+            # An account bound to TWO portfolios is a startup ERROR here as it is on the
+            # OMS: one collateral pool the exchange liquidates as one, and a proximity
+            # measured on it attributes one portfolio's distance to another.
+            #
+            # EMPTY, as shipped: LiquidationProximity is NOT registered,
+            # kanz_risk_measure_live{family="margin"} reads 0, and a mandate naming the
+            # measure refuses every order it checks. Fill this in — and set
+            # RISK_ENGINE_MARKETDATA_DATABASE_URL, without which this pod refuses to
+            # start rather than serving a measure that could never mark a position.
+            - { name: RISK_ENGINE_VENUE_ACCOUNTS, value: "" }
             # THE INSTRUMENT CLASSIFIER (#640). datamaster is the estate's golden
             # security master and the only place a sector, an issuer or an asset class
             # can be resolved from. WITHOUT THIS LINE this pod starts cleanly, logs one

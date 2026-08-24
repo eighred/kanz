@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"math/big"
 	"testing"
 	"time"
 
@@ -385,4 +386,88 @@ func TestAProviderThatCouldNeverResolveAnythingIsRefusedAtConstruction(t *testin
 	if _, err := FromStore(&fakeStore{}); err != nil {
 		t.Errorf("FromStore with no options = %v, want a working provider on the defaults", err)
 	}
+}
+
+// THE MARGIN SEAM READS THE SAME MARK EXACTLY (#408 control 4).
+//
+// A liquidation proximity is the venue's liquidation price over this mark, and it
+// is compared against a mandate's ceiling. Float64 is what the pricing library
+// needs and is wrong here: a proximity of 0.9499999999999999 refused where 0.95
+// is the limit is a refusal nobody can reconcile against the two prices it came
+// from. So the exact fraction must survive, and a fixture with a repeating
+// decimal is what proves it — 1/3 is not representable in binary floating point
+// at any precision.
+func TestMarkKeepsTheExactFractionAFloatWouldRound(t *testing.T) {
+	f := mark(dec(1, 0), time.Hour) // 1
+	got, ok := mustProvider(t, f).Mark(context.Background(), "AAPL", t0)
+	if !ok {
+		t.Fatal("ok = false for a fresh, positive, stored mark")
+	}
+	third := new(big.Rat).Quo(got, big.NewRat(3, 1))
+	if third.Cmp(big.NewRat(1, 3)) != 0 {
+		t.Errorf("mark/3 = %v, want exactly 1/3 — the mark arrived as a float somewhere and the "+
+			"proximity it feeds can no longer be reconciled against the prices it came from", third)
+	}
+}
+
+// ONE RESOLUTION, TWO REPRESENTATIONS. If Mark grew its own store read it would
+// eventually disagree with Spot's staleness bound, and the mark in the Greeks
+// would stop being the mark in the margin measure while both looked right. The
+// property that pins it: every refusal Spot reports, Mark reports identically,
+// for the same fixture.
+func TestMarkAndSpotRefuseTheSameMarksForTheSameReasons(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		store  *fakeStore
+		asOf   time.Time
+		reason string
+	}{
+		{"stale", mark(dec(100, 0), DefaultMaxAge+time.Hour), t0, ReasonStale},
+		{"no observation", &fakeStore{}, t0, ReasonNoObservation},
+		{"store error", &fakeStore{err: errors.New("boom")}, t0, ReasonStoreError},
+		{"zero asOf", mark(dec(100, 0), time.Hour), time.Time{}, ReasonNoAsOf},
+		{"unusable price", mark(dec(-5, 0), time.Hour), t0, ReasonUnusablePrice},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rs, rm recorder
+			if _, ok := mustProvider(t, tc.store, rs.observe()).Spot(context.Background(), "AAPL", tc.asOf); ok {
+				t.Fatalf("Spot ok = true, want refused (%s)", tc.reason)
+			}
+			got, ok := mustProvider(t, tc.store, rm.observe()).Mark(context.Background(), "AAPL", tc.asOf)
+			if ok {
+				t.Fatalf("Mark ok = true, want refused (%s)", tc.reason)
+			}
+			if got != nil {
+				t.Fatalf("Mark returned %v alongside ok=false — a caller reading the value would "+
+					"divide by an unresolved mark", got)
+			}
+			rs.only(t, tc.reason)
+			rm.only(t, tc.reason)
+		})
+	}
+}
+
+// A ZERO MARK IS NOT A DENOMINATOR, AND IT IS THE DANGEROUS DIRECTION. Divided
+// into a liquidation price it makes the boundary infinitely far away, so the one
+// instrument whose stored price is broken reports as the safest thing on the
+// book.
+func TestMarkRefusesAZeroPriceRatherThanReportingSafety(t *testing.T) {
+	var r recorder
+	got, ok := mustProvider(t, mark(dec(0, 0), time.Hour), r.observe()).Mark(context.Background(), "AAPL", t0)
+	if ok || got != nil {
+		t.Fatalf("Mark = %v, %v for a stored zero — want refused", got, ok)
+	}
+	r.only(t, ReasonUnusablePrice)
+}
+
+// AN EXPONENT LARGE ENOUGH TO MATERIALISE IS THE INCIDENT. Stored wire data goes
+// through the checked conversion, so this refuses rather than hanging computing
+// 10^exponent.
+func TestMarkRefusesAnOutOfDomainExponentInsteadOfMaterialisingIt(t *testing.T) {
+	var r recorder
+	got, ok := mustProvider(t, mark(dec(1, 1_000_000), time.Hour), r.observe()).Mark(context.Background(), "AAPL", t0)
+	if ok || got != nil {
+		t.Fatalf("Mark = %v, %v for an out-of-domain exponent — want refused", got, ok)
+	}
+	r.only(t, ReasonUnusablePrice)
 }

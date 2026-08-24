@@ -42,6 +42,20 @@ import (
 //	      seam is also the thing the retired entry said dataset.Materializer could
 //	      not be: it enforces the point-in-time refusal, which is the property C2
 //	      cannot be graded without.
+//	#509  internal/risk/spotsource — the production compute.SpotProvider.
+//	      RETIRED 2026-08-24: the risk-engine composition root reads it through
+//	      spotsource.Mark, the EXACT-decimal half of the same resolution, to mark
+//	      the positions #408 control 4's LiquidationProximity divides a venue's
+//	      liquidation price by.
+//	      NOTE THE LIMIT, which is why this is written down rather than merely
+//	      deleted: the entry existed because RegisterGreeks needs a vol surface
+//	      that cannot be built here, and THAT IS STILL TRUE. No greek is served
+//	      off a pricing model today. What changed is that the package has a
+//	      production caller, which is the only question this guard can ask (import
+//	      granularity, #509). The question that survives — is the Greeks family
+//	      served — is answered by kanz_risk_measure_live{family="greeks"}, which
+//	      reads 0, and by compute.Dark against the measure catalogue. A deleted
+//	      entry here must not read as "this platform prices options".
 //	#471  internal/regulatory/stress — the REG-01c CCAR/DFAST framework. Its
 //	      exemption is gone because internal/risk/benchmarks now grades it, which
 //	      gives it an importer reached from the risk-engine composition root.
@@ -118,17 +132,6 @@ import (
 // stays dark for a year. The dead-entry arm below deletes the entry for you when
 // the package finally gets an importer.
 var darkPackageExempt = map[string]string{
-	"internal/risk/spotsource": "#509 — the production compute.SpotProvider, one of the two " +
-		"seams RegisterGreeks needs. It is dark because the OTHER one cannot be built: the vol " +
-		"surface needs a volsurface.QuoteProvider, which needs observed option PREMIUMS, and no " +
-		"path in this repository carries them — market-ingest subscribes one websocket per " +
-		"configured (instrument, venue) and the deployed maps are spot-only, the vendor Source is " +
-		"an unimplemented SDK seam, and backfill writes bars rather than price_observations. " +
-		"Building a QuoteProvider anyway would mean inventing premiums, which #345 rules out in " +
-		"terms this file already quotes for XVA: a SUCCESSFUL calibration of invented quotes is " +
-		"worse than a failed one. So this ships graded and unwired rather than being held back " +
-		"until the feed exists — it is the half that is real, and holding it would mean rewriting " +
-		"it later from the same evidence.",
 	"internal/marketdata/termsload": "#509 — the contract-terms LOADER, and the writer the " +
 		"contract_terms store has never had. It is dark for one step: what remains is a CLI to " +
 		"run it (the kanz-backfill shape — pull venue reference data into a store), which is " +
