@@ -9,13 +9,10 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,10 +25,8 @@ import (
 	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/prometheus/client_golang/prometheus"
-	"google.golang.org/grpc"
 
 	"github.com/eighred/kanz/internal/dualcontrol"
-	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
@@ -42,12 +37,10 @@ import (
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 	"github.com/eighred/kanz/services/oms/internal/config"
 	"github.com/eighred/kanz/services/oms/internal/costwatch"
-	"github.com/eighred/kanz/services/oms/internal/grpcsrv"
 	"github.com/eighred/kanz/services/oms/internal/order"
 	"github.com/eighred/kanz/services/oms/internal/position"
 	"github.com/eighred/kanz/services/oms/internal/riskview"
 	"github.com/eighred/kanz/services/oms/internal/server"
-	"github.com/eighred/kanz/services/oms/internal/venuesrv"
 )
 
 func main() {
@@ -714,34 +707,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"bindings", bindings.Len(), "accounts", bindings.Accounts())
 	}
 
-	// THE OUTBOX RELAY'S INSTRUMENTATION (#292). The relay itself is built by
-	// order.NewService, from the store's own queue and the emitter's own bus, so
-	// that a composition holding a Service always holds a drain — there is no
-	// wiring step here that could be omitted. What this composition root still
-	// owns is running it (below) and measuring it.
-	//
-	// There is no switch to turn the relay off, deliberately. A disabled relay
-	// is an OMS that admits orders, commits their ACCEPTED FACTs to a table and
-	// tells nobody — the exact invisible-order failure #238 was filed for, made
-	// permanent. "Nothing configured" and "checked, and fine" must not look the
-	// same, and the cheapest way to guarantee that is for the off position not
-	// to exist.
-	outboxPublished := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "kanz_oms_outbox_published_total",
-		Help: "Order FACTs published from the transactional outbox. Every lifecycle FACT the OMS commits " +
-			"transactionally is counted here exactly once per successful publish; a relay that has stopped " +
-			"shows as a flat line while orders keep being admitted.",
-	})
-	obs.Registry.MustRegister(outboxPublished)
-
-	outboxFailures := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "kanz_oms_outbox_publish_failures_total",
-		Help: "Attempts to publish an outbox record that did not reach the broker. The record stays at the " +
-			"head of its order's queue and every FACT behind it is held back — publishing past it would hand " +
-			"consumers that order's history out of sequence. Nothing else surfaces this: the command that " +
-			"enqueued the record was acked successfully long before.",
-	})
-	obs.Registry.MustRegister(outboxFailures)
+	// THE OUTBOX RELAY'S INSTRUMENTATION (#292). The two counters and the depth
+	// gauge are one instrument and live together in outbox.go (#643) — before that
+	// they were ninety lines apart, with nothing naming them as a set.
+	outboxRelayOpts := buildOutboxRelayOptions(obs.Registry, cfg.OutboxInterval)
 
 	// OMS-01b/c: order command handler over the order store + a sim venue.
 	emitter := order.NewEmitter(producer)
@@ -777,56 +746,15 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		defer stopGRPC()
 	}
 
-	// WHERE DOES AN UNTARGETED ORDER GO? (#437) The router used to answer
-	// venues[0] — whichever adapter the config happened to list first, chosen by
-	// nobody, while the type called itself a smart order router. It is now a named
-	// choice, and an ambiguous one is refused rather than guessed.
-	// MEASURED VENUE COST, FOR AN UNTARGETED ORDER (#437 B, on #436's signal).
-	//
-	// costwatch folds every fill's realized shortfall into this, and the router
-	// reads it when an order names no venue. It is a PREFERENCE over venues that
-	// have already passed every correctness check — it cannot admit a venue they
-	// refused, and it abstains below its evidence floor, leaving the DECLARED
-	// default in charge. So the worst it does is prefer the wrong one of two
-	// acceptable venues, better informed than the config line it defers to.
-	//
-	// In-process, deliberately: the OMS publishes order.cost.recorded but does not
-	// subscribe to it. Reading its own FACT back would put a broker round trip
-	// inside a feedback loop. The honest cost is that each replica ranks on the
-	// fills it saw — acceptable for a preference, and the sample floor means a
-	// replica with thin evidence abstains rather than acting on noise.
-	venueCosts := execution.NewVenueCosts()
-	router := execution.NewRouter(venues,
-		execution.WithDefaultVenue(cfg.DefaultVenueMIC),
-		execution.WithCostRanker(venueCosts))
-	if v, ok := router.DefaultVenue(); ok {
-		logger.Info("oms: orders naming no venue will be worked at", "venue", v.MIC(),
-			"named_explicitly", cfg.DefaultVenueMIC != "")
-	} else if cfg.DefaultVenueMIC != "" {
-		// FATAL, unlike the ambiguous case below. Somebody NAMED a venue and this
-		// OMS holds no adapter for it — a typo in a MIC, or a default left pointing
-		// at an adapter that was removed. Starting anyway would leave a deployment
-		// that looks configured, logs nothing, and refuses every untargeted order
-		// with an error naming a venue the operator believes is wired.
-		//
-		// Refusing to start is safe HERE specifically because OMS_DEFAULT_VENUE_MIC
-		// is new in #437: no deployment sets it yet, so this cannot turn an existing
-		// estate's silent state into an outage. The only way to reach it is to set
-		// it wrong today.
-		return false, fmt.Errorf("oms: OMS_DEFAULT_VENUE_MIC=%q but no configured adapter holds it "+
-			"(this OMS holds %s) — an untargeted order would be refused naming a venue you "+
-			"believe is wired", cfg.DefaultVenueMIC, strings.Join(micsOf(venues), ", "))
-	} else if len(venues) > 1 {
-		// NOT FATAL. Every order from the fan-out producers carries a target, so
-		// this deployment trades perfectly well without a default; refusing to
-		// start over a path nothing currently takes would be a self-inflicted
-		// outage. An order that does arrive untargeted is refused with the
-		// candidates named.
-		logger.Warn("oms: NO DEFAULT VENUE and more than one is configured — an order naming no "+
-			"venue will be REFUSED rather than sent somewhere nobody chose. Set OMS_DEFAULT_VENUE_MIC "+
-			"to pick one", "venues", strings.Join(micsOf(venues), ","))
+	// WHERE AN UNTARGETED ORDER GOES (#437). The four-way decision, its one fatal
+	// case and the cost ranker it prefers with are in router.go, where
+	// router_test.go reaches every branch (#643).
+	routing, err := buildVenueRouter(cfg, venues, logger)
+	if err != nil {
+		return false, err
 	}
-	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, router, closeRegistry, logger,
+
+	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, routing.Router, closeRegistry, logger,
 		// The decision-time benchmark for every admitted order (#436). The same
 		// mark fold the pre-trade gate values MARKET/STOP orders against — one
 		// price source, so a cost measure and a compliance check can never
@@ -840,25 +768,15 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		order.WithQuarantineCounter(quarantined),
 		order.WithClaimTimeoutCounter(claimTimeouts),
 		order.WithAcceptedReannounceCounter(acceptedReannounced),
-		order.WithOutboxRelay(
-			outbox.WithInterval(cfg.OutboxInterval),
-			outbox.WithCounters(outboxPublished, outboxFailures)))
+		order.WithOutboxRelay(outboxRelayOpts...))
 	if err != nil {
 		return false, err
 	}
 	relay := svc.Outbox()
 
-	// THE AGE OF THE OLDEST UNPUBLISHED RECORD IS THE ALERTABLE SIGNAL, and it is
-	// a GaugeFunc because it must be true even when nothing is happening. An
-	// empty outbox and a relay that died both produce zero errors, zero failed
-	// publishes and a silent log; the only number that separates them is how long
-	// the front of the queue has been waiting.
-	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "kanz_oms_outbox_oldest_pending_seconds",
-		Help: "Age of the oldest order FACT committed to the outbox and not yet published. Zero means the " +
-			"outbox is drained. A value that keeps climbing means FACTs the estate depends on are sitting in " +
-			"Postgres: risk, compliance and the audit log are behind by that much.",
-	}, func() float64 { return relay.OldestPendingAge(ctx) }))
+	// THE AGE OF THE OLDEST UNPUBLISHED RECORD is the only signal that separates a
+	// drained outbox from a dead relay; see outbox.go.
+	announceOutboxDepth(ctx, relay, obs.Registry)
 
 	// WithDLQ is load-bearing on this path, not hygiene. Without it a SubmitOrder
 	// whose venue call fails AFTER admission returns an error with nowhere to go:
@@ -898,7 +816,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// only in the FACT: OrderState keeps a cumulative quantity and an average
 	// price and no fee total, and a cost measure that drops fees ranks a zero-fee
 	// venue with poor fills above a maker-rebate venue with good ones.
-	costs := costwatch.New(obs.Registry, cfg.Tenant, producer, venueCosts, logger)
+	costs := costwatch.New(obs.Registry, cfg.Tenant, producer, routing.Costs, logger)
 	for _, s := range cfg.FillSubjects() {
 		subs = append(subs, sub{s, cfg.ConsumerGroup, projector.Handle})
 		// ITS OWN GROUP, so it sees EVERY fill and takes none from the projector.
@@ -1531,49 +1449,6 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (or
 		return nil, nil, nil, err
 	}
 	return order.NewPostgres(pool), position.NewPostgres(pool, cfg.BaseCurrency), pool.Close, nil
-}
-
-// serveOrderQuery starts the order.v1 read surface and returns a graceful stop.
-//
-// mTLS WHEN THE MESH HAS AN IDENTITY, plaintext otherwise — the same rule the
-// risk engine's query surface follows, and for the same reason: a local run has
-// no SPIFFE socket and must still be drivable, while a deployed one must not
-// serve a portfolio's trading history to an unauthenticated peer.
-//
-// A bind failure is returned SYNCHRONOUSLY so startup fails loudly. Serving on a
-// goroutine and logging the error would leave the pod Ready with no read surface
-// — an outage that looks like a routing bug, which is the shape web-bff's static
-// root refuses for the same reason.
-func serveOrderQuery(cfg config.Config, mesh *transport.Mesh, store order.Store, catalogue []execution.VenueInstrument, logger *slog.Logger) (func(), error) {
-	var opts []grpc.ServerOption
-	if mesh.Enabled() {
-		opts = append(opts, transport.ServerOption(mesh.Source, transport.AuthorizeMesh()))
-		logger.Info("order query gRPC: mTLS enabled")
-	} else {
-		logger.Warn("order query gRPC: serving plaintext (no SPIFFE_ENDPOINT_SOCKET)")
-	}
-
-	lis, err := net.Listen("tcp", cfg.GRPCListen)
-	if err != nil {
-		return nil, fmt.Errorf("order query gRPC: listen %s: %w", cfg.GRPCListen, err)
-	}
-	srv := grpc.NewServer(opts...)
-	// cfg.Tenant is the owning tenant of THIS deployment; grpcsrv stamps it on
-	// every reply as the deny-by-default gate input. Empty fails closed.
-	// THE PENDING QUEUE IS WIRED FROM THE SAME STORE (#410). A held order is in
-	// order_proposals and nowhere else, so this route is the only way a person
-	// can see one — building the read surface without it would hold orders
-	// nobody could find, which is the drop the control exists to end.
-	grpcsrv.New(store, store.Proposals(), time.Now, cfg.Tenant).Register(srv)
-	venuesrv.New(catalogue, cfg.Tenant).Register(srv)
-
-	go func() {
-		logger.Info("order query gRPC listening", "addr", cfg.GRPCListen)
-		if err := srv.Serve(lis); err != nil {
-			logger.Error("order query gRPC server failed", "err", err)
-		}
-	}()
-	return srv.GracefulStop, nil
 }
 
 // micsOf lists the configured venue MICs for the startup log.
