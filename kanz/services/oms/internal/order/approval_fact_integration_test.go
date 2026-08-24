@@ -52,12 +52,52 @@ import (
 // broker, keyed by order id. It is fed by a real bus.Consumer, so every envelope
 // it sees has already passed bus.Validate on the receive side — which is the
 // half a captured-Event double can never assert.
+//
+// # IT RECORDS ONLY THIS RUN'S FACTs, AND THAT IS THE WHOLE FIX FOR #648
+//
+// The subject this reads is carried by the bootstrapped EXECUTION stream, which
+// binds `order.>` and retains for 24 HOURS. bustest.EnsureSubjects therefore
+// resolves to EXECUTION rather than creating the suffixed stream below — NATS
+// refuses overlapping subject bindings across streams in one account, so a
+// private stream for `order.>` cannot exist while the production topology does.
+//
+// A durable group created fresh each run then replays that whole retained
+// history. So a collector scoped to the SUBJECT counts every ORDER_APPROVED
+// anyone has produced in a day, and the total climbed 2 → 3 → 4 across
+// consecutive runs. The first run passed and every later one failed.
+//
+// THE FAILURE MESSAGE MADE IT WORSE THAN A FLAKE. It reads "a control that
+// announces approvals nobody gave is worse than the silence it replaced" — a
+// maker-checker breach (#410). Somebody would have acted on that sentence before
+// checking the broker's retained state.
+//
+// SCOPED BY TENANT, NOT BY ORDER ID. Every event this run publishes carries a
+// tenant unique to the run, and the point of the total() check below is to catch
+// an announcement under an order id THE TEST DID NOT THINK TO LOOK UP — so
+// filtering on the ids it already knows would defeat the check it is protecting.
+// The tenant is the identity the run owns, and it holds for any id whatsoever.
+// This is the repair #644 made in internal/signal/translate: select on this
+// run's own identity rather than on a subject a shared spine also carries.
 type approvalCollector struct {
+	// tenant is this run's own; a FACT stamped with any other is foreign traffic
+	// on a shared spine and is IGNORED rather than counted.
+	tenant string
+
 	mu sync.Mutex
 	by map[string][]*orderpb.OrderApproved
+	// foreign counts what was skipped, so "nothing else is publishing here" and
+	// "the filter is eating everything" cannot look the same. A filter with no
+	// counter is how a test that asserts nothing goes on passing.
+	foreign int
 }
 
-func (c *approvalCollector) handle(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
+func (c *approvalCollector) handle(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
+	if env.GetTenantId() != c.tenant {
+		c.mu.Lock()
+		c.foreign++
+		c.mu.Unlock()
+		return nil
+	}
 	var ap orderpb.OrderApproved
 	if err := proto.Unmarshal(payload, &ap); err != nil {
 		return err
@@ -68,16 +108,26 @@ func (c *approvalCollector) handle(_ context.Context, _ *envelopepb.Envelope, pa
 	return nil
 }
 
+// foreignSeen is how many ORDER_APPROVED FACTs from other runs this collector
+// skipped. Reported on failure so a reader can tell a shared broker from a
+// broken filter.
+func (c *approvalCollector) foreignSeen() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.foreign
+}
+
 func (c *approvalCollector) get(orderID string) []*orderpb.OrderApproved {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]*orderpb.OrderApproved(nil), c.by[orderID]...)
 }
 
-// total is how many ORDER_APPROVED FACTs arrived for ANY order. It is what makes
-// the non-vacuity check below sound rather than a race: a refusal that wrongly
-// announced would land here even under an order id the test did not think to
-// look up.
+// total is how many ORDER_APPROVED FACTs arrived for ANY order OF THIS RUN. It is
+// what makes the non-vacuity check below sound rather than a race: a refusal that
+// wrongly announced would land here even under an order id the test did not think
+// to look up. "Of this run" is what handle's tenant filter buys, and without it
+// this count is the number of times anyone has run the test today (#648).
 func (c *approvalCollector) total() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -113,6 +163,13 @@ func TestAnApprovedOrderAnnouncesBothIdentitiesOverARealSpine(t *testing.T) {
 	// publish to an unbound subject is a hard error, which is exactly the failure
 	// a missing grant or a missing stream mapping produces in a cluster and which
 	// no unit test can see.
+	//
+	// THE SUFFIXED NAME IS ONLY EVER USED ON A BARE BROKER. Where the production
+	// topology exists, `order.>` is already carried by EXECUTION and
+	// EnsureSubjects binds that instead — which is the right behaviour (it proves
+	// the REAL stream carries the subject) and is also why this test reads a
+	// 24-hour retained history it does not own. approvalCollector's tenant filter
+	// is what makes that safe; see its doc (#648).
 	bustest.EnsureSubjects(t, ctx, js, "ORDER_OMS_APPROVE_IT_"+suffix, []string{"order.>"})
 
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "oms-approve-it"})
@@ -131,7 +188,7 @@ func TestAnApprovedOrderAnnouncesBothIdentitiesOverARealSpine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	collector := &approvalCollector{by: map[string][]*orderpb.OrderApproved{}}
+	collector := &approvalCollector{tenant: tenant, by: map[string][]*orderpb.OrderApproved{}}
 	watchCtx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
 	go func() {
@@ -244,7 +301,10 @@ func TestAnApprovedOrderAnnouncesBothIdentitiesOverARealSpine(t *testing.T) {
 			bad[0].GetProposer(), bad[0].GetApprover())
 	}
 	if n := collector.total(); n != 1 {
-		t.Fatalf("%d ORDER_APPROVED FACTs reached the broker in a run with ONE real approval — "+
-			"a control that announces approvals nobody gave is worse than the silence it replaced", n)
+		t.Fatalf("%d ORDER_APPROVED FACTs reached the broker IN THIS RUN's tenant (%s) with ONE "+
+			"real approval — a control that announces approvals nobody gave is worse than the "+
+			"silence it replaced. (%d FACTs from other runs were seen and ignored; this count is "+
+			"scoped to this run, so a shared broker cannot inflate it — #648.)",
+			n, tenant, collector.foreignSeen())
 	}
 }
