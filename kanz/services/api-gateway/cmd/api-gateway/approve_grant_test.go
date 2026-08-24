@@ -78,6 +78,7 @@ func approveRouterWith(t *testing.T, approveRole string, ordersRead orderpb.Orde
 		stubAuthenticator{principal: &middleware.Principal{
 			Subject: "user:someone", Tenant: fundingTenant, Roles: callerRoles,
 		}},
+		nil, // per-pod idempotency claims: these cases assert routing, not dedup
 	)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)

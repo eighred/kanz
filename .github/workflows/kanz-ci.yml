@@ -448,6 +448,12 @@ jobs:
           go vet -tags anthropic,openrouter ./services/copilot/...
           go test -tags anthropic,openrouter -p 1 ./services/copilot/...
 
+      # api-gateway is in the test list because its CROSS-POD IDEMPOTENCY CLAIM (#721)
+      # is only exercised under this tag: idempotency_realredis_test.go stands two
+      # independently constructed middleware chains up against one Redis, which is the
+      # only way to prove what `replicas: 2` actually needs. build+vet alone would
+      # compile that file and never run it — the precise "dead code that deploys" shape
+      # test/arch/build_tag_coverage_test.go exists to prevent.
       - name: Build + vet + test the `redis` tag (real Redis)
         working-directory: kanz
         env:
@@ -459,7 +465,7 @@ jobs:
           TEST_KAFKA_BROKERS: localhost:9092
         # -p 1 FOR THE SAME REASON AS THE STEP ABOVE, AND IT WAS MISSING HERE (#239).
         # This step sets TEST_POSTGRES_URL against the SAME single `kanzapp` database,
-        # and names THREE package trees — webhook-ingest and pkg/bus both reach it — so
+        # and names FOUR package trees — webhook-ingest and pkg/bus both reach it — so
         # Go's default -p ran them concurrently against one database. That is the exact
         # cross-package, intermittent collision the long comment above documents; the
         # rule was written there as prose and nothing carried it here.
@@ -467,7 +473,7 @@ jobs:
         run: |
           go build -tags redis ./...
           go vet -tags redis ./...
-          go test -tags redis -p 1 -race ./services/webhook-ingest/... ./pkg/redisadapter/... ./pkg/bus/...
+          go test -tags redis -p 1 -race ./services/webhook-ingest/... ./services/api-gateway/... ./pkg/redisadapter/... ./pkg/bus/...
 
       - name: OMS log (on failure)
         if: failure()

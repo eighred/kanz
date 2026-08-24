@@ -26,7 +26,18 @@ COPY kanz/ ./
 # VERSION is stamped into the binary (internal/version, #143). Unset here means
 # the image reports "unstamped" rather than a plausible-looking "dev".
 ARG VERSION=
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}" \
+# -tags redis LINKS THE CROSS-POD IDEMPOTENCY CLAIM (#721).
+#
+# Without it the only claim available to the binary is the per-pod one, which is correct for
+# EXACTLY ONE REPLICA — and api-gateway-deploy.yaml runs replicas: 2. Two pods are two maps,
+# so a client retry carrying the same Idempotency-Key that lands on the other pod is not
+# recognised as a retry: on /v1/orders it mints a SECOND order id and publishes a SECOND
+# SubmitOrder. Nothing downstream can collapse them, because the OMS's ON CONFLICT DO NOTHING
+# keys on order_id and these are two different ones — one client intent, two live orders.
+#
+# The binary REFUSES TO START if API_GATEWAY_REDIS_URL is set without this tag, rather than
+# degrading quietly to the per-pod claim. See cmd/api-gateway/idemclaims_noredis.go.
+RUN CGO_ENABLED=0 go build -tags redis -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}" \
       -o /out/api-gateway ./services/api-gateway/cmd/api-gateway
 
 # Distroless static: no shell, no libc, no package manager — minimal attack

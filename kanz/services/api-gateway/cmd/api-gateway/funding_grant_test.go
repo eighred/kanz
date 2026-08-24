@@ -101,6 +101,7 @@ func routerFor(t *testing.T, fundRole string, callerRoles ...string) (http.Handl
 		stubAuthenticator{principal: &middleware.Principal{
 			Subject: "user:someone", Tenant: fundingTenant, Roles: callerRoles,
 		}},
+		nil, // per-pod idempotency claims: these cases assert routing, not dedup
 	)
 	if err != nil {
 		t.Fatalf("buildRouter: %v", err)

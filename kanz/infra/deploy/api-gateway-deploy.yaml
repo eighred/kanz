@@ -378,6 +378,18 @@ spec:
             # The request-signing HMAC, from the SEC-01d CSI file (never a plaintext
             # env). The config prefers <VAR>_FILE for exactly this reason.
             - { name: API_GATEWAY_SIGNING_SECRET_FILE, value: /run/secrets/gateway/signing-secret }
+            # THE CROSS-POD IDEMPOTENCY CLAIM (#721). replicas: 2 above is why this is
+            # not optional: the claim is what makes a repeated Idempotency-Key at-most-once,
+            # and per-pod it is two maps. A client retry landing on the other pod is then not
+            # recognised as a retry, and /v1/orders mints a SECOND order id and publishes a
+            # SECOND SubmitOrder. The OMS cannot collapse them — its ON CONFLICT DO NOTHING
+            # keys on order_id and these are two different ids. One client intent, two live
+            # orders at the venue.
+            #
+            # The DSN carries a password, so it is a CSI/Vault file mount (SEC-01d), never a
+            # plaintext value in the pod spec. The image is built with -tags redis; the binary
+            # refuses to start if this is set without that tag, rather than degrading quietly.
+            - { name: API_GATEWAY_REDIS_URL_FILE, value: /run/secrets/redis/redis-url }
           livenessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 5
@@ -396,11 +408,21 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - { name: gateway, mountPath: /run/secrets/gateway, readOnly: true }
+            - { name: redis, mountPath: /run/secrets/redis, readOnly: true }
             - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
             - { name: tmp, mountPath: /tmp }
       volumes:
         - name: tmp
           emptyDir: {}
+        # The Redis DSN backing the cross-pod idempotency claim (#721). Removing this
+        # volume does not degrade the claim quietly — the pod stops starting, because
+        # pkg/secret refuses a DECLARED-but-unreadable mount.
+        - name: redis
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: api-gateway-redis
         - name: gateway
           csi:
             driver: secrets-store.csi.k8s.io

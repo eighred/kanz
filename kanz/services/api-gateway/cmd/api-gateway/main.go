@@ -115,6 +115,14 @@ const proxyIdleConnTimeout = 90 * time.Second
 // default rather than by anyone here.
 const proxyMaxIdleConnsPerHost = 32
 
+// Idempotency window. The TTL bounds how long a repeated Idempotency-Key is
+// recognised; the max bounds the per-pod replay cache only, since the claim that
+// carries correctness may be Redis-backed.
+const (
+	idempotencyTTL = time.Minute
+	idempotencyMax = 10_000
+)
+
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
 	// run() registers fires before this line. The non-zero code is what makes a
@@ -324,7 +332,31 @@ func run() int {
 	}
 
 	var ready atomic.Bool
-	router, err := buildRouter(cfg, handler, ordersHandler, proxyHandler, ctlHandler, obs, &ready, logger, recorder, authn)
+	// THE IDEMPOTENCY CLAIM, AND WHICH ONE IS IN FORCE (#721).
+	//
+	// The claim is what makes a repeated Idempotency-Key at-most-once. Redis-backed
+	// it spans replicas; in memory it does not, and this deployment runs replicas: 2
+	// — so the two are NOT interchangeable and must not look the same in a log.
+	idemClaims, idemCloser, err := newIdempotencyClaims(cfg, idempotencyTTL, idempotencyMax, logger)
+	if err != nil {
+		logger.Error("api-gateway: idempotency claims refused their configuration", "err", err)
+		return 2
+	}
+	if idemCloser != nil {
+		defer func() { _ = idemCloser.Close() }()
+	}
+	if idemClaims != nil {
+		logger.Info("idempotency claims are CROSS-POD (redis) — a client retry is recognised on "+
+			"either replica", "ttl", idempotencyTTL.String())
+	} else {
+		logger.Warn("idempotency claims are PER-POD (in-memory) — with replicas > 1 a client retry "+
+			"that lands on the other replica is NOT recognised as a retry and WILL be executed "+
+			"again; on /v1/orders that is a second live order from one client intent. Set "+
+			"API_GATEWAY_REDIS_URL on a binary built with -tags redis",
+			"ttl", idempotencyTTL.String(), "max", idempotencyMax)
+	}
+
+	router, err := buildRouter(cfg, handler, ordersHandler, proxyHandler, ctlHandler, obs, &ready, logger, recorder, authn, idemClaims)
 	if err != nil {
 		return 2
 	}
@@ -1008,7 +1040,7 @@ func primeRevocations(ctx context.Context, c *revocation.Cache, reg prometheus.R
 
 // buildRouter wires the public probes/metrics/openapi (un-gated) and the /v1
 // risk + order + Phase-7 read routes behind the edge middleware chain.
-func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, ctl *control.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger, recorder auth.DecisionRecorder, authn middleware.Authenticator) (http.Handler, error) {
+func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *proxy.Handler, ctl *control.Handler, obs *observability.Provider, ready *atomic.Bool, logger *slog.Logger, recorder auth.DecisionRecorder, authn middleware.Authenticator, idemClaims bus.Deduper) (http.Handler, error) {
 	// EVERY /v1 ROUTE DECLARES WHAT IT TAKES TO REACH IT (SEC-M2).
 	//
 	// The gateway used to wrap all of /v1 in ONE role check, so `GET /v1/portfolios/{id}/
@@ -1150,7 +1182,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		middleware.Auth(authn, cfg.RequiredRole, logger),
 		gwMetrics.Measure(),
 		middleware.Quota(limits, gwMetrics),
-		middleware.Idempotency(time.Minute, 10_000),
+		middleware.IdempotencyWith(idemClaims, idempotencyTTL, idempotencyMax),
 	)
 
 	mux := http.NewServeMux()
