@@ -9,12 +9,14 @@ package spotsource
 import (
 	"context"
 	"fmt"
-	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
+	"math/big"
 	"time"
 
+	decutil "github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/marketdata/store"
 	"github.com/eighred/kanz/internal/risk/compute"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // PriceStore is the one read this provider needs from the market-data store —
@@ -260,42 +262,12 @@ func FromStore(s PriceStore, opts ...Option) (*Provider, error) {
 // history, while accepting a 2019 mark for a valuation dated today. The provider
 // therefore needs no clock and stays deterministic under test.
 func (p *Provider) Spot(ctx context.Context, instrumentID string, asOf time.Time) (float64, bool) {
-	if p == nil || p.store == nil {
-		return 0, false
-	}
-	if asOf.IsZero() {
-		// REFUSED BEFORE THE STORE IS TOUCHED. A zero asOf means "latest of
-		// everything" to store.LatestAsOf — no knowledge horizon — so a vendor
-		// correction stamped after the valuation would leak backward into the
-		// number, which is precisely what the bitemporal contract exists to
-		// prevent. It also leaves staleness undefined, since there is no
-		// reference point to measure age from. A portfolio with no AsOf is a
-		// portfolio no event has been applied to; pricing it off unbounded
-		// knowledge would be a silent future leak, so it gets no spot instead.
-		p.report(instrumentID, ReasonNoAsOf, 0)
-		return 0, false
-	}
-	obs, ok, err := p.store.LatestAsOf(ctx, instrumentID, p.kind, asOf)
-	if err != nil {
-		// A STORE ERROR ALSO RETURNS false, and that is forced rather than
-		// chosen: the seam has no error channel. It is not silent, though — a
-		// database that cannot be read fails the readiness Ping (store.Store.Ping,
-		// wired to the risk engine's probe) long before it fails here, so the loud
-		// signal exists upstream of this call. The counter below is what
-		// distinguishes it from an empty store, which the probe cannot see.
-		p.report(instrumentID, ReasonStoreError, 0)
-		return 0, false
-	}
+	px, ok := p.resolve(ctx, instrumentID, asOf)
 	if !ok {
-		p.report(instrumentID, ReasonNoObservation, 0)
 		return 0, false
 	}
-	if age := asOf.Sub(obs.ObservationTime); p.bounded && age > p.maxAge {
-		p.report(instrumentID, ReasonStale, age)
-		return 0, false
-	}
-	px, okPx := decutil.Float64(obs.Price)
-	if !okPx || px <= 0 || math.IsInf(px, 0) || math.IsNaN(px) {
+	f, okPx := decutil.Float64(px)
+	if !okPx || f <= 0 || math.IsInf(f, 0) || math.IsNaN(f) {
 		// REJECTED HERE EVEN THOUGH greeks.go ALSO REJECTS spot <= 0, and the
 		// duplication is deliberate. Upstream the rejection is anonymous — it
 		// lands in the same SkipNoSpot bucket as "no provider wired" and "no mark
@@ -311,7 +283,92 @@ func (p *Provider) Spot(ctx context.Context, instrumentID string, asOf time.Time
 		p.report(instrumentID, ReasonUnusablePrice, 0)
 		return 0, false
 	}
-	return px, true
+	return f, true
+}
+
+// Mark resolves the instrument's mark as an EXACT decimal, for a caller that
+// compares it against another price rather than pricing a derivative off it.
+//
+// # Why this exists alongside Spot, and why it is not a second implementation
+//
+// compute.SpotProvider is float64 because the pricing library it feeds is: a
+// Black-Scholes greek is a floating-point number whatever it is handed. A margin
+// control is the opposite — it divides the venue's own liquidation price by this
+// mark and compares the result to a mandate's ceiling, and CLAUDE.md's rule
+// applies with full force there: money and quantities are exact, never float. A
+// proximity of 0.9499999999999999 refused where 0.95 is the limit is a refusal an
+// operator cannot reconcile against the two prices it came from.
+//
+// So the RESOLUTION — which kind, which bitemporal bound, how old is too old,
+// what to report when the answer is no — is shared with Spot below in resolve,
+// and only the representation differs. Two resolvers would be the duplication
+// that matters: they would drift on the staleness bound, and the mark in the
+// Greeks would stop being the mark in the margin measure while both looked
+// right.
+//
+// ok=false carries the same meaning and the same observer reasons as Spot's, and
+// the caller must treat it as UNKNOWN — never as a mark of zero, which would
+// read as an instrument that liquidates at any price.
+func (p *Provider) Mark(ctx context.Context, instrumentID string, asOf time.Time) (*big.Rat, bool) {
+	px, ok := p.resolve(ctx, instrumentID, asOf)
+	if !ok {
+		return nil, false
+	}
+	// CHECKED, because this is stored wire data: an exponent large enough to
+	// materialise is the incident itself, and dec.FromProto would hang computing
+	// it rather than refuse.
+	r, okRat := decutil.FromProtoChecked(px)
+	if !okRat || r.Sign() <= 0 {
+		// A NON-POSITIVE MARK IS NOT A DENOMINATOR. The same argument Spot makes
+		// above, and the consequence here is worse than a missing greek: a zero
+		// mark would make every liquidation price infinitely far away, so the one
+		// instrument whose stored price is broken would be the one reported safest.
+		p.report(instrumentID, ReasonUnusablePrice, 0)
+		return nil, false
+	}
+	return r, true
+}
+
+// resolve is the one read both representations share: the store lookup, the
+// bitemporal bound, the staleness rule and the reason reported when there is no
+// usable answer. It returns the stored Decimal untouched — converting is the
+// caller's business, because the two callers cannot agree on what a number is.
+func (p *Provider) resolve(ctx context.Context, instrumentID string, asOf time.Time) (*commonpb.Decimal, bool) {
+	if p == nil || p.store == nil {
+		return nil, false
+	}
+	if asOf.IsZero() {
+		// REFUSED BEFORE THE STORE IS TOUCHED. A zero asOf means "latest of
+		// everything" to store.LatestAsOf — no knowledge horizon — so a vendor
+		// correction stamped after the valuation would leak backward into the
+		// number, which is precisely what the bitemporal contract exists to
+		// prevent. It also leaves staleness undefined, since there is no
+		// reference point to measure age from. A portfolio with no AsOf is a
+		// portfolio no event has been applied to; pricing it off unbounded
+		// knowledge would be a silent future leak, so it gets no spot instead.
+		p.report(instrumentID, ReasonNoAsOf, 0)
+		return nil, false
+	}
+	obs, ok, err := p.store.LatestAsOf(ctx, instrumentID, p.kind, asOf)
+	if err != nil {
+		// A STORE ERROR ALSO RETURNS false, and that is forced rather than
+		// chosen: the seam has no error channel. It is not silent, though — a
+		// database that cannot be read fails the readiness Ping (store.Store.Ping,
+		// wired to the risk engine's probe) long before it fails here, so the loud
+		// signal exists upstream of this call. The counter below is what
+		// distinguishes it from an empty store, which the probe cannot see.
+		p.report(instrumentID, ReasonStoreError, 0)
+		return nil, false
+	}
+	if !ok {
+		p.report(instrumentID, ReasonNoObservation, 0)
+		return nil, false
+	}
+	if age := asOf.Sub(obs.ObservationTime); p.bounded && age > p.maxAge {
+		p.report(instrumentID, ReasonStale, age)
+		return nil, false
+	}
+	return obs.Price, true
 }
 
 // report fires the unresolved hook if the caller asked to hear about them.

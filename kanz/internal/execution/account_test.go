@@ -136,3 +136,62 @@ func TestSimVenue_FillCarriesTheAccountThatExecutedIt(t *testing.T) {
 			"cannot locate", got)
 	}
 }
+
+// A PORTFOLIO-WIDE MARGIN CONTROL MUST SEE EVERY BOUNDARY, NOT THE ONE IT ASKED
+// ABOUT.
+//
+// The order path asks "may this portfolio spend at XNAS" because it is routing
+// an order that already names XNAS. A liquidation-proximity measure has no venue
+// in hand: it must find every account the portfolio can be liquidated at, and a
+// venue it fails to enumerate is a boundary measured by nothing that still
+// reports as fully covered.
+func TestAccountsFor_ListsEveryVenueThePortfolioIsBoundAt(t *testing.T) {
+	b, err := ParseBindings("acme/fund-alpha@XNAS=okx-sub-1,acme/fund-alpha@XLON=binance-main," +
+		"acme/fund-beta@XNAS=okx-sub-2,rival/fund-alpha@XNAS=okx-sub-3")
+	if err != nil {
+		t.Fatalf("ParseBindings: %v", err)
+	}
+	got := b.AccountsFor("acme", "fund-alpha")
+	want := []VenueAccount{{MIC: "XLON", Account: "binance-main"}, {MIC: "XNAS", Account: "okx-sub-1"}}
+	if len(got) != len(want) {
+		t.Fatalf("AccountsFor = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("AccountsFor[%d] = %+v, want %+v — the enumeration must be sorted by MIC so two "+
+				"reads of one binding set cannot attribute a tie to different accounts", i, got[i], want[i])
+		}
+	}
+}
+
+// ANOTHER TENANT'S IDENTICALLY NAMED PORTFOLIO IS NOT THIS ONE. The bindings key
+// on (tenant, portfolio, venue), and leaking across the tenant would hand one
+// customer a measure computed over another's collateral.
+func TestAccountsFor_DoesNotCrossTheTenant(t *testing.T) {
+	b, err := ParseBindings("acme/fund-alpha@XNAS=okx-sub-1,rival/fund-alpha@XNAS=okx-sub-9")
+	if err != nil {
+		t.Fatalf("ParseBindings: %v", err)
+	}
+	got := b.AccountsFor("rival", "fund-alpha")
+	if len(got) != 1 || got[0].Account != "okx-sub-9" {
+		t.Fatalf("AccountsFor(rival) = %v, want only okx-sub-9 — acme's account was reachable from "+
+			"rival's portfolio", got)
+	}
+}
+
+// NOTHING BOUND IS NOT "ANYWHERE PERMITTED". ParseBindings' own contract says an
+// empty spec means nothing is bound; the caller decides what that implies, and
+// for margin it is a refusal rather than an empty, comfortable answer.
+func TestAccountsFor_UnboundPortfolioAndNilReceiver(t *testing.T) {
+	b, err := ParseBindings("acme/fund-alpha@XNAS=okx-sub-1")
+	if err != nil {
+		t.Fatalf("ParseBindings: %v", err)
+	}
+	if got := b.AccountsFor("acme", "fund-unbound"); len(got) != 0 {
+		t.Fatalf("AccountsFor(unbound) = %v, want empty", got)
+	}
+	var nilB *AccountBindings
+	if got := nilB.AccountsFor("acme", "fund-alpha"); got != nil {
+		t.Fatalf("nil AccountBindings.AccountsFor = %v, want nil", got)
+	}
+}

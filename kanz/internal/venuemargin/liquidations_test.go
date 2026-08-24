@@ -29,7 +29,7 @@ func TestAttributionSurvivesTheFold(t *testing.T) {
 	}
 	fold(t, v, msg)
 
-	got, ok := v.Liquidations("OKX", "acct-1")
+	got, _, ok := v.Liquidations("OKX", "acct-1")
 	if !ok {
 		t.Fatal("Liquidations reported UNKNOWN for an account observed a moment ago")
 	}
@@ -66,7 +66,7 @@ func TestAnUnattributedPositionIsStillEnumerated(t *testing.T) {
 	}
 	fold(t, v, msg)
 
-	got, ok := v.Liquidations("OKX", "acct-1")
+	got, _, ok := v.Liquidations("OKX", "acct-1")
 	if !ok || len(got) != 2 {
 		t.Fatalf("got %d positions (ok=%v), want both: %+v", len(got), ok, got)
 	}
@@ -87,7 +87,7 @@ func TestAnUnattributedPositionIsStillEnumerated(t *testing.T) {
 func TestUnknownIsNotFlat(t *testing.T) {
 	v := New(WithClock(frozen))
 
-	if _, ok := v.Liquidations("OKX", "never-seen"); ok {
+	if _, _, ok := v.Liquidations("OKX", "never-seen"); ok {
 		t.Error("an account that was never observed answered ok=true — a caller may now conclude it " +
 			"holds nothing leveraged, which nobody has checked")
 	}
@@ -95,7 +95,7 @@ func TestUnknownIsNotFlat(t *testing.T) {
 	msg := state(t)
 	msg.LiquidationPrices = nil
 	fold(t, v, msg)
-	got, ok := v.Liquidations("OKX", "acct-1")
+	got, _, ok := v.Liquidations("OKX", "acct-1")
 	if !ok {
 		t.Fatal("an observed account with no open positions answered UNKNOWN — that is the exchange's " +
 			"positive statement being thrown away")
@@ -118,7 +118,7 @@ func TestStaleLiquidationsAreUnknown(t *testing.T) {
 	)
 	fold(t, v, state(t))
 
-	if _, ok := v.Liquidations("OKX", "acct-1"); ok {
+	if _, _, ok := v.Liquidations("OKX", "acct-1"); ok {
 		t.Error("a stale observation was enumerated — the risk measure would read a liquidation " +
 			"boundary from a feed that stopped an hour ago")
 	}
@@ -144,14 +144,14 @@ func TestLiquidationsDoNotAliasTheFold(t *testing.T) {
 	// copied. This test is in-package precisely so it can compare the pointers
 	// and see the sharing itself.
 	held := v.byAcct[accountKey{venue: "OKX", account: "acct-1"}].liquidation["BTC-USDT-SWAP"].price
-	got, _ := v.Liquidations("OKX", "acct-1")
+	got, _, _ := v.Liquidations("OKX", "acct-1")
 	if got[0].Price.value == held {
 		t.Fatal("Liquidations handed out the fold's own *big.Rat — one caller's in-place Add would " +
 			"rewrite the liquidation price every margin control reads")
 	}
 
 	got[0].Price.value.Add(got[0].Price.value, big.NewRat(1_000_000, 1))
-	again, _ := v.Liquidations("OKX", "acct-1")
+	again, _, _ := v.Liquidations("OKX", "acct-1")
 	if again[0].Price.Value().Cmp(rat(t, "41000")) != 0 {
 		t.Fatalf("the fold was mutated through the returned slice: now %v", again[0].Price.Value())
 	}
@@ -173,7 +173,7 @@ func TestLiquidationsAreOrderedByVenueSymbol(t *testing.T) {
 
 	want := []string{"BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"}
 	for i := 0; i < 20; i++ {
-		got, ok := v.Liquidations("OKX", "acct-1")
+		got, _, ok := v.Liquidations("OKX", "acct-1")
 		if !ok || len(got) != 3 {
 			t.Fatalf("got %d (ok=%v)", len(got), ok)
 		}
@@ -183,5 +183,62 @@ func TestLiquidationsAreOrderedByVenueSymbol(t *testing.T) {
 					i, j, got[j].VenueSymbol, w)
 			}
 		}
+	}
+}
+
+// THE POSITIONS AND THE COVERAGE COME FROM ONE OBSERVATION, AND A CALLER CANNOT
+// TAKE ONE WITHOUT THE OTHER.
+//
+// A position the venue did not answer for is missing from the slice, and the
+// slice alone cannot say so — it looks exactly like an account holding fewer
+// positions. So the enumeration hands back the coverage record beside it, and it
+// is the record of the SAME snapshot rather than whatever a separate Coverage()
+// call would re-read a moment later.
+func TestLiquidationsCarryTheCoverageOfTheObservationTheyCameFrom(t *testing.T) {
+	v := New(WithClock(frozen))
+	msg := state(t)
+	msg.Coverage = &domainpb.InputCoverage{
+		Contributed:   2,
+		ExcludedCount: 1,
+		Exclusions: []*domainpb.InputExclusion{
+			{InstrumentId: "ETH-PERP", Reason: SkipNoLiquidationPrice},
+		},
+	}
+	fold(t, v, msg)
+
+	got, cov, ok := v.Liquidations("OKX", "acct-1")
+	if !ok {
+		t.Fatal("Liquidations reported UNKNOWN for an account observed a moment ago")
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d positions, want 1", len(got))
+	}
+	if !cov.Reported() {
+		t.Error("coverage.Reported() = false on an observation that carried a coverage record — a " +
+			"caller cannot distinguish 'the venue answered in full' from 'the venue says nothing " +
+			"about what it left out'")
+	}
+	if cov.ExcludedCount() != 1 {
+		t.Errorf("coverage.ExcludedCount() = %d, want 1 — the enumeration reported one position "+
+			"while the venue could not answer for another, and nothing in the answer said so",
+			cov.ExcludedCount())
+	}
+	if cov.Complete() {
+		t.Error("coverage.Complete() = true with an exclusion recorded")
+	}
+}
+
+// AN UNKNOWN ACCOUNT YIELDS THE ZERO COVERAGE, WHICH IS NOT "COVERED NOTHING,
+// FINE". Coverage's own contract is that its zero value is a never-covered
+// record; a caller that reads Reported() on it sees false, which is a refusal.
+func TestLiquidationsOnAnUnknownAccountYieldNoCoverageRecord(t *testing.T) {
+	v := New(WithClock(frozen))
+	got, cov, ok := v.Liquidations("OKX", "never-seen")
+	if ok || got != nil {
+		t.Fatalf("Liquidations = %v, %v for an account never observed — want UNKNOWN", got, ok)
+	}
+	if cov.Reported() || cov.Complete() {
+		t.Errorf("zero Coverage reported=%v complete=%v, want both false — an unobserved account "+
+			"must not read as one the venue answered in full", cov.Reported(), cov.Complete())
 	}
 }

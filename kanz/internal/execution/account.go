@@ -168,3 +168,59 @@ func (b *AccountBindings) Accounts() []string {
 	sort.Strings(out)
 	return out
 }
+
+// VenueAccount is one exchange account a portfolio holds, and the venue it is at.
+//
+// The pair travels together because neither half identifies a liquidation
+// boundary on its own: an account name is only unique within a venue, and two
+// venues may spell the same sub-account label. venuemargin keys its fold on
+// exactly this pair for the same reason.
+type VenueAccount struct {
+	// MIC is the venue the account is at, in the spelling the bindings use.
+	MIC string
+	// Account is the exchange account, as the venue adapter holding the
+	// credential names itself.
+	Account string
+}
+
+// AccountsFor lists every venue account bound to this portfolio, sorted by MIC.
+//
+// # Why an enumerator exists alongside Account
+//
+// Account answers "may this portfolio spend at THIS venue", which is the
+// question the order path has — it is routing an order that already names a
+// venue. A portfolio-wide control has the opposite shape: it has to find every
+// boundary the portfolio can be liquidated at, INCLUDING the venue nobody
+// thought to ask about. compute.MarginProvider is that caller (#408 control 4).
+//
+// Asking per venue instead would mean the caller keeps its own list of the
+// venues in play — a second answer to "where does this portfolio trade",
+// maintained by someone who is not holding the bindings, and wrong in the
+// direction that flatters: a venue missing from that list is a liquidation
+// boundary measured by nothing, and it reports as full coverage.
+//
+// An empty result is "nothing is bound for this portfolio", which per
+// ParseBindings' contract is NOT "this portfolio may trade anywhere". What that
+// implies is the caller's decision, and for margin it is a refusal.
+func (b *AccountBindings) AccountsFor(tenant, portfolio string) []VenueAccount {
+	if b == nil {
+		return nil
+	}
+	var out []VenueAccount
+	for key, account := range b.byKey {
+		if key.tenant == tenant && key.portfolio == portfolio {
+			out = append(out, VenueAccount{MIC: key.mic, Account: account})
+		}
+	}
+	// SORTED SO TWO READS CANNOT DISAGREE. Map order would make a
+	// worst-across-accounts measure pick a different account to attribute a tie
+	// to on every evaluation, and an operator comparing two responses would be
+	// chasing a difference that is not there.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].MIC != out[j].MIC {
+			return out[i].MIC < out[j].MIC
+		}
+		return out[i].Account < out[j].Account
+	})
+	return out
+}

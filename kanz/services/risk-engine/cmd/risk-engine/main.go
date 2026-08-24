@@ -42,11 +42,13 @@ import (
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 	"github.com/eighred/kanz/internal/risk/pricing/livequote"
 	"github.com/eighred/kanz/internal/risk/publish"
+	"github.com/eighred/kanz/internal/risk/spotsource"
 	"github.com/eighred/kanz/internal/risk/state"
 	"github.com/eighred/kanz/internal/risk/state/persist"
 	"github.com/eighred/kanz/internal/risk/termsource"
 	"github.com/eighred/kanz/internal/schedule"
 	"github.com/eighred/kanz/internal/validation"
+	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -329,6 +331,11 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// liquidity at all. Nil interface, never a typed nil: only the concrete
 	// price store is ever assigned to it.
 	var barStore liquiditysource.BarStore
+	// AND THE POINT-IN-TIME MARK READ THE MARGIN MEASURE DIVIDES BY, hoisted for
+	// exactly the same reason and with the same rule: nil interface, never a typed
+	// nil, so registerMarginRisk can tell "bound accounts with nothing to mark them
+	// against" from "this deployment never asked".
+	var prices spotsource.PriceStore
 
 	if cfg.MarketDataURL != "" {
 		// The SECOND pool this pod opens (the tenant-scoped state pool is below),
@@ -348,6 +355,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			return err
 		}
 		barStore = priceStore
+		prices = priceStore
 		provider := returns.NewStoreReturnsProvider(priceStore, returns.ReturnsConfig{})
 		varmodel.Register(context.Background(), registry, provider, varmodel.Config{})
 		logger.Info("RISK-12/RISK-M1: historical-simulation VaR99 + ES99 + MaxDrawdown(+Amount) registered off market-data price store")
@@ -476,6 +484,25 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// never touches. The wiring, the two observers and the argument for
 	// registering only one of the two measures are in liquidity.go.
 	if err := registerLiquidityRisk(context.Background(), cfg, registry, barStore, obs.Registry, logger); err != nil {
+		return err
+	}
+
+	// THE MARGIN MEASURE (#408 control 4) — how close a portfolio is to being
+	// liquidated at the venues it trades on, sourced from the exchange rather than
+	// recomputed from our own book.
+	//
+	// OUTSIDE the market-data branch for the reason liquidity is: a deployment that
+	// bound exchange accounts and has no price store must be REFUSED, not quietly
+	// given the no-margin path.
+	//
+	// THE FOLD IT RETURNS IS SUBSCRIBED WITH THE OTHER CONSUMERS BELOW, and is nil
+	// when no accounts are bound — so an engine that serves no margin measure also
+	// holds no margin state nobody reads. It starts EMPTY and every account in it
+	// is UNKNOWN until a venue adapter says otherwise, which is a refusal rather
+	// than a comfortable zero, so the registration does not have to wait for the
+	// spine to be up.
+	margins, err := registerMarginRisk(context.Background(), cfg, registry, prices, obs.Registry, logger)
+	if err != nil {
 		return err
 	}
 
@@ -653,6 +680,35 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 				"nothing will size what would clear them", "err", err)
 		}
 	}()
+
+	// THE VENUE MARGIN FOLD GETS ITS TRAFFIC (#408 control 4). nil ⇒ no accounts
+	// are bound, the measure was not registered, and there is nothing to fold.
+	//
+	// BROADCAST, NOT A DURABLE GROUP, for the reason the OMS states over the same
+	// subject: a load-balanced group would leave each replica folding only the
+	// observations it happened to receive, so two pods would hold DIFFERENT margin
+	// state and answer the same portfolio's liquidation proximity differently —
+	// one refusing, one not. Margin state is replicated STATE, not work.
+	//
+	// AUXILIARY, like the unwind watch above: a subscription that never starts
+	// costs the measure, and the measure fails CLOSED — every account stays
+	// UNKNOWN, so a mandate naming LiquidationProximity refuses rather than
+	// admitting on a number nobody has. kanz_risk_venue_margin_accounts_held stays
+	// at zero, which is what distinguishes this from a fleet whose accounts are
+	// simply unlevered.
+	if margins != nil {
+		go func() {
+			logger.Info("risk-engine subscribing venue margin state (broadcast)",
+				"subject", venuemargin.Subject, "max_age", venuemargin.DefaultMaxAge.String())
+			if err := consumer.SubscribeBroadcast(ctx, venuemargin.Subject, margins.Handle); err != nil &&
+				!errors.Is(err, context.Canceled) {
+				logger.Error("risk-engine venue margin subscription failed — LiquidationProximity "+
+					"will be UNKNOWN for every portfolio, so any mandate naming it REFUSES. This is "+
+					"fail-closed, not silent: kanz_risk_venue_margin_accounts_held reads 0",
+					"err", err, "subject", venuemargin.Subject)
+			}
+		}()
+	}
 
 	// THE MODEL REGISTRY GETS A COMPOSITION ROOT (#112 step 3).
 	//

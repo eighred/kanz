@@ -415,7 +415,9 @@ data:
               # subject.PositionAll wildcard, EventTypePortfolioSnapshot) and,
               # when calibration is enabled (RISK_ENGINE_CALIBRATION_RATES),
               # the market quote spine (RISK_ENGINE_MARKET_SUBJECTS, default
-              # market.>) into a live-quote cache. Those three subscriptions go
+              # market.>) into a live-quote cache. A FIFTH —
+              # accounting.margin.observed (#408) — is BROADCAST and needs no
+              # dlq.* grant either; see its own comment below. Those three subscriptions go
               # through bus.NewConsumer(..., bus.WithDLQ(client)), so each needs
               # its own dlq.* grant. A FOURTH — platform.model.registered (#112) —
               # deliberately does not, and the subscribe list below says why.
@@ -451,6 +453,27 @@ data:
                   # an append log would leave every replica that rebuilt from it
                   # short a mutation, with nothing saying which.
                   "platform.model.registered",
+                  # THE EXCHANGE'S OWN MARGIN STATE (#408 control 4). The venue
+                  # adapters publish it per ACCOUNT on the accounting spine, and
+                  # this engine folds it to serve LiquidationProximity — the
+                  # measure a mandate names to bound how close a portfolio may
+                  # come to being liquidated. Read-only, and there is no matching
+                  # publish grant: the exchange is the author of this fact and
+                  # nothing here may restate it.
+                  #
+                  # WITHOUT THIS GRANT the pod comes up healthy, the broadcast
+                  # subscription is denied, and every account stays UNKNOWN — so
+                  # the measure refuses for every portfolio and any mandate naming
+                  # it refuses every order it checks. That is FAIL-CLOSED rather
+                  # than silent (kanz_risk_venue_margin_accounts_held reads 0 and
+                  # the subscription error is logged), but it is a trading outage
+                  # dressed as a control, so this line is part of the feature.
+                  #
+                  # BROADCAST, so no dlq.accounting.margin.observed grant: the
+                  # broadcast path never routes to a DLQ. An observation parked out
+                  # of a last-value fold would leave one replica holding older
+                  # margin state than its siblings, with nothing saying which.
+                  "accounting.margin.observed",
                   "_INBOX.>",
                 ]
               }
@@ -1394,6 +1417,10 @@ data:
                   "risk.portfolio.revalued", "risk.position.changed.>", "risk.portfolio.snapshot",
                   "market.>",
                   "platform.model.registered",
+                  # The exchange's own margin state for the accounts this tenant's
+                  # portfolios are liquidated in (#408 control 4) — see the platform
+                  # entry above for what its absence costs.
+                  "accounting.margin.observed",
                   "_INBOX.>",
                 ]
               }
@@ -1434,6 +1461,10 @@ data:
                   "risk.portfolio.revalued", "risk.position.changed.>", "risk.portfolio.snapshot",
                   "market.>",
                   "platform.model.registered",
+                  # The exchange's own margin state for the accounts this tenant's
+                  # portfolios are liquidated in (#408 control 4) — see the platform
+                  # entry above for what its absence costs.
+                  "accounting.margin.observed",
                   "_INBOX.>",
                 ]
               }
