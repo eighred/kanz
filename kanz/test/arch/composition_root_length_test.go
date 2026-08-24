@@ -72,12 +72,16 @@ const (
 // compositionRootBudget is the line count each over-cap root is allowed, and may
 // only be revised DOWNWARD. Every entry names the issue that retires it.
 var compositionRootBudget = map[string]int{
-	// #643. Was 1,474 with two bare nils; the pre-trade gate moved to
-	// services/oms/cmd/oms/pretrade.go, which took the nils with it and made the
-	// gate's seams assertable by a test. The remaining constructions — the venue
-	// router, the outbox relay, the read surface — follow the same shape, and
-	// each extraction lowers this number.
-	"services/oms/cmd/oms/main.go:runConsumers": 1308,
+	// #643. Was 1,474 lines and 61 constructors with two bare nils. All four
+	// extractions the issue named have now landed — the pre-trade gate
+	// (pretrade.go, which took both nils with it), the venue router (router.go),
+	// the outbox instrumentation (outbox.go) and the read surface
+	// (readsurface.go) — and each one is now reachable by a test that could not
+	// be written while it was a local. What is left is subscription wiring and
+	// goroutine lifecycles: real work, and NOT the same shape, because it has no
+	// product to return and assert about. Retiring this entry means deciding what
+	// that half should look like, which is a separate question from this one.
+	"services/oms/cmd/oms/main.go:runConsumers": 1233,
 	// #643. Its own doc says composition-root wiring escapes every unit test and
 	// that this service has twice shipped a crashing root with a green suite. Two
 	// of its constructions are already extracted into named builders with tests
