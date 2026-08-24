@@ -636,6 +636,7 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	}
 	g.record(ctx, DecisionRecord{
 		Phase:        PhasePreTrade,
+		TenantID:     d.TenantID,
 		Result:       res,
 		OrderID:      d.OrderID,
 		Issuer:       d.Issuer,

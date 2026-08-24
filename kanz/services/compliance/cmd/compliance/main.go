@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/compliancebus"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
@@ -27,7 +28,6 @@ import (
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/compliance/internal/api"
-	"github.com/eighred/kanz/services/compliance/internal/audit"
 	"github.com/eighred/kanz/services/compliance/internal/config"
 	"github.com/eighred/kanz/services/compliance/internal/monitor"
 	"github.com/eighred/kanz/services/compliance/internal/server"
@@ -230,7 +230,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		comp.WithMandateRejectionObserver(func(string, string) { mandateRejected.Inc() }))
 
 	// COMP-01e: decisions to the audit stream. COMP-01d: the post-trade monitor.
-	recorder := audit.NewBusRecorder(producer, logger)
+	recorder := compliancebus.NewBusRecorder(producer, logger)
 	breachEmitter := monitor.NewEmitter(producer)
 	// THE INSTRUMENT CLASSIFIER (#640) — the same cache the OMS gate wires, for
 	// the same reason and against the same source. This monitor re-evaluates LIVE

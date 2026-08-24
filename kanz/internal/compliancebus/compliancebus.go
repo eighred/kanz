@@ -1,4 +1,11 @@
-// Package audit is the COMP-01e compliance-decision recorder. Every compliance
+// Package compliancebus is the COMP-01e compliance-decision recorder — the bus
+// binding for internal/compliance's DecisionRecorder seam, exactly as
+// pkg/authbus is the bus binding for pkg/auth's.
+//
+// PROMOTED OUT OF services/compliance/internal/audit (#713). It had one consumer
+// while the pre-trade gate recorded nowhere; the OMS is the second, and Go's
+// internal rule made a service's own tree unreachable to it. The move is the
+// promotion rule in CLAUDE.md, on the event it names. Every compliance
 // decision — pre-trade pass/reject and post-trade breach — is recorded as an
 // observation.v1.DecisionLog and published on a durable observation subject,
 // exactly the AUTH-01d authorization-audit pattern: the DecisionLog already
@@ -10,7 +17,7 @@
 // logged loudly but never fails the decision — an audit-sink outage must not
 // become a trading outage (the AUTH-01d stance). Durability is the AUDIT-01
 // projection's responsibility, not the live stream's.
-package audit
+package compliancebus
 
 import (
 	"context"

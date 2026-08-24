@@ -1,4 +1,4 @@
-package audit
+package compliancebus
 
 import (
 	"testing"

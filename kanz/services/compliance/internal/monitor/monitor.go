@@ -204,11 +204,17 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 		// that never reached the trail is now visible as a number rather than
 		// only as a log line somebody has to be looking for.
 		recordErr := m.recorder.Record(ctx, comp.DecisionRecord{
-			Phase:   comp.PhasePostTrade,
-			Result:  res,
-			Allowed: false,
-			Issuer:  "compliance:monitor",
-			Trigger: trigger.String(),
+			Phase: comp.PhasePostTrade,
+			// FROM THE BOOK'S KEY, not from the context (#713). The tenant is on
+			// ctx here — this runs inside the inbound delivery — and passing it
+			// explicitly costs nothing and makes the record self-contained, which
+			// is what an asynchronous recorder needs and what a replayed one
+			// cannot otherwise reconstruct.
+			TenantID: key.tenant,
+			Result:   res,
+			Allowed:  false,
+			Issuer:   "compliance:monitor",
+			Trigger:  trigger.String(),
 		})
 		if recordErr != nil && m.onDroppedRecord != nil {
 			m.onDroppedRecord()

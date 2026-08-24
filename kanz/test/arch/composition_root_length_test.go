@@ -77,11 +77,19 @@ var compositionRootBudget = map[string]int{
 	// (pretrade.go, which took both nils with it), the venue router (router.go),
 	// the outbox instrumentation (outbox.go) and the read surface
 	// (readsurface.go) — and each one is now reachable by a test that could not
-	// be written while it was a local. What is left is subscription wiring and
-	// goroutine lifecycles: real work, and NOT the same shape, because it has no
-	// product to return and assert about. Retiring this entry means deciding what
-	// that half should look like, which is a separate question from this one.
-	"services/oms/cmd/oms/main.go:runConsumers": 1233,
+	// be written while it was a local.
+	//
+	// A FIFTH WAS PAID FOR RATHER THAN PLANNED (#713): that change needed four
+	// lines of shutdown wiring here, this ratchet refused them, and the
+	// dual-control gate's three postures moved to dualcontrol.go instead of the
+	// budget going up. That is the guard working as intended on a change that had
+	// nothing to do with #643.
+	//
+	// What is left is subscription wiring and goroutine lifecycles: real work, and
+	// NOT the same shape, because it has no product to return and assert about.
+	// Retiring this entry means deciding what that half should look like, which is
+	// a separate question from this one.
+	"services/oms/cmd/oms/main.go:runConsumers": 1202,
 	// #643. Its own doc says composition-root wiring escapes every unit test and
 	// that this service has twice shipped a crashing root with a green suite. Two
 	// of its constructions are already extracted into named builders with tests

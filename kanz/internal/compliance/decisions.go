@@ -20,6 +20,22 @@ const (
 type DecisionRecord struct {
 	// Phase is PhasePreTrade or PhasePostTrade.
 	Phase string
+	// TenantID is WHOSE decision this is, carried on the record rather than left
+	// on the context.
+	//
+	// AN ASYNCHRONOUS RECORDER CANNOT RECOVER IT (#713). pkg/bus stashes the
+	// inbound delivery's tenant on ctx, and every synchronous publisher reads it
+	// from there — but a recorder that queues the decision and publishes it from a
+	// background worker has left that context behind by the time it runs, and the
+	// OMS's producer carries no tenant fallback: the broker refuses an event with
+	// an empty tenant_id, which crash-looped that service once already.
+	//
+	// It is also the more correct shape for the synchronous path. A decision about
+	// acme's portfolio filed under whatever tenant the deployment was configured
+	// with would be a value that is valid, not theirs, and undetectable
+	// downstream — the argument authbus.WithFallbackTenant makes for authorization
+	// decisions, applied to compliance ones.
+	TenantID string
 	// Result is the full evaluation verdict.
 	Result *compliancepb.ComplianceResult
 	// Allowed is the gate outcome (pre-trade); always false for a post-trade

@@ -80,7 +80,7 @@ func masterConfigured() config.Config {
 // recorded nothing anywhere, while internal/compliance's type doc claimed the
 // audit trail was complete.
 func TestTheBuiltGateCarriesEveryControlItClaims(t *testing.T) {
-	w, err := buildPreTradeGate(masterConfigured(), gateDeps(), prometheus.NewRegistry(), gateLogger())
+	w, err := buildPreTradeGate(masterConfigured(), gateDeps(), nil, prometheus.NewRegistry(), gateLogger())
 	if err != nil {
 		t.Fatalf("buildPreTradeGate: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestTheBuiltGateCarriesEveryControlItClaims(t *testing.T) {
 // other — a build with a master that silently produced no classifier is #640
 // returning.
 func TestWithNoSecurityMasterOnlyTheClassifierIsAbsent(t *testing.T) {
-	w, err := buildPreTradeGate(config.Config{Tenant: "acme"}, gateDeps(), prometheus.NewRegistry(), gateLogger())
+	w, err := buildPreTradeGate(config.Config{Tenant: "acme"}, gateDeps(), nil, prometheus.NewRegistry(), gateLogger())
 	if err != nil {
 		t.Fatalf("buildPreTradeGate: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestWithNoSecurityMasterOnlyTheClassifierIsAbsent(t *testing.T) {
 // book with no sector limits in it.
 func TestTheGatePostureIsOnAGaugeIncludingTheZeroes(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	if _, err := buildPreTradeGate(config.Config{Tenant: "acme"}, gateDeps(), reg, gateLogger()); err != nil {
+	if _, err := buildPreTradeGate(config.Config{Tenant: "acme"}, gateDeps(), nil, reg, gateLogger()); err != nil {
 		t.Fatalf("buildPreTradeGate: %v", err)
 	}
 	got := seamGauge(t, reg)
@@ -163,7 +163,7 @@ func TestTheGatePostureIsOnAGaugeIncludingTheZeroes(t *testing.T) {
 // passes, which is the defect this gate exists to prevent.
 func TestAnUnusableSecurityMasterRefusesToStart(t *testing.T) {
 	cfg := config.Config{Tenant: "acme", RefData: refdata.Config{DatamasterURL: "://not-a-url"}}
-	w, err := buildPreTradeGate(cfg, gateDeps(), prometheus.NewRegistry(), gateLogger())
+	w, err := buildPreTradeGate(cfg, gateDeps(), nil, prometheus.NewRegistry(), gateLogger())
 	if err == nil {
 		t.Fatal("buildPreTradeGate accepted a security master it cannot read — the pod would admit " +
 			"orders with every sector and issuer limit passing unverified")
@@ -178,7 +178,7 @@ func TestAnUnusableSecurityMasterRefusesToStart(t *testing.T) {
 // failing" would read the same as "there is no refresh".
 func TestTheRefreshFailureCounterIsRegisteredWithNoMaster(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	w, err := buildPreTradeGate(config.Config{Tenant: "acme"}, gateDeps(), reg, gateLogger())
+	w, err := buildPreTradeGate(config.Config{Tenant: "acme"}, gateDeps(), nil, reg, gateLogger())
 	if err != nil {
 		t.Fatalf("buildPreTradeGate: %v", err)
 	}
