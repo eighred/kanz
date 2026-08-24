@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"github.com/eighred/kanz/internal/env"
 	"log"
-	"os"
-	"strconv"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -55,7 +53,12 @@ func main() {
 	// and the sharded recompute (PARITY-05a) spread across many portfolios, not
 	// one hot key. Default 1 keeps the single-portfolio smoke behavior (the
 	// well-known PF1). At count 1 the id is exactly the prefix (back-compat).
-	count := envInt("SEED_PORTFOLIOS", 1)
+	// A malformed value stops the run rather than seeding a book size nobody
+	// chose (#692).
+	count, err := env.Int("SEED_PORTFOLIOS", 1)
+	if err != nil {
+		log.Fatal(err)
+	}
 	if count < 1 {
 		count = 1
 	}
@@ -167,13 +170,3 @@ func money(coefficient int64, exponent int32) *commonpb.Money {
 }
 
 func timestamp(t time.Time) *timestamppb.Timestamp { return timestamppb.New(t) }
-
-// envInt reads an int env var, returning def when unset or unparseable.
-func envInt(k string, def int) int {
-	if v := os.Getenv(k); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
-}

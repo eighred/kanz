@@ -22,9 +22,7 @@ import (
 	"github.com/eighred/kanz/internal/env"
 	"log"
 	"math/rand"
-	"os"
 	"os/signal"
-	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -53,9 +51,21 @@ func main() {
 	url := env.Or("INGEST_NATS_URL", env.Or("SEED_NATS_URL", "nats://localhost:4222"))
 	prefix := env.Or("PORTFOLIO", "PF1")
 	tenant := env.Or("SEED_TENANT", "load-test")
-	rate := envInt("RATE", 1000)          // events/sec
-	portfolios := envInt("PORTFOLIOS", 1) // book size (mirror the seed)
-	dur := envDuration("DURATION", time.Minute)
+	// A MALFORMED VALUE STOPS THE RUN (#692). A load generator that silently
+	// falls back to 1000 events/sec because RATE=1k did not parse produces a
+	// number somebody will quote, measured against a rate nobody set.
+	rate, err := env.Int("RATE", 1000) // events/sec
+	if err != nil {
+		log.Fatal(err)
+	}
+	portfolios, err := env.Int("PORTFOLIOS", 1) // book size (mirror the seed)
+	if err != nil {
+		log.Fatal(err)
+	}
+	dur, err := env.Duration("DURATION", time.Minute)
+	if err != nil {
+		log.Fatal(err)
+	}
 	if rate < 1 {
 		rate = 1
 	}
@@ -151,21 +161,4 @@ func tick(tenant, portfolio, instrument string, rng *rand.Rand) bus.Event {
 		PayloadSchemaRef: positionSchemaRef,
 		Payload:          pos,
 	}
-}
-func envInt(k string, def int) int {
-	if v := os.Getenv(k); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
-}
-
-func envDuration(k string, def time.Duration) time.Duration {
-	if v := os.Getenv(k); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return def
 }
