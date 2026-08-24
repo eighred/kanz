@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
@@ -117,6 +118,30 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// A MALFORMED ROLLUP CADENCE REFUSES THE START (#692). The local helper this
+	// replaced folded a parse error into the default, so
+	// MARKET_DATA_ROLLUP_INTERVAL=1minute left the rollup on its default cadence
+	// with the deployment reporting a clean start — and the candles a liquidity
+	// measure reads off that series are then computed over a window nobody chose.
+	//
+	// A NON-POSITIVE VALUE IS STILL REFUSED, and that check moved here from the
+	// helper rather than being dropped: zero is not a cadence, and it is a
+	// different mistake from a typo, so it gets a different message.
+	rollupInterval, err := env.Duration("MARKET_DATA_ROLLUP_INTERVAL", DefaultRollupInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	if rollupInterval <= 0 {
+		return Config{}, fmt.Errorf("config: MARKET_DATA_ROLLUP_INTERVAL=%s is not a positive cadence", rollupInterval)
+	}
+	rollupWatermarkLag, err := env.Duration("MARKET_DATA_ROLLUP_WATERMARK_LAG", DefaultRollupWatermarkLag)
+	if err != nil {
+		return Config{}, err
+	}
+	if rollupWatermarkLag <= 0 {
+		return Config{}, fmt.Errorf("config: MARKET_DATA_ROLLUP_WATERMARK_LAG=%s is not a positive lag", rollupWatermarkLag)
+	}
+
 	return Config{
 		Listen:        env.Or("MARKET_DATA_LISTEN", ":8082"),
 		LogLevel:      env.ParseLevelOr(env.Or("MARKET_DATA_LOG_LEVEL", "info"), slog.LevelInfo),
@@ -134,8 +159,8 @@ func Load() (Config, error) {
 		Tenant:          env.Or("MARKET_DATA_TENANT", "__system__"),
 
 		RollupSeries:       os.Getenv("MARKET_DATA_ROLLUP_SERIES"),
-		RollupInterval:     rollupDur("MARKET_DATA_ROLLUP_INTERVAL", DefaultRollupInterval),
-		RollupWatermarkLag: rollupDur("MARKET_DATA_ROLLUP_WATERMARK_LAG", DefaultRollupWatermarkLag),
+		RollupInterval:     rollupInterval,
+		RollupWatermarkLag: rollupWatermarkLag,
 	}, nil
 }
 
@@ -161,19 +186,3 @@ const (
 	// the wrong one.
 	DefaultRollupWatermarkLag = 10 * time.Minute
 )
-
-// rollupDur reads a duration env var, falling back to def. An unparseable value
-// falls back too rather than failing startup: these two knobs tune latency, and
-// refusing to boot over a typo in a tuning value would take the price history
-// down with it.
-func rollupDur(key string, def time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
-		return def
-	}
-	return d
-}

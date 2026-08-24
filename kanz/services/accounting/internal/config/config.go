@@ -1,13 +1,10 @@
 package config
 
 import (
-	"fmt"
 	"github.com/eighred/kanz/internal/env"
 	"github.com/eighred/kanz/internal/fillfact"
 	"log/slog"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/eighred/kanz/pkg/secret"
@@ -167,11 +164,11 @@ func Load() (Config, error) {
 		cashSubjects = DefaultCashSubjects
 	}
 
-	snapshotInterval, err := durationOr("ACCOUNTING_SNAPSHOT_INTERVAL", DefaultSnapshotInterval)
+	snapshotInterval, err := env.Duration("ACCOUNTING_SNAPSHOT_INTERVAL", DefaultSnapshotInterval)
 	if err != nil {
 		return Config{}, err
 	}
-	snapshotBatch, err := intOr("ACCOUNTING_SNAPSHOT_BATCH", DefaultSnapshotBatch)
+	snapshotBatch, err := env.Int("ACCOUNTING_SNAPSHOT_BATCH", DefaultSnapshotBatch)
 	if err != nil {
 		return Config{}, err
 	}
@@ -201,34 +198,4 @@ func Load() (Config, error) {
 		FXSubjects:         fxSubjects,
 		InstrumentCurrency: os.Getenv("ACCOUNTING_INSTRUMENT_CURRENCY"),
 	}, nil
-}
-
-// durationOr parses a Go duration from the environment, or returns def when
-// unset. A MALFORMED value is an error, never the default: silently falling
-// back would leave the checkpoint job on a schedule the operator did not choose
-// while the deployment reported a clean start.
-func durationOr(key string, def time.Duration) (time.Duration, error) {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return def, nil
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil {
-		return 0, fmt.Errorf("config: %s=%q is not a duration: %w", key, raw, err)
-	}
-	return d, nil
-}
-
-// intOr parses an int from the environment, or returns def when unset. A
-// malformed value is an error, for the same reason as durationOr.
-func intOr(key string, def int) (int, error) {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return def, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, fmt.Errorf("config: %s=%q is not an integer: %w", key, raw, err)
-	}
-	return n, nil
 }

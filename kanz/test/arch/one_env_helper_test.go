@@ -97,7 +97,8 @@ func TestTheEnvironmentIsReadThroughOneHelper(t *testing.T) {
 				"There were eighty of these across three helpers, disagreeing about whitespace, about "+
 				"whether `warning` is a log level, and about what a blank value means — and one service "+
 				"in twenty-seven behaved differently off the same ConfigMap key. Use env.Or, "+
-				"env.ParseLevelOr, env.SplitList, or env.Lookup where a blank value must be refused.")
+				"env.ParseLevelOr, env.SplitList, env.Duration, env.Bool, env.Int, or env.Lookup "+
+				"where a blank value must be refused.")
 		}
 		return nil
 	})
@@ -132,7 +133,20 @@ func TestTheEnvironmentIsReadThroughOneHelper(t *testing.T) {
 // Empty. All eighty were retired and none needed to stay — including the one in
 // tools/scaffold's template, which is why a newly scaffolded service now calls
 // env.Or rather than being born with copy forty-one.
-var envHelperExempt = map[string]string{}
+var envHelperExempt = map[string]string{
+	// A SHAPE COLLISION, NOT A COPY (#692). secretFrom(path, envKey string) has
+	// two string parameters and returns (string, error), which is the same
+	// SIGNATURE as a key-and-default wrapper — but its second parameter is
+	// another KEY, not a default, and its first is a path this CLI takes from a
+	// flag. It applies no default and owns no convention this package could hold.
+	//
+	// It IS a near-copy of a different concept: pkg/secret.Read, the one
+	// implementation of file-or-env secret reading. The two are not
+	// interchangeable as written — Read derives the path from KEY_FILE while this
+	// reads a flag — so unifying them is a change to this tool's command line
+	// rather than a helper swap, and it is not smuggled into #692's repair.
+	"cmd/universe/main.go:secretFrom": "#692 — a (path, key) secret reader, not a key-and-default wrapper; unifying it with pkg/secret.Read is a CLI change",
+}
 
 // readsEnvironment reports whether the body calls os.Getenv or os.LookupEnv.
 func readsEnvironment(body *ast.BlockStmt) bool {
@@ -164,6 +178,14 @@ func readsEnvironment(body *ast.BlockStmt) bool {
 // Config, a *tls.Config) is not this: it takes no key and returns a struct, so
 // there is nothing to copy into the next service but the key name itself.
 func looksLikeAnEnvWrapper(fn *ast.FuncDecl) bool {
+	return stringOnlyWrapper(fn) || typedDefaultWrapper(fn)
+}
+
+// stringOnlyWrapper is the ORIGINAL shape, unchanged: every parameter a string,
+// every result a value kind. Kept exactly as it was so this change can only ADD
+// coverage — a rewrite that happened to narrow it would retire guarding nobody
+// asked to retire.
+func stringOnlyWrapper(fn *ast.FuncDecl) bool {
 	if fn.Type.Params == nil || fn.Type.Params.NumFields() == 0 {
 		return false
 	}
@@ -176,14 +198,67 @@ func looksLikeAnEnvWrapper(fn *ast.FuncDecl) bool {
 		return false
 	}
 	for _, r := range fn.Type.Results.List {
-		switch {
-		case isTypeNamed(r.Type, "string"), isTypeNamed(r.Type, "Level"), isTypeNamed(r.Type, "bool"),
-			isTypeNamed(r.Type, "Duration"), isTypeNamed(r.Type, "int"):
-		default:
+		if !isEnvValueType(r.Type) {
 			return false
 		}
 	}
 	return true
+}
+
+// typedDefaultWrapper is the shape that was invisible (#692): a KEY and a TYPED
+// DEFAULT.
+//
+// This function's own doc already said what identifies the defect — "a
+// package-level function that takes a KEY AND A DEFAULT and reads the
+// environment" — and the result list already allowed Duration and int, so a
+// typed RETURN was anticipated. A typed DEFAULT was not, and that is the natural
+// spelling: durationOr(key string, def time.Duration). Four such copies were live
+// while this guard was green — datamaster's durationOr and boolOr, market-data's
+// rollupDur, and two in test/load — and datamaster's swallowed the parse error on
+// five schedules, two of which bound a dual-control approval window.
+//
+// A DEFAULT IS REQUIRED, which is what keeps this from swallowing its neighbours.
+// pkg/secret.Read takes a key and returns (string, error) with NO default: it is
+// the one implementation of a different concept — KEY plus KEY_FILE — and it has
+// its own guard. Requiring a second parameter is the line between "applies a
+// default this package should own" and "reads a required value".
+func typedDefaultWrapper(fn *ast.FuncDecl) bool {
+	if fn.Type.Params == nil || fn.Type.Params.NumFields() < 2 {
+		return false
+	}
+	for i, p := range fn.Type.Params.List {
+		if i == 0 && !isTypeNamed(p.Type, "string") {
+			return false
+		}
+		if !isEnvValueType(p.Type) {
+			return false
+		}
+	}
+	if fn.Type.Results == nil || fn.Type.Results.NumFields() == 0 {
+		return false
+	}
+	values := 0
+	for _, r := range fn.Type.Results.List {
+		if isTypeNamed(r.Type, "error") {
+			continue
+		}
+		if !isEnvValueType(r.Type) {
+			return false
+		}
+		values++
+	}
+	return values > 0
+}
+
+// isEnvValueType reports whether a type is one an environment wrapper reads a
+// value into: the scalar kinds a ConfigMap key can carry.
+func isEnvValueType(e ast.Expr) bool {
+	for _, name := range []string{"string", "Level", "bool", "Duration", "int"} {
+		if isTypeNamed(e, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // isTypeNamed reports whether e's type expression ends in name, looking through

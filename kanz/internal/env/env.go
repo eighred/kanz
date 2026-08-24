@@ -32,9 +32,12 @@
 package env
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Or returns the environment variable's value, or def when it is unset or blank.
@@ -145,4 +148,74 @@ func SplitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// Duration reads a Go duration, or returns def when the key is unset or blank.
+//
+// A MALFORMED VALUE IS AN ERROR, NEVER THE DEFAULT (#692). This is the whole
+// reason the function returns one. Silently falling back leaves a service on a
+// schedule the operator did not choose while the deployment reports a clean
+// start — "nothing configured" and "checked, and fine" looking the same, which is
+// the rule CLAUDE.md states and the shape this package exists to end.
+//
+// It mattered most where it was least visible. datamaster parsed five intervals
+// through a swallowing copy, two of which — DATAMASTER_DUAL_CONTROL_TTL and
+// DATAMASTER_LAPSED_PROPOSAL_RETENTION — bound how long a dual-control proposal
+// stays approvable. A typo there changed an authorization window with nothing
+// said. Its sibling in accounting had the correct behaviour AND the paragraph
+// explaining why; the copy without the doc was the copy with the defect.
+//
+// # A NON-POSITIVE VALUE IS RETURNED, NOT REJECTED
+//
+// Zero and negative are legal here and mean whatever the caller decides they
+// mean: DATAMASTER_OUTBOX_INTERVAL defaults to 0 and reads it as "no relay on
+// this deployment". The old copy folded `err != nil || d <= 0` into one branch,
+// so an unparseable value and an explicit 0 were the same outcome — and on that
+// key the default IS 0, making a typo indistinguishable from the intended
+// setting. Refusing a bad parse and passing a well-formed 0 through are
+// different jobs, and only the first belongs here.
+func Duration(key string, def time.Duration) (time.Duration, error) {
+	raw, ok := Lookup(key)
+	if !ok {
+		return def, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("env: %s=%q is not a duration: %w", key, raw, err)
+	}
+	return d, nil
+}
+
+// Bool reads a boolean, or returns def when the key is unset or blank.
+//
+// A VALUE strconv.ParseBool CANNOT READ IS AN ERROR, never a silent disarm. The
+// values this gates are postures — OMS_REQUIRE_DUAL_CONTROL,
+// DATAMASTER_REQUIRE_DUAL_CONTROL, OMS_REQUIRE_MANDATE — and a control that
+// reads `DATAMASTER_REQUIRE_DUAL_CONTROL=yes` as false is a maker-checker gate
+// that reports itself armed and is not. `yes` is not a Go bool; `true`, `1`,
+// `T` and `TRUE` are.
+func Bool(key string, def bool) (bool, error) {
+	raw, ok := Lookup(key)
+	if !ok {
+		return def, nil
+	}
+	b, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("env: %s=%q is not a boolean: %w", key, raw, err)
+	}
+	return b, nil
+}
+
+// Int reads an integer, or returns def when the key is unset or blank. A
+// malformed value is an error, for Duration's reason.
+func Int(key string, def int) (int, error) {
+	raw, ok := Lookup(key)
+	if !ok {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("env: %s=%q is not an integer: %w", key, raw, err)
+	}
+	return n, nil
 }

@@ -1,10 +1,8 @@
 package config
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/eighred/kanz/internal/env"
@@ -197,7 +195,7 @@ func Load() (Config, error) {
 	// in-memory store — so a broken Vault mount used to produce an audit
 	// service that started clean, served queries, and lost the entire tamper-
 	// evidence log on restart. Nothing downstream would have reported it.
-	verifyInterval, err := durationOr("AUDIT_VERIFY_INTERVAL", verify.DefaultInterval)
+	verifyInterval, err := env.Duration("AUDIT_VERIFY_INTERVAL", verify.DefaultInterval)
 	if err != nil {
 		return Config{}, err
 	}
@@ -222,28 +220,4 @@ func Load() (Config, error) {
 		OTLPEndpoint:            os.Getenv("AUDIT_OTLP_ENDPOINT"),
 		SPIFFESocket:            os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
-}
-
-// durationOr parses a Go duration from the environment, or returns def when
-// unset.
-//
-// A MALFORMED VALUE IS AN ERROR, NEVER THE DEFAULT. Silently falling back would
-// leave the chain verifier on a schedule the operator did not choose while the
-// deployment reported a clean start — and on this schedule in particular, since
-// a mistyped interval that quietly became the default is indistinguishable from
-// one that was never set.
-//
-// (services/accounting states the same rule for the same reason; datamaster's
-// copy of this helper swallows the error instead, which is the defect this
-// wording warns about.)
-func durationOr(key string, def time.Duration) (time.Duration, error) {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return def, nil
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil {
-		return 0, fmt.Errorf("config: %s=%q is not a duration: %w", key, raw, err)
-	}
-	return d, nil
 }

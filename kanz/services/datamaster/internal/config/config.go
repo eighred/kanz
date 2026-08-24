@@ -152,31 +152,73 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// EVERY DURATION AND POSTURE IS RESOLVED BEFORE THE STRUCT, AND A MALFORMED
+	// ONE REFUSES THE START (#692).
+	//
+	// These used to go through a local durationOr/boolOr that swallowed the parse
+	// error and returned the default, so a typo left this service on a schedule
+	// nobody chose while the deployment reported a clean start. Two of them —
+	// DUAL_CONTROL_TTL and LAPSED_PROPOSAL_RETENTION — bound how long a
+	// dual-control proposal stays approvable, so the silent fallback changed an
+	// authorization window with nothing said.
+	refreshInterval, err := env.Duration("DATAMASTER_REFRESH_INTERVAL", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	outboxInterval, err := env.Duration("DATAMASTER_OUTBOX_INTERVAL", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	dualControlTTL, err := env.Duration("DATAMASTER_DUAL_CONTROL_TTL", dualcontrol.DefaultTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	// SEVEN DAYS, and the number is argued rather than round. A proposer who
+	// proposed an override on Friday and returns on Monday must still be able to
+	// see that it lapsed; anything shorter makes the answer depend on how long
+	// they were away, which is the ambiguity this whole change removes.
+	lapsedRetention, err := env.Duration("DATAMASTER_LAPSED_PROPOSAL_RETENTION", 7*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	// Hourly. The purge is a bounded DELETE on an indexed column and the retention
+	// is measured in days, so nothing is gained by running it often.
+	purgeInterval, err := env.Duration("DATAMASTER_PROPOSAL_PURGE_INTERVAL", time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	allowSim, err := env.Bool("DATAMASTER_ALLOW_SIM", false)
+	if err != nil {
+		return Config{}, err
+	}
+	allowEphemeralMaster, err := env.Bool("DATAMASTER_ALLOW_EPHEMERAL_MASTER", false)
+	if err != nil {
+		return Config{}, err
+	}
+	requireDualControl, err := env.Bool("DATAMASTER_REQUIRE_DUAL_CONTROL", false)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Listen:          env.Or("DATAMASTER_LISTEN", ":8080"),
 		LogLevel:        env.ParseLevelOr(os.Getenv("DATAMASTER_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint:    os.Getenv("DATAMASTER_OTLP_ENDPOINT"),
 		DatabaseURL:     databaseURL,
 		Tenant:          env.Or("DATAMASTER_TENANT", "__system__"),
-		RefreshInterval: durationOr("DATAMASTER_REFRESH_INTERVAL", 5*time.Minute),
-		AllowSim:        boolOr("DATAMASTER_ALLOW_SIM", false),
+		RefreshInterval: refreshInterval,
+		AllowSim:        allowSim,
 
-		AllowEphemeralMaster: boolOr("DATAMASTER_ALLOW_EPHEMERAL_MASTER", false),
+		AllowEphemeralMaster: allowEphemeralMaster,
 
-		Source:             env.Or("DATAMASTER_SOURCE", "datamaster"),
-		SPIFFESocket:       os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
-		NATSURL:            os.Getenv("DATAMASTER_NATS_URL"),
-		OutboxInterval:     durationOr("DATAMASTER_OUTBOX_INTERVAL", 0),
-		RequireDualControl: boolOr("DATAMASTER_REQUIRE_DUAL_CONTROL", false),
-		DualControlTTL:     durationOr("DATAMASTER_DUAL_CONTROL_TTL", dualcontrol.DefaultTTL),
-		// SEVEN DAYS, and the number is argued rather than round. A proposer who
-		// proposed an override on Friday and returns on Monday must still be able
-		// to see that it lapsed; anything shorter makes the answer depend on how
-		// long they were away, which is the ambiguity this whole change removes.
-		LapsedProposalRetention: durationOr("DATAMASTER_LAPSED_PROPOSAL_RETENTION", 7*24*time.Hour),
-		// Hourly. The purge is a bounded DELETE on an indexed column and the
-		// retention is measured in days, so nothing is gained by running it often.
-		ProposalPurgeInterval: durationOr("DATAMASTER_PROPOSAL_PURGE_INTERVAL", time.Hour),
+		Source:                  env.Or("DATAMASTER_SOURCE", "datamaster"),
+		SPIFFESocket:            os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		NATSURL:                 os.Getenv("DATAMASTER_NATS_URL"),
+		OutboxInterval:          outboxInterval,
+		RequireDualControl:      requireDualControl,
+		DualControlTTL:          dualControlTTL,
+		LapsedProposalRetention: lapsedRetention,
+		ProposalPurgeInterval:   purgeInterval,
 
 		RefFiles:   parseVendorMap(os.Getenv("DATAMASTER_REF_FILES")),
 		PriceFiles: parseVendorMap(os.Getenv("DATAMASTER_PRICE_FILES")),
@@ -228,19 +270,4 @@ func parsePriorities(s string) (map[string]int, error) {
 		out[strings.TrimSpace(k)] = rank
 	}
 	return out, nil
-}
-func boolOr(key string, def bool) bool {
-	v, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(key)))
-	if err != nil {
-		return def
-	}
-	return v
-}
-
-func durationOr(key string, def time.Duration) time.Duration {
-	d, err := time.ParseDuration(strings.TrimSpace(os.Getenv(key)))
-	if err != nil || d <= 0 {
-		return def
-	}
-	return d
 }
