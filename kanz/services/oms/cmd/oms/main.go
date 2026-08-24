@@ -277,79 +277,6 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// is admitting an order at a price we do not have.
 	marks := mark.New(time.Now, cfg.PriceMaxAge)
 
-	// AN UNGOVERNED PORTFOLIO IS NOW COUNTED AND ANNOUNCED (EXEC-M14).
-	//
-	// It used to be silent: an order for a portfolio nobody had put under mandate
-	// returned Allowed:true with no log and no metric, so "we forgot to mandate fund
-	// X" and "fund X passed compliance" were the same observable event. This counter
-	// is what makes "how much of the book is ungoverned" a number somebody can look
-	// at, rather than a question nobody has asked.
-	ungoverned := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "kanz_compliance_ungoverned_orders_total",
-		Help: "Orders admitted or refused for a portfolio that NO MANDATE GOVERNS. " +
-			"Non-zero means part of the book is trading with no compliance constraints (or, with " +
-			"OMS_REQUIRE_MANDATE, is being refused for want of one).",
-	})
-	obs.Registry.MustRegister(ungoverned)
-
-	// A MANDATE THAT WAS PUBLISHED AND COULD NOT BE READ (#619). Distinct from
-	// ungoverned above, and the distinction is the whole point: ungoverned means
-	// nobody wrote a mandate, which an operator may knowingly trade through. This
-	// means somebody wrote one and this process cannot apply it — and because the
-	// mandate stream is compacted, no redelivery and no restart will fix it. Only a
-	// republish will. The two counters must never be summed into one.
-	mandateUnreadable := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "kanz_compliance_unreadable_mandate_orders_total",
-		Help: "Orders REFUSED because the portfolio has a published mandate this process could not " +
-			"apply. Non-zero means a portfolio is un-governable until its mandate is republished; " +
-			"unlike an ungoverned portfolio this does not depend on OMS_REQUIRE_MANDATE.",
-	})
-	obs.Registry.MustRegister(mandateUnreadable)
-
-	// AN UNPRICED REFUSAL IS NOW COUNTED TOO (COMP-M2).
-	//
-	// Ungoverned already had a counter; Unpriced and Unvaluable — the other
-	// "nothing was evaluated" refusals — had only a once-per-(portfolio,
-	// instrument) warn log. That log fires once for the LIFE OF THE PROCESS, so a
-	// sustained pricing outage goes invisible after the first refused order. The
-	// two causes are split by label because they are different incidents with
-	// different responses: "never_seen" is a cold pod, a thin instrument, or a
-	// subscription delivering nothing (a warm-up); "expired" is a feed that WAS
-	// reporting and has stalled (an outage).
-	unpriced := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "kanz_compliance_unpriced_orders_total",
-		Help: "Orders refused PRICE_UNAVAILABLE because no usable reference mark exists for the instrument. " +
-			"Sustained non-zero means the market-data spine is not reaching this OMS for that instrument.",
-	}, []string{"reason"})
-	obs.Registry.MustRegister(unpriced)
-
-	// AN ADMISSION AGAINST A BALANCE NOBODY VOUCHED FOR IS COUNTED (#671).
-	//
-	// Ungoverned and Unpriced above make a REFUSAL or an unconstrained pass
-	// visible. This is the third shape and the one that was still silent: every
-	// rule ran, every rule passed, and the buying-power rule spent against a cash
-	// figure missing entry types this deployment does not produce (#588). A
-	// refusal already names them (attributeCash puts balance_omits on the
-	// violation); an ADMISSION named nothing.
-	//
-	// LABELLED BY POSTURE because the operator actions differ: "incomplete" means
-	// a feed that does not exist yet and the omission is known; "unstated" means
-	// the producing service is not declaring completeness at all, which is a
-	// wiring fault in the announcer and is fixable today.
-	//
-	// Expect this to be NON-ZERO on every current deployment — corporate_action is
-	// unproduced estate-wide — which is the point: the number says how much of the
-	// day's flow cleared against a balance nobody stands behind, instead of that
-	// being a question nobody has asked.
-	unaccounted := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "kanz_compliance_unaccounted_admissions_total",
-		Help: "Orders ADMITTED against a cash balance whose producer did not vouch for it. " +
-			"incomplete = the producer named missing entry types; unstated = the producer said nothing. " +
-			"On a SHORT book an unfolded entitlement OVERSTATES cash, so buying power can admit an " +
-			"order the fund cannot pay for.",
-	}, []string{"posture"})
-	obs.Registry.MustRegister(unaccounted)
-
 	// HOW MANY INSTRUMENTS IS THE FOLD ACTUALLY HOLDING? (#96)
 	//
 	// The price spine is a broadcast, so every replica folds every trade and
@@ -549,119 +476,26 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"population whose orders that rule will refuse.",
 	}, func() float64 { _, live := margins.Stats(); return float64(live) }))
 
-	// THE INSTRUMENT CLASSIFIER (#640). Until this, no production
-	// compliance.Classifier existed anywhere in the module and every seam was
-	// passed nil, so a mandate naming SECTOR, ISSUER or ASSET_CLASS could not be
-	// evaluated at all — first passing silently, then (once unresolvedDimension
-	// landed) refusing. It reads datamaster's golden security master, which is
-	// the estate's only reference-data source and now carries an issuer.
+	// THE PRE-TRADE GATE, BUILT BY A NAMED BUILDER (#643).
 	//
-	// LOOKUPS ARE MEMORY READS. The rule evaluators are handed context.TODO, so
-	// a classifier that dialled datamaster from inside them would put an
-	// uncancellable HTTP call on the order-admission path and couple admission to
-	// another service's availability. The cache is filled by the refresh cycle
-	// below instead.
-	//
-	// NIL WHEN NO MASTER IS CONFIGURED, deliberately, and it is the one place
-	// this seam may still be nil: "no reference source on this deployment" and
-	// "the source does not know this instrument" are different violations with
-	// different operator actions, and compliance.unresolvedDimension tells them
-	// apart only if the composition root does not collapse them here.
-	refCache, err := cfg.RefData.NewCache(cfg.Tenant, "svc:oms")
+	// Fifty constructions used to sit inline here, and two of the gate's six
+	// positional arguments were bare nils in the middle of them — one of which
+	// (#640) made every sector and issuer limit pass silently for months. pretrade.go
+	// holds the wiring and pretrade_test.go asserts the gate it returns carries the
+	// controls it claims, which is a test that could not be written while these
+	// lines were locals in a 1,400-line function.
+	wiring, err := buildPreTradeGate(cfg, preTradeDeps{
+		Books:    compliance.NewBookSource(book, cash, risk),
+		Mandates: mandateReg,
+		Margin:   compliance.NewMarginSource(bindings, margins),
+		Marks:    marks,
+	}, obs.Registry, logger)
 	if err != nil {
-		logger.Error("oms: the instrument classifier refused its configuration", "err", err)
 		return false, err
 	}
-	cfg.RefData.LogPosture(logger, "oms")
-	var classifier comp.Classifier
-	if refCache != nil {
-		classifier = refCache.Compliance()
-	}
-	// ZERO IS A READABLE ANSWER, so the gauge is registered whether or not a
-	// master is wired: an alert asking "is any classifier armed" must find a
-	// series to read, not a missing one (#622).
-	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "kanz_instrument_classifier_wired",
-		Help: "1 when this pod has a reference-data source for instrument classification. ZERO " +
-			"MEANS EVERY SECTOR, ISSUER AND ASSET_CLASS MANDATE RULE IS REFUSED as unverifiable.",
-	}, func() float64 {
-		if refCache == nil {
-			return 0
-		}
-		return 1
-	}))
-	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "kanz_instrument_classifier_resolved",
-		Help: "Instruments this pod can currently classify. Held against " +
-			"kanz_instrument_classifier_wanted it is the difference between a warming cache and " +
-			"a reference-data gap.",
-	}, func() float64 {
-		if refCache == nil {
-			return 0
-		}
-		return float64(refCache.Stats().Resolved)
-	}))
-	refreshFailures := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "kanz_instrument_reference_refresh_failures_total",
-		Help: "Reference-data refresh cycles that reported at least one failed lookup. Registered " +
-			"before anything can fail so \"none\" is a zero series rather than a missing one.",
-	})
-	obs.Registry.MustRegister(refreshFailures)
-	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "kanz_instrument_classifier_wanted",
-		Help: "Instruments asked about and not yet resolved. Each one is a holding whose " +
-			"classified-dimension mandate rules are being REFUSED right now; persistently " +
-			"non-zero means the refresh is failing or the master does not hold the book.",
-	}, func() float64 {
-		if refCache == nil {
-			return 0
-		}
-		return float64(refCache.Stats().Wanted)
-	}))
-	preTrade := comp.NewPreTradeGate(
-		comp.NewEngine(nil), compliance.NewBookSource(book, cash, risk), mandateReg, classifier, nil, logger,
-		comp.WithRequireMandate(cfg.RequireMandate),
-		// THE SOURCE IS ALWAYS WIRED, even on a deployment that binds no accounts
-		// and observes no margin. It answers UNKNOWN there, which refuses — and
-		// refusing is only reachable for a portfolio whose mandate DECLARES margin
-		// trading, so nothing that trades today changes. Leaving the seam nil
-		// instead would make "no margin control on this build" and "margin unknown"
-		// the same observable state, which is the conflation this estate designs
-		// against.
-		comp.WithMarginSource(compliance.NewMarginSource(bindings, margins)),
-		comp.WithUngovernedObserver(func(string, string) { ungoverned.Inc() }),
-		comp.WithUnreadableObserver(func(string, string) { mandateUnreadable.Inc() }),
-		comp.WithUnaccountedObserver(func(_, _, omits string) {
-			// The posture, not the omitted list, is the label: entry-type names are a
-			// bounded set today but they come from the producing deployment, and a
-			// metric label fed by another service's vocabulary is unbounded
-			// cardinality waiting to happen. The names are in the WARN, once per
-			// portfolio, where they cost nothing.
-			if omits == "" {
-				unaccounted.WithLabelValues("unstated").Inc()
-				return
-			}
-			unaccounted.WithLabelValues("incomplete").Inc()
-		}),
-		comp.WithUnpricedObserver(func(portfolioID, instrumentID string) {
-			// Two very different incidents arrive at the same refusal, and an
-			// operator needs to tell them apart: a mark we have NEVER seen means a
-			// cold pod, a thin instrument, or a subscription delivering nothing;
-			// a mark we HAVE seen but which expired means the feed was working and
-			// stalled. One is a warm-up, the other is an outage.
-			if _, asOf, seen := marks.Lookup(instrumentID); seen {
-				unpriced.WithLabelValues("expired").Inc()
-				logger.Warn("order refused: the reference mark is STALE — the price feed has stopped reporting for this instrument",
-					"portfolio", portfolioID, "instrument", instrumentID,
-					"mark_as_of", asOf, "max_age", cfg.PriceMaxAge)
-				return
-			}
-			unpriced.WithLabelValues("never_seen").Inc()
-			logger.Warn("order refused: NO reference mark has ever been seen for this instrument — a cold pod warming up, an instrument nothing quotes, or a price subscription delivering nothing",
-				"portfolio", portfolioID, "instrument", instrumentID, "subjects", cfg.PriceSubjects)
-		}),
-	)
-	gate := compliance.NewCOMP01Gate(preTrade, cfg.BaseCurrency,
+	refCache, refreshFailures := wiring.Classifier, wiring.RefreshFailures
+
+	gate := compliance.NewCOMP01Gate(wiring.Gate, cfg.BaseCurrency,
 		compliance.WithMarkSource(marks),
 	)
 

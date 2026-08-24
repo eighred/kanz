@@ -27,6 +27,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"strings"
 	"testing"
 )
@@ -49,12 +50,13 @@ func namesVenueMarginSubject(n ast.Node) bool {
 // subscribed and whether the pre-trade gate is given a margin source.
 func marginWiring(t *testing.T) (broadcast, workQueue, sourceWired bool) {
 	t.Helper()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse main.go: %v", err)
-	}
-	ast.Inspect(f, func(n ast.Node) bool {
+	// THE WHOLE COMPOSITION ROOT, NOT main.go ALONE. #643 moved the gate's
+	// construction into pretrade.go, and a guard pinned to one file reported the
+	// margin source missing for a source that had merely moved — a false alarm on
+	// a control whose real failure is silent, which is the worst direction for a
+	// guard to be wrong in.
+	files := compositionRootFiles(t)
+	inspect := func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -80,7 +82,10 @@ func marginWiring(t *testing.T) (broadcast, workQueue, sourceWired bool) {
 			workQueue = true
 		}
 		return true
-	})
+	}
+	for _, f := range files {
+		ast.Inspect(f, inspect)
+	}
 	return broadcast, workQueue, sourceWired
 }
 
@@ -105,4 +110,34 @@ func TestVenueMarginIsBroadcastAndReachesThePreTradeGate(t *testing.T) {
 			"margin state is replicated STATE, not work, and every replica's pre-trade gate " +
 			"needs all of it")
 	}
+}
+
+// compositionRootFiles parses every non-test Go file of this package — the whole
+// composition root, which since #643 is more than main.go.
+//
+// A DIRECTORY WALK RATHER THAN parser.ParseDir: that function is deprecated as
+// of Go 1.25 and golangci-lint, this repository's fourth gate, refuses it.
+func compositionRootFiles(t *testing.T) []*ast.File {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read the composition root: %v", err)
+	}
+	fset := token.NewFileSet()
+	var out []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		out = append(out, f)
+	}
+	if len(out) == 0 {
+		t.Fatal("no non-test Go files in the composition root — this guard is parsing nothing")
+	}
+	return out
 }

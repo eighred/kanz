@@ -4,7 +4,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,16 +36,17 @@ func TestOMSCompositionRootObservesUnaccountedAdmissions(t *testing.T) {
 		constructor = "NewPreTradeGate"
 		observer    = "WithUnaccountedObserver"
 	)
-	path := filepath.Join(moduleRoot(t), "services", "oms", "cmd", "oms", "main.go")
-
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
+	// THE PACKAGE, NOT main.go. #643 moved the gate's construction into
+	// pretrade.go — a named builder, so the seams it wires can be asserted by a
+	// real test rather than only read as text — and a guard pinned to one FILE
+	// reported "the gate is not constructed" for a gate that had simply moved
+	// twelve inches. The property is about the composition ROOT, which is a
+	// package.
+	dir := filepath.Join(moduleRoot(t), "services", "oms", "cmd", "oms")
+	files := parsePackageFiles(t, dir)
 
 	var constructed, observed bool
-	ast.Inspect(f, func(n ast.Node) bool {
+	inspect := func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -66,13 +69,16 @@ func TestOMSCompositionRootObservesUnaccountedAdmissions(t *testing.T) {
 			}
 		}
 		return true
-	})
+	}
+	for _, f := range files {
+		ast.Inspect(f, inspect)
+	}
 
 	// NON-VACUITY. A renamed or relocated constructor would satisfy the assertion
 	// below by never reaching it — the failure mode every "does X call Y" guard
 	// has, and the reason this one says so out loud.
 	if !constructed {
-		t.Fatalf("services/oms/cmd/oms/main.go never calls comp.%s — this guard found nothing to "+
+		t.Fatalf("nothing in services/oms/cmd/oms calls comp.%s — this guard found nothing to "+
 			"check. If the gate moved, move this assertion with it rather than deleting it.",
 			constructor)
 	}
@@ -89,4 +95,37 @@ func TestOMSCompositionRootObservesUnaccountedAdmissions(t *testing.T) {
 			"green with this wiring removed (#614 proved that on the producing side).",
 			constructor, observer)
 	}
+}
+
+// parsePackageFiles parses every non-test Go file in one directory.
+//
+// A DIRECTORY WALK RATHER THAN parser.ParseDir, which is deprecated as of Go
+// 1.25 and which golangci-lint refuses — and which this guard does not need
+// anyway: it asks a question about the files in one composition root, not about
+// build-tag-resolved package membership.
+func parsePackageFiles(t *testing.T, dir string) []*ast.File {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	var out []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		out = append(out, f)
+	}
+	// NON-VACUITY, one level down from the caller's own: an empty directory would
+	// let every "does the root call X" assertion pass by never reaching it.
+	if len(out) == 0 {
+		t.Fatalf("no non-test Go files under %s — this guard is parsing nothing", dir)
+	}
+	return out
 }
