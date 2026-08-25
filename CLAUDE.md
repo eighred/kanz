@@ -1,8 +1,33 @@
 # kanz
 
-Eighred is an institutional-grade trading and risk management platform that unifies
-order management, risk analytics, accounting, and compliance within a scalable
-multi-tenant architecture designed for fund managers and investment firms.
+**Eighred** is the company. **Kanz** is Eighred's institutional investment
+operating system: one financial model, one controlled execution core, one
+auditable state model, several secure interfaces. It is not an exchange
+connector, a trading bot, or a bag of venue APIs — execution is one component of
+a system that also owns risk, compliance, portfolio, margin, accounting and
+audit.
+
+The architecture is institutional in the sense systems like BlackRock Aladdin
+are: the book of record, the controls that govern it, and the execution that acts
+on it are one coherent model rather than an order router with reporting bolted
+beside it. That is the standard changes are judged against.
+
+The objective is never "place an order on an exchange." It is: know the
+institutional state, decide what is permitted, execute deterministically, record
+what happened, and explain why.
+
+## Planes
+
+Know which plane you are in before changing anything.
+
+| Plane | Owns | Rule |
+|---|---|---|
+| **Execution** | OMS, execution router, venue adapters, fills, exchange protocol and auth | Deterministic, typed, low-latency, fail-closed, independently testable. |
+| **Control** | risk, compliance, mandates, portfolio limits, leverage, margin, collateral, kill switches | Admission control, not reporting. Decides *whether*. |
+| **Intelligence** | MCP, analytics, copilot, operational investigation | Reasons over state. Never owns the execution path. |
+
+Collapsing one plane into another is not a refactor. A change that makes
+execution depend on the intelligence plane is wrong no matter how it tests.
 
 ## Stack
 
@@ -30,6 +55,77 @@ commands ──▶ api-gateway ──▶ NATS ──▶ services ──▶ Postg
   `X-Kanz-Principal-*`; upstreams trust those headers, which is sound **only**
   because a NetworkPolicy makes the gateway their only reachable caller.
 
+The order path is fixed, and every hop is typed:
+
+```
+strategy ─▶ intent ─▶ risk ─▶ compliance ─▶ mandate ─▶ OMS
+         ─▶ execution router ─▶ venue adapter ─▶ exchange
+```
+
+No step is skippable — not by MCP, not by an admin endpoint, not by a test helper
+that "just needs a fill." If the AI layer disappears entirely, trading continues.
+The execution core must not depend on an LLM, a prompt, dynamic tool discovery,
+or MCP being up.
+
+**The transports on that path are settled.** OMS → venue adapter is typed
+gRPC/mTLS over `venue.v1`, and exchange REST/WS lives inside the venue adapter
+and nowhere else. Both are load-bearing rather than incidental: the typed hop is
+what `buf breaking` gates and what the capability declarations ride on, and
+keeping the exchange protocol inside the adapter is what makes "credentials
+terminate at the venue adapter" structural instead of a promise. Changing either
+is an architectural decision with its own issue, not a refactor.
+
+## Invariants
+
+These are here because they change what you write. Each one has already cost
+something.
+
+- **`UNKNOWN` is a third value.** Capability and financial state are
+  `SUPPORTED` / `UNSUPPORTED` / `UNKNOWN`. An empty capability set means *the
+  venue did not assert support* — it does not mean unsupported. This is the same
+  rule as "nothing configured" ≠ "checked, and fine," applied to money.
+- **A critical unknown fails closed.** Unknown margin ratio ⇒ risk cannot
+  establish safety ⇒ order refused. Never unknown ⇒ `0.0` ⇒ proceed as if known.
+- **Credentials terminate at the venue adapter.** Signing logic and exchange auth
+  live there and nowhere else. No credential in source, git history, logs, MCP
+  responses, agent context, audit facts, test artifacts or web responses.
+- **MCP is read-only, deny-by-default, narrowly scoped, server-side filtered and
+  projected.** It may not place, cancel or amend orders, call a venue directly,
+  or bypass OMS/risk/compliance. It reaches state through authorized domain APIs
+  like any other caller. It is an agent-facing operational and read plane, and it
+  is **not the venue transport** — a proposal to move OMS → adapter onto it is a
+  proposal to replace a typed, gated, credential-isolating boundary with a
+  discovery-oriented one, and the boundary it would provide already exists.
+- **Security and execution-path hardening outrank MCP work**, always. MCP is an
+  interface; a hole on the capital path is money. When both are open, the
+  hardening lands first — and an MCP task never justifies deferring one.
+- **Every order must be attributable.** For any order the system answers: which
+  strategy, portfolio and tenant; which mandate permitted it; which risk and
+  compliance checks passed; which venue capability and account were used; what
+  was sent; what the venue returned; what filled; what state changed.
+- **Canonical model in the core, venue shapes at the boundary.** The same concept
+  must not be modelled differently by each integration, and endpoint-specific
+  models are not a second domain model.
+- **Tenant isolation is deny-by-default** and covers portfolios, accounts, orders,
+  positions, strategies, risk state, mandates, credentials, audit and AI
+  capabilities. One tenant's agent must not be able to *discover* another's state.
+- **Commands and facts are distinct.** A command is requested; a fact is observed
+  or committed. The history must reconstruct what the system knew, what it
+  believed, which controls ran, and why the action was permitted or rejected.
+
+## Coding standards
+
+- **Fail loudly, never silently.** A misconfiguration must surface on the first
+  event — a denial, a DLQ, a refusal to start. Never a default that looks healthy.
+- **"Nothing configured" and "checked, and fine" must never look the same.**
+- **One implementation per concept.** A copied helper is how a fix stops
+  spreading: 17 services each had their own `secret()` and 15 were wrong while 2
+  were right.
+- **Comments carry the operational consequence**, not a restatement of the code.
+  A comment justifying a trade-off is dated evidence — verify its premise before
+  relying on it.
+- Money and quantities are `common.v1.Decimal`; never float.
+
 ## Commands
 
 ```sh
@@ -50,19 +146,6 @@ go test -p 1 ./test/arch/   -count=1
 cd kanz-schemas && buf generate    # regenerate the Go/Python SDKs
 ```
 
-## Coding standards
-
-- **Fail loudly, never silently.** A misconfiguration must surface on the first
-  event — a denial, a DLQ, a refusal to start. Never a default that looks healthy.
-- **"Nothing configured" and "checked, and fine" must never look the same.**
-- **One implementation per concept.** A copied helper is how a fix stops
-  spreading: 17 services each had their own `secret()` and 15 were wrong while 2
-  were right.
-- **Comments carry the operational consequence**, not a restatement of the code.
-  A comment justifying a trade-off is dated evidence — verify its premise before
-  relying on it.
-- Money and quantities are `common.v1.Decimal`; never float.
-
 ## Constraints
 
 - **`go test -p 1`** — the Postgres-gated tests share one database and race otherwise.
@@ -73,7 +156,40 @@ cd kanz-schemas && buf generate    # regenerate the Go/Python SDKs
   claims are unproven until CI runs them.
 - **`fakeBus` does not validate envelopes**, so it accepts what a real broker
   rejects. A green suite using it is not a broker proof.
-- Never commit secrets; never point a test at a production DSN.
+- Never commit secrets; never point a test at a production DSN. **Do not persist
+  a credential anywhere** — not a file, not a fixture, not a commit, not an env
+  file left behind after a probe. Verify external integrations with demo/testnet
+  credentials only, passed in for one run and rotated after.
+- **Do not work around a sandbox or security restriction.** A blocked action is a
+  decision to respect and report, not an obstacle to route around — writing a
+  credential to a file to dodge a classifier defeats the control and breaks the
+  rule above at the same time. Say what was blocked and what it would have proved.
+
+## Changing the platform
+
+Kanz evolves incrementally. Prefer, in this order:
+
+existing typed contracts over parallel ones · existing authorization over a new
+security system · canonical domain models over endpoint-specific ones · explicit
+capabilities over implicit defaults · server-side projection over agent context ·
+deterministic execution over agent-mediated execution · small migrations over
+broad rewrites · existing precedent over speculative abstraction · measured
+behavior over assumption · security boundaries over convenience.
+
+Two consequences that are easy to get wrong:
+
+- **MCP augments Kanz; it does not redefine it.** It is an interface
+  architecture, and never a reason to rewrite execution. Deduplicating venue
+  adapters is a separate piece of work that must not weaken isolation or flatten
+  venue-specific semantics.
+- **The TUI is retained for now, and is not deletable on sight.** The long-term
+  direction is the Web app as the primary operator interface, and getting there
+  is a deliberate TUI → Web *migration*, never dead-code cleanup: web equivalent
+  → operational parity → production verification → retire → remove. **Unused by
+  the web client is not evidence an operation is dead** — `internal/tui/universe`
+  is today the only caller of two live gateway control routes, so deleting it on
+  that reasoning would orphan node provisioning. Every required human operation
+  must remain available before and after retirement.
 
 ## Where work is tracked
 
@@ -81,6 +197,27 @@ cd kanz-schemas && buf generate    # regenerate the Go/Python SDKs
 architecture document in this repository; all three were tried and each became a
 second answer competing with the code. Everything durable lives beside the code,
 in git history, or in claude-mem.
+
+**That extends to project state, and it is not negotiable.** Do not add
+`project-state.md`, progress files, status files, roadmap files, session notes or
+scratchpad documents — not under `docs/`, not anywhere. The persistent record is:
+CLAUDE.md for stable rules, **Issues** for discovered work, blockers, deferred
+work and decisions, **PRs** for implementation and verification history, and git
+history for the code. A status file is a fifth answer that goes stale the day
+after it is written, and this repository has already deleted 38 plan files and an
+architecture document for exactly that reason.
+
+**Discovered work goes to an Issue before the session ends.** If investigation
+turns up a defect, a blocker, an architectural decision, or work outside the
+current PR: search Issues first, reuse one if it fits, and open one if it does
+not. No engineering decision or discovered defect should exist only in a
+conversation. Reference the issue from the PR so discovery → implementation →
+verification stays connected.
+
+**Starting a session, read the repository rather than the last transcript**:
+CLAUDE.md, `git status`, the current branch, open PRs, open Issues, and main's
+latest commit. Then pick the highest-priority unfinished issue. A previous
+conversation is not state.
 
 The `M0`…`M6` milestones covered issues #55–#85 and were then abandoned: M0, M1
 and M6 are **closed and complete**, and most open issues carry no milestone at
@@ -115,7 +252,9 @@ Long procedures live in skills, not here.
 **An invariant worth keeping is a guard, not a paragraph.** The arch tests in
 `kanz/test/arch/` enforce these rules — default-deny, with named exemptions that
 carry the issue retiring them and a dead-entry check so an exemption cannot
-outlive its repair. Add one there rather than a rule here.
+outlive its repair. Add one there rather than a rule here. The Invariants section
+above is the exception, not the precedent: each line is there because no guard
+covers it yet, and each should leave when one does.
 
 Read them before filing a bug: an absence that looks like an oversight is often
 a guarded decision, and the exemption states why. A guard that passes proves
