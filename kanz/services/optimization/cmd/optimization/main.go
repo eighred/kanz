@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/auth"
@@ -94,12 +95,48 @@ func run() int {
 	obs.Registry.MustRegister(factsLost)
 
 	var serverOpts []server.Option
-	producer, closeBus, err := buildBus(ctx, cfg, logger, bus.NewBusMetrics(obs.Registry))
+	// THE PLATFORM KILL-SWITCH, CONSTRUCTED CLOSED (#739). Built before the bus
+	// so it can be handed to DialNATS as the disconnect watchdog — the gate has to
+	// exist before the connection it is watching.
+	//
+	// Until this, an operator running kanz-halt stopped TradingView signals, the
+	// gateway, the OMS and both venue adapters, and THIS service — which mints
+	// order.v1.SubmitOrder commands in internal/bridge and publishes them from
+	// internal/publish — carried on. It was invisible to
+	// TestEveryOrderPlacingServiceHonoursTheHalt because that guard classified
+	// order origins from a hand-kept list neither package was on (#738).
+	haltGate := halt.NewGate(time.Now)
+	producer, consumer, closeBus, err := buildBus(ctx, cfg, haltGate, logger, bus.NewBusMetrics(obs.Registry))
 	if err != nil {
 		logger.Error("bus init failed", "err", err)
 		return 2
 	}
 	defer closeBus()
+	// ARMED BEFORE THE ROUTES ARE MOUNTED, and the process does NOT exit if it
+	// cannot be — the same posture as the api-gateway. Arm has already latched the
+	// gate closed by the time it returns an error, so /v1/orders refuses to
+	// publish while the optimize and propose routes, which reach no bus, keep
+	// serving. Exiting here would take a stateless compute surface down over a
+	// brake it only needs when it is armed.
+	//
+	// consumer is nil when no broker is configured, which is a deployment with no
+	// publish path at all: server.WithHaltGate is then never passed either, and
+	// materialize's own check refuses on a nil gate if that ever stops being true.
+	if consumer != nil {
+		waitHalt, herr := halt.Arm(ctx, consumer, haltGate, logger)
+		if herr != nil {
+			logger.Error("halt gate is NOT armed — /v1/orders will refuse to publish any rebalance "+
+				"until this service is restarted", "err", herr)
+		}
+		if waitHalt != nil {
+			go func() {
+				if err := waitHalt(); err != nil && ctx.Err() == nil {
+					logger.Error("halt subscription ended — rebalance publication is halted", "err", err)
+				}
+			}()
+		}
+		serverOpts = append(serverOpts, server.WithHaltGate(haltGate))
+	}
 	switch {
 	case cfg.AutoPublish:
 		logger.Warn("AUTO-PUBLISH IS ARMED — a materialized rebalance proposal's orders go straight to "+
@@ -198,21 +235,39 @@ func run() int {
 // principal on ctx (AUTH-01c). This service already refuses a body-supplied
 // issuer at the handler; this is the second, independent check, and it is what
 // makes the refusal structural rather than a handler's good manners.
-func buildBus(ctx context.Context, cfg config.Config, logger *slog.Logger, busMetrics *bus.BusMetrics) (*bus.Producer, func(), error) {
+func buildBus(ctx context.Context, cfg config.Config, gate *halt.Gate, logger *slog.Logger, busMetrics *bus.BusMetrics) (*bus.Producer, *bus.Consumer, func(), error) {
 	if cfg.NATSURL == "" {
-		return nil, func() {}, nil
+		return nil, nil, func() {}, nil
 	}
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
 	// plaintext client it refuses at the handshake.
 	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	logger.Info("bus transport", "mtls", mesh.Enabled())
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{
+		URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics,
+		// LOSING THE SPINE CLOSES THE GATE (#635), the stance the gateway, the
+		// OMS and webhook-ingest all take. The halt FACT travels on this
+		// connection, so a dropped one means this process can no longer establish
+		// that trading is safe — and under deny-by-default, not knowing means not
+		// trading. The cost is deliberate: a broker restart latches rebalance
+		// publication shut until an operator resumes it. The alternative is a
+		// service that reconnects, silently loses its ephemeral halt consumer,
+		// and keeps publishing capital commands through a declared halt.
+		OnDisconnect: func(err error) {
+			gate.TripOnBusLoss(err)
+			logger.Error("NATS spine lost — rebalance publication is halted, operator resume required", "err", err)
+		},
+		OnReconnect: func() {
+			_, reason, since := gate.State()
+			logger.Warn("NATS spine reconnected — gate remains latched", "reason", reason, "since", since)
+		},
+	})
 	if err != nil {
 		_ = mesh.Close()
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	producer, err := bus.NewProducer(client, bus.ProducerConfig{
 		Source:              cfg.Source,
@@ -222,7 +277,22 @@ func buildBus(ctx context.Context, cfg config.Config, logger *slog.Logger, busMe
 	if err != nil {
 		_ = client.Close()
 		_ = mesh.Close()
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
-	return producer, func() { _ = client.Close(); _ = mesh.Close() }, nil
+	// THE CONSUMER EXISTS FOR ONE SUBJECT: the halt FACT (#739). This service
+	// subscribes to nothing else — its inputs arrive in the request body.
+	//
+	// WithDLQ even though the broadcast path never routes there, for the reason
+	// the gateway's identical consumer states: test/arch/bus_dlq_test.go exempts
+	// consumers that could NEVER hold a DLQ publisher, and this one plainly can.
+	// Skipping it because today's only subscription is broadcast is the loophole
+	// that guard names — the exemption would survive the day a queue subscription
+	// appears beside it, and the first event needing parking would be lost.
+	consumer, err := bus.NewConsumer(client, bus.WithDLQ(client))
+	if err != nil {
+		_ = client.Close()
+		_ = mesh.Close()
+		return nil, nil, func() {}, err
+	}
+	return producer, consumer, func() { _ = client.Close(); _ = mesh.Close() }, nil
 }

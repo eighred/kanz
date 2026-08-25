@@ -702,8 +702,17 @@ data:
                   "$JS.API.>", "$JS.ACK.>",
                 ]
               }
+              # AND ONE SUBSCRIBE THAT IS NOT A READ: the kill switch (#739).
+              #
+              # This is the half a Go-only fix silently loses. Without
+              # platform.mode.changed here the service authenticates fine,
+              # halt.Arm binds nothing, and — because a subscription that never
+              # arms leaves the gate exactly as NewGate built it, closed — the
+              # symptom is not "trades through a halt" but "refuses every
+              # rebalance forever", which is a different and equally wrong
+              # outcome. The grant and the Go wiring are one change.
               subscribe: {
-                allow: [ "_INBOX.>" ]
+                allow: [ "platform.mode.changed", "_INBOX.>" ]
               }
             }
           }

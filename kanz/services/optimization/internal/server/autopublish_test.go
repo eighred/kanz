@@ -8,14 +8,32 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	optimizationpb "github.com/eighred/kanz/kanz-schemas-go/optimization/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
+
 	"github.com/eighred/kanz/internal/optimization"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/auth"
 )
+
+// openGate is a kill switch an operator has resumed — the state every test
+// below except the halted one needs.
+//
+// IT IS EXPLICIT IN EVERY CASE BECAUSE THE DEFAULT IS CLOSED. halt.NewGate
+// builds a gate that refuses, so a test helper that quietly omitted the gate
+// would exercise the refusal path while claiming to test publication, and every
+// assertion about what reached the bus would pass on an empty slice.
+func openGate() *halt.Gate {
+	g := halt.NewGate(time.Now)
+	g.Resume("operator:test", "fixture")
+	return g
+}
 
 // fakeMaterializer records what the handler asked of it.
 type fakeMaterializer struct {
@@ -41,12 +59,18 @@ func (f *fakeMaterializer) Record(_ context.Context, fact *optimizationpb.Propos
 }
 
 func serverWith(f *fakeMaterializer) (*Server, *fakeMaterializer) {
+	return serverWithGate(f, openGate())
+}
+
+func serverWithGate(f *fakeMaterializer, gate *halt.Gate) (*Server, *fakeMaterializer) {
 	rd := &Readiness{}
 	rd.Set(true)
-	s := New(rd, slog.New(slog.NewTextHandler(io.Discard, nil)), WithAutoPublish(func(tenant string) Materializer {
-		f.tenant = tenant
-		return f
-	}))
+	s := New(rd, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithAutoPublish(func(tenant string) Materializer {
+			f.tenant = tenant
+			return f
+		}),
+		WithHaltGate(gate))
 	return s, f
 }
 
@@ -254,5 +278,103 @@ func TestALostFactDoesNotFailTheRequest(t *testing.T) {
 	}
 	if len(f.published) != 1 {
 		t.Errorf("published %d, want 1", len(f.published))
+	}
+}
+
+// THE PLATFORM HALT REACHES THIS SERVICE (#739).
+//
+// It did not, and the reason it went unnoticed for as long as it did is worth
+// keeping: this service mints order.v1.SubmitOrder commands in internal/bridge
+// and publishes them on order.order.submit from internal/publish — the same
+// subject the gateway and webhook-ingest write to — while
+// TestEveryOrderPlacingServiceHonoursTheHalt classified order origins from a
+// hand-kept list that named neither package. So the guard never asked, and an
+// operator running `kanz-halt` stopped five processes and not this one.
+//
+// The three tests below are the three states the gate can be in, because a
+// refusal test alone would pass against a handler that refused unconditionally.
+func TestAHaltedPlatformRefusesToPublishTheRebalance(t *testing.T) {
+	// RESUMED FIRST, THEN HALTED — the real sequence, and the only one that
+	// proves anything. A fresh gate is ALREADY closed ("gate has not been opened
+	// since startup"), so a test that halted one would assert against the
+	// startup latch and pass even if Observe did nothing at all.
+	halted := openGate()
+	halted.Observe(&lifecyclepb.ModeChanged{
+		Component: halt.ComponentSystem,
+		NewMode:   lifecyclepb.OperatingMode_OPERATING_MODE_HALTED,
+		ChangedBy: "operator:risk",
+		Reason:    "risk breach",
+	})
+	s, f := serverWithGate(&fakeMaterializer{armed: true}, halted)
+
+	rec := materializeAs(t, s, feasibleProposal(), "alice")
+	if rec.Code != http.StatusLocked {
+		t.Fatalf("got %d, want 423 — a halted platform must refuse a capital action outright: %s",
+			rec.Code, rec.Body.String())
+	}
+	// THE PART THAT MATTERS. A 423 whose orders went out anyway is worse than no
+	// brake, because the operator now believes the platform is stopped.
+	if len(f.published) != 0 {
+		t.Fatalf("%d order(s) were published through a declared halt", len(f.published))
+	}
+	// AND NO FACT EITHER. recordMaterialization runs after the publish loop, so a
+	// check placed inside that loop would record a ProposalMaterialized for a
+	// rebalance that was refused — an audit trail claiming a capital action that
+	// never occurred.
+	if len(f.facts) != 0 {
+		t.Fatalf("a materialization FACT was recorded for a rebalance that never happened: %v", f.facts)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "risk breach") {
+		t.Fatalf("the refusal does not carry the operator's reason, which is the only thing that "+
+			"tells the caller this is a halt and not a bug: %s", body)
+	}
+}
+
+// A GATE NOBODY WIRED IS A HALTED GATE. This is the case that makes
+// WithHaltGate safe to be an option rather than a constructor parameter: a
+// composition root that arms auto-publish and forgets the gate refuses to
+// publish, rather than trading with no brake at all.
+func TestAnUnwiredHaltGateRefusesToPublish(t *testing.T) {
+	rd := &Readiness{}
+	rd.Set(true)
+	f := &fakeMaterializer{armed: true}
+	s := New(rd, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithAutoPublish(func(tenant string) Materializer { f.tenant = tenant; return f }))
+
+	rec := materializeAs(t, s, feasibleProposal(), "alice")
+	if rec.Code != http.StatusLocked {
+		t.Fatalf("got %d, want 423 — auto-publish with no halt gate must fail CLOSED: %s",
+			rec.Code, rec.Body.String())
+	}
+	if len(f.published) != 0 {
+		t.Fatalf("%d order(s) were published by a service with no brake", len(f.published))
+	}
+}
+
+// AND THE DRY RUN IS NOT GATED, deliberately. A halt refuses new execution
+// exposure; a proposal that reaches no bus is not exposure, and a portfolio
+// manager must still be able to see what a rebalance WOULD do while the platform
+// is stopped — that is often exactly what the incident needs.
+func TestAHaltDoesNotStopADryRun(t *testing.T) {
+	// RESUMED FIRST, THEN HALTED — the real sequence, and the only one that
+	// proves anything. A fresh gate is ALREADY closed ("gate has not been opened
+	// since startup"), so a test that halted one would assert against the
+	// startup latch and pass even if Observe did nothing at all.
+	halted := openGate()
+	halted.Observe(&lifecyclepb.ModeChanged{
+		Component: halt.ComponentSystem,
+		NewMode:   lifecyclepb.OperatingMode_OPERATING_MODE_HALTED,
+		ChangedBy: "operator:risk",
+		Reason:    "risk breach",
+	})
+	s, f := serverWithGate(&fakeMaterializer{armed: false}, halted)
+
+	rec := materializeAs(t, s, feasibleProposal(), "alice")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 — a dry run publishes nothing and has nothing to brake: %s",
+			rec.Code, rec.Body.String())
+	}
+	if len(f.published) != 0 {
+		t.Fatalf("a DISARMED materializer published %d order(s)", len(f.published))
 	}
 }
