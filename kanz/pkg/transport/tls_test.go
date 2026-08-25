@@ -153,3 +153,116 @@ func TestNewSourceDoesNotHangWithoutAnAgent(t *testing.T) {
 			"with no error and no log line, until somebody deleted the pod.")
 	}
 }
+
+// ParseServiceIDs is the shared allow-list parser behind AuthorizeServices, and
+// these tests ARE its enforcement (#venue-authz).
+//
+// Every arm below corresponds to a way an allow-list can be wrong in the safe-
+// looking direction. The dangerous one is the empty result: AuthorizeServices()
+// with no ids is a server nobody can call, which presents as "the caller is
+// broken" and whose reflex fix is to drop back to AuthorizeMesh — admitting
+// every workload in the trust domain. So an empty list must fail at STARTUP,
+// naming the variable, not quietly at every handshake.
+//
+// The operator's control plane has carried the same six assertions since it
+// shipped; consolidating the parser moved the argument here rather than making
+// a second copy of it.
+
+func TestParseServiceIDs_RefusesAnEmptyList(t *testing.T) {
+	if _, err := ParseServiceIDs("VENUE_OKX_ALLOWED_CLIENTS", ""); err == nil {
+		t.Fatal("an empty allow-list was accepted. AuthorizeServices with no ids admits nobody, " +
+			"and the reflex repair for that is AuthorizeMesh, which admits everybody")
+	} else if !strings.Contains(err.Error(), "VENUE_OKX_ALLOWED_CLIENTS") {
+		t.Errorf("the error must name the variable an operator has to set; got: %v", err)
+	}
+}
+
+// A list of only separators is the same defect wearing a different spelling, and
+// it is why the length check lives after the loop rather than before it.
+func TestParseServiceIDs_RefusesAListOfOnlySeparators(t *testing.T) {
+	if _, err := ParseServiceIDs("VENUE_OKX_ALLOWED_CLIENTS", " , , "); err == nil {
+		t.Fatal(`" , , " produced a non-empty allow-list`)
+	}
+}
+
+// A typo must be fatal rather than skipped. Skipping it silently shrinks the
+// allow-list, and the result is a server refusing the caller it was configured
+// to admit — diagnosable only from the peer's side.
+func TestParseServiceIDs_RejectsAMalformedID(t *testing.T) {
+	_, err := ParseServiceIDs("VENUE_OKX_ALLOWED_CLIENTS",
+		"spiffe://kanz.internal/ns/kanz-services/sa/oms,not-a-spiffe-id")
+	if err == nil {
+		t.Fatal("a malformed entry was skipped rather than refused")
+	}
+	if !strings.Contains(err.Error(), "not-a-spiffe-id") {
+		t.Errorf("the error must quote the offending entry so it can be found in a manifest; got: %v", err)
+	}
+}
+
+func TestParseServiceIDs_ParsesAndTrims(t *testing.T) {
+	ids, err := ParseServiceIDs("VENUE_OKX_ALLOWED_CLIENTS",
+		"  spiffe://kanz.internal/ns/kanz-services/sa/oms , spiffe://kanz.internal/ns/kanz-services/sa/api-gateway ")
+	if err != nil {
+		t.Fatalf("ParseServiceIDs: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("parsed %d ids, want 2", len(ids))
+	}
+	if got := ids[0].String(); got != "spiffe://kanz.internal/ns/kanz-services/sa/oms" {
+		t.Errorf("ids[0] = %q — surrounding whitespace in a manifest must not change the identity", got)
+	}
+}
+
+// A trailing comma is a formatting slip, not a request to admit "".
+func TestParseServiceIDs_IgnoresEmptyEntries(t *testing.T) {
+	ids, err := ParseServiceIDs("VENUE_OKX_ALLOWED_CLIENTS",
+		"spiffe://kanz.internal/ns/kanz-services/sa/oms,")
+	if err != nil {
+		t.Fatalf("ParseServiceIDs: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("parsed %d ids, want 1", len(ids))
+	}
+}
+
+// The parsed list must actually reach an authorizer that refuses a stranger.
+// Without this the tests above only prove a string was split.
+func TestParseServiceIDs_FeedsAnAuthorizerThatRefusesAStranger(t *testing.T) {
+	ids, err := ParseServiceIDs("VENUE_OKX_ALLOWED_CLIENTS", "spiffe://kanz.internal/ns/kanz-services/sa/oms")
+	if err != nil {
+		t.Fatalf("ParseServiceIDs: %v", err)
+	}
+	ca := newCA(t)
+	serverID := mustID(t, "kanz-services", "venue-okx")
+	// A VALID, CORRECTLY-SIGNED, IN-TRUST-DOMAIN SVID that is simply not the OMS.
+	// Under AuthorizeMesh this peer was admitted and could submit orders to a
+	// live exchange.
+	rogue := mustID(t, "kanz-services", "copilot")
+
+	srv := ServerTLSConfig(ca.source(t, serverID), AuthorizeServices(ids...))
+	cli := ClientTLSConfig(ca.source(t, rogue), AuthorizeMesh())
+
+	_, _, sErr, _ := handshake(srv, cli)
+	if sErr == nil {
+		t.Fatal("the venue allow-list admitted a workload that is not the OMS. Its SVID is valid " +
+			"and in the trust domain — that is what every workload has — so authenticating it " +
+			"proves nothing about whether it may trade")
+	}
+}
+
+// And it must ADMIT the OMS, or the change is a trading outage rather than a
+// control. Without this arm the test above passes against an allow-list that
+// refuses everyone.
+func TestParseServiceIDs_FeedsAnAuthorizerThatAdmitsTheOMS(t *testing.T) {
+	ids, err := ParseServiceIDs("VENUE_OKX_ALLOWED_CLIENTS", "spiffe://kanz.internal/ns/kanz-services/sa/oms")
+	if err != nil {
+		t.Fatalf("ParseServiceIDs: %v", err)
+	}
+	ca := newCA(t)
+	srv := ServerTLSConfig(ca.source(t, mustID(t, "kanz-services", "venue-okx")), AuthorizeServices(ids...))
+	cli := ClientTLSConfig(ca.source(t, mustID(t, "kanz-services", "oms")), AuthorizeMesh())
+
+	if _, _, sErr, cErr := handshake(srv, cli); sErr != nil || cErr != nil {
+		t.Fatalf("the OMS was refused by its own adapter: server=%v client=%v", sErr, cErr)
+	}
+}

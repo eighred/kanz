@@ -39,6 +39,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
@@ -158,6 +159,70 @@ func AuthorizeMesh() tlsconfig.Authorizer {
 // known set of workloads (e.g. the API gateway accepts only the risk-engine).
 func AuthorizeServices(ids ...spiffeid.ID) tlsconfig.Authorizer {
 	return tlsconfig.AuthorizeOneOf(ids...)
+}
+
+// ServiceIDStrings renders an allow-list for a startup log.
+//
+// WHO MAY CALL A SERVER IS STATED AT BOOT, not left to be inferred from a
+// manifest — a manifest and a running process can disagree, and the process is
+// the one that decides. Every caller of AuthorizeServices wants this line, which
+// is why it is here rather than copied beside each of them.
+func ServiceIDStrings(ids []spiffeid.ID) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, id.String())
+	}
+	return out
+}
+
+// ParseServiceIDs parses a comma-separated SPIFFE ID allow-list for
+// AuthorizeServices, and REFUSES an empty result.
+//
+// # WHY THIS REFUSES RATHER THAN RETURNING AN EMPTY SLICE
+//
+// AuthorizeServices() with no ids is a server nobody can call — which sounds
+// safe and is the one failure mode an operator cannot diagnose from the server
+// side, because the handshake fails at the peer. Meanwhile the reflex fix for
+// "nothing can reach it" is to drop back to AuthorizeMesh, which admits every
+// workload in the trust domain. So the empty case has to be loud at STARTUP,
+// naming the variable, rather than quiet at every connection.
+//
+// It exists here and not in a composition root because the argument is the same
+// wherever it is made, and it had already been made once: the operator's
+// control plane refuses to start on an empty OPERATOR_ALLOWED_CLIENTS, with the
+// reasoning written out in full — "mTLS with no authorized peer list admits
+// EVERY workload in the trust domain, because every one of them carries a valid
+// SVID. Authentication is not authorization." A second copy of that reasoning
+// beside a second parser is how one of them drifts.
+//
+// A MALFORMED ENTRY IS FATAL, NOT SKIPPED. A typo that silently shrinks an
+// allow-list produces a server that refuses the caller it was configured to
+// admit — diagnosable only from the peer's side. An empty entry between commas
+// IS skipped, because a trailing comma is a formatting slip rather than a
+// request to admit "", and the zero-length check below means ",,"" cannot
+// become an empty allow-list by a different spelling.
+func ParseServiceIDs(envName, list string) ([]spiffeid.ID, error) {
+	var ids []spiffeid.ID
+	for _, raw := range strings.Split(list, ",") {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		id, err := spiffeid.FromString(entry)
+		if err != nil {
+			return nil, fmt.Errorf("%s contains %q, which is not a valid SPIFFE ID: %w — a typo "+
+				"must fail startup rather than silently shrink the allow-list, because a server "+
+				"that refuses the caller it was configured to admit is diagnosable only from the "+
+				"peer's side", envName, entry, err)
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("%s is empty: mTLS with no authorized peer list admits EVERY "+
+			"workload in the trust domain, because every one of them carries a valid SVID. "+
+			"Authentication is not authorization. Name the callers this server may serve", envName)
+	}
+	return ids, nil
 }
 
 // ServerTLSConfig returns a *tls.Config that presents this workload's SVID and

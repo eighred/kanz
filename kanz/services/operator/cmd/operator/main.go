@@ -30,6 +30,7 @@ import (
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/operator/internal/config"
 	"github.com/eighred/kanz/services/operator/internal/estate"
 	"github.com/eighred/kanz/services/operator/internal/grpcsrv"
@@ -133,7 +134,7 @@ func run() int {
 	}
 	grpcSrv := grpc.NewServer(srvOpt)
 	logger.Info("control plane authenticated — mTLS, callers restricted",
-		"authorized_clients", spiffeIDStrings(allowed))
+		"authorized_clients", transport.ServiceIDStrings(allowed))
 	reader := estate.NewK8s(cs)
 	var srv *grpcsrv.Server
 	if cfg.ProvisionerImage != "" {

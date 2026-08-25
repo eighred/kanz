@@ -88,13 +88,3 @@ func controlPlaneServerOption(ctx context.Context, socket, list string) (grpc.Se
 	}
 	return transport.ServerOption(src, transport.AuthorizeServices(ids...)), ids, nil
 }
-
-// spiffeIDStrings renders the allow-list for the startup log. Who may call the
-// control plane is stated at boot, not left to be inferred from a manifest.
-func spiffeIDStrings(ids []spiffeid.ID) []string {
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, id.String())
-	}
-	return out
-}

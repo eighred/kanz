@@ -42,6 +42,23 @@ type Config struct {
 	// on it can trade.
 	SPIFFESocket string
 
+	// AllowedClients is the comma-separated SPIFFE ID allow-list for the venue.v1
+	// listener. REQUIRED whenever SPIFFESocket is set.
+	//
+	// AUTHENTICATION IS NOT AUTHORIZATION. This listener used to authorize with
+	// transport.AuthorizeMesh(), which admits any peer holding a valid SVID in
+	// kanz.internal — that is EVERY workload in the trust domain, because issuing
+	// them an SVID is what the trust domain does. So the property "only the OMS
+	// may submit orders to a live exchange" rested entirely on a NetworkPolicy,
+	// one layer down and in a different repository directory, with nothing in the
+	// process itself refusing anyone.
+	//
+	// The narrower helper already existed and was already used twice — the
+	// operator's control plane and the api-gateway's listener both allow-list
+	// their callers. This adapter is the higher-value target of the two: the
+	// operator writes credentials, this one spends money with them.
+	AllowedClients string
+
 	// --- the exchange ---
 
 	MIC string
@@ -106,15 +123,16 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		GRPCListen:   env.Or("VENUE_BINANCE_GRPC_LISTEN", ":9000"),
-		HTTPListen:   env.Or("VENUE_BINANCE_LISTEN", ":8091"),
-		LogLevel:     env.ParseLevelOr(os.Getenv("VENUE_BINANCE_LOG_LEVEL"), slog.LevelInfo),
-		Source:       env.Or("VENUE_BINANCE_SOURCE", "venue-binance"),
-		OTLPEndpoint: os.Getenv("VENUE_BINANCE_OTLP_ENDPOINT"),
-		NATSURL:      os.Getenv("VENUE_BINANCE_NATS_URL"),
-		DatabaseURL:  databaseURL,
-		Tenant:       env.Or("VENUE_BINANCE_TENANT", "__system__"),
-		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		GRPCListen:     env.Or("VENUE_BINANCE_GRPC_LISTEN", ":9000"),
+		HTTPListen:     env.Or("VENUE_BINANCE_LISTEN", ":8091"),
+		LogLevel:       env.ParseLevelOr(os.Getenv("VENUE_BINANCE_LOG_LEVEL"), slog.LevelInfo),
+		Source:         env.Or("VENUE_BINANCE_SOURCE", "venue-binance"),
+		OTLPEndpoint:   os.Getenv("VENUE_BINANCE_OTLP_ENDPOINT"),
+		NATSURL:        os.Getenv("VENUE_BINANCE_NATS_URL"),
+		DatabaseURL:    databaseURL,
+		Tenant:         env.Or("VENUE_BINANCE_TENANT", "__system__"),
+		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		AllowedClients: os.Getenv("VENUE_BINANCE_ALLOWED_CLIENTS"),
 
 		MIC:                    env.Or("BINANCE_MIC", "BINANCE"),
 		Account:                env.Or("BINANCE_VENUE_ACCOUNT", env.Or("BINANCE_MIC", "BINANCE")),
