@@ -103,6 +103,33 @@ message SubmitOrder {
   // slice number is recoverable from the id and is deliberately not a second
   // field that could disagree with it.
   string parent_order_id = 14;
+
+  // leverage is the requested multiple; 1 (or absent) is unlevered spot (#417).
+  //
+  // WHY THIS FIELD EXISTS AT ALL, since the platform still places only spot
+  // orders. Before it, a strategy asking for 10x had its leverage parsed,
+  // bounds-checked and written onto the StrategySignal FACT — the immutable
+  // audit root — and then DROPPED, because SubmitOrder had nowhere to put it.
+  // The fund's audit trail permanently asserted a 10x position against an
+  // unlevered spot order the venue actually held. That is #240, and the estate's
+  // answer until now was internal/signal/translate refusing leverage outright:
+  // correct, and a hardcode that could only ever say no.
+  //
+  // Carrying it converts that into a CONTRACT. The adapter declares which margin
+  // modes it can express (venue.v1 supported_margin_modes), the OMS refuses at
+  // admission what no adapter can place, and the refusal names the venue and the
+  // mode instead of naming a missing schema field. Nothing here makes a levered
+  // order placeable — both connectors are spot-only and say so — but the term
+  // now survives from the signal to the state, so the audit root and the venue
+  // instruction can no longer disagree.
+  //
+  // Decimal, never a double: it is a multiplier on capital at risk.
+  common.v1.Decimal leverage = 15;
+
+  // margin_mode is the collateral regime this order is worked under. Absent ⇒
+  // MARGIN_MODE_UNSPECIFIED ⇒ spot, which is what every caller predating this
+  // field already meant.
+  MarginMode margin_mode = 16;
 }
 
 // ExecutionAlgo names the algorithm that turns a parent order into a schedule of
@@ -266,6 +293,43 @@ enum Side {
 
   // Sell / short.
   SIDE_SELL = 2;
+}
+
+// MarginMode is the collateral regime an order is worked under (#417).
+//
+// THERE IS A SECOND MarginMode IN signal.v1, AND THAT IS DELIBERATE. This one
+// is what the VENUE IS INSTRUCTED to do; that one is what a STRATEGY ASKED FOR,
+// recorded on StrategySignal — an immutable audit FACT. They are the two ends of
+// internal/signal/translate, which is where the mapping is written down and
+// reviewed, and it is the same shape SignalAction and Side already have:
+// SignalAction carries CLOSE, which is not an order side at all but a position
+// instruction that resolves against the book. A signal vocabulary and an
+// execution vocabulary are not the same vocabulary, even where today their
+// values coincide.
+//
+// Retyping signal.v1's field to point here was tried and rejected. It is
+// wire-identical (both encode as the same varints) but it edits the schema of an
+// immutable audit root to save a mapping function, and it forces two `buf
+// breaking` exemptions — ENUM_NO_DELETE and FIELD_SAME_TYPE — onto a FACT.
+//
+// What keeps the two honest is a guard, not this paragraph: test/arch's
+// TestTheTwoMarginModeVocabulariesAgree fails if one gains a regime the other
+// cannot express, so drift is a build failure rather than an order placed under
+// a regime the audit root cannot name.
+//
+// THE ZERO VALUE IS SPOT, and that is load-bearing rather than incidental. An
+// order that says nothing about margin is unlevered, which is the conservative
+// reading and the one every existing caller already means — so adding this
+// field changes the meaning of no message that predates it.
+enum MarginMode {
+  // Spot / no leverage. The zero value, and what an absent field means.
+  MARGIN_MODE_UNSPECIFIED = 0;
+
+  // Cross-margin: collateral is shared across the account's positions.
+  MARGIN_MODE_CROSS = 1;
+
+  // Isolated-margin: collateral is committed per position.
+  MARGIN_MODE_ISOLATED = 2;
 }
 
 // OrderType selects how an order is priced and triggered.

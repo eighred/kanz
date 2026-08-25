@@ -421,30 +421,24 @@ func (in Intent) validate() error {
 	if in.OrderType == orderpb.OrderType_ORDER_TYPE_LIMIT && (in.LimitPrice == nil || in.LimitPrice.Sign() <= 0) {
 		return fmt.Errorf("%w: a limit order requires a positive limit price", ErrInvalidIntent)
 	}
-	// LEVERAGE IS REFUSED, NOT DROPPED (#240).
+	// LEVERAGE AND MARGIN MODE ARE NO LONGER REFUSED HERE (#417, retiring #240's
+	// stopgap). They used to be, and the block said so: leverage was parsed,
+	// bounds-checked, written onto the StrategySignal FACT and then dropped,
+	// because order.v1.SubmitOrder had nowhere to carry it — so a strategy asking
+	// for 10x got an unlevered spot order while the audit root permanently
+	// asserted a 10x position the fund never held. Refusing stopped the audit
+	// trail lying, and the block's own comment named its exit condition: "delete
+	// this block when SubmitOrder can actually carry it."
 	//
-	// It used to be parsed, bounds-checked against max_leverage, and written onto the
-	// StrategySignal FACT — the immutable audit root — after which fanOut built an
-	// order.v1.SubmitOrder that carries neither leverage nor margin_mode, because the
-	// proto has neither field. A strategy asking for 10x got an UNLEVERED SPOT ORDER
-	// while the audit trail permanently asserted a 10x position the fund never held.
+	// It can now. SubmitOrder and OrderState carry both terms, venue.v1 lets an
+	// adapter declare which collateral regimes it can express, and the OMS refuses
+	// at ADMISSION what the target adapter did not declare. The refusal did not
+	// weaken — both spot connectors declare CASH only, so a levered signal is
+	// still refused today — it moved to the layer that can name the venue, and it
+	// stops refusing on its own the day a margined connector declares CROSS.
 	//
-	// Refusing is not the end state; plumbing leverage to the venue adapters is (a
-	// proto change, two adapters, and margin semantics). It is what stops the audit
-	// trail lying TODAY, and it is reversible: delete this block when SubmitOrder can
-	// actually carry it. A nil Leverage is ABSENT, which publishSignal already records
-	// as 1 — unlevered — so it is accepted.
-	if in.Leverage != nil && in.Leverage.Cmp(oneRat) != 0 {
-		return fmt.Errorf("%w: leverage %s is not executable — this platform submits UNLEVERED "+
-			"orders only (order.v1.SubmitOrder carries no leverage field), and accepting it would "+
-			"record a levered position on the audit root that no venue was ever asked for. Send "+
-			"leverage=1 and size the exposure yourself", ErrInvalidIntent, in.Leverage.RatString())
-	}
-	if in.MarginMode != signalpb.MarginMode_MARGIN_MODE_UNSPECIFIED {
-		return fmt.Errorf("%w: margin_mode %s is not executable — same reason as leverage: "+
-			"order.v1.SubmitOrder carries no margin mode, so the order placed would be spot "+
-			"while the audit root claimed margin", ErrInvalidIntent, in.MarginMode)
-	}
+	// Bounds-checking leverage against max_leverage stays where it was, upstream
+	// of here: this function's job is translation, and a bound is a policy.
 	return nil
 }
 
@@ -520,10 +514,13 @@ func (t *Translator) fanOut(ctx context.Context, in Intent, tenant string, venue
 		orderID := DeterministicID(in.SignalID, v.Venue)
 		qtyD, qtyOK := toDec(qty.Rat())
 		limitD, limitOK := toDec(in.LimitPrice)
-		if !qtyOK || !limitOK {
-			return nil, fmt.Errorf("translate: order %s quantity or limit price is not representable "+
-				"as a Decimal — refusing to submit an order for a size the platform invented", orderID)
+		levD, levOK := toDec(in.Leverage)
+		if !qtyOK || !limitOK || !levOK {
+			return nil, fmt.Errorf("translate: order %s quantity, limit price or leverage is not "+
+				"representable as a Decimal — refusing to submit an order for a size the platform "+
+				"invented", orderID)
 		}
+		marginMode := orderMarginMode(in.MarginMode)
 		cmd := &orderpb.SubmitOrder{
 			Metadata:     &commandpb.CommandMetadata{Issuer: "strategy:" + in.StrategyID, TargetId: orderID},
 			OrderId:      orderID,
@@ -535,6 +532,24 @@ func (t *Translator) fanOut(ctx context.Context, in Intent, tenant string, venue
 			LimitPrice:   limitD,
 			TimeInForce:  tif,
 			Venue:        v.Venue, // route this leg to its allocated venue
+
+			// THE COLLATERAL TERMS TRAVEL WITH THE ORDER NOW (#417). Until
+			// SubmitOrder carried them this function REFUSED any leverage other
+			// than 1 and any margin mode at all, because the alternative was
+			// #240: leverage bounds-checked, written onto the StrategySignal
+			// FACT, and then dropped on the floor — an audit root permanently
+			// asserting a levered position the venue held as spot.
+			//
+			// The refusal was correct and it was a hardcode. It answered the
+			// same way for every venue forever, and it could not say WHICH venue
+			// might have taken the order. The OMS now refuses at admission
+			// against what the adapter itself declared (venue.v1
+			// supported_margin_modes), and both spot connectors declare CASH —
+			// so a levered signal is still refused today, by a control that
+			// names the venue and that stops refusing the day a margined
+			// connector exists.
+			Leverage:   levD,
+			MarginMode: marginMode,
 		}
 		if err := t.publishCommand(ctx, cmd, orderID, tenant); err != nil {
 			return nil, fmt.Errorf("publish order %s: %w", orderID, err)
@@ -699,3 +714,35 @@ var (
 	// is acting on it now.
 	ErrStaleSignal = errors.New("translate: signal is too old to act on")
 )
+
+// orderMarginMode maps the signal vocabulary onto the execution vocabulary
+// (#417).
+//
+// TWO ENUMS, ONE MAPPING, AND THAT IS THE ESTATE'S PATTERN rather than an
+// oversight. signal.v1.MarginMode is what a STRATEGY ASKED FOR, recorded on
+// StrategySignal — an immutable audit FACT; order.v1.MarginMode is what the
+// VENUE IS INSTRUCTED to do. SignalAction and Side already work this way, and
+// there the vocabularies genuinely differ: SignalAction carries CLOSE, which is
+// not an order side at all but a position instruction that resolves against the
+// book.
+//
+// Retyping the FACT's field to point at order.v1 was the alternative. It is
+// wire-identical, and it edits the schema of an immutable audit root to save
+// this function — while forcing two `buf breaking` exemptions onto a FACT.
+//
+// AN UNKNOWN REGIME MAPS TO UNSPECIFIED, WHICH IS SPOT, and that is safe because
+// of where the refusals sit: the OMS admits an order only if the target adapter
+// declared the regime, and both spot connectors declare CASH. A regime added to
+// signal.v1 and not here would therefore be placed as spot — so it does not rest
+// on this default. test/arch's TestTheTwoMarginModeVocabulariesAgree fails the
+// build the moment the two enums stop naming the same set.
+func orderMarginMode(m signalpb.MarginMode) orderpb.MarginMode {
+	switch m {
+	case signalpb.MarginMode_MARGIN_MODE_CROSS:
+		return orderpb.MarginMode_MARGIN_MODE_CROSS
+	case signalpb.MarginMode_MARGIN_MODE_ISOLATED:
+		return orderpb.MarginMode_MARGIN_MODE_ISOLATED
+	default:
+		return orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED
+	}
+}

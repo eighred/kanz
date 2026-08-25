@@ -345,6 +345,25 @@ message OrderState {
   // all converge — so deleting it silently drops the repair for every one of
   // those paths at once.
   google.protobuf.Timestamp accepted_announced_at = 20;
+
+  // leverage and margin_mode are the collateral terms the order was admitted
+  // under, copied from SubmitOrder and never re-derived (#417).
+  //
+  // THEY ARE HERE BECAUSE OrderState IS WHAT Venue.Execute RECEIVES. A term the
+  // command accepts and the state does not carry is a term the venue can never
+  // be told, which is #240/#405/#486's defect family four times over: leverage
+  // written to the audit root and dropped; stop_price required at admission and
+  // discarded, so a STOP_LOSS_LIMIT connector had no trigger to send; expire_at
+  // required for GTD and discarded, so a good-till-date order reached the venue
+  // with no date; and a hardcoded good-til-cancelled that made an
+  // IMMEDIATE-OR-CANCEL order REST. test/arch's TestSubmitFieldsReachState is
+  // the guard that now refuses the fifth instance, and it is why these two
+  // fields are not optional to add.
+  //
+  // Absent ⇒ unlevered spot, matching SubmitOrder, so every order stored before
+  // this field means exactly what it meant when it was written.
+  common.v1.Decimal leverage = 27;
+  MarginMode margin_mode = 28;
 }
 
 // OrderQuarantine records an order whose true state at the venue could not be

@@ -121,6 +121,23 @@ func (v *BinanceVenue) OrderTypes() []orderpb.OrderType {
 	}
 }
 
+// MarginModes is which collateral regimes this connector can express (#417).
+//
+// CASH ONLY, AND THE ENDPOINT IS WHY. Every order this connector places, queries
+// and cancels goes to /api/v3/order — Binance SPOT. Margin and futures are
+// different API families entirely (/sapi/v1/margin/order, /fapi/v1/order) with
+// their own auth scope, symbol universe and position model, so this is not a
+// parameter this connector omits: it has no code path that could place them, and
+// declaring them would promise the OMS a translation that does not exist.
+//
+// Declaring CASH rather than leaving this empty is the point. Empty means "did
+// not say" and the OMS admits anything; saying CASH is what makes an order
+// asking for isolated margin refused at ADMISSION, naming this venue, instead of
+// being placed as spot with the audit root claiming leverage.
+func (v *BinanceVenue) MarginModes() []orderpb.MarginMode {
+	return []orderpb.MarginMode{orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED}
+}
+
 var _ Venue = (*BinanceVenue)(nil)
 
 // Execute places st on Binance and returns the immediate fills. On any ambiguous
@@ -134,6 +151,17 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 	symbol, ok := v.symbols.Symbol(st.GetInstrumentId())
 	if !ok {
 		return nil, fmt.Errorf("binance: no symbol mapping for %s", st.GetInstrumentId())
+	}
+	// AND THE COLLATERAL REGIME THIS CONNECTOR CANNOT EXPRESS (#417). The OMS
+	// refuses this at admission from MarginModes() above, so reaching here means
+	// the declaration and the wire have drifted — or that something placed an
+	// order without going through admission. Both are worth failing loudly for:
+	// placing it anyway is a live position whose regime the fund's records get
+	// wrong, and no downstream record could tell.
+	if m := st.GetMarginMode(); m != orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED {
+		return nil, fmt.Errorf("binance: cannot work an order under %v — this connector places "+
+			"SPOT (/api/v3/order) orders only, so placing it would leave the position unlevered while the "+
+			"audit root records margin", m)
 	}
 	params, err := orderParams(st, symbol)
 	if err != nil {

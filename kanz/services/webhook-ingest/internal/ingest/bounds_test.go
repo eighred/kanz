@@ -75,36 +75,56 @@ func TestPerimeter_CapBitesInTheResolvedUnit(t *testing.T) {
 // leverage was accepted, bounds-checked, written to the immutable FACT, and then
 // dropped — the order placed was spot. It is now refused at the edge.
 //
-// NOTE: this REJECTS webhooks that previously answered 202. They "succeeded" by
-// silently mis-executing.
-func TestPerimeter_LeverageIsRefusedNotDropped(t *testing.T) {
+// THE PERIMETER NO LONGER REFUSES LEVERAGE (#417). It used to, and these two
+// tests asserted it: a levered alert got 400 and published nothing.
+//
+// THE REASON THAT REFUSAL EXISTED IS GONE. It was never a perimeter judgement —
+// it came from internal/signal/translate, which refused because
+// order.v1.SubmitOrder had nowhere to carry the terms, so any levered alert
+// would have been fanned out as an unlevered spot order while the
+// StrategySignal FACT asserted 10x (#240). SubmitOrder and OrderState carry them
+// now, and the OMS refuses at ADMISSION against what the target adapter declared
+// it can work.
+//
+// THE PERIMETER IS ALSO THE WRONG LAYER FOR IT, which is why the refusal did not
+// simply move here. Venue allocation happens downstream — one alert fans out to
+// several venues — so this layer cannot know whether ANY adapter could have
+// worked the regime, and would have to answer the same way for all of them
+// forever. That is the hardcode #417 retired.
+//
+// THE AUDIT POSITION IMPROVES RATHER THAN WEAKENS. Before, a levered alert was
+// refused with NOTHING recorded — the fund had no durable trace that its
+// strategy asked for 10x. Now the FACT records the request and the order is
+// rejected downstream with a named reason, which is two records that agree
+// instead of one that never existed.
+func TestPerimeter_CarriesLeverageInsteadOfRefusingIt(t *testing.T) {
 	p, cap := cappedHarness(t, nil)
-	// The `ts` matters MORE on a refusal fixture than on an accepting one. Without
-	// it, #416's mandatory-timestamp rule refuses this alert before the leverage
-	// check is ever reached — the assertion below still passes, on the wrong
-	// refusal, and would keep passing if the leverage guard were deleted outright.
+	// `ts` matters here for the reason it mattered on the old refusal fixture:
+	// without it #416's mandatory-timestamp rule refuses the alert first, and the
+	// assertion below would pass against a build that never looked at leverage.
 	raw := `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
 		`"action":"buy","size":"100000","size_type":"quote_notional","leverage":"10",` +
 		`"margin_mode":"cross","nonce":"lev-1",` + freshTS()
-	if _, err := process(t, p, raw); !errors.Is(err, ErrBadRequest) {
-		t.Fatalf("leverage=10 = %v, want ErrBadRequest — accepting it submits an UNLEVERED order "+
-			"while the audit root asserts 10x", err)
+	if _, err := process(t, p, raw); err != nil {
+		t.Fatalf("leverage=10 cross = %v, want it accepted — the OMS is what refuses an order the "+
+			"venue cannot work, and it cannot refuse terms it was never sent", err)
 	}
-	if n := len(cap.events); n != 0 {
-		t.Fatalf("a refused levered alert published %d events, want 0", n)
+	if n := len(cap.events); n == 0 {
+		t.Fatal("a levered alert published nothing — the FACT is the audit root, and a strategy " +
+			"that asked for 10x must leave a durable trace of having asked")
 	}
 }
 
-func TestPerimeter_MarginModeAloneIsRefused(t *testing.T) {
-	p, _ := cappedHarness(t, nil)
-	// Stamped for the same reason as the leverage fixture above: an unstamped alert
-	// is refused before margin_mode is looked at, so the assertion would hold
-	// against a build with no margin_mode check at all.
+func TestPerimeter_CarriesMarginModeAlone(t *testing.T) {
+	p, cap := cappedHarness(t, nil)
+	// Stamped for the same reason as the fixture above.
 	raw := `{"strategy_id":"momentum","fund_id":"fund-alpha","symbol":"BINANCE:BTCUSDT",` +
 		`"action":"buy","size":"1","size_type":"absolute_qty","margin_mode":"isolated","nonce":"mm-1",` + freshTS()
-	if _, err := process(t, p, raw); !errors.Is(err, ErrBadRequest) {
-		t.Fatalf("margin_mode=isolated = %v, want ErrBadRequest — SubmitOrder carries no margin "+
-			"mode, so the order placed is spot while the FACT claims margin", err)
+	if _, err := process(t, p, raw); err != nil {
+		t.Fatalf("margin_mode=isolated = %v, want it accepted and carried", err)
+	}
+	if n := len(cap.events); n == 0 {
+		t.Fatal("a margined alert published nothing")
 	}
 }
 

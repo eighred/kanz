@@ -168,34 +168,71 @@ func TestMaxQuantity_DoesNotBlockAClose(t *testing.T) {
 	}
 }
 
-// leverage was parsed, bounds-checked, and written onto the FACT — then dropped,
-// because SubmitOrder has no such field. Refusing is the only honest answer until
-// it is plumbed through.
-func TestEmit_RefusesLeverageItCannotExecute(t *testing.T) {
+// THE COLLATERAL TERMS NOW TRAVEL WITH THE ORDER (#417), where they used to be
+// refused outright.
+//
+// These two tests asserted the opposite until #417: leverage != 1 and any margin
+// mode were ErrInvalidIntent, because order.v1.SubmitOrder had nowhere to carry
+// them and the alternative was #240 — the term written onto the StrategySignal
+// FACT, the immutable audit root, and then dropped, so the fund's records
+// asserted a levered position the venue held as spot.
+//
+// THE SAFETY PROPERTY DID NOT WEAKEN, IT MOVED. A levered order is still refused
+// today, at OMS admission, against what the target adapter declared it can work
+// (venue.v1 supported_margin_modes) — and both spot connectors declare CASH
+// only. The difference is that the refusal now names the venue and retires
+// itself when a margined connector exists, instead of answering the same way for
+// every venue forever.
+//
+// What these assert is the half that belongs HERE: the terms reach the command
+// intact, so the FACT and the order cannot disagree. That the OMS then refuses
+// them is asserted in services/oms/internal/order.
+func TestEmit_CarriesLeverageOntoTheCommand(t *testing.T) {
 	tr, rec := boundedTranslator(t, Qty{})
 	in := intent(signalpb.SignalAction_SIGNAL_ACTION_BUY, big.NewRat(1, 1),
 		signalpb.SizeType_SIZE_TYPE_ABSOLUTE_QTY)
 	in.Leverage = big.NewRat(10, 1)
+	in.MarginMode = signalpb.MarginMode_MARGIN_MODE_CROSS
 
-	_, err := tr.Emit(context.Background(), in)
-	if !errors.Is(err, ErrInvalidIntent) {
-		t.Fatalf("leverage=10 = %v, want ErrInvalidIntent — the order placed is unlevered while "+
-			"the audit root claims 10x", err)
+	if _, err := tr.Emit(context.Background(), in); err != nil {
+		t.Fatalf("leverage=10 cross = %v, want it translated — the OMS is what refuses an order "+
+			"the venue cannot work, and it cannot refuse a term it was never sent", err)
 	}
-	if n := len(rec.facts()); n != 0 {
-		t.Fatalf("a refused levered signal recorded %d StrategySignal FACTs, want 0 — that FACT is "+
-			"the audit root, and it would assert a position the fund never held", n)
+	cmds := rec.commands()
+	if len(cmds) != 1 {
+		t.Fatalf("legs = %d, want 1", len(cmds))
+	}
+	if got := dec.FromProto(cmds[0].GetLeverage()); got.Cmp(big.NewRat(10, 1)) != 0 {
+		t.Errorf("command leverage = %s, want 10 — a leverage dropped between the FACT and the "+
+			"command is #240 exactly: the audit root claims 10x and the venue is asked for spot",
+			got.RatString())
+	}
+	if got := cmds[0].GetMarginMode(); got != orderpb.MarginMode_MARGIN_MODE_CROSS {
+		t.Errorf("command margin_mode = %s, want CROSS", got)
+	}
+	if n := len(rec.facts()); n != 1 {
+		t.Fatalf("StrategySignal FACTs = %d, want 1", n)
 	}
 }
 
-func TestEmit_RefusesMarginModeItCannotExecute(t *testing.T) {
-	tr, _ := boundedTranslator(t, Qty{})
-	in := intent(signalpb.SignalAction_SIGNAL_ACTION_BUY, big.NewRat(1, 1),
-		signalpb.SizeType_SIZE_TYPE_ABSOLUTE_QTY)
-	in.MarginMode = signalpb.MarginMode_MARGIN_MODE_CROSS
-
-	if _, err := tr.Emit(context.Background(), in); !errors.Is(err, ErrInvalidIntent) {
-		t.Fatalf("margin_mode=CROSS = %v, want ErrInvalidIntent", err)
+// The signal vocabulary and the execution vocabulary are separate enums with an
+// explicit mapping (see orderMarginMode). This walks it, because a mapping with
+// a default arm is a silent downgrade to SPOT for anything it forgets — and SPOT
+// is admissible at every venue.
+func TestEmit_MapsEveryMarginModeOntoTheExecutionVocabulary(t *testing.T) {
+	for _, tc := range []struct {
+		signal signalpb.MarginMode
+		want   orderpb.MarginMode
+	}{
+		{signalpb.MarginMode_MARGIN_MODE_UNSPECIFIED, orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED},
+		{signalpb.MarginMode_MARGIN_MODE_CROSS, orderpb.MarginMode_MARGIN_MODE_CROSS},
+		{signalpb.MarginMode_MARGIN_MODE_ISOLATED, orderpb.MarginMode_MARGIN_MODE_ISOLATED},
+	} {
+		t.Run(tc.signal.String(), func(t *testing.T) {
+			if got := orderMarginMode(tc.signal); got != tc.want {
+				t.Fatalf("orderMarginMode(%s) = %s, want %s", tc.signal, got, tc.want)
+			}
+		})
 	}
 }
 

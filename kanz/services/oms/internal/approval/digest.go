@@ -137,6 +137,8 @@ type Terms struct {
 	Venue         string
 	ParentOrderID string
 	Schedule      *orderpb.ExecutionSchedule
+	Leverage      *commonpb.Decimal
+	MarginMode    orderpb.MarginMode
 }
 
 // TermsOfSubmit reads the covered terms off the COMMAND — the shape the
@@ -157,6 +159,8 @@ func TermsOfSubmit(cmd *orderpb.SubmitOrder) Terms {
 		Venue:         cmd.GetVenue(),
 		ParentOrderID: cmd.GetParentOrderId(),
 		Schedule:      cmd.GetExecutionSchedule(),
+		Leverage:      cmd.GetLeverage(),
+		MarginMode:    cmd.GetMarginMode(),
 	}
 }
 
@@ -185,6 +189,8 @@ func TermsOfState(st *orderpb.OrderState) Terms {
 		Venue:         st.GetVenue(),
 		ParentOrderID: st.GetParentOrderId(),
 		Schedule:      st.GetExecutionSchedule(),
+		Leverage:      st.GetLeverage(),
+		MarginMode:    st.GetMarginMode(),
 	}
 }
 
@@ -192,7 +198,21 @@ func TermsOfState(st *orderpb.OrderState) Terms {
 // makes the encoding unambiguous: an unset schedule contributes five empty parts
 // rather than none, so an order with no schedule cannot produce the same part
 // list as one whose schedule happens to sit where the next field would.
-const digestParts = 18
+//
+// 18 → 20 WHEN LEVERAGE AND MARGIN MODE JOINED THE COVERED TERMS (#417), and
+// bumping it INVALIDATES EVERY DIGEST ALREADY SIGNED. That is the intended
+// consequence, not a cost paid around it: a held proposal signed before those
+// terms existed was signed over an order that could not express them, so
+// honouring that signature after they can is exactly the substitution the digest
+// is for. An in-flight proposal must be re-proposed and re-approved.
+//
+// The gap was found by test/arch's TestTheOrderDigestCoversEverySubmitOrderField
+// rather than by review — the fields were added to SubmitOrder and OrderState,
+// carried through translate, gated at admission, and still sat outside the
+// signature. Uncovered, an order approved as spot could be submitted as 10x
+// cross under the approver's signature: two people named on an order neither of
+// them saw.
+const digestParts = 20
 
 // Digest is the value dualcontrol.Approve is given and Approval.Covers
 // re-checks.
@@ -230,6 +250,7 @@ func (t Terms) Digest() (string, error) {
 		strconv.FormatInt(int64(t.Side), 10),
 		strconv.FormatInt(int64(t.OrderType), 10),
 		strconv.FormatInt(int64(t.TimeInForce), 10),
+		strconv.FormatInt(int64(t.MarginMode), 10),
 	)
 	for _, d := range []struct {
 		field string
@@ -238,6 +259,7 @@ func (t Terms) Digest() (string, error) {
 		{"quantity", t.Quantity},
 		{"limit_price", t.LimitPrice},
 		{"stop_price", t.StopPrice},
+		{"leverage", t.Leverage},
 	} {
 		s, err := decimalPart(d.field, d.value)
 		if err != nil {

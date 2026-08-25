@@ -19,6 +19,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"math/big"
+
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/internal/execution"
@@ -599,6 +601,69 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 			fmt.Sprintf("venue %q cannot express %s — placing it as good-til-cancelled would rest "+
 				"an order the trader asked to expire, so this OMS will not admit it",
 				target, cmd.GetTimeInForce()), now)
+	}
+
+	// AND A COLLATERAL REGIME THE VENUE CANNOT WORK IS REFUSED HERE TOO (#417) —
+	// the same gate, one field over, for the fifth instance of the family.
+	//
+	// THIS ONE NEVER REACHED A VENUE, and that is the only reason it is not
+	// already a scar. internal/signal/translate refused leverage and margin_mode
+	// outright because order.v1.SubmitOrder had nowhere to carry them, so no
+	// levered order was ever built to be quietly downgraded to spot. What that
+	// refusal could not do is distinguish "this venue cannot" from "this platform
+	// cannot": it was a hardcode, and it answered the same way for every venue
+	// forever.
+	//
+	// Admitting a levered order that reached a spot-only adapter would be the
+	// WORST member of the family, not the mildest. #405's stop was accepted and
+	// inert — it did nothing. #486's IOC rested — it did the wrong thing, and the
+	// trader held exposure they asked not to. A margin_mode silently dropped
+	// places a REAL order at a REAL size with the collateral regime the fund
+	// asked for absent: the position is live, the audit root says 10x cross, and
+	// the venue holds it as spot. Nothing downstream can tell, because both
+	// records are internally consistent.
+	//
+	// Refused with the MODE and the VENUE named, because the operator's next
+	// question is which of the two to change.
+	if target := cmd.GetVenue(); target != "" && s.router != nil &&
+		!s.router.SupportsMarginMode(target, cmd.GetMarginMode()) {
+		return s.refuse(ctx, cmd.GetOrderId(), "MARGIN_MODE_NOT_SUPPORTED",
+			fmt.Sprintf("venue %q cannot work an order under %s — placing it as spot would leave "+
+				"the fund holding an unlevered position while the audit root records a levered "+
+				"one, so this OMS will not admit it", target, cmd.GetMarginMode()), now)
+	}
+
+	// LEVERAGE WITHOUT A MARGIN MODE IS SPOT CLAIMING TO BE LEVERED (#417).
+	//
+	// The gate above asks a VENUE question — can this adapter work this regime.
+	// This one is a COHERENCE question and has no venue in it: spot is unlevered
+	// by definition, so leverage 10 with MARGIN_MODE_UNSPECIFIED describes an
+	// order that cannot exist. Without this it would sail through the gate above
+	// (every connector declares CASH, so UNSPECIFIED is supported everywhere),
+	// be placed as an ordinary spot order, and leave the audit root asserting
+	// 10x — which is #240 restored by the very change that was meant to retire
+	// it.
+	//
+	// A NIL LEVERAGE IS ABSENT AND MEANS 1, so orders predating the field, and
+	// every caller that never sets it, are untouched. An UNREADABLE leverage is
+	// refused rather than defaulted: a multiplier on capital at risk that cannot
+	// be parsed must not be silently read as unlevered.
+	if lev := cmd.GetLeverage(); lev != nil {
+		r, ok := dec.FromProtoChecked(lev)
+		switch {
+		case !ok:
+			return s.refuse(ctx, cmd.GetOrderId(), "LEVERAGE_UNREADABLE",
+				"leverage is not representable as a decimal — it multiplies capital at risk, so "+
+					"it is refused rather than read as unlevered", now)
+		case r.Sign() <= 0:
+			return s.refuse(ctx, cmd.GetOrderId(), "LEVERAGE_NOT_POSITIVE",
+				fmt.Sprintf("leverage %s is not positive", r.RatString()), now)
+		case r.Cmp(big.NewRat(1, 1)) != 0 && cmd.GetMarginMode() == orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED:
+			return s.refuse(ctx, cmd.GetOrderId(), "LEVERAGE_WITHOUT_MARGIN_MODE",
+				fmt.Sprintf("leverage %s was asked for with no margin mode — spot is unlevered, so "+
+					"this order would be placed unlevered while the audit root recorded %sx. Name "+
+					"the collateral regime, or send leverage 1", r.RatString(), r.RatString()), now)
+		}
 	}
 
 	// WHOSE COLLATERAL DOES THIS ORDER SPEND? Resolve the exchange account before the
