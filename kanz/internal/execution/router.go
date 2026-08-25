@@ -203,10 +203,11 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 	//
 	// Narrowing here rather than refusing: if ONE venue can place it, the order
 	// belongs there, and that is a better answer than a refusal.
-	placeable := r.placeable(st.GetOrderType(), st.GetTimeInForce())
+	placeable := r.placeable(st.GetOrderType(), st.GetTimeInForce(), st.GetMarginMode())
 	if len(placeable) == 0 {
-		return nil, fmt.Errorf("%w: no venue this OMS holds can place a %s order with %s (it holds %s)",
-			ErrVenueNotConfigured, st.GetOrderType(), st.GetTimeInForce(), strings.Join(r.mics(), ", "))
+		return nil, fmt.Errorf("%w: no venue this OMS holds can place a %s order with %s under %s "+
+			"(it holds %s)", ErrVenueNotConfigured, st.GetOrderType(), st.GetTimeInForce(),
+			st.GetMarginMode(), strings.Join(r.mics(), ", "))
 	}
 	if r.ranker != nil {
 		if mic, ok := r.ranker.Preferred(placeable); ok {
@@ -230,7 +231,8 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 			"destination somebody chose", ErrNoDefaultVenue, strings.Join(r.mics(), ", "))
 	}
 	if r.SupportsOrderType(v.MIC(), st.GetOrderType()) &&
-		r.SupportsTimeInForce(v.MIC(), st.GetTimeInForce()) {
+		r.SupportsTimeInForce(v.MIC(), st.GetTimeInForce()) &&
+		r.SupportsMarginMode(v.MIC(), st.GetMarginMode()) {
 		return v, nil
 	}
 	// THE DECLARED DEFAULT CANNOT PLACE THIS TYPE, and exactly one venue can, so
@@ -245,19 +247,27 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 	// SEVERAL COULD, AND NOBODY SAID WHICH. Picking one would be the array index
 	// #437 removed wearing a narrower disguise — the operator named a default that
 	// does not apply here, so the destination is genuinely unchosen.
-	return nil, fmt.Errorf("%w: the declared default %q cannot place a %s order with %s, and %s "+
-		"all can — name the venue on the order, or make the default one that can",
-		ErrNoDefaultVenue, v.MIC(), st.GetOrderType(), st.GetTimeInForce(), strings.Join(placeable, ", "))
+	return nil, fmt.Errorf("%w: the declared default %q cannot place a %s order with %s under %s, "+
+		"and %s all can — name the venue on the order, or make the default one that can",
+		ErrNoDefaultVenue, v.MIC(), st.GetOrderType(), st.GetTimeInForce(), st.GetMarginMode(),
+		strings.Join(placeable, ", "))
 }
 
-// placeable lists the MICs of venues that can place this order type, in
-// configuration order. A venue that declares nothing is included: "did not say"
-// is permissive here exactly as it is in SupportsOrderType, so a deployment whose
-// adapters predate the declaration keeps working.
-func (r *Router) placeable(t orderpb.OrderType, tif orderpb.TimeInForce) []string {
+// placeable lists the MICs of venues that can work this order, in configuration
+// order. A venue that declares nothing is included: "did not say" is permissive
+// here exactly as it is in SupportsOrderType, so a deployment whose adapters
+// predate a declaration keeps working.
+//
+// ALL THREE DIMENSIONS, because the untargeted path is the one admission does
+// not cover and each dimension has already shipped a defect through it: the
+// order type (#405), the time-in-force (#486), and the collateral regime (#417).
+// Leaving margin mode out made this function agree with two thirds of the
+// admission gate, which is the shape a reader trusts and a router does not obey.
+func (r *Router) placeable(t orderpb.OrderType, tif orderpb.TimeInForce, m orderpb.MarginMode) []string {
 	out := make([]string, 0, len(r.venues))
 	for _, v := range r.venues {
-		if r.SupportsOrderType(v.MIC(), t) && r.SupportsTimeInForce(v.MIC(), tif) {
+		if r.SupportsOrderType(v.MIC(), t) && r.SupportsTimeInForce(v.MIC(), tif) &&
+			r.SupportsMarginMode(v.MIC(), m) {
 			out = append(out, v.MIC())
 		}
 	}

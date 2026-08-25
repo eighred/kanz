@@ -42,6 +42,12 @@ func order() *orderpb.SubmitOrder {
 		TimeInForce:  orderpb.TimeInForce_TIME_IN_FORCE_GTD,
 		ExpireAt:     timestamppb.New(time.Unix(1_700_000_500, 250)),
 		Venue:        "XNAS",
+		// The collateral terms (#417). This fixture's doc calls it "every covered
+		// field set to something distinguishable", and until these two lines that
+		// was false for them — both sides hashed a zero, so the parity assertion
+		// below passed without ever exercising the fields it claimed to cover.
+		MarginMode: orderpb.MarginMode_MARGIN_MODE_CROSS,
+		Leverage:   d(3, 0),
 		ExecutionSchedule: &orderpb.ExecutionSchedule{
 			Algo:             orderpb.ExecutionAlgo_EXECUTION_ALGO_TWAP,
 			WindowStart:      timestamppb.New(time.Unix(1_700_000_000, 0)),
@@ -102,6 +108,12 @@ func TestEveryCoveredFieldChangesTheDigest(t *testing.T) {
 			"an IOC could be re-signed as a GTC and REST, holding exposure the trader asked to be gone (#486)"},
 		{"expire_at", func(c *orderpb.SubmitOrder) { c.ExpireAt = timestamppb.New(time.Unix(1_900_000_000, 0)) },
 			"a good-til-date order could be extended by years after approval"},
+		{"margin_mode", func(c *orderpb.SubmitOrder) { c.MarginMode = orderpb.MarginMode_MARGIN_MODE_ISOLATED },
+			"the collateral regime could be changed after approval — the approver signed for cross " +
+				"margin and the position is worked under isolated, or the reverse (#417)"},
+		{"leverage", func(c *orderpb.SubmitOrder) { c.Leverage = d(20, 0) },
+			"the multiplier on capital at risk could be raised after approval — an approver who " +
+				"signed 3x is recorded as having signed 20x (#417)"},
 		{"venue", func(c *orderpb.SubmitOrder) { c.Venue = "XLON" },
 			"the order could be re-routed onto a different exchange ACCOUNT, and an exchange " +
 				"liquidates per account — a different collateral pool with no price or quantity changed"},
@@ -169,6 +181,8 @@ func TestTheTwoPlacementsAgreeOnTheDigest(t *testing.T) {
 		StopPrice:         cmd.GetStopPrice(),
 		ExpireAt:          cmd.GetExpireAt(),
 		Venue:             cmd.GetVenue(),
+		MarginMode:        cmd.GetMarginMode(),
+		Leverage:          cmd.GetLeverage(),
 		ExecutionSchedule: cmd.GetExecutionSchedule(),
 		// Everything below is EXCLUDED by design, and setting it here is the
 		// assertion: none of it may move the digest.

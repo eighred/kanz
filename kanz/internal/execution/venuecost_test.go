@@ -576,3 +576,105 @@ func TestRouter_RefusesWhenNoVenueCanExpressTheTimeInForce(t *testing.T) {
 		t.Errorf("error = %q, want it to name the instruction an operator has to change", err)
 	}
 }
+
+// typedMargin declares which collateral regimes a venue can work, mirroring
+// typed and typedTIF above.
+func typedMargin(mic string, modes ...orderpb.MarginMode) Venue {
+	return WithMarginModes(NewSimVenue(mic), modes)
+}
+
+// AN UNTARGETED ORDER MUST NOT BE ROUTED SOMEWHERE ITS REGIME CANNOT BE WORKED
+// (#417, correcting Part 1).
+//
+// This is the third instance of one defect on one path. Admission refuses a
+// TARGETED order whose named venue cannot work its margin mode; an untargeted
+// one had no such check, and the destination was chosen by cost rank or by the
+// declared default — neither of which asked whether the order could be worked
+// there at all.
+//
+// It was the WORST of the three, because the other two end in a refusal an
+// operator can see. #405's stop reached a connector that refused it; #486's IOC
+// reached one that rested it. A CROSS order reaching a spot-only connector was
+// placed as ORDINARY SPOT — the position is live, at the size asked for, under a
+// regime nobody granted, and the audit root records the regime the trader chose.
+// Nothing errors.
+//
+// The two halves had to land together. Until Accept carried margin_mode onto the
+// OrderState, st.GetMarginMode() was UNSPECIFIED here for every order ever
+// admitted, so narrowing on it would have filtered on a constant — a green test
+// over a field the production path never set.
+func TestRouter_AnUntargetedOrderGoesToAVenueThatCanWorkItsMarginMode(t *testing.T) {
+	// The DEFAULT is spot-only; the other venue can work cross margin.
+	r := NewRouter(
+		[]Venue{
+			typedMargin("OKX", orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED),
+			typedMargin("BINANCE", orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED,
+				orderpb.MarginMode_MARGIN_MODE_CROSS),
+		},
+		WithDefaultVenue("OKX"),
+	)
+
+	v, err := r.Route(&orderpb.OrderState{
+		OrderType:  orderpb.OrderType_ORDER_TYPE_LIMIT,
+		MarginMode: orderpb.MarginMode_MARGIN_MODE_CROSS,
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if v.MIC() != "BINANCE" {
+		t.Fatalf("routed a CROSS order to %q, which works spot only — it would be placed UNLEVERED "+
+			"with no error anywhere, while the audit root records the regime the trader asked for",
+			v.MIC())
+	}
+
+	// AND A SPOT ORDER STILL GOES TO THE DECLARED DEFAULT. A filter that changed
+	// untargeted routing for orders every venue can work would be a behaviour
+	// change wearing a bug fix's name.
+	v, err = r.Route(&orderpb.OrderState{
+		OrderType:  orderpb.OrderType_ORDER_TYPE_LIMIT,
+		MarginMode: orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED,
+	})
+	if err != nil {
+		t.Fatalf("Route (spot): %v", err)
+	}
+	if v.MIC() != "OKX" {
+		t.Errorf("a spot order went to %q, want the declared default OKX", v.MIC())
+	}
+}
+
+// AND WHEN NO VENUE CAN WORK IT, THE REFUSAL NAMES THE REGIME — because the
+// operator's next question is which of the two to change.
+func TestRouter_RefusesWhenNoVenueCanWorkTheMarginMode(t *testing.T) {
+	r := NewRouter([]Venue{typedMargin("OKX", orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED)},
+		WithDefaultVenue("OKX"))
+
+	_, err := r.Route(&orderpb.OrderState{
+		OrderType:  orderpb.OrderType_ORDER_TYPE_LIMIT,
+		MarginMode: orderpb.MarginMode_MARGIN_MODE_ISOLATED,
+	})
+	if err == nil {
+		t.Fatal("an ISOLATED order was routed to a deployment where every venue works spot only")
+	}
+	if !strings.Contains(err.Error(), "ISOLATED") {
+		t.Errorf("error = %q, want it to name the regime an operator has to change", err)
+	}
+}
+
+// AN UNDECLARING VENUE IS STILL ROUTABLE. Every adapter in the estate answered
+// nothing about margin before #417, so reading silence as refusal here would
+// take untargeted routing down on a schema addition.
+func TestRouter_AnUndeclaringVenueStillTakesAMarginOrder(t *testing.T) {
+	r := NewRouter([]Venue{NewSimVenue("SIM")}, WithDefaultVenue("SIM"))
+
+	v, err := r.Route(&orderpb.OrderState{
+		OrderType:  orderpb.OrderType_ORDER_TYPE_LIMIT,
+		MarginMode: orderpb.MarginMode_MARGIN_MODE_CROSS,
+	})
+	if err != nil {
+		t.Fatalf("an adapter that declared nothing refused a margin order: %v — empty means DID "+
+			"NOT SAY, never SUPPORTS NOTHING", err)
+	}
+	if v.MIC() != "SIM" {
+		t.Fatalf("routed to %q, want SIM", v.MIC())
+	}
+}
