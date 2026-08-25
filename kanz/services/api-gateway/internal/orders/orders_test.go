@@ -101,6 +101,11 @@ func TestSubmit_BindsIssuerAndTenant(t *testing.T) {
 	}
 }
 
+// TestSubmit_GeneratesOrderID: a client need not invent an order id. It must
+// still name the operation, though — the Idempotency-Key below is load-bearing,
+// not decoration. Without it this submit is refused 400 rather than minted, and
+// TestSubmit_NoOrderIDAndNoKey_IsRefusedNotMinted holds that line: a minted id
+// is new on every attempt, so it can name the order but never dedup it (#723).
 func TestSubmit_GeneratesOrderID(t *testing.T) {
 	pub := &fakePub{}
 	h := New(pub, "", halt.OpenGate(nil))
@@ -108,6 +113,7 @@ func TestSubmit_GeneratesOrderID(t *testing.T) {
 	h.Routes(mux)
 	req := httptest.NewRequest(http.MethodPost, "/v1/orders",
 		strings.NewReader(`{"portfolioId":"pf1","instrumentId":"AAPL","side":"SIDE_BUY","quantity":{"coefficient":"100","exponent":0},"orderType":"ORDER_TYPE_MARKET","timeInForce":"TIME_IN_FORCE_DAY"}`))
+	req.Header.Set("Idempotency-Key", "intent-generates-id")
 	req = authed(req, "alice", "acme")
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)

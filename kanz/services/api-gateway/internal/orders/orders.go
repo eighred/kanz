@@ -120,6 +120,55 @@ func (h *Handler) refuseIfHalted(w http.ResponseWriter) bool {
 	return true
 }
 
+// refuseIfUnnameable answers 400 when a submit carries no order_id AND no
+// Idempotency-Key, and reports whether it did (#723). Submit only: cancel and
+// approve take their key from the request path and the approver, both of which
+// a retry reproduces.
+//
+// A MINTED ID CANNOT ALSO BE THE DEDUP KEY. Minting is safe when the CLIENT has
+// named the operation, because then the value the broker collapses on is the
+// header and the fresh id is merely the order's name. With no header the id
+// would be both, and it is new on every attempt — so the retry of an ambiguous
+// timeout published a second COMMAND under a second Nats-Msg-Id, and
+// JetStream's dedup, the OMS consumer's claim and this gateway's own
+// middleware.Idempotency all missed for that one reason. Because
+// internal/execution stamps order_id straight into the venue clOrdId, the
+// second COMMAND became a second LIVE ORDER at the exchange.
+//
+// THIS IS THE CASE THE ESTATE'S BACKSTOP CANNOT CATCH, which is what separates
+// it from the cross-pod claim #721 landed. TENANT_ORDER is provisioned with
+// --dupe-window=2m (infra/nats/bootstrap-job.yaml), so a retry that DOES carry a
+// key is collapsed by the broker even when a per-pod claim misses it. A retry
+// with no key presents a different Nats-Msg-Id, so the window has nothing to
+// match and every attempt is stored. Measured, not reasoned: three attempts of
+// one intent against a real nats-server put three SubmitOrder COMMANDs on a
+// stream that had the 2m window configured.
+//
+// REFUSING IS THE ONLY HONEST ANSWER, not a conservative one. The server cannot
+// recognise the retry: deriving a key from the request body would collapse two
+// deliberately identical orders, and a fund sending the same order twice on
+// purpose is ordinary. Between silently placing two orders and silently placing
+// none, this path takes neither — it refuses in the client's own response, and
+// names both remedies so the refusal is actionable. That is CLAUDE.md's
+// fail-loudly rule on the one path where the silent alternative spends capital.
+//
+// A READ-ONLY GATEWAY IS EXEMPT, for the reason refuseIfHalted gives one line
+// up: with no publisher there is no write surface, publish answers 503 "order
+// writes are disabled", and that true answer must not be displaced by a fact
+// about a path this deployment does not have. Nothing is published either way,
+// so the exemption costs no safety.
+func (h *Handler) refuseIfUnnameable(w http.ResponseWriter, r *http.Request) bool {
+	if h.pub == nil || r.Header.Get("Idempotency-Key") != "" {
+		return false
+	}
+	writeError(w, http.StatusBadRequest,
+		"this submit carries neither an order_id nor an Idempotency-Key, so a retry after a "+
+			"timeout could not be told apart from a second order and would place one; the order "+
+			"was NOT submitted. Send an Idempotency-Key header, or set order_id in the body, "+
+			"and retry")
+	return true
+}
+
 // Routes registers the write endpoints.
 //
 // THIS IS THE CAPITAL PATH. Every route here reaches a live exchange, so every route here
@@ -171,6 +220,9 @@ func (h *Handler) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cmd.GetOrderId() == "" {
+		if h.refuseIfUnnameable(w, r) {
+			return
+		}
 		// NOT uuid.NewString(). The order id is stamped directly as the venue's
 		// client order id, and OKX refuses a clOrdId that is longer than 32
 		// characters or contains anything but letters and digits — so a
@@ -347,11 +399,19 @@ func bindMetadata(existing *commandpb.CommandMetadata, p *middleware.Principal, 
 }
 
 // idempotencyKey prefers the client's Idempotency-Key header (API-01d dedup);
-// absent, the order id is a stable natural key.
+// absent, the order id is the natural key.
 //
 // SUBMIT AND CANCEL ONLY. An order is submitted once and cancelled once, so the
 // order id IS the natural key for them and a retry that lands on another pod
 // must collapse. Approval is not once-per-order — see approvalIdempotencyKey.
+//
+// THE FALLBACK IS ONLY STABLE IF THE CALLER'S ORDER ID IS (#723). This comment
+// used to say "a stable natural key" flatly, and that read as a property of the
+// function when it is a precondition on the caller. `cancel` meets it — the id
+// comes from the request path. `submit` did not: it minted an id moments before
+// calling this, so the "natural key" was fresh per attempt and every dedup layer
+// downstream missed. submit now refuses that combination rather than passing a
+// minted id through here, which is what keeps this fallback honest.
 func idempotencyKey(r *http.Request, orderID string) string {
 	if k := r.Header.Get("Idempotency-Key"); k != "" {
 		return k
