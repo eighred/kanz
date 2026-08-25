@@ -28,6 +28,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/optimization"
+	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/optimization/internal/bridge"
 )
@@ -58,6 +59,15 @@ type Server struct {
 	// composition root was given both a broker and OPTIMIZATION_AUTO_PUBLISH — a
 	// reversal of the human-in-the-loop stance that has to be asked for by name.
 	materializerFor MaterializerFor
+
+	// halt is the platform kill-switch as this service sees it (#738/#739).
+	//
+	// NIL IS HALTED, and that is the whole reason the field is a *halt.Gate and
+	// not a bool: a composition root that arms auto-publish and forgets to wire
+	// the gate refuses to publish rather than trading through a declared halt.
+	// The dry-run path never consults it — a halt refuses new execution
+	// exposure, and a proposal that reaches nobody is not exposure.
+	halt *halt.Gate
 }
 
 // MaterializerFor builds a materializer for ONE tenant — the authenticated
@@ -94,6 +104,21 @@ type Materializer interface {
 // parameter and a caller passed nil would be exactly the silent acquisition this
 // must never have.
 func WithAutoPublish(f MaterializerFor) Option { return func(s *Server) { s.materializerFor = f } }
+
+// WithHaltGate hands the server the platform kill-switch (#739).
+//
+// WHY THIS SERVICE NEEDS ITS OWN BRAKE when the OMS already refuses an order
+// admitted during a halt: it is the same argument the api-gateway settled — a
+// brake this close to the caller is the one that still works if the OMS is
+// itself part of the incident, and an operator who halts the platform should get
+// a refusal here rather than a 200 followed by an asynchronous rejection nobody
+// is watching for. It is also the only layer that can refuse the rebalance
+// WHOLE: the OMS sees N independent orders and can admit some of them, which is
+// how a portfolio ends up with one leg of a pair trade on.
+//
+// An OPTION, like WithAutoPublish, so a caller that publishes nothing is not
+// made to wire a subscription it has no use for.
+func WithHaltGate(g *halt.Gate) Option { return func(s *Server) { s.halt = g } }
 
 // Option customizes the server.
 type Option func(*Server)
@@ -370,6 +395,25 @@ func (s *Server) materialize(w http.ResponseWriter, r *http.Request, proposal op
 	if s.materializerFor != nil {
 		mat := s.materializerFor(principal.Tenant)
 		published = mat.Armed()
+		// THE PLATFORM HALT, CHECKED BEFORE THE FIRST COMMAND IS BUILT (#739).
+		//
+		// Whole-rebalance or nothing. Checking per-order inside the publish loop
+		// would let a halt arriving mid-flight leave half a rebalance live, which
+		// is the failure the loop's own comment below already refuses to accept
+		// for a publish error. Only the armed path is gated: the dry run reaches
+		// no bus, so there is no exposure for the brake to refuse.
+		if published && s.halt.Halted() {
+			mode, reason, since := s.halt.State()
+			s.logger.Warn("rebalance materialization refused — the platform is halted",
+				"portfolio_id", proposal.PortfolioID, "issuer", principal.Subject,
+				"mode", mode.String(), "reason", reason, "since", since)
+			writeJSON(w, http.StatusLocked, map[string]any{
+				"error":  "the platform is halted; no order was published",
+				"mode":   mode.String(),
+				"reason": reason,
+			})
+			return
+		}
 		ctx := auth.WithPrincipal(r.Context(), principal)
 		var perr error
 		// gate is nil DELIBERATELY: the OMS re-runs the pre-trade gate on
