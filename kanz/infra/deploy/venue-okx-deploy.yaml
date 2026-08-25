@@ -195,6 +195,18 @@ spec:
             # nobody reads; armed, the adapter refuses to trade at all.
             - { name: OKX_REQUIRE_QUOTE_MATCH, value: "true" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+            # WHO MAY SUBMIT ORDERS THROUGH THIS ADAPTER. Required whenever the
+            # socket above is set: without it the process refuses to start.
+            #
+            # This listener used to authorize with AuthorizeMesh(), which admits any
+            # peer holding a valid SVID in kanz.internal — and issuing SVIDs to every
+            # workload is exactly what the trust domain does. So "only the OMS may
+            # trade" rested entirely on the NetworkPolicy one layer down, with nothing
+            # in this process refusing anyone. The NetworkPolicy is still there; it is
+            # now defence in depth rather than the only control, which is the same
+            # posture operator-deploy.yaml takes for OPERATOR_ALLOWED_CLIENTS.
+            - name: VENUE_OKX_ALLOWED_CLIENTS
+              value: "spiffe://kanz.internal/ns/kanz-services/sa/oms"
           livenessProbe:
             httpGet: { path: /healthz, port: 8092 }
             initialDelaySeconds: 5

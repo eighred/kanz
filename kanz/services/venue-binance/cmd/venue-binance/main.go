@@ -490,12 +490,21 @@ func serve(cfg config.Config) error {
 func newGRPCServer(ctx context.Context, cfg config.Config, venue execution.Venue, view orderview.Store, closes execution.CloseTracker, proof execution.AccountProof, gate *halt.Gate, logger *slog.Logger) (*grpc.Server, error) {
 	var opts []grpc.ServerOption
 	if cfg.SPIFFESocket != "" {
+		// DENY-BY-DEFAULT, NOT MEMBER-OF-THE-MESH. Parsed before the source is
+		// created so a malformed or empty allow-list fails startup on its own
+		// terms rather than after a workload-API round trip.
+		ids, err := transport.ParseServiceIDs("VENUE_BINANCE_ALLOWED_CLIENTS", cfg.AllowedClients)
+		if err != nil {
+			return nil, err
+		}
 		src, err := transport.NewSource(ctx, cfg.SPIFFESocket)
 		if err != nil {
 			return nil, err
 		}
-		opts = append(opts, transport.ServerOption(src, transport.AuthorizeMesh()))
-		logger.Info("venue-binance: venue.v1 mTLS enabled")
+		opts = append(opts, transport.ServerOption(src, transport.AuthorizeServices(ids...)))
+		// WHO MAY TRADE IS STATED AT BOOT, not left to be inferred from a
+		// manifest — the same stance the operator's control plane takes.
+		logger.Info("venue-binance: venue.v1 mTLS enabled", "authorized_clients", transport.ServiceIDStrings(ids))
 	} else {
 		logger.Warn("VENUE.V1 IS PLAINTEXT — no SPIFFE_ENDPOINT_SOCKET. Anyone who can reach this port can submit orders to a live exchange")
 	}
