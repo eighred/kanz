@@ -18,11 +18,39 @@ import (
 	"github.com/eighred/kanz/pkg/auth"
 )
 
-// Principal is the authenticated caller (API-01d). It is a MINIMAL, gateway-
-// local identity: AUTH-01a will introduce the canonical kanz/pkg/auth.Principal
-// (OIDC subject, tenant, roles, claims) and an OIDC/JWKS Authenticator; this
-// middleware consumes the Authenticator interface, so that swap touches only
-// the constructor, not the chain.
+// Principal is the authenticated caller (API-01d). It is a MINIMAL,
+// gateway-local identity, and the SPLIT FROM pkg/auth.Principal IS PERMANENT
+// (#642).
+//
+// This comment used to promise, in the future tense, that AUTH-01a would
+// introduce the canonical pkg/auth.Principal and an OIDC/JWKS Authenticator,
+// and that the swap would touch only the constructor rather than the chain.
+// AUTH-01a shipped: pkg/auth.Principal exists, it is the canonical identity the
+// platform shares, and pkg/auth/oidc.go is that Authenticator. The swap did not
+// happen, and the sentence went on reading as a plan — so a reader starting
+// identity work saw a stopgap awaiting deletion, while cmd/api-gateway's
+// edgePrincipal argued in the opposite direction that the two types are
+// deliberately different. Two load-bearing comments contradicting each other is
+// worse than either answer being wrong.
+//
+// (Phrased without quoting the old sentence, because #642's own acceptance
+// check greps for it — and a fix that trips the grep proving it was applied is
+// the prose-matching defect #661 removed from the secret guard.)
+//
+// THE ANSWER IS THAT THEY ARE DIFFERENT ON PURPOSE, and the difference is
+// exactly one field. pkg/auth.Principal carries Claims, the raw IdP claim bag;
+// this type does not. Narrowing it here is a security boundary rather than an
+// omission: the bag is attacker-influenced input that would otherwise travel
+// the whole request chain, into every downstream middleware, log line and mesh
+// header, to gain nothing any of them read. Everything the chain DOES need —
+// subject, tenant, roles, portfolios, issued-at — is present on both.
+//
+// The relation is enforced rather than described. test/arch's
+// TestTheTwoPrincipalTypesAgree fails when a field is added to
+// pkg/auth.Principal and not to this one, unless the omission is written down
+// with its reason, so #225's mechanism — a dimension silently dropped in a
+// conversion — cannot recur one level up from where the completeness guard
+// watches.
 type Principal struct {
 	Subject string
 	Tenant  string
