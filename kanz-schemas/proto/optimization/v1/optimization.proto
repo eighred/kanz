@@ -113,6 +113,47 @@ enum TradeSide {
   TRADE_SIDE_SELL = 2;
 }
 
+// MandateStatus is the outcome of the COMP-01 mandate check on a proposal, in
+// THREE states because two cannot hold the answer (#646, #675).
+//
+// This field was `bool mandate_feasible`, and a bool cannot tell "no mandate was
+// ever consulted" from "consulted, and it passed". It defaulted to the second.
+// In the Go implementation that meant Rebalance stamped every proposal it built
+// as feasible, no caller on the service's route ever ran CheckMandate, and the
+// bridge turning a proposal into live order commands used that stamp as its only
+// gate. The check had never once executed, and every proposal was certified
+// compliant by its own constructor.
+//
+// Go was repaired in #646 with a tri-state whose zero value is MandateUnchecked.
+// The WIRE kept the boolean, so the trap survived where the Go type could not
+// protect anyone — and the first consumer to adopt this message would inherit
+// it, plausibly a non-Go one with no tri-state to fall back on. That is why this
+// landed with zero consumers rather than waiting for one: it costs a
+// regeneration now and a migration later.
+//
+// THE ZERO VALUE IS THE POINT. proto3 cannot distinguish an unset enum from one
+// explicitly set to 0, which is precisely the property wanted here: a proposal
+// that nobody evaluated and a proposal whose verdict was never transmitted are
+// the same fact, and neither may read as a pass.
+enum MandateStatus {
+  // Nothing has evaluated this proposal against a mandate.
+  //
+  // NOT A SOFT PASS, and not merely "the sender omitted it": it is the state
+  // every proposal starts in, and it must never become order commands. Named
+  // _UNSPECIFIED to satisfy the STANDARD lint rule every other enum here
+  // follows; it means UNCHECKED, and the Go tri-state it mirrors says so.
+  MANDATE_STATUS_UNSPECIFIED = 0;
+
+  // The mandate check ran against a real mandate and found no BREACH. The ONLY
+  // state that may be materialized into orders.
+  MANDATE_STATUS_FEASIBLE = 1;
+
+  // The mandate check ran and found at least one BREACH; violations carries the
+  // reasons. The proposal is still returned so the PM sees why, never silently
+  // dropped.
+  MANDATE_STATUS_INFEASIBLE = 2;
+}
+
 // ProposedTrade is one leg of the rebalance trade list — the weight change
 // translated to a direction and size. It is materialized into an
 // order.v1.SubmitOrder by the OPT-01e bridge; kept schema-independent of
@@ -164,10 +205,20 @@ message RebalanceProposal {
   // were read at. Required.
   google.protobuf.Timestamp as_of = 8;
 
-  // mandate_feasible is whether the targets pass the COMP-01 mandate check
-  // (OPT-01c); false ⇒ violations carries the breached rules.
-  bool mandate_feasible = 9;
+  // mandate_status is the COMP-01 mandate verdict (OPT-01c). INFEASIBLE ⇒
+  // violations carries the breached rules. See MandateStatus for why this is
+  // three states and not the bool it replaced (#675).
+  MandateStatus mandate_status = 11;
   repeated string violations = 10;
+
+  // 9 was `bool mandate_feasible`. RESERVED RATHER THAN REUSED FOR THE ENUM:
+  // the two encode differently on the wire (varint 1 vs varint 1 is a
+  // coincidence, but `true` and FEASIBLE agreeing is exactly what would make a
+  // mistake here invisible), and reusing the number would let a message written
+  // by an old producer decode as a NEW verdict rather than fail. Number and
+  // name are both reserved so neither can return.
+  reserved 9;
+  reserved "mandate_feasible";
 }
 
 // ProposalMaterialized is the FACT that a rebalance proposal became order
