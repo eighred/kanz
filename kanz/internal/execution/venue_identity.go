@@ -33,6 +33,12 @@ type VenueIdentity struct {
 	// (#486). Same contract as OrderTypes: NIL MEANS THE ADAPTER DID NOT SAY,
 	// which is not "none".
 	TimeInForce []orderpb.TimeInForce
+
+	// MarginModes is which collateral regimes this adapter can work an order
+	// under (#417). Same contract again: NIL MEANS THE ADAPTER DID NOT SAY,
+	// which is not "none" — and here that matters more than for the other two,
+	// because every adapter in the estate predates this field.
+	MarginModes []orderpb.MarginMode
 }
 
 // SupportsOrderType reports whether this adapter said it can place t.
@@ -62,6 +68,25 @@ func (v VenueIdentity) SupportsTimeInForce(t orderpb.TimeInForce) bool {
 	}
 	return ContainsTimeInForce(v.TimeInForce, t)
 }
+
+// SupportsMarginMode reports whether this adapter said it can work an order
+// under m.
+//
+// UNKNOWN IS PERMISSIVE HERE AND REFUSED ONE LAYER UP, the same split the two
+// above use. It carries more weight for this field than for either of them: no
+// adapter in the estate declared a margin mode before #417, so on the day this
+// shipped every one of them answered nothing — and reading that as "supports no
+// regime" would have refused every spot order the platform places.
+func (v VenueIdentity) SupportsMarginMode(m orderpb.MarginMode) bool {
+	if len(v.MarginModes) == 0 {
+		return true
+	}
+	return ContainsMarginMode(v.MarginModes, m)
+}
+
+// DeclaresMarginModes reports whether the adapter answered the margin-mode
+// capability question at all.
+func (v VenueIdentity) DeclaresMarginModes() bool { return len(v.MarginModes) > 0 }
 
 // DeclaresTimeInForce reports whether the adapter answered the time-in-force
 // capability question at all.
@@ -97,6 +122,7 @@ func (v *GRPCVenue) Describe(ctx context.Context) (VenueIdentity, error) {
 		},
 		OrderTypes:  resp.GetSupportedOrderTypes(),
 		TimeInForce: resp.GetSupportedTimeInForce(),
+		MarginModes: resp.GetSupportedMarginModes(),
 	}, nil
 }
 

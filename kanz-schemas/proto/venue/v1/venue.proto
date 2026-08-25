@@ -169,6 +169,29 @@ message DescribeResponse {
   // above: an adapter predating this field returns nothing, and refusing every
   // order for it would be a trading outage caused by a schema addition.
   repeated order.v1.TimeInForce supported_time_in_force = 6;
+
+  // supported_margin_modes is which collateral regimes this adapter can actually
+  // express (#417). Same contract as the two fields above, added for the FIFTH
+  // instance of the same defect family.
+  //
+  // WHAT MAKES THIS ONE DIFFERENT FROM THE OTHER FOUR is that it was never
+  // reached: internal/signal/translate refused leverage and margin_mode outright
+  // because SubmitOrder had nowhere to carry them, so no levered order was ever
+  // built to be silently downgraded. That refusal was right, and it was a
+  // hardcode that could only say no — it could not say "OKX cannot, this other
+  // venue can", because nothing described what an adapter can do.
+  //
+  // This field is what turns the answer into a capability contract. Both spot
+  // connectors declare CASH only (`tdMode: cash` at OKX, /api/v3/order at
+  // Binance) and refuse what they cannot express, and the OMS moves that refusal
+  // to admission — where an order that can never be placed is rejected before it
+  // is stored and announced, exactly as supported_order_types did for #405.
+  //
+  // EMPTY MEANS "DID NOT SAY", NOT "SUPPORTS NOTHING", for the same reason as
+  // the two fields above: an adapter predating this field returns nothing, and
+  // refusing every order for it would be a trading outage caused by a schema
+  // addition. Unlevered spot is therefore always admissible.
+  repeated order.v1.MarginMode supported_margin_modes = 7;
 }
 
 message ExecuteRequest {

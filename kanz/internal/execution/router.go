@@ -484,3 +484,94 @@ func (r *Router) SupportsTimeInForce(mic string, t orderpb.TimeInForce) bool {
 	}
 	return true
 }
+
+// MarginModeAware is implemented by a Venue that has declared which collateral
+// regimes its adapter can express. A Venue that does not implement it has said
+// nothing, which is not the same as saying "none".
+type MarginModeAware interface {
+	SupportsMarginMode(m orderpb.MarginMode) bool
+}
+
+// WithMarginModes returns v carrying the margin-mode set its adapter declared
+// (#417).
+//
+// THE FIFTH INSTANCE OF ONE DEFECT FAMILY, and the only one that never reached a
+// venue. #240 (leverage), #405 (stop_price, order types) and #486 (time_in_force)
+// all shipped: a term was accepted at the perimeter and dropped before the wire,
+// so the order did nothing, or did the wrong thing. Leverage was stopped earlier
+// than that — internal/signal/translate refused it outright, because SubmitOrder
+// had nowhere to carry it — and that refusal was correct and could only ever say
+// no. It could not say "OKX cannot express this, another venue can", because
+// nothing described what an adapter can do.
+//
+// This is what makes the answer a capability contract instead of a hardcode.
+//
+// A WRAPPER RATHER THAN A FIELD, for the reason WithOrderTypes gives: the
+// capability is learned once, at startup, from Describe, and a mutable field set
+// after construction is a field something can read before it is written.
+//
+// EMPTY RETURNS v UNCHANGED, which is the load-bearing half. An adapter
+// predating this field answers with nothing, and reading that as "supports no
+// margin mode" would refuse every order it can already place — turning a schema
+// addition into a trading outage. Unlevered spot stays admissible everywhere.
+func WithMarginModes(v Venue, modes []orderpb.MarginMode) Venue {
+	if len(modes) == 0 {
+		return v
+	}
+	return marginModeAware{Venue: v, modes: modes}
+}
+
+type marginModeAware struct {
+	Venue
+	modes []orderpb.MarginMode
+}
+
+func (m marginModeAware) SupportsMarginMode(mode orderpb.MarginMode) bool {
+	return ContainsMarginMode(m.modes, mode)
+}
+
+// MarginModeDeclarer is implemented by a connector that states which collateral
+// regimes it can translate for its exchange.
+//
+// THE DECLARATION AND THE TRANSLATION MUST NOT DRIFT, and nothing in the type
+// system can hold them together: the truth is what the connector puts on the
+// wire — `tdMode` at OKX, the endpoint family at Binance — and this is a list
+// beside it. Each connector carries a test walking every value of
+// order.v1.MarginMode and asserting translation succeeds for exactly the
+// declared ones, so a regime added to one without the other fails there rather
+// than at a venue.
+type MarginModeDeclarer interface {
+	MarginModes() []orderpb.MarginMode
+}
+
+// ContainsMarginMode reports whether modes names m. One membership test, used by
+// the adapter that declares, the identity that carries and the router that gates.
+func ContainsMarginMode(modes []orderpb.MarginMode, m orderpb.MarginMode) bool {
+	for _, got := range modes {
+		if got == m {
+			return true
+		}
+	}
+	return false
+}
+
+// SupportsMarginMode reports whether the adapter at mic said it can work an
+// order under m.
+//
+// UNKNOWN IS PERMISSIVE, exactly as it is for order types and time-in-force: a
+// venue this router does not hold, or one that declared nothing, returns true.
+// The gate this feeds refuses an order the venue CANNOT place; it is not a
+// second entitlement check, and reading silence as refusal would take the estate
+// down on a schema addition.
+func (r *Router) SupportsMarginMode(mic string, m orderpb.MarginMode) bool {
+	for _, v := range r.venues {
+		if v.MIC() != mic {
+			continue
+		}
+		if aware, ok := v.(MarginModeAware); ok {
+			return aware.SupportsMarginMode(m)
+		}
+		return true
+	}
+	return true
+}

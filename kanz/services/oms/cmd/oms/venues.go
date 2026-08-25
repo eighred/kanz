@@ -312,11 +312,15 @@ func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared, 
 			}
 		}
 
-		// BOTH DECLARATIONS ARM THE SAME GATE. Each wrapper is a no-op when its
-		// list is empty, so an adapter that answered one question and not the
-		// other is gated on exactly what it answered.
+		// ALL THREE DECLARATIONS ARM THE SAME GATE. Each wrapper is a no-op when
+		// its list is empty, so an adapter that answered one question and not the
+		// others is gated on exactly what it answered — which is what lets #417's
+		// margin-mode declaration land beside two that predate it without
+		// refusing a single order any existing adapter can already place.
 		venues = append(venues,
-			execution.WithTimeInForce(execution.WithOrderTypes(venue, id.OrderTypes), id.TimeInForce))
+			execution.WithMarginModes(
+				execution.WithTimeInForce(
+					execution.WithOrderTypes(venue, id.OrderTypes), id.TimeInForce), id.MarginModes))
 	}
 	// Ordered by (instrument, venue) so the catalogue is stable between boots —
 	// OMS_VENUE_ENDPOINTS is a map, and Go randomises its iteration.

@@ -374,8 +374,8 @@ func TestTheDigestHashesAFixedNumberOfParts(t *testing.T) {
 	if _, err := TermsOfSubmit(empty).Digest(); err != nil {
 		t.Fatalf("empty order: %v", err)
 	}
-	if digestParts != 18 {
-		t.Fatalf("digestParts = %d, want 18 — the covered field set changed. That is allowed, but it "+
+	if digestParts != 20 {
+		t.Fatalf("digestParts = %d, want 20 — the covered field set changed. That is allowed, but it "+
 			"INVALIDATES EVERY DIGEST ALREADY SIGNED, so it must be a deliberate edit here and not a "+
 			"side effect of adding a field", digestParts)
 	}

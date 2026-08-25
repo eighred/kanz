@@ -232,6 +232,16 @@ func (s *Server) Describe(context.Context, *venuepb.DescribeRequest) (*venuepb.D
 	if d, ok := s.venue.(execution.TimeInForceDeclarer); ok {
 		resp.SupportedTimeInForce = d.TimeInForce()
 	}
+	// AND WHICH COLLATERAL REGIMES IT CAN WORK AN ORDER UNDER (#417). Same
+	// contract a third time, and this is the field that turns the platform's
+	// leverage refusal from a hardcode into something a venue can answer for
+	// itself: both spot connectors declare CASH only, so an order asking for
+	// cross or isolated margin is refused at ADMISSION, naming the venue, rather
+	// than by a blanket rule in internal/signal/translate that could never say
+	// which venue could have taken it.
+	if d, ok := s.venue.(execution.MarginModeDeclarer); ok {
+		resp.SupportedMarginModes = d.MarginModes()
+	}
 	return resp, nil
 }
 

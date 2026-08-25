@@ -164,6 +164,17 @@ func (v *OKXVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orde
 	if !ok {
 		return nil, fmt.Errorf("okx: no symbol mapping for %s", st.GetInstrumentId())
 	}
+	// AND THE COLLATERAL REGIME THIS CONNECTOR CANNOT EXPRESS (#417). The OMS
+	// refuses this at admission from MarginModes() above, so reaching here means
+	// the declaration and the wire have drifted — or that something placed an
+	// order without going through admission. Both are worth failing loudly for:
+	// placing it anyway is a live position whose regime the fund's records get
+	// wrong, and no downstream record could tell.
+	if m := st.GetMarginMode(); m != orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED {
+		return nil, fmt.Errorf("okx: cannot work an order under %v — this connector places "+
+			"SPOT (tdMode cash) orders only, so placing it would leave the position unlevered while the "+
+			"audit root records margin", m)
+	}
 	// A STOP GOES TO A DIFFERENT PRODUCT ENTIRELY (#485), and returns no fills:
 	// a conditional order RESTS until its trigger fires, and the order that
 	// eventually fills is one OKX creates then. Its fills reach this platform
@@ -462,6 +473,24 @@ func okxAlgoBody(st *orderpb.OrderState, instID string) (map[string]string, erro
 //
 // KEEP THIS IN STEP WITH THE TRANSLATION. TestDeclaredTimeInForceMatchesTranslation
 // walks the whole enum and fails if the two ever disagree, in either direction.
+// MarginModes is which collateral regimes this connector can express (#417).
+//
+// CASH ONLY, AND THE WIRE IS WHY. Every order this connector builds hardcodes
+// `"tdMode": "cash"` — okx_venue.go's place and amend bodies and okx_rest.go's
+// query — which is OKX's spot regime. Cross and isolated are a different tdMode
+// AND a different instrument family (SWAP/FUTURES rather than SPOT), so this is
+// not a flag that could be flipped: the connector has no code path that could
+// place them, and declaring them would promise the OMS a translation that does
+// not exist.
+//
+// Declaring CASH rather than leaving this empty is the point. Empty means "did
+// not say" and the OMS admits anything; saying CASH is what makes an order
+// asking for cross margin refused at ADMISSION, naming this venue, instead of
+// being placed as spot with the audit root claiming leverage.
+func (v *OKXVenue) MarginModes() []orderpb.MarginMode {
+	return []orderpb.MarginMode{orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED}
+}
+
 func (v *OKXVenue) TimeInForce() []orderpb.TimeInForce {
 	return []orderpb.TimeInForce{
 		orderpb.TimeInForce_TIME_IN_FORCE_GTC,
