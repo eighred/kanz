@@ -100,7 +100,34 @@ func Accept(cmd *orderpb.SubmitOrder, now time.Time) (*orderpb.OrderState, error
 		// before this `ExpireAt` appeared in exactly one place in the whole Go tree —
 		// the line that validates it. The adapters DO forward time_in_force, so a
 		// good-till-date order reached the venue with no date.
-		ExpireAt:       cmd.GetExpireAt(),
+		ExpireAt: cmd.GetExpireAt(),
+		// THE COLLATERAL TERMS, CARRIED (#417, correcting Part 1). Same class as
+		// the two above, and this time the guard that exists for the class did not
+		// catch it: #417 added margin_mode and leverage to SubmitOrder AND to
+		// OrderState, gated them at admission, and covered them in the dual-control
+		// digest — and then never copied the values here.
+		//
+		// The consequence was the whole family's shape, one message over. Admission
+		// only gates a TARGETED order (service.go's `target != ""`), so an order
+		// naming no venue skipped the gate, reached this constructor, and lost its
+		// regime — and the connectors' own refusals read st.GetMarginMode(), which
+		// was therefore UNSPECIFIED for every order ever admitted. A request for
+		// CROSS was placed as ordinary spot with no error anywhere, while the audit
+		// root recorded the regime the trader asked for.
+		//
+		// WHY submit_fields_reach_state DID NOT SEE IT, which is the part worth
+		// remembering: that guard compares proto field NAMES across the two
+		// messages. Both carry margin_mode, so it passed — and its own header says
+		// "WHAT IT CANNOT CHECK: that the counterpart is POPULATED". The population
+		// half is a unit test per field, which is what stopprice_test.go is for
+		// stop_price and what marginterms_test.go is for these two.
+		//
+		// Copied unconditionally, unlike StopPrice: the zero value of MarginMode is
+		// UNSPECIFIED, which IS spot, and a nil Leverage IS unlevered. There is no
+		// "wrong value to leave lying around" here — the zero is the honest answer
+		// for every order that did not ask for margin.
+		MarginMode:     cmd.GetMarginMode(),
+		Leverage:       cmd.GetLeverage(),
 		Status:         orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW,
 		FilledQuantity: zero,
 		LeavesQuantity: cmd.GetQuantity(),
