@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -41,17 +42,26 @@ type Registry struct {
 	authz   auth.Authorizer
 	client  governed.Client
 	catalog retrieval.Catalog
+	logger  *slog.Logger
 	byName  map[string]Tool
 	order   []string
 }
 
 // NewRegistry builds the governed tool set over the authorizer, governed client,
 // and lineage catalog.
-func NewRegistry(authz auth.Authorizer, client governed.Client, catalog retrieval.Catalog) *Registry {
+//
+// The logger is not optional in effect: a refusal's real reason is written here
+// and NOWHERE the caller can see, so an operator investigating "why did the
+// copilot say there is no data" has this line or nothing. A nil logger falls
+// back to slog.Default() rather than dropping the record.
+func NewRegistry(authz auth.Authorizer, client governed.Client, catalog retrieval.Catalog, logger *slog.Logger) *Registry {
 	if catalog == nil {
 		catalog = retrieval.IdentityCatalog{}
 	}
-	r := &Registry{authz: authz, client: client, catalog: catalog, byName: map[string]Tool{}}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	r := &Registry{authz: authz, client: client, catalog: catalog, logger: logger, byName: map[string]Tool{}}
 	r.register(Tool{
 		Def: llm.ToolDef{
 			Name:        "get_risk_measures",
@@ -104,29 +114,88 @@ func (r *Registry) Invoke(ctx context.Context, p *auth.Principal, call llm.ToolC
 	return t.invoke(ctx, p, call.Input)
 }
 
+// Refusal text a tool may put in front of the model. It is a CLOSED SET chosen
+// by deny code — never a passthrough of the authorizer's Reason, which names the
+// resource's owning tenant on a cross-tenant deny and used to be concatenated
+// straight into this content (#741).
+//
+// msgNoGovernedData deliberately answers TWO different questions with one
+// sentence: the portfolio does not exist, and the portfolio belongs to another
+// tenant. A caller able to tell those apart can enumerate another tenant's
+// portfolios by id, which is the discovery CLAUDE.md puts out of reach ("one
+// tenant's agent must not be able to discover another's state"). The identical
+// wording is the control; keep it identical. Both arrive here as isolation deny
+// codes — the unknown portfolio because an unresolvable owner leaves the
+// resource tenant empty, which is itself an isolation refusal.
+const (
+	msgNoGovernedData = "no governed data for portfolio "
+	msgNotAuthorized  = "not authorized to read this portfolio"
+	// msgOwnerUnavailable is NOT collapsed into msgNoGovernedData. A failed
+	// ownership lookup is an outage of the governed read surface — uncorrelated
+	// with any tenant, so stating it is not an oracle — and presenting an outage
+	// as an empty portfolio is the silent-default this estate refuses.
+	msgOwnerUnavailable = "the portfolio's owning tenant could not be established, so this read is refused"
+	// msgReadFailed stands in for a governed read that failed AFTER
+	// authorization. The dependency's own error text is logged, not rendered.
+	msgReadFailed = "the governed read surface could not be read right now"
+)
+
 // authorize is the deny-by-default gate every governed tool runs first. It
 // resolves the portfolio's owning tenant (without leaking data), then asks the
 // AUTH-01 authorizer; the AuditedAuthorizer records the decision to the
 // observation stream. A cross-tenant or out-of-scope portfolio is denied here.
+//
+// IT NEVER SUBSTITUTES A TENANT IT DOES NOT KNOW. Every error from OwnerTenant
+// used to collapse to owner = "", and "" was the exact value auth.Authorize read
+// as "this resource is not tenant-scoped, skip the boundary". So a deadline, an
+// UNAVAILABLE or a 500 on the ownership lookup removed the cross-tenant guard
+// for that invocation, the remaining gates (portfolio scope, RBAC) passed on
+// their own terms, and the tool went on to read the data — an availability blip
+// on a dependency dissolving the estate's strongest boundary (#741).
+//
+// The unresolved owner is now passed through AS "" and refused by the
+// authorizer, so the failure mode is a refusal rather than a bypass, and the
+// attempt is still audited because the authorizer still runs.
 func (r *Registry) authorize(ctx context.Context, p *auth.Principal, action auth.Action, portfolioID string) (Result, bool) {
 	owner, err := r.client.OwnerTenant(ctx, portfolioID)
-	if err != nil {
-		// Unknown to the caller — same response regardless of tenant (no oracle).
-		// Still run the authorizer so the attempt is audited.
-		owner = ""
-	}
+	// The authorizer runs on every path, including the ones already destined to
+	// refuse: the AUDIT-01 record of an attempt is worth more than the call it
+	// costs, and a probe that is never authorized is never audited either.
 	dec := r.authz.Authorize(ctx, auth.Request{
 		Principal: p,
 		Action:    action,
 		Resource:  auth.Resource{Type: auth.ResourcePortfolio, ID: portfolioID, Tenant: owner},
 	})
-	if !dec.Allow {
-		return Result{IsError: true, Content: "not authorized: " + dec.Reason}, false
+	switch {
+	case err != nil && !errors.Is(err, governed.ErrUnknownPortfolio):
+		// Fails closed regardless of what dec said — and dec is a refusal here
+		// anyway, because owner is "".
+		r.logger.WarnContext(ctx, "copilot: portfolio ownership unresolved, tool refused",
+			"portfolio_id", portfolioID, "action", string(action), "err", err)
+		return Result{IsError: true, Content: msgOwnerUnavailable}, false
+	case !dec.Allow:
+		// The authorizer's own sentence goes to the log and the audit stream.
+		// The model gets the closed-set rendering and nothing else.
+		r.logger.InfoContext(ctx, "copilot: governed tool denied",
+			"portfolio_id", portfolioID, "action", string(action),
+			"code", string(dec.Code), "reason", dec.Reason)
+		return Result{IsError: true, Content: refusalFor(dec.Code, portfolioID)}, false
 	}
-	if errors.Is(err, governed.ErrUnknownPortfolio) {
-		return Result{IsError: true, Content: "no governed data for portfolio " + portfolioID}, false
-	}
+	// There is no "authorized, but the portfolio is unknown" branch below any
+	// more, and there cannot be one: ErrUnknownPortfolio leaves owner empty, and
+	// an empty tenant on a typed resource is a refusal. The unknown portfolio is
+	// answered by refusalFor, in the same words as a cross-tenant one.
 	return Result{}, true
+}
+
+// refusalFor maps a deny code onto the fixed text the model may read. The
+// isolation refusals collapse into the not-found answer; everything else is
+// about the caller's own token and may be stated.
+func refusalFor(code auth.DenyCode, portfolioID string) string {
+	if code.IsIsolation() {
+		return msgNoGovernedData + portfolioID
+	}
+	return msgNotAuthorized
 }
 
 func (r *Registry) getMeasures(ctx context.Context, p *auth.Principal, in map[string]any) Result {
@@ -139,7 +208,7 @@ func (r *Registry) getMeasures(ctx context.Context, p *auth.Principal, in map[st
 	}
 	reading, err := r.client.Measures(ctx, pid, strSlice(in["measures"]))
 	if err != nil {
-		return Result{IsError: true, Content: err.Error()}
+		return r.readFailed(ctx, "measures", pid, err)
 	}
 	return r.render(ctx, "risk measures", reading)
 }
@@ -154,7 +223,7 @@ func (r *Registry) getExposure(ctx context.Context, p *auth.Principal, in map[st
 	}
 	reading, err := r.client.Exposure(ctx, pid)
 	if err != nil {
-		return Result{IsError: true, Content: err.Error()}
+		return r.readFailed(ctx, "exposure", pid, err)
 	}
 	return r.render(ctx, "exposure", reading)
 }
@@ -169,9 +238,26 @@ func (r *Registry) evaluateScenario(ctx context.Context, p *auth.Principal, in m
 	}
 	reading, err := r.client.EvaluateScenario(ctx, pid, str(in["scenario"]))
 	if err != nil {
-		return Result{IsError: true, Content: err.Error()}
+		return r.readFailed(ctx, "scenario", pid, err)
 	}
 	return r.render(ctx, "scenario projection", reading)
+}
+
+// readFailed renders a POST-AUTHORIZATION read failure. The caller is known to
+// own this portfolio by the time it can get here, so this is not an isolation
+// boundary — but the governed client's error is still the read surface's own
+// words (a gRPC status carrying a backend message), and it used to be handed to
+// the model verbatim. Same rule as the refusals above: the dependency's text
+// goes to the log, the model gets a fixed sentence.
+func (r *Registry) readFailed(ctx context.Context, kind, portfolioID string, err error) Result {
+	// ErrUnknownPortfolio here means the ownership lookup resolved but the
+	// reading did not — a portfolio with no data of this kind, not an outage.
+	if errors.Is(err, governed.ErrUnknownPortfolio) {
+		return Result{IsError: true, Content: msgNoGovernedData + portfolioID}
+	}
+	r.logger.WarnContext(ctx, "copilot: governed read failed",
+		"portfolio_id", portfolioID, "kind", kind, "err", err)
+	return Result{IsError: true, Content: msgReadFailed}
 }
 
 // render formats a governed reading into tool-result text + a citation. The

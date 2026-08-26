@@ -41,7 +41,7 @@ func newAgent(t *testing.T, model llm.Model, extra ...governed.Reading) (*Agent,
 	for _, r := range extra {
 		client.Put(r)
 	}
-	reg := tools.NewRegistry(authz, client, retrieval.IdentityCatalog{})
+	reg := tools.NewRegistry(authz, client, retrieval.IdentityCatalog{}, nil)
 	return New(model, reg), rec
 }
 

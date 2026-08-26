@@ -37,7 +37,7 @@ func newServer(t *testing.T) *Server {
 		llm.Response{ToolCalls: []llm.ToolCall{{ID: "tc1", Name: "get_risk_measures", Input: map[string]any{"portfolio_id": "PF-T1"}}}},
 		llm.Response{Text: "VaR99 is 1250000.", StopReason: llm.StopEndTurn},
 	)
-	reg := tools.NewRegistry(authz, client, retrieval.IdentityCatalog{})
+	reg := tools.NewRegistry(authz, client, retrieval.IdentityCatalog{}, nil)
 	r := &Readiness{}
 	r.Set(true)
 	return New(r, nil, agent.New(model, reg))
