@@ -39,12 +39,12 @@ type Tool struct {
 
 // Registry holds the tool set and dispatches calls.
 type Registry struct {
-	authz   auth.Authorizer
-	client  governed.Client
-	catalog retrieval.Catalog
-	logger  *slog.Logger
-	byName  map[string]Tool
-	order   []string
+	authGate *Gate
+	client   governed.Client
+	catalog  retrieval.Catalog
+	logger   *slog.Logger
+	byName   map[string]Tool
+	order    []string
 }
 
 // NewRegistry builds the governed tool set over the authorizer, governed client,
@@ -61,7 +61,7 @@ func NewRegistry(authz auth.Authorizer, client governed.Client, catalog retrieva
 	if logger == nil {
 		logger = slog.Default()
 	}
-	r := &Registry{authz: authz, client: client, catalog: catalog, logger: logger, byName: map[string]Tool{}}
+	r := &Registry{authGate: NewGate(authz, governedOwner{client: client}, logger), client: client, catalog: catalog, logger: logger, byName: map[string]Tool{}}
 	r.register(Tool{
 		Def: llm.ToolDef{
 			Name:        "get_risk_measures",
@@ -140,62 +140,34 @@ const (
 	msgReadFailed = "the governed read surface could not be read right now"
 )
 
-// authorize is the deny-by-default gate every governed tool runs first. It
-// resolves the portfolio's owning tenant (without leaking data), then asks the
-// AUTH-01 authorizer; the AuditedAuthorizer records the decision to the
-// observation stream. A cross-tenant or out-of-scope portfolio is denied here.
+// authorize delegates to the Gate, which owns the decision (#743).
 //
-// IT NEVER SUBSTITUTES A TENANT IT DOES NOT KNOW. Every error from OwnerTenant
-// used to collapse to owner = "", and "" was the exact value auth.Authorize read
-// as "this resource is not tenant-scoped, skip the boundary". So a deadline, an
-// UNAVAILABLE or a 500 on the ownership lookup removed the cross-tenant guard
-// for that invocation, the remaining gates (portfolio scope, RBAC) passed on
-// their own terms, and the tool went on to read the data — an availability blip
-// on a dependency dissolving the estate's strongest boundary (#741).
-//
-// The unresolved owner is now passed through AS "" and refused by the
-// authorizer, so the failure mode is a refusal rather than a bypass, and the
-// attempt is still audited because the authorizer still runs.
+// THE PORTFOLIO IS THE RESOURCE TYPE, and naming it here rather than inside the
+// gate is what lets the same gate serve a second tool surface without a second
+// copy of the decision.
 func (r *Registry) authorize(ctx context.Context, p *auth.Principal, action auth.Action, portfolioID string) (Result, bool) {
-	owner, err := r.client.OwnerTenant(ctx, portfolioID)
-	// The authorizer runs on every path, including the ones already destined to
-	// refuse: the AUDIT-01 record of an attempt is worth more than the call it
-	// costs, and a probe that is never authorized is never audited either.
-	dec := r.authz.Authorize(ctx, auth.Request{
-		Principal: p,
-		Action:    action,
-		Resource:  auth.Resource{Type: auth.ResourcePortfolio, ID: portfolioID, Tenant: owner},
-	})
-	switch {
-	case err != nil && !errors.Is(err, governed.ErrUnknownPortfolio):
-		// Fails closed regardless of what dec said — and dec is a refusal here
-		// anyway, because owner is "".
-		r.logger.WarnContext(ctx, "copilot: portfolio ownership unresolved, tool refused",
-			"portfolio_id", portfolioID, "action", string(action), "err", err)
-		return Result{IsError: true, Content: msgOwnerUnavailable}, false
-	case !dec.Allow:
-		// The authorizer's own sentence goes to the log and the audit stream.
-		// The model gets the closed-set rendering and nothing else.
-		r.logger.InfoContext(ctx, "copilot: governed tool denied",
-			"portfolio_id", portfolioID, "action", string(action),
-			"code", string(dec.Code), "reason", dec.Reason)
-		return Result{IsError: true, Content: refusalFor(dec.Code, portfolioID)}, false
+	v := r.authGate.Authorize(ctx, p, action, auth.ResourcePortfolio, portfolioID)
+	if !v.Allowed {
+		return Result{IsError: true, Content: v.Message}, false
 	}
-	// There is no "authorized, but the portfolio is unknown" branch below any
-	// more, and there cannot be one: ErrUnknownPortfolio leaves owner empty, and
-	// an empty tenant on a typed resource is a refusal. The unknown portfolio is
-	// answered by refusalFor, in the same words as a cross-tenant one.
 	return Result{}, true
 }
 
-// refusalFor maps a deny code onto the fixed text the model may read. The
-// isolation refusals collapse into the not-found answer; everything else is
-// about the caller's own token and may be stated.
-func refusalFor(code auth.DenyCode, portfolioID string) string {
-	if code.IsIsolation() {
-		return msgNoGovernedData + portfolioID
+// governedOwner adapts the governed read surface to the gate's OwnerResolver.
+//
+// IT EXISTS TO MAP ONE SENTINEL, and that is the whole seam: the gate must not
+// import the copilot's data source to know what "not visible" means, or the
+// decision travels with this service's particular reader. governed's
+// ErrUnknownPortfolio is already tenant-indistinguishable by construction, which
+// is exactly the contract ErrResourceNotVisible states.
+type governedOwner struct{ client governed.Client }
+
+func (g governedOwner) OwnerTenant(ctx context.Context, resourceID string) (string, error) {
+	tenant, err := g.client.OwnerTenant(ctx, resourceID)
+	if errors.Is(err, governed.ErrUnknownPortfolio) {
+		return "", ErrResourceNotVisible
 	}
-	return msgNotAuthorized
+	return tenant, err
 }
 
 func (r *Registry) getMeasures(ctx context.Context, p *auth.Principal, in map[string]any) Result {
