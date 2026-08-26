@@ -1762,6 +1762,46 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 				"order history before it can be amended. quarantine reason: %s (frozen %s ago, at %s)",
 			q.GetReason(), quarantineAge(q, now), q.GetAt().AsTime().UTC().Format(time.RFC3339)), now)
 	}
+	// AN AMEND MUST NOT REWRITE TERMS A VENUE IS STILL WORKING (#740).
+	//
+	// Nothing in this module sends an amend to an exchange: venue.v1 has four
+	// RPCs and none of them is amend or replace, no Amender/Replacer interface
+	// exists in internal/execution, and neither connector wires an amend
+	// endpoint. handleAmend nonetheless applied the new size or price and
+	// answered EXECUTED, so the platform's book of record moved and the venue's
+	// did not.
+	//
+	// The cancel path one function away does the opposite for exactly this
+	// reason: closeAtVenue withdraws AT the venue before recording, precisely so
+	// the ledger cannot call an order cancelled while it is still fillable. An
+	// amend with no venue leg is that same lie, told about size and price.
+	//
+	// What it costs when the two disagree:
+	//   - Down-amend 100 → 50: the venue works 100 and fills 100. The over-fill
+	//     guard stops working the order; the platform books 50. A 50-unit
+	//     position no fill FACT, no projection and no ledger entry records.
+	//   - Price amend: the screen shows the new price, the exchange works the
+	//     old one. A trader who pulled a limit away to cut risk still holds it.
+	//   - Up-amend 100 → 200: reserves buying power and margin against exposure
+	//     that does not exist.
+	// No reconciler detects any of it — they compare filled quantity and status,
+	// and copy the platform's amended figures forward as venue truth.
+	//
+	// SO THE REFUSAL IS KEYED ON STATUS, NOT ON THE ROUTER. Asking
+	// s.router.Route(st) whether a venue exists would answer yes for an order
+	// that has never been SENT (Route maps instrument→adapter, not order→venue),
+	// refusing amends that are perfectly safe; and it would answer no whenever
+	// s.router is nil, quietly permitting the divergent amend in exactly the
+	// deployment where nothing else would catch it. The order's own status is
+	// the record of whether a venue has it, so that is what this reads.
+	if venueMayBeWorking(st) {
+		return s.outcomeReject(ctx, cmd.GetOrderId(), ReasonVenueCannotAmend, fmt.Sprintf(
+			"this order is %s: a venue is working it, and no adapter in this platform can send an "+
+				"amend to an exchange. Changing the stored size or price now would move the "+
+				"platform's record while the venue kept working the original terms. Cancel it and "+
+				"submit a replacement, which withdraws at the venue before recording",
+			st.GetStatus()), now)
+	}
 	next, aerr := Amend(st, &cmd, now)
 	if aerr != nil {
 		var re *RejectError
@@ -2330,6 +2370,40 @@ func (s *Service) outcomeReject(ctx context.Context, orderID, code, reason strin
 // ReasonNotEntitled is the outcome code for a command whose issuer holds no
 // entitlement to the target order's portfolio.
 const ReasonNotEntitled = "NOT_ENTITLED"
+
+// ReasonVenueCannotAmend is the outcome code for an amend against an order a
+// venue is working, which this platform cannot deliver (#740).
+//
+// IT IS A CAPABILITY REFUSAL, NOT A POLICY ONE, and the distinction is what a
+// caller needs: nobody's permissions or mandate refused this, and no retry or
+// approval makes it succeed. The platform has no amend at the venue boundary at
+// all, so the honest answer is "cancel and replace" — which does have one.
+const ReasonVenueCannotAmend = "VENUE_CANNOT_AMEND"
+
+// venueMayBeWorking reports whether an exchange may be holding this order right
+// now, and is deliberately the OPTIMISTIC reading of that question: every status
+// that could mean the venue has it answers true.
+//
+// ROUTED and PARTIALLY_FILLED are the order itself resting at a venue.
+// WORKING_SCHEDULED is the parent of a slice schedule — the parent never rests
+// anywhere, but its CHILDREN do, and they carry the terms an amend would claim
+// to change, so a parent amend is the same divergence one level up. It is the
+// case the "just check if it is routed" reading misses.
+//
+// PENDING_NEW is admitted and not yet sent: there is nothing at a venue to
+// disagree with, so an amend there is a pure book-of-record edit and stays
+// allowed. Terminal statuses never reach this — Amend's own IsTerminal guard
+// refuses them first, with a better message.
+func venueMayBeWorking(st *orderpb.OrderState) bool {
+	switch st.GetStatus() {
+	case orderpb.OrderStatus_ORDER_STATUS_ROUTED,
+		orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED,
+		orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED:
+		return true
+	default:
+		return false
+	}
+}
 
 // ReasonPlatformHalted is the outcome code for an order refused because the
 // platform kill-switch is engaged (#635).
