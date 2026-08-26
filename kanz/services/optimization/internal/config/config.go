@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/internal/refdata"
 	"log/slog"
 	"os"
 )
@@ -83,14 +84,33 @@ type Config struct {
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
+	// Tenant is the tenant THIS DEPLOYMENT serves, and it is never read from a
+	// caller. It scopes the reference-data cache; the tenant a MANDATE is
+	// resolved for comes from the authenticated principal on each request, which
+	// is what stops one caller's portfolio being evaluated against another
+	// tenant's limits (#243).
+	Tenant string
+
+	// RefData wires the instrument classifier the mandate check resolves SECTOR,
+	// ISSUER and ASSET_CLASS through (#751). Unset ⇒ no classifier, and those
+	// dimensions are then UNRESOLVABLE — which compliance REFUSES rather than
+	// passes (#640), so a sector cap makes a proposal infeasible with a named
+	// reason instead of silently feasible.
+	RefData refdata.Config
 }
 
 // Load reads the configuration from the environment with production-safe
 // defaults.
 func Load() (Config, error) {
+	refData, rerr := refdata.LoadConfig("OPTIMIZATION")
+	if rerr != nil {
+		return Config{}, rerr
+	}
 	cfg := Config{
 		Listen:        env.Or("OPTIMIZATION_LISTEN", ":8100"),
 		MetricsListen: env.Or("OPTIMIZATION_METRICS_LISTEN", ":8094"),
+		Tenant:        env.Or("OPTIMIZATION_TENANT", "__system__"),
+		RefData:       refData,
 		NATSURL:       os.Getenv("OPTIMIZATION_NATS_URL"),
 		Source:        env.Or("OPTIMIZATION_SOURCE", "optimization"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
