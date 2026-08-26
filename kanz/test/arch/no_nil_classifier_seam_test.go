@@ -89,12 +89,24 @@ var nilClassifierExempt = map[string]string{
 	// removed them: it failed the moment the seams were wired, which is the
 	// retirement mechanism working rather than somebody remembering.
 	//
-	// The five below were FOUND BY THIS GUARD when it first ran. None of them is
-	// on the three paths the issue was filed about; all five are the same absence
+	// The four below were FOUND BY THIS GUARD when it first ran. None of them is
+	// on the three paths #640 was filed about; all of them are the same absence
 	// one door over, and they are recorded rather than quietly left out, because
 	// an exemption list that covers only the seams somebody already knew about is
-	// a list that will not catch the sixth.
-	"internal/optimization.Propose": "#640 — the OPT-01e mandate-aware rebalance. Its doc calls it " +
+	// a list that will not catch the fifth.
+	//
+	// THEY NAME #751, NOT #640. #640 is closed — its own three seams are wired
+	// and proven against a running datamaster — and an exemption pointing at a
+	// closed issue names nothing that will retire it, which is the one thing this
+	// map may not do.
+	//
+	// THERE WERE FIVE. internal/risk/compute/factor.SectorExposure left by being
+	// FIXED rather than exempted: it was never an unfilled seam, only one this
+	// guard could not see, because its caller factor.ComputeExposure is in its own
+	// package. The rule now resolves a same-package caller that is itself wired
+	// (see 2b), so the seam reports what it always was, and the dead-entry check
+	// below is what removed the entry.
+	"internal/optimization.Propose": "#751 — the OPT-01e mandate-aware rebalance. Its doc calls it " +
 		"'the one call a PM workflow / the OPT-01e service drives', and that is not true today: " +
 		"services/optimization's handlePropose reimplements the first two steps inline " +
 		"(optimization.Optimize then optimization.Rebalance) and OMITS the mandate check. WHAT IS " +
@@ -108,14 +120,14 @@ var nilClassifierExempt = map[string]string{
 		"orders instead of costing it the check — bridge.ToOrders refuses anything that is not " +
 		"MandateFeasible, and the HTTP surface refuses a caller-supplied verdict. Retiring THIS " +
 		"entry is what makes /v1/orders work again.",
-	"internal/optimization.CheckMandate": "#640 — dark because its ONLY caller is " +
+	"internal/optimization.CheckMandate": "#751 — dark because its ONLY caller is " +
 		"optimization.Propose, which is itself dark; see that entry for what the optimization " +
 		"service does instead. bridge.Materialize's doc USED TO REST on this running ('a nil gate " +
 		"skips the re-check — the optimizer's CheckMandate already ran') while the premise did not " +
 		"hold. #646 removed the claim and made ToOrders ENFORCE it: a proposal CheckMandate has " +
 		"not passed materializes into nothing, so this seam being dark is now a refusal rather " +
 		"than a silent pass.",
-	"internal/performance.BucketBySector": "#640 — Brinson sector attribution. TWO THINGS ARE " +
+	"internal/performance.BucketBySector": "#751 — Brinson sector attribution. TWO THINGS ARE " +
 		"MISSING and only one is reference data. performance.Classifier has NO implementation " +
 		"anywhere in the module, not even a StaticClassifier; and services/performance sidesteps " +
 		"the question entirely — attributionRequest carries already-bucketed []perf.SectorData " +
@@ -123,18 +135,7 @@ var nilClassifierExempt = map[string]string{
 		"instrument-level returns into sector buckets. The client is the classifier. Retiring this " +
 		"needs a request shape carrying instrument-level rows as well as a classifier to bucket " +
 		"them with.",
-	"internal/risk/compute/factor.SectorExposure": "#640 — NOT AN UNFILLED SEAM, and the only " +
-		"entry here that is a limit of the RULE rather than of the estate. Its caller is " +
-		"factor.ComputeExposure, which is WIRED: services/risk-engine passes " +
-		"app.NewFactorClassifier(refCache) to engine.WithClassifier, and EngineImpl.exposureSet " +
-		"takes the factor branch whenever that classifier is non-nil, so this runs on every served " +
-		"exposure read. It is reported dark because the rule requires a CROSS-PACKAGE non-test " +
-		"caller and its only caller is in its own package — the same one-level-up limitation the " +
-		"header names for a seam filled from another seam, seen from the other side. The old " +
-		"entry claimed 'one entry retires both', which was wrong: retiring ComputeExposure does " +
-		"not retire this. Retire it by widening the rule to same-package callers, not by moving " +
-		"code to satisfy a guard.",
-	"internal/sustainability.Screen": "#640 — ALT/CLIMATE-01b ESG exclusion screening. It is not " +
+	"internal/sustainability.Screen": "#751 — ALT/CLIMATE-01b ESG exclusion screening. It is not " +
 		"blocked on a classifier at all: it TAKES one as a parameter and would work the moment a " +
 		"caller supplied a real one. WHAT IS MISSING IS A CALLER. services/regulatory imports " +
 		"internal/sustainability for FileTCFD and FileSFDR only, mounts no screening route, and no " +
@@ -248,6 +249,62 @@ func TestNoClassifierSeamIsNilOrDarkAndUntracked(t *testing.T) {
 		})
 	})
 
+	// ===== 2b. SAME-PACKAGE callers, one hop =====
+	//
+	// A seam called only from inside its own package used to resolve DARK, and
+	// that was wrong for factor.SectorExposure: its caller factor.ComputeExposure
+	// IS wired from services/risk-engine, so it runs on every served exposure
+	// read while this guard reported it dark (#751).
+	//
+	// THE WIDENING IS ONE HOP AND CONDITIONAL, not "same-package callers count".
+	// A bare "any intra-package caller vouches for it" rule would let a seam
+	// called only by its own package's DEAD code resolve WIRED, which is the hole
+	// the cross-package rule existed to close. So an intra-package call promotes
+	// its callee only when the CALLER IS ITSELF A SEAM THAT RESOLVED WIRED —
+	// anchoring the chain in a real composition root. A chain that ends nowhere
+	// leaves every link dark, and the outermost link carries the exemption, which
+	// is the "catch it one level up" model this guard already runs on.
+	//
+	// Same-package calls are BARE IDENTIFIERS, not selectors, which is why the
+	// qualified walk above cannot see them at all.
+	type intraCall struct {
+		caller    classifierSeam // the enclosing function, itself a seam
+		seam      classifierSeam
+		passedNil bool
+	}
+	var intraCalls []intraCall
+	walkGoFiles(t, root, ".", fset, func(rel string, f *ast.File) {
+		pkgDir := filepath.ToSlash(filepath.Dir(rel))
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || fn.Body == nil || !fn.Name.IsExported() || fn.Type.Params == nil {
+				continue
+			}
+			idx, ok := classifierParamIndex(fn.Type.Params)
+			if !ok {
+				continue // only a seam may vouch for another seam
+			}
+			caller := classifierSeam{pkgDir, fn.Name.Name, idx}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok {
+					return true // a selector is the qualified case handled above
+				}
+				for _, s := range byName[pkgDir+"."+id.Name] {
+					if s == caller {
+						continue // direct recursion vouches for nothing
+					}
+					intraCalls = append(intraCalls, intraCall{caller, s, argIsNil(call, s.index)})
+				}
+				return true
+			})
+		}
+	})
+
 	// NON-VACUITY, second arm: some seam must resolve to a caller. If the import
 	// alias resolution breaks, no call site is seen at all — so no nil is seen
 	// either, and the guard reports a clean estate while checking nothing.
@@ -262,6 +319,30 @@ func TestNoClassifierSeamIsNilOrDarkAndUntracked(t *testing.T) {
 	seenExempt := map[string]bool{}
 	called := map[classifierSeam]bool{}
 	wired := 0
+
+	// The cross-package pass first: it is the only thing that can anchor a chain.
+	wiredSeam := map[classifierSeam]bool{}
+	for _, c := range calls {
+		if !c.passedNil {
+			wiredSeam[c.seam] = true
+		}
+	}
+	// Then propagate through same-package calls until nothing more resolves. A
+	// fixpoint rather than a single sweep, so a chain of three holds together
+	// regardless of the order the walk happened to produce.
+	for changed := true; changed; {
+		changed = false
+		for _, ic := range intraCalls {
+			if ic.passedNil || !wiredSeam[ic.caller] || wiredSeam[ic.seam] {
+				continue
+			}
+			wiredSeam[ic.seam] = true
+			changed = true
+		}
+	}
+	for s := range wiredSeam {
+		called[s] = true
+	}
 
 	for _, c := range calls {
 		called[c.seam] = true
