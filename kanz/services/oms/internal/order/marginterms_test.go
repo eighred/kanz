@@ -114,3 +114,69 @@ func TestAccept_KeepsTheDualControlDigestConsistent(t *testing.T) {
 			st.GetLeverage(), cmd.GetLeverage())
 	}
 }
+
+// THE TERMS MUST SURVIVE THE LIFECYCLE, NOT ONLY ADMISSION (#742).
+//
+// Everything above pins what Accept writes. What none of it pins is the STEP
+// AFTER: Route() sits between admission and Venue.Execute, so a transition that
+// dropped these fields would restore the original bug one step later with every
+// admission test above still green. stop_price carries exactly this test
+// (TestRoute_PreservesTheStopPrice) for exactly this reason, and margin mode is
+// the fourth field in that class.
+//
+// It passes for free today, because every transition goes through cloneState and
+// cloneState is proto.Clone. That is precisely why it is ASSERTED rather than
+// assumed: cloneState used to be a hand-rolled field-by-field copy, and the
+// first field added after it was written — venue_account_id, the exchange
+// account whose collateral the order spends — was silently dropped at routing.
+// A copy that must be edited whenever the message changes is a copy that will be
+// forgotten, and this is the assertion that notices.
+func TestRoute_PreservesTheCollateralTerms(t *testing.T) {
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	cmd.MarginMode = orderpb.MarginMode_MARGIN_MODE_ISOLATED
+	cmd.Leverage = d(3, 0)
+
+	st, err := Accept(cmd, t0)
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	routed := Route(st, t0)
+
+	if got := routed.GetMarginMode(); got != orderpb.MarginMode_MARGIN_MODE_ISOLATED {
+		t.Fatalf("after Route, margin_mode = %s, want ISOLATED.\n\n"+
+			"Route is on the path to Venue.Execute, so a transition that drops the regime drops "+
+			"it exactly where the connector reads it — and both connectors' refusals key on "+
+			"st.GetMarginMode(), so the order would be placed as ordinary SPOT while the audit "+
+			"root records the regime the trader asked for.", got)
+	}
+	if got := routed.GetLeverage(); dec.Cmp(got, d(3, 0)) != 0 {
+		t.Fatalf("after Route, leverage = %v, want 3 — dropped here, the platform reserves margin "+
+			"and buying power against a multiple the venue never applied", got)
+	}
+}
+
+// AND THEY SURVIVE AN AMEND. Amend clones the state and rewrites quantity and
+// price; a clone that lost the regime would leave an order the connector reads
+// as spot after a routine resize — the divergence arriving through the one
+// command whose whole purpose is to change something else.
+func TestAmend_PreservesTheCollateralTerms(t *testing.T) {
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	cmd.MarginMode = orderpb.MarginMode_MARGIN_MODE_CROSS
+	cmd.Leverage = d(5, 0)
+
+	st, err := Accept(cmd, t0)
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	next, err := Amend(st, &orderpb.AmendOrder{OrderId: st.GetOrderId(), NewQuantity: d(50, 0)}, t0)
+	if err != nil {
+		t.Fatalf("Amend: %v", err)
+	}
+	if got := next.GetMarginMode(); got != orderpb.MarginMode_MARGIN_MODE_CROSS {
+		t.Fatalf("after Amend, margin_mode = %s, want CROSS — a resize must not silently move the "+
+			"order to spot", got)
+	}
+	if got := next.GetLeverage(); dec.Cmp(got, d(5, 0)) != 0 {
+		t.Fatalf("after Amend, leverage = %v, want 5", got)
+	}
+}

@@ -47,13 +47,13 @@ var closeRegistry = execution.NewCloseRegistry()
 // is ever reached in production the OMS is filling orders against nothing, so it
 // says so at WARN in as many words, and the router hard-errors on any MIC it has
 // no venue for rather than quietly routing there.
-func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, unverified, undeclared, undeclaredTIF prometheus.Counter, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
+func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, unverified, undeclared, undeclaredTIF, undeclaredMargin prometheus.Counter, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
 	var venues []execution.Venue
 
 	// INFRA-M7a: out-of-process adapters. These need no build tag and link no
 	// vendor code — the OMS speaks venue.v1 over mTLS and never imports an
 	// exchange SDK. They are the path that retires the tags above.
-	grpcVenues, catalogue, closeConns, err := dialVenues(ctx, cfg, unverified, undeclared, undeclaredTIF, logger)
+	grpcVenues, catalogue, closeConns, err := dialVenues(ctx, cfg, unverified, undeclared, undeclaredTIF, undeclaredMargin, logger)
 	if err != nil {
 		// A configured venue that will not dial is FATAL, not a degradation. The
 		// alternative is booting without it and silently routing its orders
@@ -129,7 +129,7 @@ func parseMICs(s string) []string {
 // the account the adapter really holds while the ledger booked them to the one named
 // here, which is the exact failure EXEC-M16 exists to prevent, arriving through the
 // one door EXEC-M16 left open.
-func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared, undeclaredTIF prometheus.Counter, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
+func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared, undeclaredTIF, undeclaredMargin prometheus.Counter, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
 	endpoints := parseSymbolMap(cfg.VenueEndpoints) // MIC → address; same "K=V,K=V" form
 	if len(endpoints) == 0 {
 		return nil, nil, func() {}, nil
@@ -279,6 +279,37 @@ func dialVenues(ctx context.Context, cfg config.Config, unverified, undeclared, 
 				"announced, and refused by the connector",
 				"mic", mic, "account", account, "endpoint", addr,
 				"fix", "upgrade the adapter so venue.v1.Describe reports supported_time_in_force")
+		}
+
+		// AND WHICH COLLATERAL REGIMES IT CAN EXPRESS (#417/#742). The fifth
+		// member of this family, and until now the only one with NO signal at
+		// all: DeclaresMarginModes() existed and nothing called it, so an adapter
+		// with a silently open margin gate looked exactly like one that had been
+		// checked and was fine. "Nothing configured" and "checked, and fine" must
+		// never look the same, and here they did.
+		//
+		// ITS CONSEQUENCE IS THE WORST OF THE THREE. An undeclared order type
+		// produces an order that does nothing; an inexpressible time-in-force
+		// produces one that does the wrong thing; an unrefused collateral regime
+		// produces a REAL position whose regime the fund's records get wrong —
+		// margin and buying power reserved against leverage the exchange never
+		// applied, and no downstream record can tell.
+		//
+		// Reported and counted, NOT fatal, and deliberately with no
+		// OMS_REQUIRE_MARGIN_MODE_SUPPORT beside it: #486 declined that second
+		// switch on the same reasoning, and a third would be a fourth answer to
+		// one question an operator already has two ways to ask.
+		if id.DeclaresMarginModes() {
+			logger.Info("venue adapter declares its collateral regimes — modes it cannot express "+
+				"will be refused at admission", "mic", mic, "margin_modes", id.MarginModes)
+		} else {
+			undeclaredMargin.Inc()
+			logger.Warn("venue adapter declared NO margin modes — the OMS cannot refuse an "+
+				"inexpressible collateral regime at admission for this venue, so a levered order is "+
+				"accepted and announced, and is then either refused by the connector or placed as "+
+				"SPOT while the audit root records margin",
+				"mic", mic, "account", account, "endpoint", addr,
+				"fix", "upgrade the adapter so venue.v1.Describe reports supported_margin_modes")
 		}
 
 		// AND WHAT IT CAN TRADE (#406) — asked once, here, and held. The set is

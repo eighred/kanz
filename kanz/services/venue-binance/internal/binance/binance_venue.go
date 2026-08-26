@@ -138,6 +138,22 @@ func (v *BinanceVenue) MarginModes() []orderpb.MarginMode {
 	return []orderpb.MarginMode{orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED}
 }
 
+// marginModeSupported reports whether this connector can express a collateral
+// regime on the wire. It is the TRANSLATOR half of the capability contract, and
+// it exists as a named function for the same reason orderParams' switch does:
+// the declaration above and the refusal in Execute are two statements of one
+// fact, and nothing in the type system ties them together. Split across a
+// declaration and an inline `!= UNSPECIFIED`, the only way to check they agree
+// was to read both and believe it (#742).
+//
+// /api/v3/order is the SPOT endpoint and carries no margin parameter at all —
+// a margined order is a different API family (/sapi/v1/margin/order), not a
+// flag on this one. So UNSPECIFIED, which IS spot, is the only regime this
+// connector can honestly claim.
+func marginModeSupported(m orderpb.MarginMode) bool {
+	return m == orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED
+}
+
 var _ Venue = (*BinanceVenue)(nil)
 
 // Execute places st on Binance and returns the immediate fills. On any ambiguous
@@ -158,7 +174,7 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 	// order without going through admission. Both are worth failing loudly for:
 	// placing it anyway is a live position whose regime the fund's records get
 	// wrong, and no downstream record could tell.
-	if m := st.GetMarginMode(); m != orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED {
+	if m := st.GetMarginMode(); !marginModeSupported(m) {
 		return nil, fmt.Errorf("binance: cannot work an order under %v — this connector places "+
 			"SPOT (/api/v3/order) orders only, so placing it would leave the position unlevered while the "+
 			"audit root records margin", m)

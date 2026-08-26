@@ -170,7 +170,7 @@ func (v *OKXVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orde
 	// order without going through admission. Both are worth failing loudly for:
 	// placing it anyway is a live position whose regime the fund's records get
 	// wrong, and no downstream record could tell.
-	if m := st.GetMarginMode(); m != orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED {
+	if m := st.GetMarginMode(); !marginModeSupported(m) {
 		return nil, fmt.Errorf("okx: cannot work an order under %v — this connector places "+
 			"SPOT (tdMode cash) orders only, so placing it would leave the position unlevered while the "+
 			"audit root records margin", m)
@@ -489,6 +489,22 @@ func okxAlgoBody(st *orderpb.OrderState, instID string) (map[string]string, erro
 // being placed as spot with the audit root claiming leverage.
 func (v *OKXVenue) MarginModes() []orderpb.MarginMode {
 	return []orderpb.MarginMode{orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED}
+}
+
+// marginModeSupported reports whether this connector can express a collateral
+// regime on the wire. It is the TRANSLATOR half of the capability contract, and
+// it exists as a named function for the same reason okxLimitOrdType does: the
+// declaration above and the refusal in Execute are two statements of one fact,
+// and nothing in the type system ties them together. Split across a declaration
+// and an inline `!= UNSPECIFIED`, the only way to check they agree was to read
+// both and believe it (#742).
+//
+// tdMode is the OKX field this would set. The connector sends "cash"
+// unconditionally, so UNSPECIFIED — which IS spot — is the only regime it can
+// honestly claim. Adding cross or isolated here without also sending the
+// matching tdMode would place a spot order while the audit root recorded margin.
+func marginModeSupported(m orderpb.MarginMode) bool {
+	return m == orderpb.MarginMode_MARGIN_MODE_UNSPECIFIED
 }
 
 func (v *OKXVenue) TimeInForce() []orderpb.TimeInForce {

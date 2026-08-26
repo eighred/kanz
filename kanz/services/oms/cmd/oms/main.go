@@ -665,6 +665,29 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(undeclaredTimeInForce)
 
+	// A THIRD COUNTER, ON THE SAME REASONING (#742). Margin mode is the fifth
+	// capability in this family and was the only member with NO dial-time signal
+	// at all: DeclaresMarginModes() existed and had zero callers, so an adapter
+	// with a silently open margin gate was indistinguishable from one that had
+	// been checked and was fine. That is the distinction CLAUDE.md says must
+	// never collapse.
+	//
+	// Its consequence is the most expensive of the three. An undeclared order
+	// type produces an order that does NOTHING; an inexpressible time-in-force
+	// produces one that does the WRONG THING; an unrefused collateral regime
+	// produces a position that is REAL and whose regime the fund's records get
+	// wrong — the platform reserves margin and buying power against leverage the
+	// exchange never applied.
+	undeclaredMarginModes := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "kanz_oms_undeclared_venue_margin_modes_total",
+		Help: "Venue adapters that did not declare which collateral regimes they can express. " +
+			"Non-zero means this OMS cannot refuse an inexpressible margin mode at admission for " +
+			"that venue, so a levered order is accepted, announced, and either refused by the " +
+			"connector or placed as spot — leaving a real position whose regime the audit root " +
+			"records wrongly.",
+	})
+	obs.Registry.MustRegister(undeclaredMarginModes)
+
 	if bindings.Empty() {
 		logger.Warn("COLLATERAL IS SHARED — no venue-account bindings configured (OMS_VENUE_ACCOUNTS). Every portfolio trades whatever account its venue adapter holds, so they all margin against ONE pool per venue: a liquidation caused by one portfolio consumes the margin of all of them, and each ledger still reports its own cash intact")
 	} else if cfg.RequireVenueAccount {
@@ -685,7 +708,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// Venue set is composition-root-selected: SimVenue by default; Binance Spot +
 	// its user-data/reconciliation/ticker workers under -tags binance
 	// (configuredVenues is build-tag split, wired to the shared order store).
-	venues, catalogue, closeVenues, err := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, undeclaredOrderTypes, undeclaredTimeInForce, logger)
+	venues, catalogue, closeVenues, err := configuredVenues(ctx, cfg, store, producer, unverifiedAccounts, undeclaredOrderTypes, undeclaredTimeInForce, undeclaredMarginModes, logger)
 	if err != nil {
 		return false, err
 	}

@@ -94,7 +94,7 @@ func TestDialVenuesRefusesAnAdapterHoldingAnotherAccount(t *testing.T) {
 		VenueEndpoints: "XOKX/okx-sub-1=" + addr,
 	}
 
-	_, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
+	_, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err == nil {
 		t.Fatal("dialVenues accepted an adapter that holds a DIFFERENT account's credential")
 	}
@@ -116,7 +116,7 @@ func TestDialVenuesAcceptsAnAgreeingAdapter(t *testing.T) {
 	})
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
-	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
+	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestDialVenuesRefusesAnUnverifiedAccountWhenRequired(t *testing.T) {
 		RequireVerifiedAccount: true,
 	}
 
-	if _, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger()); err == nil {
+	if _, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger()); err == nil {
 		t.Fatal("dialVenues accepted an UNVERIFIED account with OMS_REQUIRE_VERIFIED_ACCOUNT=true")
 	}
 }
@@ -156,7 +156,7 @@ func TestDialVenuesCountsAnUnverifiedAccountByDefault(t *testing.T) {
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
 	unverified := unverifiedCounter()
-	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverified, undeclaredCounter(), undeclaredCounter(), quietLogger())
+	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverified, undeclaredCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestDialVenuesRefusesAnAdapterThatDeclaresNoOrderTypes(t *testing.T) {
 		RequireOrderTypeSupport: true,
 	}
 
-	_, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
+	_, _, _, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err == nil {
 		t.Fatal("dialVenues accepted an adapter that declared NO order types with OMS_REQUIRE_ORDER_TYPE_SUPPORT=true")
 	}
@@ -205,8 +205,8 @@ func TestDialVenuesCountsAnUndeclaredAdapterByDefault(t *testing.T) {
 	})
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
-	undeclared, undeclaredTIF := undeclaredCounter(), undeclaredCounter()
-	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclared, undeclaredTIF, quietLogger())
+	undeclared, undeclaredTIF, undeclaredMargin := undeclaredCounter(), undeclaredCounter(), undeclaredCounter()
+	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclared, undeclaredTIF, undeclaredMargin, quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -240,8 +240,8 @@ func TestDialVenuesArmsTheGateForADeclaringAdapter(t *testing.T) {
 	})
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
-	undeclared, undeclaredTIF := undeclaredCounter(), undeclaredCounter()
-	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclared, undeclaredTIF, quietLogger())
+	undeclared, undeclaredTIF, undeclaredMargin := undeclaredCounter(), undeclaredCounter(), undeclaredCounter()
+	venues, _, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclared, undeclaredTIF, undeclaredMargin, quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestDialVenuesBuildsTheCatalogueFromTheAdapters(t *testing.T) {
 		VenueEndpoints: "XBIN/binance-main=" + bin + ",XOKX/okx-sub-1=" + okx,
 	}
 
-	_, catalogue, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
+	_, catalogue, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestDialVenuesSurvivesAnAdapterThatCannotList(t *testing.T) {
 		VenueEndpoints: "XBIN/binance-main=" + mute + ",XOKX/okx-sub-1=" + okx,
 	}
 
-	venues, catalogue, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
+	venues, catalogue, closeConns, err := dialVenues(context.Background(), cfg, unverifiedCounter(), undeclaredCounter(), undeclaredCounter(), undeclaredCounter(), quietLogger())
 	if err != nil {
 		t.Fatalf("one adapter that cannot list its instruments refused the whole boot: %v", err)
 	}
