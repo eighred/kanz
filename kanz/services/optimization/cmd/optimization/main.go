@@ -19,6 +19,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/platform/httpserver"
@@ -136,14 +137,75 @@ func run() int {
 			}()
 		}
 		serverOpts = append(serverOpts, server.WithHaltGate(haltGate))
+
+		// THE MANDATE SOURCE, WHICH IS WHAT MAKES /v1/orders REACHABLE (#751).
+		//
+		// Until this, /v1/propose ran Optimize then Rebalance inline — every step
+		// of optimization.Propose except the mandate check — so every proposal
+		// carried MandateUnchecked and bridge.ToOrders refused it. The route
+		// refused out loud rather than certifying a check that never ran (#646),
+		// which was right, and left the service unable to do the one thing it
+		// exists for.
+		//
+		// THE OMS'S PATTERN, DELIBERATELY, not a second answer: the same
+		// MandateRegistry fed by the same lifecycle.v1.ConfigChanged FACTs on the
+		// same subject, so a mandate means here exactly what it means on the
+		// capital path. A mandate this service invented, or accepted from the
+		// requester, would be a control in name only.
+		//
+		// Broadcast, not a queue group: a mandate must reach EVERY replica, or one
+		// pod proposes under governance and its neighbour proposes ungoverned.
+		mandateReg := comp.NewMandateRegistry(comp.WithMandateLogger(logger))
+		mandateRejected := prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "kanz_compliance_mandate_rejected_total",
+			Help: "Mandate messages this process consumed and could not apply. Each one leaves a " +
+				"portfolio un-proposable-for until the mandate is republished.",
+		})
+		obs.Registry.MustRegister(mandateRejected)
+		mandateConsumer := comp.NewMandateConsumer(mandateReg, logger,
+			comp.WithMandateRejectionObserver(func(string, string) { mandateRejected.Inc() }))
+		go func() {
+			logger.Info("optimization arming the mandate registry", "subject", comp.SubjectMandateAll)
+			// SubscribeBroadcastReady, not SubscribeBroadcast: Arm fires only once
+			// DeliverLastPerSubject has drained, so the registry is not consulted
+			// while it still holds a partial view of who is governed.
+			err := consumer.SubscribeBroadcastReady(ctx, comp.SubjectMandateAll, mandateConsumer.Handle, mandateReg.Arm)
+			if err != nil && ctx.Err() == nil {
+				// NOT FATAL, and not silent. An unarmed registry answers "no
+				// mandate governs this" for every portfolio, which produces
+				// MandateUnchecked proposals — the pre-#751 behaviour, refused at
+				// /v1/orders. That is the safe direction, and it must be visible
+				// or it reads as "this portfolio has no constraints".
+				logger.Error("mandate subscription ended — every proposal will be MandateUnchecked "+
+					"and /v1/orders will refuse it until this service is restarted", "err", err)
+			}
+		}()
+
+		// The classifier the SECTOR / ISSUER / ASSET_CLASS dimensions resolve
+		// through. Absent, those dimensions are UNRESOLVABLE and the engine
+		// REFUSES rather than passing (#640) — so a mandate naming a sector cap
+		// makes the proposal infeasible with a named reason instead of silently
+		// feasible, which is the correct failure and still a reason to wire it.
+		refCache, rerr := cfg.RefData.NewCache(cfg.Tenant, "svc:optimization")
+		if rerr != nil {
+			logger.Error("optimization: the instrument classifier refused its configuration", "err", rerr)
+			return 2
+		}
+		cfg.RefData.LogPosture(logger, "optimization")
+		gate := server.MandateGate{Mandates: mandateReg, Engine: comp.NewEngine(nil)}
+		if refCache != nil {
+			gate.Classifier = refCache.Compliance()
+		}
+		serverOpts = append(serverOpts, server.WithMandateGate(gate))
 	}
 	switch {
 	case cfg.AutoPublish:
 		logger.Warn("AUTO-PUBLISH IS ARMED — a materialized rebalance proposal's orders go straight to "+
 			"the bus with no human approval step. Every order is still attributed to the "+
 			"gateway-authenticated caller and re-checked by the OMS's pre-trade gate on admission. "+
-			"NOTHING CAN BE MATERIALIZED IN THIS BUILD: no mandate source is wired here, so every "+
-			"proposal the service builds is MandateUnchecked and /v1/orders refuses it (#646)",
+			"A proposal is materialized only once a mandate check has passed it; with no broker "+
+			"the mandate registry is unarmed, every proposal is MandateUnchecked, and /v1/orders "+
+			"refuses it (#646/#751)",
 			"broker", cfg.NATSURL)
 		armed := publish.NewMaterializer(producer, autoPublished, factsLost)
 		serverOpts = append(serverOpts, server.WithAutoPublish(
@@ -153,16 +215,15 @@ func run() int {
 		// the FACT still gets recorded, so a dry run is visible rather than
 		// invisible. Say which mode this is so the two are never guessed at.
 		logger.Info("auto-publish is OFF — materialized proposals are returned to the caller and " +
-			"nothing is sent to the bus (set OPTIMIZATION_AUTO_PUBLISH=true to change that). No " +
-			"proposal can be materialized at all until a mandate source is wired: /v1/orders " +
-			"refuses one nothing has checked (#646)")
+			"nothing is sent to the bus (set OPTIMIZATION_AUTO_PUBLISH=true to change that). Only " +
+			"a proposal the mandate check passed can be materialized at all (#646/#751)")
 		recorder := publish.NewRecorder(producer, factsLost)
 		serverOpts = append(serverOpts, server.WithAutoPublish(
 			func(tenant string) server.Materializer { return recorder.ForTenant(tenant) }))
 	default:
 		logger.Info("no broker configured — materialized proposals are returned to the caller and " +
-			"nothing is recorded on the bus. No proposal can be materialized at all until a " +
-			"mandate source is wired: /v1/orders refuses one nothing has checked (#646)")
+			"nothing is recorded on the bus. NO MANDATE SOURCE IS REACHABLE WITHOUT A BROKER, so " +
+			"every proposal is MandateUnchecked and /v1/orders refuses it (#646/#751)")
 	}
 
 	readiness := &server.Readiness{}
@@ -279,8 +340,11 @@ func buildBus(ctx context.Context, cfg config.Config, gate *halt.Gate, logger *s
 		_ = mesh.Close()
 		return nil, nil, func() {}, err
 	}
-	// THE CONSUMER EXISTS FOR ONE SUBJECT: the halt FACT (#739). This service
-	// subscribes to nothing else — its inputs arrive in the request body.
+	// THE CONSUMER SERVES TWO SUBJECTS: the halt FACT (#739) and the mandate
+	// stream (#751). The market inputs still arrive in the request body — what
+	// the bus carries is the two things a caller must not be able to supply,
+	// namely whether trading is permitted at all and whose rules govern the
+	// portfolio.
 	//
 	// WithDLQ even though the broadcast path never routes there, for the reason
 	// the gateway's identical consumer states: test/arch/bus_dlq_test.go exempts

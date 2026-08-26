@@ -17,6 +17,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -24,9 +25,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 	optimizationpb "github.com/eighred/kanz/kanz-schemas-go/optimization/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/optimization"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/auth"
@@ -68,7 +71,44 @@ type Server struct {
 	// The dry-run path never consults it — a halt refuses new execution
 	// exposure, and a proposal that reaches nobody is not exposure.
 	halt *halt.Gate
+
+	// gate is what /v1/propose needs to reach a mandate verdict, or is the zero
+	// value.
+	//
+	// ZERO IS THE OLD BEHAVIOUR, EXACTLY: no mandate resolves, CheckMandate
+	// returns MandateUnchecked, and /v1/orders declines to materialize. Wiring it
+	// is what produces a MandateFeasible proposal and therefore what makes
+	// /v1/orders work at all (#751) — so the option is additive and the unwired
+	// service is no less safe than before, only no more useful.
+	gate MandateGate
 }
+
+// MandateGate is everything the propose path needs to turn a rebalance into a
+// CHECKED one: whose rules apply, the evaluator, and the reference data the
+// sector and issuer dimensions resolve through.
+//
+// ONE NAMED THING rather than three options, because they are useless apart. An
+// engine with no mandate source checks nothing; a mandate source with no
+// classifier resolves SECTOR to the empty bucket, which compliance refuses as
+// unresolvable rather than passing (#640) — so a partial gate produces a
+// confident refusal instead of a verdict, and that is worse than an honest
+// MandateUnchecked. Supplying them together makes the partial case a visible
+// choice at the composition root instead of a silent one.
+type MandateGate struct {
+	// Mandates resolves the mandate governing a portfolio, per TENANT. Nil ⇒ no
+	// verdict is reachable and every proposal stays MandateUnchecked.
+	Mandates compliance.MandateSource
+	// Engine evaluates the candidate book against the mandate. Nil is tolerated
+	// by CheckMandate (it builds a default), but the composition root supplies
+	// the configured one.
+	Engine *compliance.Engine
+	// Classifier resolves SECTOR / ISSUER / ASSET_CLASS. Nil makes those
+	// dimensions unresolvable, which the engine REFUSES rather than passes.
+	Classifier compliance.Classifier
+}
+
+// Ready reports whether a verdict is reachable at all.
+func (g MandateGate) Ready() bool { return g.Mandates != nil }
 
 // MaterializerFor builds a materializer for ONE tenant — the authenticated
 // caller's.
@@ -104,6 +144,17 @@ type Materializer interface {
 // parameter and a caller passed nil would be exactly the silent acquisition this
 // must never have.
 func WithAutoPublish(f MaterializerFor) Option { return func(s *Server) { s.materializerFor = f } }
+
+// WithMandateGate gives the propose path a mandate source, an evaluator and a
+// classifier (#751).
+//
+// AN OPTION, like the two below, so a deployment that has not wired a mandate
+// stream keeps today's behaviour by construction: proposals come back
+// MandateUnchecked and /v1/orders refuses them. That is the state #646 chose
+// deliberately, and it must stay reachable — a service that started certifying
+// its own rebalances because someone added a constructor parameter and a caller
+// passed the zero value would be the silent acquisition this design refuses.
+func WithMandateGate(g MandateGate) Option { return func(s *Server) { s.gate = g } }
 
 // WithHaltGate hands the server the platform kill-switch (#739).
 //
@@ -183,6 +234,16 @@ type proposeRequest struct {
 	NAV            float64                     `json:"nav"`
 	Prices         map[string]float64          `json:"prices"`
 	Threshold      float64                     `json:"threshold"`
+	// Currency is the unit NAV and Prices are quoted in, needed to build the
+	// candidate book a mandate is evaluated against.
+	//
+	// CALLER-SUPPLIED LIKE THE REST OF THE BOOK, and that is consistent rather
+	// than a hole: this endpoint evaluates a portfolio the caller DESCRIBES —
+	// weights, NAV and prices all arrive in the request — so the verdict is a
+	// feasibility answer about a hypothetical, not an authorization. The
+	// authoritative gate stays the OMS pre-trade path when the resulting orders
+	// are actually submitted, which reads the book from the platform's own record.
+	Currency string `json:"currency"`
 }
 
 // blRequest is the optional Black-Litterman input on /v1/propose. Present ⇒ the
@@ -203,6 +264,18 @@ type viewDTO struct {
 }
 
 func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
+	// WHO IS ASKING — and on this route that is now load-bearing rather than
+	// ceremony. A mandate is resolved PER TENANT, and the tenant comes from the
+	// principal the gateway injects; before the mandate check existed this route
+	// needed no identity, which is why it had none.
+	principal, ok := auth.PrincipalFromHeaders(r.Header)
+	if !ok || principal.Subject == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "no authenticated principal — this surface is reachable only through the api-gateway, " +
+				"and whose mandate governs a portfolio cannot be answered without one",
+		})
+		return
+	}
 	var req proposeRequest
 	if !decode(w, r, &req) {
 		return
@@ -221,21 +294,94 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 		}
 		in.ExpectedReturns = mu
 	}
-	res, err := optimization.Optimize(in, req.Objective, req.Constraints)
+	// ONE CALL, NOT TWO STEPS AND A MISSING THIRD (#751). This handler used to
+	// run Optimize then Rebalance inline and stop — which is every step of
+	// optimization.Propose except the mandate check, so the proposal it returned
+	// carried MandateStatus's zero value and /v1/orders refused it. Calling
+	// Propose is what makes a MandateFeasible proposal reachable; the mandate
+	// below is what makes the verdict real rather than asserted.
+	now := time.Now()
+	mandate, ok := s.resolveMandate(w, r, principal, req.PortfolioID, now)
+	if !ok {
+		return
+	}
+	if mandate != nil && req.Currency == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "currency is required when a mandate governs this portfolio: the candidate book " +
+				"is valued in it, and a currency restriction evaluated against an unstated unit " +
+				"would be a verdict about nothing",
+		})
+		return
+	}
+	proposal, err := optimization.Propose(r.Context(), req.PortfolioID, in, req.Objective, req.Constraints,
+		req.Current, req.NAV, req.Prices, req.Threshold,
+		s.gate.Classifier, s.gate.Engine, mandate, req.Currency, now)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	proposal := optimization.Rebalance(req.PortfolioID, req.Current, res.Weights, req.NAV, req.Prices, req.Threshold, time.Now())
-	proposal.Objective = req.Objective
-	proposal.ExpectedReturn = res.ExpectedReturn
-	// BOTH FIELDS OR NEITHER. ExpectedRisk is nil whenever the covariance could
-	// not support a risk number, and CovarianceQuality is what says why — a
-	// response carrying the first without the second would put a null on the wire
-	// with no explanation for it (#621).
-	proposal.ExpectedRisk = res.ExpectedRisk
-	proposal.CovarianceQuality = res.CovarianceQuality
 	writeJSON(w, http.StatusOK, proposal)
+}
+
+// resolveMandate asks WHOSE RULES APPLY, and fails closed when it cannot say.
+//
+// The tenant comes from the authenticated principal and never from the body:
+// MandateSource takes a tenantID in its signature precisely so no caller can
+// reach a mandate without saying whose, after tenant B's "growth" order was once
+// evaluated against tenant A's "growth" limits (#243).
+//
+// A source that ERRORS does not fall through to an unchecked proposal. An
+// unresolvable tenant is terminal — nobody can say which rules apply — and any
+// other error is transient; both refuse here rather than returning a proposal
+// whose MandateStatus would read as "not checked" when the truth is "could not
+// be checked". Those spell the same thing to a reader and mean different things
+// to an operator.
+func (s *Server) resolveMandate(w http.ResponseWriter, r *http.Request, principal *auth.Principal,
+	portfolioID string, asOf time.Time) (*compliancepb.Mandate, bool) {
+
+	if s.gate.Mandates == nil {
+		// No source wired: the pre-#751 posture, and it stays honest — the
+		// proposal comes back MandateUnchecked and /v1/orders declines it.
+		return nil, true
+	}
+	m, found, err := s.gate.Mandates.Mandate(r.Context(), principal.Tenant, portfolioID, asOf)
+	switch {
+	// BOTH TERMINAL SENTINELS, and they are terminal for the same reason: no
+	// amount of asking again makes the answer appear. An unresolvable tenant
+	// means nobody can say which rules apply; an unreadable mandate means the
+	// rules that do apply cannot be parsed. Letting either fall through to the
+	// transient arm below tells the caller to retry against data that cannot
+	// change — which on the bus is an infinite redelivery that starves every
+	// other portfolio of evaluation (#619), and here is a client retrying
+	// forever. Refuse once, and say which it was.
+	case errors.Is(err, compliance.ErrMandateTenantUnresolved),
+		errors.Is(err, compliance.ErrMandateUnreadable):
+		s.logger.WarnContext(r.Context(), "mandate is terminally unusable for a rebalance proposal",
+			"portfolio_id", portfolioID, "tenant", principal.Tenant, "err", err)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "the mandate governing this portfolio could not be established or could not be " +
+				"read, so none of its rules were evaluated and no proposal is returned. This does " +
+				"not resolve on retry — the mandate must be republished",
+		})
+		return nil, false
+	case err != nil:
+		s.logger.ErrorContext(r.Context(), "mandate lookup failed for a rebalance proposal",
+			"portfolio_id", portfolioID, "tenant", principal.Tenant, "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "the mandate source could not be read; this is retryable and no proposal is " +
+				"returned rather than one nothing checked",
+		})
+		return nil, false
+	case !found:
+		// NO MANDATE GOVERNS IT. CheckMandate answers MandateUnchecked for a nil
+		// mandate — deliberately, because "nobody declared constraints" is not the
+		// same claim as "the constraints were evaluated and passed" — so such a
+		// portfolio still cannot materialize orders here. That is the honest
+		// reading and it is recorded on #751 rather than papered over by
+		// returning a verdict nothing produced.
+		return nil, true
+	}
+	return m, true
 }
 
 // --- materialize to orders ---------------------------------------------------

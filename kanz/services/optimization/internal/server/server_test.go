@@ -59,7 +59,7 @@ func TestServer_Propose(t *testing.T) {
 		"objective":{"Type":1},
 		"current_weights":{"A":1.0},"nav":100000,
 		"prices":{"A":10,"B":10}}`
-	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
 	}
@@ -205,7 +205,7 @@ func TestARoundTrippedProposalIsRefusedAsUncheckedNotAsForged(t *testing.T) {
 		"objective":{"Type":1},
 		"current_weights":{"A":1.0},"nav":100000,
 		"prices":{"A":10,"B":10}}`
-	proposed := do(t, s, http.MethodPost, "/v1/propose", proposeBody)
+	proposed := asPrincipal(t, s, http.MethodPost, "/v1/propose", proposeBody, "user:pm")
 	if proposed.Code != http.StatusOK {
 		t.Fatalf("propose: got %d body %s", proposed.Code, proposed.Body.String())
 	}
@@ -293,7 +293,7 @@ func TestServer_Propose_BlackLitterman(t *testing.T) {
 		"black_litterman":{"market_weights":[0.5,0.5],"risk_aversion":2.5,"tau":0.05,
 			"views":[{"p":[1,0],"q":0.20,"omega":0}]},
 		"current_weights":{"A":0.5,"B":0.5},"nav":100000,"prices":{"A":10,"B":10}}`
-	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("propose+BL: got %d body %s", rec.Code, rec.Body.String())
 	}
@@ -316,7 +316,7 @@ func TestServer_Propose_BlackLittermanInvalid(t *testing.T) {
 		"black_litterman":{"market_weights":[0.5,0.5],"risk_aversion":0,"tau":0.05,
 			"views":[{"p":[1,0],"q":0.20,"omega":0}]},
 		"current_weights":{"A":0.5,"B":0.5},"nav":100000,"prices":{"A":10,"B":10}}`
-	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed BL ⇒ 400, got %d", rec.Code)
 	}
@@ -326,7 +326,7 @@ func TestServer_Propose_BodyTooLarge(t *testing.T) {
 	// A body over the 8 MiB cap ⇒ 400 (MaxBytesReader makes the decoder error).
 	big := strings.Repeat("A", (8<<20)+1024)
 	body := `{"portfolio_id":"` + big + `","instruments":["A"],"covariance":[[0.04]],"objective":{"Type":1}}`
-	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("oversized body ⇒ 400, got %d", rec.Code)
 	}
@@ -344,7 +344,7 @@ func TestProposeDoesNotReportZeroRiskFromAZeroCovariance(t *testing.T) {
 		"objective":{"Type":1},
 		"current_weights":{"A":1.0},"nav":100000,
 		"prices":{"A":10,"B":10}}`
-	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
 	}
@@ -399,7 +399,7 @@ func TestProposeReportsWhetherTheCovarianceWasVouchedFor(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", fmt.Sprintf(base, tc.extra))
+			rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", fmt.Sprintf(base, tc.extra), "user:pm")
 			if rec.Code != http.StatusOK {
 				t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
 			}
@@ -440,7 +440,7 @@ func TestProposeRefusesAnUndefinedTangencyPortfolio(t *testing.T) {
 		"objective":{"Type":2},
 		"current_weights":{"A":1.0},"nav":100000,
 		"prices":{"A":10,"B":10}}`
-	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", body)
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("a singular Σ under MaxSharpe got %d, want 400: %s", rec.Code, rec.Body.String())
 	}

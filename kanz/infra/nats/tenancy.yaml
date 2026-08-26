@@ -712,8 +712,27 @@ data:
               # symptom is not "trades through a halt" but "refuses every
               # rebalance forever", which is a different and equally wrong
               # outcome. The grant and the Go wiring are one change.
+              #
+              # AND THE MANDATE STREAM (#751), for the same reason and with the
+              # same failure mode. /v1/propose now runs the COMP-01 mandate check
+              # so a rebalance can be materialized at all; the mandate arrives as
+              # the lifecycle.v1.ConfigChanged FACT on this subject, replayed
+              # DeliverLastPerSubject so a starting pod holds the mandate in force
+              # for every portfolio.
+              #
+              # WITHOUT THE GRANT THE SERVICE STARTS FINE AND IS WRONG QUIETLY:
+              # the subscription is refused, MandateRegistry.Arm never fires, the
+              # registry answers "no mandate governs this" for every portfolio,
+              # and every proposal comes back MandateUnchecked — which reads as
+              # "this portfolio has no constraints" and materializes nothing. The
+              # grant and the Go wiring are one change, exactly as the halt
+              # subject above.
+              #
+              # BROADCAST, NOT A QUEUE GROUP: a mandate must reach EVERY replica,
+              # or one pod proposes under governance and its neighbour proposes
+              # ungoverned. The manifest declares replicas: 2.
               subscribe: {
-                allow: [ "platform.mode.changed", "_INBOX.>" ]
+                allow: [ "platform.mode.changed", "compliance.mandate.changed.>", "_INBOX.>" ]
               }
             }
           }
