@@ -27,6 +27,14 @@ import (
 // not enforce cross-tenant isolation without it. An empty owner_tenant (the
 // engine has no ownership record) resolves to "" — the deny-by-default gate then
 // denies, so a missing owner fails closed, never open.
+//
+// THAT LAST SENTENCE WAS FALSE UNTIL #741, and is worth reading as evidence of
+// how quietly it can go false again: the gate skipped the cross-tenant check
+// whenever the resource tenant was empty, so the "" this client so carefully
+// produces was the one value that turned the boundary off. It is now enforced —
+// auth.Authorize refuses a typed resource with no tenant — and proved end to end
+// over a real query.v1 server by TestGRPCGate_EmptyOwnerTenantFromTheEngine-
+// FailsClosed, rather than asserted here.
 type GRPCClient struct {
 	client querypb.RiskQueryServiceClient
 }

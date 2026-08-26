@@ -31,8 +31,13 @@ const (
 const ClaimPortfolios = "portfolios"
 
 // Resource is the thing being acted upon, carrying the attributes the decision
-// keys on. Tenant-scoped resource types (e.g. portfolio) MUST populate Tenant
-// so the cross-tenant guard can run; a tenant-agnostic resource leaves it empty.
+// keys on.
+//
+// A RESOURCE THAT NAMES A TYPE MUST NAME ITS TENANT. Authorize refuses a typed
+// resource whose Tenant is empty (DenyResourceTenantUnresolved) rather than
+// treating it as tenant-agnostic — do not pass "" as a stand-in for an ownership
+// lookup that failed. A request addressing no resource at all leaves the whole
+// struct zero.
 type Resource struct {
 	Type   string
 	ID     string
@@ -46,12 +51,63 @@ type Request struct {
 	Resource  Resource
 }
 
-// Decision is the authorization outcome. Reason is audit-facing — it is what
-// AUTH-01d logs into the observation stream for every allow AND deny, so the
-// "why" of a decision is always reconstructable.
+// DenyCode names WHY authorization refused, as a closed set a caller can switch
+// on. It exists because a caller must be able to tell an ISOLATION refusal from
+// an ordinary "your role does not carry this" — and must do so without parsing
+// Reason, which is an English sentence written for a human reading the audit
+// trail and is free to change wording.
+//
+// The distinction is not cosmetic. An isolation refusal has to be rendered back
+// to the caller as "there is nothing here", because a caller that can tell
+// "another tenant owns this" apart from "this does not exist" holds a
+// cross-tenant existence oracle (#741). A missing-grant refusal is about the
+// caller's own token and may be stated plainly.
+type DenyCode string
+
+const (
+	// DenyNone is the zero value, carried by every allow.
+	DenyNone DenyCode = ""
+	// DenyNoPrincipal — the request carried no authenticated principal.
+	DenyNoPrincipal DenyCode = "no_principal"
+	// DenyEmptyAction — the request named no action.
+	DenyEmptyAction DenyCode = "empty_action"
+	// DenyPrincipalNoTenant — the principal itself carries no tenant.
+	DenyPrincipalNoTenant DenyCode = "principal_no_tenant"
+	// DenyCrossTenant — the resource belongs to a tenant other than the
+	// principal's. An isolation refusal.
+	DenyCrossTenant DenyCode = "cross_tenant"
+	// DenyResourceTenantUnresolved — a typed resource arrived carrying no
+	// tenant, so isolation could not be established at all. An isolation
+	// refusal: it is the UNKNOWN case, and a critical unknown fails closed.
+	DenyResourceTenantUnresolved DenyCode = "resource_tenant_unresolved"
+	// DenyPortfolioOutOfScope — the portfolio is not on the principal's
+	// allow-list.
+	DenyPortfolioOutOfScope DenyCode = "portfolio_out_of_scope"
+	// DenyNoGrant — no role the principal holds grants the action.
+	DenyNoGrant DenyCode = "no_grant"
+)
+
+// IsIsolation reports whether the refusal was the tenant boundary rather than a
+// grant. A caller rendering a refusal to an untrusted reader MUST collapse these
+// to the same answer it gives for "no such resource"; see DenyCode.
+func (c DenyCode) IsIsolation() bool {
+	return c == DenyCrossTenant || c == DenyResourceTenantUnresolved
+}
+
+// Decision is the authorization outcome.
+//
+// REASON IS AUDIT-FACING AND ONLY AUDIT-FACING. It is what AUTH-01d logs into
+// the observation stream for every allow AND deny, so the "why" of a decision is
+// always reconstructable — which is exactly why it names the resource's owning
+// tenant on a cross-tenant deny. That makes it unsafe to return to the caller
+// being denied: concatenated into a copilot tool result it published one
+// tenant's id into another tenant's model context (#741). Branch on Code and
+// render your own fixed text; log Reason.
 type Decision struct {
 	Allow  bool
 	Reason string
+	// Code is the machine-readable refusal class, DenyNone on an allow.
+	Code DenyCode
 }
 
 // Authorizer renders a deny-by-default authorization decision.
@@ -121,19 +177,39 @@ var _ Authorizer = (*PolicyAuthorizer)(nil)
 func (a *PolicyAuthorizer) Authorize(_ context.Context, req Request) Decision {
 	p := req.Principal
 	if p == nil {
-		return deny("no authenticated principal")
+		return deny(DenyNoPrincipal, "no authenticated principal")
 	}
 	if req.Action == "" {
-		return deny("empty action")
+		return deny(DenyEmptyAction, "empty action")
 	}
-	// Tenant isolation (ABAC): the principal must carry a tenant, and a
-	// tenant-scoped resource must belong to it. A resource with no tenant is
-	// treated as not tenant-scoped (e.g. health) and skips the boundary.
+	// Tenant isolation (ABAC): the principal must carry a tenant, and a TYPED
+	// resource must name the tenant it belongs to.
 	if p.Tenant == "" {
-		return deny("principal has no tenant")
+		return deny(DenyPrincipalNoTenant, "principal has no tenant")
+	}
+	// AN EMPTY TENANT ON A TYPED RESOURCE IS UNKNOWN, NOT "TENANT-AGNOSTIC".
+	//
+	// This gate used to read `if req.Resource.Tenant != ""`, so an unpopulated
+	// tenant skipped the boundary entirely — the reading being that a resource
+	// with no tenant is not tenant-scoped (a health probe, a bare capability
+	// check). That reading is right for a request naming NO resource, and wrong
+	// for one naming a portfolio: "" is precisely the value a caller produces
+	// when the ownership lookup FAILED, and the copilot produced it on every
+	// error from OwnerTenant. A deadline or a 500 on that lookup therefore
+	// removed the tenant boundary for that invocation while the rest of the gate
+	// still passed, and the tool then read the data (#741).
+	//
+	// So the discriminator is Type, not Tenant. Resource{} still addresses
+	// nothing and stays tenant-agnostic; a typed resource must say who owns it
+	// or it is refused. That turns a caller's unresolved lookup into a refusal
+	// instead of a bypass — the same rule as "a critical unknown fails closed",
+	// applied to isolation.
+	if req.Resource.Type != "" && req.Resource.Tenant == "" {
+		return deny(DenyResourceTenantUnresolved, fmt.Sprintf(
+			"%s %q carries no tenant: isolation cannot be established", req.Resource.Type, req.Resource.ID))
 	}
 	if req.Resource.Tenant != "" && req.Resource.Tenant != p.Tenant {
-		return deny(fmt.Sprintf("cross-tenant denied: principal tenant %q != resource tenant %q", p.Tenant, req.Resource.Tenant))
+		return deny(DenyCrossTenant, fmt.Sprintf("cross-tenant denied: principal tenant %q != resource tenant %q", p.Tenant, req.Resource.Tenant))
 	}
 	// Portfolio scope (ABAC): if the principal is restricted to an explicit
 	// portfolio allow-list, the target portfolio must be on it.
@@ -143,7 +219,7 @@ func (a *PolicyAuthorizer) Authorize(_ context.Context, req Request) Decision {
 	// each other in portfolio.go with the argument for each, and this call site
 	// must not be "unified" with the OMS's without reading it (#225).
 	if req.Resource.Type == ResourcePortfolio && !PortfolioInScope(p.Portfolios, req.Resource.ID) {
-		return deny(fmt.Sprintf("portfolio %q not in principal scope", req.Resource.ID))
+		return deny(DenyPortfolioOutOfScope, fmt.Sprintf("portfolio %q not in principal scope", req.Resource.ID))
 	}
 	// RBAC: some role the principal holds must grant the action.
 	for _, role := range p.Roles {
@@ -153,7 +229,9 @@ func (a *PolicyAuthorizer) Authorize(_ context.Context, req Request) Decision {
 			}
 		}
 	}
-	return deny(fmt.Sprintf("no role grants action %q", req.Action))
+	return deny(DenyNoGrant, fmt.Sprintf("no role grants action %q", req.Action))
 }
 
-func deny(reason string) Decision { return Decision{Allow: false, Reason: reason} }
+func deny(code DenyCode, reason string) Decision {
+	return Decision{Allow: false, Reason: reason, Code: code}
+}

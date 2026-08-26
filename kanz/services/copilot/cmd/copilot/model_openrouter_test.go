@@ -511,7 +511,7 @@ func TestTheAgentLoopRunsAMultiToolTurnOverThisAdapter(t *testing.T) {
 	authz := auth.NewPolicyAuthorizer(&auth.Policy{
 		Roles: map[string][]auth.Action{"analyst": {auth.ActionRiskRead}},
 	})
-	registry := tools.NewRegistry(authz, client, retrieval.IdentityCatalog{})
+	registry := tools.NewRegistry(authz, client, retrieval.IdentityCatalog{}, nil)
 
 	ans, err := agent.New(model, registry).Ask(context.Background(),
 		&auth.Principal{Subject: "pm", Tenant: "t1", Roles: []string{"analyst"}},
