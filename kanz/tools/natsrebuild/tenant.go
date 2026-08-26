@@ -12,7 +12,8 @@ import (
 )
 
 // SystemTenant carries the cross-cutting platform events; its archived topics
-// keep the UN-PREFIXED legacy names (subject-taxonomy.md §6).
+// keep the UN-PREFIXED legacy names (kanz-schemas/README.md § Subject Taxonomy
+// §6).
 //
 // Re-exported from internal/topic, NOT redefined. This was briefly a second copy
 // of the archiver's rule, because the package lived under

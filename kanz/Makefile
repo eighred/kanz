@@ -1,7 +1,7 @@
 # Kanz developer task targets (DEVX-01e). Replaces the hand-run buf-generate
 # flow the team kept rediscovering (regenerate the SDK, remember -mod=mod, the
 # protoc-gen-go-grpc plugin). `make help` lists everything; `make bootstrap`
-# then `make generate test` is the from-scratch path. See docs/onboarding.md.
+# then `make generate test` is the from-scratch path. See dev/README.md.
 
 # The kanz module pins -mod=mod so a stale gen/ SDK is regenerated rather than
 # failing the build (the EVT-15a generated-not-committed stance).

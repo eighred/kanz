@@ -30,7 +30,7 @@ import { validate } from "./validate.js";
 /**
  * Envelope schema version this client builds against. Bumps once per
  * additive change to envelope.proto (rare; see
- * `kanz-schemas/docs/envelope-policy.md` §6).
+ * `kanz-schemas/README.md § Envelope Policy` §6).
  */
 export const ENVELOPE_VERSION = 1;
 

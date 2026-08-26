@@ -1,6 +1,6 @@
 // Package envelope contains cross-component contract tests for the
-// envelope invariants from kanz-schemas/docs/envelope-policy.md §7 and the
-// per-class rules from docs/event-class-rules.md.
+// envelope invariants from kanz-schemas/README.md § Envelope Policy §7 and the
+// per-class rules from kanz-schemas/README.md § Event Class Rules.
 //
 // Where the unit tests in kanz/pkg/bus exercise Validate / Producer
 // internals, these tests sit ABOVE the bus package and treat it as a black

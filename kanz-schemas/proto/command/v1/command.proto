@@ -2,8 +2,9 @@ syntax = "proto3";
 
 // Package command.v1 defines the generic schemas for the COMMAND event class —
 // the universal structure shared by every command, and the universal outcome
-// FACT every command must produce (see kanz-schemas/docs/event-class-rules.md
-// §2). It is to commands what envelope/v1 is to events: the generic layer.
+// FACT every command must produce (see kanz-schemas/README.md § Event Class
+// Rules §2). It is to commands what envelope/v1 is to events: the generic
+// layer.
 //
 // A concrete command (an order command, a rebalance command, ...) is owned by
 // its domain and embeds CommandMetadata as its first field; command.v1 itself

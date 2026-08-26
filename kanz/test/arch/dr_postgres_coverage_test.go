@@ -230,7 +230,7 @@ func TestEveryMigrationOwningServiceHasADecidedDRPosture(t *testing.T) {
 // it. kanz-compliance was added under exactly that constraint.
 //
 // WHAT IT DELIBERATELY DOES NOT ASSERT. That any of this has ever been executed.
-// The DR drill (docs/runbooks/dr-drill.md) is the only thing that proves a
+// The DR drill (infra/dr/README.md) is the only thing that proves a
 // promotion works, it needs two regions, and this box has neither. Green here
 // means the three files agree — not that a failover has been rehearsed.
 func TestEveryMappedDRClusterHasAStandbyAndIsPromotedOnFailover(t *testing.T) {

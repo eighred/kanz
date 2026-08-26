@@ -143,3 +143,155 @@ The guard that stops the rule-outlives-its-producer failure recurring is **#63**
 `kanz/test/arch/observability_metrics_test.go`, and the three dashboards are
 listed in its `metricSurfacesPendingRepair` allow-list until **#123** resolves
 them; the guard's dead-entry check forces those entries out as each is fixed.
+
+## Incident runbooks
+
+The pages an on-call reaches for when one of the alerts above fires. They live
+here — in source control, reviewed and diffed with the code whose failures they
+describe — rather than in a wiki that rots. They were a `docs/runbooks/` tree
+until 2026-08-26; the repository keeps persistent documentation in README files
+beside the thing it is about, so each runbook now sits with its component and the
+generic ones sit here, next to the rules that page for them.
+
+**They are not linked from the alerts yet.** No rule in `operational.rules.yaml`
+carries a `runbook_url` annotation — `grep -c runbook_url infra/` is 0 — so an
+alert does not carry its runbook, and with no Alertmanager (#98) it reaches
+nobody to carry it to. Both halves of that are worth fixing together.
+
+Every runbook answers the same five questions in the same order: **Symptom**
+(what the on-call sees), **Confirm** (copy-pasteable PromQL/kubectl that rules
+out look-alikes), **Impact** (what is and is not degraded), **Mitigate** (the
+fastest safe action to stop the bleeding), **Recover** (return to steady state
+and how to confirm it), **Root-cause pointers** (where to look next). Keep that
+shape when adding one.
+
+**A runbook is only trustworthy if its steps still work.** The SRE-01d GameDay
+schedule (`infra/chaos/gamedays/`) re-runs the matching fault weekly; each
+runbook below names the experiment that exercises it, so the drill is the
+runbook's live test. Treat a GameDay surprise as a runbook bug and fix the page
+in the same PR.
+
+Runbooks that belong to one component live with it: region failover and the
+quarterly drill in `infra/dr/README.md`, broker incidents in
+`infra/nats/README.md`, tenant onboarding in `infra/tenancy/README.md`,
+autonomous remediation in `services/autopilot/README.md`, and the audit and
+SOC 2 engagement cycles in `services/audit/README.md`.
+
+### SLO error-budget burn
+
+Severity **page** · alert `SLOFastBurn` · rehearsed by `infra/chaos/gamedays/gameday-workflow.yaml`.
+
+
+#### Symptom
+A burn-rate alert is firing (`SLOFastBurn` page, or `SLOSlowBurn` /
+`SLOBudgetBurnTicket` / `SLOBudgetBurnChronic`). The alert's `service`/`slo`
+labels name which objective is burning; `burn_rate` names how fast.
+
+#### Confirm
+```promql
+# Current burn vs. the SLO's budget threshold (>1 means burning faster than the
+# 14.4× fast threshold allows):
+slo:sli_error:ratio_rate1h / (14.4 * slo:error_budget:ratio)
+# Budget consumed so far (per SLO):
+slo:sli_error:ratio_rate3d / slo:error_budget:ratio
+```
+
+#### Impact
+The named SLO's 28-day error budget is draining. Map the SLO to user impact:
+`api-gateway/availability` → requests failing; `*/recompute-latency` → slow
+risk; `market-data/freshness` → stale views; `event-bus/delivery-success` →
+handler failures (check the DLQ).
+
+#### Mitigate
+1. Identify the dominant error source for the burning SLI (5xx codes, error
+   status, lagging subject) — the recording rule's underlying series.
+2. If a recent rollout correlates, **abort the canary / roll back**
+   (`kubectl argo rollouts abort <svc> -n kanz-services`, see infra/deploy).
+3. If load-driven, shed or scale (gateway admission is already shedding as 503s
+   if `kanz_gateway_admission_rejected_total` is rising → add capacity).
+
+#### Recover
+Burn stops when `slo:sli_error:ratio_rate5m` drops back under
+`14.4 * slo:error_budget:ratio`; the short window clears the alert within
+minutes. Confirm with the "Confirm" queries trending down.
+
+#### Root-cause pointers
+Per-SLO error series in `infra/observability/slo/slo.recording.rules.yaml`; the
+RED dashboards; the error-budget **policy** (`infra/observability/slo/README.md`)
+— a depleted budget triggers a change freeze + postmortem, not just this page.
+
+### Inference slow → circuit breaker open
+
+Severity **ticket** · SLO `risk-engine/recompute-latency` · rehearsed by `infra/chaos/latency-injection.yaml`.
+
+
+#### Symptom
+Predictions returning DEGRADED with `degraded_reason=circuit_open` (or
+`no_cached_prediction`); the inference dependency is slow/timing out, but the
+caller's own latency stays bounded.
+
+#### Confirm
+```promql
+histogram_quantile(0.99, sum(rate(kanz_risk_recompute_duration_seconds_bucket[5m])) by (le))  # bounded — breaker is shedding
+```
+Degraded predictions surface via the PRED-02 `degraded_reason` on the prediction
+envelope / kanz-py inference logs (`circuit_open`).
+
+#### Impact
+The PRED-07 breaker is doing its job: it opened after consecutive timeouts and
+calls now fast-fail to the degraded fallback instead of blocking. Predictions
+are degraded (last-known/zero-value tagged), but the caller is **not** stalled —
+latency cascade prevented.
+
+#### Mitigate
+1. This is the inference service's problem — triage **it**, not the caller. Check
+   inference pod health/saturation (CPU, model load, GC) in `kanz-services`.
+2. Scale or restart the inference workload if saturated. The breaker half-opens
+   automatically after `BreakerCooldown` and closes once calls succeed again.
+
+#### Recover
+Once inference latency recovers, the breaker closes and predictions return to
+NORMAL (no `degraded_reason`). Confirm degraded predictions stop.
+
+#### Root-cause pointers
+Breaker + per-call timeout + fallback: `internal/prediction/sync_client.go`
+(`CircuitBreaker`, `BreakerThreshold`, `BreakerCooldown`). Degraded reasons:
+PRED-02 §2.
+
+### Service replica lost / crashed
+
+Severity **ticket** · SLO `api-gateway/availability` · rehearsed by `infra/chaos/pod-eviction.yaml`.
+
+
+#### Symptom
+A service pod (api-gateway, risk-engine) evicted, OOMKilled, or crash-looping.
+Usually a non-event for clients — surfaces as a transient blip, not an outage.
+
+#### Confirm
+```promql
+sum(rate(kanz_gateway_requests_total{code=~"5.."}[5m]))   # ~flat if survivors absorb traffic
+sum(rate(kanz_risk_recompute_total[5m]))                  # still advancing (another replica owns partitions)
+```
+```sh
+kubectl get pods -n kanz-services -l app=<service>
+kubectl describe pod <pod> -n kanz-services   # reason: Evicted / OOMKilled / Error
+```
+
+#### Impact
+If `replicas > 1`, survivors serve and no SLO breaches — this is expected
+resilience. A crash-LOOP (not a one-off) on all replicas is a real outage:
+escalate and treat the crash cause.
+
+#### Mitigate
+1. One-off eviction/crash: let the scheduler recreate the pod. No action needed.
+2. Crash-loop: inspect logs (`kubectl logs <pod> -n kanz-services --previous`).
+   OOMKilled → raise memory limits; config/secret error → check the SEC-01d CSI
+   mounts and env (`*_FILE` secret paths).
+
+#### Recover
+Replacement pod reaches Ready and rejoins the consumer group / serving pool.
+Confirm no `SLOFastBurn` fired and throughput is unchanged.
+
+#### Root-cause pointers
+Rollout/replica config: `infra/deploy/risk-engine-rollout.yaml`. The CICD-01e
+canary assumes exactly this replica redundancy.

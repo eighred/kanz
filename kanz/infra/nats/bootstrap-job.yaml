@@ -34,7 +34,7 @@ data:
     svid_bundle_file_name = "bundle.pem"
 ---
 # Stream/consumer provisioning script. Idempotent — re-run after taxonomy
-# changes. Stream layout follows kanz-schemas/docs/subject-taxonomy.md §4:
+# changes. Stream layout follows kanz-schemas/README.md § Subject Taxonomy §4:
 # one stream per domain binding "{domain}.>", plus DLQ. Replay streams are
 # created per-run by replay tooling (EVT-20), not provisioned here.
 apiVersion: v1

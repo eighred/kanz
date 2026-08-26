@@ -25,8 +25,8 @@ const TenantRoutePrefix = "tenant."
 //
 // WHAT IS NOT CHANGED, and this is the part worth protecting: event_type stays
 // the 3-segment logical name. Every consumer, guard, audit projection and Kafka
-// topic keys on it, and kanz-schemas/docs/subject-taxonomy.md defines it as the
-// stable contract. The prefix lives ONLY on the wire inside __system__ —
+// topic keys on it, and kanz-schemas/README.md § Subject Taxonomy defines it as
+// the stable contract. The prefix lives ONLY on the wire inside __system__ —
 // tenancy.yaml's per-account import remaps it back before any workload sees it,
 // so a tenant's OMS subscribes the unchanged name and never learns it exists.
 //

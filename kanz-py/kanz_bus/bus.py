@@ -21,7 +21,8 @@ class Message:
     envelope before calling :meth:`Publisher.publish`.
 
     Attributes:
-        subject: NATS subject / Kafka topic per kanz-schemas/docs/subject-taxonomy.md.
+        subject: NATS subject / Kafka topic, per
+            kanz-schemas/README.md § Subject Taxonomy.
         body: Opaque payload — typically a serialized envelope frame.
         key: Partition key. Used directly as the Kafka message key. NATS has
             no native partition key — wrappers carry it as the

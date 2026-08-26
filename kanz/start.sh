@@ -60,7 +60,7 @@ ${DIM}A Go modular monolith + edge services over a NATS spine (live) and Kafka
     internal/, pkg/  shared analytics + platform libraries
     services/*/migrations/   PostgreSQL schema per durable store (PARITY-02)
     infra/           k8s, GitOps, security, DR (CloudNativePG PITR)
-    docs/            onboarding.md + runbooks/
+    dev/             the local stack + the from-scratch onboarding path
 
   ${BOLD}The local dev stack this script boots${RESET} ${DIM}(dev/docker-compose.yml)${RESET}
     NATS (live spine) · Kafka (durable log) · PostgreSQL · risk-engine · api-gateway
@@ -85,7 +85,7 @@ ensure_sdk() {
   fi
   warn "generated SDK missing — the service Dockerfiles COPY it, so generating now"
   if command -v buf >/dev/null 2>&1; then
-    ( cd ../kanz-schemas && buf generate ) && ok "buf generate done" || die "buf generate failed — see docs/onboarding.md"
+    ( cd ../kanz-schemas && buf generate ) && ok "buf generate done" || die "buf generate failed — see dev/README.md"
   else
     die "buf not found and the SDK is missing. Install buf (https://buf.build/docs/installation), then run 'make generate'."
   fi

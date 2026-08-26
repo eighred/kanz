@@ -51,7 +51,7 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 )
 
-// Event-type names follow kanz-schemas/docs/subject-taxonomy.md §1
+// Event-type names follow kanz-schemas/README.md § Subject Taxonomy §1
 // ({domain}.{entity}.{event_type}, past-tense for FACTs). These are
 // the values external consumers (downstream services, dashboards,
 // audit pipeline) subscribe to.
@@ -260,11 +260,11 @@ func toProtoInputCoverage(c v1.InputCoverage) *domainpb.InputCoverage {
 	}
 }
 
-// toProtoDimension maps the closed domain enum to the proto enum.
-// Domain values without a wire counterpart map to UNSPECIFIED so a
-// future domain-side addition that hasn't yet propagated to the
-// schema still publishes (with consumers seeing the unknown bucket
-// as UNSPECIFIED per event-class-rules.md §3 enum-unknown semantics).
+// toProtoDimension maps the closed domain enum to the proto enum. Domain values
+// without a wire counterpart map to UNSPECIFIED so a future domain-side
+// addition that hasn't yet propagated to the schema still publishes (with
+// consumers seeing the unknown bucket as UNSPECIFIED per kanz-schemas/README.md
+// § Event Class Rules §3 enum-unknown semantics).
 func toProtoDimension(d domain.ExposureDimension) domainpb.ExposureDimension {
 	switch d {
 	case domain.ExposureByInstrument:

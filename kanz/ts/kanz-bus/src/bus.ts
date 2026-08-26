@@ -14,7 +14,8 @@
  * the envelope before calling {@link Publisher.publish}.
  */
 export interface Message {
-  /** NATS subject / Kafka topic per kanz-schemas/docs/subject-taxonomy.md. */
+  /** NATS subject / Kafka topic, per kanz-schemas/README.md
+   *  § Subject Taxonomy. */
   subject: string;
   /** Opaque payload — typically a serialized envelope frame. */
   body: Uint8Array;

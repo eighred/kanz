@@ -18,7 +18,7 @@ Runs in the `kanz-messaging` namespace — created by the NATS provisioning, or
 
 ## Topics
 
-`topic = {domain}.{entity}` per `kanz-schemas/docs/subject-taxonomy.md` §5;
+`topic = {domain}.{entity}` per `kanz-schemas/README.md § Subject Taxonomy` §5;
 `event_type` is discriminated within the topic. Every delete-policy event topic
 has a paired `dlq.{name}` for poison events. Auto-create is disabled — topics
 exist only if provisioned here. RF 3, `min.insync.replicas` 2.

@@ -17,7 +17,7 @@ short-retention live tier for low-latency fan-out.
 ## Streams
 
 One stream per domain, binding `{domain}.>` per
-`kanz-schemas/docs/subject-taxonomy.md` §4. File storage, 3 replicas, `limits`
+`kanz-schemas/README.md` § Subject / Topic Taxonomy §4. File storage, 3 replicas, `limits`
 retention, `old`-discard, 2m duplicate window (broker-side idempotency keyed on
 the envelope `idempotency_key`).
 
@@ -53,7 +53,7 @@ account's subjects are physically invisible to another. `tls.verify_and_map`
 maps the client's SVID URI SAN to a per-tenant user → account, so isolation is
 enforced by *which account a connection lands in*, not by the subject string —
 the bus keeps publishing the unchanged 3-segment logical subject
-(`subject-taxonomy.md` §6). `tenancy.yaml` ships the `SYS`, `__system__`
+(`kanz-schemas/README.md` § Subject / Topic Taxonomy §6). `tenancy.yaml` ships the `SYS`, `__system__`
 (platform + pre-tenancy events), and an example `acme` tenant account; each
 tenant account carries its own JetStream quota (noisy-neighbor bound, tightened
 in MT-01e).
@@ -114,3 +114,94 @@ kubectl delete job -n kanz-messaging nats-diag --ignore-not-found
 kubectl apply -f /tmp/nats-diag.yaml
 kubectl -n kanz-messaging logs job/nats-diag -c bootstrap
 ```
+
+## Incident runbooks
+
+The two broker failure modes an on-call is paged for. They cover **NATS and
+Kafka together** — a consumer that has fallen behind cannot tell which side
+stalled, and the confirm steps below are what separate them. The shape and the
+GameDay discipline behind these pages are described in
+`infra/observability/alerts/README.md`.
+
+### Broker outage (NATS / Kafka)
+
+Severity **page** · SLO `event-bus/delivery-success` · rehearsed by `infra/chaos/broker-kill.yaml`.
+
+
+#### Symptom
+`event-bus/delivery-success` burning and/or consumer lag climbing. Broker pods
+not Ready in `kanz-messaging`.
+
+#### Confirm
+```promql
+sum(kanz_bus_consumer_lag)                                    # rising
+sum(increase(kanz_bus_consume_total{result="error"}[10m]))   # DLQ-routed terminal failures
+sum(increase(kanz_data_gap_missing_total[15m]))              # MUST stay 0 — gap = real loss
+```
+```sh
+kubectl get pods -n kanz-messaging -l app=nats
+kubectl get pods -n kanz-messaging -l app=kafka
+```
+
+#### Impact
+Events queue rather than drop (NATS JetStream / Kafka are durable). Downstream
+consumers fall behind; the risk-engine ages into degraded mode (see
+the partition runbook below). A non-zero `kanz_data_gap_missing_total` means the loss
+escaped durability — escalate.
+
+#### Mitigate
+1. Let the broker StatefulSet self-heal (pod reschedules, partition leadership
+   moves). Do **not** delete PVCs — that's the durable log.
+2. If a single pod is wedged, delete it to force reschedule:
+   `kubectl delete pod <pod> -n kanz-messaging`.
+3. Verify the DLQ for poisoned messages once recovered (`dlq.<subject>`); replay
+   if the original failure was transient.
+
+#### Recover
+Lag drains to baseline after consumers reconnect (they reconnect automatically).
+Confirm `sum(kanz_bus_consumer_lag)` back to baseline and no new gaps.
+
+#### Root-cause pointers
+DLQ/retry design: `pkg/bus/{consumer,retry}.go`. Broker topology:
+`infra/nats/`, `infra/kafka/`. DATA-05 reconciliation confirms NATS↔Kafka stayed
+matched through the outage.
+
+### Broker partition → risk-engine degraded mode
+
+Severity **page** · SLO `market-data/freshness` · rehearsed by `infra/chaos/network-partition.yaml`.
+
+
+#### Symptom
+Risk query responses tagged **stale** (RISK-11 QualityFlags); staleness lag
+climbing while the risk-engine itself stays Ready (not crash-looping).
+
+#### Confirm
+```promql
+max(kanz_data_staleness_lag_seconds)        # > 30s (FRESH→DEGRADED), > 5m (full degraded)
+```
+```sh
+kubectl get pods -n kanz-services -l app=risk-engine          # Ready, not CrashLoop
+kubectl exec -n kanz-services <risk-engine-pod> -- nc -vz nats.kanz-messaging 4222   # reachability
+```
+
+#### Impact
+The engine serves **last-known-good** results tagged stale rather than erroring
+— degraded mode working as designed. Decisions are made on an aging view; the
+older the AsOf, the less trustworthy. This is graceful, not an outage.
+
+#### Mitigate
+1. This is a *network/connectivity* problem, not a compute one — do not restart
+   the engine (restart loses nothing but doesn't fix the partition and resets
+   the warm cache).
+2. Restore connectivity between `kanz-services` and `kanz-messaging`
+   (NetworkPolicy, CNI, broker reachability). Confirm with the `nc` check above.
+
+#### Recover
+On heal the consumer reconnects and replays the backlog; AsOf catches up and
+mode returns to FRESH. Confirm `max(kanz_data_staleness_lag_seconds)` back under
+the 30s freshness budget and responses no longer tagged stale. No data gap
+(`kanz_data_gap_missing_total` flat) — events were delayed, not lost.
+
+#### Root-cause pointers
+Degraded-mode design + thresholds (`DefaultFreshnessBudget` 30s,
+`DefaultDegradedThreshold` 5m): `internal/risk/degraded.go`.

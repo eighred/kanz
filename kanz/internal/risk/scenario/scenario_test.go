@@ -40,7 +40,7 @@ func TestEvaluate_PriceShockMovesTargetMarketValue(t *testing.T) {
 	// -10% on AAPL: 1000 → 900. mulDecimal of 1000×10^0 by the
 	// factor 90×10^-2 yields 90000×10^-2 — same numeric value 900,
 	// different Decimal representation. The Decimal contract
-	// (docs/decimal.proto) is explicit: 1.0 and 1.00 are equal in
+	// (common/v1/decimal.proto) is explicit: 1.0 and 1.00 are equal in
 	// value but differ in fields; consumers compare numerically.
 	p := makePortfolio(
 		domain.Position{InstrumentID: "AAPL", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},

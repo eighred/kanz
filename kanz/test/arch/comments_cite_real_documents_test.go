@@ -49,12 +49,21 @@ import (
 //
 // # Resolution is by BASENAME as well as by path, deliberately
 //
-// Comments cite documents the way people talk about them — "event-class-rules.md",
-// not "kanz-schemas/docs/event-class-rules.md" — and both modules' docs trees are
-// in play. Requiring an exact path would make this a link checker, which is a
-// different and much noisier job: it would fail on a correct citation to a
-// document that moved, and the reader is not harmed by that. What harms the
-// reader is the document not existing AT ALL, so that is what this checks.
+// Comments cite documents the way people talk about them — "README.md" or a
+// repo-relative path, and often a section within one. Requiring an exact path
+// would make this a link checker, which is a different and much noisier job: it
+// would fail on a correct citation to a document that MOVED, and the reader is
+// not harmed by that. What harms the reader is the document not existing AT
+// ALL, so that is what this checks.
+//
+// The consequence is worth stating, because it got larger on 2026-08-26. The
+// docs/ trees were retired that day and their content folded into README files
+// and CLAUDE.md, so most citations now name one of those — and this guard
+// cannot tell a live "kanz-schemas/README.md § Subject Taxonomy §4" from a
+// citation to a section that has since been renamed or deleted. The basename
+// resolves either way. That is the same floor-not-ceiling limit stated above,
+// but it now applies to nearly every citation in the estate rather than to a
+// handful, and nothing else checks the section half.
 
 // mdRef matches a markdown filename in prose. Deliberately narrow: a path
 // fragment ending in .md, no spaces.

@@ -4,7 +4,8 @@
 // it arrived on: event_type carries the full three-segment logical name
 // ({domain}.{entity}.{event_type}) and the bus client already enforces that the
 // envelope's `domain` equals its first segment. The subject is a transport
-// detail; the logical name is the contract (kanz-schemas/docs/subject-taxonomy.md).
+// detail; the logical name is the contract (kanz-schemas/README.md § Subject
+// Taxonomy).
 //
 // Every failure here is a REFUSAL, never a guess. The caller turns an error into
 // a NACK, which leaves the event safe in NATS until someone fixes the cause. A
@@ -20,8 +21,9 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 )
 
-// SystemTenant carries cross-cutting platform events and pre-tenancy events. Its
-// topics keep the UN-PREFIXED legacy names (subject-taxonomy.md §6).
+// SystemTenant carries cross-cutting platform events and pre-tenancy events.
+// Its topics keep the UN-PREFIXED legacy names (kanz-schemas/README.md §
+// Subject Taxonomy §6).
 const SystemTenant = "__system__"
 
 // reserved leading segments that are not part of the {domain}.{entity} space.

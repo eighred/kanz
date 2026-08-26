@@ -27,7 +27,7 @@ from inference.v1.prediction_pb2 import PredictionEnvelope, PredictionMode
 from kanz_bus import Event, Producer, propagation_context
 
 # Subject + schema-ref constants for the prediction FACT. Subject
-# matches kanz-schemas/docs/subject-taxonomy.md §1 example
+# matches kanz-schemas/README.md § Subject Taxonomy §1 example
 # ("inference.prediction.scored"); schema-ref points at the
 # registered PredictionEnvelope payload (PRED-01).
 SUBJECT_PREDICTION_SCORED = "inference.prediction.scored"

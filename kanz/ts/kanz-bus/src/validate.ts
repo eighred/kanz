@@ -1,8 +1,8 @@
 /**
  * Envelope validation — publish-side rules.
  *
- * Enforces the invariants in `kanz-schemas/docs/envelope-policy.md` §7
- * plus the per-class rules from `docs/event-class-rules.md`.
+ * Enforces the invariants in `kanz-schemas/README.md § Envelope Policy` §7
+ * plus the per-class rules from `kanz-schemas/README.md § Event Class Rules`.
  * {@link Producer.publish} runs this after stamping; consumers should
  * run it on receive too — the envelope is the constitution and a
  * defensive check is cheap.

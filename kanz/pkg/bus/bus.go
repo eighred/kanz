@@ -20,7 +20,7 @@ import "context"
 // stamp the envelope before calling Publish.
 type Message struct {
 	// Subject is the NATS subject or Kafka topic per
-	// kanz-schemas/docs/subject-taxonomy.md.
+	// kanz-schemas/README.md § Subject Taxonomy.
 	Subject string
 	// Key is the partition key. Used directly as the Kafka message key.
 	// NATS has no native partition key — wrappers serialize this onto a

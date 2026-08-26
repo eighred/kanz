@@ -62,7 +62,7 @@ message PredictionEnvelope {
   // cache, last-known prediction, simplified model), or unknown
   // (UNSPECIFIED, never set explicitly). Consumers branch on this
   // BEFORE acting; the degraded contract details live in
-  // kanz-schemas/docs/inference-degraded-contract.md (PRED-02).
+  // kanz-schemas/README.md § Inference Degraded-Mode Contract (PRED-02).
   PredictionMode mode = 7;
 
   // degraded_reason is a short operator-readable explanation when

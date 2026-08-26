@@ -438,8 +438,9 @@ func dlqDrainSites(t *testing.T, root string) (engines, entryPoints []string) {
 }
 
 // dlqNamespace is the reserved DLQ subject prefix (bus.dlqSubjectPrefix, and
-// kanz-schemas/docs/subject-taxonomy.md §6). Spelled here rather than imported
-// because test/arch is deliberately dependency-free over the module it scans.
+// kanz-schemas/README.md § Subject Taxonomy §6). Spelled here rather than
+// imported because test/arch is deliberately dependency-free over the module it
+// scans.
 const dlqNamespace = "dlq."
 
 // usesRedriver reports whether f mentions bus.Redriver — a main package wiring

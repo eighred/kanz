@@ -5,14 +5,13 @@
 // the re-marshal unchanged. Only QualityFlags is permitted to differ —
 // QUALITY_FLAG_REPLAYED is appended idempotently by EVT-20c.
 //
-// schema-evolution.md §8 names this contract directly: "replaying an
-// old log with current code must produce identical output, which is
-// only true if every intervening change was genuinely non-breaking or
-// genuinely a new vN." The tests here are the runtime proof — a
-// regression in the Pipeline marshal step, in the proto generator's
-// unknown-field handling, or in StampReplayed's idempotency would
-// break determinism and surface here before it silently corrupted a
-// production replay.
+// kanz-schemas/README.md § Schema Evolution §8 names this contract directly:
+// "replaying an old log with current code must produce identical output, which
+// is only true if every intervening change was genuinely non-breaking or
+// genuinely a new vN." The tests here are the runtime proof — a regression in
+// the Pipeline marshal step, in the proto generator's unknown-field handling,
+// or in StampReplayed's idempotency would break determinism and surface here
+// before it silently corrupted a production replay.
 //
 // Tests sit in `replay_test` (external) so they consume only the
 // public `tools/replay` + `pkg/bus` surface, matching the other
@@ -294,12 +293,12 @@ func TestDeterminism_OriginalEnvelopeIdentityPreserved(t *testing.T) {
 
 // --- Compatibility-during-replay link ---------------------------------
 
-// The schema-evolution.md §8 link: replay determinism depends on
-// payload schema §2 compat holding. This test exercises the link
-// directly — an envelope carrying an unknown field (simulating an
-// event from a future publisher that landed in an old Kafka log)
-// replays without dropping that field, because proto3 preserves
-// unknown fields through unmarshal + re-marshal.
+// The kanz-schemas/README.md § Schema Evolution §8 link: replay determinism
+// depends on payload schema §2 compat holding. This test exercises the link
+// directly — an envelope carrying an unknown field (simulating an event from a
+// future publisher that landed in an old Kafka log) replays without dropping
+// that field, because proto3 preserves unknown fields through unmarshal +
+// re-marshal.
 func TestDeterminism_UnknownEnvelopeFieldsSurviveReplay(t *testing.T) {
 	const futureFieldNumber = protowire.Number(1000)
 

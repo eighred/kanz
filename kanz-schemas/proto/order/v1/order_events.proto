@@ -4,12 +4,13 @@ syntax = "proto3";
 // and the Fill records they carry — the observable effects of the order
 // COMMANDS in order.proto.
 //
-// These are FACTs (event-class-rules.md §1): per-aggregate ordering (partition
-// by order_id) is a correctness requirement, and each is self-contained —
-// order_id and the resulting OrderState travel with it. The command that
-// produced a FACT is followed via the envelope causation_id (set to the
-// command's event_id); the order's full disposition is always carried as the
-// embedded OrderState snapshot so a consumer never has to re-derive it.
+// These are FACTs (kanz-schemas/README.md § Event Class Rules §1):
+// per-aggregate ordering (partition by order_id) is a correctness requirement,
+// and each is self-contained — order_id and the resulting OrderState travel
+// with it. The command that produced a FACT is followed via the envelope
+// causation_id (set to the command's event_id); the order's full disposition is
+// always carried as the embedded OrderState snapshot so a consumer never has to
+// re-derive it.
 package order.v1;
 
 import "google/protobuf/timestamp.proto";

@@ -6,7 +6,8 @@
 # rebuild NATS), then the stateless services, then traffic. Each step is
 # idempotent and re-runnable, so a partial failover can be resumed.
 #
-# This is runbook-as-code: it IS the procedure in docs/runbooks/dr.md, executable.
+# This is runbook-as-code: it IS the region-failover procedure in
+# infra/dr/README.md, executable.
 # A human runs it during a declared incident or the DR-01e drill, watching each
 # gate. It does not auto-trigger — region failover is a human decision.
 #
@@ -20,8 +21,8 @@ set -eu
 #
 # There was no cd, no dirname and no BASH_SOURCE, and the paths resolved only
 # with cwd=infra/dr — which no document states and NEITHER RUNBOOK USES. Both
-# invoke it from the module root (docs/runbooks/dr.md:33,
-# docs/runbooks/dr-drill.md:68), where `nats/` and `../nats/` are two
+# invoke it from the module root (both runbooks in infra/dr/README.md do),
+# where `nats/` and `../nats/` are two
 # directories that do not exist. Under `set -eu` that aborted the cutover at
 # step 2 of 5: Postgres promoted, no spine, no services, no traffic — and the
 # only message named `../nats/`, two directories from the real path, because the

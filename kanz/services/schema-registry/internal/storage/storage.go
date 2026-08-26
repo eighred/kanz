@@ -1,7 +1,7 @@
 // Package storage is the schema-registry persistence boundary.
 //
 // One row per (schema_id, version); the pair is immutable once published —
-// see kanz-schemas/docs/schema-evolution.md §6. Backends are pluggable so
+// see kanz-schemas/README.md § Schema Evolution §6. Backends are pluggable so
 // tests can drive the same suite against Postgres and an in-memory fake.
 package storage
 
@@ -26,7 +26,7 @@ type Schema struct {
 // Ref is the parsed form of an envelope payload_schema_ref. Wire form is
 // "<schema-id>:<version>", e.g. "market.v1.MarketDataEvent:7". Version is
 // monotonic per schema-id and bumps on every change, breaking or not
-// (kanz-schemas/docs/schema-evolution.md §6).
+// (kanz-schemas/README.md § Schema Evolution §6).
 type Ref struct {
 	SchemaID string
 	Version  uint64

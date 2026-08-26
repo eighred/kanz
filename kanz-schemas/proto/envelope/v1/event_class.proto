@@ -8,7 +8,8 @@ package envelope.v1;
 // permitted to treat an event. It is required on every Envelope.
 //
 // Per-class consumer obligations (ordering, idempotency, mandatory outcome
-// events, retention) are specified in docs/event-class-rules.md (EVT-04).
+// events, retention) are specified in kanz-schemas/README.md § Event Class
+// Rules (EVT-04).
 enum EventClass {
   // Default zero value. An envelope with an unspecified class is invalid and
   // must be rejected by the client library before publish.

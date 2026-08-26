@@ -26,7 +26,7 @@
 //
 // This package is `kanz/internal/risk/api/v1`. The Engine interface
 // and every type in this file is **additive-only within v1** under the
-// same logic as kanz-schemas/docs/envelope-policy.md §1: a method
+// same logic as kanz-schemas/README.md § Envelope Policy §1: a method
 // removed or retyped here breaks every caller, and breaking changes
 // are rare and require a sibling `v2/` package + dual-path migration.
 // A new method may be added to Engine when every plausible

@@ -1,6 +1,7 @@
 ---
 # Topic provisioning script. Idempotent — re-run after taxonomy changes. Topic
-# layout follows kanz-schemas/docs/subject-taxonomy.md §5: topic = {domain}.
+# layout follows kanz-schemas/README.md § Subject Taxonomy §5:
+# topic = {domain}.
 # {entity}; event_type is discriminated within the topic. STATE_SNAPSHOT events
 # use a separate compacted {domain}.{entity}.snapshot topic. Every delete-policy
 # event topic gets a paired dlq.{name} for poison events.

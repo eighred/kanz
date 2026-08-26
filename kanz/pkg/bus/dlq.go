@@ -15,7 +15,7 @@ const dlqSubjectPrefix = "dlq."
 func dlqSubject(orig string) string { return dlqSubjectPrefix + orig }
 
 // IsDLQSubject reports whether subject sits in the reserved DLQ namespace
-// (kanz-schemas/docs/subject-taxonomy.md §6).
+// (kanz-schemas/README.md § Subject Taxonomy §6).
 //
 // Exported because the DRAIN side has to ask the question in both directions:
 // the subject it reads FROM must be a DLQ subject, and the subject it

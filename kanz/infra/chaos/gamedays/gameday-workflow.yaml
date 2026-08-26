@@ -4,7 +4,8 @@
 # SERIAL drill: inject one fault, verify the system stayed in steady state,
 # clear it, recover, then move to the next. Serial (not parallel) so a single
 # failed hypothesis is unambiguously attributable, and so a real on-call can
-# follow along against the runbooks (kanz/docs/runbooks/).
+# follow along against the runbooks in each component's README
+# (infra/observability/alerts/, infra/nats/, infra/dr/).
 #
 # Each `verify-*` step runs the SRE-01c verify.sh from the `chaos-verify`
 # ConfigMap (see gamedays/README.md to create it). verify.sh exits non-zero on a

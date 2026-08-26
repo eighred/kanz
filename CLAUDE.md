@@ -133,7 +133,7 @@ cd kanz
 go build ./...
 go vet ./...
 golangci-lint run ./...     # the FOURTH gate — build, vet and test all pass on code it rejects
-git ls-files -z '*.go' | xargs -0 gofmt -l   # not `gofmt -l .` — GOTMPDIR is in-module (windows-go-setup.md #2), so a tree walk lists _testmain.go build artifacts as violations
+git ls-files -z '*.go' | xargs -0 gofmt -l   # not `gofmt -l .` — GOTMPDIR is in-module (Windows environment #2), so a tree walk lists _testmain.go build artifacts as violations
 
 # -p 1 is REQUIRED (see Constraints). Run in chunks, never as one ./... —
 # the harness reaps a child at ~10 min, and a truncated run ends with 0 FAIL,
@@ -164,6 +164,136 @@ cd kanz-schemas && buf generate    # regenerate the Go/Python SDKs
   decision to respect and report, not an obstacle to route around — writing a
   credential to a file to dodge a classifier defeats the control and breaks the
   rule above at the same time. Say what was blocked and what it would have proved.
+
+## Windows environment
+
+Five things that make the project look broken — or make tests fail at random — if
+you skip them. They are **environment**, not editor: they apply to the CLI, to
+`go vet`, and to whatever editor points at the tree. Numbered, because the
+`gofmt` note under Commands cites #2.
+
+**1. Generate the schema SDK before anything else.** `kanz/go.mod` `replace`s the
+schema SDK to `../kanz-schemas/gen/go` and `gen/` is gitignored (generated code is
+never committed, EVT-15a). Skip it and you get thousands of unresolved imports —
+the project is not broken, the SDK is missing. `~/go/bin/buf.exe` is permanently
+blocked by Windows Application Control: a *downloaded* exe is blocked, one you
+*build into a project-local directory* runs. So build it:
+
+```sh
+GOBIN="$(pwd)/.gotmp/bin" go install github.com/bufbuild/buf/cmd/buf@v1.45.0
+```
+
+**2. Move `GOTMPDIR` out of `%TEMP%` — do this first.** Windows Application
+Control intermittently blocks freshly built test binaries in `%TEMP%`
+(`Uygulama Denetimi ilkesi bu dosyayı engelledi`). `go test` then fails at random
+and **the suite silently under-runs**, which is the dangerous part: a run that
+never compiled half the packages still exits 0.
+
+```sh
+mkdir -p "$HOME/.go-tmp"
+go env -w GOTMPDIR="$HOME/.go-tmp"     # undo with: go env -u GOTMPDIR
+```
+
+Set it in Go's own env so it reaches every tool, not just one shell. The Makefile
+exports its own `GOTMPDIR` pointing at `kanz/.gotmp` for CI — that path is
+*inside* the module and gitignored, which is why the fmt check asks git for the
+file list rather than walking the tree.
+
+**3. Build tags.** There are **no `binance`/`okx` tags and never were** — the
+venue connectors are hand-rolled over `github.com/coder/websocket` and compile in
+the default build (#100 retired that claim). Three tags exist:
+
+| Tag | Selects | Default (`!tag`) |
+|---|---|---|
+| `redis` | `pkg/redisadapter/goredis.go`, `risk-engine/dedup_redis.go`, `webhook-ingest/nonces_redis.go` | `dedup_default.go`, `nonces_default.go` |
+| `anthropic` | `copilot/model_anthropic.go` | `copilot/model_stub.go` |
+| `perf` | `internal/risk/compute/latency_budget_test.go` | — |
+
+The default build is vendor-free of go-redis and the Anthropic SDK — not of any
+venue. Tags must reach `gopls` per-editor; in VS Code, `.vscode/settings.json`
+(untracked): `{ "go.buildTags": "redis anthropic" }`. Without them those files
+grey out with errors, and the `!tag` defaults beside them are what the untagged
+build compiles.
+
+**4. `go env -w GOFLAGS=-mod=mod`** so a stale generated SDK is regenerated
+rather than failing the build.
+
+**5. Line endings.** `.gitattributes` pins `*.go` and `*.proto` to `text eol=lf`
+because gofmt emits LF; a CRLF working copy makes `gofmt -l` list files whose
+formatting is perfect. The attribute only applies to files checked out *after* it
+was added, so a clone predating it keeps CRLF forever.
+
+**Diagnose with `git ls-files --eol`, never by grepping for carriage returns.**
+
+```sh
+git ls-files --eol '*.go' | awk '$2 == "w/crlf" {print $NF}'   # worktree is CRLF
+git ls-files --eol '*.go' | awk '$1 != "i/lf"   {print $NF}'   # index is not LF
+```
+
+`i/lf` means the index — what git stores — is LF and there is nothing to commit;
+`w/crlf` means your working copy is stale, fix it locally and do **not** commit.
+Every `.go` file in this repo is already `i/lf`, so a `w/crlf` hit is always a
+local artifact: `rm <files> && git checkout -- <files>`, then confirm `git status`
+shows nothing modified.
+
+The tempting check — `git show HEAD:file.go | grep -c $'\r'` — is wrong and has
+already caused a false diagnosis. In Git Bash `$'\r'` does not reliably survive
+into `grep`; degraded to an empty pattern it matches **every** line, and the count
+comes back equal to the file's line count, which reads exactly like "every line
+ends CRLF". That turns a local checkout artifact into an apparent committed-CRLF
+problem whose "fix" is line-ending churn across files nobody touched.
+
+**Not blockers, but know them:** `-race` requires cgo and does not run here (see
+Constraints); `make` is not shipped with Git for Windows — the Makefile is the
+canonical task list and works in CI/WSL/Linux, so on Windows either
+`scoop install make` or run the underlying `go` commands.
+
+## Coordination at N replicas
+
+How stateful consumers behave when scaled out. Two guarantee classes, and the
+choice is per component rather than platform-wide:
+
+- **Best-effort (per-process, the default).** State lives in each replica's
+  memory. Correct under scale-out *because the handlers are idempotent* — the
+  per-process state is an optimization and an in-instance safety net, not the
+  correctness boundary. Re-baselines on restart.
+- **Strong (shared-state, opt-in).** State lives in a store every replica shares
+  (Redis/Dragonfly, or the `platform.model` log), so replicas coordinate.
+
+**The floor is always idempotent handlers.** Shared state reduces duplicate
+*work* and false cross-replica divergence; it does not replace handler
+idempotency, and where the shared operation cannot be atomic across pods the
+handler is still the thing that makes a duplicate harmless.
+
+| Component | Best-effort default | Shared-state mode | Seam |
+|---|---|---|---|
+| Bus dedup | `DedupWindow` (per-instance) | `RedisDedup` (cross-pod seen-set) | `bus.WithDeduper`; go-redis binding `redisadapter.New` |
+| DATA-05 reconciler | in-memory `PendingStore` | `integrity.RedisPendingStore` (Lua-atomic) | `integrity.NewReconcilerWithStore` |
+| PRED-09 model registry | process-local `Registry` | `CoordinatedRegistry` over `platform.model` | `registry.CoordinatedRegistry` |
+| Gap / staleness / watermark / drift detectors | per-process, per-partition | — | n/a |
+
+Three rules that are easy to get wrong, and each has a cost attached:
+
+- **Do not add shared state where partitioning already gives single ownership.**
+  The detectors key on a `partition_key` the bus already routes to one consumer
+  in a group, so per-process state is correct without coordination.
+- **`PendingStore.ClaimOrMatch` must be atomic per key.** It is a single
+  check-set-or-delete; a non-atomic distributed implementation lets two replicas
+  both record Pending and never match. Use the shared store whenever the NATS and
+  Kafka feeds are consumed by *different* replicas — the common multi-replica
+  case — or the two sightings never meet and both age out as **false**
+  discrepancies.
+- **Every shared backend fails OPEN, never closed.** A Redis error degrades dedup
+  to no-dedup and `ClaimOrMatch` to Pending (never a fabricated match). An
+  outage must not block consumption, and idempotent handlers are what makes that
+  safe.
+
+`platform.model` is the append log of record (infinite retention, EVT-09): a
+starting replica replays it from offset 0 to rebuild the registry, so the topic
+is the source of truth and the local `Registry` is a materialized cache. Publish
+keyed by `model_id` so a model's `record_validation` precedes its primary
+register in per-partition order, and carry the producing replica's `origin` so a
+replica skips applying its own events.
 
 ## Changing the platform
 

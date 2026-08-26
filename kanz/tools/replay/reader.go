@@ -64,7 +64,7 @@ func (r Range) validate() error {
 type Config struct {
 	// Brokers is the Kafka bootstrap list; matches bus.KafkaConfig.Brokers.
 	Brokers []string
-	// Topic is the source topic per kanz-schemas/docs/subject-taxonomy.md.
+	// Topic is the source topic per kanz-schemas/README.md § Subject Taxonomy.
 	Topic string
 	// Range bounds the per-partition read.
 	Range Range
