@@ -36,7 +36,7 @@ type matrixCase struct {
 	roles      []string
 	portfolios []string // principal's portfolio-scope claim; nil ⇒ unrestricted
 	action     Action
-	resTenant  string // "" ⇒ tenant-agnostic resource (skips the cross-tenant gate)
+	resTenant  string // the resource's owning tenant; "" ⇒ unresolved, and refused
 	resID      string
 	allow      bool
 }
@@ -88,6 +88,16 @@ func authMatrix() []matrixCase {
 		// Tenant isolation (ABAC) beats RBAC — even the wildcard admin.
 		{"admin cross-tenant denied", []string{"risk.admin"}, nil, ActionRiskRead, "globex", "pf-1", false},
 		{"reader cross-tenant denied", []string{"risk.reader"}, nil, ActionRiskRead, "globex", "pf-1", false},
+
+		// AN UNRESOLVED OWNER IS REFUSED, NOT WAVED THROUGH (#741). These rows
+		// carry a typed resource with no tenant — the shape a caller produces
+		// when its ownership lookup failed. It used to mean "not tenant-scoped,
+		// skip the boundary", which made a dependency timeout a tenant bypass.
+		// The wildcard admin row is the one that matters: if RBAC could rescue
+		// this, the refusal would be a grant question rather than an isolation
+		// one.
+		{"admin with unresolved resource tenant denied", []string{"risk.admin"}, nil, ActionRiskRead, "", "pf-1", false},
+		{"reader with unresolved resource tenant denied", []string{"risk.reader"}, nil, ActionRiskRead, "", "pf-1", false},
 
 		// Portfolio scope (ABAC) beats RBAC — even the wildcard admin.
 		{"scoped reader in scope", []string{"risk.reader"}, []string{"pf-1", "pf-2"}, ActionRiskRead, "acme", "pf-2", true},

@@ -149,7 +149,7 @@ func run() int {
 		catalog = retrieval.NewLineageCatalog(nil, cfg.LineageAddr)
 		logger.Info("copilot citations: lineage catalog", "addr", cfg.LineageAddr)
 	}
-	registry := tools.NewRegistry(authz, queryClient, catalog)
+	registry := tools.NewRegistry(authz, queryClient, catalog, logger)
 	cp := agent.New(model, registry)
 
 	readiness := &server.Readiness{}

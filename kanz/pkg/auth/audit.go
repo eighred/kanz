@@ -81,6 +81,13 @@ func BuildDecisionLog(decider string, req Request, d Decision) *observationpb.De
 	if d.Reason != "" {
 		attrs["reason"] = d.Reason
 	}
+	// The refusal CLASS, beside the sentence. "how often did isolation refuse,
+	// as opposed to a missing grant" is a question about a control's health, and
+	// answering it by grepping English out of Reason is how a reworded sentence
+	// silently empties a dashboard.
+	if d.Code != DenyNone {
+		attrs["deny.code"] = string(d.Code)
+	}
 	return &observationpb.DecisionLog{
 		Decider:    decider,
 		Summary:    fmt.Sprintf("%s %s on %s for %s: %s", strings.ToUpper(verdict), req.Action, resourceLabel(req.Resource), subject, d.Reason),
