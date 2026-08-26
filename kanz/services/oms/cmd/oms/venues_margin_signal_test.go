@@ -37,7 +37,7 @@ func TestDialVenuesCountsAnAdapterThatDeclaresNoMarginModes(t *testing.T) {
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
 	undeclared, undeclaredTIF, undeclaredMargin := undeclaredCounter(), undeclaredCounter(), undeclaredCounter()
-	venues, _, closeConns, err := dialVenues(context.Background(), cfg, venueCapabilityCounters{unverified: unverifiedCounter(), orderTypes: undeclared, timeInForce: undeclaredTIF, marginModes: undeclaredMargin}, quietLogger())
+	venues, _, closeConns, err := dialVenues(context.Background(), cfg, venueCapabilityCounters{unverifiedAccounts: unverifiedCounter(), undeclaredOrderTypes: undeclared, undeclaredTimeInForce: undeclaredTIF, undeclaredMarginModes: undeclaredMargin}, quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestDialVenuesCountsTheThreeCapabilityGapsApart(t *testing.T) {
 	cfg := config.Config{Tenant: "acme", VenueEndpoints: "XBIN/binance-main=" + addr}
 
 	undeclared, undeclaredTIF, undeclaredMargin := undeclaredCounter(), undeclaredCounter(), undeclaredCounter()
-	venues, _, closeConns, err := dialVenues(context.Background(), cfg, venueCapabilityCounters{unverified: unverifiedCounter(), orderTypes: undeclared, timeInForce: undeclaredTIF, marginModes: undeclaredMargin}, quietLogger())
+	venues, _, closeConns, err := dialVenues(context.Background(), cfg, venueCapabilityCounters{unverifiedAccounts: unverifiedCounter(), undeclaredOrderTypes: undeclared, undeclaredTimeInForce: undeclaredTIF, undeclaredMarginModes: undeclaredMargin}, quietLogger())
 	if err != nil {
 		t.Fatalf("dialVenues: %v", err)
 	}
