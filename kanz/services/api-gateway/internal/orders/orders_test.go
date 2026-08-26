@@ -265,9 +265,9 @@ func TestCancel_AuthenticatedWithoutTenant_403(t *testing.T) {
 // published into __system__ and `oms-acme`, which lives in the `acme` account,
 // receives nothing. Accounts are isolated by construction.
 //
-// EventType must NOT move with it: every consumer, audit projection, Kafka topic
-// and arch guard keys on the 3-segment logical name, and subject-taxonomy.md
-// defines it as the stable contract.
+// EventType must NOT move with it: every consumer, audit projection, Kafka
+// topic and arch guard keys on the 3-segment logical name, and
+// kanz-schemas/README.md § Subject Taxonomy defines it as the stable contract.
 func TestSubmit_RoutesOnTenantWithoutMovingTheEventType(t *testing.T) {
 	pub := &fakePub{}
 	h := New(pub, "", halt.OpenGate(nil))

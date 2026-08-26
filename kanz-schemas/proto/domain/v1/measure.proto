@@ -11,7 +11,7 @@ syntax = "proto3";
 // `double` and is the OBSERVATION-class metric for system behaviour
 // (latency, throughput). Risk measures are FACT-class outputs whose
 // money values must use the exact-Decimal rule (banned-double per
-// docs/event-class-rules.md + common/v1/decimal.proto).
+// kanz-schemas/README.md § Event Class Rules + common/v1/decimal.proto).
 package domain.v1;
 
 import "google/protobuf/timestamp.proto";

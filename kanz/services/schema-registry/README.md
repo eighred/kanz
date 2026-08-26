@@ -1,7 +1,7 @@
 # Schema Registry
 
 Runtime resolver for `payload_schema_ref` on every Kanz event envelope — see
-`kanz-schemas/docs/schema-evolution.md` §6, §8. Producers must resolve their
+`kanz-schemas/README.md § Schema Evolution` §6, §8. Producers must resolve their
 schema here before publishing; replay (EVT-20) resolves the historical ref
 each event was written against.
 

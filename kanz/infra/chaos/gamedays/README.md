@@ -10,8 +10,9 @@ scenario.
 | `schedule.yaml` | Chaos Mesh `Schedule` — instantiates the workflow weekly (Wed 14:00 UTC, on-call staffed) |
 
 Runbooks for every scenario the drill exercises live in
-[`kanz/docs/runbooks/`](../../../docs/runbooks/) — the GameDay is the runbooks'
-live test.
+the README of the component each one is about — `infra/observability/alerts/`
+for the generic pages, `infra/nats/` for broker incidents, `infra/dr/` for
+region failover. The GameDay is those runbooks' live test.
 
 ## One-time setup
 

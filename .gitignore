@@ -1,6 +1,6 @@
 # Editor state. Nothing editor-specific is tracked in this repo: the build tags,
-# GOFLAGS and GOTMPDIR that a working setup needs live in kanz/docs/
-# windows-go-setup.md, so a clone carries no launch/run configuration and none
+# GOFLAGS and GOTMPDIR that a working setup needs live in CLAUDE.md’s
+# “Windows environment” section, so a clone carries no launch/run configuration and none
 # should be committed.
 .vscode/
 

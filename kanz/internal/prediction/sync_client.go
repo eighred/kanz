@@ -87,7 +87,8 @@ type SyncClientOptions struct {
 //
 // So the honest statement is: NOTHING MEASURES INFERENCE SERVING LATENCY. The
 // nearest thing is the risk-engine/recompute-latency SLO and its
-// docs/runbooks/inference-latency.md runbook, and both are about the CALLER —
+// inference-latency runbook in infra/observability/alerts/README.md, and both
+// are about the CALLER —
 // they fire when this breaker opens, which is a symptom of the server being slow
 // rather than a measurement of it.
 //

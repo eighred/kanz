@@ -69,9 +69,10 @@ data:
         # The tenant therefore has to appear in the subject SOMEWHERE. It appears
         # here and only here: the routing prefix exists inside __system__, and
         # every account resolves it back to the unchanged 3-segment logical name
-        # before any workload sees it. So kanz-schemas/docs/subject-taxonomy.md
-        # still holds where it matters — inside a tenant account the subject is
-        # `order.order.submit`, and oms-deploy.yaml subscribes exactly that.
+        # before any workload sees it. So kanz-schemas/README.md
+        # § Subject Taxonomy still holds where it matters — inside a tenant
+        # account the subject is `order.order.submit`, and oms-deploy.yaml
+        # subscribes exactly that.
         exports: [
           { stream: "tenant.*.order.order.submit" }
           { stream: "tenant.*.order.order.cancel" }

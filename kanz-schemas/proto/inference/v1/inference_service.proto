@@ -4,7 +4,7 @@ syntax = "proto3";
 // Companion to the async streaming path (PRED-04/05) — both paths
 // transport the SAME payloads (FeatureVector in, PredictionEnvelope
 // out) and follow the SAME degraded-mode contract
-// (kanz-schemas/docs/inference-degraded-contract.md §6).
+// (kanz-schemas/README.md § Inference Degraded-Mode Contract §6).
 //
 // # Why same payloads as the streaming path
 //

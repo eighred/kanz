@@ -5,10 +5,10 @@ package command.v1;
 import "google/protobuf/timestamp.proto";
 
 // CommandOutcome is the payload of the single outcome FACT every COMMAND must
-// produce (event-class-rules.md §2). A command with no outcome event is a
-// defect — it is unobservable. The command being reported on is identified by
-// the envelope causation_id (set to the command's event_id), so it is not
-// restated here.
+// produce (kanz-schemas/README.md § Event Class Rules §2). A command with no
+// outcome event is a defect — it is unobservable. The command being reported on
+// is identified by the envelope causation_id (set to the command's event_id),
+// so it is not restated here.
 message CommandOutcome {
   // status is the terminal disposition of the command. Required; must not be
   // COMMAND_OUTCOME_STATUS_UNSPECIFIED.

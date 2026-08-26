@@ -974,7 +974,7 @@ groups:
           description: "The span between the earliest recoverable point and the latest backup is under a day, against a declared retentionPolicy of 30d. Restoring to any instant before that window is no longer possible. On a newly bootstrapped cluster this is expected until the second base backup completes and clears by itself; on an established one it means retention is pruning what the policy says to keep, or the archive only recently began working — in which case the 30d in cluster.yaml is a number nobody can honour."
 
       # THE STANDBY, which is the OTHER copy and the one nobody watches.
-      # docs/runbooks/dr-drill.md recovers this number by a human running
+      # The DR drill (infra/dr/README.md) recovers this number by a human running
       # `kubectl cnpg status | grep -i lag` DURING a drill — quarterly. Between
       # drills a standby that stopped replaying is invisible, and the DR-01e RPO
       # target is a claim about exactly this number.

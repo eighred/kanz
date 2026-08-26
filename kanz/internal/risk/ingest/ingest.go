@@ -44,7 +44,7 @@ import (
 	"github.com/eighred/kanz/internal/dec"
 )
 
-// Event-type names follow kanz-schemas/docs/subject-taxonomy.md §1
+// Event-type names follow kanz-schemas/README.md § Subject Taxonomy §1
 // ({domain}.{entity}.{event_type}) and the per-payload doc comments in
 // kanz-schemas/proto/domain/v1/portfolio.proto. They are the values
 // the engine's orchestrator subscribes to and the values RISK-10 will
@@ -70,9 +70,9 @@ type Applier interface {
 	ApplyPortfolioRevalued(ctx context.Context, env *envelopepb.Envelope, p *domainpb.PortfolioState) error
 	// ApplyPositionChanged applies a position-level state update.
 	ApplyPositionChanged(ctx context.Context, env *envelopepb.Envelope, p *domainpb.PositionState) error
-	// ApplyPortfolioSnapshot applies a full materialized snapshot;
-	// see event-class-rules.md §3 (snapshot then log-resume from the
-	// snapshot's log_position).
+	// ApplyPortfolioSnapshot applies a full materialized snapshot; see
+	// kanz-schemas/README.md § Event Class Rules §3 (snapshot then log-resume from
+	// the snapshot's log_position).
 	ApplyPortfolioSnapshot(ctx context.Context, env *envelopepb.Envelope, p *domainpb.PortfolioSnapshot) error
 }
 

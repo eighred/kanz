@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 # Subject the worker subscribes to. Matches PRED-03's Go publisher
-# constant + kanz-schemas/docs/subject-taxonomy.md §1 example.
+# constant + kanz-schemas/README.md § Subject Taxonomy §1 example.
 SUBJECT_FEATURE_COMPUTED = "inference.feature.computed"
 
 
@@ -92,8 +92,8 @@ class LastKnownCache:
         return self._entries.get(subject_id)
 
 
-# Degraded-reason identifiers from kanz-schemas/docs/inference-degraded-
-# contract.md §2. Constants so downstream alert-matching is exact.
+# Degraded-reason identifiers from kanz-schemas/README.md
+# § Inference Degraded-Mode Contract §2. Constants so downstream alert-matching is exact.
 REASON_INFERENCE_UNAVAILABLE = "inference_unavailable"
 REASON_NO_CACHED_PREDICTION = "no_cached_prediction"
 

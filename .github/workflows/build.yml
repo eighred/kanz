@@ -25,7 +25,6 @@ on:
     # docs and code still runs the gate.
     paths-ignore:
       - '**/*.md'
-      - 'docs/**'
       - '.gitignore'
 
 permissions:

@@ -1,6 +1,7 @@
 # Backstage software catalog for Kanz (DEVX-01c). Registers the platform System
 # and one Component per service, so the internal portal surfaces what runs, who
-# owns it, its runbooks (TechDocs), and its schemas (the EVT-16 registry). Point
+# owns it and its schemas (the EVT-16 registry) — NOT its runbooks; see
+# README.md for why the TechDocs annotations were removed. Point
 # a Backstage instance at this file (catalog.locations) to ingest it.
 ---
 apiVersion: backstage.io/v1alpha1
@@ -8,8 +9,8 @@ kind: System
 metadata:
   name: kanz
   description: Event-driven risk platform — event backbone, risk engine, prediction layer.
-  annotations:
-    backstage.io/techdocs-ref: dir:../../docs
+  # NO techdocs-ref: it read `dir:../../docs`, a tree with no mkdocs.yml and,
+  # since 2026-08-26, no existence. See README.md.
 spec:
   owner: event-platform
 ---
@@ -18,8 +19,12 @@ kind: Component
 metadata:
   name: risk-engine
   description: Ingests state, recomputes risk, serves the query.v1 gRPC read surface.
-  annotations:
-    backstage.io/techdocs-ref: dir:../../docs/runbooks
+  # NO techdocs-ref. It read `dir:../../docs/runbooks` and pointed at a tree
+  # that never carried an mkdocs.yml — TechDocs cannot render a bare directory,
+  # so the annotation described a portal facet that has never existed. The tree
+  # itself was retired on 2026-08-26 (runbooks now live in the README of the
+  # component each one is about), which turns a broken pointer into a dangling
+  # one. Restoring this needs a real TechDocs source, not a path.
   links:
     - { url: https://github.com/eighred/kanz/tree/main/kanz/services/risk-engine, title: source }
 spec:
@@ -90,8 +95,12 @@ kind: Component
 metadata:
   name: autopilot
   description: Closed-loop autonomous ops controller (AUTO-01).
-  annotations:
-    backstage.io/techdocs-ref: dir:../../docs/runbooks
+  # NO techdocs-ref. It read `dir:../../docs/runbooks` and pointed at a tree
+  # that never carried an mkdocs.yml — TechDocs cannot render a bare directory,
+  # so the annotation described a portal facet that has never existed. The tree
+  # itself was retired on 2026-08-26 (runbooks now live in the README of the
+  # component each one is about), which turns a broken pointer into a dangling
+  # one. Restoring this needs a real TechDocs source, not a path.
 spec:
   type: service
   lifecycle: production

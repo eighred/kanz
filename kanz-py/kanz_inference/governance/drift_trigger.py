@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 # Subject the DATA-04 detector publishes feature drift on
-# (kanz-schemas/docs/subject-taxonomy.md §1).
+# (kanz-schemas/README.md § Subject Taxonomy §1).
 SUBJECT_DRIFT_DETECTED = "data.feature.drift_detected"
 
 

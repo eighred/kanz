@@ -171,7 +171,7 @@ source of truth is the append-only journal.
 The general rule this settles: **covering something unnecessarily is cheap;
 excluding it on a rebuild story nobody has exercised is how #60 happened.** The
 two standing exclusions (`market-data`, `audit`) are not of that shape — each has
-an independently documented mechanism (`docs/runbooks/dr-drill.md` for
+an independently documented mechanism (the DR drill in `infra/dr/README.md` for
 market-data; object-lock/WORM for audit), not an inference.
 
 Database naming across the deploy manifests, the DSN secrets and this document

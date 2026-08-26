@@ -9,9 +9,9 @@ import "google/protobuf/timestamp.proto";
 // stream — a sequence gap, excessive staleness, or input-distribution drift.
 //
 // It carries EVENT_CLASS_OBSERVATION but is the explicit exception to
-// observation lossy-tolerance (event-class-rules.md §4): the data-integrity
-// layer MUST NOT shed it, and it gets FACT-grade delivery and durable
-// retention — losing a data-quality signal means operating blind.
+// observation lossy-tolerance (kanz-schemas/README.md § Event Class Rules §4):
+// the data-integrity layer MUST NOT shed it, and it gets FACT-grade delivery
+// and durable retention — losing a data-quality signal means operating blind.
 //
 // The common fields let the data-observability layer (dashboards, alerting)
 // triage an event without understanding the kind-specific detail.

@@ -41,7 +41,7 @@ import (
 
 // Event-type + schema-ref constants for the feature-published
 // FACT. Subject taxonomy: `inference.feature.computed`
-// (kanz-schemas/docs/subject-taxonomy.md §1 example).
+// (kanz-schemas/README.md § Subject Taxonomy §1 example).
 const (
 	EventTypeFeatureComputed = "inference.feature.computed"
 	SchemaRefFeatureVector   = "inference.v1.FeatureVector:1"

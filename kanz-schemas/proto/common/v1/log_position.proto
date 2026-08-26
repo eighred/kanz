@@ -6,7 +6,7 @@ package common.v1;
 // bootstrap-without-gaps: a STATE_SNAPSHOT payload carries the LogPosition it
 // was taken at, so a consumer can apply the snapshot and then resume the log
 // from exactly that point — no gap, no double-application
-// (see kanz-schemas/docs/event-class-rules.md §3).
+// (see kanz-schemas/README.md § Event Class Rules §3).
 message LogPosition {
   // topic is the durable-log topic the position refers to. Required.
   string topic = 1;

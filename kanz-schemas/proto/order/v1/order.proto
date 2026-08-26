@@ -1,8 +1,8 @@
 syntax = "proto3";
 
 // Package order.v1 defines the order/execution domain — the platform's first
-// first-class COMMAND flow (see kanz-schemas/docs/event-class-rules.md §2 and
-// the command.v1 generic layer). It owns two halves:
+// first-class COMMAND flow (see kanz-schemas/README.md § Event Class Rules §2
+// and the command.v1 generic layer). It owns two halves:
 //
 //   - this file: the concrete order COMMANDS (submit/amend/cancel), each
 //     embedding command.v1.CommandMetadata as field 1 per the command-class

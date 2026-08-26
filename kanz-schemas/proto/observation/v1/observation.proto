@@ -4,7 +4,7 @@ syntax = "proto3";
 // class — metrics and model-decision logs (this file), and data-quality
 // signals (data_quality.proto).
 //
-// Per kanz-schemas/docs/event-class-rules.md §4, general observations are
+// Per kanz-schemas/README.md § Event Class Rules §4, general observations are
 // lossy-tolerant: under extreme load it is acceptable to shed them to protect
 // the live FACT/COMMAND path. Data-quality signals are the explicit exception
 // and get FACT-grade delivery — see data_quality.proto.

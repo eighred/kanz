@@ -2,7 +2,7 @@ syntax = "proto3";
 
 // Package market.v1 defines the payload schemas for the `market` domain —
 // trades, quotes, and bars carried on market.{entity}.* subjects and topics.
-// These are FACT events (see kanz-schemas/docs/event-class-rules.md §1);
+// These are FACT events (see kanz-schemas/README.md § Event Class Rules §1);
 // the envelope event_time is the authoritative venue timestamp.
 package market.v1;
 
@@ -16,7 +16,7 @@ import "common/v1/decimal.proto";
 //
 // proto3 cannot enforce field presence; the "Required" notes below are
 // invariants the bus client library enforces on publish (see
-// docs/envelope-policy.md §7).
+// kanz-schemas/README.md § Envelope Policy §7).
 message MarketDataEvent {
   // instrument_id is the canonical Kanz instrument identifier and the ordering
   // domain for market data — it equals the envelope partition_key. Static
