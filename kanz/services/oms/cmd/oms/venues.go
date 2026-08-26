@@ -47,84 +47,96 @@ var closeRegistry = execution.NewCloseRegistry()
 // fix, and an adapter can close one while leaving another open; a shared counter
 // would report an adapter as having failed to declare order types when it
 // declared them perfectly well.
+// EACH FIELD IS NAMED FOR ITS METRIC, and that is load-bearing rather than
+// tidy. TestEveryRegisteredMetricHasAWriter tracks a collector from where it is
+// BOUND to where it is written by IDENTIFIER NAME — it has no type resolution —
+// so binding a counter to `unverifiedAccounts` and then writing it through a
+// field called `unverified` makes the metric look writer-less and the guard
+// report it as dead. It did exactly that here. One name from registration to
+// increment keeps the metric traceable to the guard and to a person reading it.
 type venueCapabilityCounters struct {
-	unverified  prometheus.Counter
-	orderTypes  prometheus.Counter
-	timeInForce prometheus.Counter
-	marginModes prometheus.Counter
+	unverifiedAccounts    prometheus.Counter
+	undeclaredOrderTypes  prometheus.Counter
+	undeclaredTimeInForce prometheus.Counter
+	undeclaredMarginModes prometheus.Counter
 }
 
 // newVenueCapabilityCounters builds the four counters and registers them.
+//
+// The collectors are bound INSIDE a composite literal rather than assigned to
+// fields afterwards, because that is the shape TestEveryRegisteredMetricHasAWriter
+// recognises as a binding: `c.field = prometheus.NewCounter(...)` reads to it as
+// "constructed inline and bound to nothing, so nothing can ever write it". The
+// guard is right to be strict there — an unbound collector exports a family with
+// no series, and an empty series reads as zero to every alert and dashboard.
 func newVenueCapabilityCounters(reg prometheus.Registerer) venueCapabilityCounters {
-	// Venue adapters trading an account NOBODY has proved against the exchange
-	// (SOV-02a). The adapter's account is read from its own config, so a mis-declared
-	// deployment looks exactly like a correct one — non-zero means some part of the
-	// book is settling against a collateral pool that only a human's typing says it
-	// belongs to.
-	unverifiedAccounts := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "kanz_oms_unverified_venue_account_total",
-		Help: "Venue adapters registered whose exchange account was NOT confirmed by the exchange itself. " +
-			"The adapter holds the API credential but has not proved which account it belongs to, so its fills " +
-			"could margin against a different fund's collateral than the ledger books them to.",
-	})
-	reg.MustRegister(unverifiedAccounts)
+	c := venueCapabilityCounters{
+		// Venue adapters trading an account NOBODY has proved against the
+		// exchange (SOV-02a). The adapter's account is read from its own config,
+		// so a mis-declared deployment looks exactly like a correct one —
+		// non-zero means some part of the book is settling against a collateral
+		// pool that only a human's typing says it belongs to.
+		unverifiedAccounts: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "kanz_oms_unverified_venue_account_total",
+			Help: "Venue adapters registered whose exchange account was NOT confirmed by the exchange itself. " +
+				"The adapter holds the API credential but has not proved which account it belongs to, so its fills " +
+				"could margin against a different fund's collateral than the ledger books them to.",
+		}),
 
-	// Venue adapters that did not say which order types they can place (#405).
-	// Non-zero means the admission gate is OPEN for that MIC: an order type the
-	// adapter cannot translate will be admitted, stored and announced, and refused
-	// only at the exchange. Zero is the goal; OMS_REQUIRE_ORDER_TYPE_SUPPORT is how
-	// it is held there once the fleet is upgraded.
-	undeclaredOrderTypes := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "kanz_oms_undeclared_venue_order_types_total",
-		Help: "Venue adapters registered that declared no supported order types. The OMS cannot refuse an " +
-			"unroutable order type at admission for these, so one reaches the venue and fails there instead.",
-	})
-	reg.MustRegister(undeclaredOrderTypes)
+		// Venue adapters that did not say which order types they can place
+		// (#405). Non-zero means the admission gate is OPEN for that MIC: an
+		// order type the adapter cannot translate will be admitted, stored and
+		// announced, and refused only at the exchange. Zero is the goal;
+		// OMS_REQUIRE_ORDER_TYPE_SUPPORT is how it is held there once the fleet
+		// is upgraded.
+		undeclaredOrderTypes: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "kanz_oms_undeclared_venue_order_types_total",
+			Help: "Venue adapters registered that declared no supported order types. The OMS cannot refuse an " +
+				"unroutable order type at admission for these, so one reaches the venue and fails there instead.",
+		}),
 
-	// A SEPARATE COUNTER FROM THE ONE ABOVE (#486), because they are separate
-	// gaps with separate fixes. An adapter may answer the order-type question and
-	// not the time-in-force one; collapsing both into ..._order_types_total would
-	// report an adapter as having failed to declare order types when it declared
-	// them perfectly well.
-	undeclaredTimeInForce := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "kanz_oms_undeclared_venue_time_in_force_total",
-		Help: "Venue adapters that did not declare which time-in-force instructions they can " +
-			"express. Non-zero means this OMS cannot refuse an inexpressible time-in-force at " +
-			"admission for that venue, so an order will be accepted and announced and then " +
-			"refused by the connector. Distinct from the order-type gap: an IOC placed as " +
-			"good-til-cancelled does not fail, it RESTS — the trader asked to hold no exposure " +
-			"and holds it.",
-	})
-	reg.MustRegister(undeclaredTimeInForce)
+		// A SEPARATE COUNTER FROM THE ONE ABOVE (#486), because they are
+		// separate gaps with separate fixes. An adapter may answer the
+		// order-type question and not the time-in-force one; collapsing both
+		// into ..._order_types_total would report an adapter as having failed to
+		// declare order types when it declared them perfectly well.
+		undeclaredTimeInForce: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "kanz_oms_undeclared_venue_time_in_force_total",
+			Help: "Venue adapters that did not declare which time-in-force instructions they can " +
+				"express. Non-zero means this OMS cannot refuse an inexpressible time-in-force at " +
+				"admission for that venue, so an order will be accepted and announced and then " +
+				"refused by the connector. Distinct from the order-type gap: an IOC placed as " +
+				"good-til-cancelled does not fail, it RESTS — the trader asked to hold no exposure " +
+				"and holds it.",
+		}),
 
-	// A THIRD COUNTER, ON THE SAME REASONING (#742). Margin mode is the fifth
-	// capability in this family and was the only member with NO dial-time signal
-	// at all: DeclaresMarginModes() existed and had zero callers, so an adapter
-	// with a silently open margin gate was indistinguishable from one that had
-	// been checked and was fine. That is the distinction CLAUDE.md says must
-	// never collapse.
-	//
-	// Its consequence is the most expensive of the three. An undeclared order
-	// type produces an order that does NOTHING; an inexpressible time-in-force
-	// produces one that does the WRONG THING; an unrefused collateral regime
-	// produces a position that is REAL and whose regime the fund's records get
-	// wrong — the platform reserves margin and buying power against leverage the
-	// exchange never applied.
-	undeclaredMarginModes := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "kanz_oms_undeclared_venue_margin_modes_total",
-		Help: "Venue adapters that did not declare which collateral regimes they can express. " +
-			"Non-zero means this OMS cannot refuse an inexpressible margin mode at admission for " +
-			"that venue, so a levered order is accepted, announced, and either refused by the " +
-			"connector or placed as spot — leaving a real position whose regime the audit root " +
-			"records wrongly.",
-	})
-	reg.MustRegister(undeclaredMarginModes)
-	return venueCapabilityCounters{
-		unverified:  unverifiedAccounts,
-		orderTypes:  undeclaredOrderTypes,
-		timeInForce: undeclaredTimeInForce,
-		marginModes: undeclaredMarginModes,
+		// A FOURTH COUNTER, ON THE SAME REASONING (#742). Margin mode is the
+		// fifth capability in this family and was the only member with NO
+		// dial-time signal at all: DeclaresMarginModes() existed and had zero
+		// callers, so an adapter with a silently open margin gate was
+		// indistinguishable from one that had been checked and was fine. That is
+		// the distinction CLAUDE.md says must never collapse.
+		//
+		// Its consequence is the most expensive of the four. An undeclared order
+		// type produces an order that does NOTHING; an inexpressible
+		// time-in-force produces one that does the WRONG THING; an unrefused
+		// collateral regime produces a position that is REAL and whose regime the
+		// fund's records get wrong — the platform reserves margin and buying
+		// power against leverage the exchange never applied.
+		undeclaredMarginModes: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "kanz_oms_undeclared_venue_margin_modes_total",
+			Help: "Venue adapters that did not declare which collateral regimes they can express. " +
+				"Non-zero means this OMS cannot refuse an inexpressible margin mode at admission for " +
+				"that venue, so a levered order is accepted, announced, and either refused by the " +
+				"connector or placed as spot — leaving a real position whose regime the audit root " +
+				"records wrongly.",
+		}),
 	}
+	// Registered together: four collectors, one call, so a fifth added to the
+	// struct cannot be constructed and silently left unregistered.
+	reg.MustRegister(c.unverifiedAccounts, c.undeclaredOrderTypes,
+		c.undeclaredTimeInForce, c.undeclaredMarginModes)
+	return c
 }
 
 // configuredVenues is the venue composition root. Every venue is now OUT OF
@@ -311,7 +323,7 @@ func dialVenues(ctx context.Context, cfg config.Config, counters venueCapability
 			// The adapter agrees with the manifest but nobody has checked it against the
 			// exchange. Both mis-configured and correct deployments look like this, so it
 			// must not be silent: it is named, and it is counted.
-			counters.unverified.Inc()
+			counters.unverifiedAccounts.Inc()
 			logger.Warn("venue adapter registered with an UNVERIFIED account — nobody has confirmed this API credential "+
 				"belongs to the collateral pool it names. An exchange liquidates per account",
 				"mic", mic, "account", account, "endpoint", addr,
@@ -341,7 +353,7 @@ func dialVenues(ctx context.Context, cfg config.Config, counters venueCapability
 			// The adapter said nothing, which is not the same as "supports nothing"
 			// — and both an old adapter and a broken one look like this. Named, and
 			// counted, exactly as the unverified account above.
-			counters.orderTypes.Inc()
+			counters.undeclaredOrderTypes.Inc()
 			logger.Warn("venue adapter declared NO order types — the OMS cannot refuse an unroutable order type "+
 				"at admission for this venue, so one will be accepted, announced, and fail at the exchange",
 				"mic", mic, "account", account, "endpoint", addr,
@@ -367,7 +379,7 @@ func dialVenues(ctx context.Context, cfg config.Config, counters venueCapability
 			// different fixes, and a counter named ..._order_types_total that also
 			// counts time-in-force gaps tells an operator two adapters failed to
 			// declare order types when one of them declared them fine.
-			counters.timeInForce.Inc()
+			counters.undeclaredTimeInForce.Inc()
 			logger.Warn("venue adapter declared NO time-in-force support — the OMS cannot refuse an "+
 				"inexpressible time-in-force at admission for this venue, so an order will be accepted, "+
 				"announced, and refused by the connector",
@@ -397,7 +409,7 @@ func dialVenues(ctx context.Context, cfg config.Config, counters venueCapability
 			logger.Info("venue adapter declares its collateral regimes — modes it cannot express "+
 				"will be refused at admission", "mic", mic, "margin_modes", id.MarginModes)
 		} else {
-			counters.marginModes.Inc()
+			counters.undeclaredMarginModes.Inc()
 			logger.Warn("venue adapter declared NO margin modes — the OMS cannot refuse an "+
 				"inexpressible collateral regime at admission for this venue, so a levered order is "+
 				"accepted and announced, and is then either refused by the connector or placed as "+
