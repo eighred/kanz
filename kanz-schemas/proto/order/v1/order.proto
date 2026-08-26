@@ -205,8 +205,19 @@ message ExecutionSchedule {
 
 // AmendOrder requests a change to a resting order's quantity and/or limit
 // price. Only the set fields change; an amend that would reduce quantity below
-// the already-filled amount is REJECTED. An amend resets the order's working
-// priority at the venue (venue-dependent).
+// the already-filled amount is REJECTED.
+//
+// IT CHANGES THE PLATFORM'S RECORD AND NOTHING ELSE. No adapter in this module
+// sends an amend or replace to any exchange — venue.v1.VenueAdapterService has
+// no such RPC, and neither connector wires one — so an order a venue is already
+// working CANNOT be amended: the OMS refuses it with VENUE_CANNOT_AMEND rather
+// than rewriting terms the exchange will never hear (#740).
+//
+// This comment used to say the opposite ("an amend resets the order's working
+// priority at the venue"). It was read as a promise the code never made, and
+// the gap it described is the whole reason the refusal exists: a down-amend the
+// venue never receives fills the ORIGINAL quantity, and the platform books the
+// amended one. Amending is therefore available only BEFORE the order is routed.
 message AmendOrder {
   // metadata.target_id MUST equal order_id. Required.
   command.v1.CommandMetadata metadata = 1;

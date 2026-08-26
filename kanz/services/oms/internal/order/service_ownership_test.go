@@ -195,9 +195,17 @@ func TestAmend_RefusesQuarantinedOrder(t *testing.T) {
 }
 
 // NON-VACUITY for amend: the entitled caller must still be able to amend.
+//
+// IT AMENDS A PENDING_NEW ORDER, and that is the point rather than an
+// incidental detail. This test used to amend a RESTING one, which passed only
+// because handleAmend would rewrite the size of an order the exchange was
+// working and answer EXECUTED (#740). That is now refused, so proving the
+// ENTITLEMENT gate lets the owner through needs an order no venue holds —
+// otherwise the venue refusal fires first and this asserts nothing about
+// entitlement at all.
 func TestAmend_AllowsPrincipalEntitledToTheOrdersPortfolio(t *testing.T) {
 	fb := &fakeBus{}
-	svc, _ := restingOrderOn(t, fb, &closerVenue{mic: "BINANCE"})
+	svc := pendingOrderSvc(t, fb)
 
 	amend := &orderpb.AmendOrder{
 		OrderId:     "o1",
