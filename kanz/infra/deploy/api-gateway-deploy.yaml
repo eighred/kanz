@@ -231,6 +231,10 @@ spec:
             # allow-observability-scrape. Unset until #762: the plane was deployed
             # with no address here, no route, and no NetworkPolicy either way.
             - { name: API_GATEWAY_MCP_ADDR, value: "http://mcp.kanz-services.svc:8110" }
+            # regulatory's ESG screening route (#751) on its API listener. NOT
+            # :8083 — that serves /metrics and the filing routes, and the filing
+            # routes are deliberately not proxied (they append to the audit chain).
+            - { name: API_GATEWAY_REGULATORY_ADDR, value: "http://regulatory.kanz-services.svc:8103" }
             # WHO MAY MOVE THE FUND'S OWN CAPITAL (#535). NEITHER KEY IS SET HERE, AND
             # THAT IS THE POSTURE — recorded rather than merely omitted, because a
             # control nobody can find in the manifest is a control nobody knows exists.

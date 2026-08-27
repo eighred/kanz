@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/pkg/secret"
 )
 
@@ -60,6 +61,27 @@ type Config struct {
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
+
+	// Tenant is the tenant THIS DEPLOYMENT serves, and it is never read from a
+	// caller. It scopes the reference-data cache only — datamaster is
+	// tenant-per-instance, so a cache built for the wrong tenant looks exactly
+	// like an empty security master rather than failing loudly.
+	//
+	// Nothing else here is tenant-scoped: this service reads no principal header,
+	// and the ESG screen evaluates the book the CALLER supplies rather than one
+	// it fetches, so there is no cross-tenant read for this value to guard.
+	Tenant string
+
+	// RefData wires the instrument classifier the ESG screen resolves SECTOR and
+	// ISSUER through (#751).
+	//
+	// Unset ⇒ no classifier, and those dimensions are then UNRESOLVABLE — which
+	// the shared COMP-01 engine REFUSES rather than passes (#640). So an
+	// exclusion policy naming a sector comes back as "cannot be verified" with
+	// the cause named, never as a clean PASS over a book nobody could classify.
+	// That is the honest posture for a deployment with no reference data, and it
+	// is why the route is still worth mounting before this is wired.
+	RefData refdata.Config
 }
 
 // Load reads the configuration from the environment with production-safe defaults.
@@ -75,6 +97,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	refData, rerr := refdata.LoadConfig("REGULATORY")
+	if rerr != nil {
+		return Config{}, rerr
+	}
+
 	cfg := Config{
 		Listen:        env.Or("REGULATORY_LISTEN", ":8103"),
 		MetricsListen: env.Or("REGULATORY_METRICS_LISTEN", ":8083"),
@@ -82,6 +109,8 @@ func Load() (Config, error) {
 		Signer:        strings.ToLower(env.Or("REGULATORY_SIGNER", "chain")),
 		DatabaseURL:   databaseURL,
 		OTLPEndpoint:  os.Getenv("REGULATORY_OTLP_ENDPOINT"),
+		Tenant:        env.Or("REGULATORY_TENANT", "__system__"),
+		RefData:       refData,
 
 		AllowEphemeralChain: os.Getenv("REGULATORY_ALLOW_EPHEMERAL_CHAIN") == "true",
 	}

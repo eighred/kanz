@@ -127,6 +127,15 @@ const (
 	// and no NetworkPolicy either way, so the plane was deployed and unreachable
 	// (#762).
 	ServiceMCP Service = "mcp"
+
+	// ServiceRegulatory is the ESG EXCLUSION SCREEN and nothing else (#751).
+	//
+	// The regulatory service also serves five filing routes, and they are not
+	// proxied: a filing is signed and appends to the AUDIT-01 hash chain, so its
+	// capability is a separate decision from a read route's. The screen is a pure
+	// function over the book the caller supplies — it signs nothing, stores
+	// nothing, and appends nothing.
+	ServiceRegulatory Service = "regulatory"
 )
 
 // Request is the upstream call the Backend forwards. Principal is the
@@ -476,7 +485,18 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// to read it through an agent, and the per-tool gate inside the plane is what
 	// scopes the answer to their tenant.
 	mux.Handle(authz.Read, "POST /v1/mcp", h.handle(ServiceMCP, true, func(string) string { return "/mcp" }))
+
+	// THE ESG EXCLUSION SCREEN (#751 item 4). authz.Read: it evaluates a book the
+	// caller supplied against a policy the caller supplied and returns a
+	// compliance result. Nothing is signed, nothing is stored, and no chain link
+	// is appended — which is exactly what separates it from the filing routes on
+	// the same service, and why they are not mounted here.
+	mux.Handle(authz.Read, "POST /v1/screening/esg", h.handle(ServiceRegulatory, true, identityPath))
 }
+
+// identityPath forwards the request path unchanged: regulatory serves
+// /v1/screening/esg at that same path, so there is no prefix to trim.
+func identityPath(p string) string { return p }
 
 // handle builds a forwarding handler for one upstream. requirePrincipal gates
 // the route on an authenticated caller at the edge (copilot's /v1/ask), beyond

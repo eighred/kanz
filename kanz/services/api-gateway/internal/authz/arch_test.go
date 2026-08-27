@@ -221,6 +221,21 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// scopes the answer to that caller's tenant.
 		"POST /v1/mcp": authz.Read,
 
+		// THE ESG EXCLUSION SCREEN (#751 item 4). The guard's prompt, answered:
+		// yes, a read token should reach this. It evaluates a book the CALLER
+		// supplied against a policy the CALLER supplied and returns a compliance
+		// result — it signs nothing, stores nothing, and appends no link to the
+		// AUDIT-01 hash chain.
+		//
+		// THE FIVE FILING ROUTES ON THE SAME SERVICE ARE NOT HERE, and that is the
+		// decision rather than an omission. A filing IS signed and DOES append to
+		// the chain, so authz.Read would be wrong for it and authz.Audit is a read
+		// capability. Naming the right one is its own decision with its own
+		// evidence, and making it while wiring a screening route is how a
+		// capability ends up meaning nothing — the failure the model-portfolios
+		// entry above guards against from the other direction.
+		"POST /v1/screening/esg": authz.Read,
+
 		// THE FUNDING PATH (#415) — the fund's OWN capital, not the market's.
 		//
 		// authz.Fund and not authz.Trade, and the guard's prompt is exactly the

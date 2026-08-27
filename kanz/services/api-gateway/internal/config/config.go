@@ -173,6 +173,22 @@ type Config struct {
 	// and no NetworkPolicy either way.
 	MCPAddr string
 
+	// RegulatoryAddr is the regulatory service's ESG SCREENING route, and only
+	// that route (#751).
+	//
+	// It is the service's API listener :8103, not the :8083 that serves its
+	// /metrics — allow-observability-scrape admits 8083 across every pod in the
+	// namespace, which is why the filing routes moved off it (#765).
+	//
+	// THE FIVE FILING ROUTES ARE DELIBERATELY NOT PROXIED HERE. A filing is
+	// signed and appends a link to the AUDIT-01 hash chain, so its capability is
+	// a different question from a read route's — authz.Read would be wrong for
+	// it, and deciding that while wiring something else is how a capability ends
+	// up meaning nothing. The screen writes nothing and signs nothing.
+	//
+	// Empty ⇒ POST /v1/screening/esg 503s.
+	RegulatoryAddr string
+
 	// PerTenantUpstreams names the tenants that have their OWN rendered instances
 	// of the MT-02 per-tenant services (internal/tenantgen.Services), so a read
 	// on behalf of one is dialled at <service>-<tenant> instead of the shared
@@ -351,6 +367,7 @@ func Load() (Config, error) {
 		TVSyncAddr:         os.Getenv("API_GATEWAY_TV_SYNC_ADDR"),
 		OptimizationAddr:   os.Getenv("API_GATEWAY_OPTIMIZATION_ADDR"),
 		MCPAddr:            os.Getenv("API_GATEWAY_MCP_ADDR"),
+		RegulatoryAddr:     os.Getenv("API_GATEWAY_REGULATORY_ADDR"),
 		AccountingAddr:     os.Getenv("API_GATEWAY_ACCOUNTING_ADDR"),
 		PerTenantUpstreams: env.SplitList(os.Getenv("API_GATEWAY_PER_TENANT_UPSTREAMS")),
 		FundRole:           os.Getenv("API_GATEWAY_FUND_ROLE"),
