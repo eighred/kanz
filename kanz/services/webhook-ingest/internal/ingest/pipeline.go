@@ -79,6 +79,23 @@ type Options struct {
 	// has a problem without saying whose.
 	OnUnstampedSignal func(strategyID string)
 
+	// OnStaleSignal is called for every alert the freshness bound refuses on its
+	// TIMESTAMP — one too old to act on, or one dated in the future. Nil ⇒ not
+	// counted. future says which, because the two have different fixes.
+	//
+	// IT IS THE OTHER HALF OF OnUnstampedSignal, and the asymmetry it removes was
+	// the odd one (#416). An unstamped alert — which configuration may ADMIT —
+	// was counted per strategy, while a stale one, which is ALWAYS refused, was
+	// not counted at all. So the louder failure was the invisible one: a sender
+	// whose clock drifts or whose delivery path stalls has every alert refused
+	// with a 400 that reaches the SENDER, and nothing on this side to alert on.
+	//
+	// THE DIRECTION MATTERS OPERATIONALLY. Too old is a delivery problem — a
+	// retry storm, a partition, a paused pod. Future-dated is a clock problem at
+	// the sender. Same refusal, different team, so one label separates them
+	// rather than one counter conflating them.
+	OnStaleSignal func(strategyID string, future bool)
+
 	// MaxSignalAge bounds how old an alert may be when it is acted on (#416).
 	// Handed to the translator because BOTH BRAINS must share the bound: a check
 	// here would leave the native alpha path unbounded, which is how the
@@ -301,6 +318,13 @@ func (p *Pipeline) decide(ctx context.Context, wh *Webhook) (*Result, error) {
 		// which SENDER is wrong.
 		if errors.Is(err, translate.ErrUnboundFund) && p.opt.OnUnboundFund != nil {
 			p.opt.OnUnboundFund(wh.StrategyID)
+		}
+		// A STALE ALERT IS COUNTED HERE FOR THE SAME REASON, and only when the
+		// alert CARRIED a timestamp: ErrStaleSignal also covers the unstamped
+		// case, which is counted above before Emit ever runs. Counting it twice
+		// would make one misconfigured sender look like two.
+		if errors.Is(err, translate.ErrStaleSignal) && sourceTS != nil && p.opt.OnStaleSignal != nil {
+			p.opt.OnStaleSignal(wh.StrategyID, sourceTS.AsTime().After(p.now()))
 		}
 		return nil, mapTranslateErr(err)
 	}

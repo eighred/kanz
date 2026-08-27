@@ -239,3 +239,124 @@ func TestPerimeter_APipelineThatWasNotToldTheBoundIsStillBounded(t *testing.T) {
 		t.Fatalf("%d command(s) published", n)
 	}
 }
+
+// A STALE REFUSAL IS COUNTED, AND THE DIRECTION SAYS WHICH TEAM TO CALL (#416).
+//
+// The asymmetry this removes was the odd one. An UNSTAMPED alert — which
+// configuration may ADMIT, via WEBHOOK_INGEST_REQUIRE_SIGNAL_TS=false — was
+// counted per strategy. A STALE one, which is always refused, was not counted at
+// all. So the louder failure was the invisible one: a sender whose clock drifts
+// or whose delivery path stalls has every alert refused with a 400 that reaches
+// the SENDER, and nothing on this side to alert on.
+
+type staleCall struct {
+	strategyID string
+	future     bool
+}
+
+func stalenessCountingHarness(t *testing.T, max time.Duration, now time.Time) (*Pipeline, *capture, *[]staleCall) {
+	t.Helper()
+	cap := &capture{}
+	var calls []staleCall
+	p, err := NewPipeline(Options{
+		Authority: ingestTestAuthority(t),
+		Auth:      NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, func() time.Time { return now }),
+		Symbols:   StaticSymbols{"BINANCE:BTCUSDT": "BTC-USD"},
+		Prices:    StaticPrices{"BTC-USD": big.NewRat(50_000, 1)},
+		Equity:    StaticEquity{"fund-alpha": new(big.Rat).SetInt64(1_000_000)},
+		Positions: StaticPositions{},
+		Alloc:     StaticAllocation{"fund-alpha": {{Venue: "BINANCE", Weight: big.NewRat(1, 1)}}},
+		Publisher: cap,
+		Gate:      halt.OpenGate(nil),
+
+		MaxSignalAge:  max,
+		Now:           func() time.Time { return now },
+		OnStaleSignal: func(strategyID string, future bool) { calls = append(calls, staleCall{strategyID, future}) },
+		OnUnstampedSignal: func(string) {
+			// Wired so the two counters can be told apart: an unstamped alert must
+			// reach THAT counter and not this one.
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	return p, cap, &calls
+}
+
+func TestPerimeter_AnAlertRefusedForAgeIsCountedAsTooOld(t *testing.T) {
+	now := alertFired.Add(30 * time.Minute)
+	p, cap, calls := stalenessCountingHarness(t, 2*time.Minute, now)
+
+	raw := stampedBody("old-1", alertFired)
+	_, err := p.Process(t.Context(), []byte(raw), nil, sign(raw, testSecret))
+	if !errors.Is(err, translate.ErrStaleSignal) {
+		t.Fatalf("a 30-minute-old alert = %v, want ErrStaleSignal", err)
+	}
+	if n := len(cap.commands()); n != 0 {
+		t.Fatalf("%d command(s) published for a stale alert", n)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("stale refusals counted = %d, want 1 — the refusal reaches the SENDER in a 400, "+
+			"so this counter is what reaches us", len(*calls))
+	}
+	if got := (*calls)[0]; got.strategyID != "momentum" || got.future {
+		t.Fatalf("counted %+v, want {momentum false} — a bare total would say the estate has stale "+
+			"alerts without saying whose, and too_old is a DELIVERY problem, not a clock one", got)
+	}
+}
+
+// A FUTURE-DATED ALERT IS A DIFFERENT FIX. Too old is a delivery problem — a
+// retry storm, a partition, a paused pod. Future-dated is a clock at the sender.
+// One counter conflating them sends the page to the wrong team.
+func TestPerimeter_AFutureDatedAlertIsCountedAsFuture(t *testing.T) {
+	now := alertFired
+	p, cap, calls := stalenessCountingHarness(t, 2*time.Minute, now)
+
+	raw := stampedBody("future-1", alertFired.Add(30*time.Minute))
+	_, err := p.Process(t.Context(), []byte(raw), nil, sign(raw, testSecret))
+	if !errors.Is(err, translate.ErrStaleSignal) {
+		t.Fatalf("a future-dated alert = %v, want ErrStaleSignal", err)
+	}
+	if n := len(cap.commands()); n != 0 {
+		t.Fatalf("%d command(s) published for a future-dated alert", n)
+	}
+	if len(*calls) != 1 || !(*calls)[0].future {
+		t.Fatalf("counted %+v, want one call with future=true", *calls)
+	}
+}
+
+// AN UNSTAMPED ALERT IS NOT COUNTED TWICE. ErrStaleSignal covers it too, and it
+// is already counted before Emit runs — counting it here as well would make one
+// misconfigured sender look like two.
+func TestPerimeter_AnUnstampedAlertIsNotAlsoCountedAsStale(t *testing.T) {
+	now := alertFired
+	p, _, calls := stalenessCountingHarness(t, 2*time.Minute, now)
+
+	raw := unstampedBody("buy", "1", "absolute_qty", "nots-2")
+	_, err := p.Process(t.Context(), []byte(raw), nil, sign(raw, testSecret))
+	if !errors.Is(err, translate.ErrStaleSignal) {
+		t.Fatalf("an unstamped alert = %v, want ErrStaleSignal", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("an unstamped alert was counted as stale (%+v) — it is already counted by "+
+			"OnUnstampedSignal, and double counting makes one bad sender look like two", *calls)
+	}
+}
+
+// NON-VACUITY: a fresh alert is neither refused nor counted. Without this every
+// assertion above is satisfied by a perimeter that refuses everything.
+func TestPerimeter_AFreshAlertIsNotCountedStale(t *testing.T) {
+	now := alertFired.Add(30 * time.Second)
+	p, cap, calls := stalenessCountingHarness(t, 2*time.Minute, now)
+
+	raw := stampedBody("fresh-1", alertFired)
+	if _, err := p.Process(t.Context(), []byte(raw), nil, sign(raw, testSecret)); err != nil {
+		t.Fatalf("a 30-second-old alert under a 2-minute bound = %v, want admitted", err)
+	}
+	if n := len(cap.commands()); n == 0 {
+		t.Fatal("a fresh alert published nothing")
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("a fresh alert was counted stale: %+v", *calls)
+	}
+}

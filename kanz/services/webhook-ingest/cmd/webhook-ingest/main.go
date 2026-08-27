@@ -211,6 +211,23 @@ func run() int {
 	}, []string{"strategy_id"})
 	obs.Registry.MustRegister(unstamped)
 
+	// ALERTS REFUSED ON THEIR AGE (#416). The other half of the counter above,
+	// and the asymmetry it removes was the odd one: an unstamped alert — which
+	// configuration may ADMIT — was counted, while a stale one, which is ALWAYS
+	// refused, was not. The louder failure was the invisible one.
+	//
+	// direction separates the two fixes: "too_old" is a delivery problem (a retry
+	// storm, a partition, a paused pod), "future" is a clock problem at the
+	// sender. Non-zero on either means that strategy's alerts are being dropped
+	// at the perimeter and only the SENDER is being told.
+	stale := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kanz_webhook_stale_signals_total",
+		Help: "Alerts refused because their source timestamp is outside " +
+			"WEBHOOK_INGEST_MAX_SIGNAL_AGE, by strategy and direction " +
+			"(too_old | future). Non-zero means that strategy's alerts are not being acted on.",
+	}, []string{"strategy_id", "direction"})
+	obs.Registry.MustRegister(stale)
+
 	// ATTEMPTED CROSS-TENANT ORDERS (#632). Non-zero means a sender holding a
 	// strategy's HMAC secret asked this platform to trade a fund that strategy is
 	// not bound to — a leaked secret being pointed at another tenant's book, or a
@@ -255,6 +272,13 @@ func run() int {
 		// WEBHOOK_INGEST_REQUIRE_SIGNAL_TS cannot be armed until that list is empty.
 		OnUnstampedSignal: func(strategyID string) {
 			unstamped.WithLabelValues(strategyID).Inc()
+		},
+		OnStaleSignal: func(strategyID string, future bool) {
+			direction := "too_old"
+			if future {
+				direction = "future"
+			}
+			stale.WithLabelValues(strategyID, direction).Inc()
 		},
 		OnUnboundFund: func(strategyID string) {
 			unboundFund.WithLabelValues(strategyID).Inc()
