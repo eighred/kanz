@@ -6,6 +6,9 @@
 package server
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -44,10 +47,16 @@ type Options struct {
 	ClientIP *clientip.Resolver
 	// StaticDir is the compiled SPA served on THIS origin. Empty ⇒ API only,
 	// which is the local shape where Vite serves the SPA on its own port.
-	StaticDir     string
-	OIDC          *oidc.Client
-	Sessions      *session.Manager
-	GatewayURL    string
+	StaticDir  string
+	OIDC       *oidc.Client
+	Sessions   *session.Manager
+	GatewayURL string
+	// SigningSecret is the gateway's API-01d request-signing secret. The
+	// gateway runs its Signing middleware whenever its own secret is set --
+	// which every deployment manifest does -- and rejects an unsigned request
+	// BEFORE authentication runs. Empty sends no header, which is correct only
+	// against a gateway with signing disabled (#777).
+	SigningSecret string
 	SecureCookies bool
 	Logger        *slog.Logger
 	Metrics       http.Handler
@@ -62,6 +71,7 @@ type Server struct {
 	oidc          *oidc.Client
 	sessions      *session.Manager
 	proxy         *httputil.ReverseProxy
+	signingSecret []byte
 	secureCookies bool
 	logger        *slog.Logger
 	metrics       http.Handler
@@ -103,6 +113,7 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 		oidc:          opts.OIDC,
 		sessions:      opts.Sessions,
 		proxy:         newProxy(gw),
+		signingSecret: []byte(opts.SigningSecret),
 		secureCookies: opts.SecureCookies,
 		logger:        logger,
 		metrics:       opts.Metrics,
@@ -382,7 +393,37 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// or any client-supplied Authorization to the gateway.
 	out.Header.Del("Cookie")
 	out.Header.Set("Authorization", "Bearer "+sess.AccessToken)
+	// SIGN IT, or the gateway refuses before it ever authenticates (#777). The
+	// signature covers the body, so the body has to be read here and put back --
+	// r.Clone shares the original ReadCloser, and a consumed one forwards empty.
+	//
+	// The PATH SIGNED IS THE GATEWAY'S, not this server's: the middleware hashes
+	// the path it receives, so signing "/api/v1/..." produces a valid signature
+	// for a request nobody makes.
+	if len(s.signingSecret) > 0 {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			s.fail(w, http.StatusBadRequest, "read body failed", err)
+			return
+		}
+		_ = r.Body.Close()
+		out.Body = io.NopCloser(bytes.NewReader(body))
+		out.ContentLength = int64(len(body))
+		out.Header.Set("X-Signature", signRequest(s.signingSecret, out.Method, out.URL.Path, body))
+	}
 	s.proxy.ServeHTTP(w, out)
+}
+
+// signRequest reproduces the gateway's API-01d canonicalization: HMAC-SHA256
+// over "METHOD\nPATH\nBODY", base64url with no padding. It is a reproduction
+// rather than a shared call because the gateway's verifier lives inside that
+// service; the two are one fact stated twice, and #777 exists because the third
+// caller in a row stated only half of it.
+func signRequest(secret []byte, method, path string, body []byte) string {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(method + "\n" + path + "\n"))
+	mac.Write(body)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 // currentSession resolves the session from the request cookie.

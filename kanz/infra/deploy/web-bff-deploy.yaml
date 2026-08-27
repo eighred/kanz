@@ -93,6 +93,16 @@ spec:
             # the build if this path and the Dockerfile's COPY disagree.
             - { name: WEB_BFF_STATIC_DIR, value: "/srv/spa" }
             - { name: WEB_BFF_GATEWAY_URL, value: "http://api-gateway.kanz-services.svc:8080" }
+            # API-01d REQUEST SIGNING (#777). The gateway runs its Signing
+            # middleware whenever ITS secret is set -- which its own manifest
+            # does on every deployment -- and refuses an unsigned request
+            # BEFORE authentication. Without this the web app's login succeeds
+            # and every screen behind it 401s, which is how the defect survived:
+            # /auth/* never crosses the gateway.
+            #
+            # SAME SECRET, SAME MOUNT SHAPE as api-gateway's own. It is one
+            # shared HMAC key, so both must be issued from one place.
+            - { name: WEB_BFF_SIGNING_SECRET_FILE, value: /run/secrets/gateway/signing-secret }
             # How anyone signs in (#364). The BFF exchanges a credential here and
             # keeps the returned token server-side; the browser only ever holds
             # the opaque session id.
@@ -129,6 +139,7 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - { name: gateway, mountPath: /run/secrets/gateway, readOnly: true }
             - { name: tmp, mountPath: /tmp }
         # THE ONLY PUBLIC SURFACE IN THE ESTATE.
         #
@@ -164,5 +175,13 @@ spec:
             capabilities:
               drop: ["ALL"]
       volumes:
+        # Removing this volume does not degrade signing quietly: pkg/secret
+        # refuses a DECLARED-but-unreadable mount, so the pod stops starting.
+        - name: gateway
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: api-gateway-secrets
         - name: tmp
           emptyDir: {}

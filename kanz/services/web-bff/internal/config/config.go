@@ -8,7 +8,9 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/pkg/secret"
 	"log/slog"
 	"os"
 	"strings"
@@ -40,6 +42,17 @@ type Config struct {
 	SessionTTL time.Duration
 	// SecureCookies sets the Secure flag on cookies. Default true; set
 	// WEB_BFF_INSECURE_COOKIES=1 for local http development only.
+	// SigningSecret is the gateway's API-01d request-signing secret, read via
+	// pkg/secret so WEB_BFF_SIGNING_SECRET_FILE is preferred over the plaintext
+	// var -- the same mount shape the gateway's own secret uses.
+	//
+	// EMPTY IS NOT SAFE IN PRODUCTION. Every deployment manifest sets the
+	// gateway's signing secret, and an unsigned proxied request is refused
+	// before authentication runs -- so an unset value here is a web app whose
+	// login works and whose every data screen 401s (#777). It stays optional
+	// because a gateway with signing disabled is a legitimate local setup, and
+	// the composition root says which one it is at startup.
+	SigningSecret string
 	SecureCookies bool
 
 	// IdentityURL is the platform identity provider (#364) the credential login
@@ -90,6 +103,13 @@ func Load() (Config, error) {
 		TrustedProxies:     env.SplitList(os.Getenv("WEB_BFF_TRUSTED_PROXIES")),
 		StaticDir:          os.Getenv("WEB_BFF_STATIC_DIR"),
 	}
+	// Read AFTER the literal because it can fail, and an unreadable declared
+	// mount is a deployment fault that must not degrade to "" (pkg/secret).
+	signing, err := secret.Read("WEB_BFF_SIGNING_SECRET")
+	if err != nil {
+		return Config{}, fmt.Errorf("WEB_BFF_SIGNING_SECRET: %w", err)
+	}
+	cfg.SigningSecret = signing
 	if cfg.IdentityURL == "" {
 		return Config{}, errors.New("WEB_BFF_IDENTITY_URL is required (the identity service base URL) — " +
 			"it is how anyone signs in")
