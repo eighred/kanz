@@ -141,6 +141,15 @@ jobs:
           # principal, and must not share a port the monitoring plane may open.
           - service: optimization
             dockerfile: kanz/services/optimization/Dockerfile
+          # mcp (#743): the agent-facing MCP READ plane. It had no image because it
+          # did not exist; it is here in the same change that creates it, so the
+          # image/manifest parity check sees it from its first commit rather than
+          # after somebody notices. Like optimization it serves its API and its
+          # /metrics on SEPARATE ports — the API decides which TENANT's state an
+          # agent may read from the injected principal, and must not share a port
+          # the monitoring plane may open.
+          - service: mcp
+            dockerfile: kanz/services/mcp/Dockerfile
           # EXEC-M11: the trading loop's own services, which had no images at all.
           # webhook-ingest is the FIRST HOP (the HMAC webhook that receives every
           # TradingView signal) and tv-sync is the LAST (the Broker-API projection).

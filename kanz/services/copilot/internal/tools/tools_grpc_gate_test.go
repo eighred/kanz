@@ -15,6 +15,7 @@ import (
 
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
+	"github.com/eighred/kanz/internal/agentgate"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/copilot/internal/governed"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
@@ -144,8 +145,8 @@ func TestGRPCGate_TransientStatusRefusesTheCrossTenantRead(t *testing.T) {
 		t.Fatalf("the engine served %d data read(s) behind a failed ownership lookup — the tenant "+
 			"boundary was decided by the engine's availability", data)
 	}
-	if out.Content != msgOwnerUnavailable {
-		t.Errorf("content = %q, want %q", out.Content, msgOwnerUnavailable)
+	if out.Content != agentgate.OwnerUnavailable(auth.ResourcePortfolio) {
+		t.Errorf("content = %q, want %q", out.Content, agentgate.OwnerUnavailable(auth.ResourcePortfolio))
 	}
 	if len(rec.logs) == 0 || rec.logs[len(rec.logs)-1].GetAttributes()["deny.code"] != string(auth.DenyResourceTenantUnresolved) {
 		t.Errorf("the attempt was not audited as an unresolved-tenant refusal: %+v", rec.logs)

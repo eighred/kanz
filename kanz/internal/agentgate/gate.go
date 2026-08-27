@@ -1,4 +1,4 @@
-package tools
+package agentgate
 
 import (
 	"context"
@@ -17,14 +17,16 @@ import (
 // before an MCP surface exists at all — writing a second copy is how a fix stops
 // spreading (17 secret() helpers, 15 of them wrong).
 //
-// IT IS NOT EXTRACTED, DELIBERATELY. CLAUDE.md promotes shared code to
-// kanz/internal or kanz/pkg only when a SECOND consumer appears, and the MCP
-// server does not exist. A shared package with one consumer, built for a caller
-// nobody has written, is the speculative abstraction this repository keeps
-// deleting. So the gate is made to STAND ALONE where it lives: it depends on
-// nothing in this package, takes its collaborators as narrow interfaces, and is
-// tested without a Registry. Moving it the day a second consumer arrives is then
-// a file move, not a redesign.
+// IT LIVES HERE BECAUSE A SECOND CONSUMER ARRIVED. It was kept inside
+// services/copilot for exactly as long as copilot was its only caller —
+// CLAUDE.md promotes shared code to internal/ or pkg/ only when a second
+// consumer appears, and a package built for a caller nobody has written is the
+// speculative abstraction this repository keeps deleting. services/mcp is that
+// second consumer, so the promotion happens WITH it rather than ahead of it.
+//
+// It was made to stand alone before it moved, which is why moving it was a file
+// move: it depends on nothing in either service, takes its collaborators as
+// narrow interfaces, and its tests construct it directly.
 //
 // WHAT IT DEPENDS ON, AND WHAT IT DELIBERATELY DOES NOT. It needs an authorizer
 // and an answer to "who owns this". It does NOT need the governed read surface —
@@ -51,7 +53,7 @@ type OwnerResolver interface {
 // somebody else. The two are ONE sentinel on purpose: a resolver that
 // distinguished them would push a cross-tenant existence oracle into the gate,
 // which then could not un-learn it.
-var ErrResourceNotVisible = errors.New("tools: resource not visible")
+var ErrResourceNotVisible = errors.New("agentgate: resource not visible")
 
 // Verdict is the gate's answer: whether the call may proceed, and the text a
 // caller may be shown if not.
@@ -115,14 +117,14 @@ func (g *Gate) Authorize(ctx context.Context, p *auth.Principal, action auth.Act
 		// anyway, because owner is "".
 		g.logger.WarnContext(ctx, "agent tool: resource ownership unresolved, refused",
 			"resource_type", resourceType, "resource_id", resourceID, "action", string(action), "err", err)
-		return Verdict{Message: msgOwnerUnavailable}
+		return Verdict{Message: OwnerUnavailable(resourceType)}
 	case !dec.Allow:
 		// The authorizer's own sentence goes to the log and the audit stream.
 		// The caller gets the closed-set rendering and nothing else.
 		g.logger.InfoContext(ctx, "agent tool: denied",
 			"resource_type", resourceType, "resource_id", resourceID, "action", string(action),
 			"code", string(dec.Code), "reason", dec.Reason)
-		return Verdict{Message: refusalFor(dec.Code, resourceID)}
+		return Verdict{Message: refusalFor(dec.Code, resourceType, resourceID)}
 	}
 	// There is no "authorized, but the resource is unknown" branch below any
 	// more, and there cannot be one: ErrResourceNotVisible leaves owner empty,
@@ -131,12 +133,50 @@ func (g *Gate) Authorize(ctx context.Context, p *auth.Principal, action auth.Act
 	return Verdict{Allowed: true}
 }
 
+// Refusal text a caller may read. It is a CLOSED SET chosen by deny code —
+// never a passthrough of the authorizer's Reason, which names the resource's
+// owning tenant on a cross-tenant deny and once went straight into agent-visible
+// content (#741).
+//
+// THE VOCABULARY IS BUILT FROM THE RESOURCE TYPE rather than hardcoded to one
+// noun, because this gate now serves more than one kind of resource. The
+// resource type IS the noun — auth.ResourcePortfolio is "portfolio" — so a
+// portfolio refusal reads exactly as it did when this lived in copilot, and a
+// dataset refusal reads about datasets instead of claiming to be about a
+// portfolio.
+//
+// notVisible deliberately answers TWO different questions with one sentence:
+// the resource does not exist, and it belongs to another tenant. A caller able
+// to tell those apart can enumerate another tenant's resources by id, which is
+// the discovery CLAUDE.md puts out of reach. The identical wording is the
+// control; keep it identical.
+// NotVisible is exported so a consumer can assert what its callers actually
+// see without copying the sentence — a duplicated refusal string drifts, and the
+// whole control is that two different questions get ONE answer.
+func NotVisible(resourceType, resourceID string) string {
+	return "no governed data for " + resourceType + " " + resourceID
+}
+
+// NotAuthorized is the grant refusal, exported for the same reason.
+func NotAuthorized(resourceType string) string {
+	return "not authorized to read this " + resourceType
+}
+
+// ownerUnavailable is NOT collapsed into notVisible. A failed ownership lookup
+// is an outage of the read surface — uncorrelated with any tenant, so stating it
+// is not an oracle — and presenting an outage as an absent resource is the
+// silent-default this estate refuses.
+// OwnerUnavailable is the outage refusal, exported for the same reason.
+func OwnerUnavailable(resourceType string) string {
+	return "the " + resourceType + "'s owning tenant could not be established, so this read is refused"
+}
+
 // refusalFor maps a deny code onto the fixed text the caller may read. The
 // isolation refusals collapse into the not-found answer; everything else is
 // about the caller's own token and may be stated.
-func refusalFor(code auth.DenyCode, resourceID string) string {
+func refusalFor(code auth.DenyCode, resourceType, resourceID string) string {
 	if code.IsIsolation() {
-		return msgNoGovernedData + resourceID
+		return NotVisible(resourceType, resourceID)
 	}
-	return msgNotAuthorized
+	return NotAuthorized(resourceType)
 }

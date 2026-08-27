@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/eighred/kanz/internal/agentgate"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/copilot/internal/governed"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
@@ -54,8 +55,8 @@ func TestUnresolvedOwner_CrossTenantProbeReadsNothing(t *testing.T) {
 	// Fail LOUDLY: an outage of the read surface must not be dressed up as an
 	// empty portfolio, or the operator sees a quiet estate instead of a broken
 	// dependency.
-	if out.Content != msgOwnerUnavailable {
-		t.Errorf("content = %q, want the unavailable wording %q", out.Content, msgOwnerUnavailable)
+	if out.Content != agentgate.OwnerUnavailable(auth.ResourcePortfolio) {
+		t.Errorf("content = %q, want the unavailable wording %q", out.Content, agentgate.OwnerUnavailable(auth.ResourcePortfolio))
 	}
 	// The attempt is still audited. A probe that is refused before the
 	// authorizer runs is a probe nobody can see afterwards.
@@ -81,7 +82,7 @@ func TestUnresolvedOwner_OwningTenantIsRefusedToo(t *testing.T) {
 	out := reg.Invoke(context.Background(), t1Analyst(),
 		llm.ToolCall{Name: "get_exposure", Input: map[string]any{"portfolio_id": "PF-T1"}})
 
-	if !out.IsError || out.Content != msgOwnerUnavailable {
+	if !out.IsError || out.Content != agentgate.OwnerUnavailable(auth.ResourcePortfolio) {
 		t.Fatalf("the owning tenant was served on an unresolved owner: err=%v content=%q", out.IsError, out.Content)
 	}
 	if client.reads != 0 {
@@ -173,24 +174,10 @@ func TestGrantRefusals_AreStatedRatherThanFlattened(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			out := reg.Invoke(context.Background(), p,
 				llm.ToolCall{Name: "get_risk_measures", Input: map[string]any{"portfolio_id": "PF-T1"}})
-			if !out.IsError || out.Content != msgNotAuthorized {
-				t.Fatalf("content = %q, want %q", out.Content, msgNotAuthorized)
+			if !out.IsError || out.Content != agentgate.NotAuthorized(auth.ResourcePortfolio) {
+				t.Fatalf("content = %q, want %q", out.Content, agentgate.NotAuthorized(auth.ResourcePortfolio))
 			}
 		})
-	}
-}
-
-// The mapping itself, at the unit: only the isolation classes collapse.
-func TestRefusalFor_OnlyIsolationCollapsesIntoNotFound(t *testing.T) {
-	for _, code := range []auth.DenyCode{auth.DenyCrossTenant, auth.DenyResourceTenantUnresolved} {
-		if got := refusalFor(code, "PF-1"); got != msgNoGovernedData+"PF-1" {
-			t.Errorf("refusalFor(%q) = %q, want the not-found wording", code, got)
-		}
-	}
-	for _, code := range []auth.DenyCode{auth.DenyNoGrant, auth.DenyPortfolioOutOfScope, auth.DenyNoPrincipal, auth.DenyPrincipalNoTenant, auth.DenyEmptyAction} {
-		if got := refusalFor(code, "PF-1"); got != msgNotAuthorized {
-			t.Errorf("refusalFor(%q) = %q, want %q", code, got, msgNotAuthorized)
-		}
 	}
 }
 
@@ -202,7 +189,7 @@ func TestUnknownPortfolio_IsNotReportedAsAnOutage(t *testing.T) {
 	reg, _, _ := harnessWith(t, nil)
 	out := reg.Invoke(context.Background(), t1Analyst(),
 		llm.ToolCall{Name: "get_exposure", Input: map[string]any{"portfolio_id": "PF-NOPE"}})
-	if out.Content == msgOwnerUnavailable {
+	if out.Content == agentgate.OwnerUnavailable(auth.ResourcePortfolio) {
 		t.Fatal("a missing portfolio was reported as an unresolved-owner outage")
 	}
 	// And the branch really is keyed on the sentinel, not on "err != nil": feed
@@ -213,5 +200,24 @@ func TestUnknownPortfolio_IsNotReportedAsAnOutage(t *testing.T) {
 		llm.ToolCall{Name: "get_exposure", Input: map[string]any{"portfolio_id": "PF-T1"}})
 	if again.Content != msgNoGovernedData+"PF-T1" {
 		t.Fatalf("content = %q, want %q — ErrUnknownPortfolio was classed as an outage", again.Content, msgNoGovernedData+"PF-T1")
+	}
+}
+
+// THE TWO NOT-FOUND SENTENCES MUST STAY IDENTICAL. One is the gate's refusal
+// for a resource this caller may not see; the other is this package's answer for
+// a read that got PAST authorization and found nothing. A caller able to tell
+// them apart could ask "was I refused, or is it empty?" — which is the existence
+// oracle the gate exists to deny, rebuilt one layer up.
+//
+// They are two constants in two packages by necessity: the gate cannot know the
+// copilot found no data, and the copilot must not re-run the gate's decision.
+// This is what keeps them in step.
+func TestTheRefusalAndTheEmptyAnswerAreTheSameSentence(t *testing.T) {
+	const pf = "PF-T1"
+	gate := agentgate.NotVisible(auth.ResourcePortfolio, pf)
+	empty := msgNoGovernedData + pf
+	if gate != empty {
+		t.Fatalf("the gate refuses with %q and this package answers %q — the difference tells a "+
+			"caller whether the resource exists", gate, empty)
 	}
 }
