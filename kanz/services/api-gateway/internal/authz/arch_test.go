@@ -201,6 +201,26 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"POST /v1/model-portfolios/propose": authz.Read,
 		"POST /v1/model-portfolios/orders":  authz.Trade,
 
+		// THE AGENT-FACING MCP READ PLANE (#743, wired #762). One route: every
+		// MCP method — initialize, tools/list, tools/call — arrives as a field
+		// inside the JSON-RPC body.
+		//
+		// The guard's prompt, answered: YES, a read token should reach this, and
+		// that is the whole point of the plane. It cannot do anything else. Its
+		// Reader interface declares no Submit, no Cancel, no Amend and no venue
+		// call; an arch guard asserts no write-side capability is reachable from
+		// its import graph; and its handshake states readOnly explicitly rather
+		// than leaving a caller to infer it from an absence. So Read is what the
+		// route requires in its most permissive configuration, which is the
+		// standard the materialize route above sets.
+		//
+		// It borrows Read rather than minting an "mcp" capability, per CLAUDE.md's
+		// preference for existing authorization over a new security system: a
+		// caller entitled to read a portfolio's risk directly is entitled to read
+		// it through an agent, and the per-tool gate inside the plane is what
+		// scopes the answer to that caller's tenant.
+		"POST /v1/mcp": authz.Read,
+
 		// THE FUNDING PATH (#415) — the fund's OWN capital, not the market's.
 		//
 		// authz.Fund and not authz.Trade, and the guard's prompt is exactly the

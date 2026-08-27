@@ -159,6 +159,20 @@ type Config struct {
 	// reachable except through here, where the principal is authenticated and
 	// injected. Empty disables the routes rather than exposing them unauthenticated.
 	OptimizationAddr string
+
+	// MCPAddr is the agent-facing MCP read plane (#743), on its API listener
+	// :8110 — never :8080, which serves that plane's /metrics and is admitted
+	// namespace-wide by allow-observability-scrape.
+	//
+	// IT IS PROXIED FOR THE SAME SECURITY REASON TVSyncAddr IS. The plane
+	// authenticates nobody: it reads the injected X-Kanz-Principal-* and scopes
+	// every tool call to that tenant, refusing outright when the header is
+	// absent. A direct route to it would let any caller name any tenant and read
+	// that tenant's risk state through an agent. Empty ⇒ the /v1/mcp route 503s,
+	// which is the state the whole plane shipped in (#762): no address, no route,
+	// and no NetworkPolicy either way.
+	MCPAddr string
+
 	// PerTenantUpstreams names the tenants that have their OWN rendered instances
 	// of the MT-02 per-tenant services (internal/tenantgen.Services), so a read
 	// on behalf of one is dialled at <service>-<tenant> instead of the shared
@@ -336,6 +350,7 @@ func Load() (Config, error) {
 		CopilotAddr:        os.Getenv("API_GATEWAY_COPILOT_ADDR"),
 		TVSyncAddr:         os.Getenv("API_GATEWAY_TV_SYNC_ADDR"),
 		OptimizationAddr:   os.Getenv("API_GATEWAY_OPTIMIZATION_ADDR"),
+		MCPAddr:            os.Getenv("API_GATEWAY_MCP_ADDR"),
 		AccountingAddr:     os.Getenv("API_GATEWAY_ACCOUNTING_ADDR"),
 		PerTenantUpstreams: env.SplitList(os.Getenv("API_GATEWAY_PER_TENANT_UPSTREAMS")),
 		FundRole:           os.Getenv("API_GATEWAY_FUND_ROLE"),

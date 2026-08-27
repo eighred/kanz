@@ -115,6 +115,18 @@ const (
 	// kanz-observability namespace; this constant is the other half of the repair
 	// — the gateway becoming the caller the boundary assumes.
 	ServiceAudit Service = "audit"
+
+	// ServiceMCP is the agent-facing MCP read plane (#743): one JSON-RPC route
+	// over which an external agent lists and calls READ-ONLY tools scoped to its
+	// own tenant.
+	//
+	// It is mcp's API listener — :8110, the one that serves no /metrics — for the
+	// reason ServiceAudit gives above. That plane authenticates nobody: it reads
+	// the injected X-Kanz-Principal-* and refuses outright without it, so this
+	// constant is the caller that trust assumes. Until it existed there was none,
+	// and no NetworkPolicy either way, so the plane was deployed and unreachable
+	// (#762).
+	ServiceMCP Service = "mcp"
 )
 
 // Request is the upstream call the Backend forwards. Principal is the
@@ -445,6 +457,25 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// nobody can reason about, and a read token must not be able to reach a surface
 	// that in some deployment moves capital.
 	mux.Handle(authz.Trade, "POST /v1/model-portfolios/orders", h.handle(ServiceOptimization, true, toUpstream))
+
+	// THE MCP READ PLANE (#743, wired #762). One route, because the plane is one
+	// JSON-RPC endpoint: initialize, tools/list and tools/call all arrive as a
+	// method inside the body.
+	//
+	// authz.Read AND NOTHING MORE, because that is what the plane can do. Its
+	// Reader interface has no Submit, no Cancel, no Amend and no venue call, an
+	// arch guard asserts no write-side capability is reachable from its import
+	// graph, and its handshake states readOnly explicitly rather than leaving a
+	// caller to infer it from absence. Read is therefore the capability the route
+	// DOES require in its most permissive configuration, which is the standard
+	// the materialize route above sets.
+	//
+	// It reuses an existing capability rather than minting an "mcp" one, per
+	// CLAUDE.md's preference for existing authorization over a new security
+	// system: a caller entitled to read a portfolio's risk directly is entitled
+	// to read it through an agent, and the per-tool gate inside the plane is what
+	// scopes the answer to their tenant.
+	mux.Handle(authz.Read, "POST /v1/mcp", h.handle(ServiceMCP, true, func(string) string { return "/mcp" }))
 }
 
 // handle builds a forwarding handler for one upstream. requirePrincipal gates
