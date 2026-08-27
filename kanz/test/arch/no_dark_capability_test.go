@@ -138,9 +138,35 @@ var darkPackageExempt = map[string]string{
 		"deliberately not written blind, because it cannot be exercised here against the venue " +
 		"endpoint it exists to read. Until it is wired the FI measures keep computing over an " +
 		"empty table, and kanz_risk_fi_terms_missing_total is the only thing that says so.",
-	"internal/collateral": "#408 — the COLL-01 margin/financing plane. The maths is written and " +
-		"unconsumed because an order carries no leverage and no margin mode; #408 holds the ruling " +
-		"on margin semantics that decides the shape of the wiring.",
+	"internal/collateral": "#408 — the COLL-01 margin/financing plane: variation margin, an " +
+		"ISDA-SIMM initial margin with calibration validation, cheapest-to-deliver Optimize, and " +
+		"repo/sec-lending financing ladders. All written, all unit-tested, and imported by nothing. " +
+		"THIS ENTRY USED TO JUSTIFY THE DARKNESS BY SAYING AN ORDER CARRIED NEITHER LEVERAGE NOR A " +
+		"MARGIN MODE, AND #417 MADE THAT FALSE (#759): order.v1.SubmitOrder carries leverage and " +
+		"margin_mode, order.v1.MarginMode exists with a guard asserting it agrees with " +
+		"signal.v1.MarginMode, and the OMS aggregate, the approval digest, the execution router and " +
+		"both venue adapters all read them. A reader who checked that reason found it untrue and " +
+		"would reasonably conclude the exemption was stale and the wiring should now happen — which " +
+		"is the exemption's own job done backwards, and the #610 failure arriving through a stale " +
+		"PREMISE rather than a stale line number. The dead-entry check cannot see it: the entry " +
+		"still matches a real unconsumed package, so it is not dead, only misjustified. " +
+		"THE PLANE IS STILL CORRECTLY DARK, for a stronger reason. order.v1.SubmitOrder.leverage " +
+		"says it in its own doc — nothing there makes a levered order placeable, both connectors " +
+		"are spot-only and say so — because #417 replaced a hardcoded refusal in " +
+		"internal/signal/translate with a CAPABILITY-DRIVEN one: the adapter declares what it can " +
+		"express through venue.v1 supported_margin_modes, internal/execution.venue_identity carries " +
+		"it as MarginModes, and the OMS refuses at admission what no adapter can place. Both spot " +
+		"connectors declare CASH only, so no levered order is placeable and there is nothing for " +
+		"this plane to size collateral for. On top of that #408's own ruling makes its four-control " +
+		"set non-optional BEFORE a levered order is placeable, and its control 1 — margin state as " +
+		"a first-class read — is recorded there as NOT PROVEN: the populated margin_ratio branch " +
+		"has never run, because the OKX demo account is acctLv=1 and exposes no account-level " +
+		"margin aggregates at all, so only the UNKNOWN arm is exercised. " +
+		"WHAT RETIRES THIS ENTRY is therefore a venue adapter declaring a non-CASH margin mode it " +
+		"can actually work, with #408 control 1 proven on an account that reports one — not a " +
+		"consumer written against the fields #417 added. Wiring collateral now would satisfy this " +
+		"guard while sizing margin for orders nothing can place, which is the same wrong fix " +
+		"internal/alpha/barview's entry names in the other direction.",
 	"internal/risk/pricing/credit": "#113 — the credit calibrator carries the same Refresh seam the " +
 		"scheduler drives, and is not scheduled because no live CDS quote source exists (#203). " +
 		"kanz_risk_calibration_scheduled{kind=\"credit\"} reports 0 so the gap is visible.",
