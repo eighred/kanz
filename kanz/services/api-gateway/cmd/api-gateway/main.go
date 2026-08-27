@@ -608,6 +608,9 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 	if cfg.OptimizationAddr != "" {
 		bases[proxy.ServiceOptimization] = cfg.OptimizationAddr
 	}
+	if cfg.MCPAddr != "" {
+		bases[proxy.ServiceMCP] = cfg.MCPAddr
+	}
 	if cfg.AccountingAddr != "" {
 		bases[proxy.ServiceAccounting] = cfg.AccountingAddr
 	}

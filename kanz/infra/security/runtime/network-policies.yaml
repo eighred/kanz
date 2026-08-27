@@ -789,6 +789,23 @@ spec:
               app: audit
       ports:
         - { protocol: TCP, port: 8102 }
+    # THE AGENT-FACING MCP READ PLANE (#743), and it shipped with no arm here at
+    # all — the state the audit paragraph above describes, minus the scrape rule,
+    # which made it worse rather than better. audit was at least reachable the
+    # wrong way; mcp was reachable no way, because :8110 is deliberately outside
+    # allow-observability-scrape's list. Deployed, quota'd, disruption-budgeted,
+    # and unreachable by anything (#762).
+    #
+    # :8110 rather than a fourth name in the 8080 group above, for the reason
+    # that group's own comment gives: 8080 is admitted namespace-wide by the
+    # scrape rule, and this route decides which TENANT's risk state an external
+    # agent may read. mcp's /metrics stays on 8080 and its API does not.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mcp
+      ports:
+        - { protocol: TCP, port: 8110 }
 ---
 # MODEL PORTFOLIOS (#409) — the ingress half, and it is a capital boundary rather
 # than a read one.
@@ -891,6 +908,120 @@ spec:
               app: api-gateway
       ports:
         - { protocol: TCP, port: 8100 }
+---
+# THE MCP READ PLANE (#743) — the ingress half, and the moment its header trust
+# becomes load-bearing (#762).
+#
+# mcp authenticates NOBODY. Its JSON-RPC handler reads the gateway-injected
+# X-Kanz-Principal-* and scopes every tool call to that tenant, refusing outright
+# when the header is absent. Until this rule existed the trust was sound
+# VACUOUSLY — no policy named app: mcp, so under default-deny-all nothing could
+# reach it and there was no caller to trust. This rule creates the first caller,
+# which is what makes the gateway's sole-identity-authority position real here
+# rather than theoretical: a pod that could reach :8110 directly would choose its
+# own tenant and read that tenant's book.
+#
+# ONE PEER, AND OBSERVABILITY IS NOT AMONG THEM. mcp's /metrics and probes are on
+# :8080, which allow-observability-scrape admits namespace-wide; the JSON-RPC API
+# is on :8110, which that rule deliberately does not list. The split was made in
+# mcp's first commit rather than retrofitted, and
+# test/arch/network_policy_coverage_test.go fails if the two listeners merge back
+# — though note what that guard does NOT assert, since this file is where the
+# consequence landed: it checks which port is scraped, not whether any allow rule
+# exists, so it passed for as long as this policy was missing entirely.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-mcp
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8110 }
+    # Prometheus scrape of /metrics from the observability namespace, on the
+    # metrics listener and nothing else. Named here rather than left to
+    # allow-observability-scrape so this file states mcp's whole ingress surface
+    # in one place: two peers, two ports, and no overlap between them.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+# mcp → risk-engine, the EGRESS half (#762).
+#
+# query.v1 on :9090 is the plane's ONLY upstream — it holds no database and no
+# broker connection, so this one flow is the difference between a read plane and
+# a service that answers every tool call with "the governed read surface could
+# not be read right now". It had no rule, so under default-deny-all every dial
+# failed.
+#
+# :9090 and not :9000. The Deployment named :9000 from its first commit — the
+# port the venue adapters publish, which risk-engine has never had — so even with
+# this rule the dial would have hung until its deadline. Both halves had to be
+# wrong together for the symptom to be silence, and they were.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-risk-engine-egress-from-mcp
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: risk-engine
+      ports:
+        - { protocol: TCP, port: 9090 }
+---
+# risk-engine ← mcp, the INGRESS half of the same flow.
+#
+# A SECOND POLICY RATHER THAN A SECOND `from` ARM on allow-gateway-to-risk-engine,
+# because that rule's subject is the gateway and folding a different caller into
+# it would make its name false — the same argument the accounting arm of
+# allow-gateway-to-read-upstreams makes for staying out of the "read-upstreams"
+# group. NetworkPolicy is additive, so the two rules union without either
+# widening the other.
+#
+# It grants the query surface only. mcp has no reason to reach :8081, and the
+# read plane's whole contract is that it reaches state through authorized domain
+# APIs like any other caller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mcp-to-risk-engine
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: risk-engine
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mcp
+      ports:
+        - { protocol: TCP, port: 9090 }
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

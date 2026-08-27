@@ -108,7 +108,15 @@ spec:
           env:
             - { name: MCP_LISTEN, value: ":8110" }
             - { name: MCP_METRICS_LISTEN, value: ":8080" }
-            - { name: MCP_RISK_QUERY_ADDR, value: "risk-engine.kanz-services.svc:9000" }
+            # :9090 IS THE QUERY SURFACE (API-01b), and this said :9000 from its
+            # first commit — the port the VENUE ADAPTERS publish, which
+            # risk-engine has never had. Every tool call would have dialled a
+            # port nothing serves and hung until its deadline, which reads as a
+            # slow upstream rather than a wrong address (#762). The risk-engine
+            # Service publishes 8081 (health/metrics) and 9090 (grpc); the
+            # gateway has always dialled 9090, and its Service comment records
+            # this exact defect happening once before, in the other direction.
+            - { name: MCP_RISK_QUERY_ADDR, value: "risk-engine.kanz-services.svc:9090" }
             # THE POLICY BUNDLE, AND ITS ABSENCE IS A REFUSAL RATHER THAN A HOLE.
             # With this unset the service starts and DENIES every tool call — it
             # is up and serving nothing, and says so at boot. That is the safe
