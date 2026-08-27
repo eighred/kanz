@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/eighred/kanz/internal/agentgate"
+	"github.com/eighred/kanz/internal/measureread"
 	"github.com/eighred/kanz/pkg/auth"
 )
 
@@ -38,9 +39,12 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 // narrower, because CLAUDE.md requires MCP be "server-side filtered and
 // projected" rather than handing an agent whatever a domain API returns.
 type Reader interface {
-	// Measures returns named risk measures for a portfolio, already projected to
-	// what this plane may expose.
-	Measures(ctx context.Context, portfolioID string) (map[string]float64, error)
+	// Measures returns the portfolio's risk measures, already projected to what
+	// this plane may expose — and, per measure, WHETHER IT MAY BE STATED AT ALL.
+	// The projection is internal/measureread, shared with services/copilot,
+	// because "may this number be stated" is one decision and a second copy is
+	// how a fix stops spreading (#757).
+	Measures(ctx context.Context, portfolioID string) (measureread.Set, error)
 }
 
 // Server is the MCP HTTP surface.

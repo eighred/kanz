@@ -3,7 +3,6 @@ package governed
 import (
 	"context"
 	"fmt"
-	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
 	"strconv"
 	"time"
@@ -11,8 +10,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/eighred/kanz/internal/measureread"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
-	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 )
 
@@ -66,11 +65,13 @@ func (c *GRPCClient) Measures(ctx context.Context, portfolioID string, names []s
 	if err != nil {
 		return Reading{}, mapErr(err)
 	}
+	projected := measureread.ProjectMeasures(resp)
 	return Reading{
 		PortfolioID:   portfolioID,
 		Tenant:        resp.GetOwnerTenant(),
 		Kind:          "measures",
-		Values:        measureValues(resp.GetSet()),
+		Measures:      projected.Measures,
+		QualityFlags:  projected.QualityFlags,
 		SourceEventID: citation(resp.GetSourcePosition()),
 		AsOf:          asOf(resp.GetAsOf().AsTime()),
 	}, nil
@@ -82,11 +83,13 @@ func (c *GRPCClient) Exposure(ctx context.Context, portfolioID string) (Reading,
 	if err != nil {
 		return Reading{}, mapErr(err)
 	}
+	projected := measureread.ProjectExposure(resp)
 	return Reading{
 		PortfolioID:   portfolioID,
 		Tenant:        resp.GetOwnerTenant(),
 		Kind:          "exposure",
-		Values:        exposureValues(resp.GetSet()),
+		Measures:      projected.Measures,
+		QualityFlags:  projected.QualityFlags,
 		SourceEventID: citation(resp.GetSourcePosition()),
 		AsOf:          asOf(resp.GetAsOf().AsTime()),
 	}, nil
@@ -110,35 +113,16 @@ func (c *GRPCClient) EvaluateScenario(ctx context.Context, portfolioID, scenario
 	if err != nil {
 		return Reading{}, mapErr(err)
 	}
+	projected := measureread.ProjectScenario(resp)
 	return Reading{
-		PortfolioID: portfolioID,
-		Kind:        "scenario",
-		Values:      measureValues(resp.GetProjected()),
+		PortfolioID:  portfolioID,
+		Kind:         "scenario",
+		Measures:     projected.Measures,
+		QualityFlags: projected.QualityFlags,
 	}, nil
 }
 
 // --- mapping ------------------------------------------------------------------
-
-// measureValues maps a RiskMeasureSet to name→value.
-func measureValues(set *domainpb.RiskMeasureSet) map[string]float64 {
-	out := map[string]float64{}
-	for _, m := range set.GetMeasures() {
-		out[m.GetName()] = decutil.Float64Or(m.GetValue(), 0)
-	}
-	return out
-}
-
-// exposureValues maps an ExposureSet to "dimension/bucket"→net value. The
-// composite key avoids collisions when the same bucket name appears under
-// different dimensions.
-func exposureValues(set *domainpb.ExposureSet) map[string]float64 {
-	out := map[string]float64{}
-	for _, e := range set.GetExposures() {
-		key := e.GetDimension().String() + "/" + e.GetBucket()
-		out[key] = decutil.Float64Or(e.GetNet().GetAmount(), 0)
-	}
-	return out
-}
 
 // citation renders a LogPosition to the Reading's source-citation string:
 // "topic@partition:offset". An unset position (the engine did not anchor the

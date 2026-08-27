@@ -51,7 +51,7 @@ func harnessWith(t *testing.T, ownerErr error) (*Registry, *capRecorder, *counti
 		PortfolioID:   "PF-T1",
 		Tenant:        "t1",
 		Kind:          "measures",
-		Values:        map[string]float64{"VaR99": 1250000, "Delta": 0.42},
+		Measures:      governed.Measured(map[string]float64{"VaR99": 1250000, "Delta": 0.42}),
 		SourceEventID: "evt-123",
 		AsOf:          time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC),
 	})

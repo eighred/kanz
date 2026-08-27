@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/eighred/kanz/internal/agentgate"
+	"github.com/eighred/kanz/internal/measureread"
 	"github.com/eighred/kanz/pkg/auth"
 )
 
@@ -29,17 +30,21 @@ import (
 // tells the caller nothing about another tenant's state.
 
 type fakeReader struct {
-	measures map[string]float64
-	err      error
-	reads    int
+	set   measureread.Set
+	err   error
+	reads int
 }
 
-func (f *fakeReader) Measures(_ context.Context, _ string) (map[string]float64, error) {
+func (f *fakeReader) Measures(_ context.Context, _ string) (measureread.Set, error) {
 	f.reads++
 	if f.err != nil {
-		return nil, f.err
+		return measureread.Set{}, f.err
 	}
-	return f.measures, nil
+	return f.set, nil
+}
+
+func measured(name string, v float64) measureread.Measure {
+	return measureread.Measure{Name: name, Status: measureread.StatusMeasured, Value: &v}
 }
 
 type fakeOwner struct {
@@ -99,7 +104,11 @@ func decodeRPC(t *testing.T, rec *httptest.ResponseRecorder) response {
 
 func healthyServer(t *testing.T) (*Server, *fakeReader) {
 	t.Helper()
-	reader := &fakeReader{measures: map[string]float64{"VaR99": 1250000}}
+	reader := &fakeReader{set: measureread.Set{
+		PortfolioID:  "PF-1",
+		QualityFlags: []string{},
+		Measures:     []measureread.Measure{measured("VaR99", 1250000)},
+	}}
 	return newServer(t, fakeOwner{byID: map[string]string{"PF-1": "t1"}}, reader), reader
 }
 
@@ -219,7 +228,7 @@ func TestToolsCall_UnknownAndCrossTenantAreIndistinguishable(t *testing.T) {
 
 // An ownership lookup that cannot answer FAILS CLOSED and reads nothing.
 func TestToolsCall_UnresolvedOwnerFailsClosed(t *testing.T) {
-	reader := &fakeReader{measures: map[string]float64{"VaR99": 1}}
+	reader := &fakeReader{set: measureread.Set{Measures: []measureread.Measure{measured("VaR99", 1)}}}
 	s := newServer(t, fakeOwner{err: errors.New("deadline exceeded")}, reader)
 
 	res := decodeRPC(t, rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -283,5 +292,60 @@ func TestRPC_EnvelopeAndIDHandling(t *testing.T) {
 	res := decodeRPC(t, rpc(t, s, `{"jsonrpc":"2.0","id":"abc","method":"tools/list"}`))
 	if string(res.ID) != `"abc"` {
 		t.Errorf("id echoed as %s, want \"abc\" — a string id must come back a string", res.ID)
+	}
+}
+
+// A WITHHELD MEASURE REACHES THE AGENT WITH NO NUMBER IN IT (#757).
+//
+// This is the end of the wire, and it is the assertion that matters: whatever
+// the projection decided, what an agent can actually restate is the JSON that
+// leaves this handler. A `"value": 0` anywhere in that body is the confident
+// zero, regardless of what the status beside it says.
+func TestToolsCall_AWithheldMeasureCarriesNoNumber(t *testing.T) {
+	reader := &fakeReader{set: measureread.Set{
+		PortfolioID:  "PF-1",
+		QualityFlags: []string{"INPUTS_UNRESOLVED"},
+		Measures: []measureread.Measure{
+			{
+				Name:     "DV01",
+				Status:   measureread.StatusUnavailable,
+				Reason:   "computed over 0 position(s) with 12 excluded (no_terms)",
+				Coverage: measureread.Coverage{Reported: true, Excluded: 12, ExclusionReasons: []string{"no_terms"}},
+			},
+			measured("GrossExposure", 500),
+		},
+	}}
+	s := newServer(t, fakeOwner{byID: map[string]string{"PF-1": "t1"}}, reader)
+
+	res := decodeRPC(t, rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call",
+		"params":{"name":"get_risk_measures","arguments":{"portfolio_id":"PF-1"}}}`))
+	if res.Error != nil {
+		t.Fatalf("entitled caller refused: %+v", res.Error)
+	}
+	raw, err := json.Marshal(res.Result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	body := string(raw)
+
+	// The rendered tool text is JSON inside a JSON string, so the encoded body
+	// carries escaped quotes. Both spellings are checked rather than one,
+	// because a test that greps for the unescaped form would pass on a body it
+	// never actually looked at.
+	for _, forbidden := range []string{`"value":0`, `\"value\":0`} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("a withheld measure carried %s to the agent — an LLM handed DV01 = 0 answers "+
+				"\"your book carries no interest-rate risk\", which is the whole defect: %s", forbidden, body)
+		}
+	}
+	for _, want := range []string{"UNAVAILABLE", "no_terms", "INPUTS_UNRESOLVED"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the agent is not told %q — withholding a value without saying why is a silent "+
+				"drop, which is the defect wearing different clothes: %s", want, body)
+		}
+	}
+	if !strings.Contains(body, "GrossExposure") {
+		t.Errorf("the sound measure beside the withheld one was refused too — that all-or-nothing "+
+			"is what #509 removed: %s", body)
 	}
 }

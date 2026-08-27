@@ -500,12 +500,12 @@ func TestTheAgentLoopRunsAMultiToolTurnOverThisAdapter(t *testing.T) {
 	client := governed.NewStubClient()
 	client.Put(governed.Reading{
 		PortfolioID: "PF-T1", Tenant: "t1", Kind: "measures",
-		Values: map[string]float64{"VaR99": 1250000}, SourceEventID: "evt-measures",
+		Measures: governed.Measured(map[string]float64{"VaR99": 1250000}), SourceEventID: "evt-measures",
 		AsOf: time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC),
 	})
 	client.Put(governed.Reading{
 		PortfolioID: "PF-T1", Tenant: "t1", Kind: "exposure",
-		Values: map[string]float64{"equity": 640000}, SourceEventID: "evt-exposure",
+		Measures: governed.Measured(map[string]float64{"equity": 640000}), SourceEventID: "evt-exposure",
 		AsOf: time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC),
 	})
 	authz := auth.NewPolicyAuthorizer(&auth.Policy{
