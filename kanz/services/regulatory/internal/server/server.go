@@ -12,8 +12,10 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -257,8 +259,41 @@ func asOf(t *time.Time) time.Time {
 	return time.Now().UTC()
 }
 
+// maxRequestBytes bounds a /v1 request body (#769).
+//
+// IT IS A FLOOR, NOT THE BINDING CONSTRAINT, and the difference matters to
+// anyone reading this number as permission. regulatory's /v1 surface is on
+// :8103, which allow-gateway-to-regulatory admits from app: api-gateway ONLY,
+// and the gateway already answers 413 above its own 1 MiB. So nothing that can
+// reach this service today is anywhere near this cap.
+//
+// The point is that the bound stops being somebody else's. Every sibling holds
+// its own — mcp 1 MiB, optimization 8 MiB "because an unbounded body drives
+// O(n³) solver work" — and this service held none, so its only protection was a
+// peer's configuration: gone if the NetworkPolicy widens, if a second caller is
+// added, or if someone port-forwards for a debug session.
+//
+// 4 MiB is chosen against the largest thing a caller legitimately sends here: an
+// FRTB or Form PF filing's line items, or the ESG screen's position array. Both
+// are far below it.
+const maxRequestBytes = 4 << 20 // 4 MiB
+
+// decode reads a JSON request body under maxRequestBytes.
+//
+// TOO LARGE AND MALFORMED ARE DIFFERENT ANSWERS. 413 tells a caller to send
+// less; 400 tells them to send it correctly, and a caller that cannot tell them
+// apart retries the one thing that cannot work. json.Decode collapses both into
+// "invalid request body" unless the limit error is checked for by type.
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+				"error": "request body exceeds " + strconv.Itoa(maxRequestBytes) + " bytes",
+			})
+			return false
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return false
 	}
