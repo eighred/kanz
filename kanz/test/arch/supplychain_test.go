@@ -778,56 +778,6 @@ var mutableTagExempt = map[string]string{
 	"infra/gitops/preview-applicationset.yaml": "per-PR preview environments build a fresh :pr-N image per pull " +
 		"request; there is no release digest to pin to and the environment is ephemeral",
 
-	// TEMPORARY — retire on the first release that publishes this image.
-	// nats-rebuild joined the build/release matrices in the same branch as this
-	// guard, so no digest exists for it yet. release.yml's pin-digests job
-	// rewrites it on the first tagged run; delete this line then, and the dead-
-	// exemption arm below will fail the build until it is deleted.
-	// TEMPORARY — retire on the first release that publishes this image.
-	// mcp (#743) joined the build/release matrices in the same branch that
-	// created it, so no digest exists for it yet. release.yml's pin-digests job
-	// rewrites it on the first tagged run; delete this line then, and the
-	// dead-exemption arm below will fail the build until it is deleted.
-	"infra/deploy/mcp-deploy.yaml": "mcp joined the build and release matrices in the branch that " +
-		"created the service; the first tagged release publishes its digest and pin-digests rewrites this",
-
-	// TEMPORARY — retire on the first release that publishes this image.
-	// optimization joined the build/release matrices in the same branch as this
-	// manifest (#409), so no digest exists for it yet. release.yml's pin-digests
-	// job rewrites it on the first tagged run; delete this line then, and the
-	// dead-exemption arm below will fail the build until it is deleted. That is
-	// the same shape nats-rebuild used, and the note under it records that the
-	// mechanism was observed working rather than assumed.
-	"infra/deploy/optimization-deploy.yaml": "portfolio construction had no image at all until this " +
-		"branch: no Dockerfile, no build matrix entry, no release. There is no published digest to " +
-		"pin to until the next tagged release runs pin-digests",
-
-	// TEMPORARY — retire on the first release that publishes this image.
-	// identity had no Dockerfile and no build-matrix entry until #497, which is
-	// the same shape optimization and nats-rebuild used above and retired the
-	// same way: release.yml's pin-digests job rewrites it on the first tagged
-	// run, and the dead-exemption arm then fails the build until this line goes.
-	//
-	// THIS ONE IS NOT MERELY UNPINNED, IT IS UNDEPLOYABLE UNTIL THAT RELEASE, and
-	// that is worth stating rather than discovering. Only release.yml signs
-	// (keyless cosign via OIDC) and cluster-image-policy.yaml REQUIRES a
-	// signature, so the :main image an ordinary build produces is refused at
-	// admission. Pinning its digest instead would not help — an unsigned digest
-	// is refused for the same reason. The manifest is correct and waiting on a
-	// release, which is a process step rather than a code one.
-	"infra/deploy/identity-deploy.yaml": "the platform's credential authority (#364) entered the " +
-		"build matrix in #497 and no release has been cut since, so no SIGNED digest exists to pin. " +
-		"An unsigned image is refused by the admission policy whether it is tagged or digested, so " +
-		"this deployment cannot run until the first release that includes it",
-
-	// TEMPORARY — retire on the first release that publishes this image.
-	// Same shape and same cause as identity above: web-bff entered the build
-	// matrix in #497, after the last release, so no SIGNED digest exists.
-	"infra/deploy/web-bff-deploy.yaml": "the operator surface (#371) entered the build matrix in " +
-		"#497 and no release has been cut since. An unsigned image is refused by the admission " +
-		"policy whether tagged or digested, so pinning the digest that exists today would look " +
-		"finished and fail identically",
-
 	// RETIRED 2026-07-27 by the mechanism that was supposed to retire it.
 	// infra/dr/nats/rebuild-job.yaml carried a temporary entry reading "no
 	// published digest exists until the next release. Retire on the first
