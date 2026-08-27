@@ -1,0 +1,152 @@
+---
+# The agent-facing MCP READ plane (#743).
+#
+# It exposes read-only tools over portfolio risk state to external agents, over
+# JSON-RPC on one HTTP route. Every tool is tenant-scoped through the SAME
+# authorization decision services/copilot runs (internal/agentgate), promoted to
+# shared code when this plane became its second consumer rather than copied.
+#
+# WHAT IT IS NOT, because the name invites the assumption. It is NOT the venue
+# transport: OMS → venue adapter is typed gRPC/mTLS over venue.v1, buf-breaking
+# gated and credential-isolating, and replacing that with a discovery-negotiated
+# protocol is a proposal this estate has already refused. It places no orders,
+# cancels nothing, amends nothing, and holds no venue credential — asserted on
+# the import graph by test/arch/mcp_is_a_read_plane_test.go, not by this comment.
+#
+# STATELESS: no database, no broker, no migration initContainer. It reads exactly
+# one upstream, the risk-engine's query.v1 API, and boots ready.
+#
+# TWO PORTS, AND THE SPLIT IS THE SECURITY DECISION IN THIS FILE.
+#
+#   :8110  the MCP route. It decides which TENANT's state an agent may read from
+#          the X-Kanz-Principal-* headers the api-gateway injects, so
+#          allow-gateway-to-mcp admits ONLY the gateway to it, and
+#          allow-observability-scrape deliberately does not list it.
+#
+#   :8080  /metrics, and nothing else. That is the port the scrape rule already
+#          admits, which is why the annotation below names it.
+#
+# One mux for both is how every other header-trusting service on this platform
+# ended up reachable from kanz-observability with a self-chosen principal (#232).
+# optimization was the first service to split them; this one is built that way
+# rather than retrofitted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+imagePullSecrets:
+  - name: ghcr-pull
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  selector:
+    app: mcp
+  ports:
+    - { name: http, port: 8110, targetPort: 8110 }
+    - { name: metrics, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: mcp
+  template:
+    metadata:
+      labels:
+        app: mcp
+        app.kubernetes.io/part-of: kanz
+      annotations:
+        # THE METRICS PORT, NOT THE MCP ROUTE — see the header. This annotation
+        # is what allow-observability-scrape's port list is derived from, so
+        # naming :8110 here would hand the monitoring plane a path to a surface
+        # whose whole job is deciding whose book an agent may read.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: mcp
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: mcp
+      containers:
+        - name: mcp
+          # Authored with a TAG; release.yml's kanz-pin-digests job rewrites it to
+          # the immutable digest at the first tagged release — the single image
+          # substitution point on this platform.
+          image: ghcr.io/eighred/mcp:latest
+          ports:
+            - { containerPort: 8110, name: http }
+            - { containerPort: 8080, name: metrics }
+          env:
+            - { name: MCP_LISTEN, value: ":8110" }
+            - { name: MCP_METRICS_LISTEN, value: ":8080" }
+            - { name: MCP_RISK_QUERY_ADDR, value: "risk-engine.kanz-services.svc:9000" }
+            # THE POLICY BUNDLE, AND ITS ABSENCE IS A REFUSAL RATHER THAN A HOLE.
+            # With this unset the service starts and DENIES every tool call — it
+            # is up and serving nothing, and says so at boot. That is the safe
+            # direction for a surface whose subject is somebody's book.
+            - { name: MCP_POLICY_FILE, value: "/etc/kanz/policy/risk-authz.json" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8110 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8110 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # DECLARED COST, so the namespace quota can fund it. A container with no
+          # resources block is a pod the scheduler sizes at nothing and the quota
+          # arithmetic cannot see — which is how a namespace ends up unable to
+          # fund the scale its own manifests declare.
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+            - { name: policy, mountPath: /etc/kanz/policy, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: policy
+          configMap:
+            name: risk-authz-policy
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

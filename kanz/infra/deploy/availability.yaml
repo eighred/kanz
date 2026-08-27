@@ -163,6 +163,25 @@ spec:
 # The guard also bounds these from ABOVE (2x the derivation): a quota of "1000"
 # is indistinguishable from no quota at all, and would silently stop being the
 # blast-radius bound this object exists to be.
+# The agent-facing MCP read plane (#743). replicas 2 ⇒ maxUnavailable: 1, which
+# bounds the drain at ANY replica count. Nothing here is correctness-pinned to a
+# single instance: it is stateless, holds no session, subscribes to no stream and
+# owns no state a rescheduled replica would lose — it reads one upstream and
+# answers. An outage costs external agents their reads, and costs the capital
+# path nothing, because this plane is not on it.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mcp
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: mcp
+---
 # Model Portfolios (#409). replicas 2 ⇒ maxUnavailable: 1, which bounds the drain
 # at ANY replica count. Nothing here is correctness-pinned to a single instance:
 # the service is stateless (every market input arrives in the request), so a
@@ -231,6 +250,14 @@ metadata:
   labels:
     app.kubernetes.io/part-of: kanz
 spec:
+  # RAISED AGAIN FOR mcp (#743), the agent-facing read plane: 2 replicas at
+  # 100m/128Mi requests and 500m/512Mi limits, which is 2 pods, +200m/+256Mi of
+  # requests and +1 CPU/+1Gi of limits. It is the cheapest workload in the
+  # namespace and is stated here anyway, because a quota that silently cannot
+  # fund its own manifests does not degrade gracefully — the Deployment is
+  # admitted, the ReplicaSet cannot create the pods, and the service never
+  # starts while everything around it stays healthy.
+  #
   # RAISED FOR acme's OWN accounting AND risk engine (#668). Both are rendered
   # per-tenant workloads (internal/tenantgen.Services), so onboarding a tenant
   # now costs namespace capacity.
@@ -253,11 +280,11 @@ spec:
   # quota is under it. It reported exactly this shortfall and these are its
   # figures; do not round them by hand.
   hard:
-    requests.cpu: 56500m
-    requests.memory: 59392Mi
-    limits.cpu: "113"
-    limits.memory: 116Gi
-    pods: "110"
+    requests.cpu: 56700m
+    requests.memory: 59648Mi
+    limits.cpu: "114"
+    limits.memory: 117Gi
+    pods: "112"
 ---
 # LimitRange gives every pod sane defaults + a ceiling, so a container with no
 # explicit resources still gets requests (schedulable, quota-counted) and can't

@@ -959,6 +959,14 @@ var tenantHeaderTrustingSplitListeners = map[string]int{
 	// capital — from the injected principal. A trading surface is the one place
 	// this platform cannot afford to inherit #232's gap, so it does not.
 	"optimization": 8100,
+	// mcp (#743): the agent-facing MCP read plane, SPLIT FROM ITS FIRST COMMIT
+	// rather than retrofitted. Its JSON-RPC route decides which TENANT's risk
+	// state an external agent may read, from the injected principal — so it is
+	// on :8110, which allow-observability-scrape does not admit, while /metrics
+	// sits on the :8080 that rule already permits. The two are separate because
+	// the alternative is handing the monitoring namespace a self-chosen tenant
+	// and a read of that tenant's book.
+	"mcp": 8110,
 	// accounting SPLIT (#447), and it is the first DEPLOYED service to do so.
 	//
 	// Its /v1 routes WRITE: a subscription or redemption posted to the IBOR, a

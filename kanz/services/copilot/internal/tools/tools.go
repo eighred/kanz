@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/eighred/kanz/internal/agentgate"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/copilot/internal/governed"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
@@ -39,7 +40,7 @@ type Tool struct {
 
 // Registry holds the tool set and dispatches calls.
 type Registry struct {
-	authGate *Gate
+	authGate *agentgate.Gate
 	client   governed.Client
 	catalog  retrieval.Catalog
 	logger   *slog.Logger
@@ -61,7 +62,7 @@ func NewRegistry(authz auth.Authorizer, client governed.Client, catalog retrieva
 	if logger == nil {
 		logger = slog.Default()
 	}
-	r := &Registry{authGate: NewGate(authz, governedOwner{client: client}, logger), client: client, catalog: catalog, logger: logger, byName: map[string]Tool{}}
+	r := &Registry{authGate: agentgate.NewGate(authz, governedOwner{client: client}, logger), client: client, catalog: catalog, logger: logger, byName: map[string]Tool{}}
 	r.register(Tool{
 		Def: llm.ToolDef{
 			Name:        "get_risk_measures",
@@ -128,13 +129,12 @@ func (r *Registry) Invoke(ctx context.Context, p *auth.Principal, call llm.ToolC
 // codes — the unknown portfolio because an unresolvable owner leaves the
 // resource tenant empty, which is itself an isolation refusal.
 const (
+	// msgNoGovernedData is this package's own copy of the gate's not-visible
+	// wording, used for a read that got PAST authorization and then found
+	// nothing. It must stay identical to internal/agentgate's, because a caller
+	// that could tell "refused" from "authorized but empty" apart would have the
+	// existence oracle the gate exists to deny; tools_test pins them equal.
 	msgNoGovernedData = "no governed data for portfolio "
-	msgNotAuthorized  = "not authorized to read this portfolio"
-	// msgOwnerUnavailable is NOT collapsed into msgNoGovernedData. A failed
-	// ownership lookup is an outage of the governed read surface — uncorrelated
-	// with any tenant, so stating it is not an oracle — and presenting an outage
-	// as an empty portfolio is the silent-default this estate refuses.
-	msgOwnerUnavailable = "the portfolio's owning tenant could not be established, so this read is refused"
 	// msgReadFailed stands in for a governed read that failed AFTER
 	// authorization. The dependency's own error text is logged, not rendered.
 	msgReadFailed = "the governed read surface could not be read right now"
@@ -165,7 +165,7 @@ type governedOwner struct{ client governed.Client }
 func (g governedOwner) OwnerTenant(ctx context.Context, resourceID string) (string, error) {
 	tenant, err := g.client.OwnerTenant(ctx, resourceID)
 	if errors.Is(err, governed.ErrUnknownPortfolio) {
-		return "", ErrResourceNotVisible
+		return "", agentgate.ErrResourceNotVisible
 	}
 	return tenant, err
 }

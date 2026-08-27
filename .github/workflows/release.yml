@@ -67,6 +67,8 @@ jobs:
             dockerfile: kanz/services/datamaster/Dockerfile
           - service: optimization
             dockerfile: kanz/services/optimization/Dockerfile
+          - service: mcp
+            dockerfile: kanz/services/mcp/Dockerfile
           - service: webhook-ingest
             dockerfile: kanz/services/webhook-ingest/Dockerfile
           - service: tv-sync

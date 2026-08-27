@@ -1,8 +1,9 @@
-package tools
+package agentgate
 
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -16,16 +17,15 @@ import (
 //
 // #743 names extracting this decision into shared code as the step before an MCP
 // server exists, because an MCP server needs exactly it and a second copy is how
-// a fix stops spreading. It is NOT extracted here: CLAUDE.md promotes shared code
-// only when a SECOND consumer appears, and a package built for a caller nobody
-// has written is the speculative abstraction this repository keeps deleting.
+// a fix stops spreading. It was kept inside services/copilot until services/mcp
+// existed, so the promotion arrived WITH its second consumer rather than ahead
+// of one — CLAUDE.md's rule, and the reason moving it was a file move.
 //
-// What is done instead is the half that is not speculative — making the decision
-// stand on its own where it lives. EVERY TEST BELOW CONSTRUCTS THE GATE DIRECTLY:
-// no Registry, no governed.Client, no retrieval.Catalog, no tool definitions.
-// That is the claim under test. If the gate ever acquires a dependency on this
-// package's other machinery, these tests stop compiling, which is the signal
-// that moving it has become a redesign rather than a file move.
+// EVERY TEST BELOW CONSTRUCTS THE GATE DIRECTLY: no Registry, no governed
+// client, no tool definitions, and nothing from either service. That is the
+// claim under test. If the gate ever acquires a dependency on a caller's
+// machinery, these tests stop compiling — which is the signal that it has become
+// somebody's private decision again rather than the estate's.
 
 // fakeOwner is an OwnerResolver over a map. It is the WHOLE collaborator the
 // gate needs for ownership — the decision used to hold a governed.Client to call
@@ -58,8 +58,8 @@ func (g *gateRecorder) Record(_ context.Context, e *observationpb.DecisionLog) e
 func newGate(t *testing.T, owner OwnerResolver) (*Gate, *gateRecorder) {
 	t.Helper()
 	rec := &gateRecorder{}
-	quiet := slog.New(slog.NewTextHandler(discard{}, nil))
-	authz := auth.NewAuditedAuthorizer(auth.NewPolicyAuthorizer(testPolicy()), rec, "agent-tools", quiet)
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	authz := auth.NewAuditedAuthorizer(auth.NewPolicyAuthorizer(gateTestPolicy()), rec, "agent-tools", quiet)
 	return NewGate(authz, owner, quiet), rec
 }
 
@@ -111,7 +111,7 @@ func TestGate_AnUnresolvableOwnerRefuses(t *testing.T) {
 	if v.Allowed {
 		t.Fatal("an unresolvable owner was allowed — availability decided isolation")
 	}
-	if v.Message != msgOwnerUnavailable {
+	if v.Message != OwnerUnavailable(auth.ResourcePortfolio) {
 		t.Errorf("message = %q, want the unavailable wording", v.Message)
 	}
 	// The attempt is still audited: a probe refused before the authorizer runs
@@ -131,8 +131,8 @@ func TestGate_AGrantRefusalIsStatedNotFlattened(t *testing.T) {
 	noRole := &auth.Principal{Subject: "carol", Tenant: "t1", Roles: []string{"nobody"}}
 
 	v := g.Authorize(context.Background(), noRole, auth.ActionRiskRead, auth.ResourcePortfolio, "PF-1")
-	if v.Allowed || v.Message != msgNotAuthorized {
-		t.Fatalf("message = %q, want %q", v.Message, msgNotAuthorized)
+	if v.Allowed || v.Message != NotAuthorized(auth.ResourcePortfolio) {
+		t.Fatalf("message = %q, want %q", v.Message, NotAuthorized(auth.ResourcePortfolio))
 	}
 }
 
@@ -158,5 +158,35 @@ func TestGate_ServesAResourceTypeThatIsNotAPortfolio(t *testing.T) {
 	}
 	if got := last.GetAttributes()["deny.code"]; got != string(auth.DenyCrossTenant) {
 		t.Errorf("deny.code = %q, want %q", got, auth.DenyCrossTenant)
+	}
+}
+
+// gateTestPolicy grants the analyst role the read actions. It is this package's
+// own fixture: the gate borrows nothing from the services that call it, and a
+// test reaching into one of them would quietly undo that.
+func gateTestPolicy() *auth.Policy {
+	return &auth.Policy{Roles: map[string][]auth.Action{
+		"analyst": {auth.ActionRiskRead, auth.ActionRiskScenario},
+	}}
+}
+
+// The mapping itself, over the whole deny-code set. Only the isolation classes
+// collapse into the not-found answer; a grant refusal that started reading as
+// "no such resource" would tell an analyst their own portfolio had vanished.
+//
+// It moved here with the gate: it is a property of the decision, not of any
+// caller, and leaving it behind would have made it a test copilot happened to own.
+func TestRefusalFor_OnlyIsolationCollapsesIntoNotFound(t *testing.T) {
+	const rt = auth.ResourcePortfolio
+	for _, code := range []auth.DenyCode{auth.DenyCrossTenant, auth.DenyResourceTenantUnresolved} {
+		if got := refusalFor(code, rt, "PF-1"); got != NotVisible(rt, "PF-1") {
+			t.Errorf("refusalFor(%q) = %q, want the not-found wording", code, got)
+		}
+	}
+	for _, code := range []auth.DenyCode{auth.DenyNoGrant, auth.DenyPortfolioOutOfScope,
+		auth.DenyNoPrincipal, auth.DenyPrincipalNoTenant, auth.DenyEmptyAction} {
+		if got := refusalFor(code, rt, "PF-1"); got != NotAuthorized(rt) {
+			t.Errorf("refusalFor(%q) = %q, want %q", code, got, NotAuthorized(rt))
+		}
 	}
 }
