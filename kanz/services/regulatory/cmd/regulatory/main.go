@@ -100,7 +100,35 @@ func run() int {
 	defer closeSigner()
 
 	readiness := &server.Readiness{}
-	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, sgnr, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
+	api := server.New(readiness, logger, sgnr, server.WithMetrics(obs.MetricsHandler()))
+
+	// TWO LISTENERS, AND THE SEPARATION IS THE SECURITY BOUNDARY (#765).
+	//
+	// allow-observability-scrape selects every pod in kanz-services and admits
+	// :8083 across all of them. Until this split that port carried the filing
+	// routes, and a filing is not a read — it is signed and appends a link to the
+	// AUDIT-01 hash chain — so any pod in the kanz-observability namespace could
+	// write to the compliance record, against a service that reads no principal
+	// header and therefore has no authentication step to fail.
+	//
+	// /metrics stays on :8083 because audit already publishes metrics there and
+	// the rule admits it anyway; the API moved instead. That is the same trade
+	// accounting made in #447: admitting a NEW port for metrics would widen the
+	// rule for no gain, so it is the API that leaves.
+	metricsMux := http.NewServeMux()
+	if h := api.MetricsHandler(); h != nil {
+		metricsMux.Handle("GET /metrics", h)
+	}
+	metricsSrv := httpserver.New(cfg.MetricsListen, metricsMux, httpserver.Standard())
+	go func() {
+		logger.Info("regulatory metrics listening", "addr", cfg.MetricsListen)
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics server failed", "err", err)
+			fatal.Raise(err)
+		}
+	}()
+
+	httpSrv := httpserver.New(cfg.Listen, api, httpserver.Standard())
 	go func() {
 		logger.Info("regulatory listening", "addr", cfg.Listen, "signer", cfg.Signer)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -117,6 +145,9 @@ func run() int {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown error", "err", err)
+	}
+	if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("metrics shutdown error", "err", err)
 	}
 	return fatal.Code()
 }

@@ -47,7 +47,13 @@ spec:
   selector:
     app: regulatory
   ports:
-    - { name: http, port: 8083, targetPort: 8083 }
+    # THE FILING API AND /metrics ARE DIFFERENT PORTS (#765). 8083 is admitted
+    # across every pod in this namespace by allow-observability-scrape, and a
+    # filing appends to the AUDIT-01 hash chain — so the /v1 routes moved to
+    # 8103, beside accounting's 8101 and audit's 8102, and 8083 now serves
+    # metrics and nothing else.
+    - { name: http, port: 8103, targetPort: 8103 }
+    - { name: metrics, port: 8083, targetPort: 8083 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -119,7 +125,8 @@ spec:
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
           image: ghcr.io/eighred/regulatory@sha256:e840c47d9ce4f2f43ff6ffdedadff2ed8958a8023644d554fc904ba64b54d2c9
           ports:
-            - { containerPort: 8083, name: http }
+            - { containerPort: 8103, name: http }
+            - { containerPort: 8083, name: metrics }
           env:
             # DSN from the SEC-01d CSI secret file, not a plaintext env. It is
             # REQUIRED, and it is what the scale invariant at the top of this file
@@ -130,14 +137,15 @@ spec:
             # for a laptop and REGULATORY_SIGNER=hash needs no DSN at all; neither
             # is set here, and either one requires replicas: 1.
             - { name: REGULATORY_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
-            - { name: REGULATORY_LISTEN, value: ":8083" }
+            - { name: REGULATORY_LISTEN, value: ":8103" }
+            - { name: REGULATORY_METRICS_LISTEN, value: ":8083" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
-            httpGet: { path: /healthz, port: 8083 }
+            httpGet: { path: /healthz, port: 8103 }
             initialDelaySeconds: 5
             periodSeconds: 15
           readinessProbe:
-            httpGet: { path: /readyz, port: 8083 }
+            httpGet: { path: /readyz, port: 8103 }
             initialDelaySeconds: 5
             periodSeconds: 5
           securityContext:

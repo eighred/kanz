@@ -55,7 +55,21 @@ type Server struct {
 type Option func(*Server)
 
 // WithMetrics mounts a Prometheus /metrics handler (OBS-01a).
+//
+// IT IS NO LONGER MOUNTED ON THIS MUX (#765). /metrics now belongs to the
+// SEPARATE metrics listener the composition root runs, because this mux carries
+// the filing routes and a filing appends to the AUDIT-01 hash chain: serving
+// both on one port put a write to the compliance record on the one
+// allow-observability-scrape admits across every pod in the namespace.
+//
+// The option is kept and deliberately does nothing to the route table, so a
+// caller that passes it does not silently re-open the port. MetricsHandler
+// returns it for the composition root to serve on the other listener.
 func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h } }
+
+// MetricsHandler returns the handler WithMetrics supplied, or nil. The
+// composition root serves it on the metrics listener; nothing serves it here.
+func (s *Server) MetricsHandler() http.Handler { return s.metrics }
 
 // New builds the server over an injected filing signer.
 func New(readiness *Readiness, logger *slog.Logger, signer Signer, opts ...Option) *Server {
@@ -75,9 +89,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.Serve
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
-	if s.metrics != nil {
-		s.mux.Handle("GET /metrics", s.metrics)
-	}
+	// NO /metrics HERE. See WithMetrics: this mux serves the filing routes, and
+	// they write to the compliance chain.
 	s.mux.HandleFunc("POST /v1/filings/frtb", s.handleFRTB)
 	s.mux.HandleFunc("POST /v1/filings/formpf", s.handleFormPF)
 	s.mux.HandleFunc("POST /v1/filings/aifmd", s.handleAIFMD)
