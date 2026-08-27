@@ -124,6 +124,7 @@ func run() int {
 		OIDC:          oidcClient,
 		Sessions:      sessions,
 		GatewayURL:    cfg.GatewayURL,
+		SigningSecret: cfg.SigningSecret,
 		SecureCookies: cfg.SecureCookies,
 		Logger:        logger,
 		Metrics:       obs.MetricsHandler(),
