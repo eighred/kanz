@@ -122,14 +122,6 @@ var nilClassifierExempt = map[string]string{
 		"instrument-level returns into sector buckets. The client is the classifier. Retiring this " +
 		"needs a request shape carrying instrument-level rows as well as a classifier to bucket " +
 		"them with.",
-	"internal/sustainability.Screen": "#751 — ALT/CLIMATE-01b ESG exclusion screening. It is not " +
-		"blocked on a classifier at all: it TAKES one as a parameter and would work the moment a " +
-		"caller supplied a real one. WHAT IS MISSING IS A CALLER. services/regulatory imports " +
-		"internal/sustainability for FileTCFD and FileSFDR only, mounts no screening route, and no " +
-		"other service imports the package — so an ESG exclusion policy has nowhere to be " +
-		"submitted. Its degradation was moot while it was uncalled and is now moot twice over: it " +
-		"runs the shared COMP-01 engine, which refuses an unresolvable sector or issuer rather " +
-		"than passing it (compliance.unresolvedDimension).",
 }
 
 // classifierSeam is one composition-root seam: an exported function taking a

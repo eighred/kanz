@@ -611,6 +611,9 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 	if cfg.MCPAddr != "" {
 		bases[proxy.ServiceMCP] = cfg.MCPAddr
 	}
+	if cfg.RegulatoryAddr != "" {
+		bases[proxy.ServiceRegulatory] = cfg.RegulatoryAddr
+	}
 	if cfg.AccountingAddr != "" {
 		bases[proxy.ServiceAccounting] = cfg.AccountingAddr
 	}

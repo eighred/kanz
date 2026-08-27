@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/regulatory"
 	"github.com/eighred/kanz/internal/sustainability"
@@ -49,6 +50,15 @@ type Server struct {
 	signer    Signer
 	metrics   http.Handler
 	mux       *http.ServeMux
+	// classifier resolves SECTOR and ISSUER for the ESG screen (#751).
+	//
+	// NIL IS A POSTURE, NOT A BUG. Without it those dimensions are UNRESOLVABLE,
+	// and the shared COMP-01 engine REFUSES an unresolvable dimension rather than
+	// passing it (#640) — so a screen against a sector exclusion answers "cannot
+	// be verified" with the cause named. That is the honest answer for a
+	// deployment with no reference-data source, and it is why the route is worth
+	// mounting before one exists.
+	classifier compliance.Classifier
 }
 
 // Option customizes the server.
@@ -66,6 +76,12 @@ type Option func(*Server)
 // caller that passes it does not silently re-open the port. MetricsHandler
 // returns it for the composition root to serve on the other listener.
 func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h } }
+
+// WithClassifier supplies the instrument classifier the ESG screen resolves
+// SECTOR and ISSUER through (#751). The composition root builds it from the
+// reference-data cache; omitting it leaves those dimensions unresolvable, which
+// the engine refuses rather than passes.
+func WithClassifier(c compliance.Classifier) Option { return func(s *Server) { s.classifier = c } }
 
 // MetricsHandler returns the handler WithMetrics supplied, or nil. The
 // composition root serves it on the metrics listener; nothing serves it here.
@@ -96,6 +112,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/filings/aifmd", s.handleAIFMD)
 	s.mux.HandleFunc("POST /v1/filings/tcfd", s.handleTCFD)
 	s.mux.HandleFunc("POST /v1/filings/sfdr", s.handleSFDR)
+	// THE ESG EXCLUSION SCREEN (#751 item 4). It is a READ — a pure function over
+	// the book the caller supplies — and unlike the filing routes above it signs
+	// nothing and appends nothing to the AUDIT-01 chain. See screen.go.
+	s.mux.HandleFunc("POST /v1/screening/esg", s.handleESGScreen)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

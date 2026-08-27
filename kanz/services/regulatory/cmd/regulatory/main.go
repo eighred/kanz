@@ -99,8 +99,25 @@ func run() int {
 	}
 	defer closeSigner()
 
+	// The instrument classifier the ESG screen resolves SECTOR and ISSUER through
+	// (#751). Absent, those dimensions are UNRESOLVABLE and the shared COMP-01
+	// engine REFUSES rather than passing (#640) — so an exclusion policy naming a
+	// sector comes back "cannot be verified" with the cause named, never as a
+	// clean pass over a book nobody could classify. LogPosture states which of
+	// the two postures this pod is in, at WARN when it is the unarmed one.
+	refCache, rerr := cfg.RefData.NewCache(cfg.Tenant, "svc:regulatory")
+	if rerr != nil {
+		logger.Error("regulatory: the instrument classifier refused its configuration", "err", rerr)
+		return 2
+	}
+	cfg.RefData.LogPosture(logger, "regulatory")
+
 	readiness := &server.Readiness{}
-	api := server.New(readiness, logger, sgnr, server.WithMetrics(obs.MetricsHandler()))
+	opts := []server.Option{server.WithMetrics(obs.MetricsHandler())}
+	if refCache != nil {
+		opts = append(opts, server.WithClassifier(refCache.Compliance()))
+	}
+	api := server.New(readiness, logger, sgnr, opts...)
 
 	// TWO LISTENERS, AND THE SEPARATION IS THE SECURITY BOUNDARY (#765).
 	//

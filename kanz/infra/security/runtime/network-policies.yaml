@@ -811,6 +811,17 @@ spec:
               app: mcp
       ports:
         - { protocol: TCP, port: 8110 }
+    # THE ESG EXCLUSION SCREEN (#751), on regulatory's API listener. :8103 and
+    # not :8083 — that port serves regulatory's /metrics and is admitted
+    # namespace-wide by allow-observability-scrape, which is why the filing
+    # routes left it (#765). This arm reaches the screen; the filing routes are
+    # not proxied at all, so nothing here gives the gateway a path to them.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: regulatory
+      ports:
+        - { protocol: TCP, port: 8103 }
 ---
 # MODEL PORTFOLIOS (#409) — the ingress half, and it is a capital boundary rather
 # than a read one.
@@ -1027,6 +1038,48 @@ spec:
               app: mcp
       ports:
         - { protocol: TCP, port: 9090 }
+---
+# THE ESG EXCLUSION SCREEN (#751) — the ingress half.
+#
+# regulatory authenticates nobody and reads no principal header at all: the
+# screen is a pure function over the book the CALLER supplies, so there is no
+# tenant-scoped read here for a forged header to reach. What this rule buys is
+# narrower and still worth having — it names the api-gateway as the only peer
+# that may reach :8103, so the surface stays closed to everything else in the
+# namespace by default rather than by nobody having tried.
+#
+# ONE PEER, AND OBSERVABILITY IS NOT AMONG THEM. regulatory's /metrics is on
+# :8083, which allow-observability-scrape admits; :8103 is outside that list and
+# must stay outside it, because the FILING routes share this listener and a
+# filing appends to the AUDIT-01 hash chain (#765).
+# test/arch/split_listener_api_is_off_the_scrape_list_test.go fails if it ever
+# moves back.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-regulatory
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: regulatory
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8103 }
+    # The metrics listener, from the observability namespace only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8083 }
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
