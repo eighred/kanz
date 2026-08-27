@@ -81,7 +81,7 @@ spec:
           # mutableTagExempt, same as identity. Only release.yml signs and the
           # admission policy requires a signature; this image entered the build
           # matrix in #497, after the last release.
-          image: ghcr.io/eighred/web-bff:main
+          image: ghcr.io/eighred/web-bff@sha256:66771937970d87cf32bf2ba479ad0dc141e25771524289389e1e1e8538e6891f
           ports:
             - { containerPort: 8084, name: http }
           env:

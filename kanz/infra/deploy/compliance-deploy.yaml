@@ -118,7 +118,7 @@ spec:
       containers:
         - name: compliance
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/compliance@sha256:e15b44ed75d049fe76e4c13209e5270772e935abc7ee60511cb9bf22103cdf58
+          image: ghcr.io/eighred/compliance@sha256:6148aeb14b632d3429745c9992abcf2eaad55b3ec7d0ddd2c9c7bf489096b0d2
           ports:
             - { containerPort: 8091, name: http }
             - { containerPort: 8095, name: mandate-api }

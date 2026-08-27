@@ -102,7 +102,7 @@ spec:
       # serializes them, so one applies and the rest exit 0 with nothing to do.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate@sha256:909865997d2e96fd9898c5c34a6f11ade3cd65b71a18f1424d0bcda118e0e689
+          image: ghcr.io/eighred/kanz-migrate@sha256:43799cfa71cb4ff6d5c290c2941d2f19d76b458d0c2ec0c110ee9294fc588334
           args: ["--dir", "/migrations/market-data"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -117,7 +117,7 @@ spec:
       containers:
         - name: market-data
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/market-data@sha256:37d9cc8eacea3cbbb20e55b30e8510592f12607ba735aeb4ba02ca9db6683323
+          image: ghcr.io/eighred/market-data@sha256:8ca1eca9a9de94b8be6a71b33416c5185c5e9714f73f436b794ab9985ec3450d
           ports:
             - { containerPort: 8082, name: http }
           env:

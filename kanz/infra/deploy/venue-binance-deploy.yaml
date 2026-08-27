@@ -98,7 +98,7 @@ spec:
       # INFRA-M6a: the adapter's own order view schema, before it starts.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate@sha256:909865997d2e96fd9898c5c34a6f11ade3cd65b71a18f1424d0bcda118e0e689
+          image: ghcr.io/eighred/kanz-migrate@sha256:43799cfa71cb4ff6d5c290c2941d2f19d76b458d0c2ec0c110ee9294fc588334
           args: ["--dir", "/migrations/venue-binance"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -113,7 +113,7 @@ spec:
       containers:
         - name: venue-binance
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/venue-binance@sha256:d327962cd360e433e03b633165b39edcf71289ec8273ff8e3893229378b3fb82
+          image: ghcr.io/eighred/venue-binance@sha256:2133b688b0fdc68df144802443571dfc950a357ec9012401c33ae4bd1810c5c8
           ports:
             - { containerPort: 9000, name: grpc }
             - { containerPort: 8091, name: http }

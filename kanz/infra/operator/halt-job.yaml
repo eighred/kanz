@@ -111,7 +111,7 @@ spec:
       serviceAccountName: kanz-halt
       containers:
         - name: kanz-halt
-          image: ghcr.io/eighred/kanz-halt@sha256:0fc07909a28a74c9a743132a6d604684eea042382848015c4894108bae2cf4c9 # pin by digest at deploy (SUPPLY-01)
+          image: ghcr.io/eighred/kanz-halt@sha256:957b6f50e9e4721763aaea134c701daf3661b63444c6df137bf4ae0e8901db6d # pin by digest at deploy (SUPPLY-01)
           args:
             # EDIT THESE. Add "--resume" to bring the platform live.
             - "--by=operator:CHANGE_ME"

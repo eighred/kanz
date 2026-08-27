@@ -93,7 +93,7 @@ spec:
               value: oms
             - name: SPIFFE_ENDPOINT_SOCKET
               value: unix:///run/spiffe/spire-agent.sock
-          image: ghcr.io/eighred/oms@sha256:c5cd064bb77fab3571a57d549aa571f51e28719229d5cdec0c1191489589685a
+          image: ghcr.io/eighred/oms@sha256:94e500afa9492a360902da2fa249c219dac3a1e158b7904697fb77b5c08a5b74
           livenessProbe:
             httpGet:
               path: /healthz
@@ -133,7 +133,7 @@ spec:
           env:
             - name: KANZ_MIGRATE_DATABASE_URL_FILE
               value: /run/secrets/db/migrate-database-url
-          image: ghcr.io/eighred/kanz-migrate@sha256:909865997d2e96fd9898c5c34a6f11ade3cd65b71a18f1424d0bcda118e0e689
+          image: ghcr.io/eighred/kanz-migrate@sha256:43799cfa71cb4ff6d5c290c2941d2f19d76b458d0c2ec0c110ee9294fc588334
           name: migrate
           securityContext:
             allowPrivilegeEscalation: false
