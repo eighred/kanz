@@ -108,7 +108,7 @@ spec:
               value: unix:///run/spiffe/spire-agent.sock
             - name: RISK_REQUIRE_VALIDATED_ANALYTICS
               value: "true"
-          image: ghcr.io/eighred/risk-engine@sha256:66441aea5636ca12f1dd59634afa2fc7dcc251a2c8c6a97ce08fc82fd952eca2
+          image: ghcr.io/eighred/risk-engine@sha256:011bc3a443f0612ae8308dda9a3bcee50a168fc375d7ce7d0229ae32b65258f8
           livenessProbe:
             httpGet:
               path: /healthz
@@ -150,7 +150,7 @@ spec:
           env:
             - name: KANZ_MIGRATE_DATABASE_URL_FILE
               value: /run/secrets/db/migrate-database-url
-          image: ghcr.io/eighred/kanz-migrate@sha256:909865997d2e96fd9898c5c34a6f11ade3cd65b71a18f1424d0bcda118e0e689
+          image: ghcr.io/eighred/kanz-migrate@sha256:43799cfa71cb4ff6d5c290c2941d2f19d76b458d0c2ec0c110ee9294fc588334
           name: migrate
           securityContext:
             allowPrivilegeEscalation: false

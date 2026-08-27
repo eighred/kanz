@@ -80,7 +80,7 @@ spec:
       # serializes them, so one applies and the other exits 0 with nothing to do.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate@sha256:909865997d2e96fd9898c5c34a6f11ade3cd65b71a18f1424d0bcda118e0e689
+          image: ghcr.io/eighred/kanz-migrate@sha256:43799cfa71cb4ff6d5c290c2941d2f19d76b458d0c2ec0c110ee9294fc588334
           args: ["--dir", "/migrations/alternatives"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -94,7 +94,7 @@ spec:
             - { name: db, mountPath: /run/secrets/db, readOnly: true }
       containers:
         - name: alternatives
-          image: ghcr.io/eighred/alternatives@sha256:14d5d3c0a4edc87343e62d5be93654fa6a87ea5d171e0591965d1c1bdce51f63
+          image: ghcr.io/eighred/alternatives@sha256:a32224f54ce8f4556e86b5391e763256c0bd89beff63991545c44508abc1a5c6
           ports:
             - { containerPort: 8080, name: http }
           env:

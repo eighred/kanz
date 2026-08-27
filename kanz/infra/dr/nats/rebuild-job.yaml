@@ -54,7 +54,7 @@ spec:
           # kanz/test/arch/supplychain_test.go retire together on the first
           # pin-digests run after a tagged release publishes this image's
           # digest.
-          image: ghcr.io/eighred/nats-rebuild@sha256:70d5351ad3fcb0344f55659ca381dd9a551964e46fddb43dafc9efd6e80ec926
+          image: ghcr.io/eighred/nats-rebuild@sha256:1858d7c74eb7723062353da88bbd54db1ccd195f0d7605b47ebab4074ef1fd01
           env:
             - { name: NATS_REBUILD_KAFKA_BROKERS, value: "kafka:9092" }
             - { name: NATS_REBUILD_NATS_URL, value: "nats://nats:4222" }

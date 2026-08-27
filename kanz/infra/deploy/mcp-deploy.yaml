@@ -101,7 +101,7 @@ spec:
           # Authored with a TAG; release.yml's kanz-pin-digests job rewrites it to
           # the immutable digest at the first tagged release — the single image
           # substitution point on this platform.
-          image: ghcr.io/eighred/mcp:latest
+          image: ghcr.io/eighred/mcp@sha256:6ccdd6a70d618f1b6a630b729128b4c6ee4f80680043937349cd6b1742168139
           ports:
             - { containerPort: 8110, name: http }
             - { containerPort: 8080, name: metrics }

@@ -85,7 +85,7 @@ spec:
       # serializes them, so one applies and the other exits 0 with nothing to do.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate@sha256:909865997d2e96fd9898c5c34a6f11ade3cd65b71a18f1424d0bcda118e0e689
+          image: ghcr.io/eighred/kanz-migrate@sha256:43799cfa71cb4ff6d5c290c2941d2f19d76b458d0c2ec0c110ee9294fc588334
           args: ["--dir", "/migrations/wealth"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -100,7 +100,7 @@ spec:
       containers:
         - name: wealth
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/wealth@sha256:e42edd95b2d97874e5501875bb662edbdb73198e72b13e576c3efe3a9c83f7af
+          image: ghcr.io/eighred/wealth@sha256:6ff554be90cef185d69d8856725f765d6b164f2507e21fa20d55193587497494
           ports:
             - { containerPort: 8080, name: http }
           env:

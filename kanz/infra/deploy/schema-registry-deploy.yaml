@@ -89,7 +89,7 @@ spec:
       # them, so one applies and the rest exit 0 with nothing to do.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate@sha256:909865997d2e96fd9898c5c34a6f11ade3cd65b71a18f1424d0bcda118e0e689
+          image: ghcr.io/eighred/kanz-migrate@sha256:43799cfa71cb4ff6d5c290c2941d2f19d76b458d0c2ec0c110ee9294fc588334
           args: ["--dir", "/migrations/schema-registry"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -104,7 +104,7 @@ spec:
       containers:
         - name: schema-registry
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/schema-registry@sha256:4d4c2e89bd7dff812bad9be46260921b82fb06a6f11173f30ca9bf4c93a4ce12
+          image: ghcr.io/eighred/schema-registry@sha256:e1ad6df24bca45a757391e7c152e282dd8ce653f7d3c385a0c2999bf931edb85
           ports:
             - { containerPort: 8080, name: http }
           env:

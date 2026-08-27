@@ -177,7 +177,7 @@ spec:
       containers:
         - name: inference
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/inference@sha256:8573c1568d804d045478a287d8a6ae6cca2b92c6526427f0f486d3d92abac55e
+          image: ghcr.io/eighred/inference@sha256:3b43699a20f5052cdf239d2f565dfccd95e10a152885e5085b896158eed09151
           ports:
             - { containerPort: 50051, name: grpc }
             # The name matters: prometheus_scrape_test.go resolves the annotated

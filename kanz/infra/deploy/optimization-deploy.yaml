@@ -112,7 +112,7 @@ spec:
           # carries a temporary entry in mutableTagExempt, whose dead-exemption
           # arm fails the build the moment the pin lands, so the exemption cannot
           # outlive its own repair.
-          image: ghcr.io/eighred/optimization:latest
+          image: ghcr.io/eighred/optimization@sha256:7594deec3b07fef4231e8838ae4089d2b9aae54e7f0bf331f9b3e32d32f57ca3
           ports:
             - { containerPort: 8100, name: http }
             - { containerPort: 8094, name: metrics }
