@@ -16,6 +16,8 @@ import (
 	"errors"
 	"sort"
 	"time"
+
+	"github.com/eighred/kanz/internal/measureread"
 )
 
 // ErrUnknownPortfolio is returned when the portfolio is not known to the read
@@ -24,24 +26,43 @@ import (
 // the tenant boundary.
 var ErrUnknownPortfolio = errors.New("governed: unknown portfolio")
 
-// Reading is a governed datum: named numeric values for a portfolio, the tenant
-// that owns it, and the source event id the value was computed from.
+// Reading is a governed datum: named values for a portfolio, the tenant that
+// owns it, and the source event id the values were computed from.
+//
+// IT CARRIES MEASURES AND NOT A MAP OF FLOATS (#757). This used to be
+// map[string]float64 built with dec.Float64Or(value, 0), which discarded the
+// per-measure InputCoverage (#527) and the response's quality flags — the two
+// things the engine computes to say whether a number is a claim about the book
+// or a zero that measured nothing. The copilot is the worst place to lose them:
+// it hands these to a model that states them in prose, and a reader has no way
+// to tell "DV01 is zero" from "DV01 was computed over no bonds".
+//
+// The projection is internal/measureread, SHARED WITH services/mcp. Both planes
+// answer the same question — may this number be stated — and a second copy of
+// that decision is how a fix stops spreading.
 type Reading struct {
 	PortfolioID   string
 	Tenant        string
 	Kind          string // "measures" | "exposure" | "scenario" | "performance"
-	Values        map[string]float64
+	Measures      []measureread.Measure
+	QualityFlags  []string
 	SourceEventID string
 	AsOf          time.Time
 }
 
-// OrderedNames returns the value names sorted, for deterministic rendering.
-func (r Reading) OrderedNames() []string {
-	out := make([]string, 0, len(r.Values))
-	for k := range r.Values {
-		out = append(out, k)
+// StatedValues returns the values the model may cite — MEASURED ONLY.
+//
+// A withheld measure must never reach citedValues: the grounding gate
+// (retrieval.CheckGrounding) treats that slice as "numbers a tool actually
+// returned", so admitting a withheld one would license the model to state
+// exactly the number this plane refused to state.
+func (r Reading) StatedValues() []float64 {
+	out := make([]float64, 0, len(r.Measures))
+	for _, m := range r.Measures {
+		if m.Status == measureread.StatusMeasured && m.Value != nil {
+			out = append(out, *m.Value)
+		}
 	}
-	sort.Strings(out)
 	return out
 }
 
@@ -53,6 +74,25 @@ type Client interface {
 	Measures(ctx context.Context, portfolioID string, names []string) (Reading, error)
 	Exposure(ctx context.Context, portfolioID string) (Reading, error)
 	EvaluateScenario(ctx context.Context, portfolioID, scenario string) (Reading, error)
+}
+
+// Measured builds MEASURED measures from plain name→value pairs, ordered by
+// name.
+//
+// It lives beside StubClient because it serves the same purpose: this package
+// has always carried a dependency-free default for tests and local boot, and a
+// fixture that had to hand-assemble measureread.Measure literals would tempt
+// each caller into its own idea of what a sound measure looks like. It is
+// deliberately unable to express a withheld one — a fixture that could would be
+// a second place to decide what may be stated, and that decision has exactly one
+// home (internal/measureread).
+func Measured(values map[string]float64) []measureread.Measure {
+	out := make([]measureread.Measure, 0, len(values))
+	for name, v := range values {
+		out = append(out, measureread.Measure{Name: name, Status: measureread.StatusMeasured, Value: &v})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // StubClient is the in-memory default Client. Each portfolio maps to a set of
@@ -106,10 +146,17 @@ func (c *StubClient) Measures(_ context.Context, portfolioID string, names []str
 	if len(names) == 0 {
 		return r, nil
 	}
-	filtered := Reading{PortfolioID: r.PortfolioID, Tenant: r.Tenant, Kind: r.Kind, SourceEventID: r.SourceEventID, AsOf: r.AsOf, Values: map[string]float64{}}
+	filtered := Reading{
+		PortfolioID: r.PortfolioID, Tenant: r.Tenant, Kind: r.Kind,
+		SourceEventID: r.SourceEventID, AsOf: r.AsOf, QualityFlags: r.QualityFlags,
+	}
+	want := make(map[string]bool, len(names))
 	for _, n := range names {
-		if v, ok := r.Values[n]; ok {
-			filtered.Values[n] = v
+		want[n] = true
+	}
+	for _, m := range r.Measures {
+		if want[m.Name] {
+			filtered.Measures = append(filtered.Measures, m)
 		}
 	}
 	return filtered, nil

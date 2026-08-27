@@ -3,6 +3,7 @@ package governed
 import (
 	"context"
 	decutil "github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/measureread"
 	"testing"
 	"time"
 
@@ -108,8 +109,8 @@ func TestGRPCMeasures(t *testing.T) {
 	if r.Tenant != "acme" || r.Kind != "measures" {
 		t.Fatalf("reading meta wrong: %+v", r)
 	}
-	if v := r.Values["VaR99"]; v < 1249.99 || v > 1250.01 {
-		t.Fatalf("VaR99 = %v, want 1250", v)
+	if v, ok := statedValue(r, "VaR99"); !ok || v < 1249.99 || v > 1250.01 {
+		t.Fatalf("VaR99 = %v (stated=%v), want 1250", v, ok)
 	}
 	if r.SourceEventID != "risk.state@2:42" {
 		t.Fatalf("citation = %q, want risk.state@2:42", r.SourceEventID)
@@ -134,8 +135,8 @@ func TestGRPCExposure(t *testing.T) {
 	if r.Tenant != "acme" {
 		t.Fatalf("tenant = %q", r.Tenant)
 	}
-	if v := r.Values["EXPOSURE_DIMENSION_CURRENCY/USD"]; v != 500000 {
-		t.Fatalf("net = %v, want 500000; values=%v", v, r.Values)
+	if v, ok := statedValue(r, "EXPOSURE_DIMENSION_CURRENCY/USD"); !ok || v != 500000 {
+		t.Fatalf("net = %v (stated=%v), want 500000; measures=%+v", v, ok, r.Measures)
 	}
 }
 
@@ -155,11 +156,12 @@ func TestGRPCEvaluateScenario(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvaluateScenario: %v", err)
 	}
-	if gotPct == nil || decutil.Float64Or(gotPct, 0) > -0.049 || decutil.Float64Or(gotPct, 0) < -0.051 {
-		t.Fatalf("shock pct = %v, want ~-0.05", gotPct)
+	pct, pctOK := decutil.Float64(gotPct)
+	if !pctOK || pct > -0.049 || pct < -0.051 {
+		t.Fatalf("shock pct = %v (convertible=%v), want ~-0.05", pct, pctOK)
 	}
-	if r.Values["PnL"] != -2500 {
-		t.Fatalf("PnL = %v, want -2500", r.Values["PnL"])
+	if v, ok := statedValue(r, "PnL"); !ok || v != -2500 {
+		t.Fatalf("PnL = %v (stated=%v), want -2500", v, ok)
 	}
 }
 
@@ -177,4 +179,24 @@ func mustTime(s string) time.Time {
 		panic(err)
 	}
 	return t
+}
+
+// statedValue reads one MEASURED value out of a Reading. It returns ok=false for
+// a withheld measure as well as an absent one, because a test asserting on a
+// number must fail either way: a value this plane refused to state is not a
+// value (#757).
+func statedValue(r Reading, name string) (float64, bool) {
+	for _, m := range r.Measures {
+		if m.Name == name {
+			return derefOrZero(m.Value), m.Status == measureread.StatusMeasured && m.Value != nil
+		}
+	}
+	return 0, false
+}
+
+func derefOrZero(v *float64) float64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }

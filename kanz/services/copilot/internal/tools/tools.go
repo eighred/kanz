@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/eighred/kanz/internal/agentgate"
+	"github.com/eighred/kanz/internal/measureread"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/copilot/internal/governed"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
@@ -245,14 +246,28 @@ func (r *Registry) render(ctx context.Context, label string, reading governed.Re
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s for %s (as of %s):\n", label, reading.PortfolioID, asOf)
-	var values []float64
-	for _, name := range reading.OrderedNames() {
-		v := reading.Values[name]
-		fmt.Fprintf(&b, "- %s = %g\n", name, v)
-		values = append(values, v)
+	// A WITHHELD MEASURE IS RENDERED AS A REFUSAL, NOT OMITTED (#757). Dropping
+	// the line would leave the model a shorter list and no way to know a measure
+	// was asked for and could not be answered — which it reads as "the book has
+	// no such risk", the same false claim the confident zero made.
+	for _, m := range reading.Measures {
+		if m.Status == measureread.StatusMeasured && m.Value != nil {
+			fmt.Fprintf(&b, "- %s = %g\n", m.Name, *m.Value)
+			continue
+		}
+		fmt.Fprintf(&b, "- %s: UNAVAILABLE — %s\n", m.Name, m.Reason)
+	}
+	if len(reading.QualityFlags) > 0 {
+		// Named on the reading rather than folded into the values, because
+		// DEGRADED and STALE withhold nothing: those numbers are real, and the
+		// flag is the only thing that says they are cached or older than asked for.
+		fmt.Fprintf(&b, "data quality: %s\n", strings.Join(reading.QualityFlags, ", "))
 	}
 	fmt.Fprintf(&b, "source: %s", cite.String())
-	return Result{Content: b.String(), Citations: []retrieval.Citation{cite}, Values: values}
+	// StatedValues is MEASURED-only. The grounding gate reads this slice as
+	// "numbers a tool actually returned", so admitting a withheld one would
+	// license the model to state the very number this plane refused to state.
+	return Result{Content: b.String(), Citations: []retrieval.Citation{cite}, Values: reading.StatedValues()}
 }
 
 func portfolioSchema(extra, extraDesc string) map[string]any {

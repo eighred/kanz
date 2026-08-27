@@ -30,7 +30,7 @@ func newServer(t *testing.T) *Server {
 	client := governed.NewStubClient()
 	client.Put(governed.Reading{
 		PortfolioID: "PF-T1", Tenant: "t1", Kind: "measures",
-		Values: map[string]float64{"VaR99": 1250000}, SourceEventID: "evt-1",
+		Measures: governed.Measured(map[string]float64{"VaR99": 1250000}), SourceEventID: "evt-1",
 		AsOf: time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC),
 	})
 	model := llm.NewStubModel(

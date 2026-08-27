@@ -24,7 +24,7 @@ import (
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 
 	"github.com/eighred/kanz/internal/agentgate"
-	decutil "github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/measureread"
 )
 
 // Client reads risk state over query.v1.
@@ -56,22 +56,28 @@ func (c *Client) OwnerTenant(ctx context.Context, portfolioID string) (string, e
 	return resp.GetOwnerTenant(), nil
 }
 
-// Measures reads the portfolio's risk measures, projected to name→value.
+// Measures reads the portfolio's risk measures.
 //
-// EVERY OTHER FIELD IS DROPPED HERE. The response carries an owning tenant, an
-// as-of time, quality flags and a source position; none of them is something
-// this plane decided to expose, and a projection that passed them through
-// "because they were there" is how a read plane becomes a data tap.
-func (c *Client) Measures(ctx context.Context, portfolioID string) (map[string]float64, error) {
+// THE PROJECTION IS internal/measureread AND NOT A MAP OF FLOATS (#757). This
+// used to return name→float64 built with dec.Float64Or(value, 0), which threw
+// away the three things the engine computes to say whether a number can be
+// trusted: the per-measure InputCoverage (#527), the response's quality flags,
+// and the as-of stamp. On this hop that is worse than anywhere else, because the
+// consumer is a language model that will state whatever it is handed as prose —
+// and the fixed-income family runs over a contract-terms store with no
+// production writer, so DV01 arrives as a zero computed over zero bonds.
+//
+// The owning tenant and source position are STILL dropped, and that part was
+// always right: neither is something this plane decided to expose, and a
+// projection that passes fields through "because they were there" is how a read
+// plane becomes a data tap. What changed is that the integrity record is not one
+// of them — it is the difference between a number and a claim.
+func (c *Client) Measures(ctx context.Context, portfolioID string) (measureread.Set, error) {
 	resp, err := c.query.Measures(ctx, &querypb.MeasuresRequest{PortfolioId: portfolioID})
 	if err != nil {
-		return nil, mapErr(err)
+		return measureread.Set{}, mapErr(err)
 	}
-	out := map[string]float64{}
-	for _, m := range resp.GetSet().GetMeasures() {
-		out[m.GetName()] = decutil.Float64Or(m.GetValue(), 0)
-	}
-	return out, nil
+	return measureread.ProjectMeasures(resp), nil
 }
 
 // mapErr maps a gRPC NOT_FOUND onto the gate's not-visible sentinel; every other
