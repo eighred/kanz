@@ -281,7 +281,12 @@ spec:
         - { protocol: TCP, port: 8080 } # api-gateway, accounting (metrics only), alternatives, copilot, datamaster, schema-registry, wealth
         - { protocol: TCP, port: 8081 } # risk-engine
         - { protocol: TCP, port: 8082 } # market-data
-        - { protocol: TCP, port: 8083 } # audit, regulatory
+        # regulatory's entry here is now its METRICS-ONLY listener (#765); its
+        # filing routes moved to 8103, which this rule deliberately does not
+        # admit. A filing appends to the AUDIT-01 hash chain, so serving it on
+        # this port let the whole monitoring plane write to the compliance
+        # record. audit made the same move from this same port in #627.
+        - { protocol: TCP, port: 8083 } # audit (metrics only), regulatory (metrics only)
         # web-bff (#371). The port serves the SPA and /api/* to a browser through
         # the cloudflared sidecar; admitting the observability namespace to it
         # reaches the same surface a signed-in user already reaches, and every
