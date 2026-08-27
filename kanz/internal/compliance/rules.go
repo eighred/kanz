@@ -30,6 +30,13 @@ func ConcentrationRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Viol
 	if cl == nil {
 		return paramsMismatch("concentration")
 	}
+	// BEFORE totalGross, and that order is the fix rather than a detail: a book
+	// whose every holding is unmarked totals ZERO, which is indistinguishable
+	// from an empty book and would take the "nothing is concentrated" branch
+	// below (#760).
+	if v := unmarkedHoldings(c, "concentration"); v != nil {
+		return v
+	}
 	total := totalGross(c)
 	if total.Sign() == 0 {
 		return nil // empty book: nothing is concentrated
@@ -86,6 +93,11 @@ func RestrictionRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violat
 	if rl == nil {
 		return paramsMismatch("restriction")
 	}
+	// "Hold nothing in TOBACCO" is not satisfied by a holding the engine could
+	// not see (#760) — the same argument unresolvedDimension makes one field over.
+	if v := unmarkedHoldings(c, "restriction"); v != nil {
+		return v
+	}
 	if v := unresolvedDimension(c, "restriction", rl.GetDimension()); v != nil {
 		return v
 	}
@@ -140,6 +152,9 @@ func IssuerExclusionRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Vi
 	if ie == nil {
 		return paramsMismatch("issuer_exclusion")
 	}
+	if v := unmarkedHoldings(c, "issuer exclusion"); v != nil {
+		return v
+	}
 	// The dimension is implicit in the rule type: an issuer exclusion is an
 	// ISSUER-dimension control, so it is unresolvable under exactly the same
 	// conditions a DIMENSION_ISSUER restriction is.
@@ -176,6 +191,12 @@ func LeverageRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation
 			Message:  "leverage cannot be verified: NAV unavailable",
 			Evidence: map[string]string{"nav": "unavailable"},
 		}
+	}
+	// THE FAIL-OPEN DIRECTION (#760). Gross is a SUM: a dropped holding shrinks
+	// the numerator, so a book reads as less levered for carrying something
+	// nobody could price.
+	if v := unmarkedHoldings(c, "leverage"); v != nil {
+		return v
 	}
 	gross := totalGross(c)
 	max := ratFromDecimal(lc.GetMaxGrossLeverage())
@@ -323,6 +344,11 @@ func CurrencyRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation
 	cr := rule.GetCurrencyRestriction()
 	if cr == nil {
 		return paramsMismatch("currency_restriction")
+	}
+	// The currency is read off the market value, so an unmarked holding has no
+	// currency to check and silently satisfied any restriction (#760).
+	if v := unmarkedHoldings(c, "currency restriction"); v != nil {
+		return v
 	}
 	allowed := toSet(cr.GetAllowedCurrencies())
 	for _, pos := range heldPositions(c) {
@@ -515,10 +541,16 @@ func classify(c *Candidate, pos Position) Attributes {
 // heldPositions returns positions with a non-zero market value, in stable
 // instrument order — lineage-only flat positions (zero value) are not holdings
 // and cannot breach.
+//
+// A POSITION IT DROPS IS ONE THAT WAS PRICED AND FOUND TO BE WORTH NOTHING, and
+// never one nobody could price (#760). Those two used to leave through the same
+// `continue`: an absent MarketValue read as zero, so an unmarked holding was
+// removed from the book before any rule saw it. See unmarkedHoldings for what
+// that cost and why the caller refuses instead.
 func heldPositions(c *Candidate) []Position {
 	out := make([]Position, 0, len(c.Book.Positions))
 	for _, p := range c.Book.Positions {
-		if p.MarketValue == nil || absRatFromMoney(p.MarketValue).Sign() == 0 {
+		if unmarkedPosition(p) || absRatFromMoney(p.MarketValue).Sign() == 0 {
 			continue
 		}
 		out = append(out, p)
@@ -526,6 +558,88 @@ func heldPositions(c *Candidate) []Position {
 	sort.Slice(out, func(i, j int) bool { return out[i].InstrumentID < out[j].InstrumentID })
 	return out
 }
+
+// unmarkedPosition reports that the platform could not price this holding.
+//
+// BOTH SPELLINGS OF THE ABSENCE COUNT. A nil MarketValue and a Money carrying a
+// currency but no Amount reach absRatFromMoney identically and both come back
+// zero, so catching only the first would leave the hole open to any producer
+// that sets the currency and not the number.
+//
+// A MARK OF ZERO IS NOT THIS. That is a measurement — the platform looked, and
+// the holding is worth nothing — and it stays a holding the rules evaluate
+// normally. Conflating the two in that direction would make every worthless
+// position unevaluable and the refusal meaningless.
+func unmarkedPosition(p Position) bool {
+	return p.MarketValue == nil || p.MarketValue.GetAmount() == nil
+}
+
+// unmarkedHoldings is the deny-by-default refusal for a book carrying a position
+// nobody could price. It is the value-side twin of unresolvedDimension, and it
+// returns nil — evaluate normally — when every holding is marked.
+//
+// # What the silence cost
+//
+// Every rule that reasons about the shape of the book funnels through
+// heldPositions, which dropped an unmarked position outright. Three separate
+// wrongs came out of that one filter, and only the first is the obvious one:
+//
+//   - The holding escaped limits written about it. A cap on the instrument
+//     passed because the instrument was not in the book.
+//   - Every OTHER bucket was measured against a denominator that had lost it, so
+//     a violation could be raised carrying an `observed` weight that was never
+//     measured. A breach on invented evidence is not the safe direction; it is a
+//     different wrong answer.
+//   - Gross leverage was UNDERSTATED, which is fail-open: Σ|market value| shrinks
+//     when a holding vanishes, so a book reads as less levered for carrying
+//     something nobody could price.
+//
+// # Why it refuses rather than estimating
+//
+// The estate's rule is that absent is UNKNOWN and never zero, because a zero is
+// a claim about the book — venuemargin.go states it for a margin ratio, and
+// LeverageRule already applies it to NAV ("leverage cannot be verified: NAV
+// unavailable"). There is nothing to substitute for a mark: an unpriced holding
+// could be any size, in either direction, so no bound on the answer survives.
+func unmarkedHoldings(c *Candidate, what string) *compliancepb.Violation {
+	var unmarked []string
+	for _, p := range c.Book.Positions {
+		if unmarkedPosition(p) {
+			unmarked = append(unmarked, p.InstrumentID)
+		}
+	}
+	if len(unmarked) == 0 {
+		return nil
+	}
+	sort.Strings(unmarked)
+	// A BOUNDED SAMPLE, for the reason unresolvedDimension bounds its own: on a
+	// book whose marks never loaded every holding is unmarked, and putting the
+	// whole book in a violation puts it in the audit stream too. The count
+	// carries the magnitude; the sample is what lets somebody go and look.
+	sample := unmarked
+	if len(sample) > maxUnresolvedSample {
+		sample = sample[:maxUnresolvedSample]
+	}
+	return &compliancepb.Violation{
+		Message: what + " cannot be verified: the book carries a position with no market value, " +
+			"so neither its own exposure nor the book's total is known",
+		Evidence: map[string]string{
+			EvidenceUnmarkedHoldings: strconv.Itoa(len(unmarked)),
+			EvidenceUnmarkedSample:   strings.Join(sample, ","),
+		},
+	}
+}
+
+// Evidence keys naming the holdings the platform could not price (#760). Named
+// constants because a test asserting on a literal and a rule writing a different
+// literal is a guard that checks nothing.
+const (
+	// EvidenceUnmarkedHoldings is the TOTAL count of unmarked positions, not the
+	// length of the sample.
+	EvidenceUnmarkedHoldings = "unmarked_holdings"
+	// EvidenceUnmarkedSample is a bounded, comma-separated instrument list.
+	EvidenceUnmarkedSample = "unmarked_sample"
+)
 
 func toSet(vals []string) map[string]bool {
 	m := make(map[string]bool, len(vals))
