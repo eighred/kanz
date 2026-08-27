@@ -36,6 +36,15 @@
 #                        tenant cannot read $TENANT's portfolio (must be
 #                        403 or 404).
 #
+#   VERIFY_SIGNING_SECRET
+#                      - OPTIONAL, and required in practice on any deployed
+#                        gateway. API-01d request signing is enforced whenever
+#                        API_GATEWAY_SIGNING_SECRET_FILE is set, which every
+#                        deployment manifest sets, and an unsigned request is
+#                        refused BEFORE authentication runs. Unset it and both
+#                        probes are 401 however valid the tokens are (#774).
+#                        Supply the value that file holds; needs openssl.
+#
 # Source of both, in production: Eighred SSO (OIDC) — kanz mints no
 # production identity. In dev/staging against the HS256 validator, mint both
 # with cmd/kanz-devtoken (a standalone CLI in no service image).
@@ -62,6 +71,9 @@
 #       DIFFERENT tenant). Checked before step 1 whenever STEP=all, so a run
 #       never provisions steps 1-4 only to discover at step 5 that the gate
 #       cannot run.
+#       Also refused (exit 2) when VERIFY_SIGNING_SECRET is set but openssl is
+#       not on PATH: the probes could not be signed, and an unsigned probe
+#       against a signing-enabled gateway is a 401 that proves nothing.
 #
 # Honest limit: verify_preflight refuses (exit 2) when VERIFY_TOKEN and
 # VERIFY_TOKEN_OTHER are byte-identical, which catches the single most likely
@@ -118,10 +130,37 @@ verify_preflight() {
     printf '%s' "$missing" >&2
     exit 2
   fi
+  # API-01d REQUEST SIGNING. The gateway verifies an HMAC-SHA256 X-Signature over
+  # METHOD, PATH and BODY, newline-separated, whenever API_GATEWAY_SIGNING_SECRET_FILE
+  # is set, which api-gateway-deploy.yaml does on every deployment, and it rejects at the
+  # signing middleware, BEFORE authentication runs. So an unsigned probe is 401
+  # no matter how good the token is, which is how this gate came to be
+  # unpassable on every real gateway while reporting a token problem (#774).
+  #
+  # Unset is still correct against a gateway with signing disabled, so this is
+  # optional rather than required — but a 401 must then say so rather than
+  # blaming the token, which is what the arms below do.
+  if [ -n "${VERIFY_SIGNING_SECRET:-}" ] && ! command -v openssl >/dev/null 2>&1; then
+    echo "REFUSED: VERIFY_SIGNING_SECRET is set but openssl is not on PATH — the probes cannot be signed, and an unsigned probe against a signing-enabled gateway is a 401 that says nothing about isolation." >&2
+    exit 2
+  fi
   if [ "$VERIFY_TOKEN" = "$VERIFY_TOKEN_OTHER" ]; then
     echo "REFUSED: VERIFY_TOKEN and VERIFY_TOKEN_OTHER are the same token — the cross-tenant probe token (VERIFY_TOKEN_OTHER) must belong to a DIFFERENT, already-existing tenant, not '$TENANT' itself. Mint a distinct token for another tenant and retry." >&2
     exit 2
   fi
+}
+
+# sign emits the X-Signature curl argument for one request, or nothing at all
+# when no secret was supplied. Printed as a whole argument list so an empty
+# secret contributes no header rather than an empty one.
+sign_args() {
+  _method="$1"; _path="$2"
+  [ -n "${VERIFY_SIGNING_SECRET:-}" ] || return 0
+  # base64url, unpadded: what base64.RawURLEncoding produces on the gateway side.
+  _sig="$(printf '%s\n%s\n' "$_method" "$_path" \
+    | openssl dgst -sha256 -hmac "$VERIFY_SIGNING_SECRET" -binary \
+    | base64 | tr '+/' '-_' | tr -d '=\n')"
+  printf '%s' "$_sig"
 }
 
 echo "== provision tenant '$TENANT' (step=$STEP) =="
@@ -401,19 +440,34 @@ if step verify; then
   echo "-- [6/6] verify cross-tenant isolation"
   verify_preflight
   GW="${GW:-http://api-gateway.$SVC_NS:8080}"
+  PROBE_PATH="/v1/portfolios/${FIRST_PORTFOLIO:-PF1}/exposure"
+  PROBE_SIG="$(sign_args GET "$PROBE_PATH")"
+  # An empty secret must contribute NO header. An X-Signature whose value is
+  # empty is not the same request as sending none: the gateway reads it as a
+  # present-but-wrong signature and answers 401 on a gateway that would
+  # otherwise have accepted the probe unsigned.
+  if [ -n "$PROBE_SIG" ]; then
+    set -- -H "X-Signature: $PROBE_SIG"
+  else
+    set --
+  fi
   code_self="$(curl -s -o /dev/null -w '%{http_code}' \
-    -H "Authorization: Bearer $VERIFY_TOKEN" \
-    "$GW/v1/portfolios/${FIRST_PORTFOLIO:-PF1}/exposure")" \
+    -H "Authorization: Bearer $VERIFY_TOKEN" "$@" \
+    "$GW$PROBE_PATH")" \
     || { echo "FATAL: gateway unreachable at $GW (self probe) — cannot verify isolation" >&2; exit 1; }
   code_other="$(curl -s -o /dev/null -w '%{http_code}' \
-    -H "Authorization: Bearer $VERIFY_TOKEN_OTHER" \
-    "$GW/v1/portfolios/${FIRST_PORTFOLIO:-PF1}/exposure")" \
+    -H "Authorization: Bearer $VERIFY_TOKEN_OTHER" "$@" \
+    "$GW$PROBE_PATH")" \
     || { echo "FATAL: gateway unreachable at $GW (cross probe) — cannot verify isolation" >&2; exit 1; }
   echo "   self=$code_self other=$code_other"
 
   if [ "$code_self" != "200" ]; then
     if [ "$code_self" = "401" ]; then
-      echo "FATAL: VERIFY_TOKEN is not authenticating (self=401) — the TOKEN is bad or expired; this does NOT mean tenant '$TENANT' cannot read its own portfolio. Mint a fresh VERIFY_TOKEN and retry." >&2
+      if [ -z "${VERIFY_SIGNING_SECRET:-}" ]; then
+        echo "FATAL: self probe got 401 and this run sent NO request signature. Two things produce that status and the code alone tells them apart from neither: (a) the gateway enforces API-01d request signing, which it does whenever API_GATEWAY_SIGNING_SECRET_FILE is set and every deployment manifest sets it, and VERIFY_SIGNING_SECRET was not supplied; or (b) VERIFY_TOKEN is bad or expired. Try (a) first: export VERIFY_SIGNING_SECRET to the value behind API_GATEWAY_SIGNING_SECRET_FILE and re-run. Neither case means tenant '$TENANT' cannot read its own portfolio." >&2
+      else
+        echo "FATAL: self probe got 401 even though the request WAS signed. Either VERIFY_TOKEN is bad or expired, or VERIFY_SIGNING_SECRET does not match the gateway's signing secret. This does NOT mean tenant '$TENANT' cannot read its own portfolio." >&2
+      fi
     else
       echo "FATAL: tenant '$TENANT' cannot read its own portfolio (self=$code_self)" >&2
     fi
@@ -426,7 +480,11 @@ if step verify; then
       exit 1
       ;;
     401)
-      echo "FATAL: cross-tenant probe proves NOTHING — VERIFY_TOKEN_OTHER is not authenticating (cross=401), so its denial says nothing about isolation. Provide a genuinely valid token for a DIFFERENT existing tenant and retry." >&2
+      if [ -z "${VERIFY_SIGNING_SECRET:-}" ]; then
+        echo "FATAL: cross-tenant probe proves NOTHING (cross=401) and this run sent NO request signature. An unsigned request is refused before authentication runs, so this denial says nothing about isolation. Supply VERIFY_SIGNING_SECRET if the gateway enforces API-01d signing, or a genuinely valid token for a DIFFERENT existing tenant, and retry." >&2
+      else
+        echo "FATAL: cross-tenant probe proves NOTHING - VERIFY_TOKEN_OTHER is not authenticating (cross=401) despite a signed request, so its denial says nothing about isolation. Provide a genuinely valid token for a DIFFERENT existing tenant and retry." >&2
+      fi
       exit 1
       ;;
     403|404)
