@@ -56,6 +56,7 @@ func amountless(inst string) Position {
 func bookWith(extra ...Position) *Book {
 	b := &Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: money(200000, 0, "USD"),
+		NAVBasis:  NAVBasisEquity,
 		Positions: []Position{pos("AAPL", 100000, 0, "USD")},
 	}
 	b.Positions = append(b.Positions, extra...)
@@ -212,7 +213,7 @@ func TestConcentration_AFullyMarkedBookIsUnaffected(t *testing.T) {
 // AN EMPTY BOOK IS NOT AN UNMARKED ONE. No holdings means nothing to price, and
 // the existing empty-book branches must keep working.
 func TestConcentration_AnEmptyBookDoesNotRefuse(t *testing.T) {
-	empty := &Book{PortfolioID: "p1", BaseCurrency: "USD", NAV: money(200000, 0, "USD")}
+	empty := &Book{PortfolioID: "p1", BaseCurrency: "USD", NAV: money(200000, 0, "USD"), NAVBasis: NAVBasisEquity}
 	if got := evalStatus(t, empty, nil, instrumentCap("AAPL", 60, -2)).GetStatus(); got != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_PASS {
 		t.Errorf("an empty book has nothing concentrated: want PASS, got %v", got)
 	}
@@ -226,6 +227,7 @@ func TestConcentration_AnEmptyBookDoesNotRefuse(t *testing.T) {
 func TestConcentration_ABookOfOnlyUnmarkedPositionsIsNotAnEmptyBook(t *testing.T) {
 	book := &Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: money(200000, 0, "USD"),
+		NAVBasis:  NAVBasisEquity,
 		Positions: []Position{unmarked("DARK"), unmarked("MURK")},
 	}
 	v := mustRefuse(t, evalStatus(t, book, nil, instrumentCap("DARK", 10, -2)),
@@ -256,6 +258,7 @@ func TestUnmarked_TheCountIsTheTotalAndTheSampleIsBounded(t *testing.T) {
 	const n = maxUnresolvedSample + 11 // comfortably past the bound
 	book := &Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: money(200000, 0, "USD"),
+		NAVBasis:  NAVBasisEquity,
 		Positions: []Position{pos("AAPL", 100000, 0, "USD")},
 	}
 	for i := 0; i < n; i++ {
@@ -287,6 +290,7 @@ func TestUnmarked_TheCountIsTheTotalAndTheSampleIsBounded(t *testing.T) {
 func TestPreTradeGate_RefusesAnOrderAgainstABookItCannotPrice(t *testing.T) {
 	book := &Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: money(200000, 0, "USD"),
+		NAVBasis: NAVBasisEquity,
 		Positions: []Position{
 			{InstrumentID: "AAPL", Quantity: dec(100, 0), MarketValue: money(100000, 0, "USD")},
 			{InstrumentID: "MSFT", Quantity: dec(100, 0), MarketValue: money(100000, 0, "USD")},

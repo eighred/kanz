@@ -33,7 +33,7 @@ func buyingPowerRule(floor *commonpb.Decimal) *compliancepb.Rule {
 }
 
 func bookWithCash(cash *commonpb.Money) *Book {
-	return &Book{PortfolioID: "PF1", BaseCurrency: "USD", NAV: money(1_000_000, 0, "USD"), Cash: cash}
+	return &Book{PortfolioID: "PF1", BaseCurrency: "USD", NAV: money(1_000_000, 0, "USD"), Cash: cash, NAVBasis: NAVBasisEquity}
 }
 
 func TestBuyingPowerRule_AdmitsWhenCashRemainsAboveTheFloor(t *testing.T) {
@@ -108,8 +108,9 @@ func TestBuyingPowerRule_RefusesAMismatchedParam(t *testing.T) {
 func TestProject_DebitsTheTradeFromCash(t *testing.T) {
 	book := &Book{
 		PortfolioID: "PF1", BaseCurrency: "USD",
-		NAV:  money(1_000_000, 0, "USD"),
-		Cash: money(1000, 0, "USD"),
+		NAV:      money(1_000_000, 0, "USD"),
+		NAVBasis: NAVBasisEquity,
+		Cash:     money(1000, 0, "USD"),
 	}
 	// BUY 3 at 100 ⇒ spends 300 ⇒ 700 left.
 	buy := OrderDelta{
@@ -137,8 +138,9 @@ func TestProject_DebitsTheTradeFromCash(t *testing.T) {
 func TestProject_CreditsCashOnASell(t *testing.T) {
 	book := &Book{
 		PortfolioID: "PF1", BaseCurrency: "USD",
-		NAV:  money(1_000_000, 0, "USD"),
-		Cash: money(1000, 0, "USD"),
+		NAV:      money(1_000_000, 0, "USD"),
+		NAVBasis: NAVBasisEquity,
+		Cash:     money(1000, 0, "USD"),
 		Positions: []Position{{
 			InstrumentID: "AAPL",
 			Quantity:     &commonpb.Decimal{Coefficient: 10},
@@ -164,7 +166,7 @@ func TestProject_CreditsCashOnASell(t *testing.T) {
 // "unknown" and fails closed rather than seeing a fabricated zero that would
 // look like an empty account.
 func TestProject_LeavesUnknownCashUnknown(t *testing.T) {
-	book := &Book{PortfolioID: "PF1", BaseCurrency: "USD", NAV: money(1_000_000, 0, "USD")}
+	book := &Book{PortfolioID: "PF1", BaseCurrency: "USD", NAV: money(1_000_000, 0, "USD"), NAVBasis: NAVBasisEquity}
 	proj, ok := project(book, OrderDelta{
 		InstrumentID:   "AAPL",
 		SignedQuantity: &commonpb.Decimal{Coefficient: 3},
@@ -185,8 +187,9 @@ func TestProject_LeavesUnknownCashUnknown(t *testing.T) {
 func TestGate_RefusesAnOrderThePortfolioCannotAfford(t *testing.T) {
 	book := &Book{
 		PortfolioID: "PF1", BaseCurrency: "USD",
-		NAV:  money(1_000_000, 0, "USD"),
-		Cash: money(250, 0, "USD"),
+		NAV:      money(1_000_000, 0, "USD"),
+		NAVBasis: NAVBasisEquity,
+		Cash:     money(250, 0, "USD"),
 	}
 	mandate := &compliancepb.Mandate{
 		MandateId: "m1", TenantId: "t1", PortfolioId: "PF1",

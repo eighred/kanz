@@ -177,21 +177,33 @@ func IssuerExclusionRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Vi
 	return nil
 }
 
-// LeverageRule enforces a LeverageCap: gross exposure / NAV must not exceed
-// max_gross_leverage. A non-positive or absent NAV fails closed — leverage
-// cannot be verified, so the book is denied by default.
+// LeverageRule enforces a LeverageCap: gross exposure / equity must not exceed
+// max_gross_leverage. Every way of not knowing the denominator fails closed —
+// leverage cannot be verified, so the book is denied by default.
+//
+// THE DENOMINATOR HAS TO BE EQUITY, AND FOR A LONG TIME IT WAS NOT (#780).
+// Every Book producer on this platform set NAV to the sum of position market
+// values. Gross exposure is the sum of the ABSOLUTE values of the same
+// positions, so for a book with no shorts the numerator and the denominator were
+// the SAME NUMBER: the ratio was structurally 1.0, and a max_gross_leverage of
+// 1.5 could not bind however the fund was financed. Cash was invisible too — a
+// portfolio 95% in cash and one fully invested scored identically, because the
+// equity a leverage limit is measured against was not in the denominator. The
+// rule ran, passed, and was recorded in the audit trail as a check that
+// approved: the shape #640 already cost this repository once.
+//
+// So the rule now asks the BOOK what its NAV is, and computes only on
+// NAVBasisEquity. A producer that cannot establish equity gets a refusal naming
+// which of the three states it was in, not a ratio built out of a placeholder.
 func LeverageRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation {
 	lc := rule.GetLeverageCap()
 	if lc == nil {
 		return paramsMismatch("leverage_cap")
 	}
-	nav := absRatFromMoney(c.Book.NAV)
-	if c.Book.NAV == nil || nav.Sign() == 0 {
-		return &compliancepb.Violation{
-			Message:  "leverage cannot be verified: NAV unavailable",
-			Evidence: map[string]string{"nav": "unavailable"},
-		}
+	if v := unusableEquity(c); v != nil {
+		return v
 	}
+	nav := ratFromDecimal(c.Book.NAV.GetAmount())
 	// THE FAIL-OPEN DIRECTION (#760). Gross is a SUM: a dropped holding shrinks
 	// the numerator, so a book reads as less levered for carrying something
 	// nobody could price.
@@ -629,6 +641,74 @@ func unmarkedHoldings(c *Candidate, what string) *compliancepb.Violation {
 		},
 	}
 }
+
+// unusableEquity is the deny-by-default refusal for a leverage denominator that
+// is not the portfolio's equity (#780). nil — evaluate normally — only when the
+// book asserts NAVBasisEquity and the figure is a positive number.
+//
+// THREE REFUSALS, NOT ONE, because the operator's next action differs and a
+// single message would send them to the wrong place:
+//
+//	unspecified       nothing built this book with equity in mind. Wire a
+//	                  producer that can (BookSource joins marks and cash), or
+//	                  accept that this deployment cannot enforce leverage.
+//	gross_positions   a producer said, honestly, that its number is a positions
+//	                  total. It is not wrong — it is the wrong QUESTION for this
+//	                  rule, and it is what every snapshot on this platform still
+//	                  carries.
+//	non-positive      the book asserts equity and the equity is zero or negative.
+//	                  A fund whose liabilities meet or exceed its assets has
+//	                  leverage that is undefined or infinite, never "within cap".
+//
+// THE LAST ONE CLOSES A SECOND FAIL-OPEN, and it is the subtler of the two. The
+// old code read the denominator through absRatFromMoney, which takes the
+// ABSOLUTE value: equity of -1,000,000 became a denominator of 1,000,000, and a
+// wiped-out book with a million of gross exposure reported leverage of exactly
+// 1.0 and passed a 1.5 cap. Only the ZERO case was caught, because zero is the
+// one value the absolute of which is still zero.
+func unusableEquity(c *Candidate) *compliancepb.Violation {
+	if c.Book.NAVBasis != NAVBasisEquity {
+		v := &compliancepb.Violation{
+			Message: "leverage cannot be verified: the book's NAV is not an equity figure, so " +
+				"gross exposure divided by it is not a leverage ratio",
+			Evidence: map[string]string{EvidenceNAVBasis: c.Book.NAVBasis.String()},
+		}
+		// WHAT STOPPED THE PRODUCER, when one tried and could not. Without it the
+		// operator learns only that leverage is unverifiable, which is true of a
+		// deployment that never wired a price feed and of one whose feed stalled on
+		// a single instrument — the same sentence for two different call-outs.
+		if c.Book.NAVBasisDetail != "" {
+			v.Evidence[EvidenceNAVBasisDetail] = c.Book.NAVBasisDetail
+		}
+		return v
+	}
+	if c.Book.NAV == nil || c.Book.NAV.GetAmount() == nil {
+		return &compliancepb.Violation{
+			Message:  "leverage cannot be verified: NAV unavailable",
+			Evidence: map[string]string{"nav": "unavailable", EvidenceNAVBasis: c.Book.NAVBasis.String()},
+		}
+	}
+	if nav := ratFromDecimal(c.Book.NAV.GetAmount()); nav.Sign() <= 0 {
+		return &compliancepb.Violation{
+			Message: "leverage cannot be verified: equity is not positive, so gross leverage is " +
+				"undefined rather than within any cap",
+			Evidence: map[string]string{
+				EvidenceNAVBasis: c.Book.NAVBasis.String(),
+				"equity":         ratString(nav),
+			},
+		}
+	}
+	return nil
+}
+
+// Evidence keys naming what the leverage denominator was, and what stopped a
+// producer from establishing equity (#780).
+const (
+	// EvidenceNAVBasis names what the refused book's NAV actually measured.
+	EvidenceNAVBasis = "nav_basis"
+	// EvidenceNAVBasisDetail carries the producer's reason, when it tried.
+	EvidenceNAVBasisDetail = "nav_basis_detail"
+)
 
 // Evidence keys naming the holdings the platform could not price (#760). Named
 // constants because a test asserting on a literal and a rule writing a different

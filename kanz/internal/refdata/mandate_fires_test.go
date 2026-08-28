@@ -113,6 +113,7 @@ func techAndStaples() map[string]Record {
 func TestASectorCapBreachesTheBookItWasWrittenFor(t *testing.T) {
 	book := &compliance.Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: usd(200_000, 0),
+		NAVBasis:  compliance.NAVBasisEquity,
 		Positions: []compliance.Position{holding("AAPL", 100_000), holding("MSFT", 100_000)},
 	}
 	res := evaluate(t, book, classifierOver(t, techAndStaples()), techCap(gicsTech))
@@ -144,6 +145,7 @@ func TestASectorCapBreachesTheBookItWasWrittenFor(t *testing.T) {
 func TestASectorCapPassesABookInsideIt(t *testing.T) {
 	book := &compliance.Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: usd(200_000, 0),
+		NAVBasis:  compliance.NAVBasisEquity,
 		Positions: []compliance.Position{holding("AAPL", 10_000), holding("KO", 190_000)},
 	}
 	res := evaluate(t, book, classifierOver(t, techAndStaples()), techCap(gicsTech))
@@ -163,6 +165,7 @@ func TestASectorCapPassesABookInsideIt(t *testing.T) {
 func TestACapOnASectorTheFundDoesNotHoldPassesWithEveryHoldingResolved(t *testing.T) {
 	book := &compliance.Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: usd(200_000, 0),
+		NAVBasis:  compliance.NAVBasisEquity,
 		Positions: []compliance.Position{holding("AAPL", 100_000), holding("MSFT", 100_000)},
 	}
 	res := evaluate(t, book, classifierOver(t, techAndStaples()), techCap(gicsStaples))
@@ -179,6 +182,7 @@ func TestACapOnASectorTheFundDoesNotHoldPassesWithEveryHoldingResolved(t *testin
 func TestAnUnresolvedHoldingRefusesAndNamesItself(t *testing.T) {
 	book := &compliance.Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: usd(200_000, 0),
+		NAVBasis:  compliance.NAVBasisEquity,
 		Positions: []compliance.Position{holding("AAPL", 100_000), holding("PRIVATE-CO", 100_000)},
 	}
 	res := evaluate(t, book, classifierOver(t, techAndStaples()), techCap(gicsTech))
@@ -210,6 +214,7 @@ func TestAnIssuerExclusionFiresOnTheIssuerTheMasterResolves(t *testing.T) {
 
 	held := &compliance.Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: usd(200_000, 0),
+		NAVBasis:  compliance.NAVBasisEquity,
 		Positions: []compliance.Position{holding("AAPL", 100_000), holding("KO", 100_000)},
 	}
 	if got := evaluate(t, held, cl, rule).GetStatus(); got != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH {
@@ -219,6 +224,7 @@ func TestAnIssuerExclusionFiresOnTheIssuerTheMasterResolves(t *testing.T) {
 
 	clean := &compliance.Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: usd(200_000, 0),
+		NAVBasis:  compliance.NAVBasisEquity,
 		Positions: []compliance.Position{holding("MSFT", 100_000), holding("KO", 100_000)},
 	}
 	if got := evaluate(t, clean, cl, rule).GetStatus(); got != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_PASS {

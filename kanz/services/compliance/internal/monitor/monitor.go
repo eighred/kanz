@@ -254,10 +254,19 @@ func (m *Monitor) applyAndSnapshot(key bookKey, ps *domainpb.PositionState) (com
 		MarketValue:  ps.GetMarketValue(),
 	}
 
-	// Build the candidate book. NAV is the net market value of the holdings — a
-	// funded-book proxy, since position FACTs carry no portfolio equity (the
-	// same proxy the OMS book source uses). Summed with exact decimal addition.
-	book := &comp.Book{PortfolioID: key.portfolio}
+	// Build the candidate book. NAV is the net market value of the holdings —
+	// positions and nothing else, because position FACTs carry no portfolio
+	// equity. Summed with exact decimal addition.
+	//
+	// AND IT SAYS SO NOW (#780). This proxy used to be handed to LeverageRule as
+	// though it were equity, which made a max_gross_leverage cap unable to bind on
+	// a long-only book: gross is the sum of the same values this loop adds up, so
+	// the ratio was 1.0 by construction and the monitor recorded a check that
+	// passed. Declaring the basis turns that into a refusal naming the gap. The
+	// post-trade monitor cannot close it on its own — the position spine carries
+	// no cash — so this stays a proxy until a producer of portfolio equity reaches
+	// this consumer.
+	book := &comp.Book{PortfolioID: key.portfolio, NAVBasis: comp.NAVBasisGrossPositions}
 	var nav *commonpb.Decimal
 	for _, p := range insts {
 		book.Positions = append(book.Positions, p)

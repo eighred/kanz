@@ -60,6 +60,50 @@ type Position struct {
 // shared domain.v1 wire schema, independent of the risk module's internal types
 // (RISK-02). It is the post-trade projection for the pre-trade gate and the
 // live book for the post-trade monitor.
+// NAVBasis states what a Book's NAV measures. It exists because a denominator
+// and a placeholder are the same bytes on the wire, and the rule that divides by
+// one cannot tell them apart (#780).
+//
+// THE ZERO VALUE REFUSES. A producer that constructs a Book and says nothing
+// about NAV gets NAVBasisUnspecified, and LeverageRule refuses rather than
+// dividing by whatever happens to be there. That direction is not a style
+// choice: the failure this replaces was a control that ran and passed.
+type NAVBasis int
+
+const (
+	// NAVBasisUnspecified is "nobody said". LeverageRule refuses.
+	NAVBasisUnspecified NAVBasis = iota
+	// NAVBasisGrossPositions is the sum of position market values and NOTHING
+	// ELSE — no cash, no liabilities. It is what every snapshot on this platform
+	// actually carries, and it is NOT equity: a fully-invested book and a book
+	// that is 95% cash produce the same number, because the cash a leverage limit
+	// is measured against is not in it. LeverageRule refuses, and says so.
+	NAVBasisGrossPositions
+	// NAVBasisEquity asserts the number IS the portfolio's equity — the figure
+	// gross exposure is a leverage ratio AGAINST. LeverageRule computes only on
+	// this.
+	//
+	// A PRODUCER SETTING THIS IS MAKING A CLAIM, and the claim is falsifiable:
+	// that cash (positive or negative — a margin loan is negative cash) is
+	// included, and that the positions summed into the numerator are valued on
+	// the same basis as the equity in the denominator. Mixing a marked
+	// denominator with a cost-basis numerator produces a ratio that is neither.
+	NAVBasisEquity
+)
+
+// String names the basis for a violation's evidence, so a refusal says which of
+// the three states the book was in rather than only that it was refused.
+func (b NAVBasis) String() string {
+	switch b {
+	case NAVBasisGrossPositions:
+		return "gross_positions"
+	case NAVBasisEquity:
+		return "equity"
+	default:
+		return "unspecified"
+	}
+}
+
 type Book struct {
 	PortfolioID  string
 	BaseCurrency string
@@ -77,9 +121,38 @@ type Book struct {
 	// nothing declares one. A portfolio with no such rule is unaffected; one that
 	// declares it and cannot supply the measure is REFUSED rather than admitted.
 	Risk func(measure string) (*big.Rat, bool)
-	// NAV is net asset value (positions + cash), the leverage-rule denominator.
-	// nil when unknown, which fails the leverage rule closed.
+	// NAV is net asset value, the leverage-rule denominator. nil when unknown,
+	// which fails the leverage rule closed.
+	//
+	// WHAT IT MEANS IS NOT KNOWABLE FROM THE NUMBER, which is why NAVBasis exists
+	// beside it (#780). This field used to be documented as "positions + cash"
+	// and no producer computed that: every one of them summed position values and
+	// stopped. For a long-only book that makes the denominator EQUAL to the
+	// numerator LeverageRule divides into it, so the ratio was structurally 1.0
+	// and a max_gross_leverage cap could not bind however the fund was financed —
+	// while the check ran, passed, and was recorded in the audit trail as having
+	// approved the order.
 	NAV *commonpb.Money
+	// NAVBasis states what NAV MEASURES. The zero value is NAVBasisUnspecified,
+	// so a producer that says nothing gets the refusing answer rather than the
+	// permissive one — the same reason an empty capability set is UNKNOWN and not
+	// UNSUPPORTED.
+	NAVBasis NAVBasis
+	// NAVBasisDetail is a short operator-facing note from a producer that TRIED to
+	// establish equity and could not, naming what stopped it. Empty when it
+	// succeeded, and empty when nothing ever tried.
+	//
+	// IT EXISTS BECAUSE THE REFUSAL IS OTHERWISE UNACTIONABLE. "This book's NAV is
+	// not equity" tells an operator nothing they can go and fix; "no mark for
+	// SOL-USD" and "cash unknown" send them to two different places, and the
+	// second is not even the same team. The producer is the only layer that knows
+	// which, and the rule is the only layer that reports — so the reason travels
+	// with the book, in one field, and lands in the violation's evidence.
+	//
+	// IT NEVER CHANGES A VERDICT, exactly as CashCompleteness never does. A book
+	// that cannot establish equity is refused whatever this says; this only makes
+	// the refusal legible.
+	NAVBasisDetail string
 	// Cash is UNINVESTED CASH in BaseCurrency — what the portfolio can actually
 	// spend (#415). nil when unknown, which fails the buying-power rule CLOSED,
 	// exactly as an absent NAV fails the leverage rule closed.
@@ -173,6 +246,15 @@ func BookFromSnapshot(s *domainpb.PortfolioSnapshot) *Book {
 		BaseCurrency: s.GetPortfolio().GetBaseCurrency(),
 		NAV:          s.GetPortfolio().GetTotalMarketValue(),
 		Cash:         s.GetPortfolio().GetCashBalance(),
+		// TOTAL MARKET VALUE IS NOT EQUITY, and this is the honest name for it
+		// (#780). The field is the sum of the snapshot's position values; the
+		// snapshot carries cash separately and says nothing about whether the
+		// positions were marked or held at cost. Summing the two here would
+		// manufacture an equity figure out of two numbers whose bases are
+		// unstated — so this reports what it has, and a caller that can establish
+		// real equity (services/oms/internal/compliance.BookSource) overrides
+		// both fields together.
+		NAVBasis: NAVBasisGrossPositions,
 	}
 	for _, ps := range s.GetPositions() {
 		b.Positions = append(b.Positions, Position{

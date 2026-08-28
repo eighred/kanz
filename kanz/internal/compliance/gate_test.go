@@ -26,6 +26,7 @@ func concentrationMandate(maxPct int64) *compliancepb.Mandate {
 func currentBook() *Book {
 	return &Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: money(200000, 0, "USD"),
+		NAVBasis: NAVBasisEquity,
 		Positions: []Position{
 			{InstrumentID: "AAPL", Quantity: dec(100, 0), MarketValue: money(100000, 0, "USD")},
 			{InstrumentID: "MSFT", Quantity: dec(100, 0), MarketValue: money(100000, 0, "USD")},

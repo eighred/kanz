@@ -38,6 +38,7 @@ func sweepBook() *Book {
 		PortfolioID:  "p1",
 		BaseCurrency: "USD",
 		NAV:          &commonpb.Money{Amount: dec(100000, 0), CurrencyCode: "USD"},
+		NAVBasis:     NAVBasisEquity,
 		Positions: []Position{
 			{
 				InstrumentID: "AAPL",

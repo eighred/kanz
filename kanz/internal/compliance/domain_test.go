@@ -40,6 +40,7 @@ func domainGate(t *testing.T) *PreTradeGate {
 		PortfolioID:  "p1",
 		BaseCurrency: "USD",
 		NAV:          &commonpb.Money{Amount: dec(200000, 0), CurrencyCode: "USD"},
+		NAVBasis:     NAVBasisEquity,
 		Positions: []Position{
 			{
 				InstrumentID: "AAPL",
@@ -151,6 +152,7 @@ func TestEvaluate_OutOfDomainBookPositionIsRefused(t *testing.T) {
 		PortfolioID:  "p1",
 		BaseCurrency: "USD",
 		NAV:          &commonpb.Money{Amount: dec(100000, 0), CurrencyCode: "USD"},
+		NAVBasis:     NAVBasisEquity,
 		Positions: []Position{{
 			InstrumentID: "MSFT",
 			Quantity:     dec(1, 0),
