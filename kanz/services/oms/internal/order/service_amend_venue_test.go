@@ -115,7 +115,7 @@ func TestAmend_RefusedOnAPartiallyFilledOrder(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	st.Status = orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED
-	if err := svc.store.Save(context.Background(), st, ver, nil); err != nil {
+	if err := svc.store.Save(context.Background(), st, ver, nil, ""); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestAmend_RefusedOnAScheduleParentWhoseChildrenAreAtTheVenue(t *testing.T) 
 		t.Fatalf("load: %v", err)
 	}
 	st.Status = orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED
-	if err := svc.store.Save(context.Background(), st, ver, nil); err != nil {
+	if err := svc.store.Save(context.Background(), st, ver, nil, ""); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 

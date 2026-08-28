@@ -179,7 +179,7 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce 
 // `WHERE orders.version = $4`, same 0-rows-means-ErrConflict verdict, whether it
 // runs on the pool or inside the transaction — and a refused CAS returns before
 // the enqueue, so a loser announces nothing. cas_test.go pins it.
-func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record) error {
+func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record, fillID string) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot save order with empty order_id")
 	}
@@ -187,7 +187,12 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 	if err != nil {
 		return fmt.Errorf("marshal order %s: %w", st.GetOrderId(), err)
 	}
-	if len(announce) == 0 {
+	// THE POOL FAST PATH IS ONLY AVAILABLE WHEN THERE IS NOTHING TO COMMIT
+	// ALONGSIDE. A fill claim needs the transaction for the same reason the
+	// outbox record does: a claim that commits apart from the fold loses the fill
+	// if the fold then fails, and a fold that commits apart from its claim
+	// double-counts on the next redelivery (#782).
+	if len(announce) == 0 && fillID == "" {
 		return p.cas(ctx, p.pool, st, blob, expectedVersion)
 	}
 	tx, err := p.pool.Begin(ctx)
@@ -195,7 +200,20 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 		return fmt.Errorf("save order %s: begin: %w", st.GetOrderId(), err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
-	// THE CAS FIRST, THE ANNOUNCEMENT SECOND. A conflict means another writer
+	// THE CLAIM FIRST OF ALL (#782). A fill this order already contains means
+	// this write must not land at all — not the state, not the FACT — and
+	// claiming before the CAS means the rollback has nothing to undo rather than
+	// something to be trusted to undo. It also puts the cheapest refusal first.
+	if fillID != "" {
+		claimed, cerr := p.claimFill(ctx, tx, st.GetOrderId(), fillID)
+		if cerr != nil {
+			return cerr
+		}
+		if !claimed {
+			return ErrFillApplied
+		}
+	}
+	// THE CAS SECOND, THE ANNOUNCEMENT THIRD. A conflict means another writer
 	// moved the order, so this delivery's FACT describes a transition that never
 	// happened — returning before the enqueue keeps it out of the table rather
 	// than relying on the rollback to take it out again.
@@ -209,6 +227,33 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 		return fmt.Errorf("save order %s: commit: %w", st.GetOrderId(), err)
 	}
 	return nil
+}
+
+// claimFillSQL is 0003's stance applied to the order aggregate: the insert IS
+// the claim, and RowsAffected is the verdict. A SELECT-then-INSERT would
+// reintroduce the check-then-act window two replicas reconciling the same order
+// would drive straight through.
+const claimFillSQL = `
+	INSERT INTO order_fills (tenant_id, order_id, fill_id)
+	VALUES (current_setting('app.tenant_id'), $1, $2)
+	ON CONFLICT (tenant_id, fill_id) DO NOTHING
+`
+
+// claimFill reports whether THIS write owns the fill: 1 row ⇒ it is new and the
+// fold may proceed, 0 ⇒ the aggregate already contains it.
+//
+// THE CONFLICT TARGET IS (tenant_id, fill_id) AND NOT order_id, deliberately. A
+// venue fill belongs to exactly one order; if the same fill_id ever arrived
+// against a SECOND order that would be a venue or routing defect, and silently
+// folding it into both aggregates is the worst available outcome. Keyed this
+// way the second order's fold is refused and the operator gets an order that
+// will not advance, which is the failure that gets looked at.
+func (p *Postgres) claimFill(ctx context.Context, db execer, orderID, fillID string) (bool, error) {
+	tag, err := db.Exec(ctx, claimFillSQL, orderID, fillID)
+	if err != nil {
+		return false, fmt.Errorf("claim fill %s for order %s: %w", fillID, orderID, err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // saveSQL is the compare-and-swap, written ONCE. Both Save paths execute this

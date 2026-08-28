@@ -228,7 +228,7 @@ func TestResumeDoesNotFabricateAFillForAPreOutboxOrder(t *testing.T) {
 	}
 	terminal := cloneState(loaded)
 	terminal.Status = orderpb.OrderStatus_ORDER_STATUS_FILLED
-	if err := store.Save(ctx, terminal, ver, nil); err != nil {
+	if err := store.Save(ctx, terminal, ver, nil, ""); err != nil {
 		t.Fatalf("Save terminal: %v", err)
 	}
 	if got := store.outbox.PendingCount(); got != 0 {
