@@ -390,6 +390,40 @@ func Load() (Config, error) {
 		priceSubjectsRaw = "" // set-but-blank: refuse below rather than fall back
 	}
 
+	// EVERY DENY-BY-DEFAULT POSTURE IS PARSED, NOT STRING-COMPARED (#783).
+	//
+	// These four used to read os.Getenv(key) == "true", which makes every other
+	// spelling FALSE: "True", "TRUE", "1", "T", or a value with whitespace a
+	// mounted secret file left on the end. An operator who armed a control that
+	// way got a pod that reported healthy and enforced nothing, and the manifest
+	// they would check to find out says the control is on.
+	//
+	// env.Bool refuses instead — a value strconv.ParseBool cannot read is a
+	// startup error naming the key and the value, which is CLAUDE.md's rule that a
+	// misconfiguration surfaces as a refusal to start rather than a default that
+	// looks healthy. It also accepts every spelling Go accepts, so "1" and "TRUE"
+	// now arm the control rather than silently disarming it.
+	//
+	// UNSET AND BLANK BOTH MEAN "not configured" and take the default: env.Lookup
+	// trims and treats an empty value as absent, which is what the eight manifests
+	// carrying `value: ""` already mean by it.
+	requireMandate, err := env.Bool("OMS_REQUIRE_MANDATE", false)
+	if err != nil {
+		return Config{}, err
+	}
+	requireVenueAccount, err := env.Bool("OMS_REQUIRE_VENUE_ACCOUNT", false)
+	if err != nil {
+		return Config{}, err
+	}
+	requireVerifiedAccount, err := env.Bool("OMS_REQUIRE_VERIFIED_ACCOUNT", false)
+	if err != nil {
+		return Config{}, err
+	}
+	requireOrderTypeSupport, err := env.Bool("OMS_REQUIRE_ORDER_TYPE_SUPPORT", false)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Listen: env.Or("OMS_LISTEN", ":8090"),
 		// NO DEFAULT, DELIBERATELY. A read surface that appears because nobody
@@ -405,11 +439,11 @@ func Load() (Config, error) {
 		DatabaseURL:             databaseURL,
 		Tenant:                  env.Or("OMS_TENANT", "__system__"),
 		RefData:                 refData,
-		RequireMandate:          os.Getenv("OMS_REQUIRE_MANDATE") == "true",
+		RequireMandate:          requireMandate,
 		VenueAccounts:           os.Getenv("OMS_VENUE_ACCOUNTS"),
-		RequireVenueAccount:     os.Getenv("OMS_REQUIRE_VENUE_ACCOUNT") == "true",
-		RequireVerifiedAccount:  os.Getenv("OMS_REQUIRE_VERIFIED_ACCOUNT") == "true",
-		RequireOrderTypeSupport: os.Getenv("OMS_REQUIRE_ORDER_TYPE_SUPPORT") == "true",
+		RequireVenueAccount:     requireVenueAccount,
+		RequireVerifiedAccount:  requireVerifiedAccount,
+		RequireOrderTypeSupport: requireOrderTypeSupport,
 		SimVenueMIC:             env.Or("OMS_SIM_VENUE_MIC", "XSIM"),
 		DefaultVenueMIC:         os.Getenv("OMS_DEFAULT_VENUE_MIC"),
 		VenueEndpoints:          os.Getenv("OMS_VENUE_ENDPOINTS"),
@@ -523,7 +557,16 @@ func Load() (Config, error) {
 		}
 		cfg.ProposalExpiryInterval = d
 	}
-	cfg.RequireDualControl = os.Getenv("OMS_REQUIRE_DUAL_CONTROL") == "true"
+	// PARSED, NOT STRING-COMPARED (#783) — and this one is the sharpest case of
+	// the four above. Arming it without OMS_DUAL_CONTROL_MIN_NOTIONAL is a startup
+	// refusal, so a misspelt "True" did not merely disarm maker-checker: it also
+	// suppressed the refusal that would have said the pair was incomplete, and the
+	// OMS came up with neither the control nor the complaint.
+	requireDualControl, err := env.Bool("OMS_REQUIRE_DUAL_CONTROL", false)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.RequireDualControl = requireDualControl
 	if raw := strings.TrimSpace(os.Getenv("OMS_DUAL_CONTROL_MIN_NOTIONAL")); raw != "" {
 		amount, currency, err := parseNotional(raw)
 		if err != nil {

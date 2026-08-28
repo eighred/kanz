@@ -194,6 +194,17 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// PARSED, NOT STRING-COMPARED (#783). It used to read
+	// os.Getenv(key) == "true", which makes "True", "TRUE", "1" and a value a
+	// mounted file left whitespace on all read as FALSE — a quote-match control an
+	// operator armed and that silently was not. env.Bool refuses a value it cannot
+	// parse, so a typo is a startup error naming the key rather than a venue
+	// adapter accepting fills at a price nobody checked.
+	requireQuoteMatch, err := env.Bool("OKX_REQUIRE_QUOTE_MATCH", false)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		GRPCListen:     env.Or("VENUE_OKX_GRPC_LISTEN", ":9000"),
 		HTTPListen:     env.Or("VENUE_OKX_LISTEN", ":8092"),
@@ -217,7 +228,7 @@ func Load() (Config, error) {
 		APISecret:              apiSecret,
 		Passphrase:             passphrase,
 		Symbols:                os.Getenv("OKX_SYMBOLS"),
-		RequireQuoteMatch:      os.Getenv("OKX_REQUIRE_QUOTE_MATCH") == "true",
+		RequireQuoteMatch:      requireQuoteMatch,
 	}, nil
 }
 
