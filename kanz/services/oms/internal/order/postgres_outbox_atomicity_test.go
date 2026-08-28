@@ -168,7 +168,7 @@ func TestPostgresSaveFailingAtCommitLeavesNoOutboxRecord(t *testing.T) {
 		PayloadSchemaRef: "order.v1.OrderFilled:1",
 		TenantID:         testTenant,
 		Payload:          []byte{0x01},
-	}})
+	}}, "")
 	if err == nil {
 		t.Fatal("Save returned nil with a deferred trigger that always raises — the commit did not " +
 			"fail, so this run proves nothing about the failure path")

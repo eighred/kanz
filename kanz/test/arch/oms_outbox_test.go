@@ -380,7 +380,7 @@ func TestTheFillFactHasNoWayOutExceptTheTransaction(t *testing.T) {
 			"are supposed to build the record and pass it to store.Save; if neither does, fills are " +
 			"being persisted with no announcement committed alongside them (#292)")
 	}
-	if !strings.Contains(src, "s.store.Save(ctx, next, ver, []outbox.Record{fact})") {
+	if !strings.Contains(src, "s.store.Save(ctx, next, ver, []outbox.Record{fact}, fill.GetFillId())") {
 		t.Error("no fold passes its fill FACT to store.Save. The record must ride the SAME " +
 			"transaction as the state it announces — that is the entire property, and a record " +
 			"built and then enqueued separately is two independent writes with extra steps (#292)")

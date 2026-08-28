@@ -37,6 +37,22 @@ var ErrExists = errors.New("oms: order already exists")
 // now unknown and a human must look).
 var ErrConflict = errors.New("oms: order changed since load")
 
+// ErrFillApplied reports that this order aggregate already contains the fill the
+// write was folding, so NOTHING was written — not the state, not the FACT, not
+// the claim (#782).
+//
+// IT IS A SKIP, NOT A FAILURE. A caller that gets it should move to the next
+// fill: the aggregate it holds already reflects this one, which is the correct
+// end state and the whole point of the claim. Treating it as an error would
+// quarantine an order for being reconciled twice, which is the ordinary case
+// after a redelivery.
+//
+// The alternative — letting the fold apply and hoping nobody folded it before —
+// silently double-counts filled_quantity and re-weights average_fill_price, and
+// the stored OrderState keeps only the cumulative aggregate, so there is nothing
+// downstream that could notice.
+var ErrFillApplied = errors.New("oms: fill already folded into this order")
+
 // Store is the durable home of order aggregate state (PERS-01). The in-memory
 // default below is the floor that preserves exact semantics for tests and a
 // single replica; a durable, replayable backend (Postgres, the risk-engine
@@ -119,7 +135,21 @@ type Store interface {
 	// the pre-write refusals, and the #238 compensators repairing rows that have
 	// no outbox record behind them. test/arch/oms_outbox_test.go names each one
 	// and fails if a new pair appears.
-	Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record) error
+	// THE fillID PARAMETER CLAIMS THE FILL THIS WRITE FOLDS (#782), in the same
+	// transaction as the state and the FACT.
+	//
+	// "" means this write folds no fill, which is the answer for every transition
+	// that is not an execution — routing, a cancel, a marker stamp. It is a plain
+	// parameter rather than an option precisely so that omitting it does not
+	// compile: a fill fold that forgot to claim would double-count on the next
+	// redelivery, and the caller who forgot is exactly the one who would not
+	// notice.
+	//
+	// A fill already claimed returns ErrFillApplied and writes NOTHING. That is
+	// the guarantee ApplyFill cannot give on its own: it folds a fill into a
+	// state, and the state records only the cumulative result, so the aggregate
+	// itself cannot tell a first fold from a second.
+	Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record, fillID string) error
 	// Load returns the current state of one order and its version, or
 	// ErrNotFound. The version is opaque to the caller: its only use is to be
 	// handed back to Save.
@@ -230,15 +260,21 @@ type MemoryStore struct {
 	// proposals is owned here, over the SAME outbox, for the same reason: a
 	// pending-approval FACT and an acceptance must not land in two queues.
 	proposals *MemoryProposals
+	// appliedFills is order_fills (#782): the fills already folded into an
+	// aggregate. Held under the SAME lock as the map and the outbox, which is
+	// this store's equivalent of the Postgres transaction — a claim that could
+	// commit apart from the fold has two failure modes and both are real.
+	appliedFills map[string]bool
 }
 
 // NewMemoryStore returns an empty in-memory Store.
 func NewMemoryStore() *MemoryStore {
 	q := outbox.NewMemory()
 	return &MemoryStore{
-		orders:    make(map[string]*versioned),
-		outbox:    q,
-		proposals: NewMemoryProposals(q),
+		orders:       make(map[string]*versioned),
+		appliedFills: make(map[string]bool),
+		outbox:       q,
+		proposals:    NewMemoryProposals(q),
 	}
 }
 
@@ -290,7 +326,7 @@ func (m *MemoryStore) Create(_ context.Context, st *orderpb.OrderState, announce
 // CAS must leave NOTHING behind, so the version check precedes the enqueue; and
 // the map write cannot fail, so it goes last. That is this store's whole
 // equivalent of the transaction Postgres.Save opens.
-func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record) error {
+func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record, fillID string) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot save order with empty order_id")
 	}
@@ -303,10 +339,20 @@ func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVe
 	if cur.ver != expectedVersion {
 		return ErrConflict
 	}
+	// THE CLAIM BEFORE ANYTHING ELSE IS WRITTEN, mirroring Postgres: a fill this
+	// aggregate already contains means this write must not land at all, and
+	// returning after the outbox append would leave a FACT for a fold that did
+	// not happen.
+	if fillID != "" && m.appliedFills[fillID] {
+		return ErrFillApplied
+	}
 	if len(announce) > 0 {
 		if err := m.outbox.Append(announce...); err != nil {
 			return err
 		}
+	}
+	if fillID != "" {
+		m.appliedFills[fillID] = true
 	}
 	m.orders[st.GetOrderId()] = &versioned{
 		st:  proto.Clone(st).(*orderpb.OrderState),

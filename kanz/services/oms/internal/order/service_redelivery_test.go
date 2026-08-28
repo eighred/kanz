@@ -8,9 +8,11 @@ import (
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"bytes"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/platform/halt"
+	"google.golang.org/protobuf/proto"
 )
 
 // unreachableVenue fails its FIRST execute and then recovers — a venue call
@@ -280,24 +282,42 @@ func (v *twoFillVenue) QueryOrder(context.Context, *orderpb.OrderState) (executi
 	return execution.OrderView{State: execution.OrderViewFilled, Fills: v.fills}, nil
 }
 
-// THE ORDER-AGGREGATE DOUBLE-FOLD ARM.
+// A MULTI-FILL VENUE VIEW IS ADOPTED, AND ADOPTING IT TWICE CHANGES NOTHING (#782).
 //
-// adopt() used to fold every fill in view.Fills through ApplyFill with no
-// fill_id dedup. The position book dedups the POSITION BOOK on fill_id
-// (position_fills), but the ORDER AGGREGATE folded here has no equivalent
-// guard, and cancel/amend and the read API consult that aggregate directly. A
-// venue that reports more than one fill on a single query — unreachable today
-// because SimVenue is the only Querier and it always reports exactly one
-// full-leaves fill, but not unreachable forever — must not be silently
-// double-folded. It must quarantine instead.
-func TestAdoptRefusesMultiFillViewAndQuarantinesRatherThanDoubleFold(t *testing.T) {
+// This test used to assert the opposite. adopt() refused any view carrying more
+// than one fill and quarantined the order, because ApplyFill folds a fill into
+// the aggregate with an over-fill guard and no fill_id dedup — so folding a fill
+// the order already contained would silently double-count filled_quantity and
+// re-weight average_fill_price, with nothing downstream able to notice.
+//
+// THE REFUSAL WAS CORRECT AND IT WAS A CEILING. Both wired connectors report
+// multiple fills for one order under ordinary partial execution, so any order
+// that partially filled and then needed healing froze and waited for a human —
+// more often as volume rose.
+//
+// order_fills is the guarantee that retires it: Store.Save claims the fill in
+// the same transaction as the state and the FACT, and returns ErrFillApplied
+// having written nothing if the aggregate already holds it.
+//
+// WHAT THIS TEST PROVES, AND WHAT IT DOES NOT. It proves the ceiling is gone:
+// a view carrying two fills is adopted, both fold exactly once, and the weighted
+// average is right. It does NOT prove the dedup — a redelivery for an order that
+// is already terminal announces the trailing outcome and returns without
+// reaching the fold at all, so this test passes with the claim deleted. That was
+// measured, not assumed: it was written first, it passed with the dedup removed,
+// and fill_claim_test.go exists because of it.
+//
+// The re-adoption arm below is still worth keeping. It says a second delivery
+// changes nothing an operator or a ledger would see, which is the property the
+// issue asked for — it is just not, on its own, evidence of the claim.
+func TestAdoptFoldsEveryFillOnceAndReadoptionIsANoOp(t *testing.T) {
 	ctx := testCtx()
 	fb := &fakeBus{}
 	fills := []*orderpb.Fill{
 		{FillId: "e1", OrderId: "o1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
-			Quantity: d(50, 0), Price: d(1025, -2), Venue: "XSIM"},
+			Quantity: d(50, 0), Price: d(1020, -2), Venue: "XSIM"},
 		{FillId: "e2", OrderId: "o1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
-			Quantity: d(50, 0), Price: d(1025, -2), Venue: "XSIM"},
+			Quantity: d(50, 0), Price: d(1030, -2), Venue: "XSIM"},
 	}
 	venue := &twoFillVenue{SimVenue: execution.NewSimVenue("XSIM"), fills: fills}
 	store := NewMemoryStore()
@@ -310,8 +330,7 @@ func TestAdoptRefusesMultiFillViewAndQuarantinesRatherThanDoubleFold(t *testing.
 	body := mustMarshal(t, cmd)
 
 	// Delivery 1: admitted and routed. The venue acks without recording anything,
-	// so the order is stored ROUTED with venue_ack_at set and NO fills folded —
-	// same setup as TestVenueDenyingAnAcknowledgedOrderQuarantinesAndDoesNotRedrive.
+	// so the order is stored ROUTED with venue_ack_at set and NO fills folded.
 	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
 		t.Fatalf("delivery 1: %v", err)
 	}
@@ -320,33 +339,57 @@ func TestAdoptRefusesMultiFillViewAndQuarantinesRatherThanDoubleFold(t *testing.
 		t.Fatalf("Load: %v", err)
 	}
 	if st.GetVenueAckAt() == nil {
-		t.Fatal("venue_ack_at not stamped after delivery 1 — the double-fold arm below " +
-			"needs the order routed and acknowledged before the redelivery queries the venue")
+		t.Fatal("venue_ack_at not stamped after delivery 1 — the adoption below needs the order " +
+			"routed and acknowledged before the redelivery queries the venue")
 	}
 	if !dec.IsZero(st.GetFilledQuantity()) {
-		t.Fatalf("filled_quantity = %v after delivery 1, want 0 — nothing was folded yet", st.GetFilledQuantity())
+		t.Fatalf("filled_quantity = %v after delivery 1, want 0 — nothing was folded yet",
+			st.GetFilledQuantity())
 	}
 
-	// Delivery 2: the redelivery. The venue now reports BOTH fills at once.
+	// Delivery 2: the redelivery. The venue reports BOTH fills at once.
 	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
-		t.Fatalf("delivery 2 returned %v; a quarantine is terminal and must ack", err)
+		t.Fatalf("delivery 2: %v", err)
 	}
-
 	st, _, err = store.Load(ctx, cmd.GetOrderId())
 	if err != nil {
 		t.Fatalf("Load after delivery 2: %v", err)
 	}
-	if st.GetQuarantine() == nil {
-		t.Fatal("order was NOT quarantined. adopt() folded a multi-fill venue view straight " +
-			"through ApplyFill, which has no fill_id dedup — exactly the double-fold this " +
-			"refusal exists to prevent")
+	if q := st.GetQuarantine(); q != nil {
+		t.Fatalf("the order was QUARANTINED (%q). A multi-fill view is the ordinary shape of an "+
+			"interrupted partial execution, and refusing it is the ceiling #782 removed",
+			q.GetReason())
 	}
-	if st.GetQuarantine().GetReason() == "" {
-		t.Error("quarantine carries no reason — an operator sees a frozen order and no account of why")
+	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED {
+		t.Fatalf("status = %v, want FILLED — both fills together complete the 100 ordered",
+			st.GetStatus())
 	}
-	if !dec.IsZero(st.GetFilledQuantity()) {
-		t.Fatalf("filled_quantity = %v after the redelivery, want 0 — the order was refused "+
-			"before any fill was folded, not double-folded and then caught", st.GetFilledQuantity())
+	if got := dec.Str(dec.FromProto(st.GetFilledQuantity())); got != "100" {
+		t.Fatalf("filled_quantity = %s, want 100 — both fills must fold, exactly once each", got)
+	}
+	// 50 @ 10.20 + 50 @ 10.30 = 10.25 weighted. A double-fold of either fill
+	// would move this, which is the number the old refusal was protecting.
+	if got := dec.Str(dec.FromProto(st.GetAverageFillPrice())); got != "10.25" {
+		t.Fatalf("average_fill_price = %s, want 10.25", got)
+	}
+
+	before := financialBytes(t, st)
+
+	// Delivery 3: the SAME view again. Every fill is already claimed, so every
+	// fold is skipped and the aggregate must not move by one bit.
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 3 (re-adoption): %v", err)
+	}
+	after, _, err := store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load after delivery 3: %v", err)
+	}
+	if !bytes.Equal(before, financialBytes(t, after)) {
+		t.Fatalf("re-adopting the same venue view CHANGED the aggregate.\n  before: filled=%s avg=%s\n"+
+			"  after:  filled=%s avg=%s\nA fill this order already contains was folded a second "+
+			"time — the double-count #782 exists to make impossible",
+			dec.Str(dec.FromProto(st.GetFilledQuantity())), dec.Str(dec.FromProto(st.GetAverageFillPrice())),
+			dec.Str(dec.FromProto(after.GetFilledQuantity())), dec.Str(dec.FromProto(after.GetAverageFillPrice())))
 	}
 }
 
@@ -482,4 +525,44 @@ func TestAdmissionPathHoldsTheClaimWhileWorkingAnOrder(t *testing.T) {
 			"never routed, because working it requires the claim this delivery could not get",
 			st.GetStatus())
 	}
+}
+
+// financialBytes is the order's state with the two fields a re-adoption is
+// ENTITLED to move cleared, so the comparison is over everything else.
+//
+// A BYTE COMPARISON WITH TWO NAMED EXCLUSIONS, NOT A LIST OF FIELDS TO CHECK.
+// Asserting filled_quantity and average_fill_price by hand would pass if a
+// double-fold moved leaves_quantity, the status, or a field nobody has added
+// yet; the whole point of #782's dedup is that NOTHING about the aggregate moves
+// on a second fold. So the test states what may change and compares the rest.
+//
+//	as_of                 every write stamps it; a no-op write still writes.
+//	venue_ack_at          resume() re-records that the venue has the order before
+//	                      it folds anything, which is correct and is why a
+//	                      re-adoption is not literally a no-op at the storage layer.
+//	outcome_announced_at  the redelivery finds the order already terminal and
+//	                      announces the trailing CommandOutcome, stamping its
+//	                      marker. That is the #238 compensator shape working, not
+//	                      a fold.
+//
+// EACH ONE WAS FOUND BY THE COMPARISON FAILING, not assumed in advance — which
+// is the argument for comparing bytes rather than four fields by hand. If any of
+// them ever carried financial meaning this helper would be hiding it; none does.
+// as_of is a write clock, venue_ack_at a possession marker, outcome_announced_at
+// an announcement marker, and the money lives in the quantities, the price and
+// the status — all of which are compared.
+func financialBytes(t *testing.T, st *orderpb.OrderState) []byte {
+	t.Helper()
+	c, ok := proto.Clone(st).(*orderpb.OrderState)
+	if !ok {
+		t.Fatal("clone returned a different type")
+	}
+	c.AsOf = nil
+	c.VenueAckAt = nil
+	c.OutcomeAnnouncedAt = nil
+	b, err := proto.Marshal(c)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
 }

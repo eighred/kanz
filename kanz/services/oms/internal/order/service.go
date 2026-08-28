@@ -1004,7 +1004,7 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 		// alongside the records it describes is what makes it true the instant
 		// it is durable, instead of after two more writes that can each fail.
 		rejected.OutcomeAnnouncedAt = timestamppb.New(rejectedAt)
-		if serr := s.store.Save(ctx, rejected, ver, []outbox.Record{rejFact, outFact}); serr != nil {
+		if serr := s.store.Save(ctx, rejected, ver, []outbox.Record{rejFact, outFact}, ""); serr != nil {
 			return serr
 		}
 		// Flushed here because the submitter is waiting on this outcome; the
@@ -1212,7 +1212,7 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 	// A conflict HERE is safe to abort on: nothing has reached the venue yet, so
 	// another replica winning the race means it is working this order and this
 	// delivery has nothing to contribute. Returning the error redelivers.
-	if err := s.store.Save(ctx, routed, ver, []outbox.Record{fact}); err != nil {
+	if err := s.store.Save(ctx, routed, ver, []outbox.Record{fact}, ""); err != nil {
 		return st, ver, err
 	}
 	ver++
@@ -1251,7 +1251,7 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 	// process holds the only record that the venue acknowledged, and another
 	// replica has moved the order without it. Quarantine rather than return —
 	// a redelivery would re-Execute against a venue that already has it.
-	if err := s.store.Save(ctx, acked, ver, nil); err != nil {
+	if err := s.store.Save(ctx, acked, ver, nil, ""); err != nil {
 		if errors.Is(err, ErrConflict) {
 			return st, ver, s.quarantine(ctx, st, ver,
 				"another replica moved this order while this delivery held an unrecorded venue ack; "+
@@ -1308,7 +1308,20 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 		if ferr != nil {
 			return st, ver, ferr
 		}
-		if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}); err != nil {
+		if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}, fill.GetFillId()); err != nil {
+			// ALREADY FOLDED IS A SKIP, AND IT IS THE ORDINARY CASE AFTER A
+			// REDELIVERY (#782). The aggregate in the store already contains this
+			// fill, so st — loaded from it — already reflects it, and the correct
+			// action is the next fill rather than a fold or a freeze. Nothing was
+			// written: not the state, not the FACT.
+			//
+			// It is NOT quarantined. Freezing an order for being reconciled twice
+			// is what reconciliation exists to do.
+			if errors.Is(err, ErrFillApplied) {
+				s.logger.Info("oms: fill already folded into this order, skipping",
+					"order_id", st.GetOrderId(), "fill_id", fill.GetFillId())
+				continue
+			}
 			// A CONFLICT HERE IS THE ONE THAT MATTERS, and quarantine is the only
 			// honest action (#122, and the decision #117 declined to invent
 			// without CAS to make it meaningful).
@@ -1576,7 +1589,7 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// duplicate-FACT window completeCancelAnnouncement documents is no longer
 	// reachable from the live path.
 	next.CancelAnnouncedAt = timestamppb.New(now)
-	if err := s.store.Save(ctx, next, ver, []outbox.Record{cancelled, outFact}); err != nil {
+	if err := s.store.Save(ctx, next, ver, []outbox.Record{cancelled, outFact}, ""); err != nil {
 		return err
 	}
 	// Flushed where the publishes stood: the operator issuing the cancel is
@@ -1641,7 +1654,7 @@ func (s *Service) completeCancelAnnouncement(ctx context.Context, st *orderpb.Or
 	}
 	announced := cloneState(st)
 	announced.CancelAnnouncedAt = timestamppb.New(now)
-	return s.store.Save(ctx, announced, ver, nil)
+	return s.store.Save(ctx, announced, ver, nil, "")
 }
 
 // closeAtVenue withdraws a working order at the exchange holding it, recording
@@ -1820,7 +1833,7 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 	if ferr != nil {
 		return ferr
 	}
-	if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}); err != nil {
+	if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}, ""); err != nil {
 		return err
 	}
 	// Flushed where EmitOutcome stood: the caller is waiting on this outcome, so
@@ -2649,7 +2662,7 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 		if st.GetVenueAckAt() == nil {
 			acked := cloneState(st)
 			acked.VenueAckAt = timestamppb.New(s.now().UTC())
-			return s.store.Save(ctx, acked, ver, nil)
+			return s.store.Save(ctx, acked, ver, nil, "")
 		}
 		return nil
 	case ActionRedrive:
@@ -2693,7 +2706,7 @@ func orderOutcomeAnnounced(st *orderpb.OrderState) bool {
 func (s *Service) markAcceptedAnnounced(ctx context.Context, st *orderpb.OrderState, ver int64, t time.Time) (*orderpb.OrderState, int64, error) {
 	announced := cloneState(st)
 	announced.AcceptedAnnouncedAt = timestamppb.New(t.UTC())
-	if err := s.store.Save(ctx, announced, ver, nil); err != nil {
+	if err := s.store.Save(ctx, announced, ver, nil, ""); err != nil {
 		return st, ver, err
 	}
 	return announced, ver + 1, nil
@@ -2808,7 +2821,7 @@ func (s *Service) reannounceAccepted(ctx context.Context, st *orderpb.OrderState
 func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderState, ver int64, t time.Time, announce []outbox.Record) error {
 	announced := cloneState(st)
 	announced.OutcomeAnnouncedAt = timestamppb.New(t)
-	return s.store.Save(ctx, announced, ver, announce)
+	return s.store.Save(ctx, announced, ver, announce, "")
 }
 
 // completeTerminalOutcome re-publishes the CommandOutcome for a SubmitOrder
@@ -2943,7 +2956,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 		// order_events.proto) — and, like it, stamped in the SAME write rather
 		// than two writes later, so it is true the instant it is durable.
 		rejected.OutcomeAnnouncedAt = timestamppb.New(now)
-		if err := s.store.Save(ctx, rejected, ver, []outbox.Record{rejFact, outFact}); err != nil {
+		if err := s.store.Save(ctx, rejected, ver, []outbox.Record{rejFact, outFact}, ""); err != nil {
 			return err
 		}
 		// Flushed where refuse() stood, so the FACTs leave in the same order and at
@@ -2958,7 +2971,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 	if st.GetVenueAckAt() == nil {
 		acked := cloneState(st)
 		acked.VenueAckAt = timestamppb.New(s.now().UTC())
-		if err := s.store.Save(ctx, acked, ver, nil); err != nil {
+		if err := s.store.Save(ctx, acked, ver, nil, ""); err != nil {
 			return err
 		}
 		ver++
@@ -2966,32 +2979,26 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 	}
 
 	// REFUSE A MULTI-FILL VIEW. ApplyFill has no fill_id dedup — that is left to
-	// the position book, which claims each fill_id in position_fills before
-	// folding it into the POSITION. The ORDER AGGREGATE folded here has no such
-	// guard, and cancel/amend and the read API consult this aggregate directly.
+	// THE ORDER AGGREGATE NOW DEDUPS ITS OWN FILLS (#782), so a view carrying
+	// several of them is adopted rather than refused.
 	//
-	// The failure this prevents: work() folds fill 1 and Saves it, then fails
-	// before fill 2's Save. The redelivery reaches here, and the venue
-	// reports BOTH fills, and folding fill 1 again would refold a fill this order
-	// already contains. If the refold overfills, ApplyFill errors and the order
-	// quarantines below anyway — safe, but a reconcilable order sits frozen for no
-	// reason. If it fits within the remaining leaves, filled_quantity and
-	// average_fill_price are silently double-counted and persisted, and nothing
-	// downstream catches it.
+	// It used to be refused, and the reason was real: position_fills makes the
+	// POSITION fold exactly-once, the order aggregate had no equivalent, and
+	// folding a fill this order already contained would silently double-count
+	// filled_quantity and re-weight average_fill_price — with nothing downstream
+	// able to notice, because the stored OrderState keeps only the cumulative
+	// result. So adoption refused any view with more than one fill.
 	//
-	// This is not reachable today — SimVenue is the only Querier and it always
-	// returns exactly one full-leaves fill — but it goes live the moment a
-	// multi-fill venue implements Querier. Fail closed rather than guess: refuse
-	// to adopt more than one fill until ApplyFill (or this fold) gains its own
-	// fill_id dedup. Single-fill adoption, the only case any wired venue can
-	// currently produce, keeps working unchanged.
-	if len(view.Fills) > 1 {
-		return s.quarantine(ctx, st, ver, fmt.Sprintf(
-			"venue reports %d fills for this order, and adopting more than one fill is not "+
-				"yet safe: ApplyFill has no fill_id dedup, so folding a fill this order already "+
-				"contains would silently double-count filled_quantity and average_fill_price",
-			len(view.Fills)))
-	}
+	// That refusal was correct and it was a ceiling. Both wired connectors report
+	// multiple fills for one order under ordinary partial execution, so any order
+	// that partially filled and then needed healing — an ambiguous timeout, a
+	// process death mid-dispatch, a startup sweep — froze and waited for a human,
+	// and it froze more often as volume rose.
+	//
+	// order_fills is the equivalent guarantee: Store.Save claims the fill in the
+	// same transaction as the state and the FACT, and returns ErrFillApplied
+	// without writing anything if the aggregate already holds it. The fold below
+	// skips those, so re-adopting a view is a no-op rather than a double-count.
 
 	// REFUSE A FILLED/PARTIALLY_FILLED VIEW THAT CARRIES ZERO FILLS. This is the
 	// other direction of the guard above, and it is the more dangerous of the
@@ -3032,7 +3039,17 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 		if ferr != nil {
 			return ferr
 		}
-		if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}); err != nil {
+		if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}, fill.GetFillId()); err != nil {
+			// ALREADY FOLDED IS A SKIP (#782), and THIS is the path that needed
+			// it: adoption re-reads venue truth, so a view carrying a fill this
+			// order already contains is the normal shape of a resumed
+			// reconciliation, not a fault. Before the claim existed the only safe
+			// answer was to refuse any view with more than one fill.
+			if errors.Is(err, ErrFillApplied) {
+				s.logger.Info("oms: venue fill already folded into this order, skipping",
+					"order_id", st.GetOrderId(), "fill_id", fill.GetFillId())
+				continue
+			}
 			return err
 		}
 		ver++
@@ -3090,7 +3107,7 @@ func (s *Service) quarantine(ctx context.Context, st *orderpb.OrderState, ver in
 	// state is stale and forcing it would overwrite whatever the winner recorded
 	// — the very defect quarantine exists to report. Returning the error nacks
 	// the command, and the redelivery re-derives the freeze against fresh state.
-	if err := s.store.Save(ctx, next, ver, nil); err != nil {
+	if err := s.store.Save(ctx, next, ver, nil, ""); err != nil {
 		return err
 	}
 	return nil

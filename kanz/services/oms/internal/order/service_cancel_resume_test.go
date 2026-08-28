@@ -150,7 +150,7 @@ func TestCancel_ResumesInterruptedAnnouncement(t *testing.T) {
 	stale := cloneState(st)
 	stale.Status = orderpb.OrderStatus_ORDER_STATUS_CANCELLED
 	stale.CancelAnnouncedAt = nil
-	if err := store.Save(context.Background(), stale, ver, nil); err != nil {
+	if err := store.Save(context.Background(), stale, ver, nil, ""); err != nil {
 		t.Fatalf("seed the pre-outbox row: %v", err)
 	}
 	pending, err := store.Outbox().Pending(context.Background(), "o1", 10)

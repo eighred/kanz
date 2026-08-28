@@ -170,7 +170,7 @@ func TestPostgresCreateThenSaveThenLoad(t *testing.T) {
 
 	// Save is the post-admission compare-and-swap: the transition lands when the
 	// caller still holds the version it loaded.
-	if err := st.Save(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_ROUTED), ver, nil); err != nil {
+	if err := st.Save(ctx, state("ORD-1", orderpb.OrderStatus_ORDER_STATUS_ROUTED), ver, nil, ""); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	if got, _, err = st.Load(ctx, "ORD-1"); err != nil || got.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_ROUTED {
@@ -264,7 +264,7 @@ func TestPostgresListByPortfolioReportsWhatItCannotIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load legacy-1: %v", err)
 	}
-	if err := store.Save(ctx, st, ver, nil); err != nil {
+	if err := store.Save(ctx, st, ver, nil, ""); err != nil {
 		t.Fatalf("save legacy-1: %v", err)
 	}
 	got, unindexed, err = store.ListByPortfolio(ctx, "flagship", 0)

@@ -253,7 +253,7 @@ func (s *Service) retireIfFinished(ctx context.Context, parentSt *orderpb.OrderS
 		return ferr
 	}
 	next.OutcomeAnnouncedAt = timestamppb.New(now)
-	if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}); err != nil {
+	if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}, ""); err != nil {
 		return err
 	}
 	if _, err := s.relay.Flush(ctx, next.GetOrderId()); err != nil {

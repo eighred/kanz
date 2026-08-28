@@ -75,11 +75,11 @@ func TestPostgresSaveIsCompareAndSwap(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		errs[0] = a.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), verA, nil)
+		errs[0] = a.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), verA, nil, "")
 	}()
 	go func() {
 		defer wg.Done()
-		errs[1] = b.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), verB, nil)
+		errs[1] = b.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), verB, nil, "")
 	}()
 	wg.Wait()
 
@@ -135,12 +135,12 @@ func TestPostgresSaveRejectsStaleVersion(t *testing.T) {
 	}
 
 	// Somebody else moves the order forward.
-	if err := st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), stale, nil); err != nil {
+	if err := st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), stale, nil, ""); err != nil {
 		t.Fatalf("first save should win: %v", err)
 	}
 
 	// Our writer still holds the pre-cancel version.
-	err = st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), stale, nil)
+	err = st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), stale, nil, "")
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale Save returned %v, want ErrConflict\n\n"+
 			"A writer holding a version the store has moved past was allowed to commit. That is how "+
@@ -174,7 +174,7 @@ func TestPostgresSaveRejectsStaleVersion(t *testing.T) {
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: Domain,
 		PayloadSchemaRef: "order.v1.OrderFilled:1", EventTime: t0,
 		TenantID: testTenant, Payload: []byte{0x01},
-	}})
+	}}, "")
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("an ANNOUNCING stale Save returned %v, want ErrConflict — adding the outbox record "+
 			"to the transaction must not weaken the predicate the whole store depends on (#122)", err)
@@ -211,10 +211,10 @@ func TestMemoryStoreSaveIsCompareAndSwap(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 
-	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), stale, nil); err != nil {
+	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_CANCELLED), stale, nil, ""); err != nil {
 		t.Fatalf("first save should win: %v", err)
 	}
-	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), stale, nil); !errors.Is(err, ErrConflict) {
+	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), stale, nil, ""); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale Save on MemoryStore returned %v, want ErrConflict — the seam must fail "+
 			"where Postgres fails, or the service tests running against it certify nothing", err)
 	}
@@ -227,7 +227,7 @@ func TestMemoryStoreSaveIsCompareAndSwap(t *testing.T) {
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: Domain,
 		PayloadSchemaRef: "order.v1.OrderFilled:1", EventTime: t0,
 		TenantID: testTenant, Payload: []byte{0x01},
-	}}); !errors.Is(err, ErrConflict) {
+	}}, ""); !errors.Is(err, ErrConflict) {
 		t.Fatalf("an ANNOUNCING stale Save on MemoryStore returned %v, want ErrConflict", err)
 	}
 	if got := m.outbox.PendingCount(); got != 0 {
