@@ -7,8 +7,6 @@ package server
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -21,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/eighred/kanz/internal/gatewaysig"
 	"github.com/eighred/kanz/services/web-bff/internal/clientip"
 	"github.com/eighred/kanz/services/web-bff/internal/identityclient"
 	"github.com/eighred/kanz/services/web-bff/internal/oidc"
@@ -409,22 +408,18 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		_ = r.Body.Close()
 		out.Body = io.NopCloser(bytes.NewReader(body))
 		out.ContentLength = int64(len(body))
-		out.Header.Set("X-Signature", signRequest(s.signingSecret, out.Method, out.URL.Path, body))
+		gatewaysig.SignRequest(out, s.signingSecret, body)
 	}
 	s.proxy.ServeHTTP(w, out)
 }
 
-// signRequest reproduces the gateway's API-01d canonicalization: HMAC-SHA256
-// over "METHOD\nPATH\nBODY", base64url with no padding. It is a reproduction
-// rather than a shared call because the gateway's verifier lives inside that
-// service; the two are one fact stated twice, and #777 exists because the third
-// caller in a row stated only half of it.
-func signRequest(secret []byte, method, path string, body []byte) string {
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(method + "\n" + path + "\n"))
-	mac.Write(body)
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
+// THE REPRODUCTION IS GONE (#781). It used to live here, and its own comment
+// stated the reason: "a reproduction rather than a shared call because the
+// gateway's verifier lives inside that service; the two are one fact stated
+// twice, and #777 exists because the third caller in a row stated only half of
+// it." The premise was true and is what changed — internal/gatewaysig now holds
+// the canonicalization AND the gateway's verifier is built from it, so a shared
+// call is no longer half a fact.
 
 // currentSession resolves the session from the request cookie.
 func (s *Server) currentSession(r *http.Request) (session.Session, bool) {
