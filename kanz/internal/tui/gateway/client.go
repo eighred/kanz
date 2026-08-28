@@ -25,10 +25,8 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
+	"github.com/eighred/kanz/internal/gatewaysig"
 	"io"
 	"net/http"
 	"net/url"
@@ -194,9 +192,7 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 	// present, and the constant lives in an internal/ package this binary cannot
 	// import — sending a hardcoded copy would be a second spelling of the version,
 	// free to drift into a 406 that looks like an outage.
-	if len(c.signKey) > 0 {
-		req.Header.Set("X-Signature", Sign(c.signKey, method, path, body))
-	}
+	gatewaysig.SignRequest(req, c.signKey, body)
 
 	res, err := c.hc.Do(req)
 	if err != nil {
@@ -214,11 +210,15 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 	return payload, nil
 }
 
-// Sign reproduces the gateway's Signing middleware: HMAC-SHA256 over
-// method \n path \n body, base64 raw-url encoded.
+// Sign is internal/gatewaysig.Sign, kept under this name because it was the
+// tree's only signer and #195 promoted it here for callers that still reach for
+// it.
+//
+// THE IMPLEMENTATION MOVED OUT OF THIS PACKAGE ON PURPOSE (#781). This one lives
+// in internal/tui, and internal/tui is the surface #371 retires; when the TUI
+// goes, the reference implementation would have gone with it, leaving the
+// web-bff and shell copies to drift against a verifier none of them shares. The
+// canonicalization now lives beside the verifier that enforces it.
 func Sign(key []byte, method, path string, body []byte) string {
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(method + "\n" + path + "\n"))
-	mac.Write(body)
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return gatewaysig.Sign(key, method, path, body)
 }

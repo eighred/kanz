@@ -2,9 +2,7 @@ package middleware
 
 import (
 	"bytes"
-	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"io"
 	"net/http"
@@ -12,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eighred/kanz/internal/gatewaysig"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -358,7 +357,7 @@ func Signing(secret string) func(http.Handler) http.Handler {
 	key := []byte(secret)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			sig := r.Header.Get("X-Signature")
+			sig := r.Header.Get(gatewaysig.Header)
 			if sig == "" {
 				writeError(w, http.StatusUnauthorized, "missing request signature")
 				return
@@ -366,11 +365,13 @@ func Signing(secret string) func(http.Handler) http.Handler {
 			body, _ := io.ReadAll(r.Body)
 			_ = r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewReader(body))
-			mac := hmac.New(sha256.New, key)
-			mac.Write([]byte(r.Method + "\n" + r.URL.Path + "\n"))
-			mac.Write(body)
-			want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-			if !hmac.Equal([]byte(want), []byte(sig)) {
+			// THE SAME FUNCTION EVERY CALLER SIGNS WITH (#781). This used to
+			// restate the canonicalization, which made the verifier the fourth
+			// independent spelling of it — and gave services/web-bff its documented
+			// reason for keeping a fifth. A caller using gatewaysig.Sign is now
+			// correct BY CONSTRUCTION rather than by having read this loop
+			// carefully.
+			if !gatewaysig.Verify(key, r.Method, r.URL.Path, body, sig) {
 				writeError(w, http.StatusUnauthorized, "invalid request signature")
 				return
 			}

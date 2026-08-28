@@ -346,6 +346,23 @@ func goFuncBody(t *testing.T, src, prefix string) string {
 // digest's own doc comment names every field it covers and every field it does
 // not, so any matcher run over the raw source finds every name whether or not the
 // code still uses it.
+//
+// WHICHEVER MARKER COMES FIRST ON THE LINE WINS, and getting that backwards cost
+// a guard its coverage (#781). This used to look for "/*" before "//", so a
+// perfectly ordinary line comment mentioning a path —
+//
+//	// handleProxy forwards /api/* to the gateway /v1/* as the session's caller.
+//
+// opened a block comment that never closed, and EVERY REMAINING LINE OF THE FILE
+// was swallowed. services/web-bff/internal/server/server.go carries exactly that
+// comment on line 381, so the file's last hundred-odd lines were invisible to
+// every guard built on this helper. It was found by mutating a caller and
+// watching the guard pass.
+//
+// IT STILL DOES NOT UNDERSTAND STRING LITERALS: a "//" inside a string truncates
+// the line early. That direction strips too MUCH of one line and is a false
+// negative — never a false positive that fails the build on correct code — and
+// no caller of this helper searches for a marker-bearing literal.
 func stripGoComments(src string) string {
 	var b strings.Builder
 	inBlock := false
@@ -357,11 +374,13 @@ func stripGoComments(src string) string {
 				continue
 			}
 		}
-		if j := strings.Index(line, "/*"); j >= 0 {
-			line, inBlock = line[:j], true
-		}
-		if j := strings.Index(line, "//"); j >= 0 {
-			line = line[:j]
+		block := strings.Index(line, "/*")
+		lineC := strings.Index(line, "//")
+		switch {
+		case block >= 0 && (lineC < 0 || block < lineC):
+			line, inBlock = line[:block], true
+		case lineC >= 0:
+			line = line[:lineC]
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
