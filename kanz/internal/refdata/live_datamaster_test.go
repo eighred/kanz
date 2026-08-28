@@ -220,7 +220,8 @@ func TestLiveDatamasterMakesASectorCapFire(t *testing.T) {
 	// A BOOK WHOLLY IN THAT SECTOR must BREACH the 10% cap.
 	breaching := &comp.Book{
 		PortfolioID: "p-live", BaseCurrency: "USD",
-		NAV: &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 200000, Exponent: 0}, CurrencyCode: "USD"},
+		NAV:      &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 200000, Exponent: 0}, CurrencyCode: "USD"},
+		NAVBasis: comp.NAVBasisEquity,
 		Positions: []comp.Position{
 			livePos(tech[0], 100000),
 			livePos(tech[1], 100000),
@@ -239,7 +240,8 @@ func TestLiveDatamasterMakesASectorCapFire(t *testing.T) {
 	// classification.
 	inside := &comp.Book{
 		PortfolioID: "p-live", BaseCurrency: "USD",
-		NAV: &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 200000, Exponent: 0}, CurrencyCode: "USD"},
+		NAV:      &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 200000, Exponent: 0}, CurrencyCode: "USD"},
+		NAVBasis: comp.NAVBasisEquity,
 		Positions: []comp.Position{
 			livePos(tech[0], 10000),
 			livePos(other, 190000),

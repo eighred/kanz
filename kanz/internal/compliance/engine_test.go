@@ -44,6 +44,7 @@ func twoEqualBook() *Book {
 		PortfolioID:  "p1",
 		BaseCurrency: "USD",
 		NAV:          money(200000, 0, "USD"),
+		NAVBasis:     NAVBasisEquity,
 		Positions:    []Position{pos("AAPL", 100000, 0, "USD"), pos("MSFT", 100000, 0, "USD")},
 	}
 }
@@ -76,6 +77,7 @@ func TestConcentration_BucketScoped_Sector(t *testing.T) {
 	}
 	b := &Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: money(300000, 0, "USD"),
+		NAVBasis:  NAVBasisEquity,
 		Positions: []Position{pos("AAPL", 100000, 0, "USD"), pos("MSFT", 100000, 0, "USD"), pos("XOM", 100000, 0, "USD")},
 	}
 	rule := &compliancepb.Rule{

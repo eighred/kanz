@@ -147,10 +147,22 @@ func CheckMandate(ctx context.Context, weights map[string]float64, nav float64, 
 	if engine == nil {
 		engine = compliance.NewEngine(nil)
 	}
+	// NAVBasisEquity IS A CLAIM, and here it is true by construction rather than
+	// by provenance (#780). The positions below are w x nav, so the leverage
+	// ratio LeverageRule computes is
+	//
+	//	sum(|w_i| x nav) / nav  =  sum(|w_i|)
+	//
+	// and nav CANCELS. The check is therefore about the proposed weight vector —
+	// exactly what a rebalance proposal should be checked for — and it binds for
+	// any positive nav whatever that number's own lineage is. That is not true of
+	// a real portfolio book, where the numerator is a sum of independently valued
+	// holdings and the denominator has to actually be equity; see BookSource.
 	book := &compliance.Book{
 		PortfolioID:  mandate.GetPortfolioId(),
 		BaseCurrency: currency,
 		NAV:          money(nav, currency),
+		NAVBasis:     compliance.NAVBasisEquity,
 	}
 	for id, w := range weights {
 		book.Positions = append(book.Positions, compliance.Position{

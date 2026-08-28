@@ -15,10 +15,11 @@ import (
 // BookSource: the pre-trade check projects an order onto the live holdings the
 // projector has folded from fills, so the hypothetical book is the real one.
 type BookSource struct {
-	book position.Store
-	cash CashSource
-	risk RiskSource
-	now  func() time.Time
+	book  position.Store
+	cash  CashSource
+	risk  RiskSource
+	marks MarkSource
+	now   func() time.Time
 }
 
 // CashSource answers what a portfolio can spend, or ok=false when it is UNKNOWN
@@ -52,8 +53,11 @@ type RiskSource interface {
 	Measure(portfolioID, name string) (*big.Rat, bool)
 }
 
-func NewBookSource(book position.Store, cash CashSource, risk RiskSource) *BookSource {
-	return &BookSource{book: book, cash: cash, risk: risk, now: time.Now}
+// marks may be nil, and then every Book keeps the position book's cost-basis
+// values and its positions-only NAV — which LeverageRule refuses on, because a
+// positions total is not equity (#780).
+func NewBookSource(book position.Store, cash CashSource, risk RiskSource, marks MarkSource) *BookSource {
+	return &BookSource{book: book, cash: cash, risk: risk, marks: marks, now: time.Now}
 }
 
 var _ comp.BookSource = (*BookSource)(nil)
@@ -107,5 +111,23 @@ func (s *BookSource) Book(ctx context.Context, portfolioID string) (*comp.Book, 
 		pf := portfolioID
 		b.Risk = func(measure string) (*big.Rat, bool) { return s.risk.Measure(pf, measure) }
 	}
+	// EQUITY IS COMPUTED HERE OR NOWHERE (#780). This is the only place on the
+	// platform where all three inputs meet: the holdings (position book), what
+	// they are worth now (the mark fold), and the cash that is the rest of the
+	// equity (the book of record). The position book cannot do it — it folds fills
+	// and has neither of the other two — and BookFromSnapshot cannot, because a
+	// PortfolioSnapshot does not say whether its position values are marks or
+	// costs.
+	//
+	// IT RUNS LAST, AFTER CASH. Ordering is load-bearing rather than incidental:
+	// equity is positions + cash, so running before the cash join would compute a
+	// positions total and then assert it was equity — the exact claim this issue
+	// is about, made one line earlier.
+	//
+	// It is all-or-nothing and it never fails the call. A book it cannot upgrade
+	// is returned exactly as it was, on its declared proxy basis with the reason
+	// recorded, so the leverage rule refuses with something an operator can act on
+	// and every other rule sees the book it saw before.
+	markEquity(b, s.marks)
 	return b, nil
 }

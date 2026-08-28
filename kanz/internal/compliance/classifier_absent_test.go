@@ -42,6 +42,7 @@ func techCapMandate() *compliancepb.Rule {
 func allTechBook() *Book {
 	return &Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: money(200000, 0, "USD"),
+		NAVBasis:  NAVBasisEquity,
 		Positions: []Position{pos("AAPL", 100000, 0, "USD"), pos("MSFT", 100000, 0, "USD")},
 	}
 }
@@ -231,7 +232,7 @@ func TestUnresolvedDimension_UnclassifiedDimensionsAreUnaffected(t *testing.T) {
 // sector is in question. A portfolio that holds nothing must not be refused for
 // want of reference data about nothing.
 func TestUnresolvedDimension_EmptyBookIsNotRefused(t *testing.T) {
-	empty := &Book{PortfolioID: "p1", BaseCurrency: "USD", NAV: money(0, 0, "USD")}
+	empty := &Book{PortfolioID: "p1", BaseCurrency: "USD", NAV: money(0, 0, "USD"), NAVBasis: NAVBasisEquity}
 	restriction := &compliancepb.Rule{
 		RuleId: "no-tobacco", Type: compliancepb.RuleType_RULE_TYPE_RESTRICTION,
 		Params: &compliancepb.Rule_Restriction{Restriction: &compliancepb.RestrictionList{

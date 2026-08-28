@@ -477,7 +477,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// controls it claims, which is a test that could not be written while these
 	// lines were locals in a 1,400-line function.
 	wiring, err := buildPreTradeGate(cfg, preTradeDeps{
-		Books:    compliance.NewBookSource(book, cash, risk),
+		Books:    compliance.NewBookSource(book, cash, risk, marks),
 		Mandates: mandateReg,
 		Margin:   compliance.NewMarginSource(bindings, margins),
 		Marks:    marks,
