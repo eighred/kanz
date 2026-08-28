@@ -475,6 +475,20 @@ data:
                   # of a last-value fold would leave one replica holding older
                   # margin state than its siblings, with nothing saying which.
                   "accounting.margin.observed",
+                  # COMPLIANCE BREACHES, for the unwind PROPOSAL (granted #788).
+                  # app.UnwindWatch sizes what would clear a breach; nothing
+                  # executes it, which is why the composition root treats a failed
+                  # subscription as auxiliary and logs rather than exits.
+                  #
+                  # THE SUBSCRIPTION SHIPPED WITHOUT THIS GRANT, and NOTHING said so.
+                  # The composition root logs if Subscribe returns an error, but a
+                  # permissions denial does not return one: measured against a real
+                  # nats-server (internal/bustest's TestHowADeniedSubscriptionFails),
+                  # the connection is accepted, Subscribe never returns, and no
+                  # message is delivered. So breaches would be detected by compliance,
+                  # nothing would size the unwind, and the error branch beside this
+                  # subscription would never run.
+                  "compliance.breach.detected",
                   "_INBOX.>",
                 ]
               }
@@ -1085,6 +1099,25 @@ data:
                   # must never publish a balance, or there are two computations
                   # of one number and they will disagree at the worst moment.
                   "accounting.balance.portfolio",
+                  # THE EXCHANGE'S OWN MARGIN STATE (#408 control 3, granted #788).
+                  # The venue adapters publish it per ACCOUNT and the OMS folds it
+                  # BROADCAST — every replica needs the whole picture, because a
+                  # durable group would leave each pod holding a different margin
+                  # state, and the same order would then be admitted by one pod and
+                  # refused by another on a control whose whole purpose is to fail
+                  # closed.
+                  #
+                  # THE SUBSCRIPTION SHIPPED WITHOUT THIS GRANT. Denied, the fold
+                  # receives nothing and VenueMarginRule answers UNKNOWN for every
+                  # account — which is also its honest answer for an account nobody
+                  # has bound, so a mandate declaring margin trading refuses every
+                  # order for a reason that looks exactly right. risk-engine has
+                  # carried the identical grant since #408 and nothing compared the
+                  # two.
+                  #
+                  # SUBSCRIBE ONLY, and no dlq.accounting.margin.observed grant: a
+                  # broadcast subscription never routes to a DLQ.
+                  "accounting.margin.observed",
                   # WHAT THE RISK ENGINE HAS COMPUTED (#438), for the risk half of
                   # the pre-trade gate. SUBSCRIBE ONLY, and the asymmetry is the
                   # same one cash carries: the risk engine is the authority on
@@ -1500,6 +1533,7 @@ data:
                   # entry above for what its absence costs.
                   "accounting.margin.observed",
                   "_INBOX.>",
+                  "compliance.breach.detected",
                 ]
               }
             }
@@ -1544,6 +1578,7 @@ data:
                   # entry above for what its absence costs.
                   "accounting.margin.observed",
                   "_INBOX.>",
+                  "compliance.breach.detected",
                 ]
               }
             }
@@ -1605,6 +1640,7 @@ data:
                   "risk.portfolio.measures_computed",
                   "platform.mode.changed",
                   "_INBOX.>",
+                  "accounting.margin.observed",
                 ]
               }
             }

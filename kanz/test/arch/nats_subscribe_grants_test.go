@@ -40,13 +40,25 @@ import (
 // drift from the code it is guarding. That is the same stance the publish-side
 // guard takes and the reason it is worth having.
 //
-// WHAT IT DOES NOT CHECK: services whose subscription set is assembled at
-// runtime from configuration this package cannot import — every
-// service/internal/config is unimportable from here by Go's own rule. Only the
-// two services in `want` below are covered, and that limit is the whole content
-// of #788: deriving subscriptions from the AST the way the publish-side guard
-// derives publishes is what makes this general. Until then an unchecked service
-// is a gap named here rather than a silent pass.
+// THIS GUARD STAYS ALONGSIDE THE AST-DERIVED ONE (#788), which needs justifying
+// rather than assuming. nats_subscribe_permissions_test.go now derives subscriptions from
+// the AST for every service, so most of what this file used to be the only cover
+// for is covered better there. Two things keep it:
+//
+//   - IT NAMES SUBJECTS THE RESOLVER CANNOT REACH. compliance's price
+//     subscription comes from cfg.PriceSubjects, defaulted from
+//     mark.DefaultSubjects in a SHARED package — four hops from a literal, and
+//     outside the per-service tree the AST guard walks. The general guard
+//     resolves one compliance subject; this file asserts all four.
+//   - IT IS A REQUIREMENT, NOT A PERMISSION CHECK. The AST guard asks "is what
+//     this service subscribes to allowed"; a service that stops subscribing
+//     satisfies it vacuously. This file says these subjects MUST be granted,
+//     which is the closest thing in the tree to "the pre-trade and post-trade
+//     halves of one control read the same feeds".
+//
+// It is deliberately small and hand-written for exactly that reason. Do not grow
+// it into a second copy of the general guard: a subject the resolver CAN reach
+// belongs there, not here.
 func TestEverySubscribedSubjectIsGranted(t *testing.T) {
 	// PARSED BY THE HELPER THE PUBLISH-SIDE GUARD ALREADY USES. A second scanner
 	// over this hand-written file is how the two directions would come to disagree
