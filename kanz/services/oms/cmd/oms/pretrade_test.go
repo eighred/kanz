@@ -276,3 +276,81 @@ func seamLabel(m *dto.Metric) string {
 	}
 	return ""
 }
+
+// THE POSTURE A TENANT'S MANIFEST SETS REACHES THE GATE THAT REFUSES (#779).
+//
+// config_mandate_posture_test.go proves the rendered string becomes
+// cfg.RequireMandate. This is the next link and the last one: that the value
+// survives the composition root and changes what an order gets. It goes through
+// buildPreTradeGate — the real builder main.go calls — rather than constructing
+// a comp.PreTradeGate directly, because the defect this class of test exists to
+// catch is a wiring line that stops passing the flag through while every unit
+// below it still honours a flag nobody sets (#643, and the reason
+// WithRequireMandate takes an argument at all).
+//
+// BOTH ARMS, because a control that refuses everything is not the fix. The
+// tenant posture is only usable if it separates "nobody has decided what governs
+// this portfolio" from "somebody decided to constrain nothing" — the first is
+// the gap #779 closes, the second is a mandate carrying zero rules and must
+// still trade.
+func TestTheBuiltGateHonoursTheTenantMandatePosture(t *testing.T) {
+	// stubMandates answers "no mandate, anywhere" — the ungoverned state, which
+	// is the one a freshly provisioned tenant is in for every portfolio.
+	armed := config.Config{Tenant: "acme", RequireMandate: true}
+	w, err := buildPreTradeGate(armed, gateDeps(), nil, prometheus.NewRegistry(), gateLogger())
+	if err != nil {
+		t.Fatalf("buildPreTradeGate: %v", err)
+	}
+	t.Cleanup(w.CloseRecorder)
+
+	dec, err := w.Gate.Evaluate(context.Background(), comp.OrderDelta{
+		TenantID: "acme", PortfolioID: "PF1", InstrumentID: "AAPL", AsOf: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if dec.Allowed {
+		t.Fatal("the gate built from a REQUIRE_MANDATE=true config ADMITTED an order for a portfolio " +
+			"no mandate governs. The flag is read by config and dropped somewhere in this builder, " +
+			"so a tenant would deploy the armed manifest and trade unconstrained anyway (#779)")
+	}
+	if !dec.Ungoverned {
+		t.Fatal("the refusal does not name the gap — the OMS maps Ungoverned to MANDATE_MISSING, " +
+			"which is what tells an operator to go and write a mandate rather than hunt for a rule " +
+			"that fired")
+	}
+
+	// THE OTHER ARM. A mandate carrying zero rules is a decision, and the armed
+	// posture must still admit it, or an operator with a genuinely unconstrained
+	// portfolio has no way to say so except by disarming the whole deployment.
+	reg := comp.NewMandateRegistry()
+	if err := reg.Put(&compliancepb.Mandate{
+		MandateId: "m1", TenantId: "acme", PortfolioId: "PF1", Version: 1,
+		// no rules, on purpose
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	deps := gateDeps()
+	deps.Mandates = reg
+	w2, err := buildPreTradeGate(armed, deps, nil, prometheus.NewRegistry(), gateLogger())
+	if err != nil {
+		t.Fatalf("buildPreTradeGate: %v", err)
+	}
+	t.Cleanup(w2.CloseRecorder)
+
+	dec2, err := w2.Gate.Evaluate(context.Background(), comp.OrderDelta{
+		TenantID: "acme", PortfolioID: "PF1", InstrumentID: "AAPL", AsOf: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if !dec2.Allowed {
+		t.Fatal("the armed gate REFUSED a portfolio that is under mandate — one carrying zero rules. " +
+			"That collapses the gap into the decision, and makes the tenant posture unusable for " +
+			"any portfolio somebody has deliberately left unconstrained (#779)")
+	}
+	if dec2.Ungoverned {
+		t.Fatal("a portfolio under a zero-rule mandate was reported UNGOVERNED; that counter is " +
+			"alerted on, and this would page an operator about a portfolio already ruled on")
+	}
+}
