@@ -36,7 +36,7 @@ import (
 
 const (
 	cashSubjectPublisher = "services/accounting/internal/consume/announce.go"
-	cashSubjectConsumer  = "services/oms/internal/cashview/cashview.go"
+	cashSubjectConsumer  = "internal/cashview/cashview.go"
 )
 
 var (

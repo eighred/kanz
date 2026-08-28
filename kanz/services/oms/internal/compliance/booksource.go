@@ -5,8 +5,6 @@ import (
 	"math/big"
 	"time"
 
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
-
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/services/oms/internal/position"
 )
@@ -34,9 +32,11 @@ type BookSource struct {
 // (#614), or nil when it said nothing — which is not the same as "nothing is
 // missing" and must not be flattened into it. It is carried onto the Book so a
 // buying-power refusal can name what the balance was short of.
-type CashSource interface {
-	Spendable(portfolioID string) (total *commonpb.Decimal, currency string, completeness *comp.CashCompleteness, ok bool)
-}
+// It is an ALIAS and not a second declaration (#787). The post-trade monitor
+// needs the identical seam, and it sits in a package this one cannot be imported
+// from — so the contract moved down to internal/compliance and this name stays
+// pointing at it. Two structurally identical interfaces would compile and drift.
+type CashSource = comp.CashSource
 
 // NewBookSource wraps the position book. cash may be nil, and then every Book
 // carries UNKNOWN cash — which BuyingPowerRule fails closed on, so a mandate
@@ -92,12 +92,6 @@ func (s *BookSource) Book(ctx context.Context, portfolioID string) (*comp.Book, 
 	// error is not knowable, so inflating it would be a guess that admits orders
 	// the fund cannot pay for — but the refusal now SAYS what it could not account
 	// for instead of reading as a spending limit.
-	if s.cash != nil {
-		if total, currency, completeness, ok := s.cash.Spendable(portfolioID); ok {
-			b.Cash = &commonpb.Money{Amount: total, CurrencyCode: currency}
-			b.CashCompleteness = completeness
-		}
-	}
 	// RISK COMES FROM THE RISK ENGINE, FOLDED LOCALLY (#438). Bound as a closure
 	// rather than copied as a map because "unknown" must keep its three causes as
 	// one answer — never announced, absent from the last announcement, or too old
@@ -111,23 +105,26 @@ func (s *BookSource) Book(ctx context.Context, portfolioID string) (*comp.Book, 
 		pf := portfolioID
 		b.Risk = func(measure string) (*big.Rat, bool) { return s.risk.Measure(pf, measure) }
 	}
-	// EQUITY IS COMPUTED HERE OR NOWHERE (#780). This is the only place on the
-	// platform where all three inputs meet: the holdings (position book), what
-	// they are worth now (the mark fold), and the cash that is the rest of the
-	// equity (the book of record). The position book cannot do it — it folds fills
-	// and has neither of the other two — and BookFromSnapshot cannot, because a
-	// PortfolioSnapshot does not say whether its position values are marks or
-	// costs.
+	// EQUITY: CASH JOINED, THEN THE BOOK MARKED (#780, #787).
 	//
-	// IT RUNS LAST, AFTER CASH. Ordering is load-bearing rather than incidental:
-	// equity is positions + cash, so running before the cash join would compute a
-	// positions total and then assert it was equity — the exact claim this issue
-	// is about, made one line earlier.
+	// The OMS is one of only two places on the platform where all three inputs
+	// meet — the holdings (position book), what they are worth now (the mark
+	// fold), and the cash that is the rest of the equity (the book of record).
+	// The position book cannot do it: it folds fills and has neither of the other
+	// two. BookFromSnapshot cannot either, because a PortfolioSnapshot does not
+	// say whether its position values are marks or costs.
 	//
-	// It is all-or-nothing and it never fails the call. A book it cannot upgrade
-	// is returned exactly as it was, on its declared proxy basis with the reason
+	// The OTHER place is the post-trade monitor, which needs the identical join,
+	// so the sequence lives in internal/compliance and both callers use it. A
+	// second copy of an equity calculation is how #780 would come back on one side
+	// of the platform only — and the ORDER inside it is the part that would drift:
+	// equity is marked positions PLUS cash, so marking before the cash join
+	// computes a positions total and then calls it equity.
+	//
+	// It is all-or-nothing and it never fails the call. A book it cannot value is
+	// returned exactly as it was, on its declared proxy basis with the reason
 	// recorded, so the leverage rule refuses with something an operator can act on
 	// and every other rule sees the book it saw before.
-	markEquity(b, s.marks)
+	comp.JoinEquity(b, s.cash, s.marks)
 	return b, nil
 }

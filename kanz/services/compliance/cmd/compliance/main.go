@@ -19,6 +19,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/eighred/kanz/internal/cashview"
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/compliancebus"
 	"github.com/eighred/kanz/internal/lifecycle"
@@ -297,8 +298,16 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// rather than a missing series (#622).
 	obs.Registry.MustRegister(breachRecordsLost)
 
+	// WHAT THE POST-TRADE BOOK IS WORTH (#787). A named builder, because while
+	// these were locals here nothing could assert that the mark fold got the
+	// configured staleness bound or that a cash announcement re-evaluates at all.
+	// See valuation.go.
+	valuation := buildPostTradeValuation(cfg, obs.Registry, logger)
+
 	mon := monitor.NewMonitor(comp.NewEngine(nil), mandateReg, classifier, breachEmitter, recorder, logger,
-		monitor.WithDroppedRecordObserver(func() { breachRecordsLost.Inc() }))
+		monitor.WithDroppedRecordObserver(func() { breachRecordsLost.Inc() }),
+		monitor.WithCashSource(valuation.Cash),
+		monitor.WithMarkSource(valuation.Marks))
 
 	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
 	if err != nil {
@@ -396,6 +405,45 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			}
 		}(s)
 	}
+
+	// THE CASH SPINE. Broadcast, like the OMS's: every replica needs the whole
+	// balance picture, and a durable group would give one pod the announcements
+	// and leave the others valuing books against cash they never saw.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("compliance folding the cash spine (broadcast)", "subject", cashview.Subject)
+		err := consumer.SubscribeBroadcast(ctx, cashview.Subject, valuation.CashHandler(mon))
+		if err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}()
+	// THE PRICE SPINE. No re-evaluation per tick, deliberately: that would couple
+	// compliance evaluation to market-data volume, the one rate on this platform
+	// nobody controls. The sweep below is what turns a folded mark into a verdict,
+	// at a cost bounded by the number of BOOKS rather than the number of ticks.
+	for _, subject := range cfg.PriceSubjects {
+		wg.Add(1)
+		go func(subject string) {
+			defer wg.Done()
+			logger.Info("compliance folding the price spine (broadcast)", "subject", subject)
+			err := consumer.SubscribeBroadcast(ctx, subject, valuation.Marks.Handle)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				once.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}(subject)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		reevaluateBooks(ctx, mon, cfg.ReevaluateInterval, logger)
+	}()
 
 	// READINESS MUST WAIT ON THE MANDATE REPLAY, NOT ON THE SUBSCRIPTION GOROUTINE HAVING
 	// STARTED (EXEC-M13).

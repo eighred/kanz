@@ -28,7 +28,7 @@ import (
 //	compute a balance
 //
 // and uses it to FORBID two other components from computing their own: the
-// pre-trade buying-power gate (#415, via services/oms/internal/cashview) and
+// pre-trade buying-power gate (#415, via internal/cashview) and
 // exchange balance reconciliation (#418, via internal/venueadapter/balancerecon).
 // The ruling is right and must stand — a second computation of one number drifts,
 // and the drift surfaces as a trading control that refuses or admits wrongly.
@@ -104,7 +104,7 @@ var corpactClaimSites = []struct {
 			"#415 and #418 as the two consumers forbidden from computing their own",
 	},
 	{
-		path: filepath.Join("services", "oms", "internal", "cashview", "cashview.go"),
+		path: filepath.Join("internal", "cashview", "cashview.go"),
 		why: "the pre-trade buying-power gate reads this view, and BuyingPowerRule fails CLOSED — " +
 			"a balance short by a dividend refuses orders the portfolio can afford",
 	},

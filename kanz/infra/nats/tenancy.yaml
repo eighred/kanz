@@ -872,7 +872,29 @@ data:
                   "$JS.API.>", "$JS.ACK.>",
                 ]
               }
-              subscribe: { allow: ["risk.position.changed.>", "compliance.mandate.changed.>", "_INBOX.>"] }
+              subscribe: {
+                allow: [
+                  "risk.position.changed.>", "compliance.mandate.changed.>", "_INBOX.>",
+                  # WHAT THE POST-TRADE BOOK IS WORTH (#787). Position FACTs carry
+                  # holdings and nothing else, so the monitor's book was a positions
+                  # total valued at average cost — and gross exposure is the sum of
+                  # the same values, which made a max_gross_leverage cap score 1.0
+                  # for any long-only book and bind on nothing (#780).
+                  #
+                  # These two are the rest of the equity: what accounting says the
+                  # portfolio can spend, and what its holdings are worth now. SAME
+                  # SUBJECTS THE OMS SUBSCRIBES TO, deliberately — the pre-trade and
+                  # post-trade halves of one leverage cap must not be valued off
+                  # different feeds.
+                  #
+                  # SUBSCRIBE ONLY, and both asymmetries are load-bearing: accounting
+                  # is the book of record for cash and market-data owns the price
+                  # spine. A compliance service that could publish either would be a
+                  # second computation of a number that already has an authority.
+                  "accounting.balance.portfolio",
+                  "market.*.trade", "market.*.quote",
+                ]
+              }
             }
           }
           # market-data both PUBLISHES (services/market-data/internal/feed/

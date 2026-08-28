@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/internal/marketdata/mark"
 	"log/slog"
 	"math/big"
 	"os"
@@ -382,7 +383,7 @@ func Load() (Config, error) {
 	// Lookup returns the trimmed value and whether the key was set to anything
 	// meaningful, so a blank one reaches the len()==0 refusal below instead of the
 	// default.
-	priceSubjectsRaw := "market.*.trade,market.*.quote"
+	priceSubjectsRaw := strings.Join(mark.DefaultSubjects, ",")
 	if v, ok := env.Lookup("OMS_PRICE_SUBJECTS"); ok {
 		priceSubjectsRaw = v
 	} else if _, set := os.LookupEnv("OMS_PRICE_SUBJECTS"); set {
