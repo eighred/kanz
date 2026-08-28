@@ -107,6 +107,34 @@ type Service struct {
 	//
 	// It may not name TenantEnv (that pin is rendered, not configured) and may not
 	// also appear in DropEnv — a variable cannot be both removed and given a value.
+	//
+	// ONE ENTRY IS NOT AN OVERSIGHT ABOUT THE OTHERS. The OMS render arms
+	// OMS_REQUIRE_MANDATE and leaves OMS_REQUIRE_VENUE_ACCOUNT,
+	// OMS_REQUIRE_VERIFIED_ACCOUNT, OMS_REQUIRE_ORDER_TYPE_SUPPORT and
+	// OMS_REQUIRE_DUAL_CONTROL at the base's false, deliberately.
+	//
+	// The mandate case is the one where arming costs a new tenant NOTHING: the
+	// prerequisite is a mandate, which is a decision the client's own people make
+	// before go-live, and a tenant provisioned today has no grandfathered
+	// portfolios to break. Each of the others needs a prerequisite THIS RENDER
+	// CANNOT CARRY, and arming one without it delivers the trading outage the
+	// base's paragraphs warn about to a client on day one:
+	//
+	//   OMS_REQUIRE_VENUE_ACCOUNT      refuses an order whose portfolio is bound
+	//                                  to no account at its target venue — and the
+	//                                  rendered OMS_VENUE_ACCOUNTS is empty, so
+	//                                  nothing is bound and every order refuses.
+	//   OMS_REQUIRE_DUAL_CONTROL       refuses to START without
+	//                                  OMS_DUAL_CONTROL_MIN_NOTIONAL, a threshold
+	//                                  a human has to choose (config.Load).
+	//   OMS_REQUIRE_VERIFIED_ACCOUNT   refuses every adapter nobody has bound an
+	//                                  exchange uid to yet.
+	//   OMS_REQUIRE_ORDER_TYPE_SUPPORT refuses every adapter that has not yet
+	//                                  declared which order types it supports.
+	//
+	// So each is its own decision with its own prerequisite, not a follow-up
+	// sweep. Landing the prerequisite is what earns the entry; adding the entry
+	// first refuses the tenant's orders under a control nobody can satisfy.
 	SetEnv []SetEnvVar
 	// Why states what the tenant loses without this service. It is printed by
 	// cmd/kanz-tenantgen and quoted by the guards, so an operator reading a
