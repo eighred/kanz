@@ -86,6 +86,28 @@ type Service struct {
 	// entry that stopped matching would silently start carrying the variable it
 	// exists to remove.
 	DropEnv []DropEnvVar
+	// SetEnv names env vars whose VALUE a per-tenant render overrides, each with
+	// the reason a tenant's posture differs from the platform's.
+	//
+	// IT IS FOR A CONTROL WHOSE CORRECT DEFAULT IS NOT THE SAME FOR BOTH. The
+	// deny-by-default family (*_REQUIRE_*) ships false on the platform bases for
+	// one stated reason: arming it refuses every order for every portfolio nobody
+	// has corrected yet — a trading outage dressed as a control. That reasoning is
+	// about the pre-tenancy __system__ book, which holds portfolios older than the
+	// control. A FRESHLY PROVISIONED TENANT HAS NO SUCH PORTFOLIOS, so carrying the
+	// base's value through hands a new client the platform's grandfathering as if
+	// it were a decision somebody made for them (#779).
+	//
+	// A NAME THAT IS NOT IN THE BASE IS AN ERROR, and so is an override whose value
+	// the base ALREADY sets — see Render. Both are the dead-exemption failure mode:
+	// the first records a reason for a variable that no longer exists, the second
+	// records a reason for a difference that has stopped existing, and each would
+	// go on reading as an active decision while enforcing nothing. A base flipped
+	// to match must retire the entry, not keep it as a no-op.
+	//
+	// It may not name TenantEnv (that pin is rendered, not configured) and may not
+	// also appear in DropEnv — a variable cannot be both removed and given a value.
+	SetEnv []SetEnvVar
 	// Why states what the tenant loses without this service. It is printed by
 	// cmd/kanz-tenantgen and quoted by the guards, so an operator reading a
 	// failure learns the consequence rather than the rule.
@@ -97,6 +119,17 @@ type DropEnvVar struct {
 	Name string
 	// Why is printed by cmd/kanz-tenantgen beside the rendered file, so the
 	// operator learns which capability the tenant does NOT have.
+	Why string
+}
+
+// SetEnvVar is one env var whose value a per-tenant render overrides, and why.
+type SetEnvVar struct {
+	Name string
+	// Value is what the rendered manifest sets. It must differ from the base's
+	// value, or the entry is recording a decision the base already makes.
+	Value string
+	// Why is printed by cmd/kanz-tenantgen beside the rendered file, so the
+	// operator learns which posture this tenant runs that the platform does not.
 	Why string
 }
 
@@ -165,6 +198,34 @@ var Services = []Service{
 				"at startup, kanz_instrument_classifier_wired 0, and a refusal that says " +
 				"classifier: unavailable. Retire this entry by rendering a per-tenant " +
 				"datamaster, at which point the URL becomes datamaster-<tenant>.",
+		}},
+		SetEnv: []SetEnvVar{{
+			Name:  "OMS_REQUIRE_MANDATE",
+			Value: "true",
+			Why: "A TENANT STARTS DENY-BY-DEFAULT (#779). The base ships \"false\", and its " +
+				"paragraph states why: arming it refuses every order for every portfolio " +
+				"nobody has run kanz-mandate for yet, which is a trading outage dressed as " +
+				"a control. That is a true statement ABOUT THE __system__ BOOK, whose " +
+				"portfolios predate mandates. A tenant provisioned today has none of them, " +
+				"so the same value buys nothing and costs everything: with it false, a " +
+				"portfolio no mandate governs takes the UNGOVERNED branch and is ADMITTED " +
+				"WITH NO COMPLIANCE CONSTRAINT EVALUATED — concentration, restricted list, " +
+				"issuer exclusion, leverage and buying power all inert — while the trail " +
+				"records the order as having passed pre-trade compliance. The client trades " +
+				"unconstrained from go-live until an operator remembers to write a mandate, " +
+				"and the alert on kanz_compliance_ungoverned_orders_total fires AFTER the " +
+				"first such order is already admitted. With it true the same order is " +
+				"REJECTED (MANDATE_MISSING) naming the gap. " +
+				"THIS REFUSES THE GAP, NOT THE CHOICE: a mandate carrying ZERO rules is a " +
+				"decision somebody made to constrain nothing, and internal/compliance's gate " +
+				"admits it under either posture — the two states are distinct there and this " +
+				"value does not collapse them. " +
+				"NOTHING HERE SEEDS A MANDATE, deliberately. Publishing one on the tenant's " +
+				"behalf would need two named approvers (cmd/kanz-mandate propose/approve, " +
+				"#410), and a script fabricating both would write \"somebody decided\" into " +
+				"the audit trail for a decision no human made — trading the loud gap for a " +
+				"silent one. The mandate is an operator act before go-live; " +
+				"infra/onboarding/provision-tenant.sh states it as a precondition.",
 		}},
 		Why: "the tenant's ORDER PATH. Without it the tenant's account receives the order " +
 			"commands the bridge carries and nothing consumes them.",

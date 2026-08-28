@@ -90,6 +90,15 @@ func run(args []string) error {
 		for _, d := range svc.DropEnv {
 			fmt.Printf("  WITHHELD: %s - %s\n", d.Name, d.Why)
 		}
+		// WHAT THIS TENANT RUNS THAT THE PLATFORM DOES NOT. An override is a
+		// posture difference, and the one that exists today ARMS A CONTROL: the
+		// tenant's OMS refuses an order for a portfolio under no mandate where the
+		// platform's admits it (#779). An operator who does not know that reads the
+		// first MANDATE_MISSING as a broken deployment rather than the gate working,
+		// so it is printed beside the file with the reason.
+		for _, o := range svc.SetEnv {
+			fmt.Printf("  OVERRIDDEN: %s=%s - %s\n", o.Name, o.Value, o.Why)
+		}
 		if svc.KafkaProducer {
 			fmt.Printf("  KAFKA: that same principal needs the %q. PREFIXED ACL — tenantctl.sh's onboard grants it from COMPUTE_KAFKA_SAS\n", *tenant)
 		}

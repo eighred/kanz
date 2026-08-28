@@ -190,6 +190,58 @@ func TestRequireMandateRefusesAnUngovernedPortfolio(t *testing.T) {
 	}
 }
 
+// AND IT REFUSES THE GAP, NOT THE CHOICE (#779).
+//
+// This is the property the per-tenant posture rests on. A tenant's rendered OMS
+// ships OMS_REQUIRE_MANDATE=true so that a portfolio NOBODY has put under
+// mandate is refused rather than traded unconstrained. That is only safe if the
+// armed posture still admits the OTHER state — a mandate carrying zero rules,
+// which is somebody having decided, explicitly, to constrain nothing.
+//
+// Collapsing the two would make the flip unusable: an operator who genuinely has
+// an unconstrained portfolio would have no way to say so, and the pressure would
+// be to turn the control back off for the whole deployment. The counterpart
+// above proves the gap is refused; this proves the decision is not.
+//
+// It also asserts the ungoverned OBSERVER stays silent. Ungoverned is a counter
+// an alert fires on (kanz_compliance_ungoverned_orders_total); counting a
+// deliberate zero-rule mandate there would page an operator about a portfolio
+// somebody had already ruled on.
+func TestRequireMandateStillAdmitsAZeroRuleMandate(t *testing.T) {
+	reg := NewMandateRegistry()
+	mustPut(t, reg, &compliancepb.Mandate{
+		MandateId: "m1", TenantId: "t1", PortfolioId: "p1", Version: 1,
+		EffectiveAt: timestamppb.New(t0),
+		// no rules, on purpose: the explicit "constrain nothing" decision
+	})
+	counted := 0
+	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, reg, nil, nil, nil,
+		WithRequireMandate(true),
+		WithUngovernedObserver(func(string, string) { counted++ }))
+
+	dec, err := g.Evaluate(context.Background(), OrderDelta{
+		TenantID: "t1", PortfolioID: "p1", InstrumentID: "AAPL", AsOf: t0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dec.Allowed {
+		t.Fatal("OMS_REQUIRE_MANDATE refused a portfolio that IS under mandate — one carrying zero " +
+			"rules. That collapses \"nobody decided\" into \"decided to constrain nothing\", and " +
+			"leaves an operator with no way to run an unconstrained portfolio except by disarming " +
+			"the control for the whole deployment (#779)")
+	}
+	if dec.Ungoverned {
+		t.Fatal("a portfolio under a zero-rule mandate was reported as UNGOVERNED; the two states " +
+			"are distinct and the refusal path must not claim the gap")
+	}
+	if counted != 0 {
+		t.Fatalf("a deliberate zero-rule mandate incremented the ungoverned counter %d time(s) — "+
+			"that counter is alerted on, and this would page an operator about a portfolio "+
+			"somebody had already ruled on", counted)
+	}
+}
+
 // restrictAAPLMandate denies holding AAPL outright — any book holding it, with
 // no order at all, already breaches.
 func restrictAAPLMandate() *compliancepb.Mandate {

@@ -75,6 +75,13 @@ func generatedHeader(base string) string {
 // The Deployment's serviceAccountName is rewritten to the renamed
 // ServiceAccount, and svc.TenantEnv (on the container named svc.Container)
 // is set to tenant.
+//
+// On that same container, svc.DropEnv removes the __system__-only dependencies a
+// tenant must not inherit, and svc.SetEnv overrides the controls whose correct
+// default differs between the platform and a tenant — today, the mandate
+// requirement (#779). Both are held to the same dead-entry rule: an entry that
+// matches nothing fails the render rather than passing silently, and so does an
+// override the base already makes.
 func Render(base []byte, svc Service, tenant string) ([]byte, error) {
 	if err := validateTenant(tenant); err != nil {
 		return nil, err
@@ -82,6 +89,9 @@ func Render(base []byte, svc Service, tenant string) ([]byte, error) {
 	if svc.Name == "" || svc.Base == "" || svc.Container == "" || svc.TenantEnv == "" {
 		return nil, fmt.Errorf("tenantgen: incomplete service descriptor %+v — every field is load-bearing; "+
 			"a rendered deployment with no tenant env var still serves __system__ while wearing the tenant's name", svc)
+	}
+	if err := validateEnvRules(svc); err != nil {
+		return nil, err
 	}
 
 	dec := yaml.NewDecoder(bytes.NewReader(base))
@@ -277,9 +287,14 @@ func transformDeployment(spec map[string]interface{}, svc Service, name, tenant 
 		for _, d := range svc.DropEnv {
 			drop[d.Name] = d.Why
 		}
+		set := make(map[string]SetEnvVar, len(svc.SetEnv))
+		for _, o := range svc.SetEnv {
+			set[o.Name] = o
+		}
 		env, _ := cm["env"].([]interface{})
 		kept := make([]interface{}, 0, len(env))
 		dropped := map[string]bool{}
+		overridden := map[string]bool{}
 		for _, e := range env {
 			em, ok := e.(map[string]interface{})
 			if !ok {
@@ -289,6 +304,35 @@ func transformDeployment(spec map[string]interface{}, svc Service, name, tenant 
 			en, _ := em["name"].(string)
 			if _, remove := drop[en]; remove {
 				dropped[en] = true
+				continue
+			}
+			if o, override := set[en]; override {
+				// A CONTROL SUPPLIED BY REFERENCE CANNOT BE OVERRIDDEN WITH A LITERAL.
+				// An env entry carrying both value and valueFrom is rejected by the API
+				// server, so the render would produce a manifest that fails to APPLY
+				// rather than to render — a tenant whose workload never starts,
+				// discovered at deploy time rather than here.
+				if _, fromRef := em["valueFrom"]; fromRef {
+					return fmt.Errorf("Deployment %q: SetEnv names %s, which the base supplies from a "+
+						"valueFrom reference. Overriding it with a literal would produce an env entry "+
+						"carrying both value and valueFrom, which the API server rejects — and the "+
+						"rendered manifest would fail to apply rather than to render (%s)",
+						name, o.Name, o.Why)
+				}
+				// A VALUE THE BASE ALREADY SETS IS AN ERROR, not a no-op. The entry
+				// exists to record a posture the tenant runs and the platform does
+				// not; once the base agrees, the override enforces nothing while its
+				// Why goes on reading as a live decision. Deleting it is the honest
+				// outcome — the same dead-exemption rule DropEnv is held to.
+				if base, has := em["value"]; has && fmt.Sprintf("%v", base) == o.Value {
+					return fmt.Errorf("Deployment %q: SetEnv sets %s=%q, which the base ALREADY sets. "+
+						"An override that changes nothing records a reason for a difference that has "+
+						"stopped existing; delete the entry rather than keep it as a no-op (%s)",
+						name, o.Name, o.Value, o.Why)
+				}
+				em["value"] = o.Value
+				overridden[en] = true
+				kept = append(kept, e)
 				continue
 			}
 			if en == svc.TenantEnv {
@@ -311,10 +355,61 @@ func transformDeployment(spec map[string]interface{}, svc Service, name, tenant 
 					name, d.Name, svc.Container, d.Why)
 			}
 		}
+		// A DECLARED OVERRIDE THAT MATCHED NOTHING IS AN ERROR, for the reason the
+		// drop check above states: the base having renamed or removed the variable
+		// is exactly when this entry stops arming anything, and the tenant would
+		// silently fall back to whatever the base does — which for a *_REQUIRE_*
+		// control is the permissive posture (#779).
+		for _, o := range svc.SetEnv {
+			if !overridden[o.Name] {
+				return fmt.Errorf("Deployment %q: SetEnv names %s, which container %q does not "+
+					"set. Either the base renamed it — in which case update the entry — or the "+
+					"variable is gone and the entry must be deleted; an override that matches "+
+					"nothing leaves this tenant on the base's default (%s)",
+					name, o.Name, svc.Container, o.Why)
+			}
+		}
 		cm["env"] = kept
 	}
 	if !patchedEnv {
 		return fmt.Errorf("Deployment %q: no %s env var found on a container named %q", name, svc.TenantEnv, svc.Container)
+	}
+	return nil
+}
+
+// validateEnvRules rejects a service descriptor whose DropEnv and SetEnv
+// contradict each other or the tenant pin, before any document is touched.
+//
+// These are declaration errors, not rendering ones: a variable cannot be both
+// removed and given a value, and the tenant pin is RENDERED (to the tenant id)
+// rather than configured — an override naming it would either fight the pin or
+// silently win, and a per-tenant deployment reading the wrong tenant is the one
+// defect this package exists to close.
+func validateEnvRules(svc Service) error {
+	drop := map[string]bool{}
+	for _, d := range svc.DropEnv {
+		drop[d.Name] = true
+	}
+	seen := map[string]bool{}
+	for _, o := range svc.SetEnv {
+		if o.Name == "" || o.Value == "" || o.Why == "" {
+			return fmt.Errorf("tenantgen: service %q: SetEnv entry %+v is incomplete — a name, a value "+
+				"and the reason the tenant's posture differs are all required", svc.Name, o)
+		}
+		if seen[o.Name] {
+			return fmt.Errorf("tenantgen: service %q: SetEnv names %s twice; which value renders would "+
+				"depend on declaration order", svc.Name, o.Name)
+		}
+		seen[o.Name] = true
+		if drop[o.Name] {
+			return fmt.Errorf("tenantgen: service %q: %s is in both DropEnv and SetEnv — a variable "+
+				"cannot be both removed from the render and given a value in it", svc.Name, o.Name)
+		}
+		if o.Name == svc.TenantEnv {
+			return fmt.Errorf("tenantgen: service %q: SetEnv names the tenant pin %s, which Render "+
+				"sets to the tenant id; an override here would decide which tenant this deployment "+
+				"serves", svc.Name, o.Name)
+		}
 	}
 	return nil
 }

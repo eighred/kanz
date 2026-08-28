@@ -428,6 +428,50 @@ if step seed; then
   SEED_TENANT="$TENANT" SEED_PORTFOLIO="${FIRST_PORTFOLIO:-PF1}" \
     SEED_NATS_URL="${SEED_NATS_URL:-nats://nats.$MSG_NS:4222}" \
     go run ../../test/load/seed
+
+  # THE PORTFOLIO IS SEEDED AND CANNOT TRADE YET, ON PURPOSE (#779).
+  #
+  # A rendered tenant OMS carries OMS_REQUIRE_MANDATE=true — declared in
+  # internal/tenantgen.Services, asserted at both ends by
+  # test/arch/tenant_mandate_required_test.go — so until a mandate is published
+  # for this portfolio every order it receives is REJECTED with MANDATE_MISSING.
+  # The platform base ships false because the __system__ book holds portfolios
+  # older than the control; a tenant provisioned today holds none, and with false
+  # its first orders would be ADMITTED WITH NO COMPLIANCE RULE EVALUATED while
+  # the trail recorded them as having passed pre-trade compliance.
+  #
+  # THIS SCRIPT DOES NOT PUBLISH ONE, DELIBERATELY. A mandate takes two named
+  # approvers (#410). A script holding both would write four eyes into the audit
+  # trail for a decision one process made, and a zero-rule mandate seeded that
+  # way reads as "somebody decided to constrain nothing" — silencing the
+  # ungoverned counter while changing nothing about what the order does. That
+  # trades a loud gap for a silent one, which is the defect and not the fix.
+  echo ""
+  echo "   REQUIRED BEFORE GO-LIVE: put ${FIRST_PORTFOLIO:-PF1} under mandate."
+  echo ""
+  echo "   This tenant OMS runs OMS_REQUIRE_MANDATE=true. Until a mandate exists"
+  echo "   for the portfolio, EVERY order it receives is REJECTED (MANDATE_MISSING)."
+  echo "   That is the gate working, not a broken deployment - and it is the posture"
+  echo "   a new tenant must start in, because the alternative admits its orders with"
+  echo "   no compliance rule evaluated at all."
+  echo ""
+  echo "   PREFERRED - two authenticated principals, through the gateway:"
+  echo "     POST /v1/portfolios/${FIRST_PORTFOLIO:-PF1}/mandate          (proposer)"
+  echo "     GET  /v1/mandates/pending-changes                 (the approver queue)"
+  echo "     POST /v1/portfolios/${FIRST_PORTFOLIO:-PF1}/mandate/approve  (a DIFFERENT signatory)"
+  echo ""
+  echo "   BREAK-GLASS - an estate with no gateway route yet (cmd/kanz-mandate):"
+  echo "     kanz-mandate propose --tenant $TENANT --file mandate.json \\"
+  echo "                          --by operator:<a> --reason <why> --out proposal.json"
+  echo "     kanz-mandate approve --tenant $TENANT --file mandate.json \\"
+  echo "                          --proposal proposal.json --by operator:<b>"
+  echo "   Both steps on one machine prove ONE operator held both credentials; the"
+  echo "   FACT records source=kanz-mandate, and an auditor can tell the two apart."
+  echo ""
+  echo "   A ZERO-RULE MANDATE IS A VALID ANSWER, and it is not the same as no"
+  echo "   mandate: the gate reads it as somebody having decided to constrain"
+  echo "   nothing, and admits. Use it only if that IS the decision, made by the"
+  echo "   people whose names go on the FACT."
 fi
 
 # 5) Verify isolation end-to-end BEFORE handing over: the new tenant can read
