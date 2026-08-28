@@ -28,6 +28,7 @@ import (
 
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // bookKey identifies a book by (tenant, portfolio).
@@ -53,6 +54,8 @@ type Monitor struct {
 	classifier comp.Classifier
 	emitter    *Emitter
 	recorder   comp.DecisionRecorder
+	cash       comp.CashSource
+	marks      comp.MarkSource
 	now        func() time.Time
 	logger     *slog.Logger
 
@@ -81,6 +84,37 @@ type MonitorOption func(*Monitor)
 // Nil ⇒ not counted; the recorder still logs each failure.
 func WithDroppedRecordObserver(fn func()) MonitorOption {
 	return func(m *Monitor) { m.onDroppedRecord = fn }
+}
+
+// WithCashSource and WithMarkSource are what let this monitor answer "how
+// levered is this book" at all (#787).
+//
+// WITHOUT THEM IT CANNOT, and could not before they existed. The position spine
+// carries holdings and no portfolio equity, so the book built from it is a
+// positions total — and gross exposure is the sum of the same values, which made
+// a max_gross_leverage cap score exactly 1.0 for any long-only book and bind on
+// nothing (#780). Since #786 that is a refusal rather than a silent pass, which
+// is honest and is still not enforcement.
+//
+// With both wired the monitor joins the same three inputs the OMS pre-trade gate
+// does — holdings, live marks, announced cash — through the same
+// comp.JoinEquity, and a leverage cap becomes checkable AFTER the trade as well
+// as before it. That matters because leverage is precisely a limit a book
+// breaches WITHOUT TRADING: a drawdown on a financed book raises it with no
+// order involved, and this monitor is the only thing watching for that.
+//
+// Either being nil leaves the book on its positions-only basis, which
+// LeverageRule refuses with the reason recorded. Nil is a legal posture — a
+// deployment with no price feed or no book of record — and it is not silent.
+func WithCashSource(c comp.CashSource) MonitorOption {
+	return func(m *Monitor) { m.cash = c }
+}
+
+// WithMarkSource supplies the reference prices the book is valued at. See
+// WithCashSource: the two are needed together, because equity is marked
+// positions plus cash and half of that is not a basis.
+func WithMarkSource(mk comp.MarkSource) MonitorOption {
+	return func(m *Monitor) { m.marks = mk }
 }
 
 func NewMonitor(engine *comp.Engine, mandates comp.MandateSource, classifier comp.Classifier, emitter *Emitter, recorder comp.DecisionRecorder, logger *slog.Logger, opts ...MonitorOption) *Monitor {
@@ -138,7 +172,36 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 	key := bookKey{tenant: env.GetTenantId(), portfolio: pid}
 
 	trigger, book, asOf := m.applyAndSnapshot(key, &ps)
+	return m.evaluate(ctx, key, book, trigger, asOf)
+}
 
+// evaluate runs one book against its mandate and emits the transition into
+// BREACH. It is shared by every path that can move a book: a position FACT, a
+// cash announcement, and the periodic re-evaluation sweep (#787).
+//
+// IT IS FACTORED OUT RATHER THAN COPIED because the three paths differ only in
+// what WOKE them. The mandate lookup, the two terminal refusals, the ungoverned
+// warning, the transition test, the record and the emit are identical, and a
+// sweep that re-implemented any of them would drift from the FACT path — most
+// dangerously on the transition test, where a second copy of lastStatus handling
+// would re-emit a breach the FACT path had already reported.
+func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, trigger compliancepb.BreachTrigger, asOf time.Time) error {
+	// THE TENANT COMES FROM THE BOOK, NOT FROM THE CALLER'S CONTEXT (#787).
+	//
+	// Emitter.EmitBreach sets no Event.TenantID and compliance configures no
+	// producer-level fallback, so the tenant it publishes under is whatever is on
+	// the ctx — which bus.Consumer stamps from the inbound envelope. Two of the
+	// three paths into this function are NOT inbound deliveries: the sweep runs on
+	// a ticker and Reevaluate can be called from anywhere, so their ctx carries no
+	// tenant and every breach they found would fail to publish with "tenant_id
+	// required". That is the same shape that once crash-looped the OMS.
+	//
+	// key.tenant is the authoritative answer on every path — Handle derives it
+	// from the envelope, and the decision record below has always used it in
+	// preference to the context for exactly that reason. Stamping it here makes
+	// each path self-contained instead of dependent on how it was woken.
+	ctx = bus.WithTenantID(ctx, key.tenant)
+	pid := key.portfolio
 	mandate, ok, err := m.mandates.Mandate(ctx, key.tenant, pid, asOf)
 	if err != nil {
 		// A tenant the registry cannot resolve is TERMINAL — retrying re-reads the
@@ -235,6 +298,14 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 // the breach trigger (POSITION_CHANGE when the quantity moved, else MARKET_MOVE),
 // a candidate Book snapshot, and the event's as-of time.
 func (m *Monitor) applyAndSnapshot(key bookKey, ps *domainpb.PositionState) (compliancepb.BreachTrigger, *comp.Book, time.Time) {
+	trigger, book := m.applyLocked(key, ps)
+	// OUTSIDE THE LOCK. See snapshotLocked: the join reaches into the cash view
+	// and the mark fold, each with its own lock.
+	comp.JoinEquity(book, m.cash, m.marks)
+	return trigger, book, ps.GetAsOf().AsTime()
+}
+
+func (m *Monitor) applyLocked(key bookKey, ps *domainpb.PositionState) (compliancepb.BreachTrigger, *comp.Book) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -254,19 +325,33 @@ func (m *Monitor) applyAndSnapshot(key bookKey, ps *domainpb.PositionState) (com
 		MarketValue:  ps.GetMarketValue(),
 	}
 
-	// Build the candidate book. NAV is the net market value of the holdings —
-	// positions and nothing else, because position FACTs carry no portfolio
-	// equity. Summed with exact decimal addition.
-	//
-	// AND IT SAYS SO NOW (#780). This proxy used to be handed to LeverageRule as
-	// though it were equity, which made a max_gross_leverage cap unable to bind on
-	// a long-only book: gross is the sum of the same values this loop adds up, so
-	// the ratio was 1.0 by construction and the monitor recorded a check that
-	// passed. Declaring the basis turns that into a refusal naming the gap. The
-	// post-trade monitor cannot close it on its own — the position spine carries
-	// no cash — so this stays a proxy until a producer of portfolio equity reaches
-	// this consumer.
-	book := &comp.Book{PortfolioID: key.portfolio, NAVBasis: comp.NAVBasisGrossPositions}
+	return trigger, m.snapshotLocked(key)
+}
+
+// snapshotLocked builds the candidate book from the positions held for key. The
+// caller must hold m.mu.
+//
+// THE BOOK IT RETURNS IS A PROXY, and says so. NAV here is the net market value
+// of the holdings and nothing else, because position FACTs carry no portfolio
+// equity — and gross exposure is the sum of the same values, so handing this to
+// LeverageRule as though it were equity made a max_gross_leverage cap score 1.0
+// for any long-only book and bind on nothing (#780).
+//
+// The caller upgrades it through comp.JoinEquity, OUTSIDE this lock. That
+// placement is deliberate: JoinEquity calls into the cash view and the mark
+// fold, each of which takes its own lock, and reaching into two foreign locks
+// while holding the one that guards every book in this process is how a monitor
+// stops monitoring anything.
+func (m *Monitor) snapshotLocked(key bookKey) *comp.Book {
+	insts := m.books[key]
+	book := &comp.Book{
+		PortfolioID: key.portfolio,
+		// THE CURRENCY THE HOLDINGS ARE IN. It was left unset while nothing read
+		// it; comp.JoinEquity does, and refuses to net cash against positions
+		// without it rather than assuming they match (#787).
+		BaseCurrency: navCurrency(insts),
+		NAVBasis:     comp.NAVBasisGrossPositions,
+	}
 	var nav *commonpb.Decimal
 	for _, p := range insts {
 		book.Positions = append(book.Positions, p)
@@ -275,7 +360,96 @@ func (m *Monitor) applyAndSnapshot(key bookKey, ps *domainpb.PositionState) (com
 		}
 	}
 	book.NAV = &commonpb.Money{Amount: nav, CurrencyCode: navCurrency(insts)}
-	return trigger, book, ps.GetAsOf().AsTime()
+	return book
+}
+
+// snapshot builds a book and joins its equity, taking and releasing the lock.
+func (m *Monitor) snapshot(key bookKey) *comp.Book {
+	m.mu.Lock()
+	book := m.snapshotLocked(key)
+	m.mu.Unlock()
+	comp.JoinEquity(book, m.cash, m.marks)
+	return book
+}
+
+// ReevaluateAll re-runs every book this monitor holds against its mandate,
+// against the marks and cash in force NOW (#787).
+//
+// # Why a monitor driven only by position FACTs is not a monitor
+//
+// Everything above this line is woken by a position change. That is enough for
+// the limits that move when the BOOK moves — a concentration cap crossed by a
+// fill — and it is not enough for the limits that move when the MARKET moves.
+// Leverage is the clearest case: a financed book that falls 20% raises its gross
+// leverage with no order placed anywhere, and until this existed there was no
+// path by which anything noticed. The package doc calls that "a passive,
+// market-move-induced breach" and names it as the reason the monitor exists; the
+// position spine simply never delivered one, because the OMS position book
+// values holdings at average cost and republishes only when a fill lands.
+//
+// # Why a sweep and not a subscription to market data
+//
+// The mark fold IS subscribed (the service folds market.*.trade and
+// market.*.quote), so this process already knows every price as it arrives. What
+// it must not do is re-evaluate every portfolio holding an instrument on every
+// tick: that couples compliance evaluation to market-data volume, which is the
+// one rate on this platform nobody controls. A sweep decouples them — the work
+// per interval is bounded by the number of BOOKS, not the number of ticks — and
+// it costs at most one interval of latency on a passive breach, which is the
+// right trade for a control that exists to catch drift rather than to gate an
+// order.
+//
+// # It cannot double-emit
+//
+// Every path goes through evaluate, which emits only on the TRANSITION into
+// BREACH (recordStatus). A book already breaching when the sweep reaches it
+// emits nothing; a book the FACT path has just reported emits nothing here. That
+// is why the sweep re-uses evaluate rather than carrying its own emit.
+//
+// Errors are collected and returned as one, so a single portfolio whose mandate
+// lookup is transiently failing does not stop the rest of the sweep.
+func (m *Monitor) ReevaluateAll(ctx context.Context) error {
+	m.mu.Lock()
+	keys := make([]bookKey, 0, len(m.books))
+	for k := range m.books {
+		keys = append(keys, k)
+	}
+	m.mu.Unlock()
+
+	var firstErr error
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := m.Reevaluate(ctx, key.tenant, key.portfolio); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// Reevaluate re-runs one portfolio against its mandate with the marks and cash
+// in force now. It is what a cash announcement triggers — cash is half of
+// equity, so a drawdown on a margin loan moves leverage with no position FACT
+// behind it — and what ReevaluateAll calls per book.
+//
+// A portfolio this monitor holds no positions for is a no-op rather than an
+// empty book: an empty book passes every concentration limit there is, and
+// evaluating one because an announcement mentioned a portfolio the position
+// spine has never described would report it clean (EXEC-M18).
+func (m *Monitor) Reevaluate(ctx context.Context, tenant, portfolio string) error {
+	key := bookKey{tenant: tenant, portfolio: portfolio}
+	m.mu.Lock()
+	_, known := m.books[key]
+	m.mu.Unlock()
+	if !known {
+		return nil
+	}
+	// MARKET_MOVE is the honest trigger for both callers. Nothing traded: the
+	// book's value moved, or the cash behind it did. The schema's other value
+	// (POSITION_CHANGE) would claim a fill that did not happen.
+	return m.evaluate(ctx, key, m.snapshot(key),
+		compliancepb.BreachTrigger_BREACH_TRIGGER_MARKET_MOVE, m.now().UTC())
 }
 
 // recordStatus updates the book's last status and reports whether this is a

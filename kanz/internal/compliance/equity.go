@@ -6,11 +6,74 @@ import (
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
-	comp "github.com/eighred/kanz/internal/compliance"
-	"github.com/eighred/kanz/internal/dec"
+	// decutil: this package's own tests declare a local `dec(...)` Decimal-literal
+	// helper (engine_test.go), so the platform decimal package is aliased here for
+	// the reason gate.go states — a name clash, not a preference.
+	decutil "github.com/eighred/kanz/internal/dec"
 )
 
-// markEquity turns the OMS's cost-basis book into a MARKED book with a real
+// MarkSource supplies a reference price for an instrument, or nil when there is
+// none it may act on — never a zero, never a guess. It is satisfied by
+// internal/marketdata/mark.Source.
+//
+// THE SAME SHAPE THE OMS ALREADY DEFINED for pricing a MARKET order
+// (services/oms/internal/compliance.MarkSource). It is restated here rather than
+// imported because this package is BELOW that one and cannot import it; the two
+// are structurally identical, so one value satisfies both, and the arch guard on
+// duplicated helpers is about copied LOGIC rather than a one-method seam each
+// layer names for itself.
+type MarkSource interface {
+	Mark(instrument string) *big.Rat
+}
+
+// CashSource answers what a portfolio can spend, or ok=false when it is UNKNOWN.
+// It is satisfied by internal/cashview.View, which folds the book of record's
+// announcements.
+//
+// A SEAM AND NOT A QUERY. Both callers read this while deciding something — the
+// OMS on the order-admission path, the monitor inside a FACT delivery — and a
+// call into accounting from either would put an externally-owned latency in
+// front of the decision and turn a degraded accounting service into a trading
+// outage.
+//
+// completeness is what the ANNOUNCING deployment said that total contains
+// (#614), or nil when it said nothing — which is not the same as "nothing is
+// missing" and must not be flattened into it.
+type CashSource interface {
+	Spendable(portfolioID string) (total *commonpb.Decimal, currency string, completeness *CashCompleteness, ok bool)
+}
+
+// JoinEquity attaches a portfolio's cash to a book and then establishes its
+// equity. It is the whole "what is this book worth" sequence, in one place.
+//
+// ORDER IS LOAD-BEARING, WHICH IS WHY THIS IS A FUNCTION AND NOT A CONVENTION.
+// Equity is marked positions PLUS cash, so running MarkEquity before the cash
+// join computes a positions total and then asserts it is equity — which is
+// exactly the defect #780 was about, made one line earlier. Two callers each
+// writing the sequence themselves is two chances to get that order wrong, and
+// the wrong one produces a plausible number rather than an error.
+//
+// A nil cash source leaves Cash UNKNOWN, which MarkEquity refuses to guess past:
+// unknown cash and an empty account are different books and only one of them is
+// levered. A nil mark source leaves the book on its producer's declared basis.
+//
+// It never fails. A book it cannot value comes back exactly as it went in, with
+// the reason on NAVBasisDetail; every caller of this is on a path where refusing
+// to RETURN a book would be worse than returning one whose leverage rule refuses.
+func JoinEquity(b *Book, cash CashSource, marks MarkSource) {
+	if b == nil {
+		return
+	}
+	if cash != nil {
+		if total, currency, completeness, ok := cash.Spendable(b.PortfolioID); ok {
+			b.Cash = &commonpb.Money{Amount: total, CurrencyCode: currency}
+			b.CashCompleteness = completeness
+		}
+	}
+	MarkEquity(b, marks)
+}
+
+// MarkEquity turns the OMS's cost-basis book into a MARKED book with a real
 // equity figure — or changes nothing at all and records why (#780).
 //
 // # What it replaces
@@ -48,7 +111,7 @@ import (
 // So the failure mode is bounded to the one rule that needs equity:
 // LeverageRule refuses, naming the reason this function recorded, and every
 // other rule sees the book it saw before.
-func markEquity(b *comp.Book, marks MarkSource) {
+func MarkEquity(b *Book, marks MarkSource) {
 	if marks == nil {
 		// Nothing tried, so nothing to explain: the deployment has no price feed
 		// wired, which the gate already says at startup. A detail here would read
@@ -60,7 +123,7 @@ func markEquity(b *comp.Book, marks MarkSource) {
 		b.NAVBasisDetail = err.Error()
 		return
 	}
-	amount, ok := dec.ToProtoScaled(equity)
+	amount, ok := decutil.ToProtoScaled(equity)
 	if !ok {
 		b.NAVBasisDetail = "equity is not representable as a Decimal"
 		return
@@ -73,7 +136,7 @@ func markEquity(b *comp.Book, marks MarkSource) {
 		b.Positions[i].MarketValue = marked[i]
 	}
 	b.NAV = &commonpb.Money{Amount: amount, CurrencyCode: b.BaseCurrency}
-	b.NAVBasis = comp.NAVBasisEquity
+	b.NAVBasis = NAVBasisEquity
 	b.NAVBasisDetail = ""
 }
 
@@ -87,8 +150,8 @@ func markEquity(b *comp.Book, marks MarkSource) {
 // than hidden: a book whose positions are NOT already denominated in the base
 // currency is refused below rather than summed, because that is the case where
 // the assumption is demonstrably false and the sum would be economically
-// meaningless — the netting error dec.MoneyIn exists to stop.
-func equityFromMarks(b *comp.Book, marks MarkSource) (*big.Rat, []*commonpb.Money, error) {
+// meaningless — the netting error decutil.MoneyIn exists to stop.
+func equityFromMarks(b *Book, marks MarkSource) (*big.Rat, []*commonpb.Money, error) {
 	if b.BaseCurrency == "" {
 		return nil, nil, fmt.Errorf("portfolio has no base currency, so nothing can be summed into equity")
 	}
@@ -100,7 +163,7 @@ func equityFromMarks(b *comp.Book, marks MarkSource) (*big.Rat, []*commonpb.Mone
 	if b.Cash == nil {
 		return nil, nil, fmt.Errorf("cash is unknown, and equity without cash is a positions total")
 	}
-	equity, err := dec.MoneyIn(b.Cash, b.BaseCurrency)
+	equity, err := decutil.MoneyIn(b.Cash, b.BaseCurrency)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cash cannot be netted into equity: %w", err)
 	}
@@ -126,12 +189,12 @@ func equityFromMarks(b *comp.Book, marks MarkSource) (*big.Rat, []*commonpb.Mone
 			// price this may act on.
 			return nil, nil, fmt.Errorf("no live mark for %s", p.InstrumentID)
 		}
-		qty, ok := dec.FromProtoChecked(p.Quantity)
+		qty, ok := decutil.FromProtoChecked(p.Quantity)
 		if !ok {
 			return nil, nil, fmt.Errorf("position %s has an out-of-domain quantity", p.InstrumentID)
 		}
 		value := new(big.Rat).Mul(qty, px)
-		amount, ok := dec.ToProtoScaled(value)
+		amount, ok := decutil.ToProtoScaled(value)
 		if !ok {
 			return nil, nil, fmt.Errorf("position %s is not representable at any exponent", p.InstrumentID)
 		}

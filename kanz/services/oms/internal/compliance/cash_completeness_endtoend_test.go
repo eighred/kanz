@@ -11,8 +11,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/eighred/kanz/internal/cashview"
 	comp "github.com/eighred/kanz/internal/compliance"
-	"github.com/eighred/kanz/services/oms/internal/cashview"
 )
 
 // THE WHOLE CHAIN AGAIN, FOR THE HALF #614 IS ABOUT.

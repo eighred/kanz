@@ -142,6 +142,52 @@ spec:
             # Must match DATAMASTER_TENANT on the instance named below: datamaster
             # serves one tenant and 404s every other caller.
             - { name: COMPLIANCE_TENANT, value: "__system__" }
+            # WHAT THE POST-TRADE BOOK IS WORTH (#787).
+            #
+            # The monitor's own input is position FACTs, which carry holdings and
+            # nothing else — no cash, and values the OMS recorded at AVERAGE COST.
+            # Gross exposure is the sum of the same values, so a max_gross_leverage
+            # cap scored exactly 1.0 for any long-only book and bound on nothing
+            # (#780). These two folds are the rest of the equity: what accounting
+            # says a portfolio can spend, and what its holdings are worth now.
+            #
+            # THE SUBJECTS ARE THE OMS'S, and that is not a coincidence to preserve
+            # by hand: both default from internal/marketdata/mark.DefaultSubjects,
+            # the fold's own consumption set. A leverage cap valued off one feed
+            # before the trade and another after it would give two answers for
+            # reasons no operator could see.
+            #
+            # SET IT TO "" TO RUN WITH NO PRICE FEED. That is a legal posture and it
+            # is announced at startup: books cannot be valued, so gross-leverage
+            # rules REFUSE rather than report a ratio, while concentration,
+            # restriction and issuer rules are unaffected. Unlike the OMS — which
+            # refuses to START on a blank list, because a pod folding no marks
+            # rejects every MARKET/STOP order — this service degrades instead.
+            - { name: COMPLIANCE_PRICE_SUBJECTS, value: "market.*.trade,market.*.quote" }
+            # HOW OLD A MARK MAY BE AND STILL VALUE A BOOK. A SAFETY BOUND, not a
+            # tuning knob: mark.Source treats a non-positive value as NEVER EXPIRES,
+            # so widening this to quiet "cannot be valued" refusals does not fix the
+            # feed — it enforces a leverage cap against a number that stopped
+            # moving. Non-positive is refused at startup. Matches OMS_PRICE_MAX_AGE.
+            - { name: COMPLIANCE_PRICE_MAX_AGE, value: "30s" }
+            # HOW OFTEN EVERY BOOK IS RE-CHECKED against the marks and cash in force
+            # now (#787).
+            #
+            # IT IS WHAT MAKES A PASSIVE BREACH VISIBLE AT ALL. Every other path into
+            # the monitor is woken by a FACT — a position change, a cash
+            # announcement — and the breach this service exists to catch is the one
+            # with NO FACT behind it: a financed book that falls 20% raises its gross
+            # leverage with no order placed anywhere.
+            #
+            # It bounds WORK, not latency. The sweep costs one evaluation per book
+            # per interval, which is why the monitor does not re-evaluate on every
+            # market tick — that would couple compliance to market-data volume, the
+            # one rate on this platform nobody controls. The cost of this number is
+            # up to that much delay in noticing a passive breach.
+            #
+            # There is no off switch: non-positive is refused at startup, because a
+            # monitor that never re-evaluates is the state #787 is about.
+            - { name: COMPLIANCE_REEVALUATE_INTERVAL, value: "60s" }
             # THE INSTRUMENT CLASSIFIER (#640). datamaster is the estate's golden
             # security master and the only place a sector, an issuer or an asset class
             # can be resolved from. WITHOUT THIS LINE this pod starts cleanly, logs one

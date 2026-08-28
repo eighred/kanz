@@ -11,9 +11,9 @@ import (
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 
+	"github.com/eighred/kanz/internal/cashview"
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/dec"
-	"github.com/eighred/kanz/services/oms/internal/cashview"
 )
 
 // THE ONLY PLACE ON THE PLATFORM WHERE EQUITY CAN BE COMPUTED (#780).

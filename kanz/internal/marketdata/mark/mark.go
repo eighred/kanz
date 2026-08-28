@@ -69,6 +69,28 @@ type entry struct {
 
 // Source holds the latest mark per instrument, folded from the price spine.
 // Safe for concurrent folds (Handle) and reads (Mark, Lookup).
+// DefaultSubjects is THE consumption set of this fold, expressed as subjects.
+//
+// TWO SERVICES FOLD THIS SOURCE and both must fold the same thing: the OMS, to
+// value a MARKET or STOP order pre-trade (COMP-M2), and the compliance monitor,
+// to value a book post-trade (#787). A leverage cap checked against one feed
+// before the trade and a different feed after it would give two answers for
+// reasons no operator could see, so the default lives HERE — beside the fold
+// that consumes it — rather than being written out once per service config.
+//
+// IT IS NOT A CONVENIENT WILDCARD. market.v1.MarketDataEvent publishes on
+// market.<assetClass>.<variant> where the variant token comes from the payload
+// oneof (Trade→trade, Quote→quote, Bar→bar), and Handle uses Trade and Quote
+// only. NATS `*` matches exactly one token, so these two cover every asset class
+// — present and future — while structurally excluding market.*.bar and,
+// critically, market.book.snapshot: OrderBookSnapshot is wire-compatible with
+// MarketDataEvent, so a one-sided book snapshot would unmarshal cleanly into a
+// "Trade" at the deepest resting bid and poison the mark below mid. Handle
+// refuses it by event type as well; this is the outer of the two doors.
+//
+// Callers must copy before mutating — it is a package-level slice.
+var DefaultSubjects = []string{"market.*.trade", "market.*.quote"}
+
 type Source struct {
 	mu     sync.RWMutex
 	prices map[string]entry
