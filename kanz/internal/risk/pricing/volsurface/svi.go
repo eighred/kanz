@@ -357,11 +357,31 @@ func (st *Store) Put(underlyingID string, asOf time.Time, s *SVISurface) {
 
 // Vol resolves the surface live at asOf and evaluates it — the
 // compute.VolProvider contract.
+//
+// THE UNLOCK IS DEFERRED, AND THAT IS THE WHOLE POINT (#800). This used to
+// RUnlock straight after sort.Search and dereference vs[i-1] afterwards. The
+// slice header is a copy, but the BACKING ARRAY is the one Put mutates: an
+// out-of-order backfill does copy(vs[i+1:], vs[i:]) in place whenever cap
+// exceeds len, so an index resolved under the lock addresses a DIFFERENT
+// version by the time it is read. Two goroutines against the unlocked shape —
+// a reader asking for the newest surface, a writer backfilling earlier as-ofs —
+// returned the second-newest surface 114 times in 4.19M reads over 20s on this
+// box. Not a crash, not a panic: a wrong implied vol, silently, feeding
+// compute.Greeks and revaluation, and a wrong risk number is what a limit is
+// checked against.
+//
+// Evaluating the surface under the read lock is the cost of the fix. It is
+// bounded and shared — SVISurface.Vol is a binary search plus a few flops, it
+// takes no lock of its own, and RLock does not exclude other readers; only a
+// calibration Put waits, at its refresh cadence. curve.Store.Curve and
+// credit.Store.Curve hold their read lock through the element read for the same
+// reason, and test/arch/pricing_store_read_holds_its_lock_test.go is what stops
+// the fourth store in this family from repeating it.
 func (st *Store) Vol(_ context.Context, underlyingID string, strike, ttmYears float64, asOf time.Time) (float64, bool) {
 	st.mu.RLock()
+	defer st.mu.RUnlock()
 	vs := st.byUnderlying[underlyingID]
 	i := sort.Search(len(vs), func(i int) bool { return vs[i].asOf.After(asOf) })
-	st.mu.RUnlock()
 	if i == 0 {
 		return 0, false
 	}
