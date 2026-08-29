@@ -360,6 +360,15 @@ func (m *MemoryProposals) Claim(ctx context.Context, orderID, approver string, a
 		if p.Approver != "" {
 			return p, false, nil
 		}
+		// THE MIRROR OF AnnounceExpiry'S `approver != ""` (#796). An order whose
+		// expiry the estate has already been told about must not then be approved,
+		// admitted and traded — that is two terminal answers to one command. The
+		// omission was in BOTH stores, which is what made it a gap in the state
+		// machine rather than a Postgres typo, and it is spelled once per store for
+		// the same reason every other predicate here is.
+		if !p.ExpiryAnnouncedAt.IsZero() {
+			return p, false, nil
+		}
 		if dualcontrol.SameSubject(approver, p.Proposer) {
 			// Refused rather than recorded, and the proposal is LEFT PENDING for
 			// somebody who may actually approve it — an error from the decide
@@ -516,7 +525,7 @@ func (p *PostgresProposals) Put(ctx context.Context, prop OrderProposal, announc
 func (p *PostgresProposals) Get(ctx context.Context, orderID string) (OrderProposal, bool, error) {
 	row := p.pool.QueryRow(ctx, `
 		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at,
-		       refusal_reason, refused_by, refused_at
+		       refusal_reason, refused_by, refused_at, expiry_announced_at
 		FROM order_proposals WHERE order_id = $1
 	`, orderID)
 	prop, err := scanOrderProposal(row)
@@ -530,6 +539,31 @@ func (p *PostgresProposals) Get(ctx context.Context, orderID string) (OrderPropo
 }
 
 // Claim is the serialisation point. See ProposalStore.Claim.
+//
+// `expiry_announced_at IS NULL` MAKES THIS AND AnnounceExpiry A PROPER PAIR (#796).
+//
+// AnnounceExpiry has always defended against a racing claim — it carries
+// `approver = ”` — and this defended against nothing in the other direction.
+// The window needs no clock skew and no second process to explain: handleApprove
+// captures `now` BEFORE the Proposals().Get round trip, dualcontrol.Approve
+// checks the deadline against that captured value, and the Claim runs later
+// still. ExpireProposals runs on its own ticker in the composition root.
+//
+//	T-10ms  the approval arrives; Approve passes, the proposal is live
+//	T+5ms   the expiry ticker commits ORDER_REJECTED / DUAL_CONTROL_EXPIRED and
+//	        a REJECTED CommandOutcome, and sets expiry_announced_at. It does NOT
+//	        set approver.
+//	T+20ms  Claim runs. approver = '' is still true, so it SUCCEEDED — and
+//	        approval.Covers checks act and digest, never expiry.
+//
+// The estate then received a terminal REJECTED and afterwards ORDER_APPROVED,
+// ORDER_ACCEPTED and fills for the same order_id: two terminal answers to one
+// command, and capital moving on a maker-checker approval the platform had
+// already declared dead. The window is about a round trip wide, which is exactly
+// when late approvals land.
+//
+// With both predicates in place the two mutations exclude each other in both
+// directions and rows-affected stays the verdict on either side.
 //
 // ONE STATEMENT, and `approver = ”` in the WHERE is what makes it atomic: a
 // SELECT to check it is still pending followed by an UPDATE would leave exactly
@@ -568,6 +602,7 @@ func (p *PostgresProposals) Claim(ctx context.Context, orderID, approver string,
 		   SET approver = $2, decided_at = $3
 		 WHERE order_id = $1
 		   AND approver = ''
+		   AND expiry_announced_at IS NULL
 		   AND lower(btrim(proposer)) <> lower(btrim($2))
 	`, orderID, approver, at.UTC())
 	if err != nil {
@@ -627,7 +662,7 @@ func (p *PostgresProposals) RecordRefusal(ctx context.Context, orderID, approver
 func (p *PostgresProposals) ExpiredUnannounced(ctx context.Context, now time.Time, limit int) ([]OrderProposal, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at,
-		       refusal_reason, refused_by, refused_at
+		       refusal_reason, refused_by, refused_at, expiry_announced_at
 		FROM order_proposals
 		WHERE approver = '' AND expiry_announced_at IS NULL AND expires_at <= $1
 		ORDER BY expires_at, order_id
@@ -731,7 +766,7 @@ func (p *PostgresProposals) AnnounceExpiry(ctx context.Context, orderID string, 
 func (p *PostgresProposals) Pending(ctx context.Context, now time.Time) ([]OrderProposal, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at,
-		       refusal_reason, refused_by, refused_at
+		       refusal_reason, refused_by, refused_at, expiry_announced_at
 		FROM order_proposals
 		WHERE approver = '' AND expiry_announced_at IS NULL AND expires_at > $1
 		ORDER BY created_at, order_id
@@ -761,11 +796,22 @@ func scanOrderProposal(s proposalScanner) (OrderProposal, error) {
 		blob      []byte
 		decidedAt *time.Time
 		refusedAt *time.Time
+		announced *time.Time
 	)
+	// expiry_announced_at IS READ BACK, and it was not (#796). The memory store
+	// set the field and the durable one never selected it, so OrderProposal.
+	// ExpiryAnnouncedAt was populated by one backend and permanently zero on the
+	// other — two implementations of one struct disagreeing about a field that
+	// says whether the estate has already been told this order is dead. Anything
+	// branching on it would have taken the memory store's answer in every test
+	// and the wrong one in production.
 	if err := s.Scan(&prop.ID, &prop.PortfolioID, &act, &prop.Proposer, &prop.Digest,
 		&blob, &prop.Approver, &decidedAt, &prop.CreatedAt, &prop.ExpiresAt,
-		&prop.RefusalReason, &prop.RefusedBy, &refusedAt); err != nil {
+		&prop.RefusalReason, &prop.RefusedBy, &refusedAt, &announced); err != nil {
 		return OrderProposal{}, err
+	}
+	if announced != nil {
+		prop.ExpiryAnnouncedAt = announced.UTC()
 	}
 	prop.Subject = prop.ID
 	prop.Act = dualcontrol.Act(act)

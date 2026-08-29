@@ -2178,23 +2178,42 @@ func (s *Service) handleApprove(ctx context.Context, env *envelopepb.Envelope, p
 		return err // transient
 	}
 	if !claimed {
-		// TWO SHAPES REACH HERE, and they are different answers to the approver.
+		// THREE SHAPES REACH HERE, and they are different answers to the approver.
 		// Usually somebody else's signature landed between the read and now: the
 		// proposal is decided, RecordRefusal declines to touch the row that is the
 		// OMS's only evidence two people signed, and the approver sees the order
 		// gone from the queue and live in the book.
 		//
-		// The other shape is a proposal STILL PENDING that Claim's SQL predicate
-		// refused where dualcontrol.Approve's Go comparison did not — the two
-		// normalise a subject independently, and a divergence between them would
-		// otherwise be the most invisible refusal of the lot. There the refusal is
-		// recorded and reaches the queue like any other.
-		recorded, rErr := s.store.Proposals().RecordRefusal(ctx, orderID, approver, RefusalLostTheClaim, now)
+		// SINCE #796 THE EXPIRY SWEEPER CAN ALSO BE THE WINNER. Claim now carries
+		// `expiry_announced_at IS NULL`, so an approval that raced the deadline and
+		// lost is refused HERE rather than admitting an order the estate has already
+		// been told was rejected. That refusal must not be reported as
+		// "lost_the_claim": the two demand opposite responses. Losing to a signature
+		// means the order is live and there is nothing to do; losing to the deadline
+		// means nobody signed it in time and it must be PROPOSED AGAIN. Telling an
+		// approver to go and find a co-signer who does not exist is the shape #558
+		// spent an issue on.
+		//
+		// The third shape is a proposal STILL PENDING and NOT expired that Claim's
+		// SQL predicate refused where dualcontrol.Approve's Go comparison did not —
+		// the two normalise a subject independently, and a divergence between them
+		// would otherwise be the most invisible refusal of the lot.
+		//
+		// THE RE-READ DECIDES ONLY THE WORDING, never the outcome. Whether this
+		// approval took effect was settled by Claim's rows-affected before this
+		// line; a stale read here can mislabel a refusal and cannot cause one.
+		reason := RefusalLostTheClaim
+		if latest, found, gErr := s.store.Proposals().Get(ctx, orderID); gErr == nil && found &&
+			latest.Approver == "" && !latest.ExpiryAnnouncedAt.IsZero() {
+			reason = RefusalExpired
+		}
+		recorded, rErr := s.store.Proposals().RecordRefusal(ctx, orderID, approver, reason, now)
 		if rErr != nil {
 			return fmt.Errorf("oms: record refusal on order %s: %w", orderID, rErr)
 		}
-		s.logger.Warn("oms: approval lost the claim — this proposal was already decided",
-			"order_id", orderID, "approver", approver, "refusal_recorded", recorded)
+		s.logger.Warn("oms: approval lost the claim",
+			"order_id", orderID, "approver", approver, "reason", reason,
+			"refusal_recorded", recorded)
 		return nil
 	}
 
