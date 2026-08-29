@@ -58,7 +58,7 @@ func newServer(t *testing.T) (*Server, store.ExceptionStore) {
 	t.Helper()
 	feeds := testFeeds()
 	golden := store.NewMemoryGoldenStore()
-	exceptions := store.NewQueueStore(pricing.NewQueue())
+	exceptions := store.NewQueueStore(pricing.NewQueue(), nil)
 	proj := projector.New(feeds, golden, exceptions, nil, projector.WithClock(func() time.Time { return now }))
 	if err := proj.Refresh(context.Background()); err != nil {
 		t.Fatalf("projector refresh: %v", err)
@@ -155,7 +155,7 @@ func TestSecurityIsServedFromTheStore(t *testing.T) {
 	}
 	r := &Readiness{}
 	r.Set(true)
-	s := New(r, nil, testTenant, golden, store.NewQueueStore(nil), []feed.VendorFeed{errFeed{}})
+	s := New(r, nil, testTenant, golden, store.NewQueueStore(nil, nil), []feed.VendorFeed{errFeed{}})
 
 	rec := get(t, s, "/v1/securities/INST1")
 	if rec.Code != http.StatusOK {

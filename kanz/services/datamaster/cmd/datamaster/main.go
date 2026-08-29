@@ -352,8 +352,13 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (st
 		// NO OUTBOX ON THE EPHEMERAL PATH. The in-memory exception queue never
 		// enqueues a FACT, so a relay would drain nothing forever; returning nil
 		// keeps 'there is no announcement here' explicit rather than staffed.
-		return store.NewMemoryGoldenStore(), store.NewQueueStore(pricing.NewQueue()),
-			store.NewMemoryProposals(), nil, nil, func() {}, nil
+		// ONE MemoryProposals, HELD BY BOTH. The queue consumes the proposal an
+		// approval carries, so handing the server a different instance from the
+		// one the queue claims against would let a dual-signed override apply and
+		// leave its proposal approvable — the same decision spent twice.
+		proposals := store.NewMemoryProposals()
+		return store.NewMemoryGoldenStore(), store.NewQueueStore(pricing.NewQueue(), proposals),
+			proposals, nil, nil, func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
 	// `app.tenant_id` GUC, so Postgres RLS scopes all reads/writes to it. A
