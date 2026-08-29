@@ -146,6 +146,22 @@ func amendReducesExposure(prev, next *orderpb.OrderState) bool {
 // for a second signature to land, so the fail-closed answer is to refuse and name
 // the path that works.
 //
+// # It runs UNDER the per-order claim, and that is deliberate
+//
+// submit checks the gate before taking any lock, because nothing else can be
+// touching an order that does not exist yet. An amend is a read-modify-write on
+// one that does: the state the controls are asked about must be the state that
+// is written, so checking outside the claim would be a check-then-act with a
+// racing fill in the gap — the same shape handleAmend's own claim comment
+// describes for the quantity guard.
+//
+// THE COST IS ONE MORE ROUND TRIP INSIDE THE LOCK, and it is bounded by the
+// budget that already governs this path: work() holds the same per-order lock
+// across venue.Execute — a real call to an exchange — and defaultClaimWait caps
+// a waiter at 5s against a 60s AckWait (orderlock.go). A book-and-mandate lookup
+// is well inside that. If #801's AckWait budget is ever retightened, this call
+// is one of the things spending it.
+//
 // A returned error is TRANSIENT (the gate could not answer) and must redeliver;
 // a returned *RejectError is terminal and the caller answers the client with it.
 func (s *Service) admitAmendment(ctx context.Context, env *envelopepb.Envelope, md *commandpb.CommandMetadata, prev, next *orderpb.OrderState) (*RejectError, error) {
