@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/services/datamaster/internal/master"
 	"github.com/eighred/kanz/services/datamaster/internal/pricing"
 )
@@ -86,15 +88,15 @@ func runExceptionContract(t *testing.T, ctx context.Context, es ExceptionStore) 
 	}
 
 	at := time.Unix(1_700_001_000, 0).UTC()
-	if err := es.Override(ctx, ex.ID, pricing.Override{Actor: "ops@kanz", Reason: "vendor confirmed", ChosenPrice: dec.Rat("152.40"), At: at}); err != nil {
+	if err := es.Override(ctx, ex.ID, pricing.Override{Actor: "ops@kanz", Reason: "vendor confirmed", ChosenPrice: dec.Rat("152.40"), At: at}, Claim{}); err != nil {
 		t.Fatalf("override: %v", err)
 	}
 	// Override requires actor + reason.
-	if err := es.Override(ctx, ex.ID, pricing.Override{ChosenPrice: dec.Rat("1"), At: at}); err == nil {
+	if err := es.Override(ctx, ex.ID, pricing.Override{ChosenPrice: dec.Rat("1"), At: at}, Claim{}); err == nil {
 		t.Fatal("override without actor/reason should error")
 	}
 	// Unknown id errors.
-	if err := es.Override(ctx, "nope", pricing.Override{Actor: "a", Reason: "r", ChosenPrice: dec.Rat("1"), At: at}); err == nil {
+	if err := es.Override(ctx, "nope", pricing.Override{Actor: "a", Reason: "r", ChosenPrice: dec.Rat("1"), At: at}, Claim{}); err == nil {
 		t.Fatal("override unknown id should error")
 	}
 
@@ -119,7 +121,81 @@ func TestMemoryGoldenStore(t *testing.T) {
 }
 
 func TestQueueStore(t *testing.T) {
-	runExceptionContract(t, context.Background(), NewQueueStore(nil))
+	runExceptionContract(t, context.Background(), NewQueueStore(nil, nil))
+}
+
+// A CLAIMED OVERRIDE ON A QUEUE WITH NO PROPOSAL STORE IS REFUSED (#807).
+//
+// "There was nothing to consume" and "two people signed" must not produce the
+// same record. A queue built without proposals cannot honour a claim, so it
+// refuses the override rather than writing an approver whose proposal it never
+// took — and leaving that proposal approvable a second time.
+func TestQueueStore_AClaimWithNoProposalStoreIsRefused(t *testing.T) {
+	ctx := context.Background()
+	qs := NewQueueStore(nil, nil)
+	ex := sampleException()
+	if err := qs.Add(ctx, ex); err != nil {
+		t.Fatal(err)
+	}
+	err := qs.Override(ctx, ex.ID, pricing.Override{
+		Actor: "alice@kanz", Approver: "bob@kanz", Reason: "vendor confirmed",
+		ChosenPrice: dec.Rat("152.40"), At: time.Unix(1_700_001_000, 0).UTC(),
+	}, Claim{ProposalID: "prop-1"})
+	if err == nil {
+		t.Fatal("a queue with no proposal store applied a dual-signed override, consuming nothing " +
+			"— the approval stays spendable and the trail says two people signed")
+	}
+	if got, _, _ := qs.Get(ctx, ex.ID); got.Status != pricing.StatusOpen || len(got.Overrides) != 0 {
+		t.Errorf("the refused override still wrote: status=%s overrides=%d", got.Status, len(got.Overrides))
+	}
+}
+
+// AND WITH A PROPOSAL STORE, THE APPROVAL CONSUMES ITS PROPOSAL.
+//
+// The in-process backend is not one transaction and does not need to be — see
+// QueueStore.Override — but it must still consume exactly once, or the same
+// signature applies twice.
+func TestQueueStore_AnApprovalConsumesItsProposal(t *testing.T) {
+	ctx := context.Background()
+	props := NewMemoryProposals()
+	qs := NewQueueStore(nil, props)
+	ex := sampleException()
+	if err := qs.Add(ctx, ex); err != nil {
+		t.Fatal(err)
+	}
+	prop := memoryProposalFor(t, "prop-mem", ex.ID, "alice@kanz")
+	if err := props.Put(ctx, prop); err != nil {
+		t.Fatal(err)
+	}
+
+	o := prop.ApplyOverride("bob@kanz", time.Unix(1_700_001_000, 0).UTC())
+	if err := qs.Override(ctx, ex.ID, o, Claim{ProposalID: prop.ID}); err != nil {
+		t.Fatalf("a dual-signed override was refused: %v", err)
+	}
+	if _, found, err := props.Get(ctx, prop.ID); err != nil || found {
+		t.Errorf("the proposal survived the override it authorised (found=%v err=%v)", found, err)
+	}
+	// AND THE SECOND PRESENTATION IS REFUSED rather than applied again.
+	err := qs.Override(ctx, ex.ID, o, Claim{ProposalID: prop.ID})
+	if !errors.Is(err, ErrProposalAlreadyDecided) {
+		t.Fatalf("re-presenting a consumed approval returned %v, want ErrProposalAlreadyDecided", err)
+	}
+	if got, _, _ := qs.Get(ctx, ex.ID); len(got.Overrides) != 1 {
+		t.Errorf("%d override records for ONE decision", len(got.Overrides))
+	}
+}
+
+// memoryProposalFor builds a well-formed pending proposal for the memory tests.
+func memoryProposalFor(t *testing.T, id, exceptionID, proposer string) OverrideProposal {
+	t.Helper()
+	price := dec.Rat("152.40")
+	base, err := dualcontrol.Propose(id, dualcontrol.ActPricingOverride, exceptionID, proposer,
+		PayloadDigest(exceptionID, "vendor confirmed", price),
+		time.Unix(1_700_000_500, 0).UTC(), dualcontrol.DefaultTTL)
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	return OverrideProposal{Proposal: base, Reason: "vendor confirmed", ChosenPrice: price}
 }
 
 // --- Postgres (DB-gated, mirrors the risk-engine persist tests) -----------
@@ -228,7 +304,7 @@ func TestPostgresOverridePriceIsExact(t *testing.T) {
 	// the property.
 	const chosen = "12345678901.12345678"
 	want := dec.Rat(chosen)
-	if err := es.Override(ctx, ex.ID, pricing.Override{Actor: "alice@kanz", Reason: "vendor confirmed", ChosenPrice: want, At: time.Unix(1_700_000_001, 0).UTC()}); err != nil {
+	if err := es.Override(ctx, ex.ID, pricing.Override{Actor: "alice@kanz", Reason: "vendor confirmed", ChosenPrice: want, At: time.Unix(1_700_000_001, 0).UTC()}, Claim{}); err != nil {
 		t.Fatal(err)
 	}
 

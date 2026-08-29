@@ -98,6 +98,14 @@ func PayloadDigest(exceptionID, reason string, chosenPrice *big.Rat) string {
 // are deliberately indistinguishable, the same stance as notFoundBody.
 var ErrNoProposal = errors.New("store: no such pending override proposal")
 
+// ErrProposalAlreadyDecided is returned by ExceptionStore.Override when the
+// Claim it carried found no proposal to take — somebody else decided it first.
+//
+// IT IS A REFUSAL, NOT A FAILURE, and the override wrote nothing. The caller
+// answers 409 and counts refused_race; treating it as an error would report a
+// control working exactly as intended as a broken store.
+var ErrProposalAlreadyDecided = errors.New("store: this override proposal has already been decided")
+
 // ProposalStore persists pending dual-control proposals.
 //
 // There is no "applied" flag. The durable record of what happened is the
@@ -118,13 +126,17 @@ type ProposalStore interface {
 	// Claim atomically removes a proposal and reports whether THIS caller is the
 	// one that got it.
 	//
-	// IT IS THE SERIALISATION POINT, and the reason it exists rather than a
-	// Delete. Two approvers acting on the same pending override at the same
-	// moment both pass every check — they are different people, the digest
-	// matches for both, neither has expired — and would both apply, appending
-	// two override records for one decision and marking the exception OVERRIDDEN
-	// twice. Whoever claims it applies it; the other is told it is already
-	// decided.
+	// IT IS FOR THE DECISIONS THAT CHANGE NOTHING ELSE — a rejection, and a
+	// withdrawal by the proposer. An APPROVAL does not come through here: it
+	// passes a store.Claim to ExceptionStore.Override, which consumes the
+	// proposal in the same transaction as the audit row, the status flip and the
+	// FACT. Claiming here first would put the claim in its own commit again, and
+	// a process death in the window that opens spends the second signature
+	// without applying the override (#807).
+	//
+	// IT IS STILL A SERIALISATION POINT for the acts that use it. Two rejections
+	// racing would otherwise both answer "rejected" for one decision; whoever
+	// removes the row decides it, and the other is told it is already decided.
 	Claim(ctx context.Context, proposalID string) (bool, error)
 	// Pending lists proposals not yet expired at now, oldest first, so an
 	// unapproved act is VISIBLE rather than silently dropped.
@@ -260,11 +272,33 @@ func (p *PostgresProposals) Get(ctx context.Context, id string) (OverrideProposa
 }
 
 func (p *PostgresProposals) Claim(ctx context.Context, id string) (bool, error) {
-	// ONE STATEMENT. A SELECT followed by a DELETE would leave the window this
-	// method exists to close: both approvers see the row, both delete it, both
-	// apply. The rows-affected count of a single DELETE is the atomic answer to
-	// "did I get it", and Postgres serialises the two writers for free.
-	tag, err := p.pool.Exec(ctx, `DELETE FROM exception_override_proposals WHERE proposal_id = $1`, id)
+	// ON THE POOL, so this runs in its own implicit transaction — which is right
+	// for a rejection, where removing the row IS the whole decision. An approval
+	// takes the same statement on the override's transaction instead; see
+	// claimProposal.
+	return claimProposal(ctx, p.pool, id)
+}
+
+// execer is what a *pgxpool.Pool and a pgx.Tx have in common.
+//
+// IT IS WHY THE CLAIM IS ONE STATEMENT IN ONE PLACE. The approval path needs the
+// DELETE inside the override's transaction and the rejection path needs it on
+// its own; written twice, the two would drift, and the one that drifts is the
+// one an auditor reads. The same rule PayloadDigest states above: a statement
+// spelled in two code paths is a statement that eventually differs.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// claimProposal consumes a pending proposal and reports whether THIS caller got
+// it.
+//
+// ONE STATEMENT. A SELECT followed by a DELETE would leave the window the claim
+// exists to close: both approvers see the row, both delete it, both apply. The
+// rows-affected count of a single DELETE is the atomic answer to "did I get it",
+// and Postgres serialises the two writers for free.
+func claimProposal(ctx context.Context, db execer, id string) (bool, error) {
+	tag, err := db.Exec(ctx, `DELETE FROM exception_override_proposals WHERE proposal_id = $1`, id)
 	if err != nil {
 		return false, fmt.Errorf("store: claim proposal %s: %w", id, err)
 	}

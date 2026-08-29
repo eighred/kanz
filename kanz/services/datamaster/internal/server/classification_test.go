@@ -30,7 +30,7 @@ import (
 func serverOver(t *testing.T, feeds []feed.VendorFeed) *Server {
 	t.Helper()
 	golden := store.NewMemoryGoldenStore()
-	exceptions := store.NewQueueStore(pricing.NewQueue())
+	exceptions := store.NewQueueStore(pricing.NewQueue(), nil)
 	proj := projector.New(feeds, golden, exceptions, nil, projector.WithClock(func() time.Time { return now }))
 	if err := proj.Refresh(context.Background()); err != nil {
 		t.Fatalf("projector refresh: %v", err)

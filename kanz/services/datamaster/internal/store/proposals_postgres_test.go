@@ -92,7 +92,7 @@ func TestPostgresOverride_TheDatabaseRefusesASelfApproval(t *testing.T) {
 	if err := es.Override(ctx, "SELF:PRICE_TOLERANCE:ICE", pricing.Override{
 		Actor: "alice@kanz", Approver: "bob@kanz", Reason: "vendor confirmed",
 		ChosenPrice: rat, At: pgNow,
-	}); err != nil {
+	}, Claim{}); err != nil {
 		t.Fatalf("a genuine dual-signed override was refused: %v", err)
 	}
 }
@@ -112,7 +112,7 @@ func TestPostgresOverride_TheApproverRoundTrips(t *testing.T) {
 	rat, _ := new(big.Rat).SetString("130")
 	if err := es.Override(ctx, "RT:PRICE_TOLERANCE:ICE", pricing.Override{
 		Actor: "alice@kanz", Approver: "bob@kanz", Reason: "dual", ChosenPrice: rat, At: pgNow,
-	}); err != nil {
+	}, Claim{}); err != nil {
 		t.Fatal(err)
 	}
 	ex, ok, err := es.Get(ctx, "RT:PRICE_TOLERANCE:ICE")
@@ -133,7 +133,7 @@ func TestPostgresOverride_TheApproverRoundTrips(t *testing.T) {
 	// A single-signed override stores '' and reads back as not-dual-signed.
 	if err := es.Override(ctx, "RT:PRICE_TOLERANCE:ICE", pricing.Override{
 		Actor: "carol@kanz", Reason: "single", ChosenPrice: rat, At: pgNow,
-	}); err != nil {
+	}, Claim{}); err != nil {
 		t.Fatal(err)
 	}
 	ex, _, _ = es.Get(ctx, "RT:PRICE_TOLERANCE:ICE")
@@ -378,7 +378,7 @@ func TestPostgresOverride_TheFactIsEnqueuedInTheSameTransaction(t *testing.T) {
 	if err := es.Override(ctx, "TX:PRICE_TOLERANCE:ICE", pricing.Override{
 		Actor: "alice@kanz", Approver: "bob@kanz", Reason: "vendor confirmed",
 		ChosenPrice: rat, At: pgNow,
-	}); err != nil {
+	}, Claim{}); err != nil {
 		t.Fatalf("Override: %v", err)
 	}
 
@@ -445,7 +445,7 @@ func TestPostgresOverride_AFailedOverrideAnnouncesNothing(t *testing.T) {
 	// Unknown exception: the override fails after the transaction has opened.
 	if err := es.Override(ctx, "NO-SUCH-EXCEPTION", pricing.Override{
 		Actor: "alice@kanz", Reason: "r", ChosenPrice: rat, At: pgNow,
-	}); err == nil {
+	}, Claim{}); err == nil {
 		t.Fatal("an override against an unknown exception succeeded")
 	}
 	var after int
