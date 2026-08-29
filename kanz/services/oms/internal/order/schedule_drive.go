@@ -294,41 +294,35 @@ func (s *Service) emitChild(ctx context.Context, parentSt *orderpb.OrderState, c
 			"cannot be worked without losing part of it", child.Quantity.FloatString(20))
 	}
 
-	cmd := &orderpb.SubmitOrder{
-		Metadata: &commandpb.CommandMetadata{
-			// target_id MUST equal order_id — the command-class contract every
-			// order command keeps.
-			TargetId: child.OrderID,
-			Issuer:   ScheduleIssuer,
-			Reason: fmt.Sprintf("slice %d of %d for parent order %s",
-				child.Index+1, parentSt.GetExecutionSchedule().GetSliceCount(), child.ParentID),
-			// NO principal_portfolios. That list NARROWS a delegated user
-			// principal's authority, and this command has no user behind it — the
-			// authority it acts on is the parent's, which was checked when the
-			// parent was admitted. An empty list here is not an omission: with a
-			// non-"user:" issuer, delegatedAndEntitled never consults it.
-		},
-		OrderId:       child.OrderID,
-		ParentOrderId: child.ParentID,
-		PortfolioId:   parentSt.GetPortfolioId(),
-		InstrumentId:  parentSt.GetInstrumentId(),
-		Side:          parentSt.GetSide(),
-		Quantity:      qty,
-		OrderType:     parentSt.GetOrderType(),
-		LimitPrice:    parentSt.GetLimitPrice(),
-		StopPrice:     parentSt.GetStopPrice(),
-		TimeInForce:   parentSt.GetTimeInForce(),
-		ExpireAt:      parentSt.GetExpireAt(),
-		// THE PARENT'S VENUE, SO EVERY SLICE OF ONE DECISION TRADES WHERE THAT
-		// DECISION SAID. Empty when the parent named none, which leaves each child
-		// to the router's own choice — and that is deliberate rather than
-		// overlooked: an unrouted parent is one whose venue the platform picks, and
-		// picking it per slice is what lets the cost ranker (#437) move later
-		// slices to whichever venue the earlier ones proved cheaper.
-		Venue: parentSt.GetVenue(),
-		// NO execution_schedule. A child is not itself worked as a schedule, and
-		// validateSchedule refuses a command carrying both.
-	}
+	// THE PARENT'S OWN TERMS, THROUGH THE ONE MAPPING (#799). It carries the
+	// parent's venue, so every slice of one decision trades where that decision
+	// said — empty when the parent named none, which leaves each child to the
+	// router's own choice, and that is deliberate rather than overlooked: an
+	// unrouted parent is one whose venue the platform picks, and picking it per
+	// slice is what lets the cost ranker (#437) move later slices to whichever
+	// venue the earlier ones proved cheaper. It also carries leverage and
+	// margin_mode, which the hand-listed copy this replaces silently dropped.
+	cmd := submitFromState(parentSt, &commandpb.CommandMetadata{
+		// target_id MUST equal order_id — the command-class contract every
+		// order command keeps.
+		TargetId: child.OrderID,
+		Issuer:   ScheduleIssuer,
+		Reason: fmt.Sprintf("slice %d of %d for parent order %s",
+			child.Index+1, parentSt.GetExecutionSchedule().GetSliceCount(), child.ParentID),
+		// NO principal_portfolios. That list NARROWS a delegated user
+		// principal's authority, and this command has no user behind it — the
+		// authority it acts on is the parent's, which was checked when the
+		// parent was admitted. An empty list here is not an omission: with a
+		// non-"user:" issuer, delegatedAndEntitled never consults it.
+	})
+	// The four fields a SLICE does not inherit: its own id, the relation that
+	// makes it a slice, its share of the quantity, and NO execution_schedule — a
+	// child is not itself worked as a schedule, and validateSchedule refuses a
+	// command carrying both a parent and a schedule.
+	cmd.OrderId = child.OrderID
+	cmd.ParentOrderId = child.ParentID
+	cmd.Quantity = qty
+	cmd.ExecutionSchedule = nil
 	payload, err := proto.Marshal(cmd)
 	if err != nil {
 		return fmt.Errorf("marshal child order: %w", err)
