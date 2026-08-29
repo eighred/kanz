@@ -781,7 +781,7 @@ func TestAnotherTenantCannotSeeOrAnnounceAnExpiredProposal(t *testing.T) {
 // stopped issuing.
 const pendingQuery = `
 	SELECT order_id, portfolio_id, act, proposer, digest, command, approver, decided_at, created_at, expires_at,
-	       refusal_reason, refused_by, refused_at
+	       refusal_reason, refused_by, refused_at, expiry_announced_at
 	FROM order_proposals
 	WHERE approver = '' AND expiry_announced_at IS NULL AND expires_at > $1
 	ORDER BY created_at, order_id`
