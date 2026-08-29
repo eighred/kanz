@@ -33,6 +33,7 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/pkg/bus"
 )
@@ -52,14 +53,42 @@ func (c *captureClient) Close() error { return nil }
 
 // stubStore returns a fixed fold. The arithmetic is book.go's and postgres.go's
 // business and is tested there; what is under test here is the ENVELOPE.
-type stubStore struct{ applied *Applied }
+//
+// IT HONOURS THE ANNOUNCER RATHER THAN IGNORING IT (#795). The projector no
+// longer publishes: it hands the store records to commit with the fold, and the
+// relay publishes them. A stub that dropped them would leave every wire
+// assertion below reading an empty client — green, and testing nothing.
+type stubStore struct {
+	applied *Applied
+	queue   *outbox.Memory
+	// announceErr, when set, is returned instead of enqueuing — the fold that
+	// cannot be announced.
+	announceErr error
+}
 
-func (s *stubStore) Apply(context.Context, string, *orderpb.Fill, time.Time) (*Applied, error) {
+func newStubStore(applied *Applied) *stubStore {
+	return &stubStore{applied: applied, queue: outbox.NewMemory()}
+}
+
+func (s *stubStore) Apply(ctx context.Context, _ string, _ *orderpb.Fill, _ time.Time, announce Announcer) (*Applied, error) {
+	if s.announceErr != nil {
+		return nil, s.announceErr
+	}
+	if announce != nil {
+		records, err := announce(ctx, s.applied)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.queue.Append(records...); err != nil {
+			return nil, err
+		}
+	}
 	return s.applied, nil
 }
 func (s *stubStore) Snapshot(context.Context, string, time.Time) (*domainpb.PortfolioSnapshot, error) {
 	return nil, errors.New("not implemented")
 }
+func (s *stubStore) Outbox() outbox.Queue { return s.queue }
 
 const (
 	testTenant    = "acme"
@@ -89,7 +118,7 @@ func newProjectorUnderTest(t *testing.T) (*Projector, *captureClient) {
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}
-	st := &stubStore{applied: &Applied{Aggregate: state(3), Venue: state(2)}}
+	st := newStubStore(&Applied{Aggregate: state(3), Venue: state(2)})
 	p, err := NewProjector(st, prod, testTenant)
 	if err != nil {
 		t.Fatalf("NewProjector: %v", err)
@@ -168,9 +197,26 @@ func TestPositionProjectorEmitsTwoValidFacts(t *testing.T) {
 		if got := envOut.GetPayloadSchemaRef(); got != "domain.v1.PositionState:1" {
 			t.Errorf("[%d] payload_schema_ref = %q", i, got)
 		}
-		if got := string(msg.Key); got != testPortfolio {
-			t.Errorf("[%d] partition key = %q, want the portfolio id — a book's states must stay "+
-				"ordered against each other", i, got)
+		// THE KEY IS THE INSTRUMENT ENTITY, NOT THE PORTFOLIO (#795).
+		//
+		// IT USED TO BE THE PORTFOLIO ID, on the reason "a book's states must stay
+		// ordered against each other". That premise does not hold, and it was worth
+		// checking rather than inheriting: the consumer is
+		// risk/state.ApplyPositionChanged, which calls port.SetPosition — one
+		// instrument's entry replaced in a map. Two FACTs for DIFFERENT instruments
+		// commute, so nothing ever needed them ordered against each other. What does
+		// need ordering is two FACTs for the SAME instrument, and the finer key
+		// preserves exactly that.
+		//
+		// The change is load-bearing rather than cosmetic. The outbox promises
+		// "records with the same partition key are published in id order", and that
+		// holds only where a key's commits cannot interleave. The fold's advisory
+		// lock is per (tenant, portfolio, instrument); keyed by portfolio, two fills
+		// in different instruments take different locks, interleave, and id order
+		// stops being commit order — which is #795 reintroduced one layer down.
+		if got, want := string(msg.Key), subject.PositionFor(testTenant, testPortfolio, testInstr); got != want {
+			t.Errorf("[%d] partition key = %q, want %q — same key must imply same advisory lock, or "+
+				"the outbox's id-order-is-commit-order guarantee is void for this FACT", i, got, want)
 		}
 	}
 
@@ -247,8 +293,8 @@ func TestPositionProjectorIgnoresANonFillEvent(t *testing.T) {
 // guard against the stub drifting from the real Applied contract: both
 // projections must be present, or the two-publish assertion above is vacuous.
 func TestStubStoreReturnsBothProjections(t *testing.T) {
-	st := &stubStore{applied: &Applied{Aggregate: state(3), Venue: state(2)}}
-	got, err := st.Apply(context.Background(), testPortfolio, nil, time.Time{})
+	st := newStubStore(&Applied{Aggregate: state(3), Venue: state(2)})
+	got, err := st.Apply(context.Background(), testPortfolio, nil, time.Time{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

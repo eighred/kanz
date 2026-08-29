@@ -15,6 +15,7 @@ import (
 
 	"github.com/eighred/kanz/internal/cashview"
 	comp "github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/services/oms/internal/position"
 )
 
@@ -36,8 +37,14 @@ func (s stubStore) Snapshot(context.Context, string, time.Time) (*domainpb.Portf
 
 // Apply is never called on the read path this test drives; position.Store
 // requires it, and a panic here would say so loudly if that ever changed.
-func (s stubStore) Apply(context.Context, string, *orderpb.Fill, time.Time) (*position.Applied, error) {
+func (s stubStore) Apply(context.Context, string, *orderpb.Fill, time.Time, position.Announcer) (*position.Applied, error) {
 	panic("the pre-trade read path must not fold a fill")
+}
+
+// Outbox is never reached either: this stub stands in for the READ side of
+// position.Store, and the queue exists for the announce side.
+func (s stubStore) Outbox() outbox.Queue {
+	panic("the pre-trade read path must not announce a position")
 }
 
 func snapshotFor(portfolioID string) *domainpb.PortfolioSnapshot {

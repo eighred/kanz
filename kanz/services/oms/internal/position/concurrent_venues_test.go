@@ -167,7 +167,7 @@ func concurrentFolds(t *testing.T, rz *foldRendezvous, store *Postgres, portfoli
 	for _, f := range fills {
 		go func(f *labelledFill) {
 			start.Wait()
-			applied, err := store.Apply(context.Background(), portfolio, f.fill, now)
+			applied, err := store.Apply(context.Background(), portfolio, f.fill, now, nil)
 			if err != nil {
 				out <- result{key: f.key, err: err}
 				return

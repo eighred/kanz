@@ -42,7 +42,7 @@ func TestBookApplyRefusesNonPositiveQuantity(t *testing.T) {
 				InstrumentId: "BTC-USD",
 				Quantity:     tc.qty,
 				Price:        &commonpb.Decimal{Coefficient: 50000, Exponent: 0},
-			}, time.Now())
+			}, time.Now(), nil)
 
 			if !errors.Is(err, ErrFillQuantityNotPositive) {
 				t.Fatalf("Apply(qty=%v) error = %v, want ErrFillQuantityNotPositive.\n"+
@@ -65,7 +65,7 @@ func TestBookApplyStillFoldsAPositiveFill(t *testing.T) {
 		InstrumentId: "BTC-USD",
 		Quantity:     &commonpb.Decimal{Coefficient: 2, Exponent: 0},
 		Price:        &commonpb.Decimal{Coefficient: 50000, Exponent: 0},
-	}, time.Now())
+	}, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("Apply on a valid fill: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestPostgresApplyRefusesNonPositiveQuantity(t *testing.T) {
 		InstrumentId: "BTC-USD",
 		Quantity:     &commonpb.Decimal{Coefficient: 0, Exponent: 0},
 		Price:        &commonpb.Decimal{Coefficient: 50000, Exponent: 0},
-	}, time.Now())
+	}, time.Now(), nil)
 
 	if !errors.Is(err, ErrFillQuantityNotPositive) {
 		t.Fatalf("Apply error = %v, want ErrFillQuantityNotPositive", err)

@@ -268,13 +268,39 @@ type MemoryStore struct {
 }
 
 // NewMemoryStore returns an empty in-memory Store.
-func NewMemoryStore() *MemoryStore {
-	q := outbox.NewMemory()
-	return &MemoryStore{
+func NewMemoryStore(opts ...MemoryStoreOption) *MemoryStore {
+	m := &MemoryStore{
 		orders:       make(map[string]*versioned),
 		appliedFills: make(map[string]bool),
-		outbox:       q,
-		proposals:    NewMemoryProposals(q),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	if m.outbox == nil {
+		m.outbox = outbox.NewMemory()
+	}
+	m.proposals = NewMemoryProposals(m.outbox)
+	return m
+}
+
+// MemoryStoreOption configures the in-process store.
+type MemoryStoreOption func(*MemoryStore)
+
+// WithSharedOutbox makes this store enqueue into a queue somebody else also
+// writes — in practice the position book's, so the ONE relay the composition
+// root runs drains both (#795).
+//
+// IT MIRRORS WHAT THE DURABLE DEPLOYMENT GETS FOR FREE. order.NewPostgres and
+// position.NewPostgres are handed the same pool, so both write the same outbox
+// TABLE and the relay finds every record. Two in-process maps have no such
+// shared table, and without this the position book's queue would have no
+// background drainer at all — a FACT that lives exactly as long as the bus keeps
+// redelivering the fill.
+func WithSharedOutbox(q *outbox.Memory) MemoryStoreOption {
+	return func(m *MemoryStore) {
+		if q != nil {
+			m.outbox = q
+		}
 	}
 }
 
