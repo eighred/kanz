@@ -303,3 +303,104 @@ func funcBodyText(t *testing.T, path, name string) string {
 	t.Fatalf("no func %s in %s", name, path)
 	return ""
 }
+
+// ONLY TWO FUNCTIONS MAY WRITE ordered_quantity, AND BOTH ARE GATED (#799).
+//
+// This is the property the guards above are really protecting, stated at the
+// field instead of at the handler. Today `Accept` sets it on admission (behind
+// submit's controls) and `Amend` rewrites it (now behind admitAmendment's). A
+// THIRD writer is how the hole reopens without either guard above noticing: a
+// reconciler, a sweep, a healing path or a future replace could move an order's
+// size with no control anywhere near it, and every test in this file would stay
+// green because handleAmend would still be doing the right thing.
+//
+// DEFAULT-DENY, so the third writer has to be argued for rather than merely
+// added. The exemption carries the reason and the issue that retires it, and the
+// dead-entry arm keeps an exemption from outliving its repair.
+var orderedQuantityWriters = map[string]string{
+	"Accept": "admission: the quantity the order comes into existence with, behind submit's " +
+		"halt gate, dual-control classification and pre-trade compliance check.",
+	"Amend": "the amendment itself, behind admitAmendment's re-entry into the same three " +
+		"controls (#799).",
+}
+
+func TestOnlyTheGatedPathsWriteOrderedQuantity(t *testing.T) {
+	root := moduleRoot(t)
+	dir := filepath.Join(root, filepath.FromSlash(omsOrderPkg))
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatalf("glob %s: %v", dir, err)
+	}
+
+	fset := token.NewFileSet()
+	writers := map[string][]string{} // function name -> where
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", path, perr)
+		}
+		rel := filepath.Base(path)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch v := n.(type) {
+				case *ast.AssignStmt:
+					// x.OrderedQuantity = ...
+					for _, lhs := range v.Lhs {
+						if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "OrderedQuantity" {
+							writers[fn.Name.Name] = append(writers[fn.Name.Name], rel)
+						}
+					}
+				case *ast.KeyValueExpr:
+					// OrderedQuantity: ... inside a composite literal
+					if k, ok := v.Key.(*ast.Ident); ok && k.Name == "OrderedQuantity" {
+						writers[fn.Name.Name] = append(writers[fn.Name.Name], rel)
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	// NON-VACUITY. Both known writers must be found, or the scan is looking for
+	// a field spelling this tree does not use and would report an empty set as
+	// a clean one.
+	for want := range orderedQuantityWriters {
+		if len(writers[want]) == 0 {
+			t.Fatalf("the scan found no ordered_quantity write in %s — the field was renamed or "+
+				"the aggregate moved, so this guard is asserting nothing", want)
+		}
+	}
+
+	var unexcused []string
+	for fn, where := range writers {
+		if _, ok := orderedQuantityWriters[fn]; ok {
+			continue
+		}
+		unexcused = append(unexcused, fn+" ("+strings.Join(uniq(where), ", ")+")")
+	}
+	if len(unexcused) > 0 {
+		sort.Strings(unexcused)
+		t.Errorf("these functions write ordered_quantity and are not known to be gated: %v.\n\n"+
+			"An order's SIZE is the number every admission control was asked about. A path that "+
+			"moves it without re-entering them is #799 reopened somewhere else — and the guards "+
+			"above would stay green, because handleAmend would still be correct.\n\n"+
+			"Either route the new writer through the controls (see admitAmendment) or add it to "+
+			"orderedQuantityWriters with the reason it needs none and the issue that retires the "+
+			"entry.", unexcused)
+	}
+
+	// DEAD-ENTRY ARM: an exemption that no longer matches a writer is a claim
+	// nobody is checking any more.
+	for fn, reason := range orderedQuantityWriters {
+		if len(writers[fn]) == 0 {
+			t.Errorf("exemption for %q (%s) matches no ordered_quantity writer — delete it", fn, reason)
+		}
+	}
+}
