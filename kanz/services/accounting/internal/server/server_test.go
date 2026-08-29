@@ -33,7 +33,7 @@ func seed(t *testing.T, store ledger.Store) {
 			Effective: eff, Knowledge: eff},
 	}
 	for _, e := range entries {
-		if err := store.Append(context.Background(), e); err != nil {
+		if err := store.Append(context.Background(), e, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -98,7 +98,7 @@ func seedEUR(t *testing.T, store ledger.Store) {
 			Effective: eff, Knowledge: eff},
 	}
 	for _, e := range entries {
-		if err := store.Append(context.Background(), e); err != nil {
+		if err := store.Append(context.Background(), e, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

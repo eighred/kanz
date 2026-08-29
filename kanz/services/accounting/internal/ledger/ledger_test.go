@@ -67,7 +67,7 @@ func TestReplayDeterministicNAV(t *testing.T) {
 	// Snapshot midway then fold the tail must equal a full replay.
 	st := NewMemoryStore()
 	for _, e := range events {
-		_ = st.Append(context.Background(), e)
+		_ = st.Append(context.Background(), e, nil)
 	}
 	mid := Replay("PF", events[:2])
 	snap := mid.Snapshot(day(2))

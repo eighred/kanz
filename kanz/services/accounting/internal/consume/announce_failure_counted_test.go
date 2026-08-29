@@ -1,7 +1,6 @@
 package consume
 
 import (
-	"context"
 	"errors"
 	"testing"
 )
@@ -37,10 +36,10 @@ func TestALostAnnouncementIsCounted(t *testing.T) {
 	}
 
 	// A fold that changes cash triggers the announcement.
-	if err := st.Append(context.Background(), cashEntry("e1", "PF1", "ACC1", "USD", 500)); err != nil {
+	if err := st.Append(foldCtx(), cashEntry("e1", "PF1", "ACC1", "USD", 500), f.announcerFor("PF1")); err != nil {
 		t.Fatal(err)
 	}
-	f.announce(context.Background(), "PF1")
+	f.flush(foldCtx(), "PF1")
 
 	if len(pub.events) != 0 {
 		t.Fatal("premise broken: the publisher accepted the announcement, so nothing was lost")
@@ -63,10 +62,10 @@ func TestASuccessfulAnnouncementIsNotCountedAsLost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Append(context.Background(), cashEntry("e1", "PF1", "ACC1", "USD", 500)); err != nil {
+	if err := st.Append(foldCtx(), cashEntry("e1", "PF1", "ACC1", "USD", 500), f.announcerFor("PF1")); err != nil {
 		t.Fatal(err)
 	}
-	f.announce(context.Background(), "PF1")
+	f.flush(foldCtx(), "PF1")
 
 	if lost != 0 {
 		t.Fatalf("a successful announcement was counted as lost %d time(s)", lost)
@@ -80,8 +79,8 @@ func TestTheAnnounceFailureObserverIsOptional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Append(context.Background(), cashEntry("e1", "PF1", "ACC1", "USD", 500)); err != nil {
+	if err := st.Append(foldCtx(), cashEntry("e1", "PF1", "ACC1", "USD", 500), f.announcerFor("PF1")); err != nil {
 		t.Fatal(err)
 	}
-	f.announce(context.Background(), "PF1") // must not panic
+	f.flush(foldCtx(), "PF1") // must not panic
 }

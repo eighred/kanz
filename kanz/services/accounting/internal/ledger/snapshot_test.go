@@ -85,7 +85,7 @@ func seed(t *testing.T, st Store, portfolio string, n int) []*Event {
 			Effective:    at,
 			Knowledge:    at,
 		}
-		if err := st.Append(context.Background(), e); err != nil {
+		if err := st.Append(context.Background(), e, nil); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 		out = append(out, e)
@@ -183,7 +183,7 @@ func TestMaterializeCurrentRefusesABackdatedTail(t *testing.T) {
 		Quantity: big.NewRat(-50, 1), Price: big.NewRat(20, 1), Cash: big.NewRat(1000, 1), CashCurrency: "USD",
 		Effective: t0.Add(3 * time.Hour), Knowledge: t0.Add(3 * time.Hour)}
 	for _, e := range []*Event{buy, sell} {
-		if err := st.Append(ctx, e); err != nil {
+		if err := st.Append(ctx, e, nil); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -197,7 +197,7 @@ func TestMaterializeCurrentRefusesABackdatedTail(t *testing.T) {
 	backdated := &Event{EntryID: "late", PortfolioID: "PF", Type: EntryTrade, InstrumentID: "AAPL",
 		Quantity: big.NewRat(100, 1), Price: big.NewRat(5, 1), Cash: big.NewRat(-500, 1), CashCurrency: "USD",
 		Effective: t0, Knowledge: t0.Add(9 * time.Hour)}
-	if err := st.Append(ctx, backdated); err != nil {
+	if err := st.Append(ctx, backdated, nil); err != nil {
 		t.Fatalf("append backdated: %v", err)
 	}
 

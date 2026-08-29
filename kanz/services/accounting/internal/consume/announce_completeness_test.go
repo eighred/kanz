@@ -1,7 +1,6 @@
 package consume
 
 import (
-	"context"
 	"math/big"
 	"testing"
 	"time"
@@ -74,18 +73,18 @@ func TestAnnounce_ADividendMovesTheAnnouncedBalance(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pub := &capturingPublisher{}
 			a, st := announcerOver(t, pub)
-			ctx := context.Background()
+			ctx := foldCtx()
 			at := time.Unix(1_700_000_000, 0).UTC()
 
 			for _, e := range []*ledger.Event{
 				positionEntry("t:1", "PF1", "AAPL", tc.qty, at),
 				cashEntry("c:1", "PF1", "", "USD", 1000),
 			} {
-				if err := st.Append(ctx, e); err != nil {
+				if err := st.Append(ctx, e, nil); err != nil {
 					t.Fatalf("append: %v", err)
 				}
 			}
-			if err := a.Announce(ctx, "PF1"); err != nil {
+			if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
 				t.Fatalf("Announce: %v", err)
 			}
 			before := dec.FromProto(pub.last().GetTotal())
@@ -95,10 +94,10 @@ func TestAnnounce_ADividendMovesTheAnnouncedBalance(t *testing.T) {
 
 			div := corpActDividend("ca:1", "PF1", "AAPL", "USD", big.NewRat(1, 4),
 				at.Add(24*time.Hour))
-			if err := st.Append(ctx, div); err != nil {
+			if err := st.Append(ctx, div, nil); err != nil {
 				t.Fatalf("append dividend: %v", err)
 			}
-			if err := a.Announce(ctx, "PF1"); err != nil {
+			if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
 				t.Fatalf("Announce: %v", err)
 			}
 			after := dec.FromProto(pub.last().GetTotal())
@@ -117,11 +116,11 @@ func TestAnnounce_ADividendMovesTheAnnouncedBalance(t *testing.T) {
 func TestAnnounce_CarriesTheDeploymentsEntrySourcePosture(t *testing.T) {
 	pub := &capturingPublisher{}
 	a, st := announcerOver(t, pub)
-	ctx := context.Background()
-	if err := st.Append(ctx, cashEntry("c:1", "PF1", "", "USD", 1000)); err != nil {
+	ctx := foldCtx()
+	if err := st.Append(ctx, cashEntry("c:1", "PF1", "", "USD", 1000), nil); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	if err := a.Announce(ctx, "PF1"); err != nil {
+	if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
 		t.Fatalf("Announce: %v", err)
 	}
 	cp := pub.last().GetCompleteness()
@@ -149,11 +148,11 @@ func TestAnnounce_AnUnstatedPostureIsNotPublishedAsComplete(t *testing.T) {
 	st := ledger.NewMemoryStore()
 	at := time.Unix(1_700_000_000, 0).UTC()
 	a := NewAnnouncer(st, pub, "USD", EntrySourcePosture{}, nil, func() time.Time { return at })
-	ctx := context.Background()
-	if err := st.Append(ctx, cashEntry("c:1", "PF1", "", "USD", 1000)); err != nil {
+	ctx := foldCtx()
+	if err := st.Append(ctx, cashEntry("c:1", "PF1", "", "USD", 1000), nil); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	if err := a.Announce(ctx, "PF1"); err != nil {
+	if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
 		t.Fatalf("Announce: %v", err)
 	}
 	if cp := pub.last().GetCompleteness(); cp != nil {

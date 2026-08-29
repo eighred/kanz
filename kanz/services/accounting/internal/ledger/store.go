@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/eighred/kanz/internal/outbox"
 )
 
 // Store is the durable home of the append-only journal and the periodic book
@@ -16,8 +18,19 @@ import (
 // change to the book or the fold. Append is idempotent on EntryID — the journal
 // is exactly-once over an at-least-once producer.
 type Store interface {
-	// Append records one journal entry (idempotent on EntryID).
-	Append(ctx context.Context, e *Event) error
+	// Append records one journal entry (idempotent on EntryID), and enqueues
+	// whatever announce returns IN THE SAME TRANSACTION (#804).
+	//
+	// THE announce PARAMETER IS THE SAME DECISION order.Store.Create'S IS (#292).
+	// The cash announcement was a second, independent write whose only recovery
+	// was the next fold for the same portfolio, so one broker blip refused every
+	// order for that portfolio under a buying-power mandate until unrelated
+	// activity happened to arrive. It is a parameter rather than something the
+	// store reaches for, so the ledger goes on knowing nothing about subjects or
+	// FACTs.
+	//
+	// Nil announces nothing.
+	Append(ctx context.Context, e *Event, announce Announcer) error
 	// Journal returns a portfolio's ENTIRE journal (the caller orders for the
 	// fold). It is unbounded by construction and grows for the life of the
 	// portfolio: only the snapshotter, which must fold everything to build a
@@ -39,6 +52,18 @@ type Store interface {
 	// at all. It is the Snapshotter's work queue.
 	StalePortfolios(ctx context.Context, limit int) ([]string, error)
 }
+
+// Announcer renders the FACTs that must become true at the same instant the
+// entry does. It is called INSIDE Append's transaction, over a Store whose reads
+// SEE THE UNCOMMITTED ENTRY — which is what lets it announce the level the fold
+// produced rather than the one that preceded it.
+//
+// It must do nothing but read and build: no publish, no second Append, no I/O of
+// its own. Everything it returns is enqueued before the commit, so an entry
+// whose announcement cannot be built is an entry that does not land — the
+// correct direction, and the same stance outbox.From takes on a record with no
+// tenant.
+type Announcer func(ctx context.Context, st Store) ([]outbox.Record, error)
 
 // ErrNoSnapshot is returned by LoadSnapshot when a portfolio has no snapshot yet.
 var ErrNoSnapshot = errors.New("ledger: no snapshot")
@@ -212,6 +237,7 @@ type MemoryStore struct {
 	journal   map[string][]*Event // portfolio -> entries
 	seen      map[string]bool     // entry dedup across the journal
 	snapshots map[string]*Snapshot
+	outbox    *outbox.Memory
 }
 
 // NewMemoryStore returns an empty in-memory Store.
@@ -220,21 +246,94 @@ func NewMemoryStore() *MemoryStore {
 		journal:   make(map[string][]*Event),
 		seen:      make(map[string]bool),
 		snapshots: make(map[string]*Snapshot),
+		outbox:    outbox.NewMemory(),
 	}
 }
 
-func (m *MemoryStore) Append(_ context.Context, e *Event) error {
+// Outbox is the in-process queue this store enqueues announcements into. Never
+// nil, so a Folder built on this seam always has somewhere to put one.
+func (m *MemoryStore) Outbox() outbox.Queue { return m.outbox }
+
+func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) error {
 	if e == nil || e.EntryID == "" {
 		return errors.New("ledger: cannot append entry with empty entry_id")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.seen[e.EntryID] {
-		return nil // idempotent
+		// IDEMPOTENT, AND THAT INCLUDES THE ANNOUNCEMENT. A redelivered entry
+		// changes no balance, so re-announcing would enqueue a duplicate level for
+		// a fold that did not happen — harmless on the wire and noise in the
+		// outbox. Postgres reaches the same place by a different route: its INSERT
+		// is ON CONFLICT DO NOTHING, so the level the announcer computes is
+		// unchanged and the record it enqueues is a correct restatement.
+		return nil
 	}
 	m.seen[e.EntryID] = true
 	m.journal[e.PortfolioID] = append(m.journal[e.PortfolioID], e)
+
+	// ENQUEUED UNDER THE SAME LOCK THAT WROTE THE ENTRY — this store's whole
+	// equivalent of the transaction Postgres.Append opens, and the same argument
+	// order.MemoryStore.Create makes. The announcer reads m through the unexported
+	// readers below, which do not re-take the lock.
+	if announce != nil {
+		records, err := announce(ctx, memoryReader{m})
+		if err != nil {
+			return err
+		}
+		if err := m.outbox.Append(records...); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// memoryReader is the MemoryStore seen from inside its own write lock: the same
+// journal and snapshots, with the mutex already held.
+//
+// IT EXISTS BECAUSE THE ANNOUNCER READS THE BOOK IT IS ANNOUNCING. Calling
+// m.Journal from inside Append would take m.mu a second time and deadlock, and
+// dropping the lock around the announcer would let another fold interleave
+// between the entry and the level computed from it — the reordering the durable
+// store's advisory lock exists to prevent, reintroduced in the seam every
+// DB-free test runs on.
+type memoryReader struct{ m *MemoryStore }
+
+func (r memoryReader) Append(context.Context, *Event, Announcer) error {
+	return errors.New("ledger: an announcer must not append")
+}
+
+func (r memoryReader) Journal(_ context.Context, portfolioID string) ([]*Event, error) {
+	src := r.m.journal[portfolioID]
+	out := make([]*Event, len(src))
+	copy(out, src)
+	return out, nil
+}
+
+func (r memoryReader) JournalSince(_ context.Context, portfolioID string, after time.Time) ([]*Event, error) {
+	var out []*Event
+	for _, e := range r.m.journal[portfolioID] {
+		if e.Knowledge.After(after) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (r memoryReader) SaveSnapshot(context.Context, *Snapshot) error {
+	return errors.New("ledger: an announcer must not write a snapshot")
+}
+
+func (r memoryReader) LoadSnapshot(_ context.Context, portfolioID string) (*Snapshot, error) {
+	snap, ok := r.m.snapshots[portfolioID]
+	if !ok {
+		return nil, ErrNoSnapshot
+	}
+	return snap, nil
+}
+
+func (r memoryReader) StalePortfolios(context.Context, int) ([]string, error) {
+	return nil, errors.New("ledger: an announcer must not scan for stale portfolios")
 }
 
 func (m *MemoryStore) Journal(_ context.Context, portfolioID string) ([]*Event, error) {
