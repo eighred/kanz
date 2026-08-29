@@ -117,7 +117,26 @@ func (p *PostgresExceptions) AddAll(ctx context.Context, exs []pricing.Exception
 	return nil
 }
 
-func (p *PostgresExceptions) Override(ctx context.Context, id string, o pricing.Override) error {
+// Override appends the audit record, flips the status, announces the FACT and
+// consumes claim — in ONE transaction.
+//
+// THE CLAIM IS THE FIRST STATEMENT, AND IT IS IN HERE RATHER THAN BEFORE (#807).
+//
+// It used to be a separate call that committed on its own, and the approve
+// handler ran the two in sequence. A process death between them consumed the
+// proposal and applied nothing: the second signature was spent, the override
+// never happened, and no row, FACT or log line anywhere said so. The exception
+// went on reading as OPEN while the proposal that would have closed it read as
+// decided, so the contradiction was only findable by a human who went looking —
+// and until they did, the book was valued off a price the system had flagged.
+//
+// FIRST, not last, so a racing approver blocks on the proposal row before it
+// takes the exception's — this transaction never waits on one lock while holding
+// another. Two approvers acting on one proposal at the same moment serialise
+// here: the loser's DELETE sees zero rows once the winner commits and it returns
+// ErrProposalAlreadyDecided having written nothing, instead of both appending an
+// override for one decision.
+func (p *PostgresExceptions) Override(ctx context.Context, id string, o pricing.Override, claim Claim) error {
 	// ONE implementation of what a storable override is, shared with the
 	// in-memory queue. It carries the self-approval refusal, so the clause the
 	// control rests on cannot be reached around by a caller that skips the
@@ -130,6 +149,16 @@ func (p *PostgresExceptions) Override(ctx context.Context, id string, o pricing.
 		return fmt.Errorf("begin override tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if claim.Held() {
+		claimed, err := claimProposal(ctx, tx, claim.ProposalID)
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			return fmt.Errorf("%w: proposal %s", ErrProposalAlreadyDecided, claim.ProposalID)
+		}
+	}
 
 	var status, instrumentID string
 	err = tx.QueryRow(ctx,

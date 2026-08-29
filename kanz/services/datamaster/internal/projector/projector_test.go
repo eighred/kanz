@@ -45,7 +45,7 @@ func vendors() []feed.VendorFeed {
 
 func newProjector(feeds []feed.VendorFeed) (*Projector, *store.MemoryGoldenStore, store.ExceptionStore) {
 	golden := store.NewMemoryGoldenStore()
-	exceptions := store.NewQueueStore(pricing.NewQueue())
+	exceptions := store.NewQueueStore(pricing.NewQueue(), nil)
 	return New(feeds, golden, exceptions, nil, fixedClock()), golden, exceptions
 }
 
@@ -143,7 +143,7 @@ func TestRefreshIsAllOrNothingWhenAVendorIsDown(t *testing.T) {
 
 	// BLOOMBERG (the priority-0 vendor) goes down; ICE alone would still resolve a
 	// complete-looking record for INST1, with ICE's conflicting ISIN surviving.
-	degraded := New([]feed.VendorFeed{failing{}, vendors()[1]}, golden, store.NewQueueStore(nil), nil, fixedClock())
+	degraded := New([]feed.VendorFeed{failing{}, vendors()[1]}, golden, store.NewQueueStore(nil, nil), nil, fixedClock())
 	if err := degraded.Refresh(ctx); err == nil {
 		t.Fatal("a refresh with an unreachable vendor must fail, not master a book from the vendors that answered")
 	}
@@ -171,7 +171,7 @@ func TestRefreshDoesNotReopenAnAdjudicatedBreak(t *testing.T) {
 		t.Fatalf("no exceptions filed: %v %v", open, err)
 	}
 	id := open[0].ID
-	if err := exceptions.Override(ctx, id, pricing.Override{Actor: "alice@kanz", Reason: "vendor confirmed", ChosenPrice: dec.Rat("101"), At: now}); err != nil {
+	if err := exceptions.Override(ctx, id, pricing.Override{Actor: "alice@kanz", Reason: "vendor confirmed", ChosenPrice: dec.Rat("101"), At: now}, store.Claim{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -218,7 +218,7 @@ func (f *fakeLock) TryAcquire(context.Context) (func(), bool, error) {
 func TestRefreshSkipsTheCycleWhenAnotherReplicaHoldsIt(t *testing.T) {
 	ctx := context.Background()
 	golden := store.NewMemoryGoldenStore()
-	exceptions := store.NewQueueStore(nil)
+	exceptions := store.NewQueueStore(nil, nil)
 	lock := &fakeLock{acquired: false}
 
 	// A feed that fails if it is so much as touched: losing the election must not
