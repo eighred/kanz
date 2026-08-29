@@ -50,7 +50,7 @@ func newPool(t *testing.T) *pgxpool.Pool {
 func applySchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS ledger_entries, ledger_snapshots CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS ledger_entries, ledger_snapshots, outbox CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))
@@ -97,12 +97,12 @@ func TestPostgresJournalRoundTripAndReplay(t *testing.T) {
 		tradeEvent("e3", "AAPL", -30, 170, 5100, t0.Add(2*time.Hour), t0.Add(2*time.Hour)),
 	}
 	for _, e := range events {
-		if err := st.Append(ctx, e); err != nil {
+		if err := st.Append(ctx, e, nil); err != nil {
 			t.Fatalf("append %s: %v", e.EntryID, err)
 		}
 	}
 	// Idempotent re-append is a no-op.
-	if err := st.Append(ctx, events[0]); err != nil {
+	if err := st.Append(ctx, events[0], nil); err != nil {
 		t.Fatalf("re-append: %v", err)
 	}
 
@@ -133,8 +133,8 @@ func TestPostgresJournalAsOf(t *testing.T) {
 	ctx := context.Background()
 
 	t0 := time.Unix(1_700_000_000, 0).UTC()
-	_ = st.Append(ctx, tradeEvent("e1", "AAPL", 100, 150, -15000, t0, t0))
-	_ = st.Append(ctx, tradeEvent("e2", "AAPL", 50, 160, -8000, t0.Add(2*time.Hour), t0.Add(2*time.Hour)))
+	_ = st.Append(ctx, tradeEvent("e1", "AAPL", 100, 150, -15000, t0, t0), nil)
+	_ = st.Append(ctx, tradeEvent("e2", "AAPL", 50, 160, -8000, t0.Add(2*time.Hour), t0.Add(2*time.Hour)), nil)
 
 	// As-of just after the first entry: only e1 is visible on the effective axis.
 	asOf, err := st.JournalAsOf(ctx, "PORT-1", t0.Add(time.Hour), time.Time{})
@@ -157,7 +157,7 @@ func TestPostgresSnapshotTailEqualsFullReplay(t *testing.T) {
 
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	first := tradeEvent("e1", "AAPL", 100, 150, -15000, t0, t0)
-	if err := st.Append(ctx, first); err != nil {
+	if err := st.Append(ctx, first, nil); err != nil {
 		t.Fatalf("append e1: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestPostgresSnapshotTailEqualsFullReplay(t *testing.T) {
 		t.Fatalf("save snapshot: %v", err)
 	}
 	tail := tradeEvent("e2", "AAPL", 50, 160, -8000, t0.Add(time.Hour), t0.Add(time.Hour))
-	if err := st.Append(ctx, tail); err != nil {
+	if err := st.Append(ctx, tail, nil); err != nil {
 		t.Fatalf("append e2: %v", err)
 	}
 
@@ -208,7 +208,7 @@ func TestPostgresCrossReplicaConsistency(t *testing.T) {
 		tradeEvent("e2", "MSFT", 200, 300, -60000, t0.Add(time.Hour), t0.Add(time.Hour)),
 		tradeEvent("e3", "AAPL", -40, 170, 6800, t0.Add(2*time.Hour), t0.Add(2*time.Hour)),
 	} {
-		if err := writer.Append(ctx, e); err != nil {
+		if err := writer.Append(ctx, e, nil); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
@@ -246,7 +246,7 @@ func TestPostgresJournalSinceReturnsOnlyTheTail(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	for i := range 20 {
 		at := t0.Add(time.Duration(i) * time.Hour)
-		if err := st.Append(ctx, tradeEvent(fmt.Sprintf("e%02d", i), "AAPL", 10, 100, -1000, at, at)); err != nil {
+		if err := st.Append(ctx, tradeEvent(fmt.Sprintf("e%02d", i), "AAPL", 10, 100, -1000, at, at), nil); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
@@ -297,7 +297,7 @@ func TestPostgresJournalSinceUsesTheKnowledgeIndex(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	for i := range 2000 {
 		at := t0.Add(time.Duration(i) * time.Minute)
-		if err := st.Append(ctx, tradeEvent(fmt.Sprintf("e%05d", i), "AAPL", 1, 100, -100, at, at)); err != nil {
+		if err := st.Append(ctx, tradeEvent(fmt.Sprintf("e%05d", i), "AAPL", 1, 100, -100, at, at), nil); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
@@ -393,7 +393,7 @@ func TestPostgresWithoutTenantGUCIsFailClosed(t *testing.T) {
 	err = NewPostgres(bare).Append(context.Background(), &Event{
 		EntryID:     "E-NO-GUC",
 		PortfolioID: "P-1",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("Append succeeded with no app.tenant_id GUC set — RLS is not protecting this table, or the tenant scoping is gone")
 	}

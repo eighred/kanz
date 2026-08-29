@@ -42,7 +42,7 @@ func TestAppend_RecordsTheAccountTheFillSettledAgainst(t *testing.T) {
 	store := NewPostgres(pool)
 	ctx := context.Background()
 
-	if err := store.Append(ctx, entry("fill:1", "fund-alpha", "okx-alpha")); err != nil {
+	if err := store.Append(ctx, entry("fill:1", "fund-alpha", "okx-alpha"), nil); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	var got string
@@ -65,7 +65,7 @@ func TestAppend_AnEntryWithNoExchangeAccountIsAllowed(t *testing.T) {
 	e := entry("cash:1", "fund-alpha", "") // no venue account: a wire in, not a fill
 	e.Type = EntryCash
 	e.Quantity, e.Price, e.InstrumentID = nil, nil, ""
-	if err := store.Append(context.Background(), e); err != nil {
+	if err := store.Append(context.Background(), e, nil); err != nil {
 		t.Fatalf("Append of a non-exchange entry: %v — a cash movement touches no venue account "+
 			"and must still be writable", err)
 	}
@@ -160,7 +160,7 @@ func TestAppend_RecordsTheAccountACashMovementSettledAgainst(t *testing.T) {
 		Effective:      time.Now().UTC(),
 		Knowledge:      time.Now().UTC(),
 	}
-	if err := store.Append(ctx, cash); err != nil {
+	if err := store.Append(ctx, cash, nil); err != nil {
 		t.Fatalf("Append a funded cash movement: %v.\n"+
 			"The write-guard and the RLS write policy must accept a CASH entry that declares "+
 			"an account, exactly as they accept a fill's — otherwise #415's funding path is "+
@@ -193,7 +193,7 @@ func TestJournal_ReadsBackTheVenueAccount(t *testing.T) {
 	store := NewPostgres(pool)
 	ctx := context.Background()
 
-	if err := store.Append(ctx, entry("fill:rt-1", "fund-rt", "okx-alpha")); err != nil {
+	if err := store.Append(ctx, entry("fill:rt-1", "fund-rt", "okx-alpha"), nil); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	events, err := store.Journal(ctx, "fund-rt")
@@ -248,7 +248,7 @@ func TestVenueAccountCash_OverARealJournal(t *testing.T) {
 		// money no exchange holds.
 		cash("proj:4", "", "USD", 1_000_000),
 	} {
-		if err := store.Append(ctx, e); err != nil {
+		if err := store.Append(ctx, e, nil); err != nil {
 			t.Fatalf("Append %s: %v", e.EntryID, err)
 		}
 	}

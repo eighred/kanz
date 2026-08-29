@@ -9,7 +9,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/eighred/kanz/internal/outbox"
 )
 
 // Postgres is the durable Store backed by the 0001_ledger.sql schema — the
@@ -20,15 +23,67 @@ import (
 // store's Journal reconstruct byte-identical books.
 type Postgres struct {
 	pool *pgxpool.Pool
+	// q is what the READS run on. It is the pool everywhere except inside
+	// Append, where withTx swaps in the open transaction — see withTx.
+	q querier
+}
+
+// querier is the read/write surface *pgxpool.Pool and pgx.Tx have in common.
+//
+// IT EXISTS SO A BALANCE CAN BE COMPUTED FROM INSIDE THE APPEND'S OWN
+// TRANSACTION (#804). The cash announcement is now enqueued with the entry that
+// caused it, and a level read through the POOL from inside that transaction
+// would not see the uncommitted entry — it would announce the balance as it was
+// BEFORE the fold, every time, which is a wrong number rather than a late one.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
 // NewPostgres returns a Postgres store over an existing pool. The caller owns
 // the pool lifecycle (Close), matching persist.NewPostgres.
-func NewPostgres(pool *pgxpool.Pool) *Postgres { return &Postgres{pool: pool} }
+func NewPostgres(pool *pgxpool.Pool) *Postgres { return &Postgres{pool: pool, q: pool} }
+
+// withTx returns a Store whose reads run inside tx.
+//
+// A SHALLOW COPY, NOT A MUTATION. Postgres is shared by every goroutine folding
+// into this book; swapping the field in place would point one fold's reads at
+// another fold's transaction. The copy is handed only to the announcer callback
+// and dies with the transaction.
+//
+// Its WRITES are the ones that must not be reached: an announcer exists to READ
+// the book it is about to announce, and a second Append from inside an Append
+// would take the same advisory lock it is already holding and enqueue a record
+// nothing ordered. appendUnavailable says so rather than deadlocking or
+// succeeding quietly.
+func (p *Postgres) withTx(tx pgx.Tx) *Postgres { return &Postgres{pool: p.pool, q: tx} }
+
+// Outbox is the durable queue this store enqueues announcements into. Built on
+// the same pool the journal is written through, so the relay reads under the
+// same RLS scope that wrote the record and there is no cross-tenant read to be
+// had.
+func (p *Postgres) Outbox() outbox.Queue { return outbox.NewPostgres(p.pool, "accounting") }
 
 // Append records one journal entry, idempotent on entry_id (ON CONFLICT DO
 // NOTHING) — the journal is exactly-once over an at-least-once producer.
-func (p *Postgres) Append(ctx context.Context, e *Event) error {
+//
+// announce is called WITH THE ENTRY WRITTEN AND NOT YET COMMITTED, over a Store
+// whose reads see it, and the records it returns are enqueued in the same
+// transaction (#804). Nil announces nothing, which is what the MemoryStore seam
+// and every read-only caller pass.
+//
+// # Why the announcement had to move in here
+//
+// It used to be a second, independent write after Append returned, and its error
+// was discarded on purpose — the ledger is the book of record and nacking the
+// fold to retry a publish would turn a broker blip into a stalled ledger. That
+// reasoning was right. What it left out was the recovery: the ONLY thing that
+// re-announced a portfolio was the next fold for that portfolio, so a single
+// blip refused every order for it under a buying-power mandate until unrelated
+// activity happened to arrive. Enqueued here, the entry and its announcement
+// commit together and the relay retries the publish on its own schedule.
+func (p *Postgres) Append(ctx context.Context, e *Event, announce Announcer) error {
 	if e == nil || e.EntryID == "" {
 		return errors.New("ledger: cannot append entry with empty entry_id")
 	}
@@ -56,6 +111,27 @@ func (p *Postgres) Append(ctx context.Context, e *Event) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
 
+	// THE PER-PORTFOLIO LOCK, FIRST, AND IT IS WHAT MAKES THE OUTBOX ORDERED (#804).
+	//
+	// The relay publishes one partition key in id order, and id order is COMMIT
+	// order only where a key's transactions cannot interleave. The OMS gets that
+	// free: every enqueue there rides a compare-and-swap, so two transactions for
+	// one order cannot both commit. This journal has no such write — it is
+	// append-only with ON CONFLICT DO NOTHING — so two folds for one portfolio
+	// would otherwise commit independently, and the relay would publish the older
+	// BALANCE last. internal/cashview replaces its map entry unconditionally with
+	// no as_of guard, so that stale level is what every buying-power check then
+	// reads until the next fold. Same defect as #795, same lock shape as
+	// position.lockInstrument.
+	//
+	// It is taken before the venue-account declaration and before the INSERT, so
+	// every transaction acquires in one order and two portfolios never contend.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext(app_current_tenant()), hashtext($1))`,
+		e.PortfolioID); err != nil {
+		return fmt.Errorf("append entry %s: lock portfolio %s: %w", e.EntryID, e.PortfolioID, err)
+	}
+
 	if _, err := tx.Exec(ctx, `SELECT set_config('app.venue_account_id', $1, true)`, e.VenueAccountID); err != nil {
 		return fmt.Errorf("append entry %s: declare venue account: %w", e.EntryID, err)
 	}
@@ -72,6 +148,19 @@ func (p *Postgres) Append(ctx context.Context, e *Event) error {
 	if err != nil {
 		return fmt.Errorf("append entry %s: %w", e.EntryID, err)
 	}
+	// THE ANNOUNCEMENT COMMITS WITH THE ENTRY (#804, #292). It reads through
+	// p.withTx(tx), so the level it computes INCLUDES the entry above — the fold's
+	// own effect, which is the whole point of announcing it.
+	if announce != nil {
+		records, aerr := announce(ctx, p.withTx(tx))
+		if aerr != nil {
+			return fmt.Errorf("append entry %s: announce: %w", e.EntryID, aerr)
+		}
+		if err := outbox.Enqueue(ctx, tx, records...); err != nil {
+			return fmt.Errorf("append entry %s: enqueue announcement: %w", e.EntryID, err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("append entry %s: commit: %w", e.EntryID, err)
 	}
@@ -130,7 +219,7 @@ func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, er
 	if limit <= 0 {
 		return nil, errors.New("ledger: StalePortfolios needs a positive limit")
 	}
-	rows, err := p.pool.Query(ctx, `
+	rows, err := p.q.Query(ctx, `
 		SELECT e.portfolio_id
 		FROM ledger_entries e
 		LEFT JOIN ledger_snapshots s ON s.portfolio_id = e.portfolio_id
@@ -155,7 +244,7 @@ func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, er
 }
 
 func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, knowBound, knowAfter time.Time) ([]*Event, error) {
-	rows, err := p.pool.Query(ctx, `
+	rows, err := p.q.Query(ctx, `
 		SELECT entry_id, portfolio_id, venue_account_id, entry_type, instrument_id,
 		       quantity, price, cash, cash_currency, action,
 		       effective_time, knowledge_time, source_ref
@@ -231,7 +320,7 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 	if err != nil {
 		return fmt.Errorf("encode accrued %s: %w", snap.PortfolioID, err)
 	}
-	_, err = p.pool.Exec(ctx, `
+	_, err = p.q.Exec(ctx, `
 		INSERT INTO ledger_snapshots
 			(tenant_id, portfolio_id, positions, cash, accrued, through_time,
 			 max_effective_time, updated_at)
@@ -270,7 +359,7 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	// "unrecorded" is one value on both sides rather than a sentinel timestamp
 	// whose comparison could be written backwards.
 	var maxEffective *time.Time
-	err := p.pool.QueryRow(ctx, `
+	err := p.q.QueryRow(ctx, `
 		SELECT positions, cash, accrued, through_time, max_effective_time
 		FROM ledger_snapshots WHERE portfolio_id = $1
 	`, portfolioID).Scan(&positions, &cash, &accrued, &through, &maxEffective)
