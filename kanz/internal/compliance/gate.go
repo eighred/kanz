@@ -11,6 +11,7 @@ import (
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	// decutil: this package's own tests declare a local `dec(...)` Decimal-literal
 	// helper (engine_test.go), so the platform decimal package is aliased here to
@@ -27,8 +28,10 @@ import (
 //
 // The check is hypothetical: it projects the POST-trade book (current holdings
 // plus the order delta), evaluates the mandate against that, and rejects on
-// BREACH — a WARN passes (advisory). Every decision is recorded (COMP-01e), pass
-// or reject, THROUGH WHATEVER RECORDER THE COMPOSITION ROOT WIRED.
+// BREACH — a WARN passes (advisory). Every TERMINAL decision is recorded
+// (COMP-01e) — admitted or refused, evaluated or short-circuited — THROUGH
+// WHATEVER RECORDER THE COMPOSITION ROOT WIRED. A transient failure records
+// nothing, because nothing was decided.
 //
 // CORRECTION (2026-08-24). That sentence used to end "so the audit trail is
 // complete", and it was FALSE wherever it mattered most: services/oms/cmd/oms
@@ -281,6 +284,23 @@ type Decision struct {
 	// waiting to be governed, it is un-governable until someone republishes, and
 	// admitting on that is a guess about rules nobody has read (#619).
 	Unreadable bool
+
+	// Unconstrained means a mandate EXISTS for this portfolio and carries no
+	// rules — somebody decided, explicitly, to constrain nothing. So, a fifth
+	// time, NO RULE WAS EVALUATED, and the order is ADMITTED.
+	//
+	// IT IS NOT Ungoverned, AND THE DISTINCTION IS THE ONE EXEC-M14 EXISTS FOR.
+	// "Nobody has decided what governs this portfolio" is a gap; "somebody
+	// decided nothing constrains it" is a decision. Collapsing them is what made
+	// the gap silent, and this flag is what keeps them apart on the far side of
+	// the gate as well as inside it.
+	//
+	// It exists because the audit record needs it (#797). Without a flag this
+	// path reached the decision recorder as a bare Decision and would have been
+	// filed under whatever the reason switch's last arm guessed — an audit trail
+	// that answers confidently and wrongly, which is worse than one that says
+	// UNCLASSIFIED.
+	Unconstrained bool
 }
 
 // NewPreTradeGate wires the gate. engine defaults to NewEngine(nil).
@@ -522,7 +542,112 @@ func bookInDomain(b *Book) bool {
 // (book/mandate load failure) and the caller should retry; a clean Decision with
 // Allowed=false is a terminal compliance rejection. An order against a portfolio
 // with no mandate is allowed.
+//
+// # IT IS A RECORDING WRAPPER, AND THAT SHAPE IS THE FIX (#797)
+//
+// The decision logic used to be this function, with ten terminal returns and
+// exactly ONE g.record among them — on the full-evaluation path. Nine paths
+// recorded nothing, and TWO of those returned Allowed: true: the ungoverned
+// portfolio and the mandate that constrains nothing. For an order admitted that
+// way the platform could not answer CLAUDE.md's attributability requirement —
+// "which mandate permitted it" — because nothing anywhere said a compliance
+// decision had been made at all. The ungoverned COUNTER gives an aggregate; a
+// reviewer asking about THIS order got silence.
+//
+// Adding g.record to nine call sites would have fixed today's nine and nothing
+// about the tenth. So the recording moved OUT: decide() owns every return, this
+// function owns the only record, and a new short-circuit cannot skip it without
+// being written in the wrong function. test/arch keeps that true.
+//
+// A TRANSIENT ERROR RECORDS NOTHING, deliberately. Nothing was decided — the
+// book or the mandate could not be read — and a record saying otherwise would
+// put a decision in the audit trail that no enforcement point ever made. The
+// order is redelivered and evaluated again.
 func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, error) {
+	dec, err := g.decide(ctx, d)
+	if err != nil {
+		return dec, err
+	}
+	g.record(ctx, g.decisionRecord(d, dec))
+	return dec, nil
+}
+
+// decisionRecord renders one terminal decision for the audit trail, SYNTHESISING
+// the result for the paths that short-circuited before any rule ran.
+//
+// A nil Result is the marker: the engine sets one on every path that actually
+// evaluated a mandate, so its absence means no rule was applied. The record then
+// carries WHY, on NotEvaluated, rather than an invented Violation — a Violation
+// says "a rule did not pass", and claiming one fired would put a rule id in the
+// audit trail that never ran. Violations stays empty and the reason is its own
+// field.
+//
+// THE STATUS IS THE VERDICT THE ORDER GOT, not a verdict about the rules. BREACH
+// where the gate refused, WARN where it admitted without evaluating anything —
+// advisory is exactly what an admission nobody checked is. Neither is
+// UNSPECIFIED: that is the zero value, and "nobody set it" and "we could not
+// evaluate" must not be the same observable state.
+func (g *PreTradeGate) decisionRecord(d OrderDelta, dec Decision) DecisionRecord {
+	rec := DecisionRecord{
+		Phase:        PhasePreTrade,
+		TenantID:     d.TenantID,
+		Result:       dec.Result,
+		OrderID:      d.OrderID,
+		Issuer:       d.Issuer,
+		Allowed:      dec.Allowed,
+		WorkedSlices: d.WorkedSlices,
+	}
+	if rec.Result != nil {
+		return rec
+	}
+	rec.NotEvaluated = notEvaluatedCode(dec)
+	status := compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
+	if dec.Allowed {
+		status = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_WARN
+	}
+	rec.Result = &compliancepb.ComplianceResult{
+		Status:      status,
+		PortfolioId: d.PortfolioID,
+		EvaluatedAt: timestamppb.New(d.AsOf),
+	}
+	return rec
+}
+
+// NotEvaluatedUnclassified is the code recorded when a decision reached the
+// audit trail with no rule evaluated and no flag saying why.
+//
+// IT IS DELIBERATELY NOT A SILENT DEFAULT. A switch whose last arm guessed the
+// most likely reason would file a new short-circuit under an existing one, and
+// the record would be wrong in the direction nobody checks — an audit trail that
+// answers confidently is worse than one that says it does not know. This value
+// is greppable, and test/arch fails when a Decision flag exists that the switch
+// below does not name.
+const NotEvaluatedUnclassified = "UNCLASSIFIED"
+
+// notEvaluatedCode names why no rule ran, from the flags the decision already
+// carries. Every arm corresponds to one short-circuit in decide().
+func notEvaluatedCode(dec Decision) string {
+	switch {
+	case dec.Unvaluable:
+		return "NOTIONAL_UNREPRESENTABLE"
+	case dec.Unscoped:
+		return "MANDATE_TENANT_UNRESOLVED"
+	case dec.Unreadable:
+		return "MANDATE_UNREADABLE"
+	case dec.Ungoverned:
+		return "MANDATE_MISSING"
+	case dec.Unpriced:
+		return "PRICE_UNAVAILABLE"
+	case dec.Unconstrained:
+		return "MANDATE_HAS_NO_RULES"
+	default:
+		return NotEvaluatedUnclassified
+	}
+}
+
+// decide is the pre-trade decision itself. Every terminal return lives here; the
+// record lives in Evaluate. See Evaluate for why they are separated.
+func (g *PreTradeGate) decide(ctx context.Context, d OrderDelta) (Decision, error) {
 	// INPUT VALIDATION, BEFORE ANYTHING COMPUTES WITH THESE NUMBERS — including
 	// before the mandate lookup, so an out-of-domain order against an UNGOVERNED
 	// portfolio is refused rather than admitted. That is deliberate: a malformed
@@ -569,7 +694,12 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 		return Decision{Allowed: true, Ungoverned: true}, nil
 	}
 	if len(mandate.GetRules()) == 0 {
-		return Decision{Allowed: true}, nil // governed by a mandate that constrains nothing
+		// GOVERNED BY A MANDATE THAT CONSTRAINS NOTHING — a choice somebody made,
+		// and distinct from the ungoverned gap above. Unconstrained is what carries
+		// that distinction into the audit record: without a flag this path would
+		// reach notEvaluatedCode as a bare Decision and be filed under whatever the
+		// switch's last arm guessed.
+		return Decision{Allowed: true, Unconstrained: true}, nil
 	}
 	// An order the gate cannot value must not reach project()/heldPositions: a
 	// nil, zero, or negative price projects at zero market value, and
@@ -634,15 +764,6 @@ func (g *PreTradeGate) Evaluate(ctx context.Context, d OrderDelta) (Decision, er
 	if unaccounted {
 		g.noteUnaccounted(d.TenantID, d.PortfolioID, book.CashCompleteness)
 	}
-	g.record(ctx, DecisionRecord{
-		Phase:        PhasePreTrade,
-		TenantID:     d.TenantID,
-		Result:       res,
-		OrderID:      d.OrderID,
-		Issuer:       d.Issuer,
-		Allowed:      allowed,
-		WorkedSlices: d.WorkedSlices,
-	})
 	return Decision{Allowed: allowed, Result: res, Unaccounted: unaccounted}, nil
 }
 

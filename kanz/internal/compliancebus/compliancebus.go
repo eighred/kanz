@@ -135,6 +135,14 @@ func BuildDecisionLog(rec comp.DecisionRecord) *observationpb.DecisionLog {
 	if rec.Issuer != "" {
 		attrs["issuer"] = rec.Issuer
 	}
+	if rec.NotEvaluated != "" {
+		// NO RULE RAN, AND THE RECORD SAYS SO (#797). Without it an admission
+		// against an ungoverned portfolio is indistinguishable in this log from one
+		// that passed every rule in a mandate — PASS and "nothing to check" reading
+		// as the same answer is the collapse EXEC-M14 exists to prevent, arriving
+		// one layer downstream.
+		attrs["not_evaluated"] = rec.NotEvaluated
+	}
 	if rec.Trigger != "" {
 		attrs["trigger"] = strings.TrimPrefix(rec.Trigger, "BREACH_TRIGGER_")
 	}

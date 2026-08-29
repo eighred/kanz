@@ -68,6 +68,26 @@ type DecisionRecord struct {
 	// more than the one order it names. This is that statement: one decision,
 	// this many orders.
 	WorkedSlices uint32
+	// NotEvaluated names WHY no rule was applied, and is empty on a decision the
+	// mandate was actually run for (#797).
+	//
+	// # Why it is a field and not a synthesised Violation
+	//
+	// Nine of the pre-trade gate's ten terminal paths short-circuit before any
+	// rule is evaluated, and two of those ADMIT the order — the ungoverned
+	// portfolio and the mandate that constrains nothing. Those admissions have to
+	// reach the audit trail, or the platform cannot answer "which mandate
+	// permitted this order"; the ungoverned counter gives an aggregate, and a
+	// reviewer holds one order id.
+	//
+	// A Violation says "a rule did not pass". Putting one on these records would
+	// name a rule id that never ran, in the log an examiner reads as evidence.
+	// The reason is its own field for the same reason Decision's flags are their
+	// own flags rather than a status: "checked, and fine" and "not checked" must
+	// never look the same.
+	//
+	// The values are the codes in gate.go's notEvaluatedCode.
+	NotEvaluated string
 }
 
 // DecisionRecorder persists a compliance decision. Implementations SHOULD be
