@@ -301,9 +301,14 @@ func (s *Service) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 	// current_setting('app.tenant_id') — the GUC pinned to THIS service's tenant.
 	// Nothing compared them, so an acme order was admitted from an acme envelope
 	// and stored as __system__ (#223). Checking at the dispatch point rather than
-	// in each handler is deliberate: handleCancel and handleAmend do not even
-	// receive the envelope, so a per-handler check would have to thread it and
-	// would be forgotten by the next command added here.
+	// in each handler is deliberate: handleCancel does not even receive the
+	// envelope, so a per-handler check would have to thread it and would be
+	// forgotten by the next command added here.
+	//
+	// handleAmend DOES take the envelope, and only because the pre-trade gate it
+	// re-enters must be scoped to the order's tenant rather than this service's
+	// (#799). That is not a second tenant check and must not become one — this
+	// line is still the only place the two are compared.
 	if err := bus.RequireTenantScope(env.GetTenantId(), s.tenant); err != nil {
 		return err
 	}
@@ -313,7 +318,7 @@ func (s *Service) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 	case SubjectCancel:
 		return s.handleCancel(ctx, payload)
 	case SubjectAmend:
-		return s.handleAmend(ctx, payload)
+		return s.handleAmend(ctx, env, payload)
 	case SubjectApprove:
 		return s.handleApprove(ctx, env, payload)
 	default:
@@ -1712,7 +1717,7 @@ func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now 
 	s.closes.Resolve(st.GetOrderId()) // venue confirmed the withdrawal — nothing to heal
 }
 
-func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
+func (s *Service) handleAmend(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
 	var cmd orderpb.AmendOrder
 	if err := proto.Unmarshal(payload, &cmd); err != nil {
 		s.logger.Error("oms: malformed AmendOrder", "err", err)
@@ -1822,6 +1827,21 @@ func (s *Service) handleAmend(ctx context.Context, payload []byte) error {
 			return s.outcomeReject(ctx, cmd.GetOrderId(), re.Code, re.Msg, now)
 		}
 		return aerr
+	}
+	// THE AMENDED TERMS RE-ENTER THE CONTROL PLANE (#799).
+	//
+	// Built on `next` rather than on the command, because what the controls must
+	// be asked about is the order that would EXIST — the aggregate has already
+	// resolved which fields the amend touches and bounded the quantity against
+	// what has traded. Placed after Amend and before Save for the same reason the
+	// outcome fact is built there: nothing is durable yet, so a refusal here
+	// leaves the order exactly as the controls last admitted it.
+	rej, cerr := s.admitAmendment(ctx, env, cmd.GetMetadata(), st, next)
+	if cerr != nil {
+		return cerr // transient control failure ⇒ redeliver, never refuse
+	}
+	if rej != nil {
+		return s.outcomeReject(ctx, cmd.GetOrderId(), rej.Code, rej.Msg, now)
 	}
 	// THE AMENDED STATE AND ITS OUTCOME COMMIT TOGETHER (#292). Like ROUTED,
 	// this pair had no marker: nothing re-announces an amend whose outcome was
