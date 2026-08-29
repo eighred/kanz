@@ -87,10 +87,51 @@ type Watch struct {
 	now    func() time.Time
 	logger *slog.Logger
 
+	// seen claims a fill_id before it is measured, so a REDELIVERY changes
+	// neither the ranker's mean nor the durable cost report (#802).
+	//
+	// # What it costs when it is missing
+	//
+	// VenueCosts.Observe increments sum, weight and n with no guard, and
+	// VenueCosts.Preferred reads the mean it produces to decide where the next
+	// untargeted order routes. So a venue whose fills happened to be redelivered
+	// looks systematically cheaper or dearer than it is, and order flow follows —
+	// silently, because a biased mean is a plausible number. The published cost
+	// FACT inherits the same duplication, so the post-trade report CONFIRMS the
+	// wrong answer instead of catching it.
+	//
+	// The decisions set inside venueStat bounds the EVIDENCE floor against
+	// duplicates; it does not bound the mean, which is the number that routes.
+	//
+	// # Why here and not on the bus consumer
+	//
+	// The per-pod DedupWindow the consumer can carry is a 2-minute suppression
+	// horizon and the OMS wires no WithDeduper at all, so at replicas: 2 each pod
+	// would keep its own independently-biased mean regardless. The claim has to
+	// outlive the RANKER's evidence window, which is what costClaimTTL is.
+	seen *bus.DedupWindow
+
 	shortfallBps      *prometheus.HistogramVec
 	priceShortfallBps *prometheus.HistogramVec
 	unmeasurable      *prometheus.CounterVec
+	duplicates        *prometheus.CounterVec
 }
+
+// The claim window. Both numbers are bounds on a MEASUREMENT, not on money.
+const (
+	// costClaimTTL must outlive the window a measurement can still move the mean
+	// in. execution.DefaultCostWindow is 6h, so a claim that expired sooner would
+	// let a redelivery inside the ranker's own window double-count the fill it was
+	// meant to protect — the defect, with extra steps. Doubled, so a redelivery
+	// arriving at the far edge of the window is still refused.
+	costClaimTTL = 12 * time.Hour
+	// costClaimMax is the hard ceiling on claimed fill ids, because an unbounded
+	// seen-set is the leak #805 was filed for and this must not add a second one.
+	// At capacity the OLDEST claims are shed first, so the fills at risk of a
+	// double count are the ones least able to move a 6h window's mean. Bounded
+	// memory with a stated edge beats an exact answer that grows forever.
+	costClaimMax = 200_000
+)
 
 // New registers the cost metrics and returns the handler.
 //
@@ -130,11 +171,18 @@ func New(reg prometheus.Registerer, tenant string, b Bus, costs *execution.Venue
 				"scoring them as zero would drag every venue average toward whichever venue " +
 				"trades the instruments the price spine covers worst.",
 		}, []string{"venue", "reason"}),
+		duplicates: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kanz_execution_duplicate_fills_total",
+			Help: "Fill FACTs re-delivered and REFUSED a second measurement, by venue. A rising " +
+				"count is healthy — it is the number of times the ranker's mean and the cost " +
+				"report were protected from counting one execution twice.",
+		}, []string{"venue"}),
+		seen: bus.NewDedupWindow(costClaimTTL, costClaimMax),
 	}
 	if w.logger == nil {
 		w.logger = slog.Default()
 	}
-	reg.MustRegister(w.shortfallBps, w.priceShortfallBps, w.unmeasurable)
+	reg.MustRegister(w.shortfallBps, w.priceShortfallBps, w.unmeasurable, w.duplicates)
 	return w
 }
 
@@ -159,6 +207,21 @@ func (w *Watch) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 		return nil
 	}
 
+	// AN UNIDENTIFIED FILL IS REFUSED, as the books refuse it (#802).
+	//
+	// fillfact.Validate — which the position store and the accounting ledger both
+	// run — rejects a fill with no fill_id under ErrNotIdentified, so a fill that
+	// reaches here without one is a fill NEITHER BOOK WILL FOLD. Measuring it into
+	// a routing decision while the position book refuses to record it would rank
+	// venues on an execution the platform does not believe happened; and with no
+	// id there is nothing to claim on, so every redelivery of it would count
+	// again. Counted by its own reason so the gap is attributable rather than
+	// silent.
+	if fill.GetFillId() == "" {
+		w.unmeasurable.WithLabelValues(fill.GetVenue(), "unidentified").Inc()
+		return nil
+	}
+
 	res, err := tca.Measure(state, []*orderpb.Fill{fill})
 	if err != nil {
 		// NOT A ZERO. An unmeasurable fill is counted by REASON so the gap is
@@ -170,6 +233,19 @@ func (w *Watch) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 	}
 
 	venue := res.Venue
+
+	// THE CLAIM, AFTER THE MEASUREMENT AND BEFORE ANY EFFECT (#802).
+	//
+	// After, because a fill that could not be measured produced no observation to
+	// protect and must stay claimable — a later delivery once the price spine
+	// covers its instrument is a first measurement, not a duplicate. Before the
+	// effects, because BOTH of them are what a redelivery would double: the
+	// ranker's mean and the durable cost FACT.
+	if !w.seen.Claim(fill.GetFillId()) {
+		w.duplicates.WithLabelValues(venue).Inc()
+		return nil
+	}
+
 	total, _ := res.ShortfallBps.Float64()
 	// FEED THE RANKER (#437 B). The same measurement, in-process, so an
 	// untargeted order can go to the venue that has actually been cheapest
@@ -207,6 +283,15 @@ func (w *Watch) Handle(ctx context.Context, env *envelopepb.Envelope, payload []
 			"did not, so a venue comparison over a long window will be short by this fill",
 			"order_id", res.OrderID, "fill_id", fill.GetFillId(), "venue", venue, "err", err)
 	}
+
+	// COMMITTED EVEN IF THE PUBLISH FAILED, and that is a choice rather than an
+	// oversight. The Observe above ALREADY MOVED THE MEAN, so releasing the claim
+	// would let a redelivery move it a second time — the exact double count this
+	// claim exists to stop — in exchange for a retry of the FACT. This handler's
+	// standing decision is that a lost cost row is a gap in a report and is
+	// counted as one (publish_failed, above), while a biased mean is a wrong
+	// routing decision nobody can see. The claim protects the number that routes.
+	w.seen.Commit(fill.GetFillId())
 
 	// FLOAT64 HERE AND ONLY HERE, DELIBERATELY. The measurement is exact
 	// (*big.Rat) all the way through tca; this converts at the very last step,
