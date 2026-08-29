@@ -17,6 +17,7 @@ import (
 	"github.com/eighred/kanz/internal/costbasis"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/fillfact"
+	"github.com/eighred/kanz/internal/outbox"
 )
 
 // Store is the position book. Memory (*Book) is correct for exactly ONE replica;
@@ -31,7 +32,18 @@ type Store interface {
 	// Apply folds one fill EXACTLY ONCE and returns BOTH projections of the book. A fill
 	// already folded — by a redelivery, or by another pod — is not counted again; the
 	// current state is returned unchanged.
-	Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time) (*Applied, error)
+	//
+	// announce is called WITH THE FOLDED BOOK, INSIDE THE FOLD'S OWN TRANSACTION,
+	// and the records it returns are committed with it (#795). That is the whole
+	// point of the parameter: the position FACT used to be published after Apply
+	// returned, which is after the advisory lock had been released by the commit,
+	// so two pods folding the same instrument serialized their FOLDS and RACED
+	// their PUBLISHES. On a stream provisioned --max-msgs-per-subject=1 the loser
+	// of that race is what the subject KEEPS.
+	Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time, announce Announcer) (*Applied, error)
+	// Outbox is the queue Apply's announced records land in, and the relay
+	// publishes from.
+	Outbox() outbox.Queue
 	// Snapshot is the read side the pre-trade gate projects an order onto: the fund's
 	// holdings AGGREGATED across venues — one row per instrument, because a concentration
 	// limit is about the fund's BTC, not the BTC at one exchange.
@@ -56,6 +68,23 @@ type Applied struct {
 	Aggregate *domainpb.PositionState
 }
 
+// Announcer renders the folded book as the FACTs that must become true at the
+// same instant it does.
+//
+// IT RUNS INSIDE THE TRANSACTION, and it must therefore do nothing but build
+// records: no I/O, no publish, no lock. Everything it returns is enqueued before
+// the commit, so a fold that cannot be announced is a fold that does not happen
+// — which is the correct direction, and the same stance outbox.From takes on a
+// record with no tenant.
+//
+// It returns records rather than publishing them because WHO publishes is the
+// defect being repaired. A direct publish from here would be back inside the
+// lock and would hold a database lock across a broker round trip; a direct
+// publish after Apply is where the race was. The relay is the only publisher,
+// and it drains one partition key in id order, which under this store's advisory
+// lock IS commit order.
+type Announcer func(ctx context.Context, applied *Applied) ([]outbox.Record, error)
+
 // THE THREE SENTINELS NOW LIVE IN internal/fillfact, AND THESE ARE THAT PACKAGE'S (#631).
 //
 // They were declared here, with the incident behind each one written beside it —
@@ -78,6 +107,7 @@ var (
 type Postgres struct {
 	pool    *pgxpool.Pool
 	baseCcy string
+	queue   outbox.Queue
 }
 
 // NewPostgres returns the durable store. baseCcy stamps Money, as the in-memory Book does.
@@ -85,8 +115,19 @@ func NewPostgres(pool *pgxpool.Pool, baseCcy string) *Postgres {
 	if baseCcy == "" {
 		baseCcy = "USD"
 	}
-	return &Postgres{pool: pool, baseCcy: baseCcy}
+	// THE SAME outbox TABLE THE ORDER STORE WRITES, BY CONSTRUCTION: one pool,
+	// one service namespace, one table (openStores hands both stores the same
+	// pool). That is what lets the relay the OMS already runs drain position
+	// records without a second lifecycle in the composition root — and it is why
+	// the partition key below has to be the instrument-level entity rather than
+	// the portfolio: two keys in one table must not be able to interleave their
+	// commits, and the advisory lock Apply holds is per (tenant, portfolio,
+	// instrument).
+	return &Postgres{pool: pool, baseCcy: baseCcy, queue: outbox.NewPostgres(pool, "oms")}
 }
+
+// Outbox is the durable queue this store enqueues announced FACTs into.
+func (p *Postgres) Outbox() outbox.Queue { return p.queue }
 
 var (
 	_ Store = (*Postgres)(nil)
@@ -111,7 +152,7 @@ var (
 //  5. Upsert, then SUM the venues into the fund-level position — in the same transaction
 //     that just changed one of them, and under the lock from step 1, so the aggregate
 //     cannot disagree with the rows it came from.
-func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time) (*Applied, error) {
+func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time, announce Announcer) (*Applied, error) {
 	// ONE VALIDATION, SHARED WITH THE LEDGER (#631). Both books fold the same
 	// FACT and must agree about which ones they will fold.
 	if err := fillfact.Validate(fill); err != nil {
@@ -166,10 +207,11 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("position: commit: %w", err)
-	}
 
+	// BOTH PROJECTIONS ARE BUILT BEFORE THE COMMIT, because the commit is what
+	// RELEASES the advisory lock. They were built after it, and that was the
+	// whole of #795: the numbers were still correct, and the ANNOUNCEMENT of them
+	// was outside the mutual exclusion that made them true.
 	venueState, err := p.stateOf(portfolioID, venue, instrument, l, price, asOf)
 	if err != nil {
 		return nil, err
@@ -178,7 +220,27 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 	if err != nil {
 		return nil, err
 	}
-	return &Applied{Venue: venueState, Aggregate: aggState}, nil
+	applied := &Applied{Venue: venueState, Aggregate: aggState}
+
+	// THE FACT AND THE FOLD COMMIT TOGETHER (#292, #795). A record enqueued here
+	// is ordered by the same lock that ordered the fold, so the relay — which
+	// drains one partition key in id order — publishes the aggregates in the
+	// order they were committed. That is what makes the compacted subject retain
+	// the LATEST fold rather than whichever pod's publish happened to arrive last.
+	if announce != nil {
+		records, aerr := announce(ctx, applied)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if err := outbox.Enqueue(ctx, tx, records...); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("position: commit: %w", err)
+	}
+	return applied, nil
 }
 
 // lockInstrument serializes every fold that can move one instrument's FUND-LEVEL

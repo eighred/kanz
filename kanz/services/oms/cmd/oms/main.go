@@ -21,6 +21,7 @@ import (
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/mark"
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/internal/version"
@@ -1369,7 +1370,9 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (or
 			"an ABSOLUTE position folded from only the fills it happened to receive. A crash loses any order FACT "+
 			"committed and not yet published",
 			"fix", "set OMS_DATABASE_URL; the shipped manifest runs replicas: 2")
-		return order.NewMemoryStore(), position.NewBook(cfg.BaseCurrency), func() {}, nil
+		q := outbox.NewMemory() // ONE queue, so the relay this root runs drains both books (#795)
+		return order.NewMemoryStore(order.WithSharedOutbox(q)),
+			position.NewBook(cfg.BaseCurrency, position.WithSharedOutbox(q)), func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
 	// `app.tenant_id` GUC, so Postgres RLS scopes all reads/writes to it (the

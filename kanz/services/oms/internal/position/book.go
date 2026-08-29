@@ -27,6 +27,7 @@ import (
 	"github.com/eighred/kanz/internal/costbasis"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/fillfact"
+	"github.com/eighred/kanz/internal/outbox"
 )
 
 // key: a holding is identified by WHERE it sits, not just what it is (EXEC-M19a).
@@ -48,15 +49,44 @@ type Book struct {
 	mu      sync.Mutex
 	lots    map[key]*lot
 	baseCcy string
+	queue   *outbox.Memory
+}
+
+// BookOption configures the in-memory book.
+type BookOption func(*Book)
+
+// WithSharedOutbox makes this book announce into a queue somebody else owns —
+// in practice the order store's, so the ONE relay the composition root already
+// runs drains both (#795).
+//
+// WITHOUT IT THE IN-MEMORY BOOK HAS A QUEUE NOTHING DRAINS. The durable store
+// gets a background drainer for free: it writes the same outbox TABLE the order
+// store does, over the same pool, so the relay the OMS already runs finds its
+// records. Two in-process maps have no such shared table, and a record whose
+// only drainer is the inline flush is a FACT that survives exactly as long as
+// the bus keeps redelivering the fill.
+func WithSharedOutbox(q *outbox.Memory) BookOption {
+	return func(b *Book) {
+		if q != nil {
+			b.queue = q
+		}
+	}
 }
 
 // NewBook returns an empty book stamping Money in baseCcy.
-func NewBook(baseCcy string) *Book {
+func NewBook(baseCcy string, opts ...BookOption) *Book {
 	if baseCcy == "" {
 		baseCcy = "USD"
 	}
-	return &Book{lots: make(map[key]*lot), baseCcy: baseCcy}
+	b := &Book{lots: make(map[key]*lot), baseCcy: baseCcy, queue: outbox.NewMemory()}
+	for _, opt := range opts {
+		opt(b)
+	}
+	return b
 }
+
+// Outbox is the in-process queue this book enqueues announced FACTs into.
+func (b *Book) Outbox() outbox.Queue { return b.queue }
 
 // Apply folds one fill into the book and returns the resulting PositionState.
 // Realized P&L is booked on the portion of a fill that reduces or closes an
@@ -69,7 +99,7 @@ func NewBook(baseCcy string) *Book {
 // handed it, each publishing an ABSOLUTE position built from a fraction of the trades
 // (EXEC-M18). Use Postgres in any deployment that runs more than one pod — which the
 // shipped one does. The ctx and error exist to satisfy Store; neither is used here.
-func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time) (*Applied, error) {
+func (b *Book) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time, announce Announcer) (*Applied, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -103,7 +133,24 @@ func (b *Book) Apply(_ context.Context, portfolioID string, fill *orderpb.Fill, 
 	if err != nil {
 		return nil, err
 	}
-	return &Applied{Venue: venueState, Aggregate: aggState}, nil
+	applied := &Applied{Venue: venueState, Aggregate: aggState}
+
+	// THE ANNOUNCEMENT HAPPENS UNDER b.mu, which is this store's whole equivalent
+	// of the transaction the durable one opens — the same argument
+	// order.MemoryStore.Create makes for enqueuing inside its lock hold. A
+	// permissive double certifies behaviour production does not have, and the
+	// behaviour under test here is that the FACT cannot be built from a fold
+	// another goroutine has already moved past.
+	if announce != nil {
+		records, aerr := announce(ctx, applied)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if err := b.queue.Append(records...); err != nil {
+			return nil, err
+		}
+	}
+	return applied, nil
 }
 
 // aggregate sums every venue's holding of one instrument into the fund's position — the

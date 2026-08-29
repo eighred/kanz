@@ -159,10 +159,10 @@ func TestTwoPodsConvergeOnOneBook(t *testing.T) {
 	podB := NewPostgres(pool, "USD")
 
 	// The group splits the stream: A gets the first fill, B the second.
-	if _, err := podA.Apply(ctx, "fund-alpha", buy("f1", "BTC-USD", "1", "50000", now), now); err != nil {
+	if _, err := podA.Apply(ctx, "fund-alpha", buy("f1", "BTC-USD", "1", "50000", now), now, nil); err != nil {
 		t.Fatalf("pod A apply: %v", err)
 	}
-	st, err := podB.Apply(ctx, "fund-alpha", buy("f2", "BTC-USD", "2", "50000", now), now)
+	st, err := podB.Apply(ctx, "fund-alpha", buy("f2", "BTC-USD", "2", "50000", now), now, nil)
 	if err != nil {
 		t.Fatalf("pod B apply: %v", err)
 	}
@@ -199,10 +199,10 @@ func TestTheSameFillIsCountedOnce(t *testing.T) {
 	podB := NewPostgres(pool, "USD")
 
 	f := buy("dup-1", "BTC-USD", "1", "50000", now)
-	if _, err := podA.Apply(ctx, "fund-alpha", f, now); err != nil {
+	if _, err := podA.Apply(ctx, "fund-alpha", f, now, nil); err != nil {
 		t.Fatal(err)
 	}
-	st, err := podB.Apply(ctx, "fund-alpha", f, now) // same fill_id, second delivery
+	st, err := podB.Apply(ctx, "fund-alpha", f, now, nil) // same fill_id, second delivery
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,13 +221,13 @@ func TestTheBookSurvivesARestart(t *testing.T) {
 	now := time.Now().UTC()
 
 	before := NewPostgres(pool, "USD")
-	if _, err := before.Apply(ctx, "fund-alpha", buy("f1", "BTC-USD", "5", "50000", now), now); err != nil {
+	if _, err := before.Apply(ctx, "fund-alpha", buy("f1", "BTC-USD", "5", "50000", now), now, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	// The pod restarts: a brand-new store, nothing carried over in memory.
 	after := NewPostgres(pool, "USD")
-	st, err := after.Apply(ctx, "fund-alpha", buy("f2", "BTC-USD", "0.1", "51000", now), now)
+	st, err := after.Apply(ctx, "fund-alpha", buy("f2", "BTC-USD", "0.1", "51000", now), now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestPositionsAreTenantIsolated(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	if _, err := NewPostgres(acme, "USD").Apply(ctx, "fund-alpha", buy("f1", "BTC-USD", "1", "50000", now), now); err != nil {
+	if _, err := NewPostgres(acme, "USD").Apply(ctx, "fund-alpha", buy("f1", "BTC-USD", "1", "50000", now), now, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -284,10 +284,10 @@ func TestTwoVenuesAreTwoHoldings(t *testing.T) {
 
 	store := NewPostgres(pool, "USD")
 
-	if _, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f1", "BTC-USD", "XBIN", "1", "50000", now), now); err != nil {
+	if _, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f1", "BTC-USD", "XBIN", "1", "50000", now), now, nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f2", "BTC-USD", "XOKX", "2", "50000", now), now)
+	res, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f2", "BTC-USD", "XOKX", "2", "50000", now), now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,10 +321,10 @@ func TestSnapshotAggregatesAcrossVenues(t *testing.T) {
 	now := time.Now().UTC()
 
 	store := NewPostgres(pool, "USD")
-	if _, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f1", "BTC-USD", "XBIN", "1", "50000", now), now); err != nil {
+	if _, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f1", "BTC-USD", "XBIN", "1", "50000", now), now, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f2", "BTC-USD", "XOKX", "2", "50000", now), now); err != nil {
+	if _, err := store.Apply(ctx, "fund-alpha", buyAtVenue("f2", "BTC-USD", "XOKX", "2", "50000", now), now, nil); err != nil {
 		t.Fatal(err)
 	}
 

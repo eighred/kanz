@@ -103,7 +103,7 @@ func TestTheRealFoldsAgreeOnEquity(t *testing.T) {
 	now := time.Now().UTC()
 
 	book := position.NewBook("USD")
-	if _, err := book.Apply(ctx, "PF1", fill("f1", "AAPL", 1_000, 100, now), now); err != nil {
+	if _, err := book.Apply(ctx, "PF1", fill("f1", "AAPL", 1_000, 100, now), now, nil); err != nil {
 		t.Fatalf("fold fill: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestAStaleMarkStopsEquityRatherThanAgeingIntoIt(t *testing.T) {
 	now := time.Now().UTC()
 
 	book := position.NewBook("USD")
-	if _, err := book.Apply(ctx, "PF1", fill("f1", "AAPL", 1_000, 100, now), now); err != nil {
+	if _, err := book.Apply(ctx, "PF1", fill("f1", "AAPL", 1_000, 100, now), now, nil); err != nil {
 		t.Fatalf("fold fill: %v", err)
 	}
 
