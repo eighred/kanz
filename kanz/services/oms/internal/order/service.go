@@ -3058,12 +3058,56 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 				"order looking untraded", view.State.String()))
 	}
 
+	// THE FILLS THIS ORDER ALREADY HOLDS, READ BEFORE ANY FOLD IS ATTEMPTED (#798).
+	//
+	// Store.Save's claim is still the guarantee and this does not replace it. What
+	// it fixes is the ORDER OF THE TWO REFUSALS: the loop below folds first and
+	// claims second, so Save only ever gets to answer ErrFillApplied for a fill
+	// ApplyFill accepted — and ApplyFill refuses any fill larger than the
+	// REMAINING leaves. A re-presented fill was therefore protected only while its
+	// quantity still fit.
+	//
+	// The shape that breaks it is the ordinary one. execution.Querier.Fills is
+	// what the venue attributes to the order, i.e. CUMULATIVE: an order for 100
+	// whose first adoption folded A(60) before the delivery failed is re-offered
+	// [A(60), B(40)] on redelivery, and iteration one hands ApplyFill a 60 against
+	// 40 leaves. OVERFILL, quarantine, and B — a real 40-unit execution — is never
+	// folded at all. That is worse than the double-count #782 prevented, because a
+	// double-count is visible in the numbers and a fill nobody recorded is not; and
+	// it is verbatim the freeze #782 was opened to end.
+	//
+	// THIS READ IS ONLY EVER USED TO SKIP, NEVER TO PERMIT, so it is not the
+	// check-then-act this file spends so much of its length refusing elsewhere. A
+	// stale "not applied" still lands on Save's atomic claim and comes back
+	// ErrFillApplied, which the loop already handles — the pre-read is an
+	// optimisation of the refusal and the transaction remains the guarantee.
+	//
+	// A FAILED READ NACKS RATHER THAN FOLDS. Treating a store error as "no fills
+	// applied" would put this delivery straight back into the quarantine above,
+	// with a store outage as the cause and an operator holding a frozen order.
+	applied, perr := s.store.AppliedFills(ctx, st.GetOrderId())
+	if perr != nil {
+		return perr
+	}
+
 	for _, fill := range view.Fills {
+		if applied[fill.GetFillId()] {
+			// Skipped WITHOUT calling ApplyFill: the aggregate already contains this
+			// fill, so its quantity is already spent out of leaves and offering it
+			// again can only over-fill.
+			s.logger.Info("oms: venue fill already folded into this order, skipping before the fold",
+				"order_id", st.GetOrderId(), "fill_id", fill.GetFillId())
+			continue
+		}
 		next, aerr := ApplyFill(st, fill, fill.GetExecutedAt().AsTime())
 		if aerr != nil {
 			// The venue's own fills do not fit the order we hold. That is not a
 			// transient fault and re-driving cannot help; it is a disagreement
 			// about what this order IS, and it freezes.
+			//
+			// Every fill this order already holds has been skipped above, so
+			// reaching here means the venue's UNFOLDED fills do not fit — which is
+			// the genuine disagreement, not a reconciliation running twice.
 			return s.quarantine(ctx, st, ver, fmt.Sprintf(
 				"venue reported a fill this order cannot accept (%v). The venue's record and "+
 					"ours describe different orders under one id", aerr))
