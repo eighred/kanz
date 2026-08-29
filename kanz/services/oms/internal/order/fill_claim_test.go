@@ -229,3 +229,121 @@ func TestAClaimRollsBackWithTheFoldThatFailed(t *testing.T) {
 			"execution is lost, which is worse than the double-count the claim prevents", err)
 	}
 }
+
+// THE READ THAT MAKES THE CLAIM REACHABLE (#798).
+//
+// Save's claim can only refuse a fold ApplyFill has already accepted, and
+// ApplyFill refuses any fill larger than the order's remaining leaves. So a
+// re-presented fill was protected only while its quantity still fit: an order for
+// 100 whose 60 was folded, re-offered the venue's cumulative [60, 40], quarantined
+// on OVERFILL and never folded the 40. AppliedFills is what lets adopt() skip the
+// 60 before it reaches ApplyFill at all.
+//
+// IT IS TESTED AT THE STORE FOR THE SAME REASON THE CLAIM IS. The service-level
+// test (service_redelivery_test.go) proves the skip happens; these prove the two
+// stores AGREE about which fills an order holds, which is the only thing that
+// makes the in-process seam a model of order_fills rather than a second answer.
+
+// TestMemoryStoreAppliedFillsAnswersOnlyThisOrdersClaims pins the in-process seam.
+func TestMemoryStoreAppliedFillsAnswersOnlyThisOrdersClaims(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemoryStore()
+	const mine, theirs = "applied-mem-1", "applied-mem-2"
+	for _, id := range []string{mine, theirs} {
+		if err := m.Create(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW), nil); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+
+	// AN ORDER WITH NOTHING FOLDED ANSWERS AN EMPTY SET, NOT AN ERROR. A caller
+	// that treated "no claims yet" as a fault would nack every first adoption.
+	held, err := m.AppliedFills(ctx, mine)
+	if err != nil {
+		t.Fatalf("AppliedFills on an order with no fills: %v", err)
+	}
+	if len(held) != 0 {
+		t.Fatalf("AppliedFills = %v on an order that has folded nothing, want empty", held)
+	}
+
+	if err := m.Save(ctx, state(mine, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), 0, claimFacts(mine), "mine-f1"); err != nil {
+		t.Fatalf("fold mine-f1: %v", err)
+	}
+	if err := m.Save(ctx, state(theirs, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), 0, claimFacts(theirs), "theirs-f1"); err != nil {
+		t.Fatalf("fold theirs-f1: %v", err)
+	}
+
+	held, err = m.AppliedFills(ctx, mine)
+	if err != nil {
+		t.Fatalf("AppliedFills: %v", err)
+	}
+	if !held["mine-f1"] {
+		t.Error("mine-f1 is absent from the order that folded it — adopt() would hand it back to " +
+			"ApplyFill against leaves it no longer fits, which is the over-fill quarantine #798 " +
+			"exists to end")
+	}
+	// ANOTHER ORDER'S CLAIM MUST NOT LEAK IN. The result is only ever used to SKIP
+	// a fold, so a fill this order does not hold appearing here is a fill it would
+	// silently never fold at all.
+	if held["theirs-f1"] {
+		t.Error("another order's claim appeared in this order's applied set — the skip it drives " +
+			"would drop a real execution rather than dedup one")
+	}
+	if len(held) != 1 {
+		t.Errorf("AppliedFills = %v, want exactly {mine-f1}", held)
+	}
+}
+
+// TestPostgresAppliedFillsAnswersOnlyThisOrdersClaims is the same contract on the
+// production backend, and it is the one that matters: MemoryStore's map is a model
+// of order_fills, and this is order_fills.
+func TestPostgresAppliedFillsAnswersOnlyThisOrdersClaims(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	st := NewPostgres(pool)
+
+	const mine, theirs = "applied-pg-1", "applied-pg-2"
+	for _, id := range []string{mine, theirs} {
+		if err := st.Create(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW), nil); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+
+	held, err := st.AppliedFills(ctx, mine)
+	if err != nil {
+		t.Fatalf("AppliedFills on an order with no fills: %v", err)
+	}
+	if len(held) != 0 {
+		t.Fatalf("AppliedFills = %v on an order that has folded nothing, want empty", held)
+	}
+
+	_, ver, err := st.Load(ctx, mine)
+	if err != nil {
+		t.Fatalf("load %s: %v", mine, err)
+	}
+	if err := st.Save(ctx, state(mine, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), ver, claimFacts(mine), "applied-pgf1"); err != nil {
+		t.Fatalf("fold applied-pgf1: %v", err)
+	}
+	_, tver, err := st.Load(ctx, theirs)
+	if err != nil {
+		t.Fatalf("load %s: %v", theirs, err)
+	}
+	if err := st.Save(ctx, state(theirs, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), tver, claimFacts(theirs), "applied-pgf2"); err != nil {
+		t.Fatalf("fold applied-pgf2: %v", err)
+	}
+
+	held, err = st.AppliedFills(ctx, mine)
+	if err != nil {
+		t.Fatalf("AppliedFills: %v", err)
+	}
+	if !held["applied-pgf1"] {
+		t.Error("applied-pgf1 is absent from the order that folded it — the fill would be handed " +
+			"back to ApplyFill and over-fill the leaves it already consumed")
+	}
+	if held["applied-pgf2"] {
+		t.Error("another order's claim appeared in this order's applied set — the WHERE order_id " +
+			"predicate is not being applied, and the skip would drop a real execution")
+	}
+	if len(held) != 1 {
+		t.Errorf("AppliedFills = %v, want exactly {applied-pgf1}", held)
+	}
+}

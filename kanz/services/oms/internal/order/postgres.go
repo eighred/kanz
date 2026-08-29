@@ -256,6 +256,50 @@ func (p *Postgres) claimFill(ctx context.Context, db execer, orderID, fillID str
 	return tag.RowsAffected() == 1, nil
 }
 
+// appliedFillsSQL answers "which fills does this order already hold" from
+// order_fills_order_idx (tenant_id, order_id) — the index migration 0013 created
+// for this exact question and nothing else had yet asked.
+//
+// NO TENANT PREDICATE, and that is not an omission: RLS is FORCEd on order_fills
+// and the policy filters on app_current_tenant(), which RAISES when the GUC is
+// unset. An unscoped session therefore gets an ERROR rather than an empty set —
+// and an empty set is the one wrong answer here, because it makes every fill look
+// new and walks the caller back into the over-fill quarantine this read exists to
+// prevent.
+const appliedFillsSQL = `SELECT fill_id FROM order_fills WHERE order_id = $1`
+
+// AppliedFills reads the claims committed for one order. See Store.AppliedFills
+// for why the result may only be used to SKIP a fold and never to permit one.
+func (p *Postgres) AppliedFills(ctx context.Context, orderID string) (map[string]bool, error) {
+	if orderID == "" {
+		// No order carries the empty id, so this can only be a caller that lost
+		// track of which order it meant. Answering it literally would return
+		// nothing and look like a clean aggregate.
+		return nil, nil
+	}
+	rows, err := p.pool.Query(ctx, appliedFillsSQL, orderID)
+	if err != nil {
+		return nil, fmt.Errorf("applied fills for order %s: %w", orderID, err)
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var fillID string
+		if err := rows.Scan(&fillID); err != nil {
+			return nil, fmt.Errorf("scan applied fill for order %s: %w", orderID, err)
+		}
+		out[fillID] = true
+	}
+	// rows.Err() IS THE HALF THAT MATTERS. A connection dropped mid-iteration ends
+	// the loop with no error of its own, so skipping this check would return a
+	// PARTIAL claim set as a complete one — and a claim missing from that set is a
+	// fill the fold below re-attempts against leaves it no longer fits.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("applied fills for order %s: %w", orderID, err)
+	}
+	return out, nil
+}
+
 // saveSQL is the compare-and-swap, written ONCE. Both Save paths execute this
 // exact text; a second copy is how the pool path and the transaction path would
 // come to disagree about what a conflict is.

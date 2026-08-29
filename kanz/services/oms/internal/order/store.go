@@ -150,6 +150,37 @@ type Store interface {
 	// state, and the state records only the cumulative result, so the aggregate
 	// itself cannot tell a first fold from a second.
 	Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record, fillID string) error
+	// AppliedFills returns the fill_ids this order aggregate ALREADY CONTAINS —
+	// the claims Save has committed for it (#798). An order with no folded fill
+	// answers an empty set, never an error.
+	//
+	// IT EXISTS BECAUSE Save's CLAIM CANNOT REFUSE A FOLD ApplyFill NEVER
+	// ACCEPTED. Save is the guarantee and stays the guarantee, but a caller only
+	// reaches it after ApplyFill has folded the fill into a state — and ApplyFill
+	// refuses any fill larger than the order's REMAINING leaves. So a re-presented
+	// fill was protected only while its quantity still fit: an order for 100 whose
+	// 60 is already folded, re-offered the venue's cumulative [60, 40], hands
+	// ApplyFill a 60 against 40 leaves, quarantines on OVERFILL, and never folds
+	// the 40 — a real execution the platform does not record, on an order frozen
+	// for a human. That is strictly worse than the double-count #782 prevented,
+	// because a double-count is visible in the numbers and this is not.
+	//
+	// THE ANSWER MAY ONLY BE USED TO SKIP, NEVER TO PERMIT. A stale "not applied"
+	// still lands on Save's atomic claim and comes back ErrFillApplied, which
+	// every fold loop already treats as a skip — so this read is an optimisation
+	// of the refusal and not a check-then-act reintroduced. A caller that let a
+	// fill through on the strength of this read alone would be doing the opposite,
+	// and would race two replicas straight into a double fold.
+	//
+	// IT IS KEYED THE WAY order_fills IS: the claim is (tenant_id, fill_id) and
+	// order_id is carried alongside it, so a fill claimed by a DIFFERENT order is
+	// absent from this set and its fold is still refused at Save. That refusal is
+	// deliberate (see Postgres.claimFill) and this read must not paper over it.
+	//
+	// A durable backend must answer it with a SELECTION, not a scan —
+	// migrations/0013_order_fills.sql carries order_fills_order_idx on
+	// (tenant_id, order_id) for exactly this question.
+	AppliedFills(ctx context.Context, orderID string) (map[string]bool, error)
 	// Load returns the current state of one order and its version, or
 	// ErrNotFound. The version is opaque to the caller: its only use is to be
 	// handed back to Save.
@@ -261,17 +292,25 @@ type MemoryStore struct {
 	// pending-approval FACT and an acceptance must not land in two queues.
 	proposals *MemoryProposals
 	// appliedFills is order_fills (#782): the fills already folded into an
-	// aggregate. Held under the SAME lock as the map and the outbox, which is
-	// this store's equivalent of the Postgres transaction — a claim that could
-	// commit apart from the fold has two failure modes and both are real.
-	appliedFills map[string]bool
+	// aggregate, keyed by fill_id and valued by the order that claimed it. Held
+	// under the SAME lock as the map and the outbox, which is this store's
+	// equivalent of the Postgres transaction — a claim that could commit apart
+	// from the fold has two failure modes and both are real.
+	//
+	// THE KEY IS THE FILL AND THE VALUE IS THE ORDER, mirroring the table exactly:
+	// PRIMARY KEY (tenant_id, fill_id) with order_id carried alongside. Keying the
+	// map by order would let one fill be claimed by two aggregates, which is the
+	// venue/routing defect Postgres.claimFill deliberately refuses; the value is
+	// what lets AppliedFills answer "which fills does THIS order hold" (#798)
+	// without weakening that.
+	appliedFills map[string]string
 }
 
 // NewMemoryStore returns an empty in-memory Store.
 func NewMemoryStore(opts ...MemoryStoreOption) *MemoryStore {
 	m := &MemoryStore{
 		orders:       make(map[string]*versioned),
-		appliedFills: make(map[string]bool),
+		appliedFills: make(map[string]string),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -369,8 +408,10 @@ func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVe
 	// aggregate already contains means this write must not land at all, and
 	// returning after the outbox append would leave a FACT for a fold that did
 	// not happen.
-	if fillID != "" && m.appliedFills[fillID] {
-		return ErrFillApplied
+	if fillID != "" {
+		if _, held := m.appliedFills[fillID]; held {
+			return ErrFillApplied
+		}
 	}
 	if len(announce) > 0 {
 		if err := m.outbox.Append(announce...); err != nil {
@@ -378,13 +419,41 @@ func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVe
 		}
 	}
 	if fillID != "" {
-		m.appliedFills[fillID] = true
+		m.appliedFills[fillID] = st.GetOrderId()
 	}
 	m.orders[st.GetOrderId()] = &versioned{
 		st:  proto.Clone(st).(*orderpb.OrderState),
 		ver: cur.ver + 1,
 	}
 	return nil
+}
+
+// AppliedFills is a scan of the claim map, filtered to one order. It is O(claims)
+// where Postgres is an index scan on order_fills_order_idx, and that is the
+// right trade for a store whose whole purpose is a single-process test seam: a
+// map keyed by order as well would be a second index to keep in step with the
+// first, and two structures that can disagree about which fills an order holds
+// is precisely the divergence this method exists to close.
+//
+// The set is a COPY. Handing back a view into the map would let a caller iterate
+// it while another goroutine folds a fill, which is the concurrent map read the
+// lock above exists to prevent.
+func (m *MemoryStore) AppliedFills(_ context.Context, orderID string) (map[string]bool, error) {
+	if orderID == "" {
+		// No order has the empty id, so answering "" literally would return the
+		// fills of nothing. Postgres answers the same way; see ListByPortfolio for
+		// why the two stores must agree about what an empty id means.
+		return nil, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]bool)
+	for fillID, claimedBy := range m.appliedFills {
+		if claimedBy == orderID {
+			out[fillID] = true
+		}
+	}
+	return out, nil
 }
 
 func (m *MemoryStore) Load(_ context.Context, orderID string) (*orderpb.OrderState, int64, error) {

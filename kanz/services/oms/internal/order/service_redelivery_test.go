@@ -393,6 +393,188 @@ func TestAdoptFoldsEveryFillOnceAndReadoptionIsANoOp(t *testing.T) {
 	}
 }
 
+// growingFillVenue answers a CUMULATIVE view that GROWS between queries, which
+// is the shape execution.Querier actually has: Fills is what the venue
+// attributes to the order, so every answer repeats the fills the previous one
+// carried. twoFillVenue above returns the same two fills every time and is
+// therefore only ever adopted from scratch; this one models the state that
+// really occurs — some of the venue's fills already folded, the rest not.
+//
+// Views past the last one repeat it, so a redelivery beyond the script is
+// answered rather than panicking: a venue that has stopped changing its mind is
+// the ordinary end state, not a test error.
+type growingFillVenue struct {
+	*execution.SimVenue
+	mu    sync.Mutex
+	n     int
+	views []execution.OrderView
+}
+
+func (v *growingFillVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orderpb.Fill, error) {
+	// Deliberately does NOT delegate to SimVenue.Execute or record anything: the
+	// order must reach ROUTED with venue_ack_at set so the redeliveries below take
+	// the Load-found-it path into resume(), exactly as twoFillVenue's test does.
+	return nil, nil
+}
+
+func (v *growingFillVenue) QueryOrder(context.Context, *orderpb.OrderState) (execution.OrderView, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	i := v.n
+	if i >= len(v.views) {
+		i = len(v.views) - 1
+	}
+	v.n++
+	return v.views[i], nil
+}
+
+func (v *growingFillVenue) queries() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.n
+}
+
+// A FILL THIS ORDER ALREADY HOLDS IS SKIPPED BEFORE THE FOLD, NOT AFTER IT (#798).
+//
+// #782 made the order aggregate dedup its own fills by claiming each fill_id in
+// order_fills inside the transaction that folds it. That claim is the guarantee
+// and it still is — but adopt() folded FIRST and claimed SECOND, so Store.Save
+// only ever got to answer ErrFillApplied for a fill ApplyFill had already
+// accepted. ApplyFill refuses any fill larger than the REMAINING leaves, so a
+// re-presented fill was protected only while its quantity still fit.
+//
+// THE FAILURE, WHICH IS THE ORDINARY SHAPE AND NOT AN EDGE CASE. Order for 100.
+// The venue fills it 60 then 40, and Querier.Fills is cumulative. The first
+// adoption sees [A(60)] and folds it; the order is durably PARTIALLY_FILLED with
+// 40 leaves. The next delivery is offered [A(60), B(40)] — and iteration one
+// hands ApplyFill a 60 against 40 leaves. OVERFILL. The order QUARANTINES, and
+// B is never reached: a 40-unit execution the platform does not record, on an
+// order frozen for a human. That is worse than the double-count #782 prevented,
+// because a double-count is visible in the numbers and a fill nobody recorded is
+// not.
+//
+// WHY THIS TEST AND NOT TestAdoptFoldsEveryFillOnceAndReadoptionIsANoOp. That one
+// uses 50/50 with nothing folded beforehand, so its first adoption takes both
+// fills and terminates the order; its re-adoption arm never reaches the fold at
+// all, because a redelivery for a terminal order announces the trailing outcome
+// and returns. Equal fills and a clean start are exactly the two conditions that
+// hide this. Here the fills are UNEQUAL and the first is already folded, which is
+// the only combination that puts an over-fill in front of the claim.
+func TestAdoptSkipsAFillAlreadyFoldedRatherThanOverfillingOnIt(t *testing.T) {
+	ctx := testCtx()
+	fb := &fakeBus{}
+	a := &orderpb.Fill{
+		FillId: "a60", OrderId: "o1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
+		Quantity: d(60, 0), Price: d(1020, -2), Venue: "XSIM",
+	}
+	b := &orderpb.Fill{
+		FillId: "b40", OrderId: "o1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
+		Quantity: d(40, 0), Price: d(1030, -2), Venue: "XSIM",
+	}
+	venue := &growingFillVenue{
+		SimVenue: execution.NewSimVenue("XSIM"),
+		views: []execution.OrderView{
+			// Query 1: the venue has filled 60 of the 100.
+			{State: execution.OrderViewPartiallyFilled, Fills: []*orderpb.Fill{a}},
+			// Query 2: the remaining 40 has since traded, and the view repeats the
+			// 60 because it is cumulative. This is the answer that used to freeze.
+			{State: execution.OrderViewFilled, Fills: []*orderpb.Fill{a, b}},
+		},
+	}
+	store := NewMemoryStore()
+	svc, err := NewService(testTenant, store, NewEmitter(fb), nil, execution.NewRouter([]execution.Venue{venue}), nil, nil, WithHaltGate(halt.OpenGate(nil)))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	cmd := limitOrder(d(100, 0), d(1025, -2))
+	body := mustMarshal(t, cmd)
+
+	// Delivery 1: admitted and routed. The venue acks without recording anything,
+	// so the order is stored ROUTED with venue_ack_at set and NO fills folded.
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 1: %v", err)
+	}
+	st, _, err := store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load after delivery 1: %v", err)
+	}
+	if st.GetVenueAckAt() == nil {
+		t.Fatal("venue_ack_at not stamped after delivery 1 — the adoptions below need the order " +
+			"routed and acknowledged before the redeliveries query the venue")
+	}
+
+	// Delivery 2: the first adoption. It folds A and leaves the order OPEN, which
+	// is the state the defect needs.
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 2: %v", err)
+	}
+	st, _, err = store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load after delivery 2: %v", err)
+	}
+	// THE NON-VACUITY ARM. Without it every assertion after delivery 3 would also
+	// pass on a handler that folded NOTHING at either delivery: no fold means no
+	// over-fill, and an order still sitting at ROUTED is not quarantined either.
+	// The defect is only in front of the loop once A is genuinely in the
+	// aggregate.
+	if got := dec.Str(dec.FromProto(st.GetFilledQuantity())); got != "60" {
+		t.Fatalf("filled_quantity = %s after delivery 2, want 60 — the first adoption did not fold "+
+			"A, so nothing below is testing what it claims to", got)
+	}
+	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED {
+		t.Fatalf("status = %v after delivery 2, want PARTIALLY_FILLED — the order must still be "+
+			"OPEN with 40 leaves, or delivery 3 never reaches the fold at all", st.GetStatus())
+	}
+	if q := st.GetQuarantine(); q != nil {
+		t.Fatalf("the order was QUARANTINED on the FIRST adoption (%q)", q.GetReason())
+	}
+
+	// Delivery 3: the venue's cumulative view now carries A and B. A is already
+	// folded; B is not.
+	if err := svc.Handle(ctx, submitEnv(), body); err != nil {
+		t.Fatalf("delivery 3: %v", err)
+	}
+	if got := venue.queries(); got != 2 {
+		t.Fatalf("the venue was queried %d times, want 2 — delivery 3 did not reach adoption, so "+
+			"the assertions below prove nothing", got)
+	}
+	st, _, err = store.Load(ctx, cmd.GetOrderId())
+	if err != nil {
+		t.Fatalf("Load after delivery 3: %v", err)
+	}
+	if q := st.GetQuarantine(); q != nil {
+		t.Fatalf("the order was QUARANTINED (%q). The venue re-presented A(60) — which this order "+
+			"already holds — against 40 remaining leaves, and the over-fill guard fired on it "+
+			"BEFORE the claim could refuse the fold. B(40) was never reached: a real execution "+
+			"the platform does not record, on an order frozen for a human", q.GetReason())
+	}
+	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED {
+		t.Fatalf("status = %v, want FILLED — A(60) is already folded and B(40) completes the 100 "+
+			"ordered", st.GetStatus())
+	}
+	if got := dec.Str(dec.FromProto(st.GetFilledQuantity())); got != "100" {
+		t.Fatalf("filled_quantity = %s, want 100 — B was not folded", got)
+	}
+	// 60 @ 10.20 + 40 @ 10.30 = 10.24 weighted. A re-fold of A would move this,
+	// which is the number #782's claim protects and this change must not weaken.
+	if got := dec.Str(dec.FromProto(st.GetAverageFillPrice())); got != "10.24" {
+		t.Fatalf("average_fill_price = %s, want 10.24", got)
+	}
+
+	// EXACTLY ONE FACT PER FILL, over the whole run. This is the arm that says the
+	// skip is a SKIP and not a second fold: A announced once (as a partial) and B
+	// once (as the fill that completed the order). A re-folded A would announce
+	// twice, and a B that never folded would announce not at all.
+	if got := fb.count(EventTypePartiallyFilled); got != 1 {
+		t.Errorf("%d ORDER_PARTIALLY_FILLED FACTs published, want exactly 1 — one for A(60)", got)
+	}
+	if got := fb.count(EventTypeFilled); got != 1 {
+		t.Errorf("%d ORDER_FILLED FACTs published, want exactly 1 — one for B(40), the fill that "+
+			"completed the order", got)
+	}
+}
+
 // zeroFillVenue acknowledges an execute (no error, nothing recorded — same
 // shape as amnesiacVenue and twoFillVenue) and then, when queried, reports the
 // order FILLED but supplies NO fill to fold. It models a venue whose answer is
