@@ -72,6 +72,16 @@ type ProducerConfig struct {
 	// caller (ctx) may issue under it (AUTH-01c forged-issuer guard). Nil ⇒ no
 	// check (backward compatible); non-COMMAND events never invoke it.
 	VerifyCommandIssuer CommandIssuerFunc
+
+	// SequenceTTL and SequenceMax bound the per-(event_type, partition_key)
+	// sequence map (#805). Zero ⇒ defaultSequenceTTL / defaultSequenceMax, which
+	// is what every service in this estate uses — they are here so a deployment
+	// with an unusual key cardinality can say so, not because anybody must.
+	//
+	// See the block comment on defaultSequenceTTL for why evicting a key is safe
+	// and what it costs.
+	SequenceTTL time.Duration
+	SequenceMax int
 }
 
 // Producer stamps + validates envelopes and frames them onto a Client.
@@ -84,13 +94,83 @@ type Producer struct {
 	verifyIssuer CommandIssuerFunc
 
 	seqMu    sync.Mutex
-	sequence map[seqKey]uint64
+	sequence map[seqKey]seqEntry
+	seqTTL   time.Duration
+	seqMax   int
+	// now is the sequence window's clock; nil ⇒ time.Now. A test installs one
+	// to advance past the TTL without sleeping.
+	now func() time.Time
 }
 
 type seqKey struct {
 	eventType    string
 	partitionKey string
 }
+
+// seqEntry is one key's counter and when it was last stamped.
+type seqEntry struct {
+	seq     uint64
+	touched time.Time
+}
+
+// THE SEQUENCE MAP IS BOUNDED, AND IT WAS NOT (#805).
+//
+// # What it cost
+//
+// sequence is keyed by {event_type, partition_key} and partition_key ON THE
+// ORDER PATH IS THE ORDER ID — services/oms/internal/order/events.go stamps it
+// in the single builder every OMS order FACT goes through, and the api-gateway,
+// both venue adapters and optimization do the same. One Producer per process,
+// one entry per (event type x order id), and the only delete( in this package
+// belonged to DedupWindow. So roughly 2-6 permanent entries per order the
+// process had ever touched, for the life of the pod.
+//
+// This is the platform's highest-throughput long-lived map and it was
+// monotonic. At institutional order rates the OMS heap grows until the pod is
+// OOM-killed, which on the execution path means orders in flight at an unknown
+// state and a restart that has to reconcile them. It arrives as a memory
+// eviction rather than an error, so nothing on the trading path reports it
+// until the pod dies.
+//
+// # Why eviction is safe, and what it actually costs
+//
+// envelope.proto: producer_sequence is "a per-(source, partition_key) monotonic
+// counter, 1-based, used for consumer-side gap detection independent of the
+// broker". Evicting a key restarts it at 1 — which is exactly what a PROCESS
+// RESTART already does to every key at once, and the contract has always
+// tolerated that. Nothing in this estate reads the field today: the only
+// GetProducerSequence outside the generated SDK is one accounting test
+// asserting two publishes on one key are 1 then 2, which a live key still
+// satisfies.
+//
+// So the cost is bounded and stated: a future gap detector seeing a restart-to-1
+// on an idle key must treat it as a producer restart rather than a gap. That is
+// the same rule it needs for pod restarts, which are not optional.
+//
+// # Why lazy, capacity-triggered eviction and not a goroutine
+//
+// A sweeper goroutine would need starting and joining in EVERY composition root
+// that builds a Producer — twenty-odd services — and a Close() on a type that
+// has never had one. That is a large, error-prone change to fix a leak, and a
+// forgotten join is its own defect. Sweeping on insert costs nothing on the
+// common path (the key already exists), runs only when the map is at capacity,
+// and cannot be forgotten because there is nothing to wire.
+//
+// The bound is HARD: len(sequence) never exceeds seqMax, because gc runs before
+// any insert that would cross it and evicts by soonest-touched when everything
+// is still live. The TTL decides WHICH keys go first; the cap is what makes the
+// memory answer finite regardless of burst rate. Same discipline, same shape and
+// the same two knobs as DedupWindow.gc one file over.
+const (
+	// defaultSequenceTTL is how long an untouched key is kept. An order's FACTs
+	// land within seconds of each other; an hour is generous for a redelivery or
+	// a late cancel and still sheds a day's order ids many times over.
+	defaultSequenceTTL = time.Hour
+	// defaultSequenceMax is the hard ceiling on live keys. At the ~100-150 bytes
+	// an entry costs, 100k keys is ~10-15MB — a bound an operator can reason
+	// about, and far above any burst a single process sees inside the TTL.
+	defaultSequenceMax = 100_000
+)
 
 func NewProducer(client Client, cfg ProducerConfig) (*Producer, error) {
 	if client == nil {
@@ -102,12 +182,21 @@ func NewProducer(client Client, cfg ProducerConfig) (*Producer, error) {
 	if cfg.ProducerVersion == "" {
 		return nil, errors.New("bus: ProducerConfig.ProducerVersion required")
 	}
+	ttl, max := cfg.SequenceTTL, cfg.SequenceMax
+	if ttl <= 0 {
+		ttl = defaultSequenceTTL
+	}
+	if max <= 0 {
+		max = defaultSequenceMax
+	}
 	return &Producer{
 		client:       client,
 		cfg:          cfg,
 		metrics:      cfg.Metrics,
 		verifyIssuer: cfg.VerifyCommandIssuer,
-		sequence:     make(map[seqKey]uint64),
+		sequence:     make(map[seqKey]seqEntry),
+		seqTTL:       ttl,
+		seqMax:       max,
 	}, nil
 }
 
@@ -296,7 +385,56 @@ func (p *Producer) nextSequence(eventType, partitionKey string) uint64 {
 	}
 	p.seqMu.Lock()
 	defer p.seqMu.Unlock()
+	now := p.seqClock()
 	k := seqKey{eventType, partitionKey}
-	p.sequence[k]++
-	return p.sequence[k]
+	e, live := p.sequence[k]
+	// SWEPT ONLY WHEN A NEW KEY WOULD CROSS THE CEILING. A publish for a key the
+	// map already holds — the common case, every FACT after an order's first —
+	// touches nothing but its own entry.
+	if !live && len(p.sequence) >= p.seqMax {
+		p.gcSequence(now)
+	}
+	e.seq++
+	e.touched = now
+	p.sequence[k] = e
+	// NEVER 0 ON AN EVICTED KEY. Validate refuses producer_sequence == 0 while
+	// partition_key is non-empty, so an eviction that returned 0 would turn a
+	// memory bound into a publish failure. The zero seqEntry increments to 1,
+	// which is the same value a fresh process would have stamped.
+	return e.seq
+}
+
+// gcSequence sheds expired keys, then the soonest-touched until the map is under
+// its ceiling. Caller holds p.seqMu.
+//
+// It is DedupWindow.gc's discipline over a different value, and the second half
+// is what makes the bound hard: a burst that creates seqMax live keys inside the
+// TTL still cannot grow the map, it just evicts the least recently used. Without
+// it the TTL alone would be a hope rather than a limit.
+func (p *Producer) gcSequence(now time.Time) {
+	for k, e := range p.sequence {
+		if now.Sub(e.touched) >= p.seqTTL {
+			delete(p.sequence, k)
+		}
+	}
+	for len(p.sequence) >= p.seqMax {
+		var oldestK seqKey
+		var oldestT time.Time
+		first := true
+		for k, e := range p.sequence {
+			if first || e.touched.Before(oldestT) {
+				oldestK, oldestT, first = k, e.touched, false
+			}
+		}
+		delete(p.sequence, oldestK)
+	}
+}
+
+// seqClock is the sequence window's time source. Caller holds p.seqMu (or is the
+// constructor).
+func (p *Producer) seqClock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
 }
