@@ -26,7 +26,7 @@ func appendOne(t *testing.T, st *Postgres) *Event {
 	t.Helper()
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	e := tradeEvent("worm-1", "AAPL", 100, 150, -15000, t0, t0)
-	if err := st.Append(context.Background(), e); err != nil {
+	if err := st.Append(context.Background(), e, nil); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	return e
@@ -77,13 +77,13 @@ func TestLedgerEntries_AppendStillWorksUnderWORM(t *testing.T) {
 	ctx := context.Background()
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 
-	if err := st.Append(ctx, tradeEvent("worm-a", "AAPL", 10, 100, -1000, t0, t0)); err != nil {
+	if err := st.Append(ctx, tradeEvent("worm-a", "AAPL", 10, 100, -1000, t0, t0), nil); err != nil {
 		t.Fatalf("append 1: %v", err)
 	}
 	// A second, later entry — the bitemporal CORRECTION path. This is how the
 	// ledger is meant to be amended, and it must remain open.
 	if err := st.Append(ctx, tradeEvent("worm-b", "AAPL", -10, 110, 1100,
-		t0.Add(time.Hour), t0.Add(time.Hour))); err != nil {
+		t0.Add(time.Hour), t0.Add(time.Hour)), nil); err != nil {
 		t.Fatalf("append 2 (the correction path) rejected: %v — WORM must block rewrites, not appends", err)
 	}
 

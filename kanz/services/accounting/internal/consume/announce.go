@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
@@ -143,21 +144,44 @@ func NewAnnouncer(store ledger.Store, publisher Publisher, baseCcy string, postu
 	return &Announcer{store: store, publisher: publisher, baseCcy: baseCcy, posture: posture, logger: logger, now: now}
 }
 
-// Announce recomputes portfolioID's cash from the journal and publishes it.
+// Records renders portfolioID's cash level as the outbox records that must
+// commit with the entry that changed it (#804).
 //
-// THE ERROR IS RETURNED BUT THE CALLER MUST NOT NACK ON IT. The ledger write is
-// the book of record and has already committed; this announcement is DERIVED. A
-// failed publish that failed the fold would turn a broker blip into a stalled
-// ledger, and the fold is what must never stop. The consumer's staleness bound
-// is what makes a lost announcement safe: it falls back to "cash unavailable",
-// which the buying-power rule fails closed on.
-func (a *Announcer) Announce(ctx context.Context, portfolioID string) error {
-	if a.publisher == nil {
-		return nil
+// # What this replaces, and what was right about it
+//
+// It used to be Announce: a publish that ran AFTER the ledger write committed,
+// whose error the Folder deliberately discarded. That trade-off was correct and
+// is preserved — the ledger is the book of record, this announcement is DERIVED,
+// and nacking the fold to retry a publish would turn a broker blip into a
+// stalled ledger. A consumer's staleness bound made a lost announcement safe,
+// because it ages the balance out to UNKNOWN and the buying-power rule fails
+// closed on that.
+//
+// WHAT WAS MISSING WAS THE RECOVERY. The only thing that re-announced a
+// portfolio was the next fold FOR THAT PORTFOLIO — there was no ticker, no
+// compensator and no outbox. So one broker blip during one portfolio's fold
+// refused every order for it under a buying-power mandate, indefinitely, until
+// unrelated activity happened to arrive: a trading outage measured in hours,
+// produced by a transient the platform recovered from in seconds. Fail-closed
+// was the right direction and the wrong duration.
+//
+// Now the record commits with the entry and the relay retries the publish on its
+// own schedule. The failure it cannot survive moved from "the broker was down"
+// to "the database was down", and the database being down already fails the
+// fold.
+//
+// IT READS THROUGH THE STORE IT IS HANDED, not through a.store, and that is the
+// whole reason it is a callback. Inside Append's transaction that store SEES THE
+// UNCOMMITTED ENTRY, so the level is the one the fold produced. Reading through
+// the pool from in there would announce the balance as it was BEFORE the fold,
+// every time.
+func (a *Announcer) Records(ctx context.Context, st ledger.Store, portfolioID string) ([]outbox.Record, error) {
+	if a.publisher == nil || portfolioID == "" {
+		return nil, nil
 	}
-	book, _, err := ledger.MaterializeCurrent(ctx, a.store, portfolioID)
+	book, _, err := ledger.MaterializeCurrent(ctx, st, portfolioID)
 	if err != nil {
-		return fmt.Errorf("announce %s: materialize: %w", portfolioID, err)
+		return nil, fmt.Errorf("announce %s: materialize: %w", portfolioID, err)
 	}
 	total, ok := dec.ToProtoScaled(book.CashBalance(a.baseCcy))
 	if !ok {
@@ -165,12 +189,18 @@ func (a *Announcer) Announce(ctx context.Context, portfolioID string) error {
 		// exactly must not be announced as a smaller one: a consumer would compare
 		// a wrapped figure against a spending limit and admit an order the fund
 		// cannot pay for.
-		return fmt.Errorf("announce %s: cash balance is not representable as a Decimal", portfolioID)
+		//
+		// IT NOW FAILS THE APPEND, and that is the correct direction rather than a
+		// regression. An entry whose resulting balance cannot be stated is one the
+		// estate would be told nothing about; refusing it leaves the journal
+		// consistent and the fill in the DLQ, where an operator sees it — instead
+		// of a committed entry whose level silently never goes out.
+		return nil, fmt.Errorf("announce %s: cash balance is not representable as a Decimal", portfolioID)
 	}
 
-	perAccount, err := a.byVenueAccount(ctx, portfolioID)
+	perAccount, err := a.byVenueAccount(ctx, st, portfolioID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	now := a.now().UTC()
@@ -183,7 +213,19 @@ func (a *Announcer) Announce(ctx context.Context, portfolioID string) error {
 		KnowledgeTime:  timestamppb.New(now),
 		Completeness:   a.posture.toProto(),
 	}
-	return a.publisher.Publish(ctx, bus.Event{
+	// outbox.From resolves the tenant and the lineage off ctx exactly as
+	// bus.Producer.stamp would have — the relay publishes from a ticker, long
+	// after the fold's context is gone, so a record that did not capture them
+	// would publish fine and quietly stop being traceable to the fill that caused
+	// it. It REFUSES an empty tenant, and that refusal rolls the entry back with
+	// it: a balance the platform cannot announce is one it must not book.
+	//
+	// THE PARTITION KEY IS THE PORTFOLIO, which is the granularity a consumer
+	// folds at (cashview keys its map by portfolio_id) and the granularity
+	// Append's advisory lock serializes. Same key implies same lock implies
+	// commits that cannot interleave, which is what makes the relay's id order
+	// commit order for this FACT.
+	rec, err := outbox.From(ctx, bus.Event{
 		Subject:          SubjectPortfolioCash,
 		EventType:        SubjectPortfolioCash,
 		EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
@@ -194,6 +236,10 @@ func (a *Announcer) Announce(ctx context.Context, portfolioID string) error {
 		PayloadSchemaRef: schemaRefPortfolioCash,
 		Payload:          msg,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("announce %s: capture: %w", portfolioID, err)
+	}
+	return []outbox.Record{rec}, nil
 }
 
 // byVenueAccount folds the journal into per-(exchange account, asset) balances —
@@ -202,8 +248,8 @@ func (a *Announcer) Announce(ctx context.Context, portfolioID string) error {
 //
 // Sorted, so the announcement is byte-stable for a given book: an unsorted map
 // range would make every republish look like a change to anything diffing them.
-func (a *Announcer) byVenueAccount(ctx context.Context, portfolioID string) ([]*accountingpb.VenueAccountCash, error) {
-	events, err := a.store.Journal(ctx, portfolioID)
+func (a *Announcer) byVenueAccount(ctx context.Context, st ledger.Store, portfolioID string) ([]*accountingpb.VenueAccountCash, error) {
+	events, err := st.Journal(ctx, portfolioID)
 	if err != nil {
 		return nil, fmt.Errorf("announce %s: journal: %w", portfolioID, err)
 	}

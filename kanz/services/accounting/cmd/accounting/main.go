@@ -558,6 +558,34 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mes
 	for _, subject := range cfg.CashSubjects {
 		subscribe(subject, folder.HandleCash)
 	}
+
+	// THE OUTBOX RELAY, AND IT IS THE RECOVERY #804 ADDED.
+	//
+	// The cash announcement now commits with the journal entry that changed it,
+	// and the fold flushes it inline so a healthy deployment publishes exactly as
+	// promptly as the direct publish it replaces. This goroutine is what happens
+	// when that flush fails: before it, the ONLY thing that re-announced a
+	// portfolio was the next fold for that portfolio, so one broker blip refused
+	// every order for it under a buying-power mandate until unrelated activity
+	// happened to arrive.
+	//
+	// Started only when there is an announcer to publish through — NewFolder
+	// builds no relay without one, and a nil relay here is the no-announcer
+	// deployment the startup log already reports.
+	if relay := folder.Outbox(); relay != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("accounting outbox relay armed — cash levels are published from the store, " +
+				"in the same transaction that committed the entry that changed them")
+			if err := relay.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				once.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}()
+	}
 	wg.Wait()
 	return firstErr
 }

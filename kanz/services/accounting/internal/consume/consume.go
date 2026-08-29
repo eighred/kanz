@@ -21,6 +21,7 @@ import (
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
+	"github.com/eighred/kanz/internal/outbox"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"google.golang.org/protobuf/proto"
@@ -58,10 +59,18 @@ type Folder struct {
 	// changed it (#450). nil ⇒ nothing announces, which the composition root
 	// reports at startup rather than leaving to be discovered.
 	announcer *Announcer
-	logger    *slog.Logger
+	// relay drains the outbox this folder's store enqueues into. Built by
+	// NewFolder from the store's own queue, so a Folder always has a drain for
+	// the announcements its Appends commit (#804) — the same construction
+	// order.NewService makes, and for the same reason.
+	relay  *outbox.Relay
+	logger *slog.Logger
 	// onAnnounceFailed counts announcements that never left this process. See
 	// WithAnnounceFailureObserver for why a log line alone was not enough.
 	onAnnounceFailed func()
+	// relayOpts carry the relay's interval and counters from the composition
+	// root; applied before NewFolder builds it.
+	relayOpts []outbox.RelayOption
 }
 
 // WithAnnouncer makes the folder publish a portfolio's cash level after each
@@ -100,28 +109,47 @@ func WithAnnounceFailureObserver(fn func()) FolderOption {
 	return func(f *Folder) { f.onAnnounceFailed = fn }
 }
 
-// announce publishes portfolioID's new cash level, and NEVER fails the fold.
+// announcerFor returns the callback Append runs INSIDE its transaction to build
+// this portfolio's cash announcement (#804), or nil when nothing announces.
 //
-// The ledger write has already committed and is the book of record; this
-// announcement is DERIVED state. Returning the error to the bus would nack the
+// The level and the entry that produced it now commit together, so the record
+// cannot be lost to a broker that was down for a moment — which is what it used
+// to be, with no recovery but the next fold for the same portfolio.
+func (f *Folder) announcerFor(portfolioID string) ledger.Announcer {
+	if f.announcer == nil || portfolioID == "" {
+		return nil
+	}
+	return func(ctx context.Context, st ledger.Store) ([]outbox.Record, error) {
+		return f.announcer.Records(ctx, st, portfolioID)
+	}
+}
+
+// flush publishes what the fold just committed, and NEVER fails the fold.
+//
+// THE TRADE-OFF THE OLD announce MADE IS UNCHANGED, and it is still the right
+// one: the ledger write has committed and is the book of record, this
+// announcement is DERIVED, and returning the error to the bus would nack the
 // message and re-fold it — turning a broker blip into a stalled ledger, when the
 // fold is the one thing that must not stop.
 //
-// It is LOUD instead. A consumer's staleness bound is what makes a lost
-// announcement safe (it falls back to "cash unavailable", which the buying-power
-// rule fails closed on), but that fallback is a refusal — so an operator needs to
-// know the announcements stopped, not infer it from orders being denied.
-func (f *Folder) announce(ctx context.Context, portfolioID string) {
-	if f.announcer == nil || portfolioID == "" {
+// WHAT CHANGED IS WHAT A FAILURE COSTS. It used to be permanent until unrelated
+// activity arrived; the record is now durable, so a failure here is LATENCY and
+// the relay's own pass sends it. The counter and the ERROR log stay, because an
+// operator should learn that announcements are lagging from the thing that
+// measures them rather than from orders being refused — but they now describe a
+// delay rather than a loss, and the log says so.
+func (f *Folder) flush(ctx context.Context, portfolioID string) {
+	if f.relay == nil || portfolioID == "" {
 		return
 	}
-	if err := f.announcer.Announce(ctx, portfolioID); err != nil {
+	if _, err := f.relay.Flush(ctx, portfolioID); err != nil {
 		if f.onAnnounceFailed != nil {
 			f.onAnnounceFailed()
 		}
-		f.logger.ErrorContext(ctx, "accounting: cash balance announcement failed — the ledger is "+
-			"correct and downstream consumers will age this portfolio's balance out to UNKNOWN, "+
-			"which refuses orders under a buying-power mandate",
+		f.logger.ErrorContext(ctx, "accounting: cash balance announcement did not publish — it is "+
+			"DURABLE and the outbox relay will retry it, so this is a delay rather than a loss. "+
+			"Downstream consumers age this portfolio's balance out to UNKNOWN meanwhile, which "+
+			"refuses orders under a buying-power mandate",
 			"portfolio_id", portfolioID, "err", err)
 	}
 }
@@ -145,7 +173,36 @@ func NewFolder(tenant string, store ledger.Store, cashCurrency string, opts ...F
 	for _, opt := range opts {
 		opt(f)
 	}
+	// THE RELAY IS BUILT LAST, from this store's own outbox and this announcer's
+	// own publisher, so a Folder always has a drain for the announcements its
+	// Appends commit (#804, #292). Options are applied first because they carry
+	// the announcer the publisher comes from.
+	//
+	// No announcer means nothing to publish and nothing to drain — the deployment
+	// the composition root already reports at startup.
+	if f.announcer != nil && f.announcer.publisher != nil {
+		q, ok := store.(interface{ Outbox() outbox.Queue })
+		if !ok {
+			return nil, errors.New("consume: the ledger store has no outbox, so a cash announcement " +
+				"would be committed and never published")
+		}
+		relay, err := outbox.NewRelay(q.Outbox(), f.announcer.publisher, f.logger, f.relayOpts...)
+		if err != nil {
+			return nil, err
+		}
+		f.relay = relay
+	}
 	return f, nil
+}
+
+// Outbox is the relay draining the announcements this folder's store commits.
+// The composition root must Run it, or every cash level waits for the next fold
+// to flush it inline — which is the recovery gap #804 closed.
+func (f *Folder) Outbox() *outbox.Relay { return f.relay }
+
+// WithOutboxRelay passes options through to the relay NewFolder constructs.
+func WithOutboxRelay(opts ...outbox.RelayOption) FolderOption {
+	return func(f *Folder) { f.relayOpts = append(f.relayOpts, opts...) }
 }
 
 // Handle is the bus.EventHandler value wired into bus.Consumer.Subscribe. It
@@ -174,10 +231,10 @@ func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload [
 		// carry the fee's own asset.
 		return fmt.Errorf("consume: %s: %w", env.GetEventType(), err)
 	}
-	if err := f.store.Append(ctx, entry); err != nil {
+	if err := f.store.Append(ctx, entry, f.announcerFor(portfolioID)); err != nil {
 		return err
 	}
-	f.announce(ctx, portfolioID)
+	f.flush(ctx, portfolioID)
 	return nil
 }
 
@@ -201,10 +258,10 @@ func (f *Folder) HandleCash(ctx context.Context, env *envelopepb.Envelope, paylo
 	if entry == nil {
 		return nil // not a cash-movement event; ack
 	}
-	if err := f.store.Append(ctx, entry); err != nil {
+	if err := f.store.Append(ctx, entry, f.announcerFor(entry.PortfolioID)); err != nil {
 		return err
 	}
-	f.announce(ctx, entry.PortfolioID)
+	f.flush(ctx, entry.PortfolioID)
 	return nil
 }
 

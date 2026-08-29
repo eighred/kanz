@@ -75,17 +75,17 @@ func cashEntry(id, portfolio, account, ccy string, amount int64) *ledger.Event {
 func TestAnnounce_PublishesTheSpendableTotal(t *testing.T) {
 	pub := &capturingPublisher{}
 	a, st := announcerOver(t, pub)
-	ctx := context.Background()
+	ctx := foldCtx()
 
 	for _, e := range []*ledger.Event{
 		cashEntry("c:1", "PF1", "", "USD", 1000),
 		cashEntry("c:2", "PF1", "", "USD", -250),
 	} {
-		if err := st.Append(ctx, e); err != nil {
+		if err := st.Append(ctx, e, nil); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	if err := a.Announce(ctx, "PF1"); err != nil {
+	if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
 		t.Fatalf("Announce: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestAnnounce_PublishesTheSpendableTotal(t *testing.T) {
 func TestAnnounce_CarriesPerVenueAccountBalances(t *testing.T) {
 	pub := &capturingPublisher{}
 	a, st := announcerOver(t, pub)
-	ctx := context.Background()
+	ctx := foldCtx()
 
 	for _, e := range []*ledger.Event{
 		cashEntry("c:1", "PF1", "okx-sub-1", "USDT", 140),
@@ -127,11 +127,11 @@ func TestAnnounce_CarriesPerVenueAccountBalances(t *testing.T) {
 		// Declares it touched NO exchange account: the fund's own bank.
 		cashEntry("c:3", "PF1", "", "USD", 1_000_000),
 	} {
-		if err := st.Append(ctx, e); err != nil {
+		if err := st.Append(ctx, e, nil); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	if err := a.Announce(ctx, "PF1"); err != nil {
+	if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
 		t.Fatalf("Announce: %v", err)
 	}
 
@@ -161,11 +161,11 @@ func TestAnnounce_CarriesPerVenueAccountBalances(t *testing.T) {
 // closed on. The composition root reports the posture at startup.
 func TestAnnounce_NilPublisherIsInert(t *testing.T) {
 	a, st := announcerOver(t, nil)
-	ctx := context.Background()
-	if err := st.Append(ctx, cashEntry("c:1", "PF1", "", "USD", 100)); err != nil {
+	ctx := foldCtx()
+	if err := st.Append(ctx, cashEntry("c:1", "PF1", "", "USD", 100), nil); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	if err := a.Announce(ctx, "PF1"); err != nil {
+	if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
 		t.Fatalf("Announce with no publisher = %v, want nil", err)
 	}
 }
@@ -193,13 +193,13 @@ func TestFolderKeepsFoldingWhenTheAnnouncementFails(t *testing.T) {
 		TenantId:      testTenant,
 		IngestionTime: timestamppb.New(at),
 	}
-	if err := f.HandleCash(context.Background(), env, payload); err != nil {
+	if err := f.HandleCash(foldCtx(), env, payload); err != nil {
 		t.Fatalf("HandleCash returned %v — a failed ANNOUNCEMENT nacked the message, so a broker "+
 			"blip stalls the ledger. The fold is the thing that must not stop.", err)
 	}
 
 	// And the entry really did land, so this is not passing by not folding.
-	book, _, err := ledger.MaterializeCurrent(context.Background(), st, "PORT-1")
+	book, _, err := ledger.MaterializeCurrent(foldCtx(), st, "PORT-1")
 	if err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestFolderAnnouncesAfterASuccessfulFold(t *testing.T) {
 		TenantId:      testTenant,
 		IngestionTime: timestamppb.New(at),
 	}
-	if err := f.HandleCash(context.Background(), env, payload); err != nil {
+	if err := f.HandleCash(foldCtx(), env, payload); err != nil {
 		t.Fatalf("HandleCash: %v", err)
 	}
 	msg := pub.last()
