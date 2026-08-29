@@ -224,23 +224,7 @@ func (s *Server) handleApproveOverride(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.Decision == "reject" {
-		// A rejection needs no second-person check: refusing an act is always
-		// safe, including by the proposer withdrawing their own.
-		claimed, err := s.proposals.Claim(r.Context(), prop.ID)
-		if err != nil {
-			s.logger.Error("cannot claim the override proposal", "proposal_id", prop.ID, "err", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "proposal store unavailable"})
-			return
-		}
-		if !claimed {
-			s.countProposal("refused_race")
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "this proposal has already been decided"})
-			return
-		}
-		s.countProposal("rejected")
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status": "REJECTED", "proposal_id": prop.ID, "rejected_by": approver,
-		})
+		s.rejectProposal(w, r, prop, approver)
 		return
 	}
 
@@ -254,30 +238,36 @@ func (s *Server) handleApproveOverride(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claimed, err := s.proposals.Claim(r.Context(), prop.ID)
-	if err != nil {
-		s.logger.Error("cannot claim the override proposal", "proposal_id", prop.ID, "err", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "proposal store unavailable"})
-		return
-	}
-	if !claimed {
-		// Someone else decided it between the read and here. Refusing is the only
-		// safe answer: applying would append a second override for one decision.
-		s.countProposal("refused_race")
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this proposal has already been decided"})
-		return
-	}
-
+	// ONE CALL, AND IT CARRIES THE CLAIM (#807).
+	//
+	// This used to be s.proposals.Claim followed by s.exceptions.Override, two
+	// commits with the approval sitting between them. A process death in that
+	// window spent the second signature and applied nothing — the proposal gone,
+	// the exception still OPEN, and no record anywhere that an approval had been
+	// given. The claim now rides the override's transaction, so this request
+	// either does both or does neither.
+	//
 	// BOTH NAMES GO IN TOGETHER, built by the proposal itself, so the proposer
 	// and the approver cannot be transposed or one of them dropped on the way
 	// into the append-only trail.
-	if err := s.exceptions.Override(r.Context(), prop.Subject, prop.ApplyOverride(approver, s.now())); err != nil {
-		// The proposal is already claimed and the override did not apply. Say so
-		// loudly: the proposer must re-propose, and an operator needs to know why
-		// a decision they made vanished.
-		s.logger.Error("dual-signed override was approved but did not apply — the proposal is consumed "+
-			"and must be re-proposed", "exception_id", prop.Subject, "proposer", prop.Proposer,
-			"approver", approver, "err", err)
+	err = s.exceptions.Override(r.Context(), prop.Subject, prop.ApplyOverride(approver, s.now()),
+		store.Claim{ProposalID: prop.ID})
+	switch {
+	case errors.Is(err, store.ErrProposalAlreadyDecided):
+		// Someone else decided it between the read and the claim. Refusing is the
+		// only safe answer: applying would append a second override for one
+		// decision. Nothing was written.
+		s.countProposal("refused_race")
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this proposal has already been decided"})
+		return
+	case err != nil:
+		// NOTHING WAS CONSUMED. The claim was in the transaction that failed, so
+		// the proposal is still pending and this approver can simply try again
+		// once the cause is fixed — which is the whole difference #807 made, and
+		// why this line no longer tells them to re-propose.
+		s.logger.Error("dual-signed override did not apply; the proposal is still pending and the "+
+			"approval can be given again", "exception_id", prop.Subject, "proposal_id", prop.ID,
+			"proposer", prop.Proposer, "approver", approver, "err", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -291,6 +281,39 @@ func (s *Server) handleApproveOverride(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ex)
+}
+
+// rejectProposal withdraws a pending override.
+//
+// IT IS THE ONE PLACE LEFT THAT CLAIMS ON ITS OWN, and that is correct rather
+// than an oversight: removing the row IS the whole of a rejection, so there is
+// no second write for the claim to be separable from. An APPROVAL is the
+// opposite — it authorises a state change — and hands its claim to
+// ExceptionStore.Override so the two commit together (#807).
+//
+// It is a separate method for that reason. While the two decisions shared one
+// function, "does this function claim and also override" could not tell the safe
+// arrangement from the defect, and the guard in test/arch that now forbids the
+// pair had nothing it could assert.
+//
+// A rejection needs no second-person check: refusing an act is always safe,
+// including by the proposer withdrawing their own.
+func (s *Server) rejectProposal(w http.ResponseWriter, r *http.Request, prop store.OverrideProposal, approver string) {
+	claimed, err := s.proposals.Claim(r.Context(), prop.ID)
+	if err != nil {
+		s.logger.Error("cannot claim the override proposal", "proposal_id", prop.ID, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "proposal store unavailable"})
+		return
+	}
+	if !claimed {
+		s.countProposal("refused_race")
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this proposal has already been decided"})
+		return
+	}
+	s.countProposal("rejected")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "REJECTED", "proposal_id": prop.ID, "rejected_by": approver,
+	})
 }
 
 // refuseApproval maps a dualcontrol refusal onto a status, a count and a message
@@ -439,7 +462,10 @@ func (s *Server) authenticatedSubject(w http.ResponseWriter, r *http.Request) (s
 // person's authority, and the fact that it did is recorded and counted.
 func (s *Server) applySingleSigned(w http.ResponseWriter, r *http.Request, exceptionID, actor, reason string, price *big.Rat) {
 	o := pricing.Override{Actor: actor, Reason: reason, ChosenPrice: price, At: s.now()}
-	if err := s.exceptions.Override(r.Context(), exceptionID, o); err != nil {
+	// AN EMPTY CLAIM, and it is the honest one: no proposal was ever made, so
+	// there is nothing to consume. The parameter is not optional precisely so
+	// that this path has to say so.
+	if err := s.exceptions.Override(r.Context(), exceptionID, o, store.Claim{}); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

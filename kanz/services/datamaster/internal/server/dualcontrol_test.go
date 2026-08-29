@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -42,9 +43,30 @@ type armed struct {
 
 func newDualControlServer(t *testing.T, require bool) armed {
 	t.Helper()
+	return newDualControlServerWith(t, require, nil)
+}
+
+// newDualControlServerWith builds the armed server, optionally wrapping the
+// proposal store THE QUEUE CLAIMS AGAINST.
+//
+// The wrapper hook exists because the claim moved (#807): an approval no longer
+// claims and then applies, it hands the claim to the override, so a test that
+// wants to lose the claim has to lose it where the override takes it. Swapping
+// s.proposals alone now only affects the read and the rejection path.
+func newDualControlServerWith(t *testing.T, require bool, wrapQueueProposals func(store.ProposalStore) store.ProposalStore) armed {
+	t.Helper()
 	feeds := testFeeds()
 	golden := store.NewMemoryGoldenStore()
-	exceptions := store.NewQueueStore(pricing.NewQueue())
+	// THE QUEUE HOLDS THE SAME PROPOSAL STORE THE SERVER APPROVES AGAINST (#807).
+	// An approved override consumes its proposal in the same call that applies
+	// it, so a queue wired to a different instance would apply the override and
+	// leave the proposal approvable — the same signature spendable twice.
+	proposals := store.NewMemoryProposals()
+	var queueProposals store.ProposalStore = proposals
+	if wrapQueueProposals != nil {
+		queueProposals = wrapQueueProposals(proposals)
+	}
+	exceptions := store.NewQueueStore(pricing.NewQueue(), queueProposals)
 	proj := projector.New(feeds, golden, exceptions, nil, projector.WithClock(func() time.Time { return now }))
 	if err := proj.Refresh(context.Background()); err != nil {
 		t.Fatalf("projector refresh: %v", err)
@@ -52,7 +74,6 @@ func newDualControlServer(t *testing.T, require bool) armed {
 	r := &Readiness{}
 	r.Set(true)
 	clock := now
-	proposals := store.NewMemoryProposals()
 	reg := prometheus.NewRegistry()
 	s := New(r, nil, testTenant, golden, exceptions, feeds,
 		WithClock(func() time.Time { return clock }),
@@ -415,13 +436,19 @@ func (l losesTheClaim) Claim(context.Context, string) (bool, error) { return fal
 //
 // The sequential test above cannot reach this: it needs the read to succeed and
 // the claim to fail, which is precisely the window a real race opens.
+//
+// SINCE #807 THE CLAIM IS INSIDE THE OVERRIDE, so losing it must also leave the
+// override unwritten — the two are one act. That is what the zero-overrides
+// assertion below now measures.
 func TestArmed_ALostClaimRefusesRatherThanApplyingTwice(t *testing.T) {
-	a := newDualControlServer(t, true)
+	// The claim that decides is the one INSIDE the override (#807), so the store
+	// that loses it is the one the queue applies against — not s.proposals, which
+	// now only answers the read and the rejection path.
+	a := newDualControlServerWith(t, true, func(p store.ProposalStore) store.ProposalStore {
+		return losesTheClaim{p}
+	})
 	id := openExceptionID(t, a.s, a.exceptions)
 	proposalID := a.propose(t, id, "alice@kanz", "130")
-
-	// Swap in a store that answers the read and then loses every claim.
-	a.s.proposals = losesTheClaim{a.proposals}
 
 	rec := a.do(t, http.MethodPost, "/v1/exceptions/"+id+"/override/approve", "bob@kanz",
 		`{"proposal_id":"`+proposalID+`","decision":"approve"}`)
@@ -434,6 +461,68 @@ func TestArmed_ALostClaimRefusesRatherThanApplyingTwice(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(a.s.overrideMetrics.proposals.WithLabelValues("refused_race")); got != 1 {
 		t.Errorf("refused_race = %v, want 1", got)
+	}
+}
+
+// refusesTheOverride is an exception store whose Override applies nothing and
+// says so — a store failure anywhere inside the override's transaction.
+type refusesTheOverride struct{ store.ExceptionStore }
+
+func (refusesTheOverride) Override(context.Context, string, pricing.Override, store.Claim) error {
+	return errors.New("the override FACT could not be built")
+}
+
+// A FAILED OVERRIDE LEAVES THE APPROVAL STILL GIVABLE (#807).
+//
+// The handler used to claim the proposal and THEN apply the override, so any
+// failure after the claim — a store error, or the process simply dying — spent
+// the second signature and applied nothing. The approver was told to re-propose,
+// because there was nothing left to approve.
+//
+// The claim now travels with the override, so a refused override consumes
+// nothing: the proposal is still on the pending queue and the same approver can
+// sign again once the cause is fixed. That re-approval is what this asserts,
+// because "the proposal is still in the store" is a weaker claim than "the
+// approval still works".
+func TestArmed_AFailedOverrideLeavesTheApprovalGivable(t *testing.T) {
+	a := newDualControlServer(t, true)
+	id := openExceptionID(t, a.s, a.exceptions)
+	proposalID := a.propose(t, id, "alice@kanz", "130")
+
+	working := a.s.exceptions
+	a.s.exceptions = refusesTheOverride{working}
+	rec := a.do(t, http.MethodPost, "/v1/exceptions/"+id+"/override/approve", "bob@kanz",
+		`{"proposal_id":"`+proposalID+`","decision":"approve"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("an override the store refused: want 400 got %d (%s)", rec.Code, rec.Body.String())
+	}
+	a.s.exceptions = working
+
+	// STILL PENDING. Not "still in the store" — on the queue the proposer and the
+	// approver actually read.
+	list := a.do(t, http.MethodGet, "/v1/exceptions/pending-overrides", "carol@kanz", "")
+	var pending []struct {
+		ProposalID string `json:"proposal_id"`
+		State      string `json:"state"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &pending); err != nil {
+		t.Fatalf("decode pending: %v (%s)", err, list.Body.String())
+	}
+	if len(pending) != 1 || pending[0].ProposalID != proposalID {
+		t.Fatalf("pending after a failed override = %+v, want the proposal that was never applied — "+
+			"the second signature was spent on an override that did not happen (#807)", pending)
+	}
+
+	// AND THE APPROVAL STILL WORKS.
+	rec = a.do(t, http.MethodPost, "/v1/exceptions/"+id+"/override/approve", "bob@kanz",
+		`{"proposal_id":"`+proposalID+`","decision":"approve"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-approving after a failed override: want 200 got %d (%s)", rec.Code, rec.Body.String())
+	}
+	ex := a.exception(t, id)
+	if ex.Status != pricing.StatusOverridden || len(ex.Overrides) != 1 {
+		t.Errorf("after the retry the exception is %s with %d override(s), want OVERRIDDEN with 1",
+			ex.Status, len(ex.Overrides))
 	}
 }
 
@@ -584,7 +673,7 @@ func TestDualControl_EverySeriesExistsBeforeItFires(t *testing.T) {
 func TestArmedWithoutAStore_IsNotSilentlyDualSigned(t *testing.T) {
 	feeds := testFeeds()
 	golden := store.NewMemoryGoldenStore()
-	exceptions := store.NewQueueStore(pricing.NewQueue())
+	exceptions := store.NewQueueStore(pricing.NewQueue(), nil)
 	proj := projector.New(feeds, golden, exceptions, nil, projector.WithClock(func() time.Time { return now }))
 	if err := proj.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
@@ -625,7 +714,7 @@ func TestOverrideRecord_AStoreWillNotWriteASelfApproval(t *testing.T) {
 	for _, approver := range []string{"alice@kanz", "Alice@kanz", " alice@kanz "} {
 		err := a.exceptions.Override(context.Background(), id, pricing.Override{
 			Actor: "alice@kanz", Approver: approver, Reason: "r", ChosenPrice: bigRat(t, "130"), At: now,
-		})
+		}, store.Claim{})
 		if err == nil {
 			t.Errorf("the store wrote an override where the approver (%q) is the actor — a self-approval "+
 				"is recorded as dual control", approver)
