@@ -245,10 +245,10 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// healthy: kanz_risk_calibration_scheduled said 1 and the composition root
 	// logged "calibration scheduler enabled", while the output went nowhere.
 	//
-	// Owning it here is what lets the FI measures read it. It is created
-	// unconditionally and cheaply (an empty in-memory map); whether anything
-	// FILLS it is the calibration gate below.
-	curveStore := curve.NewStore()
+	// Owning it here is what lets the FI measures read it. It is created cheaply
+	// (an empty map, bounded by the #811 retention horizon config.Load has
+	// already validated against the cadence); the gate below decides if it FILLS.
+	curveStore := curve.NewStore(curve.WithHorizon(cfg.CalibrationHorizon))
 
 	// FI IS REGISTERED ONLY WHEN A CURVE CAN EXIST, and that condition is the
 	// interesting part of this change.
@@ -913,7 +913,12 @@ func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSCl
 	sched := schedule.New(jobs, schedule.WithLogger(logger))
 	logger.Info("calibration scheduler enabled",
 		"jobs", sched.Jobs(), "currencies", src.Currencies(),
-		"intraday", cfg.CalibrationInterval, "nightly", cfg.CalibrationNightly)
+		"intraday", cfg.CalibrationInterval, "nightly", cfg.CalibrationNightly,
+		// The retained-version bound belongs beside the cadence that fills it:
+		// these two numbers are what an operator needs to reason about this pod's
+		// pricing memory, and reading one without the other says nothing (#811).
+		"horizon", cfg.CalibrationHorizon,
+		"retained_curves_per_currency", int64(cfg.CalibrationHorizon/cfg.CalibrationInterval))
 	go func() { _ = sched.Run(ctx) }()
 	return nil
 }

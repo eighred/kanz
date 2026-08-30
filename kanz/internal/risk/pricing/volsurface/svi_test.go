@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/risk/pricing"
+	"github.com/eighred/kanz/internal/risk/pricing/pit"
 )
 
 // sviQuotes generates listed-option quotes whose smile IS an SVI slice, so the
@@ -203,7 +204,7 @@ func TestVolStore_AConcurrentBackfillNeverResolvesAStaleVersion(t *testing.T) {
 	// backing array a concurrent reader is holding a header into, which is the
 	// only arrangement in which the defect is reachable. A reallocating append
 	// leaves the reader on a private, consistent copy and hides it.
-	st.byUnderlying["X"] = make([]surfaceVersion, 0, 4*1024)
+	st.byUnderlying["X"] = make([]pit.Version[*SVISurface], 0, 4*1024)
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for k := 1; k <= versions; k++ {
 		st.Put("X", base.Add(time.Duration(k)*time.Minute), flatSurface(float64(k)))
@@ -236,11 +237,24 @@ func TestVolStore_AConcurrentBackfillNeverResolvesAStaleVersion(t *testing.T) {
 	// The writer only ever backfills EARLIER as-ofs, so it inserts at index 0 and
 	// shifts the whole array right on every Put while never changing the answer
 	// the readers are asserting.
+	//
+	// MICROSECONDS, NOT MINUTES, AND THE UNIT IS LOAD-BEARING (#811). Retention
+	// is now bounded by a horizon measured back from the newest retained version,
+	// so a writer stepping a MINUTE further back on every Put walks out of the
+	// horizon after ~10k iterations and every later backfill is pruned the
+	// instant it is inserted. The array would then stop shifting, this test would
+	// stop exercising the interleaving, and it would keep passing — the exact
+	// "green guard checking a weaker property" failure this file exists to
+	// prevent. At microsecond granularity two seconds of writes reach two
+	// seconds into the past, no version is ever pruned, and every Put still
+	// inserts at index 0.
+	writes := &atomic.Int64{}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for k := 1; !stop.Load(); k++ {
-			st.Put("X", base.Add(-time.Duration(k)*time.Minute), flatSurface(-1))
+			st.Put("X", base.Add(-time.Duration(k)*time.Microsecond), flatSurface(-1))
+			writes.Add(1)
 		}
 	}()
 
@@ -263,6 +277,20 @@ func TestVolStore_AConcurrentBackfillNeverResolvesAStaleVersion(t *testing.T) {
 	if v, ok := st.Vol(ctx, "X", 100, 1, future); !ok || math.Abs(v-newest) > 1e-12 {
 		t.Fatalf("after the run the store resolves %v (ok=%v), want %v — the readers were "+
 			"asserting against an answer the store never gave", v, ok, newest)
+	}
+	// NON-VACUITY ON THE WRITER (#811). The defect this test hunts is only
+	// reachable while Put is SHIFTING the backing array under a reader, and
+	// retention is now bounded — a backfill older than the horizon is dropped as
+	// it is inserted, and the array then stops moving. Every version this writer
+	// published must still be retained, or the interleaving above was never
+	// exercised no matter how many reads completed.
+	st.mu.RLock()
+	held := len(st.byUnderlying["X"])
+	st.mu.RUnlock()
+	if want := int(writes.Load()) + versions; held != want {
+		t.Fatalf("the store holds %d versions after %d backfills plus %d seeded — want %d. "+
+			"Retention pruned versions this writer published, so Put stopped inserting at index 0 "+
+			"and the concurrent shift this test depends on was not happening", held, writes.Load(), versions, want)
 	}
 }
 
