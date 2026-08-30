@@ -104,9 +104,17 @@ var _ Queue = (*Postgres)(nil)
 // envelope_tenant_id, NOT tenant_id: the relay publishes under the tenant the
 // FACT belongs to, which on today's deployment is not the tenant the row is
 // stored under. See Enqueue.
+//
+// last_error IS ON THE PROJECTION (#817). It was written by MarkFailed, cleared
+// by MarkPublished and selected by nothing, so the one field that says why the
+// head of a key will not publish could only be reached by opening psql against
+// production during the outage. Every column here must have a Scan target in
+// Pending below, in the same order; test/arch/outbox_projection_test.go proves
+// the counts match, because a mismatch is a pgx error that only appears on a
+// box with TEST_POSTGRES_URL set — which a developer's is not.
 const pendingColumns = `id, attempts, envelope_tenant_id, partition_key, subject, event_type,
 	event_class, schema_version, domain, payload_schema_ref, event_time,
-	correlation_id, causation_id, trace_context, payload`
+	correlation_id, causation_id, trace_context, payload, last_error`
 
 // PendingKeys returns the partition keys with work waiting, ordered by their
 // OLDEST pending record.
@@ -260,7 +268,8 @@ func (p *Postgres) Pending(ctx context.Context, key string, limit int) ([]Pendin
 		if err := rows.Scan(&p.ID, &p.Attempts, &p.Record.TenantID, &p.Record.PartitionKey,
 			&p.Record.Subject, &p.Record.EventType, &class, &schemaVer, &p.Record.Domain,
 			&p.Record.PayloadSchemaRef, &eventTime, &p.Record.CorrelationID,
-			&p.Record.CausationID, &p.Record.TraceContext, &p.Record.Payload); err != nil {
+			&p.Record.CausationID, &p.Record.TraceContext, &p.Record.Payload,
+			&p.LastError); err != nil {
 			return nil, fmt.Errorf("outbox: scan pending for %s: %w", key, err)
 		}
 		p.Record.EventClass = envelopepb.EventClass(class)
@@ -299,14 +308,13 @@ func (p *Postgres) MarkPublished(ctx context.Context, id int64) error {
 // estate is missing, and skipping the record would publish the FACTs behind it
 // out of order. The record stays at the head of its key, the attempt count
 // climbs, and the age gauge makes it visible.
+//
+// THE CAUSE IS WHAT THE AGE GAUGE CANNOT SAY. It comes back on the next
+// Pending as LastError and the relay logs it beside the live error, so the
+// replica that inherits a stalled key reports the refusal that started it rather
+// than only the symptom it just saw (#817).
 func (p *Postgres) MarkFailed(ctx context.Context, id int64, cause error) error {
-	msg := ""
-	if cause != nil {
-		msg = cause.Error()
-	}
-	if len(msg) > 1000 {
-		msg = msg[:1000] // a column, not a log: bound it
-	}
+	msg := boundedCause(cause)
 	if _, err := p.pool.Exec(ctx,
 		`UPDATE outbox SET attempts = attempts + 1, last_error = $2 WHERE id = $1 AND published_at IS NULL`,
 		id, msg); err != nil {

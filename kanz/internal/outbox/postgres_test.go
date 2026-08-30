@@ -19,9 +19,11 @@ package outbox
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -447,4 +449,191 @@ func TestPostgresOutboxPublishesEveryConcurrentEnqueueExactlyOnce(t *testing.T) 
 	if again, err := relay.DrainOnce(ctx); err != nil || again != 0 {
 		t.Fatalf("a second drain published %d records (err %v) — published_at is not sticking", again, err)
 	}
+}
+
+// THE STALL SAYS WHY, WITHOUT A DATABASE SESSION (#817).
+//
+// This is the column half of stall_cause_test.go, and it is the half that
+// matters, because the defect was a COLUMN nothing selected: `last_error` was
+// written by MarkFailed on every failed attempt, cleared by MarkPublished on
+// every success, and absent from pendingColumns. The in-process queue cannot
+// carry that assertion — it has no columns and no projection to omit one from.
+//
+// THE SECOND RELAY IS THE POINT, NOT A FLOURISH. oms-deploy.yaml runs
+// replicas: 2 and pods get rescheduled, so the replica that inherits a stalled
+// key is routinely one that never witnessed the refusal that started the stall
+// and whose log line is in a container that no longer exists. It is given a
+// DIFFERENT refusal so the test cannot pass by reporting the live error twice,
+// and its own logger so nothing can leak from the first relay in memory.
+func TestPostgresOutboxReportsWhyTheHeadOfAKeyIsStuck(t *testing.T) {
+	pool := newPool(t, "acme")
+	applySchema(t)
+	ctx := testCtx()
+	q := NewPostgres(pool, "oms")
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := Enqueue(ctx, tx,
+		pgFact(t, ctx, "order.order.accepted", "o1"),
+		pgFact(t, ctx, "order.order.routed", "o1")); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// An untried record must not look poisoned.
+	pending, err := q.Pending(ctx, "o1", 10)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("Pending = (%d records, %v), want (2, nil)", len(pending), err)
+	}
+	if pending[0].LastError != "" {
+		t.Errorf("an untried record reports LastError=%q, want empty", pending[0].LastError)
+	}
+
+	first := &recorder{failOn: "order.order.accepted", failWith: "no responders on order.order.accepted"}
+	relayA, err := NewRelay(q, first, quietLogger())
+	if err != nil {
+		t.Fatalf("NewRelay: %v", err)
+	}
+	if n, err := relayA.DrainOnce(ctx); err != nil || n != 0 {
+		t.Fatalf("first pass = (%d, %v), want (0, nil)", n, err)
+	}
+
+	// A NEW POD. A new Postgres handle over the same pool, a new relay, a new
+	// logger — nothing carried over from the process that saw the failure.
+	fresh := NewPostgres(pool, "oms")
+	pending, err = fresh.Pending(ctx, "o1", 10)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("Pending after the stall = (%d records, %v), want (2, nil)", len(pending), err)
+	}
+	if pending[0].Attempts != 1 {
+		t.Fatalf("head attempts = %d, want 1", pending[0].Attempts)
+	}
+	if !strings.Contains(pending[0].LastError, "no responders") {
+		t.Fatalf("LastError = %q on the stalled head, want the recorded refusal — the column is "+
+			"written and not selected, so the only route to it is psql against production "+
+			"during the outage (#817)", pending[0].LastError)
+	}
+
+	second := &recorder{failOn: "order.order.accepted", failWith: "connection reset by peer"}
+	logs := &capturingHandler{}
+	relayB, err := NewRelay(fresh, second, slog.New(logs))
+	if err != nil {
+		t.Fatalf("NewRelay: %v", err)
+	}
+	if n, err := relayB.DrainOnce(ctx); err != nil || n != 0 {
+		t.Fatalf("second pass = (%d, %v), want (0, nil)", n, err)
+	}
+	prior := logs.attrs("prior_error")
+	if len(prior) != 1 || !strings.Contains(prior[0], "no responders") {
+		t.Errorf("the stall log carried prior_error=%v, want the refusal the FIRST relay recorded — "+
+			"this replica is reporting only the symptom it just saw", prior)
+	}
+	if live := logs.attrs("err"); len(live) != 1 || !strings.Contains(live[0], "connection reset by peer") {
+		t.Errorf("err = %v, want the live refusal — the pair is what says whether the condition "+
+			"changed shape", live)
+	}
+}
+
+// A RECOVERED RECORD MUST NOT KEEP REPORTING THE BLIP IT RECOVERED FROM.
+//
+// MarkPublished clears last_error in the same UPDATE that stamps published_at.
+// Asserted by reading the column directly, because a published row is out of
+// the pending projection by definition — and the clear is exactly what stops a
+// forensic query, or a future read plane over this table, from presenting a
+// healthy record's old blip as the reason something is stuck.
+func TestPostgresOutboxClearsTheCauseWhenTheRecordFinallyPublishes(t *testing.T) {
+	pool := newPool(t, "acme")
+	applySchema(t)
+	ctx := testCtx()
+	q := NewPostgres(pool, "oms")
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := Enqueue(ctx, tx, pgFact(t, ctx, "order.order.accepted", "o1")); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	rec := &recorder{failOn: "order.order.accepted", failWith: "a blip"}
+	relay, err := NewRelay(q, rec, quietLogger())
+	if err != nil {
+		t.Fatalf("NewRelay: %v", err)
+	}
+	if n, err := relay.DrainOnce(ctx); err != nil || n != 0 {
+		t.Fatalf("failing pass = (%d, %v), want (0, nil)", n, err)
+	}
+	pending, err := q.Pending(ctx, "o1", 10)
+	if err != nil || len(pending) != 1 || !strings.Contains(lastErrorOf(pending), "a blip") {
+		t.Fatalf("Pending after the blip = (%d records, %v) with LastError=%q",
+			len(pending), err, lastErrorOf(pending))
+	}
+	id := pending[0].ID
+
+	rec.setFailOn("")
+	if n, err := relay.DrainOnce(ctx); err != nil || n != 1 {
+		t.Fatalf("recovery pass = (%d, %v), want (1, nil)", n, err)
+	}
+	var stored string
+	if err := pool.QueryRow(ctx, `SELECT last_error FROM outbox WHERE id = $1`, id).Scan(&stored); err != nil {
+		t.Fatalf("read last_error: %v", err)
+	}
+	if stored != "" {
+		t.Errorf("a published record still stores last_error=%q — the blip it recovered from is "+
+			"presented to anything that later queries this table as the reason it is stuck", stored)
+	}
+}
+
+// THE BOUND IS THE COLUMN'S, AND IT MUST SURVIVE THE ROUND TRIP.
+//
+// boundedCause caps what MarkFailed stores; this proves the cap is what comes
+// back out, so a venue returning an HTML error page cannot grow a row without
+// limit and cannot be truncated differently on the way in and the way out.
+func TestPostgresOutboxBoundsTheCauseItStores(t *testing.T) {
+	pool := newPool(t, "acme")
+	applySchema(t)
+	ctx := testCtx()
+	q := NewPostgres(pool, "oms")
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := Enqueue(ctx, tx, pgFact(t, ctx, "order.order.accepted", "o1")); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	pending, err := q.Pending(ctx, "o1", 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("Pending = (%d, %v)", len(pending), err)
+	}
+	if err := q.MarkFailed(ctx, pending[0].ID, errors.New(strings.Repeat("x", causeLimit*3))); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+	pending, err = q.Pending(ctx, "o1", 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("Pending = (%d, %v)", len(pending), err)
+	}
+	if len(pending[0].LastError) != causeLimit {
+		t.Errorf("the column round-tripped %d bytes of a %d-byte cause, want %d",
+			len(pending[0].LastError), causeLimit*3, causeLimit)
+	}
+}
+
+// lastErrorOf keeps the failure messages above readable when the slice is empty.
+func lastErrorOf(p []Pending) string {
+	if len(p) == 0 {
+		return ""
+	}
+	return p[0].LastError
 }
