@@ -214,7 +214,7 @@ func decisionConsumerFiles(t *testing.T, root string) []string {
 		}
 		if info.IsDir() {
 			switch info.Name() {
-			case ".git", "node_modules", "gen", ".gotmp", "vendor":
+			case ".git", ".claude", "node_modules", "gen", ".gotmp", "vendor":
 				return filepath.SkipDir
 			}
 			return nil

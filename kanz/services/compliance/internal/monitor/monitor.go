@@ -41,13 +41,31 @@ import (
 // back one layer down.
 type bookKey struct{ tenant, portfolio string }
 
+// book is everything this monitor holds for one (tenant, portfolio): the
+// holdings, the last verdict, and whether the portfolio has already been named
+// as ungoverned.
+//
+// THE THREE USED TO BE THREE MAPS KEYED THE SAME WAY, and that is why the
+// portfolio half of #810 existed. Positions, lastStatus and warnedUngoverned all
+// grew by (tenant, portfolio) and only one of them had a delete( anywhere, so
+// evicting a dead portfolio meant remembering to evict it from three places and
+// getting the order right relative to evaluate() — which writes lastStatus
+// AFTER the fold that would have dropped it. One struct means one lifetime and
+// one delete, and the three cannot drift.
+type book struct {
+	positions  map[string]comp.Position // instrument → position
+	lastStatus compliancepb.ComplianceStatus
+	// warnedUngoverned records that this book has already been named in a "not
+	// being checked" message.
+	warnedUngoverned bool
+	// emptiedAt is when positions last became empty, and the zero time while the
+	// book holds anything. It is what bookIdleRetention is measured from.
+	emptiedAt time.Time
+}
+
 // Monitor re-evaluates portfolios on every position change. Goroutine-safe.
 type Monitor struct {
 	onDroppedRecord func()
-
-	// warnedUngoverned names each ungoverned (tenant, portfolio) once (guarded by
-	// mu, which already protects the books below).
-	warnedUngoverned map[bookKey]bool
 
 	engine     *comp.Engine
 	mandates   comp.MandateSource
@@ -59,9 +77,10 @@ type Monitor struct {
 	now        func() time.Time
 	logger     *slog.Logger
 
-	mu         sync.Mutex
-	books      map[bookKey]map[string]comp.Position // (tenant, portfolio) → instrument → position
-	lastStatus map[bookKey]compliancepb.ComplianceStatus
+	mu    sync.Mutex
+	books map[bookKey]*book // (tenant, portfolio) → book
+	// lastBookGC rate-limits the idle sweep; see gcBooksLocked.
+	lastBookGC time.Time
 }
 
 // NewMonitor wires the monitor. A nil engine defaults to comp.NewEngine(nil); a
@@ -125,16 +144,14 @@ func NewMonitor(engine *comp.Engine, mandates comp.MandateSource, classifier com
 		logger = slog.Default()
 	}
 	m := &Monitor{
-		engine:           engine,
-		mandates:         mandates,
-		classifier:       classifier,
-		emitter:          emitter,
-		recorder:         recorder,
-		now:              time.Now,
-		logger:           logger,
-		books:            make(map[bookKey]map[string]comp.Position),
-		lastStatus:       make(map[bookKey]compliancepb.ComplianceStatus),
-		warnedUngoverned: make(map[bookKey]bool),
+		engine:     engine,
+		mandates:   mandates,
+		classifier: classifier,
+		emitter:    emitter,
+		recorder:   recorder,
+		now:        time.Now,
+		logger:     logger,
+		books:      make(map[bookKey]*book),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -172,6 +189,22 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 	key := bookKey{tenant: env.GetTenantId(), portfolio: pid}
 
 	trigger, book, asOf := m.applyAndSnapshot(key, &ps)
+	// A PORTFOLIO THAT NOW HOLDS NOTHING IS NOT EVALUATED, which is EXEC-M18's
+	// existing rule reaching the FACT path because #810 made it reachable there.
+	// Reevaluate has always refused to evaluate a portfolio the position spine has
+	// not described, on the grounds that an empty book passes every concentration
+	// limit there is; the FACT path never met one, because a closed position was
+	// kept in the map and left the book non-empty.
+	//
+	// IT IS NOT A COSMETIC EXTENSION. Under a leverage cap an empty book is worse
+	// than clean, it is a BREACH: with no holdings there is no base currency,
+	// comp.equityFromMarks refuses to sum anything into equity, and LeverageRule
+	// fails closed with "leverage cannot be verified". Evaluating the book of a
+	// portfolio that just went flat would therefore emit a breach FACT — which
+	// AUTO-01 halts and escalates on — for a fund holding nothing at all.
+	if book == nil {
+		return nil
+	}
 	return m.evaluate(ctx, key, book, trigger, asOf)
 }
 
@@ -296,9 +329,14 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 
 // applyAndSnapshot folds the position update into the portfolio book and returns
 // the breach trigger (POSITION_CHANGE when the quantity moved, else MARKET_MOVE),
-// a candidate Book snapshot, and the event's as-of time.
+// a candidate Book snapshot, and the event's as-of time. A nil Book means the
+// portfolio holds nothing after the fold — see Handle for why that is not
+// evaluated.
 func (m *Monitor) applyAndSnapshot(key bookKey, ps *domainpb.PositionState) (compliancepb.BreachTrigger, *comp.Book, time.Time) {
 	trigger, book := m.applyLocked(key, ps)
+	if book == nil {
+		return trigger, nil, ps.GetAsOf().AsTime()
+	}
 	// OUTSIDE THE LOCK. See snapshotLocked: the join reaches into the cash view
 	// and the mark fold, each with its own lock.
 	comp.JoinEquity(book, m.cash, m.marks)
@@ -309,23 +347,153 @@ func (m *Monitor) applyLocked(key bookKey, ps *domainpb.PositionState) (complian
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	insts := m.books[key]
-	if insts == nil {
-		insts = make(map[string]comp.Position)
-		m.books[key] = insts
+	m.gcBooksLocked()
+
+	b := m.books[key]
+	if b == nil {
+		b = &book{positions: make(map[string]comp.Position)}
+		m.books[key] = b
 	}
-	prev, had := insts[ps.GetInstrumentId()]
+	prev, had := b.positions[ps.GetInstrumentId()]
 	trigger := compliancepb.BreachTrigger_BREACH_TRIGGER_MARKET_MOVE
 	if !had || !sameQuantity(prev.Quantity, ps.GetQuantity()) {
 		trigger = compliancepb.BreachTrigger_BREACH_TRIGGER_POSITION_CHANGE
 	}
-	insts[ps.GetInstrumentId()] = comp.Position{
-		InstrumentID: ps.GetInstrumentId(),
-		Quantity:     ps.GetQuantity(),
-		MarketValue:  ps.GetMarketValue(),
+	// A CLOSED POSITION LEAVES THE BOOK HERE (#810). It used to be written in and
+	// filtered back out by heldPositions at read time, which made it INVISIBLE
+	// rather than merely retained: nothing in any output counted it, and every
+	// subsequent position FACT still paid to copy it. The book therefore grew with
+	// the instruments the portfolio had EVER held, so a strategy that rotates
+	// positions degraded the monitor monotonically — and because the POSITION
+	// stream is compacted and this consumer boots on DeliverLastPerSubject, a
+	// restart REBUILT the whole accumulated set rather than clearing it.
+	if flatPosition(ps) {
+		delete(b.positions, ps.GetInstrumentId())
+	} else {
+		b.positions[ps.GetInstrumentId()] = comp.Position{
+			InstrumentID: ps.GetInstrumentId(),
+			Quantity:     ps.GetQuantity(),
+			MarketValue:  ps.GetMarketValue(),
+		}
 	}
+	if len(b.positions) == 0 {
+		if b.emptiedAt.IsZero() {
+			b.emptiedAt = m.now()
+		}
+		// THE LAST VERDICT GOES WITH THE LAST HOLDING, and forgetting it here is
+		// what keeps the next breach emittable. Handle does not evaluate an empty
+		// book, so a portfolio that was BREACHING when its final position closed
+		// would otherwise carry that status until something evaluated it again —
+		// and the transition test in recordStatus would then see BREACH → BREACH
+		// and emit NOTHING when the portfolio re-opened straight back into the same
+		// breach. A swallowed breach FACT is the one outcome this monitor exists to
+		// prevent. Clearing it is not declaring the book clean: nothing is emitted
+		// and nothing is recorded, the portfolio simply has no verdict because it
+		// has no holdings to have one about.
+		b.lastStatus = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_UNSPECIFIED
+		return trigger, nil
+	}
+	b.emptiedAt = time.Time{}
 
 	return trigger, m.snapshotLocked(key)
+}
+
+// flatPosition reports whether this FACT says the portfolio no longer holds the
+// instrument at all, so the entry can be dropped rather than kept as a
+// zero-weight ghost.
+//
+// # Each arm is a claim, and the third one is the trap
+//
+//   - THE PRODUCER MUST HAVE STATED A QUANTITY. A PositionState with no quantity
+//     is not a flat position, it is a producer that did not say — and
+//     comp.equityFromMarks refuses on exactly that ("carries no quantity, so it
+//     cannot be valued"). Evicting it would delete the evidence for a refusal
+//     that is doing its job.
+//   - THE QUANTITY MUST BE EXACTLY ZERO. Not "worth nothing today": a holding
+//     marked at zero can still have a quantity, and comp.equityFromMarks values
+//     every position at quantity × the LIVE mark, so a position with a stale
+//     zero market value and a real quantity contributes to equity as soon as the
+//     mark fold has a price for it. Dropping that one would understate the
+//     leverage denominator — the fail-open direction #760 already cost this
+//     package once.
+//   - THE MARKET VALUE MUST NOT ASSERT SOMETHING ELSE. A quantity of zero and a
+//     non-zero market value is a contradiction, and the honest response to a
+//     contradiction is to keep it where the rules can see it, not to resolve it
+//     silently in the direction that frees memory.
+//
+// An ABSENT market value is not consulted, and that is deliberate rather than an
+// oversight of comp's unmarked-holding refusal (#760/#806). That refusal exists
+// because an unpriced holding could be any size in either direction; a holding
+// of quantity zero is worth zero at every price there is, so no rule's reasoning
+// about it can differ. Restating comp's "is this mark usable" test here would
+// also be the fourth copy of the enumeration that test/arch's
+// a_usable_mark_covers_every_money_field_test.go exists to stop.
+func flatPosition(ps *domainpb.PositionState) bool {
+	if ps.GetQuantity() == nil {
+		return false
+	}
+	return ratFromDecimal(ps.GetQuantity()).Sign() == 0 &&
+		ratFromDecimal(ps.GetMarketValue().GetAmount()).Sign() == 0
+}
+
+// bookIdleRetention is how long a book that holds NOTHING is kept before the
+// (tenant, portfolio) entry itself is dropped, and bookGCInterval bounds how
+// often the sweep that does it runs.
+//
+// # Why a portfolio is evicted on a timer and a position is not
+//
+// They are different lifetimes and the evidence for each is different. A
+// position FACT stating quantity zero is the position spine SAYING the holding
+// is closed, so the entry can go immediately. Nothing ever says "this portfolio
+// is gone" — a book that holds nothing today may be one a strategy flattened
+// between trades — so the only available evidence is that nothing has referred
+// to it for a while.
+//
+// The retention is not zero, for a reason that has nothing to do with memory:
+// evaluate() names an ungoverned portfolio ONCE, and that promise is kept by a
+// flag inside the book. Dropping the book the instant it empties would rearm the
+// warning, so a single-instrument portfolio flipping in and out of a position
+// would reprint "UNGOVERNED" on every round trip — and a monitor that floods its
+// own log is a monitor nobody reads, which is the reason the once-only rule
+// exists. Fifteen minutes is far longer than any round trip and far shorter than
+// a pod's life.
+//
+// # Why a book that still HOLDS something is never evicted, at any age
+//
+// This map is the monitor's only copy of the portfolio's holdings; it is rebuilt
+// from position FACTs and from nothing else. Evicting a live book would not free
+// stale data, it would make the next evaluation run against a book missing
+// holdings nobody removed — a smaller book passes concentration and understates
+// gross leverage, so the failure would be fail-OPEN and silent, which is worse
+// than the leak it saved. The bound is therefore structural: one entry per
+// portfolio that holds something, plus those emptied inside the window. A
+// producer inventing portfolio ids is the estate-wide unbounded-key shape #842
+// tracks and is not something this monitor can safely paper over.
+const (
+	bookIdleRetention = 15 * time.Minute
+	bookGCInterval    = time.Minute
+)
+
+// gcBooksLocked drops books that have held nothing for longer than
+// bookIdleRetention. Caller must hold m.mu.
+//
+// LAZY AND RATE-LIMITED, the shape internal/risk/state's dedupWindow.gc already
+// uses: it runs from the position-FACT path so the bound exists in the type
+// rather than in whatever the composition root remembered to wire, and the
+// interval keeps an O(books) walk off the per-event path. A monitor receiving no
+// FACTs at all sweeps nothing and also grows nothing.
+func (m *Monitor) gcBooksLocked() {
+	now := m.now()
+	if now.Sub(m.lastBookGC) < bookGCInterval {
+		return
+	}
+	m.lastBookGC = now
+	cutoff := now.Add(-bookIdleRetention)
+	for k, b := range m.books {
+		if len(b.positions) == 0 && !b.emptiedAt.IsZero() && b.emptiedAt.Before(cutoff) {
+			delete(m.books, k)
+		}
+	}
 }
 
 // snapshotLocked builds the candidate book from the positions held for key. The
@@ -342,25 +510,49 @@ func (m *Monitor) applyLocked(key bookKey, ps *domainpb.PositionState) (complian
 // fold, each of which takes its own lock, and reaching into two foreign locks
 // while holding the one that guards every book in this process is how a monitor
 // stops monitoring anything.
+// ONE PASS, ONE ALLOCATION, and both halves of that were measured (#810). The
+// copy runs on every position FACT, and it used to scan the map three times —
+// once for the positions and the NAV, and twice more for navCurrency, whose
+// result was thrown away and recomputed for the NAV's own currency code — while
+// growing book.Positions from nil, which reallocates and re-copies as it doubles.
+// Preallocating to len(positions) and folding the currency into the same pass
+// took the 50-holding snapshot from 59 allocations to 53 and the 1000-holding one
+// from 1013 to 1003, on top of the far larger win from evicting the flats that
+// made those maps big in the first place.
+//
+// It also settles a disagreement the two navCurrency calls could produce: Go
+// randomizes map iteration per range, so on a book holding more than one currency
+// the BaseCurrency and the NAV's currency code were each "the first non-empty one
+// seen" in a DIFFERENT order, and could name different currencies on the same
+// snapshot. One pass makes them the same value by construction.
 func (m *Monitor) snapshotLocked(key bookKey) *comp.Book {
-	insts := m.books[key]
-	book := &comp.Book{
-		PortfolioID: key.portfolio,
-		// THE CURRENCY THE HOLDINGS ARE IN. It was left unset while nothing read
-		// it; comp.JoinEquity does, and refuses to net cash against positions
-		// without it rather than assuming they match (#787).
-		BaseCurrency: navCurrency(insts),
-		NAVBasis:     comp.NAVBasisGrossPositions,
+	b := m.books[key]
+	var positions map[string]comp.Position
+	if b != nil {
+		positions = b.positions
 	}
+	out := make([]comp.Position, 0, len(positions))
 	var nav *commonpb.Decimal
-	for _, p := range insts {
-		book.Positions = append(book.Positions, p)
+	// THE CURRENCY THE HOLDINGS ARE IN. It was left unset while nothing read it;
+	// comp.JoinEquity does, and refuses to net cash against positions without it
+	// rather than assuming they match (#787).
+	currency := ""
+	for _, p := range positions {
+		out = append(out, p)
 		if p.MarketValue != nil {
 			nav = addDecimal(nav, p.MarketValue.GetAmount())
 		}
+		if currency == "" {
+			currency = p.MarketValue.GetCurrencyCode()
+		}
 	}
-	book.NAV = &commonpb.Money{Amount: nav, CurrencyCode: navCurrency(insts)}
-	return book
+	return &comp.Book{
+		PortfolioID:  key.portfolio,
+		BaseCurrency: currency,
+		NAVBasis:     comp.NAVBasisGrossPositions,
+		Positions:    out,
+		NAV:          &commonpb.Money{Amount: nav, CurrencyCode: currency},
+	}
 }
 
 // snapshot builds a book and joins its equity, taking and releasing the lock.
@@ -440,9 +632,16 @@ func (m *Monitor) ReevaluateAll(ctx context.Context) error {
 func (m *Monitor) Reevaluate(ctx context.Context, tenant, portfolio string) error {
 	key := bookKey{tenant: tenant, portfolio: portfolio}
 	m.mu.Lock()
-	_, known := m.books[key]
+	b, known := m.books[key]
+	held := known && len(b.positions) > 0
 	m.mu.Unlock()
-	if !known {
+	// HOLDS NOTHING IS THE SAME ANSWER AS NEVER DESCRIBED, and since #810 the two
+	// are also the same state: a book whose last holding closed is emptied rather
+	// than left full of zero-weight ghosts, so this test has to read the holdings
+	// and not merely the key. Reading the key alone would have re-admitted exactly
+	// what EXEC-M18 rules out — evaluating an empty book, which passes every
+	// concentration limit there is.
+	if !held {
 		return nil
 	}
 	// MARKET_MOVE is the honest trigger for both callers. Nothing traded: the
@@ -454,13 +653,21 @@ func (m *Monitor) Reevaluate(ctx context.Context, tenant, portfolio string) erro
 
 // recordStatus updates the book's last status and reports whether this is a
 // fresh entry into BREACH (transition from non-breach).
+// A BOOK THE SWEEP HAS ALREADY DROPPED IS TREATED AS ONE THAT HAS NEVER BEEN
+// SEEN, in whichever direction is safe. Here that is "this IS a transition", so
+// a breach is emitted rather than swallowed: a duplicate breach FACT is the cost
+// EmitBreach's rollback below already accepts, and a dropped one is not.
 func (m *Monitor) recordStatus(key bookKey, status compliancepb.ComplianceStatus) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	prev := m.lastStatus[key]
-	m.lastStatus[key] = status
-	return status == compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH &&
-		prev != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
+	entering := status == compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
+	b := m.books[key]
+	if b == nil {
+		return entering
+	}
+	prev := b.lastStatus
+	b.lastStatus = status
+	return entering && prev != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH
 }
 
 // resetStatus clears a book's recorded status so the next evaluation re-emits —
@@ -468,32 +675,31 @@ func (m *Monitor) recordStatus(key bookKey, status compliancepb.ComplianceStatus
 func (m *Monitor) resetStatus(key bookKey) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.lastStatus, key)
+	if b := m.books[key]; b != nil {
+		b.lastStatus = compliancepb.ComplianceStatus_COMPLIANCE_STATUS_UNSPECIFIED
+	}
 }
 
 // firstUngoverned reports whether this book has not yet been named in a
-// "not being checked" message, and records that it now has.
+// "not being checked" message, and records that it now has. A book the sweep has
+// dropped warns again — see bookIdleRetention for why the window is long enough
+// that this is not the flood the once-only rule exists to prevent.
 func (m *Monitor) firstUngoverned(key bookKey) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.warnedUngoverned[key] {
+	b := m.books[key]
+	if b == nil {
+		return true
+	}
+	if b.warnedUngoverned {
 		return false
 	}
-	m.warnedUngoverned[key] = true
+	b.warnedUngoverned = true
 	return true
 }
 
 func sameQuantity(a, b *commonpb.Decimal) bool {
 	return ratFromDecimal(a).Cmp(ratFromDecimal(b)) == 0
-}
-
-func navCurrency(insts map[string]comp.Position) string {
-	for _, p := range insts {
-		if p.MarketValue.GetCurrencyCode() != "" {
-			return p.MarketValue.GetCurrencyCode()
-		}
-	}
-	return ""
 }
 
 // --- local exact-decimal helpers (monitor-only) ----------------------------

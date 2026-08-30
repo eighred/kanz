@@ -2,6 +2,7 @@ package pricing
 
 import (
 	"encoding/json"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -206,13 +207,26 @@ func TestQueue_OverrideAuditTrail(t *testing.T) {
 	if len(q.Open()) != 0 {
 		t.Errorf("overridden exception should leave the open queue")
 	}
-	// A second override appends — the trail is append-only.
-	if err := q.Override(id, Override{Actor: "bob@kanz", Reason: "re-reviewed", ChosenPrice: dec.Rat("130"), At: now}); err != nil {
-		t.Fatalf("second override: %v", err)
+	// A SECOND OVERRIDE IS REFUSED, AND THE FIRST IS UNTOUCHED (#816).
+	//
+	// This assertion used to run the other way — it applied bob's override and
+	// checked for two entries, under the heading "the trail is append-only". That
+	// conflated two properties. Append-only means alice's record is never
+	// rewritten or removed, which is what the two checks below assert; it never
+	// meant a decided exception may be decided again. Letting it append put two
+	// authorisations in the trail for one act, and the durable backend did the
+	// same with two FACTs whose distinct event ids audit's dedup cannot collapse.
+	err := q.Override(id, Override{Actor: "bob@kanz", Reason: "re-reviewed", ChosenPrice: dec.Rat("130"), At: now})
+	if !errors.Is(err, ErrAlreadyOverridden) {
+		t.Fatalf("a second override on an OVERRIDDEN exception returned %v, want ErrAlreadyOverridden", err)
 	}
 	ex, _ = q.Get(id)
-	if len(ex.Overrides) != 2 {
-		t.Errorf("override trail = %d entries, want 2 (append-only)", len(ex.Overrides))
+	if len(ex.Overrides) != 1 {
+		t.Errorf("override trail = %d entries, want 1 — the refused second decision was recorded anyway",
+			len(ex.Overrides))
+	}
+	if ex.Overrides[0].Actor != "alice@kanz" {
+		t.Errorf("the refused override displaced the trail: actor = %q, want alice@kanz", ex.Overrides[0].Actor)
 	}
 
 	// Override of an unknown id, a missing actor/reason, or no chosen price errors.

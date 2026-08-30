@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -91,13 +92,52 @@ func New(cfg Config) *Engine {
 	}
 }
 
-// Run drives the fold loop and the snapshot loop until ctx is cancelled. It
-// returns the first fatal error (a source error that is not ctx cancellation).
+// Run drives the fold loop and the snapshot loop until ctx is cancelled or the
+// source fails. It returns the first fatal error (a source error that is not ctx
+// cancellation), and it returns only after BOTH loops have exited.
+//
+// THE JOIN IS THE POINT, and it is here rather than in the caller (#813). The
+// snapshot loop holds a ticker that publishes to the bus; the fold loop is what
+// Run's result comes from. Returning on the fold loop alone left the ticker
+// running outside every WaitGroup in the chain above — pkg/alpha's Runner joins
+// Engine.Run, and market-ingest joins the Runner, then its LIFO defers close the
+// bus client. So `return <-errc` handed the caller a completed shutdown while a
+// snapshot was still inside Publish, and the process went on to close the
+// transport underneath it. publishSnapshot only logs, so the loser of that race
+// is a market-data snapshot that vanishes with one Warn line at the least
+// observed moment of a deploy.
+//
+// The derived cancel is what makes the join terminate on the fold loop's own
+// error, not only on the caller's cancel. Relying on the caller's cancel made
+// this function correct only under callers that remembered to issue one — the
+// lifetime belongs to the frame that starts the goroutines.
+//
+// The wait is UNBOUNDED, deliberately: bounding it would reintroduce exactly the
+// return-over-a-live-publish this fixes. Termination rests on Publish honouring
+// the cancelled context, which the real bus.Producer does.
 func (e *Engine) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
 	errc := make(chan error, 1)
-	go func() { errc <- e.foldLoop(ctx) }()
-	go e.snapshotLoop(ctx)
-	return <-errc
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errc <- e.foldLoop(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		e.snapshotLoop(ctx)
+	}()
+
+	err := <-errc
+	cancel()
+	wg.Wait()
+	return err
 }
 
 // foldLoop consumes the depth feed into the in-memory book. A snapshot resets

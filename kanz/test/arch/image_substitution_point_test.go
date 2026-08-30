@@ -218,7 +218,7 @@ func repoYAMLFiles(t *testing.T, moduleRootDir string) []string {
 	t.Helper()
 	repoRoot := filepath.Dir(moduleRootDir)
 	skip := map[string]bool{
-		".git": true, "node_modules": true, "dist": true, "vendor": true,
+		".git": true, ".claude": true, "node_modules": true, "dist": true, "vendor": true,
 		"build": true, ".next": true, "coverage": true,
 	}
 	var files []string
@@ -227,6 +227,13 @@ func repoYAMLFiles(t *testing.T, moduleRootDir string) []string {
 			return err
 		}
 		if d.IsDir() {
+			// OTHER CHECKOUTS FIRST (#848). This walk starts at the REPO ROOT, so it
+			// can see .claude/worktrees/ — another checkout of this same tree, whose
+			// files are not the estate's. The shared set is what every repo-root guard
+			// consults; the local names below are per-guard speed hints on top of it.
+			if skipWalkDir(d) {
+				return filepath.SkipDir
+			}
 			if skip[d.Name()] {
 				return filepath.SkipDir
 			}
