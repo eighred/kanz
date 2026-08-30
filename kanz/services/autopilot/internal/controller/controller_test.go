@@ -27,7 +27,7 @@ type rig struct {
 	roller *remediate.LogModelRoller
 	scaler *actuate.LogScaler
 	fail   *actuate.LogFailover
-	esc    *controller.LogEscalator
+	escLog *escRecorder
 	ctrl   *controller.Controller
 }
 
@@ -39,10 +39,16 @@ func newRig(autoFailover bool, q remediate.Quarantiner) rig {
 	roller := remediate.NewLogModelRoller(discard)
 	scaler := actuate.NewLogScaler(discard)
 	fail := actuate.NewLogFailover(discard)
-	esc := controller.NewLogEscalator(discard)
+	// The escalator gets its OWN logger so a test can count the escalation
+	// records it emits. That error-level line is the escalation's real sink —
+	// #844 removed the in-process buffer these assertions used to read — and
+	// the Controller keeps `discard`, so its own "escalating to human" warning
+	// on the same path cannot be counted as one.
+	escLog := &escRecorder{}
+	esc := controller.NewLogEscalator(escLog.logger())
 	deps := plan.Deps{Quarantiner: q, ModelRoller: roller, Scaler: scaler, Failover: fail}
 	ctrl := controller.New(plan.DefaultMatcher(), plan.DefaultRegistry(deps, autoFailover), esc, discard, nil)
-	return rig{q: lq, roller: roller, scaler: scaler, fail: fail, esc: esc, ctrl: ctrl}
+	return rig{q: lq, roller: roller, scaler: scaler, fail: fail, escLog: escLog, ctrl: ctrl}
 }
 
 func sig(kind signal.Kind, subject string, sev signal.Severity) signal.Signal {
@@ -68,8 +74,8 @@ func TestAutoRemediation(t *testing.T) {
 		if !r.q.Quarantined("AAPL") {
 			t.Error("subject not quarantined")
 		}
-		if len(r.esc.Escalations()) != 0 {
-			t.Error("should not escalate an auto-remediated condition")
+		if n := len(r.escLog.escalations(t)); n != 0 {
+			t.Errorf("escalation records = %d, want 0: an auto-remediated condition must not escalate", n)
 		}
 	})
 
@@ -109,8 +115,8 @@ func TestEscalationOnlyOnUnrecognized(t *testing.T) {
 		if r.q.Quarantined("AAPL") {
 			t.Error("a sub-threshold WARNING must not trigger remediation")
 		}
-		if len(r.esc.Escalations()) != 1 {
-			t.Fatalf("escalations = %d, want 1", len(r.esc.Escalations()))
+		if n := len(r.escLog.escalations(t)); n != 1 {
+			t.Fatalf("escalation records = %d, want 1", n)
 		}
 	})
 
@@ -119,8 +125,8 @@ func TestEscalationOnlyOnUnrecognized(t *testing.T) {
 		if o := mustDispatch(t, r, sig(signal.KindDataGap, "AAPL", signal.SeverityCritical)); o != controller.OutcomeEscalated {
 			t.Fatalf("outcome = %s, want escalated", o)
 		}
-		if len(r.esc.Escalations()) != 1 {
-			t.Error("a failed remediation should escalate to a human")
+		if n := len(r.escLog.escalations(t)); n != 1 {
+			t.Errorf("escalation records = %d, want 1: a failed remediation must escalate to a human", n)
 		}
 	})
 }
