@@ -20,12 +20,25 @@
 // # Mutation discipline
 //
 // Domain types are treated as **immutable from the api/v1 caller's
-// perspective**: every method returns a value or a fresh slice / map,
-// never the package's internal storage. RISK-05's state-apply layer
-// is the only writer; concurrent readers + a single writer is the
-// model RISK-04 will use (one ingest goroutine, many query
-// goroutines). The accessor methods here are deliberately read-only
-// so that contract stays clear.
+// perspective**: a caller may not mutate what it is handed. RISK-05's
+// state-apply layer is the only writer of portfolio STATE; concurrent
+// readers + a single writer is the model RISK-04 uses (one ingest
+// goroutine, many query goroutines).
+//
+// TWO EXCEPTIONS TO "an accessor is a pure read", stated here because
+// this paragraph used to claim there were none and that claim was the
+// footgun's instruction manual (#821):
+//
+//   - Positions() returns the package's internal storage — the memoised
+//     sortedCache — rather than a fresh slice. Callers must not mutate or
+//     re-sort it.
+//   - Positions() WRITES that field on the first call after a mutation.
+//
+// Both are safe only while the receiver is exclusively owned by the
+// calling goroutine. What makes that structural rather than advisory is
+// that state.Store exports no read returning the live *Portfolio: outside
+// internal/risk/state, every Portfolio is a per-query Clone. See
+// sortedCache for the measured reason the memoisation stays.
 //
 // # Boundary
 //
@@ -78,10 +91,29 @@ type Portfolio struct {
 	// mutation. It exists because the compute layer (RISK-06/07) calls
 	// Positions() many times per query — ~8× across the DefaultRegistry
 	// measures — and re-sorting each time dominated the hot path (LATENCY-01b
-	// profile). Safe without a lock: every reader operates on a per-query
-	// Clone (state.Store.Snapshot), owned by a single goroutine; the shared
-	// live copy is only read under the per-aggregate lock via Clone, which
-	// copies the map directly and never populates this cache.
+	// profile).
+	//
+	// ITS COST, MEASURED, because "load-bearing" is a claim and this is the
+	// number behind it: removing the memoisation and re-sorting per call
+	// takes BenchmarkComputeMeasures from 356–444µs to 2.25–2.53ms at
+	// n=1024 (5.7×), and from 23 to 59 allocs/op — 331KB/op to 1.14MB/op
+	// (12th-gen i5, 2026-08-30). At n=16 it is still 4.0×. That is why #821
+	// was answered by removing the way to share a Portfolio rather than by
+	// removing this field.
+	//
+	// # The precondition, which is a precondition and not a guarantee
+	//
+	// Populating this from Positions() is a WRITE performed by a method that
+	// reads like an accessor. It is safe only because the receiver is always
+	// exclusively owned at that moment, and that is now structural rather
+	// than advisory: state.Store exports no read that returns the live
+	// portfolio (#821), so a Portfolio reachable outside internal/risk/state
+	// is a per-query Clone owned by one goroutine. Clone copies the map
+	// directly under the per-aggregate lock and never populates this cache,
+	// so the shared live copy is never the receiver of the write.
+	//
+	// An accessor that writes is the reason that paragraph is needed; it
+	// earns its place at 5.7×, and nothing else here does.
 	sortedCache []Position
 }
 
@@ -178,9 +210,15 @@ func (p *Portfolio) Position(id InstrumentID) (Position, bool) {
 // must not mutate or re-sort it in place, and it is valid only until the
 // next state mutation (which invalidates the cache). It is built once per
 // portfolio version and shared across repeated calls within a query — see
-// sortedCache. Position is a value type with immutable-by-contract pointer
-// fields, so the shared slice is safe to read concurrently within the
-// single goroutine that owns the snapshot.
+// sortedCache.
+//
+// NOT A PURE READ. The first call after a mutation WRITES p.sortedCache,
+// so the receiver must be exclusively owned by the calling goroutine — a
+// Clone (state.Store.Snapshot / SnapshotWithKeys / SnapshotOwned, the only
+// reads that exist), or the live copy inside internal/risk/state under its
+// per-aggregate lock. That is a property of the caller, not of this
+// method, and it holds today because there is no exported way to obtain a
+// shared *Portfolio (#821) — not because the write is somehow benign.
 func (p *Portfolio) Positions() []Position {
 	if p.sortedCache == nil {
 		out := make([]Position, 0, len(p.positions))

@@ -23,6 +23,37 @@
 // (per-aggregate goroutine + channel) add complexity without
 // changing the contract.
 //
+// # Reads leave by clone, and there is no other door (#821)
+//
+// Every exported read here — Snapshot, SnapshotWithKeys, SnapshotOwned —
+// returns port.Clone() taken under the per-aggregate lock. There is
+// deliberately NO accessor that hands out the live *domain.Portfolio.
+//
+// There used to be: Lookup returned it and told callers to "read it while
+// holding the appropriate lock". The lock in question is s.locks[id],
+// which is unexported and unreachable from outside this package, so the
+// instruction could not be followed — and the accessor it pointed at,
+// domain.Portfolio.Positions, WRITES the receiver's memoised sorted view.
+// A caller obeying the doc would have raced an apply on the risk path, and
+// the memoisation makes the racing write look like a read. Nothing had
+// followed it (Lookup had zero non-test callers), which is why the trap
+// was still theoretical when it was found rather than after a wrong limit
+// check.
+//
+// The memoisation is not the thing to remove: dropping it costs the
+// measures query 5.7x at n=1024 (356-444us -> 2.25-2.53ms, 23 -> 59
+// allocs/op; BenchmarkComputeMeasures on a 12th-gen i5, 2026-08-30), which
+// is why LATENCY-01c introduced it and why compute/regression_test.go
+// pins it at zero allocations warm. What had to go was the way to obtain
+// a Portfolio that two goroutines can hold at once. With Lookup gone, a
+// Positions() write can only land on a per-query clone owned by one
+// goroutine, or on the live copy inside this package under the lock —
+// both safe by construction rather than by instruction.
+//
+// test/arch/risk_state_hands_out_no_live_portfolio_test.go is the guard;
+// it fails on any exported Store method that returns a *domain.Portfolio
+// which is not clone-derived, including one it has never seen.
+//
 // # Idempotency
 //
 // Each portfolio has its own dedupWindow (defense-in-depth alongside
@@ -71,9 +102,10 @@ import (
 )
 
 // Store is the risk engine's state-of-the-world. Implements
-// ingest.Applier (writer side) and exposes Lookup (reader side).
-// Compute layers (RISK-06/07/08) and the api/v1 surface read
-// portfolios through Lookup.
+// ingest.Applier (writer side) and exposes Snapshot / SnapshotWithKeys /
+// SnapshotOwned (reader side). Compute layers (RISK-06/07/08) and the
+// api/v1 surface read portfolios through those, and every one of them
+// returns a clone — see the package doc's "Reads leave by clone" (#821).
 type Store struct {
 	// mu guards the maps themselves (lookup-or-create of locks /
 	// portfolios / dedup windows). Per-portfolio mu is held briefly
@@ -111,26 +143,18 @@ func NewStore(opts ...Option) *Store {
 	return s
 }
 
-// Lookup returns the portfolio and true, or nil and false. The
-// returned pointer is the engine's live copy — callers within the
-// risk module must read it while holding the appropriate lock or
-// clone before passing it across an apply boundary. The api/v1
-// surface always clones before returning to external callers.
-func (s *Store) Lookup(id v1.PortfolioID) (*domain.Portfolio, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p, ok := s.portfolios[id]
-	return p, ok
-}
-
 // Snapshot returns a race-free deep clone of the portfolio, taken while
 // holding the per-aggregate lock, or nil/false when the portfolio is
-// unknown. This is the locked-read boundary the compute/query paths use
-// instead of Lookup: applies for the same portfolio are serialized by
-// the same lock, so the clone is a consistent point-in-time view that
-// the caller can compute against while subsequent applies proceed on the
-// live copy. Cheap — typical portfolios hold tens to hundreds of
-// value-copied positions.
+// unknown. This is THE read boundary out of this package: applies for the
+// same portfolio are serialized by the same lock, so the clone is a
+// consistent point-in-time view that the caller can compute against while
+// subsequent applies proceed on the live copy. Cheap — typical portfolios
+// hold tens to hundreds of value-copied positions.
+//
+// The clone is also what makes domain.Portfolio's memoising Positions()
+// safe for the caller to use: the returned value is owned by one goroutine
+// and no apply can reach it. See the package doc's "Reads leave by clone"
+// section (#821) for why there is no non-cloning read here.
 func (s *Store) Snapshot(id v1.PortfolioID) (*domain.Portfolio, bool) {
 	s.mu.Lock()
 	lock := s.locks[id]

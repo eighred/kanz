@@ -164,7 +164,7 @@ func TestBootstrap_RestoreRehydratesState(t *testing.T) {
 	if err := b.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	p, ok := store.Lookup("PORT-1")
+	p, ok := store.Snapshot("PORT-1")
 	if !ok {
 		t.Fatal("portfolio not restored")
 	}
@@ -194,7 +194,7 @@ func TestBootstrap_ReplayIdempotent_NoRegress(t *testing.T) {
 	if err := b.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	p, _ := store.Lookup("PORT-1")
+	p, _ := store.Snapshot("PORT-1")
 	pos, _ := p.Position("AAPL")
 	if got := pos.MarketValue.GetAmount().GetCoefficient(); got != 2000 {
 		t.Fatalf("replayed superseded event regressed state: AAPL=%d want 2000", got)
@@ -219,7 +219,7 @@ func TestBootstrap_ReplayAppliesNewEvents(t *testing.T) {
 	if err := b.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	p, _ := store.Lookup("PORT-1")
+	p, _ := store.Snapshot("PORT-1")
 	pos, _ := p.Position("AAPL")
 	if got := pos.MarketValue.GetAmount().GetCoefficient(); got != 3000 {
 		t.Fatalf("new replayed event not applied: AAPL=%d want 3000", got)
@@ -242,7 +242,7 @@ func TestBootstrap_MalformedFrameSkipped(t *testing.T) {
 	if err := b.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	p, _ := store.Lookup("PORT-1")
+	p, _ := store.Snapshot("PORT-1")
 	pos, _ := p.Position("AAPL")
 	if got := pos.MarketValue.GetAmount().GetCoefficient(); got != 4000 {
 		t.Fatalf("replay did not continue past malformed frame: AAPL=%d want 4000", got)
@@ -280,7 +280,7 @@ func TestBootstrap_NoResumePositionSkipsReplay(t *testing.T) {
 	if called {
 		t.Error("replay source created despite no resume position")
 	}
-	if _, ok := store.Lookup("PORT-1"); !ok {
+	if _, ok := store.Snapshot("PORT-1"); !ok {
 		t.Error("restore did not run")
 	}
 }
@@ -316,7 +316,7 @@ func TestBootstrap_RestoreDoesNotClobberLiveState(t *testing.T) {
 	if err := b.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	p, _ := store.Lookup("PORT-1")
+	p, _ := store.Snapshot("PORT-1")
 	pos, _ := p.Position("AAPL")
 	if got := pos.MarketValue.GetAmount().GetCoefficient(); got != 9000 {
 		t.Fatalf("restore clobbered live state: AAPL=%d want 9000", got)
