@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -140,6 +141,86 @@ const (
 	nakBackoffBase = 2 * time.Second
 	nakBackoffMax  = 60 * time.Second
 )
+
+// THE HANDLER IS BOUND BY THE CLOCK IT IS ALREADY RACING (#836).
+//
+// # What ran unbounded, and what it cost
+//
+// Nothing in Subscribe put a deadline on the context it handed a handler. The
+// only thing keeping a handler inside its consumer's AckWait was the handler's
+// own arithmetic — written per handler, where it was written at all.
+//
+// Past AckWait the broker redelivers a message whose first copy is STILL
+// RUNNING. On a work subject that is a second concurrent dispatch of the same
+// command: on this platform, a second trade. The type comment above states the
+// rule this file is sized by —
+//
+//	MaxAckPending × worst-case per-message handling  <  AckWait
+//
+// — and until now nothing enforced the "worst-case per-message handling" half.
+// It was an assertion about code the bus does not own.
+//
+// #801 is what that cost in practice. The OMS cancel of a scheduled parent took
+// one per-order claim per child plus one venue round-trip per child, all on one
+// delivery, against a 60s AckWait; twelve contended slices was 65s of waiting
+// alone. The fix there was a budget local to that handler. This is the same
+// budget where it belongs: the delivery contract is owned by the layer that owns
+// AckWait, and a per-handler copy in twenty services is the `secret()` pattern
+// CLAUDE.md names — 17 copies, 15 of them wrong.
+//
+// # Why three quarters, and why a FRACTION rather than a constant
+//
+// The margin has to cover what happens AFTER the handler gives up and before the
+// broker stops waiting: the error returns, the Consumer publishes to the DLQ and
+// acks the original, or NakWithDelay reaches the server. Those are broker
+// round-trips on a broker that, in the scenario that got us here, is under load.
+//
+// A fixed 15s margin would be right for the 60s work class and IMPOSSIBLE for
+// the 15s tick class — it would leave a zero budget and cancel every tick
+// handler instantly. A fraction scales with the class it is applied to, and at
+// the work class it reproduces exactly the 45s #801 arrived at independently.
+//
+//	work    60s → 45s
+//	control 30s → 22.5s
+//	tick    15s → 11.25s
+//
+// A handler that cannot finish in three quarters of its own AckWait is not one
+// margin away from correct; it is on the wrong side of the rule above.
+// Exported so a caller that must bound a NON-bus entry point — the OMS's
+// schedule ticker is the one that exists — derives the same number at COMPILE
+// time rather than restating the fraction. HandlerBudget below is a function and
+// cannot appear in a const expression; these can, which is what lets
+// services/oms/internal/order/claimscope.go keep its compile-time ordering
+// assertion while still reading the formula from here.
+const HandlerBudgetNumerator, HandlerBudgetDenominator = 3, 4
+
+// HandlerBudget is how long a handler may run on one delivery of a message whose
+// consumer is configured with ackWait.
+//
+// A non-positive ackWait yields a non-positive budget, and withHandlerBudget
+// treats that as "do not bound" rather than as "expire immediately" — an unset
+// tuning must not be the one shape that cancels every delivery on arrival.
+// ConsumerTuning.validate already refuses a zero AckWait at construction, so
+// this is the belt behind that brace rather than a supported configuration.
+func HandlerBudget(ackWait time.Duration) time.Duration {
+	if ackWait <= 0 {
+		return 0
+	}
+	return ackWait * HandlerBudgetNumerator / HandlerBudgetDenominator
+}
+
+// withHandlerBudget bounds one delivery by HandlerBudget(ackWait).
+//
+// AN EARLIER DEADLINE ALREADY ON ctx WINS: context.WithTimeout keeps whichever
+// is sooner, so a shutdown, a drain, or a caller-imposed bound is never widened
+// by this. A handler that needs LESS than its class allows still sets its own.
+func withHandlerBudget(ctx context.Context, ackWait time.Duration) (context.Context, context.CancelFunc) {
+	budget := HandlerBudget(ackWait)
+	if budget <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, budget)
+}
 
 // nakDelay returns how long the broker should hold a failed message before
 // re-offering it. numDelivered is the broker's own delivery count for this

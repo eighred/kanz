@@ -53,36 +53,42 @@ import (
 // terminal, so a replay from the DLQ skips them (cancelChildren's IsTerminal
 // check) and issues no second venue call for them.
 //
-// deliveryBudget is what is left of AckWait after the margin below.
-const deliveryBudget = bus.WorkAckWait - deliveryBudgetMargin
-
-// deliveryBudgetMargin is the part of AckWait the handler must NOT spend, so
-// that abandoning is still observably faster than the broker's own clock.
+// deliveryBudget is one delivery's share of the broker's AckWait, and the
+// FORMULA now lives in exactly one place (#836).
 //
-// It has to cover what happens AFTER the budget expires and before the broker
-// stops waiting: the abandon path returns an error up through cancelChildren,
-// the Consumer publishes the command to dlq.order.order.cancel and acks the
-// original (pkg/bus/consumer.go). A DLQ publish is a broker round-trip on a
-// broker that, in the scenario that got us here, is under load. 15s is generous
-// against that and still leaves 45s of working budget, which is nine times the
-// single-claim wait it replaces as the binding constraint.
-const deliveryBudgetMargin = 15 * time.Second
+// #801 added this budget here because nothing else bounded a handler. That was
+// the right fix in the wrong layer: bus.Subscribe now bounds EVERY delivery in
+// the estate from the consumer's own AckWait, so the arithmetic that used to be
+// spelled out in this file — an AckWait, a margin, a subtraction — is gone, and
+// this is the same number read from bus's own fraction rather than a second copy
+// that could drift away from it.
+//
+// IT IS STILL NEEDED, AND THE REASON IS NOT THE BUS PATH. Every command delivery
+// arrives already bounded, so withDeliveryDeadline does nothing for those. What
+// it still covers is the entry points that are NOT bus deliveries: DriveSchedules
+// runs off a ticker in the composition root and reaches awaitClaim through
+// retireIfFinished, with no broker anywhere in the call stack and therefore no
+// deadline unless this file supplies one. Deleting this outright — which is what
+// #836 originally proposed, before that path was traced — would have left the
+// scheduler's claims unbounded while the command path got safer.
+//
+// One formula, two entry points, is not the duplication #836 exists to remove.
+// Two formulas would have been.
+const deliveryBudget = bus.WorkAckWait * bus.HandlerBudgetNumerator / bus.HandlerBudgetDenominator
 
 // THE ORDERING IS ASSERTED BY THE COMPILER, not by this paragraph. If a future
-// change lowers bus.WorkAckWait below the margin — or raises the margin past the
-// AckWait — deliveryBudget goes non-positive, every armed delivery expires
-// instantly, and every cancel of a scheduled parent goes to the DLQ. That is a
-// total outage of the exit path, arrived at by editing a number in another
-// package, and it must not be discoverable only in production. The conversion of
-// a negative constant to an unsigned type does not compile.
+// change drives bus.HandlerBudget to zero or below — a non-positive AckWait, a
+// fraction inverted — every armed delivery expires instantly and every cancel of
+// a scheduled parent goes to the DLQ. That is a total outage of the exit path,
+// arrived at by editing a number in another package, and it must not be
+// discoverable only in production. The conversion of a negative constant to an
+// unsigned type does not compile.
 //
 // This is the same idiom pkg/bus/dedup.go uses to bind the dedup claim lease to
-// maxTunedAckWait, and it is here for the same reason: the two numbers live in
-// different packages and only a compile-time expression makes one of them unable
-// to drift away from the other silently. It is uint64 rather than that file's
-// uint because these operands are nanosecond durations — 45e9 does not fit in a
-// 32-bit uint, so on a 32-bit target the uint form would fail to compile for a
-// reason that has nothing to do with the ordering it is asserting.
+// maxTunedAckWait. It is uint64 rather than that file's uint because these
+// operands are nanosecond durations — 45e9 does not fit in a 32-bit uint, so on
+// a 32-bit target the uint form would fail to compile for a reason that has
+// nothing to do with the ordering it is asserting.
 const _ = uint64(deliveryBudget - 1)
 
 // maxClaimDepth is how many per-order claims one delivery may hold at once.
@@ -142,6 +148,14 @@ var errClaimTooDeep = errors.New("oms: per-order claims nested too deeply")
 // widened by arming.
 func (s *Service) withDeliveryDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
 	if scopeOf(ctx) != nil {
+		return ctx, func() {}
+	}
+	// ALREADY BOUNDED IS ALREADY DONE (#836). Every bus delivery arrives with a
+	// deadline derived from its consumer's AckWait, so on the command path this
+	// returns immediately and the broker's number is the one in force — there is
+	// no second, local budget stacked underneath it that could disagree. What
+	// falls through to the arming below is the ticker path, which has no broker.
+	if _, bounded := ctx.Deadline(); bounded {
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, s.budget())
@@ -274,9 +288,10 @@ func (s *Service) affordsAnotherClaim(ctx context.Context) (time.Duration, bool)
 // commitGrace is how long a write that RECORDS AN EFFECT ALREADY AT THE EXCHANGE
 // may run after the delivery budget is gone.
 //
-// It is spent out of deliveryBudgetMargin, not out of the budget, so the handler
-// still returns inside AckWait: 45s of budget plus at most one 5s grace is 50s
-// against 60s, leaving the DLQ publish the rest. At most ONE grace period is
+// It is spent out of the quarter of AckWait the budget deliberately leaves
+// unspent (bus.HandlerBudget), not out of the budget itself, so the handler still
+// returns inside AckWait: 45s of budget plus at most one 5s grace is 50s against
+// 60s, leaving the DLQ publish the rest. At most ONE grace period is
 // reachable per delivery — once the budget is spent, affordsAnotherClaim stops
 // the fan-out before the next child rather than letting each one overrun.
 const commitGrace = 5 * time.Second
