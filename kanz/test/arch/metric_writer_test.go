@@ -234,7 +234,7 @@ func scanModuleMetrics(t *testing.T, root string) ([]metricDecl, map[string][]st
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "vendor", "node_modules", ".gotmp":
+			case ".git", ".claude", "vendor", "node_modules", ".gotmp":
 				return filepath.SkipDir
 			}
 			return nil

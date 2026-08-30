@@ -80,7 +80,7 @@ func TestThereIsOneFilingRendering(t *testing.T) {
 		}
 		if info.IsDir() {
 			switch info.Name() {
-			case "gen", "testdata", ".git", "node_modules":
+			case "gen", "testdata", ".git", ".claude", "node_modules":
 				return filepath.SkipDir
 			}
 			return nil

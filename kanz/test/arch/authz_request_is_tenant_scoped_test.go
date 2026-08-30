@@ -224,7 +224,7 @@ func authzParsedFiles(t *testing.T, root string) []authzFile {
 			}
 			if d.IsDir() {
 				switch d.Name() {
-				case ".git", "vendor", "node_modules", ".gotmp", "testdata":
+				case ".git", ".claude", "vendor", "node_modules", ".gotmp", "testdata":
 					return filepath.SkipDir
 				}
 				return nil
