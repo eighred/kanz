@@ -25,8 +25,10 @@ import (
 // (#801). A cancel of a scheduled parent takes 1+N of these — one per child —
 // plus N venue round-trips, all on one delivery, so twelve contended slices
 // consumed 65s of an AckWait of 60. The bound that actually holds the delivery
-// inside the broker's clock is deliveryBudget (claimscope.go), armed once per
-// command and shared by every acquisition below it. This number is now what
+// inside the broker's clock is the one bus.Subscribe arms from this consumer's
+// own AckWait (#836), shared by every acquisition below it; deliveryBudget
+// (claimscope.go) supplies the same number to the entry points that are not bus
+// deliveries. This number is now what
 // bounds head-of-line blocking for ONE order; that one bounds the command.
 //
 // WHAT THIS COMMENT USED TO SAY, AND WHY IT WAS WRONG (#237). It claimed that at
