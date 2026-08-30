@@ -131,12 +131,23 @@ func TestPostgresOverride_TheApproverRoundTrips(t *testing.T) {
 	}
 
 	// A single-signed override stores '' and reads back as not-dual-signed.
-	if err := es.Override(ctx, "RT:PRICE_TOLERANCE:ICE", pricing.Override{
+	//
+	// ON ITS OWN EXCEPTION, and that is not cosmetic (#816). This half used to
+	// re-override RT:PRICE_TOLERANCE:ICE, which the store then accepted — the
+	// second row it wrote was the duplicate audit record #816 reported, and this
+	// test passing against real Postgres is where the defect was reproducible.
+	// An already-decided exception is now refused, so the single-signed case
+	// needs a break nobody has decided yet.
+	seedException(t, pool, "RT1:PRICE_TOLERANCE:ICE")
+	if err := es.Override(ctx, "RT1:PRICE_TOLERANCE:ICE", pricing.Override{
 		Actor: "carol@kanz", Reason: "single", ChosenPrice: rat, At: pgNow,
 	}, Claim{}); err != nil {
 		t.Fatal(err)
 	}
-	ex, _, _ = es.Get(ctx, "RT:PRICE_TOLERANCE:ICE")
+	ex, _, _ = es.Get(ctx, "RT1:PRICE_TOLERANCE:ICE")
+	if len(ex.Overrides) != 1 {
+		t.Fatalf("want 1 override on the second exception, got %d", len(ex.Overrides))
+	}
 	single := ex.Overrides[len(ex.Overrides)-1]
 	if single.Approver != "" || single.DualSigned() {
 		t.Errorf("single-signed override reads approver=%q dual=%v", single.Approver, single.DualSigned())

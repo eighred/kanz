@@ -93,8 +93,11 @@ func newOverrideMetrics(reg prometheus.Registerer) *overrideMetrics {
 	proposals := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "kanz_datamaster_override_proposals_total",
 		Help: "Dual-control proposals by outcome: proposed, approved, rejected, " +
-			"refused_self_approval, refused_expired, refused_payload_changed, refused_race. " +
-			"refused_self_approval is the one an auditor asks for — it is the control firing.",
+			"refused_self_approval, refused_expired, refused_payload_changed, refused_race, " +
+			"refused_already_overridden. refused_self_approval is the one an auditor asks for — it " +
+			"is the control firing. refused_already_overridden counts approvals that arrived for an " +
+			"exception somebody had already decided; each one is a duplicate audit row that #816 " +
+			"would have written.",
 	}, []string{"outcome"})
 	reg.MustRegister(signatures, proposals)
 	// EVERY SERIES EXISTS FROM THE FIRST SCRAPE, including the zeroes. A counter
@@ -105,7 +108,7 @@ func newOverrideMetrics(reg prometheus.Registerer) *overrideMetrics {
 		signatures.WithLabelValues(l)
 	}
 	for _, l := range []string{"proposed", "approved", "rejected", "refused_self_approval",
-		"refused_expired", "refused_payload_changed", "refused_race"} {
+		"refused_expired", "refused_payload_changed", "refused_race", "refused_already_overridden"} {
 		proposals.WithLabelValues(l)
 	}
 	return &overrideMetrics{signatures: signatures, proposals: proposals}
@@ -259,6 +262,18 @@ func (s *Server) handleApproveOverride(w http.ResponseWriter, r *http.Request) {
 		// decision. Nothing was written.
 		s.countProposal("refused_race")
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "this proposal has already been decided"})
+		return
+	case errors.Is(err, pricing.ErrAlreadyOverridden):
+		// THE PROPOSAL IS STILL PENDING (#816). Nothing was written, the claim
+		// included, so this approval was not spent on an act that did not happen —
+		// it stays on the pending queue and lapses there visibly. That is
+		// deliberate: an approver whose exception was decided out from under them
+		// should find the unsigned proposal where they left it, not an absence.
+		s.countProposal("refused_already_overridden")
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "this exception has already been overridden, so this approval was not applied " +
+				"and this proposal was not consumed",
+		})
 		return
 	case err != nil:
 		// NOTHING WAS CONSUMED. The claim was in the transaction that failed, so
@@ -466,6 +481,19 @@ func (s *Server) applySingleSigned(w http.ResponseWriter, r *http.Request, excep
 	// there is nothing to consume. The parameter is not optional precisely so
 	// that this path has to say so.
 	if err := s.exceptions.Override(r.Context(), exceptionID, o, store.Claim{}); err != nil {
+		// 409, NOT 400 (#816). The request is well-formed and this caller may
+		// override; the exception has simply already been decided, and a second
+		// override would put two authorisations in the audit trail for one act.
+		// A client that retried after a timeout needs to tell "my first attempt
+		// landed" from "my request was malformed", and the status code is the
+		// only part of this answer such a client branches on.
+		if errors.Is(err, pricing.ErrAlreadyOverridden) {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "this exception has already been overridden; read it back to see what was " +
+					"decided and by whom",
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

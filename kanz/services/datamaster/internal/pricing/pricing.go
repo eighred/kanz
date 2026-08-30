@@ -27,6 +27,7 @@
 package pricing
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -72,6 +73,39 @@ const (
 	StatusOverridden Status = "OVERRIDDEN"
 	StatusResolved   Status = "RESOLVED"
 )
+
+// AlreadyOverridden reports whether an exception in this status has already had
+// a human decision recorded against it.
+//
+// ONE IMPLEMENTATION, called by both backends. Queue holds a Status; the
+// Postgres store holds the same value as a TEXT column it scans into a string.
+// Without a shared predicate the two spell the check separately — and the
+// Postgres spelling is precisely the one that was never written (#816).
+func (s Status) AlreadyOverridden() bool { return s == StatusOverridden }
+
+// ErrAlreadyOverridden refuses an override presented for an exception a human
+// has already decided.
+//
+// # A REFUSAL, NOT AN IDEMPOTENT NO-OP, and the choice is the contract
+//
+// Two callers reach this: one retrying a decision whose first attempt already
+// committed, and one deciding a DIFFERENT price on an exception somebody else
+// closed. Neither store can tell them apart — the request carries no idempotency
+// key, and the price, actor and reason all legitimately differ between a retry
+// and a second decision.
+//
+// Swallowing the second silently is the worst of the three answers: the caller
+// who chose a different price is told their decision was recorded while the
+// append-only trail holds someone else's. Applying it is what #816 reported —
+// two authorisations in the audit trail for what an auditor reads as one act,
+// with two FACTs carrying distinct event ids that audit's dedup cannot collapse.
+// Refusing tells both callers the truth, and the exception can be read back to
+// see what was decided and by whom.
+//
+// It is also the answer maker-checker already gives one statement away:
+// ErrProposalAlreadyDecided refuses a re-presented approval rather than applying
+// it twice, and an override is the same act arriving by the unarmed door.
+var ErrAlreadyOverridden = errors.New("pricing: this exception has already been overridden")
 
 // Override is the audit record of a human override — appended, never mutated.
 //
@@ -316,6 +350,13 @@ func (q *Queue) AddAll(exs []Exception) {
 // override history is append-only — the full audit trail of who chose what and
 // why. Unknown id ⇒ error. The chosen price must be an exact decimal: this is the
 // record of what a named human decided, and it is what a reviewer will be shown.
+//
+// AN ALREADY-OVERRIDDEN EXCEPTION IS REFUSED (#816). Append-only means an
+// existing record is never rewritten or removed; it does not mean an exception
+// that has been decided may be decided again. OVERRIDDEN is terminal here — the
+// entry has already left the Open queue — and a second override would put two
+// authorisations in the trail for one act. ErrAlreadyOverridden carries why a
+// refusal rather than a silent no-op is the honest answer.
 func (q *Queue) Override(id string, o Override) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -325,6 +366,9 @@ func (q *Queue) Override(id string, o Override) error {
 	}
 	if err := o.Validate(); err != nil {
 		return err
+	}
+	if e.Status.AlreadyOverridden() {
+		return fmt.Errorf("%w: %q", ErrAlreadyOverridden, id)
 	}
 	// Copied, not aliased: a *big.Rat is a mutable pointer and the caller keeps
 	// its own reference. An append-only record the caller can still scribble on
