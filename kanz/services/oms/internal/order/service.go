@@ -1285,10 +1285,32 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 	for _, fill := range fills {
 		next, aerr := ApplyFill(st, fill, fill.GetExecutedAt().AsTime())
 		if aerr != nil {
-			// An over-fill from the venue is a bug, not a transient fault; log
-			// and stop working this order rather than loop.
-			s.logger.Error("oms: venue fill rejected by aggregate", "order_id", st.GetOrderId(), "err", aerr)
-			break
+			// THE SAME DISAGREEMENT THE RECOVERY PATH FREEZES ON, ANSWERED THE SAME
+			// WAY (#808).
+			//
+			// This used to log an ERROR and break, and work() then returned nil so
+			// admission published an ACCEPTED CommandOutcome. adopt() — the recovery
+			// path — quarantines on the identical ApplyFill refusal. One condition,
+			// two answers, and the weaker one was on the LIVE path.
+			//
+			// What that cost: a venue over-fill here is a position THE FUND HOLDS
+			// with no ORDER_FILLED FACT, no projection, no ledger entry and no
+			// alertable counter — discoverable only by reading logs, while the order
+			// reports ACCEPTED. Risk, compliance and the IBOR all measure a book
+			// missing the execution, and the first thing that notices is
+			// reconciliation against the venue, if it runs.
+			//
+			// A break was also the wrong stop even taken on its own terms: it
+			// abandoned the REMAINING fills in the same view, so a refusal on fill
+			// one silently dropped fills two and three as well.
+			//
+			// The two paths differ in how they were reached, not in what the
+			// disagreement MEANS, so the wording is adopt()'s: the venue's record and
+			// ours describe different orders under one id, and only a human comparing
+			// them against the venue's own order history can say which is right.
+			return st, ver, s.quarantine(ctx, st, ver, fmt.Sprintf(
+				"venue reported a fill this order cannot accept (%v). The venue's record and "+
+					"ours describe different orders under one id", aerr))
 		}
 		// THE FILL AND ITS FACT ARE NOW ONE WRITE (#292), AND THIS IS THE PAIR
 		// THAT MOST NEEDED IT.
