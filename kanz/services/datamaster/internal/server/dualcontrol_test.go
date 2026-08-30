@@ -657,8 +657,13 @@ func TestDualControl_EverySeriesExistsBeforeItFires(t *testing.T) {
 		t.Errorf("kanz_datamaster_overrides_total has %d series before any override, want 2 "+
 			"(single_signed and dual_signed)", n)
 	}
-	if n := seen["kanz_datamaster_override_proposals_total"]; n != 7 {
-		t.Errorf("kanz_datamaster_override_proposals_total has %d series before any proposal, want 7", n)
+	// EIGHT since #816 added refused_already_overridden — an approval that
+	// arrived for an exception somebody had already decided. Its zero is worth as
+	// much as the others': a dashboard reading 0 there says the duplicate-audit
+	// path is being watched and has not fired, which is a different claim from
+	// the series being absent.
+	if n := seen["kanz_datamaster_override_proposals_total"]; n != 8 {
+		t.Errorf("kanz_datamaster_override_proposals_total has %d series before any proposal, want 8", n)
 	}
 }
 
