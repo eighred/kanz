@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"sync"
 	"syscall"
 	"time"
 
@@ -124,7 +125,25 @@ func run() int {
 		logger.Error("store init failed", "err", err)
 		return 2
 	}
-	defer closeStores()
+	// THE STORES OUTLIVE EVERY LOOP THAT DRIVES THEM (#815).
+	//
+	// closeStores() is pool.Close(), and three goroutines below read and write
+	// through that pool: the outbox relay, the golden projector (which also holds
+	// the per-tenant cycle lock) and the lapsed-proposal purge. main() is
+	// os.Exit(run()), so the moment run() returns those goroutines are destroyed
+	// wherever they stand — there is no unwinding and no last tick.
+	//
+	// So the teardown is ordered rather than raced: cancel, JOIN, then close.
+	// joinThenClose is a named function because that ordering is the whole fix
+	// and a defer is not assertable; see loops_test.go.
+	//
+	// ctx is SHADOWED deliberately. Every loop below must run on the cancellable
+	// child, and shadowing is what makes that true by construction instead of by
+	// remembering to write loopCtx at four call sites — the OMS does the same in
+	// runConsumers for the same reason.
+	ctx, cancelLoops := context.WithCancel(ctx)
+	var loops sync.WaitGroup
+	defer joinThenClose(cancelLoops, &loops, closeStores)
 
 	// THE OVERRIDE FACT REACHES THE ESTATE (#410).
 	//
@@ -173,7 +192,15 @@ func run() int {
 				logger.Error("outbox relay init failed", "err", err)
 				return 2
 			}
+			// JOINED (#815). The relay is the loop with the most to lose from being
+			// killed mid-pass: it publishes a FACT to the broker and THEN marks the
+			// record published, so a process that dies between the two leaves the
+			// estate holding an announcement the table still calls pending, and the
+			// next process republishes it. Measured, against Postgres, in
+			// internal/outbox's TestPostgresOutboxARelayLeftRunningIsStillHoldingTheDrainLock.
+			loops.Add(1)
 			go func() {
+				defer loops.Done()
 				// A DEAD RELAY IS A SILENT AUDIT GAP, so its exit is logged rather
 				// than discarded. It does not bring the service down: overrides keep
 				// committing to the outbox and the other replica drains them, which
@@ -238,7 +265,13 @@ func run() int {
 	// job that happens to be tidy — it is the moment the record stops existing.
 	// That is why zero is loud rather than quiet.
 	if armProposalPurge(cfg, proposals, logger) {
-		go purgeLapsedProposals(ctx, proposals, cfg.ProposalPurgeInterval, cfg.LapsedProposalRetention, logger)
+		// JOINED (#815): PurgeLapsed is a DELETE against the same pool
+		// closeStores() tears down.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			purgeLapsedProposals(ctx, proposals, cfg.ProposalPurgeInterval, cfg.LapsedProposalRetention, logger)
+		}()
 	}
 
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, cfg.Tenant, golden, exceptions, feeds,
@@ -275,7 +308,16 @@ func run() int {
 		if err := proj.Refresh(ctx); err != nil {
 			logger.Error("initial golden projection failed; serving whatever was last mastered", "err", err)
 		}
-		go proj.Run(ctx, cfg.RefreshInterval)
+		// JOINED (#815). The projector writes the golden book AND holds the
+		// per-tenant cycle lock, which is a session advisory lock pinned to one
+		// pooled connection: killing this goroutine mid-cycle is how a half-written
+		// projection and a lock released by a teardown rather than by its own
+		// unlock both become possible.
+		loops.Add(1)
+		go func() {
+			defer loops.Done()
+			proj.Run(ctx, cfg.RefreshInterval)
+		}()
 	} else {
 		logger.Warn("no vendor feeds configured; the golden master will not be refreshed (set DATAMASTER_REF_FILES / DATAMASTER_PRICE_FILES to a mounted vendor drop)")
 	}

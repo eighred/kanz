@@ -315,31 +315,28 @@ func TestTheOMSOutboxHasADrain(t *testing.T) {
 		}
 	}
 
-	// AND THE RELAY MUST BE JOINED. closeStores() is deferred in runConsumers, so
-	// it runs after wg.Wait(); an unjoined drainer would still be writing to a
-	// closing pool. test/arch/consumer_goroutine_join_test.go does not classify
-	// this goroutine (it only looks for bus.NewConsumer inside one), so the join
-	// is asserted here instead of being left to a comment.
-	if !strings.Contains(body, "relay.Run(ctx)") {
-		t.Error("the outbox relay is not run through the identifier this guard tracks; if it was " +
-			"renamed, rename it here too rather than deleting the assertion")
-	}
-	if idx := strings.Index(body, "relay.Run(ctx)"); idx >= 0 {
-		// The wg.Add(1)/defer wg.Done() pair must be within the same goroutine
-		// literal. Checking the 400 bytes before the Run keeps this a locality
-		// check rather than a whole-file grep that any wg.Add would satisfy.
-		start := idx - 400
-		if start < 0 {
-			start = 0
-		}
-		window := body[start:idx]
-		if !strings.Contains(window, "wg.Add(1)") || !strings.Contains(window, "defer wg.Done()") {
-			t.Error("the outbox relay goroutine is not joined into the WaitGroup runConsumers waits " +
-				"on. closeStores() is deferred above it, so it closes the pool the relay is still " +
-				"reading and writing — and the relay's per-key advisory lock would be released by a " +
-				"connection teardown rather than by its own unlock (#292)")
-		}
-	}
+	// AND THE RELAY MUST BE JOINED — asserted in outbox_relay_join_test.go, over
+	// EVERY adopter, and not here over the OMS alone (#815).
+	//
+	// THIS IS WHERE IT USED TO LIVE, and moving it is the repair rather than a
+	// tidy-up. It was a source-text window: find the literal `relay.Run(ctx)` in
+	// services/oms/cmd/oms/main.go and require wg.Add(1) and defer wg.Done() in
+	// the 400 bytes before it. Correct about the OMS, and blind by construction
+	// to the second adopter — datamaster ran a relay unjoined from 2026-08-15 until #815
+	// while this test was green, because the guard's scope was a file path.
+	//
+	// TestEveryOutboxRelayGoroutineIsJoinedByItsFrame replaces it with an AST
+	// analysis over the whole module: relay handles derived per file, `go`
+	// statements matched to them, and the join decided by frameJoins() — the same
+	// implementation run_loop_joins_its_goroutines_test.go uses. It covers this
+	// service too, so nothing was lost by deleting the window.
+	//
+	// One claim from the old assertion is NOT carried over, because it was
+	// measured and is false: it said an unjoined relay's advisory lock "would be
+	// released by a connection teardown rather than by its own unlock". pgx v5's
+	// pool.Close() blocks while a connection is checked out and the held
+	// connection keeps working. See outbox_relay_join_test.go's header for what
+	// the real cost is.
 }
 
 // TestTheFillFactHasNoWayOutExceptTheTransaction is guard (3).
