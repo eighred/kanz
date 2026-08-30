@@ -83,7 +83,7 @@ func (s *Service) SweepInterrupted(ctx context.Context) (int, error) {
 //
 // It must therefore be set longer than every recovery that could still be
 // running against a young order: JetStream's AckWait on order subjects
-// (workAckWait, 60s, pkg/bus/tuning.go), which bounds how long the broker waits
+// (bus.WorkAckWait, 60s, pkg/bus/tuning.go), which bounds how long the broker waits
 // before redelivering; and the in-process dedup claim lease derived from it
 // (dedupClaimLease = maxTunedAckWait + 15s = 75s, pkg/bus/dedup.go), which
 // bounds how long a dispatch can hold an idempotency key. The deployed default

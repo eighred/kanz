@@ -125,7 +125,7 @@ func TestAwaitClaimBlocksUntilTheHolderReleases(t *testing.T) {
 	acquired := make(chan func(), 1)
 	failed := make(chan error, 1)
 	go func() {
-		r, err := svc.awaitClaim(context.Background(), "o-1")
+		_, r, err := svc.awaitClaim(context.Background(), "o-1")
 		if err != nil {
 			failed <- err
 			return
@@ -174,7 +174,7 @@ func TestAwaitClaimGivesUpWhenItsContextExpires(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	if _, err := svc.awaitClaim(ctx, "o-1"); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, err := svc.awaitClaim(ctx, "o-1"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("awaitClaim err = %v, want a wrapped context.DeadlineExceeded", err)
 	}
 
@@ -192,7 +192,7 @@ func TestAwaitClaimGivesUpWhenItsContextExpires(t *testing.T) {
 func TestAwaitClaimAndClaimShareOneLock(t *testing.T) {
 	svc := &Service{}
 
-	held, err := svc.awaitClaim(context.Background(), "o-1")
+	_, held, err := svc.awaitClaim(context.Background(), "o-1")
 	if err != nil {
 		t.Fatalf("awaitClaim on a free order: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestAwaitClaimAndClaimShareOneLock(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := svc.awaitClaim(ctx, "o-1"); err == nil {
+	if _, _, err := svc.awaitClaim(ctx, "o-1"); err == nil {
 		t.Fatal("awaitClaim acquired an order claim holds — they are not the same lock")
 	}
 	release()
@@ -271,7 +271,7 @@ func TestOrderLockTableDoesNotGrow(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			release, err := svc.awaitClaim(ctx, "contended")
+			_, release, err := svc.awaitClaim(ctx, "contended")
 			if err != nil {
 				return
 			}

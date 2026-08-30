@@ -18,9 +18,16 @@ import (
 // (pkg/bus/tuning.go), where it was previously the 1000 server default.
 //
 // It must also stay comfortably under JetStream's AckWait, which is 60s for
-// order subjects (workAckWait, pkg/bus/tuning.go). Past AckWait the broker
-// redelivers this same command while the first copy is still blocked. 5s leaves
-// 12× headroom.
+// order subjects (bus.WorkAckWait). Past AckWait the broker redelivers this same
+// command while the first copy is still blocked. 5s leaves 12× headroom.
+//
+// THAT HEADROOM IS PER ACQUISITION, AND IT IS NO LONGER THE BINDING CONSTRAINT
+// (#801). A cancel of a scheduled parent takes 1+N of these — one per child —
+// plus N venue round-trips, all on one delivery, so twelve contended slices
+// consumed 65s of an AckWait of 60. The bound that actually holds the delivery
+// inside the broker's clock is deliveryBudget (claimscope.go), armed once per
+// command and shared by every acquisition below it. This number is now what
+// bounds head-of-line blocking for ONE order; that one bounds the command.
 //
 // WHAT THIS COMMENT USED TO SAY, AND WHY IT WAS WRONG (#237). It claimed that at
 // the redelivery "the consumer's dedup window is still holding its idempotency
@@ -204,27 +211,77 @@ func (s *Service) claim(orderID string) (func(), bool) {
 //
 // ctx is honoured too, so a shutdown does not have to wait out the timeout.
 //
-// ONE LOCK AT A TIME IS AN INVARIANT OF THIS PACKAGE. No path acquires a second
-// order lock while holding one (work, adopt, quarantine, closeAtVenue and
-// completeCancelAnnouncement take none), so these two functions cannot deadlock
-// against each other: t.mu is a leaf never held across a channel operation, and
-// there is no lock ordering to get wrong.
-func (s *Service) awaitClaim(ctx context.Context, orderID string) (func(), error) {
+// LOCKS NEST, ONE LEVEL, PARENT BEFORE CHILD — AND THAT IS ENFORCED HERE (#801).
+//
+// WHAT THIS COMMENT USED TO SAY, AND WHY IT WAS WRONG. It claimed "ONE LOCK AT A
+// TIME IS AN INVARIANT OF THIS PACKAGE. No path acquires a second order lock
+// while holding one". That stopped being true when a cancel learned to withdraw
+// a scheduled parent's children: handleCancel takes the parent's lock and then,
+// still holding it, runs cancelChildren, which re-enters handleCancel per child
+// and takes the child's. The comment was dated evidence for a property the code
+// no longer had, in the file the next person reasoning about lock ordering would
+// read first — which is the compounding hazard, not the nesting itself.
+//
+// THE REAL INVARIANT, AND WHY IT CANNOT DEADLOCK. Acquisition is ordered parent
+// then child, and the order is acyclic because a child can never itself be a
+// parent — validateSchedule refuses a command carrying both a parent and a
+// schedule. So the deepest a delivery goes is two, and no two deliveries can
+// hold each other's next lock.
+//
+// IT IS ENFORCED RATHER THAN ASSERTED. That acyclicity rests on a rule in
+// another file, and the cost of relaxing it is not a bug report — it is this
+// dispatch goroutine blocking on a lock it holds itself. enterClaim (claimscope.go)
+// therefore refuses a re-entrant claim at the door, instantly and by name,
+// and refuses a third level outright. t.mu remains a leaf never held across a
+// channel operation.
+//
+// THE WAIT SPENDS THE DELIVERY'S BUDGET, NOT A FRESH ONE. claimWait bounds this
+// acquisition; the deadline already on ctx bounds the whole delivery, and
+// context.WithTimeout keeps whichever is earlier. That is what stops 1+N
+// acquisitions from costing 1+N × claimWait on one AckWait clock.
+//
+// THE RETURNED CONTEXT MUST BE USED for everything done while holding the lock,
+// including a nested cancel — it is what carries the claim record that makes the
+// two refusals above possible.
+func (s *Service) awaitClaim(ctx context.Context, orderID string) (context.Context, func(), error) {
+	held, err := enterClaim(ctx, orderID)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	wait := s.claimWait
 	if wait <= 0 {
 		wait = defaultClaimWait
 	}
-	ctx, cancel := context.WithTimeout(ctx, wait)
+	waitCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 
 	l := s.working.ref(orderID)
 	select {
 	case l.sem <- struct{}{}:
-		return s.working.releaser(orderID, l), nil
-	case <-ctx.Done():
+		return held, s.working.releaser(orderID, l), nil
+	case <-waitCtx.Done():
 		s.working.unref(orderID, l)
-		return nil, fmt.Errorf(
+		// WHICH CLOCK RAN OUT IS THE WHOLE DIAGNOSIS. ctx.Err() non-nil means the
+		// DELIVERY's budget is gone — this cancel has already spent its share of
+		// AckWait on earlier children, and the operator should be looking at the
+		// fan-out, not at this order. A bare timeout means this ONE order is held
+		// too long, which is a hung venue. They read the same in a log unless the
+		// message says which.
+		if cerr := ctx.Err(); cerr != nil {
+			// s.deliveryBudget, NOT the package constant: a test lowers it, and a
+			// message that always names 45s while the delivery actually had 600ms
+			// tells an operator the wrong thing about the only number that matters
+			// here.
+			return nil, nil, fmt.Errorf(
+				"%w (%s) while waiting for the goroutine working order %s to release it — this "+
+					"command has spent its whole share of the broker's AckWait, so it stops "+
+					"here rather than running past it and being redelivered while this copy is "+
+					"still working: %w",
+				errBudgetSpent, s.budget(), orderID, cerr)
+		}
+		return nil, nil, fmt.Errorf(
 			"oms: gave up after %s waiting for the goroutine working order %s to release it: %w",
-			wait, orderID, ctx.Err())
+			wait, orderID, waitCtx.Err())
 	}
 }

@@ -73,8 +73,11 @@ type Service struct {
 	working orderLocks
 	// claimWait bounds how long a cancel or an amend waits for the in-flight
 	// work on an order to release it. Zero means defaultClaimWait.
-	claimWait   time.Duration
-	sharedCount prometheus.Counter
+	claimWait time.Duration
+	// deliveryBudget bounds a WHOLE command delivery, where claimWait bounds one
+	// acquisition inside it (#801). See claimscope.go.
+	deliveryBudget time.Duration
+	sharedCount    prometheus.Counter
 	// quarantined counts orders frozen because venue truth could not be
 	// established. It is the alertable signal: a quarantine is a position whose
 	// true size nobody knows, and it must not be discoverable only by reading logs.
@@ -193,6 +196,19 @@ func WithClaimWait(d time.Duration) ServiceOption {
 	return func(s *Service) { s.claimWait = d }
 }
 
+// WithDeliveryBudget bounds how long ONE command delivery may spend in total,
+// across every per-order claim and every venue call it makes (#801).
+//
+// IT EXISTS TO BE LOWERED IN TESTS, and for the same reason WithClaimWait does:
+// the production value is derived from the broker's AckWait (deliveryBudget,
+// claimscope.go), and no test can afford to wait it out. RAISING it is the
+// dangerous direction and there is no legitimate reason to — past AckWait the
+// broker redelivers the command onto a sibling pod while this copy is still
+// inside a venue call, which is the entire defect this budget removes.
+func WithDeliveryBudget(d time.Duration) ServiceOption {
+	return func(s *Service) { s.deliveryBudget = d }
+}
+
 // WithClaimTimeoutCounter gives the OMS the counter it increments when a cancel
 // or an amend gives up waiting for the goroutine working an order. Without it
 // the timeout is still logged at ERROR and the command still parks in the DLQ,
@@ -258,6 +274,7 @@ func NewService(tenant string, store Store, emitter *Emitter, gate compliance.Ga
 		tenant: tenant,
 		store:  store, gate: gate, emitter: emitter, router: router, closes: closes,
 		now: time.Now, logger: logger, claimWait: defaultClaimWait,
+		deliveryBudget: deliveryBudget,
 	}
 	for _, opt := range opts {
 		opt(svc)
@@ -1438,7 +1455,20 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// too — a timestamp captured before a multi-second block would date the
 	// cancellation and its FACTs EARLIER than the fill they follow, inverting
 	// the order of events for every downstream projection.
-	release, err := s.awaitClaim(ctx, cmd.GetOrderId())
+	// ARM THE DELIVERY BUDGET BEFORE THE FIRST CLAIM (#801).
+	//
+	// Everything below — this claim, every child's claim, every venue withdrawal
+	// dispatched for a child — now spends ONE budget derived from the broker's
+	// AckWait, instead of each acquisition getting a fresh claimWait. That is what
+	// stops a scheduled parent's fan-out from running past AckWait and having the
+	// broker redeliver the cancel onto a sibling pod while this copy is still
+	// inside a venue call. See claimscope.go for the arithmetic and the
+	// consequence. It is armed only on the OUTERMOST entry: the per-child
+	// re-entry below inherits this deadline rather than restarting it.
+	ctx, budgetDone := s.withDeliveryDeadline(ctx)
+	defer budgetDone()
+
+	ctx, release, err := s.awaitClaim(ctx, cmd.GetOrderId())
 	if err != nil {
 		// Exclusivity could not be established in time, so nothing about this
 		// cancel has been decided — and saying nothing is the only honest
@@ -1592,6 +1622,15 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// calls an order cancelled while it is still resting on the exchange — so a
 	// failure here nacks and the redelivery finds an order still live at the
 	// ledger and re-runs the whole transition.
+	// THE WITHDRAWAL IS AT THE EXCHANGE BY NOW, SO THE RECORD OF IT DOES NOT RUN
+	// ON THE DELIVERY'S CLOCK (#801). Everything above — the claims, the loads,
+	// the venue call — spends the delivery budget and may be abandoned. This does
+	// not: abandoning it would not undo the cancel the venue already has, only
+	// lose the ledger's evidence of it, and the replay would then dispatch a
+	// second one. See commitContext.
+	ctx, commitDone := commitContext(ctx)
+	defer commitDone()
+
 	cancelled, ferr := s.emitter.CancelledFact(ctx, next.GetOrderId(), cancelledQty, now)
 	if ferr != nil {
 		return ferr
@@ -1757,7 +1796,14 @@ func (s *Service) handleAmend(ctx context.Context, env *envelopepb.Envelope, pay
 	// compromised: it compares against a filled_quantity that a fold in flight
 	// has already moved, so it can also shrink an order below what has actually
 	// traded.
-	release, err := s.awaitClaim(ctx, cmd.GetOrderId())
+	// NO DELIVERY BUDGET IS ARMED HERE, and that is a decision rather than an
+	// omission (#801). An amend takes exactly ONE claim and makes at most one
+	// venue call — it has no fan-out — so claimWait plus a venue round-trip is
+	// already its whole worst case, comfortably inside AckWait. Arming a budget
+	// on every handler is the right end state and belongs in bus.Subscribe, which
+	// owns the delivery contract, rather than being copied per handler; #836
+	// carries it.
+	ctx, release, err := s.awaitClaim(ctx, cmd.GetOrderId())
 	if err != nil {
 		// Same posture as the cancel path: nothing was decided, so nothing is
 		// announced, and the command parks in the DLQ rather than rewriting the
