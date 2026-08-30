@@ -88,7 +88,7 @@ func busConsumerCalls(t *testing.T, root string) []busConsumerCall {
 		}
 		if info.IsDir() {
 			switch info.Name() {
-			case "vendor", ".git", "gen", "testdata":
+			case "vendor", ".git", ".claude", "gen", "testdata":
 				return filepath.SkipDir
 			}
 			return nil
@@ -373,7 +373,7 @@ func dlqDrainSites(t *testing.T, root string) (engines, entryPoints []string) {
 		}
 		if info.IsDir() {
 			switch info.Name() {
-			case "vendor", ".git", "gen", "testdata":
+			case "vendor", ".git", ".claude", "gen", "testdata":
 				return filepath.SkipDir
 			}
 			return nil

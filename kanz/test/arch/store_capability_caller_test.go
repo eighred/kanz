@@ -150,7 +150,7 @@ func productionSources(t *testing.T, root string) map[string]string {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "vendor", "gen", "kanz-schemas-go":
+			case ".git", ".claude", "vendor", "gen", "kanz-schemas-go":
 				return fs.SkipDir
 			}
 			return nil

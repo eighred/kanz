@@ -117,7 +117,7 @@ func TestDLQHeadersLiveOnlyInPkgBus(t *testing.T) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "vendor", "testdata", "gen":
+			case ".git", ".claude", "vendor", "testdata", "gen":
 				return filepath.SkipDir
 			}
 			return nil

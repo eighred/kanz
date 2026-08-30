@@ -132,7 +132,7 @@ func jetStreamConsumerConfigLiterals(t *testing.T, root string) []consumerConfig
 		}
 		if info.IsDir() {
 			switch info.Name() {
-			case "vendor", ".git", "gen", "testdata":
+			case "vendor", ".git", ".claude", "gen", "testdata":
 				return filepath.SkipDir
 			}
 			return nil
