@@ -94,7 +94,7 @@ func computeExposureWithFlags(
 ) (*domain.ExposureSet, v1.Mode, []v1.QualityFlag, bool) {
 	var es *domain.ExposureSet
 	if computeLive {
-		p, found := store.Lookup(id)
+		p, found := store.Snapshot(id)
 		if found {
 			es = compute.ComputeExposure(p)
 			cache.StoreExposure(id, es)
@@ -270,7 +270,7 @@ func TestIntegration_HealthAggregatesLatestAsOfAcrossPortfolios(t *testing.T) {
 
 	var latest time.Time
 	for _, id := range store.IDs() {
-		p, _ := store.Lookup(id)
+		p, _ := store.Snapshot(id)
 		if p.AsOf().After(latest) {
 			latest = p.AsOf()
 		}
@@ -308,7 +308,7 @@ func TestIntegration_UncertaintyPropagatesThroughCompute(t *testing.T) {
 	})
 
 	// Post-apply, populate uncertainty (simulating RISK-11's role).
-	p, _ := store.Lookup("PORT-1")
+	p, _ := store.Snapshot("PORT-1")
 	for _, pos := range p.Positions() {
 		pos.MarketValueUncertainty = integMoney(3, 0, "USD")
 		p.SetPosition(pos)
@@ -340,7 +340,7 @@ func TestIntegration_NoUncertaintyInputsLeavesAllUncertaintyAbsNil(t *testing.T)
 		AsOf:         timestamppb.New(integT0),
 	})
 
-	p, _ := store.Lookup("PORT-1")
+	p, _ := store.Snapshot("PORT-1")
 	measures := compute.ComputeMeasures(p, nil, nil)
 	for _, n := range measures.Names() {
 		m, _ := measures.Lookup(n)
@@ -362,7 +362,7 @@ func TestIntegration_MixedUncertaintyInputsSkipNil(t *testing.T) {
 		PortfolioId: "PORT-1", InstrumentId: "WithoutUnc", MarketValue: integMoney(50, 0, "USD"), AsOf: timestamppb.New(integT0),
 	})
 
-	p, _ := store.Lookup("PORT-1")
+	p, _ := store.Snapshot("PORT-1")
 	withUnc, _ := p.Position("WithUnc")
 	withUnc.MarketValueUncertainty = integMoney(4, 0, "USD")
 	p.SetPosition(withUnc)
