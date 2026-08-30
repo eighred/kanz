@@ -38,6 +38,10 @@ type recorder struct {
 	mu     sync.Mutex
 	got    []bus.Event
 	failOn string
+	// failWith names the refusal, so a test running two relays over one record
+	// can tell the cause THIS relay produced from the cause a previous one
+	// persisted. Empty keeps the original message.
+	failWith string
 	// beforePublish runs inside Publish, so a test can interleave a second
 	// drainer at the exact moment one holds the key.
 	beforePublish func()
@@ -50,6 +54,9 @@ func (r *recorder) Publish(_ context.Context, e bus.Event) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.failOn != "" && e.EventType == r.failOn {
+		if r.failWith != "" {
+			return errors.New("recorder: " + r.failWith)
+		}
 		return errors.New("recorder: injected publish failure for " + r.failOn)
 	}
 	r.got = append(r.got, e)

@@ -111,6 +111,49 @@ type Pending struct {
 	ID       int64
 	Attempts int
 	Record   Record
+	// LastError is what the PREVIOUS attempt on this record recorded — possibly
+	// by a different replica, possibly in a previous pod's lifetime. Empty means
+	// no attempt has failed yet, which is why it is only meaningful read
+	// alongside Attempts: empty with Attempts>0 would mean the cause is not
+	// being recorded, not that the record is healthy.
+	//
+	// IT IS ON THE PROJECTION BECAUSE OTHERWISE IT IS UNREACHABLE FROM GO (#817).
+	// The relay stops at the head of a key by design, so one record that will not
+	// publish halts every FACT behind it for that key; the age gauge says a
+	// record is ageing and nothing said why. The cause was already being written
+	// on every failed attempt and cleared on every success — it was simply never
+	// selected, so the only route to it was a psql session against production
+	// during the audit-trail outage that made it matter.
+	//
+	// FREE TEXT, DELIBERATELY, AND THEREFORE NEVER A METRIC LABEL. It is a
+	// broker's refusal string: unbounded in shape, one distinct value per
+	// failure mode per subject. As a label value it would be an unbounded
+	// cardinality explosion in Prometheus during exactly the incident it was
+	// added to explain. It belongs on a log line and in a read plane, not in a
+	// series. See Relay.drainKey.
+	LastError string
+}
+
+// causeLimit bounds a recorded cause. It is a COLUMN, not a log line: a venue
+// returning an HTML error page, or a wrapped chain naming every hop, must not be
+// what a row grows to.
+const causeLimit = 1000
+
+// boundedCause renders a failure cause for storage, in ONE place.
+//
+// Both Queue implementations record the cause and both must agree on what they
+// stored, or the in-process queue certifies a length production does not have —
+// the same permissive-double problem Memory's doc names for ordering, reached
+// through the reporting side instead.
+func boundedCause(cause error) string {
+	if cause == nil {
+		return ""
+	}
+	msg := cause.Error()
+	if len(msg) > causeLimit {
+		msg = msg[:causeLimit]
+	}
+	return msg
 }
 
 var (
@@ -351,6 +394,12 @@ type Queue interface {
 	// mark the record published: the relay retries it on the next pass, and the
 	// attempt count is what tells an operator the difference between a blip and
 	// a record that will never go out.
+	//
+	// THE CAUSE MUST COME BACK ON THE NEXT Pending, as Pending.LastError,
+	// bounded by boundedCause. An implementation that accepts the cause and
+	// drops it is write-only, and #817 is what that costs: the attempt count
+	// climbs, the age gauge climbs, and the field that says why is reachable
+	// only by hand-written SQL against a production database mid-incident.
 	MarkFailed(ctx context.Context, id int64, cause error) error
 	// OldestPendingAge reports how long the oldest unpublished record has been
 	// waiting, and false when the queue is empty. It is the ONLY number that

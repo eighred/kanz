@@ -314,11 +314,34 @@ func (r *Relay) drainKey(ctx context.Context, key string, wait bool) (int, error
 			inc(r.failures)
 			// ERROR, and it names the consequence rather than the call. Every
 			// FACT behind this one on this order is now waiting on it.
+			//
+			// prior_error IS THE RECORDED CAUSE, AND IT IS THE POINT OF #817.
+			// err is what THIS relay just saw. prior_error is what the last
+			// attempt persisted — which, on a deployment running two replicas
+			// and rescheduling pods, is routinely an attempt this process never
+			// witnessed and whose log line no longer exists anywhere. Reading it
+			// used to mean psql against production mid-incident; it is on the
+			// pending projection now, so the operator who followed the age gauge
+			// here gets the history with the symptom.
+			//
+			// The two together are the diagnosis: identical means one persistent
+			// condition, different means the record has now failed two ways and
+			// the first refusal is not the one being fixed. Empty prior_error is
+			// only meaningful beside attempts — empty at attempts=1 is a first
+			// failure, empty at attempts=9 means the cause is not being recorded.
+			//
+			// A LOG LINE AND NOT A LABEL. This is a broker refusal string, one
+			// distinct value per failure mode per subject and unbounded in shape;
+			// as a Prometheus label value it would be an unbounded-cardinality
+			// series added during the incident it exists to explain. The bounded
+			// signals — the failure counter and the age gauge — already exist and
+			// are what alerts fire on; this is what an operator reads next.
 			r.logger.Error("oms: an outbox record could not be published — every FACT behind it for this "+
 				"order is held back until it goes out, because publishing past it would hand consumers "+
 				"this order's history out of sequence",
 				"partition_key", key, "event_type", p.Record.EventType,
-				"outbox_id", p.ID, "attempts", p.Attempts+1, "err", err)
+				"outbox_id", p.ID, "attempts", p.Attempts+1, "err", err,
+				"prior_error", p.LastError)
 			return sent, fmt.Errorf("outbox: %s is stalled on %s (outbox id %d): %w",
 				key, p.Record.EventType, p.ID, err), nil
 		}

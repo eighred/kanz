@@ -33,10 +33,16 @@ type Memory struct {
 }
 
 type memRow struct {
-	id        int64
-	attempts  int
-	rec       Record
-	enqueued  time.Time
+	id       int64
+	attempts int
+	rec      Record
+	enqueued time.Time
+	// lastErr mirrors the outbox.last_error column, bounded the same way. It is
+	// not bookkeeping this queue needs: it is here because Memory is not a
+	// permissive double, and a queue that accepted a failure cause and dropped
+	// it would let a test certify a stall whose reason production can report and
+	// this cannot (#817).
+	lastErr   string
 	published bool
 }
 
@@ -132,7 +138,7 @@ func (m *Memory) Pending(_ context.Context, key string, limit int) ([]Pending, e
 		if r.published || r.rec.PartitionKey != key {
 			continue
 		}
-		out = append(out, Pending{ID: r.id, Attempts: r.attempts, Record: r.rec})
+		out = append(out, Pending{ID: r.id, Attempts: r.attempts, Record: r.rec, LastError: r.lastErr})
 		if len(out) == limit {
 			break
 		}
@@ -145,15 +151,20 @@ func (m *Memory) MarkPublished(_ context.Context, id int64) error {
 	defer m.mu.Unlock()
 	if r := m.row(id); r != nil {
 		r.published = true
+		// Cleared with the same UPDATE that stamps published_at in Postgres. A
+		// record that recovered must not keep reporting the blip it recovered
+		// from to whatever later reads the row.
+		r.lastErr = ""
 	}
 	return nil
 }
 
-func (m *Memory) MarkFailed(_ context.Context, id int64, _ error) error {
+func (m *Memory) MarkFailed(_ context.Context, id int64, cause error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if r := m.row(id); r != nil && !r.published {
 		r.attempts++
+		r.lastErr = boundedCause(cause)
 	}
 	return nil
 }
