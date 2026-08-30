@@ -68,7 +68,7 @@ func TestAccept_Rejections(t *testing.T) {
 
 func TestApplyFill_PartialThenFull(t *testing.T) {
 	st, _ := Accept(limitOrder(d(100, 0), d(1025, -2)), t0)
-	st = Route(st, t0)
+	st, _ = Route(st, t0)
 
 	fill1 := &orderpb.Fill{Quantity: d(40, 0), Price: d(1000, -2), ExecutedAt: timestamppb.New(t0)}
 	st, err := ApplyFill(st, fill1, t0)

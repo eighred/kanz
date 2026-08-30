@@ -150,11 +150,26 @@ func IsTerminal(st *orderpb.OrderState) bool {
 }
 
 // Route marks an admitted order as working at a venue. Returns a copy.
-func Route(st *orderpb.OrderState, now time.Time) *orderpb.OrderState {
+//
+// A TERMINAL ORDER IS REFUSED, LIKE EVERY OTHER TRANSITION (#840). This used to
+// clone and write ROUTED unconditionally, so handed a CANCELLED order it
+// returned a state saying that order was working at a venue — and ROUTED is what
+// resume() and the sweep treat as live, so the order would be re-driven to an
+// exchange after an operator had withdrawn it.
+//
+// It was not reachable: work() is the only caller and resume() checks
+// IsTerminal(fresh) before calling it. But that put the invariant in a
+// caller-side check in another file while four transitions in THIS one enforced
+// it themselves, so a reader here saw a rule the code did not have and a new
+// caller of work() reintroduced the hole by doing nothing wrong.
+func Route(st *orderpb.OrderState, now time.Time) (*orderpb.OrderState, error) {
+	if IsTerminal(st) {
+		return nil, reject("ORDER_TERMINAL", "cannot route a %s order", st.GetStatus())
+	}
 	next := cloneState(st)
 	next.Status = orderpb.OrderStatus_ORDER_STATUS_ROUTED
 	next.AsOf = timestamppb.New(now.UTC())
-	return next
+	return next, nil
 }
 
 // Reject marks an ADMITTED order terminally rejected. Returns a copy.
@@ -165,11 +180,21 @@ func Route(st *orderpb.OrderState, now time.Time) *orderpb.OrderState {
 // never will). Without persisting the terminal state the order stays ROUTED in
 // the store — the ledger would say rejected while the OMS's own truth says
 // working, and a later cancel or amend would act on a live-looking order.
-func Reject(st *orderpb.OrderState, now time.Time) *orderpb.OrderState {
+// A TERMINAL ORDER IS REFUSED HERE TOO (#840), and on this path the cost is a
+// trade rather than an order. adopt() calls this with the venue's own account of
+// what became of the order; rejecting one that is already FILLED would write
+// REJECTED over a completed trade, leaving the ledger's last word contradicting
+// a fill the fund actually received. Reconcile() refuses a terminal order before
+// adopt() is reached and calls arriving with one "a caller defect" — this is the
+// aggregate saying the same thing where the transition actually happens.
+func Reject(st *orderpb.OrderState, now time.Time) (*orderpb.OrderState, error) {
+	if IsTerminal(st) {
+		return nil, reject("ORDER_TERMINAL", "cannot reject a %s order", st.GetStatus())
+	}
 	next := cloneState(st)
 	next.Status = orderpb.OrderStatus_ORDER_STATUS_REJECTED
 	next.AsOf = timestamppb.New(now.UTC())
-	return next
+	return next, nil
 }
 
 // ApplyFill folds one fill into the order, recomputing filled/leaves quantity,

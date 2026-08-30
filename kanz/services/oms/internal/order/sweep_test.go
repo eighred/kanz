@@ -34,7 +34,7 @@ func TestSweepResumesAnOrderStrandedAtRouted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
-	stranded := Route(admitted, t0)
+	stranded, _ := Route(admitted, t0)
 	if err := store.Create(ctx, stranded, nil); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestSweepRefusesAContextWithNoTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
-	stranded := Route(admitted, t0)
+	stranded, _ := Route(admitted, t0)
 	if err := store.Create(context.Background(), stranded, nil); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
