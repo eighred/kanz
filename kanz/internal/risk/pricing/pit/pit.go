@@ -150,6 +150,27 @@ func Put[T any](vs []Version[T], asOf time.Time, v T, horizon time.Duration) ([]
 	if drop == 0 {
 		return vs, 0
 	}
+	// THE HORIZON BOUNDS len, AND WITHOUT THIS IT DOES NOT BOUND THE HEAP (#862).
+	//
+	// vs[drop:] reslices the SAME backing array. Go keeps an entire array alive
+	// while any slice references any part of it, so the dropped Version[T] values
+	// — and the curve, credit or vol surface each one carries — stay reachable
+	// from array[0:drop] and are NOT collected. They are released only when a
+	// later append exceeds cap and reallocates, which for a store in steady state
+	// is many refreshes away.
+	//
+	// The effect is a store that reports the right version COUNT and holds twice
+	// the payloads: at the shipped 7-day horizon and a one-minute cadence, ~10,080
+	// live versions per key with up to ~10,080 dead ones resident beside them, on
+	// the risk engine, whose reason for existing is to hold a valuation surface in
+	// memory. Every retention assertion in this package is on len(vs) or on what
+	// At resolves; both are correct and both are blind to it.
+	//
+	// clear zeroes each Version[T], which drops the reference the array was
+	// holding. It is O(drop), and drop is 1 in the steady state — the prune
+	// removes one version per refresh once the horizon is full — so the ordinary
+	// cost is a single struct write.
+	clear(vs[:drop])
 	return vs[drop:], drop
 }
 
