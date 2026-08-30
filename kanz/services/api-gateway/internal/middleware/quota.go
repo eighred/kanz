@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"sync"
-	"time"
 )
 
 // Limits is one tenant's resource budget at the gateway (MT-01e). RatePerSec/
@@ -70,22 +69,31 @@ type QuotaObserver interface {
 // exhaustion (a transient capacity signal — distinct from 429's "slow down").
 // obs may be nil. Runs after Auth so the principal's tenant is on ctx.
 func Quota(limits TenantLimits, obs QuotaObserver) func(http.Handler) http.Handler {
-	q := &quota{
+	return newQuota(limits, obs).handler()
+}
+
+// newQuota builds the state Quota's chain link owns. It is split out so a test
+// can drive the WIRED handler and still read the maps behind it — the bound in
+// #834 is a property of the state, not of any one response.
+func newQuota(limits TenantLimits, obs QuotaObserver) *quota {
+	return &quota{
 		limits:   limits,
 		obs:      obs,
-		buckets:  map[string]*bucket{},
+		rates:    newBucketSet(),
 		inflight: map[string]int{},
-		now:      time.Now,
 	}
+}
+
+func (q *quota) handler() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := rateKey(r)
 			tenant := tenantLabel(r)
-			lim := limits.limit(tenant)
+			lim := q.limits.limit(tenant)
 
 			if !q.allowRate(key, lim) {
-				if obs != nil {
-					obs.RateLimited(tenant)
+				if q.obs != nil {
+					q.obs.RateLimited(tenant)
 				}
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
@@ -93,16 +101,16 @@ func Quota(limits TenantLimits, obs QuotaObserver) func(http.Handler) http.Handl
 			}
 			release, ok := q.acquire(key, lim)
 			if !ok {
-				if obs != nil {
-					obs.AdmissionRejected(tenant)
+				if q.obs != nil {
+					q.obs.AdmissionRejected(tenant)
 				}
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusServiceUnavailable, "tenant concurrency limit exceeded")
 				return
 			}
-			if obs != nil {
-				obs.InFlight(tenant, 1)
-				defer obs.InFlight(tenant, -1)
+			if q.obs != nil {
+				q.obs.InFlight(tenant, 1)
+				defer q.obs.InFlight(tenant, -1)
 			}
 			defer release()
 			next.ServeHTTP(w, r)
@@ -111,12 +119,13 @@ func Quota(limits TenantLimits, obs QuotaObserver) func(http.Handler) http.Handl
 }
 
 type quota struct {
-	limits   TenantLimits
-	obs      QuotaObserver
+	limits TenantLimits
+	obs    QuotaObserver
+	// rates is the bounded token-bucket store (bucketSet carries its own lock
+	// and its own evictor); mu guards inflight alone.
+	rates    *bucketSet
 	mu       sync.Mutex
-	buckets  map[string]*bucket
 	inflight map[string]int
-	now      func() time.Time
 }
 
 func (q *quota) allowRate(key string, lim Limits) bool {
@@ -127,19 +136,21 @@ func (q *quota) allowRate(key string, lim Limits) bool {
 	if burst < 1 {
 		burst = 1
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	b, ok := q.buckets[key]
-	if !ok {
-		q.buckets[key] = &bucket{tokens: burst - 1, last: q.now()}
-		return true
-	}
-	return b.take(q.now(), lim.RatePerSec, burst)
+	return q.rates.allow(key, lim.RatePerSec, burst)
 }
 
 // acquire reserves an in-flight slot for key, returning a release func and
 // whether admission succeeded. When MaxInFlight <= 0 admission is disabled and
 // release is a no-op.
+//
+// # THE KEY IS REMOVED AT ZERO, AND THAT IS THE WHOLE BOUND
+//
+// A decrement alone left a zero-valued entry behind for every principal the
+// gateway had ever served, for the life of the pod (#834). Deleting at zero
+// needs no TTL and no ceiling because it makes the invariant structural: a key
+// is present only while it holds at least one slot, so len(inflight) can never
+// exceed the number of requests actually in flight — a quantity the HTTP server
+// already bounds. Nothing here is retained on behalf of history.
 func (q *quota) acquire(key string, lim Limits) (func(), bool) {
 	if lim.MaxInFlight <= 0 {
 		return func() {}, true
@@ -153,9 +164,14 @@ func (q *quota) acquire(key string, lim Limits) (func(), bool) {
 	return func() {
 		q.mu.Lock()
 		defer q.mu.Unlock()
-		if q.inflight[key] > 0 {
-			q.inflight[key]--
+		// <= 1 rather than == 1: a double release must still not underflow, and
+		// deleting an already-absent key is a no-op.
+		n := q.inflight[key]
+		if n <= 1 {
+			delete(q.inflight, key)
+			return
 		}
+		q.inflight[key] = n - 1
 	}, true
 }
 

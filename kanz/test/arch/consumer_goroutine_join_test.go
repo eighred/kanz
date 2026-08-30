@@ -252,13 +252,19 @@ type joinPoint struct {
 // completion signal and is filtered out — it is the shutdown trigger, and
 // leaving it in would only produce a confusing failure message (it can never
 // match a wait, so it could never produce a false pass).
+//
+// The filter is on the SHAPE of the name, not the exact word `ctx`: a derived
+// context is routinely called runCtx or shutdownCtx, and #813's guard reported
+// pkg/bus/redrive.go's watchdog as "it signals runCtx (waitgroup)" — a true
+// verdict with a detail line that named a context as a WaitGroup and would have
+// sent the next reader looking for one.
 func completionSignals(n ast.Node) []joinPoint {
 	var out []joinPoint
 	ast.Inspect(n, func(node ast.Node) bool {
 		switch v := node.(type) {
 		case *ast.CallExpr:
 			if sel, ok := v.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Done" {
-				if id, ok := sel.X.(*ast.Ident); ok && id.Name != "ctx" {
+				if id, ok := sel.X.(*ast.Ident); ok && !isContextIdent(id.Name) {
 					out = append(out, joinPoint{name: id.Name, kind: "waitgroup", pos: v.Pos()})
 				}
 			}
@@ -275,6 +281,14 @@ func completionSignals(n ast.Node) []joinPoint {
 		return true
 	})
 	return out
+}
+
+// isContextIdent reports whether name is a context variable — `ctx` itself or
+// any of the derived spellings this module uses (runCtx, shutdownCtx, baseCtx).
+// Its only effect is on which Done() calls are reported as completion signals;
+// a context has no Wait method, so widening it cannot create a false pass.
+func isContextIdent(name string) bool {
+	return name == "ctx" || strings.HasSuffix(name, "Ctx") || strings.HasSuffix(name, "Context")
 }
 
 // waitPoints returns the ways n blocks on someone else finishing: `wg.Wait()`
