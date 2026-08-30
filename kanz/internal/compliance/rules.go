@@ -405,13 +405,17 @@ func paramsMismatch(want string) *compliancepb.Violation {
 
 // totalGross is the book's gross exposure — Σ|market value| over held positions,
 // the same gross definition compute.ComputeExposure uses (RISK-06), as an exact
-// Rat.
+// Rat. Folded once per candidate; see candidateFold.
+//
+// IT HANDS BACK A COPY, and that is not defensiveness for its own sake. The
+// memo is the denominator of every concentration weight in the evaluation, and
+// this file already carries what a corrupted denominator costs: a violation
+// raised with an `observed` weight nobody measured (see unmarkedHoldings). A
+// future rule that accumulated into the returned Rat would do exactly that to
+// every rule after it, silently. One allocation buys the guarantee that it
+// cannot.
 func totalGross(c *Candidate) *big.Rat {
-	sum := new(big.Rat)
-	for _, pos := range heldPositions(c) {
-		sum.Add(sum, absRatFromMoney(pos.MarketValue))
-	}
-	return sum
+	return new(big.Rat).Set(foldBook(c).gross)
 }
 
 // grossByDimension buckets gross exposure on a dimension.
@@ -574,15 +578,84 @@ func classify(c *Candidate, pos Position) Attributes {
 // removed from the book before any rule saw it. See unmarkedHoldings for what
 // that cost and why the caller refuses instead.
 func heldPositions(c *Candidate) []Position {
-	out := make([]Position, 0, len(c.Book.Positions))
+	return foldBook(c).held
+}
+
+// candidateFold is the ONE fold of a candidate's book: which of its positions
+// are held, in stable instrument order, and their gross exposure. Both fall out
+// of a single pass, and gross is a sum over exactly the positions held, so
+// computing them apart would be two answers to one question.
+type candidateFold struct {
+	held  []Position
+	gross *big.Rat
+}
+
+// foldBook returns the candidate's fold, computing it on first use.
+//
+// # Why it is memoised, and what it cost not to be (#812)
+//
+// This fold is what every book-reading rule funnels through, and a five-rule
+// mandate on a classified dimension entered it NINE times per admission —
+// measured rather than assumed: Concentration 3 (totalGross,
+// unresolvedDimension, grossByDimension), Restriction 2, IssuerExclusion 2,
+// Leverage 1, Currency 1. Every one of those re-allocated the whole book,
+// re-sorted it and re-summed it, on the synchronous pre-trade path between a
+// strategy's intent and the venue. The cost scales with book size AND mandate
+// complexity, both of which grow with AUM, so the capital path got slower
+// precisely as it took on more capital.
+//
+// # The memo is keyed on the *Book, not on a done flag
+//
+// A stale memo on a compliance gate is a rule evaluated against a book that is
+// not the one under evaluation — a wrong verdict rather than a slow one. The
+// pointer compare is the price of that being impossible: replace c.Book and the
+// next call folds again. It does not (and cannot cheaply) detect a caller
+// mutating a Book in place mid-evaluation; Candidate is documented as the book
+// under evaluation and every construction site on this platform builds one per
+// Evaluate.
+//
+// # The lock is fail-safe, not contended
+//
+// Candidate is exported with exported fields, and evaluating one book against
+// several mandates concurrently is a natural thing for a caller to write. An
+// unguarded lazy field would make that a silent data race on the capital path,
+// and `-race` does not run on the usual dev box (CLAUDE.md, Constraints) — so it
+// would be found in production. Uncontended it costs tens of nanoseconds against
+// an evaluation measured in microseconds.
+func foldBook(c *Candidate) *candidateFold {
+	c.foldMu.Lock()
+	defer c.foldMu.Unlock()
+	if c.foldFor == c.Book && c.fold != nil {
+		return c.fold
+	}
+	held := make([]Position, 0, len(c.Book.Positions))
+	gross := new(big.Rat)
 	for _, p := range c.Book.Positions {
-		if unmarkedPosition(p) || absRatFromMoney(p.MarketValue).Sign() == 0 {
+		if unmarkedPosition(p) || zeroMark(p) {
 			continue
 		}
-		out = append(out, p)
+		held = append(held, p)
+		gross.Add(gross, absRatFromMoney(p.MarketValue))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].InstrumentID < out[j].InstrumentID })
-	return out
+	sort.Slice(held, func(i, j int) bool { return held[i].InstrumentID < held[j].InstrumentID })
+	c.fold, c.foldFor = &candidateFold{held: held, gross: gross}, c.Book
+	c.folds++
+	return c.fold
+}
+
+// zeroMark reports that this holding was priced and found to be worth nothing —
+// the "flat position" the fold drops. It is NOT the unmarked case, which
+// unmarkedPosition owns and which must be checked first.
+//
+// EXACTLY absRatFromMoney(p.MarketValue).Sign() == 0, WITHOUT THE big.Rat. The
+// value is coefficient x 10^exponent and 10^exponent is never zero, so the sign
+// is the coefficient's sign and nothing else. Spelling it as a Rat built a
+// two-allocation arbitrary-precision number per position purely to compare it
+// against zero, and that comparison ran for every position on every one of the
+// nine calls: on a profile of a 200-position five-rule admission it was the
+// single largest source of allocations in the package (#812).
+func zeroMark(p Position) bool {
+	return p.MarketValue.GetAmount().GetCoefficient() == 0
 }
 
 // The three spellings of an unusable mark, as they appear in a refusal's

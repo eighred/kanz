@@ -40,6 +40,7 @@ package compliance
 import (
 	"context"
 	"math/big"
+	"sync"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -362,6 +363,21 @@ type Candidate struct {
 	// is the common case and it is safe, exactly as a nil Book.Risk is: the rule
 	// only runs when a mandate DECLARES margin trading.
 	Margin func(venue string) (MarginState, bool)
+
+	// The memo of the one fold of this candidate's book (#812). foldBook in
+	// rules.go owns these fields; nothing else may read or write them. The zero
+	// value is "not computed yet", so a Candidate built by any caller — every
+	// construction site on this platform builds a keyed literal — starts cold and
+	// correct without knowing they exist.
+	foldMu  sync.Mutex
+	foldFor *Book
+	fold    *candidateFold
+	// folds counts how many times the book was actually folded. It is the
+	// observable the #812 regression test asserts on — "once per evaluation, not
+	// nine times" is the whole point of the memo, and without a counter that
+	// claim can only be re-measured by hand with a profiler. One int, written
+	// under foldMu with the memo it describes.
+	folds int
 }
 
 // CandidateOrder is the order under evaluation, in the terms a rule needs it —
