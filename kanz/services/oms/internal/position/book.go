@@ -50,6 +50,27 @@ type Book struct {
 	lots    map[key]*lot
 	baseCcy string
 	queue   *outbox.Memory
+	// appliedFills is position_fills (#818): the fills already folded into these
+	// lots, keyed on fill_id — the same key the table's PRIMARY KEY carries once
+	// the tenant column is dropped, and this book belongs to exactly one tenant
+	// (NewProjector refuses an empty one) so there is nothing to scope it by.
+	//
+	// Held under the SAME b.mu as the lots and the outbox, which is this store's
+	// whole equivalent of the transaction Postgres.Apply opens. A claim that
+	// could commit apart from the fold has two failure modes and both are real.
+	//
+	// IT EXISTS BECAUSE THIS IS THE TEST SEAM. Every service-level test of the
+	// projector runs against this book, so without the claim a redelivery test
+	// certified exactly-once folding against a store that doubled the position —
+	// the same divergence order.MemoryStore.appliedFills was added to end.
+	//
+	// IT GROWS WITHOUT BOUND, AND SO DOES position_fills. Exactly-once over an
+	// unbounded stream of fills costs one key per fill in either backend; the
+	// durable one pays it in a table an operator can see and archive, this one in
+	// a map that dies with the process. That is a real cost of this store rather
+	// than a defect of the claim, and it is one more reason the in-memory book is
+	// a single-replica seam and not a deployment.
+	appliedFills map[string]bool
 }
 
 // BookOption configures the in-memory book.
@@ -78,7 +99,12 @@ func NewBook(baseCcy string, opts ...BookOption) *Book {
 	if baseCcy == "" {
 		baseCcy = "USD"
 	}
-	b := &Book{lots: make(map[key]*lot), baseCcy: baseCcy, queue: outbox.NewMemory()}
+	b := &Book{
+		lots:         make(map[key]*lot),
+		appliedFills: make(map[string]bool),
+		baseCcy:      baseCcy,
+		queue:        outbox.NewMemory(),
+	}
 	for _, opt := range opts {
 		opt(b)
 	}
@@ -88,7 +114,10 @@ func NewBook(baseCcy string, opts ...BookOption) *Book {
 // Outbox is the in-process queue this book enqueues announced FACTs into.
 func (b *Book) Outbox() outbox.Queue { return b.queue }
 
-// Apply folds one fill into the book and returns the resulting PositionState.
+// Apply folds one fill into the book EXACTLY ONCE and returns the resulting
+// PositionState. A fill this book has already folded is claimed-and-skipped, and
+// the book as it stands is returned and announced — the same two steps, in the
+// same order, that Postgres.Apply takes around its position_fills claim.
 // Realized P&L is booked on the portion of a fill that reduces or closes an
 // opposite position; a fill that crosses through zero opens a new lot at the
 // fill price. market_value and unrealized_pnl are marked at the fill price (the
@@ -110,20 +139,43 @@ func (b *Book) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill
 	if err := fillfact.Validate(fill); err != nil {
 		return nil, err
 	}
+	// THE CLAIM BEFORE THE FOLD, WHICH IS WHAT position_fills DOES (#818). The
+	// Store contract this type satisfies says a fill already folded — by a
+	// redelivery, or by another pod — is not counted again; the durable book
+	// honoured that with an INSERT ... ON CONFLICT DO NOTHING whose RowsAffected
+	// it read, and this one honoured it not at all. Two implementations of one
+	// contract inside a single package, disagreeing about the answer that
+	// matters most: how much the fund holds.
+	//
+	// A double-counted fill does not fail. It publishes an ABSOLUTE
+	// PositionState on a compacted subject, and the risk engine, the compliance
+	// monitor and the OMS's own pre-trade gate all admit orders against it.
+	claimed := !b.appliedFills[fill.GetFillId()]
+	if claimed {
+		b.appliedFills[fill.GetFillId()] = true
+	}
+
 	k := key{portfolioID, fill.GetVenue(), fill.GetInstrumentId()}
 	l := b.lots[k]
 	if l == nil {
 		l = zeroLot()
-		b.lots[k] = l
+		// A SKIPPED FOLD LEAVES NO HOLDING BEHIND, mirroring the durable store,
+		// which upserts `positions` only inside the same branch as the fold. A
+		// zero lot recorded here would surface from Snapshot as a position the
+		// fund does not hold.
+		if claimed {
+			b.lots[k] = l
+		}
 	}
 
 	price := dec.FromProto(fill.GetPrice())
-	signed := dec.FromProto(fill.GetQuantity())
-	if fill.GetSide() == orderpb.Side_SIDE_SELL {
-		signed = new(big.Rat).Neg(signed)
+	if claimed {
+		signed := dec.FromProto(fill.GetQuantity())
+		if fill.GetSide() == orderpb.Side_SIDE_SELL {
+			signed = new(big.Rat).Neg(signed)
+		}
+		costbasis.Fold(l, signed, price)
 	}
-
-	costbasis.Fold(l, signed, price)
 
 	venueState, err := b.stateOf(portfolioID, fill.GetVenue(), fill.GetInstrumentId(), l, price, asOf)
 	if err != nil {
