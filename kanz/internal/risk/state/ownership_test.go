@@ -103,7 +103,7 @@ func TestUngatedStoreOwnsEverythingAndRefusesOwnershipCalls(t *testing.T) {
 	if err := s.ApplyPortfolioRevalued(context.Background(), env("e1"), revalued("PORT-U")); err != nil {
 		t.Fatalf("ungated apply: %v", err)
 	}
-	if _, ok := s.Lookup("PORT-U"); !ok {
+	if _, ok := s.Snapshot("PORT-U"); !ok {
 		t.Error("ungated store must still lazy-create on first reference")
 	}
 	// Acquire/Release on an ungated store are a mechanism error, not a no-op:
@@ -151,7 +151,7 @@ func TestGatedStoreRefusesUnacquiredPortfolioRatherThanServingZero(t *testing.T)
 	if _, err := s.SnapshotOwned("PORT-X"); !errors.Is(err, state.ErrNotOwned) {
 		t.Errorf("SnapshotOwned unowned = %v, want ErrNotOwned", err)
 	}
-	if _, ok := s.Lookup("PORT-X"); ok {
+	if _, ok := s.Snapshot("PORT-X"); ok {
 		t.Error("a refused apply must leave nothing in the store")
 	}
 	if ids := s.IDs(); len(ids) != 0 {
@@ -162,7 +162,7 @@ func TestGatedStoreRefusesUnacquiredPortfolioRatherThanServingZero(t *testing.T)
 	if !errors.Is(err, state.ErrNotOwned) {
 		t.Errorf("Restore of unowned portfolio = %v, want ErrNotOwned", err)
 	}
-	if _, ok := s.Lookup("PORT-X"); ok {
+	if _, ok := s.Snapshot("PORT-X"); ok {
 		t.Error("a refused Restore must install nothing")
 	}
 }
@@ -266,7 +266,7 @@ func TestFailedAcquireLeavesNothingHalfLoadedOrAnswerable(t *testing.T) {
 	if s.Owns("PORT-A") {
 		t.Error("a failed Acquire must not grant ownership — either loaded and owned, or neither")
 	}
-	if _, ok := s.Lookup("PORT-A"); ok {
+	if _, ok := s.Snapshot("PORT-A"); ok {
 		t.Error("a failed Acquire must install no state")
 	}
 	if _, serr := s.SnapshotOwned("PORT-A"); !errors.Is(serr, state.ErrNotOwned) {
@@ -319,7 +319,7 @@ func TestReleaseDropsMemoryKeepsDurableAndHandsBackTheTail(t *testing.T) {
 	if s.Owns("PORT-A") {
 		t.Error("Release must drop ownership")
 	}
-	if _, ok := s.Lookup("PORT-A"); ok {
+	if _, ok := s.Snapshot("PORT-A"); ok {
 		t.Error("Release must drop the in-memory copy")
 	}
 	if _, serr := s.SnapshotOwned("PORT-A"); !errors.Is(serr, state.ErrNotOwned) {

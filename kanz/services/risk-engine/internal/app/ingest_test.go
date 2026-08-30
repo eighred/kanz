@@ -146,7 +146,7 @@ func TestIngest_RoutesEventsIntoStore(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	p, _ := store.Lookup("PORT-1")
+	p, _ := store.Snapshot("PORT-1")
 	pos, _ := p.Position("AAPL")
 	if pos.MarketValue.GetAmount().GetCoefficient() != 1000 {
 		t.Errorf("position market value = %v want 1000", pos.MarketValue)

@@ -48,7 +48,7 @@ func TestApplyPortfolioRevaluedPopulatesAggregateFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	p, ok := s.Lookup("PORT-1")
+	p, ok := s.Snapshot("PORT-1")
 	if !ok {
 		t.Fatal("portfolio not stored")
 	}
@@ -79,7 +79,7 @@ func TestApplyPositionChangedStoresPosition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	p, _ := s.Lookup("PORT-1")
+	p, _ := s.Snapshot("PORT-1")
 	pos, ok := p.Position("AAPL")
 	if !ok {
 		t.Fatal("position not stored")
@@ -123,7 +123,7 @@ func TestIdempotency_DuplicateEventIsSkipped(t *testing.T) {
 	if err := s.ApplyPortfolioRevalued(ctx, env("evt-dup"), second); err != nil {
 		t.Fatal(err)
 	}
-	p, _ := s.Lookup("PORT-1")
+	p, _ := s.Snapshot("PORT-1")
 	if p.BaseCurrency() != "USD" {
 		t.Errorf("BaseCurrency=%q want USD (dedup should have blocked update)", p.BaseCurrency())
 	}
@@ -146,7 +146,7 @@ func TestIdempotency_DistinctKeysApplyBoth(t *testing.T) {
 			t.Fatalf("apply %s: %v", key, err)
 		}
 	}
-	p, _ := s.Lookup("PORT-1")
+	p, _ := s.Snapshot("PORT-1")
 	if got := len(p.Positions()); got != 3 {
 		t.Errorf("positions=%d want 3", got)
 	}
@@ -180,7 +180,7 @@ func TestSnapshot_AppliedAsHardReset(t *testing.T) {
 	if err := s.ApplyPortfolioSnapshot(ctx, env("snap-1"), snap); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	p, _ := s.Lookup("PORT-1")
+	p, _ := s.Snapshot("PORT-1")
 	positions := p.Positions()
 	if len(positions) != 2 {
 		t.Fatalf("positions=%d want 2 (snapshot is hard reset; OLDSTOCK must be gone)", len(positions))
@@ -219,7 +219,7 @@ func TestSnapshot_StaleSnapshotSkipped(t *testing.T) {
 	if err := s.ApplyPortfolioSnapshot(ctx, env("stale-snap"), snap); err != nil {
 		t.Fatal(err)
 	}
-	p, _ := s.Lookup("PORT-1")
+	p, _ := s.Snapshot("PORT-1")
 	if p.BaseCurrency() != "USD" {
 		t.Errorf("BaseCurrency=%q want USD (stale snapshot must not overwrite)", p.BaseCurrency())
 	}
@@ -260,7 +260,7 @@ func TestConcurrent_DifferentPortfoliosRunInParallel(t *testing.T) {
 		t.Errorf("portfolios stored=%d want %d", got, portfolios)
 	}
 	for i := 0; i < portfolios; i++ {
-		p, _ := s.Lookup(v1.PortfolioID("PORT-" + strconv.Itoa(i)))
+		p, _ := s.Snapshot(v1.PortfolioID("PORT-" + strconv.Itoa(i)))
 		if got := len(p.Positions()); got != eventsPer {
 			t.Errorf("PORT-%d positions=%d want %d", i, got, eventsPer)
 		}
@@ -290,7 +290,7 @@ func TestConcurrent_SamePortfolioIsSerialized(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	p, _ := s.Lookup("PORT-1")
+	p, _ := s.Snapshot("PORT-1")
 	if got := len(p.Positions()); got != events {
 		t.Errorf("positions=%d want %d (lost updates ⇒ per-portfolio serialization broken)", got, events)
 	}
