@@ -87,7 +87,9 @@ func forUpdateSources(t *testing.T, root string) []struct {
 		fset *token.FileSet
 		file *ast.File
 	}
-	skipDir := map[string]bool{".git": true, ".gotmp": true, "gen": true, "node_modules": true, "vendor": true}
+	// .claude is the agent-worktree root (#848): without it this walk reads another
+	// checkout's files as the estate's, which is a red suite with no defect in it.
+	skipDir := map[string]bool{".git": true, ".claude": true, ".gotmp": true, "gen": true, "node_modules": true, "vendor": true}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
