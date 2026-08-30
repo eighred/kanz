@@ -341,6 +341,13 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 
 	cc, err := cons.Consume(func(m jetstream.Msg) {
 		hctx := *handlerCtx.Load()
+		// THE DELIVERY IS BOUNDED BY ITS OWN AckWait (#836). A handler that runs
+		// past it is not slow — it is a second concurrent dispatch of the same
+		// message waiting to happen, because the broker redelivers at AckWait
+		// while this copy is still working. Bounding it here rather than in each
+		// handler is the point: this is the layer that knows the number.
+		hctx, releaseBudget := withHandlerBudget(hctx, want.AckWait)
+		defer releaseBudget()
 		// dispatchMessage, not h: a panic in a direct Subscribe caller's handler
 		// would otherwise unwind through this callback and kill the process, taking
 		// every other subscription in it down too. Consumer recovers above this, so
@@ -792,7 +799,15 @@ func (c *NATSClient) subscribeEphemeral(ctx context.Context, subject string, pol
 		return fmt.Errorf("nats: broadcast consumer on %q: %w", subject, err)
 	}
 	cc, err := cons.Consume(func(m jetstream.Msg) {
-		if err := h(ctx, natsToMessage(m)); err != nil {
+		// BOUNDED BY ITS OWN AckWait, exactly as the queue-group path is (#836).
+		// The control class is where a slow handler is least visible: these arm
+		// in-process state — a halt gate, a mode, a mandate — and SubscribeBroadcast's
+		// own doc forbids "I could not read the brake signal" resolving to "carry on".
+		// A handler still running when the broker redelivers is two goroutines
+		// arming the same gate from two copies of one message.
+		hctx, releaseBudget := withHandlerBudget(ctx, tuning.AckWait)
+		defer releaseBudget()
+		if err := h(hctx, natsToMessage(m)); err != nil {
 			// See the queue-group Subscribe callback above: surfaced deliberately,
 			// never escalated. A failed Nak still redelivers on the AckWait timeout.
 			// NakWithDelay for the same reason as the queue-group path above: a bare
