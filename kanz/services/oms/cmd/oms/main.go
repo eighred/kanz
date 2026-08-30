@@ -850,13 +850,27 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 
 	// THE OUTBOX RELAY (#292). It is JOINED INTO wg, and that is not tidiness:
 	// closeStores() — deferred above, so it runs AFTER wg.Wait() returns — closes
-	// the pool this relay reads and writes. An unjoined drainer would still be
-	// mid-UPDATE against a closing pool, and its per-key advisory lock would be
-	// released by a connection teardown rather than by the unlock it expects.
-	// Same hazard test/arch/consumer_goroutine_join_test.go exists for on the
-	// subscription goroutines; that guard does not classify this one (it only
-	// looks for bus.NewConsumer), so the join is here by argument rather than by
-	// enforcement.
+	// the pool this relay reads and writes, and main() is os.Exit(run()), so a
+	// frame returning DESTROYS whatever it did not join. This relay is the worst
+	// thing to destroy mid-pass: it publishes a FACT and only then marks the
+	// record published, holding a cluster-wide per-key advisory lock across both.
+	// Killed there, the estate has the announcement, the table still calls the
+	// record pending, the next process republishes it, and the lock is released
+	// by the session dying rather than by the unlock Relay deliberately runs on
+	// context.Background so a cancelled shutdown still releases it.
+	//
+	// CORRECTED (#815). This comment used to name pool.Close() as what took the
+	// lock away. Measured on pgx v5, it does not: Close BLOCKS while a connection
+	// is checked out and the held connection keeps working, so a relay inside a
+	// locked drain does get to unlock. Close refuses a NEW acquisition ("closed
+	// pool"), and os.Exit is what actually ends the session. The join is right;
+	// the mechanism recorded here was not.
+	//
+	// ENFORCED, no longer an argument in a comment:
+	// test/arch/outbox_relay_join_test.go asserts this join for every adopter.
+	// test/arch/consumer_goroutine_join_test.go does not classify this goroutine
+	// (it only looks for bus.NewConsumer, and a relay is a producer), which is
+	// why datamaster shipped without the join from 2026-08-15 until #815 (#815).
 	//
 	// A relay error IS terminal for the process, unlike a failed sweep pass. Run
 	// returns only on a fault that makes draining impossible at all, and an OMS
