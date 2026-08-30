@@ -999,7 +999,13 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 		// admission and is stored as ROUTED; leaving it there would have the
 		// ledger say rejected while the OMS's own truth says working, and a
 		// later cancel would act on a live-looking order.
-		rejected := Reject(st, rejectedAt)
+		rejected, rerr := Reject(st, rejectedAt)
+		if rerr != nil {
+			// st came back from work() above, which only returns ErrUnpriced
+			// before any fill is folded, so this order cannot be terminal here.
+			// Surfaced rather than skipped for the reason the routing refusal is.
+			return fmt.Errorf("oms: refusing to reject order %s: %w", st.GetOrderId(), rerr)
+		}
 		// TRANSACTIONAL (#292). This was the last pair whose FACT nothing could
 		// rebuild: outcome_announced_at drives completeTerminalOutcome, which
 		// reconstructs the CommandOutcome from stored state and says in its own
@@ -1217,7 +1223,18 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 	if err != nil {
 		return st, ver, err
 	}
-	routed := Route(st, s.now().UTC())
+	// A REFUSAL HERE IS A CALLER DEFECT, AND IT IS SURFACED (#840). Every caller
+	// of work() reaches it with a live order — handleSubmit with a freshly
+	// admitted one, resume() past its IsTerminal check, and reconcile only on
+	// ActionRedrive, which Reconcile refuses to return for a terminal order. So
+	// this cannot fire today. If it ever does, the order finished while this
+	// delivery was deciding what to do with it, and the honest answer is to stop
+	// and say so rather than route a finished order or skip in silence: the
+	// command nacks, parks in the DLQ, and an operator sees it.
+	routed, rerr := Route(st, s.now().UTC())
+	if rerr != nil {
+		return st, ver, fmt.Errorf("oms: refusing to route order %s: %w", st.GetOrderId(), rerr)
+	}
 	// THE ROUTED FACT COMMITS WITH THE ROUTED STATE (#292).
 	//
 	// This pair had no compensator — the three *_announced_at markers cover
@@ -3027,7 +3044,15 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 		if reason == "" {
 			reason = "venue reports this order rejected"
 		}
-		rejected := Reject(st, now)
+		rejected, rerr := Reject(st, now)
+		if rerr != nil {
+			// Reconcile refuses a terminal order before ActionAdopt is returned,
+			// so this is unreachable from the live path. It is the last line of
+			// defence for the case that matters most: writing REJECTED over a
+			// FILLED order would erase a trade the fund actually received.
+			return fmt.Errorf("oms: refusing to adopt a venue rejection for order %s: %w",
+				st.GetOrderId(), rerr)
+		}
 		// THE VENUE'S REJECTION AND ITS ANNOUNCEMENT ARE NOW ONE WRITE (#292),
 		// AND THIS PATH NEEDED IT MORE THAN THE ONE IT MIRRORS.
 		//

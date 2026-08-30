@@ -101,7 +101,7 @@ func TestRoute_PreservesTheStopPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
-	routed := Route(st, t0)
+	routed, _ := Route(st, t0)
 	if dec.Cmp(routed.GetStopPrice(), stop) != 0 {
 		t.Fatalf("after Route, stop_price = %v, want %v. Route is on the path to "+
 			"Venue.Execute, so a transition that drops the trigger drops it exactly where "+

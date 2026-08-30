@@ -140,7 +140,7 @@ func TestRoute_PreservesTheCollateralTerms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
-	routed := Route(st, t0)
+	routed, _ := Route(st, t0)
 
 	if got := routed.GetMarginMode(); got != orderpb.MarginMode_MARGIN_MODE_ISOLATED {
 		t.Fatalf("after Route, margin_mode = %s, want ISOLATED.\n\n"+
