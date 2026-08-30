@@ -1,6 +1,7 @@
 package compliance
 
 import (
+	"math/big"
 	"strings"
 	"testing"
 
@@ -260,6 +261,96 @@ func TestNonPositiveEquityIsUndefinedLeverageNotCompliance(t *testing.T) {
 // for carrying it. That refusal must survive the equity check being added in
 // front of it — a book that is both unmarked and equity-backed has to be refused
 // for the reason that is actionable, and #760's names the instrument.
+// fixedMarks prices every instrument the same, so a test can drive
+// equityFromMarks without a price feed.
+type fixedMarks struct{ px *big.Rat }
+
+func (m fixedMarks) Mark(string) *big.Rat { return m.px }
+
+// EQUITY IS NOT SUMMED OVER A MARK WITH NO UNIT (#806).
+//
+// equityFromMarks states its assumption openly — the mark is in the portfolio's
+// base currency — and refuses a book whose positions are demonstrably in another
+// one. The check was `mv.GetCurrencyCode() != "" && != BaseCurrency`, so a
+// holding whose currency NOBODY STATED skipped it and was valued at the
+// base-currency mark anyway.
+//
+// That is the same fail-open shape as #806's CurrencyRule, two functions over,
+// and it lands on the leverage denominator: a book reads as LESS levered for
+// carrying a position nobody stated the currency of. "Nothing configured" and
+// "checked, and fine" must never look the same.
+func TestEquity_AMarkWithNoCurrencyIsNotAssumedToBeBaseCurrency(t *testing.T) {
+	b := &Book{
+		PortfolioID: "p1", BaseCurrency: "USD",
+		Cash: money(1_000_000, 0, "USD"),
+		Positions: []Position{{
+			InstrumentID: "AAPL",
+			Quantity:     dec(1000, 0),
+			// An amount, and no currency code: priced, unitless.
+			MarketValue: &commonpb.Money{Amount: dec(500_000, 0)},
+		}},
+	}
+	MarkEquity(b, fixedMarks{px: big.NewRat(500, 1)})
+
+	if b.NAVBasis == NAVBasisEquity {
+		t.Fatalf("a position carrying an amount with no currency code was summed into equity as "+
+			"though it were %s — the assumption equityFromMarks documents was never checked for "+
+			"this holding, and equity is LeverageRule's denominator: NAV=%v basis=%q",
+			b.BaseCurrency, b.NAV, b.NAVBasis)
+	}
+	if !strings.Contains(b.NAVBasisDetail, "no currency code") {
+		t.Errorf("NAVBasisDetail=%q must name the absence it found, so an operator knows to go "+
+			"and fix the producer rather than the price feed", b.NAVBasisDetail)
+	}
+}
+
+// NON-VACUITY. The same book with the currency STATED must still compute equity —
+// otherwise the refusal above is just a broken equity path.
+func TestEquity_AStatedBaseCurrencyStillComputesEquity(t *testing.T) {
+	b := &Book{
+		PortfolioID: "p1", BaseCurrency: "USD",
+		Cash: money(1_000_000, 0, "USD"),
+		Positions: []Position{{
+			InstrumentID: "AAPL",
+			Quantity:     dec(1000, 0),
+			MarketValue:  money(500_000, 0, "USD"),
+		}},
+	}
+	MarkEquity(b, fixedMarks{px: big.NewRat(500, 1)})
+
+	if b.NAVBasis != NAVBasisEquity {
+		t.Fatalf("a fully stated book did not produce equity: basis=%q detail=%q",
+			b.NAVBasis, b.NAVBasisDetail)
+	}
+}
+
+// AND A HOLDING THE BOOK NEVER PRICED IS STILL NOT THAT. A nil MarketValue, or
+// one with no amount, is a holding awaiting a mark — which is exactly what
+// equityFromMarks is for — and must not be caught by the refusal above.
+func TestEquity_AnUnpricedHoldingIsStillValuedFromItsMark(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mv   *commonpb.Money
+	}{
+		{"no market value", nil},
+		{"a market value with no amount", &commonpb.Money{CurrencyCode: "USD"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &Book{
+				PortfolioID: "p1", BaseCurrency: "USD",
+				Cash:      money(1_000_000, 0, "USD"),
+				Positions: []Position{{InstrumentID: "AAPL", Quantity: dec(1000, 0), MarketValue: tc.mv}},
+			}
+			MarkEquity(b, fixedMarks{px: big.NewRat(500, 1)})
+			if b.NAVBasis != NAVBasisEquity {
+				t.Fatalf("a holding awaiting a mark was refused instead of valued from one — "+
+					"that is what equityFromMarks exists to do: basis=%q detail=%q",
+					b.NAVBasis, b.NAVBasisDetail)
+			}
+		})
+	}
+}
+
 func TestAnUnmarkedHoldingStillWinsOverTheEquityCheck(t *testing.T) {
 	b := equityBook(1_000_000, 1_000_000)
 	b.Positions = append(b.Positions, Position{InstrumentID: "SOL-USD"}) // no MarketValue

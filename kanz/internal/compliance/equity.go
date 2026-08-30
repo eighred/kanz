@@ -174,9 +174,26 @@ func equityFromMarks(b *Book, marks MarkSource) (*big.Rat, []*commonpb.Money, er
 		if p.Quantity == nil {
 			return nil, nil, fmt.Errorf("position %s carries no quantity, so it cannot be valued", p.InstrumentID)
 		}
+		// A MARK CARRYING A NUMBER AND NO UNIT CANNOT BE SHOWN TO BE IN THE BASE
+		// CURRENCY (#806), and the check below cannot see it: `!= ""` SKIPS it, so
+		// a holding whose currency nobody stated was silently valued at the
+		// base-currency mark and netted into equity. Equity is LeverageRule's
+		// denominator, so the fail-open direction is a book that reads as less
+		// levered for carrying a position nobody stated the currency of.
+		//
+		// This is the same absence rules.go's unmarkedReason refuses one function
+		// over; it is spelled separately because the two are asking different
+		// questions — that one asks whether the mark can be USED, this one asks
+		// whether the holding is FOREIGN — and an unstated currency is unknown to
+		// both.
+		if mv := p.MarketValue; mv != nil && mv.GetAmount() != nil && mv.GetCurrencyCode() == "" {
+			return nil, nil, fmt.Errorf("position %s carries a market value with no currency code, "+
+				"so it cannot be shown to be in the portfolio's %s and must not be summed into equity",
+				p.InstrumentID, b.BaseCurrency)
+		}
 		// A POSITION ALREADY IN ANOTHER CURRENCY FALSIFIES THE ASSUMPTION ABOVE.
-		// A nil or zero MarketValue is not that — it is a holding the book has not
-		// priced, which is exactly what a mark is for.
+		// A nil MarketValue, or one with no amount, is not that — it is a holding
+		// the book has not priced, which is exactly what a mark is for.
 		if mv := p.MarketValue; mv != nil && mv.GetCurrencyCode() != "" && mv.GetCurrencyCode() != b.BaseCurrency {
 			return nil, nil, fmt.Errorf("position %s is held in %s, not the portfolio's %s",
 				p.InstrumentID, mv.GetCurrencyCode(), b.BaseCurrency)

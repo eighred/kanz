@@ -357,15 +357,29 @@ func CurrencyRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Violation
 	if cr == nil {
 		return paramsMismatch("currency_restriction")
 	}
-	// The currency is read off the market value, so an unmarked holding has no
-	// currency to check and silently satisfied any restriction (#760).
+	// The currency is read off the market value, so a holding the platform cannot
+	// price has no currency to check and silently satisfied any restriction
+	// (#760) — as did one carrying an amount with no currency code (#806).
 	if v := unmarkedHoldings(c, "currency restriction"); v != nil {
 		return v
 	}
 	allowed := toSet(cr.GetAllowedCurrencies())
 	for _, pos := range heldPositions(c) {
 		ccy := pos.MarketValue.GetCurrencyCode()
-		if ccy != "" && !allowed[ccy] {
+		// NO `ccy != ""` GUARD, AND ITS ABSENCE IS THE FIX (#806). This read used
+		// to be `ccy != "" && !allowed[ccy]`, which SKIPS a holding whose currency
+		// nobody stated — and skipping is passing, on a mandate term.
+		//
+		// AN EMPTY CODE CANNOT REACH HERE TODAY: unmarkedHoldings above refuses
+		// the whole book first, so this branch is unreachable by construction and
+		// NO TEST COVERS IT — mutating it back to the guarded form leaves the
+		// suite green. It is written this way anyway, for the reason
+		// orderLocks.unref gives for its own identity check: if the refusal above
+		// is ever weakened by a future change, an unstated currency matches no
+		// allow-list and BREACHES, instead of silently satisfying the restriction
+		// again. The fail-open spelling is one character shorter and would hand
+		// that regression back for free.
+		if !allowed[ccy] {
 			return &compliancepb.Violation{
 				Message: "position in disallowed currency",
 				Evidence: map[string]string{
@@ -571,19 +585,61 @@ func heldPositions(c *Candidate) []Position {
 	return out
 }
 
-// unmarkedPosition reports that the platform could not price this holding.
+// The three spellings of an unusable mark, as they appear in a refusal's
+// evidence. They are values rather than free text because a test and an operator
+// runbook both key off them.
+const (
+	// unmarkedReasonNoValue: the platform never priced this holding at all.
+	unmarkedReasonNoValue = "no_market_value"
+	// unmarkedReasonNoAmount: a Money carrying a currency and no number.
+	unmarkedReasonNoAmount = "no_amount"
+	// unmarkedReasonNoCurrency: a Money carrying a number and no unit.
+	unmarkedReasonNoCurrency = "no_currency"
+)
+
+// unmarkedReason reports WHY this holding's market value cannot be used, or ""
+// when it can be.
 //
-// BOTH SPELLINGS OF THE ABSENCE COUNT. A nil MarketValue and a Money carrying a
-// currency but no Amount reach absRatFromMoney identically and both come back
-// zero, so catching only the first would leave the hole open to any producer
-// that sets the currency and not the number.
+// ALL THREE SPELLINGS OF THE ABSENCE COUNT, and the third one is #806. A nil
+// MarketValue and a Money carrying a currency but no Amount reach absRatFromMoney
+// identically and both come back zero — that pair was #760. What #760 stopped one
+// field short of is a Money carrying an AMOUNT AND NO CURRENCY CODE: a number
+// with no unit.
 //
-// A MARK OF ZERO IS NOT THIS. That is a measurement — the platform looked, and
-// the holding is worth nothing — and it stays a holding the rules evaluate
-// normally. Conflating the two in that direction would make every worthless
-// position unevaluable and the refusal meaningless.
+// WHY A NUMBER WITH NO UNIT IS NOT A MARK. Every use this package makes of a
+// market value is either a comparison against a named currency or a sum across
+// holdings, and neither is defined without the unit. CurrencyRule read the code
+// off this field and skipped what it could not read, so a currency restriction —
+// a mandate term — was silently satisfied by the one holding it was written to
+// refuse. bucketKey reads the same field for DIMENSION_CURRENCY, so the same
+// holding also became an anonymous "" BUCKET, and a per-currency concentration
+// weight was measured against a denominator nobody can name.
+//
+// Both of those are closed here rather than in the two rules, because the hole
+// was never in either rule's logic: it is in what every rule shares, and a rule
+// added later would inherit it by doing nothing wrong. That is the same argument
+// #760's own guard (test/arch/unmarked_holding_refusal_test.go) makes.
+//
+// A MARK OF ZERO IS NOT THIS, and neither is a zero in a STATED currency. That
+// is a measurement — the platform looked, and the holding is worth nothing — and
+// it stays a holding the rules evaluate normally. Conflating the two in that
+// direction would make every worthless position unevaluable and the refusal
+// meaningless.
+func unmarkedReason(p Position) string {
+	switch {
+	case p.MarketValue == nil:
+		return unmarkedReasonNoValue
+	case p.MarketValue.GetAmount() == nil:
+		return unmarkedReasonNoAmount
+	case p.MarketValue.GetCurrencyCode() == "":
+		return unmarkedReasonNoCurrency
+	}
+	return ""
+}
+
+// unmarkedPosition reports that the platform cannot use this holding's mark.
 func unmarkedPosition(p Position) bool {
-	return p.MarketValue == nil || p.MarketValue.GetAmount() == nil
+	return unmarkedReason(p) != ""
 }
 
 // unmarkedHoldings is the deny-by-default refusal for a book carrying a position
@@ -615,15 +671,27 @@ func unmarkedPosition(p Position) bool {
 // could be any size, in either direction, so no bound on the answer survives.
 func unmarkedHoldings(c *Candidate, what string) *compliancepb.Violation {
 	var unmarked []string
+	seen := map[string]bool{}
 	for _, p := range c.Book.Positions {
-		if unmarkedPosition(p) {
+		if r := unmarkedReason(p); r != "" {
 			unmarked = append(unmarked, p.InstrumentID)
+			seen[r] = true
 		}
 	}
 	if len(unmarked) == 0 {
 		return nil
 	}
 	sort.Strings(unmarked)
+	// WHICH ABSENCE, NOT JUST HOW MANY. "the mark never loaded" and "the producer
+	// emitted an amount with no unit" are different upstream bugs with different
+	// fixes, and the count alone sends an operator to read the book row by row to
+	// find out which they have. Sorted so the evidence is stable in the audit
+	// stream.
+	reasons := make([]string, 0, len(seen))
+	for r := range seen {
+		reasons = append(reasons, r)
+	}
+	sort.Strings(reasons)
 	// A BOUNDED SAMPLE, for the reason unresolvedDimension bounds its own: on a
 	// book whose marks never loaded every holding is unmarked, and putting the
 	// whole book in a violation puts it in the audit stream too. The count
@@ -633,11 +701,13 @@ func unmarkedHoldings(c *Candidate, what string) *compliancepb.Violation {
 		sample = sample[:maxUnresolvedSample]
 	}
 	return &compliancepb.Violation{
-		Message: what + " cannot be verified: the book carries a position with no market value, " +
-			"so neither its own exposure nor the book's total is known",
+		Message: what + " cannot be verified: the book carries a position whose market value the " +
+			"platform cannot use (see unmarked_reasons), so neither its own exposure nor the " +
+			"book's total is known",
 		Evidence: map[string]string{
 			EvidenceUnmarkedHoldings: strconv.Itoa(len(unmarked)),
 			EvidenceUnmarkedSample:   strings.Join(sample, ","),
+			EvidenceUnmarkedReasons:  strings.Join(reasons, ","),
 		},
 	}
 }
@@ -719,6 +789,11 @@ const (
 	EvidenceUnmarkedHoldings = "unmarked_holdings"
 	// EvidenceUnmarkedSample is a bounded, comma-separated instrument list.
 	EvidenceUnmarkedSample = "unmarked_sample"
+	// EvidenceUnmarkedReasons is the sorted, comma-separated SET of absences the
+	// book actually carries — see the unmarkedReason constants. It is a set and
+	// not a per-instrument map on purpose: it is a pointer at which producer to
+	// go and fix, and unmarked_sample is what says where to look.
+	EvidenceUnmarkedReasons = "unmarked_reasons"
 )
 
 func toSet(vals []string) map[string]bool {

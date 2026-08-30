@@ -172,7 +172,15 @@ func TestESGScreen_AnUnpricedHoldingIsRefused(t *testing.T) {
 	if res.GetStatus() == compliancepb.ComplianceStatus_COMPLIANCE_STATUS_PASS {
 		t.Fatalf("a book carrying a holding nobody priced PASSED: %s", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "no market value") {
+	// THE REFUSAL MUST NAME WHICH ABSENCE AND WHICH HOLDING. This used to match the
+	// message prose "no market value"; it now reads the structured evidence, which
+	// is what an operator and a downstream consumer actually key off — and which
+	// stayed correct when the message had to stop claiming every unusable mark was
+	// a MISSING one (#806 added a third spelling: an amount with no currency).
+	if !strings.Contains(rec.Body.String(), `"unmarked_reasons":"no_market_value"`) {
+		t.Errorf("the refusal does not say WHICH absence it found: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"unmarked_sample":"BAT"`) {
 		t.Errorf("the refusal does not name the unpriced holding as the cause: %s", rec.Body.String())
 	}
 }
