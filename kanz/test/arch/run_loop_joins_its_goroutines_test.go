@@ -116,6 +116,36 @@ func deferredWaits(n ast.Node) []joinPoint {
 	return out
 }
 
+// frameJoins reports whether the frame that started g blocks on g finishing, and
+// returns the completion signals g raises so a failure can say what it signalled
+// instead of only that nothing waited.
+//
+// ONE IMPLEMENTATION, TWO SCOPES. This guard asks it about `go` statements in a
+// Run(ctx) loop; outbox_relay_join_test.go asks it about the goroutine a
+// composition root runs an outbox relay in. The rule is the same one — the frame
+// that starts a goroutine is the frame that joins it — and it is written once so
+// that widening what counts as a join widens both, rather than one of them.
+//
+// "Joined" means the frame blocks on a signal the goroutine raises: a wg.Wait()
+// or channel receive placed AFTER the `go` statement, or either under a `defer`
+// (a deferred wait runs on every return path, so its source position carries no
+// meaning). It does not prove the wait is reached before a resource is torn
+// down, and it does not prove the goroutine terminates.
+func frameJoins(a joinAnalysis, deferred []joinPoint, g *ast.GoStmt) (bool, []joinPoint) {
+	signals := completionSignals(g)
+	for _, s := range signals {
+		if a.waitsOnAfter(s, g.Pos()) {
+			return true, signals
+		}
+		for _, d := range deferred {
+			if d.name == s.name && d.kind == s.kind {
+				return true, signals
+			}
+		}
+	}
+	return false, signals
+}
+
 // scanRunLoops reports every `go` statement inside every Run loop declared in f,
 // marked joined or not. This is the one implementation: the estate scan and the
 // fixture self-check below both go through it, so a self-check that passes is
@@ -130,23 +160,7 @@ func scanRunLoops(fset *token.FileSet, rel string, f *ast.File) (loops int, out 
 		a := analyseFunc(fd.Body)
 		deferred := deferredWaits(fd.Body)
 		for _, g := range a.goStmts {
-			signals := completionSignals(g)
-			joined := false
-			for _, s := range signals {
-				if a.waitsOnAfter(s, g.Pos()) {
-					joined = true
-					break
-				}
-				for _, d := range deferred {
-					if d.name == s.name && d.kind == s.kind {
-						joined = true
-						break
-					}
-				}
-				if joined {
-					break
-				}
-			}
+			joined, signals := frameJoins(a, deferred, g)
 			out = append(out, runGoroutine{
 				site:     fmt.Sprintf("%s:%d", rel, fset.Position(g.Pos()).Line),
 				function: fd.Name.Name,
