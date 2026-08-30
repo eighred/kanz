@@ -60,10 +60,10 @@ func RateLimit(perSec float64, burst int) func(http.Handler) http.Handler {
 	if burst <= 0 {
 		burst = 1
 	}
-	lim := &tenantLimiter{perSec: perSec, burst: float64(burst), buckets: map[string]*bucket{}, now: time.Now}
+	rates := newBucketSet()
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !lim.allow(rateKey(r)) {
+			if !rates.allow(rateKey(r), perSec, float64(burst)) {
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 				return
@@ -83,49 +83,6 @@ func rateKey(r *http.Request) string {
 		}
 	}
 	return "a:" + r.RemoteAddr
-}
-
-type bucket struct {
-	tokens float64
-	last   time.Time
-}
-
-// take lazily refills the bucket by elapsed time (no background goroutine, so
-// an idle gateway holds no timers), caps it at burst, and consumes one token —
-// returning false when empty. Shared by the global RateLimit and the per-tenant
-// Quota (MT-01e). Caller holds the owning mutex.
-func (b *bucket) take(now time.Time, perSec, burst float64) bool {
-	b.tokens += now.Sub(b.last).Seconds() * perSec
-	if b.tokens > burst {
-		b.tokens = burst
-	}
-	b.last = now
-	if b.tokens < 1 {
-		return false
-	}
-	b.tokens--
-	return true
-}
-
-type tenantLimiter struct {
-	perSec  float64
-	burst   float64
-	mu      sync.Mutex
-	buckets map[string]*bucket
-	now     func() time.Time
-}
-
-// allow consumes one token from the key's bucket, returning false when empty.
-func (l *tenantLimiter) allow(key string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := l.now()
-	b, ok := l.buckets[key]
-	if !ok {
-		l.buckets[key] = &bucket{tokens: l.burst - 1, last: now}
-		return true
-	}
-	return b.take(now, l.perSec, l.burst)
 }
 
 // Idempotency makes a repeated Idempotency-Key at-most-once and replays the
