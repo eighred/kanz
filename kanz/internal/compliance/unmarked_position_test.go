@@ -53,6 +53,21 @@ func amountless(inst string) Position {
 	}
 }
 
+// unitless carries an AMOUNT and no currency code. It is the third spelling of
+// the same absence and the one #760's repair stopped one field short of: the
+// platform has a number and does not know what it is a number OF.
+//
+// It is not the same failure as amountless, and the difference is which producer
+// to go and fix — a mark that never loaded, or one emitted without its unit — so
+// the refusal names which it saw.
+func unitless(inst string) Position {
+	return Position{
+		InstrumentID: inst,
+		Quantity:     dec(5000, 0),
+		MarketValue:  &commonpb.Money{Amount: dec(50000, 0)},
+	}
+}
+
 func bookWith(extra ...Position) *Book {
 	b := &Book{
 		PortfolioID: "p1", BaseCurrency: "USD", NAV: money(200000, 0, "USD"),
@@ -167,6 +182,124 @@ func TestCurrency_AnUnmarkedHoldingHasNoCurrencyToCheck(t *testing.T) {
 		}},
 	}
 	mustRefuse(t, evalStatus(t, bookWith(unmarked("DARK")), nil, rule), "a USD-only currency restriction")
+}
+
+// A CURRENCY RESTRICTION IS NOT SATISFIED BY A HOLDING WITH NO CURRENCY (#806).
+//
+// THIS IS #760's SHAPE ONE FIELD OVER, and it was open for the same reason the
+// last one was: unmarkedPosition caught a nil MarketValue and a nil Amount, and
+// stopped there. A position carrying an amount and an EMPTY currency code
+// therefore reached CurrencyRule's loop, where `ccy != "" && !allowed[ccy]`
+// SKIPPED it — and skipping is passing.
+//
+// A currency restriction is a mandate term. A position whose currency nobody
+// stated satisfied an allow-list that exists precisely to refuse it, silently:
+// no violation, no evidence, no counter. The mandate reported compliant.
+func TestCurrency_AnAllowListIsNotSatisfiedByAHoldingWithNoCurrency(t *testing.T) {
+	rule := &compliancepb.Rule{
+		RuleId: "ccy", Type: compliancepb.RuleType_RULE_TYPE_CURRENCY,
+		Params: &compliancepb.Rule_CurrencyRestriction{CurrencyRestriction: &compliancepb.CurrencyRestriction{
+			AllowedCurrencies: []string{"USD"},
+		}},
+	}
+	res := evalStatus(t, bookWith(unitless("DARK")), nil, rule)
+	if res.GetStatus() == compliancepb.ComplianceStatus_COMPLIANCE_STATUS_PASS {
+		t.Fatalf("a USD-only restriction PASSED a book holding a position with an amount and no "+
+			"currency code — the holding satisfied a restriction written to refuse it, and "+
+			"nothing anywhere says so: %v", res)
+	}
+	v := mustRefuse(t, res, "a USD-only currency restriction over a holding with no currency")
+	// AND IT MUST BE A REFUSAL, NOT A BREACH. mustRefuse only proves the rule did
+	// not read as satisfied; a breach would also clear it, and a breach here is a
+	// different wrong answer — it asserts the holding IS in a disallowed currency,
+	// which is a claim nobody measured. The honest answer is that the check could
+	// not be made.
+	assertUnevaluable(t, v, unmarkedReasonNoCurrency)
+}
+
+// AND IT IS NOT ONLY THE CURRENCY RULE. bucketKey reads DIMENSION_CURRENCY off
+// the same field, and classifiedDimension deliberately does NOT route CURRENCY
+// through unresolvedDimension — the currency comes off the position, not the
+// classifier, so a missing classifier must not refuse it.
+//
+// The consequence is that an empty currency code became a BUCKET: every holding
+// nobody stated a currency for was pooled under one anonymous key and measured
+// against a per-currency concentration limit as though "" were a currency. That
+// is a weight computed over a bucket that does not exist.
+func TestConcentration_AnEmptyCurrencyIsNotACurrencyBucket(t *testing.T) {
+	rule := &compliancepb.Rule{
+		RuleId: "ccy-conc", Type: compliancepb.RuleType_RULE_TYPE_CONCENTRATION,
+		Params: &compliancepb.Rule_Concentration{Concentration: &compliancepb.ConcentrationLimit{
+			Dimension: compliancepb.Dimension_DIMENSION_CURRENCY,
+			Bucket:    "USD",
+			MaxWeight: dec(60, -2),
+		}},
+	}
+	res := evalStatus(t, bookWith(unitless("DARK")), nil, rule)
+	if res.GetStatus() == compliancepb.ComplianceStatus_COMPLIANCE_STATUS_PASS {
+		t.Fatalf("a per-currency concentration limit PASSED over a book carrying a holding with "+
+			"no currency — the holding was pooled into an anonymous bucket and the USD weight "+
+			"was measured against a denominator nobody can name: %v", res)
+	}
+	v := mustRefuse(t, res, "a currency concentration limit over a holding with no currency")
+	assertUnevaluable(t, v, unmarkedReasonNoCurrency)
+}
+
+// assertUnevaluable pins the distinction the whole #760/#806 family turns on: a
+// rule the platform COULD NOT EVALUATE must say so, and must not be recorded as
+// a measured breach. An operator reading the audit trail has to tell a limit
+// that was exceeded from one that was never checked, and only one of those is
+// evidence about the book.
+func assertUnevaluable(t *testing.T, v *compliancepb.Violation, wantReason string) {
+	t.Helper()
+	if !strings.Contains(v.GetMessage(), "cannot be verified") {
+		t.Errorf("message=%q must say the check could not be made, not that a limit was "+
+			"exceeded — a breach here would assert something about the book that nobody "+
+			"measured", v.GetMessage())
+	}
+	if got := v.GetEvidence()[EvidenceUnmarkedReasons]; got != wantReason {
+		t.Errorf("evidence[%s]=%q want %q", EvidenceUnmarkedReasons, got, wantReason)
+	}
+}
+
+// THE REFUSAL SAYS WHICH ABSENCE IT SAW.
+//
+// "the mark never loaded" and "the producer emitted an amount with no unit" are
+// different upstream bugs with different fixes, and an operator holding a
+// refusal needs to know which one to chase. One refusal path, but it names what
+// it found.
+func TestUnmarked_TheRefusalNamesWhichAbsenceItFound(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pos  Position
+		want string
+	}{
+		{"no market value at all", unmarked("DARK"), unmarkedReasonNoValue},
+		{"an amount that was never set", amountless("DARK"), unmarkedReasonNoAmount},
+		{"an amount with no currency", unitless("DARK"), unmarkedReasonNoCurrency},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := evalStatus(t, bookWith(tc.pos), nil, instrumentCap("AAPL", 60, -2))
+			mustRefuse(t, res, "a book carrying "+tc.name)
+			got := res.GetViolations()[0].GetEvidence()[EvidenceUnmarkedReasons]
+			if got != tc.want {
+				t.Errorf("evidence[%s]=%q want %q — the refusal does not say which absence it "+
+					"saw, so nobody can tell a mark that never loaded from one emitted "+
+					"without its unit", EvidenceUnmarkedReasons, got, tc.want)
+			}
+		})
+	}
+}
+
+// NON-VACUITY FOR THE NEW FIELD, the boundary that keeps it honest. A position
+// marked at zero IN A STATED CURRENCY is a measurement and must still evaluate —
+// the same argument markedZero makes for the amount, one field over.
+func TestConcentration_AZeroAmountInAStatedCurrencyStillEvaluates(t *testing.T) {
+	res := evalStatus(t, bookWith(markedZero("CHEAP")), nil, instrumentCap("AAPL", 60, -2))
+	if res.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH {
+		t.Fatalf("a holding priced at zero in a STATED currency is fully measured — refusing it "+
+			"would make every worthless position unevaluable: %v", res)
+	}
 }
 
 // A MONEY WITH NO AMOUNT IS THE SAME ABSENCE WEARING A CURRENCY CODE.
