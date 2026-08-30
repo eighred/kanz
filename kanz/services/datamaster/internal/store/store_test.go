@@ -99,6 +99,26 @@ func runExceptionContract(t *testing.T, ctx context.Context, es ExceptionStore) 
 	if err := es.Override(ctx, "nope", pricing.Override{Actor: "a", Reason: "r", ChosenPrice: dec.Rat("1"), At: at}, Claim{}); err == nil {
 		t.Fatal("override unknown id should error")
 	}
+	// A SECOND OVERRIDE ON A DECIDED EXCEPTION IS REFUSED (#816).
+	//
+	// In the shared contract because it is a property of the SEAM, and because
+	// the durable backend is where it was wrong: PostgresExceptions.Override
+	// scanned the status under FOR UPDATE and never branched on it, so a call
+	// like this one appended a second exception_overrides row, re-flipped a
+	// status that was already OVERRIDDEN, and enqueued a second FACT carrying
+	// its own event id. One operator decision, two audit records.
+	//
+	// A DIFFERENT ACTOR AND A DIFFERENT PRICE, on purpose: the refusal is not a
+	// duplicate-request check, it is "this exception has been decided". The
+	// caller who chose 160 is TOLD, rather than being handed a success for a
+	// price the trail does not hold.
+	if err := es.Override(ctx, ex.ID, pricing.Override{
+		Actor: "ops2@kanz", Reason: "re-reviewed", ChosenPrice: dec.Rat("160"), At: at,
+	}, Claim{}); !errors.Is(err, pricing.ErrAlreadyOverridden) {
+		t.Fatalf("a second override on an OVERRIDDEN exception returned %v, want "+
+			"pricing.ErrAlreadyOverridden — the audit trail now answers \"who overrode this price\" "+
+			"twice for one decision", err)
+	}
 
 	got, ok, err := es.Get(ctx, ex.ID)
 	if err != nil || !ok {

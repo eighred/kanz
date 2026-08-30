@@ -123,7 +123,7 @@ func declaredSubjects(t *testing.T, root string) []string {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "gen", "vendor", "node_modules":
+			case ".git", ".claude", "gen", "vendor", "node_modules":
 				return filepath.SkipDir
 			}
 			return nil

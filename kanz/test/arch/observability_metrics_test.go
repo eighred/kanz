@@ -262,7 +262,7 @@ func declaredGoMetrics(t *testing.T, root string) map[string]bool {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "vendor", "node_modules", ".gotmp":
+			case ".git", ".claude", "vendor", "node_modules", ".gotmp":
 				return filepath.SkipDir
 			}
 			return nil

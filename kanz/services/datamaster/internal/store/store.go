@@ -66,6 +66,14 @@ type ExceptionStore interface {
 	// claim finds no proposal to take: somebody else decided it first, and
 	// applying a second override for one decision is the outcome Claim has
 	// always existed to prevent.
+	//
+	// It returns pricing.ErrAlreadyOverridden, ALSO HAVING WRITTEN NOTHING, when
+	// the exception has already been decided (#816). That is the same outcome
+	// arriving by the other door: a proposal is single-use, but nothing stopped a
+	// second single-signed override — or a second proposal — from appending a
+	// second authorisation for one act. AN OVERRIDE IS NOT REPEATABLE, and both
+	// backends refuse rather than silently no-op — see ErrAlreadyOverridden for
+	// why the two are not interchangeable here.
 	Override(ctx context.Context, id string, o pricing.Override, claim Claim) error
 	Get(ctx context.Context, id string) (pricing.Exception, bool, error)
 	Open(ctx context.Context) ([]pricing.Exception, error)
@@ -140,10 +148,16 @@ func (s *QueueStore) AddAll(_ context.Context, exs []pricing.Exception) error {
 // MUST run exactly one replica.
 //
 // WHAT IS STILL ORDERED DELIBERATELY: everything that can refuse runs BEFORE the
-// proposal is consumed. pricing.Queue.Override fails in exactly two ways — an
-// unknown exception, and an override that is not storable audit evidence — and
-// both are decidable up front, so no refusal reachable from here can spend a
-// signature and apply nothing.
+// proposal is consumed. pricing.Queue.Override fails in exactly three ways — an
+// unknown exception, an override that is not storable audit evidence, and an
+// exception a human has already decided (#816) — and all three are decidable up
+// front, so no refusal reachable from here can spend a signature and apply
+// nothing.
+//
+// THE THIRD ONE IS THE NEWEST AND THE EASIEST TO PUT IN THE WRONG PLACE. Left
+// where pricing.Queue.Override raises it, it would fire after the claim below
+// and spend a second signature on an override that does not happen — which is
+// #807's cost, arriving through #816's repair.
 func (s *QueueStore) Override(ctx context.Context, id string, o pricing.Override, claim Claim) error {
 	if !claim.Held() {
 		return s.q.Override(id, o)
@@ -152,11 +166,43 @@ func (s *QueueStore) Override(ctx context.Context, id string, o pricing.Override
 		return fmt.Errorf("store: override for exception %s carries proposal %s but this queue was "+
 			"built with no proposal store, so approving it would consume nothing", id, claim.ProposalID)
 	}
-	if _, ok := s.q.Get(id); !ok {
+	e, ok := s.q.Get(id)
+	if !ok {
 		return fmt.Errorf("pricing: unknown exception %q", id)
 	}
 	if err := o.Validate(); err != nil {
 		return err
+	}
+	// THE PROPOSAL IS PEEKED BEFORE THE EXCEPTION IS JUDGED, AND THE ORDER IS THE
+	// POINT (#816).
+	//
+	// Both refusals can be true at once — a spent approval re-presented for the
+	// exception that same approval decided — and the two backends must pick the
+	// same one, or a caller branching on the sentinel gets a different answer on
+	// the ephemeral posture than on the durable one. PostgresExceptions.Override
+	// claims FIRST and checks the status after, so there "the proposal is gone"
+	// wins; this reproduces that precedence without consuming anything.
+	//
+	// Peeking rather than claiming is what keeps the promise above: everything
+	// that can refuse runs before the signature is spent. It is not a
+	// serialisation point and does not need to be — Claim below is still what
+	// decides, and a proposal taken between these two lines comes back from there
+	// as ErrProposalAlreadyDecided.
+	_, held, err := s.proposals.Get(ctx, claim.ProposalID)
+	if err != nil {
+		return err
+	}
+	if !held {
+		return fmt.Errorf("%w: proposal %s", ErrProposalAlreadyDecided, claim.ProposalID)
+	}
+	// THE THIRD REFUSAL, PRE-CHECKED FOR THE SAME REASON AS THE TWO ABOVE.
+	//
+	// pricing.Queue.Override refuses an already-decided exception itself, but it
+	// runs AFTER the claim below — and a refusal that runs after the claim spends
+	// the second signature on an act that does not happen. This is not a second
+	// rule; it is the same predicate reached early enough to keep that promise.
+	if e.Status.AlreadyOverridden() {
+		return fmt.Errorf("%w: %q", pricing.ErrAlreadyOverridden, id)
 	}
 	claimed, err := s.proposals.Claim(ctx, claim.ProposalID)
 	if err != nil {

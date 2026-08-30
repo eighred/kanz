@@ -237,8 +237,16 @@ func dockerfilePaths(t *testing.T, root string) []dockerfileRef {
 			return err
 		}
 		if d.IsDir() {
+			// OTHER CHECKOUTS FIRST (#848). dockerfileFroms is called with the REPO
+			// ROOT, so this walk can descend into .claude/worktrees/ — another
+			// checkout of this same tree, whose Dockerfiles are not the estate's.
+			// The shared set is the one every repo-root walker consults; "gen"
+			// below is this guard's own speed hint on top of it.
+			if skipWalkDir(d) {
+				return filepath.SkipDir
+			}
 			switch d.Name() {
-			case ".git", "vendor", "node_modules", ".gotmp", "gen":
+			case "gen":
 				return filepath.SkipDir
 			}
 			if path != root {

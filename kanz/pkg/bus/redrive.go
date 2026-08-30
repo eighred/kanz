@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -476,13 +477,37 @@ func (r *Redriver) Run(ctx context.Context, dlqSubj, group string) (RedriveStats
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
+
+	// THE WATCHDOG IS JOINED (#813). It is a Run(ctx) loop's own goroutine, and a
+	// Run loop that returns while one is still running hands its caller a
+	// completed shutdown that is not one — the defect the ingest engine's
+	// snapshot loop had, where the escaped goroutine was still publishing.
+	//
+	// A deferred Wait rather than an inline one because Run has several return
+	// paths below this point, and a join reached on only some of them is the
+	// defect this repository keeps finding rather than a fix for it.
+	//
+	// DEFER ORDER IS LATENCY, NOT TERMINATION — stated precisely because the
+	// obvious claim ("the other order deadlocks") is false, and was disproved by
+	// mutation: the watchdog's own `time.After(idle)` arm always fires, so it
+	// stops on its own within IdleTimeout regardless. Defers unwind LIFO, so
+	// cancel() runs first and the already-parked watchdog leaves at once. The
+	// reverse order costs the whole IdleTimeout on any path that reaches this
+	// return WITHOUT the handler having called cancel() — a Subscribe that fails
+	// outright is the one that does, and an operator drain reporting a transport
+	// error would sit here for five seconds saying nothing. Pinned by
+	// TestRedriverReturnsAsSoonAsTheSubscriptionEnds.
+	var watchdog sync.WaitGroup
+	defer watchdog.Wait()
 	defer cancel()
 
 	// The idle watchdog owns its own timer in a single goroutine, so there is no
 	// Stop/Reset race with the dispatch goroutine. time.After per iteration is a
 	// timer per message, which at operator-drain volumes is free.
 	activity := make(chan struct{}, 1)
+	watchdog.Add(1)
 	go func() {
+		defer watchdog.Done()
 		for {
 			select {
 			case <-runCtx.Done():

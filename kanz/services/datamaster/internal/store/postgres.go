@@ -170,6 +170,30 @@ func (p *PostgresExceptions) Override(ctx context.Context, id string, o pricing.
 	if err != nil {
 		return fmt.Errorf("lock exception %s: %w", id, err)
 	}
+	// THE STATUS IS READ IN ORDER TO BE CHECKED, AND THIS IS THE CHECK (#816).
+	//
+	// It was scanned under the FOR UPDATE above and then never referenced again,
+	// so every statement below ran unconditionally. A second override on an
+	// already-decided exception appended a second exception_overrides row,
+	// re-flipped a status that was already OVERRIDDEN, and enqueued a second FACT
+	// carrying its own event id — which audit's dedup cannot collapse. The
+	// append-only trail then held two authorisations for what an examiner reads as
+	// one act, and "who overrode this price, and when" had two answers.
+	//
+	// THE LOCK WAS NEVER THE MISSING PART. FOR UPDATE serialises two concurrent
+	// overrides correctly and always did; the defect is that the operation was not
+	// IDEMPOTENT, so a client retry after a timeout landed a second decision just
+	// as surely as two callers would. Reading a value under a lock and not
+	// branching on it is a lock taken for a decision nobody made.
+	//
+	// NOTHING IS WRITTEN, INCLUDING THE CLAIM. The deferred rollback covers
+	// claimProposal above, so an approval presented against an already-overridden
+	// exception is not spent: the proposal stays pending and lapses visibly on the
+	// pending-overrides surface, rather than being consumed by an act that did not
+	// happen (#807, #563).
+	if pricing.Status(status).AlreadyOverridden() {
+		return fmt.Errorf("%w: %q", pricing.ErrAlreadyOverridden, id)
+	}
 	// chosen_price is TEXT holding the rational's exact RatString (0002), the same
 	// stance as the accounting ledger's money columns: a lossless round-trip, and
 	// `double` is banned for a price. It was DOUBLE PRECISION, which rounded the
