@@ -61,7 +61,7 @@ type ConsumerTuning struct {
 // the lease ordering in dedup.go can be asserted BY THE COMPILER rather than by
 // a comment somebody has to remember to re-read. See dedupClaimLease.
 const (
-	// workAckWait covers order commands, execution FACTs, accounting, audit,
+	// WorkAckWait covers order commands, execution FACTs, accounting, audit,
 	// compliance — every subject whose handler can make a network call.
 	//
 	// Sized from the slowest real path this estate has: the OMS submit handler
@@ -78,7 +78,19 @@ const (
 	// pod's in-flight messages invisible for up to 60s instead of 30s. That cost
 	// is paid only on a crash — Subscribe drains and NAKs on an ordinary
 	// shutdown, which is the case that actually happens on every rolling deploy.
-	workAckWait = 60 * time.Second
+	//
+	// IT IS EXPORTED, ALONE AMONG THE THREE, BECAUSE A HANDLER HAS TO BE ABLE TO
+	// BOUND ITSELF BY IT (#801). Nothing in Subscribe puts a deadline on the
+	// context it hands a handler, so a handler that fans out — the OMS cancel of
+	// a scheduled parent takes one per-order claim per child and makes one venue
+	// call per child, all on one delivery — can simply run past this number, at
+	// which point the broker redelivers a command whose first copy is still
+	// inside a venue call. A handler that needs a self-imposed budget must derive
+	// it from THIS constant rather than restating 60s locally, so that raising
+	// the AckWait cannot leave a stale budget behind in another package. See
+	// deliveryBudget in services/oms/internal/order/claimscope.go, which asserts
+	// its ordering against this value at COMPILE time.
+	WorkAckWait = 60 * time.Second
 
 	// tickAckWait covers market.> — the 12-partition tick fan-in. Handlers here
 	// are in-memory folds into a quote cache, microseconds each, and a tick that
@@ -97,7 +109,7 @@ const (
 	// guards that depend on them are compile-time constant expressions; the unit
 	// test TestTunedAckWaitBoundsCoverEveryClass fails if a class is ever added
 	// or changed without updating them, so they cannot drift silently.
-	maxTunedAckWait = workAckWait
+	maxTunedAckWait = WorkAckWait
 	minTunedAckWait = tickAckWait
 )
 
@@ -176,7 +188,7 @@ func nakDelay(numDelivered uint64) time.Duration {
 // the 60s AckWait, so a backlog cannot time out its own tail. The 1000 default
 // would have been 1000s of queue in front of a 60s clock.
 var workTuning = ConsumerTuning{
-	AckWait:       workAckWait,
+	AckWait:       WorkAckWait,
 	MaxDeliver:    64,
 	MaxAckPending: 32,
 }

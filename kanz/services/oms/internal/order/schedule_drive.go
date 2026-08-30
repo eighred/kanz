@@ -223,7 +223,7 @@ func (s *Service) retireIfFinished(ctx context.Context, parentSt *orderpb.OrderS
 			"as a decimal", parentSt.GetOrderId(), unfilled.FloatString(20))
 	}
 
-	release, err := s.awaitClaim(ctx, parentSt.GetOrderId())
+	ctx, release, err := s.awaitClaim(ctx, parentSt.GetOrderId())
 	if err != nil {
 		return s.abandonClaim("retire", parentSt.GetOrderId(), err)
 	}
@@ -396,9 +396,35 @@ func (s *Service) cancelChildren(ctx context.Context, parentSt *orderpb.OrderSta
 		unsent = new(big.Rat)
 	}
 
+	withdrawn := 0
 	for _, child := range children {
 		if IsTerminal(child) {
 			continue // already finished; nothing to withdraw
+		}
+		// STOP BETWEEN CHILDREN, NOT INSIDE AN ACQUISITION THAT CANNOT SUCCEED (#801).
+		//
+		// Every withdrawal below spends the parent delivery's ONE budget — the
+		// child's claim, its venue call, its Save. When there is no longer enough
+		// left to claim the next child, stop HERE, where the last one is fully
+		// committed and the next has not been touched.
+		//
+		// THE REPORT IS THE POINT. awaitClaim below would also fail on the spent
+		// budget, and it says so; what it cannot say is HOW FAR THE FAN-OUT GOT.
+		// A cancel that withdrew 5 of 12 slices and a cancel that withdrew none
+		// are the same nack and the same DLQ entry, and an operator holding a
+		// half-withdrawn parent needs to know which they have.
+		//
+		// This is an error, so the parent nacks and stays WORKING_SCHEDULED. The
+		// replay finds the children withdrawn so far terminal and skips them
+		// before building a command for them, so resuming costs no second venue
+		// call for any of them.
+		if left, ok := s.affordsAnotherClaim(ctx); !ok {
+			return nil, fmt.Errorf(
+				"%w: stopping the withdrawal of order %s before child %s with %s left, too "+
+					"little to claim it. %d of %d children were withdrawn; the parent stays "+
+					"live and a replay resumes from here rather than re-issuing them",
+				errBudgetSpent, parentSt.GetOrderId(), child.GetOrderId(),
+				left.Round(time.Millisecond), withdrawn, len(children))
 		}
 		payload, merr := proto.Marshal(&orderpb.CancelOrder{
 			Metadata: &commandpb.CommandMetadata{
@@ -452,6 +478,7 @@ func (s *Service) cancelChildren(ctx context.Context, parentSt *orderpb.OrderSta
 				"report a withdrawal that did not happen while this slice is still live at a venue",
 				child.GetOrderId(), parentSt.GetOrderId(), after.GetStatus())
 		}
+		withdrawn++
 	}
 
 	qty, ok := dec.ToProtoScaled(unsent)
