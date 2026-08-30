@@ -95,7 +95,7 @@ func (g *COMP01Gate) Check(ctx context.Context, tenantID string, cmd *orderpb.Su
 	// rule that fired (EXEC-M14).
 	if decision.Ungoverned {
 		return &Breach{
-			Code:   "MANDATE_MISSING",
+			Code:   comp.CodeMandateMissing,
 			Reason: "no mandate governs portfolio " + cmd.GetPortfolioId(),
 		}, nil
 	}
@@ -105,7 +105,7 @@ func (g *COMP01Gate) Check(ctx context.Context, tenantID string, cmd *orderpb.Su
 	// (COMP-M2) — not to go look for the rule that fired (COMP-M1).
 	if decision.Unpriced {
 		return &Breach{
-			Code:   "PRICE_UNAVAILABLE",
+			Code:   comp.CodePriceUnavailable,
 			Reason: "no usable price to value order for instrument " + cmd.GetInstrumentId(),
 		}, nil
 	}
@@ -117,7 +117,7 @@ func (g *COMP01Gate) Check(ctx context.Context, tenantID string, cmd *orderpb.Su
 	// to look at.
 	if decision.Unvaluable {
 		return &Breach{
-			Code:   "NOTIONAL_UNREPRESENTABLE",
+			Code:   comp.CodeNotionalUnrepresentable,
 			Reason: "order notional (quantity × price) cannot be represented for instrument " + cmd.GetInstrumentId(),
 		}, nil
 	}
@@ -132,9 +132,29 @@ func (g *COMP01Gate) Check(ctx context.Context, tenantID string, cmd *orderpb.Su
 	// another customer's rejection message.
 	if decision.Unscoped {
 		return &Breach{
-			Code: "MANDATE_TENANT_UNRESOLVED",
+			Code: comp.CodeMandateTenantUnresolved,
 			Reason: "cannot determine which tenant's mandate governs portfolio " + cmd.GetPortfolioId() +
 				" — the order was not evaluated against any rule",
+		}, nil
+	}
+	// A mandate for this portfolio WAS PUBLISHED and could not be applied, so —
+	// a fifth time — NO RULE WAS EVALUATED (#803). Without this branch the
+	// decision fell through to breachFromResult with a NIL Result and came back
+	// as the defensive tail's "MANDATE" / "mandate breach": a rule breach that
+	// never fired, reported to the client and filed in the audit trail.
+	//
+	// The action this names is the ONLY one that resolves it, and it is neither
+	// of the two a reviewer would otherwise try. The mandate stream is COMPACTED,
+	// so the message that failed to decode is the last one on that portfolio's
+	// subject: every consumer that boots re-reads it and fails identically, and
+	// this portfolio refuses every order until somebody republishes. Retrying
+	// does nothing and there is no rule to go and read.
+	if decision.Unreadable {
+		return &Breach{
+			Code: comp.CodeMandateUnreadable,
+			Reason: "the mandate governing portfolio " + cmd.GetPortfolioId() + " could not be " +
+				"applied, so the order was not evaluated against any rule — the mandate must be " +
+				"republished; this does not resolve on retry",
 		}, nil
 	}
 	return breachFromResult(decision.Result), nil

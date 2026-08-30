@@ -173,11 +173,18 @@ func orderDelta(cmd *orderpb.SubmitOrder, tenantID, currency string, prices map[
 }
 
 // gateReason renders a rejected Decision as a human-readable reason.
-// Ungoverned, Unpriced and Unvaluable are refusals under their OWN code, not a
-// rule violation — nothing breached, because nothing was evaluated — so none
-// of them may fall through to "pre-trade compliance breach" (that used to be
-// true for Ungoverned, and would otherwise now be true for the other two;
-// COMP-M1).
+//
+// EVERY MEMBER OF THE "NOTHING WAS EVALUATED" FAMILY IS NAMED HERE, and none may
+// fall through to "pre-trade compliance breach" — nothing breached, because
+// nothing was checked (COMP-M1). That used to be true for Ungoverned, and would
+// otherwise now be true for the others.
+//
+// Unreadable was the one that WAS falling through (#803), here and in the OMS
+// gate, both for the same reason: this list is written by hand and a fifth flag
+// was added to the family without either copy being opened.
+// test/arch/every_decision_consumer_handles_every_refusal_test.go now fails the
+// build when that happens, and derives the family from decide()'s own returns
+// rather than from a third hand-written list.
 func gateReason(d compliance.Decision) string {
 	if d.Ungoverned {
 		return "no mandate governs this portfolio"
@@ -190,6 +197,10 @@ func gateReason(d compliance.Decision) string {
 	}
 	if d.Unscoped {
 		return "cannot determine which tenant's mandate governs this portfolio — the order was not evaluated"
+	}
+	if d.Unreadable {
+		return "the mandate governing this portfolio could not be applied, so the order was not " +
+			"evaluated — the mandate must be republished; this does not resolve on retry"
 	}
 	if d.Result != nil && len(d.Result.GetViolations()) > 0 {
 		return d.Result.GetViolations()[0].GetMessage()

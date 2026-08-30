@@ -624,22 +624,64 @@ func (g *PreTradeGate) decisionRecord(d OrderDelta, dec Decision) DecisionRecord
 // below does not name.
 const NotEvaluatedUnclassified = "UNCLASSIFIED"
 
+// THE CODES A REFUSAL IS FILED UNDER, AND THEY ARE EXPORTED BECAUSE THERE WAS A
+// SECOND COPY OF THEM (#803).
+//
+// notEvaluatedCode below writes the decision RECORD's code. The OMS gate wrote
+// the code the CLIENT sees, as its own chain of string literals, and the
+// optimization bridge wrote a third set of strings for the same flags. Three
+// hand-maintained copies of one table, and the copies were how a row went
+// missing: Unreadable was mapped here and nowhere else, so an order refused
+// because its mandate could not be decoded reached the client and the audit
+// trail as "mandate breach" — a rule breach that never fired, on an order
+// against which no rule was evaluated.
+//
+// One table. A sixth flag added to the family now has exactly one place to be
+// named, and test/arch/every_decision_consumer_handles_every_refusal_test.go
+// fails until every consumer names it.
+const (
+	// CodeNotionalUnrepresentable: the price was fine and quantity × price is
+	// beyond any Decimal, so no rule was evaluated. The ORDER SIZE is what to
+	// look at — deliberately not PRICE_UNAVAILABLE, which would send an operator
+	// to wire a price source that is already wired.
+	CodeNotionalUnrepresentable = "NOTIONAL_UNREPRESENTABLE"
+	// CodeMandateTenantUnresolved: a mandate exists and the platform cannot say
+	// whose it is. The action is to disambiguate the tenants, not to write a
+	// mandate.
+	CodeMandateTenantUnresolved = "MANDATE_TENANT_UNRESOLVED"
+	// CodeMandateUnreadable: a mandate for this portfolio WAS PUBLISHED and could
+	// not be applied. The action is to REPUBLISH it — and only that: the mandate
+	// stream is compacted, so the undecodable message is the last one on the
+	// subject and every consumer that boots re-reads it forever.
+	CodeMandateUnreadable = "MANDATE_UNREADABLE"
+	// CodeMandateMissing: nobody has written a mandate for this portfolio. The
+	// action is to write one.
+	CodeMandateMissing = "MANDATE_MISSING"
+	// CodePriceUnavailable: the order could not be valued, so no rule was
+	// evaluated. The action is to wire a reference-price source.
+	CodePriceUnavailable = "PRICE_UNAVAILABLE"
+	// CodeMandateHasNoRules: a mandate exists and constrains nothing — somebody
+	// decided that, explicitly. The order is ADMITTED; this names why the record
+	// shows no rule having run.
+	CodeMandateHasNoRules = "MANDATE_HAS_NO_RULES"
+)
+
 // notEvaluatedCode names why no rule ran, from the flags the decision already
 // carries. Every arm corresponds to one short-circuit in decide().
 func notEvaluatedCode(dec Decision) string {
 	switch {
 	case dec.Unvaluable:
-		return "NOTIONAL_UNREPRESENTABLE"
+		return CodeNotionalUnrepresentable
 	case dec.Unscoped:
-		return "MANDATE_TENANT_UNRESOLVED"
+		return CodeMandateTenantUnresolved
 	case dec.Unreadable:
-		return "MANDATE_UNREADABLE"
+		return CodeMandateUnreadable
 	case dec.Ungoverned:
-		return "MANDATE_MISSING"
+		return CodeMandateMissing
 	case dec.Unpriced:
-		return "PRICE_UNAVAILABLE"
+		return CodePriceUnavailable
 	case dec.Unconstrained:
-		return "MANDATE_HAS_NO_RULES"
+		return CodeMandateHasNoRules
 	default:
 		return NotEvaluatedUnclassified
 	}

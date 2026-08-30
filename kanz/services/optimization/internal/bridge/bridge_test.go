@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/compliance"
@@ -233,4 +234,54 @@ func pow(exp int32) float64 {
 		p /= 10
 	}
 	return p
+}
+
+// EVERY REFUSAL THE GATE CAN RETURN GETS ITS OWN REASON (#803).
+//
+// gateReason is the second consumer of a compliance.Decision that enumerated the
+// "nothing was evaluated" family by hand, and the second one that was missing
+// Unreadable — so a rebalance proposal rejected because the portfolio's mandate
+// could not be decoded came back as "pre-trade compliance breach": a rule breach
+// that never fired.
+//
+// The fall-through is the failure mode, so the assertion is that NO member of the
+// family reaches it. A table over the flags rather than one test per flag,
+// because the next flag added is the one this is written for.
+func TestGateReason_NoRefusalFallsThroughToRuleBreach(t *testing.T) {
+	const fallthroughReason = "pre-trade compliance breach"
+	for _, tc := range []struct {
+		name string
+		d    compliance.Decision
+		want string
+	}{
+		{"ungoverned", compliance.Decision{Ungoverned: true}, "no mandate governs"},
+		{"unpriced", compliance.Decision{Unpriced: true}, "no usable price"},
+		{"unvaluable", compliance.Decision{Unvaluable: true}, "notional cannot be represented"},
+		{"unscoped", compliance.Decision{Unscoped: true}, "which tenant's mandate"},
+		{"unreadable", compliance.Decision{Unreadable: true}, "must be republished"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := gateReason(tc.d)
+			if got == fallthroughReason {
+				t.Fatalf("a %s refusal renders as %q — nothing was evaluated, so calling it a "+
+					"compliance breach sends a reviewer to look for the rule that fired",
+					tc.name, got)
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("reason %q does not contain %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// NON-VACUITY: a real rule violation must still render as its own message, and a
+// decision with no flags and no result still falls through — that tail is the
+// correct answer for an actual breach with nothing attached.
+func TestGateReason_ARealViolationStillRendersItsOwnMessage(t *testing.T) {
+	d := compliance.Decision{Result: &compliancepb.ComplianceResult{
+		Violations: []*compliancepb.Violation{{Message: "concentration limit exceeded"}},
+	}}
+	if got := gateReason(d); got != "concentration limit exceeded" {
+		t.Fatalf("gateReason = %q, want the violation's own message", got)
+	}
 }
