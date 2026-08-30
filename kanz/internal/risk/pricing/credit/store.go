@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eighred/kanz/internal/risk/pricing/pit"
 	"github.com/eighred/kanz/internal/risk/xva"
 )
 
@@ -32,41 +33,51 @@ import (
 // risk number is reproduced AS OF a date, and a store that only knows "now"
 // cannot answer what the book was worth last Tuesday — which is the question an
 // auditor asks.
+//
+// Retention is bounded by a horizon (#811), through the same pit.Put every
+// member of this family uses. The mirror is the point, here as everywhere else
+// in this file: a horizon added to one of the three stores and not the others
+// is the copied-helper failure mode, and the horizon is a financial decision
+// that must be one decision rather than three.
 type Store struct {
 	mu          sync.RWMutex
-	byReference map[string][]curveVersion // ascending by asOf
+	byReference map[string][]pit.Version[*xva.CreditCurve] // ascending by AsOf
+	horizon     time.Duration
 }
 
-type curveVersion struct {
-	asOf time.Time
-	c    *xva.CreditCurve
+// Option configures a Store.
+type Option func(*Store)
+
+// WithHorizon sets how far back versions are retained, measured from the newest
+// version held for that reference entity. Zero or negative selects
+// pit.DefaultHorizon; there is no "retain forever".
+func WithHorizon(d time.Duration) Option {
+	return func(s *Store) { s.horizon = pit.Horizon(d) }
 }
 
-// NewStore returns an empty point-in-time store.
-func NewStore() *Store {
-	return &Store{byReference: map[string][]curveVersion{}}
+// NewStore returns an empty point-in-time store retaining pit.DefaultHorizon of
+// versions unless WithHorizon says otherwise.
+func NewStore(opts ...Option) *Store {
+	s := &Store{byReference: map[string][]pit.Version[*xva.CreditCurve]{}, horizon: pit.DefaultHorizon}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // Put publishes a curve for the reference entity effective at asOf. Versions may
 // arrive out of order (a nightly-close backfill behind an intraday refresh); the
-// version list stays sorted. A second Put at the same asOf replaces.
+// version list stays sorted. A second Put at the same asOf replaces. Versions
+// older than the horizon are dropped here, under the write lock already held.
 func (s *Store) Put(reference string, asOf time.Time, c *xva.CreditCurve) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	vs := s.byReference[reference]
-	i := sort.Search(len(vs), func(i int) bool { return !vs[i].asOf.Before(asOf) })
-	if i < len(vs) && vs[i].asOf.Equal(asOf) {
-		vs[i].c = c
-	} else {
-		vs = append(vs, curveVersion{})
-		copy(vs[i+1:], vs[i:])
-		vs[i] = curveVersion{asOf: asOf, c: c}
-	}
+	vs, _ := pit.Put(s.byReference[reference], asOf, c, s.horizon)
 	s.byReference[reference] = vs
 }
 
 // Curve resolves the latest curve effective at or before asOf. ok=false when the
-// reference has no curve yet or asOf predates the first version.
+// reference has no curve yet or asOf predates the first version retained.
 //
 // FALSE IS NOT A ZERO CURVE. A zero-hazard curve means "this counterparty cannot
 // default", which prices CVA at zero — so a missing curve must be reported as
@@ -76,11 +87,7 @@ func (s *Store) Curve(_ context.Context, reference string, asOf time.Time) (*xva
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	vs := s.byReference[reference]
-	i := sort.Search(len(vs), func(i int) bool { return vs[i].asOf.After(asOf) })
-	if i == 0 {
-		return nil, false
-	}
-	return vs[i-1].c, true
+	return pit.At(vs, asOf)
 }
 
 // References lists every reference entity with at least one calibrated curve,

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/risk/pricing"
+	"github.com/eighred/kanz/internal/risk/pricing/pit"
 )
 
 // Parametric vol-surface calibration (PARITY-03b). The DERIV-01c Surface
@@ -323,35 +324,45 @@ func (s *SVISurface) Slice(i int) SVIParams { return s.slices[i] }
 // seam (the vol mirror of the PARITY-03a curve.Store): each Refresh publishes
 // a fitted surface versioned by as-of; a read resolves the surface live at the
 // requested as_of. Satisfies compute.VolProvider implicitly.
+//
+// Retention is bounded by a horizon (#811) via the shared pit.Put, the same
+// mechanism curve.Store and credit.Store use. See pit's package doc for why the
+// horizon is anchored on the newest retained version rather than on wall clock:
+// a stalled calibration feed must degrade to a stale surface, never to no
+// surface at all.
 type Store struct {
 	mu           sync.RWMutex
-	byUnderlying map[string][]surfaceVersion
+	byUnderlying map[string][]pit.Version[*SVISurface]
+	horizon      time.Duration
 }
 
-type surfaceVersion struct {
-	asOf time.Time
-	s    *SVISurface
+// Option configures a Store.
+type Option func(*Store)
+
+// WithHorizon sets how far back versions are retained, measured from the newest
+// version held for that underlying. Zero or negative selects
+// pit.DefaultHorizon; there is no "retain forever".
+func WithHorizon(d time.Duration) Option {
+	return func(st *Store) { st.horizon = pit.Horizon(d) }
 }
 
-// NewStore returns an empty point-in-time surface store.
-func NewStore() *Store {
-	return &Store{byUnderlying: map[string][]surfaceVersion{}}
+// NewStore returns an empty point-in-time surface store retaining
+// pit.DefaultHorizon of versions unless WithHorizon says otherwise.
+func NewStore(opts ...Option) *Store {
+	st := &Store{byUnderlying: map[string][]pit.Version[*SVISurface]{}, horizon: pit.DefaultHorizon}
+	for _, o := range opts {
+		o(st)
+	}
+	return st
 }
 
 // Put publishes a surface for the underlying effective at asOf; out-of-order
 // versions insert in place, same-asOf replaces (the curve.Store contract).
+// Versions older than the horizon are dropped here, under the write lock.
 func (st *Store) Put(underlyingID string, asOf time.Time, s *SVISurface) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	vs := st.byUnderlying[underlyingID]
-	i := sort.Search(len(vs), func(i int) bool { return !vs[i].asOf.Before(asOf) })
-	if i < len(vs) && vs[i].asOf.Equal(asOf) {
-		vs[i].s = s
-	} else {
-		vs = append(vs, surfaceVersion{})
-		copy(vs[i+1:], vs[i:])
-		vs[i] = surfaceVersion{asOf: asOf, s: s}
-	}
+	vs, _ := pit.Put(st.byUnderlying[underlyingID], asOf, s, st.horizon)
 	st.byUnderlying[underlyingID] = vs
 }
 
@@ -381,11 +392,11 @@ func (st *Store) Vol(_ context.Context, underlyingID string, strike, ttmYears fl
 	st.mu.RLock()
 	defer st.mu.RUnlock()
 	vs := st.byUnderlying[underlyingID]
-	i := sort.Search(len(vs), func(i int) bool { return vs[i].asOf.After(asOf) })
-	if i == 0 {
+	s, ok := pit.At(vs, asOf)
+	if !ok {
 		return 0, false
 	}
-	return vs[i-1].s.Vol(strike, ttmYears)
+	return s.Vol(strike, ttmYears)
 }
 
 // Calibrator ties the existing QuoteProvider seam to the fit and the store:

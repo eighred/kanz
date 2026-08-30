@@ -11,6 +11,7 @@ import (
 
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/refdata"
+	"github.com/eighred/kanz/internal/risk/pricing/pit"
 	"github.com/eighred/kanz/pkg/secret"
 )
 
@@ -213,6 +214,19 @@ type Config struct {
 	// CalibrationRates is the raw rate-instrument reference spec
 	// (RISK_ENGINE_CALIBRATION_RATES), parsed by livequote.ParseRateInstruments.
 	CalibrationRates string
+	// CalibrationHorizon is how far back the point-in-time curve store retains
+	// calibrated versions (RISK_ENGINE_CALIBRATION_HORIZON), measured from the
+	// newest version held for a currency. Unset ⇒ pit.DefaultHorizon.
+	//
+	// IT IS PAIRED WITH THE CADENCE, AND Load REFUSES THE PAIR IT CANNOT HOLD
+	// (#811). Retention used to be unbounded — a version per refresh, none ever
+	// removed — so the pod's memory tracked uptime rather than the book. A
+	// horizon bounds it at horizon/CalibrationInterval versions per currency,
+	// which means the two settings are one decision: a horizon that looks
+	// reasonable beside a cadence that does not is how the bound gets set and
+	// still fails. Load computes the product and refuses to start above
+	// pit.MaxVersionsPerKey rather than letting the store discover it.
+	CalibrationHorizon time.Duration
 	// MarketSubjects are the market.v1 quote subjects the calibration cache
 	// subscribes (RISK_ENGINE_MARKET_SUBJECTS); default the MARKET wildcard.
 	// Comma-separated. Only used when the scheduler is enabled.
@@ -248,6 +262,11 @@ func Load() (Config, error) {
 	marketSubjects := env.SplitList(os.Getenv("RISK_ENGINE_MARKET_SUBJECTS"))
 	if len(marketSubjects) == 0 {
 		marketSubjects = DefaultMarketSubjects
+	}
+	calibrationInterval := parseDuration(os.Getenv("RISK_ENGINE_CALIBRATION_INTERVAL"))
+	horizon, err := calibrationHorizon(calibrationInterval)
+	if err != nil {
+		return Config{}, err
 	}
 
 	// All three are resolved before the literal so a DECLARED-but-unreadable
@@ -332,9 +351,10 @@ func Load() (Config, error) {
 		GRPCListen:   os.Getenv("RISK_ENGINE_GRPC_LISTEN"),
 		SPIFFESocket: os.Getenv("RISK_ENGINE_SPIFFE_SOCKET"),
 
-		CalibrationInterval: parseDuration(os.Getenv("RISK_ENGINE_CALIBRATION_INTERVAL")),
+		CalibrationInterval: calibrationInterval,
 		CalibrationNightly:  nightly,
 		CalibrationRates:    os.Getenv("RISK_ENGINE_CALIBRATION_RATES"),
+		CalibrationHorizon:  horizon,
 		MarketSubjects:      marketSubjects,
 	}, nil
 }
@@ -372,6 +392,65 @@ func parseBoolDefault(key string, def bool, nearMisses ...string) (bool, error) 
 		return false, fmt.Errorf("risk-engine: %s=%q is not a boolean (use true or false)", key, raw)
 	}
 	return v, nil
+}
+
+// calibrationHorizon resolves RISK_ENGINE_CALIBRATION_HORIZON against the
+// intraday cadence and refuses the pair the curve store cannot hold (#811).
+//
+// THREE REFUSALS, AND EACH ONE IS A CASE THAT USED TO LOOK HEALTHY.
+//
+//  1. A MALFORMED VALUE IS AN ERROR, not a fallback. parseDuration answers 0 for
+//     anything time.ParseDuration rejects, and 0 here would silently become the
+//     default — so an operator who wrote "7days" instead of "168h" would be told
+//     nothing, see their variable in the pod spec, and get a horizon they did not
+//     choose. The same stance parseBoolDefault takes, for the same reason.
+//
+//  2. A NON-POSITIVE VALUE IS AN ERROR rather than "retain everything". Unbounded
+//     retention is the defect this configuration exists to close, and there is
+//     deliberately no spelling that reopens it: pit.Put would treat a zero
+//     horizon as "keep every version", so an operator who set 0 believing it
+//     meant "no limit" would get exactly #811 back with the knob reading as
+//     configured.
+//
+//  3. A CADENCE THE HORIZON CANNOT HOLD IS AN ERROR AT STARTUP. horizon/interval
+//     is the retained-version count per currency, and the two settings are one
+//     decision made in two places. A one-second cadence under the seven-day
+//     default is ~605k curves per currency in a pod that reports itself healthy
+//     until it is OOM-killed — and calibration latency climbs the whole way,
+//     because a store this size is what every Refresh inserts into. Refusing the
+//     pair names both numbers while an operator can still change either.
+//
+// Only the intraday cadence is checked. The nightly job publishes at the same
+// as-ofs into the same list at 24h spacing, so it adds single digits to the
+// count and cannot be what breaches the ceiling.
+func calibrationHorizon(interval time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("RISK_ENGINE_CALIBRATION_HORIZON"))
+	horizon := pit.DefaultHorizon
+	if raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return 0, fmt.Errorf("risk-engine: RISK_ENGINE_CALIBRATION_HORIZON=%q is not a Go "+
+				"duration (e.g. 168h for the %s default)", raw, pit.DefaultHorizon)
+		}
+		if d <= 0 {
+			return 0, fmt.Errorf("risk-engine: RISK_ENGINE_CALIBRATION_HORIZON=%q is not positive. "+
+				"There is no value meaning \"retain every calibrated curve\" — that is the "+
+				"unbounded retention #811 closed. Unset the variable for the %s default",
+				raw, pit.DefaultHorizon)
+		}
+		horizon = d
+	}
+	if interval <= 0 {
+		return horizon, nil // the calibration scheduler is off; nothing publishes versions
+	}
+	if retained := int64(horizon / interval); retained > pit.MaxVersionsPerKey {
+		return 0, fmt.Errorf("risk-engine: a %s calibration horizon at a %s intraday cadence "+
+			"retains %d curves per currency, above the %d ceiling. Lengthen "+
+			"RISK_ENGINE_CALIBRATION_INTERVAL or shorten RISK_ENGINE_CALIBRATION_HORIZON — the "+
+			"two are one decision, and the pod would otherwise grow until it is OOM-killed",
+			horizon, interval, retained, pit.MaxVersionsPerKey)
+	}
+	return horizon, nil
 }
 
 // parseDuration parses a Go duration (e.g. "30s", "2m"); an empty or malformed
