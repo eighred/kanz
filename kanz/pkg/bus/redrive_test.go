@@ -533,3 +533,42 @@ func TestRedriverRequiresADurableGroup(t *testing.T) {
 func withHeader(k, v string) func(map[string]string) {
 	return func(h map[string]string) { h[k] = v }
 }
+
+// failingSubscribeDLQ fails the subscription outright — a stream that is not
+// there, a permission the drain does not hold. It is the one ending that
+// reaches Run's return WITHOUT the handler having cancelled runCtx, because the
+// handler never ran.
+type failingSubscribeDLQ struct{ err error }
+
+func (f *failingSubscribeDLQ) Subscribe(context.Context, string, string, bus.Handler) error {
+	return f.err
+}
+
+// A FINISHED RUN RETURNS AT ONCE, whatever finished it.
+//
+// The idle watchdog is joined on the way out (#813), and it only leaves early
+// when runCtx is cancelled — so the deferred cancel() has to unwind BEFORE the
+// deferred Wait(). Registered the other way round this still terminates, which
+// is exactly why it needs an assertion rather than an argument: the watchdog's
+// own timer fires after IdleTimeout and the run completes, just five seconds
+// late, with an operator watching a drain that has already failed say nothing.
+func TestRedriverReturnsAsSoonAsTheSubscriptionEnds(t *testing.T) {
+	const idle = 3 * time.Second
+	src := &failingSubscribeDLQ{err: errors.New("stream not found")}
+	r := &bus.Redriver{Source: src, Dest: &recordingPublisher{}, IdleTimeout: idle}
+
+	start := time.Now()
+	_, err := r.Run(context.Background(), parkedSubject, "kanz-redrive")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Run succeeded despite a subscription that failed outright")
+	}
+	if elapsed > idle/3 {
+		t.Fatalf("Run took %s to return after the subscription failed immediately, with "+
+			"IdleTimeout=%s. The idle watchdog is joined before Run returns and stops only on "+
+			"runCtx — so cancel() must be deferred AFTER the Wait() (LIFO puts it first). "+
+			"Reversed, every run that ends without the handler having cancelled pays the whole "+
+			"idle timeout before reporting the error it already has.", elapsed, idle)
+	}
+}
