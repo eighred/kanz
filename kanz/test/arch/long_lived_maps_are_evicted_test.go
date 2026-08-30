@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// EVERY LONG-LIVED MAP IN pkg/bus MUST HAVE AN EVICTOR (#805).
+// EVERY LONG-LIVED MAP IN A COVERED PACKAGE MUST HAVE AN EVICTOR (#805, #834).
 //
 // # What this is protecting
 //
@@ -30,6 +30,13 @@ import (
 // The whole package had exactly three delete( calls and all three belonged to
 // DedupWindow.
 //
+// The second scope is the same shape one service out (#834): the api-gateway's
+// quota middleware held a token bucket and an in-flight counter per PRINCIPAL
+// and evicted from neither, so a gateway that stayed up across staff turnover,
+// service accounts and rotated subjects accumulated one entry per identity it
+// had ever served. The gateway is the sole entry point for POST /v1/orders, so
+// its heap is on the critical path for placing an order at all.
+//
 // # Why the guard is about the FIELD and not about a number
 //
 // A test can show today's map is bounded. What it cannot notice is the NEXT map
@@ -37,9 +44,19 @@ import (
 // per-tenant cache, a per-consumer watermark. Every one of those is a leak on
 // the same shape, and none of them fails anything until a pod dies of it.
 //
-// So this is default-deny over the map-typed fields of pkg/bus's long-lived
-// types: each one must be named by a delete( somewhere in the package, or
-// exempted on purpose with the reason.
+// So this is default-deny over the map-typed fields of each covered package's
+// long-lived types: each one must be named by a delete( on ITS OWN receiver
+// somewhere in the package, or exempted on purpose with the reason.
+//
+// # Why it is keyed by Type.field and not by field name
+//
+// Field names repeat. The middleware package held `buckets` on TWO types and
+// only one of them ever got an evictor — under a name-keyed check the fixed one
+// would have vouched for the unfixed one, and the guard would have gone green
+// over a live leak. Attribution is therefore by the enclosing method's receiver:
+// delete(q.inflight, k) inside func (q *quota) counts for quota.inflight and for
+// nothing else. A delete on a field the guard cannot attribute is an ERROR, not
+// a pass — see the unattributed arm below.
 //
 // # Why it reads the AST with comments detached
 //
@@ -47,9 +64,40 @@ import (
 // a regex over raw source matched their own explanatory prose. The paragraph you
 // are reading cannot satisfy anything below.
 
-const busDir = "pkg/bus"
+// evictionScope is one package under this guard, plus the anchors that prove the
+// walk actually reached it. The anchors are NON-VACUITY, not policy: they are
+// existing fields whose disappearance means the scan drifted rather than the
+// estate got cleaner, so every assertion below would pass over an empty set.
+type evictionScope struct {
+	dir string
+	// minFiles is a floor on non-test files parsed — a moved or renamed package
+	// otherwise scans zero files and reports nothing wrong.
+	minFiles int
+	// mustFind are Type.field names the struct walk has to see.
+	mustFind []string
+	// mustEvict is a Type.field that has had an evictor since it was written. It
+	// also proves receiver attribution works: it only resolves if the delete site
+	// was tied back to its own type.
+	mustEvict string
+}
 
-// mapEvictionExempt names a map field that may live without an evictor, and why.
+var evictionScopes = []evictionScope{
+	{
+		dir:       "pkg/bus",
+		minFiles:  5,
+		mustFind:  []string{"Producer.sequence", "DedupWindow.expiry"},
+		mustEvict: "DedupWindow.expiry",
+	},
+	{
+		dir:       "services/api-gateway/internal/middleware",
+		minFiles:  5,
+		mustFind:  []string{"quota.inflight", "bucketSet.buckets", "replayCache.entries"},
+		mustEvict: "replayCache.entries",
+	},
+}
+
+// mapEvictionExempt names a map field ("Package: Type.field") that may live
+// without an evictor, and why.
 //
 // DEFAULT-DENY: a field on a long-lived type, not listed here and not deleted
 // from anywhere, fails. An entry is a claim that the key space is BOUNDED BY
@@ -62,19 +110,110 @@ const busDir = "pkg/bus"
 // exemption, because it reads as a decision somebody made.
 var mapEvictionExempt = map[string]string{}
 
-func TestEveryLongLivedMapInTheBusHasAnEvictor(t *testing.T) {
+func TestEveryLongLivedMapHasAnEvictor(t *testing.T) {
 	root := moduleRoot(t)
-	dir := filepath.Join(root, filepath.FromSlash(busDir))
+	if len(evictionScopes) == 0 {
+		t.Fatal("no packages are under this guard — it is asserting nothing")
+	}
+
+	usedExempt := map[string]bool{}
+
+	for _, scope := range evictionScopes {
+		t.Run(scope.dir, func(t *testing.T) {
+			mapFields, deleted, unattributed, files := scanEviction(t, filepath.Join(root, filepath.FromSlash(scope.dir)))
+
+			// NON-VACUITY 1: the package was actually read.
+			if files < scope.minFiles {
+				t.Fatalf("parsed only %d non-test file(s) in %s — the package moved and this guard is "+
+					"scanning nothing", files, scope.dir)
+			}
+			// NON-VACUITY 2: the struct walk found the maps this scope names.
+			for _, must := range scope.mustFind {
+				if !mapFields[must] {
+					t.Fatalf("the struct scan did not find a map field %q in %s — it is one this guard "+
+						"was written about, so the walk has drifted and its verdict is empty",
+						must, scope.dir)
+				}
+			}
+			// NON-VACUITY 3: the delete scan can find one, ATTRIBUTED TO ITS TYPE.
+			if !deleted[scope.mustEvict] {
+				t.Fatalf("the delete scan did not attribute any delete( to %s in %s — that field has had "+
+					"an evictor since it was written, so receiver attribution is broken and this walk "+
+					"would report every map as unevicted or none of them", scope.mustEvict, scope.dir)
+			}
+
+			// UNATTRIBUTED ARM: a delete on a struct field the guard cannot tie to
+			// the enclosing method's receiver. Silently counting it for every field
+			// of that name is how a name-keyed check let one type's fix vouch for
+			// another's leak, so it fails loudly and asks to be taught instead.
+			if len(unattributed) > 0 {
+				sort.Strings(unattributed)
+				t.Errorf("delete( sites in %s that this guard cannot attribute to a receiver: %v.\n\n"+
+					"Attribution is what keeps one type's evictor from vouching for another type's "+
+					"leak. Either move the delete into a method on the owning type, or extend "+
+					"scanEviction to resolve this shape — do not leave it unattributed.",
+					scope.dir, unattributed)
+			}
+
+			var unevicted []string
+			for field := range mapFields {
+				if deleted[field] {
+					continue
+				}
+				key := scope.dir + ": " + field
+				if reason, ok := mapEvictionExempt[key]; ok {
+					usedExempt[key] = true
+					t.Logf("%s: exempt — %s", key, reason)
+					continue
+				}
+				unevicted = append(unevicted, field)
+			}
+
+			if len(unevicted) > 0 {
+				sort.Strings(unevicted)
+				t.Errorf("these long-lived maps have no delete( on their own receiver anywhere in %[2]s: %[1]v.\n\n"+
+					"A map on a type that lives as long as the process, with a key that grows with "+
+					"traffic, is a leak that reports nothing until the pod is OOM-killed. On the "+
+					"execution path that means orders in flight at an unknown state and a restart that "+
+					"has to reconcile them — which is what Producer.sequence cost, keyed by order id, in "+
+					"the platform's highest-throughput map (#805); one service out it was the gateway's "+
+					"per-principal quota maps, on the only route that accepts an order (#834).\n\n"+
+					"Give it an evictor (bus.Producer.gcSequence, bus.DedupWindow.gc and "+
+					"middleware.bucketSet.gc are the shapes the estate already uses), or add "+
+					"%[2]q + \": \" + the field to mapEvictionExempt with the argument that its key "+
+					"space is bounded BY CONSTRUCTION — not that it looks small today.", unevicted, scope.dir)
+			}
+		})
+	}
+
+	// DEAD-ENTRY ARM: an exemption that matches no field in any scope, or one
+	// whose field has since grown an evictor, is a claim nobody is checking any
+	// more. It runs outside the subtests so an exemption naming a scope that no
+	// longer exists is caught too.
+	for key, reason := range mapEvictionExempt {
+		if !usedExempt[key] {
+			t.Errorf("exemption %q (%s) was never applied — either it names no map field in a "+
+				"covered package, or that field now HAS an evictor. Delete it: an exemption nobody "+
+				"checks reads as a decision somebody made.", key, reason)
+		}
+	}
+}
+
+// scanEviction parses dir's non-test files and returns the mutex-guarded map
+// fields it holds ("Type.field"), the ones a delete( names through their own
+// receiver, any delete on a struct field it could not attribute, and the number
+// of files read.
+func scanEviction(t *testing.T, dir string) (mapFields, deleted map[string]bool, unattributed []string, files int) {
+	t.Helper()
 
 	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
-		t.Fatalf("glob %s: %v", busDir, err)
+		t.Fatalf("glob %s: %v", dir, err)
 	}
 
 	fset := token.NewFileSet()
-	mapFields := map[string]string{} // field name -> "Type.field"
-	deleted := map[string]bool{}     // field names appearing as delete(x.field, …)
-	files := 0
+	mapFields = map[string]bool{}
+	deleted = map[string]bool{}
 
 	for _, p := range paths {
 		if strings.HasSuffix(p, "_test.go") {
@@ -88,107 +227,92 @@ func TestEveryLongLivedMapInTheBusHasAnEvictor(t *testing.T) {
 		files++
 
 		ast.Inspect(file, func(n ast.Node) bool {
-			switch v := n.(type) {
-			case *ast.TypeSpec:
-				st, ok := v.Type.(*ast.StructType)
-				if !ok {
-					return true
+			ts, ok := n.(*ast.TypeSpec)
+			if !ok {
+				return true
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				return true
+			}
+			// LONG-LIVED IS "GUARDED BY A MUTEX", and that is a discriminator
+			// rather than a proxy. A map that needs a lock is one more than one
+			// goroutine reaches, which means it belongs to something the process
+			// holds — a Producer, a window, a registry. A map on a per-message
+			// value like Message.Headers dies with the message and cannot leak,
+			// and the first draft of this guard flagged exactly that before this
+			// arm existed.
+			if !isMutexGuarded(st) {
+				return true
+			}
+			for _, f := range st.Fields.List {
+				if _, isMap := f.Type.(*ast.MapType); !isMap {
+					continue
 				}
-				// LONG-LIVED IS "GUARDED BY A MUTEX", and that is a discriminator
-				// rather than a proxy. A map that needs a lock is one more than one
-				// goroutine reaches, which means it belongs to something the process
-				// holds — a Producer, a window, a registry. A map on a per-message
-				// value like Message.Headers dies with the message and cannot leak,
-				// and the first draft of this guard flagged exactly that before this
-				// arm existed.
-				if !isMutexGuarded(st) {
-					return true
-				}
-				for _, f := range st.Fields.List {
-					if _, isMap := f.Type.(*ast.MapType); !isMap {
-						continue
-					}
-					for _, name := range f.Names {
-						mapFields[name.Name] = v.Name.Name + "." + name.Name
-					}
-				}
-			case *ast.CallExpr:
-				id, ok := v.Fun.(*ast.Ident)
-				if !ok || id.Name != "delete" || len(v.Args) == 0 {
-					return true
-				}
-				if sel, ok := v.Args[0].(*ast.SelectorExpr); ok {
-					deleted[sel.Sel.Name] = true
+				for _, name := range f.Names {
+					mapFields[ts.Name.Name+"."+name.Name] = true
 				}
 			}
 			return true
 		})
-	}
 
-	// NON-VACUITY 1: the package was actually read.
-	if files < 5 {
-		t.Fatalf("parsed only %d non-test file(s) in %s — the package moved and this guard is "+
-			"scanning nothing", files, busDir)
-	}
-	// NON-VACUITY 2: the field scan found the maps this guard exists for. If the
-	// struct walk breaks, every assertion below passes over an empty set.
-	for _, must := range []string{"sequence", "expiry"} {
-		if mapFields[must] == "" {
-			t.Fatalf("the struct scan did not find a map field named %q — it is one of the two "+
-				"this guard was written about, so the walk has drifted and its verdict is empty",
-				must)
+		// Deletes are walked per FuncDecl so the enclosing method's receiver is
+		// known. A closure a method RETURNS is still inside that decl — which is
+		// where quota.acquire's release func deletes from — so it attributes too.
+		for _, d := range file.Decls {
+			fn, isFunc := d.(*ast.FuncDecl)
+			if !isFunc || fn.Body == nil {
+				continue
+			}
+			recvName, recvType := receiverOf(fn)
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok || id.Name != "delete" || len(call.Args) == 0 {
+					return true
+				}
+				sel, ok := call.Args[0].(*ast.SelectorExpr)
+				if !ok {
+					return true // delete on a local map: not a field, cannot outlive its scope
+				}
+				base, ok := sel.X.(*ast.Ident)
+				if ok && recvName != "" && base.Name == recvName {
+					deleted[recvType+"."+sel.Sel.Name] = true
+					return true
+				}
+				unattributed = append(unattributed,
+					filepath.Base(p)+": delete("+exprString(sel)+", ...) in "+fn.Name.Name)
+				return true
+			})
 		}
 	}
-	// NON-VACUITY 3: the delete scan can find one. DedupWindow.expiry has had an
-	// evictor since it was written; if this stops being seen, the delete walk is
-	// broken rather than the estate clean.
-	if !deleted["expiry"] {
-		t.Fatal("the delete scan found no delete(…expiry…) — DedupWindow has evicted from it since " +
-			"it was written, so this walk is broken and would report every map as unevicted or " +
-			"none of them")
-	}
+	return mapFields, deleted, unattributed, files
+}
 
-	var unevicted []string
-	usedExempt := map[string]bool{}
-	for field, where := range mapFields {
-		if deleted[field] {
-			continue
-		}
-		if reason, ok := mapEvictionExempt[field]; ok {
-			usedExempt[field] = true
-			t.Logf("%s: exempt — %s", where, reason)
-			continue
-		}
-		unevicted = append(unevicted, where)
+// receiverOf returns a method's receiver variable name and its base type name.
+// Both are empty for a plain function.
+func receiverOf(fn *ast.FuncDecl) (name, typeName string) {
+	if fn.Recv == nil || len(fn.Recv.List) != 1 {
+		return "", ""
 	}
-
-	if len(unevicted) > 0 {
-		sort.Strings(unevicted)
-		t.Errorf("these long-lived maps have no delete( anywhere in %[2]s: %[1]v.\n\n"+
-			"A map on a type that lives as long as the process, with a key that grows with "+
-			"traffic, is a leak that reports nothing until the pod is OOM-killed. On the "+
-			"execution path that means orders in flight at an unknown state and a restart that "+
-			"has to reconcile them — which is what Producer.sequence cost, keyed by order id, in "+
-			"the platform's highest-throughput map (#805).\n\n"+
-			"Give it an evictor (Producer.gcSequence and DedupWindow.gc are the two shapes this "+
-			"package already uses), or add it to mapEvictionExempt with the argument that its key "+
-			"space is bounded BY CONSTRUCTION — not that it looks small today.", unevicted, busDir)
+	f := fn.Recv.List[0]
+	if len(f.Names) == 1 {
+		name = f.Names[0].Name
 	}
-
-	_ = usedExempt
-
-	// DEAD-ENTRY ARM: an exemption that matches no field, or one that has since
-	// grown an evictor, is a claim nobody is checking any more.
-	for field, reason := range mapEvictionExempt {
-		if mapFields[field] == "" {
-			t.Errorf("exemption for %q (%s) matches no map field in %s — delete it", field, reason, busDir)
-			continue
-		}
-		if deleted[field] {
-			t.Errorf("exemption for %q (%s) is stale: the field now HAS an evictor, so the "+
-				"exemption is recording permission nobody needs", field, reason)
-		}
+	typ := f.Type
+	if star, ok := typ.(*ast.StarExpr); ok {
+		typ = star.X
 	}
+	if id, ok := typ.(*ast.Ident); ok {
+		typeName = id.Name
+	}
+	if name == "" || typeName == "" {
+		return "", ""
+	}
+	return name, typeName
 }
 
 // isMutexGuarded reports whether a struct holds a sync.Mutex or sync.RWMutex —
