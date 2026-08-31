@@ -131,17 +131,33 @@ message ExposureRequest {
   // INVALID_ARGUMENT.
   string portfolio_id = 1;
 
-  // as_of pins the query to a point in time. Unset ⇒ latest. The response
-  // as_of reports the actual state timestamp, which may be older when the
-  // engine is degraded.
+  // as_of is RESERVED AND NOT HONOURED. Unset ⇒ latest, which is the only
+  // query the engine can answer; ANY OTHER VALUE IS REFUSED with
+  // INVALID_ARGUMENT (#859).
+  //
+  // It used to read "pins the query to a point in time", and that was a
+  // promise nothing kept: the field was parsed by the gateway, forwarded
+  // here, and never read by the engine, which answered every query from
+  // live state and stamped the response with the live timestamp. A caller
+  // pinning last Tuesday got today's book, internally consistent and
+  // wrong, with nothing flagged. The refusal is what makes the gap
+  // visible; honouring it needs a point-in-time read of risk state that
+  // does not exist yet.
+  //
+  // The field is RETAINED rather than reserved-in-the-proto-sense because
+  // v1 is additive-only and clients already send it — a removed field
+  // would be dropped silently by old clients, which is the same silence
+  // one layer down.
   google.protobuf.Timestamp as_of = 2;
 }
 
 // ExposureResponse is the reply to ExposureRequest.
 message ExposureResponse {
   string portfolio_id = 1;
-  // as_of is the state timestamp the response was computed against —
-  // equal to or older than the request as_of when set.
+  // as_of is the state timestamp the response was computed against. It is
+  // always the LATEST applied state: the request as_of is refused rather
+  // than honoured (#859), so this reports what the answer is, never what
+  // the caller asked for.
   google.protobuf.Timestamp as_of = 2;
   // set is the exposure aggregate, the same payload exposure FACTs carry.
   domain.v1.ExposureSet set = 3;
@@ -166,6 +182,8 @@ message ExposureResponse {
 // MeasuresRequest scopes a risk-measure query.
 message MeasuresRequest {
   string portfolio_id = 1;
+  // as_of is RESERVED AND NOT HONOURED — see ExposureRequest.as_of. Unset ⇒
+  // latest; any other value is REFUSED with INVALID_ARGUMENT (#859).
   google.protobuf.Timestamp as_of = 2;
   // measures narrows the response to a named subset (e.g. ["VaR99",
   // "Delta"]); empty ⇒ all measures the engine computes.
@@ -175,6 +193,7 @@ message MeasuresRequest {
 // MeasuresResponse is the reply to MeasuresRequest.
 message MeasuresResponse {
   string portfolio_id = 1;
+  // as_of is the latest applied state timestamp — see ExposureResponse.as_of.
   google.protobuf.Timestamp as_of = 2;
   domain.v1.RiskMeasureSet set = 3;
   repeated QualityFlag quality_flags = 4;
