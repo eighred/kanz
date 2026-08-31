@@ -69,17 +69,20 @@ type okxOrdersMsg struct {
 // folds dedup the two.
 type OKXUserDataIngester struct {
 	stream UserDataStream
-	lookup OrderLookup
+	// orders is the adapter's own order view, READ AND WRITTEN (#904). Read to
+	// enrich the push; written so the fill this ingester just published as a FACT
+	// is also the fill the adapter believes in — see handle.
+	orders OrderTracker
 	pub    Publisher
 	venue  string
 	tenant string
 }
 
-func newOKXUserDataIngester(stream UserDataStream, lookup OrderLookup, pub Publisher, venue, tenant string) *OKXUserDataIngester {
+func newOKXUserDataIngester(stream UserDataStream, orders OrderTracker, pub Publisher, venue, tenant string) *OKXUserDataIngester {
 	if venue == "" {
 		venue = "OKX"
 	}
-	return &OKXUserDataIngester{stream: stream, lookup: lookup, pub: pub, venue: venue, tenant: tenant}
+	return &OKXUserDataIngester{stream: stream, orders: orders, pub: pub, venue: venue, tenant: tenant}
 }
 
 // Run reads the stream until ctx is cancelled or the stream errors.
@@ -115,7 +118,7 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		if d.AlgoClOrdID != "" {
 			orderID = d.AlgoClOrdID
 		}
-		st, ok := i.lookup.Lookup(orderID)
+		st, ok := i.orders.Lookup(orderID)
 		if !ok {
 			continue
 		}
@@ -178,6 +181,20 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		}); err != nil {
 			return err
 		}
+		// AND NOW THIS ADAPTER'S OWN VIEW AGREES WITH THE FACT IT JUST PUBLISHED (#904).
+		//
+		// healed carries okxStateToProto(d.State) — OKX's OWN state field, so
+		// "filled" and "partially_filled" are the venue's verdict and not an
+		// inference from accFillSz. A PARTIAL is recorded as PARTIALLY_FILLED,
+		// which orderview.Terminal does NOT treat as terminal, so the order stays
+		// in Open and the healing watchdog keeps reconciling it. Marking a
+		// partially filled order terminal would hide a LIVE order from the
+		// watchdog, which is a far worse failure than the unbounded view this
+		// closes.
+		//
+		// AFTER the publish, not before: the view must never claim an order
+		// finished on the strength of a FACT that did not reach the bus.
+		i.orders.Progressed(healed)
 	}
 	return nil
 }

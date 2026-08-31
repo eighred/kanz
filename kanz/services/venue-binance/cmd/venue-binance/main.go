@@ -388,7 +388,7 @@ func serve(cfg config.Config) error {
 
 	conn.Start(ctx, execution.WorkerDeps{
 		Publisher: publishHealth,
-		Lookup:    seam,
+		Orders:    seam,
 		Expected:  seam,
 		// BOUND AT LAST (#418). accounting announces what each portfolio holds per
 		// EXCHANGE ACCOUNT (#450) and this view folds the entries for the one

@@ -15,6 +15,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/venueadapter/orderview"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -41,9 +42,48 @@ func (s *okxStream) Recv(context.Context) ([]byte, error) {
 	return b, nil
 }
 
-type okxLookup map[string]*orderpb.OrderState
+// okxOrders is the adapter's REAL order view — orderview.Memory behind
+// orderview.Seam — and not a stub map, deliberately. #904 is a claim about what
+// the view DOES with a fill, and a hand-written double would be free to answer
+// however the test wanted.
+type okxOrders struct {
+	*orderview.Seam
+	store *orderview.Memory
+	errs  []error
+}
 
-func (l okxLookup) Lookup(id string) (*orderpb.OrderState, bool) { s, ok := l[id]; return s, ok }
+func newOKXOrders(ids ...string) *okxOrders {
+	f := &okxOrders{store: orderview.NewMemory()}
+	f.Seam = orderview.NewSeam(f.store, func(err error) { f.errs = append(f.errs, err) })
+	for _, id := range ids {
+		if err := f.store.Record(context.Background(), okxKanzOrder(id)); err != nil {
+			panic(err)
+		}
+	}
+	return f
+}
+
+func (f *okxOrders) get(t *testing.T, id string) *orderpb.OrderState {
+	t.Helper()
+	st, ok, err := f.store.Get(context.Background(), id)
+	if err != nil || !ok {
+		t.Fatalf("order %s is not in the adapter's view (ok=%v err=%v)", id, ok, err)
+	}
+	return st
+}
+
+func (f *okxOrders) openIDs(t *testing.T) []string {
+	t.Helper()
+	open, err := f.store.Open(context.Background())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	var ids []string
+	for _, o := range open {
+		ids = append(ids, o.GetOrderId())
+	}
+	return ids
+}
 
 func okxKanzOrder(id string) *orderpb.OrderState {
 	return &orderpb.OrderState{
@@ -54,8 +94,7 @@ func okxKanzOrder(id string) *orderpb.OrderState {
 }
 
 func okxIngesterOver(frames [][]byte, cap *okxCapture) *OKXUserDataIngester {
-	ing := newOKXUserDataIngester(&okxStream{frames: frames}, okxLookup{"o1": okxKanzOrder("o1")}, cap, "OKX", "fund-alpha")
-	return ing
+	return newOKXUserDataIngester(&okxStream{frames: frames}, newOKXOrders("o1"), cap, "OKX", "fund-alpha")
 }
 
 func TestOKXUserData_FillBecomesOrderFilled(t *testing.T) {

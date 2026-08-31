@@ -11,6 +11,8 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/coder/websocket"
+
+	"github.com/eighred/kanz/internal/venueadapter/orderview"
 )
 
 type fakeStream struct {
@@ -27,9 +29,51 @@ func (f *fakeStream) Recv(context.Context) ([]byte, error) {
 	return b, nil
 }
 
-type fakeLookup map[string]*orderpb.OrderState
+// fakeOrders is the adapter's REAL order view — orderview.Memory behind
+// orderview.Seam — and not a stub map, deliberately. #904 is a claim about what
+// the view DOES with a fill, and a hand-written double would be free to answer
+// however the test wanted; this exercises the same Progress merge, the same
+// Terminal filter and the same eviction the connector runs in production.
+type fakeOrders struct {
+	*orderview.Seam
+	store *orderview.Memory
+	errs  []error
+}
 
-func (l fakeLookup) Lookup(id string) (*orderpb.OrderState, bool) { s, ok := l[id]; return s, ok }
+func newFakeOrders(ids ...string) *fakeOrders {
+	f := &fakeOrders{store: orderview.NewMemory()}
+	f.Seam = orderview.NewSeam(f.store, func(err error) { f.errs = append(f.errs, err) })
+	for _, id := range ids {
+		if err := f.store.Record(context.Background(), kanzOrder(id)); err != nil {
+			panic(err)
+		}
+	}
+	return f
+}
+
+// get is the adapter's own belief about one order, straight from the store.
+func (f *fakeOrders) get(t *testing.T, id string) *orderpb.OrderState {
+	t.Helper()
+	st, ok, err := f.store.Get(context.Background(), id)
+	if err != nil || !ok {
+		t.Fatalf("order %s is not in the adapter's view (ok=%v err=%v)", id, ok, err)
+	}
+	return st
+}
+
+// openIDs is what the healing watchdog would reconcile this pass.
+func (f *fakeOrders) openIDs(t *testing.T) []string {
+	t.Helper()
+	open, err := f.store.Open(context.Background())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	var ids []string
+	for _, o := range open {
+		ids = append(ids, o.GetOrderId())
+	}
+	return ids
+}
 
 func kanzOrder(id string) *orderpb.OrderState {
 	return &orderpb.OrderState{
@@ -40,9 +84,13 @@ func kanzOrder(id string) *orderpb.OrderState {
 }
 
 func ingesterOver(frames [][]byte, cap *reconCapture) *UserDataIngester {
+	return ingesterOverView(frames, cap, newFakeOrders("o1"))
+}
+
+func ingesterOverView(frames [][]byte, cap *reconCapture, view *fakeOrders) *UserDataIngester {
 	return newUserDataIngester(UserDataConfig{
 		Stream: &fakeStream{frames: frames},
-		Lookup: fakeLookup{"o1": kanzOrder("o1")},
+		Orders: view,
 		Pub:    cap, Venue: "BINANCE", Tenant: "fund-alpha",
 	})
 }

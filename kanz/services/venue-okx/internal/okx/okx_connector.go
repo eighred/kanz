@@ -70,7 +70,7 @@ func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
 			go rec.RunHealing(ctx, deps.HealInterval)
 		}
 	}
-	if deps.Lookup != nil {
+	if deps.Orders != nil {
 		go c.runUserData(ctx, deps)
 	}
 	// MARGIN IS READ FROM OKX, NOT DERIVED FROM OUR BOOK (#408, control 1). A nil
@@ -109,7 +109,7 @@ func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
 }
 
 func (c *OKXConnector) runUserData(ctx context.Context, deps WorkerDeps) {
-	ing := newOKXUserDataIngester(nil, deps.Lookup, deps.Publisher, c.settings.MIC, deps.Tenant)
+	ing := newOKXUserDataIngester(nil, deps.Orders, deps.Publisher, c.settings.MIC, deps.Tenant)
 	backoff := time.Second
 	for ctx.Err() == nil {
 		ws := newOKXUserDataWS(c.wsURL, c.settings.APIKey, string(c.rest.apiSecret), c.settings.Passphrase)

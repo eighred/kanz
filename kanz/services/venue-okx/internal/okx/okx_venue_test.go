@@ -25,6 +25,7 @@ type fakeOKX struct {
 	sawPostCl   string
 	sawPostSz   string // the size actually sent to the venue (#94)
 	posts       int
+	gets        int // GET /api/v5/trade/order count — a reconciler query-order (#904)
 	placeBody   string
 	queryBody   string
 	balanceBody string
@@ -52,6 +53,7 @@ func newFakeOKX(t *testing.T) *fakeOKX {
 			_, _ = w.Write([]byte(f.placeBody))
 			return
 		}
+		f.gets++
 		f.sawClOrd = r.URL.Query().Get("clOrdId")
 		_, _ = w.Write([]byte(f.queryBody))
 	})

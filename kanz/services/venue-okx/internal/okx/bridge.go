@@ -25,6 +25,11 @@ type (
 	// OrderLookup enriches an exchange execution report (which carries only the
 	// clOrdId) with Kanz order context. Backed by THIS adapter's own order view.
 	OrderLookup = execution.OrderLookup
+	// OrderTracker is that same view's WRITE half alongside it (#904): the
+	// user-data ingester advances an order here when the venue reports it
+	// filled, so a filled order goes terminal in the adapter's own view instead
+	// of being re-queried and re-healed on every reconciliation pass forever.
+	OrderTracker = execution.OrderTracker
 	// ExpectedOrders is what this adapter believes is open at the venue.
 	ExpectedOrders = execution.ExpectedOrders
 	// ExpectedBalances is the per-asset balance the reconciler compares against.

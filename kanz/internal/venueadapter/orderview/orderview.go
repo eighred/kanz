@@ -83,13 +83,15 @@ func Terminal(s orderpb.OrderStatus) bool {
 //     ingester enriching an exchange execution report with the order's terms.
 //
 // So the ONLY thing a dropped entry can cost is the enrichment of a report that
-// arrives after the order went terminal. An order goes terminal in this view
-// only through Server.recordStatus, on a cancel the VENUE CONFIRMED — the
-// exchange has already said the order will not trade again — so such a report
-// describes a trade that happened BEFORE the confirmation and is still in flight
-// on the websocket. Retention has to cover that lag, and a reconciliation pass
-// is this adapter's own statement of the timescale on which venue truth is
-// allowed to lag its view.
+// arrives after the order went terminal. There are exactly two ways an order
+// goes terminal in this view, and in BOTH the exchange has already said it will
+// not trade again: Server.recordStatus on a cancel the VENUE CONFIRMED, and
+// Progress on a venue report of FILLED (#904 — before that, a filled order never
+// went terminal here at all, which is why this eviction reached almost nothing).
+// So a later report describes a trade that happened BEFORE that verdict and is
+// still in flight on the websocket. Retention has to cover that lag, and a
+// reconciliation pass is this adapter's own statement of the timescale on which
+// venue truth is allowed to lag its view.
 //
 // THE RESIDUAL, STATED RATHER THAN GLOSSED. A report later than that finds
 // Lookup empty and is skipped — the same answer the ingester already gives for
@@ -323,11 +325,117 @@ func decode(blob []byte, orderID string) (*orderpb.OrderState, error) {
 }
 
 var (
-	_ Store = (*Memory)(nil)
-	_ Store = (*Postgres)(nil)
+	_ Store                  = (*Memory)(nil)
+	_ Store                  = (*Postgres)(nil)
+	_ execution.OrderTracker = (*Seam)(nil)
 )
 
-// Seam adapts a Store to the connector's OrderLookup + ExpectedOrders interfaces,
+// ErrNotInView is returned when Progress is asked to advance an order this
+// adapter has no record of. It is a REFUSAL, not a failure to find something:
+// the reported state is a partial reconstruction (the venue tells us a status
+// and a filled size, not an order's terms), so writing it as a new entry would
+// put an order into the view with its stop price, its GTD expiry, its parent,
+// its leverage and its margin mode all absent — the #405/#240 shape, a field the
+// system had and then quietly did not.
+var ErrNotInView = errors.New("orderview: order is not in this adapter's view")
+
+// ErrUnmappedStatus is returned when the reported status is UNSPECIFIED — the
+// answer both connectors' status tables give for a venue string they do not
+// know. UNSPECIFIED IS "THE VENUE SAID SOMETHING WE CANNOT READ", never "the
+// order has no status", and overwriting a known ROUTED with it would replace
+// what this adapter knows with what it does not.
+var ErrUnmappedStatus = errors.New("orderview: refusing to record an order at an unmapped venue status")
+
+// ErrTerminalNotReopened is returned when a non-terminal report arrives for an
+// order already terminal here. See Progress.
+var ErrTerminalNotReopened = errors.New("orderview: refusing to reopen a terminal order")
+
+// Progress folds the venue's OWN report of an order's progress into this
+// adapter's view — the state the user-data ingester has ALREADY published as an
+// order.order.filled / order.order.partially_filled FACT (#904).
+//
+// WHY THIS EXISTS. Before it, the only writer that ever advanced an order to a
+// terminal status was Server.recordStatus on a venue-confirmed cancel. A FILLED
+// order stayed at the status the OMS handed Execute forever, so Open kept
+// returning it, the reconciler kept spending REST weight on it, healedState kept
+// finding permanent drift and re-emitting a StateHealed FACT for it every pass,
+// and DefaultTerminalRetention could never evict it because it never went
+// terminal. This is the write that makes all four stop.
+//
+// IT MERGES, IT DOES NOT REPLACE, and that is the load-bearing half. Both
+// ingesters build their healed OrderState from scratch out of the venue report
+// plus a handful of Kanz terms — twelve of the message's thirty-two fields.
+// Recording it wholesale would silently drop stop_price, expire_at,
+// arrival_price/arrival_at, execution_schedule, parent_order_id, venue_account_id,
+// quarantine, leverage, margin_mode and the release_* marks from an order the
+// adapter is still working. That is precisely the defect
+// test/arch/submit_fields_reach_state_test.go exists to catch one layer up: a
+// field the system accepted and then did not carry. So the stored order stays
+// authoritative for its terms, and only what the EXCHANGE observed — status,
+// filled and leaves quantities, average fill price, as_of — is taken from the
+// report, and only where the report actually set it.
+//
+// A TERMINAL ORDER IS NEVER REOPENED. A late or out-of-order report — a trade
+// executed before a cancel the venue then confirmed, arriving on the websocket
+// after it — would otherwise move a CANCELLED or FILLED order back to
+// PARTIALLY_FILLED, put it back into Open, restart the re-query and the
+// duplicate FACTs, and reset the eviction it had become eligible for. Terminal
+// to terminal IS allowed: the venue saying FILLED about an order we recorded
+// CANCELLED is venue truth about a trade that happened, and Memory keeps the
+// FIRST terminal sighting as the retention clock so this cannot refresh it.
+//
+// CONCURRENCY, STATED RATHER THAN IMPLIED. This is a read-modify-write across
+// two Store calls and is NOT atomic; only the individual calls are. The single
+// writer of fill progress is one ingester goroutine, and the other two writers
+// overwrite unconditionally with something they already know (Execute records
+// the OMS's state, recordStatus records CANCELLED), so a lost update here costs
+// at most one pass of staleness that the reconciler then heals. It cannot
+// fabricate a status: every value written came from a venue report. -race does
+// not run on the usual Windows box (no cgo), so CI is the detector for this
+// path.
+func Progress(ctx context.Context, store Store, reported *orderpb.OrderState) error {
+	id := reported.GetOrderId()
+	if id == "" {
+		return errors.New("orderview: cannot record progress for an order with empty order_id")
+	}
+	next := reported.GetStatus()
+	if next == orderpb.OrderStatus_ORDER_STATUS_UNSPECIFIED {
+		return fmt.Errorf("%w: order %s", ErrUnmappedStatus, id)
+	}
+	cur, ok, err := store.Get(ctx, id)
+	if err != nil {
+		return fmt.Errorf("progress order %s: %w", id, err)
+	}
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrNotInView, id)
+	}
+	if Terminal(cur.GetStatus()) && !Terminal(next) {
+		return fmt.Errorf("%w: %s is %v and the venue now reports %v", ErrTerminalNotReopened, id, cur.GetStatus(), next)
+	}
+	merged, mok := proto.Clone(cur).(*orderpb.OrderState)
+	if !mok {
+		return fmt.Errorf("orderview: order %s did not clone", id)
+	}
+	merged.Status = next
+	// Each guarded on the report having SET it: a nil here would blank a quantity
+	// the view already holds, and a blanked filled_quantity reads downstream as an
+	// order that traded nothing.
+	if q := reported.GetFilledQuantity(); q != nil {
+		merged.FilledQuantity = q
+	}
+	if q := reported.GetLeavesQuantity(); q != nil {
+		merged.LeavesQuantity = q
+	}
+	if p := reported.GetAverageFillPrice(); p != nil {
+		merged.AverageFillPrice = p
+	}
+	if t := reported.GetAsOf(); t != nil {
+		merged.AsOf = t
+	}
+	return store.Record(ctx, merged)
+}
+
+// Seam adapts a Store to the connector's OrderTracker + ExpectedOrders interfaces,
 // which are synchronous and non-failing by design (they sit inside websocket and
 // reconciler loops that must not block on an error path). A store failure here
 // degrades to "I don't know about this order" — the reconciler then treats it as
@@ -361,6 +469,21 @@ func (s *Seam) OpenOrders() []*orderpb.OrderState {
 		return nil
 	}
 	return open
+}
+
+// Progressed satisfies execution.OrderTracker's write half: it records the venue's
+// own report of an order's progress, which is the state the caller has already
+// published as a fill FACT (#904).
+//
+// Non-failing, like Lookup and OpenOrders and for the same reason — it is called
+// from inside a websocket read loop. Every refusal and every store failure goes
+// to onErr instead, and NONE of them is silent: an order that stops advancing
+// here is one the reconciler will keep re-querying and re-healing forever, which
+// is the whole defect this method closes.
+func (s *Seam) Progressed(st *orderpb.OrderState) {
+	if err := Progress(context.Background(), s.store, st); err != nil {
+		s.report(err)
+	}
 }
 
 func (s *Seam) report(err error) {

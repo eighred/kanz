@@ -26,6 +26,7 @@ type fakeBinance struct {
 	sawType          string
 
 	posts       int    // POST /api/v3/order count — a healing sweep is a POST
+	gets        int    // GET /api/v3/order count — a reconciler query-order (#904)
 	deletes     int    // DELETE /api/v3/order count — a venue cancel
 	sawDeleteCl string // origClientOrderId of the last cancel
 
@@ -57,6 +58,7 @@ func newFakeBinance(t *testing.T) *fakeBinance {
 			f.sawDeleteCl = q.Get("origClientOrderId")
 			_, _ = w.Write([]byte(f.cancelBody))
 		default:
+			f.gets++
 			_, _ = w.Write([]byte(f.queryBody)) // GET: query-order
 		}
 	})
