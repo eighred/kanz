@@ -181,6 +181,19 @@ var darkPackageExempt = map[string]string{
 		"It would also cost something real — market-ingest has no database and does not depend on " +
 		"pgx today, which is why the seam's own types live in pkg/alpha rather than being " +
 		"store.Attested. What retires this entry is an Engine implementation, not a constructor.",
+	"internal/marketedge/volprofile": "#869 — the intraday volume profile #867 landed: a " +
+		"bucketed distribution of traded volume per (instrument, venue), and the one genuinely " +
+		"missing DATUM behind #864 rather than another algorithm. It is dark for ONE STEP and the " +
+		"consumer is named: #869's VWAP and POV, which schedule against liquidity and have nothing " +
+		"else in this module to read a shape from. CONSTRUCTING IT FROM THE market-ingest " +
+		"COMPOSITION ROOT WOULD NOT MAKE IT LIVE and is the obvious wrong fix, exactly as " +
+		"internal/alpha/barview's entry says of its own: a fold nobody queries is a profile " +
+		"nobody schedules against, and the import would satisfy this guard while changing nothing " +
+		"an order can observe. It would also cost something real — the store is in-memory and " +
+		"starts empty, so a rolled pod answers VerdictAbsent until MinSessions sessions have " +
+		"accumulated, and standing it up with no reader means nothing measures whether that ever " +
+		"happens. What retires this entry is an algorithm calling Store.Profile and acting on the " +
+		"verdict, not a constructor.",
 
 	// The three below were dark in the services/*/internal blind spot #583 closed.
 	"services/accounting/internal/corpact": "#588 — the IBOR-01c corporate-action processor. It " +
