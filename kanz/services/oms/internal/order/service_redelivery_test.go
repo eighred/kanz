@@ -202,9 +202,13 @@ func (v *amnesiacVenue) executes() int {
 	return v.n
 }
 
-// A venue that cannot be asked is not a venue we may guess about. Every real
-// out-of-process adapter is in this state today, because venue.v1's wire
-// contract has no query RPC.
+// A venue that cannot be asked is not a venue we may guess about.
+//
+// THIS USED TO DESCRIBE EVERY REAL DEPLOYMENT, because venue.v1 carried no query
+// RPC and GRPCVenue was therefore no Querier. #920 added the RPC, so the
+// population this covers is now a connector that implements no Querier at all —
+// the same refusal, for a much smaller set. service_grpc_querier_test.go covers
+// the adapter-predates-the-RPC case across the wire.
 func TestVenueWithoutQuerierQuarantinesRatherThanGuessing(t *testing.T) {
 	ctx := testCtx()
 	fb := &fakeBus{}
@@ -240,8 +244,9 @@ func TestVenueWithoutQuerierQuarantinesRatherThanGuessing(t *testing.T) {
 	}
 }
 
-// muteVenue implements Venue and nothing else — no Querier. This is every
-// out-of-process GRPCVenue today.
+// muteVenue implements Venue and nothing else — no Querier. GRPCVenue was in
+// this state until #920; today it is what a connector with no way to ask its
+// exchange looks like.
 type muteVenue struct {
 	mu sync.Mutex
 	n  int
@@ -263,9 +268,9 @@ func (v *muteVenue) executes() int {
 
 // twoFillVenue acknowledges an execute (no error, nothing recorded — same shape
 // as amnesiacVenue) and then, when queried, reports the order FILLED by TWO
-// fills instead of amnesiacVenue's UNKNOWN. It models the first multi-fill
-// venue to implement execution.Querier — none does today; SimVenue always
-// reports exactly one full-leaves fill.
+// fills instead of amnesiacVenue's UNKNOWN. It models a multi-fill venue — the
+// Binance connector became one in #920, reporting one fill per trade off
+// /api/v3/myTrades; SimVenue always reports exactly one full-leaves fill.
 type twoFillVenue struct {
 	*execution.SimVenue
 	fills []*orderpb.Fill

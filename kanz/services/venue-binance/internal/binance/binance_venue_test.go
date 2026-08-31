@@ -33,9 +33,16 @@ type fakeBinance struct {
 	newOrderStatus int    // HTTP status for POST /api/v3/order
 	newOrderBody   string // body for POST
 	queryBody      string // body for GET /api/v3/order
-	cancelBody     string // body for DELETE /api/v3/order
-	accountBody    string // body for GET /api/v3/account
-	tickerPrice    string // price for GET /api/v3/ticker/price
+	queryStatus    int    // HTTP status for GET /api/v3/order (0 ⇒ 200)
+	// GET /api/v3/myTrades — the executions behind a filled order (#920). It is a
+	// SEPARATE endpoint from the order query beside it because Binance's order
+	// response carries no trade list, and a fill's identity is what the order
+	// aggregate dedups on.
+	myTradesBody  string
+	myTradesCalls int
+	cancelBody    string // body for DELETE /api/v3/order
+	accountBody   string // body for GET /api/v3/account
+	tickerPrice   string // price for GET /api/v3/ticker/price
 }
 
 func newFakeBinance(t *testing.T) *fakeBinance {
@@ -59,8 +66,15 @@ func newFakeBinance(t *testing.T) *fakeBinance {
 			_, _ = w.Write([]byte(f.cancelBody))
 		default:
 			f.gets++
+			if f.queryStatus != 0 {
+				w.WriteHeader(f.queryStatus)
+			}
 			_, _ = w.Write([]byte(f.queryBody)) // GET: query-order
 		}
+	})
+	mux.HandleFunc("/api/v3/myTrades", func(w http.ResponseWriter, _ *http.Request) {
+		f.myTradesCalls++
+		_, _ = w.Write([]byte(f.myTradesBody))
 	})
 	mux.HandleFunc("/api/v3/account", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(f.accountBody))

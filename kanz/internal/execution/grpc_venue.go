@@ -8,6 +8,8 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // GRPCVenue is an exchange that lives in ANOTHER PROCESS (INFRA-M7a).
@@ -106,6 +108,127 @@ func (v *GRPCVenue) CancelOrder(ctx context.Context, st *orderpb.OrderState) err
 	return nil
 }
 
+// QueryOrder asks the adapter what the exchange did with st — the Querier
+// capability, over the wire (#920).
+//
+// BEFORE THIS, SimVenue WAS THE ONLY Querier IN THE PLATFORM. venue.v1 carried
+// no query RPC, so `Service.resume`'s `venue.(execution.Querier)` assertion
+// failed for every real deployment and EVERY interrupted ROUTED order
+// quarantined — the platform's answer to "what happened to the orders in flight
+// when the OMS restarted" was "freeze them all and fetch a human". Most of
+// order.Reconcile's policy table was reachable only against a simulator.
+//
+// # THE THREE ANSWERS, AND WHY A FOURTH WOULD BE A DUPLICATE TRADE
+//
+// This method returns an error for exactly one thing: THE QUESTION COULD NOT BE
+// ASKED. The adapter was unreachable, the deadline expired, the exchange
+// refused for weight. resume() propagates that, the delivery is NAKed, and the
+// broker asks again later.
+//
+// It returns OrderViewUnknown only when the far end said, positively, that the
+// VENUE HAS NO SUCH ORDER. Reconcile turns that into ActionRedrive when the OMS
+// holds no venue ack, which places the order at a real exchange. Every failure
+// mode above must therefore stay on the error return or land on
+// OrderViewIndeterminate, and the mapping below is written as an explicit
+// switch with a fail-closed default rather than an integer conversion for that
+// reason: a value this build has not been taught must freeze the order, not
+// take the meaning of whatever Go constant shares its number.
+//
+// # Unimplemented IS NOT A TRANSIENT FAULT
+//
+// An adapter that predates this RPC, or a connector that cannot ask its
+// exchange, answers codes.Unimplemented. Retrying can never fix that, so
+// returning it as an error would replace a quarantine — a terminal, visible,
+// operator-resolvable state — with an endless redelivery loop ending in a DLQ.
+// It maps to INDETERMINATE, which reproduces EXACTLY the behaviour the OMS had
+// when GRPCVenue implemented no Querier at all. That is what makes it safe to
+// upgrade the OMS ahead of its adapters.
+func (v *GRPCVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (OrderView, error) {
+	if st == nil {
+		return OrderView{}, errors.New("execution: nil order state")
+	}
+	resp, err := v.client.QueryOrder(ctx, &venuepb.QueryOrderRequest{
+		TenantId: v.tenant,
+		State:    st,
+	})
+	if err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			return OrderView{
+				State: OrderViewIndeterminate,
+				Reason: fmt.Sprintf(
+					"venue adapter %s serves no QueryOrder, so nothing can establish whether it holds "+
+						"order %s. Re-driving might trade the fund twice and abandoning might strand a "+
+						"live exchange order; neither is a guess this platform will make",
+					v.mic, st.GetOrderId()),
+			}, nil
+		}
+		// The question could not be asked. NOT an answer, and emphatically not
+		// OrderViewUnknown — collapsing the two turns a network blip into a
+		// re-driven order.
+		return OrderView{}, fmt.Errorf("venue %s: query order %s: %w", v.mic, st.GetOrderId(), err)
+	}
+	return OrderView{
+		State:  orderViewState(resp.GetState()),
+		Fills:  resp.GetFills(),
+		Reason: resp.GetReason(),
+	}, nil
+}
+
+// orderViewState maps the wire verdict onto the in-process one.
+//
+// EXHAUSTIVE, AND FAIL-CLOSED BY DEFAULT. The two enums agree value for value
+// today, so `OrderViewState(resp.GetState())` would compile and pass every test
+// — and it would silently give a NEW wire value the meaning of whatever Go
+// constant happens to share its number. If a future venue.v1 adds a value at 7
+// and this package later adds an unrelated constant at 7, an unrecognised
+// exchange verdict becomes an authoritative one with no code change anywhere.
+// The switch cannot do that: anything unrecognised is INDETERMINATE, which
+// quarantines.
+func orderViewState(s venuepb.OrderViewState) OrderViewState {
+	switch s {
+	case venuepb.OrderViewState_ORDER_VIEW_STATE_UNKNOWN:
+		return OrderViewUnknown
+	case venuepb.OrderViewState_ORDER_VIEW_STATE_WORKING:
+		return OrderViewWorking
+	case venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED:
+		return OrderViewPartiallyFilled
+	case venuepb.OrderViewState_ORDER_VIEW_STATE_FILLED:
+		return OrderViewFilled
+	case venuepb.OrderViewState_ORDER_VIEW_STATE_REJECTED:
+		return OrderViewRejected
+	default:
+		// ORDER_VIEW_STATE_INDETERMINATE, ORDER_VIEW_STATE_UNSPECIFIED (the
+		// adapter set no field) and anything this build has not been taught.
+		return OrderViewIndeterminate
+	}
+}
+
+// OrderViewStateProto is the same mapping the other way round, for a venue
+// adapter serving QueryOrder. It lives here rather than in the adapter's own
+// package so the two directions cannot drift into disagreeing about which wire
+// value means "the venue positively has no such order" — the one value that
+// authorizes a second placement.
+func OrderViewStateProto(s OrderViewState) venuepb.OrderViewState {
+	switch s {
+	case OrderViewUnknown:
+		return venuepb.OrderViewState_ORDER_VIEW_STATE_UNKNOWN
+	case OrderViewWorking:
+		return venuepb.OrderViewState_ORDER_VIEW_STATE_WORKING
+	case OrderViewPartiallyFilled:
+		return venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED
+	case OrderViewFilled:
+		return venuepb.OrderViewState_ORDER_VIEW_STATE_FILLED
+	case OrderViewRejected:
+		return venuepb.OrderViewState_ORDER_VIEW_STATE_REJECTED
+	default:
+		// OrderViewIndeterminate and any state this build has not been taught.
+		// Never UNSPECIFIED: an adapter that DID establish "I cannot tell" has
+		// said something, and an operator reading the quarantine record must be
+		// able to tell that from a field nobody set.
+		return venuepb.OrderViewState_ORDER_VIEW_STATE_INDETERMINATE
+	}
+}
+
 // OwnsCloseTracking marks this venue as SelfHealing: the adapter on the far end
 // tracks the close in its OWN registry the moment its CancelOrder handler runs,
 // and its OWN reconciler heals it. The OMS must not track it too — see SelfHealing.
@@ -118,4 +241,8 @@ var (
 	_ Venue       = (*GRPCVenue)(nil)
 	_ Closer      = (*GRPCVenue)(nil)
 	_ SelfHealing = (*GRPCVenue)(nil)
+	// AND A Querier (#920). Without it, Service.resume quarantines every
+	// interrupted ROUTED order at every real venue, and order.Reconcile's policy
+	// table is exercised only against the simulator.
+	_ Querier = (*GRPCVenue)(nil)
 )

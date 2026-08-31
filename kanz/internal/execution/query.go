@@ -74,12 +74,18 @@ type OrderView struct {
 // what did you do with it?".
 //
 // It is separate from Venue for the same reason Closer is: not every venue can
-// answer. SimVenue can, because it remembers what it executed. An out-of-process
-// GRPCVenue cannot, because venue.v1.VenueAdapterService exposes only Execute,
-// CancelOrder and Describe — the Binance and OKX REST clients each have a
-// private queryOrder their own reconcilers call, and nothing surfaces it across
-// the process boundary. Until that RPC exists, those venues are not Queriers and
-// the OMS quarantines rather than guessing on their behalf.
+// answer. SimVenue can, because it remembers what it executed. GRPCVenue can as
+// of #920: venue.v1.VenueAdapterService now carries a QueryOrder RPC, served by
+// each connector over the private queryOrder its own reconciler has always
+// called. A venue that still cannot — one whose adapter predates the RPC, or a
+// connector that implements no Querier — reports INDETERMINATE, and the OMS
+// quarantines rather than guessing on its behalf.
+//
+// THAT ABSENCE USED TO BE THE NORMAL CASE AND IT COST THE PLATFORM ITS CRASH
+// RECOVERY. Every deployment that actually traded reached its venues through
+// GRPCVenue, so Service.resume's type assertion failed for all of them and every
+// interrupted ROUTED order froze for a human — and order.Reconcile's policy
+// table was exercised only against the simulator.
 //
 // QueryOrder addresses the order by st.order_id — the same deterministic
 // clOrdId the submit used — so it is safe to call repeatedly.

@@ -96,6 +96,48 @@ service VenueAdapterService {
   // refusal as a platform fault, so a pair the platform cannot route must never
   // appear here.
   rpc ListInstruments(ListInstrumentsRequest) returns (ListInstrumentsResponse);
+
+  // QueryOrder asks the venue what became of one order, addressed by
+  // state.order_id — the same deterministic clOrdId Execute stamped, so it is
+  // safe to ask repeatedly and costs nothing but exchange read weight (#920).
+  //
+  // # Why this RPC had to exist
+  //
+  // The OMS's crash-recovery path (Service.resume) asks the venue what happened
+  // to an order whose work was interrupted, and acts on the answer:
+  // order.Reconcile LEAVEs a working order, ADOPTs a filled or rejected one, and
+  // RE-DRIVEs one the venue affirmatively never received. Without this RPC an
+  // out-of-process adapter could not be asked at all, so `SimVenue` was the only
+  // execution.Querier in the platform and every interrupted ROUTED order in a
+  // real deployment QUARANTINED — frozen for a human to resolve against the
+  // exchange's own order history by hand. Both connectors already knew the
+  // answer: each has a private queryOrder its own reconciler calls. Nothing
+  // surfaced it across the process boundary.
+  //
+  // # THE ERROR DISCIPLINE IS THE CONTRACT, AND IT IS WORTH A DUPLICATE TRADE
+  //
+  // A gRPC ERROR means THE QUESTION COULD NOT BE ASKED — the exchange was
+  // unreachable, the request timed out, the weight budget was exhausted. The
+  // OMS backs off and asks again.
+  //
+  // ORDER_VIEW_STATE_UNKNOWN means something entirely different: the venue
+  // POSITIVELY STATED it has no such order. That is the one answer that
+  // authorizes placing the order again, so an adapter that maps a network fault,
+  // a timeout or a rate-limit refusal onto it has bought a duplicate order at a
+  // real exchange. There is a third answer for "I could not establish anything"
+  // — ORDER_VIEW_STATE_INDETERMINATE — and it exists precisely so that UNKNOWN
+  // never has to absorb a failure.
+  //
+  // AN ADAPTER THAT CANNOT ANSWER RETURNS Unimplemented, and the OMS reads that
+  // as INDETERMINATE rather than as a transient fault: retrying can never fix a
+  // method the far end does not serve, so it quarantines exactly as it did
+  // before this RPC existed. That is what keeps an older adapter from turning
+  // into an endless redelivery loop the day the OMS is upgraded first.
+  //
+  // IT IS NOT GATED BY THE PLATFORM HALT. Execute is, because it moves capital;
+  // this is a read, and it is the read an operator most needs while the platform
+  // is stopped — the same boundary CancelOrder sits on.
+  rpc QueryOrder(QueryOrderRequest) returns (QueryOrderResponse);
 }
 
 message DescribeRequest {}
@@ -218,6 +260,80 @@ message CancelOrderRequest {
 // Deliberately empty. OK ⇒ the withdrawal is CONFIRMED; an error ⇒ the close is
 // in flight. There is no third answer, so there is no field to carry one.
 message CancelOrderResponse {}
+
+message QueryOrderRequest {
+  // Owning tenant (MT-01a), as on every other request: the adapter scopes its
+  // credentials by it.
+  string tenant_id = 1;
+  // The order to ask about. Only order_id and instrument_id are read — the
+  // former addresses the order at the exchange, the latter selects the venue
+  // symbol — but the whole state travels so an adapter can tell a CONDITIONAL
+  // order from a regular one, which at OKX decides WHICH endpoint holds it.
+  order.v1.OrderState state = 2;
+}
+
+// OrderViewState is what a venue says it knows about one order. It is the wire
+// form of execution.OrderViewState, value for value.
+//
+// THE ZERO VALUE IS "NOTHING WAS ESTABLISHED", DELIBERATELY. The dangerous
+// answer here is UNKNOWN, because that is the one the OMS turns into a second
+// placement, and it must never be something an adapter can produce by leaving a
+// field unset.
+enum OrderViewState {
+  // Unset. Read exactly as INDETERMINATE — nothing was established, so the
+  // order freezes. It is a separate value from INDETERMINATE only so that "the
+  // adapter said it could not tell" and "the adapter said nothing" stay
+  // distinguishable in an audit record; they resolve to the same action.
+  ORDER_VIEW_STATE_UNSPECIFIED = 0;
+
+  // The adapter positively states it could NOT establish anything: it answered
+  // in a way it cannot map, or it may have worked an order it can no longer
+  // account for. Resolves to quarantine, never to an action. `reason` carries
+  // the adapter's own words.
+  ORDER_VIEW_STATE_INDETERMINATE = 1;
+
+  // The VENUE affirmatively has no record of this order. This is a positive
+  // statement by the exchange, not the absence of one, and it is the only
+  // answer that authorizes placing the order again. A transport failure, a
+  // timeout, or an exhausted rate-limit budget is NEVER this — those are gRPC
+  // errors.
+  ORDER_VIEW_STATE_UNKNOWN = 2;
+
+  // The venue holds the order and it is live.
+  ORDER_VIEW_STATE_WORKING = 3;
+
+  // The venue holds the order and it has partially traded. `fills` carries what
+  // traded.
+  ORDER_VIEW_STATE_PARTIALLY_FILLED = 4;
+
+  // The order is fully executed. `fills` carries it.
+  ORDER_VIEW_STATE_FILLED = 5;
+
+  // The venue terminally refused the order.
+  ORDER_VIEW_STATE_REJECTED = 6;
+}
+
+message QueryOrderResponse {
+  // The venue's verdict. See OrderViewState — the zero value freezes the order.
+  OrderViewState state = 1;
+
+  // The executions the venue attributes to this order, for the
+  // PARTIALLY_FILLED and FILLED states. Empty otherwise.
+  //
+  // EACH FILL MUST CARRY THE VENUE'S OWN FILL IDENTITY — the same fill_id the
+  // original Execute and the user-data stream report for that execution, not a
+  // freshly minted one. The order aggregate and the position book both dedup on
+  // fill_id, so an adapter that renames its fills when re-queried turns
+  // exactly-once into double-counting. An adapter that cannot reproduce the
+  // identities must answer INDETERMINATE rather than invent them: the OMS
+  // refuses a FILLED verdict carrying no fill, and it is right to.
+  repeated order.v1.Fill fills = 2;
+
+  // The venue's own words for a REJECTED or INDETERMINATE answer, carried into
+  // the quarantine record an operator reads. It is the only thing that tells
+  // them WHICH exchange condition froze the order.
+  string reason = 3;
+}
 
 message ListInstrumentsRequest {}
 

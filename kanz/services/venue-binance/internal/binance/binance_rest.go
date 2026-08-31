@@ -180,6 +180,63 @@ func (c *binanceREST) queryOrder(ctx context.Context, symbol, origClientOrderID 
 	return c.signedOrderCall(ctx, http.MethodGet, "/api/v3/order", params, 2)
 }
 
+// tradeEntry is one execution as GET /api/v3/myTrades reports it. `ID` is the
+// tradeId — the SAME identity the placement response and the user-data stream
+// carry, which is what lets a re-query rebuild a fill with the fill_id the
+// platform already holds instead of a second name for one trade.
+type tradeEntry struct {
+	Symbol          string `json:"symbol"`
+	ID              int64  `json:"id"`
+	OrderID         int64  `json:"orderId"`
+	Price           string `json:"price"`
+	Qty             string `json:"qty"`
+	Commission      string `json:"commission"`
+	CommissionAsset string `json:"commissionAsset"`
+	Time            int64  `json:"time"`
+}
+
+// myTradesWeight is the request weight of GET /api/v3/myTrades. It is far more
+// expensive than the order query beside it (2), which is why the query path asks
+// for trades ONLY once Binance has said the order actually traded — a working or
+// unknown order costs 2, not 22.
+const myTradesWeight = 20
+
+// myTrades lists the executions behind one order (GET /api/v3/myTrades).
+//
+// ADDRESSED BY THE EXCHANGE'S NUMERIC orderId, which is the one place the query
+// path cannot use our own client order id: Binance offers no origClientOrderId
+// form of this endpoint. The numeric id comes from the order query that precedes
+// it, so the two calls are still anchored on our deterministic id.
+//
+// An error body is a JSON OBJECT and a success body a JSON ARRAY, so the object
+// decode is attempted first: a {code,msg} that unmarshals is the exchange
+// refusing, and anything else falls through to the list.
+func (c *binanceREST) myTrades(ctx context.Context, symbol string, orderID int64) ([]tradeEntry, error) {
+	if !c.bucket.Allow(myTradesWeight) {
+		c.onThrottle()
+		return nil, ErrRateLimited
+	}
+	body, err := c.signedGet(ctx, "/api/v3/myTrades", url.Values{
+		"symbol":  {symbol},
+		"orderId": {strconv.FormatInt(orderID, 10)},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var apiErr struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if json.Unmarshal(body, &apiErr) == nil && apiErr.Code != 0 {
+		return nil, &APIError{Code: apiErr.Code, Msg: apiErr.Msg}
+	}
+	var out []tradeEntry
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("binance: decode trade list: %w", err)
+	}
+	return out, nil
+}
+
 // cancelOrder withdraws a working order by its client order id (DELETE
 // /api/v3/order, weight 1). It addresses the order by the SAME deterministic
 // origClientOrderId the submit stamped, so a retried cancel resolves to the
