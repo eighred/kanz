@@ -30,7 +30,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,15 +63,100 @@ func Terminal(s orderpb.OrderStatus) bool {
 	}
 }
 
+// DefaultTerminalRetention is how long Memory keeps an order after it has gone
+// terminal, and it is DERIVED rather than chosen: it is one full
+// execution.DefaultReconcileInterval — the widest window this adapter operates
+// on, the longest it tolerates its own view diverging from the exchange before
+// something re-asks.
+//
+// WHY A TERMINAL ORDER CAN BE DROPPED AT ALL, which is the whole argument (#891).
+// Work out what still reads one:
+//
+//   - Open, the healing watchdog's ExpectedOrders read, already EXCLUDES every
+//     terminal order — Terminal() has always filtered its return value. So the
+//     watchdog's view is bit-identical before and after this eviction, and no
+//     order it can act on is reachable by it.
+//   - HealClosures does not read this store at all: an in-flight close is
+//     carried by execution.CloseRegistry, which the OMS writes at dispatch and
+//     the watchdog force-clears on its own timeout.
+//   - Get, through Seam.Lookup, is the one remaining reader — the user-data
+//     ingester enriching an exchange execution report with the order's terms.
+//
+// So the ONLY thing a dropped entry can cost is the enrichment of a report that
+// arrives after the order went terminal. An order goes terminal in this view
+// only through Server.recordStatus, on a cancel the VENUE CONFIRMED — the
+// exchange has already said the order will not trade again — so such a report
+// describes a trade that happened BEFORE the confirmation and is still in flight
+// on the websocket. Retention has to cover that lag, and a reconciliation pass
+// is this adapter's own statement of the timescale on which venue truth is
+// allowed to lag its view.
+//
+// THE RESIDUAL, STATED RATHER THAN GLOSSED. A report later than that finds
+// Lookup empty and is skipped — the same answer the ingester already gives for
+// an order this process never worked, which in THIS store is every order placed
+// before the last restart. openView warns about exactly that: an in-memory order
+// view loses the whole thing on restart and the watchdog goes blind across it.
+// A bound measured in reconciliation passes sits well inside a failure envelope
+// the posture already declares out loud, and unbounded growth does not.
+const DefaultTerminalRetention = execution.DefaultReconcileInterval
+
+// Compile-time assertion: retention must outlast the in-flight-close force-clear
+// window, or an order could be evicted while the healing watchdog is still
+// deciding what to do about the close that terminated it. Inverting the two
+// makes this expression negative and the package stops compiling — the
+// bus.DedupWindow / dedupClaimLease shape, for the same reason: an ordering
+// between two intervals that only a comment enforces is one an edit breaks.
+const _ = uint(DefaultTerminalRetention - execution.DefaultCloseTimeout - 1)
+
 // Memory is the in-process Store — the test seam and the single-replica default.
+//
+// IT IS NOT PARITY-IDENTICAL TO Postgres, DELIBERATELY. The durable sibling
+// keeps a terminal order's row forever (venue_orders is not pruned, and the DR
+// posture in infra/dr counts on that row being there). This one keeps a terminal
+// order for DefaultTerminalRetention and then forgets it, because a map in a
+// process that must not be OOM-killed is not a table: it grew one permanent
+// entry per order the adapter had ever worked, at whatever rate the strategy
+// trades, and a venue adapter that dies of its heap is the process holding the
+// exchange session for orders in flight. See DefaultTerminalRetention for why
+// the entry it forgets is one nothing can still act on.
+//
+// A NON-TERMINAL ORDER IS NEVER EVICTED, at any age. That is the load-bearing
+// half: the watchdog reconciles against exactly those, and an order the adapter
+// still believes is working at the exchange is the one thing this store exists
+// to be able to answer for.
 type Memory struct {
 	mu     sync.RWMutex
-	orders map[string]*orderpb.OrderState
+	orders map[string]memEntry
+	// retain is how long a terminal order stays readable. <=0 disables eviction.
+	retain time.Duration
+	// lastSweep is when evictTerminal last walked the map. The sweep is
+	// AMORTIZED — once per retain, on the write path — so Record stays O(1) at
+	// the order rate rather than O(n) per order. The cost of amortizing is that
+	// an entry lives between retain and 2*retain; the bound that matters is that
+	// it is a function of the terminal-order RATE over a fixed window, and no
+	// longer of how long the process has been up.
+	lastSweep time.Time
+	// now is the time source, swappable from this package's tests. The retention
+	// is a full reconciliation pass, so expiry is not testable by sleeping — the
+	// same seam and the same reason as bus.DedupWindow's.
+	now func() time.Time
+}
+
+// memEntry is a recorded order plus the instant it FIRST went terminal (zero
+// while it is still working).
+type memEntry struct {
+	state      *orderpb.OrderState
+	terminalAt time.Time
 }
 
 // NewMemory returns an empty in-memory Store.
 func NewMemory() *Memory {
-	return &Memory{orders: make(map[string]*orderpb.OrderState)}
+	return &Memory{
+		orders:    make(map[string]memEntry),
+		retain:    DefaultTerminalRetention,
+		lastSweep: time.Now(),
+		now:       time.Now,
+	}
 }
 
 func (m *Memory) Record(_ context.Context, st *orderpb.OrderState) error {
@@ -78,27 +165,62 @@ func (m *Memory) Record(_ context.Context, st *orderpb.OrderState) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.orders[st.GetOrderId()] = proto.Clone(st).(*orderpb.OrderState)
+	now := m.now()
+	e := memEntry{state: proto.Clone(st).(*orderpb.OrderState)}
+	if Terminal(st.GetStatus()) {
+		// FIRST terminal sighting wins, and a re-record does not reset the clock.
+		// A redelivered or retried close would otherwise refresh the entry
+		// forever and the retention would never elapse — the same reasoning as
+		// execution.CloseRegistry.Track preserving its original RequestedAt.
+		e.terminalAt = now
+		if prev, ok := m.orders[st.GetOrderId()]; ok && !prev.terminalAt.IsZero() {
+			e.terminalAt = prev.terminalAt
+		}
+	}
+	m.orders[st.GetOrderId()] = e
+	m.evictTerminal(now)
 	return nil
+}
+
+// evictTerminal drops orders that have been terminal for longer than the
+// retention. Caller holds m.mu.
+//
+// It runs on the WRITE path on purpose: the map only grows in Record, so a sweep
+// there is the one place a bound can be enforced without a goroutine the store
+// would then have to own a lifecycle for. A store nobody writes to does not
+// grow, so there is nothing for a background sweep to do that this misses.
+func (m *Memory) evictTerminal(now time.Time) {
+	if m.retain <= 0 || now.Sub(m.lastSweep) < m.retain {
+		return
+	}
+	m.lastSweep = now
+	for id, e := range m.orders {
+		if e.terminalAt.IsZero() {
+			continue // still working at the venue — never evicted, at any age
+		}
+		if now.Sub(e.terminalAt) >= m.retain {
+			delete(m.orders, id)
+		}
+	}
 }
 
 func (m *Memory) Get(_ context.Context, orderID string) (*orderpb.OrderState, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	st, ok := m.orders[orderID]
+	e, ok := m.orders[orderID]
 	if !ok {
 		return nil, false, nil
 	}
-	return proto.Clone(st).(*orderpb.OrderState), true, nil
+	return proto.Clone(e.state).(*orderpb.OrderState), true, nil
 }
 
 func (m *Memory) Open(_ context.Context) ([]*orderpb.OrderState, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var out []*orderpb.OrderState
-	for _, st := range m.orders {
-		if !Terminal(st.GetStatus()) {
-			out = append(out, proto.Clone(st).(*orderpb.OrderState))
+	for _, e := range m.orders {
+		if !Terminal(e.state.GetStatus()) {
+			out = append(out, proto.Clone(e.state).(*orderpb.OrderState))
 		}
 	}
 	return out, nil

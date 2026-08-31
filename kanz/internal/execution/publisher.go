@@ -125,6 +125,32 @@ type UserDataStream interface {
 	Recv(ctx context.Context) ([]byte, error)
 }
 
+// THE THREE WINDOWS THE BACKGROUND WORKERS RUN ON, IN ONE PLACE (#891).
+//
+// Each of these was a literal inside BOTH reconcilers, restated as prose in the
+// WorkerDeps field docs below, which owned neither copy and were checked against
+// neither. A third consumer then made the duplication load-bearing:
+// orderview.DefaultTerminalRetention is DERIVED from the reconcile interval,
+// because how long a venue adapter keeps a finished order readable is not an
+// independent choice from how often it re-asks the exchange for truth. That is
+// the same argument bus.defaultDedupTTL makes for the DLQ drain's minimum age —
+// two intervals with a required ordering must not be two literals in two files.
+const (
+	// DefaultReconcileInterval is how often a reconciler re-reads venue truth for
+	// the orders it believes are open. It is the widest window this adapter
+	// operates on: the longest it tolerates its own view diverging from the
+	// exchange before something re-checks.
+	DefaultReconcileInterval = time.Minute
+	// DefaultCloseTimeout is how long an in-flight close may stay unconfirmed
+	// before the healing watchdog force-clears it (the In-Flight Certainty
+	// mandate's trigger).
+	DefaultCloseTimeout = 1500 * time.Millisecond
+	// DefaultHealInterval is the healing watchdog's own tick — deliberately
+	// faster than DefaultCloseTimeout, so a close becoming due is acted on inside
+	// one tick rather than one full timeout later.
+	DefaultHealInterval = 500 * time.Millisecond
+)
+
 // WorkerDeps are the composition-root-supplied collaborators an exchange
 // connector's background workers need. Shared by both connectors' Start.
 type WorkerDeps struct {
@@ -139,8 +165,9 @@ type WorkerDeps struct {
 	// test/arch/workerdeps_completeness_test.go fails the build on a literal
 	// that does not name it, so an absent margin seam is a decision visible in a
 	// diff — the mechanism that closed the identical #418 omission.
-	Margin            VenueMarginSource
-	Tenant            string
+	Margin VenueMarginSource
+	Tenant string
+	// ReconcileInterval is the venue-truth poll. <=0 ⇒ DefaultReconcileInterval.
 	ReconcileInterval time.Duration
 	TickerInterval    time.Duration
 	// MarginInterval is the margin observation poll. <=0 ⇒ venuemargin's default.
@@ -148,9 +175,9 @@ type WorkerDeps struct {
 	// Closes is the in-flight-close registry the healing watchdog drains. Nil ⇒
 	// the healing seam is disabled.
 	Closes PendingCloses
-	// CloseTimeout is the in-flight-close force-clear trigger. <=0 ⇒ 1500ms.
+	// CloseTimeout is the in-flight-close force-clear trigger. <=0 ⇒ DefaultCloseTimeout.
 	CloseTimeout time.Duration
-	// HealInterval is the healing watchdog tick. <=0 ⇒ 500ms.
+	// HealInterval is the healing watchdog tick. <=0 ⇒ DefaultHealInterval.
 	HealInterval time.Duration
 	// OnMarkTickDropped is called for EVERY reference-mark tick the exchange
 	// answered and the bus did not accept (#673). The composition root wires it

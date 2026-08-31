@@ -444,11 +444,6 @@ var mapEvictionExempt = map[string]evictionExemption{
 	// the only correct direction for it is shorter: the dead-entry arm fails
 	// the day one of these grows an evictor and the entry is left behind.
 	// ---------------------------------------------------------------------
-	"internal/venueadapter/orderview: Memory.orders": {deferredLeak,
-		"keyed by ORDER ID with no removal: a terminal order is filtered out of Open()'s return value " +
-			"and kept in the map. One permanent entry per order either venue adapter has ever worked, " +
-			"in the no-DSN posture both of them support.",
-		"#891"},
 	"services/autopilot/internal/remediate: LogQuarantiner.set": {deferredLeak,
 		"keyed by the subject off a DataQualityEvent — a wire field with no bounded universe — and " +
 			"read by nothing outside a test. It grows fastest during exactly the degraded period the " +
