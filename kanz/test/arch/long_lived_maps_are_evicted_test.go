@@ -444,11 +444,6 @@ var mapEvictionExempt = map[string]evictionExemption{
 	// the only correct direction for it is shorter: the dead-entry arm fails
 	// the day one of these grows an evictor and the entry is left behind.
 	// ---------------------------------------------------------------------
-	"internal/outbox: Memory.rows": {deferredLeak,
-		"append-only, and MarkPublished only flips a bool — every read path FILTERS on published " +
-			"rather than removing, so a published row is dead weight for the life of the process. This " +
-			"is the OMS's, the position book's and the accounting ledger's outbox when no DSN is set.",
-		"#890"},
 	"internal/venueadapter/orderview: Memory.orders": {deferredLeak,
 		"keyed by ORDER ID with no removal: a terminal order is filtered out of Open()'s return value " +
 			"and kept in the map. One permanent entry per order either venue adapter has ever worked, " +

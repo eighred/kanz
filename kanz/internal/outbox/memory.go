@@ -24,9 +24,36 @@ import (
 // openStores). Its outbox degrades with it: a crash loses the records, exactly
 // as it loses the orders they announce. That is coherent — the two halves fail
 // together instead of disagreeing — and cmd/oms/main.go says it out loud.
+//
+// # WHERE THE TWO QUEUES DIVERGE, AND WHY THAT IS THE CORRECT DIRECTION (#890)
+//
+// Postgres KEEPS a published row and stamps published_at on it. Memory DROPS it.
+// The row is the same row in both, and the difference is what a published row is
+// FOR: in the table it is a durable artifact an operator can query, archive and
+// prune, and #817's last_error assertion reads the column of one. In a slice
+// behind a mutex it is reachable by nothing — no query surface, no archival, no
+// retention policy — so keeping it buys the estate no answer it could not get
+// otherwise and costs one *memRow, plus its marshalled payload, per business
+// event this process has ever emitted, for the life of the process.
+//
+// This queue used to keep them: rows was append-only, MarkPublished flipped a
+// bool and every read FILTERED on it. Growth was therefore one entry per order
+// accepted, per fill folded, per ledger posting — monotonic in trading volume on
+// the OMS's own heap, reported by nothing until the pod is OOM-killed.
 type Memory struct {
-	mu      sync.Mutex
-	next    int64
+	mu   sync.Mutex
+	next int64
+	// rows holds exactly the UNPUBLISHED records — the in-memory spelling of
+	// Postgres's `WHERE published_at IS NULL`, which is the predicate on every
+	// read this queue has. Its length is therefore the pending depth and not the
+	// process's lifetime volume: it rises with a backlog and falls as the relay
+	// drains it.
+	//
+	// The BACKING ARRAY does not shrink, so the retained capacity settles at the
+	// high-water mark of pending depth. That is bounded by how far behind the
+	// relay has ever fallen, which is what the age gauge already alerts on —
+	// unlike the old behaviour, it is not bounded by anything the process did in
+	// the past and cannot undo.
 	rows    []*memRow
 	locked  map[string]bool
 	nowFunc func() time.Time
@@ -42,8 +69,7 @@ type memRow struct {
 	// permissive double, and a queue that accepted a failure cause and dropped
 	// it would let a test certify a stall whose reason production can report and
 	// this cannot (#817).
-	lastErr   string
-	published bool
+	lastErr string
 }
 
 // NewMemory returns an empty in-process Queue.
@@ -78,9 +104,6 @@ func (m *Memory) PendingKeys(_ context.Context, limit int) ([]string, error) {
 	defer m.mu.Unlock()
 	first := map[string]int64{}
 	for _, r := range m.rows {
-		if r.published {
-			continue
-		}
 		if cur, ok := first[r.rec.PartitionKey]; !ok || r.id < cur {
 			first[r.rec.PartitionKey] = r.id
 		}
@@ -135,7 +158,7 @@ func (m *Memory) Pending(_ context.Context, key string, limit int) ([]Pending, e
 	defer m.mu.Unlock()
 	var out []Pending
 	for _, r := range m.rows {
-		if r.published || r.rec.PartitionKey != key {
+		if r.rec.PartitionKey != key {
 			continue
 		}
 		out = append(out, Pending{ID: r.id, Attempts: r.attempts, Record: r.rec, LastError: r.lastErr})
@@ -146,25 +169,54 @@ func (m *Memory) Pending(_ context.Context, key string, limit int) ([]Pending, e
 	return out, nil
 }
 
+// MarkPublished DROPS the record, and dropping is this queue's evictor (#890).
+//
+// # WHY THIS CANNOT LOSE A FACT
+//
+// It is reached from exactly one place: Relay.drainKey, on the line after
+// Publish returned nil. The broker HAS the event before this runs, which is the
+// same instant Postgres.MarkPublished stamps published_at — after which
+// `WHERE published_at IS NULL` excludes the row from every read that table has,
+// permanently. Removal is that exclusion, made total. It is downstream of the
+// publish, never ahead of it, so the at-least-once direction the whole package
+// rests on is untouched: a publish that FAILS goes to MarkFailed, which keeps
+// the row at the head of its key exactly as before.
+//
+// The relay does not hold the row. Pending is a VALUE copy taken before the
+// publish, so nothing it is still reading dies here.
+//
+// # WHY AN ABSENT ROW IS SILENCE RATHER THAN AN ERROR, IN BOTH QUEUES
+//
+// Postgres marks with `AND published_at IS NULL` and treats RowsAffected()==0 as
+// success — "another relay published it between our read and this update, or RLS
+// hid it; the record is out". It cannot distinguish that from an id that never
+// existed, and does not need to. A dropped row lands in the same place here, and
+// m.next is never rewound, so an id is never reused and a late mark for a
+// drained record can never reach a different one.
 func (m *Memory) MarkPublished(_ context.Context, id int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if r := m.row(id); r != nil {
-		r.published = true
-		// Cleared with the same UPDATE that stamps published_at in Postgres. A
-		// record that recovered must not keep reporting the blip it recovered
-		// from to whatever later reads the row.
-		r.lastErr = ""
+	if i := m.indexOf(id); i >= 0 {
+		// The vacated tail slot is cleared before the reslice: leaving the
+		// pointer above len would keep one drained record's marshalled payload
+		// reachable until an Append happens to overwrite that slot, which on a
+		// queue that has just gone quiet is never.
+		copy(m.rows[i:], m.rows[i+1:])
+		m.rows[len(m.rows)-1] = nil
+		m.rows = m.rows[:len(m.rows)-1]
 	}
 	return nil
 }
 
+// MarkFailed records an attempt on a record still in the queue. A record that is
+// no longer here has published — see MarkPublished — and Postgres's own
+// `AND published_at IS NULL` predicate makes the same call a no-op there.
 func (m *Memory) MarkFailed(_ context.Context, id int64, cause error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if r := m.row(id); r != nil && !r.published {
-		r.attempts++
-		r.lastErr = boundedCause(cause)
+	if i := m.indexOf(id); i >= 0 {
+		m.rows[i].attempts++
+		m.rows[i].lastErr = boundedCause(cause)
 	}
 	return nil
 }
@@ -174,9 +226,6 @@ func (m *Memory) OldestPendingAge(_ context.Context, now time.Time) (time.Durati
 	defer m.mu.Unlock()
 	var oldest time.Time
 	for _, r := range m.rows {
-		if r.published {
-			continue
-		}
 		if oldest.IsZero() || r.enqueued.Before(oldest) {
 			oldest = r.enqueued
 		}
@@ -198,20 +247,16 @@ func (m *Memory) OldestPendingAge(_ context.Context, now time.Time) (time.Durati
 func (m *Memory) PendingCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	n := 0
-	for _, r := range m.rows {
-		if !r.published {
-			n++
-		}
-	}
-	return n
+	return len(m.rows)
 }
 
-func (m *Memory) row(id int64) *memRow {
-	for _, r := range m.rows {
+// indexOf is the ONE place a record is located by id, so the two Mark* calls
+// cannot drift about what "the record is no longer here" means.
+func (m *Memory) indexOf(id int64) int {
+	for i, r := range m.rows {
 		if r.id == id {
-			return r
+			return i
 		}
 	}
-	return nil
+	return -1
 }
