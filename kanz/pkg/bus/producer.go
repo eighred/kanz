@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -26,6 +27,18 @@ const envelopeVersion uint32 = 2
 // simply stops the message being deduplicated — which is why both the write
 // site here and the re-stamp in redriveMsgID spell it through this constant.
 const headerNatsMsgID = "Nats-Msg-Id"
+
+// headerExpectedLastSubjectSeq is the header JetStream reads to make a publish
+// CONDITIONAL on the sequence currently last on that subject. The name is
+// RESERVED by the broker; a typo does not error, it simply drops the condition
+// and the publish lands unconditionally — the same silent-degradation shape as
+// headerNatsMsgID, and the reason both are constants rather than literals.
+//
+// It exists for read-modify-write on a COMPACTED state subject: a caller that
+// reads the retained message, merges into it and writes the result back must not
+// clobber a value another writer put there in between. Kafka has no equivalent
+// and treats this as an ordinary user header; every current user is NATS-only.
+const headerExpectedLastSubjectSeq = "Nats-Expected-Last-Subject-Sequence"
 
 // Event is the producer-facing form: caller-known envelope fields plus the
 // domain payload. Auto fields (event_id, publish_time, source,
@@ -50,6 +63,25 @@ type Event struct {
 	TenantID         string // explicit tenant; empty ⇒ ctx tenant, then ProducerConfig.Tenant
 
 	Payload proto.Message
+
+	// ExpectedLastSubjectSeq makes this publish CONDITIONAL: the broker accepts it
+	// only if the sequence given here is the last one currently on Subject, and
+	// refuses it otherwise. nil ⇒ unconditional, which is what every event on an
+	// append-only stream wants.
+	//
+	// IT IS FOR STATE SUBJECTS, WHERE THE MESSAGE IS THE WHOLE ANSWER. On a
+	// compacted subject a publisher that reads the retained value, merges into it
+	// and writes the result back is performing a read-modify-write, and two of
+	// those racing lose one of the merges — silently, because both publishes
+	// succeed. The mandate publisher is the first such caller (#916): the value it
+	// writes carries the mandate in force PLUS every scheduled one, so a lost merge
+	// is a mandate that vanishes off a never-aging stream.
+	//
+	// A pointer, not a bare uint64, because ZERO IS A REAL EXPECTATION: it asserts
+	// that the subject holds no message at all, which is what the first publish for
+	// a portfolio must claim. A plain uint64 could not tell "expect empty" from
+	// "no expectation" and would have made exactly the first-write race unguardable.
+	ExpectedLastSubjectSeq *uint64
 }
 
 // ProducerConfig pins the identity fields the producer stamps on every event.
@@ -249,18 +281,22 @@ func (p *Producer) publish(ctx context.Context, e Event) error {
 	if err != nil {
 		return fmt.Errorf("frame marshal: %w", err)
 	}
+	// NATS JetStream keys its broker-side dedup window on Nats-Msg-Id
+	// (EVT-08); Kafka treats this as an ordinary user header (harmless).
+	// One header serves both transports because NATS reserves the name
+	// and Kafka is name-agnostic. A constant, not a literal, because the
+	// redrive path has to RE-STAMP it (see redriveMsgID) and a second
+	// spelling of a reserved name fails silently — the publish succeeds and
+	// simply stops being deduplicated.
+	headers := map[string]string{headerNatsMsgID: env.IdempotencyKey}
+	if e.ExpectedLastSubjectSeq != nil {
+		headers[headerExpectedLastSubjectSeq] = strconv.FormatUint(*e.ExpectedLastSubjectSeq, 10)
+	}
 	return p.client.Publish(ctx, Message{
 		Subject: e.Subject,
 		Key:     []byte(env.PartitionKey),
 		Body:    body,
-		// NATS JetStream keys its broker-side dedup window on Nats-Msg-Id
-		// (EVT-08); Kafka treats this as an ordinary user header (harmless).
-		// One header serves both transports because NATS reserves the name
-		// and Kafka is name-agnostic. A constant, not a literal, because the
-		// redrive path has to RE-STAMP it (see redriveMsgID) and a second
-		// spelling of a reserved name fails silently — the publish succeeds and
-		// simply stops being deduplicated.
-		Headers: map[string]string{headerNatsMsgID: env.IdempotencyKey},
+		Headers: headers,
 	})
 }
 

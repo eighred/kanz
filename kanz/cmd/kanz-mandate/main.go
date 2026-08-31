@@ -300,11 +300,17 @@ func runApprove(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// previous is nil: this tool does not read the stream back, so it cannot honestly
-	// claim what it superseded. The FACT's previous_value is for audit, and an
-	// invented one is worse than an absent one — the mandate's own version carries
-	// the ordering.
-	if err := comp.NewPublisher(producer).Publish(ctx, m, nil, approval, pf.Reason); err != nil {
+	// THE CLIENT IS PASSED AS WELL, and that is the #916 change. A mandate publish
+	// is a read-modify-write of the portfolio's compacted subject: the value that
+	// goes on the wire carries the mandate in force PLUS every mandate already
+	// scheduled, so this tool has to read the subject before writing it. Publishing
+	// only the mandate in --file deleted the rest, which is how scheduling a change
+	// left a portfolio UNGOVERNED at the next restart.
+	//
+	// It also makes previous_value honest: it is now the value actually replaced,
+	// read from the stream, rather than the nil this passed because it had nothing
+	// to read.
+	if err := comp.NewPublisher(producer, client).Publish(ctx, m, approval, pf.Reason); err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
 

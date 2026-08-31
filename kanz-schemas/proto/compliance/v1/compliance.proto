@@ -355,6 +355,32 @@ message Mandate {
   google.protobuf.Timestamp effective_at = 6;
 }
 
+// MandateSet is what a portfolio's mandate subject CARRIES, and it is a set
+// rather than one mandate because the stream retains exactly one message per
+// (tenant, portfolio) subject.
+//
+// THE STREAM KEEPS THE NEWEST MESSAGE, NOT THE ONE IN FORCE. A mandate carries
+// effective_at and an operator may legitimately schedule one: publish v2 today,
+// dated next month. With a single Mandate on the wire that publish EVICTED v1 —
+// the version actually governing the portfolio — from a compacted, never-aging
+// stream. The next replica to boot read only v2, found nothing in effect, and
+// resolved the portfolio as UNGOVERNED; with OMS_REQUIRE_MANDATE unset that is
+// admitted with no constraints rather than refused. A routine, correct operator
+// action silently disarmed the pre-trade control (#916).
+//
+// Carrying the SET makes "keep the newest message" correct by construction: the
+// newest message is the whole answer, so there is nothing for compaction to lose.
+// The members are the versions a lookup can still choose — the single latest
+// version in force at publish time, plus every version dated later (#884) — so
+// the count is 1 + the mandate changes an operator has scheduled and not yet
+// reached, and a republish collapses rather than accumulates.
+message MandateSet {
+  // mandates is ordered ascending by (effective_at, version) and is never empty
+  // on the wire. A reader resolves the version in force by taking the last
+  // member whose effective_at is at or before the query time.
+  repeated Mandate mandates = 1;
+}
+
 // Violation is one rule that failed in an evaluation, with the evidence that
 // reconstructs why.
 message Violation {
