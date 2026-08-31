@@ -12,6 +12,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -250,6 +251,78 @@ func (s *Server) CancelOrder(ctx context.Context, req *venuepb.CancelOrderReques
 			"order_id", st.GetOrderId(), "err", err)
 	}
 	return &venuepb.CancelOrderResponse{}, nil
+}
+
+// QueryOrder asks the connector what the EXCHANGE did with one order, and
+// serves the answer to the OMS (#920).
+//
+// # This is the RPC that makes crash recovery possible against a real venue
+//
+// The OMS's resume path asks the venue what became of an interrupted order and
+// acts on the answer. Until this existed, no out-of-process adapter could be
+// asked, so every interrupted ROUTED order in a real deployment was frozen for
+// a human. Both connectors already held the answer behind a private queryOrder
+// their own reconcilers call; this surfaces it, and nothing about the exchange
+// protocol crosses the boundary — the REST call stays inside the connector, in
+// this process, behind the credential that never leaves it.
+//
+// # THE ERROR RETURN AND THE UNKNOWN VERDICT ARE DIFFERENT ANSWERS
+//
+// An error means the question could not be asked. UNKNOWN means the exchange
+// positively stated it has no such order, and the OMS is entitled to place the
+// order again on the strength of it. So a rate-limit refusal is
+// ResourceExhausted and every other failure is Unavailable; neither can reach
+// the OMS as a verdict, because a verdict only travels on the OK path.
+//
+// A CONNECTOR THAT IS NOT A Querier ANSWERS Unimplemented, which GRPCVenue reads
+// as INDETERMINATE — the same quarantine the OMS performed before this RPC
+// existed. It is not an error the OMS should retry: no amount of asking again
+// will make a connector able to ask its exchange.
+//
+// # NOT GATED BY THE PLATFORM HALT, AND NOT ANSWERED FROM THE LOCAL VIEW
+//
+// Execute is halt-gated because it moves capital. This is a read, and it is the
+// read an operator most needs WHILE the platform is stopped — the same boundary
+// CancelOrder sits on.
+//
+// It also does not answer from s.view, which would be free and would be wrong.
+// The view is this adapter's own record, seeded by Execute; a MISS in it is not
+// the exchange stating it has no such order, it is this process not having
+// written one — exactly the distinction UNKNOWN must never blur. The exchange is
+// the authority on what the exchange holds, so the exchange is who gets asked.
+func (s *Server) QueryOrder(ctx context.Context, req *venuepb.QueryOrderRequest) (*venuepb.QueryOrderResponse, error) {
+	if err := requireDecimalDomain(req); err != nil {
+		return nil, err
+	}
+	st := req.GetState()
+	if st.GetOrderId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "venue: order_id is required")
+	}
+	q, ok := s.venue.(execution.Querier)
+	if !ok {
+		return nil, status.Errorf(codes.Unimplemented,
+			"venue: the %s connector cannot ask the exchange what became of an order", s.venue.MIC())
+	}
+	view, err := q.QueryOrder(ctx, st)
+	if err != nil {
+		// ResourceExhausted names the weight budget specifically, because the two
+		// demand different operator actions: an exhausted budget is this
+		// platform's own back-pressure and clears itself, an Unavailable is the
+		// exchange. Both are "could not ask", and NEITHER may become a verdict.
+		if errors.Is(err, execution.ErrRateLimited) {
+			s.logger.Warn("venue: could not ask the exchange about an order — weight budget exhausted",
+				"mic", s.venue.MIC(), "order_id", st.GetOrderId())
+			return nil, status.Errorf(codes.ResourceExhausted,
+				"venue: could not ask %s about order %s: %v", s.venue.MIC(), st.GetOrderId(), err)
+		}
+		return nil, status.Errorf(codes.Unavailable,
+			"venue: could not ask %s about order %s: %v", s.venue.MIC(), st.GetOrderId(), err)
+	}
+	return &venuepb.QueryOrderResponse{
+		State:  execution.OrderViewStateProto(view.State),
+		Fills:  view.Fills,
+		Reason: view.Reason,
+	}, nil
 }
 
 // Describe reports who this adapter is: the venue it trades, the exchange account

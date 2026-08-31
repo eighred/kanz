@@ -31,6 +31,13 @@ type fakeOKX struct {
 	balanceBody string
 	tickerBody  string
 	configBody  string // body for GET /api/v5/account/config — carries the account uid
+	// GET /api/v5/trade/order-algo — where a CONDITIONAL order lives (#485). It
+	// is a separate endpoint because /trade/order answers 51603 for a stop that
+	// is resting and perfectly healthy, which is the one place that code must
+	// NOT be read as "the venue never had it".
+	algoQueryBody string
+	algoGets      int
+	sawAlgoClOrd  string
 }
 
 func newFakeOKX(t *testing.T) *fakeOKX {
@@ -56,6 +63,11 @@ func newFakeOKX(t *testing.T) *fakeOKX {
 		f.gets++
 		f.sawClOrd = r.URL.Query().Get("clOrdId")
 		_, _ = w.Write([]byte(f.queryBody))
+	})
+	mux.HandleFunc("/api/v5/trade/order-algo", func(w http.ResponseWriter, r *http.Request) {
+		f.algoGets++
+		f.sawAlgoClOrd = r.URL.Query().Get("algoClOrdId")
+		_, _ = w.Write([]byte(f.algoQueryBody))
 	})
 	mux.HandleFunc("/api/v5/account/balance", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(f.balanceBody))

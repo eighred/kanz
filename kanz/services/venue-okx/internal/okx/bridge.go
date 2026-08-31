@@ -63,6 +63,16 @@ type (
 	// boundary.
 	Venue  = execution.Venue
 	Closer = execution.Closer
+	// Querier is the READ half the OMS's crash recovery needs (#920): "do you
+	// hold this order, and what did you do with it?". The gRPC face serves it,
+	// and OKXVenue implements it over the same private queryOrder /
+	// queryAlgoOrder this connector's own reconciler has always used.
+	Querier = execution.Querier
+	// OrderView is that answer, and OrderViewState is its verdict. THE ZERO VALUE
+	// IS INDETERMINATE, deliberately — see execution.OrderViewState. The
+	// dangerous value is UNKNOWN, which authorizes placing the order again.
+	OrderView      = execution.OrderView
+	OrderViewState = execution.OrderViewState
 
 	// WorkerDeps is what the composition root hands the background workers.
 	WorkerDeps = execution.WorkerDeps
@@ -87,6 +97,16 @@ var (
 	NewCloseRegistry      = execution.NewCloseRegistry
 
 	NewMarkTickPublisher = execution.NewMarkTickPublisher
+
+	// The venue verdicts. Aliased as values rather than re-declared so a
+	// connector cannot invent a seventh answer, and so "which constant is
+	// UNKNOWN" has exactly one definition on the platform.
+	OrderViewIndeterminate   = execution.OrderViewIndeterminate
+	OrderViewUnknown         = execution.OrderViewUnknown
+	OrderViewWorking         = execution.OrderViewWorking
+	OrderViewPartiallyFilled = execution.OrderViewPartiallyFilled
+	OrderViewFilled          = execution.OrderViewFilled
+	OrderViewRejected        = execution.OrderViewRejected
 
 	// Exact base-10 helpers. Money and sizes are big.Rat-backed common.v1.Decimal;
 	// `double` is banned on any path moving capital, and these are the only way a
