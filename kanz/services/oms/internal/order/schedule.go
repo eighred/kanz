@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
@@ -20,26 +21,61 @@ import (
 // aggregate: turning a stored parent into a Plan, and deciding whether a
 // SubmitOrder claiming to be a child is really one.
 
+// ReasonUnknownExecutionAlgo refuses a schedule naming an algorithm this build
+// cannot work (#868).
+//
+// ITS OWN CODE, NOT INVALID_SCHEDULE, and the distinction is operational rather
+// than cosmetic. INVALID_SCHEDULE means the operator's own numbers do not work —
+// a window that does not move forward, a cap the slice count cannot honour — and
+// they fix it by changing the command. This means the COMMAND IS FINE AND THIS
+// BUILD CANNOT SERVE IT, which on a rolling deploy is the difference between a
+// bad order and a fleet where half the pods can work it. A client retrying the
+// same command is right in the second case and wrong in the first, and one code
+// cannot tell them apart.
+const ReasonUnknownExecutionAlgo = "UNKNOWN_EXECUTION_ALGO"
+
+// algoNameOf translates order.v1's wire enum to the core's algorithm name.
+//
+// DERIVED FROM THE ENUM'S OWN NAME, NOT A SWITCH. A switch is a second list: add
+// EXECUTION_ALGO_VWAP to the schema and implement VWAP in internal/execution/algo
+// and the order path still refuses it until somebody remembers a third edit here.
+// Stripping the enum prefix makes the wire vocabulary and the registry's
+// vocabulary the same vocabulary, so there is exactly one list — Registered() —
+// and this function cannot drift from it.
+//
+// EVERY FAILURE OF THIS MAPPING FAILS CLOSED. UNSPECIFIED yields "UNSPECIFIED",
+// and a numeric value no schema names at all (an old pod reading a newer
+// producer's enum) yields "", because String() renders it as digits with no
+// prefix. Both reach algo.Lookup, and Lookup refuses both. There is no path
+// through here that reaches an algorithm the caller did not name.
+func algoNameOf(a orderpb.ExecutionAlgo) algo.Name {
+	const prefix = "EXECUTION_ALGO_"
+	name := a.String()
+	if !strings.HasPrefix(name, prefix) {
+		return ""
+	}
+	return algo.Name(strings.TrimPrefix(name, prefix))
+}
+
 // planFromOrder derives a parent's schedule from its durable fields.
 //
 // EVERY INPUT COMES OFF THE ORDER, which is what makes the schedule survive a
 // restart without being stored: two pods holding the same order derive the same
 // children, forever. Nothing here reads a clock or a store.
+//
+// THE ALGORITHM IS ONE OF THOSE FIELDS (#868), carried onto the Plan rather than
+// checked here. It used to be checked here, against TWAP by name; the check has
+// not been dropped but MOVED, to algo.Lookup, which is now the single place a
+// name becomes an implementation. Refusing in two places is how the two answers
+// drift, and the surviving one is the registry's because it is also what the
+// arch guard holds complete.
 func planFromOrder(st *orderpb.OrderState) (algo.Plan, error) {
 	sch := st.GetExecutionSchedule()
 	if sch == nil {
 		return algo.Plan{}, fmt.Errorf("%w: order %s", schedule.ErrNoSchedule, st.GetOrderId())
 	}
-	if sch.GetAlgo() != orderpb.ExecutionAlgo_EXECUTION_ALGO_TWAP {
-		// UNSPECIFIED, or an algorithm a future schema added that this build does
-		// not implement. Both must refuse rather than fall through to TWAP: a
-		// parent worked by an algorithm nobody asked for is a schedule nobody
-		// chose, and on a rolling deploy the old pods would work the order one way
-		// while the new ones worked it another.
-		return algo.Plan{}, fmt.Errorf("%w: order %s asks for %s, which this build does not implement",
-			schedule.ErrNoSchedule, st.GetOrderId(), sch.GetAlgo())
-	}
 	p := algo.Plan{
+		Algo:   algoNameOf(sch.GetAlgo()),
 		Total:  dec.FromProto(st.GetOrderedQuantity()),
 		Start:  sch.GetWindowStart().AsTime().UTC(),
 		End:    sch.GetWindowEnd().AsTime().UTC(),
@@ -93,16 +129,19 @@ func validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 	if err := schedule.UsableParentID(cmd.GetOrderId()); err != nil {
 		return reject("INVALID_SCHEDULE", "%s", err.Error())
 	}
-	if sch.GetAlgo() != orderpb.ExecutionAlgo_EXECUTION_ALGO_TWAP {
-		return reject("INVALID_SCHEDULE",
-			"execution algorithm %s is not implemented by this OMS; the schedule names how the "+
-				"order is worked and must not be defaulted", sch.GetAlgo())
-	}
 	// THE SCHEDULE IS DERIVED HERE, AT ADMISSION, PURELY TO SEE IT REFUSE. The
 	// same arithmetic the driver will run every tick — so a window that does not
 	// move forward, a slice count of zero, or a cap the slices cannot honour is
 	// the caller's answer to their own command rather than a log line hours later.
+	//
+	// It is derived THROUGH THE REGISTRY (#868), which is also what refuses an
+	// algorithm this build does not implement. One call, two refusals, and they
+	// stay distinguishable: algo.ErrUnknownAlgo says the name is the problem, and
+	// anything else says the numbers are. Nothing here compares the algorithm
+	// against a name of its own, so this admission check cannot fall out of step
+	// with what the driver will actually be able to work.
 	plan := algo.Plan{
+		Algo:   algoNameOf(sch.GetAlgo()),
 		Total:  dec.FromProto(cmd.GetQuantity()),
 		Start:  sch.GetWindowStart().AsTime().UTC(),
 		End:    sch.GetWindowEnd().AsTime().UTC(),
@@ -111,7 +150,19 @@ func validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 	if cap := sch.GetMaxSliceQuantity(); cap != nil {
 		plan.MaxSlice = dec.FromProto(cap)
 	}
-	if _, err := algo.TWAP(plan); err != nil {
+	// NOTHING IS SENT AND NOTHING IS KNOWN ABOUT THE MARKET, and both are said
+	// rather than left blank. The order does not exist yet, so no slice of it can
+	// have been sent — that is a KNOWN "none", not an unknown. The OMS has no
+	// market data on this path at all, so UnknownMarket is the honest answer, and
+	// an algorithm needing a book or a volume profile (#867) refuses the order
+	// here rather than being handed a zero.
+	state := algo.ParentState{OrderID: cmd.GetOrderId(), Sent: func(int) bool { return false }}
+	if _, err := algo.Run(plan, state, algo.UnknownMarket{}); err != nil {
+		if errors.Is(err, algo.ErrUnknownAlgo) {
+			return reject(ReasonUnknownExecutionAlgo,
+				"the schedule names how order %s is worked and must not be defaulted: %s",
+				cmd.GetOrderId(), err.Error())
+		}
 		return reject("INVALID_SCHEDULE", "%s", err.Error())
 	}
 	return nil
@@ -183,7 +234,13 @@ func (s *Service) authorizeChild(ctx context.Context, cmd *orderpb.SubmitOrder) 
 			"order %s is a slice of %s, whose schedule cannot be derived: %v",
 			cmd.GetOrderId(), parentID, perr), nil
 	}
-	slices, terr := algo.TWAP(plan)
+	// WHAT HAS BEEN SENT IS UNKNOWN HERE, and Sent is nil to say so rather than a
+	// predicate answering false. This runs on ONE inbound child command; it has
+	// not read the parent's other children and will not, because doing so would
+	// put a second query on the admission path for an answer TWAP does not use.
+	// An algorithm that needs to know refuses, which is correct: it must not be
+	// told "nothing has been sent" by a caller that never looked.
+	slices, terr := algo.Run(plan, algo.ParentState{OrderID: parentID}, algo.UnknownMarket{})
 	if terr != nil {
 		return nil, reject("PARENT_NOT_WORKING",
 			"order %s is a slice of %s, whose schedule is unworkable: %v",

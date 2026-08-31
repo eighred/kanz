@@ -28,10 +28,19 @@ var (
 )
 
 // parent builds a 60-unit parent worked in 6 slices — one every 10 minutes.
+//
+// Algo IS NAMED HERE AND NOWHERE ELSE IN THIS FILE, which is the whole of what
+// #868 changed about these tests. Every assertion below is untouched: the seam
+// was required to leave TWAP's behaviour identical, and it did. What it removed
+// is the ABILITY to leave it unnamed — Due now resolves the algorithm the parent
+// names through the registry and refuses one it cannot work, so a fixture that
+// says nothing is refused rather than silently worked as TWAP. Deleting this one
+// line makes every test below fail with that refusal, which is the check working.
 func parent(id string) Parent {
 	return Parent{
 		OrderID: id,
 		Plan: algo.Plan{
+			Algo:   algo.NameTWAP,
 			Total:  new(big.Rat).SetInt64(60),
 			Start:  windowStart,
 			End:    windowEnd,
