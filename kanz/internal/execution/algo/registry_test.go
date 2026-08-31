@@ -129,7 +129,21 @@ func TestAlgoRegistry_TWAPThroughTheSeamIsTheSameSchedule(t *testing.T) {
 func TestAlgoRegistry_AnUnknownNameIsRefusedNotDefaulted(t *testing.T) {
 	base := Plan{Total: new(big.Rat).SetInt64(60), Start: seamStart, End: seamEnd, Slices: 6}
 
-	for _, name := range []Name{"VWAP", "POV", "IS", "twap", "TWAP ", "", "EXECUTION_ALGO_TWAP"} {
+	// THE SET IS DERIVED FROM THE REGISTRY, NOT WRITTEN OUT. This list named VWAP
+	// and POV as examples of "nobody implements this", so it began asserting the
+	// opposite of what it says on the day #869 registered them — a hand-written
+	// set is the same drift one layer up. What belongs here is anything the
+	// registry does NOT publish, plus the near-misses that must not resolve by
+	// accident: every registered name in the wrong case, with a trailing space,
+	// and wearing the wire enum's prefix.
+	unimplemented := []Name{"IS", "ICEBERG", "SNIPER", ""}
+	for _, a := range Registered() {
+		n := a.Name()
+		unimplemented = append(unimplemented,
+			Name(strings.ToLower(string(n))), n+" ", Name("EXECUTION_ALGO_"+string(n)))
+	}
+
+	for _, name := range unimplemented {
 		t.Run(string("name="+name), func(t *testing.T) {
 			p := base
 			p.Algo = name
@@ -158,7 +172,7 @@ func TestAlgoRegistry_AnUnknownNameIsRefusedNotDefaulted(t *testing.T) {
 // refusal: fixing the window would otherwise reveal a second refusal the operator
 // was never told about, and each round trip costs them a market.
 func TestAlgoRegistry_TheNameIsCheckedBeforeThePlan(t *testing.T) {
-	p := Plan{Algo: "VWAP", Total: new(big.Rat).SetInt64(60), Start: seamEnd, End: seamStart, Slices: 0}
+	p := Plan{Algo: "IS", Total: new(big.Rat).SetInt64(60), Start: seamEnd, End: seamStart, Slices: 0}
 
 	_, err := Run(p, ParentState{OrderID: "p1"}, UnknownMarket{})
 	if !errors.Is(err, ErrUnknownAlgo) {

@@ -80,11 +80,14 @@ import (
 //     (OMS_VENUE_ACCOUNTS): an exchange margins and liquidates per account, so
 //     re-routing an approved order moves it onto a different pool without
 //     changing a single price or quantity.
-//   - EXECUTION_SCHEDULE, all five fields. Narrowing the window from an hour to
+//   - EXECUTION_SCHEDULE, all six fields. Narrowing the window from an hour to
 //     a second turns an order somebody asked to be worked carefully into a
 //     market sweep, at the same quantity and the same price. ExecutionSchedule's
 //     own doc says the schedule is a pure function of exactly these fields, so
-//     covering all five covers the schedule.
+//     covering all six covers the schedule. max_participation_rate joined them
+//     with #869's POV: it is the difference between an order that may be 2% of
+//     the tape and one that may be 40% of it, at the same quantity, the same
+//     price and the same window.
 //   - PARENT_ORDER_ID. It decides whether the order is checked at all: a child
 //     is admitted WITHOUT re-running the compliance gate, because its parent was
 //     checked once for the whole notional (service.go). Re-parenting an order
@@ -199,6 +202,10 @@ func TermsOfState(st *orderpb.OrderState) Terms {
 // rather than none, so an order with no schedule cannot produce the same part
 // list as one whose schedule happens to sit where the next field would.
 //
+// 20 → 21 WHEN THE PARTICIPATION CAP JOINED THEM (#869), for the same reason and
+// with the same consequence as the bump below it: a proposal signed before POV
+// existed was signed over an order that could not carry a cap.
+//
 // 18 → 20 WHEN LEVERAGE AND MARGIN MODE JOINED THE COVERED TERMS (#417), and
 // bumping it INVALIDATES EVERY DIGEST ALREADY SIGNED. That is the intended
 // consequence, not a cost paid around it: a held proposal signed before those
@@ -212,7 +219,7 @@ func TermsOfState(st *orderpb.OrderState) Terms {
 // signature. Uncovered, an order approved as spot could be submitted as 10x
 // cross under the approver's signature: two people named on an order neither of
 // them saw.
-const digestParts = 20
+const digestParts = 21
 
 // Digest is the value dualcontrol.Approve is given and Approval.Covers
 // re-checks.
@@ -271,7 +278,7 @@ func (t Terms) Digest() (string, error) {
 		timestampPart(t.ExpireAt),
 		t.Venue,
 		t.ParentOrderID,
-		// The schedule, flattened. SIX parts always — see digestParts — and the
+		// The schedule, flattened. SEVEN parts always — see digestParts — and the
 		// first of them is PRESENCE. Without it an order with no schedule and one
 		// carrying an all-zero schedule hash identically, and "worked over time"
 		// versus "sent whole" is the largest behavioural difference on this
@@ -284,11 +291,19 @@ func (t Terms) Digest() (string, error) {
 		timestampPart(t.Schedule.GetWindowEnd()),
 		strconv.FormatUint(uint64(t.Schedule.GetSliceCount()), 10),
 	)
-	maxSlice, err := decimalPart("execution_schedule.max_slice_quantity", t.Schedule.GetMaxSliceQuantity())
-	if err != nil {
-		return "", err
+	for _, d := range []struct {
+		field string
+		value *commonpb.Decimal
+	}{
+		{"execution_schedule.max_slice_quantity", t.Schedule.GetMaxSliceQuantity()},
+		{"execution_schedule.max_participation_rate", t.Schedule.GetMaxParticipationRate()},
+	} {
+		s, err := decimalPart(d.field, d.value)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, s)
 	}
-	parts = append(parts, maxSlice)
 
 	// A part list of the wrong length means a field was added to the append
 	// chain and not to digestParts, which would silently change every digest the
