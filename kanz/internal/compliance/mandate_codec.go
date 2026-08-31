@@ -98,9 +98,15 @@ func SubjectMandateFor(tenantID, portfolioID string) string {
 // second-consumer trigger (positions now build a subject the same way — EXEC-M20).
 func subjectToken(s string) string { return subject.Token(s) }
 
-// MarshalMandateValue renders a Mandate as the canonical serialized value stored
-// in ConfigChanged.new_value. protojson (not binary) keeps the audited value
-// human-readable and diffable, which an auditor of "what changed" wants.
+// MarshalMandateValue renders ONE Mandate as canonical protojson. protojson (not
+// binary) keeps the audited value human-readable and diffable, which an auditor
+// of "what changed" wants.
+//
+// IT IS NO LONGER WHAT GOES ON THE WIRE, and that is deliberate. Its one caller
+// is MandateDigest — the two-signature flow hashes the mandate the operators
+// actually approved, which is a single version, not the set the publisher
+// derives around it. What ConfigChanged.new_value carries is
+// MarshalMandateSetValue; see MandateSet in compliance.proto for why a set.
 func MarshalMandateValue(m *compliancepb.Mandate) (string, error) {
 	b, err := protojson.Marshal(m)
 	if err != nil {
@@ -109,13 +115,64 @@ func MarshalMandateValue(m *compliancepb.Mandate) (string, error) {
 	return string(b), nil
 }
 
-// UnmarshalMandateValue parses a ConfigChanged.new_value back into a Mandate.
+// UnmarshalMandateValue parses ONE serialized Mandate. Use DecodeMandateValue to
+// read a ConfigChanged.new_value off the stream — that value may be a set.
 func UnmarshalMandateValue(s string) (*compliancepb.Mandate, error) {
 	var m compliancepb.Mandate
 	if err := protojson.Unmarshal([]byte(s), &m); err != nil {
 		return nil, err
 	}
 	return &m, nil
+}
+
+// MarshalMandateSetValue renders the mandates a portfolio's subject carries —
+// the version in force plus every version scheduled after it — as the
+// ConfigChanged.new_value that goes on the compacted MANDATE stream.
+//
+// An EMPTY set is refused rather than encoded. The stream keeps one message per
+// subject forever, so a message carrying no mandate is not a no-op: it is the
+// last word on that portfolio, and every replica that boots afterwards reads the
+// portfolio as UNGOVERNED — which under OMS_REQUIRE_MANDATE=false is admitted
+// with no constraints at all. There is no operator intent this could express.
+func MarshalMandateSetValue(ms []*compliancepb.Mandate) (string, error) {
+	if len(ms) == 0 {
+		return "", errors.New("compliance: refusing to publish an EMPTY mandate set — the MANDATE " +
+			"stream retains one message per portfolio forever, so this would be the last word on " +
+			"that portfolio and every replica booting afterwards would read it as UNGOVERNED")
+	}
+	b, err := protojson.Marshal(&compliancepb.MandateSet{Mandates: ms})
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// DecodeMandateValue reads a ConfigChanged.new_value off the mandate stream and
+// returns every mandate it carries, ordered as published.
+//
+// IT ACCEPTS BOTH SHAPES, AND HAS TO, FOREVER. The MANDATE stream has no
+// max-age — "a mandate that expires off the stream is a portfolio that has
+// quietly become ungoverned" (infra/nats/bootstrap-job.yaml) — so every value
+// published before #916 is still the retained message on its subject and will be
+// until someone republishes that portfolio's mandate. A decoder that understood
+// only the new set shape would refuse those, and a refused mandate is a portfolio
+// the gate REFUSES rather than one it governs (#619): an upgrade would have taken
+// every un-republished portfolio out of trading.
+//
+// The two shapes are told apart by protojson's STRICTNESS, not by inspecting the
+// text: unknown fields are an error by default, so a bare Mandate cannot parse as
+// a MandateSet (its mandate_id is unknown there) and a MandateSet cannot parse as
+// a Mandate. The set is tried first because it is what every new publish writes.
+func DecodeMandateValue(s string) ([]*compliancepb.Mandate, error) {
+	var set compliancepb.MandateSet
+	if err := protojson.Unmarshal([]byte(s), &set); err == nil && len(set.GetMandates()) > 0 {
+		return set.GetMandates(), nil
+	}
+	m, err := UnmarshalMandateValue(s)
+	if err != nil {
+		return nil, err
+	}
+	return []*compliancepb.Mandate{m}, nil
 }
 
 // MandateLoader applies mandate ConfigChanged FACTs into a MandateRegistry — the
@@ -134,24 +191,43 @@ func NewMandateLoader(reg *MandateRegistry) *MandateLoader { return &MandateLoad
 
 // Apply decodes a ConfigChanged. It ignores config keys outside the mandate
 // namespace (returns nil, nil), so it is safe to point at a shared config
-// stream. On a mandate key it parses and stores the version, returning it.
-func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) (*compliancepb.Mandate, error) {
+// stream. On a mandate key it parses EVERY mandate the value carries and stores
+// them, returning them.
+//
+// IT RETURNS A SLICE BECAUSE THE VALUE IS A SET (#916). One message on the
+// portfolio's subject carries the version in force AND every version scheduled
+// after it, so applying only the first would restore exactly the loss the set
+// exists to prevent — the scheduled change, or the mandate governing right now,
+// depending on which end you dropped.
+//
+// A PARTIAL APPLY IS STILL A FAILURE. If any member is refused the whole message
+// is reported as unapplied, which marks the portfolio unreadable and makes its
+// orders REFUSE rather than pass. Keeping the members that happened to parse
+// would leave a registry that looks governed while holding an arbitrary subset of
+// what two people signed.
+func (l *MandateLoader) Apply(cc *lifecyclepb.ConfigChanged) ([]*compliancepb.Mandate, error) {
 	if !strings.HasPrefix(cc.GetConfigKey(), MandateConfigKeyPrefix) {
 		return nil, nil
 	}
-	m, err := UnmarshalMandateValue(cc.GetNewValue())
+	ms, err := DecodeMandateValue(cc.GetNewValue())
 	if err != nil {
 		return nil, err
+	}
+	if len(ms) == 0 {
+		return nil, errors.New("compliance: the mandate value carried no mandate at all — this " +
+			"portfolio's subject retains a message that governs nothing")
 	}
 	// Put's refusal is PROPAGATED, not swallowed. A mandate that names no tenant
 	// cannot be filed under (tenant, portfolio) at all, and a registry that
 	// dropped it quietly would leave the portfolio reading UNGOVERNED — which
 	// under OMS_REQUIRE_MANDATE=false is admitted with no constraints, not
 	// refused (#243).
-	if err := l.reg.Put(m); err != nil {
-		return nil, err
+	for _, m := range ms {
+		if err := l.reg.Put(m); err != nil {
+			return nil, err
+		}
 	}
-	return m, nil
+	return ms, nil
 }
 
 // MandateConsumer is the bus handler that feeds a MandateRegistry from the
