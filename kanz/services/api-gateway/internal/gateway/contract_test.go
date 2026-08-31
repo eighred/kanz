@@ -30,8 +30,15 @@ const contractSecret = "contract-secret"
 // contract test fails as a 404, which reads like a routing bug and is not one.
 const contractTenant = "acme"
 
-// chainedServer builds the production-shaped chain: version → auth → rate
-// limit → idempotency, wrapping the gateway routes.
+// chainedServer builds the production-shaped chain: version → pre-auth source
+// limit → auth → per-tenant quota → idempotency, wrapping the gateway routes.
+//
+// THE TWO LIMITERS ARE BOTH HERE, in the order buildRouter composes them (#835),
+// because the contract clients depend on is which one answers. PreAuth spends a
+// token only on a 401, so an authenticated client meets the per-tenant Quota and
+// never the pre-auth bucket — a chain carrying only one of the two would let a
+// change swap them without a case noticing. The nil resolver is the unconfigured
+// posture: no forwarded header is honoured and the key is the TCP peer.
 func chainedServer(t *testing.T, fc *fakeClient, perSec float64, burst int, requiredRole string) *httptest.Server {
 	t.Helper()
 	// The risk routes are READS (SEC-M2), and the contract's token carries requiredRole —
@@ -40,9 +47,12 @@ func chainedServer(t *testing.T, fc *fakeClient, perSec float64, burst int, requ
 	gateway.New(fc, nil, nil, "", nil).Routes(gwMux)
 	chain := middleware.Chain(
 		middleware.Version(),
+		middleware.PreAuth(perSec, burst, nil, nil),
 		middleware.Auth(middleware.NewJWTAuthenticator(contractSecret), requiredRole, nil),
-		middleware.RateLimit(perSec, burst),
-		middleware.Idempotency(time.Minute, 100),
+		middleware.Quota(middleware.TenantLimits{
+			Default: middleware.Limits{RatePerSec: perSec, Burst: burst},
+		}, nil),
+		middleware.IdempotencyWith(nil, time.Minute, 100),
 	)
 	ts := httptest.NewServer(chain(gwMux))
 	t.Cleanup(ts.Close)
@@ -98,6 +108,34 @@ func TestContract_RateLimit429(t *testing.T) {
 	if r := get(t, url, tok, ""); r.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("second ⇒ %d, want 429", r.StatusCode)
 	}
+}
+
+// AN UNAUTHENTICATED CALLER IS BOUNDED, AND BY THE LAYER IN FRONT OF AUTH
+// (#835).
+//
+// Before this, the chain was version → signing → auth → metrics → quota, and
+// quota is per-TENANT so it needs a principal — which means a caller who never
+// authenticates reached the HMAC verification and the token validation with no
+// bucket to exhaust first. The first request below still gets the honest 401;
+// the second gets 429 without the token being looked at again, which is the
+// whole property: the cost stops being paid once the source has shown it cannot
+// authenticate.
+func TestContract_PreAuthRefusesAFloodBeforeAuth(t *testing.T) {
+	fc := &fakeClient{exposureResp: &querypb.ExposureResponse{PortfolioId: "PF1", OwnerTenant: contractTenant}}
+	ts := chainedServer(t, fc, 1, 1, "risk.read") // 1 token, no refill in-test
+	url := ts.URL + "/v1/portfolios/PF1/exposure"
+
+	if r := get(t, url, "not-a-token", ""); r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("first unauthenticated call ⇒ %d, want 401 — the caller must be told why", r.StatusCode)
+	}
+	if r := get(t, url, "not-a-token", ""); r.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("second unauthenticated call ⇒ %d, want 429 — nothing bounds the auth path", r.StatusCode)
+	}
+	// AND A VALID TOKEN FROM THE SAME SOURCE IS STILL SERVED... after the bucket
+	// refills. Here it has not, so the point being pinned is the one above; the
+	// "authenticated traffic never debits" property is asserted directly in
+	// middleware's TestPreAuthSpendsNothingOnASuccessfulRequest, where the clock
+	// is controllable.
 }
 
 func TestContract_VersionMatrix(t *testing.T) {

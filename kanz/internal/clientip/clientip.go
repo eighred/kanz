@@ -3,23 +3,37 @@
 //
 // WHY THIS IS NOT A ONE-LINER, AND WHY IT FAILS CLOSED.
 //
-// The login limiter keys on the caller's address. If that address comes from a
-// header the caller can set, the limiter is not a limiter: an attacker sends a
-// different CF-Connecting-IP on every request and guesses credentials without
-// bound, while the metrics show a wide spread of well-behaved clients. The bug
-// is invisible precisely because it looks like normal traffic.
+// A pre-authentication limiter keys on the caller's address. If that address
+// comes from a header the caller can set, the limiter is not a limiter: an
+// attacker sends a different CF-Connecting-IP on every request and guesses
+// credentials without bound, while the metrics show a wide spread of
+// well-behaved clients. The bug is invisible precisely because it looks like
+// normal traffic.
 //
 // A forwarded header is trustworthy only when the connection carrying it could
 // not have come from anywhere else. Under the zero-ingress model that condition
 // holds — cloudflared holds an OUTBOUND tunnel and nothing listens publicly, so
-// the only peer that can reach this process is the tunnel daemon itself. But
-// "holds today" is a deployment property, not a code property, and a BFF that
+// the only peer that can reach the BFF is the tunnel daemon itself. But "holds
+// today" is a deployment property, not a code property, and a process that
 // trusts the header unconditionally is one `docker run -p` away from being an
 // open oracle.
 //
 // So the header is honoured ONLY when the immediate peer is one of the
 // configured trusted proxies. Configure neither and the peer address is used,
 // which is correct for direct local development and safe everywhere else.
+//
+// # WHY IT LIVES IN internal/ RATHER THAN IN ONE SERVICE (#835)
+//
+// It was services/web-bff/internal/clientip while the BFF's credential login
+// was the only pre-auth surface that needed it. The api-gateway's pre-auth
+// limiter (middleware.PreAuth) is the second consumer, and Go's internal rule
+// makes that promotion mandatory rather than stylistic: a package under
+// services/web-bff/internal is importable only from services/web-bff, so the
+// alternative to moving it is a second copy — and a copied helper is how a fix
+// stops spreading (CLAUDE.md). The two callers face the same question with two
+// different edges in front of them (cloudflared for the BFF, ingress-nginx for
+// the gateway), which is exactly why the trusted set is configuration and not a
+// constant in here.
 package clientip
 
 import (
@@ -75,7 +89,11 @@ func NewResolver(header string, trustedCIDRs []string) (*Resolver, error) {
 // Trusts reports whether the header will ever be honoured. Used by the
 // composition root to say so out loud at startup — "configured and ignored" and
 // "not configured" must not look the same in a log.
-func (r *Resolver) Trusts() bool { return r.header != "" && len(r.trusted) > 0 }
+// A NIL RESOLVER TRUSTS NOTHING rather than panicking. It is the zero value a
+// composition root that configured no edge would hand a limiter, and the safe
+// reading of "no resolver" is "no header is honoured" — the same answer an
+// unconfigured one gives.
+func (r *Resolver) Trusts() bool { return r != nil && r.header != "" && len(r.trusted) > 0 }
 
 // Resolve returns the address to attribute this request to.
 //

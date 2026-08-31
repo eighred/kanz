@@ -113,6 +113,24 @@ type Config struct {
 	// ConfigMap-mounted policy-as-data shape (cf. AUTH-01b risk-authz.json).
 	QuotasFile string
 
+	// TrustedProxyHeader names the forwarded-for header the edge in front of this
+	// gateway sets — "X-Forwarded-For" under ingress-nginx. Empty ⇒ the TCP peer
+	// address is used and no header is honoured.
+	//
+	// IT IS WHAT THE PRE-AUTH LIMITER KEYS ON (#835). middleware.PreAuth bounds
+	// how fast one SOURCE may fail to authenticate, and before authentication the
+	// source is the only thing there is. Unset, every caller arriving through the
+	// ingress controller shares the controller's own address as their key — safe,
+	// and less precise. Set to a header from an UNTRUSTED peer it would be worse
+	// than unset: a caller varies the value per request and every attempt lands in
+	// a fresh bucket, so the limiter would stop existing while its metrics showed
+	// a wide spread of well-behaved clients.
+	TrustedProxyHeader string
+	// TrustedProxies are the peer CIDRs (or bare addresses) permitted to set that
+	// header — for ingress-nginx, the controller's pod CIDR. Both must be set
+	// together or neither; Load refuses the half-configured state.
+	TrustedProxies []string
+
 	// SigningSecret, when set, requires every request to carry a valid HMAC
 	// X-Signature over method+path+body (API-01d request signing). Empty ⇒
 	// signing is not enforced.
@@ -359,6 +377,8 @@ func Load() (Config, error) {
 		RateLimitBurst:     parseInt(os.Getenv("API_GATEWAY_RATE_LIMIT_BURST")),
 		MaxInFlight:        parseInt(os.Getenv("API_GATEWAY_MAX_IN_FLIGHT")),
 		QuotasFile:         os.Getenv("API_GATEWAY_QUOTAS_FILE"),
+		TrustedProxyHeader: os.Getenv("API_GATEWAY_TRUSTED_PROXY_HEADER"),
+		TrustedProxies:     env.SplitList(os.Getenv("API_GATEWAY_TRUSTED_PROXIES")),
 		SigningSecret:      signingSecret,
 		NATSURL:            os.Getenv("API_GATEWAY_NATS_URL"),
 		WealthAddr:         os.Getenv("API_GATEWAY_WEALTH_ADDR"),
@@ -379,6 +399,16 @@ func Load() (Config, error) {
 	}
 	if err := cfg.validateAuth(); err != nil {
 		return Config{}, err
+	}
+	// Naming a header with nobody trusted to send it, or the reverse, silently
+	// disables it — and the operator who set one of the two believes the pre-auth
+	// limiter is keyed on the real caller when it is not. Refuse rather than run in
+	// a state that reads as configured and honours nothing. Same rule, same
+	// wording, as web-bff's (the other clientip caller).
+	if (cfg.TrustedProxyHeader == "") != (len(cfg.TrustedProxies) == 0) {
+		return Config{}, errors.New("API_GATEWAY_TRUSTED_PROXY_HEADER and API_GATEWAY_TRUSTED_PROXIES " +
+			"must be set together or not at all — one without the other reads as configured and " +
+			"honours nothing, and the pre-auth limiter would key on the proxy instead of the caller")
 	}
 	return cfg, nil
 }

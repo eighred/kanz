@@ -381,9 +381,38 @@ spec:
             # AUDIT_VERIFY_ROLES in audit-deploy.yaml answers that (#118); this
             # capability answers only whether the principal may read the surface at all.
             # PER POD, not platform-wide. See THE SCALE INVARIANT above.
+            #
+            # THIS PAIR NOW BUDGETS TWO LIMITERS, NOT ONE (#835). Quota charges an
+            # authenticated TENANT for its requests; PreAuth charges a SOURCE for its
+            # 401s, and runs ahead of the signature and token checks a caller who never
+            # authenticates used to reach unbounded. They share these numbers on
+            # purpose: a request that answered 401 would, had it authenticated, have
+            # been charged against exactly this budget one hop later, so the failure
+            # allowance can never be tighter than the request allowance the operator
+            # already accepted — and there is no second number to drift.
             - { name: API_GATEWAY_RATE_LIMIT_PER_SEC, value: "50" }
             - { name: API_GATEWAY_RATE_LIMIT_BURST, value: "100" }
             - { name: API_GATEWAY_MAX_IN_FLIGHT, value: "64" }
+            # WHAT THE PRE-AUTH LIMITER KEYS ON, AND WHY IT IS UNSET HERE.
+            #
+            # Before authentication the only thing there is is where the request came
+            # from, and the TCP peer of most requests reaching this pod is the nginx
+            # ingress controller — so unset, every external caller shares one bucket.
+            # That is the safe direction rather than a broken one: PreAuth spends a
+            # token only on a 401, so legitimate load never debits it whatever its
+            # volume, and the cost of aggregating is precision, not throughput.
+            #
+            # Setting the pair below makes the key the real caller. It is NOT filled in
+            # with a value because the trusted peer is the ingress controller's POD
+            # CIDR, which is cluster-specific — a wrong CIDR here would be worse than
+            # nothing, because the header would then be honoured from a peer that is
+            # not the edge and any caller could name their own bucket. Fill both in per
+            # cluster, or neither: config.Load REFUSES to start on one without the
+            # other, since a header named with nobody trusted to send it reads as
+            # configured and honours nothing.
+            #
+            #   API_GATEWAY_TRUSTED_PROXY_HEADER  "X-Forwarded-For" under ingress-nginx
+            #   API_GATEWAY_TRUSTED_PROXIES       the controller's pod CIDR, comma-separated
             # The request-signing HMAC, from the SEC-01d CSI file (never a plaintext
             # env). The config prefers <VAR>_FILE for exactly this reason.
             - { name: API_GATEWAY_SIGNING_SECRET_FILE, value: /run/secrets/gateway/signing-secret }

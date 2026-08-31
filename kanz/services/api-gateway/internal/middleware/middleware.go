@@ -49,30 +49,29 @@ func Version() func(http.Handler) http.Handler {
 	}
 }
 
-// RateLimit applies a per-tenant token bucket (API-01d noisy-neighbor
-// protection). The key is the authenticated tenant (falling back to the
-// subject, then the remote addr for unauthenticated/dev paths), so one
-// tenant's burst cannot starve another. A non-positive rate disables it.
-func RateLimit(perSec float64, burst int) func(http.Handler) http.Handler {
-	if perSec <= 0 {
-		return func(next http.Handler) http.Handler { return next }
-	}
-	if burst <= 0 {
-		burst = 1
-	}
-	rates := newBucketSet()
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !rates.allow(rateKey(r), perSec, float64(burst)) {
-				w.Header().Set("Retry-After", "1")
-				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
+// RateLimit IS GONE, AND ITS ABSENCE IS THE POINT (#835).
+//
+// It was a complete per-key token bucket — lazy refill, its own bucket set — and
+// nothing in the module called it. A reviewer reading this file found a wired
+// rate limiter and reasonably concluded the gateway was rate-limited; it was
+// not, at the layer that mattered most. An unwired seam and a healthy one must
+// not look the same.
+//
+// The two questions it appeared to answer are now answered by the two middleware
+// that are actually in the chain: Quota bounds an authenticated TENANT
+// (per-tenant budgets and overrides, MT-01e), and PreAuth bounds a SOURCE that
+// cannot authenticate at all. test/arch's
+// TestEveryGatewayMiddlewareIsWiredIntoTheChain fails the build if a third one
+// arrives and is never called.
 
+// rateKey is the principal the per-tenant Quota charges. Its only caller now
+// runs AFTER Auth, so a principal is always present and the address arm is a
+// backstop rather than a path: Auth refuses (503) without an authenticator and
+// (401) without a valid token, and every authenticator this gateway accepts
+// requires a subject claim. That matters because RemoteAddr is IP:PORT, which
+// changes per TCP connection — as a live key it would hand every connection a
+// fresh bucket. PreAuth, which does key on the address, resolves it through
+// clientip and strips the port for exactly this reason.
 func rateKey(r *http.Request) string {
 	if p := PrincipalFromContext(r.Context()); p != nil {
 		if p.Tenant != "" {
@@ -85,8 +84,8 @@ func rateKey(r *http.Request) string {
 	return "a:" + r.RemoteAddr
 }
 
-// Idempotency makes a repeated Idempotency-Key at-most-once and replays the
-// prior response (API-01d). It applies only to non-idempotent methods — GETs are
+// IdempotencyWith makes a repeated Idempotency-Key at-most-once and replays
+// the prior response (API-01d). It applies only to non-idempotent methods — GETs are
 // already idempotent — and passes through when the client sends no key.
 //
 // # THE KEY IS SCOPED, NOT THE HEADER AS SENT
@@ -130,14 +129,15 @@ func rateKey(r *http.Request) string {
 // A duplicate this pod cannot answer from its body cache is REFUSED with 409,
 // not executed. That is the fail-loud choice CLAUDE.md asks for: the client
 // learns its retry was not run, instead of the platform placing a second order.
-func Idempotency(ttl time.Duration, max int) func(http.Handler) http.Handler {
-	return IdempotencyWith(bus.NewDedupWindow(ttl, max), ttl, max)
-}
-
-// IdempotencyWith is Idempotency over a caller-supplied claim store, so the
-// composition root can substitute the cross-pod bus.RedisDedup for the default
-// per-pod window. A nil claims falls back to the in-memory window rather than
-// disabling the guarantee silently.
+//
+// # THE CLAIM STORE IS A PARAMETER, AND THERE IS NO CONVENIENCE TWIN
+//
+// `Idempotency(ttl, max)` used to sit here and wrap this call with the in-memory
+// window. It had no production caller — the composition root has always used
+// this form so it can hand over the cross-pod bus.RedisDedup — so it was a
+// second spelling of one concept, reachable only from tests, in the same file as
+// the dead RateLimit (#835). A nil claims falls back to the in-memory window
+// rather than disabling the guarantee silently, which is what the twin provided.
 func IdempotencyWith(claims bus.Deduper, ttl time.Duration, max int) func(http.Handler) http.Handler {
 	if ttl <= 0 {
 		ttl = time.Minute
@@ -191,7 +191,7 @@ func IdempotencyWith(claims bus.Deduper, ttl time.Duration, max int) func(http.H
 	}
 }
 
-// idempotencyScope derives the cache/claim key. See Idempotency for why each
+// idempotencyScope derives the cache/claim key. See IdempotencyWith for why each
 // component is present.
 //
 // tenantLabel is reused rather than reading the principal again: it is the same

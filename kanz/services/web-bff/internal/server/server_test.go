@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eighred/kanz/services/web-bff/internal/clientip"
+	"github.com/eighred/kanz/internal/clientip"
 	"github.com/eighred/kanz/services/web-bff/internal/identityclient"
 	"github.com/eighred/kanz/services/web-bff/internal/oidc"
 	"github.com/eighred/kanz/services/web-bff/internal/session"
