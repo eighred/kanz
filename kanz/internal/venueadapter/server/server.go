@@ -132,6 +132,62 @@ func (s *Server) Execute(ctx context.Context, req *venuepb.ExecuteRequest) (*ven
 	if st.GetOrderId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "venue: order_id is required")
 	}
+	// AND REFUSE AN ORDER THIS ADAPTER HAS ALREADY SEEN THE VENUE FINISH (#914).
+	//
+	// BEFORE view.Record, for the reason the halt gate above is: an order this
+	// adapter will not place must not be written into the view as one it has.
+	//
+	// THE VIEW IS THE SMALLER HALF, and it is the half the issue was filed for.
+	// Record is a plain upsert, so a re-dispatch of an order the view holds
+	// FILLED overwrote it back to the OMS's ROUTED. Memory.Record stamps
+	// terminalAt only for a terminal status, so the entry lost its eviction
+	// clock, Open started returning it again, and the reconciler resumed
+	// spending REST weight on it and re-emitting StateHealed about it on every
+	// pass — the leak Progress closed, reopened through the other writer.
+	//
+	// THE BIGGER HALF IS WHAT THE LINE AFTER THE RECORD WOULD DO: place, at the
+	// exchange, an order the venue has already finished. Both connectors stamp
+	// order_id as the client order id (see orderid.Valid for why the id shape is
+	// the intersection of the venues), so the exchange dedups a resubmission —
+	// WHILE THE ORIGINAL IS STILL OPEN. Once it has filled, that id is free
+	// again, and the idempotency this platform leans on is weakest in exactly
+	// the case this guard covers. Nothing downstream catches it either:
+	// BinanceVenue.Execute's recovery branch runs only when the placement
+	// FAILED, and a second placement that succeeds returns real fills for a real
+	// second trade.
+	//
+	// NO OMS PATH REACHES THIS TODAY, and the guard is worth its cost anyway.
+	// Service.work is the only caller of Venue.Execute, and each of its three
+	// callers either provably precedes the first placement (admission, and
+	// resume's PENDING_NEW branch, which is reachable only because work saves
+	// ROUTED before it calls the venue) or goes through Reconcile, which returns
+	// ActionRedrive only when the venue itself answered UNKNOWN. This is the
+	// last line before the exchange; it is the wrong place to hold an invariant
+	// by knowing what every caller currently does.
+	//
+	// REFUSE RATHER THAN WORK-IT-AND-KEEP-THE-STATUS, which was the other option
+	// on the table. Keeping the status fixes the bookkeeping and leaves the
+	// duplicate placement, and it is quiet: the OMS would be told the order was
+	// worked and given whatever the second placement returned. Refusing costs a
+	// nack and, past the venue adapter, a quarantine or a DLQ entry for an order
+	// that did in fact finish — a human looking at something that needs no
+	// repair. That is the SimVenue.QueryOrder trade taken the same way round: a
+	// false freeze against a second trade, fail closed.
+	//
+	// AN ID IS NOT REUSED ACROSS ORDERS, so this cannot refuse a different
+	// order: orderid.Mint is 128 bits and Store.Create is an admission gate that
+	// refuses a duplicate order_id.
+	//
+	// THE RESIDUAL, STATED RATHER THAN GLOSSED. Memory forgets a terminal order
+	// after DefaultTerminalRetention, so past that window Execute sees no entry
+	// and proceeds; Postgres never prunes and the guard is permanent there. The
+	// SimVenue.forgotten latch is deliberately NOT copied here, for the reason
+	// stated there: Execute cannot tell a forgotten order from a brand-new one,
+	// so refusing every miss would not bound anything, it would stop the adapter
+	// dead.
+	if err := s.refuseFinished(ctx, st.GetOrderId()); err != nil {
+		return nil, err
+	}
 	if err := s.view.Record(ctx, st); err != nil {
 		// Not a soft failure. Working an order we have no record of leaves its
 		// fills unenrichable and invisible to the reconciler — better to refuse it
@@ -280,6 +336,33 @@ func (s *Server) ListInstruments(context.Context, *venuepb.ListInstrumentsReques
 		})
 	}
 	return resp, nil
+}
+
+// refuseFinished refuses to work an order this adapter's view already holds at a
+// terminal status. See the call site in Execute for the argument.
+//
+// A STORE FAILURE REFUSES TOO. It leaves this adapter unable to establish that
+// the order is not already finished, and an unknown on the capital path fails
+// closed — the same direction Execute takes when the Record itself fails.
+func (s *Server) refuseFinished(ctx context.Context, orderID string) error {
+	prior, ok, err := s.view.Get(ctx, orderID)
+	if err != nil {
+		s.logger.Error("venue: could not read the order view before working an order",
+			"mic", s.venue.MIC(), "order_id", orderID, "err", err)
+		return status.Errorf(codes.Internal,
+			"venue: could not establish whether order %s has already been worked: %v", orderID, err)
+	}
+	if !ok || !orderview.Terminal(prior.GetStatus()) {
+		return nil
+	}
+	// AlreadyExists, not the halt gate's FailedPrecondition: an operator reading
+	// a refusal has to be able to tell "the platform is stopped" from "the
+	// exchange already finished this order", and those demand different actions.
+	s.logger.Warn("venue: refusing to place an order the venue has already finished",
+		"mic", s.venue.MIC(), "order_id", orderID, "status", prior.GetStatus().String())
+	return status.Errorf(codes.AlreadyExists,
+		"venue: order %s is already %s in this adapter's view — the exchange finished it, and "+
+			"placing it again would trade the fund twice", orderID, prior.GetStatus())
 }
 
 func (s *Server) recordStatus(ctx context.Context, st *orderpb.OrderState, next orderpb.OrderStatus) error {
