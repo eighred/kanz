@@ -56,9 +56,22 @@ runs:
         tmp="$(mktemp -d)"
         trap 'rm -rf "$tmp"' EXIT
 
-        curl --fail --silent --show-error --location --retry 3 --retry-connrefused \
+        # --retry-all-errors ON TOP OF --retry-connrefused, because the failure
+        # that actually turns a good commit red here is neither a refused
+        # connection nor an HTTP error: it is `curl: (35) Recv failure:
+        # Connection reset by peer` — the transfer STARTS and dies mid-stream.
+        # --retry alone covers transient HTTP codes and timeouts, and
+        # --retry-connrefused extends it to a refused connect; neither covers a
+        # reset, so `--retry 3` retried nothing and the job failed on the first
+        # attempt. Seen on 2026-08-31, red-lighting two jobs on a merged PR.
+        #
+        # It does not weaken the verification below. The sha256 check is what
+        # makes the download safe, and it runs on whatever bytes finally arrive —
+        # retrying changes how many attempts are made, never whether the result
+        # is checked.
+        curl --fail --silent --show-error --location --retry 3 --retry-connrefused --retry-all-errors \
           -o "$tmp/$asset" "$base/$asset"
-        curl --fail --silent --show-error --location --retry 3 --retry-connrefused \
+        curl --fail --silent --show-error --location --retry 3 --retry-connrefused --retry-all-errors \
           -o "$tmp/sha256.txt" "$base/sha256.txt"
 
         # VERIFIED BEFORE IT IS EXECUTED, and the grep is anchored to the exact

@@ -46,11 +46,28 @@ export function headers() {
 // and measures dominate; scenario is heavier and rarer. Returns the responses
 // so callers can check them.
 export function readMix() {
-  const asOf = new Date().toISOString();
   const pf = pickPortfolio();
+  // NO ?as_of= ON THE MEASURES READ, AND IT IS NOT AN OMISSION (#859).
+  //
+  // This used to send as_of=<now>, and every response counted as a 2xx — which
+  // is precisely the defect #859 fixed: the engine never read the field, so a
+  // pinned query was answered from live state and returned 200. The harness was
+  // therefore never measuring a point-in-time query; it was measuring a
+  // latest-state query that happened to carry an ignored parameter, and it would
+  // have gone on reporting green throughput for a contract nothing honoured.
+  //
+  // as_of is now REFUSED with INVALID_ARGUMENT ⇒ 400, so sending it here would
+  // measure the refusal path — a constant-time rejection that never reaches the
+  // engine — and report it as read-path capacity. Dropping it is what restores
+  // the mix this file claims to issue: "the read-path request mix a client
+  // actually issues".
+  //
+  // Do not add it back to exercise the pin. When as_of is honoured it will need
+  // a point-in-time read of risk state, and a capacity number for that belongs
+  // in the same change that builds it.
   const reqs = [
     ["GET", `${BASE_URL}/v1/portfolios/${pf}/exposure`, null],
-    ["GET", `${BASE_URL}/v1/portfolios/${pf}/measures?as_of=${asOf}&measure=VaR99&measure=Delta`, null],
+    ["GET", `${BASE_URL}/v1/portfolios/${pf}/measures?measure=VaR99&measure=Delta`, null],
   ];
   // ~1 in 5 iterations also runs a scenario (the expensive POST).
   if (Math.random() < 0.2) {
