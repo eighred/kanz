@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"math"
 	"strings"
-	"sync"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -56,12 +55,19 @@ type PreTradeGate struct {
 	onUnpriced     func(portfolioID, instrumentID string)
 	onUnaccounted  func(tenantID, portfolioID, omits string)
 
-	mu sync.Mutex
 	// warned holds (tenant, portfolio[, instrument]) keys already named in a WARN
 	// — say it once, count always. The tenant is IN the key: keyed by portfolio
 	// alone, tenant A's "growth" warning silenced tenant B's, so the second
 	// tenant's ungoverned book was the one nobody was told about (#243).
-	warned map[string]bool
+	//
+	// IT IS A sayOnce AND NO LONGER A BARE MAP because two of these key shapes
+	// end in an instrument id, which is a free-form string off SubmitOrder that
+	// nothing validates beyond "not empty" — so the map grew by one permanent
+	// entry per invented instrument, on the enforcement point that decides
+	// whether capital moves, and reported nothing until the pod was OOM-killed
+	// (#814). sayOnce carries its own lock, so the check path still never takes
+	// the gate's.
+	warned sayOnce
 }
 
 // PreTradeOption customizes the gate.
@@ -321,7 +327,6 @@ func NewPreTradeGate(engine *Engine, books BookSource, mandates MandateSource, c
 	g := &PreTradeGate{
 		engine: engine, books: books, mandates: mandates,
 		classifier: classifier, recorder: recorder, logger: logger,
-		warned: map[string]bool{},
 	}
 	for _, opt := range opts {
 		opt(g)
@@ -395,14 +400,16 @@ func (g *PreTradeGate) noteUnreadable(tenantID, portfolioID string, err error) {
 			"one this portfolio's subject serves until it is replaced")
 }
 
-func (g *PreTradeGate) firstTime(key string) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.warned[key] {
-		return false
-	}
-	g.warned[key] = true
-	return true
+func (g *PreTradeGate) firstTime(key string) bool { return g.warned.first(key) }
+
+// firstTimeAbout is firstTime for the two keys that end in an instrument id —
+// the ONE thing on this path a caller supplies and nothing bounds. It is a
+// separate method rather than a flag so a new warning cannot join the unbounded
+// class by accident: the caller-supplied component has to be handed over
+// separately to get there at all. See sayOnce for what remembering it costs and
+// what forgetting it costs.
+func (g *PreTradeGate) firstTimeAbout(key, instrumentID string) bool {
+	return g.warned.firstAbout(key, instrumentID)
 }
 
 // noteUnaccounted makes an ADMISSION against an unvouched-for balance AUDIBLE,
@@ -454,7 +461,7 @@ func (g *PreTradeGate) noteUnpriced(tenantID, portfolioID, instrumentID string) 
 	if g.onUnpriced != nil {
 		g.onUnpriced(portfolioID, instrumentID)
 	}
-	if !g.firstTime("unpriced:" + tenantID + ":" + portfolioID + ":" + instrumentID) {
+	if !g.firstTimeAbout("unpriced:"+tenantID+":"+portfolioID, instrumentID) {
 		return
 	}
 	g.logger.Warn("REFUSING order: no usable price to evaluate compliance against",
@@ -470,7 +477,7 @@ func (g *PreTradeGate) noteUnpriced(tenantID, portfolioID, instrumentID string) 
 // Decimal — so if it does, somebody needs to look at the order, not the price
 // feed.
 func (g *PreTradeGate) noteUnvaluable(tenantID, portfolioID, instrumentID string) {
-	if !g.firstTime("unvaluable:" + tenantID + ":" + portfolioID + ":" + instrumentID) {
+	if !g.firstTimeAbout("unvaluable:"+tenantID+":"+portfolioID, instrumentID) {
 		return
 	}
 	g.logger.Warn("REFUSING order: its notional (quantity × price) cannot be represented — the order was NOT evaluated",
