@@ -139,6 +139,70 @@ func newVenueCapabilityCounters(reg prometheus.Registerer) venueCapabilityCounte
 	return c
 }
 
+// venuePostureGauges answers ONE question nothing on this process could answer
+// before (#865): is this OMS filling orders against a simulator, or against an
+// exchange?
+//
+// The posture was stated only in a log line — the WARN in configuredVenues below
+// — and a log line is not a thing an alert, a dashboard, or a caller can read.
+// Every other venue signal on this process is a COUNTER OF GAPS, and all four sit
+// at zero for an OMS with NO VENUES AT ALL, which is exactly the collapse
+// CLAUDE.md forbids: "nothing configured" and "checked, and fine" read identically.
+// kanz_oms_unverified_venue_account_total == 0 means "every adapter proved its
+// account" on a live deployment and "there are no adapters" on a simulator, and
+// nothing distinguishes them.
+//
+// WHO NEEDS TO READ IT. An operator, because a production OMS that fell back to
+// the simulator is trading nothing while reporting healthy. And the write-path
+// load harness (test/load/orderflow), which must REFUSE to submit an order
+// against anything that could reach an exchange — a refusal it can only make
+// against a fact the system under test asserts about itself, never against an
+// env var the operator running the load test sets for themselves.
+//
+// TWO GAUGES, NOT A RATIO OR A SINGLE "is_simulated" BOOL. A deployment with a
+// live adapter AND a SimVenue is a configuration nothing forbids today (it takes
+// an empty OMS_VENUE_ENDPOINTS to reach the sim arm, so it is currently
+// unreachable — but a reader must not have to know that to interpret the
+// number). Two counts state what is there; a bool would state a conclusion this
+// file is not entitled to draw for its reader.
+//
+// BOTH ARE ALWAYS SET, including to zero. An unset gauge exports a family with no
+// series, which every consumer reads as zero — so a harness that required
+// "simulated >= 1" would be satisfied by an OMS too old to have this metric at
+// all if the absence and a real zero were allowed to look the same. The harness
+// requires the FAMILY to be present; this builder is what makes that requirement
+// meaningful on every deployment, sim or live.
+type venuePostureGauges struct {
+	liveVenueAdapters prometheus.Gauge
+	simulatedVenues   prometheus.Gauge
+}
+
+// newVenuePostureGauges builds and registers the two posture gauges.
+//
+// Bound INSIDE the composite literal for the reason newVenueCapabilityCounters
+// gives above: TestEveryRegisteredMetricHasAWriter reads
+// `g.field = prometheus.NewGauge(...)` as "constructed inline and bound to
+// nothing", and an unbound collector exports a family with no series.
+func newVenuePostureGauges(reg prometheus.Registerer) venuePostureGauges {
+	g := venuePostureGauges{
+		liveVenueAdapters: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "kanz_oms_live_venue_adapters",
+			Help: "Out-of-process venue.v1 adapters this OMS registered and can route orders to. " +
+				"Each one holds an exchange credential, so a non-zero value means orders placed " +
+				"through this process reach a real exchange.",
+		}),
+		simulatedVenues: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "kanz_oms_simulated_venues",
+			Help: "In-process SimVenues this OMS registered. Non-zero means orders routed to those " +
+				"MICs are filled against NOTHING — correct for tests and local development, and a " +
+				"silent trading outage in production, where it means the platform is booking fills " +
+				"no exchange ever made.",
+		}),
+	}
+	reg.MustRegister(g.liveVenueAdapters, g.simulatedVenues)
+	return g
+}
+
 // configuredVenues is the venue composition root. Every venue is now OUT OF
 // PROCESS (INFRA-M7a): OMS_VENUE_ENDPOINTS maps each MIC to an adapter, dialed
 // over mTLS as an execution.GRPCVenue.
@@ -153,7 +217,7 @@ func newVenueCapabilityCounters(reg prometheus.Registerer) venueCapabilityCounte
 // is ever reached in production the OMS is filling orders against nothing, so it
 // says so at WARN in as many words, and the router hard-errors on any MIC it has
 // no venue for rather than quietly routing there.
-func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, counters venueCapabilityCounters, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
+func configuredVenues(ctx context.Context, cfg config.Config, store order.Store, producer execution.Publisher, counters venueCapabilityCounters, posture venuePostureGauges, logger *slog.Logger) ([]execution.Venue, []execution.VenueInstrument, func(), error) {
 	var venues []execution.Venue
 
 	// INFRA-M7a: out-of-process adapters. These need no build tag and link no
@@ -191,10 +255,18 @@ func configuredVenues(ctx context.Context, cfg config.Config, store order.Store,
 		for _, mic := range mics {
 			sims = append(sims, execution.NewSimVenue(mic))
 		}
+		// THE POSTURE, AS A NUMBER (#865). The WARN above is the operator's
+		// sentence; these are what an alert, a dashboard and the write-path load
+		// harness can read. Both are set on BOTH arms so the family always carries
+		// a series — see venuePostureGauges.
+		posture.liveVenueAdapters.Set(0)
+		posture.simulatedVenues.Set(float64(len(sims)))
 		// A simulator trades nothing real, so it contributes nothing to a catalogue a
 		// person picks pairs from. An empty list here is the honest answer.
 		return sims, nil, closeConns, nil
 	}
+	posture.liveVenueAdapters.Set(float64(len(venues)))
+	posture.simulatedVenues.Set(0)
 	return venues, catalogue, closeConns, nil
 }
 
