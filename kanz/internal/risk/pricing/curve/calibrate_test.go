@@ -119,16 +119,21 @@ func TestStore_PointInTimeResolution(t *testing.T) {
 	}
 }
 
-type staticQuotes struct{ qs []RateQuote }
+type staticQuotes struct {
+	qs []RateQuote
+	// cov is what this source claims its quotes are a subset OF. The zero value
+	// is the UNREPORTED case — a fixed test vector that declares no strip.
+	cov StripCoverage
+}
 
-func (s staticQuotes) RateQuotes(context.Context, string, time.Time) ([]RateQuote, error) {
-	return s.qs, nil
+func (s staticQuotes) RateQuotes(context.Context, string, time.Time) (Strip, error) {
+	return Strip{Quotes: s.qs, Coverage: s.cov}, nil
 }
 
 type failingQuotes struct{}
 
-func (failingQuotes) RateQuotes(context.Context, string, time.Time) ([]RateQuote, error) {
-	return nil, errors.New("vendor down")
+func (failingQuotes) RateQuotes(context.Context, string, time.Time) (Strip, error) {
+	return Strip{}, errors.New("vendor down")
 }
 
 // Refresh publishes on success and leaves the store untouched on failure — the

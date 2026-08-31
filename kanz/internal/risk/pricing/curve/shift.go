@@ -35,6 +35,11 @@ func shiftCurve(c *Curve, delta func(tenor float64) float64) *Curve {
 		tenors: append([]float64(nil), c.tenors...),
 		zeros:  zeros,
 		interp: c.interp,
+		// The strip coverage travels with the shock (#908). A stress applied to a
+		// curve that lost its long end produces a SHOCKED curve that is short of
+		// exactly the same instruments, and a scenario result is where that
+		// matters most — the shift path must not launder the gap into an UNKNOWN.
+		coverage: c.coverage,
 	}
 	return out
 }
@@ -118,8 +123,9 @@ func (c *Curve) WithPillarBump(i int, delta float64) *Curve {
 		zeros[i] += delta
 	}
 	return &Curve{
-		tenors: append([]float64(nil), c.tenors...),
-		zeros:  zeros,
-		interp: c.interp,
+		tenors:   append([]float64(nil), c.tenors...),
+		zeros:    zeros,
+		interp:   c.interp,
+		coverage: c.coverage, // a bumped curve is short of what its base was short of
 	}
 }

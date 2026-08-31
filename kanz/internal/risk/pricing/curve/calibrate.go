@@ -161,8 +161,17 @@ func annualCouponTimes(tenor float64) []float64 {
 // QuoteSource supplies the calibration quote set for a currency as of a point
 // in time — the calibrator-local seam the live quote surface (feed.Snapshot)
 // adapts to at the composition root.
+//
+// IT RETURNS A Strip, NOT A []RateQuote, AND THAT IS THE POINT (#908). A source
+// resolves a CONFIGURED set of instruments and yields whatever subset had a
+// usable price; returning only the subset made a short strip unreportable by
+// anything downstream, because the size of the set it came from had already
+// been thrown away at this line. Carrying the coverage in the same return value
+// is what makes it impossible to take the quotes without it. A source that
+// genuinely has no configured set (a fixed test vector) returns a zero
+// StripCoverage, which reads as UNKNOWN rather than as complete.
 type QuoteSource interface {
-	RateQuotes(ctx context.Context, currency string, asOf time.Time) ([]RateQuote, error)
+	RateQuotes(ctx context.Context, currency string, asOf time.Time) (Strip, error)
 }
 
 // Calibrator ties the seam together: pull quotes, calibrate, publish the curve
@@ -173,6 +182,30 @@ type Calibrator struct {
 	Source QuoteSource
 	Store  *Store
 	Interp Interpolation
+
+	// OnCoverage is called on EVERY refresh with what the source resolved,
+	// before calibration is attempted. Optional; nil disables it.
+	//
+	// IT FIRES BEFORE Calibrate, AND ON FAILURES TOO, which is the whole reason
+	// it exists rather than the caller reading Curve.StripCoverage off the
+	// returned curve. The worst coverage — every configured instrument missing —
+	// is exactly the case where Calibrate refuses and there IS no curve to read
+	// it from, so a caller that learned coverage only from a successful refresh
+	// would be blind in the one state that matters most. Refresh's error says
+	// "no quotes"; only this says WHICH configured instruments produced it.
+	//
+	// IT FIRES ON COMPLETE STRIPS TOO, and that is not noise. A signal emitted
+	// only when something is wrong makes "healthy" and "not reporting"
+	// indistinguishable — the defect this seam exists to end, one level up. The
+	// observer decides what to do with a complete report; it must not be the
+	// thing that decides whether one exists.
+	//
+	// THIS IS A METRIC SEAM AND IT DOES NOT REPLACE Curve.StripCoverage, nor the
+	// reverse — the same split FIProviders.OnSkip states. This one reaches an
+	// operator watching the pod, at refresh time, whether or not a curve was
+	// produced; the coverage on the curve reaches the caller pricing off it,
+	// later, at an arbitrary as-of, through the point-in-time store.
+	OnCoverage func(currency string, cov StripCoverage)
 }
 
 // Refresh calibrates the currency's curve from quotes as of asOf and publishes
@@ -180,14 +213,23 @@ type Calibrator struct {
 // uncalibratable quote set leaves the store unchanged (the previous curve keeps
 // serving — no silent overwrite with garbage).
 func (cal *Calibrator) Refresh(ctx context.Context, currency string, asOf time.Time) (*Curve, error) {
-	quotes, err := cal.Source.RateQuotes(ctx, currency, asOf)
+	strip, err := cal.Source.RateQuotes(ctx, currency, asOf)
 	if err != nil {
 		return nil, fmt.Errorf("curve: quote source for %s: %w", currency, err)
 	}
-	c, err := Calibrate(quotes, cal.Interp)
+	// Reported before Calibrate can refuse: see OnCoverage. A SOURCE error above
+	// is deliberately not reported — the source could not say what it resolved,
+	// so there is no coverage to state, and a fabricated zero would read as "the
+	// whole strip is missing" when the truth is that nothing was looked at.
+	if cal.OnCoverage != nil {
+		cal.OnCoverage(currency, strip.Coverage)
+	}
+	c, err := Calibrate(strip.Quotes, cal.Interp)
 	if err != nil {
 		return nil, err
 	}
-	cal.Store.Put(currency, asOf, c)
+	// Stamped before Put, so no reader can resolve this curve out of the
+	// point-in-time store without the record of what it was built from.
+	cal.Store.Put(currency, asOf, c.withStripCoverage(strip.Coverage))
 	return c, nil
 }

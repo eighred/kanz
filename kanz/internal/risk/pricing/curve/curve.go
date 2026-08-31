@@ -57,6 +57,55 @@ type Curve struct {
 	tenors []float64 // ascending pillar tenors (years)
 	zeros  []float64 // continuously-compounded zero rate at each pillar
 	interp Interpolation
+	// coverage is how much of the configured calibration strip this curve was
+	// built from (#908). A POINTER because presence is the signal: nil means the
+	// curve was not built from a declared strip (NewZeroCurve, Bootstrap, a
+	// shift of another curve) and its coverage is UNKNOWN — never "complete".
+	// Only Calibrator.Refresh sets it, and only from the source's own report.
+	coverage *StripCoverage
+}
+
+// StripCoverage reports how much of the configured calibration strip this curve
+// was calibrated from, and whether it says at all (#908).
+//
+// ok=false is the UNKNOWN third value and must not be read as full coverage: a
+// bootstrapped or hand-built curve has no strip to be short of, so it makes no
+// claim. ok=true with cov.Complete() false is a curve that IS short — it prices
+// every flow past its last pillar off a flat extrapolation, and the instruments
+// that would have pinned that end are named in cov.Missing.
+//
+// RIDING ON THE CURVE RATHER THAN BESIDE IT is the same reasoning
+// v1.InputCoverage's doc gives for riding on the measure: a consumer that
+// resolves a curve out of the point-in-time store — days later, at an arbitrary
+// as-of, through the CurveProvider seam — cannot get the curve without also
+// being able to ask what it was built from. A log line at calibration time
+// reaches nobody at that moment.
+func (c *Curve) StripCoverage() (StripCoverage, bool) {
+	if c.coverage == nil {
+		return StripCoverage{}, false
+	}
+	return c.coverage.clone(), true
+}
+
+// withStripCoverage records what this curve was calibrated from. Unexported and
+// called once, by Calibrator.Refresh, immediately after Calibrate returns and
+// before the curve is published — a curve is never mutated after a reader can
+// reach it, and no path outside this package can assert a coverage it did not
+// measure.
+//
+// AN UNREPORTED COVERAGE IS NOT RECORDED, and that is the UNKNOWN rule rather
+// than an optimization: stamping a zero StripCoverage would make
+// Curve.StripCoverage answer ok=true with Configured = 0, which is an active
+// claim ("this curve was built from a strip of nothing") standing in for "the
+// source never said". Those are the two states this whole record exists to keep
+// apart.
+func (c *Curve) withStripCoverage(cov StripCoverage) *Curve {
+	if !cov.Reported() {
+		return c
+	}
+	cp := cov.clone()
+	c.coverage = &cp
+	return c
 }
 
 var (

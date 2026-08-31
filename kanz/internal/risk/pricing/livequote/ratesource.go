@@ -53,28 +53,60 @@ func (s *SnapshotRateSource) Currencies() []string {
 }
 
 // RateQuotes implements curve.QuoteSource: for the requested currency it emits
-// one RateQuote per configured instrument that has a positive latest mid.
-// Instruments with no tick yet (or a garbage/non-positive mid) are skipped,
-// yielding a partial strip; the calibrator rejects an unusable set and its
-// deny-on-garbage stance leaves the prior curve serving. asOf is unused (the
-// cache is always "latest"); the calibrator stamps the curve point-in-time.
-func (s *SnapshotRateSource) RateQuotes(_ context.Context, currency string, _ time.Time) ([]curve.RateQuote, error) {
-	var out []curve.RateQuote
+// one RateQuote per configured instrument that has a positive latest mid,
+// TOGETHER WITH how much of that currency's configured strip those quotes are.
+//
+// Instruments with no tick yet (or a garbage/non-positive mid) are still
+// skipped — a calibration cannot use a price that does not exist, and refusing
+// the whole currency for one dead instrument would take its curve out of
+// service for a fixable data problem. WHAT CHANGED IN #908 IS THAT THE SKIP IS
+// NOW STATED. The returned Strip names every configured instrument that did not
+// make it and why, so a curve calibrated from six of nine points is no longer
+// the same artifact as one calibrated from a six-point strip that is complete.
+//
+// COVERAGE IS COUNTED OVER THE REQUESTED CURRENCY ONLY. An instrument of
+// another currency is not "missing" from this strip — it belongs to a different
+// curve with its own job and its own report, and folding it in here would make
+// every currency look permanently short by the size of its siblings.
+//
+// asOf is unused (the cache is always "latest"); the calibrator stamps the
+// curve point-in-time.
+func (s *SnapshotRateSource) RateQuotes(_ context.Context, currency string, _ time.Time) (curve.Strip, error) {
+	strip := curve.Strip{}
 	for _, in := range s.instruments {
 		if in.Currency != currency {
 			continue
 		}
+		strip.Coverage.Configured++
 		ev, ok := s.quotes.Latest(in.InstrumentID)
 		if !ok {
+			strip.Coverage.Missing = append(strip.Coverage.Missing,
+				curve.MissingQuote{InstrumentID: in.InstrumentID, Reason: curve.MissingNoQuote})
 			continue
 		}
 		mid, ok := midPrice(ev)
 		if !ok || mid <= 0 {
+			strip.Coverage.Missing = append(strip.Coverage.Missing,
+				curve.MissingQuote{InstrumentID: in.InstrumentID, Reason: curve.MissingUnusableMid})
 			continue
 		}
-		out = append(out, curve.RateQuote{Kind: in.Kind, Tenor: in.Tenor, Span: in.Span, Value: mid})
+		strip.Quotes = append(strip.Quotes, curve.RateQuote{Kind: in.Kind, Tenor: in.Tenor, Span: in.Span, Value: mid})
+		strip.Coverage.Quoted++
 	}
-	return out, nil
+	return strip, nil
+}
+
+// ConfiguredCurrencies reports how many instruments the strip declares per
+// currency — the denominator, read off the configuration BEFORE anything has
+// ticked. The composition root logs it at startup so an operator can see what
+// this pod believes each curve needs, in the same place it already reads the
+// cached instrument universe and the retention horizon.
+func (s *SnapshotRateSource) ConfiguredCurrencies() map[string]int {
+	out := make(map[string]int, len(s.instruments))
+	for _, in := range s.instruments {
+		out[in.Currency]++
+	}
+	return out
 }
 
 var _ curve.QuoteSource = (*SnapshotRateSource)(nil)
