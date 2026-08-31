@@ -74,14 +74,10 @@ func TestARedispatchLeavesAFilledOrderTerminalAndOutOfOpen(t *testing.T) {
 
 	_, _ = s.Execute(ctx, &venuepb.ExecuteRequest{State: redispatched()})
 
-	st, ok, err := view.Get(ctx, "ORD-1")
-	if err != nil || !ok {
-		t.Fatalf("order ORD-1 left the view entirely (ok=%v err=%v)", ok, err)
-	}
-	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED {
-		t.Fatalf("the view has ORD-1 at %v after a re-dispatch, want FILLED — the OMS's stale "+
-			"status overwrote the venue's own verdict", st.GetStatus())
-	}
+	// Open FIRST, and the order is not cosmetic: a regression makes BOTH
+	// assertions fail, and whichever runs first is the one an operator reads. The
+	// leak is the reconciler re-querying a finished order, so that is the sentence
+	// the failure should say — not that a status field has the wrong value.
 	open, err := view.Open(ctx)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -90,6 +86,14 @@ func TestARedispatchLeavesAFilledOrderTerminalAndOutOfOpen(t *testing.T) {
 		t.Fatalf("the view believes %d orders are still open at the venue after a filled order was "+
 			"re-dispatched, want 0 — the reconciler would re-query it and re-emit StateHealed "+
 			"about it on every pass, which is the leak #904 closed", len(open))
+	}
+	st, ok, err := view.Get(ctx, "ORD-1")
+	if err != nil || !ok {
+		t.Fatalf("order ORD-1 left the view entirely (ok=%v err=%v)", ok, err)
+	}
+	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED {
+		t.Fatalf("the view has ORD-1 at %v after a re-dispatch, want FILLED — the OMS's stale "+
+			"status overwrote the venue's own verdict", st.GetStatus())
 	}
 }
 
