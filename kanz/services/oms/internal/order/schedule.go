@@ -1,6 +1,8 @@
 package order
 
 import (
+	"time"
+
 	"context"
 	"errors"
 	"fmt"
@@ -140,7 +142,7 @@ func parentOf(st *orderpb.OrderState) (schedule.Parent, error) {
 // would refuse it on every tick with nobody watching the log. "Nothing
 // configured" and "checked, and fine" must never look the same, and an order
 // resting at WORKING_SCHEDULED looks exactly like one being worked.
-func validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
+func (s *Service) validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 	sch := cmd.GetExecutionSchedule()
 	if sch == nil {
 		return nil // an ordinary order; nothing to validate
@@ -156,6 +158,29 @@ func validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 	}
 	if err := schedule.UsableParentID(cmd.GetOrderId()); err != nil {
 		return reject("INVALID_SCHEDULE", "%s", err.Error())
+	}
+	// THE SLICE COUNT IS BOUNDED BEFORE THE SCHEDULE IS DERIVED (#898), and the
+	// ordering is the whole point: the derivation below allocates one Slice per
+	// slice_count, so a bound applied after it is a bound applied to a process
+	// that has already tried to allocate 160 GiB for a single command. slice_count
+	// is a uint32 off the wire and nothing else constrains it.
+	//
+	// THE NUMBER IS DERIVED FROM THE DRIVER, NOT PICKED. A child is sent on the
+	// first tick at or after it becomes due, so a schedule whose slices are closer
+	// together than OMS_SCHEDULE_INTERVAL cannot be worked the way it was asked
+	// for — several children land on one tick and the parent is sliced more
+	// coarsely than the caller specified. The platform already KNOWS this: the OMS
+	// computes TightestSliceInterval on every pass and warns when the tick is
+	// slower than the tightest schedule it is working. This makes that an
+	// admission decision instead of a log line, which is what CLAUDE.md asks of
+	// this plane — "admission control, not reporting. Decides whether."
+	//
+	// It closes the allocation as a side effect rather than as its purpose: at a
+	// 10s tick a 24h parent tops out at 8,640 slices, four orders of magnitude
+	// below the point where the arithmetic in algo.Plan.boundary was overflowing
+	// and six below the memory.
+	if rej := s.refuseUndrivableSchedule(cmd, sch); rej != nil {
+		return rej
 	}
 	// THE SCHEDULE IS DERIVED HERE, AT ADMISSION, PURELY TO SEE IT REFUSE. The
 	// same arithmetic the driver will run every tick — so a window that does not
@@ -347,4 +372,50 @@ func quantityString(r *big.Rat) string {
 		return "unreadable"
 	}
 	return r.FloatString(12)
+}
+
+// DefaultScheduleInterval mirrors OMS_SCHEDULE_INTERVAL's own default (10s,
+// #435). It is the fallback when a Service was built without
+// WithScheduleInterval, and it exists so an unwired composition root still
+// refuses an undrivable schedule.
+//
+// A ZERO INTERVAL MUST NOT MEAN "UNBOUNDED". That is the reading which turns a
+// missing option into an unbounded allocation on the admission path, and it is
+// the same "nothing configured looks like checked, and fine" failure this
+// service refuses everywhere else.
+const DefaultScheduleInterval = 10 * time.Second
+
+// refuseUndrivableSchedule refuses a slice count the driver cannot honour.
+//
+// The comparison is the gap between consecutive slices against the tick that
+// sends them. It is deliberately the SAME comparison Service.TightestSliceInterval
+// feeds to the scheduleTickTooSlow gauge, so an operator who lowers
+// OMS_SCHEDULE_INTERVAL raises what this admits, by exactly as much: one number
+// governs both, and neither can be tightened without the other following.
+func (s *Service) refuseUndrivableSchedule(cmd *orderpb.SubmitOrder, sch *orderpb.ExecutionSchedule) *RejectError {
+	tick := s.scheduleInterval
+	if tick <= 0 {
+		tick = DefaultScheduleInterval
+	}
+	count := sch.GetSliceCount()
+	if count == 0 {
+		return nil // ErrNoSlices is the planner's answer, and it names the field
+	}
+	start, end := sch.GetWindowStart().AsTime().UTC(), sch.GetWindowEnd().AsTime().UTC()
+	if !end.After(start) {
+		return nil // ErrEmptyWindow is the planner's answer
+	}
+	// Integer division, so no product is formed and this cannot overflow however
+	// large count is — the arithmetic that could is the one downstream of it.
+	gap := end.Sub(start) / time.Duration(count)
+	if gap >= tick {
+		return nil
+	}
+	return reject("INVALID_SCHEDULE",
+		"order %s asks for %d slices across %s, which is one child every %s — closer together "+
+			"than the %s driver tick that sends them. Every child would not be sent when it is "+
+			"due: several land on each tick, so the parent would be worked more coarsely than "+
+			"asked while every screen showed the schedule it specified. Use at most %d slices "+
+			"for this window, or lower OMS_SCHEDULE_INTERVAL",
+		cmd.GetOrderId(), count, end.Sub(start), gap, tick, int64(end.Sub(start)/tick))
 }
