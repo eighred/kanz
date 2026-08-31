@@ -16,7 +16,8 @@ still under budget* — not the maximum the box can push.
 |---|---|---|
 | `seed` (`SEED_PORTFOLIOS=N`) | seeds an N-portfolio book so load is not one hot key | book size the run is valid for |
 | `baseline.js` (`PORTFOLIOS=N`) | **read** hot path (gateway → risk-engine query), spread across the book via `pickPortfolio()` | sustained **RPS/replica** at the p99 knee |
-| `ingest` (`RATE`, `DURATION`, `PORTFOLIOS`) | **write** hot path (NATS → risk-engine ingest → sharded recompute, PARITY-05a) | sustained **events/sec/replica** before bus-pending climbs |
+| `ingest` (`RATE`, `DURATION`, `PORTFOLIOS`) | **state-write** hot path (NATS → risk-engine ingest → sharded recompute, PARITY-05a) | sustained **events/sec/replica** before bus-pending climbs |
+| `orderflow` (`STAGES`, `STAGE_DURATION`) | **ORDER ADMISSION** (gateway `POST /v1/orders` → broker → OMS claim → pre-trade gate → Postgres admission → outbox) | sustained **admitted orders/sec/replica**, and which control degraded first |
 | `soak.js` | steady sub-capacity read load for hours | p99 drift / leaks |
 
 Production-shaped run (single command per side):
@@ -84,6 +85,85 @@ Because lanes parallelize per instrument, market-data scales further than risk
 production tick rates — without it, per-event publish overhead caps `C1` an order
 of magnitude lower.
 
+### OMS — order admission (#865)
+
+Until #865 this section did not exist, and that absence was the point of the
+issue: the platform could state its read-path p99 and could not state how many
+orders per second it admits before a control degrades.
+
+`orderflow` measures it. The scale signal is the same family the risk-engine
+already uses — `kanz_bus_pending_messages{group="oms",subject="order.order.submit"}`
+— which is the standing backlog of order COMMANDS. **It is not yet a KEDA
+threshold, deliberately.** The OMS is not horizontally scaled on it today, and
+sizing a ScaledObject off a single-node figure would put a number in a manifest
+that the estate would then treat as derived. What follows is the first
+measurement, not a policy.
+
+#### The local figure, and what it is not
+
+Measured 2026-08-31 on ONE developer machine — Windows 11, i5-12500H (12 cores /
+16 threads), 16 GB, Postgres 16 and NATS 2.x in Docker Desktop, one OMS replica,
+one api-gateway, all on the same box as the load generator. **These are local
+figures and not a capacity guarantee.**
+
+Idle box (nothing else running):
+
+| offered orders/s | admitted | p50 | p95 | p99 | peak outstanding | verdict |
+|---|---|---|---|---|---|---|
+| 20 | 399/399 | 8ms | 13ms | 21ms | 1 | ok |
+| 40 | 799/799 | 27ms | 241ms | 278ms | 10 | ok |
+| 60 | 1199/1199 | 5.17s | 10.42s | 10.83s | 430 | **saturated** |
+
+Same box, same code, while `go test ./services/...` was running beside it:
+
+| offered orders/s | admitted | p50 | p99 | verdict |
+|---|---|---|---|---|
+| 5 | 99/99 | 8ms | 22ms | ok |
+| 10 | 199/199 | 8ms | 110ms | ok |
+| 14 | 279/279 | 2.28s | 6.49s | **saturated** |
+| 25 | 373/373 | 19.9s | 70.2s | **saturated** |
+
+Read it as: **the knee is between 40 and 60 admitted orders/sec on one idle
+replica, and it collapses to single digits when the machine is contended.** That
+spread — a factor of four to eight, from nothing but a busy neighbour — is the
+concrete reason this is not a per-PR CI gate: on a shared runner the measurement
+would be of the runner.
+
+Four things in those tables are worth more than the number:
+
+- **p50 barely moves while p99 explodes.** At 60/s the median order is still
+  admitted in 5s while the 99th takes 10.8s; at 40/s the median is 27ms and the
+  95th is already 241ms. That is the signature of a single dispatch goroutine per
+  subject (`pkg/bus`: one bus subject is dispatched by ONE goroutine) — one slow
+  order stalls everything queued behind it, and a harness reporting means would
+  have called every stage healthy.
+- **HTTP stayed green throughout.** Every stage above answered 202 to essentially
+  every submission, including the one where admission took seventy seconds. The
+  degradation is visible only from the FACT side, which is why this harness reads
+  the bus at all.
+- **The bus gauge corroborates but cannot lead.** At 60/s the harness's own
+  outstanding count peaked at 430 while `kanz_bus_pending_messages` read 101 —
+  the gauge is refreshed every 15s per subscription, so on a 20s plateau it sees
+  one or two polls. It agrees on direction and understates the depth.
+- **Exactly-once held at every rate measured**, including the stage whose p99
+  (70s) exceeded the consumer's own 60s `AckWait`: across the runs above, every
+  accepted submission produced exactly one terminal FACT and none produced two
+  (2397/2397 on the idle ramp, 522/522 on the contended one). That is the
+  idempotent-handler floor doing its job, and it is the first time it has been
+  observed under sustained concurrency rather than argued from a lock comment.
+
+#### What it does NOT measure
+
+- **The exchange hop.** Orders were filled by an in-process `SimVenue`; a real
+  venue adapter adds a network round-trip per order *inside the same delivery
+  budget*, so the live figure is lower and this number must never be quoted as an
+  execution capacity.
+- **Multi-replica behaviour.** One OMS replica, one gateway.
+- **`-race`.** It needs cgo and does not run on this box; CI is the detector.
+
+Re-run it against a real multi-node deployment before any of this becomes a
+threshold. The command and the stack recipe are in `README.md`.
+
 ### Phase-7 read services (wealth/datamaster/copilot/alternatives)
 
 Stateless HTTP, no bus — scale on **CPU 70 %** (`phase7-scaling.yaml`, SVCWIRE-01d).
@@ -98,6 +178,7 @@ Stateless HTTP, no bus — scale on **CPU 70 %** (`phase7-scaling.yaml`, SVCWIRE
 | market-data | `kanz_bus_consumer_lag` | 1000 lag | 2 | 16 | `market-data-scaledobject.yaml` |
 | wealth/datamaster/copilot/alternatives | CPU | 70 % util | 2 | 8 | `phase7-scaling.yaml` |
 | api-gateway | CPU | 70 % util | — | — | (SRE-01a) |
+| oms (admission) | `kanz_bus_pending_messages{subject="order.order.submit"}` | **not set** — measured, not yet policy (#865) | — | — | none |
 
 ## Re-derivation cadence
 
