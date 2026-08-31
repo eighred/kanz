@@ -274,6 +274,34 @@ var workTuning = ConsumerTuning{
 	MaxAckPending: 32,
 }
 
+// WorkRedeliveryBudget is the WALL-CLOCK window over which one work-class
+// message can keep coming back to a handler: the sum of nakDelay across
+// workTuning's delivery budget — the "MaxDeliver is a TIME budget" the comment
+// above already argues, computed from the two constants that decide it instead
+// of restated as a literal. ~59 minutes at MaxDeliver 64.
+//
+// EXPORTED FOR THE REASON WorkAckWait IS (#801): a component outside this
+// package has to size itself against the redelivery contract, and the
+// alternative is that number living as a literal in a file that cannot see this
+// one. The caller that needed it is internal/execution.SimVenue (#895), whose
+// record of what it executed is the only thing standing between a redelivered
+// submit command and a SECOND fill for one order — so how long that record must
+// live is not an independent choice from how long the broker can keep
+// re-offering the command that would replay it.
+//
+// A FUNCTION, not a const or a var. nakDelay's series is computed, so it cannot
+// be a constant expression; and a package-level mutable duration is a global any
+// test could rewrite for every other caller in the process.
+func WorkRedeliveryBudget() time.Duration {
+	// nakDelay(k) is the wait AFTER the kth delivery failed, so the window from
+	// the first delivery to the last is the k = 1..MaxDeliver-1 series.
+	var total time.Duration
+	for k := 1; k < workTuning.MaxDeliver; k++ {
+		total += nakDelay(uint64(k))
+	}
+	return total
+}
+
 // tickTuning covers market.>. MaxDeliver 5 — deliberately far below the work
 // class's 64, and for the opposite reason. A tick's value IS its currency: with
 // nakDelay's backoff the fifth delivery lands ~30s after the first, and a quote
