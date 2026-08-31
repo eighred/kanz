@@ -61,6 +61,22 @@ var (
 // Plan is everything needed to work a parent order, and every field of it lives
 // on the parent order durably. Nothing here is state.
 type Plan struct {
+	// Algo names the algorithm that works this parent — order.v1's
+	// ExecutionSchedule.algo, which the order stores durably like every other
+	// field here.
+	//
+	// UNSET IS REFUSED BY Run, never defaulted. It is deliberately a name rather
+	// than a resolved implementation so that Plan stays a value derived entirely
+	// from the order: two pods holding the same order hold the same Plan, and the
+	// registry is what turns the name into code (see Lookup).
+	//
+	// TWAP, the free function below, does not read it — it IS the TWAP
+	// arithmetic, and Run is what selects. A caller that reaches TWAP directly has
+	// chosen the algorithm at the call site rather than from the order, which is
+	// what the closed-form tests do on purpose and what nothing on the order path
+	// does.
+	Algo Name
+
 	// Total is the parent's ordered quantity — the amount the children must sum
 	// to exactly.
 	Total *big.Rat
