@@ -88,7 +88,9 @@ type Parent struct {
 	// child is one that was never created.
 	Terminal bool
 
-	// Plan is the schedule, derived from the parent's durable fields.
+	// Plan is the schedule, derived from the parent's durable fields — including
+	// which algorithm works it (algo.Plan.Algo, #868). An unset or unimplemented
+	// name is refused by Due rather than defaulted.
 	Plan algo.Plan
 }
 
@@ -192,7 +194,31 @@ func Due(p Parent, exists func(childID string) bool, now time.Time) ([]Child, er
 		return nil, err
 	}
 
-	slices, err := algo.TWAP(p.Plan)
+	// THE ALGORITHM COMES OFF THE PARENT, NOT OUT OF THIS FILE (#868).
+	//
+	// This used to name TWAP. That made "how is this order worked" a property of
+	// the build rather than of the order, so a desk could not choose per order and
+	// a second algorithm could not land without editing this decision. algo.Run
+	// resolves p.Plan.Algo through the registry and REFUSES a name this build does
+	// not implement — never a fallback, because a parent worked by an algorithm
+	// nobody asked for would still produce fills, and every reader of them would
+	// see the label of an algorithm that never ran.
+	//
+	// What is passed alongside is deliberate on both counts. Sent is a predicate
+	// over slice indices rather than a count, for the reason this package's doc
+	// gives — a count skips past a hole forever. UnknownMarket is passed
+	// EXPLICITLY: this decision has no market data, and saying so is not the same
+	// as saying nothing. An algorithm that needs a book or a volume profile
+	// (#867) refuses here rather than inventing one.
+	state := algo.ParentState{
+		OrderID: p.OrderID,
+		Sent:    func(index int) bool { return exists(ChildID(p.OrderID, index)) },
+	}
+	slices, err := algo.Run(p.Plan, state, algo.UnknownMarket{})
+	if errors.Is(err, algo.ErrUnknownAlgo) {
+		return nil, fmt.Errorf("schedule: parent %s names an execution algorithm this build cannot "+
+			"work, so nothing can advance it: %w", p.OrderID, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("schedule: parent %s carries an unworkable schedule: %w", p.OrderID, err)
 	}
