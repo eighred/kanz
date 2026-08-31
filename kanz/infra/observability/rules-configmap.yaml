@@ -62,6 +62,29 @@ data:
     # both query these two series from Prometheus as their KEDA trigger, so both
     # ScaledObjects are scaling on a series that does not exist.
     #
+    # ALSO DELIBERATELY ABSENT: A RULE OVER kanz_risk_calibration_strip_quoted.
+    # #908 instrumented the risk-engine's curve calibration so a strip short of its
+    # configured instrument set is visible — kanz_risk_calibration_strip_configured
+    # is the denominator from this pod's reference spec,
+    # kanz_risk_calibration_strip_quoted is how many reached the last fit, and
+    # kanz_risk_calibration_strip_missing splits the gap by reason. The natural rule
+    # writes itself and needs no invented threshold, because both sides are the
+    # pod's own numbers: quoted < configured.
+    #
+    # It is not here because NOTHING IN THIS ESTATE EMITS THE SERIES YET. The
+    # calibration scheduler starts only when RISK_ENGINE_CALIBRATION_INTERVAL and
+    # RISK_ENGINE_CALIBRATION_RATES are both set, and `grep -rn CALIBRATION infra/`
+    # finds neither in any manifest — so the gauges have a real producer in the
+    # binary and no producer in any RUNNING pod. A rule over them today would
+    # compare against an empty vector and could never fire: #62's defect reached
+    # from the same direction as the two bus gauges above, and the reason
+    # alerts/README.md gives for INSTRUMENT FIRST, then write the rule. The
+    # instrumenting is the half that landed. What unblocks the rule is a deployment
+    # that enables calibration; the `for:` duration is then derivable from that
+    # deployment's own RISK_ENGINE_CALIBRATION_INTERVAL (a strip point absent across
+    # several consecutive refreshes is not warming up), which is a number nobody can
+    # state while the cadence is unset everywhere.
+    #
     # EVERY RULE BELOW IS PROVEN TO FIRE. operational_test.yaml next to this file is
     # a promtool unit-test harness with a firing case for each alert and a
     # must-NOT-fire case for each one where silence is a distinct claim. A rule that

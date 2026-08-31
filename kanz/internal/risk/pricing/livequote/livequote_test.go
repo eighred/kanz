@@ -68,31 +68,117 @@ func TestSnapshotRateSourceEmitsStrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RateQuotes: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d quotes, want 2: %+v", len(got), got)
+	if len(got.Quotes) != 2 {
+		t.Fatalf("got %d quotes, want 2: %+v", len(got.Quotes), got.Quotes)
 	}
-	if got[0].Kind != curve.Deposit || !approx(got[0].Value, 0.045) {
-		t.Fatalf("deposit quote wrong: %+v", got[0])
+	if got.Quotes[0].Kind != curve.Deposit || !approx(got.Quotes[0].Value, 0.045) {
+		t.Fatalf("deposit quote wrong: %+v", got.Quotes[0])
+	}
+	if !got.Coverage.Complete() || got.Coverage.Configured != 2 || len(got.Coverage.Missing) != 0 {
+		t.Fatalf("a whole strip must report itself whole: %+v", got.Coverage)
 	}
 }
 
-// Missing ticks are skipped; other-currency instruments are filtered.
-func TestSnapshotRateSourceSkipsAndFilters(t *testing.T) {
+// Missing ticks are skipped; other-currency instruments are filtered — AND THE
+// SKIP IS REPORTED (#908). Skipping an instrument with no price is correct on
+// its own; what was wrong is that the resulting curve could not be told from
+// one whose strip was that short to begin with.
+//
+// A quoting instrument of ANOTHER currency is not "missing" here. It belongs to
+// a different curve with its own job and its own report, and counting it would
+// make every currency look permanently short by the size of its siblings.
+func TestSnapshotRateSourceSkipsAndReportsWhatItSkipped(t *testing.T) {
 	instruments := []RateInstrument{
 		{InstrumentID: "USD-DEP-3M", Currency: "USD", Kind: curve.Deposit, Tenor: 0.25},
-		{InstrumentID: "USD-SWAP-5Y", Currency: "USD", Kind: curve.Swap, Tenor: 5}, // no tick
+		{InstrumentID: "USD-SWAP-5Y", Currency: "USD", Kind: curve.Swap, Tenor: 5},   // never ticked
+		{InstrumentID: "USD-SWAP-10Y", Currency: "USD", Kind: curve.Swap, Tenor: 10}, // ticks garbage
 		{InstrumentID: "EUR-DEP-3M", Currency: "EUR", Kind: curve.Deposit, Tenor: 0.25},
 	}
 	q := New(instruments)
 	q.Update(quoteEvent("USD-DEP-3M", decv(44, -3), decv(46, -3)))
+	q.Update(quoteEvent("USD-SWAP-10Y", decv(0, 0), decv(0, 0))) // a zero mid is not a rate
+	q.Update(quoteEvent("EUR-DEP-3M", decv(30, -3), decv(32, -3)))
 
 	src := NewSnapshotRateSource(q, instruments)
 	got, err := src.RateQuotes(context.Background(), "USD", time.Now())
 	if err != nil {
 		t.Fatalf("RateQuotes: %v", err)
 	}
-	if len(got) != 1 || got[0].Kind != curve.Deposit {
-		t.Fatalf("want only the ticked USD deposit, got %+v", got)
+	if len(got.Quotes) != 1 || got.Quotes[0].Kind != curve.Deposit {
+		t.Fatalf("want only the ticked USD deposit, got %+v", got.Quotes)
+	}
+	cov := got.Coverage
+	if cov.Configured != 3 {
+		t.Fatalf("Configured = %d, want the 3 USD instruments — the EUR one belongs to another "+
+			"curve's report, not this one's denominator", cov.Configured)
+	}
+	if cov.Quoted != 1 || cov.Complete() {
+		t.Fatalf("a 1-of-3 strip reported %+v", cov)
+	}
+	want := map[string]string{
+		"USD-SWAP-5Y":  curve.MissingNoQuote,
+		"USD-SWAP-10Y": curve.MissingUnusableMid,
+	}
+	if len(cov.Missing) != len(want) {
+		t.Fatalf("Missing = %+v, want both dropped instruments named", cov.Missing)
+	}
+	for _, m := range cov.Missing {
+		if want[m.InstrumentID] != m.Reason {
+			t.Errorf("%s reported reason %q, want %q. The two reasons have different owners — a "+
+				"spec/spine question and a venue question — so the label must not blur them",
+				m.InstrumentID, m.Reason, want[m.InstrumentID])
+		}
+	}
+}
+
+// The whole defect in one assertion (#908): a strip that loses its long end
+// still calibrates and still publishes, and the curve it publishes says so.
+func TestAShortStripStillCalibratesAndSaysSo(t *testing.T) {
+	instruments := []RateInstrument{
+		{InstrumentID: "USD-DEP-1Y", Currency: "USD", Kind: curve.Deposit, Tenor: 1},
+		{InstrumentID: "USD-SWAP-2Y", Currency: "USD", Kind: curve.Swap, Tenor: 2},
+		{InstrumentID: "USD-SWAP-5Y", Currency: "USD", Kind: curve.Swap, Tenor: 5},
+	}
+	q := New(instruments)
+	q.Update(quoteEvent("USD-DEP-1Y", decv(40, -3), decv(40, -3)))
+	q.Update(quoteEvent("USD-SWAP-2Y", decv(42, -3), decv(42, -3)))
+	// USD-SWAP-5Y never ticks: a typo in the reference spec, or the one instrument
+	// the spine stopped quoting. Either way this pod's USD curve now ends at 2Y
+	// and extrapolates flat from there.
+
+	src := NewSnapshotRateSource(q, instruments)
+	store := curve.NewStore()
+	var reported []curve.StripCoverage
+	cal := &curve.Calibrator{
+		Source: src, Store: store, Interp: curve.LinearZero,
+		OnCoverage: func(_ string, cov curve.StripCoverage) { reported = append(reported, cov) },
+	}
+	asOf := time.Now()
+	if _, err := cal.Refresh(context.Background(), "USD", asOf); err != nil {
+		t.Fatalf("a short strip must still calibrate — refusing on any gap takes a whole "+
+			"currency out of service for one dead instrument: %v", err)
+	}
+
+	if len(reported) != 1 || reported[0].Quoted != 2 || reported[0].Configured != 3 {
+		t.Fatalf("the refresh reported %+v, want one 2-of-3 report", reported)
+	}
+	if len(reported[0].Missing) != 1 || reported[0].Missing[0].InstrumentID != "USD-SWAP-5Y" {
+		t.Fatalf("the report does not name the dead instrument: %+v", reported[0].Missing)
+	}
+
+	c, ok := store.Curve(context.Background(), "USD", asOf)
+	if !ok {
+		t.Fatal("no curve published")
+	}
+	cov, ok := c.StripCoverage()
+	if !ok || cov.Complete() {
+		t.Fatalf("the PUBLISHED curve reports %+v (ok=%v) — a curve missing its 5Y point must not "+
+			"be the same artifact as a complete two-point one", cov, ok)
+	}
+	// And the curve really is short: 30Y is priced off a flat extrapolation of the
+	// 2Y pillar, which is what makes the silence expensive.
+	if len(c.Tenors()) != 2 {
+		t.Fatalf("expected a 2-pillar curve, got %v", c.Tenors())
 	}
 }
 
@@ -145,12 +231,22 @@ func TestEmptyStripDenyOnGarbage(t *testing.T) {
 	}
 	src := NewSnapshotRateSource(New(instruments), instruments)
 	store := curve.NewStore()
-	cal := &curve.Calibrator{Source: src, Store: store, Interp: curve.LinearZero}
+	var reported []curve.StripCoverage
+	cal := &curve.Calibrator{
+		Source: src, Store: store, Interp: curve.LinearZero,
+		OnCoverage: func(_ string, cov curve.StripCoverage) { reported = append(reported, cov) },
+	}
 	if _, err := cal.Refresh(context.Background(), "USD", time.Now()); err == nil {
 		t.Fatal("expected Refresh to reject an empty strip")
 	}
 	if _, ok := store.Curve(context.Background(), "USD", time.Now()); ok {
 		t.Fatal("store should stay empty after a failed calibration")
+	}
+	// The refusal is right; it is also the state with NO curve to read a coverage
+	// off, so the observer is the only thing that can name what went missing.
+	if len(reported) != 1 || reported[0].Quoted != 0 || len(reported[0].Missing) != 1 {
+		t.Fatalf("a wholly unquoted strip reported %+v — the refusal says \"no quotes\" and only "+
+			"this says which instrument that was", reported)
 	}
 }
 
@@ -251,8 +347,11 @@ func TestCacheAdmitsOnlyTheConfiguredUniverse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RateQuotes: %v", err)
 	}
-	if len(got) != len(instruments) {
-		t.Fatalf("the strip lost instruments to the admission filter: %+v", got)
+	if len(got.Quotes) != len(instruments) {
+		t.Fatalf("the strip lost instruments to the admission filter: %+v", got.Quotes)
+	}
+	if !got.Coverage.Complete() {
+		t.Fatalf("the admission filter cost the strip coverage it should not have: %+v", got.Coverage)
 	}
 }
 
