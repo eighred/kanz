@@ -81,6 +81,9 @@ type Service struct {
 	// claimWait bounds how long a cancel or an amend waits for the in-flight
 	// work on an order to release it. Zero means defaultClaimWait.
 	claimWait time.Duration
+	// scheduleInterval is the driver tick admission compares a schedule against.
+	// Zero means unwired, which reads as DefaultScheduleInterval, never unbounded.
+	scheduleInterval time.Duration
 	// deliveryBudget bounds a WHOLE command delivery, where claimWait bounds one
 	// acquisition inside it (#801). See claimscope.go.
 	deliveryBudget time.Duration
@@ -199,6 +202,19 @@ func WithQuarantineCounter(c prometheus.Counter) ServiceOption {
 // JetStream's AckWait (60s on order subjects, pkg/bus/tuning.go) the broker
 // starts redelivering the cancel while the first copy is still blocked here —
 // see defaultClaimWait, which explains what that costs.
+// WithScheduleInterval tells the Service how often the execution-algorithm
+// driver ticks, so admission can refuse a schedule finer than the driver can
+// send (#898).
+//
+// IT IS THE SAME VALUE THE DRIVER RUNS ON — OMS_SCHEDULE_INTERVAL — and it must
+// be, or the two disagree about what is workable: admission would accept a
+// schedule the driver then coarsens, which is the state this refusal exists to
+// end. Unset falls back to DefaultScheduleInterval rather than to "unbounded";
+// see refuseUndrivableSchedule.
+func WithScheduleInterval(d time.Duration) ServiceOption {
+	return func(s *Service) { s.scheduleInterval = d }
+}
+
 func WithClaimWait(d time.Duration) ServiceOption {
 	return func(s *Service) { s.claimWait = d }
 }
@@ -470,7 +486,7 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 	// cannot be worked is the caller's answer to their own command. Admitted and
 	// then refused on every driver tick would be an order shown working on every
 	// screen while nothing ever traded it, and nobody watching the log.
-	if rej := validateSchedule(&cmd); rej != nil {
+	if rej := s.validateSchedule(&cmd); rej != nil {
 		return s.refuse(ctx, cmd.GetOrderId(), rej.Code, rej.Msg, now)
 	}
 	// A CHILD is authorized by its parent's own schedule — see authorizeChild.

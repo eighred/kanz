@@ -41,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"math/bits"
 	"time"
 )
 
@@ -90,9 +91,38 @@ func (p Plan) validate() error {
 // the market what trades in it, and a second copy of this expression would put
 // the schedule's due times and the interval it was sized against one rounding
 // apart — the child would be sized for a window it is not sent in.
+// THE PRODUCT IS COMPUTED IN 128 BITS, AND THAT IS NOT A MICRO-OPTIMISATION
+// (#898). `int64(span) * int64(i)` is nanoseconds times a slice index, and it
+// overflows int64 far inside the range of a uint32 slice_count that arrives on
+// the wire:
+//
+//	window     overflows at
+//	   1h      i > 2_562_047
+//	  24h      i >   106_751     ← a day-long parent at ~one child per 0.8s
+//
+// The threshold scales INVERSELY with the window, so the longer the parent is
+// worked the fewer slices it takes — which is backwards from the intuition that
+// a long window is the safe case.
+//
+// What overflow does here is worse than a wrong number. The product goes
+// NEGATIVE, so offset is negative, so p.Start.Add(offset) lands BEFORE the
+// window starts — and Due() filters on "at or before now", so every child of the
+// schedule reads as due immediately. A parent somebody asked to be worked
+// carefully over a day goes to the venue in one pass. That is the exact failure
+// the window's own proto comment says a zero-length window must not be allowed
+// to cause, arrived at by arithmetic instead.
+//
+// bits.Mul64/Div64 gives the exact quotient with no allocation and no float.
+// Div64 panics when the high word is >= the divisor; that cannot happen here
+// because callers only ever ask for i in [0, Slices], so span·i < span·Slices and
+// the quotient is bounded by span itself. requireSaneSlices, and the OMS's
+// admission bound above it, are what keep i in range — this is the arithmetic
+// being correct for every i it is actually given, not a substitute for them.
 func (p Plan) boundary(i int) time.Time {
 	span := p.End.Sub(p.Start)
-	offset := time.Duration(int64(span) * int64(i) / int64(p.Slices))
+	hi, lo := bits.Mul64(uint64(span), uint64(i))
+	q, _ := bits.Div64(hi, lo, uint64(p.Slices))
+	offset := time.Duration(q)
 	return p.Start.Add(offset).UTC()
 }
 

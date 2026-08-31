@@ -679,6 +679,13 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		// Without it a deployment that can measure nothing and one that measures
 		// everything are indistinguishable from outside.
 		order.WithAttributionCounter(attributions),
+		// ADMISSION AND THE DRIVER MUST AGREE ABOUT WHAT IS WORKABLE (#898). The
+		// same interval the schedule driver ticks on, so a schedule finer than the
+		// tick is refused when it is submitted rather than admitted, announced, and
+		// then silently coarsened by a driver that cannot send its children on time.
+		// It also bounds slice_count, which arrives as an unconstrained uint32 and
+		// is otherwise allocated one Slice at a time at admission.
+		order.WithScheduleInterval(cfg.ScheduleInterval),
 		order.WithOutboxRelay(outboxRelayOpts...))
 	if err != nil {
 		return false, err
