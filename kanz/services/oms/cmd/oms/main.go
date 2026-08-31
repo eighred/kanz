@@ -597,6 +597,8 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	})
 	obs.Registry.MustRegister(proposalExpiryFailures)
 
+	attributions := executionAttributionCounter(obs)
+
 	// THE EXECUTION-ALGORITHM DRIVER'S THREE SIGNALS (#435).
 	//
 	// A parent order that is not being worked looks exactly like one being worked
@@ -700,6 +702,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		order.WithQuarantineCounter(quarantined),
 		order.WithClaimTimeoutCounter(claimTimeouts),
 		order.WithAcceptedReannounceCounter(acceptedReannounced),
+		// The coverage signal for the per-decision execution attribution (#866).
+		// Without it a deployment that can measure nothing and one that measures
+		// everything are indistinguishable from outside.
+		order.WithAttributionCounter(attributions),
 		order.WithOutboxRelay(outboxRelayOpts...))
 	if err != nil {
 		return false, err
@@ -1377,6 +1383,36 @@ mandateArmWait:
 // is no unscoped pool on this platform to build such a binary on, and the app
 // role is NOSUPERUSER so it could not bypass RLS to read the other tenants
 // either. See outbox.Relay.
+// executionAttributionCounter registers the execution-quality COVERAGE signal
+// (#866): one counter, labelled by what the per-decision cost attribution
+// produced for each terminal decision.
+//
+// IT COUNTS THE SUCCESSES TOO, DELIBERATELY. A counter that only fired on
+// failure would leave the two states this platform refuses to conflate looking
+// identical: an OMS whose price spine covers nothing publishes no attributions
+// and increments nothing, and so does an OMS nobody has given any orders. The
+// ratio between labels is the signal — a rising no_arrival_mark share is a
+// price-spine coverage problem, a rising total_only share is a QUOTE coverage
+// problem, and the two have different owners.
+//
+// IT IS A NAMED BUILDER RATHER THAN TWENTY MORE LINES INSIDE runConsumers,
+// because that function's length is a ratchet (#643): every addition to it is
+// individually reasonable, which is how it reached 1,474 lines with two bare
+// nils in the middle.
+func executionAttributionCounter(obs *observability.Provider) *prometheus.CounterVec {
+	c := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kanz_oms_execution_attributions_total",
+		Help: "Terminal DECISIONS (parent orders and unsliced orders) by what their " +
+			"execution-cost attribution produced. decomposed = spread, impact and timing all " +
+			"measured; total_only = the shortfall is exact but the market's width was not " +
+			"observable for at least one slice that traded; no_arrival_mark / no_fills = nothing " +
+			"to measure; the rest are faults. NOT zero-cost orders — an unmeasurable decision " +
+			"scored as zero would flatter every algorithm comparison built on this.",
+	}, []string{"outcome"})
+	obs.Registry.MustRegister(c)
+	return c
+}
+
 func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (order.Store, position.Store, func(), error) {
 	if cfg.DatabaseURL == "" {
 		logger.Warn("NO OMS_DATABASE_URL — the order store, the position book AND the outbox are IN-PROCESS. This deployment "+

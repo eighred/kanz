@@ -1032,6 +1032,26 @@ data:
                   # would put an analytic on the capital path; the venue ranking
                   # that will consume this (#437) is a separate reader.
                   "order.cost.recorded",
+                  # WHAT ONE DECISION COST, DECOMPOSED (#866). Emitted ONCE per
+                  # parent order — or per unsliced order — at the moment it
+                  # reaches a terminal status, in the same transaction as the
+                  # state change. It is the per-DECISION grain of the same
+                  # measurement order.cost.recorded carries per FILL, which is
+                  # why it shares that subject's first two tokens: the Kafka
+                  # topic is derived from them (internal/topic.For), so both land
+                  # on order.cost, partitioned by the same order id, and a report
+                  # reads one topic instead of interleaving two.
+                  #
+                  # A MISSING LINE HERE IS SILENT AND EXPENSIVE. The OMS commits
+                  # the record to its outbox inside the terminal transaction and
+                  # the relay then fails to publish it forever — the order is
+                  # correct, the trade is booked, and the execution-quality
+                  # report is short one decision with nothing saying so (#787).
+                  #
+                  # PUBLISH ONLY. Nothing on the trading path may read it: a
+                  # measurement that could reroute or refuse an order would put
+                  # an analytic on the capital path.
+                  "order.cost.attributed",
                   "risk.position.changed.>", "risk.position.venue.changed.>",
                   # GRANTED, AND NOTHING PUBLISHES IT (#589). posttrade.BusFailSink
                   # is defined and never constructed, so this grant is exercised by
@@ -1619,6 +1639,10 @@ data:
                   "order.order.pending_approval",
                   "order.order.approved",
                   "order.cost.recorded",
+                  # The per-decision execution attribution (#866) — mirrors the
+                  # platform grant above; the pod runs the same binary and will
+                  # name it.
+                  "order.cost.attributed",
                   "risk.position.changed.>", "risk.position.venue.changed.>",
                   "settlement.instruction.fail",
                   # The pre-trade compliance decision (#713) — mirrors the platform

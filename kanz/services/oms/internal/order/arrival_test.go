@@ -31,6 +31,13 @@ type fakeMarks struct {
 	asOf    time.Time
 	seen    bool
 	expired bool // Mark refuses an expired entry; Lookup still reports it
+
+	// bid, ask and touchAt are the QUOTED WIDTH (#866). Zero means the
+	// instrument was last seen as a trade print and has no observable width —
+	// which is a different state from having a zero-width market, and the
+	// distinction is what the release stamp exists to preserve.
+	bid, ask *big.Rat
+	touchAt  time.Time
 }
 
 func (f fakeMarks) Mark(string) *big.Rat {
@@ -44,13 +51,30 @@ func (f fakeMarks) Lookup(string) (*big.Rat, time.Time, bool) {
 	return f.price, f.asOf, f.seen
 }
 
+// Touch mirrors mark.Source.Touch: it is the SAFE accessor and refuses an
+// expired or crossed quote rather than handing back a width nobody can use.
+func (f fakeMarks) Touch(string) (*big.Rat, *big.Rat, time.Time, bool) {
+	if f.bid == nil || f.ask == nil || f.expired || f.ask.Cmp(f.bid) <= 0 {
+		return nil, nil, time.Time{}, false
+	}
+	return new(big.Rat).Set(f.bid), new(big.Rat).Set(f.ask), f.touchAt, true
+}
+
 var markObserved = time.Date(2026, 8, 1, 11, 59, 30, 0, time.UTC)
 
 func stampWith(t *testing.T, m ArrivalMarks) *orderpb.OrderState {
 	t.Helper()
 	s := &Service{arrivalMarks: m}
 	st := &orderpb.OrderState{InstrumentId: "BTC-USD"}
-	s.stampArrival(st)
+	// THE SAME SHAPE ADMISSION USES: one observation of the spine, both stamps
+	// taken from it. Calling the two stampers with two separate reads would test
+	// a code path the service does not have — and would hide the property the
+	// timing leg depends on, that an unsliced order's arrival and release are
+	// equal by construction.
+	if o, ok := s.observe(st.GetInstrumentId()); ok {
+		s.stampArrival(st, o)
+		s.stampRelease(st, o)
+	}
 	return st
 }
 
@@ -127,7 +151,9 @@ func TestStampArrival_AStaleMarkIsRefusedEvenThoughLookupStillReportsIt(t *testi
 func TestStampArrival_NoSourceIsHarmless(t *testing.T) {
 	s := &Service{} // arrivalMarks nil
 	st := &orderpb.OrderState{InstrumentId: "BTC-USD"}
-	s.stampArrival(st) // must not panic
+	if _, ok := s.observe(st.GetInstrumentId()); ok {
+		t.Fatal("observe reported a usable observation with no mark source configured")
+	}
 	if st.GetArrivalPrice() != nil {
 		t.Error("an arrival price appeared with no mark source configured")
 	}
@@ -152,5 +178,119 @@ func TestAccept_DoesNotStampAnArrivalPrice(t *testing.T) {
 	if st.GetArrivalPrice() != nil {
 		t.Error("Accept stamped an arrival price — it is documented pure, and a replay would " +
 			"then re-benchmark the order against today's market")
+	}
+}
+
+// THE RELEASE OBSERVATION AND ITS WIDTH (#866).
+//
+// arrival_price alone is one observation, and a decomposition is a difference
+// between two. These pin the second one: the market as it stood when THIS order
+// was released to be worked, including the width that was quoted — without which
+// the cost of crossing cannot be told apart from the cost of moving the book.
+
+var touchObserved = time.Date(2026, 8, 1, 11, 59, 20, 0, time.UTC)
+
+// A QUOTED MARKET IS RECORDED IN FULL: the mark, and both legs of the touch.
+func TestStampRelease_RecordsTheQuotedWidth(t *testing.T) {
+	st := stampWith(t, fakeMarks{
+		price: big.NewRat(64000, 1), asOf: markObserved, seen: true,
+		bid: big.NewRat(63990, 1), ask: big.NewRat(64010, 1), touchAt: markObserved,
+	})
+
+	if st.GetReleasePrice() == nil {
+		t.Fatal("no release price stamped — the timing leg is a difference between the arrival " +
+			"mark and this one, and without it a worked order's drift cannot be separated from " +
+			"what its algorithm paid")
+	}
+	if got := dec.FromProto(st.GetReleasePrice()).RatString(); got != "64000" {
+		t.Errorf("release_price = %s, want 64000", got)
+	}
+	if st.GetReleaseBid() == nil || st.GetReleaseAsk() == nil {
+		t.Fatal("the quoted width was not stamped — the spread leg cannot be computed from a mid " +
+			"at any later time, by anybody")
+	}
+	if got := dec.FromProto(st.GetReleaseBid()).RatString(); got != "63990" {
+		t.Errorf("release_bid = %s, want 63990", got)
+	}
+	if got := dec.FromProto(st.GetReleaseAsk()).RatString(); got != "64010" {
+		t.Errorf("release_ask = %s, want 64010", got)
+	}
+}
+
+// AN UNSLICED ORDER'S ARRIVAL AND RELEASE ARE EQUAL BY CONSTRUCTION, and this is
+// the property the timing leg depends on.
+//
+// The decision and the release are the same instant for an order that is not
+// worked on a schedule, so its drift must be exactly zero — not a few basis
+// points of jitter because the two stamps happened to read the mark cache twice
+// and a tick landed in between. observe() takes ONE read for exactly this
+// reason, and this pins it.
+func TestStampRelease_AnUnslicedOrdersArrivalAndReleaseAreOneObservation(t *testing.T) {
+	st := stampWith(t, fakeMarks{
+		price: big.NewRat(64000, 1), asOf: markObserved, seen: true,
+		bid: big.NewRat(63990, 1), ask: big.NewRat(64010, 1), touchAt: markObserved,
+	})
+
+	if dec.Cmp(st.GetArrivalPrice(), st.GetReleasePrice()) != 0 {
+		t.Fatalf("arrival_price %s != release_price %s for an unsliced order — its timing leg "+
+			"will report drift that did not happen",
+			dec.FromProto(st.GetArrivalPrice()).RatString(),
+			dec.FromProto(st.GetReleasePrice()).RatString())
+	}
+	if !st.GetArrivalAt().AsTime().Equal(st.GetReleaseAt().AsTime()) {
+		t.Errorf("arrival_at %s != release_at %s from one observation",
+			st.GetArrivalAt().AsTime(), st.GetReleaseAt().AsTime())
+	}
+}
+
+// A TRADE-ONLY FEED HAS A MARK AND NO WIDTH, and stamping bid == ask == mark
+// would report that crossing this market was free. That is the single most
+// flattering lie available to an execution report: it pushes the whole cost of
+// crossing into the impact residual, the one leg nobody can independently check.
+func TestStampRelease_NoQuoteMeansNoWidth(t *testing.T) {
+	st := stampWith(t, fakeMarks{price: big.NewRat(64000, 1), asOf: markObserved, seen: true})
+
+	if st.GetReleasePrice() == nil {
+		t.Fatal("a trade-only mark must still stamp the release price — the headline shortfall " +
+			"needs it and does not need a width")
+	}
+	if st.GetReleaseBid() != nil || st.GetReleaseAsk() != nil {
+		t.Fatalf("a width was stamped for an instrument that was never quoted: bid %v ask %v",
+			st.GetReleaseBid(), st.GetReleaseAsk())
+	}
+}
+
+// THE STAMPED TIME IS THE STALEST COMPONENT'S.
+//
+// A mark from a trade one second ago and a quote from ten seconds ago are one
+// observation with two ages. Recording the newer would describe it as fresher
+// than its worst part, and a consumer discounting the cost figure for staleness
+// would discount it too little — always in the flattering direction.
+func TestStampRelease_TheObservationTimeIsTheOlderOfMarkAndTouch(t *testing.T) {
+	st := stampWith(t, fakeMarks{
+		price: big.NewRat(64000, 1), asOf: markObserved, seen: true,
+		bid: big.NewRat(63990, 1), ask: big.NewRat(64010, 1),
+		touchAt: touchObserved, // ten seconds older than the mark
+	})
+
+	if got := st.GetReleaseAt().AsTime(); !got.Equal(touchObserved) {
+		t.Fatalf("release_at = %s, want the OLDER observation %s — the record claims this "+
+			"observation is fresher than its stalest part", got, touchObserved)
+	}
+}
+
+// A CROSSED QUOTE IS NOT A WIDTH. ask <= bid is a book nobody saw in one
+// consistent state, and a negative half-spread arrives in the report as the fund
+// being PAID to take liquidity.
+func TestStampRelease_ACrossedQuoteIsNotStamped(t *testing.T) {
+	st := stampWith(t, fakeMarks{
+		price: big.NewRat(64000, 1), asOf: markObserved, seen: true,
+		bid: big.NewRat(64010, 1), ask: big.NewRat(63990, 1), touchAt: markObserved,
+	})
+
+	if st.GetReleaseBid() != nil || st.GetReleaseAsk() != nil {
+		t.Fatalf("a crossed quote was stamped as a width: bid %s ask %s",
+			dec.FromProto(st.GetReleaseBid()).RatString(),
+			dec.FromProto(st.GetReleaseAsk()).RatString())
 	}
 }

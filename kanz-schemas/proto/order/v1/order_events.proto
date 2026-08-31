@@ -365,6 +365,41 @@ message OrderState {
   // this field means exactly what it meant when it was written.
   common.v1.Decimal leverage = 27;
   MarginMode margin_mode = 28;
+
+  // THE MARKET AS IT STOOD WHEN THIS ORDER WAS RELEASED (#866).
+  //
+  // "Released" is the instant this order became the OMS's to work: its own
+  // admission. For an ordinary order and for a scheduled PARENT that is the same
+  // instant as the decision, so release_price equals arrival_price by
+  // construction — both are stamped from ONE read of the price spine. For a
+  // CHILD it is not: the child is admitted minutes into the parent's window, and
+  // the gap between arrival_price and its own release_price is the market's own
+  // drift while the parent was being worked.
+  //
+  // THAT GAP IS THE TIMING LEG, and it is the reason these fields exist. Without
+  // them an implementation shortfall is one number: the desk learns the parent
+  // cost 14bps and cannot tell whether the algorithm traded badly or the market
+  // simply moved away while it waited. arrival_price alone cannot separate them,
+  // because it is a single observation and drift is a difference between two.
+  //
+  // A CHILD IS NEVER GIVEN ITS PARENT'S RELEASE OBSERVATION, which is the exact
+  // opposite of the rule arrival_price follows one field up. The benchmark is
+  // inherited because the DECISION was the parent's; the release observation is
+  // taken fresh because the MARKET was not.
+  //
+  // release_bid and release_ask are the touch, and they are set ONLY when the
+  // price spine's most recent observation for this instrument was a QUOTE. A
+  // last-trade mark carries no width, and an unset pair means the market's width
+  // was not observable — never a zero spread, which would report every slice as
+  // having crossed for free.
+  //
+  // All four are UNSET WHEN UNKNOWN, for the reason arrival_price is: an order
+  // nobody could see the market for is unmeasurable, and a zero would score it
+  // as free.
+  common.v1.Decimal release_price = 29;
+  google.protobuf.Timestamp release_at = 30;
+  common.v1.Decimal release_bid = 31;
+  common.v1.Decimal release_ask = 32;
 }
 
 // OrderQuarantine records an order whose true state at the venue could not be
@@ -775,4 +810,169 @@ message TransactionCostRecorded {
   // faster for whichever venue happens to be worked with an algorithm — then
   // feeds that back into where the next order is sent.
   string parent_order_id = 15;
+}
+
+// Benchmark names what an execution was measured AGAINST (#866).
+//
+// IT IS THE SEAM, and it is an enum rather than an implied constant because the
+// second benchmark is already specified: #864 wants interval VWAP (did we trade
+// worse than the market did over the same window) and participation-rate
+// tracking alongside arrival (what did the decision cost). Those are different
+// questions about the same execution, and the way this goes wrong is a SECOND
+// attribution path publishing a second FACT with the same field names and a
+// different meaning — at which point a report that unions them is averaging two
+// benchmarks and nobody can see it.
+//
+// UNSPECIFIED is not "arrival". A record that does not say what it was measured
+// against is a record nothing may aggregate.
+enum Benchmark {
+  BENCHMARK_UNSPECIFIED = 0;
+  // BENCHMARK_ARRIVAL is implementation shortfall against the mark stamped at
+  // the DECISION — OrderState.arrival_price.
+  BENCHMARK_ARRIVAL = 1;
+}
+
+// AttributionQuality says how much of the decomposition was actually OBSERVED.
+//
+// It exists because "nothing configured" and "checked, and fine" must never look
+// the same, and a three-way split is exactly where that rule gets broken: a
+// consumer handed spread=0 cannot tell a genuinely zero-width market from a
+// market nobody could see. So the legs are UNSET when unobservable and this says
+// which case a reader is holding, rather than leaving them to infer it from
+// three zeros.
+enum AttributionQuality {
+  ATTRIBUTION_QUALITY_UNSPECIFIED = 0;
+  // DECOMPOSED: every slice that traded carried a release observation and a
+  // quoted touch, so spread_bps, timing_bps and impact_bps are all present and
+  // sum to shortfall_bps exactly.
+  ATTRIBUTION_QUALITY_DECOMPOSED = 1;
+  // TOTAL_ONLY: shortfall_bps is measured and the three legs are UNSET, because
+  // at least one slice that traded had no observable touch or no release mark.
+  // The headline is still true; the attribution is not available.
+  ATTRIBUTION_QUALITY_TOTAL_ONLY = 2;
+}
+
+// ExecutionAttributionRecorded is what one DECISION cost, decomposed (#866).
+//
+// # The grain is the decision, not the fill
+//
+// order.cost.recorded (TransactionCostRecorded) is per FILL, and that is right
+// for the question it answers — which venue should we have used. It cannot
+// answer the other one. An order worked in fifty slices produces fifty cost
+// records, each measured against the same arrival mark, and summing them by hand
+// gives a number nobody publishes and no two consumers derive identically. This
+// is published ONCE per decision, at the moment the decision finished: a
+// scheduled parent when its last child is done, an ordinary order when it
+// reaches a terminal status having traded.
+//
+// A CHILD NEVER PRODUCES ONE. A slice is not a decision, it is a consequence of
+// one; attributing to it would report the platform working fifty decisions where
+// a desk made one.
+//
+// # Why the decomposition and not a single number
+//
+// A single slippage figure tells a desk it lost 14bps and nothing about what to
+// change. The three legs each name a different lever:
+//
+//   - spread_bps — what it cost to cross the quoted touch. Change VENUE, or
+//     change from taking to making.
+//   - timing_bps — how far the market moved on its own between the decision and
+//     the moment each slice was released. Change URGENCY: a schedule stretched
+//     over an hour is buying impact reduction with drift exposure, and this is
+//     the price of that trade.
+//   - impact_bps — the residual. What was paid beyond the touch that was quoted
+//     when the slice went out. Change ALGORITHM or slice size.
+//
+// # impact_bps is a RESIDUAL, and that is stated rather than hidden
+//
+// Market impact is not directly observable: nobody can see the counterfactual
+// price at which this order would have filled had it not been sent. Spread and
+// timing ARE observable — each is a difference between two real observations the
+// OMS recorded at defined instants — so impact is defined as what is left:
+//
+//	impact_bps = shortfall_bps - spread_bps - timing_bps
+//
+// That identity is exact, and a test pins it. What it means is only as good as
+// the two measured legs: a NEGATIVE impact_bps is the ordinary result of resting
+// inside the spread rather than crossing it, and is information, not an error.
+// What it must never be is the whole of a decomposition — three legs derived
+// from one number would be arithmetic dressing, which is why the other two are
+// measured from the record and this one is not.
+//
+// # It records; it decides nothing
+//
+// Nothing on the trading path reads this, for the reason TransactionCostRecorded
+// gives: a measurement that could refuse or reroute an order would put an
+// analytic on the capital path.
+message ExecutionAttributionRecorded {
+  // order_id is the DECISION — a scheduled parent, or an ordinary order that
+  // carries no parent. Never a child.
+  string order_id = 1;
+  string portfolio_id = 2;
+  string instrument_id = 3;
+  Side side = 4;
+  // terminal_status is how the decision ended: FILLED, CANCELLED or EXPIRED. A
+  // partially-filled order that was withdrawn is measured on what traded, and
+  // this is what tells a reader the rest was not a miss but a withdrawal.
+  OrderStatus terminal_status = 5;
+
+  common.v1.Decimal ordered_quantity = 6;
+  // filled_quantity is what this measurement covers. Never zero: an order that
+  // never traded produces no record at all, because a zero shortfall on an
+  // execution that did not happen is a datapoint claiming a perfect fill.
+  common.v1.Decimal filled_quantity = 7;
+  // average_fill_price is quantity-weighted across every slice that traded,
+  // exclusive of fees.
+  common.v1.Decimal average_fill_price = 8;
+
+  // arrival_price is the benchmark: the mark stamped on the decision at
+  // ADMISSION, never a price looked up at measurement time. A mark read after
+  // the fact is a mark from after this order moved the market, and it biases
+  // every result flatter, always in the flattering direction.
+  common.v1.Decimal arrival_price = 9;
+  google.protobuf.Timestamp arrival_at = 10;
+
+  // EVERY FIGURE BELOW IS IN BASIS POINTS OF ARRIVAL NOTIONAL AND EXCLUDES FEES,
+  // and both halves of that are deliberate.
+  //
+  // Of ARRIVAL notional, because that is the benchmark's own scale: dividing by
+  // what was actually paid makes a worse execution look proportionally smaller.
+  //
+  // EXCLUDING FEES, because a fee is not a leg of this decomposition and cannot
+  // be made into one — it is charged per fill, and the individual Fill's fee
+  // lives only in the fill FACT, never in the stored OrderState this is built
+  // from. TransactionCostRecorded.shortfall_bps is the fee-inclusive measure and
+  // it is per fill; this is the fee-exclusive one and it is per decision. A
+  // reader wanting the all-in cost of a decision sums the fills' fees from
+  // order.cost.recorded, keyed on parent_order_id.
+  //
+  // THE SIGN IS FROM THE FUND'S POINT OF VIEW ON BOTH SIDES: positive cost
+  // money, negative beat the benchmark. Chosen once so a report cannot average a
+  // good sell against a bad buy to zero.
+  common.v1.Decimal shortfall_bps = 11;
+
+  // The three legs. UNSET when quality is TOTAL_ONLY — unset, not zero, because
+  // a zero spread is a real and different claim from an unobservable one.
+  common.v1.Decimal spread_bps = 12;
+  common.v1.Decimal impact_bps = 13;
+  common.v1.Decimal timing_bps = 14;
+
+  AttributionQuality quality = 15;
+  Benchmark benchmark = 16;
+
+  // slices is how many orders traded into this decision — 1 for an ordinary
+  // order, the number of children that filled for a worked parent. measured is
+  // how many of those carried the observations the decomposition needs.
+  //
+  // THE PAIR IS THE COVERAGE SIGNAL, and it is why measured is carried even
+  // though quality already says DECOMPOSED or not. A parent whose slices were
+  // all measurable and one whose 49th slice lost its quote are both TOTAL_ONLY,
+  // and the second is a price-spine gap somebody should fix.
+  int32 slices = 17;
+  int32 measured_slices = 18;
+
+  // measured_at is when this attribution was computed, which is NOT when the
+  // decision finished — a replayed or backlogged terminal transition produces a
+  // late measurement of an old order.
+  google.protobuf.Timestamp measured_at = 19;
 }

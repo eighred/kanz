@@ -16,7 +16,6 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/dec"
-	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/oms/internal/schedule"
 )
@@ -253,7 +252,17 @@ func (s *Service) retireIfFinished(ctx context.Context, parentSt *orderpb.OrderS
 		return ferr
 	}
 	next.OutcomeAnnouncedAt = timestamppb.New(now)
-	if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}, ""); err != nil {
+	// AND THE DECISION'S COST, MEASURED FROM THE CHILDREN THAT TRADED IT (#866).
+	//
+	// THIS IS THE SITE THE WHOLE MEASUREMENT EXISTS FOR. A scheduled parent is
+	// the only order on this platform whose execution was worked over TIME, so it
+	// is the only one where the market's own drift can be told apart from what
+	// the algorithm paid — and it is the order #864's algorithm library will be
+	// judged on. withAttribution reads the children itself rather than being
+	// handed the list this pass began with, because a cancel may have landed
+	// since and the record must describe what actually traded.
+	announce := s.withAttribution(ctx, next, now, fact)
+	if err := s.store.Save(ctx, next, ver, announce, ""); err != nil {
 		return err
 	}
 	if _, err := s.relay.Flush(ctx, next.GetOrderId()); err != nil {

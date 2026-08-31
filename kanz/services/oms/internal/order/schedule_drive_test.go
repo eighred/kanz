@@ -346,6 +346,74 @@ func (m *movingMarks) Lookup(string) (*big.Rat, time.Time, bool) {
 	return m.Mark(""), *m.at, true
 }
 
+// Touch quotes a fixed 1-wide market around the moving mark, so the width is
+// constant while the mid drifts — which is what lets a test tell the spread leg
+// (unchanging) from the timing leg (growing with the clock) apart.
+func (m *movingMarks) Touch(string) (*big.Rat, *big.Rat, time.Time, bool) {
+	mid := m.Mark("")
+	half := big.NewRat(1, 2)
+	return new(big.Rat).Sub(mid, half), new(big.Rat).Add(mid, half), *m.at, true
+}
+
+// A CHILD TAKES ITS OWN RELEASE OBSERVATION, and this is the exact inverse of
+// the inheritance pinned above (#866).
+//
+// The two rules look contradictory and are not: the benchmark is inherited
+// because the DECISION was the parent's, and the release observation is taken
+// fresh because the MARKET was not. Their difference IS the timing leg. If a
+// child were given the parent's release mark as well, every worked order would
+// report zero drift and the platform would once again be unable to say whether
+// the algorithm or the market cost it the money.
+func TestScheduleE2E_AChildTakesItsOwnReleaseObservation(t *testing.T) {
+	at := schedStart
+	fb := &fakeBus{}
+	marks := &movingMarks{at: &at}
+	svc, store := newService(t, fb, nil)
+	svc.now = func() time.Time { return at }
+	WithArrivalMarks(marks)(svc)
+
+	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, scheduledOrder("p1", 6, nil))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	parent, _, err := store.Load(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("Load parent: %v", err)
+	}
+	if parent.GetReleasePrice() == nil {
+		t.Fatal("the parent carries no release price — this test cannot distinguish a fresh " +
+			"observation from two empty fields")
+	}
+
+	at = schedStart.Add(40 * time.Minute)
+	if _, err := svc.DriveSchedules(driveCtx()); err != nil {
+		t.Fatalf("DriveSchedules: %v", err)
+	}
+	child, _, err := store.Load(context.Background(), schedule.ChildID("p1", 0))
+	if err != nil {
+		t.Fatalf("Load child: %v", err)
+	}
+
+	if child.GetReleasePrice() == nil {
+		t.Fatal("the child carries no release price — its slice contributes no timing measurement " +
+			"and the whole parent's decomposition degrades to a single number")
+	}
+	if proto_equalDecimal(parent.GetArrivalPrice(), child.GetReleasePrice()) {
+		t.Errorf("child release_price = %v equals the inherited arrival price — the release "+
+			"observation was inherited too, so every worked order will report zero drift and the "+
+			"timing leg becomes decoration", child.GetReleasePrice())
+	}
+	// AND THE BENCHMARK IS STILL INHERITED. The two rules have to hold together;
+	// asserting one without the other is how a change satisfies half of it.
+	if !proto_equalDecimal(parent.GetArrivalPrice(), child.GetArrivalPrice()) {
+		t.Errorf("child arrival_price = %v, parent's = %v — the benchmark stopped being inherited",
+			child.GetArrivalPrice(), parent.GetArrivalPrice())
+	}
+	if child.GetReleaseBid() == nil || child.GetReleaseAsk() == nil {
+		t.Error("the child carries no quoted width, so its spread leg is unmeasurable and the " +
+			"whole parent's decomposition falls back to TOTAL_ONLY")
+	}
+}
+
 // A CHILD INHERITS THE PARENT'S COLLATERAL ANSWER rather than resolving its own.
 // Re-resolving mid-schedule would silently move the remaining slices onto
 // different collateral than the ones already filled.
