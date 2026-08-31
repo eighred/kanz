@@ -57,7 +57,7 @@ const sweepInterval = 30 * time.Second
 // That distinction is not bookkeeping. Lookup exists so a caller can tell "never
 // seen" from "seen but expired" — a cold or thin instrument versus a feed that
 // stalled — and the OMS branches on exactly that to emit two different metrics
-// and two different operator messages (services/oms/cmd/oms/main.go). Deleting
+// and two different operator messages (services/oms/cmd/oms/pretrade.go). Deleting
 // the entry outright would have bounded memory by silently reporting every
 // stalled feed as a cold instrument, converting an outage signal into a warm-up
 // signal. Releasing the *big.Rat while keeping asOf bounds the heavy part and

@@ -66,7 +66,7 @@ func TestAnExpiredMarkIsTombstoned(t *testing.T) {
 
 // THE DISTINCTION THE OMS BRANCHES ON MUST SURVIVE TOMBSTONING.
 //
-// services/oms/cmd/oms/main.go emits kanz_compliance_unpriced_orders_total with
+// services/oms/cmd/oms/pretrade.go emits kanz_compliance_unpriced_orders_total with
 // reason="expired" vs reason="never_seen" from exactly this, and calls them "an
 // outage" and "a warm-up". Plain deletion would have reported every stalled feed
 // as a cold instrument. This is the regression test for that.
