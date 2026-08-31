@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// EVERY LONG-LIVED MAP IN A COVERED PACKAGE MUST HAVE AN EVICTOR (#805, #834).
+// EVERY LONG-LIVED MAP IN A COVERED PACKAGE MUST HAVE AN EVICTOR (#805, #834, #814).
 //
 // # What this is protecting
 //
@@ -36,6 +36,16 @@ import (
 // service accounts and rotated subjects accumulated one entry per identity it
 // had ever served. The gateway is the sole entry point for POST /v1/orders, so
 // its heap is on the critical path for placing an order at all.
+//
+// The third scope is the same shape on the CONTROL plane (#814). The pre-trade
+// compliance gate's say-it-once warning ledger was a bare map keyed partly by
+// the order's instrument id — a free-form string off SubmitOrder that nothing
+// on the path validates beyond "not empty" — so a caller entitled to one
+// portfolio grew a permanent entry per invented instrument on the enforcement
+// point that decides whether capital moves, and every one of those orders was
+// REFUSED, so it cost its author nothing. The same eleven lines existed a second
+// time on the mandate registry, which is how a repair to one would have missed
+// the other.
 //
 // # Why the guard is about the FIELD and not about a number
 //
@@ -94,6 +104,15 @@ var evictionScopes = []evictionScope{
 		mustFind:  []string{"quota.inflight", "bucketSet.buckets", "replayCache.entries"},
 		mustEvict: "replayCache.entries",
 	},
+	{
+		dir:      "internal/compliance",
+		minFiles: 8,
+		mustFind: []string{"sayOnce.volatile", "MandateRegistry.byKey"},
+		// MandateRegistry.rejected has had its evictor since Put was written, and
+		// it predates this scope — so it proves receiver attribution here without
+		// vouching for the field #814 repaired.
+		mustEvict: "MandateRegistry.rejected",
+	},
 }
 
 // mapEvictionExempt names a map field ("Package: Type.field") that may live
@@ -104,11 +123,33 @@ var evictionScopes = []evictionScope{
 // CONSTRUCTION — not that the map is small today, and not that nobody has seen
 // it grow.
 //
-// IT IS EMPTY, AND THE FIRST DRAFT OF THIS GUARD IS WHY THAT MATTERS. It carried
+// IT WAS EMPTY, AND THE FIRST DRAFT OF THIS GUARD IS WHY THAT MATTERS. It carried
 // an invented entry for a field that does not exist, and the dead-entry arm
 // below caught it on the first run. An exemption nobody checks is worse than no
 // exemption, because it reads as a decision somebody made.
-var mapEvictionExempt = map[string]string{}
+//
+// The three entries below arrived with the internal/compliance scope. Each names
+// a key space whose every component is written by the ESTATE — a portfolio that
+// passed entitlement, or a mandate an operator published — as opposed to the
+// instrument id that made the gate's other ledger #814.
+var mapEvictionExempt = map[string]string{
+	"internal/compliance: sayOnce.stable": "every key's variable part is (tenant, portfolio). " +
+		"An order reaches the gate only after order.delegatedAndEntitled, so a \"user:\" issuer can " +
+		"name only a portfolio the gateway stamped from its verified principal, and the two machine " +
+		"issuers on order.order.submit take theirs from a strategy signal or a rebalance proposal. " +
+		"The registry's keys are narrower still: warnMisfiled and warnSystemFallback only form one " +
+		"for a portfolio that ALREADY has a published mandate. Evicting here would be wrong rather " +
+		"than merely unnecessary — an ungoverned portfolio is ungoverned all day, so a horizon would " +
+		"re-announce it forever. The caller-keyed half of the same type is sayOnce.volatile, which " +
+		"IS swept.",
+	"internal/compliance: MandateRegistry.byKey": "keyed by (tenant, portfolio) and written only by " +
+		"Put, whose only caller is the mandate replay off a COMPACTED config subject. An entry " +
+		"exists because an operator published a mandate for that portfolio; nothing a trading " +
+		"caller sends can create one.",
+	"internal/compliance: MandateRegistry.tenantsByPortfolio": "same writer and same source as " +
+		"byKey — one entry per portfolio some tenant has published a mandate for. It exists so a " +
+		"missed lookup can say WHY (#243), and it cannot outgrow the set of published mandates.",
+}
 
 func TestEveryLongLivedMapHasAnEvictor(t *testing.T) {
 	root := moduleRoot(t)
