@@ -190,6 +190,21 @@ var mapEvictionExempt = map[string]evictionExemption{
 	// ---------------------------------------------------------------------
 	// boundedByConstruction — the key space is written by the estate.
 	// ---------------------------------------------------------------------
+	// ADDED BY A CROSS-PR COLLISION, NOT BY EITHER PR BEING WRONG. This guard went
+	// estate-wide (#842) and the write-path load harness landed (#865) within minutes
+	// of each other, in parallel worktrees; neither branch could see the other, both
+	// were green alone, and main was red on the merge of the second.
+	"test/load/orderflow: ledger.seen": {boundedByConstruction,
+		"keyed by the order id on the EXECUTION stream, which is retained for 24h — so the key " +
+			"space is that window plus whatever the run itself submits, imposed by the stream's own " +
+			"retention rather than by hope. The holder is a ONE-SHOT CLI: watchFacts replays the " +
+			"backlog, the stages run, the report prints, the process exits. There is no long-lived " +
+			"process for it to leak in. " +
+			"IT MUST NOT BE FILTERED TO THIS RUN, which is the obvious repair and is wrong: " +
+			"TestAnotherRunsFactsDoNotCountAsThisRunsAnnouncements pins that a foreign order is " +
+			"FOLDED AND NOT COUNTED, because await must be able to resolve any id it is handed " +
+			"while the outstanding depth counts only this run's tag. Dropping foreign ids at the " +
+			"door breaks that test, and counting them makes the depth go negative on a re-run.", ""},
 	"internal/cashview: View.byPF": {boundedByConstruction,
 		"keyed by portfolio_id off an accounting PortfolioCashBalance announcement, which the ledger " +
 			"publishes only for a portfolio it books for. A LEVEL, NOT A DELTA: each announcement " +
