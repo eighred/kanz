@@ -304,6 +304,24 @@ func funcBodyText(t *testing.T, path, name string) string {
 	return ""
 }
 
+// namesAType reports whether a composite literal states its own type, e.g.
+// orderpb.OrderState{…} or Thing{…} rather than the elided form inside a slice.
+func namesAType(cl *ast.CompositeLit) bool { return cl.Type != nil }
+
+// isOrderStateLiteral reports whether a composite literal constructs an
+// order.v1.OrderState — the aggregate whose size is the thing under guard.
+// Matched by the type's own name so an import alias change cannot silently widen
+// or narrow it.
+func isOrderStateLiteral(cl *ast.CompositeLit) bool {
+	switch t := cl.Type.(type) {
+	case *ast.SelectorExpr:
+		return t.Sel.Name == "OrderState"
+	case *ast.Ident:
+		return t.Name == "OrderState"
+	}
+	return false
+}
+
 // ONLY TWO FUNCTIONS MAY WRITE ordered_quantity, AND BOTH ARE GATED (#799).
 //
 // This is the property the guards above are really protecting, stated at the
@@ -357,10 +375,39 @@ func TestOnlyTheGatedPathsWriteOrderedQuantity(t *testing.T) {
 							writers[fn.Name.Name] = append(writers[fn.Name.Name], rel)
 						}
 					}
-				case *ast.KeyValueExpr:
-					// OrderedQuantity: ... inside a composite literal
-					if k, ok := v.Key.(*ast.Ident); ok && k.Name == "OrderedQuantity" {
-						writers[fn.Name.Name] = append(writers[fn.Name.Name], rel)
+				case *ast.CompositeLit:
+					// OrderedQuantity: ... inside a composite literal.
+					//
+					// A LITERAL THAT NAMES A TYPE OTHER THAN OrderState IS NOT AN
+					// ORDER WRITE, and skipping it is a narrowing of scope rather
+					// than of strength (#866). The guard's property is that only
+					// two gated functions may move an ORDER's size; a FACT that
+					// REPORTS the quantity an order was placed for moves nothing,
+					// and order.v1.ExecutionAttributionRecorded carries exactly
+					// that field so a reader of an execution-cost record can tell
+					// a withdrawal from a miss.
+					//
+					// Exempting the function instead would have been the wrong
+					// repair twice over: it would excuse every future write in
+					// that function including a real one, and it would need an
+					// issue to retire that nothing could ever close.
+					//
+					// A literal with NO named type stays denied — an implicit one
+					// inside an OrderState slice or map is still an order write,
+					// and this cannot tell. Selector assignments below are
+					// untouched: st.OrderedQuantity = … is denied wherever it
+					// appears, whatever st is.
+					if !isOrderStateLiteral(v) && namesAType(v) {
+						return false
+					}
+					for _, elt := range v.Elts {
+						kv, ok := elt.(*ast.KeyValueExpr)
+						if !ok {
+							continue
+						}
+						if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "OrderedQuantity" {
+							writers[fn.Name.Name] = append(writers[fn.Name.Name], rel)
+						}
 					}
 				}
 				return true

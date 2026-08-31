@@ -94,8 +94,12 @@ var DefaultSubjects = []string{"market.*.trade", "market.*.quote"}
 type Source struct {
 	mu     sync.RWMutex
 	prices map[string]entry
-	now    func() time.Time
-	maxAge time.Duration
+	// touches is the QUOTED WIDTH per instrument, folded from the same Quote
+	// events the mid above comes from and kept beside it rather than inside it.
+	// See touch.go for why the two observations do not share one entry.
+	touches map[string]touch
+	now     func() time.Time
+	maxAge  time.Duration
 	// lastSweep is when the expired-entry sweep last ran. Guarded by mu.
 	lastSweep time.Time
 }
@@ -110,7 +114,12 @@ func New(now func() time.Time, maxAge time.Duration) *Source {
 	if now == nil {
 		now = time.Now
 	}
-	return &Source{prices: make(map[string]entry), now: now, maxAge: maxAge}
+	return &Source{
+		prices:  make(map[string]entry),
+		touches: make(map[string]touch),
+		now:     now,
+		maxAge:  maxAge,
+	}
 }
 
 // Mark returns the latest non-expired mark for an instrument, or nil when none
@@ -209,6 +218,12 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 		return nil
 	}
 	var price *big.Rat
+	// qBid and qAsk carry the TOUCH out of the switch, and they are nil on the
+	// trade arm because a print has no width (#866). They are declared here
+	// rather than inside the quote case for that reason only: a trade must not
+	// leave a stale width behind it, and the way that happens is a variable
+	// scoped so the record below cannot tell it was not set.
+	var qBid, qAsk *big.Rat
 	switch {
 	case ev.GetTrade() != nil && ev.GetTrade().GetPrice() != nil:
 		p, ok := decutil.FromProtoChecked(ev.GetTrade().GetPrice())
@@ -225,6 +240,7 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 		if !ok {
 			return nil
 		}
+		qBid, qAsk = bid, ask
 		mid := new(big.Rat).Add(bid, ask)
 		price = mid.Quo(mid, big.NewRat(2, 1))
 	default:
@@ -233,8 +249,13 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 	if price == nil || price.Sign() <= 0 {
 		return nil
 	}
+	asOf := s.clampSkew(eventTime(env, &ev))
 	s.mu.Lock()
-	s.prices[ev.GetInstrumentId()] = entry{price: price, asOf: s.clampSkew(eventTime(env, &ev))}
+	s.prices[ev.GetInstrumentId()] = entry{price: price, asOf: asOf}
+	// THE WIDTH IS WRITTEN ONLY BY THE QUOTE ARM. recordTouchLocked drops a nil,
+	// non-positive or crossed pair, so a trade print folds no touch at all and
+	// the previous quote keeps its own observation time until it expires.
+	s.recordTouchLocked(ev.GetInstrumentId(), qBid, qAsk, asOf)
 	s.sweepLocked()
 	s.mu.Unlock()
 	return nil
@@ -255,6 +276,11 @@ func (s *Source) sweepLocked() {
 		return
 	}
 	s.lastSweep = now
+	// THE TOUCH MAP RIDES THE SAME THROTTLE (#866), so retaining the quoted width
+	// costs one extra amortised walk rather than a second timer. It shares the
+	// throttle and not the semantics — an expired price is tombstoned, an expired
+	// touch is deleted; see sweepTouchesLocked for why.
+	s.sweepTouchesLocked(now)
 	for id, e := range s.prices {
 		if e.price != nil && s.expired(e) {
 			s.prices[id] = entry{price: nil, asOf: e.asOf}

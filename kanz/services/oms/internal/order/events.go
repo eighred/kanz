@@ -58,6 +58,18 @@ const (
 	EventTypeCancelled       = "order.order.cancelled"
 	EventTypeExpired         = "order.order.expired"
 	EventTypeOutcome         = "order.order.outcome"
+	// EventTypeAttributed is what one DECISION cost, decomposed (#866): emitted
+	// ONCE per parent — or per unsliced order — in the same transaction as the
+	// state change that made it terminal.
+	//
+	// IT SITS UNDER order.cost. DELIBERATELY, beside order.cost.recorded rather
+	// than under a subject of its own. The two are the same measurement at two
+	// grains — per fill, and per decision — and the Kafka archival topic is
+	// derived from the first two subject tokens, so sharing the prefix means the
+	// per-decision record lands on the SAME order.cost topic, partitioned by the
+	// same order id, as the fills it summarises. A report joining them reads one
+	// topic in one order instead of two topics it has to interleave by hand.
+	EventTypeAttributed = "order.cost.attributed"
 )
 
 // schemaVersion is the EVT-16 version every FACT this emitter builds carries.
@@ -466,4 +478,37 @@ func (e *Emitter) EmitOutcome(ctx context.Context, orderID string, status comman
 // caller is waiting on commit together (#292).
 func (e *Emitter) OutcomeFact(ctx context.Context, orderID string, status commandpb.CommandOutcomeStatus, reason, errorCode, resultRef string, t time.Time) (outbox.Record, error) {
 	return outbox.From(ctx, e.outcomeEvent(orderID, status, reason, errorCode, resultRef, t))
+}
+
+// attributedEvent is the once-per-decision execution attribution FACT (#866).
+//
+// PARTITIONED BY THE DECISION'S OWN ORDER ID, which is the same key
+// order.cost.recorded uses for the fills underneath it — so a consumer reading
+// the order.cost topic sees a decision's fill-level records and its single
+// decision-level summary on one partition, in the order they happened, and never
+// has to interleave two partitions to reconstitute one order's cost.
+//
+// The event time is the terminal transition's, not the measurement's: this FACT
+// describes what happened when the decision finished. When the measurement was
+// COMPUTED is a separate field on the payload, because a replayed or backlogged
+// terminal transition produces a late measurement of an old order and a reader
+// comparing costs over a window needs to know which clock it is holding.
+func (e *Emitter) attributedEvent(a *orderpb.ExecutionAttributionRecorded, t time.Time) bus.Event {
+	return e.event(EventTypeAttributed, a.GetOrderId(), t, a)
+}
+
+// AttributionFact captures the attribution as an outbox record, so it commits in
+// the SAME transaction as the state change that made the order terminal (#292,
+// #866).
+//
+// THERE IS NO EmitAttribution SIBLING, and that absence is the design. Every
+// other FACT here has a direct-publish form for the compensator that re-announces
+// it; this one cannot have a useful compensator, because the attribution is
+// derived from state the terminal transition itself wrote, and a later pass could
+// recompute it — which is exactly how one decision would come to have two
+// attribution records with the same order id and different numbers. Committing
+// with the transition means it is emitted once or not at all, and "not at all"
+// is a counted, visible gap rather than a second answer.
+func (e *Emitter) AttributionFact(ctx context.Context, a *orderpb.ExecutionAttributionRecorded, t time.Time) (outbox.Record, error) {
+	return outbox.From(ctx, e.attributedEvent(a, t))
 }

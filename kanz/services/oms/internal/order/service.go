@@ -63,6 +63,13 @@ type Service struct {
 	// a stated absence rather than a zero.
 	arrivalMarks ArrivalMarks
 
+	// attributions counts every terminal DECISION by what its execution-quality
+	// measurement produced — decomposed, total-only, or one of the named reasons
+	// it produced nothing (#866). It is the coverage signal: without it an OMS
+	// that can measure nothing and one that measures everything look the same
+	// from outside. See WithAttributionCounter.
+	attributions *prometheus.CounterVec
+
 	accounts       *execution.AccountBindings
 	requireAccount bool
 	sharedOnce     sync.Map // "tenant/portfolio@MIC" → struct{}, so the warning is said once
@@ -803,11 +810,27 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 	// working orders on a schedule costs nothing, which is precisely the claim
 	// #435 exists to let somebody TEST. A measure that cannot show the feature
 	// failing cannot show it working either.
+	//
+	// THE RELEASE OBSERVATION IS TAKEN FRESH ON EVERY ORDER, INCLUDING A CHILD
+	// (#866), and it is the exact opposite rule to the one above. The benchmark
+	// is inherited because the DECISION was the parent's; the market as it stood
+	// when this slice went out is inherited from nothing, because it is a
+	// different instant. Their difference is the timing leg — how far the market
+	// drifted on its own while the parent was being worked — and it is what lets
+	// a desk tell a badly-scheduled algorithm from a market that moved away.
+	//
+	// One read of the spine serves both, so an unsliced order's arrival and
+	// release are equal by construction rather than by two lookups that happened
+	// to agree. See observe().
+	if o, ok := s.observe(st.GetInstrumentId()); ok {
+		if parent == nil {
+			s.stampArrival(st, o)
+		}
+		s.stampRelease(st, o)
+	}
 	if parent != nil {
 		st.ArrivalPrice = parent.GetArrivalPrice()
 		st.ArrivalAt = parent.GetArrivalAt()
-	} else {
-		s.stampArrival(st)
 	}
 	// THE RELATION AND THE SCHEDULE COME OFF THE COMMAND, having been validated
 	// above — a parent carries a schedule and no parent id; a child carries a
@@ -1369,7 +1392,14 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 		if ferr != nil {
 			return st, ver, ferr
 		}
-		if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}, fill.GetFillId()); err != nil {
+		// AND THE EXECUTION ATTRIBUTION, WHEN THIS FILL FINISHED THE DECISION
+		// (#866). It rides the same transaction for the same reason the fill FACT
+		// does — but with the opposite error policy, because it MEASURES rather
+		// than records: withAttribution can only add records, never refuse this
+		// write. A fill must never fail to commit because a cost report could not
+		// be built from it.
+		announce := s.withAttribution(ctx, next, s.now().UTC(), fact)
+		if err := s.store.Save(ctx, next, ver, announce, fill.GetFillId()); err != nil {
 			// ALREADY FOLDED IS A SKIP, AND IT IS THE ORDINARY CASE AFTER A
 			// REDELIVERY (#782). The aggregate in the store already contains this
 			// fill, so st — loaded from it — already reflects it, and the correct
@@ -1672,7 +1702,15 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// duplicate-FACT window completeCancelAnnouncement documents is no longer
 	// reachable from the live path.
 	next.CancelAnnouncedAt = timestamppb.New(now)
-	if err := s.store.Save(ctx, next, ver, []outbox.Record{cancelled, outFact}, ""); err != nil {
+	// A WITHDRAWN ORDER THAT PARTIALLY FILLED IS STILL A MEASURED DECISION (#866),
+	// and it is the one an operator most often wants explained. It is measured on
+	// what actually traded; the quantity that never traded has no cost, and the
+	// terminal status on the record is what tells a reader the remainder was a
+	// withdrawal rather than a miss. An order that traded NOTHING produces no
+	// record at all — a zero shortfall on an execution that did not happen is a
+	// datapoint claiming a perfect fill.
+	announce := s.withAttribution(ctx, next, now, cancelled, outFact)
+	if err := s.store.Save(ctx, next, ver, announce, ""); err != nil {
 		return err
 	}
 	// Flushed where the publishes stood: the operator issuing the cancel is
@@ -3215,7 +3253,14 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 		if ferr != nil {
 			return ferr
 		}
-		if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}, fill.GetFillId()); err != nil {
+		// The attribution rides the adoption too (#866). This is the RECOVERY
+		// path — the process that reaches here already crashed once — and a
+		// decision finished by an adopted fill is exactly as measurable as one
+		// finished on the live path. Leaving it out would make the
+		// execution-quality report silently thinner for the orders that had
+		// trouble, which is the population most worth measuring.
+		announce := s.withAttribution(ctx, next, s.now().UTC(), fact)
+		if err := s.store.Save(ctx, next, ver, announce, fill.GetFillId()); err != nil {
 			// ALREADY FOLDED IS A SKIP (#782), and THIS is the path that needed
 			// it: adoption re-reads venue truth, so a view carrying a fill this
 			// order already contains is the normal shape of a resumed

@@ -377,10 +377,22 @@ func TestTheFillFactHasNoWayOutExceptTheTransaction(t *testing.T) {
 			"are supposed to build the record and pass it to store.Save; if neither does, fills are " +
 			"being persisted with no announcement committed alongside them (#292)")
 	}
-	if !strings.Contains(src, "s.store.Save(ctx, next, ver, []outbox.Record{fact}, fill.GetFillId())") {
-		t.Error("no fold passes its fill FACT to store.Save. The record must ride the SAME " +
-			"transaction as the state it announces — that is the entire property, and a record " +
-			"built and then enqueued separately is two independent writes with extra steps (#292)")
+	// THIS ARM USED TO BE A SOURCE-TEXT WINDOW and it broke the first time the
+	// announcement grew a second record (#866, which enqueues an execution
+	// attribution alongside the fill on the transition that ends a decision).
+	// The property was still true; the LITERAL was not, and a guard that fails on
+	// a correct change is a guard people learn to edit rather than read.
+	//
+	// It is now an AST analysis, which is also strictly stronger. A string match
+	// could be satisfied by a COMMENT — this file's siblings have three recorded
+	// cases of a guard passing by matching its own prose — and it could not see a
+	// fill FACT handed to Save through a local variable at all, which is exactly
+	// the shape that broke it.
+	if folds := foldsPassingTheirFillFactToSave(t, root); folds < 2 {
+		t.Errorf("%d folds pass their fill FACT to store.Save, want at least 2 (work and adopt). "+
+			"The record must ride the SAME transaction as the state it announces — that is the "+
+			"entire property, and a record built and then enqueued separately is two independent "+
+			"writes with extra steps (#292)", folds)
 	}
 
 	// DEFAULT-DENY: no direct publish of a fill, by any route. The budget is how
@@ -510,6 +522,132 @@ func sortedKeysOf(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// foldsPassingTheirFillFactToSave counts the functions in the OMS order package
+// that capture a fill FACT from Emitter.FillFact and hand it to store.Save in
+// the same function — directly in the announce slice, or through a local
+// variable built from it.
+//
+// ONE FUNCTION, ONE HOP. It does not chase the record across function
+// boundaries, which is deliberate: the property being asserted is that the FACT
+// and the state write are in one transaction, and a record that leaves the
+// function is a record whose transaction this analysis cannot see. A fold that
+// does that is not counted, so the floor above fails rather than passing on
+// something unverified.
+//
+// Comments are detached (mode 0), so nothing here can be satisfied by prose.
+func foldsPassingTheirFillFactToSave(t *testing.T, root string) int {
+	t.Helper()
+	dir := filepath.Join(root, filepath.FromSlash(omsOrderPkg))
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatalf("glob %s: %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	// KEYED BY FUNCTION, NOT COUNTED PER CALL SITE. work() writes twice — the
+	// ROUTED transition and then each fill — so counting call sites made the
+	// floor of two satisfiable by work() alone, and removing adopt()'s fold
+	// entirely would have gone unnoticed.
+	folds := map[string]bool{}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", path, perr)
+		}
+		rel := filepath.Base(path)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			// The identifiers this function bound to a FillFact result, and the
+			// identifiers built from one of those.
+			carriers := map[string]bool{}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok || len(as.Rhs) != 1 {
+					return true
+				}
+				if callsSelector(as.Rhs[0], "FillFact") {
+					for _, lhs := range as.Lhs {
+						if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+							carriers[id.Name] = true
+						}
+					}
+					return true
+				}
+				// A local built FROM a carrier — an announce slice, or the result
+				// of a helper the carrier was passed to.
+				if !exprMentions(as.Rhs[0], carriers) {
+					return true
+				}
+				for _, lhs := range as.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+						carriers[id.Name] = true
+					}
+				}
+				return true
+			})
+			if len(carriers) == 0 {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || !callsSelector(call, "Save") || len(call.Args) < 5 {
+					return true
+				}
+				// A FILL FOLD IS A SAVE THAT ALSO CLAIMS A FILL, and requiring
+				// that is what stops the ROUTED transition in the same function
+				// from being mistaken for one: it reuses the identifier `fact`
+				// for its own FACT and passes an empty fill id. Without this the
+				// analysis counted work() twice and adopt() could have been
+				// deleted without the floor noticing.
+				if isEmptyString(call.Args[4]) {
+					return true
+				}
+				if exprMentions(call.Args[3], carriers) {
+					folds[rel+"."+fn.Name.Name] = true
+					return false
+				}
+				return true
+			})
+		}
+	}
+	return len(folds)
+}
+
+// isEmptyString reports whether an expression is the literal "".
+func isEmptyString(e ast.Expr) bool {
+	lit, ok := e.(*ast.BasicLit)
+	return ok && lit.Kind == token.STRING && lit.Value == `""`
+}
+
+// callsSelector reports whether e is a call whose function is a selector with
+// this name — s.emitter.FillFact(...), s.store.Save(...).
+func callsSelector(e ast.Expr, name string) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == name
+}
+
+// exprMentions reports whether any identifier in an expression is in the set.
+func exprMentions(e ast.Expr, names map[string]bool) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && names[id.Name] {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // readGoFiles concatenates every non-test .go file in a directory.
