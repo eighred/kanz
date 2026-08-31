@@ -28,10 +28,22 @@ func versioned(version uint64, effective time.Time) *compliancepb.Mandate {
 	}
 }
 
+// TestMandateRegistry_PointInTimeResolution pins the SELECTION ORDER: the latest
+// version whose effective_at is at or before the query time, and the newest of
+// all for a zero asOf.
+//
+// THE CLOCK IS PINNED BEFORE EITHER EFFECTIVE DATE, and that is what makes this
+// still a resolution test after #884. Put now drops versions no query at or after
+// the retention instant can choose (retainSelectable); with the registry's clock
+// standing before v1, BOTH versions are scheduled-not-yet-in-force, nothing is
+// prunable, and the table below asks exactly what it always asked. Run it against
+// the wall clock instead and it would be asserting that a superseded version is
+// still resident — which is the leak, not the behaviour.
 func TestMandateRegistry_PointInTimeResolution(t *testing.T) {
 	reg := NewMandateRegistry()
 	v1Eff := t0
 	v2Eff := t0.Add(10 * 24 * time.Hour)
+	reg.now = func() time.Time { return v1Eff.Add(-time.Hour) }
 	mustPut(t, reg, versioned(1, v1Eff))
 	mustPut(t, reg, versioned(2, v2Eff))
 

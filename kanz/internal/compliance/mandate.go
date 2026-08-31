@@ -34,18 +34,35 @@ var ErrMandateTenantUnresolved = errors.New("mandate: cannot resolve which tenan
 // ADMITTED UNCONSTRAINED, not refused.
 type mandateKey struct{ tenant, portfolio string }
 
-// MandateRegistry is an in-memory, point-in-time store of mandate versions per
-// (tenant, portfolio) — the COMP-01f resolution core. Each mandate change is
-// appended as a new version with its effective_at; resolution returns the version
-// in effect at a query time (the latest version whose effective_at ≤ asOf). The
-// compliance service loads it by replaying the lifecycle.v1.ConfigChanged FACTs
-// that carry each serialized Mandate, so "which mandate applied when" is
-// reconstructable.
+// MandateRegistry is an in-memory store of the mandate IN FORCE per
+// (tenant, portfolio), plus whatever an operator has SCHEDULED to take force
+// later — the COMP-01f resolution core. Resolution returns the latest version
+// whose effective_at ≤ asOf, so a mandate published today with a date next month
+// governs nothing until then.
+//
+// # It is CURRENT STATE, not a history, and that is the stream's decision
+//
+// The MANDATE stream is compacted to one message per (tenant, portfolio) subject
+// (infra/nats/bootstrap-job.yaml: `--max-msgs-per-subject=1`), and a booting
+// consumer arms from DeliverLastPerSubject. SubjectMandateFor says why in full:
+// "state that a control depends on must be recoverable in one read, not
+// reconstructed from a history nobody keeps" (EXEC-M13).
+//
+// So a replica that has just started holds exactly ONE version per key. Nothing
+// may depend on a superseded version still being resident, because on every
+// rolling restart it is not — and a pre-trade control whose answer depends on
+// how long its pod has been up is worse than one with no history at all. The
+// doc here used to claim "which mandate applied when" was reconstructable from
+// this type; it is not, and #884 is the leak that claim was covering. Which
+// mandate permitted an order is answered by the DECISION RECORD, which stamps
+// ComplianceResult.mandate_version at decision time (engine.go) and carries it
+// into the audit fact — not by asking this registry again afterwards.
 //
 // It satisfies MandateSource, so the pre-trade gate resolves through it directly.
 type MandateRegistry struct {
 	mu sync.RWMutex
-	// byKey holds versions sorted ascending by (effective_at, version).
+	// byKey holds versions sorted ascending by (effective_at, version), pruned by
+	// Put to the ones a lookup can still choose — see retainSelectable.
 	byKey map[mandateKey][]*compliancepb.Mandate
 	// tenantsByPortfolio names every tenant holding a mandate for a portfolio id.
 	// It exists so a lookup that misses can say WHY — "nobody wrote one" and "one
@@ -73,6 +90,11 @@ type MandateRegistry struct {
 	// sayOnce.first: bounded by the estate, never evicted.
 	warned sayOnce
 	logger *slog.Logger
+	// now is the retention instant Put prunes against. It is a field so a test can
+	// place a mandate's effective_at on either side of it deterministically; there
+	// is no option to override it in production, because the only honest answer
+	// there is the wall clock.
+	now func() time.Time
 }
 
 // MandateRegistryOption customizes the registry.
@@ -97,6 +119,7 @@ func NewMandateRegistry(opts ...MandateRegistryOption) *MandateRegistry {
 		tenantsByPortfolio: make(map[string]map[string]struct{}),
 		rejected:           make(map[mandateKey]error),
 		logger:             slog.Default(),
+		now:                time.Now,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -263,14 +286,23 @@ func (r *MandateRegistry) Put(m *compliancepb.Mandate) error {
 	r.tenantsByPortfolio[k.portfolio][k.tenant] = struct{}{}
 
 	vers := r.byKey[k]
+	replaced := false
 	for i, v := range vers {
 		if v.GetVersion() == m.GetVersion() {
 			vers[i] = m // idempotent replace
-			r.byKey[k] = vers
-			return nil
+			replaced = true
+			break
 		}
 	}
-	vers = append(vers, m)
+	if !replaced {
+		vers = append(vers, m)
+	}
+	// THE RE-SORT RUNS ON THE REPLACE PATH TOO, and that is not tidiness. A
+	// republished version carries its own effective_at, and an operator correcting
+	// a mandate can move it — the digest the two-signature flow covers includes
+	// effective_at precisely because it is allowed to change. Writing it in place
+	// and returning, which is what this did, left the slice out of the order both
+	// Mandate's "the last match wins" scan and retainSelectable below depend on.
 	sort.Slice(vers, func(i, j int) bool {
 		ti, tj := vers[i].GetEffectiveAt().AsTime(), vers[j].GetEffectiveAt().AsTime()
 		if !ti.Equal(tj) {
@@ -278,8 +310,68 @@ func (r *MandateRegistry) Put(m *compliancepb.Mandate) error {
 		}
 		return vers[i].GetVersion() < vers[j].GetVersion()
 	})
-	r.byKey[k] = vers
+	r.byKey[k] = retainSelectable(vers, r.now())
 	return nil
+}
+
+// retainSelectable drops the versions no lookup at or after asOf can choose
+// again, and returns what is left. vers must be sorted ascending by
+// (effective_at, version).
+//
+// # The bound, and why it is derived rather than picked
+//
+// Mandate resolves to the LAST version whose effective_at ≤ the query time. For
+// any query at or after asOf, that can only ever be one of:
+//
+//   - the single latest version already in force at asOf, or
+//   - a version dated LATER than asOf, once its date arrives.
+//
+// Everything strictly before the first of those is unreachable — not "old", not
+// "probably fine to drop": no argument to Mandate at or after asOf selects it.
+// So the retained count is 1 + the number of mandate changes an operator has
+// SCHEDULED and not yet reached, which is a set the estate deliberately created
+// and each member of which still has a day on which it governs. There is no
+// number to invent here, and a fixed cap would have had to drop one of those.
+//
+// A REPUBLISH IS WHAT THIS BOUNDS, and it is the only unbounded input: an
+// operator correcting the same portfolio's mandate N times in one uptime left N
+// versions resident for the life of the process (#884), all but the last of them
+// unselectable. After this they collapse to one.
+//
+// # What it is allowed to cost, stated so it is not discovered later
+//
+// A query with asOf BEFORE the retention instant can now miss a version this
+// process once held. Nothing on the estate makes one: the OMS pre-trade gate,
+// the optimization proposal route and the monitor's cash/sweep path all pass
+// their own now(). The one backdated argument is the monitor's position-FACT
+// path, which passes the FACT's as_of — and on a replayed FACT that read already
+// cannot find a superseded version today, because the compacted stream gave the
+// booting replica exactly one. This makes a long-lived replica answer as a
+// freshly started one does, which is the direction that removes a divergence
+// rather than adding one.
+//
+// The result is a fresh slice rather than a reslice: vers[i:] keeps the whole
+// backing array alive, so the dropped versions would remain reachable and the
+// leak would survive with a shorter len.
+func retainSelectable(vers []*compliancepb.Mandate, asOf time.Time) []*compliancepb.Mandate {
+	first := -1
+	for i := len(vers) - 1; i >= 0; i-- {
+		if !vers[i].GetEffectiveAt().AsTime().After(asOf) {
+			first = i
+			break
+		}
+	}
+	if first <= 0 {
+		// first == 0: already minimal. first == -1: EVERY version is future-dated,
+		// so none of them is superseded and all are kept. Dropping here would leave
+		// the portfolio with no mandate at all until the earliest date arrived —
+		// UNGOVERNED, which under OMS_REQUIRE_MANDATE=false is admitted with no
+		// constraints rather than refused.
+		return vers
+	}
+	kept := make([]*compliancepb.Mandate, len(vers)-first)
+	copy(kept, vers[first:])
+	return kept
 }
 
 // TenantsGoverning names every tenant that has published a mandate for

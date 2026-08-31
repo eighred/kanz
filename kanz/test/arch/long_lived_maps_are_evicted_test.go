@@ -76,11 +76,18 @@ import (
 //     condition nobody satisfies, or on a ticker nothing starts. Whether an
 //     evictor RUNS is a behavioural property and belongs in the owning
 //     package's tests.
-//  2. IT INSPECTS FIELDS, SO A COLLECTION INSIDE A VALUE IS INVISIBLE (#884).
+//  2. IT INSPECTS FIELDS, SO A COLLECTION INSIDE A VALUE IS INVISIBLE.
 //     MandateRegistry.byKey is map[key][]*Mandate: the KEY set is bounded by
 //     published mandates and this guard is satisfied, while the SLICE at each
-//     key grows once per mandate version. Widening the walk does not change
-//     that — the field is still one field — and no arm below would notice.
+//     key grew once per mandate version and no arm here saw it (#884). That one
+//     is now bounded IN ITS OWN PACKAGE — Put prunes to the version in force
+//     plus the ones an operator has scheduled, measured by
+//     TestMandateVersionsDoNotAccumulate — and this guard did not go red when it
+//     landed, because the write is r.byKey[k] = pruned, an indexed assignment no
+//     arm below credits. The exemption's claim about the KEY set is unchanged
+//     and still the only thing it vouches for. Teaching the walk to descend into
+//     a map VALUE is #915, and it is its own batch rather than a thing to bolt
+//     on beside a repair.
 //  3. LONG-LIVED IS APPROXIMATED BY "GUARDED BY A sync MUTEX". A long-lived map
 //     reached from one goroutine only, or guarded by a channel, a RWMutex behind
 //     an embedded type, or an atomic, is not in the population at all.
@@ -224,8 +231,11 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"keyed by (tenant, portfolio) and written only by Put, whose only caller is the mandate " +
 			"replay off a COMPACTED config subject. An entry exists because an operator published a " +
 			"mandate for that portfolio; nothing a trading caller sends can create one. The KEY set " +
-			"is what this guard sees — the []*Mandate at each key grows per version, which is #884 " +
-			"and which no arm here can reach.", ""},
+			"is what this guard sees and it is all this entry vouches for. The []*Mandate behind " +
+			"each key is a SEPARATE bound no arm here can reach (limitation 2 above): it grew once " +
+			"per republish until #884, and Put now prunes it to the version in force plus the " +
+			"scheduled ones — proven by the owning package's tests, not by anything in this " +
+			"file.", ""},
 	"internal/compliance: MandateRegistry.tenantsByPortfolio": {boundedByConstruction,
 		"same writer and same source as byKey — one entry per portfolio some tenant has published a " +
 			"mandate for. It exists so a missed lookup can say WHY (#243), and it cannot outgrow the " +

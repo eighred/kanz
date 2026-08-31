@@ -119,8 +119,14 @@ func UnmarshalMandateValue(s string) (*compliancepb.Mandate, error) {
 }
 
 // MandateLoader applies mandate ConfigChanged FACTs into a MandateRegistry — the
-// shared decode-and-store step both services run so a mandate's full version
-// history (and thus point-in-time resolution) is reconstructed from the stream.
+// shared decode-and-store step both services run so both resolve against the same
+// mandate.
+//
+// IT DOES NOT RECONSTRUCT A HISTORY, which is what this said until #884. The
+// stream it reads is compacted to one message per (tenant, portfolio) subject
+// (SubjectMandateFor), so a replay delivers exactly the mandate in force — a
+// consumer that wanted every past version could not get one from here, and the
+// registry no longer keeps versions this fold can never re-supply.
 type MandateLoader struct{ reg *MandateRegistry }
 
 // NewMandateLoader wraps a registry.
