@@ -61,13 +61,28 @@ func (s *Source) Touch(instrument string) (bid, ask *big.Rat, asOf time.Time, ok
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	t, seen := s.touches[instrument]
-	if !seen || t.bid == nil || t.ask == nil {
-		return nil, nil, time.Time{}, false
-	}
-	if s.maxAge > 0 && s.now().Sub(t.asOf) > s.maxAge {
+	if !seen || !s.touchUsableLocked(t) {
 		return nil, nil, time.Time{}, false
 	}
 	return new(big.Rat).Set(t.bid), new(big.Rat).Set(t.ask), t.asOf, true
+}
+
+// touchUsableLocked is the ONE definition of "this fold can answer for that
+// instrument right now". The caller holds at least the read lock.
+//
+// IT IS SHARED WITH TouchStats DELIBERATELY, and that is the whole reason it
+// exists as a named predicate rather than two inline conditions. The gauge below
+// is read by an alert whose entire claim is "Touch would refuse for everything"
+// — so a gauge computed from a SECOND, separately-written expiry test is a
+// coverage number that can disagree with the coverage it reports on. The
+// divergence would not look like a bug: it would look like an execution-quality
+// problem on a healthy spine, or silence on a dead one, and the metric is the
+// only place either could be seen from.
+func (s *Source) touchUsableLocked(t touch) bool {
+	if t.bid == nil || t.ask == nil {
+		return false
+	}
+	return !(s.maxAge > 0 && s.now().Sub(t.asOf) > s.maxAge)
 }
 
 // recordTouchLocked stores one quote's two legs. The caller holds the write lock
@@ -108,12 +123,36 @@ func (s *Source) sweepTouchesLocked(now time.Time) {
 	}
 }
 
-// TouchStats reports how many instruments this fold holds a live quoted width
-// for. It answers the question Stats answers for prices, and it is the coverage
-// signal an execution-quality report needs: a decomposition that keeps coming
-// back TOTAL_ONLY is a price-spine gap, and this is what says how wide it is.
-func (s *Source) TouchStats() (held int) {
+// TouchStats reports how many instruments this fold holds a quoted width for,
+// and how many of those Touch would actually answer for. It is the pair Stats is
+// for prices, and it is the coverage signal an execution-quality report needs: a
+// decomposition that keeps coming back TOTAL_ONLY is a QUOTE-spine gap, and this
+// is what says how wide it is — before an order is measured, rather than
+// inferred afterwards from a cost report (#875).
+//
+// HELD ALONE WOULD HAVE OVERSTATED IT, which is why this returns two numbers and
+// not the one it returned when it had no caller. `len(touches)` counts entries
+// the sweep has not reached yet: sweepTouchesLocked is throttled to sweepInterval
+// and runs only inside a fold, so a spine that stops quoting leaves every width
+// in the map — expired, unusable, and indistinguishable from coverage — until
+// the next Quote arrives to trigger the sweep. On a spine that stops quoting
+// ENTIRELY, which is the exact condition this measures, that next Quote never
+// comes and held stays at its high-water mark forever. A gauge reading full
+// coverage on a dead quote feed is the "nothing configured" / "checked, and
+// fine" failure with a number attached.
+//
+// live is therefore computed through touchUsableLocked — the same predicate
+// Touch reads — rather than from the map's cardinality. held is kept beside it
+// because held − live is the expired-width population, which distinguishes a
+// spine that never quoted these instruments (both zero) from one that quoted and
+// stopped (held high, live zero) exactly as Stats does for marks.
+func (s *Source) TouchStats() (held, live int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.touches)
+	for _, t := range s.touches {
+		if s.touchUsableLocked(t) {
+			live++
+		}
+	}
+	return len(s.touches), live
 }

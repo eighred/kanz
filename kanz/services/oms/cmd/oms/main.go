@@ -270,34 +270,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// is admitting an order at a price we do not have.
 	marks := mark.New(time.Now, cfg.PriceMaxAge)
 
-	// HOW MANY INSTRUMENTS IS THE FOLD ACTUALLY HOLDING? (#96)
-	//
-	// The price spine is a broadcast, so every replica folds every trade and
-	// quote the estate publishes — deliberately, because a consumer group made
-	// admission depend on which pod received the tick (see the subscription
-	// below). The open question was whether that volume needs bounding by an
-	// instrument allowlist, and it could not be answered: nothing reported the
-	// fold's size, so the choice sat between accepting unmeasured growth and
-	// adding config whose omission would refuse live orders.
-	//
-	// GaugeFuncs rather than a counter, because this is a level and not an event,
-	// and they read through mark.Source.Stats so the metric cannot drift from the
-	// map it describes.
-	//
-	// held − live is the tombstone population: instruments seen once whose marks
-	// have expired and whose prices have been released. A held that climbs while
-	// live stays flat is an estate publishing instruments this OMS never trades —
-	// which is the measurement that would justify an allowlist.
-	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "kanz_oms_mark_instruments_held",
-		Help: "Instruments held by the reference-mark fold, including expired tombstones. " +
-			"Growth here is the price spine's instrument cardinality, not this OMS's trading universe.",
-	}, func() float64 { held, _ := marks.Stats(); return float64(held) }))
-	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "kanz_oms_mark_instruments_live",
-		Help: "Instruments whose reference mark is present and within OMS_PRICE_MAX_AGE — the marks the " +
-			"pre-trade gate can actually value an order from. A fall here with held flat is a stalling feed.",
-	}, func() float64 { _, live := marks.Stats(); return float64(live) }))
+	registerMarkCoverageGauges(obs, marks)
 
 	// WHAT EACH PORTFOLIO CAN SPEND, folded from the book of record (#450).
 	//
@@ -1383,6 +1356,88 @@ mandateArmWait:
 // is no unscoped pool on this platform to build such a binary on, and the app
 // role is NOSUPERUSER so it could not bypass RLS to read the other tenants
 // either. See outbox.Relay.
+// registerMarkCoverageGauges exports what the price fold is holding: how many
+// instruments carry a usable MARK (#96), and how many of those also carry a
+// usable quoted WIDTH (#875).
+//
+// # Why the fold is measured at all (#96)
+//
+// The price spine is a broadcast, so every replica folds every trade and quote
+// the estate publishes — deliberately, because a consumer group made admission
+// depend on which pod received the tick (see the price subscription in
+// runConsumers). The open question was whether that volume needs bounding by an
+// instrument allowlist, and it could not be answered: nothing reported the
+// fold's size, so the choice sat between accepting unmeasured growth and adding
+// config whose omission would refuse live orders.
+//
+// # Why the WIDTH is a second, separate pair (#875)
+//
+// The mark pair counts PRICES. The quote pair counts the subset that also has an
+// observable bid and ask, and the two are not the same population: a mark can
+// come from a trade print OR a quote mid, while a width can only come from a
+// quote. An estate whose venue adapters publish only trades — which is what
+// venue-binance and venue-okx do today, both polling a last-price ticker — has
+// full mark coverage and ZERO quote coverage. That is the estate as shipped, and
+// #876 is the producer these gauges measure the absence of.
+//
+// That distinction is the difference between a headline number and an
+// attribution. #866 decomposes a decision's implementation shortfall into
+// spread + impact + timing, and the spread leg is the half-width of the market
+// quoted when each slice was released. With no width the decomposition correctly
+// refuses and publishes quality = TOTAL_ONLY — correct, and invisible: a
+// platform measuring every decision perfectly and one measuring none of them
+// both publish attribution FACTs, and until this pair existed the only way to
+// tell them apart was to read a cost report and infer it.
+//
+// So this is the signal BEFORE an order is measured rather than after, and it is
+// the one that still works on a desk with no order flow: a ratio over terminal
+// decisions is blind at 03:00, and a dead quote feed is exactly as dead then.
+//
+// # held − live, on both pairs
+//
+// For marks it is the tombstone population — instruments seen once whose marks
+// expired and whose prices were released. For widths it is the expired-width
+// population. Either way it separates two causes an operator acts on
+// differently: both zero is a spine that never covered these instruments (a
+// binding question), while held high with live zero is a feed that ran and
+// stopped (an incident).
+//
+// GaugeFuncs rather than counters, because these are levels and not events, and
+// they read through mark.Source's own accessors so a metric cannot drift from
+// the map it describes.
+//
+// IT IS A NAMED BUILDER RATHER THAN FOUR REGISTRATIONS INSIDE runConsumers, for
+// the reason executionAttributionCounter gives below and for one more: inline in
+// a function that takes a bus connection and a database, these four gauges are
+// unreachable by any test, and the composition root is where this platform has
+// twice shipped a crash under a green suite. Out here they are called with a
+// bare registry and a fold, and coverage_gauges_test.go folds real events
+// through them and reads the numbers back.
+func registerMarkCoverageGauges(obs *observability.Provider, marks *mark.Source) {
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_mark_instruments_held",
+		Help: "Instruments held by the reference-mark fold, including expired tombstones. " +
+			"Growth here is the price spine's instrument cardinality, not this OMS's trading universe.",
+	}, func() float64 { held, _ := marks.Stats(); return float64(held) }))
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_mark_instruments_live",
+		Help: "Instruments whose reference mark is present and within OMS_PRICE_MAX_AGE — the marks the " +
+			"pre-trade gate can actually value an order from. A fall here with held flat is a stalling feed.",
+	}, func() float64 { _, live := marks.Stats(); return float64(live) }))
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_quote_instruments_held",
+		Help: "Instruments for which the fold holds a quoted bid/ask width, including widths that " +
+			"have aged out and not yet been swept. Compare with _live: the gap is the expired population.",
+	}, func() float64 { held, _ := marks.TouchStats(); return float64(held) }))
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_quote_instruments_live",
+		Help: "Instruments whose quoted width is present and within OMS_PRICE_MAX_AGE — the ones whose " +
+			"execution shortfall can be decomposed into spread, impact and timing rather than reported " +
+			"as a total only. Zero while kanz_oms_mark_instruments_live is positive means the spine " +
+			"carries prices but no quotes, and every attribution is TOTAL_ONLY.",
+	}, func() float64 { _, live := marks.TouchStats(); return float64(live) }))
+}
+
 // executionAttributionCounter registers the execution-quality COVERAGE signal
 // (#866): one counter, labelled by what the per-decision cost attribution
 // produced for each terminal decision.
@@ -1410,6 +1465,34 @@ func executionAttributionCounter(obs *observability.Provider) *prometheus.Counte
 			"scored as zero would flatter every algorithm comparison built on this.",
 	}, []string{"outcome"})
 	obs.Registry.MustRegister(c)
+
+	// SEEDED AT ZERO FOR EVERY OUTCOME, WHICH IS WHAT MAKES A RULE OVER THIS
+	// COUNTER ABLE TO FIRE (#875).
+	//
+	// A CounterVec exports no series at all for a label value it has never been
+	// incremented with. The condition worth alerting on here is "decisions are
+	// terminating, they are all TOTAL_ONLY, and not one has been decomposed" —
+	// and its second half is a statement about a series that, unseeded, does not
+	// exist. `increase(...{outcome="decomposed"}[1h]) == 0` over an absent series
+	// is an empty vector, so the `and` never matches and the alert is silent in
+	// exactly the state it was written for. That is #62's defect approached from
+	// the other side: there, rules over series with no producer; here, a rule
+	// over a series whose producer has not spoken yet.
+	//
+	// It is also the honest reading for a human. Unseeded, an OMS that has
+	// decomposed nothing all week and an OMS that started four minutes ago look
+	// identical on this counter — both show no series. Seeded, one shows a flat
+	// zero and the other shows a zero that has only just begun, and the
+	// difference is legible.
+	//
+	// The label set comes from order.AttributionOutcomes rather than being
+	// retyped here: eight values written twice is one rename away from a live
+	// outcome with no seeded series, and that gap would only be discovered by the
+	// alert staying quiet. order's attribution_outcomes_test.go reads the const
+	// block itself and fails if the two disagree.
+	for _, outcome := range order.AttributionOutcomes {
+		c.WithLabelValues(outcome)
+	}
 	return c
 }
 

@@ -66,6 +66,45 @@ const (
 	outcomeOther          = "other"
 )
 
+// AttributionOutcomes is every label value countAttribution can emit, in the
+// order the constants above declare them.
+//
+// IT EXISTS SO THE COUNTER CAN BE SEEDED AT ZERO, and seeding is what makes an
+// alert over this counter able to fire at all (#875).
+//
+// A Prometheus CounterVec exports NO series for a label value it has never been
+// incremented with. So on the estate this measurement was built for — where the
+// quote spine covers nothing and every decomposition comes back total_only —
+// `kanz_oms_execution_attributions_total{outcome="decomposed"}` does not exist,
+// and any rule of the form "total_only is rising AND decomposed is not" compares
+// against an EMPTY VECTOR and yields nothing. The alert would be silent in
+// precisely the state it was written to detect: the failure alerts/README.md
+// records ten deleted rules for, arrived at from the other direction.
+//
+// Seeding is also the honest reading of the counter for a human. An OMS that has
+// decomposed nothing and an OMS that has been running for four minutes both show
+// no `decomposed` series unless it is seeded; with it, one shows 0 and the other
+// shows nothing at all, and those are different claims.
+//
+// THE LIST IS EXPORTED FROM HERE RATHER THAN RETYPED AT THE COMPOSITION ROOT.
+// A second hand-written copy in cmd/oms is how a new outcome gets counted but
+// never seeded — the label would be live in the code and absent from the metric
+// until the first time it fired, which is the one moment nobody wants to
+// discover a gap. attribution_outcomes_test.go reads the const block above and
+// fails if this slice omits any of it.
+//
+// Callers must copy before mutating — it is a package-level slice.
+var AttributionOutcomes = []string{
+	outcomeDecomposed,
+	outcomeTotalOnly,
+	outcomeNoArrival,
+	outcomeNoFills,
+	outcomeStoreError,
+	outcomeUnrepresetable,
+	outcomeNotCaptured,
+	outcomeOther,
+}
+
 // WithAttributionCounter supplies the counter that makes this measurement's
 // COVERAGE visible.
 //

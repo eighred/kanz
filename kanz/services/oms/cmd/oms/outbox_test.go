@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -90,6 +91,21 @@ func TestTheDepthGaugeIsReadLiveRatherThanCaptured(t *testing.T) {
 
 // --- helpers --------------------------------------------------------------
 
+// gaugeValue reads one unlabelled process-wide gauge out of a registry.
+//
+// EXACTLY ONE SERIES, NOT THE FIRST OF SEVERAL. Ranging and returning the first
+// metric made the helper answer for a LabelVec by picking whichever series the
+// gather happened to order first — a caller asserting a total would then be
+// reading one arbitrary label's value and passing. Every gauge read through this
+// helper is unlabelled, so the plural case is a mistake rather than a shape to
+// support, and it fails here instead of silently narrowing the assertion.
+//
+// ABSENCE FAILS LOUDLY AND NEVER READS AS ZERO. Alert rules in
+// infra/observability/alerts/ name these metrics, and a rule over a series with
+// no producer yields an empty vector and can never fire — which reads as a
+// healthy platform (alerts/README.md). A helper that returned 0 for "not
+// registered" would let a test assert exactly the value an unregistered metric
+// produces.
 func gaugeValue(t *testing.T, g prometheus.Gatherer, name string) float64 {
 	t.Helper()
 	families, err := g.Gather()
@@ -100,10 +116,16 @@ func gaugeValue(t *testing.T, g prometheus.Gatherer, name string) float64 {
 		if f.GetName() != name {
 			continue
 		}
-		for _, m := range f.GetMetric() {
-			return m.GetGauge().GetValue()
+		if len(f.GetMetric()) != 1 {
+			t.Fatalf("%s has %d series, want exactly 1 — it is an unlabelled process-wide gauge, "+
+				"and reading one of several would narrow the assertion without saying so",
+				name, len(f.GetMetric()))
 		}
+		return f.GetMetric()[0].GetGauge().GetValue()
 	}
-	t.Fatalf("%s is absent from the registry", name)
-	return 0
+	t.Fatalf("metric %q is not registered.\n\n"+
+		"An alert rule may name it (infra/observability/alerts/operational.rules.yaml). A rule over "+
+		"a series with no producer yields an EMPTY VECTOR and can never fire, which reads as a "+
+		"healthy platform rather than a broken one — see alerts/README.md.", name)
+	return math.NaN()
 }

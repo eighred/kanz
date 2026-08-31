@@ -555,6 +555,141 @@ groups:
           description: "One or more venue adapters registered with an exchange account that was never confirmed by the exchange itself — the adapter holds the API credential but has not proved which account it belongs to. Its fills could margin against a different fund's collateral than the ledger books them to, and a mis-declared deployment looks exactly like a correct one. Verify each adapter's account against the exchange, or unbind it."
 
   # ---------------------------------------------------------------------------
+  # EXECUTION-QUALITY MEASUREMENT — can the platform still explain its own costs?
+  # ---------------------------------------------------------------------------
+  #
+  # A SEPARATE GROUP FROM oms_execution_integrity ABOVE, AND THE SPLIT IS THE
+  # SEVERITY ARGUMENT. Everything in that group is the capital path: an order
+  # frozen, a claim timed out, a feed stall that makes the pre-trade gate refuse.
+  # Nothing here stops a trade, refuses an order or misprices a book. What breaks
+  # is the platform's ability to say WHY an execution cost what it did — which is
+  # a warning and a ticket, never a page, and mixing the two would train a
+  # responder to treat the group above as noise.
+  #
+  # BOTH RULES COMPARE AGAINST ZERO, WHICH IS WHY NEITHER CARRIES A PERCENTAGE.
+  # "Alert when more than N% of decompositions fail" is the natural shape and it
+  # was rejected: this file's own header requires every threshold to be derived,
+  # and any N here could only be invented. What IS derivable is the absolute
+  # condition — the fold holds no width at all, or not one decision in an hour
+  # could be decomposed — and that is the shape used, the same stance
+  # ArchiverNotArchivingWithBacklog takes against a throughput of exactly zero.
+  #
+  # THE TWO ARE NOT REDUNDANT, and each covers the other's blind spot:
+  #
+  #   - the GAUGE rule sees a dead quote feed with no order flow at all, which is
+  #     the state at 03:00 and on any desk between sessions;
+  #   - the COUNTER rule sees widths that are held but unusable at the moments
+  #     that actually mattered — stale at release, or crossed — which a gauge
+  #     reading a healthy level cannot show.
+  - name: execution_quality_measurement
+    rules:
+      # THE PRICE SPINE CARRIES PRICES AND NO QUOTES (#875).
+      #
+      # #866 decomposes a decision's implementation shortfall into spread, impact
+      # and timing. The spread leg is the half-width of the market quoted when
+      # each slice was released, and it exists only if the spine carried a Quote
+      # for that instrument: a trade print has no width. Where it is missing the
+      # decomposition refuses correctly and publishes quality = TOTAL_ONLY with
+      # the three legs UNSET — an exact headline number and no attribution.
+      #
+      # That refusal is right and it is not what this alerts on. What it alerts
+      # on is the refusal being ESTATE-WIDE and nobody knowing: a platform
+      # measuring every decision perfectly and one measuring none of them both
+      # publish attribution FACTs, and the only thing separating them is this
+      # ratio. Under it, an execution-algorithm comparison (#869's VWAP and POV
+      # against TWAP) would be run against a benchmark that cannot say why either
+      # one won — the exact condition #866 exists to end, one layer down.
+      #
+      # THE SECOND CLAUSE IS WHAT MAKES IT A DEFECT RATHER THAN A COLD START. A
+      # freshly started pod holds neither marks nor widths and must stay silent;
+      # mark_instruments_live > 0 says the price spine IS reaching this replica
+      # and delivering usable prices, so a width of zero beside it is a statement
+      # about the FEED's content, not about warm-up. Same shape and same reason as
+      # OMSPriceFeedStalled's held > 0 clause above.
+      #
+      # by (namespace, pod): the fold is per-process, so a replica subscribed to
+      # the wrong subject set must not be masked by a healthy sibling. Both sides
+      # aggregate to the SAME label set deliberately — an `and` between two bare
+      # gauges never matches, because __name__ differs.
+      #
+      # for: 15m IS DERIVED FROM THE WIDTH'S OWN LIFETIME. A width is usable for
+      # OMS_PRICE_MAX_AGE (30s by default) and is swept at most sweepInterval
+      # (30s) later, so one minute bounds how long a live quote feed can leave
+      # this at zero. 15m is fifteen consecutive such windows: longer than a
+      # rolling restart, a market-data rollout or a vendor reconnect, and short
+      # enough to be true before the first order of a session is measured.
+      #
+      # WARNING, NOT CRITICAL, AND IT MAY BE TRUE ON ARRIVAL. Both deployed venue
+      # adapters poll a last-price ticker and publish market.crypto.trade only, so
+      # on a crypto-only estate this fires as soon as it is deployed — correctly,
+      # because that estate genuinely cannot decompose a single execution. It is
+      # not the `absent()` trap alerts/README.md records: that fired forever over
+      # a series with no producer and could never be fixed, while this names a
+      # real, owned condition that clears the moment any feed publishes a
+      # market.*.quote for a traded instrument.
+      - alert: OMSQuoteCoverageAbsent
+        expr: |
+          (
+            max by (namespace, pod) (kanz_oms_quote_instruments_live) == 0
+            and
+            max by (namespace, pod) (kanz_oms_mark_instruments_live) > 0
+          )
+        for: 15m
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "OMS {{ $labels.pod }} has prices for every instrument and a quoted width for none"
+          description: "This replica's mark fold holds live prices but not one usable bid/ask, so the market's width was never observable. Every execution-cost attribution it publishes will be quality = TOTAL_ONLY: an exact implementation shortfall with the spread, impact and timing legs UNSET, which is correct and is also the whole of what the execution-quality programme can say. Any algorithm comparison built on it can rank outcomes and cannot explain them. This is a market-data question, not an OMS one — check which connectors publish market.*.quote for the instruments this desk trades. On the estate as shipped nothing does: both venue adapters publish trade prints only and the market-data feed is disabled, which is issue #876."
+
+      # NOT ONE DECISION IN AN HOUR COULD BE DECOMPOSED (#875).
+      #
+      # The gauge above is a level and this is the outcome, and they fail
+      # independently. A fold can hold plenty of live widths while every width
+      # that MATTERED — the one at each slice's release — was stale, crossed, or
+      # for a different instrument than the one traded. The gauge reads healthy
+      # throughout; only the attribution's own verdict shows it.
+      #
+      # decomposed AND total_only, NOT the other outcomes. no_arrival_mark and
+      # no_fills mean there was nothing to measure — a price-spine gap or an order
+      # that never traded — and the counter's Help says so. Those have a different
+      # owner, so folding them in here would make the rule fire for a reason its
+      # description does not name.
+      #
+      # THIS RULE ONLY WORKS BECAUSE THE COUNTER IS SEEDED AT ZERO, and that is a
+      # property of cmd/oms rather than of this file. A CounterVec exports NO
+      # series for a label value never incremented, so on the estate this was
+      # written for — where nothing is ever decomposed — the second clause would
+      # compare against an EMPTY VECTOR, the `and` would never match, and the rule
+      # would be silent in exactly the state it detects. That is #62's defect
+      # reached from the other direction. executionAttributionCounter seeds every
+      # order.AttributionOutcomes value, cmd/oms's TestEveryAttributionOutcomeIsSeededAtZero
+      # holds it, and the harness beside this file executes the silent case so the
+      # dependency is not merely written down.
+      #
+      # sum() WITHOUT by: the question is estate-level. Decisions are spread
+      # across replicas, so one pod that decomposed nothing is not a finding while
+      # another is working — and bare sum() on both sides leaves both with the
+      # empty label set, which is what lets the `and` match at all.
+      #
+      # THRESHOLDS ARE ZERO ON BOTH SIDES. increase(total_only[1h]) > 0 says
+      # decisions ARE terminating and being measured, so the estate is not merely
+      # idle; increase(decomposed[1h]) == 0 says not one of them yielded a
+      # spread/impact/timing split. for: 30m on top means the condition held
+      # across at least half an hour of evaluations, so a single quiet hour after
+      # a restart cannot produce it.
+      - alert: OMSExecutionAttributionUndecomposable
+        expr: |
+          (
+            sum(increase(kanz_oms_execution_attributions_total{outcome="total_only"}[1h])) > 0
+            and
+            sum(increase(kanz_oms_execution_attributions_total{outcome="decomposed"}[1h])) == 0
+          )
+        for: 30m
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "Every execution attribution in the last hour was a total, and none was decomposed"
+          description: "Terminal decisions ARE being measured — the shortfall against arrival is exact for each — but not one in the last hour could be split into spread, impact and timing, because the market's width was unobservable for at least one slice that traded. The platform can say what its executions cost and cannot say why any of them cost it. Check kanz_oms_quote_instruments_live first: zero means the spine carries no quotes at all (see OMSQuoteCoverageAbsent). Non-zero means widths exist but are stale or crossed at the moments slices are released, which is a feed-latency or feed-quality problem rather than a coverage one."
+
+  # ---------------------------------------------------------------------------
   # COMPLIANCE — how much of the book is trading unchecked
   # ---------------------------------------------------------------------------
   - name: compliance_coverage
