@@ -65,10 +65,13 @@ type MandateRegistry struct {
 	armed   bool
 	onceOn  sync.Once
 
-	// warnMu guards warned only; it is separate from mu so the resolution path
-	// never takes a write lock to say something.
-	warnMu sync.Mutex
-	warned map[string]bool
+	// warned is the registry's say-it-once ledger. It carries its own lock, so
+	// the resolution path still never takes mu's write lock to say something —
+	// the property the separate warnMu used to provide, now a property of the
+	// shared type. Both of its keys are (tenant, portfolio) and only ever formed
+	// for a portfolio that ALREADY has a published mandate, so they take
+	// sayOnce.first: bounded by the estate, never evicted.
+	warned sayOnce
 	logger *slog.Logger
 }
 
@@ -93,7 +96,6 @@ func NewMandateRegistry(opts ...MandateRegistryOption) *MandateRegistry {
 		byKey:              make(map[mandateKey][]*compliancepb.Mandate),
 		tenantsByPortfolio: make(map[string]map[string]struct{}),
 		rejected:           make(map[mandateKey]error),
-		warned:             make(map[string]bool),
 		logger:             slog.Default(),
 	}
 	for _, opt := range opts {
@@ -404,15 +406,7 @@ func (r *MandateRegistry) Mandate(_ context.Context, tenantID, portfolioID strin
 // warnOnce reports whether this is the first time key has been named. The
 // resolution path runs on every order and every position tick; a diagnosis
 // repeated per event is a log nobody reads.
-func (r *MandateRegistry) warnOnce(key string) bool {
-	r.warnMu.Lock()
-	defer r.warnMu.Unlock()
-	if r.warned[key] {
-		return false
-	}
-	r.warned[key] = true
-	return true
-}
+func (r *MandateRegistry) warnOnce(key string) bool { return r.warned.first(key) }
 
 // warnMisfiled names the one case whose answer #243 changes: the portfolio IS
 // under mandate, just not for the tenant asking. Without this the change reads
