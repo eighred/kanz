@@ -268,20 +268,45 @@ func buildPreTradeGate(cfg config.Config, deps preTradeDeps, producer compliance
 			}
 			unaccounted.WithLabelValues("incomplete").Inc()
 		}),
-		comp.WithUnpricedObserver(func(portfolioID, instrumentID string) {
+		comp.WithUnpricedObserver(func(portfolioID, instrumentID string, firstForPair bool) {
 			// Two very different incidents arrive at the same refusal, and an
 			// operator needs to tell them apart: a mark we have NEVER seen means a
 			// cold pod, a thin instrument, or a subscription delivering nothing;
 			// a mark we HAVE seen but which expired means the feed was working and
 			// stalled. One is a warm-up, the other is an outage.
+			//
+			// THE COUNTER IS UNCONDITIONAL AND THE LOG IS NOT (#883). Both halves
+			// of that sentence are load-bearing:
+			//
+			//   - the counter is a RATE. How fast orders are being refused is the
+			//     number an operator watches during a price-feed outage, and it is
+			//     only a rate if every refusal increments it. Moving either Inc()
+			//     below the firstForPair check would silently turn this series
+			//     into a count of distinct instruments first seen unpriced.
+			//   - the log is a CONDITION. An operator wants to be told the
+			//     condition CHANGED, not that it is still true; the rate is
+			//     already on the counter, and a per-order line only buries the
+			//     transition it should be announcing. This warned on every order
+			//     while internal/compliance's gate warned once per pair, so one
+			//     event carried two dedup policies. firstForPair is the gate's own
+			//     verdict, so both lines now appear together, once per
+			//     (tenant, portfolio, instrument), and the diagnosis below —
+			//     warm-up versus outage, the distinction #96's tombstone design
+			//     exists to preserve — is what the gate's generic line cannot say.
 			if _, asOf, seen := deps.Marks.Lookup(instrumentID); seen {
 				unpriced.WithLabelValues("expired").Inc()
+				if !firstForPair {
+					return
+				}
 				logger.Warn("order refused: the reference mark is STALE — the price feed has stopped reporting for this instrument",
 					"portfolio", portfolioID, "instrument", instrumentID,
 					"mark_as_of", asOf, "max_age", cfg.PriceMaxAge)
 				return
 			}
 			unpriced.WithLabelValues("never_seen").Inc()
+			if !firstForPair {
+				return
+			}
 			logger.Warn("order refused: NO reference mark has ever been seen for this instrument — a cold pod warming up, an instrument nothing quotes, or a price subscription delivering nothing",
 				"portfolio", portfolioID, "instrument", instrumentID, "subjects", cfg.PriceSubjects)
 		}),

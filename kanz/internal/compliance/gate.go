@@ -52,7 +52,7 @@ type PreTradeGate struct {
 	requireMandate bool
 	onUnreadable   func(tenantID, portfolioID string)
 	onUngoverned   func(tenantID, portfolioID string)
-	onUnpriced     func(portfolioID, instrumentID string)
+	onUnpriced     func(portfolioID, instrumentID string, firstForPair bool)
 	onUnaccounted  func(tenantID, portfolioID, omits string)
 
 	// warned holds (tenant, portfolio[, instrument]) keys already named in a WARN
@@ -104,7 +104,25 @@ func WithUngovernedObserver(fn func(tenantID, portfolioID string)) PreTradeOptio
 // usable price — the composition root wires it to a counter (COMP-M1), the same
 // way WithUngovernedObserver makes the ungoverned gap a number on a dashboard
 // instead of a thing nobody has asked about.
-func WithUnpricedObserver(fn func(portfolioID, instrumentID string)) PreTradeOption {
+//
+// firstForPair CARRIES THIS GATE'S DEDUP VERDICT OUT TO THE CALLER, and it is
+// here because the OMS observer wanted to LOG as well as count (#883). It is
+// true exactly when the gate is also warning about this refusal — the first
+// sighting of (tenant, portfolio, instrument) in the say-once ledger — and false
+// on every repeat.
+//
+// THE OBSERVER STILL FIRES ON EVERY ORDER. The bool gates what a caller CHOOSES
+// to say, never whether it is told: a counter behind this seam is a RATE, and a
+// rate incremented only on first sightings is a count of distinct instruments
+// wearing a rate's name.
+//
+// IT IS PASSED RATHER THAN RECOMPUTED because a second ledger in the caller
+// would be a second implementation of the thing #814 had just finished
+// deduplicating — and it would be a WORSE one: this ledger's key is
+// (tenant, portfolio, instrument) while the observer is handed no tenant at all,
+// so a caller-side ledger would key on (portfolio, instrument) and let one
+// tenant's first warning silence another's. That is #243, one seam out.
+func WithUnpricedObserver(fn func(portfolioID, instrumentID string, firstForPair bool)) PreTradeOption {
 	return func(g *PreTradeGate) { g.onUnpriced = fn }
 }
 
@@ -457,11 +475,21 @@ func (g *PreTradeGate) noteUnaccounted(tenantID, portfolioID string, cc *CashCom
 // once per (portfolio, instrument) pair — loud enough to be seen, quiet enough
 // not to drown the log for an instrument that trades all day with no reference
 // price wired.
+//
+// THE LEDGER IS CONSULTED ONCE AND THE VERDICT IS SHARED, which is what makes
+// this gate and its observer hold ONE dedup policy rather than two (#883). The
+// observer used to be called before the ledger was touched and could therefore
+// only guess; it now receives the same bool this method's own WARN is gated on,
+// so a caller that logs says its line on exactly the orders this one does.
 func (g *PreTradeGate) noteUnpriced(tenantID, portfolioID, instrumentID string) {
+	// Ordered deliberately: firstTimeAbout MUTATES the ledger, so it must be
+	// called exactly once per refusal and its answer handed on. Calling it again
+	// below to re-ask would return false and silence this gate's own warning.
+	first := g.firstTimeAbout("unpriced:"+tenantID+":"+portfolioID, instrumentID)
 	if g.onUnpriced != nil {
-		g.onUnpriced(portfolioID, instrumentID)
+		g.onUnpriced(portfolioID, instrumentID, first)
 	}
-	if !g.firstTimeAbout("unpriced:"+tenantID+":"+portfolioID, instrumentID) {
+	if !first {
 		return
 	}
 	g.logger.Warn("REFUSING order: no usable price to evaluate compliance against",
