@@ -27,6 +27,11 @@ type (
 	// clOrdId) with Kanz order context. Now backed by the ADAPTER'S OWN order view,
 	// not the OMS store — the OMS is in another process.
 	OrderLookup = execution.OrderLookup
+	// OrderTracker is that same view's WRITE half alongside it (#904): the
+	// user-data ingester advances an order here when the venue reports it
+	// filled, so a filled order goes terminal in the adapter's own view instead
+	// of being re-queried and re-healed on every reconciliation pass forever.
+	OrderTracker = execution.OrderTracker
 	// ExpectedOrders is what this adapter believes is open at the venue. Also its
 	// own view now.
 	ExpectedOrders = execution.ExpectedOrders

@@ -109,7 +109,7 @@ func TestUserDataFillEmitsAValidEnvelope(t *testing.T) {
 
 	ing := newUserDataIngester(UserDataConfig{
 		Stream: &fakeStream{frames: [][]byte{[]byte(report)}},
-		Lookup: fakeLookup{"o1": kanzOrder("o1")},
+		Orders: newFakeOrders("o1"),
 		Pub:    prod, Venue: "BINANCE", Tenant: "fund-alpha",
 	})
 	_ = ing.Run(context.Background()) // returns io.EOF at end of frames

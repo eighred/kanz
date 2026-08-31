@@ -28,6 +28,45 @@ type OrderLookup interface {
 	Lookup(orderID string) (*orderpb.OrderState, bool)
 }
 
+// OrderTracker is the adapter's OWN order view, read and write.
+//
+// THE READ HALF ALONE IS WHY A FILLED ORDER LEAKED (#904). OrderLookup had no
+// write half, so the ONLY thing that ever advanced an order to a terminal status
+// was the venue-confirmed-cancel branch of the gRPC CancelOrder handler. The
+// user-data ingester receives the fill, computes the healed OrderState, and
+// publishes it as a FACT — and then had nowhere to put it. An order that FILLED
+// therefore stayed at the status the OMS handed Execute for the life of the
+// process, with three consequences on the execution path: ExpectedOrders.
+// OpenOrders returned it forever, so the reconciler spent REST weight re-querying
+// orders that finished last week; healedState found permanent drift and
+// re-emitted an order.state_healed FACT for each of them on EVERY pass; and
+// #891's terminal-order eviction could never reach them, because eviction is
+// keyed on going terminal and they never did.
+//
+// IT IS ONE INTERFACE AND NOT TWO FIELDS, deliberately. A separate, nil-able
+// recorder seam would let a composition root wire the reader and forget the
+// writer, and the result would be exactly the defect above with nothing to say
+// so — CLAUDE.md's "nothing configured" and "checked, and fine" must never look
+// the same. Widening the type a venue adapter already supplies makes a
+// write-less order view a COMPILE error instead.
+type OrderTracker interface {
+	OrderLookup
+	// Progressed records the venue's own report of an order's progress onto this
+	// adapter's view: the state the caller has ALREADY published as a FACT, so
+	// the view agrees with what the adapter itself told the platform.
+	//
+	// It does not return an error, for the reason Lookup and OpenOrders do not:
+	// it is called from inside a websocket read loop that must not acquire an
+	// error path. An implementation reports its own failures (orderview.NewSeam
+	// takes the callback), and a failure leaves the view stale — never wrong.
+	//
+	// IT IS NOT A SECOND SOURCE OF TRUTH. The OMS owns an order's status; this
+	// is the adapter's record of what it was asked to work and what the exchange
+	// has since said about it. See orderview.Progress for what it may and may
+	// not overwrite.
+	Progressed(st *orderpb.OrderState)
+}
+
 // ExpectedOrders is Kanz's internal view of the orders it believes are open —
 // bound to the OMS order store. The reconciler queries each on the exchange and
 // heals any that have drifted.
@@ -155,9 +194,14 @@ const (
 // connector's background workers need. Shared by both connectors' Start.
 type WorkerDeps struct {
 	Publisher Publisher
-	Lookup    OrderLookup
-	Expected  ExpectedOrders
-	Balances  ExpectedBalances
+	// Orders is the adapter's own order view — the read half the user-data
+	// ingester enriches an execution report from, AND the write half that
+	// advances the order when the venue reports it filled (#904). It was
+	// `Lookup OrderLookup` and read-only, which is why a filled order was never
+	// marked terminal here; see execution.OrderTracker.
+	Orders   OrderTracker
+	Expected ExpectedOrders
+	Balances ExpectedBalances
 	// Margin is the venue's own margin state for this adapter's account (#408).
 	// nil ⇒ this adapter publishes no margin observations, which venuemargin
 	// .Announce makes loud rather than silent. It is a FIELD ON WorkerDeps

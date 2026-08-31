@@ -60,7 +60,7 @@ func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) {
 		}
 	}
 	// User-data stream ingester with resilient reconnect.
-	if deps.Lookup != nil {
+	if deps.Orders != nil {
 		go c.runUserData(ctx, deps)
 	}
 	// MARGIN IS READ FROM THE EXCHANGE, NOT DERIVED FROM OUR BOOK (#408,
@@ -101,7 +101,7 @@ func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) {
 
 func (c *BinanceConnector) runUserData(ctx context.Context, deps WorkerDeps) {
 	ing := newUserDataIngester(UserDataConfig{
-		Lookup: deps.Lookup, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
+		Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
 	})
 	backoff := time.Second
 	for ctx.Err() == nil {

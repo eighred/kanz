@@ -49,7 +49,10 @@ type executionReport struct {
 // BinanceVenue synchronous path, so downstream folds dedup the two idempotently.
 type UserDataIngester struct {
 	stream UserDataStream
-	lookup OrderLookup
+	// orders is the adapter's own order view, READ AND WRITTEN (#904). Read to
+	// enrich the report; written so the fill this ingester just published as a
+	// FACT is also the fill the adapter believes in — see handle.
+	orders OrderTracker
 	pub    Publisher
 	venue  string
 	tenant string
@@ -58,7 +61,7 @@ type UserDataIngester struct {
 // UserDataConfig configures the ingester.
 type UserDataConfig struct {
 	Stream UserDataStream
-	Lookup OrderLookup
+	Orders OrderTracker
 	Pub    Publisher
 	Venue  string
 	Tenant string
@@ -68,7 +71,7 @@ func newUserDataIngester(cfg UserDataConfig) *UserDataIngester {
 	if cfg.Venue == "" {
 		cfg.Venue = "BINANCE"
 	}
-	return &UserDataIngester{stream: cfg.Stream, lookup: cfg.Lookup, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant}
+	return &UserDataIngester{stream: cfg.Stream, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant}
 }
 
 // Run reads the stream until ctx is cancelled or the stream errors. A decode of
@@ -93,7 +96,7 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	if json.Unmarshal(raw, &rep) != nil || rep.Event != "executionReport" || rep.ExecType != "TRADE" {
 		return nil // not a fill — ignore
 	}
-	st, ok := i.lookup.Lookup(rep.ClientOrderID)
+	st, ok := i.orders.Lookup(rep.ClientOrderID)
 	if !ok {
 		return nil // unknown order (not ours / not yet admitted) — skip
 	}
@@ -137,13 +140,30 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		subject = fillfact.SubjectFilled
 		payload = &orderpb.OrderFilled{OrderId: rep.ClientOrderID, Fill: fill, State: healed}
 	}
-	return i.pub.Publish(ctx, bus.Event{
+	if err := i.pub.Publish(ctx, bus.Event{
 		Subject: subject, EventType: subject,
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "order",
 		EventTime: time.Now().UTC(), PartitionKey: rep.ClientOrderID, TenantID: i.tenant,
 		CausationID: rep.ClientOrderID,
 		Payload:     payload,
-	})
+	}); err != nil {
+		return err
+	}
+	// AND NOW THIS ADAPTER'S OWN VIEW AGREES WITH THE FACT IT JUST PUBLISHED (#904).
+	//
+	// healed carries binanceStatusToProto(rep.OrderStatus) — Binance's OWN X
+	// field, so FILLED and PARTIALLY_FILLED are the venue's verdict and not an
+	// inference from quantities. A PARTIAL is recorded as PARTIALLY_FILLED, which
+	// orderview.Terminal does NOT treat as terminal, so the order stays in Open
+	// and the healing watchdog keeps reconciling it. Marking a partially filled
+	// order terminal would hide a LIVE order from the watchdog, which is a far
+	// worse failure than the unbounded view this closes.
+	//
+	// AFTER the publish, not before: the view must never claim an order finished
+	// on the strength of a FACT that did not reach the bus. A publish error nacks
+	// the report and the reconciler re-reads venue truth.
+	i.orders.Progressed(healed)
+	return nil
 }
 
 // applyFillToState folds the report's cumulative fill into a fresh OrderState
