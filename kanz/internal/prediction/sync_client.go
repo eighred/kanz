@@ -74,7 +74,35 @@ type SyncClientOptions struct {
 	// SPIFFE identity. Lives here rather than as a separate constructor
 	// so the resilience options and the transport choice compose.
 	Credentials credentials.TransportCredentials
+
+	// MaxCachedSubjects caps how many subjects the degraded-fallback cache
+	// holds. It is REQUIRED and has no default: a non-positive value is refused
+	// at construction rather than filled in.
+	//
+	// WHY THIS ONE IS REFUSED WHERE THE THREE ABOVE FALL BACK (#895). Timeout,
+	// BreakerThreshold and BreakerCooldown describe how THIS client behaves, and
+	// this package knows enough to pick them. The subject population does not
+	// belong to this package at all: Predict checks SubjectID only for
+	// emptiness, and "it is a portfolio id" is a convention that lives at the
+	// caller (services/risk-engine/internal/app/features.go), not a property of
+	// the type. A default here would be this package inventing a bound on
+	// somebody else's key space and then reading its own invention back as a
+	// fact — which is the shape the cache was enumerated as an unbounded leak
+	// for. Making the caller state it IS the repair.
+	//
+	// SIZE IT AS THE SUBJECTS EXPECTED TO BE LIVE AT ONCE, with headroom. It is
+	// not a staleness policy and it is not a TTL: the cache evicts
+	// least-recently-USED, every fallback read touches the entry it serves, and
+	// nothing is evicted while the breaker is open. See PredictionCache.
+	MaxCachedSubjects int
 }
+
+// ErrMaxCachedSubjectsRequired is returned by both constructors when
+// SyncClientOptions.MaxCachedSubjects is not positive. It is a distinct error
+// rather than a generic one so a composition root can say which knob it missed.
+var ErrMaxCachedSubjectsRequired = errors.New(
+	"prediction: SyncClientOptions.MaxCachedSubjects must be > 0 — the degraded-fallback cache is " +
+		"keyed by a SubjectID this package does not constrain, so its bound is the caller's to state")
 
 // DefaultSyncClientOptions returns conservative defaults. Tune per deployment.
 //
@@ -97,6 +125,10 @@ type SyncClientOptions struct {
 // it needs the measurement first: a timeout tuned against an imagined target
 // trips on real traffic and opens the breaker, which reads as the model being
 // down.
+//
+// IT DELIBERATELY LEAVES MaxCachedSubjects AT ZERO, so a caller that takes these
+// defaults wholesale still cannot construct a client without stating its own
+// subject population. That is not an oversight to be tidied up: see the field.
 func DefaultSyncClientOptions() SyncClientOptions {
 	return SyncClientOptions{
 		Timeout:          200 * time.Millisecond,
@@ -126,21 +158,31 @@ func NewSyncClient(target string, opts SyncClientOptions) (*SyncClient, error) {
 	if creds == nil {
 		creds = insecure.NewCredentials()
 	}
+	// BEFORE the dial: a client that cannot be constructed must not leave a
+	// connection behind for the caller to not-Close.
+	if opts.MaxCachedSubjects <= 0 {
+		return nil, ErrMaxCachedSubjectsRequired
+	}
 	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, err
 	}
-	return newSyncClientFrom(conn, inferencepb.NewInferenceServiceClient(conn), opts), nil
+	return newSyncClientFrom(conn, inferencepb.NewInferenceServiceClient(conn), opts)
 }
 
 // NewSyncClientWithStub constructs a SyncClient with an explicit
 // stub — used by tests to swap in a fake that doesn't need a
 // running gRPC server. conn is nil so Close is a no-op.
-func NewSyncClientWithStub(stub inferencepb.InferenceServiceClient, opts SyncClientOptions) *SyncClient {
+//
+// It returns an error for the same reasons NewSyncClient does, so the test seam
+// cannot construct a client the production constructor would refuse — a seam
+// that admits a configuration the real path rejects certifies a client that
+// cannot exist.
+func NewSyncClientWithStub(stub inferencepb.InferenceServiceClient, opts SyncClientOptions) (*SyncClient, error) {
 	return newSyncClientFrom(nil, stub, opts)
 }
 
-func newSyncClientFrom(conn *grpc.ClientConn, stub inferencepb.InferenceServiceClient, opts SyncClientOptions) *SyncClient {
+func newSyncClientFrom(conn *grpc.ClientConn, stub inferencepb.InferenceServiceClient, opts SyncClientOptions) (*SyncClient, error) {
 	if opts.Timeout <= 0 {
 		opts.Timeout = DefaultSyncClientOptions().Timeout
 	}
@@ -150,13 +192,23 @@ func newSyncClientFrom(conn *grpc.ClientConn, stub inferencepb.InferenceServiceC
 	if opts.BreakerCooldown <= 0 {
 		opts.BreakerCooldown = DefaultSyncClientOptions().BreakerCooldown
 	}
+	// THE ONE OPTION WITH NO FALLBACK, checked here so both constructors get the
+	// same answer from the same line — NewSyncClient repeats it only to refuse
+	// before it dials.
+	if opts.MaxCachedSubjects <= 0 {
+		return nil, ErrMaxCachedSubjectsRequired
+	}
+	cache, err := NewPredictionCache(opts.MaxCachedSubjects)
+	if err != nil {
+		return nil, err
+	}
 	return &SyncClient{
 		conn:    conn,
 		stub:    stub,
-		cache:   NewPredictionCache(),
+		cache:   cache,
 		breaker: NewCircuitBreaker(opts.BreakerThreshold, opts.BreakerCooldown),
 		timeout: opts.Timeout,
-	}
+	}, nil
 }
 
 // Close shuts down the underlying gRPC connection. No-op for
@@ -242,33 +294,126 @@ func (c *SyncClient) fallback(fv FeatureVector, reason string) *inferencepb.Pred
 // prediction. Mirrors PRED-04's Python LastKnownCache in shape;
 // each process has its own (cross-process sharing is deliberately
 // out of scope — replay determinism doesn't require it).
+//
+// # The bound, and why it is a cardinality rather than a TTL (#895)
+//
+// The map used to be documented as "overwrite-on-next-store eviction; no TTL",
+// which is not eviction at all: an entry per distinct SubjectID, forever, keyed
+// by a string Predict checks only for emptiness.
+//
+// A TTL WOULD HAVE BEEN THE WRONG SHAPE, not merely an invented number. This
+// cache IS the degraded fallback — a cached prediction is what a caller gets
+// while the breaker is open — so an age-based rule expires entries fastest
+// during exactly the outage they exist for. It would also be this type taking
+// over a staleness judgment the contract puts elsewhere: the envelope's own
+// as_of is the staleness source of truth and PRED-02 §1 has the CALLER branch on
+// it, which is why fallback stamps DEGRADED and a reason rather than hiding a
+// stale value.
+//
+// So the bound is a cap on the number of subjects, and the eviction order is
+// LEAST-RECENTLY-USED where "used" includes a fallback READ. Two consequences
+// carry the safety argument, and both are pinned by tests:
+//
+//   - NOTHING IS EVICTED DURING AN OUTAGE. The map is only written by Store, and
+//     Predict stores only a NORMAL response — so growth, and therefore eviction,
+//     happens only on the healthy path. An open breaker cannot cost a subject
+//     its cached answer.
+//   - A SUBJECT STILL BEING ASKED ABOUT IS NEVER THE VICTIM. Lookup touches the
+//     entry it serves, so the entries at the cold end are the subjects nobody has
+//     asked about — the ones whose eviction the degraded path cannot notice.
+//
+// The residual, stated rather than glossed: a subject that goes quiet for longer
+// than max other subjects take to cycle through, and is then asked about while
+// the service is down, gets DEGRADED with no_cached_prediction instead of a
+// stale value. That is a documented outcome of this contract (PRED-02 §2.1), not
+// a new failure mode, and it is the one an under-sized cap trades for.
 type PredictionCache struct {
-	mu      sync.RWMutex
-	entries map[string]*inferencepb.PredictionEnvelope
+	// mu is a full Mutex, not an RWMutex: Lookup WRITES now, because a read is
+	// what marks a subject live. The alternative — recency updated only on Store
+	// — would rank subjects by how recently the model scored them rather than by
+	// how recently anyone needed them, which is the opposite of the question.
+	mu      sync.Mutex
+	entries map[string]cacheEntry
+	// max is the subject cardinality this cache admits. Always > 0: the
+	// constructor refuses anything else.
+	max int
+	// seq is a monotonic use counter. RECENCY IS AN ORDER, NOT A TIME, so a
+	// counter answers it exactly and needs no clock, no clock injection, and no
+	// tie-break between two entries touched in the same nanosecond.
+	seq uint64
 }
 
-func NewPredictionCache() *PredictionCache {
-	return &PredictionCache{entries: make(map[string]*inferencepb.PredictionEnvelope)}
+// cacheEntry is one subject's last NORMAL prediction plus the seq at which it
+// was last stored or served.
+type cacheEntry struct {
+	pred    *inferencepb.PredictionEnvelope
+	usedSeq uint64
 }
 
-// Store records the latest NORMAL prediction for the subject.
-// Overwrite-on-next-store eviction; no TTL (cached envelope's
-// as_of is the staleness source of truth).
+// NewPredictionCache returns a cache admitting at most max subjects. max must be
+// positive; see SyncClientOptions.MaxCachedSubjects for why there is no default
+// to fall back to.
+func NewPredictionCache(max int) (*PredictionCache, error) {
+	if max <= 0 {
+		return nil, ErrMaxCachedSubjectsRequired
+	}
+	return &PredictionCache{entries: make(map[string]cacheEntry, max), max: max}, nil
+}
+
+// Store records the latest NORMAL prediction for the subject, and drops the
+// least recently used subject if that puts the cache over its cap.
 func (c *PredictionCache) Store(subjectID string, pred *inferencepb.PredictionEnvelope) {
 	if pred == nil || subjectID == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[subjectID] = pred
+	c.seq++
+	c.entries[subjectID] = cacheEntry{pred: pred, usedSeq: c.seq}
+	c.evictLRU()
 }
 
-// Lookup returns the cached prediction and true, or nil and false.
+// evictLRU drops least-recently-used entries until the cache is within max.
+// Caller holds c.mu.
+//
+// ON THE WRITE PATH AND NOWHERE ELSE, for the reason orderview.Memory sweeps
+// there: this map grows in exactly one place, so that is where the cap belongs,
+// and a cache nobody stores into does not need a sweeper. It is also what makes
+// "an open breaker evicts nothing" true by construction rather than by care —
+// Predict stores only NORMAL responses, so a client that cannot reach the
+// inference service never reaches this function at all.
+//
+// The scan is O(len) and runs only on a store that overflows the cap, so it
+// costs one pass per admitted new subject once the cache is full. A heap would
+// buy nothing at these sizes and would need its own invariant kept in step.
+func (c *PredictionCache) evictLRU() {
+	for len(c.entries) > c.max {
+		var coldest string
+		var coldestSeq uint64
+		first := true
+		for k, e := range c.entries {
+			if first || e.usedSeq < coldestSeq {
+				coldest, coldestSeq, first = k, e.usedSeq, false
+			}
+		}
+		delete(c.entries, coldest)
+	}
+}
+
+// Lookup returns the cached prediction and true, or nil and false. A hit COUNTS
+// AS A USE: it is the fallback reading this subject's last known value, which is
+// the only evidence this type has that anyone still cares about that subject.
 func (c *PredictionCache) Lookup(subjectID string) (*inferencepb.PredictionEnvelope, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	p, ok := c.entries[subjectID]
-	return p, ok
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[subjectID]
+	if !ok {
+		return nil, false
+	}
+	c.seq++
+	e.usedSeq = c.seq
+	c.entries[subjectID] = e
+	return e.pred, true
 }
 
 // --- CircuitBreaker ---------------------------------------------------

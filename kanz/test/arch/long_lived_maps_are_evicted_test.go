@@ -470,16 +470,6 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"the measure half of the same asymmetry as Cache.exposure: written on every recompute, never " +
 			"dropped on ownership handoff.",
 		"#893"},
-	"internal/execution: SimVenue.executed": {deferredLeak,
-		"keyed by order_id and documented as unbounded by design because 'it is a simulator' — but " +
-			"the OMS selects it whenever OMS_VENUE_ENDPOINTS is empty, so the process holding it is a " +
-			"real one. The dedup argument for keeping the record is sound; the missing bound is not.",
-		"#895"},
-	"internal/prediction: PredictionCache.entries": {deferredLeak,
-		"keyed by a SubjectID that Predict checks only for emptiness — that it is a portfolio id is a " +
-			"convention at the caller, not a property of the type. No composition root builds a " +
-			"SyncClient today, so this is a shape rather than a live leak.",
-		"#895"},
 }
 
 // TestEveryLongLivedMapHasAnEvictor walks the module and holds every

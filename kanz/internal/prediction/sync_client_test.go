@@ -62,7 +62,7 @@ func normalPrediction(subject string, value float64) *inferencepb.PredictionEnve
 
 func TestPredict_NormalPathReturnsServerResponse(t *testing.T) {
 	stub := &fakeStub{response: normalPrediction("AAPL", 0.73)}
-	client := prediction.NewSyncClientWithStub(stub, prediction.DefaultSyncClientOptions())
+	client := newStubClient(t, stub, prediction.DefaultSyncClientOptions())
 	defer client.Close()
 
 	pred, err := client.Predict(context.Background(), goodFV())
@@ -86,7 +86,7 @@ func TestPredict_CachesOnlyNormalResponses(t *testing.T) {
 		SubjectId: "AAPL",
 		Mode:      inferencepb.PredictionMode_PREDICTION_MODE_DEGRADED,
 	}}
-	client := prediction.NewSyncClientWithStub(stub, prediction.DefaultSyncClientOptions())
+	client := newStubClient(t, stub, prediction.DefaultSyncClientOptions())
 
 	_, _ = client.Predict(context.Background(), goodFV())
 
@@ -105,7 +105,7 @@ func TestPredict_CachesOnlyNormalResponses(t *testing.T) {
 
 func TestPredict_TransportErrorNoCacheReturnsNoCachedPrediction(t *testing.T) {
 	stub := &fakeStub{err: errors.New("connection refused")}
-	client := prediction.NewSyncClientWithStub(stub, prediction.DefaultSyncClientOptions())
+	client := newStubClient(t, stub, prediction.DefaultSyncClientOptions())
 
 	pred, err := client.Predict(context.Background(), goodFV())
 
@@ -132,7 +132,7 @@ func TestPredict_TransportErrorNoCacheReturnsNoCachedPrediction(t *testing.T) {
 func TestPredict_CacheHitOnFallbackReusesCachedValue(t *testing.T) {
 	// Step 1: prime cache with a successful NORMAL call.
 	stub := &fakeStub{response: normalPrediction("AAPL", 1.23)}
-	client := prediction.NewSyncClientWithStub(stub, prediction.DefaultSyncClientOptions())
+	client := newStubClient(t, stub, prediction.DefaultSyncClientOptions())
 	if _, err := client.Predict(context.Background(), goodFV()); err != nil {
 		t.Fatalf("seed call: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestPredict_TimeoutNoCacheReturnsDegraded(t *testing.T) {
 	}
 	opts := prediction.DefaultSyncClientOptions()
 	opts.Timeout = 5 * time.Millisecond // shorter than delay
-	client := prediction.NewSyncClientWithStub(stub, opts)
+	client := newStubClient(t, stub, opts)
 
 	pred, err := client.Predict(context.Background(), goodFV())
 	if pred.Mode != inferencepb.PredictionMode_PREDICTION_MODE_DEGRADED {
@@ -184,7 +184,7 @@ func TestPredict_CircuitOpensAfterThresholdFailures(t *testing.T) {
 	opts := prediction.DefaultSyncClientOptions()
 	opts.BreakerThreshold = 3
 	opts.BreakerCooldown = 1 * time.Hour // long enough to stay open
-	client := prediction.NewSyncClientWithStub(stub, opts)
+	client := newStubClient(t, stub, opts)
 
 	// First N failures attempt the call; subsequent attempts
 	// short-circuit and never hit the stub.
@@ -213,7 +213,7 @@ func TestPredict_CircuitClosesAfterSuccessfulProbe(t *testing.T) {
 	opts := prediction.DefaultSyncClientOptions()
 	opts.BreakerThreshold = 2
 	opts.BreakerCooldown = 5 * time.Millisecond
-	client := prediction.NewSyncClientWithStub(stub, opts)
+	client := newStubClient(t, stub, opts)
 
 	// Trip the breaker.
 	for i := 0; i < opts.BreakerThreshold; i++ {
@@ -238,7 +238,7 @@ func TestPredict_CircuitClosesAfterSuccessfulProbe(t *testing.T) {
 
 func TestPredict_EmptySubjectIDReturnsDegradedAndError(t *testing.T) {
 	stub := &fakeStub{response: normalPrediction("AAPL", 1.0)}
-	client := prediction.NewSyncClientWithStub(stub, prediction.DefaultSyncClientOptions())
+	client := newStubClient(t, stub, prediction.DefaultSyncClientOptions())
 
 	fv := goodFV()
 	fv.SubjectID = ""
@@ -257,7 +257,7 @@ func TestPredict_EmptySubjectIDReturnsDegradedAndError(t *testing.T) {
 // --- PredictionCache -------------------------------------------------
 
 func TestPredictionCache_OverwriteReplacesPrevious(t *testing.T) {
-	c := prediction.NewPredictionCache()
+	c := newTestCache(t, 8)
 	c.Store("AAPL", normalPrediction("AAPL", 1.0))
 	c.Store("AAPL", normalPrediction("AAPL", 2.0))
 	got, ok := c.Lookup("AAPL")
@@ -267,7 +267,7 @@ func TestPredictionCache_OverwriteReplacesPrevious(t *testing.T) {
 }
 
 func TestPredictionCache_NilStoreIsNoOp(t *testing.T) {
-	c := prediction.NewPredictionCache()
+	c := newTestCache(t, 8)
 	c.Store("AAPL", nil)
 	c.Store("", normalPrediction("", 1.0))
 	if _, ok := c.Lookup("AAPL"); ok {
@@ -302,4 +302,30 @@ func TestCircuitBreaker_StateTransitions(t *testing.T) {
 	if got := b.State(); got != "closed" {
 		t.Errorf("after probe success=%q want closed", got)
 	}
+}
+
+// --- construction helpers (#895) --------------------------------------
+
+// newStubClient states a subject cap for every test that does not care about
+// one. SyncClientOptions.MaxCachedSubjects has no default, so there is no longer
+// an unbounded client for a test to certify by omission.
+func newStubClient(t *testing.T, stub inferencepb.InferenceServiceClient, opts prediction.SyncClientOptions) *prediction.SyncClient {
+	t.Helper()
+	if opts.MaxCachedSubjects <= 0 {
+		opts.MaxCachedSubjects = 64
+	}
+	c, err := prediction.NewSyncClientWithStub(stub, opts)
+	if err != nil {
+		t.Fatalf("NewSyncClientWithStub: %v", err)
+	}
+	return c
+}
+
+func newTestCache(t *testing.T, max int) *prediction.PredictionCache {
+	t.Helper()
+	c, err := prediction.NewPredictionCache(max)
+	if err != nil {
+		t.Fatalf("NewPredictionCache(%d): %v", max, err)
+	}
+	return c
 }

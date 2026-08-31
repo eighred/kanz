@@ -20,6 +20,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/pkg/bus"
 )
 
 // Venue works an order and returns the fills it produced. The MIC identifies
@@ -116,13 +117,43 @@ type SimVenue struct {
 	now     func() time.Time
 	newID   func() string
 
-	// mu guards executed. SimVenue is shared by every goroutine handling orders
-	// for this MIC, so the record is concurrent by construction.
+	// mu guards executed, lastSweep and forgotten. SimVenue is shared by every
+	// goroutine handling orders for this MIC, so the record is concurrent by
+	// construction.
 	mu sync.Mutex
-	// executed maps order_id → the fills this venue reported for it. Unbounded
-	// by design: it is a simulator, its lifetime is a process, and forgetting an
-	// order would resurrect the exact bug this record exists to close.
-	executed map[string][]*orderpb.Fill
+	// executed maps order_id → what this venue reported for it.
+	//
+	// IT USED TO BE UNBOUNDED, and the comment said so in as many words: "it is a
+	// simulator, its lifetime is a process". The dedup half of that argument is
+	// sound and is why the record still exists; the "it is a simulator" half was
+	// checked and did not survive (#895). services/oms/cmd/oms/venues.go selects
+	// NewSimVenue for every MIC whenever OMS_VENUE_ENDPOINTS is empty, so the
+	// process holding this map is a long-lived OMS pod with an order rate, not a
+	// test binary — one permanent entry per order, for the life of the pod, on
+	// the execution path.
+	executed map[string]simRecord
+	// retain is how long a record stays readable after the execution that
+	// produced it. <=0 disables eviction entirely.
+	retain time.Duration
+	// lastSweep is when evictExecuted last walked the record. The sweep is
+	// AMORTIZED — at most once per retain, on the write path — so Execute stays
+	// O(1) at the order rate. The cost is that an entry lives somewhere between
+	// retain and 2*retain; what matters is that its lifetime is a function of the
+	// ORDER RATE over a fixed window rather than of how long the pod has been up.
+	// orderview.Memory bounds itself the same way and for the same reason.
+	lastSweep time.Time
+	// forgotten latches the first time evictExecuted actually drops something.
+	// It is what keeps QueryOrder honest — see the answer it gives on a miss.
+	forgotten bool
+}
+
+// simRecord is what SimVenue reported for one order, plus when it reported it.
+// The instant is what the retention is measured from; it is kept beside the
+// fills rather than read back out of Fill.executed_at so that eviction does not
+// depend on a wire field a future change could stop setting.
+type simRecord struct {
+	fills      []*orderpb.Fill
+	executedAt time.Time
 }
 
 // SimOption customizes a SimVenue.
@@ -142,6 +173,35 @@ func WithClock(now func() time.Time) SimOption { return func(v *SimVenue) { v.no
 // WithIDGen overrides the fill_id generator (tests).
 func WithIDGen(f func() string) SimOption { return func(v *SimVenue) { v.newID = f } }
 
+// WithRetention overrides how long an executed order stays remembered. It exists
+// for this package's own tests, which cannot wait out DefaultSimRetention; a
+// non-positive value disables eviction, which is the pre-#895 behaviour and is
+// what the double-fill tests pin against. Nothing outside a test sets it.
+func WithRetention(d time.Duration) SimOption { return func(v *SimVenue) { v.retain = d } }
+
+// DefaultSimRetention is how long SimVenue remembers an order it executed, and
+// it is DERIVED rather than chosen: one full bus.WorkRedeliveryBudget().
+//
+// WHAT THE RECORD IS FOR, WHICH IS WHAT SIZES IT. A submit command that fails
+// after venue.Execute returned — the store.Save of venue_ack_at, the fill fold,
+// the relay flush — is NAKed and redelivered, and the redelivery re-drives the
+// same order. This record is what makes the second Execute return the FIRST
+// one's fills instead of minting a second fill_id for one execution. So the
+// window it has to cover is the window in which the broker can keep re-offering
+// that command, and that is not a number this package gets to pick: it is
+// workTuning's delivery budget, which pkg/bus computes and exports.
+//
+// WHY THE RESIDUAL IS NOT A DOUBLE FILL. The budget is not the only replay path
+// — the OMS's periodic sweep (OMS_SWEEP_INTERVAL) re-reads non-terminal rows of
+// ANY age, so an order stuck at ROUTED can be re-driven hours later, and no
+// finite retention can cover that. That is exactly why eviction here also sets
+// the forgotten latch: past the retention this venue stops claiming it never
+// executed an order it cannot find, QueryOrder answers INDETERMINATE, and
+// order.Reconcile quarantines instead of re-driving. The retention decides how
+// often that costs an operator a quarantine; it does not decide whether a
+// forgotten order can be filled twice.
+func DefaultSimRetention() time.Duration { return bus.WorkRedeliveryBudget() }
+
 // NewSimVenue returns a simulation venue with the given MIC.
 func NewSimVenue(mic string, opts ...SimOption) *SimVenue {
 	v := &SimVenue{
@@ -149,11 +209,16 @@ func NewSimVenue(mic string, opts ...SimOption) *SimVenue {
 		account:  "sim:" + mic,
 		now:      time.Now,
 		newID:    uuid.NewString,
-		executed: make(map[string][]*orderpb.Fill),
+		executed: make(map[string]simRecord),
+		retain:   DefaultSimRetention(),
 	}
 	for _, opt := range opts {
 		opt(v)
 	}
+	// AFTER the options, so an injected clock is the one the first sweep window
+	// is measured from. Seeding it from time.Now under a frozen test clock would
+	// make the first sweep due immediately or never, depending on the epoch.
+	v.lastSweep = v.now()
 	return v
 }
 
@@ -175,9 +240,14 @@ func (v *SimVenue) Execute(_ context.Context, st *orderpb.OrderState) ([]*orderp
 	v.mu.Lock()
 	if prior, ok := v.executed[st.GetOrderId()]; ok {
 		v.mu.Unlock()
-		return prior, nil
+		return prior.fills, nil
 	}
 	v.mu.Unlock()
+
+	// ONE clock read for the whole execution: the fill's executed_at, the
+	// retention this record is measured against and the sweep window must all be
+	// the same instant, or a record can be born already expired.
+	executedAt := v.now().UTC()
 
 	price := v.executionPrice(st)
 	if price == nil || dec.IsZero(price) {
@@ -204,7 +274,7 @@ func (v *SimVenue) Execute(_ context.Context, st *orderpb.OrderState) ([]*orderp
 		// The account that ACTUALLY executed — the venue's own, not the order's
 		// intent. The ledger posts where the cash moved, not where it was meant to.
 		VenueAccountId: v.account,
-		ExecutedAt:     timestamppb.New(v.now().UTC()),
+		ExecutedAt:     timestamppb.New(executedAt),
 	}
 	fills := []*orderpb.Fill{fill}
 
@@ -214,29 +284,84 @@ func (v *SimVenue) Execute(_ context.Context, st *orderpb.OrderState) ([]*orderp
 	// produce ONE execution, and the loser adopts the winner's fills. Returning
 	// its own would be the double trade in miniature.
 	if prior, ok := v.executed[st.GetOrderId()]; ok {
-		return prior, nil
+		return prior.fills, nil
 	}
-	v.executed[st.GetOrderId()] = fills
+	v.executed[st.GetOrderId()] = simRecord{fills: fills, executedAt: executedAt}
+	// SWEEP ON THE WRITE PATH, and only there. This map grows in exactly one
+	// place, so that is the one place a bound can be enforced without the
+	// simulator owning a goroutine's lifecycle; a SimVenue nobody executes
+	// against does not grow, so there is nothing a background sweep would catch
+	// that this misses. Same shape as orderview.Memory.evictTerminal.
+	v.evictExecuted(executedAt)
 	return fills, nil
+}
+
+// evictExecuted drops records older than the retention. Caller holds v.mu.
+//
+// EVERY DROP LATCHES forgotten, and that latch is the load-bearing half of this
+// change rather than bookkeeping. Before it, QueryOrder's UNKNOWN was an
+// AFFIRMATIVE statement — "I keep a complete record, so my silence means I never
+// executed this" — and order.Reconcile is built on exactly that: UNKNOWN with no
+// venue_ack_at recorded means RE-DRIVE. Evicting without saying so would leave
+// that sentence false and turn a forgotten order into a second fill on the very
+// path this record exists to protect.
+func (v *SimVenue) evictExecuted(now time.Time) {
+	if v.retain <= 0 || now.Sub(v.lastSweep) < v.retain {
+		return
+	}
+	v.lastSweep = now
+	for id, rec := range v.executed {
+		if now.Sub(rec.executedAt) >= v.retain {
+			delete(v.executed, id)
+			v.forgotten = true
+		}
+	}
 }
 
 // QueryOrder answers what this venue did with an order — the Querier capability.
 //
-// SimVenue fills in full or not at all, so an order it remembers is FILLED and
-// an order it does not is UNKNOWN. UNKNOWN here is an AFFIRMATIVE statement:
-// this venue keeps a complete record for its process lifetime, so its silence
-// about an order really does mean it never executed one.
+// SimVenue fills in full or not at all, so an order it remembers is FILLED.
+//
+// AN ORDER IT DOES NOT REMEMBER IS UNKNOWN ONLY WHILE IT HAS FORGOTTEN NOTHING.
+// UNKNOWN is an AFFIRMATIVE statement — the venue positively asserting it never
+// executed this order — and order.Reconcile turns it into a RE-DRIVE when the
+// OMS holds no venue ack. That was true while this record was permanent. Once
+// the retention has dropped even one entry (#895) this venue can no longer tell
+// "I never executed it" from "I executed it and forgot", and asserting the first
+// would be a second fill for one order.
+//
+// So a miss after any eviction is INDETERMINATE, which Reconcile quarantines.
+// The cost is a false quarantine for an order this simulator genuinely never
+// executed, on a pod that has been up longer than the retention; the cost of the
+// other direction is the fund trading twice. Fail closed.
+//
+// THE LATCH IS DELIBERATELY NOT APPLIED TO Execute, which is the asymmetry a
+// reader will ask about. Execute cannot distinguish a forgotten order from a
+// brand-new one — a new order is a miss too — so refusing every miss there would
+// not bound anything, it would stop the simulator dead. It does not need to: the
+// only path that re-drives an order this venue may already hold runs through
+// resume(), which queries FIRST and quarantines on INDETERMINATE, and which
+// quarantines outright against a venue that implements no Querier at all.
 func (v *SimVenue) QueryOrder(_ context.Context, st *orderpb.OrderState) (OrderView, error) {
 	if st == nil {
 		return OrderView{}, errors.New("execution: nil order state")
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	fills, ok := v.executed[st.GetOrderId()]
+	rec, ok := v.executed[st.GetOrderId()]
 	if !ok {
+		if v.forgotten {
+			return OrderView{
+				State: OrderViewIndeterminate,
+				Reason: fmt.Sprintf(
+					"%s is a simulator that has dropped executed-order records older than %s, so it "+
+						"cannot state whether it executed this one. Re-driving might fill the fund twice",
+					v.mic, v.retain),
+			}, nil
+		}
 		return OrderView{State: OrderViewUnknown}, nil
 	}
-	return OrderView{State: OrderViewFilled, Fills: fills}, nil
+	return OrderView{State: OrderViewFilled, Fills: rec.fills}, nil
 }
 
 func (v *SimVenue) executionPrice(st *orderpb.OrderState) *commonpb.Decimal {
