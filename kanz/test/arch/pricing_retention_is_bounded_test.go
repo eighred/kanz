@@ -423,10 +423,19 @@ func (f *FwdStore) Publish(pair string, asOf time.Time, pts float64) {
 	f.byPair[pair] = append(f.byPair[pair], fwdVersion{asOf: asOf, pts: pts})
 }`
 
-// lastValueCache is livequote.LiveQuotes' shape: a mutex over a map to a single
-// value, bounded by instrument cardinality rather than by time. It must NOT be
-// flagged, or the rule degenerates into "every map behind a mutex needs a
-// horizon" and the exemption list becomes the guard.
+// lastValueCache is livequote.LiveQuotes' shape: a mutex over a map to a SINGLE
+// value rather than to a version list. THIS RULE IS ABOUT RETENTION PER KEY — a
+// last-value write keeps one event per key however often it fires, so there is
+// no horizon for it to violate. It must NOT be flagged, or the rule degenerates
+// into "every map behind a mutex needs a horizon" and the exemption list becomes
+// the guard.
+//
+// The KEY SPACE is a different question and this guard has never answered it.
+// The premise here used to be "bounded by instrument cardinality"; #894 measured
+// that against the wiring and it was false — the handler is subscribed to the
+// `market.>` wildcard, so the real cardinality was the whole spine's instrument
+// universe. LiveQuotes now admits only the configured calibration strip and
+// TestEveryLongLivedMapHasAnEvictor is where that key-space claim is held.
 const lastValueCache = `package fixture
 
 import "sync"
@@ -482,11 +491,12 @@ func TestPricingRetentionIsBounded(t *testing.T) {
 			"shape, so it protects nothing a new store could do wrong.")
 	}
 
-	// FIXTURE ARM 4 (negative control). A last-value cache behind a mutex is
-	// bounded by cardinality and is not this rule's business.
+	// FIXTURE ARM 4 (negative control). A last-value cache behind a mutex retains
+	// one event per key and is not this rule's business — its KEY space is
+	// TestEveryLongLivedMapHasAnEvictor's.
 	if lv := scanRetentionTextRaw(t, "livequote.go", lastValueCache); len(lv.containers) != 0 {
 		t.Fatalf("a mutex-guarded map to a SINGLE value was treated as a versioned container: %+v. "+
-			"livequote.LiveQuotes has this shape, keeps one entry per instrument, and needs no "+
+			"livequote.LiveQuotes has this shape, keeps one event per instrument, and needs no "+
 			"horizon.", lv.containers)
 	}
 
