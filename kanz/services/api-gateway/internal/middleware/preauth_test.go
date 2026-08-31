@@ -108,6 +108,57 @@ func TestPreAuthChargesNothingForAnOutageOrAnAuthorisationRefusal(t *testing.T) 
 	}
 }
 
+// A SOURCE THAT FAILED ONCE MUST NOT BE CHARGED FOR ITS SUCCESSES AFTERWARDS.
+//
+// THIS IS THE CASE THE OTHER TWO CANNOT REACH, and the gap was found by
+// mutation. TestPreAuthSpendsNothingOnASuccessfulRequest and
+// TestPreAuthChargesNothingForAnOutageOrAnAuthorisationRefusal both drive a
+// source that NEVER fails, so bucketSet.debit — the only thing that creates a
+// bucket — is never called for it. hasToken then takes its `!live` early return
+// on every request and never reaches the token arithmetic at all. Making
+// hasToken CONSUME (the spend-then-refund shape) therefore left the entire
+// middleware package green.
+//
+// The uncovered path is the one that matters. A source is only interesting to
+// this limiter AFTER its first failure, and the design's whole safety argument
+// is that the check does not spend: "authenticated traffic never debits, so the
+// aggregated key cannot be drained by legitimate load at any volume". An
+// operator whose token expired, who gets one 401 and then refreshes, is exactly
+// this shape — and under a consuming check their successful traffic would be
+// charged against a bucket shared with every other caller behind the same edge.
+//
+// burst 4, one failure, then 200 successes: with a consuming check the source is
+// 429'd by the fourth success and stays refused, because perSec is slow enough
+// that nothing refills.
+func TestPreAuthDoesNotChargeSuccessesAfterASourceHasAlreadyFailed(t *testing.T) {
+	const burst = 4
+	fail := true
+	h := PreAuth(0.001, burst, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if fail {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// One failure, which is what CREATES the bucket for this source.
+	if c := callFrom(h, "10.0.0.9:1"); c != http.StatusUnauthorized {
+		t.Fatalf("first request ⇒ %d, want 401", c)
+	}
+	fail = false
+
+	for i := 0; i < 200; i++ {
+		if c := callFrom(h, "10.0.0.9:2"); c != http.StatusOK {
+			t.Fatalf("success %d from a source with an existing bucket ⇒ %d, want 200.\n\n"+
+				"The check is SPENDING. PreAuth's safety argument is that only a 401 debits, so "+
+				"authenticated traffic can never drain the source bucket — which is shared by "+
+				"every caller behind one edge when no trusted proxy is configured. A consuming "+
+				"check turns one expired token into a throttle on that caller's legitimate load.",
+				i, c)
+		}
+	}
+}
+
 // TestPreAuthDisabledPassesEverything: a non-positive rate is off, matching
 // Quota's convention. The composition root logs a WARN in that posture rather
 // than letting "unconfigured" and "enforcing" look the same.
@@ -198,13 +249,22 @@ func (o *recordingQuotaObserver) InFlight(string, float64) {}
 // not all be admitted, and every request must be answered by one of the two
 // codes this middleware can produce.
 //
-// It does NOT prove the check is non-consuming. That was checked by mutation
-// rather than assumed: making hasToken consume (i.e. spend-then-refund) leaves
-// this case PASSING and is caught by
-// TestPreAuthSpendsNothingOnASuccessfulRequest and by
-// TestPreAuthChargesNothingForAnOutageOrAnAuthorisationRefusal instead. A
-// concurrency case that claimed the non-consuming property would be a guard
-// asserting something weaker than its name.
+// It does NOT prove the check is non-consuming, and neither did the two tests
+// this comment used to name.
+//
+// Making hasToken consume leaves this case passing — that much was measured. The
+// comment then credited TestPreAuthSpendsNothingOnASuccessfulRequest and
+// TestPreAuthChargesNothingForAnOutageOrAnAuthorisationRefusal with catching it,
+// and re-running the mutation showed neither does: both drive a source that
+// NEVER fails, so bucketSet.debit — the only creator of a bucket — is never
+// called for it, hasToken takes its `!live` early return every time, and the
+// token arithmetic is never reached. The whole middleware package stayed green.
+//
+// TestPreAuthDoesNotChargeSuccessesAfterASourceHasAlreadyFailed was added to
+// close that, and it is the one that kills the mutation. The correction is left
+// visible rather than tidied away: a comment crediting a test with a property it
+// does not check is the failure this repository keeps paying for, and it is
+// worth more as a worked example than as a silent edit.
 //
 // It does not prove race-freedom either. -race needs cgo and does not run on the
 // Windows box this was written on, so that claim is CI's to make; the logical
