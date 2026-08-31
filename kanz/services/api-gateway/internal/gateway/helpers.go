@@ -5,13 +5,21 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
+
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
-// maxBodyBytes bounds the scenario request body — a generous ceiling for a
-// shock list, small enough to refuse an abusive payload.
-const maxBodyBytes = 1 << 20 // 1 MiB
+// maxBodyBytes is middleware.MaxRequestBody, not a fourth copy of 1 MiB (#887).
+//
+// This number was declared THREE times across the api-gateway — here,
+// internal/orders and internal/proxy — each with its own comment justifying the
+// same ceiling. Three spellings of one bound is how it gets raised in one place
+// and not the others. The middleware package owns it because that layer applies
+// it BEFORE authentication, and an arch guard ties it to the edge's own
+// proxy-body-size so the two cannot drift.
+const maxBodyBytes = middleware.MaxRequestBody
 
 // decodeJSON reads a size-limited JSON body and unmarshals it into the proto
 // message via protojson (so the REST request shape matches the proto exactly).

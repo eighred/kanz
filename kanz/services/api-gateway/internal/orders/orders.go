@@ -38,7 +38,15 @@ const (
 	domain         = "order"
 )
 
-const maxBodyBytes = 1 << 20 // 1 MiB
+// maxBodyBytes is middleware.MaxRequestBody, not a fourth copy of 1 MiB (#887).
+//
+// This number was declared THREE times across the api-gateway — here,
+// internal/orders and internal/proxy — each with its own comment justifying the
+// same ceiling. Three spellings of one bound is how it gets raised in one place
+// and not the others. The middleware package owns it because that layer applies
+// it BEFORE authentication, and an arch guard ties it to the edge's own
+// proxy-body-size so the two cannot drift.
+const maxBodyBytes = middleware.MaxRequestBody
 
 // Publisher is the bus publish surface — satisfied by *bus.Producer.
 type Publisher interface {
@@ -209,9 +217,23 @@ func (h *Handler) submit(w http.ResponseWriter, r *http.Request) {
 	if h.refuseIfHalted(w) {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	// +1 SO AN OVERSIZED BODY IS DETECTED RATHER THAN TRUNCATED (#887). Without
+	// it LimitReader silently cut the body at exactly the ceiling and handed the
+	// prefix to protojson, which then failed to parse — so a body that was too
+	// LARGE was reported as "invalid order body", sending the caller to look for
+	// a syntax error it did not make. The other two readers in this service
+	// already used the +1 form; this one did not.
+	//
+	// middleware.BodyLimit refuses the same request one layer out, so this is a
+	// backstop rather than the primary bound — it still has to be right, because
+	// a handler mounted outside that chain would have only this.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "read body failed")
+		return
+	}
+	if len(body) > maxBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
 	var cmd orderpb.SubmitOrder
@@ -276,9 +298,23 @@ func (h *Handler) approve(w http.ResponseWriter, r *http.Request) {
 	if h.refuseIfHalted(w) {
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	// +1 SO AN OVERSIZED BODY IS DETECTED RATHER THAN TRUNCATED (#887). Without
+	// it LimitReader silently cut the body at exactly the ceiling and handed the
+	// prefix to protojson, which then failed to parse — so a body that was too
+	// LARGE was reported as "invalid order body", sending the caller to look for
+	// a syntax error it did not make. The other two readers in this service
+	// already used the +1 form; this one did not.
+	//
+	// middleware.BodyLimit refuses the same request one layer out, so this is a
+	// backstop rather than the primary bound — it still has to be right, because
+	// a handler mounted outside that chain would have only this.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "read body failed")
+		return
+	}
+	if len(body) > maxBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
 	var cmd orderpb.ApproveOrder
