@@ -1307,3 +1307,225 @@ tests:
       - eval_time: 45m
         alertname: AuditChainVerificationFailing
         exp_alerts: []
+
+  # ===========================================================================
+  # OMSQuoteCoverageAbsent — the price spine carries prices and no quotes (#875).
+  # ===========================================================================
+  # THE ESTATE THIS RULE WAS WRITTEN FOR. venue-binance and venue-okx both poll a
+  # last-price ticker and publish market.crypto.trade, so a crypto-only desk has
+  # a perfectly healthy price feed — 120 instruments with live marks — and a
+  # quoted width for none of them. Every execution attribution it publishes is
+  # TOTAL_ONLY, and before this rule nothing anywhere said so.
+  - interval: 1m
+    name: a trade-only price spine
+    input_series:
+      - series: 'kanz_oms_quote_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '0x40'
+      - series: 'kanz_oms_mark_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '120x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: OMSQuoteCoverageAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              namespace: kanz-services
+              pod: oms-0
+            exp_annotations:
+              summary: "OMS oms-0 has prices for every instrument and a quoted width for none"
+              description: "This replica's mark fold holds live prices but not one usable bid/ask, so the market's width was never observable. Every execution-cost attribution it publishes will be quality = TOTAL_ONLY: an exact implementation shortfall with the spread, impact and timing legs UNSET, which is correct and is also the whole of what the execution-quality programme can say. Any algorithm comparison built on it can rank outcomes and cannot explain them. This is a market-data question, not an OMS one — check which connectors publish market.*.quote for the instruments this desk trades. On the estate as shipped nothing does: both venue adapters publish trade prints only and the market-data feed is disabled, which is issue #876."
+
+  # A COLD POD MUST NOT PAGE, AND THIS IS THE CLAUSE THAT STOPS IT. The mark fold
+  # starts EMPTY and warms as the spine delivers, so for the first ticks of a
+  # pod's life it holds no marks and no widths. Without the
+  # mark_instruments_live > 0 arm every OMS restart would alert.
+  - interval: 1m
+    name: a cold pod holding neither marks nor widths
+    input_series:
+      - series: 'kanz_oms_quote_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '0x40'
+      - series: 'kanz_oms_mark_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: OMSQuoteCoverageAbsent
+        exp_alerts: []
+
+  # A HEALTHY QUOTED SPINE STAYS SILENT. Stated because the firing case above is
+  # equally satisfied by a gauge hard-wired to zero, and a rule that fires on a
+  # correctly quoted estate is one that gets muted rather than fixed.
+  #
+  # Partial coverage (118 of 120 instruments quoted) deliberately does NOT fire:
+  # the rule compares against zero because no percentage here could be derived,
+  # and it must be honest about what that means.
+  - interval: 1m
+    name: a quoted spine, including a partially quoted one
+    input_series:
+      - series: 'kanz_oms_quote_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '118x40'
+      - series: 'kanz_oms_mark_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '120x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: OMSQuoteCoverageAbsent
+        exp_alerts: []
+
+  # THE `for: 15m` DURATION, EXECUTED IN BOTH DIRECTIONS. A width lives for
+  # OMS_PRICE_MAX_AGE (30s) and is swept at most sweepInterval (30s) later, so one
+  # minute bounds how long a live feed can read zero. The vendor disconnect below
+  # starts at t=6m: at 18m it has been zero for twelve minutes and must still be
+  # PENDING, and by 25m it has crossed fifteen and must fire. One series, both
+  # claims — a `for:` asserted only from the firing side is half-checked.
+  - interval: 1m
+    name: a quote feed that drops and stays down
+    input_series:
+      - series: 'kanz_oms_quote_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '80x5 0x60'
+      - series: 'kanz_oms_mark_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '120x66'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: OMSQuoteCoverageAbsent
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: OMSQuoteCoverageAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              namespace: kanz-services
+              pod: oms-0
+            exp_annotations:
+              summary: "OMS oms-0 has prices for every instrument and a quoted width for none"
+              description: "This replica's mark fold holds live prices but not one usable bid/ask, so the market's width was never observable. Every execution-cost attribution it publishes will be quality = TOTAL_ONLY: an exact implementation shortfall with the spread, impact and timing legs UNSET, which is correct and is also the whole of what the execution-quality programme can say. Any algorithm comparison built on it can rank outcomes and cannot explain them. This is a market-data question, not an OMS one — check which connectors publish market.*.quote for the instruments this desk trades. On the estate as shipped nothing does: both venue adapters publish trade prints only and the market-data feed is disabled, which is issue #876."
+
+  # ONE BAD REPLICA IS NOT MASKED BY A HEALTHY SIBLING. The fold is per-process:
+  # a replica subscribed to a narrower subject set folds no quotes while its
+  # sibling folds all of them, and an estate-wide sum() would report the average
+  # as fine. by (namespace, pod) is what makes the broken pod nameable, and this
+  # is the case that proves the aggregation was not widened.
+  - interval: 1m
+    name: one replica missing quotes while its sibling has them
+    input_series:
+      - series: 'kanz_oms_quote_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '0x40'
+      - series: 'kanz_oms_mark_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '120x40'
+      - series: 'kanz_oms_quote_instruments_live{namespace="kanz-services", pod="oms-1"}'
+        values: '118x40'
+      - series: 'kanz_oms_mark_instruments_live{namespace="kanz-services", pod="oms-1"}'
+        values: '120x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: OMSQuoteCoverageAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              namespace: kanz-services
+              pod: oms-0
+            exp_annotations:
+              summary: "OMS oms-0 has prices for every instrument and a quoted width for none"
+              description: "This replica's mark fold holds live prices but not one usable bid/ask, so the market's width was never observable. Every execution-cost attribution it publishes will be quality = TOTAL_ONLY: an exact implementation shortfall with the spread, impact and timing legs UNSET, which is correct and is also the whole of what the execution-quality programme can say. Any algorithm comparison built on it can rank outcomes and cannot explain them. This is a market-data question, not an OMS one — check which connectors publish market.*.quote for the instruments this desk trades. On the estate as shipped nothing does: both venue adapters publish trade prints only and the market-data feed is disabled, which is issue #876."
+
+  # ===========================================================================
+  # OMSExecutionAttributionUndecomposable — measured, and never explained (#875).
+  # ===========================================================================
+  # Decisions ARE terminating and being attributed — total_only climbs steadily —
+  # and the decomposed series, seeded at zero by cmd/oms, never moves. The
+  # platform can say what every execution cost and why none of them cost it.
+  - interval: 1m
+    name: an hour of decisions, none of them decomposable
+    input_series:
+      - series: 'kanz_oms_execution_attributions_total{outcome="total_only", pod="oms-0"}'
+        values: '0+2x180'
+      - series: 'kanz_oms_execution_attributions_total{outcome="decomposed", pod="oms-0"}'
+        values: '0x180'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: OMSExecutionAttributionUndecomposable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+            exp_annotations:
+              summary: "Every execution attribution in the last hour was a total, and none was decomposed"
+              description: "Terminal decisions ARE being measured — the shortfall against arrival is exact for each — but not one in the last hour could be split into spread, impact and timing, because the market's width was unobservable for at least one slice that traded. The platform can say what its executions cost and cannot say why any of them cost it. Check kanz_oms_quote_instruments_live first: zero means the spine carries no quotes at all (see OMSQuoteCoverageAbsent). Non-zero means widths exist but are stale or crossed at the moments slices are released, which is a feed-latency or feed-quality problem rather than a coverage one."
+
+  # THE SEEDING DEPENDENCY, EXECUTED RATHER THAN ASSERTED IN A COMMENT.
+  #
+  # This is the SAME estate as the case above with one difference: the decomposed
+  # series is absent entirely, which is what an UNSEEDED CounterVec produces for a
+  # label value nothing has ever incremented. `sum(increase(absent[1h])) == 0` is
+  # an empty vector, the `and` has nothing to join, and the rule goes silent in
+  # precisely the state it exists to detect — #62's ten unfireable rules reached
+  # from the other side.
+  #
+  # So the seeding in executionAttributionCounter is load-bearing for this alert,
+  # not tidiness, and this case is what stops that being rediscovered by an
+  # outage. cmd/oms's TestEveryAttributionOutcomeIsSeededAtZero holds the other
+  # end: it gathers the real registry and fails if any outcome exports no series.
+  - interval: 1m
+    name: the same estate with an unseeded decomposed series
+    input_series:
+      - series: 'kanz_oms_execution_attributions_total{outcome="total_only", pod="oms-0"}'
+        values: '0+2x180'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: OMSExecutionAttributionUndecomposable
+        exp_alerts: []
+
+  # A WORKING DECOMPOSITION STAYS SILENT — even a mostly-unmeasurable one. The
+  # rule compares against exactly zero, so an estate decomposing one decision in
+  # sixty is not a finding here. That is deliberate rather than an oversight: any
+  # ratio threshold would be invented, and this file's header forbids one.
+  - interval: 1m
+    name: decompositions are landing, however few
+    input_series:
+      - series: 'kanz_oms_execution_attributions_total{outcome="total_only", pod="oms-0"}'
+        values: '0+2x180'
+      - series: 'kanz_oms_execution_attributions_total{outcome="decomposed", pod="oms-0"}'
+        values: '0+1x180'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: OMSExecutionAttributionUndecomposable
+        exp_alerts: []
+
+  # AN IDLE DESK MUST NOT PAGE AT 03:00. Both series are seeded and flat: no
+  # decision terminated, so nothing was measured and nothing failed to be. This
+  # is the case the first clause (total_only increasing) exists for, and it is
+  # why the gauge rule above — which needs no order flow at all — is not
+  # redundant with this one.
+  - interval: 1m
+    name: an idle desk with both outcomes seeded at zero
+    input_series:
+      - series: 'kanz_oms_execution_attributions_total{outcome="total_only", pod="oms-0"}'
+        values: '0x180'
+      - series: 'kanz_oms_execution_attributions_total{outcome="decomposed", pod="oms-0"}'
+        values: '0x180'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: OMSExecutionAttributionUndecomposable
+        exp_alerts: []
+
+  # ONE REPLICA DECOMPOSING IS ENOUGH FOR THE ESTATE. Decisions are spread across
+  # pods, so a replica that happened to terminate only unmeasurable decisions is
+  # not a finding while another is decomposing normally. This is what bare sum()
+  # buys, and asserting it is what stops the aggregation being narrowed to
+  # by (pod) — which would page for every quiet replica.
+  - interval: 1m
+    name: a quiet replica beside a working one
+    input_series:
+      - series: 'kanz_oms_execution_attributions_total{outcome="total_only", pod="oms-0"}'
+        values: '0+2x180'
+      - series: 'kanz_oms_execution_attributions_total{outcome="decomposed", pod="oms-0"}'
+        values: '0x180'
+      - series: 'kanz_oms_execution_attributions_total{outcome="total_only", pod="oms-1"}'
+        values: '0x180'
+      - series: 'kanz_oms_execution_attributions_total{outcome="decomposed", pod="oms-1"}'
+        values: '0+3x180'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: OMSExecutionAttributionUndecomposable
+        exp_alerts: []
