@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -48,7 +49,8 @@ type OKXReconcilerConfig struct {
 	// healing seam is disabled (order/balance reconciliation still runs).
 	Closes PendingCloses
 	// CloseTimeout is how long a close may stay unconfirmed before the healing
-	// loop force-clears it. <=0 ⇒ 1500ms (the mandate's trigger).
+	// loop force-clears it. <=0 ⇒ execution.DefaultCloseTimeout (the mandate's
+	// trigger).
 	CloseTimeout     time.Duration
 	Pub              Publisher
 	Venue            string
@@ -65,7 +67,7 @@ func newOKXReconciler(cfg OKXReconcilerConfig) *OKXReconciler {
 		cfg.Venue = "OKX"
 	}
 	if cfg.CloseTimeout <= 0 {
-		cfg.CloseTimeout = 1500 * time.Millisecond
+		cfg.CloseTimeout = execution.DefaultCloseTimeout
 	}
 	return &OKXReconciler{
 		rest: cfg.REST, symbols: cfg.Symbols, expected: cfg.Expected, balances: cfg.Balances,
@@ -78,7 +80,7 @@ func newOKXReconciler(cfg OKXReconcilerConfig) *OKXReconciler {
 // Run polls every interval until ctx is cancelled.
 func (r *OKXReconciler) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
-		interval = time.Minute
+		interval = execution.DefaultReconcileInterval
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -109,7 +111,7 @@ func (r *OKXReconciler) RunHealing(ctx context.Context, tick time.Duration) {
 		return
 	}
 	if tick <= 0 {
-		tick = 500 * time.Millisecond
+		tick = execution.DefaultHealInterval
 	}
 	t := time.NewTicker(tick)
 	defer t.Stop()
