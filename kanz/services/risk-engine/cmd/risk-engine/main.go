@@ -883,7 +883,12 @@ func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSCl
 	if err != nil {
 		return err
 	}
-	cache := livequote.New()
+	// The cache is built FROM the parsed instruments and the rate source is bound
+	// to the same slice below (#894). cfg.MarketSubjects defaults to the
+	// `market.>` wildcard — the cache must see a calibration instrument's price
+	// whichever subject it arrives on — so the admitted key space is the
+	// configured strip rather than everything the spine has ever published.
+	cache := livequote.New(instruments)
 	group := cfg.Source + "-calibration"
 	for _, subject := range cfg.MarketSubjects {
 		go func(subject string) {
@@ -918,7 +923,11 @@ func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSCl
 		// these two numbers are what an operator needs to reason about this pod's
 		// pricing memory, and reading one without the other says nothing (#811).
 		"horizon", cfg.CalibrationHorizon,
-		"retained_curves_per_currency", int64(cfg.CalibrationHorizon/cfg.CalibrationInterval))
+		"retained_curves_per_currency", int64(cfg.CalibrationHorizon/cfg.CalibrationInterval),
+		// The quote cache's bound, for the same reason: the subscription is a
+		// wildcard, so this is the only place an operator can read which
+		// instruments this pod actually retains quotes for (#894).
+		"cached_instruments", cache.Universe())
 	go func() { _ = sched.Run(ctx) }()
 	return nil
 }

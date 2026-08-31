@@ -261,6 +261,16 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"keyed by currency, and the currency list is parsed once at startup from " +
 			"RISK_ENGINE_CALIBRATION_RATES — there is no runtime path that adds one. Per-key retention " +
 			"is pit.Put's horizon, enforced by TestPricingRetentionIsBounded.", ""},
+	"internal/risk/pricing/livequote: LiveQuotes.wanted": {boundedByConstruction,
+		"the admitted instrument set itself, built by New from the strip parsed out of " +
+			"RISK_ENGINE_CALIBRATION_RATES and never written again — no method mutates it, so its size " +
+			"is decided before the subscription exists. It is what bounds LiveQuotes.latest below.", ""},
+	"internal/risk/pricing/livequote: LiveQuotes.latest": {boundedByConstruction,
+		"keyed by instrument id, and the ADMITTED key space is fixed at construction from the strip " +
+			"parsed out of RISK_ENGINE_CALIBRATION_RATES — the same slice that binds the only reader, " +
+			"SnapshotRateSource. Update drops anything else, so what the `market.>` wildcard delivers " +
+			"cannot create an entry; only re-deploying with a longer strip can (#894). There is no " +
+			"evictor because the key space cannot grow.", ""},
 	"internal/risk/pricing/volsurface: Store.byUnderlying": {boundedByConstruction,
 		"keyed by underlying id, written only by a scheduled calibration refresh, with pit.Put " +
 			"pruning the version list at each key. Same shape and same writer discipline as the curve " +
@@ -458,12 +468,6 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"the measure half of the same asymmetry as Cache.exposure: written on every recompute, never " +
 			"dropped on ownership handoff.",
 		"#893"},
-	"internal/risk/pricing/livequote: LiveQuotes.latest": {deferredLeak,
-		"the standing 'bounded by instrument cardinality' argument no longer holds as wired: the " +
-			"handler is subscribed to the market.> WILDCARD by default and writes every event, so the " +
-			"map accumulates the whole spine's instrument universe including delisted ones, while the " +
-			"reader takes only the configured calibration set.",
-		"#894"},
 	"internal/execution: SimVenue.executed": {deferredLeak,
 		"keyed by order_id and documented as unbounded by design because 'it is a simulator' — but " +
 			"the OMS selects it whenever OMS_VENUE_ENDPOINTS is empty, so the process holding it is a " +

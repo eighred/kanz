@@ -553,8 +553,12 @@ var retryCertifiedConsumers = map[string]string{
 
 	"services/risk-engine/cmd/risk-engine/main.go:startCalibration": "risk-engine (calibration quotes): the " +
 		"sole handler is livequote.LiveQuotes.Handler (internal/risk/pricing/livequote/livequote.go) " +
-		"— an unconditional last-value cache write, same shape as accounting's live FX feed. " +
-		"Nothing to skip.",
+		"— a last-value cache write, same shape as accounting's live FX feed. Nothing to skip. " +
+		"Since #894 the write is admitted only for an instrument in the calibration strip parsed at " +
+		"startup, which does not change the retry analysis: membership is a pure function of the " +
+		"event and a set fixed before the subscription exists, so a second attempt takes the same " +
+		"branch as the first. The dropped branch returns nil for an event this subscriber never had " +
+		"work for, not for work an earlier attempt left unfinished.",
 
 	"services/market-data/cmd/market-data/main.go:runIngest": "market-data: the sole handler is " +
 		"marketdata.Ingestor.Handler, which writes through Postgres.Put " +
