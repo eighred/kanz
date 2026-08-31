@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eighred/kanz/internal/risk/pricing/pit"
+	"github.com/eighred/kanz/internal/pit"
 )
 
 func flat(z float64) *Curve {

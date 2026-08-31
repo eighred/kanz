@@ -39,7 +39,7 @@ import (
 //
 // Inside internal/risk/pricing, a versioned container — a field of type
 // map[K][]V on a struct that also carries its own mutex — may only be written
-// from a value the shared retention package produced. internal/risk/pricing/pit
+// from a value the shared retention package produced. internal/pit
 // is that package: pit.Put inserts, prunes past the horizon and reports what it
 // dropped, and it is one implementation because a horizon copied into three
 // stores is the copied-helper failure mode this repository has already paid for
@@ -58,9 +58,16 @@ import (
 //     shape and a store this repository has never contained.
 //   - It proves the write is BOUNDED, not that the bound is RIGHT. The horizon
 //     itself is a financial decision argued in pit's package doc and asserted by
-//     internal/risk/pricing/pit's tests and by the per-store retention tests.
+//     internal/pit's tests and by the per-store retention tests.
 //   - Only internal/risk/pricing/** is scanned. The rule is a property of this
 //     store family, not a module-wide ban on append.
+//   - It does not cover the CONCEPT module-wide, and widening this walk would not
+//     make it: the match is a map-of-slice field on a mutex-carrying struct,
+//     which is this family's shape and not volprofile's (a plain slice on an
+//     inner history struct, behind the Store's mutex rather than its own).
+//     test/arch/one_horizon_prune_test.go is the guard that follows the concept
+//     instead of the directory — default-deny over every non-test file in the
+//     module — and #871 is why it exists.
 
 // retentionPkg is the one implementation a versioned container may be written
 // from.
@@ -371,7 +378,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eighred/kanz/internal/risk/pricing/pit"
+	"github.com/eighred/kanz/internal/pit"
 )
 
 type Curve struct{}
@@ -557,7 +564,7 @@ func TestPricingRetentionIsBounded(t *testing.T) {
 		"function of UPTIME rather than of the book: at the one-minute intraday cadence the "+
 		"risk-engine accepts, that is ~525k retained curves per currency per year, with every "+
 		"Refresh inserting into a longer list until refreshes overlap or the pod is OOM-killed. "+
-		"Route the write through internal/risk/pricing/pit — pit.Put inserts, prunes past the "+
+		"Route the write through internal/pit — pit.Put inserts, prunes past the "+
 		"store's horizon and reports what it dropped — rather than pruning in a fourth place. The "+
 		"horizon is a financial decision, argued once in pit's package doc, and three copies of it "+
 		"is how a fix stops spreading.",

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eighred/kanz/internal/risk/pricing/pit"
+	"github.com/eighred/kanz/internal/pit"
 )
 
 // THE HORIZON/CADENCE PAIR IS VALIDATED AT STARTUP, NOT DISCOVERED IN THE

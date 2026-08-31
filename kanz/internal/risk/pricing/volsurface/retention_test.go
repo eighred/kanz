@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eighred/kanz/internal/risk/pricing/pit"
+	"github.com/eighred/kanz/internal/pit"
 )
 
 // THE VOL STORE'S RETENTION IS BOUNDED BY ITS HORIZON, NOT BY UPTIME (#811).

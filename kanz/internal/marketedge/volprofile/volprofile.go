@@ -64,12 +64,12 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/eighred/kanz/internal/marketedge/trades"
+	"github.com/eighred/kanz/internal/pit"
 )
 
 // Session is the profile's day.
@@ -339,8 +339,12 @@ type history struct {
 	// partial session is the hours that have already elapsed, and folding it in
 	// tilts the shape toward the morning every morning.
 	open *session
-	// done is the retained completed sessions, ascending by start.
-	done []*session
+	// done is the retained completed sessions, ascending by AsOf (the session's
+	// UTC start), bounded to the store's horizon by pit.Put — the estate's one
+	// point-in-time retention container (#871). The as-of a version carries is the
+	// same instant as the session's own start; reads take it from the version, so
+	// there is one place the retained ordering is expressed.
+	done []pit.Version[*session]
 	// shape is the cached distribution, and dirty is what invalidates it. THE
 	// PROFILE IS BUILT ONCE AND READ MANY TIMES — recomputing per order would put
 	// one exact division per retained bucket per session onto the order path.
@@ -462,7 +466,7 @@ func (s *Store) Observe(ser Series, tr trades.Trade) {
 		// session is still late — reopening that day would restate a shape readers
 		// have already scheduled against, and it would do so without the
 		// out-of-order arm below ever running.
-		if n := len(h.done); n > 0 && !start.After(h.done[n-1].start) {
+		if n := len(h.done); n > 0 && !start.After(h.done[n-1].AsOf) {
 			s.late.Add(1)
 			return
 		}
@@ -513,54 +517,28 @@ func (s *Store) Advance(now time.Time) {
 
 // completeLocked moves the open session onto the retained list and prunes past
 // the horizon. The caller holds the lock and owns clearing h.open.
+//
+// THE PRUNE IS pit.Put AND NOT A SECOND HORIZON (#871). Retaining an ascending
+// list to a horizon measured from the NEWEST RETAINED element, and releasing what
+// it drops, is one concept with one implementation: internal/pit. This package
+// carried its own copy of it — including its own copy of #862's clear() — until
+// pit was promoted out of internal/risk/pricing, where the risk-module boundary
+// (test/arch/risk_boundary_test.go) had made it unimportable from the market-data
+// edge. Both halves of the argument survive the move unchanged and are stated
+// once, in pit's package doc: the anchor is the newest retained element rather
+// than the wall clock, so a stalled feed keeps serving its last shape (staleness
+// stays the separate, reported condition VerdictStale) instead of going dark;
+// and the drop is cleared rather than resliced away, so the horizon bounds the
+// heap and not only len.
+//
+// The insert is a tail append in every real path — Observe refuses a print for a
+// session at or before the newest one it holds, so a completed session is always
+// the newest — and pit.Put's sorted insert lands it in exactly that place.
 func (s *Store) completeLocked(h *history) {
 	if h.open == nil {
 		return
 	}
-	h.done = append(h.done, h.open)
-	h.dirty = true
-	s.pruneLocked(h)
-}
-
-// pruneLocked drops completed sessions older than the horizon.
-//
-// THE HORIZON IS MEASURED FROM THE NEWEST SESSION RETAINED, NOT FROM WALL CLOCK,
-// and that is the difference between degrading and breaking. A wall-clock prune
-// would empty the store the moment a feed stalled, turning "this profile is
-// stale" into "there is no profile" — and those are different answers to a
-// scheduler, one of which it can reason about. Staleness stays a separate,
-// reported condition: see VerdictStale.
-//
-// IT IS A SECOND IMPLEMENTATION OF internal/risk/pricing/pit's PRUNE, AND #871
-// IS THE ISSUE TO RETIRE THAT. pit is the one place this shape has been argued
-// and the one place #862 was fixed; it is not imported here only because it
-// lives under internal/risk/pricing, and the market-data edge depending on the
-// risk pricing tree is the inversion store.Window's doc already refuses. The
-// repair is to promote pit rather than to keep two horizons.
-func (s *Store) pruneLocked(h *history) {
-	if len(h.done) == 0 {
-		return
-	}
-	cutoff := h.done[len(h.done)-1].start.Add(-s.horizon)
-	drop := sort.Search(len(h.done), func(i int) bool { return !h.done[i].start.Before(cutoff) })
-	if drop == 0 {
-		return
-	}
-	// THE HORIZON BOUNDS len, AND WITHOUT THIS IT DOES NOT BOUND THE HEAP (#862).
-	//
-	// h.done[drop:] reslices the SAME backing array. Go keeps an entire array
-	// alive while any slice references any part of it, so the dropped *session
-	// values — each carrying one exact big.Rat per intraday bucket — stay
-	// reachable from the array's prefix and are NOT collected. They are released
-	// only when a later append exceeds cap and reallocates, which in steady state
-	// is many sessions away, on the process whose job is to hold market state in
-	// memory.
-	//
-	// Every retention assertion that counts sessions is blind to this; only
-	// TestARetiredSessionIsReleasedWithoutWaitingForAReallocation can see it.
-	// clear is O(drop), and drop is 1 in steady state.
-	clear(h.done[:drop])
-	h.done = h.done[drop:]
+	h.done, _ = pit.Put(h.done, h.open.start, h.open, s.horizon)
 	h.dirty = true
 }
 
@@ -589,8 +567,8 @@ func (s *Store) Profile(ser Series, asOf time.Time) (Answer, error) {
 	}
 
 	out.Sessions = len(h.done)
-	out.Oldest = h.done[0].start
-	out.Newest = h.done[len(h.done)-1].start
+	out.Oldest = h.done[0].AsOf
+	out.Newest = h.done[len(h.done)-1].AsOf
 	newestEnd := out.Newest.Add(Session)
 
 	if asOf.Before(newestEnd) {
@@ -643,7 +621,8 @@ func (s *Store) rebuildLocked(h *history) {
 	}
 	w := Window{}
 	contributing := 0
-	for _, sess := range h.done {
+	for _, v := range h.done {
+		sess := v.V
 		w.Buckets += s.buckets
 		for i := 0; i < s.buckets; i++ {
 			if sess.seen[i] {

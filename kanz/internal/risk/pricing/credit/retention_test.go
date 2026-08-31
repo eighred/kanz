@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eighred/kanz/internal/risk/pricing/pit"
+	"github.com/eighred/kanz/internal/pit"
 	"github.com/eighred/kanz/internal/risk/xva"
 )
 
