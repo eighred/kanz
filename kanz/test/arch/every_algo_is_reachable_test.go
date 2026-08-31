@@ -169,7 +169,13 @@ func TestEveryExecutionAlgoIsReachableFromTheRegistry(t *testing.T) {
 					byReceiver[recv][d.Name.Name] = algoFuncSig(fset, d.Type)
 					continue
 				}
-				if d.Name.IsExported() && algoReturnsSchedule(fset, d.Type) {
+				// THE SEAM'S OWN ENTRY POINT SHARES THE PLANNER SIGNATURE and must
+				// not be swept into the set — Run returns ([]Slice, error) too, and
+				// calling it is the CORRECT thing this arm exists to require. It is
+				// excluded here rather than relied on to be caught by the switch
+				// below, so the set stays true to its own name and a future edit to
+				// the switch cannot turn every legitimate caller into an offender.
+				if d.Name.IsExported() && d.Name.Name != "Run" && algoReturnsSchedule(fset, d.Type) {
 					planners[d.Name.Name] = true
 				}
 				switch d.Name.Name {
