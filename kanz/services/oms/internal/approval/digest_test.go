@@ -388,8 +388,13 @@ func TestTheDigestHashesAFixedNumberOfParts(t *testing.T) {
 	if _, err := TermsOfSubmit(empty).Digest(); err != nil {
 		t.Fatalf("empty order: %v", err)
 	}
-	if digestParts != 20 {
-		t.Fatalf("digestParts = %d, want 20 — the covered field set changed. That is allowed, but it "+
+	// 21 SINCE #869 ADDED execution_schedule.max_participation_rate. Edited here
+	// on purpose, with the consequence understood: every proposal signed before
+	// this build must be re-proposed and re-approved, because a signature over an
+	// order that could not carry a participation cap must not authorise one that
+	// does.
+	if digestParts != 21 {
+		t.Fatalf("digestParts = %d, want 21 — the covered field set changed. That is allowed, but it "+
 			"INVALIDATES EVERY DIGEST ALREADY SIGNED, so it must be a deliberate edit here and not a "+
 			"side effect of adding a field", digestParts)
 	}

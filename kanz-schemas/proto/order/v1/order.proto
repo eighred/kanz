@@ -150,6 +150,27 @@ enum ExecutionAlgo {
   // distribution, and a distribution cannot be asserted against a venue that
   // does not exist yet.
   EXECUTION_ALGO_TWAP = 1;
+
+  // Volume-weighted average price: the parent is divided across the window in
+  // proportion to the volume expected to trade in each slice's own interval, so
+  // it is large when the market is and small when it is not (#869).
+  //
+  // IT REFUSES ON AN UNKNOWN VOLUME PROFILE RATHER THAN DEGRADING TO TWAP, and
+  // that is the property this value promises. A flat curve is not a neutral
+  // default: a flat curve IS TWAP, so a VWAP order scheduled against one is a
+  // TWAP order wearing this name, and the execution attribution would decompose
+  // the shortfall of an algorithm that never ran.
+  EXECUTION_ALGO_VWAP = 2;
+
+  // Percent of volume: the same proportional allocation, under a HARD
+  // participation cap that the schedule may never exceed (#869).
+  //
+  // THE CAP IS REQUIRED. A schedule naming this algorithm without
+  // max_participation_rate is REFUSED, because an uncapped POV is not a
+  // conservative POV — it is VWAP with a different label. What the cap bounds is
+  // self-signalling on a thin instrument, where a perfectly small child is still
+  // the whole print and max_slice_quantity cannot see it.
+  EXECUTION_ALGO_POV = 3;
 }
 
 // ExecutionSchedule is HOW a parent order is worked (#435).
@@ -201,6 +222,30 @@ message ExecutionSchedule {
   // the remainder unworked; raising the slice count silently would run a
   // schedule nobody chose, at a message rate the operator never sized for.
   common.v1.Decimal max_slice_quantity = 5;
+
+  // max_participation_rate is the largest fraction of the volume expected to
+  // trade in a slice's interval that any child may be. Required by
+  // EXECUTION_ALGO_POV; ignored by every other algorithm (#869).
+  //
+  // A FRACTION IN (0, 1], WHERE max_slice_quantity IS A SIZE, and the two bound
+  // different things. A size cap bounds the largest single message the platform
+  // puts in front of a venue; this bounds how much of the tape that message IS.
+  // A cap of 0 permits no child at all and a cap above 1 permits more than
+  // everything that trades — both are spellings of "no cap" that read as a
+  // configured control, so both are REFUSED rather than clamped.
+  //
+  // A parent the forecast says cannot be worked inside its cap is refused WHOLE
+  // at admission, naming the largest parent that window and that cap could have
+  // worked. Trimming the children would leave the remainder unworked; exceeding
+  // the cap on one slice is the single outcome a participation limit exists to
+  // prevent.
+  //
+  // WHAT IT IS BOUND AGAINST IS A FORECAST, stated so the control is not
+  // overread: the cap binds against the volume profile's expectation, not
+  // against the tape as it actually prints. A realised-volume control is a
+  // send-time decision beside the driver, which is a different thing from a
+  // schedule derived from the order.
+  common.v1.Decimal max_participation_rate = 6;
 }
 
 // AmendOrder requests a change to a resting order's quantity and/or limit

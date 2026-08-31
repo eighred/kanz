@@ -55,6 +55,10 @@ type Name string
 
 // NameTWAP is time-weighted average price — equal quantity at equal intervals,
 // indifferent to volume and to price.
+//
+// The volume-driven names live beside their implementations: NameVWAP in vwap.go,
+// NamePOV in pov.go (#869). One name, one file, one algorithm — so a name cannot
+// be added here and left with nothing behind it.
 const NameTWAP Name = "TWAP"
 
 // ErrUnknownAlgo refuses a schedule naming an algorithm this build cannot work.
@@ -87,7 +91,9 @@ var ErrUnknownAlgo = errors.New("algo: no such execution algorithm")
 // fails the build on it. The view runs in the driver, where a clock is allowed.
 //
 // TWAP asks this nothing, by design. It is indifferent to volume and to price,
-// which is why it is the algorithm whose output can be asserted closed-form.
+// which is why it is the algorithm whose output can be asserted closed-form. VWAP
+// and POV (#869) ask ExpectedVolume for every slice's own interval and REFUSE the
+// whole plan on the first `known=false` — which is what this shape was added for.
 type MarketView interface {
 	// TopOfBook is the best bid and offer for an instrument. known=false ⇒ this
 	// view cannot say — there is no book, or the one it has is not current.
@@ -171,6 +177,8 @@ type Algo interface {
 func Registered() []Algo {
 	return []Algo{
 		twapAlgo{},
+		vwapAlgo{},
+		povAlgo{},
 	}
 }
 

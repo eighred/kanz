@@ -58,6 +58,44 @@ var (
 	ErrCapUnsatisfiable = errors.New("algo: slice count cannot honour the participation cap")
 )
 
+// validate checks the three things every algorithm needs before it can produce a
+// single child, in the order TWAP has always checked them.
+//
+// SHARED SO THE THREE ALGORITHMS REFUSE THE SAME PLAN THE SAME WAY. A second
+// copy of these checks is a second answer to "is this schedule workable", and the
+// two would drift the first time one of them grew a case — with the failure that
+// an order admitted under one algorithm is refused after being switched to
+// another, for a reason nothing in the command changed.
+func (p Plan) validate() error {
+	if p.Total == nil || p.Total.Sign() <= 0 {
+		return ErrEmptyQuantity
+	}
+	if p.Slices <= 0 {
+		return ErrNoSlices
+	}
+	if !p.End.After(p.Start) {
+		return fmt.Errorf("%w: [%s, %s]", ErrEmptyWindow,
+			p.Start.UTC().Format(time.RFC3339), p.End.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+// boundary is the instant slice i starts, for i in [0, Slices]. boundary(0) is
+// Start and boundary(Slices) is End exactly.
+//
+// INTEGER NANOSECOND ARITHMETIC ON THE OFFSET, not repeated addition of a step:
+// accumulating a rounded step drifts, and the last child of a long schedule would
+// fall outside the window it was supposed to finish in. It is one function
+// because a volume-driven algorithm needs both ENDS of a slice's interval to ask
+// the market what trades in it, and a second copy of this expression would put
+// the schedule's due times and the interval it was sized against one rounding
+// apart — the child would be sized for a window it is not sent in.
+func (p Plan) boundary(i int) time.Time {
+	span := p.End.Sub(p.Start)
+	offset := time.Duration(int64(span) * int64(i) / int64(p.Slices))
+	return p.Start.Add(offset).UTC()
+}
+
 // Plan is everything needed to work a parent order, and every field of it lives
 // on the parent order durably. Nothing here is state.
 type Plan struct {
@@ -76,6 +114,16 @@ type Plan struct {
 	// what the closed-form tests do on purpose and what nothing on the order path
 	// does.
 	Algo Name
+
+	// InstrumentID is what the parent trades, and it is here so a volume-driven
+	// algorithm can ask MarketView about the right instrument.
+	//
+	// TWAP DOES NOT READ IT, so it is unset on every plan this platform derived
+	// before #869 and nothing about those schedules changes. VWAP and POV REFUSE
+	// an empty one rather than asking the view about "": a view that answered a
+	// nameless instrument would be answering about nothing, and the shape it
+	// returned would size real children.
+	InstrumentID string
 
 	// Total is the parent's ordered quantity — the amount the children must sum
 	// to exactly.
@@ -99,6 +147,24 @@ type Plan struct {
 	// message this platform will put in front of a venue, which is the half that
 	// can be decided in advance and the half #240 needed.
 	MaxSlice *big.Rat
+
+	// MaxParticipation is the hard participation cap: the largest fraction of the
+	// volume expected to trade in a slice's interval that a child may be. Nil
+	// means no cap was given, which POV REFUSES rather than reading as uncapped.
+	//
+	// A FRACTION, WHERE MaxSlice IS A SIZE, and the two bound different things. A
+	// size cap bounds the largest single message this platform puts in front of a
+	// venue; this bounds how much of the tape that message IS. On a thin
+	// instrument a perfectly small order is still the whole print, and only this
+	// one can see that — which is why #869 puts the cap in the execution
+	// vocabulary rather than leaving "never more than n% of volume" as a desk
+	// convention nothing enforces.
+	//
+	// IT IS BOUNDED ABOVE BY 1 AND BELOW BY 0, EXCLUSIVE. A cap of 0 permits no
+	// child at all and a cap above 1 permits more than everything that trades —
+	// both are spellings of "no cap" that read as a configured control, which is
+	// the shape this platform refuses everywhere.
+	MaxParticipation *big.Rat
 }
 
 // Slice is one child order: how much, and when it becomes due.
@@ -122,15 +188,8 @@ type Slice struct {
 // the operator asked for into one nobody chose. Both are the "control that
 // reports success" this platform designs against.
 func TWAP(p Plan) ([]Slice, error) {
-	if p.Total == nil || p.Total.Sign() <= 0 {
-		return nil, ErrEmptyQuantity
-	}
-	if p.Slices <= 0 {
-		return nil, ErrNoSlices
-	}
-	if !p.End.After(p.Start) {
-		return nil, fmt.Errorf("%w: [%s, %s]", ErrEmptyWindow,
-			p.Start.UTC().Format(time.RFC3339), p.End.UTC().Format(time.RFC3339))
+	if err := p.validate(); err != nil {
+		return nil, err
 	}
 
 	each := new(big.Rat).Quo(p.Total, new(big.Rat).SetInt64(int64(p.Slices)))
@@ -144,16 +203,11 @@ func TWAP(p Plan) ([]Slice, error) {
 			ceilRat(need))
 	}
 
-	span := p.End.Sub(p.Start)
 	out := make([]Slice, 0, p.Slices)
 	for i := range p.Slices {
-		// Integer nanosecond arithmetic on the OFFSET, not repeated addition of a
-		// step: accumulating a rounded step drifts, and the last child of a long
-		// schedule would fall outside the window it was supposed to finish in.
-		offset := time.Duration(int64(span) * int64(i) / int64(p.Slices))
 		out = append(out, Slice{
 			Index:    i,
-			Due:      p.Start.Add(offset).UTC(),
+			Due:      p.boundary(i),
 			Quantity: new(big.Rat).Set(each),
 		})
 	}

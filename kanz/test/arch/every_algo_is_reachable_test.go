@@ -67,10 +67,19 @@ const (
 	// algoLookup is the resolution, which must read the registry rather than
 	// repeat it.
 	algoLookup = "Lookup"
-	// algoPlanner is the closed-form TWAP function. It may be called from inside
+	// algoPlanner is the closed-form TWAP function, and it is the ANCHOR for the
+	// derived planner set rather than the set itself. It may be called from inside
 	// the package (it IS the registered implementation's body) and from tests
 	// (which assert the arithmetic directly); a call from anywhere else is the
 	// order path bypassing the seam.
+	//
+	// THE SET OF PLANNERS IS DERIVED, NOT LISTED (#869). Every EXPORTED function
+	// in the package returning ([]Slice, error) is one, because that signature IS
+	// "turns a plan into children" — so an algorithm exported alongside its
+	// registration is caught without this constant being edited. A hand-written
+	// list here would be the same drift the guard exists to catch, one layer up:
+	// #869 added two algorithms and, had it exported them, both would have been
+	// callable around the registry with this guard green.
 	algoPlanner = "TWAP"
 	// algoImport is the import path a caller reaching around the seam would carry.
 	algoImport = "github.com/eighred/kanz/internal/execution/algo"
@@ -103,6 +112,7 @@ func TestEveryExecutionAlgoIsReachableFromTheRegistry(t *testing.T) {
 		// methods by receiver type name -> method name -> signature
 		byReceiver  = map[string]map[string]string{}
 		registered  = map[string]bool{}
+		planners    = map[string]bool{}
 		sawRegistry bool
 		sawLookup   bool
 		lookupReads bool
@@ -158,6 +168,9 @@ func TestEveryExecutionAlgoIsReachableFromTheRegistry(t *testing.T) {
 					}
 					byReceiver[recv][d.Name.Name] = algoFuncSig(fset, d.Type)
 					continue
+				}
+				if d.Name.IsExported() && algoReturnsSchedule(fset, d.Type) {
+					planners[d.Name.Name] = true
 				}
 				switch d.Name.Name {
 				case algoRegistry:
@@ -220,6 +233,11 @@ func TestEveryExecutionAlgoIsReachableFromTheRegistry(t *testing.T) {
 	if len(registered) == 0 {
 		t.Fatalf("%s() constructs nothing — this build can work no order at all", algoRegistry)
 	}
+	if !planners[algoPlanner] {
+		t.Fatalf("the derived planner set does not contain %s — the signature this guard matches "+
+			"(an exported func returning ([]Slice, error)) no longer describes a planner, so arm "+
+			"(2) below would scan for calls to nothing", algoPlanner)
+	}
 	if !lookupReads {
 		t.Errorf("%s() does not call %s() — the resolution has become a second list, and the two "+
 			"will drift: an algorithm added to one and not the other either cannot be selected or "+
@@ -270,13 +288,13 @@ func TestEveryExecutionAlgoIsReachableFromTheRegistry(t *testing.T) {
 	}
 
 	// ===== (2) NOTHING REACHES AN ALGORITHM AROUND THE REGISTRY =====
-	algoDirectCallers(t, root, fset)
+	algoDirectCallers(t, root, fset, planners)
 }
 
 // algoDirectCallers fails on any file outside internal/execution/algo that calls
 // the closed-form planner directly instead of resolving the order's own algorithm
 // through the registry.
-func algoDirectCallers(t *testing.T, root string, fset *token.FileSet) {
+func algoDirectCallers(t *testing.T, root string, fset *token.FileSet, planners map[string]bool) {
 	t.Helper()
 
 	var (
@@ -333,13 +351,16 @@ func algoDirectCallers(t *testing.T, root string, fset *token.FileSet) {
 				// be going THROUGH the seam, or this arm is scanning a codebase
 				// where nothing schedules anything and passes by finding nothing.
 				sawSeamUse = true
-			case algoPlanner:
+			default:
+				if !planners[sel.Sel.Name] {
+					return true
+				}
 				if reason, ok := algoDirectCallExempt[f.rel]; ok {
 					seenExempt[f.rel] = true
 					t.Logf("%s: exempt — %s", f.rel, reason)
 					return true
 				}
-				offenders = append(offenders, f.rel)
+				offenders = append(offenders, f.rel+" calls algo."+sel.Sel.Name)
 			}
 			return true
 		})
@@ -352,14 +373,16 @@ func algoDirectCallers(t *testing.T, root string, fset *token.FileSet) {
 	}
 	if len(offenders) > 0 {
 		sort.Strings(offenders)
-		t.Errorf("%d file(s) call %s.%s directly instead of resolving the order's own algorithm: %s\n\n"+
+		t.Errorf("%d call(s) reach a planner directly instead of resolving the order's own "+
+			"algorithm: %s\n\n"+
 			"That call ignores the algorithm the ORDER names, so a parent asking for anything else "+
-			"is worked as TWAP and every fill is attributed to an algorithm that never ran. It "+
-			"compiles, and the schedule it produces is a perfectly valid TWAP schedule — which is "+
-			"why no behavioural test catches it.\n"+
-			"Use %s.Run(plan, state, market), which resolves plan.Algo through the registry and "+
-			"REFUSES a name this build does not implement.",
-			len(offenders), "algo", algoPlanner, strings.Join(offenders, ", "), "algo")
+			"is worked by whichever planner was called, and every fill is attributed to an "+
+			"algorithm that never ran. It compiles, and the schedule it produces is perfectly "+
+			"valid — which is why no behavioural test catches it.\n"+
+			"Use algo.Run(plan, state, market), which resolves plan.Algo through the registry and "+
+			"REFUSES a name this build does not implement.\n"+
+			"The planner set is DERIVED from the package rather than listed here: %v.",
+			len(offenders), strings.Join(offenders, ", "), plannerNames(planners))
 	}
 	for rel, reason := range algoDirectCallExempt {
 		if !seenExempt[rel] {
@@ -437,4 +460,42 @@ func algoReceiverType(recv *ast.FieldList) string {
 		return id.Name
 	}
 	return ""
+}
+
+// algoReturnsSchedule reports whether a function's results are exactly
+// ([]Slice, error) — the signature of a planner.
+//
+// MATCHED ON THE RESULT TYPES, NOT ON THE NAME, so an algorithm exported under any
+// name is covered. Due returns []Slice with no error and Sum returns a *big.Rat,
+// so neither is a planner and neither is swept in.
+func algoReturnsSchedule(fset *token.FileSet, ft *ast.FuncType) bool {
+	if ft.Results == nil || len(ft.Results.List) != 2 {
+		return false
+	}
+	var out []string
+	for _, f := range ft.Results.List {
+		var b strings.Builder
+		if err := printer.Fprint(&b, fset, f.Type); err != nil {
+			return false
+		}
+		n := len(f.Names)
+		if n == 0 {
+			n = 1
+		}
+		for range n {
+			out = append(out, b.String())
+		}
+	}
+	return len(out) == 2 && out[0] == "[]Slice" && out[1] == "error"
+}
+
+// plannerNames renders the derived planner set for a refusal, sorted so the
+// message is stable between runs.
+func plannerNames(planners map[string]bool) []string {
+	out := make([]string, 0, len(planners))
+	for name := range planners {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }

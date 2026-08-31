@@ -251,6 +251,26 @@ type Answer struct {
 	// Shares is the mean of each retained session's own distribution, one entry
 	// per intraday bucket, summing to exactly 1. NIL UNLESS Verdict.Known.
 	Shares []*big.Rat
+	// SessionVolume is the mean TOTAL volume of the retained sessions the shape
+	// was built from, in the instrument's own units. NIL UNLESS Verdict.Known,
+	// under exactly the rule Shares follows.
+	//
+	// THE SHAPE SAYS WHEN, THIS SAYS HOW MUCH, and they are separate because only
+	// one of them is dimensionless. Shares sums to 1, so it can answer "which half
+	// of the day is busier" and cannot answer "how many units will trade" — and a
+	// PARTICIPATION cap is a fraction OF a quantity (#869's POV: never more than
+	// n% of prints). A scheduler holding only the shape would have to invent the
+	// level to apply one, which is the unknown-becomes-a-number failure this
+	// package's whole design refuses.
+	//
+	// IT IS A MEAN OF SESSIONS, NOT A POOLED TOTAL, for the reason rebuildLocked
+	// gives about the shape: sessions are weighted equally so one liquidation
+	// cascade does not set the following month's level. It is an estimate of a
+	// TYPICAL session and carries every limitation the sample does — a session
+	// closed by Advance after a feed outage contributes the volume that was seen,
+	// not the volume that traded, and Window.Unknown is the only thing that says
+	// so.
+	SessionVolume *big.Rat
 }
 
 // Known reports whether this answer carries a measured shape.
@@ -349,6 +369,10 @@ type history struct {
 	// PROFILE IS BUILT ONCE AND READ MANY TIMES — recomputing per order would put
 	// one exact division per retained bucket per session onto the order path.
 	shape []*big.Rat
+	// level is the cached mean session total that goes with shape — rebuilt by
+	// the same pass and invalidated by the same flag, so the two can never
+	// describe different sets of sessions.
+	level *big.Rat
 	dirty bool
 	// window is the observation accounting computed alongside shape.
 	window Window
@@ -421,6 +445,15 @@ func New(cfg Config) (*Store, error) {
 
 // Bucket is the intraday bin width in force.
 func (s *Store) Bucket() time.Duration { return s.bucket }
+
+// Horizon is how far back completed sessions are retained.
+//
+// READ BY A SCHEDULER TO BOUND ITS OWN QUESTION. A shape is the mean of the
+// sessions inside this window, so a caller integrating it over an interval longer
+// than the window is extrapolating past everything that was measured. The
+// judgement of what to do about that belongs to the caller — this only lets it be
+// made from the store's own number instead of from one invented beside it.
+func (s *Store) Horizon() time.Duration { return s.horizon }
 
 // Recomputes is how many times a shape has been rebuilt. It moves once per
 // completed session per series that is then read, never per query.
@@ -590,6 +623,8 @@ func (s *Store) Profile(ser Series, asOf time.Time) (Answer, error) {
 		out.Verdict = VerdictTooFewSessions
 	default:
 		out.Verdict = VerdictKnown
+		// THE CALLER'S OWN COPY, for the level as well as for the shape.
+		out.SessionVolume = new(big.Rat).Set(h.level)
 		out.Shares = make([]*big.Rat, len(h.shape))
 		for i, sh := range h.shape {
 			// THE CALLER'S OWN COPY. big.Rat is a pointer, and handing out the
@@ -620,6 +655,7 @@ func (s *Store) rebuildLocked(h *history) {
 		shape[i] = new(big.Rat)
 	}
 	w := Window{}
+	level := new(big.Rat)
 	contributing := 0
 	for _, v := range h.done {
 		sess := v.V
@@ -637,6 +673,7 @@ func (s *Store) rebuildLocked(h *history) {
 			continue
 		}
 		contributing++
+		level.Add(level, sess.total)
 		for i := 0; i < s.buckets; i++ {
 			if sess.vol[i].Sign() == 0 {
 				continue
@@ -649,8 +686,9 @@ func (s *Store) rebuildLocked(h *history) {
 		for i := range shape {
 			shape[i].Mul(shape[i], inv)
 		}
+		level.Mul(level, inv)
 	}
-	h.shape, h.window, h.dirty = shape, w, false
+	h.shape, h.level, h.window, h.dirty = shape, level, w, false
 }
 
 // String reports how many series are folded and the bins and horizon in force —

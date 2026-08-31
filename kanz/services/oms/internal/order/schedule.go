@@ -34,6 +34,26 @@ import (
 // cannot tell them apart.
 const ReasonUnknownExecutionAlgo = "UNKNOWN_EXECUTION_ALGO"
 
+// ReasonNoVolumeProfile refuses a volume-driven schedule this OMS cannot size
+// (#869).
+//
+// ITS OWN CODE, FOR THE REASON ReasonUnknownExecutionAlgo HAS ONE. There are now
+// three different problems an operator can have with one schedule, and a client
+// that cannot tell them apart retries the wrong one:
+//
+//	INVALID_SCHEDULE       your numbers do not work — change the command.
+//	UNKNOWN_EXECUTION_ALGO the command is fine; this BUILD cannot work it.
+//	NO_VOLUME_PROFILE      the command is fine and this build implements the
+//	                       algorithm; nothing here can SEE the volume it needs.
+//
+// The third is not a client error at all. VWAP and POV schedule against #867's
+// intraday volume profile, and this admission path passes algo.UnknownMarket —
+// the OMS holds no market data — so every volume-driven order is refused here
+// today. That is the fail-closed direction and it is deliberately loud: the
+// alternative, a flat curve, is TWAP, and an order labelled VWAP that TWAP worked
+// is a mislabelled execution the attribution plane cannot detect.
+const ReasonNoVolumeProfile = "NO_VOLUME_PROFILE"
+
 // algoNameOf translates order.v1's wire enum to the core's algorithm name.
 //
 // DERIVED FROM THE ENUM'S OWN NAME, NOT A SWITCH. A switch is a second list: add
@@ -75,14 +95,22 @@ func planFromOrder(st *orderpb.OrderState) (algo.Plan, error) {
 		return algo.Plan{}, fmt.Errorf("%w: order %s", schedule.ErrNoSchedule, st.GetOrderId())
 	}
 	p := algo.Plan{
-		Algo:   algoNameOf(sch.GetAlgo()),
-		Total:  dec.FromProto(st.GetOrderedQuantity()),
-		Start:  sch.GetWindowStart().AsTime().UTC(),
-		End:    sch.GetWindowEnd().AsTime().UTC(),
-		Slices: int(sch.GetSliceCount()),
+		Algo: algoNameOf(sch.GetAlgo()),
+		// THE INSTRUMENT IS PART OF THE SCHEDULE'S INPUTS NOW (#869), because a
+		// volume-driven algorithm asks the market view about a named instrument.
+		// It comes off the ORDER like every other input here, so two pods holding
+		// the same order still derive the same children.
+		InstrumentID: st.GetInstrumentId(),
+		Total:        dec.FromProto(st.GetOrderedQuantity()),
+		Start:        sch.GetWindowStart().AsTime().UTC(),
+		End:          sch.GetWindowEnd().AsTime().UTC(),
+		Slices:       int(sch.GetSliceCount()),
 	}
-	if cap := sch.GetMaxSliceQuantity(); cap != nil {
-		p.MaxSlice = dec.FromProto(cap)
+	if maxSlice := sch.GetMaxSliceQuantity(); maxSlice != nil {
+		p.MaxSlice = dec.FromProto(maxSlice)
+	}
+	if maxPart := sch.GetMaxParticipationRate(); maxPart != nil {
+		p.MaxParticipation = dec.FromProto(maxPart)
 	}
 	return p, nil
 }
@@ -141,14 +169,18 @@ func validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 	// against a name of its own, so this admission check cannot fall out of step
 	// with what the driver will actually be able to work.
 	plan := algo.Plan{
-		Algo:   algoNameOf(sch.GetAlgo()),
-		Total:  dec.FromProto(cmd.GetQuantity()),
-		Start:  sch.GetWindowStart().AsTime().UTC(),
-		End:    sch.GetWindowEnd().AsTime().UTC(),
-		Slices: int(sch.GetSliceCount()),
+		Algo:         algoNameOf(sch.GetAlgo()),
+		InstrumentID: cmd.GetInstrumentId(),
+		Total:        dec.FromProto(cmd.GetQuantity()),
+		Start:        sch.GetWindowStart().AsTime().UTC(),
+		End:          sch.GetWindowEnd().AsTime().UTC(),
+		Slices:       int(sch.GetSliceCount()),
 	}
-	if cap := sch.GetMaxSliceQuantity(); cap != nil {
-		plan.MaxSlice = dec.FromProto(cap)
+	if maxSlice := sch.GetMaxSliceQuantity(); maxSlice != nil {
+		plan.MaxSlice = dec.FromProto(maxSlice)
+	}
+	if maxPart := sch.GetMaxParticipationRate(); maxPart != nil {
+		plan.MaxParticipation = dec.FromProto(maxPart)
 	}
 	// NOTHING IS SENT AND NOTHING IS KNOWN ABOUT THE MARKET, and both are said
 	// rather than left blank. The order does not exist yet, so no slice of it can
@@ -161,6 +193,17 @@ func validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 		if errors.Is(err, algo.ErrUnknownAlgo) {
 			return reject(ReasonUnknownExecutionAlgo,
 				"the schedule names how order %s is worked and must not be defaulted: %s",
+				cmd.GetOrderId(), err.Error())
+		}
+		if errors.Is(err, algo.ErrVolumeUnknown) {
+			// THE ALGORITHM REFUSED RATHER THAN INVENTING A CURVE, which is #869's
+			// non-negotiable property arriving at the client under its own code.
+			// Reporting it as INVALID_SCHEDULE would send an operator to change a
+			// command that is correct.
+			return reject(ReasonNoVolumeProfile,
+				"order %s is worked by an algorithm that schedules against expected volume, and "+
+					"this OMS has no volume profile on the admission path — it is refused rather "+
+					"than worked against a flat curve, which would be TWAP under another name: %s",
 				cmd.GetOrderId(), err.Error())
 		}
 		return reject("INVALID_SCHEDULE", "%s", err.Error())
