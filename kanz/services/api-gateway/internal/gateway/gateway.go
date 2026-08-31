@@ -363,7 +363,19 @@ func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseAsOf reads the optional ?as_of=<RFC3339> query param into a proto
-// timestamp; absent ⇒ nil (the engine reads it as "latest").
+// timestamp; absent ⇒ nil, which is the only value the engine can answer.
+//
+// A PRESENT as_of IS REFUSED UPSTREAM, NOT HERE, AND THAT IS DELIBERATE (#859).
+// The engine is the single v1.Engine implementation and every caller converges
+// on it — services/mcp and services/copilot reach it over gRPC without passing
+// through this gateway at all — so refusing here would leave them with the
+// silent answer this refusal exists to end. The engine returns
+// ErrAsOfNotSupported, mapError renders it INVALID_ARGUMENT, and grpcStatus
+// below turns that into a 400 carrying the message, which names the field.
+//
+// This still parses and validates the parameter rather than ignoring it: a
+// malformed as_of is the caller's own error and is worth reporting as one, and
+// forwarding the field is what lets the refusal name it.
 func parseAsOf(r *http.Request) (*timestamppb.Timestamp, error) {
 	v := r.URL.Query().Get("as_of")
 	if v == "" {

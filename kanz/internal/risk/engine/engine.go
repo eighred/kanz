@@ -154,6 +154,23 @@ func (e *EngineImpl) Exposure(ctx context.Context, req v1.ExposureRequest) (v1.E
 	if req.PortfolioID == "" {
 		return v1.ExposureResponse{}, v1.ErrInvalidRequest
 	}
+	// A PINNED QUERY IS REFUSED, NOT QUIETLY ANSWERED FROM LIVE STATE (#859).
+	//
+	// exposureSet below reads store.Snapshot(id) — the latest applied state, and
+	// the only state this engine holds. Answering a historical as_of from it
+	// returns today's book stamped with today's timestamp, which is not a
+	// slightly-wrong answer but a confidently wrong one: internally consistent,
+	// unflagged, and indistinguishable from the real thing to a reconciliation
+	// or a regulatory as-of report.
+	//
+	// REFUSED HERE RATHER THAN AT THE GATEWAY, because the gateway is not the
+	// only caller. services/mcp and services/copilot build these requests
+	// directly against the gRPC surface, and a boundary check would leave them
+	// with the silent answer. EngineImpl is the single v1.Engine implementation,
+	// so this is the one place every path converges.
+	if !req.AsOf.IsZero() {
+		return v1.ExposureResponse{}, v1.ErrAsOfNotSupported
+	}
 	if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
 		return v1.ExposureResponse{}, err
 	}
@@ -181,6 +198,13 @@ func (e *EngineImpl) Measures(ctx context.Context, req v1.MeasuresRequest) (v1.M
 	}
 	if req.PortfolioID == "" {
 		return v1.MeasuresResponse{}, v1.ErrInvalidRequest
+	}
+	// Refused for the reason Exposure gives above (#859), and it matters more
+	// here: a MeasureSet carries VaR and the sensitivities a desk hedges on, so
+	// a pinned query answered from live state hands back today's risk numbers
+	// under a historical label.
+	if !req.AsOf.IsZero() {
+		return v1.MeasuresResponse{}, v1.ErrAsOfNotSupported
 	}
 	if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
 		return v1.MeasuresResponse{}, err
