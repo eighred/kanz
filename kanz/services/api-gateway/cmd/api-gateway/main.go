@@ -1246,6 +1246,13 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	chain := middleware.Chain(
 		middleware.Version(),
 		middleware.PreAuth(cfg.RateLimitPerSec, cfg.RateLimitBurst, ipResolver, gwMetrics),
+		// BODYLIMIT IS BEFORE SIGNING, WHICH IS THE WHOLE POINT (#887). Signing
+		// buffers the entire body and hashes it, and it runs before Auth — so
+		// without this an unauthenticated caller chose how much of this process's
+		// heap it allocated per request. It sits AFTER PreAuth because a source
+		// already refused for repeated auth failures should not have its headers
+		// examined at all, and both are cheaper than the HMAC they protect.
+		middleware.BodyLimit(middleware.MaxRequestBody),
 		middleware.Signing(cfg.SigningSecret),
 		middleware.Auth(authn, cfg.RequiredRole, logger),
 		gwMetrics.Measure(),

@@ -4,12 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+
+	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
 )
 
-// maxBodyBytes bounds a forwarded request body (a copilot question or a small
-// read body) — generous enough for any read surface, small enough to refuse an
-// abusive payload.
-const maxBodyBytes = 1 << 20 // 1 MiB
+// maxBodyBytes is middleware.MaxRequestBody, not a fourth copy of 1 MiB (#887).
+//
+// This number was declared THREE times across the api-gateway — here,
+// internal/orders and internal/proxy — each with its own comment justifying the
+// same ceiling. Three spellings of one bound is how it gets raised in one place
+// and not the others. The middleware package owns it because that layer applies
+// it BEFORE authentication, and an arch guard ties it to the edge's own
+// proxy-body-size so the two cannot drift.
+const maxBodyBytes = middleware.MaxRequestBody
 
 // ErrBackendUnavailable is returned by a Backend when the targeted upstream is
 // not wired (the per-service client is absent at the composition root). The

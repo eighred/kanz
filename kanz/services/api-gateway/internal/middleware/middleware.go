@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -319,7 +320,28 @@ func Signing(secret string) func(http.Handler) http.Handler {
 				writeError(w, http.StatusUnauthorized, "missing request signature")
 				return
 			}
-			body, _ := io.ReadAll(r.Body)
+			// THE READ ERROR IS NOT DISCARDABLE, and it used to be (#887).
+			//
+			// BodyLimit installs an http.MaxBytesReader ahead of this, so a body
+			// that overruns the ceiling — a chunked request, or one that lied about
+			// its Content-Length — fails HERE. Dropping the error left `body`
+			// holding a TRUNCATED prefix, which then failed Verify and was reported
+			// as "invalid request signature": the caller is sent to check its
+			// signing key for a request that was simply too big. "Too large" and
+			// "unsigned" are different answers.
+			//
+			// The same discard also turned a client that hung up mid-body into a
+			// signature failure, for the same reason.
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				var tooLarge *http.MaxBytesError
+				if errors.As(err, &tooLarge) {
+					writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+					return
+				}
+				writeError(w, http.StatusBadRequest, "could not read request body")
+				return
+			}
 			_ = r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			// THE SAME FUNCTION EVERY CALLER SIGNS WITH (#781). This used to

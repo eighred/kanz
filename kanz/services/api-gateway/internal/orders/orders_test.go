@@ -316,3 +316,42 @@ func TestTenantRoutedSubjectRefusesToMintAnEmptyTenantSegment(t *testing.T) {
 			"to no account and the order is dropped with no error anywhere", got)
 	}
 }
+
+// AN OVERSIZED ORDER BODY IS "TOO LARGE", NOT "MALFORMED" (#887).
+//
+// This reader used io.LimitReader(r.Body, maxBodyBytes) with no `+1`, so a body
+// over the ceiling was silently CUT at exactly the limit and the prefix handed
+// to protojson. The parse then failed on the truncated JSON and the caller was
+// told "invalid order body" — sent to hunt a syntax error it had not made, for a
+// request whose only fault was its size.
+//
+// The other two body readers in this service already used the +1 form. This one
+// and its approval twin did not, so one concept had two enforcements and the
+// weaker was on the order-submission path.
+//
+// middleware.BodyLimit refuses the same request a layer out, which makes this a
+// backstop rather than the primary bound. It still has to be right: a handler
+// mounted outside that chain would have only this, and "backstop" is not a
+// reason for a control to give the wrong answer.
+func TestAnOversizedOrderBodyIsTooLargeNotMalformed(t *testing.T) {
+	h := New(&fakePub{}, "", halt.OpenGate(nil))
+	mux := testMux()
+	h.Routes(mux)
+
+	// Valid JSON, and far past the ceiling. Truncation would leave an unbalanced
+	// document, which is exactly how this came back as a 400.
+	body := `{"orderId":"o1","note":"` + strings.Repeat("x", maxBodyBytes*2) + `"}`
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/orders", strings.NewReader(body)), "alice", "acme")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusBadRequest {
+		t.Fatalf("status = 400 for an oversized body: %s\n\n"+
+			"The body was truncated and the PARSE failed, so \"too large\" arrived as "+
+			"\"malformed\". Those are different answers and a caller cannot act on the wrong one.",
+			rr.Body.String())
+	}
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rr.Code)
+	}
+}
