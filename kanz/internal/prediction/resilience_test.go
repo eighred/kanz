@@ -78,7 +78,7 @@ func TestPredict_TimeoutWithCacheHitReportsTimeoutReason(t *testing.T) {
 	stub := &stubClient{resp: normalPred("AAPL", 1.23)}
 	opts := DefaultSyncClientOptions()
 	opts.Timeout = 5 * time.Millisecond
-	client := NewSyncClientWithStub(stub, opts)
+	client := newStubClient(t, stub, opts)
 
 	// Prime the cache with a successful NORMAL response (no delay, so it
 	// beats the 5ms timeout).
@@ -109,7 +109,7 @@ func TestPredict_OpenCircuitWithCacheHitReportsCircuitOpen(t *testing.T) {
 	opts := DefaultSyncClientOptions()
 	opts.BreakerThreshold = 2
 	opts.BreakerCooldown = 1 * time.Hour // stays open
-	client := NewSyncClientWithStub(stub, opts)
+	client := newStubClient(t, stub, opts)
 
 	// Prime cache with a NORMAL success (also resets the breaker).
 	if _, err := client.Predict(context.Background(), fvFor("AAPL")); err != nil {
@@ -147,7 +147,7 @@ func TestPredict_OpenCircuitWithCacheHitReportsCircuitOpen(t *testing.T) {
 // the stub, mirroring the empty-SubjectID validation path.
 func TestPredict_FeatureTranslationErrorReturnsDegradedNoStubCall(t *testing.T) {
 	stub := &stubClient{resp: normalPred("AAPL", 1.0)}
-	client := NewSyncClientWithStub(stub, DefaultSyncClientOptions())
+	client := newStubClient(t, stub, DefaultSyncClientOptions())
 
 	fv := fvFor("AAPL")
 	fv.Values["broken"] = FeatureValue{} // Kind == unspecified → translate error
@@ -170,7 +170,7 @@ func TestPredict_FeatureTranslationErrorReturnsDegradedNoStubCall(t *testing.T) 
 // consumer can reason about freshness even on the synthesized fallback.
 func TestPredict_NoCacheFallbackPropagatesAsOf(t *testing.T) {
 	stub := &stubClient{err: errors.New("down")}
-	client := NewSyncClientWithStub(stub, DefaultSyncClientOptions())
+	client := newStubClient(t, stub, DefaultSyncClientOptions())
 
 	fv := fvFor("AAPL")
 	pred, _ := client.Predict(context.Background(), fv)
