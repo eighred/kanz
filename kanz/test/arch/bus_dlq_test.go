@@ -232,6 +232,21 @@ var dlqExemptBroadcastOnlyConsumers = map[string]string{
 		"denies all business publish) and physically cannot hold the dlq.* " +
 		"publisher WithDLQ requires — there is no producer anywhere in this file, " +
 		"see busreader.go's own READ-ONLY doc comment.",
+	"test/load/orderflow/facts.go:watchFacts": "orderflow (#865): this Consumer makes " +
+		"TWO SubscribeReplay calls (order.order.accepted and order.order.rejected) and " +
+		"nothing else — there is no Subscribe call anywhere in test/load/orderflow, so the " +
+		"DLQ-routing branch of consumer.go's Subscribe path is unreachable from this call " +
+		"site. SubscribeReplay shares subscribeEphemeral with SubscribeBroadcast in " +
+		"pkg/bus/nats.go — one function, one enum apart — so the same fact holds: the " +
+		"ephemeral path never consults c.dlq and WithDLQ is structurally inert here.\n" +
+		"It also CANNOT hold a DLQ publisher, for a stronger reason than the monitor's: " +
+		"this whole package must not publish AT ALL. It is the write-path load harness, and " +
+		"test/arch/load_harness_front_door_test.go enforces that it submits orders through " +
+		"the api-gateway's POST /v1/orders rather than putting anything on the bus itself. " +
+		"Wiring a bus.Producer here to satisfy this guard would hand the harness the exact " +
+		"capability that guard exists to deny it.\n" +
+		"Nothing is lost: the handler folds an envelope's partition key into a map and " +
+		"returns nil on every path, so it has no terminal failure to park.",
 }
 
 func TestEveryBusConsumerWiresADLQ(t *testing.T) {

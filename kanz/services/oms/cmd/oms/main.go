@@ -603,6 +603,9 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// The dial-time venue capability counters (#405/#486/#742), built beside the
 	// code that increments them — see newVenueCapabilityCounters.
 	venueCounters := newVenueCapabilityCounters(obs.Registry)
+	// Whether this process fills against an exchange or against nothing (#865) —
+	// see newVenuePostureGauges for why a WARN alone was not enough.
+	venuePosture := newVenuePostureGauges(obs.Registry)
 
 	if bindings.Empty() {
 		logger.Warn("COLLATERAL IS SHARED — no venue-account bindings configured (OMS_VENUE_ACCOUNTS). Every portfolio trades whatever account its venue adapter holds, so they all margin against ONE pool per venue: a liquidation caused by one portfolio consumes the margin of all of them, and each ledger still reports its own cash intact")
@@ -624,7 +627,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// Venue set is composition-root-selected: SimVenue by default; Binance Spot +
 	// its user-data/reconciliation/ticker workers under -tags binance
 	// (configuredVenues is build-tag split, wired to the shared order store).
-	venues, catalogue, closeVenues, err := configuredVenues(ctx, cfg, store, producer, venueCounters, logger)
+	venues, catalogue, closeVenues, err := configuredVenues(ctx, cfg, store, producer, venueCounters, venuePosture, logger)
 	if err != nil {
 		return false, err
 	}

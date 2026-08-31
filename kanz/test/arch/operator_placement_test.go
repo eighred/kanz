@@ -377,22 +377,37 @@ func declText(t *testing.T, fset *token.FileSet, f *ast.File, name string) strin
 	return exprText(t, fset, v)
 }
 
-// stringConsts collects every `const name = "literal"` in a file, so an identifier used
-// as a map key can be resolved without a full type check.
+// stringConsts collects every file-level `name = "literal"` binding, so an
+// identifier used as a map key or as a published subject can be resolved without
+// a full type check.
+//
+// IT COVERS `var` AND MULTI-NAME SPECS, and that is not tidiness (#865). The
+// const-only, single-name version missed a mutation outright:
+// test/arch/load_harness_front_door_test.go asserts that no load harness
+// publishes an order COMMAND, and a mutation binding the subject to an
+// identifier survived it — the publish was there and the guard was green,
+// because the value was one hop away from the literal it looked for. A resolver
+// used by a default-deny guard has to resolve the ordinary shapes, and `var x =
+// "s"` and `const a, b = "s", "t"` are both ordinary.
 func stringConsts(f *ast.File) map[string]string {
 	out := map[string]string{}
 	for _, d := range f.Decls {
 		gd, ok := d.(*ast.GenDecl)
-		if !ok || gd.Tok != token.CONST {
+		if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
 			continue
 		}
 		for _, spec := range gd.Specs {
 			vs, ok := spec.(*ast.ValueSpec)
-			if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+			if !ok {
 				continue
 			}
-			if s, ok := literalString(vs.Values[0]); ok {
-				out[vs.Names[0].Name] = s
+			for i, name := range vs.Names {
+				if i >= len(vs.Values) {
+					continue
+				}
+				if s, ok := literalString(vs.Values[i]); ok {
+					out[name.Name] = s
+				}
 			}
 		}
 	}
