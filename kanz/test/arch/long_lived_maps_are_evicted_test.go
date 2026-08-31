@@ -261,6 +261,13 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"keyed by currency, and the currency list is parsed once at startup from " +
 			"RISK_ENGINE_CALIBRATION_RATES — there is no runtime path that adds one. Per-key retention " +
 			"is pit.Put's horizon, enforced by TestPricingRetentionIsBounded.", ""},
+	"services/risk-engine/internal/app: CalibrationCoverage.last": {boundedByConstruction,
+		"keyed by CURRENCY, and the only writer is curve.Calibrator.OnCoverage, which the composition " +
+			"root drives once per scheduled job. The job set is src.Currencies() over the strip parsed " +
+			"from RISK_ENGINE_CALIBRATION_RATES at startup, so the key space is the same one that bounds " +
+			"curve.Store.byCurrency above and is decided before the subscription exists. The VALUE is a " +
+			"short state string REPLACED on every observation rather than appended to — the map is a " +
+			"per-currency last-logged marker, so a currency whose strip flaps rewrites one entry.", ""},
 	"internal/risk/pricing/livequote: LiveQuotes.wanted": {boundedByConstruction,
 		"the admitted instrument set itself, built by New from the strip parsed out of " +
 			"RISK_ENGINE_CALIBRATION_RATES and never written again — no method mutates it, so its size " +

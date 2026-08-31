@@ -765,7 +765,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// either" was indistinguishable from a healthy service.
 	scheduledCalibrations := map[string]string{}
 	if cfg.CalibrationInterval > 0 && cfg.CalibrationRates != "" {
-		if err := startCalibration(ctx, cfg, client, busMetrics, logger, curveStore); err != nil {
+		if err := startCalibration(ctx, cfg, client, busMetrics, logger, obs.Registry, curveStore); err != nil {
 			logger.Error("calibration scheduler disabled", "err", err)
 		} else {
 			scheduledCalibrations["curve"] = "rates"
@@ -867,7 +867,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 // cadence. It returns an error only on a setup failure (bad reference spec /
 // consumer) — the caller logs it and continues, since calibration is auxiliary
 // to core risk ingestion.
-func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSClient, busMetrics *bus.BusMetrics, logger *slog.Logger, store *curve.Store) error {
+func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSClient, busMetrics *bus.BusMetrics, logger *slog.Logger, reg prometheus.Registerer, store *curve.Store) error {
 	instruments, err := livequote.ParseRateInstruments(cfg.CalibrationRates)
 	if err != nil {
 		return err
@@ -902,7 +902,21 @@ func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSCl
 	}
 
 	src := livequote.NewSnapshotRateSource(cache, instruments)
-	cal := &curve.Calibrator{Source: src, Store: store, Interp: curve.LinearZero}
+	// WHAT EACH CURVE IS ACTUALLY BUILT FROM (#908). The source skips a configured
+	// instrument it has no usable price for, the calibrator refuses only an EMPTY
+	// set, and the store publishes whatever survives — so without this observer a
+	// curve missing its long end is byte-for-byte as trustworthy-looking as a
+	// complete one, forever, from one typo in the reference spec. OnCoverage fires
+	// on every refresh including the failed and the healthy ones; app.CalibrationCoverage
+	// turns it into the gauges an operator queries and the one warning that names
+	// the dead instrument.
+	coverage := app.NewCalibrationCoverage(reg, logger)
+	cal := &curve.Calibrator{
+		Source:     src,
+		Store:      store,
+		Interp:     curve.LinearZero,
+		OnCoverage: coverage.Observe,
+	}
 	var jobs []schedule.Job
 	for _, ccy := range src.Currencies() {
 		ccy := ccy
@@ -927,7 +941,11 @@ func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSCl
 		// The quote cache's bound, for the same reason: the subscription is a
 		// wildcard, so this is the only place an operator can read which
 		// instruments this pod actually retains quotes for (#894).
-		"cached_instruments", cache.Universe())
+		"cached_instruments", cache.Universe(),
+		// And how many of them each currency's curve is SUPPOSED to be built from
+		// (#908) — the denominator kanz_risk_calibration_strip_quoted is read
+		// against, stated once from configuration before anything has ticked.
+		"configured_strip", src.ConfiguredCurrencies())
 	go func() { _ = sched.Run(ctx) }()
 	return nil
 }
