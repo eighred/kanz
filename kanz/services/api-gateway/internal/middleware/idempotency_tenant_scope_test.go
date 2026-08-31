@@ -24,7 +24,7 @@ import (
 // collide between tenants by accident.
 func TestIdempotencyDoesNotReplayAcrossTenants(t *testing.T) {
 	var served int
-	h := Idempotency(time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := IdempotencyWith(nil, time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		served++
 		p := PrincipalFromContext(r.Context())
 		w.WriteHeader(http.StatusAccepted)

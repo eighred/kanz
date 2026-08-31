@@ -33,6 +33,7 @@ import (
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 
+	"github.com/eighred/kanz/internal/clientip"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/platform/httpserver"
@@ -1179,11 +1180,72 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	}
 	gwMetrics := middleware.NewGatewayMetrics(obs.Registry)
 
-	// Outermost first: negotiate version → verify signature → authenticate →
-	// per-tenant request metrics → per-tenant quota (rate + admission, needs the
-	// principal) → idempotency replay.
+	// THE KEY THE PRE-AUTH LIMITER CHARGES A FAILURE TO (#835). Unconfigured, it
+	// is the TCP peer — which behind the ingress controller is the controller, so
+	// every external caller shares one bucket. Configured, it is the address the
+	// edge forwarded, honoured only from a peer in the trusted set.
+	ipResolver, err := clientip.NewResolver(cfg.TrustedProxyHeader, cfg.TrustedProxies)
+	if err != nil {
+		logger.Error("api-gateway: trusted proxy CIDRs are unparseable", "err", err,
+			"trusted_proxies", cfg.TrustedProxies)
+		return nil, err
+	}
+
+	// SAID OUT LOUD, BOTH WAYS. "Configured and ignored" and "not configured" must
+	// not look the same in a log, and neither must "limiting" and "not limiting" —
+	// which is the whole reason #835 existed: a complete rate limiter sat in the
+	// middleware package for months, called by nothing, reading as a live control.
+	switch {
+	case cfg.RateLimitPerSec <= 0:
+		logger.Warn("api-gateway: NO PRE-AUTH RATE LIMIT — unauthenticated callers reach signature "+
+			"verification and token validation unbounded. Set API_GATEWAY_RATE_LIMIT_PER_SEC",
+			"pre_auth_limit", false)
+	default:
+		logger.Info("api-gateway: pre-auth rate limit enabled",
+			"per_sec", cfg.RateLimitPerSec, "burst", cfg.RateLimitBurst,
+			// false ⇒ the key is the TCP peer, so callers behind one edge share a
+			// bucket. Legitimate traffic never debits it, so that is a precision
+			// cost rather than a throttle — but an operator must be able to see
+			// which of the two postures this pod is in.
+			"keyed_on_forwarded_header", ipResolver.Trusts())
+	}
+
+	// Outermost first: negotiate version → bound unauthenticated failures per
+	// source → verify signature → authenticate → per-tenant request metrics →
+	// per-tenant quota (rate + admission, needs the principal) → idempotency
+	// replay.
+	//
+	// PreAuth IS SECOND, NOT FIRST, and the ordering is deliberate on both sides.
+	// It must sit AHEAD of Signing and Auth because those two are the cost it
+	// exists to bound — an HMAC over the whole body and a token validation. It
+	// sits BEHIND Version so every response this gateway emits, refusals included,
+	// still carries the X-API-Version contract; version negotiation is a header
+	// compare and a map write, which is not a cost anyone can flood a pod with.
+	//
+	// It is a DIFFERENT control from Quota below, not a duplicate: Quota is
+	// per-TENANT and therefore cannot run until a principal exists, which is
+	// exactly why a caller who never authenticates was bounded by nothing.
+	//
+	// # ITS BUDGET IS THE OPERATOR'S OWN PER-TENANT BUDGET, AND NOT A NEW NUMBER
+	//
+	// PreAuth is handed cfg.RateLimitPerSec/RateLimitBurst — the same pair Quota
+	// applies below (50/s, burst 100 in infra/deploy/api-gateway-deploy.yaml).
+	// That is a derivation, not a coincidence: PreAuth spends a token only on a
+	// 401, and a request that answered 401 would, had it authenticated, have been
+	// charged against exactly this budget one hop later. Setting the failure
+	// allowance equal to the request allowance therefore cannot refuse anything
+	// the operator's own quota would have admitted, while still bounding a source
+	// that produces nothing BUT failures.
+	//
+	// A separate knob would be a second number to keep in step with this one, and
+	// a threshold nobody can derive is a rule that gets disabled on its first
+	// false page. The infra/deploy ingress already carries the outer bound for the
+	// public path (nginx limit-rps: 100 per source IP); this is the bound for the
+	// paths that ingress never sees — the browser route through web-bff, and any
+	// in-cluster peer the NetworkPolicy admits to :8080.
 	chain := middleware.Chain(
 		middleware.Version(),
+		middleware.PreAuth(cfg.RateLimitPerSec, cfg.RateLimitBurst, ipResolver, gwMetrics),
 		middleware.Signing(cfg.SigningSecret),
 		middleware.Auth(authn, cfg.RequiredRole, logger),
 		gwMetrics.Measure(),

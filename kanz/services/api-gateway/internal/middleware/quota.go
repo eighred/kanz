@@ -175,13 +175,24 @@ func (q *quota) acquire(key string, lim Limits) (func(), bool) {
 	}, true
 }
 
+// anonymousTenant labels a request the gateway could not attribute to a tenant.
+//
+// It is deliberately distinct from observability.SystemTenant — an
+// unauthenticated caller is not the platform — and it is a named constant
+// because PreAuth reports under it too: a refusal that happens BEFORE
+// authentication has no tenant to carry, and inventing one would be a label that
+// claims knowledge the refusal did not have. The two producers are
+// distinguishable in the same series by their code
+// (kanz_gateway_rate_limited_total is incremented by both; PreAuth's refusals
+// are the ones with no matching authenticated request), and one honest label
+// beats a second parallel metric.
+const anonymousTenant = "anonymous"
+
 // tenantLabel is the metric/quota tenant for a request: the authenticated
-// tenant, or "anonymous" when no principal carries one (auth-disabled/dev). It
-// is deliberately distinct from observability.SystemTenant — an unauthenticated
-// caller is not the platform.
+// tenant, or anonymousTenant when no principal carries one (auth-disabled/dev).
 func tenantLabel(r *http.Request) string {
 	if p := PrincipalFromContext(r.Context()); p != nil && p.Tenant != "" {
 		return p.Tenant
 	}
-	return "anonymous"
+	return anonymousTenant
 }

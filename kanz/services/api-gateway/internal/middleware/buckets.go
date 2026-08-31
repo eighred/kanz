@@ -29,16 +29,25 @@ type bucket struct {
 	burst  float64
 }
 
-// take lazily refills the bucket by elapsed time (no background goroutine, so
-// an idle gateway holds no timers), caps it at burst, and consumes one token —
-// returning false when empty. Caller holds the owning mutex.
-func (b *bucket) take(now time.Time, perSec, burst float64) bool {
+// refill lazily credits the bucket by elapsed time (no background goroutine, so
+// an idle gateway holds no timers) and caps it at burst. It is idempotent with
+// respect to the clock — calling it twice at the same instant credits nothing
+// the second time — which is what lets the pre-auth limiter inspect a bucket on
+// the way in and debit it on the way out without double-counting. Caller holds
+// the owning mutex.
+func (b *bucket) refill(now time.Time, perSec, burst float64) {
 	b.perSec, b.burst = perSec, burst
 	b.tokens += now.Sub(b.last).Seconds() * perSec
 	if b.tokens > burst {
 		b.tokens = burst
 	}
 	b.last = now
+}
+
+// take refills and consumes one token, returning false when empty. Caller holds
+// the owning mutex.
+func (b *bucket) take(now time.Time, perSec, burst float64) bool {
+	b.refill(now, perSec, burst)
 	if b.tokens < 1 {
 		return false
 	}
@@ -104,6 +113,60 @@ func (s *bucketSet) allow(key string, perSec, burst float64) bool {
 	}
 	s.buckets[key] = &bucket{tokens: burst - 1, last: now, perSec: perSec, burst: burst}
 	return true
+}
+
+// hasToken reports whether key could spend a token now, WITHOUT spending one.
+//
+// # WHY THE PRE-AUTH LIMITER NEEDS A CHECK THAT DOES NOT CONSUME
+//
+// PreAuth debits a source only for requests that fail to authenticate, so the
+// verdict is known on the way OUT while the refusal has to happen on the way IN
+// — before the HMAC verification and the JWKS check that are the cost being
+// bounded. Consuming on the way in and refunding on the way out would look
+// equivalent and is not: N legitimate requests IN FLIGHT SIMULTANEOUSLY would
+// hold N tokens at once, so a burst of concurrent authenticated traffic wider
+// than the burst size would 429 itself. Checking without consuming makes the
+// bucket a function of failures alone, which is the whole property.
+//
+// AN UNSEEN KEY IS FULL BY DEFINITION AND IS NOT CREATED HERE. A source that has
+// never failed occupies no memory, so a flood of distinct source keys that all
+// authenticate cannot grow this map at all — only failures allocate.
+func (s *bucketSet) hasToken(key string, perSec, burst float64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, live := s.buckets[key]
+	if !live {
+		return true
+	}
+	b.refill(s.now(), perSec, burst)
+	return b.tokens >= 1
+}
+
+// debit spends one token on key, creating the bucket if this is its first debit.
+//
+// It CLAMPS AT ZERO rather than going negative. A negative balance would extend
+// the penalty past the configured refill time by however much concurrency was in
+// flight when the bucket emptied — a punishment whose size nothing chose. Zero is
+// the floor the burst/rate pair already describes.
+func (s *bucketSet) debit(key string, perSec, burst float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	b, live := s.buckets[key]
+	if !live {
+		// SWEPT ONLY WHEN A NEW KEY WOULD CROSS THE CEILING, as in allow.
+		if len(s.buckets) >= s.max {
+			s.gc(now)
+		}
+		s.buckets[key] = &bucket{tokens: burst - 1, last: now, perSec: perSec, burst: burst}
+		return
+	}
+	b.refill(now, perSec, burst)
+	if b.tokens >= 1 {
+		b.tokens--
+		return
+	}
+	b.tokens = 0
 }
 
 // gc sheds refilled buckets, then the least-recently-used until the map is under

@@ -14,7 +14,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/eighred/kanz/services/web-bff/internal/clientip"
+	"github.com/eighred/kanz/internal/clientip"
 )
 
 func req(t *testing.T, remoteAddr, header, value string) *http.Request {

@@ -69,9 +69,15 @@ type Minter interface {
 //
 // IT IS A REQUIRED DEPENDENCY, not an option, because nothing upstream provides
 // one. The gateway's Quota middleware sits AFTER its auth middleware, so an
-// anonymous request never reaches it, and middleware.RateLimit is wired nowhere.
-// A login endpoint with no limiter is an offline password-guessing oracle that
-// answers as fast as Argon2id allows.
+// anonymous request never reaches it. A login endpoint with no limiter is an
+// offline password-guessing oracle that answers as fast as Argon2id allows.
+//
+// THE GATEWAY NOW HAS A PRE-AUTH LIMITER OF ITS OWN (middleware.PreAuth, #835)
+// AND IT DOES NOT COVER THIS SERVICE, which is worth saying because the sentence
+// this replaces — "middleware.RateLimit is wired nowhere" — no longer parses.
+// identity cannot sit behind the gateway at all: /login and /invites/redeem
+// exist to be reached by people holding no token. Nothing about the gateway's
+// chain reaches a request that never goes through the gateway.
 type Limiter interface {
 	// Allow reports whether an attempt keyed by k may proceed.
 	Allow(k string) bool

@@ -36,9 +36,19 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "1m"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    # The gateway's own limiter (API_GATEWAY_RATE_LIMIT_PER_SEC) is per-principal and
-    # runs after auth. This one is per-source-IP and runs before a request reaches a
-    # pod — it is what an unauthenticated flood hits.
+    # THE OUTER OF TWO PRE-AUTH BOUNDS, AND IT COVERS ONLY THIS PATH (#835).
+    #
+    # This one is per-source-IP and runs before a request reaches a pod at all, which
+    # is what makes it the right place for an internet flood: nothing is spent inside
+    # the estate. The gateway's Quota (API_GATEWAY_RATE_LIMIT_PER_SEC) is per-TENANT
+    # and runs after auth, so it never sees an unauthenticated caller.
+    #
+    # It is not the whole answer, and that is why middleware.PreAuth now exists in the
+    # gateway process too. Two live paths never traverse this Ingress: the browser
+    # route (cloudflared → web-bff → api-gateway, infra/edge/cloudflared-config.yml)
+    # and any in-cluster peer a NetworkPolicy admits to :8080 — the observability
+    # namespace among them. A bound that lives only in an annotation also leaves with
+    # a manifest edit, silently, on a path that fronts POST /v1/orders.
     nginx.ingress.kubernetes.io/limit-rps: "100"
     # THIS INGRESS IS A DEADLINE ON EVERY CALL, AND IT MUST BE THE LOOSEST ONE.
     #

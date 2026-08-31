@@ -28,7 +28,7 @@ func TestIdempotencyRefusesAConcurrentDuplicate(t *testing.T) {
 	var mu sync.Mutex
 	served := 0
 	release := make(chan struct{})
-	h := Idempotency(time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := IdempotencyWith(nil, time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		served++
 		first := served == 1
@@ -89,7 +89,7 @@ func TestIdempotencyRefusesAConcurrentDuplicate(t *testing.T) {
 // must not replay the first route's body — replaying a submit's response for a
 // cancel is the cross-tenant defect wearing a different hat.
 func TestIdempotencyScopesToTheRoute(t *testing.T) {
-	h := Idempotency(time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := IdempotencyWith(nil, time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{"route":"` + r.URL.Path + `"}`))
 	}))
@@ -112,7 +112,7 @@ func TestIdempotencyScopesToTheRoute(t *testing.T) {
 // a client, and two clients of the same fund have no way to coordinate.
 func TestIdempotencyScopesToTheSubject(t *testing.T) {
 	var served int
-	h := Idempotency(time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := IdempotencyWith(nil, time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		served++
 		w.WriteHeader(http.StatusAccepted)
 	}))
@@ -135,7 +135,7 @@ func TestIdempotencyScopesToTheSubject(t *testing.T) {
 // believes it asked for.
 func TestIdempotencyReleasesTheKeyAfterAServerError(t *testing.T) {
 	var served int
-	h := Idempotency(time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := IdempotencyWith(nil, time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		served++
 		if served == 1 {
 			w.WriteHeader(http.StatusBadGateway)
@@ -166,7 +166,7 @@ func TestIdempotencyReleasesTheKeyAfterAServerError(t *testing.T) {
 // so a retry must read that decision rather than re-running it.
 func TestIdempotencyHoldsTheKeyAfterAClientError(t *testing.T) {
 	var served int
-	h := Idempotency(time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := IdempotencyWith(nil, time.Minute, 100)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		served++
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":"bad instrument"}`))
