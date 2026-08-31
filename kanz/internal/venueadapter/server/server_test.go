@@ -38,12 +38,16 @@ type fakeVenue struct {
 	// cancel was dispatched — the whole point of the In-Flight Certainty seam.
 	trackedWhenCancelled int
 	closes               *execution.CloseRegistry
+	// execCalls counts placements. A test that asserts a refusal is only worth
+	// anything if it also proves the exchange was never asked.
+	execCalls int
 }
 
 func (f *fakeVenue) MIC() string     { return "XBIN" }
 func (f *fakeVenue) Account() string { return "binance-main" }
 
 func (f *fakeVenue) Execute(context.Context, *orderpb.OrderState) ([]*orderpb.Fill, error) {
+	f.execCalls++
 	if f.execErr != nil {
 		return nil, f.execErr
 	}
