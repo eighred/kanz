@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,8 +14,10 @@ import (
 	"time"
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	comp "github.com/eighred/kanz/internal/compliance"
@@ -62,6 +65,27 @@ func (b *recordingBus) Publish(_ context.Context, e bus.Event) error {
 	return nil
 }
 
+// LastOnSubject makes this double a COMPACTED subject rather than a log: it
+// answers with the newest event recorded for the subject, which is exactly what
+// a MaxMsgsPerSubject=1 stream retains. Without it the publisher would be reading
+// a source that disagrees with the one it writes, and the mandate set it merges
+// (#916) would be tested against a fiction.
+func (b *recordingBus) LastOnSubject(_ context.Context, subject string) (*envelopepb.Envelope, []byte, uint64, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i := len(b.events) - 1; i >= 0; i-- {
+		if b.events[i].Subject != subject {
+			continue
+		}
+		payload, err := proto.Marshal(b.events[i].Payload)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		return nil, payload, uint64(i + 1), nil
+	}
+	return nil, nil, 0, fmt.Errorf("%w %q", bus.ErrNoRetainedMessage, subject)
+}
+
 func (b *recordingBus) published() []bus.Event {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -83,7 +107,7 @@ func newRig(t *testing.T, opts ...api.Option) *rig {
 		now:   time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC),
 	}
 	all := append([]api.Option{api.WithClock(func() time.Time { return r.now })}, opts...)
-	r.srv = api.New(r.store, comp.NewPublisher(r.bus),
+	r.srv = api.New(r.store, comp.NewPublisher(r.bus, r.bus),
 		slog.New(slog.NewTextHandler(io.Discard, nil)), all...)
 	return r
 }

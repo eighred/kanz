@@ -80,7 +80,7 @@ const maxBodyBytes = 1 << 20 // 1 MiB
 // can forge one, and the zero value is refused by Covers. Faking the bus does not
 // fake the control.
 type Publisher interface {
-	Publish(ctx context.Context, m, previous *compliancepb.Mandate, approval dualcontrol.Approval, reason string) error
+	Publish(ctx context.Context, m *compliancepb.Mandate, approval dualcontrol.Approval, reason string) error
 }
 
 // Server serves the mandate-change routes.
@@ -406,12 +406,14 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// previous IS NIL, and that is honest rather than lazy. This process holds a
-	// mandate registry, but it is the POST-TRADE MONITOR's armed view and it is
-	// filled by a replay that may still be in flight — a previous_value read from
-	// it could disagree with the compacted stream, and an INVENTED previous is
-	// worse than an absent one. The mandate's own version carries the ordering.
-	if err := s.publisher.Publish(r.Context(), prop.Mandate, nil, approval, prop.Reason); err != nil {
+	// THE PUBLISHER READS THE SUBJECT ITSELF (#916). It used to be handed a
+	// `previous` here and this call passed nil, because the only mandate view this
+	// process holds is the POST-TRADE MONITOR's armed replay — a replica's cache,
+	// not the stream. That is still true, and it is now also insufficient for a
+	// different reason: the value published is the SET a portfolio's subject must
+	// carry, so it has to be merged into what the stream actually holds rather than
+	// into anything resident here.
+	if err := s.publisher.Publish(r.Context(), prop.Mandate, approval, prop.Reason); err != nil {
 		// THE PROPOSAL IS ALREADY CLAIMED AND NOTHING WAS PUBLISHED. Say so loudly:
 		// the proposer must re-propose, and an operator needs to know why a decision
 		// two people made did not take effect. A quiet 500 here is a mandate change

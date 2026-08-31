@@ -85,7 +85,7 @@ func TestARestartedGateArmsItselfWithEveryMandateInForce(t *testing.T) {
 	alpha, beta := "pf-alpha-"+suffix, "pf-beta-"+suffix
 
 	// THE OPERATOR PUTS TWO PORTFOLIOS UNDER MANDATE — before anything is listening.
-	pub := comp.NewPublisher(producer)
+	pub := comp.NewPublisher(producer, client)
 	for _, pf := range []string{alpha, beta} {
 		m := &compliancepb.Mandate{
 			MandateId:   "m-" + pf,
@@ -98,7 +98,7 @@ func TestARestartedGateArmsItselfWithEveryMandateInForce(t *testing.T) {
 		// longer accepts a lone actor, so a test that wants to publish has to go
 		// through the same two-person path production does.
 		approval := mustApprove(t, m, "arming test")
-		if err := pub.Publish(ctx, m, nil, approval, "arming test"); err != nil {
+		if err := pub.Publish(ctx, m, approval, "arming test"); err != nil {
 			t.Fatalf("publish %s: %v", pf, err)
 		}
 	}

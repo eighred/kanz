@@ -195,7 +195,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"mandate in force is unchanged, and the proposer must propose again. Valid only at "+
 			"replicas: 1, which this deployment is pinned to for the monitor's own reasons.")
 	mandateSrv := httpserver.New(cfg.APIListen,
-		api.New(proposals, comp.NewPublisher(producer), logger), httpserver.Standard())
+		// The CLIENT is the second argument, not the producer: publishing a mandate
+		// is a read-modify-write of the portfolio's compacted subject, and the read
+		// is the client's (#916). Without it every approval refuses.
+		api.New(proposals, comp.NewPublisher(producer, client), logger), httpserver.Standard())
 	go func() {
 		logger.Info("compliance mandate API listening", "addr", cfg.APIListen)
 		if err := mandateSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

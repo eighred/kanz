@@ -156,7 +156,7 @@ func TestAMandateRefusesAnOrderOverARealSpine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := comp.NewPublisher(producer).Publish(ctx, mandate, nil, approval, "#245"); err != nil {
+	if err := comp.NewPublisher(producer, client).Publish(ctx, mandate, approval, "#245"); err != nil {
 		t.Fatalf("publish mandate: %v", err)
 	}
 

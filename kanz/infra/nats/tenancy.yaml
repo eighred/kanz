@@ -235,6 +235,12 @@ data:
           # JetStream admin API (stream/consumer create, delete, purge) — a
           # far bigger privilege than the tool needs or than least-privilege
           # calls for, so it is deliberately withheld.
+          #
+          # kanz-mandate IS NO LONGER PUBLISH-ONLY, and it is the one exception
+          # (#916). Its publish is a READ-MODIFY-WRITE of a compacted subject:
+          # see its entry below. It gets THREE NAMED READ SUBJECTS under
+          # $JS.API, not `$JS.API.>` — the paragraph above still holds, and the
+          # admin API is still withheld.
           {
             user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-halt"
             permissions: {
@@ -253,10 +259,59 @@ data:
           # once it has its own ServiceAccount are declared here now so the
           # broker side does not have to change again when that manifest
           # ships.
+          #
+          # IT ALSO READS THE SUBJECT IT IS ABOUT TO WRITE (#916), which is why
+          # this is the only operator CLI with anything under $JS.API. The
+          # MANDATE stream keeps ONE message per (tenant, portfolio) subject and
+          # never ages it out, and that message now carries the mandate IN FORCE
+          # plus every mandate an operator has SCHEDULED. Writing it therefore
+          # means merging into it: publishing only the mandate in --file deleted
+          # the rest, and scheduling a change that way left the portfolio
+          # UNGOVERNED at the next restart — admitted with no constraints under
+          # OMS_REQUIRE_MANDATE=false.
+          #
+          # THE FOUR SUBJECTS ARE NAMED, NOT `$JS.API.>`. They are what
+          # bus.NATSClient.LastOnSubject issues and nothing else:
+          #
+          #   $JS.API.STREAM.NAMES              which stream owns the subject
+          #   $JS.API.STREAM.INFO.MANDATE       bind that stream
+          #   $JS.API.DIRECT.GET.MANDATE.>      fetch its last message
+          #   $JS.API.STREAM.MSG.GET.MANDATE    the same, without AllowDirect
+          #
+          # THE LIST WAS MEASURED, NOT REASONED. Its first version omitted
+          # DIRECT.GET and was WRONG: nats.go routes GetLastMsgForSubject to
+          # $JS.API.DIRECT.GET.{stream}.{subject} whenever the stream advertises
+          # AllowDirect, and MANDATE does (allow_direct: true). Against a broker
+          # carrying exactly the three-subject list, every mandate publish
+          # refused. STREAM.MSG.GET stays because it is the path taken on a
+          # stream without AllowDirect, and a grant that only works while one
+          # stream flag holds is a grant that breaks when somebody clears it.
+          #
+          # All four are READS of one stream in this account. None creates,
+          # deletes, purges, or consumes anything, so the least-privilege
+          # argument above is intact — the admin API is still withheld.
+          #
+          # OMITTING ANY OF THEM DOES NOT FAIL QUIETLY, and that is by design
+          # (#787/#788). The read is refused, the publisher refuses to write a
+          # set it could not merge, and `kanz-mandate approve` exits non-zero
+          # naming the subject — rather than publishing a set that deletes the
+          # mandate in force. It surfaces as a TIMEOUT rather than an error,
+          # because NATS reports a permissions violation asynchronously on the
+          # connection and the request never gets an answer; LastOnSubject bounds
+          # the read by PublishTimeout so that is seconds, not the operator's
+          # whole deadline.
           {
             user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-mandate"
             permissions: {
-              publish: { allow: ["compliance.mandate.changed.>"] }
+              publish: {
+                allow: [
+                  "compliance.mandate.changed.>",
+                  "$JS.API.STREAM.NAMES",
+                  "$JS.API.STREAM.INFO.MANDATE",
+                  "$JS.API.DIRECT.GET.MANDATE.>",
+                  "$JS.API.STREAM.MSG.GET.MANDATE",
+                ]
+              }
               subscribe: { allow: ["_INBOX.>"] }
             }
           }

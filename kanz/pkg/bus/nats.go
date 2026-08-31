@@ -13,6 +13,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 )
 
 // defaultDrainGrace bounds how long Subscribe's shutdown waits for a JetStream
@@ -887,6 +889,82 @@ func (c *NATSClient) subscribeEphemeral(ctx context.Context, subject string, pol
 
 var _ BroadcastSubscriber = (*NATSClient)(nil)
 var _ ReplaySubscriber = (*NATSClient)(nil)
+
+// ErrNoRetainedMessage means the subject holds nothing — no message has ever
+// been published there, or every one has been removed. It is a legitimate answer
+// on a compacted state subject (the portfolio has no mandate yet), NOT a
+// transport failure, so it is a sentinel rather than an error string.
+var ErrNoRetainedMessage = errors.New("bus: no message retained on subject")
+
+// LastOnSubject returns the message CURRENTLY RETAINED on a compacted subject,
+// with the stream sequence it sits at.
+//
+// # It reads state, and only state
+//
+// On a stream configured MaxMsgsPerSubject=1 the last message on a subject is
+// the whole value — the MANDATE and WEALTH and POSITION streams are all shaped
+// that way deliberately (infra/nats/bootstrap-job.yaml). A publisher that has to
+// MERGE into that value rather than replace it has no other way to learn what is
+// there: a subscription would arm a consumer and change the delivery state of a
+// stream this caller only wants to read one message from.
+//
+// The sequence comes back because it is the input to Event.ExpectedLastSubjectSeq
+// — reading, merging and writing back without it is a read-modify-write that
+// silently loses a concurrent writer's merge, which on a mandate subject is a
+// mandate that disappears off a never-aging stream (#916).
+//
+// The BROKER PERMISSIONS this needs are FOUR named read subjects, and the list
+// was MEASURED against a broker configured with exactly them rather than reasoned
+// out — the first three-subject guess was wrong:
+//
+//	$JS.API.STREAM.NAMES               resolve which stream owns the subject
+//	$JS.API.STREAM.INFO.{stream}       bind that stream
+//	$JS.API.DIRECT.GET.{stream}.>      fetch the message on a stream with
+//	                                   AllowDirect (which MANDATE has)
+//	$JS.API.STREAM.MSG.GET.{stream}    the same fetch without AllowDirect
+//
+// The last two are alternatives the CLIENT chooses, not the caller: nats.go
+// routes GetLastMsgForSubject to DIRECT.GET whenever the stream advertises
+// AllowDirect, so granting only STREAM.MSG.GET is refused on exactly the streams
+// this is for. All four are READS of one account's own streams and none creates,
+// deletes, purges or consumes anything — which is why a caller granted them is
+// still not granted the $JS.API.> management surface (infra/nats/tenancy.yaml).
+//
+// A MISSING GRANT IS A TIMEOUT, NOT A REFUSAL, because NATS reports a permissions
+// violation asynchronously on the connection while the request simply never gets
+// an answer. That is why the read is bounded by PublishTimeout rather than by the
+// caller's context: without the bound a denied grant consumes the caller's whole
+// deadline before it is reported, which on the operator CLI reads as a hung tool
+// rather than as a missing permission.
+//
+// ErrNoRetainedMessage distinguishes "nothing is there" from "the read failed".
+// A caller merging into the value MUST NOT treat a failed read as an empty one:
+// on the mandate path that turns a broker hiccup into a published set that drops
+// every version already in force.
+func (c *NATSClient) LastOnSubject(ctx context.Context, subject string) (*envelopepb.Envelope, []byte, uint64, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.cfg.PublishTimeout)
+	defer cancel()
+	streamName, err := c.streamForSubject(ctx, subject)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	stream, err := c.js.Stream(ctx, streamName)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("nats: stream %q: %w", streamName, err)
+	}
+	msg, err := stream.GetLastMsgForSubject(ctx, subject)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrMsgNotFound) {
+			return nil, nil, 0, fmt.Errorf("%w %q", ErrNoRetainedMessage, subject)
+		}
+		return nil, nil, 0, fmt.Errorf("nats: last message on %q: %w", subject, err)
+	}
+	env, payload, err := Unframe(msg.Data)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("nats: retained message on %q: %w", subject, err)
+	}
+	return env, payload, msg.Sequence, nil
+}
 
 // streamForSubject resolves the ONE stream a subscription binds to, and REFUSES
 // a subject that matches more than one.

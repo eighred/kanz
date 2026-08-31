@@ -3,11 +3,14 @@ package compliance_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	comp "github.com/eighred/kanz/internal/compliance"
@@ -25,13 +28,40 @@ import (
 
 // countingBus records publishes. Its whole job is to be able to say "you
 // published, and you should not have".
+//
+// IT IS ALSO THE COMPACTED SUBJECT the publisher reads back (#916), because the
+// two are the same thing: a MaxMsgsPerSubject=1 stream retains exactly the newest
+// message per subject, which is what LastOnSubject answers with here. Making the
+// double read from what it recorded is what keeps these tests honest — a
+// publisher merging into a source that disagrees with the one it writes would
+// pass against a fiction.
 type countingBus struct {
 	events []bus.Event
+	// readErr, when set, is what LastOnSubject returns instead of an answer — a
+	// broker that is up enough to publish and not up enough to read.
+	readErr error
 }
 
 func (c *countingBus) Publish(_ context.Context, e bus.Event) error {
 	c.events = append(c.events, e)
 	return nil
+}
+
+func (c *countingBus) LastOnSubject(_ context.Context, subject string) (*envelopepb.Envelope, []byte, uint64, error) {
+	if c.readErr != nil {
+		return nil, nil, 0, c.readErr
+	}
+	for i := len(c.events) - 1; i >= 0; i-- {
+		if c.events[i].Subject != subject {
+			continue
+		}
+		payload, err := proto.Marshal(c.events[i].Payload)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		return nil, payload, uint64(i + 1), nil
+	}
+	return nil, nil, 0, fmt.Errorf("%w %q", bus.ErrNoRetainedMessage, subject)
 }
 
 func mandateFixture() *compliancepb.Mandate {
@@ -72,7 +102,7 @@ func approvalFor(t *testing.T, m *compliancepb.Mandate, reason string) dualcontr
 // state the old `changedBy string` signature was in, one keystroke away.
 func TestPublish_RefusesAZeroApproval(t *testing.T) {
 	b := &countingBus{}
-	err := comp.NewPublisher(b).Publish(context.Background(), mandateFixture(), nil,
+	err := comp.NewPublisher(b, b).Publish(context.Background(), mandateFixture(),
 		dualcontrol.Approval{}, "no approval at all")
 
 	if err == nil {
@@ -102,7 +132,7 @@ func TestPublish_RefusesAnApprovalForADifferentMandate(t *testing.T) {
 	swapped.Version = 4 // a different mandate, same portfolio
 
 	b := &countingBus{}
-	err := comp.NewPublisher(b).Publish(context.Background(), swapped, nil, approval, "Q3 mandate")
+	err := comp.NewPublisher(b, b).Publish(context.Background(), swapped, approval, "Q3 mandate")
 
 	if err == nil {
 		t.Fatal("a mandate was published under an approval collected for a different one")
@@ -125,7 +155,7 @@ func TestPublish_RefusesWhenTheReasonChangedAfterApproval(t *testing.T) {
 	approval := approvalFor(t, m, "Q3 mandate, approved by the IC")
 
 	b := &countingBus{}
-	err := comp.NewPublisher(b).Publish(context.Background(), m, nil, approval,
+	err := comp.NewPublisher(b, b).Publish(context.Background(), m, approval,
 		"routine update")
 
 	if err == nil || !errors.Is(err, dualcontrol.ErrPayloadChanged) {
@@ -159,7 +189,7 @@ func TestPublish_RefusesAnApprovalForAnotherAct(t *testing.T) {
 	}
 
 	b := &countingBus{}
-	err = comp.NewPublisher(b).Publish(context.Background(), m, nil, approval, "Q3 mandate")
+	err = comp.NewPublisher(b, b).Publish(context.Background(), m, approval, "Q3 mandate")
 	if err == nil {
 		t.Fatal("an approval for a PRICING_OVERRIDE published a mandate change")
 	}
@@ -179,7 +209,7 @@ func TestPublish_CarriesBothNamesOntoTheFact(t *testing.T) {
 	approval := approvalFor(t, m, reason)
 
 	b := &countingBus{}
-	if err := comp.NewPublisher(b).Publish(context.Background(), m, nil, approval, reason); err != nil {
+	if err := comp.NewPublisher(b, b).Publish(context.Background(), m, approval, reason); err != nil {
 		t.Fatalf("a valid two-person approval was refused: %v", err)
 	}
 	if len(b.events) != 1 {
@@ -207,6 +237,7 @@ func TestPublish_CarriesBothNamesOntoTheFact(t *testing.T) {
 // invariant rather than as a coincidence of the current signature. If someone
 // adds `changedBy string` back, this stops compiling.
 func TestPublish_SignatureAdmitsNoLoneActor(t *testing.T) {
-	var _ func(context.Context, *compliancepb.Mandate, *compliancepb.Mandate,
-		dualcontrol.Approval, string) error = comp.NewPublisher(&countingBus{}).Publish
+	b := &countingBus{}
+	var _ func(context.Context, *compliancepb.Mandate,
+		dualcontrol.Approval, string) error = comp.NewPublisher(b, b).Publish
 }
