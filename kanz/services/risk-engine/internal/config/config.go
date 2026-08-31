@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/pit"
 	"github.com/eighred/kanz/internal/refdata"
-	"github.com/eighred/kanz/internal/risk/pricing/pit"
 	"github.com/eighred/kanz/pkg/secret"
 )
 

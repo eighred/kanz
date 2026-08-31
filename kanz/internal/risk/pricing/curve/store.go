@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eighred/kanz/internal/risk/pricing/pit"
+	"github.com/eighred/kanz/internal/pit"
 )
 
 // Store is the point-in-time curve store behind the FI-01d CurveProvider seam

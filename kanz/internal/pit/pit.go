@@ -1,7 +1,27 @@
-// Package pit is the one implementation of point-in-time version retention for
-// the pricing stores — curve (rates), credit (hazard) and volsurface (implied
-// vol) each keep the same "ascending versions per key" container, and #811 is
-// what happens when only the retain half of that concept is decided.
+// Package pit is the estate's one implementation of point-in-time version
+// retention: an ascending list of versions per key, pruned to an explicit
+// horizon measured from the NEWEST RETAINED element, releasing what it drops.
+// The risk pricing stores — curve (rates), credit (hazard) and volsurface
+// (implied vol) — each keep that container, and #811 is what happens when only
+// the retain half of the concept is decided.
+//
+// # WHY IT SITS AT internal/pit AND NOT UNDER internal/risk/pricing (#871)
+//
+// It was written under internal/risk/pricing/ for the three stores that
+// motivated it. #867 then added internal/marketedge/volprofile, whose retained
+// completed-session list is the same container, and it could not import this
+// package: test/arch/risk_boundary_test.go admits only internal/risk/api/v* from
+// outside the risk module, and the market-data edge depending on the risk
+// pricing tree is the inversion store.Window's doc already refuses. So the shape
+// was written a second time, carrying its own copy of #862's fix — the
+// copied-helper failure mode CLAUDE.md names by cost, and the reason the next
+// defect of that class would have had to be fixed twice.
+//
+// The package itself never had a risk dependency (sort and time), so the
+// ownership claim was the PATH and nothing else. CLAUDE.md's rule — shared code
+// is promoted out of a service's internal/ when a SECOND consumer appears — is
+// what moved it here. test/arch/one_horizon_prune_test.go is the guard that
+// keeps a third copy from appearing quietly.
 //
 // # What was decided, and what was not (#811)
 //

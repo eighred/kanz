@@ -555,7 +555,7 @@ var (
 	// A point-in-time read of risk state. internal/risk/state has none today —
 	// Snapshot(id) is live-only — so honouring as_of is a persistence change,
 	// not a branch here. It is tracked separately, and whoever does it must
-	// revisit internal/risk/pricing/pit.DefaultHorizon in the same change: that
+	// revisit internal/pit.DefaultHorizon in the same change: that
 	// horizon was sized on the fact that no caller can pin a historical as-of
 	// (#811), and a pricing store that starts empty on every pod would answer
 	// an arbitrary historical as-of with no curve — reporting DV01 = 0, which

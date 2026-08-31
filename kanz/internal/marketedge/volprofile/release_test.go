@@ -4,6 +4,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/eighred/kanz/internal/pit"
 )
 
 // THE HORIZON RELEASES WHAT IT DROPS (#862).
@@ -64,7 +66,7 @@ func TestARetiredSessionIsReleasedWithoutWaitingForAReallocation(t *testing.T) {
 	// per drop; 512 against 200 sessions leaves it far from a reallocation.
 	s.Observe(btcBinance, trade(day0.Add(time.Minute), 10))
 	h := s.series[btcBinance]
-	h.done = make([]*session, 0, 512)
+	h.done = make([]pit.Version[*session], 0, 512)
 
 	gone := make(chan struct{})
 	func() {
@@ -72,11 +74,11 @@ func TestARetiredSessionIsReleasedWithoutWaitingForAReallocation(t *testing.T) {
 		// the only reference to it.
 		s.Observe(btcBinance, trade(day0.Add(Session+time.Minute), 10))
 		first := h.done[0]
-		if !first.start.Equal(day0) {
+		if !first.AsOf.Equal(day0) {
 			t.Fatalf("h.done[0] starts at %s, want %s — the fixture is not holding the session "+
-				"the prune will drop", first.start, day0)
+				"the prune will drop", first.AsOf, day0)
 		}
-		runtime.SetFinalizer(first, func(*session) { close(gone) })
+		runtime.SetFinalizer(first.V, func(*session) { close(gone) })
 	}()
 
 	for d := 2; d <= runSessions; d++ {
@@ -90,7 +92,7 @@ func TestARetiredSessionIsReleasedWithoutWaitingForAReallocation(t *testing.T) {
 		t.Fatalf("after %d sessions the store still holds %d — nothing was pruned, so this test "+
 			"is not measuring release", runSessions, len(h.done))
 	}
-	if h.done[0].start.Equal(day0) {
+	if h.done[0].AsOf.Equal(day0) {
 		t.Fatal("the first session is still the head of the store — it was not dropped")
 	}
 	// NON-VACUITY 2: the backing array must not have been replaced, or a passing

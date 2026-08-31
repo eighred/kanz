@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eighred/kanz/internal/pit"
 	"github.com/eighred/kanz/internal/risk/pricing"
-	"github.com/eighred/kanz/internal/risk/pricing/pit"
 )
 
 // Parametric vol-surface calibration (PARITY-03b). The DERIV-01c Surface
