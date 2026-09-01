@@ -808,6 +808,14 @@ func (g *PreTradeGate) decide(ctx context.Context, d OrderDelta) (Decision, erro
 		Book:       proj,
 		Classifier: g.classifier,
 		AsOf:       d.AsOf,
+		// ClassifyAsOf IS DELIBERATELY UNSET, and this gate is why the split was safe
+		// to make (#930). d.AsOf here is the gate's OWN clock at admission
+		// (services/oms/internal/compliance/comp01.go stamps it from g.now()), so the
+		// classifier question is already a current one and the fallback to AsOf is
+		// exact. It is the paths whose AsOf is an OBSERVATION rather than now — the
+		// post-trade monitor replaying a month-old position FACT — that have to say
+		// which instant their reference data is read at. Should d.AsOf ever become an
+		// observation, this line is the one to change.
 		// THE ORDER, ALONGSIDE THE PROJECTION AND NOT INSTEAD OF IT. Every existing
 		// rule keeps reading the projected book; this exists so a margin control can
 		// tell an order that TAKES a position from one that closes it, which the

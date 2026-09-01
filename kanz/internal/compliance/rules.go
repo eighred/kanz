@@ -564,7 +564,14 @@ func classify(c *Candidate, pos Position) Attributes {
 	// context.TODO, not nil: no request context reaches the rule engine yet (the
 	// evaluators take only a *Candidate). A nil ctx is not a placeholder, it is a
 	// panic waiting for the first Classifier that does I/O.
-	a, _ := c.Classifier.Classify(context.TODO(), pos.InstrumentID, c.AsOf)
+	//
+	// c.classifyAsOf(), NOT c.AsOf (#930). The reference data is read at the
+	// instant the caller says the CLASSIFICATION applies at, which on a re-evaluation
+	// of the current book is now — not at the instant the book was observed. Asking
+	// at the observation backdated the question past the record's own as_of, which
+	// refdata.Cache.Lookup refuses, and the refusal arrived as unresolvedDimension:
+	// a false breach on a book that was fine. See Candidate.ClassifyAsOf.
+	a, _ := c.Classifier.Classify(context.TODO(), pos.InstrumentID, c.classifyAsOf())
 	return a
 }
 

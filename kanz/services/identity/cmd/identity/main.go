@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/clientip"
 	"github.com/eighred/kanz/internal/identity"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
@@ -101,6 +102,36 @@ func run() int {
 	})
 	go sweepLoop(ctx, limiter)
 
+	// THE ADDRESS THE PER-SOURCE HALF OF THE CREDENTIAL BOUND IS CHARGED TO (#888).
+	//
+	// This service used to take server.ClientIPHeader at face value, on the stated
+	// premise that a NetworkPolicy made the web-bff its only reachable caller. It
+	// does not: infra/security/runtime/network-policies.yaml admits the
+	// ingress-nginx namespace, the api-gateway (for /jwks.json), the web-bff and
+	// the kanz-observability namespace (for the /metrics registered below, on this
+	// same listener) to :8087. The header is now honoured only from a peer the
+	// deployment named, and is the TCP peer otherwise.
+	ipResolver, err := clientip.NewResolver(server.ClientIPHeader, cfg.TrustedProxies)
+	if err != nil {
+		logger.Error("IDENTITY_TRUSTED_PROXIES is unparseable", "err", err,
+			"trusted_proxies", cfg.TrustedProxies)
+		return 2
+	}
+	// SAID OUT LOUD, BOTH WAYS: "configured and ignored" and "not configured" must
+	// not look the same, and neither must "bounded per caller" and "bounded per
+	// estate". Neither state is unsafe — the unconfigured one is stricter — but an
+	// operator who set the variable and mistyped a CIDR would otherwise see nothing.
+	if ipResolver.Trusts() {
+		logger.Info("login attempts are attributed to the forwarded caller address",
+			"header", server.ClientIPHeader, "trusted_proxies", cfg.TrustedProxies)
+	} else {
+		logger.Warn("no trusted proxy configured — every login attempt is attributed to its "+
+			"immediate peer, so the per-source half of the credential bound is ONE bucket for "+
+			"everything behind the web-bff rather than one per caller. The per-subject half is "+
+			"unaffected. Name the BFF's pod CIDR to restore per-caller precision.",
+			"set", "IDENTITY_TRUSTED_PROXIES")
+	}
+
 	// AUTHENTICATED PROVISIONING (#364), when a role is named.
 	//
 	// The VERIFIER IS THE SIGNER. This service mints the tokens the gateway
@@ -111,7 +142,7 @@ func run() int {
 	// NetworkPolicy that makes X-Kanz-Principal-* trustworthy anywhere else, and
 	// a header arriving here is a string the caller typed.
 	store := identity.NewPostgres(pool)
-	opts := []server.Option{}
+	opts := []server.Option{server.WithClientIP(ipResolver)}
 	if cfg.OperatorRole != "" {
 		// THE AUDIT SINK IS STDOUT, AND THAT IS A CHOICE WITH A COST.
 		//
