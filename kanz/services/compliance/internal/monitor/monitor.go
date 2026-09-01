@@ -218,7 +218,29 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 // sweep that re-implemented any of them would drift from the FACT path — most
 // dangerously on the transition test, where a second copy of lastStatus handling
 // would re-emit a breach the FACT path had already reported.
-func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, trigger compliancepb.BreachTrigger, asOf time.Time) error {
+//
+// # Two clocks, and they are not the same question (#917)
+//
+// observedAt is WHEN THE THING BEING EVALUATED WAS OBSERVED: the position FACT's
+// as_of on the FACT path, and now on the two paths that are woken by something
+// other than an observation. It stamps the breach FACT, the decision record and
+// the result's evaluated_at, and it has to stay the observation's own time or a
+// breach stops being attributable to what the system actually saw.
+//
+// THE MANDATE IS RESOLVED AT NOW. The book being evaluated is the CURRENT one —
+// the holdings, marks and cash in force at this instant — so the mandate that
+// governs it is the one in force at this instant too. Resolving it at observedAt
+// asked the registry a question it cannot answer: it is armed from a COMPACTED
+// stream serving one message per subject, so it holds the version in force plus
+// the ones SCHEDULED and no superseded version to find (#884, #916). A backdated
+// lookup therefore returns either the same answer as now or, when the mandate's
+// effective_at is LATER than the FACT's as_of, NOTHING — and a miss here is
+// UNGOVERNED, which declines to evaluate. This path boots on
+// DeliverLastPerSubject over the compacted POSITION stream, where the as_of is as
+// old as the portfolio's last fill, so a portfolio whose mandate is newer than
+// its last trade was skipped by this control entirely — silently, and for as long
+// as it did not trade.
+func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, trigger compliancepb.BreachTrigger, observedAt time.Time) error {
 	// THE TENANT COMES FROM THE BOOK, NOT FROM THE CALLER'S CONTEXT (#787).
 	//
 	// Emitter.EmitBreach sets no Event.TenantID and compliance configures no
@@ -235,7 +257,8 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 	// each path self-contained instead of dependent on how it was woken.
 	ctx = bus.WithTenantID(ctx, key.tenant)
 	pid := key.portfolio
-	mandate, ok, err := m.mandates.Mandate(ctx, key.tenant, pid, asOf)
+	// AT NOW, NEVER AT observedAt — see the two-clocks note above (#917).
+	mandate, ok, err := m.mandates.Mandate(ctx, key.tenant, pid, m.now().UTC())
 	if err != nil {
 		// A tenant the registry cannot resolve is TERMINAL — retrying re-reads the
 		// same ambiguous data forever, and a redelivery loop on a position FACT is
@@ -287,7 +310,7 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 		return nil // governed by a mandate that constrains nothing — a choice, not a gap
 	}
 
-	res := m.engine.Evaluate(ctx, &comp.Candidate{Book: book, Classifier: m.classifier, AsOf: asOf}, mandate)
+	res := m.engine.Evaluate(ctx, &comp.Candidate{Book: book, Classifier: m.classifier, AsOf: observedAt}, mandate)
 
 	entered := m.recordStatus(key, res.GetStatus())
 	if res.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH || !entered {
@@ -317,7 +340,7 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 		}
 	}
 	if m.emitter != nil {
-		if err := m.emitter.EmitBreach(ctx, res, trigger, asOf); err != nil {
+		if err := m.emitter.EmitBreach(ctx, res, trigger, observedAt); err != nil {
 			// Roll back the status so the next delivery re-emits — a dropped
 			// breach FACT is worse than a duplicate.
 			m.resetStatus(key)
