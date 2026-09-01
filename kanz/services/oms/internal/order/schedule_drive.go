@@ -119,7 +119,14 @@ func (s *Service) driveOne(ctx context.Context, parentSt *orderpb.OrderState, te
 		held[c.GetOrderId()] = true
 	}
 
-	due, err := schedule.Due(parent, func(id string) bool { return held[id] }, now)
+	// THE PARENT'S OWN PINNED PROFILE, RESOLVED PER TICK AND NEVER RE-CHOSEN
+	// (#897). scheduleMarket reads the version stamped on the order at admission,
+	// so this tick derives the schedule the order was admitted with — not the one
+	// today's market would produce. A pin this pod cannot resolve answers UNKNOWN,
+	// which a volume-driven algorithm refuses: the parent stops advancing and the
+	// failure is reported by the caller rather than being worked against a curve
+	// nobody chose.
+	due, err := schedule.Due(parent, func(id string) bool { return held[id] }, now, s.scheduleMarket(parentSt))
 	if err != nil {
 		return 0, err
 	}

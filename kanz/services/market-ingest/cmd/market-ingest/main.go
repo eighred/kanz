@@ -167,6 +167,26 @@ func run() int {
 		return 2
 	}
 
+	// THE INTRADAY VOLUME PROFILE (#897), folded off the same trade feeds the
+	// candles are and published as a versioned FACT.
+	//
+	// IT IS WHAT MAKES A VWAP OR POV ORDER PLACEABLE AT ALL. #867 built the fold
+	// and #869 built the algorithms, and nothing carried the shape from this
+	// process to the OMS — so all three OMS entries into internal/execution/algo
+	// passed algo.UnknownMarket and every volume-driven order was refused at
+	// admission. This is the producer half of the transport that closes it.
+	//
+	// A MISSING MIN_SESSIONS IS A DELIBERATE OFF, NOT A DEFAULT. See the config
+	// field: there is no number this binary could invent that would not be an
+	// execution-policy decision made by accident. What it must not be is SILENT,
+	// because the refusal a desk sees downstream names the market rather than
+	// this line — so the posture is logged and exported.
+	volProfile, err := volumeProfileCollector(cfg, publishHealth, obs, logger)
+	if err != nil {
+		logger.Error("volume-profile fold cannot be built", "err", err)
+		return 2
+	}
+
 	// A market-ingest with nothing real to ingest is a HARD failure now, not a
 	// silent swap to generated prices (see feeds()).
 	srcs, err := feeds(cfg, cov, logger)
@@ -188,7 +208,10 @@ func run() int {
 		// minute, while market-data stored bars that nothing in production
 		// published. The store, the ticks and the schema all existed; nothing
 		// joined them.
-		Bars:             publishHealth,
+		Bars: publishHealth,
+		// THE VOLUME PROFILE (#897). Nil when this deployment names no session
+		// floor, which is the OFF state the posture above reports.
+		VolumeProfile:    volProfile,
 		TradeRetention:   cfg.TradeRetention,
 		SnapshotInterval: cfg.SnapshotInterval,
 		SnapshotDepth:    cfg.SnapshotDepth,

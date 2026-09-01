@@ -84,6 +84,12 @@ type Service struct {
 	// scheduleInterval is the driver tick admission compares a schedule against.
 	// Zero means unwired, which reads as DefaultScheduleInterval, never unbounded.
 	scheduleInterval time.Duration
+	// volumeProfiles is the published intraday volume profiles a volume-driven
+	// schedule is derived against (#897). Nil means this OMS holds no market data
+	// on the schedule path, which is the state every deployment was in before
+	// #897: VWAP and POV are refused at admission under NO_VOLUME_PROFILE, and
+	// the refusal says the feed is unbound rather than blaming the market.
+	volumeProfiles VolumeProfiles
 	// deliveryBudget bounds a WHOLE command delivery, where claimWait bounds one
 	// acquisition inside it (#801). See claimscope.go.
 	deliveryBudget time.Duration

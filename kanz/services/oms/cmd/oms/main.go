@@ -25,6 +25,7 @@ import (
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/internal/version"
+	"github.com/eighred/kanz/internal/volprofilefeed"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/cashview"
@@ -664,6 +665,11 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		return false, err
 	}
 
+	// THE INTRADAY VOLUME PROFILE REGISTRY (#897), built before the order service
+	// because the service binds it. The SUBSCRIPTION that fills it starts with the
+	// other folds below and is joined with them.
+	volProfiles := bindVolumeProfiles(obs, logger)
+
 	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, routing.Router, closeRegistry, logger,
 		// The decision-time benchmark for every admitted order (#436). The same
 		// mark fold the pre-trade gate values MARKET/STOP orders against — one
@@ -689,6 +695,13 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		// It also bounds slice_count, which arrives as an unconstrained uint32 and
 		// is otherwise allocated one Slice at a time at admission.
 		order.WithScheduleInterval(cfg.ScheduleInterval),
+		// THE MEASURED LIQUIDITY A VOLUME-DRIVEN SCHEDULE IS SIZED AGAINST (#897).
+		// Without it VWAP and POV are refused at admission under NO_VOLUME_PROFILE,
+		// which is where every deployment stood until now: the profile is folded in
+		// market-ingest and nothing carried it here. The registry is version-addressed
+		// and the parent order records which version its schedule was planned
+		// against, so two pods derive the same children — see volprofile.go.
+		order.WithVolumeProfiles(volProfiles),
 		order.WithOutboxRelay(outboxRelayOpts...))
 	if err != nil {
 		return false, err
@@ -969,6 +982,20 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		logger.Info("oms subscribing to risk measures (broadcast)", "subject", riskview.Subject)
 		err := consumer.SubscribeBroadcast(ctx, riskview.Subject, risk.Handle)
 		if err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}()
+
+	// THE INTRADAY VOLUME PROFILE — REPLAY, NOT BROADCAST (#897), and the
+	// difference is the whole reason the pin works. See volprofile.go.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("oms folding the volume-profile spine (replay)", "subject", volprofilefeed.Subject)
+		if err := foldVolumeProfiles(ctx, consumer, volProfiles, logger); err != nil {
 			once.Do(func() {
 				firstErr = err
 				cancel()

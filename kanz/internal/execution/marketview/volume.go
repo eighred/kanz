@@ -41,6 +41,21 @@
 // UNKNOWN as load-bearing: the alternative is a flat curve, a flat curve is TWAP,
 // and a VWAP order worked as TWAP is a mislabelled execution whose fills the
 // attribution plane will decompose against an algorithm that never ran.
+//
+// # TWO WAYS IN, ONE ARITHMETIC (#897)
+//
+// Volume is the view for the process that HOLDS the fold. It is not the view for
+// the OMS, and #897 is the issue that established why: a store is per-process and
+// moves as sessions complete, so a schedule derived from it is a different
+// schedule on every pod and after every session boundary — and
+// services/oms/internal/order.authorizeChild compares a child's quantity as an
+// exact rational, so a difference in the last digit refuses a legitimate slice.
+//
+// Pinned is the other way in: ONE published, versioned shape, recorded on the
+// parent order and resolved by every later derivation. Both resolve to Shape and
+// integrate through expectedOver, so the curve a schedule was planned against on
+// the market-data edge and the curve it is re-derived against in the OMS cannot
+// be integrated two ways.
 package marketview
 
 import (
@@ -111,49 +126,15 @@ func (v *Volume) TopOfBook(string) (*big.Rat, *big.Rat, bool) { return nil, nil,
 
 // ExpectedVolume is the quantity expected to trade in [from, to).
 //
-// # Shape times level
-//
-// A profile is a DISTRIBUTION — its shares sum to 1 — so on its own it answers
-// "which part of the day is busy" and cannot answer "how many units". The answer
-// here is the share of a session falling in [from, to) multiplied by
-// Answer.SessionVolume, the mean total of the sessions the shape was built from.
-// Both halves come from the same set of retained sessions, computed in the same
-// pass, so the level cannot describe a different market from the shape.
-//
-// # The share is INTEGRATED, not looked up
-//
-// A slice's interval is whatever the parent's window divided by its slice count
-// happens to be, and it will not line up with the profile's 30-minute bins. So the
-// share is the cumulative distribution evaluated at both ends: whole sessions
-// between them contribute 1 each, and each end contributes the bins it fully
-// covers plus a PRO-RATA part of the bin it lands inside.
-//
-// THE PRO-RATA IS AN ASSUMPTION AND IT IS STATED: volume is taken as uniform
-// WITHIN a bin, because a bin is the finest thing the profile measured and
-// anything smaller is a shape nobody sampled. It is the same assumption a caller
-// makes by choosing the bin width, applied consistently rather than by rounding an
-// interval to the nearest bin — which would put two different slices of the same
-// parent on the same share and size them identically.
+// THE SHAPE IS RESOLVED PER QUESTION, because the instrument belongs to the
+// QUESTION while the venue belongs to the VIEW: one view over a live store serves
+// every instrument that store folds. Everything after the resolve is Shape's, so
+// this path and the pinned one (#897) integrate the same curve the same way and
+// cannot drift into two answers.
 func (v *Volume) ExpectedVolume(instrumentID string, from, to time.Time) (*big.Rat, bool) {
 	if instrumentID == "" {
 		return nil, false
 	}
-	from, to = from.UTC(), to.UTC()
-	if to.Before(from) {
-		// A backwards interval is not a question about this market. It is refused
-		// as UNKNOWN rather than answered with a negative or an absolute value,
-		// either of which would size a child from a caller's own bug.
-		return nil, false
-	}
-
-	// A WINDOW LONGER THAN THE HISTORY THE SHAPE WAS BUILT FROM. The store's own
-	// horizon is the bound, read from the store rather than chosen here: beyond it
-	// the answer is an extrapolation of a mean over sessions nobody sampled, and
-	// this view does not extrapolate.
-	if horizon := v.store.Horizon(); horizon > 0 && to.Sub(from) > horizon {
-		return nil, false
-	}
-
 	ans, err := v.store.Profile(volprofile.Series{InstrumentID: instrumentID, Venue: v.venue}, v.asOf)
 	if err != nil {
 		// ErrNoAsOf cannot occur (the constructor refuses a zero) and ErrLookahead
@@ -162,63 +143,15 @@ func (v *Volume) ExpectedVolume(instrumentID string, from, to time.Time) (*big.R
 		// Both are UNKNOWN, which is what makes the algorithm refuse.
 		return nil, false
 	}
-	if !ans.Known() || len(ans.Shares) == 0 || ans.Bucket <= 0 {
+	// THE STORE'S OWN HORIZON BOUNDS THE QUESTION, read from the store rather than
+	// chosen here: beyond it the answer is an extrapolation of a mean over sessions
+	// nobody sampled. The judgement of what to do about that is Shape's, so the
+	// bound reaches an algorithm identically however the shape was resolved.
+	shape, ok := fromAnswer(ans, instrumentID, v.store.Horizon())
+	if !ok {
 		return nil, false
 	}
-	if ans.SessionVolume == nil || ans.SessionVolume.Sign() <= 0 {
-		// A KNOWN SHAPE WITH NO LEVEL IS STILL UNKNOWN FOR THIS QUESTION. The
-		// shares would answer "which half of the window is busier" perfectly well,
-		// and multiplying them by nothing would answer "how much" with a zero.
-		return nil, false
-	}
-
-	share := shareOver(ans, from, to)
-	if share.Sign() < 0 {
-		return nil, false
-	}
-	return new(big.Rat).Mul(share, ans.SessionVolume), true
-}
-
-// shareOver is the fraction of a session's volume expected in [from, to), which
-// exceeds 1 when the interval spans more than a session.
-func shareOver(a volprofile.Answer, from, to time.Time) *big.Rat {
-	// WHOLE SESSIONS BETWEEN THE TWO ENDS, counted from the truncated boundaries
-	// rather than from the raw difference: [23:00 Monday, 01:00 Tuesday) spans two
-	// hours and one session boundary, and only the boundary count is the number of
-	// complete distributions between the prefixes below.
-	sessions := to.Truncate(volprofile.Session).Sub(from.Truncate(volprofile.Session)) / volprofile.Session
-
-	out := new(big.Rat).SetInt64(int64(sessions))
-	out.Add(out, prefixShare(a, to))
-	out.Sub(out, prefixShare(a, from))
-	return out
-}
-
-// prefixShare is the share of a session accumulated from its start up to t.
-func prefixShare(a volprofile.Answer, t time.Time) *big.Rat {
-	off := t.Sub(t.Truncate(volprofile.Session))
-	if off < 0 {
-		return new(big.Rat)
-	}
-
-	full := int(off / a.Bucket)
-	out := new(big.Rat)
-	for i := 0; i < full && i < len(a.Shares); i++ {
-		out.Add(out, a.Shares[i])
-	}
-	if full >= len(a.Shares) {
-		return out
-	}
-
-	// THE PART-BIN, PRO-RATA. Exact rationals throughout: the remainder and the
-	// bin are both integer nanosecond counts, so the fraction is exact and a
-	// schedule derived from it is reproducible to the last digit on every pod.
-	rem := off - time.Duration(full)*a.Bucket
-	if rem <= 0 {
-		return out
-	}
-	part := new(big.Rat).SetFrac64(int64(rem), int64(a.Bucket))
-	return out.Add(out, part.Mul(part, a.Shares[full]))
+	return expectedOver(shape, from, to)
 }
 
 // Volume is an algo.MarketView. The assertion is here rather than in a test

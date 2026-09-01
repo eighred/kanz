@@ -22,6 +22,18 @@ import (
 // ago must reach the same answer from the same three inputs, or a restart either
 // re-sends children or skips them forever.
 
+// dueTWAP is Due with the market view every test in this file wants: none.
+//
+// #897 made the view a PARAMETER rather than something Due constructs, because
+// the driver must be able to hand it the exact profile version the parent was
+// admitted against. Every parent here is TWAP, which reads no market at all, so
+// UnknownMarket is the honest argument and it is written once rather than
+// repeated at thirteen call sites. TestScheduleDue_TheMarketViewIsTheCallers is
+// what proves the parameter is actually threaded through.
+func dueTWAP(p Parent, exists func(childID string) bool, now time.Time) ([]Child, error) {
+	return Due(p, exists, now, algo.UnknownMarket{})
+}
+
 var (
 	windowStart = time.Date(2026, 8, 15, 14, 0, 0, 0, time.UTC)
 	windowEnd   = time.Date(2026, 8, 15, 15, 0, 0, 0, time.UTC)
@@ -78,7 +90,7 @@ func TestScheduleDue_ATerminalParentEmitsNothing(t *testing.T) {
 	after := windowEnd.Add(time.Hour)
 
 	live := parent("o1")
-	if got, err := Due(live, none, after); err != nil || len(got) != 6 {
+	if got, err := dueTWAP(live, none, after); err != nil || len(got) != 6 {
 		t.Fatalf("precondition: a LIVE parent yields %d children (err %v), want 6 — if this is "+
 			"wrong the cancellation assertion below proves nothing", len(got), err)
 	}
@@ -86,7 +98,7 @@ func TestScheduleDue_ATerminalParentEmitsNothing(t *testing.T) {
 	cancelled := parent("o1")
 	cancelled.Terminal = true
 
-	got, err := Due(cancelled, none, after)
+	got, err := dueTWAP(cancelled, none, after)
 	if err != nil {
 		t.Fatalf("Due on a terminal parent: %v", err)
 	}
@@ -110,7 +122,7 @@ func TestScheduleDue_CancellingMidScheduleEmitsNoFurtherChildren(t *testing.T) {
 	at := windowStart.Add(35 * time.Minute)
 
 	live := parent("o1")
-	got, err := Due(live, sent, at)
+	got, err := dueTWAP(live, sent, at)
 	if err != nil || len(got) != 1 || got[0].Index != 3 {
 		t.Fatalf("precondition: a live parent mid-schedule yields %v (err %v), want exactly "+
 			"slice 3", got, err)
@@ -118,7 +130,7 @@ func TestScheduleDue_CancellingMidScheduleEmitsNoFurtherChildren(t *testing.T) {
 
 	cancelled := parent("o1")
 	cancelled.Terminal = true
-	if got, _ := Due(cancelled, sent, at); len(got) != 0 {
+	if got, _ := dueTWAP(cancelled, sent, at); len(got) != 0 {
 		t.Fatalf("a parent cancelled with 3 of 6 slices working still yielded %v — the operator "+
 			"pulled this order and the platform kept trading it", got)
 	}
@@ -139,7 +151,7 @@ func TestScheduleDue_AlreadySentChildrenAreNotResent(t *testing.T) {
 		all = append(all, ChildID("o1", i))
 	}
 
-	got, err := Due(parent("o1"), setOf(all...), at)
+	got, err := dueTWAP(parent("o1"), setOf(all...), at)
 	if err != nil {
 		t.Fatalf("Due: %v", err)
 	}
@@ -159,7 +171,7 @@ func TestScheduleDue_AlreadySentChildrenAreNotResent(t *testing.T) {
 func TestScheduleDue_AMissingChildIsRefilledNotSkipped(t *testing.T) {
 	at := windowEnd.Add(time.Hour)
 	// 2 is missing; 0, 1, 3, 4 exist; 5 was never reached.
-	got, err := Due(parent("o1"), setOf(
+	got, err := dueTWAP(parent("o1"), setOf(
 		ChildID("o1", 0), ChildID("o1", 1), ChildID("o1", 3), ChildID("o1", 4)), at)
 	if err != nil {
 		t.Fatalf("Due: %v", err)
@@ -181,11 +193,11 @@ func TestScheduleDue_TwoPodsDecideIdentically(t *testing.T) {
 	at := windowStart.Add(25 * time.Minute)
 	sent := setOf(ChildID("o1", 0))
 
-	a, err := Due(parent("o1"), sent, at)
+	a, err := dueTWAP(parent("o1"), sent, at)
 	if err != nil {
 		t.Fatalf("pod A: %v", err)
 	}
-	b, err := Due(parent("o1"), sent, at)
+	b, err := dueTWAP(parent("o1"), sent, at)
 	if err != nil {
 		t.Fatalf("pod B: %v", err)
 	}
@@ -292,7 +304,7 @@ func TestScheduleDue_EmitsOnlyWhatTheClockHasReached(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Due(parent("o1"), none, tt.at)
+			got, err := dueTWAP(parent("o1"), none, tt.at)
 			if err != nil {
 				t.Fatalf("Due: %v", err)
 			}
@@ -312,7 +324,7 @@ func TestScheduleDue_ChildrenStillSumToTheParent(t *testing.T) {
 	p.Plan.Total = new(big.Rat).SetInt64(10)
 	p.Plan.Slices = 3 // 10/3 — the division that does not close
 
-	got, err := Due(p, none, windowEnd.Add(time.Hour))
+	got, err := dueTWAP(p, none, windowEnd.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("Due: %v", err)
 	}
@@ -331,7 +343,7 @@ func TestScheduleDue_ChildrenStillSumToTheParent(t *testing.T) {
 // out late.
 func TestScheduleDue_ChildCarriesItsScheduledTimeNotTheTickTime(t *testing.T) {
 	// Ticking at 14:47 — slice 4 was due at 14:40, seven minutes ago.
-	got, err := Due(parent("o1"), setOf(
+	got, err := dueTWAP(parent("o1"), setOf(
 		ChildID("o1", 0), ChildID("o1", 1), ChildID("o1", 2), ChildID("o1", 3)),
 		windowStart.Add(47*time.Minute))
 	if err != nil {
@@ -369,7 +381,7 @@ func TestScheduleDue_AParentWithNoScheduleIsRefusedLoudly(t *testing.T) {
 		{"no slices", Parent{OrderID: "o1", Plan: algo.Plan{Total: new(big.Rat).SetInt64(60), Start: windowStart, End: windowEnd}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Due(tt.p, none, windowEnd)
+			got, err := dueTWAP(tt.p, none, windowEnd)
 			if !errors.Is(err, ErrNoSchedule) {
 				t.Fatalf("err = %v, want ErrNoSchedule — a parent resting with no schedule would "+
 					"otherwise rest forever with nobody told", err)
@@ -404,7 +416,7 @@ func TestScheduleDue_AnUnworkableScheduleSurfacesTheReason(t *testing.T) {
 	p.Plan.Slices = 10
 	p.Plan.MaxSlice = new(big.Rat).SetInt64(10) // 100 per child, over the cap
 
-	_, err := Due(p, none, windowEnd)
+	_, err := dueTWAP(p, none, windowEnd)
 	if !errors.Is(err, algo.ErrCapUnsatisfiable) {
 		t.Fatalf("err = %v, want the scheduler's ErrCapUnsatisfiable to survive this layer — an "+
 			"operator needs the reason, not a parent that rests and says nothing", err)
@@ -436,5 +448,70 @@ func TestScheduleComplete_MeansEveryChildExists(t *testing.T) {
 	if Complete(p, setOf(all[0], all[1], all[3], all[4], all[5])) {
 		t.Error("Complete true with slice 2 missing — a count of children cannot tell a hole " +
 			"from a short tail, and the parent would be retired having never sent slice 2")
+	}
+}
+
+// ===== THE MARKET VIEW IS THE CALLER'S (#897) =====
+
+// countingView records that a schedule asked it something, and answers a flat
+// 1 per interval so a volume-driven plan is workable.
+//
+// A FLAT CURVE IS DELIBERATELY FINE HERE. This asserts that the parameter REACHES
+// the algorithm, not that any particular curve is correct — the arithmetic is
+// internal/execution/algo's and the curve is internal/execution/marketview's.
+type countingView struct{ asked int }
+
+func (c *countingView) TopOfBook(string) (*big.Rat, *big.Rat, bool) { return nil, nil, false }
+func (c *countingView) ExpectedVolume(string, time.Time, time.Time) (*big.Rat, bool) {
+	c.asked++
+	return big.NewRat(1, 1), true
+}
+
+// DUE DERIVES AGAINST THE VIEW IT WAS GIVEN.
+//
+// This decision used to construct algo.UnknownMarket itself, which was honest
+// while the OMS held no market data and became a defect the moment it did (#897):
+// a driver holding the parent's PINNED profile could not hand it over, so a
+// volume-driven parent would be refused on every tick by the one component whose
+// job is to advance it. A view that is ignored looks exactly like a market nobody
+// measured, which is why this counts the calls rather than only checking the
+// result.
+func TestScheduleDue_TheMarketViewIsTheCallers(t *testing.T) {
+	p := parent("o1")
+	p.Plan.Algo = algo.NameVWAP
+	p.Plan.InstrumentID = "BTC-USD"
+
+	view := &countingView{}
+	got, err := Due(p, none, windowEnd, view)
+	if err != nil {
+		t.Fatalf("Due refused a VWAP parent against a view that can size it: %v", err)
+	}
+	if view.asked != p.Plan.Slices {
+		t.Fatalf("the view was asked %d times for a %d-slice VWAP parent — Due is not deriving "+
+			"against the view it was handed, so a driver could not give a parent the profile "+
+			"version it was admitted with", view.asked, p.Plan.Slices)
+	}
+	if len(got) != p.Plan.Slices {
+		t.Fatalf("children = %d, want %d", len(got), p.Plan.Slices)
+	}
+}
+
+// AND A VOLUME-DRIVEN PARENT WITH NO VIEW IS REFUSED, never worked against a flat
+// curve. algo.Run normalises a nil view to UnknownMarket, so this is also the
+// assertion that a caller with no market data is unchanged by #897.
+func TestScheduleDue_AVolumeDrivenParentWithNoViewIsRefused(t *testing.T) {
+	p := parent("o1")
+	p.Plan.Algo = algo.NameVWAP
+	p.Plan.InstrumentID = "BTC-USD"
+
+	for _, mkt := range []algo.MarketView{nil, algo.UnknownMarket{}} {
+		got, err := Due(p, none, windowEnd, mkt)
+		if !errors.Is(err, algo.ErrVolumeUnknown) {
+			t.Fatalf("err = %v, want ErrVolumeUnknown — a VWAP parent worked against a curve "+
+				"nobody measured is a TWAP execution wearing the wrong label", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("children = %d from a refused schedule", len(got))
+		}
 	}
 }

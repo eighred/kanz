@@ -207,14 +207,38 @@ func (s *Service) validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 	if maxPart := sch.GetMaxParticipationRate(); maxPart != nil {
 		plan.MaxParticipation = dec.FromProto(maxPart)
 	}
-	// NOTHING IS SENT AND NOTHING IS KNOWN ABOUT THE MARKET, and both are said
-	// rather than left blank. The order does not exist yet, so no slice of it can
-	// have been sent — that is a KNOWN "none", not an unknown. The OMS has no
-	// market data on this path at all, so UnknownMarket is the honest answer, and
-	// an algorithm needing a book or a volume profile (#867) refuses the order
-	// here rather than being handed a zero.
+	// NOTHING IS SENT, AND THAT IS A KNOWN "none" RATHER THAN AN UNKNOWN. The
+	// order does not exist yet, so no slice of it can have been sent.
 	state := algo.ParentState{OrderID: cmd.GetOrderId(), Sent: func(int) bool { return false }}
-	if _, err := algo.Run(plan, state, algo.UnknownMarket{}); err != nil {
+
+	// THE PIN IS THE PLATFORM'S, NEVER THE CALLER'S, so whatever arrived on the
+	// command is discarded before anything reads it. A client that could name the
+	// profile version could choose which measured curve its order is sliced
+	// against — an older, thinner one gives smaller early children and a shape
+	// nobody on the desk selected — and the order's own audit record would then
+	// assert a schedule the platform never chose. It is the stance
+	// SubmitOrder.venue_account_id takes for the same reason: a field the platform
+	// stamps has no business surviving from the wire.
+	sch.VolumeProfileVersion = ""
+
+	// THE MARKET IS THE NEWEST PUBLISHED PROFILE FOR THIS (INSTRUMENT, VENUE), AND
+	// THIS IS THE ONE PLACE THAT READS "NEWEST" (#897).
+	//
+	// Admission is the moment the choice is RECORDED, so it is the only moment at
+	// which "whatever is current" is a defensible input: every later derivation of
+	// this parent's schedule — the child-admission check, the driver tick, the
+	// same pod after a restart, a different pod entirely — resolves the version
+	// stamped below. Reading current anywhere else would re-plan a working parent
+	// against a market it was never sized for.
+	//
+	// IT IS OFFERED TO EVERY SCHEDULE AND THE ALGORITHM DECIDES. Nothing here asks
+	// whether the order is volume-driven, because that question has exactly one
+	// correct answer-holder — algo.Registered() — and a copy of it in this file
+	// would drift from it. TWAP never asks and is unaffected; VWAP and POV ask,
+	// and refuse on UNKNOWN.
+	market, version := s.currentMarket(cmd.GetInstrumentId(), cmd.GetVenue())
+	seen := &consultedView{MarketView: market}
+	if _, err := algo.Run(plan, state, seen); err != nil {
 		if errors.Is(err, algo.ErrUnknownAlgo) {
 			return reject(ReasonUnknownExecutionAlgo,
 				"the schedule names how order %s is worked and must not be defaulted: %s",
@@ -227,11 +251,27 @@ func (s *Service) validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 			// command that is correct.
 			return reject(ReasonNoVolumeProfile,
 				"order %s is worked by an algorithm that schedules against expected volume, and "+
-					"this OMS has no volume profile on the admission path — it is refused rather "+
-					"than worked against a flat curve, which would be TWAP under another name: %s",
-				cmd.GetOrderId(), err.Error())
+					"this OMS cannot size it: %s. It is refused rather than worked against a flat "+
+					"curve, which would be TWAP under another name. The algorithm's own report: %s",
+				cmd.GetOrderId(), s.volumeProfileGap(cmd.GetInstrumentId(), cmd.GetVenue()), err.Error())
 		}
 		return reject("INVALID_SCHEDULE", "%s", err.Error())
+	}
+
+	// THE PIN IS STAMPED ONLY IF THE SCHEDULE ACTUALLY ASKED (#897).
+	//
+	// A TWAP parent reads no curve, so recording a version on it would assert in
+	// the durable audit record that its schedule was sized against a market it
+	// never looked at. Whether the view was consulted is OBSERVED at the seam
+	// rather than predicted from the algorithm's name — see consultedView — so
+	// this cannot drift from what the algorithms actually do.
+	//
+	// IT MUTATES THE COMMAND, and that is the mechanism rather than a side effect:
+	// handleSubmit copies cmd.GetExecutionSchedule() onto the OrderState it
+	// commits, so stamping here is what makes the pin durable in the same write
+	// that admits the order. There is no second store to fall out of sync with.
+	if seen.asked && version != "" {
+		sch.VolumeProfileVersion = version
 	}
 	return nil
 }
@@ -308,7 +348,15 @@ func (s *Service) authorizeChild(ctx context.Context, cmd *orderpb.SubmitOrder) 
 	// put a second query on the admission path for an answer TWAP does not use.
 	// An algorithm that needs to know refuses, which is correct: it must not be
 	// told "nothing has been sent" by a caller that never looked.
-	slices, terr := algo.Run(plan, algo.ParentState{OrderID: parentID}, algo.UnknownMarket{})
+	//
+	// THE MARKET IS THE PARENT'S OWN PINNED PROFILE VERSION, NEVER THE NEWEST
+	// (#897). This is the sharpest of the three paths: the quantity comparison
+	// below is an EXACT RATIONAL, so a view built here from a curve that has moved
+	// since admission derives a different slice and refuses the driver's own child
+	// as a forgery — on a parent that then advances no further while every screen
+	// shows it working. Resolving the recorded version is what makes this check
+	// agree with the derivation that produced the child, on any pod, at any time.
+	slices, terr := algo.Run(plan, algo.ParentState{OrderID: parentID}, s.scheduleMarket(parent))
 	if terr != nil {
 		return nil, reject("PARENT_NOT_WORKING",
 			"order %s is a slice of %s, whose schedule is unworkable: %v",
