@@ -333,6 +333,41 @@ type Candidate struct {
 	Classifier Classifier
 	AsOf       time.Time
 
+	// ClassifyAsOf is the instant the CLASSIFIER is asked at — the point in time
+	// this candidate's reference data is read. It is a DIFFERENT QUESTION from
+	// AsOf, and answering both with one field cost a false breach on every boot
+	// (#930).
+	//
+	// AsOf is when the thing under evaluation was OBSERVED, and it stamps
+	// evaluated_at, so on the post-trade monitor's FACT path it is the position
+	// FACT's as_of — as old as the portfolio's last fill. refdata.Cache.Lookup
+	// REFUSES a record whose own as_of is AFTER the question's, because the master
+	// holds one snapshot per instrument and cannot answer backwards. Asking the
+	// classifier at the observation's instant therefore made every instrument whose
+	// reference record had been refreshed since that fill unresolvable, and
+	// unresolvedDimension turns unresolvable into a VIOLATION. So a SECTOR, ISSUER
+	// or ASSET_CLASS limit reported a breach on a portfolio that was not breaching,
+	// on every restart, for any fund that had not traded since its reference data
+	// was last refreshed — which is the normal state of a fund that is not trading
+	// — and AUTO-01 halts and escalates on that FACT. A control that cries breach
+	// on restart is a control operators learn to ignore.
+	//
+	// THE BOOK UNDER EVALUATION DECIDES WHICH INSTANT IS RIGHT. A monitor
+	// re-evaluating the holdings in force NOW must read the classification in force
+	// now — the same argument that resolves the mandate at now (#917). A caller
+	// whose book genuinely IS historical sets this to that history's instant and
+	// gets the refusal, which is the honest answer rather than today's sector
+	// applied to last quarter.
+	//
+	// ZERO FALLS BACK TO AsOf, NEVER TO THE ZERO TIME. Lookup skips the as-of check
+	// entirely on a zero asOf, so defaulting to zero would accept a record dated
+	// after the question on every caller — trading this false breach for a silent
+	// correctness hole on the pre-trade gate. Falling back to AsOf is what this
+	// platform did before the split, and it is the STRICTER direction: a
+	// construction site that never learns about this field can only refuse, never
+	// admit.
+	ClassifyAsOf time.Time
+
 	// Order is the order this evaluation is ABOUT, when there is one. nil for the
 	// post-trade monitor, which re-evaluates a live book with no order in hand.
 	//
@@ -378,6 +413,18 @@ type Candidate struct {
 	// claim can only be re-measured by hand with a profiler. One int, written
 	// under foldMu with the memo it describes.
 	folds int
+}
+
+// classifyAsOf is the clock the reference data is read at: ClassifyAsOf when the
+// caller set one, and AsOf otherwise. It never returns the zero time unless the
+// caller supplied neither, which is the pre-#930 behaviour of every construction
+// site and is the strict direction — see ClassifyAsOf for why a zero must not be
+// manufactured here.
+func (c *Candidate) classifyAsOf() time.Time {
+	if !c.ClassifyAsOf.IsZero() {
+		return c.ClassifyAsOf
+	}
+	return c.AsOf
 }
 
 // CandidateOrder is the order under evaluation, in the terms a rule needs it —

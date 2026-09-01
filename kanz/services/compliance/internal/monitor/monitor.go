@@ -219,13 +219,22 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 // dangerously on the transition test, where a second copy of lastStatus handling
 // would re-emit a breach the FACT path had already reported.
 //
-// # Two clocks, and they are not the same question (#917)
+// # Two clocks, and they are not the same question (#917, #930)
 //
 // observedAt is WHEN THE THING BEING EVALUATED WAS OBSERVED: the position FACT's
 // as_of on the FACT path, and now on the two paths that are woken by something
 // other than an observation. It stamps the breach FACT, the decision record and
 // the result's evaluated_at, and it has to stay the observation's own time or a
 // breach stops being attributable to what the system actually saw.
+//
+// EVERYTHING THIS FUNCTION LOOKS UP IS LOOKED UP AT NOW — the mandate below, and
+// the reference data the rule engine classifies with (Candidate.ClassifyAsOf).
+// Both are properties of the CURRENT world applied to the CURRENT book, and both
+// were asked at observedAt until the boot replay showed what that costs. They
+// failed differently, which is why they are two issues: the backdated mandate
+// lookup found NOTHING and skipped the portfolio (#917), while the backdated
+// reference-data lookup found a record dated after the question, refused it, and
+// turned that refusal into a false BREACH (#930).
 //
 // THE MANDATE IS RESOLVED AT NOW. The book being evaluated is the CURRENT one —
 // the holdings, marks and cash in force at this instant — so the mandate that
@@ -240,6 +249,17 @@ func (m *Monitor) Handle(ctx context.Context, env *envelopepb.Envelope, payload 
 // old as the portfolio's last fill, so a portfolio whose mandate is newer than
 // its last trade was skipped by this control entirely — silently, and for as long
 // as it did not trade.
+//
+// THE REFERENCE DATA IS READ AT NOW for the same reason, and it is the same boot
+// replay that reaches it. refdata.Cache holds one snapshot per instrument and
+// REFUSES a record whose own as_of is after the question's, so a classifier asked
+// at a month-old fill resolves nothing for any instrument refreshed since — and
+// comp.unresolvedDimension turns that into a violation, which is the right answer
+// to "the dimension is dark" and the wrong answer to "the question was backdated".
+// A SECTOR, ISSUER or ASSET_CLASS cap therefore breached on a book that was
+// inside it, on every restart, and AUTO-01 halts on that FACT. Asking at now does
+// NOT weaken the refusal: a dimension the master genuinely cannot resolve is
+// unresolved at now too, and still breaches.
 func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, trigger compliancepb.BreachTrigger, observedAt time.Time) error {
 	// THE TENANT COMES FROM THE BOOK, NOT FROM THE CALLER'S CONTEXT (#787).
 	//
@@ -310,7 +330,17 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 		return nil // governed by a mandate that constrains nothing — a choice, not a gap
 	}
 
-	res := m.engine.Evaluate(ctx, &comp.Candidate{Book: book, Classifier: m.classifier, AsOf: observedAt}, mandate)
+	res := m.engine.Evaluate(ctx, &comp.Candidate{
+		Book:       book,
+		Classifier: m.classifier,
+		// THE STAMP, and it stays the observation's own time — evaluated_at is what
+		// makes a breach attributable to what the system saw and when (#917).
+		AsOf: observedAt,
+		// THE REFERENCE-DATA CLOCK, and it is NOT observedAt (#930). See the
+		// two-clocks note above: the book is the current one, so the classification
+		// that applies to it is the current one.
+		ClassifyAsOf: m.now().UTC(),
+	}, mandate)
 
 	entered := m.recordStatus(key, res.GetStatus())
 	if res.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH || !entered {
