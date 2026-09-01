@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,9 +24,73 @@ import (
 
 var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
 
+// call is one remediation the controller drove through a seam: what it acted on
+// and the reason it passed down.
+type call struct{ target, reason string }
+
+// recordingQuarantiner / recordingRoller are the assertion surface that replaced
+// remediate's LogQuarantiner.Quarantined and LogModelRoller.RolledBack when #892
+// removed the ledgers behind them.
+//
+// The ledgers were state PRODUCTION carried so that a test could read it back —
+// an unbounded map keyed by a subject off the wire, filling fastest during the
+// storm autopilot exists to handle. Recording belongs to the test, so it now
+// lives here, and these assert MORE than the removed bool did: which subject,
+// with which reason, how many times, in what order. What LogQuarantiner and
+// LogModelRoller themselves do is asserted in their own package, against the log
+// line production actually keeps (remediate/remediate_test.go).
+type recordingQuarantiner struct {
+	mu    sync.Mutex
+	calls []call
+}
+
+func (q *recordingQuarantiner) Quarantine(_ context.Context, subject, reason string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.calls = append(q.calls, call{subject, reason})
+	return nil
+}
+
+func (q *recordingQuarantiner) recorded() []call {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]call(nil), q.calls...)
+}
+
+type recordingRoller struct {
+	mu    sync.Mutex
+	calls []call
+}
+
+func (r *recordingRoller) Rollback(_ context.Context, modelID, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, call{modelID, reason})
+	return nil
+}
+
+func (r *recordingRoller) recorded() []call {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]call(nil), r.calls...)
+}
+
+// wantCalls asserts the exact sequence a seam saw. `want` is variadic and an
+// empty want is the negative case — "this seam was not touched at all" — which
+// is what a sub-threshold signal has to prove.
+func wantCalls(t *testing.T, what string, got []call, want ...call) {
+	t.Helper()
+	if len(want) == 0 && len(got) == 0 {
+		return
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%s calls = %v, want %v", what, got, want)
+	}
+}
+
 type rig struct {
-	q      *remediate.LogQuarantiner
-	roller *remediate.LogModelRoller
+	q      *recordingQuarantiner
+	roller *recordingRoller
 	scaler *actuate.LogScaler
 	fail   *actuate.LogFailover
 	escLog *escRecorder
@@ -32,11 +98,11 @@ type rig struct {
 }
 
 func newRig(autoFailover bool, q remediate.Quarantiner) rig {
-	lq := remediate.NewLogQuarantiner(discard)
+	rq := &recordingQuarantiner{}
 	if q == nil {
-		q = lq
+		q = rq
 	}
-	roller := remediate.NewLogModelRoller(discard)
+	roller := &recordingRoller{}
 	scaler := actuate.NewLogScaler(discard)
 	fail := actuate.NewLogFailover(discard)
 	// The escalator gets its OWN logger so a test can count the escalation
@@ -48,7 +114,7 @@ func newRig(autoFailover bool, q remediate.Quarantiner) rig {
 	esc := controller.NewLogEscalator(escLog.logger())
 	deps := plan.Deps{Quarantiner: q, ModelRoller: roller, Scaler: scaler, Failover: fail}
 	ctrl := controller.New(plan.DefaultMatcher(), plan.DefaultRegistry(deps, autoFailover), esc, discard, nil)
-	return rig{q: lq, roller: roller, scaler: scaler, fail: fail, escLog: escLog, ctrl: ctrl}
+	return rig{q: rq, roller: roller, scaler: scaler, fail: fail, escLog: escLog, ctrl: ctrl}
 }
 
 func sig(kind signal.Kind, subject string, sev signal.Severity) signal.Signal {
@@ -71,9 +137,7 @@ func TestAutoRemediation(t *testing.T) {
 		if o := mustDispatch(t, r, sig(signal.KindDataGap, "AAPL", signal.SeverityCritical)); o != controller.OutcomeRemediated {
 			t.Fatalf("outcome = %s", o)
 		}
-		if !r.q.Quarantined("AAPL") {
-			t.Error("subject not quarantined")
-		}
+		wantCalls(t, "quarantine", r.q.recorded(), call{"AAPL", "data_gap: "})
 		if n := len(r.escLog.escalations(t)); n != 0 {
 			t.Errorf("escalation records = %d, want 0: an auto-remediated condition must not escalate", n)
 		}
@@ -82,17 +146,13 @@ func TestAutoRemediation(t *testing.T) {
 	t.Run("reconcile divergence → quarantine", func(t *testing.T) {
 		r := newRig(false, nil)
 		mustDispatch(t, r, sig(signal.KindReconcileDivergence, "risk.exposure", signal.SeverityWarning))
-		if !r.q.Quarantined("risk.exposure") {
-			t.Error("divergent subject not quarantined")
-		}
+		wantCalls(t, "quarantine", r.q.recorded(), call{"risk.exposure", "reconcile_divergence: "})
 	})
 
 	t.Run("model drift → rollback", func(t *testing.T) {
 		r := newRig(false, nil)
 		mustDispatch(t, r, sig(signal.KindDrift, "model-7", signal.SeverityCritical))
-		if !r.roller.RolledBack("model-7") {
-			t.Error("model not rolled back")
-		}
+		wantCalls(t, "rollback", r.roller.recorded(), call{"model-7", "drift: "})
 	})
 
 	t.Run("broker stall: staleness → scale ingest, circuit → scale inference", func(t *testing.T) {
@@ -112,8 +172,9 @@ func TestEscalationOnlyOnUnrecognized(t *testing.T) {
 		if o := mustDispatch(t, r, sig(signal.KindDataGap, "AAPL", signal.SeverityWarning)); o != controller.OutcomeEscalated {
 			t.Fatalf("outcome = %s, want escalated", o)
 		}
-		if r.q.Quarantined("AAPL") {
-			t.Error("a sub-threshold WARNING must not trigger remediation")
+		if got := r.q.recorded(); len(got) != 0 {
+			t.Errorf("quarantine calls = %v, want none: a sub-threshold WARNING must not trigger "+
+				"remediation", got)
 		}
 		if n := len(r.escLog.escalations(t)); n != 1 {
 			t.Fatalf("escalation records = %d, want 1", n)
@@ -169,8 +230,9 @@ func TestHandleClassifiesAndRemediates(t *testing.T) {
 	if err := r.ctrl.Handle(context.Background(), env, payload); err != nil {
 		t.Fatal(err)
 	}
-	if !r.q.Quarantined("AAPL") {
-		t.Error("Handle did not classify+remediate the data-quality gap")
+	if got := r.q.recorded(); !reflect.DeepEqual(got, []call{{"AAPL", "data_gap: "}}) {
+		t.Errorf("quarantine calls = %v, want the AAPL data gap — Handle did not classify+remediate "+
+			"the data-quality event", got)
 	}
 
 	// A non-signal event is ignored (acked, no action).
@@ -185,4 +247,3 @@ type failingQuarantiner struct{}
 func (failingQuarantiner) Quarantine(context.Context, string, string) error {
 	return errors.New("quarantine backend down")
 }
-func (failingQuarantiner) Quarantined(string) bool { return false }
