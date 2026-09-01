@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+// VolumeProfile is the intraday volume profile crossing a service boundary as a
+// FACT (#897).
+//
+// internal/marketedge/volprofile folds the shape in the process that holds the
+// venue sockets. internal/execution/algo's VWAP and POV schedule against it, and
+// they run in the OMS. Nothing carried it between the two, so every volume-driven
+// order was refused at admission under NO_VOLUME_PROFILE.
+//
+// # WHY A FACT AND NOT A QUERY
+//
+// Three reasons, and the third is the one that decides it.
+//
+// A published shape survives a pod roll. The fold is in-memory, per-process, and
+// starts empty; an OMS that built its own would answer "no profile" for as many
+// days as its MinSessions demands after every deploy.
+//
+// A published shape is one shape. A query answered per pod from per-pod state is
+// as many shapes as there are pods, and services/oms/internal/order.authorizeChild
+// re-derives an inbound child's quantity and compares it as an EXACT RATIONAL —
+// two pods holding different tapes derive different children, and a legitimate
+// slice is refused as a forgery.
+//
+// And a published shape is ADDRESSABLE. `version` names one immutable shape, so a
+// parent order can record which one its schedule was planned against and every
+// later re-derivation — the child-admission check on one pod, the driver tick on
+// another, the same pod after a restart — resolves THAT one rather than whatever
+// is newest. Same input, same schedule, forever. A query has no such handle:
+// "the profile for BTC-USDT on XBIT" means something different after every
+// session boundary.
+package market.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+
+// VolumeProfileVerdict is what the producer concluded about a series, and it is
+// carried EVEN WHEN THERE IS NO SHAPE.
+//
+// A CONSUMER MUST BE ABLE TO TELL "nobody is folding this instrument" FROM
+// "folded, and there is not enough of it yet". Both refuse an order, and they
+// need different actions from an operator — one is a missing subscription, the
+// other is patience. Publishing only the KNOWN profiles would collapse them into
+// the same silence, which is the failure this estate names first.
+//
+// It mirrors internal/marketedge/volprofile.Verdict one value for one value, and
+// TestVolumeProfileVerdictCoversTheFold holds the two vocabularies equal.
+enum VolumeProfileVerdict {
+  // UNSPECIFIED is what a producer that set nothing sends and what a consumer
+  // reading a value this build has no name for decodes to. It is NOT known, so
+  // it fails closed exactly as ABSENT does.
+  VOLUME_PROFILE_VERDICT_UNSPECIFIED = 0;
+
+  // ABSENT — no completed session has ever been folded for this series.
+  VOLUME_PROFILE_VERDICT_ABSENT = 1;
+
+  // STALE — the newest completed session is further back than the horizon, so
+  // the shape describes a market that has since moved on.
+  VOLUME_PROFILE_VERDICT_STALE = 2;
+
+  // TOO_FEW_SESSIONS — fewer completed sessions are retained than the desk
+  // requires before it will schedule against a shape.
+  VOLUME_PROFILE_VERDICT_TOO_FEW_SESSIONS = 3;
+
+  // KNOWN — expected_volume carries a measured shape.
+  VOLUME_PROFILE_VERDICT_KNOWN = 4;
+}
+
+// VolumeProfile is one (instrument, venue) series' intraday shape as of an
+// instant, addressable by version.
+message VolumeProfile {
+  // instrument_id is the canonical Kanz instrument identifier, matching
+  // MarketDataEvent.instrument_id and the envelope partition_key. Required.
+  string instrument_id = 1;
+
+  // mic is the venue the shape was measured on, matching MarketDataEvent.mic.
+  //
+  // A PROFILE IS PER VENUE, for the reason IngestionCoverage is: two venues on
+  // one instrument have different participants, funding cycles and maintenance
+  // windows, so a blended shape schedules an order against books it will never
+  // touch. Required.
+  string mic = 2;
+
+  // version names this exact shape, and it is what a parent order pins.
+  //
+  // IT IS DERIVED FROM THE CONTENT, NOT ALLOCATED. Two replicas folding the same
+  // sessions publish the same version, and a re-publish of an unchanged shape is
+  // the same version — so a consumer's fold is idempotent at the key rather than
+  // by a dedup window. A consumer recomputes it from the fields below and REFUSES
+  // a message whose version does not match its own content: a shape carrying
+  // somebody else's version is precisely the mislabelling the pin exists to make
+  // impossible. Required.
+  string version = 3;
+
+  // as_of is the instant the producer answered as of. The enclosing envelope's
+  // event_time is the same instant. Required.
+  google.protobuf.Timestamp as_of = 4;
+
+  // session is the profile's day and bucket is its intraday bin width;
+  // expected_volume has exactly session/bucket entries when the verdict is
+  // KNOWN. Both required.
+  google.protobuf.Duration session = 5;
+  google.protobuf.Duration bucket = 6;
+
+  // horizon is how far back the producer retained completed sessions.
+  //
+  // IT TRAVELS WITH THE SHAPE RATHER THAN BEING CONFIGURED AT THE CONSUMER, and
+  // that is what makes a pinned schedule reproducible on a pod that was deployed
+  // with a different setting. A consumer integrating this shape over an interval
+  // LONGER than the history behind it is extrapolating past everything measured
+  // and must answer UNKNOWN — a bound read from a local config would make that
+  // refusal a property of the reader rather than of the datum, and two pods would
+  // disagree about a schedule. Required.
+  google.protobuf.Duration horizon = 7;
+
+  // verdict says whether a shape could be asserted, and why not when it could
+  // not. Required; expected_volume is empty unless it is KNOWN.
+  VolumeProfileVerdict verdict = 8;
+
+  // sessions is how many completed sessions the producer retains for this
+  // series. Reported in EVERY verdict, including the refusals: an operator has to
+  // be able to tell "nearly ready" from "nothing here".
+  uint32 sessions = 9;
+
+  // oldest_session and newest_session are the first and last retained completed
+  // sessions' starts. Unset when none are retained.
+  google.protobuf.Timestamp oldest_session = 10;
+  google.protobuf.Timestamp newest_session = 11;
+
+  // window_buckets is how many (session, bucket) pairs the retained history
+  // spans and window_observed how many of them saw at least one print. Their
+  // difference is how much of this shape nobody can speak for.
+  //
+  // THERE IS DELIBERATELY NO QUIET COUNT. A bucket with no print is
+  // indistinguishable from one whose feed was down, and only
+  // market.v1.IngestionCoverage holds a first-hand attestation that could tell
+  // them apart. Reporting some of these as measured-quiet would be a claim
+  // nobody made.
+  uint32 window_buckets = 12;
+  uint32 window_observed = 13;
+
+  // expected_volume[i] is the quantity expected to trade in intraday bucket i of
+  // a typical session, in the instrument's own units. Empty unless the verdict is
+  // KNOWN.
+  //
+  // A QUANTITY PER BUCKET RATHER THAN A DIMENSIONLESS SHARE PLUS A LEVEL, and
+  // the two halves are multiplied HERE rather than at every reader for one
+  // reason: the product is the only thing any consumer uses. VWAP needs the
+  // ratios between buckets, POV needs the absolute level, and both get exactly
+  // this. Publishing a share and a level separately would put one multiplication
+  // in every reader and invite the reading that a share alone answers "how much".
+  //
+  // ROUNDED ONCE, HERE, AT THE PLATFORM'S DECIMAL BOUNDARY. The producer's shape
+  // is a mean of per-session distributions and is generically a non-terminating
+  // rational; a decimal is what the estate transports, and rounding it in one
+  // place means every consumer reads the same number and derives the same
+  // schedule. A bucket whose expectation rounds to zero is not a measured zero —
+  // it makes a schedule slicing into that bucket REFUSE (algo.ErrNoVolumeInBucket)
+  // rather than place a child of nothing, which is the fail-closed direction.
+  repeated common.v1.Decimal expected_volume = 14;
+}

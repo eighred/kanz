@@ -176,7 +176,21 @@ func UsableParentID(orderID string) error {
 // first failure has sent a PREFIX of the schedule rather than an arbitrary
 // subset. That matters on the next tick: a hole is refilled before anything
 // later is added, which is what keeps a partially-sent parent recoverable.
-func Due(p Parent, exists func(childID string) bool, now time.Time) ([]Child, error) {
+//
+// # mkt IS SUPPLIED BY THE DRIVER, AND IT MUST BE THE PARENT'S PINNED CURVE
+//
+// This used to construct algo.UnknownMarket itself, which was honest while the
+// OMS held no market data and is a defect now that it does (#897): a decision
+// that builds its own view has no way to be given the SAME view the parent's
+// schedule was admitted against, and a volume-driven schedule derived against a
+// different curve is a different schedule.
+//
+// A nil view is normalised by algo.Run to UnknownMarket, so a caller with no
+// market data is unchanged — TWAP asks nothing, and a volume-driven parent
+// refuses here rather than being worked against a curve nobody chose. What this
+// signature makes impossible is the middle case: a driver holding a profile and
+// silently not using the one the order names.
+func Due(p Parent, exists func(childID string) bool, now time.Time, mkt algo.MarketView) ([]Child, error) {
 	// CLAUSE (c) OF #435, AND IT IS FIRST FOR A REASON.
 	//
 	// Not "return early as an optimisation" — this is the cancellation. An
@@ -206,15 +220,15 @@ func Due(p Parent, exists func(childID string) bool, now time.Time) ([]Child, er
 	//
 	// What is passed alongside is deliberate on both counts. Sent is a predicate
 	// over slice indices rather than a count, for the reason this package's doc
-	// gives — a count skips past a hole forever. UnknownMarket is passed
-	// EXPLICITLY: this decision has no market data, and saying so is not the same
-	// as saying nothing. An algorithm that needs a book or a volume profile
-	// (#867) refuses here rather than inventing one.
+	// gives — a count skips past a hole forever. The market view comes from the
+	// DRIVER (#897), which resolves the profile version the parent recorded at
+	// admission; this decision does not choose one, because choosing one here
+	// would be choosing it per tick and per pod.
 	state := algo.ParentState{
 		OrderID: p.OrderID,
 		Sent:    func(index int) bool { return exists(ChildID(p.OrderID, index)) },
 	}
-	slices, err := algo.Run(p.Plan, state, algo.UnknownMarket{})
+	slices, err := algo.Run(p.Plan, state, mkt)
 	if errors.Is(err, algo.ErrUnknownAlgo) {
 		return nil, fmt.Errorf("schedule: parent %s names an execution algorithm this build cannot "+
 			"work, so nothing can advance it: %w", p.OrderID, err)

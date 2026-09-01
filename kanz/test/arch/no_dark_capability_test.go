@@ -73,6 +73,19 @@ import (
 //	      risk-engine composition root publishes kanz_risk_analytics_validated.
 //	      THE DEAD-ENTRY ARM IS WHAT CAUGHT THE STALE EXEMPTION — the repair
 //	      landed and this guard refused to keep vouching for the old state.
+//	#897  internal/execution/marketview — the binding between #867's volume
+//	      profile and #869's VWAP and POV. RETIRED 2026-09-01: the profile now
+//	      crosses the service boundary as a versioned FACT
+//	      (internal/volprofilefeed, market.crypto.volume_profile), the OMS folds
+//	      it by replay, and all three of its entries into
+//	      internal/execution/algo take a view built from it — so
+//	      services/oms/internal/order imports this package and a VWAP order is
+//	      ADMITTED rather than refused under NO_VOLUME_PROFILE.
+//	      NOTE THE LIMIT, in the spirit of the entries below. What is wired is
+//	      the CURVE, not the venue: a slice still names no venue (#870), so a
+//	      volume-driven parent is scheduled against the book its own `venue`
+//	      field names and is refused when it names none. A deleted entry here
+//	      must not read as "this platform allocates a slice across venues".
 //	#869  internal/marketedge/volprofile — the intraday volume profile #867
 //	      landed. RETIRED 2026-08-31: internal/execution/marketview.Volume calls
 //	      Store.Profile and ACTS ON THE VERDICT, which is the retirement condition
@@ -197,23 +210,6 @@ var darkPackageExempt = map[string]string{
 		"It would also cost something real — market-ingest has no database and does not depend on " +
 		"pgx today, which is why the seam's own types live in pkg/alpha rather than being " +
 		"store.Attested. What retires this entry is an Engine implementation, not a constructor.",
-
-	"internal/execution/marketview": "#897 — the binding between #867's intraday volume profile and " +
-		"#869's VWAP and POV. IT IS WHERE volprofile's DARKNESS MOVED, not a new one: that entry " +
-		"retired because this package calls Store.Profile and turns every non-KNOWN verdict into " +
-		"algo.MarketView's UNKNOWN, which the two algorithms refuse on — the retirement condition " +
-		"the old entry named. What is still missing is one step further out and it is a DESIGN " +
-		"decision rather than plumbing, which is why it has its own issue: all three OMS entries " +
-		"into internal/execution/algo pass algo.UnknownMarket, because the profile is an in-memory " +
-		"fold in market-ingest and nothing carries it to the OMS. So a VWAP or POV order is refused " +
-		"at admission under NO_VOLUME_PROFILE today, which is the fail-closed direction and is " +
-		"asserted in services/oms/internal/order/schedule_volume_test.go. " +
-		"CONSTRUCTING THIS FROM THE OMS COMPOSITION ROOT OVER A LOCAL STORE WOULD BE THE WRONG FIX " +
-		"and would satisfy this guard: the store starts empty and answers VerdictAbsent for days " +
-		"after a roll, and order.authorizeChild re-derives a child's quantity and compares it as an " +
-		"exact rational — two pods with different in-memory tapes would derive different children " +
-		"and legitimate slices would be refused as forgeries. What retires this entry is a profile " +
-		"that is the same point-in-time fact on every pod.",
 
 	// The three below were dark in the services/*/internal blind spot #583 closed.
 	"services/accounting/internal/corpact": "#588 — the IBOR-01c corporate-action processor. It " +

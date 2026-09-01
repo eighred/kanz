@@ -262,6 +262,14 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"keyed by Series{instrument, venue} — one entry per feed this process has ever folded a trade " +
 			"for, which is the subscription set rather than the message rate. The per-series history " +
 			"inside each entry IS pruned, through pit.Put with the store's horizon.", ""},
+	"internal/volprofilefeed: Collector.published": {boundedByConstruction,
+		"keyed by Series{instrument, venue}, and the ONLY writer is Sweep, whose key set is the " +
+			"slice its caller passes — pkg/alpha.Runner builds that once, from the feeds the " +
+			"composition root configured. Nothing off the wire and nothing per message can reach it. " +
+			"The VALUE is one version string per series, replaced rather than appended, so a series " +
+			"that republishes a thousand times still holds one entry of one string. It is also not " +
+			"correctness state: losing it republishes every series once, which the consumer folds " +
+			"idempotently.", ""},
 	"internal/risk/pricing/credit: Store.byReference": {boundedByConstruction,
 		"keyed by counterparty reference entity, written only by the credit Calibrator's scheduled " +
 			"refresh over a configured set — no request path reaches Put. The version list at each key " +

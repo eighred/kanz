@@ -90,6 +90,31 @@ type Config struct {
 	// of it. coverage.NewRecorder REFUSES a value >= one bucket rather than
 	// accepting a tolerance that would vouch for a dead feed.
 	CoverageMaxSilence time.Duration
+
+	// VolumeProfileMinSessions is how many completed sessions must be folded
+	// before this edge will assert an intraday volume shape (#897).
+	//
+	// ZERO MEANS THE PROFILE IS NOT PUBLISHED AT ALL, and that is deliberate
+	// rather than a disabled feature with a shrug. volprofile.Config refuses to
+	// invent this number — how much history a desk requires before it will
+	// schedule an order against a curve is an execution-policy decision — so
+	// there is no value this file could default to that would not either refuse a
+	// healthy profile or let a two-day sample set a month's schedule.
+	//
+	// THE CONSEQUENCE IS STATED AT STARTUP RATHER THAN DISCOVERED FROM A DESK.
+	// Unset, no profile reaches the OMS and every VWAP or POV order on the
+	// platform is refused under NO_VOLUME_PROFILE — a refusal that names the
+	// MARKET while the cause is this line. The composition root logs it and seeds
+	// kanz_market_ingest_volume_profile_publishing at 0, which is the only thing
+	// separating "this deployment does not publish profiles" from "it does, and
+	// nothing has been measured yet".
+	VolumeProfileMinSessions int
+
+	// VolumeProfileBucket and VolumeProfileHorizon are volprofile.Config's bin
+	// width and retention. Zero is that package's documented default (30m and
+	// three weeks), each argued there; neither is "unbounded".
+	VolumeProfileBucket  time.Duration
+	VolumeProfileHorizon time.Duration
 }
 
 // Load reads and validates the environment.
@@ -123,6 +148,13 @@ func Load() Config {
 		// recorder enforces. A misconfiguration here fails at construction, not on
 		// the first quiet minute.
 		CoverageMaxSilence: parseDuration(os.Getenv("MARKET_INGEST_COVERAGE_MAX_SILENCE"), 45*time.Second),
+
+		// NO DEFAULT, AND THE ZERO IS LOUD. See the field's own comment: an
+		// invented session floor is a schedule nobody chose, and a silent one is
+		// worse than none.
+		VolumeProfileMinSessions: parseInt(os.Getenv("MARKET_INGEST_VOLUME_PROFILE_MIN_SESSIONS"), 0),
+		VolumeProfileBucket:      parseDuration(os.Getenv("MARKET_INGEST_VOLUME_PROFILE_BUCKET"), 0),
+		VolumeProfileHorizon:     parseDuration(os.Getenv("MARKET_INGEST_VOLUME_PROFILE_HORIZON"), 0),
 	}
 }
 

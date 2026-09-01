@@ -91,9 +91,29 @@ var orderDigestExempt = map[string]string{
 }
 
 // orderDigestScheduleExempt is the same thing for ExecutionSchedule's fields.
-// EMPTY, and it should stay that way: every field of a schedule changes what
-// reaches a venue and when.
-var orderDigestScheduleExempt = map[string]string{}
+//
+// EVERY FIELD A CALLER CAN SET MUST BE HASHED, because every one of them changes
+// what reaches a venue and when. The single entry below is not a caller field at
+// all.
+var orderDigestScheduleExempt = map[string]string{
+	"volume_profile_version": "THE PLATFORM STAMPS IT AND THE CALLER CANNOT (#897). It records " +
+		"which published market.v1.VolumeProfile a volume-driven schedule was derived against, and " +
+		"the OMS RESOLVES it at admission: services/oms/internal/order.validateSchedule clears " +
+		"whatever arrived on the command before reading anything, then sets it only if the " +
+		"algorithm actually consulted the curve. So nothing a proposer sends survives into the " +
+		"admitted order, and there is nothing for an approver's signature to protect — the field " +
+		"is in the same position as venue_account_id, which SubmitOrder deliberately has no field " +
+		"for at all. " +
+		"HASHING IT WOULD BREAK THE CONTROL RATHER THAN STRENGTHEN IT, in exactly #511's shape: " +
+		"the proposed command carries no version and the applied one carries whichever profile was " +
+		"current at admission, so propose and apply would hash different payloads and EVERY " +
+		"approval of a VWAP or POV order would fail for a reason unrelated to the control. " +
+		"WHAT AN APPROVER IS ACTUALLY PROMISED, stated rather than implied: the fields that decide " +
+		"the schedule's SHAPE - algo, window, slice_count and both caps - are all hashed, so the " +
+		"order they signed is worked by the algorithm they saw over the window they saw. What the " +
+		"version pins is the measured curve, which is market data neither party chooses and which " +
+		"moves between propose and apply by construction.",
+}
 
 func TestTheOrderDigestCoversEverySubmitOrderField(t *testing.T) {
 	root := moduleRoot(t)

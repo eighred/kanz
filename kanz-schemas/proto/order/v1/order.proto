@@ -246,6 +246,39 @@ message ExecutionSchedule {
   // send-time decision beside the driver, which is a different thing from a
   // schedule derived from the order.
   common.v1.Decimal max_participation_rate = 6;
+
+  // volume_profile_version pins WHICH market.v1.VolumeProfile this schedule was
+  // planned against (#897). Stamped by the OMS at admission, never by a client;
+  // unset ⇒ the schedule was derived without consulting a volume profile, which
+  // is every TWAP order.
+  //
+  // # IT IS THE FIELD THAT KEEPS TWO PODS AGREEING
+  //
+  // Everything else here is an input a client supplied and the order stored, so
+  // any pod re-derives the same children from it. A volume-driven schedule has a
+  // sixth input the client never sends — the shape of the market — and that one
+  // MOVES: a session completes, the producer publishes a new profile, and a pod
+  // reading "the current profile" now derives a different schedule from the same
+  // order.
+  //
+  // That is not a cosmetic difference. services/oms/internal/order.authorizeChild
+  // re-derives the parent's schedule to decide whether an inbound child really is
+  // a slice of it, and compares the quantity as an EXACT RATIONAL. Two pods on
+  // two profiles disagree in the last digit, so the driver's own child is refused
+  // as a forgery and the parent stops advancing — with every screen showing it
+  // working.
+  //
+  // So the profile is pinned once, at admission, and every later derivation
+  // resolves THAT version: the child-admission check, the driver tick, and the
+  // same pod after a restart. The pin also makes the order auditable in the sense
+  // CLAUDE.md requires — "which venue capability was used" extends to which
+  // measured shape the desk's VWAP was sized against, and the version addresses
+  // an immutable one.
+  //
+  // A PIN THAT CANNOT BE RESOLVED IS UNKNOWN, NEVER THE NEAREST SHAPE. The
+  // schedule then refuses, loudly, rather than being re-planned mid-flight
+  // against a market the parent was never sized for.
+  string volume_profile_version = 7;
 }
 
 // AmendOrder requests a change to a resting order's quantity and/or limit

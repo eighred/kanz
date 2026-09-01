@@ -130,6 +130,29 @@ spec:
             - { name: MARKET_INGEST_BINANCE_WS_BASE, value: "wss://stream.binance.com:9443" }
             - { name: MARKET_INGEST_BINANCE_REST_BASE, value: "https://api.binance.com" }
             - { name: MARKET_INGEST_OKX_WS_URL, value: "wss://ws.okx.com:8443/ws/v5/public" }
+            # HOW MUCH HISTORY THIS DESK REQUIRES BEFORE IT WILL SCHEDULE AN
+            # ORDER AGAINST A MEASURED VOLUME CURVE (#897).
+            #
+            # THE VALUE IS AN EXECUTION-POLICY DECISION AND IT BELONGS HERE, which
+            # is why the binary has no default for it: a number invented in code
+            # would either refuse a healthy profile or let a two-day sample set a
+            # month's schedule, and "nothing configured" would look exactly like
+            # "checked, and fine".
+            #
+            # FIVE, and the number comes from what it has to survive. The fold
+            # weights sessions equally, so the floor is a count of SAMPLES: at
+            # five, one anomalous session — a liquidation cascade, a venue outage,
+            # a listing — cannot decide the shape on its own. It is also five DAYS
+            # of uptime before this deployment publishes its first curve, during
+            # which the OMS refuses every VWAP and POV order under
+            # NO_VOLUME_PROFILE and the profile it does publish says
+            # TOO_FEW_SESSIONS with its counts, so the wait is visible rather than
+            # silent.
+            #
+            # REMOVING THIS LINE TURNS THE WHOLE FEATURE OFF, estate-wide, and the
+            # pod says so at startup and exports
+            # kanz_market_ingest_volume_profile_publishing=0.
+            - { name: MARKET_INGEST_VOLUME_PROFILE_MIN_SESSIONS, value: "5" }
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
             # MARKET_INGEST_ALLOW_SIM is deliberately ABSENT. Setting it to "true"
             # makes this pod publish generated prices as market data. It exists for

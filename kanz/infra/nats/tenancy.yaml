@@ -1025,9 +1025,26 @@ data:
           # platform was never looking", the exact conclusion the record exists
           # to make impossible. Coverage cannot be reconstructed afterwards, so a
           # denial here is not a delay, it is permanent loss.
+          #
+          # FOURTH PUBLISHER, ADDED WITH #897: internal/volprofilefeed publishes
+          # market.crypto.volume_profile - the per-(instrument, venue) intraday
+          # volume profile, versioned so a parent order can pin the exact curve
+          # its schedule was derived against. It rides market.crypto.* for the
+          # reason the candle and the coverage record do, so again no new stream,
+          # no new Kafka topic and no new archival decision.
+          #
+          # IT IS THE SAME PER-PACKAGE DERIVATION TRAP the two above record: the
+          # bus.Event is built inside the shared package, so the package is listed
+          # in crossPackagePublishSurfaces in
+          # test/arch/nats_service_permissions_test.go. WITHOUT THE GRANT BELOW
+          # every profile is denied at publish time while the fold keeps running -
+          # and the OMS then refuses every VWAP and POV order under
+          # NO_VOLUME_PROFILE, a refusal whose text names the MARKET rather than a
+          # missing line in this file.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-ingest"
             permissions: {
-              publish: { allow: ["market.book.snapshot", "market.crypto.bar", "market.crypto.ingestion_coverage"] }
+              publish: { allow: ["market.book.snapshot", "market.crypto.bar",
+                                 "market.crypto.ingestion_coverage", "market.crypto.volume_profile"] }
               subscribe: { allow: ["_INBOX.>"] }
             }
           }
@@ -1168,6 +1185,22 @@ data:
                   "order.order.approve",
                   "order.order.filled", "order.order.partially_filled",
                   "market.*.trade", "market.*.quote", "compliance.mandate.changed.>",
+                  # THE INTRADAY VOLUME PROFILE (#897), which is what makes a VWAP
+                  # or POV order placeable at all. It is folded by SubscribeReplay
+                  # rather than SubscribeBroadcast, because this registry is
+                  # version-ADDRESSED: a parent order pins the profile version its
+                  # schedule was derived against, and delivering only the last
+                  # message per subject would leave a cold pod holding one curve
+                  # for one instrument.
+                  #
+                  # A DENIED SUBSCRIPTION IS SILENT (#787/#788). The OMS starts
+                  # fine, folds nothing, and answers "no volume profile" to every
+                  # question - which is also its honest answer for an instrument
+                  # nobody measures, so a missing line here reads as a market
+                  # rather than as a permission. SUBSCRIBE ONLY: the market-data
+                  # edge is the authority on this curve and an OMS that published
+                  # one would be a second measurement of the same market.
+                  "market.crypto.volume_profile",
                   # WHAT THE PORTFOLIO CAN SPEND (#450), for the pre-trade
                   # buying-power gate. SUBSCRIBE ONLY, and that asymmetry is the
                   # point: accounting is the book of record for cash and the OMS
@@ -1715,6 +1748,11 @@ data:
                   "order.order.approve",
                   "order.order.filled", "order.order.partially_filled",
                   "market.*.trade", "market.*.quote", "compliance.mandate.changed.>",
+                  # The intraday volume profile (#897) - mirrors the platform
+                  # grant above; the pod runs the same binary and folds the same
+                  # spine, and without this line its VWAP and POV orders are
+                  # refused while the platform tenant's are admitted.
+                  "market.crypto.volume_profile",
                   "accounting.balance.portfolio",
                   "risk.portfolio.measures_computed",
                   "platform.mode.changed",

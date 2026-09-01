@@ -690,7 +690,13 @@ var crossPackagePublishSurfaces = map[string][]string{
 	// worse. A denied candle can be re-derived from the venue tomorrow; a denied
 	// attestation is gone permanently, because nothing can reconstruct whether a
 	// feed was live, and the interval reads as UNKNOWN forever.
-	"market-ingest": {"internal/marketedge/ingest", "internal/marketedge/bars", "internal/marketedge/coverage"},
+	// internal/volprofilefeed is the FOURTH (#897): the intraday volume profile,
+	// folded off the same trade feeds and published versioned so a parent order
+	// can pin the exact curve its schedule was derived against. Listed for bars'
+	// reason, with coverage's consequence: a denied profile is not merely a hole
+	// in a series, it is every VWAP and POV order on the platform refused at
+	// admission under a code that names the MARKET.
+	"market-ingest": {"internal/marketedge/ingest", "internal/marketedge/bars", "internal/marketedge/coverage", "internal/volprofilefeed"},
 	// webhook-ingest's signal + order-command publishes are
 	// internal/signal/translate's Translator, constructed and driven from
 	// services/webhook-ingest/internal/ingest (pipeline.go's tr.Emit).

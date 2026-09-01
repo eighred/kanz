@@ -19,6 +19,7 @@ import (
 	"github.com/eighred/kanz/internal/marketedge/trades"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/internal/signal/translate"
+	"github.com/eighred/kanz/internal/volprofilefeed"
 )
 
 // Feed is one (instrument, venue) pair's live inputs: the L2 depth stream and the
@@ -99,6 +100,19 @@ type Config struct {
 	// producer, so that turning candles on is a deliberate act at the composition
 	// root rather than a side effect of having a bus.
 	Bars bars.Publisher
+
+	// VolumeProfile folds the same trade feeds into a per-(instrument, venue)
+	// intraday volume profile and publishes it as a FACT (#897). Nil ⇒ no profile
+	// leaves this process, and every VWAP or POV order on the platform is refused
+	// at admission under NO_VOLUME_PROFILE.
+	//
+	// IT IS A BUILT COLLECTOR RATHER THAN A PUBLISHER, unlike Bars, because the
+	// fold carries a POLICY this package must not choose: volprofile.Config's
+	// MinSessions — how much history a desk requires before it will schedule
+	// against a curve — has no default and cannot have one. Taking the collector
+	// keeps that decision at the composition root, where the deployment's own
+	// answer lives.
+	VolumeProfile *volprofilefeed.Collector
 
 	// SnapshotInterval / SnapshotDepth govern the bounded book snapshots published
 	// for durable replay and audit (the only depth that reaches the bus).
@@ -215,6 +229,14 @@ func (r *Runner) Run(ctx context.Context) error {
 			if r.bars != nil {
 				src = bars.Tee(src, bars.Series{InstrumentID: f.InstrumentID, Venue: f.MIC}, r.bars)
 			}
+			// THE VOLUME PROFILE TEES OFF THE SAME FEED, for the same reason and
+			// with the same consequence if it did not (#897): a second Recv loop
+			// would give the candle fold and the profile fold half the prints
+			// each, and BOTH would look plausible.
+			if r.cfg.VolumeProfile != nil {
+				src = volprofilefeed.Tee(src,
+					volprofilefeed.Series{InstrumentID: f.InstrumentID, Venue: f.MIC}, r.cfg.VolumeProfile)
+			}
 			wg.Add(1)
 			go func(src trades.TradeSource, inst, mic string) {
 				defer wg.Done()
@@ -246,6 +268,20 @@ func (r *Runner) Run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			r.barFlushLoop(ctx)
+		}()
+	}
+
+	// THE PROFILE SWEEP GETS ITS OWN LOOP, for the bar flush's reason and one
+	// more of its own (#897). volprofile.Observe closes a session only when a
+	// print from the NEXT one arrives, so a series whose feed has died leaves its
+	// last session open forever and never enters the shape — and a curve silently
+	// short the day a pod rolled through is one nothing downstream can see is
+	// wrong. Store.Advance is what closes it, and this is what calls Advance.
+	if r.cfg.VolumeProfile != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.volumeProfileLoop(ctx)
 		}()
 	}
 
@@ -284,6 +320,51 @@ func (r *Runner) barFlushLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			r.bars.Flush(ctx, r.cfg.Now())
+		}
+	}
+}
+
+// volumeProfileInterval is how often the profile fold is swept and any changed
+// curve announced.
+//
+// ONE MINUTE, AND THE NUMBER IS BOUNDED BY WHAT IT COSTS TO BE LATE RATHER THAN
+// BY THE DATA. A profile changes once per SESSION, so nothing is gained by
+// sweeping faster; what the interval bounds is how long after a session boundary
+// the estate is still scheduling against yesterday's curve, and how long after a
+// deploy the first curve reaches an OMS that has none. A minute makes both
+// invisible against a 24-hour session while costing one map walk over the
+// configured instruments.
+const volumeProfileInterval = time.Minute
+
+func (r *Runner) volumeProfileLoop(ctx context.Context) {
+	series := make([]volprofilefeed.Series, 0, len(r.cfg.Feeds))
+	for _, f := range r.cfg.Feeds {
+		if f.Trades == nil {
+			// NO TRADE SOURCE, NO CURVE, AND NO ANNOUNCEMENT. A series swept
+			// without a feed behind it would publish ABSENT forever, which is
+			// true and useless: it would say "nobody has folded this" about an
+			// instrument this process was never asked to fold.
+			continue
+		}
+		series = append(series, volprofilefeed.Series{InstrumentID: f.InstrumentID, Venue: f.MIC})
+	}
+	if len(series) == 0 {
+		return
+	}
+
+	t := time.NewTicker(volumeProfileInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// A LAST SWEEP ON THE WAY OUT, for the bar flush's reason: the
+			// session that completed between the final tick and shutdown would
+			// otherwise reach nobody, and on a rollout that is one missed curve
+			// per series per deploy.
+			r.cfg.VolumeProfile.Sweep(context.WithoutCancel(ctx), r.cfg.Now(), series)
+			return
+		case <-t.C:
+			r.cfg.VolumeProfile.Sweep(ctx, r.cfg.Now(), series)
 		}
 	}
 }
