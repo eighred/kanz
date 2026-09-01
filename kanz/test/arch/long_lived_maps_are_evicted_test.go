@@ -355,8 +355,8 @@ var mapEvictionExempt = map[string]evictionExemption{
 	"services/autopilot/internal/actuate: LogFailover.done": {boundedByConstruction,
 		"keyed by the region attribute of an SLO-burn signal, falling back to the signal's subject — " +
 			"both of which name a service or region this platform itself deploys and monitors, not " +
-			"anything an external feed mints. Contrast the same package's remediate maps, which take " +
-			"their key off a DataQualityEvent and are filed as leaks.", ""},
+			"anything an external feed mints. Contrast the sibling remediate package's maps, which " +
+			"took their key off a DataQualityEvent and were the #892 leak.", ""},
 	"services/datamaster/internal/pricing: Queue.byID": {boundedByConstruction,
 		"keyed by ExceptionID(instrument, kind, source): a fixed four-value kind enum, a configured " +
 			"vendor source, and an instrument out of the platform's own security master. It is also " +
@@ -548,16 +548,11 @@ var mapEvictionExempt = map[string]evictionExemption{
 	// the only correct direction for it is shorter: the dead-entry arm fails
 	// the day one of these grows an evictor and the entry is left behind.
 	// ---------------------------------------------------------------------
-	"services/autopilot/internal/remediate: LogQuarantiner.set": {deferredLeak,
-		"keyed by the subject off a DataQualityEvent — a wire field with no bounded universe — and " +
-			"read by nothing outside a test. It grows fastest during exactly the degraded period the " +
-			"autopilot exists to handle. Same class as #844.",
-		"#892"},
-	"services/autopilot/internal/remediate: LogModelRoller.rolled": {deferredLeak,
-		"keyed by a model_id attribute that FALLS BACK to the same wire subject when absent, so the " +
-			"real model population is a convention rather than a bound. Also read by nothing outside a " +
-			"test.",
-		"#892"},
+	// RETIRED BY #892: LogQuarantiner.set and LogModelRoller.rolled were here.
+	// LogModelRoller keeps no map at all now (and no mutex, so it has left this
+	// walk's population entirely — its own package asserts the absence by
+	// reflection); LogQuarantiner's say-it-once set is a fixed-capacity FIFO that
+	// this walk sees shrunk, at LogQuarantiner.warned and .order.
 	"internal/risk: Cache.exposure": {deferredLeak,
 		"keyed by portfolio — estate-controlled, so not the #814 shape — but never pruned when this " +
 			"replica RELEASES ownership on a ring rebalance, which state/ownership.go already does for " +
