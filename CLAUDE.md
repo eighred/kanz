@@ -268,7 +268,6 @@ handler is still the thing that makes a duplicate harmless.
 | Component | Best-effort default | Shared-state mode | Seam |
 |---|---|---|---|
 | Bus dedup | `DedupWindow` (per-instance) | `RedisDedup` (cross-pod seen-set) | `bus.WithDeduper`; go-redis binding `redisadapter.New` |
-| DATA-05 reconciler | in-memory `PendingStore` | `integrity.RedisPendingStore` (Lua-atomic) | `integrity.NewReconcilerWithStore` |
 | PRED-09 model registry | process-local `Registry` | `CoordinatedRegistry` over `platform.model` | `registry.CoordinatedRegistry` |
 | Gap / staleness / watermark / drift detectors | per-process, per-partition | — | n/a |
 
@@ -277,16 +276,16 @@ Three rules that are easy to get wrong, and each has a cost attached:
 - **Do not add shared state where partitioning already gives single ownership.**
   The detectors key on a `partition_key` the bus already routes to one consumer
   in a group, so per-process state is correct without coordination.
-- **`PendingStore.ClaimOrMatch` must be atomic per key.** It is a single
-  check-set-or-delete; a non-atomic distributed implementation lets two replicas
-  both record Pending and never match. Use the shared store whenever the NATS and
-  Kafka feeds are consumed by *different* replicas — the common multi-replica
-  case — or the two sightings never meet and both age out as **false**
-  discrepancies.
+- **There is no longer a NATS/Kafka reconciler here, and that is the point.**
+  DATA-M1 made Kafka DERIVED from NATS by a single archiver, so there are no two
+  independent transports left to reconcile, and DATA-M4 deleted
+  `internal/integrity` outright. The single-writer shape that replaced it is held
+  by `test/arch/drain_single_writer_gate_test.go` — the rule left and the guard
+  stayed, which is the disposition this file prescribes for an invariant that has
+  acquired one (#819).
 - **Every shared backend fails OPEN, never closed.** A Redis error degrades dedup
-  to no-dedup and `ClaimOrMatch` to Pending (never a fabricated match). An
-  outage must not block consumption, and idempotent handlers are what makes that
-  safe.
+  to no-dedup rather than to a fabricated hit. An outage must not block
+  consumption, and idempotent handlers are what makes that safe.
 
 `platform.model` is the append log of record (infinite retention, EVT-09): a
 starting replica replays it from offset 0 to rebuild the registry, so the topic
