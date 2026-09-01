@@ -13,6 +13,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -438,10 +439,92 @@ func (s *Server) refuseFinished(ctx context.Context, orderID string) error {
 			"placing it again would trade the fund twice", orderID, prior.GetStatus())
 }
 
+// recordStatus writes the outcome of a venue-confirmed close into this adapter's
+// own view WITHOUT letting the OMS's copy of the order overwrite what the venue
+// itself already reported (#921).
+//
+// THE RACE THAT MAKES THIS REACHABLE IS NOT HYPOTHETICAL. A confirmed cancel is
+// the venue saying the order is NO LONGER WORKING. It is not the venue saying the
+// order did not trade, and on this path the two are routinely the same answer:
+// BinanceVenue.CancelOrder maps Binance's -2011 "Unknown order sent" to a
+// CONFIRMED withdrawal precisely because the order may have "already filled,
+// expired, or withdrawn by an earlier attempt". So a cancel that races a fill
+// returns success, and a plain Record here wrote CANCELLED — together with the
+// OMS's quantities, which are behind the venue by construction — over a FILLED
+// verdict and the filled/leaves quantities orderview.Progress had just folded in
+// from the exchange's own execution report.
+//
+// WHAT THAT COSTS, BOUNDED HONESTLY, BECAUSE IT IS NOT #904's LEAK. The
+// reconciler is unaffected: both statuses are terminal, so Open still excludes
+// the order. Eviction is unaffected: Memory keeps the FIRST terminal sighting as
+// the retention clock. What it costs is the record itself. venue_orders is never
+// pruned, so in the durable store the overwrite is permanent, and this adapter's
+// answer to "what did the venue do with this order" — the attribution the
+// platform owes every order, and the state Seam.Lookup hands the user-data
+// ingester to enrich a late execution report — stops being the exchange's report
+// and becomes the OMS's stale guess.
+//
+// THE DECISION: A TERMINAL VERDICT ALREADY IN THE VIEW IS NEVER OVERWRITTEN, the
+// shape #914 gave Execute. Three alternatives were on the table.
+//
+//   - Merge, and still take the cancel's status. Keeps the numbers and writes a
+//     verdict the cancel never established: a record reading CANCELLED with
+//     filled equal to ordered and leaves zero, which is harder to act on than
+//     either honest answer, and which still loses what the venue returned.
+//   - Merge, and refuse only to downgrade FILLED. The right instinct with a
+//     hand-written membership test — and the -2011 comment names EXPIRED in the
+//     same breath as filled, so the hand-written set is already short one member
+//     on the day it is written. The set that matters is orderview.Terminal's, so
+//     this asks it rather than keeping a second copy of it here.
+//   - orderview.Progress. Wrong tool twice: terminal → terminal is an ALLOWED
+//     transition there, deliberately, so it would still move FILLED to CANCELLED;
+//     and it merges FROM the reported state, which on this path is the OMS's
+//     record — the thing that must not win.
+//
+// A NON-TERMINAL ORDER IS MERGED ONTO THE VIEW'S OWN ENTRY, not onto the
+// request's state, and that half is not cosmetic: the view is where the venue's
+// partial-fill quantities live, so recording the OMS's copy over a
+// PARTIALLY_FILLED entry erases a fill that DID happen just as surely as
+// overwriting a terminal one. Only when this adapter has NO record does the
+// request seed one — that is the full OrderState the OMS sent, carrying the
+// order's terms, not the partial reconstruction Progress refuses with
+// ErrNotInView.
+//
+// IT DOES NOT REFUSE THE RPC THE WAY Execute DOES, and the asymmetry is the
+// point. refuseFinished runs BEFORE the exchange is touched, so refusing there
+// prevents a second trade. This runs AFTER the venue confirmed the withdrawal;
+// failing here would tell the OMS to retry a cancel that already succeeded.
+//
+// A VIEW THAT CANNOT BE READ WRITES NOTHING. Not knowing what the venue already
+// reported is a critical unknown, and it fails closed: the entry is left alone,
+// so the order stays non-terminal, Open keeps returning it, and the healing
+// watchdog re-reads venue truth on the next pass — a cost that self-corrects. The
+// alternative is a store blip permanently replacing the exchange's verdict with
+// the OMS's, which nothing corrects.
+//
+// THE Get AND THE Record ARE NOT ONE OPERATION, and Store offers nothing that
+// would make them one. A fill landing between the two is written over by a merge
+// built on the pre-fill read — the same erasure, narrowed from a certainty to
+// the width of one window. #934 carries the conditional write that closes it;
+// orderview.Progress states the same residual from the other side.
 func (s *Server) recordStatus(ctx context.Context, st *orderpb.OrderState, next orderpb.OrderStatus) error {
-	cloned, ok := proto.Clone(st).(*orderpb.OrderState)
-	if !ok {
-		return nil
+	orderID := st.GetOrderId()
+	prior, ok, err := s.view.Get(ctx, orderID)
+	if err != nil {
+		return fmt.Errorf("could not establish what the view already holds for order %s: %w", orderID, err)
+	}
+	base := st
+	if ok {
+		if orderview.Terminal(prior.GetStatus()) {
+			s.logger.Info("venue: close confirmed for an order the venue had already finished — keeping the venue's own verdict",
+				"mic", s.venue.MIC(), "order_id", orderID, "status", prior.GetStatus().String())
+			return nil
+		}
+		base = prior
+	}
+	cloned, cok := proto.Clone(base).(*orderpb.OrderState)
+	if !cok {
+		return fmt.Errorf("order %s did not clone", orderID)
 	}
 	cloned.Status = next
 	return s.view.Record(ctx, cloned)
