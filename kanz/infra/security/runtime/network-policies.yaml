@@ -305,6 +305,19 @@ spec:
         # nothing the ingress rule has not already. Its one authenticated route
         # verifies a bearer token's signature and is unaffected by who can reach
         # the port.
+        #
+        # THIS PARAGRAPH ONCE CONTRADICTED THE CODE, AND THE CODE WAS THE WRONG
+        # ONE (#888). identity attributed every login attempt to an
+        # X-Kanz-Client-IP header it did not verify, justified by "a NetworkPolicy
+        # makes the BFF the only caller that can reach this service" — a premise
+        # this rule and the ingress rule below both refute, and always did. The
+        # service now resolves that address through clientip.Resolver, so it
+        # honours the header only from IDENTITY_TRUSTED_PROXIES and answers the
+        # TCP peer otherwise; the admission here costs the credential limiter
+        # nothing. Pinned by
+        # TestIdentityResolvesTheClientAddressThroughATrustedPeerResolver.
+        # The structural answer to /metrics sharing a tenant-scoped listener at
+        # all is still #232, and it is still open.
         - { protocol: TCP, port: 8087 } # identity
         - { protocol: TCP, port: 8090 } # oms, webhook-ingest
         - { protocol: TCP, port: 8091 } # compliance, market-ingest, tv-sync, venue-binance
@@ -589,6 +602,18 @@ spec:
 # The api-gateway is admitted too, and for a different reason than usual: it
 # fetches /jwks.json to verify the tokens this service mints. That is a read of
 # public key material, not a privileged call.
+#
+# SO FOUR PEERS REACH :8087, NOT ONE (#888): the ingress-nginx namespace and the
+# two pods below, plus the kanz-observability namespace via
+# allow-observability-scrape (/metrics is on this same listener until #232 splits
+# it). None is removable — dropping the gateway is a total authentication outage,
+# and dropping the scrape blinds the monitoring plane on the credential
+# authority. The consequence is for the SERVICE to own, and it does: no route
+# here trusts a header for authorisation
+# (test/arch/identity_trusts_no_headers_test.go), and since #888 the login
+# limiter no longer trusts one for attribution either — the caller address is
+# resolved through clientip.Resolver against IDENTITY_TRUSTED_PROXIES, pinned by
+# TestIdentityResolvesTheClientAddressThroughATrustedPeerResolver.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
