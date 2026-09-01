@@ -17,6 +17,7 @@ import (
 	"time"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
 	"github.com/eighred/kanz/internal/marketedge/book"
 	"github.com/eighred/kanz/internal/marketedge/depth"
@@ -167,7 +168,16 @@ func (e *Engine) foldLoop(ctx context.Context) error {
 	}
 }
 
-// snapshotLoop publishes a bounded book snapshot every interval.
+// snapshotLoop publishes a bounded book snapshot every interval, and the top of
+// that same snapshot as a market.v1 Quote (#876).
+//
+// ONE Book.Snapshot READ FEEDS BOTH PUBLISHES, and that is load-bearing rather
+// than tidy. Book.Snapshot takes the read lock once across both sides, so the
+// bid and the ask the quote carries are two legs of ONE book state; a second
+// read - or Book.BestBid + Book.BestAsk, which lock twice - could straddle a
+// fold and blend two states into a market that never existed. It also means the
+// snapshot FACT and the quote FACT published on the same tick describe the same
+// book and cannot disagree about where the touch was.
 func (e *Engine) snapshotLoop(ctx context.Context) {
 	t := time.NewTicker(e.snapshotInterval)
 	defer t.Stop()
@@ -176,16 +186,21 @@ func (e *Engine) snapshotLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			e.publishSnapshot(ctx)
+			snap := e.book.Snapshot(e.snapshotDepth)
+			if len(snap.GetBids()) == 0 && len(snap.GetAsks()) == 0 {
+				continue // nothing folded yet — don't emit an empty book
+			}
+			e.publishSnapshot(ctx, snap)
+			// The quote publishes even when the snapshot publish above failed:
+			// they are two independent FACTs, and one being refused does not make
+			// the other untrue. publishQuote refuses a one-sided or crossed book
+			// on its own terms.
+			e.publishQuote(ctx, snap)
 		}
 	}
 }
 
-func (e *Engine) publishSnapshot(ctx context.Context) {
-	snap := e.book.Snapshot(e.snapshotDepth)
-	if len(snap.GetBids()) == 0 && len(snap.GetAsks()) == 0 {
-		return // nothing folded yet — don't emit an empty book
-	}
+func (e *Engine) publishSnapshot(ctx context.Context, snap *marketpb.OrderBookSnapshot) {
 	if err := e.pub.Publish(ctx, bus.Event{
 		Subject:       SubjectBookSnapshot,
 		EventType:     SubjectBookSnapshot,

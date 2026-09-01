@@ -1041,10 +1041,42 @@ data:
           # and the OMS then refuses every VWAP and POV order under
           # NO_VOLUME_PROFILE, a refusal whose text names the MARKET rather than a
           # missing line in this file.
+          #
+          # FIFTH PUBLISHER, ADDED WITH #876: internal/marketedge/ingest also
+          # publishes market.crypto.quote - the TOP OF THE BOOK it is already
+          # folding, as a canonical market.v1 Quote, on the same tick and from
+          # the same Book.Snapshot read as the book snapshot above.
+          #
+          # IT IS THE ONLY PRODUCER OF A TWO-SIDED QUOTE IN THE ESTATE. Both
+          # venue adapters poll a last-price REST ticker and publish
+          # market.crypto.trade; market-data's feed loop is not started in the
+          # shipped manifest; datamaster emits Quote{BidPrice: p, AskPrice: p},
+          # a mid dressed as a quote that internal/marketdata/mark refuses
+          # correctly. So a trade print has no width, no width means no spread
+          # leg, and every execution-cost attribution the platform publishes
+          # comes back quality = TOTAL_ONLY - which is what OMSQuoteCoverageAbsent
+          # fires on today.
+          #
+          # WITHOUT THE GRANT BELOW THAT STATE IS UNCHANGED AND LOOKS IDENTICAL.
+          # The fold keeps running, the snapshots keep landing, and the quote is
+          # denied at publish time - which reaches an operator as "the desk's
+          # instruments are not quoted", the exact condition being fixed. It is
+          # the same per-package derivation trap the four publishers above
+          # record: the bus.Event is built inside internal/marketedge/ingest,
+          # already listed in crossPackagePublishSurfaces in
+          # test/arch/nats_service_permissions_test.go.
+          #
+          # It rides market.crypto.* like the candle, the coverage record and the
+          # volume profile, so it needs no new stream (MARKET is provisioned as
+          # market.>) and no new Kafka topic. The consumer half already exists:
+          # OMS_PRICE_SUBJECTS and TV_SYNC_PRICE_SUBJECTS default to
+          # market.*.trade,market.*.quote and both accounts already hold the
+          # matching subscribe grant.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/market-ingest"
             permissions: {
               publish: { allow: ["market.book.snapshot", "market.crypto.bar",
-                                 "market.crypto.ingestion_coverage", "market.crypto.volume_profile"] }
+                                 "market.crypto.ingestion_coverage", "market.crypto.volume_profile",
+                                 "market.crypto.quote"] }
               subscribe: { allow: ["_INBOX.>"] }
             }
           }

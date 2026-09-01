@@ -642,14 +642,19 @@ groups:
       # rolling restart, a market-data rollout or a vendor reconnect, and short
       # enough to be true before the first order of a session is measured.
       #
-      # WARNING, NOT CRITICAL, AND IT MAY BE TRUE ON ARRIVAL. Both deployed venue
-      # adapters poll a last-price ticker and publish market.crypto.trade only, so
-      # on a crypto-only estate this fires as soon as it is deployed — correctly,
-      # because that estate genuinely cannot decompose a single execution. It is
-      # not the `absent()` trap alerts/README.md records: that fired forever over
-      # a series with no producer and could never be fixed, while this names a
-      # real, owned condition that clears the moment any feed publishes a
-      # market.*.quote for a traded instrument.
+      # WARNING, NOT CRITICAL, AND IT NOW HAS A PRODUCER TO NAME. It is not the
+      # `absent()` trap alerts/README.md records: that fired forever over a series
+      # with no producer and could never be fixed, while this names a real, owned
+      # condition that clears the moment any feed publishes a market.*.quote for a
+      # traded instrument.
+      #
+      # UNTIL #876 THERE WAS NO SUCH FEED and this fired on arrival, correctly,
+      # because the estate genuinely could not decompose a single execution: both
+      # venue adapters poll a last-price ticker and publish market.crypto.trade
+      # only. market-ingest now publishes market.crypto.quote from the top of the
+      # L2 book it was already folding, so the condition is repairable and the
+      # repair is bounded — it covers exactly MARKET_INGEST_INSTRUMENTS, and an
+      # instrument the desk trades that is not in that list still has no width.
       - alert: OMSQuoteCoverageAbsent
         expr: |
           (
@@ -661,7 +666,7 @@ groups:
         labels: { severity: warning, layer: operational }
         annotations:
           summary: "OMS {{ $labels.pod }} has prices for every instrument and a quoted width for none"
-          description: "This replica's mark fold holds live prices but not one usable bid/ask, so the market's width was never observable. Every execution-cost attribution it publishes will be quality = TOTAL_ONLY: an exact implementation shortfall with the spread, impact and timing legs UNSET, which is correct and is also the whole of what the execution-quality programme can say. Any algorithm comparison built on it can rank outcomes and cannot explain them. This is a market-data question, not an OMS one — check which connectors publish market.*.quote for the instruments this desk trades. On the estate as shipped nothing does: both venue adapters publish trade prints only and the market-data feed is disabled, which is issue #876."
+          description: "This replica's mark fold holds live prices but not one usable bid/ask, so the market's width was never observable. Every execution-cost attribution it publishes will be quality = TOTAL_ONLY: an exact implementation shortfall with the spread, impact and timing legs UNSET, which is correct and is also the whole of what the execution-quality programme can say. Any algorithm comparison built on it can rank outcomes and cannot explain them. This is a market-data question, not an OMS one — check which connectors publish market.*.quote for the instruments this desk trades. market-ingest publishes market.crypto.quote from the top of the book it already folds (#876), so a width exists only for the instruments in MARKET_INGEST_INSTRUMENTS: check that market-ingest is running and that every instrument this desk trades is in its list. Nothing else supplies one - both venue adapters publish trade prints only and the market-data feed is disabled."
 
       # NOT ONE DECISION IN AN HOUR COULD BE DECOMPOSED (#875).
       #

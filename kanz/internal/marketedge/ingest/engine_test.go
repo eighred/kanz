@@ -52,6 +52,25 @@ func (c *capture) last() (bus.Event, bool) {
 	return c.events[len(c.events)-1], true
 }
 
+// lastOn returns the newest captured event on one subject.
+//
+// THE ENGINE PUBLISHES TWO SUBJECTS PER TICK SINCE #876 - the book snapshot and
+// the top-of-book quote derived from it - so `last()` alone no longer answers
+// "the newest snapshot". It answers "the newest event", which is the quote,
+// whose payload is a MarketDataEvent and not an OrderBookSnapshot. A test
+// type-asserting the payload would simply never match and would fail on its
+// deadline with a message about the snapshot, which is the wrong diagnosis.
+func (c *capture) lastOn(subject string) (bus.Event, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.events) - 1; i >= 0; i-- {
+		if c.events[i].Subject == subject {
+			return c.events[i], true
+		}
+	}
+	return bus.Event{}, false
+}
+
 // scriptedSource replays a fixed list of updates, then blocks until ctx done.
 type scriptedSource struct {
 	updates []depth.Update
@@ -102,7 +121,7 @@ func TestEngine_FoldsAndPublishesSnapshot(t *testing.T) {
 	// Wait for a published snapshot reflecting the folded delta.
 	deadline := time.After(400 * time.Millisecond)
 	for {
-		if ev, ok := cap.last(); ok {
+		if ev, ok := cap.lastOn(SubjectBookSnapshot); ok {
 			snap, _ := ev.Payload.(*marketpb.OrderBookSnapshot)
 			if snap != nil && snap.GetLastUpdateSequence() == 2 {
 				if ev.Subject != SubjectBookSnapshot {
