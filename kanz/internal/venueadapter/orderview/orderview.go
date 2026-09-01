@@ -52,6 +52,13 @@ type Store interface {
 	// It is UNCONDITIONAL, and that is the seed/refresh contract: an adapter
 	// asked to work an order it already holds must refresh it, not be rejected.
 	// A read-modify-write must use Get + RecordIf (or Update) instead.
+	//
+	// NO PRODUCTION WRITER CALLS IT AFTER #944. Server.Execute was the last one,
+	// and its unconditional upsert is what erased the venue's own partial-fill
+	// quantities on a re-dispatch; it goes through Dispatch now. This stays
+	// because it IS the contract — the one primitive that seeds a row and the
+	// thing RecordIf is defined against — and because #905 pins it. Reaching for
+	// it from a new write path is how that erasure comes back.
 	Record(ctx context.Context, st *orderpb.OrderState) error
 	// Get returns one order by id, together with the Revision of the EXACT value
 	// returned — including when there is no row, which is itself a value a
@@ -525,6 +532,16 @@ var ErrUnmappedStatus = errors.New("orderview: refusing to record an order at an
 // order already terminal here. See Progress.
 var ErrTerminalNotReopened = errors.New("orderview: refusing to reopen a terminal order")
 
+// ErrTerminalNotRedispatched is returned when Dispatch is asked to record an
+// order this adapter's view already holds at a TERMINAL status. See Dispatch.
+//
+// IT IS THE REFUSAL OF A PLACEMENT, not a bookkeeping complaint, and that is why
+// it is a sentinel rather than a plain error: Server.Execute matches it to answer
+// the OMS codes.AlreadyExists — distinct from the codes.Internal any other
+// failure to record gets — and the exchange is never called. Update returns a
+// decide error UNWRAPPED for exactly this reason.
+var ErrTerminalNotRedispatched = errors.New("orderview: refusing to work an order the venue has already finished")
+
 // ErrContended is returned when Update could not land its write inside
 // UpdateAttempts rounds because another writer changed the order every time.
 //
@@ -661,16 +678,17 @@ func Update(ctx context.Context, store Store, orderID string, decide Decide) err
 //     Seam.Progressed reports to onErr. That is not a lost update: nothing was
 //     overwritten, the order is still non-terminal, so Open keeps returning it
 //     and the reconciler re-reads venue truth on the next pass.
-//   - ANOTHER WRITER can still overwrite what this one recorded, and that one IS
-//     a lost update. Store.Record is still unconditional — deliberately, because
-//     a redelivered ExecuteRequest must refresh rather than be rejected — and
-//     Server.Execute uses it to seed or refresh an order it is about to work.
-//     Execute reads the view first only to REFUSE a TERMINAL order (#914), so a
-//     re-dispatch of a PARTIALLY_FILLED one passes that guard and records the
-//     OMS's OrderState over the quantities this call folded in. Out of scope for
-//     #934, which is about the two read-modify-write writers; #944 carries it,
-//     and states the bound: the OMS's status is non-terminal, so the healing
-//     watchdog re-queries and re-heals, and what is lost meanwhile is the record.
+//   - ANOTHER WRITER can still write this entry, and as of #944 it can no longer
+//     overwrite what this call recorded. Server.Execute's seed/refresh was a
+//     plain Store.Record, so a re-dispatch of a PARTIALLY_FILLED order wrote the
+//     OMS's OrderState over the quantities this call had folded in; it now goes
+//     through Dispatch, which is this same Update and carries the status, the
+//     filled and leaves quantities, the average fill price and the as-of forward
+//     from whatever the view holds at the instant it lands. Store.Record is
+//     still an unconditional upsert — deliberately, because a redelivered
+//     ExecuteRequest must refresh rather than be rejected — but nothing in
+//     production calls it any more, and a new write path that reached for it
+//     rather than Update would reopen exactly this.
 //
 // -race does not run on the usual Windows box (no cgo) and would not have found
 // this anyway — a lost update is a correct-looking interleaving, not a data race,
@@ -696,23 +714,154 @@ func Progress(ctx context.Context, store Store, reported *orderpb.OrderState) er
 		if !mok {
 			return nil, fmt.Errorf("orderview: order %s did not clone", id)
 		}
-		merged.Status = next
-		// Each guarded on the report having SET it: a nil here would blank a
-		// quantity the view already holds, and a blanked filled_quantity reads
-		// downstream as an order that traded nothing.
-		if q := reported.GetFilledQuantity(); q != nil {
-			merged.FilledQuantity = q
-		}
-		if q := reported.GetLeavesQuantity(); q != nil {
-			merged.LeavesQuantity = q
-		}
-		if p := reported.GetAverageFillPrice(); p != nil {
-			merged.AverageFillPrice = p
-		}
-		if t := reported.GetAsOf(); t != nil {
-			merged.AsOf = t
-		}
+		// The venue's own observations onto the view's terms. Dispatch applies
+		// the SAME projection in the other direction (#944), so the field set the
+		// exchange is authoritative for is written once rather than twice.
+		carryVenueObserved(merged, reported)
 		return merged, nil
+	})
+}
+
+// carryVenueObserved copies onto dst the fields the EXCHANGE is the authority on,
+// where src has them.
+//
+// IT EXISTS ONCE BECAUSE IT IS APPLIED IN BOTH DIRECTIONS. Progress folds a venue
+// report onto the view's terms; Dispatch folds the OMS's terms onto the view's
+// venue observations (#944). Those are the same partition of the message read
+// from opposite ends, and written out twice they would drift: a field the
+// exchange becomes authoritative for would be added to one merge and not the
+// other, and the writer that missed it would go back to overwriting the
+// exchange's own number — the defect both #921 and #944 are. The partition is
+// stated once, here.
+//
+// EACH FIELD IS GUARDED ON src HAVING SET IT. A nil would otherwise blank a value
+// the destination already holds, and a blanked filled_quantity reads downstream
+// as an order that traded nothing — the same sentence, whichever direction the
+// merge runs in. UNSPECIFIED is the status's nil: it is "we cannot read what was
+// said", never "no status", so it never overwrites a status somebody could read.
+func carryVenueObserved(dst, src *orderpb.OrderState) {
+	if s := src.GetStatus(); s != orderpb.OrderStatus_ORDER_STATUS_UNSPECIFIED {
+		dst.Status = s
+	}
+	if q := src.GetFilledQuantity(); q != nil {
+		dst.FilledQuantity = q
+	}
+	if q := src.GetLeavesQuantity(); q != nil {
+		dst.LeavesQuantity = q
+	}
+	if p := src.GetAverageFillPrice(); p != nil {
+		dst.AverageFillPrice = p
+	}
+	if t := src.GetAsOf(); t != nil {
+		dst.AsOf = t
+	}
+}
+
+// Dispatch records an order this adapter has been ASKED TO WORK — the OMS's own
+// OrderState, off a venue.v1.ExecuteRequest — without letting that copy overwrite
+// what the venue itself has already observed about the order (#944), and REFUSES
+// with ErrTerminalNotRedispatched when the view already holds the order finished,
+// so that the terminal check and the write are one operation (#947).
+//
+// IT IS Progress READ FROM THE OTHER END, and that symmetry is the design. The
+// OMS is the authority on an order's TERMS: it is the only party that knows the
+// limit price, the GTD expiry, the parent, the leverage, the margin mode, the
+// venue account. The EXCHANGE is the authority on what happened to it: the
+// status, the filled and leaves quantities, the average fill price, the as-of.
+// Progress writes the second set onto the first; this writes the first onto the
+// second. Neither writer can take a field the other owns, and the partition is
+// carryVenueObserved, stated once for both.
+//
+// WHAT IT REPLACED, AND WHY THAT WAS WRONG. Server.Execute called Store.Record —
+// an unconditional upsert — so a re-dispatch of an order the view held
+// PARTIALLY_FILLED wrote the OMS's OrderState straight over the venue's own
+// filled_quantity and leaves_quantity. The OMS's copy is BEHIND the venue by
+// construction on this path: the adapter learns of a fill on the exchange's
+// websocket and the OMS learns of it from the adapter, so the state arriving on
+// an ExecuteRequest cannot be fresher than the one already in the view. It is the
+// same erasure #921 and #934 closed on the cancel path, through the one writer
+// neither of them changed.
+//
+// THE BOUND, STATED RATHER THAN INFLATED. The status the old write left was the
+// OMS's (ROUTED), which is NOT terminal, so Open kept returning the order and the
+// healing watchdog re-queried the exchange and healed the quantities on its next
+// pass. No fill was lost, and no FACT was wrong — both user-data ingesters build
+// the healed OrderState they publish from the REPORT's quantities, never from the
+// view. What was not self-correcting is venue_orders, which is never pruned:
+// between the overwrite and the next reconciliation pass this adapter's answer to
+// "what did the venue report filled" was the OMS's stale guess, and Seam.Lookup
+// hands that answer to the user-data ingester enriching any execution report that
+// arrives in the window. That is the attribution the platform owes every order,
+// and it is what this closes.
+//
+// A REFRESH IS STILL A REFRESH, which is why this merges rather than declining to
+// write. Leaving the entry alone whenever one exists is simpler and drops the
+// legitimate reason a re-dispatch writes at all: a redelivered or re-worked
+// ExecuteRequest carries the order's terms as the OMS holds them NOW, and an
+// adapter working an order off terms it has since been corrected on enriches its
+// fills wrong. Store.Record's seed/refresh contract (#905) is unchanged and
+// unconditional; what changes is that the refresh no longer reaches five fields
+// the OMS is not the authority on.
+//
+// A TERMINAL PRIOR REFUSES THE WHOLE DISPATCH, and that refusal lives HERE
+// rather than in the caller (#947). Server.Execute used to check it with its own
+// Get on the line above and throw the value away, which made the guard a
+// check-then-act: an execution report landing between that read and the
+// placement left the order FILLED in the view AFTER the guard had waved it
+// through, and the adapter placed it again at the exchange. The exchange dedups
+// a resubmitted client order id only WHILE the original is open — once it has
+// filled, the id is free again, and that is precisely the case this refuses. In
+// here the read, the refusal and the write are one operation and the window does
+// not exist: the decide that refuses is the decide the conditional write is made
+// against, and it is re-run against the re-read value on every contended round,
+// so a fill that lands mid-flight is seen by the retry rather than missed by it.
+//
+// THE VERDICT IS ALSO NOT REOPENED, which used to be this function's whole
+// answer to a terminal prior (#944): the merge carried the venue's status and
+// quantities forward, so the record survived even though the placement did not.
+// Refusing subsumes that — nothing is written at all — and the record is
+// asserted afterwards either way, because "the entry is untouched" is the half
+// an operator reads.
+//
+// THE COST OF REFUSING, TAKEN DELIBERATELY. The caller gets an error for an order
+// that did in fact finish, and past the venue adapter that is a quarantine or a
+// DLQ entry — a human looking at something that needs no repair. The alternative
+// is a second trade with the fund's money. Fail closed.
+//
+// THE READ AND THE WRITE ARE ONE OPERATION (#934), through the same Update both
+// other writers go through, for the same reason and with the same re-decide: a
+// fill landing between the read and the write must not be overwritten by a merge
+// built on the pre-fill read, and a retry that re-applied the old decision would
+// do exactly that. The condition is the VALUE, not its status — a re-dispatch
+// over a partially filling order is the case a status compare-and-set passes
+// while losing the quantity.
+//
+// NO ENTRY MEANS SEED, and the seed goes through the same conditional write. Two
+// dispatches racing to seed one order therefore cannot both win: the second finds
+// the row present and merges onto it rather than clobbering it.
+//
+// THE RESIDUAL. Update gives up after UpdateAttempts contended rounds and returns
+// ErrContended — a refusal, never a silent overwrite. Server.Execute treats that
+// like any other failure to record and does NOT place the order: working an order
+// this adapter has no record of leaves its fills unenrichable and invisible to
+// the reconciler, which is the trade Execute already took for a failed Record.
+func Dispatch(ctx context.Context, store Store, requested *orderpb.OrderState) error {
+	id := requested.GetOrderId()
+	if id == "" {
+		return errors.New("orderview: cannot record a dispatch for an order with empty order_id")
+	}
+	return Update(ctx, store, id, func(cur *orderpb.OrderState, found bool) (*orderpb.OrderState, error) {
+		if found && Terminal(cur.GetStatus()) {
+			return nil, fmt.Errorf("%w: %s is already %v in this adapter's view", ErrTerminalNotRedispatched, id, cur.GetStatus())
+		}
+		next, ok := proto.Clone(requested).(*orderpb.OrderState)
+		if !ok {
+			return nil, fmt.Errorf("orderview: order %s did not clone", id)
+		}
+		if found {
+			carryVenueObserved(next, cur)
+		}
+		return next, nil
 	})
 }
 
