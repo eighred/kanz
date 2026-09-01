@@ -134,18 +134,37 @@ func (s *Server) Execute(ctx context.Context, req *venuepb.ExecuteRequest) (*ven
 	if st.GetOrderId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "venue: order_id is required")
 	}
-	// AND REFUSE AN ORDER THIS ADAPTER HAS ALREADY SEEN THE VENUE FINISH (#914).
+	// RECORD THE ORDER, AND REFUSE ONE THIS ADAPTER HAS ALREADY SEEN THE VENUE
+	// FINISH — IN ONE OPERATION (#914, #944, #947).
 	//
-	// BEFORE view.Record, for the reason the halt gate above is: an order this
-	// adapter will not place must not be written into the view as one it has.
+	// This was three lines and two reads of the same entry: a refuseFinished
+	// helper that Got the order, checked it for a terminal status and threw the
+	// value away, and then the record beneath it. That is a check-then-act. An
+	// execution report landing between the two — written into this entry by the
+	// user-data ingester's orderview.Progress, from another goroutine — left the
+	// order FILLED in the view AFTER the guard had waved it through, and the
+	// placement below went out anyway. orderview.Dispatch now makes the read, the
+	// refusal and the write one conditional operation whose decision is re-run
+	// against the re-read value on every contended round, so there is no window
+	// to land in. Execute also stops paying for a second store round-trip on the
+	// order path.
 	//
-	// THE VIEW IS THE SMALLER HALF, and it is the half the issue was filed for.
-	// Record is a plain upsert, so a re-dispatch of an order the view holds
+	// THE VIEW IS THE SMALLER HALF, and it is the half #914 was filed for.
+	// Store.Record is a plain upsert, so a re-dispatch of an order the view held
 	// FILLED overwrote it back to the OMS's ROUTED. Memory.Record stamps
 	// terminalAt only for a terminal status, so the entry lost its eviction
 	// clock, Open started returning it again, and the reconciler resumed
 	// spending REST weight on it and re-emitting StateHealed about it on every
-	// pass — the leak Progress closed, reopened through the other writer.
+	// pass — the leak Progress closed, reopened through the other writer. That
+	// half now cannot happen twice over: a terminal entry is refused, and a
+	// non-terminal one is MERGED rather than replaced, so the OMS's copy — which
+	// is behind the venue by construction on this path, since this adapter learns
+	// of a fill on the exchange's websocket and the OMS learns of it from this
+	// adapter — cannot write over the venue's own filled_quantity,
+	// leaves_quantity or average_fill_price either (#944). orderview.Dispatch
+	// keeps the five fields the exchange is the authority on and takes the OMS's
+	// terms, which is the rule recordStatus follows on the cancel path: one rule
+	// for the view, not two.
 	//
 	// THE BIGGER HALF IS WHAT THE LINE AFTER THE RECORD WOULD DO: place, at the
 	// exchange, an order the venue has already finished. Both connectors stamp
@@ -187,41 +206,26 @@ func (s *Server) Execute(ctx context.Context, req *venuepb.ExecuteRequest) (*ven
 	// stated there: Execute cannot tell a forgotten order from a brand-new one,
 	// so refusing every miss would not bound anything, it would stop the adapter
 	// dead.
-	if err := s.refuseFinished(ctx, st.GetOrderId()); err != nil {
-		return nil, err
-	}
-	// AND THE RECORD MERGES ONTO THE VIEW RATHER THAN REPLACING IT (#944).
 	//
-	// The guard above refuses a TERMINAL prior. It returns nil for every other
-	// one, so a re-dispatch of an order the view holds PARTIALLY_FILLED passed it
-	// and the plain Store.Record that used to be on this line wrote the OMS's
-	// OrderState over the venue's own filled_quantity and leaves_quantity. The
-	// OMS's copy is behind the venue BY CONSTRUCTION here: this adapter learns of
-	// a fill on the exchange's websocket and the OMS learns of it from this
-	// adapter, so the state arriving on an ExecuteRequest cannot be fresher than
-	// the one already in the view. orderview.Dispatch keeps the five fields the
-	// exchange is the authority on and takes the OMS's terms, which is the same
-	// rule recordStatus follows on the cancel path — one rule for the view, not
-	// two — through the same atomic read-decide-write (#934).
-	//
-	// BOUNDED HONESTLY, BECAUSE IT WAS NOT A LOST FILL. The status the old write
-	// left behind was the OMS's ROUTED, which is not terminal, so Open kept
-	// returning the order and the healing watchdog re-queried the exchange and
-	// healed the quantities next pass; the fill FACTs are built from the report,
-	// never from this view. What did not self-correct is venue_orders, which is
-	// never pruned: until that pass this adapter's answer to "what did the venue
-	// report filled" was the OMS's stale guess, and Seam.Lookup hands it to the
-	// user-data ingester enriching any execution report arriving in the window.
-	//
-	// IT COSTS ONE MORE READ OF THE VIEW than the upsert did, on the order path,
-	// because refuseFinished's Get and this one are still two operations. That is
-	// a check-then-act: a fill landing between them leaves a terminal order the
-	// guard has already waved through, and the placement goes out. The RECORD
-	// survives it — the merge carries the venue's verdict forward rather than
-	// writing ROUTED over it — so what remains is #914's window, not this one.
-	// Folding the two reads into this single Update is the repair, and #947
-	// carries it.
+	// TWO ERRORS OUT OF ONE CALL, AND THE OMS HAS TO BE ABLE TO TELL THEM APART.
+	// A terminal prior comes back as orderview.ErrTerminalNotRedispatched, which
+	// Update returns UNWRAPPED so the sentinel survives the trip; everything else
+	// — a view that cannot be read, a permanently contended write — is a failure
+	// to establish what this adapter already knows, and on the capital path an
+	// unknown fails closed the same way a terminal prior does. Both refuse the
+	// placement. They differ only in what an operator is told, and that
+	// difference is worth its branch: "the exchange already finished this order"
+	// and "this adapter cannot read its own view" demand different actions.
 	if err := orderview.Dispatch(ctx, s.view, st); err != nil {
+		if errors.Is(err, orderview.ErrTerminalNotRedispatched) {
+			// AlreadyExists, not the halt gate's FailedPrecondition: an operator
+			// reading a refusal has to be able to tell "the platform is stopped"
+			// from "the exchange already finished this order".
+			s.logger.Warn("venue: refusing to place an order the venue has already finished",
+				"mic", s.venue.MIC(), "order_id", st.GetOrderId(), "err", err)
+			return nil, status.Errorf(codes.AlreadyExists,
+				"venue: %v — the exchange finished it, and placing it again would trade the fund twice", err)
+		}
 		// Not a soft failure, and that includes orderview.ErrContended: working an
 		// order we have no record of leaves its fills unenrichable and invisible to
 		// the reconciler — better to refuse it and let the OMS see the error than
@@ -444,33 +448,6 @@ func (s *Server) ListInstruments(context.Context, *venuepb.ListInstrumentsReques
 	return resp, nil
 }
 
-// refuseFinished refuses to work an order this adapter's view already holds at a
-// terminal status. See the call site in Execute for the argument.
-//
-// A STORE FAILURE REFUSES TOO. It leaves this adapter unable to establish that
-// the order is not already finished, and an unknown on the capital path fails
-// closed — the same direction Execute takes when the Record itself fails.
-func (s *Server) refuseFinished(ctx context.Context, orderID string) error {
-	prior, _, ok, err := s.view.Get(ctx, orderID)
-	if err != nil {
-		s.logger.Error("venue: could not read the order view before working an order",
-			"mic", s.venue.MIC(), "order_id", orderID, "err", err)
-		return status.Errorf(codes.Internal,
-			"venue: could not establish whether order %s has already been worked: %v", orderID, err)
-	}
-	if !ok || !orderview.Terminal(prior.GetStatus()) {
-		return nil
-	}
-	// AlreadyExists, not the halt gate's FailedPrecondition: an operator reading
-	// a refusal has to be able to tell "the platform is stopped" from "the
-	// exchange already finished this order", and those demand different actions.
-	s.logger.Warn("venue: refusing to place an order the venue has already finished",
-		"mic", s.venue.MIC(), "order_id", orderID, "status", prior.GetStatus().String())
-	return status.Errorf(codes.AlreadyExists,
-		"venue: order %s is already %s in this adapter's view — the exchange finished it, and "+
-			"placing it again would trade the fund twice", orderID, prior.GetStatus())
-}
-
 // recordStatus writes the outcome of a venue-confirmed close into this adapter's
 // own view WITHOUT letting the OMS's copy of the order overwrite what the venue
 // itself already reported (#921).
@@ -523,8 +500,9 @@ func (s *Server) refuseFinished(ctx context.Context, orderID string) error {
 // ErrNotInView.
 //
 // IT DOES NOT REFUSE THE RPC THE WAY Execute DOES, and the asymmetry is the
-// point. refuseFinished runs BEFORE the exchange is touched, so refusing there
-// prevents a second trade. This runs AFTER the venue confirmed the withdrawal;
+// point. Execute's orderview.Dispatch runs BEFORE the exchange is touched, so
+// refusing there prevents a second trade. This runs AFTER the venue confirmed the
+// withdrawal;
 // failing here would tell the OMS to retry a cancel that already succeeded.
 //
 // A VIEW THAT CANNOT BE READ WRITES NOTHING. Not knowing what the venue already

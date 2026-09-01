@@ -24,6 +24,7 @@ package orderview
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -168,42 +169,145 @@ func TestDispatchSeedsAnOrderTheViewHasNeverSeen(t *testing.T) {
 	})
 }
 
-// A TERMINAL ENTRY IS NOT REOPENED, the rule Progress already holds. Server.Execute
-// refuses a re-dispatch over a terminal entry before it reaches here (#914), so
-// this is the window between that guard's read and this write: a fill landing in
-// it must not be turned back into a working order by the OMS's ROUTED, or the
-// reconciler re-queries a finished order forever and the eviction clock resets.
-func TestDispatchDoesNotReopenAnOrderTheVenueFinished(t *testing.T) {
+// A TERMINAL ENTRY REFUSES THE DISPATCH OUTRIGHT (#947), which is a stronger
+// answer than the merge that used to keep the verdict here (#944) and it is the
+// one the caller acts on: Server.Execute turns this sentinel into
+// codes.AlreadyExists and never calls the exchange. The refusal is HERE and not
+// in the caller because in here it is the same operation as the write — the
+// caller's own Get-then-check was a check-then-act, and a fill landing in its
+// window got the order placed a second time at a real exchange.
+//
+// EVERY TERMINAL STATUS, DERIVED FROM Terminal RATHER THAN LISTED. A status added
+// to the schema and taught to Terminal is covered the day it lands; a
+// hand-written list here would be a second copy of the set, which is how the
+// original omission happened.
+func TestDispatchRefusesAnOrderTheVenueHasAlreadyFinished(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
 		ctx := context.Background()
-		done := venuePartial("ORD-1", 150_000_000, 0)
-		done.Status = orderpb.OrderStatus_ORDER_STATUS_FILLED
-		if err := s.Record(ctx, done); err != nil {
-			t.Fatalf("seed the view: %v", err)
-		}
+		values := orderpb.OrderStatus(0).Descriptor().Values()
+		terminal := 0
+		for i := range values.Len() {
+			st := orderpb.OrderStatus(values.Get(i).Number())
+			if !Terminal(st) {
+				continue
+			}
+			terminal++
+			id := "ORD-" + st.String()
+			done := venuePartial(id, 150_000_000, 0)
+			done.Status = st
+			if err := s.Record(ctx, done); err != nil {
+				t.Fatalf("seed the view at %v: %v", st, err)
+			}
 
-		if err := Dispatch(ctx, s, omsRedispatch("ORD-1")); err != nil {
-			t.Fatalf("Dispatch: %v", err)
-		}
+			err := Dispatch(ctx, s, omsRedispatch(id))
+			if !errors.Is(err, ErrTerminalNotRedispatched) {
+				t.Fatalf("a dispatch over a view holding %v returned %v, want "+
+					"ErrTerminalNotRedispatched — the caller places the order at the exchange "+
+					"unless this refuses, and an order the venue already finished placed again "+
+					"is a second trade with the fund's money", st, err)
+			}
 
+			// AND THE ENTRY IS UNTOUCHED. A refusal that still wrote would put the
+			// OMS's ROUTED over the venue's verdict: Open returns the order again,
+			// the reconciler re-queries it every pass and re-emits StateHealed
+			// about it, and the eviction clock it had started is cleared — the leak
+			// #904 closed, reopened through this writer.
+			got, _, ok, err := s.Get(ctx, id)
+			if err != nil || !ok {
+				t.Fatalf("order %s left the view entirely (ok=%v err=%v)", id, ok, err)
+			}
+			if got.GetStatus() != st {
+				t.Fatalf("status = %v after a refused dispatch, want %v — the refusal wrote "+
+					"anyway, and the OMS's stale copy replaced the venue's own verdict",
+					got.GetStatus(), st)
+			}
+			if !proto.Equal(got.GetFilledQuantity(), dec(150_000_000, -8)) {
+				t.Fatalf("filled_quantity = %v, want 1.5 — the refused write reached the "+
+					"quantities the EXCHANGE reported", got.GetFilledQuantity())
+			}
+		}
+		if terminal == 0 {
+			t.Fatal("Terminal called no status terminal — this test asserted nothing")
+		}
 		open, err := s.Open(ctx)
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
 		if len(open) != 0 {
-			t.Fatalf("the view believes %d orders are open after a re-dispatch over a FILLED "+
-				"order, want 0 — the reconciler would re-query it and re-emit StateHealed about "+
-				"it on every pass, which is the leak #904 closed", len(open))
+			t.Fatalf("the view believes %d orders are open after re-dispatches over finished "+
+				"orders, want 0", len(open))
+		}
+	})
+}
+
+// A FILL THAT FINISHES THE ORDER INSIDE THE DISPATCH'S OWN READ STILL REFUSES,
+// and this is the interleaving #947 exists for. The decorator commits the venue's
+// FILLED report inside the Get whose value the merge is about to be built on, so
+// the first decide sees a still-working order and does NOT refuse. The
+// conditional write then loses — the value changed underneath — and Update
+// re-reads and RE-DECIDES against the FILLED entry, which refuses. A retry that
+// re-applied the first decision would write the OMS's ROUTED over the verdict and
+// return success, and the caller would place the order at the exchange.
+func TestADispatchLosingToAFinishingFillRefusesOnTheRedecide(t *testing.T) {
+	eachBackend(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		if err := s.Record(ctx, venuePartial("ORD-1", 40_000_000, 110_000_000)); err != nil {
+			t.Fatalf("seed the view: %v", err)
+		}
+		done := venuePartial("ORD-1", 150_000_000, 0)
+		done.Status = orderpb.OrderStatus_ORDER_STATUS_FILLED
+		racing := &racingView{Store: s, on: 1, during: func() {
+			if err := Progress(ctx, s, done); err != nil {
+				t.Errorf("the venue's own report could not be folded in: %v", err)
+			}
+		}}
+
+		err := Dispatch(ctx, racing, omsRedispatch("ORD-1"))
+		if !errors.Is(err, ErrTerminalNotRedispatched) {
+			t.Fatalf("a dispatch that lost to the fill that finished the order returned %v, want "+
+				"ErrTerminalNotRedispatched — the decision has to be re-made against the value "+
+				"the write is conditional on, or the terminal check is a check-then-act again "+
+				"and the exchange is asked to place a finished order", err)
+		}
+		if racing.gets < 2 {
+			t.Fatalf("Dispatch read the view %d time(s), want at least 2 (its own, and the "+
+				"re-read after the write lost) — no re-read means it either wrote "+
+				"unconditionally or gave up", racing.gets)
 		}
 		got, _, ok, err := s.Get(ctx, "ORD-1")
 		if err != nil || !ok {
 			t.Fatalf("order ORD-1 left the view entirely (ok=%v err=%v)", ok, err)
 		}
 		if got.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED {
-			t.Fatalf("status = %v, want FILLED — the OMS's stale ROUTED overwrote the venue's own "+
-				"verdict", got.GetStatus())
+			t.Fatalf("status = %v, want FILLED — the venue's verdict was overwritten by a merge "+
+				"built on the pre-fill read", got.GetStatus())
+		}
+		if !proto.Equal(got.GetFilledQuantity(), dec(150_000_000, -8)) {
+			t.Fatalf("filled_quantity = %v, want 1.5 — the whole order traded and this adapter's "+
+				"record says otherwise", got.GetFilledQuantity())
 		}
 	})
+}
+
+// racingView commits a write inside the Nth Get, after the read has happened and
+// before its value reaches the caller — so the caller decides against a value the
+// store no longer holds. Deterministic, single-goroutine, repeatable; the same
+// decorator internal/venueadapter/server uses on the RPC, kept here so this
+// package's own interleavings are provable against BOTH backends.
+type racingView struct {
+	Store
+	gets   int
+	on     int
+	during func()
+}
+
+func (r *racingView) Get(ctx context.Context, orderID string) (*orderpb.OrderState, Revision, bool, error) {
+	st, rev, ok, err := r.Store.Get(ctx, orderID)
+	r.gets++
+	if r.gets == r.on && r.during != nil {
+		r.during()
+	}
+	return st, rev, ok, err
 }
 
 // AN UNSPECIFIED STORED STATUS IS NOT CARRIED FORWARD. UNSPECIFIED is "the venue

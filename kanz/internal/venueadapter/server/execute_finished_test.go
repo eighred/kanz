@@ -64,6 +64,9 @@ func TestExecuteRefusesAnOrderTheVenueHasAlreadyFinished(t *testing.T) {
 
 // THE VIEW SURVIVES THE RE-DISPATCH, which is the half #914 was filed for: the
 // order must still be terminal and must still be out of the reconciler's set.
+//
+// AND THE EXCHANGE IS NEVER ASKED, which this test did NOT assert until #947 and
+// therefore did not discriminate at all — see the comment on that assertion.
 func TestARedispatchLeavesAFilledOrderTerminalAndOutOfOpen(t *testing.T) {
 	ctx := context.Background()
 	v := &fakeVenue{}
@@ -74,10 +77,21 @@ func TestARedispatchLeavesAFilledOrderTerminalAndOutOfOpen(t *testing.T) {
 
 	_, _ = s.Execute(ctx, &venuepb.ExecuteRequest{State: redispatched()})
 
-	// Open FIRST, and the order is not cosmetic: a regression makes BOTH
-	// assertions fail, and whichever runs first is the one an operator reads. The
-	// leak is the reconciler re-querying a finished order, so that is the sentence
-	// the failure should say — not that a status field has the wrong value.
+	// THE PLACEMENT FIRST, because without this line the test does not
+	// discriminate. After #944 the merge carries the venue's FILLED and its
+	// quantities forward on its own, so every assertion below passes with the
+	// terminal refusal mutated away entirely — the test proved what it RESOLVED
+	// (the record survives) rather than what its name claims. This is the
+	// property #914 and #947 are actually about: the fund is not traded twice.
+	if v.execCalls != 0 {
+		t.Fatalf("the exchange was asked to place a FILLED order %d time(s) — the view surviving "+
+			"the re-dispatch is bookkeeping, and this is the money", v.execCalls)
+	}
+	// Open FIRST of the view's own two, and the order is not cosmetic: a
+	// regression makes BOTH assertions fail, and whichever runs first is the one
+	// an operator reads. The leak is the reconciler re-querying a finished order,
+	// so that is the sentence the failure should say — not that a status field
+	// has the wrong value.
 	open, err := view.Open(ctx)
 	if err != nil {
 		t.Fatalf("Open: %v", err)

@@ -158,9 +158,11 @@ func TestAFirstDispatchStillSeedsTheView(t *testing.T) {
 // a correct-looking interleaving, not a data race, and -race needs cgo the usual
 // box does not have.
 //
-// on: 2 IS NOT ARBITRARY. Execute reads the view twice: refuseFinished's guard
-// read is the first, and the merge's is the second. Racing the FIRST would prove
-// nothing about the write, because refuseFinished throws its value away.
+// on: 1 IS NOT ARBITRARY, and it used to be 2. Execute read the view twice —
+// refuseFinished's guard read and then the merge's — and racing the first proved
+// nothing about the write because that guard threw its value away. #947 folded
+// the guard into the merge's own decide, so there is exactly ONE read on this
+// path now and it is the one the write is conditional on.
 func TestAFillLandingInsideARedispatchsReadIsNotOverwritten(t *testing.T) {
 	ctx := context.Background()
 	v := &fakeVenue{}
@@ -168,7 +170,7 @@ func TestAFillLandingInsideARedispatchsReadIsNotOverwritten(t *testing.T) {
 	if err := view.Record(ctx, venuePartiallyFilled()); err != nil {
 		t.Fatalf("seed the view: %v", err)
 	}
-	racing := &racingStore{Store: view, on: 2, during: func() {
+	racing := &racingStore{Store: view, on: 1, during: func() {
 		// PARTIALLY_FILLED over PARTIALLY_FILLED with a larger quantity: the
 		// status never moves, so a compare-and-set on the status would apply and
 		// lose the fill with a green test beside it.
@@ -195,10 +197,18 @@ func TestAFillLandingInsideARedispatchsReadIsNotOverwritten(t *testing.T) {
 		t.Fatalf("leaves_quantity = %v, want 0.8 — the same stale read, one field over",
 			st.GetLeavesQuantity())
 	}
-	if racing.gets < 3 {
-		t.Fatalf("Execute read the view %d time(s), want at least 3 (the guard's, the merge's, and "+
-			"the re-read after it lost) — a conditional write that lost has to re-read and "+
-			"re-decide, and no re-read means it either wrote unconditionally or gave up",
+	if racing.gets < 2 {
+		t.Fatalf("Execute read the view %d time(s), want at least 2 (the merge's, and the re-read "+
+			"after it lost) — a conditional write that lost has to re-read and re-decide, and no "+
+			"re-read means it either wrote unconditionally or gave up", racing.gets)
+	}
+	// AND NO MORE THAN THE RETRY NEEDED. Two reads is one read plus one re-read;
+	// a third would mean the check-then-act #947 removed had come back as a
+	// separate Get on this path.
+	if racing.gets > 2 {
+		t.Fatalf("Execute read the view %d times for one uncontended re-dispatch that lost a "+
+			"single race, want 2 — the terminal check and the write are supposed to be ONE "+
+			"operation, and a second read of the same entry is the check-then-act again",
 			racing.gets)
 	}
 	if !proto.Equal(st.GetLimitPrice(), qty(6_400_000_000_000, -8)) {
@@ -208,30 +218,49 @@ func TestAFillLandingInsideARedispatchsReadIsNotOverwritten(t *testing.T) {
 	}
 }
 
-// A FILL THAT FINISHES THE ORDER INSIDE THAT SAME WINDOW KEEPS ITS VERDICT.
+// A FILL THAT FINISHES THE ORDER INSIDE THAT SAME WINDOW REFUSES THE PLACEMENT
+// (#947) — THE TEST THIS ISSUE NAMES.
 //
-// This is #914's guard racing rather than this issue's write: refuseFinished has
-// already waved the order through, so the placement goes out either way (#947
-// carries that, and folding the two reads into one Update is the repair). What
-// this pins is that the RECORD survives it — the merge carries the venue's own
-// FILLED forward instead of writing the OMS's ROUTED over it, so the order does
-// not come back into Open and the eviction clock is not reset.
-func TestAFillThatFinishesTheOrderInsideTheRedispatchKeepsItsVerdict(t *testing.T) {
+// This used to be #914's guard racing rather than the write: refuseFinished had
+// already waved the order through on a read of its own, so the exchange was asked
+// to place an order the venue had just finished, and all this test could pin was
+// that the RECORD survived. With the terminal check inside the merge's decide
+// there is nothing left to race: the first decide sees a still-working order and
+// does not refuse, the conditional write loses because the value changed
+// underneath, and Update re-reads and RE-DECIDES against the FILLED entry — which
+// refuses. execCalls is the assertion that matters; the view's state is the
+// bookkeeping behind it.
+func TestAFillThatFinishesTheOrderInsideTheRedispatchRefusesThePlacement(t *testing.T) {
 	ctx := context.Background()
 	v := &fakeVenue{}
 	s, _, view := newServer(t, v)
 	if err := view.Record(ctx, venuePartiallyFilled()); err != nil {
 		t.Fatalf("seed the view: %v", err)
 	}
-	racing := &racingStore{Store: view, on: 2, during: func() {
+	racing := &racingStore{Store: view, on: 1, during: func() {
 		if err := orderview.Progress(ctx, view, venueReport(orderpb.OrderStatus_ORDER_STATUS_FILLED, 150_000_000, 0)); err != nil {
 			t.Errorf("the venue's own report could not be folded in: %v", err)
 		}
 	}}
 	s.view = racing
 
-	if _, err := s.Execute(ctx, &venuepb.ExecuteRequest{State: omsRedispatching()}); err != nil {
-		t.Fatalf("execute: %v", err)
+	_, err := s.Execute(ctx, &venuepb.ExecuteRequest{State: omsRedispatching()})
+	if status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("a re-dispatch that lost to the fill finishing the order returned %v, want "+
+			"AlreadyExists — the venue finished the order between the read and the placement, "+
+			"and the adapter is the last line before the exchange", err)
+	}
+	if v.execCalls != 0 {
+		t.Fatalf("the exchange was asked to place the order %d time(s) after the venue reported "+
+			"it FILLED inside this re-dispatch's own read — both connectors stamp order_id as "+
+			"the client order id, and the exchange dedups a resubmission only WHILE the original "+
+			"is open. Once it has filled that id is free again, so this is a second real trade "+
+			"with the fund's money", v.execCalls)
+	}
+	if racing.gets < 2 {
+		t.Fatalf("Execute read the view %d time(s), want at least 2 — the refusal has to come "+
+			"from a decision RE-MADE against the value the write is conditional on, not from a "+
+			"second guard read bolted back on", racing.gets)
 	}
 
 	st, _, ok, err := view.Get(ctx, "ORD-1")
@@ -239,10 +268,9 @@ func TestAFillThatFinishesTheOrderInsideTheRedispatchKeepsItsVerdict(t *testing.
 		t.Fatalf("order ORD-1 left the view entirely (ok=%v err=%v)", ok, err)
 	}
 	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED {
-		t.Fatalf("status = %v, want FILLED — the exchange finished the order between the guard's "+
-			"read and this write, and the OMS's ROUTED reopened it: Open returns it again, the "+
-			"reconciler re-queries it every pass, and the retention clock it had just started is "+
-			"cleared", st.GetStatus())
+		t.Fatalf("status = %v, want FILLED — the refusal wrote the OMS's ROUTED anyway and "+
+			"reopened the order: Open returns it again, the reconciler re-queries it every pass, "+
+			"and the retention clock it had just started is cleared", st.GetStatus())
 	}
 	if !proto.Equal(st.GetFilledQuantity(), qty(150_000_000, -8)) {
 		t.Fatalf("filled_quantity = %v, want 1.5 — the whole order traded and this adapter's "+

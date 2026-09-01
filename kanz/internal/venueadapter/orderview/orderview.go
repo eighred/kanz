@@ -532,6 +532,16 @@ var ErrUnmappedStatus = errors.New("orderview: refusing to record an order at an
 // order already terminal here. See Progress.
 var ErrTerminalNotReopened = errors.New("orderview: refusing to reopen a terminal order")
 
+// ErrTerminalNotRedispatched is returned when Dispatch is asked to record an
+// order this adapter's view already holds at a TERMINAL status. See Dispatch.
+//
+// IT IS THE REFUSAL OF A PLACEMENT, not a bookkeeping complaint, and that is why
+// it is a sentinel rather than a plain error: Server.Execute matches it to answer
+// the OMS codes.AlreadyExists — distinct from the codes.Internal any other
+// failure to record gets — and the exchange is never called. Update returns a
+// decide error UNWRAPPED for exactly this reason.
+var ErrTerminalNotRedispatched = errors.New("orderview: refusing to work an order the venue has already finished")
+
 // ErrContended is returned when Update could not land its write inside
 // UpdateAttempts rounds because another writer changed the order every time.
 //
@@ -749,7 +759,9 @@ func carryVenueObserved(dst, src *orderpb.OrderState) {
 
 // Dispatch records an order this adapter has been ASKED TO WORK — the OMS's own
 // OrderState, off a venue.v1.ExecuteRequest — without letting that copy overwrite
-// what the venue itself has already observed about the order (#944).
+// what the venue itself has already observed about the order (#944), and REFUSES
+// with ErrTerminalNotRedispatched when the view already holds the order finished,
+// so that the terminal check and the write are one operation (#947).
 //
 // IT IS Progress READ FROM THE OTHER END, and that symmetry is the design. The
 // OMS is the authority on an order's TERMS: it is the only party that knows the
@@ -791,6 +803,31 @@ func carryVenueObserved(dst, src *orderpb.OrderState) {
 // unconditional; what changes is that the refresh no longer reaches five fields
 // the OMS is not the authority on.
 //
+// A TERMINAL PRIOR REFUSES THE WHOLE DISPATCH, and that refusal lives HERE
+// rather than in the caller (#947). Server.Execute used to check it with its own
+// Get on the line above and throw the value away, which made the guard a
+// check-then-act: an execution report landing between that read and the
+// placement left the order FILLED in the view AFTER the guard had waved it
+// through, and the adapter placed it again at the exchange. The exchange dedups
+// a resubmitted client order id only WHILE the original is open — once it has
+// filled, the id is free again, and that is precisely the case this refuses. In
+// here the read, the refusal and the write are one operation and the window does
+// not exist: the decide that refuses is the decide the conditional write is made
+// against, and it is re-run against the re-read value on every contended round,
+// so a fill that lands mid-flight is seen by the retry rather than missed by it.
+//
+// THE VERDICT IS ALSO NOT REOPENED, which used to be this function's whole
+// answer to a terminal prior (#944): the merge carried the venue's status and
+// quantities forward, so the record survived even though the placement did not.
+// Refusing subsumes that — nothing is written at all — and the record is
+// asserted afterwards either way, because "the entry is untouched" is the half
+// an operator reads.
+//
+// THE COST OF REFUSING, TAKEN DELIBERATELY. The caller gets an error for an order
+// that did in fact finish, and past the venue adapter that is a quarantine or a
+// DLQ entry — a human looking at something that needs no repair. The alternative
+// is a second trade with the fund's money. Fail closed.
+//
 // THE READ AND THE WRITE ARE ONE OPERATION (#934), through the same Update both
 // other writers go through, for the same reason and with the same re-decide: a
 // fill landing between the read and the write must not be overwritten by a merge
@@ -814,6 +851,9 @@ func Dispatch(ctx context.Context, store Store, requested *orderpb.OrderState) e
 		return errors.New("orderview: cannot record a dispatch for an order with empty order_id")
 	}
 	return Update(ctx, store, id, func(cur *orderpb.OrderState, found bool) (*orderpb.OrderState, error) {
+		if found && Terminal(cur.GetStatus()) {
+			return nil, fmt.Errorf("%w: %s is already %v in this adapter's view", ErrTerminalNotRedispatched, id, cur.GetStatus())
+		}
 		next, ok := proto.Clone(requested).(*orderpb.OrderState)
 		if !ok {
 			return nil, fmt.Errorf("orderview: order %s did not clone", id)
