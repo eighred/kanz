@@ -41,6 +41,8 @@ func TestOrderViewStateStrings(t *testing.T) {
 		{OrderViewPartiallyFilled, "PARTIALLY_FILLED"},
 		{OrderViewFilled, "FILLED"},
 		{OrderViewRejected, "REJECTED"},
+		{OrderViewCancelled, "CANCELLED"},
+		{OrderViewExpired, "EXPIRED"},
 		{OrderViewState(99), "OrderViewState(99)"},
 	} {
 		if got := tc.state.String(); got != tc.want {

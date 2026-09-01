@@ -32,6 +32,29 @@ const (
 	OrderViewFilled
 	// OrderViewRejected means the venue terminally refused the order.
 	OrderViewRejected
+	// OrderViewCancelled means the VENUE WITHDREW the order: it is gone from
+	// the book and it will not trade again. A cancel this platform issued and
+	// lost the answer to, an operator acting at the exchange, self-trade
+	// prevention, market-maker protection.
+	//
+	// IT IS TERMINAL AND IT MAY HAVE TRADED FIRST. Fills carries whatever
+	// executed before the withdrawal — see the OrderView doc.
+	OrderViewCancelled
+	// OrderViewExpired means the order's time in force ELAPSED at the venue.
+	//
+	// IT IS THE ORDINARY TERMINAL STATE OF AN UNFILLED IOC OR FOK ORDER, not an
+	// exceptional condition, and that is why it is a verdict rather than a
+	// freeze: both time-in-force values are declared supported (#486), so every
+	// IOC order interrupted between Save(ROUTED) and its venue ack used to
+	// quarantine for a human on an answer the venue had given in full (#924).
+	//
+	// DISTINCT FROM OrderViewCancelled BECAUSE THE BOOK OF RECORD IS. The
+	// aggregate has two terminal statuses here, carrying two different FACTs —
+	// ORDER_CANCELLED with a cancelled quantity, ORDER_EXPIRED with an unfilled
+	// one — and recording an IOC that simply did not fill as "cancelled" would
+	// tell an operator somebody pulled it. Fills carries what traded before the
+	// window closed, under the same rule as OrderViewCancelled.
+	OrderViewExpired
 )
 
 func (s OrderViewState) String() string {
@@ -48,6 +71,10 @@ func (s OrderViewState) String() string {
 		return "FILLED"
 	case OrderViewRejected:
 		return "REJECTED"
+	case OrderViewCancelled:
+		return "CANCELLED"
+	case OrderViewExpired:
+		return "EXPIRED"
 	default:
 		return fmt.Sprintf("OrderViewState(%d)", int(s))
 	}
@@ -63,7 +90,18 @@ type OrderView struct {
 	// State is the venue's verdict. Zero value quarantines.
 	State OrderViewState
 	// Fills are the executions the venue attributes to this order, for the
-	// PARTIALLY_FILLED and FILLED states. Empty otherwise.
+	// PARTIALLY_FILLED, FILLED, CANCELLED and EXPIRED states. Empty otherwise.
+	//
+	// EMPTY MEANS SOMETHING DIFFERENT ON EACH OF THOSE, AND THAT IS WHY THE TWO
+	// WITHDRAWN VERDICTS NEED NO "AND IT DID NOT TRADE" COMPANION. For
+	// PARTIALLY_FILLED and FILLED an empty slice is a CONTRADICTION — the venue
+	// says it traded and produced no trade — and the OMS freezes the order
+	// rather than record a traded order as untraded. For CANCELLED and EXPIRED
+	// it is the ORDINARY case: an unfilled IOC that expired traded nothing, and
+	// there is nothing to carry. The fills already say which case this is, so a
+	// third state would be a second name for a fact the payload states, and a
+	// connector could then contradict itself by setting one and supplying the
+	// other.
 	Fills []*orderpb.Fill
 	// Reason is the venue's own words for a REJECTED or INDETERMINATE answer,
 	// carried into the quarantine record an operator reads.

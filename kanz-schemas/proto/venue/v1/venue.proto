@@ -311,6 +311,29 @@ enum OrderViewState {
 
   // The venue terminally refused the order.
   ORDER_VIEW_STATE_REJECTED = 6;
+
+  // The VENUE WITHDREW the order: it is gone from the book and it will not
+  // trade again. Binance `CANCELED`, OKX `canceled` / `mmp_canceled` — a cancel
+  // this platform issued and lost the answer to, an operator acting at the
+  // exchange, self-trade prevention, market-maker protection.
+  //
+  // IT IS TERMINAL AND IT MAY HAVE TRADED FIRST. `fills` carries whatever
+  // executed before the withdrawal, under the venue's OWN fill identities, and
+  // an adapter that cannot reproduce those identities must answer INDETERMINATE
+  // instead — adopting a withdrawal without its fills would record a traded
+  // order as untraded, which is worse than the freeze it replaces.
+  ORDER_VIEW_STATE_CANCELLED = 7;
+
+  // The order's time in force ELAPSED at the venue: Binance `EXPIRED`. This is
+  // the ORDINARY terminal state of an unfilled IOC or FOK order, not an
+  // exceptional condition, which is why it is a verdict rather than a freeze.
+  //
+  // Distinct from CANCELLED because the platform's book of record is: an
+  // expiry and a withdrawal are different terminal statuses carrying different
+  // FACTs, and recording an IOC that simply did not fill as "cancelled" would
+  // tell an operator somebody pulled it. `fills` carries what traded before the
+  // window closed, under the same rule as CANCELLED.
+  ORDER_VIEW_STATE_EXPIRED = 8;
 }
 
 message QueryOrderResponse {
@@ -318,7 +341,14 @@ message QueryOrderResponse {
   OrderViewState state = 1;
 
   // The executions the venue attributes to this order, for the
-  // PARTIALLY_FILLED and FILLED states. Empty otherwise.
+  // PARTIALLY_FILLED, FILLED, CANCELLED and EXPIRED states. Empty otherwise.
+  //
+  // EMPTY MEANS SOMETHING DIFFERENT ON EACH OF THOSE. For PARTIALLY_FILLED and
+  // FILLED it is a contradiction — the venue says it traded and produced no
+  // trade — and the OMS freezes the order. For CANCELLED and EXPIRED it is the
+  // ORDINARY case: an unfilled IOC that expired traded nothing, and there is
+  // nothing to carry. So the two withdrawn verdicts need no companion "and it
+  // did not trade" value: the fills already say it.
   //
   // EACH FILL MUST CARRY THE VENUE'S OWN FILL IDENTITY — the same fill_id the
   // original Execute and the user-data stream report for that execution, not a

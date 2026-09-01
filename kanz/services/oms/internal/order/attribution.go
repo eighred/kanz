@@ -335,13 +335,13 @@ func attributionPayload(st *orderpb.OrderState, a tca.Attribution, now time.Time
 // transition's announcement, so the measurement commits in the SAME transaction
 // as the state change that produced it.
 //
-// ONE IDIOM, FOUR CALL SITES, AND THAT IS THE POINT. The four transitions a
+// ONE IDIOM, FIVE CALL SITES, AND THAT IS THE POINT. The five transitions a
 // decision can end on — a last fill in work(), a last fill adopted from the
-// venue, a cancellation, and a scheduled parent's expiry — are in three files,
-// and a copied `append` at each is how one of them would quietly stop
-// attributing. attributionRecords answers nil for everything that is not a
-// measurable decision, so this is safe to call at any terminal Save and says
-// nothing about which of them are parents.
+// venue, a cancellation, a withdrawal or expiry ADOPTED from the venue (#924),
+// and a scheduled parent's expiry — are in three files, and a copied `append` at
+// each is how one of them would quietly stop attributing. attributionRecords
+// answers nil for everything that is not a measurable decision, so this is safe
+// to call at any terminal Save and says nothing about which of them are parents.
 //
 // IT DOES NOT HAVE TO BE TRUSTED NOT TO BE CALLED ON A NON-TERMINAL TRANSITION:
 // attributionRecords refuses a non-terminal state itself, so a caller that grows

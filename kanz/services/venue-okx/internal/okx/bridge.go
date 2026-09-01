@@ -99,14 +99,19 @@ var (
 	NewMarkTickPublisher = execution.NewMarkTickPublisher
 
 	// The venue verdicts. Aliased as values rather than re-declared so a
-	// connector cannot invent a seventh answer, and so "which constant is
-	// UNKNOWN" has exactly one definition on the platform.
+	// connector cannot invent a ninth answer, and so "which constant is UNKNOWN"
+	// has exactly one definition on the platform.
 	OrderViewIndeterminate   = execution.OrderViewIndeterminate
 	OrderViewUnknown         = execution.OrderViewUnknown
 	OrderViewWorking         = execution.OrderViewWorking
 	OrderViewPartiallyFilled = execution.OrderViewPartiallyFilled
 	OrderViewFilled          = execution.OrderViewFilled
 	OrderViewRejected        = execution.OrderViewRejected
+	// The two TERMINAL WITHDRAWN verdicts (#924): the venue pulled the order, or
+	// its time in force elapsed. Both may carry fills — whatever traded before the
+	// withdrawal — and the OMS ADOPTS both rather than quarantining.
+	OrderViewCancelled = execution.OrderViewCancelled
+	OrderViewExpired   = execution.OrderViewExpired
 
 	// Exact base-10 helpers. Money and sizes are big.Rat-backed common.v1.Decimal;
 	// `double` is banned on any path moving capital, and these are the only way a

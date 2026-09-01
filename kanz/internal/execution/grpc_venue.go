@@ -176,14 +176,18 @@ func (v *GRPCVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (Ord
 
 // orderViewState maps the wire verdict onto the in-process one.
 //
-// EXHAUSTIVE, AND FAIL-CLOSED BY DEFAULT. The two enums agree value for value
-// today, so `OrderViewState(resp.GetState())` would compile and pass every test
-// — and it would silently give a NEW wire value the meaning of whatever Go
-// constant happens to share its number. If a future venue.v1 adds a value at 7
-// and this package later adds an unrelated constant at 7, an unrecognised
-// exchange verdict becomes an authoritative one with no code change anywhere.
-// The switch cannot do that: anything unrecognised is INDETERMINATE, which
-// quarantines.
+// EXHAUSTIVE, AND FAIL-CLOSED BY DEFAULT. `OrderViewState(resp.GetState())`
+// would compile and pass every test, and it would silently give each wire value
+// the meaning of whatever Go constant happens to share its number.
+//
+// THAT HAZARD IS NO LONGER HYPOTHETICAL — #924 realised it. The wire enum has a
+// zero value the Go one does not (ORDER_VIEW_STATE_UNSPECIFIED), so the two have
+// always been offset by one, and the two withdrawn verdicts added for #924 put a
+// concrete collision on the board: wire ORDER_VIEW_STATE_CANCELLED is 7 and Go
+// OrderViewExpired is 7. A cast would record every order an exchange WITHDREW as
+// one whose time in force elapsed — two different terminal statuses in the book
+// of record, from a conversion no test would fail on. The switch cannot do that,
+// and anything unrecognised is INDETERMINATE, which quarantines.
 func orderViewState(s venuepb.OrderViewState) OrderViewState {
 	switch s {
 	case venuepb.OrderViewState_ORDER_VIEW_STATE_UNKNOWN:
@@ -196,6 +200,10 @@ func orderViewState(s venuepb.OrderViewState) OrderViewState {
 		return OrderViewFilled
 	case venuepb.OrderViewState_ORDER_VIEW_STATE_REJECTED:
 		return OrderViewRejected
+	case venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED:
+		return OrderViewCancelled
+	case venuepb.OrderViewState_ORDER_VIEW_STATE_EXPIRED:
+		return OrderViewExpired
 	default:
 		// ORDER_VIEW_STATE_INDETERMINATE, ORDER_VIEW_STATE_UNSPECIFIED (the
 		// adapter set no field) and anything this build has not been taught.
@@ -220,6 +228,10 @@ func OrderViewStateProto(s OrderViewState) venuepb.OrderViewState {
 		return venuepb.OrderViewState_ORDER_VIEW_STATE_FILLED
 	case OrderViewRejected:
 		return venuepb.OrderViewState_ORDER_VIEW_STATE_REJECTED
+	case OrderViewCancelled:
+		return venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED
+	case OrderViewExpired:
+		return venuepb.OrderViewState_ORDER_VIEW_STATE_EXPIRED
 	default:
 		// OrderViewIndeterminate and any state this build has not been taught.
 		// Never UNSPECIFIED: an adapter that DID establish "I cannot tell" has

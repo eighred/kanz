@@ -228,10 +228,22 @@ func TestOKXQuery_NoTradesFetchedForAnOrderThatDidNotTrade(t *testing.T) {
 	}
 }
 
-// A WITHDRAWN ORDER FREEZES. execution.OrderView has no withdrawn answer, and
-// inventing one would be a lie in whichever direction it was taken.
-func TestOKXQuery_CancelledFreezesRatherThanGuessing(t *testing.T) {
-	for _, state := range []string{"canceled", "mmp_canceled", "something_new"} {
+// A WITHDRAWN ORDER IS A VERDICT NOW, NOT A FREEZE (#924).
+//
+// THIS TEST USED TO ASSERT THE OPPOSITE, and it was right to: OrderView had no
+// withdrawn answer, and inventing one out of the other five would have been a
+// lie in whichever direction it was taken. The vocabulary was what was missing.
+//
+// mmp_canceled IS MARKET MAKER PROTECTION pulling the order, and it comes back
+// CANCELLED because okxStateToProto — the ONE table the healing path off the
+// private websocket also reads — now names it. Teaching only the query path
+// would have given the platform two answers for one OKX state.
+//
+// OKX HAS NO EXPIRY OF ITS OWN: an unfilled IOC comes back "canceled" here where
+// Binance calls the same thing EXPIRED. The connector reports what its venue
+// says rather than normalising the two together.
+func TestOKXQuery_CancelledIsAnAdoptableWithdrawal(t *testing.T) {
+	for _, state := range []string{"canceled", "mmp_canceled"} {
 		f := newFakeOKX(t)
 		f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"` + state +
 			`","sz":"1","accFillSz":"0"}]}`
@@ -240,8 +252,160 @@ func TestOKXQuery_CancelledFreezesRatherThanGuessing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: QueryOrder: %v", state, err)
 		}
-		if view.State != OrderViewIndeterminate {
-			t.Fatalf("%s: state = %v, want INDETERMINATE", state, view.State)
+		if view.State != OrderViewCancelled {
+			t.Fatalf("%s: state = %v, want CANCELLED — an order OKX withdrew must go terminal "+
+				"without a human", state, view.State)
+		}
+		if len(view.Fills) != 0 {
+			t.Fatalf("%s: %d fills for an order that traded nothing", state, len(view.Fills))
+		}
+		if f.fillsGets != 0 {
+			t.Fatalf("%s: %d fills-history requests fired for an order that traded nothing",
+				state, f.fillsGets)
+		}
+	}
+}
+
+// A WITHDRAWAL THAT PARTIALLY TRADED CARRIES WHAT TRADED, UNDER OKX'S OWN FILL
+// IDENTITIES.
+//
+// THIS IS THE TEST #924 EXISTS FOR. An order pulled after a partial execution is
+// the common shape of a withdrawal, and a withdrawn verdict that dropped those
+// fills would record a traded order as untraded — SILENTLY, which is strictly
+// worse than the quarantine this verdict replaces.
+func TestOKXQuery_AWithdrawalThatPartiallyTradedCarriesItsFills(t *testing.T) {
+	f := newFakeOKX(t)
+	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"canceled",` +
+		`"sz":"1","accFillSz":"0.6","avgPx":"50000"}]}`
+	f.fillsBody = `{"code":"0","msg":"","data":[` +
+		`{"instId":"BTC-USDT","tradeId":"42","ordId":"1","clOrdId":"o1","fillPx":"50000","fillSz":"0.6","ts":"1750000000000"}]}`
+
+	view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
+	if err != nil {
+		t.Fatalf("QueryOrder: %v", err)
+	}
+	if view.State != OrderViewCancelled {
+		t.Fatalf("state = %v, want CANCELLED", view.State)
+	}
+	if len(view.Fills) != 1 {
+		t.Fatalf("fills = %d, want 1 — a withdrawal that traded 0.6 before it was pulled must "+
+			"carry that trade, or the platform records a traded order as untraded", len(view.Fills))
+	}
+	if view.Fills[0].GetFillId() != "BTC-USDT-42" {
+		t.Fatalf("fill id = %q, want BTC-USDT-42 — the same id the placement path and the "+
+			"user-data stream mint for this trade", view.Fills[0].GetFillId())
+	}
+	if got := view.Fills[0].GetExecutedAt().AsTime(); !got.Equal(time.UnixMilli(1750000000000).UTC()) {
+		t.Fatalf("executed_at = %s, want the exchange's own trade time", got)
+	}
+}
+
+// OKX CONTRADICTING ITSELF ON A WITHDRAWAL FREEZES IT, exactly as it does on a
+// FILLED one: a traded size with no trade behind it cannot be adopted as a clean
+// withdrawal.
+func TestOKXQuery_AWithdrawalThatTradedWithNoTradeIsIndeterminate(t *testing.T) {
+	f := newFakeOKX(t)
+	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"canceled",` +
+		`"sz":"1","accFillSz":"0.6","avgPx":"50000"}]}`
+	// fillsBody keeps its default: code 0, empty data.
+
+	view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
+	if err != nil {
+		t.Fatalf("QueryOrder: %v", err)
+	}
+	if view.State != OrderViewIndeterminate {
+		t.Fatalf("state = %v, want INDETERMINATE — adopting this as a clean withdrawal records a "+
+			"traded order as untraded", view.State)
+	}
+	if view.Reason == "" {
+		t.Fatal("no reason given — an operator reading the quarantine learns nothing")
+	}
+}
+
+// A FAILED TRADE FETCH ON A WITHDRAWAL IS AN ERROR, never a fill-less
+// withdrawal. The OMS nacks and asks again; adopting it would drop the fills.
+func TestOKXQuery_AWithdrawalWhoseTradesCannotBeReadIsAnError(t *testing.T) {
+	f := newFakeOKX(t)
+	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"canceled",` +
+		`"sz":"1","accFillSz":"0.6","avgPx":"50000"}]}`
+	f.fillsBody = `{"code":"50011","msg":"Requests too frequent","data":[]}`
+
+	view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
+	if err == nil {
+		t.Fatal("a refused fills-history on a withdrawal produced no error — the OMS would adopt " +
+			"a partially traded order as one that traded nothing")
+	}
+	if view.State != OrderViewIndeterminate {
+		t.Fatalf("state = %v; a half-fetched answer must carry no verdict at all", view.State)
+	}
+}
+
+// AN UNREADABLE accFillSz ON A WITHDRAWAL FREEZES.
+//
+// tradedFills answers "no trades" for a size it cannot parse, which on the
+// FILLED arm is caught by the empty-fills refusal and here would silently adopt
+// a partially traded order as one that traded nothing. So the size is read
+// BEFORE the trades are asked for.
+func TestOKXQuery_AWithdrawalWithAnUnreadableFilledSizeIsIndeterminate(t *testing.T) {
+	f := newFakeOKX(t)
+	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"canceled",` +
+		`"sz":"1","accFillSz":"n/a"}]}`
+
+	view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
+	if err != nil {
+		t.Fatalf("QueryOrder: %v", err)
+	}
+	if view.State != OrderViewIndeterminate {
+		t.Fatalf("state = %v, want INDETERMINATE", view.State)
+	}
+	if f.fillsGets != 0 {
+		t.Fatalf("%d fills-history requests fired on a size that could not be parsed", f.fillsGets)
+	}
+}
+
+// A STATE THIS CONNECTOR'S ONE TABLE DOES NOT NAME STILL FREEZES. An answer the
+// adapter cannot map is not an answer.
+func TestOKXQuery_AnUnnamedStateStillFreezes(t *testing.T) {
+	f := newFakeOKX(t)
+	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"something_new",` +
+		`"sz":"1","accFillSz":"0"}]}`
+
+	view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
+	if err != nil {
+		t.Fatalf("QueryOrder: %v", err)
+	}
+	if view.State != OrderViewIndeterminate {
+		t.Fatalf("state = %v, want INDETERMINATE", view.State)
+	}
+}
+
+// THE WITHDRAWN VERDICT IS DERIVED FROM THE HEALING PATH'S OWN TABLE, NOT FROM A
+// SECOND LIST OF STRINGS IN THE QUERY PATH (#924).
+//
+// A state okxStateToProto calls CANCELLED must query as OrderViewCancelled, and
+// one it does not name must freeze. A second table in okx_query.go would be free
+// to learn a state this one had not.
+func TestOKXQuery_WithdrawnVerdictAgreesWithTheHealingStateTable(t *testing.T) {
+	for _, state := range []string{
+		"live", "partially_filled", "filled", "canceled", "mmp_canceled", "something_new",
+	} {
+		want := OrderViewIndeterminate
+		if okxStateToProto(state) == orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
+			want = OrderViewCancelled
+		} else if okxStateToProto(state) != orderpb.OrderStatus_ORDER_STATUS_UNSPECIFIED {
+			continue // answered by the live / traded arms, which have their own tests
+		}
+		f := newFakeOKX(t)
+		f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"` + state +
+			`","sz":"1","accFillSz":"0"}]}`
+
+		view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
+		if err != nil {
+			t.Fatalf("%s: QueryOrder: %v", state, err)
+		}
+		if view.State != want {
+			t.Fatalf("%s: okxStateToProto calls it %v so the query must answer %v, got %v",
+				state, okxStateToProto(state), want, view.State)
 		}
 	}
 }

@@ -205,6 +205,13 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 	return nil
 }
 
+// okxStateToProto is the ONE table turning an OKX order state into an order.v1
+// status. The healing path off the private websocket reads it, and — through
+// okxStateWithdrawn — so does the Querier that answers the OMS's crash recovery.
+//
+// ONE TABLE, DELIBERATELY (#924). A second one inside the query path is how the
+// two would come to disagree about what "canceled" means, or how one of them
+// would learn a state the other did not.
 func okxStateToProto(s string) orderpb.OrderStatus {
 	switch s {
 	case "live":
@@ -213,7 +220,11 @@ func okxStateToProto(s string) orderpb.OrderStatus {
 		return orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED
 	case "filled":
 		return orderpb.OrderStatus_ORDER_STATUS_FILLED
-	case "canceled":
+	case "canceled", "mmp_canceled":
+		// mmp_canceled is MARKET MAKER PROTECTION pulling the order. It is as
+		// terminal and as withdrawn as an ordinary cancel — the order is gone from
+		// the book and will not trade again — and it used to fall through to
+		// UNSPECIFIED here, so the healing path could not name it either.
 		return orderpb.OrderStatus_ORDER_STATUS_CANCELLED
 	default:
 		return orderpb.OrderStatus_ORDER_STATUS_UNSPECIFIED

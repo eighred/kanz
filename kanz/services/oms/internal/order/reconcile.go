@@ -58,7 +58,18 @@ func (a Action) String() string {
 //	PARTIALLY_FILLED  | ADOPT              | ADOPT
 //	FILLED            | ADOPT              | ADOPT
 //	REJECTED          | ADOPT              | ADOPT
+//	CANCELLED         | ADOPT              | ADOPT
+//	EXPIRED           | ADOPT              | ADOPT
 //	INDETERMINATE     | QUARANTINE         | QUARANTINE
+//
+// CANCELLED AND EXPIRED ARE ONE ROW EACH AND THEY DO NOT BRANCH ON THE FILLS
+// (#924). A withdrawn order may have partially traded before it was pulled, so
+// the fills that came with the verdict are the ordinary payload rather than a
+// second case: adopt() folds whatever arrived and then writes the terminal
+// withdrawal over what remains. An EMPTY fill list on these two is not a
+// contradiction the way it is on FILLED — an unfilled IOC that expired traded
+// nothing — so there is nothing here to refuse, and splitting the verdict on a
+// property of the payload would let a connector set one and supply the other.
 //
 // Only ONE cell reads venue_ack_at, and it is the only cell where it could
 // possibly matter. Everywhere else the venue has made a positive statement about
@@ -82,7 +93,8 @@ func Reconcile(st *orderpb.OrderState, view execution.OrderView) (Action, string
 	case execution.OrderViewWorking:
 		return ActionLeave, ""
 
-	case execution.OrderViewFilled, execution.OrderViewPartiallyFilled, execution.OrderViewRejected:
+	case execution.OrderViewFilled, execution.OrderViewPartiallyFilled, execution.OrderViewRejected,
+		execution.OrderViewCancelled, execution.OrderViewExpired:
 		return ActionAdopt, ""
 
 	case execution.OrderViewUnknown:

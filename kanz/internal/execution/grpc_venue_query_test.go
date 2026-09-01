@@ -196,8 +196,18 @@ func TestOrderViewStateMappingFailsClosedOnAnUnknownWireValue(t *testing.T) {
 		{venuepb.OrderViewState_ORDER_VIEW_STATE_PARTIALLY_FILLED, OrderViewPartiallyFilled},
 		{venuepb.OrderViewState_ORDER_VIEW_STATE_FILLED, OrderViewFilled},
 		{venuepb.OrderViewState_ORDER_VIEW_STATE_REJECTED, OrderViewRejected},
+		// THE TWO WITHDRAWN VERDICTS (#924), AND THE PAIR THAT PROVES THE SWITCH
+		// EARNS ITS KEEP. The wire enum has a zero value the Go one does not, so the
+		// two are offset by one: wire CANCELLED is 7 and Go OrderViewExpired is 7.
+		// An integer conversion would compile, pass every other case in this table,
+		// and record every order an exchange WITHDREW as one whose time in force
+		// elapsed.
+		{venuepb.OrderViewState_ORDER_VIEW_STATE_CANCELLED, OrderViewCancelled},
+		{venuepb.OrderViewState_ORDER_VIEW_STATE_EXPIRED, OrderViewExpired},
 		// Not a value venue.v1 declares. A future adapter built against a newer
-		// schema can send it, and it must not become an authoritative verdict.
+		// schema can send it, and it must not become an authoritative verdict —
+		// least of all a TERMINAL one, which would write a withdrawal over an order
+		// the exchange may still be working.
 		{venuepb.OrderViewState(99), OrderViewIndeterminate},
 	}
 	for _, tc := range cases {
@@ -214,6 +224,7 @@ func TestOrderViewStateProtoRoundTripsEveryVerdict(t *testing.T) {
 	for _, s := range []OrderViewState{
 		OrderViewIndeterminate, OrderViewUnknown, OrderViewWorking,
 		OrderViewPartiallyFilled, OrderViewFilled, OrderViewRejected,
+		OrderViewCancelled, OrderViewExpired,
 	} {
 		if got := orderViewState(OrderViewStateProto(s)); got != s {
 			t.Fatalf("%v round-tripped as %v", s, got)
@@ -234,5 +245,49 @@ func TestGRPCVenueSatisfiesQuerierThroughTheVenueInterface(t *testing.T) {
 	if _, ok := venue.(Querier); !ok {
 		t.Fatal("a GRPCVenue held as a Venue does not assert to Querier — Service.resume would " +
 			"quarantine every interrupted ROUTED order, which is the whole of #920")
+	}
+}
+
+// EVERY VALUE venue.v1 DECLARES MUST BE A VALUE THIS BUILD HAS BEEN TAUGHT, and
+// the set is read off the PROTO DESCRIPTOR rather than listed here (#924).
+//
+// The fail-closed default is what makes this build safe against a NEWER adapter:
+// a verdict it has never heard of quarantines instead of acting. That same
+// default is what would silently swallow a value added to venue.v1 IN THIS REPO
+// and never wired into orderViewState — the schema and the OMS would disagree,
+// every order carrying the new verdict would freeze, and no test would fail.
+//
+// A hand-written list of wire values here would be a second copy of the enum and
+// would go stale in exactly the same way, which is the whole point of asking the
+// descriptor. The two deliberate exceptions are named, not skipped by index.
+func TestEveryDeclaredWireVerdictIsMappedNotDefaulted(t *testing.T) {
+	values := venuepb.OrderViewState(0).Descriptor().Values()
+	if values.Len() < 9 {
+		t.Fatalf("the OrderViewState descriptor declares %d values; this test is reading the "+
+			"wrong enum", values.Len())
+	}
+	for i := 0; i < values.Len(); i++ {
+		wire := venuepb.OrderViewState(values.Get(i).Number())
+		switch wire {
+		case venuepb.OrderViewState_ORDER_VIEW_STATE_UNSPECIFIED,
+			venuepb.OrderViewState_ORDER_VIEW_STATE_INDETERMINATE:
+			// The two that MEAN indeterminate. Everything else reaching that answer
+			// is a mapping this build does not have.
+			if got := orderViewState(wire); got != OrderViewIndeterminate {
+				t.Fatalf("orderViewState(%v) = %v, want INDETERMINATE", wire, got)
+			}
+			continue
+		}
+		if got := orderViewState(wire); got == OrderViewIndeterminate {
+			t.Fatalf("venue.v1 declares %v and orderViewState falls through to INDETERMINATE for "+
+				"it. An adapter in this repo answering it would have every such order QUARANTINED "+
+				"with nothing failing. Add the case to the switch, and decide deliberately whether "+
+				"order.Reconcile has a row for the verdict it maps to", wire)
+		}
+		// And back out again unchanged: a verdict that changes meaning in transit
+		// is the same defect one hop further on.
+		if back := OrderViewStateProto(orderViewState(wire)); back != wire {
+			t.Fatalf("%v round-tripped as %v", wire, back)
+		}
 	}
 }
