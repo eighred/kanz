@@ -111,20 +111,72 @@ func TestOKXQuery_RateLimitedIsAnErrorNeverUnknown(t *testing.T) {
 	}
 }
 
-// A FILLED OR PARTIALLY FILLED ORDER FREEZES, AND THE QUARANTINE SAYS WHY.
+// A FILLED OR PARTIALLY FILLED ORDER IS ADOPTED WITH OKX'S OWN FILL IDENTITIES
+// (#923).
 //
-// This connector reports ONE CUMULATIVE fill per order, named "<instId>-<ordId>"
-// — a stable name over a quantity that grows. Adopting that on a later query
-// would be skipped by fill_id and leave a fully-traded order recorded at its
-// earlier size; fetching OKX's per-trade fills instead would fold a second copy
-// under "<instId>-<tradeId>", the id space the user-data stream already uses. So
-// the connector says it cannot express the answer rather than guessing, which is
-// the same quarantine these orders got before this RPC existed (#923).
-func TestOKXQuery_FilledIsIndeterminateNotAnInventedFill(t *testing.T) {
+// This is the answer the connector used to refuse. It refused because Execute
+// synthesized ONE CUMULATIVE fill per order named "<instId>-<ordId>", a
+// different identifier space from the "<instId>-<tradeId>" its user-data stream
+// mints — so a queried view could only under-record the trade or fold a second
+// copy of it. Both paths now build from OKX's own trade records through one
+// function, so the ids here are the ids the platform already holds.
+func TestOKXQuery_FilledCarriesTheVenuesOwnFillIdentities(t *testing.T) {
+	for _, tc := range []struct {
+		state string
+		want  OrderViewState
+	}{
+		{"filled", OrderViewFilled},
+		{"partially_filled", OrderViewPartiallyFilled},
+	} {
+		f := newFakeOKX(t)
+		f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"` + tc.state +
+			`","sz":"1","accFillSz":"0.6","avgPx":"50000"}]}`
+		f.fillsBody = `{"code":"0","msg":"","data":[` +
+			`{"instId":"BTC-USDT","tradeId":"42","ordId":"1","clOrdId":"o1","fillPx":"50000","fillSz":"0.2","ts":"1750000000000"},` +
+			`{"instId":"BTC-USDT","tradeId":"43","ordId":"1","clOrdId":"o1","fillPx":"50010","fillSz":"0.4","ts":"1750000001000"}]}`
+
+		view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
+		if err != nil {
+			t.Fatalf("%s: QueryOrder: %v", tc.state, err)
+		}
+		if view.State != tc.want {
+			t.Fatalf("%s: state = %v, want %v", tc.state, view.State, tc.want)
+		}
+		if len(view.Fills) != 2 {
+			t.Fatalf("%s: fills = %d, want 2 — one per trade, not one aggregate", tc.state, len(view.Fills))
+		}
+		// THE IDENTITIES. The same fill_id okx_userdata.go mints for a live push
+		// and OKXVenue.fills mints for a placement; a change to one without the
+		// others double-counts a trade.
+		if view.Fills[0].GetFillId() != "BTC-USDT-42" || view.Fills[1].GetFillId() != "BTC-USDT-43" {
+			t.Fatalf("%s: fill ids = %q, %q; want BTC-USDT-42 and BTC-USDT-43", tc.state,
+				view.Fills[0].GetFillId(), view.Fills[1].GetFillId())
+		}
+		// ADDRESSED BY OKX'S OWN ordId — fills-history has no clOrdId form.
+		if f.sawFillsOrdID != "1" {
+			t.Fatalf("%s: fills-history asked about ordId %q, want 1", tc.state, f.sawFillsOrdID)
+		}
+		// THE TRADE'S OWN INSTANT, not the recovery's. An order adopted an hour
+		// after it traded must not be timestamped an hour late in every
+		// execution-quality measurement that reads it.
+		if got := view.Fills[0].GetExecutedAt().AsTime(); !got.Equal(time.UnixMilli(1750000000000).UTC()) {
+			t.Fatalf("%s: executed_at = %s, want the exchange's own trade time", tc.state, got)
+		}
+	}
+}
+
+// OKX CONTRADICTING ITSELF FREEZES THE ORDER.
+//
+// It reports the order traded and returns no trade for it. Reporting FILLED with
+// no fill leaves a traded order looking untraded — the OMS quarantines such a
+// view and is right to; reporting UNKNOWN re-places an order OKX has just said
+// it executed. Neither is a guess this platform makes.
+func TestOKXQuery_FilledWithNoTradeIsIndeterminateNotUnknown(t *testing.T) {
 	for _, state := range []string{"filled", "partially_filled"} {
 		f := newFakeOKX(t)
 		f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"` + state +
 			`","sz":"1","accFillSz":"0.6","avgPx":"50000"}]}`
+		// fillsBody keeps its default: code 0, empty data.
 
 		view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
 		if err != nil {
@@ -135,6 +187,43 @@ func TestOKXQuery_FilledIsIndeterminateNotAnInventedFill(t *testing.T) {
 		}
 		if view.Reason == "" {
 			t.Fatalf("%s: no reason given — an operator reading the quarantine learns nothing", state)
+		}
+	}
+}
+
+// A FAILURE FETCHING THE TRADES IS A FAILURE, not a fill-less FILLED and not an
+// UNKNOWN. The order query succeeded; the answer is still incomplete, and a
+// half-read set of fills is worse than no answer.
+func TestOKXQuery_TradeFetchFailureIsAnErrorNeverUnknown(t *testing.T) {
+	f := newFakeOKX(t)
+	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"filled","sz":"1","accFillSz":"1","avgPx":"50000"}]}`
+	f.fillsBody = `{"code":"50011","msg":"Requests too frequent","data":[]}`
+
+	view, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1"))
+	if err == nil {
+		t.Fatal("a refused fills-history produced no error")
+	}
+	if view.State == OrderViewUnknown || view.State == OrderViewFilled {
+		t.Fatalf("state = %v; a half-fetched answer must be neither a re-drive nor an adoption", view.State)
+	}
+}
+
+// A RESTING OR WITHDRAWN ORDER COSTS ONE REQUEST, NOT SEVEN. fills-history's own
+// rate limit is six times tighter than /trade/order's, so asking it about every
+// order — including the ones OKX says traded nothing — would spend the placement
+// path's headroom on nothing.
+func TestOKXQuery_NoTradesFetchedForAnOrderThatDidNotTrade(t *testing.T) {
+	for _, state := range []string{"live", "canceled"} {
+		f := newFakeOKX(t)
+		f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"1","clOrdId":"o1","state":"` + state +
+			`","sz":"1","accFillSz":"0"}]}`
+
+		if _, err := okxVenueOver(f).QueryOrder(context.Background(), okxLimit("o1")); err != nil {
+			t.Fatalf("%s: QueryOrder: %v", state, err)
+		}
+		if f.fillsGets != 0 {
+			t.Fatalf("%s: %d fills-history requests fired for an order that traded nothing",
+				state, f.fillsGets)
 		}
 	}
 }

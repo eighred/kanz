@@ -17,29 +17,27 @@ package okx
 // denial and an exhausted weight budget are ERRORS ("the question could not be
 // asked"); anything unmappable is INDETERMINATE, which quarantines.
 //
-// # WHAT THIS CONNECTOR DELIBERATELY WILL NOT ANSWER, AND WHY
+// # FILL IDENTITY IS WHAT MAKES A FILLED ANSWER ADOPTABLE (#923)
 //
-// It reports WORKING and UNKNOWN, and it refuses to report FILLED or
-// PARTIALLY_FILLED — those answer INDETERMINATE, which is exactly the quarantine
-// the OMS performed before this RPC existed, so no order is worse off.
+// This connector used to report WORKING and UNKNOWN and refuse to answer FILLED
+// or PARTIALLY_FILLED, because its Execute synthesized ONE CUMULATIVE fill per
+// order named "<instId>-<ordId>" while its own user-data stream named per-trade
+// fills "<instId>-<tradeId>". Two names for one execution, in an id space the
+// order aggregate (order_fills) and the position book (position_fills) dedup on,
+// which meant a queried view could only ever under-record the trade or fold a
+// second copy of it.
 //
-// THE REASON IS FILL IDENTITY, WHICH IS THE THING THE ORDER AGGREGATE DEDUPS ON.
-// This connector's Execute reports ONE CUMULATIVE fill per order, built from
-// accFillSz and avgPx and named "<instId>-<ordId>" (OKXVenue.fills). That name is
-// stable while the quantity behind it is not: an order that was 40% done when
-// its first fill was folded comes back from a later query as the SAME fill_id
-// carrying 100. The OMS skips a fill_id it already holds — correctly, that is
-// what stops a double count — so adopting this view would silently leave a
-// fully-traded order recorded as 40% filled, with nothing able to notice. The
-// other direction is worse: OKX's per-trade fills (and its own user-data stream)
-// are named "<instId>-<tradeId>", a DIFFERENT id space from Execute's, so
-// fetching them here would fold a second copy of a trade the platform already
-// has.
+// Both paths now build fills from OKX's own trade records — one per trade,
+// "<instId>-<tradeId>" — through the single OKXVenue.fills, so a view fetched
+// here carries the ids the platform already holds and re-adopting it is a no-op
+// rather than a double count. That is what authorizes the FILLED and
+// PARTIALLY_FILLED answers below.
 //
-// That id disagreement is a real defect and it is not this change's to fix
-// (#923). Reporting a fill state whose fills cannot be trusted would be, so this
-// connector says so instead of guessing, and the quarantine record names the
-// venue's own state and filled size for the operator resolving it.
+// WHAT STILL FREEZES: an order OKX calls filled while returning no trade for it.
+// Reporting FILLED with nothing to fold would leave a traded order looking
+// untraded (the OMS refuses such a view, and is right to); reporting UNKNOWN
+// would re-place an order OKX has just said it executed. So it quarantines, and
+// the reason names the venue's own state and filled size.
 
 import (
 	"context"
@@ -95,7 +93,22 @@ func (v *OKXVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (Orde
 		}
 		return OrderView{}, err
 	}
-	return okxOrderView(st, o.State, o.AccFillSz), nil
+	// THE TRADES ARE FETCHED ONLY FOR THE STATES THAT CAN CARRY THEM, and the
+	// SAME predicate okxOrderView switches on decides it — so the fetch and the
+	// verdict cannot drift into a FILLED answer with nothing fetched to carry.
+	// A resting, withdrawn or unmappable order costs one weight unit, not seven.
+	//
+	// A FAILURE TO FINISH READING THE TRADES IS AN ERROR, never a fill-less
+	// FILLED and never an UNKNOWN that would re-place an order OKX has just said
+	// it executed.
+	var fills []*orderpb.Fill
+	if okxStateTraded(o.State) {
+		fills, err = v.tradedFills(ctx, o, st, instID)
+		if err != nil {
+			return OrderView{}, err
+		}
+	}
+	return okxOrderView(st, o.State, o.AccFillSz, fills), nil
 }
 
 // queryAlgo answers for a CONDITIONAL order, which lives on a different endpoint
@@ -156,29 +169,53 @@ func (v *OKXVenue) queryAlgo(ctx context.Context, st *orderpb.OrderState) (Order
 	}
 }
 
-// okxOrderView maps a regular order's OKX state onto a verdict.
+// okxStateTraded reports whether an OKX order state means the venue attributes
+// EXECUTIONS to the order.
+//
+// ONE PREDICATE, read by QueryOrder to decide whether to spend the weight budget
+// fetching trades and by okxOrderView to decide which verdict to give. Split
+// across two copies of the same two string literals, the fetch and the mapping
+// would be free to disagree — and the direction that fails is FILLED with an
+// empty Fills slice, which the OMS quarantines an already-traded order for.
+func okxStateTraded(state string) bool {
+	return state == "partially_filled" || state == "filled"
+}
+
+// okxOrderView maps a regular order's OKX state and its fetched trades onto a
+// verdict.
 //
 // Split out so the mapping is one function with one table rather than a switch
 // buried in a call path, and so a test can drive every OKX state without an HTTP
 // server.
-func okxOrderView(st *orderpb.OrderState, state, accFillSz string) OrderView {
-	switch state {
-	case "live":
+func okxOrderView(st *orderpb.OrderState, state, accFillSz string, fills []*orderpb.Fill) OrderView {
+	switch {
+	case state == "live":
 		return OrderView{State: OrderViewWorking}
-	case "partially_filled", "filled":
-		// SEE THIS FILE'S HEADER. The venue's truth is known and this connector
-		// cannot express it as fills whose identities the order aggregate can
-		// reconcile, so it says that rather than adopting a fill it would have to
-		// invent a name for.
-		return OrderView{
-			State: OrderViewIndeterminate,
-			Reason: fmt.Sprintf(
-				"okx reports order %s as %s having traded %s, but this adapter reports one cumulative "+
-					"fill per order whose identity cannot be reconciled with what the order already "+
-					"holds, so adopting it could under-record or double-count the trade. Resolve it "+
-					"against the exchange's own order history",
-				st.GetOrderId(), state, accFillSz),
+	case okxStateTraded(state):
+		if len(fills) == 0 {
+			// OKX CONTRADICTED ITSELF: it reports the order traded and produced no
+			// trade record for it. Reporting FILLED with no fill would leave a
+			// traded order looking untraded (the OMS refuses such a view, and is
+			// right to); reporting UNKNOWN would re-place an order OKX has just
+			// said it executed. Freeze it and say which.
+			return OrderView{
+				State: OrderViewIndeterminate,
+				Reason: fmt.Sprintf(
+					"okx reports order %s as %s having traded %s but returned no trade for it, so "+
+						"this adapter cannot say what traded. Resolve it against the exchange's own "+
+						"order history",
+					st.GetOrderId(), state, accFillSz),
+			}
 		}
+		// THE VENUE'S OWN FILL IDENTITIES, byte for byte what the placement path
+		// and the user-data stream mint for these trades — which is what makes
+		// adopting this view a no-op for a fill the order already holds instead of
+		// a second copy of it (#923).
+		verdict := OrderViewPartiallyFilled
+		if state == "filled" {
+			verdict = OrderViewFilled
+		}
+		return OrderView{State: verdict, Fills: fills}
 	default:
 		// "canceled", "mmp_canceled", and anything OKX adds later.
 		//

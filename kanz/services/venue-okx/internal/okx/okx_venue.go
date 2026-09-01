@@ -20,9 +20,11 @@ import (
 // only under -tags okx). It maps a SubmitOrder-derived OrderState onto a signed
 // OKX place-order, stamping our deterministic order_id as clOrdId for
 // exchange-side idempotency. OKX place-order does not return fills inline, so
-// Execute queries the order for its true fill state; a filled/partial order
-// returns the aggregate fill, a resting limit returns none. On any ambiguous
-// failure it recovers via query by clOrdId — never a fabricated fill.
+// Execute queries the order for its true fill state and then, only if it traded,
+// for the individual TRADES behind it — one fill per trade, named
+// "<instId>-<tradeId>", which is what the user-data stream names them (#923). A
+// resting limit returns none. On any ambiguous failure it recovers via query by
+// clOrdId — never a fabricated fill.
 type OKXVenue struct {
 	mic     string
 	account string
@@ -213,17 +215,18 @@ func (v *OKXVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orde
 		// Idempotency recovery: a duplicate clOrdId / ambiguous timeout may mean
 		// the order landed. Query by clOrdId; if present, adopt its state.
 		if o, qErr := v.rest.queryOrder(ctx, instID, st.GetOrderId()); qErr == nil {
-			return v.fills(o, st, instID)
+			return v.tradedFills(ctx, o, st, instID)
 		}
 		return nil, err
 	}
-	// Placed OK — query for the true fill state (OKX returns no inline fills).
+	// Placed OK — query for the true fill state (OKX returns no inline fills),
+	// then, only if it traded, for the individual trades behind it (#923).
 	o, err := v.rest.queryOrder(ctx, instID, st.GetOrderId())
 	if err != nil {
 		return nil, nil // accepted but not yet queryable — treat as resting; the
 		// user-data stream / reconciliation heals the fill (never fabricate).
 	}
-	return v.fills(o, st, instID)
+	return v.tradedFills(ctx, o, st, instID)
 }
 
 func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, error) {
@@ -269,54 +272,132 @@ func okxOrderBody(st *orderpb.OrderState, instID string) (map[string]string, err
 	return body, nil
 }
 
-// fills builds the aggregate fill from an OKX order's cumulative filled size and
-// average price. A zero accFillSz (a resting limit) yields no fills.
+// tradedFills reports the EXECUTIONS behind an order OKX has already answered
+// about — one fill per trade, never a synthesized aggregate.
 //
-// The error return is for the Decimal conversions (#94). A nil slice already
-// means "no fill happened", so it cannot also mean "the fill could not be read" —
-// reporting an unreadable fill as no fill is how a real execution goes unbooked.
-func (v *OKXVenue) fills(o *okxOrder, st *orderpb.OrderState, instID string) ([]*orderpb.Fill, error) {
+// # Why the order response is not enough (#923)
+//
+// GET /api/v5/trade/order reports accFillSz and avgPx and no trade list; OKX
+// returns no inline fills on the POST either. Synthesizing one cumulative fill
+// from those two numbers was the obvious shortcut and it is unsafe in both
+// directions, because a fill's IDENTITY is what the order aggregate
+// (order_fills) and the position book (position_fills) dedup on:
+//
+//   - "<instId>-<ordId>" is a STABLE NAME OVER A GROWING QUANTITY. An order that
+//     was 40% done when its aggregate fill was folded comes back from a later
+//     query as the same id carrying 100. The OMS skips a fill_id it already
+//     holds — correctly; that is what stops a double count — so the order stayed
+//     recorded at 40% forever, with nothing able to notice.
+//   - ordId AND tradeId ARE DIFFERENT OKX IDENTIFIER SPACES, and the private
+//     user-data stream names its fills "<instId>-<tradeId>". So one execution
+//     arrived under two names, and folding both double-counts it — or overfills
+//     past leaves and freezes the order in quarantine.
+//
+// So the real trades are fetched and built by the SAME v.fills the query path
+// uses, and it mints the id the websocket mints. This is the Binance connector's
+// shape (binance_query.go's tradesFor), one venue over.
+func (v *OKXVenue) tradedFills(ctx context.Context, o *okxOrder, st *orderpb.OrderState, instID string) ([]*orderpb.Fill, error) {
 	acc, ok := new(big.Rat).SetString(o.AccFillSz)
 	if !ok || acc.Sign() <= 0 {
+		// NOTHING TRADED, so nothing is asked. A resting limit is the common case
+		// and it must not spend six units of the weight budget to learn that.
 		return nil, nil
 	}
-	execID := o.OrdID
-	if execID == "" {
-		execID = st.GetOrderId()
+	if o.OrdID == "" {
+		// OKX CONTRADICTED ITSELF: it says this order traded and did not name the
+		// order it traded on. fills-history has no clOrdId form, so there is no
+		// second way to ask. A nil slice here would report a real execution as no
+		// execution, which is the exact failure #94's error return exists for.
+		return nil, fmt.Errorf("okx: order %s traded %s but OKX named no ordId for it, so this "+
+			"adapter cannot read which trades made it up", st.GetOrderId(), o.AccFillSz)
 	}
-	qty, qok := ParseDec(o.AccFillSz)
-	px, pok := ParseDec(o.AvgPx)
-	if !qok || !pok {
-		return nil, fmt.Errorf("okx: order %s fill is not representable as a Decimal (accFillSz=%q avgPx=%q)",
-			st.GetOrderId(), o.AccFillSz, o.AvgPx)
+	trades, err := v.rest.fillsHistory(ctx, instID, o.OrdID)
+	if err != nil {
+		// Including ErrRateLimited: the question could not be finished, and a
+		// half-read set of fills is worse than no answer at all.
+		return nil, err
 	}
-	fee, feeOK := okxFee(o)
-	if !feeOK {
-		return nil, fmt.Errorf("okx: order %s fee %q %s is not representable as a Decimal",
-			st.GetOrderId(), o.Fee, o.FeeCcy)
-	}
-	return []*orderpb.Fill{{
-		FillId:           instID + "-" + execID,
-		OrderId:          st.GetOrderId(),
-		InstrumentId:     st.GetInstrumentId(),
-		Side:             st.GetSide(),
-		Quantity:         qty,
-		Price:            px,
-		Fee:              fee,
-		Venue:            v.mic,
-		VenueExecutionId: execID,
-		ExecutedAt:       timestamppb.New(v.now().UTC()),
-	}}, nil
+	return v.fills(trades, st, instID)
 }
 
-// okxFee reads the fee OKX charged. A nil Money means NO FEE — so ok=false is a
+// fills converts OKX's own execution records into order.v1.Fills — ONE PER
+// TRADE, named "<instId>-<tradeId>", byte for byte what okx_userdata.go mints
+// for the same trade off the private websocket.
+//
+// IT IS THE ONE PLACE AN OKX FILL IS CONSTRUCTED on the synchronous path, so the
+// placement path and the query path cannot drift apart into two id spaces the
+// way the placement path and the user-data stream did (#923).
+//
+// The error return is for the Decimal conversions (#94). An empty slice already
+// means "this order filled nothing", so it cannot also mean "a fill could not be
+// read" — reporting an unreadable execution as no execution is how a real trade
+// goes unbooked while the request looks successful.
+func (v *OKXVenue) fills(trades []okxFill, st *orderpb.OrderState, instID string) ([]*orderpb.Fill, error) {
+	out := make([]*orderpb.Fill, 0, len(trades))
+	for _, t := range trades {
+		if sz, szOK := new(big.Rat).SetString(t.FillSz); szOK && sz.Sign() <= 0 {
+			// NOT AN EXECUTION. OKX reports fee-only rows on this endpoint for
+			// some instrument types; a zero-size row is not a trade and must not
+			// become a zero-quantity fill in the position book.
+			//
+			// ONLY A SIZE OKX SENT AND THIS CONNECTOR COULD READ IS SKIPPED. An
+			// UNREADABLE size falls through to ParseDec below and becomes an
+			// ERROR — skipping it would report a real execution as no execution,
+			// which is the failure #94's error return exists for.
+			continue
+		}
+		qty, qok := ParseDec(t.FillSz)
+		px, pok := ParseDec(t.FillPx)
+		if !qok || !pok {
+			return nil, fmt.Errorf("okx: order %s trade %s is not representable as a Decimal "+
+				"(fillSz=%q fillPx=%q)", st.GetOrderId(), t.TradeID, t.FillSz, t.FillPx)
+		}
+		feeMoney, feeOK := okxFee(t.Fee, t.FeeCcy)
+		if !feeOK {
+			return nil, fmt.Errorf("okx: order %s trade %s fee %q %s is not representable as a Decimal",
+				st.GetOrderId(), t.TradeID, t.Fee, t.FeeCcy)
+		}
+		inst := t.InstID
+		if inst == "" {
+			// The instrument this adapter asked about. The fill_id must be the
+			// venue-side instrument id either way, because that is the half of the
+			// name the user-data stream reads off its own push.
+			inst = instID
+		}
+		out = append(out, &orderpb.Fill{
+			FillId:           inst + "-" + t.TradeID,
+			OrderId:          st.GetOrderId(),
+			InstrumentId:     st.GetInstrumentId(),
+			Side:             st.GetSide(),
+			Quantity:         qty,
+			Price:            px,
+			Fee:              feeMoney,
+			Venue:            v.mic,
+			VenueExecutionId: t.TradeID,
+			// THE TRADE'S OWN INSTANT, NOT THIS ONE. The connector clock is right
+			// on the placement path (the trade just happened) and wrong on the
+			// recovery path: an order adopted an hour after it traded would be
+			// timestamped an hour late in every execution-quality measurement that
+			// reads it.
+			ExecutedAt: timestamppb.New(okxMillis(t.TS, v.now)),
+		})
+	}
+	return out, nil
+}
+
+// okxFee reads a fee OKX charged. A nil Money means NO FEE — so ok=false is a
 // separate answer for "there is a fee and it could not be read" (#94). Collapsing
 // the two would drop a real cost silently, which understates what the trade cost.
-func okxFee(o *okxOrder) (*commonpb.Money, bool) {
-	if o.Fee == "" || o.Fee == "0" {
+//
+// ONE IMPLEMENTATION for both ingress paths: the REST trade record spells it
+// fee/feeCcy and the websocket push spells it fillFee/fillFeeCcy, but the sign
+// convention and the failure rule are one concept, and two copies of them is how
+// a repair reaches one path only.
+func okxFee(fee, ccy string) (*commonpb.Money, bool) {
+	if fee == "" || fee == "0" {
 		return nil, true
 	}
-	amt, ok := ParseDec(o.Fee)
+	amt, ok := ParseDec(fee)
 	if !ok {
 		return nil, false
 	}
@@ -328,7 +409,7 @@ func okxFee(o *okxOrder) (*commonpb.Money, bool) {
 		}
 		amt = neg
 	}
-	return &commonpb.Money{Amount: amt, CurrencyCode: o.FeeCcy}, true
+	return &commonpb.Money{Amount: amt, CurrencyCode: ccy}, true
 }
 
 func okxSide(s orderpb.Side) (string, error) {

@@ -147,6 +147,78 @@ func (c *okxREST) queryOrder(ctx context.Context, instID, clOrdID string) (*okxO
 	return &out.Data[0], nil
 }
 
+// okxFill is ONE EXECUTION as GET /api/v5/trade/fills-history reports it, and
+// TradeID is the identity that matters: it is the SAME field the private
+// user-data stream carries on a live fill, so a fill rebuilt from here and a
+// fill built from the websocket are one fill with one name (#923).
+//
+// ordId is a DIFFERENT identifier space. Naming a fill after it — which this
+// connector did, for one synthesized cumulative fill per order — gave the same
+// execution two names, and the order aggregate and the position book both make
+// folding exactly-once by deduping on that name.
+type okxFill struct {
+	InstID  string `json:"instId"`
+	TradeID string `json:"tradeId"`
+	OrdID   string `json:"ordId"`
+	ClOrdID string `json:"clOrdId"`
+	Side    string `json:"side"`
+	FillPx  string `json:"fillPx"`
+	FillSz  string `json:"fillSz"`
+	Fee     string `json:"fee"`
+	FeeCcy  string `json:"feeCcy"`
+	TS      string `json:"ts"`
+}
+
+// okxFillsHistoryWeight is what one /trade/fills-history request costs against
+// this connector's single request budget.
+//
+// THE BUDGET IS ONE NUMBER STANDING IN FOR OKX'S PER-ENDPOINT LIMITS, and its
+// default (60 per 2s) is /trade/order's. fills-history's own limit is 10 per 2
+// seconds — six times tighter — so it is charged six units. Undercharging it
+// would let the recovery path spend a budget it does not have and collect
+// rate-limit refusals on the placement path, which is the one path that must
+// never be starved.
+const okxFillsHistoryWeight = 6
+
+// fillsHistory lists the individual executions behind one order (GET
+// /api/v5/trade/fills-history).
+//
+// ADDRESSED BY OKX'S OWN ordId. There is no clOrdId form of this endpoint, which
+// makes it the single place this connector cannot use its own deterministic id —
+// the ordId comes off the order query that precedes it, so the pair is still
+// anchored on ours.
+//
+// AN EMPTY data ARRAY IS NOT AN ERROR HERE, and that is the difference from
+// queryOrder beside it. queryOrder treats empty as "no such order" because a
+// lookup by clOrdId either resolves or does not; a trade list legitimately comes
+// back empty for an order whose executions OKX has not published yet, and
+// turning that into an APIError would make the caller read a propagation delay
+// as a venue refusal. The caller decides what an empty answer means, and its two
+// callers answer it differently — see okx_venue.go's tradedFills.
+func (c *okxREST) fillsHistory(ctx context.Context, instID, ordID string) ([]okxFill, error) {
+	if !c.bucket.Allow(okxFillsHistoryWeight) {
+		c.onThrottle()
+		return nil, ErrRateLimited
+	}
+	path := "/api/v5/trade/fills-history?instType=SPOT&instId=" + instID + "&ordId=" + ordID
+	raw, err := c.signedRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Code string    `json:"code"`
+		Msg  string    `json:"msg"`
+		Data []okxFill `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("okx: decode fills-history response: %w", err)
+	}
+	if out.Code != "0" {
+		return nil, &APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
+	}
+	return out.Data, nil
+}
+
 // sweepMarket places an aggressive market order to flatten a residual exposure
 // when an in-flight close is stuck (the healing seam). side is "buy"/"sell", sz
 // is the base quantity. clOrdId is deterministic ("heal-"+orderID) so a retried
