@@ -77,7 +77,7 @@ func TestExecuteRefusesToPlaceAnOrderWhileThePlatformIsHalted(t *testing.T) {
 	// an order this adapter will not place must not enter the view as one it has,
 	// or the reconciler and the fill-enrichment path both start believing in an
 	// order the exchange never saw.
-	if _, ok, gerr := view.Get(context.Background(), "ORD-1"); gerr != nil || ok {
+	if _, _, ok, gerr := view.Get(context.Background(), "ORD-1"); gerr != nil || ok {
 		t.Fatal("a refused order was recorded in the adapter's order view — the reconciler will " +
 			"now look for an order the exchange has never heard of")
 	}

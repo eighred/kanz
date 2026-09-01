@@ -91,7 +91,7 @@ func TestAConfirmedCancelKeepsTheVenuesFilledVerdictAndItsQuantities(t *testing.
 		t.Fatalf("registry still holds %d closes after a confirmed cancel, want 0", closes.Len())
 	}
 
-	st, ok, err := view.Get(ctx, "ORD-1")
+	st, _, ok, err := view.Get(ctx, "ORD-1")
 	if err != nil || !ok {
 		t.Fatalf("order ORD-1 left the view entirely (ok=%v err=%v)", ok, err)
 	}
@@ -153,7 +153,7 @@ func TestOnlyATerminalViewStatusSurvivesAConfirmedCancel(t *testing.T) {
 		} else {
 			terminal++
 		}
-		st, ok, err := view.Get(ctx, "ORD-1")
+		st, _, ok, err := view.Get(ctx, "ORD-1")
 		if err != nil || !ok {
 			t.Fatalf("order ORD-1 left the view entirely for prior %v (ok=%v err=%v)", prior, ok, err)
 		}
@@ -191,7 +191,7 @@ func TestAConfirmedCancelOfAWorkingOrderKeepsTheVenuesPartialFill(t *testing.T) 
 		t.Fatalf("cancel: %v", err)
 	}
 
-	st, ok, err := view.Get(ctx, "ORD-1")
+	st, _, ok, err := view.Get(ctx, "ORD-1")
 	if err != nil || !ok {
 		t.Fatalf("order ORD-1 left the view entirely (ok=%v err=%v)", ok, err)
 	}
@@ -230,7 +230,7 @@ func TestAConfirmedCancelSeedsAnOrderTheAdapterHasNoRecordOf(t *testing.T) {
 	if _, err := s.CancelOrder(ctx, &venuepb.CancelOrderRequest{State: omsCancelling()}); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
-	st, ok, err := view.Get(ctx, "ORD-1")
+	st, _, ok, err := view.Get(ctx, "ORD-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -248,22 +248,29 @@ func TestAConfirmedCancelSeedsAnOrderTheAdapterHasNoRecordOf(t *testing.T) {
 	}
 }
 
-// blindStore cannot answer Get and counts every Record it is asked to make.
-// Counting the writes is the whole assertion: "nothing was written" is not
-// observable from a store that also cannot be read.
+// blindStore cannot answer Get and counts every write it is asked to make —
+// BOTH kinds, because the cancel path writes through RecordIf now and a counter
+// that only watched Record would report zero writes while the view was being
+// overwritten. Counting the writes is the whole assertion: "nothing was written"
+// is not observable from a store that also cannot be read.
 type blindStore struct {
 	orderview.Store
 	err     error
 	records int
 }
 
-func (b *blindStore) Get(context.Context, string) (*orderpb.OrderState, bool, error) {
-	return nil, false, b.err
+func (b *blindStore) Get(context.Context, string) (*orderpb.OrderState, orderview.Revision, bool, error) {
+	return nil, orderview.Revision{}, false, b.err
 }
 
 func (b *blindStore) Record(ctx context.Context, st *orderpb.OrderState) error {
 	b.records++
 	return b.Store.Record(ctx, st)
+}
+
+func (b *blindStore) RecordIf(ctx context.Context, st *orderpb.OrderState, at orderview.Revision) (bool, error) {
+	b.records++
+	return b.Store.RecordIf(ctx, st, at)
 }
 
 // A VIEW THAT CANNOT BE READ WRITES NOTHING, AND THE RPC STILL SUCCEEDS.

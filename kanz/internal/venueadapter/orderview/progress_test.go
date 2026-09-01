@@ -59,7 +59,7 @@ func TestProgressToFilledTakesTheOrderOutOfOpen(t *testing.T) {
 		t.Fatalf("Progress: %v", err)
 	}
 
-	st, ok, err := m.Get(ctx, "o1")
+	st, _, ok, err := m.Get(ctx, "o1")
 	if err != nil || !ok {
 		t.Fatalf("Get after the fill: ok=%v err=%v", ok, err)
 	}
@@ -91,7 +91,7 @@ func TestProgressToPartiallyFilledKeepsTheOrderOpen(t *testing.T) {
 		t.Fatalf("Progress: %v", err)
 	}
 
-	st, ok, err := m.Get(ctx, "o1")
+	st, _, ok, err := m.Get(ctx, "o1")
 	if err != nil || !ok {
 		t.Fatalf("Get: ok=%v err=%v", ok, err)
 	}
@@ -185,7 +185,7 @@ func TestProgressKeepsTheOrdersTerms(t *testing.T) {
 		t.Fatalf("Progress: %v", err)
 	}
 
-	st, _, err := m.Get(ctx, "o1")
+	st, _, _, err := m.Get(ctx, "o1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestProgressDoesNotBlankAQuantityTheReportOmitted(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Progress: %v", err)
 	}
-	got, _, err := m.Get(ctx, "o1")
+	got, _, _, err := m.Get(ctx, "o1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestProgressRefusesAnUnmappedStatus(t *testing.T) {
 	if !errors.Is(err, ErrUnmappedStatus) {
 		t.Fatalf("Progress with an unmapped status returned %v, want ErrUnmappedStatus", err)
 	}
-	st, _, gErr := m.Get(ctx, "o1")
+	st, _, _, gErr := m.Get(ctx, "o1")
 	if gErr != nil {
 		t.Fatalf("Get: %v", gErr)
 	}
@@ -304,7 +304,7 @@ func TestProgressAcceptsVenueTruthOnATerminalOrder(t *testing.T) {
 	if err := Progress(ctx, m, venueReport("o1", orderpb.OrderStatus_ORDER_STATUS_FILLED, 1, 0)); err != nil {
 		t.Fatalf("Progress: %v", err)
 	}
-	st, _, err := m.Get(ctx, "o1")
+	st, _, _, err := m.Get(ctx, "o1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestProgressRefusesAnOrderNotInTheView(t *testing.T) {
 	if !errors.Is(err, ErrNotInView) {
 		t.Fatalf("Progress for an unknown order returned %v, want ErrNotInView", err)
 	}
-	if _, ok, gErr := m.Get(ctx, "ghost"); ok || gErr != nil {
+	if _, _, ok, gErr := m.Get(ctx, "ghost"); ok || gErr != nil {
 		t.Fatalf("the unknown order was written into the view anyway (ok=%v err=%v)", ok, gErr)
 	}
 }

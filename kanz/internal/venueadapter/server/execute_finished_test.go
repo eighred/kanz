@@ -87,7 +87,7 @@ func TestARedispatchLeavesAFilledOrderTerminalAndOutOfOpen(t *testing.T) {
 			"re-dispatched, want 0 — the reconciler would re-query it and re-emit StateHealed "+
 			"about it on every pass, which is the leak #904 closed", len(open))
 	}
-	st, ok, err := view.Get(ctx, "ORD-1")
+	st, _, ok, err := view.Get(ctx, "ORD-1")
 	if err != nil || !ok {
 		t.Fatalf("order ORD-1 left the view entirely (ok=%v err=%v)", ok, err)
 	}
@@ -124,7 +124,7 @@ func TestExecuteStillWorksAndRefreshesAnOrderThatIsStillOpen(t *testing.T) {
 	if v.execCalls != 1 {
 		t.Fatalf("the venue was called %d times for a live order, want 1", v.execCalls)
 	}
-	st, _, err := view.Get(ctx, "ORD-1")
+	st, _, _, err := view.Get(ctx, "ORD-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -184,8 +184,8 @@ type errStore struct {
 	err error
 }
 
-func (e errStore) Get(context.Context, string) (*orderpb.OrderState, bool, error) {
-	return nil, false, e.err
+func (e errStore) Get(context.Context, string) (*orderpb.OrderState, orderview.Revision, bool, error) {
+	return nil, orderview.Revision{}, false, e.err
 }
 
 // A VIEW THAT CANNOT ANSWER REFUSES. An adapter that cannot establish whether it

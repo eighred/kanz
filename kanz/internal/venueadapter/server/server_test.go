@@ -125,7 +125,7 @@ func TestExecuteRecordsTheOrderBeforeWorkingIt(t *testing.T) {
 	if _, err := s.Execute(context.Background(), &venuepb.ExecuteRequest{State: order()}); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if _, ok, _ := view.Get(context.Background(), "ORD-1"); !ok {
+	if _, _, ok, _ := view.Get(context.Background(), "ORD-1"); !ok {
 		t.Fatal("order was not recorded in the adapter's own view — its fills would be unenrichable")
 	}
 }
@@ -178,7 +178,7 @@ func TestOutOfDomainDecimalIsRefusedBeforeTheOrderIsTouched(t *testing.T) {
 			t.Fatal("Execute did not return within 5s — the domain check is gone and one crafted order " +
 				"stalls the adapter while its probes stay green")
 		}
-		if _, ok, _ := view.Get(context.Background(), "ORD-1"); ok {
+		if _, _, ok, _ := view.Get(context.Background(), "ORD-1"); ok {
 			t.Error("a refused order was recorded in the adapter's view — the refusal must precede the record")
 		}
 	})

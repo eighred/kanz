@@ -299,7 +299,7 @@ func TestRecordRefreshesARedeliveredOrderRatherThanFailing(t *testing.T) {
 		t.Fatalf("a redelivered order left %d rows in venue_orders, want 1", rows)
 	}
 
-	got, ok, err := st.Get(ctx, "o-redelivered")
+	got, _, ok, err := st.Get(ctx, "o-redelivered")
 	if err != nil || !ok {
 		t.Fatalf("Get after the redelivery: ok=%v err=%v", ok, err)
 	}
@@ -423,7 +423,7 @@ func TestProgressToFilledLeavesOpenWhileGetStillAnswers(t *testing.T) {
 		t.Fatalf("Progress: %v", err)
 	}
 
-	got, ok, err := st.Get(ctx, "o-fill")
+	got, _, ok, err := st.Get(ctx, "o-fill")
 	if err != nil || !ok {
 		t.Fatalf("Get after the fill: ok=%v err=%v — the user-data ingester can no longer enrich a "+
 			"report for this order, and Execute's already-worked refusal fails OPEN", ok, err)
@@ -493,7 +493,7 @@ func TestProgressPreservesEveryTermTheVenueDidNotReport(t *testing.T) {
 		t.Fatalf("Progress: %v", err)
 	}
 
-	got, ok, err := st.Get(ctx, "o-merge")
+	got, _, ok, err := st.Get(ctx, "o-merge")
 	if err != nil || !ok {
 		t.Fatalf("Get: ok=%v err=%v", ok, err)
 	}
@@ -531,7 +531,7 @@ func TestAnotherTenantSeesNoneOfThisTenantsOrders(t *testing.T) {
 		t.Fatalf("Record as acme: %v", err)
 	}
 
-	if _, ok, err := beta.Get(ctx, "o-shared-id"); err != nil || ok {
+	if _, _, ok, err := beta.Get(ctx, "o-shared-id"); err != nil || ok {
 		t.Fatalf("tenant beta READ tenant acme's order by id (ok=%v err=%v). Get carries no tenant "+
 			"predicate, so this is row-level security not isolating", ok, err)
 	}
@@ -551,7 +551,7 @@ func TestAnotherTenantSeesNoneOfThisTenantsOrders(t *testing.T) {
 		t.Fatalf("Record as beta: %v", err)
 	}
 
-	back, ok, err := acme.Get(ctx, "o-shared-id")
+	back, _, ok, err := acme.Get(ctx, "o-shared-id")
 	if err != nil || !ok {
 		t.Fatalf("acme's own order vanished after beta recorded the same id: ok=%v err=%v", ok, err)
 	}
@@ -593,7 +593,7 @@ func TestAnotherTenantsFillCannotAdvanceThisTenantsOrder(t *testing.T) {
 			"a fill observed on one tenant's session must not reach another tenant's order", err)
 	}
 
-	back, ok, gerr := acme.Get(ctx, "o-cross-fill")
+	back, _, ok, gerr := acme.Get(ctx, "o-cross-fill")
 	if gerr != nil || !ok {
 		t.Fatalf("Get as acme: ok=%v err=%v", ok, gerr)
 	}
@@ -624,7 +624,7 @@ func TestAnUnscopedSessionCannotReadOrWriteTheOrderView(t *testing.T) {
 		t.Fatalf("Record as acme: %v", err)
 	}
 
-	if _, _, err := unscoped.Get(ctx, "o-unscoped"); err == nil {
+	if _, _, _, err := unscoped.Get(ctx, "o-unscoped"); err == nil {
 		t.Error("a session with no app.tenant_id got an ANSWER out of Get — an unscoped read " +
 			"returned instead of failing, which is exactly the silent-empty defect MT-01e ends")
 	} else if !strings.Contains(err.Error(), "tenant scope missing") {
@@ -659,7 +659,7 @@ func TestGetAnswersForATerminalOrder(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 
-	got, ok, err := st.Get(ctx, "o-terminal")
+	got, _, ok, err := st.Get(ctx, "o-terminal")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -692,7 +692,7 @@ func TestAStoreFailureIsNotAMiss(t *testing.T) {
 	}
 	pool.Close()
 
-	got, ok, err := st.Get(ctx, "o-outage")
+	got, _, ok, err := st.Get(ctx, "o-outage")
 	if err == nil {
 		t.Fatalf("Get against a closed pool returned ok=%v err=nil — an outage is indistinguishable "+
 			"from an order this adapter never worked, and Execute places it again", ok)
@@ -725,7 +725,7 @@ func TestDecodeRefusesAnUnreadableRowRatherThanReturningAnEmptyOrder(t *testing.
 		t.Fatalf("seed the unreadable row: %v", err)
 	}
 
-	got, ok, err := st.Get(ctx, "o-corrupt")
+	got, _, ok, err := st.Get(ctx, "o-corrupt")
 	if err == nil {
 		t.Fatalf("Get decoded an unreadable blob without complaint: ok=%v state=%v", ok, got)
 	}
@@ -766,7 +766,7 @@ func TestARowFromANewerSchemaVersionSurvivesBeingReadAndRewritten(t *testing.T) 
 		t.Fatalf("seed the newer-schema row: %v", err)
 	}
 
-	got, ok, err := st.Get(ctx, "o-newer")
+	got, _, ok, err := st.Get(ctx, "o-newer")
 	if err != nil || !ok {
 		t.Fatalf("Get on a row written by a newer schema: ok=%v err=%v — this adapter would go "+
 			"blind to every order the newer version wrote", ok, err)
