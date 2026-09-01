@@ -65,7 +65,7 @@ func newOKXOrders(ids ...string) *okxOrders {
 
 func (f *okxOrders) get(t *testing.T, id string) *orderpb.OrderState {
 	t.Helper()
-	st, ok, err := f.store.Get(context.Background(), id)
+	st, _, ok, err := f.store.Get(context.Background(), id)
 	if err != nil || !ok {
 		t.Fatalf("order %s is not in the adapter's view (ok=%v err=%v)", id, ok, err)
 	}

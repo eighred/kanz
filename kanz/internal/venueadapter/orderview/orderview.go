@@ -40,14 +40,94 @@ import (
 )
 
 // Store records the orders this adapter is working.
+//
+// THERE IS EXACTLY ONE READ, AND IT MINTS THE TOKEN THE CONDITIONAL WRITE NEEDS
+// (#934). Get could have kept its old three-value shape with a separate
+// read-for-update beside it, and that would have been a trap of the kind this
+// repository keeps paying for: a test decorator that fakes Get would then not be
+// consulted by the write path at all, and the test would go green while
+// asserting nothing about it. One read method cannot be half-overridden.
 type Store interface {
 	// Record stores (or refreshes) an order this adapter has been asked to work.
+	// It is UNCONDITIONAL, and that is the seed/refresh contract: an adapter
+	// asked to work an order it already holds must refresh it, not be rejected.
+	// A read-modify-write must use Get + RecordIf (or Update) instead.
 	Record(ctx context.Context, st *orderpb.OrderState) error
-	// Get returns one order by id.
-	Get(ctx context.Context, orderID string) (*orderpb.OrderState, bool, error)
+	// Get returns one order by id, together with the Revision of the EXACT value
+	// returned — including when there is no row, which is itself a value a
+	// conditional write can be made against.
+	Get(ctx context.Context, orderID string) (*orderpb.OrderState, Revision, bool, error)
+	// RecordIf writes st only if the store is still at the value `at` was minted
+	// from, and reports whether it applied. applied == false is not a failure: it
+	// means another writer got there first and the caller must re-read and
+	// re-decide. An `at` this store did not mint is refused with an error rather
+	// than guessed at.
+	RecordIf(ctx context.Context, st *orderpb.OrderState, at Revision) (bool, error)
 	// Open returns the orders this adapter believes are still working at the venue.
 	Open(ctx context.Context) ([]*orderpb.OrderState, error)
 }
+
+// Revision identifies the exact stored value one Get returned. It is the token a
+// RecordIf is made against, and it is OPAQUE on purpose: the two backends
+// establish "still the same value" by different means and neither is a thing a
+// caller should be reasoning about.
+//
+// WHY NOT A COMPARE-AND-SET ON THE STATUS, which is the shape that suggests
+// itself first and is the one this issue had to reject. Both writers that need
+// this write a status CHANGE, so a status predicate does catch the interleaving
+// where the racing writer also moved the status. It does not catch the ordinary
+// one: a partially filling order takes another fill, and the venue's own report
+// writes PARTIALLY_FILLED over PARTIALLY_FILLED with a LARGER filled_quantity. A
+// status CAS succeeds against that, the merge is still built on the pre-fill
+// read, and the quantity the exchange reported is lost exactly as before — with
+// a green test next to it. The condition has to be the value that was read, not
+// a projection of it.
+//
+// WHY NOT A version COLUMN, which is the clearer of the two exact shapes. It
+// needs a migration to venue_orders in BOTH deployed venue services, kept
+// byte-identical (TestBothDeployedAdaptersRunTheSameOrderViewSchema), on a table
+// both adapters already run in production. The stored state bytes are already an
+// exact revision token and cost no schema change at all.
+//
+// THE BYTES ARE THE ONES THAT WERE READ, NEVER RE-MARSHALED. proto.Marshal is
+// explicitly not guaranteed to be deterministic, so comparing a re-marshal of
+// the value a caller is holding could refuse a write that should have applied —
+// intermittently, and more often the larger the message. Get carries the row's
+// own bytes out with it and RecordIf compares those.
+//
+// THE ZERO Revision IS NOT A WILDCARD. It is what a caller has when it never
+// read anything, and a conditional write that cannot establish what it would be
+// overwriting must refuse rather than proceed — the critical-unknown rule, on the
+// capital path's own record of what the venue did.
+type Revision struct {
+	// source is the backend that minted this token. A token from the other one
+	// means the caller mixed two stores up, and the zero value means it was
+	// never minted at all; both are refused.
+	source revisionSource
+	// present is whether there was a row. A conditional write made against an
+	// absent revision applies only while the row is STILL absent, so two writers
+	// racing to seed the same order cannot both win.
+	present bool
+	// state is the stored bytes exactly as Postgres returned them.
+	state []byte
+	// seq is Memory's per-entry write counter, drawn from a store-wide monotonic
+	// source so an entry that was evicted and re-recorded never reuses one.
+	seq uint64
+}
+
+type revisionSource uint8
+
+const (
+	revisionUnminted revisionSource = iota
+	revisionMemory
+	revisionPostgres
+)
+
+// ErrUnmintedRevision is returned when RecordIf is handed a Revision this store
+// did not produce — the zero value, or one from the other backend. It is a
+// REFUSAL and never a lost race: the store cannot establish what the write would
+// be overwriting, and on this path an unknown fails closed.
+var ErrUnmintedRevision = errors.New("orderview: refusing a conditional write against a revision this store did not mint")
 
 // Terminal reports whether an order is finished, and so no longer "open at the
 // venue" for reconciliation purposes.
@@ -142,13 +222,20 @@ type Memory struct {
 	// is a full reconciliation pass, so expiry is not testable by sleeping — the
 	// same seam and the same reason as bus.DedupWindow's.
 	now func() time.Time
+	// seq is the store-wide write counter every entry's revision is stamped
+	// from. STORE-WIDE rather than per entry, so an order that is evicted and
+	// later re-recorded cannot be handed a revision a stale reader is still
+	// holding — a per-entry counter restarting at zero would make exactly that
+	// collision, and the losing write would silently apply.
+	seq uint64
 }
 
-// memEntry is a recorded order plus the instant it FIRST went terminal (zero
-// while it is still working).
+// memEntry is a recorded order, the instant it FIRST went terminal (zero while
+// it is still working), and the revision of this exact value.
 type memEntry struct {
 	state      *orderpb.OrderState
 	terminalAt time.Time
+	seq        uint64
 }
 
 // NewMemory returns an empty in-memory Store.
@@ -167,8 +254,42 @@ func (m *Memory) Record(_ context.Context, st *orderpb.OrderState) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.recordLocked(st)
+	return nil
+}
+
+// RecordIf writes st only while the entry is still at the value `at` was minted
+// from. Under the same mutex Get read it, so "still" is exact.
+func (m *Memory) RecordIf(_ context.Context, st *orderpb.OrderState, at Revision) (bool, error) {
+	if st.GetOrderId() == "" {
+		return false, errors.New("orderview: cannot record an order with empty order_id")
+	}
+	if at.source != revisionMemory {
+		return false, fmt.Errorf("%w: order %s", ErrUnmintedRevision, st.GetOrderId())
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prev, ok := m.orders[st.GetOrderId()]
+	// Presence is half the condition. A revision read from an absent entry
+	// applies only while it is still absent, so a seed cannot overwrite an order
+	// another writer inserted in the meantime.
+	if ok != at.present {
+		return false, nil
+	}
+	if ok && prev.seq != at.seq {
+		return false, nil
+	}
+	m.recordLocked(st)
+	return true, nil
+}
+
+// recordLocked is the one write body both Record and RecordIf go through, so the
+// terminal-clock rule and the eviction sweep cannot drift between them. Caller
+// holds m.mu.
+func (m *Memory) recordLocked(st *orderpb.OrderState) {
 	now := m.now()
-	e := memEntry{state: proto.Clone(st).(*orderpb.OrderState)}
+	m.seq++
+	e := memEntry{state: proto.Clone(st).(*orderpb.OrderState), seq: m.seq}
 	if Terminal(st.GetStatus()) {
 		// FIRST terminal sighting wins, and a re-record does not reset the clock.
 		// A redelivered or retried close would otherwise refresh the entry
@@ -181,7 +302,6 @@ func (m *Memory) Record(_ context.Context, st *orderpb.OrderState) error {
 	}
 	m.orders[st.GetOrderId()] = e
 	m.evictTerminal(now)
-	return nil
 }
 
 // evictTerminal drops orders that have been terminal for longer than the
@@ -206,14 +326,15 @@ func (m *Memory) evictTerminal(now time.Time) {
 	}
 }
 
-func (m *Memory) Get(_ context.Context, orderID string) (*orderpb.OrderState, bool, error) {
+func (m *Memory) Get(_ context.Context, orderID string) (*orderpb.OrderState, Revision, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	e, ok := m.orders[orderID]
 	if !ok {
-		return nil, false, nil
+		return nil, Revision{source: revisionMemory}, false, nil
 	}
-	return proto.Clone(e.state).(*orderpb.OrderState), true, nil
+	rev := Revision{source: revisionMemory, present: true, seq: e.seq}
+	return proto.Clone(e.state).(*orderpb.OrderState), rev, true, nil
 }
 
 func (m *Memory) Open(_ context.Context) ([]*orderpb.OrderState, error) {
@@ -265,21 +386,75 @@ func (p *Postgres) Record(ctx context.Context, st *orderpb.OrderState) error {
 	return nil
 }
 
-func (p *Postgres) Get(ctx context.Context, orderID string) (*orderpb.OrderState, bool, error) {
+func (p *Postgres) Get(ctx context.Context, orderID string) (*orderpb.OrderState, Revision, bool, error) {
 	var blob []byte
 	err := p.pool.QueryRow(ctx,
 		`SELECT state FROM venue_orders WHERE order_id = $1`, orderID).Scan(&blob)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, nil
+		return nil, Revision{source: revisionPostgres}, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("get order %s: %w", orderID, err)
+		return nil, Revision{}, false, fmt.Errorf("get order %s: %w", orderID, err)
 	}
 	st, err := decode(blob, orderID)
 	if err != nil {
-		return nil, false, err
+		return nil, Revision{}, false, err
 	}
-	return st, true, nil
+	// The revision is the row's OWN bytes, carried out of the read. Re-marshaling
+	// st here would look equivalent and would not be: proto.Marshal is not
+	// guaranteed deterministic, so the comparison could refuse a write nothing
+	// had raced.
+	return st, Revision{source: revisionPostgres, present: true, state: blob}, true, nil
+}
+
+// RecordIf writes st only while venue_orders still holds the exact bytes `at` was
+// read from, and reports whether it applied.
+//
+// TWO STATEMENTS, BECAUSE ABSENT IS A VALUE. Against a row that was there, the
+// predicate is `state = $4` — an equality on the bytes Get returned, evaluated by
+// the engine under the row lock the UPDATE takes, which is what makes the whole
+// read-decide-write atomic across replicas rather than only across goroutines.
+// Against a row that was NOT there, the conditional insert is ON CONFLICT DO
+// NOTHING: zero rows affected means somebody else seeded the order first, which
+// is a lost race and not a failure.
+//
+// NEITHER STATEMENT CARRIES A TENANT PREDICATE, exactly like Get and Open. The
+// tenant_isolation policy is FORCE ROW LEVEL SECURITY and is enforced at the
+// engine on both the USING and the WITH CHECK side, so a conditional write can
+// no more reach another tenant's row than an unconditional one can — and it
+// cannot silently match zero rows for the wrong reason either, because
+// app_current_tenant() RAISES on an unscoped session (MT-01e).
+func (p *Postgres) RecordIf(ctx context.Context, st *orderpb.OrderState, at Revision) (bool, error) {
+	if st.GetOrderId() == "" {
+		return false, errors.New("orderview: cannot record an order with empty order_id")
+	}
+	if at.source != revisionPostgres {
+		return false, fmt.Errorf("%w: order %s", ErrUnmintedRevision, st.GetOrderId())
+	}
+	blob, err := proto.Marshal(st)
+	if err != nil {
+		return false, fmt.Errorf("marshal order %s: %w", st.GetOrderId(), err)
+	}
+	if !at.present {
+		tag, ierr := p.pool.Exec(ctx, `
+			INSERT INTO venue_orders (tenant_id, order_id, status, state)
+			VALUES (current_setting('app.tenant_id'), $1, $2, $3)
+			ON CONFLICT (tenant_id, order_id) DO NOTHING
+		`, st.GetOrderId(), int32(st.GetStatus()), blob)
+		if ierr != nil {
+			return false, fmt.Errorf("conditionally seed order %s: %w", st.GetOrderId(), ierr)
+		}
+		return tag.RowsAffected() == 1, nil
+	}
+	tag, uerr := p.pool.Exec(ctx, `
+		UPDATE venue_orders
+		   SET status = $2, state = $3, updated_at = now()
+		 WHERE order_id = $1 AND state = $4
+	`, st.GetOrderId(), int32(st.GetStatus()), blob, at.state)
+	if uerr != nil {
+		return false, fmt.Errorf("conditionally record order %s: %w", st.GetOrderId(), uerr)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (p *Postgres) Open(ctx context.Context) ([]*orderpb.OrderState, error) {
@@ -350,6 +525,90 @@ var ErrUnmappedStatus = errors.New("orderview: refusing to record an order at an
 // order already terminal here. See Progress.
 var ErrTerminalNotReopened = errors.New("orderview: refusing to reopen a terminal order")
 
+// ErrContended is returned when Update could not land its write inside
+// UpdateAttempts rounds because another writer changed the order every time.
+//
+// IT IS A REFUSAL, NOT A LOST UPDATE, and that distinction is the whole reason
+// the bound is allowed to exist: the caller is told the write did not happen,
+// loudly, instead of a merge built on a stale read being applied quietly. On the
+// cancel path the RPC still succeeds and the view stays non-terminal, so the
+// healing watchdog re-reads venue truth on its next pass; on the fill path the
+// ingester reports it and the reconciler heals the same way.
+var ErrContended = errors.New("orderview: gave up on a conditional write after repeated concurrent changes to the same order")
+
+// UpdateAttempts bounds Update's retry loop.
+//
+// A BOUND RATHER THAN A SPIN, because the loop's exit condition is another
+// writer losing interest. Every round is a real store round-trip, and the callers
+// here are a websocket read loop and a gRPC handler the OMS is waiting on: an
+// unbounded retry turns one hot order into an unbounded stall in the one process
+// holding the exchange session.
+//
+// THE NUMBER IS MEASURED, NOT PICKED. TestConcurrentUpdatesLoseNoWrites is that
+// measurement: two writers saturating ONE order — forty updates back to back with
+// no gap, which is far past anything the venue path produces, where per order
+// there is one ingester goroutine and the occasional cancel. The average round
+// count there is 1.4, and the tail is what matters: over forty runs of the
+// saturated workload the worst single Update took 21 rounds against Memory and
+// Postgres alike. There is no backoff between rounds, so the tail is a real
+// losing streak rather than a queue; 64 is three times the worst observed, and
+// leaves the bound reachable only by contention an order of magnitude past
+// saturation. Reaching it is ErrContended — a refusal, never a silent overwrite.
+const UpdateAttempts = 64
+
+// Decide is Update's read-decide-write body: given what the view currently holds
+// (cur, and whether there was an entry at all), it returns the state to write, or
+// (nil, nil) to write nothing.
+//
+// It is called AGAIN on every retry, against the re-read value, and that is the
+// property the whole design turns on. A conditional write that lost the race must
+// not re-apply the decision it made against the old value — for a confirmed
+// cancel, re-deciding against a view that has since gone terminal means keeping
+// the venue's verdict and writing NOTHING, which is exactly what would be lost by
+// retrying blindly.
+type Decide func(cur *orderpb.OrderState, found bool) (*orderpb.OrderState, error)
+
+// Update is the store's atomic read-modify-write: it reads one order, asks decide
+// what to write, and applies it only if nothing changed underneath — re-reading
+// and re-deciding when something did (#934).
+//
+// WHY THIS IS NOT OPTIONAL SUGAR OVER Get + RecordIf. Both callers are a merge
+// onto what the view already holds, and both had the same defect: a fill landing
+// between the read and the write was overwritten by a merge built on the pre-fill
+// read, and the exchange's own report of what it filled was gone from a table
+// that is never pruned. That is an attribution loss on the capital path — "what
+// the venue returned, what filled" stops being answerable — and it is invisible
+// to -race, because it is a correct-looking interleaving and not a data race.
+//
+// A decide error is returned UNWRAPPED so callers can still match the package's
+// sentinels with errors.Is.
+func Update(ctx context.Context, store Store, orderID string, decide Decide) error {
+	if orderID == "" {
+		return errors.New("orderview: cannot update an order with empty order_id")
+	}
+	for range UpdateAttempts {
+		cur, rev, found, err := store.Get(ctx, orderID)
+		if err != nil {
+			return fmt.Errorf("could not establish what the view already holds for order %s: %w", orderID, err)
+		}
+		next, derr := decide(cur, found)
+		if derr != nil {
+			return derr
+		}
+		if next == nil {
+			return nil
+		}
+		applied, werr := store.RecordIf(ctx, next, rev)
+		if werr != nil {
+			return fmt.Errorf("record order %s: %w", orderID, werr)
+		}
+		if applied {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s", ErrContended, orderID)
+}
+
 // Progress folds the venue's OWN report of an order's progress into this
 // adapter's view — the state the user-data ingester has ALREADY published as an
 // order.order.filled / order.order.partially_filled FACT (#904).
@@ -384,21 +643,39 @@ var ErrTerminalNotReopened = errors.New("orderview: refusing to reopen a termina
 // CANCELLED is venue truth about a trade that happened, and Memory keeps the
 // FIRST terminal sighting as the retention clock so this cannot refresh it.
 //
-// CONCURRENCY, STATED RATHER THAN IMPLIED, AND THE PREMISE HAS ALREADY MOVED
-// ONCE. This is a read-modify-write across two Store calls and is NOT atomic;
-// only the individual calls are. The single writer of fill progress is one
-// ingester goroutine. The other two writers no longer overwrite unconditionally
-// the way this paragraph used to say they did: Execute refuses outright when it
-// finds a terminal order (#914), and Server.recordStatus keeps a terminal
-// verdict and otherwise merges onto what it read (#921). So a lost update is no
-// longer a certainty on the cancel path — it is the width of one Get-to-Record
-// window, in which a confirmed cancel can still land on a pre-fill read and
-// write CANCELLED over a FILLED this call had just established. Both are
-// terminal, so Open and the eviction clock are unaffected and only the recorded
-// verdict is; closing that window needs a conditional write neither backend has,
-// which is #934. It cannot fabricate a status: every value written came from a
-// venue report. -race does not run on the usual Windows box (no cgo), so CI is
-// the detector for this path.
+// CONCURRENCY, STATED RATHER THAN IMPLIED. This read-modify-write IS atomic
+// (#934): it goes through Update, which applies the merge only while the view
+// still holds the exact value the merge was built on, and re-reads and
+// re-decides when it does not. The condition is the VALUE, not its status — a
+// status compare-and-set would have succeeded against the ordinary case of a
+// partially filling order taking another fill, PARTIALLY_FILLED over
+// PARTIALLY_FILLED with a larger filled_quantity, and lost the quantity anyway.
+// It cannot fabricate a status either way: every value written came from a venue
+// report.
+//
+// THE RESIDUALS, AND THERE ARE TWO. They are different in kind, so they are not
+// stated as one.
+//
+//   - THIS CALL can still decline to write. Update gives up after
+//     UpdateAttempts contended rounds and returns ErrContended, which
+//     Seam.Progressed reports to onErr. That is not a lost update: nothing was
+//     overwritten, the order is still non-terminal, so Open keeps returning it
+//     and the reconciler re-reads venue truth on the next pass.
+//   - ANOTHER WRITER can still overwrite what this one recorded, and that one IS
+//     a lost update. Store.Record is still unconditional — deliberately, because
+//     a redelivered ExecuteRequest must refresh rather than be rejected — and
+//     Server.Execute uses it to seed or refresh an order it is about to work.
+//     Execute reads the view first only to REFUSE a TERMINAL order (#914), so a
+//     re-dispatch of a PARTIALLY_FILLED one passes that guard and records the
+//     OMS's OrderState over the quantities this call folded in. Out of scope for
+//     #934, which is about the two read-modify-write writers; #944 carries it,
+//     and states the bound: the OMS's status is non-terminal, so the healing
+//     watchdog re-queries and re-heals, and what is lost meanwhile is the record.
+//
+// -race does not run on the usual Windows box (no cgo) and would not have found
+// this anyway — a lost update is a correct-looking interleaving, not a data race,
+// and only a deterministic test finds it. There is one, in this package and in
+// internal/venueadapter/server.
 func Progress(ctx context.Context, store Store, reported *orderpb.OrderState) error {
 	id := reported.GetOrderId()
 	if id == "" {
@@ -408,37 +685,35 @@ func Progress(ctx context.Context, store Store, reported *orderpb.OrderState) er
 	if next == orderpb.OrderStatus_ORDER_STATUS_UNSPECIFIED {
 		return fmt.Errorf("%w: order %s", ErrUnmappedStatus, id)
 	}
-	cur, ok, err := store.Get(ctx, id)
-	if err != nil {
-		return fmt.Errorf("progress order %s: %w", id, err)
-	}
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrNotInView, id)
-	}
-	if Terminal(cur.GetStatus()) && !Terminal(next) {
-		return fmt.Errorf("%w: %s is %v and the venue now reports %v", ErrTerminalNotReopened, id, cur.GetStatus(), next)
-	}
-	merged, mok := proto.Clone(cur).(*orderpb.OrderState)
-	if !mok {
-		return fmt.Errorf("orderview: order %s did not clone", id)
-	}
-	merged.Status = next
-	// Each guarded on the report having SET it: a nil here would blank a quantity
-	// the view already holds, and a blanked filled_quantity reads downstream as an
-	// order that traded nothing.
-	if q := reported.GetFilledQuantity(); q != nil {
-		merged.FilledQuantity = q
-	}
-	if q := reported.GetLeavesQuantity(); q != nil {
-		merged.LeavesQuantity = q
-	}
-	if p := reported.GetAverageFillPrice(); p != nil {
-		merged.AverageFillPrice = p
-	}
-	if t := reported.GetAsOf(); t != nil {
-		merged.AsOf = t
-	}
-	return store.Record(ctx, merged)
+	return Update(ctx, store, id, func(cur *orderpb.OrderState, found bool) (*orderpb.OrderState, error) {
+		if !found {
+			return nil, fmt.Errorf("%w: %s", ErrNotInView, id)
+		}
+		if Terminal(cur.GetStatus()) && !Terminal(next) {
+			return nil, fmt.Errorf("%w: %s is %v and the venue now reports %v", ErrTerminalNotReopened, id, cur.GetStatus(), next)
+		}
+		merged, mok := proto.Clone(cur).(*orderpb.OrderState)
+		if !mok {
+			return nil, fmt.Errorf("orderview: order %s did not clone", id)
+		}
+		merged.Status = next
+		// Each guarded on the report having SET it: a nil here would blank a
+		// quantity the view already holds, and a blanked filled_quantity reads
+		// downstream as an order that traded nothing.
+		if q := reported.GetFilledQuantity(); q != nil {
+			merged.FilledQuantity = q
+		}
+		if q := reported.GetLeavesQuantity(); q != nil {
+			merged.LeavesQuantity = q
+		}
+		if p := reported.GetAverageFillPrice(); p != nil {
+			merged.AverageFillPrice = p
+		}
+		if t := reported.GetAsOf(); t != nil {
+			merged.AsOf = t
+		}
+		return merged, nil
+	})
 }
 
 // Seam adapts a Store to the connector's OrderTracker + ExpectedOrders interfaces,
@@ -459,7 +734,7 @@ func NewSeam(store Store, onErr func(error)) *Seam {
 
 // Lookup satisfies execution.OrderLookup.
 func (s *Seam) Lookup(orderID string) (*orderpb.OrderState, bool) {
-	st, ok, err := s.store.Get(context.Background(), orderID)
+	st, _, ok, err := s.store.Get(context.Background(), orderID)
 	if err != nil {
 		s.report(err)
 		return nil, false

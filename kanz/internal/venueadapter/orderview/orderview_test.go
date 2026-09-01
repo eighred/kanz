@@ -105,7 +105,7 @@ func TestTerminalOrderSurvivesTheRetentionWindow(t *testing.T) {
 	if err := m.Record(ctx, working("other")); err != nil { // drive the sweep
 		t.Fatalf("record other: %v", err)
 	}
-	if _, ok, err := m.Get(ctx, "late-fill"); err != nil || !ok {
+	if _, _, ok, err := m.Get(ctx, "late-fill"); err != nil || !ok {
 		t.Fatalf("Get(late-fill) after one close timeout = (%v, %v), want found — a report for a "+
 			"trade that raced the cancel would be dropped unenriched", ok, err)
 	}
@@ -113,7 +113,7 @@ func TestTerminalOrderSurvivesTheRetentionWindow(t *testing.T) {
 	if err := m.Record(ctx, working("other2")); err != nil {
 		t.Fatalf("record other2: %v", err)
 	}
-	if _, ok, err := m.Get(ctx, "late-fill"); err != nil || !ok {
+	if _, _, ok, err := m.Get(ctx, "late-fill"); err != nil || !ok {
 		t.Fatalf("Get(late-fill) inside the retention window = (%v, %v), want found", ok, err)
 	}
 }
@@ -148,7 +148,7 @@ func TestAWorkingOrderIsNeverEvicted(t *testing.T) {
 			"against this read, and an order it cannot see is one nothing at the exchange gets "+
 			"queried or healed", open)
 	}
-	if _, ok, err := m.Get(ctx, "resting"); err != nil || !ok {
+	if _, _, ok, err := m.Get(ctx, "resting"); err != nil || !ok {
 		t.Fatalf("Get(resting) = (%v, %v), want found", ok, err)
 	}
 }
@@ -252,7 +252,7 @@ func TestRecordedStateIsCloned(t *testing.T) {
 	}
 	st.Status = orderpb.OrderStatus_ORDER_STATUS_CANCELLED
 
-	got, ok, err := m.Get(ctx, "aliased")
+	got, _, ok, err := m.Get(ctx, "aliased")
 	if err != nil || !ok {
 		t.Fatalf("Get = (%v, %v), want found", ok, err)
 	}

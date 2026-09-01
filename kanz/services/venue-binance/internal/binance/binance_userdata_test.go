@@ -54,7 +54,7 @@ func newFakeOrders(ids ...string) *fakeOrders {
 // get is the adapter's own belief about one order, straight from the store.
 func (f *fakeOrders) get(t *testing.T, id string) *orderpb.OrderState {
 	t.Helper()
-	st, ok, err := f.store.Get(context.Background(), id)
+	st, _, ok, err := f.store.Get(context.Background(), id)
 	if err != nil || !ok {
 		t.Fatalf("order %s is not in the adapter's view (ok=%v err=%v)", id, ok, err)
 	}

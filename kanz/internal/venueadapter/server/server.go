@@ -419,7 +419,7 @@ func (s *Server) ListInstruments(context.Context, *venuepb.ListInstrumentsReques
 // the order is not already finished, and an unknown on the capital path fails
 // closed — the same direction Execute takes when the Record itself fails.
 func (s *Server) refuseFinished(ctx context.Context, orderID string) error {
-	prior, ok, err := s.view.Get(ctx, orderID)
+	prior, _, ok, err := s.view.Get(ctx, orderID)
 	if err != nil {
 		s.logger.Error("venue: could not read the order view before working an order",
 			"mic", s.venue.MIC(), "order_id", orderID, "err", err)
@@ -502,30 +502,47 @@ func (s *Server) refuseFinished(ctx context.Context, orderID string) error {
 // alternative is a store blip permanently replacing the exchange's verdict with
 // the OMS's, which nothing corrects.
 //
-// THE Get AND THE Record ARE NOT ONE OPERATION, and Store offers nothing that
-// would make them one. A fill landing between the two is written over by a merge
-// built on the pre-fill read — the same erasure, narrowed from a certainty to
-// the width of one window. #934 carries the conditional write that closes it;
-// orderview.Progress states the same residual from the other side.
+// THE READ AND THE WRITE ARE ONE OPERATION (#934). They were not: this was a
+// plain Get followed by a plain Record, and a fill landing between the two was
+// written over by a merge built on the pre-fill read — the same erasure #921
+// closed, narrowed from a certainty to the width of one window rather than shut.
+// orderview.Update now applies the write only while the view still holds the
+// exact value the decision was made against, and RE-DECIDES when it does not,
+// which is the half that matters: a retry that re-applied the old decision would
+// write CANCELLED over the FILLED the racing writer had just established, and
+// a conditional write that simply gave up would drop a cancel that must land.
+// Re-deciding against a now-terminal view means keeping the venue's verdict and
+// writing nothing, which is this function's own rule reached a second time.
+//
+// THE CONDITION IS THE VALUE, NOT THE STATUS, and that is not a detail. A cancel
+// always writes a status CHANGE, so a compare-and-set on the status catches the
+// interleaving where the racing writer also moved the status — and misses the
+// ordinary one, where a partially filling order takes another fill and the venue
+// writes PARTIALLY_FILLED over PARTIALLY_FILLED with a larger filled_quantity.
+// The status predicate holds, the merge is still built on the pre-fill read, and
+// the quantity the exchange reported is lost with a green test beside it.
+//
+// THE RESIDUAL. Update gives up after orderview.UpdateAttempts contended rounds
+// and returns ErrContended — a refusal, not a silent overwrite. The caller logs
+// it and the RPC still succeeds, so the view keeps the venue's own report and
+// stays non-terminal, and the healing watchdog re-reads venue truth next pass.
 func (s *Server) recordStatus(ctx context.Context, st *orderpb.OrderState, next orderpb.OrderStatus) error {
 	orderID := st.GetOrderId()
-	prior, ok, err := s.view.Get(ctx, orderID)
-	if err != nil {
-		return fmt.Errorf("could not establish what the view already holds for order %s: %w", orderID, err)
-	}
-	base := st
-	if ok {
-		if orderview.Terminal(prior.GetStatus()) {
-			s.logger.Info("venue: close confirmed for an order the venue had already finished — keeping the venue's own verdict",
-				"mic", s.venue.MIC(), "order_id", orderID, "status", prior.GetStatus().String())
-			return nil
+	return orderview.Update(ctx, s.view, orderID, func(prior *orderpb.OrderState, found bool) (*orderpb.OrderState, error) {
+		base := st
+		if found {
+			if orderview.Terminal(prior.GetStatus()) {
+				s.logger.Info("venue: close confirmed for an order the venue had already finished — keeping the venue's own verdict",
+					"mic", s.venue.MIC(), "order_id", orderID, "status", prior.GetStatus().String())
+				return nil, nil
+			}
+			base = prior
 		}
-		base = prior
-	}
-	cloned, cok := proto.Clone(base).(*orderpb.OrderState)
-	if !cok {
-		return fmt.Errorf("order %s did not clone", orderID)
-	}
-	cloned.Status = next
-	return s.view.Record(ctx, cloned)
+		cloned, cok := proto.Clone(base).(*orderpb.OrderState)
+		if !cok {
+			return nil, fmt.Errorf("order %s did not clone", orderID)
+		}
+		cloned.Status = next
+		return cloned, nil
+	})
 }
