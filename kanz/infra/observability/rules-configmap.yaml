@@ -79,11 +79,39 @@ data:
     # compare against an empty vector and could never fire: #62's defect reached
     # from the same direction as the two bus gauges above, and the reason
     # alerts/README.md gives for INSTRUMENT FIRST, then write the rule. The
-    # instrumenting is the half that landed. What unblocks the rule is a deployment
-    # that enables calibration; the `for:` duration is then derivable from that
+    # instrumenting is the half that landed.
+    #
+    # WHAT UNBLOCKS IT IS A RATE QUOTE PRODUCER, NOT THE MANIFEST LINE (#912). This
+    # paragraph used to end "what unblocks the rule is a deployment that enables
+    # calibration", which reads as one env-var edit away and is wrong in a way that
+    # would ship a rule firing forever. #912 measured the estate: the entire market
+    # spine is MARKET_INGEST_INSTRUMENTS="BTC-USDT,ETH-USDT", market-data's feed is
+    # unset in every manifest, and no deposit, rate future or par swap is quoted
+    # anywhere — so RISK_ENGINE_CALIBRATION_RATES has no defensible value to hold.
+    # Setting it anyway would give every configured instrument MissingNoQuote from
+    # the first refresh: _configured > 0, _quoted == 0, permanently. The rule would
+    # then fire on its first evaluation and never clear, which is the same "trains
+    # its readers to ignore it" failure this file rejects `absent()` for one
+    # paragraph up — an alert that is always firing and an alert that can never fire
+    # are the same alert. It would also register the seven FI and structured
+    # measures behind the same gate, flagged unmeasured on every response.
+    #
+    # So the ordering is one step longer than it looked: a rates producer (#104
+    # vendor Source bindings, #105 licensed rate data — both blocked-external), THEN
+    # a deployment that enables calibration against instruments that producer
+    # quotes, THEN this rule. Its `for:` is derivable at that point from that
     # deployment's own RISK_ENGINE_CALIBRATION_INTERVAL (a strip point absent across
     # several consecutive refreshes is not warming up), which is a number nobody can
     # state while the cadence is unset everywhere.
+    #
+    # THE SECOND HALF OF THAT ORDERING IS ENFORCED, NOT DOCUMENTED.
+    # test/arch/calibration_alert_follows_its_producer_test.go derives both sides —
+    # whether any workload in infra/ sets both variables, and whether any rule here
+    # names the strip-coverage gauges — and fails when they disagree, in either
+    # direction. A deployment that turns the producer on without this rule fails the
+    # build; so does this rule landing while no pod produces the series. That is
+    # what stops the paragraph above from going stale a second time, which is how it
+    # got the unblocking condition wrong in the first place.
     #
     # EVERY RULE BELOW IS PROVEN TO FIRE. operational_test.yaml next to this file is
     # a promtool unit-test harness with a firing case for each alert and a
