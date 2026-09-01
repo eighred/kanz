@@ -197,3 +197,171 @@ func TestARestartedMonitorSeesTheForbiddenHolding(t *testing.T) {
 			"holding, so a fund holding an instrument its mandate FORBIDS looked compliant")
 	}
 }
+
+// portfolioRecorder captures the post-trade decisions recorded for ONE portfolio.
+//
+// SCOPED, DELIBERATELY. The monitor subscribes to the whole position subject and
+// the POSITION stream is persistent and compacted, so a boot replays every
+// holding the estate has ever published — including other runs'. Counting all
+// records would make this test pass once and then drift; counting the ones
+// naming this run's portfolio asserts on content, which is stable.
+type portfolioRecorder struct {
+	mu        sync.Mutex
+	portfolio string
+	results   []*compliancepb.ComplianceResult
+}
+
+func (r *portfolioRecorder) Record(_ context.Context, rec comp.DecisionRecord) error {
+	if rec.Result.GetPortfolioId() != r.portfolio {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.results = append(r.results, rec.Result)
+	return nil
+}
+
+func (r *portfolioRecorder) first() *compliancepb.ComplianceResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.results) == 0 {
+		return nil
+	}
+	return r.results[0]
+}
+
+// TestAMonitorReplayingAnOldFillFindsTheMandateInForce pins #917 against the
+// REAL spine and the REAL registry, because the defect lives at the join between
+// the two.
+//
+// The fund's last fill is a MONTH OLD and its mandate took force AFTER it —
+// exactly what a portfolio that stopped trading before its mandate was published
+// looks like. The position FACT arrives off DeliverLastPerSubject carrying that
+// month-old as_of; the registry, armed from its own compacted subject, holds
+// only the version in force (#884, #916). Resolving the mandate at the FACT's
+// as_of finds NOTHING, and the portfolio is skipped as UNGOVERNED — the control
+// does not fail, it declines to run, and a fund holding an instrument its
+// mandate FORBIDS looks compliant.
+//
+// The book is a single forbidden holding, so any evaluation at all breaches.
+func TestAMonitorReplayingAnOldFillFindsTheMandateInForce(t *testing.T) {
+	url := os.Getenv("TEST_NATS_URL")
+	if url == "" {
+		t.Skip("set TEST_NATS_URL to replay a backdated position FACT over a real spine")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	admin, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	js, err := jetstream.New(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bustest.EnsureSubjects(t, ctx, js, "POSITION_917_"+suffix, []string{subject.PositionAll})
+
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "position-917"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{
+		Source: "oms", ProducerVersion: "it", Tenant: "acme",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := bus.NewConsumer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// UNIQUE per run: the POSITION stream is compacted and PERSISTENT, so a reused
+	// id would let a previous run's holdings arm this one.
+	portfolio := "pf-917-" + suffix
+	forbidden := "ETH-USD-" + suffix
+
+	// THE FILL IS A MONTH OLD. Nothing has traded this portfolio since.
+	lastFill := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	st := &domainpb.PositionState{
+		PortfolioId:  portfolio,
+		InstrumentId: forbidden,
+		Quantity:     dec.ToProto(ratOf(2)),
+		AveragePrice: dec.ToProto(ratOf(100)),
+		MarketValue:  &commonpb.Money{Amount: dec.ToProto(ratOf(200)), CurrencyCode: "USD"},
+		AsOf:         timestamppb.New(lastFill),
+	}
+	if err := producer.Publish(ctx, bus.Event{
+		Subject:          subject.PositionFor("acme", portfolio, forbidden),
+		EventType:        subject.PositionChanged,
+		EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
+		SchemaVersion:    1,
+		Domain:           "risk",
+		EventTime:        lastFill,
+		PartitionKey:     portfolio,
+		PayloadSchemaRef: "domain.v1.PositionState:1",
+		Payload:          st,
+	}); err != nil {
+		t.Fatalf("publish the old fill: %v", err)
+	}
+
+	// THE MANDATE TOOK FORCE AFTER THE FILL, and it is the only resident version —
+	// which is what the compacted mandate subject serves.
+	reg := comp.NewMandateRegistry()
+	if err := reg.Put(&compliancepb.Mandate{
+		MandateId:   "m-" + portfolio,
+		TenantId:    "acme",
+		PortfolioId: portfolio,
+		Version:     1,
+		EffectiveAt: timestamppb.New(time.Now().UTC()),
+		Rules: []*compliancepb.Rule{{
+			RuleId: "no-eth",
+			Type:   compliancepb.RuleType_RULE_TYPE_RESTRICTION,
+			Params: &compliancepb.Rule_Restriction{Restriction: &compliancepb.RestrictionList{
+				Dimension: compliancepb.Dimension_DIMENSION_INSTRUMENT,
+				Mode:      compliancepb.RestrictionMode_RESTRICTION_MODE_DENY,
+				Values:    []string{forbidden},
+			}},
+		}},
+	}); err != nil {
+		t.Fatalf("registry refused a well-formed mandate: %v", err)
+	}
+
+	rec := &portfolioRecorder{portfolio: portfolio}
+	mon := monitor.NewMonitor(comp.NewEngine(nil), reg, nil, nil, rec, nil)
+	subCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	go func() {
+		_ = consumer.SubscribeBroadcast(subCtx, subject.PositionAll, mon.Handle)
+	}()
+
+	deadline := time.Now().Add(20 * time.Second)
+	var got *compliancepb.ComplianceResult
+	for time.Now().Before(deadline) {
+		if got = rec.first(); got != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got == nil {
+		t.Fatal("the monitor recorded no decision for a portfolio holding an instrument its mandate " +
+			"FORBIDS: the replayed FACT's as_of predates the mandate's effective_at, so the mandate " +
+			"lookup found nothing and the portfolio was skipped as UNGOVERNED")
+	}
+	if got.GetStatus() != compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH {
+		t.Fatalf("decision status is %v, want BREACH", got.GetStatus())
+	}
+	if got.GetMandateId() != "m-"+portfolio {
+		t.Fatalf("decision names mandate %q, want %q", got.GetMandateId(), "m-"+portfolio)
+	}
+	// The evaluation is stamped with the OBSERVATION, not with the clock that
+	// resolved the mandate — the attribution half of #917.
+	if evAt := got.GetEvaluatedAt().AsTime(); !evAt.Equal(lastFill) {
+		t.Fatalf("decision evaluated_at is %s, want the FACT's as_of %s", evAt, lastFill)
+	}
+}
