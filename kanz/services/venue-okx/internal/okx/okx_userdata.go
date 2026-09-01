@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"time"
 
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
@@ -21,7 +20,6 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -67,6 +65,14 @@ type okxOrdersMsg struct {
 // analog of the Binance user-data ingester. fill_id is deterministic
 // (instId-tradeId), identical to the OKX synchronous venue path, so downstream
 // folds dedup the two.
+//
+// THAT LAST SENTENCE WAS UNTRUE FOR AS LONG AS IT STOOD HERE, AND IT COST #923.
+// The synchronous path did not mint "<instId>-<tradeId>" — it synthesized ONE
+// CUMULATIVE fill per order named "<instId>-<ordId>", a different OKX identifier
+// space, so the same execution reached the order aggregate and the position book
+// under two names and neither could dedup it. OKXVenue.fills now builds one fill
+// per trade from /trade/fills-history and mints the id below, so the two paths
+// agree by construction rather than by claim.
 type OKXUserDataIngester struct {
 	stream UserDataStream
 	// orders is the adapter's own order view, READ AND WRITTEN (#904). Read to
@@ -140,7 +146,7 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		if !lok {
 			return fmt.Errorf("okx: order %s leaves quantity is not representable as a Decimal", orderID)
 		}
-		feeMoney, feeOK := okxWSFee(d.FillFee, d.FillFeeCcy)
+		feeMoney, feeOK := okxFee(d.FillFee, d.FillFeeCcy)
 		if !feeOK {
 			return fmt.Errorf("okx: order %s fee %q %s is not representable as a Decimal",
 				orderID, d.FillFee, d.FillFeeCcy)
@@ -199,27 +205,6 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 	return nil
 }
 
-// okxWSFee reads the fee off a user-data fill. nil Money means NO FEE, so
-// ok=false is a separate answer for "there is a fee and it could not be read"
-// (#94) — collapsing them would silently drop a real cost.
-func okxWSFee(fee, ccy string) (*commonpb.Money, bool) {
-	if fee == "" || fee == "0" {
-		return nil, true
-	}
-	amt, ok := ParseDec(fee)
-	if !ok {
-		return nil, false
-	}
-	if r := dec.FromProto(amt); r.Sign() < 0 {
-		neg, nok := dec.ToProtoScaled(r.Neg(r))
-		if !nok {
-			return nil, false
-		}
-		amt = neg
-	}
-	return &commonpb.Money{Amount: amt, CurrencyCode: ccy}, true
-}
-
 func okxStateToProto(s string) orderpb.OrderStatus {
 	switch s {
 	case "live":
@@ -235,10 +220,18 @@ func okxStateToProto(s string) orderpb.OrderStatus {
 	}
 }
 
-func uTime(ms string) time.Time {
+func uTime(ms string) time.Time { return okxMillis(ms, time.Now) }
+
+// okxMillis reads an OKX millisecond epoch string. fallback supplies the instant
+// when OKX sent nothing this connector can read — the venue's own clock is
+// always preferred, because a fill adopted on the RECOVERY path is timestamped
+// hours after it traded otherwise, in every execution-quality measurement that
+// reads it. Injectable rather than time.Now so the connector's clock seam
+// reaches here too.
+func okxMillis(ms string, fallback func() time.Time) time.Time {
 	n, err := strconv.ParseInt(ms, 10, 64)
-	if err != nil {
-		return time.Now().UTC()
+	if err != nil || n <= 0 {
+		return fallback().UTC()
 	}
 	return time.UnixMilli(n).UTC()
 }
