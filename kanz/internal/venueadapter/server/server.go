@@ -190,10 +190,42 @@ func (s *Server) Execute(ctx context.Context, req *venuepb.ExecuteRequest) (*ven
 	if err := s.refuseFinished(ctx, st.GetOrderId()); err != nil {
 		return nil, err
 	}
-	if err := s.view.Record(ctx, st); err != nil {
-		// Not a soft failure. Working an order we have no record of leaves its
-		// fills unenrichable and invisible to the reconciler — better to refuse it
-		// and let the OMS see the error than to trade blind.
+	// AND THE RECORD MERGES ONTO THE VIEW RATHER THAN REPLACING IT (#944).
+	//
+	// The guard above refuses a TERMINAL prior. It returns nil for every other
+	// one, so a re-dispatch of an order the view holds PARTIALLY_FILLED passed it
+	// and the plain Store.Record that used to be on this line wrote the OMS's
+	// OrderState over the venue's own filled_quantity and leaves_quantity. The
+	// OMS's copy is behind the venue BY CONSTRUCTION here: this adapter learns of
+	// a fill on the exchange's websocket and the OMS learns of it from this
+	// adapter, so the state arriving on an ExecuteRequest cannot be fresher than
+	// the one already in the view. orderview.Dispatch keeps the five fields the
+	// exchange is the authority on and takes the OMS's terms, which is the same
+	// rule recordStatus follows on the cancel path — one rule for the view, not
+	// two — through the same atomic read-decide-write (#934).
+	//
+	// BOUNDED HONESTLY, BECAUSE IT WAS NOT A LOST FILL. The status the old write
+	// left behind was the OMS's ROUTED, which is not terminal, so Open kept
+	// returning the order and the healing watchdog re-queried the exchange and
+	// healed the quantities next pass; the fill FACTs are built from the report,
+	// never from this view. What did not self-correct is venue_orders, which is
+	// never pruned: until that pass this adapter's answer to "what did the venue
+	// report filled" was the OMS's stale guess, and Seam.Lookup hands it to the
+	// user-data ingester enriching any execution report arriving in the window.
+	//
+	// IT COSTS ONE MORE READ OF THE VIEW than the upsert did, on the order path,
+	// because refuseFinished's Get and this one are still two operations. That is
+	// a check-then-act: a fill landing between them leaves a terminal order the
+	// guard has already waved through, and the placement goes out. The RECORD
+	// survives it — the merge carries the venue's verdict forward rather than
+	// writing ROUTED over it — so what remains is #914's window, not this one.
+	// Folding the two reads into this single Update is the repair, and #947
+	// carries it.
+	if err := orderview.Dispatch(ctx, s.view, st); err != nil {
+		// Not a soft failure, and that includes orderview.ErrContended: working an
+		// order we have no record of leaves its fills unenrichable and invisible to
+		// the reconciler — better to refuse it and let the OMS see the error than
+		// to trade blind.
 		s.logger.Error("venue: could not record order before working it", "mic", s.venue.MIC(), "order_id", st.GetOrderId(), "err", err)
 		return nil, status.Errorf(codes.Internal, "venue: record order %s: %v", st.GetOrderId(), err)
 	}
