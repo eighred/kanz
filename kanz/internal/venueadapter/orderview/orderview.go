@@ -384,15 +384,21 @@ var ErrTerminalNotReopened = errors.New("orderview: refusing to reopen a termina
 // CANCELLED is venue truth about a trade that happened, and Memory keeps the
 // FIRST terminal sighting as the retention clock so this cannot refresh it.
 //
-// CONCURRENCY, STATED RATHER THAN IMPLIED. This is a read-modify-write across
-// two Store calls and is NOT atomic; only the individual calls are. The single
-// writer of fill progress is one ingester goroutine, and the other two writers
-// overwrite unconditionally with something they already know (Execute records
-// the OMS's state, recordStatus records CANCELLED), so a lost update here costs
-// at most one pass of staleness that the reconciler then heals. It cannot
-// fabricate a status: every value written came from a venue report. -race does
-// not run on the usual Windows box (no cgo), so CI is the detector for this
-// path.
+// CONCURRENCY, STATED RATHER THAN IMPLIED, AND THE PREMISE HAS ALREADY MOVED
+// ONCE. This is a read-modify-write across two Store calls and is NOT atomic;
+// only the individual calls are. The single writer of fill progress is one
+// ingester goroutine. The other two writers no longer overwrite unconditionally
+// the way this paragraph used to say they did: Execute refuses outright when it
+// finds a terminal order (#914), and Server.recordStatus keeps a terminal
+// verdict and otherwise merges onto what it read (#921). So a lost update is no
+// longer a certainty on the cancel path — it is the width of one Get-to-Record
+// window, in which a confirmed cancel can still land on a pre-fill read and
+// write CANCELLED over a FILLED this call had just established. Both are
+// terminal, so Open and the eviction clock are unaffected and only the recorded
+// verdict is; closing that window needs a conditional write neither backend has,
+// which is #934. It cannot fabricate a status: every value written came from a
+// venue report. -race does not run on the usual Windows box (no cgo), so CI is
+// the detector for this path.
 func Progress(ctx context.Context, store Store, reported *orderpb.OrderState) error {
 	id := reported.GetOrderId()
 	if id == "" {
