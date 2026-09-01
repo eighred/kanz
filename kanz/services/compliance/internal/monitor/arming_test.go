@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,6 +42,7 @@ import (
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/platform/subject"
+	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/compliance/internal/monitor"
 )
@@ -361,6 +363,206 @@ func TestAMonitorReplayingAnOldFillFindsTheMandateInForce(t *testing.T) {
 	}
 	// The evaluation is stamped with the OBSERVATION, not with the clock that
 	// resolved the mandate — the attribution half of #917.
+	if evAt := got.GetEvaluatedAt().AsTime(); !evAt.Equal(lastFill) {
+		t.Fatalf("decision evaluated_at is %s, want the FACT's as_of %s", evAt, lastFill)
+	}
+}
+
+// refMaster is a refdata.Source over a fixed set of golden records — the one
+// seam refdata.Cache needs faked. The cache, its as-of rule and the compliance
+// projection over it are the REAL ones the composition root wires
+// (services/compliance/cmd/compliance, refCache.Compliance).
+type refMaster map[string]refdata.Record
+
+func (m refMaster) Fetch(_ context.Context, instrumentID string) (refdata.Record, bool, error) {
+	rec, ok := m[instrumentID]
+	if !ok {
+		return refdata.Record{}, false, nil
+	}
+	return rec, true, nil
+}
+
+// armedRefCache builds the production classifier over master and primes it, so
+// the cache is warm exactly as a running pod's is. The cache is demand-driven:
+// an instrument nothing has asked about is not resident, and would refuse for a
+// reason that is not the one under test.
+func armedRefCache(ctx context.Context, t *testing.T, master refMaster) comp.Classifier {
+	t.Helper()
+	cache, err := refdata.NewCache(master, refdata.Options{})
+	if err != nil {
+		t.Fatalf("refdata.NewCache: %v", err)
+	}
+	cl := cache.Compliance()
+	for id := range master {
+		_, _ = cl.Classify(ctx, id, time.Now().UTC()) // records the want
+	}
+	if _, err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("refdata.Refresh: %v", err)
+	}
+	for id := range master {
+		if _, ok := cl.Classify(ctx, id, time.Now().UTC()); !ok {
+			t.Fatalf("the cache did not arm %s, so this test would prove nothing about the as-of rule", id)
+		}
+	}
+	return cl
+}
+
+// TestAMonitorReplayingAnOldFillReadsCurrentReferenceData pins #930 against the
+// REAL spine and the REAL refdata.Cache, because the defect lives at the join
+// between the replayed FACT's as_of and the cache's as-of rule.
+//
+// The fund's last fill is a MONTH OLD; its reference record was refreshed an
+// hour ago, which is the ordinary state of a security master beside a fund that
+// is not trading. refdata.Cache holds ONE snapshot per instrument and REFUSES a
+// record whose own as_of is after the question's, so a classifier asked at the
+// replayed FACT's as_of resolved NOTHING — and comp.unresolvedDimension turns
+// that into a violation. A SECTOR cap therefore reported a breach whose reason
+// was "the dimension cannot be verified" rather than the cap it names, on every
+// boot, and AUTO-01 halts and escalates on that FACT.
+//
+// THE ASSERTION IS ON CONTENT, NOT ON A COUNT, and that is load-bearing twice
+// over. The POSITION stream is persistent with 24h retention, so a test counting
+// events passes once and fails forever after. And under the defect this book
+// breached TOO — a count of one would have been green before and after the fix.
+// What separates them is WHICH violation: the cap firing on a sector the
+// classifier resolved, or the refusal that says it could not read one.
+func TestAMonitorReplayingAnOldFillReadsCurrentReferenceData(t *testing.T) {
+	url := os.Getenv("TEST_NATS_URL")
+	if url == "" {
+		t.Skip("set TEST_NATS_URL to replay a backdated position FACT against real reference data")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	admin, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	js, err := jetstream.New(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bustest.EnsureSubjects(t, ctx, js, "POSITION_930_"+suffix, []string{subject.PositionAll})
+
+	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "position-930"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	producer, err := bus.NewProducer(client, bus.ProducerConfig{
+		Source: "oms", ProducerVersion: "it", Tenant: "acme",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := bus.NewConsumer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// UNIQUE per run: the POSITION stream is compacted and PERSISTENT, so a reused
+	// id would let a previous run's holdings arm this one.
+	portfolio := "pf-930-" + suffix
+	held := "TECH-" + suffix
+
+	// THE FILL IS A MONTH OLD. THE REFERENCE RECORD IS AN HOUR OLD. That gap is
+	// the whole defect: the record post-dates the question the FACT's as_of asks.
+	lastFill := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	classifier := armedRefCache(ctx, t, refMaster{held: {
+		InstrumentID: held,
+		AssetClass:   "EQUITY",
+		Sector:       refdata.Sector{Taxonomy: "GICS", Code: "45", Name: "Information Technology"},
+		IssuerID:     "ISS-" + suffix,
+		AsOf:         time.Now().UTC().Add(-time.Hour),
+	}})
+
+	st := &domainpb.PositionState{
+		PortfolioId:  portfolio,
+		InstrumentId: held,
+		Quantity:     dec.ToProto(ratOf(2)),
+		AveragePrice: dec.ToProto(ratOf(100)),
+		MarketValue:  &commonpb.Money{Amount: dec.ToProto(ratOf(200)), CurrencyCode: "USD"},
+		AsOf:         timestamppb.New(lastFill),
+	}
+	if err := producer.Publish(ctx, bus.Event{
+		Subject:          subject.PositionFor("acme", portfolio, held),
+		EventType:        subject.PositionChanged,
+		EventClass:       envelopepb.EventClass_EVENT_CLASS_FACT,
+		SchemaVersion:    1,
+		Domain:           "risk",
+		EventTime:        lastFill,
+		PartitionKey:     portfolio,
+		PayloadSchemaRef: "domain.v1.PositionState:1",
+		Payload:          st,
+	}); err != nil {
+		t.Fatalf("publish the old fill: %v", err)
+	}
+
+	// The cap names the sector the fund is WHOLLY in, so a monitor that can read
+	// the classification breaches on the cap itself — which is the observable that
+	// tells "the sector was resolved" from "the sector could not be read". The
+	// monitor records only breaches, so this is how the evaluation is made visible.
+	mandate := &compliancepb.Mandate{
+		MandateId:   "m-" + portfolio,
+		TenantId:    "acme",
+		PortfolioId: portfolio,
+		Version:     1,
+		EffectiveAt: timestamppb.New(time.Now().UTC().Add(-time.Hour)),
+		Rules: []*compliancepb.Rule{{
+			RuleId: "sector-cap",
+			Type:   compliancepb.RuleType_RULE_TYPE_CONCENTRATION,
+			Params: &compliancepb.Rule_Concentration{Concentration: &compliancepb.ConcentrationLimit{
+				Dimension: compliancepb.Dimension_DIMENSION_SECTOR,
+				Bucket:    "GICS:45",
+				MaxWeight: &commonpb.Decimal{Coefficient: 10, Exponent: -2}, // 10%
+			}},
+		}},
+	}
+
+	rec := &portfolioRecorder{portfolio: portfolio}
+	mon := monitor.NewMonitor(comp.NewEngine(nil), oneMandate{mandate}, classifier, nil, rec, nil)
+	subCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	go func() {
+		_ = consumer.SubscribeBroadcast(subCtx, subject.PositionAll, mon.Handle)
+	}()
+
+	deadline := time.Now().Add(20 * time.Second)
+	var got *compliancepb.ComplianceResult
+	for time.Now().Before(deadline) {
+		if got = rec.first(); got != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got == nil {
+		t.Fatal("the monitor recorded no decision for a portfolio 100% in a sector capped at 10%")
+	}
+	var fired *compliancepb.Violation
+	for _, v := range got.GetViolations() {
+		if strings.Contains(v.GetMessage(), "cannot be verified") {
+			t.Fatalf("the SECTOR dimension was REFUSED rather than read: %q, evidence %v. The "+
+				"classifier was asked at the replayed FACT's as_of (%s) instead of at the monitor's "+
+				"clock, and the reference record is an hour old — so a fund that is not breaching "+
+				"its sector cap raises a breach FACT on every boot",
+				v.GetMessage(), v.GetEvidence(), lastFill)
+		}
+		if v.GetMessage() == "concentration exceeds limit" {
+			fired = v
+		}
+	}
+	if fired == nil {
+		t.Fatalf("no concentration violation on a book 100%% in a capped sector: status=%v", got.GetStatus())
+	}
+	if b := fired.GetEvidence()["bucket"]; b != "GICS:45" {
+		t.Fatalf("the violation names bucket %q, want GICS:45 — the bucket is what proves the "+
+			"classifier RESOLVED the holding rather than dropping it into the empty key", b)
+	}
+	// The attribution half of #917, unmoved: only the LOOKUPS ask the monitor's
+	// clock; the evaluation is still stamped with the observation.
 	if evAt := got.GetEvaluatedAt().AsTime(); !evAt.Equal(lastFill) {
 		t.Fatalf("decision evaluated_at is %s, want the FACT's as_of %s", evAt, lastFill)
 	}
