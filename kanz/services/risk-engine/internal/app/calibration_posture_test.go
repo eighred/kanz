@@ -140,3 +140,86 @@ func TestCalibrationPosture_AllScheduledIsNotAWarning(t *testing.T) {
 		t.Errorf("warned while every calibration was running; logged:\n%s", logs.b.String())
 	}
 }
+
+// THE REASON BELONGS TO THE KIND, NOT TO THE LOG LINE (#912).
+//
+// This log carried ONE shared "why" for every idle calibration, and it named the
+// vol/credit gap: "no live quote source is configured for them (#203 provider,
+// #345 vol terms join)". In the state this estate is actually in — all three
+// idle — that sentence sent an operator asking where their discount curve went
+// to two issues about implied vol, and said nothing about the one thing that
+// would answer them: nothing quotes a rate instrument here, so
+// RISK_ENGINE_CALIBRATION_RATES has no value to hold and no manifest sets it.
+//
+// A reason an operator cannot act on costs the same as no reason at all, and a
+// reason pointing at the wrong issue costs more — it spends their time before it
+// fails them.
+func TestCalibrationPosture_TheCurveReasonIsNotTheVolReason(t *testing.T) {
+	logs := &postureLogs{}
+	CalibrationPosture(prometheus.NewRegistry(), slog.New(logs), nil)
+	out := logs.b.String()
+
+	// The curve's own blocker, named where an operator will read it.
+	for _, want := range []string{"RISK_ENGINE_CALIBRATION_RATES", "#912"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the idle-curve reason does not mention %q — an operator asking why there "+
+				"is no discount curve is not told what blocks it; logged:\n%s", want, out)
+		}
+	}
+	// And the vol/credit blocker is still there, on its own kinds.
+	if !strings.Contains(out, "#203") {
+		t.Errorf("the vol/credit reason lost its issue reference; logged:\n%s", out)
+	}
+	// The failure this replaced: one sentence covering all three. If the curve's
+	// entry were dropped and only the shared vol wording remained, the assertions
+	// above would still be the only thing standing between that and a green run,
+	// so pin the shape too — three kinds idle must produce three reasons.
+	if n := strings.Count(out, ":"); n < 3 {
+		t.Errorf("expected a reason per idle kind and found %d ':' separators; logged:\n%s", n, out)
+	}
+}
+
+// A KIND NOBODY EXPLAINED IS SAID OUT LOUD, NOT SKIPPED.
+//
+// Omitting the attribute would make "idle for a stated reason" and "idle and
+// nobody wrote down why" the same line — the "nothing configured" / "checked, and
+// fine" rule, one layer in. test/arch's
+// TestEveryCalibrationKindHasAnUnscheduledReason catches this at build time; this
+// covers what the running service does if one ever gets through.
+func TestUnscheduledReason_AnUnexplainedKindSaysSo(t *testing.T) {
+	got := unscheduledReason("a-calibration-nobody-explained")
+	if !strings.Contains(got, "NO REASON RECORDED") {
+		t.Errorf("unscheduledReason for an unknown kind = %q, want it to state that no reason "+
+			"was recorded rather than returning something that reads like one", got)
+	}
+	for _, k := range CalibrationKinds {
+		if r := unscheduledReason(k); strings.Contains(r, "NO REASON RECORDED") {
+			t.Errorf("kind %q has no recorded reason: %q", k, r)
+		}
+	}
+}
+
+// EVERY IMPLEMENTED KIND HAS A REASON, AND NO REASON IS ORPHANED.
+//
+// The in-package mirror of the arch guard: this one runs in the package that owns
+// both declarations, so it fails on the same commit that introduces the drift
+// rather than on the next full test/arch run.
+func TestCalibrationUnscheduledReason_CoversExactlyTheKinds(t *testing.T) {
+	for _, k := range CalibrationKinds {
+		if _, ok := calibrationUnscheduledReason[k]; !ok {
+			t.Errorf("CalibrationKinds has %q with no entry in calibrationUnscheduledReason", k)
+		}
+	}
+	for k := range calibrationUnscheduledReason {
+		found := false
+		for _, kind := range CalibrationKinds {
+			if kind == k {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("calibrationUnscheduledReason names %q, which this platform does not "+
+				"implement — a reason that is never logged is a claim nothing checks", k)
+		}
+	}
+}

@@ -751,18 +751,18 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// intraday cadence; a failed calibration deny-on-garbages (prior curve keeps
 	// serving). Auxiliary to core risk ingest — a market-subscription failure
 	// degrades calibration (no fresh curve), it does not bring the engine down.
-	// WHICH CALIBRATIONS ARE ACTUALLY RUNNING (#113).
+	// WHICH CALIBRATIONS ARE ACTUALLY RUNNING (#113, sized correctly by #912).
 	//
-	// This service implements three — curve, volsurface and credit — and
-	// schedules at most ONE. "calibration scheduler enabled" reads as though
-	// calibration is on; it says nothing about the two that are built, tested and
-	// idle, and a surface nobody refreshes prices a position exactly like a fresh
-	// one.
+	// This service implements three — curve, volsurface and credit — and schedules
+	// at most ONE. IN THIS REPOSITORY IT SCHEDULES ZERO: the branch below needs
+	// both RISK_ENGINE_CALIBRATION_INTERVAL and RISK_ENGINE_CALIBRATION_RATES and
+	// no manifest sets either, so startCalibration runs in no environment.
+	// app.CalibrationPosture carries the evidence and the per-kind reason.
 	//
 	// STATED HERE RATHER THAN INSIDE startCalibration, because the case that
-	// matters most is the one where startCalibration is never called at all: with
-	// calibration disabled the old code said nothing whatsoever, so "no curve
-	// either" was indistinguishable from a healthy service.
+	// matters most is the one where startCalibration is never called at all —
+	// today, every case: with calibration disabled the old code said nothing
+	// whatsoever, so "no curve either" was indistinguishable from a healthy one.
 	scheduledCalibrations := map[string]string{}
 	if cfg.CalibrationInterval > 0 && cfg.CalibrationRates != "" {
 		if err := startCalibration(ctx, cfg, client, busMetrics, logger, obs.Registry, curveStore); err != nil {
