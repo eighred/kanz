@@ -1308,6 +1308,91 @@ tests:
         alertname: AuditChainVerificationFailing
         exp_alerts: []
 
+
+  # ===========================================================================
+  # OMSPriceSpineNeverFolded — the fold that never held anything (#955).
+  # ===========================================================================
+  # THE ESTATE THIS RULE WAS WRITTEN FOR. A tenant-dedicated OMS lands in its own
+  # NATS account. That account granted it a SUBSCRIBE on market.*.trade and
+  # market.*.quote, contained no market producer and imported none, so the pod
+  # authenticated, reported Ready, subscribed to both subjects and folded NOTHING
+  # for the life of the deployment. held and live both sit at zero, which is the
+  # one reading OMSPriceFeedStalled (needs held > 0) and OMSQuoteCoverageAbsent
+  # (needs mark live > 0) are both structurally unable to fire on.
+  - interval: 1m
+    name: an OMS whose price spine never delivered a single mark
+    input_series:
+      - series: 'kanz_oms_mark_instruments_held{namespace="kanz-services", pod="oms-acme-0"}'
+        values: '0x90'
+      - series: 'kanz_oms_mark_instruments_live{namespace="kanz-services", pod="oms-acme-0"}'
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: OMSPriceSpineNeverFolded
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              namespace: kanz-services
+              pod: oms-acme-0
+            exp_annotations:
+              summary: "OMS oms-acme-0 has never folded a single reference mark"
+              description: "This replica's mark fold has held nothing at all for an hour — not a live mark, not an expired one. That is neither a stalled feed (OMSPriceFeedStalled needs a mark to have existed first) nor a warm-up. The pre-trade gate cannot value an order without a mark, so every MARKET and STOP order this pod receives is refused PRICE_UNAVAILABLE and nothing it accepts is stamped with an arrival price. Check the NATS ACCOUNT this pod authenticates into before checking the feed: a per-tenant OMS reaches the price spine through an import from __system__ (infra/nats/tenancy.yaml), and a missing import is an error on neither side — the subscription succeeds and delivers nothing forever. Then check OMS_PRICE_SUBJECTS, and that market-data or market-ingest is publishing at all."
+
+  # A COLD POD MUST NOT PAGE, AND `for: 1h` IS THE ONLY THING STOPPING IT. The
+  # fold starts EMPTY and warms as the spine delivers, so held is legitimately
+  # zero for the first ticks of every pod's life. This pod is dark for eight
+  # minutes and then folds; at 30m it must be silent and it must STAY silent.
+  # Asserted at two times because a `for:` checked from the firing side only is
+  # half-checked.
+  - interval: 1m
+    name: a cold pod that warms within the grace window
+    input_series:
+      - series: 'kanz_oms_mark_instruments_held{namespace="kanz-services", pod="oms-0"}'
+        values: '0x8 120x82'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OMSPriceSpineNeverFolded
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: OMSPriceSpineNeverFolded
+        exp_alerts: []
+
+  # A STALLED FEED IS THE OTHER RULE'S, NOT THIS ONE'S. held stays at 120 while
+  # every mark ages out, so live falls to zero: OMSPriceFeedStalled owns that and
+  # this must not double-page on it. Stated because a rule keyed on held would
+  # look equally correct if it had been written over live by mistake.
+  - interval: 1m
+    name: a feed that ran and stopped, which this rule must leave alone
+    input_series:
+      - series: 'kanz_oms_mark_instruments_held{namespace="kanz-services", pod="oms-0"}'
+        values: '120x90'
+      - series: 'kanz_oms_mark_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '120x5 0x85'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: OMSPriceSpineNeverFolded
+        exp_alerts: []
+
+  # THE OMITTED-SERIES CASE, EXECUTED RATHER THAN ASSERTED IN A COMMENT. A
+  # promtool harness supplies its own input, so proving a rule fires here does not
+  # prove the series exists in production: an `== 0` arm over a metric that is
+  # ABSENT rather than zero is silent in exactly the state it detects, which is
+  # #62's defect. kanz_oms_mark_instruments_held is a GaugeFunc registered
+  # unconditionally by cmd/oms's registerMarkCoverageGauges, so a pod that folds
+  # nothing still exports it at zero — and cmd/oms owns that property, not this
+  # file. This case pins the dependency: with the gauge missing and only its
+  # sibling present, the rule cannot fire at all.
+  - interval: 1m
+    name: the held gauge absent rather than zero, which this rule cannot see
+    input_series:
+      - series: 'kanz_oms_mark_instruments_live{namespace="kanz-services", pod="oms-0"}'
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: OMSPriceSpineNeverFolded
+        exp_alerts: []
+
   # ===========================================================================
   # OMSQuoteCoverageAbsent — the price spine carries prices and no quotes (#875).
   # ===========================================================================

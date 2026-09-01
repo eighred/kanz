@@ -87,6 +87,14 @@ TENANT_OMS_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/oms-acme"
 # this one, and the platform tenant's own order must reach this one and not
 # oms-acme. One subscriber can only ever show delivery.
 SYSTEM_OMS_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/oms"
+# A SIXTH identity, for the price spine's half of the bridge (#955). market-ingest
+# is a __system__ workload and it is the ONLY minted identity here that may
+# publish a market subject: tenancy.yaml grants it market.crypto.quote and its
+# siblings, and grants no market publish to any tenant user at all. That
+# asymmetry is the property under test — a price crosses INTO a tenant account
+# and nothing a tenant does crosses back out along the same pair — so the
+# publishing side has to be the real producer's SVID rather than a convenient one.
+MARKET_INGEST_ID="spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/market-ingest"
 
 # Repo root, so this runs from anywhere.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -141,6 +149,7 @@ mint bootstrap "$BOOTSTRAP_ID"
 mint gateway "$GATEWAY_ID"
 mint tenantoms "$TENANT_OMS_ID"
 mint systemoms "$SYSTEM_OMS_ID"
+mint marketingest "$MARKET_INGEST_ID"
 # spiffe-helper writes the broker's SVID under these exact names (see the
 # nats-spiffe-helper ConfigMap); nats.conf reads them by path.
 cp server.pem svid.pem && cp server.key svid_key.pem

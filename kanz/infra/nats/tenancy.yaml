@@ -95,6 +95,49 @@ data:
           # a total outage for that tenant. The export and the per-account import
           # below are both load-bearing.
           { stream: "platform.mode.changed" }
+
+          # THE PUBLIC PRICE SPINE (#955), AND THE SECOND THING ON THIS LIST
+          # THAT IS NOT TENANT-PREFIXED — for the same reason the halt above is
+          # not. There is ONE book. Every fund on the estate values BTC-USDT off
+          # the same last trade and the same top of book, so a per-tenant copy
+          # would not be isolation, it would be two answers to a question that
+          # has one — and a mark is what values an order at admission, an
+          # exposure at recompute and a position at close. Two tenants
+          # disagreeing about a price is a control failure, not a privacy
+          # property.
+          #
+          # A PRICE IS NOT TENANT DATA, AND THAT IS THE ARGUMENT FOR CROSSING THE
+          # BOUNDARY WITH IT. Tenant isolation here covers portfolios, accounts,
+          # orders, positions, strategies, risk state, mandates, credentials,
+          # audit and AI capabilities — everything that says what a tenant DID.
+          # market.*.trade and market.*.quote say what the MARKET did: they carry
+          # no order, no size and no holding that belongs to anybody, and
+          # pkg/alpha stamps MarketDataTenant (__system__) on them precisely
+          # because the observation has no tenant. The export is one-directional
+          # — it offers the platform's public price spine to a tenant account —
+          # and no tenant workload holds a market.* PUBLISH grant, so nothing a
+          # tenant does can travel back along it.
+          #
+          # WITHOUT IT A TENANT-DEDICATED OMS CANNOT TRADE AT MARKET AT ALL. Its
+          # OMS_PRICE_SUBJECTS default is internal/marketdata/mark.DefaultSubjects
+          # — these two subjects — and no workload inside a tenant account
+          # publishes a market subject: market-data and market-ingest are
+          # __system__ services. The tenant's own MARKET stream exists and stays
+          # EMPTY, so the fold holds nothing, every MARKET and STOP order is
+          # refused PRICE_UNAVAILABLE, no arrival price is stamped on any order,
+          # and both coverage gauges sit at zero — the one state
+          # OMSQuoteCoverageAbsent is structurally unable to fire in, because it
+          # requires marks > 0 to tell a dead feed from a cold pod.
+          # OMSPriceSpineNeverFolded (operational.rules.yaml) is the signal that
+          # covers that hole; this export is the repair.
+          #
+          # NARROWED TO THE PRICE SPINE, not `market.>`. The domain also carries
+          # book snapshots, bars, ingestion-coverage FACTs and the volume profile,
+          # and a tenant folding those is a separate decision with its own cost —
+          # see #959. test/arch/tenant_bridge_test.go derives this list from
+          # mark.DefaultSubjects, so the export and the fold cannot drift.
+          { stream: "market.*.trade" }
+          { stream: "market.*.quote" }
         ]
 
         # THE RETURN PATH'S PLATFORM HALF (#668). The tenant account exports its
@@ -1631,6 +1674,40 @@ data:
           # every order and says so — which is fail-closed working, and still a
           # total outage for this tenant. The line is not optional.
           { stream: { account: __system__, subject: "platform.mode.changed" } }
+
+          # THE PUBLIC PRICE SPINE (#955). No `to:` — the subject is identical on
+          # both sides, because there is one book and every account names it the
+          # same way. See the matching export in __system__ for why a price
+          # crosses this boundary when an order does not.
+          #
+          # WHAT IT REPAIRS. This account granted oms-acme a SUBSCRIBE on
+          # market.*.trade and market.*.quote and gave it nothing to subscribe
+          # TO: no user in here publishes a market subject, and there was no
+          # import. A denied grant would at least error; a granted subscription
+          # over an empty subject space does not. The pod authenticated, reported
+          # Ready, logged "oms subscribing to the price spine (broadcast)" for
+          # both subjects, and folded nothing — for as long as the deployment
+          # lived. Every MARKET and STOP order refused PRICE_UNAVAILABLE, no
+          # arrival price on any order, and the coverage gauges pinned at zero,
+          # which is the one reading OMSQuoteCoverageAbsent cannot fire on.
+          #
+          # This account's own MARKET stream (`market.>`, created by running
+          # nats-bootstrap on this account — see README "Per-tenant streams")
+          # captures the imported events, which is what lets this tenant's OMS
+          # bind its ephemeral JetStream consumer to them — the same mechanism
+          # the halt import above relies on, and the reason neither needs a new
+          # stream. It also means these events now count against this account's
+          # `max_file` quota for the MARKET stream's 24h retention.
+          #
+          # NO CYCLE. This account's exports are its own FACT spaces (order
+          # FACTs, execution.>, risk.*, accounting.>, compliance.*, settlement.>,
+          # wealth.>, alternatives.>, dlq.>); none of them overlaps where these
+          # land, so nats-server has nothing to reject. That is checked
+          # deterministically by test/arch/TestNoTenantExportsWhatItImports
+          # rather than left to the broker, whose own cycle check fires roughly
+          # 1 run in 8.
+          { stream: { account: __system__, subject: "market.*.trade" } }
+          { stream: { account: __system__, subject: "market.*.quote" } }
         ]
 
         users: [
