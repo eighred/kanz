@@ -166,6 +166,29 @@ spec:
             # anonymous request, so nothing upstream limits /login.
             - { name: IDENTITY_LOGIN_BURST, value: "10" }
             - { name: IDENTITY_LOGIN_REFILL, value: "6s" }
+            # WHICH PEER MAY SET X-Kanz-Client-IP (#888), and it is deliberately
+            # NOT FILLED IN.
+            #
+            # That header carries the browser's address, forwarded by the web-bff,
+            # and it is what the PER-SOURCE half of the login bound above keys on.
+            # It used to be honoured from anybody, on the premise that a
+            # NetworkPolicy made the BFF the only caller able to reach :8087 —
+            # network-policies.yaml admits four peers to this port and always did,
+            # so that premise was never true for this service.
+            #
+            # UNSET, EVERY ATTEMPT IS ATTRIBUTED TO ITS TCP PEER. Behind the BFF
+            # that is one address for everyone, so the per-source half becomes one
+            # bucket for the estate: less precise, and still a bound. The
+            # per-subject half is unaffected either way, and the process says which
+            # state it is in at startup rather than leaving the two identical.
+            #
+            # A WRONG VALUE IS WORSE THAN NONE, which is why none is guessed here:
+            # the trusted peer is the BFF's POD CIDR, cluster-specific, and naming
+            # a range wider than the BFF lets anything inside it choose its own
+            # rate-limit bucket per attempt. Fill it in per cluster from the
+            # cluster's actual pod CIDR, or leave it out.
+            #
+            #   IDENTITY_TRUSTED_PROXIES   the web-bff's pod CIDR, comma-separated
             # AUTHENTICATED PROVISIONING (#364). Naming the role turns on
             # POST/GET /invites; leaving it unset means the ONLY way to create an
             # account is cmd/kanz-invite, which needs the database credential and

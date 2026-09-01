@@ -37,11 +37,11 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/eighred/kanz/internal/clientip"
 	"github.com/eighred/kanz/internal/identity"
 	"github.com/eighred/kanz/internal/revocation"
 )
@@ -107,6 +107,21 @@ type Server struct {
 	// path spends Argon2id's full cost, and that difference enumerates the
 	// platform's users — which on this system is a fund's traders and operators.
 	decoyHash identity.Hash
+
+	// clientIP resolves the address the per-source bound is charged to (#888).
+	// Nil trusts nothing and answers the TCP peer, which is the safe default and
+	// the only behaviour available to a deployment that named no trusted peer.
+	clientIP *clientip.Resolver
+}
+
+// WithClientIP makes this server honour ClientIPHeader from the named peers.
+//
+// WITHOUT IT THE HEADER IS IGNORED ENTIRELY and every attempt is attributed to
+// its immediate peer. That is a loss of precision — behind the BFF the whole
+// estate shares one per-source bucket — and never a loss of the bound itself,
+// which is the direction a misconfiguration must fail in.
+func WithClientIP(r *clientip.Resolver) Option {
+	return func(s *Server) { s.clientIP = r }
 }
 
 // New builds the server. Every dependency is required: a nil limiter in
@@ -361,11 +376,38 @@ func (s *Server) discoveryHandler(w http.ResponseWriter, _ *http.Request) {
 // BFF reaches this service over the private network with no edge in between, so
 // reusing the vendor name would invite someone to trust it here too.
 //
-// TRUSTING IT IS SOUND FOR THE SAME REASON THE GATEWAY'S PRINCIPAL HEADERS ARE:
-// a NetworkPolicy makes the BFF the only caller that can reach this service. If
-// that ever stops holding, this header becomes forgeable and the per-source
-// bound below stops existing — which is why the subject bound is checked
-// independently rather than being folded into one composite key.
+// # IT IS NOT TRUSTED UNCONDITIONALLY, AND THE COMMENT THAT SAID IT COULD BE WAS WRONG (#888)
+//
+// The sentence that stood here claimed the same premise every other upstream
+// relies on — "a NetworkPolicy makes the BFF the only caller that can reach this
+// service". That premise is FALSE for identity, and it was false on the day it
+// was written. infra/security/runtime/network-policies.yaml admits FOUR peers to
+// :8087: the ingress-nginx namespace, the api-gateway pod (it reads /jwks.json,
+// and without that flow the gateway verifies no token at all), the web-bff pod,
+// and the kanz-observability namespace (/metrics is on this same listener, which
+// is what #232 exists to split). None of those admissions is removable — the
+// gateway's is an authentication outage, the scrape's is the monitoring plane —
+// so the code is what had to change.
+//
+// TestIdentityServiceTrustsNoPrincipalHeaders already states the general form of
+// this: identity is the one service on the estate that cannot sit behind the
+// policy which makes a header trustworthy, so a header arriving here is a string
+// the caller typed. That reasoning never stopped at X-Kanz-Principal-*.
+//
+// # What that costs if it is ignored
+//
+// The per-source half of allowAttempt keys on this value. Honoured from any
+// peer, a caller who can reach :8087 sends a different address per attempt,
+// every attempt lands in a fresh bucket, and that half of the bound stops
+// existing — while the metrics show a wide spread of well-behaved clients. The
+// per-SUBJECT half still bounds guessing at ONE account, which is why this was a
+// weakening rather than an open oracle; the attack the source axis exists to
+// bound is credential stuffing, one guess sprayed across thousands of accounts,
+// and that is the one that came back.
+//
+// So the value is resolved through clientip.Resolver, which honours it only from
+// a peer in IDENTITY_TRUSTED_PROXIES and answers the TCP peer otherwise — the
+// same decision web-bff has made since #371 and the api-gateway since #835.
 const ClientIPHeader = "X-Kanz-Client-IP"
 
 // allowAttempt bounds an unauthenticated attempt on BOTH axes, and both must
@@ -385,23 +427,7 @@ func (s *Server) allowAttempt(r *http.Request, subject string) bool {
 	if subject != "" && !s.limiter.Allow("s:"+subject) {
 		return false
 	}
-	return s.limiter.Allow("a:" + clientIP(r))
-}
-
-// clientIP is the address an attempt is attributed to.
-//
-// The BFF's forwarded header wins when present. Without this the header the BFF
-// takes care to send would be silently ignored, every attempt would be
-// attributed to the BFF itself, and the per-source bound would be one bucket for
-// the entire estate — "limited" and "not limited" looking identical from here.
-func clientIP(r *http.Request) string {
-	if v := strings.TrimSpace(r.Header.Get(ClientIPHeader)); v != "" {
-		return v
-	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
-	}
-	return r.RemoteAddr
+	return s.limiter.Allow("a:" + s.clientIP.Resolve(r))
 }
 
 // maxBody bounds a credential request. A login body is small; anything larger is

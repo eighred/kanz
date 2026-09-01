@@ -23,6 +23,7 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
+	"github.com/eighred/kanz/internal/clientip"
 	"github.com/eighred/kanz/internal/identity"
 	"github.com/eighred/kanz/internal/revocation"
 	"github.com/eighred/kanz/pkg/auth"
@@ -104,11 +105,35 @@ func testServer(t *testing.T, st *fakeStore, lim Limiter) (*Server, *fakeMinter)
 	if lim == nil {
 		lim = &allowN{n: 100}
 	}
-	s, err := New(st, m, lim, func() any { return map[string]any{"keys": []any{}} }, "https://identity.test", quiet())
+	// THE DEFAULT SERVER TRUSTS THE PEER httptest GIVES EVERY REQUEST, so the
+	// tests below exercise the deployed shape: a forwarded address arriving from
+	// the web-bff, which is a peer this deployment named. The tests that matter
+	// most for #888 build their own server with a DIFFERENT peer, to prove the
+	// same header is ignored when it did not come from that one.
+	s, err := New(st, m, lim, func() any { return map[string]any{"keys": []any{}} }, "https://identity.test", quiet(),
+		WithClientIP(resolverTrusting(t, testPeerIP)))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return s, m
+}
+
+// testPeerIP is the RemoteAddr httptest.NewRequest stamps on every request
+// (192.0.2.1:1234, from the TEST-NET-1 range). Naming it makes the trusted-peer
+// set in these tests a deliberate value rather than a coincidence.
+const testPeerIP = "192.0.2.1"
+
+func resolverTrusting(t *testing.T, cidrs ...string) *clientip.Resolver {
+	t.Helper()
+	r, err := clientip.NewResolver(ClientIPHeader, cidrs)
+	if err != nil {
+		t.Fatalf("clientip.NewResolver(%v): %v", cidrs, err)
+	}
+	if !r.Trusts() {
+		t.Fatalf("resolver built from %v trusts nothing — the test would prove the header is "+
+			"ignored for the wrong reason", cidrs)
+	}
+	return r
 }
 
 func post(t *testing.T, s *Server, path string, body any) *httptest.ResponseRecorder {
@@ -420,6 +445,14 @@ func TestTheJWKSIsServed(t *testing.T) {
 // tests able to tell "the header is honoured" from "the peer happens to differ".
 func postFrom(t *testing.T, s *Server, path string, body any, clientIP string) *httptest.ResponseRecorder {
 	t.Helper()
+	return postFromPeer(t, s, path, body, clientIP, "")
+}
+
+// postFromPeer is postFrom with the TCP peer chosen too. The peer is what decides
+// whether the forwarded header is honoured at all (#888), so a test about
+// spoofing has to be able to move it.
+func postFromPeer(t *testing.T, s *Server, path string, body any, clientIP, remoteAddr string) *httptest.ResponseRecorder {
+	t.Helper()
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -429,6 +462,9 @@ func postFrom(t *testing.T, s *Server, path string, body any, clientIP string) *
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
 	if clientIP != "" {
 		req.Header.Set(ClientIPHeader, clientIP)
+	}
+	if remoteAddr != "" {
+		req.RemoteAddr = remoteAddr
 	}
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
@@ -498,6 +534,82 @@ func TestRedemptionIsBoundedPerSource(t *testing.T) {
 	if rr := postFrom(t, s, "/invites/redeem", redeemRequest{Token: "c", Credential: "a-valid-passphrase"}, "10.0.0.1"); rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("a second redemption from 10.0.0.1 = %d, want 429 — invite tokens would "+
 			"otherwise be guessable at line rate", rr.Code)
+	}
+}
+
+// A SPOOFED FORWARDED ADDRESS FROM AN UNTRUSTED PEER GETS NO FRESH BUCKET (#888).
+//
+// This is the property the service did NOT have. The address was read from
+// ClientIPHeader unconditionally, on the stated premise that a NetworkPolicy made
+// the web-bff the only caller able to reach :8087. It does not:
+// infra/security/runtime/network-policies.yaml admits the ingress-nginx
+// namespace, the api-gateway (for /jwks.json), the web-bff, and the
+// kanz-observability namespace (/metrics shares this listener) — four peers.
+//
+// Any one of them could send a different X-Kanz-Client-IP per attempt. Every
+// attempt would then land in a fresh bucket and the per-source half of
+// allowAttempt would stop existing, while the metrics showed a wide spread of
+// well-behaved clients. The per-subject half still bounds guessing at ONE
+// account, so what this recovers is the bound on credential STUFFING: one guess
+// sprayed across thousands of accounts.
+//
+// The server here trusts a peer that is NOT the one making these requests, so
+// the header is a string the caller typed and the resolver must ignore it.
+func TestASpoofedForwardedAddressFromAnUntrustedPeerSharesOneBucket(t *testing.T) {
+	s, err := New(&fakeStore{}, &fakeMinter{}, &allowN{n: 1},
+		func() any { return map[string]any{"keys": []any{}} }, "https://identity.test", quiet(),
+		// The BFF's address in this deployment. The attacker below is not it.
+		WithClientIP(resolverTrusting(t, "10.42.0.0/16")))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const attacker = "198.51.100.7:5555" // TEST-NET-2, outside the trusted set
+
+	if rr := postFromPeer(t, s, "/login", loginRequest{Subject: "alice", Credential: "x"},
+		"10.0.0.1", attacker); rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("the first attempt was throttled: %d", rr.Code)
+	}
+	// Same peer, a DIFFERENT claimed address, and a different subject so the
+	// per-subject axis cannot be what refuses it. Only the source axis can.
+	rr := postFromPeer(t, s, "/login", loginRequest{Subject: "bob", Credential: "x"},
+		"10.0.0.2", attacker)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("a second attempt from the same untrusted peer claiming a new address = %d, "+
+			"want 429.\n\n"+
+			"The peer %s is NOT in the trusted set, so "+ClientIPHeader+" arriving from it is a "+
+			"string the caller typed. Honouring it gives every attempt a fresh bucket and ends "+
+			"the per-source half of the credential bound — the half that stops one guess being "+
+			"sprayed across thousands of accounts. The subject axis cannot cover this: the two "+
+			"attempts name different subjects.", rr.Code, attacker)
+	}
+}
+
+// AND THE HEADER IS IGNORED ENTIRELY WHEN NO PEER IS TRUSTED (#888).
+//
+// A deployment that names no IDENTITY_TRUSTED_PROXIES gets the peer address for
+// everybody. That is a loss of PRECISION — behind the BFF the estate shares one
+// per-source bucket — and it is the direction a missing configuration must fail
+// in. The opposite default would make an unconfigured deployment an open oracle,
+// which is exactly the state this issue found.
+func TestWithNoTrustedPeerTheForwardedAddressIsIgnored(t *testing.T) {
+	s, err := New(&fakeStore{}, &fakeMinter{}, &allowN{n: 1},
+		func() any { return map[string]any{"keys": []any{}} }, "https://identity.test", quiet())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if s.clientIP.Trusts() {
+		t.Fatal("a server built with no WithClientIP option trusts a peer — the zero value must " +
+			"honour no header at all")
+	}
+
+	if rr := postFrom(t, s, "/login", loginRequest{Subject: "alice", Credential: "x"}, "10.0.0.1"); rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("the first attempt was throttled: %d", rr.Code)
+	}
+	if rr := postFrom(t, s, "/login", loginRequest{Subject: "bob", Credential: "x"}, "10.0.0.2"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("a second attempt claiming a fresh address = %d, want 429 — an unconfigured "+
+			"deployment must attribute every caller to its peer rather than to whatever it "+
+			"claims", rr.Code)
 	}
 }
 

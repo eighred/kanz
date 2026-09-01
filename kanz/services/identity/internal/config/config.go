@@ -48,6 +48,24 @@ type Config struct {
 	LoginBurst  int
 	LoginRefill time.Duration
 
+	// TrustedProxies are the peers permitted to set server.ClientIPHeader — in
+	// practice the web-bff's pod CIDR, since the BFF is the caller that turns a
+	// person's password into a token and forwards the browser's address with it.
+	//
+	// EMPTY IS THE SAFE STATE AND THE DEFAULT (#888). The credential limiter's
+	// per-source half keys on the resolved address, so honouring the header from
+	// an untrusted peer would end that half of the bound: a caller who can reach
+	// :8087 varies the value per attempt, every attempt lands in a fresh bucket,
+	// and the traffic looks like many well-behaved clients. Ignoring it merely
+	// makes the bound too strict — every login behind the BFF shares one bucket.
+	//
+	// THERE IS NO COMPANION HEADER SETTING, unlike the gateway's and the BFF's
+	// pair. The header is this service's own constant and the BFF sends exactly
+	// it, so making the name configurable would be a second answer to a question
+	// the two processes already agree on — and a deployment could then name a
+	// header nobody sends and believe it had configured something.
+	TrustedProxies []string
+
 	// OperatorRole enables AUTHENTICATED provisioning (#364) and names the role a
 	// caller must hold to create an account.
 	//
@@ -105,6 +123,7 @@ func Load() (Config, error) {
 		InviteTTL:         parseDuration(os.Getenv("IDENTITY_INVITE_TTL"), 0),
 		LoginBurst:        parseInt(os.Getenv("IDENTITY_LOGIN_BURST"), 0),
 		LoginRefill:       parseDuration(os.Getenv("IDENTITY_LOGIN_REFILL"), 0),
+		TrustedProxies:    env.SplitList(os.Getenv("IDENTITY_TRUSTED_PROXIES")),
 		OTLPEndpoint:      os.Getenv("IDENTITY_OTLP_ENDPOINT"),
 	}
 
