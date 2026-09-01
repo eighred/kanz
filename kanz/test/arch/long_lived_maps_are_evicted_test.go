@@ -76,18 +76,24 @@ import (
 //     condition nobody satisfies, or on a ticker nothing starts. Whether an
 //     evictor RUNS is a behavioural property and belongs in the owning
 //     package's tests.
-//  2. IT INSPECTS FIELDS, SO A COLLECTION INSIDE A VALUE IS INVISIBLE.
-//     MandateRegistry.byKey is map[key][]*Mandate: the KEY set is bounded by
-//     published mandates and this guard is satisfied, while the SLICE at each
-//     key grew once per mandate version and no arm here saw it (#884). That one
-//     is now bounded IN ITS OWN PACKAGE — Put prunes to the version in force
-//     plus the ones an operator has scheduled, measured by
-//     TestMandateVersionsDoNotAccumulate — and this guard did not go red when it
-//     landed, because the write is r.byKey[k] = pruned, an indexed assignment no
-//     arm below credits. The exemption's claim about the KEY set is unchanged
-//     and still the only thing it vouches for. Teaching the walk to descend into
-//     a map VALUE is #915, and it is its own batch rather than a thing to bolt
-//     on beside a repair.
+//  2. IT DESCENDS ONE LEVEL INTO A VALUE, AND STOPS THERE (#915).
+//     A collection at a map VALUE — map[K][]T, map[K]map[K2]V — is a population
+//     of its own, and the two bounds are independent: the KEY set can be
+//     perfectly bounded by published mandates while the SLICE at each key grows
+//     once per republish for the life of the pod. That was #884, and it had to
+//     be found by READING, because this walk inspected fields only and a value
+//     is not a field. Each such value is now its own default-deny entry, keyed
+//     "Type.field[]", and the shrink arm credits an INDEXED write
+//     (r.byKey[k] = pruned) and a call to a pruner in another package
+//     (pit.Put) — without both, #884's own repair stayed invisible here and its
+//     exemption stayed green over a fixed field.
+//     WHAT IS STILL INVISIBLE is the level BELOW that: map[K]map[K2][]T reports
+//     the inner map and says nothing about the slice inside it, and a collection
+//     reached through a POINTER value (map[K]*T, where T holds the collection)
+//     is not in the population at all — tv-sync's per-account orders, seenFills
+//     and execs are exactly that shape, and they are #809. Teaching the walk to
+//     follow a pointer value is #951, and it is its own batch for the same
+//     reason this one was.
 //  3. LONG-LIVED IS APPROXIMATED BY "GUARDED BY A sync MUTEX". A long-lived map
 //     reached from one goroutine only, or guarded by a channel, a RWMutex behind
 //     an embedded type, or an atomic, is not in the population at all.
@@ -116,6 +122,11 @@ type evictionScope struct {
 	// also proves receiver attribution works: it only resolves if the shrink site
 	// was tied back to its own type.
 	mustEvict string
+	// mustEvictValue is a "Type.field[]" whose collection INSIDE the value is
+	// pruned (#915). It anchors the half of the walk that a field-level check
+	// cannot reach: an indexed write is not a write to a field, so a scope with
+	// mustEvict alone stays green while the value arm reports nothing.
+	mustEvictValue string
 }
 
 var evictionScopes = []evictionScope{
@@ -139,6 +150,24 @@ var evictionScopes = []evictionScope{
 		// it predates this scope — so it proves receiver attribution here without
 		// vouching for the field #814 repaired.
 		mustEvict: "MandateRegistry.rejected",
+		// The SAME-PACKAGE pruner: Put writes r.byKey[k] = retainSelectable(...),
+		// which is neither a delete( nor a write to a field. It is the #884 repair,
+		// and this guard was green over it until #915.
+		mustEvictValue: "MandateRegistry.byKey[]",
+	},
+	{
+		// THE CROSS-PACKAGE PRUNER, which is why this scope exists at all. Fold
+		// shrinks the version list AT EACH KEY by handing it to internal/pit's Put
+		// — another package — and assigning the result back at the index. Four
+		// stores in the estate write that shape and none of them contains a
+		// delete(, so this anchor is what fails if the walk loses either the
+		// indexed write or the resolution of the pruner it calls. mustEvict beside
+		// it still pins the ordinary field-level delete on the same map.
+		dir:            "internal/volprofilefeed",
+		minFiles:       2,
+		mustFind:       []string{"Registry.series", "Registry.series[]"},
+		mustEvict:      "Registry.series",
+		mustEvictValue: "Registry.series[]",
 	},
 	{
 		// A generic receiver: proves the walk unwraps Memory[T] rather than
@@ -231,11 +260,10 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"keyed by (tenant, portfolio) and written only by Put, whose only caller is the mandate " +
 			"replay off a COMPACTED config subject. An entry exists because an operator published a " +
 			"mandate for that portfolio; nothing a trading caller sends can create one. The KEY set " +
-			"is what this guard sees and it is all this entry vouches for. The []*Mandate behind " +
-			"each key is a SEPARATE bound no arm here can reach (limitation 2 above): it grew once " +
-			"per republish until #884, and Put now prunes it to the version in force plus the " +
-			"scheduled ones — proven by the owning package's tests, not by anything in this " +
-			"file.", ""},
+			"is what THIS entry vouches for and nothing more. The []*Mandate behind each key is a " +
+			"SEPARATE bound with its own entry — MandateRegistry.byKey[] — which since #915 this " +
+			"guard reaches and finds pruned by Put, rather than taking the owning package's word " +
+			"for it as the note here used to.", ""},
 	"internal/compliance: MandateRegistry.tenantsByPortfolio": {boundedByConstruction,
 		"same writer and same source as byKey — one entry per portfolio some tenant has published a " +
 			"mandate for. It exists so a missed lookup can say WHY (#243), and it cannot outgrow the " +
@@ -374,15 +402,43 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"for portfolios it computes. A LEVEL, NOT A DELTA: each fold replaces that portfolio's " +
 			"snapshot, so only a new portfolio adds a key.", ""},
 	"services/tv-sync/internal/projection: Projection.accounts": {boundedByConstruction,
-		"tenant → account_id, where the account id is the portfolio off an order FACT that already " +
-			"passed OMS entitlement — the provisioned account roster. NOTE the scope of that claim: it " +
-			"covers this OUTER map only. #809 is about the per-account collections inside it " +
-			"(orders, seenFills, execs), which live on a struct with no mutex of its own and are " +
-			"therefore outside this guard's population entirely.", ""},
+		"keyed by TENANT — the estate's onboarded tenant roster, and the outermost of three levels " +
+			"this type nests. NOTE the scope of that claim: it covers this map's own keys only. The " +
+			"account map at each value has its own entry below; the per-account collections one level " +
+			"further down (orders, seenFills, execs) are #809 and live on a struct with no mutex of " +
+			"its own, so they are outside this guard's population entirely.", ""},
 	"services/webhook-ingest/internal/ingest: PositionCache.byKey": {boundedByConstruction,
 		"keyed by fund/venue/instrument off the OMS's own compacted venue-position stream. The webhook " +
 			"caller influences the READ path only — Position() looks a key up and never creates one — " +
 			"so an alert naming an invented instrument cannot add an entry.", ""},
+
+	// ---------------------------------------------------------------------
+	// boundedByConstruction, INSIDE A MAP VALUE (#915). The key is
+	// "Type.field[]" and the claim is about what lives BEHIND each key, which is
+	// a different claim from the one the same field's outer entry makes about
+	// the key set — #884 is the case where the first was sound and the second
+	// was not.
+	// ---------------------------------------------------------------------
+	"internal/compliance: MandateRegistry.tenantsByPortfolio[]": {boundedByConstruction,
+		"the set of TENANTS that have published a mandate for one portfolio id. Put is the only " +
+			"writer and it inserts the tenant off the mandate it is folding, so this set cannot exceed " +
+			"the tenants an operator has onboarded — the same compacted-config source that bounds the " +
+			"outer key, one level down. The make(...) at a missing key is a lazy initialiser and the " +
+			"value arm deliberately refuses to read one as an evictor.", ""},
+	"services/lineage/internal/graph: Memory.upstream[]": {boundedByConstruction,
+		"the set of DIRECT UPSTREAM datasets of one dataset — an edge list over the same schema " +
+			"taxonomy that bounds the outer key, so it is bounded by the estate's dataset count rather " +
+			"than by its event count. Observe adds an edge only between two datasets already resolved " +
+			"from the envelope's domain and schema ref; an event cannot mint a dataset id of its own. " +
+			"The type's own comment has said datasets and upstream are not evicted, and why, since " +
+			"#244.", ""},
+	"services/tv-sync/internal/projection: Projection.accounts[]": {boundedByConstruction,
+		"one entry per ACCOUNT ID within a tenant, where the account id is the portfolio off an order " +
+			"FACT that already passed OMS entitlement — the provisioned account roster, which is what " +
+			"the outer entry above used to claim on this level's behalf before the two were separable. " +
+			"A caller cannot name a portfolio it is not entitled to and reach this fold. The *account " +
+			"behind each entry holds collections that DO grow with traffic; those are #809 and are not " +
+			"in this guard's population, because account has no mutex of its own.", ""},
 
 	// ---------------------------------------------------------------------
 	// isTheStore — the collection IS an in-memory store's content. Each of
@@ -463,6 +519,29 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"WEALTH_ALLOW_EPHEMERAL_BOOK (without it the service refuses to start). Evicting drops a " +
 			"household the estate has onboarded.", ""},
 
+	// isTheStore, INSIDE A MAP VALUE (#915). In all three the outer key is an
+	// entity and the CONTENT is at the value, so the value is where the store's
+	// "evicting is data loss" argument actually applies — the outer entry above
+	// each of these was making that argument about a key set.
+	"internal/marketdata/store: Memory.byInstrument[]": {isTheStore,
+		"the observation set for one instrument, keyed by the full bitemporal identity " +
+			"(observation_time, kind, KNOWLEDGE TIME). A restatement is deliberately an additional " +
+			"entry rather than an overwrite — that is the store's contract and its Postgres sibling's " +
+			"primary key — so dropping one changes the answer to an as-of query. An exact re-put " +
+			"overwrites in place, so a replay does not grow it.", ""},
+	"services/accounting/internal/ledger: MemoryStore.journal[]": {isTheStore,
+		"the IBOR journal ENTRIES for one portfolio, in postings order, when " +
+			"ACCOUNTING_ALLOW_EPHEMERAL_LEDGER is opted into. This is the append that makes the " +
+			"journal a journal: the balances a fold reports are derived from it, and dropping the " +
+			"oldest posting silently changes the fund's book of record. Postgres.Append keeps its rows " +
+			"too. THE HONEST BOUND IS THE POSTURE, not an evictor this type could grow — one replica, " +
+			"ephemeral, and TestNoCompositionRootSilentlyFallsBackToAnInMemoryStore makes choosing it " +
+			"loud.", ""},
+	"services/alternatives/internal/fund: MemoryStore.journal[]": {isTheStore,
+		"the commitment event log for one commitment_id, opted into through " +
+			"ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL. It is the replay source a fund position is derived " +
+			"from, so the same argument and the same consequence as the ledger journal beside it.", ""},
+
 	// ---------------------------------------------------------------------
 	// deferredLeak — genuinely unbounded, enumerated rather than fixed here,
 	// each with the issue that retires it. This block is a debt register and
@@ -512,6 +591,16 @@ func TestEveryLongLivedMapHasAnEvictor(t *testing.T) {
 			"has drifted. An append-only slice under a lock is the same unbounded leak as an unevicted "+
 			"map with none of the delete( vocabulary that makes the map version greppable (#844)", got)
 	}
+	// AND THE VALUE HALF (#915). Measured 2026-09-01: 11 collections living
+	// inside a map value, all one level deep. This floor is separate from the
+	// one above on purpose — the field walk and the value walk fail
+	// independently, and a value walk that returned nothing would otherwise hide
+	// behind 102 field findings and report a clean estate.
+	if got := est.valueFields(); got < 9 {
+		t.Fatalf("found only %d collection(s) inside a map or slice VALUE estate-wide — the #915 half "+
+			"of this walk has drifted, and a bounded key set is once again vouching for whatever grows "+
+			"behind each key (#884)", got)
+	}
 
 	// NON-VACUITY 2: the anchors still resolve, per directory.
 	for _, scope := range evictionScopes {
@@ -530,6 +619,20 @@ func TestEveryLongLivedMapHasAnEvictor(t *testing.T) {
 			t.Errorf("the shrink scan did not attribute any delete(/truncation to %s in %s — that field "+
 				"has had an evictor since it was written, so receiver attribution is broken and this walk "+
 				"would report every collection as unevicted or none of them", scope.mustEvict, scope.dir)
+		}
+		if scope.mustEvictValue == "" {
+			continue
+		}
+		if _, ok := est.fields[scope.dir+": "+scope.mustEvictValue]; !ok {
+			t.Errorf("the struct scan did not find a collection inside the value of %s in %s — the "+
+				"#915 walk no longer descends into a map value there", scope.mustEvictValue, scope.dir)
+		}
+		if !est.shrunk[scope.dir+": "+scope.mustEvictValue] {
+			t.Errorf("the shrink scan attributed no prune to the collection INSIDE %s in %s — that "+
+				"value is pruned on every write, so the #915 arm that credits an indexed assignment "+
+				"(and resolves the pruner it calls) is broken. With it broken this guard demands an "+
+				"exemption for every already-correct map[K][]T in the estate, which is how a "+
+				"widening gets weakened back to nothing", scope.mustEvictValue, scope.dir)
 		}
 	}
 
@@ -659,9 +762,9 @@ func TestEveryLongLivedMapHasAnEvictor(t *testing.T) {
 			"field honestly.", orphaned)
 	}
 
-	t.Logf("estate: %d package(s), %d mutex-guarded collection field(s) (%d map, %d slice), %d shrunk, "+
-		"%d exempt", est.packages, len(est.fields), est.kindCount("map"), est.kindCount("slice"),
-		len(est.shrunk), len(mapEvictionExempt))
+	t.Logf("estate: %d package(s), %d mutex-guarded collection(s) (%d map, %d slice, %d inside a "+
+		"value), %d shrunk, %d exempt", est.packages, len(est.fields), est.kindCount("map"),
+		est.kindCount("slice"), est.valueFields(), len(est.shrunk), len(mapEvictionExempt))
 }
 
 func pkgOfKey(key string) string {
@@ -682,7 +785,27 @@ type estate struct {
 	files          map[string]int             // pkgdir → non-test files parsed
 	unattributed   []string
 	packages       int
+
+	// prunersIn and prunersBy are the #915 half: a function that can only hand
+	// back a SHORTER version of a collection it was given. Four stores prune the
+	// list at each map key by calling one — internal/pit's Put — and assigning
+	// the result back at the index, so without resolving the callee this walk
+	// reads every one of them as unevicted.
+	//
+	// Two indexes because a call site names the callee two ways. prunersIn is
+	// pkgdir → name, for a bare call to a function in the same package
+	// (compliance's retainSelectable). prunersBy is the PACKAGE DIRECTORY'S BASE
+	// NAME → name, for pkg.Fn(), and it holds exported functions only — that is
+	// the same coarseness the reachability arm accepts, and it is narrower here
+	// because the selector's own qualifier has to match the directory.
+	prunersIn map[string]map[string]map[int]bool // pkgdir → func → result indices that are collections
+	prunersBy map[string]map[string]map[int]bool // pkg base name → exported func → same
 }
+
+// valueSuffix marks a key as the collection AT a field's values rather than the
+// field itself: "internal/compliance: MandateRegistry.byKey[]" is the []*Mandate
+// behind each key, and it is a separate default-deny entry from the map (#915).
+const valueSuffix = "[]"
 
 // calls reports whether anything in the estate invokes a method of this name
 // that could be pkg's own.
@@ -717,6 +840,116 @@ func (e *estate) kindCount(kind string) int {
 	return n
 }
 
+// valueFields counts the collections found INSIDE a value rather than at a
+// field. They carry their own kind prefix so the two field floors above stay
+// exact counts of what they were written about.
+func (e *estate) valueFields() int {
+	n := 0
+	for _, k := range e.fields {
+		if strings.HasPrefix(k, "in-value ") {
+			n++
+		}
+	}
+	return n
+}
+
+// prunerCall resolves a call expression to the result indices of the pruner it
+// invokes, if it invokes one. A generic instantiation (pit.Put[T](…)) arrives
+// as an IndexExpr around the callee and is unwrapped, because every pit store in
+// the estate calls it that way after inference.
+func (e *estate) prunerCall(pkg string, expr ast.Expr) (map[int]bool, bool) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil, false
+	}
+	fun := call.Fun
+	for {
+		switch x := fun.(type) {
+		case *ast.IndexExpr:
+			fun = x.X
+			continue
+		case *ast.IndexListExpr:
+			fun = x.X
+			continue
+		}
+		break
+	}
+	switch x := fun.(type) {
+	case *ast.Ident:
+		res, found := e.prunersIn[pkg][x.Name]
+		return res, found
+	case *ast.SelectorExpr:
+		if id, isIdent := x.X.(*ast.Ident); isIdent {
+			res, found := e.prunersBy[id.Name][x.Sel.Name]
+			return res, found
+		}
+	}
+	return nil, false
+}
+
+// prunedLocals names the locals in a body that hold a pruner's OUTPUT, so that
+// `vs, _ := pit.Put(s.byCurrency[c], …)` followed by `s.byCurrency[c] = vs` — the
+// shape all four pit-backed stores write — reads as the prune it is. The result
+// INDEX is checked rather than assumed: pit.Put returns (collection, dropped
+// count), and crediting the count would let any second return value vouch for a
+// prune.
+func (e *estate) prunedLocals(pkg string, body *ast.BlockStmt) map[string]bool {
+	out := map[string]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		if len(as.Rhs) == 1 && len(as.Lhs) > 1 {
+			res, isPruner := e.prunerCall(pkg, as.Rhs[0])
+			if !isPruner {
+				return true
+			}
+			for i, lhs := range as.Lhs {
+				if id, isIdent := lhs.(*ast.Ident); isIdent && res[i] {
+					out[id.Name] = true
+				}
+			}
+			return true
+		}
+		for i, lhs := range as.Lhs {
+			id, isIdent := lhs.(*ast.Ident)
+			if !isIdent || i >= len(as.Rhs) {
+				continue
+			}
+			if res, isPruner := e.prunerCall(pkg, as.Rhs[i]); isPruner && res[0] {
+				out[id.Name] = true
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// shrinksValueAt reports whether what is being written INTO a map value can only
+// make that value smaller.
+//
+// replacesWholesale is deliberately NOT admitted here, and that is the one place
+// this arm is stricter than the field arm. `m.byInstrument[id] = byKey`, where
+// byKey was just make(…), is a LAZY INITIALISER at a missing key — and that one
+// guards with `if !ok` on the map read rather than `== nil`, so
+// lazyInitAssignments does not see it either. Crediting a fresh collection at an
+// index would let every map[K]map[K2]V in the estate buy a pass with its own
+// constructor, which is precisely the exemption-free green this widening exists
+// to refuse.
+func (e *estate) shrinksValueAt(pkg string, rhs ast.Expr, pruned map[string]bool) bool {
+	if truncates(rhs) {
+		return true
+	}
+	if id, ok := rhs.(*ast.Ident); ok {
+		return pruned[id.Name]
+	}
+	if res, isPruner := e.prunerCall(pkg, rhs); isPruner {
+		return res[0]
+	}
+	return false
+}
+
 // scanEvictionEstate parses every non-test .go file in the module and returns
 // the mutex-guarded map and slice fields it holds, which of them something
 // shrinks through their own receiver, and the supporting facts the arms above
@@ -734,6 +967,8 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 		namesCalledIn:  map[string]map[string]bool{},
 		durableSibling: map[string]bool{},
 		files:          map[string]int{},
+		prunersIn:      map[string]map[string]map[int]bool{},
+		prunersBy:      map[string]map[string]map[int]bool{},
 	}
 
 	var dirs []string
@@ -753,6 +988,18 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 	}
 	sort.Strings(dirs)
 
+	// PARSE ONCE, THEN WALK TWICE, and the second walk is not an optimisation.
+	// The function that prunes a map's VALUE routinely lives in another package —
+	// four stores hand their version list to internal/pit's Put — so the pruner
+	// pass has to have seen the whole module before any package is attributed.
+	// Doing it in one directory-ordered pass would work only for as long as the
+	// pruner's directory happened to sort before its callers', which is luck
+	// rather than a property.
+	type parsedPkg struct {
+		rel   string
+		files []*ast.File
+	}
+	var pkgs []parsedPkg
 	for _, dir := range dirs {
 		rel, err := filepath.Rel(root, dir)
 		if err != nil {
@@ -784,6 +1031,44 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 		}
 		e.packages++
 		e.files[rel] = len(files)
+		pkgs = append(pkgs, parsedPkg{rel: rel, files: files})
+	}
+
+	// PASS 0: PRUNERS, module-wide (#915). Methods are excluded: a pkg.Fn() call
+	// site resolves through the package's directory name, and a method's receiver
+	// is a variable, so admitting one could only ever match a package that
+	// happens to share the receiver's name.
+	for _, p := range pkgs {
+		base := p.rel
+		if i := strings.LastIndex(base, "/"); i >= 0 {
+			base = base[i+1:]
+		}
+		for _, f := range p.files {
+			for _, d := range f.Decls {
+				fn, ok := d.(*ast.FuncDecl)
+				if !ok || fn.Body == nil || fn.Recv != nil || fn.Name.Name == "" {
+					continue
+				}
+				res := prunedResults(fn)
+				if len(res) == 0 {
+					continue
+				}
+				if e.prunersIn[p.rel] == nil {
+					e.prunersIn[p.rel] = map[string]map[int]bool{}
+				}
+				e.prunersIn[p.rel][fn.Name.Name] = res
+				if unicode.IsUpper(rune(fn.Name.Name[0])) {
+					if e.prunersBy[base] == nil {
+						e.prunersBy[base] = map[string]map[int]bool{}
+					}
+					e.prunersBy[base][fn.Name.Name] = res
+				}
+			}
+		}
+	}
+
+	for _, p := range pkgs {
+		rel, files := p.rel, p.files
 
 		local := map[string]bool{} // field NAMES tracked in this package
 		for _, f := range files {
@@ -811,8 +1096,14 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 					if kind == "" {
 						continue
 					}
+					// The collection AT the values is its own population member, with
+					// its own bound and its own exemption (#915).
+					inner := valueCollectionKind(fl.Type)
 					for _, name := range fl.Names {
 						e.fields[rel+": "+ts.Name.Name+"."+name.Name] = kind
+						if inner != "" {
+							e.fields[rel+": "+ts.Name.Name+"."+name.Name+valueSuffix] = "in-value " + inner
+						}
 						local[name.Name] = true
 					}
 				}
@@ -861,12 +1152,13 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 				recvName, recvType := receiverOf(fn)
 				fresh := freshLocals(fn.Body)
 				lazyInit := lazyInitAssignments(fn.Body)
-				credit := func(sel *ast.SelectorExpr) bool {
+				pruned := e.prunedLocals(rel, fn.Body)
+				creditKey := func(sel *ast.SelectorExpr, suffix string) bool {
 					base, isIdent := sel.X.(*ast.Ident)
 					if !isIdent || recvName == "" || base.Name != recvName {
 						return false
 					}
-					key := rel + ": " + recvType + "." + sel.Sel.Name
+					key := rel + ": " + recvType + "." + sel.Sel.Name + suffix
 					e.shrunk[key] = true
 					if e.shrinkMethod[key] == nil {
 						e.shrinkMethod[key] = map[string]bool{}
@@ -874,6 +1166,12 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 					e.shrinkMethod[key][fn.Name.Name] = true
 					return true
 				}
+				credit := func(sel *ast.SelectorExpr) bool { return creditKey(sel, "") }
+				// creditValue attributes a shrink to what lives at the field's
+				// VALUES, which is a different entry from the field: deleting a key
+				// bounds the map and says nothing about the slice behind a key that
+				// stays, and pruning that slice says nothing about the key set.
+				creditValue := func(sel *ast.SelectorExpr) bool { return creditKey(sel, valueSuffix) }
 				ast.Inspect(fn.Body, func(n ast.Node) bool {
 					switch x := n.(type) {
 					case *ast.CallExpr:
@@ -887,6 +1185,14 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 						}
 						if id, isIdent := x.Fun.(*ast.Ident); isIdent &&
 							(id.Name == "delete" || id.Name == "clear") && len(x.Args) > 0 {
+							// delete(x.f[k], k2) and clear(x.f[k]) shrink the collection
+							// AT a value, not the field (#915).
+							if ix, isIndex := x.Args[0].(*ast.IndexExpr); isIndex {
+								if inner, isSel := ix.X.(*ast.SelectorExpr); isSel {
+									creditValue(inner)
+								}
+								return true
+							}
 							sel, isSel := x.Args[0].(*ast.SelectorExpr)
 							if !isSel {
 								return true // a local map cannot outlive its scope
@@ -911,8 +1217,22 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 						// this estate trims a retention window — trades.Tape does the
 						// second — and neither contains a delete(.
 						for i, lhs := range x.Lhs {
+							if i >= len(x.Rhs) || lazyInit[x] {
+								continue
+							}
+							// x.f[k] = pruned — AN INDEXED WRITE, which is how every
+							// value-prune in this estate is spelled and which no arm
+							// credited before #915. #884's repair writes exactly this,
+							// and its exemption stayed green over the fix.
+							if ix, isIndex := lhs.(*ast.IndexExpr); isIndex {
+								if inner, isSel := ix.X.(*ast.SelectorExpr); isSel &&
+									e.shrinksValueAt(rel, x.Rhs[i], pruned) {
+									creditValue(inner)
+								}
+								continue
+							}
 							sel, isSel := lhs.(*ast.SelectorExpr)
-							if !isSel || i >= len(x.Rhs) || lazyInit[x] {
+							if !isSel {
 								continue
 							}
 							if truncates(x.Rhs[i]) || replacesWholesale(x.Rhs[i], fresh) {
@@ -939,6 +1259,99 @@ func collectionKind(t ast.Expr) string {
 		}
 	}
 	return ""
+}
+
+// valueCollectionKind reports the kind of collection held AT each value of a map
+// field, or at each element of a slice field — "" when the value is anything
+// else. It descends ONE level: map[K]map[K2][]T reports the inner map, and the
+// slice inside that is invisible (limitation 2). Measured 2026-09-01, nothing in
+// the estate is nested deeper than one level and no slice field holds a
+// collection, so the second arm is coverage against a shape arriving rather than
+// one that is here.
+func valueCollectionKind(t ast.Expr) string {
+	switch x := t.(type) {
+	case *ast.MapType:
+		return collectionKind(x.Value)
+	case *ast.ArrayType:
+		if x.Len == nil {
+			return collectionKind(x.Elt)
+		}
+	}
+	return ""
+}
+
+// prunedResults reports which of fn's results are collections, for a function
+// that can only hand back a SHORTER version of a collection it was given — and
+// nil for anything else. internal/pit's Put and internal/compliance's
+// retainSelectable are the two in this estate, and between them they bound the
+// value of five of the eleven collections living inside a map value.
+//
+// The test is that the body RESLICES or deletes from a collection PARAMETER.
+// That is deliberately not "returns a collection": a helper that appends and
+// returns is the leak, not the fix. It is still syntactic — a decoder that
+// walks a byte slice with b = b[4:] and returns a parsed list would qualify —
+// so this credits a call, never a bound. What it cannot credit is the shape
+// that actually leaks, x.f[k] = append(x.f[k], v), which contains no reslice at
+// all.
+func prunedResults(fn *ast.FuncDecl) map[int]bool {
+	if fn.Type.Results == nil || fn.Body == nil {
+		return nil
+	}
+	shrinks := false
+	for _, name := range collectionParams(fn) {
+		if name == "" {
+			continue
+		}
+		if shrinksIdent(fn.Body, name) || reslices(fn.Body, name) {
+			shrinks = true
+			break
+		}
+	}
+	if !shrinks {
+		return nil
+	}
+	out := map[int]bool{}
+	i := 0
+	for _, f := range fn.Type.Results.List {
+		n := len(f.Names)
+		if n == 0 {
+			n = 1
+		}
+		isCollection := collectionKind(f.Type) != ""
+		for k := 0; k < n; k++ {
+			if isCollection {
+				out[i] = true
+			}
+			i++
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// reslices reports whether a body takes a sub-slice OF the named parameter.
+// pit.Put's `return vs[drop:]` and retainSelectable's `copy(kept, vers[first:])`
+// are both this shape, and neither assigns to the parameter nor deletes from it,
+// so shrinksIdent alone sees neither.
+func reslices(body *ast.BlockStmt, name string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		se, ok := n.(*ast.SliceExpr)
+		if !ok {
+			return true
+		}
+		if id, isIdent := se.X.(*ast.Ident); isIdent && id.Name == name &&
+			(se.Low != nil || se.High != nil) {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // truncates reports whether an assignment's right-hand side can only make the
