@@ -53,8 +53,8 @@ aiokafka==0.14.0 \
     --hash=sha256:219d2dc66b97b1aaea100697c928024b6a0348b7baa370b824900054bf86916e
 async-timeout==5.0.1 \
     --hash=sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c
-grpcio==1.83.0 \
-    --hash=sha256:aeb339838db07600481ef869507279b75326c75eac6d10f7afa62a0da1d2bcdd
+grpcio==1.83.1 \
+    --hash=sha256:72578aa07a4008f17521ef52debcc3acfd1e2c5426243bc3ffb56a38bfe610b7
 nats-py==2.15.0 \
     --hash=sha256:9f8d36aa52a9926a88b8f1d70cf1fdce0ad387941479b500ee9ab3e51073cefd
 packaging==26.3 \

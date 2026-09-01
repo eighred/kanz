@@ -37,10 +37,10 @@
 # independently re-fetched from https://pypi.org/pypi/<name>/<version>/json and
 # compared; none is hand-written.
 
-grpcio==1.83.0 \
-    --hash=sha256:aeb339838db07600481ef869507279b75326c75eac6d10f7afa62a0da1d2bcdd
-grpcio-tools==1.83.0 \
-    --hash=sha256:7d4edc6ba9fdca70bbf585ff6ab5971b8cd6140b4b316df66fd91d168bc1b617
+grpcio==1.83.1 \
+    --hash=sha256:72578aa07a4008f17521ef52debcc3acfd1e2c5426243bc3ffb56a38bfe610b7
+grpcio-tools==1.83.1 \
+    --hash=sha256:70c74bb6fe0b57b7f4f49caa21d3263e149c2f1e2ef9d53c3d78d622e8564deb
 protobuf==7.36.0 \
     --hash=sha256:1781cc1de61249b750848029bca452c0a8b7e990080316b9bbc2518b2117b488 \
     --hash=sha256:3297e60abdff301e5f74393d87f6cc59dacab5f024a89548a6e8de1d26576b16 \
