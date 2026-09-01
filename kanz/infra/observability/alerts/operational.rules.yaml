@@ -581,6 +581,62 @@ groups:
           summary: "OMS {{ $labels.pod }} holds no live reference mark — the price feed has stalled"
           description: "Every reference mark in this OMS replica's fold has aged past OMS_PRICE_MAX_AGE while the fold still holds the instruments, so the price spine WAS reaching this pod and has stopped. The pre-trade gate cannot value an order without a mark: every order this replica receives will be refused PRICE_UNAVAILABLE. Check market-data and this pod's price subscription."
 
+
+      # A PRICE SPINE THAT NEVER DELIVERED ANYTHING — THE STATE NEITHER MARK RULE
+      # CAN SEE (#955).
+      #
+      # OMSPriceFeedStalled above needs held > 0. OMSQuoteCoverageAbsent below
+      # needs mark_instruments_live > 0. Both clauses are there to keep a COLD POD
+      # from paging and both are right, and together they leave one reading
+      # uncovered: a replica that has held nothing, ever. cmd/oms's
+      # registerMarkCoverageGauges already names that state — "both zero is a
+      # spine that never covered these instruments (a binding question)" — and
+      # until now nothing asked the question.
+      #
+      # IT IS NOT A HYPOTHETICAL SHAPE. The `acme` account granted its OMS a
+      # SUBSCRIBE on market.*.trade and market.*.quote while nothing in that
+      # account published a market subject and the account imported none, so
+      # oms-acme folded an empty source for the life of the deployment: every
+      # MARKET and STOP order refused PRICE_UNAVAILABLE, no arrival price on any
+      # order, and this pair of gauges pinned at zero — the exact reading that
+      # silenced both neighbouring rules. #955 imported the spine; this is the
+      # signal that would have said so, and the one that will say so for the next
+      # tenant provisioned without it.
+      #
+      # THE SERIES EXISTS AT ZERO, AND THE RULE DEPENDS ON THAT. These are
+      # GaugeFuncs registered unconditionally at startup, not a CounterVec whose
+      # label values appear only once incremented — so a pod that folds nothing
+      # still exports kanz_oms_mark_instruments_held 0 and `== 0` matches it. A
+      # rule over a series that is ABSENT rather than zero is silent in precisely
+      # the state it detects (#62, and OMSExecutionAttributionUndecomposable's
+      # comment below), so the harness beside this file EXECUTES the absent case
+      # as well as the zero one rather than leaving the dependency written down.
+      #
+      # for: 1h, AND THE DURATION IS THE WHOLE COLD-START ARGUMENT. A live spine
+      # fills the fold within one OMS_PRICE_MAX_AGE (30s), so anything past a few
+      # minutes is not warm-up. An hour is longer than a rolling restart, a
+      # market-data rollout or a vendor reconnect, and it is the point where "this
+      # pod has never seen a price" stops being a timing question and becomes a
+      # binding one.
+      #
+      # CRITICAL, LIKE OMSPriceFeedStalled, BECAUSE THE CONSEQUENCE IS THE SAME
+      # ONE: every MARKET and STOP order this replica receives is refused. The
+      # difference is that it never worked rather than having stopped working,
+      # which is worse — there is no last-known-good to point at and nobody saw it
+      # break.
+      #
+      # by (namespace, pod), because a tenant-dedicated OMS has to be nameable
+      # beside a healthy platform one: MT-02 runs both from the same image in the
+      # same namespace, and they differ only in which NATS account they land in.
+      - alert: OMSPriceSpineNeverFolded
+        expr: |
+          max by (namespace, pod) (kanz_oms_mark_instruments_held) == 0
+        for: 1h
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "OMS {{ $labels.pod }} has never folded a single reference mark"
+          description: "This replica's mark fold has held nothing at all for an hour — not a live mark, not an expired one. That is neither a stalled feed (OMSPriceFeedStalled needs a mark to have existed first) nor a warm-up. The pre-trade gate cannot value an order without a mark, so every MARKET and STOP order this pod receives is refused PRICE_UNAVAILABLE and nothing it accepts is stamped with an arrival price. Check the NATS ACCOUNT this pod authenticates into before checking the feed: a per-tenant OMS reaches the price spine through an import from __system__ (infra/nats/tenancy.yaml), and a missing import is an error on neither side — the subscription succeeds and delivers nothing forever. Then check OMS_PRICE_SUBJECTS, and that market-data or market-ingest is publishing at all."
+
       # A STANDING CONFIGURATION STATE, SO AN ABSOLUTE VALUE — NOT increase().
       #
       # This counter is incremented while venue adapters are REGISTERED, at

@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/eighred/kanz/internal/marketdata/mark"
 )
 
 // EVERY TENANT ACCOUNT IMPORTS ITS OWN ORDERS, AND ONLY ITS OWN (MT-02, #358).
@@ -78,6 +80,37 @@ var bridgedSubjects = []string{"order.order.submit", "order.order.cancel", "orde
 // and refuses every order for that tenant — loud, and a total outage.
 var platformWideImports = []string{"platform.mode.changed"}
 
+// priceSpineImports are the PUBLIC PRICE subjects every tenant account imports
+// unprefixed (#955), and they are DERIVED FROM THE FOLD rather than retyped.
+//
+// mark.DefaultSubjects is what OMS_PRICE_SUBJECTS defaults to and what
+// mark.Source folds; writing the subjects out here would make this guard a
+// second copy of that decision, and a second copy is what has to be kept in
+// step by hand. Derived, the export, the import and the subscription move
+// together or this test fails.
+//
+// WHY A PRICE CROSSES A BOUNDARY AN ORDER DOES NOT. Tenant isolation covers what
+// a tenant DID — portfolios, accounts, orders, positions, strategies, risk
+// state, mandates, credentials, audit. A trade print and a top-of-book quote say
+// what the MARKET did: one book, no tenant, published by __system__ workloads
+// (market-data, market-ingest) that no tenant account contains. A per-tenant
+// price feed would fold the same public book twice and let two funds disagree
+// about the mark that values their orders, their exposure and their positions —
+// which is a worse failure than the one it would be isolating against.
+//
+// UNPREFIXED, LIKE THE HALT AND FOR THE SAME REASON: there is exactly one of
+// these for the whole estate, so `tenant.<t>.market.*.trade` would be a private
+// copy of a public fact. A tenant missing this import has an OMS that folds an
+// EMPTY mark source: every MARKET and STOP order refused PRICE_UNAVAILABLE, no
+// arrival price stamped on any order, and both coverage gauges at zero — the one
+// reading OMSQuoteCoverageAbsent structurally cannot fire on, because it needs
+// marks > 0 to tell a dead feed from a cold pod.
+//
+// NARROWED TO THE PRICE SPINE. `market.>` also carries book snapshots, bars, the
+// ingestion-coverage FACT and the volume profile; those are a separate decision
+// (#959) and deliberately do not cross here.
+var priceSpineImports = append([]string(nil), mark.DefaultSubjects...)
+
 func tenancyText(t *testing.T) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "infra", "nats", "tenancy.yaml"))
@@ -134,6 +167,7 @@ func TestEveryTenantAccountImportsExactlyItsOwnOrders(t *testing.T) {
 			want = append(want, fmt.Sprintf("tenant.%s.%s", tenant, subj))
 		}
 		want = append(want, platformWideImports...)
+		want = append(want, priceSpineImports...)
 		sort.Strings(found)
 		sort.Strings(want)
 
@@ -143,8 +177,12 @@ func TestEveryTenantAccountImportsExactlyItsOwnOrders(t *testing.T) {
 				"NOTHING — silently, because the orders are delivered to __system__ and the pod "+
 				"just looks idle. An account importing another tenant's prefix is the isolation "+
 				"boundary inverted, and the receiving OMS cannot detect it: its RLS pool is scoped "+
-				"by ITS tenant while the envelope carries the other's.",
-				tenant, found, want)
+				"by ITS tenant while the envelope carries the other's.\n\n"+
+				"A MISSING PRICE-SPINE IMPORT (%v) FAILS THE SAME WAY ONE DOMAIN OVER (#955): the "+
+				"OMS holds a market.*.trade/quote SUBSCRIBE grant, subscribes it, and folds an "+
+				"empty mark source forever — every MARKET and STOP order refused PRICE_UNAVAILABLE "+
+				"while every probe reads Ready.",
+				tenant, found, want, priceSpineImports)
 		}
 	}
 }
@@ -170,6 +208,22 @@ func TestSystemAccountCarriesTheBridge(t *testing.T) {
 				"Every tenant's import of the platform kill switch resolves to nothing, the broker "+
 				"accepts the config, and that tenant's OMS cannot hear a declared halt — or, because "+
 				"the gate is deny-by-default, refuses every order instead.", export)
+		}
+	}
+
+	// THE PRICE SPINE'S EXPORTING HALF (#955). Without it every tenant's import
+	// resolves to nothing, nats-server accepts the file, and each tenant OMS
+	// subscribes a subject space no message ever lands in — which is not an error
+	// anywhere, just a pod that folds no marks and refuses every MARKET order.
+	for _, subj := range priceSpineImports {
+		export := fmt.Sprintf(`stream: "%s"`, subj)
+		if !strings.Contains(sys, export) {
+			t.Errorf("__system__ does not export %s.\n\n"+
+				"market-data and market-ingest publish the price spine in THIS account, and no "+
+				"workload in a tenant account publishes a market subject at all. Without the "+
+				"export, a tenant-dedicated OMS folds an empty mark source: every MARKET and STOP "+
+				"order refused PRICE_UNAVAILABLE, no arrival price on any order, and the coverage "+
+				"gauges pinned at zero — the one reading OMSQuoteCoverageAbsent cannot fire on.", export)
 		}
 	}
 

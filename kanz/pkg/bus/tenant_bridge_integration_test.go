@@ -95,7 +95,7 @@ func TestAnOrderReachesOnlyItsOwnTenantsOMS(t *testing.T) {
 	// looks — the producer publishes through JetStream, so a subject no stream
 	// covers comes back "nats: no response from stream". A core-publish test
 	// would route correctly and hide that the gateway could not publish at all.
-	producer := producerAs(t, url, certDir, "gateway")
+	producer := producerAs(t, url, certDir, "gateway", "api-gateway")
 
 	// --- an order for `acme` -------------------------------------------------
 	publishOrder(t, producer, "acme", "acme-order")
@@ -131,7 +131,7 @@ func TestAnOrderReachesOnlyItsOwnTenantsOMS(t *testing.T) {
 }
 
 // producerAs builds the bus.Producer a composition root would, under one SVID.
-func producerAs(t *testing.T, url, certDir, identity string) *bus.Producer {
+func producerAs(t *testing.T, url, certDir, identity, source string) *bus.Producer {
 	t.Helper()
 	tlsCfg := transport.ClientTLSConfig(sourceFromDir(t, certDir, identity), transport.AuthorizeMesh())
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -141,7 +141,7 @@ func producerAs(t *testing.T, url, certDir, identity string) *bus.Producer {
 		t.Fatalf("dial as %s: %v", identity, err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	p, err := bus.NewProducer(client, bus.ProducerConfig{Source: "api-gateway", ProducerVersion: "bridge-it"})
+	p, err := bus.NewProducer(client, bus.ProducerConfig{Source: source, ProducerVersion: "bridge-it"})
 	if err != nil {
 		t.Fatalf("producer: %v", err)
 	}
