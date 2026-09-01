@@ -33,16 +33,29 @@ package okx
 // rather than a double count. That is what authorizes the FILLED and
 // PARTIALLY_FILLED answers below.
 //
-// WHAT STILL FREEZES: an order OKX calls filled while returning no trade for it.
-// Reporting FILLED with nothing to fold would leave a traded order looking
-// untraded (the OMS refuses such a view, and is right to); reporting UNKNOWN
-// would re-place an order OKX has just said it executed. So it quarantines, and
-// the reason names the venue's own state and filled size.
+// # A WITHDRAWAL IS AN ANSWER TOO (#924)
+//
+// "canceled" and "mmp_canceled" used to freeze, because execution.OrderView had
+// no withdrawn verdict. It has two now, and this connector answers CANCELLED for
+// both — OKX has no expiry of its own, an unfilled IOC comes back "canceled"
+// here where Binance calls the same thing EXPIRED. The withdrawal CARRIES
+// WHATEVER TRADED BEFORE IT, from the same fills-history the FILLED path reads,
+// because an order pulled after a partial execution is the common shape and a
+// verdict that dropped those fills would record a traded order as untraded.
+//
+// WHAT STILL FREEZES: an order OKX calls filled — or withdrawn after a trade —
+// while returning no trade for it. Reporting a verdict with nothing to fold
+// would leave a traded order looking untraded (the OMS refuses such a view, and
+// is right to); reporting UNKNOWN would re-place an order OKX has just said it
+// executed. So it quarantines, and the reason names the venue's own state and
+// filled size. So does a CONDITIONAL order in any terminal state — see
+// queryAlgo, and #925.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
@@ -93,22 +106,26 @@ func (v *OKXVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (Orde
 		}
 		return OrderView{}, err
 	}
-	// THE TRADES ARE FETCHED ONLY FOR THE STATES THAT CAN CARRY THEM, and the
-	// SAME predicate okxOrderView switches on decides it — so the fetch and the
-	// verdict cannot drift into a FILLED answer with nothing fetched to carry.
-	// A resting, withdrawn or unmappable order costs one weight unit, not seven.
+	// THE MAPPING DECIDES WHETHER TO SPEND THE WEIGHT, because it is the thing
+	// that knows which verdicts can carry fills.
+	//
+	// IT USED TO BE A SECOND PREDICATE HERE, gating the fetch beside the switch
+	// that gated the verdict, and #924 is what made that shape untenable: a
+	// withdrawn order may have partially traded before it was pulled, so a third
+	// family of states now needs its trades too, and every state added to one
+	// side and not the other produces a verdict with nothing fetched to carry.
+	// Handing okxOrderView the fetch itself removes the second list entirely —
+	// there is one switch, and the arm that answers is the arm that asks.
+	//
+	// A resting or unmappable order still costs one weight unit and not seven:
+	// tradedFills asks nothing when OKX reports no filled size.
 	//
 	// A FAILURE TO FINISH READING THE TRADES IS AN ERROR, never a fill-less
 	// FILLED and never an UNKNOWN that would re-place an order OKX has just said
 	// it executed.
-	var fills []*orderpb.Fill
-	if okxStateTraded(o.State) {
-		fills, err = v.tradedFills(ctx, o, st, instID)
-		if err != nil {
-			return OrderView{}, err
-		}
-	}
-	return okxOrderView(st, o.State, o.AccFillSz, fills), nil
+	return okxOrderView(st, o.State, o.AccFillSz, func() ([]*orderpb.Fill, error) {
+		return v.tradedFills(ctx, o, st, instID)
+	})
 }
 
 // queryAlgo answers for a CONDITIONAL order, which lives on a different endpoint
@@ -159,6 +176,16 @@ func (v *OKXVenue) queryAlgo(ctx context.Context, st *orderpb.OrderState) (Order
 		}, nil
 	default:
 		// "canceled", "order_failed", and anything OKX adds later.
+		//
+		// A CONDITIONAL ORDER GETS NO WITHDRAWN VERDICT, DELIBERATELY (#924). The
+		// regular path can answer one because it can also establish what traded
+		// before the withdrawal; this path cannot. An algo order's executions
+		// belong to the order its trigger CREATED, under a clOrdId of OKX's own
+		// choosing, which is the same reason "effective" freezes above — so
+		// answering CANCELLED here would rest on an assumption that a withdrawn
+		// trigger never fired, and being wrong about that adopts a traded order as
+		// one that traded nothing. The algo endpoint's own answers are not yet
+		// established against a real account either (#925). Fail closed.
 		return OrderView{
 			State: OrderViewIndeterminate,
 			Reason: fmt.Sprintf(
@@ -170,28 +197,50 @@ func (v *OKXVenue) queryAlgo(ctx context.Context, st *orderpb.OrderState) (Order
 }
 
 // okxStateTraded reports whether an OKX order state means the venue attributes
-// EXECUTIONS to the order.
-//
-// ONE PREDICATE, read by QueryOrder to decide whether to spend the weight budget
-// fetching trades and by okxOrderView to decide which verdict to give. Split
-// across two copies of the same two string literals, the fetch and the mapping
-// would be free to disagree — and the direction that fails is FILLED with an
-// empty Fills slice, which the OMS quarantines an already-traded order for.
+// EXECUTIONS to the order and the order is still live at it.
 func okxStateTraded(state string) bool {
 	return state == "partially_filled" || state == "filled"
 }
 
-// okxOrderView maps a regular order's OKX state and its fetched trades onto a
-// verdict.
+// okxStateWithdrawn reports whether OKX has PULLED the order: "canceled", and
+// "mmp_canceled" for one market-maker protection removed.
 //
-// Split out so the mapping is one function with one table rather than a switch
-// buried in a call path, and so a test can drive every OKX state without an HTTP
+// IT IS DERIVED FROM okxStateToProto RATHER THAN LISTING THE STRINGS AGAIN
+// (#924). That table is what the healing path off the private websocket already
+// uses to name an OKX state, so reading the withdrawal set off it means the two
+// paths cannot come to disagree about which states are terminal withdrawals, and
+// a state taught to one is taught to both.
+//
+// OKX HAS NO EXPIRY OF ITS OWN HERE, and that is a venue difference rather than
+// an omission: an unfilled IOC comes back "canceled" at OKX, where Binance calls
+// the same thing EXPIRED. The connector reports what its venue says.
+func okxStateWithdrawn(state string) bool {
+	return okxStateToProto(state) == orderpb.OrderStatus_ORDER_STATUS_CANCELLED
+}
+
+// okxOrderView maps a regular order's OKX state onto a verdict, fetching the
+// order's trades through fetch for the states that can carry them.
+//
+// IT TAKES THE FETCH RATHER THAN THE FILLS, so the arm that answers is the arm
+// that asks. The alternative — a predicate at the call site deciding whether to
+// fetch, and this switch deciding what to answer — is two lists of OKX states
+// that must agree, and the direction that fails is a verdict carrying no fills
+// because the caller's list had not learned the state. #924 added a third family
+// of fill-carrying states, which is when keeping the two in step stopped being
+// worth the second list.
+//
+// Split out from QueryOrder so a test can drive every OKX state without an HTTP
 // server.
-func okxOrderView(st *orderpb.OrderState, state, accFillSz string, fills []*orderpb.Fill) OrderView {
+func okxOrderView(st *orderpb.OrderState, state, accFillSz string, fetch func() ([]*orderpb.Fill, error)) (OrderView, error) {
 	switch {
 	case state == "live":
-		return OrderView{State: OrderViewWorking}
+		return OrderView{State: OrderViewWorking}, nil
+
 	case okxStateTraded(state):
+		fills, err := fetch()
+		if err != nil {
+			return OrderView{}, err
+		}
 		if len(fills) == 0 {
 			// OKX CONTRADICTED ITSELF: it reports the order traded and produced no
 			// trade record for it. Reporting FILLED with no fill would leave a
@@ -205,7 +254,7 @@ func okxOrderView(st *orderpb.OrderState, state, accFillSz string, fills []*orde
 						"this adapter cannot say what traded. Resolve it against the exchange's own "+
 						"order history",
 					st.GetOrderId(), state, accFillSz),
-			}
+			}, nil
 		}
 		// THE VENUE'S OWN FILL IDENTITIES, byte for byte what the placement path
 		// and the user-data stream mint for these trades — which is what makes
@@ -215,23 +264,64 @@ func okxOrderView(st *orderpb.OrderState, state, accFillSz string, fills []*orde
 		if state == "filled" {
 			verdict = OrderViewFilled
 		}
-		return OrderView{State: verdict, Fills: fills}
-	default:
-		// "canceled", "mmp_canceled", and anything OKX adds later.
+		return OrderView{State: verdict, Fills: fills}, nil
+
+	case okxStateWithdrawn(state):
+		// OKX PULLED THE ORDER AND IT IS TERMINAL (#924). Before this verdict
+		// existed these froze, because inventing one out of the other five was a
+		// lie in whichever direction it was taken: REJECTED writes a refusal over
+		// an order that may have partially traded before it was pulled, UNKNOWN
+		// re-places it.
 		//
-		// execution.OrderView HAS NO WITHDRAWN ANSWER, and inventing one would be
-		// a lie in whichever direction it was taken: REJECTED writes a refusal
-		// over an order that may have partially traded before it was pulled,
-		// UNKNOWN re-places it. So these freeze — which is what they did before
-		// this RPC existed. Closing the gap needs an OrderView verdict that does
-		// not exist yet (#924).
+		// THE FILLED SIZE IS READ BEFORE THE TRADES ARE ASKED FOR, because
+		// tradedFills answers "no trades" for a size it cannot parse — which on
+		// the traded arm above is caught by the empty-fills refusal, and here
+		// would silently adopt a partially traded order as one that traded
+		// nothing.
+		traded, ok := new(big.Rat).SetString(accFillSz)
+		if !ok && accFillSz != "" {
+			return OrderView{
+				State: OrderViewIndeterminate,
+				Reason: fmt.Sprintf(
+					"okx reports order %s as %s with an unreadable filled size %q, so this adapter "+
+						"cannot say whether it traded before it was withdrawn",
+					st.GetOrderId(), state, accFillSz),
+			}, nil
+		}
+		if traded == nil || traded.Sign() <= 0 {
+			// The ordinary case, and the population #924 was opened for: an order
+			// withdrawn without trading. Nothing to fetch and nothing to carry.
+			return OrderView{State: OrderViewCancelled}, nil
+		}
+		fills, err := fetch()
+		if err != nil {
+			// The question could not be finished. NEVER a fill-less withdrawal —
+			// that adopts a partially traded order as one that traded nothing, and
+			// a fill nobody recorded is worse than the freeze this replaces.
+			return OrderView{}, err
+		}
+		if len(fills) == 0 {
+			return OrderView{
+				State: OrderViewIndeterminate,
+				Reason: fmt.Sprintf(
+					"okx reports order %s as %s having traded %s before it was withdrawn, but returned "+
+						"no trade for it, so this adapter cannot say what traded. Resolve it against "+
+						"the exchange's own order history",
+					st.GetOrderId(), state, accFillSz),
+			}, nil
+		}
+		return OrderView{State: OrderViewCancelled, Fills: fills}, nil
+
+	default:
+		// Anything OKX adds later, and anything okxStateToProto has not been
+		// taught. An answer this connector cannot map is not an answer.
 		return OrderView{
 			State: OrderViewIndeterminate,
 			Reason: fmt.Sprintf(
 				"okx reports order %s as %s (filled %s), which this platform has no reconciliation "+
 					"answer for. Resolve it against the exchange's own order history",
 				st.GetOrderId(), state, accFillSz),
-		}
+		}, nil
 	}
 }
 

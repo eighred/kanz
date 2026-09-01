@@ -22,11 +22,25 @@ package binance
 // budget are all returned as ERRORS — "the question could not be asked" — and
 // the OMS backs off. A venue status this connector cannot map is
 // OrderViewIndeterminate, which quarantines. Neither ever becomes UNKNOWN.
+//
+// # A WITHDRAWAL IS AN ANSWER TOO (#924)
+//
+// "CANCELED" and "EXPIRED" used to freeze, because execution.OrderView had no
+// withdrawn verdict. It has two now, and EXPIRED is the one that mattered: it is
+// what Binance calls an IOC or FOK order that did not fill, so it is the
+// ORDINARY terminal state of a time-in-force this platform declares supported
+// (#486), and every interrupted one froze for a human on a complete answer.
+//
+// The withdrawal CARRIES WHATEVER TRADED BEFORE IT, from the same myTrades the
+// FILLED path reads — an order pulled after a partial execution is the common
+// shape, and a verdict that dropped those fills would record a traded order as
+// untraded, which is worse than the freeze it replaces because it is silent.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -119,18 +133,35 @@ func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (
 		}, nil
 
 	default:
-		// "CANCELED", "EXPIRED", "PENDING_CANCEL", and anything Binance adds
-		// later.
+		// A TERMINAL WITHDRAWAL, OR SOMETHING THIS CONNECTOR STILL WILL NOT GUESS
+		// ABOUT (#924).
 		//
-		// execution.OrderView HAS NO WITHDRAWN ANSWER, and inventing one here
-		// would be a lie in whichever direction it was taken: REJECTED writes a
-		// refusal over an order that may have partially traded before it was
-		// pulled, UNKNOWN re-places it. So these freeze, which is exactly what
-		// they did before this RPC existed — no order is worse off, and the
-		// quarantine record now names the venue status instead of naming the
-		// absence of a Querier. EXPIRED is the common one: it is what Binance
-		// calls an IOC or FOK order that did not fill, and closing that gap needs
-		// an OrderView verdict that does not exist yet (#924).
+		// WHICH STATUSES ARE WITHDRAWALS IS NOT DECIDED HERE. It is read off
+		// binanceStatusToProto — the table the healing path has always used to
+		// turn a Binance status into an order.v1 status — so the two paths cannot
+		// come to disagree about what "CANCELED" means. A second string table in
+		// this file is exactly how the query path would learn a status the
+		// healing path did not, or answer a different terminal state for one they
+		// both know.
+		switch binanceStatusToProto(resp.Status) {
+		case orderpb.OrderStatus_ORDER_STATUS_CANCELLED, orderpb.OrderStatus_ORDER_STATUS_EXPIRED:
+			return v.withdrawnView(ctx, st, symbol, resp)
+		}
+		// "PENDING_CANCEL", "EXPIRED_IN_MATCH", and anything Binance adds later.
+		//
+		// PENDING_CANCEL IS DELIBERATELY NOT A WITHDRAWAL. It says a cancel is IN
+		// FLIGHT, not that the order is gone: Binance may still fill it. Writing a
+		// terminal withdrawal over a live exchange order is the same class of
+		// error as re-placing one, and binanceStatusToProto has never claimed
+		// otherwise — it answers UNSPECIFIED for it, which is what routes it here.
+		//
+		// EXPIRED_IN_MATCH (self-trade prevention) is a genuine terminal
+		// withdrawal and it freezes ANYWAY, for the same reason: this connector's
+		// one status table does not know it, and teaching only the query path
+		// would give the platform two answers for one Binance status. It is a
+		// smaller and rarer population than the IOC/FOK expiries #924 was opened
+		// for, and it is fixed by teaching binanceStatusToProto, at which point
+		// this arm picks it up with no change here.
 		return OrderView{
 			State: OrderViewIndeterminate,
 			Reason: fmt.Sprintf(
@@ -139,6 +170,63 @@ func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (
 				st.GetOrderId(), resp.Status, resp.ExecutedQty),
 		}, nil
 	}
+}
+
+// withdrawnView answers for an order Binance WITHDREW — "CANCELED", or the
+// "EXPIRED" that is the ordinary terminal state of an unfilled IOC or FOK
+// (#924).
+//
+// IT CARRIES THE FILLS THAT TRADED BEFORE THE WITHDRAWAL. That is the whole
+// hazard of this verdict: an order pulled after a partial execution is the
+// common shape, and adopting one without its fills would record a traded order
+// as untraded — silently, and worse than the quarantine this replaces. The
+// trades come from the SAME tradesFor the FILLED path uses, so they carry
+// Binance's own "<symbol>-<tradeId>" identities and re-adopting the view is a
+// no-op rather than a double count.
+//
+// AN UNTRADED WITHDRAWAL COSTS NO EXTRA WEIGHT. executedQty is zero for the
+// population this exists for — an IOC that did not fill — and myTrades is not
+// called at all for those.
+func (v *BinanceVenue) withdrawnView(ctx context.Context, st *orderpb.OrderState, symbol string, resp *orderResponse) (OrderView, error) {
+	state := OrderViewCancelled
+	if binanceStatusToProto(resp.Status) == orderpb.OrderStatus_ORDER_STATUS_EXPIRED {
+		state = OrderViewExpired
+	}
+	traded, ok := new(big.Rat).SetString(resp.ExecutedQty)
+	if !ok && resp.ExecutedQty != "" {
+		// BINANCE SENT A QUANTITY THIS CONNECTOR CANNOT READ, so it cannot
+		// establish whether the order traded before it was pulled. Answering the
+		// withdrawal now would adopt it as untraded on a field nobody parsed.
+		return OrderView{
+			State: OrderViewIndeterminate,
+			Reason: fmt.Sprintf(
+				"binance reports order %s as %s with an unreadable executedQty %q, so this adapter "+
+					"cannot say whether it traded before it was withdrawn",
+				st.GetOrderId(), resp.Status, resp.ExecutedQty),
+		}, nil
+	}
+	if traded == nil || traded.Sign() <= 0 {
+		return OrderView{State: state}, nil
+	}
+	fills, err := v.tradesFor(ctx, st, symbol, resp)
+	if err != nil {
+		// The question could not be finished. NEVER a fill-less withdrawal: that
+		// would adopt a partially traded order as one that traded nothing.
+		return OrderView{}, err
+	}
+	if len(fills) == 0 {
+		// BINANCE CONTRADICTED ITSELF: it reports a traded quantity and returned
+		// no trade for it. Same reasoning as the FILLED arm above — freeze, and
+		// say which.
+		return OrderView{
+			State: OrderViewIndeterminate,
+			Reason: fmt.Sprintf(
+				"binance reports order %s as %s having traded %s before it was withdrawn, but returned "+
+					"no trade for it, so this adapter cannot say what traded",
+				st.GetOrderId(), resp.Status, resp.ExecutedQty),
+		}, nil
+	}
+	return OrderView{State: state, Fills: fills}, nil
 }
 
 // tradesFor fetches the individual executions behind a filled or partially

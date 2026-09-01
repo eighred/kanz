@@ -3072,8 +3072,12 @@ func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.Order
 			"tv-sync, accounting, and audit will never see this fill's FACT",
 			"order_id", st.GetOrderId())
 	default:
-		// REJECTED today; EXPIRED is not currently reachable (Expire is never
-		// called from this service), but the same reasoning applies if it ever is.
+		// REJECTED, and EXPIRED for a row this build did not write. Both callers
+		// of Expire — a scheduled parent finishing its window, and a venue expiry
+		// adopted in adoptWithdrawal (#924) — stamp outcome_announced_at in the
+		// same write as the state, so an EXPIRED order they produced never reaches
+		// here. One written by an older build, or by a caller that grows without
+		// the stamp, does; the generic outcome below is the honest answer for it.
 		status = commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_REJECTED
 		reason = "order rejected (outcome re-announced after an interrupted delivery)"
 		code = "OUTCOME_RECOVERED"
@@ -3304,7 +3308,135 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 			break
 		}
 	}
+
+	// THE VENUE'S WITHDRAWAL IS WRITTEN LAST, AFTER ITS FILLS (#924), and the
+	// order of those two is the entire safety property of this branch.
+	//
+	// A withdrawn order MAY HAVE PARTIALLY TRADED BEFORE IT WAS PULLED — an IOC
+	// that took 40 of 100 and expired, an order self-trade prevention removed
+	// mid-execution, a cancel that landed after a partial. So the fills are
+	// folded above and the terminal status is written over what remains. Writing
+	// the withdrawal first would make the order terminal, and ApplyFill refuses
+	// every transition on a terminal order: the fund's own executions would be
+	// dropped and the order recorded as having traded nothing. That is strictly
+	// worse than the quarantine this whole change removes, because a freeze is
+	// visible and a fill nobody recorded is not.
+	//
+	// AND IF THE FILLS COMPLETED THE ORDER THERE IS NO WITHDRAWAL LEFT TO WRITE.
+	// The loop above breaks on a terminal state, so an order the venue calls
+	// withdrawn whose fills sum to the full quantity is FILLED and stays FILLED.
+	// The fills are the harder evidence, and writing a withdrawal over them is
+	// the same erasure that stopped #920 from spelling this verdict REJECTED.
+	if view.State == execution.OrderViewCancelled || view.State == execution.OrderViewExpired {
+		if IsTerminal(st) {
+			return nil
+		}
+		return s.adoptWithdrawal(ctx, st, ver, view)
+	}
 	return nil
+}
+
+// adoptWithdrawal records the venue's own withdrawal of an order as terminal:
+// CANCELLED for one the exchange pulled, EXPIRED for one whose time in force
+// elapsed (#924).
+//
+// THE TWO ARE NOT ONE CASE, and the difference is in the book of record rather
+// than in this file. An expiry and a withdrawal are different terminal statuses
+// carrying different FACTs — ORDER_CANCELLED with a cancelled quantity,
+// ORDER_EXPIRED with an unfilled one — so recording an IOC that simply did not
+// fill as "cancelled" would tell an operator somebody pulled it, and recording a
+// self-trade-prevention removal as "expired" would tell them the market moved
+// on. The venue states which; the aggregate can express both; collapsing them
+// here would throw the distinction away between two places that have it.
+//
+// IT IS REACHED ONLY FROM adopt(), AFTER THE FILLS ARE FOLDED AND ONLY WHILE THE
+// ORDER IS STILL LIVE. Both aggregate transitions refuse a terminal order
+// themselves, so the guard is doubled rather than assumed.
+func (s *Service) adoptWithdrawal(ctx context.Context, st *orderpb.OrderState, ver int64, view execution.OrderView) error {
+	now := s.now().UTC()
+	var (
+		next      *orderpb.OrderState
+		lifecycle outbox.Record
+		reason    string
+	)
+	switch view.State {
+	case execution.OrderViewCancelled:
+		withdrawn, cancelledQty, cerr := Cancel(st, now)
+		if cerr != nil {
+			// Unreachable: Reconcile refuses a terminal order before ActionAdopt,
+			// adopt() re-checks after the fold, and Cancel checks again. It is the
+			// last line of defence for the case that matters — writing CANCELLED
+			// over a FILLED order would erase a trade the fund actually received.
+			return fmt.Errorf("oms: refusing to adopt a venue withdrawal for order %s: %w",
+				st.GetOrderId(), cerr)
+		}
+		fact, ferr := s.emitter.CancelledFact(ctx, withdrawn.GetOrderId(), cancelledQty, now)
+		if ferr != nil {
+			return ferr
+		}
+		// cancel_announced_at, NOT outcome_announced_at, and stamped in THIS write.
+		// It is the marker orderOutcomeAnnounced() and handleCancel's
+		// already-CANCELLED branch read for a CANCELLED order; leaving it unset
+		// would have completeCancelAnnouncement republish an ORDER_CANCELLED FACT
+		// for a withdrawal this platform never issued.
+		withdrawn.CancelAnnouncedAt = timestamppb.New(now)
+		next, lifecycle = withdrawn, fact
+		reason = "order withdrawn at the venue"
+
+	case execution.OrderViewExpired:
+		withdrawn, unfilledQty, eerr := Expire(st, now)
+		if eerr != nil {
+			return fmt.Errorf("oms: refusing to adopt a venue expiry for order %s: %w",
+				st.GetOrderId(), eerr)
+		}
+		fact, ferr := s.emitter.ExpiredFact(ctx, withdrawn.GetOrderId(), unfilledQty, now)
+		if ferr != nil {
+			return ferr
+		}
+		// outcome_announced_at here, because EXPIRED has no marker of its own —
+		// the same stamp a scheduled parent's expiry takes in retireIfFinished.
+		withdrawn.OutcomeAnnouncedAt = timestamppb.New(now)
+		next, lifecycle = withdrawn, fact
+		reason = "order expired at the venue"
+
+	default:
+		return fmt.Errorf("oms: adoptWithdrawal was handed a %s view for order %s, which is not a "+
+			"withdrawal; this is a caller defect", view.State, st.GetOrderId())
+	}
+	if view.Reason != "" {
+		reason += ": " + view.Reason
+	}
+
+	// EXECUTED, NOT FAILED. The submit command completed: the order reached the
+	// exchange, the exchange worked it, and this is the exchange's own account of
+	// how it ended. FAILED would report a fault for what is, for an IOC or a FOK,
+	// the ORDINARY outcome — and it is the same status handleCancel reports for a
+	// withdrawal it issued itself.
+	//
+	// IT IS PUBLISHED RATHER THAN ASSUMED ALREADY SENT. This is the recovery
+	// path: the delivery that got the order into this state is by definition one
+	// that failed partway, so the caller may never have been told anything at all.
+	outFact, ferr := s.emitter.OutcomeFact(ctx, next.GetOrderId(),
+		commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED, reason, "", "", now)
+	if ferr != nil {
+		return ferr
+	}
+	// A WITHDRAWN ORDER THAT PARTIALLY TRADED IS STILL A MEASURED DECISION (#866)
+	// — the same call, for the same reason, handleCancel makes. An order that
+	// traded NOTHING produces no record at all, which is what an expired IOC is.
+	announce := s.withAttribution(ctx, next, now, lifecycle, outFact)
+	if err := s.store.Save(ctx, next, ver, announce, ""); err != nil {
+		return err
+	}
+	s.logger.Info("oms adopted a venue withdrawal for an interrupted order",
+		"order_id", next.GetOrderId(), "venue_view", view.State.String(),
+		"status", next.GetStatus().String(),
+		"filled_quantity", dec.FromProto(next.GetFilledQuantity()).FloatString(12))
+	// Flushed here for the same reason every other terminal transition flushes:
+	// the records are durable either way, and this only decides whether the
+	// estate hears now or on the relay's next tick.
+	_, ferr = s.relay.Flush(ctx, next.GetOrderId())
+	return ferr
 }
 
 // quarantine freezes an order whose truth could not be established, and says so

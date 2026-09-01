@@ -76,6 +76,37 @@ func TestReconcilePolicy(t *testing.T) {
 			view: execution.OrderView{State: execution.OrderViewRejected},
 			want: ActionAdopt,
 		},
+		// THE FOUR WITHDRAWAL ROWS (#924). Neither verdict branches on the ack —
+		// the venue has made a positive statement about an order it held, and the
+		// venue is the authority on that — and neither branches on whether fills
+		// came with it. An unfilled IOC the venue expired is the population this
+		// row exists for and it carries none; one pulled after a partial carries
+		// what traded; both ADOPT, and adopt() folds whatever arrived before it
+		// writes the terminal status over the remainder.
+		{
+			name: "venue withdrew it, no ack recorded — adopt the withdrawal",
+			st:   routedOrder(nil),
+			view: execution.OrderView{State: execution.OrderViewCancelled},
+			want: ActionAdopt,
+		},
+		{
+			name: "venue withdrew it after a partial — adopt it with the fills",
+			st:   routedOrder(acked),
+			view: execution.OrderView{State: execution.OrderViewCancelled, Fills: []*orderpb.Fill{{FillId: "f-1"}}},
+			want: ActionAdopt,
+		},
+		{
+			name: "venue expired an unfilled IOC — adopt it, no human",
+			st:   routedOrder(nil),
+			view: execution.OrderView{State: execution.OrderViewExpired},
+			want: ActionAdopt,
+		},
+		{
+			name: "venue expired it after a partial — adopt it with the fills",
+			st:   routedOrder(acked),
+			view: execution.OrderView{State: execution.OrderViewExpired, Fills: []*orderpb.Fill{{FillId: "f-1"}}},
+			want: ActionAdopt,
+		},
 		{
 			name: "nothing was established — freeze",
 			st:   routedOrder(nil),
