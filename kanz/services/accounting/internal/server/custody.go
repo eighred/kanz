@@ -11,12 +11,15 @@ package server
 // capability" pattern this codebase has nine instances of, and the one that makes
 // a control look finished while an operator cannot actually work the queue.
 //
-// A GET AND THREE TRANSITIONS, NOT A CRUD SURFACE. There is deliberately no
-// create and no delete: a break is DETECTED by comparing the book against a
-// custodian statement and is resolved by those two agreeing again. An operator
-// may record what they know about one and may not invent or erase one, which is
-// why SaveBreak refuses to insert and why Resolve refuses while the difference is
-// still there.
+// A GET AND TWO TRANSITIONS, NOT A CRUD SURFACE — and there is deliberately no
+// resolve among them. A break is DETECTED by comparing the book against a
+// custodian statement and is RESOLVED by those two agreeing again, which only a
+// run can establish; Store.UpsertBreaks does it automatically and is the single
+// path into the terminal state. An operator may record what they know about a
+// break (assign it, explain it) and may not invent, erase or close one — which is
+// why SaveBreak refuses to insert and why custody.Break has no Resolve method.
+// See the note in custody/lifecycle.go for why a "resolve if the sides agree"
+// route cannot be made safe without re-running the comparison.
 
 import (
 	"context"
@@ -56,7 +59,6 @@ func (s *Server) custodyRoutes() {
 	s.mux.HandleFunc("GET /v1/custody/breaks", s.handleListBreaks)
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/assign", s.handleAssignBreak)
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/explain", s.handleExplainBreak)
-	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/resolve", s.handleResolveBreak)
 }
 
 // breakView is one break as an operator sees it. Figures are rendered as exact
@@ -204,35 +206,5 @@ func (s *Server) handleExplainBreak(w http.ResponseWriter, r *http.Request) {
 			return errBadTransitionInput
 		}
 		return b.Explain(req.Explanation, now)
-	})
-}
-
-// handleResolveBreak resolves a break ONLY if the latest stored state no longer
-// shows it outstanding-and-detected.
-//
-// THE stillDetected ARGUMENT IS READ FROM THE STORE, NEVER FROM THE REQUEST. A
-// caller asserting "this is fixed" is the exact thing the check exists to
-// prevent: a break resolved while the book and the custodian still disagree is
-// the control being silenced by hand, which leaves the number wrong and the queue
-// looking clean. The legitimate path is that the cause is corrected, the next run
-// stops detecting it, and it is resolved then — which the scheduled run already
-// does automatically.
-func (s *Server) handleResolveBreak(w http.ResponseWriter, r *http.Request) {
-	s.transition(w, r, func(b *custody.Break, now time.Time) error {
-		outstanding, err := s.breaks.OutstandingBreaks(r.Context())
-		if err != nil {
-			return err
-		}
-		stillDetected := false
-		for _, o := range outstanding {
-			// LastSeenAt equal to the newest run's completion is what "the latest
-			// run still finds it" means; the store only keeps outstanding breaks
-			// in this set, so presence here is the answer.
-			if o.BreakID == b.BreakID && o.LastSeenAt.After(o.StatusChangedAt) {
-				stillDetected = true
-				break
-			}
-		}
-		return b.Resolve(stillDetected, now)
 	})
 }

@@ -207,6 +207,24 @@ func (s Subject) Key() string {
 	return s.PortfolioID + "|" + s.CustodianID + "|" + BusinessDay(s.BusinessDate).Format("2006-01-02")
 }
 
+// IDSeparator joins the components of a break id and a subject key.
+//
+// NOTHING THAT GOES INTO EITHER MAY CONTAIN IT, and that is CHECKED rather than
+// assumed — see idComponent. A comment claiming a property the code does not
+// enforce is how an identity bug survives review: with a portfolio "a|b" and a
+// custodian "c", and another portfolio "a" with custodian "b|c", both produce the
+// same break id prefix, so two funds' breaks would share one row and one age.
+const IDSeparator = "|"
+
+// idComponent refuses a value that would corrupt a derived identity.
+func idComponent(field, value string) error {
+	if strings.Contains(value, IDSeparator) {
+		return fmt.Errorf("custody: %s %q contains %q, which is the id separator — "+
+			"two different subjects would derive the same break id", field, value, IDSeparator)
+	}
+	return nil
+}
+
 // Validate refuses a subject that cannot identify a reconciliation.
 func (s Subject) Validate() error {
 	switch {
@@ -217,7 +235,10 @@ func (s Subject) Validate() error {
 	case s.BusinessDate.IsZero():
 		return errors.New("custody: subject has no business_date")
 	}
-	return nil
+	if err := idComponent("portfolio_id", s.PortfolioID); err != nil {
+		return err
+	}
+	return idComponent("custodian_id", s.CustodianID)
 }
 
 // Validate refuses a statement the control cannot act on.
@@ -241,10 +262,19 @@ func (s Statement) Validate() error {
 		if qty == nil {
 			return fmt.Errorf("custody: statement position %q has no quantity", instrument)
 		}
+		// The instrument becomes a break's key, which becomes part of its derived
+		// id. A separator here would collide two instruments onto one break — one
+		// row, one age, one operator's investigation covering two differences.
+		if err := idComponent("instrument_id", instrument); err != nil {
+			return err
+		}
 	}
 	for ccy, bal := range s.Cash {
 		if bal == nil {
 			return fmt.Errorf("custody: statement cash %q has no balance", ccy)
+		}
+		if err := idComponent("currency_code", ccy); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -306,11 +336,13 @@ type Break struct {
 // materially different break about the same instrument, and collapsing the two
 // would silently carry the age of the smaller problem onto the larger one.
 //
-// The separator is one the components cannot contain: an instrument id or a
-// currency code with a '|' in it would let two different breaks collide on one
-// id, which is the identity bug this function exists to avoid.
+// THE SEPARATOR IS ENFORCED, NOT ASSUMED. Subject.Validate and
+// Statement.Validate both refuse a component containing IDSeparator, because a
+// portfolio "a|b" with custodian "c" and a portfolio "a" with custodian "b|c"
+// would otherwise derive the same id — two funds' breaks sharing one row, one
+// age and one operator's investigation.
 func BreakID(portfolioID, custodianID string, kind recon.BreakKind, key string) string {
-	return strings.Join([]string{portfolioID, custodianID, kind.String(), key}, "|")
+	return strings.Join([]string{portfolioID, custodianID, kind.String(), key}, IDSeparator)
 }
 
 // FromRecon builds the working items for a run's detected discrepancies. now is
