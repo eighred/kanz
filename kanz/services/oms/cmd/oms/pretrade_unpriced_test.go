@@ -48,13 +48,13 @@ var unpricedBase = time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 // short-circuits and down to the price check, which is the branch under test.
 type governedMandates struct{}
 
-func (governedMandates) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, bool, error) {
+func (governedMandates) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, comp.Governance, error) {
 	return &compliancepb.Mandate{
 		MandateId: "m1", TenantId: "acme", PortfolioId: "PF1", Version: 1,
 		Rules: []*compliancepb.Rule{{
 			RuleId: "r1", Type: compliancepb.RuleType_RULE_TYPE_CONCENTRATION,
 		}},
-	}, true, nil
+	}, comp.Governed, nil
 }
 
 // unpricedRig builds the gate the composition root builds, over a mark fold whose

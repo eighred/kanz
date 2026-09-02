@@ -42,8 +42,8 @@ import (
 // applied: the shape MandateRegistry takes on after a poison ConfigChanged.
 type unreadableMandates struct{}
 
-func (unreadableMandates) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, bool, error) {
-	return nil, false, comp.ErrMandateUnreadable
+func (unreadableMandates) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, comp.Governance, error) {
+	return nil, comp.GovernanceUnspecified, comp.ErrMandateUnreadable
 }
 
 func unreadableGate(t *testing.T) *COMP01Gate {

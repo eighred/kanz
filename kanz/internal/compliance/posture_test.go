@@ -28,8 +28,8 @@ func (postureBooks) Book(context.Context, string) (*Book, error) { return &Book{
 
 type postureMandates struct{}
 
-func (postureMandates) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, bool, error) {
-	return nil, false, nil
+func (postureMandates) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, Governance, error) {
+	return nil, NeverMandated, nil
 }
 
 type postureClassifier struct{}

@@ -182,7 +182,11 @@ func logPosture(cfg config, s scrape) {
 	sim, _ := s.value("kanz_oms_simulated_venues")
 	log.Printf("orderflow: posture — simulated venues=%.0f, live adapters=0, admission p99 budget=%s",
 		sim, cfg.budget)
-	if v, ok := s.value("kanz_compliance_ungoverned_orders_total"); ok {
+	// sum, NOT value: this family gained a `governance` label (#926) so it exports
+	// one series per ungoverned state, and scrape.value documents that reaching it
+	// with a labelled family is a caller error — it would report the first series
+	// and call it the total. The number wanted here is the whole family.
+	if v, _, present := s.sum("kanz_compliance_ungoverned_orders_total"); present {
 		log.Printf("orderflow: kanz_compliance_ungoverned_orders_total=%.0f at the start of the run. "+
 			"If this moves, the portfolio is under NO mandate and the gate returns at its first "+
 			"branch — the run would be measuring a short circuit", v)

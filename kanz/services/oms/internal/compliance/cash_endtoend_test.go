@@ -89,8 +89,8 @@ func buyingPowerMandate(portfolioID string) *compliancepb.Mandate {
 
 type stubMandate struct{ m *compliancepb.Mandate }
 
-func (s stubMandate) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, bool, error) {
-	return s.m, true, nil
+func (s stubMandate) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, comp.Governance, error) {
+	return s.m, comp.Governed, nil
 }
 
 func gateOver(t *testing.T, v *cashview.View) *comp.PreTradeGate {

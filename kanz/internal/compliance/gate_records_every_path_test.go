@@ -39,8 +39,8 @@ import (
 // erroringMandates returns a fixed error from the mandate lookup.
 type erroringMandates struct{ err error }
 
-func (m erroringMandates) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, bool, error) {
-	return nil, false, m.err
+func (m erroringMandates) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, Governance, error) {
+	return nil, GovernanceUnspecified, m.err
 }
 
 // erroringBooks fails the book load — the transient shape.

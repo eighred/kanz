@@ -127,7 +127,7 @@ func TestPreTradeGate_RecordsDecision(t *testing.T) {
 func TestAnUngovernedPortfolioIsNotSilent(t *testing.T) {
 	var counted []string
 	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, NewMandateRegistry(), nil, nil, nil,
-		WithUngovernedObserver(func(_, pf string) { counted = append(counted, pf) }))
+		WithUngovernedObserver(func(_, pf string, _ Governance) { counted = append(counted, pf) }))
 
 	dec, err := g.Evaluate(context.Background(), OrderDelta{TenantID: "t1", PortfolioID: "unmandated", AsOf: time.Now()})
 	if err != nil {
@@ -156,7 +156,7 @@ func TestAMandateWithNoRulesIsGovernedNotUngoverned(t *testing.T) {
 	})
 	var counted int
 	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, reg, nil, nil, nil,
-		WithUngovernedObserver(func(string, string) { counted++ }))
+		WithUngovernedObserver(func(string, string, Governance) { counted++ }))
 
 	dec, err := g.Evaluate(context.Background(), OrderDelta{TenantID: "t1", PortfolioID: "p1", AsOf: time.Now()})
 	if err != nil {
@@ -218,7 +218,7 @@ func TestRequireMandateStillAdmitsAZeroRuleMandate(t *testing.T) {
 	counted := 0
 	g := NewPreTradeGate(NewEngine(nil), MapBookSource{"p1": currentBook()}, reg, nil, nil, nil,
 		WithRequireMandate(true),
-		WithUngovernedObserver(func(string, string) { counted++ }))
+		WithUngovernedObserver(func(string, string, Governance) { counted++ }))
 
 	dec, err := g.Evaluate(context.Background(), OrderDelta{
 		TenantID: "t1", PortfolioID: "p1", InstrumentID: "AAPL", AsOf: t0,

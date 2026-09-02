@@ -58,7 +58,7 @@ func TestTwoTenantsSharingAPortfolioNameGetTheirOwnMandate(t *testing.T) {
 		{"beta", 10},
 	} {
 		m, ok, err := reg.Mandate(context.Background(), tc.tenant, "growth", t0.Add(time.Hour))
-		if err != nil || !ok {
+		if err != nil || ok.NoMandate() {
 			t.Fatalf("%s/growth did not resolve: ok=%v err=%v", tc.tenant, ok, err)
 		}
 		if got := capOf(t, m); got != tc.wantCap {
@@ -80,7 +80,7 @@ func TestAVersionCollisionDoesNotOverwriteTheOtherTenantsMandate(t *testing.T) {
 	mustPut(t, reg, forTenant("beta", "growth", 1, 10)) // SAME version number
 
 	m, ok, err := reg.Mandate(context.Background(), "acme", "growth", t0.Add(time.Hour))
-	if err != nil || !ok {
+	if err != nil || ok.NoMandate() {
 		t.Fatalf("acme's mandate was ERASED by another tenant publishing the same version: ok=%v err=%v", ok, err)
 	}
 	if got := capOf(t, m); got != 60 {
@@ -130,7 +130,7 @@ func TestTheSharedSystemBucketStillResolvesASingleTenantsMandate(t *testing.T) {
 	mustPut(t, reg, forTenant("acme", "growth", 1, 60))
 
 	m, ok, err := reg.Mandate(context.Background(), bus.SystemTenant, "growth", t0.Add(time.Hour))
-	if err != nil || !ok {
+	if err != nil || ok.NoMandate() {
 		t.Fatalf("a __system__ lookup stopped resolving the only mandate there is: ok=%v err=%v", ok, err)
 	}
 	if got := capOf(t, m); got != 60 {
@@ -149,7 +149,7 @@ func TestTheSharedSystemBucketRefusesWhenTwoTenantsShareAPortfolioName(t *testin
 	mustPut(t, reg, forTenant("beta", "growth", 1, 10))
 
 	_, ok, err := reg.Mandate(context.Background(), bus.SystemTenant, "growth", t0.Add(time.Hour))
-	if ok {
+	if !ok.NoMandate() {
 		t.Fatal("an ambiguous __system__ lookup RESOLVED — it picked one tenant's mandate to " +
 			"govern the other's book, which is #243 with extra steps")
 	}
@@ -176,7 +176,7 @@ func TestARealTenantDoesNotInheritAnotherTenantsMandate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a miss for a real tenant is not an error: %v", err)
 	}
-	if ok {
+	if !ok.NoMandate() {
 		t.Fatalf("tenant acme was handed a mandate filed under %q (cap %d%%) — a mandate is "+
 			"not transferable between tenants (#243)", bus.SystemTenant, capOf(t, m))
 	}
@@ -193,7 +193,7 @@ func TestAnUntenantedLookupIsRefusedRatherThanGuessed(t *testing.T) {
 	mustPut(t, reg, forTenant("acme", "growth", 1, 60))
 
 	_, ok, err := reg.Mandate(context.Background(), "", "growth", t0.Add(time.Hour))
-	if ok {
+	if !ok.NoMandate() {
 		t.Fatal("a lookup with NO tenant returned a mandate")
 	}
 	if !errors.Is(err, ErrMandateTenantUnresolved) {

@@ -161,12 +161,12 @@ func TestPreTradeGatePortfolioWarningsStillSayItOnce(t *testing.T) {
 	g := NewPreTradeGate(nil, nil, nil, nil, nil, discardLogger())
 
 	for i := 0; i < 100; i++ {
-		g.noteUngoverned("tenant-a", "flagship")
+		g.noteUngoverned("tenant-a", "flagship", NeverMandated)
 	}
 	if got := len(g.warned.stable); got != 1 {
 		t.Fatalf("100 orders against one ungoverned portfolio left %d ledger entries, want 1", got)
 	}
-	g.noteUngoverned("tenant-b", "flagship")
+	g.noteUngoverned("tenant-b", "flagship", NeverMandated)
 	if got := len(g.warned.stable); got != 2 {
 		t.Fatalf("a second tenant's ungoverned book left %d entries, want 2 — the tenant must stay "+
 			"in the key (#243)", got)

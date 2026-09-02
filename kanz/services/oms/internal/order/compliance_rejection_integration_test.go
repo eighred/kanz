@@ -171,7 +171,7 @@ func TestAMandateRefusesAnOrderOverARealSpine(t *testing.T) {
 
 	armed := false
 	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
-		if _, ok, _ := registry.Mandate(ctx, tenant, portfolio, time.Now()); ok {
+		if _, gov, _ := registry.Mandate(ctx, tenant, portfolio, time.Now()); gov == comp.Governed {
 			armed = true
 			break
 		}

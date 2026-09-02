@@ -50,25 +50,30 @@ func TestMandateRegistry_PointInTimeResolution(t *testing.T) {
 	cases := []struct {
 		name    string
 		asOf    time.Time
-		wantOK  bool
+		wantGov Governance
 		wantVer uint64
 	}{
-		{"before any version", t0.Add(-time.Hour), false, 0},
-		{"during v1", t0.Add(5 * 24 * time.Hour), true, 1},
-		{"on v2 effective", v2Eff, true, 2},
-		{"during v2", t0.Add(15 * 24 * time.Hour), true, 2},
-		{"zero asOf ⇒ latest", time.Time{}, true, 2},
+		// THE LAPSED CASE, AND IT WAS ALREADY HERE UNDER A BOOLEAN (#926). Two
+		// versions exist for this key — the portfolio IS mandated — and neither is
+		// in effect this early. That is a different fact from "nobody has mandated
+		// this portfolio", and until the verdict replaced the bool the registry
+		// answered both identically.
+		{"before any version ⇒ lapsed, not never-mandated", t0.Add(-time.Hour), MandateLapsed, 0},
+		{"during v1", t0.Add(5 * 24 * time.Hour), Governed, 1},
+		{"on v2 effective", v2Eff, Governed, 2},
+		{"during v2", t0.Add(15 * 24 * time.Hour), Governed, 2},
+		{"zero asOf ⇒ latest", time.Time{}, Governed, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m, ok, err := reg.Mandate(context.Background(), "t1", "p1", tc.asOf)
+			m, gov, err := reg.Mandate(context.Background(), "t1", "p1", tc.asOf)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if ok != tc.wantOK {
-				t.Fatalf("ok: want %v got %v", tc.wantOK, ok)
+			if gov != tc.wantGov {
+				t.Fatalf("governance: want %s got %s", tc.wantGov, gov)
 			}
-			if ok && m.GetVersion() != tc.wantVer {
+			if gov == Governed && m.GetVersion() != tc.wantVer {
 				t.Fatalf("version: want %d got %d", tc.wantVer, m.GetVersion())
 			}
 		})
@@ -80,7 +85,7 @@ func TestMandateRegistry_IdempotentReplay(t *testing.T) {
 	mustPut(t, reg, versioned(1, t0))
 	mustPut(t, reg, versioned(1, t0)) // replay same version
 	m, ok, _ := reg.Mandate(context.Background(), "t1", "p1", t0)
-	if !ok || m.GetVersion() != 1 {
+	if ok.NoMandate() || m.GetVersion() != 1 {
 		t.Fatalf("idempotent replay broke resolution: ok=%v m=%v", ok, m)
 	}
 }
@@ -144,7 +149,7 @@ func TestMandateLoader_AppliesOnlyMandateKeys(t *testing.T) {
 	if err != nil || applied == nil {
 		t.Fatalf("mandate key should apply: m=%v err=%v", applied, err)
 	}
-	if _, ok, _ := reg.Mandate(context.Background(), "t1", "p1", t0); !ok {
+	if _, ok, _ := reg.Mandate(context.Background(), "t1", "p1", t0); ok.NoMandate() {
 		t.Fatalf("applied mandate not resolvable")
 	}
 }
