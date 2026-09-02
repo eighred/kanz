@@ -59,7 +59,7 @@ func TestOKXDemo_ReporterMapsLiveMarginState(t *testing.T) {
 	rest := newOKXREST(okxRestConfig{
 		BaseURL: envOrDefault("OKX_TESTNET_BASE", "https://www.okx.com"),
 		APIKey:  key, APISecret: secret, Passphrase: pass,
-		Bucket:     NewWeightBucket(60, 2*time.Second, nil),
+		Buckets:    newOKXBuckets(NewWeightBucket(60, 2*time.Second, nil), nil),
 		HTTPClient: NewExchangeHTTPClient(0),
 		// Demo, for the reason the sibling harness gives: these are demo keys, and
 		// without the header they ask production about an account that does not

@@ -139,11 +139,11 @@ func publishQuote(t *testing.T, p *bus.Producer, instrument string) {
 		Domain:        "market",
 		EventTime:     time.Now().UTC(),
 		PartitionKey:  instrument,
-		// NO IdempotencyKey. For a non-COMMAND event the producer sets
+		// NO IdempotencyKey. For a non-COMMAND event bus.Producer.stamp sets
 		// idempotency_key = event_id, and supplying a DIFFERENT one is refused
-		// outright ("idempotency_key must equal event_id for non-COMMAND events",
-		// producer.go:351) — this publish never reached the broker at all, so the
-		// test failed before it could assert anything about the spine.
+		// outright ("idempotency_key must equal event_id for non-COMMAND events")
+		// — this publish never reached the broker at all, so the test failed
+		// before it could assert anything about the spine.
 		//
 		// A FACT'S IDENTITY IS ITS event_id, and that is the reason for the rule
 		// rather than a formality: a second, caller-chosen key would let one fact

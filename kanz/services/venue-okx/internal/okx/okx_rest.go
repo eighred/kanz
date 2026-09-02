@@ -24,7 +24,7 @@ type okxREST struct {
 	apiSecret  []byte
 	passphrase string
 	httpc      *http.Client
-	bucket     *WeightBucket
+	buckets    *okxBuckets
 	now        func() time.Time
 	onThrottle func()
 	// mode decides which OKX book every signed request from this client reaches
@@ -40,7 +40,7 @@ type okxRestConfig struct {
 	APISecret  string
 	Passphrase string
 	HTTPClient *http.Client
-	Bucket     *WeightBucket
+	Buckets    *okxBuckets
 	Now        func() time.Time
 	OnThrottle func()
 	Mode       exchangeauth.OKXTradingMode
@@ -58,7 +58,7 @@ func newOKXREST(cfg okxRestConfig) *okxREST {
 	}
 	return &okxREST{
 		baseURL: cfg.BaseURL, apiKey: cfg.APIKey, apiSecret: []byte(cfg.APISecret),
-		passphrase: cfg.Passphrase, httpc: cfg.HTTPClient, bucket: cfg.Bucket,
+		passphrase: cfg.Passphrase, httpc: cfg.HTTPClient, buckets: cfg.Buckets,
 		now: cfg.Now, onThrottle: cfg.OnThrottle, mode: cfg.Mode,
 	}
 }
@@ -103,7 +103,7 @@ type okxQueryResp struct {
 
 // placeOrder places a signed order (POST /api/v5/trade/order, weight 1).
 func (c *okxREST) placeOrder(ctx context.Context, body map[string]string) (*okxPlaceData, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}
@@ -128,7 +128,7 @@ func (c *okxREST) placeOrder(ctx context.Context, body map[string]string) (*okxP
 // queryOrder fetches an order's true state by client order id (GET
 // /api/v5/trade/order, weight 1) — the idempotency-recovery path.
 func (c *okxREST) queryOrder(ctx context.Context, instID, clOrdID string) (*okxOrder, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}
@@ -169,16 +169,19 @@ type okxFill struct {
 	TS      string `json:"ts"`
 }
 
-// okxFillsHistoryWeight is what one /trade/fills-history request costs against
-// this connector's single request budget.
+// THE 6-UNIT WEIGHT THAT USED TO LIVE HERE IS NOW A BUCKET (#933).
 //
-// THE BUDGET IS ONE NUMBER STANDING IN FOR OKX'S PER-ENDPOINT LIMITS, and its
-// default (60 per 2s) is /trade/order's. fills-history's own limit is 10 per 2
-// seconds — six times tighter — so it is charged six units. Undercharging it
-// would let the recovery path spend a budget it does not have and collect
-// rate-limit refusals on the placement path, which is the one path that must
-// never be starved.
-const okxFillsHistoryWeight = 6
+// okxFillsHistoryWeight expressed this endpoint's real 10-per-2s limit in units
+// of a bucket sized 60-per-2s for /trade/order — six times tighter, so six units.
+// That translation was correct arithmetic and the wrong model: OKX meters PER
+// ENDPOINT, so the two are independent remote budgets and charging one against
+// the other made the adapter self-throttle at 7 traded orders per window
+// (measured, not derived — see okx_buckets_test.go) where the venue permits its
+// own 10 fills-history calls alongside 60 placements.
+//
+// The limit now lives in okx_buckets.go as familyFillsHistory's own bucket, and a
+// call against it costs 1. Nothing about the remote limit changed; only which
+// budget it is drawn from.
 
 // fillsHistory lists the individual executions behind one order (GET
 // /api/v5/trade/fills-history).
@@ -196,7 +199,7 @@ const okxFillsHistoryWeight = 6
 // as a venue refusal. The caller decides what an empty answer means, and its two
 // callers answer it differently — see okx_venue.go's tradedFills.
 func (c *okxREST) fillsHistory(ctx context.Context, instID, ordID string) ([]okxFill, error) {
-	if !c.bucket.Allow(okxFillsHistoryWeight) {
+	if !c.buckets.allow(familyFillsHistory, 1) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}
@@ -240,7 +243,7 @@ func (c *okxREST) sweepMarket(ctx context.Context, instID, side, sz, clOrdID str
 // deterministic clOrdId the submit stamped, so a retried cancel resolves to the
 // original order rather than racing a second one.
 func (c *okxREST) cancelOrder(ctx context.Context, instID, clOrdID string) (*okxPlaceData, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}
@@ -278,7 +281,7 @@ type okxBalances struct {
 
 // balances fetches the account cash balances per currency (signed, weight 1).
 func (c *okxREST) balances(ctx context.Context) (map[string]string, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}
@@ -309,7 +312,7 @@ func (c *okxREST) balances(ctx context.Context) (map[string]string, error) {
 // The signature, request, and uid-decode/validation live once in exchangeauth — this
 // method only spends the weight budget and delegates.
 func (c *okxREST) ExchangeAccountID(ctx context.Context) (string, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return "", ErrRateLimited
 	}
@@ -334,7 +337,7 @@ func (c *okxREST) ExchangeAccountID(ctx context.Context) (string, error) {
 // tickerPrice returns the last price for an instrument (public GET
 // /api/v5/market/ticker, unsigned) — feeds the MarkSource seam.
 func (c *okxREST) tickerPrice(ctx context.Context, instID string) (string, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return "", ErrRateLimited
 	}
@@ -494,7 +497,7 @@ type okxAlgoResp struct {
 // sCode "0" means the order itself was accepted — so the caller's success and
 // idempotency handling is unchanged.
 func (c *okxREST) placeAlgoOrder(ctx context.Context, body map[string]string) (*okxPlaceData, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}
@@ -523,7 +526,7 @@ func (c *okxREST) placeAlgoOrder(ctx context.Context, body map[string]string) (*
 // the recovery path here needs no symbol mapping, so it cannot fail for the one
 // reason the regular path can.
 func (c *okxREST) queryAlgoOrder(ctx context.Context, algoClOrdID string) (*okxAlgoOrder, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}
@@ -553,7 +556,7 @@ func (c *okxREST) queryAlgoOrder(ctx context.Context, algoClOrdID string) (*okxA
 // the original order and this connector never has to have remembered an
 // exchange-assigned identifier.
 func (c *okxREST) cancelAlgoOrder(ctx context.Context, instID, algoClOrdID string) (*okxPlaceData, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}
@@ -599,7 +602,7 @@ func (c *okxREST) cancelAlgoOrder(ctx context.Context, instID, algoClOrdID strin
 // is past the point where this backstop helps, and paging further would turn one
 // recon tick into an unbounded walk of the order history.
 func (c *okxREST) queryTriggeredOrder(ctx context.Context, instID, algoClOrdID string) (*okxOrder, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}

@@ -95,7 +95,7 @@ func TestOKXQuery_TransportFailureIsAnErrorNeverUnknown(t *testing.T) {
 func TestOKXQuery_RateLimitedIsAnErrorNeverUnknown(t *testing.T) {
 	f := newFakeOKX(t)
 	bucket := NewWeightBucket(0, 2*time.Second, nil) // nothing is affordable
-	rest := newOKXREST(okxRestConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Bucket: bucket, Mode: exchangeauth.OKXDemo})
+	rest := newOKXREST(okxRestConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Buckets: newOKXBuckets(bucket, nil), Mode: exchangeauth.OKXDemo})
 	v := &OKXVenue{mic: "OKX", rest: rest, symbols: StaticSymbolMap{"BTC-USD": "BTC-USDT"}, now: time.Now}
 
 	view, err := v.QueryOrder(context.Background(), okxLimit("o1"))

@@ -58,7 +58,7 @@ func newFakeMarginOKX(t *testing.T) *fakeMarginOKX {
 func marginRESTOver(f *fakeMarginOKX) *okxREST {
 	return newOKXREST(okxRestConfig{
 		BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p",
-		Bucket: NewWeightBucket(60, 2*time.Second, nil), Mode: exchangeauth.OKXDemo,
+		Buckets: newOKXBuckets(NewWeightBucket(60, 2*time.Second, nil), nil), Mode: exchangeauth.OKXDemo,
 	})
 }
 

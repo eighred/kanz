@@ -136,7 +136,7 @@ func TestOKXReconStateHealedEmitsAValidEnvelope(t *testing.T) {
 	r := newOKXReconciler(OKXReconcilerConfig{
 		REST: newOKXREST(okxRestConfig{
 			BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p",
-			Bucket: bucket, Mode: exchangeauth.OKXDemo,
+			Buckets: newOKXBuckets(bucket, nil), Mode: exchangeauth.OKXDemo,
 		}),
 		Symbols:  StaticSymbolMap{"BTC-USD": "BTC-USDT"},
 		Expected: exp, Pub: prod, Venue: "OKX", Tenant: "fund-alpha",
@@ -175,7 +175,7 @@ func TestOKXReconBalanceReconciledEmitsAValidEnvelope(t *testing.T) {
 	r := newOKXReconciler(OKXReconcilerConfig{
 		REST: newOKXREST(okxRestConfig{
 			BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p",
-			Bucket: bucket, Mode: exchangeauth.OKXDemo,
+			Buckets: newOKXBuckets(bucket, nil), Mode: exchangeauth.OKXDemo,
 		}),
 		Symbols: StaticSymbolMap{"BTC-USD": "BTC-USDT"},
 		// Expected must be non-nil even when empty — the same fixture requirement

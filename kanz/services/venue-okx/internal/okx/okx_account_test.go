@@ -18,7 +18,7 @@ func okxRESTOver(f *fakeOKX) *okxREST {
 		APIKey:     "k",
 		APISecret:  "s",
 		Passphrase: "p",
-		Bucket:     NewWeightBucket(60, 2*time.Second, nil),
+		Buckets:    newOKXBuckets(NewWeightBucket(60, 2*time.Second, nil), nil),
 		Mode:       exchangeauth.OKXDemo,
 	})
 }
