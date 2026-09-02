@@ -69,7 +69,7 @@ func (h *storeLogCapture) hasWarnContaining(substrs ...string) bool {
 func TestOpenStoreRefusesAnUnaskedForEphemeralLedger(t *testing.T) {
 	h := &storeLogCapture{}
 
-	store, closeFn, err := openStore(context.Background(), config.Config{}, slog.New(h))
+	store, _, closeFn, err := openStore(context.Background(), config.Config{}, slog.New(h))
 	if err == nil {
 		if closeFn != nil {
 			closeFn()
@@ -102,7 +102,7 @@ func TestOpenStoreRefusesAnUnaskedForEphemeralLedger(t *testing.T) {
 func TestOpenStoreWarnsAndReportsUndurableWhenEphemeralIsAcceptedOutLoud(t *testing.T) {
 	h := &storeLogCapture{}
 
-	store, closeFn, err := openStore(context.Background(),
+	store, _, closeFn, err := openStore(context.Background(),
 		config.Config{AllowEphemeralLedger: true}, slog.New(h))
 	if err != nil {
 		t.Fatalf("openStore with AllowEphemeralLedger: %v", err)

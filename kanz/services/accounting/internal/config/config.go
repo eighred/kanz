@@ -38,6 +38,29 @@ type Config struct {
 	Source string
 	// ConsumerGroup is the durable consumer name the fill subjects subscribe under.
 	ConsumerGroup string
+
+	// CustodyStatementSubject is where custodian statements arrive (#962). Empty
+	// ⇒ no statement consumer.
+	CustodyStatementSubject string
+	// CustodyPairs are the "portfolio:custodian" pairs the scheduled
+	// reconciliation covers.
+	//
+	// AN EMPTY LIST DISABLES THE CONTROL ENTIRELY, and the composition root says
+	// so at ERROR rather than starting a scheduler with nothing to do. The
+	// pre-#962 estate reconciled only when a human posted a statement by hand; a
+	// scheduler configured with no pairs reproduces exactly that, with the added
+	// cost of looking configured.
+	CustodyPairs []string
+	// CustodyInterval is how often each pair is reconciled.
+	CustodyInterval time.Duration
+	// CustodyLagDays is how many days back from the run instant the reconciled
+	// business date sits. A custodian states holdings as of a CLOSE and transmits
+	// afterwards, so 0 would conclude NO_STATEMENT permanently and train readers
+	// to ignore the alert.
+	CustodyLagDays int
+	// CustodyTolerance is the absolute difference at or below which the book and
+	// the custodian are treated as agreeing. Empty ⇒ exact match required.
+	CustodyTolerance string
 	// FillSubjects are the order.v1 fill FACT subjects folded into the journal.
 	FillSubjects []string
 	// CashSubjects are the accounting.v1 cash-movement FACT subjects folded into
@@ -125,6 +148,24 @@ var DefaultFillSubjects = []string{fillfact.SubjectFilled, fillfact.SubjectParti
 // consumer folds (WIRE-01f) — the wildcard over the cashmove.Publisher subjects.
 var DefaultCashSubjects = []string{"accounting.cash.>"}
 
+// DefaultCustodyStatementSubject is where a custodian feed adapter announces a
+// statement (#962). The per-custodian adapters that translate SWIFT MT535/MT940
+// or a prime broker's SFTP drop into this canonical shape are deferred to
+// #105/#106, which have real feeds to develop against; the subject and the
+// control behind it exist now so an adapter has somewhere to publish.
+const DefaultCustodyStatementSubject = "accounting.custody.statement"
+
+// DefaultCustodyInterval is how often each (portfolio, custodian) pair is
+// reconciled. Daily is the custodian's own cadence; more often simply
+// re-reconciles the same close.
+const DefaultCustodyInterval = 24 * time.Hour
+
+// DefaultCustodyLagDays is the business-date lag. ONE, not zero: a custodian
+// states holdings as of a CLOSE and transmits afterwards, so reconciling "today"
+// during today compares a still-moving book against a statement that cannot exist
+// yet — every run would conclude NO_STATEMENT and the alert would never clear.
+const DefaultCustodyLagDays = 1
+
 // DefaultSnapshotInterval is how often the ledger checkpoint job runs when
 // ACCOUNTING_SNAPSHOT_INTERVAL is unset. Five minutes bounds the worst-case
 // tail a NAV request folds to five minutes of fills for one portfolio, at a
@@ -173,6 +214,15 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	custodyInterval, err := env.Duration("ACCOUNTING_CUSTODY_INTERVAL", DefaultCustodyInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	custodyLagDays, err := env.Int("ACCOUNTING_CUSTODY_LAG_DAYS", DefaultCustodyLagDays)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Listen:        env.Or("ACCOUNTING_LISTEN", ":8101"),
 		MetricsListen: env.Or("ACCOUNTING_METRICS_LISTEN", ":8080"),
@@ -190,6 +240,12 @@ func Load() (Config, error) {
 
 		SnapshotInterval: snapshotInterval,
 		SnapshotBatch:    snapshotBatch,
+
+		CustodyStatementSubject: env.Or("ACCOUNTING_CUSTODY_STATEMENT_SUBJECT", DefaultCustodyStatementSubject),
+		CustodyPairs:            env.SplitList(os.Getenv("ACCOUNTING_CUSTODY_PAIRS")),
+		CustodyInterval:         custodyInterval,
+		CustodyLagDays:          custodyLagDays,
+		CustodyTolerance:        os.Getenv("ACCOUNTING_CUSTODY_TOLERANCE"),
 
 		OTLPEndpoint: os.Getenv("ACCOUNTING_OTLP_ENDPOINT"),
 		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),

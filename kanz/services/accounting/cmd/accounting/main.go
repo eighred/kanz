@@ -29,8 +29,11 @@ import (
 	"github.com/eighred/kanz/pkg/transport"
 	accounting "github.com/eighred/kanz/services/accounting/internal"
 	"github.com/eighred/kanz/services/accounting/internal/cashmove"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/eighred/kanz/services/accounting/internal/config"
 	"github.com/eighred/kanz/services/accounting/internal/consume"
+	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"github.com/eighred/kanz/services/accounting/internal/fxfeed"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/eighred/kanz/services/accounting/internal/server"
@@ -136,7 +139,7 @@ func run() int {
 	// and none occurred": today the book looks identical either way.
 	stateEntrySourcePosture(obs.Registry, logger, cfg)
 
-	store, closeStore, err := openStore(ctx, cfg, logger)
+	store, ledgerPool, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
 		return 2
@@ -164,8 +167,15 @@ func run() int {
 	// NO WithMetrics: /metrics moved to its own listener (#447). See the split
 	// below — an API that shares the scraped port is reachable from
 	// kanz-observability whatever the NetworkPolicy says.
+	// THE CUSTODY BREAK QUEUE AND THE SCHEDULED RUNS SHARE ONE STORE (#962).
+	// Built here rather than inside runConsumer because the operator surface on
+	// the server needs the same instance: two stores would show an operator an
+	// empty queue while the scheduler filled another one, and every assignment
+	// they made would be written where nothing reads it.
+	custodyStore := newCustodyStore(ledgerPool)
 	opts := []server.Option{
 		server.WithSnapshotMetrics(snapMetrics),
+		server.WithBreakStore(custodyStore),
 	}
 	liveFX, err := buildLiveFX(cfg, &opts)
 	if err != nil {
@@ -261,7 +271,7 @@ func run() int {
 		consumers.Add(1)
 		go func() {
 			defer consumers.Done()
-			if err := runConsumer(ctx, cfg, store, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runConsumer(ctx, cfg, store, ledgerPool, custodyStore, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("fill consumer stopped with error", "err", err)
 				fatal.Raise(err)
 			}
@@ -428,10 +438,14 @@ func awaitConsumers(consumers *sync.WaitGroup, logger *slog.Logger) {
 // can only mean no DSN was ever configured — precisely the case that must not be
 // silent. Every shipped manifest mounts one, so this refusal does not change the
 // deployed posture; it changes what happens to the deployment that forgot.
-func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (ledger.Store, func(), error) {
+// It returns the POOL alongside the store because the custody reconciliation
+// plane (#962) needs a durable home for the break lifecycle on the same
+// tenant-scoped connection. nil means the in-memory book, and the custody plane
+// reports that at ERROR rather than inheriting it silently.
+func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (ledger.Store, *pgxpool.Pool, func(), error) {
 	if cfg.DatabaseURL == "" {
 		if !cfg.AllowEphemeralLedger {
-			return nil, nil, errors.New("no ACCOUNTING_DATABASE_URL (or _FILE mount): the IBOR journal " +
+			return nil, nil, nil, errors.New("no ACCOUNTING_DATABASE_URL (or _FILE mount): the IBOR journal " +
 				"would be IN-MEMORY and the fund's BOOK OF RECORD would be DISCARDED on the next restart, " +
 				"rollout or eviction — every fill, cash movement and FX revaluation with it, and the fold " +
 				"cannot be rebuilt because the consumer group resumes at its last ack and the ACCOUNTING " +
@@ -446,7 +460,7 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 			"fix", "set ACCOUNTING_DATABASE_URL (or its _FILE mount); the shipped manifest runs replicas: 2",
 			"gauge", "kanz_accounting_ledger_durable=0")
 		ledgerDurable.Set(0)
-		return ledger.NewMemoryStore(), func() {}, nil
+		return ledger.NewMemoryStore(), nil, func() {}, nil
 	}
 	// MT-01d: every connection carries this deployment's tenant as the
 	// `app.tenant_id` GUC. 0001_ledger.sql runs FORCE ROW LEVEL SECURITY with a
@@ -457,10 +471,10 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 	// composition root never did, which is exactly why it went unnoticed.
 	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	ledgerDurable.Set(1)
-	return ledger.NewPostgres(pool), pool.Close, nil
+	return ledger.NewPostgres(pool), pool, pool.Close, nil
 }
 
 // runConsumer folds live order.v1 fill FACTs into store until ctx is canceled.
@@ -470,7 +484,7 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 // so a broken subscription brings folding down rather than running silently
 // degraded (book-of-record data loss must be loud). Idempotency is handled below
 // this layer (consumer dedup + ledger.Store.Append on the entry id).
-func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
+func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, ledgerPool *pgxpool.Pool, custodyStore custody.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		return err
@@ -557,6 +571,41 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, mes
 	}
 	for _, subject := range cfg.CashSubjects {
 		subscribe(subject, folder.HandleCash)
+	}
+
+	// CUSTODY RECONCILIATION (#962) — the control around the comparison engine.
+	//
+	// The engine in internal/recon has been correct since IBOR-01e and its only
+	// caller was an HTTP handler taking the custodian's statement from the REQUEST
+	// BODY. So the platform had a reconciliation engine and no reconciliation
+	// control: nothing ingested a statement, nothing ran on a cadence, nothing
+	// recorded that a run happened, and a break had no lifecycle once found.
+	//
+	// It rides the consumer's connection for the same reason the cash announcer
+	// does: a run is caused by folded state, and "can fold, cannot record the
+	// reconciliation" is a state worth not inventing.
+	custodyProducer, err := bus.NewProducer(client, cashProducerConfig(cfg))
+	if err != nil {
+		return err
+	}
+	plane, err := buildCustodyPlane(cfg, ledgerPool, custodyStore, store, custodyProducer, obs.Registry, logger)
+	if err != nil {
+		return err
+	}
+	if cfg.CustodyStatementSubject != "" {
+		subscribe(cfg.CustodyStatementSubject, plane.consumer.Handle)
+	}
+	if plane.scheduler != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := plane.scheduler.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				once.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}()
 	}
 
 	// THE OUTBOX RELAY, AND IT IS THE RECOVERY #804 ADDED.

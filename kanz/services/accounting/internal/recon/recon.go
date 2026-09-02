@@ -29,6 +29,19 @@ const (
 	BreakCash
 )
 
+// BreakKinds returns every kind this engine can produce, in declaration order.
+//
+// IT EXISTS SO NOTHING DOWNSTREAM RETYPES THE SET. The custody control seeds a
+// gauge label per kind and the wire enum mirrors them one-to-one; both derive
+// from here, and test/arch derives the proto's set from this one. When the defect
+// class is "somebody enumerated a set by hand and missed a member" (#806, #803),
+// a list written a second time in the consumer is a further copy of the thing
+// that broke — so a kind added above reaches the metric, the wire and the guard
+// without anyone remembering a second edit.
+func BreakKinds() []BreakKind {
+	return []BreakKind{BreakQuantity, BreakMissingAtCustodian, BreakMissingInIBOR, BreakCash}
+}
+
 func (k BreakKind) String() string {
 	switch k {
 	case BreakQuantity:

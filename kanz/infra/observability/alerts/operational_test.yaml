@@ -1614,3 +1614,212 @@ tests:
       - eval_time: 100m
         alertname: OMSExecutionAttributionUndecomposable
         exp_alerts: []
+
+  # ===========================================================================
+  # CustodyReconciliationStale — the book is not being checked (#962).
+  # ===========================================================================
+  # A pair that reconciled once and then stopped. The gauge holds the completion
+  # instant and stops advancing; time() keeps moving, so the age crosses 26h.
+  #
+  # The series is seeded to a real timestamp here, which models a pair that HAS
+  # reconciled at least once.
+  - interval: 1m
+    name: a pair that reconciled yesterday and not since
+    input_series:
+      # Pinned at 1800 — the run completed at 00:30 of this test's clock and the
+      # gauge has not advanced since. promtool's clock starts at the epoch, so the
+      # evaluation must run past 26h for the age to cross the threshold at all;
+      # that is a property of the harness, not of the rule.
+      - series: 'kanz_accounting_reconciliation_last_success_timestamp_seconds{namespace="kanz-services", portfolio="PF1", custodian="CUST-A"}'
+        values: '1800x1700'
+    alert_rule_test:
+      - eval_time: 28h
+        alertname: CustodyReconciliationStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              namespace: kanz-services
+              portfolio: PF1
+              custodian: CUST-A
+            exp_annotations:
+              summary: "Portfolio PF1 has not been reconciled against custodian CUST-A"
+              description: "No reconciliation run for this (portfolio, custodian) has completed AND published in over 26 hours, so the fund's book of record is unverified against the only independent view of what is actually custodied. Every number derived from that book — NAV, exposure, VaR, mandate headroom, margin — inherits whatever it is wrong about, and the failure is silent: a position missing from the book contributes to no measure and crosses no threshold. A value at the Unix epoch means this pair has NEVER reconciled. Check kanz_accounting_reconciliation_runs_total by outcome on the accounting deployment: outcome=no_statement means the custodian sent nothing (or accounting.custody.statement is not granted in infra/nats/tenancy.yaml — a denied subscription delivers nothing and looks identical); outcome=failed means the run could not complete and failure_reason on the ReconciliationRun FACT says why; no increment at all means ACCOUNTING_CUSTODY_PAIRS is empty and nothing is scheduled."
+
+  # THE NEVER-RECONCILED ESTATE, WHICH IS THE WHOLE REASON THE SERIES IS SEEDED.
+  #
+  # buildCustodyPlane calls Metrics.SeedPair for every configured pair before the
+  # first tick, setting this gauge to 0 — the Unix epoch. Without that seed the
+  # pair would be ABSENT from the vector and this rule would skip it silently, so
+  # the deployment that has never reconciled at all — strictly worse than one
+  # whose last run is old — would be the one case the alerting cannot see.
+  #
+  # This case executes the seeded-zero reading. The companion case below executes
+  # the ABSENT reading and asserts the rule is silent there, which is what makes
+  # the seeding a load-bearing dependency rather than a comment.
+  - interval: 1m
+    name: a pair that has never reconciled at all
+    input_series:
+      - series: 'kanz_accounting_reconciliation_last_success_timestamp_seconds{namespace="kanz-services", portfolio="PF2", custodian="CUST-B"}'
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 28h
+        alertname: CustodyReconciliationStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+              namespace: kanz-services
+              portfolio: PF2
+              custodian: CUST-B
+            exp_annotations:
+              summary: "Portfolio PF2 has not been reconciled against custodian CUST-B"
+              description: "No reconciliation run for this (portfolio, custodian) has completed AND published in over 26 hours, so the fund's book of record is unverified against the only independent view of what is actually custodied. Every number derived from that book — NAV, exposure, VaR, mandate headroom, margin — inherits whatever it is wrong about, and the failure is silent: a position missing from the book contributes to no measure and crosses no threshold. A value at the Unix epoch means this pair has NEVER reconciled. Check kanz_accounting_reconciliation_runs_total by outcome on the accounting deployment: outcome=no_statement means the custodian sent nothing (or accounting.custody.statement is not granted in infra/nats/tenancy.yaml — a denied subscription delivers nothing and looks identical); outcome=failed means the run could not complete and failure_reason on the ReconciliationRun FACT says why; no increment at all means ACCOUNTING_CUSTODY_PAIRS is empty and nothing is scheduled."
+
+  # THE OMITTED-SERIES CASE, EXECUTED RATHER THAN ASSUMED.
+  #
+  # A promtool harness INVENTS its input series, so a rule proven to fire here can
+  # still be structurally unfireable in production if nothing exports the series
+  # at all. This case supplies an UNRELATED series only: the staleness vector is
+  # empty, and the rule is correctly silent. That silence is exactly why
+  # Metrics.SeedPair must run at wiring time — it is the mechanism that turns
+  # "never reconciled" from this silent state into the firing one above.
+  - interval: 1m
+    name: an estate exporting no staleness series at all
+    input_series:
+      - series: 'kanz_accounting_breaks_open{namespace="kanz-services", custodian="CUST-A", kind="quantity"}'
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 28h
+        alertname: CustodyReconciliationStale
+        exp_alerts: []
+
+  # A HEALTHY PAIR MUST STAY QUIET. The gauge advances every 24h; at 26h of
+  # tolerance a run that lands on schedule never crosses the threshold.
+  - interval: 1m
+    name: a pair reconciling on schedule
+    input_series:
+      # The timestamp advances with wall-clock: value = eval second, so the age
+      # is always ~0.
+      - series: 'kanz_accounting_reconciliation_last_success_timestamp_seconds{namespace="kanz-services", portfolio="PF1", custodian="CUST-A"}'
+        values: '0+60x1700'
+    alert_rule_test:
+      - eval_time: 28h
+        alertname: CustodyReconciliationStale
+        exp_alerts: []
+
+  # ===========================================================================
+  # CustodyStatementMissing — the custodian stopped sending (#962).
+  # ===========================================================================
+  # Deliberately a separate rule from the staleness one: a no_statement run is the
+  # control WORKING — it came due, it looked, and nothing was there — so the
+  # platform is healthy and the counterparty (or the subscription grant) is not.
+  # Paging identically for both would send an operator to the wrong system.
+  - interval: 1m
+    name: scheduled runs finding no statement
+    input_series:
+      - series: 'kanz_accounting_reconciliation_runs_total{namespace="kanz-services", custodian="CUST-A", outcome="no_statement"}'
+        values: '0+1x200'
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: CustodyStatementMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              namespace: kanz-services
+              custodian: CUST-A
+              outcome: no_statement
+            exp_annotations:
+              summary: "Custodian CUST-A sent no statement for a reconciliation that came due"
+              description: "A scheduled reconciliation ran and found no custodian statement for the business date it covers, so the book was not compared against anything. This is the control reporting an absence rather than failing — before #962 this state produced no event at all and was indistinguishable from reconciling cleanly. Two causes and they need different owners: the custodian genuinely has not transmitted (chase the counterparty / the feed adapter), or accounting's subscription to accounting.custody.statement is not granted in infra/nats/tenancy.yaml, in which case the subscription is DENIED SILENTLY and delivers nothing (#787/#788). Check the accounting pod's subscribe log line before chasing the custodian."
+
+  # THE SEEDED ZERO MUST NOT PAGE. Every outcome's series is registered at zero at
+  # wiring time so the vector is never empty; a counter that stays at zero means
+  # no no_statement run has happened, which is the healthy reading.
+  - interval: 1m
+    name: a custodian sending statements every day
+    input_series:
+      - series: 'kanz_accounting_reconciliation_runs_total{namespace="kanz-services", custodian="CUST-A", outcome="no_statement"}'
+        values: '0x200'
+      - series: 'kanz_accounting_reconciliation_runs_total{namespace="kanz-services", custodian="CUST-A", outcome="clean"}'
+        values: '0+1x200'
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: CustodyStatementMissing
+        exp_alerts: []
+
+  # ===========================================================================
+  # CustodyBreakAgeing — a difference nobody has closed (#962).
+  # ===========================================================================
+  # The age is measured from when the break was FIRST seen and is never reset by a
+  # redetection, so this is genuinely "this position has disagreed for six days".
+  - interval: 1m
+    name: a break outstanding for six days
+    input_series:
+      - series: 'kanz_accounting_break_oldest_age_seconds{namespace="kanz-services", custodian="CUST-A"}'
+        values: '518400x200'
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: CustodyBreakAgeing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              namespace: kanz-services
+              custodian: CUST-A
+            exp_annotations:
+              summary: "A reconciliation break against CUST-A has been open for over 5 days"
+              description: "The book and the custodian have disagreed about the same instrument or currency for more than five business days without reaching RESOLVED. A break that persists is either a real economic difference nobody has corrected — a fill that never reached the ledger, a settlement that failed — or an explanation that did not hold, which is why an EXPLAINED break keeps ageing rather than dropping out of this gauge. Read kanz_accounting_breaks_open by kind: missing_in_ibor is the direction that most often means a fill never reached the book, and it is the case no other control on this platform can detect."
+
+  # A BREAK FOUND AND CLEARED WITHIN THE WINDOW MUST NOT PAGE. Ordinary
+  # settlement timing produces breaks that resolve in a day or two, and a rule
+  # that paged on those would be silenced on its first week.
+  - interval: 1m
+    name: a break that clears inside the tolerance window
+    input_series:
+      - series: 'kanz_accounting_break_oldest_age_seconds{namespace="kanz-services", custodian="CUST-A"}'
+        values: '172800x100 0x100'
+    alert_rule_test:
+      - eval_time: 180m
+        alertname: CustodyBreakAgeing
+        exp_alerts: []
+
+  # ===========================================================================
+  # CustodyReconciliationUnpublished — the run happened, the estate did not hear
+  # it (#962).
+  # ===========================================================================
+  # The reconciler advances the staleness gauge ONLY on a successful publish, so a
+  # broker outage leaves CustodyReconciliationStale firing correctly. This rule is
+  # what names the cause as a publish path rather than a custodian, so nobody is
+  # sent to chase a counterparty over a NATS problem.
+  - interval: 1m
+    name: runs that complete locally and cannot be published
+    input_series:
+      - series: 'kanz_accounting_reconciliation_publish_failures_total{namespace="kanz-services", custodian="CUST-A"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: CustodyReconciliationUnpublished
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              namespace: kanz-services
+              custodian: CUST-A
+            exp_annotations:
+              summary: "Custody reconciliation runs for CUST-A completed but could not be published"
+              description: "A reconciliation ran and its ReconciliationRun FACT could not be published, so the run exists in accounting's own store and nowhere else. The staleness gauge deliberately does NOT advance on an unpublished run — the estate genuinely has no record that the control ran — so CustodyReconciliationStale will follow and this rule is what names the cause as a publish path rather than a custodian. Check the broker and that accounting.custody.reconciled is in the accounting user's publish allow-list in infra/nats/tenancy.yaml."
+
+  # THE SEEDED ZERO, AGAIN AS A SILENCE CLAIM. publishFails is registered at zero
+  # for every configured custodian, so a healthy estate exports the series and
+  # must not page on it.
+  - interval: 1m
+    name: a publish path that is working
+    input_series:
+      - series: 'kanz_accounting_reconciliation_publish_failures_total{namespace="kanz-services", custodian="CUST-A"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: CustodyReconciliationUnpublished
+        exp_alerts: []

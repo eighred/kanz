@@ -83,7 +83,7 @@ spec:
             # every other tenant "{tenant}.{domain}.{entity}"). A hand-written
             # prefixed list here would be a second copy of this table, which is
             # exactly how the pre-36a9ba1 dead table survived unnoticed.
-            - { name: NATS_REBUILD_TOPICS, value: "order.order,order.cost,strategy.signal,optimization.proposal,accounting.balance,accounting.margin,settlement.instruction,compliance.breach,compliance.mandate,risk.portfolio,risk.position,platform.authz,platform.compliance,platform.mode,inference.feature,inference.prediction,data.feature,data.exception,platform.model" }
+            - { name: NATS_REBUILD_TOPICS, value: "order.order,order.cost,strategy.signal,optimization.proposal,accounting.balance,accounting.margin,accounting.custody,settlement.instruction,compliance.breach,compliance.mandate,risk.portfolio,risk.position,platform.authz,platform.compliance,platform.mode,inference.feature,inference.prediction,data.feature,data.exception,platform.model" }
             # WHICH TENANTS TO RESTORE (issue #93). Each name is crossed with
             # the topic list above to produce the topics actually read:
             # __system__ -> order.order, acme -> acme.order.order, and so on,

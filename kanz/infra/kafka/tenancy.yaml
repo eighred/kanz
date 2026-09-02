@@ -97,6 +97,13 @@ data:
     # exist loses exactly that evidence, for exactly the tenants trading on
     # margin.
     accounting.margin          6   delete   2592000000  yes
+    # accounting.custody (#962): mirrors infra/kafka/topics-job.yaml. The
+    # ReconciliationRun FACT — the record that a tenant's book of record was
+    # checked against its custodian on a business date, or that it could NOT be.
+    # A tenant's accounting pod is the same digest-pinned binary as the platform
+    # one and publishes the same subject, so a topic missing here is a hard
+    # publish failure for that tenant with auto-create disabled.
+    accounting.custody         6   delete   2592000000  yes
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes

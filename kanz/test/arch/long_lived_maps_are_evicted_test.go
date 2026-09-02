@@ -541,6 +541,36 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"the commitment event log for one commitment_id, opted into through " +
 			"ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL. It is the replay source a fund position is derived " +
 			"from, so the same argument and the same consequence as the ledger journal beside it.", ""},
+	"services/accounting/internal/custody: MemoryStore.statements": {isTheStore,
+		"custodian statements keyed by (portfolio, custodian, business date) — the independent side of " +
+			"the reconciliation (#962). Evicting one deletes the evidence a run was performed against, " +
+			"and the run FACT that cites its statement_id would name a statement the store cannot " +
+			"produce.", ""},
+	"services/accounting/internal/custody: MemoryStore.statements[]": {isTheStore,
+		"the statements received for one subject, newest-wins by received_at. A restatement is an " +
+			"additional entry rather than an overwrite, exactly as the ledger journal's is, so dropping " +
+			"one changes which statement a past run reconciled against.", ""},
+	"services/accounting/internal/custody: MemoryStore.runs": {isTheStore,
+		"reconciliation runs keyed by (portfolio, custodian) — the record that the control RAN, which " +
+			"is the entire point of #962. A dropped run is a reconciliation the estate can no longer " +
+			"prove happened, and 'reconciled clean' becomes indistinguishable from 'nobody ran it' " +
+			"again.", ""},
+	"services/accounting/internal/custody: MemoryStore.runs[]": {isTheStore,
+		"the runs for one pair, in completion order. LatestRun reads the newest and the history is the " +
+			"audit trail of what was known and when; dropping the oldest rewrites that history.", ""},
+	"services/accounting/internal/custody: MemoryStore.runIDs": {isTheStore,
+		"run_ids already recorded — the idempotency ledger for SaveRun, the same role and the same " +
+			"consequence as ledger MemoryStore.seen: forgetting an id re-records the run it was " +
+			"refusing, doubling one comparison in the history.", ""},
+	"services/accounting/internal/custody: MemoryStore.breaks": {isTheStore,
+		"the break lifecycle keyed by a break_id that is STABLE ACROSS RUNS. It holds an operator's " +
+			"assignee and explanation and each break's first_seen_at, which exist nowhere else, and " +
+			"the age measured from that instant is what the queue is triaged by. Evicting one resets " +
+			"somebody's investigation to OPEN and its age to zero. The key space is bounded by the " +
+			"instruments and currencies a portfolio actually holds at its custodian, and a break that " +
+			"clears is resolved out of the outstanding set by UpsertBreaks rather than accumulating. " +
+			"THE HONEST BOUND IS THE POSTURE: buildCustodyPlane logs at ERROR when this store is " +
+			"chosen, because an in-memory break lifecycle is a defect rather than a configuration.", ""},
 
 	// ---------------------------------------------------------------------
 	// deferredLeak — genuinely unbounded, enumerated rather than fixed here,
