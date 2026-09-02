@@ -125,7 +125,6 @@ func TestBreakQueueRefusesAnotherTenant(t *testing.T) {
 	for _, path := range []string{
 		"/v1/custody/breaks/" + breakID() + "/assign",
 		"/v1/custody/breaks/" + breakID() + "/explain",
-		"/v1/custody/breaks/" + breakID() + "/resolve",
 	} {
 		if w := do(t, s, "POST", path, otherTenant, `{"assignee":"mallory","explanation":"x"}`); w.Code == http.StatusOK {
 			t.Fatalf("POST %s from another tenant returned 200", path)
@@ -186,51 +185,27 @@ func TestAssignWithoutAnAssigneeIsRefused(t *testing.T) {
 	}
 }
 
-// THE CONTROL CANNOT BE SILENCED BY HAND. A break the latest run still detects
-// must not be resolvable: that would leave the number wrong and the queue
-// looking clean, which is the failure that makes a reconciliation process
-// decorative.
-func TestResolveIsRefusedWhileTheDifferenceIsStillDetected(t *testing.T) {
+// THE CONTROL CANNOT BE SILENCED BY HAND — there is no resolve route at all.
+//
+// A break is resolved when the book and the custodian agree, which only a run can
+// establish; Store.UpsertBreaks does it automatically and is the single path into
+// the terminal state. A route here could not be made safe: the store removes a
+// break from the outstanding set the moment a run stops finding it, so any break
+// an operator can still see is one the latest run DID find, and closing it would
+// leave the number wrong and the queue looking clean.
+func TestThereIsNoResolveRoute(t *testing.T) {
 	store := seededBreakStore(t)
-	// A second run re-detects it, so LastSeenAt moves past StatusChangedAt — the
-	// store's statement that the difference is still there.
-	detected := custody.FromRecon(custodySubject(), []recon.Break{{
-		Kind: recon.BreakQuantity, Key: "AAPL",
-		IBOR: big.NewRat(100, 1), Custodian: big.NewRat(90, 1), Diff: big.NewRat(10, 1),
-	}}, breakT0.Add(24*time.Hour))
-	if _, err := store.UpsertBreaks(context.Background(), custodySubject(), detected, breakT0.Add(24*time.Hour)); err != nil {
-		t.Fatalf("UpsertBreaks: %v", err)
-	}
-
 	s := breakServer(t, store)
 	w := do(t, s, "POST", "/v1/custody/breaks/"+breakID()+"/resolve", testTenant, "")
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 — the control was silenced by hand (body %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 — a hand-resolve route lets the control be silenced", w.Code)
 	}
 	got, err := store.LoadBreak(context.Background(), breakID())
 	if err != nil {
 		t.Fatalf("LoadBreak: %v", err)
 	}
 	if got.Status == custody.BreakResolved {
-		t.Fatal("the break was resolved despite the difference still being detected")
-	}
-}
-
-// A BREAK THE RUNS NO LONGER FIND MAY BE RESOLVED. This is the legitimate path,
-// and it must actually work or an operator can never close anything by hand.
-func TestResolveSucceedsOnceTheSidesAgree(t *testing.T) {
-	store := seededBreakStore(t)
-	s := breakServer(t, store)
-	w := do(t, s, "POST", "/v1/custody/breaks/"+breakID()+"/resolve", testTenant, "")
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
-	}
-	got, err := store.LoadBreak(context.Background(), breakID())
-	if err != nil {
-		t.Fatalf("LoadBreak: %v", err)
-	}
-	if got.Status != custody.BreakResolved {
-		t.Fatalf("status = %s, want resolved", got.Status)
+		t.Fatal("the break was resolved without a run establishing agreement")
 	}
 }
 

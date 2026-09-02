@@ -494,22 +494,24 @@ func TestAReturningBreakDoesNotInheritTheStaleExplanation(t *testing.T) {
 	}
 }
 
-func TestResolveRequiresAgreement(t *testing.T) {
-	b := Break{BreakID: "PF1|CUST-A|quantity|AAPL", Kind: recon.BreakQuantity, Key: "AAPL", Status: BreakOpen}
-	if err := b.Resolve(true, t0); !errors.Is(err, ErrResolveWithoutAgreement) {
-		t.Fatalf("Resolve while still detected = %v, want ErrResolveWithoutAgreement — the control can be silenced by hand", err)
+// THERE IS NO OPERATOR-FACING Resolve, AND THAT IS THE INVARIANT.
+//
+// A break is resolved when the book and the custodian AGREE, which only a run can
+// establish — so the transition belongs to Store.UpsertBreaks and there is no way
+// to reach the terminal state by hand. This test fails if a Resolve method is
+// reintroduced on the aggregate: the store removes a break from the outstanding
+// set the moment a run stops finding it, so any break an operator can still see is
+// by construction one the latest run DID find, and closing it would leave the
+// number wrong and the queue looking clean.
+func TestABreakCannotBeResolvedByHand(t *testing.T) {
+	var b any = &Break{Status: BreakOpen}
+	if _, ok := b.(interface{ Resolve(bool, time.Time) error }); ok {
+		t.Fatal("custody.Break grew a Resolve method — the terminal state must be reachable only " +
+			"through a run that finds the two sides agreeing (Store.UpsertBreaks), or the control " +
+			"can be silenced by hand")
 	}
-	if b.Status != BreakOpen {
-		t.Fatalf("status = %s after a refused resolve, want open", b.Status)
-	}
-	if err := b.Resolve(false, t0); err != nil {
-		t.Fatalf("Resolve after agreement: %v", err)
-	}
-	if b.Status != BreakResolved {
-		t.Fatalf("status = %s, want resolved", b.Status)
-	}
-	if err := b.Resolve(false, t0); !errors.Is(err, ErrIllegalTransition) {
-		t.Fatalf("second Resolve = %v, want ErrIllegalTransition", err)
+	if _, ok := b.(interface{ Resolve(time.Time) error }); ok {
+		t.Fatal("custody.Break grew a Resolve method")
 	}
 }
 
@@ -569,6 +571,48 @@ func TestBreakIDIsStableAcrossRunsAndSeparatesKinds(t *testing.T) {
 	}
 	if c := BreakID("PF1", "CUST-B", recon.BreakQuantity, "AAPL"); c == a {
 		t.Fatal("two custodians collide on an id")
+	}
+}
+
+// THE SEPARATOR IS ENFORCED, NOT MERELY DOCUMENTED.
+//
+// BreakID joins four components with "|". A comment claiming they cannot contain
+// it is not a mechanism: portfolio "a|b" with custodian "c", and portfolio "a"
+// with custodian "b|c", derive the SAME id — two funds' breaks sharing one row,
+// one first_seen_at, and one operator's investigation covering two differences.
+func TestASeparatorInAnIdentityComponentIsRefused(t *testing.T) {
+	colliding := []Subject{
+		{PortfolioID: "a|b", CustodianID: "c", BusinessDate: t0},
+		{PortfolioID: "a", CustodianID: "b|c", BusinessDate: t0},
+	}
+	// The collision is real, which is why the refusal has to be.
+	if BreakID("a|b", "c", recon.BreakQuantity, "X") != BreakID("a", "b|c", recon.BreakQuantity, "X") {
+		t.Fatal("the premise no longer holds — BreakID's encoding changed and this guard needs rewriting")
+	}
+	for _, subj := range colliding {
+		if err := subj.Validate(); err == nil {
+			t.Fatalf("subject %+v was accepted; it collides with the other spelling", subj)
+		}
+	}
+
+	// A statement key becomes a break key, which becomes part of the same id.
+	st := statement("S1", nil, nil)
+	st.Positions = map[string]*big.Rat{"AA|PL": big.NewRat(1, 1)}
+	if err := st.Validate(); err == nil {
+		t.Fatal("an instrument containing the id separator was accepted — two instruments would collide onto one break")
+	}
+	st = statement("S1", nil, nil)
+	st.Cash = map[string]*big.Rat{"US|D": big.NewRat(1, 1)}
+	if err := st.Validate(); err == nil {
+		t.Fatal("a currency containing the id separator was accepted")
+	}
+
+	// An ordinary subject and statement are of course still fine.
+	if err := subject().Validate(); err != nil {
+		t.Fatalf("a legitimate subject was refused: %v", err)
+	}
+	if err := statement("S1", map[string]int64{"AAPL": 1}, map[string]int64{"USD": 1}).Validate(); err != nil {
+		t.Fatalf("a legitimate statement was refused: %v", err)
 	}
 }
 

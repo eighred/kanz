@@ -72,10 +72,6 @@ func (s BreakStatus) Outstanding() bool {
 // than invented.
 var ErrIllegalTransition = errors.New("custody: illegal break transition")
 
-// ErrResolveWithoutAgreement is returned when a break is resolved while the book
-// and the custodian still disagree.
-var ErrResolveWithoutAgreement = errors.New("custody: cannot resolve a break the latest run still detects")
-
 // Assign gives an OPEN or ASSIGNED break an owner.
 //
 // RE-ASSIGNMENT IS LEGAL, a handover between operators is ordinary, and refusing
@@ -115,28 +111,30 @@ func (b *Break) Explain(explanation string, now time.Time) error {
 	}
 }
 
-// Resolve moves a non-terminal break to the terminal RESOLVED.
+// THERE IS DELIBERATELY NO Resolve METHOD HERE, and its absence is the design.
 //
-// stillDetected is whether the MOST RECENT run still finds this discrepancy, and
-// passing it is not a formality. A break is resolved when the book and the
-// custodian agree — not when somebody is finished looking at it. Allowing a
-// resolution while the difference is still there would let the control be
-// silenced by hand, which is precisely the failure that makes a reconciliation
-// process decorative: the number stays wrong and the queue looks clean.
+// A BREAK IS RESOLVED WHEN THE BOOK AND THE CUSTODIAN AGREE — not when somebody
+// is finished looking at it. The only thing that can establish agreement is
+// running the comparison, so the RESOLVED transition belongs to the run and lives
+// in Store.UpsertBreaks: a stored outstanding break that the latest run no longer
+// detects is resolved, automatically, and that is the single path into the
+// terminal state.
 //
-// The legitimate path is that the underlying cause is corrected (the missing fill
-// is folded, the custodian restates), the next run no longer detects it, and it
-// is resolved then. Sweeper does exactly that automatically; this method is the
-// operator's route to the same place.
-func (b *Break) Resolve(stillDetected bool, now time.Time) error {
-	if b.Status == BreakResolved {
-		return fmt.Errorf("%w: %s -> resolved", ErrIllegalTransition, b.Status)
-	}
-	if stillDetected {
-		return fmt.Errorf("%w: %s %s", ErrResolveWithoutAgreement, b.Kind, b.Key)
-	}
-	return b.moveTo(BreakResolved, now)
-}
+// AN OPERATOR-FACING Resolve WOULD BE A WAY TO SILENCE THE CONTROL. It would let
+// a break be closed while the difference is still there, which leaves the number
+// wrong and the queue looking clean — the failure that makes a reconciliation
+// process decorative. It cannot be made safe by asking the store whether the
+// break is "still detected" either: the store REMOVES a break from the
+// outstanding set the moment a run stops finding it, so any break an operator
+// could still see is by construction one the latest run DID find. The check would
+// always refuse, and a route that always refuses is a dead route pretending to be
+// a control.
+//
+// What an operator has instead is Explain — "I know why this is here and I expect
+// it to clear" — which keeps the break ageing until it actually does. Closing one
+// sooner than the next cycle needs an operator-triggered RE-RECONCILIATION rather
+// than a status write, which is a real feature with a real question behind it
+// (what happens when no statement exists for the date) and is tracked separately.
 
 // moveTo applies a status change and stamps when it happened.
 //
