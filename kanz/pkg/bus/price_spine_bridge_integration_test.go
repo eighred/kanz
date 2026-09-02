@@ -132,15 +132,24 @@ func publishQuote(t *testing.T, p *bus.Producer, instrument string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	err := p.Publish(ctx, bus.Event{
-		Subject:        "market.crypto.quote",
-		EventType:      "market.crypto.quote",
-		EventClass:     envelopepb.EventClass_EVENT_CLASS_FACT,
-		SchemaVersion:  1,
-		Domain:         "market",
-		EventTime:      time.Now().UTC(),
-		PartitionKey:   instrument,
-		IdempotencyKey: "idem-quote-" + instrument,
-		TenantID:       bus.SystemTenant,
+		Subject:       "market.crypto.quote",
+		EventType:     "market.crypto.quote",
+		EventClass:    envelopepb.EventClass_EVENT_CLASS_FACT,
+		SchemaVersion: 1,
+		Domain:        "market",
+		EventTime:     time.Now().UTC(),
+		PartitionKey:  instrument,
+		// NO IdempotencyKey. For a non-COMMAND event the producer sets
+		// idempotency_key = event_id, and supplying a DIFFERENT one is refused
+		// outright ("idempotency_key must equal event_id for non-COMMAND events",
+		// producer.go:351) — this publish never reached the broker at all, so the
+		// test failed before it could assert anything about the spine.
+		//
+		// A FACT'S IDENTITY IS ITS event_id, and that is the reason for the rule
+		// rather than a formality: a second, caller-chosen key would let one fact
+		// be deduplicated under two identities, so a redelivery would be dropped
+		// by one consumer and folded by another.
+		TenantID: bus.SystemTenant,
 		Payload: &marketpb.MarketDataEvent{
 			InstrumentId: instrument,
 			Symbol:       "BTC-USDT",
@@ -170,15 +179,18 @@ func publishSnapshot(t *testing.T, p *bus.Producer, instrument string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	err := p.Publish(ctx, bus.Event{
-		Subject:        "market.book.snapshot",
-		EventType:      "market.book.snapshot",
-		EventClass:     envelopepb.EventClass_EVENT_CLASS_FACT,
-		SchemaVersion:  1,
-		Domain:         "market",
-		EventTime:      time.Now().UTC(),
-		PartitionKey:   instrument,
-		IdempotencyKey: "idem-snapshot-" + instrument,
-		TenantID:       bus.SystemTenant,
+		Subject:       "market.book.snapshot",
+		EventType:     "market.book.snapshot",
+		EventClass:    envelopepb.EventClass_EVENT_CLASS_FACT,
+		SchemaVersion: 1,
+		Domain:        "market",
+		EventTime:     time.Now().UTC(),
+		PartitionKey:  instrument,
+		// NO IdempotencyKey, for the same reason as publishQuote above: this is a
+		// FACT, so the producer sets idempotency_key = event_id and a different
+		// caller-supplied one is refused before the publish leaves the process.
+
+		TenantID: bus.SystemTenant,
 		Payload: &marketpb.OrderBookSnapshot{
 			InstrumentId: instrument,
 			Symbol:       "BTC-USDT",
