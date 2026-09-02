@@ -162,12 +162,19 @@ func run() int {
 	// Said at ERROR when unrecorded, because an unrecordable agent looks identical
 	// from the outside to a recorded one — right up to the moment somebody needs
 	// to explain an answer.
-	agentOpts := []agent.Option{}
+	//
+	// THE AGENT-PLANE SERIES ARE REGISTERED UNCONDITIONALLY (#973), outside the
+	// producer branch the record path sits in. They previously were not, and that
+	// was the defect in miniature: a deployment with no recorder registered no
+	// series either, so the state where NOTHING is kept scraped as an absent
+	// metric rather than as a rising kanz_copilot_unrecorded_answers_total.
+	answerMx := newAnswerMetrics()
+	answerMx.register(obs.Registry)
+	agentOpts := []agent.Option{agent.WithAnswerObserver(answerMx.observe)}
 	if answerProducer != nil {
-		obs.Registry.MustRegister(answerRecordsLost)
 		agentOpts = append(agentOpts,
 			agent.WithRecorder(&busAnswerRecorder{producer: answerProducer}),
-			agent.WithRecordObserver(func(error) { answerRecordsLost.Inc() }),
+			agent.WithRecordObserver(func(error) { answerMx.recordsLost.Inc() }),
 			agent.WithLogger(logger))
 		logger.Info("copilot: answer records armed — what each answer was built from is recorded",
 			"subject", SubjectAgentAnswer)

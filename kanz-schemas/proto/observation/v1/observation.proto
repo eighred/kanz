@@ -182,6 +182,23 @@ message AgentAnswerRecord {
   uint32 tool_calls = 15;
   uint32 tool_errors = 16;
 
+  // context_measured and context_withheld count the measures the read plane put
+  // in front of the model, by whether it would state a number for them (#973).
+  //
+  // AN ANSWER BUILT ON A BOOK WITH HOLES IS A DIFFERENT ANSWER. #757 is the
+  // version that already cost something: a measure whose integrity record was
+  // stripped reached an agent as a computed zero. The read plane withholds
+  // instead now — but an answer that hedged because two of three measures were
+  // UNAVAILABLE and one that hedged for no reason were indistinguishable here,
+  // and "the numbers were missing" is the first thing an operator disputing an
+  // answer needs to rule in or out.
+  //
+  // COUNTS AND NOT NAMES, deliberately. The measure vocabulary belongs to the
+  // risk engine; carrying the list here would make this record grow with another
+  // component's vocabulary, and the reference set already says which reads ran.
+  uint32 context_measured = 18;
+  uint32 context_withheld = 19;
+
   // answered_at is when the answer was produced. Required.
   google.protobuf.Timestamp answered_at = 17;
 }

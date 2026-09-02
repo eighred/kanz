@@ -172,3 +172,22 @@ func (c *StubClient) Exposure(_ context.Context, portfolioID string) (Reading, e
 func (c *StubClient) EvaluateScenario(_ context.Context, portfolioID, _ string) (Reading, error) {
 	return c.read(portfolioID, "scenario")
 }
+
+// Coverage counts this reading's measures by whether the read plane will state a
+// number for them (#973).
+//
+// IT IS DERIVED FROM Status AND NOT FROM Value BEING NIL. measureread already
+// draws that line once — StatusUnavailable means "this plane will not state a
+// number here", with Reason saying why — and re-deriving it from a nil pointer
+// would be a second implementation of the same judgement, which is how the two
+// drift and how a withheld measure starts being counted as present.
+func (r Reading) Coverage() (measured, unavailable int) {
+	for _, m := range r.Measures {
+		if m.Status == measureread.StatusMeasured && m.Value != nil {
+			measured++
+			continue
+		}
+		unavailable++
+	}
+	return measured, unavailable
+}

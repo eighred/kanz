@@ -75,6 +75,7 @@ type Agent struct {
 	// discover when an answer cannot be explained.
 	recorder     AnswerRecorder
 	onRecordLost func(error)
+	onAnswer     func(Observation)
 	now          func() time.Time
 	log          *slog.Logger
 }
@@ -148,6 +149,13 @@ func (a *Agent) Ask(ctx context.Context, p *auth.Principal, question string) (An
 			if out.IsError {
 				trace.toolErrors++
 			}
+			// COVERAGE IS ACCUMULATED FOR EVERY CALL, error results included. A tool
+			// that refused returns 0/0, so counting unconditionally needs no second
+			// rule about which results are eligible — and the alternative, skipping
+			// errors, would make a loop whose reads were all denied look like a loop
+			// that was shown a complete book.
+			trace.measured += out.Measured
+			trace.unavailable += out.Unavailable
 			content, flagged := ScanToolResult(out.Content)
 			if flagged {
 				injectionFlagged = true
