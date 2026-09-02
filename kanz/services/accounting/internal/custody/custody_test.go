@@ -574,6 +574,48 @@ func TestBreakIDIsStableAcrossRunsAndSeparatesKinds(t *testing.T) {
 	}
 }
 
+// THE SEPARATOR IS ENFORCED, NOT MERELY DOCUMENTED.
+//
+// BreakID joins four components with "|". A comment claiming they cannot contain
+// it is not a mechanism: portfolio "a|b" with custodian "c", and portfolio "a"
+// with custodian "b|c", derive the SAME id — two funds' breaks sharing one row,
+// one first_seen_at, and one operator's investigation covering two differences.
+func TestASeparatorInAnIdentityComponentIsRefused(t *testing.T) {
+	colliding := []Subject{
+		{PortfolioID: "a|b", CustodianID: "c", BusinessDate: t0},
+		{PortfolioID: "a", CustodianID: "b|c", BusinessDate: t0},
+	}
+	// The collision is real, which is why the refusal has to be.
+	if BreakID("a|b", "c", recon.BreakQuantity, "X") != BreakID("a", "b|c", recon.BreakQuantity, "X") {
+		t.Fatal("the premise no longer holds — BreakID's encoding changed and this guard needs rewriting")
+	}
+	for _, subj := range colliding {
+		if err := subj.Validate(); err == nil {
+			t.Fatalf("subject %+v was accepted; it collides with the other spelling", subj)
+		}
+	}
+
+	// A statement key becomes a break key, which becomes part of the same id.
+	st := statement("S1", nil, nil)
+	st.Positions = map[string]*big.Rat{"AA|PL": big.NewRat(1, 1)}
+	if err := st.Validate(); err == nil {
+		t.Fatal("an instrument containing the id separator was accepted — two instruments would collide onto one break")
+	}
+	st = statement("S1", nil, nil)
+	st.Cash = map[string]*big.Rat{"US|D": big.NewRat(1, 1)}
+	if err := st.Validate(); err == nil {
+		t.Fatal("a currency containing the id separator was accepted")
+	}
+
+	// An ordinary subject and statement are of course still fine.
+	if err := subject().Validate(); err != nil {
+		t.Fatalf("a legitimate subject was refused: %v", err)
+	}
+	if err := statement("S1", map[string]int64{"AAPL": 1}, map[string]int64{"USD": 1}).Validate(); err != nil {
+		t.Fatalf("a legitimate statement was refused: %v", err)
+	}
+}
+
 func TestBusinessDayNormalizes(t *testing.T) {
 	morning := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
 	evening := time.Date(2026, 9, 1, 23, 59, 59, 0, time.UTC)
