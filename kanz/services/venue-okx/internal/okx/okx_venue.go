@@ -41,15 +41,28 @@ type OKXVenue struct {
 // string there would move the "is this a real mode?" check away from the compiler
 // and back into a runtime string comparison. Passing it here keeps the type, and
 // keeps the decision visible at the composition root where it belongs (#147).
+// okxDefaultWeightBudget and okxDefaultWeightWindow are /trade/order's published
+// limit: 60 requests per 2 seconds per instrument family. It is the DEFAULT for
+// the shared bucket and, before #933, was the single number standing in for every
+// endpoint's limit.
+const (
+	okxDefaultWeightBudget = 60
+	okxDefaultWeightWindow = 2 * time.Second
+)
+
 func NewOKXVenueFromSettings(s VenueSettings, mode exchangeauth.OKXTradingMode) *OKXVenue {
 	budget := s.WeightBudget
 	if budget <= 0 {
-		budget = 60 // OKX place-order default: 60 requests / 2s per instrument family
+		budget = okxDefaultWeightBudget
 	}
-	bucket := NewWeightBucket(budget, 2*time.Second, nil)
+	// ONE BUCKET PER OKX RATE-LIMIT FAMILY (#933), not one bucket for the venue.
+	// OKX meters PER ENDPOINT, so fills-history spending placement budget was a
+	// self-imposed throttle the venue does not actually impose — see okx_buckets.go
+	// for why only the families with a verified limit are split out.
+	buckets := newOKXBuckets(NewWeightBucket(budget, okxDefaultWeightWindow, nil), nil)
 	rest := newOKXREST(okxRestConfig{
 		BaseURL: s.BaseURL, APIKey: s.APIKey, APISecret: s.APISecret, Passphrase: s.Passphrase,
-		Bucket: bucket, OnThrottle: s.OnThrottle,
+		Buckets: buckets, OnThrottle: s.OnThrottle,
 		HTTPClient: NewExchangeHTTPClient(s.DNSTTL),
 		Mode:       mode,
 	})

@@ -44,7 +44,7 @@ func TestOKXTestnet_SignedRoundTrip(t *testing.T) {
 	base := envOrDefault("OKX_TESTNET_BASE", "https://www.okx.com")
 	rest := newOKXREST(okxRestConfig{
 		BaseURL: base, APIKey: key, APISecret: secret, Passphrase: pass,
-		Bucket:     NewWeightBucket(60, 2*time.Second, nil),
+		Buckets:    newOKXBuckets(NewWeightBucket(60, 2*time.Second, nil), nil),
 		HTTPClient: NewExchangeHTTPClient(0),
 		// The credentials this test demands are DEMO keys (OKX_TESTNET_*). Sending
 		// them without the demo header asks production about an account that does

@@ -97,7 +97,7 @@ type okxPositionsResp struct {
 // The account leg is different: without it there is no observation at all, and
 // an error is the honest answer.
 func (c *okxREST) MarginState(ctx context.Context) (VenueMargin, error) {
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return VenueMargin{}, ErrRateLimited
 	}
@@ -127,7 +127,7 @@ func (c *okxREST) MarginState(ctx context.Context) (VenueMargin, error) {
 		}
 	}
 
-	if !c.bucket.Allow(1) {
+	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return out, nil
 	}

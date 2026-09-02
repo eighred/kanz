@@ -28,7 +28,7 @@ func (b okxStaticBalances) Balance(asset string) (*big.Rat, bool) {
 
 func okxReconOver(f *fakeOKX, cap *okxCapture, exp okxStaticOrders, bal okxStaticBalances) *OKXReconciler {
 	bucket := NewWeightBucket(60, time.Minute, nil)
-	rest := newOKXREST(okxRestConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Bucket: bucket, Mode: exchangeauth.OKXDemo})
+	rest := newOKXREST(okxRestConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Buckets: newOKXBuckets(bucket, nil), Mode: exchangeauth.OKXDemo})
 	var balances ExpectedBalances // true nil interface when no balances configured
 	if bal != nil {
 		balances = bal

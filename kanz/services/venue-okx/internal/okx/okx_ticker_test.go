@@ -26,7 +26,7 @@ func okxTickerConnector(f *fakeOKX) *OKXConnector {
 	bucket := NewWeightBucket(60, 2*time.Second, nil)
 	rest := newOKXREST(okxRestConfig{
 		BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p",
-		Bucket: bucket, Mode: exchangeauth.OKXDemo,
+		Buckets: newOKXBuckets(bucket, nil), Mode: exchangeauth.OKXDemo,
 	})
 	return &OKXConnector{
 		settings: VenueSettings{MIC: "OKX", Symbols: map[string]string{"BTC-USD": "BTC-USDT"}},

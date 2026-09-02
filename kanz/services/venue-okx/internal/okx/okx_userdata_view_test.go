@@ -76,7 +76,7 @@ func TestOKXRecon_AFilledOrderIsNeitherRequeriedNorRehealed(t *testing.T) {
 	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"o1","state":"filled","accFillSz":"1","avgPx":"50000"}]}`
 	rcap := &okxCapture{}
 	bucket := NewWeightBucket(60, time.Minute, nil)
-	rest := newOKXREST(okxRestConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Bucket: bucket, Mode: exchangeauth.OKXDemo})
+	rest := newOKXREST(okxRestConfig{BaseURL: f.srv.URL, APIKey: "k", APISecret: "s", Passphrase: "p", Buckets: newOKXBuckets(bucket, nil), Mode: exchangeauth.OKXDemo})
 	r := newOKXReconciler(OKXReconcilerConfig{
 		REST: rest, Symbols: StaticSymbolMap{"BTC-USD": "BTC-USDT"},
 		Expected: view, Pub: rcap, Venue: "OKX", Tenant: "fund-alpha",
