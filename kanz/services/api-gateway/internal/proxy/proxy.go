@@ -341,8 +341,6 @@ func (h *Handler) Routes(mux *authz.Mux) {
 			h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/explain",
 			h.handle(ServiceAccounting, true, nil))
-		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/resolve",
-			h.handle(ServiceAccounting, true, nil))
 	}
 
 	// THE SECOND SIGNATURE, AND THE DOOR IT NEEDED (#539, #410 act one).

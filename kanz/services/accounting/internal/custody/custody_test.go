@@ -494,22 +494,24 @@ func TestAReturningBreakDoesNotInheritTheStaleExplanation(t *testing.T) {
 	}
 }
 
-func TestResolveRequiresAgreement(t *testing.T) {
-	b := Break{BreakID: "PF1|CUST-A|quantity|AAPL", Kind: recon.BreakQuantity, Key: "AAPL", Status: BreakOpen}
-	if err := b.Resolve(true, t0); !errors.Is(err, ErrResolveWithoutAgreement) {
-		t.Fatalf("Resolve while still detected = %v, want ErrResolveWithoutAgreement — the control can be silenced by hand", err)
+// THERE IS NO OPERATOR-FACING Resolve, AND THAT IS THE INVARIANT.
+//
+// A break is resolved when the book and the custodian AGREE, which only a run can
+// establish — so the transition belongs to Store.UpsertBreaks and there is no way
+// to reach the terminal state by hand. This test fails if a Resolve method is
+// reintroduced on the aggregate: the store removes a break from the outstanding
+// set the moment a run stops finding it, so any break an operator can still see is
+// by construction one the latest run DID find, and closing it would leave the
+// number wrong and the queue looking clean.
+func TestABreakCannotBeResolvedByHand(t *testing.T) {
+	var b any = &Break{Status: BreakOpen}
+	if _, ok := b.(interface{ Resolve(bool, time.Time) error }); ok {
+		t.Fatal("custody.Break grew a Resolve method — the terminal state must be reachable only " +
+			"through a run that finds the two sides agreeing (Store.UpsertBreaks), or the control " +
+			"can be silenced by hand")
 	}
-	if b.Status != BreakOpen {
-		t.Fatalf("status = %s after a refused resolve, want open", b.Status)
-	}
-	if err := b.Resolve(false, t0); err != nil {
-		t.Fatalf("Resolve after agreement: %v", err)
-	}
-	if b.Status != BreakResolved {
-		t.Fatalf("status = %s, want resolved", b.Status)
-	}
-	if err := b.Resolve(false, t0); !errors.Is(err, ErrIllegalTransition) {
-		t.Fatalf("second Resolve = %v, want ErrIllegalTransition", err)
+	if _, ok := b.(interface{ Resolve(time.Time) error }); ok {
+		t.Fatal("custody.Break grew a Resolve method")
 	}
 }
 
