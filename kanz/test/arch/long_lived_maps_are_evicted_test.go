@@ -256,6 +256,20 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"unnecessary — an ungoverned portfolio is ungoverned all day, so a horizon would " +
 			"re-announce it forever. The caller-keyed half of the same type is sayOnce.volatile, " +
 			"which IS swept.", ""},
+	"services/compliance/cmd/compliance: onceSet.seen": {boundedByConstruction,
+		"keyed by (treasury refusal reason, tenant, portfolio). The reason is a CLOSED SET of six " +
+			"constants — treasury.Reasons() is what seeds the metric's labels and an arch guard " +
+			"holds it to the type's own constants — and the tenant and portfolio come off the " +
+			"compliance monitor's bookKey, which is itself the map gcBooksLocked sweeps. So the " +
+			"key space is six times the estate's PROVISIONED portfolio count, and no amount of " +
+			"traffic against one portfolio adds an entry. " +
+			"EVICTING HERE WOULD BE WRONG rather than merely unnecessary, which is the same " +
+			"argument sayOnce.stable makes one package over: a portfolio whose cash nobody can " +
+			"vouch for is in that state all day (#588 is a missing FEED, not a transient), and " +
+			"the monitor re-evaluates every book it holds on an interval — so a horizon would " +
+			"re-announce the identical finding for the identical portfolio forever, which is the " +
+			"log noise the warn-once exists to prevent. The COUNTER beside it is what carries " +
+			"the repetition (#963).", ""},
 	"internal/compliance: MandateRegistry.byKey": {boundedByConstruction,
 		"keyed by (tenant, portfolio) and written only by Put, whose only caller is the mandate " +
 			"replay off a COMPACTED config subject. An entry exists because an operator published a " +

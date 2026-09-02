@@ -2229,3 +2229,111 @@ tests:
             exp_annotations:
               summary: "The copilot is taking most of its tool-use budget to reach an answer"
               description: "Nine in ten answers now need more than six of the eight turns agent.DefaultMaxTurns allows, so the loop is close to exhausting and CopilotLoopNotConverging is what fires next. Nothing is failing yet — this is the precursor, and it is here because by the time requests exhaust, the change that caused it is several deploys back. The usual causes are a model or prompt change, and a tool the model retries because it cannot act on the output; check kanz_copilot_tool_calls_total{result=\"error\"} and kanz_copilot_context_measures_total{status=\"withheld\"}, since a model reaching around missing measures asks more questions to get there."
+
+  # ─── CASH DRAG (#963) ────────────────────────────────────────────────────
+  #
+  # The two rules are a RATIO and its blind spot, so they must be tested as a
+  # pair. A ratio over two counters that are both flat at zero evaluates to 0 and
+  # stays quiet — correct behaviour for the ratio, and exactly the state where
+  # nothing is being measured at all. Each group below asserts BOTH rules, so a
+  # change that made one cover the other's case would fail here.
+
+  - interval: 1m
+    name: the estate can measure most of its books
+    input_series:
+      - series: 'kanz_treasury_idle_cash_share_count{namespace="kanz"}'
+        values: '0+10x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="cash_unvouched", namespace="kanz"}'
+        values: '0+1x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="nav_not_equity", namespace="kanz"}'
+        values: '0x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="cash_unknown", namespace="kanz"}'
+        values: '0x400'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: TreasuryCashDragUnmeasurable
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TreasuryCashDragNotObserved
+        exp_alerts: []
+
+  # THE STATE #588 PUTS THE ESTATE IN TODAY. Most books refuse, and the reason
+  # counter is what names the feed rather than the fund.
+  - interval: 1m
+    name: most books cannot have their cash vouched for
+    input_series:
+      - series: 'kanz_treasury_idle_cash_share_count{namespace="kanz"}'
+        values: '0+1x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="cash_unvouched", namespace="kanz"}'
+        values: '0+9x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="nav_not_equity", namespace="kanz"}'
+        values: '0x400'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: TreasuryCashDragUnmeasurable
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational, namespace: kanz }
+            exp_annotations:
+              summary: "More than half the estate's books cannot have their idle cash measured"
+              description: "Uninvested cash is a permanent performance drag that breaches no mandate, trips no risk limit and produces no reconciliation break — so this measurement is the only thing that would ever report it, and for most of the book it is refusing. Read kanz_treasury_drag_unmeasurable_total by reason, because they route to different teams. cash_unvouched is #588: accounting's ledger folds corporate actions and accruals and NOTHING in this platform produces either, so those books' cash is short every dividend and coupon ever paid and no drag figure computed from it can be trusted. nav_not_equity is #780's shape: the book is valued on a gross-positions proxy with no cash and no financing in it, so it is the wrong denominator — check the price feed (COMPLIANCE_PRICE_SUBJECTS) and kanz_compliance_marked_instruments. cash_unknown means accounting has announced no balance for those portfolios at all, or the announcements stopped and aged past cashview's bound."
+      # Refusals ARE observations, so the liveness rule must stay quiet: the
+      # monitor is working and the inputs are not.
+      - eval_time: 400m
+        alertname: TreasuryCashDragNotObserved
+        exp_alerts: []
+
+  # THE BLIND SPOT THE SECOND RULE EXISTS FOR.
+  #
+  # Every series is present and seeded — which is what registerTreasuryMetrics
+  # guarantees at startup — and nothing has moved. The ratio rule reads 0/1 and
+  # is correctly silent; without the liveness rule beside it, a monitor that
+  # stopped evaluating every book on the estate would produce exactly this and
+  # page nobody.
+  - interval: 1m
+    name: nothing has been measured or refused at all
+    input_series:
+      - series: 'kanz_treasury_idle_cash_share_count{namespace="kanz"}'
+        values: '0x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="cash_unvouched", namespace="kanz"}'
+        values: '0x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="nav_not_equity", namespace="kanz"}'
+        values: '0x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="cash_unknown", namespace="kanz"}'
+        values: '0x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="nav_unknown", namespace="kanz"}'
+        values: '0x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="nav_not_positive", namespace="kanz"}'
+        values: '0x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="currency_mismatch", namespace="kanz"}'
+        values: '0x400'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: TreasuryCashDragUnmeasurable
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TreasuryCashDragNotObserved
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational, namespace: kanz }
+            exp_annotations:
+              summary: "No portfolio's idle cash has been measured or refused for six hours"
+              description: "Neither a measurement nor a refusal has been recorded, which is not the same as an estate with no idle cash — it means no book was evaluated. The observer rides the compliance post-trade monitor's evaluate path, which is woken by position FACTs, by cash announcements, and by a sweep over every book it holds; all three being silent means the monitor is not evaluating, and the same silence covers the passive gross-leverage breaches it exists to catch (#787). Check that compliance is consuming the position spine and that its book map is not empty. NOTE: no other rule currently covers that sweep stopping, so this one is presently the estate's only signal for it — which is a gap in #787's coverage rather than a property of this measurement, tracked separately."
+
+  # A HEALTHY ESTATE MEASURING EVERYTHING pages neither rule. Without this case
+  # the two above cannot distinguish a working pair from a rule whose threshold
+  # is inverted.
+  - interval: 1m
+    name: every book is measured cleanly
+    input_series:
+      - series: 'kanz_treasury_idle_cash_share_count{namespace="kanz"}'
+        values: '0+20x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="cash_unvouched", namespace="kanz"}'
+        values: '0x400'
+      - series: 'kanz_treasury_drag_unmeasurable_total{reason="nav_not_equity", namespace="kanz"}'
+        values: '0x400'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: TreasuryCashDragUnmeasurable
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: TreasuryCashDragNotObserved
+        exp_alerts: []

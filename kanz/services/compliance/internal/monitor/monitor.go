@@ -28,6 +28,7 @@ import (
 
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/treasury"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -66,6 +67,7 @@ type book struct {
 // Monitor re-evaluates portfolios on every position change. Goroutine-safe.
 type Monitor struct {
 	onDroppedRecord func()
+	onCashDrag      func(tenantID, portfolioID string, d treasury.Drag)
 
 	engine     *comp.Engine
 	mandates   comp.MandateSource
@@ -103,6 +105,27 @@ type MonitorOption func(*Monitor)
 // Nil ⇒ not counted; the recorder still logs each failure.
 func WithDroppedRecordObserver(fn func()) MonitorOption {
 	return func(m *Monitor) { m.onDroppedRecord = fn }
+}
+
+// WithCashDragObserver reports every book's idle-cash drag, or the reason it
+// cannot be stated (#963).
+//
+// IT HANGS HERE AND NOT ON THE ORDER PATH, and that placement is the whole
+// measurement. Idle cash sits in portfolios that are NOT trading — a book being
+// swept toward its target weights is by definition putting its cash to work —
+// so sampling the drag at the pre-trade gate would measure exactly the set of
+// portfolios least likely to have any. This monitor already re-runs EVERY book
+// it holds on an interval, because a passive breach has no FACT behind it; a
+// portfolio sitting on cash and doing nothing is the same shape of silence, and
+// this is the only loop in the estate that already walks it.
+//
+// The observer takes the whole Drag rather than a number, because the REFUSALS
+// are the more useful half today: with #588 open, most books cannot have a drag
+// stated at all, and "we cannot measure our own cash drag, and here is which
+// feed is why" is the finding that sizes whether the sweep engine in #963 is
+// worth building.
+func WithCashDragObserver(fn func(tenantID, portfolioID string, d treasury.Drag)) MonitorOption {
+	return func(m *Monitor) { m.onCashDrag = fn }
 }
 
 // WithCashSource and WithMarkSource are what let this monitor answer "how
@@ -277,6 +300,16 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 	// each path self-contained instead of dependent on how it was woken.
 	ctx = bus.WithTenantID(ctx, key.tenant)
 	pid := key.portfolio
+
+	// MEASURED BEFORE THE MANDATE LOOKUP, and before every terminal branch below
+	// (#963). Idle cash is a fact about a book's composition, not about whether a
+	// mandate governs it — a portfolio nobody has mandated still holds cash, and
+	// an unresolvable tenant is exactly the kind of book that gets forgotten. The
+	// branches under the mandate error return early and correctly; a measurement
+	// placed after them would silently stop sampling the portfolios in the worst
+	// operational state.
+	m.observeCashDrag(key.tenant, pid, book)
+
 	// AT NOW, NEVER AT observedAt — see the two-clocks note above (#917).
 	mandate, governance, err := m.mandates.Mandate(ctx, key.tenant, pid, m.now().UTC())
 	if err != nil {
@@ -811,4 +844,18 @@ func addDecimal(a, b *commonpb.Decimal) *commonpb.Decimal {
 		Coefficient: a.GetCoefficient()*pow(a.GetExponent()-exp) + b.GetCoefficient()*pow(b.GetExponent()-exp),
 		Exponent:    exp,
 	}
+}
+
+// observeCashDrag reports one book's idle-cash drag to the treasury observer.
+//
+// NIL-SAFE ON BOTH SIDES. A deployment that wired no observer measures nothing,
+// and a book the monitor holds with no snapshot yet is UNKNOWN rather than a
+// panic — this runs inside the loop that watches every portfolio on the estate,
+// and a measurement that can take down the control it rides on is a worse trade
+// than a missing sample.
+func (m *Monitor) observeCashDrag(tenantID, portfolioID string, book *comp.Book) {
+	if m.onCashDrag == nil {
+		return
+	}
+	m.onCashDrag(tenantID, portfolioID, treasury.Measure(book))
 }

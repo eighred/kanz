@@ -94,6 +94,19 @@ func run() int {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
+	// THE CASH-DRAG SERIES ARE REGISTERED IN run(), NOT IN runConsumers (#963).
+	//
+	// A deployment with no COMPLIANCE_NATS_URL consumes nothing, so it evaluates no
+	// book and measures no portfolio's idle cash — which is exactly the state
+	// TreasuryCashDragNotObserved exists to page on. Registering inside the
+	// consumer path would leave that deployment exporting NO SERIES AT ALL, and an
+	// == 0 rule over an absent series evaluates to nothing: the alert would be
+	// silent in the one state it was written for. This is the same wiring defect
+	// #973 found in the copilot's answer metrics, and it is the reason to build
+	// the composition root's own posture into the registration point rather than
+	// beside whatever happens to construct the producer.
+	registerTreasuryMetrics(obs.Registry)
+
 	readiness := &server.Readiness{}
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
 	go func() {
@@ -309,6 +322,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 
 	mon := monitor.NewMonitor(comp.NewEngine(nil), mandateReg, classifier, breachEmitter, recorder, logger,
 		monitor.WithDroppedRecordObserver(func() { breachRecordsLost.Inc() }),
+		monitor.WithCashDragObserver(cashDragObserver(logger, newOnceSet().first)),
 		monitor.WithCashSource(valuation.Cash),
 		monitor.WithMarkSource(valuation.Marks))
 
