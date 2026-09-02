@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"time"
+
 	"context"
 	"errors"
 	"strings"
@@ -13,6 +15,15 @@ import (
 	"github.com/eighred/kanz/internal/optimization"
 )
 
+// testNow is the fixed instant the bridge tests reason about, and testFreshness
+// is a bound wide enough that the freshness gate is never what a mandate test is
+// measuring. The freshness gate has its own tests in freshness_test.go.
+func testNow() time.Time { return time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC) }
+
+func testFreshness() Freshness {
+	return Freshness{MaxAge: time.Hour, Now: testNow}
+}
+
 func sampleProposal() optimization.RebalanceProposal {
 	return optimization.RebalanceProposal{
 		PortfolioID: "PF",
@@ -21,6 +32,10 @@ func sampleProposal() optimization.RebalanceProposal {
 		// below assert that unchecked and infeasible proposals emit nothing, and
 		// they would all pass against a ToOrders that emitted nothing ever.
 		MandateStatus: optimization.MandateFeasible,
+		// A DATED PROPOSAL, for the same non-vacuity reason as the verdict above
+		// (#970): ToOrders now refuses an undated one, so a fixture without AsOf
+		// would make every test below pass against a ToOrders that emitted nothing.
+		AsOf: testNow(),
 		Trades: []optimization.ProposedTrade{
 			{InstrumentID: "AAA", Side: optimization.Buy, TargetWeight: 0.6, Quantity: 100},
 			{InstrumentID: "BBB", Side: optimization.Sell, TargetWeight: 0.1, Quantity: 50},
@@ -29,7 +44,7 @@ func sampleProposal() optimization.RebalanceProposal {
 }
 
 func TestToOrders_MapsTradesIssuerBound(t *testing.T) {
-	cmds, err := ToOrders(sampleProposal(), "alice@desk")
+	cmds, err := ToOrders(sampleProposal(), "alice@desk", testFreshness())
 	if err != nil {
 		t.Fatalf("a mandate-feasible proposal must materialize: %v", err)
 	}
@@ -66,7 +81,7 @@ func TestToOrders_InfeasibleProposalEmitsNothing(t *testing.T) {
 	p := sampleProposal()
 	p.MandateStatus = optimization.MandateInfeasible
 	p.Violations = []string{"instrument concentration over 50%"}
-	cmds, err := ToOrders(p, "alice")
+	cmds, err := ToOrders(p, "alice", testFreshness())
 	if len(cmds) != 0 {
 		t.Fatalf("mandate-infeasible proposal must emit no orders, got %d", len(cmds))
 	}
@@ -88,7 +103,7 @@ func TestToOrders_InfeasibleProposalEmitsNothing(t *testing.T) {
 func TestToOrders_UncheckedProposalIsRefusedByName(t *testing.T) {
 	p := sampleProposal()
 	p.MandateStatus = optimization.MandateUnchecked // the zero value: what Rebalance produces
-	cmds, err := ToOrders(p, "alice")
+	cmds, err := ToOrders(p, "alice", testFreshness())
 	if len(cmds) != 0 {
 		t.Fatalf("a proposal no mandate check has run on must emit no orders, got %d", len(cmds))
 	}
@@ -108,7 +123,7 @@ func TestMaterialize_RefusesAnUncheckedProposalLoudly(t *testing.T) {
 	pub := &recordingPublisher{}
 	p := sampleProposal()
 	p.MandateStatus = optimization.MandateUnchecked
-	res, err := Materialize(context.Background(), p, "t1", "alice", "USD", nil, nil, pub)
+	res, err := Materialize(context.Background(), p, "t1", "alice", "USD", nil, nil, pub, testFreshness())
 	if !errors.Is(err, ErrMandateUnchecked) {
 		t.Fatalf("Materialize must propagate the refusal, got %v", err)
 	}
@@ -141,7 +156,7 @@ func (g rejectGate) Evaluate(_ context.Context, d compliance.OrderDelta) (compli
 func TestMaterialize_GateRejectsAreNotPublished(t *testing.T) {
 	pub := &recordingPublisher{}
 	res, err := Materialize(context.Background(), sampleProposal(), "t1", "alice", "USD",
-		map[string]float64{"AAA": 10, "BBB": 20}, rejectGate{rejectInstrument: "BBB"}, pub)
+		map[string]float64{"AAA": 10, "BBB": 20}, rejectGate{rejectInstrument: "BBB"}, pub, testFreshness())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +195,7 @@ func TestMaterialize_UnpricedInstrumentRejectsWithoutClaimingABreach(t *testing.
 	pub := &recordingPublisher{}
 	res, err := Materialize(context.Background(), sampleProposal(), "t1", "alice", "USD",
 		map[string]float64{"AAA": 10}, // BBB is absent ⇒ nil price ⇒ Unpriced
-		unpricedGate{}, pub)
+		unpricedGate{}, pub, testFreshness())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +214,7 @@ func TestMaterialize_UnpricedInstrumentRejectsWithoutClaimingABreach(t *testing.
 func TestMaterialize_UngovernedInstrumentRejectsWithoutClaimingABreach(t *testing.T) {
 	pub := &recordingPublisher{}
 	res, err := Materialize(context.Background(), sampleProposal(), "t1", "alice", "USD",
-		map[string]float64{"AAA": 10, "BBB": 20}, ungovernedGate{}, pub)
+		map[string]float64{"AAA": 10, "BBB": 20}, ungovernedGate{}, pub, testFreshness())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +228,7 @@ func TestMaterialize_UngovernedInstrumentRejectsWithoutClaimingABreach(t *testin
 }
 
 func TestMaterialize_PublishErrorPropagates(t *testing.T) {
-	_, err := Materialize(context.Background(), sampleProposal(), "t1", "alice", "USD", nil, nil, errPublisher{})
+	_, err := Materialize(context.Background(), sampleProposal(), "t1", "alice", "USD", nil, nil, errPublisher{}, testFreshness())
 	if err == nil {
 		t.Fatal("a publish error must propagate")
 	}

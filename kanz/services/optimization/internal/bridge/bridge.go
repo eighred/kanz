@@ -74,7 +74,23 @@ var (
 // proposal and a checked-and-clean one were the same value here, and this is the
 // line that decides whether a rebalance becomes live capital commands. An
 // unchecked proposal is now refused by name rather than admitted.
-func ToOrders(p optimization.RebalanceProposal, issuer string) ([]*orderpb.SubmitOrder, error) {
+//
+// THE FRESHNESS BOUND IS CHECKED HERE, BESIDE THE MANDATE VERDICT (#970), and
+// for the same reason it is here rather than in Materialize: this is the single
+// function every materialization path passes through, so a caller cannot reach
+// order construction without answering both questions. A check in Materialize
+// alone would be skipped by server.materialize, which calls ToOrders directly.
+//
+// IT RUNS BEFORE THE MANDATE SWITCH. Both refuse the whole proposal, and the
+// order between them decides which reason an operator is given for a proposal
+// that is both stale AND infeasible. Staleness first is the more useful answer:
+// an infeasibility computed against a book from four hours ago is not a fact
+// about today's mandate, and reporting it as one would send somebody to
+// investigate a limit that may never have been breached.
+func ToOrders(p optimization.RebalanceProposal, issuer string, f Freshness) ([]*orderpb.SubmitOrder, error) {
+	if _, err := f.Check(p); err != nil {
+		return nil, err
+	}
 	switch p.MandateStatus {
 	case optimization.MandateFeasible:
 	case optimization.MandateInfeasible:
@@ -120,9 +136,9 @@ func ToOrders(p optimization.RebalanceProposal, issuer string) ([]*orderpb.Submi
 // ENFORCES the premise rather than resting on it — an unchecked proposal returns
 // ErrMandateUnchecked before the loop below starts, so nothing is published and
 // the caller is told which of the two refusals it was.
-func Materialize(ctx context.Context, p optimization.RebalanceProposal, tenantID, issuer, currency string, prices map[string]float64, gate Gate, pub Publisher) (MaterializeResult, error) {
+func Materialize(ctx context.Context, p optimization.RebalanceProposal, tenantID, issuer, currency string, prices map[string]float64, gate Gate, pub Publisher, f Freshness) (MaterializeResult, error) {
 	var res MaterializeResult
-	cmds, err := ToOrders(p, issuer)
+	cmds, err := ToOrders(p, issuer, f)
 	if err != nil {
 		return res, err
 	}

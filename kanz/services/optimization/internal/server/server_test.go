@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,12 +14,13 @@ import (
 
 	"github.com/eighred/kanz/internal/optimization"
 	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/optimization/internal/bridge"
 )
 
 func newTestServer() *Server {
 	rd := &Readiness{}
 	rd.Set(true)
-	return New(rd, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(rd, slog.New(slog.NewTextHandler(io.Discard, nil)), testFreshness())
 }
 
 func do(t *testing.T, s *Server, method, path, body string) *httptest.ResponseRecorder {
@@ -85,7 +88,26 @@ func TestServer_Propose(t *testing.T) {
 // mandate verdict on it, because nothing checked it. It used to carry
 // "MandateFeasible":true, which is what every proposal this service built said
 // about itself (#646).
-const ordersBody = `{"proposal":{"PortfolioID":"PF",
+// testAsOf is the knowledge horizon every fixture proposal below is dated at, and
+// the instant the servers in these tests are clocked to (#970).
+//
+// FIXED RATHER THAN time.Now(): the freshness gate compares the two, so a fixture
+// dated "now" and a server clocked to the real "now" would make these tests
+// depend on how long the suite takes to reach them. Both sides are pinned so the
+// gate is never what a mandate test is measuring — the gate has its own tests in
+// bridge/freshness_test.go.
+const testAsOf = "2026-09-02T12:00:00Z"
+
+func testClock() time.Time { return time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC) }
+
+// testFreshness is a bound wide enough to admit testAsOf. Without it the zero
+// Freshness refuses everything and every assertion in this package would pass
+// against a route that materializes nothing.
+func testFreshness() Option {
+	return WithProposalFreshness(bridge.Freshness{MaxAge: time.Hour, Now: testClock})
+}
+
+const ordersBody = `{"proposal":{"PortfolioID":"PF","AsOf":"` + testAsOf + `",
 		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`
 
 // A PROPOSAL NOTHING CHECKED DOES NOT BECOME ORDERS (#646).
@@ -199,7 +221,14 @@ func TestASuppliedVerdictIsDecodedWhateverItsCase(t *testing.T) {
 // be told what is actually missing (nothing checked this) rather than being sent
 // away over a field it merely copied back.
 func TestARoundTrippedProposalIsRefusedAsUncheckedNotAsForged(t *testing.T) {
-	s := newTestServer()
+	// A REAL-CLOCK BOUND FOR THIS ONE TEST. /v1/propose stamps AsOf with the
+	// wall clock, so a server pinned to testClock would see its own freshly
+	// built proposal as dated in the future and refuse it as stale — measuring
+	// the harness rather than the issuer rule this test is about (#970).
+	s := New(func() *Readiness { r := &Readiness{}; r.Set(true); return r }(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithProposalFreshness(bridge.Freshness{MaxAge: time.Hour}))
+
 	proposeBody := `{"portfolio_id":"PF","instruments":["A","B"],
 		"covariance":[[0.04,0],[0,0.04]],
 		"objective":{"Type":1},
@@ -269,7 +298,7 @@ func TestOrdersRefuseABodySuppliedIssuer(t *testing.T) {
 // answer with a different status, and conflating the two would let the issuer
 // rule rot behind it.
 func TestOrdersAllowAnIssuerThatEchoesTheCaller(t *testing.T) {
-	body := `{"issuer":"alice","proposal":{"PortfolioID":"PF",
+	body := `{"issuer":"alice","proposal":{"PortfolioID":"PF","AsOf":"` + testAsOf + `",
 		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`
 	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/orders", body, "alice")
 	if rec.Code == http.StatusBadRequest {
@@ -449,5 +478,74 @@ func TestProposeRefusesAnUndefinedTangencyPortfolio(t *testing.T) {
 	}
 	if raw := rec.Body.String(); strings.Contains(raw, `"Targets"`) {
 		t.Fatalf("a refused optimization returned a portfolio: %s", raw)
+	}
+}
+
+// A STALE PROPOSAL IS REFUSED AT THE ROUTE, WITH ITS OWN REASON (#970).
+//
+// The route is where an operator meets this refusal, and the status and reason
+// class are what they act on. 409 rather than 422: the request is well formed and
+// the caller was entitled to make it — the proposal is simply no longer valid
+// against the book, and the fix is to compute a new one rather than to correct
+// the request.
+func TestOrdersRefuseAStaleProposalWithItsOwnReason(t *testing.T) {
+	rd := &Readiness{}
+	rd.Set(true)
+	// A bound of one minute against a fixture dated an hour before the clock.
+	s := New(rd, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithProposalFreshness(bridge.Freshness{MaxAge: time.Minute, Now: func() time.Time {
+			return testClock().Add(time.Hour)
+		}}))
+
+	rec := asPrincipal(t, s, http.MethodPost, "/v1/orders", ordersBody, "alice")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("a stale proposal got %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Reason string `json:"reason"`
+		AsOf   string `json:"as_of"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Reason != "STALE_PROPOSAL" {
+		t.Fatalf("reason = %q, want STALE_PROPOSAL — the refusal CLASS is what a dashboard counts, "+
+			"and grepping English out of the message is how a reworded sentence empties a panel",
+			got.Reason)
+	}
+	if got.AsOf != testAsOf {
+		t.Fatalf("as_of = %q, want %q — the horizon must be echoed so the operator can see how "+
+			"stale it was", got.AsOf, testAsOf)
+	}
+}
+
+// AN UNCONFIGURED BOUND REFUSES, AND SAYS SO AS ITS OWN PROBLEM.
+//
+// This is the fail-closed direction: a deployment that forgot the setting must
+// not silently materialize everything. And it must NOT be reported as
+// STALE_PROPOSAL — nothing is wrong with the proposal, so telling the caller to
+// re-run the optimizer would send them round a loop that refuses forever.
+func TestOrdersRefuseWhenNoFreshnessBoundIsConfigured(t *testing.T) {
+	rd := &Readiness{}
+	rd.Set(true)
+	s := New(rd, slog.New(slog.NewTextHandler(io.Discard, nil))) // no WithProposalFreshness
+
+	rec := asPrincipal(t, s, http.MethodPost, "/v1/orders", ordersBody, "alice")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("an unconfigured deployment got %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Reason string `json:"reason"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Reason != "FRESHNESS_UNCONFIGURED" {
+		t.Fatalf("reason = %q, want FRESHNESS_UNCONFIGURED — an unset bound is a deployment "+
+			"problem, not a stale proposal", got.Reason)
+	}
+	if !strings.Contains(got.Detail, "OPTIMIZATION_PROPOSAL_MAX_AGE") {
+		t.Fatalf("the detail does not name the setting to fix: %q", got.Detail)
 	}
 }
