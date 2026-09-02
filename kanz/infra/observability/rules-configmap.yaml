@@ -1751,6 +1751,54 @@ data:
             annotations:
               summary: "The copilot is taking most of its tool-use budget to reach an answer"
               description: "Nine in ten answers now need more than six of the eight turns agent.DefaultMaxTurns allows, so the loop is close to exhausting and CopilotLoopNotConverging is what fires next. Nothing is failing yet — this is the precursor, and it is here because by the time requests exhaust, the change that caused it is several deploys back. The usual causes are a model or prompt change, and a tool the model retries because it cannot act on the output; check kanz_copilot_tool_calls_total{result=\"error\"} and kanz_copilot_context_measures_total{status=\"withheld\"}, since a model reaching around missing measures asks more questions to get there."
+
+          # ─── THE ESTATE CANNOT MEASURE ITS OWN CASH DRAG (#963) ───────────────
+          #
+          # ONE RULE, AND DELIBERATELY NOT TWO. The obvious second rule — "this book
+          # is holding too much idle cash" — needs a threshold, and a threshold is a
+          # cash policy: a target operating buffer and a maximum idle balance. #963
+          # is explicit that the policy belongs where mandates are held, because it
+          # is a mandate-shaped constraint, and writing a number here would be
+          # inventing it in an alert file. kanz_treasury_idle_cash_share is exported
+          # for reading and for sizing the engine; when the policy lands, the rule
+          # becomes "this book is outside the buffer its mandate declares", which is
+          # a different rule against a different series.
+          #
+          # What IS alertable today is that the measurement itself is not working.
+          - alert: TreasuryCashDragUnmeasurable
+            expr: |
+              sum by (namespace) (increase(kanz_treasury_drag_unmeasurable_total[6h]))
+                /
+              clamp_min(
+                sum by (namespace) (increase(kanz_treasury_drag_unmeasurable_total[6h]))
+                  + sum by (namespace) (increase(kanz_treasury_idle_cash_share_count[6h])),
+                1)
+                > 0.5
+            for: 2h
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "More than half the estate's books cannot have their idle cash measured"
+              description: "Uninvested cash is a permanent performance drag that breaches no mandate, trips no risk limit and produces no reconciliation break — so this measurement is the only thing that would ever report it, and for most of the book it is refusing. Read kanz_treasury_drag_unmeasurable_total by reason, because they route to different teams. cash_unvouched is #588: accounting's ledger folds corporate actions and accruals and NOTHING in this platform produces either, so those books' cash is short every dividend and coupon ever paid and no drag figure computed from it can be trusted. nav_not_equity is #780's shape: the book is valued on a gross-positions proxy with no cash and no financing in it, so it is the wrong denominator — check the price feed (COMPLIANCE_PRICE_SUBJECTS) and kanz_compliance_marked_instruments. cash_unknown means accounting has announced no balance for those portfolios at all, or the announcements stopped and aged past cashview's bound."
+
+          # THE MEASUREMENT STOPPED ENTIRELY (#963).
+          #
+          # The rule above is a RATIO and cannot distinguish "half the books refuse"
+          # from "no book was evaluated at all" — with both terms at zero the
+          # clamp_min denominator makes it 0 and it stays quiet, which is correct for
+          # a ratio and wrong as the only signal. The post-trade monitor re-runs every
+          # book it holds on an interval precisely so a passive state is still
+          # observed, so a window in which NOTHING was measured or refused means that
+          # sweep is not running.
+          - alert: TreasuryCashDragNotObserved
+            expr: |
+              sum by (namespace) (increase(kanz_treasury_drag_unmeasurable_total[6h]))
+                + sum by (namespace) (increase(kanz_treasury_idle_cash_share_count[6h]))
+                == 0
+            for: 2h
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "No portfolio's idle cash has been measured or refused for six hours"
+              description: "Neither a measurement nor a refusal has been recorded, which is not the same as an estate with no idle cash — it means no book was evaluated. The observer rides the compliance post-trade monitor's evaluate path, which is woken by position FACTs, by cash announcements, and by a sweep over every book it holds; all three being silent means the monitor is not evaluating, and the same silence covers the passive gross-leverage breaches it exists to catch (#787). Check that compliance is consuming the position spine and that its book map is not empty. NOTE: no other rule currently covers that sweep stopping, so this one is presently the estate's only signal for it — which is a gap in #787's coverage rather than a property of this measurement, tracked separately."
   slo.alerts.rules.yaml: |
     # SLO multi-window burn-rate alerts (SRE-01b) — over slo.recording.rules.yaml.
     #
