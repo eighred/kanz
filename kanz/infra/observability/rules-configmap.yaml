@@ -1579,6 +1579,178 @@ data:
             annotations:
               summary: "Custody reconciliation runs for {{ $labels.custodian }} completed but could not be published"
               description: "A reconciliation ran and its ReconciliationRun FACT could not be published, so the run exists in accounting's own store and nowhere else. The staleness gauge deliberately does NOT advance on an unpublished run — the estate genuinely has no record that the control ran — so CustodyReconciliationStale will follow and this rule is what names the cause as a publish path rather than a custodian. Check the broker and that accounting.custody.reconciled is in the accounting user's publish allow-list in infra/nats/tenancy.yaml."
+
+          # ─── THE AGENT PLANE (#973) ───────────────────────────────────────────
+          #
+          # Every rule below reads a series #971 made real. None of them is a
+          # judgement about model quality: there is no hallucination rate here and
+          # no drift score, because neither is falsifiable from inside the process.
+          # What is here is what the estate can check — whether an answer was tied
+          # to its evidence, whether the evidence was complete, whether the loop
+          # converged, and whether any of it was kept.
+
+          # AN ANSWER NOBODY CAN EXPLAIN (#973).
+          #
+          # THE SUPERSET RULE, and it fires in a state kanz_copilot_answer_records_lost_total
+          # cannot reach: a copilot with no recorder configured never fails a publish,
+          # so before this series existed the deployment that kept NOTHING scraped
+          # exactly like the one whose every record landed. "Nothing configured" and
+          # "checked, and fine" must never look the same.
+          - alert: CopilotAnswersUnrecorded
+            expr: |
+              increase(kanz_copilot_unrecorded_answers_total[1h]) > 0
+            for: 15m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "The copilot is answering questions it keeps no record of"
+              description: "Answers went out and nothing kept what the model was shown, which model answered, or whether the answer was grounded — so an operator disputing one has no way to reconstruct it (#971). Two causes and they need different fixes. If kanz_copilot_answer_records_lost_total is rising with this, the recorder is configured and PUBLISHING is failing: check the broker and that platform.agent.answered is in the copilot user's publish allow-list in infra/nats/tenancy.yaml. If this is rising and that one is flat, NO RECORDER IS CONFIGURED — COPILOT_NATS_URL is unset — and the pod said so at ERROR on startup."
+
+          # THE PUBLISH PATH SPECIFICALLY (#973).
+          #
+          # Narrower than the rule above on purpose: this one can only fire when a
+          # recorder EXISTS and its publish failed, which is what separates a broker
+          # problem from an unconfigured deployment without an operator having to
+          # compare two series by hand.
+          - alert: CopilotAnswerRecordsLost
+            expr: |
+              increase(kanz_copilot_answer_records_lost_total[1h]) > 0
+            for: 15m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Copilot answer records are being produced and not published"
+              description: "The copilot has a recorder and its publishes are failing, so answers are being produced whose audit record exists nowhere. The answer itself is deliberately NOT failed by this — refusing to answer because the audit stream is down would turn a broker blip into a copilot outage — which is exactly why the loss has to be alerted rather than surfaced to the caller. Check the broker, and that platform.agent.answered is in the copilot user's publish allow-list in infra/nats/tenancy.yaml: a denied publish is rejected per-message and looks like a transport fault."
+
+          # THE MODEL STATED A NUMBER ITS CONTEXT DID NOT CONTAIN (#973).
+          #
+          # This is the CHECKABLE half of "did it make something up" — the grounding
+          # gate compares every figure in the answer against the values tools
+          # actually returned, and this counts the times that comparison failed. It
+          # is not a hallucination rate: a model can be wrong in prose with every
+          # number grounded, and this rule says nothing about that case.
+          - alert: CopilotAnswersUngrounded
+            expr: |
+              increase(kanz_copilot_ungrounded_answers_total[1h]) > 0
+            for: 15m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "The copilot stated figures no tool result supports"
+              description: "The grounding gate found a numeric claim in an answer that appeared in no tool result. The answer was still RETURNED, with grounded=false on the response — the gate marks, it does not withhold — so whether a human saw the flag depends entirely on the caller honouring it. Read the answer records on platform.agent.answered for the affected window: ungrounded_claims names the figures, and context_measured/context_withheld says whether the model was reaching around a gap in the read plane. If context_withheld is non-zero on the same answers, fix the data before the model."
+
+          # NOT A SLIP — A PATTERN (#973).
+          #
+          # One unsupported figure in an hour is a model slip. Several is a model
+          # systematically composing numbers, and the two want different responses:
+          # the first is read alongside the answer, the second is a reason to change
+          # the model or the prompt.
+          - alert: CopilotUngroundedClaimsSustained
+            expr: |
+              increase(kanz_copilot_ungrounded_claims_total[1h]) > 5
+            for: 15m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "The copilot is systematically stating unsupported figures"
+              description: "More than five individual figures with no supporting tool result in an hour. Divided by kanz_copilot_ungrounded_answers_total this separates one persistently inventive answer from a broad grounding failure; a high ratio is the former and a low one across many answers is the latter. A broad failure usually means the tool results stopped carrying the values the gate compares against rather than the model changing — check kanz_copilot_context_measures_total{status=\"withheld\"} and the tool error rate before assuming the model is at fault."
+
+          # THE READ PLANE IS WITHHOLDING AND THE AGENT IS ANSWERING ANYWAY (#973).
+          #
+          # #757 is why this series exists: a measure whose integrity record was
+          # stripped once reached an agent as a computed zero. The read plane
+          # withholds now instead — which is correct, and which made the failure
+          # SILENT, because an answer hedged for good reason and one hedged for no
+          # reason are indistinguishable from outside.
+          #
+          # clamp_min guards the denominator: with no measures read at all the ratio
+          # is 0 rather than undefined, so a quiet copilot does not page.
+          - alert: CopilotContextWithheld
+            expr: |
+              sum by (namespace) (increase(kanz_copilot_context_measures_total{status="withheld"}[1h]))
+                /
+              clamp_min(sum by (namespace) (increase(kanz_copilot_context_measures_total[1h])), 1)
+                > 0.25
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "More than a quarter of the risk measures reaching the copilot are unavailable"
+              description: "The governed read plane is refusing to state a number for a large share of what the agent asks for, and the agent is composing answers around the gaps. This is the read plane behaving CORRECTLY — withholding beats #757's computed zero — so the fault is upstream of the copilot: a risk engine not publishing, an integrity record that is not arriving, or a measure whose freshness bound has lapsed. The answers themselves are not wrong, but they are being written against a book with holes, and the hedging in them is load-bearing."
+
+          # THE LOOP STOPPED CONVERGING (#973).
+          #
+          # An exhausted budget is its own outcome rather than an error (#971): the
+          # caller gets a truthful "I could not complete this", which is why nothing
+          # else would ever page on it. A rising share means a model that keeps
+          # calling tools without reaching an answer — usually a prompt or model
+          # change, sometimes a tool that started returning something it cannot use.
+          - alert: CopilotLoopNotConverging
+            expr: |
+              sum by (namespace) (increase(kanz_copilot_answers_total{outcome="budget_exhausted"}[1h]))
+                /
+              clamp_min(sum by (namespace) (increase(kanz_copilot_answers_total[1h])), 1)
+                > 0.1
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "More than a tenth of copilot answers are exhausting the tool-use budget"
+              description: "The agent is running out of turns before reaching an answer, so those requests returned nothing useful. Read kanz_copilot_answer_turns: a distribution that shifted right without exhausting is the same cause caught earlier. The usual causes are a model or prompt change, and a tool whose output the model cannot act on — check kanz_copilot_tool_calls_total{result=\"error\"} first, because a loop retrying a failing tool exhausts the budget every time."
+
+          # A READ PLANE DEGRADING UNDER AN AGENT THAT KEEPS ASKING (#973).
+          - alert: CopilotToolErrorsRising
+            expr: |
+              sum by (namespace) (increase(kanz_copilot_tool_calls_total{result="error"}[1h]))
+                /
+              clamp_min(sum by (namespace) (increase(kanz_copilot_tool_calls_total[1h])), 1)
+                > 0.2
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "A fifth of the copilot's tool calls are failing"
+              description: "The agent's reads are erroring. An authorization deny counts here too and is not a fault — a principal asking about a portfolio it cannot see produces exactly this — so read platform.authz.decision for the same window before chasing the read plane: a rise concentrated in one principal is an access problem, and one spread across principals is the governed read service. Sustained tool errors also drive CopilotLoopNotConverging, because a loop retrying a failing tool exhausts its budget."
+
+          # CONTENT REACHED THE MODEL THAT LOOKED LIKE AN INSTRUCTION (#973).
+          #
+          # The scanner runs on tool OUTPUT, which is derived from tenant state. A
+          # hit means something in the book — an instrument description, a note, a
+          # counterparty name — is shaped like a prompt. It is counted per ANSWER
+          # rather than per scan, so this is a count of affected requests.
+          - alert: CopilotToolOutputInjectionFlagged
+            expr: |
+              increase(kanz_copilot_injection_flagged_answers_total[1h]) > 0
+            for: 15m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Tool output reaching the copilot tripped the prompt-injection scanner"
+              description: "Content derived from tenant state looked like an instruction to the model. The scanner neutralises it before the model sees it, so this is not evidence anything was acted on — it is evidence that a field somebody can write reaches an agent's context. Find the source through the answer record's retrieved references on platform.agent.answered: a repeated hit on one portfolio is a specific record, and a broad rise is a scanner tuning problem. A hit that is NOT a false positive is an escalation, because the writable field it came from is an entry point into the intelligence plane."
+
+          # AN OUTCOME THAT MAPPED TO NOTHING (#973).
+          #
+          # outcomeOf never returns UNSPECIFIED, so this series exists only because
+          # the label set is seeded from the proto descriptor rather than a list — a
+          # new AgentAnswerOutcome that nothing maps would otherwise be counted
+          # silently as whatever the default branch returns. The series is a
+          # deliberate, permanent zero; non-zero is a code defect, not an incident.
+          - alert: CopilotOutcomeUnclassified
+            expr: |
+              increase(kanz_copilot_answers_total{outcome="unspecified"}[1h]) > 0
+            for: 15m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Copilot answers are being counted under no outcome"
+              description: "An answer reached the metrics observer with an outcome the mapping does not classify, which is a code defect rather than an operational state: agent.outcomeOf returns one of four concrete outcomes and never UNSPECIFIED. It means observation.v1.AgentAnswerOutcome gained a value that outcomeOf does not produce, or that a zero-valued outcome is being constructed somewhere other than that function. Every alert on kanz_copilot_answers_total under-reports until it is fixed, because the answers are landing in a label nothing else reads."
+
+          # THE LOOP TAKING LONGER, BEFORE IT STARTS FAILING (#973).
+          #
+          # CopilotLoopNotConverging fires once requests are already exhausting the
+          # budget and returning nothing. This is the same phenomenon one step
+          # earlier: agent.DefaultMaxTurns is 8, so a p90 above 6 means a tenth of
+          # requests are within two turns of the ceiling and the next small
+          # regression starts failing them.
+          - alert: CopilotAnswerTurnsRising
+            expr: |
+              histogram_quantile(0.9, sum by (namespace, le) (rate(kanz_copilot_answer_turns_bucket[1h]))) > 6
+            for: 1h
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "The copilot is taking most of its tool-use budget to reach an answer"
+              description: "Nine in ten answers now need more than six of the eight turns agent.DefaultMaxTurns allows, so the loop is close to exhausting and CopilotLoopNotConverging is what fires next. Nothing is failing yet — this is the precursor, and it is here because by the time requests exhaust, the change that caused it is several deploys back. The usual causes are a model or prompt change, and a tool the model retries because it cannot act on the output; check kanz_copilot_tool_calls_total{result=\"error\"} and kanz_copilot_context_measures_total{status=\"withheld\"}, since a model reaching around missing measures asks more questions to get there."
   slo.alerts.rules.yaml: |
     # SLO multi-window burn-rate alerts (SRE-01b) — over slo.recording.rules.yaml.
     #

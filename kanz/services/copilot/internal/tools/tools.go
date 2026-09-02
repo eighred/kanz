@@ -31,6 +31,24 @@ type Result struct {
 	Citations []retrieval.Citation
 	Values    []float64
 	IsError   bool
+
+	// Measured and Unavailable are how many measures this result put in front of
+	// the model, by whether the read plane would state a number for them (#973).
+	//
+	// AN ANSWER BUILT ON A BOOK WITH HOLES IS A DIFFERENT THING from one built on
+	// a complete book, and nothing counted the difference. #757 is the version of
+	// this that already cost something: an integrity record was stripped on the
+	// way to an agent and DV01 = 0 read as a computed zero. The read plane now
+	// withholds instead — but "the agent was shown three measures and two were
+	// UNAVAILABLE" was still invisible, so an answer hedged for good reason and
+	// one hedged for no reason looked the same from outside.
+	//
+	// COUNTS AND NOT NAMES. A measure name is bounded today and comes from the
+	// engine's vocabulary, and a metric label fed by another component's
+	// vocabulary is unbounded by construction — the argument the OMS's
+	// unaccounted-observer makes for reporting the posture rather than the list.
+	Measured    int
+	Unavailable int
 }
 
 // Tool is one governed function the model may call.
@@ -267,7 +285,11 @@ func (r *Registry) render(ctx context.Context, label string, reading governed.Re
 	// StatedValues is MEASURED-only. The grounding gate reads this slice as
 	// "numbers a tool actually returned", so admitting a withheld one would
 	// license the model to state the very number this plane refused to state.
-	return Result{Content: b.String(), Citations: []retrieval.Citation{cite}, Values: reading.StatedValues()}
+	measured, unavailable := reading.Coverage()
+	return Result{
+		Content: b.String(), Citations: []retrieval.Citation{cite}, Values: reading.StatedValues(),
+		Measured: measured, Unavailable: unavailable,
+	}
 }
 
 func portfolioSchema(extra, extraDesc string) map[string]any {

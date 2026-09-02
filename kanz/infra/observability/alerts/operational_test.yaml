@@ -1876,3 +1876,356 @@ tests:
             exp_annotations:
               summary: "Orders are being handled for portfolios that NO mandate governs"
               description: "Part of the book is trading with no compliance constraints (or, with OMS_REQUIRE_MANDATE=true, is being refused for want of a mandate). Which of those two it is depends on the posture logged at OMS startup. Put every live portfolio under mandate with kanz-mandate; this counter is how much of the book is currently ungoverned."
+
+  # ─── THE AGENT PLANE (#973) ─────────────────────────────────────────────
+  #
+  # Two things are proven here, and the second is the one that has bitten this
+  # repo before. Every rule fires on its own condition — that is the easy half,
+  # and test/arch requires it. The harder half is that a QUIET copilot pages
+  # NOTHING: every ratio rule below divides by a counter that a healthy, idle
+  # deployment never increments, and a harness that only ever supplies busy
+  # series cannot see a rule that is unfireable — or one that fires forever —
+  # in the state the deployment actually spends its time in.
+
+  - interval: 1m
+    name: an idle copilot pages nothing
+    # EVERY SERIES PRESENT AND FLAT AT ZERO, which is exactly what
+    # registerAnswerMetrics produces before the first question: seeded labels,
+    # no increments. The ratio rules must read 0 here and not NaN — clamp_min on
+    # the denominator is the only thing standing between this state and a
+    # division by zero that evaluates to nothing at all.
+    input_series:
+      - series: 'kanz_copilot_answers_total{outcome="answered", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answers_total{outcome="refused", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answers_total{outcome="budget_exhausted", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answers_total{outcome="failed", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answers_total{outcome="unspecified", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_tool_calls_total{result="ok", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_tool_calls_total{result="error", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_context_measures_total{status="measured", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_context_measures_total{status="withheld", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_ungrounded_answers_total{namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_ungrounded_claims_total{namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_injection_flagged_answers_total{namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_unrecorded_answers_total{namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answer_records_lost_total{namespace="kanz"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CopilotContextWithheld
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CopilotLoopNotConverging
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CopilotToolErrorsRising
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CopilotOutcomeUnclassified
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CopilotAnswersUnrecorded
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CopilotAnswerRecordsLost
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CopilotAnswersUngrounded
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CopilotUngroundedClaimsSustained
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CopilotToolOutputInjectionFlagged
+        exp_alerts: []
+
+  # A BUSY AND HEALTHY COPILOT ALSO PAGES NOTHING. The idle case above cannot
+  # distinguish "the ratio is guarded" from "the rule never fires"; this one
+  # drives the denominators hard with clean traffic, so a rule whose threshold
+  # were inverted would fire here.
+  - interval: 1m
+    name: a busy copilot answering cleanly pages nothing
+    input_series:
+      - series: 'kanz_copilot_answers_total{outcome="answered", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answers_total{outcome="budget_exhausted", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answers_total{outcome="unspecified", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_tool_calls_total{result="ok", namespace="kanz"}'
+        values: '0+30x120'
+      - series: 'kanz_copilot_tool_calls_total{result="error", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_context_measures_total{status="measured", namespace="kanz"}'
+        values: '0+20x120'
+      - series: 'kanz_copilot_context_measures_total{status="withheld", namespace="kanz"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CopilotContextWithheld
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CopilotLoopNotConverging
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CopilotToolErrorsRising
+        exp_alerts: []
+
+  # THE STATE kanz_copilot_answer_records_lost_total CANNOT REACH (#973).
+  #
+  # No recorder is configured, so nothing ever fails to publish and the lost
+  # counter sits at a permanent, healthy-looking zero — while every answer goes
+  # unrecorded. This is the case the superset series exists for, and the harness
+  # asserts BOTH halves: the critical rule fires, and the narrower one stays
+  # silent, because an operator reading the pair is how the two causes are told
+  # apart.
+  - interval: 1m
+    name: a copilot with no recorder configured
+    input_series:
+      - series: 'kanz_copilot_unrecorded_answers_total{namespace="kanz"}'
+        values: '0+3x120'
+      - series: 'kanz_copilot_answer_records_lost_total{namespace="kanz"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: CopilotAnswersUnrecorded
+        exp_alerts:
+          - exp_labels: { severity: critical, layer: operational , namespace: kanz}
+            exp_annotations:
+              summary: "The copilot is answering questions it keeps no record of"
+              description: "Answers went out and nothing kept what the model was shown, which model answered, or whether the answer was grounded — so an operator disputing one has no way to reconstruct it (#971). Two causes and they need different fixes. If kanz_copilot_answer_records_lost_total is rising with this, the recorder is configured and PUBLISHING is failing: check the broker and that platform.agent.answered is in the copilot user's publish allow-list in infra/nats/tenancy.yaml. If this is rising and that one is flat, NO RECORDER IS CONFIGURED — COPILOT_NATS_URL is unset — and the pod said so at ERROR on startup."
+      - eval_time: 60m
+        alertname: CopilotAnswerRecordsLost
+        exp_alerts: []
+
+  # A CONFIGURED RECORDER WHOSE PUBLISHES ARE FAILING. Both rules fire, and that
+  # pairing is the diagnosis: the narrow rule can only be true when a recorder
+  # exists, so its presence names the broker rather than the config.
+  - interval: 1m
+    name: a copilot whose answer records will not publish
+    input_series:
+      - series: 'kanz_copilot_unrecorded_answers_total{namespace="kanz"}'
+        values: '0+2x120'
+      - series: 'kanz_copilot_answer_records_lost_total{namespace="kanz"}'
+        values: '0+2x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: CopilotAnswerRecordsLost
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational , namespace: kanz}
+            exp_annotations:
+              summary: "Copilot answer records are being produced and not published"
+              description: "The copilot has a recorder and its publishes are failing, so answers are being produced whose audit record exists nowhere. The answer itself is deliberately NOT failed by this — refusing to answer because the audit stream is down would turn a broker blip into a copilot outage — which is exactly why the loss has to be alerted rather than surfaced to the caller. Check the broker, and that platform.agent.answered is in the copilot user's publish allow-list in infra/nats/tenancy.yaml: a denied publish is rejected per-message and looks like a transport fault."
+
+  - interval: 1m
+    name: the model states a figure no tool returned
+    input_series:
+      - series: 'kanz_copilot_ungrounded_answers_total{namespace="kanz"}'
+        values: '0+1x120'
+      # One claim per answer: a slip, not a pattern. The sustained rule must NOT
+      # fire here, or the two severities collapse into one.
+      - series: 'kanz_copilot_ungrounded_claims_total{namespace="kanz"}'
+        values: '0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: CopilotAnswersUngrounded
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational , namespace: kanz}
+            exp_annotations:
+              summary: "The copilot stated figures no tool result supports"
+              description: "The grounding gate found a numeric claim in an answer that appeared in no tool result. The answer was still RETURNED, with grounded=false on the response — the gate marks, it does not withhold — so whether a human saw the flag depends entirely on the caller honouring it. Read the answer records on platform.agent.answered for the affected window: ungrounded_claims names the figures, and context_measured/context_withheld says whether the model was reaching around a gap in the read plane. If context_withheld is non-zero on the same answers, fix the data before the model."
+      - eval_time: 60m
+        alertname: CopilotUngroundedClaimsSustained
+        exp_alerts: []
+
+  - interval: 1m
+    name: the model is systematically composing figures
+    input_series:
+      - series: 'kanz_copilot_ungrounded_claims_total{namespace="kanz"}'
+        values: '0+1x120'
+      - series: 'kanz_copilot_ungrounded_answers_total{namespace="kanz"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: CopilotUngroundedClaimsSustained
+        exp_alerts:
+          - exp_labels: { severity: critical, layer: operational , namespace: kanz}
+            exp_annotations:
+              summary: "The copilot is systematically stating unsupported figures"
+              description: "More than five individual figures with no supporting tool result in an hour. Divided by kanz_copilot_ungrounded_answers_total this separates one persistently inventive answer from a broad grounding failure; a high ratio is the former and a low one across many answers is the latter. A broad failure usually means the tool results stopped carrying the values the gate compares against rather than the model changing — check kanz_copilot_context_measures_total{status=\"withheld\"} and the tool error rate before assuming the model is at fault."
+
+  - interval: 1m
+    name: the read plane is withholding and the agent answers anyway
+    input_series:
+      - series: 'kanz_copilot_context_measures_total{status="withheld", namespace="kanz"}'
+        values: '0+1x120'
+      - series: 'kanz_copilot_context_measures_total{status="measured", namespace="kanz"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CopilotContextWithheld
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational, namespace: kanz }
+            exp_annotations:
+              summary: "More than a quarter of the risk measures reaching the copilot are unavailable"
+              description: "The governed read plane is refusing to state a number for a large share of what the agent asks for, and the agent is composing answers around the gaps. This is the read plane behaving CORRECTLY — withholding beats #757's computed zero — so the fault is upstream of the copilot: a risk engine not publishing, an integrity record that is not arriving, or a measure whose freshness bound has lapsed. The answers themselves are not wrong, but they are being written against a book with holes, and the hedging in them is load-bearing."
+
+  - interval: 1m
+    name: the tool-use loop stops converging
+    input_series:
+      - series: 'kanz_copilot_answers_total{outcome="budget_exhausted", namespace="kanz"}'
+        values: '0+1x120'
+      - series: 'kanz_copilot_answers_total{outcome="answered", namespace="kanz"}'
+        values: '0+2x120'
+      - series: 'kanz_copilot_answers_total{outcome="unspecified", namespace="kanz"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CopilotLoopNotConverging
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational, namespace: kanz }
+            exp_annotations:
+              summary: "More than a tenth of copilot answers are exhausting the tool-use budget"
+              description: "The agent is running out of turns before reaching an answer, so those requests returned nothing useful. Read kanz_copilot_answer_turns: a distribution that shifted right without exhausting is the same cause caught earlier. The usual causes are a model or prompt change, and a tool whose output the model cannot act on — check kanz_copilot_tool_calls_total{result=\"error\"} first, because a loop retrying a failing tool exhausts the budget every time."
+      # The unspecified series is seeded and flat, so the classification rule
+      # must stay silent while its own family is busy.
+      - eval_time: 90m
+        alertname: CopilotOutcomeUnclassified
+        exp_alerts: []
+
+  - interval: 1m
+    name: the agents reads are erroring
+    input_series:
+      - series: 'kanz_copilot_tool_calls_total{result="error", namespace="kanz"}'
+        values: '0+1x120'
+      - series: 'kanz_copilot_tool_calls_total{result="ok", namespace="kanz"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CopilotToolErrorsRising
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational, namespace: kanz }
+            exp_annotations:
+              summary: "A fifth of the copilot's tool calls are failing"
+              description: "The agent's reads are erroring. An authorization deny counts here too and is not a fault — a principal asking about a portfolio it cannot see produces exactly this — so read platform.authz.decision for the same window before chasing the read plane: a rise concentrated in one principal is an access problem, and one spread across principals is the governed read service. Sustained tool errors also drive CopilotLoopNotConverging, because a loop retrying a failing tool exhausts its budget."
+
+  - interval: 1m
+    name: tool output looks like an instruction
+    input_series:
+      - series: 'kanz_copilot_injection_flagged_answers_total{namespace="kanz"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: CopilotToolOutputInjectionFlagged
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational , namespace: kanz}
+            exp_annotations:
+              summary: "Tool output reaching the copilot tripped the prompt-injection scanner"
+              description: "Content derived from tenant state looked like an instruction to the model. The scanner neutralises it before the model sees it, so this is not evidence anything was acted on — it is evidence that a field somebody can write reaches an agent's context. Find the source through the answer record's retrieved references on platform.agent.answered: a repeated hit on one portfolio is a specific record, and a broad rise is a scanner tuning problem. A hit that is NOT a false positive is an escalation, because the writable field it came from is an entry point into the intelligence plane."
+
+  # THE SERIES THAT ONLY EXISTS BECAUSE THE LABEL SET IS DERIVED (#973).
+  #
+  # outcomeOf returns one of four concrete outcomes and never UNSPECIFIED, so
+  # this can only go non-zero if the enum gains a value the mapping does not
+  # produce. Seeding it from the proto descriptor is what makes the rule
+  # queryable at all — a hand-written label list would omit it, and the defect
+  # would land as answers counted under a series no alert reads.
+  - interval: 1m
+    name: an answer outcome the mapping does not classify
+    input_series:
+      - series: 'kanz_copilot_answers_total{outcome="unspecified", namespace="kanz"}'
+        values: '0+1x120'
+      - series: 'kanz_copilot_answers_total{outcome="answered", namespace="kanz"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: CopilotOutcomeUnclassified
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational , namespace: kanz, outcome: unspecified}
+            exp_annotations:
+              summary: "Copilot answers are being counted under no outcome"
+              description: "An answer reached the metrics observer with an outcome the mapping does not classify, which is a code defect rather than an operational state: agent.outcomeOf returns one of four concrete outcomes and never UNSPECIFIED. It means observation.v1.AgentAnswerOutcome gained a value that outcomeOf does not produce, or that a zero-valued outcome is being constructed somewhere other than that function. Every alert on kanz_copilot_answers_total under-reports until it is fixed, because the answers are landing in a label nothing else reads."
+
+  # THE PRECURSOR, AND THE STATE IT MUST NOT FIRE IN (#973).
+  #
+  # A quantile rule is the easiest kind to get backwards, because a histogram
+  # whose observations all sit in the low buckets and one that has never been
+  # observed at all both produce something that looks quiet. The two groups
+  # below are the same shape with the mass moved, so a threshold comparison the
+  # wrong way round fails one of them.
+
+  - interval: 1m
+    name: the copilot answers in a couple of turns
+    input_series:
+      - series: 'kanz_copilot_answer_turns_bucket{le="1", namespace="kanz"}'
+        values: '0+5x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="2", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="3", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="4", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="5", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="6", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="8", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="10", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="15", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="+Inf", namespace="kanz"}'
+        values: '0+10x120'
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: CopilotAnswerTurnsRising
+        exp_alerts: []
+
+  - interval: 1m
+    name: the loop is creeping toward its budget
+    # Everything lands in the 8 bucket: nothing has EXHAUSTED — that would be a
+    # budget_exhausted outcome, not an observation — but nine in ten answers are
+    # now taking seven or eight of the eight turns available.
+    input_series:
+      - series: 'kanz_copilot_answer_turns_bucket{le="1", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="2", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="3", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="4", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="5", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="6", namespace="kanz"}'
+        values: '0x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="8", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="10", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="15", namespace="kanz"}'
+        values: '0+10x120'
+      - series: 'kanz_copilot_answer_turns_bucket{le="+Inf", namespace="kanz"}'
+        values: '0+10x120'
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: CopilotAnswerTurnsRising
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational, namespace: kanz }
+            exp_annotations:
+              summary: "The copilot is taking most of its tool-use budget to reach an answer"
+              description: "Nine in ten answers now need more than six of the eight turns agent.DefaultMaxTurns allows, so the loop is close to exhausting and CopilotLoopNotConverging is what fires next. Nothing is failing yet — this is the precursor, and it is here because by the time requests exhaust, the change that caused it is several deploys back. The usual causes are a model or prompt change, and a tool the model retries because it cannot act on the output; check kanz_copilot_tool_calls_total{result=\"error\"} and kanz_copilot_context_measures_total{status=\"withheld\"}, since a model reaching around missing measures asks more questions to get there."

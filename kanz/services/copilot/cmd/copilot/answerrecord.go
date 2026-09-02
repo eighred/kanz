@@ -7,8 +7,6 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -76,15 +74,3 @@ func (r *busAnswerRecorder) RecordAnswer(ctx context.Context, rec *observationpb
 		Payload:          rec,
 	})
 }
-
-// answerRecordsLost counts answers produced whose record could not be published.
-//
-// A PLAIN COUNTER, registered before anything can drop, so "none lost" is a
-// readable zero rather than a missing series (#622). Non-zero means the estate
-// answered questions it cannot now explain.
-var answerRecordsLost = prometheus.NewCounter(prometheus.CounterOpts{
-	Name: "kanz_copilot_answer_records_lost_total",
-	Help: "Copilot answers that were produced and whose record could not be published. Non-zero " +
-		"means an answer exists that cannot be reconstructed: what the model was shown, which " +
-		"model answered and whether the answer was grounded are unrecoverable for it (#971).",
-})
