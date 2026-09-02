@@ -98,9 +98,27 @@ func ToOrders(p optimization.RebalanceProposal, issuer string, f Freshness) ([]*
 	default:
 		return nil, fmt.Errorf("%w (verdict: %s)", ErrMandateUnchecked, p.MandateStatus)
 	}
+	// THE CONSTRAINT ENVELOPE (#972) — the third proposal-level question, and the
+	// last, so that all three are answered before a single command is built.
+	//
+	// AFTER THE MANDATE VERDICT, deliberately. All three refusals are about the
+	// proposal as a whole, so the order decides only which one an operator is
+	// shown for a proposal failing several — and "nothing checked this" is a more
+	// fundamental objection than "nobody bounded it". It also matters today: this
+	// service has no mandate source wired (#646), so every proposal is UNCHECKED,
+	// and putting the envelope first would replace that precise, deployment-level
+	// diagnosis with one about the request.
+	//
+	// Freshness stays FIRST for the reason #970 gives: a ceiling breached by a
+	// trade list computed against a four-hour-old book is not a fact about today's
+	// ceiling.
+	if _, err := checkEnvelope(p); err != nil {
+		return nil, err
+	}
+	now := f.now()
 	out := make([]*orderpb.SubmitOrder, 0, len(p.Trades))
 	for _, tr := range p.Trades {
-		out = append(out, &orderpb.SubmitOrder{
+		cmd := &orderpb.SubmitOrder{
 			Metadata: &commandpb.CommandMetadata{
 				Issuer:   issuer,
 				TargetId: orderID(p.PortfolioID, tr.InstrumentID),
@@ -111,9 +129,22 @@ func ToOrders(p optimization.RebalanceProposal, issuer string, f Freshness) ([]*
 			InstrumentId: tr.InstrumentID,
 			Side:         orderSide(tr.Side),
 			Quantity:     &commonpb.Decimal{Coefficient: int64(math.Round(tr.Quantity * 1e4)), Exponent: qtyExp},
-			OrderType:    orderpb.OrderType_ORDER_TYPE_MARKET,
-			TimeInForce:  orderpb.TimeInForce_TIME_IN_FORCE_DAY,
-		})
+			// MARKET / DAY IS THE FLOOR, NOT THE ANSWER. applyConstraints below
+			// replaces both when the envelope names a slippage bound or an
+			// execution window; leaving them here keeps "the envelope chose to
+			// cross" a visible default rather than an implicit one.
+			OrderType:   orderpb.OrderType_ORDER_TYPE_MARKET,
+			TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_DAY,
+		}
+		// A CONSTRAINT THAT CANNOT BE APPLIED REFUSES THE WHOLE PROPOSAL rather
+		// than emitting this child unprotected. A proposal that ASKED for a 20bp
+		// bound and produced an unbounded MARKET order is worse than one that
+		// asked for nothing: the envelope is on the record, and an auditor reads a
+		// protection the order never had.
+		if err := applyConstraints(cmd, tr, p.Constraints, now); err != nil {
+			return nil, err
+		}
+		out = append(out, cmd)
 	}
 	return out, nil
 }

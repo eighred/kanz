@@ -146,6 +146,19 @@ func (f Freshness) Check(p optimization.RebalanceProposal) (age time.Duration, e
 		return age, fmt.Errorf("%w: inputs are %s old, bound is %s",
 			ErrProposalStale, age.Truncate(time.Second), f.MaxAge)
 	}
+	// THE PROPOSAL'S OWN EXPIRY MAY ONLY TIGHTEN THE ESTATE'S (#972). An approver
+	// who says "this is good for the next ten minutes" is making a NARROWER claim
+	// than OPTIMIZATION_PROPOSAL_MAX_AGE, and the tighter of the two binds.
+	//
+	// IT CANNOT LOOSEN IT, and that asymmetry is the point: expires_at arrives in
+	// the request body, so a per-proposal field that could extend the deployment's
+	// ceiling would let any caller opt out of the control entirely — the same
+	// reason the mandate verdict is refused from the body (#409/#646).
+	if c := p.Constraints; c != nil && !c.ExpiresAt.IsZero() && now.After(c.ExpiresAt) {
+		return age, fmt.Errorf("%w: the proposal's own expires_at (%s) passed %s ago",
+			ErrProposalStale, c.ExpiresAt.UTC().Format(time.RFC3339),
+			now.Sub(c.ExpiresAt).Truncate(time.Second))
+	}
 	return age, nil
 }
 

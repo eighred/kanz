@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 
 	"github.com/eighred/kanz/internal/compliance"
@@ -46,6 +48,48 @@ func (s TradeSide) String() string {
 }
 
 // ProposedTrade is one leg of the rebalance trade list.
+// ProposalConstraints is the envelope an approved rebalance may act within
+// (#972) — what it may cost, how long it stays valid, and why it was proposed.
+//
+// A PROPOSAL SAID WHAT TO TRADE AND NEVER UNDER WHAT CONDITIONS IT STOPS BEING A
+// GOOD IDEA. Every child the bridge emitted was ORDER_TYPE_MARKET /
+// TIME_IN_FORCE_DAY, so an approved rebalance was an instruction to cross the
+// spread for whatever quantity the delta implied, at whatever price the book
+// offered, for the rest of the day.
+//
+// IT IS A POINTER ON THE PROPOSAL, AND THAT IS THE WHOLE DESIGN. Its ABSENCE
+// means nobody bounded this rebalance, which is not the same as bounding it at
+// zero — and four loose scalars could not tell those apart, because a zero and an
+// unset field are the same value. The envelope's presence is the statement that
+// somebody thought about it; a zero INSIDE it is a decision (max slippage of 0
+// says "cross whatever the book offers", which is legitimate for an unwind that
+// must complete).
+type ProposalConstraints struct {
+	// MaxNotional is the largest ABSOLUTE notional the WHOLE proposal may move.
+	// Required and positive: there is no legitimate unbounded rebalance, and this
+	// is the circuit breaker between an optimizer bug and the market.
+	MaxNotional *commonpb.Decimal
+
+	// MaxSlippageBPS is the worst execution the thesis tolerates, measured from
+	// the price the proposal was BUILT at. It becomes a limit price on every
+	// child; zero emits market orders, explicitly.
+	MaxSlippageBPS uint32
+
+	// ExecutionWindow is how long the emitted children stay valid. Non-zero emits
+	// TIME_IN_FORCE_GTD with expire_at; zero keeps DAY.
+	ExecutionWindow time.Duration
+
+	// ExpiresAt is when this proposal stops being actionable, set by whoever
+	// authorised it. It may only TIGHTEN the estate-wide freshness bound (#970),
+	// never loosen it — a per-proposal field that could would let any caller opt
+	// out of the control.
+	ExpiresAt time.Time
+
+	// ReasonCodes name why the rebalance was proposed, from a closed vocabulary.
+	// Prose here would make "how often did drift cause a rebalance" a grep.
+	ReasonCodes []string
+}
+
 type ProposedTrade struct {
 	InstrumentID  string
 	Side          TradeSide
@@ -164,7 +208,11 @@ type RebalanceProposal struct {
 	// bearer is not entitled to make, and the optimization service's HTTP surface
 	// refuses a request body that carries one.
 	MandateStatus MandateStatus
-	Violations    []string
+
+	// Constraints is the envelope this proposal may act within (#972). NIL means
+	// nobody bounded it, and the bridge refuses to materialize it.
+	Constraints *ProposalConstraints
+	Violations  []string
 }
 
 // DefaultRebalanceThreshold is the minimum absolute weight change that warrants

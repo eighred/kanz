@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"math/big"
 	"time"
 
 	"context"
@@ -12,6 +13,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/optimization"
 )
 
@@ -36,6 +38,16 @@ func sampleProposal() optimization.RebalanceProposal {
 		// (#970): ToOrders now refuses an undated one, so a fixture without AsOf
 		// would make every test below pass against a ToOrders that emitted nothing.
 		AsOf: testNow(),
+		// A BOUNDED PROPOSAL, for the same non-vacuity reason as the verdict and
+		// the date above (#972): ToOrders refuses an unbounded one, so a fixture
+		// without an envelope would make every test below pass against a ToOrders
+		// that emitted nothing. The envelope is deliberately permissive — a large
+		// ceiling, no slippage bound, no window — so these tests measure the
+		// mandate path and not the envelope. The envelope has its own tests in
+		// constraints_test.go.
+		Constraints: &optimization.ProposalConstraints{
+			MaxNotional: dec.ToProto(big.NewRat(1_000_000_000, 1)),
+		},
 		Trades: []optimization.ProposedTrade{
 			{InstrumentID: "AAA", Side: optimization.Buy, TargetWeight: 0.6, Quantity: 100},
 			{InstrumentID: "BBB", Side: optimization.Sell, TargetWeight: 0.1, Quantity: 50},
