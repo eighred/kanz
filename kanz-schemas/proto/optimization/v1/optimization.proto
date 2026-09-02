@@ -16,6 +16,8 @@ syntax = "proto3";
 // the trade direction/size as analytics.
 package optimization.v1;
 
+import "common/v1/decimal.proto";
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
 // ObjectiveType is what the optimizer maximizes/minimizes.
@@ -219,7 +221,128 @@ message RebalanceProposal {
   // name are both reserved so neither can return.
   reserved 9;
   reserved "mandate_feasible";
+
+  // constraints is the envelope this proposal may act within (#972): what it may
+  // cost, how long it stays valid, and why it was proposed.
+  //
+  // ITS ABSENCE REFUSES. A proposal with no envelope is one nobody bounded, and
+  // bridge.ToOrders will not materialize it — see ProposalConstraints for why the
+  // message being present is itself the statement.
+  ProposalConstraints constraints = 12;
 }
+
+// ProposalConstraints is the envelope an approved rebalance may act within
+// (#972) — what it may cost, how long it stays valid, and why it was proposed.
+//
+// # What a proposal said before this, and what it did not
+//
+// A RebalanceProposal said WHAT to trade and never said under what conditions it
+// stops being a good idea. bridge.ToOrders then emitted every child as
+// ORDER_TYPE_MARKET / TIME_IN_FORCE_DAY, so an approved rebalance was an
+// instruction to cross the spread for whatever quantity the delta implied, at
+// whatever price the book offered, for the rest of the day.
+//
+// A rebalance is sized in NOTIONAL (|Δw| × NAV) and converted to quantity at the
+// price known when it was built. Between that instant and the fill, nothing
+// expressed:
+//
+//   - the most slippage the thesis tolerates. A 40bp rebalance that pays 90bp of
+//     impact has destroyed the reason it was proposed, and the platform executed
+//     it identically to one that paid 3bp.
+//   - the largest notional this proposal may move. A weight error, a NAV read
+//     from the wrong instant, or a mistyped target produces a trade list whose
+//     size nothing bounds. This is the circuit breaker between an optimizer bug
+//     and the market.
+//   - how long the instruction remains valid. TIME_IN_FORCE_DAY means a child
+//     rejected, requeued or slow to route can still fill hours later against a
+//     book the proposal never saw.
+//   - why it was proposed. When a rebalance is questioned weeks later the record
+//     said what moved and not which limit or objective compelled it.
+//
+// This is the sibling of #970 and the two are independent: that one bounds a
+// proposal's AGE, this one bounds its EFFECT. A perfectly fresh proposal can
+// still be enormous, and a small one can still be stale.
+//
+// # Presence is the statement; a zero inside it is a choice
+//
+// THE MESSAGE BEING ABSENT MEANS NOBODY DECIDED, and a proposal with no envelope
+// does not materialize. That is the platform's "nothing configured and
+// checked-and-fine must never look the same" rule on the path where a proposal
+// becomes capital, and it is why this is a message rather than four loose fields:
+// proto3 cannot tell an unset field from a zero one, so four scalars would make
+// "no limit was set" and "the limit is zero" identical — which is the trap
+// BalanceCompleteness exists to avoid one domain over.
+//
+// INSIDE a present envelope, a zero IS meaningful: max_slippage_bps = 0 says
+// "cross whatever the book offers", which is a real decision for an illiquid
+// unwind and is now recorded as one rather than inferred from silence.
+message ProposalConstraints {
+  // max_notional is the largest ABSOLUTE notional this whole proposal may move,
+  // in the portfolio's currency. Required and must be positive.
+  //
+  // ACROSS THE TRADE LIST, NOT PER CHILD, and that is the load-bearing half. A
+  // per-child ceiling is evaded by splitting one trade into two, and the risk
+  // being bounded is the rebalance's aggregate footprint — a bad NAV read scales
+  // every leg at once, not one of them.
+  //
+  // THE WHOLE PROPOSAL IS REFUSED WHEN IT EXCEEDS, never truncated to fit.
+  // Dropping legs until the total fits would leave a partially rebalanced book:
+  // one side of a pair trade on, weights further from target than before it ran,
+  // and no record of which legs were dropped or why. Half a rebalance is not a
+  // smaller rebalance.
+  common.v1.Decimal max_notional = 1;
+
+  // max_slippage_bps is the worst execution the thesis tolerates, in basis points
+  // from the price the proposal was built at.
+  //
+  // IT BECOMES A LIMIT PRICE ON EVERY CHILD, which is what actually stops a fill.
+  // A slippage constraint checked only at proposal time bounds nothing: the
+  // proposal is not where the money moves. bridge.ToOrders derives each child's
+  // reference price from the trade's own notional and quantity — the price the
+  // optimizer sized it at — and emits ORDER_TYPE_LIMIT at that price adjusted by
+  // this many basis points in the direction that costs money.
+  //
+  // ZERO IS A DECISION, NOT AN ABSENCE. It says "cross whatever the book offers",
+  // which is legitimate for an unwind that must complete, and the children are
+  // then MARKET orders exactly as before. It is distinguishable from an unset
+  // envelope because the envelope itself is required.
+  uint32 max_slippage_bps = 2;
+
+  // execution_window is how long the emitted children remain valid.
+  //
+  // IT REPLACES TIME_IN_FORCE_DAY, which let an instruction outlive the thesis
+  // that produced it: a child rejected, requeued or slow to route could still
+  // fill hours later against a book the proposal never saw. A non-zero window
+  // emits TIME_IN_FORCE_GTD with expire_at set from it; zero keeps DAY.
+  google.protobuf.Duration execution_window = 3;
+
+  // expires_at is when this proposal stops being actionable at all, set by
+  // whoever authorised it.
+  //
+  // IT IS THE PROPOSAL'S OWN BOUND AND #970's IS THE ESTATE'S. #970 refuses a
+  // proposal whose inputs are older than OPTIMIZATION_PROPOSAL_MAX_AGE — a
+  // deployment-wide ceiling nobody per-proposal can raise. This one may only
+  // TIGHTEN it: an approver who says "this is good for the next ten minutes" is
+  // making a narrower claim than the estate's default, and the tighter of the two
+  // binds. It cannot loosen the estate bound, because a per-proposal field that
+  // could would let any caller opt out of the control.
+  google.protobuf.Timestamp expires_at = 4;
+
+  // reason_codes name why this rebalance was proposed, from a closed vocabulary.
+  //
+  // WHEN A REBALANCE IS QUESTIONED WEEKS LATER the record said what moved and not
+  // which limit or objective compelled it. "Drifted past the band", "concentration
+  // limit", "mandate change" and "cash deployment" are different decisions with
+  // different reviewers, and reconstructing which one it was from the trade list
+  // is guesswork.
+  //
+  // CODES RATHER THAN PROSE, for the reason every refusal vocabulary in this
+  // estate is a closed set: "how often did drift cause a rebalance" is a question
+  // about the strategy's behaviour, and answering it by grepping English is how a
+  // reworded sentence silently empties a panel.
+  repeated string reason_codes = 5;
+}
+
 
 // ProposalMaterialized is the FACT that a rebalance proposal became order
 // commands (#409).
@@ -285,6 +408,16 @@ message ProposalMaterialized {
   // A materialization refused for staleness carries it too, which is what makes
   // the refusal reviewable rather than merely logged.
   google.protobuf.Timestamp proposal_as_of = 7;
+
+  // constraints is the envelope the materialization acted within (#972), carried
+  // through from the proposal.
+  //
+  // WITHOUT IT THE RECORD SAYS WHAT MOVED AND NOT WHAT BOUNDED IT. An auditor
+  // asking "was this rebalance capped, and at what" had to find the proposal that
+  // produced it — which is a request body nobody kept. The reason_codes inside it
+  // are the other half: they say which limit or objective compelled the trade,
+  // which the trade list alone cannot.
+  ProposalConstraints constraints = 8;
 }
 
 // RejectedOrder is one command the pre-trade gate refused.

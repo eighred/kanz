@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	lifecyclepb "github.com/eighred/kanz/kanz-schemas-go/lifecycle/v1"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/optimization"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/auth"
@@ -96,6 +98,9 @@ func feasibleProposal() optimization.RebalanceProposal {
 		PortfolioID:   "PF",
 		MandateStatus: optimization.MandateFeasible,
 		AsOf:          testClock(),
+		Constraints: &optimization.ProposalConstraints{
+			MaxNotional: dec.ToProto(big.NewRat(1_000_000_000, 1)),
+		},
 		Trades: []optimization.ProposedTrade{
 			{InstrumentID: "A", Side: optimization.Buy, Quantity: 100},
 		},

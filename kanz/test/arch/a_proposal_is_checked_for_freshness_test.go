@@ -235,3 +235,69 @@ func anyContains(hay []string, needle string) bool {
 	}
 	return false
 }
+
+// A PROPOSAL CANNOT BECOME ORDERS WITHOUT A CONSTRAINT ENVELOPE (#972).
+//
+// The sibling of the freshness guard above and the same argument: ToOrders is the
+// one function every materialization path passes through, so the envelope check
+// belongs there and a new path cannot avoid it.
+//
+// WHAT WOULD OTHERWISE ROT. The envelope's whole design rests on its ABSENCE
+// meaning "nobody decided" — proto3 cannot tell an unset scalar from a zero one,
+// which is why it is a message and why nil refuses. A future edit that defaulted
+// a missing envelope to a permissive one, or that checked only some of its
+// fields, would restore unbounded MARKET orders while every test that supplies an
+// envelope kept passing.
+func TestToOrdersRefusesAProposalWithNoConstraintEnvelope(t *testing.T) {
+	fset, files := parseBridgePkg(t, bridgePkgDir)
+
+	toOrders := findBridgeFunc(files, "ToOrders")
+	if toOrders == nil {
+		t.Fatal("bridge.ToOrders not found — update this guard rather than letting it check nothing")
+	}
+	body := renderBody(t, fset, toOrders.Body)
+	checkIdx := strings.Index(body, "checkEnvelope(")
+	if checkIdx < 0 {
+		t.Fatal("bridge.ToOrders no longer calls checkEnvelope — a proposal that bounds nothing " +
+			"would materialize as unbounded MARKET orders good for the rest of the day (#972)")
+	}
+	buildIdx := strings.Index(body, "orderpb.SubmitOrder{")
+	if buildIdx >= 0 && buildIdx < checkIdx {
+		t.Fatal("bridge.ToOrders constructs a SubmitOrder before checking the envelope — the " +
+			"refusal must precede construction so no command built from an unbounded proposal " +
+			"can escape")
+	}
+	// The envelope must also be APPLIED, not merely validated. A proposal carrying
+	// a slippage bound whose children go out as MARKET orders is worse than one
+	// carrying nothing: the bound is on the record and the order never had it.
+	if !strings.Contains(body, "applyConstraints(") {
+		t.Fatal("bridge.ToOrders validates the envelope and never applies it — a slippage bound " +
+			"that does not become a limit price, and a window that does not become an expiry, " +
+			"bound nothing (#972)")
+	}
+}
+
+// A MISSING ENVELOPE MUST REFUSE, AND THE ZERO VALUE IS WHAT A CALLER LEAVES.
+//
+// Checked in the estate-wide guard for the same reason the freshness zero value
+// is: the signature and call-order checks above are only load-bearing if the
+// absent case is the safe one.
+func TestTheNilEnvelopeRefuses(t *testing.T) {
+	fset, files := parseBridgePkg(t, bridgePkgDir)
+	check := findBridgeFunc(files, "checkEnvelope")
+	if check == nil {
+		t.Fatal("bridge.checkEnvelope not found — update this guard rather than letting it check nothing")
+	}
+	body := renderBody(t, fset, check.Body)
+	if !strings.Contains(body, "ErrConstraintsUnstated") {
+		t.Fatal("checkEnvelope no longer refuses a nil envelope with ErrConstraintsUnstated. " +
+			"An absent envelope means NOBODY BOUNDED this proposal, which is not the same as " +
+			"bounding it at zero — and proto3 cannot tell those apart in a scalar, which is the " +
+			"whole reason the envelope is a message (#972)")
+	}
+	if !strings.Contains(body, "ErrNotionalUnbounded") {
+		t.Fatal("checkEnvelope no longer requires a positive max_notional — there is no legitimate " +
+			"unbounded rebalance, and this is the circuit breaker between an optimizer bug and " +
+			"the market (#972)")
+	}
+}

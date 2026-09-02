@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
@@ -544,6 +545,28 @@ func (s *Server) materialize(w http.ResponseWriter, r *http.Request, proposal op
 		})
 		return
 	}
+	if bridge.IsEnvelopeRefusal(err) {
+		// AN UNBOUNDED PROPOSAL IS NOT A MANDATE REFUSAL (#972), and rendering it
+		// under the #646 detail below would tell an operator this service has no
+		// mandate source — true, and not why THIS request was refused. The two
+		// need different actions: state the envelope, versus wire a mandate stream.
+		//
+		// 422: unlike a stale proposal (409, where the request was fine and the
+		// world moved), this request is genuinely incomplete — the envelope is the
+		// caller's to supply, and supplying it is the fix.
+		s.logger.Warn("refused to materialize an unbounded rebalance proposal",
+			"portfolio_id", proposal.PortfolioID, "issuer", principal.Subject, "err", err)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  err.Error(),
+			"reason": bridge.EnvelopeRefusalCode(err),
+			"detail": "an approved rebalance must say what it may cost: a max_notional ceiling for " +
+				"the whole trade list, and optionally a slippage bound and an execution window. " +
+				"Without an envelope every child is an unbounded MARKET order good for the rest " +
+				"of the day. An ABSENT envelope means nobody decided; a zero INSIDE one is a " +
+				"decision. See #972",
+		})
+		return
+	}
 	if err != nil {
 		// A PROPOSAL WITH NO VERDICT DOES NOT MATERIALIZE, AND THE REFUSAL SAYS SO.
 		//
@@ -686,6 +709,21 @@ func (s *Server) recordMaterialization(ctx context.Context, mat Materializer,
 	// FACT.
 	if !p.AsOf.IsZero() {
 		fact.ProposalAsOf = timestamppb.New(p.AsOf.UTC())
+	}
+	// AND THE ENVELOPE IT ACTED WITHIN (#972). Without it the record says what
+	// moved and not what bounded it: an auditor asking "was this rebalance capped,
+	// and at what" would have to find the proposal, which arrived in a request
+	// body nobody kept.
+	if c := p.Constraints; c != nil {
+		fact.Constraints = &optimizationpb.ProposalConstraints{
+			MaxNotional:     c.MaxNotional,
+			MaxSlippageBps:  c.MaxSlippageBPS,
+			ExecutionWindow: durationpb.New(c.ExecutionWindow),
+			ReasonCodes:     c.ReasonCodes,
+		}
+		if !c.ExpiresAt.IsZero() {
+			fact.Constraints.ExpiresAt = timestamppb.New(c.ExpiresAt.UTC())
+		}
 	}
 	for _, c := range res.Submitted {
 		fact.SubmittedOrderIds = append(fact.SubmittedOrderIds, c.GetOrderId())

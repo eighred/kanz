@@ -107,8 +107,15 @@ func testFreshness() Option {
 	return WithProposalFreshness(bridge.Freshness{MaxAge: time.Hour, Now: testClock})
 }
 
-const ordersBody = `{"proposal":{"PortfolioID":"PF","AsOf":"` + testAsOf + `",
-		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`
+// testEnvelope is a permissive but PRESENT constraint envelope (#972). Present,
+// because ToOrders refuses an unbounded proposal and every assertion in this
+// package would otherwise pass against a route that materializes nothing.
+// Permissive, because the envelope is never what a mandate or issuer test is
+// measuring — it has its own tests in bridge/constraints_test.go.
+const testEnvelope = `"Constraints":{"MaxNotional":{"coefficient":100000000,"exponent":0}}`
+
+const ordersBody = `{"proposal":{"PortfolioID":"PF","AsOf":"` + testAsOf + `",` + testEnvelope + `,
+		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100,"Notional":1000}]}}`
 
 // A PROPOSAL NOTHING CHECKED DOES NOT BECOME ORDERS (#646).
 //
@@ -298,8 +305,8 @@ func TestOrdersRefuseABodySuppliedIssuer(t *testing.T) {
 // answer with a different status, and conflating the two would let the issuer
 // rule rot behind it.
 func TestOrdersAllowAnIssuerThatEchoesTheCaller(t *testing.T) {
-	body := `{"issuer":"alice","proposal":{"PortfolioID":"PF","AsOf":"` + testAsOf + `",
-		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100}]}}`
+	body := `{"issuer":"alice","proposal":{"PortfolioID":"PF","AsOf":"` + testAsOf + `",` + testEnvelope + `,
+		"Trades":[{"InstrumentID":"A","Side":1,"Quantity":100,"Notional":1000}]}}`
 	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/orders", body, "alice")
 	if rec.Code == http.StatusBadRequest {
 		t.Fatalf("an issuer echoing the caller was refused as forged: %s", rec.Body.String())
