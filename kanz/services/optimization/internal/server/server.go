@@ -25,6 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 	optimizationpb "github.com/eighred/kanz/kanz-schemas-go/optimization/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -53,6 +55,12 @@ type Server struct {
 	logger    *slog.Logger
 	readiness *Readiness
 	mux       *http.ServeMux
+
+	// freshness bounds how old a proposal's inputs may be when it becomes orders
+	// (#970). Its ZERO VALUE REFUSES EVERYTHING — see bridge.ErrFreshnessUnbounded
+	// — so a composition root that forgets WithProposalFreshness fails closed
+	// rather than restoring the unbounded behaviour.
+	freshness bridge.Freshness
 
 	// materializerFor builds a per-request materializer scoped to the caller's
 	// tenant, or is nil.
@@ -144,6 +152,16 @@ type Materializer interface {
 // parameter and a caller passed nil would be exactly the silent acquisition this
 // must never have.
 func WithAutoPublish(f MaterializerFor) Option { return func(s *Server) { s.materializerFor = f } }
+
+// WithProposalFreshness sets the bound on how old a proposal's inputs may be
+// (#970).
+//
+// NOT OPTIONAL IN EFFECT, only in syntax: without it Server.freshness is the zero
+// Freshness, whose MaxAge is 0, and bridge.Freshness.Check refuses on that. The
+// option exists so the number comes from the deployment's configuration rather
+// than from a default this package invented — and the refusal is what makes
+// forgetting it loud instead of silent.
+func WithProposalFreshness(f bridge.Freshness) Option { return func(s *Server) { s.freshness = f } }
 
 // WithMandateGate gives the propose path a mandate source, an evaluator and a
 // classifier (#751).
@@ -491,7 +509,41 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 // be rebuilt.
 func (s *Server) materialize(w http.ResponseWriter, r *http.Request, proposal optimization.RebalanceProposal,
 	principal *auth.Principal) {
-	cmds, err := bridge.ToOrders(proposal, principal.Subject)
+	cmds, err := bridge.ToOrders(proposal, principal.Subject, s.freshness)
+	if bridge.IsFreshnessRefusal(err) {
+		// A STALE PROPOSAL IS NOT A MANDATE REFUSAL, and rendering it as one would
+		// send the operator to the wrong place (#970). The two need different
+		// actions — re-run the optimizer against the current book, versus
+		// investigate a limit — so they get different status codes and different
+		// reason classes rather than sharing the branch below.
+		//
+		// 409 AND NOT 422: the request is well formed and the caller was entitled
+		// to make it; the proposal is simply no longer valid against the state.
+		// 422 would tell them to fix their request, which is the wrong instruction
+		// — the fix is to compute a new proposal.
+		s.logger.Warn("refused to materialize a stale rebalance proposal",
+			"portfolio_id", proposal.PortfolioID, "issuer", principal.Subject,
+			"as_of", proposal.AsOf.UTC().Format(time.RFC3339), "err", err)
+		code := bridge.RefusalCode(err)
+		detail := "a rebalance proposal is a DELTA against the holdings read at as_of. Against a " +
+			"book that has since moved the delta is the wrong trade, and every child this service " +
+			"emits is a MARKET order — nothing absorbs the drift. Re-run the optimizer against " +
+			"the current book; see #970"
+		if code == "FRESHNESS_UNCONFIGURED" {
+			// NOTHING IS WRONG WITH THIS PROPOSAL, and telling the caller to re-run
+			// the optimizer would send them round a loop that refuses forever.
+			detail = "this DEPLOYMENT has no OPTIMIZATION_PROPOSAL_MAX_AGE set, so no proposal can " +
+				"be materialized. An unset bound is UNKNOWN rather than unlimited and refuses " +
+				"closed; the proposal itself was not examined. See #970"
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":  err.Error(),
+			"reason": code,
+			"as_of":  proposal.AsOf.UTC().Format(time.RFC3339),
+			"detail": detail,
+		})
+		return
+	}
 	if err != nil {
 		// A PROPOSAL WITH NO VERDICT DOES NOT MATERIALIZE, AND THE REFUSAL SAYS SO.
 		//
@@ -569,7 +621,7 @@ func (s *Server) materialize(w http.ResponseWriter, r *http.Request, proposal op
 		// one governed the trade.
 		if published {
 			result, perr = bridge.Materialize(ctx, proposal, principal.Tenant, principal.Subject,
-				"", nil, nil, mat)
+				"", nil, nil, mat, s.freshness)
 		} else {
 			result = bridge.MaterializeResult{Submitted: cmds}
 		}
@@ -624,6 +676,16 @@ func (s *Server) recordMaterialization(ctx context.Context, mat Materializer,
 		PortfolioId: p.PortfolioID,
 		Issuer:      principal.Subject,
 		Published:   published,
+	}
+	// THE PROPOSAL'S OWN HORIZON, BESIDE THE MATERIALIZATION INSTANT (#970). The
+	// gap between the two IS the drift this decision was exposed to; without it
+	// on the record an auditor asking "how stale was the book this rebalance was
+	// built on" has no answer and no way to reconstruct one. A zero AsOf is left
+	// nil rather than stamped as the epoch — an undated proposal is refused
+	// upstream, and encoding "no horizon" as 1970 would put a false one on the
+	// FACT.
+	if !p.AsOf.IsZero() {
+		fact.ProposalAsOf = timestamppb.New(p.AsOf.UTC())
 	}
 	for _, c := range res.Submitted {
 		fact.SubmittedOrderIds = append(fact.SubmittedOrderIds, c.GetOrderId())

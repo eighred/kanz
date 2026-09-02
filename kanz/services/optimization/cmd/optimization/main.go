@@ -28,6 +28,7 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
+	"github.com/eighred/kanz/services/optimization/internal/bridge"
 	"github.com/eighred/kanz/services/optimization/internal/config"
 	"github.com/eighred/kanz/services/optimization/internal/publish"
 	"github.com/eighred/kanz/services/optimization/internal/server"
@@ -198,6 +199,29 @@ func run() int {
 		}
 		serverOpts = append(serverOpts, server.WithMandateGate(gate))
 	}
+	// THE PROPOSAL FRESHNESS BOUND (#970), AND ITS ABSENCE IS ANNOUNCED.
+	//
+	// A rebalance proposal's trades are a DELTA against the holdings read at its
+	// as_of, and every child this service emits is a MARKET order — so against a
+	// book that has moved since, the delta is the wrong trade and nothing absorbs
+	// the drift. Unset, bridge.Freshness refuses every materialization, which is
+	// the fail-closed direction; a default invented here would silently restore
+	// the unbounded behaviour the issue exists to remove.
+	//
+	// Said at ERROR when unset AND auto-publish is armed, because that is the
+	// combination where a deployment believes it is trading and materializes
+	// nothing — the route answers 409 to every proposal and the desk sees an
+	// optimizer that "stopped working".
+	if cfg.ProposalMaxAge <= 0 {
+		logger.Error("no OPTIMIZATION_PROPOSAL_MAX_AGE is set — every /v1/orders request will be " +
+			"REFUSED as STALE_PROPOSAL, because an unset bound is UNKNOWN rather than unlimited. " +
+			"Set it to how old a proposal's inputs may be before its trade list stops describing " +
+			"the current book (#970)")
+	} else {
+		logger.Info("proposal freshness bound armed", "max_age", cfg.ProposalMaxAge.String())
+	}
+	serverOpts = append(serverOpts, server.WithProposalFreshness(bridge.Freshness{MaxAge: cfg.ProposalMaxAge}))
+
 	switch {
 	case cfg.AutoPublish:
 		logger.Warn("AUTO-PUBLISH IS ARMED — a materialized rebalance proposal's orders go straight to "+

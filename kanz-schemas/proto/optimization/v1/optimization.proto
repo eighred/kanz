@@ -271,6 +271,20 @@ message ProposalMaterialized {
 
   // as_of is when the materialization happened. Required.
   google.protobuf.Timestamp as_of = 6;
+
+  // proposal_as_of is the knowledge horizon the PROPOSAL's inputs were read at —
+  // RebalanceProposal.as_of, carried through (#970).
+  //
+  // IT IS NOT as_of ABOVE, AND THE PAIR IS THE POINT. as_of is when this
+  // materialization happened; this is when the book it was computed against was
+  // read. The gap between them is the drift the decision was exposed to, and
+  // until #970 it was unrecoverable: the FACT stamped only the materialization
+  // instant, so an auditor asking "how stale was the book this rebalance was
+  // built on" had no answer on the record and no way to reconstruct one.
+  //
+  // A materialization refused for staleness carries it too, which is what makes
+  // the refusal reviewable rather than merely logged.
+  google.protobuf.Timestamp proposal_as_of = 7;
 }
 
 // RejectedOrder is one command the pre-trade gate refused.

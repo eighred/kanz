@@ -1,6 +1,8 @@
 package config
 
 import (
+	"time"
+
 	"fmt"
 	"github.com/eighred/kanz/internal/env"
 	"github.com/eighred/kanz/internal/refdata"
@@ -56,6 +58,13 @@ type Config struct {
 	// Source names this producer on every envelope it emits.
 	Source string
 
+	// ProposalMaxAge bounds how old a RebalanceProposal's inputs may be at
+	// materialization (#970). Zero ⇒ UNCONFIGURED ⇒ every materialization is
+	// refused, which is the fail-closed direction: "nobody set a bound" and "the
+	// bound is unlimited" must not share an encoding on the path where a proposal
+	// becomes capital.
+	ProposalMaxAge time.Duration
+
 	// SPIFFESocket is the workload SVID used for mTLS to the broker. The
 	// production broker refuses a plaintext client at the handshake (SEC-M3).
 	SPIFFESocket string
@@ -106,17 +115,26 @@ func Load() (Config, error) {
 	if rerr != nil {
 		return Config{}, rerr
 	}
+	// NO DEFAULT, deliberately: an unset bound is UNKNOWN, and bridge.Freshness
+	// refuses on it. A default here would be a number this package invented for a
+	// deployment it cannot see, and it would silently restore the pre-#970
+	// behaviour of materializing a proposal of any age.
+	proposalMaxAge, perr := env.Duration("OPTIMIZATION_PROPOSAL_MAX_AGE", 0)
+	if perr != nil {
+		return Config{}, perr
+	}
 	cfg := Config{
-		Listen:        env.Or("OPTIMIZATION_LISTEN", ":8100"),
-		MetricsListen: env.Or("OPTIMIZATION_METRICS_LISTEN", ":8094"),
-		Tenant:        env.Or("OPTIMIZATION_TENANT", "__system__"),
-		RefData:       refData,
-		NATSURL:       os.Getenv("OPTIMIZATION_NATS_URL"),
-		Source:        env.Or("OPTIMIZATION_SOURCE", "optimization"),
-		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
-		AutoPublish:   os.Getenv("OPTIMIZATION_AUTO_PUBLISH") == "true",
-		LogLevel:      env.ParseLevelOr(os.Getenv("OPTIMIZATION_LOG_LEVEL"), slog.LevelInfo),
-		OTLPEndpoint:  os.Getenv("OPTIMIZATION_OTLP_ENDPOINT"),
+		Listen:         env.Or("OPTIMIZATION_LISTEN", ":8100"),
+		MetricsListen:  env.Or("OPTIMIZATION_METRICS_LISTEN", ":8094"),
+		Tenant:         env.Or("OPTIMIZATION_TENANT", "__system__"),
+		RefData:        refData,
+		NATSURL:        os.Getenv("OPTIMIZATION_NATS_URL"),
+		Source:         env.Or("OPTIMIZATION_SOURCE", "optimization"),
+		ProposalMaxAge: proposalMaxAge,
+		SPIFFESocket:   os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		AutoPublish:    os.Getenv("OPTIMIZATION_AUTO_PUBLISH") == "true",
+		LogLevel:       env.ParseLevelOr(os.Getenv("OPTIMIZATION_LOG_LEVEL"), slog.LevelInfo),
+		OTLPEndpoint:   os.Getenv("OPTIMIZATION_OTLP_ENDPOINT"),
 	}
 
 	// AUTO-PUBLISH WITH NO BROKER IS REFUSED, NOT IGNORED (#409).

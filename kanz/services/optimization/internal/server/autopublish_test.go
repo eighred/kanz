@@ -70,6 +70,11 @@ func serverWithGate(f *fakeMaterializer, gate *halt.Gate) (*Server, *fakeMateria
 			f.tenant = tenant
 			return f
 		}),
+		// A BOUND WIDE ENOUGH NOT TO BE WHAT THESE TESTS MEASURE (#970). The
+		// freshness gate has its own tests; without an option here the zero
+		// Freshness refuses everything and every assertion below would pass
+		// against a route that materializes nothing.
+		testFreshness(),
 		WithHaltGate(gate))
 	return s, f
 }
@@ -90,6 +95,7 @@ func feasibleProposal() optimization.RebalanceProposal {
 	return optimization.RebalanceProposal{
 		PortfolioID:   "PF",
 		MandateStatus: optimization.MandateFeasible,
+		AsOf:          testClock(),
 		Trades: []optimization.ProposedTrade{
 			{InstrumentID: "A", Side: optimization.Buy, Quantity: 100},
 		},
@@ -339,6 +345,7 @@ func TestAnUnwiredHaltGateRefusesToPublish(t *testing.T) {
 	rd.Set(true)
 	f := &fakeMaterializer{armed: true}
 	s := New(rd, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		testFreshness(),
 		WithAutoPublish(func(tenant string) Materializer { f.tenant = tenant; return f }))
 
 	rec := materializeAs(t, s, feasibleProposal(), "alice")
