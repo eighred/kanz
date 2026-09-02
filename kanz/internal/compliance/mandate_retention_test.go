@@ -27,7 +27,7 @@ func atVersion(t *testing.T, reg *MandateRegistry, asOf time.Time) uint64 {
 	if err != nil {
 		t.Fatalf("resolution failed at %s: %v", asOf, err)
 	}
-	if !ok {
+	if ok.NoMandate() {
 		t.Fatalf("no mandate in force at %s — the portfolio reads UNGOVERNED, which under "+
 			"OMS_REQUIRE_MANDATE=false is admitted with no constraints", asOf)
 	}
@@ -214,7 +214,7 @@ func TestMandateRegistry_RetentionIsPerKey(t *testing.T) {
 			"reached across the key", got)
 	}
 	m, ok, err := reg.Mandate(context.Background(), "t2", "p1", t0.Add(24*time.Hour))
-	if err != nil || !ok || m.GetMandateId() != "m2" {
+	if err != nil || ok.NoMandate() || m.GetMandateId() != "m2" {
 		t.Fatalf("t2's mandate did not survive t1's republishes: ok=%v m=%v err=%v", ok, m, err)
 	}
 }

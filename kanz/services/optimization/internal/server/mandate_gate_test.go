@@ -42,12 +42,15 @@ type staticMandates struct {
 	err      error
 }
 
-func (m staticMandates) Mandate(_ context.Context, tenantID, _ string, _ time.Time) (*compliancepb.Mandate, bool, error) {
+func (m staticMandates) Mandate(_ context.Context, tenantID, _ string, _ time.Time) (*compliancepb.Mandate, compliance.Governance, error) {
 	if m.err != nil {
-		return nil, false, m.err
+		return nil, compliance.GovernanceUnspecified, m.err
 	}
 	got, ok := m.byTenant[tenantID]
-	return got, ok, nil
+	if !ok {
+		return nil, compliance.NeverMandated, nil
+	}
+	return got, compliance.Governed, nil
 }
 
 // concentrationMandate caps any single instrument at cap of gross.

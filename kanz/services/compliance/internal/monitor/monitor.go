@@ -278,7 +278,7 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 	ctx = bus.WithTenantID(ctx, key.tenant)
 	pid := key.portfolio
 	// AT NOW, NEVER AT observedAt — see the two-clocks note above (#917).
-	mandate, ok, err := m.mandates.Mandate(ctx, key.tenant, pid, m.now().UTC())
+	mandate, governance, err := m.mandates.Mandate(ctx, key.tenant, pid, m.now().UTC())
 	if err != nil {
 		// A tenant the registry cannot resolve is TERMINAL — retrying re-reads the
 		// same ambiguous data forever, and a redelivery loop on a position FACT is
@@ -318,11 +318,21 @@ func (m *Monitor) evaluate(ctx context.Context, key bookKey, book *comp.Book, tr
 	// portfolio somebody deliberately left unconstrained. Said ONCE per (tenant,
 	// portfolio) — this handler runs on every position change, and a monitor that
 	// floods its own log is a monitor nobody reads.
-	if !ok {
+	if governance.NoMandate() {
 		if m.firstUngoverned(key) {
-			m.logger.Warn("UNGOVERNED: no mandate governs this portfolio — nothing is being checked against it",
+			// WHICH ungoverned state, because the fixes differ (#926): a portfolio
+			// nobody has mandated needs one written; one whose versions exist and
+			// are not in force needs its effective dates looked at, and telling the
+			// operator to write a second mandate would be the wrong instruction.
+			fix := "put it under mandate with `kanz-mandate --tenant " + key.tenant + "`"
+			headline := "UNGOVERNED: no mandate has ever been published for this portfolio"
+			if governance == comp.MandateLapsed {
+				headline = "UNGOVERNED: this portfolio HAS a mandate and none of its versions is in force"
+				fix = "check the effective dates on its published versions (#916, #926)"
+			}
+			m.logger.Warn(headline+" — nothing is being checked against it",
 				"tenant_id", key.tenant, "portfolio_id", pid,
-				"fix", "put it under mandate with `kanz-mandate --tenant "+key.tenant+"`")
+				"governance", governance.String(), "fix", fix)
 		}
 		return nil
 	}

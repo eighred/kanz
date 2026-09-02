@@ -233,8 +233,8 @@ func (s staticBook) Book(context.Context, string) (*Book, error) { return s.b, n
 
 type staticMandate struct{ m *compliancepb.Mandate }
 
-func (s staticMandate) Mandate(_ context.Context, _, _ string, _ time.Time) (*compliancepb.Mandate, bool, error) {
-	return s.m, true, nil
+func (s staticMandate) Mandate(_ context.Context, _, _ string, _ time.Time) (*compliancepb.Mandate, Governance, error) {
+	return s.m, Governed, nil
 }
 
 // ratFromString parses evidence back to an exact rational, so an assertion is

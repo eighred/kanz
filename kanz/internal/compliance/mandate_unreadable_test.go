@@ -49,7 +49,7 @@ func TestAMandateThatCannotBeAppliedLeavesThatPortfolioUnreadable(t *testing.T) 
 	}
 
 	_, ok, err := reg.Mandate(context.Background(), "acme", "pf-1", time.Now())
-	if ok {
+	if !ok.NoMandate() {
 		t.Fatal("a mandate that failed to apply was reported as governing")
 	}
 	if !errors.Is(err, ErrMandateUnreadable) {
@@ -139,7 +139,7 @@ func TestARepublishedMandateClearsTheRejection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a repaired mandate still reports an error: %v", err)
 	}
-	if !ok {
+	if ok.NoMandate() {
 		t.Fatal("a republished, valid mandate did not arm the registry")
 	}
 }
@@ -217,7 +217,7 @@ func TestABrokenMandateSupersedesAValidOneAlreadyHeld(t *testing.T) {
 	if err := c.Handle(context.Background(), nil, configChanged(t, key, goodMandateValue(t, "acme", "pf-1"))); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := reg.Mandate(context.Background(), "acme", "pf-1", time.Now()); !ok || err != nil {
+	if _, ok, err := reg.Mandate(context.Background(), "acme", "pf-1", time.Now()); ok.NoMandate() || err != nil {
 		t.Fatalf("premise broken: the good mandate did not arm (ok=%v err=%v)", ok, err)
 	}
 
@@ -225,7 +225,7 @@ func TestABrokenMandateSupersedesAValidOneAlreadyHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, ok, err := reg.Mandate(context.Background(), "acme", "pf-1", time.Now())
-	if ok {
+	if !ok.NoMandate() {
 		t.Fatal("still governing under a mandate version the operator has replaced")
 	}
 	if !errors.Is(err, ErrMandateUnreadable) {

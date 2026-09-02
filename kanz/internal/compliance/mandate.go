@@ -435,11 +435,11 @@ func sortedTenants(set map[string]struct{}) []string {
 // The middle and last branches are therefore inert on a single-tenant estate and
 // load-bearing the moment #97 provisions a second one — which is when nobody is
 // re-reading this file.
-func (r *MandateRegistry) Mandate(_ context.Context, tenantID, portfolioID string, asOf time.Time) (*compliancepb.Mandate, bool, error) {
+func (r *MandateRegistry) Mandate(_ context.Context, tenantID, portfolioID string, asOf time.Time) (*compliancepb.Mandate, Governance, error) {
 	if tenantID == "" {
 		// An untenanted lookup cannot be scoped at all. Terminal, not transient:
 		// the caller lost the envelope's tenant somewhere, and no retry restores it.
-		return nil, false, fmt.Errorf("%w: no tenant supplied for portfolio %q — the caller "+
+		return nil, GovernanceUnspecified, fmt.Errorf("%w: no tenant supplied for portfolio %q — the caller "+
 			"dropped the envelope's tenant_id, and any mandate returned here would be a guess",
 			ErrMandateTenantUnresolved, portfolioID)
 	}
@@ -452,7 +452,7 @@ func (r *MandateRegistry) Mandate(_ context.Context, tenantID, portfolioID strin
 	// the first is a posture question (#619).
 	if rejErr := r.rejected[mandateKey{tenant: tenantID, portfolio: portfolioID}]; rejErr != nil {
 		r.mu.RUnlock()
-		return nil, false, fmt.Errorf("%w: portfolio %q of tenant %q has a published mandate this "+
+		return nil, GovernanceUnspecified, fmt.Errorf("%w: portfolio %q of tenant %q has a published mandate this "+
 			"registry could not apply (%v). The mandate stream is compacted, so that message is the "+
 			"LAST one on this portfolio's subject and every consumer that boots re-reads it: the "+
 			"portfolio is not merely un-mandated, it is un-governable until the mandate is "+
@@ -467,7 +467,7 @@ func (r *MandateRegistry) Mandate(_ context.Context, tenantID, portfolioID strin
 
 	if len(vers) == 0 {
 		if tenantID == bus.SystemTenant && len(others) > 1 {
-			return nil, false, fmt.Errorf("%w: portfolio %q is under mandate for tenants %v and this "+
+			return nil, GovernanceUnspecified, fmt.Errorf("%w: portfolio %q is under mandate for tenants %v and this "+
 				"lookup is the shared %q bucket — two tenants named a portfolio the same, and picking "+
 				"one of their mandates for the other's book is the defect, not the fix. Give this "+
 				"consumer the real tenant (#97), or rename one portfolio",
@@ -476,7 +476,8 @@ func (r *MandateRegistry) Mandate(_ context.Context, tenantID, portfolioID strin
 		if len(others) > 0 {
 			r.warnMisfiled(tenantID, portfolioID, others)
 		}
-		return nil, false, nil
+		// NOBODY HAS DECIDED what governs this portfolio (#926).
+		return nil, NeverMandated, nil
 	}
 	if tenantID == bus.SystemTenant && len(others) == 1 && others[0] != bus.SystemTenant {
 		r.warnSystemFallback(portfolioID, others[0])
@@ -490,9 +491,13 @@ func (r *MandateRegistry) Mandate(_ context.Context, tenantID, portfolioID strin
 		}
 	}
 	if chosen == nil {
-		return nil, false, nil
+		// SOMEBODY DECIDED AND THE DECISION IS NOT IN FORCE (#926). Versions exist
+		// for this key — the portfolio WAS governed — and none of them is effective
+		// at asOf. This is the #916 shape when every surviving version is
+		// future-dated, and it must not read as the onboarding state above.
+		return nil, MandateLapsed, nil
 	}
-	return chosen, true, nil
+	return chosen, Governed, nil
 }
 
 // warnOnce reports whether this is the first time key has been named. The

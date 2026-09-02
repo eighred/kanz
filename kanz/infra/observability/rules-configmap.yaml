@@ -851,6 +851,44 @@ data:
               summary: "Orders are being handled for portfolios that NO mandate governs"
               description: "Part of the book is trading with no compliance constraints (or, with OMS_REQUIRE_MANDATE=true, is being refused for want of a mandate). Which of those two it is depends on the posture logged at OMS startup. Put every live portfolio under mandate with kanz-mandate; this counter is how much of the book is currently ungoverned."
 
+          # A PORTFOLIO THAT WAS GOVERNED AND IS NOT NOW (#926).
+          #
+          # ComplianceUngovernedOrders above sums the whole family and cannot tell the
+          # two ungoverned states apart, because until #926 the counter had no label
+          # and the registry answered them identically:
+          #
+          #   never_mandated  nobody has run `kanz-mandate` for this portfolio. The
+          #                   onboarding gap, expected, and the reason
+          #                   OMS_REQUIRE_MANDATE defaults false.
+          #   mandate_lapsed  the portfolio HAS published mandate versions and none is
+          #                   in force. It WAS governed. Not expected, and money.
+          #
+          # THIS IS THE SIGNAL #916 DID NOT HAVE. Scheduling a mandate change evicted
+          # the version in force from the compacted stream; the replica booted holding
+          # only the future-dated one, resolved the portfolio as ungoverned, and
+          # admitted its orders unconstrained. The registry was Armed and Complete, so
+          # every health signal was green, and the only trace was a counter that reads
+          # exactly like onboarding. #916 removed that cause; this makes the STATE
+          # visible so the next cause is not equally invisible.
+          #
+          # CRITICAL, where the family-wide rule is warning, and the split is the
+          # point: an unmandated portfolio is a gap somebody may knowingly trade
+          # through during onboarding. A portfolio whose mandate stopped applying is a
+          # control that was in place and is not, which nobody chose.
+          #
+          # THE SERIES EXISTS AT ZERO. cmd/oms seeds one series per ungoverned verdict
+          # from compliance.Governances() at registration, so this rule queries a real
+          # 0 rather than an empty vector — a rule over an absent series is silent in
+          # exactly the state it detects (#62).
+          - alert: ComplianceMandateLapsed
+            expr: |
+              sum(increase(kanz_compliance_ungoverned_orders_total{governance="mandate_lapsed"}[1h])) > 0
+            for: 0m
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "Orders are being handled for a portfolio whose mandate is no longer in force"
+              description: "This portfolio HAS published mandate versions and none of them is effective right now, so it is trading with no compliance constraints (or being refused, under OMS_REQUIRE_MANDATE) — and it is NOT the onboarding gap ComplianceUngovernedOrders also counts. Somebody decided what governs this book and the decision is not applying. Check the effective dates on its published versions: every surviving version being FUTURE-DATED is the #916 shape, where scheduling a change evicted the version in force from the compacted stream. Re-publish the version that should be in effect with kanz-mandate. The OMS logs the portfolio and tenant once per state under governance=mandate_lapsed."
+
           # THE `reason` LABEL SPLITS ONE COUNTER INTO TWO INCIDENTS, AND THE CODE
           # SAYS WHICH IS WHICH: "never_seen" is a cold pod, a thin instrument or a
           # subscription delivering nothing (a warm-up); "expired" is a feed that WAS

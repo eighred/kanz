@@ -51,7 +51,7 @@ type PreTradeGate struct {
 
 	requireMandate bool
 	onUnreadable   func(tenantID, portfolioID string)
-	onUngoverned   func(tenantID, portfolioID string)
+	onUngoverned   func(tenantID, portfolioID string, governance Governance)
 	onUnpriced     func(portfolioID, instrumentID string, firstForPair bool)
 	onUnaccounted  func(tenantID, portfolioID, omits string)
 
@@ -96,7 +96,13 @@ func WithUnreadableObserver(fn func(tenantID, portfolioID string)) PreTradeOptio
 // WithUngovernedObserver is called for EVERY order against a portfolio no mandate
 // governs — the composition root wires it to a counter, so "how much of the book is
 // ungoverned" is a number on a dashboard rather than a thing nobody has asked.
-func WithUngovernedObserver(fn func(tenantID, portfolioID string)) PreTradeOption {
+//
+// IT CARRIES THE VERDICT (#926), because "nobody has mandated this portfolio yet"
+// and "this portfolio WAS governed and its mandate is not in force" are different
+// operator problems that used to increment the same counter. The observer is where
+// the distinction reaches a dashboard; without the parameter the registry could
+// tell them apart and nothing downstream could.
+func WithUngovernedObserver(fn func(tenantID, portfolioID string, governance Governance)) PreTradeOption {
 	return func(g *PreTradeGate) { g.onUngoverned = fn }
 }
 
@@ -181,7 +187,7 @@ type BookSource interface {
 // not say whose rules apply, so none were evaluated and the order must be
 // refused. Any other error is transient and the caller should retry.
 type MandateSource interface {
-	Mandate(ctx context.Context, tenantID, portfolioID string, asOf time.Time) (*compliancepb.Mandate, bool, error)
+	Mandate(ctx context.Context, tenantID, portfolioID string, asOf time.Time) (*compliancepb.Mandate, Governance, error)
 }
 
 // OrderDelta is the order's effect on a book, in terms compliance understands —
@@ -361,24 +367,42 @@ func NewPreTradeGate(engine *Engine, books BookSource, mandates MandateSource, c
 // The counter fires on EVERY such order (that is the number that belongs on a
 // dashboard). The WARN fires ONCE PER PORTFOLIO — loud enough to be seen in a log,
 // quiet enough that it does not drown the log for a fund that trades all day.
-func (g *PreTradeGate) noteUngoverned(tenantID, portfolioID string) {
+func (g *PreTradeGate) noteUngoverned(tenantID, portfolioID string, governance Governance) {
 	if g.onUngoverned != nil {
-		g.onUngoverned(tenantID, portfolioID)
+		g.onUngoverned(tenantID, portfolioID, governance)
 	}
-	if !g.firstTime("ungoverned:" + tenantID + ":" + portfolioID) {
+	// THE VERDICT IS PART OF THE ONCE-KEY (#926). A portfolio first seen as
+	// NeverMandated and later LAPSING is a new fact and must warn again; keying
+	// on the pair alone would silence the transition — which is the one moment an
+	// operator most needs to hear about.
+	if !g.firstTime("ungoverned:" + governance.String() + ":" + tenantID + ":" + portfolioID) {
 		return
+	}
+	// THE FIX DEPENDS ON WHICH STATE THIS IS (#926), so the sentence does too.
+	// Telling an operator to "put it under mandate" when a mandate already exists
+	// and is merely not in force sends them to write a second one — which is not
+	// the repair and may not even be possible if the versions are future-dated.
+	fix := "put it under mandate with `kanz-mandate --tenant " + tenantID + "`"
+	headline := "UNGOVERNED: no mandate has ever been published for this portfolio"
+	if governance == MandateLapsed {
+		headline = "UNGOVERNED: this portfolio HAS a mandate and none of its versions is in force right now"
+		fix = "check the effective dates on its published versions — every surviving version being " +
+			"FUTURE-DATED is the #916 shape, where scheduling a change evicted the version in force " +
+			"from the compacted stream. Re-publish the version that should be in effect"
 	}
 	if g.requireMandate {
-		g.logger.Warn("REFUSING orders: no mandate governs this portfolio",
+		g.logger.Warn("REFUSING orders: "+headline,
 			"tenant_id", tenantID,
 			"portfolio_id", portfolioID,
-			"fix", "put it under mandate with `kanz-mandate --tenant "+tenantID+"`, or unset OMS_REQUIRE_MANDATE")
+			"governance", governance.String(),
+			"fix", fix+", or unset OMS_REQUIRE_MANDATE")
 		return
 	}
-	g.logger.Warn("UNGOVERNED: no mandate governs this portfolio — its orders are being ADMITTED WITH NO COMPLIANCE CONSTRAINTS",
+	g.logger.Warn(headline+" — its orders are being ADMITTED WITH NO COMPLIANCE CONSTRAINTS",
 		"tenant_id", tenantID,
 		"portfolio_id", portfolioID,
-		"fix", "put it under mandate with `kanz-mandate --tenant "+tenantID+"`, or set OMS_REQUIRE_MANDATE=true to refuse instead")
+		"governance", governance.String(),
+		"fix", fix+", or set OMS_REQUIRE_MANDATE=true to refuse instead")
 }
 
 // noteUnscoped makes the unresolvable-tenant refusal audible. It is separate
@@ -733,7 +757,7 @@ func (g *PreTradeGate) decide(ctx context.Context, d OrderDelta) (Decision, erro
 		g.noteUnvaluable(d.TenantID, d.PortfolioID, d.InstrumentID)
 		return Decision{Allowed: false, Unvaluable: true}, nil
 	}
-	mandate, ok, err := g.mandates.Mandate(ctx, d.TenantID, d.PortfolioID, d.AsOf)
+	mandate, governance, err := g.mandates.Mandate(ctx, d.TenantID, d.PortfolioID, d.AsOf)
 	if err != nil {
 		// TERMINAL vs TRANSIENT, and getting this backwards is why the
 		// distinction is spelled out. A transient load failure is returned so the
@@ -763,8 +787,8 @@ func (g *PreTradeGate) decide(ctx context.Context, d OrderDelta) (Decision, erro
 	//
 	// The second is a choice and needs no noise. The first is a GAP, and it must not
 	// be indistinguishable from passing compliance (EXEC-M14).
-	if !ok {
-		g.noteUngoverned(d.TenantID, d.PortfolioID)
+	if governance.NoMandate() {
+		g.noteUngoverned(d.TenantID, d.PortfolioID, governance)
 		if g.requireMandate {
 			return Decision{Allowed: false, Ungoverned: true}, nil
 		}

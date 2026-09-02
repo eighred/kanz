@@ -206,7 +206,7 @@ func TestAScheduledMandateDoesNotEvictTheOneInForce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if !ok {
+	if ok.NoMandate() {
 		t.Fatal("A RESTARTED GATE READ THIS PORTFOLIO AS UNGOVERNED while a mandate is in force.\n" +
 			"Scheduling a mandate change evicted the version governing the portfolio from the " +
 			"compacted stream. Under OMS_REQUIRE_MANDATE=false an ungoverned portfolio is not " +
@@ -249,7 +249,7 @@ func TestAScheduledMandateSurvivesARestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if !ok {
+	if ok.NoMandate() {
 		t.Fatal("after a restart NOTHING governs this portfolio at the scheduled date — the " +
 			"scheduled mandate is not on the stream a booting replica reads (#916)")
 	}
@@ -485,7 +485,7 @@ func TestALegacySingleMandateValueStillArmsAGate(t *testing.T) {
 	if len(applied) != 1 {
 		t.Fatalf("applied %d mandates from a legacy value, want 1", len(applied))
 	}
-	if _, ok, _ := reg.Mandate(context.Background(), "acme", "PF1", time.Now().UTC()); !ok {
+	if _, ok, _ := reg.Mandate(context.Background(), "acme", "PF1", time.Now().UTC()); ok.NoMandate() {
 		t.Fatal("a gate armed from a legacy value reads the portfolio as UNGOVERNED")
 	}
 }
@@ -510,11 +510,11 @@ func TestMandateLoaderAppliesEveryMemberOfTheSet(t *testing.T) {
 	}
 	ctx := context.Background()
 	now, ok, _ := reg.Mandate(ctx, "acme", "PF1", time.Now().UTC())
-	if !ok || now.GetVersion() != 1 {
+	if ok.NoMandate() || now.GetVersion() != 1 {
 		t.Fatalf("resolved %v at now, want v1 in force", now.GetVersion())
 	}
 	later, ok, _ := reg.Mandate(ctx, "acme", "PF1", takesForce.Add(time.Hour))
-	if !ok || later.GetVersion() != 2 {
+	if ok.NoMandate() || later.GetVersion() != 2 {
 		t.Fatalf("resolved %v at the scheduled date, want v2 — the scheduled member of the set "+
 			"was dropped on the way in", later.GetVersion())
 	}

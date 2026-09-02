@@ -39,8 +39,8 @@ func (stubBooks) Book(context.Context, string) (*comp.Book, error) { return &com
 
 type stubMandates struct{}
 
-func (stubMandates) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, bool, error) {
-	return nil, false, nil
+func (stubMandates) Mandate(context.Context, string, string, time.Time) (*compliancepb.Mandate, comp.Governance, error) {
+	return nil, comp.NeverMandated, nil
 }
 
 type stubMargin struct{}

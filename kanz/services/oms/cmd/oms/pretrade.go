@@ -109,12 +109,35 @@ func buildPreTradeGate(cfg config.Config, deps preTradeDeps, producer compliance
 	// fund X" and "fund X passed compliance" were the same observable event. This
 	// counter is what makes "how much of the book is ungoverned" a number
 	// somebody can look at, rather than a question nobody has asked.
-	ungoverned := prometheus.NewCounter(prometheus.CounterOpts{
+	// LABELLED BY WHICH UNGOVERNED STATE IT IS (#926), because the two mean
+	// different things and an operator acts on them differently.
+	//
+	//   never_mandated  nobody has run `kanz-mandate` for this portfolio. The
+	//                   onboarding state, and the one OMS_REQUIRE_MANDATE=false
+	//                   was meant to trade through.
+	//   mandate_lapsed  the portfolio HAS versions and none is in force. It WAS
+	//                   governed and is not now — the #916 shape, where scheduling
+	//                   a change evicted the version in force from the compacted
+	//                   stream and the replica booted holding only a future-dated
+	//                   one. Every health signal was green and this counter was
+	//                   the only trace, reading exactly like onboarding.
+	//
+	// SEEDED FOR EVERY VERDICT at registration, from compliance.Governances(),
+	// because a CounterVec exports nothing for a label it has never incremented —
+	// so an alert on mandate_lapsed would query an empty vector and never fire,
+	// which is #62's ten deleted rules exactly.
+	ungovernedByState := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "kanz_compliance_ungoverned_orders_total",
-		Help: "Orders admitted or refused for a portfolio that NO MANDATE GOVERNS. " +
-			"Non-zero means part of the book is trading with no compliance constraints (or, with " +
-			"OMS_REQUIRE_MANDATE, is being refused for want of one).",
-	})
+		Help: "Orders admitted or refused for a portfolio that NO MANDATE GOVERNS, by which " +
+			"ungoverned state it is. never_mandated is the onboarding gap; mandate_lapsed means " +
+			"the portfolio WAS governed and none of its mandate versions is in force, which is " +
+			"not an onboarding state and is money (#926).",
+	}, []string{"governance"})
+	for _, g := range comp.Governances() {
+		if g.NoMandate() {
+			ungovernedByState.WithLabelValues(g.String()).Add(0)
+		}
+	}
 	// A MANDATE THAT WAS PUBLISHED AND COULD NOT BE READ (#619). Distinct from
 	// ungoverned above, and the distinction is the whole point: ungoverned means
 	// nobody wrote a mandate, which an operator may knowingly trade through. This
@@ -172,7 +195,7 @@ func buildPreTradeGate(cfg config.Config, deps preTradeDeps, producer compliance
 		Help: "Reference-data refresh cycles that reported at least one failed lookup. Registered " +
 			"before anything can fail so \"none\" is a zero series rather than a missing one.",
 	})
-	reg.MustRegister(ungoverned, mandateUnreadable, unpriced, unaccounted, refreshFailures)
+	reg.MustRegister(ungovernedByState, mandateUnreadable, unpriced, unaccounted, refreshFailures)
 
 	// THE INSTRUMENT CLASSIFIER (#640), CACHED AND NEVER DIALLED FROM THE GATE.
 	// The rules run inside the order-admission path, so a classifier that dialled
@@ -254,7 +277,9 @@ func buildPreTradeGate(cfg config.Config, deps preTradeDeps, producer compliance
 		// the same observable state, which is the conflation this estate designs
 		// against.
 		comp.WithMarginSource(deps.Margin),
-		comp.WithUngovernedObserver(func(string, string) { ungoverned.Inc() }),
+		comp.WithUngovernedObserver(func(_, _ string, g comp.Governance) {
+			ungovernedByState.WithLabelValues(g.String()).Inc()
+		}),
 		comp.WithUnreadableObserver(func(string, string) { mandateUnreadable.Inc() }),
 		comp.WithUnaccountedObserver(func(_, _, omits string) {
 			// The posture, not the omitted list, is the label: entry-type names are a

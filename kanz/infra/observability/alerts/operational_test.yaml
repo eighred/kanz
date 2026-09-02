@@ -1823,3 +1823,56 @@ tests:
       - eval_time: 60m
         alertname: CustodyReconciliationUnpublished
         exp_alerts: []
+
+  # ===========================================================================
+  # ComplianceMandateLapsed — a portfolio that WAS governed and is not now (#926).
+  # ===========================================================================
+  # The state #916 produced and nothing could see: mandate versions exist, none is
+  # in force, orders are admitted unconstrained, and every health signal is green.
+  - interval: 1m
+    name: a portfolio whose mandate versions are all out of force
+    input_series:
+      - series: 'kanz_compliance_ungoverned_orders_total{governance="mandate_lapsed"}'
+        values: '0+1x120'
+      # The onboarding gap, exported at zero beside it — seeded at registration
+      # from compliance.Governances(), which is what makes the rule query a real 0
+      # rather than an empty vector.
+      - series: 'kanz_compliance_ungoverned_orders_total{governance="never_mandated"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ComplianceMandateLapsed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              layer: operational
+            exp_annotations:
+              summary: "Orders are being handled for a portfolio whose mandate is no longer in force"
+              description: "This portfolio HAS published mandate versions and none of them is effective right now, so it is trading with no compliance constraints (or being refused, under OMS_REQUIRE_MANDATE) — and it is NOT the onboarding gap ComplianceUngovernedOrders also counts. Somebody decided what governs this book and the decision is not applying. Check the effective dates on its published versions: every surviving version being FUTURE-DATED is the #916 shape, where scheduling a change evicted the version in force from the compacted stream. Re-publish the version that should be in effect with kanz-mandate. The OMS logs the portfolio and tenant once per state under governance=mandate_lapsed."
+
+  # THE ONBOARDING GAP MUST NOT PAGE THIS RULE. It is a real state somebody may
+  # knowingly trade through, and the whole reason the label exists is that it was
+  # previously indistinguishable from the one above. If this fired, the split
+  # would have bought nothing.
+  - interval: 1m
+    name: a portfolio nobody has mandated yet
+    input_series:
+      - series: 'kanz_compliance_ungoverned_orders_total{governance="never_mandated"}'
+        values: '0+1x120'
+      - series: 'kanz_compliance_ungoverned_orders_total{governance="mandate_lapsed"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ComplianceMandateLapsed
+        exp_alerts: []
+      # And the family-wide rule DOES still fire on it — the split must not have
+      # made the onboarding gap invisible, only distinguishable.
+      - eval_time: 60m
+        alertname: ComplianceUngovernedOrders
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+            exp_annotations:
+              summary: "Orders are being handled for portfolios that NO mandate governs"
+              description: "Part of the book is trading with no compliance constraints (or, with OMS_REQUIRE_MANDATE=true, is being refused for want of a mandate). Which of those two it is depends on the posture logged at OMS startup. Put every live portfolio under mandate with kanz-mandate; this counter is how much of the book is currently ungoverned."

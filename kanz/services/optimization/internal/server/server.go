@@ -390,7 +390,7 @@ func (s *Server) resolveMandate(w http.ResponseWriter, r *http.Request, principa
 				"returned rather than one nothing checked",
 		})
 		return nil, false
-	case !found:
+	case found.NoMandate():
 		// NO MANDATE GOVERNS IT. CheckMandate answers MandateUnchecked for a nil
 		// mandate — deliberately, because "nobody declared constraints" is not the
 		// same claim as "the constraints were evaluated and passed" — so such a

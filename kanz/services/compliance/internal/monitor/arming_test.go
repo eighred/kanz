@@ -77,11 +77,11 @@ func ratOf(n int64) *big.Rat { return big.NewRat(n, 1) }
 // and the behaviour they are standing in for are the same thing.
 type oneMandate struct{ m *compliancepb.Mandate }
 
-func (o oneMandate) Mandate(_ context.Context, tenant, portfolio string, _ time.Time) (*compliancepb.Mandate, bool, error) {
+func (o oneMandate) Mandate(_ context.Context, tenant, portfolio string, _ time.Time) (*compliancepb.Mandate, comp.Governance, error) {
 	if tenant != o.m.GetTenantId() || portfolio != o.m.GetPortfolioId() {
-		return nil, false, nil
+		return nil, comp.NeverMandated, nil
 	}
-	return o.m, true, nil
+	return o.m, comp.Governed, nil
 }
 
 // breachRecorder counts the post-trade decisions the monitor records for ONE
