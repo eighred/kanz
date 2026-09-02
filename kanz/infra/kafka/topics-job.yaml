@@ -99,6 +99,16 @@ data:
     # is the same mistake that made the control necessary. Partitioned by venue
     # account, which is the unit the exchange margins and liquidates per.
     accounting.margin          6   delete   2592000000  yes
+    # THE RECORD THAT THE BOOK WAS RECONCILED AGAINST ITS CUSTODIAN (#962).
+    # Money-path retention because of what it is evidence FOR: a ReconciliationRun
+    # is the only durable statement that the fund's book of record was checked
+    # against an independent view on a given business date — and, when the outcome
+    # is no_statement, that it could NOT be. An auditor asking "was this position
+    # ever confirmed by the custodian, and at what tolerance" reads the answer
+    # here; reconstructing it afterwards from our own book is the same mistake
+    # that made the control necessary. Partitioned by (portfolio, custodian),
+    # which is the unit a reconciliation is defined over.
+    accounting.custody         6   delete   2592000000  yes
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes

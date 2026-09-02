@@ -374,3 +374,292 @@ message VenueAccountCash {
   // amount is the balance of asset in this account. Required.
   common.v1.Decimal amount = 3;
 }
+
+// --- Custody reconciliation (#962) -------------------------------------------
+//
+// THE ENGINE EXISTED AND THE CONTROL DID NOT. services/accounting/internal/recon
+// has compared the folded book against a custodian statement since IBOR-01e, and
+// its only caller was an HTTP handler whose statement came from the REQUEST BODY.
+// So the platform had a reconciliation ENGINE with no reconciliation CONTROL: an
+// operator obtained the custodian's positions by hand, transcribed them into
+// JSON, and posted them, per portfolio, per custodian, per day — or did not, and
+// nothing said so.
+//
+// WHY THIS IS THE CONTROL THAT MATTERS MOST. Custody reconciliation detects the
+// discrepancies nothing else can see, because every other control on this
+// platform READS THE BOOK and therefore inherits whatever the book is wrong
+// about: exposure, VaR, mandate limits, margin and NAV are all confidently wrong
+// in the same direction when a fill never reached the ledger. The failure is
+// silent by construction — a position missing from the book contributes nothing
+// to any measure, so no threshold fires. The custodian's statement is the only
+// independent view.
+
+// CustodianStatement is the custodian's own view of what it holds for a
+// portfolio on a business date — the independent side of the reconciliation.
+//
+// IT IS A FACT AND NOT A REQUEST BODY, which is the whole point of #962. As a
+// fact it is replayable, auditable, and attributable to the custodian that
+// asserted it, and the reconciliation no longer depends on who called an
+// endpoint. It is a LEVEL, exactly as PortfolioCashBalance is: the custodian
+// states what it holds, not what changed, so a redelivery is idempotent and a
+// gap is self-correcting on the next statement.
+//
+// AN ABSENT INSTRUMENT IS A POSITIVE CLAIM OF ZERO, not silence. A statement
+// lists what the custodian holds; anything it omits, the custodian says it does
+// not hold, and that is precisely what makes MISSING_AT_CUSTODIAN detectable. A
+// producer that can only render a PARTIAL statement must not publish one — a
+// partial level read as complete manufactures a break for every position it
+// omitted, which is worse than no reconciliation at all because it buries the
+// real breaks in noise.
+message CustodianStatement {
+  // statement_id is the custodian's identity for this statement, and the
+  // idempotency key: a redelivered statement replaces, never accumulates.
+  // Required.
+  string statement_id = 1;
+
+  // custodian_id is the institution asserting it (a custodian, prime broker or
+  // fund administrator). Required, and part of the reconciliation's identity —
+  // a portfolio custodied in two places reconciles against each separately, and
+  // merging them would net a break at one against a holding at the other.
+  string custodian_id = 2;
+
+  // portfolio_id is the book this statement is reconciled against. Required.
+  string portfolio_id = 3;
+
+  // business_date is the close-of-business date the statement states holdings
+  // AS OF — the economic date, not the transmission date. Required.
+  //
+  // IT IS THE RECONCILIATION'S IDENTITY together with (portfolio, custodian).
+  // A statement that arrives late still reconciles the date it describes, and a
+  // restated statement for a date already reconciled produces a NEW run for that
+  // date rather than mutating the old one: the history must reconstruct what was
+  // known and when, and a rewritten run destroys exactly that.
+  google.protobuf.Timestamp business_date = 4;
+
+  // positions are the holdings the custodian asserts, by instrument. A quantity
+  // of zero and an absent instrument mean the same thing — not held.
+  repeated StatementPosition positions = 5;
+
+  // cash are the cash balances the custodian asserts, by currency.
+  repeated StatementCash cash = 6;
+
+  // received_at is when the platform learned of the statement (the knowledge
+  // time to business_date's effective time). Required.
+  google.protobuf.Timestamp received_at = 7;
+}
+
+// StatementPosition is one instrument holding the custodian asserts.
+message StatementPosition {
+  // instrument_id is the held instrument, in the platform's canonical id space.
+  // Required.
+  //
+  // THE ADAPTER TRANSLATES, NOT THIS MESSAGE. A custodian names instruments in
+  // its own space (SEDOL, CUSIP, an internal code); mapping that to the
+  // canonical id is the feed adapter's job, for the same reason venue shapes
+  // terminate at the venue adapter. An unmappable identifier must fail IN THE
+  // ADAPTER — publishing the custodian's raw code here reconciles it against an
+  // instrument the book has never heard of and reports MISSING_IN_IBOR for a
+  // position the book holds perfectly well under its real id.
+  string instrument_id = 1;
+
+  // quantity is the holding the custodian asserts. Signed: a short position is
+  // negative. Decimal — a book of record never rounds through float.
+  common.v1.Decimal quantity = 2;
+}
+
+// StatementCash is one currency balance the custodian asserts.
+message StatementCash {
+  // currency_code is the ISO 4217 currency. Required.
+  string currency_code = 1;
+
+  // balance is the cash the custodian asserts it holds in that currency.
+  // Signed: an overdrawn balance is negative. Decimal.
+  common.v1.Decimal balance = 2;
+}
+
+// ReconciliationOutcome is what a run concluded.
+//
+// THE UNSUCCESSFUL VALUES ARE THE REASON THIS ENUM EXISTS. A run that found
+// nothing and a run that never happened must not produce the same telemetry —
+// that is the "nothing configured and checked-and-fine must never look the same"
+// rule applied to the control that guards the book of record.
+enum ReconciliationOutcome {
+  RECONCILIATION_OUTCOME_UNSPECIFIED = 0;
+  // CLEAN: the book and the statement agreed within tolerance. A real, positive
+  // result — the control ran and the book is confirmed.
+  RECONCILIATION_OUTCOME_CLEAN = 1;
+  // BREAKS: the run completed and found discrepancies. The breaks are attached
+  // and each one is a working item with a lifecycle, not a log line.
+  RECONCILIATION_OUTCOME_BREAKS = 2;
+  // NO_STATEMENT: the run was due and the custodian had said nothing for that
+  // business date.
+  //
+  // THIS IS THE VALUE THAT MAKES ABSENCE LOUD. Before #962 a custodian that
+  // simply stopped sending statements produced no event of any kind, so the
+  // estate looked identical to one reconciling cleanly every day. A scheduled
+  // run emits this instead of staying silent, so the gap has a timestamp, a
+  // counter and an alert.
+  RECONCILIATION_OUTCOME_NO_STATEMENT = 3;
+  // FAILED: the run could not be completed — the book could not be
+  // materialized, or a figure was not representable. It is NOT a clean book and
+  // must never be read as one; the failure_reason says which.
+  RECONCILIATION_OUTCOME_FAILED = 4;
+}
+
+// ReconciliationBreakKind classifies a discrepancy. The values mirror
+// recon.BreakKind, which is the engine that produces them; the guard
+// test/arch/break_kinds_match_the_engine_test.go derives one set from the other
+// so a kind added to the engine cannot silently fail to reach the wire.
+enum ReconciliationBreakKind {
+  RECONCILIATION_BREAK_KIND_UNSPECIFIED = 0;
+  // QUANTITY: both sides hold the instrument, the quantities differ beyond
+  // tolerance.
+  RECONCILIATION_BREAK_KIND_QUANTITY = 1;
+  // MISSING_AT_CUSTODIAN: the book holds it, the custodian does not. The
+  // direction that most often means a settlement failed or never happened.
+  RECONCILIATION_BREAK_KIND_MISSING_AT_CUSTODIAN = 2;
+  // MISSING_IN_IBOR: the custodian holds it, the book does not. The direction
+  // that most often means a fill never reached the ledger — the case no other
+  // control on this platform can detect, because a position absent from the book
+  // contributes to no measure and crosses no threshold.
+  RECONCILIATION_BREAK_KIND_MISSING_IN_IBOR = 3;
+  // CASH: a currency balance differs beyond tolerance.
+  RECONCILIATION_BREAK_KIND_CASH = 4;
+}
+
+// BreakStatus is where a break has got to in the investigation.
+//
+// A BREAK NOBODY CAN AGE IS A BREAK NOBODY CHASES, which is why this exists at
+// all. Detection without a lifecycle produces a list that regenerates identically
+// every day: an operator cannot tell a break they have already explained from one
+// that appeared this morning, so after a week nobody reads the list. The status
+// and its timestamp are what make the control operational rather than
+// informational.
+//
+// It is deliberately the same shape as the settlement lifecycle in
+// services/oms/internal/posttrade — modelled on it rather than invented, because
+// a second aggregate idiom for "a working item that moves through states" is a
+// second thing to learn and to get wrong.
+enum BreakStatus {
+  BREAK_STATUS_UNSPECIFIED = 0;
+  // OPEN: detected, unassigned. The state every break is born in.
+  BREAK_STATUS_OPEN = 1;
+  // ASSIGNED: an operator owns the investigation.
+  BREAK_STATUS_ASSIGNED = 2;
+  // EXPLAINED: the cause is known and recorded, and the break is expected to
+  // clear on its own — a trade that settles tomorrow, a fee the custodian books
+  // on a different day.
+  //
+  // IT IS NOT TERMINAL, and that is deliberate. An explanation is a claim about
+  // the future, and a break that is still there a week after being explained is
+  // a WORSE signal than an unexplained one, because somebody looked at it and
+  // was wrong. Only RESOLVED, which requires the difference to actually be gone,
+  // ends the lifecycle.
+  BREAK_STATUS_EXPLAINED = 3;
+  // RESOLVED: the discrepancy is gone — the book and the custodian now agree.
+  // Terminal.
+  BREAK_STATUS_RESOLVED = 4;
+}
+
+// ReconciliationBreak is one discrepancy between the book and the custodian,
+// carried as a working item with an owner, an explanation and an age.
+message ReconciliationBreak {
+  // break_id is the break's stable identity ACROSS RUNS, derived from
+  // (portfolio, custodian, kind, key). Required.
+  //
+  // STABLE, BECAUSE THE AGE IS THE POINT. A break that got a fresh id on every
+  // daily run would be permanently one day old, and "this position has
+  // disagreed with the custodian for three weeks" — the single most useful thing
+  // a reconciliation can tell an operator — would be unrepresentable.
+  string break_id = 1;
+
+  // kind classifies the discrepancy. Required.
+  ReconciliationBreakKind kind = 2;
+
+  // key is the instrument id for a position break, or the currency code for a
+  // cash break. Required.
+  string key = 3;
+
+  // ibor is the book's figure, custodian the custodian's, and difference is
+  // (ibor - custodian). Decimal, all three.
+  //
+  // ALL THREE ARE CARRIED RATHER THAN TWO PLUS ARITHMETIC. A consumer that
+  // recomputed the difference would be a second implementation of the
+  // comparison, and the run is evidence of what the engine actually concluded —
+  // including at what tolerance — not an invitation to re-derive it.
+  common.v1.Decimal ibor = 4;
+  common.v1.Decimal custodian = 5;
+  common.v1.Decimal difference = 6;
+
+  // status is where the investigation has got to. Required.
+  BreakStatus status = 7;
+
+  // assignee is the operator who owns it, set from ASSIGNED onward. Empty in
+  // OPEN.
+  string assignee = 8;
+
+  // explanation is the recorded cause, set from EXPLAINED onward.
+  string explanation = 9;
+
+  // first_seen_at is when this break was FIRST detected, carried forward across
+  // every subsequent run that still finds it. It is what the age is measured
+  // from, and it is never advanced by a redetection.
+  google.protobuf.Timestamp first_seen_at = 10;
+
+  // last_seen_at is the completed_at of the most recent run that still found it.
+  // Together with first_seen_at it separates "disagreed once, three weeks ago"
+  // from "has disagreed every day for three weeks".
+  google.protobuf.Timestamp last_seen_at = 11;
+
+  // status_changed_at is when status last moved. Required.
+  google.protobuf.Timestamp status_changed_at = 12;
+}
+
+// ReconciliationRun is the record that a reconciliation happened — emitted
+// WHETHER OR NOT it found breaks, and whether or not a statement arrived.
+//
+// A RUN THAT FOUND NOTHING IS EVIDENCE; SILENCE IS NOT. The pre-#962 design
+// could only ever produce output when a human ran it and it found something, so
+// "reconciled clean today" and "nobody ran it" were the same observable event.
+// This FACT is what separates them, and the age of the newest run per
+// (portfolio, custodian) is what the staleness alert reads.
+message ReconciliationRun {
+  // run_id is this run's unique identity, and the idempotency key for the
+  // consumers that fold it. Required.
+  string run_id = 1;
+
+  // portfolio_id, custodian_id and business_date are the run's subject — the
+  // triple a scheduled reconciliation is defined over. Required.
+  string portfolio_id = 2;
+  string custodian_id = 3;
+  google.protobuf.Timestamp business_date = 4;
+
+  // outcome is what the run concluded. Required.
+  ReconciliationOutcome outcome = 5;
+
+  // statement_id is the custodian statement reconciled against. Empty when
+  // outcome is NO_STATEMENT — which is the only case where its absence is a
+  // statement rather than an omission.
+  string statement_id = 6;
+
+  // breaks are the discrepancies found, deterministically ordered. Empty for
+  // CLEAN.
+  repeated ReconciliationBreak breaks = 7;
+
+  // tolerance is the absolute difference at or below which the two sides were
+  // treated as agreeing. Decimal.
+  //
+  // IT IS CARRIED ON THE RUN BECAUSE IT CHANGES WHAT "CLEAN" MEANT. A run
+  // reconciled at a loose tolerance and one reconciled exactly are not
+  // comparable evidence, and an auditor asking why a break was not raised on a
+  // given date must be able to read the answer off the run rather than infer it
+  // from whatever the configuration says today.
+  common.v1.Decimal tolerance = 8;
+
+  // completed_at is when the run finished. Required — it is what the staleness
+  // alert ages.
+  google.protobuf.Timestamp completed_at = 9;
+
+  // failure_reason names why a FAILED run could not complete. Empty otherwise.
+  string failure_reason = 10;
+}

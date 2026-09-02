@@ -766,7 +766,21 @@ data:
                   # occurred".
                   "accounting.balance.portfolio",
                   "dlq.order.order.filled", "dlq.order.order.partially_filled",
+                  # CUSTODY RECONCILIATION RECORDS THAT IT RAN (#962). The
+                  # comparison engine in internal/recon has been correct since
+                  # IBOR-01e and its only caller was an HTTP handler taking the
+                  # custodian's statement from the REQUEST BODY, so nothing
+                  # recorded that a reconciliation had happened at all. A run is
+                  # now published for EVERY outcome — including no_statement,
+                  # when the custodian sent nothing for a business date —
+                  # because "reconciled clean today" and "nobody ran it"
+                  # produced identical telemetry, on the control that guards the
+                  # book of record. Without this grant every run is recorded
+                  # locally and invisible, and the staleness alert has no series
+                  # to age.
+                  "accounting.custody.reconciled",
                   "dlq.accounting.cash.>", "dlq.market.fx.>",
+                  "dlq.accounting.custody.statement",
                   "$JS.API.>", "$JS.ACK.>",
                 ]
               }
@@ -774,6 +788,21 @@ data:
                 allow: [
                   "order.order.filled", "order.order.partially_filled",
                   "accounting.cash.>", "market.fx.>", "_INBOX.>",
+                  # THE CUSTODIAN'S OWN VIEW (#962), published by a custodian
+                  # feed adapter. A SUBJECT MISSING FROM THIS LIST IS DENIED
+                  # SILENTLY: the subscription never delivers, which is
+                  # indistinguishable from a custodian that has sent nothing
+                  # (#787/#788) — the scheduled run would conclude no_statement
+                  # forever and the cause would be a permission, not a
+                  # counterparty.
+                  #
+                  # No adapter publishes here yet: the per-custodian translators
+                  # (SWIFT MT535/MT940, prime-broker SFTP) are deferred to
+                  # #105/#106, which have real feeds to develop against. The
+                  # grant and the control exist first so an adapter has somewhere
+                  # to publish, and so the estate reports the absence out loud
+                  # instead of being silent about it.
+                  "accounting.custody.statement",
                 ]
               }
             }
@@ -1944,7 +1973,12 @@ data:
                   "accounting.cash.>",
                   "accounting.balance.portfolio",
                   "dlq.order.order.filled", "dlq.order.order.partially_filled",
+                  # The custody reconciliation run FACT (#962); see the
+                  # platform accounting entry above for why it is published on
+                  # every outcome.
+                  "accounting.custody.reconciled",
                   "dlq.accounting.cash.>", "dlq.market.fx.>",
+                  "dlq.accounting.custody.statement",
                   "$JS.API.>", "$JS.ACK.>",
                 ]
               }
@@ -1952,6 +1986,9 @@ data:
                 allow: [
                   "order.order.filled", "order.order.partially_filled",
                   "accounting.cash.>", "market.fx.>", "_INBOX.>",
+                  # The custodian statement feed (#962); see the platform
+                  # accounting entry above.
+                  "accounting.custody.statement",
                 ]
               }
             }

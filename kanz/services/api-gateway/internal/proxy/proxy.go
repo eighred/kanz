@@ -294,6 +294,57 @@ func (h *Handler) Routes(mux *authz.Mux) {
 			h.handle(ServiceAccounting, true, nil))
 	}
 
+	// THE CUSTODY RECONCILIATION BREAK QUEUE (#962) — the operator surface for
+	// the control that checks the book of record against the custodian.
+	//
+	// WHY IT IS ROUTED AT ALL. custody.Break.Assign/Explain/Resolve are the half
+	// of the lifecycle a PERSON drives. The automatic half — detected ⇒ OPEN, and
+	// the book and custodian agreeing again ⇒ RESOLVED — runs on every scheduled
+	// run and needs nobody. Left unrouted, the manual half would be complete,
+	// tested and callable by nothing, and under network-policies.yaml this gateway
+	// is accounting's ONLY permitted caller, so "unrouted" means "reachable by
+	// nobody" (the shape #539 found in datamaster's maker-checker workflow).
+	//
+	// authz.Fund, AND THE ALTERNATIVES WERE CONSIDERED. Working a custody break is
+	// middle-office FUND OPERATIONS — the same function that books a subscription
+	// or a redemption above — so it reuses that capability rather than growing a
+	// seventh one, which the bar written on Operate/Fund/Approve explicitly warns
+	// against. NOT authz.Read: the queue names every unresolved discrepancy
+	// between the fund's book and what is actually custodied, which is a working
+	// surface an operator acts from rather than a view of settled state, and a
+	// read token that can see it but not work it is a half-open control whose
+	// leaking half is the interesting one (the reasoning the datamaster pending
+	// queue below sets out). NOT authz.Trade: the person who investigates a
+	// custody break is not the person who trades the book. NOT authz.Operate:
+	// operating the estate is draining nodes and rotating credentials, not
+	// reasoning about the fund's positions.
+	//
+	// NO CAPITAL MOVES ON THESE ROUTES, and the one that could be abused cannot
+	// be: Resolve refuses while the latest run still detects the difference, so an
+	// operator may record what they know and may NOT silence the control by hand.
+	// SaveBreak refuses to insert, so a break cannot be invented either.
+	//
+	// requirePrincipal is TRUE on all four. accounting takes the tenant off the
+	// header and serves the one tenant its RLS pool is pinned to; an anonymous
+	// forward would be an investigation nobody signed, and the queue it reads
+	// names another fund's control failures if the tenant is not established.
+	//
+	// CONDITIONAL, for the reason the cash-movement route above is: a route whose
+	// capability nobody holds answers 403 to every principal that exists — "you
+	// may not", when the truth is "nobody may, in this deployment" — which is
+	// indistinguishable from a control working as intended. Unregistered, the
+	// answer is 404, and that is true.
+	if h.roles.Fund != "" {
+		mux.Handle(authz.Fund, "GET /v1/custody/breaks",
+			h.handle(ServiceAccounting, true, nil))
+		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/assign",
+			h.handle(ServiceAccounting, true, nil))
+		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/explain",
+			h.handle(ServiceAccounting, true, nil))
+		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/resolve",
+			h.handle(ServiceAccounting, true, nil))
+	}
+
 	// THE SECOND SIGNATURE, AND THE DOOR IT NEEDED (#539, #410 act one).
 	//
 	// datamaster has carried a complete maker-checker workflow since #495/#498:

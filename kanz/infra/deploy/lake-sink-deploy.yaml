@@ -150,7 +150,7 @@ spec:
             # not business history). Kafka has no subject wildcard, so the set is
             # explicit; TestEverySubjectHasAKafkaTopic keeps the topic names honest.
             - name: LAKE_SINK_TOPICS
-              value: "compliance.mandate,risk.position,order.order,order.cost,strategy.signal,optimization.proposal,accounting.balance,accounting.margin,settlement.instruction,compliance.breach,risk.portfolio,platform.authz,platform.compliance,platform.mode,inference.feature,inference.prediction,data.feature,data.exception,platform.model"
+              value: "compliance.mandate,risk.position,order.order,order.cost,strategy.signal,optimization.proposal,accounting.balance,accounting.margin,accounting.custody,settlement.instruction,compliance.breach,risk.portfolio,platform.authz,platform.compliance,platform.mode,inference.feature,inference.prediction,data.feature,data.exception,platform.model"
             # Schema-evolution-aware decode is the whole of LAKE-01a: without the
             # registry, payloads land envelope-only (undecoded). Point it at the
             # EVT-16 registry so an additively-added field surfaces as a new column

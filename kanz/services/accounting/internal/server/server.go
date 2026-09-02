@@ -48,6 +48,10 @@ type Server struct {
 	fxProvider    func() accounting.FXConverter
 	instrumentCcy accounting.InstrumentCurrency
 	cashPublisher CashPublisher
+	// breaks is the custody reconciliation break queue (#962). Nil ⇒ the routes
+	// are not registered and the surface answers 404, which is the truthful
+	// answer for a deployment with no custody reconciliation.
+	breaks BreakStore
 	// snapshotMetrics counts unbounded materializations. nil is inert.
 	snapshotMetrics *ledger.SnapshotMetrics
 	// tenant is the ONE tenant this instance serves. main pins the RLS pool to it
@@ -149,6 +153,7 @@ func (s *Server) routes() {
 	if s.cashPublisher != nil {
 		s.mux.HandleFunc("POST /v1/portfolios/{id}/cash-movements", s.handleCashMovement)
 	}
+	s.custodyRoutes()
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

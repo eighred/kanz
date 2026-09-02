@@ -1414,3 +1414,107 @@ groups:
         annotations:
           summary: "Audit-chain verification cannot read the log on {{ $labels.pod }}"
           description: "The scheduled tamper check ran and could not read the audit store, so NOTHING was verified — this is not a pass and not a tamper. report.Verify is a whole-log scan holding one pool connection, so this usually means the store is unreachable, the pool is exhausted, or the scan is timing out on a log that has outgrown it. While this persists the chain's integrity is unknown, and AuditChainNotBeingVerified will follow if it continues."
+
+      # THE BOOK OF RECORD IS NOT BEING CHECKED AGAINST ITS CUSTODIAN (#962).
+      #
+      # # Why this is the staleness rule that matters most
+      #
+      # Custody reconciliation detects what nothing else on this platform can.
+      # Every other control READS THE BOOK — exposure, VaR, mandate limits,
+      # margin, NAV — so each inherits whatever the book is wrong about,
+      # confidently and in the same direction. And the error is silent by
+      # construction: a position missing from the book contributes nothing to any
+      # measure, so no threshold is crossed and no alert fires. The custodian's
+      # statement is the only independent view, and this rule is what says the
+      # comparison has stopped happening.
+      #
+      # # Why it reads a TIMESTAMP and not a duration
+      #
+      # kanz_accounting_reconciliation_last_success_timestamp_seconds is set to
+      # the completion instant and the subtraction happens HERE. A gauge holding
+      # a duration is computed at scrape time by the process that owns it, so a
+      # process that has hung — the single most important thing a staleness alert
+      # must catch — publishes a duration frozen at whatever it last managed to
+      # compute, and the rule reads it as healthy forever. A timestamp cannot lie
+      # that way: it stops advancing while time() keeps moving.
+      #
+      # # Why the series exists before the first run, and why that is load-bearing
+      #
+      # buildCustodyPlane calls Metrics.SeedPair for EVERY configured
+      # (portfolio, custodian) before the scheduler's first tick, which sets this
+      # gauge to 0 — the Unix epoch, i.e. an age of five decades. That is
+      # deliberate: an estate that has NEVER reconciled is strictly worse than one
+      # whose last run is old, and without the seed it would be ABSENT from the
+      # vector and silently skipped by this rule. A rule over an absent series is
+      # silent in exactly the state it detects (#62 deleted ten data-quality rules
+      # for that), so the harness beside this file executes the never-reconciled
+      # case as well as the stale one.
+      #
+      # 26h, not 24h: the scheduler's default interval is 24h and a run that
+      # slips by an hour is a scrape gap, not an incident.
+      - alert: CustodyReconciliationStale
+        expr: |
+          (time() - max by (namespace, portfolio, custodian) (kanz_accounting_reconciliation_last_success_timestamp_seconds)) > 93600
+        for: 30m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "Portfolio {{ $labels.portfolio }} has not been reconciled against custodian {{ $labels.custodian }}"
+          description: "No reconciliation run for this (portfolio, custodian) has completed AND published in over 26 hours, so the fund's book of record is unverified against the only independent view of what is actually custodied. Every number derived from that book — NAV, exposure, VaR, mandate headroom, margin — inherits whatever it is wrong about, and the failure is silent: a position missing from the book contributes to no measure and crosses no threshold. A value at the Unix epoch means this pair has NEVER reconciled. Check kanz_accounting_reconciliation_runs_total by outcome on the accounting deployment: outcome=no_statement means the custodian sent nothing (or accounting.custody.statement is not granted in infra/nats/tenancy.yaml — a denied subscription delivers nothing and looks identical); outcome=failed means the run could not complete and failure_reason on the ReconciliationRun FACT says why; no increment at all means ACCOUNTING_CUSTODY_PAIRS is empty and nothing is scheduled."
+
+      # THE CUSTODIAN HAS STOPPED SENDING (#962).
+      #
+      # Distinct from the staleness rule above and deliberately not folded into
+      # it. A no_statement run is the control WORKING: it came due, it looked, and
+      # the custodian had said nothing — so the platform is healthy and the
+      # counterparty (or the subscription grant) is not. Paging the same way for
+      # both would tell an operator to check the wrong system.
+      #
+      # It is a rate over a COUNTER whose zero series is seeded from
+      # custody.Outcomes() at wiring time, so "no no_statement runs" is a real 0
+      # rather than an absent vector that this rule would never match.
+      - alert: CustodyStatementMissing
+        expr: |
+          increase(kanz_accounting_reconciliation_runs_total{outcome="no_statement"}[26h]) > 0
+        for: 1h
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "Custodian {{ $labels.custodian }} sent no statement for a reconciliation that came due"
+          description: "A scheduled reconciliation ran and found no custodian statement for the business date it covers, so the book was not compared against anything. This is the control reporting an absence rather than failing — before #962 this state produced no event at all and was indistinguishable from reconciling cleanly. Two causes and they need different owners: the custodian genuinely has not transmitted (chase the counterparty / the feed adapter), or accounting's subscription to accounting.custody.statement is not granted in infra/nats/tenancy.yaml, in which case the subscription is DENIED SILENTLY and delivers nothing (#787/#788). Check the accounting pod's subscribe log line before chasing the custodian."
+
+      # A RECONCILIATION BREAK NOBODY HAS CLOSED (#962).
+      #
+      # kanz_accounting_break_oldest_age_seconds is measured from when a break was
+      # FIRST seen and is never reset by a redetection, so this is genuinely "this
+      # position has disagreed with the custodian for N days" rather than "a run
+      # found something today".
+      #
+      # EXPLAINED BREAKS ARE STILL COUNTED, and that is the point of the ageing.
+      # An explanation is a claim about the future — "this clears when tomorrow's
+      # settlement lands" — not evidence that it has, and a break still present a
+      # week after being explained is a WORSE signal than an unexplained one
+      # because somebody looked at it and was wrong. Only RESOLVED, which requires
+      # the book and the custodian to actually agree, leaves the outstanding set.
+      - alert: CustodyBreakAgeing
+        expr: |
+          max by (namespace, custodian) (kanz_accounting_break_oldest_age_seconds) > 432000
+        for: 1h
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "A reconciliation break against {{ $labels.custodian }} has been open for over 5 days"
+          description: "The book and the custodian have disagreed about the same instrument or currency for more than five business days without reaching RESOLVED. A break that persists is either a real economic difference nobody has corrected — a fill that never reached the ledger, a settlement that failed — or an explanation that did not hold, which is why an EXPLAINED break keeps ageing rather than dropping out of this gauge. Read kanz_accounting_breaks_open by kind: missing_in_ibor is the direction that most often means a fill never reached the book, and it is the case no other control on this platform can detect."
+
+      # A RUN HAPPENED AND THE ESTATE NEVER HEARD IT (#962).
+      #
+      # The reconciler advances the staleness gauge ONLY on a successful publish,
+      # so a broker outage leaves CustodyReconciliationStale firing correctly — the
+      # estate has no record of the run, and "no record" is the honest reading.
+      # This rule is what distinguishes that cause from the others, so an operator
+      # is not sent to chase a custodian over a NATS problem.
+      - alert: CustodyReconciliationUnpublished
+        expr: |
+          increase(kanz_accounting_reconciliation_publish_failures_total[1h]) > 0
+        for: 15m
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "Custody reconciliation runs for {{ $labels.custodian }} completed but could not be published"
+          description: "A reconciliation ran and its ReconciliationRun FACT could not be published, so the run exists in accounting's own store and nowhere else. The staleness gauge deliberately does NOT advance on an unpublished run — the estate genuinely has no record that the control ran — so CustodyReconciliationStale will follow and this rule is what names the cause as a publish path rather than a custodian. Check the broker and that accounting.custody.reconciled is in the accounting user's publish allow-list in infra/nats/tenancy.yaml."
