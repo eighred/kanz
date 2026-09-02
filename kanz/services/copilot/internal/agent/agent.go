@@ -12,7 +12,9 @@ package agent
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/copilot/internal/llm"
@@ -48,6 +50,14 @@ type Answer struct {
 	Ungrounded []string
 	// Refused is true when the model declined (stop_reason refusal).
 	Refused bool
+	// BudgetExhausted is true when the tool-use loop hit maxTurns without the
+	// model reaching a final answer.
+	//
+	// DISTINCT FROM Refused (#971). A model that declined and one that never
+	// converged are different facts with different owners — the first is the model
+	// working, the second is the earliest sign of one that has stopped — and they
+	// previously returned the same shape with a different sentence.
+	BudgetExhausted bool
 	// InjectionFlagged is true when a tool result tripped the prompt-injection
 	// guard during this answer.
 	InjectionFlagged bool
@@ -59,11 +69,23 @@ type Agent struct {
 	model    llm.Model
 	tools    *tools.Registry
 	maxTurns int
+
+	// recorder keeps what the model was shown (#971). Nil records nothing, which
+	// the composition root reports at startup rather than leaving the estate to
+	// discover when an answer cannot be explained.
+	recorder     AnswerRecorder
+	onRecordLost func(error)
+	now          func() time.Time
+	log          *slog.Logger
 }
 
 // New builds an agent over a Claude model and the governed tool registry.
-func New(model llm.Model, registry *tools.Registry) *Agent {
-	return &Agent{model: model, tools: registry, maxTurns: DefaultMaxTurns}
+func New(model llm.Model, registry *tools.Registry, opts ...Option) *Agent {
+	a := &Agent{model: model, tools: registry, maxTurns: DefaultMaxTurns}
+	for _, o := range opts {
+		o(a)
+	}
+	return a
 }
 
 // Ask runs the tool-use loop for one question under the Principal and returns a
@@ -83,33 +105,49 @@ func (a *Agent) Ask(ctx context.Context, p *auth.Principal, question string) (An
 	var citations []retrieval.Citation
 	var citedValues []float64
 	injectionFlagged := false
+	trace := loopTrace{answerID: newAnswerID(a.clock())}
 
 	for turn := 0; turn < a.maxTurns; turn++ {
 		resp, err := a.model.Complete(ctx, req)
+		trace.turns++
+		trace.models = append(trace.models, resp.Model)
 		if err != nil {
+			// THE FAILURE IS RECORDED TOO. A loop that could not complete is a fact
+			// about the agent, and recording only the successes would leave exactly
+			// the failures unexplained (#971).
+			ans := Answer{Citations: citations, InjectionFlagged: injectionFlagged}
+			a.record(ctx, p, question, ans, trace, true)
 			return Answer{}, err
 		}
 		if resp.StopReason == llm.StopRefusal {
-			return Answer{Text: resp.Text, Refused: true, Grounded: true, InjectionFlagged: injectionFlagged}, nil
+			ans := Answer{Text: resp.Text, Refused: true, Grounded: true, InjectionFlagged: injectionFlagged}
+			a.record(ctx, p, question, ans, trace, false)
+			return ans, nil
 		}
 
 		if len(resp.ToolCalls) == 0 {
 			// Final answer — review grounding against everything the tools returned.
 			grounding := ReviewOutput(resp.Text, citedValues)
-			return Answer{
+			ans := Answer{
 				Text:             resp.Text,
 				Citations:        citations,
 				Grounded:         grounding.Grounded,
 				Ungrounded:       grounding.Ungrounded,
 				InjectionFlagged: injectionFlagged,
-			}, nil
+			}
+			a.record(ctx, p, question, ans, trace, false)
+			return ans, nil
 		}
 
 		// Record the assistant tool-call turn, then invoke each tool.
 		req.Messages = append(req.Messages, llm.Message{Role: llm.RoleAssistant, Text: resp.Text, ToolCalls: resp.ToolCalls})
 		var results []llm.ToolResult
 		for _, call := range resp.ToolCalls {
+			trace.toolCalls++
 			out := a.tools.Invoke(ctx, p, call)
+			if out.IsError {
+				trace.toolErrors++
+			}
 			content, flagged := ScanToolResult(out.Content)
 			if flagged {
 				injectionFlagged = true
@@ -123,7 +161,17 @@ func (a *Agent) Ask(ctx context.Context, p *auth.Principal, question string) (An
 		req.Messages = append(req.Messages, llm.Message{Role: llm.RoleUser, ToolResults: results})
 	}
 
-	return Answer{Text: "I could not complete the request within the tool-use budget.", Citations: citations, Grounded: true, InjectionFlagged: injectionFlagged}, nil
+	ans := Answer{
+		Text:            "I could not complete the request within the tool-use budget.",
+		Citations:       citations,
+		Grounded:        true,
+		BudgetExhausted: true,
+		//InjectionFlagged carries forward so an exhausted loop that was fed a
+		// poisoned result is still visible as such.
+		InjectionFlagged: injectionFlagged,
+	}
+	a.record(ctx, p, question, ans, trace, false)
+	return ans, nil
 }
 
 // CitationsString renders an answer's citations for display/logging.

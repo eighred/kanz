@@ -49,7 +49,7 @@ func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard
 // exactly the behaviour that predates #352, so this cannot regress an existing
 // deployment.
 func TestWithNoBusTheRecorderFallsBackToTheLog(t *testing.T) {
-	rec, closeRec, err := buildDecisionRecorder(context.Background(), config.Config{},
+	rec, _, closeRec, err := buildDecisionRecorder(context.Background(), config.Config{},
 		prometheus.NewRegistry(), quietLogger())
 	if err != nil {
 		t.Fatalf("buildDecisionRecorder with no NATS URL: %v\n\n"+
@@ -147,7 +147,7 @@ func TestACopilotToolAuthorizationReachesTheObservationStream(t *testing.T) {
 	cfg.NATSURL = natsURL
 	cfg.SPIFFESocket = "" // plaintext against the dev broker
 
-	rec, closeRec, err := buildDecisionRecorder(ctx, cfg, prometheus.NewRegistry(), quietLogger())
+	rec, _, closeRec, err := buildDecisionRecorder(ctx, cfg, prometheus.NewRegistry(), quietLogger())
 	if err != nil {
 		t.Fatalf("buildDecisionRecorder: %v", err)
 	}

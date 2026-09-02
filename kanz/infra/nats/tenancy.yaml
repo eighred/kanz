@@ -672,7 +672,19 @@ data:
           # is its alone. An AI agent is the last identity that should hold it.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/copilot"
             permissions: {
-              publish: { allow: ["platform.authz.decision"] }
+              publish: {
+                allow: [
+                  "platform.authz.decision",
+                  # WHAT AN AGENT WAS SHOWN (#971), beside the authorization
+                  # decisions it correlates with. Without this grant the copilot
+                  # answers normally and the publish is DENIED — a permissions
+                  # violation that reads like a broken feature rather than a
+                  # missing grant — so every answer would be produced and none
+                  # recorded, which is exactly the state before #971 with the
+                  # added cost of looking wired.
+                  "platform.agent.answered",
+                ]
+              }
               subscribe: { allow: ["_INBOX.>"] }
             }
           }

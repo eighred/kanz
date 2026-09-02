@@ -109,6 +109,21 @@ type Response struct {
 	Text       string
 	ToolCalls  []ToolCall
 	StopReason StopReason
+
+	// Model is the model identity that produced THIS turn — the provider's own
+	// name and version, as it reported them (#971).
+	//
+	// PER TURN AND NOT PER DEPLOYMENT. Recording the configured model name would
+	// be a claim about CONFIGURATION; this seam is provider-agnostic (#179) and an
+	// adapter may route differently per call, so "which model actually answered"
+	// is a question only the response can settle.
+	//
+	// AN EMPTY VALUE IS NOT AN ERROR HERE, and it is not defaulted either. A
+	// provider that reports no identity leaves this empty, and the answer record
+	// carries the empty entry rather than omitting the turn — an omission would
+	// silently shorten the model list and make it disagree with the turn count,
+	// which is the one thing that would make the record unreadable.
+	Model string
 }
 
 // Model is the Claude seam (see the package doc for the production Opus 4.8

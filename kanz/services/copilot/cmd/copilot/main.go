@@ -94,7 +94,7 @@ func run() int {
 	// observation stream. With no COPILOT_NATS_URL it falls back to the log, which
 	// is where this service started and why #352 exists: a decision in a pod's
 	// stdout is gone at the next rollout.
-	recorder, closeRecorder, rerr := buildDecisionRecorder(ctx, cfg, obs.Registry, logger)
+	recorder, answerProducer, closeRecorder, rerr := buildDecisionRecorder(ctx, cfg, obs.Registry, logger)
 	if rerr != nil {
 		logger.Error("decision recorder init failed", "err", rerr)
 		return 2
@@ -150,7 +150,34 @@ func run() int {
 		logger.Info("copilot citations: lineage catalog", "addr", cfg.LineageAddr)
 	}
 	registry := tools.NewRegistry(authz, queryClient, catalog, logger)
-	cp := agent.New(model, registry)
+	// THE ANSWER RECORD (#971) — what the model was shown, which model answered,
+	// and what it concluded.
+	//
+	// Every AUTHORIZATION decision was already recorded (#352); none of THIS was.
+	// So an operator asking "the copilot told me the book was flat and it was not"
+	// could be shown that the caller was permitted to read the resource, and
+	// nothing about the retrieval set, the model version, or whether the answer
+	// was grounded in what the tools returned.
+	//
+	// Said at ERROR when unrecorded, because an unrecordable agent looks identical
+	// from the outside to a recorded one — right up to the moment somebody needs
+	// to explain an answer.
+	agentOpts := []agent.Option{}
+	if answerProducer != nil {
+		obs.Registry.MustRegister(answerRecordsLost)
+		agentOpts = append(agentOpts,
+			agent.WithRecorder(&busAnswerRecorder{producer: answerProducer}),
+			agent.WithRecordObserver(func(error) { answerRecordsLost.Inc() }),
+			agent.WithLogger(logger))
+		logger.Info("copilot: answer records armed — what each answer was built from is recorded",
+			"subject", SubjectAgentAnswer)
+	} else {
+		logger.Error("copilot: NO answer records — COPILOT_NATS_URL is unset, so what the model was " +
+			"shown, which model answered and whether the answer was grounded are kept nowhere. " +
+			"An answer that informs a capital decision and cannot be reconstructed is not " +
+			"auditable, whatever the authorization trail says (#971)")
+	}
+	cp := agent.New(model, registry, agentOpts...)
 
 	readiness := &server.Readiness{}
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, cp, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
@@ -223,24 +250,29 @@ var authDecisionsLost = prometheus.NewCounterVec(prometheus.CounterOpts{
 // recorder, exactly the behaviour before this change. Neither arm is a no-op — a
 // service that cannot reach a broker must still record its authorization
 // decisions somewhere.
-func buildDecisionRecorder(ctx context.Context, cfg config.Config, reg prometheus.Registerer, logger *slog.Logger) (auth.DecisionRecorder, func(), error) {
+// IT RETURNS THE PRODUCER TOO (#971). The answer recorder publishes onto the same
+// observation stream from the same process, and giving it a second connection
+// would create a state worth not inventing: "this pod can record which tool calls
+// were authorized and cannot record what the model was shown". One dial, both
+// records, or neither.
+func buildDecisionRecorder(ctx context.Context, cfg config.Config, reg prometheus.Registerer, logger *slog.Logger) (auth.DecisionRecorder, *bus.Producer, func(), error) {
 	if cfg.NATSURL == "" {
 		logger.Warn("no COPILOT_NATS_URL — AUTH-01d tool authorizations are recorded to the LOG ONLY, " +
 			"so they do not survive a restart and cannot be queried beside the FACTs they justified")
-		return auth.NewSlogRecorder(logger), func() {}, nil
+		return auth.NewSlogRecorder(logger), nil, func() {}, nil
 	}
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
 	// plaintext client it refuses at the handshake.
 	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	logger.Info("bus transport", "mtls", mesh.Enabled())
 	busMetrics := bus.NewBusMetrics(reg)
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: "copilot", TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		_ = mesh.Close()
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	// NO ProducerConfig.Tenant: the tenant is stamped per decision by pkg/authbus
 	// from the deciding principal, so one analyst's tool authorizations are filed
@@ -253,7 +285,7 @@ func buildDecisionRecorder(ctx context.Context, cfg config.Config, reg prometheu
 	if err != nil {
 		_ = client.Close()
 		_ = mesh.Close()
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	reg.MustRegister(authDecisionsLost)
 
@@ -273,13 +305,13 @@ func buildDecisionRecorder(ctx context.Context, cfg config.Config, reg prometheu
 	if err != nil {
 		_ = client.Close()
 		_ = mesh.Close()
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	logger.Info("copilot: authorization decisions publish to the observation stream")
 	// ORDER IS LOAD-BEARING: drain the recorder's queue BEFORE dropping the
 	// connection it publishes over, or the decisions still in flight at shutdown —
 	// precisely those made just before a rollout — are discarded.
-	return rec, func() { rec.Close(); _ = client.Close(); _ = mesh.Close() }, nil
+	return rec, producer, func() { rec.Close(); _ = client.Close(); _ = mesh.Close() }, nil
 }
 
 func (denyAll) Authorize(_ context.Context, _ auth.Request) auth.Decision {
