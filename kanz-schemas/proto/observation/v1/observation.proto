@@ -13,6 +13,8 @@ syntax = "proto3";
 // the bus client library enforces on publish.
 package observation.v1;
 
+import "google/protobuf/timestamp.proto";
+
 // MetricObservation is a single metric data point — a measurement of the
 // system's own behaviour (latency, throughput, queue depth, ...). Ephemeral
 // and lossy-tolerant; it is not a system of record.
@@ -72,4 +74,152 @@ enum MetricKind {
   // COUNTER: a monotonically non-decreasing cumulative total (e.g. events
   // processed since start).
   METRIC_KIND_COUNTER = 2;
+}
+
+// AN AGENT ANSWER MUST BE RECONSTRUCTABLE (#971).
+//
+// # What was already recorded, and what was not
+//
+// Every AUTHORIZATION decision the copilot makes is on this stream: pkg/auth's
+// AuditedAuthorizer wraps the authorizer so each allow AND deny becomes a
+// DecisionLog carrying decider, principal, resource, tenant, reason and refusal
+// code (#352). That half is solid.
+//
+// WHAT THE MODEL WAS SHOWN WAS NOT RECORDED ANYWHERE. So for any answer the
+// platform could say "this principal was permitted to read this resource" and
+// could not say "and here is what it was shown, by which model, and what it
+// concluded".
+//
+// # Why that matters
+//
+// The copilot answers questions about risk and exposure that a human then acts
+// on. When an operator says "the copilot told me the book was flat in EURUSD and
+// it was not", four different faults are indistinguishable from the record that
+// existed:
+//
+//   - the retrieval returned a stale or partial measure set;
+//   - a measure arrived with a degraded integrity record (the failure #757 fixed,
+//     where DV01 = 0 reached an agent as if it were a computed zero);
+//   - the model was a different version than the one deployed today;
+//   - or the model produced something its context did not support.
+//
+// Four faults, four owners. An answer that informs a capital decision and cannot
+// be reconstructed is not auditable, whatever the authorization trail says.
+//
+// # References, not payloads — and no prompt text
+//
+// This record carries the IDENTITY of everything the agent was shown and none of
+// its content. The retrieval set is derived from tenant-scoped state and may
+// carry position-level detail; copying it here would put a second copy of the
+// book in the observation stream under different isolation, and the question a
+// reader has ("was this measure degraded when the agent saw it") is answerable
+// from a reference plus a re-fetch.
+//
+// THE QUESTION AND ANSWER TEXT ARE DELIBERATELY ABSENT for the same reason. Their
+// digests are here so a transcript the caller holds can be matched to this record
+// beyond doubt; the text itself belongs to that transcript. What this record
+// exists to establish is what the agent was SHOWN and what it CONCLUDED
+// structurally — the two things nothing else keeps.
+message AgentAnswerRecord {
+  // answer_id is this answer's unique identity, and the key everything else
+  // about it correlates on. Required.
+  string answer_id = 1;
+
+  // agent names the asking surface ("copilot"). Required — the MCP read plane is
+  // a second one, and an estate-wide refusal rate that merged them would be
+  // uninterpretable.
+  string agent = 2;
+
+  // principal_subject and tenant_id are WHO asked, taken from the authenticated
+  // principal and never from a request body. Required.
+  string principal_subject = 3;
+  string tenant_id = 4;
+
+  // models are the model identities that produced each turn, in order.
+  //
+  // PER TURN AND NOT PER DEPLOYMENT, deliberately. Recording the configured model
+  // name would be a claim about CONFIGURATION; a provider seam can route
+  // differently per call, and "which model actually answered" is the question a
+  // reader has. A turn whose model reported no identity contributes an empty
+  // entry rather than being omitted — the count must match the turns.
+  repeated string models = 5;
+
+  // retrieved is everything placed in the model's context, by reference.
+  repeated RetrievedReference retrieved = 6;
+
+  // context_digest is a digest over the assembled context, so two answers built
+  // from the same material are recognisable as such and a changed one is
+  // detectable without storing either.
+  string context_digest = 7;
+
+  // question_digest and answer_digest match this record to a transcript the
+  // caller holds, without copying the text. See the message header.
+  string question_digest = 8;
+  string answer_digest = 9;
+
+  // outcome is how the answer ended.
+  AgentAnswerOutcome outcome = 10;
+
+  // grounded is the output review's verdict: false when the answer made a numeric
+  // claim no cited tool value supports.
+  //
+  // THIS IS THE ONE HALLUCINATION SIGNAL THAT IS ACTUALLY CHECKABLE, and it is
+  // recorded rather than computed later because the cited values it was checked
+  // against are not kept. ungrounded_claims names what failed.
+  bool grounded = 11;
+  repeated string ungrounded_claims = 12;
+
+  // injection_flagged is true when a tool result tripped the prompt-injection
+  // screen during this answer. Not a refusal — the guard neutralises the content
+  // — but a fact about the data the agent was fed, and one nobody could count.
+  bool injection_flagged = 13;
+
+  // turns, tool_calls and tool_errors are the shape of the loop. A rising turn
+  // count is the earliest sign of a model that has stopped converging, and a
+  // rising tool_errors is a read plane degrading under an agent that keeps
+  // asking.
+  uint32 turns = 14;
+  uint32 tool_calls = 15;
+  uint32 tool_errors = 16;
+
+  // answered_at is when the answer was produced. Required.
+  google.protobuf.Timestamp answered_at = 17;
+}
+
+// RetrievedReference identifies one thing the agent was shown, without its
+// content. The fields mirror the copilot's own Citation, which is already a
+// reference rather than a payload.
+message RetrievedReference {
+  // source_event_id is the FACT the value was computed from (AUDIT-01), and is
+  // what a re-fetch resolves.
+  string source_event_id = 1;
+
+  // portfolio_id and as_of scope it — as_of being the half that answers "was this
+  // stale when the agent saw it".
+  string portfolio_id = 2;
+  string as_of = 3;
+
+  // lineage_node is the LIN-01 catalog node, so the reference names the governed
+  // dataset rather than an opaque event id.
+  string lineage_node = 4;
+}
+
+// AgentAnswerOutcome is how an answer ended.
+//
+// THE UNSUCCESSFUL VALUES ARE WHY THIS IS AN ENUM. A refused answer and a budget
+// exhaustion are facts about the agent worth keeping — the same argument
+// ProposalMaterialized makes for a materialization that published nothing — and
+// merging them into "no answer" would make a model that has stopped converging
+// look like one that declined.
+enum AgentAnswerOutcome {
+  AGENT_ANSWER_OUTCOME_UNSPECIFIED = 0;
+  // ANSWERED: the model produced a final answer.
+  AGENT_ANSWER_OUTCOME_ANSWERED = 1;
+  // REFUSED: the model declined (stop_reason refusal).
+  AGENT_ANSWER_OUTCOME_REFUSED = 2;
+  // BUDGET_EXHAUSTED: the tool-use loop hit its turn ceiling without the model
+  // reaching a final answer.
+  AGENT_ANSWER_OUTCOME_BUDGET_EXHAUSTED = 3;
+  // FAILED: the loop could not complete — a model or transport error.
+  AGENT_ANSWER_OUTCOME_FAILED = 4;
 }

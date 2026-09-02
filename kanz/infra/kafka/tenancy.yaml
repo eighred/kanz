@@ -109,6 +109,13 @@ data:
     risk.portfolio             6   delete   2592000000  yes
     alternatives.commitment    3   delete   604800000   yes
     platform.authz             3   delete   2592000000  yes
+    # WHAT AN AGENT WAS SHOWN (#971). Beside platform.authz above, and on the same
+    # 30d retention, because they are two halves of one request: the authz decision
+    # says a principal was permitted to read a resource, this says what the model
+    # was then shown, which model answered and whether the answer was grounded in
+    # it. Aging them differently would leave half a trail, which is worse than
+    # either half alone.
+    platform.agent            3   delete   2592000000  yes
     platform.compliance        3   delete   2592000000  yes
     platform.mode              3   delete   2592000000  yes
     inference.feature          6   delete   604800000   yes
