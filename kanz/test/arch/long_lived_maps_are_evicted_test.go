@@ -87,13 +87,17 @@ import (
 //     (r.byKey[k] = pruned) and a call to a pruner in another package
 //     (pit.Put) — without both, #884's own repair stayed invisible here and its
 //     exemption stayed green over a fixed field.
-//     WHAT IS STILL INVISIBLE is the level BELOW that: map[K]map[K2][]T reports
-//     the inner map and says nothing about the slice inside it, and a collection
-//     reached through a POINTER value (map[K]*T, where T holds the collection)
-//     is not in the population at all — tv-sync's per-account orders, seenFills
-//     and execs are exactly that shape, and they are #809. Teaching the walk to
-//     follow a pointer value is #951, and it is its own batch for the same
-//     reason this one was.
+//     #951 then taught it to follow a POINTER value: map[K]*T, map[K]map[K2]*T
+//     and []*T now put the collections declared on T into the population, keyed
+//     by T's own package and type so the credit machinery finds their evictors
+//     unchanged. That is what finally made tv-sync's per-account orders,
+//     seenFills and execs visible — they are #809, and they are enumerated as a
+//     deferredLeak below rather than invisible.
+//     WHAT IS STILL INVISIBLE is the level below THAT: map[K]map[K2][]T reports
+//     the inner map and says nothing about the slice inside it, and a pointer
+//     behind a pointer is not followed. Measured 2026-09-03: 25 pointer-valued
+//     fields on mutex-guarded types and none of them nested, so the second is
+//     coverage against a shape arriving rather than one that is here.
 //  3. LONG-LIVED IS APPROXIMATED BY "GUARDED BY A sync MUTEX". A long-lived map
 //     reached from one goroutine only, or guarded by a channel, a RWMutex behind
 //     an embedded type, or an atomic, is not in the population at all.
@@ -223,6 +227,76 @@ type evictionExemption struct {
 // arm caught it on the first run. An exemption nobody checks is worse than no
 // exemption, because it reads as a decision somebody made.
 var mapEvictionExempt = map[string]evictionExemption{
+	// ─── BEHIND A POINTER VALUE (#951) ──────────────────────────────────────
+	//
+	// Seventeen members, every one read during the calibration pass rather than
+	// classified from its name. The population is small because the shape is:
+	// 25 pointer-valued fields on mutex-guarded types, 13 of them pointing at a
+	// type that holds a collection, and four of those already pruned through a
+	// local (compliance's book.positions, volprofile's history.done,
+	// MeasureSet.excluded, audit's Record.Attributes) so they need no entry.
+	//
+	// THREE PATTERNS ACCOUNT FOR ALL SEVENTEEN, and naming them here is what
+	// stops the next reader classifying by intuition:
+	//
+	//  1. REPLACED WHOLESALE. The value is rebuilt and reassigned; the collection
+	//     inside it is never appended to after construction, so its size is a
+	//     property of one value and the number of values is the outer map's key
+	//     space — which has its own entry above.
+	//  2. SIZED BY THE BOOK. It grows with the instruments or currencies a
+	//     portfolio holds, which is an estate quantity, not a message rate.
+	//  3. CAPPED IN THE WRITE PATH, with the cap in the code.
+	//
+	// The one that fits none of them is tv-sync, and it is #809.
+
+	"internal/execution: venueStat.decisions": {boundedByConstruction,
+		"CAPPED IN THE WRITE PATH: VenueCosts.Observe stores an id only while " +
+			"len(s.decisions) < v.minSamples, because once the floor is crossed no further id can " +
+			"change the verdict. The holder's own entry has claimed this since #483; #951 is what " +
+			"makes the claim checkable rather than prose.", ""},
+
+	"internal/marketedge/volprofile: history.shape": {boundedByConstruction,
+		"the MEMOISED intraday shape, replaced wholesale on recompute (`h.shape, h.level, h.window, " +
+			"h.dirty = shape, level, w, false`) and never appended to. Its length is the bucket " +
+			"count for the configured window, so it is fixed by the interval rather than by how " +
+			"many sessions have been folded. The sessions themselves are history.done, which IS " +
+			"pruned through pit.Put and is credited rather than exempted.", ""},
+
+	"internal/risk/domain: ExposureSet.items": {boundedByConstruction,
+		"built once by NewExposureSet from the exposures a single compute produced, and the Cache " +
+			"REPLACES the whole set on the next store rather than appending to this one. Its length " +
+			"is the number of exposure dimensions for one portfolio — currency, asset class, " +
+			"sector — not a count of computes.", ""},
+
+	"internal/risk/domain: MeasureSet.measures": {boundedByConstruction,
+		"keyed by v1.MeasureName, the registry's closed vocabulary of measures, and rebuilt whole " +
+			"by NewMeasureSet on every compute. A new key can only come from a new measure being " +
+			"REGISTERED, which is a code change. Its sibling `excluded` is set to nil on the same " +
+			"path and is credited rather than exempted.", ""},
+
+	"internal/risk/factormodel: Model.Factors":     factorModelArtifact("the factor names"),
+	"internal/risk/factormodel: Model.Instruments": factorModelArtifact("the instrument universe"),
+	"internal/risk/factormodel: Model.Loadings":    factorModelArtifact("the loadings matrix, one row per instrument"),
+	"internal/risk/factormodel: Model.FactorCov":   factorModelArtifact("the factor covariance matrix, factors x factors"),
+	"internal/risk/factormodel: Model.SpecificVar": factorModelArtifact("specific variance, one entry per instrument"),
+	"internal/risk/factormodel: Model.index":       factorModelArtifact("the instrument-to-row index over the same universe"),
+
+	"services/accounting/internal/ledger: Snapshot.Positions": ledgerSnapshot("open positions, keyed by instrument"),
+	"services/accounting/internal/ledger: Snapshot.Cash":      ledgerSnapshot("cash, keyed by currency"),
+	"services/accounting/internal/ledger: Snapshot.Accrued":   ledgerSnapshot("accruals, keyed by currency"),
+
+	"services/datamaster/internal/pricing: Exception.Overrides": {boundedByConstruction,
+		"the operator decisions taken on ONE pricing exception, appended by a human acting through " +
+			"the override surface — bounded by review actions rather than by message rate. It is " +
+			"also the compliance record of what was chosen and why, so trimming it would delete " +
+			"the answer rather than free memory, which is the same argument the holder Queue.byID " +
+			"already carries.", ""},
+
+	"services/tv-sync/internal/projection: account.orders": tvSyncAccount("orders, keyed by order id"),
+	"services/tv-sync/internal/projection: account.seenFills": tvSyncAccount(
+		"the seen-fill set, keyed by fill id"),
+	"services/tv-sync/internal/projection: account.execs": tvSyncAccount("the execution list, appended per fill"),
+
 	// ---------------------------------------------------------------------
 	// boundedByConstruction — the key space is written by the estate.
 	// ---------------------------------------------------------------------
@@ -626,6 +700,21 @@ func TestEveryLongLivedMapHasAnEvictor(t *testing.T) {
 	// one above on purpose — the field walk and the value walk fail
 	// independently, and a value walk that returned nothing would otherwise hide
 	// behind 102 field findings and report a clean estate.
+	// NON-VACUITY FOR THE POINTER ARM (#951). The walk resolves a type name
+	// across packages for the first time in this guard, and every way that can
+	// break — an import map that resolves nothing, a struct index built after the
+	// field walk instead of before, a pointerElems that returns nothing — empties
+	// this population silently and leaves the guard green over the fields it was
+	// widened to cover. Measured 23 at the calibration; the floor is deliberately
+	// below that so removing a leak does not fail the build, and far enough above
+	// zero that a broken walk does.
+	if got := est.pointerFields(); got < 15 {
+		t.Fatalf("only %d collection(s) behind a pointer value were found; the #951 calibration "+
+			"measured 23 and this arm resolves type names ACROSS PACKAGES, which is the part that "+
+			"fails silently. A number this low means the walk is not reaching them — check that "+
+			"the struct index is built before the field walk and that fileImports resolves this "+
+			"module's paths — not that the estate stopped using the shape.", got)
+	}
 	if got := est.valueFields(); got < 9 {
 		t.Fatalf("found only %d collection(s) inside a map or slice VALUE estate-wide — the #915 half "+
 			"of this walk has drifted, and a bounded key set is once again vouching for whatever grows "+
@@ -693,6 +782,16 @@ func TestEveryLongLivedMapHasAnEvictor(t *testing.T) {
 	for _, key := range keys {
 		if est.shrunk[key] {
 			continue
+		}
+		// A POINTER-REACHED collection is pruned through a local, never through a
+		// receiver, so it is credited from the per-package field index instead
+		// (#951). Applied ONLY to behind-pointer members: the receiver-based rule
+		// stays exact for every field the guard covered before.
+		if strings.HasPrefix(est.fields[key], "behind-pointer ") {
+			field := key[strings.LastIndex(key, ".")+1:]
+			if est.prunedFieldIn[pkgOfKey(key)][field] {
+				continue
+			}
 		}
 		ex, ok := mapEvictionExempt[key]
 		if !ok {
@@ -793,8 +892,10 @@ func TestEveryLongLivedMapHasAnEvictor(t *testing.T) {
 	}
 
 	t.Logf("estate: %d package(s), %d mutex-guarded collection(s) (%d map, %d slice, %d inside a "+
-		"value), %d shrunk, %d exempt", est.packages, len(est.fields), est.kindCount("map"),
-		est.kindCount("slice"), est.valueFields(), len(est.shrunk), len(mapEvictionExempt))
+		"value, %d behind a pointer), %d shrunk by a receiver, %d shrunk through a pointer, "+
+		"%d exemption(s) declared", est.packages, len(est.fields), est.kindCount("map"),
+		est.kindCount("slice"), est.valueFields(), est.pointerFields(), len(est.shrunk),
+		est.pointerShrunk(), len(mapEvictionExempt))
 }
 
 func pkgOfKey(key string) string {
@@ -805,6 +906,20 @@ func pkgOfKey(key string) string {
 }
 
 // estate is one walk's findings, keyed "pkgdir: Type.field" throughout.
+// structDecl is one struct type's collection fields, for the pointer walk (#951).
+//
+// EVERY STRUCT IN THE MODULE, not just the mutex-guarded ones. The type behind a
+// map[K]*T value is normally NOT guarded — it is protected by the holder's lock —
+// so isMutexGuarded cannot be the discriminator at that level, and the index has
+// to be built before the field walk rather than during it.
+type structDecl struct {
+	pkgRel  string
+	guarded bool
+	fields  []structField
+}
+
+type structField struct{ name, kind string }
+
 type estate struct {
 	fields         map[string]string // key → "map" | "slice"
 	shrunk         map[string]bool
@@ -815,6 +930,17 @@ type estate struct {
 	files          map[string]int             // pkgdir → non-test files parsed
 	unattributed   []string
 	packages       int
+
+	// structs indexes EVERY struct type in the module by "pkgRel.TypeName", and
+	// reachedVia records which mutex-guarded field reaches a collection behind a
+	// pointer value (#951).
+	structs    map[string]*structDecl
+	reachedVia map[string][]string
+
+	// prunedFieldIn records, per package, the field NAMES shrunk through any
+	// selector rather than through a method receiver — the shape every
+	// pointer-reached prune in this estate takes (#951).
+	prunedFieldIn map[string]map[string]bool
 
 	// prunersIn and prunersBy are the #915 half: a function that can only hand
 	// back a SHORTER version of a collection it was given. Four stores prune the
@@ -831,6 +957,11 @@ type estate struct {
 	prunersIn map[string]map[string]map[int]bool // pkgdir → func → result indices that are collections
 	prunersBy map[string]map[string]map[int]bool // pkg base name → exported func → same
 }
+
+// reachedVia records which mutex-guarded field reaches a collection behind a
+// pointer, so the failure message can name the holder rather than only the
+// pointed-to type — "risk/domain: MeasureSet.measures leaks" is unactionable
+// without "reached from internal/risk: Cache.measures".
 
 // valueSuffix marks a key as the collection AT a field's values rather than the
 // field itself: "internal/compliance: MandateRegistry.byKey[]" is the []*Mandate
@@ -858,6 +989,35 @@ func (e *estate) calls(pkg, method string) bool {
 		return e.namesCalled[method]
 	}
 	return e.namesCalledIn[pkg][method]
+}
+
+// pointerFields counts the collections reached through a POINTER value (#951).
+// They carry their own kind prefix so the map and slice counts above stay exact
+// counts of what they were written about.
+func (e *estate) pointerFields() int {
+	n := 0
+	for _, k := range e.fields {
+		if strings.HasPrefix(k, "behind-pointer ") {
+			n++
+		}
+	}
+	return n
+}
+
+// pointerShrunk counts the behind-pointer members credited to a prune through a
+// local rather than a receiver.
+func (e *estate) pointerShrunk() int {
+	n := 0
+	for key, kind := range e.fields {
+		if !strings.HasPrefix(kind, "behind-pointer ") || e.shrunk[key] {
+			continue
+		}
+		field := key[strings.LastIndex(key, ".")+1:]
+		if e.prunedFieldIn[pkgOfKey(key)][field] {
+			n++
+		}
+	}
+	return n
 }
 
 func (e *estate) kindCount(kind string) int {
@@ -1097,11 +1257,46 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 		}
 	}
 
+	// PASS 0: index every struct in the module, so the field walk below can follow
+	// a pointer VALUE into a type declared in another package (#951). It has to be
+	// a separate pass because the holder and the pointed-to type are routinely in
+	// different packages, and the walk order between packages is not defined.
+	e.structs = map[string]*structDecl{}
+	e.reachedVia = map[string][]string{}
+	e.prunedFieldIn = map[string]map[string]bool{}
+	for _, p := range pkgs {
+		for _, f := range p.files {
+			ast.Inspect(f, func(n ast.Node) bool {
+				ts, ok := n.(*ast.TypeSpec)
+				if !ok {
+					return true
+				}
+				st, ok := ts.Type.(*ast.StructType)
+				if !ok {
+					return true
+				}
+				sd := &structDecl{pkgRel: p.rel, guarded: isMutexGuarded(st)}
+				for _, fl := range st.Fields.List {
+					k := collectionKind(fl.Type)
+					if k == "" {
+						continue
+					}
+					for _, nm := range fl.Names {
+						sd.fields = append(sd.fields, structField{nm.Name, k})
+					}
+				}
+				e.structs[p.rel+"."+ts.Name.Name] = sd
+				return true
+			})
+		}
+	}
+
 	for _, p := range pkgs {
 		rel, files := p.rel, p.files
 
 		local := map[string]bool{} // field NAMES tracked in this package
 		for _, f := range files {
+			imports := fileImports(f)
 			ast.Inspect(f, func(n ast.Node) bool {
 				ts, ok := n.(*ast.TypeSpec)
 				if !ok {
@@ -1129,6 +1324,32 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 					// The collection AT the values is its own population member, with
 					// its own bound and its own exemption (#915).
 					inner := valueCollectionKind(fl.Type)
+					// #951: the collection is not AT the value, it is behind a POINTER
+					// at the value. Those collections live on the pointed-to type and
+					// are registered under THAT type's own key, so the existing credit
+					// machinery — which attributes a shrink by receiver type and field
+					// name — finds their evictors with no further change.
+					//
+					// A TARGET THAT IS ITSELF MUTEX-GUARDED IS SKIPPED: its fields are
+					// already population members in their own right, and adding them
+					// again here would double-count them and attribute them to a
+					// holder that is not the reason they are covered.
+					for _, elem := range pointerElems(fl.Type) {
+						tgtKey := resolveNamed(elem, rel, imports)
+						sd := e.structs[tgtKey]
+						if sd == nil || sd.guarded || len(sd.fields) == 0 {
+							continue
+						}
+						tgtName := tgtKey[strings.LastIndex(tgtKey, ".")+1:]
+						for _, cf := range sd.fields {
+							key := sd.pkgRel + ": " + tgtName + "." + cf.name
+							e.fields[key] = "behind-pointer " + cf.kind
+							for _, name := range fl.Names {
+								e.reachedVia[key] = append(e.reachedVia[key],
+									rel+": "+ts.Name.Name+"."+name.Name)
+							}
+						}
+					}
 					for _, name := range fl.Names {
 						e.fields[rel+": "+ts.Name.Name+"."+name.Name] = kind
 						if inner != "" {
@@ -1202,6 +1423,30 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 				// bounds the map and says nothing about the slice behind a key that
 				// stays, and pruning that slice says nothing about the key set.
 				creditValue := func(sel *ast.SelectorExpr) bool { return creditKey(sel, valueSuffix) }
+				// creditPointer records a prune of a field reached through ANY
+				// selector, not just the method receiver (#951).
+				//
+				// A COLLECTION BEHIND A POINTER IS NEVER PRUNED THROUGH A RECEIVER,
+				// because reaching it means fetching the *T out of the holder's map
+				// first: volprofile writes `h.done, _ = pit.Put(h.done, …)` and the
+				// compliance monitor writes `delete(b.positions, …)`, both on a local.
+				// The receiver-based rule above cannot see either, and it is the rule
+				// that makes the guard precise for the fields it DOES cover, so this
+				// is a second, deliberately coarser index rather than a loosening of
+				// the first.
+				//
+				// ITS COARSENESS, STATED: it is keyed by (package, field name), so two
+				// types in one package with a same-named collection vouch for each
+				// other. That is the same trade the reachability arm already takes for
+				// exported method names, and it is bounded by the population being
+				// small and read — 21 members at the #951 calibration, every one of
+				// them classified by hand.
+				creditPointer := func(sel *ast.SelectorExpr) {
+					if e.prunedFieldIn[rel] == nil {
+						e.prunedFieldIn[rel] = map[string]bool{}
+					}
+					e.prunedFieldIn[rel][sel.Sel.Name] = true
+				}
 				ast.Inspect(fn.Body, func(n ast.Node) bool {
 					switch x := n.(type) {
 					case *ast.CallExpr:
@@ -1227,6 +1472,7 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 							if !isSel {
 								return true // a local map cannot outlive its scope
 							}
+							creditPointer(sel)
 							if !credit(sel) && local[sel.Sel.Name] {
 								e.unattributed = append(e.unattributed,
 									rel+": "+exprString(sel)+" in "+fn.Name.Name)
@@ -1254,6 +1500,10 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 							// value-prune in this estate is spelled and which no arm
 							// credited before #915. #884's repair writes exactly this,
 							// and its exemption stayed green over the fix.
+							if sel, isSel := lhs.(*ast.SelectorExpr); isSel &&
+								e.shrinksValueAt(rel, x.Rhs[i], pruned) {
+								creditPointer(sel)
+							}
 							if ix, isIndex := lhs.(*ast.IndexExpr); isIndex {
 								if inner, isSel := ix.X.(*ast.SelectorExpr); isSel &&
 									e.shrinksValueAt(rel, x.Rhs[i], pruned) {
@@ -1279,6 +1529,84 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 }
 
 // collectionKind reports "map", "slice" or "" for a struct field's type.
+// pointerElems returns the pointed-to type expressions reachable at a field's
+// values or elements — map[K]*T, map[K]map[K2]*T and []*T (#951).
+//
+// IT STOPS AT ONE POINTER HOP, deliberately. A pointer behind a pointer is a
+// shape this estate does not have (measured 2026-09-03: 25 pointer-valued fields
+// on mutex-guarded types, none of them nested), and every level of following
+// costs another cross-package resolution that can silently resolve wrong. The
+// limitation is recorded in the header rather than hidden here.
+func pointerElems(t ast.Expr) []ast.Expr {
+	var out []ast.Expr
+	star := func(e ast.Expr) {
+		if se, ok := e.(*ast.StarExpr); ok {
+			out = append(out, se.X)
+		}
+	}
+	switch x := t.(type) {
+	case *ast.MapType:
+		star(x.Value)
+		if im, ok := x.Value.(*ast.MapType); ok {
+			star(im.Value)
+		}
+	case *ast.ArrayType:
+		if x.Len == nil {
+			star(x.Elt)
+		}
+	}
+	return out
+}
+
+// resolveNamed maps a type expression to a "pkgRel.TypeName" key, using THIS
+// FILE's imports for a qualified selector.
+//
+// PER-FILE IMPORTS, NOT A GLOBAL PACKAGE-NAME MAP. Two packages in this module
+// share a name (there are several `config` and `store` packages), so a global
+// name→directory map resolves some selectors to the wrong package — which would
+// invent a population member that does not exist, or silently miss one that
+// does. The import path is unambiguous, and it is right there in the file.
+func resolveNamed(e ast.Expr, samePkg string, imports map[string]string) string {
+	switch x := e.(type) {
+	case *ast.Ident:
+		if !x.IsExported() && samePkg == "" {
+			return ""
+		}
+		return samePkg + "." + x.Name
+	case *ast.SelectorExpr:
+		id, ok := x.X.(*ast.Ident)
+		if !ok {
+			return ""
+		}
+		rel, found := imports[id.Name]
+		if !found {
+			return ""
+		}
+		return rel + "." + x.Sel.Name
+	}
+	return ""
+}
+
+// fileImports maps each in-module import's local name to its directory,
+// relative to the module root.
+func fileImports(f *ast.File) map[string]string {
+	const mod = "github.com/eighred/kanz/"
+	out := map[string]string{}
+	for _, im := range f.Imports {
+		path := strings.Trim(im.Path.Value, `"`)
+		if !strings.HasPrefix(path, mod) {
+			continue
+		}
+		rel := strings.TrimPrefix(path, mod)
+		name := rel[strings.LastIndex(rel, "/")+1:]
+		if im.Name != nil {
+			name = im.Name.Name
+		}
+		out[name] = rel
+	}
+	return out
+}
+
 func collectionKind(t ast.Expr) string {
 	switch x := t.(type) {
 	case *ast.MapType:
@@ -1601,4 +1929,52 @@ func isMutexGuarded(st *ast.StructType) bool {
 		}
 	}
 	return false
+}
+
+// factorModelArtifact is the shared argument for internal/risk/factormodel.Model's
+// six collections (#951).
+//
+// A MODEL IS AN IMMUTABLE LOADED ARTIFACT. Every one of these is filled when the
+// model is built and read-only afterwards — the package's own arithmetic copies a
+// row out (`append([]float64(nil), m.Loadings[i]...)`) rather than growing one in
+// place. Their sizes are the model's shape: factors x instruments, fixed when the
+// model was fitted. What grows with time is the CACHE of models, and that is
+// internal/risk/compute: LiveModelProvider.cache, which has its own entry.
+func factorModelArtifact(what string) evictionExemption {
+	return evictionExemption{boundedByConstruction,
+		"an immutable field of a loaded factor model — " + what + ". Sized by the model's shape " +
+			"when it was fitted, never appended to after construction; the collection that grows " +
+			"with time is the model cache holding it, not this.", ""}
+}
+
+// ledgerSnapshot is the shared argument for the accounting Snapshot's three maps.
+//
+// SIZED BY THE BOOK, NOT BY TRAFFIC. A snapshot is one portfolio's resume point
+// and is rebuilt whole on each save; these grow with the instruments the fund
+// holds and the currencies it settles in, which are estate quantities. The holder
+// MemoryStore.snapshots is already exempt as isTheStore for the same reason —
+// it is data rather than cache — and #951 extends that reasoning one level in
+// rather than restating it.
+func ledgerSnapshot(what string) evictionExemption {
+	return evictionExemption{boundedByConstruction,
+		"one portfolio's " + what + ", rebuilt whole on each snapshot save. It grows with the " +
+			"book — the instruments held and the currencies settled in — and not with the number " +
+			"of events folded.", ""}
+}
+
+// tvSyncAccount is the shared argument for the three per-account collections that
+// ARE unbounded (#809).
+//
+// THE ONE REAL LEAK #951 EXPOSED, and it was already known: the guard's own
+// header named these as the reason to teach the walk to follow a pointer. Every
+// order and every fill for an account adds an entry and nothing removes one, so
+// a tv-sync process holding a busy account grows for its whole life. Recorded
+// here as a deferredLeak so it is enumerated rather than invisible — which is
+// the point of this guard being estate-wide — and the fix belongs in #809.
+func tvSyncAccount(what string) evictionExemption {
+	return evictionExemption{deferredLeak,
+		"UNBOUNDED: " + what + ", on a projection that never forgets an account. Every order and " +
+			"fill folded adds an entry and nothing removes one, so this grows with lifetime " +
+			"traffic rather than with the account roster. Exposed by #951 teaching this guard to " +
+			"follow a pointer value; the repair is #809.", "#809"}
 }
