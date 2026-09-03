@@ -69,9 +69,23 @@ runs:
         # makes the download safe, and it runs on whatever bytes finally arrive —
         # retrying changes how many attempts are made, never whether the result
         # is checked.
-        curl --fail --silent --show-error --location --retry 3 --retry-connrefused --retry-all-errors \
+        #
+        # THE BUDGET MATTERS AS MUCH AS THE COUNT (#776). `--retry 3` at curl's
+        # default backoff spends about SEVEN SECONDS in total — measured on PR
+        # #902, where four attempts ran 15:43:55 → 15:44:02 and the job still
+        # failed. A 504 from GitHub's release CDN routinely outlasts that, and
+        # that one did: a manual re-run of the same job succeeded, which is the
+        # definition of a retry that was too short to be worth having.
+        #
+        # --retry-max-time IS NOT OPTIONAL ALONGSIDE A RAISED COUNT. Without a
+        # deadline a higher --retry can hang the job rather than fail it, trading
+        # a red build for a stuck one — and a job that fails gets read while a job
+        # that hangs gets waited on.
+        curl --fail --silent --show-error --location \
+          --retry 5 --retry-connrefused --retry-all-errors --retry-max-time 60 \
           -o "$tmp/$asset" "$base/$asset"
-        curl --fail --silent --show-error --location --retry 3 --retry-connrefused --retry-all-errors \
+        curl --fail --silent --show-error --location \
+          --retry 5 --retry-connrefused --retry-all-errors --retry-max-time 60 \
           -o "$tmp/sha256.txt" "$base/sha256.txt"
 
         # VERIFIED BEFORE IT IS EXECUTED, and the grep is anchored to the exact
