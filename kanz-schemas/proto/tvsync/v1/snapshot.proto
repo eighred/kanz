@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+// Package tvsync.v1 carries tv-sync's private fold checkpoint (#809).
+//
+// A CHECKPOINT OF A DERIVED VIEW, NOT A SECOND BOOK. migrations/0001_fact_log.sql
+// argues — correctly — that a table of orders, executions and positions would make
+// tv-sync a second book of record, one that could disagree with the OMS's with
+// nobody able to say which was right. This is a different thing: it is the fold's
+// own state at a known point in its own input, discardable at any time, and
+// rebuildable by replaying the fact log from the beginning. Delete every row here
+// and the service still reaches the identical view; it just takes longer.
+//
+// # Why it exists
+//
+// EXEC-M21 built tv_facts because a pod roll left a trader looking at an empty
+// account while real positions sat open at the exchanges — realized P&L since
+// inception was gone. The fix was to replay every fact on boot, and that is what
+// makes boot cost proportional to ALL history: N facts, each unmarshalled and
+// folded, before the pod can report ready.
+//
+// #809 proposed bounding the replay to a window. That would re-create EXEC-M21's
+// defect with a shorter horizon: a windowed rebuild loses any position opened
+// before the window and reports P&L since the window start. A checkpoint bounds
+// the boot WITHOUT losing history, because `checkpoint + tail` folds to exactly
+// the same view as `all facts`.
+//
+// # The determinism contract, restated rather than weakened
+//
+// The house contract is that a full re-fold of the FACT log reproduces the view
+// exactly. That still holds and is what makes this safe: the checkpoint is only
+// ever an optimisation of a computation whose answer is defined elsewhere. The
+// contract this ADDS is that folding the tail onto a restored checkpoint gives the
+// same view as folding everything — which is a property a test can hold, and one
+// does.
+package tvsync.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/decimal.proto";
+import "order/v1/order.proto";
+import "order/v1/order_events.proto";
+
+option go_package = "github.com/eighred/kanz/kanz-schemas-go/tvsync/v1;tvsyncv1";
+
+// Execution is one folded fill, exactly as the in-memory view holds it.
+//
+// EFFECTIVE AND KNOWLEDGE ARE BOTH CARRIED. The projection is bitemporal, and a
+// checkpoint that kept only the effective time would restore a view that cannot
+// answer "as known at T" — which is the read the Broker API exposes.
+message Execution {
+  string fill_id = 1;
+  string order_id = 2;
+  string instrument = 3;
+  string venue = 4;
+  order.v1.Side side = 5;
+  common.v1.Decimal qty = 6;
+  common.v1.Decimal price = 7;
+  common.v1.Decimal fee = 8;
+  google.protobuf.Timestamp effective = 9;
+  google.protobuf.Timestamp knowledge = 10;
+}
+
+// OrderRevision is one revision of an order's materialized state.
+//
+// state MAY BE ABSENT, and that is not a defect: a terminal-only transition
+// (reject, cancel, expire) carries no full OrderState, and status and reason still
+// record the outcome. A checkpoint that dropped those revisions would lose the
+// reason an order was rejected, which is the field an operator asks for first.
+message OrderRevision {
+  order.v1.OrderState state = 1;
+  order.v1.OrderStatus status = 2;
+  string reason = 3;
+  string venue = 4;
+  google.protobuf.Timestamp effective = 5;
+  google.protobuf.Timestamp knowledge = 6;
+}
+
+// OrderRevisions is one order's revisions in fold order.
+//
+// A MESSAGE RATHER THAN A REPEATED FIELD IN A MAP, because proto3 map values
+// cannot be repeated. The fold ORDER is load-bearing — an average-cost basis
+// depends on which revision came first — so this preserves it rather than
+// re-sorting on restore.
+message OrderRevisions {
+  repeated OrderRevision revisions = 1;
+}
+
+// AccountSnapshot is one trading account's folded state at a point in the log.
+message AccountSnapshot {
+  string tenant_id = 1;
+  string account_id = 2;
+
+  repeated Execution execs = 3;
+  // orders is order_id -> that order's revisions, in fold order.
+  map<string, OrderRevisions> orders = 4;
+  // seen_fills is the fill-id dedup set for the DUAL fill path — the synchronous
+  // venue response and the asynchronous websocket echo of the same fill.
+  //
+  // IT IS RESTORED IN FULL AND NEVER TRUNCATED. A fill id missing from this set
+  // when its echo arrives is a fill folded twice, which doubles a position the
+  // fund does not hold. The bus-redelivery path is protected separately by
+  // tv_facts's (tenant_id, event_id) primary key; this set is not that, and the
+  // two must not be conflated when someone later bounds the view's history.
+  repeated string seen_fills = 5;
+}
+
+// Checkpoint is every account's state at one point in this tenant's fact log.
+//
+// ONE SEQ FOR THE WHOLE TENANT, not one per account. The fold is ordered across
+// accounts — facts arrive interleaved — so a per-account watermark would replay a
+// different tail for each and produce a view that never existed. The seq is the
+// LAST fact folded into this checkpoint; replay resumes strictly after it.
+message Checkpoint {
+  string tenant_id = 1;
+  int64 seq = 2;
+  google.protobuf.Timestamp taken_at = 3;
+  repeated AccountSnapshot accounts = 4;
+}

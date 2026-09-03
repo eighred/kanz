@@ -142,12 +142,28 @@ func run() int {
 	// It is also why the fold stays exactly-once across the boundary: a FACT replayed here
 	// is already in the log, so if the consumer redelivers it, Append reports it stale and
 	// the projection skips it rather than folding the same fill twice.
+	// REGISTERED BEFORE THE REBUILD, so a pod that cannot checkpoint still exports
+	// the series saying so (#809). A rule over an absent series evaluates to
+	// nothing, which is the wiring defect #973, #963 and #983 each shipped once.
+	registerCheckpointMetrics(obs.Registry)
+
 	rehydrateStart := time.Now()
 	if err := proj.Rehydrate(ctx); err != nil {
 		logger.Error("could not rebuild the book from the fact log — refusing to serve an account we cannot vouch for", "err", err)
 		return 2
 	}
-	logger.Info("book rebuilt from the fact log", "took", time.Since(rehydrateStart).String(), "tenant", cfg.Tenant)
+	rehydrateSeconds.Set(time.Since(rehydrateStart).Seconds())
+	if proj.BootedFromCheckpoint() {
+		rehydrateFromCheckpoint.Set(1)
+	}
+	logger.Info("book rebuilt from the fact log", "took", time.Since(rehydrateStart).String(),
+		"tenant", cfg.Tenant, "from_checkpoint", proj.BootedFromCheckpoint())
+
+	// THE CHECKPOINT LOOP IS WHAT MAKES THE NEXT BOOT CHEAP (#809). Without it this
+	// pod rebuilds correctly and every successor pays the full replay again — a
+	// degradation with no symptom other than a startup that lengthens with the
+	// fund's history.
+	go runCheckpoints(ctx, proj, cfg.CheckpointInterval, logger)
 
 	readiness := &server.Readiness{}
 	broker := brokerapi.New(proj)

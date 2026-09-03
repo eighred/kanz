@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/eighred/kanz/pkg/secret"
 )
@@ -63,6 +64,15 @@ type Config struct {
 	// Tenant scopes this pod, as it scopes every durable service on this platform
 	// (internal/pg.NewTenantPool refuses an empty one). REQUIRED.
 	Tenant string
+
+	// CheckpointInterval is how often the fold's state is written so the next boot
+	// resumes from it rather than replaying the fund's entire history (#809).
+	//
+	// NON-POSITIVE IS REFUSED rather than treated as "off". There is no off switch:
+	// a pod that never checkpoints boots by replaying everything, which is the
+	// unbounded startup this exists to end — and it degrades SILENTLY, because the
+	// book it rebuilds is correct, just slower to reach every time.
+	CheckpointInterval time.Duration
 }
 
 // Load reads TV_SYNC_* environment variables with production-safe defaults.
@@ -91,6 +101,21 @@ func Load() (Config, error) {
 		DatabaseURL:   databaseURL,
 		Tenant:        os.Getenv("TV_SYNC_TENANT"),
 	}
+
+	// 60s: a full replay of the tail is at most a minute of facts, and a checkpoint
+	// of a book this size is cheap enough that the interval is bounded by how much
+	// re-fold a restart should ever have to pay rather than by the write cost.
+	interval, err := time.ParseDuration(env.Or("TV_SYNC_CHECKPOINT_INTERVAL", "60s"))
+	if err != nil {
+		return Config{}, fmt.Errorf("TV_SYNC_CHECKPOINT_INTERVAL: %w", err)
+	}
+	if interval <= 0 {
+		return Config{}, fmt.Errorf("TV_SYNC_CHECKPOINT_INTERVAL must be positive, got %s: a pod that "+
+			"never checkpoints rebuilds the fund's ENTIRE history on every boot, which is the "+
+			"unbounded startup #809 exists to end — and it fails silently, because the book is "+
+			"correct and only the outage is longer", interval)
+	}
+	cfg.CheckpointInterval = interval
 	if len(cfg.PriceSubjects) == 0 {
 		return Config{}, fmt.Errorf("TV_SYNC_PRICE_SUBJECTS: at least one subject is required; " +
 			"a pod subscribing to nothing folds no marks and silently shows no unrealized P&L")

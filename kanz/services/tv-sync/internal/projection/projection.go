@@ -2,6 +2,7 @@ package projection
 
 import (
 	"context"
+	"fmt"
 	"github.com/eighred/kanz/internal/fillfact"
 	"math/big"
 	"sort"
@@ -47,6 +48,13 @@ type Projection struct {
 	subs     *subscribers
 	log      Log    // durable record of the FACTs folded (EXEC-M21); nil ⇒ memory only
 	tenant   string // the tenant this pod is scoped to, when a log is bound
+	// bootedFromCheckpoint records whether Rehydrate restored one, so the
+	// composition root can report the posture rather than infer it from a timing.
+	bootedFromCheckpoint bool
+	// seq is the log position of the last fact this projection folded — the
+	// watermark a checkpoint is taken at (#809). Guarded by mu, and only ever
+	// advanced by a fold that actually happened.
+	seq int64
 }
 
 // Option configures a Projection.
@@ -115,8 +123,33 @@ func (p *Projection) Rehydrate(ctx context.Context) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.log.Replay(ctx, func(f Fact) error {
+
+	// THE CHECKPOINT FIRST, THEN THE TAIL (#809). Boot used to unmarshal and fold
+	// every fact the fund had ever produced before the pod could report ready, so
+	// startup grew with total history and each OOM kill cost longer than the last.
+	//
+	// A MISSING CHECKPOINT REPLAYS EVERYTHING. That is the pre-#809 boot and it
+	// reaches the identical view — a fresh deployment and a truncated checkpoint
+	// table are both this case. The failure that would matter is the opposite one:
+	// treating an absent checkpoint as a restored empty account, which is exactly
+	// EXEC-M21's defect (a trader looking at zero P&L while positions sat open).
+	// So a load error is FATAL rather than degraded: booting from nothing when a
+	// checkpoint exists but could not be read would silently re-fold from zero,
+	// which is correct but slow, while booting from a PARTIAL one would not be.
+	var after int64
+	if blob, seq, ok, err := p.log.LoadCheckpoint(ctx); err != nil {
+		return fmt.Errorf("tv-sync: read fold checkpoint: %w", err)
+	} else if ok {
+		if err := p.restore(blob); err != nil {
+			return fmt.Errorf("tv-sync: restore fold checkpoint at seq %d: %w", seq, err)
+		}
+		after = seq
+		p.bootedFromCheckpoint = true
+	}
+
+	return p.log.Replay(ctx, after, func(f Fact) error {
 		p.fold(p.tenant, f.EventType, f.Payload, f.Knowledge)
+		p.seq = f.Seq
 		return nil
 	})
 }
@@ -136,6 +169,7 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 	}
 	know := p.now().UTC()
 
+	var appended int64
 	if p.log != nil {
 		if tenant != p.tenant {
 			// Not this pod's tenant. The log is scoped to one tenant (as every durable
@@ -143,7 +177,7 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 			// it into memory only would put it in a book no restart could rebuild.
 			return nil
 		}
-		fresh, err := p.log.Append(ctx, Fact{
+		fresh, seq, err := p.log.Append(ctx, Fact{
 			EventID: env.GetEventId(), EventType: env.GetEventType(),
 			Payload: payload, Knowledge: know,
 		})
@@ -153,6 +187,7 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 			// original bug, one layer down.
 			return err
 		}
+		appended = seq
 		if !fresh {
 			// Already folded — a redelivery after a lost ack, or a FACT this pod replayed at
 			// boot. Folding it again would double a fill, and with it the position and the
@@ -163,6 +198,13 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 
 	p.mu.Lock()
 	deltas := p.fold(tenant, env.GetEventType(), payload, know)
+	// THE WATERMARK ADVANCES WITH THE FOLD, not with the append. A checkpoint
+	// names a prefix of the log that this view has actually absorbed; recording a
+	// seq for a fact that was appended and not folded would let the next boot skip
+	// it (#809).
+	if appended > 0 {
+		p.seq = appended
+	}
 	p.mu.Unlock()
 
 	for _, d := range deltas {
@@ -560,4 +602,18 @@ func executionDTO(e execution) ExecutionDTO {
 		dto.Fee = dec.Str(e.fee)
 	}
 	return dto
+}
+
+// BootedFromCheckpoint reports whether the last Rehydrate resumed from a fold
+// checkpoint rather than replaying the whole fact log (#809).
+//
+// FALSE IS A LEGITIMATE POSTURE, not a failure: a fresh deployment has no
+// checkpoint and a truncated table has none either, and both reach the identical
+// view. It is worth reporting because a long-lived deployment that keeps booting
+// false has a checkpoint loop that is not running, and the rebuild time beside it
+// is the evidence.
+func (p *Projection) BootedFromCheckpoint() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.bootedFromCheckpoint
 }
