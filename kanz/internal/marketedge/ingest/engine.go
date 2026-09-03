@@ -14,6 +14,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -43,6 +44,10 @@ type Engine struct {
 	snapshotDepth    int
 	now              func() time.Time
 	tenant           string
+
+	// warnedNoVenueTime keeps the #957 refusal to one log line per engine: a
+	// source that omits event_time omits it on every message.
+	warnedNoVenueTime atomic.Bool
 }
 
 // Config configures an Engine.
@@ -158,11 +163,17 @@ func (e *Engine) foldLoop(ctx context.Context) error {
 		}
 		switch {
 		case u.Snapshot != nil:
-			e.book.ApplySnapshot(u.Snapshot)
+			if err := e.book.ApplySnapshot(u.Snapshot); errors.Is(err, book.ErrNoVenueTime) {
+				e.warnNoVenueTime("snapshot")
+			}
 		case u.Delta != nil:
-			if err := e.book.ApplyDelta(u.Delta); errors.Is(err, book.ErrSequenceGap) {
+			err := e.book.ApplyDelta(u.Delta)
+			switch {
+			case errors.Is(err, book.ErrSequenceGap):
 				e.logger.Warn("depth sequence gap — awaiting re-snapshot",
 					"instrument", e.book.InstrumentID(), "prev_seq", u.Delta.GetPrevUpdateSequence())
+			case errors.Is(err, book.ErrNoVenueTime):
+				e.warnNoVenueTime("delta")
 			}
 		}
 	}
@@ -220,4 +231,33 @@ func (e *Engine) publishSnapshot(ctx context.Context, snap *marketpb.OrderBookSn
 	}); err != nil {
 		e.logger.Warn("book snapshot publish failed", "instrument", snap.GetInstrumentId(), "err", err)
 	}
+}
+
+// warnNoVenueTime reports a depth source that omits event_time (#957).
+//
+// ONCE PER ENGINE, not once per update. A source that omits the field omits it
+// on every message, so this would otherwise write a line per update for the life
+// of the pod — and the one thing worse than a silent defect is a loud one nobody
+// can read past.
+//
+// IT NAMES THE INSTRUMENT AND WHICH KIND OF UPDATE, because that is what an
+// operator needs to find the source: the two shipped adapters both stamp the
+// field on snapshots AND deltas, so a message missing it identifies the code
+// path that built it.
+//
+// WITHOUT THIS THE FAILURE IS INVISIBLE. market-ingest folds, publishes and
+// reports ready; every consumer discards the output as stale because the book is
+// stamped 1970 (or, after #957, is never seeded at all); and nothing anywhere
+// says why. The refusal is what makes the silence impossible — the WARN is what
+// makes it diagnosable.
+func (e *Engine) warnNoVenueTime(kind string) {
+	if e.warnedNoVenueTime.Swap(true) {
+		return
+	}
+	e.logger.Warn("depth source omits event_time — REFUSING to fold, so this instrument publishes "+
+		"nothing rather than a book stamped with a substituted clock",
+		"instrument", e.book.InstrumentID(), "update", kind,
+		"consequence", "no quote and no snapshot are published for this instrument until the source "+
+			"stamps event_time; the shipped binance and okx adapters set it on both snapshots and "+
+			"deltas, so a new or modified source is the place to look (#957)")
 }

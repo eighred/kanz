@@ -99,6 +99,10 @@ func runUntilPublished(t *testing.T, tenant string) *captureClient {
 			InstrumentId: "BTC-USD", LastUpdateSequence: 1,
 			Bids: []*marketpb.PriceLevel{lvl("50000", "1")},
 			Asks: []*marketpb.PriceLevel{lvl("50001", "1")},
+			// The venue time is not optional on the wire and so is not optional
+			// here: both shipped depth sources stamp it, and since #957 the fold
+			// REFUSES an update without one rather than stamping the book 1970.
+			EventTime: tsOf(time.Now().UTC()),
 		}},
 	}}
 	eng := New(Config{

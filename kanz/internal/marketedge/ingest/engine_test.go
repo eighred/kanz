@@ -102,6 +102,9 @@ func TestEngine_FoldsAndPublishesSnapshot(t *testing.T) {
 			InstrumentId: "BTC-USD", LastUpdateSequence: 1,
 			Bids: []*marketpb.PriceLevel{lvl("50000", "1")},
 			Asks: []*marketpb.PriceLevel{lvl("50001", "1")},
+			// Not optional on the wire, so not optional here: since #957 the fold
+			// REFUSES a snapshot with no venue time rather than stamping it 1970.
+			EventTime: tsOf(time.Now().UTC()),
 		}},
 		{Delta: &marketpb.OrderBookDelta{
 			InstrumentId: "BTC-USD", PrevUpdateSequence: 1, LastUpdateSequence: 2,
@@ -192,6 +195,9 @@ func TestEngine_SnapshotCarriesTheConfiguredTenant(t *testing.T) {
 			InstrumentId: "BTC-USD", LastUpdateSequence: 1,
 			Bids: []*marketpb.PriceLevel{lvl("50000", "1")},
 			Asks: []*marketpb.PriceLevel{lvl("50001", "1")},
+			// Not optional on the wire, so not optional here: since #957 the fold
+			// REFUSES a snapshot with no venue time rather than stamping it 1970.
+			EventTime: tsOf(time.Now().UTC()),
 		}},
 	}}
 	eng := New(Config{
