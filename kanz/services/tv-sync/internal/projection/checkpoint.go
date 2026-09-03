@@ -200,6 +200,11 @@ func restoreAccount(as *tvsyncpb.AccountSnapshot) (*account, error) {
 	for _, fid := range as.GetSeenFills() {
 		a.seenFills[fid] = true
 	}
+	// The restored history is the fold's input, so the fold is rebuilt with it
+	// (#995). Without this a pod that restored from a checkpoint would serve an
+	// EMPTY position book off a full history — EXEC-M21's failure reached from
+	// the other direction, and invisible because every other field is right.
+	a.rebuildLive()
 	return a, nil
 }
 

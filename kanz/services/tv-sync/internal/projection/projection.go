@@ -367,6 +367,10 @@ func (p *Projection) appendFill(tenant, accountID string, f *orderpb.Fill, know 
 		fee: feeRat(f), effective: f.GetExecutedAt().AsTime(), knowledge: know,
 	}
 	a.execs = append(a.execs, ex)
+	// Maintain the as-of-now fold in the same order the full fold would visit
+	// (#995). This is the whole of the O(N²) fix: the arithmetic is unchanged,
+	// it simply runs once per execution rather than once per execution per read.
+	applyExecution(a.livePos(ex.instrument), ex)
 	return []Delta{
 		{Kind: "execution", Account: a.id, Payload: executionDTO(ex)},
 		{Kind: "position", Account: a.id, Payload: p.positionsLocked(a, time.Time{})},
@@ -456,7 +460,7 @@ func (p *Projection) readAcct(tenant, accountID string) *account {
 }
 
 func (p *Projection) positionsLocked(a *account, asOf time.Time) []PositionDTO {
-	folded := foldPositions(visibleExecs(a.execs, asOf))
+	folded := p.foldFor(a, asOf)
 	var out []PositionDTO
 	for inst, ps := range folded {
 		if ps.Qty.Sign() == 0 && ps.Realized.Sign() == 0 {
@@ -477,7 +481,7 @@ func (p *Projection) positionsLocked(a *account, asOf time.Time) []PositionDTO {
 }
 
 func (p *Projection) stateLocked(a *account, asOf time.Time) StateDTO {
-	folded := foldPositions(visibleExecs(a.execs, asOf))
+	folded := p.foldFor(a, asOf)
 	realized, unrealized := new(big.Rat), new(big.Rat)
 	open := 0
 	for inst, ps := range folded {
@@ -514,6 +518,27 @@ func (p *Projection) Subscribe(tenant, accountID string) (<-chan Delta, func()) 
 }
 
 // --- helpers ---
+
+// foldFor returns the position fold an as-of read should see (#995).
+//
+// A ZERO asOf IS THE LIVE READ and gets the maintained fold. Anything else is a
+// bitemporal question — "what did we believe at that instant" — which only the
+// retained history can answer, so it still walks it. That path is an operator
+// query rather than the fill path, so its cost is paid by the caller who asked
+// for it instead of by every trader watching a position.
+//
+// THE RESULT IS SHARED, NOT COPIED, and that is safe rather than lucky: both
+// callers only read it. positionsLocked copies through new(big.Rat).Abs before
+// touching a quantity, stateLocked accumulates into fresh rats, and
+// costbasis.Lot.Unrealized allocates its result. A future reader that mutates
+// what it is handed here would corrupt the live fold for every subsequent read,
+// so if this ever needs to hand out a mutable view it must clone.
+func (p *Projection) foldFor(a *account, asOf time.Time) map[string]*posState {
+	if asOf.IsZero() {
+		return a.live
+	}
+	return foldPositions(visibleExecs(a.execs, asOf))
+}
 
 func visibleExecs(execs []execution, asOf time.Time) []execution {
 	if asOf.IsZero() {
