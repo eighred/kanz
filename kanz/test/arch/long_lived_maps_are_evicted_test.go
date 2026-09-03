@@ -1537,7 +1537,26 @@ func scanEvictionEstate(t *testing.T, root string) *estate {
 							if !isSel {
 								continue
 							}
-							if truncates(x.Rhs[i]) || replacesWholesale(x.Rhs[i], fresh) {
+							// shrinksValueAt RATHER THAN truncates (#880).
+							//
+							// truncates only sees a reslice or a nil written
+							// literally into the field. That credited
+							// `t.trades = append(t.trades[:0], t.trades[i:]...)`
+							// and stopped crediting the same field the moment the
+							// prune was DELEGATED —
+							// `t.trades = pit.DropOldest(t.trades, i)` — even
+							// though this file already understands a pruner call
+							// perfectly well: the indexed and behind-pointer arms
+							// above have consulted shrinksValueAt since #915, and
+							// it is what credits the four pit-backed stores.
+							//
+							// So the receiver arm was the only one that could not
+							// see a prune it did not spell inline, which made the
+							// guard argue AGAINST consolidating a prune into
+							// internal/pit — the exact direction #871 and #882
+							// spent two issues pushing the estate. It is a strict
+							// superset: shrinksValueAt opens with truncates.
+							if e.shrinksValueAt(rel, x.Rhs[i], pruned) || replacesWholesale(x.Rhs[i], fresh) {
 								credit(sel)
 							}
 						}

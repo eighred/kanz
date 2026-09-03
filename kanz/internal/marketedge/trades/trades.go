@@ -14,6 +14,7 @@ package trades
 
 import (
 	"context"
+	"github.com/eighred/kanz/internal/pit"
 	"math/big"
 	"sync"
 	"time"
@@ -149,13 +150,36 @@ func (t *Tape) pruneLocked(newest time.Time) {
 		return
 	}
 	cutoff := newest.Add(-t.retention)
+	// LINEAR, AND ON PURPOSE. The tape is ordered by ARRIVAL, so its event times
+	// are only approximately ascending and sort.Search would be entitled to drop
+	// a late print that landed behind a newer one. Stopping at the first trade
+	// inside the window is the conservative reading: never drop anything at or
+	// after an element being retained. i is 1 in the steady state.
 	i := 0
 	for i < len(t.trades) && t.trades[i].EventTime.Before(cutoff) {
 		i++
 	}
-	if i > 0 {
-		t.trades = append(t.trades[:0], t.trades[i:]...)
-	}
+	// THE RELEASE IS pit's, AND THAT IS THE POINT (#880). This used to read
+	//
+	//	t.trades = append(t.trades[:0], t.trades[i:]...)
+	//
+	// which copies every LIVE element down to the front on every print: O(n) per
+	// trade, under this tape's write lock, on the market-data ingest path.
+	// Measured at 100k trades it cost 156us per print and grew with depth; the
+	// reslice below is ~300ns and flat.
+	//
+	// #880 ALSO CALLED THE OLD FORM A LEAK, AND THAT HALF WAS WRONG. The slots it
+	// left past len hold duplicates of elements that are still live, and the next
+	// append overwrites them — checked rather than reasoned about. So nothing was
+	// retained that a reader could not still reach anyway.
+	//
+	// The trade is that a RESLICE overwrites nothing, so it needs the clear that
+	// pit.DropOldest does: without it the dropped trades' *big.Rat price and size
+	// stay reachable behind the returned slice for as long as the array lives.
+	// That is #862's defect, and it is now this tape's to inherit — which is what
+	// release_test.go exists to hold, because every other test here counts and a
+	// count cannot see reachability.
+	t.trades = pit.DropOldest(t.trades, i)
 }
 
 // Volumes returns the exact aggressive buy and sell volume within `window` of the
