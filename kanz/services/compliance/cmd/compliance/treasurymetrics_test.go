@@ -49,6 +49,8 @@ func metricVal(m *dto.Metric) float64 {
 	switch {
 	case m.GetCounter() != nil:
 		return m.GetCounter().GetValue()
+	case m.GetGauge() != nil:
+		return m.GetGauge().GetValue()
 	case m.GetHistogram() != nil:
 		return float64(m.GetHistogram().GetSampleCount())
 	}
