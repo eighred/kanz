@@ -80,9 +80,34 @@ type Config struct {
 	// RedisURL backs the CROSS-POD nonce store (EXEC-M17). The nonce cache is the
 	// replay defence at the internet-facing perimeter, and in-process it is per-pod:
 	// two replicas are two caches, so a re-delivered TradingView alert landing on the
-	// other pod is admitted a SECOND time and fans out a SECOND set of orders. Nothing
+	// other pod is admitted a SECOND time and fans out a SECOND set of orders.
+	//
+	// THAT SECOND FAN-OUT DOES NOT REACH A VENUE. This comment used to say "nothing
 	// downstream can catch that — a fresh claim mints a fresh signal_id, so the OMS's
-	// admission gate sees two different orders.
+	// admission gate sees two different orders", and that was false against the code
+	// it sat next to (#820). Every id on this path is a pure function of (strategy,
+	// nonce): signal_id is DeterministicID(strategy, nonce), order_id is
+	// DeterministicID(signal_id, venue), and the SubmitOrder's IdempotencyKey IS the
+	// order_id. A re-delivered alert re-derives the SAME ids, so the bus deduper
+	// collapses the re-fanned command, and anything that does land meets the OMS
+	// admission gate: ON CONFLICT (tenant_id, order_id) DO NOTHING, whose zero
+	// RowsAffected acks the delivery and stops it BEFORE it routes, rolling the
+	// announcement back with the INSERT.
+	//
+	// WHY THIS SETTING IS STILL WORTH ITS COST — stated accurately, because a control
+	// kept for a wrong reason is as badly decided as one dropped for a wrong one:
+	//
+	//   - It refuses at the PERIMETER, so a replay never traverses the pipeline at
+	//     all: no signal FACT, no risk or compliance evaluation, no OMS delivery.
+	//   - It is the only layer that can NAME a replay. Downstream a duplicate is
+	//     indistinguishable from a legitimate redelivery losing an admission race, so
+	//     a sender replaying alerts leaves an audit trail that says "lost the race".
+	//   - It bounds attacker-controlled work at the one endpoint the internet reaches.
+	//   - It is what keeps the determinism above from being load-bearing. The backstop
+	//     holds only while every id on the path stays a pure function of (strategy,
+	//     nonce); the day one of them mixes in a clock, a UUID or a retry counter, the
+	//     perimeter is all that is left. test/arch holds that chain so this comment
+	//     cannot go stale the way the one it replaces did.
 	//
 	// Empty ⇒ the in-process store, which is correct for EXACTLY ONE REPLICA and is
 	// therefore what pins this service — the one the internet talks to — to a single

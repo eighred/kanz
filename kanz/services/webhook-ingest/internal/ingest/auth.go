@@ -49,10 +49,21 @@ type AuthOption func(*Authenticator)
 //
 // The DEFAULT is MemoryNonces, which is correct for exactly ONE replica: two pods are
 // two maps, so a re-delivered alert landing on the other pod is admitted a SECOND time
-// and fans out a SECOND set of orders — and nothing downstream can catch it, because a
-// fresh claim mints a fresh signal_id and therefore fresh order_ids. Pass RedisNonces
-// and the defence spans every replica; that is what lets webhook-ingest — the one
-// service the internet talks to — run more than one pod (EXEC-M17).
+// and fans out a SECOND set of orders. Pass RedisNonces and the defence spans every
+// replica; that is what lets webhook-ingest — the one service the internet talks to —
+// run more than one pod (EXEC-M17).
+//
+// THAT SECOND FAN-OUT DOES NOT REACH A VENUE, and this comment used to claim the
+// opposite — "a fresh claim mints a fresh signal_id and therefore fresh order_ids"
+// (#820). It does not: signal_id is DeterministicID(strategy, nonce) and order_id is
+// DeterministicID(signal_id, venue), so a redelivery re-derives the SAME ids and the
+// OMS admission gate collapses it — ON CONFLICT (tenant_id, order_id) DO NOTHING, ack,
+// announce nothing, do not route.
+//
+// What this store buys is therefore refusal at the PERIMETER rather than deep in the
+// OMS: a replay never traverses the pipeline, and it is the only layer that can tell a
+// replay apart from a legitimate redelivery losing an admission race. See
+// config.RedisURL for the full statement.
 //
 // The composition root REFUSES to run on the in-process default unless the deployment
 // says so out loud (WEBHOOK_INGEST_ALLOW_INPROCESS_NONCE): a per-pod replay defence
