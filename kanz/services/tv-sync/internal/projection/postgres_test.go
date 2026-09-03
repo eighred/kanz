@@ -213,7 +213,13 @@ func TestAFactThatCouldNotBeRecordedIsNotFolded(t *testing.T) {
 
 type brokenLog struct{}
 
-func (brokenLog) Append(context.Context, Fact) (bool, error) {
-	return false, errors.New("postgres is down")
+func (brokenLog) Append(context.Context, Fact) (bool, int64, error) {
+	return false, 0, errors.New("postgres is down")
 }
-func (brokenLog) Replay(context.Context, func(Fact) error) error { return nil }
+func (brokenLog) Replay(context.Context, int64, func(Fact) error) error { return nil }
+
+func (brokenLog) SaveCheckpoint(context.Context, int64, []byte) error { return nil }
+
+func (brokenLog) LoadCheckpoint(context.Context) ([]byte, int64, bool, error) {
+	return nil, 0, false, nil
+}
