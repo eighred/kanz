@@ -17,9 +17,14 @@ import (
 //
 // And the in-process store is correct for EXACTLY ONE REPLICA. Two pods are two maps: a
 // re-delivered TradingView alert landing on the other pod is admitted a SECOND time and
-// fans out a SECOND set of orders against a live exchange. Nothing downstream can catch
-// it — a fresh claim mints a fresh signal_id, so the OMS's admission gate sees two
-// different orders, not a duplicate.
+// fans out a SECOND set of orders.
+//
+// THOSE ORDERS DO NOT REACH A LIVE EXCHANGE, which is a correction to what this comment
+// used to assert (#820). signal_id is DeterministicID(strategy, nonce) and order_id is
+// DeterministicID(signal_id, venue), so a redelivery re-derives the SAME order_id and
+// the OMS admission gate refuses it: ON CONFLICT (tenant_id, order_id) DO NOTHING acks
+// the delivery and stops it BEFORE routing. The value of THIS store is that the replay
+// is refused at the perimeter and can be named as one — see config.RedisURL.
 //
 // So this REFUSES TO START unless the deployment says out loud that it accepts a per-pod
 // replay defence. A defence that degrades to per-pod by FORGETTING to configure Redis is
