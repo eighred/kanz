@@ -391,6 +391,28 @@ func (d *Drain) Run(ctx any) error {
 	return d.one(ctx)
 }
 `
+	// Short-circuited: every node the guard reads is still here — the gate call,
+	// the error test, the branch, the return — and the branch cannot run. This
+	// case PASSED before #992.
+	const shortCircuitedRefusal = header + `
+func (d *Drain) Run(ctx any) error {
+	if err := d.assertArchiverStopped(ctx); err != nil && false {
+		return err
+	}
+	return d.one(ctx)
+}
+`
+	// The same defeat in the assignment spelling, so fixing one form does not
+	// leave the other open.
+	const shortCircuitedAssign = header + `
+func (d *Drain) Run(ctx any) error {
+	err := d.assertArchiverStopped(ctx)
+	if err != nil && false {
+		return err
+	}
+	return d.one(ctx)
+}
+`
 	// Indirect: the produce is two hops away, through a package-level helper.
 	// Following it is why the walk does not stop at the type's own methods.
 	const indirectPublish = header + `
@@ -423,6 +445,8 @@ func (d *Drain) Run(ctx any) error {
 		{"gate call dropped", noGate, "never reaches"},
 		{"refusal discarded", ignoredRefusal, "discard"},
 		{"produce through a package-level helper", indirectPublish, "before"},
+		{"refusal short-circuited to unreachable", shortCircuitedRefusal, "discard"},
+		{"refusal short-circuited in the assignment spelling", shortCircuitedAssign, "discard"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -752,9 +776,36 @@ func (p *drainPkg) gateDefect(fd *ast.FuncDecl) string {
 // call whose error is dropped — is reported, and a third correct spelling would
 // have to be added here deliberately. That cost is the point: this is the line
 // between a gate and a gesture.
+//
+// IT CHECKS THE CONDITION, NOT ONLY THE BODY (#992). This used to ask solely
+// whether the branch returned, which proved that the SYMBOLS of a refusal were
+// present and nothing about whether the refusal could ever FIRE:
+//
+//	if err := d.assertArchiverStopped(ctx); err != nil && false {
+//	        return rep, err
+//	}
+//
+// kept the gate call, the error test, the branch and the return — every node
+// this function reads — while making the branch unreachable. The drain would
+// then pay for the probe and produce to Kafka BESIDE A LIVE ARCHIVER, which is
+// the two-writer state DATA-M1 exists to prevent, with this guard green. That is
+// not hypothetical: the mutation was run, and this guard passed it.
+//
+// The fix is the shape that made the estate's other refusal guards immune
+// without anyone planning it — `every_refused_fill_quarantines` and
+// `one_intent_is_one_order` both type-assert the WHOLE condition and so reject a
+// short-circuit for free. Requiring the condition to BE the error test is
+// strictly stronger than blacklisting `false`, because it also rejects every
+// other way to make the branch unreachable.
+//
+// A legitimate third spelling — `err != nil && !d.force`, say — is refused here
+// and must be added deliberately, exactly as the paragraph above already says.
 func refusalIsActedOn(list []ast.Stmt, gateIdx int) bool {
 	switch stmt := list[gateIdx].(type) {
 	case *ast.IfStmt:
+		if !condIsTheErrorTest(stmt.Cond) {
+			return false
+		}
 		return containsReturn(stmt.Body) || (stmt.Else != nil && containsReturn(stmt.Else))
 	case *ast.AssignStmt:
 		for _, lhs := range stmt.Lhs {
@@ -766,10 +817,30 @@ func refusalIsActedOn(list []ast.Stmt, gateIdx int) bool {
 			return false
 		}
 		next, ok := list[gateIdx+1].(*ast.IfStmt)
-		return ok && containsReturn(next.Body)
+		return ok && condIsTheErrorTest(next.Cond) && containsReturn(next.Body)
 	default:
 		return false
 	}
+}
+
+// condIsTheErrorTest reports whether cond IS `<something> != nil`, rather than
+// merely containing it.
+//
+// The distinction is the whole of #992. Searching INSIDE the condition would
+// find the error test in `err != nil && false` and credit it; requiring the
+// condition to be that comparison and nothing else cannot be satisfied by a
+// branch that has been made unreachable.
+func condIsTheErrorTest(cond ast.Expr) bool {
+	bin, ok := cond.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.NEQ {
+		return false
+	}
+	for _, side := range []ast.Expr{bin.X, bin.Y} {
+		if id, isIdent := side.(*ast.Ident); isIdent && id.Name == "nil" {
+			return true
+		}
+	}
+	return false
 }
 
 func containsReturn(n ast.Node) bool {
