@@ -31,7 +31,12 @@ ENV GOFLAGS=-mod=mod
 COPY kanz-schemas/gen/go/ ./kanz-schemas/gen/go/
 COPY kanz/go.mod kanz/go.sum ./kanz/
 WORKDIR /src/kanz
-RUN go mod download
+# The download is retried (#776): the module proxy and checksum database drop
+# HTTP/2 streams mid-transfer, and a bare `go mod download` turns that into a
+# red build on a commit that is fine. The script is shared rather than copied
+# into 29 Dockerfiles, and a genuine outage still fails this build.
+COPY kanz/build/go-mod-download.sh /usr/local/bin/go-mod-download.sh
+RUN sh /usr/local/bin/go-mod-download.sh
 
 COPY kanz/ ./
 # CGO off ⇒ a fully static binary (every dep — pgx, nats, kafka-go, go-spiffe —
