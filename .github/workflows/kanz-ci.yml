@@ -750,6 +750,129 @@ jobs:
             exit 1
           fi
 
+  # THE COMMITTED MODULE GRAPH MUST STAND ON ITS OWN (#946).
+  #
+  # This workflow sets GOFLAGS=-mod=mod globally, and it has to: the kanz module
+  # `replace`s the kanz-schemas Go SDK to a generated directory, and a freshly
+  # generated local module must be allowed to settle into the graph rather than
+  # failing readonly. That is a deliberate convenience and this job does not
+  # remove it.
+  #
+  # What the flag ALSO does is suppress every graph-completeness error, because
+  # `-mod=mod` does not fail on an incomplete graph — it silently WRITES the
+  # missing requirements into go.mod and go.sum and carries on. One deliberate
+  # convenience was buying a second, undesired one, and the second is invisible
+  # by construction: the build goes green and the repair is thrown away with the
+  # runner.
+  #
+  # It has cost this repository twice.
+  #
+  #  1. #946 itself. go-openapi/swag v0.28.0 split into eleven submodules; none
+  #     was in go.mod and none of their hashes was in go.sum, so `go build ./...`
+  #     in Go's DEFAULT mode failed on a clean checkout of main with eleven
+  #     "missing go.sum entry" errors. Every path that builds this module sets
+  #     the flag, so nothing noticed — while a new contributor, an IDE, a
+  #     container build, a `go install` or a security scanner does not read this
+  #     workflow and gets the failure.
+  #
+  #  2. Dependabot PR #15 (k8s 0.31.3 → 0.36.3) omitted three indirect
+  #     requirements, passed verification under -mod=mod, was merged, and then
+  #     failed in a context using the default mode. #32 was the repair. The
+  #     lesson recorded then — that a green -mod=mod run proves nothing about an
+  #     incomplete graph — had no guard behind it, which is why main drifted back
+  #     into the same state.
+  #
+  # THE ASSERTION IS "NOTHING WAS REWRITTEN", not "readonly succeeded", and that
+  # is deliberately the broader of the two. It also catches the SEC-M5 phantom
+  # documented on the SDK generation step above, where a newer runner Go raised
+  # kanz/go.mod's `go` directive mid-run and deleted the `toolchain` pin as
+  # redundant — a TRACKED FILE REWRITTEN DURING A BUILD, which is the same class
+  # and was equally invisible until somebody reproduced it by hand.
+  #
+  # IT IS A SEPARATE JOB RATHER THAN A STEP IN `go`, because `go` takes ~28
+  # minutes and PRs here merge on the fast checks — a gate that only reports
+  # after the merge window has closed protects main, not the pull request. This
+  # job needs no database, no broker and no Docker, so it lands in a couple of
+  # minutes.
+  module-graph:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # THE SAME GENERATION THE `go` JOB DOES, including the `go` directive pin,
+      # because the graph has to be complete for the module as it is ACTUALLY
+      # built — with the local replace resolved — and not for a hypothetical one
+      # without it.
+      - name: Generate kanz-schemas Go SDK
+        working-directory: kanz-schemas
+        run: |
+          buf generate
+          cd gen/go
+          go mod init github.com/eighred/kanz/kanz-schemas-go || true
+          go mod edit -go="$(awk '/^go [0-9]/{print $2; exit}' ../../../kanz/go.mod)"
+          go mod tidy
+
+      # -mod=readonly IS PASSED EXPLICITLY, and clearing GOFLAGS is NOT enough.
+      #
+      # An empty GOFLAGS in the environment does not override a persistent
+      # `go env -w GOFLAGS=-mod=mod` — Go reads the env var as unset and falls
+      # back to its own env file. This repository's documented Windows setup sets
+      # exactly that (CLAUDE.md, Windows environment #4), so a job written as
+      # `env: GOFLAGS: ''` would be a no-op on every developer box that follows
+      # the setup instructions, and would silently pass on the very graph it
+      # exists to reject. Verified: with go env -w GOFLAGS=-mod=mod set, a build
+      # with GOFLAGS cleared succeeded on main's incomplete graph, and the same
+      # build with -mod=readonly reported all eleven missing entries.
+      #
+      # The flag also beats the workflow-level GOFLAGS above it, so this job
+      # needs no env override at all — which is the point: the assertion should
+      # not depend on the absence of a setting.
+      - name: Build under Go's default module mode
+        working-directory: kanz
+        run: |
+          set -euo pipefail
+          if ! go build -mod=readonly ./...; then
+            echo '::error file=kanz/go.mod::the committed module graph is INCOMPLETE — this builds only because every other path sets GOFLAGS=-mod=mod, which repairs the graph in memory and discards the repair. Run `cd kanz && go mod tidy` and commit go.mod and go.sum. Review the result as a dependency change: `go mod tidy` resolves against whatever the proxy currently serves.'
+            exit 1
+          fi
+
+      # A BUILD THAT REWRITES ITS OWN DEPENDENCY MANIFEST IS NOT REPRODUCIBLE,
+      # and this repository signs release artifacts and publishes an SBOM — both
+      # of which describe a graph that must be the committed one. This is also
+      # the check that makes `git status` trustworthy after a build, which an
+      # earlier session lost while verifying an unrelated PR.
+      - name: The committed graph must survive the build unchanged
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- kanz/go.mod kanz/go.sum; then
+            echo '::error file=kanz/go.mod::the build REWROTE go.mod or go.sum. Under -mod=mod this is silent, and the diff above is the repair the runner was about to throw away. Two known causes: a dependency whose requirements are missing from the committed graph (#946), and a runner Go newer than the pinned toolchain raising the `go` directive and deleting the `toolchain` line as redundant (SEC-M5). Commit the diff if it is the first; fix the pin if it is the second.'
+            exit 1
+          fi
+
+      # The hashes must also match what the proxy serves. `go build` trusts
+      # go.sum; this re-derives it from the module cache, so a go.sum entry that
+      # is present but wrong fails here rather than at somebody else's checkout.
+      - name: Verify module checksums
+        working-directory: kanz
+        # No -mod flag: `go mod verify` does not accept one, and it needs none —
+        # it re-hashes the module cache and never writes go.mod or go.sum.
+        run: go mod verify
+
   # THE SLO RULES HAD NEVER BEEN EXECUTED BY ANYTHING (#61).
   #
   # slo/ ships slo.recording.rules.yaml, slo.alerts.rules.yaml and a promtool
