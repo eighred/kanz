@@ -109,11 +109,39 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	for _, c := range ans.Citations {
 		cites = append(cites, c.String())
 	}
+
+	// THE VERDICT MUST NAME WHAT IT JUDGED (#981).
+	//
+	// `grounded: false` on its own says a number in this answer came from
+	// nowhere, without saying WHICH — so a caller that wanted to act on the
+	// verdict could only discard the whole answer or ignore the flag, and
+	// ignoring it is the cheaper habit. Ungrounded holds the numeric tokens the
+	// output review could not match to any cited tool value.
+	//
+	// IT DISCLOSES NOTHING NEW. Every token here is already present in ans.Text,
+	// which this same response carries: this is a projection of the answer, not a
+	// window into tool state, so it adds no surface to the tenant-isolation or
+	// read-plane rules.
+	//
+	// ALWAYS AN ARRAY, never null, for the same reason `citations` is — a client
+	// rendering "which figures" must not have to tell "none" from "absent".
+	ungrounded := make([]string, 0, len(ans.Ungrounded))
+	ungrounded = append(ungrounded, ans.Ungrounded...)
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"answer":            ans.Text,
-		"citations":         cites,
-		"grounded":          ans.Grounded,
-		"refused":           ans.Refused,
+		"answer":     ans.Text,
+		"citations":  cites,
+		"grounded":   ans.Grounded,
+		"ungrounded": ungrounded,
+		"refused":    ans.Refused,
+		// BUDGET EXHAUSTION IS NOT A REFUSAL, and this surface used to collapse
+		// them by carrying neither (#971, #981). An exhausted loop returns
+		// Grounded: true (vacuously — it asserted no numbers) and Refused: false,
+		// so a caller reading those two fields sees an ordinary, trustworthy
+		// answer whose prose happens to say it failed. #971 separated "the model
+		// declined" from "the model never converged" precisely because they have
+		// different owners; dropping the field here re-merged them one hop later.
+		"budget_exhausted":  ans.BudgetExhausted,
 		"injection_flagged": ans.InjectionFlagged,
 	})
 }
