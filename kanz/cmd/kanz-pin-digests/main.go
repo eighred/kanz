@@ -60,6 +60,47 @@ func main() {
 		fmt.Fprintln(os.Stderr, "no image reference was rewritten — the manifests do not match the expected shape")
 		os.Exit(1)
 	}
+	// A RELEASE THAT LEAVES ONE OF OUR IMAGES ON A MUTABLE TAG FAILS (#771).
+	//
+	// Result.Unpinned has been reported since this tool was written and nothing
+	// acted on it, which is the hole: the dead-exemption arm in
+	// test/arch/supplychain_test.go fires only when an exemption OUTLIVES its
+	// repair — the manifest is pinned and the line is still there. It cannot fire
+	// the other way. If a release ran and this tool silently skipped a manifest,
+	// the exemption covering it kept covering it forever, the guard stayed green,
+	// and nothing anywhere said the image was still on a mutable tag. A temporary
+	// exemption became permanent without anyone deciding it should.
+	//
+	// THE CHECK BELONGS HERE, WHERE THE ACTION IS, rather than in a guard that
+	// infers it afterwards from git history. This runs at the exact moment the
+	// promise ("the first tagged release publishes its digest and pin-digests
+	// rewrites this") is either kept or broken, and it needs no release tag, no
+	// join date and no shallow-clone caveat to say which.
+	//
+	// IT NEEDS NO EXEMPTION LIST, and that is measured rather than assumed. The
+	// release matrix builds 30 services; infra/ references 30 eighred images
+	// through an image:/value: key; the difference is EMPTY (2026-09-03). So every
+	// image this rewriter can see is one this release published, and a service in
+	// Unpinned means one of exactly two things — both defects:
+	//
+	//   - the service is missing from release.yml's build matrix, so no digest was
+	//     published for an image the estate deploys; or
+	//   - a manifest names a service that does not exist, so the reference is dead.
+	//
+	// The kustomize `images:` list in infra/gitops/preview-applicationset.yaml is
+	// deliberately NOT reachable by this tool's pattern (it carries bare quoted
+	// strings, not an image: key), so per-PR preview tags cannot reach this arm.
+	// That is why the one standing entry in mutableTagExempt is unaffected.
+	if len(res.Unpinned) > 0 {
+		fmt.Fprintf(os.Stderr, "REFUSING THE RELEASE: %d service(s) referenced by a manifest were left on a "+
+			"mutable tag because this release published no digest for them: %s\n\n"+
+			"Either the service is missing from release.yml's build matrix — in which case the estate "+
+			"deploys an image this release did not build — or a manifest names a service that no longer "+
+			"exists. Both are defects. Reporting them and exiting 0 is how a temporary exemption in "+
+			"test/arch/supplychain_test.go becomes permanent without anyone deciding it should (#771).\n",
+			len(res.Unpinned), strings.Join(res.Unpinned, ", "))
+		os.Exit(1)
+	}
 }
 
 // loadDigests reads <dir>/<service> files whose contents are sha256:<hex>.
