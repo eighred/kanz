@@ -297,6 +297,28 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"the seen-fill set, keyed by fill id"),
 	"services/tv-sync/internal/projection: account.execs": tvSyncAccount("the execution list, appended per fill"),
 
+	// live is the fourth per-account collection and it grows DIFFERENTLY from its
+	// three siblings above, so it does not share their wording (#995).
+	//
+	// It is the maintained position fold — foldPositions(execs) kept current as
+	// each execution lands rather than re-derived per read. Its key space is the
+	// INSTRUMENTS an account has traded, not its orders or fills, so it grows far
+	// more slowly than the history it is folded from: a million fills in one
+	// instrument is one entry.
+	//
+	// It still never shrinks, and deliberately. A flat position keeps its slot
+	// because its realized P&L is still part of the book — dropping it would
+	// change what the account has earned, not just what it holds. So the entry
+	// leaves when the history it folds does, which is #809's heap half: bound
+	// execs and this bounds with it, because it is derived from execs and cannot
+	// outlive them.
+	"services/tv-sync/internal/projection: account.live": {deferredLeak,
+		"UNBOUNDED IN PRINCIPLE: the maintained position fold, keyed by instrument, on a projection " +
+			"that never forgets an account. Bounded by instruments traded rather than by orders or " +
+			"fills, so it is the smallest of this account's four collections — but nothing removes " +
+			"an entry, because a flat instrument's realized P&L is still part of the book. Derived " +
+			"from account.execs and retired with it.", "#809"},
+
 	// ---------------------------------------------------------------------
 	// boundedByConstruction — the key space is written by the estate.
 	// ---------------------------------------------------------------------

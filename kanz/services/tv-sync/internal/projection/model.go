@@ -13,6 +13,8 @@ import (
 	"time"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+
+	"github.com/eighred/kanz/internal/costbasis"
 )
 
 // execution is one folded Fill. Effective = venue execution time; knowledge =
@@ -49,10 +51,58 @@ type account struct {
 	execs     []execution
 	orders    map[string][]orderRev // order_id -> revisions in fold order
 	seenFills map[string]bool       // fill_id dedup (sync venue path + async ws echo)
+
+	// live is foldPositions(execs) — the as-of-NOW fold, maintained as each
+	// execution arrives instead of re-derived per read (#995).
+	//
+	// WHY IT IS EXACT RATHER THAN AN APPROXIMATION. foldPositions is a pure left
+	// fold: it accumulates out[instrument] through applyExecution, which mutates
+	// a *posState in place and reads nothing else. Appending one execution is
+	// therefore precisely applyExecution(live[instrument], e), provided it is
+	// applied in the SAME ORDER the full fold would visit — which is slice
+	// order, which is arrival order. No arithmetic changes; the same function
+	// does the same work, once per execution rather than once per execution per
+	// read.
+	//
+	// WHAT IT REPLACED. Every fill published a position delta AND a state delta,
+	// and each re-folded the whole lifetime history, so the Nth fill cost O(N)
+	// and an account cost O(N²) over its life — 210ms per fold at 100k execs,
+	// twice per fill, under this projection's lock, before the trader saw
+	// anything.
+	//
+	// IT IS NOT A CACHE and must never be treated as one: there is no
+	// invalidation and no staleness window, because it is not derived lazily. It
+	// is the fold itself, kept where the fold happens. A bitemporal read with an
+	// explicit as-of still walks the history, which is correct — that query asks
+	// what was known at a past instant, and only the history knows.
+	live map[string]*posState
 }
 
 func newAccount(tenant, id string) *account {
-	return &account{tenant: tenant, id: id, orders: make(map[string][]orderRev), seenFills: make(map[string]bool)}
+	return &account{
+		tenant: tenant, id: id,
+		orders:    make(map[string][]orderRev),
+		seenFills: make(map[string]bool),
+		live:      make(map[string]*posState),
+	}
+}
+
+// livePos returns the live fold slot for an instrument, creating it on first
+// execution exactly as foldPositions does.
+func (a *account) livePos(instrument string) *posState {
+	p := a.live[instrument]
+	if p == nil {
+		p = costbasis.NewLot()
+		a.live[instrument] = p
+	}
+	return p
+}
+
+// rebuildLive recomputes the live fold from the retained history. Used after a
+// checkpoint restore, where the executions arrive in one batch rather than one
+// at a time — bounded, and once per boot.
+func (a *account) rebuildLive() {
+	a.live = foldPositions(a.execs)
 }
 
 // --- output DTOs (the TradingView Broker-API JSON shapes) ---
