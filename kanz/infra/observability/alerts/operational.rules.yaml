@@ -1776,3 +1776,58 @@ groups:
         annotations:
           summary: "No portfolio's idle cash has been measured or refused for six hours"
           description: "Neither a measurement nor a refusal has been recorded, which is not the same as an estate with no idle cash — it means no book was evaluated. The observer rides the compliance post-trade monitor's evaluate path, which is woken by position FACTs, by cash announcements, and by a sweep over every book it holds; all three being silent means the monitor is not evaluating, and the same silence covers the passive gross-leverage breaches it exists to catch (#787). Check that compliance is consuming the position spine and that its book map is not empty. NOTE: no other rule currently covers that sweep stopping, so this one is presently the estate's only signal for it — which is a gap in #787's coverage rather than a property of this measurement, tracked separately."
+
+      # ─── THE PASSIVE-BREACH SWEEP (#983) ──────────────────────────────────
+      #
+      # The compliance post-trade monitor re-runs every book it holds on an
+      # interval, and that loop is the ONLY detector of a breach with no FACT
+      # behind it: a financed book that falls 20% raises its gross leverage with
+      # no order placed anywhere, so nothing wakes the monitor and nothing else
+      # in the estate is watching. Until #983 the only signal that it had stopped
+      # was an ERROR log on a sweep that RAN AND FAILED — a stopped ticker, a
+      # goroutine that never started and a broker-less deployment all produced
+      # total silence, and a log cannot express "this did not happen".
+
+      # THE SWEEP IS NOT RUNNING (#983).
+      #
+      # WRITTEN IN INTERVALS, NOT IN SECONDS. The right-hand side reads the
+      # deployment's own COMPLIANCE_REEVALUATE_INTERVAL, so a fund that widens
+      # the cadence widens this bound with it. A hard-coded staleness would be
+      # correct only for the 60s default and would silently stop being correct
+      # the moment somebody changed the setting — without anybody editing this
+      # rule.
+      #
+      # THREE INTERVALS, so a single skipped or slow sweep is not a page; two
+      # consecutive misses is already a control that is not doing its job.
+      #
+      # A NEVER-SUCCEEDED PROCESS FIRES, and that is intended: the timestamp is 0
+      # until the first sweep completes, so time() - 0 is decades and the rule
+      # trips. A compliance with no COMPLIANCE_NATS_URL starts no sweep at all —
+      # it is deployed and watching nothing — and that is a state worth waking
+      # somebody for rather than a quiet default.
+      - alert: CompliancePassiveBreachSweepStalled
+        expr: |
+          time() - kanz_compliance_reevaluate_last_success_timestamp_seconds
+            > 3 * kanz_compliance_reevaluate_interval_seconds
+        for: 10m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "The compliance passive-breach sweep has not completed for three intervals"
+          description: "The post-trade monitor is not re-evaluating its books, so a breach with NO order behind it is currently undetectable: a financed book falling in value raises its gross leverage with no position FACT and no cash announcement, and this sweep is the only thing that would ever ask (#787). Nothing else in the estate covers that case, and the pods will look healthy throughout — the loop logs and continues rather than terminating, deliberately, because a monitor that exits is a fund nothing is watching at all. Three causes, in the order they are worth checking. If kanz_compliance_reevaluate_failures_total is rising alongside this, the sweep IS running and erroring — read the compliance ERROR log, it names the book. If the timestamp is exactly 0, no sweep has ever completed in this process: either COMPLIANCE_NATS_URL is unset, in which case the pod said so at WARN on startup and this deployment consumes nothing at all, or the goroutine never started. If the timestamp is old but non-zero and failures are flat, the ticker has stopped — restart the pod and capture a goroutine dump first, because that is the case with no other evidence behind it."
+
+      # THE SWEEP IS RUNNING AND FAILING (#983).
+      #
+      # A DIFFERENT FAULT AND A DIFFERENT OWNER. This one means the loop is alive
+      # and ReevaluateAll is returning an error — usually one book the monitor
+      # cannot evaluate, not the loop. It is separated from the staleness rule
+      # because a failing sweep does NOT advance the last-success timestamp, so
+      # both will eventually fire together; this one fires first and names the
+      # cause, which is the difference between reading a log and restarting a pod.
+      - alert: CompliancePassiveBreachSweepFailing
+        expr: |
+          increase(kanz_compliance_reevaluate_failures_total[30m]) > 0
+        for: 15m
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "The compliance passive-breach sweep is running and not completing"
+          description: "ReevaluateAll returned an error, so the monitor did not finish looking at every book it holds and a passive breach in the unreached remainder is unreported until a sweep completes. The loop deliberately logs and continues — a monitor that stopped would be strictly worse — which is why this needs an alert rather than a crash. The compliance ERROR log names the book and the error at each occurrence; the usual causes are a mandate the registry cannot resolve and a classifier that cannot answer for an instrument. If this persists, CompliancePassiveBreachSweepStalled follows, because a failed sweep does not advance the last-success timestamp."

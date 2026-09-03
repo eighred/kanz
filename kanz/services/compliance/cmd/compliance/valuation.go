@@ -135,7 +135,24 @@ func (v postTradeValuation) CashHandler(mon *monitor.Monitor) bus.EventHandler {
 // would evaluate half-built books — and because it goes through the same
 // transition test as every other path, it could record a BREACH that the next
 // sweep silently un-breaches. One interval of nothing is the honest start.
-func reevaluateBooks(ctx context.Context, mon *monitor.Monitor, interval time.Duration, logger *slog.Logger) {
+// sweeper is what reevaluateBooks drives.
+//
+// A ONE-METHOD SEAM, and it exists because the LOOP's branching is what regresses,
+// not the monitor's. Three outcomes have to be told apart here — completed,
+// errored, cancelled — and only the first is reachable through a real
+// *monitor.Monitor without standing up a book, a mandate registry that fails, and
+// a classifier: a test that expensive gets written once and then not maintained,
+// which is how the error branch ends up unexercised. *monitor.Monitor satisfies
+// this, so the production path is unchanged and the composition root still passes
+// the real thing.
+//
+// The monitor's own behaviour is covered against the REAL Monitor in
+// services/compliance/internal/monitor; this seam deliberately does not restate it.
+type sweeper interface {
+	ReevaluateAll(ctx context.Context) error
+}
+
+func reevaluateBooks(ctx context.Context, mon sweeper, interval time.Duration, logger *slog.Logger, mx *sweepMetrics) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -146,7 +163,18 @@ func reevaluateBooks(ctx context.Context, mon *monitor.Monitor, interval time.Du
 			if err := mon.ReevaluateAll(ctx); err != nil && ctx.Err() == nil {
 				logger.Error("compliance: post-trade re-evaluation sweep did not complete; a passive "+
 					"breach may be unreported until the next one", "err", err, "interval", interval)
+				mx.failed()
+				continue
 			}
+			// A CANCELLED SWEEP IS NEITHER A SUCCESS NOR A FAILURE. On shutdown
+			// ReevaluateAll returns ctx.Err() and the branch above deliberately does
+			// not log it; advancing the timestamp here would let a terminating pod
+			// record its last partial pass as a completed one, and counting it as a
+			// failure would put every clean shutdown into an alert.
+			if ctx.Err() != nil {
+				return
+			}
+			mx.succeeded()
 		}
 	}
 }

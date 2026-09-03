@@ -2337,3 +2337,133 @@ tests:
       - eval_time: 400m
         alertname: TreasuryCashDragNotObserved
         exp_alerts: []
+
+  # ─── THE PASSIVE-BREACH SWEEP (#983) ─────────────────────────────────────
+  #
+  # promtool's synthetic clock starts at the Unix epoch, so time() inside these
+  # groups is a small number of seconds rather than 1.7e9. A "healthy" timestamp
+  # is therefore expressed relative to the eval_time, not as a wall-clock value —
+  # which is also why the never-succeeded case below is expressed as a literal 0
+  # and still trips the rule: 0 is more than three intervals behind any eval_time
+  # past 180.
+
+  - interval: 1m
+    name: the sweep is completing on schedule
+    input_series:
+      # Advancing one second per second: a sweep that keeps up.
+      - series: 'kanz_compliance_reevaluate_last_success_timestamp_seconds{namespace="kanz"}'
+        values: '0+60x60'
+      - series: 'kanz_compliance_reevaluate_interval_seconds{namespace="kanz"}'
+        values: '60x60'
+      - series: 'kanz_compliance_reevaluate_failures_total{namespace="kanz"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: CompliancePassiveBreachSweepStalled
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: CompliancePassiveBreachSweepFailing
+        exp_alerts: []
+
+  # A SINGLE SLOW SWEEP IS NOT A PAGE. The timestamp stops advancing for two
+  # intervals and then resumes; three is the bound, so this must stay quiet or
+  # the rule pages on ordinary jitter and gets silenced.
+  - interval: 1m
+    name: one skipped sweep does not page
+    input_series:
+      - series: 'kanz_compliance_reevaluate_last_success_timestamp_seconds{namespace="kanz"}'
+        values: '0+60x20 1200x2 1380+60x30'
+      - series: 'kanz_compliance_reevaluate_interval_seconds{namespace="kanz"}'
+        values: '60x60'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: CompliancePassiveBreachSweepStalled
+        exp_alerts: []
+
+  # THE TICKER STOPPED. The timestamp freezes and time() walks away from it.
+  - interval: 1m
+    name: the sweep stops completing
+    input_series:
+      - series: 'kanz_compliance_reevaluate_last_success_timestamp_seconds{namespace="kanz"}'
+        values: '600x60'
+      - series: 'kanz_compliance_reevaluate_interval_seconds{namespace="kanz"}'
+        values: '60x60'
+      - series: 'kanz_compliance_reevaluate_failures_total{namespace="kanz"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: CompliancePassiveBreachSweepStalled
+        exp_alerts:
+          - exp_labels: { severity: critical, layer: operational, namespace: kanz }
+            exp_annotations:
+              summary: "The compliance passive-breach sweep has not completed for three intervals"
+              description: "The post-trade monitor is not re-evaluating its books, so a breach with NO order behind it is currently undetectable: a financed book falling in value raises its gross leverage with no position FACT and no cash announcement, and this sweep is the only thing that would ever ask (#787). Nothing else in the estate covers that case, and the pods will look healthy throughout — the loop logs and continues rather than terminating, deliberately, because a monitor that exits is a fund nothing is watching at all. Three causes, in the order they are worth checking. If kanz_compliance_reevaluate_failures_total is rising alongside this, the sweep IS running and erroring — read the compliance ERROR log, it names the book. If the timestamp is exactly 0, no sweep has ever completed in this process: either COMPLIANCE_NATS_URL is unset, in which case the pod said so at WARN on startup and this deployment consumes nothing at all, or the goroutine never started. If the timestamp is old but non-zero and failures are flat, the ticker has stopped — restart the pod and capture a goroutine dump first, because that is the case with no other evidence behind it."
+      # The sweep is not erroring, it is absent — so the cause rule stays quiet
+      # and the operator is not sent to read a log with nothing in it.
+      - eval_time: 50m
+        alertname: CompliancePassiveBreachSweepFailing
+        exp_alerts: []
+
+  # NO SWEEP HAS EVER SUCCEEDED — the broker-less deployment, and the goroutine
+  # that never started. The timestamp is a registered, never-set 0, which is the
+  # zero value the code deliberately does not initialise to time.Now(): doing so
+  # would make a loop that never ran look healthy for three intervals after every
+  # restart.
+  - interval: 1m
+    name: the sweep has never run at all
+    input_series:
+      - series: 'kanz_compliance_reevaluate_last_success_timestamp_seconds{namespace="kanz"}'
+        values: '0x60'
+      - series: 'kanz_compliance_reevaluate_interval_seconds{namespace="kanz"}'
+        values: '60x60'
+      - series: 'kanz_compliance_reevaluate_failures_total{namespace="kanz"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: CompliancePassiveBreachSweepStalled
+        exp_alerts:
+          - exp_labels: { severity: critical, layer: operational, namespace: kanz }
+            exp_annotations:
+              summary: "The compliance passive-breach sweep has not completed for three intervals"
+              description: "The post-trade monitor is not re-evaluating its books, so a breach with NO order behind it is currently undetectable: a financed book falling in value raises its gross leverage with no position FACT and no cash announcement, and this sweep is the only thing that would ever ask (#787). Nothing else in the estate covers that case, and the pods will look healthy throughout — the loop logs and continues rather than terminating, deliberately, because a monitor that exits is a fund nothing is watching at all. Three causes, in the order they are worth checking. If kanz_compliance_reevaluate_failures_total is rising alongside this, the sweep IS running and erroring — read the compliance ERROR log, it names the book. If the timestamp is exactly 0, no sweep has ever completed in this process: either COMPLIANCE_NATS_URL is unset, in which case the pod said so at WARN on startup and this deployment consumes nothing at all, or the goroutine never started. If the timestamp is old but non-zero and failures are flat, the ticker has stopped — restart the pod and capture a goroutine dump first, because that is the case with no other evidence behind it."
+
+  # A WIDER CADENCE WIDENS THE BOUND. The same 10-minute-stale timestamp that
+  # trips the rule at a 60s interval must NOT trip it at a 600s one — that is the
+  # whole reason the interval is exported rather than hard-coded, and a rule that
+  # ignored it would page every deployment that slowed its sweep down.
+  - interval: 1m
+    name: a deployment with a wider interval is judged against its own cadence
+    input_series:
+      - series: 'kanz_compliance_reevaluate_last_success_timestamp_seconds{namespace="kanz"}'
+        values: '2400x60'
+      - series: 'kanz_compliance_reevaluate_interval_seconds{namespace="kanz"}'
+        values: '600x60'
+    alert_rule_test:
+      # eval_time 50m = 3000s; last success 2400s; stale by 600s = ONE interval.
+      - eval_time: 50m
+        alertname: CompliancePassiveBreachSweepStalled
+        exp_alerts: []
+
+  # THE SWEEP RUNS AND ERRORS. The cause rule fires and names the log to read.
+  - interval: 1m
+    name: the sweep is failing rather than absent
+    input_series:
+      - series: 'kanz_compliance_reevaluate_failures_total{namespace="kanz"}'
+        values: '0+1x60'
+      # It is still completing sometimes, so the staleness rule has nothing to say
+      # yet — which is the ordering the two rules are designed around.
+      - series: 'kanz_compliance_reevaluate_last_success_timestamp_seconds{namespace="kanz"}'
+        values: '0+60x60'
+      - series: 'kanz_compliance_reevaluate_interval_seconds{namespace="kanz"}'
+        values: '60x60'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: CompliancePassiveBreachSweepFailing
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational, namespace: kanz }
+            exp_annotations:
+              summary: "The compliance passive-breach sweep is running and not completing"
+              description: "ReevaluateAll returned an error, so the monitor did not finish looking at every book it holds and a passive breach in the unreached remainder is unreported until a sweep completes. The loop deliberately logs and continues — a monitor that stopped would be strictly worse — which is why this needs an alert rather than a crash. The compliance ERROR log names the book and the error at each occurrence; the usual causes are a mandate the registry cannot resolve and a classifier that cannot answer for an instrument. If this persists, CompliancePassiveBreachSweepStalled follows, because a failed sweep does not advance the last-success timestamp."
+      - eval_time: 50m
+        alertname: CompliancePassiveBreachSweepStalled
+        exp_alerts: []

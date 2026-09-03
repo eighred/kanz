@@ -107,6 +107,14 @@ func run() int {
 	// beside whatever happens to construct the producer.
 	registerTreasuryMetrics(obs.Registry)
 
+	// AND THE SWEEP-LIVENESS SERIES, for exactly the same reason (#983). A
+	// deployment with no broker never starts the sweep at all, which is the state
+	// the staleness rule pages on; registered here, its last-success timestamp
+	// stays at 0 and the rule fires, and registered in runConsumers it would
+	// export nothing and the rule would evaluate over an empty vector.
+	sweepMx := newSweepMetrics(cfg.ReevaluateInterval)
+	sweepMx.register(obs.Registry, cfg.ReevaluateInterval)
+
 	readiness := &server.Readiness{}
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
 	go func() {
@@ -119,7 +127,7 @@ func run() int {
 
 	var runErr error
 	if cfg.NATSURL != "" {
-		if err := runConsumers(ctx, cfg, readiness, logger, obs, fatal); err != nil {
+		if err := runConsumers(ctx, cfg, readiness, logger, obs, fatal, sweepMx); err != nil {
 			logger.Error("compliance consumers stopped with error", "err", err)
 			runErr = err
 		}
@@ -153,7 +161,7 @@ func run() int {
 // runConsumers wires the bus producer + monitor and subscribes the mandate and
 // position streams. The mandate consumer feeds the registry the monitor resolves
 // against, so it is subscribed first.
-func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, fatal *lifecycle.Fatal) error {
+func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, fatal *lifecycle.Fatal, sweepMx *sweepMetrics) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
@@ -459,7 +467,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		reevaluateBooks(ctx, mon, cfg.ReevaluateInterval, logger)
+		reevaluateBooks(ctx, mon, cfg.ReevaluateInterval, logger, sweepMx)
 	}()
 
 	// READINESS MUST WAIT ON THE MANDATE REPLAY, NOT ON THE SUBSCRIPTION GOROUTINE HAVING
