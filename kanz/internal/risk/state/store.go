@@ -126,6 +126,11 @@ type Store struct {
 	// consistent-hash ring's verdict, fixed for the process lifetime because
 	// the member list is. Nil means "no ring", not "owns nothing".
 	shardOwns func(v1.PortfolioID) bool
+
+	// onRelease is notified after a portfolio's state has been dropped, so the
+	// layer above can drop what it derived from it (#893). Nil means nothing
+	// derived is pruned, which is the state that leaked.
+	onRelease func(v1.PortfolioID)
 }
 
 // NewStore returns an empty Store. With no options it is the ungated,

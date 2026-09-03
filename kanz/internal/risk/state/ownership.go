@@ -123,6 +123,30 @@ func WithRuntimeOwnership(loader Loader) Option {
 // A nil owns is ignored (the store stays ungated) — a gate that refuses
 // everything is worse than the unsharded default, which at least holds a
 // complete book. Composes with WithRuntimeOwnership; see ownsLocked.
+// WithReleaseObserver is called when a portfolio's state is dropped on an
+// ownership handoff, so a caller can prune what it derived from that state
+// (#893).
+//
+// THE STORE MUST NOT KNOW WHAT IS DERIVED FROM IT. internal/risk/state sits
+// below internal/risk; a store that called risk.Cache directly would invert the
+// layering and make the persistence tier depend on the compute tier. The
+// composition root owns the relationship, which is also the only place that
+// knows which caches exist.
+//
+// IT IS CALLED UNDER THE PER-AGGREGATE LOCK, after the state maps are cleared,
+// so it is ordered against an apply already in flight for the same portfolio.
+// An observer that blocks therefore blocks that portfolio's applies: it is for
+// dropping an in-memory entry, not for I/O.
+//
+// A NIL OBSERVER IS THE PRE-#893 BEHAVIOUR — the state store prunes and
+// everything derived from it accumulates for the life of the process. An arch
+// guard requires the composition root to wire one, because the omission is
+// invisible: nothing errors, no probe fails, and the heap grows with cumulative
+// rather than current ownership.
+func WithReleaseObserver(fn func(v1.PortfolioID)) Option {
+	return func(s *Store) { s.onRelease = fn }
+}
+
 func WithShardOwnership(owns func(v1.PortfolioID) bool) Option {
 	return func(s *Store) {
 		if owns == nil {
@@ -308,6 +332,31 @@ func (s *Store) Release(id v1.PortfolioID) (rec persist.PortfolioRecord, release
 		lock.Lock()
 		defer lock.Unlock()
 	}
+
+	// EVERYTHING THIS REPLICA HELD FOR THE PORTFOLIO GOES AT ONCE (#893).
+	//
+	// The four maps above are this package's; a released portfolio also leaves
+	// derived state in the layer ABOVE — risk.Cache holds its last-known-good
+	// exposure and measure sets, written after every recompute and, until this
+	// seam existed, never dropped. A replica on a rebalancing ring accumulated
+	// every portfolio it had ever owned rather than the ones it owns.
+	//
+	// AN OBSERVER RATHER THAN A DIRECT CALL, because internal/risk/state sits
+	// BELOW internal/risk and must not import it — a store that knew about the
+	// cache would invert the layering and make the persistence tier depend on
+	// the compute tier. The composition root wires the two together, and an arch
+	// guard asserts that it does, because an unwired observer restores the exact
+	// asymmetry this fixes and is invisible in review.
+	//
+	// CALLED UNDER THE PER-AGGREGATE LOCK, so it serialises against an apply
+	// already in flight for this portfolio — the same ordering the map deletes
+	// above get. A recompute that has already finished and is racing to store
+	// its result can still land after this; the ownership gate refuses reads of
+	// it, and the next release clears it.
+	if s.onRelease != nil {
+		s.onRelease(id)
+	}
+
 	if !hadState {
 		return persist.PortfolioRecord{}, true, nil
 	}

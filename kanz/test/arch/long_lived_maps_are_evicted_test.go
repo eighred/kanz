@@ -597,15 +597,6 @@ var mapEvictionExempt = map[string]evictionExemption{
 	// walk's population entirely — its own package asserts the absence by
 	// reflection); LogQuarantiner's say-it-once set is a fixed-capacity FIFO that
 	// this walk sees shrunk, at LogQuarantiner.warned and .order.
-	"internal/risk: Cache.exposure": {deferredLeak,
-		"keyed by portfolio — estate-controlled, so not the #814 shape — but never pruned when this " +
-			"replica RELEASES ownership on a ring rebalance, which state/ownership.go already does for " +
-			"the state store. The stale entry is still readable through the degraded path.",
-		"#893"},
-	"internal/risk: Cache.measures": {deferredLeak,
-		"the measure half of the same asymmetry as Cache.exposure: written on every recompute, never " +
-			"dropped on ownership handoff.",
-		"#893"},
 }
 
 // TestEveryLongLivedMapHasAnEvictor walks the module and holds every
