@@ -1,8 +1,10 @@
 package book
 
 import (
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"math/big"
 	"testing"
+	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
@@ -22,12 +24,20 @@ func lvl(price, size string) *marketpb.PriceLevel {
 func seedBook(t *testing.T) *Book {
 	t.Helper()
 	b := New("BTC-USD", "BTCUSDT", "BINANCE")
-	b.ApplySnapshot(&marketpb.OrderBookSnapshot{
+	// THE VENUE TIME IS NOT OPTIONAL, on the wire or here (#957). Both shipped
+	// depth sources stamp it on every snapshot and delta, and the fold now
+	// REFUSES an update that would seed a book without one — rather than stamping
+	// the book with the epoch (a nil timestamp is not a zero time) or with a
+	// substituted clock.
+	if err := b.ApplySnapshot(&marketpb.OrderBookSnapshot{
 		InstrumentId:       "BTC-USD",
 		LastUpdateSequence: 100,
 		Bids:               []*marketpb.PriceLevel{lvl("50000", "1"), lvl("49999", "2")},
 		Asks:               []*marketpb.PriceLevel{lvl("50001", "1"), lvl("50002", "3")},
-	})
+		EventTime:          timestamppb.New(time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 	return b
 }
 
@@ -102,10 +112,13 @@ func TestApplyDelta_SequenceGapRefused(t *testing.T) {
 
 func TestSnapshot_DepthBounded(t *testing.T) {
 	b := New("BTC-USD", "BTCUSDT", "BINANCE")
-	b.ApplySnapshot(&marketpb.OrderBookSnapshot{
-		Bids: []*marketpb.PriceLevel{lvl("100", "1"), lvl("99", "1"), lvl("98", "1")},
-		Asks: []*marketpb.PriceLevel{lvl("101", "1"), lvl("102", "1"), lvl("103", "1")},
-	})
+	if err := b.ApplySnapshot(&marketpb.OrderBookSnapshot{
+		Bids:      []*marketpb.PriceLevel{lvl("100", "1"), lvl("99", "1"), lvl("98", "1")},
+		Asks:      []*marketpb.PriceLevel{lvl("101", "1"), lvl("102", "1"), lvl("103", "1")},
+		EventTime: timestamppb.New(time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 	snap := b.Snapshot(2)
 	if len(snap.GetBids()) != 2 || len(snap.GetAsks()) != 2 {
 		t.Fatalf("bounded snapshot = %d bids / %d asks, want 2/2", len(snap.GetBids()), len(snap.GetAsks()))
@@ -133,7 +146,12 @@ func TestBestBidAsk(t *testing.T) {
 func TestUnsequencedFeedSkipsGapCheck(t *testing.T) {
 	// A sim/unsequenced feed carries all-zero sequences; the gap check is skipped.
 	b := New("BTC-USD", "BTCUSDT", "SIM")
-	b.ApplySnapshot(&marketpb.OrderBookSnapshot{Bids: []*marketpb.PriceLevel{lvl("100", "1")}})
+	if err := b.ApplySnapshot(&marketpb.OrderBookSnapshot{
+		Bids:      []*marketpb.PriceLevel{lvl("100", "1")},
+		EventTime: timestamppb.New(time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 	if err := b.ApplyDelta(&marketpb.OrderBookDelta{Bids: []*marketpb.PriceLevel{lvl("100", "7")}}); err != nil {
 		t.Fatalf("unsequenced delta should fold, got %v", err)
 	}

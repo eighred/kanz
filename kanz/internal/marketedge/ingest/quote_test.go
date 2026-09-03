@@ -15,8 +15,11 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -392,29 +395,34 @@ func TestTheQuoteCarriesTheVenueBookTimeNotOurs(t *testing.T) {
 	}
 }
 
-// A BOOK WITH NO VENUE TIME PRODUCES NO USABLE WIDTH, AND THAT IS THE SAFE
-// DIRECTION.
+// A BOOK WITH NO VENUE TIME PUBLISHES NOTHING, AND SAYS SO (#957).
 //
-// Neither shipped depth source can reach this state — depth/binance.go and
-// depth/okx.go stamp EventTime on every snapshot and every delta — so this is
-// recording a property rather than covering a live path. It is recorded because
-// the behaviour is SURPRISING and the surprise is load-bearing: a nil
-// google.protobuf.Timestamp reads back as the UNIX EPOCH, not as a zero
-// time.Time, so book.Snapshot's `if et.IsZero() { et = time.Now() }` fallback
-// does NOT fire for a source that omitted the field. The quote is then stamped
-// 1970 and every staleness bound refuses it.
+// THIS TEST USED TO RECORD THE OPPOSITE, and the change is the point. Before
+// #957 a source that omitted EventTime produced a quote stamped 1970 and this
+// test asserted that the mark fold refused it — safe in its consequence and
+// silent in its cause. The surprise underneath was that a nil
+// google.protobuf.Timestamp reads back through AsTime() as the UNIX EPOCH, not
+// as a zero time.Time, so book.Snapshot's `if et.IsZero() { et = time.Now() }`
+// fallback could never fire for the case it was written for.
 //
-// Refusing is right: a width whose observation time is unknown must not be
-// treated as fresh. But a future source that forgets EventTime would go dark
-// with no error anywhere, so the failure mode belongs written down. The same
-// epoch stamp also reaches the market.book.snapshot FACT, which is a separate
-// (and today unreachable) defect in book.Snapshot rather than one here.
-func TestABookWithNoVenueTimeYieldsNoUsableWidth(t *testing.T) {
+// Both fold paths now REFUSE an update with no venue time, so:
+//
+//   - nothing is published at all — no quote, no market.book.snapshot FACT, so
+//     the epoch never reaches a consumer that has to decide what to do with it;
+//   - the engine WARNS once, naming the instrument and which kind of update, so
+//     the source is findable instead of the ingest merely going quiet.
+//
+// Neither shipped source can reach this state (depth/binance.go and
+// depth/okx.go both stamp the field on every snapshot and delta), so this is a
+// trap set for the next one rather than a live path — which is exactly why the
+// signal has to exist before the source does.
+func TestABookWithNoVenueTimePublishesNothingAndSaysSo(t *testing.T) {
 	cc := newCaptureClient()
 	prod, err := bus.NewProducer(cc, bus.ProducerConfig{Source: "market-edge", ProducerVersion: "test"})
 	if err != nil {
 		t.Fatalf("NewProducer: %v", err)
 	}
+	var logs bytes.Buffer
 	src := &scriptedSource{updates: []depth.Update{
 		{Snapshot: &marketpb.OrderBookSnapshot{
 			InstrumentId: "BTC-USD", LastUpdateSequence: 7,
@@ -424,6 +432,7 @@ func TestABookWithNoVenueTimeYieldsNoUsableWidth(t *testing.T) {
 	}}
 	eng := New(Config{
 		Book: book.New("BTC-USD", "BTCUSDT", "BINANCE"), Source: src, Publisher: prod,
+		Logger:           slog.New(slog.NewTextHandler(&logs, nil)),
 		SnapshotInterval: 10 * time.Millisecond, SnapshotDepth: 10, Tenant: "test-tenant",
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
@@ -433,17 +442,56 @@ func TestABookWithNoVenueTimeYieldsNoUsableWidth(t *testing.T) {
 	<-ctx.Done()
 	<-done
 
-	got := framed(t, cc, SubjectMarketCryptoQuote)
-	if len(got) == 0 {
-		t.Fatal("nothing was published on the quote subject")
+	if got := framed(t, cc, SubjectMarketCryptoQuote); len(got) != 0 {
+		t.Errorf("%d quote(s) published from a book with no venue time. An observation whose time "+
+			"is unknown must not reach a consumer at all — before #957 this was stamped 1970 and "+
+			"every staleness bound refused it downstream, which was safe and told nobody why.", len(got))
 	}
-	s := mark.New(time.Now, 30*time.Second)
-	if err := s.Handle(context.Background(), got[0].env, got[0].payload); err != nil {
-		t.Fatalf("mark.Handle: %v", err)
+	if got := framed(t, cc, SubjectBookSnapshot); len(got) != 0 {
+		t.Errorf("%d book snapshot FACT(s) published from a book with no venue time. The quote path "+
+			"and the snapshot path publish from ONE Book.Snapshot read, so an epoch that reaches "+
+			"either reaches both.", len(got))
 	}
-	if _, _, _, ok := s.Touch("BTC-USD"); ok {
-		t.Fatal("a quote from a book with no venue timestamp is being served as a live width — " +
-			"an observation whose time is unknown must never be treated as fresh")
+
+	out := logs.String()
+	if !strings.Contains(out, "event_time") {
+		t.Fatalf("the engine went quiet without naming the cause:\n%s\n\nGoing dark with no error "+
+			"anywhere is the defect #957 is about — the refusal is what makes the silence "+
+			"impossible, the WARN is what makes it diagnosable.", out)
+	}
+	for _, want := range []string{"BTC-USD", "snapshot"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the warning does not name %q, so an operator cannot find the source:\n%s", want, out)
+		}
+	}
+}
+
+// A SEEDED BOOK STILL ACCEPTS A DELTA THAT OMITS event_time.
+//
+// The refusal must not become "every update needs a timestamp". On a seeded book
+// the previous venue time still describes the state being amended, and this path
+// has always tolerated nil for that reason — narrowing it would refuse a shape
+// both shipped adapters are entitled to send and take a live feed dark.
+func TestASeededBookAcceptsADeltaWithNoVenueTime(t *testing.T) {
+	b := book.New("BTC-USD", "BTCUSDT", "BINANCE")
+	seeded := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	if err := b.ApplySnapshot(&marketpb.OrderBookSnapshot{
+		InstrumentId: "BTC-USD", LastUpdateSequence: 7,
+		Bids: []*marketpb.PriceLevel{lvl("50000", "3")}, Asks: []*marketpb.PriceLevel{lvl("50001", "2")},
+		EventTime: tsOf(seeded),
+	}); err != nil {
+		t.Fatalf("ApplySnapshot: %v", err)
+	}
+
+	if err := b.ApplyDelta(&marketpb.OrderBookDelta{
+		InstrumentId: "BTC-USD", PrevUpdateSequence: 7, LastUpdateSequence: 8,
+		Bids: []*marketpb.PriceLevel{lvl("50000", "4")},
+	}); err != nil {
+		t.Fatalf("a delta with no event_time was refused on a SEEDED book: %v", err)
+	}
+	if got := b.Snapshot(10).GetEventTime().AsTime(); !got.Equal(seeded) {
+		t.Errorf("event time = %s, want the snapshot's %s — a delta that carries none must keep the "+
+			"venue time already held rather than substituting one", got, seeded)
 	}
 }
 

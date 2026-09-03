@@ -56,6 +56,19 @@ import (
 // this as a fail-open bug; it was traced to the sources and it is not one.
 var ErrSequenceGap = errors.New("book: sequence gap — re-snapshot required")
 
+// ErrNoVenueTime is returned when an update carries no event_time and the book
+// has no earlier venue time to keep (#957).
+//
+// IT IS A SOURCE DEFECT, NOT A FEED CONDITION — unlike ErrSequenceGap, which a
+// healthy venue produces routinely and which re-snapshotting repairs. A depth
+// source that omits event_time will omit it on every message, so this refuses
+// the same way every time until the source is fixed. The alternative was folding
+// it and stamping the book with the epoch (the pre-#957 behaviour, invisible
+// because a nil timestamp is not a zero time) or with time.Now() (the branch
+// written for this case, which converts "we do not know when the venue said
+// this" into "we know it now").
+var ErrNoVenueTime = errors.New("book: update carries no venue event_time and the book has none to keep")
+
 // Book is one instrument's L2 depth on one venue. Safe for concurrent use: the
 // fold path and the snapshot path run on separate goroutines.
 type Book struct {
@@ -81,7 +94,29 @@ func New(instrumentID, symbol, mic string) *Book {
 
 // ApplySnapshot resets the book to a venue snapshot — the bootstrap and
 // gap-recovery entry point. After it, deltas chain off snapshot.last_update_sequence.
-func (b *Book) ApplySnapshot(s *marketpb.OrderBookSnapshot) {
+//
+// IT REFUSES A SNAPSHOT THAT CARRIES NO VENUE TIME (#957), and the check is on
+// the PROTO rather than on the converted value. A nil google.protobuf.Timestamp
+// reads back through AsTime() as time.Unix(0, 0) — the UNIX EPOCH, not a zero
+// time.Time — so the guard that was written for this case (`if et.IsZero()` in
+// Snapshot) could never fire, and a source that omitted event_time stamped every
+// book 1970-01-01.
+//
+// WHAT THAT COST IS THE DIAGNOSIS, not the number. The epoch propagates to
+// market.crypto.quote and internal/marketdata/mark refuses a 56-year-old
+// observation, so the fold holds no width rather than a fabricated fresh one —
+// that part is safe. What is not safe is that market-ingest folds perfectly,
+// publishes perfectly and reports ready while every consumer silently discards
+// its output, with no error anywhere naming the cause.
+//
+// REFUSING BEATS SUBSTITUTING A CLOCK. The dead branch substituted time.Now(),
+// which converts "we do not know when the venue said this" into "we know it
+// now" — the same quiet confidence the staleness bound exists to prevent, and it
+// would have made the epoch case invisible in the other direction.
+func (b *Book) ApplySnapshot(s *marketpb.OrderBookSnapshot) error {
+	if s.GetEventTime() == nil {
+		return ErrNoVenueTime
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.bids = levelsToMap(s.GetBids())
@@ -89,6 +124,7 @@ func (b *Book) ApplySnapshot(s *marketpb.OrderBookSnapshot) {
 	b.lastSeq = s.GetLastUpdateSequence()
 	b.eventTime = s.GetEventTime().AsTime()
 	b.seeded = true
+	return nil
 }
 
 // ApplyDelta folds one incremental update. It returns ErrSequenceGap if the
@@ -101,6 +137,15 @@ func (b *Book) ApplyDelta(d *marketpb.OrderBookDelta) error {
 	if b.seeded && b.lastSeq != 0 && d.GetPrevUpdateSequence() != 0 &&
 		d.GetPrevUpdateSequence() != b.lastSeq {
 		return ErrSequenceGap
+	}
+	// A DELTA MAY OMIT event_time ONLY ONCE THE BOOK IS SEEDED (#957). On a
+	// seeded book the previous venue time still describes the state being
+	// amended, which is why this path has always tolerated nil. On an UNSEEDED
+	// book there is no previous time to keep, so folding it would leave
+	// eventTime at Go's zero value and Snapshot would substitute a clock — the
+	// same "we know it now" the snapshot path refuses.
+	if !b.seeded && d.GetEventTime() == nil {
+		return ErrNoVenueTime
 	}
 	applyLevels(b.bids, d.GetBids())
 	applyLevels(b.asks, d.GetAsks())
@@ -122,15 +167,19 @@ func (b *Book) Snapshot(depth int) *marketpb.OrderBookSnapshot {
 
 	bids := sortedLevels(b.bids, true, depth)
 	asks := sortedLevels(b.asks, false, depth)
-	et := b.eventTime
-	if et.IsZero() {
-		et = time.Now().UTC()
-	}
+	// NO CLOCK SUBSTITUTION (#957). Both fold paths now refuse an update with no
+	// venue time, so a SEEDED book always carries one and there is nothing to
+	// substitute for. An unseeded book has no levels either, and the snapshot
+	// loop already declines to publish an empty one.
+	//
+	// The branch this replaces read `if et.IsZero() { et = time.Now().UTC() }`
+	// and could not fire for the case it was written for: a nil timestamp
+	// arrives as the epoch, not as a zero time.
 	return &marketpb.OrderBookSnapshot{
 		InstrumentId:       b.instrumentID,
 		Symbol:             b.symbol,
 		Mic:                b.mic,
-		EventTime:          timestamppb.New(et.UTC()),
+		EventTime:          timestamppb.New(b.eventTime.UTC()),
 		LastUpdateSequence: b.lastSeq,
 		Bids:               bids,
 		Asks:               asks,
