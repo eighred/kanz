@@ -33,6 +33,7 @@ import (
 	"github.com/eighred/kanz/internal/prediction"
 	predregistry "github.com/eighred/kanz/internal/prediction/registry"
 	risk "github.com/eighred/kanz/internal/risk"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/bookuniverse"
 	"github.com/eighred/kanz/internal/risk/compute"
 	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
@@ -218,15 +219,12 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		return err
 	}
 
-	// Gated on the ring when sharded (no-op otherwise): a portfolio this replica
-	// does not own cannot be restored, cannot be lazy-created by an apply, and so
-	// never reaches IDs() — which is what the Snapshotter and the post-bootstrap
-	// recompute arming iterate without asking about ownership.
-	store := state.NewStore(sharding.StoreOptions()...)
 	// Cache + registry are shared between the recompute path and the query
 	// EngineImpl below, so a query sees the live store plus the same
-	// last-known-good cache the recomputer fills (degraded fallback).
+	// last-known-good cache the recomputer fills (degraded fallback). It is built
+	// BEFORE the store because the store releases into it — see newStateStore.
 	cache := risk.NewCache()
+	store := newStateStore(sharding.StoreOptions(), cache)
 	registry := compute.DefaultRegistry()
 	// RISK-12: with a market-data price store configured, override the RISK-07
 	// 1%×gross VaR99 placeholder with the real historical-simulation model, read
@@ -983,4 +981,38 @@ func serveQueryGRPC(ctx context.Context, cfg config.Config, src transport.Source
 		}
 	}()
 	return grpcSrv.GracefulStop, nil
+}
+
+// newStateStore builds the risk state store, wired to prune the degraded cache
+// on an ownership handoff (#893).
+//
+// A NAMED BUILDER RETURNING WHAT IT BUILT, which is what
+// composition_root_length_test.go asks for — runEngine is on a shrink-only
+// ratchet and this wiring carries the reasoning below with it.
+//
+// THE STORE RELEASES INTO THE CACHE. state.Store.Release prunes four maps when a
+// ring rebalances; risk.Cache holds a fifth thing derived from that same state,
+// the portfolio's last-known-good exposure and measure sets, written after every
+// recompute. Nothing pruned them, so a replica on a rebalancing ring accumulated
+// every portfolio it had EVER owned rather than the ones it owns. The two
+// prunings sit either side of a package boundary — internal/risk/state is BELOW
+// internal/risk and must not import it — so this is the only place that can join
+// them, and an arch guard requires that it does.
+//
+// The ring gating in sharding.StoreOptions is unchanged: a portfolio this replica
+// does not own cannot be restored, cannot be lazy-created by an apply, and so
+// never reaches IDs() — which is what the Snapshotter and the post-bootstrap
+// recompute arming iterate without asking about ownership.
+//
+// THE OBSERVER IS A CLOSURE, NOT THE METHOD VALUE `cache.Evict`. The two are
+// equivalent to the compiler; they are not to
+// test/arch/long_lived_maps_are_evicted_test.go, whose reachability arm credits
+// an evictor only from a CALL expression. The method-value form leaves
+// Cache.Evict looking like dead code to that guard, which then reports both cache
+// maps as leaking behind an evictor nothing invokes. Keep the call.
+func newStateStore(opts []state.Option, cache *risk.Cache) *state.Store {
+	return state.NewStore(append(
+		opts,
+		state.WithReleaseObserver(func(id v1.PortfolioID) { cache.Evict(id) }),
+	)...)
 }

@@ -189,6 +189,32 @@ func (c *Cache) StoreMeasures(id v1.PortfolioID, ms *domain.MeasureSet) {
 	c.measures[id] = ms
 }
 
+// Evict drops everything this cache holds for a portfolio (#893).
+//
+// IT EXISTS BECAUSE OWNERSHIP CAN END. Every other write to this cache is an
+// overwrite — the same portfolio recomputed — so the maps only ever grow by one
+// entry per portfolio this replica has EVER owned, not per portfolio it owns
+// now. state.Store.Release already prunes the state store's four maps on an
+// ownership handoff; this is the fifth, and it was the one nothing told.
+//
+// The consequence is a heap that grows with cumulative ownership on a ring that
+// rebalances. It is NOT, in the posture that would be doing the releasing, a
+// stale read: EngineImpl.refuseIfNotOwned sits above both the store and the
+// cache fallback, so a portfolio this replica has released is refused before
+// either is consulted. The readable-stale case needs an engine with ownership
+// unwired, and an engine with ownership unwired is not calling Release.
+//
+// BOTH MAPS UNDER ONE LOCK, because a portfolio whose exposure was dropped and
+// whose measures were not is a book this replica reports half of — and the two
+// halves are read by different callers, so nothing downstream would reconcile
+// them.
+func (c *Cache) Evict(id v1.PortfolioID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.exposure, id)
+	delete(c.measures, id)
+}
+
 // LookupMeasures returns the cached MeasureSet and true, or nil
 // and false.
 func (c *Cache) LookupMeasures(id v1.PortfolioID) (*domain.MeasureSet, bool) {
