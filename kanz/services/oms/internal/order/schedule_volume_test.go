@@ -190,6 +190,25 @@ func TestScheduleE2E_AVolumeDrivenOrderIsAdmittedAndPinsItsCurve(t *testing.T) {
 		t.Fatalf("pinned version = %q, want %q — without it every later derivation of this "+
 			"parent's schedule would re-plan it against whatever curve was current then", got, version)
 	}
+	// AND THE CURVE ITSELF IS ON THE ORDER, NOT ONLY ITS NAME (#943). A version
+	// alone is a handle into the registry, which a pod rebuilds from a stream that
+	// retains a day — so a parent worked over longer than that stopped advancing on
+	// the pod that replaced the one that admitted it.
+	stored := st.GetExecutionSchedule().GetVolumeProfile()
+	if stored == nil {
+		t.Fatal("the admitted parent carries a pinned version and NO curve — the schedule's last " +
+			"input is still only on the bus, so this order is derivable exactly as long as some " +
+			"pod happens to hold the profile in memory")
+	}
+	if got := stored.GetVersion(); got != version {
+		t.Fatalf("the stored curve announces version %q beside a pin of %q — the order names one "+
+			"market and carries another, and every fill would be attributed to a schedule that "+
+			"was never derived", got, version)
+	}
+	if _, err := volprofilefeed.Decode(stored); err != nil {
+		t.Fatalf("the stored curve does not describe its own version: %v — Decode recomputes the "+
+			"hash, so this is a curve no pin can ever resolve", err)
+	}
 
 	// THE CHILDREN ARE THE MEASURED SHAPE, NOT TWO EQUAL HALVES. The parent is 60
 	// units; the curve puts 1/4 of a session in the first half-hour and 3/4 at
@@ -249,20 +268,39 @@ func TestScheduleE2E_ATWAPOrderIsNotPinnedToACurveItNeverRead(t *testing.T) {
 	}
 }
 
-// THE PIN IS THE PLATFORM'S, NEVER THE CALLER'S.
+// THE PIN IS THE PLATFORM'S, NEVER THE CALLER'S — AND SO IS THE CURVE.
 //
 // A client that could name the version could choose which measured curve its
 // order is sliced against — an older, thinner one gives smaller early children —
 // and the order's audit record would then assert a schedule the platform never
 // chose. It is discarded before anything reads it, which is also what lets the
 // dual-control digest exempt the field.
+//
+// THE CURVE IS THE HALF WITH TEETH (#943). Naming a version only lets a caller
+// pick among curves somebody measured; sending the SHAPE lets them supply one
+// nobody did. And because the two are checked against EACH OTHER — the stored
+// curve must hash to the stored version — a caller who sent both would send a
+// self-consistent pair that verifies. The only thing standing between that and a
+// schedule sized against a fabricated market is that both fields are cleared
+// before anything reads either.
 func TestValidateSchedule_DiscardsAClientSuppliedProfileVersion(t *testing.T) {
 	at := profileDay.Add(-time.Hour)
 	fb := &fakeBus{}
 	svc, store := profiledService(t, fb, &at, nil) // no feed at all, so nothing can re-stamp it
 
+	// A SELF-CONSISTENT FORGERY: a real Encode, so its version genuinely hashes to
+	// its own content. Nothing downstream could tell it from a published curve; the
+	// only thing that can is that it arrived on a command.
+	forged := volprofilefeed.NewRegistry(0)
+	forgedVersion := publishedCurve(t, forged, profileDay, 399, 400)
+	p, ok := forged.Current(volprofilefeed.Series{InstrumentID: "BTC-USD", Venue: profileVenue})
+	if !ok {
+		t.Fatal("the fixture did not fold its own curve")
+	}
+
 	cmd := vwapOrder("p1", orderpb.ExecutionAlgo_EXECUTION_ALGO_TWAP, profileVenue)
-	cmd.ExecutionSchedule.VolumeProfileVersion = "a-version-the-caller-chose"
+	cmd.ExecutionSchedule.VolumeProfileVersion = forgedVersion
+	cmd.ExecutionSchedule.VolumeProfile = p.Wire
 	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -273,6 +311,11 @@ func TestValidateSchedule_DiscardsAClientSuppliedProfileVersion(t *testing.T) {
 	if got := st.GetExecutionSchedule().GetVolumeProfileVersion(); got != "" {
 		t.Fatalf("a caller-supplied profile version survived onto the order as %q — the caller "+
 			"would be choosing which measured curve their order is sliced against", got)
+	}
+	if got := st.GetExecutionSchedule().GetVolumeProfile(); got != nil {
+		t.Fatalf("a caller-supplied CURVE survived onto the order (version %q) — the client just "+
+			"handed the platform the market its own order is sized against, and every later "+
+			"derivation on every pod would resolve it", got.GetVersion())
 	}
 }
 

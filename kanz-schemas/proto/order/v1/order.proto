@@ -21,6 +21,12 @@ package order.v1;
 import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
 import "command/v1/command.proto";
+// ExecutionSchedule.volume_profile carries the measured curve a volume-driven
+// schedule was derived against, so a pod that never received the FACT can still
+// derive the parent (#943). It is the first order.v1 -> market.v1 edge, and it is
+// the right direction: market.v1 imports only common.v1, so there is no cycle, and
+// redeclaring the shape here would be a second definition of one concept.
+import "market/v1/volume_profile.proto";
 
 // SubmitOrder requests a new order be admitted and worked. Its outcome is a
 // command.v1.CommandOutcome (ACCEPTED on admission; REJECTED on validation,
@@ -279,6 +285,45 @@ message ExecutionSchedule {
   // schedule then refuses, loudly, rather than being re-planned mid-flight
   // against a market the parent was never sized for.
   string volume_profile_version = 7;
+
+  // volume_profile IS THE PINNED CURVE ITSELF, stored beside the version that
+  // names it (#943). Stamped by the OMS at admission in the same write as
+  // volume_profile_version, never by a client; unset wherever that is unset.
+  //
+  // # Why the pin alone was not durable
+  //
+  // A version is a HANDLE, and #897 left the thing it handles on the bus. A pod
+  // resolves a pin by replaying market.crypto.volume_profile into
+  // internal/volprofilefeed.Registry, and the MARKET stream retains 24h while the
+  // registry retains seven days. So one pin resolved on a pod that had been up all
+  // week and resolved to NOTHING on the pod that replaced it — a parent worked over
+  // more than a day, on a pod that then rolled, stopped advancing until a human
+  // cancelled and re-submitted it.
+  //
+  // The answer is not a longer retention on a stream that also carries every trade,
+  // quote and book snapshot, and not a second stream for one subject. It is that the
+  // curve is a SCHEDULE INPUT, and this message's own contract — stated at the top —
+  // is that every schedule input is a durable field of the order. The order already
+  // outlives the bus: it is in Postgres, it is backed up, and it is restored. So the
+  // last input joins the others, and a schedule stops depending on how long the pod
+  // deriving it has been running.
+  //
+  // # THE VERSION STILL DECIDES, AND THIS MUST AGREE WITH IT
+  //
+  // This does not replace volume_profile_version and must never be read instead of
+  // it. The version is a hash over the curve's own content
+  // (internal/volprofilefeed.versionOf), so the two are checkable against each
+  // other: the OMS re-derives the hash of what is stored here and refuses to
+  // schedule against it unless it equals field 7. A curve that does not hash to its
+  // pin is UNKNOWN — the same fail-closed answer as no curve at all — because a
+  // stored shape disagreeing with the name the audit record carries is worse than an
+  // absent one: every fill would be attributed to a version that was never derived.
+  //
+  // An order admitted before this field existed carries a version and no curve. That
+  // is neither an error nor silently repaired: the OMS falls back to the registry for
+  // it, which is exactly the pre-#943 behaviour, and stops the parent loudly when the
+  // registry cannot answer either.
+  market.v1.VolumeProfile volume_profile = 8;
 }
 
 // AmendOrder requests a change to a resting order's quantity and/or limit

@@ -234,6 +234,134 @@ func TestHandle_DropsWhatItCannotReadAndCountsIt(t *testing.T) {
 	}
 }
 
+// A DECODED PROFILE CARRIES THE MESSAGE IT CAME FROM, BYTE FOR BYTE (#943).
+//
+// # Why the message and not a re-encoding
+//
+// A parent order stores the curve its schedule was derived against, so a pod that
+// never received the FACT can still derive it. What it stores has to be the
+// PUBLISHED encoding, because the version is a hash over each bucket's Decimal
+// COEFFICIENT AND EXPONENT rather than over its value — one rational has many
+// encodings and each hashes differently. A curve rebuilt from the decoded
+// Expected slice would therefore be the same market under a version no order ever
+// pinned, and the pin would resolve a shape nobody published under a name
+// somebody did.
+func TestDecode_CarriesThePublishedMessage(t *testing.T) {
+	pb := curve(t, day1, 100, 400)
+	p := mustDecode(t, pb)
+
+	if p.Wire == nil {
+		t.Fatal("a decoded profile carries no wire message — admission has nothing durable to " +
+			"stamp on an order, so every pin goes back to depending on what this pod replayed")
+	}
+	if !proto.Equal(p.Wire, pb) {
+		t.Fatalf("the retained message is not the one decoded:\n got %v\nwant %v", p.Wire, pb)
+	}
+	// AND IT IS NOT THE CALLER'S POINTER. A proto message is mutable and a Profile
+	// is documented as immutable once decoded.
+	if p.Wire == pb {
+		t.Fatal("Decode retained the caller's own message — one reader's edit would rewrite the " +
+			"curve every later order pins, under a version that no longer describes it")
+	}
+	// THE ROUND TRIP IS CLOSED: what is retained still decodes, which is the check
+	// the OMS performs on an order's stored curve before scheduling against it.
+	back := mustDecode(t, p.Wire)
+	if back.Version != p.Version {
+		t.Fatalf("the retained message hashes to %q and the profile says %q", back.Version, p.Version)
+	}
+}
+
+// THE REGISTRY HANDS OUT A COPY OF THE MESSAGE TOO.
+//
+// Expected was already copied because *big.Rat is a pointer. The wire message is
+// a pointer for the same reason and was not, which would have let a caller that
+// stamps it on an order edit the curve every LATER order is pinned to — with the
+// version still hashing to a shape the registry no longer holds.
+func TestResolve_HandsOutACopyOfTheMessage(t *testing.T) {
+	reg := volprofilefeed.NewRegistry(0)
+	p := mustDecode(t, curve(t, day2, 100, 400))
+	reg.Fold(p)
+
+	first, ok := reg.Resolve(ser, p.Version)
+	if !ok {
+		t.Fatal("Resolve did not answer for the version just folded")
+	}
+	first.Wire.ExpectedVolume[0].Coefficient = 999999
+
+	second, _ := reg.Resolve(ser, p.Version)
+	if second.Wire.GetExpectedVolume()[0].GetCoefficient() == 999999 {
+		t.Fatal("one reader's edit to the wire message reached the registry — the next order " +
+			"pinned to this version would store a curve that no longer hashes to it")
+	}
+	if _, err := volprofilefeed.Decode(second.Wire); err != nil {
+		t.Fatalf("the registry's own message no longer describes its version: %v", err)
+	}
+}
+
+// A PROFILE WITH NO MESSAGE IS REFUSED, AND COUNTED.
+//
+// Such a value cannot be stamped on an order, so admission would pin a version
+// this pod can resolve and the pod that replaces it cannot — #943's gap, re-entered
+// through a hand-built fold instead of through the bus. Refusing it puts the
+// failure on the counter an operator already watches for "the producer is speaking
+// and this build is refusing it", rather than in a parent that stops advancing
+// three days later.
+func TestFold_RefusesAProfileThatCarriesNoMessage(t *testing.T) {
+	reg := volprofilefeed.NewRegistry(0)
+	p := mustDecode(t, curve(t, day2, 100, 400))
+	p.Wire = nil
+
+	reg.Fold(p)
+
+	if got := reg.Versions(ser); got != 0 {
+		t.Fatalf("versions = %d after folding a profile with no message, want 0 — a version "+
+			"resolvable on this pod alone is exactly what #943 closed", got)
+	}
+	if _, refused, _, _ := reg.Stats(); refused != 1 {
+		t.Errorf("refused = %d, want 1 — a fold that drops a profile without counting it is "+
+			"indistinguishable from a feed nobody is publishing on", refused)
+	}
+}
+
+// A CURVE'S VERSION DEPENDS ON WHICH BOOK IT DESCRIBES.
+//
+// # What rests on this
+//
+// services/oms/internal/order.storedMarket checks that the curve stored on an
+// order names the order's own (instrument, venue). That check is REDUNDANT while
+// this holds — a message for another book cannot carry this order's pin, because
+// the pin is a hash of content that includes the book — and it is kept as the belt
+// under that brace. Redundant is not the same as unnecessary: versionOf's inputs
+// are a list somebody maintains, and the day the series leaves that list, the OMS
+// check becomes the only thing standing between a pin and a curve measured on a
+// different exchange, where the same instrument has a different intraday shape.
+//
+// So this test is what makes that check honest rather than superstitious. If it
+// ever fails, the OMS check is no longer redundant and must not be removed.
+func TestVersion_DependsOnTheSeries(t *testing.T) {
+	base := curve(t, day1, 100, 400)
+
+	elsewhere := proto.Clone(base).(*marketpb.VolumeProfile)
+	elsewhere.Mic = base.GetMic() + "-2"
+	if got := elsewhere.GetVersion(); got != base.GetVersion() {
+		t.Fatalf("the fixture changed the version field itself (%q vs %q); it must change only "+
+			"the venue so the HASH is what is being observed", got, base.GetVersion())
+	}
+	if _, err := volprofilefeed.Decode(elsewhere); err == nil {
+		t.Fatal("a curve measured on a DIFFERENT venue still hashed to this venue's version — a " +
+			"parent order's pin no longer identifies which book its schedule was sized against, " +
+			"and services/oms/internal/order.storedMarket's series check has stopped being " +
+			"redundant and become load-bearing")
+	}
+
+	renamed := proto.Clone(base).(*marketpb.VolumeProfile)
+	renamed.InstrumentId = base.GetInstrumentId() + "-PERP"
+	if _, err := volprofilefeed.Decode(renamed); err == nil {
+		t.Fatal("a curve measured on a DIFFERENT instrument still hashed to this instrument's " +
+			"version — see above; the two are one property")
+	}
+}
+
 // THE HANDLER IS A bus.EventHandler, asserted at build time: a signature drift
 // would leave the subscription in the composition root failing to compile rather
 // than the fold silently unwired.
