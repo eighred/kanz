@@ -86,7 +86,7 @@ func newRealProducerReconciler(t *testing.T, cfg bus.ProducerConfig) (*custody.R
 		CashCurrency: "USD", Effective: runAt, Knowledge: runAt,
 	})
 	r, err := custody.NewReconciler(store,
-		func(context.Context, string) (*ledger.Book, error) { return book, nil },
+		func(context.Context, custody.Subject) (*ledger.Book, error) { return book, nil },
 		prod, new(big.Rat), nil, nil, func() time.Time { return runAt })
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)

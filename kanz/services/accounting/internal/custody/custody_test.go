@@ -72,7 +72,7 @@ func bookWith(positions map[string]int64, cash map[string]int64) *ledger.Book {
 }
 
 func loaderFor(b *ledger.Book) BookLoader {
-	return func(context.Context, string) (*ledger.Book, error) { return b, nil }
+	return func(context.Context, Subject) (*ledger.Book, error) { return b, nil }
 }
 
 func subject() Subject {
@@ -258,7 +258,7 @@ func TestFailedRunIsRecordedAndNotClean(t *testing.T) {
 		t.Fatalf("SaveStatement: %v", err)
 	}
 	pub := &capturePublisher{}
-	failing := func(context.Context, string) (*ledger.Book, error) { return nil, errors.New("pool is down") }
+	failing := func(context.Context, Subject) (*ledger.Book, error) { return nil, errors.New("pool is down") }
 	r, err := NewReconciler(store, failing, pub, new(big.Rat), nil, nil, func() time.Time { return t0 })
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
@@ -960,8 +960,8 @@ func TestOnePairsFailureDoesNotSkipTheOthers(t *testing.T) {
 		t.Fatalf("SaveStatement: %v", err)
 	}
 	pub := &capturePublisher{}
-	loader := func(_ context.Context, portfolioID string) (*ledger.Book, error) {
-		if portfolioID == "PF1" {
+	loader := func(_ context.Context, sub Subject) (*ledger.Book, error) {
+		if sub.PortfolioID == "PF1" {
 			return nil, errors.New("pool is down")
 		}
 		return bookWith(map[string]int64{"AAPL": 100}, nil), nil

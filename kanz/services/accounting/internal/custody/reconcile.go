@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -27,16 +28,57 @@ type Publisher interface {
 	Publish(ctx context.Context, e bus.Event) error
 }
 
-// BookLoader materializes a portfolio's current book. It is a function rather
-// than the ledger.Store interface so the reconciler depends on the one operation
-// it needs instead of on the whole journal surface.
-type BookLoader func(ctx context.Context, portfolioID string) (*ledger.Book, error)
+// BookLoader materializes the book ONE custodian's statement is compared against.
+// It is a function rather than the ledger.Store interface so the reconciler
+// depends on the one operation it needs instead of on the whole journal surface.
+//
+// IT TAKES THE WHOLE SUBJECT, NOT THE PORTFOLIO ID (#1006). It used to take
+// portfolioID alone, and there was therefore no parameter through which the
+// custodian on the subject COULD reach the book side — the comparison loaded the
+// whole portfolio and handed it to one custodian's statement. Threading the
+// subject rather than a second string is what makes the omission impossible to
+// reintroduce: a loader that ignores the custodian now has to ignore a field it
+// was handed.
+type BookLoader func(ctx context.Context, subject Subject) (*ledger.Book, error)
 
 // LedgerBookLoader is the production BookLoader over a ledger store.
-func LedgerBookLoader(store ledger.Store) BookLoader {
-	return func(ctx context.Context, portfolioID string) (*ledger.Book, error) {
-		book, _, err := ledger.MaterializeCurrent(ctx, store, portfolioID)
-		return book, err
+//
+// A nil scope, or a portfolio with one custodian, loads the WHOLE book — the
+// pre-#1006 behaviour, which is correct for a single custodian and does not move.
+// A portfolio custodied in two or more places folds only the entries that settled
+// against THIS custodian's exchange accounts, and REFUSES when the journal holds
+// value on an account no custodian claims.
+func LedgerBookLoader(store ledger.Store, scope *BookScope) BookLoader {
+	return func(ctx context.Context, subject Subject) (*ledger.Book, error) {
+		if !scope.Scoped(subject.PortfolioID) {
+			book, _, err := ledger.MaterializeCurrent(ctx, store, subject.PortfolioID)
+			return book, err
+		}
+		accounts, claimed := scope.For(subject.PortfolioID, subject.CustodianID)
+		if len(accounts) == 0 {
+			// NewBookScope refuses this configuration, so reaching it means the
+			// scope was built by some other path. Fail rather than fall back to
+			// the whole book, which is the exact wrong answer #1006 is about.
+			return nil, fmt.Errorf("custody: no exchange accounts declared for %s:%s, so there is no "+
+				"book slice to compare its statement against", subject.PortfolioID, subject.CustodianID)
+		}
+		book, unmapped, err := ledger.MaterializeForAccounts(ctx, store, subject.PortfolioID, accounts, claimed)
+		if err != nil {
+			return nil, err
+		}
+		if len(unmapped) > 0 {
+			// A PARTIAL BOOK MUST NOT RECONCILE. accounting.proto says it on the
+			// statement side of this same comparison: "a partial level read as
+			// complete manufactures a break for every position it omitted, which
+			// is worse than no reconciliation at all because it buries the real
+			// breaks in noise." An account nobody claimed is that, on the book
+			// side — so the run FAILS and names the account.
+			return nil, fmt.Errorf("custody: portfolio %s holds value in exchange account(s) %s, which no "+
+				"custodian in ACCOUNTING_CUSTODY_ACCOUNTS claims. Reconciling %s without them would compare "+
+				"a book missing those holdings and break every one of them; add each account to the custodian "+
+				"that holds it", subject.PortfolioID, strings.Join(unmapped, ", "), subject.CustodianID)
+		}
+		return book, nil
 	}
 }
 
@@ -123,7 +165,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 		return r.recordFailure(ctx, subject, now, fmt.Sprintf("load statement: %v", err))
 	}
 
-	book, err := r.book(ctx, subject.PortfolioID)
+	book, err := r.book(ctx, subject)
 	if err != nil {
 		return r.recordFailure(ctx, subject, now, fmt.Sprintf("materialize book: %v", err))
 	}

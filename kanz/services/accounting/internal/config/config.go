@@ -51,6 +51,16 @@ type Config struct {
 	// scheduler configured with no pairs reproduces exactly that, with the added
 	// cost of looking configured.
 	CustodyPairs []string
+	// CustodyAccounts declares which exchange accounts each (portfolio,
+	// custodian) holds, as "portfolio:custodian:account[,account...]" entries.
+	//
+	// IT IS REQUIRED EXACTLY WHEN A PORTFOLIO HAS MORE THAN ONE CUSTODIAN, and
+	// custody.NewBookScope refuses the start without it (#1006). The book side of
+	// the comparison used to load the whole portfolio regardless of the custodian
+	// on the subject, so each custodian's run reported every position held at the
+	// other as MISSING_AT_CUSTODIAN. A single-custodian portfolio needs no entry:
+	// the whole book against its one custodian is correct.
+	CustodyAccounts []string
 	// CustodyInterval is how often each pair is reconciled.
 	CustodyInterval time.Duration
 	// CustodyLagDays is how many days back from the run instant the reconciled
@@ -243,6 +253,7 @@ func Load() (Config, error) {
 
 		CustodyStatementSubject: env.Or("ACCOUNTING_CUSTODY_STATEMENT_SUBJECT", DefaultCustodyStatementSubject),
 		CustodyPairs:            env.SplitList(os.Getenv("ACCOUNTING_CUSTODY_PAIRS")),
+		CustodyAccounts:         env.SplitList(os.Getenv("ACCOUNTING_CUSTODY_ACCOUNTS")),
 		CustodyInterval:         custodyInterval,
 		CustodyLagDays:          custodyLagDays,
 		CustodyTolerance:        os.Getenv("ACCOUNTING_CUSTODY_TOLERANCE"),

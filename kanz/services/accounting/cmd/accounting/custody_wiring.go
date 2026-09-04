@@ -118,8 +118,35 @@ func buildCustodyPlane(
 			"ACCOUNTING_DATABASE_URL for a durable lifecycle")
 	}
 
+	// THE BOOK SIDE IS SCOPED TO THE CUSTODIAN, AND A MISCONFIGURATION REFUSES
+	// HERE (#1006). NewBookScope fails the start rather than the first tick: a
+	// portfolio custodied in two places with nothing saying which accounts sit
+	// where would compare the WHOLE book against each custodian in turn, and
+	// report every position held at the other as MISSING_AT_CUSTODIAN. A control
+	// that will assert a wrong answer must not reach a running pod.
+	accountDecl, err := custody.ParseCustodyAccounts(cfg.CustodyAccounts)
+	if err != nil {
+		return nil, err
+	}
+	scope, err := custody.NewBookScope(pairs, accountDecl)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range pairs {
+		if scope.Scoped(p.PortfolioID) {
+			continue
+		}
+		// Said out loud because "one custodian, whole book" is CORRECT and
+		// "several custodians, whole book" is the defect — and from outside the
+		// process the two look identical. NewBookScope has already refused the
+		// second, so this line is the positive record of the first.
+		logger.Info("accounting: custody reconciliation compares the whole portfolio book",
+			"portfolio", p.PortfolioID, "custodian", p.CustodianID,
+			"reason", "one custodian configured for this portfolio")
+	}
+
 	plane.reconciler, err = custody.NewReconciler(
-		plane.store, custody.LedgerBookLoader(ledgerStore), publisher, tolerance, plane.metrics, logger, nil)
+		plane.store, custody.LedgerBookLoader(ledgerStore, scope), publisher, tolerance, plane.metrics, logger, nil)
 	if err != nil {
 		return nil, err
 	}
