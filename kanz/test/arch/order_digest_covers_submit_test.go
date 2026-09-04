@@ -96,6 +96,23 @@ var orderDigestExempt = map[string]string{
 // what reaches a venue and when. The single entry below is not a caller field at
 // all.
 var orderDigestScheduleExempt = map[string]string{
+	"volume_profile": "THE PLATFORM STAMPS IT AND THE CALLER CANNOT (#943), on the same line and " +
+		"for the same reason as volume_profile_version below — the curve is the version's own " +
+		"content, so the two must be exempt together or the pair is half-protected. " +
+		"IT IS THE MORE DANGEROUS HALF, AND THAT ARGUES FOR THE EXEMPTION RATHER THAN AGAINST IT. " +
+		"A version names a curve somebody measured; a curve IS one, so a caller able to send this " +
+		"would supply a market nobody published — and since the OMS checks the two against each " +
+		"other rather than against the feed, a self-consistent pair a client sent would verify. " +
+		"That is precisely why services/oms/internal/order.validateSchedule clears BOTH before " +
+		"reading either, and why a digest is the wrong control here: hashing a field the platform " +
+		"overwrites cannot stop a client setting it, it can only make every approval of a VWAP or " +
+		"POV order fail, in #511's shape. What stops it is that nothing a proposer sends survives " +
+		"into the admitted order, and services/oms/internal/order." +
+		"TestValidateSchedule_DiscardsAClientSuppliedProfileVersion sends a genuine forged pair " +
+		"and asserts neither field reaches the store. " +
+		"WHAT AN APPROVER IS PROMISED IS UNCHANGED by this field existing: the schedule's SHAPE " +
+		"- algo, window, slice_count and both caps - is hashed, and what this carries is the " +
+		"measured market data neither party chooses.",
 	"volume_profile_version": "THE PLATFORM STAMPS IT AND THE CALLER CANNOT (#897). It records " +
 		"which published market.v1.VolumeProfile a volume-driven schedule was derived against, and " +
 		"the OMS RESOLVES it at admission: services/oms/internal/order.validateSchedule clears " +
