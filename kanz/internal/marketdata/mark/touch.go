@@ -44,7 +44,9 @@ type touch struct {
 //
 // IT IS THE SAFE ACCESSOR, with the same contract Mark has: ok == false when
 // the instrument was never quoted or when the newest quote is older than
-// maxAge, and the caller's job is then to record NOTHING rather than a zero
+// touchMaxAge — the width's OWN bound, which is shorter than the mark's
+// wherever a caller set one (#956) — and the caller's job is then to record
+// NOTHING rather than a zero
 // width. A zero spread is a real and different claim from an unobservable one —
 // it says the book was tight and crossing was free — and an execution report
 // that cannot tell them apart will score every unquoted instrument as the
@@ -78,11 +80,15 @@ func (s *Source) Touch(instrument string) (bid, ask *big.Rat, asOf time.Time, ok
 // divergence would not look like a bug: it would look like an execution-quality
 // problem on a healthy spine, or silence on a dead one, and the metric is the
 // only place either could be seen from.
+// IT READS touchMaxAge AND NOT maxAge (#956). The mark's bound is six missed
+// ticker polls; the same number against a 1s quote cadence is thirty missed
+// publishes, and the width is the leg a spread cost is computed from. The two
+// producers are different, so the two bounds are.
 func (s *Source) touchUsableLocked(t touch) bool {
 	if t.bid == nil || t.ask == nil {
 		return false
 	}
-	return !(s.maxAge > 0 && s.now().Sub(t.asOf) > s.maxAge)
+	return !(s.touchMaxAge > 0 && s.now().Sub(t.asOf) > s.touchMaxAge)
 }
 
 // recordTouchLocked stores one quote's two legs. The caller holds the write lock
@@ -112,12 +118,18 @@ func (s *Source) recordTouchLocked(instrument string, bid, ask *big.Rat, asOf ti
 // tombstone already carries the staleness diagnosis for that instrument. Keeping
 // a second tombstone population would be memory held to distinguish two cases
 // nothing distinguishes.
+//
+// IT SWEEPS ON touchMaxAge, the same bound touchUsableLocked reads, so an
+// entry Touch refuses is an entry the next sweep drops. Reading the mark's
+// maxAge here instead would hold every width for the longer of the two bounds
+// — memory retained for entries no accessor can answer from — and would make
+// TouchStats's held count a population with no reader.
 func (s *Source) sweepTouchesLocked(now time.Time) {
-	if s.maxAge <= 0 {
+	if s.touchMaxAge <= 0 {
 		return
 	}
 	for id, t := range s.touches {
-		if now.Sub(t.asOf) > s.maxAge {
+		if now.Sub(t.asOf) > s.touchMaxAge {
 			delete(s.touches, id)
 		}
 	}

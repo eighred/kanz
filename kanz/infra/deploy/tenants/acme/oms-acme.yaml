@@ -89,6 +89,10 @@ spec:
               value: ""
             - name: OMS_REQUIRE_VENUE_ACCOUNT
               value: "false"
+            - name: OMS_PRICE_MAX_AGE
+              value: 30s
+            - name: OMS_QUOTE_MAX_AGE
+              value: 6s
             - name: OMS_CONSUMER_GROUP
               value: oms
             - name: SPIFFE_ENDPOINT_SOCKET

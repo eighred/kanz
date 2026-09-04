@@ -139,7 +139,10 @@ func TestAnExpiredWidthIsHeldButNotLive(t *testing.T) {
 	now = base.Add(time.Hour)
 
 	if _, _, _, ok := s.Touch("BTC-USD"); ok {
-		t.Fatal("Touch answered for a width an hour past OMS_PRICE_MAX_AGE")
+		// This Source names no WithTouchMaxAge, so the width inherits the mark's
+		// bound — the OMS ships a tighter OMS_QUOTE_MAX_AGE (#956), and an hour
+		// is past either of them.
+		t.Fatal("Touch answered for a width an hour past its staleness bound")
 	}
 	held, live := s.TouchStats()
 	if held != 1 {

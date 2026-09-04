@@ -743,11 +743,15 @@ data:
           # gauges never matches, because __name__ differs.
           #
           # for: 15m IS DERIVED FROM THE WIDTH'S OWN LIFETIME. A width is usable for
-          # OMS_PRICE_MAX_AGE (30s by default) and is swept at most sweepInterval
-          # (30s) later, so one minute bounds how long a live quote feed can leave
-          # this at zero. 15m is fifteen consecutive such windows: longer than a
-          # rolling restart, a market-data rollout or a vendor reconnect, and short
-          # enough to be true before the first order of a session is measured.
+          # OMS_QUOTE_MAX_AGE — 6s as shipped, the width's own bound since #956 gave
+          # it one, NOT the mark's OMS_PRICE_MAX_AGE it used to share — and is swept
+          # at most sweepInterval (30s) later, so well under a minute bounds how long
+          # a live quote feed can leave this at zero. 15m is fifteen consecutive such
+          # windows: longer than a rolling restart, a market-data rollout or a vendor
+          # reconnect, and short enough to be true before the first order of a session
+          # is measured. Tightening OMS_QUOTE_MAX_AGE shortens the lifetime and so
+          # only widens this margin; it is the sweep, not the bound, that sets the
+          # floor.
           #
           # WARNING, NOT CRITICAL, AND IT NOW HAS A PRODUCER TO NAME. It is not the
           # `absent()` trap alerts/README.md records: that fired forever over a series

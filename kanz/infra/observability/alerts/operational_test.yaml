@@ -1457,8 +1457,9 @@ tests:
         exp_alerts: []
 
   # THE `for: 15m` DURATION, EXECUTED IN BOTH DIRECTIONS. A width lives for
-  # OMS_PRICE_MAX_AGE (30s) and is swept at most sweepInterval (30s) later, so one
-  # minute bounds how long a live feed can read zero. The vendor disconnect below
+  # OMS_QUOTE_MAX_AGE (6s as shipped — the width's own bound since #956, not the
+  # mark's OMS_PRICE_MAX_AGE it used to share) and is swept at most sweepInterval
+  # (30s) later, so well under a minute bounds how long a live feed can read zero. The vendor disconnect below
   # starts at t=6m: at 18m it has been zero for twelve minutes and must still be
   # PENDING, and by 25m it has crossed fifteen and must fire. One series, both
   # claims — a `for:` asserted only from the firing side is half-checked.

@@ -39,9 +39,21 @@ import (
 	"github.com/eighred/kanz/pkg/bus"
 )
 
-// omsPriceMaxAge is the OMS's shipped OMS_PRICE_MAX_AGE default — the bound the
-// width has to be inside when the arrival stamp reads it.
+// omsPriceMaxAge is the OMS's shipped OMS_PRICE_MAX_AGE default — the MARK's
+// bound, six missed observations against the venue adapters' 5s ticker poll.
 const omsPriceMaxAge = 30 * time.Second
+
+// omsQuoteMaxAge is the OMS's shipped OMS_QUOTE_MAX_AGE default, and it is the
+// bound the width below actually has to be inside (#956).
+//
+// THIS CONSTANT USED NOT TO EXIST, and that is what the measurement in this test
+// turned up: the width aged under the MARK's 30s, which against market-ingest's
+// 1s snapshot ticker is thirty missed publishes for the six the mark gets. The
+// numbers this harness logged — p50 559ms, p95 1.009s, max 1.093s over 746
+// samples at the deployed cadence — are what 6s is derived against: six publishes
+// of the width's own producer, and about five and a half times the worst age a
+// healthy feed produced.
+const omsQuoteMaxAge = 6 * time.Second
 
 func TestATopOfBookQuoteCrossesTheRealSpineAndBecomesALiveWidth(t *testing.T) {
 	url := os.Getenv("TEST_NATS_URL")
@@ -89,7 +101,7 @@ func TestATopOfBookQuoteCrossesTheRealSpineAndBecomesALiveWidth(t *testing.T) {
 	// OMS's own maxAge, folded by mark.Handle, subscribed on the OMS's default
 	// price subject through SubscribeBroadcast — services/oms/cmd/oms/main.go
 	// does exactly this for each of cfg.PriceSubjects.
-	marks := mark.New(time.Now, omsPriceMaxAge)
+	marks := mark.New(time.Now, omsPriceMaxAge, mark.WithTouchMaxAge(omsQuoteMaxAge))
 	subCtx, stopSub := context.WithCancel(ctx)
 	defer stopSub()
 	go func() { _ = consumer.SubscribeBroadcast(subCtx, "market.*.quote", marks.Handle) }()
@@ -115,9 +127,11 @@ func TestATopOfBookQuoteCrossesTheRealSpineAndBecomesALiveWidth(t *testing.T) {
 	t.Cleanup(func() { stopEngine(); <-engDone })
 
 	// THE MEASUREMENT, not merely the assertion: how old the width is by the time
-	// the fold can answer for it. That number is what decides whether
-	// OMS_PRICE_MAX_AGE is a sane bound for a WIDTH as opposed to a mark, and it
-	// has to come from the wire rather than from arithmetic about the ticker.
+	// the fold can answer for it. That number is what decided that a WIDTH needs a
+	// bound of its own rather than the mark's (#956), and it has to come from the
+	// wire rather than from arithmetic about the ticker. It is now checked against
+	// the bound it produced, so a quote producer that slows down fails here rather
+	// than in a cost report.
 	var bid, ask *big.Rat
 	var asOf time.Time
 	deadline := time.Now().Add(30 * time.Second)
@@ -139,12 +153,15 @@ func TestATopOfBookQuoteCrossesTheRealSpineAndBecomesALiveWidth(t *testing.T) {
 		t.Fatalf("Touch = %s/%s over the real spine, want 50000/50001", bid.RatString(), ask.RatString())
 	}
 	age := time.Since(asOf)
-	t.Logf("MEASURED width age at the fold: %v (venue book time %s, OMS_PRICE_MAX_AGE %v, "+
-		"engine snapshot interval %v)", age.Round(time.Millisecond), venueTime.Format(time.RFC3339Nano),
-		omsPriceMaxAge, 200*time.Millisecond)
-	if age > omsPriceMaxAge {
-		t.Fatalf("the width was already %v old when the fold first answered for it — inside a %v "+
-			"bound this is a coin flip, not a benchmark", age, omsPriceMaxAge)
+	t.Logf("MEASURED width age at the fold: %v (venue book time %s, OMS_QUOTE_MAX_AGE %v, "+
+		"OMS_PRICE_MAX_AGE %v, engine snapshot interval %v)", age.Round(time.Millisecond),
+		venueTime.Format(time.RFC3339Nano), omsQuoteMaxAge, omsPriceMaxAge, 200*time.Millisecond)
+	if age > omsQuoteMaxAge {
+		t.Fatalf("the width was already %v old when the fold first answered for it, past the %v "+
+			"OMS_QUOTE_MAX_AGE the OMS ships. Either the quote producer has slowed down — in "+
+			"which case the derivation in infra/deploy/oms-deploy.yaml is stale and the bound "+
+			"must move with it — or the bound is a jitter trap that drops good widths",
+			age, omsQuoteMaxAge)
 	}
 
 	// And the mid rides the same event, so the price and the width the arrival

@@ -100,8 +100,51 @@ type Source struct {
 	touches map[string]touch
 	now     func() time.Time
 	maxAge  time.Duration
+	// touchMaxAge is the QUOTED WIDTH's own staleness bound, separate from
+	// maxAge because the two observations have different PRODUCERS with
+	// different cadences and the same number means different things to each
+	// (#956).
+	//
+	// maxAge was calibrated for a mark: its producers are the venue adapters'
+	// REST ticker polls at 5s (WorkerDeps.TickerInterval), so the OMS's 30s is
+	// six missed observations — an outage tolerance. A width comes from
+	// market-ingest's book snapshot ticker at 1s
+	// (MARKET_INGEST_SNAPSHOT_INTERVAL), so the SAME 30s is thirty missed
+	// publishes: five times looser in the only unit that matters, on the leg
+	// where precision matters most.
+	//
+	// It fails in the FLATTERING direction, which is why it is not left alone.
+	// A stale width is usually a TIGHTER width — the book was calm when it was
+	// last quoted, and the event that widened it is what stopped the quotes —
+	// so the half-spread comes back too small and the residual lands in impact
+	// or timing, charging the algorithm for what the market charged.
+	//
+	// It DEFAULTS TO maxAge when no option sets it, so every existing caller
+	// keeps exactly the behaviour it had.
+	touchMaxAge time.Duration
 	// lastSweep is when the expired-entry sweep last ran. Guarded by mu.
 	lastSweep time.Time
+}
+
+// Option adjusts a Source at construction. There is no setter: every bound this
+// fold enforces is fixed for the life of the Source, so a stale read cannot be
+// explained by a knob something turned while it was running.
+type Option func(*Source)
+
+// WithTouchMaxAge gives the QUOTED WIDTH a staleness bound of its own, separate
+// from the mark's (#956). See Source.touchMaxAge for why the two differ.
+//
+// A NON-POSITIVE d IS IGNORED rather than treated as "never expires". The
+// never-expires posture belongs to New's maxAge, where a caller states it once
+// for the whole Source; accepting it here would let a width outlive the mark
+// taken from the very same quote, which is the one arrangement neither bound
+// was ever meant to express.
+func WithTouchMaxAge(d time.Duration) Option {
+	return func(s *Source) {
+		if d > 0 {
+			s.touchMaxAge = d
+		}
+	}
 }
 
 // New returns an empty mark source.
@@ -110,16 +153,26 @@ type Source struct {
 // deliberate choice a caller has to make out loud: tv-sync passes 0 because a
 // P&L display degrades gracefully on a stale mark, while the OMS passes a real
 // bound because an admission decision does not.
-func New(now func() time.Time, maxAge time.Duration) *Source {
+func New(now func() time.Time, maxAge time.Duration, opts ...Option) *Source {
 	if now == nil {
 		now = time.Now
 	}
-	return &Source{
+	s := &Source{
 		prices:  make(map[string]entry),
 		touches: make(map[string]touch),
 		now:     now,
 		maxAge:  maxAge,
+		// The width inherits the mark's bound unless an option overrides it, so
+		// adding this second bound changed no caller's behaviour on the day it
+		// landed. Resolved HERE and not at each read: a fallback evaluated in
+		// touchUsableLocked would be a second place the two bounds relate to
+		// each other, and the point of the field is that they do not.
+		touchMaxAge: maxAge,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Mark returns the latest non-expired mark for an instrument, or nil when none
@@ -268,7 +321,12 @@ func (s *Source) Handle(_ context.Context, env *envelopepb.Envelope, payload []b
 // never expire — there is nothing to tombstone, and sweeping would be a walk
 // that can never free anything.
 func (s *Source) sweepLocked() {
-	if s.maxAge <= 0 {
+	// BOTH BOUNDS ARE TESTED, not just the mark's (#956). Since touchMaxAge can
+	// be shorter than maxAge, a Source with maxAge <= 0 and a real touch bound is
+	// expressible, and returning on maxAge alone would leave every expired width
+	// in the map forever while Touch correctly refused it — memory held for
+	// entries nothing can read.
+	if s.maxAge <= 0 && s.touchMaxAge <= 0 {
 		return
 	}
 	now := s.now()
@@ -279,8 +337,12 @@ func (s *Source) sweepLocked() {
 	// THE TOUCH MAP RIDES THE SAME THROTTLE (#866), so retaining the quoted width
 	// costs one extra amortised walk rather than a second timer. It shares the
 	// throttle and not the semantics — an expired price is tombstoned, an expired
-	// touch is deleted; see sweepTouchesLocked for why.
+	// touch is deleted; see sweepTouchesLocked for why. It no longer shares the
+	// BOUND either: sweepTouchesLocked reads touchMaxAge.
 	s.sweepTouchesLocked(now)
+	if s.maxAge <= 0 {
+		return
+	}
 	for id, e := range s.prices {
 		if e.price != nil && s.expired(e) {
 			s.prices[id] = entry{price: nil, asOf: e.asOf}
