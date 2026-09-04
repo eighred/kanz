@@ -1,6 +1,8 @@
 package wealth
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -30,6 +32,32 @@ const (
 	ProfileAggressive
 )
 
+// String names the profile for a log line, an operator-facing JSON field and an
+// error message. It exists because the alternative everywhere is the raw ordinal:
+// "profile=4" in a warning about a household nobody is checking is a number an
+// operator has to go look up, and a read surface that returns 0 for
+// ProfileUnspecified is indistinguishable from one that omitted the field.
+func (p RiskProfile) String() string {
+	switch p {
+	case ProfileConservative:
+		return "CONSERVATIVE"
+	case ProfileModerate:
+		return "MODERATE"
+	case ProfileBalanced:
+		return "BALANCED"
+	case ProfileGrowth:
+		return "GROWTH"
+	case ProfileAggressive:
+		return "AGGRESSIVE"
+	case ProfileUnspecified:
+		return "UNSPECIFIED"
+	default:
+		// Named rather than rendered blank: a profile this build does not know
+		// reaching a log line is itself the finding.
+		return fmt.Sprintf("RiskProfile(%d)", int(p))
+	}
+}
+
 // ModelPortfolio is the target allocation for a risk profile — the book a
 // household of that profile should hold. Targets maps instrument id to its target
 // weight; the weights are expected to sum to 1.
@@ -37,6 +65,80 @@ type ModelPortfolio struct {
 	ModelID string
 	Profile RiskProfile
 	Targets map[string]float64
+	// Tolerance is the per-instrument weight band this model may drift by before
+	// a rebalance is due — the argument Drift.Breached is compared against. It
+	// lives BESIDE THE MODEL rather than in the evaluator because it is a policy
+	// choice that differs per model, and a band compiled into code cannot be
+	// changed without a deploy.
+	//
+	// A zero tolerance is REFUSED by Validate, not defaulted: Breached compares
+	// `max > tolerance`, so a zero band marks every household holding anything at
+	// all as permanently breached, and "nobody set a band" would be
+	// indistinguishable from "rebalance on any deviation whatsoever".
+	Tolerance float64
+	// RecordedBy and Reason are the operator principal and the decision this model
+	// records — carried into the domain rather than dropped at the decode because
+	// the registry's refusals name them. Two models claiming one risk profile is
+	// an operator error somebody has to fix, and "growth-2024 (operator:akif) and
+	// growth-2025 (operator:sam) both claim GROWTH" is the difference between a
+	// log line an operator can act on and one they have to go digging behind.
+	RecordedBy string
+	Reason     string
+}
+
+// weightSumTolerance is how far Σ targets may sit from 1 before Validate refuses
+// the model. The weights arrive as operator-authored protojson decimals, so an
+// exact comparison would reject a correct model for the last bit of a base-2
+// rounding; 1e-6 is far tighter than any allocation anybody writes by hand and
+// far looser than float64 noise over a few dozen instruments.
+const weightSumTolerance = 1e-6
+
+// Validate reports why a model portfolio may not be admitted to the catalogue,
+// or nil. It is called in TWO places on purpose — by cmd/kanz-model before it
+// dials the broker, and by ModelRegistry.Put on delivery — because the model
+// subject is COMPACTED: a bad publish is not recoverable by leaving it alone, it
+// stays the answer for that model id until somebody publishes another. Validating
+// only at the consumer would let a wrong model become every consumer's permanent
+// state; validating only at the publisher would trust that this tool is the only
+// writer the subject will ever have.
+//
+// Every rule here exists because breaking it produces a CONFIDENTLY WRONG drift
+// rather than an error. A model whose weights sum to 0.5 reports every household
+// of that profile as ~50 points overweight; a model with no targets reports every
+// held instrument as fully drifted; an unspecified profile serves no household at
+// all while looking like a published model.
+func (m ModelPortfolio) Validate() error {
+	switch {
+	case m.ModelID == "":
+		return errors.New("model_id is required: it is the catalogue key and the subject's compaction key")
+	case m.Profile == ProfileUnspecified:
+		return errors.New("risk_profile is required: it is the ONLY thing that selects this model for a household, " +
+			"and an unspecified profile serves nobody while looking like a published model")
+	case len(m.Targets) == 0:
+		return errors.New("target_weights is required: a model with no targets reports every instrument a household " +
+			"holds as fully drifted from it")
+	case m.Tolerance <= 0:
+		return errors.New("drift_tolerance must be > 0: Breached compares max > tolerance, so a zero band marks every " +
+			"household holding anything at all as permanently breached")
+	case m.Tolerance > 1:
+		return fmt.Errorf("drift_tolerance %v exceeds 1: a band wider than the whole book can never be breached, "+
+			"which silently disables rebalancing for every household on this model", m.Tolerance)
+	case m.RecordedBy == "":
+		return errors.New("recorded_by is required: this subject is compacted, so publishing a model discards the " +
+			"one it replaced and nothing is left to attribute the change to")
+	case m.Reason == "":
+		return errors.New("reason is required: an unexplained overwrite of the allocation every household of a risk " +
+			"profile is measured against is not auditable")
+	}
+	var sum float64
+	for _, w := range m.Targets {
+		sum += w
+	}
+	if math.Abs(sum-1) > weightSumTolerance {
+		return fmt.Errorf("target_weights sum to %v, not 1: every household on this model would be reported as "+
+			"%v of drift that is the model's arithmetic, not the book's", sum, math.Abs(sum-1))
+	}
+	return nil
 }
 
 // SelectModel returns the model serving profile, or false if none does. Models

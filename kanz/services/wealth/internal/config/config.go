@@ -49,6 +49,25 @@ type Config struct {
 	// book. Defaults to wealth.SubjectHouseholdAll — the compacted wildcard over
 	// every household. Comma-separated.
 	Subjects []string
+	// ModelSubject is the wealth.v1.ModelPortfolio catalogue subject (WEALTH-01d).
+	// It is a SEPARATE field from Subjects above, not another entry in it, because
+	// the two need OPPOSITE delivery semantics and putting them in one list would
+	// silently give the catalogue the wrong one:
+	//
+	//   · Subjects rides the DURABLE QUEUE GROUP. A valuation must be folded once
+	//     across the deployment, and with replicas: 2 a queue group is what makes
+	//     that true.
+	//   · ModelSubject rides SubscribeBroadcastReady (DeliverLastPerSubject). The
+	//     catalogue is per-process state, so EVERY replica must receive EVERY
+	//     model. Under a queue group the two pods would hold DISJOINT catalogues
+	//     and a household's drift would resolve or not depending on which pod the
+	//     Service happened to pick — the exact split-brain openStore's doc
+	//     describes for the ephemeral book.
+	//
+	// Empty ⇒ the catalogue never arms, every household reports
+	// outcome="catalogue_unarmed", and no drift is evaluated at all. That is
+	// visible on kanz_wealth_model_catalogue_armed rather than silent.
+	ModelSubject string
 
 	// SPIFFESocket is the SPIFFE Workload API socket (SEC-01a CSI mount). When
 	// set, the bus dials the spine over mTLS presenting this workload SVID; empty
@@ -89,6 +108,7 @@ func Load() (Config, error) {
 		Source:             env.Or("WEALTH_SOURCE", "wealth"),
 		ConsumerGroup:      env.Or("WEALTH_CONSUMER_GROUP", "wealth"),
 		Subjects:           subjects,
+		ModelSubject:       env.Or("WEALTH_MODEL_SUBJECT", wealth.SubjectModelAll),
 		SPIFFESocket:       os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}, nil
 }

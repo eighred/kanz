@@ -378,6 +378,19 @@ data:
               subscribe: { allow: ["_INBOX.>"] }
             }
           }
+          # kanz-model publishes the MODEL PORTFOLIO (WEALTH-01d, #1010) on
+          # wealth.> — see internal/wealth/subject.go's SubjectModelFor. It is
+          # the only producer of a target allocation on this platform: before it,
+          # wealth.v1.ModelPortfolio was specified in proto and constructed by no
+          # Go code, so no household's drift from its model could be computed at
+          # all. Same no-manifest-yet caveat as kanz-mandate above.
+          {
+            user: "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-model"
+            permissions: {
+              publish: { allow: ["wealth.>"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
           # kanz-redrive is the DLQ DRAIN (#220, cmd/kanz-redrive): it reads
           # messages parked on `dlq.<subject>` and republishes them, byte for
           # byte, onto the subject named in their Kanz-DLQ-Original-Subject
@@ -1547,14 +1560,27 @@ data:
           # every dialer to be admitted here; test/arch/nats_identity_test.go's
           # TestNATSDialersHaveBrokerAccounts caught the gap before it shipped.
           #
-          # It only CONSUMES kanz-household's wealth.household.valued.>
-          # (internal/wealth's SubjectHouseholdAll, WEALTH_SUBJECTS) via
-          # bus.NewConsumer(..., bus.WithDLQ(client)) — no service code
-          # publishes to NATS on this account.
+          # It only CONSUMES — no service code publishes to NATS on this
+          # account. TWO subjects, with DELIBERATELY OPPOSITE delivery:
+          #
+          #   · kanz-household's wealth.household.valued.> (SubjectHouseholdAll,
+          #     WEALTH_SUBJECTS) through the DURABLE QUEUE GROUP, so a valuation
+          #     is folded once across the deployment's two replicas.
+          #   · kanz-model's wealth.model.published.> (SubjectModelAll,
+          #     WEALTH_MODEL_SUBJECT) through SubscribeBroadcastReady, because
+          #     the model catalogue is PER-PROCESS state and every replica needs
+          #     every model. Under a queue group the two pods would hold disjoint
+          #     catalogues and a household's drift would resolve or not depending
+          #     on which pod the Service picked (#1010).
+          #
+          # Both are bus.NewConsumer(..., bus.WithDLQ(client)), so BOTH dlq.
+          # subjects must be publishable: a model that fails validation is the
+          # LAST message on its compacted subject and is redelivered on every
+          # boot, so it must land somewhere inspectable rather than vanish.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/wealth"
             permissions: {
-              publish: { allow: ["dlq.wealth.household.valued.>", "$JS.API.>", "$JS.ACK.>"] }
-              subscribe: { allow: ["wealth.household.valued.>", "_INBOX.>"] }
+              publish: { allow: ["dlq.wealth.household.valued.>", "dlq.wealth.model.published.>", "$JS.API.>", "$JS.ACK.>"] }
+              subscribe: { allow: ["wealth.household.valued.>", "wealth.model.published.>", "_INBOX.>"] }
             }
           }
           # webhook-ingest PUBLISHES the audit-root signal FACT

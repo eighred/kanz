@@ -247,6 +247,19 @@ func loadValuation(path string) (*wealthpb.HouseholdValued, error) {
 		return nil, errors.New("as_of is required: the exposure view aggregates over it, and there is no safe default for a valuation with no point in time")
 	case hv.GetCurrencyCode() == "":
 		return nil, errors.New("currency_code is required: a market value with no currency is not a value")
+	case hv.GetRiskProfile() == wealthpb.RiskProfile_RISK_PROFILE_UNSPECIFIED:
+		// REQUIRED, and the reason is compaction rather than completeness. This
+		// message is a REPLACEMENT: publishing one without a profile does not leave
+		// the household's previous profile standing, it ERASES it, and a household
+		// with no profile selects no model portfolio — so its drift stops being
+		// evaluated and the wealth service reports it under
+		// kanz_wealth_drift_evaluations_total{outcome="no_profile"} from then on.
+		// A custodial statement does not carry the risk profile, so this is exactly
+		// the field an operator transcribing one would leave out (#1010).
+		return nil, errors.New("risk_profile is required: it selects the model portfolio this " +
+			"household's book is measured against, and this stream is COMPACTED — publishing a " +
+			"valuation without it ERASES the household's profile rather than leaving the previous " +
+			"one standing, and nothing measures its drift afterwards")
 	}
 
 	// FromProtoChecked, not FromProto: this file transcribes an advisor's or

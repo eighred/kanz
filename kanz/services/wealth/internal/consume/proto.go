@@ -73,8 +73,84 @@ func DecodeProto(payload []byte) (wealth.Household, error) {
 		})
 	}
 
+	profile, ok := domainProfile(m.GetRiskProfile())
+	if !ok {
+		// A profile this build does not know is REFUSED, not coerced. The
+		// alternative is a numeric cast, which would map an unknown wire value
+		// onto a domain profile no model serves — the household would then read
+		// as "no target allocation" forever, which is indistinguishable from a
+		// firm that has published none. A DLQ'd valuation is visible; that is not.
+		return wealth.Household{}, fmt.Errorf(
+			"consume: household %s carries risk_profile %v, which this build does not know; "+
+				"refusing rather than folding a household whose target allocation cannot be selected",
+			m.GetHouseholdId(), m.GetRiskProfile())
+	}
+
 	return wealth.Household{
 		HouseholdID: m.GetHouseholdId(),
 		Accounts:    accounts,
+		RiskProfile: profile,
+	}, nil
+}
+
+// domainProfile maps the wire risk profile onto the domain one. It is an EXPLICIT
+// SWITCH rather than wealth.RiskProfile(v), because the two enums agreeing today
+// is a fact about today: a value added to wealth.v1.RiskProfile and not to
+// internal/wealth would be cast to a domain profile that no model can serve, and
+// the household would silently report no target allocation rather than failing.
+// ok=false is the UNKNOWN third value the callers turn into a refusal (#1010).
+func domainProfile(p wealthpb.RiskProfile) (wealth.RiskProfile, bool) {
+	switch p {
+	case wealthpb.RiskProfile_RISK_PROFILE_UNSPECIFIED:
+		return wealth.ProfileUnspecified, true
+	case wealthpb.RiskProfile_RISK_PROFILE_CONSERVATIVE:
+		return wealth.ProfileConservative, true
+	case wealthpb.RiskProfile_RISK_PROFILE_MODERATE:
+		return wealth.ProfileModerate, true
+	case wealthpb.RiskProfile_RISK_PROFILE_BALANCED:
+		return wealth.ProfileBalanced, true
+	case wealthpb.RiskProfile_RISK_PROFILE_GROWTH:
+		return wealth.ProfileGrowth, true
+	case wealthpb.RiskProfile_RISK_PROFILE_AGGRESSIVE:
+		return wealth.ProfileAggressive, true
+	default:
+		return wealth.ProfileUnspecified, false
+	}
+}
+
+// DecodeModelProto turns a wealth.v1.ModelPortfolio payload into the domain model
+// portfolio the catalogue holds. It is the WEALTH-01d twin of DecodeProto above
+// and lives beside it for the same reason: internal/wealth imports no wealthpb by
+// design (see internal/wealth's package doc on the float-at-the-analytics-edge
+// stance), so the wire→domain crossing happens here and nowhere else.
+//
+// Target weights are already dimensionless double on the wire, so unlike a
+// valuation there is no Decimal crossing and nothing to lose exactly. What CAN be
+// lost is the meaning of the numbers, which is why the shape is validated by
+// wealth.ModelPortfolio.Validate at the registry rather than here — one rule, at
+// the point of admission, shared with cmd/kanz-model's pre-flight check.
+func DecodeModelProto(payload []byte) (wealth.ModelPortfolio, error) {
+	var m wealthpb.ModelPortfolio
+	if err := proto.Unmarshal(payload, &m); err != nil {
+		return wealth.ModelPortfolio{}, fmt.Errorf("consume: ModelPortfolio decode: %w", err)
+	}
+	profile, ok := domainProfile(m.GetRiskProfile())
+	if !ok {
+		return wealth.ModelPortfolio{}, fmt.Errorf(
+			"consume: model %s carries risk_profile %v, which this build does not know; refusing rather "+
+				"than admitting a model no household can be matched to",
+			m.GetModelId(), m.GetRiskProfile())
+	}
+	targets := make(map[string]float64, len(m.GetTargetWeights()))
+	for id, w := range m.GetTargetWeights() {
+		targets[id] = w
+	}
+	return wealth.ModelPortfolio{
+		ModelID:    m.GetModelId(),
+		Profile:    profile,
+		Targets:    targets,
+		Tolerance:  m.GetDriftTolerance(),
+		RecordedBy: m.GetRecordedBy(),
+		Reason:     m.GetReason(),
 	}, nil
 }
