@@ -131,6 +131,46 @@ type BacklogSource interface {
 	Backlog(ctx context.Context, subject, group string) ([]PartitionBacklog, error)
 }
 
+// EphemeralBacklogSource is a transport that can report how far behind ONE
+// ephemeral consumer is, addressed by the name the BROKER generated for it
+// (#1009).
+//
+// It exists because BacklogSource cannot serve the broadcast path at all:
+// Backlog resolves the consumer through durableName(group, subject), and an
+// ephemeral consumer has no durable name to resolve. That is why
+// kanz_bus_pending_messages was structurally unavailable for every broadcast
+// subscription in the estate — the compliance position book, both mandate
+// registries, the OMS's mark and cash folds, the halt gate — rather than merely
+// unwired.
+//
+// It is a SEPARATE interface, asserted the way BroadcastSubscriber is, because
+// broadcast is a NATS-only concept here: KafkaClient implements BacklogSource
+// and must not be forced to answer a question its transport does not have.
+type EphemeralBacklogSource interface {
+	BacklogKind() BacklogKind
+	BacklogForConsumer(ctx context.Context, stream, consumer string) ([]PartitionBacklog, error)
+}
+
+// The `delivery` label's two values. A queue-group durable is SHARED across the
+// replicas of a service and its backlog is a queue of work; a broadcast
+// consumer is PER POD and its backlog is a control reading stale state. Summing
+// them would be meaningless, so they are told apart on the series rather than
+// inferred from an empty group — and the estate's three KEDA queries all select
+// an explicit group=, so neither is picked up by a scaler it was not meant for.
+const (
+	deliveryLabelGroup     = "group"
+	deliveryLabelBroadcast = "broadcast"
+)
+
+// backlogRead is ONE poll, however the consumer is addressed: the durable path
+// asks by (subject, group), the broadcast path by the ephemeral consumer's
+// generated name. Injecting the read is what keeps a single loop and a single
+// failure policy — the deletion, the two health series and the transition
+// logging below are the part that took #283 fifty lines to get right, and a
+// second copy of them for the broadcast path is how one of the two would come to
+// zero-fill during an outage.
+type backlogRead func(ctx context.Context) ([]PartitionBacklog, error)
+
 // startBacklogPoll launches the backlog poller for one subscription and returns
 // a function that stops it and waits for it to finish clearing up.
 //
@@ -153,11 +193,45 @@ func (c *Consumer) startBacklogPoll(ctx context.Context, subject, group string) 
 	if !ok || c.metrics == nil {
 		return func() {}
 	}
+	return c.pollInBackground(ctx, src.BacklogKind(), subject, group, deliveryLabelGroup,
+		func(pollCtx context.Context) ([]PartitionBacklog, error) {
+			return src.Backlog(pollCtx, subject, group)
+		})
+}
+
+// startEphemeralBacklogPoll is startBacklogPoll for a BROADCAST subscription
+// (#1009).
+//
+// The only difference is how the consumer is addressed. subscribeEphemeral hands
+// back the stream and the server-generated consumer name as soon as the consumer
+// exists, and that pair is the durable name's equivalent — everything after it,
+// including the failure policy that makes an unanswered poll DELETE the series
+// rather than zero-fill it, is the same loop.
+//
+// The group label is empty because a broadcast consumer HAS no group: it is one
+// consumer per pod, not one shared across replicas. delivery="broadcast" is what
+// says so out loud, so an empty group reads as a fact about the subscription
+// rather than as a value somebody forgot to set.
+func (c *Consumer) startEphemeralBacklogPoll(ctx context.Context, subject, stream, consumer string) func() {
+	src, ok := c.subscriber.(EphemeralBacklogSource)
+	if !ok || c.metrics == nil || stream == "" || consumer == "" {
+		return func() {}
+	}
+	return c.pollInBackground(ctx, src.BacklogKind(), subject, "", deliveryLabelBroadcast,
+		func(pollCtx context.Context) ([]PartitionBacklog, error) {
+			return src.BacklogForConsumer(pollCtx, stream, consumer)
+		})
+}
+
+// pollInBackground runs one poller and returns the stop-and-join both callers use.
+func (c *Consumer) pollInBackground(
+	ctx context.Context, kind BacklogKind, subject, group, delivery string, read backlogRead,
+) func() {
 	pollCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pollBacklog(pollCtx, src, c.metrics, subject, group)
+		pollBacklog(pollCtx, read, kind, c.metrics, subject, group, delivery)
 	}()
 	// Joined, not abandoned: the poller DELETES its series on the way out (see
 	// pollBacklog), and returning from Subscribe before that has happened would
@@ -210,8 +284,9 @@ func (c *Consumer) startBacklogPoll(ctx context.Context, subject, group string) 
 // line per failed poll is a log flood during precisely the outage someone is
 // reading the log through. The series above are the durable signal; the log is
 // the pointer to which pod and which subject.
-func pollBacklog(ctx context.Context, src BacklogSource, m *BusMetrics, subject, group string) {
-	kind := src.BacklogKind()
+func pollBacklog(
+	ctx context.Context, read backlogRead, kind BacklogKind, m *BusMetrics, subject, group, delivery string,
+) {
 	logger := slog.Default()
 	// seen tracks the partitions this loop has published, so a Kafka rebalance
 	// that moves a partition away does not leave its last lag reading behind as
@@ -223,8 +298,8 @@ func pollBacklog(ctx context.Context, src BacklogSource, m *BusMetrics, subject,
 		// This subscription is over. Whatever this pod last measured is no longer
 		// something it is measuring, and a series left behind here is the same
 		// stale fiction the failure path above refuses to publish.
-		m.forgetBacklog(kind, subject, group)
-		m.forgetBacklogPollHealth(kind, subject, group)
+		m.forgetBacklog(kind, subject, group, delivery)
+		m.forgetBacklogPollHealth(kind, subject, group, delivery)
 	}()
 
 	ticker := time.NewTicker(backlogPollInterval)
@@ -234,13 +309,13 @@ func pollBacklog(ctx context.Context, src BacklogSource, m *BusMetrics, subject,
 		// must not spend a whole interval exporting no series, because during that
 		// interval it is indistinguishable from the bug this replaces.
 		pollCtx, cancel := context.WithTimeout(ctx, backlogPollTimeout)
-		readings, err := src.Backlog(pollCtx, subject, group)
+		readings, err := read(pollCtx)
 		cancel()
 
 		switch {
 		case err != nil:
-			m.observeBacklogPollFailure(kind, subject, group)
-			m.forgetBacklog(kind, subject, group)
+			m.observeBacklogPollFailure(kind, subject, group, delivery)
+			m.forgetBacklog(kind, subject, group, delivery)
 			seen = map[string]bool{}
 			if !failing {
 				failing = true
@@ -248,20 +323,20 @@ func pollBacklog(ctx context.Context, src BacklogSource, m *BusMetrics, subject,
 					"has been DELETED rather than reported as zero, so any KEDA trigger over it now errors and "+
 					"holds replicas instead of scaling in; kanz_bus_backlog_poll_last_success_timestamp_seconds "+
 					"carries the age of the last real answer",
-					"subject", subject, "group", group, "transport", kind.transport(), "err", err)
+					"subject", subject, "group", group, "delivery", delivery, "transport", kind.transport(), "err", err)
 			}
 		default:
-			m.setBacklog(kind, subject, group, readings, seen)
+			m.setBacklog(kind, subject, group, delivery, readings, seen)
 			next := make(map[string]bool, len(readings))
 			for _, r := range readings {
 				next[r.Partition] = true
 			}
 			seen = next
-			m.observeBacklogPollSuccess(kind, subject, group)
+			m.observeBacklogPollSuccess(kind, subject, group, delivery)
 			if failing {
 				failing = false
 				logger.Info("bus: backlog poll recovered",
-					"subject", subject, "group", group, "transport", kind.transport())
+					"subject", subject, "group", group, "delivery", delivery, "transport", kind.transport())
 			}
 		}
 

@@ -357,8 +357,53 @@ const tickSubjectPrefix = "market."
 // escape hatch for a service that can show it needs different numbers, and
 // DialNATS validates it rather than trusting it.
 func tuningForSubject(subject string) ConsumerTuning {
+	return tuningFor(subject, deliveryGroup)
+}
+
+// deliveryClass is WHICH SUBSCRIPTION PATH a consumer is being created for. It
+// exists because the work/control split is a property of the PATH, while the
+// tick class is a property of the SUBJECT — and before #1009 the ephemeral path
+// resolved neither: it hard-coded controlTuning for every subject it was handed.
+type deliveryClass int
+
+const (
+	// deliveryGroup is the queue-group durable: one delivery shared across the
+	// replicas of a service. Work.
+	deliveryGroup deliveryClass = iota
+	// deliveryBroadcast is the per-pod ephemeral consumer: every replica folds
+	// every message into its own in-process state. Control.
+	deliveryBroadcast
+)
+
+// tuningFor resolves the delivery contract for ONE consumer, from the subject
+// and the path (#1009).
+//
+// THE TICK CLASS IS RESOLVED BY SUBJECT ON BOTH PATHS, AND THAT IS THE CHANGE.
+// subscribeEphemeral used to take controlTuning unconditionally, so a broadcast
+// subscription on market.* got MaxAckPending 16 where this file reasoned it
+// needed 512, and UNBOUNDED redelivery where this file reasoned a stale tick
+// must be given up on after five attempts. Two production services subscribe to
+// market.* through that path — compliance's price spine
+// (COMPLIANCE_PRICE_SUBJECTS = market.*.trade,market.*.quote) and the OMS's — so
+// the reasoning written into tickTuning did not reach the consumers it was
+// written for.
+//
+// WHY THE HALT FACT IS NOT PUT AT RISK BY THIS. controlTuning's MaxDeliver -1 is
+// there because "I could not read the brake signal" must never stop being
+// re-offered and thereby resolve to "carry on trading". That argument is about
+// the BRAKE SIGNAL, and nothing carrying one rides market.*: the halt FACT, the
+// trading mode and every mandate sit on their own subjects and still resolve to
+// controlTuning here. A tick is the one class where continuing to re-offer a
+// message is the wrong answer, and tickTuning says so in its own words.
+//
+// So: tick by subject, then work-or-control by path. Two axes, each deciding the
+// thing it actually knows about.
+func tuningFor(subject string, class deliveryClass) ConsumerTuning {
 	if strings.HasPrefix(subject, tickSubjectPrefix) {
 		return tickTuning
+	}
+	if class == deliveryBroadcast {
+		return controlTuning
 	}
 	return workTuning
 }

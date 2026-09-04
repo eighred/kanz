@@ -185,3 +185,104 @@ func jetStreamConsumerConfigLiterals(t *testing.T, root string) []consumerConfig
 	}
 	return out
 }
+
+// #1009: BOTH CONSUMER-CREATION SITES MUST DERIVE THEIR CONTRACT FROM THE SAME
+// RESOLVER.
+//
+// The guard above is default-deny over the PRESENCE of the three fields, and
+// says so: it "deliberately does not check the VALUES". That is still the right
+// scope for it — an AST scanner re-deriving durations from source text would be a
+// worse copy of pkg/bus/tuning_internal_test.go. But presence is what let the
+// ephemeral path set all three fields, explicitly, from a class nobody chose for
+// the subject it was on.
+//
+// subscribeEphemeral read `tuning := controlTuning` for every subject a broadcast
+// was ever taken on, and tuningForSubject — the resolver that gives market.* its
+// own contract — was never consulted there. Two production services subscribe to
+// market.* through that path (compliance's price spine and the OMS's), so both
+// got MaxAckPending 16 where tuning.go reasoned the tick path needs 512, and
+// unbounded redelivery where the same file reasoned a stale tick must be dropped.
+// Every existing check passed: the fields were present, and the resolver unit
+// test asserted the resolver — which was not what that path called.
+//
+// So this arm checks RESOLUTION rather than values: whatever a consumer-creation
+// site puts in those fields must come from a `tuning` it obtained by CALLING the
+// shared resolver. A third creation path cannot then inherit a class nobody
+// chose, which is the same default-deny shape #237 used for presence.
+func TestBothConsumerCreationSitesResolveTheirTuning(t *testing.T) {
+	const (
+		busFile  = "pkg/bus/nats.go"
+		resolver = "tuningFor"
+	)
+	root := moduleRoot(t)
+	fset := token.NewFileSet()
+	path := filepath.Join(root, filepath.FromSlash(busFile))
+	f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", busFile, err)
+	}
+
+	type site struct {
+		fn       string
+		line     int
+		resolves bool
+	}
+	var sites []site
+	for _, decl := range f.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		creates, at := false, 0
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			sel, ok := cl.Type.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "ConsumerConfig" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "jetstream" {
+				creates = true
+				at = fset.Position(cl.Pos()).Line
+			}
+			return true
+		})
+		if !creates {
+			continue
+		}
+		// Does this function obtain its contract by CALLING the resolver?
+		resolved := false
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && strings.HasPrefix(id.Name, resolver) {
+				resolved = true
+			}
+			return !resolved
+		})
+		sites = append(sites, site{fn: fd.Name.Name, line: at, resolves: resolved})
+	}
+
+	// NON-VACUITY: the two known sites must both be found, or an AST walk that
+	// matched nothing would pass this no matter what either path did.
+	if len(sites) < 2 {
+		t.Fatalf("found %d consumer-creation function(s) in %s, want at least 2 (Subscribe and "+
+			"subscribeEphemeral) — the scanner is broken or consumer creation moved, and this guard "+
+			"is checking nothing", len(sites), busFile)
+	}
+	for _, s := range sites {
+		if !s.resolves {
+			t.Errorf("%s:%d — %s creates a JetStream consumer without calling %s.\n\n"+
+				"Its three delivery fields are set, so TestJetStreamConsumersAreExplicitlyTuned passes; "+
+				"they are just set from a class nobody chose for the subject. That is #1009: the ephemeral "+
+				"path hard-coded controlTuning, so compliance's price spine and the OMS's — both broadcast "+
+				"subscriptions on market.* — ran with MaxAckPending 16 where tuning.go reasoned they need "+
+				"512, and unbounded redelivery of a quote the same file says must be dropped when stale.",
+				busFile, s.line, s.fn, resolver)
+		}
+	}
+}

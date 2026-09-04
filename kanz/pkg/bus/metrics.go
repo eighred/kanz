@@ -153,12 +153,12 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 		// queries in infra/deploy/*-scaledobject.yaml are written that way.
 		consumerLag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kanz_bus_consumer_lag",
-			Help: "Kafka consumer lag (partition high-water offset - committed group offset) — the KEDA scale signal. Absent while the broker is unreachable; never zero-filled.",
-		}, []string{"subject", "group", "partition"}),
+			Help: "Kafka consumer lag (partition high-water offset - committed group offset) — the KEDA scale signal. Absent while the broker is unreachable; never zero-filled. delivery=\"group\" is a shared queue-group durable; delivery=\"broadcast\" is a per-pod ephemeral consumer arming in-process control state (#1009).",
+		}, []string{"subject", "group", "partition", "delivery"}),
 		pending: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kanz_bus_pending_messages",
-			Help: "NATS JetStream consumer pending messages (ConsumerInfo.NumPending) — the KEDA scale signal. Absent while the broker is unreachable; never zero-filled.",
-		}, []string{"subject", "group"}),
+			Help: "NATS JetStream consumer pending messages (ConsumerInfo.NumPending) — the KEDA scale signal. Absent while the broker is unreachable; never zero-filled. delivery=\"group\" is a shared queue-group durable; delivery=\"broadcast\" is a per-pod ephemeral consumer arming in-process control state, whose group label is empty because it has no group (#1009).",
+		}, []string{"subject", "group", "delivery"}),
 		// THE POLLER'S OWN HEALTH, AND THE REASON THE DELETION ABOVE IS SAFE. An
 		// absent backlog gauge is not self-describing: "the broker is not
 		// answering" and "nobody subscribes to that subject" look identical from
@@ -168,11 +168,11 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 		backlogPollFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kanz_bus_backlog_poll_failures_total",
 			Help: "Backlog polls that did not get an answer from the broker, by subject, consumer group and transport (nats|kafka). Each one also DELETED the backlog gauge for that subscription rather than publishing a zero.",
-		}, []string{"subject", "group", "transport"}),
+		}, []string{"subject", "group", "transport", "delivery"}),
 		backlogPollSuccess: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kanz_bus_backlog_poll_last_success_timestamp_seconds",
 			Help: "Unix time of the last backlog poll that the broker answered. `time() - this` is the age of the newest real reading; it is the series that makes a MISSING kanz_bus_consumer_lag / kanz_bus_pending_messages attributable to a broker that stopped answering rather than to a subject nobody consumes.",
-		}, []string{"subject", "group", "transport"}),
+		}, []string{"subject", "group", "transport", "delivery"}),
 		connected: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kanz_bus_connected",
 			Help: "1 while this client holds a live NATS connection, 0 while it does not.",
@@ -322,21 +322,21 @@ func (m *BusMetrics) observeRedrive(subject, result string) {
 // Reader.Stats() would also have been the wrong call to make on an interval:
 // its counter fields are read-and-reset (`atomic.SwapInt64`), so a lag poller
 // calling it would silently zero Fetches/Messages/Bytes/Errors for anyone else.
-func (m *BusMetrics) SetConsumerLag(subject, group, partition string, lag float64) {
+func (m *BusMetrics) SetConsumerLag(subject, group, partition, delivery string, lag float64) {
 	if m == nil {
 		return
 	}
-	m.consumerLag.WithLabelValues(subject, group, partition).Set(lag)
+	m.consumerLag.WithLabelValues(subject, group, partition, delivery).Set(lag)
 }
 
 // SetPending publishes the NATS JetStream pending count for one (subject,
 // group). Fed by pollBacklog (backlog.go) via NATSClient.Backlog, which reads
 // ConsumerInfo.NumPending off the same durable Subscribe binds.
-func (m *BusMetrics) SetPending(subject, group string, pending float64) {
+func (m *BusMetrics) SetPending(subject, group, delivery string, pending float64) {
 	if m == nil {
 		return
 	}
-	m.pending.WithLabelValues(subject, group).Set(pending)
+	m.pending.WithLabelValues(subject, group, delivery).Set(pending)
 }
 
 // setBacklog writes one poll's readings into whichever gauge family the
@@ -348,7 +348,7 @@ func (m *BusMetrics) SetPending(subject, group string, pending float64) {
 // a number nothing will ever update again — double-counted by any aggregation
 // and immune to the deletion the failure path performs, because the poll that
 // would have deleted it is succeeding.
-func (m *BusMetrics) setBacklog(kind BacklogKind, subject, group string, readings []PartitionBacklog, prev map[string]bool) {
+func (m *BusMetrics) setBacklog(kind BacklogKind, subject, group, delivery string, readings []PartitionBacklog, prev map[string]bool) {
 	if m == nil {
 		return
 	}
@@ -357,9 +357,9 @@ func (m *BusMetrics) setBacklog(kind BacklogKind, subject, group string, reading
 		current[r.Partition] = true
 		switch kind {
 		case BacklogPending:
-			m.SetPending(subject, group, float64(r.Messages))
+			m.SetPending(subject, group, delivery, float64(r.Messages))
 		case BacklogLag:
-			m.SetConsumerLag(subject, group, r.Partition, float64(r.Messages))
+			m.SetConsumerLag(subject, group, r.Partition, delivery, float64(r.Messages))
 		}
 	}
 	if kind != BacklogLag {
@@ -367,7 +367,7 @@ func (m *BusMetrics) setBacklog(kind BacklogKind, subject, group string, reading
 	}
 	for p := range prev {
 		if !current[p] {
-			m.consumerLag.DeleteLabelValues(subject, group, p)
+			m.consumerLag.DeleteLabelValues(subject, group, p, delivery)
 		}
 	}
 }
@@ -375,11 +375,11 @@ func (m *BusMetrics) setBacklog(kind BacklogKind, subject, group string, reading
 // forgetBacklog removes every backlog series for (subject, group). Called when
 // a poll fails and when the subscription ends — the two states in which this pod
 // is no longer measuring this backlog, and must therefore not be reporting one.
-func (m *BusMetrics) forgetBacklog(kind BacklogKind, subject, group string) {
+func (m *BusMetrics) forgetBacklog(kind BacklogKind, subject, group, delivery string) {
 	if m == nil {
 		return
 	}
-	labels := prometheus.Labels{"subject": subject, "group": group}
+	labels := prometheus.Labels{"subject": subject, "group": group, "delivery": delivery}
 	switch kind {
 	case BacklogPending:
 		m.pending.Delete(labels)
@@ -394,37 +394,37 @@ func (m *BusMetrics) forgetBacklog(kind BacklogKind, subject, group string) {
 // paired with the deletion in forgetBacklog, never a substitute for it: the
 // counter says the poller is in trouble, the deletion is what stops a stale or
 // invented backlog reaching a KEDA trigger.
-func (m *BusMetrics) observeBacklogPollFailure(kind BacklogKind, subject, group string) {
+func (m *BusMetrics) observeBacklogPollFailure(kind BacklogKind, subject, group, delivery string) {
 	if m == nil {
 		return
 	}
-	m.backlogPollFailures.WithLabelValues(subject, group, kind.transport()).Inc()
+	m.backlogPollFailures.WithLabelValues(subject, group, kind.transport(), delivery).Inc()
 	// Touch the failure counter's success partner so the pair is complete from
 	// the first poll. Without this a subscription whose very first poll fails
 	// exports a failure count and NO timestamp, and `time() - <absent>` is not a
 	// staleness an alert can express.
-	m.backlogPollSuccess.WithLabelValues(subject, group, kind.transport())
+	m.backlogPollSuccess.WithLabelValues(subject, group, kind.transport(), delivery)
 }
 
 // observeBacklogPollSuccess stamps the wall-clock time of a poll the broker
 // answered. `time() - kanz_bus_backlog_poll_last_success_timestamp_seconds` is
 // the age of the newest real backlog reading, which is the only thing that makes
 // an ABSENT backlog gauge attributable.
-func (m *BusMetrics) observeBacklogPollSuccess(kind BacklogKind, subject, group string) {
+func (m *BusMetrics) observeBacklogPollSuccess(kind BacklogKind, subject, group, delivery string) {
 	if m == nil {
 		return
 	}
-	m.backlogPollSuccess.WithLabelValues(subject, group, kind.transport()).SetToCurrentTime()
+	m.backlogPollSuccess.WithLabelValues(subject, group, kind.transport(), delivery).SetToCurrentTime()
 }
 
 // forgetBacklogPollHealth drops the poller's own series when the subscription
 // ends. Kept separate from forgetBacklog because the failure path calls that one
 // and MUST NOT call this one — deleting the staleness evidence at the moment it
 // becomes load-bearing is how the outage goes back to looking like an idle bus.
-func (m *BusMetrics) forgetBacklogPollHealth(kind BacklogKind, subject, group string) {
+func (m *BusMetrics) forgetBacklogPollHealth(kind BacklogKind, subject, group, delivery string) {
 	if m == nil {
 		return
 	}
-	m.backlogPollFailures.DeleteLabelValues(subject, group, kind.transport())
-	m.backlogPollSuccess.DeleteLabelValues(subject, group, kind.transport())
+	m.backlogPollFailures.DeleteLabelValues(subject, group, kind.transport(), delivery)
+	m.backlogPollSuccess.DeleteLabelValues(subject, group, kind.transport(), delivery)
 }
