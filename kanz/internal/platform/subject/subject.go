@@ -12,8 +12,6 @@
 // disagreement would be invisible until a control read the wrong book.
 package subject
 
-import "strings"
-
 // A POSITION IS STATE, AND ITS SUBJECT HAS TO SAY WHICH POSITION IT IS (EXEC-M20).
 //
 // Every position FACT rode the flat `risk.position.changed`, and JetStream compacts PER
@@ -76,18 +74,4 @@ const (
 func VenuePositionFor(tenantID, portfolioID, venue, instrumentID string) string {
 	return VenuePositionChanged + "." +
 		Token(tenantID) + "." + Token(portfolioID) + "." + Token(venue) + "." + Token(instrumentID)
-}
-
-// Token makes an id safe as a single NATS subject token.
-//
-// A subject is DOT-DELIMITED, and `*` (one token) and `>` (all remaining tokens) are
-// wildcards. An id carrying any of them does not fail — it silently changes what a
-// publish lands on and what a subscription matches. An empty id would collapse the token
-// entirely, so two different entities would share one subject and one would overwrite the
-// other on a compacted stream.
-func Token(s string) string {
-	if s == "" {
-		return "_"
-	}
-	return strings.NewReplacer(".", "_", "*", "_", ">", "_", " ", "_").Replace(s)
 }

@@ -24,17 +24,31 @@ func TestTokenNeutralizesSubjectSyntax(t *testing.T) {
 
 		// A dot would SPLIT one token into two, so `fund.alpha` would land the position
 		// under a different (portfolio, instrument) pair than the one it belongs to.
-		{"fund.alpha", "fund_alpha"},
+		// It is ESCAPED rather than replaced: `fund.alpha` and `fund_alpha` are two
+		// portfolios and must not share one compacted subject (#999).
+		{"fund.alpha", "fund%2Ealpha"},
 
-		// `>` matches everything to the right and `*` matches one token: an id carrying
-		// either would turn a subscription for ONE entity into a subscription for many.
-		{"fund>", "fund_"},
-		{"fund*", "fund_"},
-		{"a b", "a_b"},
+		// `>` matches everything to the right and `*` matches one token, but only as a
+		// WHOLE token — measured against nats-server 2.14.5, both are literal inside a
+		// token. They are escaped anyway: an id that IS ">" would be a wildcard, and
+		// escaping costs nothing an id actually spends.
+		{"fund>", "fund%3E"},
+		{"fund*", "fund%2A"},
+		{"fund_", "fund_"},
 
-		// An empty id must still produce a token, or the subject collapses and two
-		// different entities share one subject.
-		{"", "_"},
+		// A space is the one byte nats-server REFUSES outright.
+		{"a b", "a%20b"},
+		{"a_b", "a_b"},
+
+		// The escape character is itself escaped, or the encoding is not injective:
+		// the id `%2E` and the id `.` would otherwise produce the same token.
+		{"%2E", "%252E"},
+
+		// An empty id must still produce a token, or the subject collapses — and the
+		// sentinel must be one no non-empty id can reach. `%` is only ever emitted as
+		// the lead of a two-hex-digit escape, so `%_` is unreachable.
+		{"", subject.EmptyToken},
+		{"_", "_"},
 	} {
 		if got := subject.Token(tc.in); got != tc.want {
 			t.Errorf("Token(%q) = %q, want %q", tc.in, got, tc.want)
