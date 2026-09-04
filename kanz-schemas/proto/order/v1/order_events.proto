@@ -852,6 +852,66 @@ enum AttributionQuality {
   ATTRIBUTION_QUALITY_TOTAL_ONLY = 2;
 }
 
+// ParticipationQuality says whether a decision's REALISED participation could be
+// measured at all, and how much of it was observed (#1007).
+//
+// # Why it exists
+//
+// EXECUTION_ALGO_POV enforces its cap against the volume profile's FORECAST, at
+// admission, once. Nothing measured what the cap actually turned out to be, so
+// max_participation_rate = 0.08 read from every screen, every audit record and
+// every allocator report as a rate that was honoured, with nothing anywhere able
+// to confirm or contradict it. The rates beside this field are that measurement;
+// this field is what stops the measurement being overread.
+//
+// # A ZERO RATE AND AN UNCOMPUTABLE ONE ARE DIFFERENT CLAIMS
+//
+// The denominator is the volume that actually printed in a slice's interval, and
+// the platform's only realised-volume record is the 1-minute candle series
+// (market.crypto.bar), which emits NO BAR for a minute in which nothing traded —
+// internal/marketedge/bars says at length that it cannot tell "nothing traded"
+// from "the feed was down". So an interval with no candle behind it has NO RATE,
+// not a rate of zero and not an infinite one, and the direction of that error is
+// the one that matters: a forecast is most wrong exactly when the market is
+// thinnest, which is exactly when the cap binds and exactly when a candle is
+// missing. A fabricated zero would report the calmest possible participation in
+// the state the cap exists for.
+enum ParticipationQuality {
+  PARTICIPATION_QUALITY_UNSPECIFIED = 0;
+
+  // NOT_WORKED: the decision was not worked as a schedule, so it has no
+  // intervals to participate in. It is NOT a measurement gap — an ordinary order
+  // is one message at one instant, and "what fraction of the tape was it" is a
+  // question about a working window it never had.
+  PARTICIPATION_QUALITY_NOT_WORKED = 1;
+
+  // MEASURED: every interval in which this decision traded had realised volume
+  // behind it, so realised_participation_rate and max_slice_participation_rate
+  // describe the whole of what was worked.
+  PARTICIPATION_QUALITY_MEASURED = 2;
+
+  // PARTIAL: some intervals that traded had realised volume and some did not.
+  // The rates are computed over the observed intervals ONLY, and
+  // participation_intervals / measured_participation_intervals say how much of
+  // the decision they cover.
+  //
+  // IT IS A DISTINCT VALUE RATHER THAN A DEGRADE TO UNOBSERVABLE, and that is a
+  // deliberate departure from AttributionQuality's all-or-nothing shape. The
+  // decomposition is all-or-nothing because its three legs must SUM to the
+  // headline, so one unmeasurable slice makes the identity false. Participation
+  // has no such identity: a slice measured at 40% against an 8% cap IS a breach,
+  // whatever the interval next to it could or could not be seen. Collapsing it
+  // to UNOBSERVABLE would discard a real, observed exceedance because a
+  // neighbouring minute was quiet — silencing the alarm using exactly the market
+  // thinness that caused both.
+  PARTICIPATION_QUALITY_PARTIAL = 3;
+
+  // UNOBSERVABLE: not one interval in which this decision traded had realised
+  // volume behind it, so both rates are UNSET. The cap this order carried has
+  // not been contradicted and has not been confirmed.
+  PARTICIPATION_QUALITY_UNOBSERVABLE = 4;
+}
+
 // ExecutionAttributionRecorded is what one DECISION cost, decomposed (#866).
 //
 // # The grain is the decision, not the fill
@@ -975,4 +1035,83 @@ message ExecutionAttributionRecorded {
   // decision finished — a replayed or backlogged terminal transition produces a
   // late measurement of an old order.
   google.protobuf.Timestamp measured_at = 19;
+
+  // THE REALISED HALF OF THE PARTICIPATION CONTROL (#1007).
+  //
+  // # What was missing, and why it is on THIS record
+  //
+  // EXECUTION_ALGO_POV refuses a parent the volume profile's FORECAST says
+  // cannot be worked inside max_participation_rate. That is a real admission
+  // control and it is the half that is decidable in advance. The other half —
+  // what the participation TURNED OUT to be once the tape printed — was measured
+  // nowhere: not in a metric, not in a FACT, not in any post-trade record. So a
+  // desk could state a participation cap to a risk committee, to a mandate and
+  // to an allocator, and the platform could neither confirm nor contradict it
+  // for a single order it had ever worked.
+  //
+  // It rides this record rather than a new one because this is already the
+  // once-per-DECISION grain, and participation is a property of the decision:
+  // the fills are the children's, the intervals are the parent's schedule, and
+  // the cap is the parent's. A second FACT would be a second answer to "how did
+  // this decision execute", joined on order_id by every reader forever.
+  //
+  // # THE RATES ARE A LOWER BOUND, AND THE DIRECTION IS THE POINT
+  //
+  // The denominator comes from the 1-minute candle series, so a slice interval
+  // that does not begin and end on a minute is measured against the candles that
+  // COVER it — a window at least as long as the interval, therefore a volume at
+  // least as large, therefore a rate no larger than the true one. An exceedance
+  // reported here is real. A rate under the cap is not proof the cap held, in
+  // the same way internal/marketedge/coverage's credited time is a floor and
+  // internal/marketdata/store/gaps.go's whole window proves nothing.
+  //
+  // # participation_cap IS COPIED SO THE RECORD IS SELF-CONTAINED
+  //
+  // Comparing a measured rate against the cap it was working under otherwise
+  // means joining back to OrderState, which a cost report, a Kafka topic and an
+  // allocator extract each do differently or not at all. The cap is what makes
+  // the two rates beside it mean anything, so it travels with them. Unset when
+  // the decision carried none — every algorithm but POV.
+  common.v1.Decimal participation_cap = 20;
+
+  // realised_participation_rate is what this decision filled, over the volume
+  // that actually printed, across the intervals it traded in and could be seen
+  // in. UNSET when participation_quality is NOT_WORKED or UNOBSERVABLE.
+  common.v1.Decimal realised_participation_rate = 21;
+
+  // max_slice_participation_rate is the worst single interval, and it is the
+  // figure a cap actually bounds. The aggregate above can sit comfortably under
+  // a cap that one thin interval blew through — averaging a busy hour against a
+  // dead one is precisely how an exceeded participation limit hides — so the
+  // maximum is carried separately and it is the one the estate alerts on.
+  common.v1.Decimal max_slice_participation_rate = 22;
+
+  // max_slice_participation_index is which slice produced that maximum, so an
+  // investigation starts at an interval rather than at a window. -1 when no
+  // interval was measurable.
+  int32 max_slice_participation_index = 23;
+
+  ParticipationQuality participation_quality = 24;
+
+  // participation_intervals is how many of the decision's intervals it actually
+  // traded in; measured_participation_intervals is how many of THOSE had
+  // realised volume behind them.
+  //
+  // THE PAIR IS THE COVERAGE SIGNAL, exactly as slices/measured_slices is for
+  // the decomposition, and it is carried even though participation_quality
+  // already says MEASURED or PARTIAL: a parent whose 49th of 50 intervals lost
+  // its candle and one where two of fifty were seen are both PARTIAL, and only
+  // one of them supports a statement about the cap.
+  int32 participation_intervals = 25;
+  int32 measured_participation_intervals = 26;
+
+  // execution_algo is the algorithm that produced this decision's schedule —
+  // EXECUTION_ALGO_UNSPECIFIED for an order that was not worked as one.
+  //
+  // WITHOUT IT AN ATTRIBUTION CANNOT BE GROUPED BY THE THING IT IS MEANT TO
+  // JUDGE. #866 exists so an execution algorithm is a change somebody can prove
+  // is an improvement, and until this field a consumer had to join back to
+  // OrderState to learn which algorithm ran — so the one comparison the whole
+  // measurement was built for was the one it could not serve on its own.
+  ExecutionAlgo execution_algo = 27;
 }

@@ -126,6 +126,34 @@ func (p Plan) boundary(i int) time.Time {
 	return p.Start.Add(offset).UTC()
 }
 
+// Interval is the window slice i is worked over: [boundary(i), boundary(i+1)).
+//
+// # It is exported so the MEASUREMENT can name the same intervals the SCHEDULE
+// # used
+//
+// A realised-participation figure (#1007) divides what a child filled by what
+// actually printed in that child's own interval, and the OMS computes it after
+// the parent is terminal. Reconstructing the boundaries there — `start +
+// i*(end-start)/slices` written a second time — would put the denominator's
+// window and the schedule's due times one rounding apart, which is the exact
+// defect boundary's own comment exists to prevent, moved one package away and
+// out of sight of the tests that hold it here.
+//
+// ok is false for an index outside [0, Slices), rather than a clamped or
+// extrapolated window. A caller asking about a slice that does not exist has
+// already lost track of the schedule, and answering with the last interval would
+// attribute one child's fills to another child's minutes.
+//
+// IT READS NO CLOCK AND HOLDS NO STATE, like everything else in this package.
+// The interval is a function of the parent's durable window and slice count, so
+// two pods measuring the same finished parent measure it over the same minutes.
+func (p Plan) Interval(i int) (from, to time.Time, ok bool) {
+	if p.Slices <= 0 || i < 0 || i >= p.Slices || !p.End.After(p.Start) {
+		return time.Time{}, time.Time{}, false
+	}
+	return p.boundary(i), p.boundary(i + 1), true
+}
+
 // Plan is everything needed to work a parent order, and every field of it lives
 // on the parent order durably. Nothing here is state.
 type Plan struct {

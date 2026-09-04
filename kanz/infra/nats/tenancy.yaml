@@ -1317,6 +1317,25 @@ data:
                   # edge is the authority on this curve and an OMS that published
                   # one would be a second measurement of the same market.
                   "market.crypto.volume_profile",
+                  # THE REALISED CANDLE SERIES (#1007), which is what makes a
+                  # participation cap MEASURABLE rather than merely declared. POV
+                  # enforces its cap against the forecast profile above; this is
+                  # the tape as it actually printed, and the OMS is the only
+                  # process that also holds the decision and its children's fills.
+                  # Folded by SubscribeReplay for the same reason: a participation
+                  # measurement covers a parent's whole working window, and
+                  # delivering only the last message per subject would hand a pod
+                  # one candle for one instrument.
+                  #
+                  # A DENIED SUBSCRIPTION IS SILENT (#787/#788), and here it is
+                  # silent in the worst available way: the OMS starts fine, folds
+                  # nothing, and publishes every worked order's participation as
+                  # UNOBSERVABLE - which is also its honest answer for a market
+                  # nobody measures, so a missing line here reads as a thin tape
+                  # rather than as a permission. SUBSCRIBE ONLY: market-ingest
+                  # folds the candle and an OMS that published one would be a
+                  # second measurement of the same market.
+                  "market.crypto.bar",
                   # WHAT THE PORTFOLIO CAN SPEND (#450), for the pre-trade
                   # buying-power gate. SUBSCRIBE ONLY, and that asymmetry is the
                   # point: accounting is the book of record for cash and the OMS
@@ -1903,6 +1922,11 @@ data:
                   # spine, and without this line its VWAP and POV orders are
                   # refused while the platform tenant's are admitted.
                   "market.crypto.volume_profile",
+                  # The realised candle series (#1007) - mirrors the platform
+                  # grant above; the pod runs the same binary and folds the same
+                  # spine, and without this line its worked orders' participation
+                  # is UNOBSERVABLE while the platform tenant's is measured.
+                  "market.crypto.bar",
                   "accounting.balance.portfolio",
                   "risk.portfolio.measures_computed",
                   "platform.mode.changed",

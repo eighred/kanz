@@ -159,6 +159,12 @@ var marketSubscriptionWithoutAProducer = map[string]string{
 	"acme/oms-acme/market.crypto.volume_profile": "#959 — #897's intraday volume profile. Its " +
 		"absence refuses this tenant's VWAP and POV orders while the platform tenant's are " +
 		"admitted, which is #955 one subject over.",
+	"acme/oms-acme/market.crypto.bar": "#959 — #1007's realised candle series, and the entry " +
+		"above one subject over: without it this tenant's worked orders publish an UNOBSERVABLE " +
+		"participation while the platform tenant's is measured, so no participation cap this " +
+		"tenant declares can be shown to have held. The grant is kept rather than dropped for the " +
+		"reason the volume-profile one is — a tenant OMS runs the same binary and subscribes the " +
+		"same subject, and removing the grant would make the subscription DENIED as well as empty.",
 	"acme/accounting-acme/market.fx.>": "#959 — the FX revaluation spine. Without it this " +
 		"tenant's non-base-currency cash is revalued from nothing.",
 }

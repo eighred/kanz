@@ -24,6 +24,7 @@ import (
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/execution/tca"
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/services/oms/internal/approval"
@@ -69,6 +70,22 @@ type Service struct {
 	// that can measure nothing and one that measures everything look the same
 	// from outside. See WithAttributionCounter.
 	attributions *prometheus.CounterVec
+
+	// realisedVolume is the tape a worked decision's REALISED participation is
+	// measured against (#1007). Nil ⇒ this OMS cannot see what printed, so every
+	// worked parent's participation is published and counted as UNOBSERVABLE —
+	// never as a zero, which would report the calmest possible participation in
+	// exactly the thin market a cap exists for. See WithRealisedVolume.
+	realisedVolume tca.RealisedVolume
+	// participations counts every terminal decision by whether its participation
+	// could be measured. It is the coverage signal for the measurement above:
+	// without it an OMS bound to no tape and one measuring every decision export
+	// the same thing, which is nothing. See WithParticipationCounter.
+	participations *prometheus.CounterVec
+	// capExceeded counts decisions whose measured worst interval exceeded the
+	// participation cap they were admitted under. It is the series that turns "the
+	// forecast was wrong" from an inference into an event.
+	capExceeded *prometheus.CounterVec
 
 	accounts       *execution.AccountBindings
 	requireAccount bool

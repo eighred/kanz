@@ -151,7 +151,7 @@ func (s *Service) attributionRecords(ctx context.Context, st *orderpb.OrderState
 		return nil
 	}
 
-	slices, ok := s.attributionSlices(ctx, st)
+	slices, children, ok := s.attributionSlices(ctx, st)
 	if !ok {
 		return nil
 	}
@@ -174,7 +174,14 @@ func (s *Service) attributionRecords(ctx context.Context, st *orderpb.OrderState
 		return nil
 	}
 
-	payload, ok := attributionPayload(st, a, now)
+	// THE PARTICIPATION MEASUREMENT RUNS BEFORE THE PAYLOAD IS BUILT AND ON THE
+	// SAME CHILDREN (#1007), so the cost figure and the participation figure on
+	// one record describe one set of children. It counts its own outcome whatever
+	// happens next: a decision whose payload turns out unrepresentable still had
+	// its participation observed or not observed, and losing that from the
+	// coverage counter would make an encoding fault read as a market-data gap.
+	part := s.measureParticipation(st, children)
+	payload, ok := attributionPayload(st, a, part, now)
 	if !ok {
 		s.countAttribution(outcomeUnrepresetable)
 		s.logger.Error("oms: an execution attribution was computed and cannot be written down "+
@@ -218,9 +225,9 @@ func (s *Service) attributionRecords(ctx context.Context, st *orderpb.OrderState
 // not an unmeasurable order — measuring the parent as if it had no children
 // would publish a confident zero — so it is counted separately and nothing is
 // published.
-func (s *Service) attributionSlices(ctx context.Context, st *orderpb.OrderState) ([]tca.Slice, bool) {
+func (s *Service) attributionSlices(ctx context.Context, st *orderpb.OrderState) ([]tca.Slice, []*orderpb.OrderState, bool) {
 	if st.GetExecutionSchedule() == nil {
-		return []tca.Slice{sliceOf(st)}, true
+		return []tca.Slice{sliceOf(st)}, nil, true
 	}
 	children, err := s.store.ListByParent(ctx, st.GetOrderId())
 	if err != nil {
@@ -228,13 +235,18 @@ func (s *Service) attributionSlices(ctx context.Context, st *orderpb.OrderState)
 		s.logger.Warn("oms: could not read the children of a finished parent to attribute its "+
 			"execution cost; the decision is missing from the execution-quality report",
 			"order_id", st.GetOrderId(), "err", err)
-		return nil, false
+		return nil, nil, false
 	}
 	out := make([]tca.Slice, 0, len(children))
 	for _, c := range children {
 		out = append(out, sliceOf(c))
 	}
-	return out, true
+	// THE CHILDREN ARE RETURNED ALONGSIDE THE SLICES rather than re-read by the
+	// participation measurement (#1007). A second ListByParent would be a second
+	// answer to "what traded into this decision", and a cancel landing between the
+	// two would put a cost figure and a participation figure describing different
+	// children on one record.
+	return out, children, true
 }
 
 // sliceOf reads one order's contribution to a decision.
@@ -286,7 +298,8 @@ func nilIfUnset(d *commonpb.Decimal) *big.Rat {
 // TOTAL_ONLY result they are nil in the Attribution and stay unset on the wire —
 // unset, not zero, because a consumer handed three zeros cannot tell a market
 // that cost nothing to cross from one nobody could see.
-func attributionPayload(st *orderpb.OrderState, a tca.Attribution, now time.Time) (*orderpb.ExecutionAttributionRecorded, bool) {
+func attributionPayload(st *orderpb.OrderState, a tca.Attribution, part tca.Participation,
+	now time.Time) (*orderpb.ExecutionAttributionRecorded, bool) {
 	qty, ok1 := tca.ToDecimal(a.FilledQuantity)
 	avg, ok2 := tca.ToDecimal(a.AveragePrice)
 	arr, ok3 := tca.ToDecimal(a.ArrivalPrice)
@@ -312,6 +325,14 @@ func attributionPayload(st *orderpb.OrderState, a tca.Attribution, now time.Time
 		MeasuredSlices:   int32(a.Measured),
 		MeasuredAt:       timestamppb.New(now.UTC()),
 	}
+	// THE PARTICIPATION FIGURES ARE ATTACHED BEFORE THE DECOMPOSITION RETURNS
+	// EARLY (#1007), and the ordering is load-bearing rather than tidy: a
+	// TOTAL_ONLY attribution is the ordinary outcome on an estate whose quote
+	// spine covers nothing, so attaching after that return would leave every
+	// record on such an estate carrying no participation quality at all — the
+	// measurement present in the code and absent from every FACT, which is the
+	// state this issue exists to end.
+	attachParticipation(p, st, part)
 	if a.Quality != tca.QualityDecomposed {
 		return p, true
 	}

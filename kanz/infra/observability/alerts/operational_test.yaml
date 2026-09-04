@@ -1616,6 +1616,131 @@ tests:
         alertname: OMSExecutionAttributionUndecomposable
         exp_alerts: []
 
+
+  # ===========================================================================
+  # OMSParticipationCapExceeded — a control that did not hold (#1007).
+  # ===========================================================================
+  # One breach measured on one book. The counter has no seeded zeros and needs
+  # none: increase() over a series that exists is all the rule asks for.
+  - interval: 1m
+    name: a participation cap exceeded on one instrument
+    input_series:
+      - series: 'kanz_oms_participation_cap_exceeded_total{venue="BINANCE", instrument="BTC-USDT", pod="oms-0"}'
+        values: '0x60 1x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: OMSParticipationCapExceeded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              venue: BINANCE
+              instrument: BTC-USDT
+            exp_annotations:
+              summary: "A worked order on BINANCE was a larger share of the BTC-USDT tape than its cap allowed"
+              description: "A decision worked under a participation cap was measured, after the fact, to have exceeded it in at least one interval. POV enforces its cap against the FORECAST volume profile at admission; this is the tape as it actually printed coming in thinner than that forecast, so the children were sized for volume that did not arrive. The consequence is the one a participation cap exists to prevent: on a thin instrument a fixed-size child IS the print, so the order signalled itself and paid for it. The measurement is a LOWER bound, so the true breach was at least this large. Read the ExecutionAttributionRecorded FACT for the order to see max_slice_participation_rate, the interval it happened in, and the cap it was measured against; then either shorten the parent, lengthen the window, or fix the volume profile this instrument is scheduled against."
+
+  # AN ESTATE THAT HAS NEVER BREACHED STAYS SILENT. The series is flat rather
+  # than absent, which is the harder case: an absent series is an empty vector
+  # and could not fire whatever the threshold, while a flat one exercises the
+  # `> 0` actually being a threshold rather than a presence check.
+  - interval: 1m
+    name: a book whose caps have all held
+    input_series:
+      - series: 'kanz_oms_participation_cap_exceeded_total{venue="BINANCE", instrument="BTC-USDT", pod="oms-0"}'
+        values: '3x180'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: OMSParticipationCapExceeded
+        exp_alerts: []
+
+  # ===========================================================================
+  # OMSParticipationUnmeasurable — no cap can be shown to have held (#1007).
+  # ===========================================================================
+  # Worked decisions ARE terminating and every one of them is unobservable: the
+  # candle spine is not reaching this OMS, so OMSParticipationCapExceeded above
+  # cannot fire however badly a cap is broken.
+  - interval: 1m
+    name: an hour of worked decisions, none of them measurable
+    input_series:
+      - series: 'kanz_oms_participation_measurements_total{quality="unobservable", pod="oms-0"}'
+        values: '0+2x180'
+      - series: 'kanz_oms_participation_measurements_total{quality="measured", pod="oms-0"}'
+        values: '0x180'
+      - series: 'kanz_oms_participation_measurements_total{quality="partial", pod="oms-0"}'
+        values: '0x180'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: OMSParticipationUnmeasurable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+            exp_annotations:
+              summary: "Every worked decision in the last hour had unmeasurable participation"
+              description: "Orders ARE being worked as schedules and terminating, and not one of them could be measured against the tape that printed — so no participation cap this desk declares can be shown to have held, and OMSParticipationCapExceeded cannot fire however badly one is breached. Check kanz_oms_realised_volume_series first: zero means no 1-minute candle has reached this OMS at all, which is either market-ingest not publishing them or a missing subscribe grant on market.crypto.bar in infra/nats/tenancy.yaml — a denied subscription is silent and looks exactly like a market nobody measures. Non-zero means candles are arriving for series other than the ones being worked, or the windows being worked start before the retained history, which a pod that has just rolled will produce until it has folded an hour."
+
+  # THE SEEDING DEPENDENCY, EXECUTED RATHER THAN ASSERTED IN A COMMENT.
+  #
+  # The SAME estate as the case above with one difference: the measured and
+  # partial series are absent entirely, which is what an UNSEEDED CounterVec
+  # produces for label values nothing has ever incremented — and that is exactly
+  # the estate this rule was written for, because an OMS that measures nothing
+  # never increments either of them. `sum(increase(absent[1h])) == 0` is an empty
+  # vector, the `and` has nothing to join, and the rule goes silent in precisely
+  # the state it exists to detect.
+  #
+  # So participationCounters' seeding loop is load-bearing for this alert, and
+  # cmd/oms's TestEveryParticipationQualityIsSeededAtZero holds the other end.
+  - interval: 1m
+    name: the same estate with unseeded measured and partial series
+    input_series:
+      - series: 'kanz_oms_participation_measurements_total{quality="unobservable", pod="oms-0"}'
+        values: '0+2x180'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: OMSParticipationUnmeasurable
+        exp_alerts: []
+
+  # A PARTIAL MEASUREMENT IS A REAL OBSERVATION, AND KEEPS THIS QUIET. It is what
+  # supports a breach finding on a thin instrument — one interval of fifty lost
+  # its candle and the other forty-nine did not — so an estate producing partials
+  # is not blind, and folding partial in with unobservable would page a desk whose
+  # candle spine is working.
+  - interval: 1m
+    name: mostly unobservable, with partials landing
+    input_series:
+      - series: 'kanz_oms_participation_measurements_total{quality="unobservable", pod="oms-0"}'
+        values: '0+2x180'
+      - series: 'kanz_oms_participation_measurements_total{quality="measured", pod="oms-0"}'
+        values: '0x180'
+      - series: 'kanz_oms_participation_measurements_total{quality="partial", pod="oms-0"}'
+        values: '0+1x180'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: OMSParticipationUnmeasurable
+        exp_alerts: []
+
+  # A DESK THAT TRADES EVERYTHING WHOLE MUST NOT PAGE. not_worked climbs and
+  # nothing else moves: there is no participation to measure and no market-data
+  # problem, and a rule that counted those would fire on an estate that has simply
+  # never used an execution schedule.
+  - interval: 1m
+    name: an estate that works no schedules at all
+    input_series:
+      - series: 'kanz_oms_participation_measurements_total{quality="not_worked", pod="oms-0"}'
+        values: '0+5x180'
+      - series: 'kanz_oms_participation_measurements_total{quality="unobservable", pod="oms-0"}'
+        values: '0x180'
+      - series: 'kanz_oms_participation_measurements_total{quality="measured", pod="oms-0"}'
+        values: '0x180'
+      - series: 'kanz_oms_participation_measurements_total{quality="partial", pod="oms-0"}'
+        values: '0x180'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: OMSParticipationUnmeasurable
+        exp_alerts: []
+
   # ===========================================================================
   # CustodyReconciliationStale — the book is not being checked (#962).
   # ===========================================================================
