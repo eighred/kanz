@@ -198,6 +198,17 @@ var notArchivedByDesign = map[string]string{
 		"restored by nats-rebuild after a region failover and must be recovered from Postgres " +
 		"(PITR/CNPG), like any other service-owned relational state. Revisit if wealth ever gains " +
 		"an automated publisher — today its only producer is the kanz-household operator CLI.",
+	"wealth.model": "Owner decision 2026-09-04 (#1010): the model-portfolio catalogue's durable " +
+		"record is the COMPACTED wealth.model.published.> subject itself — one retained message per " +
+		"model, no max-age — from which every wealth pod arms in one read. It is deliberately NOT in " +
+		"a Postgres table, unlike wealth.household above, so the note there does not transfer: the " +
+		"archiver subscribes no wealth.> subject, nothing is written to this topic, and nothing can " +
+		"be rebuilt from it. Accepted consequence: after a region failover that loses the NATS " +
+		"stream, nats-rebuild does NOT restore the catalogue and every household's drift reads " +
+		"outcome=\"no_model\" until an operator re-runs cmd/kanz-model — which is loud (the " +
+		"kanz_wealth_models_registered gauge sits at 0) rather than silent, and is the same recovery " +
+		"the household valuations beside it already require. Revisit together with wealth.household " +
+		"if wealth ever gains an automated publisher.",
 	"alternatives.commitment": "Owner decision 2026-07-27: same posture as wealth.household — the " +
 		"alternatives journal's durable record is the service's Postgres store, not the 7d stream, " +
 		"and no tooling replays that stream. The archiver subscribes no alternatives.> subject. " +

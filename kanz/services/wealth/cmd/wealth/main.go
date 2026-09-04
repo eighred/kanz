@@ -25,12 +25,14 @@ import (
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
+	"github.com/eighred/kanz/internal/wealth"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/wealth/internal/book"
 	"github.com/eighred/kanz/services/wealth/internal/config"
 	"github.com/eighred/kanz/services/wealth/internal/consume"
+	"github.com/eighred/kanz/services/wealth/internal/drift"
 	"github.com/eighred/kanz/services/wealth/internal/server"
 )
 
@@ -101,6 +103,23 @@ func run() int {
 	// scrape, including the degraded one.
 	obs.Registry.MustRegister(bookDurable)
 
+	// WEALTH-01d target-weight drift. Constructed HERE — above every
+	// `if cfg.NATSURL != ""` branch below — and not inside runConsumer, because a
+	// collector registered inside a broker branch exports NO SERIES in the
+	// deployment that has no broker, and an alert written over a missing series is
+	// silent in exactly the state it was written to detect (#963, #973). With no
+	// broker this service now exports kanz_wealth_model_catalogue_armed=0 and six
+	// zeroed outcome counters, which says "nothing is being checked" out loud
+	// instead of exporting nothing at all.
+	//
+	// The catalogue is per-process state armed from the compacted model subject,
+	// the same shape the OMS's mandate registry uses. It starts UNARMED: until the
+	// replay lands, every lookup returns ErrModelCatalogueUnarmed rather than "no
+	// model", so a rolling restart cannot masquerade as a firm that has published
+	// no target allocations.
+	models := wealth.NewModelRegistry(wealth.WithModelLogger(logger))
+	driftMonitor := drift.New(cfg.Tenant, models, drift.NewMetrics(obs.Registry, models), logger)
+
 	store, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
@@ -109,7 +128,14 @@ func run() int {
 	defer closeStore()
 
 	readiness := &server.Readiness{}
-	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, cfg.Tenant, store, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
+	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, cfg.Tenant, store,
+		server.WithMetrics(obs.MetricsHandler()),
+		// The read surface answers "has this household drifted" on demand. It uses
+		// Evaluate, not Observe: a query must not move the counters that measure how
+		// the BOOK is behaving, or a dashboard refresh would read as a rebalance
+		// signal.
+		server.WithDriftMonitor(driftMonitor),
+	), httpserver.Standard())
 	go func() {
 		logger.Info("wealth listening", "addr", cfg.Listen)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -131,13 +157,15 @@ func run() int {
 		consumers.Add(1)
 		go func() {
 			defer consumers.Done()
-			if err := runConsumer(ctx, cfg, store, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runConsumer(ctx, cfg, store, models, driftMonitor, mesh, logger, obs); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("household consumer stopped with error", "err", err)
 				fatal.Raise(err)
 			}
 		}()
 	} else {
-		logger.Info("no WEALTH_NATS_URL set — serving read endpoints only (no valuation folding)")
+		logger.Info("no WEALTH_NATS_URL set — serving read endpoints only (no valuation folding, " +
+			"and NO DRIFT EVALUATION: the model catalogue never arms, so every household reports " +
+			"kanz_wealth_drift_evaluations_total{outcome=\"catalogue_unarmed\"})")
 	}
 	readiness.Set(true)
 
@@ -226,10 +254,14 @@ func awaitConsumers(consumers *sync.WaitGroup, logger *slog.Logger) {
 // way, an ephemeral book would be a genuinely defensible posture and this would
 // be a warn, as market-data's is.
 //
-// IT DOES NOT. runConsumer below uses the DURABLE QUEUE GROUP
-// (bus.Consumer.Subscribe), which resumes at its last ack and never re-reads
-// what it already folded — the compacted stream's one useful property is left on
-// the table. So a restarted pod comes back with an EMPTY map and serves it: not
+// IT DOES NOT. runConsumer below folds VALUATIONS through the DURABLE QUEUE GROUP
+// (bus.Consumer.Subscribe), which resumes at its last ack and never re-reads what
+// it already folded — for the household book, the compacted stream's one useful
+// property is left on the table. (#1010 added a SECOND subscription in the same
+// function that DOES use it: the model catalogue arms through
+// SubscribeBroadcastReady/DeliverLastPerSubject. That is deliberately the other
+// delivery mode — the catalogue is per-process state every replica needs in full
+// — and it changes nothing about the household book below.) So a restarted pod comes back with an EMPTY map and serves it: not
 // an error, not a partial answer, an authoritative-looking exposure view of a
 // household that holds nothing. That is EXEC-M13's disarmed mandate registry and
 // EXEC-M20's blind compliance book, a third time. (Switching the consumer to the
@@ -287,8 +319,12 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (boo
 // exposure view). Unlike alternatives, wealth carries one message type on one
 // subject, so a single consume.NewFolder(cfg.Tenant, store, consume.DecodeProto) suffices
 // — no per-subject factory is needed.
-func runConsumer(ctx context.Context, cfg config.Config, store book.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
-	folder, err := consume.NewFolder(cfg.Tenant, store, consume.DecodeProto)
+func runConsumer(ctx context.Context, cfg config.Config, store book.Store, models *wealth.ModelRegistry, driftMonitor *drift.Monitor, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider) error {
+	folder, err := consume.NewFolder(cfg.Tenant, store, consume.DecodeProto, consume.WithDriftObserver(driftMonitor))
+	if err != nil {
+		return err
+	}
+	modelFolder, err := consume.NewModelFolder(cfg.Tenant, models, consume.DecodeModelProto)
 	if err != nil {
 		return err
 	}
@@ -316,18 +352,49 @@ func runConsumer(ctx context.Context, cfg config.Config, store book.Store, mesh 
 		once     sync.Once
 		firstErr error
 	)
+	fail := func(err error) {
+		if err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}
+
+	// The model catalogue arms FIRST — launched before the valuation
+	// subscriptions, so the replay of published models has the best chance of
+	// landing before the first valuation is folded. It is only a head start, not a
+	// barrier: a valuation that arrives mid-replay is still folded, and its drift
+	// is counted under outcome="catalogue_unarmed" rather than being mistaken for
+	// a household with no model. Blocking the fold on the catalogue would trade a
+	// missing drift number for a missing household.
+	//
+	// SubscribeBroadcastReady, NOT Subscribe: every replica needs EVERY model (see
+	// config.ModelSubject). Arm is passed as the ready callback rather than called
+	// after the goroutine launches — that distinction is EXEC-M13 exactly, where a
+	// registry reported itself armed the instant its subscription STARTED and
+	// every lookup in the window between resolved as "nothing published".
+	if cfg.ModelSubject != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("wealth arming model catalogue", "subject", cfg.ModelSubject)
+			fail(consumer.SubscribeBroadcastReady(ctx, cfg.ModelSubject, modelFolder.Handle, models.Arm))
+		}()
+	} else {
+		// An empty subject is a configuration this deployment chose, and it
+		// disables the whole drift capability — so it is said out loud rather than
+		// leaving an unarmed catalogue that looks identical to one still replaying.
+		logger.Warn("WEALTH_MODEL_SUBJECT is empty — the model catalogue will NEVER arm and NO household's " +
+			"drift will be evaluated; kanz_wealth_model_catalogue_armed stays 0")
+	}
+
 	for _, subject := range cfg.Subjects {
 		wg.Add(1)
 		go func(subject string) {
 			defer wg.Done()
 			logger.Info("wealth subscribing", "subject", subject, "group", cfg.ConsumerGroup)
-			err := consumer.Subscribe(ctx, subject, cfg.ConsumerGroup, folder.Handle)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				once.Do(func() {
-					firstErr = err
-					cancel()
-				})
-			}
+			fail(consumer.Subscribe(ctx, subject, cfg.ConsumerGroup, folder.Handle))
 		}(subject)
 	}
 	wg.Wait()

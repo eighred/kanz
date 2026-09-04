@@ -36,3 +36,37 @@ func SubjectHouseholdFor(tenantID, householdID string) string {
 // subjectToken is subject.Token, matching the same local-alias pattern
 // internal/compliance uses.
 func subjectToken(s string) string { return subject.Token(s) }
+
+// The model-portfolio catalogue subject (WEALTH-01d).
+//
+// COMPACTED, one retained message per model — the same shape and the same reason
+// as the household valuation above and as compliance.mandate. A ModelPortfolio is
+// the target allocation IN FORCE for a risk profile, not an event that happened:
+// a wealth pod booting tomorrow must arm its catalogue from the stream in one
+// read, because until it does, every household's drift is UNEVALUABLE and the
+// only detector of a drifted book is a human remembering to look (#1010).
+//
+// It rides the SAME `wealth.>` stream already provisioned with
+// --max-msgs-per-subject=1 and no max-age (infra/nats/bootstrap-job.yaml), so no
+// new stream is created — a model MUST NOT AGE OUT for the same reason a mandate
+// must not: on the 168h streams a model published nine days ago is deleted, and
+// the next restart comes back with an empty catalogue that is indistinguishable
+// from a firm that has set no targets.
+const (
+	// EventTypeModelPublished is the envelope event_type. As with
+	// EventTypeHouseholdValued this stays the flat logical name; the subject a
+	// message rides appends routing tokens (see SubjectModelFor).
+	EventTypeModelPublished = "wealth.model.published"
+
+	// SubjectModelAll is the wildcard the catalogue arms from.
+	SubjectModelAll = EventTypeModelPublished + ".>"
+)
+
+// SubjectModelFor is the subject one model portfolio is published on. The tenant
+// and model tokens are what make compaction per-model rather than per-domain:
+// with a single flat subject the stream would retain exactly one model for the
+// entire platform, and a firm running five risk profiles would arm with one of
+// them and silence about the other four.
+func SubjectModelFor(tenantID, modelID string) string {
+	return EventTypeModelPublished + "." + subjectToken(tenantID) + "." + subjectToken(modelID)
+}

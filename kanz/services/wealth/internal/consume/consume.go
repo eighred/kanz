@@ -48,18 +48,56 @@ type Folder struct {
 	tenant string
 	store  book.Store
 	decode Decoder
+	// drift observes each folded household against its model portfolio. Nil ⇒ no
+	// drift is evaluated at all, which is the state this service shipped in for
+	// its whole existence (#1010) — so the composition root always supplies one
+	// and the metrics it registers make an absent evaluation visible rather than
+	// leaving "not checked" and "checked, and in band" indistinguishable.
+	drift DriftObserver
+}
+
+// DriftObserver measures a folded household against the model portfolio its risk
+// profile selects, and records the outcome. It is an interface rather than the
+// concrete *drift.Monitor so this package does not import the service's drift
+// package — the fold is the caller, not the owner, and the seam keeps a test
+// folder from needing a Prometheus registry.
+//
+// It returns nothing the fold acts on, deliberately: the household book is the
+// primary record and drift is derived from it, so a household whose drift cannot
+// be computed must still be folded. Trading a missing drift number for a missing
+// household would be strictly worse.
+type DriftObserver interface {
+	Observe(h wealth.Household)
+}
+
+// FolderOption customizes a Folder.
+type FolderOption func(*Folder)
+
+// WithDriftObserver attaches the target-weight drift evaluation to the fold, so a
+// household that has moved past its model's band is noticed on the FACT that
+// moved it rather than by a human remembering to look.
+func WithDriftObserver(d DriftObserver) FolderOption {
+	return func(f *Folder) {
+		if d != nil {
+			f.drift = d
+		}
+	}
 }
 
 // NewFolder wires a Folder to a durable book.Store. A nil decoder defaults to
 // DecodeJSON.
-func NewFolder(tenant string, store book.Store, decode Decoder) (*Folder, error) {
+func NewFolder(tenant string, store book.Store, decode Decoder, opts ...FolderOption) (*Folder, error) {
 	if store == nil {
 		return nil, errors.New("consume: book store is nil")
 	}
 	if decode == nil {
 		decode = DecodeJSON
 	}
-	return &Folder{tenant: tenant, store: store, decode: decode}, nil
+	f := &Folder{tenant: tenant, store: store, decode: decode}
+	for _, opt := range opts {
+		opt(f)
+	}
+	return f, nil
 }
 
 // Handle decodes one composition FACT and Puts it into the book (last-write-wins
@@ -77,5 +115,16 @@ func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload [
 	if h.HouseholdID == "" {
 		return fmt.Errorf("consume: %s missing household_id", env.GetEventType())
 	}
-	return f.store.Put(ctx, h)
+	if err := f.store.Put(ctx, h); err != nil {
+		return err
+	}
+	// AFTER the Put, and only on success: drift is measured against the book of
+	// record, so evaluating a household the store rejected would report a number
+	// for state the service does not hold. Observe records rather than returns —
+	// see DriftObserver for why a drift that cannot be computed must not fail the
+	// delivery that carried the valuation.
+	if f.drift != nil {
+		f.drift.Observe(h)
+	}
+	return nil
 }

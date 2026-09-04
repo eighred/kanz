@@ -22,6 +22,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +73,7 @@ func valuation() *wealthpb.HouseholdValued {
 		AsOf:         timestamppb.New(asOf),
 		RecordedBy:   "operator:akif",
 		Reason:       "quarter close",
+		RiskProfile:  wealthpb.RiskProfile_RISK_PROFILE_GROWTH,
 	}
 }
 
@@ -184,5 +187,43 @@ func TestHouseholdEventWithNoTenantIsRefused(t *testing.T) {
 	}
 	if len(cc.sent) != 0 {
 		t.Errorf("a refused envelope still reached the transport (%d message(s))", len(cc.sent))
+	}
+}
+
+// A VALUATION WITH NO RISK PROFILE IS REFUSED BEFORE THE NETWORK (#1010).
+//
+// The profile selects the model portfolio the household's book is measured
+// against, and this stream is COMPACTED — a valuation published without one does
+// not leave the household's previous profile standing, it ERASES it, and the
+// wealth service then reports that household under
+// kanz_wealth_drift_evaluations_total{outcome="no_profile"} for good. A custodial
+// statement carries no risk profile, so this is precisely the field an operator
+// transcribing one omits.
+func TestHouseholdValuationWithNoRiskProfileIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hh.json")
+	body := `{"householdId":"hh-1","currencyCode":"USD","asOf":"2026-06-30T00:00:00Z"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	_, err := loadValuation(path)
+	if err == nil {
+		t.Fatal("a valuation with no risk profile was accepted. Published, it would erase the " +
+			"household's profile on a compacted subject and nothing would measure its drift again")
+	}
+	if !strings.Contains(err.Error(), "risk_profile") {
+		t.Errorf("the refusal does not name the field, so an operator cannot tell what to add: %v", err)
+	}
+
+	withProfile := `{"householdId":"hh-1","currencyCode":"USD","asOf":"2026-06-30T00:00:00Z","riskProfile":"RISK_PROFILE_GROWTH"}`
+	if err := os.WriteFile(path, []byte(withProfile), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	hv, err := loadValuation(path)
+	if err != nil {
+		t.Fatalf("a valuation WITH a profile was refused: %v", err)
+	}
+	if hv.GetRiskProfile() != wealthpb.RiskProfile_RISK_PROFILE_GROWTH {
+		t.Errorf("risk_profile = %v after load, want GROWTH", hv.GetRiskProfile())
 	}
 }

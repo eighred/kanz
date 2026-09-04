@@ -171,6 +171,52 @@ spec:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
 ---
+# kanz-model publishes the MODEL PORTFOLIO (WEALTH-01d, #1010) on wealth.>
+# (internal/wealth/subject.go's SubjectModelFor). This ServiceAccount is issued
+# spiffe://kanz.internal/ns/kanz-operator/sa/kanz-model; tenancy.yaml grants that
+# exact SVID publish rights to wealth.> and nothing else. WITHOUT THIS
+# ServiceAccount SPIRE issues no SVID and the tool silently inherits another
+# operator identity — which on a publish-only account means it can write a target
+# allocation under someone else's attestation.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kanz-model
+  namespace: kanz-operator
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+# kanz-model reaches the broker and nothing else — same posture as
+# kanz-household-egress above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kanz-model-egress
+  namespace: kanz-operator
+spec:
+  podSelector:
+    matchLabels:
+      app: kanz-model
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-messaging
+          podSelector:
+            matchLabels:
+              app: nats
+      ports:
+        - { protocol: TCP, port: 4222 }
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
 # kanz-redrive is the DLQ drain (#220): it reads messages parked on
 # `dlq.<subject>` and republishes them onto the subject named in their
 # Kanz-DLQ-Original-Subject header. This ServiceAccount is issued

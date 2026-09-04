@@ -42,6 +42,20 @@ type Account struct {
 type Household struct {
 	HouseholdID string
 	Accounts    []Account
+	// RiskProfile is the household's agreed risk tolerance. It is the ONLY input
+	// that selects which ModelPortfolio the household's book is measured against
+	// (SelectModel), so a household that arrives without one has no target
+	// allocation and its drift cannot be computed at all.
+	//
+	// ProfileUnspecified is therefore a THIRD VALUE, not a default: it means the
+	// valuation on the wire asserted no profile, which is a different fact from
+	// "measured, and in band". Callers must branch on it explicitly — see
+	// services/wealth/internal/drift, which counts it under its own metric label
+	// rather than letting an unevaluable household read as a clean one. Before
+	// #1010 this field did not exist and wealth.v1.Household.risk_profile had no
+	// producer anywhere in the estate, so the drift half of this package had no
+	// reachable input and never ran.
+	RiskProfile RiskProfile
 }
 
 // VirtualPortfolio is the household's accounts collapsed into one book — the

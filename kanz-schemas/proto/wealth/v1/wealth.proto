@@ -121,6 +121,37 @@ message ModelPortfolio {
   // target_weights maps instrument id to its target portfolio weight; the weights
   // sum to 1. Dimensionless ⇒ double per EVT-14. Required.
   map<string, double> target_weights = 4;
+
+  // drift_tolerance is the per-instrument weight band this model is allowed to
+  // drift by before a rebalance is due — the argument to
+  // internal/wealth.Drift.Breached. Dimensionless (0.05 = five percentage
+  // points of weight) => double per EVT-14. Required, and it lives HERE rather
+  // than in code because it is a mandate-level policy choice that differs per
+  // model: a conservative model's band is not a growth model's, and a band
+  // compiled into the evaluator cannot be changed without a deploy.
+  //
+  // THERE IS NO SAFE DEFAULT AND THE PRODUCER MUST REFUSE ZERO. Left at the
+  // proto3 zero, `Breached` compares `max > 0` and every household with any
+  // holding at all reads as breached forever — an unset band and a band of
+  // "rebalance on any deviation" are the same bytes on the wire. cmd/kanz-model
+  // refuses to publish a model whose tolerance is not in (0, 1], and the
+  // registry refuses to admit one, so the two states cannot be confused.
+  double drift_tolerance = 5;
+
+  // recorded_by is the operator principal that published this model, formatted
+  // "{type}:{id}" (e.g. "operator:akif") — the same convention as
+  // HouseholdValued.recorded_by, and here for the same reason: the model
+  // subject is COMPACTED to one message per model_id, so publishing a new
+  // ModelPortfolio DISCARDS the previous one. Without this, the target
+  // allocation every household of a risk profile is measured against can be
+  // changed by nobody, and once it is, nothing remains to show what it
+  // replaced. Required.
+  string recorded_by = 6;
+
+  // reason is why this model is being published — the investment-committee
+  // decision or review it records. Required, for the same compaction reason as
+  // recorded_by. Retained for audit.
+  string reason = 7;
 }
 
 // ProposedTrade is one leg of a rebalancing Proposal — the same shape as
@@ -217,6 +248,39 @@ message HouseholdValued {
   // this stream is compacted, the valuation it silently replaced is gone.
   // Required.
   string reason = 6;
+
+  // risk_profile is the household's agreed risk tolerance — it SELECTS the
+  // ModelPortfolio the household's actual book is measured against
+  // (WEALTH-01d). Required.
+  //
+  // # Why a registry attribute rides the valuation
+  //
+  // This message's doc above draws a line between the REGISTRY (Household,
+  // Account) and the VALUATION, and this field crosses it deliberately rather
+  // than by oversight. Household.risk_profile has been specified since
+  // WEALTH-01a and no code has ever constructed a Household, so the selector
+  // internal/wealth.SelectModel needs had no source in the running estate at
+  // all: no producer, no subject, no consumer (#1010). Publishing the registry
+  // Household on its own compacted subject is the fuller answer and remains
+  // open; it costs a second subject, its own producer, its own fold and the
+  // per-subject estate wiring, for a message carrying one field the drift
+  // evaluation reads.
+  //
+  // The line the original doc drew is still respected: what it forbids is
+  // feeding a VALUATION FOLD from a registry message that carries no holdings
+  // and no market value. This is the reverse — one registry attribute carried
+  // on the valuation, which the fold already has.
+  //
+  // WHAT THIS COSTS, SO THE NEXT PERSON DOES NOT DISCOVER IT: the valuation is
+  // a REPLACEMENT on a compacted subject, so a publisher that omits the profile
+  // does not leave the previous one standing — it erases it. Left at the proto3
+  // zero the profile is RISK_PROFILE_UNSPECIFIED, which selects no model, and a
+  // household whose drift CANNOT BE EVALUATED must never read like one that is
+  // in band. cmd/kanz-household therefore refuses to publish an unspecified
+  // profile before it touches the network, and the wealth service counts an
+  // unspecified profile under its own metric label rather than as a clean
+  // evaluation.
+  RiskProfile risk_profile = 7;
 }
 
 // ValuedAccount is one account's holdings and cash at as_of.

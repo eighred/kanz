@@ -74,6 +74,7 @@ data:
     compliance.mandate         3   compact  -1          yes
     risk.position              6   compact  -1          yes
     wealth.household            3   compact  -1          yes
+    wealth.model                3   compact  -1          yes
 
     # MONEY AND OBLIGATIONS -> 30d + a DLQ. 30 days is what the ARCHIVER buys;
     # permanence is the lakehouse's job (DATA-M2), not a retention setting here.

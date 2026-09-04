@@ -17,6 +17,7 @@ import (
 	"github.com/eighred/kanz/internal/wealth"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/wealth/internal/book"
+	"github.com/eighred/kanz/services/wealth/internal/drift"
 )
 
 // Readiness gates traffic; the read endpoints are pure over the store, so the
@@ -33,7 +34,20 @@ type Server struct {
 	tenant    string
 	store     book.Store
 	metrics   http.Handler
-	mux       *http.ServeMux
+	// drift answers "has this household moved off its model" on the read path.
+	// Nil ⇒ the response says so explicitly rather than omitting the field, so an
+	// advisor cannot read a missing drift block as a book that matches its model.
+	drift DriftEvaluator
+	mux   *http.ServeMux
+}
+
+// DriftEvaluator measures a household against the model portfolio its risk
+// profile selects, WITHOUT recording anything. The read surface must not move the
+// counters that measure how the book is behaving — a dashboard refresh is not a
+// rebalance signal — which is why this is the pure Evaluate half of
+// drift.Monitor and not its recording Observe half.
+type DriftEvaluator interface {
+	Evaluate(h wealth.Household) drift.Result
 }
 
 // Option customizes the server.
@@ -41,6 +55,18 @@ type Option func(*Server)
 
 // WithMetrics mounts a Prometheus /metrics handler (OBS-01a).
 func WithMetrics(h http.Handler) Option { return func(s *Server) { s.metrics = h } }
+
+// WithDriftMonitor attaches the WEALTH-01d drift evaluation to the household read
+// (#1010). Without it the household view reports holdings, weights and asset-class
+// exposure and says nothing about whether any of it matches the allocation the
+// household is supposed to hold.
+func WithDriftMonitor(d DriftEvaluator) Option {
+	return func(s *Server) {
+		if d != nil {
+			s.drift = d
+		}
+	}
+}
 
 // New builds the server over a household composition store.
 //
@@ -132,7 +158,46 @@ func (s *Server) handleHousehold(w http.ResponseWriter, r *http.Request) {
 		"holdings":     vp.Holdings,
 		"weights":      vp.Weights(),
 		"asset_class":  vp.AssetClassExposure(),
+		"risk_profile": h.RiskProfile.String(),
+		"drift":        s.driftView(h),
 	})
+}
+
+// driftView renders the household's drift from its model portfolio for the read
+// surface.
+//
+// IT NEVER OMITS THE KEY AND NEVER RETURNS A BARE ZERO. A response with no drift
+// block, or one carrying max: 0, is read by a human as "this book matches its
+// model" — which is the same confusion between "not measured" and "measured, and
+// fine" that left this whole capability dark. So an unevaluated household carries
+// evaluated: false, the outcome that applied, and the reason, and it carries no
+// drift numbers at all.
+func (s *Server) driftView(h wealth.Household) map[string]any {
+	if s.drift == nil {
+		return map[string]any{
+			"evaluated": false,
+			"outcome":   string(drift.OutcomeCatalogueUnarmed),
+			"reason":    "this instance has no model catalogue wired; no target allocation is known",
+		}
+	}
+	res := s.drift.Evaluate(h)
+	if !res.Evaluated {
+		return map[string]any{
+			"evaluated": false,
+			"outcome":   string(res.Outcome),
+			"reason":    res.Reason,
+		}
+	}
+	return map[string]any{
+		"evaluated":     true,
+		"outcome":       string(res.Outcome),
+		"model_id":      res.ModelID,
+		"tolerance":     res.Tolerance,
+		"max":           res.Drift.Max,
+		"total":         res.Drift.Total,
+		"by_instrument": res.Drift.ByInstrument,
+		"breached":      res.Breached,
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

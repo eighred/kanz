@@ -122,6 +122,12 @@ var operatorSVIDs = map[string]string{
 	"kanz-mandate":   "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-mandate",
 	"kanz-altevent":  "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-altevent",
 	"kanz-household": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-household",
+	// kanz-model publishes the MODEL PORTFOLIO (WEALTH-01d, #1010) — the target
+	// allocation every household of a risk profile is measured against. It is an
+	// OPERATOR rather than an observer for the same reason kanz-mandate is: what it
+	// writes is a control input, and the subject it writes to is compacted, so a
+	// publish replaces the firm's stated target rather than adding to a history.
+	"kanz-model": "spiffe://kanz.internal/ns/kanz-operator/sa/kanz-model",
 	// kanz-redrive is the DLQ drain (#220). It is an OPERATOR, not a read-only
 	// observer, and the distinction is the whole point of the two maps: it
 	// republishes parked commands onto live subjects, so it moves capital by
