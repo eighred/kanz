@@ -117,9 +117,10 @@ func durationFromEnv(t *testing.T, rel, key string, re *regexp.Regexp, body stri
 	t.Helper()
 	m := re.FindStringSubmatch(body)
 	if m == nil {
-		t.Errorf("%s does not set %s. Both staleness bounds are stated in the manifest so an "+
-			"operator can read what this pod enforces and compare the two; a code default that "+
-			"appears nowhere is a bound nobody knows exists (#956).", rel, key)
+		t.Errorf("%s does not set %s. Every staleness bound a pod enforces is stated in its "+
+			"manifest, so an operator can read it there and compare it against the other bounds "+
+			"and the other plane's; a code default that appears nowhere is a bound nobody knows "+
+			"exists (#956, #1002).", rel, key)
 		return 0, false
 	}
 	raw := m[1]
