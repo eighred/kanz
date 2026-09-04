@@ -102,7 +102,16 @@ func run() int {
 	// display should refuse an hours-old mark is a real question and a separate
 	// decision — it is not settled by an OMS task needing a bound of its own.
 	marks := mark.New(time.Now, 0)
-	proj := projection.New(time.Now, marks, projection.WithLog(projection.NewPostgresLog(pool), cfg.Tenant))
+	// WithRetention IS NOT OPTIONAL HERE, whatever its name suggests (#809). A
+	// Projection built without it keeps every execution, order revision and fill
+	// id for the life of the process — the leak #809 filed — and the failure is an
+	// OOM kill with no other symptom. config.Load refuses a non-positive or
+	// too-short TV_SYNC_RETENTION, so the value reaching this line is always a
+	// window; TestTheResidentHistoryIsBounded fails the build if this argument is
+	// dropped.
+	proj := projection.New(time.Now, marks,
+		projection.WithLog(projection.NewPostgresLog(pool), cfg.Tenant),
+		projection.WithRetention(cfg.Retention))
 
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
 	// plaintext client it refuses at the handshake.
@@ -146,6 +155,7 @@ func run() int {
 	// the series saying so (#809). A rule over an absent series evaluates to
 	// nothing, which is the wiring defect #973, #963 and #983 each shipped once.
 	registerCheckpointMetrics(obs.Registry)
+	registerRetentionMetrics(obs.Registry, cfg.Retention)
 
 	rehydrateStart := time.Now()
 	if err := proj.Rehydrate(ctx); err != nil {
@@ -164,6 +174,12 @@ func run() int {
 	// degradation with no symptom other than a startup that lengthens with the
 	// fund's history.
 	go runCheckpoints(ctx, proj, cfg.CheckpointInterval, logger)
+
+	// THE RETENTION LOOP IS WHAT KEEPS THE HEAP BOUNDED (#809). Rehydrate already
+	// evicts as it replays, so the pod boots inside the window; without this loop
+	// it would then grow out of it again for the rest of its life, which is the
+	// leak with a delay on it.
+	go runRetention(ctx, proj, retentionSweep, logger)
 
 	readiness := &server.Readiness{}
 	broker := brokerapi.New(proj)

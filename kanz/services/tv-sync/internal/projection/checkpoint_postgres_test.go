@@ -336,10 +336,10 @@ func assertSameView(t *testing.T, want, got *Projection) {
 	t.Helper()
 	const acct = "fund-alpha"
 
-	wp, wok := want.Positions(testTenant, acct, time.Time{})
-	gp, gok := got.Positions(testTenant, acct, time.Time{})
-	if wok != gok || len(wp) != len(gp) {
-		t.Fatalf("positions: want %d (found=%v), got %d (found=%v)", len(wp), wok, len(gp), gok)
+	wp, wErr := want.Positions(testTenant, acct, time.Time{})
+	gp, gErr := got.Positions(testTenant, acct, time.Time{})
+	if (wErr == nil) != (gErr == nil) || len(wp) != len(gp) {
+		t.Fatalf("positions: want %d (err=%v), got %d (err=%v)", len(wp), wErr, len(gp), gErr)
 	}
 	for i := range wp {
 		if wp[i] != gp[i] {

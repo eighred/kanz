@@ -24,20 +24,27 @@ package projection
 // straight through, once through a checkpoint and a tail — and compares the served
 // DTOs.
 //
-// # What is NOT here, and why
+// # What the checkpoint must carry once the RAM view is a window
 //
-// NO PRUNING. Every exec, every order revision and every seen fill is carried
-// across. The in-memory history is what serves the bitemporal reads, so dropping
-// any of it is the read-path decision #809 describes as a hot window with
-// log-backed as-of reads — a different piece of work with a different failure mode.
-// This one is only about not re-deriving what we already derived.
+// The heap half of #809 landed after this file did (retention.go), and it changes
+// what "the fold's own state" means: account.execs is now a window, and the fold
+// of everything that fell out of it lives in account.baseline. So a checkpoint
+// that carried only the window would restore a pod reporting the fund's positions
+// and realized P&L SINCE THE WINDOW OPENED — EXEC-M21's defect, reached from the
+// other direction and invisible because every other field would be right.
 //
-// NO TRUNCATION OF seen_fills IN PARTICULAR. It looks like the cheapest thing to
-// drop and it is the most dangerous: it is the dedup for the DUAL fill path (the
-// synchronous venue response and the asynchronous websocket echo of the same
-// fill), so a fill id missing when its echo arrives is a fill folded twice, which
-// doubles a position the fund does not hold. The bus-redelivery path is protected
-// separately by tv_facts's (tenant_id, event_id) primary key; this set is not that.
+// baseline and retained_from are therefore part of the snapshot, and
+// restoreAccount rebuilds the live fold from baseline rather than from zero.
+// TestTheCheckpointCarriesTheEvictedFold holds that.
+//
+// THE FILL DEDUP SET IS STILL CARRIED IN FULL. It is the dedup for the DUAL fill
+// path (the synchronous venue response and the asynchronous websocket echo of the
+// same fill), so a fill id missing when its echo arrives is a fill folded twice,
+// which doubles a position the fund does not hold. The bus-redelivery path is
+// protected separately by tv_facts's (tenant_id, event_id) primary key; this set
+// is not that. Retention drops an id only in lockstep with the execution it
+// belongs to, never on a schedule of its own, so the dedup horizon is the
+// retention window and is floored in config — see retention.go.
 
 import (
 	"context"
@@ -52,6 +59,7 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	tvsyncpb "github.com/eighred/kanz/kanz-schemas-go/tvsync/v1"
 
+	"github.com/eighred/kanz/internal/costbasis"
 	"github.com/eighred/kanz/internal/dec"
 )
 
@@ -129,6 +137,30 @@ func snapshotAccount(a *account) *tvsyncpb.AccountSnapshot {
 	for fid := range a.seenFills {
 		out.SeenFills = append(out.SeenFills, fid)
 	}
+	// THE EVICTED FOLD, WITHOUT WHICH THE RESTORE IS A SHORTER HORIZON (#809).
+	// live is baseline plus fold(execs); execs is a retention window, so a
+	// checkpoint that dropped this restores a book that starts when the window
+	// does — and an account that has never been evicted is indistinguishable
+	// from one whose baseline was lost, so the omission would report nothing.
+	if len(a.baseline) > 0 {
+		out.Baseline = make(map[string]*tvsyncpb.Lot, len(a.baseline))
+		for inst, l := range a.baseline {
+			// RatString, NOT ratToProto — see tvsync.v1.Lot. An average cost and a
+			// realized P&L are derived rationals and routinely non-terminating, so
+			// the scaled Decimal the executions use would move the fund's realized
+			// P&L by its last digit on every restore, and again on the next one.
+			out.Baseline[inst] = &tvsyncpb.Lot{
+				Qty: l.Qty.RatString(), AvgCost: l.AvgCost.RatString(), Realized: l.Realized.RatString(),
+			}
+		}
+	}
+	if !a.retainedFrom.IsZero() {
+		// NOT logTime. retainedFrom is a cutoff this process chose from its own
+		// clock, never a value read back out of the knowledge_at column, so the
+		// microsecond truncation logTime applies would move the horizon rather
+		// than match the source of truth.
+		out.RetainedFrom = timestamppb.New(a.retainedFrom)
+	}
 	return out
 }
 
@@ -200,12 +232,60 @@ func restoreAccount(as *tvsyncpb.AccountSnapshot) (*account, error) {
 	for _, fid := range as.GetSeenFills() {
 		a.seenFills[fid] = true
 	}
+	for inst, l := range as.GetBaseline() {
+		lot, err := protoToLot(l)
+		if err != nil {
+			return nil, fmt.Errorf("baseline %s: %w", inst, err)
+		}
+		a.baseline[inst] = lot
+	}
+	if ts := as.GetRetainedFrom(); ts != nil {
+		a.retainedFrom = ts.AsTime()
+	}
 	// The restored history is the fold's input, so the fold is rebuilt with it
-	// (#995). Without this a pod that restored from a checkpoint would serve an
-	// EMPTY position book off a full history — EXEC-M21's failure reached from
-	// the other direction, and invisible because every other field is right.
+	// (#995), STARTING FROM THE BASELINE (#809). Without this a pod that restored
+	// from a checkpoint would serve an EMPTY position book off a full history —
+	// EXEC-M21's failure reached from the other direction, and invisible because
+	// every other field is right.
 	a.rebuildLive()
 	return a, nil
+}
+
+// protoToLot reads one baseline entry back.
+//
+// IT STARTS FROM A FLAT LOT so every rational is non-nil, and an EMPTY STRING
+// stays flat rather than failing: costbasis mutates these in place and a nil
+// *big.Rat is a panic one dereference later — on the fold path, under the
+// projection's write lock, which stops every read behind it.
+//
+// AN UNPARSEABLE VALUE IS REFUSED, never defaulted to zero. This is the fund's
+// position and realized P&L from before the retention window, and there is
+// nothing else holding it: substituting a zero would restore an account that has
+// silently forgotten everything it earned, which is EXEC-M21 with an error
+// swallowed. lotFrom in services/oms/internal/position/postgres.go refuses the
+// same shape for the same reason — "a value that will not parse is a corrupt
+// book, never a zero".
+func protoToLot(l *tvsyncpb.Lot) (*posState, error) {
+	out := costbasis.NewLot()
+	for _, f := range []struct {
+		name string
+		src  string
+		dst  **big.Rat
+	}{
+		{"qty", l.GetQty(), &out.Qty},
+		{"avg_cost", l.GetAvgCost(), &out.AvgCost},
+		{"realized", l.GetRealized(), &out.Realized},
+	} {
+		if f.src == "" {
+			continue
+		}
+		r, ok := new(big.Rat).SetString(f.src)
+		if !ok {
+			return nil, fmt.Errorf("%s: %w: %q", f.name, ErrCheckpointValueOutOfDomain, f.src)
+		}
+		*f.dst = r
+	}
+	return out, nil
 }
 
 // logTime writes a KNOWLEDGE time at the resolution the fact log gives it back.

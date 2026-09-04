@@ -60,8 +60,8 @@ func TestMark_DrivesUnrealizedPnL(t *testing.T) {
 	// so this fixture is realistic rather than weakened.
 	_ = m.Handle(context.Background(), &envelopepb.Envelope{EventType: "market.crypto.trade"}, tradeEvent(t, "BTC", 150))
 
-	stDTO, ok := proj.State("acme", "fund-alpha", time.Time{})
-	if !ok || stDTO.UnrealizedPnl != "100" {
+	stDTO, err := proj.State("acme", "fund-alpha", time.Time{})
+	if err != nil || stDTO.UnrealizedPnl != "100" {
 		t.Fatalf("unrealized = %q, want 100 (dynamic from live mark)", stDTO.UnrealizedPnl)
 	}
 }

@@ -2,6 +2,7 @@ package projection
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/eighred/kanz/internal/fillfact"
 	"math/big"
@@ -55,6 +56,10 @@ type Projection struct {
 	// watermark a checkpoint is taken at (#809). Guarded by mu, and only ever
 	// advanced by a fold that actually happened.
 	seq int64
+	// retention bounds how much folded history stays RESIDENT (#809). Zero means
+	// unbounded, which is the pre-#809 behaviour and what the memory-only tests
+	// run on; retention.go states what a window does and does not change.
+	retention time.Duration
 }
 
 // Option configures a Projection.
@@ -147,9 +152,21 @@ func (p *Projection) Rehydrate(ctx context.Context) error {
 		p.bootedFromCheckpoint = true
 	}
 
+	// THE REBUILD IS EVICTED AS IT GOES (#809). A boot with no checkpoint replays
+	// from seq 0 — a fresh deployment, or a truncated checkpoint table — and
+	// without this it would materialise the fund's entire history in RAM before
+	// the first retention pass could trim it, so the boot most likely to be
+	// OOM-killed would be the one after an OOM kill. What leaves is folded into
+	// each account's baseline exactly as in the steady state, so the book this
+	// reaches is the same book either way.
+	folded := 0
 	return p.log.Replay(ctx, after, func(f Fact) error {
 		p.fold(p.tenant, f.EventType, f.Payload, f.Knowledge)
 		p.seq = f.Seq
+		folded++
+		if p.retention > 0 && folded%rehydrateEvictEvery == 0 {
+			p.evictLocked(p.now().Add(-p.retention))
+		}
 		return nil
 	})
 }
@@ -392,36 +409,53 @@ func (p *Projection) Accounts(tenant string) []AccountDTO {
 	return out
 }
 
+// ErrAccountNotFound: no such account under this tenant. It is deliberately the
+// same answer for an account that belongs to somebody else — cross-tenant reads
+// are impossible here rather than merely denied, so a caller cannot learn that
+// another tenant's fund exists by asking for it.
+var ErrAccountNotFound = errors.New("tv-sync: no such account under this tenant")
+
 // Positions returns net positions as known at asOf (zero ⇒ latest).
-func (p *Projection) Positions(tenant, accountID string, asOf time.Time) ([]PositionDTO, bool) {
+//
+// A LIVE READ AND AN AS-OF READ WITHIN THE RESIDENT WINDOW ARE BOTH EXACT, even
+// after retention has dropped history: what left was folded into the account's
+// baseline and every fold starts from it (#809). Only an as-of read reaching
+// BEHIND the window is refused, with ErrBeforeRetention.
+func (p *Projection) Positions(tenant, accountID string, asOf time.Time) ([]PositionDTO, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	a := p.readAcct(tenant, accountID)
-	if a == nil {
-		return nil, false
+	a, err := p.readableAcct(tenant, accountID, asOf)
+	if err != nil {
+		return nil, err
 	}
-	return p.positionsLocked(a, asOf), true
+	return p.positionsLocked(a, asOf), nil
 }
 
 // State returns the account balance/equity/P&L summary as of asOf.
-func (p *Projection) State(tenant, accountID string, asOf time.Time) (*StateDTO, bool) {
+func (p *Projection) State(tenant, accountID string, asOf time.Time) (*StateDTO, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	a := p.readAcct(tenant, accountID)
-	if a == nil {
-		return nil, false
+	a, err := p.readableAcct(tenant, accountID, asOf)
+	if err != nil {
+		return nil, err
 	}
 	s := p.stateLocked(a, asOf)
-	return &s, true
+	return &s, nil
 }
 
 // Orders returns each order's state as known at asOf.
-func (p *Projection) Orders(tenant, accountID string, asOf time.Time) ([]OrderDTO, bool) {
+//
+// IT IS A WINDOW ONCE RetainedFrom IS NON-ZERO. Terminal orders older than the
+// retention window are dropped; working and scheduled ones never are, whatever
+// their age. A caller presenting this as a list must present the horizon with it
+// — a short list read as a complete one is a wrong answer about how a fund
+// traded, not a truncated one.
+func (p *Projection) Orders(tenant, accountID string, asOf time.Time) ([]OrderDTO, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	a := p.readAcct(tenant, accountID)
-	if a == nil {
-		return nil, false
+	a, err := p.readableAcct(tenant, accountID, asOf)
+	if err != nil {
+		return nil, err
 	}
 	var out []OrderDTO
 	for _, revs := range a.orders {
@@ -430,17 +464,17 @@ func (p *Projection) Orders(tenant, accountID string, asOf time.Time) ([]OrderDT
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].OrderID < out[j].OrderID })
-	return out, true
+	return out, nil
 }
 
 // Executions returns the execution log as known at asOf, optionally filtered to
-// one instrument.
-func (p *Projection) Executions(tenant, accountID, instrument string, asOf time.Time) ([]ExecutionDTO, bool) {
+// one instrument. Windowed by retention on the same terms as Orders.
+func (p *Projection) Executions(tenant, accountID, instrument string, asOf time.Time) ([]ExecutionDTO, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	a := p.readAcct(tenant, accountID)
-	if a == nil {
-		return nil, false
+	a, err := p.readableAcct(tenant, accountID, asOf)
+	if err != nil {
+		return nil, err
 	}
 	var out []ExecutionDTO
 	for _, e := range visibleExecs(a.execs, asOf) {
@@ -449,7 +483,7 @@ func (p *Projection) Executions(tenant, accountID, instrument string, asOf time.
 		}
 		out = append(out, executionDTO(e))
 	}
-	return out, true
+	return out, nil
 }
 
 func (p *Projection) readAcct(tenant, accountID string) *account {
@@ -537,7 +571,12 @@ func (p *Projection) foldFor(a *account, asOf time.Time) map[string]*posState {
 	if asOf.IsZero() {
 		return a.live
 	}
-	return foldPositions(visibleExecs(a.execs, asOf))
+	// FROM THE BASELINE, NOT FROM ZERO (#809). Once retention has dropped a
+	// prefix, folding only the resident executions reports the account's book
+	// since the window opened — a position held for a year shown flat, realized
+	// P&L restarted. readableAcct has already refused any asOf behind the window,
+	// so baseline plus the visible remainder is the whole history up to asOf.
+	return foldPositionsFrom(a.baseline, visibleExecs(a.execs, asOf))
 }
 
 func visibleExecs(execs []execution, asOf time.Time) []execution {
