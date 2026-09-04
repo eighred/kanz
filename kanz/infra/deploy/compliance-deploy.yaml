@@ -168,7 +168,20 @@ spec:
             # tuning knob: mark.Source treats a non-positive value as NEVER EXPIRES,
             # so widening this to quiet "cannot be valued" refusals does not fix the
             # feed — it enforces a leverage cap against a number that stopped
-            # moving. Non-positive is refused at startup. Matches OMS_PRICE_MAX_AGE.
+            # moving. Non-positive is refused at startup.
+            #
+            # IT MUST EQUAL OMS_PRICE_MAX_AGE, AND THE EQUALITY IS NOW CHECKED
+            # (#1002). This is one control with two halves: the OMS values a book
+            # from the same mark fold before the trade and this monitor values it
+            # after, through the same JoinEquity and the same LeverageRule. Raise
+            # this alone and the monitor reports a leverage ratio off prices the OMS
+            # already refuses to trade on. LOWER IT ALONE AND IT IS WORSE, not
+            # safer: one holding past the bound leaves the whole book unmarked,
+            # LeverageRule refuses "leverage cannot be verified", and the monitor
+            # emits that as a BREACH the autopilot halts and escalates on — an
+            # automated halt on a feed gap the execution plane is trading through.
+            # test/arch/the_mark_bound_agrees_across_planes_test.go fails the build
+            # when either side moves alone.
             - { name: COMPLIANCE_PRICE_MAX_AGE, value: "30s" }
             # HOW OFTEN EVERY BOOK IS RE-CHECKED against the marks and cash in force
             # now (#787).

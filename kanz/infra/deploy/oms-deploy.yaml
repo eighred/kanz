@@ -409,6 +409,16 @@ spec:
             # RAISING IT DOES NOT FIX A FEED. It admits orders priced off one that
             # stopped reporting. Lowering it turns PRICE_UNAVAILABLE on for every
             # MARKET and STOP order on a 5s-poll feed.
+            #
+            # AND IT DOES NOT MOVE ALONE. COMPLIANCE_PRICE_MAX_AGE in
+            # compliance-deploy.yaml is the SAME bound on the post-trade half of the
+            # same leverage control — same mark fold, same JoinEquity, same
+            # LeverageRule — so a change here that is not made there leaves the two
+            # halves valuing one book against different markets. Whichever half is
+            # tighter is the one that refuses first, and on the compliance side a
+            # refusal is a BREACH the autopilot halts on.
+            # test/arch/the_mark_bound_agrees_across_planes_test.go fails the build
+            # when either side moves alone (#1002).
             - { name: OMS_PRICE_MAX_AGE, value: "30s" }
             # OMS_QUOTE_MAX_AGE governs the quoted WIDTH (the bid/ask touch), which
             # the execution-cost attribution measures the spread leg from. It is a
