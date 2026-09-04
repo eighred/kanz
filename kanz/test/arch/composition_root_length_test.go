@@ -89,7 +89,16 @@ var compositionRootBudget = map[string]int{
 	// NOT the same shape, because it has no product to return and assert about.
 	// Retiring this entry means deciding what that half should look like, which is
 	// a separate question from this one.
-	"services/oms/cmd/oms/main.go:runConsumers": 1202,
+	//
+	// A SIXTH RISE WAS PAID FOR RATHER THAN AVOIDED (#1007): the realised-candle
+	// fold that makes a participation cap measurable needed a registry binding,
+	// three service options and one more subscription goroutine here. The
+	// registry construction, the metrics and the delivery policy all moved to
+	// participation.go, the way volprofile.go did for #897; what is left in this
+	// function is the twenty-one lines that genuinely are subscription wiring and
+	// a goroutine lifecycle, which is the half this entry already says it has no
+	// extraction shape for.
+	"services/oms/cmd/oms/main.go:runConsumers": 1223,
 	// #643. Its own doc says composition-root wiring escapes every unit test and
 	// that this service has twice shipped a crashing root with a green suite. Two
 	// of its constructions are already extracted into named builders with tests

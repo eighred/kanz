@@ -828,6 +828,90 @@ data:
               summary: "Every execution attribution in the last hour was a total, and none was decomposed"
               description: "Terminal decisions ARE being measured — the shortfall against arrival is exact for each — but not one in the last hour could be split into spread, impact and timing, because the market's width was unobservable for at least one slice that traded. The platform can say what its executions cost and cannot say why any of them cost it. Check kanz_oms_quote_instruments_live first: zero means the spine carries no quotes at all (see OMSQuoteCoverageAbsent). Non-zero means widths exist but are stale or crossed at the moments slices are released, which is a feed-latency or feed-quality problem rather than a coverage one."
 
+
+          # A PARTICIPATION CAP DID NOT HOLD (#1007).
+          #
+          # EXECUTION_ALGO_POV refuses a parent whose FORECAST participation would
+          # exceed its cap, at admission, once. Nothing measured what the
+          # participation turned out to be, so a cap of 0.08 read from every screen
+          # as a rate that was honoured with nothing anywhere able to contradict it.
+          # This counter moves only when a decision's measured WORST interval
+          # exceeded the cap that decision was admitted under — the forecast said the
+          # tape would be thick enough and it was not, so children were sized for
+          # volume that did not arrive and the order was a larger fraction of the
+          # prints than the desk promised anyone it would be.
+          #
+          # THE MEASUREMENT IS A LOWER BOUND, so every one of these is REAL. A slice
+          # interval is measured against the 1-minute candles covering it, which is a
+          # window at least as long as the interval, hence a volume at least as large,
+          # hence a rate no larger than the true one. Silence is NOT the converse
+          # claim: a cap that was exceeded in a minute nobody could see produces
+          # nothing here, which is what kanz_oms_participation_measurements_total is
+          # for.
+          #
+          # BY VENUE AND INSTRUMENT, because that is what a desk acts on: a cap
+          # exceeded on a thin pair on one book is a sizing or a routing decision
+          # about that book, and an estate-wide count is a number nobody can do
+          # anything with. Both label spaces are bounded by what this OMS has
+          # actually traded.
+          #
+          # NOT SEEDED, AND THE RULE IS WRITTEN SO IT DOES NOT NEED TO BE. The labels
+          # are only knowable from a decision that breached, so there is no honest
+          # zero to write. `increase(...) > 0` over an absent series is an empty
+          # vector, which is exactly right for an event counter — unlike an `== 0`
+          # arm, which would be silent in the state it was written for (#875).
+          #
+          # increase() OVER 1h WITH for: 0m, not a `for:`. A breach is a discrete
+          # past event rather than a condition that persists, so waiting for it to
+          # "hold" would wait for a second breach; one firing period per hour in
+          # which it happened is the right cadence for something a desk reviews and
+          # acts on.
+          - alert: OMSParticipationCapExceeded
+            expr: sum by (venue, instrument) (increase(kanz_oms_participation_cap_exceeded_total[1h])) > 0
+            for: 0m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "A worked order on {{ $labels.venue }} was a larger share of the {{ $labels.instrument }} tape than its cap allowed"
+              description: "A decision worked under a participation cap was measured, after the fact, to have exceeded it in at least one interval. POV enforces its cap against the FORECAST volume profile at admission; this is the tape as it actually printed coming in thinner than that forecast, so the children were sized for volume that did not arrive. The consequence is the one a participation cap exists to prevent: on a thin instrument a fixed-size child IS the print, so the order signalled itself and paid for it. The measurement is a LOWER bound, so the true breach was at least this large. Read the ExecutionAttributionRecorded FACT for the order to see max_slice_participation_rate, the interval it happened in, and the cap it was measured against; then either shorten the parent, lengthen the window, or fix the volume profile this instrument is scheduled against."
+
+          # THE PARTICIPATION OF EVERY DECISION IS UNMEASURABLE (#1007).
+          #
+          # The rule above can only fire on a breach somebody could SEE. This is the
+          # coverage half, and without it an OMS bound to no candle spine and one
+          # measuring every decision perfectly look identical from outside: both
+          # export no breaches. "Nothing configured" and "checked, and fine" must
+          # never look the same, and on this signal they would.
+          #
+          # THIS RULE ONLY WORKS BECAUSE THE COUNTER IS SEEDED AT ZERO, which is a
+          # property of cmd/oms rather than of this file — participationCounters
+          # seeds every order.ParticipationQualities value. Unseeded, the second
+          # clause compares against an EMPTY VECTOR on exactly the estate this was
+          # written for (one measuring nothing), the `and` never matches, and the
+          # rule is silent in the state it detects. The harness beside this file
+          # executes that silent case so the dependency is not merely written down.
+          #
+          # measured OR partial ON THE QUIET SIDE. A partial measurement is a real
+          # observation of a real interval — it is what supports a breach finding —
+          # so an estate producing them is not blind, and folding it in with
+          # unobservable would page a desk whose candle spine is working.
+          #
+          # not_worked IS EXCLUDED FROM BOTH SIDES. An estate that trades everything
+          # whole has no participation to measure and no market-data problem, and a
+          # rule that counted those would fire on a desk that has simply never used a
+          # schedule.
+          - alert: OMSParticipationUnmeasurable
+            expr: |
+              (
+                sum(increase(kanz_oms_participation_measurements_total{quality="unobservable"}[1h])) > 0
+                and
+                sum(increase(kanz_oms_participation_measurements_total{quality=~"measured|partial"}[1h])) == 0
+              )
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Every worked decision in the last hour had unmeasurable participation"
+              description: "Orders ARE being worked as schedules and terminating, and not one of them could be measured against the tape that printed — so no participation cap this desk declares can be shown to have held, and OMSParticipationCapExceeded cannot fire however badly one is breached. Check kanz_oms_realised_volume_series first: zero means no 1-minute candle has reached this OMS at all, which is either market-ingest not publishing them or a missing subscribe grant on market.crypto.bar in infra/nats/tenancy.yaml — a denied subscription is silent and looks exactly like a market nobody measures. Non-zero means candles are arriving for series other than the ones being worked, or the windows being worked start before the retained history, which a pod that has just rolled will produce until it has folded an hour."
+
       # ---------------------------------------------------------------------------
       # COMPLIANCE — how much of the book is trading unchecked
       # ---------------------------------------------------------------------------

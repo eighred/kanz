@@ -26,6 +26,7 @@ import (
 	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/internal/volprofilefeed"
+	"github.com/eighred/kanz/services/oms/internal/tape"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/eighred/kanz/internal/cashview"
@@ -572,6 +573,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	obs.Registry.MustRegister(proposalExpiryFailures)
 
 	attributions := executionAttributionCounter(obs)
+	// THE REALISED HALF OF THE PARTICIPATION CONTROL (#1007). Registered here and
+	// never behind a feed branch: an OMS with no candle spine must export a rising
+	// `unobservable`, because that is the finding.
+	participations, capExceeded := participationCounters(obs)
 
 	// THE EXECUTION-ALGORITHM DRIVER'S THREE SIGNALS (#435).
 	//
@@ -669,6 +674,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// because the service binds it. The SUBSCRIPTION that fills it starts with the
 	// other folds below and is joined with them.
 	volProfiles := bindVolumeProfiles(obs, logger)
+	// AND THE REALISED CANDLE SERIES the participation of a finished decision is
+	// measured against (#1007). Same shape, same lifecycle: the subscription that
+	// fills it starts with the other folds below and is joined with them.
+	realisedTape := bindRealisedTape(obs, logger)
 
 	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, routing.Router, closeRegistry, logger,
 		// The decision-time benchmark for every admitted order (#436). The same
@@ -702,6 +711,13 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		// and the parent order records which version its schedule was planned
 		// against, so two pods derive the same children — see volprofile.go.
 		order.WithVolumeProfiles(volProfiles),
+		// WHAT THE PARTICIPATION CAP ACTUALLY TURNED OUT TO BE (#1007). POV enforces
+		// its cap against the FORECAST above; these three make the realised half
+		// measurable, published and countable. Unbound, every worked decision
+		// reports UNOBSERVABLE — which is honest and is visibly not a rate.
+		order.WithRealisedVolume(realisedTape),
+		order.WithParticipationCounter(participations),
+		order.WithParticipationBreachCounter(capExceeded),
 		order.WithOutboxRelay(outboxRelayOpts...))
 	if err != nil {
 		return false, err
@@ -996,6 +1012,20 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		defer wg.Done()
 		logger.Info("oms folding the volume-profile spine (replay)", "subject", volprofilefeed.Subject)
 		if err := foldVolumeProfiles(ctx, consumer, volProfiles, logger); err != nil {
+			once.Do(func() {
+				firstErr = err
+				cancel()
+			})
+		}
+	}()
+
+	// THE REALISED CANDLE SERIES — REPLAY, for the reason the volume profile is
+	// (#1007). See participation.go.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("oms folding the realised candle series (replay)", "subject", tape.Subject)
+		if err := foldRealisedTape(ctx, consumer, realisedTape, logger); err != nil {
 			once.Do(func() {
 				firstErr = err
 				cancel()
