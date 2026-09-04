@@ -208,12 +208,36 @@ message MeasuresResponse {
 }
 
 // EvaluateScenarioRequest evaluates a what-if scenario against current state.
+//
+// A request names its perturbation ONE of two ways, and exactly one:
+// `shocks` (the caller assembles them) or `scenario_name` (the engine resolves
+// a curated catalog entry). Both set is refused, and so is neither — see the
+// field docs below for why each of those is a refusal rather than a default.
 message EvaluateScenarioRequest {
   string portfolio_id = 1;
   // shocks describe the hypothetical perturbations. A shock against an
   // instrument the portfolio does not hold is a silent no-op (so large
   // watchlist batches succeed regardless of holdings).
   repeated ScenarioShock shocks = 2;
+
+  // scenario_name selects a curated stress from the engine's named catalog
+  // ("GFC_2008", "COVID_2020", "DISORDERLY_TRANSITION", "HOT_HOUSE_PHYSICAL")
+  // and the engine expands it into the shocks above, server-side.
+  //
+  // WHY THE CATALOG IS RESOLVED HERE AND NOT IN EACH CLIENT (#1004). A named
+  // historical stress is an eleven-point GICS sector curve — financials −55%
+  // against staples −15% in 2008 — because a crisis is not uniform. Every
+  // client that "knows" GFC_2008 would carry its own copy of those eleven
+  // magnitudes, and two desks stressing the same book with the same name would
+  // then get different answers with nothing to say which was right. One
+  // versionable definition, on the server, is the only shape in which the name
+  // means something.
+  //
+  // An unknown name is INVALID_ARGUMENT naming the catalog, never an empty
+  // shock list: a scenario the engine could not resolve must not come back as
+  // the unshocked book wearing the scenario's name (#640 is that failure, one
+  // layer in).
+  string scenario_name = 3;
 }
 
 // EvaluateScenarioResponse carries the projected measures under the shocks.
@@ -243,10 +267,24 @@ message EvaluateScenarioResponse {
 // ScenarioShock is one perturbation. The oneof is the proto mirror of the
 // api/v1 concrete shock types; new shock kinds are added as new oneof
 // members (additive-only).
+//
+// THE MIRROR WAS TWO MEMBERS SHORT FOR AS LONG AS IT EXISTED, AND THAT MADE THE
+// WHOLE STRESS CAPABILITY UNREACHABLE (#1004). api/v1 declared SectorShock and
+// VolShock, the scenario engine applied both, the factor classifier that
+// resolves a sector was wired at the risk-engine composition root, and a
+// catalog of historical and climate scenarios built entirely out of sector
+// curves was written and unit-tested — and none of it could be asked for,
+// because the wire carried only "drop instrument X" and "drop everything".
+// The richest external stress on an institutional risk platform was the
+// textbook sanity check. test/arch/every_shock_kind_reaches_the_wire_test.go
+// now derives the api/v1 implementor set from the AST and fails the build if a
+// member here is missing again, so this cannot be a silent gap a second time.
 message ScenarioShock {
   oneof shock {
     PriceShock price = 1;
     ParallelShift parallel_shift = 2;
+    SectorShock sector = 3;
+    VolShock vol = 4;
   }
 }
 
@@ -261,6 +299,45 @@ message PriceShock {
 // market value — the textbook "everything drops 5%" stress test.
 message ParallelShift {
   common.v1.Decimal pct = 1;
+}
+
+// SectorShock applies a fractional price change to every position whose
+// instrument classifies into one sector — taxonomy + code, e.g. {"GICS","40"}
+// for financials. It mirrors api/v1.SectorShock and carries the same strings
+// reference.v1.SectorClassification does.
+//
+// This is the shock a differentiated stress is made of: a 2008 replay is one
+// SectorShock per GICS sector, so financials fall further than staples. A
+// ParallelShift cannot express that dispersion, and a stress that cannot
+// express dispersion tells a PM nothing they did not already know from gross
+// exposure.
+//
+// Sector membership is resolved SERVER-SIDE at apply time against the factor
+// model the engine is wired with, never supplied by the caller. A position the
+// engine cannot classify is not silently left unshocked: it is recorded in the
+// response's input coverage and the whole request is refused with
+// FAILED_PRECONDITION, because a shock that did not land makes the projection
+// a lie (#640).
+message SectorShock {
+  // taxonomy is the classification scheme, e.g. "GICS". Empty taxonomy or code
+  // is a malformed shock and refuses the request — it is not "shock nothing".
+  string taxonomy = 1;
+  string code = 2;
+  common.v1.Decimal pct = 3;
+}
+
+// VolShock bumps implied volatility by an ABSOLUTE amount (abs_bump = 0.05 ⇒
+// +5 vol points), the vega leg of an option-book stress.
+//
+// It only moves numbers under full revaluation, where option positions are
+// repriced; on the linear market-value path it is a recognized no-op rather
+// than an unknown shock, so a caller pairing it with a price move gets the
+// price move applied and no silent rejection.
+message VolShock {
+  common.v1.Decimal abs_bump = 1;
+  // underlying_id scopes the bump to one underlying; empty applies it to every
+  // underlying — the "vol up 5 points across the book" stress.
+  string underlying_id = 2;
 }
 
 // HealthRequest takes no arguments; the engine reports its global state.
