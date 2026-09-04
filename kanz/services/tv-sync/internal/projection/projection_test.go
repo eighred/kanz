@@ -2,6 +2,7 @@ package projection
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -62,8 +63,8 @@ func TestHandle_FoldsFillIntoPositionOrderExecutionState(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	pos, ok := p.Positions("acme", "fund-alpha", time.Time{})
-	if !ok || len(pos) != 1 || pos[0].Qty != "2" || pos[0].AvgPrice != "100" || pos[0].Side != "long" {
+	pos, err := p.Positions("acme", "fund-alpha", time.Time{})
+	if err != nil || len(pos) != 1 || pos[0].Qty != "2" || pos[0].AvgPrice != "100" || pos[0].Side != "long" {
 		t.Fatalf("positions = %+v", pos)
 	}
 	ords, _ := p.Orders("acme", "fund-alpha", time.Time{})
@@ -126,8 +127,8 @@ func TestHandle_TenantIsolation(t *testing.T) {
 	_ = p.Handle(context.Background(), env("acme", evtFilled), mustMarshal(t, filledOrder("o1", "fund-alpha", "BTC", orderpb.Side_SIDE_BUY, 1, 100)))
 
 	// Tenant globex cannot see acme's account — not merely denied, not found.
-	if _, ok := p.Positions("globex", "fund-alpha", time.Time{}); ok {
-		t.Fatal("cross-tenant read returned acme's account")
+	if _, err := p.Positions("globex", "fund-alpha", time.Time{}); !errors.Is(err, ErrAccountNotFound) {
+		t.Fatalf("cross-tenant read returned acme's account (err = %v)", err)
 	}
 	if accts := p.Accounts("globex"); len(accts) != 0 {
 		t.Fatalf("globex sees %d accounts, want 0", len(accts))

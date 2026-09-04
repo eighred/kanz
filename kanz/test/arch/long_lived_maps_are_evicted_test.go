@@ -91,8 +91,11 @@ import (
 //     and []*T now put the collections declared on T into the population, keyed
 //     by T's own package and type so the credit machinery finds their evictors
 //     unchanged. That is what finally made tv-sync's per-account orders,
-//     seenFills and execs visible — they are #809, and they are enumerated as a
-//     deferredLeak below rather than invisible.
+//     seenFills and execs visible — they were #809, they were enumerated as a
+//     deferredLeak rather than left invisible, and #809's heap half then gave
+//     all three an evictor and took the entries out. That round trip is the
+//     whole argument for the debt register: the leak was found by widening the
+//     walk, named, and closed.
 //     WHAT IS STILL INVISIBLE is the level below THAT: map[K]map[K2][]T reports
 //     the inner map and says nothing about the slice inside it, and a pointer
 //     behind a pointer is not followed. Measured 2026-09-03: 25 pointer-valued
@@ -247,7 +250,9 @@ var mapEvictionExempt = map[string]evictionExemption{
 	//     portfolio holds, which is an estate quantity, not a message rate.
 	//  3. CAPPED IN THE WRITE PATH, with the cap in the code.
 	//
-	// The one that fits none of them is tv-sync, and it is #809.
+	// tv-sync used to be the one that fitted none of them. It fits (2) now: its
+	// two remaining per-account folds are keyed by instrument, and #809's heap
+	// half gave the three collections that grew with traffic an evictor.
 
 	"internal/execution: venueStat.decisions": {boundedByConstruction,
 		"CAPPED IN THE WRITE PATH: VenueCosts.Observe stores an id only while " +
@@ -292,10 +297,11 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"the answer rather than free memory, which is the same argument the holder Queue.byID " +
 			"already carries.", ""},
 
-	"services/tv-sync/internal/projection: account.orders": tvSyncAccount("orders, keyed by order id"),
-	"services/tv-sync/internal/projection: account.seenFills": tvSyncAccount(
-		"the seen-fill set, keyed by fill id"),
-	"services/tv-sync/internal/projection: account.execs": tvSyncAccount("the execution list, appended per fill"),
+	// RETIRED BY #809's HEAP HALF: account.orders, account.seenFills and
+	// account.execs were the three deferredLeak entries here, and they are gone
+	// because they now HAVE an evictor (projection/retention.go, account.evict).
+	// The dead-entry arm below is what forced their removal in the same change
+	// rather than leaving three claims nobody was checking any more.
 
 	// live is the fourth per-account collection and it grows DIFFERENTLY from its
 	// three siblings above, so it does not share their wording (#995).
@@ -312,12 +318,38 @@ var mapEvictionExempt = map[string]evictionExemption{
 	// leaves when the history it folds does, which is #809's heap half: bound
 	// execs and this bounds with it, because it is derived from execs and cannot
 	// outlive them.
-	"services/tv-sync/internal/projection: account.live": {deferredLeak,
-		"UNBOUNDED IN PRINCIPLE: the maintained position fold, keyed by instrument, on a projection " +
-			"that never forgets an account. Bounded by instruments traded rather than by orders or " +
-			"fills, so it is the smallest of this account's four collections — but nothing removes " +
-			"an entry, because a flat instrument's realized P&L is still part of the book. Derived " +
-			"from account.execs and retired with it.", "#809"},
+	// THE TWO POSITION FOLDS, RECLASSIFIED BY #809's HEAP HALF. They were a
+	// deferredLeak while their sibling collections were: the argument was that
+	// live is derived from account.execs and would be retired with it. execs is
+	// now a retention window and these two are what makes that lossless, so the
+	// claim they rest on has changed shape and is stated fresh rather than
+	// inherited.
+	//
+	// The key space of BOTH is the set of instruments an account has traded, and
+	// an instrument id reaches this fold only on an order FACT that already
+	// passed OMS entitlement — it is the estate's instrument universe, not a
+	// message rate. A million fills in one instrument is one entry, and the fold
+	// of a whole fund's lifetime in it is the same size as the fold of a day's.
+	//
+	// NOTHING REMOVES AN ENTRY, and that is the decision rather than the gap: a
+	// flat instrument keeps its slot because its realized P&L is still part of
+	// what the account has earned. Dropping it would change what the fund has
+	// made, not merely what it holds — which is the failure the rest of this
+	// retention work exists to avoid.
+	"services/tv-sync/internal/projection: account.live": {boundedByConstruction,
+		"SIZED BY THE BOOK: the maintained position fold, keyed by the INSTRUMENTS an account has " +
+			"traded, where an instrument reaches it only through an order FACT that already passed " +
+			"OMS entitlement. It grows with the instrument universe rather than with orders or fills, " +
+			"so a fund's whole lifetime in one instrument is one entry. A flat instrument is retained " +
+			"deliberately: its realized P&L is still part of the book, exactly as the OMS's own " +
+			"position Book.lots is retained flat above.", ""},
+	"services/tv-sync/internal/projection: account.baseline": {boundedByConstruction,
+		"SIZED BY THE BOOK: the fold of the executions retention has DROPPED, keyed by the same " +
+			"instrument set as account.live beside it and written only by account.evict as history " +
+			"leaves. It is what makes bounding the resident history lossless — live is baseline plus " +
+			"fold(execs) — so it is the one collection here that must never shrink: evicting an entry " +
+			"would delete the fund's realized P&L from before the retention window, which nothing " +
+			"else holds (#809).", ""},
 
 	// ---------------------------------------------------------------------
 	// boundedByConstruction — the key space is written by the estate.
@@ -525,8 +557,8 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"keyed by TENANT — the estate's onboarded tenant roster, and the outermost of three levels " +
 			"this type nests. NOTE the scope of that claim: it covers this map's own keys only. The " +
 			"account map at each value has its own entry below; the per-account collections one level " +
-			"further down (orders, seenFills, execs) are #809 and live on a struct with no mutex of " +
-			"its own, so they are outside this guard's population entirely.", ""},
+			"further down are reached through the pointer arm (#951) and carry their own entries, " +
+			"three of which #809's heap half retired by giving them an evictor.", ""},
 	"services/webhook-ingest/internal/ingest: PositionCache.byKey": {boundedByConstruction,
 		"keyed by fund/venue/instrument off the OMS's own compacted venue-position stream. The webhook " +
 			"caller influences the READ path only — Position() looks a key up and never creates one — " +
@@ -557,8 +589,8 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"FACT that already passed OMS entitlement — the provisioned account roster, which is what " +
 			"the outer entry above used to claim on this level's behalf before the two were separable. " +
 			"A caller cannot name a portfolio it is not entitled to and reach this fold. The *account " +
-			"behind each entry holds collections that DO grow with traffic; those are #809 and are not " +
-			"in this guard's population, because account has no mutex of its own.", ""},
+			"behind each entry holds collections that grow with traffic; the pointer arm (#951) does " +
+			"reach them, and #809's heap half gave those three an evictor.", ""},
 
 	// ---------------------------------------------------------------------
 	// isTheStore — the collection IS an in-memory store's content. Each of
@@ -2013,19 +2045,14 @@ func ledgerSnapshot(what string) evictionExemption {
 			"of events folded.", ""}
 }
 
-// tvSyncAccount is the shared argument for the three per-account collections that
-// ARE unbounded (#809).
+// tvSyncAccount USED TO BE HERE, and its removal is the shape this guard
+// prescribes for a debt entry that gets paid.
 //
-// THE ONE REAL LEAK #951 EXPOSED, and it was already known: the guard's own
-// header named these as the reason to teach the walk to follow a pointer. Every
-// order and every fill for an account adds an entry and nothing removes one, so
-// a tv-sync process holding a busy account grows for its whole life. Recorded
-// here as a deferredLeak so it is enumerated rather than invisible — which is
-// the point of this guard being estate-wide — and the fix belongs in #809.
-func tvSyncAccount(what string) evictionExemption {
-	return evictionExemption{deferredLeak,
-		"UNBOUNDED: " + what + ", on a projection that never forgets an account. Every order and " +
-			"fill folded adds an entry and nothing removes one, so this grows with lifetime " +
-			"traffic rather than with the account roster. Exposed by #951 teaching this guard to " +
-			"follow a pointer value; the repair is #809.", "#809"}
-}
+// It was the shared argument for tv-sync's three unbounded per-account
+// collections — orders, seenFills and execs — enumerated as a deferredLeak by
+// #951 and repaired by #809's heap half. They have an evictor now
+// (projection/retention.go, account.evict), so the dead-entry arm rejected the
+// exemptions the moment the fix landed and this helper had nowhere left to be
+// called from. The two collections that remain, account.live and
+// account.baseline, are boundedByConstruction on a different argument and are
+// spelled out at their own entries rather than sharing one.

@@ -84,6 +84,32 @@ message OrderRevisions {
   repeated OrderRevision revisions = 1;
 }
 
+// Lot is one instrument's folded position — the three numbers
+// internal/costbasis.Lot carries: signed quantity, the average cost of what is
+// open, and cumulative realized P&L.
+//
+// EXACT RATIONALS AS STRINGS ("num/den"), NOT common.v1.Decimal, and this is the
+// one place on the platform where that is the correct answer rather than a lazy
+// one. A Decimal is a coefficient at a fixed scale; an average cost is
+// cost / quantity and a realized P&L accumulates (price - avg) * closed, so both
+// are routinely NON-TERMINATING — 1/3 of a share at any price is. Rendering them
+// through dec.ToProtoScaled truncates at the platform scale, which means the
+// fund's realized P&L moves by the last digit on every checkpoint restore and
+// keeps moving, restart after restart, with nothing to compare it against. That
+// drift was measured, not feared: it appeared on the first round-trip test.
+//
+// services/oms/internal/position/postgres.go persists the OMS's own durable
+// position book the same way and for the same reason (Qty.RatString(),
+// AvgCost.RatString(), Realized.RatString(), parsed back with big.Rat.SetString),
+// so this follows the estate's existing answer rather than inventing a second
+// one. The executions beside this field stay Decimal because they are the wire
+// values off the FACT and are exact by construction.
+message Lot {
+  string qty = 1;
+  string avg_cost = 2;
+  string realized = 3;
+}
+
 // AccountSnapshot is one trading account's folded state at a point in the log.
 message AccountSnapshot {
   string tenant_id = 1;
@@ -95,12 +121,38 @@ message AccountSnapshot {
   // seen_fills is the fill-id dedup set for the DUAL fill path — the synchronous
   // venue response and the asynchronous websocket echo of the same fill.
   //
-  // IT IS RESTORED IN FULL AND NEVER TRUNCATED. A fill id missing from this set
-  // when its echo arrives is a fill folded twice, which doubles a position the
-  // fund does not hold. The bus-redelivery path is protected separately by
-  // tv_facts's (tenant_id, event_id) primary key; this set is not that, and the
-  // two must not be conflated when someone later bounds the view's history.
+  // IT IS RESTORED IN FULL. A fill id missing from this set when its echo
+  // arrives is a fill folded twice, which doubles a position the fund does not
+  // hold. The bus-redelivery path is protected separately by tv_facts's
+  // (tenant_id, event_id) primary key; this set is not that, and the two must
+  // not be conflated.
+  //
+  // WHAT BOUNDS IT IS RETENTION, AND ONLY IN LOCKSTEP WITH execs. An id is
+  // dropped exactly when the execution it belongs to leaves the resident window,
+  // never on its own account — so the dedup horizon IS the retention window and
+  // is stated in one place (TV_SYNC_RETENTION, floored well above any delay the
+  // echo can have). Truncating this set on any other schedule is the cheapest-
+  // looking change in this file and the most expensive.
   repeated string seen_fills = 5;
+
+  // baseline is the fold of the executions RETENTION HAS ALREADY DROPPED, keyed
+  // by instrument.
+  //
+  // WITHOUT IT A RESTORE IS EXEC-M21 AGAIN. The live position book is
+  // fold(baseline) + fold(execs); once execs is a window rather than the whole
+  // history, rebuilding the book from execs alone reports the fund's positions
+  // and realized P&L since the window start and nothing before it — a trader
+  // looking at a book the fund does not have, which is the exact defect
+  // tv_facts was built to close. Every checkpoint therefore carries it, and a
+  // restore that ignored it would be wrong in a way no field comparison of the
+  // remaining state would reveal.
+  map<string, Lot> baseline = 6;
+
+  // retained_from is the knowledge instant the resident history begins at, and
+  // it is the reason baseline is safe to hold: an as-of read BEFORE it is
+  // refused rather than answered from a window. Absent means nothing has been
+  // dropped yet, which is the pre-retention posture and permits every read.
+  google.protobuf.Timestamp retained_from = 7;
 }
 
 // Checkpoint is every account's state at one point in this tenant's fact log.

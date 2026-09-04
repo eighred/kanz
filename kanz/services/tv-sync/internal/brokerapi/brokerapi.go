@@ -18,6 +18,7 @@ package brokerapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -72,9 +73,9 @@ func (h *Handler) state(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	st, found := h.proj.State(tenant, r.PathValue("id"), asOf)
-	if !found {
-		notFound(w)
+	st, err := h.proj.State(tenant, r.PathValue("id"), asOf)
+	if err != nil {
+		writeReadErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
@@ -85,11 +86,16 @@ func (h *Handler) positions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	pos, found := h.proj.Positions(tenant, r.PathValue("id"), asOf)
-	if !found {
-		notFound(w)
+	pos, err := h.proj.Positions(tenant, r.PathValue("id"), asOf)
+	if err != nil {
+		writeReadErr(w, err)
 		return
 	}
+	// NO retainedFrom HERE, AND THAT IS THE INTERESTING HALF. Positions and state
+	// are FOLDS, and what retention evicted was folded into the account's baseline
+	// on its way out, so these numbers are identical with retention on and off
+	// (#809). The two list endpoints below are windows and say so; conflating the
+	// two would teach a reader to distrust a figure that is exact.
 	writeJSON(w, http.StatusOK, map[string]any{"positions": pos})
 }
 
@@ -98,12 +104,13 @@ func (h *Handler) orders(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ords, found := h.proj.Orders(tenant, r.PathValue("id"), asOf)
-	if !found {
-		notFound(w)
+	accountID := r.PathValue("id")
+	ords, err := h.proj.Orders(tenant, accountID, asOf)
+	if err != nil {
+		writeReadErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"orders": ords})
+	writeJSON(w, http.StatusOK, h.windowed(tenant, accountID, "orders", ords))
 }
 
 func (h *Handler) executions(w http.ResponseWriter, r *http.Request) {
@@ -111,12 +118,40 @@ func (h *Handler) executions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	execs, found := h.proj.Executions(tenant, r.PathValue("id"), r.URL.Query().Get("instrument"), asOf)
-	if !found {
-		notFound(w)
+	accountID := r.PathValue("id")
+	execs, err := h.proj.Executions(tenant, accountID, r.URL.Query().Get("instrument"), asOf)
+	if err != nil {
+		writeReadErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"executions": execs})
+	writeJSON(w, http.StatusOK, h.windowed(tenant, accountID, "executions", execs))
+}
+
+// windowed wraps a list read with the instant the resident history begins at.
+//
+// A SHORT LIST READ AS A COMPLETE ONE IS A WRONG ANSWER, not a truncated one.
+// Retention drops terminal orders and executions older than the window from
+// memory (#809), so without this field a client counting rows would report "this
+// fund placed four orders" for a fund that placed four thousand. The key is
+// omitted entirely while nothing has been dropped, so a deployment whose history
+// is shorter than its retention window sends exactly the bytes it sent before.
+//
+// The facts themselves are NOT gone — tv_facts keeps every one of them, and a pod
+// restarted with a longer window rebuilds the longer list. This says what THIS
+// PROCESS can currently serve, which is the only thing an HTTP response can
+// honestly claim.
+// THE HORIZON IS READ AFTER THE LIST, and the order is the safe one rather than
+// the tidy one. A retention pass between the two calls can only move the horizon
+// FORWARD, so reading it second can declare a window slightly narrower than the
+// rows returned — the client under-trusts a complete list. Reading it first would
+// declare a window wider than the data and let a client read a truncated list as
+// covering everything back to the horizon, which is the direction that lies.
+func (h *Handler) windowed(tenant, accountID, key string, list any) map[string]any {
+	out := map[string]any{key: list}
+	if from, ok := h.proj.RetainedFrom(tenant, accountID); ok && !from.IsZero() {
+		out["retainedFrom"] = from.UTC().Format(time.RFC3339Nano)
+	}
+	return out
 }
 
 // stream is the Server-Sent-Events channel: the Trading Terminal subscribes and
@@ -130,8 +165,8 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	accountID := r.PathValue("id")
 	// The account must exist under this tenant — never open a stream to a
 	// resource the caller cannot read.
-	if _, found := h.proj.State(tenant, accountID, time.Time{}); !found {
-		notFound(w)
+	if _, err := h.proj.State(tenant, accountID, time.Time{}); err != nil {
+		writeReadErr(w, err)
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -243,6 +278,30 @@ func tenantAndAsOf(w http.ResponseWriter, r *http.Request) (string, time.Time, b
 		asOf = t
 	}
 	return tenant, asOf, true
+}
+
+// writeReadErr turns a projection read failure into a status.
+//
+// 410 GONE FOR AN AS-OF READ BEHIND THE RESIDENT WINDOW (#809), and the
+// distinction from 404 is the whole point: the account exists, the question is
+// well formed, and this process no longer holds the history to answer it. A 404
+// would say the fund does not exist and a 200 with a fold of the surviving window
+// would say something worse — a plausible position and P&L for a book the fund
+// never had. The body carries the horizon so the caller knows which questions
+// this pod can still answer.
+//
+// AN UNRECOGNISED ERROR IS 500, never a quiet empty list. Every read on this
+// surface answers a question about money, and "we could not tell" must not render
+// as "there is nothing".
+func writeReadErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, projection.ErrAccountNotFound):
+		notFound(w)
+	case errors.Is(err, projection.ErrBeforeRetention):
+		writeJSON(w, http.StatusGone, map[string]string{"error": err.Error()})
+	default:
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
 }
 
 func notFound(w http.ResponseWriter) {

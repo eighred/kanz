@@ -128,8 +128,8 @@ func TestABootingPodRebuildsTheBookItLost(t *testing.T) {
 	deliver(t, dying, "evt-1", evtFilled, filledOrder("o1", "fund-alpha", "BTC", orderpb.Side_SIDE_BUY, 2, 100))
 	deliver(t, dying, "evt-2", evtFilled, filledOrder("o2", "fund-alpha", "BTC", orderpb.Side_SIDE_SELL, 1, 150))
 
-	before, ok := dying.Positions(testTenant, "fund-alpha", time.Time{})
-	if !ok || len(before) != 1 {
+	before, err := dying.Positions(testTenant, "fund-alpha", time.Time{})
+	if err != nil || len(before) != 1 {
 		t.Fatalf("the dying pod's own book is wrong: %+v", before)
 	}
 
@@ -143,8 +143,8 @@ func TestABootingPodRebuildsTheBookItLost(t *testing.T) {
 		t.Fatalf("rehydrate: %v", err)
 	}
 
-	after, ok := reborn.Positions(testTenant, "fund-alpha", time.Time{})
-	if !ok {
+	after, err := reborn.Positions(testTenant, "fund-alpha", time.Time{})
+	if err != nil {
 		t.Fatal("the rebuilt book has no account — the trader sees an empty TradingView account while the fund holds 1 BTC")
 	}
 	if len(after) != 1 || after[0].Instrument != "BTC" {

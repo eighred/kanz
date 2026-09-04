@@ -73,7 +73,56 @@ type Config struct {
 	// unbounded startup this exists to end — and it degrades SILENTLY, because the
 	// book it rebuilds is correct, just slower to reach every time.
 	CheckpointInterval time.Duration
+
+	// Retention is how much folded history tv-sync keeps RESIDENT (#809).
+	//
+	// IT BOUNDS MEMORY, NOT THE RECORD. tv_facts keeps every fact forever; this
+	// only says how much of the fold stays in RAM. Positions, average cost and
+	// realized P&L are unaffected at any window — what leaves is folded into a
+	// per-account baseline on the way out — so what this actually buys is the
+	// depth of the order and execution BLOTTER and the depth of the bitemporal
+	// as-of reads, against the pod's resident set. A pod restarted with a longer
+	// window rebuilds the longer one from the log.
+	//
+	// NON-POSITIVE IS REFUSED rather than treated as "keep everything". Keeping
+	// everything is what #809 filed: the heap grows with lifetime order and fill
+	// volume until the pod is OOM-killed, and the operator interface disappears
+	// exactly when an incident makes somebody want it. There is no off switch
+	// here for the same reason there is none for the checkpoint interval.
+	//
+	// BELOW MinRetention IS ALSO REFUSED, and for a different and sharper reason
+	// than memory — see that constant.
+	Retention time.Duration
 }
+
+// MinRetention is the floor under TV_SYNC_RETENTION, and it is a CORRECTNESS
+// floor rather than a comfort one.
+//
+// The resident window is also the fill-id dedup window: retention drops a fill id
+// exactly when the execution it belongs to leaves memory (projection/retention.go
+// evict). That set is the dedup for the DUAL fill path — the synchronous venue
+// placement response and the asynchronous user-data websocket echo of the SAME
+// fill, published as two separate FACTs with two event_ids, so tv_facts's
+// (tenant_id, event_id) primary key does not deduplicate them. An id dropped
+// before its echo arrives is a fill folded twice: a doubled position and a
+// doubled realized P&L on the surface a trader acts from.
+//
+// 24h, for two reasons that agree:
+//
+//   - The venue adapters re-report a fill after a user-data websocket reconnect
+//     and on the periodic REST reconciliation pass (services/venue-binance/
+//     internal/binance/binance_recon.go). Both are minutes-to-hours horizons even
+//     through an outage; a day clears them with room.
+//   - The EXECUTION stream itself is provisioned with 24h retention
+//     (infra/nats/bootstrap-job.yaml), so nothing older than that can still be
+//     delivered to this consumer by any path at all.
+//
+// IT IS A CHOSEN BOUND, NOT A MEASURED ONE. Nothing on this platform instruments
+// the actual sync-response-to-echo delay, so the floor is argued from the two
+// horizons above rather than from a distribution. Lowering it is a decision about
+// double-counted fills, which is why it is a constant with this comment on it
+// instead of a default somebody can quietly halve.
+const MinRetention = 24 * time.Hour
 
 // Load reads TV_SYNC_* environment variables with production-safe defaults.
 func Load() (Config, error) {
@@ -116,6 +165,27 @@ func Load() (Config, error) {
 			"correct and only the outage is longer", interval)
 	}
 	cfg.CheckpointInterval = interval
+
+	// 168h: a week of blotter and of as-of depth. The number is a memory
+	// trade-off rather than a correctness one (every fold stays exact at any
+	// window), so it is set high enough that an operator investigating last
+	// week's trading does not hit the horizon, and low enough that the resident
+	// set is a function of a week's volume rather than of the fund's life.
+	retention, err := time.ParseDuration(env.Or("TV_SYNC_RETENTION", "168h"))
+	if err != nil {
+		return Config{}, fmt.Errorf("TV_SYNC_RETENTION: %w", err)
+	}
+	if retention < MinRetention {
+		return Config{}, fmt.Errorf("TV_SYNC_RETENTION must be at least %s, got %s: the resident "+
+			"window is also the fill-id dedup window for the DUAL fill path (the synchronous venue "+
+			"response and the asynchronous websocket echo of the same fill), and an id dropped "+
+			"before its echo arrives is a fill folded TWICE — a doubled position and a doubled "+
+			"realized P&L. A non-positive value is refused by the same check: keeping everything is "+
+			"the unbounded heap #809 exists to end, and it fails by OOM-killing the pod rather than "+
+			"by saying anything", MinRetention, retention)
+	}
+	cfg.Retention = retention
+
 	if len(cfg.PriceSubjects) == 0 {
 		return Config{}, fmt.Errorf("TV_SYNC_PRICE_SUBJECTS: at least one subject is required; " +
 			"a pod subscribing to nothing folds no marks and silently shows no unrealized P&L")

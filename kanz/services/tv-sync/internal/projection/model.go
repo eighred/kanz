@@ -76,6 +76,35 @@ type account struct {
 	// explicit as-of still walks the history, which is correct — that query asks
 	// what was known at a past instant, and only the history knows.
 	live map[string]*posState
+
+	// baseline is foldPositions of the executions RETENTION HAS DROPPED, and
+	// retainedFrom is the knowledge instant the resident history begins at
+	// (#809). Together they are what makes bounding execs safe rather than
+	// lossy.
+	//
+	// WHY A FOLD AND NOT A WINDOW. #809 asked for a hot window with the old
+	// history left behind. A window alone reports the fund's positions and
+	// realized P&L since the window opened — a year-old position simply gone,
+	// P&L restarted — which is EXEC-M21's defect (a trader looking at an empty
+	// account while the fund's positions sat open at the exchanges) reached from
+	// the other direction. Folding the evicted prefix into baseline keeps every
+	// number a LIVE read reports exact and unchanged, forever: live is
+	// baseline ⊕ fold(execs), and it is what the Broker API serves.
+	//
+	// WHAT IS ACTUALLY LOST IS THE ABILITY TO ANSWER FOR A PAST INSTANT, and
+	// only for instants before retainedFrom. A fold is not invertible — an
+	// average cost basis cannot be unwound to what it was three fills ago — so
+	// baseline can answer "now" and cannot answer "then". That read is REFUSED
+	// with ErrBeforeRetention rather than served from the window, because a
+	// partial history produces a plausible wrong number rather than an error,
+	// and this projection's whole contract is that it never does.
+	//
+	// A ZERO retainedFrom MEANS NOTHING HAS BEEN DROPPED — a fresh account, or a
+	// deployment with retention longer than its history — and every read behaves
+	// exactly as it did before #809. That is the default, so an unconfigured
+	// projection is not silently a windowed one.
+	baseline     map[string]*posState
+	retainedFrom time.Time
 }
 
 func newAccount(tenant, id string) *account {
@@ -84,6 +113,7 @@ func newAccount(tenant, id string) *account {
 		orders:    make(map[string][]orderRev),
 		seenFills: make(map[string]bool),
 		live:      make(map[string]*posState),
+		baseline:  make(map[string]*posState),
 	}
 }
 
@@ -98,11 +128,28 @@ func (a *account) livePos(instrument string) *posState {
 	return p
 }
 
+// baselinePos returns the baseline fold slot for an instrument, creating it on
+// first eviction exactly as foldPositions does.
+func (a *account) baselinePos(instrument string) *posState {
+	p := a.baseline[instrument]
+	if p == nil {
+		p = costbasis.NewLot()
+		a.baseline[instrument] = p
+	}
+	return p
+}
+
 // rebuildLive recomputes the live fold from the retained history. Used after a
 // checkpoint restore, where the executions arrive in one batch rather than one
 // at a time — bounded, and once per boot.
+//
+// IT STARTS FROM THE BASELINE, not from zero (#809). A restore that folded only
+// the retained window would serve a book missing every position opened before
+// retention dropped it, and every field beside it would still be right — which
+// is why this line is load-bearing and why the checkpoint carries baseline at
+// all.
 func (a *account) rebuildLive() {
-	a.live = foldPositions(a.execs)
+	a.live = foldPositionsFrom(a.baseline, a.execs)
 }
 
 // --- output DTOs (the TradingView Broker-API JSON shapes) ---
