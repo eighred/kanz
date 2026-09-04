@@ -141,6 +141,32 @@ spec:
             - { name: ACCOUNTING_LISTEN, value: ":8101" }
             - { name: ACCOUNTING_METRICS_LISTEN, value: ":8080" }
             - { name: ACCOUNTING_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            # CUSTODY RECONCILIATION IS UNCONFIGURED HERE, AND THAT IS RECORDED RATHER
+            # THAN MERELY OMITTED (#962, #1006, #1025) — a control nobody can find in
+            # the manifest is a control nobody knows is absent.
+            #
+            #   ACCOUNTING_CUSTODY_PAIRS     PF1:CUST-A,PF1:CUST-B — the work list
+            #   ACCOUNTING_CUSTODY_ACCOUNTS  PF1:CUST-A:okx-sub-1,PF1:CUST-B:bin-main —
+            #                                which exchange accounts each custodian holds
+            #
+            # BOTH ARE COMMA-SEPARATED, one entry per custodian, and the comma is the
+            # ONLY separator env.SplitList honours — which means a custodian holding
+            # more than one account cannot be declared here today: the comma inside
+            # "okx-sub-1,okx-sub-2" splits the entry and the pod refuses to start on the
+            # fragment. Verified against the built binary. That is a defect in the
+            # declaration format rather than in the control, and it is why both examples
+            # above name exactly one account each.
+            #
+            # UNSET, THE BOOK OF RECORD IS VERIFIED AGAINST NO CUSTODIAN. Nothing is
+            # scheduled (main says so at ERROR on every boot), no ReconciliationRun FACT
+            # is ever emitted, and POST /v1/portfolios/{id}/reconcile — routed at the
+            # gateway since #1025 — refuses every request naming a custodian, because
+            # this deployment declares none and the only book it could otherwise compare
+            # is the WHOLE portfolio.
+            #
+            # THE ACCOUNTS KEY IS NOT OPTIONAL ONCE A PORTFOLIO HAS TWO CUSTODIANS: the
+            # pod REFUSES TO START without it, rather than reporting every position held
+            # at the other custodian as a break, twice a day, forever (#1006).
             - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8101 }

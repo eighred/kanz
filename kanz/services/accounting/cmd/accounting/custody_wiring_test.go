@@ -75,9 +75,19 @@ func baseCfg() config.Config {
 	}
 }
 
+// buildPlane runs the whole custody wiring the composition root does: the
+// declaration is parsed and the book scope derived FIRST (#1025 — the server's
+// ad-hoc reconcile endpoint needs the same scope, so main builds it before either
+// consumer), then the plane is assembled over it. A configuration refused by
+// either half is a refused start, which is what the tests below assert.
 func buildPlane(t *testing.T, cfg config.Config, h *capturingHandler) (*custodyPlane, error) {
 	t.Helper()
-	return buildCustodyPlane(cfg, nil, custody.NewMemoryStore(), ledger.NewMemoryStore(), noopPublisher{}, prometheus.NewRegistry(), slog.New(h))
+	logger := slog.New(h)
+	cc, err := buildCustodyConfig(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	return buildCustodyPlane(cfg, cc, nil, custody.NewMemoryStore(), ledger.NewMemoryStore(), noopPublisher{}, prometheus.NewRegistry(), logger)
 }
 
 // THE WIRING ASSEMBLES AND THE SCHEDULER EXISTS. A plane that builds without a
@@ -188,7 +198,12 @@ func TestEveryConfiguredPairIsSeededOnTheRegistry(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	cfg := baseCfg()
 	cfg.CustodyPairs = []string{"PF1:CUST-A", "PF2:CUST-B"}
-	if _, err := buildCustodyPlane(cfg, nil, custody.NewMemoryStore(), ledger.NewMemoryStore(), noopPublisher{}, reg, slog.New(&capturingHandler{})); err != nil {
+	logger := slog.New(&capturingHandler{})
+	cc, err := buildCustodyConfig(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildCustodyConfig: %v", err)
+	}
+	if _, err := buildCustodyPlane(cfg, cc, nil, custody.NewMemoryStore(), ledger.NewMemoryStore(), noopPublisher{}, reg, logger); err != nil {
 		t.Fatalf("buildCustodyPlane: %v", err)
 	}
 	families, err := reg.Gather()
@@ -242,8 +257,13 @@ func TestTheConfiguredStatementSubjectMatchesThePackage(t *testing.T) {
 // manage to make is written where nothing reads it. Both halves look fine alone.
 func TestTheBreakQueueAndTheSchedulerShareOneStore(t *testing.T) {
 	shared := custody.NewMemoryStore()
-	plane, err := buildCustodyPlane(baseCfg(), nil, shared, ledger.NewMemoryStore(),
-		noopPublisher{}, prometheus.NewRegistry(), slog.New(&capturingHandler{}))
+	logger := slog.New(&capturingHandler{})
+	cc, err := buildCustodyConfig(baseCfg(), logger)
+	if err != nil {
+		t.Fatalf("buildCustodyConfig: %v", err)
+	}
+	plane, err := buildCustodyPlane(baseCfg(), cc, nil, shared, ledger.NewMemoryStore(),
+		noopPublisher{}, prometheus.NewRegistry(), logger)
 	if err != nil {
 		t.Fatalf("buildCustodyPlane: %v", err)
 	}

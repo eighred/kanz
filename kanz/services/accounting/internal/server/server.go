@@ -14,12 +14,15 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/eighred/kanz/pkg/auth"
 	accounting "github.com/eighred/kanz/services/accounting/internal"
 	"github.com/eighred/kanz/services/accounting/internal/cashmove"
+	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
 )
@@ -54,6 +57,17 @@ type Server struct {
 	breaks BreakStore
 	// snapshotMetrics counts unbounded materializations. nil is inert.
 	snapshotMetrics *ledger.SnapshotMetrics
+	// custodyScope decides WHICH SLICE of a portfolio's journal the ad-hoc
+	// reconcile endpoint compares one custodian's statement against — the same
+	// declaration the scheduled runs are scoped by (#1006, #1025).
+	//
+	// NIL PLACES NO CUSTODIAN AND THEREFORE RECONCILES NOTHING, deliberately. A
+	// deployment that forgets WithCustodyBookScope refuses every reconcile and
+	// names the missing configuration, rather than comparing the WHOLE portfolio
+	// against one custodian's statement and answering 200 with a break for every
+	// position held anywhere else. Same direction as the unset tenant above: a
+	// misconfiguration on the book of record takes the surface offline.
+	custodyScope *custody.BookScope
 	// tenant is the ONE tenant this instance serves. main pins the RLS pool to it
 	// (pg.NewTenantPool), so a caller from any other tenant has no business here
 	// whatever the database holds.
@@ -102,6 +116,19 @@ func WithTenant(t string) Option { return func(s *Server) { s.tenant = t } }
 
 func WithCashPublisher(p CashPublisher) Option {
 	return func(s *Server) { s.cashPublisher = p }
+}
+
+// WithCustodyBookScope supplies the (portfolio, custodian) → exchange-account
+// declaration the ad-hoc reconcile endpoint scopes its book side by.
+//
+// IT IS THE SAME *custody.BookScope THE SCHEDULED RUNS USE, built once at the
+// composition root and handed to both. Two instances built from the same
+// environment would agree today and diverge the first time one of them is
+// rebuilt from something else — and a disagreement about which accounts a
+// custodian holds is invisible until a real break is buried in the noise it
+// manufactures.
+func WithCustodyBookScope(scope *custody.BookScope) Option {
+	return func(s *Server) { s.custodyScope = scope }
 }
 
 // New builds the server over a journal store and base currency.
@@ -280,11 +307,50 @@ func (s *Server) instrumentCurrencyFor(req navRequest) accounting.InstrumentCurr
 // --- reconcile ---------------------------------------------------------------
 
 type reconcileRequest struct {
-	Positions map[string]string `json:"positions"` // instrument -> custodian quantity
-	Cash      map[string]string `json:"cash"`      // currency -> custodian balance
-	Tolerance string            `json:"tolerance"`
+	// CustodianID names WHOSE statement this is, and it is REQUIRED (#1025).
+	//
+	// Without it the comparison loaded the WHOLE portfolio and handed it to one
+	// custodian's statement, so for a portfolio custodied in two places every
+	// position held at the other came back as MISSING_AT_CUSTODIAN. An ad-hoc
+	// reconciliation is what an operator runs WHILE INVESTIGATING, so that noise
+	// arrives exactly when somebody is trying to read the signal.
+	//
+	// IT IS NEVER DEFAULTED OR INFERRED, not even for a portfolio with one
+	// configured custodian. A guessed custodian compares a book slice nobody
+	// asked about and presents the result as an answer about the one they did.
+	CustodianID string            `json:"custodian_id"`
+	Positions   map[string]string `json:"positions"` // instrument -> custodian quantity
+	Cash        map[string]string `json:"cash"`      // currency -> custodian balance
+	Tolerance   string            `json:"tolerance"`
 }
 
+// handleReconcile compares ONE CUSTODIAN'S slice of the book against a statement
+// the caller supplies, and writes nothing.
+//
+// IT MUST NEVER RECORD A RUN OR UPSERT A BREAK, and that is the boundary between
+// this route and the scheduled control. The statement here arrives in the REQUEST
+// BODY: a caller who could make it move the lifecycle would close any break by
+// posting a statement that agrees with the book — the hand-resolve #966 removed,
+// arriving through the comparison engine rather than through custody.Break. This
+// answers "what does the statement in my hand say about the book right now"; only
+// a run over a statement the CUSTODIAN sent may move a break.
+//
+// THE BOOK SIDE GOES THROUGH custody.LedgerBookLoader — the same loader the
+// scheduled runs use (#1025). A second custodian-scoping implementation here
+// would be the copied helper this repository keeps paying for, and the two would
+// disagree about which accounts a custodian holds; that disagreement is invisible
+// until a real break is buried in the fabricated ones.
+//
+// IT NO LONGER GOES THROUGH s.materialize, AND THAT COSTS THIS ROUTE THE #229
+// FULL-SCAN COUNTER. Worth stating rather than leaving to be discovered:
+// MaterializeForAccounts deliberately does NOT resume from a checkpoint (the
+// snapshot is per-PORTFOLIO, and resuming a custodian-scoped fold from one covers
+// only the tail), so counting a scoped reconcile as an unbounded materialization
+// would make kanz_accounting_ledger_full_scans_total report "the snapshot job has
+// stopped working" on a path where reading the whole journal IS the design — a
+// permanent false positive on the one signal that catches a real one. NAV is the
+// frequent read and still counts; this route is operator-triggered and rare. If
+// that changes, the fix is a reason on the loader, not a second materialize here.
 func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	if !s.callerOwnsThisInstance(w, r) {
 		return
@@ -292,6 +358,28 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req reconcileRequest
 	if !decode(w, r, &req) {
+		return
+	}
+	custodian := strings.TrimSpace(req.CustodianID)
+	if custodian == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reconcile: custodian_id is required — " +
+			"a statement belongs to ONE custodian, and comparing it against the whole portfolio reports " +
+			"every position held at another custodian as a break"})
+		return
+	}
+	// THE NAMED PAIR MUST BE ONE THIS DEPLOYMENT RECONCILES. An unrecognised
+	// custodian has no declared exchange accounts, so the only book that could be
+	// answered with is the whole portfolio — which is the defect, returned as a
+	// 200. The refusal names the configuration rather than the caller, because
+	// "you typed it wrong" and "nobody declared it" are both live and an operator
+	// can act on either.
+	if !slices.Contains(s.custodyScope.Custodians(id), custodian) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf(
+			"reconcile: portfolio %s is not reconciled against custodian %q in this deployment "+
+				"(configured: %s). Either the custodian_id is wrong, or the pair is missing from "+
+				"ACCOUNTING_CUSTODY_PAIRS and its accounts from ACCOUNTING_CUSTODY_ACCOUNTS — "+
+				"reconciling without them would compare the WHOLE portfolio against one custodian's "+
+				"statement", id, custodian, custodianList(s.custodyScope.Custodians(id)))})
 		return
 	}
 	positions, err := toRatMap(req.Positions)
@@ -311,8 +399,18 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	book, err := s.materialize(r.Context(), id)
+	// subject names the BOOK SLICE and nothing else. It carries no business date
+	// on purpose: this comparison is against a statement in the request, so there
+	// is no stored statement, run or break for a date to key — and a date invented
+	// here would be a business date on evidence nobody chose. Nothing persists or
+	// publishes it, so Subject.Validate's date requirement does not apply.
+	subject := custody.Subject{PortfolioID: id, CustodianID: custodian}
+	book, err := custody.LedgerBookLoader(s.store, s.custodyScope)(r.Context(), subject)
 	if err != nil {
+		// The loader refuses rather than returning a partial book — an exchange
+		// account no custodian claims, most often. Surface the reason: it names
+		// the account to declare, and a comparison run against a partial book
+		// breaks every position it omitted.
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -327,7 +425,22 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 			"diff":      b.Diff.FloatString(8),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"breaks": out, "count": len(out)})
+	// The custodian is echoed because the answer is only meaningful about the
+	// slice it was computed over: a break list an operator pastes into an
+	// investigation must say whose book it compared.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"portfolio_id": id, "custodian_id": custodian, "breaks": out, "count": len(out),
+	})
+}
+
+// custodianList renders the configured custodians for a refusal message. "none"
+// rather than an empty string, so a deployment that declared no pair at all reads
+// as a stated fact instead of a truncated sentence.
+func custodianList(custodians []string) string {
+	if len(custodians) == 0 {
+		return "none"
+	}
+	return strings.Join(custodians, ", ")
 }
 
 // --- cash movements (WIRE-01f) -----------------------------------------------

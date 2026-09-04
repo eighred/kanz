@@ -136,6 +136,23 @@ func (s *BookScope) Scoped(portfolio string) bool {
 	return s != nil && len(s.accounts[portfolio]) > 0
 }
 
+// Custodians returns the custodians configured for a portfolio, sorted, or nil
+// when this deployment reconciles that portfolio against none.
+//
+// IT EXISTS SO A CALLER CAN REFUSE A CUSTODIAN IT CANNOT PLACE (#1025). The
+// ad-hoc reconcile endpoint takes the custodian from the REQUEST, and Scoped
+// cannot check it: a single-custodian portfolio is deliberately unscoped, so
+// there a wrong custodian id is indistinguishable from the right one and the
+// only book the handler could answer with is the WHOLE portfolio — #1006's
+// defect served with a 200. A caller that cannot place the name must refuse
+// rather than compare something else.
+func (s *BookScope) Custodians(portfolio string) []string {
+	if s == nil {
+		return nil
+	}
+	return slices.Clone(s.custodians[portfolio])
+}
+
 // For returns the accounts one custodian holds, and every account any custodian
 // of that portfolio claims. The second is what turns an account nobody declared
 // into a refusal instead of a silently missing holding.

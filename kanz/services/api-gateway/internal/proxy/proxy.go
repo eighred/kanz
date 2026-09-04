@@ -334,12 +334,37 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// may not", when the truth is "nobody may, in this deployment" — which is
 	// indistinguishable from a control working as intended. Unregistered, the
 	// answer is 404, and that is true.
+	//
+	// THE AD-HOC COMPARISON IS THE FOURTH ROUTE HERE (#1025, #967), and it is what
+	// makes the queue above workable rather than only readable. accounting has
+	// served POST /v1/portfolios/{id}/reconcile since IBOR-01e and this gateway
+	// routed none of it, so under network-policies.yaml — where this gateway is
+	// accounting's ONLY permitted caller — the comparison engine was reachable by
+	// nobody. An operator who has just folded the missing fill behind a break had
+	// no way to ask whether the difference is actually gone; the answer waited for
+	// the next scheduled run, up to ACCOUNTING_CUSTODY_INTERVAL (24h) away.
+	//
+	// EXPOSING IT WAS BLOCKED ON SCOPING IT, and that ordering is the point rather
+	// than a coincidence. Until #1025 the handler compared the WHOLE portfolio
+	// against the one custodian's statement in the request body, so for a portfolio
+	// custodied in two places it answered 200 with a break for every position held
+	// at the other. Routing that first would have taken a latent defect and made it
+	// live — #539's shape, where each repair reintroduces the bug one layer out. It
+	// now names a custodian and refuses a pair it cannot place.
+	//
+	// IT WRITES NOTHING, AND THAT IS WHY IT IS SAFE TO ROUTE. The statement arrives
+	// in the REQUEST BODY, so a route that recorded a run from it would let a
+	// caller close any break by posting a statement that agrees with the book — the
+	// hand-resolve #966 removed, arriving through the comparison engine instead of
+	// through the lifecycle. The handler records no run and upserts no break.
 	if h.roles.Fund != "" {
 		mux.Handle(authz.Fund, "GET /v1/custody/breaks",
 			h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/assign",
 			h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/explain",
+			h.handle(ServiceAccounting, true, nil))
+		mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/reconcile",
 			h.handle(ServiceAccounting, true, nil))
 	}
 
