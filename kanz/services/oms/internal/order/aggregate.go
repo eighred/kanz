@@ -44,8 +44,8 @@ func Accept(cmd *orderpb.SubmitOrder, now time.Time) (*orderpb.OrderState, error
 	if cmd.GetPortfolioId() == "" {
 		return nil, reject("INVALID_ORDER", "portfolio_id required")
 	}
-	if cmd.GetInstrumentId() == "" {
-		return nil, reject("INVALID_ORDER", "instrument_id required")
+	if rej := validateInstrumentID(cmd.GetInstrumentId()); rej != nil {
+		return nil, rej
 	}
 	if cmd.GetSide() == orderpb.Side_SIDE_UNSPECIFIED {
 		return nil, reject("INVALID_ORDER", "side required")
