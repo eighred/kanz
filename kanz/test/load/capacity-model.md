@@ -164,6 +164,63 @@ Four things in those tables are worth more than the number:
 Re-run it against a real multi-node deployment before any of this becomes a
 threshold. The command and the stack recipe are in `README.md`.
 
+### compliance — the post-trade book (#1008)
+
+Until #1008 this section did not exist, and the policy table below had no
+compliance row at all. That absence was the point of the issue: the one control
+that answers "is this fund still inside its concentration, leverage and exposure
+limits AFTER the trade" had never been in a load run, and the platform could not
+state how many position FACTs per second it folds before falling behind.
+
+`services/compliance/internal/monitor` folds every FACT on `risk.position.>` into
+a per-`(tenant, portfolio)` book and re-evaluates the mandate on each one. Two
+properties set the ceiling:
+
+- **Per-FACT cost is O(holdings)** and dominated by the rule evaluation, not by
+  the snapshot copy: `BenchmarkSnapshot/held=1000` is ~59 µs against
+  `BenchmarkHandlePositionFact/held=1000` at ~2.85 ms, so the copy is ~2 % of the
+  work.
+- **Production dispatch concurrency is ONE.** The monitor's fold is a
+  `SubscribeBroadcast`, and one bus subject is dispatched by one goroutine. So the
+  SERIAL column below is the deployed figure; the parallel one is a ceiling that
+  is not reachable until dispatch widens.
+
+#### The local figures, and what they are not
+
+Measured 2026-09-04 on ONE developer machine — Windows 11, i5-12500H (12 cores /
+16 threads), `GOMAXPROCS=16`, Go 1.26.1, no `-race`, with the compose backing
+services idle beside it. **These are local figures and not a capacity guarantee.**
+
+```sh
+go test ./services/compliance/internal/monitor/ -run '^$' -bench 'BenchmarkHandlePositionFact$' -benchmem -benchtime=3s -count=3
+go test ./services/compliance/internal/monitor/ -run '^$' -bench 'BenchmarkHandlePositionFactParallel' -benchmem -benchtime=3s -count=3
+```
+
+| holdings/book | serial — **the deployed shape** | 16 goroutines | ratio | allocs/FACT |
+|---|---|---|---|---|
+| 50 | ~130 µs/op ⇒ **~7,700 FACTs/s** | ~41 µs/op ⇒ ~24,600/s | 3.2× | 1,030 |
+| 1,000 | ~2.85 ms/op ⇒ **~350 FACTs/s** | ~508 µs/op ⇒ ~1,970/s | 5.6× | 19,095 |
+
+Read it as: **at a 1,000-name book this box sustains a few hundred position FACTs
+per second of post-trade compliance**, against a producer side on the SAME stream
+(`subject.PositionAll`, consumed by both risk-engine and compliance) that is sized
+at 500 pending/replica and autoscaled to 12 replicas. The ceiling also FALLS as
+books grow, which is the direction institutional books travel.
+
+#### What the numbers say about the fix, which is not what was assumed
+
+The allocation count is **identical** serial and parallel (19,095/op at
+held=1000). The cost is per-FACT WORK, not lock contention — and at the deployed
+concurrency of one goroutine there is no contention at all. Sharding
+`Monitor.mu` therefore buys nothing in the current deployment; it is a
+PREREQUISITE for widening dispatch, not itself a throughput fix. The 3-6× the
+parallel column shows is the ceiling that sharding would raise, and it is only
+collectable once more than one goroutine is delivering.
+
+`replicas: 1` stays: that bound is correctness (every pod folds every position and
+would emit its own duplicate breach FACT), so the fix is per-replica throughput,
+not horizontal scale.
+
 ### Phase-7 read services (wealth/datamaster/copilot/alternatives)
 
 Stateless HTTP, no bus — scale on **CPU 70 %** (`phase7-scaling.yaml`, SVCWIRE-01d).
@@ -179,6 +236,7 @@ Stateless HTTP, no bus — scale on **CPU 70 %** (`phase7-scaling.yaml`, SVCWIRE
 | wealth/datamaster/copilot/alternatives | CPU | 70 % util | 2 | 8 | `phase7-scaling.yaml` |
 | api-gateway | CPU | 70 % util | — | — | (SRE-01a) |
 | oms (admission) | `kanz_bus_pending_messages{subject="order.order.submit"}` | **not set** — measured, not yet policy (#865) | — | — | none |
+| compliance (post-trade book) | `kanz_bus_pending_messages{delivery="broadcast"}` (the series exists only from #1009; before it, a broadcast subscription had none) | **not set** — measured, not yet policy (#1008); ~350 FACTs/s at a 1,000-name book, one dispatch goroutine | 1 | 1 | `compliance-deploy.yaml` (`replicas: 1` is a CORRECTNESS bound) |
 
 ## Re-derivation cadence
 
