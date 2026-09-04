@@ -97,9 +97,17 @@ func seedBook(m *Monitor, key bookKey, n int) {
 }
 
 func benchPositionFact(b *testing.B, inst string, qty, mv int64) []byte {
+	return benchPositionFactFor(b, "p1", inst, qty, mv)
+}
+
+// benchPositionFactFor is benchPositionFact for a NAMED portfolio, which the
+// parallel benchmark needs: goroutines folding into distinct portfolios is what
+// separates cross-portfolio contention from the per-portfolio serialization the
+// book actually requires (#1008).
+func benchPositionFactFor(b *testing.B, portfolio, inst string, qty, mv int64) []byte {
 	b.Helper()
 	out, err := proto.Marshal(&domainpb.PositionState{
-		PortfolioId:  "p1",
+		PortfolioId:  portfolio,
 		InstrumentId: inst,
 		Quantity:     decv(qty, 0),
 		MarketValue:  &commonpb.Money{Amount: decv(mv, 0), CurrencyCode: "USD"},
