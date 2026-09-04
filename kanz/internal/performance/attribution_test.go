@@ -2,6 +2,8 @@ package performance
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,7 +64,10 @@ func TestBucketBySector_AggregatesAndCatchesUnclassified(t *testing.T) {
 		{InstrumentID: "Z", Weight: 0.2, Return: 0.00}, // unknown ⇒ UNCLASSIFIED
 	}
 	bench := []WeightedReturn{{InstrumentID: "A", Weight: 1.0, Return: 0.08}}
-	data := BucketBySector(context.Background(), cl, time.Now(), port, bench)
+	data, err := BucketBySector(context.Background(), cl, time.Now(), port, bench)
+	if err != nil {
+		t.Fatalf("BucketBySector: %v", err)
+	}
 
 	got := map[string]SectorData{}
 	for _, d := range data {
@@ -76,4 +81,48 @@ func TestBucketBySector_AggregatesAndCatchesUnclassified(t *testing.T) {
 		t.Fatal("unknown instrument must land in UNCLASSIFIED, not be dropped")
 	}
 	near(t, "unclassified weight", got[UnclassifiedSector].PortfolioWeight, 0.2, 1e-12)
+}
+
+// TestBucketBySector_NoClassifierIsRefused pins the distinction #640 was filed
+// about, in the one Classifier consumer that never had it: a book with holdings
+// and no classifier must REFUSE, not come back as a decomposition. Before this,
+// every row bucketed as UNCLASSIFIED and the Brinson effects still summed to the
+// active return, so the report was indistinguishable from a correctly resolved
+// single-sector book — a fabricated answer, not a missing one.
+func TestBucketBySector_NoClassifierIsRefused(t *testing.T) {
+	port := []WeightedReturn{
+		{InstrumentID: "A", Weight: 0.6, Return: 0.10},
+		{InstrumentID: "B", Weight: 0.4, Return: 0.05},
+	}
+	bench := []WeightedReturn{{InstrumentID: "A", Weight: 1.0, Return: 0.08}}
+
+	data, err := BucketBySector(context.Background(), nil, time.Now(), port, bench)
+	if !errors.Is(err, ErrNoClassifier) {
+		t.Fatalf("err=%v want ErrNoClassifier — with no classifier wired this returned a "+
+			"decomposition that reconciled, booking the whole active return to selection inside "+
+			"UNCLASSIFIED; a caller cannot tell that from a real single-sector attribution", err)
+	}
+	if data != nil {
+		t.Fatalf("refusal returned %d sector row(s); a refused decomposition must carry no "+
+			"partial buckets a caller could render as a result", len(data))
+	}
+	// The message must say how much book it declined to attribute, so the refusal
+	// is actionable without re-running it under a debugger.
+	if got := err.Error(); !strings.Contains(got, "2 portfolio and 1 benchmark row(s)") {
+		t.Errorf("refusal %q does not name the row counts it declined", got)
+	}
+}
+
+// TestBucketBySector_NoClassifierAndAnEmptyBookIsNotRefused: with nothing held,
+// no holding's sector is in question and there is nothing unclassified to hide —
+// the same cut compliance's unresolvedDimension makes on heldPositions. Refusing
+// here would make an empty portfolio look like a reference-data outage.
+func TestBucketBySector_NoClassifierAndAnEmptyBookIsNotRefused(t *testing.T) {
+	data, err := BucketBySector(context.Background(), nil, time.Now(), nil, nil)
+	if err != nil {
+		t.Fatalf("empty book with no classifier: err=%v want nil", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("empty book produced %d sector row(s)", len(data))
+	}
 }

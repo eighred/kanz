@@ -2,6 +2,8 @@ package performance
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -34,6 +36,13 @@ type Classifier interface {
 // invariant as factor.SectorExposure).
 const UnclassifiedSector = "UNCLASSIFIED"
 
+// ErrNoClassifier refuses a sector decomposition of a non-empty book when no
+// instrument classifier is wired. The wording is deliberately the compliance
+// engine's — "no instrument classifier is wired" is what unresolvedDimension
+// reports for the same absence — so an operator meets one phrase across the
+// control and reporting planes rather than two.
+var ErrNoClassifier = errors.New("performance: sector attribution cannot be computed: no instrument classifier is wired")
+
 // WeightedReturn is one instrument's weight and period return on one side
 // (portfolio or benchmark) — the input rows BucketBySector aggregates.
 type WeightedReturn struct {
@@ -48,9 +57,33 @@ type WeightedReturn struct {
 // sum of instrument weights and the return is the weight-weighted average of
 // instrument returns (Σ wᵢrᵢ / Σ wᵢ). An instrument the classifier doesn't know
 // falls into UnclassifiedSector — bucketed, never dropped, so the decomposition
-// reconciles with the totals. Output is sorted by sector. A nil classifier
-// buckets everything as unclassified (the no-classifier degradation).
-func BucketBySector(ctx context.Context, classifier Classifier, asOf time.Time, portfolio, benchmark []WeightedReturn) []SectorData {
+// reconciles with the totals and a large UNCLASSIFIED row tells the reader about
+// a reference-data gap, which is the same answer factor.SectorExposure gives an
+// operator on the risk side. Output is sorted by sector.
+//
+// # NO CLASSIFIER AT ALL IS REFUSED, NOT DEGRADED (#751)
+//
+// This used to bucket every row as UNCLASSIFIED and return a decomposition that
+// reconciled perfectly: the whole active return booked to selection inside one
+// meaningless bucket, with nothing in the result saying the sectors were never
+// resolved. A PM reads that as "the sector bets added nothing", which is a
+// statement about the book; it was a statement about the deployment. That is
+// #640's defect — "nothing configured" reading identically to "checked, and
+// fine" — in the one Classifier consumer where it was never repaired, and
+// test/arch/no_nil_classifier_seam_test.go makes a refusing unresolvable case
+// the condition for holding an exemption at all.
+//
+// An EMPTY book is not refused: with nothing held, no holding's sector is in
+// question and there is nothing unclassified to hide. That is the same cut
+// compliance's unresolvedDimension makes on heldPositions.
+func BucketBySector(ctx context.Context, classifier Classifier, asOf time.Time, portfolio, benchmark []WeightedReturn) ([]SectorData, error) {
+	if classifier == nil {
+		if len(portfolio)+len(benchmark) == 0 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: %d portfolio and %d benchmark row(s) would all bucket as %s",
+			ErrNoClassifier, len(portfolio), len(benchmark), UnclassifiedSector)
+	}
 	type acc struct{ pw, pwr, bw, bwr float64 }
 	buckets := map[string]*acc{}
 	get := func(sector string) *acc {
@@ -62,9 +95,6 @@ func BucketBySector(ctx context.Context, classifier Classifier, asOf time.Time, 
 		return a
 	}
 	sectorOf := func(id string) string {
-		if classifier == nil {
-			return UnclassifiedSector
-		}
 		if s, ok := classifier.Sector(ctx, id, asOf); ok && s != "" {
 			return s
 		}
@@ -92,7 +122,7 @@ func BucketBySector(ctx context.Context, classifier Classifier, asOf time.Time, 
 		out = append(out, sd)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Sector < out[j].Sector })
-	return out
+	return out, nil
 }
 
 // SectorData is one sector's weights and returns in the portfolio and the
