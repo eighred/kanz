@@ -269,7 +269,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// started pod refuses market orders until the first tick for that instrument
 	// arrives. That is the safe direction and it is deliberate — the alternative
 	// is admitting an order at a price we do not have.
-	marks := mark.New(time.Now, cfg.PriceMaxAge)
+	marks := newMarkSource(time.Now, cfg)
 
 	registerMarkCoverageGauges(obs, marks)
 
@@ -1450,6 +1450,29 @@ mandateArmWait:
 // twice shipped a crash under a green suite. Out here they are called with a
 // bare registry and a fold, and coverage_gauges_test.go folds real events
 // through them and reads the numbers back.
+// newMarkSource builds the reference-mark fold from this pod's configuration.
+//
+// IT IS A NAMED BUILDER RATHER THAN ONE LINE INSIDE run, for the same reason
+// registerMarkCoverageGauges below is: the composition root takes a bus
+// connection and a database, so nothing inside it is reachable from a test, and
+// this platform has twice shipped a startup crash under a fully green suite.
+// What escapes a unit test here is not a crash but something quieter — a bound
+// wired from the wrong config field, which no signal reports and which shows up
+// only as a cost number that is too flattering.
+//
+// TWO OBSERVATIONS, TWO BOUNDS (#956). PriceMaxAge governs the MARK, whose
+// producers are the venue adapters' 5s REST ticker polls, so its 30s default is
+// six missed observations. QuoteMaxAge governs the quoted WIDTH, whose producer
+// is market-ingest's 1s book-snapshot ticker, so the same 30s would have been
+// thirty missed publishes on the one observation an execution report cannot
+// recompute afterwards. Passing both keeps the PRICE_UNAVAILABLE gate on the
+// mark's tolerance while the spread leg is measured against a market that was
+// actually there. `now` is a parameter so a test can age one fold past one bound
+// and not the other.
+func newMarkSource(now func() time.Time, cfg config.Config) *mark.Source {
+	return mark.New(now, cfg.PriceMaxAge, mark.WithTouchMaxAge(cfg.QuoteMaxAge))
+}
+
 func registerMarkCoverageGauges(obs *observability.Provider, marks *mark.Source) {
 	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "kanz_oms_mark_instruments_held",
@@ -1468,7 +1491,7 @@ func registerMarkCoverageGauges(obs *observability.Provider, marks *mark.Source)
 	}, func() float64 { held, _ := marks.TouchStats(); return float64(held) }))
 	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "kanz_oms_quote_instruments_live",
-		Help: "Instruments whose quoted width is present and within OMS_PRICE_MAX_AGE — the ones whose " +
+		Help: "Instruments whose quoted width is present and within OMS_QUOTE_MAX_AGE — the ones whose " +
 			"execution shortfall can be decomposed into spread, impact and timing rather than reported " +
 			"as a total only. Zero while kanz_oms_mark_instruments_live is positive means the spine " +
 			"carries prices but no quotes, and every attribution is TOTAL_ONLY.",

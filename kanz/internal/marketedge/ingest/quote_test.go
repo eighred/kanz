@@ -344,7 +344,9 @@ func TestNoBookSnapshotIsEverPublishedOnAMarkBearingSubject(t *testing.T) {
 // what is true about the quote rather than about our plumbing. Stamping
 // time.Now() in the payload would make every width look as fresh as this
 // engine's ticker no matter how long ago the venue last spoke — which is
-// precisely the condition OMS_PRICE_MAX_AGE exists to detect, made undetectable.
+// precisely the condition OMS_QUOTE_MAX_AGE exists to detect, made undetectable.
+// (The width's bound, not the mark's — they are separate numbers since #956,
+// because their producers publish at different cadences.)
 func TestTheQuoteCarriesTheVenueBookTimeNotOurs(t *testing.T) {
 	venueTime := time.Now().UTC().Add(-90 * time.Second).Truncate(time.Second)
 	cc := newCaptureClient()

@@ -244,6 +244,26 @@ type Config struct {
 	// disable the bound in silence. There is no off switch.
 	PriceMaxAge time.Duration
 
+	// QuoteMaxAge is how old a QUOTED WIDTH may be and still be recorded as the
+	// market an order crossed (#956). It bounds mark.Source.Touch; PriceMaxAge
+	// above bounds Mark, and they are separate because their PRODUCERS are.
+	//
+	// A mark comes from the venue adapters' REST ticker poll, every 5s, so
+	// PriceMaxAge's 30s is six missed observations. A width comes from
+	// market-ingest's book-snapshot ticker, every 1s, so the same 30s would be
+	// THIRTY missed publishes — five times looser, on the one leg an execution
+	// report cannot recompute later from anything else.
+	//
+	// IT IS NOT A REASON TO TIGHTEN PriceMaxAge. That value governs the mark as
+	// well, and lowering it turns on PRICE_UNAVAILABLE refusals for every MARKET
+	// and STOP order on a 5s-poll feed — a trading outage in place of a
+	// measurement defect. Two observations, two bounds.
+	//
+	// Same non-positive rule as PriceMaxAge, for the same reason: mark.Source
+	// reads a non-positive bound as NEVER EXPIRES, so `0` and `-5s` are refused
+	// at startup rather than silently disabling the width's staleness check.
+	QuoteMaxAge time.Duration
+
 	// SweepInterval is how often the OMS re-runs its in-flight reconciliation
 	// WHILE RUNNING, on top of the mandatory one at startup (#238).
 	//
@@ -465,6 +485,27 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("OMS_PRICE_MAX_AGE: must be positive (got %v); a non-positive value would disable the staleness bound and admit orders against arbitrarily old prices", maxAge)
 	}
 	cfg.PriceMaxAge = maxAge
+
+	// OMS_QUOTE_MAX_AGE: 6s, and the number is DERIVED rather than picked (#956).
+	//
+	// The mark's 30s is six missed observations against a 5s producer. The width's
+	// producer publishes every 1s (MARKET_INGEST_SNAPSHOT_INTERVAL), so the same
+	// SIX-observation outage tolerance is 6s. Measured over a real broker at that
+	// deployed cadence, the age a Touch caller actually sees was p50 559ms, p95
+	// 1.009s, max 1.093s across 746 samples — so 6s is about five and a half times
+	// the worst age a healthy feed produced, which is the margin that keeps this a
+	// staleness bound rather than a jitter trap.
+	//
+	// infra/deploy/oms-deploy.yaml states this value and this derivation beside
+	// OMS_PRICE_MAX_AGE, where an operator can compare the two.
+	quoteMaxAge, err := time.ParseDuration(env.Or("OMS_QUOTE_MAX_AGE", "6s"))
+	if err != nil {
+		return Config{}, fmt.Errorf("OMS_QUOTE_MAX_AGE: %w", err)
+	}
+	if quoteMaxAge <= 0 {
+		return Config{}, fmt.Errorf("OMS_QUOTE_MAX_AGE: must be positive (got %v); a non-positive value would disable the quoted width's staleness bound and let an execution report measure a spread against a market that is arbitrarily old", quoteMaxAge)
+	}
+	cfg.QuoteMaxAge = quoteMaxAge
 
 	// OMS_SWEEP_INTERVAL: 60s. The exposure this bounds is an admitted order that
 	// no downstream service has heard of, so the window is measured against the

@@ -395,6 +395,55 @@ spec:
             # refuses every order for every portfolio nobody has bound yet — a trading
             # outage dressed as a control. Turn it on WITH the list of accounts in hand.
             - { name: OMS_REQUIRE_VENUE_ACCOUNT, value: "false" }
+            # TWO OBSERVATIONS, TWO STALENESS BOUNDS (#956). Both are SAFETY
+            # bounds, not tuning knobs — mark.Source reads a non-positive value as
+            # NEVER EXPIRES, so both are refused at startup unless positive.
+            #
+            # OMS_PRICE_MAX_AGE governs the reference MARK, which the pre-trade
+            # gate values a MARKET or STOP order from. Its producers are the two
+            # venue adapters' REST ticker polls (WorkerDeps.TickerInterval, 5s), so
+            # 30s is six missed observations: an outage tolerance, and the number
+            # this pod has always run. It is written down here rather than left to
+            # the code default because the line below is only readable next to it.
+            #
+            # RAISING IT DOES NOT FIX A FEED. It admits orders priced off one that
+            # stopped reporting. Lowering it turns PRICE_UNAVAILABLE on for every
+            # MARKET and STOP order on a 5s-poll feed.
+            - { name: OMS_PRICE_MAX_AGE, value: "30s" }
+            # OMS_QUOTE_MAX_AGE governs the quoted WIDTH (the bid/ask touch), which
+            # the execution-cost attribution measures the spread leg from. It is a
+            # SEPARATE number because it has a separate producer: market-ingest
+            # publishes market.crypto.quote off its book-snapshot ticker every 1s
+            # (MARKET_INGEST_SNAPSHOT_INTERVAL, not overridden in
+            # market-ingest-deploy.yaml). Under the single 30s bound this width had
+            # before, that was THIRTY missed publishes against the mark's six —
+            # five times looser in the only unit that matters, on the leg where
+            # precision matters most.
+            #
+            # 6s IS THE DERIVATION, NOT A PREFERENCE: the same six-missed-observation
+            # tolerance the mark gets, against a producer that publishes six times
+            # as often. 30s / 5s = 6; 6 x 1s = 6s.
+            #
+            # AND IT IS ABOVE WHAT THE FEED MEASURES. Over a real broker at this
+            # deployed cadence, the age a Touch caller sees at an arbitrary instant
+            # was p50 559ms, p95 1.009s, max 1.093s over 746 samples — so 6s is
+            # about five and a half times the worst age a HEALTHY feed produced.
+            # That margin is what makes this a staleness bound rather than a jitter
+            # trap that would drop good widths on an ordinary GC pause or reconnect.
+            #
+            # IT MUST STAY TIGHTER THAN OMS_PRICE_MAX_AGE, and
+            # test/arch/quote_bound_is_tighter_than_the_mark_test.go fails the build
+            # if a deployment loosens it back. A width looser than the mark's own
+            # bound is the exact state #956 repaired.
+            #
+            # WHAT TIGHTENING THIS COSTS is measurement coverage, never a trade: a
+            # refused width makes that decision's attribution quality TOTAL_ONLY
+            # (exact shortfall, spread/impact/timing UNSET) and shows up in
+            # kanz_oms_quote_instruments_live and OMSExecutionAttributionUndecomposable.
+            # No order is rejected for a stale width. Raise it only with the reason
+            # that the quote producer's own cadence changed, and change the
+            # derivation above with it.
+            - { name: OMS_QUOTE_MAX_AGE, value: "6s" }
             # Both pods share one durable consumer group, so a command is
             # delivered to one of them — the admission gate is the backstop for
             # the redelivery case, not the primary path.
