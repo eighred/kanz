@@ -89,11 +89,18 @@ var nilClassifierExempt = map[string]string{
 	// removed them: it failed the moment the seams were wired, which is the
 	// retirement mechanism working rather than somebody remembering.
 	//
-	// The two below were FOUND BY THIS GUARD when it first ran. None of them is
-	// on the three paths #640 was filed about; all of them are the same absence
-	// one door over, and they are recorded rather than quietly left out, because
-	// an exemption list that covers only the seams somebody already knew about is
-	// a list that will not catch the next one.
+	// The ONE below was FOUND BY THIS GUARD when it first ran, along with four
+	// others since retired. None of them is on the three paths #640 was filed
+	// about; all of them are the same absence one door over, and they are recorded
+	// rather than quietly left out, because an exemption list that covers only the
+	// seams somebody already knew about is a list that will not catch the next
+	// one.
+	//
+	// ONE LEFT BY BEING WIRED AND GIVEN A CALLER. internal/sustainability.Screen
+	// took a classifier already; what it had no caller for was an ESG exclusion
+	// policy, which had nowhere to be submitted. regulatory now mounts
+	// POST /v1/screening/esg over a refdata-backed classifier at its composition
+	// root (#767), and the dead-entry check removed the entry.
 	//
 	// TWO MORE LEFT BY BEING WIRED. optimization.Propose and .CheckMandate were
 	// dark because services/optimization's handlePropose ran Optimize and
@@ -114,14 +121,25 @@ var nilClassifierExempt = map[string]string{
 	// package. The rule now resolves a same-package caller that is itself wired
 	// (see 2b), so the seam reports what it always was, and the dead-entry check
 	// below is what removed the entry.
-	"internal/performance.BucketBySector": "#751 — Brinson sector attribution. TWO THINGS ARE " +
-		"MISSING and only one is reference data. performance.Classifier has NO implementation " +
-		"anywhere in the module, not even a StaticClassifier; and services/performance sidesteps " +
-		"the question entirely — attributionRequest carries already-bucketed []perf.SectorData " +
-		"straight off the wire and hands it to perf.SingleAttribution, so nothing ever converts " +
-		"instrument-level returns into sector buckets. The client is the classifier. Retiring this " +
-		"needs a request shape carrying instrument-level rows as well as a classifier to bucket " +
-		"them with.",
+	"internal/performance.BucketBySector": "#751 — Brinson sector attribution. DARK FOR WANT OF " +
+		"SOMETHING DOWNSTREAM, and the retirement condition this entry used to give was the wrong " +
+		"one. Two things are missing and only one is reference data: performance.Classifier has NO " +
+		"implementation anywhere in the module, not even a StaticClassifier; and services/performance " +
+		"sidesteps the question entirely — attributionRequest carries already-bucketed " +
+		"[]perf.SectorData straight off the wire and hands it to perf.SingleAttribution, so nothing " +
+		"ever converts instrument-level returns into sector buckets. The client is the classifier. " +
+		"BUT BUILDING THOSE TWO IS THE OBVIOUS WRONG FIX: services/performance is PARKED by a " +
+		"decision deployability_test.go already records (ANALYTICS PLANE, PARKED) — no Dockerfile, " +
+		"no CI build-matrix entry, no deploy manifest, no gateway route, no NetworkPolicy — so they " +
+		"would give this seam an importer inside a service nobody runs and delete this entry while " +
+		"changing nothing an operator can observe, which is the failure internal/alpha/barview's " +
+		"entry names in the same words. RETIRED BY the analytics surface shipping with a consumer; " +
+		"the request shape and a refdata-backed Classifier are then the work that makes it useful, " +
+		"copying the compliance.Classifier wired into regulatory in #767. " +
+		"THE UNRESOLVABLE CASE REFUSES, which is this map's condition for holding an entry at all: " +
+		"BucketBySector returns performance.ErrNoClassifier on a non-empty book rather than " +
+		"bucketing the whole of it as UNCLASSIFIED and returning a decomposition that reconciles " +
+		"(#751). An empty book still returns empty — nothing held, nothing hidden.",
 }
 
 // classifierSeam is one composition-root seam: an exported function taking a
