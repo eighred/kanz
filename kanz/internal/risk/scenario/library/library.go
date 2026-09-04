@@ -143,8 +143,17 @@ func SectorCurve(taxonomy string, shifts map[string]*commonpb.Decimal) []v1.Scen
 }
 
 // Named looks up a scenario by its catalog name (case-sensitive), returning the
-// shocks and true, or nil and false when unknown. The dispatch seam an API or
-// CLI uses to drive Engine.EvaluateScenario from a scenario name.
+// shocks and true, or nil and false when unknown. The dispatch seam an API uses
+// to drive Engine.EvaluateScenario from a scenario name.
+//
+// THE CALLER IS grpcsrv.namedScenario, WHICH RESOLVES query.v1's scenario_name
+// SERVER-SIDE. This comment described that seam for as long as the package
+// existed and nothing read it: the shocks these scenarios are made of
+// (v1.SectorShock) had no member in the query.v1 ScenarioShock oneof, so no
+// caller of any kind could ask for a named scenario and the whole catalog was
+// unreachable (#1004). Keeping the resolution on the server is what makes the
+// magnitudes in this file ONE versionable definition rather than a copy per
+// client.
 func Named(name string) ([]v1.ScenarioShock, bool) {
 	b, ok := catalog[name]
 	if !ok {

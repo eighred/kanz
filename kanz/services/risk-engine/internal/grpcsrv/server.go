@@ -26,6 +26,7 @@ package grpcsrv
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -42,6 +43,7 @@ import (
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/publish"
+	"github.com/eighred/kanz/internal/risk/scenario/library"
 )
 
 // Server adapts the api/v1.Engine to the generated RiskQueryService gRPC
@@ -174,7 +176,7 @@ func (s *Server) EvaluateScenario(ctx context.Context, req *querypb.EvaluateScen
 	if err := requireDecimalDomain(req); err != nil {
 		return nil, err
 	}
-	shocks, err := apiShocks(req.GetShocks())
+	shocks, err := scenarioShocks(req)
 	if err != nil {
 		return nil, err
 	}
@@ -269,9 +271,90 @@ func measureNames(in []string) []v1.MeasureName {
 	return out
 }
 
+// scenarioShocks resolves a request's perturbation from EXACTLY ONE of its two
+// sources: the caller's own shocks, or a named catalog scenario the engine
+// expands server-side.
+//
+// # Both, and neither, are refusals
+//
+// Both set has no defensible reading: a caller who sent eleven sector shocks
+// AND "GFC_2008" either meant to override the catalog or to add to it, and
+// guessing which produces a number nobody asked for. Neither set is the worse
+// one — it evaluated cleanly and returned the CURRENT BOOK as a projection,
+// with measures, quality flags and an owner tenant, indistinguishable from a
+// stress that genuinely moved nothing. That is #640's failure shape (a scenario
+// answering with the unshocked book) reachable from an empty request body, so
+// it is refused here rather than answered.
+func scenarioShocks(req *querypb.EvaluateScenarioRequest) ([]v1.ScenarioShock, error) {
+	name := req.GetScenarioName()
+	shocks := req.GetShocks()
+	switch {
+	case name != "" && len(shocks) > 0:
+		return nil, status.Error(codes.InvalidArgument,
+			"risk: set either shocks or scenario_name, not both")
+	case name != "":
+		return namedScenario(name)
+	case len(shocks) > 0:
+		return apiShocks(shocks)
+	default:
+		return nil, status.Errorf(codes.InvalidArgument,
+			"risk: a scenario needs shocks or a scenario_name; the catalog holds %s",
+			strings.Join(scenarioCatalogNames(), ", "))
+	}
+}
+
+// namedScenario expands a catalog name into the shocks the engine evaluates
+// (#1004). This is the ONE place a scenario name becomes magnitudes: the
+// catalog is a curated, versionable definition (an eleven-point GICS curve for
+// a historical crisis, a transition/physical curve for a climate stress), and a
+// name that meant something different per client would make two desks stressing
+// the same book with the same name disagree with nothing to arbitrate.
+//
+// An unknown name is INVALID_ARGUMENT LISTING THE CATALOG, not an empty shock
+// list. The alternative — resolve to nothing and evaluate — returns the
+// unshocked book under the requested scenario's name, which is precisely the
+// answer #640 exists to prevent.
+func namedScenario(name string) ([]v1.ScenarioShock, error) {
+	if shocks, ok := library.Named(name); ok {
+		return shocks, nil
+	}
+	if shocks, ok := library.NamedClimateScenario(name); ok {
+		return shocks, nil
+	}
+	// The name is echoed because it is a catalog key the caller typed, not an
+	// attacker-supplied numeric field (contrast requireDecimalDomain): naming it
+	// back is what turns a typo into a one-step fix.
+	return nil, status.Errorf(codes.InvalidArgument,
+		"risk: unknown scenario %q; the catalog holds %s", name,
+		strings.Join(scenarioCatalogNames(), ", "))
+}
+
+// scenarioCatalogNames is the union of the historical and climate catalogs, in
+// stable order, DERIVED from the catalogs themselves rather than listed here.
+// A hand-written copy is how the refusal message would come to advertise a
+// scenario that no longer resolves — the same duplication that left the wire
+// two shock kinds short of api/v1 for as long as both existed.
+func scenarioCatalogNames() []string {
+	historical := library.Names()
+	climate := library.ClimateScenarioNames()
+	out := make([]string, 0, len(historical)+len(climate))
+	out = append(out, historical...)
+	out = append(out, climate...)
+	return out
+}
+
 // apiShocks decodes the proto shock oneof into the api/v1 concrete shock
 // types. An empty/unset oneof member is an INVALID_ARGUMENT — a shock with
 // no kind is a malformed request, distinct from "no shocks at all".
+//
+// EVERY api/v1 SHOCK TYPE MUST HAVE A CASE HERE, and that is checked rather
+// than remembered: test/arch/every_shock_kind_reaches_the_wire_test.go derives
+// the implementor set from the api/v1 AST and requires each one to have both a
+// query.v1 oneof member and a case in this switch. SectorShock and VolShock had
+// neither for as long as they existed (#1004), so the named historical and
+// climate scenarios — which are sector curves by construction — could not be
+// requested by any caller at all, and the default arm below returned
+// INVALID_ARGUMENT to a shock the engine was fully able to apply.
 func apiShocks(in []*querypb.ScenarioShock) ([]v1.ScenarioShock, error) {
 	if len(in) == 0 {
 		return nil, nil
@@ -286,6 +369,22 @@ func apiShocks(in []*querypb.ScenarioShock) ([]v1.ScenarioShock, error) {
 			})
 		case *querypb.ScenarioShock_ParallelShift:
 			out = append(out, v1.ParallelShift{Pct: k.ParallelShift.GetPct()})
+		case *querypb.ScenarioShock_Sector:
+			// Taxonomy and code are carried through unvalidated ON PURPOSE. An
+			// empty or unknown sector is not "shock nothing": the engine records
+			// it as a malformed shock and refuses the whole request
+			// (v1.ErrScenarioUnresolvable), which is a louder and more specific
+			// answer than a syntactic check here could give.
+			out = append(out, v1.SectorShock{
+				Taxonomy: k.Sector.GetTaxonomy(),
+				Code:     k.Sector.GetCode(),
+				Pct:      k.Sector.GetPct(),
+			})
+		case *querypb.ScenarioShock_Vol:
+			out = append(out, v1.VolShock{
+				UnderlyingID: v1.InstrumentID(k.Vol.GetUnderlyingId()),
+				AbsBump:      k.Vol.GetAbsBump(),
+			})
 		default:
 			return nil, status.Error(codes.InvalidArgument, "scenario shock has no kind set")
 		}
