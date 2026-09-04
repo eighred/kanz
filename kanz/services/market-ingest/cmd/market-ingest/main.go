@@ -1,12 +1,28 @@
 // market-ingest is the native-alpha edge of the platform (Milestone 5
 // foundation). It dials exchange L2 depth feeds, folds them into per-instrument
 // in-memory books off the bus (the hot path), and publishes bounded periodic
-// OrderBookSnapshots for durable replay and audit. It is process-isolated from
-// the OMS: the raw full-rate depth feed lives and dies inside this process; only
-// snapshots — and, in a later slice, the native engines' signal.v1.
-// StrategySignals — cross the bus. The default binary is vendor-free and tracks
-// each configured instrument with a deterministic simulator; real venue depth
-// sources bind behind per-venue build tags, exactly like the OMS connectors.
+// OrderBookSnapshots — bounded precisely so the full-rate feed never reaches the
+// spine. It is process-isolated from the OMS: the raw full-rate depth feed lives
+// and dies inside this process; only the snapshot, the top-of-book quote derived
+// from the same book read, the candle and coverage records, the volume profile —
+// and, in a later slice, the native engines' signal.v1.StrategySignals — cross
+// the bus.
+//
+// BOOK HISTORY IS NOT RETAINED (#1005). This doc used to say the snapshots were
+// published "for durable replay and audit". Nothing replays them, nothing audits
+// with them, and no component keeps them beyond the MARKET stream's retention —
+// the archiver and the lake both exclude the domain by design. The decision, and
+// what it costs a best-execution review, is recorded on the book package.
+//
+// THE DEFAULT BINARY DIALS REAL VENUES AND REFUSES TO START WITHOUT ONE. This
+// doc used to say the opposite: that it tracked each instrument with a
+// deterministic simulator by default, with real venue depth bound behind
+// per-venue build tags. Both halves were retired by #100 — there are no
+// binance/okx build tags and never were, the connectors compile in the default
+// build, and feeds returns an error rather than quietly swapping in
+// alpha.SimFeed. The simulator stands in only when MARKET_INGEST_ALLOW_SIM says
+// so, because a pod that silently generates prices is one that risk, NAV and
+// pricing all mark against.
 package main
 
 import (

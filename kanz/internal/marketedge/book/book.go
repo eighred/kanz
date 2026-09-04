@@ -1,9 +1,40 @@
 // Package book is the in-memory L2 order book at the heart of the market-ingest
 // edge. It is the off-bus hot path: the raw, full-rate depth feed from an
 // exchange is folded here in memory and NEVER republished on the bus at full
-// rate. The native-alpha engines (order-book imbalance, cross-venue arbitrage)
-// read the live book directly; only bounded, periodic Snapshots leave the
-// process (for durable replay, cross-node bootstrap, and audit).
+// rate. Only bounded, periodic Snapshots leave the process, and the bound is
+// their whole purpose — capping what the spine carries, not preserving the book.
+//
+// BOOK HISTORY IS NOT RETAINED (#1005), and that is a decision rather than an
+// oversight. This doc used to say the snapshots left the process "for durable
+// replay, cross-node bootstrap, and audit", and named the native-alpha engines
+// as readers of the live book. None of the four was ever built, and the estate
+// is arranged so that the first three cannot happen: the MARKET stream ages
+// market.> out, the archiver's DefaultSubjects names no market subject, and
+// lake-sink's topic list excludes market.book — all three deliberately, because
+// L2 depth is the highest-volume stream here and the CURRENT book is
+// re-fetchable from the venue (DATA-M1). The snapshot IS delivered — market-data
+// and, when calibration is enabled, the risk-engine both subscribe the market.>
+// wildcard — but nothing turns it into state that outlives the pod's retention
+// window. book_history_is_not_retained_test.go binds this paragraph to the three
+// artifacts that decide it, so the claim and the estate cannot drift apart.
+//
+// THE CONSEQUENCE, stated here so nobody discovers it during a best-execution
+// review: this estate cannot say what the book looked like at a past instant.
+// That is stronger than "unretained" — it is unreachable. Neither venue serves
+// historical L2 depth on the public endpoints internal/marketedge/depth dials,
+// and Snapshots leave on a per-second cadence, so "the book at 14:32:05.123"
+// would stay unanswerable under this shape even with unlimited retention. The
+// artifact that WOULD answer what a reviewer asks is a book capture taken on the
+// execution path at fill time and attached to the fill — bounded by fill count
+// rather than by tick rate, and landing in an already-archived domain. It is not
+// this, and it is its own piece of work. Do not close the gap by subscribing
+// this subject into a store nobody queries: this repository has already ruled
+// that a consumer written to satisfy a guard moves no capability.
+//
+// The one thing that reads a Snapshot today is in-process and is not the
+// subject at all: the ingest engine derives the top-of-book market.v1 Quote it
+// publishes from the SAME Snapshot call that feeds the published FACT, so the
+// two FACTs on one tick cannot disagree about where the touch was.
 //
 // The book folds OrderBookDeltas with strict sequence-chain checking: a delta
 // whose prev_update_sequence does not chain onto the current book sequence is a

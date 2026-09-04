@@ -77,6 +77,17 @@ data:
     # Domain streams. NATS is the live spine with short retention; Kafka (EVT-09)
     # is the durable log of record. platform/data keep longer (lifecycle +
     # FACT-grade data-quality signals); observability is ephemeral.
+    # BOOK HISTORY IS NOT RETAINED (#1005). This 24h is the ONLY place L2 depth
+    # lives: market-ingest publishes a bounded book snapshot per instrument per
+    # second on market.book.snapshot, the archiver drains no market.> subject and
+    # lake-sink's topic list excludes market.book, both by design (DATA-M1 —
+    # highest-volume domain, and the CURRENT book is re-fetchable from the venue).
+    # So this line is the whole retention policy for the order book, and the
+    # accepted consequence is that no past book state is recoverable: after 24h,
+    # and after a failover, "what did the book look like when this order filled"
+    # has no answer. Raising the age does not buy the answer either — snapshots
+    # leave the edge once a second, so millisecond reconstruction is out of reach
+    # by shape, not by retention.
     ensure_stream MARKET        "market.>"        24h
     # RISK is NARROWED, and deliberately: it used to be the wildcard `risk.>`, which
     # swallowed risk.position.> too. A subject can belong to exactly ONE stream in
