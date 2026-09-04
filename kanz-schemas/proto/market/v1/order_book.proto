@@ -2,14 +2,21 @@ syntax = "proto3";
 
 // Package market.v1 also defines L2 order-book depth for the native-alpha edge.
 // The raw, full-rate depth feed is NEVER carried on the bus: services/market-
-// ingest keeps the live book in memory (the off-bus hot path) and the native
-// engines (order-book imbalance, cross-venue arbitrage) read it there. Only two
-// things reach the bus — bounded periodic OrderBookSnapshots (for durable
-// replay, cross-node bootstrap, and audit) and the signal.v1.StrategySignals the
-// native engines emit. OrderBookDelta is the incremental transport the ingester
-// folds internally; it is schema'd here so a durable-log / replay consumer can
-// reconstruct the book deterministically, but it is not published on the live
-// spine at full rate.
+// ingest keeps the live book in memory (the off-bus hot path). Only two things
+// reach the bus — bounded periodic OrderBookSnapshots, whose bound is the whole
+// reason they exist, and the signal.v1.StrategySignals the native engines emit.
+//
+// BOOK HISTORY IS NOT RETAINED (#1005). This doc used to say the snapshots were
+// carried "for durable replay, cross-node bootstrap, and audit" and that
+// OrderBookDelta was schema'd so a durable-log / replay consumer could
+// reconstruct the book deterministically. No such consumer, log or archive
+// exists anywhere in the estate: the snapshot subject ages out of the live
+// spine, and both the archiver and the lake exclude the market domain by design
+// (DATA-M1), so no past book state is recoverable. OrderBookDelta is the
+// incremental transport the ingester folds INTERNALLY and is published on no
+// subject at any rate. Schema'ing a message is not evidence that anything
+// produces or consumes it — the market-ingest book package carries the decision
+// and what it costs.
 package market.v1;
 
 import "google/protobuf/timestamp.proto";

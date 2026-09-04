@@ -1,11 +1,14 @@
 // Package depth defines the exchange-depth transport seam for market-ingest and
 // a deterministic in-process simulator that satisfies it. A DepthSource yields
 // the raw L2 feed — an initial snapshot followed by incremental deltas — which
-// the ingester folds into the in-memory book. Real venues (Binance/OKX depth
-// websockets) implement DepthSource behind a per-venue build tag, isolated from
-// the default binary exactly like the OMS exchange connectors; the sim is the
-// vendor-free default so the fold + snapshot path is exercised without a network
-// and without fabricating live market data (the sim is explicitly labelled SIM).
+// the ingester folds into the in-memory book. BinanceSource and OKXSource are
+// hand-rolled over the depth websockets and compile in the DEFAULT build — this
+// doc used to say they bound behind per-venue build tags, which #100 retired:
+// no binance/okx tag exists or ever did, and a reader who went looking for one
+// would conclude the live sources were unreachable. The sim satisfies the same
+// seam so the fold + snapshot path is exercised without a network, and it is
+// opt-in rather than the default: market-ingest refuses to start on no real feed
+// rather than fabricating live market data (the sim is explicitly labelled SIM).
 package depth
 
 import (
