@@ -113,6 +113,29 @@ type ReplaySubscriber interface {
 	SubscribeReplay(ctx context.Context, subject string, h Handler, ready func()) error
 }
 
+// ConsumerCreated is called ONCE with the stream and the BROKER-GENERATED
+// consumer name, as soon as an ephemeral consumer exists.
+//
+// That pair is the only handle by which a broadcast subscription's backlog can
+// be read: BacklogSource.Backlog resolves a consumer through
+// durableName(group, subject), and an ephemeral consumer has no durable name
+// (#1009).
+type ConsumerCreated func(stream, consumer string)
+
+// ObservableEphemeralSubscriber is a transport whose ephemeral subscriptions
+// report the consumer they created.
+//
+// It is OPTIONAL and asserted, in the same shape BroadcastSubscriber and
+// BacklogSource are. Only *NATSClient implements it: broadcast is a NATS concept
+// here, and a Kafka client or a test fake must degrade to the unobserved path
+// rather than be forced to invent a consumer handle. A subscriber that does not
+// implement it simply exports no backlog series, exactly as before — which is
+// why the assertion in Consumer is paired with a fallback and not an error.
+type ObservableEphemeralSubscriber interface {
+	SubscribeBroadcastObserved(ctx context.Context, subject string, h Handler, ready func(), created ConsumerCreated) error
+	SubscribeReplayObserved(ctx context.Context, subject string, h Handler, ready func(), created ConsumerCreated) error
+}
+
 // Client is a transport that does both. NATSClient and KafkaClient each
 // satisfy it; higher layers (EVT-17b–e) hold a Client rather than caring
 // which transport is underneath.
