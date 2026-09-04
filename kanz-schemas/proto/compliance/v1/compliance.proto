@@ -105,6 +105,32 @@ enum RuleType {
   // de-risking while margin was unknown would trap the fund in exactly the
   // position it needs to leave. See VenueMarginRule.
   RULE_TYPE_VENUE_MARGIN = 8;
+
+  // RULE_TYPE_CASH_BUFFER caps the cash a portfolio may leave UNINVESTED (#963).
+  //
+  // IT IS THE OTHER HALF OF RULE_TYPE_BUYING_POWER, and the pair is the cash
+  // policy. BuyingPowerLimit is the FLOOR — the operating buffer the fund
+  // declines to spend below. This is the CEILING, above which cash stops being
+  // prudence and becomes drag: a permanent, compounding performance loss that
+  // breaches no other mandate, trips no risk limit and produces no
+  // reconciliation break, so no other control on this platform would ever report
+  // it.
+  //
+  // THE TWO BOUNDS FAIL IN OPPOSITE DIRECTIONS ON THE SAME BAD NUMBER, which is
+  // why the ceiling cannot simply mirror the floor's handling. Cash on this
+  // platform is short every dividend and coupon ever paid (#588). An understated
+  // balance makes a FLOOR refuse too much — safe, and the reason
+  // BuyingPowerLimit ships while #588 is open. It makes a CEILING pass too much:
+  // the drag the rule exists to find is exactly what the missing entries hide.
+  // So this rule REFUSES a balance whose producer has not vouched for it, rather
+  // than comparing it. See CashBufferRule.
+  //
+  // IT NEVER GATES AN ORDER. The remedy for excess cash is to BUY something, so
+  // a ceiling enforced at the pre-trade gate would refuse the very orders that
+  // discharge it, and would refuse a liquidation for raising cash — the
+  // de-risking trap RULE_TYPE_VENUE_MARGIN is careful to avoid. It is a passive,
+  // post-trade constraint, discharged by a sweep and not by admission control.
+  RULE_TYPE_CASH_BUFFER = 9;
 }
 
 // Dimension is the portfolio axis a concentration or restriction rule buckets
@@ -217,7 +243,41 @@ message Rule {
     BuyingPowerLimit buying_power = 15;
     RiskMeasureLimit risk_measure = 16;
     VenueMarginLimit venue_margin = 17;
+    CashBufferLimit cash_buffer = 18;
   }
+}
+
+// CashBufferLimit bounds the cash a portfolio may leave UNINVESTED (#963).
+//
+// THE CEILING IS EXPLICIT AND HAS NO DEFAULT, and — unlike BuyingPowerLimit's
+// floor — an ABSENT one is not zero. An unset floor means "spend down to
+// nothing", which is a coherent policy. An unset ceiling would mean "hold no
+// cash at all", which no fund can honour and which nobody would ever have meant
+// to declare; treating it as a number would turn a half-filled mandate into a
+// permanent breach on every book that has it. So a rule declared with no maximum
+// is a MISCONFIGURED MANDATE and refuses under its own severity, naming the
+// missing field. proto3 distinguishes the two: an explicit zero is a Decimal
+// with coefficient 0, an absent one is nil.
+//
+// It is denominated in the portfolio's BASE CURRENCY, the same convention
+// BuyingPowerLimit, NAV and the leverage denominator use. A cash balance in any
+// other currency is REFUSED rather than compared: netting them without a rate is
+// the FX error internal/dec.MoneyIn exists to stop, and here it would silently
+// re-scale the ceiling by the exchange rate.
+//
+// AN ABSOLUTE AMOUNT AND NOT A SHARE OF NAV, deliberately. A share is the more
+// natural way to write a drag policy and it is not writable today: it needs a
+// denominator that is the fund's EQUITY, and no producer on this platform
+// establishes one for most books (#780) — so a share-form ceiling would refuse
+// every portfolio it was declared on and could not be deployed. The share is
+// already MEASURED, without a policy attached, as
+// kanz_treasury_idle_cash_share; when equity is establishable estate-wide, a
+// second bound in a share form is an additive field here, not a rewrite.
+message CashBufferLimit {
+  // max_idle_cash is the highest uninvested cash balance the mandate permits, in
+  // the portfolio's base currency. REQUIRED — see the message comment for why an
+  // absent one is a refusal rather than a zero.
+  common.v1.Decimal max_idle_cash = 1;
 }
 
 // BuyingPowerLimit bounds what an order may spend (#415).
