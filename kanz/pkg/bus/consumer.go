@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -332,7 +333,55 @@ func (c *Consumer) SubscribeBroadcastReady(ctx context.Context, subject string, 
 	if !ok {
 		return fmt.Errorf("bus: this transport cannot broadcast %q — a control signal delivered to one pod out of N is not a control signal", subject)
 	}
-	return bs.SubscribeBroadcastReady(ctx, subject, c.envelopeHandler(subject, h), ready)
+	// AND IT STARTS THIS SUBSCRIPTION'S BACKLOG POLLER (#1009), exactly as
+	// Subscribe does for the durable path.
+	//
+	// #283 wired the poller on the queue-group path only, and that is the wrong
+	// half to leave uncovered. A durable consumer falling behind is a queue of
+	// COMMANDS that will still be executed. A broadcast consumer falling behind is
+	// a CONTROL READING STALE STATE — a mandate registry, a halt gate, a mark
+	// fold, the compliance position book — and it keeps answering, confidently,
+	// from a book that is behind the market. Until now those two exported
+	// identical metrics.
+	return c.observedEphemeral(ctx, subject,
+		func(created ConsumerCreated) error {
+			obs, ok := c.subscriber.(ObservableEphemeralSubscriber)
+			if !ok {
+				return bs.SubscribeBroadcastReady(ctx, subject, c.envelopeHandler(subject, h), ready)
+			}
+			return obs.SubscribeBroadcastObserved(ctx, subject, c.envelopeHandler(subject, h), ready, created)
+		})
+}
+
+// observedEphemeral runs one ephemeral subscription with its backlog poller
+// bound to the consumer the transport creates.
+//
+// The poller cannot be started before the call — the consumer does not exist yet
+// and has no name — so it is started from the callback and stopped when the
+// subscription returns. Stopped, not abandoned: pollBacklog DELETES its series on
+// the way out, and returning while that is still pending would leave this pod
+// exporting a backlog for a subscription it no longer has.
+//
+// The mutex is not ceremony. created fires on the transport's goroutine inside
+// the subscribe call while this goroutine is blocked in it, and the deferred stop
+// then runs on this one — two goroutines touching the same field.
+func (c *Consumer) observedEphemeral(ctx context.Context, subject string, run func(ConsumerCreated) error) error {
+	var (
+		mu   sync.Mutex
+		stop = func() {}
+	)
+	defer func() {
+		mu.Lock()
+		s := stop
+		mu.Unlock()
+		s()
+	}()
+	return run(func(stream, consumer string) {
+		s := c.startEphemeralBacklogPoll(ctx, subject, stream, consumer)
+		mu.Lock()
+		stop = s
+		mu.Unlock()
+	})
 }
 
 // SubscribeReplay folds a subject's WHOLE retained history into this process and then
@@ -350,7 +399,17 @@ func (c *Consumer) SubscribeReplay(ctx context.Context, subject string, h EventH
 	if !ok {
 		return fmt.Errorf("bus: this transport cannot replay %q — a log folded from wherever a durable happened to stop is not the log", subject)
 	}
-	return rs.SubscribeReplay(ctx, subject, c.envelopeHandler(subject, h), ready)
+	// Polled for the same reason the broadcast path is (#1009): a replay
+	// subscription arms in-process state from a log, and one that has fallen
+	// behind is a fold that is incomplete without saying so.
+	return c.observedEphemeral(ctx, subject,
+		func(created ConsumerCreated) error {
+			obs, ok := c.subscriber.(ObservableEphemeralSubscriber)
+			if !ok {
+				return rs.SubscribeReplay(ctx, subject, c.envelopeHandler(subject, h), ready)
+			}
+			return obs.SubscribeReplayObserved(ctx, subject, c.envelopeHandler(subject, h), ready, created)
+		})
 }
 
 // envelopeHandler is the decoding half that SubscribeBroadcastReady and SubscribeReplay

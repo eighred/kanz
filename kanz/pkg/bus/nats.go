@@ -567,6 +567,35 @@ func (c *NATSClient) Backlog(ctx context.Context, subject, group string) ([]Part
 
 var _ BacklogSource = (*NATSClient)(nil)
 
+// BacklogForConsumer implements EphemeralBacklogSource: the same NumPending
+// reading, for a consumer addressed by the name the BROKER generated rather than
+// by a durable name this side derived (#1009).
+//
+// It is the whole reason a broadcast subscription can be measured at all.
+// Backlog resolves through durableName(group, subject), and an ephemeral
+// consumer has no durable name — so before this, kanz_bus_pending_messages was
+// structurally unavailable for every in-process control fold in the estate, and
+// a consumer that had silently fallen behind exported exactly the metrics of one
+// that was current.
+//
+// The error is returned rather than folded into a zero for the same reason
+// Backlog's is: a consumer lookup or ConsumerInfo that fails means the broker did
+// not answer, not that nothing is waiting. pollBacklog turns that into a DELETED
+// series, never a zero.
+func (c *NATSClient) BacklogForConsumer(ctx context.Context, stream, consumer string) ([]PartitionBacklog, error) {
+	cons, err := c.js.Consumer(ctx, stream, consumer)
+	if err != nil {
+		return nil, fmt.Errorf("nats: ephemeral consumer %q on stream %q: %w", consumer, stream, err)
+	}
+	info, err := cons.Info(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("nats: consumer info for %q on stream %q: %w", consumer, stream, err)
+	}
+	return []PartitionBacklog{{Messages: int64(info.NumPending)}}, nil
+}
+
+var _ EphemeralBacklogSource = (*NATSClient)(nil)
+
 func (c *NATSClient) Close() error {
 	if c.conn != nil {
 		c.conn.Close()
@@ -743,8 +772,30 @@ func (c *NATSClient) SubscribeBroadcast(ctx context.Context, subject string, h H
 // backlog that existed at subscribe time has been delivered and acked, so a caller can hold
 // /readyz closed until it actually knows the state it is about to act on.
 func (c *NATSClient) SubscribeBroadcastReady(ctx context.Context, subject string, h Handler, ready func()) error {
-	return c.subscribeEphemeral(ctx, subject, jetstream.DeliverLastPerSubjectPolicy, h, ready)
+	return c.subscribeEphemeral(ctx, subject, jetstream.DeliverLastPerSubjectPolicy, h, ready, nil)
 }
+
+// SubscribeBroadcastObserved is SubscribeBroadcastReady that also reports the
+// ephemeral consumer it created, so the caller can poll its backlog (#1009).
+//
+// It is a separate method rather than a wider BroadcastSubscriber because that
+// interface has implementers outside this package — internal/platform/halt
+// narrows it, and two test fakes satisfy it — and widening it would make every
+// one of them carry a parameter only the NATS transport can honour.
+func (c *NATSClient) SubscribeBroadcastObserved(
+	ctx context.Context, subject string, h Handler, ready func(), created ConsumerCreated,
+) error {
+	return c.subscribeEphemeral(ctx, subject, jetstream.DeliverLastPerSubjectPolicy, h, ready, created)
+}
+
+// SubscribeReplayObserved is SubscribeReplay with the same reporting.
+func (c *NATSClient) SubscribeReplayObserved(
+	ctx context.Context, subject string, h Handler, ready func(), created ConsumerCreated,
+) error {
+	return c.subscribeEphemeral(ctx, subject, jetstream.DeliverAllPolicy, h, ready, created)
+}
+
+var _ ObservableEphemeralSubscriber = (*NATSClient)(nil)
 
 // SubscribeReplay implements ReplaySubscriber: EVERY message on the subject, from the
 // first the stream still holds, to EVERY subscriber — then live.
@@ -765,25 +816,37 @@ func (c *NATSClient) SubscribeBroadcastReady(ctx context.Context, subject string
 // treat an empty replay as "nothing in the window", never as "nothing ever happened" —
 // Kafka holds the infinite copy, and this is the live spine.
 func (c *NATSClient) SubscribeReplay(ctx context.Context, subject string, h Handler, ready func()) error {
-	return c.subscribeEphemeral(ctx, subject, jetstream.DeliverAllPolicy, h, ready)
+	return c.subscribeEphemeral(ctx, subject, jetstream.DeliverAllPolicy, h, ready, nil)
 }
 
 // subscribeEphemeral is the one implementation behind both: an ephemeral consumer at the
 // given delivery policy, with the armed signal. ONE function rather than two near-copies —
 // the two callers differ by a single enum, and a second copy is how the AckWait fix, the
 // NakWithDelay fix and the arming logic would have landed in one of them only.
-func (c *NATSClient) subscribeEphemeral(ctx context.Context, subject string, policy jetstream.DeliverPolicy, h Handler, ready func()) error {
+func (c *NATSClient) subscribeEphemeral(
+	ctx context.Context, subject string, policy jetstream.DeliverPolicy, h Handler, ready func(), created ConsumerCreated,
+) error {
 	stream, err := c.js.StreamNameBySubject(ctx, subject)
 	if err != nil {
 		return fmt.Errorf("nats: stream for subject %q: %w", subject, err)
 	}
-	// controlTuning, NOT tuningForSubject: a broadcast carries the halt FACT and
-	// the trading mode, and its MaxDeliver is deliberately unbounded where every
-	// queue-group durable's is finite. See controlTuning in tuning.go — a bounded
-	// MaxDeliver here would let "I could not read the brake signal" stop being
-	// re-offered, which resolves to "carry on trading". A NATSConfig override
-	// still wins, so a test can shorten the AckWait.
-	tuning := controlTuning
+	// RESOLVED BY SUBJECT AND PATH, not hard-coded to the control class (#1009).
+	//
+	// This line read `tuning := controlTuning` for every subject a broadcast was
+	// ever taken on. The reasoning it carried is sound and still applies: a
+	// broadcast carries the halt FACT and the trading mode, whose MaxDeliver is
+	// deliberately unbounded where every queue-group durable's is finite, because
+	// a bounded MaxDeliver would let "I could not read the brake signal" stop
+	// being re-offered and resolve to "carry on trading".
+	//
+	// What it missed is that TICKS TAKE THIS PATH TOO. Compliance's price spine
+	// and the OMS's are broadcast subscriptions on market.*, and they were getting
+	// MaxAckPending 16 where tuning.go reasoned the tick path needs 512, and
+	// unbounded redelivery where the same file reasoned a quote half a minute
+	// stale must be given up on. tuningFor keeps the control class for everything
+	// that carries a brake signal and gives the tick class to the subjects that
+	// are ticks. A NATSConfig override still wins, so a test can shorten AckWait.
+	tuning := tuningFor(subject, deliveryBroadcast)
 	if c.cfg.ConsumerTuning != nil {
 		tuning = *c.cfg.ConsumerTuning
 	}
@@ -799,6 +862,15 @@ func (c *NATSClient) subscribeEphemeral(ctx context.Context, subject string, pol
 	})
 	if err != nil {
 		return fmt.Errorf("nats: broadcast consumer on %q: %w", subject, err)
+	}
+	// REPORTED AS SOON AS IT EXISTS, because the broker's generated name is the
+	// only handle by which this consumer's backlog can be read (#1009). Backlog
+	// resolves through durableName(group, subject) and an ephemeral consumer has
+	// none, which is why every in-process control fold in the estate was
+	// unmeasurable for lag. CachedInfo is the config just returned by
+	// CreateConsumer — no round trip.
+	if created != nil {
+		created(stream, cons.CachedInfo().Name)
 	}
 	cc, err := cons.Consume(func(m jetstream.Msg) {
 		// BOUNDED BY ITS OWN AckWait, exactly as the queue-group path is (#836).
