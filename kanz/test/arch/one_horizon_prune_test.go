@@ -348,25 +348,30 @@ func (t *Tape) Volumes(window time.Duration) int {
 // that has been reviewed and argued for, keyed on the file and SYMBOL that
 // implements it (see horizonPrune.key). The value names the issue that retires
 // the entry — an exemption without one is a decision nobody has to revisit.
-var horizonPruneExempt = map[string]string{
-	// trades.Tape.pruneLocked. It is the same concept and it CANNOT be pit.Put as
-	// pit.Put is written, for two reasons that are properties of a trade tape
-	// rather than of the code:
-	//
-	//  1. pit.Version is keyed uniquely by AsOf — a second Put at the same as-of
-	//     REPLACES, which is right for a calibration (one curve per instant) and
-	//     silently destroys a print (two trades routinely share a timestamp).
-	//  2. The tape is ordered by ARRIVAL, not by event time, and says so; pit.Put
-	//     sorted-inserts, which would reorder a late print into history that a
-	//     reader has already aggregated.
-	//
-	// So this is not a copy to delete but a variant to decide on, and #880 is
-	// where that decision (and the O(n)-per-trade copy-down the current prune
-	// does) is tracked. It is exempt here rather than silently unmatched because
-	// an unmatched second implementation is exactly what this guard exists to
-	// prevent.
-	"internal/marketedge/trades/trades.go:Tape.pruneLocked": "#880",
-}
+// EMPTY, AND THAT IS THE POINT (#880 retired the only entry).
+//
+// It held trades.Tape.pruneLocked, on the grounds that the tape could not be
+// pit.Put: pit.Version is keyed uniquely by AsOf so a second Put at the same
+// instant REPLACES — right for a calibration, silently lossy for a tape where two
+// prints routinely share a timestamp — and pit.Put sorted-inserts, which would
+// splice a late print into history a reader has already aggregated.
+//
+// BOTH OF THOSE ARE STILL TRUE. The tape was not folded into pit.Put and must not
+// be. What changed is which part of the concept is shared: the RELEASE — clear
+// the dropped prefix, reslice past it — moved into pit.DropOldest, and the tape
+// calls it. The cutoff and the scan for the drop index stay in the tape, because
+// they are where a trade tape genuinely differs from a calibration store: it
+// scans linearly, tolerating the out-of-order print that arrival ordering admits.
+//
+// So the guard's rule is satisfied in the way it was meant to be — one
+// implementation of "drop a prefix and release it" — rather than by an exemption.
+// The tape also stopped compacting with append(t.trades[:0], t.trades[i:]...),
+// which cost an O(n) copy per print on the ingest path and left the vacated tail
+// slots reachable through the backing array.
+//
+// A new entry here needs the same standard: a reason that is a property of the
+// data rather than of the code, and an issue that retires it.
+var horizonPruneExempt = map[string]string{}
 
 func TestOneHorizonPrune(t *testing.T) {
 	// FIXTURE ARM 1 (positive control). The analyser must flag the copy #871

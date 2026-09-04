@@ -190,8 +190,60 @@ func Put[T any](vs []Version[T], asOf time.Time, v T, horizon time.Duration) ([]
 	// holding. It is O(drop), and drop is 1 in the steady state — the prune
 	// removes one version per refresh once the horizon is full — so the ordinary
 	// cost is a single struct write.
-	clear(vs[:drop])
-	return vs[drop:], drop
+	return DropOldest(vs, drop), drop
+}
+
+// DropOldest releases the first `drop` elements of an ascending list and returns
+// the remainder. It is the "releasing what it drops" half of this package's
+// concept, named so it can be shared (#880).
+//
+// # Why this is the half worth sharing
+//
+// The reslice is the obvious part and the clear is the part that gets forgotten.
+// #862 found exactly that inside Put — the horizon bounded the version COUNT and
+// not the heap — and #867's volprofile then reimplemented the container and had
+// to carry its own copy of the same clear(). The estate has already paid twice
+// for this three-line act being written rather than called.
+//
+// internal/marketedge/trades is the third caller. Its prune compacted with
+// `append(t.trades[:0], t.trades[i:]...)`, copying every live element down on
+// EVERY print — O(n) per trade under the tape's write lock, on the market-data
+// ingest path.
+//
+// THAT ONE WAS NOT A LEAK, and #880's second claim is worth correcting rather
+// than repeating: the slots left past len hold DUPLICATES of elements that are
+// still live, and the next append writes over them. Measured, not reasoned —
+// after a copy-down prune the backing array reads [2 3 4 5 6 | 6 0 0] and the
+// following append makes it [2 3 4 5 6 | 7 0 0].
+//
+// The clear below is what makes the RESLICE safe, which is why it is
+// load-bearing for every caller of this function including the tape now: a
+// reslice does not overwrite anything, so without it the dropped values sit
+// behind the returned slice for as long as the array lives.
+//
+// # What it deliberately does not decide
+//
+// WHERE THE CUTOFF COMES FROM, and how the drop index is found. Put searches a
+// sorted list with sort.Search; the trade tape scans linearly because it is
+// ordered by ARRIVAL and a late print must not be treated as sorted. Those are
+// genuine differences between a calibration store and a trade tape, and folding
+// them together would either impose sortedness the tape does not have or add an
+// accessor indirection to the hot path. What is one implementation here is the
+// RELEASE, which is the part that has broken twice.
+func DropOldest[T any](xs []T, drop int) []T {
+	if drop <= 0 {
+		return xs
+	}
+	if drop >= len(xs) {
+		drop = len(xs)
+	}
+	// clear zeroes each element, dropping the reference the backing array was
+	// holding. Go keeps an entire array alive while any slice references any part
+	// of it, so without this the dropped values stay resident behind the returned
+	// slice and every length-based assertion still passes. O(drop), and drop is 1
+	// in the steady state.
+	clear(xs[:drop])
+	return xs[drop:]
 }
 
 // At resolves the newest version effective at or before asOf. ok=false when the
