@@ -470,6 +470,12 @@ func DefaultRegistry() *Registry {
 	r.Register(compliancepb.RuleType_RULE_TYPE_BUYING_POWER, BuyingPowerRule)
 	r.Register(compliancepb.RuleType_RULE_TYPE_RISK_MEASURE, RiskLimitRule)
 	r.Register(compliancepb.RuleType_RULE_TYPE_VENUE_MARGIN, VenueMarginRule)
+	// REGISTERED HERE AND NOT AT A COMPOSITION ROOT (#963). This is the only
+	// registry both the OMS pre-trade gate and the compliance monitor construct,
+	// so a rule wired anywhere else would be armed on one of the two paths and
+	// silently absent on the other — and the path it would be missing from is the
+	// passive sweep, which is the only one that enforces this rule at all.
+	r.Register(compliancepb.RuleType_RULE_TYPE_CASH_BUFFER, CashBufferRule)
 	return r
 }
 
