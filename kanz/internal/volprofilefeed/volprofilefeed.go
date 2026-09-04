@@ -72,6 +72,8 @@ import (
 	"strconv"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
@@ -144,6 +146,22 @@ type Profile struct {
 	// gets a nil slice rather than a flat curve, and the failure is loud instead
 	// of a schedule that looks right.
 	Expected []*big.Rat
+
+	// Wire is the exact message this profile was decoded from, and it is what a
+	// parent order stores so a cold pod can derive its schedule without the bus
+	// (#943).
+	//
+	// IT IS THE MESSAGE AND NOT A RE-ENCODING, because versionOf hashes each
+	// bucket's Decimal COEFFICIENT AND EXPONENT rather than its value. Two
+	// encodings of one rational are one number and two versions, so a curve
+	// rebuilt from the decoded Expected slice would hash to a version no order
+	// pinned — the mislabelling the pin exists to prevent, arriving from the
+	// direction nobody watches. Decode keeps the original instead, so the bytes an
+	// order carries are the bytes the producer published.
+	//
+	// It is a CLONE, not the caller's pointer: a proto message is mutable and this
+	// value is documented as immutable once decoded.
+	Wire *marketpb.VolumeProfile
 }
 
 // Known reports whether this profile carries a measured curve.
@@ -349,6 +367,12 @@ func Decode(pb *marketpb.VolumeProfile) (Profile, error) {
 	if pb.GetNewestSession() != nil {
 		out.Newest = pb.GetNewestSession().AsTime().UTC()
 	}
+
+	// THE MESSAGE IS KEPT, CLONED, AND KEPT FOR EVERY VERDICT. A non-known profile
+	// carries no curve, but it is still a version an order could in principle pin,
+	// and a Wire that were present only on the KNOWN ones would be a second rule
+	// about which profiles are durable for a reader to get wrong.
+	out.Wire = proto.Clone(pb).(*marketpb.VolumeProfile)
 
 	if !out.Verdict.Known() {
 		if len(pb.GetExpectedVolume()) != 0 {

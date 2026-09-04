@@ -167,6 +167,18 @@ func (r *Registry) Fold(p Profile) {
 		r.count(&r.refused)
 		return
 	}
+	// A PROFILE WITH NO WIRE MESSAGE IS REFUSED, because admission would resolve
+	// it, schedule against it, and then have nothing durable to stamp on the order
+	// (#943) — so that parent would go back to depending on the MARKET stream's 24h
+	// and stop advancing on the pod that replaced the one that admitted it. Every
+	// Profile that reaches here through Decode carries one; a hand-built value does
+	// not, and the honest answer to "this curve cannot be made durable" is to refuse
+	// it under the count an operator already watches rather than to fold a version
+	// that is resolvable on exactly one pod.
+	if p.Wire == nil {
+		r.count(&r.refused)
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	vs, dropped := pit.Put(r.series[p.Series], p.AsOf.UTC(), p, r.retention)
@@ -277,13 +289,21 @@ func (r *Registry) count(n *int64) {
 // nothing to say so, and with the two pods this design exists to keep in agreement
 // disagreeing for a reason no log records.
 func copyProfile(p Profile) Profile {
-	if p.Expected == nil {
-		return p
-	}
 	out := p
-	out.Expected = make([]*big.Rat, len(p.Expected))
-	for i, e := range p.Expected {
-		out.Expected[i] = new(big.Rat).Set(e)
+	if p.Expected != nil {
+		out.Expected = make([]*big.Rat, len(p.Expected))
+		for i, e := range p.Expected {
+			out.Expected[i] = new(big.Rat).Set(e)
+		}
+	}
+	// THE WIRE MESSAGE IS CLONED FOR THE SAME REASON AND IT IS NOT OPTIONAL. It is
+	// what admission stamps on the order, so a caller handed the registry's own
+	// pointer could rewrite the curve every LATER order pins — under a version that
+	// still hashes to the shape nobody has any more. There is no early return above
+	// any more precisely so this cannot be skipped by a profile that carries no
+	// curve: a non-KNOWN verdict has a nil Expected and a message all the same.
+	if p.Wire != nil {
+		out.Wire = proto.Clone(p.Wire).(*marketpb.VolumeProfile)
 	}
 	return out
 }

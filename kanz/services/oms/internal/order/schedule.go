@@ -219,7 +219,15 @@ func (s *Service) validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 	// assert a schedule the platform never chose. It is the stance
 	// SubmitOrder.venue_account_id takes for the same reason: a field the platform
 	// stamps has no business surviving from the wire.
+	//
+	// THE CURVE IS CLEARED WITH THE VERSION, AND IT IS THE HALF WITH TEETH (#943).
+	// A caller who could send the SHAPE would not merely choose among published
+	// curves — it would supply one nobody published, and since the two are checked
+	// against each other rather than against the feed, a self-consistent pair would
+	// verify. Both fields leave on the same line so a future reader cannot repair
+	// one and forget the other.
 	sch.VolumeProfileVersion = ""
+	sch.VolumeProfile = nil
 
 	// THE MARKET IS THE NEWEST PUBLISHED PROFILE FOR THIS (INSTRUMENT, VENUE), AND
 	// THIS IS THE ONE PLACE THAT READS "NEWEST" (#897).
@@ -236,7 +244,7 @@ func (s *Service) validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 	// correct answer-holder — algo.Registered() — and a copy of it in this file
 	// would drift from it. TWAP never asks and is unaffected; VWAP and POV ask,
 	// and refuse on UNKNOWN.
-	market, version := s.currentMarket(cmd.GetInstrumentId(), cmd.GetVenue())
+	market, profile := s.currentMarket(cmd.GetInstrumentId(), cmd.GetVenue())
 	seen := &consultedView{MarketView: market}
 	if _, err := algo.Run(plan, state, seen); err != nil {
 		if errors.Is(err, algo.ErrUnknownAlgo) {
@@ -270,8 +278,16 @@ func (s *Service) validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 	// handleSubmit copies cmd.GetExecutionSchedule() onto the OrderState it
 	// commits, so stamping here is what makes the pin durable in the same write
 	// that admits the order. There is no second store to fall out of sync with.
-	if seen.asked && version != "" {
-		sch.VolumeProfileVersion = version
+	//
+	// THE CURVE IS STAMPED WITH THE VERSION, NEVER SEPARATELY (#943). They are one
+	// assignment because they are one fact: the shape and the name of the shape.
+	// Stamping the version alone is what left a working parent depending on the
+	// MARKET stream's 24h retention — resolvable on the pod that admitted it and
+	// unresolvable on the pod that replaced it — and stamping the curve alone would
+	// store a market under no name at all.
+	if seen.asked && profile.GetVersion() != "" {
+		sch.VolumeProfileVersion = profile.GetVersion()
+		sch.VolumeProfile = profile
 	}
 	return nil
 }

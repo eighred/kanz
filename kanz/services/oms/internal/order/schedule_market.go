@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"time"
 
+	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/execution/algo"
@@ -104,6 +105,81 @@ func shapeOf(p volprofilefeed.Profile) (marketview.Shape, bool) {
 	}, true
 }
 
+// viewOf turns a resolved profile into the pinned view a schedule integrates.
+//
+// IT CONSTRUCTS NO algo.UnknownMarket and returns nil instead, deliberately. Two
+// functions in this package may answer UNKNOWN — currentMarket and pinnedMarket —
+// because each of them is a lookup that failed, and a third site would be a path
+// that refuses a volume-driven order without ever asking anything. A helper that
+// returned UnknownMarket would be exactly that third site, and
+// test/arch/pinned_profile_is_the_only_market_test.go would say so.
+func viewOf(p volprofilefeed.Profile) (algo.MarketView, bool) {
+	sh, ok := shapeOf(p)
+	if !ok {
+		return nil, false
+	}
+	v, err := marketview.NewPinned(sh, p.Version)
+	if err != nil {
+		return nil, false
+	}
+	return v, true
+}
+
+// storedMarket resolves the curve the ORDER ITSELF carries (#943).
+//
+// # Why an order carries a curve at all
+//
+// #897 stamped a VERSION and left the shape it names on the bus. A pod resolves
+// the version by replaying market.crypto.volume_profile into the registry, and
+// the MARKET stream retains 24h while the registry retains seven days — so the
+// same pin resolved on a pod that had been up all week and resolved to nothing on
+// the pod that replaced it. A parent worked over more than a day, on a pod that
+// then rolled, stopped advancing until somebody cancelled and re-submitted it.
+//
+// The curve is a schedule INPUT, so it belongs where the other inputs are: on the
+// order, in Postgres, backed up and restored. This reads it back.
+//
+// # THE STORED CURVE IS CHECKED AGAINST THE PIN, NEVER TRUSTED BESIDE IT
+//
+// volprofilefeed.Decode recomputes the version from the message's own content and
+// refuses one that does not describe itself; this then requires that content hash
+// to equal the version field 7 carries, and requires the curve to name THIS
+// order's (instrument, venue). A blob that fails any of the three is UNKNOWN and
+// the parent stops — the same answer as no curve at all, and for a sharper
+// reason: a stored shape that disagrees with the version the audit record carries
+// would attribute every fill to a schedule that was never derived, which is the
+// mislabelling the whole pin exists to prevent.
+//
+// The bool is "there was something here to resolve", not "it resolved". A false
+// with a non-nil message is a REFUSAL and must not fall through to the registry:
+// a bad blob silently replaced by a good registry answer is a corruption nothing
+// would ever report.
+func (s *Service) storedMarket(instrumentID, venue, version string,
+	wire *marketpb.VolumeProfile) (algo.MarketView, bool) {
+
+	p, err := volprofilefeed.Decode(wire)
+	if err != nil {
+		return nil, false
+	}
+	if p.Version != version {
+		return nil, false
+	}
+	// THE SERIES CHECK IS REDUNDANT TODAY AND KEPT DELIBERATELY. versionOf hashes
+	// the instrument and the venue, so a curve measured on another book cannot
+	// carry this order's pin and the comparison above already refuses it — a
+	// mutation deleting these three lines survives every test, and that is the
+	// honest state of them rather than a gap. What they defend is the day the
+	// series leaves versionOf's input list: from then on this is the only thing
+	// between a parent and a curve measured on a different exchange, where the same
+	// instrument has a different intraday shape. The premise is under test at
+	// internal/volprofilefeed.TestVersion_DependsOnTheSeries, which fails loudly if
+	// it ever stops holding.
+	if p.Series.InstrumentID != instrumentID || p.Series.Venue != venue {
+		return nil, false
+	}
+	return viewOf(p)
+}
+
 // pinnedMarket resolves the exact profile version an order was planned against.
 //
 // IT RETURNS algo.UnknownMarket RATHER THAN AN ERROR when the version cannot be
@@ -113,20 +189,40 @@ func shapeOf(p volprofilefeed.Profile) (marketview.Shape, bool) {
 // UNKNOWN — so the failure surfaces as an unworkable schedule naming the slice it
 // could not size, which is the same message an operator would get for a market
 // nobody measured. The second return says which of the two happened, for the log.
-func (s *Service) pinnedMarket(instrumentID, venue, version string) (algo.MarketView, bool) {
-	if s.volumeProfiles == nil || version == "" || instrumentID == "" || venue == "" {
+//
+// # THE ORDER IS ASKED FIRST, AND THE REGISTRY IS THE FALLBACK (#943)
+//
+// A schedule that reaches the registry at all is a schedule whose answer depends
+// on how long this pod has been running, because what a pod can replay is bounded
+// by the bus and what an order carries is not. So an order that carries its curve
+// is derived from its curve — on a pod with an empty registry, on a pod that has
+// never seen the FACT, and after the version has aged off the stream entirely.
+//
+// The registry path remains for exactly one population: parents admitted before
+// this field existed, which carry a version and no curve. Their behaviour is
+// unchanged, including the stop.
+func (s *Service) pinnedMarket(instrumentID, venue, version string,
+	wire *marketpb.VolumeProfile) (algo.MarketView, bool) {
+
+	if version == "" || instrumentID == "" || venue == "" {
+		return algo.UnknownMarket{}, false
+	}
+	if wire != nil {
+		v, ok := s.storedMarket(instrumentID, venue, version, wire)
+		if !ok {
+			return algo.UnknownMarket{}, false
+		}
+		return v, true
+	}
+	if s.volumeProfiles == nil {
 		return algo.UnknownMarket{}, false
 	}
 	p, ok := s.volumeProfiles.Resolve(volprofilefeed.Series{InstrumentID: instrumentID, Venue: venue}, version)
 	if !ok {
 		return algo.UnknownMarket{}, false
 	}
-	sh, ok := shapeOf(p)
+	v, ok := viewOf(p)
 	if !ok {
-		return algo.UnknownMarket{}, false
-	}
-	v, err := marketview.NewPinned(sh, p.Version)
-	if err != nil {
 		return algo.UnknownMarket{}, false
 	}
 	return v, true
@@ -139,34 +235,44 @@ func (s *Service) pinnedMarket(instrumentID, venue, version string) (algo.Market
 // derivation after admission resolves the recorded version or nothing, so the
 // schedule a pod derives cannot depend on when it looked or on which pod it is.
 func (s *Service) scheduleMarket(st *orderpb.OrderState) algo.MarketView {
+	sch := st.GetExecutionSchedule()
 	v, _ := s.pinnedMarket(st.GetInstrumentId(), st.GetVenue(),
-		st.GetExecutionSchedule().GetVolumeProfileVersion())
+		sch.GetVolumeProfileVersion(), sch.GetVolumeProfile())
 	return v
 }
 
-// currentMarket is the view for a schedule being ADMITTED, and the version it
+// currentMarket is the view for a schedule being ADMITTED, and the profile it
 // would be pinned to.
 //
 // ADMISSION IS THE ONE MOMENT "whatever is newest" IS THE RIGHT QUESTION, because
 // it is the moment the answer is RECORDED. Everything after it resolves the
 // record.
-func (s *Service) currentMarket(instrumentID, venue string) (algo.MarketView, string) {
+//
+// IT RETURNS THE MESSAGE RATHER THAN THE VERSION STRING (#943), because both are
+// stamped on the order and they must be the same profile. Handing back a version
+// and making the caller fetch the curve separately would be two lookups that can
+// disagree — and the one thing a stored curve must never do is disagree with the
+// version beside it.
+func (s *Service) currentMarket(instrumentID, venue string) (algo.MarketView, *marketpb.VolumeProfile) {
 	if s.volumeProfiles == nil || instrumentID == "" || venue == "" {
-		return algo.UnknownMarket{}, ""
+		return algo.UnknownMarket{}, nil
 	}
 	p, ok := s.volumeProfiles.Current(volprofilefeed.Series{InstrumentID: instrumentID, Venue: venue})
 	if !ok {
-		return algo.UnknownMarket{}, ""
+		return algo.UnknownMarket{}, nil
 	}
-	sh, ok := shapeOf(p)
+	v, ok := viewOf(p)
 	if !ok {
-		return algo.UnknownMarket{}, ""
+		return algo.UnknownMarket{}, nil
 	}
-	v, err := marketview.NewPinned(sh, p.Version)
-	if err != nil {
-		return algo.UnknownMarket{}, ""
+	// THE REGISTRY REFUSES A PROFILE THAT CARRIES NO MESSAGE, so this is not a
+	// reachable state through the bus — it is here because a hand-built fake in a
+	// test is, and a schedule pinned to a version whose curve cannot be stored
+	// would be the #943 gap re-entering through the composition root.
+	if p.Wire == nil {
+		return algo.UnknownMarket{}, nil
 	}
-	return v, p.Version
+	return v, p.Wire
 }
 
 // consultedView records whether the schedule actually ASKED about volume.
