@@ -18,13 +18,33 @@ type OKXConnector struct {
 	rest     *okxREST
 	venue    *OKXVenue
 	wsURL    string
+	// dialUserData opens ONE private user-data websocket, or fails. A FIELD for
+	// the reason venue-binance's is (#1047): the reconnect loop's re-dial rate is
+	// what stands between a store outage and an exchange rate-limit or IP ban, and
+	// a loop that can only be driven against a real venue cannot be asserted.
+	dialUserData func(ctx context.Context) (UserDataStream, func(), error)
+	// newUserDataBackoff builds the reconnect policy for one run of the user-data
+	// loop. A FIELD for the reason dialUserData is (#1047): the loop's growth
+	// curve is a venue-safety property, and on the production bounds a test cannot
+	// tell an exponential delay from one pinned at the base.
+	newUserDataBackoff func() *UserDataBackoff
 }
 
 // NewOKXConnector assembles the venue + shared REST client. wsURL is the private
 // websocket origin (e.g. wss://ws.okx.com:8443/ws/v5/private).
 func NewOKXConnector(settings VenueSettings, wsURL string, mode exchangeauth.OKXTradingMode) *OKXConnector {
 	venue := NewOKXVenueFromSettings(settings, mode)
-	return &OKXConnector{settings: settings, rest: venue.rest, venue: venue, wsURL: wsURL}
+	c := &OKXConnector{settings: settings, rest: venue.rest, venue: venue, wsURL: wsURL}
+	c.dialUserData = func(ctx context.Context) (UserDataStream, func(), error) {
+		ws := newOKXUserDataWS(c.wsURL, c.settings.APIKey, string(c.rest.apiSecret), c.settings.Passphrase)
+		stop, err := ws.Connect(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return ws, stop, nil
+	}
+	c.newUserDataBackoff = NewUserDataBackoff
+	return c
 }
 
 // Venue returns the execution venue for the router.
@@ -118,22 +138,53 @@ func (c *OKXConnector) runUserData(ctx context.Context, deps WorkerDeps) {
 		Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
 		OnRefused: deps.OnFillRefused, OnDropped: deps.OnFillDropped, Logger: deps.Logger,
 	})
-	backoff := time.Second
+	// THE RE-DIAL RATE IS THE THING THIS LOOP DECIDES, AND IT IS A VENUE-SAFETY
+	// DECISION (#1047).
+	//
+	// It backed off only when Connect FAILED, and reset the delay on every
+	// successful connect. That covers an exchange being down and covers nothing
+	// else. When the exchange is HEALTHY and the adapter's own order view is not,
+	// every session connects, the ingester refuses the first execution report it
+	// cannot resolve, Run returns, the delay is reset, and the loop re-dials with
+	// no pause at all — measured at 38,688 dials in 300ms. Binance and OKX
+	// rate-limit and then IP-BAN that, which turns a recoverable database blip
+	// into a venue-level lockout of the whole account and stops every order on it.
+	//
+	// So BOTH failures back off through one policy, and the delay is reset only on
+	// evidence the session actually resolved a report — see UserDataBackoff.
+	// The seam defaults to the PRODUCTION policy rather than to nothing: an unset
+	// field must never mean "no back-off", which is the defect itself.
+	newBackoff := c.newUserDataBackoff
+	if newBackoff == nil {
+		newBackoff = NewUserDataBackoff
+	}
+	backoff := newBackoff()
 	for ctx.Err() == nil {
-		ws := newOKXUserDataWS(c.wsURL, c.settings.APIKey, string(c.rest.apiSecret), c.settings.Passphrase)
-		stop, err := ws.Connect(ctx)
+		stream, stop, err := c.dialUserData(ctx)
 		if err != nil {
-			deps.Logger.Warn("okx user-data connect failed; backing off", "err", err, "backoff", backoff)
-			Sleep(ctx, backoff)
-			backoff = CapDur(backoff*2, 30*time.Second)
+			deps.Logger.Warn("okx user-data connect failed; backing off",
+				"err", err, "backoff", backoff.Delay())
+			backoff.Wait(ctx)
 			continue
 		}
-		backoff = time.Second
-		ing.stream = ws
-		if err := ing.Run(ctx); err != nil && ctx.Err() == nil {
-			deps.Logger.Warn("okx user-data stream ended; reconnecting", "err", err)
-		}
+		ing.stream = stream
+		runErr := ing.Run(ctx)
 		stop()
+		if ctx.Err() != nil {
+			return
+		}
+		// THE RESET IS NOT ON CONNECTING. A session that published a fill proved
+		// the whole path works and has earned the base delay back; one that died
+		// without resolving anything has proved nothing, whatever killed it.
+		resolved := ing.resolvedAReport()
+		if resolved {
+			backoff.Reset()
+		}
+		deps.Logger.Warn("okx user-data stream ended; backing off before re-dialling — a stream "+
+			"that never resolves a report must not be re-dialled at full speed, or the exchange "+
+			"rate-limits and then bans this account",
+			"err", runErr, "backoff", backoff.Delay(), "resolved_a_report_this_session", resolved)
+		backoff.Wait(ctx)
 	}
 }
 

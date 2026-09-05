@@ -464,3 +464,92 @@ func RefusalKind(err error) string {
 		return "other"
 	}
 }
+
+// The user-data reconnect bounds. Unchanged from the values both connectors
+// carried inline; they are here so ONE policy governs both venues and both
+// failure paths.
+const (
+	// UserDataBackoffBase is the first delay after a failed session.
+	UserDataBackoffBase = time.Second
+	// UserDataBackoffMax caps it. 30s is a compromise the fill path pays for: a
+	// stream that is down is a stream not delivering fills, and the reconciler
+	// and the OMS sweep are what cover that window.
+	UserDataBackoffMax = 30 * time.Second
+)
+
+// UserDataBackoff is the ONE re-dial policy a private user-data run loop uses,
+// for BOTH the failure to connect and the failure to keep running (#1047).
+//
+// # What it is protecting, and why the second path was the dangerous one
+//
+// Both connectors backed off only when Connect FAILED, and reset the delay on
+// every successful connect. That is correct when the exchange is what is broken.
+// It is exactly wrong when the exchange is FINE and something behind the adapter
+// is not — which is the case this landed with: an unreadable order view makes
+// every execution report unresolvable, so the ingester returns an error on the
+// first report of every session while Connect keeps succeeding. The delay was
+// reset each time and never consulted, and the loop re-dialled a real exchange
+// as fast as the machine allowed. Measured on this failure: 38,688 dials in
+// 300ms.
+//
+// Binance and OKX rate-limit and then IP-BAN that behaviour. The consequence is
+// not a slow reconnect — it is a venue-level lockout of the whole account, which
+// stops every order on it, and it would be caused by a recoverable database
+// blip. That is strictly worse than the silent drop this all began as.
+//
+// # Reset is tied to PROGRESS, not to connecting
+//
+// Connecting is not the thing that fails here, so a reset on connect cannot
+// bound anything. The caller resets only on evidence the session did real work —
+// an execution report resolved and published as a FACT — which is precisely the
+// thing a store outage prevents. A session that connects and immediately dies
+// therefore grows the delay whatever killed it.
+//
+// # Indefinite retry, deliberately, rather than a bounded attempt count
+//
+// A bounded count would stop the user-data stream permanently after N failures
+// and leave a counter behind. That trades a transient outage for a permanent
+// one: the adapter would never hear about a fill again for the life of the
+// process, including long after the store recovered, and nothing would restart
+// it. The reconciler reads the SAME store, so it is down for the same reason,
+// and the OMS sweep only adopts while an order is still working. A backed-off
+// retry recovers by itself the moment the store does; a stopped stream does not.
+type UserDataBackoff struct {
+	base, max, cur time.Duration
+}
+
+// NewUserDataBackoff starts at UserDataBackoffBase and caps at UserDataBackoffMax.
+func NewUserDataBackoff() *UserDataBackoff {
+	return NewUserDataBackoffWith(UserDataBackoffBase, UserDataBackoffMax)
+}
+
+// NewUserDataBackoffWith is the same policy on explicit bounds.
+//
+// IT EXISTS SO THE GROWTH CURVE IS TESTABLE AT THE RUN LOOP, not only in
+// isolation. The production bounds are seconds, and a test that waits them out
+// cannot separate "the delay doubles" from "the delay is pinned at one second" —
+// a mutation restoring the old unconditional reset SURVIVED a bound written that
+// way, because one dial per second still looks quiet inside a 300ms window. It
+// is not quiet over an outage: one dial per second is 3,600 an hour, which
+// breaches the exchange's connection rate limit on its own and reaches the same
+// ban by a slower road. Millisecond bounds make the curve observable in a test
+// that still drives the real loop.
+func NewUserDataBackoffWith(base, max time.Duration) *UserDataBackoff {
+	return &UserDataBackoff{base: base, max: max, cur: base}
+}
+
+// Delay is what the next Wait will sleep. Read it for the log line BEFORE
+// waiting, so an operator learns the adapter is backing off at the moment it
+// starts rather than up to UserDataBackoffMax later.
+func (b *UserDataBackoff) Delay() time.Duration { return b.cur }
+
+// Wait sleeps the current delay, then doubles it up to the cap. It returns
+// early if ctx is cancelled, so shutdown is never held up by a long backoff.
+func (b *UserDataBackoff) Wait(ctx context.Context) {
+	Sleep(ctx, b.cur)
+	b.cur = CapDur(b.cur*2, b.max)
+}
+
+// Reset returns to the base delay. The caller calls it ONLY on evidence the last
+// session made progress — see the type doc.
+func (b *UserDataBackoff) Reset() { b.cur = b.base }

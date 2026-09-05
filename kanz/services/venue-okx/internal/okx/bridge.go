@@ -50,6 +50,12 @@ type (
 	// was in both connectors because the arithmetic was written in both.
 	ReportRefusal = execution.ReportRefusal
 
+	// UserDataBackoff is the SHARED re-dial policy for the private user-data run
+	// loop (#1047). Its reset is tied to an execution report actually resolved
+	// rather than to a successful connect, which is what stops an order-view
+	// outage becoming an exchange rate-limit and then an IP ban.
+	UserDataBackoff = execution.UserDataBackoff
+
 	// MarkTickPublisher is the shared reference-mark tick publisher (#673). The
 	// ticker feed does not build the market.crypto.trade envelope itself and does
 	// not see the publish error: both connectors share one implementation, so a
@@ -99,7 +105,14 @@ var (
 	ErrRateLimited  = execution.ErrRateLimited
 	ErrEgressDenied = execution.ErrEgressDenied
 
-	NewWeightBucket       = execution.NewWeightBucket
+	NewWeightBucket = execution.NewWeightBucket
+	// sleep/capDur are GONE from this surface (#1047). The connectors no longer
+	// reach for the raw wait-and-cap primitives: the only thing that ever
+	// composed them was the user-data reconnect delay, and that decision now
+	// lives in execution.UserDataBackoff where one policy governs both venues and
+	// both of their failure paths. Reaching for them again here would be a second
+	// re-dial policy, which is how the venue-safety bound came to differ from the
+	// connect-failure bound in the first place.
 	NewExchangeHTTPClient = execution.NewExchangeHTTPClient
 	NewCloseRegistry      = execution.NewCloseRegistry
 
@@ -111,6 +124,13 @@ var (
 	// "store_error" and split the series it is meant to be alerted on.
 	DropUnknownOrder = execution.DropUnknownOrder
 	DropStoreError   = execution.DropStoreError
+
+	// The user-data reconnect policy, shared so one venue cannot be fixed alone
+	// (#1047). Its reset is tied to a resolved execution report rather than to a
+	// successful connect, which is what stops a store outage becoming an
+	// exchange-side rate-limit or IP ban.
+	NewUserDataBackoff     = execution.NewUserDataBackoff
+	NewUserDataBackoffWith = execution.NewUserDataBackoffWith
 
 	// The venue verdicts. Aliased as values rather than re-declared so a
 	// connector cannot invent a ninth answer, and so "which constant is UNKNOWN"
@@ -130,8 +150,6 @@ var (
 	// Exact base-10 helpers. Money and sizes are big.Rat-backed common.v1.Decimal;
 	// `double` is banned on any path moving capital, and these are the only way a
 	// decimal crosses to or from an exchange's string wire format.
-	Sleep     = execution.Sleep
-	CapDur    = execution.CapDur
 	FormatDec = execution.FormatDec
 	ParseDec  = execution.ParseDec
 
