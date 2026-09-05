@@ -163,3 +163,70 @@ func TestCalibrator_Refresh(t *testing.T) {
 		t.Error("a failed Refresh must leave the previous curve serving")
 	}
 }
+
+// THE DURABILITY SEAM (#1039). curve.Store is in-memory and starts empty, so
+// without an observer on the write the curve that discounted a published DV01
+// dies with the pod while the DV01 lives 30 days on risk.portfolio — a number
+// that outlives every input that produced it.
+func TestCalibrator_OnCalibratedRecordsWhatReachedTheStore(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore()
+	asOf := time.Date(2026, 7, 1, 16, 0, 0, 0, time.UTC)
+
+	type record struct {
+		currency string
+		asOf     time.Time
+		c        *Curve
+		inStore  bool
+	}
+	var seen []record
+	cal := &Calibrator{
+		Source: staticQuotes{
+			qs:  []RateQuote{{Kind: Deposit, Tenor: 0.5, Value: 0.03}, {Kind: Swap, Tenor: 5, Value: 0.04}},
+			cov: StripCoverage{Configured: 3, Quoted: 2, Missing: []MissingQuote{{InstrumentID: "USD-10Y", Reason: "no_quote"}}},
+		},
+		Store:  store,
+		Interp: LogLinearDF,
+		OnCalibrated: func(_ context.Context, ccy string, at time.Time, c *Curve) {
+			// AFTER Put, NOT BEFORE: the observer must record what a reader can
+			// actually resolve, so the store is interrogated from inside it.
+			got, ok := store.Curve(ctx, ccy, at)
+			seen = append(seen, record{ccy, at, c, ok && got == c})
+		},
+	}
+	if _, err := cal.Refresh(ctx, "USD", asOf); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("OnCalibrated fired %d times, want 1", len(seen))
+	}
+	if seen[0].currency != "USD" || !seen[0].asOf.Equal(asOf) {
+		t.Errorf("OnCalibrated(%q, %v) want (USD, %v)", seen[0].currency, seen[0].asOf, asOf)
+	}
+	if !seen[0].inStore {
+		t.Error("OnCalibrated fired with a curve the store does not serve — the record would " +
+			"name an artifact that never priced anything")
+	}
+	// THE COVERAGE MUST BE ON THE CURVE THE OBSERVER SEES. Refresh stamps it
+	// before Put; an observer handed the pre-stamp curve would record a complete-
+	// looking curve that is actually short its long end.
+	cov, ok := seen[0].c.StripCoverage()
+	if !ok {
+		t.Fatal("the recorded curve makes no coverage claim, but its source reported one")
+	}
+	if cov.Configured != 3 || cov.Quoted != 2 || len(cov.Missing) != 1 {
+		t.Errorf("recorded coverage=%+v want configured=3 quoted=2 missing=1", cov)
+	}
+
+	// A FAILED CALIBRATION RECORDS NOTHING. There is no artifact, and a record of
+	// one would put a curve in the permanent record that never priced anything.
+	before := len(seen)
+	bad := &Calibrator{Source: failingQuotes{}, Store: store, Interp: LogLinearDF, OnCalibrated: cal.OnCalibrated}
+	if _, err := bad.Refresh(ctx, "USD", asOf.Add(time.Hour)); err == nil {
+		t.Fatal("Refresh must surface a source error")
+	}
+	if len(seen) != before {
+		t.Errorf("OnCalibrated fired %d extra time(s) for a refresh that produced no curve",
+			len(seen)-before)
+	}
+}

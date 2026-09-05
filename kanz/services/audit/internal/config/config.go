@@ -153,6 +153,8 @@ var DefaultSubjects = []string{
 	"risk.exposure.>",      // RISK
 	"risk.signal.>",        // RISK
 	"risk.command.>",       // RISK
+	"risk.curve.>",         // RISK — the calibrated curve a valuation discounted (#1039)
+	"risk.factor.>",        // RISK — the fitted factor model a VaR was read off (#1039)
 	"execution.>",          // EXECUTION
 	"strategy.>",           // EXECUTION
 	"order.>",              // EXECUTION

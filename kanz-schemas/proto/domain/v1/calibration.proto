@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+// Calibration-artifact payloads. Companion to measure.proto: that file carries
+// what the risk engine COMPUTED, this one carries what it computed it FROM.
+//
+// A risk number is only reproducible if the model instance behind it survives.
+// The engine's pricing stores are point-in-time in memory and start empty — a
+// pod restart leaves them holding nothing — so before this message existed the
+// discount curve that produced a DV01 was gone with the pod while the DV01 lived
+// 30 days on the risk.portfolio topic. The number could be quoted and could not
+// be reproduced, challenged, or explained (#1039).
+//
+// Lives in domain.v1 for the same reason RiskMeasureSet does: a calibrated
+// curve is the risk engine's own committed state, keyed and partitioned by the
+// engine's own key, not reference data somebody else masters.
+package domain.v1;
+
+import "reference/v1/fixed_income.proto";
+
+// CalibratedCurve is one discount curve as it was actually calibrated, at the
+// as-of it was calibrated for — the FACT payload of risk.curve.calibrated.
+//
+// THE CURVE ITSELF IS reference.v1.YieldCurve AND NOT A SECOND CURVE SHAPE.
+// That message already carries pillars, compounding, interpolation and a
+// point-in-time as_of, and the engine already bootstraps its internal curve out
+// of it. A parallel "calibrated curve" shape would be a second answer to what a
+// curve is, and the two would drift the first time a convention changed.
+//
+// What is added here is the part a reference curve has no business carrying:
+// how much of the configured calibration strip actually reached the fit.
+message CalibratedCurve {
+  // curve is the calibrated term structure. Required. curve.currency_code and
+  // curve.as_of are the point-in-time key of this artifact.
+  reference.v1.YieldCurve curve = 1;
+
+  // strip_coverage is how much of the configured calibration strip this curve
+  // was built from. ABSENT means the producer makes no claim — a bootstrapped
+  // or hand-built curve has no strip to be short of — and it does NOT mean the
+  // strip was complete. A curve missing its long end prices every flow past its
+  // last pillar off a flat extrapolation and is otherwise indistinguishable
+  // from a complete one (#908).
+  CalibrationCoverage strip_coverage = 2;
+
+  // method names how the pillars were solved, from a closed low-cardinality
+  // vocabulary ("mixed_strip_sequential" — deposits, futures and par swaps
+  // solved in ascending maturity). Required; a curve that names no method is a
+  // curve nobody can re-solve.
+  string method = 3;
+}
+
+// CalibrationCoverage reports how much of a configured calibration strip
+// reached the fit, and names every instrument that did not.
+message CalibrationCoverage {
+  // configured is how many instruments the deployment's reference spec names
+  // for this key. Zero means the source does not report coverage at all —
+  // UNKNOWN, not "nothing was configured".
+  uint32 configured = 1;
+
+  // quoted is how many of them had a usable price and reached the fit. It is
+  // also the number of pillars the resulting curve carries.
+  uint32 quoted = 2;
+
+  // missing names every configured instrument that did NOT reach the fit, with
+  // why. COMPLETE, not a sample: the strip is bounded by configuration, and the
+  // identity is what lets somebody go and look at the one that died.
+  repeated MissingQuote missing = 3;
+}
+
+// MissingQuote names one configured calibration instrument absent from the
+// strip the calibration ran over.
+message MissingQuote {
+  // instrument_id is the configured instrument's cache key — the same id the
+  // deployment's reference spec names. Required.
+  string instrument_id = 1;
+
+  // reason is drawn from the producer's closed vocabulary rather than free
+  // text, because it is also a metric label. Required.
+  string reason = 2;
+}
