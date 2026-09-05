@@ -139,12 +139,12 @@ func (p *Postgres) Append(ctx context.Context, e *Event, announce Announcer) err
 		INSERT INTO ledger_entries
 			(tenant_id, entry_id, portfolio_id, venue_account_id, entry_type, instrument_id,
 			 quantity, price, cash, cash_currency, action,
-			 effective_time, knowledge_time, source_ref)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			 effective_time, knowledge_time, settlement_status, settlement_date, source_ref)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (tenant_id, entry_id) DO NOTHING
 	`, e.EntryID, e.PortfolioID, e.VenueAccountID, int(e.Type), e.InstrumentID,
 		ratText(e.Quantity), ratText(e.Price), ratText(e.Cash), e.CashCurrency, action,
-		e.Effective, e.Knowledge, e.SourceRef)
+		e.Effective, e.Knowledge, int(e.SettlementBasis), nullTime(e.SettlementDate), e.SourceRef)
 	if err != nil {
 		return fmt.Errorf("append entry %s: %w", e.EntryID, err)
 	}
@@ -247,7 +247,7 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 	rows, err := p.q.Query(ctx, `
 		SELECT entry_id, portfolio_id, venue_account_id, entry_type, instrument_id,
 		       quantity, price, cash, cash_currency, action,
-		       effective_time, knowledge_time, source_ref
+		       effective_time, knowledge_time, settlement_status, settlement_date, source_ref
 		FROM ledger_entries
 		WHERE portfolio_id = $1
 		  AND ($2::timestamptz IS NULL OR effective_time <= $2)
@@ -267,11 +267,18 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 			qty, price *string
 			cash       *string
 			action     []byte
+			// NULL settlement_date is "nobody asserted one", which is the Go zero
+			// time — scanned through a pointer so the absence stays one value on
+			// both sides rather than becoming a sentinel timestamp.
+			settlementDate *time.Time
 		)
 		if err := rows.Scan(&e.EntryID, &e.PortfolioID, &e.VenueAccountID, &e.Type, &e.InstrumentID,
 			&qty, &price, &cash, &e.CashCurrency, &action,
-			&e.Effective, &e.Knowledge, &e.SourceRef); err != nil {
+			&e.Effective, &e.Knowledge, &e.SettlementBasis, &settlementDate, &e.SourceRef); err != nil {
 			return nil, fmt.Errorf("scan entry %s: %w", portfolioID, err)
+		}
+		if settlementDate != nil {
+			e.SettlementDate = *settlementDate
 		}
 		if e.Quantity, err = parseRat(qty); err != nil {
 			return nil, fmt.Errorf("decode quantity %s: %w", e.EntryID, err)
@@ -320,17 +327,39 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 	if err != nil {
 		return fmt.Errorf("encode accrued %s: %w", snap.PortfolioID, err)
 	}
+	// THE SETTLED HALF OF THE CHECKPOINT (#1043). Written as SQL NULL when the
+	// snapshot states no settled view, so the row is indistinguishable from one
+	// written before the axis existed — that is the point: both mean "this
+	// checkpoint cannot answer a settled question", and LoadSnapshot reads them
+	// the same way.
+	var settledPositions, settledCash any
+	var unknownSettlement, pendingSettlement any
+	if snap.SettlementStated {
+		if settledPositions, err = json.Marshal(encodePositions(snap.SettledPositions)); err != nil {
+			return fmt.Errorf("encode settled positions %s: %w", snap.PortfolioID, err)
+		}
+		if settledCash, err = json.Marshal(encodeRatMap(snap.SettledCash)); err != nil {
+			return fmt.Errorf("encode settled cash %s: %w", snap.PortfolioID, err)
+		}
+		unknownSettlement = snap.UnknownSettlement
+		pendingSettlement = snap.PendingSettlement
+	}
 	_, err = p.q.Exec(ctx, `
 		INSERT INTO ledger_snapshots
 			(tenant_id, portfolio_id, positions, cash, accrued, through_time,
-			 max_effective_time, updated_at)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, now())
+			 max_effective_time, settled_positions, settled_cash,
+			 unknown_settlement, pending_settlement, updated_at)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
 		ON CONFLICT (tenant_id, portfolio_id) DO UPDATE SET
 			positions          = EXCLUDED.positions,
 			cash               = EXCLUDED.cash,
 			accrued            = EXCLUDED.accrued,
 			through_time       = EXCLUDED.through_time,
 			max_effective_time = EXCLUDED.max_effective_time,
+			settled_positions  = EXCLUDED.settled_positions,
+			settled_cash       = EXCLUDED.settled_cash,
+			unknown_settlement = EXCLUDED.unknown_settlement,
+			pending_settlement = EXCLUDED.pending_settlement,
 			updated_at         = now()
 		-- MONOTONIC WATERMARK. Two Snapshotter replicas, or one restarting mid-
 		-- pass, can present checkpoints out of order; a full-replace upsert would
@@ -340,7 +369,8 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 		-- write is a no-op, not a failure: the store already holds a checkpoint at
 		-- least as new as the one offered.
 		WHERE EXCLUDED.through_time >= ledger_snapshots.through_time
-	`, snap.PortfolioID, positions, cash, accrued, snap.Through, snap.MaxEffective)
+	`, snap.PortfolioID, positions, cash, accrued, snap.Through, snap.MaxEffective,
+		settledPositions, settledCash, unknownSettlement, pendingSettlement)
 	if err != nil {
 		return fmt.Errorf("save snapshot %s: %w", snap.PortfolioID, err)
 	}
@@ -359,10 +389,17 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	// "unrecorded" is one value on both sides rather than a sentinel timestamp
 	// whose comparison could be written backwards.
 	var maxEffective *time.Time
+	// A NULL settled_positions is a checkpoint that STATES NO SETTLED VIEW — see
+	// Snapshot.SettlementStated. Scanned into pointers so the absence survives as
+	// an absence rather than as an empty map that looks like a computed answer.
+	var settledPositions, settledCash []byte
+	var unknownSettlement, pendingSettlement *int
 	err := p.q.QueryRow(ctx, `
-		SELECT positions, cash, accrued, through_time, max_effective_time
+		SELECT positions, cash, accrued, through_time, max_effective_time,
+		       settled_positions, settled_cash, unknown_settlement, pending_settlement
 		FROM ledger_snapshots WHERE portfolio_id = $1
-	`, portfolioID).Scan(&positions, &cash, &accrued, &through, &maxEffective)
+	`, portfolioID).Scan(&positions, &cash, &accrued, &through, &maxEffective,
+		&settledPositions, &settledCash, &unknownSettlement, &pendingSettlement)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoSnapshot
 	}
@@ -381,6 +418,23 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	}
 	if snap.Accrued, err = decodeRatMap(accrued); err != nil {
 		return nil, fmt.Errorf("decode accrued %s: %w", portfolioID, err)
+	}
+	snap.SettledPositions = make(map[string]*Position)
+	snap.SettledCash = make(map[string]*big.Rat)
+	if settledPositions != nil {
+		snap.SettlementStated = true
+		if snap.SettledPositions, err = decodePositions(settledPositions); err != nil {
+			return nil, fmt.Errorf("decode settled positions %s: %w", portfolioID, err)
+		}
+		if snap.SettledCash, err = decodeRatMap(settledCash); err != nil {
+			return nil, fmt.Errorf("decode settled cash %s: %w", portfolioID, err)
+		}
+		if unknownSettlement != nil {
+			snap.UnknownSettlement = *unknownSettlement
+		}
+		if pendingSettlement != nil {
+			snap.PendingSettlement = *pendingSettlement
+		}
 	}
 	return snap, nil
 }

@@ -96,6 +96,31 @@ type Snapshot struct {
 	// A zero value means "unrecorded" and is likewise never trusted: an
 	// unbounded read that is loud and slow beats a bounded read that is wrong.
 	MaxEffective time.Time
+
+	// SettledPositions and SettledCash are the settled-basis fold at the same
+	// watermark — the checkpoint's half of Book.SettledPositions (#1043).
+	//
+	// A CHECKPOINT MUST CARRY BOTH BASES OR THE MATERIALIZED BOOK IS WRONG ON ONE
+	// OF THEM. MaterializeCurrent restores from here and folds only the tail, so a
+	// snapshot that omitted the settled view would produce a book whose settled
+	// balances are short by everything the checkpoint absorbed — a number that is
+	// not late but WRONG, and wrong in the direction that overstates nothing while
+	// understating what the fund owns.
+	SettledPositions map[string]*Position
+	SettledCash      map[string]*big.Rat
+
+	// SettlementStated is whether this checkpoint carries a settled view at all.
+	// FALSE for one written before the settlement axis existed: its settled maps
+	// are empty because nobody wrote them, not because nothing settled. Restoring
+	// from it clears the book's SettlementBasisComplete, so the settled read fails
+	// closed until the Snapshotter's next pass rewrites the checkpoint — the same
+	// stance MaxEffective takes on a fenceless one, for the same reason.
+	SettlementStated bool
+	// UnknownSettlement and PendingSettlement carry the two entry counts across a
+	// checkpoint. Without them a restored book would report zero unknowns and
+	// declare a settled basis it cannot support.
+	UnknownSettlement int
+	PendingSettlement int
 }
 
 // Snapshot captures the book's current state with the given knowledge watermark.
@@ -103,27 +128,48 @@ type Snapshot struct {
 // corrupt it.
 func (b *Book) Snapshot(through time.Time) *Snapshot {
 	s := &Snapshot{
-		PortfolioID:  b.PortfolioID,
-		Positions:    make(map[string]*Position, len(b.Positions)),
-		Cash:         make(map[string]*big.Rat, len(b.Cash)),
-		Accrued:      make(map[string]*big.Rat, len(b.Accrued)),
-		Through:      through,
-		MaxEffective: b.maxEffective,
+		PortfolioID:      b.PortfolioID,
+		Positions:        make(map[string]*Position, len(b.Positions)),
+		Cash:             make(map[string]*big.Rat, len(b.Cash)),
+		Accrued:          make(map[string]*big.Rat, len(b.Accrued)),
+		SettledPositions: make(map[string]*Position, len(b.SettledPositions)),
+		SettledCash:      make(map[string]*big.Rat, len(b.SettledCash)),
+		Through:          through,
+		MaxEffective:     b.maxEffective,
+		// A LIVE BOOK ALWAYS STATES ITS SETTLED VIEW, even when that view is empty
+		// and every entry behind it was unknown — the counts below are what makes
+		// the difference readable. Only LoadSnapshot can produce a false here, for
+		// a row written before the settlement axis existed.
+		SettlementStated:  b.settlementStated,
+		UnknownSettlement: b.unknownSettlement,
+		PendingSettlement: b.pendingSettlement,
 	}
-	for k, p := range b.Positions {
-		s.Positions[k] = &Position{
-			Qty:      new(big.Rat).Set(p.Qty),
-			AvgCost:  new(big.Rat).Set(p.AvgCost),
-			Realized: new(big.Rat).Set(p.Realized),
-		}
-	}
+	copyPositions(s.Positions, b.Positions)
+	copyPositions(s.SettledPositions, b.SettledPositions)
 	for k, v := range b.Cash {
 		s.Cash[k] = new(big.Rat).Set(v)
+	}
+	for k, v := range b.SettledCash {
+		s.SettledCash[k] = new(big.Rat).Set(v)
 	}
 	for k, v := range b.Accrued {
 		s.Accrued[k] = new(big.Rat).Set(v)
 	}
 	return s
+}
+
+// copyPositions deep-copies a holdings map into dst. One implementation, because
+// the snapshot and the restore each carry TWO of them now (traded and settled)
+// and four hand-written copy loops is how one of them ends up sharing a *big.Rat
+// with the book it was supposed to detach from.
+func copyPositions(dst, src map[string]*Position) {
+	for k, p := range src {
+		dst[k] = &Position{
+			Qty:      new(big.Rat).Set(p.Qty),
+			AvgCost:  new(big.Rat).Set(p.AvgCost),
+			Realized: new(big.Rat).Set(p.Realized),
+		}
+	}
 }
 
 // RestoreBook rebuilds a book from a snapshot. The dedup set starts empty, so a
@@ -132,19 +178,24 @@ func (b *Book) Snapshot(through time.Time) *Snapshot {
 func RestoreBook(s *Snapshot) *Book {
 	b := NewBook(s.PortfolioID)
 	b.maxEffective = s.MaxEffective
-	for k, p := range s.Positions {
-		b.Positions[k] = &Position{
-			Qty:      new(big.Rat).Set(p.Qty),
-			AvgCost:  new(big.Rat).Set(p.AvgCost),
-			Realized: new(big.Rat).Set(p.Realized),
-		}
-	}
+	copyPositions(b.Positions, s.Positions)
+	copyPositions(b.SettledPositions, s.SettledPositions)
 	for k, v := range s.Cash {
 		b.Cash[k] = new(big.Rat).Set(v)
+	}
+	for k, v := range s.SettledCash {
+		b.SettledCash[k] = new(big.Rat).Set(v)
 	}
 	for k, v := range s.Accrued {
 		b.Accrued[k] = new(big.Rat).Set(v)
 	}
+	// THE CHECKPOINT DECIDES WHETHER THE RESTORED BOOK MAY ANSWER A SETTLED
+	// QUESTION. A row written before the settlement axis existed states nothing,
+	// and a book restored from it must not report an empty settled view as a
+	// complete one — see Snapshot.SettlementStated.
+	b.settlementStated = s.SettlementStated
+	b.unknownSettlement = s.UnknownSettlement
+	b.pendingSettlement = s.PendingSettlement
 	return b
 }
 

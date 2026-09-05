@@ -74,21 +74,56 @@ func FromFill(portfolioID string, fill *orderpb.Fill, cashCurrency string, knowl
 	if eff.IsZero() {
 		eff = knowledge
 	}
+	basis, settlementDate := fillSettlement(eff)
 	return &Event{
 		EntryID:     "fill:" + fill.GetFillId(),
 		PortfolioID: portfolioID,
 		// The account the fill SETTLED against — reported by the venue that executed
 		// it, not inferred from the order's intent. Where the cash actually went is
 		// the only thing a book of record may say about where the cash went.
-		VenueAccountID: fill.GetVenueAccountId(),
-		Type:           EntryTrade,
-		InstrumentID:   fill.GetInstrumentId(),
-		Quantity:       signedQty,
-		Price:          price,
-		Cash:           cash,
-		CashCurrency:   cashCurrency,
-		Effective:      eff,
-		Knowledge:      knowledge,
-		SourceRef:      fill.GetFillId(),
+		VenueAccountID:  fill.GetVenueAccountId(),
+		Type:            EntryTrade,
+		InstrumentID:    fill.GetInstrumentId(),
+		Quantity:        signedQty,
+		Price:           price,
+		Cash:            cash,
+		CashCurrency:    cashCurrency,
+		Effective:       eff,
+		Knowledge:       knowledge,
+		SettlementBasis: basis,
+		SettlementDate:  settlementDate,
+		SourceRef:       fill.GetFillId(),
 	}, nil
+}
+
+// fillSettlement decides which of a fill's legs are immediate and which are
+// pending — THE ONE PLACE THE T+0 ASSUMPTION LIVES (#1043).
+//
+// Before this existed the assumption was not written down anywhere: FromFill
+// emitted the position leg and the FULL cash leg at the execution time, so "the
+// fund owns it and can spend the proceeds the instant it matched" was implicit in
+// every consumer of the book rather than stated once by the component that knows
+// the venue.
+//
+// # Why T+0 is the right answer today, and what would change it
+//
+// Both venue adapters in this estate are crypto SPOT, and they say so through the
+// capability surface rather than in prose: BinanceVenue.MarginModes and
+// OKXVenue.MarginModes each return MARGIN_MODE_UNSPECIFIED alone, which is the
+// cash/spot regime, and venueadapter/server reports it as venue.v1's
+// supported_margin_modes. Spot on those venues settles atomically with the match —
+// base asset and quote cash move in the same exchange transaction — so the
+// position leg and the cash leg are both FINAL at ExecutedAt. Asserting
+// SettlementSettled here is therefore a statement about the venue, not a default.
+//
+// WHEN A T+n VENUE ARRIVES THIS FUNCTION IS WHAT CHANGES, and only this function.
+// A prime-brokered leg, a security settling at a CSD, or an adapter declaring a
+// non-CASH margin mode returns SettlementPending with the contractual settlement
+// date; the legs stay in the traded book, drop out of the settled one, and every
+// caller that asked for the settled basis gets the right answer without being
+// edited. test/arch/settlement_basis_absence_is_stated_test.go derives the
+// justification above from those two MarginModes declarations and fails the moment
+// one of them stops being spot-only, so this comment cannot quietly expire.
+func fillSettlement(executedAt time.Time) (SettlementBasis, time.Time) {
+	return SettlementSettled, executedAt
 }

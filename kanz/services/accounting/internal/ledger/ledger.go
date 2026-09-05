@@ -143,6 +143,21 @@ type Event struct {
 	Effective time.Time
 	Knowledge time.Time
 
+	// SettlementBasis is whether these legs have actually changed hands, and
+	// SettlementDate is when they do (or did). THE THIRD TEMPORAL AXIS, and it is
+	// not the bitemporal one (#1043): Effective/Knowledge is one event seen twice
+	// over time, this is one uncontested event with two economic dates.
+	//
+	// THE ZERO VALUE IS SettlementUnknown AND THAT IS THE WHOLE DESIGN. A producer
+	// that cannot assert a settlement basis leaves it unset, and an unset basis
+	// keeps the entry OUT of the settled book rather than into it — see
+	// SettlementBasis, and Book.SettlementBasisComplete for the fail-closed read.
+	// SettlementDate is likewise zero when nobody asserted one; it is not defaulted
+	// to Effective, because "settles the day it traded" is a claim about a venue's
+	// convention and must be made by whoever knows it, in one place (FromFill).
+	SettlementBasis SettlementBasis
+	SettlementDate  time.Time
+
 	SourceRef string
 }
 
@@ -189,12 +204,50 @@ func newPosition() *Position { return costbasis.NewLot() }
 // Book is the folded state of one portfolio: positions by instrument, cash by
 // currency, and accrued income by currency (earned-not-received, carried in NAV).
 // It is the fold of the journal — replayable and snapshot-restorable.
+//
+// # Two bases, one journal (#1043)
+//
+// Positions/Cash are the TRADED basis: everything the portfolio has traded,
+// settled or not. SettledPositions/SettledCash are the SETTLED basis: only the
+// legs that have actually changed hands. THEY ARE THE SAME ENTRIES FOLDED TWICE,
+// not a second store — a caller asks for the basis its question needs instead of
+// choosing between two books that can drift. A pre-trade buying-power gate wants
+// settled cash; a mandate exposure limit wants traded positions; NAV wants both
+// and the difference between them is the unsettled receivable.
+//
+// The settled fold is only as good as what the producers assert, so a caller that
+// reads it MUST check SettlementBasisComplete first. See SettlementBasis.
 type Book struct {
 	PortfolioID string
 	Positions   map[string]*Position
 	Cash        map[string]*big.Rat
 	Accrued     map[string]*big.Rat
-	seen        map[string]bool
+
+	// SettledPositions and SettledCash are the settled-basis fold of the same
+	// journal: an entry contributes to them only when it asserts
+	// SettlementSettled.
+	//
+	// ACCRUED HAS NO SETTLED TWIN, on purpose. Accrued income is earned-not-
+	// received by definition, so a "settled accrual" is a contradiction; folding
+	// it into a settled balance would assert cash the fund has not been paid,
+	// which is the exact direction this axis exists to stop.
+	SettledPositions map[string]*Position
+	SettledCash      map[string]*big.Rat
+
+	// settlementStated is whether this book's settled fold covers every entry
+	// behind it. NewBook starts true (an empty book states an empty settled view
+	// correctly) and RestoreBook clears it for a checkpoint written before the
+	// settlement axis existed, whose settled maps are empty because nobody wrote
+	// them rather than because nothing settled.
+	settlementStated bool
+	// unknownSettlement and pendingSettlement count the folded entries that did
+	// not assert a basis, and those that asserted a future one. They are what
+	// makes a zero settled balance readable: "nothing has settled" and "nine
+	// entries never said" are different answers and must not look the same.
+	unknownSettlement int
+	pendingSettlement int
+
+	seen map[string]bool
 	// maxEffective is the latest effective_time this book has folded. It is the
 	// fence a snapshot carries into Snapshot.MaxEffective: the fold is
 	// order-sensitive (weighted-average cost realizes P&L in sequence), so
@@ -207,13 +260,36 @@ type Book struct {
 // NewBook returns an empty book for a portfolio.
 func NewBook(portfolioID string) *Book {
 	return &Book{
-		PortfolioID: portfolioID,
-		Positions:   make(map[string]*Position),
-		Cash:        make(map[string]*big.Rat),
-		Accrued:     make(map[string]*big.Rat),
-		seen:        make(map[string]bool),
+		PortfolioID:      portfolioID,
+		Positions:        make(map[string]*Position),
+		Cash:             make(map[string]*big.Rat),
+		Accrued:          make(map[string]*big.Rat),
+		SettledPositions: make(map[string]*Position),
+		SettledCash:      make(map[string]*big.Rat),
+		// An empty book has folded nothing, so its empty settled view is a
+		// complete and correct statement rather than an unwritten one.
+		settlementStated: true,
+		seen:             make(map[string]bool),
 	}
 }
+
+// basisFold is one basis's half of the book — the positions and cash map an
+// entry is folded into. It exists so the corporate-action and weighted-average
+// folds are written ONCE and run over whichever basis an entry belongs to
+// (#1043). A second copy of foldCorpAct for the settled maps is the shape #428
+// already paid for here: three copies of one calculation had drifted, and the
+// repair was one implementation, not three careful ones.
+type basisFold struct {
+	positions map[string]*Position
+	cash      map[string]*big.Rat
+}
+
+// traded is the fold every entry contributes to: what the portfolio has traded.
+func (b *Book) traded() basisFold { return basisFold{b.Positions, b.Cash} }
+
+// settled is the fold only an entry asserting SettlementSettled contributes to:
+// what has actually changed hands.
+func (b *Book) settled() basisFold { return basisFold{b.SettledPositions, b.SettledCash} }
 
 // Apply folds one entry into the book. It is idempotent on EntryID — a replay or
 // redelivery of the same entry is a no-op, so the book is exactly-once over the
@@ -230,30 +306,79 @@ func (b *Book) Apply(e *Event) {
 		b.maxEffective = e.Effective
 	}
 
+	// THE BASIS IS COUNTED BEFORE ANY LEG IS LOOKED AT, and before the
+	// corporate-action return below. An entry that asserts nothing is a gap in
+	// the settled view whether or not it happened to carry a quantity, and
+	// counting it only on the paths that move something would report a book as
+	// complete because the entry it could not classify was empty.
+	settles := e.SettlementBasis == SettlementSettled
+	switch e.SettlementBasis {
+	case SettlementSettled:
+	case SettlementPending:
+		b.pendingSettlement++
+	default:
+		b.unknownSettlement++
+	}
+
 	if e.Type == EntryCorporateAction && e.Action != nil {
-		b.foldCorpAct(e.InstrumentID, e.Action)
+		b.traded().foldCorpAct(e.InstrumentID, e.Action)
+		if settles {
+			b.settled().foldCorpAct(e.InstrumentID, e.Action)
+		}
 		return
 	}
 
 	if e.InstrumentID != "" && e.Quantity != nil && e.Quantity.Sign() != 0 {
-		b.foldPosition(e.InstrumentID, e.Quantity, orZero(e.Price))
+		b.traded().foldPosition(e.InstrumentID, e.Quantity, orZero(e.Price))
+		if settles {
+			b.settled().foldPosition(e.InstrumentID, e.Quantity, orZero(e.Price))
+		}
 	}
 	if e.Cash != nil && e.Cash.Sign() != 0 {
 		ccy := e.CashCurrency
 		if e.Type == EntryAccrual {
+			// No settled twin — see Book.SettledPositions on why accrued income
+			// has no settled balance.
 			add(b.Accrued, ccy, e.Cash)
 		} else {
 			add(b.Cash, ccy, e.Cash)
+			if settles {
+				add(b.SettledCash, ccy, e.Cash)
+			}
 		}
 	}
 }
+
+// SettlementBasisComplete reports whether this book can answer a settled-basis
+// question at all.
+//
+// FALSE MEANS FAIL CLOSED, NOT "PROBABLY FINE". It is false when any folded
+// entry asserted no settlement basis, and when the book was restored from a
+// checkpoint written before the settlement axis existed. In either case the
+// settled maps are a LOWER BOUND of unknown tightness, and a control that spends
+// against them — a pre-trade buying-power gate above all — would be authorising
+// money on a number nobody computed. A critical unknown refuses; it does not
+// collapse to zero and proceed.
+func (b *Book) SettlementBasisComplete() bool {
+	return b.settlementStated && b.unknownSettlement == 0
+}
+
+// UnknownSettlementEntries is how many folded entries asserted no settlement
+// basis — the reason SettlementBasisComplete is false when it is, and the number
+// that separates "nothing has settled" from "nobody said".
+func (b *Book) UnknownSettlementEntries() int { return b.unknownSettlement }
+
+// PendingSettlementEntries is how many folded entries are traded-but-not-settled.
+// Distinct from the unknown count: pending is an ANSWER, unknown is the absence
+// of one.
+func (b *Book) PendingSettlementEntries() int { return b.pendingSettlement }
 
 // foldCorpAct applies a corporate action against the position in instrument as it
 // stands at this point in the fold. Splits scale the lot (conserving market
 // value); dividends/coupons pay cash on the held quantity; a merger converts the
 // holding into the target instrument, carrying the cost basis and paying any cash.
-func (b *Book) foldCorpAct(instrument string, a *Action) {
-	l := b.Positions[instrument]
+func (f basisFold) foldCorpAct(instrument string, a *Action) {
+	l := f.positions[instrument]
 	if l == nil || l.Qty.Sign() == 0 {
 		return // nothing held at the ex-date: the action has no effect
 	}
@@ -273,7 +398,7 @@ func (b *Book) foldCorpAct(instrument string, a *Action) {
 		}
 		// Cash on the held quantity (absolute: a long receives, a short pays).
 		cash := new(big.Rat).Mul(l.Qty, a.PerUnit)
-		add(b.Cash, a.Currency, cash)
+		add(f.cash, a.Currency, cash)
 
 	case CorpActMerger:
 		if a.Target == "" || a.Ratio == nil {
@@ -285,9 +410,9 @@ func (b *Book) foldCorpAct(instrument string, a *Action) {
 		l.Qty = new(big.Rat)
 		l.AvgCost = new(big.Rat)
 		newQty := new(big.Rat).Mul(q, a.Ratio)
-		b.foldContribution(a.Target, newQty, basis)
+		f.foldContribution(a.Target, newQty, basis)
 		if a.PerUnit != nil && a.PerUnit.Sign() != 0 {
-			add(b.Cash, a.Currency, new(big.Rat).Mul(q, a.PerUnit))
+			add(f.cash, a.Currency, new(big.Rat).Mul(q, a.PerUnit))
 		}
 	}
 }
@@ -295,12 +420,12 @@ func (b *Book) foldCorpAct(instrument string, a *Action) {
 // foldContribution adds a quantity carrying a given total cost basis into a
 // holding, weighted-averaging with any existing lot. Used by a merger to open the
 // target position at the source's carried basis (avg = totalCost / |qty|).
-func (b *Book) foldContribution(instrument string, qty, totalCost *big.Rat) {
+func (f basisFold) foldContribution(instrument string, qty, totalCost *big.Rat) {
 	if qty.Sign() == 0 {
 		return
 	}
 	avg := new(big.Rat).Quo(new(big.Rat).Abs(totalCost), new(big.Rat).Abs(qty))
-	b.foldPosition(instrument, qty, avg)
+	f.foldPosition(instrument, qty, avg)
 }
 
 // foldPosition applies a signed quantity at price using the PLATFORM'S
@@ -316,11 +441,11 @@ func (b *Book) foldContribution(instrument string, qty, totalCost *big.Rat) {
 // into realized P&L while this one and the OMS's did not. internal/costbasis is
 // the one implementation; the IBOR and the OMS book now agree by construction
 // rather than by inspection.
-func (b *Book) foldPosition(instrument string, signed, price *big.Rat) {
-	l := b.Positions[instrument]
+func (f basisFold) foldPosition(instrument string, signed, price *big.Rat) {
+	l := f.positions[instrument]
 	if l == nil {
 		l = newPosition()
-		b.Positions[instrument] = l
+		f.positions[instrument] = l
 	}
 	costbasis.Fold(l, signed, price)
 }
