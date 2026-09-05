@@ -3,7 +3,11 @@ package arch
 import (
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
+	"os"
+	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,19 +47,42 @@ import (
 // A Replace call naming one of these is a call deciding subject syntax.
 var subjectDelimiters = map[string]bool{".": true, "*": true, ">": true, " ": true}
 
-// oneSanitizerExemptions are the call sites that still hold their own copy, each with the
-// issue that retires it. An entry is a promise with an owner, not a permanent carve-out —
-// TestSubjectSanitizerExemptionsAreAllLive fails when one stops being needed.
-var oneSanitizerExemptions = map[string]string{
+// sanitizerExemption is one call site that keeps its own copy of the lossy map, and what
+// PAYS FOR keeping it.
+//
+// The `guard` field is the half that is easy to leave out, and it is the load-bearing one. An exemption
+// naming only an issue is a promise, and a promise is not a control: the issue can be
+// closed by DECIDING to keep the copy — which is what happened here (#1011) — and the
+// entry then reads as an outstanding repair forever while nothing checks that the
+// compensating behaviour still exists. So an entry must name the test that holds the
+// losses harmless, and TestSubjectSanitizerExemptionsNameALiveGuard fails if that test is
+// not in the exempted file's own package.
+type sanitizerExemption struct {
+	// issue is the decision record: the issue that either retires this copy or explains
+	// why it stays.
+	issue string
+	// guard is the test function, in the exempted file's package, that proves this copy's
+	// many-to-one losses cannot cause harm. Deleting it fails the build.
+	guard string
+}
+
+// oneSanitizerExemptions are the call sites that still hold their own copy. An entry is
+// never a permanent carve-out on its own — TestSubjectSanitizerExemptionsAreAllLive fails
+// when one stops being needed, and TestSubjectSanitizerExemptionsNameALiveGuard fails when
+// the control that pays for it is gone.
+var oneSanitizerExemptions = map[string]sanitizerExemption{
 	// durableName maps a SUBJECT onto a JetStream consumer name, which may not contain
 	// `.`, `*`, `>` or whitespace. Same lossy map, different blast radius: two subjects
-	// that differ only in `.` vs `_` become ONE durable, and CreateOrUpdateConsumer then
-	// rewrites the first subscription's FilterSubject instead of failing — one feed goes
-	// dark while its consumer stays Ready. Measured at the time of #999: zero collisions
-	// among the estate's 290 subject literals and every subscribe subject is a constant,
-	// so it is latent rather than live — and repairing it renames every durable in the
-	// estate, which is a redelivery migration and not a refactor.
-	"pkg/bus/nats.go": "#1011",
+	// that differ only in `.` vs `_` — or `>` vs `*` — become ONE durable, and
+	// CreateOrUpdateConsumer then rewrites the first subscription's FilterSubject instead
+	// of failing, so one feed goes dark while its consumer stays Ready.
+	//
+	// #1011 DECIDED THIS COPY STAYS, and the decision is in durableName's own doc comment:
+	// subject.Token is legal in a consumer name, but adopting it renames every durable in
+	// the estate, and a renamed durable is a new consumer starting at DeliverAll — a 24h
+	// replay of order.> and a 168h replay of the ledger streams, against a 2-minute
+	// in-process dedup window. The loss is refused at the point of use instead.
+	"pkg/bus/nats.go": {issue: "#1011", guard: "TestDurableNameCollisionIsRefused"},
 }
 
 // The trees the estate's own code lives in. `.gotmp` (build artifacts) and `.claude` are
@@ -108,9 +135,9 @@ func TestSubjectSanitizerExemptionsAreAllLive(t *testing.T) {
 	}
 
 	var dead []string
-	for file, issue := range oneSanitizerExemptions {
+	for file, ex := range oneSanitizerExemptions {
 		if !live[file] {
-			dead = append(dead, fmt.Sprintf("%s (%s)", file, issue))
+			dead = append(dead, fmt.Sprintf("%s (%s)", file, ex.issue))
 		}
 	}
 	sort.Strings(dead)
@@ -130,6 +157,82 @@ func TestSubjectSanitizerExemptionsAreAllLive(t *testing.T) {
 			"this check) or the AST walk stopped reaching the estate — which would make " +
 			"TestOneSubjectSanitizer pass over an unread tree.")
 	}
+}
+
+// AN EXEMPTION MUST BE PAID FOR, NOT MERELY EXPLAINED.
+//
+// TestSubjectSanitizerExemptionsAreAllLive above catches an exemption that outlived its
+// REPAIR. This catches the other direction, which is the one #1011 created: an exemption
+// that outlived its COMPENSATING CONTROL. #1011 decided pkg/bus keeps the lossy map and
+// refuses the collision instead, so from here on the entry is permanent — and a permanent
+// entry with nothing checking the refusal still exists is how the hazard comes back with
+// the carve-out still saying it is handled.
+//
+// The check is deliberately structural rather than textual: the named test must be a real
+// `func Name(t *testing.T)` declaration in the exempted file's OWN package directory. A
+// guard that matched prose would be satisfied by the comment above it, which this
+// repository has been bitten by before.
+func TestSubjectSanitizerExemptionsNameALiveGuard(t *testing.T) {
+	root := moduleRoot(t)
+	for file, ex := range oneSanitizerExemptions {
+		if ex.guard == "" {
+			t.Errorf("exemption for %s (%s) names no compensating guard: an exemption is a carve-out "+
+				"with nothing checking it until one is named", file, ex.issue)
+			continue
+		}
+		dir := filepath.Join(root, filepath.FromSlash(path.Dir(file)))
+		if !testFuncExistsIn(t, dir, ex.guard) {
+			t.Errorf("exemption for %s (%s) names %s as the control that makes its lossy sanitizer safe, "+
+				"and no such test function exists in %s.\n\n"+
+				"Either the control was deleted — in which case the copy is a live hazard again and the "+
+				"exemption is now a lie — or it was renamed, in which case name it here. Do not delete "+
+				"this check to make the build green.",
+				file, ex.issue, ex.guard, path.Dir(file))
+		}
+	}
+}
+
+// testFuncExistsIn reports whether dir holds a `func name(t *testing.T)` declaration in any
+// of its _test.go files. It parses rather than greps for the reason findSubjectSanitizers
+// does.
+func testFuncExistsIn(t *testing.T, dir, name string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		f, perr := parser.ParseFile(fset, filepath.Join(dir, e.Name()), nil, parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", e.Name(), perr)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || fn.Name.Name != name {
+				continue
+			}
+			if len(fn.Type.Params.List) != 1 {
+				continue
+			}
+			star, ok := fn.Type.Params.List[0].Type.(*ast.StarExpr)
+			if !ok {
+				continue
+			}
+			sel, ok := star.X.(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if ok && pkg.Name == "testing" && sel.Sel.Name == "T" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // findSubjectSanitizers walks the estate's AST for strings.Replace-family calls that name

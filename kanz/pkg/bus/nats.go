@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -131,6 +132,36 @@ type NATSClient struct {
 	cfg  NATSConfig
 	conn *nats.Conn
 	js   jetstream.JetStream
+	// claims is the in-process half of the durable-collision refusal. See
+	// claimDurable and durableName.
+	claims durableClaims
+}
+
+// durableClaims records which SUBJECT each durable name this process has created
+// is bound to, so a second Subscribe that lands on the same name with a different
+// subject is refused instead of silently taking the first one's consumer over.
+//
+// It is the half of the refusal that does not depend on the broker, and it is
+// needed for a reason a broker read cannot cover. Services fan their subject
+// list out into ONE GOROUTINE PER SUBJECT — accounting, audit, autopilot,
+// alternatives, archiver, lineage and the risk engine all spell out
+// `go consumer.Subscribe(...)` in a loop — so two colliding Subscribes can both
+// read "no such consumer" before either creates one, and the broker read decides
+// nothing. The mutex is what makes the answer deterministic; the broker check
+// below is what makes it hold ACROSS processes.
+//
+// Entries are never released, and that is deliberate rather than an omission: a
+// Subscribe whose ctx has been cancelled leaves the durable ON THE BROKER with its
+// filter intact, so the claim is still true and a swept entry would let a later
+// colliding Subscribe through. The key space is one entry per Subscribe CALL —
+// never per message, order or tenant — so it is the composition root's own subject
+// list, and for the one operator-supplied subject in the estate
+// (cmd/kanz-redrive --subject) it is one entry in a process that then exits.
+// test/arch/long_lived_maps_are_evicted_test.go carries that argument as this
+// field's eviction exemption.
+type durableClaims struct {
+	mu sync.Mutex
+	by map[string]string // durable name -> subject it is bound to
 }
 
 func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
@@ -303,10 +334,16 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 	//
 	// What was NOT acceptable was that the revert was silent: a responder who
 	// raised AckWait to 120s mid-incident got it reset by the next rolling deploy
-	// with no error and no log line, and nothing anywhere said so. logTuningDrift
-	// below reads the existing consumer first and logs a WARN naming each field it
-	// is about to overwrite and its old value. Transient by design is fine;
-	// transient and invisible is how the same incident gets diagnosed twice.
+	// with no error and no log line, and nothing anywhere said so.
+	// inspectExistingDurable below reads the existing consumer first and logs a
+	// WARN naming each field it is about to overwrite and its old value. Transient
+	// by design is fine; transient and invisible is how the same incident gets
+	// diagnosed twice.
+	//
+	// That decision covers the TUNING fields and stops there. The consumer's
+	// FILTER SUBJECT is not a field an operator tunes, it is the consumer's
+	// identity, and overwriting it is the failure this whole comment exists about
+	// — so that one is REFUSED rather than logged. See #1011 at the call below.
 	//
 	// AckWait / MaxDeliver / MaxAckPending are set EXPLICITLY, from
 	// tuningForSubject (see tuning.go for each number and the reasoning behind
@@ -329,7 +366,37 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 		MaxDeliver:    tuning.MaxDeliver,
 		MaxAckPending: tuning.MaxAckPending,
 	}
-	c.logTuningDrift(ctx, stream, want)
+	// A DURABLE NAME BELONGS TO EXACTLY ONE SUBJECT, AND THE SECOND CLAIMANT IS
+	// REFUSED (#1011).
+	//
+	// durableName is lossy — a consumer name may not carry `.`, `*`, `>` or a
+	// space, so all four become `_` — which means two subjects CAN land on one
+	// name (`a.b.c` and `a.b_c`; `dlq.order.>` and `dlq.order.*`). One line below,
+	// CreateOrUpdateConsumer would take the second claimant's FilterSubject and
+	// write it over the first's. Measured on nats-server 2.14.4: the overwrite
+	// succeeds, and the first subscription then receives ZERO of its own messages
+	// while its consumer still exists and reports Ready. That is the same silence
+	// #237 fixed one layer up, arriving through a different door.
+	//
+	// AND IT IS REACHABLE WITHOUT A CODE CHANGE, which is why this is a refusal and
+	// not a lint. The subject list is DEPLOYMENT CONFIGURATION in most of the
+	// estate — ACCOUNTING_FILL_SUBJECTS, AUDIT_SUBJECTS, ARCHIVER_SUBJECTS,
+	// ALTERNATIVES_SUBJECTS, AUTOPILOT_SUBJECTS are all env.SplitList — and
+	// cmd/kanz-redrive takes its subject straight off an operator's `--subject`
+	// flag, whose own help text offers `dlq.order.>` while `dlq.order.*` sanitizes
+	// to the same durable from a different invocation entirely.
+	//
+	// Two checks, because they cover different distances and neither covers the
+	// other. claimDurable is per-process and race-free, which the env lists need:
+	// they are subscribed one goroutine per subject, so both can read "no such
+	// consumer" before either creates one. inspectExistingDurable crosses processes
+	// and deploys, which the redrive CLI needs: its two invocations share no map.
+	if err := c.claimDurable(stream, want.Durable, subject); err != nil {
+		return err
+	}
+	if err := c.inspectExistingDurable(ctx, stream, want); err != nil {
+		return err
+	}
 	cons, err := c.js.CreateOrUpdateConsumer(ctx, stream, want)
 	if err != nil {
 		return fmt.Errorf("nats: consumer %q on stream %q: %w", durableName(group, subject), stream, err)
@@ -676,6 +743,112 @@ func logNakFailure(logger *slog.Logger, subject, group string, err error) {
 	)
 }
 
+// inspectExistingDurable reads the durable this Subscribe is about to write and
+// decides TWO DIFFERENT THINGS from that one $JS.API round-trip, because they are
+// answered by the same reading and must both happen BEFORE the overwrite:
+//
+//   - IDENTITY — is this name already bound to a DIFFERENT subject? That is the
+//     collision durableName's lossy map allows, and it is REFUSED (#1011).
+//   - TUNING — is a delivery-contract field about to be overwritten? That is
+//     deliberate, and it is LOGGED (see Subscribe, and logTuningDrift below).
+//
+// AN UNKNOWN ANSWER IS FATAL TO THE SUBSCRIPTION, NOT IGNORED. If the broker does
+// not answer, this side cannot establish that the name is free, and proceeding
+// anyway is precisely the "checked, and fine" that "nothing configured" must
+// never be able to look like. That costs nothing in availability that was not
+// already being paid: streamForSubject — Subscribe's FIRST statement, and a
+// $JS.API.STREAM.NAMES round-trip — ALREADY returns any broker error to the
+// caller, so a blip fails this subscription with or without this read. And it
+// cannot become a permissions outage in this estate — infra/nats/tenancy.yaml
+// grants every account that subscribes `publish: ["$JS.API.>"]` wholesale, so no
+// account can hold CONSUMER.CREATE while lacking CONSUMER.INFO. Re-check that
+// grant list before relying on this paragraph; it is dated evidence, not a rule.
+//
+// One $JS.API round-trip per Subscribe at startup — paid once per
+// (service, subject), not per message.
+func (c *NATSClient) inspectExistingDurable(ctx context.Context, stream string, want jetstream.ConsumerConfig) error {
+	existing, err := c.js.Consumer(ctx, stream, want.Durable)
+	if errors.Is(err, jetstream.ErrConsumerNotFound) {
+		return nil // not provisioned yet — nothing to collide with, nothing to overwrite
+	}
+	if err != nil {
+		return fmt.Errorf("nats: cannot read consumer %q on stream %q, so this process cannot establish "+
+			"that the durable name is free before CreateOrUpdateConsumer overwrites whatever holds it: %w",
+			want.Durable, stream, err)
+	}
+	info, err := existing.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("nats: consumer %q on stream %q exists but did not report its config, so this "+
+			"process cannot establish which subject it is bound to: %w", want.Durable, stream, err)
+	}
+	// The filter comparison is the whole refusal, and it is ONE comparison over the
+	// EFFECTIVE filter rather than a field-by-field one. A consumer's binding lives
+	// in either of two config fields — a multi-filter consumer reports FilterSubject
+	// EMPTY and carries its filters in FilterSubjects instead (measured, nats-server
+	// 2.14.4) — so filterOf collapses both shapes to the one string this side can
+	// compare and, when it does not match, NAME.
+	//
+	// Spelled as `a != b || len(plural) > 0` instead, the second term is
+	// UNFALSIFIABLE: Subscribe always writes a non-empty FilterSubject, a
+	// multi-filter consumer always reports an empty one, so the first term already
+	// covers every case the second was written for. Deleting it changed no test.
+	// A branch no test can distinguish is not defence in depth, it is an untested
+	// claim — measured, then removed.
+	if have := filterOf(info.Config); have != want.FilterSubject {
+		return errDurableBoundToAnotherSubject(stream, want.Durable, have, want.FilterSubject)
+	}
+	c.logTuningDrift(stream, want, info.Config)
+	return nil
+}
+
+// filterOf renders the subject(s) a consumer is actually bound to, whichever of
+// the two config fields carries them.
+//
+// It is what makes the refusal above ONE comparison, and it is what lets the
+// refusal NAME the feed that would have gone dark instead of printing an empty
+// string for a multi-filter consumer. A single-element FilterSubjects is the same
+// binding as the equivalent FilterSubject and collapses to the same string here,
+// so that case is accepted rather than refused.
+func filterOf(cfg jetstream.ConsumerConfig) string {
+	if len(cfg.FilterSubjects) > 0 {
+		return strings.Join(cfg.FilterSubjects, ",")
+	}
+	if cfg.FilterSubject == "" {
+		return "(no filter — the whole stream)"
+	}
+	return cfg.FilterSubject
+}
+
+// errDurableBoundToAnotherSubject is the ONE wording for the collision, shared by
+// the in-process claim and the broker read so the two layers cannot drift into
+// describing the same defect differently.
+func errDurableBoundToAnotherSubject(stream, durable, held, want string) error {
+	return fmt.Errorf("nats: durable %q on stream %q is already bound to subject %q, and this subscription "+
+		"asks for %q (#1011). A JetStream consumer name may not carry `.`, `*`, `>` or a space, so pkg/bus "+
+		"maps all four onto `_` — which is many-to-one, and these two subjects landed on one name. "+
+		"CreateOrUpdateConsumer does not fail on that: it REWRITES the existing consumer's filter, after "+
+		"which the other subscription receives nothing while its consumer still exists and reports Ready. "+
+		"Refused instead. Rename one of the two subjects so they no longer differ only in `.` vs `_` vs a "+
+		"wildcard, or give this subscription its own consumer group",
+		durable, stream, held, want)
+}
+
+// claimDurable records that durable belongs to subject in THIS process, refusing
+// if another subject already holds it. See durableClaims for why the broker read
+// alone is not enough.
+func (c *NATSClient) claimDurable(stream, durable, subject string) error {
+	c.claims.mu.Lock()
+	defer c.claims.mu.Unlock()
+	if c.claims.by == nil {
+		c.claims.by = make(map[string]string)
+	}
+	if held, ok := c.claims.by[durable]; ok && held != subject {
+		return errDurableBoundToAnotherSubject(stream, durable, held, subject)
+	}
+	c.claims.by[durable] = subject
+	return nil
+}
+
 // logTuningDrift reports, BEFORE CreateOrUpdateConsumer overwrites it, every
 // delivery-contract field on an existing durable that differs from what this
 // process is about to write.
@@ -687,29 +860,19 @@ func logNakFailure(logger *slog.Logger, subject, group string, err error) {
 // naming the field, the old value and the new one turns that into something a
 // responder can find in the log of the pod that did it.
 //
-// Everything here is best-effort and non-fatal. A consumer that does not exist
-// yet (the common case on a fresh spine) returns an error from js.Consumer and
-// there is nothing to report; an Info call that fails costs a log line, never a
-// subscription. It adds one $JS.API round-trip per Subscribe at startup — paid
-// once per (service, subject), not per message.
-func (c *NATSClient) logTuningDrift(ctx context.Context, stream string, want jetstream.ConsumerConfig) {
-	existing, err := c.js.Consumer(ctx, stream, want.Durable)
-	if err != nil {
-		return // not provisioned yet — nothing is being overwritten
-	}
-	info, err := existing.Info(ctx)
-	if err != nil {
-		return
-	}
+// It takes the config its caller already read rather than reading again: the
+// identity refusal above needs the same reading, and two reads would be two
+// answers to one question with a window between them.
+func (c *NATSClient) logTuningDrift(stream string, want, have jetstream.ConsumerConfig) {
 	var drift []any
-	if info.Config.AckWait != want.AckWait {
-		drift = append(drift, "ack_wait_was", info.Config.AckWait, "ack_wait_now", want.AckWait)
+	if have.AckWait != want.AckWait {
+		drift = append(drift, "ack_wait_was", have.AckWait, "ack_wait_now", want.AckWait)
 	}
-	if info.Config.MaxDeliver != want.MaxDeliver {
-		drift = append(drift, "max_deliver_was", info.Config.MaxDeliver, "max_deliver_now", want.MaxDeliver)
+	if have.MaxDeliver != want.MaxDeliver {
+		drift = append(drift, "max_deliver_was", have.MaxDeliver, "max_deliver_now", want.MaxDeliver)
 	}
-	if info.Config.MaxAckPending != want.MaxAckPending {
-		drift = append(drift, "max_ack_pending_was", info.Config.MaxAckPending, "max_ack_pending_now", want.MaxAckPending)
+	if have.MaxAckPending != want.MaxAckPending {
+		drift = append(drift, "max_ack_pending_was", have.MaxAckPending, "max_ack_pending_now", want.MaxAckPending)
 	}
 	if len(drift) == 0 {
 		return
@@ -746,6 +909,54 @@ func nakDelayFor(m jetstream.Msg) time.Duration {
 // "oms-order_order_submit". The name is deterministic, so every replica of a
 // service binds to the SAME durable for a subject and the messages are shared
 // between them — which is what a consumer group means.
+//
+// # THIS MAP IS LOSSY ON PURPOSE, AND THE LOSS IS REFUSED RATHER THAN ENCODED (#1011)
+//
+// Four bytes onto one is many-to-one: `a.b.c` and `a.b_c` produce one name, and
+// so do `dlq.order.>` and `dlq.order.*`. internal/platform/subject.Token is the
+// injective encoding this estate uses everywhere else, it is LEGAL here
+// (measured on nats-server 2.14.4: a durable named `oms-risk%2Eposition` and one
+// named `oms-a%25b` are both accepted), and it was still not adopted. The reason
+// is what adopting it would cost, not what it would fix:
+//
+// Every durable in the estate is named from a subject, and every subject has
+// dots — so switching encodings RENAMES ALL OF THEM. A renamed durable is a NEW
+// consumer, and Subscribe sets no DeliverPolicy, which is jetstream's zero value:
+// DeliverAll. On the first deploy after the rename every work-class consumer
+// therefore re-reads its stream FROM THE BEGINNING:
+//
+//	work  · EXECUTION is --max-age 24h and carries order.> — up to a day of
+//	        SubmitOrder COMMANDs re-dispatched into handlers. ACCOUNTING,
+//	        COMPLIANCE, SETTLEMENT, ALTERNATIVES and TENANT_FACT are 168h, so
+//	        seven days of ledger and compliance FACTs re-folded.
+//	tick  · MARKET is 24h of ticks at AckWait 15s / MaxDeliver 5 (tuning.go), so
+//	        the replay does not merely arrive late — a consumer that cannot keep
+//	        up EXHAUSTS the delivery budget and the broker stops offering.
+//	control · unaffected. SubscribeBroadcast consumers are EPHEMERAL and have no
+//	        durable name at all, so the halt FACT, the trading mode and the
+//	        mandate arming cannot be touched by a rename. Verify by grepping
+//	        subscribeEphemeral for `Durable:` — there is none.
+//
+// Nothing on this platform is built to absorb that. The in-process dedup window
+// is defaultDedupTTL = 2 MINUTES and starts EMPTY on a fresh pod (dedup.go), and
+// the longest replay-protection horizon anywhere is WorkRedeliveryBudget(), ~59
+// minutes, which internal/execution.SimVenue sizes its execution record by. A 24h
+// replay is outside both by orders of magnitude. Setting DeliverNew instead only
+// trades the replay for the opposite loss — the un-acked backlog of the old
+// durable, which on order.> is dropped orders. So the migration has no safe
+// automatic form: it is a per-durable, ordered, drain-then-cut-over operation
+// across the estate, to remove a hazard with zero live instances (0 collisions
+// among the module's subject literals, re-measured for this change).
+//
+// What is done instead: the name stays, and the COLLISION IS REFUSED at the two
+// places it can be introduced — claimDurable for one process,
+// inspectExistingDurable for the broker. Both are in Subscribe, above. That is
+// the smaller change, and it fails at the moment a collision is introduced rather
+// than at the deploy that would have hidden one.
+//
+// This function stays exempt in test/arch/one_subject_sanitizer_test.go, and the
+// exemption now names the refusal rather than an issue promising to remove this
+// call.
 func durableName(group, subject string) string {
 	safe := strings.NewReplacer(".", "_", "*", "_", ">", "_", " ", "_").Replace(subject)
 	return group + "-" + safe

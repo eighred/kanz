@@ -369,6 +369,19 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"FOLDED AND NOT COUNTED, because await must be able to resolve any id it is handed " +
 			"while the outstanding depth counts only this run's tag. Dropping foreign ids at the " +
 			"door breaks that test, and counting them makes the depth go negative on a re-run.", ""},
+	"pkg/bus: durableClaims.by": {boundedByConstruction,
+		"keyed by the JetStream durable name, and ONE ENTRY IS ADDED PER Subscribe CALL — never per " +
+			"message, per order or per tenant. Nothing a caller sends can create an entry: the key is " +
+			"durableName(group, subject), and a re-Subscribe of the same pair rewrites its own entry rather " +
+			"than adding one. The number of Subscribe calls a process makes is the length of its configured " +
+			"subject list — a package constant in most services, an env.SplitList (ACCOUNTING_FILL_SUBJECTS " +
+			"and its siblings) in the rest — read once at startup and fixed for the life of the process; " +
+			"cmd/kanz-redrive, the one operator-supplied subject in the estate, subscribes once and exits. " +
+			"So the key space is that list, never the traffic across it (re-measured for #1011). " +
+			"EVICTING HERE WOULD BE WRONG rather than merely unnecessary: the entry IS the record that a " +
+			"durable on the broker is bound to a subject, and that binding outlives the Subscribe that made " +
+			"it — a swept entry would let a later colliding Subscribe through while the broker's consumer " +
+			"is still filtered to the first subject.", ""},
 	"internal/cashview: View.byPF": {boundedByConstruction,
 		"keyed by portfolio_id off an accounting PortfolioCashBalance announcement, which the ledger " +
 			"publishes only for a portfolio it books for. A LEVEL, NOT A DELTA: each announcement " +
