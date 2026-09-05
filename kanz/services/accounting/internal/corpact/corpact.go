@@ -67,6 +67,11 @@ func (c CorporateAction) ToEntry() *ledger.Event {
 			Target:   c.Target,
 			Currency: c.Currency,
 		},
+		// SettlementBasis is deliberately left at ledger.SettlementUnknown (#1043):
+		// nothing announces a corporate action in this platform, and an announcement
+		// that did arrive would carry a pay date this type does not model. An
+		// unasserted basis keeps the action out of the settled book instead of
+		// claiming a dividend has been paid on the day it was declared.
 		Effective: c.ExDate,
 		Knowledge: c.AnnouncedAt,
 		SourceRef: c.ActionID,

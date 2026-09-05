@@ -139,6 +139,14 @@ func run() int {
 	// and none occurred": today the book looks identical either way.
 	stateEntrySourcePosture(obs.Registry, logger, cfg)
 
+	// AND ON WHAT BASIS IT CALLS AN ENTRY SETTLED (#1043). Registered here for the
+	// same reason and unconditionally: every fill this book folds is booked as
+	// settled at the instant it executed, which is correct while every venue
+	// adapter is crypto spot and is invisible from outside — a book that never
+	// tracks settlement and one that tracks it with nothing outstanding produce
+	// identical numbers. See settlement_basis_posture.go.
+	stateSettlementBasisPosture(obs.Registry, logger)
+
 	// AND WHETHER THIS POD CAN VALUE A FOREIGN HOLDING (#1041). Registered here
 	// for the same reason and before buildLiveFX below, which is silent on an
 	// ABSENT FX spec while failing the start on a malformed one — the asymmetry

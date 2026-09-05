@@ -343,8 +343,12 @@ func AccrualEntry(entryID, portfolioID, instrument, currency string, increment *
 		InstrumentID: instrument,
 		Cash:         increment,
 		CashCurrency: currency,
-		Effective:    asOf,
-		Knowledge:    knowledge,
-		SourceRef:    instrument,
+		// An accrual has NO settled basis by construction (#1043): accrued income is
+		// earned-not-received, so it is folded into Book.Accrued and never into a
+		// settled balance. ledger.SettlementUnknown is left in place rather than
+		// SettlementPending because nothing here knows the pay date either.
+		Effective: asOf,
+		Knowledge: knowledge,
+		SourceRef: instrument,
 	}
 }
