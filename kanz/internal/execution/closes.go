@@ -50,6 +50,44 @@ type CloseIntent struct {
 	RequestedAt time.Time
 }
 
+// Reasons a tracked close cannot be healed — the label the watchdog counts a
+// dropped intent under, and the only two ways an intent reaches the exchange
+// query as a question that cannot be asked.
+//
+// THESE ARE NOT THE SAME EVENT AND MUST NEVER SHARE A COUNTER (#1036). An intent
+// with no instrument is MALFORMED: some writer recorded a close the watchdog was
+// never able to attempt, and the fix is in the writer. An intent whose instrument
+// this venue has no symbol for is a CONFIGURATION answer: the order is not
+// tradeable here, which is a statement about the symbol map. Collapsing them is
+// what hid the defect — every close the venue adapter tracked failed the symbol
+// lookup with an empty id and was dropped as "untradeable here".
+const (
+	// CloseDropNoInstrument: the intent named no instrument at all.
+	CloseDropNoInstrument = "no_instrument"
+	// CloseDropUnmappedSymbol: the instrument is not in this venue's symbol map.
+	CloseDropUnmappedSymbol = "unmapped_symbol"
+)
+
+// Unhealable reports why the healing watchdog could not even form a venue query
+// for this intent, or "" when it can.
+//
+// It is on the intent rather than in each reconciler because BOTH reconcilers and
+// the ONE production writer must agree on what a healable close is: the writer
+// refuses to dispatch a close it could not later resolve, and the watchdogs count
+// what reaches them anyway. Two copies of that rule is how the first one drifts.
+//
+// InstrumentID is the whole check today, and it is enough: it is the field both
+// watchdogs map to a venue symbol before they can ask the exchange anything, so
+// an empty one makes the query unformable. OrderID is not checked here because
+// the RPC and the OMS both refuse an empty one earlier, where the caller is still
+// nameable.
+func (ci CloseIntent) Unhealable() string {
+	if ci.InstrumentID == "" {
+		return CloseDropNoInstrument
+	}
+	return ""
+}
+
 // PendingCloses is the reconciler's read/resolve seam over in-flight closes.
 // Bound to CloseRegistry in the composition root.
 type PendingCloses interface {

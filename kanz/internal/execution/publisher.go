@@ -271,5 +271,25 @@ type WorkerDeps struct {
 	// diff rather than a field nobody typed.
 	OnFillRefused func(mic, orderID, reason string)
 
+	// OnCloseUnhealable is called for EVERY in-flight close the healing watchdog
+	// dropped WITHOUT asking the exchange anything (#1036): the intent named no
+	// instrument, or named one this venue has no symbol for. Either way the
+	// watchdog could not form the venue query, so no StateHealed was emitted, no
+	// force-clear ran and no balance was re-anchored — while the OMS has already
+	// written CANCELLED, which is terminal.
+	//
+	// IT IS THE ALERTABLE HALF, and this seam had none. The drop happened on the
+	// same Resolve() line as a close the watchdog had genuinely healed against
+	// venue truth, so "In-Flight Certainty is working" and "In-Flight Certainty has
+	// never once reached the exchange" were the same silence — which is exactly how
+	// the empty InstrumentID this field was added with survived: every close the
+	// out-of-process adapter tracked was dropped as "untradeable here".
+	//
+	// A FIELD ON WorkerDeps for the reason Margin, OnMarkTickDropped and
+	// OnFillRefused are: a third venue adapter must not be able to omit it by
+	// accident, and the completeness guard in test/arch makes choosing nil a
+	// visible decision in a diff rather than a field nobody typed.
+	OnCloseUnhealable func(orderID, instrumentID, reason string)
+
 	Logger *slog.Logger
 }

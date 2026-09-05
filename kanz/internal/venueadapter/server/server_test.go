@@ -41,6 +41,8 @@ type fakeVenue struct {
 	// execCalls counts placements. A test that asserts a refusal is only worth
 	// anything if it also proves the exchange was never asked.
 	execCalls int
+	// cancelCalls counts withdrawals, for the same reason.
+	cancelCalls int
 }
 
 func (f *fakeVenue) MIC() string     { return "XBIN" }
@@ -55,6 +57,7 @@ func (f *fakeVenue) Execute(context.Context, *orderpb.OrderState) ([]*orderpb.Fi
 }
 
 func (f *fakeVenue) CancelOrder(context.Context, *orderpb.OrderState) error {
+	f.cancelCalls++
 	f.trackedWhenCancelled = f.closes.Len()
 	return f.cancelErr
 }
@@ -111,6 +114,53 @@ func TestCancelResolvesTheCloseOnlyWhenTheVenueConfirms(t *testing.T) {
 	}
 	if closes.Len() != 0 {
 		t.Fatalf("registry still holds %d closes after a CONFIRMED cancel, want 0 (leak — the watchdog would re-heal it forever)", closes.Len())
+	}
+}
+
+// A CANCEL THIS ADAPTER COULD NOT HEAL IS REFUSED, NOT DISPATCHED (#1036).
+//
+// The healing watchdog resolves an ambiguous cancel by asking the exchange about
+// the order, and it can only form that question from the intent's instrument. A
+// close with no instrument is therefore one the adapter could never resolve: if
+// the withdrawal then hangs, the exchange keeps a resting, fillable order while
+// the OMS writes CANCELLED — terminal, so no sweep and no resume ever revisits
+// it. Refusing before dispatch is the only point where the caller is still
+// nameable and nothing irreversible has happened.
+func TestCancelRefusesACloseItCouldNotHeal(t *testing.T) {
+	v := &fakeVenue{}
+	s, closes, _ := newServer(t, v)
+
+	st := order()
+	st.InstrumentId = "" // the shape the adapter itself used to record
+
+	_, err := s.CancelOrder(context.Background(), &venuepb.CancelOrderRequest{State: st})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("cancel with no instrument returned %v, want InvalidArgument — the adapter "+
+			"dispatched a withdrawal whose ambiguity nothing could ever resolve", err)
+	}
+	if v.cancelCalls != 0 {
+		t.Fatalf("%d withdrawals reached the venue for a close the watchdog could not heal — the "+
+			"refusal must precede the dispatch, not follow it", v.cancelCalls)
+	}
+	if closes.Len() != 0 {
+		t.Fatalf("the registry holds %d closes after a refused cancel — an entry no watchdog can "+
+			"ever act on, kept forever", closes.Len())
+	}
+}
+
+// THE NON-VACUITY HALF: the refusal must not refuse a real cancel. Every other
+// cancel test in this package sends an instrument, and they all still pass; this
+// one states the requirement rather than relying on that.
+func TestCancelStillWithdrawsAnOrderThatNamesItsInstrument(t *testing.T) {
+	v := &fakeVenue{}
+	s, _, _ := newServer(t, v)
+
+	if _, err := s.CancelOrder(context.Background(), &venuepb.CancelOrderRequest{State: order()}); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if v.cancelCalls != 1 {
+		t.Fatalf("%d withdrawals reached the venue, want 1 — the instrument check has turned every "+
+			"cancel into a refusal, which is a trading outage", v.cancelCalls)
 	}
 }
 
