@@ -74,7 +74,7 @@ func TestAnOutOfDomainExponentIsCountedUnderItsOwnReason(t *testing.T) {
 		t.Fatalf("observer saw %v, want exactly [%s]", reasons, DropOutOfDomain)
 	}
 	// And nothing was folded from it.
-	if _, ok := v.Balance("USD"); ok {
+	if _, ok, _ := v.Balance("USD"); ok {
 		t.Fatal("an out-of-domain announcement was folded into the view")
 	}
 }

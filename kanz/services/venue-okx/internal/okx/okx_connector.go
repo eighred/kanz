@@ -85,7 +85,14 @@ func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
 			// where it was found: unhealable closes discarded on the same line as
 			// healed ones, with nothing an alert can reach.
 			OnCloseUnhealable: deps.OnCloseUnhealable,
-			Venue:             c.settings.MIC, Tenant: deps.Tenant,
+			// Every asset this reconciliation could not check is counted and named by
+			// the composition root (#1063). Nil here is what shipped for a year: both
+			// reconcilers honoured the callback, neither root supplied one, so an
+			// asset whose expected balance is UNKNOWN produced no FACT, no counter and
+			// no log — output identical to an asset that reconciled cleanly, on the
+			// last layer that can notice a mis-booked position.
+			OnUnknownBalance: deps.OnUnknownBalance,
+			Venue:            c.settings.MIC, Tenant: deps.Tenant,
 		})
 		if deps.Expected != nil {
 			go rec.Run(ctx, deps.ReconcileInterval)

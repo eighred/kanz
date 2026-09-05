@@ -33,10 +33,12 @@ type OKXReconciler struct {
 	tenant       string
 	now          func() time.Time
 	// onUnknownBalance is called for an asset whose expected balance is UNKNOWN
-	// (#418). Nil ⇒ silent, which is only right in a test: in production an
-	// operator must be able to tell "reconciliation found nothing wrong" from
-	// "reconciliation could not check", and those look identical otherwise.
-	onUnknownBalance func(asset string)
+	// (#418), with the reason it is unknown (#1063). Nil ⇒ silent, which is only
+	// right in a test: in production an operator must be able to tell
+	// "reconciliation found nothing wrong" from "reconciliation could not check",
+	// and those look identical otherwise — which is what both composition roots
+	// shipped, because both left this nil for a year.
+	onUnknownBalance func(asset, reason string)
 	// onCloseUnhealable is called for EVERY in-flight close this watchdog dropped
 	// WITHOUT asking the exchange anything (#1036), with the reason. Nil => silent,
 	// which is only right in a test.
@@ -63,12 +65,17 @@ type OKXReconcilerConfig struct {
 	// CloseTimeout is how long a close may stay unconfirmed before the healing
 	// loop force-clears it. <=0 ⇒ execution.DefaultCloseTimeout (the mandate's
 	// trigger).
-	CloseTimeout     time.Duration
-	Pub              Publisher
-	Venue            string
-	Tenant           string
-	Now              func() time.Time
-	OnUnknownBalance func(asset string)
+	CloseTimeout time.Duration
+	Pub          Publisher
+	Venue        string
+	Tenant       string
+	Now          func() time.Time
+	// OnUnknownBalance is called for every asset this pass could not check, with
+	// the reason (#1063). Nil ⇒ the skip is silent, and a silent skip is
+	// indistinguishable from a clean comparison. The composition root supplies it
+	// from execution.WorkerDeps, where the completeness guard makes omitting it a
+	// visible decision rather than a field nobody typed.
+	OnUnknownBalance func(asset, reason string)
 	// OnCloseUnhealable is called for every in-flight close dropped without a venue
 	// query, with the reason (#1036). Nil => the drop is silent.
 	OnCloseUnhealable func(orderID, instrumentID, reason string)
@@ -334,9 +341,9 @@ func (r *OKXReconciler) reconcileBalances(ctx context.Context) error {
 		// zero for a balance nobody has announced reports every asset the exchange
 		// holds as a discrepancy — a break storm on the first run, which teaches an
 		// operator to ignore this layer.
-		expected, known := r.balances.Balance(ccy)
+		expected, known, why := r.balances.Balance(ccy)
 		if !known {
-			r.unknownBalance(ccy)
+			r.unknownBalance(ccy, why)
 			continue
 		}
 		if actual.Cmp(expected) == 0 {
@@ -436,10 +443,21 @@ func okxDriftReason(exp *orderpb.OrderState, o *okxOrder) string {
 // point: a break means the two sides disagree, this means one side is missing.
 // Collapsing them would let "we have never been told what we hold" arrive on the
 // same dashboard as "the exchange and our books differ", and only one of those is
-// an incident.
-func (r *OKXReconciler) unknownBalance(asset string) {
+// an incident. It is also why this is NOT published as a BalanceReconciled FACT:
+// that message carries expected, actual and delta, and the whole condition here
+// is that expected does not exist — emitting one means inventing expected=0,
+// which is the fabrication #418 removed from this exact loop, folded bitemporally
+// into the book of record rather than merely shown on a dashboard.
+//
+// THE REASON RIDES ALONG (#1063), because "the cash spine has never delivered"
+// and "what it delivered has gone stale" are different repairs.
+func (r *OKXReconciler) unknownBalance(asset, reason string) {
 	if r.onUnknownBalance != nil {
-		r.onUnknownBalance(asset)
+		// NORMALISED HERE, at the one place both reconcilers pass through, so the
+		// label set is fixed by execution.NamedBalanceUnknown rather than by
+		// whatever string a seam happened to return. A venue adapter must not be
+		// able to widen a Prometheus label by writing a new word.
+		r.onUnknownBalance(asset, execution.NamedBalanceUnknown(reason))
 	}
 }
 
