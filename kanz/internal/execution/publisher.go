@@ -23,9 +23,37 @@ type Publisher interface {
 
 // OrderLookup enriches an exchange execution report (which carries only the
 // client order id = our order_id, and the symbol) with Kanz's order context —
-// portfolio_id, instrument_id, static terms. Bound to the OMS order store.
+// portfolio_id, instrument_id, static terms. Bound to the adapter's own order
+// view.
+//
+// THE ANSWER HAS THREE VALUES, NOT TWO (#1047). It returned (state, ok) and the
+// one implementation folded a store failure into (nil, false) — the same answer
+// it gives for an order this adapter does not hold. The ingesters then answered
+// that collapsed value the only way it can be answered, with a skip, so a
+// Postgres blip inside a venue adapter deleted real executions from the
+// order.order.filled stream: no FACT, so no position booked and no cash
+// journalled, and nothing downstream could notice because there was nothing to
+// notice.
+//
+// The two are opposite readings of the same silence. "The view answered, and
+// does not hold this order" is a legitimate skip — a shared exchange account and
+// a second replica both produce reports that are not ours. "I could not read the
+// view" means this adapter almost certainly DOES own the order and cannot tell,
+// and treating it as somebody else's applies the safe reading of the first case
+// to the second.
+//
+// This is the same three-value discipline ExpectedBalances takes for an unknown
+// balance (#418) and OrderViewState takes for INDETERMINATE: an unknown is a
+// value, never the benign default.
 type OrderLookup interface {
-	Lookup(orderID string) (*orderpb.OrderState, bool)
+	// Lookup returns this adapter's record of orderID.
+	//
+	//	(st,  true,  nil) — held, and this is it
+	//	(nil, false, nil) — the view answered, and does not hold it
+	//	(nil, false, err) — the view could not be read; the caller knows NOTHING
+	//	                    about this order and must not treat it as somebody
+	//	                    else's
+	Lookup(orderID string) (*orderpb.OrderState, bool, error)
 }
 
 // OrderTracker is the adapter's OWN order view, read and write.
@@ -270,6 +298,30 @@ type WorkerDeps struct {
 	// completeness guard in test/arch makes choosing nil a visible decision in a
 	// diff rather than a field nobody typed.
 	OnFillRefused func(mic, orderID, reason string)
+
+	// OnFillDropped is called for EVERY venue execution report an ingester did
+	// not turn into a fill FACT because it could not RESOLVE it to an order this
+	// adapter holds (#1047), with the reason separating the two cases that used
+	// to be one.
+	//
+	// IT IS A DIFFERENT QUESTION FROM OnFillRefused, and that is why it is a
+	// different seam. A refusal means the report was understood and contradicts
+	// what this platform authorised — a standing disagreement that freezes the
+	// order. A drop means the report was never resolved to an order at all:
+	// either it belongs to somebody else (DropUnknownOrder, routine on a shared
+	// exchange account) or the order view could not be read (DropStoreError, an
+	// execution this adapter probably owns and is blind to).
+	//
+	// WHAT IT ANSWERS. "How many fills did we lose during that outage?" — a
+	// question the ERROR log cannot answer and no other series on this path can
+	// either. The unknown_order arm is what makes the store_error arm readable:
+	// an adapter that routinely sees other people's orders has a visible baseline
+	// to compare against.
+	//
+	// A FIELD ON WorkerDeps for the reason OnFillRefused is: a third venue
+	// adapter must not be able to omit it by accident, and the completeness guard
+	// in test/arch makes choosing nil a visible decision in a diff.
+	OnFillDropped func(mic, orderID, reason string)
 
 	// OnCloseUnhealable is called for EVERY in-flight close the healing watchdog
 	// dropped WITHOUT asking the exchange anything (#1036): the intent named no

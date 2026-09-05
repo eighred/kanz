@@ -348,6 +348,9 @@ type ReportRefusal struct {
 	// production never leaves it nil, because the completeness guard makes an
 	// omitted WorkerDeps field a visible decision in a diff.
 	OnRefused func(mic, orderID, reason string)
+	// OnDropped is the counter seam for Dropped, supplied from
+	// WorkerDeps.OnFillDropped. Nil is tolerated on the same terms as OnRefused.
+	OnDropped func(mic, orderID, reason string)
 	// Logger is where the ERROR goes. Nil falls back to the default logger rather
 	// than dropping the loudest half of the refusal.
 	Logger *slog.Logger
@@ -369,6 +372,79 @@ func (r ReportRefusal) Refuse(orderID string, reason error) {
 	if r.Orders != nil {
 		r.Orders.Quarantined(&orderpb.OrderState{OrderId: orderID}, reason.Error())
 	}
+}
+
+// The two reasons an execution report is DROPPED rather than refused (#1047) —
+// the counter labels for ReportRefusal.Dropped.
+//
+// BOUNDED BY CONSTRUCTION, like RefusalKind and for the same reason: a label
+// derived from an exchange's error text would let a venue mint unbounded
+// Prometheus cardinality.
+const (
+	// DropUnknownOrder: the view answered, and this adapter does not hold the
+	// order. Routine — a shared exchange account and a second replica both
+	// produce reports that are not ours — and NOT a fault. It is counted anyway,
+	// because it is the baseline DropStoreError is read against: an adapter that
+	// normally sees a steady trickle of other people's orders and an adapter that
+	// has just gone blind are otherwise the same rising line.
+	DropUnknownOrder = "unknown_order"
+	// DropStoreError: the order view could not be READ, so this adapter cannot
+	// say whether it holds the order. Every increment is an execution that
+	// reached no FACT, no position projection and no ledger entry, and that the
+	// OMS sweep can only recover while the order is still non-terminal.
+	DropStoreError = "store_error"
+)
+
+// Dropped records ONE execution report that did not become a fill FACT because
+// this adapter could not RESOLVE it to an order it holds (#1047).
+//
+// # Why this is not Refuse
+//
+// Refuse answers a report the adapter UNDERSTOOD and will not honour: the venue
+// and the platform disagree about what was authorised, no re-drive resolves it,
+// and the order is frozen so that a re-dispatch cannot work a size nobody can
+// state. A drop is the opposite situation — nothing was understood, because the
+// report was never matched to an order — so there are three differences and each
+// one has a reason:
+//
+//   - NO FREEZE. Quarantine is a claim that a specific order is contradicted.
+//     On DropStoreError the adapter cannot even confirm it holds the order, and
+//     the freeze is a WRITE to the store whose READ just failed, so it would
+//     mostly fail on its way to onErr. Worse if it succeeded: a store outage
+//     touches every in-flight order at once, so freezing on it would convert a
+//     transient blip into a quarantine across the whole book that a human must
+//     clear order by order. On DropUnknownOrder there is nothing to freeze — the
+//     order is somebody else's.
+//   - ITS OWN COUNTER, not the refusal counter. "The venue over-filled us" and
+//     "we could not read our own view" are different incidents with different
+//     responses, and one series carrying both cannot be alerted on either.
+//   - THE CALLER DECIDES WHAT TO DO WITH THE FRAME, and the two reasons differ
+//     there too: an unknown order is skipped, a store error is returned. See the
+//     ingesters.
+//
+// # Why the log level differs by reason
+//
+// DropUnknownOrder is ordinary traffic and an ERROR per frame would be noise
+// that trains an operator to ignore the line — the counter is its whole signal.
+// DropStoreError is a lost execution, so it gets the ERROR, and the message
+// names what was lost rather than what was degraded.
+func (r ReportRefusal) Dropped(orderID, reason string) {
+	if r.OnDropped != nil {
+		r.OnDropped(r.Venue, orderID, reason)
+	}
+	if reason == DropUnknownOrder {
+		return
+	}
+	logger := r.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Error("VENUE EXECUTION REPORT DROPPED — this adapter could not resolve it to an order "+
+		"it holds, so no fill FACT was published: the position book has not booked this trade and "+
+		"the accounting ledger has not journalled its cash. The OMS sweep re-queries the venue and "+
+		"can adopt the execution ONLY while the order is still working — an order the venue "+
+		"completed during this outage lands terminal and the missed execution is unreachable",
+		"venue", r.Venue, "order_id", orderID, "reason", reason)
 }
 
 // RefusalKind is the counter LABEL for a refusal.
