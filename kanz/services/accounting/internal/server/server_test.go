@@ -26,12 +26,21 @@ func newServer(t *testing.T) (*Server, ledger.Store) {
 	return New(r, nil, store, "USD", WithTenant(testTenant), WithCustodyBookScope(testScope(t))), store
 }
 
+// seed builds the book the NAV and reconcile tests read.
+//
+// BOTH ENTRIES NAME AN EXCHANGE ACCOUNT, AND THAT IS LOAD-BEARING FOR RECONCILE
+// (#1073). A custody comparison basis holds only the entries that settled against
+// an exchange account, because no exchange custodian's statement can describe one
+// that did not. An unstamped fixture would fold to an EMPTY basis, and the loader
+// refuses that rather than reporting every position the custodian holds as
+// MISSING_IN_IBOR. NAV is unaffected: it reads the whole book either way, which is
+// why the same fixture serves both and why the totals below do not move.
 func seed(t *testing.T, store ledger.Store) {
 	t.Helper()
 	eff := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	entries := []*ledger.Event{
-		{EntryID: "c1", PortfolioID: "PF", Type: ledger.EntryCash, Cash: big.NewRat(100000, 1), CashCurrency: "USD", Effective: eff, Knowledge: eff},
-		{EntryID: "t1", PortfolioID: "PF", Type: ledger.EntryTrade, InstrumentID: "AAPL",
+		{EntryID: "c1", PortfolioID: "PF", VenueAccountID: "okx-sub-1", Type: ledger.EntryCash, Cash: big.NewRat(100000, 1), CashCurrency: "USD", Effective: eff, Knowledge: eff},
+		{EntryID: "t1", PortfolioID: "PF", VenueAccountID: "okx-sub-1", Type: ledger.EntryTrade, InstrumentID: "AAPL",
 			Quantity: big.NewRat(100, 1), Price: big.NewRat(150, 1), Cash: big.NewRat(-15000, 1), CashCurrency: "USD",
 			Effective: eff, Knowledge: eff},
 	}
@@ -73,9 +82,10 @@ func TestNAVEndpoint(t *testing.T) {
 func TestReconcileEndpoint(t *testing.T) {
 	s, store := newServer(t)
 	seed(t, store)
-	// PF has ONE configured custodian, so the whole book IS that custodian's book —
-	// the pre-#1006 behaviour, which is correct here and does not move. The request
-	// still names it: a custodian is never inferred (#1025).
+	// PF has ONE configured custodian, so its comparison basis is DERIVED from the
+	// accounts its journal touches (#1073) — every entry here settled against
+	// okx-sub-1, so the basis is the whole of what the fixture holds. The request
+	// still names the custodian: it is never inferred (#1025).
 	body := `{"custodian_id":"CUST-A","positions":{"AAPL":"90"},"cash":{"USD":"85000"}}`
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/reconcile", strings.NewReader(body)))

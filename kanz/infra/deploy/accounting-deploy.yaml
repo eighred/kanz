@@ -169,8 +169,14 @@ spec:
             # scheduled (main says so at ERROR on every boot), no ReconciliationRun FACT
             # is ever emitted, and POST /v1/portfolios/{id}/reconcile — routed at the
             # gateway since #1025 — refuses every request naming a custodian, because
-            # this deployment declares none and the only book it could otherwise compare
-            # is the WHOLE portfolio.
+            # this deployment declares no pair and a custodian is never inferred.
+            #
+            # WITH ONE CUSTODIAN, THE ACCOUNTS KEY IS OPTIONAL AND THE COMPARISON IS
+            # STILL SCOPED (#1073): the basis is derived from the exchange accounts the
+            # portfolio journal touches. Entries that settled against NO exchange account
+            # — an investor subscription into the fund own bank — are in no comparison
+            # basis under either scope, are reconciled by nothing, and are named per run
+            # in the log and per pair by kanz_accounting_custody_comparison_basis.
             #
             # THE ACCOUNTS KEY IS NOT OPTIONAL ONCE A PORTFOLIO HAS TWO CUSTODIANS: the
             # pod REFUSES TO START without it, rather than reporting every position held

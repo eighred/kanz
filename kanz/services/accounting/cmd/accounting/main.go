@@ -200,11 +200,20 @@ func run() int {
 	// the "read/reconcile only" default — serving the reconcile endpoint with a
 	// declaration nothing had ever validated. A malformed one now refuses the start
 	// on every deployment that can answer the route.
-	custodyCfg, err := buildCustodyConfig(cfg, logger)
+	custodyCfg, err := buildCustodyConfig(cfg)
 	if err != nil {
 		logger.Error("custody config invalid", "err", err)
 		return 2
 	}
+	// AND WHICH SLICE OF THE BOOK EACH CUSTODIAN'S STATEMENT IS COMPARED AGAINST
+	// (#1073). Registered on THIS path — the earliest point the declaration has
+	// been parsed — and never inside buildCustodyPlane, which runs only with a
+	// broker configured: the broker-less "read/reconcile only" deployment still
+	// answers the ad-hoc reconcile route, so it is precisely a deployment whose
+	// comparison basis an operator needs to be able to read. Collectors registered
+	// behind a branch have exported nothing twice in this estate, and both times
+	// only running the binary caught it. See custody_basis_posture.go.
+	stateCustodyBasisPosture(obs.Registry, logger, custodyCfg.pairs, custodyCfg.scope)
 	opts := []server.Option{
 		server.WithSnapshotMetrics(snapMetrics),
 		server.WithBreakStore(custodyStore),

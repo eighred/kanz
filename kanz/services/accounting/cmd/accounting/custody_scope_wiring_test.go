@@ -58,9 +58,17 @@ func TestTwoCustodiansWithAnAccountDeclarationStarts(t *testing.T) {
 	}
 }
 
-// A single-custodian portfolio needs no declaration and does not move — the whole
-// book against its one custodian is correct, and every existing deployment is
-// this shape.
+// A single-custodian portfolio needs no declaration and starts — every existing
+// deployment is this shape, and requiring one would be a refusal nobody could act
+// on for a portfolio where there is nothing to say.
+//
+// WHAT IT NO LONGER DOES IS COMPARE THE WHOLE BOOK (#1073). This test used to
+// assert an INFO line reading "compares the whole portfolio book", reason "one
+// custodian configured for this portfolio" — an affirmatively correct-sounding
+// record of the configuration that reported every entry with no exchange account
+// as a cash break. The posture that replaced it, gauge included, is asserted in
+// custody_basis_posture_test.go; the scope is derived from the journal, so there
+// is nothing about it for this function to log.
 func TestASingleCustodianPortfolioStartsWithNoDeclaration(t *testing.T) {
 	h := &capturingHandler{}
 	plane, err := buildPlane(t, baseCfg(), h)
@@ -70,12 +78,10 @@ func TestASingleCustodianPortfolioStartsWithNoDeclaration(t *testing.T) {
 	if plane.scheduler == nil {
 		t.Fatal("no scheduler was armed")
 	}
-	// "One custodian, whole book" is CORRECT and "several custodians, whole book"
-	// is the defect. From outside the process they look identical, so the correct
-	// case is stated out loud rather than left as an absence.
-	if !h.sawAt(slog.LevelInfo, "compares the whole portfolio book") {
-		t.Error("the plane did not record WHY it compares the whole book. An operator reading the log " +
-			"cannot then tell a correct single-custodian scope from the unscoped defect")
+	if h.sawAt(slog.LevelInfo, "compares the whole portfolio book") {
+		t.Error("the wiring still records that it compares the WHOLE portfolio book. No path does " +
+			"(#1073) — and an operator reading that line is told the configuration is correct by the " +
+			"line that describes the defect")
 	}
 }
 

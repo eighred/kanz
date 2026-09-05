@@ -418,7 +418,7 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	// here would be a business date on evidence nobody chose. Nothing persists or
 	// publishes it, so Subject.Validate's date requirement does not apply.
 	subject := custody.Subject{PortfolioID: id, CustodianID: custodian}
-	book, err := custody.LedgerBookLoader(s.store, s.custodyScope)(r.Context(), subject)
+	book, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger)(r.Context(), subject)
 	if err != nil {
 		// The loader refuses rather than returning a partial book — an exchange
 		// account no custodian claims, most often. Surface the reason: it names

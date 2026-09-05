@@ -3,7 +3,9 @@ package ledger
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"sort"
+	"strings"
 )
 
 // AccountScope is a set of exchange accounts, used to restrict a fold to the
@@ -78,10 +80,24 @@ func NewAccountScope(accounts ...string) (AccountScope, error) {
 // VenueAccountCash applies, for the same reason. "" is the positive declaration
 // that an entry settled against no exchange account (an investor subscription
 // into the fund's own bank, a corporate action), and no exchange custodian's
-// statement lists it. A consequence worth stating: for a multi-custodian
-// portfolio the scoped books do NOT sum to Book — the un-attributed entries are
-// in neither. That is correct for a comparison against exchange custodians, and
-// Book.CashBalance remains the portfolio total for every other reader.
+// statement lists it. A consequence worth stating: the scoped books do NOT sum to
+// Book — the un-attributed entries are in none of them. That is correct for a
+// comparison against exchange custodians, and Book.CashBalance remains the
+// portfolio total for every other reader.
+//
+// THIS RULE IS NOW THE ONLY ONE, AT ONE CUSTODIAN AS AT SEVERAL (#1073). The
+// single-custodian path used to compare the WHOLE book, so the same entry was in
+// the basis under one configuration and out of it under another, each documented
+// as correct. Both cannot be: a run against a custodian statement over a book
+// carrying the +1000 of an investor subscription reported a cash break for the
+// full 1000, every run, on the DEFAULT configuration. MaterializeAttributed
+// derives the scope from the accounts the journal touched, so a one-custodian
+// portfolio reaches the same basis without an operator declaring anything.
+//
+// The excluded entries are RETURNED rather than dropped in silence, as an
+// UnattributedResidue: cash genuinely held away from every custodian is real, it
+// is reconciled by nothing, and "in no basis" has to be a stated bucket rather
+// than an absence a reader infers from two numbers that do not add up.
 //
 // # The unmapped return
 //
@@ -91,13 +107,136 @@ func NewAccountScope(accounts ...string) (AccountScope, error) {
 // the proto warns about. Sorted, so an operator reads the same list every time.
 func MaterializeForAccounts(
 	ctx context.Context, st Store, portfolioID string, scope, claimed AccountScope,
-) (*Book, []string, error) {
+) (*Book, []string, UnattributedResidue, error) {
 	events, err := st.Journal(ctx, portfolioID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, UnattributedResidue{}, err
 	}
+	book, unmapped, residue := foldForAccounts(portfolioID, events, scope, claimed)
+	return book, unmapped, residue, nil
+}
 
+// MaterializeAttributed folds the entries that settled against SOME exchange
+// account, with the scope DERIVED from the accounts the journal actually touched.
+//
+// IT IS THE BASIS FOR A PORTFOLIO WITH ONE CUSTODIAN (#1073), and it exists so
+// that basis is scoped BY CONSTRUCTION rather than by operator diligence. A
+// portfolio custodied in one place holds every exchange account it touches at
+// that custodian — that is what "one custodian" means — so there is nothing for a
+// declaration to add and no account this can fail to claim. What a declaration
+// could never supply is the other half: the entries that settled against NO
+// exchange account are excluded here exactly as MaterializeForAccounts excludes
+// them, so the comparison basis follows one rule at one custodian and at several.
+//
+// The alternative shipped until #1073 was the whole book, and it manufactured a
+// cash break for every investor subscription into the fund's own bank — on the
+// default configuration, every run, in the queue that exists to surface the one
+// break meaning a fill never reached the ledger.
+//
+// IT RETURNS THE DERIVED SCOPE, AND A CALLER MUST READ IT. An EMPTY scope over a
+// journal that holds value is the mirror-image defect: every entry declares it
+// settled against no exchange account, so the basis folds to nothing and every
+// position the custodian holds comes back as MISSING_IN_IBOR. That is the state
+// NewBookScope already refuses an operator who declares an empty account set, and
+// it must not arrive by derivation instead. This returns the evidence; the custody
+// loader is where the refusal belongs, because "compared against a custodian" is
+// what makes an empty basis wrong rather than merely small.
+func MaterializeAttributed(ctx context.Context, st Store, portfolioID string) (*Book, AccountScope, UnattributedResidue, error) {
+	events, err := st.Journal(ctx, portfolioID)
+	if err != nil {
+		return nil, nil, UnattributedResidue{}, err
+	}
+	scope := AttributedAccounts(events)
+	book, unmapped, residue := foldForAccounts(portfolioID, events, scope, scope)
+	if len(unmapped) > 0 {
+		// UNREACHABLE, AND LOUD RATHER THAN IGNORED. scope and claimed are both
+		// the set of accounts this journal touched, so no account it touched can
+		// be unclaimed. Reaching it means AttributedAccounts and foldForAccounts
+		// disagree about what an account is, and the fold would then be silently
+		// missing holdings — the partial book that breaks every position it
+		// omitted.
+		return nil, scope, residue, fmt.Errorf("ledger: portfolio %s: the derived custody scope does not "+
+			"claim account(s) %s that its own journal touched — the fold and the derivation disagree",
+			portfolioID, strings.Join(unmapped, ", "))
+	}
+	return book, scope, residue, nil
+}
+
+// AttributedAccounts returns every non-empty exchange account the journal
+// touched.
+//
+// THE EMPTY ACCOUNT IS NOT A MEMBER, for NewAccountScope's reason: "" is the
+// positive declaration that an entry settled against no exchange account, so
+// admitting it would put the fund's own bank cash into a custodian's book through
+// the derivation instead of through a declaration — the same claim NewAccountScope
+// refuses an operator, arriving by a route nobody typed.
+func AttributedAccounts(events []*Event) AccountScope {
+	s := AccountScope{}
+	for _, e := range events {
+		if e == nil || e.EntryID == "" || e.VenueAccountID == "" {
+			continue
+		}
+		s[e.VenueAccountID] = true
+	}
+	return s
+}
+
+// UnattributedResidue is what a custodian-scoped fold deliberately left OUT: the
+// entries that settled against no exchange account at all.
+//
+// IT IS A BUCKET, NOT A BREAK, AND NOT NOTHING. Cash genuinely held away from
+// every custodian — an investor subscription sitting in the fund's own bank — is
+// real money in the book of record that NO custodian statement can confirm. Book
+// still carries it for every other reader; the reconciliation basis does not, and
+// so nothing reconciles it. Returning it is what makes that an explicit
+// unreconciled bucket rather than a silent omission, which is the half of #1073
+// that neither of the two disagreeing rules stated.
+type UnattributedResidue struct {
+	// Entries is how many distinct journal entries were excluded.
+	Entries int
+	// Cash is currency -> the net cash those entries moved.
+	Cash map[string]*big.Rat
+	// Instruments names the instruments whose quantity they moved, sorted. A
+	// position held away from every exchange is rarer than cash and worth naming
+	// separately: it is a holding no custodian will ever confirm.
+	Instruments []string
+}
+
+// Empty reports whether the fold excluded nothing that moves value.
+func (r UnattributedResidue) Empty() bool { return len(r.Cash) == 0 && len(r.Instruments) == 0 }
+
+// Describe renders the residue for an operator, sorted so the same journal reads
+// the same way every run.
+func (r UnattributedResidue) Describe() string {
+	parts := make([]string, 0, len(r.Cash)+len(r.Instruments))
+	ccys := make([]string, 0, len(r.Cash))
+	for ccy := range r.Cash {
+		ccys = append(ccys, ccy)
+	}
+	sort.Strings(ccys)
+	for _, ccy := range ccys {
+		parts = append(parts, ccy+" "+r.Cash[ccy].FloatString(8))
+	}
+	parts = append(parts, r.Instruments...)
+	if len(parts) == 0 {
+		return "nothing"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// foldForAccounts is the ONE filter both entry points share, so "which entries are
+// in a custodian's comparison basis" has a single answer rather than one per
+// caller. Two answers is the shape #1073 was filed on: the scoped path excluded an
+// un-attributed entry, the single-custodian path included it, and each documented
+// itself as correct.
+func foldForAccounts(portfolioID string, events []*Event, scope, claimed AccountScope) (*Book, []string, UnattributedResidue) {
 	unmappedSet := map[string]bool{}
+	residue := UnattributedResidue{Cash: map[string]*big.Rat{}}
+	instruments := map[string]bool{}
+	// Deduped for VenueAccountCash's reason: the journal legitimately returns a
+	// restated entry alongside the original, and summing both would overstate the
+	// residue. Book.Apply applies the same rule to the entries that are kept.
+	seen := map[string]bool{}
 	kept := make([]*Event, 0, len(events))
 	for _, e := range events {
 		if e == nil || e.EntryID == "" {
@@ -105,7 +244,23 @@ func MaterializeForAccounts(
 		}
 		acct := e.VenueAccountID
 		if acct == "" {
-			continue // settled against no exchange account — see above
+			// Settled against no exchange account — see above. MEASURED rather
+			// than dropped in silence: this is the bucket nothing reconciles.
+			if seen[e.EntryID] {
+				continue
+			}
+			seen[e.EntryID] = true
+			residue.Entries++
+			if e.Cash != nil && e.Cash.Sign() != 0 {
+				if residue.Cash[e.CashCurrency] == nil {
+					residue.Cash[e.CashCurrency] = new(big.Rat)
+				}
+				residue.Cash[e.CashCurrency].Add(residue.Cash[e.CashCurrency], e.Cash)
+			}
+			if e.InstrumentID != "" && e.Quantity != nil && e.Quantity.Sign() != 0 {
+				instruments[e.InstrumentID] = true
+			}
+			continue
 		}
 		if !claimed.Has(acct) {
 			// Only an entry that MOVES something can distort a book. An entry
@@ -127,11 +282,17 @@ func MaterializeForAccounts(
 	}
 	sort.Strings(unmapped)
 
+	residue.Instruments = make([]string, 0, len(instruments))
+	for i := range instruments {
+		residue.Instruments = append(residue.Instruments, i)
+	}
+	sort.Strings(residue.Instruments)
+
 	// Replay, not a quantity-only sum: the scoped book's AvgCost and Realized are
 	// then the cost basis OF THAT CUSTODIAN'S SLICE — a meaningful number — rather
 	// than a half-populated struct the next caller would misread as the
 	// portfolio's.
-	return Replay(portfolioID, kept), unmapped, nil
+	return Replay(portfolioID, kept), unmapped, residue
 }
 
 // movesValue reports whether an entry changes a position or a cash balance.

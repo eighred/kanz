@@ -28,10 +28,21 @@ import (
 // See ledger.MaterializeForAccounts for why that beats putting a custodian_id on
 // ledger.Event.
 //
-// A ZERO BookScope IS THE PRE-#1006 BEHAVIOUR, and that is deliberate rather than
-// a fallback: for a portfolio with ONE custodian, the whole book against that
-// custodian is correct, needs no declaration, and must not move. Only the
-// configuration that was wrong changes.
+// A PORTFOLIO WITH ONE CUSTODIAN NEEDS NO DECLARATION, AND IS STILL SCOPED
+// (#1073). This used to say the opposite — that an undeclared portfolio compares
+// the WHOLE book, and that this is correct for one custodian — and it was wrong in
+// a way ledger.MaterializeForAccounts contradicted in its own doc comment: an
+// entry that settled against no exchange account is in NO custodian's comparison
+// basis, because no exchange custodian's statement can list it. Including it at
+// one custodian and excluding it at several is one entry with two answers, and the
+// one-custodian answer reported an investor subscription into the fund's own bank
+// as a cash break for the full amount, every run, on the default configuration.
+//
+// So the undeclared case derives its scope from the accounts the journal touched
+// (ledger.MaterializeAttributed) rather than taking the whole book. Declared is
+// therefore a question about the CONFIGURATION — did an operator say which
+// custodian holds what — and never about whether the comparison is scoped. Every
+// comparison is.
 type BookScope struct {
 	// custodians is portfolio -> the custodians configured for it, sorted.
 	custodians map[string][]string
@@ -163,10 +174,17 @@ func (s *BookScope) declTemplate(portfolio string, custodians []string) string {
 	return strings.Join(entries, " ")
 }
 
-// Scoped reports whether this portfolio's book is folded per custodian. False
-// means the whole book is compared, which is correct for a single custodian and
-// is what NewBookScope guarantees is the only case that reaches it.
-func (s *BookScope) Scoped(portfolio string) bool {
+// Declared reports whether an operator declared which exchange accounts each
+// custodian of this portfolio holds.
+//
+// IT IS NOT "IS THE COMPARISON SCOPED", AND IT WAS CALLED Scoped UNTIL #1073.
+// That name was read as its own answer — not scoped, therefore the whole book —
+// and the whole book against ONE custodian's statement reports every entry that
+// settled against no exchange account as a cash break. False now means only that
+// the scope is DERIVED from the accounts the journal touched, which is the correct
+// basis for the single custodian NewBookScope guarantees is the only case that
+// reaches it.
+func (s *BookScope) Declared(portfolio string) bool {
 	return s != nil && len(s.accounts[portfolio]) > 0
 }
 
@@ -174,12 +192,13 @@ func (s *BookScope) Scoped(portfolio string) bool {
 // when this deployment reconciles that portfolio against none.
 //
 // IT EXISTS SO A CALLER CAN REFUSE A CUSTODIAN IT CANNOT PLACE (#1025). The
-// ad-hoc reconcile endpoint takes the custodian from the REQUEST, and Scoped
-// cannot check it: a single-custodian portfolio is deliberately unscoped, so
-// there a wrong custodian id is indistinguishable from the right one and the
-// only book the handler could answer with is the WHOLE portfolio — #1006's
-// defect served with a 200. A caller that cannot place the name must refuse
-// rather than compare something else.
+// ad-hoc reconcile endpoint takes the custodian from the REQUEST, and Declared
+// cannot check it: a single-custodian portfolio derives its scope from the
+// journal rather than from a declaration, so there a wrong custodian id is
+// indistinguishable from the right one and the book the handler would answer with
+// is every account the portfolio touches — one custodian's name over another
+// custodian's holdings, served with a 200. A caller that cannot place the name
+// must refuse rather than compare something else.
 func (s *BookScope) Custodians(portfolio string) []string {
 	if s == nil {
 		return nil
