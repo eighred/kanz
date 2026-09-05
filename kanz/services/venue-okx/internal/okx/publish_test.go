@@ -111,8 +111,10 @@ func TestOKXUserDataFillEmitsAValidEnvelope(t *testing.T) {
 		`"state":"filled","fillSz":"1","fillPx":"50000","accFillSz":"1","tradeId":"7",` +
 		`"fillFee":"-0.05","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
 
-	ing := newOKXUserDataIngester(&okxStream{frames: [][]byte{[]byte(frame)}},
-		newOKXOrders("o1"), prod, "OKX", "fund-alpha")
+	ing := newOKXUserDataIngester(OKXUserDataConfig{
+		Stream: &okxStream{frames: [][]byte{[]byte(frame)}}, Orders: newOKXOrders("o1"), Pub: prod,
+		Venue: "OKX", Tenant: "fund-alpha",
+	})
 	_ = ing.Run(context.Background()) // returns io.EOF at end of frames
 
 	if len(cc.sent) != 1 {

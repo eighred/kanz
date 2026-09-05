@@ -94,7 +94,10 @@ func okxKanzOrder(id string) *orderpb.OrderState {
 }
 
 func okxIngesterOver(frames [][]byte, cap *okxCapture) *OKXUserDataIngester {
-	return newOKXUserDataIngester(&okxStream{frames: frames}, newOKXOrders("o1"), cap, "OKX", "fund-alpha")
+	return newOKXUserDataIngester(OKXUserDataConfig{
+		Stream: &okxStream{frames: frames}, Orders: newOKXOrders("o1"), Pub: cap,
+		Venue: "OKX", Tenant: "fund-alpha",
+	})
 }
 
 func TestOKXUserData_FillBecomesOrderFilled(t *testing.T) {
@@ -253,9 +256,33 @@ func TestOKXUserData_ALargeFillIsNotWrapped(t *testing.T) {
 	const qty = "1000000000000" // 1e12 units — an ordinary meme-coin fill
 
 	cap := &okxCapture{}
+	// THE ORDER IS FOR 1e12 TOO, and it has to be. This fixture used to leave the
+	// seeded order at the shared default of 1 while reporting a cumulative of
+	// 1e12 against it, which is an OVER-FILL — the venue claiming it filled a
+	// trillion times what it was sent. Nothing objected, because nothing bounded
+	// the cumulative against the ordered quantity; that is exactly the defect
+	// #1045 closed, and the ingester now refuses this report rather than
+	// publishing leaves of −999999999999. The property under test is unchanged:
+	// a large but REPRESENTABLE fill must convert exactly and still publish.
+	view := newOKXOrders()
+	big := okxKanzOrder("o1")
+	// ParseDec, not odec: odec is dec.ToProto, which WRAPS past an int64
+	// coefficient — 1e12 comes back as 77662796314.5224192, which is #94's own
+	// worked example and would make the ordered quantity smaller than the fill.
+	orderedQty, ok := ParseDec(qty)
+	if !ok {
+		t.Fatalf("ParseDec(%s) refused", qty)
+	}
+	big.OrderedQuantity = orderedQty
+	if err := view.store.Record(context.Background(), big); err != nil {
+		t.Fatalf("seed the view: %v", err)
+	}
 	frame := `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT","ordId":"312","clOrdId":"o1","state":"filled","fillSz":"` +
 		qty + `","fillPx":"0.00001","accFillSz":"` + qty + `","tradeId":"7","uTime":"1700000000000"}]}`
-	_ = okxIngesterOver([][]byte{[]byte(frame)}, cap).Run(context.Background())
+	_ = newOKXUserDataIngester(OKXUserDataConfig{
+		Stream: &okxStream{frames: [][]byte{[]byte(frame)}}, Orders: view, Pub: cap,
+		Venue: "OKX", Tenant: "fund-alpha",
+	}).Run(context.Background())
 
 	var ev *orderpb.OrderFilled
 	for _, e := range cap.events {

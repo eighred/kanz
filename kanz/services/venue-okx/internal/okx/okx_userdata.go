@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/eighred/kanz/internal/fillfact"
+	"log/slog"
 	"math/big"
 	"strconv"
 	"time"
@@ -82,13 +83,41 @@ type OKXUserDataIngester struct {
 	pub    Publisher
 	venue  string
 	tenant string
+	// refusal is the SHARED answer to an execution report this ingester will not
+	// publish (#1045): counter, ERROR log, and a freeze on the adapter's own view.
+	// Shared with the Binance connector rather than written out here, because the
+	// defect it answers was in both and a per-connector refusal is one that gets
+	// improved on one venue.
+	refusal ReportRefusal
 }
 
-func newOKXUserDataIngester(stream UserDataStream, orders OrderTracker, pub Publisher, venue, tenant string) *OKXUserDataIngester {
-	if venue == "" {
-		venue = "OKX"
+// OKXUserDataConfig configures the ingester. It is a struct rather than the
+// positional argument list it replaces for the reason the Binance one is: the
+// refusal seam and the logger are the two collaborators a caller can silently
+// omit, and a keyed literal makes leaving either out visible in a diff.
+type OKXUserDataConfig struct {
+	Stream    UserDataStream
+	Orders    OrderTracker
+	Pub       Publisher
+	Venue     string
+	Tenant    string
+	OnRefused func(mic, orderID, reason string)
+	Logger    *slog.Logger
+}
+
+func newOKXUserDataIngester(cfg OKXUserDataConfig) *OKXUserDataIngester {
+	if cfg.Venue == "" {
+		cfg.Venue = "OKX"
 	}
-	return &OKXUserDataIngester{stream: stream, orders: orders, pub: pub, venue: venue, tenant: tenant}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	return &OKXUserDataIngester{
+		stream: cfg.Stream, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
+		refusal: ReportRefusal{
+			Venue: cfg.Venue, Orders: cfg.Orders, OnRefused: cfg.OnRefused, Logger: cfg.Logger,
+		},
+	}
 }
 
 // Run reads the stream until ctx is cancelled or the stream errors.
@@ -142,9 +171,27 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 			return fmt.Errorf("okx: order %s fill is not representable as a Decimal "+
 				"(fillSz=%q fillPx=%q accFillSz=%q)", orderID, d.FillSz, d.FillPx, d.AccFillSz)
 		}
-		leaves, lok := SubDec(st.GetOrderedQuantity(), accFilled)
-		if !lok {
-			return fmt.Errorf("okx: order %s leaves quantity is not representable as a Decimal", orderID)
+		// THE BOUND BETWEEN WHAT WAS ORDERED AND WHAT OKX SAYS IT FILLED (#1045).
+		//
+		// This was SubDec and a check on its ok, which is not a bound at all: a
+		// negative result represents perfectly well and reports success, so an
+		// accFillSz of 14 against an order of 10 published an order.order.filled
+		// FACT carrying leaves −4 into the position book and the accounting
+		// ledger. The OMS order aggregate does not consume that subject, so its
+		// OVERFILL refusal was never on this path and nothing else looked.
+		//
+		// THE WHOLE REPORT IS REFUSED, NOT CLAMPED. Healing leaves to zero would
+		// record the order at a size the platform never authorised and destroy the
+		// evidence of the disagreement in the same write.
+		leaves, lerr := LeavesRemaining(st.GetOrderedQuantity(), accFilled)
+		if lerr != nil {
+			// Refused, frozen and counted — never a silent drop; see refuse. The
+			// loop CONTINUES rather than returning: a returned error tears down the
+			// websocket, and this is a standing disagreement about one order, so a
+			// reconnect would only re-derive it while every other order's fills go
+			// unseen for the duration.
+			i.refusal.Refuse(orderID, fmt.Errorf("okx: order %s: %w", orderID, lerr))
+			continue
 		}
 		feeMoney, feeOK := okxFee(d.FillFee, d.FillFeeCcy)
 		if !feeOK {

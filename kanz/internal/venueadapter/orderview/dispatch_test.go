@@ -39,6 +39,14 @@ func omsRedispatch(id string) *orderpb.OrderState {
 	st.OrderedQuantity = dec(150_000_000, -8) // 1.5
 	st.FilledQuantity = dec(0, -8)
 	st.LeavesQuantity = dec(150_000_000, -8)
+	// NOT FROZEN, STATED RATHER THAN INHERITED. routed() is the round-trip
+	// fixture — every field of OrderState populated, so the stores are proven to
+	// carry all of them — and one of those fields is the quarantine. An order
+	// this adapter has frozen is one Dispatch refuses outright
+	// (ErrQuarantinedNotRedispatched, #1045), so leaving it set here would make
+	// every case in this file a test of the freeze instead of a test of the
+	// terms/observations partition it is about.
+	st.Quarantine = nil
 	return st
 }
 
@@ -46,6 +54,7 @@ func omsRedispatch(id string) *orderpb.OrderState {
 // what orderview.Progress writes, quantities and price included.
 func venuePartial(id string, filled, leaves int64) *orderpb.OrderState {
 	st := partiallyFilled(id, filled, leaves)
+	st.Quarantine = nil // see omsRedispatch: not frozen, and this file is not about the freeze
 	st.AverageFillPrice = dec(6_500_000_000_000, -8)
 	st.LimitPrice = dec(6400000, -2)
 	st.VenueAccountId = "binance-alpha"

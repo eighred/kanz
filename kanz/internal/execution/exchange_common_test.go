@@ -1,7 +1,11 @@
 package execution
 
 import (
+	"errors"
+	"strings"
 	"testing"
+
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	"github.com/eighred/kanz/internal/dec"
 )
@@ -111,4 +115,60 @@ func TestSubDecIsExactAtLargeMagnitudes(t *testing.T) {
 		t.Fatalf("leaves = %s, want 750000000000 — a wrong leaves quantity is what the next "+
 			"cancel or sweep is sized from", got)
 	}
+}
+
+// LeavesRemaining IS THE BOUND BOTH CONNECTORS COMPUTE LEAVES THROUGH (#1045).
+//
+// The subtraction it replaces was not a bound at all: SubDec represents a
+// negative result and reports ok, so a venue reporting a cumulative 14 against
+// an order of 10 produced leaves −4 and published it as a fill FACT the position
+// book and the accounting ledger both fold. The OMS order aggregate does not
+// consume that subject, so nothing downstream refused it either.
+func TestLeavesRemainingRefusesAnOverfill(t *testing.T) {
+	ordered, cumulative := decOf(t, "10"), decOf(t, "14")
+	leaves, err := LeavesRemaining(ordered, cumulative)
+	if !errors.Is(err, ErrVenueOverfill) {
+		t.Fatalf("LeavesRemaining(10, 14) err = %v, want ErrVenueOverfill — a venue cannot fill "+
+			"more than it was sent, and a negative leaves quantity is what booking it looks like", err)
+	}
+	if leaves != nil {
+		t.Errorf("leaves = %v on a refusal, want nil — a caller reading past the error must not "+
+			"find a usable number there", leaves)
+	}
+	// The refusal names both numbers, because that is the whole finding an
+	// operator resolves against the exchange's own order history.
+	if msg := err.Error(); !strings.Contains(msg, "10") || !strings.Contains(msg, "14") {
+		t.Errorf("refusal %q names neither the ordered nor the reported cumulative quantity", msg)
+	}
+}
+
+// EQUALITY IS THE ORDINARY TERMINAL CASE, not an over-fill. A bound that refused
+// it would stop every completed order from being booked.
+func TestLeavesRemainingAllowsAnExactFill(t *testing.T) {
+	leaves, err := LeavesRemaining(decOf(t, "10"), decOf(t, "10"))
+	if err != nil {
+		t.Fatalf("LeavesRemaining(10, 10) = %v, want no error", err)
+	}
+	if got := dec.FromProto(leaves); got.Sign() != 0 {
+		t.Errorf("leaves = %s, want 0", got.FloatString(8))
+	}
+}
+
+func TestLeavesRemainingIsTheOrdinaryPartialSubtraction(t *testing.T) {
+	leaves, err := LeavesRemaining(decOf(t, "10"), decOf(t, "3.5"))
+	if err != nil {
+		t.Fatalf("LeavesRemaining(10, 3.5) = %v", err)
+	}
+	if got := dec.FromProto(leaves).FloatString(1); got != "6.5" {
+		t.Errorf("leaves = %s, want 6.5", got)
+	}
+}
+
+func decOf(t *testing.T, s string) *commonpb.Decimal {
+	t.Helper()
+	d, ok := ParseDec(s)
+	if !ok {
+		t.Fatalf("ParseDec(%q) refused", s)
+	}
+	return d
 }

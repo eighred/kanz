@@ -182,3 +182,49 @@ func TestMarkTickDroppedCounterRegistersAndCounts(t *testing.T) {
 		t.Errorf("counter = %v after one drop, want 1", v)
 	}
 }
+
+// THE REFUSAL COUNTER MUST SURVIVE REGISTRATION AND EXPORT A SERIES (#1045).
+//
+// Two failures in one, and this estate has shipped the second twice. A bad
+// metric name or a label colliding with a const label panics inside
+// obs.Registry.MustRegister and crash-loops the pod on a config nobody changed;
+// and a CounterVec whose labels are never written exports NO SERIES AT ALL, so
+// an alert over it compares a threshold against an empty vector and can never
+// fire — silent in exactly the state it was written for.
+//
+// The collector is registered in serve() beside the other package-level ones,
+// BEFORE the exchange and the broker are dialled and not inside any branch that
+// depends on either. That placement is what this pairs with: a collector
+// registered on one arm of an `if` is the shape that goes silent.
+func TestFillRefusedCounterRegistersAndCounts(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(fillRefused)
+
+	fillRefused.WithLabelValues("overfill").Inc()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	var got *dto.MetricFamily
+	for _, f := range families {
+		if f.GetName() == "kanz_venue_fill_refused_total" {
+			got = f
+		}
+	}
+	if got == nil {
+		t.Fatal("kanz_venue_fill_refused_total exports no series after an increment — an over-fill " +
+			"the adapter refused would then be indistinguishable from a venue that never over-filled")
+	}
+	labels := map[string]string{}
+	for _, l := range got.GetMetric()[0].GetLabel() {
+		labels[l.GetName()] = l.GetValue()
+	}
+	for name, want := range map[string]string{"venue": "binance", "reason": "overfill"} {
+		if labels[name] != want {
+			t.Errorf("label %q = %q, want %q — the venue says WHICH exchange disagreed with the "+
+				"platform, and the reason separates an over-fill from a number that would not convert",
+				name, labels[name], want)
+		}
+	}
+}

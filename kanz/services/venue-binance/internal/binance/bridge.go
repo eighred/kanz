@@ -40,6 +40,13 @@ type (
 	// UserDataStream is the private-websocket transport seam (tests inject a fake).
 	UserDataStream = execution.UserDataStream
 
+	// ReportRefusal is the SHARED answer to an execution report this connector
+	// will not publish as a fill (#1045): the counter, the ERROR log and the
+	// freeze on this adapter's own order view, in one place for both venues. The
+	// bound that produces the refusal is shared for the same reason — the defect
+	// was in both connectors because the arithmetic was written in both.
+	ReportRefusal = execution.ReportRefusal
+
 	// MarkTickPublisher is the shared reference-mark tick publisher (#673). The
 	// ticker feed does not build the market.crypto.trade envelope itself and does
 	// not see the publish error: both connectors share one implementation, so a
@@ -121,7 +128,28 @@ var (
 	capDur    = execution.CapDur
 	formatDec = execution.FormatDec
 	parseDec  = execution.ParseDec
-	subDec    = execution.SubDec
+
+	// THERE IS NO BARE SUBTRACTION ALIAS HERE ANY MORE, and that is the repair
+	// rather than tidying (#1045). execution.SubDec was how this connector
+	// computed leaves off an execution report, and it is not a bound: it
+	// represents a negative result and reports success. Leaving the alias in
+	// place would leave the next author one identifier away from writing the
+	// defect again, beside a helper whose whole purpose is to stop it.
+	//
+	// leavesRemaining is the BOUND between what this platform ordered and what
+	// the venue says it filled, and the only way this connector computes leaves
+	// off an execution report (#1045). Aliased rather than re-derived here for
+	// the reason every other decimal helper is: a subtraction written per
+	// connector is a bound implemented per connector, and this one was missing
+	// from both.
+	leavesRemaining = execution.LeavesRemaining
+)
+
+// The two refusals leavesRemaining answers with. Aliased as values so this
+// connector cannot invent a third meaning for "the venue's number does not fit".
+var (
+	ErrVenueOverfill         = execution.ErrVenueOverfill
+	ErrLeavesUnrepresentable = execution.ErrLeavesUnrepresentable
 )
 
 // Subjects both exchange reconcilers publish healing FACTs on — shared so the

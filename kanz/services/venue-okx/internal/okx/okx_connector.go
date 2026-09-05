@@ -109,7 +109,10 @@ func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
 }
 
 func (c *OKXConnector) runUserData(ctx context.Context, deps WorkerDeps) {
-	ing := newOKXUserDataIngester(nil, deps.Orders, deps.Publisher, c.settings.MIC, deps.Tenant)
+	ing := newOKXUserDataIngester(OKXUserDataConfig{
+		Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
+		OnRefused: deps.OnFillRefused, Logger: deps.Logger,
+	})
 	backoff := time.Second
 	for ctx.Err() == nil {
 		ws := newOKXUserDataWS(c.wsURL, c.settings.APIKey, string(c.rest.apiSecret), c.settings.Passphrase)

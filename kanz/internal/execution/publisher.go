@@ -65,6 +65,22 @@ type OrderTracker interface {
 	// has since said about it. See orderview.Progress for what it may and may
 	// not overwrite.
 	Progressed(st *orderpb.OrderState)
+
+	// Quarantined FREEZES an order because the venue and the platform disagree
+	// about what was authorised — today, a venue reporting a cumulative filled
+	// quantity larger than the quantity this platform ever sent (#1045).
+	//
+	// IT IS THE OTHER HALF OF REFUSING A REPORT. Refusing alone would drop the
+	// execution silently, which trades a wrong number for a missing one; the
+	// freeze is what makes the refusal readable afterwards, and what stops the
+	// order being re-dispatched at a size nobody can state — orderview.Dispatch
+	// declines a quarantined order the way it declines a terminal one.
+	//
+	// Non-failing for the same reason Progressed is: it runs inside a websocket
+	// read loop. The caller has already counted and logged the refusal before
+	// calling this, so an implementation that cannot persist the freeze degrades
+	// the record rather than erasing the finding.
+	Quarantined(st *orderpb.OrderState, reason string)
 }
 
 // ExpectedOrders is Kanz's internal view of the orders it believes are open —
@@ -235,5 +251,25 @@ type WorkerDeps struct {
 	// operator can see, and the completeness guard in test/arch makes choosing
 	// nil a visible decision in a diff rather than a field nobody typed.
 	OnMarkTickDropped func(mic, instrumentID string)
-	Logger            *slog.Logger
+
+	// OnFillRefused is called for EVERY venue execution report an ingester
+	// refused to turn into a fill FACT (#1045): the venue reported a cumulative
+	// filled quantity the platform never authorised, or one that will not convert
+	// to a Decimal at all.
+	//
+	// IT IS THE ALERTABLE HALF, and on this path there is no other. The
+	// synchronous and recovery fill paths meet the OMS aggregate, whose OVERFILL
+	// refusal quarantines the order and moves the OMS's own quarantine counter.
+	// The user-data websocket meets neither — the OMS order aggregate does not
+	// consume the fill subject — so without this an over-fill is a log line in a
+	// venue adapter, and "the venue over-filled us and we refused" is
+	// indistinguishable from "no venue has ever over-filled us".
+	//
+	// A FIELD ON WorkerDeps for the reason Margin and OnMarkTickDropped are: a
+	// third venue adapter must not be able to omit it by accident, and the
+	// completeness guard in test/arch makes choosing nil a visible decision in a
+	// diff rather than a field nobody typed.
+	OnFillRefused func(mic, orderID, reason string)
+
+	Logger *slog.Logger
 }
