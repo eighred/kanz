@@ -38,8 +38,16 @@ func HHI(p *domain.Portfolio) v1.Measure {
 		gross += v
 	}
 	if gross == 0 {
-		return v1.Measure{Name: MeasureHHI, Value: zeroDecimal()}
+		return v1.Measure{
+			Name:       MeasureHHI,
+			Value:      zeroDecimal(),
+			Provenance: v1.MeasureProvenance{Method: v1.MethodPortfolioArithmetic},
+		}
 	}
 	hhi := sumSq / (gross * gross)
-	return v1.Measure{Name: MeasureHHI, Value: floatToDecimal(hhi, hhiExponent)}
+	return v1.Measure{
+		Name:       MeasureHHI,
+		Value:      floatToDecimal(hhi, hhiExponent),
+		Provenance: v1.MeasureProvenance{Method: v1.MethodPortfolioArithmetic},
+	}
 }

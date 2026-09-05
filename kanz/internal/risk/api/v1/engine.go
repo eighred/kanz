@@ -242,6 +242,19 @@ type Measure struct {
 	// from. See InputCoverage — its zero value means "this measure does
 	// not report input coverage", NOT "everything resolved".
 	Coverage InputCoverage
+	// Provenance names the MODEL that produced Value. See
+	// MeasureProvenance — its zero value means "this producer declares
+	// no model", NOT that the number is model-derived and NOT that it is
+	// a placeholder.
+	//
+	// COVERAGE AND PROVENANCE ANSWER DIFFERENT QUESTIONS AND NEITHER
+	// SUBSTITUTES FOR THE OTHER. Coverage says how much of the book was
+	// seen; provenance says what was done with it. The measures with no
+	// provider — the ones that can never report coverage — are exactly
+	// the ones where provenance is the only signal left, and two of them
+	// are illustrative constants sitting on the order-admission path
+	// (#1037).
+	Provenance MeasureProvenance
 }
 
 // InputCoverage records how much of the book one measure was actually

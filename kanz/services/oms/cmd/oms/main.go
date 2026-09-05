@@ -318,65 +318,10 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		return false, err
 	}
 
-	// THE RISK HALF OF THE PRE-TRADE GATE (#438).
-	//
-	// Order admission never asked the risk engine anything: risk was a downstream
-	// OBSERVER of orders, never a gate in front of them, so an order could be
-	// inside every mandate rule and still take the portfolio through its VaR
-	// limit. This folds the measures risk already publishes so the gate can check
-	// them as arithmetic on a local map — no call, no added latency, and a
-	// degraded risk engine makes this view STALE (a refusal) rather than making
-	// the OMS wait on it (an outage).
-	// A MEASURE THE ENGINE COULD NOT COMPUTE IS COUNTED, NOT JUST DROPPED (#509).
-	//
-	// The view declines to fold a measure whose coverage says it was computed over
-	// an incomplete book, so a risk limit over it refuses. That refusal otherwise
-	// looks identical to an engine that never published — and the two need
-	// different people: a stale view is a risk-engine incident, this is a
-	// REFERENCE-DATA one. The contract-terms store has no production writer today,
-	// so the fixed-income measures are the population this counts.
-	//
-	// Zero on registration, so "no unresolved measure has ever arrived" is a
-	// reading rather than an absent series.
-	unresolvedMeasures := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "kanz_oms_risk_measures_unresolved_total",
-		Help: "Announced risk measures this OMS refused to fold because the engine computed " +
-			"them over an incomplete book (domain.v1.RiskMeasure.coverage). Non-zero means a " +
-			"risk-limit mandate over that measure is REFUSING orders, and the fix is upstream " +
-			"reference data, not the risk engine.",
-	})
-	obs.Registry.MustRegister(unresolvedMeasures)
-
-	risk := riskview.New(
-		riskview.WithOnStale(func(portfolioID, measure string, age time.Duration) {
-			logger.Warn("oms: a risk measure is too old to gate on — orders under a risk-limit "+
-				"mandate will be REFUSED for this portfolio until the engine publishes again",
-				"portfolio_id", portfolioID, "measure", measure, "age", age.String(),
-				"subject", riskview.Subject)
-		}),
-		riskview.WithOnUnresolved(func(portfolioID, measure string, excluded uint32) {
-			unresolvedMeasures.Inc()
-			logger.Warn("oms: a risk measure was announced having been computed over an "+
-				"INCOMPLETE BOOK and will not gate anything — orders under a mandate naming it "+
-				"will be REFUSED until the engine can resolve its inputs",
-				"portfolio_id", portfolioID, "measure", measure, "excluded_positions", excluded,
-				"subject", riskview.Subject)
-		}),
-	)
-	// HELD vs CURRENT, because the difference is what an operator needs BEFORE a
-	// risk limit starts refusing everything. A portfolio held but not current is
-	// one whose gate is about to fail closed, and that is a different incident
-	// from one the engine has never computed.
-	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "kanz_oms_risk_portfolios_held",
-		Help: "Portfolios whose risk measures this OMS has folded at all.",
-	}, func() float64 { held, _ := risk.Stats(); return float64(held) }))
-	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "kanz_oms_risk_portfolios_current",
-		Help: "Portfolios whose risk measures are within OMS freshness — the ones a declared " +
-			"risk limit can actually be checked against. held − current is the population whose " +
-			"orders a risk mandate will refuse.",
-	}, func() float64 { _, live := risk.Stats(); return float64(live) }))
+	// THE RISK HALF OF THE PRE-TRADE GATE (#438, #509, #1037) — built in
+	// riskfold.go, which owns the three announcements this view REFUSES to fold and
+	// the counters that make each refusal legible as its own incident.
+	risk := newRiskFold(obs.Registry, logger)
 
 	// THE MARGIN HALF OF THE PRE-TRADE GATE (#408, control 3).
 	//

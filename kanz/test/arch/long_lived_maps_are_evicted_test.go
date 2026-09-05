@@ -479,6 +479,15 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"curve.Store.byCurrency above and is decided before the subscription exists. The VALUE is a " +
 			"short state string REPLACED on every observation rather than appended to — the map is a " +
 			"per-currency last-logged marker, so a currency whose strip flaps rewrites one entry.", ""},
+	"services/risk-engine/internal/app: MeasureMethodPosture.last": {boundedByConstruction,
+		"keyed by MEASURE NAME, and the name space is compute.Catalogue() — a package-level map " +
+			"literal of twenty-six entries fixed at compile time, which test/arch/measure_catalogue_test.go " +
+			"already pins against the registry. Both writers key on it: Seed walks Registry.Names(), " +
+			"which is a subset of the catalogue, and Observe is called with the Name off a measure " +
+			"the same registry produced. The VALUE is the last method string, REPLACED rather than " +
+			"appended, so a pod that recomputes a million times rewrites at most twenty-six entries. " +
+			"An unknown measure name cannot enter it without first entering the catalogue, which is " +
+			"a source change (#1037).", ""},
 	"internal/risk/pricing/livequote: LiveQuotes.wanted": {boundedByConstruction,
 		"the admitted instrument set itself, built by New from the strip parsed out of " +
 			"RISK_ENGINE_CALIBRATION_RATES and never written again — no method mutates it, so its size " +

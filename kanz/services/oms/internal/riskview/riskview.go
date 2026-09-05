@@ -40,6 +40,17 @@
 // neither the freshness bound nor the never-announced check could refuse it.
 // domain.v1.RiskMeasure.coverage is what tells them apart, and until it existed
 // this view had no way to ask.
+//
+// AND A FOURTH ARRIVED THROUGH THE SAME DOOR (#1037). A measure can be computed
+// over the WHOLE book, by a model that is an illustrative constant. compute.VaR99
+// is 0.01 × GrossExposure — its own doc says "NOT a calibrated risk number" — and
+// it is what every engine with no RISK_ENGINE_MARKETDATA_DATABASE_URL serves,
+// which is every manifest in infra/. It has no provider, so it reports no
+// coverage and the arm above cannot see it; it announces on the subject below
+// under the same name and shape as historical simulation. On a leveraged or
+// volatile book 1% of gross sits BELOW a real one-day 99% VaR, so a mandate limit
+// checked against it admits orders the real number would refuse — the direction
+// that costs money. domain.v1.MeasureProvenance is what tells THOSE apart.
 package riskview
 
 import (
@@ -54,6 +65,12 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	// THE VOCABULARY HAS ONE DEFINITION, and this is the import that keeps it
+	// that way. The risk module's api/v* surface is the one package outside code
+	// may import (test/arch/risk_boundary_test.go), and a local copy of "which
+	// methods are placeholders" is how the producer and this gate come to
+	// disagree about the number that decides whether an order is admitted.
+	riskv1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -88,8 +105,9 @@ type View struct {
 	now    func() time.Time
 	maxAge time.Duration
 
-	onStale      func(portfolio, measure string, age time.Duration)
-	onUnresolved func(portfolio, measure string, excluded uint32)
+	onStale       func(portfolio, measure string, age time.Duration)
+	onUnresolved  func(portfolio, measure string, excluded uint32)
+	onPlaceholder func(portfolio, measure, method string)
 }
 
 // Option customizes a View.
@@ -123,6 +141,19 @@ func WithOnStale(fn func(portfolio, measure string, age time.Duration)) Option {
 // unusable, which is a different incident from an engine that has gone quiet.
 func WithOnUnresolved(fn func(portfolio, measure string, excluded uint32)) Option {
 	return func(v *View) { v.onUnresolved = fn }
+}
+
+// WithOnPlaceholder is called when an announcement carries a measure produced by
+// a placeholder model, which this view then declines to fold.
+//
+// IT IS A DIFFERENT INCIDENT FROM EVERY OTHER REFUSAL HERE, and that is why it
+// has its own hook. Stale means the risk engine has gone quiet; unresolved means
+// a reference-data store is empty; this means the engine is healthy, current,
+// answering over the whole book, and answering with an illustrative constant
+// because a DEPLOYMENT never gave it a market-data DSN. The fix is a manifest,
+// and nobody would look for it from the other two signals.
+func WithOnPlaceholder(fn func(portfolio, measure, method string)) Option {
+	return func(v *View) { v.onPlaceholder = fn }
 }
 
 // New returns an empty view. Until an announcement arrives every measure is
@@ -183,6 +214,29 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 		if excluded := m.GetCoverage().GetExcludedCount(); excluded > 0 {
 			if v.onUnresolved != nil {
 				v.onUnresolved(pf, m.GetName(), excluded)
+			}
+			continue
+		}
+		// A NUMBER FROM A PLACEHOLDER MODEL DOES NOT GATE ANYTHING (#1037).
+		//
+		// Same ruling as the arm above and for the same reason: dropping it here
+		// leaves the measure UNKNOWN, which the rules already fail closed on.
+		// REFUSE, DO NOT ANNOTATE — a rule comparing 1% of gross against a
+		// mandate's VaR limit is not conservative, it is arbitrary, and the error
+		// runs in the permissive direction on exactly the books where a VaR limit
+		// matters (leveraged, volatile, hedged). An advisory read may still show
+		// the number labelled; a control may not act on it.
+		//
+		// ABSENT PROVENANCE IS NOT A PLACEHOLDER. IsPlaceholder is false for the
+		// empty method, deliberately: every measure published before this field
+		// existed declares nothing, and refusing on absence would fail every
+		// risk-limit mandate closed the moment this shipped. The arch guard
+		// test/arch/placeholder_declares_itself_test.go is what covers the gap
+		// that leaves — a producer that forgets to declare is invisible HERE, so
+		// the declaration is required where the measure is written.
+		if method := riskv1.MeasureMethod(m.GetProvenance().GetMethod()); method.IsPlaceholder() {
+			if v.onPlaceholder != nil {
+				v.onPlaceholder(pf, m.GetName(), string(method))
 			}
 			continue
 		}

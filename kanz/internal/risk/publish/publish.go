@@ -70,17 +70,38 @@ const (
 
 // Publisher emits the risk engine's output FACTs onto the bus.
 type Publisher struct {
-	producer *bus.Producer
+	producer      *bus.Producer
+	onMeasureFrom func(measure, method string)
+}
+
+// Option customizes a Publisher.
+type Option func(*Publisher)
+
+// WithMeasureMethodObserver is called once per measure on every measures FACT,
+// with the model that measure declared ("" when it declared none).
+//
+// IT OBSERVES WHAT WAS ANNOUNCED, NOT WHAT WAS REGISTERED, and the difference is
+// the whole point (#1037). A registry probe would have to EXECUTE each measure
+// against a book to learn its model — which fits a factor model and moves the
+// skip counters at boot — and would still only describe the registry rather than
+// the numbers the OMS gate actually folds. This subject is what gates order
+// admission, so this is where the question is answered.
+func WithMeasureMethodObserver(fn func(measure, method string)) Option {
+	return func(p *Publisher) { p.onMeasureFrom = fn }
 }
 
 // NewPublisher returns a Publisher around the given bus.Producer.
 // Producer must already be initialized with the engine's source +
 // producer_version (ProducerConfig at EVT-17b).
-func NewPublisher(producer *bus.Producer) (*Publisher, error) {
+func NewPublisher(producer *bus.Producer, opts ...Option) (*Publisher, error) {
 	if producer == nil {
 		return nil, errors.New("publish: producer is nil")
 	}
-	return &Publisher{producer: producer}, nil
+	p := &Publisher{producer: producer}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p, nil
 }
 
 // EmitExposure publishes an ExposureSet FACT for the portfolio.
@@ -116,6 +137,11 @@ func (p *Publisher) EmitMeasures(ctx context.Context, measures *domain.MeasureSe
 		return errors.New("publish: measures is nil")
 	}
 	payload := ToProtoMeasureSet(measures, sourceEventIDs)
+	if p.onMeasureFrom != nil {
+		for _, m := range payload.GetMeasures() {
+			p.onMeasureFrom(m.GetName(), m.GetProvenance().GetMethod())
+		}
+	}
 	return p.producer.Publish(ctx, bus.Event{
 		Subject:          EventTypeMeasuresComputed,
 		EventType:        EventTypeMeasuresComputed,
@@ -218,6 +244,7 @@ func ToProtoMeasureSet(ms *domain.MeasureSet, sourceEventIDs []string) *domainpb
 			UncertaintyAbs: m.UncertaintyAbs,
 			SourceEventIds: sourceEventIDs,
 			Coverage:       toProtoInputCoverage(m.Coverage),
+			Provenance:     toProtoProvenance(m.Provenance),
 		})
 	}
 	return &domainpb.RiskMeasureSet{
@@ -258,6 +285,35 @@ func toProtoInputCoverage(c v1.InputCoverage) *domainpb.InputCoverage {
 		ExcludedCount: uint32(c.ExcludedCount),
 		Exclusions:    exclusions,
 	}
+}
+
+// toProtoProvenance carries the model behind one measure onto the wire,
+// or nil when the producer declared none.
+//
+// THE NIL IS LOAD-BEARING FOR THE SAME REASON IT IS ON COVERAGE, and it
+// is why domain.v1.MeasureProvenance is a message. Absent means "this
+// producer declares no model" — every measure this platform published
+// before #1037 is in that state, so the OMS gate must fold an
+// undeclared measure rather than refuse it. A present-but-empty message
+// would look like a declaration and would turn every legacy measure
+// into a method the gate cannot classify.
+//
+// THE METHOD IS THE ONLY REQUIRED FIELD. A provenance with an empty
+// method says less than no provenance at all, because it looks like a
+// declaration; it is dropped rather than published.
+func toProtoProvenance(p v1.MeasureProvenance) *domainpb.MeasureProvenance {
+	if !p.Declared() {
+		return nil
+	}
+	out := &domainpb.MeasureProvenance{
+		Method:  string(p.Method),
+		ModelId: p.ModelID,
+		Params:  p.Params,
+	}
+	if !p.ModelAsOf.IsZero() {
+		out.ModelAsOf = timestamppb.New(p.ModelAsOf)
+	}
+	return out
 }
 
 // toProtoDimension maps the closed domain enum to the proto enum. Domain values

@@ -22,9 +22,11 @@ package varmodel
 
 import (
 	"context"
-	"github.com/eighred/kanz/internal/dec"
 	"math"
 	"sort"
+	"strconv"
+
+	"github.com/eighred/kanz/internal/dec"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
@@ -84,11 +86,16 @@ func (c Config) confidence() float64 {
 func Historical(cfg Config) compute.ReturnsMeasure {
 	conf := cfg.confidence()
 	window := cfg.Window
+	// THE MEASURE NAMES ITS MODEL, AND THE PLACEHOLDER NAMES ITS OWN (#1037).
+	// compute.VaR99 (1%×gross) publishes under this same name on any engine with
+	// no market-data DSN, and the OMS gate refuses a placeholder method. Without
+	// this, the calibrated answer and the illustrative one are the same bytes.
+	prov := historicalProvenance(conf, window)
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
 		var cov compute.Coverage
 		pnl, _, ok := portfolioPnL(ctx, p, rp, window, &cov)
 		if !ok {
-			return zeroNamed(compute.MeasureVaR99, cov)
+			return zeroNamed(compute.MeasureVaR99, prov, cov)
 		}
 		sorted := append([]float64(nil), pnl...)
 		sort.Float64s(sorted)
@@ -97,9 +104,10 @@ func Historical(cfg Config) compute.ReturnsMeasure {
 			loss = 0
 		}
 		return v1.Measure{
-			Name:     compute.MeasureVaR99,
-			Value:    floatToDecimal(loss, varExponent),
-			Coverage: cov.Result(),
+			Name:       compute.MeasureVaR99,
+			Value:      floatToDecimal(loss, varExponent),
+			Coverage:   cov.Result(),
+			Provenance: prov,
 		}
 	}
 }
@@ -195,12 +203,44 @@ func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsPr
 // counter, no observer and no flag between them — the single worst instance of
 // #527 in the estate, and the only measure family that had no observability of
 // any kind. Callers must pass their accumulator, not a fresh one.
-func zeroNamed(name v1.MeasureName, cov compute.Coverage) v1.Measure {
+func zeroNamed(name v1.MeasureName, prov v1.MeasureProvenance, cov compute.Coverage) v1.Measure {
 	return v1.Measure{
-		Name:     name,
-		Value:    &commonpb.Decimal{Coefficient: 0, Exponent: 0},
-		Coverage: cov.Result(),
+		Name:       name,
+		Value:      &commonpb.Decimal{Coefficient: 0, Exponent: 0},
+		Coverage:   cov.Result(),
+		Provenance: prov,
 	}
+}
+
+// historicalProvenance is the provenance every measure read off the historical
+// P&L path carries — VaR99, ES99 and both drawdowns come from the one
+// distribution portfolioPnL builds, so they name one model.
+//
+// THE CONFIDENCE IS IN THE PARAMS BECAUSE THE NAME LIES ABOUT IT. "VaR99" is a
+// registry key, not an assertion: Config.Confidence is settable and an engine
+// wired at 0.95 publishes it under the name VaR99 regardless. The params are the
+// only place that says which quantile the number actually is.
+func historicalProvenance(conf float64, window int) v1.MeasureProvenance {
+	return v1.MeasureProvenance{
+		Method: v1.MethodHistoricalSimulation,
+		Params: modelParams(conf, window, nil),
+	}
+}
+
+// modelParams renders the reproduction parameters. Window and seed are omitted
+// when the caller did not set them rather than rendered as zero — a lookback of
+// "0" would read as a claim about the window instead of "the provider's own
+// default", which is the same conflation domain.v1.InputCoverage exists to break
+// one field over.
+func modelParams(conf float64, window int, seed *int64) map[string]string {
+	params := map[string]string{"confidence": strconv.FormatFloat(conf, 'g', -1, 64)}
+	if window > 0 {
+		params["lookback"] = strconv.Itoa(window)
+	}
+	if seed != nil {
+		params["seed"] = strconv.FormatInt(*seed, 10)
+	}
+	return params
 }
 
 // Register overrides MeasureVaR99 with historical-simulation VaR and registers
@@ -240,7 +280,9 @@ func quantile(sorted []float64, q float64) float64 {
 	return sorted[lo] + (h-float64(lo))*(sorted[lo+1]-sorted[lo])
 }
 
-func zeroMeasure(cov compute.Coverage) v1.Measure { return zeroNamed(compute.MeasureVaR99, cov) }
+func zeroMeasure(prov v1.MeasureProvenance, cov compute.Coverage) v1.Measure {
+	return zeroNamed(compute.MeasureVaR99, prov, cov)
+}
 
 func floatToDecimal(f float64, exp int32) *commonpb.Decimal {
 	scaled := f * math.Pow10(int(-exp))
