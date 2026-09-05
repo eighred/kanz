@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -115,9 +116,23 @@ func run() int {
 		}
 	}()
 
+	// THE RISK COLLECTORS ARE REGISTERED BEFORE THE BROKER BRANCH, AND THAT IS THE
+	// POINT (#1050). They used to be built inside runEngine, which only runs when
+	// RISK_ENGINE_NATS_URL is set — so a broker-less deployment exported NO
+	// kanz_risk_recompute_* series at all, and every rule written over them was
+	// silent on the one deployment that consumes nothing and computes nothing
+	// while its probes stay green. That is the `if producer != nil` shape that has
+	// already silenced two alerting layers on this estate (#973, #963).
+	//
+	// Registered here, ABSENCE means a registration defect or a scrape that is not
+	// reaching these pods, and ZERO means deployed-and-idle — two different
+	// readings that an absent series collapses into one. The broker-less case
+	// still announces itself, loudly, in the WARN below.
+	riskMetrics := engine.NewMetrics(obs.Registry)
+
 	var runErr error
 	if cfg.NATSURL != "" {
-		if err := runEngine(ctx, cfg, readiness, logger, obs); err != nil {
+		if err := runEngine(ctx, cfg, readiness, logger, obs, riskMetrics); err != nil {
 			logger.Error("engine stopped with error", "err", err)
 			runErr = err
 		}
@@ -160,9 +175,8 @@ func hostOrigin() string {
 // runEngine builds the ingestion→recompute→publish pipeline over the live
 // NATS spine and runs it under the graceful-shutdown lifecycle. Returns
 // when ctx is canceled (signal) or ingestion fails.
-func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
+func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, riskMetrics *engine.Metrics) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
-	riskMetrics := engine.NewMetrics(obs.Registry)
 
 	// A HALF-CONFIGURED SHARD RING REFUSES THE START, AND IT DOES SO BEFORE ANY
 	// I/O (#110). The ring is a pure function of two env values, so nothing here
@@ -550,16 +564,10 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// publish failure is logged and dropped — a model that cannot be scored must never stop
 	// the engine from computing, publishing and serving the risk numbers the platform
 	// actually trades on. A prediction is an observation, never an order.
-	recomputeOpts := []engine.RecomputerOption{engine.WithMetrics(riskMetrics)}
-	features, err := prediction.NewPublisher(producer)
+	recomputeOpts, err := recomputerOptions(cfg, riskMetrics, producer, logger)
 	if err != nil {
 		return err
 	}
-	recomputeOpts = append(recomputeOpts,
-		engine.WithMeasureObserver(app.PublishFeaturesOn(features, logger)))
-	logger.Info("AI-M1: publishing risk features for scoring",
-		"subject", prediction.EventTypeFeatureComputed,
-		"feature_set", app.FeatureSetPortfolioRisk)
 
 	// Recomputer baseCtx is app-scoped (Background), not the signal ctx, so
 	// the shutdown Drain can still publish the last settled state after the
@@ -1017,4 +1025,65 @@ func newStateStore(opts []state.Option, cache *risk.Cache) *state.Store {
 		opts,
 		state.WithReleaseObserver(func(id v1.PortfolioID) { cache.Evict(id) }),
 	)...)
+}
+
+// recomputerOptions builds the Recomputer's construction options and announces
+// what each one resolved to.
+//
+// A NAMED BUILDER BESIDE runEngine RATHER THAN MORE LINES INSIDE IT, which is
+// what test/arch/composition_root_length_test.go asks for and why: every addition
+// to a composition root is individually reasonable, and that is how this one
+// reached 1,474 lines with two bare nils in the middle (#643).
+func recomputerOptions(
+	cfg config.Config,
+	riskMetrics *engine.Metrics,
+	producer *bus.Producer,
+	logger *slog.Logger,
+) ([]engine.RecomputerOption, error) {
+	// THE FAN-OUT CEILING (#1050). Zero leaves engine's GOMAXPROCS default, which
+	// on this container's 1-CPU LimitRange default reads 1 — see
+	// engine.DefaultRecomputeConcurrency for why that is the right number and what
+	// breaks the cgroup-awareness it depends on.
+	//
+	// LOGGED AS THE NUMBER IN FORCE, NOT AS THE CONFIG FIELD. cfg.RecomputeConcurrency
+	// is 0 on every deployment that has not set the variable — which is all of them
+	// — and a logged 0 reads as "no limit", the exact posture this bound removes.
+	logger.Info("recompute fan-out ceiling",
+		"configured", cfg.RecomputeConcurrency,
+		"effective", effectiveRecomputeCeiling(cfg.RecomputeConcurrency),
+		"gomaxprocs", runtime.GOMAXPROCS(0))
+
+	// THE AI LAYER GETS ITS INPUT (AI-M1). It is an OBSERVER, not a dependency: it
+	// runs after the risk FACTs are emitted, and a publish failure is logged and
+	// dropped — a model that cannot be scored must never stop the engine from
+	// computing, publishing and serving the risk numbers the platform trades on.
+	features, err := prediction.NewPublisher(producer)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("AI-M1: publishing risk features for scoring",
+		"subject", prediction.EventTypeFeatureComputed,
+		"feature_set", app.FeatureSetPortfolioRisk)
+
+	return []engine.RecomputerOption{
+		engine.WithMetrics(riskMetrics),
+		engine.WithRecomputeConcurrency(cfg.RecomputeConcurrency),
+		engine.WithMeasureObserver(app.PublishFeaturesOn(features, logger)),
+	}, nil
+}
+
+// effectiveRecomputeCeiling resolves what the recompute fan-out ceiling actually
+// is, so the startup log states the NUMBER IN FORCE rather than the config field
+// (#1050).
+//
+// Logging cfg.RecomputeConcurrency alone would print 0 on every deployment that
+// has not set the variable — which is all of them — and 0 reads as "no limit",
+// the exact posture this bound was added to remove. "Nothing configured" and
+// "checked, and fine" must not look the same, least of all in the one line an
+// operator greps for after an OOMKill.
+func effectiveRecomputeCeiling(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	return engine.DefaultRecomputeConcurrency()
 }

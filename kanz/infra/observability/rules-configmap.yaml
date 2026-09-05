@@ -1942,6 +1942,79 @@ data:
             annotations:
               summary: "The compliance passive-breach sweep is running and not completing"
               description: "ReevaluateAll returned an error, so the monitor did not finish looking at every book it holds and a passive breach in the unreached remainder is unreported until a sweep completes. The loop deliberately logs and continues — a monitor that stopped would be strictly worse — which is why this needs an alert rather than a crash. The compliance ERROR log names the book and the error at each occurrence; the usual causes are a mandate the registry cannot resolve and a classifier that cannot answer for an instrument. If this persists, CompliancePassiveBreachSweepStalled follows, because a failed sweep does not advance the last-success timestamp."
+      - name: risk_recompute_capacity
+      # ===========================================================================
+      # THE RISK ENGINE'S FAN-OUT NOW HAS A CEILING, AND THESE SAY WHETHER IT IS
+      # HOLDING (#1050).
+      #
+      # internal/risk/engine dispatched one goroutine per DUE portfolio with nothing
+      # bounding it, and `ready` is every portfolio past its debounce deadline — an
+      # estate-sized number. The debounce collapses a burst of applies to ONE
+      # portfolio and says nothing about a burst ACROSS portfolios, so the widest
+      # fan-out arrived on a correlated market move (every book dirtied at once, by
+      # definition) and on every rolling deploy (Drain forces the whole dirty set
+      # due). Each goroutine holds a Store.Snapshot clone plus the full measure
+      # working set, in a container the kanz-services LimitRange sizes at cpu: 1 /
+      # memory: 1Gi because risk-engine-rollout.yaml declares no resources: block.
+      #
+      # The bound is RISK_ENGINE_RECOMPUTE_CONCURRENCY, defaulting to GOMAXPROCS. It
+      # removes the OOMKill; it does not remove the capacity question, it MOVES it —
+      # from "how much memory did the fan-out take" to "is the bounded engine keeping
+      # up". That question is what this group answers, and before #1050 there was no
+      # series that could even be asked it.
+        rules:
+          # THE BACKLOG NEVER EMPTIES.
+          #
+          # kanz_risk_recompute_queue_depth is portfolios dirty-and-not-yet-dispatched;
+          # kanz_risk_recompute_inflight is the width working them off. A depth that
+          # spikes and clears is the engine doing its job — that is what the ceiling is
+          # FOR — so a threshold on the instantaneous value would page on every
+          # market-wide move and be silenced within a week.
+          #
+          # min_over_time > 0 is the shape that distinguishes them: it asks whether the
+          # queue was non-empty at EVERY scrape in the window. One empty scrape in
+          # fifteen minutes proves the engine caught up and the rule stays silent. Only
+          # a backlog that never once cleared trips it, and that is a bounded engine
+          # that cannot work off its own book: exposure FACTs are being published late
+          # by a growing margin, and consumers are treating stale risk as current.
+          #
+          # THE UNITS ARE PORTFOLIOS, NOT A RATE, so there is deliberately no absolute
+          # threshold. A 50-portfolio backlog on a 60-book desk is an outage and on a
+          # 20,000-book estate is noise; "never empty for twenty minutes" is scale-free
+          # and is the claim that actually matters.
+          - alert: RiskRecomputeBacklogNeverEmpties
+            expr: min_over_time(kanz_risk_recompute_queue_depth[15m]) > 0
+            for: 5m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "The risk engine's recompute backlog has not cleared in twenty minutes ({{ $labels.pod }})"
+              description: "Every scrape for the last twenty minutes has found portfolios waiting to be recomputed, so this replica has not once caught up with its own dirty set. The recompute fan-out is bounded at RISK_ENGINE_RECOMPUTE_CONCURRENCY (default GOMAXPROCS, which is the container's CPU limit), and that bound is doing what it must — but a queue that never drains means exposure and measure FACTs are being published progressively later than the state they describe, and every consumer treats the last published exposure as current. Read kanz_risk_recompute_inflight beside this: pinned at the ceiling means the engine is saturated and needs CPU (a resources: block, #231) or more replicas across the shard ring (#110); well below the ceiling means the recomputes themselves are slow, so check kanz_risk_recompute_duration_seconds and whether the market-data price store behind the VaR family is responding. A rolling deploy will make this worse, not better: Drain forces the whole dirty set due at once against a 60s grace period."
+
+          # THE WIDTH IS NOT BEING REPORTED AT ALL.
+          #
+          # THIS RULE EXISTS BECAUSE OF THE FAILURE THAT PRODUCED IT TWICE ON THIS
+          # ESTATE (#973, #963): collectors registered inside a branch — `if producer
+          # != nil` and its relatives — so the deployment that took the other branch
+          # exported NO SERIES, and every rule written over them was silent in exactly
+          # the state it was written to detect. An `== 0` or `> N` arm cannot tell a
+          # healthy zero from a series that was never registered; only absent() can.
+          #
+          # engine.NewMetrics registers both gauges unconditionally, from the
+          # composition root, before any broker/database/shard decision is made — so on
+          # a running, scraped risk-engine this series EXISTS at all times, idle or not.
+          # Its absence therefore has exactly three causes and all three are worth
+          # waking somebody for: the collectors moved behind a branch, the pods are not
+          # being scraped, or there is no risk-engine running in this estate at all.
+          #
+          # for: 30m rides out a rolling deploy and a fresh cluster bootstrap, both of
+          # which pass through a legitimate window with no risk-engine target up.
+          - alert: RiskRecomputeWidthUnreported
+            expr: absent(kanz_risk_recompute_inflight)
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "No risk-engine is reporting its recompute fan-out width"
+              description: "kanz_risk_recompute_inflight has produced no sample anywhere for thirty minutes. engine.NewMetrics registers it unconditionally at the composition root, so a running and scraped risk-engine exports it whether or not it is doing any work — an idle engine reads 0, it does not disappear. Three causes: the collector has been moved behind a conditional branch, which is the defect that silenced two alerting layers on this estate already (#973, #963) and which makes RiskRecomputeBacklogNeverEmpties silent with it; the risk-engine pods are up but not being scraped (check the ServiceMonitor and the pod annotations); or no risk-engine is running at all, in which case nothing in this platform is computing exposure or measures and the cached values every consumer is reading are frozen at whatever was last published."
   slo.alerts.rules.yaml: |
     # SLO multi-window burn-rate alerts (SRE-01b) — over slo.recording.rules.yaml.
     #

@@ -232,6 +232,29 @@ type Config struct {
 	// Comma-separated. Only used when the scheduler is enabled.
 	MarketSubjects []string
 
+	// RecomputeConcurrency is the ceiling on how many portfolio recomputes run at
+	// once (RISK_ENGINE_RECOMPUTE_CONCURRENCY, #1050). Zero/unset ⇒
+	// engine.DefaultRecomputeConcurrency(), which is GOMAXPROCS.
+	//
+	// IT BOUNDS RESIDENT MEMORY, NOT JUST SCHEDULING. Each recompute holds a
+	// Store.Snapshot clone of the portfolio's positions plus the full measure
+	// working set (the VaR family included) until it returns, so the fan-out width
+	// multiplies the engine's peak working set. Before this existed the width was
+	// one goroutine per DUE portfolio with nothing bounding it — an estate-sized
+	// number, widest on a correlated market move (which dirties every portfolio at
+	// once, by definition) and on every rolling deploy (Drain forces the whole
+	// dirty set due), inside a container the kanz-services LimitRange sizes at
+	// cpu: 1 / memory: 1Gi because risk-engine-rollout.yaml declares no resources:
+	// block of its own.
+	//
+	// RAISE IT ONLY WITH A CPU LIMIT RAISED ALONGSIDE. Above what the container can
+	// actually run, extra width buys no throughput and costs one more working set
+	// per slot — the direction that ends in an OOMKill the pod reports as a crash.
+	// kanz_risk_recompute_inflight and kanz_risk_recompute_queue_depth are what
+	// this should be tuned against: saturation with a flat queue is healthy,
+	// saturation with a climbing one is a backlog the container cannot work off.
+	RecomputeConcurrency int
+
 	// GRPCListen is the address the risk query gRPC server (API-01b) binds.
 	// Empty ⇒ the query server is not started (probes + ingestion only).
 	GRPCListen string
@@ -308,6 +331,21 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// A MALFORMED CEILING STOPS Load, IT DOES NOT FALL BACK (#1050). The default
+	// this would silently land on — GOMAXPROCS — is a perfectly plausible value, so
+	// an operator who wrote RISK_ENGINE_RECOMPUTE_CONCURRENCY=2x would see their
+	// variable in the pod spec and a bound they did not choose, with nothing
+	// distinguishing it from a deployment that meant it. Same stance as
+	// parseBoolDefault and calibrationHorizon above.
+	recomputeConcurrency, err := env.Int("RISK_ENGINE_RECOMPUTE_CONCURRENCY", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	if recomputeConcurrency < 0 {
+		return Config{}, fmt.Errorf("risk-engine: RISK_ENGINE_RECOMPUTE_CONCURRENCY=%d is negative; "+
+			"unset it for the GOMAXPROCS default, or give a positive ceiling", recomputeConcurrency)
+	}
+
 	// THE SEGREGATION REFUSAL IS VALIDATED HERE, WHERE THE OMS VALIDATES ITS OWN.
 	//
 	// An account bound to two portfolios is one collateral pool the exchange will
@@ -335,6 +373,8 @@ func Load() (Config, error) {
 		MarketDataURL:    marketDataURL,
 
 		RequireValidatedAnalytics: requireValidated,
+
+		RecomputeConcurrency: recomputeConcurrency,
 
 		LiquidityVenue: strings.TrimSpace(os.Getenv("RISK_ENGINE_LIQUIDITY_VENUE")),
 		VenueAccounts:  venueAccounts,

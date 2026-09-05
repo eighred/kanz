@@ -14,13 +14,14 @@ import (
 	"testing"
 
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/test/load/internal/promscrape"
 )
 
-func scrapeOf(t *testing.T, text string) scrape {
+func scrapeOf(t *testing.T, text string) promscrape.Scrape {
 	t.Helper()
-	s, err := parseScrape(bufio.NewScanner(strings.NewReader(text)))
+	s, err := promscrape.Parse(bufio.NewScanner(strings.NewReader(text)))
 	if err != nil {
-		t.Fatalf("parseScrape: %v", err)
+		t.Fatalf("promscrape.Parse: %v", err)
 	}
 	return s
 }

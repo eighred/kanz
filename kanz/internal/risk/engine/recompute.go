@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
@@ -38,6 +40,39 @@ const DefaultDebounceInterval = 250 * time.Millisecond
 // together, and a quiet portfolio being retried has nothing to collapse with.
 const DefaultEmitRetryInterval = 5 * time.Second
 
+// DefaultRecomputeConcurrency is the dispatch ceiling when none is configured:
+// how many portfolio recomputes may execute at once (#1050).
+//
+// GOMAXPROCS, BECAUSE THAT IS WHAT THE CONTAINER CAN ACTUALLY RUN. A recompute is
+// CPU-bound work — Store.Snapshot clones the portfolio's positions, then
+// PopulateUncertainty, ComputeExposure and ComputeMeasures (the whole measure set,
+// VaR family included) run against the clone and stay resident until it returns.
+// Above GOMAXPROCS extra goroutines do not add throughput; they multiply resident
+// memory by the fan-out width and thrash the scheduler, so every recompute's
+// latency degrades together and kanz_risk_recompute_duration_seconds — the ORCH-01f
+// p99 the CICD-01e canary gates on - degrades with them.
+//
+// GOMAXPROCS IS CGROUP-AWARE IN THIS BUILD, WHICH IS THE PREMISE THIS DEFAULT
+// RESTS ON. Since Go 1.25 the runtime derives the default GOMAXPROCS from the CPU
+// bandwidth limit of the cgroup containing the process, for a module whose `go`
+// directive is at least 1.25; kanz/go.mod declares go 1.26.1.
+// risk-engine-rollout.yaml declares no resources: block, so the kanz-services
+// LimitRange sizes the container at cpu: 1 — and this default therefore reads 1 in
+// the pod and NumCPU on a developer box, with neither number written down
+// anywhere. A future build that pins GOMAXPROCS explicitly, or a go directive
+// dropped below 1.25, breaks that chain and this becomes NumCPU against a one-CPU
+// limit: set RISK_ENGINE_RECOMPUTE_CONCURRENCY rather than rediscovering it as an
+// OOMKill.
+//
+// (Verified 2026-09-05 against go.mod at 40569ca5. It is the premise, not the
+// conclusion, that a future reader must re-check.)
+func DefaultRecomputeConcurrency() int {
+	if n := runtime.GOMAXPROCS(0); n > 0 {
+		return n
+	}
+	return 1
+}
+
 // Recomputer runs the engine's apply→recompute→publish reaction. On a
 // Trigger it debounces per-portfolio, then takes a race-free Snapshot,
 // recomputes exposure + measures, stores them in the degraded-fallback
@@ -61,6 +96,45 @@ const DefaultEmitRetryInterval = 5 * time.Second
 // stopped timer from one whose func already started) that makes a
 // race-free graceful drain hard. The read is a Store.Snapshot, so a
 // recompute never races a concurrent apply.
+//
+// # Why the fan-out has a ceiling (#1050)
+//
+// The paragraph above is why the recomputes run in PARALLEL. This one is why
+// there is a limit on how parallel. The dispatch used to be one goroutine per due
+// portfolio with nothing bounding it, and `ready` is every portfolio in the dirty
+// map past its deadline — an estate-sized number, not a request-sized one. The
+// debounce does not help: it collapses a burst of applies to ONE portfolio and
+// says nothing about a burst ACROSS portfolios. So the two events that produced
+// the widest fan-out were the worst two available:
+//
+//   - A correlated market move dirties every portfolio at once, by definition —
+//     so peak width coincided exactly with the moment the numbers matter most.
+//   - Every rolling deploy: Drain forces EVERY dirty portfolio due at once and
+//     then blocks on wg.Wait(), against terminationGracePeriodSeconds: 60. An
+//     overrun there is a SIGKILL mid-flush, which loses exactly the exposure FACTs
+//     #620's reschedule logic exists to guarantee.
+//
+// sem is a buffered channel of DefaultRecomputeConcurrency slots, acquired by the
+// worker BEFORE it dispatches. THE DISPATCHER BLOCKS AT THE CEILING; IT NEVER
+// DROPS. A skipped recompute leaves that portfolio's last published exposure
+// standing as its live risk, which is the failure mode #620 already ruled against
+// — so the only thing a full semaphore may do is make the worker wait.
+//
+// IT CANNOT DEADLOCK AGAINST Drain, and the argument is short enough to check.
+// The worker acquires the slot with r.mu UNLOCKED, and a slot is released by a
+// recompute goroutine that needs nothing from the worker: it takes r.mu only
+// briefly (markAwaitingEmit / clearAwaitingEmit) and nudge is non-blocking. So
+// every acquire waits on a bounded amount of finite CPU work, Drain's <-r.done is
+// reached once the dirty map empties, and wg.Wait() then joins a set already
+// draining.
+//
+// IT DOES NOT MAKE DRAIN SLOWER IN THE SHAPE THAT MATTERS. Total drain work is
+// unchanged — the same N recomputes, the same CPU — and on a one-CPU container
+// the unbounded version never ran them faster, it ran them interleaved while
+// holding N working sets resident. Bounded, the flush is N/ceiling batches of
+// serialized CPU; unbounded it was one batch of N-way time-slicing of that same
+// CPU at N times the memory. What the bound removes is the OOMKill that used to
+// end the flush early.
 type Recomputer struct {
 	store     *state.Store
 	registry  *compute.Registry
@@ -98,6 +172,26 @@ type Recomputer struct {
 	wake chan struct{}  // nudges the worker to re-scan deadlines
 	wg   sync.WaitGroup // tracks in-flight recompute goroutines
 	done chan struct{}  // closed when the worker loop exits
+
+	// sem bounds the dispatch fan-out: cap(sem) recomputes may run at once, and
+	// its OCCUPANCY is what kanz_risk_recompute_inflight exports, so the gauge and
+	// the ceiling it describes can never disagree. See the type doc.
+	sem chan struct{}
+
+	// undispatched is the remainder of the batch the worker is currently walking:
+	// portfolios that are DUE, have already been removed from the dirty map, and
+	// have not yet acquired a dispatch slot.
+	//
+	// IT EXISTS BECAUSE len(dirty) IS NOT THE BACKLOG, AND READING IT AS ONE
+	// REPORTS ZERO IN THE ONE STATE THE GAUGE IS FOR. The worker removes the whole
+	// due batch from the map in a single scan and then walks it; while it is parked
+	// on the semaphore with 196 of 200 portfolios still to dispatch, the map is
+	// empty. A queue-depth gauge sourced from len(dirty) alone would therefore read
+	// 0 through the exact saturation an operator is watching for — an absent
+	// backlog and an unreported one being the same reading, and only one of them
+	// honest. (Caught by TestRecompute_WidthAndBacklogAreExported before this
+	// shipped, not after.)
+	undispatched atomic.Int64
 }
 
 // RecomputerOption customizes a Recomputer at construction (applied before the
@@ -116,6 +210,25 @@ func WithEmitRetryInterval(d time.Duration) RecomputerOption {
 	return func(r *Recomputer) {
 		if d > 0 {
 			r.emitRetry = d
+		}
+	}
+}
+
+// WithRecomputeConcurrency overrides how many portfolio recomputes may execute at
+// once (#1050). Non-positive is ignored, leaving DefaultRecomputeConcurrency.
+//
+// AN OPTION RATHER THAN A MUTABLE PACKAGE VARIABLE, for the reason
+// WithEmitRetryInterval states above and one more: the ceiling is read by the
+// WORKER goroutine on the dispatch path, so relaxing a constant into a var "just
+// so a test can shrink it" would put a data race on the value that bounds the
+// fan-out. Applied at construction, before the worker starts, so it is race-free.
+//
+// In production it is threaded from RISK_ENGINE_RECOMPUTE_CONCURRENCY by the
+// composition root — the same seam a test passes through, not a second one.
+func WithRecomputeConcurrency(n int) RecomputerOption {
+	return func(r *Recomputer) {
+		if n > 0 {
+			r.sem = make(chan struct{}, n)
 		}
 	}
 }
@@ -185,6 +298,12 @@ func NewRecomputer(
 		awaiting:  make(map[v1.PortfolioID]struct{}),
 		wake:      make(chan struct{}, 1),
 		done:      make(chan struct{}),
+		// The ceiling is established BEFORE the options run, so
+		// WithRecomputeConcurrency overrides a real default rather than being the
+		// only thing that ever creates the channel. An unset sem would be a nil
+		// channel and a send on nil blocks forever — the one way a missing config
+		// value could turn into a silent full stop of the whole recompute path.
+		sem: make(chan struct{}, DefaultRecomputeConcurrency()),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -207,7 +326,14 @@ func (r *Recomputer) Trigger(id v1.PortfolioID) {
 		return
 	}
 	r.dirty[id] = time.Now().Add(r.debounce)
+	depth := len(r.dirty)
 	r.mu.Unlock()
+	// PUBLISHED FROM HERE AS WELL AS FROM THE WORKER, because the worker is
+	// exactly where it stops being fresh: while it is parked acquiring a dispatch
+	// slot for a wide batch it publishes nothing, and that is the load under which
+	// an operator most needs to see the backlog moving. Both terms, for the reason
+	// the undispatched field documents.
+	r.metrics.setQueueDepth(depth + int(r.undispatched.Load()))
 	r.nudge()
 }
 
@@ -281,13 +407,44 @@ func (r *Recomputer) loop() {
 		for _, id := range ready {
 			delete(r.dirty, id)
 		}
-		closed, empty := r.closed, len(r.dirty) == 0
+		// deferred is what is still IN the map: dirty, but not yet past its debounce
+		// deadline. The due batch has just been removed from it, so the backlog is
+		// deferred plus however much of that batch is still waiting for a slot.
+		deferred := len(r.dirty)
+		closed, empty := r.closed, deferred == 0
 		r.mu.Unlock()
+		r.undispatched.Store(int64(len(ready)))
+		r.metrics.setQueueDepth(deferred + len(ready))
 
-		for _, id := range ready {
+		for i, id := range ready {
+			// ACQUIRE BEFORE DISPATCH, AND BLOCK RATHER THAN SKIP (#1050). This send
+			// is the ceiling: at cap(sem) in flight the worker waits here instead of
+			// starting a cap+1'th clone-plus-VaR working set. Dropping the portfolio
+			// instead would leave its last published exposure standing as its live
+			// risk — the exact failure #620 exists to close.
+			//
+			// It is also what makes the `continue` re-scan below safe. That branch
+			// re-enters the loop before the batch it just dispatched has drained;
+			// unbounded, each pass piled another full batch of goroutines on the
+			// last. Bounded, the re-scan simply parks here until a slot frees.
+			//
+			// The one cost is that a baseCtx cancellation is not observed while this
+			// send is parked. That is bounded by one recompute's duration and is the
+			// right trade: recomputes are finite CPU work, and on a canceled baseCtx
+			// each one skips its emit and returns almost immediately.
+			r.sem <- struct{}{}
+			r.undispatched.Store(int64(len(ready) - i - 1))
+			r.metrics.setInflight(len(r.sem))
+			// Depth EXCLUDES what is now in flight — that is the other gauge — so the
+			// two series are disjoint and depth+inflight is the outstanding work.
+			r.metrics.setQueueDepth(deferred + len(ready) - i - 1)
 			r.wg.Add(1)
 			go func(id v1.PortfolioID) {
-				defer r.wg.Done()
+				defer func() {
+					<-r.sem
+					r.metrics.setInflight(len(r.sem))
+					r.wg.Done()
+				}()
 				r.recompute(id)
 			}(id)
 		}

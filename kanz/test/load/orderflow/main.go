@@ -93,6 +93,8 @@ import (
 	"github.com/eighred/kanz/internal/env"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/secret"
+
+	"github.com/eighred/kanz/test/load/internal/promscrape"
 )
 
 // config is the whole run, read from the environment.
@@ -270,7 +272,7 @@ func run() error {
 		}
 	}
 
-	after, serr := fetchScrape(ctx, cfg.metricsURL)
+	after, serr := promscrape.Fetch(ctx, cfg.metricsURL)
 	if serr != nil {
 		// Not fatal: the load already ran. But the control deltas are half the
 		// point of this harness, so a run that cannot read them says so rather
@@ -285,7 +287,7 @@ func run() error {
 // report prints the run. It is deliberately a plain text block rather than JSON:
 // the audience is a person deciding whether a number may be quoted, and the
 // caveats are as load-bearing as the numbers.
-func report(cfg config, results []stageResult, before, after scrape) {
+func report(cfg config, results []stageResult, before, after promscrape.Scrape) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n=== orderflow: write-path admission capacity ===\n")
 	fmt.Fprintf(&b, "gateway=%s tenant=%s portfolio=%s instrument=%s venue=%q group=%s\n",
@@ -519,7 +521,7 @@ func watchOutstanding(ctx context.Context, s *submitter, l *ledger, res *stageRe
 func sampleBacklog(ctx context.Context, cfg config) float64 {
 	max := -1.0
 	for ctx.Err() == nil {
-		if s, err := fetchScrape(ctx, cfg.metricsURL); err == nil {
+		if s, err := promscrape.Fetch(ctx, cfg.metricsURL); err == nil {
 			if v, ok := pendingCommands(s, cfg.group, "order.order.submit"); ok && v > max {
 				max = v
 			}

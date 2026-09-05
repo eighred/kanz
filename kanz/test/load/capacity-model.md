@@ -16,7 +16,7 @@ still under budget* — not the maximum the box can push.
 |---|---|---|
 | `seed` (`SEED_PORTFOLIOS=N`) | seeds an N-portfolio book so load is not one hot key | book size the run is valid for |
 | `baseline.js` (`PORTFOLIOS=N`) | **read** hot path (gateway → risk-engine query), spread across the book via `pickPortfolio()` | sustained **RPS/replica** at the p99 knee |
-| `ingest` (`RATE`, `DURATION`, `PORTFOLIOS`) | **state-write** hot path (NATS → risk-engine ingest → sharded recompute, PARITY-05a) | sustained **events/sec/replica** before bus-pending climbs |
+| `ingest` (`RATE`, `DURATION`, `PORTFOLIOS`) | **state-write** hot path (NATS → risk-engine ingest → sharded recompute, PARITY-05a) | sustained **events/sec/replica** before bus-pending climbs, **and the engine's own working set**: peak goroutines, peak RSS, peak recompute fan-out width and backlog, and the recompute-latency distribution (#1050) |
 | `orderflow` (`STAGES`, `STAGE_DURATION`) | **ORDER ADMISSION** (gateway `POST /v1/orders` → broker → OMS claim → pre-trade gate → Postgres admission → outbox) | sustained **admitted orders/sec/replica**, and which control degraded first |
 | `soak.js` | steady sub-capacity read load for hours | p99 drift / leaks |
 
@@ -62,6 +62,22 @@ Two loads share the replicas. The binding constraint is whichever needs more.
   pending/replica** = `C1_write` expressed as standing backlog: one replica works
   ~500 queued state events down inside the recompute debounce + p99 window. Lag
   past that ⇒ add workers.
+- **The engine's working set is now measurable, and it was not before (#1050).**
+  The recompute fan-out was one goroutine per DUE portfolio with no ceiling, so
+  peak memory was a function of how many books happened to be dirty at the same
+  instant — a quantity nobody could size a `resources:` block against, which is
+  part of why risk-engine still has none (#231). It is now bounded by
+  `RISK_ENGINE_RECOMPUTE_CONCURRENCY` (default GOMAXPROCS, which is cgroup-aware
+  in this build), and `ingest` polls the engine's own `/metrics` across the run,
+  reporting peak goroutines, peak RSS, peak `kanz_risk_recompute_inflight` and
+  `kanz_risk_recompute_queue_depth`, and the recompute-latency distribution for
+  that run. Point it with `INGEST_ENGINE_METRICS_URL`; a run that could not read
+  the endpoint reports UNKNOWN and makes no capacity claim rather than a peak of
+  zero, because a number nobody measured is worse than no `resources:` block —
+  the limit it produces looks chosen.
+  **Take the number from a container shaped like the pod.** GOMAXPROCS on a
+  developer box is not the one-CPU LimitRange default, and the ceiling follows
+  GOMAXPROCS, so the two runs measure different engines.
 
 **Sharding interaction (PARITY-05a).** With consistent-hash sharding on, each
 replica owns ~`1/R` of portfolios and subscribes as its own broadcast group, so
