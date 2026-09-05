@@ -10,6 +10,8 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/eighred/kanz/internal/execution"
 )
 
 var at0 = time.Unix(1_700_000_000, 0).UTC()
@@ -45,7 +47,7 @@ func acct(account, asset string, amount int64) *accountingpb.VenueAccountCash {
 // layer.
 func TestView_UnknownBeforeAnyAnnouncement(t *testing.T) {
 	v := NewView("okx-sub-1", WithViewClock(func() time.Time { return at0 }))
-	if _, ok := v.Balance("USDT"); ok {
+	if _, ok, _ := v.Balance("USDT"); ok {
 		t.Fatal("an adapter that has never been told its balance reported one — unknown must " +
 			"not become zero, or the first reconciliation pass breaks on every asset")
 	}
@@ -60,7 +62,7 @@ func TestView_FoldsItsOwnAccountOnly(t *testing.T) {
 	if err := v.Handle(context.Background(), nil, payload); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	got, ok := v.Balance("USDT")
+	got, ok, _ := v.Balance("USDT")
 	if !ok {
 		t.Fatal("the announcement was not folded")
 	}
@@ -80,7 +82,7 @@ func TestView_AbsentAssetIsKnownZero(t *testing.T) {
 	if err := v.Handle(context.Background(), nil, announcement(t, at0, acct("okx-sub-1", "USDT", 140))); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	got, ok := v.Balance("BTC")
+	got, ok, _ := v.Balance("BTC")
 	if !ok {
 		t.Fatal("an asset absent from an ARRIVED announcement was reported unknown — that skips " +
 			"the exchange holding something we do not think we have")
@@ -103,7 +105,7 @@ func TestView_ReplacesRatherThanMerges(t *testing.T) {
 	if err := v.Handle(ctx, nil, announcement(t, at0, acct("okx-sub-1", "USDT", 140))); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	got, ok := v.Balance("BTC")
+	got, ok, _ := v.Balance("BTC")
 	if !ok {
 		t.Fatal("BTC became unknown after a level that omitted it — it is known to be zero")
 	}
@@ -127,11 +129,11 @@ func TestView_StaleIsUnknown(t *testing.T) {
 	if err := v.Handle(context.Background(), nil, announcement(t, at0, acct("okx-sub-1", "USDT", 140))); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if _, ok := v.Balance("USDT"); !ok {
+	if _, ok, _ := v.Balance("USDT"); !ok {
 		t.Fatal("a fresh balance was treated as stale")
 	}
 	now = at0.Add(16 * time.Minute)
-	if _, ok := v.Balance("USDT"); ok {
+	if _, ok, _ := v.Balance("USDT"); ok {
 		t.Fatal("a balance past the bound was served as current")
 	}
 	if staleAge < 16*time.Minute {
@@ -149,5 +151,38 @@ func TestView_IsAnExpectedBalances(t *testing.T) {
 	g := NewGauge("okx")
 	if got := Announce(g, nil, "okx", v); got == nil {
 		t.Fatal("Announce dropped a bound view")
+	}
+}
+
+// THE UNKNOWN NAMES ITSELF, AND THE TWO ARE DIFFERENT INCIDENTS (#1063).
+//
+// Both answers are ok=false and they send an operator to different places: never
+// announced means the cash spine has not delivered once, so this account has NEVER
+// been compared against the exchange; stale means it delivered and has stopped.
+// A counter that cannot tell them apart says only "something", which is the state
+// this seam was in when it said nothing at all.
+func TestTheUnknownNamesWhichUnknownItIs(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	v := NewView("acct-1",
+		WithViewClock(func() time.Time { return now }),
+		WithViewMaxAge(15*time.Minute))
+
+	if _, ok, reason := v.Balance("USDT"); ok || reason != execution.BalanceUnknownNeverAnnounced {
+		t.Fatalf("cold view answered (ok=%v, reason=%q), want (false, %q)",
+			ok, reason, execution.BalanceUnknownNeverAnnounced)
+	}
+
+	if err := v.Handle(context.Background(), nil, announcement(t, now, acct("acct-1", "USDT", 100))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if _, ok, reason := v.Balance("USDT"); !ok || reason != "" {
+		t.Fatalf("fresh view answered (ok=%v, reason=%q), want (true, \"\") — a KNOWN balance "+
+			"must not carry a reason, or every asset looks like a skip", ok, reason)
+	}
+
+	now = now.Add(16 * time.Minute)
+	if _, ok, reason := v.Balance("USDT"); ok || reason != execution.BalanceUnknownStale {
+		t.Fatalf("aged-out view answered (ok=%v, reason=%q), want (false, %q)",
+			ok, reason, execution.BalanceUnknownStale)
 	}
 }
