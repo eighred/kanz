@@ -139,6 +139,12 @@ func run() int {
 	// and none occurred": today the book looks identical either way.
 	stateEntrySourcePosture(obs.Registry, logger, cfg)
 
+	// AND WHETHER THIS POD CAN VALUE A FOREIGN HOLDING (#1041). Registered here
+	// for the same reason and before buildLiveFX below, which is silent on an
+	// ABSENT FX spec while failing the start on a malformed one — the asymmetry
+	// that let every deployed pod run with no rates and no way to notice.
+	stateFXPosture(obs.Registry, logger, cfg)
+
 	store, ledgerPool, closeStore, err := openStore(ctx, cfg, logger)
 	if err != nil {
 		logger.Error("store init failed", "err", err)
