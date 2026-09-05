@@ -120,13 +120,47 @@ func NewBookScope(pairs []Subject, accounts map[string]map[string][]string) (*Bo
 					"Without it every run compares the WHOLE portfolio book against ONE custodian's "+
 					"statement, so each custodian's run reports every position held at the other as "+
 					"MISSING_AT_CUSTODIAN — the entire book becomes breaks, twice, and a real break is "+
-					"buried in the noise. Declare the accounts each custodian holds, e.g. "+
-					"ACCOUNTING_CUSTODY_ACCOUNTS=%s:%s:okx-sub-1",
-					portfolio, len(cs), strings.Join(cs, ", "), custodian, portfolio, custodian)
+					"buried in the noise. Declare the accounts EVERY custodian of this portfolio holds "+
+					"— entries separated by whitespace, one custodian's accounts by comma — and replace "+
+					"each placeholder with the real exchange account ids:\n"+
+					"ACCOUNTING_CUSTODY_ACCOUNTS=%s\n",
+					portfolio, len(cs), strings.Join(cs, ", "), custodian, s.declTemplate(portfolio, cs))
 			}
 		}
 	}
 	return s, nil
+}
+
+// declTemplate renders the ACCOUNTING_CUSTODY_ACCOUNTS value that would LIFT the
+// refusal above, in the syntax ParseCustodyAccounts actually accepts.
+//
+// IT IS COMPLETE, AND THAT IS THE POINT (#1029). The message used to end with a
+// one-entry example naming a single account of a single custodian — printed by a
+// refusal that fires precisely because the portfolio has two, so the example
+// covered one of them. An operator who applied it literally got the SAME exit 2
+// naming the other custodian: the remediation did not produce a start, which no
+// unit test of the parser can see because the syntax was never the wrong part.
+//
+// Every custodian of the portfolio appears here, and the ones already declared
+// keep the accounts they were declared with rather than being overwritten by a
+// placeholder.
+func (s *BookScope) declTemplate(portfolio string, custodians []string) string {
+	entries := make([]string, 0, len(custodians))
+	for _, c := range custodians {
+		ids := make([]string, 0, len(s.accounts[portfolio][c]))
+		for id := range s.accounts[portfolio][c] {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		if len(ids) == 0 {
+			// Named after the custodian so two undeclared custodians do not both
+			// claim one placeholder id — which the refusal above would reject as
+			// an account counted at both.
+			ids = []string{"<accounts-held-at-" + c + ">"}
+		}
+		entries = append(entries, portfolio+":"+c+":"+strings.Join(ids, ","))
+	}
+	return strings.Join(entries, " ")
 }
 
 // Scoped reports whether this portfolio's book is folded per custodian. False
@@ -163,31 +197,51 @@ func (s *BookScope) For(portfolio, custodian string) (scope, claimed ledger.Acco
 	return s.accounts[portfolio][custodian], s.claimed[portfolio]
 }
 
-// ParseCustodyAccounts parses the ACCOUNTING_CUSTODY_ACCOUNTS declaration:
+// ParseCustodyAccounts parses the WHOLE ACCOUNTING_CUSTODY_ACCOUNTS declaration:
 //
-//	PF1:CUST-A:okx-sub-1,okx-sub-2   PF1:CUST-B:bin-main
+//	ACCOUNTING_CUSTODY_ACCOUNTS=PF1:CUST-A:okx-sub-1,okx-sub-2 PF1:CUST-B:bin-main
 //
-// one entry per (portfolio, custodian). A MALFORMED ENTRY IS AN ERROR AND NOT A
-// SKIP, exactly as parseCustodyPairs treats a malformed pair: dropping one would
-// un-scope a custodian while the service reported a healthy start, which is the
-// defect this declaration exists to prevent, reintroduced by the parser.
-func ParseCustodyAccounts(specs []string) (map[string]map[string][]string, error) {
+// ENTRIES ARE SEPARATED BY WHITESPACE, a custodian's ACCOUNTS BY COMMA, one entry
+// per (portfolio, custodian).
+//
+// IT TAKES THE RAW ENVIRONMENT VALUE BECAUSE THE TWO LEVELS OF THIS GRAMMAR MUST
+// HAVE ONE OWNER (#1029). The outer split used to live in config as
+// env.SplitList, which splits on comma — the same character that separates one
+// custodian's accounts. A custodian holding two accounts therefore had its entry
+// cut in half: the value "PF1:CUST-A:okx-sub-1,okx-sub-2 PF1:CUST-B:bin-main",
+// written with commas throughout as that split required, arrived here as three
+// entries rather than two, the middle one a bare "okx-sub-2", and the pod exited
+// 2 naming a fragment the operator never typed.
+//
+// #1006's custodian scoping was then reachable ONLY for single-account
+// custodians, which is not the shape an institutional portfolio is in: the repair
+// was unreachable for the case it was written for. A grammar split in one package
+// and interpreted in another has no owner; this one has.
+//
+// Whitespace is the outer separator because no portfolio, custodian or exchange
+// account id contains any, so the two levels cannot collide again — and because
+// it lets a manifest write one entry per line in a YAML block scalar instead of
+// one unreadable run.
+//
+// A MALFORMED ENTRY IS AN ERROR AND NOT A SKIP, exactly as parseCustodyPairs
+// treats a malformed pair: dropping one would un-scope a custodian while the
+// service reported a healthy start, which is the defect this declaration exists
+// to prevent, reintroduced by the parser.
+func ParseCustodyAccounts(decl string) (map[string]map[string][]string, error) {
 	out := map[string]map[string][]string{}
 	seen := map[string]bool{}
-	for _, spec := range specs {
-		spec = strings.TrimSpace(spec)
-		if spec == "" {
-			continue
-		}
-		parts := strings.Split(spec, ":")
+	// Fields, not Split: an operator writes this across lines in a manifest, and
+	// leading indentation must not become an empty entry.
+	for _, entry := range strings.Fields(decl) {
+		parts := strings.Split(entry, ":")
 		if len(parts) != 3 {
 			return nil, fmt.Errorf("custody: ACCOUNTING_CUSTODY_ACCOUNTS entry %q is not "+
-				"\"portfolio:custodian:account[,account...]\"", spec)
+				"\"portfolio:custodian:account[,account...]\".\n\n%s", entry, entryHint(entry))
 		}
-		portfolio, custodian := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		portfolio, custodian := parts[0], parts[1]
 		if portfolio == "" || custodian == "" {
 			return nil, fmt.Errorf("custody: ACCOUNTING_CUSTODY_ACCOUNTS entry %q names an empty "+
-				"portfolio or custodian", spec)
+				"portfolio or custodian", entry)
 		}
 		key := portfolio + "|" + custodian
 		if seen[key] {
@@ -198,9 +252,8 @@ func ParseCustodyAccounts(specs []string) (map[string]map[string][]string, error
 
 		var ids []string
 		for _, id := range strings.Split(parts[2], ",") {
-			id = strings.TrimSpace(id)
 			if id == "" {
-				return nil, fmt.Errorf("custody: ACCOUNTING_CUSTODY_ACCOUNTS entry %q has an empty account id", spec)
+				return nil, fmt.Errorf("custody: ACCOUNTING_CUSTODY_ACCOUNTS entry %q has an empty account id", entry)
 			}
 			ids = append(ids, id)
 		}
@@ -210,4 +263,23 @@ func ParseCustodyAccounts(specs []string) (map[string]map[string][]string, error
 		out[portfolio][custodian] = ids
 	}
 	return out, nil
+}
+
+// entryHint names the SEPARATOR MISTAKE behind a malformed entry, because the two
+// that #1029 makes likely are both invisible in the fragment the operator is
+// shown: they never wrote "okx-sub-2", the splitter did.
+func entryHint(entry string) string {
+	switch {
+	case !strings.Contains(entry, ":"):
+		return "It has no ':' at all, so it is the tail of an account list that was split. " +
+			"ENTRIES ARE SEPARATED BY WHITESPACE and a custodian's ACCOUNTS BY COMMA — write " +
+			"\"PF1:CUST-A:okx-sub-1,okx-sub-2\" with no space after the comma."
+	case strings.Count(entry, ":") > 2:
+		return "It has more than two ':', so two entries ran together. ENTRIES ARE SEPARATED BY " +
+			"WHITESPACE, not by comma — the comma separates one custodian's ACCOUNTS. Write " +
+			"\"PF1:CUST-A:okx-sub-1 PF1:CUST-B:bin-main\"."
+	default:
+		return "An entry names a portfolio, a custodian and at least one exchange account, e.g. " +
+			"\"PF1:CUST-A:okx-sub-1,okx-sub-2\"."
+	}
 }

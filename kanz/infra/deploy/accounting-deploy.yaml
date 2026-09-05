@@ -145,17 +145,25 @@ spec:
             # THAN MERELY OMITTED (#962, #1006, #1025) — a control nobody can find in
             # the manifest is a control nobody knows is absent.
             #
-            #   ACCOUNTING_CUSTODY_PAIRS     PF1:CUST-A,PF1:CUST-B — the work list
-            #   ACCOUNTING_CUSTODY_ACCOUNTS  PF1:CUST-A:okx-sub-1,PF1:CUST-B:bin-main —
-            #                                which exchange accounts each custodian holds
+            #   ACCOUNTING_CUSTODY_PAIRS=PF1:CUST-A,PF1:CUST-B
+            #     the work list: "portfolio:custodian" entries, COMMA-separated.
             #
-            # BOTH ARE COMMA-SEPARATED, one entry per custodian, and the comma is the
-            # ONLY separator env.SplitList honours — which means a custodian holding
-            # more than one account cannot be declared here today: the comma inside
-            # "okx-sub-1,okx-sub-2" splits the entry and the pod refuses to start on the
-            # fragment. Verified against the built binary. That is a defect in the
-            # declaration format rather than in the control, and it is why both examples
-            # above name exactly one account each.
+            #   ACCOUNTING_CUSTODY_ACCOUNTS=PF1:CUST-A:okx-sub-1,okx-sub-2 PF1:CUST-B:bin-main
+            #     which exchange accounts each custodian holds: entries WHITESPACE-
+            #     separated, one custodian's accounts comma-separated.
+            #
+            # THE TWO SEPARATORS DIFFER BECAUSE THEY MUST (#1029). A custodian's accounts
+            # are the inner list, so the comma is spent there and the entries around them
+            # cannot also use it. Read with env.SplitList — comma-only — the entry above
+            # was cut at "okx-sub-2" and the pod exited 2 on a fragment the operator never
+            # typed, which made #1006's custodian scoping reachable ONLY for custodians
+            # holding exactly one account. Whitespace inside a PAIRS entry is now refused
+            # for the same reason it is a separator here: swallowed, it became one pair
+            # with a custodian id no statement will ever carry.
+            #
+            # BOTH LINES ABOVE ARE PARSED FROM THIS FILE BY A TEST
+            # (custody_declaration_examples_test.go), so the syntax this manifest
+            # advertises cannot drift from the syntax the binary accepts.
             #
             # UNSET, THE BOOK OF RECORD IS VERIFIED AGAINST NO CUSTODIAN. Nothing is
             # scheduled (main says so at ERROR on every boot), no ReconciliationRun FACT

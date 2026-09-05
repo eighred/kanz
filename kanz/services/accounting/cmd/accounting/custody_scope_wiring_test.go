@@ -44,7 +44,7 @@ func TestTwoCustodiansWithoutAnAccountDeclarationRefusesToStart(t *testing.T) {
 func TestTwoCustodiansWithAnAccountDeclarationStarts(t *testing.T) {
 	cfg := baseCfg()
 	cfg.CustodyPairs = []string{"PF1:CUST-A", "PF1:CUST-B"}
-	cfg.CustodyAccounts = []string{"PF1:CUST-A:okx-sub-1", "PF1:CUST-B:bin-main"}
+	cfg.CustodyAccounts = "PF1:CUST-A:okx-sub-1 PF1:CUST-B:bin-main"
 
 	plane, err := buildPlane(t, cfg, &capturingHandler{})
 	if err != nil {
@@ -84,12 +84,15 @@ func TestASingleCustodianPortfolioStartsWithNoDeclaration(t *testing.T) {
 func TestAnAccountDeclarationForAnUnconfiguredPairRefusesToStart(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		accounts []string
+		accounts string
 		wantIn   string
 	}{
-		{"unknown portfolio", []string{"PF9:CUST-A:okx-sub-1"}, "not in ACCOUNTING_CUSTODY_PAIRS"},
-		{"unknown custodian", []string{"PF1:CUST-Z:okx-sub-1"}, "not a configured pair"},
-		{"malformed entry", []string{"PF1:CUST-A"}, "is not"},
+		{"unknown portfolio", "PF9:CUST-A:okx-sub-1", "not in ACCOUNTING_CUSTODY_PAIRS"},
+		{"unknown custodian", "PF1:CUST-Z:okx-sub-1", "not a configured pair"},
+		{"malformed entry", "PF1:CUST-A", "is not"},
+		// The fragment env.SplitList used to manufacture out of a two-account
+		// custodian. It must be refused, and it must never be produced (#1029).
+		{"a bare account fragment", "okx-sub-2", "no ':' at all"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := baseCfg()

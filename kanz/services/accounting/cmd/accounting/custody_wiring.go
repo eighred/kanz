@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
+	"unicode"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,18 +35,36 @@ type custodyPlane struct {
 	durable bool
 }
 
-// parseCustodyPairs parses "portfolio:custodian" pairs.
+// parseCustodyPairs parses comma-separated "portfolio:custodian" pairs.
 //
 // A MALFORMED PAIR IS AN ERROR AND NOT A SKIP. Silently dropping one would
 // un-reconcile a portfolio while the service reported a healthy start, and the
 // gap would be invisible precisely because the pair never reaches the metric
 // seeding that would have exported its zero series.
+//
+// WHITESPACE INSIDE AN ENTRY IS REFUSED, AND THAT IS THE SAME RULE, NOT A NEW ONE
+// (#1029). strings.Cut splits on the FIRST colon, so "PF1:CUST-A PF2:CUST-B" —
+// what an operator writes after declaring ACCOUNTING_CUSTODY_ACCOUNTS, whose
+// entries ARE whitespace-separated — was accepted as ONE pair whose custodian id
+// is "CUST-A PF2:CUST-B". The pod started clean, PF2 was never reconciled at all,
+// and PF1's pair reconciled forever as NO_STATEMENT against a custodian no
+// statement will ever name. That is a malformed pair swallowed rather than
+// refused: the shape this function's own doc says must be an error.
 func parseCustodyPairs(specs []string) ([]custody.Subject, error) {
 	out := make([]custody.Subject, 0, len(specs))
 	seen := map[string]struct{}{}
 	for _, spec := range specs {
-		portfolio, custodian, ok := strings.Cut(strings.TrimSpace(spec), ":")
-		portfolio, custodian = strings.TrimSpace(portfolio), strings.TrimSpace(custodian)
+		spec = strings.TrimSpace(spec)
+		if strings.ContainsFunc(spec, unicode.IsSpace) {
+			return nil, fmt.Errorf("accounting: ACCOUNTING_CUSTODY_PAIRS entry %q contains whitespace, "+
+				"which is not a separator here — PAIRS ARE SEPARATED BY COMMAS. Accepted, it would be "+
+				"ONE pair whose custodian id is the rest of the line, reconciling forever as "+
+				"NO_STATEMENT while every portfolio after the space went unreconciled with nothing "+
+				"said. Write \"PF1:CUST-A,PF1:CUST-B\". (ACCOUNTING_CUSTODY_ACCOUNTS separates ITS "+
+				"entries by whitespace instead, because a comma there separates one custodian's "+
+				"accounts.)", spec)
+		}
+		portfolio, custodian, ok := strings.Cut(spec, ":")
 		if !ok || portfolio == "" || custodian == "" {
 			return nil, fmt.Errorf("accounting: ACCOUNTING_CUSTODY_PAIRS entry %q is not \"portfolio:custodian\"", spec)
 		}
