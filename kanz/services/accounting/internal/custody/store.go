@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/eighred/kanz/services/accounting/internal/recon"
 )
 
 // ErrNoStatement is returned by LatestStatement when the custodian has said
@@ -311,7 +313,32 @@ func cloneStatement(s Statement) Statement {
 	out.BusinessDate = BusinessDay(s.BusinessDate)
 	out.Positions = cloneRats(s.Positions)
 	out.Cash = cloneRats(s.Cash)
+	out.Transactions = cloneTransactions(s.Transactions)
 	return out
+}
+
+// cloneTransactions deep-copies the trade lines, INCLUDING their rats, for
+// cloneRats's reason: a caller mutating a figure on its own statement must not
+// reach into the store's copy and change what a later run reconciles against.
+func cloneTransactions(in []recon.Transaction) []recon.Transaction {
+	if in == nil {
+		return nil
+	}
+	out := make([]recon.Transaction, len(in))
+	for i, tx := range in {
+		tx.Quantity = cloneRat(tx.Quantity)
+		tx.Price = cloneRat(tx.Price)
+		tx.Cash = cloneRat(tx.Cash)
+		out[i] = tx
+	}
+	return out
+}
+
+func cloneRat(r *big.Rat) *big.Rat {
+	if r == nil {
+		return nil
+	}
+	return new(big.Rat).Set(r)
 }
 
 func cloneRats(in map[string]*big.Rat) map[string]*big.Rat {

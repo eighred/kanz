@@ -446,6 +446,21 @@ message CustodianStatement {
   // received_at is when the platform learned of the statement (the knowledge
   // time to business_date's effective time). Required.
   google.protobuf.Timestamp received_at = 7;
+
+  // transactions are the trade lines the custodian reports for this business
+  // date (#1049). OPTIONAL, and an empty list is NOT "no transactions occurred"
+  // -- see grain, which is the field that says which.
+  repeated StatementTransaction transactions = 8;
+
+  // grain declares what this feed supplies, and it is what makes an empty
+  // transactions list readable. A custodian that sends only balances must produce
+  // a statement that SAYS SO (BALANCES_ONLY) rather than one that reads as a
+  // complete trade-level statement with nothing in it.
+  //
+  // UNSPECIFIED IS THE ZERO VALUE AND IT MEANS UNKNOWN. Every statement written
+  // before this field existed decodes to it, which is honest: nobody asserted a
+  // grain for those, and the transaction leg does not run on them.
+  StatementGrain grain = 9;
 }
 
 // StatementPosition is one instrument holding the custodian asserts.
@@ -475,6 +490,99 @@ message StatementCash {
   // balance is the cash the custodian asserts it holds in that currency.
   // Signed: an overdrawn balance is negative. Decimal.
   common.v1.Decimal balance = 2;
+}
+
+// StatementGrain is what a custodian's feed actually supplies (#1049).
+//
+// IT EXISTS BECAUSE AN EMPTY transactions LIST IS AMBIGUOUS, and the ambiguity is
+// the dangerous kind: "this custodian sends balances only" and "this custodian
+// sends trade lines and there were none on that date" are the same empty list,
+// and reading the first as the second reports every execution the book holds as
+// one the custodian never saw. That is the platform's rule that an empty
+// capability set means "the venue did not assert support" rather than
+// "unsupported", applied to the control that guards the book of record.
+//
+// SO THE TRANSACTION LEG RUNS ONLY ON TRANSACTIONS. Under BALANCES_ONLY and under
+// UNSPECIFIED it is skipped and the run says so; it does not fall back to
+// comparing against an empty set, and it does not report a clean transaction pass
+// it never performed.
+enum StatementGrain {
+  // UNSPECIFIED: the producer asserted nothing. NOT a synonym for balances-only
+  // -- it is the third value, and it means the grain of this feed is UNKNOWN. The
+  // zero value, so a producer that says nothing says "unknown" rather than
+  // accidentally claiming its statement is complete at trade level.
+  STATEMENT_GRAIN_UNSPECIFIED = 0;
+  // BALANCES_ONLY: the custodian supplies positions and cash and no trade lines.
+  // A POSITIVE CLAIM, and a legitimate one -- many custody feeds are exactly this
+  // -- but it is SAID rather than inferred from an empty list, so an operator can
+  // read that no execution is being matched anywhere.
+  STATEMENT_GRAIN_BALANCES_ONLY = 1;
+  // TRANSACTIONS: the transactions below are the COMPLETE set of trade lines the
+  // custodian reports for this business date. Completeness is what makes an
+  // absent reference a break rather than a gap, exactly as an absent instrument
+  // in positions is a positive claim of zero.
+  STATEMENT_GRAIN_TRANSACTIONS = 2;
+}
+
+// StatementTransaction is ONE trade line the custodian reports for the business
+// date -- the grain at which "which of my executions has the custodian never
+// seen?" becomes answerable (#1049).
+//
+// # Why a netted position is not enough
+//
+// A position-and-cash comparison cannot distinguish a genuine break from two
+// offsetting errors of equal size, nor a wrongly-booked execution from a missing
+// one when both touch the same instrument. An institutional custody control runs
+// a position pass AND a transaction pass precisely because the first is blind to
+// the internal composition of a correct-looking total.
+//
+// # It is matched on external_ref, and it does not re-price
+//
+// The transaction pass answers IDENTITY -- did both sides see this execution --
+// and leaves quantity and price agreement to the netted pass, which already
+// covers it at the grain an operator books against. The figures below are carried
+// so a break names an amount somebody can act on, not so a second tolerance
+// regime can be invented beside the first.
+message StatementTransaction {
+  // external_ref is the custodian's identity for the execution, in the SAME
+  // reference space the book stamps on the journal entry (ledger.Event.SourceRef,
+  // set from the venue fill id). Required -- a line with no reference cannot be
+  // matched against anything, and admitting one would make a feed that omits the
+  // field reconcile as though every trade were missing.
+  //
+  // THE ADAPTER TRANSLATES, exactly as it does for StatementPosition's
+  // instrument_id: a custodian naming trades in its own space maps them in the
+  // feed adapter, and an unmappable reference must fail THERE rather than arrive
+  // here to be reported as an execution the book never made.
+  string external_ref = 1;
+
+  // trade_date is when the execution happened and settlement_date is when its
+  // legs change (or changed) hands -- the SAME two economic dates the journal has
+  // carried since #1043 (ledger.Event.SettlementBasis / SettlementDate), which is
+  // why this message names both rather than one "date".
+  //
+  // A STATEMENT'S BUSINESS DATE IS A SETTLEMENT DATE for most custody feeds and a
+  // TRADE DATE for some, and the book side of the comparison is windowed by
+  // whichever the entry asserts. Carrying both is what lets the two sides be
+  // windowed consistently instead of by a convention nobody wrote down.
+  google.protobuf.Timestamp trade_date = 2;
+  google.protobuf.Timestamp settlement_date = 3;
+
+  // instrument_id is the traded instrument in the platform's canonical id space,
+  // under StatementPosition.instrument_id's rule: the adapter translates.
+  string instrument_id = 4;
+
+  // quantity is the SIGNED traded quantity -- negative for a sale -- and price
+  // the per-unit price. Decimal, never float: a book of record does not round.
+  common.v1.Decimal quantity = 5;
+  common.v1.Decimal price = 6;
+
+  // cash is the signed cash leg of the execution (+ increases cash) in
+  // currency_code, signed the way the journal's cash leg is. A break can then
+  // state the custodian's figure beside the book's with no convention change in
+  // between.
+  common.v1.Decimal cash = 7;
+  string currency_code = 8;
 }
 
 // ReconciliationOutcome is what a run concluded.
@@ -525,6 +633,25 @@ enum ReconciliationBreakKind {
   RECONCILIATION_BREAK_KIND_MISSING_IN_IBOR = 3;
   // CASH: a currency balance differs beyond tolerance.
   RECONCILIATION_BREAK_KIND_CASH = 4;
+
+  // THE TWO BELOW ARE THE TRANSACTION GRAIN (#1049), and they exist because the
+  // four above are a NETTED comparison and a netted comparison is blind to the
+  // internal composition of a correct-looking total. Twelve executions on one
+  // instrument, one of them booked against an execution the custodian never
+  // settled and one the custodian settled that the book never heard of, produce
+  // identical position and cash totals: the four kinds above report the line as
+  // fully correct. These two are the only ones that can name WHICH execution.
+
+  // EXECUTION_MISSING_AT_CUSTODIAN: the book holds an execution whose reference
+  // appears on no transaction line the custodian reported for the business date.
+  // The key is the execution's external reference (ledger.Event.SourceRef, the
+  // venue fill id), not an instrument.
+  RECONCILIATION_BREAK_KIND_EXECUTION_MISSING_AT_CUSTODIAN = 5;
+  // EXECUTION_MISSING_IN_IBOR: the custodian reported a transaction whose
+  // reference matches no journal entry in the comparison basis. THE DIRECTION
+  // THAT MEANS A FILL NEVER REACHED THE BOOK, observed rather than inferred from
+  // a balance -- which is the whole of #1049.
+  RECONCILIATION_BREAK_KIND_EXECUTION_MISSING_IN_IBOR = 6;
 }
 
 // BreakStatus is where a break has got to in the investigation.

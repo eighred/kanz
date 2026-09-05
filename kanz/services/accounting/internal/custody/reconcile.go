@@ -39,7 +39,15 @@ type Publisher interface {
 // subject rather than a second string is what makes the omission impossible to
 // reintroduce: a loader that ignores the custodian now has to ignore a field it
 // was handed.
-type BookLoader func(ctx context.Context, subject Subject) (*ledger.Book, error)
+//
+// IT RETURNS THE EXECUTIONS AS WELL AS THE FOLD (#1049). The comparison has two
+// grains — netted positions and cash, and the EXECUTIONS behind them — and both
+// come out of ONE call over one slice of the journal. A second loader would be a
+// second answer to "which entries is this custodian compared against", which is
+// the shape #1073 was filed on; returning them together is what makes the
+// transaction pass inherit the custodian scoping the guard over this hop already
+// enforces, rather than needing a guard of its own to be remembered.
+type BookLoader func(ctx context.Context, subject Subject) (*ledger.Book, []ledger.Execution, error)
 
 // LedgerBookLoader is the production BookLoader over a ledger store.
 //
@@ -70,15 +78,16 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger)
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return func(ctx context.Context, subject Subject) (*ledger.Book, error) {
+	return func(ctx context.Context, subject Subject) (*ledger.Book, []ledger.Execution, error) {
 		if !scope.Declared(subject.PortfolioID) {
 			// ONE CUSTODIAN: the scope is derived from the journal rather than
 			// declared. See ledger.MaterializeAttributed for why that is scoped by
 			// construction and why no declaration could add to it.
-			book, accounts, residue, err := ledger.MaterializeAttributed(ctx, store, subject.PortfolioID)
+			basis, err := ledger.MaterializeAttributed(ctx, store, subject.PortfolioID)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
+			accounts, residue := basis.Accounts, basis.Residue
 			if len(accounts) == 0 && !residue.Empty() {
 				// THE MIRROR-IMAGE DEFECT, REFUSED RATHER THAN SERVED. Every entry
 				// in this journal declares that it settled against NO exchange
@@ -88,7 +97,7 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger)
 				// NewBookScope already refuses an operator who declares an empty
 				// account set, in these words and for this reason; a basis derived
 				// to the same emptiness must not be quieter than one declared.
-				return nil, fmt.Errorf("custody: portfolio %s holds value (%s) and NO journal entry names "+
+				return nil, nil, fmt.Errorf("custody: portfolio %s holds value (%s) and NO journal entry names "+
 					"an exchange account, so the book slice compared against %s's statement would fold to "+
 					"nothing and every position the custodian holds would break as MISSING_IN_IBOR. The "+
 					"producers stamp venue_account_id and never default it: set it on the fills and cash "+
@@ -96,35 +105,61 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger)
 					subject.PortfolioID, residue.Describe(), subject.CustodianID)
 			}
 			stateResidue(logger, subject, BasisDerived, residue)
-			return book, nil
+			stateUnreferenced(logger, subject, BasisDerived, basis)
+			return basis.Book, basis.Executions, nil
 		}
 		accounts, claimed := scope.For(subject.PortfolioID, subject.CustodianID)
 		if len(accounts) == 0 {
 			// NewBookScope refuses this configuration, so reaching it means the
 			// scope was built by some other path. Fail rather than fall back to
 			// the whole book, which is the exact wrong answer #1006 is about.
-			return nil, fmt.Errorf("custody: no exchange accounts declared for %s:%s, so there is no "+
+			return nil, nil, fmt.Errorf("custody: no exchange accounts declared for %s:%s, so there is no "+
 				"book slice to compare its statement against", subject.PortfolioID, subject.CustodianID)
 		}
-		book, unmapped, residue, err := ledger.MaterializeForAccounts(ctx, store, subject.PortfolioID, accounts, claimed)
+		basis, err := ledger.MaterializeForAccounts(ctx, store, subject.PortfolioID, accounts, claimed)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if len(unmapped) > 0 {
+		if len(basis.Unmapped) > 0 {
 			// A PARTIAL BOOK MUST NOT RECONCILE. accounting.proto says it on the
 			// statement side of this same comparison: "a partial level read as
 			// complete manufactures a break for every position it omitted, which
 			// is worse than no reconciliation at all because it buries the real
 			// breaks in noise." An account nobody claimed is that, on the book
 			// side — so the run FAILS and names the account.
-			return nil, fmt.Errorf("custody: portfolio %s holds value in exchange account(s) %s, which no "+
+			return nil, nil, fmt.Errorf("custody: portfolio %s holds value in exchange account(s) %s, which no "+
 				"custodian in ACCOUNTING_CUSTODY_ACCOUNTS claims. Reconciling %s without them would compare "+
 				"a book missing those holdings and break every one of them; add each account to the custodian "+
-				"that holds it", subject.PortfolioID, strings.Join(unmapped, ", "), subject.CustodianID)
+				"that holds it", subject.PortfolioID, strings.Join(basis.Unmapped, ", "), subject.CustodianID)
 		}
-		stateResidue(logger, subject, BasisDeclared, residue)
-		return book, nil
+		stateResidue(logger, subject, BasisDeclared, basis.Residue)
+		stateUnreferenced(logger, subject, BasisDeclared, basis)
+		return basis.Book, basis.Executions, nil
 	}
+}
+
+// stateUnreferenced names the trades in the comparison basis that carry NO
+// external reference, and what that costs (#1049).
+//
+// A TRANSACTION PASS THAT SHRINKS REPORTS FEWER BREAKS, which reads exactly like
+// a book coming into agreement. An entry with no SourceRef cannot be matched
+// against a custodian trade line, so it is in the netted pass and in no
+// transaction pass — and a producer that stopped stamping the reference would
+// silently move executions out of the finer control into the coarser one with
+// every signal staying green. WARN for stateResidue's reason: it is not an error,
+// the netted pass still covers those entries, and what is wrong is not saying so.
+func stateUnreferenced(logger *slog.Logger, subject Subject, basisKind string, basis ledger.CustodyBasis) {
+	if basis.Unreferenced == 0 {
+		return
+	}
+	logger.Warn("accounting: custody reconciliation holds trades with NO EXTERNAL REFERENCE — they are in "+
+		"the netted position and cash comparison and in NO transaction comparison, so no custodian trade "+
+		"line can ever be matched against them (#1049)",
+		"portfolio", subject.PortfolioID, "custodian", subject.CustodianID, "basis", basisKind,
+		"unreferenced_trades", basis.Unreferenced, "referenced_trades", len(basis.Executions),
+		"consequence", "for these entries the control is back at the netted grain: a wrongly-booked "+
+			"execution and a missing one on the same instrument are indistinguishable. ledger.FromFill "+
+			"stamps SourceRef from the venue fill id; a trade without one did not come from a fill")
 }
 
 // The two ways a portfolio's comparison basis is scoped, named here because the
@@ -241,16 +276,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 		return r.recordFailure(ctx, subject, now, fmt.Sprintf("load statement: %v", err))
 	}
 
-	book, err := r.book(ctx, subject)
+	// BOTH GRAINS OUT OF ONE CALL, and the pair is bound here rather than
+	// re-derived: the executions must be the ones behind THIS book, over the same
+	// slice of the journal the custodian is scoped to.
+	book, executions, err := r.book(ctx, subject)
 	if err != nil {
 		return r.recordFailure(ctx, subject, now, fmt.Sprintf("materialize book: %v", err))
 	}
 
-	detected := recon.Reconcile(book, recon.Statement{
-		PortfolioID: subject.PortfolioID,
-		Positions:   stmt.Positions,
-		Cash:        stmt.Cash,
+	detected, leg := recon.Reconcile(book, executions, recon.Statement{
+		PortfolioID:  subject.PortfolioID,
+		Positions:    stmt.Positions,
+		Cash:         stmt.Cash,
+		BusinessDate: subject.BusinessDate,
+		Transactions: stmt.Transactions,
+		Grain:        stmt.Grain,
 	}, r.tolerance)
+	r.stateLeg(subject, stmt, leg, len(executions))
 
 	stored, err := r.store.UpsertBreaks(ctx, subject, FromRecon(subject, detected, now), now)
 	if err != nil {
@@ -275,6 +317,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, subject Subject) (Run, error
 		Tolerance:   r.tolerance,
 		CompletedAt: now,
 	})
+}
+
+// stateLeg says, once per run, whether the TRANSACTION pass actually happened
+// (#1049).
+//
+// "NO EXECUTION BREAKS" AND "NO EXECUTION COMPARISON" ARE THE SAME CLEAN RUN
+// otherwise, and that is the netted-grain blindness this issue is about arriving
+// one level up: a run against a balances-only feed produces exactly the output of
+// a run against a full feed that matched every fill. The gauge
+// kanz_accounting_custody_statement_grain_produced states the BUILD's posture at
+// startup; this states what the statement in front of this run actually carried.
+func (r *Reconciler) stateLeg(subject Subject, stmt Statement, leg recon.LegStatus, executions int) {
+	if leg.Ran() {
+		r.logger.Info("accounting: custody reconciliation compared executions",
+			"portfolio", subject.PortfolioID, "custodian", subject.CustodianID,
+			"statement", stmt.StatementID, "statement_transactions", len(stmt.Transactions),
+			"book_executions", executions)
+		return
+	}
+	r.logger.Warn("accounting: custody reconciliation compared NETTED BALANCES ONLY — no execution was "+
+		"matched against a custodian trade line, so a wrongly-booked execution and a missing one on the "+
+		"same instrument are indistinguishable in this run (#1049)",
+		"portfolio", subject.PortfolioID, "custodian", subject.CustodianID,
+		"statement", stmt.StatementID, "reason", leg.String(), "grain", stmt.Grain.String(),
+		"book_executions", executions,
+		"consequence", "a CLEAN verdict here is a statement about totals. 'A fill never reached the "+
+			"book' remains inferable from a position difference rather than observed on a reference")
 }
 
 // recordFailure records and publishes a FAILED run, and returns the underlying

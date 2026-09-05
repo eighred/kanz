@@ -160,8 +160,43 @@ func wireKind(k recon.BreakKind) (accountingpb.ReconciliationBreakKind, bool) {
 		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_MISSING_IN_IBOR, true
 	case recon.BreakCash:
 		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_CASH, true
+	case recon.BreakExecutionMissingAtCustodian:
+		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_EXECUTION_MISSING_AT_CUSTODIAN, true
+	case recon.BreakExecutionMissingInIBOR:
+		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_EXECUTION_MISSING_IN_IBOR, true
 	default:
 		return accountingpb.ReconciliationBreakKind_RECONCILIATION_BREAK_KIND_UNSPECIFIED, false
+	}
+}
+
+// wireGrain renders a statement grain onto the wire, and grainFromWire reads one
+// back. They are the ONE join between recon.Grain and
+// accounting.v1.StatementGrain, for wireKind's reason.
+//
+// AN UNRECOGNISED WIRE VALUE BECOMES GrainUnknown RATHER THAN A GUESS. A newer
+// producer asserting a grain this build does not know about must leave the
+// transaction leg unrun and say so, not have its statement read at whichever
+// grain happens to be adjacent — that is the "empty capability set is not
+// unsupported" rule for a value nobody here can interpret.
+func wireGrain(g recon.Grain) accountingpb.StatementGrain {
+	switch g {
+	case recon.GrainBalancesOnly:
+		return accountingpb.StatementGrain_STATEMENT_GRAIN_BALANCES_ONLY
+	case recon.GrainTransactions:
+		return accountingpb.StatementGrain_STATEMENT_GRAIN_TRANSACTIONS
+	default:
+		return accountingpb.StatementGrain_STATEMENT_GRAIN_UNSPECIFIED
+	}
+}
+
+func grainFromWire(g accountingpb.StatementGrain) recon.Grain {
+	switch g {
+	case accountingpb.StatementGrain_STATEMENT_GRAIN_BALANCES_ONLY:
+		return recon.GrainBalancesOnly
+	case accountingpb.StatementGrain_STATEMENT_GRAIN_TRANSACTIONS:
+		return recon.GrainTransactions
+	default:
+		return recon.GrainUnknown
 	}
 }
 
@@ -181,6 +216,16 @@ type Statement struct {
 	Positions    map[string]*big.Rat // instrument -> quantity
 	Cash         map[string]*big.Rat // currency -> balance
 	ReceivedAt   time.Time
+
+	// Transactions are the custodian's trade lines for the business date, and
+	// Grain is what makes an EMPTY list readable (#1049).
+	//
+	// THEY ARE recon's TYPES AND NOT A THIRD COPY. The statement's grain, the
+	// engine's grain and the wire's grain are one concept; a custody.Grain beside
+	// recon.Grain would be the copied helper this repository keeps paying for,
+	// and the two would drift the first time a value is added to one of them.
+	Transactions []recon.Transaction
+	Grain        recon.Grain
 }
 
 // Subject is the triple a scheduled reconciliation is defined over.
@@ -274,6 +319,50 @@ func (s Statement) Validate() error {
 			return fmt.Errorf("custody: statement cash %q has no balance", ccy)
 		}
 		if err := idComponent("currency_code", ccy); err != nil {
+			return err
+		}
+	}
+	return s.validateTransactions()
+}
+
+// validateTransactions refuses a statement whose transaction grain cannot be
+// acted on (#1049).
+//
+// THE CONTRADICTIONS ARE REFUSED RATHER THAN RESOLVED, and the reason is the same
+// one Validate gives for the business date: a statement whose grain had to be
+// guessed would reconcile executions against a claim nobody made. A producer that
+// sends trade lines while asserting BALANCES_ONLY, or while asserting nothing at
+// all, would have every one of those lines SILENTLY IGNORED by the transaction
+// leg — a feed that looks wired, a control that compares nothing, and no
+// difference visible from outside. That is precisely what this issue exists to
+// abolish, so it is a refusal and therefore a DLQ, not a dropped field.
+func (s Statement) validateTransactions() error {
+	if len(s.Transactions) > 0 && s.Grain != recon.GrainTransactions {
+		return fmt.Errorf("custody: statement %s carries %d transaction line(s) and declares grain %q — "+
+			"the transaction leg runs ONLY on %q, so every one of those lines would be ignored with "+
+			"nothing saying so. A feed that supplies trade lines must declare it",
+			s.StatementID, len(s.Transactions), s.Grain, recon.GrainTransactions)
+	}
+	seen := make(map[string]struct{}, len(s.Transactions))
+	for _, tx := range s.Transactions {
+		ref := strings.TrimSpace(tx.ExternalRef)
+		if ref == "" {
+			return fmt.Errorf("custody: statement %s has a transaction with no external_ref — "+
+				"there is nothing to match it against, and a feed that omits the field would "+
+				"reconcile as though every trade in the book were missing", s.StatementID)
+		}
+		if _, dup := seen[ref]; dup {
+			// TWO LINES FOR ONE REFERENCE IS AMBIGUOUS, exactly as two rows for
+			// one instrument are: the pass matches on identity, and a reference
+			// the custodian used twice makes "did both sides see this execution"
+			// unanswerable rather than doubly answered.
+			return fmt.Errorf("custody: statement %s names transaction reference %q twice", s.StatementID, ref)
+		}
+		seen[ref] = struct{}{}
+		// The reference becomes a break's Key, which becomes part of its derived
+		// id. A separator here would collide two executions onto one break — one
+		// row, one age, one operator's investigation covering two differences.
+		if err := idComponent("external_ref", ref); err != nil {
 			return err
 		}
 	}

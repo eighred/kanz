@@ -1,0 +1,53 @@
+-- 0009: the transaction grain of a custodian statement (#1049).
+--
+-- CUSTODY RECONCILIATION COMPARED NET BALANCES AND NOTHING ELSE. 0007 stores a
+-- statement as two JSONB maps — instrument -> quantity and currency -> balance —
+-- and there was no column anywhere that could hold a TRADE LINE. So no fill was
+-- ever matched against a custodian record, and "which of my executions has the
+-- custodian never seen?" could not be answered at any grain finer than an
+-- end-of-day netted instrument position.
+--
+-- # What a netted comparison cannot see
+--
+-- A total is blind to its own composition. Twelve fills on one instrument, one of
+-- them booked against an execution the custodian never settled and one the
+-- custodian settled that the book never heard of, produce IDENTICAL position and
+-- cash totals: the comparison reports the line as fully correct. The same holds
+-- for two offsetting errors of equal size, and for a wrongly-booked execution
+-- against a missing one on the same instrument.
+--
+-- The estate's own alert conceded the inference it was left with — "missing_in_ibor
+-- is the direction that MOST OFTEN means a fill never reached the book". Most
+-- often, deduced from a balance rather than observed on a reference.
+--
+-- # grain IS THE FIELD THAT MAKES AN EMPTY transactions READABLE
+--
+-- "This custodian sends balances only" and "this custodian sends trade lines and
+-- there were none that day" are the SAME empty list, and reading the first as the
+-- second reports every execution the book holds as one the custodian never saw —
+-- a screen of fabricated breaks that buries the real one.
+--
+-- So the default is 'unknown' and NOT 'balances_only'. Every statement stored
+-- before this migration was written by a producer that asserted nothing about its
+-- grain, and 'unknown' says exactly that; the transaction pass does not run on
+-- one, and the run says why. Defaulting to 'balances_only' would have been the
+-- cheaper migration and it would put a claim into the record that no producer
+-- ever made — the same failure 0008 refused when it declined to backfill
+-- settlement_status to 'settled'.
+--
+-- # Why JSONB and why text inside it
+--
+-- Same reasons as positions and cash in 0007. A statement is a LEVEL: a
+-- redelivery REPLACES the whole row, so the lines have no identity of their own
+-- to warrant a child table, and nothing queries across statements by trade
+-- reference. Every figure inside is TEXT, never a JSON number: encoding/json
+-- renders a number as float64, and a book of record does not round-trip a
+-- quantity through a type that rounds.
+--
+-- No new table, so infra/onboarding/provision-tenant.sh's RLS list and the gated
+-- tests' teardown DROPs are unchanged: custody_statements is already in both, and
+-- its FORCE ROW LEVEL SECURITY policy from 0007 covers these columns.
+
+ALTER TABLE custody_statements
+    ADD COLUMN IF NOT EXISTS transactions JSONB NOT NULL DEFAULT '[]'::jsonb,  -- [{external_ref, instrument_id, quantity, ...}], figures as text
+    ADD COLUMN IF NOT EXISTS grain        TEXT  NOT NULL DEFAULT 'unknown';    -- recon.Grain.String(): unknown | balances_only | transactions

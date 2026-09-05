@@ -72,7 +72,15 @@ func bookWith(positions map[string]int64, cash map[string]int64) *ledger.Book {
 }
 
 func loaderFor(b *ledger.Book) BookLoader {
-	return func(context.Context, Subject) (*ledger.Book, error) { return b, nil }
+	return func(context.Context, Subject) (*ledger.Book, []ledger.Execution, error) { return b, nil, nil }
+}
+
+// loaderWith is loaderFor plus the book's EXECUTIONS — the transaction grain the
+// comparison basis carries alongside the fold (#1049).
+func loaderWith(b *ledger.Book, executions []ledger.Execution) BookLoader {
+	return func(context.Context, Subject) (*ledger.Book, []ledger.Execution, error) {
+		return b, executions, nil
+	}
 }
 
 func subject() Subject {
@@ -258,7 +266,9 @@ func TestFailedRunIsRecordedAndNotClean(t *testing.T) {
 		t.Fatalf("SaveStatement: %v", err)
 	}
 	pub := &capturePublisher{}
-	failing := func(context.Context, Subject) (*ledger.Book, error) { return nil, errors.New("pool is down") }
+	failing := func(context.Context, Subject) (*ledger.Book, []ledger.Execution, error) {
+		return nil, nil, errors.New("pool is down")
+	}
 	r, err := NewReconciler(store, failing, pub, new(big.Rat), nil, nil, func() time.Time { return t0 })
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
@@ -960,11 +970,11 @@ func TestOnePairsFailureDoesNotSkipTheOthers(t *testing.T) {
 		t.Fatalf("SaveStatement: %v", err)
 	}
 	pub := &capturePublisher{}
-	loader := func(_ context.Context, sub Subject) (*ledger.Book, error) {
+	loader := func(_ context.Context, sub Subject) (*ledger.Book, []ledger.Execution, error) {
 		if sub.PortfolioID == "PF1" {
-			return nil, errors.New("pool is down")
+			return nil, nil, errors.New("pool is down")
 		}
-		return bookWith(map[string]int64{"AAPL": 100}, nil), nil
+		return bookWith(map[string]int64{"AAPL": 100}, nil), nil, nil
 	}
 	r, err := NewReconciler(store, loader, pub, new(big.Rat), nil, nil, func() time.Time { return t0 })
 	if err != nil {

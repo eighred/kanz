@@ -56,20 +56,31 @@ func (p *Postgres) SaveStatement(ctx context.Context, s Statement) error {
 	if err != nil {
 		return fmt.Errorf("custody: statement %s cash: %w", s.StatementID, err)
 	}
+	// THE GRAIN IS PERSISTED WITH THE LINES, never re-derived from whether the
+	// list is empty (#1049). A statement read back with an empty list and no
+	// grain would be indistinguishable from a balances-only feed, and the
+	// transaction pass would then run against nothing and report every execution
+	// in the window as one the custodian never saw.
+	transactions, err := transactionsToJSON(s.Transactions)
+	if err != nil {
+		return fmt.Errorf("custody: statement %s transactions: %w", s.StatementID, err)
+	}
 	const q = `
 INSERT INTO custody_statements
-    (statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+    (statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at, transactions, grain)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (tenant_id, statement_id) DO UPDATE SET
     custodian_id  = EXCLUDED.custodian_id,
     portfolio_id  = EXCLUDED.portfolio_id,
     business_date = EXCLUDED.business_date,
     positions     = EXCLUDED.positions,
     cash          = EXCLUDED.cash,
-    received_at   = EXCLUDED.received_at`
+    received_at   = EXCLUDED.received_at,
+    transactions  = EXCLUDED.transactions,
+    grain         = EXCLUDED.grain`
 	_, err = p.pool.Exec(ctx, q,
 		s.StatementID, s.CustodianID, s.PortfolioID, BusinessDay(s.BusinessDate),
-		positions, cash, s.ReceivedAt.UTC())
+		positions, cash, s.ReceivedAt.UTC(), transactions, s.Grain.String())
 	if err != nil {
 		return fmt.Errorf("custody: save statement %s: %w", s.StatementID, err)
 	}
@@ -79,7 +90,7 @@ ON CONFLICT (tenant_id, statement_id) DO UPDATE SET
 // LatestStatement implements Store.
 func (p *Postgres) LatestStatement(ctx context.Context, subject Subject) (Statement, error) {
 	const q = `
-SELECT statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at
+SELECT statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at, transactions, grain
 FROM custody_statements
 WHERE portfolio_id = $1 AND custodian_id = $2 AND business_date = $3
 ORDER BY received_at DESC
@@ -87,10 +98,13 @@ LIMIT 1`
 	var (
 		s                  Statement
 		positions, cash    []byte
+		transactions       []byte
+		grain              string
 		businessDate, recv time.Time
 	)
 	err := p.pool.QueryRow(ctx, q, subject.PortfolioID, subject.CustodianID, BusinessDay(subject.BusinessDate)).
-		Scan(&s.StatementID, &s.CustodianID, &s.PortfolioID, &businessDate, &positions, &cash, &recv)
+		Scan(&s.StatementID, &s.CustodianID, &s.PortfolioID, &businessDate, &positions, &cash, &recv,
+			&transactions, &grain)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Statement{}, ErrNoStatement
 	}
@@ -105,6 +119,10 @@ LIMIT 1`
 	if s.Cash, err = jsonToRats(cash); err != nil {
 		return Statement{}, fmt.Errorf("custody: statement %s cash: %w", s.StatementID, err)
 	}
+	if s.Transactions, err = jsonToTransactions(transactions); err != nil {
+		return Statement{}, fmt.Errorf("custody: statement %s transactions: %w", s.StatementID, err)
+	}
+	s.Grain = parseGrain(grain)
 	return s, nil
 }
 
@@ -340,6 +358,23 @@ func parseKind(name string) recon.BreakKind {
 	return recon.BreakKind(-1)
 }
 
+// parseGrain maps a stored grain name back to the engine's value.
+//
+// AN UNRECOGNISED NAME BECOMES GrainUnknown, which keeps the transaction pass
+// unrun rather than guessing at the nearest value — the same stance grainFromWire
+// takes on an unrecognised wire enum, and the same one parseKind takes when it
+// returns a kind no consumer will match. Deriving the mapping from recon.Grains()
+// rather than switching on string literals means a grain added to the engine
+// round-trips through storage with no second edit here.
+func parseGrain(name string) recon.Grain {
+	for _, g := range recon.Grains() {
+		if g.String() == name {
+			return g
+		}
+	}
+	return recon.GrainUnknown
+}
+
 func parseStatus(name string) BreakStatus {
 	for _, s := range BreakStatuses() {
 		if s.String() == name {
@@ -373,6 +408,119 @@ func ratsToJSON(in map[string]*big.Rat) ([]byte, error) {
 		out[k] = dec.Str(v)
 	}
 	return json.Marshal(out)
+}
+
+// storedTransaction is the JSONB shape of one custodian trade line.
+//
+// EVERY FIGURE IS TEXT, for ratsToJSON's reason: encoding/json renders a number
+// as float64, so a quantity with more precision than a float carries would be
+// silently rounded on the way into the record the book of record is reconciled
+// against. Dates are RFC3339 for the same reason a text decimal is text — a
+// stable, exact, human-readable round trip.
+type storedTransaction struct {
+	ExternalRef    string `json:"external_ref"`
+	TradeDate      string `json:"trade_date,omitempty"`
+	SettlementDate string `json:"settlement_date,omitempty"`
+	InstrumentID   string `json:"instrument_id,omitempty"`
+	Quantity       string `json:"quantity,omitempty"`
+	Price          string `json:"price,omitempty"`
+	Cash           string `json:"cash,omitempty"`
+	CurrencyCode   string `json:"currency_code,omitempty"`
+}
+
+func transactionsToJSON(in []recon.Transaction) ([]byte, error) {
+	out := make([]storedTransaction, 0, len(in))
+	for _, tx := range in {
+		if tx.ExternalRef == "" {
+			return nil, fmt.Errorf("transaction with no external_ref")
+		}
+		out = append(out, storedTransaction{
+			ExternalRef:    tx.ExternalRef,
+			TradeDate:      formatTime(tx.TradeDate),
+			SettlementDate: formatTime(tx.SettlementDate),
+			InstrumentID:   tx.InstrumentID,
+			Quantity:       ratText(tx.Quantity),
+			Price:          ratText(tx.Price),
+			Cash:           ratText(tx.Cash),
+			CurrencyCode:   tx.CurrencyCode,
+		})
+	}
+	return json.Marshal(out)
+}
+
+func jsonToTransactions(raw []byte) ([]recon.Transaction, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var stored []storedTransaction
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return nil, err
+	}
+	if len(stored) == 0 {
+		return nil, nil
+	}
+	out := make([]recon.Transaction, 0, len(stored))
+	for _, st := range stored {
+		tx := recon.Transaction{
+			ExternalRef:  st.ExternalRef,
+			InstrumentID: st.InstrumentID,
+			CurrencyCode: st.CurrencyCode,
+		}
+		var err error
+		// A FIGURE THAT WILL NOT PARSE REFUSES THE WHOLE STATEMENT rather than
+		// being dropped from the line. A trade line read back without its
+		// quantity still matches on its reference, so dropping the figure would
+		// leave a break stating an amount of zero about a real execution.
+		if tx.Quantity, err = parseRatText(st.Quantity); err != nil {
+			return nil, fmt.Errorf("%q quantity: %w", st.ExternalRef, err)
+		}
+		if tx.Price, err = parseRatText(st.Price); err != nil {
+			return nil, fmt.Errorf("%q price: %w", st.ExternalRef, err)
+		}
+		if tx.Cash, err = parseRatText(st.Cash); err != nil {
+			return nil, fmt.Errorf("%q cash: %w", st.ExternalRef, err)
+		}
+		if tx.TradeDate, err = parseTimeText(st.TradeDate); err != nil {
+			return nil, fmt.Errorf("%q trade_date: %w", st.ExternalRef, err)
+		}
+		if tx.SettlementDate, err = parseTimeText(st.SettlementDate); err != nil {
+			return nil, fmt.Errorf("%q settlement_date: %w", st.ExternalRef, err)
+		}
+		out = append(out, tx)
+	}
+	return out, nil
+}
+
+func ratText(r *big.Rat) string {
+	if r == nil {
+		return ""
+	}
+	return dec.Str(r)
+}
+
+func parseRatText(text string) (*big.Rat, error) {
+	if text == "" {
+		return nil, nil
+	}
+	return dec.ParseRat(text)
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func parseTimeText(text string) (time.Time, error) {
+	if text == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, text)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return t.UTC(), nil
 }
 
 func jsonToRats(raw []byte) (map[string]*big.Rat, error) {

@@ -84,10 +84,11 @@ func TestPostgresMaterializeForAccountsScopesTheBookToOneCustodian(t *testing.T)
 		{"CUST-B", custB, "MSFT", 250, -250, "AAPL", "bin-main"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			book, unmapped, _, err := MaterializeForAccounts(ctx, st, "PORT-CUST", tc.scope, claimed)
+			basis, err := MaterializeForAccounts(ctx, st, "PORT-CUST", tc.scope, claimed)
 			if err != nil {
 				t.Fatalf("MaterializeForAccounts: %v", err)
 			}
+			book, unmapped := basis.Book, basis.Unmapped
 			if len(unmapped) != 0 {
 				t.Errorf("unmapped = %v, want none — every account in this journal is claimed", unmapped)
 			}
@@ -158,10 +159,11 @@ func TestPostgresMaterializeForAccountsReportsAnUnclaimedAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, unmapped, _, err := MaterializeForAccounts(ctx, st, "PORT-CUST", claimed, claimed)
+	basis, err := MaterializeForAccounts(ctx, st, "PORT-CUST", claimed, claimed)
 	if err != nil {
 		t.Fatalf("MaterializeForAccounts: %v", err)
 	}
+	unmapped := basis.Unmapped
 	if len(unmapped) != 1 || unmapped[0] != "okx-sub-9" {
 		t.Errorf("unmapped = %v, want exactly [okx-sub-9]. okx-sub-8 moves nothing and must not be "+
 			"reported; okx-sub-9 holds TSLA that no custodian's statement would ever cover", unmapped)
@@ -205,10 +207,11 @@ func TestPostgresMaterializeAttributedDerivesTheScopeFromTheJournal(t *testing.T
 		}
 	}
 
-	book, scope, residue, err := MaterializeAttributed(ctx, st, "PORT-CUST")
+	basis, err := MaterializeAttributed(ctx, st, "PORT-CUST")
 	if err != nil {
 		t.Fatalf("MaterializeAttributed: %v", err)
 	}
+	book, scope, residue := basis.Book, basis.Accounts, basis.Residue
 	if len(scope) != 2 || !scope.Has("okx-sub-1") || !scope.Has("bin-main") {
 		t.Fatalf("derived scope = %v, want both accounts this journal touched. An EMPTY scope here "+
 			"means venue_account_id did not survive the round trip, and the basis would fold to nothing "+
@@ -283,10 +286,11 @@ func TestPostgresMaterializeAttributedReportsAnEmptyDerivedScope(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	book, scope, residue, err := MaterializeAttributed(ctx, st, "PORT-CUST")
+	basis, err := MaterializeAttributed(ctx, st, "PORT-CUST")
 	if err != nil {
 		t.Fatalf("MaterializeAttributed: %v", err)
 	}
+	book, scope, residue := basis.Book, basis.Accounts, basis.Residue
 	if len(scope) != 0 {
 		t.Fatalf("derived scope = %v, want empty — no entry in this journal names an exchange account", scope)
 	}

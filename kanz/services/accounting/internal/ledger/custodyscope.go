@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"time"
 )
 
 // AccountScope is a set of exchange accounts, used to restrict a fold to the
@@ -105,15 +106,23 @@ func NewAccountScope(accounts ...string) (AccountScope, error) {
 // a MISCONFIGURATION, and it is returned rather than ignored so the caller can
 // refuse the run. Silently folding without it produces exactly the partial book
 // the proto warns about. Sorted, so an operator reads the same list every time.
+//
+// # It returns the transaction grain as well as the fold (#1049)
+//
+// A CustodyBasis carries the executions behind the book, not only the book. The
+// position pass and the transaction pass must be over the SAME slice of the
+// journal or they disagree about what they are reconciling, and one return value
+// out of one filter is what makes that structural rather than remembered.
 func MaterializeForAccounts(
 	ctx context.Context, st Store, portfolioID string, scope, claimed AccountScope,
-) (*Book, []string, UnattributedResidue, error) {
+) (CustodyBasis, error) {
 	events, err := st.Journal(ctx, portfolioID)
 	if err != nil {
-		return nil, nil, UnattributedResidue{}, err
+		return CustodyBasis{}, err
 	}
-	book, unmapped, residue := foldForAccounts(portfolioID, events, scope, claimed)
-	return book, unmapped, residue, nil
+	basis := foldForAccounts(portfolioID, events, scope, claimed)
+	basis.Accounts = scope
+	return basis, nil
 }
 
 // MaterializeAttributed folds the entries that settled against SOME exchange
@@ -141,25 +150,26 @@ func MaterializeForAccounts(
 // it must not arrive by derivation instead. This returns the evidence; the custody
 // loader is where the refusal belongs, because "compared against a custodian" is
 // what makes an empty basis wrong rather than merely small.
-func MaterializeAttributed(ctx context.Context, st Store, portfolioID string) (*Book, AccountScope, UnattributedResidue, error) {
+func MaterializeAttributed(ctx context.Context, st Store, portfolioID string) (CustodyBasis, error) {
 	events, err := st.Journal(ctx, portfolioID)
 	if err != nil {
-		return nil, nil, UnattributedResidue{}, err
+		return CustodyBasis{}, err
 	}
 	scope := AttributedAccounts(events)
-	book, unmapped, residue := foldForAccounts(portfolioID, events, scope, scope)
-	if len(unmapped) > 0 {
+	basis := foldForAccounts(portfolioID, events, scope, scope)
+	basis.Accounts = scope
+	if len(basis.Unmapped) > 0 {
 		// UNREACHABLE, AND LOUD RATHER THAN IGNORED. scope and claimed are both
 		// the set of accounts this journal touched, so no account it touched can
 		// be unclaimed. Reaching it means AttributedAccounts and foldForAccounts
 		// disagree about what an account is, and the fold would then be silently
 		// missing holdings — the partial book that breaks every position it
 		// omitted.
-		return nil, scope, residue, fmt.Errorf("ledger: portfolio %s: the derived custody scope does not "+
-			"claim account(s) %s that its own journal touched — the fold and the derivation disagree",
-			portfolioID, strings.Join(unmapped, ", "))
+		return CustodyBasis{Accounts: scope, Residue: basis.Residue}, fmt.Errorf("ledger: portfolio %s: the "+
+			"derived custody scope does not claim account(s) %s that its own journal touched — the fold "+
+			"and the derivation disagree", portfolioID, strings.Join(basis.Unmapped, ", "))
 	}
-	return book, scope, residue, nil
+	return basis, nil
 }
 
 // AttributedAccounts returns every non-empty exchange account the journal
@@ -229,7 +239,7 @@ func (r UnattributedResidue) Describe() string {
 // caller. Two answers is the shape #1073 was filed on: the scoped path excluded an
 // un-attributed entry, the single-custodian path included it, and each documented
 // itself as correct.
-func foldForAccounts(portfolioID string, events []*Event, scope, claimed AccountScope) (*Book, []string, UnattributedResidue) {
+func foldForAccounts(portfolioID string, events []*Event, scope, claimed AccountScope) CustodyBasis {
 	unmappedSet := map[string]bool{}
 	residue := UnattributedResidue{Cash: map[string]*big.Rat{}}
 	instruments := map[string]bool{}
@@ -288,11 +298,25 @@ func foldForAccounts(portfolioID string, events []*Event, scope, claimed Account
 	}
 	sort.Strings(residue.Instruments)
 
+	// ORDERED ONCE, CONSUMED TWICE. The fold is order-sensitive (weighted-average
+	// cost realizes P&L in sequence) and the execution list dedupes a restatement
+	// against its original, so both must see the entries in the SAME canonical
+	// order or the copy the transaction pass keeps is not the one the fold
+	// applied. Replay re-sorts what it is given, which is idempotent here.
+	ordered := sortedFor(kept, time.Time{}, time.Time{}, false)
+	executions, unreferenced := executionsOf(ordered)
+
 	// Replay, not a quantity-only sum: the scoped book's AvgCost and Realized are
 	// then the cost basis OF THAT CUSTODIAN'S SLICE — a meaningful number — rather
 	// than a half-populated struct the next caller would misread as the
 	// portfolio's.
-	return Replay(portfolioID, kept), unmapped, residue
+	return CustodyBasis{
+		Book:         Replay(portfolioID, ordered),
+		Executions:   executions,
+		Unreferenced: unreferenced,
+		Unmapped:     unmapped,
+		Residue:      residue,
+	}
 }
 
 // movesValue reports whether an entry changes a position or a cash balance.

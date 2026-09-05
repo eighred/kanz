@@ -418,7 +418,7 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	// here would be a business date on evidence nobody chose. Nothing persists or
 	// publishes it, so Subject.Validate's date requirement does not apply.
 	subject := custody.Subject{PortfolioID: id, CustodianID: custodian}
-	book, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger)(r.Context(), subject)
+	book, executions, err := custody.LedgerBookLoader(s.store, s.custodyScope, s.logger)(r.Context(), subject)
 	if err != nil {
 		// The loader refuses rather than returning a partial book — an exchange
 		// account no custodian claims, most often. Surface the reason: it names
@@ -427,7 +427,14 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	breaks := recon.Reconcile(book, recon.Statement{PortfolioID: id, Positions: positions, Cash: cash}, tol)
+	// THE TRANSACTION PASS IS DELIBERATELY NOT RUN ON THIS ROUTE (#1049), and the
+	// leg status says so rather than the route reporting a clean execution
+	// comparison it never performed. The statement here comes from a REQUEST BODY
+	// with no business date and no trade lines, so there is no window: matching
+	// the whole comparison basis against it would report every execution the fund
+	// has ever made as one the custodian never saw. An operator investigating gets
+	// the netted answer, and the response says which grain it is.
+	breaks, leg := recon.Reconcile(book, executions, recon.Statement{PortfolioID: id, Positions: positions, Cash: cash}, tol)
 	out := make([]map[string]string, 0, len(breaks))
 	for _, b := range breaks {
 		out = append(out, map[string]string{
@@ -443,6 +450,12 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	// investigation must say whose book it compared.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"portfolio_id": id, "custodian_id": custodian, "breaks": out, "count": len(out),
+		// The grain of the answer, beside the answer. "No breaks" over netted
+		// balances and "no breaks" over matched executions are different claims,
+		// and a caller pasting this into an investigation must be able to tell
+		// them apart.
+		"grain": recon.GrainBalancesOnly.String(), "transaction_pass": leg.String(),
+		"book_executions": len(executions),
 	})
 }
 

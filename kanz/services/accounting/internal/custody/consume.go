@@ -14,6 +14,7 @@ import (
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/accounting/internal/recon"
 )
 
 // StatementConsumer folds accounting.v1.CustodianStatement FACTs into the store.
@@ -81,7 +82,13 @@ func (c *StatementConsumer) Handle(ctx context.Context, env *envelopepb.Envelope
 	c.logger.Info("accounting: custodian statement stored",
 		"statement", stmt.StatementID, "custodian", stmt.CustodianID,
 		"portfolio", stmt.PortfolioID, "business_date", BusinessDay(stmt.BusinessDate).Format("2006-01-02"),
-		"positions", len(stmt.Positions), "currencies", len(stmt.Cash))
+		"positions", len(stmt.Positions), "currencies", len(stmt.Cash),
+		// THE GRAIN IS ON THE LINE, not inferred from the count beside it (#1049).
+		// transactions=0 with grain=transactions is "no trades that day";
+		// transactions=0 with grain=balances_only is "this custodian matches no
+		// execution, ever"; transactions=0 with grain=unknown is nobody saying.
+		// Logging only the count would render all three identically.
+		"transactions", len(stmt.Transactions), "grain", stmt.Grain.String())
 	return nil
 }
 
@@ -143,6 +150,42 @@ func statementFromProto(msg *accountingpb.CustodianStatement) (Statement, error)
 			return Statement{}, fmt.Errorf("custody: statement %s: balance for %s is not a valid Decimal", stmt.StatementID, code)
 		}
 		stmt.Cash[code] = bal
+	}
+	stmt.Grain = grainFromWire(msg.GetGrain())
+	if n := len(msg.GetTransactions()); n > 0 {
+		stmt.Transactions = make([]recon.Transaction, 0, n)
+	}
+	for _, tx := range msg.GetTransactions() {
+		ref := tx.GetExternalRef()
+		if ref == "" {
+			return Statement{}, fmt.Errorf("custody: statement %s has a transaction with no external_ref", stmt.StatementID)
+		}
+		// EVERY FIGURE IS CHECKED, and an unrepresentable one refuses the whole
+		// statement — Handle's rule, and it matters more here than on a position:
+		// a trade line dropped for a bad decimal leaves its reference unmatched,
+		// which is reported as an execution the custodian never saw. A decoder
+		// bug would arrive in the queue wearing a settlement failure's clothes.
+		qty, qok := dec.FromProtoChecked(tx.GetQuantity())
+		price, pok := dec.FromProtoChecked(tx.GetPrice())
+		cash, cok := dec.FromProtoChecked(tx.GetCash())
+		if !qok || !pok || !cok {
+			return Statement{}, fmt.Errorf("custody: statement %s: transaction %s carries a figure that is not a valid Decimal", stmt.StatementID, ref)
+		}
+		out := recon.Transaction{
+			ExternalRef:  ref,
+			InstrumentID: tx.GetInstrumentId(),
+			Quantity:     qty,
+			Price:        price,
+			Cash:         cash,
+			CurrencyCode: tx.GetCurrencyCode(),
+		}
+		if td := tx.GetTradeDate(); td != nil {
+			out.TradeDate = td.AsTime().UTC()
+		}
+		if sd := tx.GetSettlementDate(); sd != nil {
+			out.SettlementDate = sd.AsTime().UTC()
+		}
+		stmt.Transactions = append(stmt.Transactions, out)
 	}
 	if err := stmt.Validate(); err != nil {
 		return Statement{}, err
