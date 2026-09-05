@@ -25,7 +25,10 @@ const okxPartialFrame = `{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT
 	`"tradeId":"7","fillFee":"-0.02","fillFeeCcy":"USDT","uTime":"1700000000000"}]}`
 
 func okxIngesterOverView(frames [][]byte, cap *okxCapture, view *okxOrders) *OKXUserDataIngester {
-	return newOKXUserDataIngester(&okxStream{frames: frames}, view, cap, "OKX", "fund-alpha")
+	return newOKXUserDataIngester(OKXUserDataConfig{
+		Stream: &okxStream{frames: frames}, Orders: view, Pub: cap,
+		Venue: "OKX", Tenant: "fund-alpha",
+	})
 }
 
 func TestOKXUserData_AFilledPushMarksTheOrderTerminalInTheView(t *testing.T) {

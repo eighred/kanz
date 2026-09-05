@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/eighred/kanz/internal/fillfact"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -56,22 +57,38 @@ type UserDataIngester struct {
 	pub    Publisher
 	venue  string
 	tenant string
+	// refusal is the SHARED answer to an execution report this ingester will not
+	// publish (#1045): counter, ERROR log, and a freeze on the adapter's own view.
+	// Shared with the OKX connector rather than written out here, because the
+	// defect it answers was in both and a per-connector refusal is one that gets
+	// improved on one venue.
+	refusal ReportRefusal
 }
 
 // UserDataConfig configures the ingester.
 type UserDataConfig struct {
-	Stream UserDataStream
-	Orders OrderTracker
-	Pub    Publisher
-	Venue  string
-	Tenant string
+	Stream    UserDataStream
+	Orders    OrderTracker
+	Pub       Publisher
+	Venue     string
+	Tenant    string
+	OnRefused func(mic, orderID, reason string)
+	Logger    *slog.Logger
 }
 
 func newUserDataIngester(cfg UserDataConfig) *UserDataIngester {
 	if cfg.Venue == "" {
 		cfg.Venue = "BINANCE"
 	}
-	return &UserDataIngester{stream: cfg.Stream, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	return &UserDataIngester{
+		stream: cfg.Stream, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
+		refusal: ReportRefusal{
+			Venue: cfg.Venue, Orders: cfg.Orders, OnRefused: cfg.OnRefused, Logger: cfg.Logger,
+		},
+	}
 }
 
 // Run reads the stream until ctx is cancelled or the stream errors. A decode of
@@ -117,10 +134,29 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 		return fmt.Errorf("binance: order %s commission %q %s is not representable as a Decimal",
 			rep.ClientOrderID, rep.Commission, rep.CommissionAst)
 	}
-	healed, hok := applyFillToState(st, rep)
-	if !hok {
-		return fmt.Errorf("binance: order %s healed quantities are not representable as a Decimal (cumQty=%q)",
-			rep.ClientOrderID, rep.CumQty)
+	healed, herr := applyFillToState(st, rep)
+	if herr != nil {
+		// A REFUSED REPORT IS FROZEN AND COUNTED, NEVER JUST DROPPED (#1045).
+		//
+		// The report does not become a fill FACT — publishing it would put a
+		// quantity the platform never authorised into the position book and the
+		// accounting ledger, and on this path nothing downstream would refuse it,
+		// because the OMS order aggregate does not consume the fill subject.
+		//
+		// But dropping it and reading the next frame would trade a wrong number
+		// for a missing execution, which is worse: the fund holds a position and
+		// no record says so. So the refusal leaves three marks — the counter an
+		// alert can watch, an ERROR an operator can read, and a quarantine on
+		// this adapter's own view that orderview.Dispatch will refuse to work
+		// over. Only then is the frame let go.
+		//
+		// THE STREAM IS NOT TORN DOWN FOR IT, unlike the conversion refusals
+		// above. Those are per-message and a reconnect re-reads venue truth; this
+		// one is a standing disagreement about ONE order, so returning an error
+		// would drop the websocket — and every other order's fills with it — on
+		// every repeat report, in a reconnect loop that fixes nothing.
+		i.refusal.Refuse(rep.ClientOrderID, herr)
+		return nil
 	}
 	fill := &orderpb.Fill{
 		FillId:           fmt.Sprintf("%s-%d", rep.Symbol, rep.TradeID),
@@ -167,18 +203,25 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 }
 
 // applyFillToState folds the report's cumulative fill into a fresh OrderState
-// (Kanz static terms + exchange dynamic fields). ok=false when a quantity will
-// not convert (#94) — the caller refuses the whole report rather than healing the
-// order to a size nothing traded.
-func applyFillToState(st *orderpb.OrderState, rep executionReport) (*orderpb.OrderState, bool) {
+// (Kanz static terms + exchange dynamic fields).
+//
+// It returns an error rather than healing the order in two cases, and they are
+// different findings: a quantity that will not convert (#94), and a venue
+// cumulative LARGER than the ordered quantity (#1045). The second used to be no
+// case at all — leaves came from a bare subtraction that represents a negative
+// result and reports success — so a cumulative 14 against an order of 10 healed
+// the order to filled 14, leaves −4, and published it. Both are now
+// LeavesRemaining's answer, and the caller refuses the whole report.
+func applyFillToState(st *orderpb.OrderState, rep executionReport) (*orderpb.OrderState, error) {
 	cum, cok := parseDec(rep.CumQty)
 	if !cok {
-		return nil, false
+		return nil, fmt.Errorf("binance: order %s cumulative filled quantity %q is not representable as a Decimal",
+			rep.ClientOrderID, rep.CumQty)
 	}
 	ordered := st.GetOrderedQuantity()
-	leaves, lok := subDec(ordered, cum)
-	if !lok {
-		return nil, false
+	leaves, lerr := leavesRemaining(ordered, cum)
+	if lerr != nil {
+		return nil, fmt.Errorf("binance: order %s: %w", rep.ClientOrderID, lerr)
 	}
 	return &orderpb.OrderState{
 		OrderId: st.GetOrderId(), PortfolioId: st.GetPortfolioId(), InstrumentId: st.GetInstrumentId(),
@@ -187,7 +230,7 @@ func applyFillToState(st *orderpb.OrderState, rep executionReport) (*orderpb.Ord
 		Status:         binanceStatusToProto(rep.OrderStatus),
 		FilledQuantity: cum, LeavesQuantity: leaves,
 		AsOf: timestamppb.New(time.UnixMilli(rep.TransactTime).UTC()),
-	}, true
+	}, nil
 }
 
 // reportFee reads the commission off a fill report. nil Money means NO FEE, so

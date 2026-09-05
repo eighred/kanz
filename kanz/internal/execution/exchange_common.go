@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"sort"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/instrument"
@@ -241,4 +243,148 @@ func ParseDec(s string) (*commonpb.Decimal, bool) {
 // cannot be represented; see ParseDec for why that is a refusal and not a zero.
 func SubDec(a, b *commonpb.Decimal) (*commonpb.Decimal, bool) {
 	return dec.ToProtoScaled(new(big.Rat).Sub(dec.FromProto(a), dec.FromProto(b)))
+}
+
+// ErrVenueOverfill is the exchange claiming a cumulative filled quantity LARGER
+// than the quantity this platform sent it.
+//
+// IT IS NOT AN ARITHMETIC EDGE CASE, IT IS A DISAGREEMENT ABOUT WHAT WAS
+// AUTHORISED — the same class Reconcile freezes an order over, and the same one
+// the OMS aggregate refuses as OVERFILL when the fill reaches it through
+// ApplyFill. On the user-data websocket it does not reach ApplyFill: the
+// ingester builds the fill FACT itself and the OMS order aggregate does not
+// consume that subject, so this sentinel is the whole bound on that path.
+var ErrVenueOverfill = errors.New("venue reports a cumulative filled quantity greater than the ordered quantity")
+
+// ErrLeavesUnrepresentable is ordered − cumulative not fitting a Decimal at all.
+// Separate from ErrVenueOverfill because they are different findings: one is a
+// venue contradiction an operator must resolve against the exchange's own order
+// history, the other is a number too large to carry, and merging them would make
+// the counter that fires on the first unreadable.
+var ErrLeavesUnrepresentable = errors.New("leaves quantity is not representable as a Decimal")
+
+// LeavesRemaining is ordered − cumulative for a venue execution report, and the
+// ONE place the bound between them is applied.
+//
+// # Why it exists rather than a subtraction at each ingester
+//
+// Both connectors computed leaves with SubDec and checked only its ok. SubDec
+// represents a negative result perfectly well and reports ok, so a venue
+// reporting a cumulative 14 against an order of 10 produced LeavesQuantity −4
+// and published it as an order.order.filled FACT. The position book folded it
+// and the accounting ledger journalled both legs: the fund's book recorded an
+// execution larger than any order the controls admitted, with no refusal, no
+// quarantine and no counter, and the first thing that could notice was a balance
+// reconciliation against the venue, if it ran (#1045).
+//
+// The two connectors shared the shape, so a fix in one of them would have been a
+// fix in one of them. This is the helper both call.
+//
+// # Refusing, not healing
+//
+// The caller must refuse the WHOLE report on either error — never clamp leaves
+// to zero and never record the venue's cumulative. Clamping would heal the order
+// to a size the platform never authorised, which is the same defect with the
+// evidence removed; and the fill quantity on the report is not trustworthy
+// either once the cumulative is not.
+//
+// EQUALITY IS NOT AN OVERFILL. A report that completes the order exactly is the
+// ordinary terminal case and leaves zero.
+func LeavesRemaining(ordered, cumulative *commonpb.Decimal) (*commonpb.Decimal, error) {
+	o, c := dec.FromProto(ordered), dec.FromProto(cumulative)
+	if c.Cmp(o) > 0 {
+		return nil, fmt.Errorf("%w: ordered %s, venue reports %s cumulative filled",
+			ErrVenueOverfill, o.FloatString(8), c.FloatString(8))
+	}
+	leaves, ok := SubDec(ordered, cumulative)
+	if !ok {
+		return nil, fmt.Errorf("%w: ordered %s minus cumulative %s",
+			ErrLeavesUnrepresentable, o.FloatString(8), c.FloatString(8))
+	}
+	return leaves, nil
+}
+
+// ReportRefusal is the ONE answer both connectors give a venue execution report
+// they will not publish as a fill (#1045).
+//
+// # Why it is here and not written out at each ingester
+//
+// The bound was missing from both connectors because the subtraction was
+// written at both, so the answer to it is shared for the same reason the bound
+// is. A refusal implemented per connector is a refusal that gets improved on one
+// venue: the copy is made once and the fix lands on one side afterwards, which
+// is how "one implementation per concept" fails in practice on this platform.
+//
+// # What a refusal has to leave behind, and why all three
+//
+// REFUSING ALONE IS A SILENT DROP, and a dropped execution is worse than a wrong
+// one: the fund holds a position and no FACT, no projection and no ledger entry
+// says so. Nothing downstream can notice, because there is nothing to notice.
+// So a refusal is three marks and no fewer:
+//
+//   - the COUNTER, which is the only alertable signal on this path. The two fill
+//     paths that reach the OMS aggregate move its quarantine counter when
+//     ApplyFill refuses; this one reaches no aggregate, so without this
+//     "the venue over-filled us and we refused" and "no venue has ever
+//     over-filled us" are the same silence.
+//   - the ERROR LOG, which carries the venue's own numbers an operator resolves
+//     the disagreement with.
+//   - the FREEZE on this adapter's own order view, which is the durable half:
+//     orderview.Dispatch refuses to work a quarantined order, so the refusal
+//     survives into the next ExecuteRequest instead of being a line in a log
+//     nobody greps.
+//
+// COUNTED AND LOGGED BEFORE THE FREEZE, for the reason the OMS's own quarantine
+// states: the freeze is a store write and it can fail, and an operator must
+// learn the attempt was made either way.
+type ReportRefusal struct {
+	// Venue is the MIC, and the counter's first answer to "which exchange".
+	Venue string
+	// Orders is the view the freeze is written to. Its Quarantined is non-failing
+	// by contract — this runs inside a websocket read loop.
+	Orders OrderTracker
+	// OnRefused is the counter seam, supplied by the composition root from
+	// WorkerDeps.OnFillRefused. Nil is tolerated so a test need not wire one;
+	// production never leaves it nil, because the completeness guard makes an
+	// omitted WorkerDeps field a visible decision in a diff.
+	OnRefused func(mic, orderID, reason string)
+	// Logger is where the ERROR goes. Nil falls back to the default logger rather
+	// than dropping the loudest half of the refusal.
+	Logger *slog.Logger
+}
+
+// Refuse records the refusal of one execution report.
+func (r ReportRefusal) Refuse(orderID string, reason error) {
+	if r.OnRefused != nil {
+		r.OnRefused(r.Venue, orderID, RefusalKind(reason))
+	}
+	logger := r.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Error("VENUE EXECUTION REPORT REFUSED — this adapter will not publish it as a fill, and "+
+		"the order is being frozen. The venue and this platform disagree about what was authorised, "+
+		"and no re-drive resolves that: a human must compare it against the exchange's own order history",
+		"venue", r.Venue, "order_id", orderID, "reason", reason)
+	if r.Orders != nil {
+		r.Orders.Quarantined(&orderpb.OrderState{OrderId: orderID}, reason.Error())
+	}
+}
+
+// RefusalKind is the counter LABEL for a refusal.
+//
+// BOUNDED BY CONSTRUCTION, and deliberately not the error text: an exchange
+// controls what its error strings contain, and a label taken from one would let
+// a venue mint unbounded Prometheus cardinality by putting an order id in a
+// message. Anything unrecognised is "other" rather than dropped — a refusal this
+// table has not learned to name is still a refusal that happened.
+func RefusalKind(err error) string {
+	switch {
+	case errors.Is(err, ErrVenueOverfill):
+		return "overfill"
+	case errors.Is(err, ErrLeavesUnrepresentable):
+		return "unrepresentable"
+	default:
+		return "other"
+	}
 }

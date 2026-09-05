@@ -103,6 +103,33 @@ var markTickDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
 	ConstLabels: prometheus.Labels{"venue": "binance"},
 }, []string{"mic", "instrument"})
 
+// fillRefused counts venue execution reports this adapter REFUSED to publish as
+// a fill FACT, by reason (#1045).
+//
+// THE FIRST REASON IS AN OVER-FILL: the exchange reporting a cumulative filled
+// quantity larger than the quantity this platform sent it. That is the venue and
+// the platform disagreeing about what was authorised, and on the user-data
+// websocket nothing else forms an opinion — the two fill paths that meet the OMS
+// aggregate get its OVERFILL refusal and its quarantine counter, and this one
+// meets neither, because the OMS order aggregate does not consume the fill
+// subject. Without this metric, "the venue over-filled us and we refused" and
+// "no venue has ever over-filled us" are the same silence.
+//
+// REGISTERED UNCONDITIONALLY, beside the other package-level collectors and NOT
+// inside a branch that depends on the broker or the exchange being reachable. A
+// collector registered on one arm of an `if` exports no series at all on the
+// other, so an alert written `== 0` over it is silent in exactly the deployment
+// state it was written for — twice shipped in this estate and caught both times
+// only by running the binary.
+var fillRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "kanz_venue_fill_refused_total",
+	Help: "Venue execution reports this adapter refused to publish as a fill FACT, by reason. " +
+		"Non-zero means the venue reported an execution this platform did not authorise; the " +
+		"order is frozen in the adapter's order view and a human must resolve it against the " +
+		"exchange's own order history.",
+	ConstLabels: prometheus.Labels{"venue": "binance"},
+}, []string{"reason"})
+
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
 	// run() registers fires before this line. The non-zero code is what makes a
@@ -176,7 +203,8 @@ func serve(cfg config.Config) error {
 
 	balanceReconConfigured := balancerecon.NewGauge("binance")
 	marginSourceConfigured := venuemargin.NewGauge("binance")
-	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured, marginSourceConfigured, markTickDropped)
+	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured, marginSourceConfigured,
+		markTickDropped, fillRefused)
 
 	// The adapter's own order view — the state its workers read after the process
 	// split cut them off from the OMS store.
@@ -434,6 +462,18 @@ func serve(cfg config.Config) error {
 		// rate-limited on purpose and carries the reason.
 		OnMarkTickDropped: func(mic, instrumentID string) {
 			markTickDropped.WithLabelValues(mic, instrumentID).Inc()
+		},
+		// EVERY REFUSED EXECUTION REPORT IS COUNTED (#1045). Nil here would leave
+		// an over-fill — the venue claiming it filled more than we sent — as an
+		// ERROR log in one pod and nothing an alert can reach.
+		//
+		// THE ORDER ID IS NOT A LABEL, deliberately: it is unbounded, and a
+		// per-order series would put one time series per refused order into
+		// Prometheus forever. It is in the ERROR log beside the venue's own
+		// numbers, which is where the operator resolving the freeze reads it.
+		// The mic is already the collector's const label.
+		OnFillRefused: func(_, _, reason string) {
+			fillRefused.WithLabelValues(reason).Inc()
 		},
 		Logger: logger,
 	})

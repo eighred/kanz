@@ -37,6 +37,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Store records the orders this adapter is working.
@@ -542,6 +543,18 @@ var ErrTerminalNotReopened = errors.New("orderview: refusing to reopen a termina
 // decide error UNWRAPPED for exactly this reason.
 var ErrTerminalNotRedispatched = errors.New("orderview: refusing to work an order the venue has already finished")
 
+// ErrQuarantinedNotRedispatched is returned when Dispatch is asked to work an
+// order this adapter has FROZEN, because the venue and the platform disagree
+// about what was authorised — today, a venue reporting more filled than was ever
+// sent (#1045).
+//
+// IT IS THE SAME REFUSAL ErrTerminalNotRedispatched IS, for a state that is not
+// terminal. A quarantined order has an unresolved contradiction attached to it,
+// and the resolution is a human comparing this adapter's record against the
+// exchange's own order history — not another placement with the fund's money
+// against a size nobody can currently state.
+var ErrQuarantinedNotRedispatched = errors.New("orderview: refusing to work an order this adapter has quarantined")
+
 // ErrContended is returned when Update could not land its write inside
 // UpdateAttempts rounds because another writer changed the order every time.
 //
@@ -854,12 +867,81 @@ func Dispatch(ctx context.Context, store Store, requested *orderpb.OrderState) e
 		if found && Terminal(cur.GetStatus()) {
 			return nil, fmt.Errorf("%w: %s is already %v in this adapter's view", ErrTerminalNotRedispatched, id, cur.GetStatus())
 		}
+		// A QUARANTINED PRIOR REFUSES THE DISPATCH TOO, and for a harder reason
+		// than the terminal one above: a terminal order is one whose story ended,
+		// a quarantined order is one whose size nobody can currently state. Working
+		// it would put the fund's money behind a quantity the venue and the
+		// platform disagree about — which is exactly the disagreement that froze it.
+		if found && cur.GetQuarantine() != nil {
+			return nil, fmt.Errorf("%w: %s was frozen — %s", ErrQuarantinedNotRedispatched, id,
+				cur.GetQuarantine().GetReason())
+		}
 		next, ok := proto.Clone(requested).(*orderpb.OrderState)
 		if !ok {
 			return nil, fmt.Errorf("orderview: order %s did not clone", id)
 		}
 		if found {
 			carryVenueObserved(next, cur)
+		}
+		return next, nil
+	})
+}
+
+// Quarantine FREEZES an order in this adapter's own view because the venue and
+// the platform disagree about what was authorised.
+//
+// # What it is for, and what it deliberately is not
+//
+// It is the adapter-side half of the freeze the OMS performs on the two paths a
+// fill reaches ApplyFill on. On the user-data websocket there is no such path —
+// the ingester builds the fill FACT and publishes it, and the OMS order
+// aggregate is not a consumer of that subject — so a report the ingester refuses
+// would otherwise leave no trace at all except a log line. That is the "silent
+// drop" half of #1045, and it is worse than the wrong number it replaced: the
+// fund would hold a position with no FACT, no projection and no ledger entry.
+//
+// So the refusal writes something DURABLE that a later action reads: Dispatch
+// refuses to work a quarantined order, which turns the freeze into a refusal the
+// OMS sees on its next ExecuteRequest rather than a record nobody looks at.
+//
+// IT DOES NOT INVENT A SECOND QUARANTINE MODEL. The record is
+// order.v1.OrderQuarantine — the same message the OMS writes and the same one
+// this view has always been able to carry — so an operator reads one shape
+// wherever the freeze happened.
+//
+// # The write is conditional, like every other writer here
+//
+// It goes through Update, so it cannot overwrite a value it was not built on and
+// it re-decides against the re-read state on a contended round. An order that is
+// ALREADY quarantined is left exactly as it was: the first contradiction is the
+// one an operator needs, and refreshing the timestamp on every repeat report
+// would make a freeze from an hour ago look like a fresh one.
+//
+// An order not in the view is ErrNotInView, not a silent no-op: quarantining an
+// order this adapter never held would be a claim about somebody else's order.
+func Quarantine(ctx context.Context, store Store, orderID, reason string, at time.Time) error {
+	if orderID == "" {
+		return errors.New("orderview: cannot quarantine an order with empty order_id")
+	}
+	if reason == "" {
+		return errors.New("orderview: cannot quarantine an order without a reason — the reason IS " +
+			"what an operator resolves the freeze against")
+	}
+	return Update(ctx, store, orderID, func(cur *orderpb.OrderState, found bool) (*orderpb.OrderState, error) {
+		if !found {
+			return nil, fmt.Errorf("%w: %s", ErrNotInView, orderID)
+		}
+		if cur.GetQuarantine() != nil {
+			return nil, nil // already frozen; keep the first contradiction
+		}
+		next, ok := proto.Clone(cur).(*orderpb.OrderState)
+		if !ok {
+			return nil, fmt.Errorf("orderview: order %s did not clone", orderID)
+		}
+		next.Quarantine = &orderpb.OrderQuarantine{
+			At:          timestamppb.New(at.UTC()),
+			Reason:      reason,
+			LastQueryAt: timestamppb.New(at.UTC()),
 		}
 		return next, nil
 	})
@@ -912,6 +994,20 @@ func (s *Seam) OpenOrders() []*orderpb.OrderState {
 // is the whole defect this method closes.
 func (s *Seam) Progressed(st *orderpb.OrderState) {
 	if err := Progress(context.Background(), s.store, st); err != nil {
+		s.report(err)
+	}
+}
+
+// Quarantined satisfies execution.OrderTracker's freeze half: the ingester
+// refused a venue execution report it cannot reconcile with the order the
+// platform sent, and this is where that refusal becomes durable (#1045).
+//
+// Non-failing, like Progressed and for the same reason — it is called from
+// inside a websocket read loop. A store failure goes to onErr, and it is NOT
+// silent: the caller has already counted and logged the refusal, so the freeze
+// failing to persist degrades the answer rather than erasing it.
+func (s *Seam) Quarantined(st *orderpb.OrderState, reason string) {
+	if err := Quarantine(context.Background(), s.store, st.GetOrderId(), reason, time.Now()); err != nil {
 		s.report(err)
 	}
 }
