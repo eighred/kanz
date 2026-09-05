@@ -316,12 +316,24 @@ func decodeCash(eventType string, payload []byte, envKnowledge time.Time) (*ledg
 		// funded cash movement landed asserting something false in the append-only
 		// book of record.
 		VenueAccountID: le.GetVenueAccountId(),
-		Type:           entryType,
-		Cash:           dec.FromProto(le.GetCash()),
-		CashCurrency:   le.GetCashCurrency(),
-		Effective:      effective,
-		Knowledge:      knowledge,
-		SourceRef:      le.GetSourceRef(),
+		// NO SETTLEMENT BASIS IS ASSERTED HERE, AND THAT IS THE HONEST ANSWER
+		// (#1043). accounting.v1.LedgerEntry carries no settlement field, so this
+		// decoder genuinely cannot know whether a subscription, redemption or fee
+		// has actually moved between the accounts — only that it was announced.
+		// Leaving SettlementBasis at ledger.SettlementUnknown keeps the movement in
+		// the traded book, out of the settled one, and counted as the gap it is;
+		// Book.SettlementBasisComplete then refuses a settled-basis read rather than
+		// returning a balance short by every unsettled movement. Stamping
+		// SettlementSettled here would be cheaper and would be a fabrication — the
+		// same #345 ground on which invented corporate actions are refused. WHAT
+		// WOULD ARM IT is a settlement field on accounting.v1.LedgerEntry carrying
+		// the producer's own assertion, which is #589's confirmation plane.
+		Type:         entryType,
+		Cash:         dec.FromProto(le.GetCash()),
+		CashCurrency: le.GetCashCurrency(),
+		Effective:    effective,
+		Knowledge:    knowledge,
+		SourceRef:    le.GetSourceRef(),
 	}, nil
 }
 

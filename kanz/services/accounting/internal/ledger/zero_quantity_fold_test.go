@@ -32,7 +32,7 @@ func TestApplyScreensOutAZeroQuantityEntry(t *testing.T) {
 func TestFoldPositionSurvivesALotThatNetsToZero(t *testing.T) {
 	b := NewBook("PF")
 
-	b.foldPosition("AAPL", new(big.Rat), big.NewRat(150, 1))
+	b.traded().foldPosition("AAPL", new(big.Rat), big.NewRat(150, 1))
 
 	pos, ok := b.Positions["AAPL"]
 	if !ok {

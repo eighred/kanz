@@ -289,6 +289,15 @@ var mapEvictionExempt = map[string]evictionExemption{
 	"services/accounting/internal/ledger: Snapshot.Positions": ledgerSnapshot("open positions, keyed by instrument"),
 	"services/accounting/internal/ledger: Snapshot.Cash":      ledgerSnapshot("cash, keyed by currency"),
 	"services/accounting/internal/ledger: Snapshot.Accrued":   ledgerSnapshot("accruals, keyed by currency"),
+	// The SETTLED half of the same checkpoint (#1043). Identical shape, identical
+	// bound: one map per instrument held and one per currency settled in, rebuilt
+	// whole on each save. They are a SUBSET of the two above — an entry reaches
+	// them only when it also reached the traded fold — so they cannot outgrow
+	// collections this guard has already accepted as book-sized.
+	"services/accounting/internal/ledger: Snapshot.SettledPositions": ledgerSnapshot(
+		"settled open positions, keyed by instrument"),
+	"services/accounting/internal/ledger: Snapshot.SettledCash": ledgerSnapshot(
+		"settled cash, keyed by currency"),
 
 	"services/datamaster/internal/pricing: Exception.Overrides": {boundedByConstruction,
 		"the operator decisions taken on ONE pricing exception, appended by a human acting through " +
@@ -2052,7 +2061,7 @@ func factorModelArtifact(what string) evictionExemption {
 			"with time is the model cache holding it, not this.", ""}
 }
 
-// ledgerSnapshot is the shared argument for the accounting Snapshot's three maps.
+// ledgerSnapshot is the shared argument for the accounting Snapshot's five maps.
 //
 // SIZED BY THE BOOK, NOT BY TRAFFIC. A snapshot is one portfolio's resume point
 // and is rebuilt whole on each save; these grow with the instruments the fund
