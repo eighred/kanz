@@ -2674,3 +2674,64 @@ tests:
       - eval_time: 40m
         alertname: RiskRecomputeBacklogNeverEmpties
         exp_alerts: []
+
+  # ===========================================================================
+  # RiskGreekServedByANetExposurePlaceholder — the estate as it stands (#1055).
+  # ===========================================================================
+  # Every risk-engine in this platform seeds the whole Greek family at 0 and
+  # leaves it there, because compute.RegisterGreeks has no caller. Delta's zero
+  # is the one that reaches order admission: it is REGISTERED and answers, with
+  # net exposure, which the OMS gate refuses to fold.
+  - interval: 1m
+    name: an engine whose Delta is the net-exposure placeholder
+    input_series:
+      - series: 'kanz_risk_greek_model_live{namespace="kanz", measure="Delta"}'
+        values: '0x60'
+      - series: 'kanz_risk_greek_model_live{namespace="kanz", measure="Gamma"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: RiskGreekServedByANetExposurePlaceholder
+        exp_alerts:
+          - exp_labels: { severity: warning, layer: operational, namespace: kanz, measure: Delta }
+            exp_annotations:
+              summary: "The risk engine's Delta is the portfolio's net exposure, not a Greek — a Delta mandate refuses every order"
+              description: "compute.RegisterGreeks has no caller in this build, so compute.Delta is what this engine serves: the signed base-currency sum of the book, which is NetExposure under a second name. It declares net_exposure_placeholder, the OMS admission gate refuses to fold a placeholder (#1037), and compliance.RiskLimitRule fails closed on an unknown measure — so every order under a mandate naming Delta is REFUSED rather than checked, on every deployment, permanently. THIS IS THE SAFE DIRECTION AND IT IS NOT A REGRESSION: before #1037 the same number folded silently and the limit was checked against net exposure. What to do now: confirm with kanz_risk_greek_model_live (Gamma/Vega/Theta/Rho read 0 because they are unregistered; Delta reads 0 because it answers and is not a model) and with kanz_oms_risk_measures_placeholder_total on the OMS, which counts the refusals. Then take the Delta limit out of any mandate that carries one — it cannot be satisfied and it cannot be evaluated. The real repair is a VolProvider behind compute.RegisterGreeks, blocked on option premiums nothing in this estate persists (#203, #345, #113); wiring it against an uncalibrated surface would return a MEASURED ZERO instead of a refusal, which is worse (#1044). This clears by itself the day RegisterGreeks has a caller."
+
+  # THE DAY IT IS WIRED, AND THE HALF THAT PROVES THE RULE IS NOT A CONSTANT. A
+  # gauge that could only ever read 0 would fire this alert forever no matter what
+  # the estate did, which is the shape alerts/README.md deleted ten rules for. The
+  # posture is DERIVED from the registry, so RegisterGreeks having a caller flips
+  # every member of the family to 1 and this rule goes quiet with no rule change.
+  - interval: 1m
+    name: an engine with the Greek family wired
+    input_series:
+      - series: 'kanz_risk_greek_model_live{namespace="kanz", measure="Delta"}'
+        values: '1x60'
+      - series: 'kanz_risk_greek_model_live{namespace="kanz", measure="Gamma"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: RiskGreekServedByANetExposurePlaceholder
+        exp_alerts: []
+
+  # THE OMITTED-SERIES CASE, EXECUTED (#973, #963). A promtool harness INVENTS its
+  # input series, so a rule proven to fire above says nothing about a deployment
+  # where the collector was never registered — and an `== 0` arm over a series
+  # that does not exist matches an EMPTY VECTOR and is silent in exactly the state
+  # it was written for. Gamma is present so this case is not vacuously empty; the
+  # Delta label is the one missing, which is the same shape as a CounterVec label
+  # that was never incremented. The rule staying silent here is not a bug in the
+  # rule — it is what makes app.NewGreekModelPosture's unconditional registration
+  # at the risk-engine composition root LOAD-BEARING, and it is why
+  # test/arch/greek_posture_is_stated_test.go refuses to let that registration
+  # move behind the broker branch.
+  - interval: 1m
+    name: the Delta series is not exported at all
+    input_series:
+      - series: 'kanz_risk_greek_model_live{namespace="kanz", measure="Gamma"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: RiskGreekServedByANetExposurePlaceholder
+        exp_alerts: []

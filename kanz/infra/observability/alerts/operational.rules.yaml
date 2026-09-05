@@ -1992,3 +1992,79 @@ groups:
         annotations:
           summary: "No risk-engine is reporting its recompute fan-out width"
           description: "kanz_risk_recompute_inflight has produced no sample anywhere for thirty minutes. engine.NewMetrics registers it unconditionally at the composition root, so a running and scraped risk-engine exports it whether or not it is doing any work — an idle engine reads 0, it does not disappear. Three causes: the collector has been moved behind a conditional branch, which is the defect that silenced two alerting layers on this estate already (#973, #963) and which makes RiskRecomputeBacklogNeverEmpties silent with it; the risk-engine pods are up but not being scraped (check the ServiceMonitor and the pod annotations); or no risk-engine is running at all, in which case nothing in this platform is computing exposure or measures and the cached values every consumer is reading are frozen at whatever was last published."
+
+  - name: risk_measure_models
+  # ===========================================================================
+  # WHAT SERVES A RISK MEASURE, NOT WHETHER ITS NAME IS REGISTERED (#1055).
+  #
+  # compute.Delta returns the portfolio's signed base-currency sum — NetExposure
+  # under a second name, the "every $1 of position is $1 of delta to spot"
+  # assumption that holds for cash equities and is wrong for derivatives. It is
+  # registered in compute.DefaultRegistry, which every engine builds, and
+  # compute.RegisterGreeks is the only thing that overwrites it. RegisterGreeks
+  # has NO PRODUCTION CALLER anywhere in this estate: it needs a VolProvider,
+  # which needs option premiums nothing here persists (#203, #345, #113). So
+  # unlike the VaR placeholder — which a market-data DSN switches off — there is
+  # no configuration in which this one does not serve.
+  #
+  # Since #1037 the placeholder declares itself and the OMS admission gate
+  # refuses to fold it, so a mandate naming Delta is a PERMANENT REFUSAL rather
+  # than a check: the measure is UNKNOWN and compliance.RiskLimitRule fails
+  # closed on unknown. That direction is right — a control that refuses beats one
+  # that passes on a number nobody can vouch for — and it is a live change in
+  # admission behaviour that no signal announced. This is the signal.
+  #
+  # WHY NOT kanz_risk_measure_live OR kanz_risk_measure_method. The first answers
+  # whether the NAME is registered and reads 1 for Delta on an engine that
+  # computes no Greek at all — its own Help says so. The second answers what was
+  # last ANNOUNCED, which is the right question and has no answer until a
+  # recompute has run: on a pod holding no portfolio it reads
+  # method="unobserved" forever, so a rule selecting the placeholder method is
+  # silent on exactly the engine that has never computed anything. Both are also
+  # registered INSIDE runEngine, behind RISK_ENGINE_NATS_URL, so a broker-less
+  # risk-engine exports neither — verified on the binary: zero
+  # kanz_risk_measure_live series beside fifteen kanz_risk_recompute_* ones.
+  # kanz_risk_greek_model_live is registered ahead of that branch and is a
+  # property of the registry, known at startup.
+    rules:
+      # THE ONE GREEK THAT ANSWERS IS NOT A GREEK.
+      #
+      # YES, IT FIRES CONTINUOUSLY TODAY, AND THAT IS NOT THE absent()
+      # ANTI-PATTERN THIS FILE'S HEADER CONDEMNS. AlertDeliveryNotDelivering
+      # states the three tests and this rule meets all three. The condition is
+      # TRUE — every risk-engine in this estate serves a net-exposure Delta. It
+      # is ACTIONABLE, and by the person who receives it rather than by a
+      # platform team years out: a desk holding a Delta limit is having orders
+      # refused, and their action is to stop writing that limit until the Greek
+      # family is wired. And it CLEARS BY ITSELF the moment compute.RegisterGreeks
+      # has a caller — the gauge is derived from the registry, not asserted, so
+      # nothing has to be remembered. It is a permanent banner on a permanent
+      # defect and it stops existing when the defect does.
+      #
+      # WHY ONLY measure="Delta" AND NOT THE WHOLE FAMILY. A zero on Gamma, Vega,
+      # Theta or Rho means the name is unregistered and absent from every
+      # response, which kanz_risk_measure_live already reports and which no
+      # mandate can be written against — the query path drops unknown names, so a
+      # limit naming Gamma refuses for the ordinary reason. Delta is the only one
+      # that ANSWERS, with a number that reaches order admission and is refused
+      # there. Firing on all five would make four false incidents to carry the
+      # one real one.
+      #
+      # WARNING, NOT CRITICAL. Nothing is broken and nothing is degrading: the
+      # gate is refusing, which is the safe direction. Critical would claim an
+      # outage, and the failure this replaced — a Delta mandate silently gating
+      # on net exposure — was the state BEFORE #1037.
+      #
+      # for: 30m rides out a rolling deploy and a fresh cluster bootstrap, both of
+      # which pass through a legitimate window with no risk-engine target up.
+      #
+      # NO by(): the question is estate-level. Every replica builds the same
+      # registry from the same binary, so a per-pod split would multiply one fact
+      # by the replica count.
+      - alert: RiskGreekServedByANetExposurePlaceholder
+        expr: kanz_risk_greek_model_live{measure="Delta"} == 0
+        for: 30m
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "The risk engine's Delta is the portfolio's net exposure, not a Greek — a Delta mandate refuses every order"
+          description: "compute.RegisterGreeks has no caller in this build, so compute.Delta is what this engine serves: the signed base-currency sum of the book, which is NetExposure under a second name. It declares net_exposure_placeholder, the OMS admission gate refuses to fold a placeholder (#1037), and compliance.RiskLimitRule fails closed on an unknown measure — so every order under a mandate naming Delta is REFUSED rather than checked, on every deployment, permanently. THIS IS THE SAFE DIRECTION AND IT IS NOT A REGRESSION: before #1037 the same number folded silently and the limit was checked against net exposure. What to do now: confirm with kanz_risk_greek_model_live (Gamma/Vega/Theta/Rho read 0 because they are unregistered; Delta reads 0 because it answers and is not a model) and with kanz_oms_risk_measures_placeholder_total on the OMS, which counts the refusals. Then take the Delta limit out of any mandate that carries one — it cannot be satisfied and it cannot be evaluated. The real repair is a VolProvider behind compute.RegisterGreeks, blocked on option premiums nothing in this estate persists (#203, #345, #113); wiring it against an uncalibrated surface would return a MEASURED ZERO instead of a refusal, which is worse (#1044). This clears by itself the day RegisterGreeks has a caller."

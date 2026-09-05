@@ -128,8 +128,17 @@ var bareMeasureExempt = map[string]string{
 	"GrossExposure": "reads domain.Portfolio directly — no provider can decline",
 	"NetExposure":   "reads domain.Portfolio directly — no provider can decline",
 	"VaR99":         "the 1%-of-gross placeholder; arithmetic over the book, no provider",
-	"Delta":         "the net-exposure placeholder RegisterGreeks overwrites; no provider",
-	"HHI":           "concentration over the book itself — no provider can decline",
+	// CORRECTED (#1055). This entry used to read "the net-exposure placeholder
+	// RegisterGreeks overwrites", and the premise was false in every deployment:
+	// RegisterGreeks has no production caller anywhere in the estate — it needs a
+	// VolProvider, which needs option premiums nothing here persists (#203/#345)
+	// — so nothing overwrites it, and the exemption was resting on a repair that
+	// has never happened. Delta is not a placeholder awaiting a swap; it is the
+	// answer this platform serves. Sitting under a coverage exemption whose
+	// justification named the swap made it read like a temporary state.
+	"Delta": "the net-exposure placeholder that EVERY deployment serves — arithmetic over the " +
+		"book, no provider to decline. Nothing overwrites it (#1055)",
+	"HHI": "concentration over the book itself — no provider can decline",
 
 	// DARK AND TRACKED. These DO have providers and DO have the #527 shape, and
 	// they are unregistered — which is a schedule, not a safeguard. Each is
