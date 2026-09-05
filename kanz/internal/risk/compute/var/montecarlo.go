@@ -2,10 +2,12 @@ package varmodel
 
 import (
 	"context"
-	"github.com/eighred/kanz/internal/dec"
 	"math"
 	"math/rand"
 	"sort"
+	"strconv"
+
+	"github.com/eighred/kanz/internal/dec"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/compute"
@@ -49,6 +51,14 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 	if seed == 0 {
 		seed = DefaultSeed
 	}
+	// THE SEED IS PART OF THE ANSWER, not a detail of how it was reached. Two
+	// Monte-Carlo VaRs over the same book differ by draws and seed alone, and a
+	// recompute that cannot be reproduced cannot be audited (#1037).
+	prov := v1.MeasureProvenance{
+		Method: v1.MethodMonteCarlo,
+		Params: modelParams(conf, window, &seed),
+	}
+	prov.Params["draws"] = strconv.Itoa(draws)
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
 		// SAME COVERAGE CONTRACT AS THE HISTORICAL PATH, and it has to be
 		// open-coded here because this estimator needs the per-instrument series
@@ -79,7 +89,7 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 		// Need ≥2 scenarios for a sample covariance.
 		if len(series) == 0 || minLen < 2 {
 			cover.ExcludeWhole(SkipInsufficientHistory)
-			return zeroMeasure(cover)
+			return zeroMeasure(prov, cover)
 		}
 
 		// Tail-align every series to the common window (matching Historical), so
@@ -119,9 +129,10 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 			v = 0
 		}
 		return v1.Measure{
-			Name:     compute.MeasureVaR99,
-			Value:    floatToDecimal(v, varExponent),
-			Coverage: cover.Result(),
+			Name:       compute.MeasureVaR99,
+			Value:      floatToDecimal(v, varExponent),
+			Coverage:   cover.Result(),
+			Provenance: prov,
 		}
 	}
 }

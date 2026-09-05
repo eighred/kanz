@@ -263,7 +263,9 @@ func TestMeasurePosture_ThePlaceholderDeltaReadsAsLive(t *testing.T) {
 
 	if got, ok := seriesFor(t, reg, "Delta"); !ok || got != 1 {
 		t.Errorf("Delta = %v (present=%v), want 1 — DefaultRegistry registers the placeholder, "+
-			"and the posture cannot see that it is one", got, ok)
+			"and THIS gauge cannot see that it is one. That is now a division of labour rather "+
+			"than a hole: kanz_risk_measure_method carries the model (#1037), and this one keeps "+
+			"answering only whether the name is registered", got, ok)
 	}
 	// AND ITS FAMILY IS STILL MOSTLY DARK, which is the reading that matters. An
 	// operator must take family coverage from the other four, not from Delta.
