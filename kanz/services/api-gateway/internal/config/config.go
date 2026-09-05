@@ -222,14 +222,21 @@ type Config struct {
 	// against infra/deploy/tenants/ so the short list cannot ship.
 	PerTenantUpstreams []string
 
-	// AccountingAddr is the book of record (#415). It fronts exactly one route —
-	// POST /v1/portfolios/{id}/cash-movements — behind authz.Fund. Empty disables
-	// it, the same shape as every other upstream here: a funding surface that is
-	// not configured must 404 rather than answer.
+	// AccountingAddr is the book of record (#415). It fronts the routes behind
+	// authz.Fund — POST /v1/portfolios/{id}/cash-movements (#415), the custody
+	// break queue (#962) and POST /v1/portfolios/{id}/reconcile (#1025) — and the
+	// list has grown twice since it was written as "exactly one route", which is
+	// why it names the issues rather than a count. Empty disables them, the same
+	// shape as every other upstream here: a funding surface that is not configured
+	// must 404 rather than answer.
 	AccountingAddr string
-	// FundRole is the role a Principal must carry to MOVE THE FUND'S OWN CAPITAL:
+	// FundRole is the role a Principal must carry to MOVE THE FUND'S OWN CAPITAL —
 	// POST /v1/portfolios/{id}/cash-movements, which posts a subscription, a
-	// redemption or a fee to the book of record (#535).
+	// redemption or a fee to the book of record (#535) — and, since #962/#1025, to
+	// work the custody break queue and run the ad-hoc comparison behind it. Those
+	// move no capital; they are middle-office fund operations by the same people,
+	// and the reasoning for reusing this capability rather than minting a seventh
+	// is written on the routes themselves.
 	//
 	// OPTIONAL, AND THE UNSET CASE IS THE DECISION. Empty ⇒ the route is NOT
 	// REGISTERED at all, so a deployment that has named no funder answers 404 —

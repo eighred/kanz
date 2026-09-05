@@ -244,9 +244,20 @@ spec:
             #                                infra/security/runtime/network-policies.yaml)
             #   API_GATEWAY_FUND_ROLE        the role carrying authz.Fund
             #
-            # A PAIR, like the operator plane above. With the ROLE unset, POST
-            # /v1/portfolios/{id}/cash-movements is NOT REGISTERED and this gateway
-            # answers 404 — "there is no cash-movement surface here", which is true. With
+            # A PAIR, like the operator plane above. With the ROLE unset, NONE of the
+            # routes carrying authz.Fund is REGISTERED and this gateway answers 404 —
+            # "there is no such surface here", which is true:
+            #
+            #   POST /v1/portfolios/{id}/cash-movements   the fund's own capital (#415)
+            #   GET  /v1/custody/breaks                   the break queue (#962)
+            #   POST /v1/custody/breaks/{id}/assign       "
+            #   POST /v1/custody/breaks/{id}/explain      "
+            #   POST /v1/portfolios/{id}/reconcile        the ad-hoc comparison (#1025)
+            #
+            # ONLY THE FIRST MOVES CAPITAL. The other four are middle-office custody
+            # work, and they ride this role deliberately rather than a seventh
+            # capability — the argument is written on the routes themselves, in
+            # internal/proxy/proxy.go. With
             # the ADDRESS set the role becomes REQUIRED and the gateway refuses to start
             # without it, so the funding surface can never be exposed with nobody able to
             # reach it. That third state is what #535 found: the route registered,

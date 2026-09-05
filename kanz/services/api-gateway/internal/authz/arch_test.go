@@ -272,6 +272,28 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"POST /v1/custody/breaks/{id}/assign":  authz.Fund,
 		"POST /v1/custody/breaks/{id}/explain": authz.Fund,
 
+		// THE AD-HOC CUSTODY COMPARISON (#1025, #967) — "here is the statement in
+		// my hand; what does it say about the book right now".
+		//
+		// authz.Fund, and the guard's prompt is worth answering carefully because
+		// this route WRITES NOTHING, which is usually the argument for Read. It is
+		// not the argument here. The response is the full set of differences
+		// between the fund's book and a named custodian's holdings — strictly more
+		// disclosing than the queue above, which lists only the differences a
+		// scheduled run already found. It is also the surface an operator acts
+		// from while working a break, so a read token that can compute the fund's
+		// entire custody position but not work the queue is the half-open control
+		// the entry above refuses.
+		//
+		// Should a TRADE token? No, for the reason given above: investigating a
+		// custody break is not trading the book.
+		//
+		// NO CAPITAL MOVES AND NO BREAK MOVES. The statement is caller-supplied, so
+		// the handler deliberately records no run and upserts no break — a route
+		// that did would let a caller close any break by posting a statement that
+		// agrees with the book, which is the hand-resolve #966 removed.
+		"POST /v1/portfolios/{id}/reconcile": authz.Fund,
+
 		// Reference + wealth reads.
 		"GET /v1/households/{id}": authz.Read,
 		"GET /v1/securities/{id}": authz.Read,

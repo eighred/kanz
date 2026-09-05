@@ -173,9 +173,28 @@ func run() int {
 	// empty queue while the scheduler filled another one, and every assignment
 	// they made would be written where nothing reads it.
 	custodyStore := newCustodyStore(ledgerPool)
+	// THE CUSTODY DECLARATION IS PARSED HERE, BEFORE EITHER CONSUMER OF IT (#1025).
+	//
+	// The scheduled runs and the server's ad-hoc reconcile endpoint scope the book
+	// side by the SAME *custody.BookScope: two built from one environment agree
+	// today and diverge the first time one is rebuilt from something else, and a
+	// disagreement about which accounts a custodian holds is invisible until a real
+	// break is buried in the fabricated ones.
+	//
+	// IT IS ALSO UNCONDITIONAL, where the plane below is not. runConsumer only runs
+	// with a broker configured, so parsing there left a broker-less deployment —
+	// the "read/reconcile only" default — serving the reconcile endpoint with a
+	// declaration nothing had ever validated. A malformed one now refuses the start
+	// on every deployment that can answer the route.
+	custodyCfg, err := buildCustodyConfig(cfg, logger)
+	if err != nil {
+		logger.Error("custody config invalid", "err", err)
+		return 2
+	}
 	opts := []server.Option{
 		server.WithSnapshotMetrics(snapMetrics),
 		server.WithBreakStore(custodyStore),
+		server.WithCustodyBookScope(custodyCfg.scope),
 	}
 	liveFX, err := buildLiveFX(cfg, &opts)
 	if err != nil {
@@ -271,7 +290,7 @@ func run() int {
 		consumers.Add(1)
 		go func() {
 			defer consumers.Done()
-			if err := runConsumer(ctx, cfg, store, ledgerPool, custodyStore, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runConsumer(ctx, cfg, custodyCfg, store, ledgerPool, custodyStore, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("fill consumer stopped with error", "err", err)
 				fatal.Raise(err)
 			}
@@ -484,7 +503,7 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 // so a broken subscription brings folding down rather than running silently
 // degraded (book-of-record data loss must be loud). Idempotency is handled below
 // this layer (consumer dedup + ledger.Store.Append on the entry id).
-func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, ledgerPool *pgxpool.Pool, custodyStore custody.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
+func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfig, store ledger.Store, ledgerPool *pgxpool.Pool, custodyStore custody.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		return err
@@ -588,7 +607,7 @@ func runConsumer(ctx context.Context, cfg config.Config, store ledger.Store, led
 	if err != nil {
 		return err
 	}
-	plane, err := buildCustodyPlane(cfg, ledgerPool, custodyStore, store, custodyProducer, obs.Registry, logger)
+	plane, err := buildCustodyPlane(cfg, custodyCfg, ledgerPool, custodyStore, store, custodyProducer, obs.Registry, logger)
 	if err != nil {
 		return err
 	}

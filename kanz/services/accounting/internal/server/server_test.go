@@ -20,7 +20,10 @@ func newServer(t *testing.T) (*Server, ledger.Store) {
 	store := ledger.NewMemoryStore()
 	r := &Readiness{}
 	r.Set(true)
-	return New(r, nil, store, "USD", WithTenant(testTenant)), store
+	// EVERY SERVER IN THESE TESTS CARRIES THE CUSTODY DECLARATION, because the
+	// reconcile endpoint refuses without one (#1025) — see testScope, and
+	// TestReconcileFailsClosedWithNoCustodyScopeWired for the other direction.
+	return New(r, nil, store, "USD", WithTenant(testTenant), WithCustodyBookScope(testScope(t))), store
 }
 
 func seed(t *testing.T, store ledger.Store) {
@@ -70,7 +73,10 @@ func TestNAVEndpoint(t *testing.T) {
 func TestReconcileEndpoint(t *testing.T) {
 	s, store := newServer(t)
 	seed(t, store)
-	body := `{"positions":{"AAPL":"90"},"cash":{"USD":"85000"}}`
+	// PF has ONE configured custodian, so the whole book IS that custodian's book —
+	// the pre-#1006 behaviour, which is correct here and does not move. The request
+	// still names it: a custodian is never inferred (#1025).
+	body := `{"custodian_id":"CUST-A","positions":{"AAPL":"90"},"cash":{"USD":"85000"}}`
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, postV1(http.MethodPost, "/v1/portfolios/PF/reconcile", strings.NewReader(body)))
 	if rec.Code != http.StatusOK {
