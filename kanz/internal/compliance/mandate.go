@@ -285,17 +285,33 @@ func (r *MandateRegistry) Put(m *compliancepb.Mandate) error {
 	}
 	r.tenantsByPortfolio[k.portfolio][k.tenant] = struct{}{}
 
-	vers := r.byKey[k]
+	// COPY-ON-WRITE, and it is not defensive tidiness: it is the second half of
+	// #1048. This used to mutate the array it had ALREADY PUBLISHED — vers[i] = m
+	// in place, then sort.Slice permuting it — and retainSelectable hands the same
+	// array straight back on its first <= 0 arm, so the array a reader had escaped
+	// with was routinely the array the next Put reordered. Building a private copy
+	// means every array this registry has ever published is immutable from the
+	// moment it is published: a reader holding a slice header of one holds a
+	// stable, correctly sorted sequence forever, whatever it does with the lock.
+	//
+	// It removes the class rather than the call site. Mandate holding its read lock
+	// (below) also closes today's window; this is what keeps it closed when some
+	// future reader hands a version slice to a caller, or a goroutine, that outlives
+	// the lock. The cost is one 1-3 element allocation per republish, on the
+	// operator-driven write path — not on the order path.
+	published := r.byKey[k]
+	next := make([]*compliancepb.Mandate, len(published), len(published)+1)
+	copy(next, published)
 	replaced := false
-	for i, v := range vers {
+	for i, v := range next {
 		if v.GetVersion() == m.GetVersion() {
-			vers[i] = m // idempotent replace
+			next[i] = m // idempotent replace
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
-		vers = append(vers, m)
+		next = append(next, m)
 	}
 	// THE RE-SORT RUNS ON THE REPLACE PATH TOO, and that is not tidiness. A
 	// republished version carries its own effective_at, and an operator correcting
@@ -303,14 +319,14 @@ func (r *MandateRegistry) Put(m *compliancepb.Mandate) error {
 	// effective_at precisely because it is allowed to change. Writing it in place
 	// and returning, which is what this did, left the slice out of the order both
 	// Mandate's "the last match wins" scan and retainSelectable below depend on.
-	sort.Slice(vers, func(i, j int) bool {
-		ti, tj := vers[i].GetEffectiveAt().AsTime(), vers[j].GetEffectiveAt().AsTime()
+	sort.Slice(next, func(i, j int) bool {
+		ti, tj := next[i].GetEffectiveAt().AsTime(), next[j].GetEffectiveAt().AsTime()
 		if !ti.Equal(tj) {
 			return ti.Before(tj)
 		}
-		return vers[i].GetVersion() < vers[j].GetVersion()
+		return next[i].GetVersion() < next[j].GetVersion()
 	})
-	r.byKey[k] = retainSelectable(vers, r.now())
+	r.byKey[k] = retainSelectable(next, r.now())
 	return nil
 }
 
@@ -353,6 +369,15 @@ func (r *MandateRegistry) Put(m *compliancepb.Mandate) error {
 // The result is a fresh slice rather than a reslice: vers[i:] keeps the whole
 // backing array alive, so the dropped versions would remain reachable and the
 // leak would survive with a shorter len.
+//
+// # vers MUST be the caller's PRIVATE array, and the early return is why
+//
+// The first <= 0 arm returns vers ITSELF, so whatever the caller passed becomes
+// the published array. Put therefore hands it a copy it made this call and never
+// the array it read out of byKey (#1048): passing the published array here is
+// what made "the reader's array" and "the writer's array" the same object, and
+// the aliasing is invisible at this call — it shows up as a resolution selecting
+// a mandate that is not in force, one goroutine away.
 func retainSelectable(vers []*compliancepb.Mandate, asOf time.Time) []*compliancepb.Mandate {
 	first := -1
 	for i := len(vers) - 1; i >= 0; i-- {
@@ -463,9 +488,38 @@ func (r *MandateRegistry) Mandate(_ context.Context, tenantID, portfolioID strin
 	if len(vers) == 0 && tenantID == bus.SystemTenant && len(others) == 1 {
 		vers = r.byKey[mandateKey{tenant: others[0], portfolio: portfolioID}]
 	}
+	// THE SELECTION SCAN RUNS UNDER THE READ LOCK, and that is the whole of #1048.
+	// It used to run after the unlock, walking the backing array while Put — which
+	// holds the WRITE lock, and was therefore believed to be safe — reordered that
+	// same array in place. Holding the write lock buys nothing against a reader
+	// that is no longer holding anything.
+	//
+	// The consequence was not merely the data race. This scan's only claim to
+	// correctness is "versions are ascending, so the last match wins"; a reader
+	// walking a transiently unsorted sequence selects a mandate that is NOT in
+	// force, and the gate then evaluates the order against the wrong limits, the
+	// wrong restricted list, the wrong leverage cap — and stamps that version into
+	// ComplianceResult.mandate_version as the authority that permitted it (see the
+	// type doc above). The audit trail comes out internally consistent and wrong.
+	//
+	// The cost is nil: a bounded walk over 1 + the scheduled changes (retainSelectable
+	// bounds it), no I/O, no allocation. Five sibling methods on this type already
+	// hold their lock across the read; this one was the deviation, not the pattern.
+	var chosen *compliancepb.Mandate
+	for _, v := range vers {
+		eff := v.GetEffectiveAt().AsTime()
+		if asOf.IsZero() || !eff.After(asOf) {
+			chosen = v // versions are ascending, so the last match wins
+		}
+	}
+	resident := len(vers)
 	r.mu.RUnlock()
+	// Nothing below reads guarded state again: `others` is a fresh slice out of
+	// sortedTenants, `resident` is a copy, and `chosen` is a pointer to a mandate
+	// Put only ever REPLACES, never mutates. The warnings stay outside the lock so
+	// the resolution path never logs while holding it.
 
-	if len(vers) == 0 {
+	if resident == 0 {
 		if tenantID == bus.SystemTenant && len(others) > 1 {
 			return nil, GovernanceUnspecified, fmt.Errorf("%w: portfolio %q is under mandate for tenants %v and this "+
 				"lookup is the shared %q bucket — two tenants named a portfolio the same, and picking "+
@@ -483,13 +537,6 @@ func (r *MandateRegistry) Mandate(_ context.Context, tenantID, portfolioID strin
 		r.warnSystemFallback(portfolioID, others[0])
 	}
 
-	var chosen *compliancepb.Mandate
-	for _, v := range vers {
-		eff := v.GetEffectiveAt().AsTime()
-		if asOf.IsZero() || !eff.After(asOf) {
-			chosen = v // versions are ascending, so the last match wins
-		}
-	}
 	if chosen == nil {
 		// SOMEBODY DECIDED AND THE DECISION IS NOT IN FORCE (#926). Versions exist
 		// for this key — the portfolio WAS governed — and none of them is effective
