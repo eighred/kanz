@@ -211,8 +211,28 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		// These become an order.order.filled FACT the ledger and the position book
 		// fold. ParseDec used to answer an unparseable string with ZERO and to wrap
 		// a large one, so a garbled FillPx published a fill at price 0 and a
-		// trillion-unit AccFillSz published 77662796314.5224192. Returning the error
-		// nacks the websocket message instead; the reconciler re-reads venue truth.
+		// trillion-unit AccFillSz published 77662796314.5224192. Returning the
+		// error refuses to publish that instead.
+		//
+		// WHAT "RETURNING THE ERROR" ACTUALLY DOES, STATED CORRECTLY (#1046). This
+		// comment used to say it NACKS the websocket message. It does not, and
+		// nothing on this path can: there is no acknowledgement to withhold. handle
+		// returns to Run, Run returns to runUserData, which logs, grows
+		// execution.UserDataBackoff and re-subscribes. The orders channel pushes
+		// state changes live rather than replaying them, so THIS message is gone —
+		// and so is every other fill in the same frame, since the loop abandons the
+		// whole message. Recovery is the reconciler's next pass and the OMS sweep,
+		// and the sweep only adopts while the order is still non-terminal.
+		//
+		// The trade is still the right way round — a fill published at price 0 is a
+		// wrong number in the ledger, worse than a missing one the healing watchdog
+		// re-derives — but it is a trade against a WEAKER recovery than the
+		// sentence it replaced claimed.
+		//
+		// FillSz, NOT AccFillSz, and that distinction is load-bearing: the OMS
+		// order aggregate ADDS fill.quantity to filled_quantity, so publishing the
+		// cumulative here double-counts every partially filled order. Pinned by
+		// TestOKXUserData_TwoSequentialPartialsPublishIncrementsNotCumulatives.
 		qty, qok := ParseDec(d.FillSz)
 		px, pok := ParseDec(d.FillPx)
 		accFilled, aok := ParseDec(d.AccFillSz)
@@ -267,7 +287,15 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 			FilledQuantity: accFilled,
 			LeavesQuantity: leaves,
 			Venue:          i.venue,
-			AsOf:           timestamppb.New(uTime(d.UTime)),
+			// OKX'S OWN ORDERING TOKEN (#1046). uTime is the instant OKX last
+			// updated this order, so it is both what order.v1's as_of is defined as
+			// ("the event_time of the change that produced it") and the token
+			// orderview.Progress orders reports by: a replayed push carries its
+			// ORIGINAL uTime, which is how the view can tell it apart from a fresh
+			// one. Fill.executed_at is stamped from the same field because the
+			// orders channel offers no separate fill time; the two are one clock
+			// here, unlike Binance where E and T are different instants.
+			AsOf: timestamppb.New(uTime(d.UTime)),
 		}
 		subject := fillfact.SubjectPartiallyFilled
 		var payload proto.Message = &orderpb.OrderPartiallyFilled{OrderId: orderID, Fill: fill, State: healed}
@@ -296,6 +324,13 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		//
 		// AFTER the publish, not before: the view must never claim an order
 		// finished on the strength of a FACT that did not reach the bus.
+		//
+		// Progressed MAY REFUSE THIS, and that is by design (#1046): healed carries
+		// OKX's own accFillSz and uTime, and orderview.Progress will not fold in a
+		// report older than the last one it recorded. The refusal is counted on
+		// kanz_venue_orderview_stale_reports_total and logged; the FACT above is
+		// already on the bus and is unaffected, because the fill's quantity is an
+		// INCREMENT and downstream dedups on fill_id.
 		i.orders.Progressed(healed)
 		// THE ONE THING THE RECONNECT BACK-OFF MAY RESET ON (#1047) — see
 		// resolvedThisSession.
