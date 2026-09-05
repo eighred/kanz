@@ -325,10 +325,17 @@ func TestEvaluate_SectorShockNamingNoSectorIsRecorded(t *testing.T) {
 }
 
 // TestEvaluate_NonSectorScenarioNeedsNoClassifier is the FALSE-REFUSAL arm. A
-// price/parallel/vol scenario never consults the classifier, so it must come
+// price/parallel scenario never consults the classifier, so it must come
 // back with an empty coverage even though none is wired — otherwise the refusal
 // added in #640 would take out every scenario on the platform rather than the
 // ones that cannot be answered.
+//
+// THIS CASE USED TO CARRY A VolShock, and asserting an empty coverage over it
+// was this test standing behind the #1035 defect: the vol bump reached nothing
+// and the clean coverage was read here as proof no shock had gone missing. The
+// vol arm moved to volshock_coverage_test.go, where the assertion is the
+// opposite one. The remaining two shocks are MarketValue arithmetic the linear
+// path expresses exactly, which is what "needs no classifier" was always about.
 func TestEvaluate_NonSectorScenarioNeedsNoClassifier(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "BANK", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},
@@ -336,7 +343,6 @@ func TestEvaluate_NonSectorScenarioNeedsNoClassifier(t *testing.T) {
 	_, cov := scenario.Evaluate(p, []v1.ScenarioShock{
 		v1.ParallelShift{Pct: pct(-20, -2)},
 		v1.PriceShock{InstrumentID: "BANK", Pct: pct(-5, -2)},
-		v1.VolShock{AbsBump: pct(15, -2)},
 	}, nil) // no classifier, and none needed
 	if cov.ExcludedCount != 0 {
 		t.Fatalf("coverage=%+v want empty — no shock here resolves a sector", cov)

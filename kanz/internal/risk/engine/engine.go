@@ -285,8 +285,12 @@ func (e *EngineImpl) EvaluateScenario(ctx context.Context, req v1.ScenarioReques
 // SkipNoClassifier is a composition-root gap — nobody wired an instrument
 // reference source and no per-instrument action will help. SkipUnclassified
 // names holdings a wired classifier does not know, which is a reference-data
-// load. SkipShockNamesNoSector is the caller's own malformed shock. One error
-// with an unhelpful message would send all three to the same wrong place.
+// load. SkipShockNamesNoSector is the caller's own malformed shock.
+// SkipNoRevaluer is a composition-root gap too, but a DEEPER one: a vol stress
+// needs an option pricer, which needs a calibrated vol surface, which needs
+// observed option premiums nothing on this estate carries — so the answer to
+// "when can I run this" is an issue (#509/#203), not a config change. One error
+// with an unhelpful message would send all four to the same wrong place.
 func unresolvableScenario(cov v1.InputCoverage) error {
 	reasons := make([]string, 0, len(cov.Exclusions))
 	seen := map[string]bool{}

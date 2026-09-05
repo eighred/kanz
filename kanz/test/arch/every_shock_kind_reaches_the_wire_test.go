@@ -55,11 +55,15 @@ import (
 //   - a case in grpcsrv.apiShocks that CONSTRUCTS the api/v1 type — the decode.
 //     A oneof member with no case here is refused by that switch's default arm,
 //     which is the same unreachability with a different error message;
-//   - a case in scenario.applyShock — the apply. VolShock's case there is
-//     deliberately empty (a vol bump has no linear market-value effect and only
-//     reprices under full revaluation), and an empty case is exactly the point:
-//     it makes the shock RECOGNIZED rather than dropped by the switch's silent
-//     default.
+//   - a case in scenario.applyShock — the apply. A case here makes the shock
+//     RECOGNIZED rather than dropped by the switch's silent default.
+//
+// THIS GUARD ONLY PROVES THE CASE EXISTS. It used to record that VolShock's arm
+// was "deliberately empty" and that an empty case "is exactly the point", and
+// that reading is what let a recognized-but-inert shock ship: recognized is not
+// answered, and the caller could not tell the two apart (#1035). Whether an arm
+// DOES anything is the sibling guard's question —
+// every_shock_kind_answers_or_refuses_test.go.
 //
 // It also checks the reverse direction. A oneof member with no api/v1
 // implementor is a field a caller can populate and the engine can never act on
@@ -138,10 +142,10 @@ func TestEveryShockKindReachesTheWire(t *testing.T) {
 			t.Errorf("scenario.applyShock has no case for v1.%s.\n"+
 				"applyShock's switch has no default, so an unhandled shock is silently dropped: "+
 				"the request succeeds, the projection comes back, and the shock the caller asked "+
-				"for never moved a number. An intentionally inert shock still needs an EMPTY case "+
-				"(see v1.VolShock, which only reprices under full revaluation) so it is recognized "+
-				"rather than dropped.\n"+
-				"Add the case in internal/risk/scenario/scenario.go.", name)
+				"for never moved a number.\n"+
+				"Add the case in internal/risk/scenario/scenario.go — and note that an EMPTY case "+
+				"satisfies this guard and not the sibling one: an arm must move the book or record "+
+				"on the coverage (every_shock_kind_answers_or_refuses_test.go).", name)
 		}
 	}
 
