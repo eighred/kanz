@@ -132,8 +132,77 @@ type ExpectedOrders interface {
 // worse than one that does not run: it trains an operator to ignore the layer,
 // which is the failure the observability guards in test/arch exist to prevent.
 // So an unknown balance SKIPS the asset, loudly, and a known one is compared.
+//
+// THE UNKNOWN NAMES ITSELF (#1063), which is the third value's other half. "We
+// have never been told what this account holds" and "what we were told is too
+// old to compare against" are the same ok=false and are not the same incident:
+// the first is a cold adapter or a cash spine that has never delivered, the
+// second is a spine that has stopped. An operator chases different things, and a
+// counter that cannot separate them is a counter that only says "something".
+// The reason is returned BESIDE the verdict rather than asked for afterwards
+// because the two must describe the same instant — the healing watchdog
+// reconciles balances from its own goroutine, so a second call could read a view
+// that has since been announced to and label a real gap as healthy.
 type ExpectedBalances interface {
-	Balance(asset string) (amount *big.Rat, ok bool)
+	// Balance returns the amount of asset this account is believed to hold.
+	//
+	//	(amount, true,  "")       — known, and this is it
+	//	(nil,    false, reason)   — UNKNOWN, and reason says why
+	//
+	// reason is one of the BalanceUnknown* constants below. An implementation
+	// that answers UNKNOWN without one is normalised to
+	// BalanceUnknownUnattributed by the caller rather than counted under an
+	// empty label, so a seam that forgets to name its reason is visible instead
+	// of being folded into a series that reads like a real cause.
+	Balance(asset string) (amount *big.Rat, ok bool, reason string)
+}
+
+// The reasons an expected balance is UNKNOWN — a BOUNDED set, because they are a
+// Prometheus label (#1063). Declared here rather than in balancerecon so both
+// reconcilers, both composition roots and the alert rule name one spelling; a
+// venue that invented a second word for "stale" would split the series an
+// operator is paged on.
+const (
+	// BalanceUnknownNeverAnnounced: no cash announcement has EVER reached this
+	// adapter for this account. A cold adapter reads this for its first few
+	// passes, which is expected; an adapter that reads it for hours is one whose
+	// cash spine subscription never landed, and reconciliation has therefore
+	// never once compared this account against the exchange.
+	BalanceUnknownNeverAnnounced = "never_announced"
+	// BalanceUnknownStale: an announcement arrived and is now older than the
+	// freshness bound. The spine has stopped rather than never started, and the
+	// comparison is being skipped to avoid reporting staleness as a break.
+	BalanceUnknownStale = "stale"
+	// BalanceUnknownUnattributed: the seam answered UNKNOWN and named no reason.
+	// It is here so that "the implementation did not say" is a LABEL rather than
+	// an empty string — an empty label value is still a series, and it reads on a
+	// dashboard like a cause somebody chose.
+	BalanceUnknownUnattributed = "unattributed"
+)
+
+// BalanceUnknownReasons is the whole bounded set, in the order a dashboard reads
+// them. Both composition roots seed their counter from THIS slice rather than
+// from a list retyped per venue: a reason nobody seeds exports no series until
+// its first increment, and an alert over a series that does not exist is silent
+// in exactly the state it detects (#973, #963).
+var BalanceUnknownReasons = []string{
+	BalanceUnknownNeverAnnounced,
+	BalanceUnknownStale,
+	BalanceUnknownUnattributed,
+}
+
+// NamedBalanceUnknown normalises a seam's reason for an UNKNOWN balance onto the
+// bounded set. An empty or unrecognised reason becomes
+// BalanceUnknownUnattributed — the label cardinality is fixed HERE, at the one
+// place both reconcilers pass through, so a venue adapter cannot widen it by
+// returning a new string.
+func NamedBalanceUnknown(reason string) string {
+	for _, known := range BalanceUnknownReasons {
+		if reason == known {
+			return reason
+		}
+	}
+	return BalanceUnknownUnattributed
 }
 
 // VenueMarginSource is the EXCHANGE'S own margin state for the account this
@@ -342,6 +411,42 @@ type WorkerDeps struct {
 	// accident, and the completeness guard in test/arch makes choosing nil a
 	// visible decision in a diff rather than a field nobody typed.
 	OnCloseUnhealable func(orderID, instrumentID, reason string)
+
+	// OnUnknownBalance is called for EVERY asset a reconciliation pass could not
+	// check, because Kanz has no usable expected balance for it (#1063), with the
+	// reason from BalanceUnknownReasons.
+	//
+	// IT IS THE ALERTABLE HALF, and this seam had none. Both reconcilers have
+	// honoured the callback since #418 and NEITHER composition root wired it, so
+	// an asset whose expected balance is UNKNOWN produced output identical to one
+	// that reconciled cleanly: no FACT, no counter, no log, a pass that returns
+	// nil. accounting.balance.reconciled is emitted only on a DISCREPANCY, so the
+	// silence of a skipped asset and the silence of an agreeing one are the same
+	// silence — CLAUDE.md's rule verbatim.
+	//
+	// WHY IT IS NOT A BREAK. A break FACT carries expected, actual and delta, and
+	// the whole condition here is that expected does not exist. Publishing one
+	// means inventing expected=0, which is precisely the fabrication #418 removed
+	// from both reconcilers — it reports every asset the exchange holds as a
+	// discrepancy on the first cold pass, and the journal folds it bitemporally,
+	// so the invented figure becomes durable book state rather than a dashboard
+	// mistake. A break says the two sides DISAGREE; this says one side is
+	// MISSING, and only the first is an incident an operator resolves against the
+	// exchange's own history.
+	//
+	// WHAT IT COSTS TO BE SILENT. Balance reconciliation is the last thing that
+	// can notice a mis-booked position — a fill the websocket missed, one posted
+	// to the wrong account, a residual a sweep left behind. A pass that skips
+	// what it could not evaluate is running in name only for that asset, and
+	// nothing anywhere said so.
+	//
+	// A FIELD ON WorkerDeps for the reason Margin, OnMarkTickDropped,
+	// OnFillRefused and OnCloseUnhealable are: a third venue adapter must not be
+	// able to omit it by accident, and the completeness guard in test/arch makes
+	// choosing nil a visible decision in a diff rather than a field nobody typed.
+	// That guard is the reason this field exists HERE rather than only on the two
+	// ReconcilerConfigs — the omission it repairs was in the composition roots.
+	OnUnknownBalance func(asset, reason string)
 
 	Logger *slog.Logger
 }

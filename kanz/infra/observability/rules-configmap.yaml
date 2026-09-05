@@ -2015,6 +2015,53 @@ data:
             annotations:
               summary: "No risk-engine is reporting its recompute fan-out width"
               description: "kanz_risk_recompute_inflight has produced no sample anywhere for thirty minutes. engine.NewMetrics registers it unconditionally at the composition root, so a running and scraped risk-engine exports it whether or not it is doing any work — an idle engine reads 0, it does not disappear. Three causes: the collector has been moved behind a conditional branch, which is the defect that silenced two alerting layers on this estate already (#973, #963) and which makes RiskRecomputeBacklogNeverEmpties silent with it; the risk-engine pods are up but not being scraped (check the ServiceMonitor and the pod annotations); or no risk-engine is running at all, in which case nothing in this platform is computing exposure or measures and the cached values every consumer is reading are frozen at whatever was last published."
+
+      # ==========================================================================
+      # VENUE BALANCE RECONCILIATION (#1063) — the layer that can notice a
+      # mis-booked position, and whether it is actually looking.
+      # ==========================================================================
+      #
+      # A venue adapter compares Kanz's books against the exchange's balances. When
+      # it has no usable expected balance for an asset it SKIPS that asset, which is
+      # correct — substituting zero would report every asset the exchange holds as a
+      # discrepancy on the first cold pass and train an operator to ignore the layer.
+      #
+      # THE SKIP IS THE THING THAT WAS INVISIBLE. accounting.balance.reconciled is
+      # emitted only on a DISCREPANCY, so a skipped asset and an agreeing one produce
+      # the identical estate: no FACT, no line, a pass that returns nil. Both
+      # reconcilers have had a callback for this since #418 and neither composition
+      # root wired it, so for as long as that lasted "reconciliation found nothing
+      # wrong" and "reconciliation could not check" were the same silence.
+      - name: venue_balance_reconciliation
+        rules:
+          # THE COMPARISON IS NOT HAPPENING, AND IT HAS NOT BEEN FOR HALF AN HOUR.
+          #
+          # increase(...) > 0 is the shape, not a comparison against a resting value.
+          # A healthy adapter never increments this counter, so any rule shaped
+          # `== 0` or `< N` would be evaluating a claim about a series whose absence
+          # is itself a failure mode — the defect that silenced two alerting layers
+          # on this estate (#973, #963). The counter is registered unconditionally
+          # and SEEDED at zero for every reason by balancerecon.NewUnknownCounter, so
+          # on a running, scraped adapter the family exists whether or not anything
+          # has been skipped; this rule then reads only movement.
+          #
+          # for: 30m IS THE COLD-START ALLOWANCE, not padding. reason="never_announced"
+          # legitimately increments between a pod starting and the first
+          # accounting.balance.portfolio announcement reaching it, and a rolling
+          # deploy passes every replica through that window. Thirty minutes of the
+          # counter climbing at EVERY evaluation is not a start-up window: it is an
+          # adapter that has not once compared this account against the exchange.
+          #
+          # THE REASON IS ON THE ALERT because the two send an operator to different
+          # places. never_announced is a cash spine that has not delivered — check
+          # the subscription and accounting itself; stale is one that has stopped.
+          - alert: VenueBalanceReconciliationCannotCheck
+            expr: increase(kanz_venue_balance_unknown_total[5m]) > 0
+            for: 30m
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "{{ $labels.venue }} balance reconciliation has been unable to check assets for 30 minutes ({{ $labels.reason }})"
+              description: "The {{ $labels.venue }} adapter's reconciliation pass has skipped at least one asset at every evaluation for the last thirty minutes because it has no usable expected balance for it (reason={{ $labels.reason }}). The pass completes and publishes no accounting.balance.reconciled FACT, which is exactly what a clean comparison also does — so this alert is the only thing that separates them. While it holds, nothing is comparing this exchange account's books against the venue, and balance reconciliation is the last layer able to notice a fill the user-data websocket missed, one posted to the wrong account, or a residual a healing sweep left behind. reason=never_announced means no accounting.balance.portfolio announcement has ever reached this pod: check that the broadcast subscription landed and that accounting is publishing (kanz_venue_binance_balance_announcements_dropped_total / the okx equivalent will show announcements arriving and being discarded). reason=stale means announcements arrived and stopped, so the balance aged past its freshness bound. reason=unattributed means the balance seam answered UNKNOWN without saying why, which is a defect in the seam rather than in the estate. Read kanz_venue_balance_reconciliation_configured beside this: 0 there means no comparison is wired at all, which is a different and worse state."
   slo.alerts.rules.yaml: |
     # SLO multi-window burn-rate alerts (SRE-01b) — over slo.recording.rules.yaml.
     #

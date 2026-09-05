@@ -2674,3 +2674,81 @@ tests:
       - eval_time: 40m
         alertname: RiskRecomputeBacklogNeverEmpties
         exp_alerts: []
+
+  # ===========================================================================
+  # VenueBalanceReconciliationCannotCheck (#1063).
+  # ===========================================================================
+  # An adapter whose cash spine has never delivered: every pass skips every
+  # asset, so the counter climbs at every evaluation. Thirty minutes of that is
+  # an account nothing has compared against the exchange.
+  - interval: 1m
+    name: an adapter that has never been told what it holds
+    input_series:
+      - series: 'kanz_venue_balance_unknown_total{venue="binance", reason="never_announced"}'
+        values: '0+12x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: VenueBalanceReconciliationCannotCheck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              layer: operational
+              venue: binance
+              reason: never_announced
+            exp_annotations:
+              summary: "binance balance reconciliation has been unable to check assets for 30 minutes (never_announced)"
+              description: "The binance adapter's reconciliation pass has skipped at least one asset at every evaluation for the last thirty minutes because it has no usable expected balance for it (reason=never_announced). The pass completes and publishes no accounting.balance.reconciled FACT, which is exactly what a clean comparison also does — so this alert is the only thing that separates them. While it holds, nothing is comparing this exchange account's books against the venue, and balance reconciliation is the last layer able to notice a fill the user-data websocket missed, one posted to the wrong account, or a residual a healing sweep left behind. reason=never_announced means no accounting.balance.portfolio announcement has ever reached this pod: check that the broadcast subscription landed and that accounting is publishing (kanz_venue_binance_balance_announcements_dropped_total / the okx equivalent will show announcements arriving and being discarded). reason=stale means announcements arrived and stopped, so the balance aged past its freshness bound. reason=unattributed means the balance seam answered UNKNOWN without saying why, which is a defect in the seam rather than in the estate. Read kanz_venue_balance_reconciliation_configured beside this: 0 there means no comparison is wired at all, which is a different and worse state."
+
+  # THE COLD-START ALLOWANCE, EXECUTED. A pod that skips assets for its first ten
+  # minutes and then receives its first cash announcement must NOT page: that
+  # window is a rolling deploy, and a rule that fires on it is silenced within a
+  # week and then covers nothing.
+  - interval: 1m
+    name: a cold start that then receives its first announcement stays silent
+    input_series:
+      - series: 'kanz_venue_balance_unknown_total{venue="okx", reason="never_announced"}'
+        values: '0+12x10 120x50'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: VenueBalanceReconciliationCannotCheck
+        exp_alerts: []
+
+  # THE SEEDED-AT-ZERO CASE, WHICH IS THE HEALTHY ONE. balancerecon
+  # .NewUnknownCounter creates a series for every reason at construction, so a
+  # perfectly healthy adapter exports three flat zeroes forever. The rule must be
+  # silent over them — an `== 0` or `absent()` arm would fire continuously here
+  # and train whoever receives it to ignore the layer, which is how #62's
+  # data-quality rules were deleted.
+  - interval: 1m
+    name: an adapter checking everything exports seeded zeroes and stays silent
+    input_series:
+      - series: 'kanz_venue_balance_unknown_total{venue="binance", reason="never_announced"}'
+        values: '0x60'
+      - series: 'kanz_venue_balance_unknown_total{venue="binance", reason="stale"}'
+        values: '0x60'
+      - series: 'kanz_venue_balance_unknown_total{venue="binance", reason="unattributed"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: VenueBalanceReconciliationCannotCheck
+        exp_alerts: []
+
+  # THE OMITTED-SERIES CASE — the trap #1057 names, executed rather than argued.
+  #
+  # A promtool harness INVENTS its input series, so a rule that is unfireable in
+  # production can still pass its own harness. With NO kanz_venue_balance_unknown
+  # _total series at all, increase() evaluates an empty vector and this rule is
+  # silent — which is correct for this expression and is precisely why the
+  # counter is registered unconditionally and seeded in the constructor rather
+  # than inside a branch that depends on the broker or the exchange. The other
+  # input series is here so the evaluation is over a populated TSDB rather than
+  # an empty one, which would prove nothing about matcher selectivity.
+  - interval: 1m
+    name: with no unknown-balance series the rule is silent, which is why the counter is seeded
+    input_series:
+      - series: 'kanz_venue_closes_unhealable_total{venue="binance", reason="no_instrument"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: VenueBalanceReconciliationCannotCheck
+        exp_alerts: []
