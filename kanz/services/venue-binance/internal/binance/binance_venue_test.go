@@ -41,8 +41,13 @@ type fakeBinance struct {
 	myTradesBody  string
 	myTradesCalls int
 	cancelBody    string // body for DELETE /api/v3/order
-	accountBody   string // body for GET /api/v3/account
-	tickerPrice   string // price for GET /api/v3/ticker/price
+	// cancelStatus is the HTTP status for DELETE /api/v3/order (0 => 200). A 5xx
+	// here is THE ambiguous cancel: the exchange may or may not have withdrawn the
+	// order, and the In-Flight Certainty watchdog is the only thing that can find
+	// out (#1036).
+	cancelStatus int
+	accountBody  string // body for GET /api/v3/account
+	tickerPrice  string // price for GET /api/v3/ticker/price
 }
 
 func newFakeBinance(t *testing.T) *fakeBinance {
@@ -63,6 +68,9 @@ func newFakeBinance(t *testing.T) *fakeBinance {
 		case http.MethodDelete:
 			f.deletes++
 			f.sawDeleteCl = q.Get("origClientOrderId")
+			if f.cancelStatus != 0 {
+				w.WriteHeader(f.cancelStatus)
+			}
 			_, _ = w.Write([]byte(f.cancelBody))
 		default:
 			f.gets++
