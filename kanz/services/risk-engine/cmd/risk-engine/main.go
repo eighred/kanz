@@ -232,6 +232,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	if err != nil {
 		return err
 	}
+	// The record of what this pod priced with; modelrecord.go (#1039).
+	artifacts := newModelRecorder(publisher, logger, obs.Registry)
 
 	// Cache + registry are shared between the recompute path and the query
 	// EngineImpl below, so a query sees the live store plus the same
@@ -404,6 +406,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			factormodel.Config{Type: factormodel.Statistical},
 			universe,
 			factormodel.Providers{Returns: provider},
+			// Fit daily, and record each instance; modelrecord.go (#1039).
+			artifacts.FitOptions()...,
 		)
 		compute.RegisterFactorRisk(context.Background(), registry, compute.FactorProviders{
 			Model: modelProvider,
@@ -773,7 +777,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// whatsoever, so "no curve either" was indistinguishable from a healthy one.
 	scheduledCalibrations := map[string]string{}
 	if cfg.CalibrationInterval > 0 && cfg.CalibrationRates != "" {
-		if err := startCalibration(ctx, cfg, client, busMetrics, logger, obs.Registry, curveStore); err != nil {
+		if err := startCalibration(ctx, cfg, client, busMetrics, logger, obs.Registry, curveStore, artifacts); err != nil {
 			logger.Error("calibration scheduler disabled", "err", err)
 		} else {
 			scheduledCalibrations["curve"] = "rates"
@@ -875,7 +879,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 // cadence. It returns an error only on a setup failure (bad reference spec /
 // consumer) — the caller logs it and continues, since calibration is auxiliary
 // to core risk ingestion.
-func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSClient, busMetrics *bus.BusMetrics, logger *slog.Logger, reg prometheus.Registerer, store *curve.Store) error {
+func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSClient, busMetrics *bus.BusMetrics, logger *slog.Logger, reg prometheus.Registerer, store *curve.Store, artifacts *modelRecorder) error {
 	instruments, err := livequote.ParseRateInstruments(cfg.CalibrationRates)
 	if err != nil {
 		return err
@@ -924,6 +928,12 @@ func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSCl
 		Store:      store,
 		Interp:     curve.LinearZero,
 		OnCoverage: coverage.Observe,
+		// AND THE CURVE ITSELF IS RECORDED, not just how complete its strip was
+		// (#1039). curve.Store is in-memory and starts empty, so without this the
+		// curve that discounted a published DV01 dies with the pod while the DV01
+		// lives 30 days on risk.portfolio — a number that outlives every input
+		// that produced it.
+		OnCalibrated: artifacts.CurveCalibrated,
 	}
 	var jobs []schedule.Job
 	for _, ccy := range src.Currencies() {

@@ -25,7 +25,10 @@
 package factormodel
 
 import (
+	"fmt"
 	"math"
+	"strings"
+	"time"
 )
 
 // FactorType is the category a factor belongs to — the dimension a risk report
@@ -71,8 +74,68 @@ type Model struct {
 	// keyed by instrument id — the diagonal of the residual covariance.
 	SpecificVar map[string]float64
 
+	// ModelID and AsOf identify this fitted INSTANCE, and they are the reason a
+	// number produced from it can be reproduced (#1039).
+	//
+	// Before they existed, a Model was an anonymous bag of matrices: the loadings
+	// and covariance behind a published FactorVaR99 lived for the duration of one
+	// call and nothing on the wire named them, so "reproduce last Tuesday's VaR"
+	// had no referent to resolve. They are the same pair factor.v1 keys every one
+	// of its messages by (model_id + as_of) and the same pair
+	// domain.v1.MeasureProvenance carries onto each measure, so an output joins to
+	// its inputs by equality rather than by inference.
+	//
+	// SET BY Fit AND NOWHERE ELSE. An estimator assembles the matrices; only Fit
+	// knows the configuration and the as-of the caller asked for, which is
+	// precisely what the pair has to name. Zero values mean the model was
+	// assembled directly (a test fixture, blend's intermediate passes) and is not
+	// a citable instance — absence is "this names no instance", never "the
+	// instance is unnamed".
+	ModelID string
+	AsOf    time.Time
+
 	// index memoizes instrument id → row for O(1) lookup.
 	index map[string]int
+}
+
+// DefaultModelID derives a model's canonical id from the configuration that
+// produced it — "STATISTICAL-3F-250D", "FUNDAMENTAL-250D", "BLEND-3F-250D".
+//
+// THE ESTIMATION PARAMETERS ARE IN THE ID ON PURPOSE, and it is the whole
+// difference between an id that identifies a model and one that identifies a
+// slot. factor.v1 keys every artifact by model_id + as_of and calls model_id
+// "the canonical id of the model", which invites a bare "STATISTICAL" — and then
+// a deployment that widens the lookback from 250 to 500 days publishes a
+// materially different model under the id yesterday's number cited. The join
+// still resolves, the numbers no longer reconcile, and nothing anywhere reports
+// a change. Putting the window and the factor count in the id makes that a NEW
+// model rather than a quiet redefinition of an old one.
+//
+// Config.ModelID overrides it, for a desk that names its models itself; the
+// override is then that desk's promise that the name still identifies the fit.
+func DefaultModelID(cfg Config) string {
+	parts := []string{cfg.Type.String()}
+	if cfg.Type != Fundamental {
+		parts = append(parts, fmt.Sprintf("%dF", cfg.statFactors()))
+	}
+	parts = append(parts, fmt.Sprintf("%dD", cfg.window()))
+	return strings.Join(parts, "-")
+}
+
+// String names the model type for DefaultModelID and for logs. An unrecognised
+// value renders as UNKNOWN rather than a number: an id is read by a human
+// reconstructing a number, and "3" tells them nothing.
+func (t ModelType) String() string {
+	switch t {
+	case Statistical:
+		return "STATISTICAL"
+	case Blend:
+		return "BLEND"
+	case Fundamental:
+		return "FUNDAMENTAL"
+	default:
+		return "UNKNOWN"
+	}
 }
 
 // newModel wires the id→row index. Estimators call it once assembled.

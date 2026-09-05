@@ -124,3 +124,116 @@ func TestLiveModelProvider_FailuresYieldNoModel(t *testing.T) {
 		t.Error("fit failure must yield ok=false, not a broken model")
 	}
 }
+
+// THE FIT CADENCE, AND WHY EACH ARM IS LOAD-BEARING (#1039).
+//
+// The fit used to key on the exact requested as-of, so a book receiving events a
+// second apart produced a distinct model instance per event. That is defensible
+// while the model is a transient and indefensible once it is an artifact
+// somebody cites: model_id + as_of would name a different thing every recompute.
+
+func cadenceProvider(t *testing.T, cadence time.Duration, observed *[]*factormodel.Model, universeCalls *int) *LiveModelProvider {
+	t.Helper()
+	rp := trendReturns{"A": 0.001, "B": -0.0005, "C": 0.0002}
+	universe := func(_ context.Context, _ time.Time) ([]string, error) {
+		*universeCalls++
+		return []string{"A", "B", "C"}, nil
+	}
+	return NewLiveModelProvider(
+		factormodel.Config{Type: factormodel.Statistical, StatFactors: 2, Window: 40},
+		universe,
+		factormodel.Providers{Returns: rp},
+		WithFitCadence(cadence),
+		WithFitObserver(func(_ context.Context, m *factormodel.Model) { *observed = append(*observed, m) }),
+	)
+}
+
+func TestLiveModelProvider_FitsOncePerCadencePeriod(t *testing.T) {
+	ctx := context.Background()
+	var observed []*factormodel.Model
+	calls := 0
+	p := cadenceProvider(t, 24*time.Hour, &observed, &calls)
+
+	first, ok := p.Model(ctx, liveAsOf)
+	if !ok {
+		t.Fatal("first evaluation must resolve a model")
+	}
+	// Later in the SAME period — a different portfolio's as-of, minutes or hours
+	// on. One instance must serve them all, or "the model that priced this" names
+	// a fit per recompute.
+	for _, d := range []time.Duration{time.Minute, 3 * time.Hour, 23*time.Hour + 59*time.Minute} {
+		got, ok := p.Model(ctx, liveAsOf.Add(d))
+		if !ok {
+			t.Fatalf("evaluation at +%v must resolve a model", d)
+		}
+		if got != first {
+			t.Errorf("evaluation at +%v refitted: one cadence period must resolve ONE instance", d)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("universe called %d times in one period, want 1 — the cadence is not bounding the fit", calls)
+	}
+	if len(observed) != 1 {
+		t.Fatalf("fit observer fired %d times, want 1 — the artifact record must carry one "+
+			"message per instance, not one per evaluation", len(observed))
+	}
+	if observed[0] != first {
+		t.Error("the observed model is not the one served — the published artifact would name an " +
+			"instance no measure used")
+	}
+
+	// The next period refits, and records the new instance.
+	next, ok := p.Model(ctx, liveAsOf.Add(24*time.Hour))
+	if !ok || next == first {
+		t.Error("a new cadence period must produce a new instance")
+	}
+	if len(observed) != 2 {
+		t.Errorf("fit observer fired %d times across two periods, want 2", len(observed))
+	}
+	if !next.AsOf.Equal(liveAsOf.Add(24 * time.Hour)) {
+		t.Errorf("instance as_of=%v want %v — the as-of must be the instant the estimator read "+
+			"to, never a period boundary it did not", next.AsOf, liveAsOf.Add(24*time.Hour))
+	}
+}
+
+func TestLiveModelProvider_AnEarlierAsOfInThePeriodIsNotServedALaterFit(t *testing.T) {
+	ctx := context.Background()
+	var observed []*factormodel.Model
+	calls := 0
+	p := cadenceProvider(t, 24*time.Hour, &observed, &calls)
+
+	late, _ := p.Model(ctx, liveAsOf.Add(9*time.Hour))
+	early, ok := p.Model(ctx, liveAsOf.Add(time.Hour))
+	if !ok {
+		t.Fatal("an earlier evaluation in the period must still resolve a model")
+	}
+	// THE NO-LOOK-AHEAD ARM. Reusing the 09:00 fit for an 01:00 valuation prices
+	// the book off data its own state had not seen.
+	if early == late {
+		t.Fatal("an evaluation at +1h was served a model fitted at +9h — the model read data " +
+			"the priced state had not seen")
+	}
+	if early.AsOf.After(liveAsOf.Add(time.Hour)) {
+		t.Errorf("model as_of=%v postdates the evaluation as_of=%v", early.AsOf, liveAsOf.Add(time.Hour))
+	}
+	// And the period's instance is not displaced by the out-of-order request:
+	// the model must not walk backwards for everybody else.
+	again, _ := p.Model(ctx, liveAsOf.Add(11*time.Hour))
+	if again != late {
+		t.Error("the period's instance was replaced by an out-of-order earlier fit")
+	}
+}
+
+func TestLiveModelProvider_CadenceRefusesToFitEveryTime(t *testing.T) {
+	var observed []*factormodel.Model
+	calls := 0
+	// Zero and negative select the default rather than "fit every evaluation" —
+	// there is deliberately no way to spell the state #1039 found.
+	for _, d := range []time.Duration{0, -time.Second} {
+		p := cadenceProvider(t, d, &observed, &calls)
+		if got := p.epoch(liveAsOf.Add(time.Hour)); got != p.epoch(liveAsOf) {
+			t.Errorf("cadence %v put two same-day as-ofs in different periods — a zero or "+
+				"negative cadence must fall back to DefaultFitCadence", d)
+		}
+	}
+}

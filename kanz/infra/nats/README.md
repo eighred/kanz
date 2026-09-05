@@ -23,11 +23,20 @@ the envelope `idempotency_key`).
 
 | Stream | Subjects | Max age |
 |---|---|---|
-| `MARKET` `RISK` `INFERENCE` | `<domain>.>` | 24h |
+| `MARKET` `INFERENCE` | `<domain>.>` | 24h |
+| `RISK` | `risk.portfolio.>` + `risk.exposure.>` + `risk.signal.>` + `risk.command.>` + `risk.curve.>` + `risk.factor.>` | 24h |
 | `EXECUTION` | `execution.>` + `strategy.>` + `order.>` (the signal→order path) | 24h |
 | `PLATFORM` `DATA` | `<domain>.>` | 168h (lifecycle + FACT-grade data-quality) |
 | `OBSERVABILITY` | `observability.>` | 1h (ephemeral metrics) |
 | `DLQ` | `dlq.>` | 720h (poison-event investigation runway) |
+
+`RISK` is NOT `risk.>`, and has not been since `POSITION` was split out: a subject
+belongs to exactly one stream, so `risk.position.>` needed its own compacted,
+never-ageing stream. The consequence for a NEW `risk.*` subject is that it is
+UNBOUND until `bootstrap-job.yaml` names it explicitly, and a JetStream publish
+to an unbound subject is a hard error rather than a silent drop —
+`test/arch`'s `TestEverySubjectIsCarriedByAStream` is what turns that into a red
+build instead of a production denial.
 
 Replay streams (`replay.{run_id}.*`) are created per-run by replay tooling
 (EVT-20), not provisioned here.

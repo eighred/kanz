@@ -108,6 +108,12 @@ data:
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes
+    # risk.curve / risk.factor (#1039): mirrors infra/kafka/topics-job.yaml. A
+    # tenant's risk-engine is the same digest-pinned binary as the platform one
+    # and calibrates and fits for that tenant's book, so a topic missing here is a
+    # hard publish failure for that tenant with auto-create disabled.
+    risk.curve                 3   delete   2592000000  yes
+    risk.factor                3   delete   2592000000  yes
     alternatives.commitment    3   delete   604800000   yes
     platform.authz             3   delete   2592000000  yes
     # WHAT AN AGENT WAS SHOWN (#971). Beside platform.authz above, and on the same

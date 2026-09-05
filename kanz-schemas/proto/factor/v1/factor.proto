@@ -133,3 +133,41 @@ message FactorCovariance {
   // values is the row-major covariance matrix (length == dimension²). Required.
   repeated double values = 4;
 }
+
+// FactorModelSnapshot is ONE FITTED MODEL INSTANCE, whole: the definition, every
+// instrument's loadings, and the factor covariance, as one message.
+//
+// # Why one message and not three FACTs
+//
+// The four artifacts above are keyed model_id + as_of so they CAN be stored
+// independently. Publishing them as three separate events would make
+// reconstructing an instance a JOIN across three subjects, and a join over an
+// at-least-once bus is a thing that can be torn: a reader that sees the
+// definition and the covariance but not yet the loadings holds a model that
+// looks complete (K factors, a K×K matrix) and prices every position at zero
+// systematic risk. The model instance is the unit a regulator asks for under SR
+// 11-7 — "show me the model that priced this" — so it is also the unit that is
+// written and read atomically.
+//
+// # What it deliberately does NOT carry
+//
+// FactorReturn. The statistical (PCA) estimator does not retain the factor-return
+// panel it estimates the covariance from — it keeps eigenvalues, not the
+// projected series — so nothing here could fill that field honestly, and a
+// present-but-empty repeated field reads as "this model had no factor returns"
+// rather than "this producer does not retain them". When an estimator retains
+// them, the field is added here and the absence stops being silent.
+message FactorModelSnapshot {
+  // model is the fitted model's definition — model_id, as_of, factors,
+  // estimation. Required; model.model_id and model.as_of key the whole snapshot.
+  FactorModel model = 1;
+
+  // exposures are every universe instrument's loadings and specific variance,
+  // in the model's own instrument order. Required; non-empty. Each entry
+  // repeats model.model_id / model.as_of so a row extracted from the lake still
+  // names the instance it came from.
+  repeated FactorExposure exposures = 2;
+
+  // covariance is the K×K factor-return covariance for this instance. Required.
+  FactorCovariance covariance = 3;
+}

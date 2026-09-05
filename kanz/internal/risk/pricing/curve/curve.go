@@ -215,6 +215,12 @@ func (c *Curve) Tenors() []float64 {
 	return out
 }
 
+// Interp returns how this curve interpolates between its pillars. It is part of
+// the curve's definition rather than a rendering choice — two curves with the
+// same pillars and different interpolation disagree everywhere between them — so
+// anything recording a curve for later reconstruction must record it (#1039).
+func (c *Curve) Interp() Interpolation { return c.interp }
+
 // Zeros returns the continuously-compounded zero rate at each pillar. Copy.
 func (c *Curve) Zeros() []float64 {
 	out := make([]float64, len(c.zeros))
