@@ -190,3 +190,46 @@ func TestLoadRequireValidatedAnalytics(t *testing.T) {
 		}
 	})
 }
+
+// The recompute fan-out ceiling (#1050). Three cases, and each is a state that
+// used to be indistinguishable from a healthy one.
+func TestLoadRecomputeConcurrency(t *testing.T) {
+	const key = "RISK_ENGINE_RECOMPUTE_CONCURRENCY"
+
+	t.Run("unset means the engine default, not unbounded", func(t *testing.T) {
+		os.Unsetenv(key)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RecomputeConcurrency != 0 {
+			t.Fatalf("got %d, want 0 — the sentinel the composition root resolves to "+
+				"engine.DefaultRecomputeConcurrency()", cfg.RecomputeConcurrency)
+		}
+	})
+
+	t.Run("an explicit ceiling is carried through", func(t *testing.T) {
+		t.Setenv(key, "8")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RecomputeConcurrency != 8 {
+			t.Fatalf("got %d, want 8", cfg.RecomputeConcurrency)
+		}
+	})
+
+	// A MALFORMED OR NEGATIVE VALUE STOPS THE BOOT. Falling back would land on
+	// GOMAXPROCS, a plausible number an operator would never question — so the
+	// variable would be visible in the pod spec with a bound nobody chose, which
+	// is exactly the "nothing configured looks like checked, and fine" failure.
+	for _, bad := range []string{"2x", "unbounded", "-1"} {
+		t.Run("refuses "+bad, func(t *testing.T) {
+			t.Setenv(key, bad)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted %s=%q — a ceiling that silently falls back is a "+
+					"ceiling the operator cannot see is not in force", key, bad)
+			}
+		})
+	}
+}

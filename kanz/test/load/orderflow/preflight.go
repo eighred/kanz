@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/eighred/kanz/test/load/internal/promscrape"
 )
 
 // preflight decides whether this run may happen at all, and returns the opening
@@ -36,11 +38,11 @@ import (
 // REFUSES. "Unknown" is the third value CLAUDE.md names and a critical unknown
 // fails closed: this harness never proceeds on the strength of something it could
 // not check.
-func preflight(ctx context.Context, cfg config, s *submitter, l *ledger) (scrape, error) {
+func preflight(ctx context.Context, cfg config, s *submitter, l *ledger) (promscrape.Scrape, error) {
 	pctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	before, err := fetchScrape(pctx, cfg.metricsURL)
+	before, err := promscrape.Fetch(pctx, cfg.metricsURL)
 	if err != nil {
 		return nil, fmt.Errorf("the OMS's metrics (%s) could not be read, so this harness cannot "+
 			"establish whether an order submitted here reaches an exchange or a simulator. It will not "+
@@ -54,7 +56,7 @@ func preflight(ctx context.Context, cfg config, s *submitter, l *ledger) (scrape
 	}
 	// Re-read AFTER the canary, so the canary's own effect on the watched counters
 	// is inside the baseline rather than showing up as a delta the load caused.
-	before, err = fetchScrape(pctx, cfg.metricsURL)
+	before, err = promscrape.Fetch(pctx, cfg.metricsURL)
 	if err != nil {
 		return nil, fmt.Errorf("the baseline metrics scrape failed after the canary: %w", err)
 	}
@@ -78,9 +80,9 @@ func preflight(ctx context.Context, cfg config, s *submitter, l *ledger) (scrape
 //     Nothing would trade, so it is safe; but every order would be refused and
 //     the run would report a throughput number for the refusal path, which is the
 //     #859 defect wearing a write-path costume. Refuse, and say which one it is.
-func refuseUnlessSimulated(s scrape) error {
-	live, okLive := s.value("kanz_oms_live_venue_adapters")
-	sim, okSim := s.value("kanz_oms_simulated_venues")
+func refuseUnlessSimulated(s promscrape.Scrape) error {
+	live, okLive := s.Value("kanz_oms_live_venue_adapters")
+	sim, okSim := s.Value("kanz_oms_simulated_venues")
 	if !okLive || !okSim {
 		return errors.New("this OMS does not export kanz_oms_live_venue_adapters / " +
 			"kanz_oms_simulated_venues, so whether an order submitted here reaches an exchange is " +
@@ -178,20 +180,20 @@ func canary(ctx context.Context, cfg config, s *submitter, l *ledger) error {
 // as unverifiable rather than evaluated; refusing to run on that would mean this
 // harness could only ever run against a full estate. Reporting it is the honest
 // middle: the measured admission cost is the cost of the rules that DID run.
-func logPosture(cfg config, s scrape) {
-	sim, _ := s.value("kanz_oms_simulated_venues")
+func logPosture(cfg config, s promscrape.Scrape) {
+	sim, _ := s.Value("kanz_oms_simulated_venues")
 	log.Printf("orderflow: posture — simulated venues=%.0f, live adapters=0, admission p99 budget=%s",
 		sim, cfg.budget)
 	// sum, NOT value: this family gained a `governance` label (#926) so it exports
 	// one series per ungoverned state, and scrape.value documents that reaching it
 	// with a labelled family is a caller error — it would report the first series
 	// and call it the total. The number wanted here is the whole family.
-	if v, _, present := s.sum("kanz_compliance_ungoverned_orders_total"); present {
+	if v, _, present := s.Sum("kanz_compliance_ungoverned_orders_total"); present {
 		log.Printf("orderflow: kanz_compliance_ungoverned_orders_total=%.0f at the start of the run. "+
 			"If this moves, the portfolio is under NO mandate and the gate returns at its first "+
 			"branch — the run would be measuring a short circuit", v)
 	}
-	if v, ok := s.value("kanz_compliance_pretrade_seam_wired"); ok && v == 0 {
+	if v, ok := s.Value("kanz_compliance_pretrade_seam_wired"); ok && v == 0 {
 		log.Printf("orderflow: the pre-trade gate reports a MISSING SEAM " +
 			"(kanz_compliance_pretrade_seam_wired=0). Rules depending on it PASS rather than refuse, " +
 			"so the admission cost measured here is the cost of the rules that did run")

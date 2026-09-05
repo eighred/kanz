@@ -11,6 +11,16 @@
 //
 //	RATE=5000 DURATION=2m PORTFOLIOS=2000 go run ./test/load/ingest
 //
+// IT ALSO REPORTS THE ENGINE'S CAPACITY, WHICH IS WHY IT EXISTS (#1050). Publish
+// rate and bus backlog describe the GENERATOR and the SPINE; the component this
+// harness drives is the one whose working set is a function of estate size rather
+// than a constant, and it had no capacity number at all. The run now polls the
+// engine's own /metrics — INGEST_ENGINE_METRICS_URL, default
+// http://localhost:8081/metrics, matching RISK_ENGINE_LISTEN's default — and
+// reports peak goroutines, peak RSS, peak recompute fan-out width and backlog,
+// and the recompute-latency distribution for the run. Set it empty to skip, and
+// the report says in words that no capacity claim can be made. See capacity.go.
+//
 // Reuses the production bus.Producer (envelope stamped + validated exactly as a
 // real publisher) and hardcodes the risk subject strings, like seed/, to respect
 // the RISK-02 arch boundary (no import of kanz/internal/risk).
@@ -23,6 +33,7 @@ import (
 	"log"
 	"math/rand"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -94,6 +105,39 @@ func main() {
 	}
 
 	log.Printf("ingest: %d events/sec across %d portfolios for %s → %s", rate, portfolios, dur, url)
+
+	// THE CAPACITY POLLER (#1050). Started before the first tick so the opening
+	// scrape is the engine's pre-load baseline: the latency histogram is reported
+	// as a DELTA across the run, and a process that has been up for a day carries
+	// a distribution dominated by what it did yesterday.
+	//
+	// EMPTY IS A DELIBERATE OPT-OUT AND IT SAYS SO. Silently skipping would leave
+	// a run that printed publish numbers and nothing else — indistinguishable from
+	// a run whose engine was unreachable, which is the state that matters.
+	metricsURL := env.Or("INGEST_ENGINE_METRICS_URL", "http://localhost:8081/metrics")
+	capacity := &capacityReport{}
+	if metricsURL == "" {
+		log.Printf("ingest: WARNING — INGEST_ENGINE_METRICS_URL is empty, so this run measures the " +
+			"GENERATOR and the SPINE only. It produces no risk-engine capacity number and nothing " +
+			"from it may be quoted into a resources: block (#231).")
+	} else {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			capacity.pollEngine(ctx, metricsURL, time.Second)
+		}()
+		defer func() {
+			wg.Wait()
+			// One last scrape AFTER the run, outside the run context, so the closing
+			// histogram includes the recomputes the final ticks triggered. Bounded on
+			// its own so a dead endpoint cannot hang the report.
+			last, cancelLast := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelLast()
+			capacity.pollOnce(last, metricsURL)
+			log.Print(capacity.render(metricsURL, portfolios))
+		}()
+	}
 
 	// Open-model pacing: one tick per (1s / rate). A ticker keeps the target rate
 	// independent of publish latency — a slow broker makes ticks queue, which is
