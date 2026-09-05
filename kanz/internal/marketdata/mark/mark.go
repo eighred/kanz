@@ -24,7 +24,6 @@ package mark
 import (
 	"context"
 	"math/big"
-	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +32,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	decutil "github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/marketdata/eventtype"
 )
 
 // maxForwardSkew is how far AHEAD of our own clock a producer's timestamp may
@@ -353,34 +353,28 @@ func (s *Source) sweepLocked() {
 // isMarkBearingEventType reports whether eventType announces a payload this
 // fold can safely unmarshal as a market.v1.MarketDataEvent.
 //
-// services/market-data/internal/feed/bussink.go stamps every MarketDataEvent
-// it publishes as market.<assetClass>.<variant>, where variant comes from the
-// oneof actually set: "trade" or "quote" for the two variants this fold uses,
-// "bar" for the one it doesn't. market.book.snapshot (a DIFFERENT publisher,
-// internal/marketedge/ingest/engine.go) uses the bare subject as its
-// EventType too, with no third segment — a shape this check also rejects, on
-// top of "snapshot" not being a variant this fold understands.
+// WHICH VARIANT AN event_type ANNOUNCES IS NOT THIS FOLD'S QUESTION, and it is
+// no longer answered here: eventtype.Of owns the taxonomy
+// services/market-data/internal/feed/bussink.go stamps, and its own test
+// derives the variant tokens from the MarketDataEvent oneof descriptor rather
+// than restating them. What IS this fold's question is which of those variants
+// a MARK can be taken from, and that is the switch below — a Trade and a Quote,
+// never a Bar.
 //
-// Anything that is not exactly "market.<assetClass>.trade" or
-// "market.<assetClass>.quote" is refused here, before Unmarshal ever runs —
-// by the time the bytes are decoded, a bids-only OrderBookSnapshot and a
-// genuine Trade are indistinguishable (see the Handle doc comment).
+// The split is the point. internal/risk/pricing/livequote folds the same
+// wildcard into calibration rates and admits all three variants, so the two
+// folds share the classifier and disagree only where they genuinely differ. Two
+// hand-written parses would have been two chances to disagree about whether
+// market.book.snapshot is a price, which is the disagreement that poisons a
+// mark below mid.
 func isMarkBearingEventType(eventType string) bool {
-	parts := strings.Split(eventType, ".")
-	if len(parts) != 3 || parts[0] != domainMarket {
-		return false
-	}
-	switch parts[2] {
-	case "trade", "quote":
+	switch eventtype.Of(eventType) {
+	case eventtype.Trade, eventtype.Quote:
 		return true
 	default:
 		return false
 	}
 }
-
-// domainMarket is the first EventType segment every mark-bearing event
-// shares — market.<assetClass>.<variant>.
-const domainMarket = "market"
 
 // clampSkew refuses to trust an asOf that is AHEAD of our own clock by more
 // than maxForwardSkew, and ages the mark from receive time instead.
