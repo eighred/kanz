@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -60,10 +61,12 @@ func MeasurePosture(reg prometheus.Registerer, logger *slog.Logger, registry *co
 			"but registered by nobody. A ZERO IS NOT AN ERROR ANYWHERE ELSE: the query path drops " +
 			"unknown measure names, so a client asking for a dark measure receives 200 with it " +
 			"absent — indistinguishable from a portfolio that holds none of that instrument (#509). " +
-			"A ONE MEANS THE NAME IS REGISTERED, NOT THAT ITS FAMILY IS WIRED: Delta is served by " +
-			"the RISK-07 net-exposure placeholder in DefaultRegistry, so it reads 1 under " +
-			"family=greeks on an engine with no pricing-derived Greek at all. Read family " +
-			"coverage from the family's OTHER members.",
+			"A ONE MEANS THE NAME IS REGISTERED, AND NOTHING ABOUT WHAT SERVES IT: Delta reads 1 " +
+			"under family=greeks whether it is a pricing-derived Greek or the RISK-07 net-exposure " +
+			"placeholder, and VaR99 reads 1 whether it is historical simulation or 1%×gross. " +
+			"WHICH ONE IS kanz_risk_measure_method's question, and it is the one that decides " +
+			"whether the number may gate an order (#1037). Read family coverage from the family's " +
+			"OTHER members.",
 	}, []string{"measure", "family"})
 	reg.MustRegister(g)
 
@@ -123,4 +126,122 @@ func MeasurePosture(reg prometheus.Registerer, logger *slog.Logger, registry *co
 		"why", "each family is registered by one seam that no composition root calls; the seams and "+
 			"the provider each is missing are listed in test/arch/no_dark_measure_seam_test.go (#509)",
 		"gauge", "kanz_risk_measure_live")
+}
+
+// WHICH MODEL IS THIS ENGINE ACTUALLY ANNOUNCING (#1037)?
+//
+// # The question kanz_risk_measure_live cannot answer
+//
+// That gauge asks whether the NAME is registered, and reads 1 in both
+// configurations of the fork that matters: VaR99 served by historical simulation
+// over a price panel, and VaR99 served by compute.VaR99 — 0.01 × GrossExposure, an
+// illustrative constant. Which one a pod serves turns on
+// RISK_ENGINE_MARKETDATA_DATABASE_URL, which no manifest in infra/ sets, so the
+// shipped rollout has been answering with 1% of gross while exporting the series
+// of an engine that computes a real number.
+//
+// The alert an operator needs — "a mandate names a measure served by a
+// placeholder" — was unwritable, because both states looked the same. With the
+// method as a label it is one expression:
+//
+//	kanz_risk_measure_method{method="placeholder_1pct_gross"} == 1
+//
+// # Why it is fed from the announcement rather than probed from the registry
+//
+// A registry probe has to EXECUTE a measure to learn its model, and executing
+// them at boot fits a live factor model and moves the factor skip counters for a
+// portfolio nobody owns. It would also answer about the REGISTRY, while the thing
+// that gates order admission is the measures FACT the OMS folds. So the publisher
+// reports what it announced and this records it — measured behaviour, not the
+// registry's intent.
+//
+// # Why registration and setting are separated
+//
+// The collector is registered by NewMeasureMethodPosture, which the composition
+// root calls UNCONDITIONALLY — before the market-data branch, before the
+// publisher, before anything that could take the other path. A collector created
+// inside `if producer != nil` exports no series at all in the deployment that
+// takes the other branch, and an == 0 (or absent-series) alert over it is then
+// silent in exactly the state it was written for. That has shipped twice here
+// (#973, #963).
+type MeasureMethodPosture struct {
+	g *prometheus.GaugeVec
+
+	mu   sync.Mutex
+	last map[string]string
+}
+
+// MethodUnobserved labels a measure this engine has not yet announced. It is a
+// REAL STATE AND NOT A GAP: a served measure whose series still reads
+// method="unobserved" long after boot means the engine has computed nothing for
+// it, which an absent series would have left invisible.
+const MethodUnobserved = "unobserved"
+
+// MethodUndeclared labels a measure whose producer named no model. Distinct from
+// unobserved: something WAS announced and it said nothing about how it was
+// computed. Every measure this platform published before #1037 is in that state,
+// so it must not be read as a verdict either way.
+const MethodUndeclared = "undeclared"
+
+// NewMeasureMethodPosture registers the gauge. Call it unconditionally, at the
+// composition root, ahead of every branch.
+func NewMeasureMethodPosture(reg prometheus.Registerer) *MeasureMethodPosture {
+	p := &MeasureMethodPosture{
+		g: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "kanz_risk_measure_method",
+			Help: "1 for the model this engine last announced for the measure, 0 for a model it has " +
+				"stopped announcing. THE LABEL IS THE ANSWER: method=\"placeholder\"_1pct_gross or " +
+				"method=\"net_exposure_placeholder\" means the number is an ILLUSTRATIVE CONSTANT rather " +
+				"than a calibrated risk figure, and the OMS admission gate refuses to fold it — a " +
+				"mandate naming that measure REFUSES orders. method=\"undeclared\" means the producer " +
+				"named no model, which is not a claim that the number is real. method=\"unobserved\" " +
+				"means the measure is registered and nothing has been computed for it yet. " +
+				"kanz_risk_measure_live answers whether the NAME is registered; this answers what " +
+				"serves it, which is what decides whether the number may gate an order (#1037).",
+		}, []string{"measure", "method"}),
+		last: map[string]string{},
+	}
+	reg.MustRegister(p.g)
+	return p
+}
+
+// Seed gives every measure the registry serves a series before the first
+// recompute, so a dashboard is not empty and an alert is not silent while the
+// engine warms up. Called with the SAME registry the query path uses, beside
+// MeasurePosture and for the same reason.
+func (p *MeasureMethodPosture) Seed(registry *compute.Registry) {
+	if p == nil || registry == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, name := range registry.Names() {
+		p.g.WithLabelValues(string(name), MethodUnobserved).Set(1)
+		p.last[string(name)] = MethodUnobserved
+	}
+}
+
+// Observe records the model announced for one measure. It is
+// publish.WithMeasureMethodObserver's callback, so it runs once per measure per
+// measures FACT — cheap, and on the path whose output the OMS gate folds.
+func (p *MeasureMethodPosture) Observe(measure, method string) {
+	if p == nil || measure == "" {
+		return
+	}
+	if method == "" {
+		method = MethodUndeclared
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if prev, ok := p.last[measure]; ok {
+		if prev == method {
+			return
+		}
+		// THE PREVIOUS SERIES IS ZEROED, NOT DELETED. A deleted series makes an
+		// alert stop evaluating rather than evaluate to false, which is the same
+		// silence this gauge exists to end.
+		p.g.WithLabelValues(measure, prev).Set(0)
+	}
+	p.g.WithLabelValues(measure, method).Set(1)
+	p.last[measure] = method
 }

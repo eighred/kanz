@@ -42,7 +42,6 @@ import (
 	"github.com/eighred/kanz/internal/risk/liquiditysource"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 	"github.com/eighred/kanz/internal/risk/pricing/livequote"
-	"github.com/eighred/kanz/internal/risk/publish"
 	"github.com/eighred/kanz/internal/risk/spotsource"
 	"github.com/eighred/kanz/internal/risk/state"
 	"github.com/eighred/kanz/internal/risk/state/persist"
@@ -214,7 +213,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	if err != nil {
 		return err
 	}
-	publisher, err := publish.NewPublisher(producer)
+	// Publisher + the which-model-did-it-announce gauge; measurepublish.go (#1037).
+	publisher, measureMethods, err := newMeasurePublisher(producer, obs.Registry)
 	if err != nil {
 		return err
 	}
@@ -526,6 +526,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// rather than refused, which is indistinguishable from a portfolio that holds
 	// none of that instrument.
 	app.MeasurePosture(obs.Registry, logger, registry)
+	// AND WHAT SERVES EACH ONE (#1037) — same final registry, so no series is absent.
+	measureMethods.Seed(registry)
 	// THE AI LAYER GETS ITS INPUT (AI-M1).
 	//
 	// internal/prediction shipped a feature publisher, a resilient inference client and a

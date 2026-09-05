@@ -173,6 +173,13 @@ func GrossExposure(p *domain.Portfolio) v1.Measure {
 		Name:           MeasureGrossExposure,
 		Value:          sumInBaseCurrency(p, true /*absolute*/),
 		UncertaintyAbs: sumUncertaintyInBaseCurrency(p),
+		// ARITHMETIC, NOT A MODEL, and saying so is not a formality. This
+		// measure can never report InputCoverage — there is no provider to
+		// decline — so provenance is the only field on it a consumer can read
+		// to tell it apart from the illustrative constants below, which are
+		// coverage-less for the same reason and are NOT arithmetic the engine
+		// stands behind (#1037).
+		Provenance: v1.MeasureProvenance{Method: v1.MethodPortfolioArithmetic},
 	}
 }
 
@@ -186,6 +193,7 @@ func NetExposure(p *domain.Portfolio) v1.Measure {
 		Name:           MeasureNetExposure,
 		Value:          sumInBaseCurrency(p, false /*signed*/),
 		UncertaintyAbs: sumUncertaintyInBaseCurrency(p),
+		Provenance:     v1.MeasureProvenance{Method: v1.MethodPortfolioArithmetic},
 	}
 }
 
@@ -207,6 +215,21 @@ func VaR99(p *domain.Portfolio) v1.Measure {
 		Name:           MeasureVaR99,
 		Value:          mulDecimal(gross, var1pctOfGross),
 		UncertaintyAbs: PropagateScalar(var1pctOfGross, grossUnc),
+		// THE PLACEHOLDER DECLARES ITSELF, ON EVERY RESPONSE (#1037).
+		//
+		// The doc above has said "NOT a calibrated risk number" since RISK-07,
+		// and main.go logs a WARN naming this measure once at boot. Neither
+		// travels with the number. This value is announced on
+		// risk.portfolio.measures_computed under the same name and the same
+		// shape as historical-simulation VaR99, the OMS folds it, and
+		// compliance.RiskLimitRule checks a mandate limit against it — 1% of
+		// gross, which on a leveraged book sits BELOW a real one-day 99% VaR,
+		// so the gate admits orders the real number would refuse. riskview
+		// refuses on this method, and cannot without it.
+		Provenance: v1.MeasureProvenance{
+			Method: v1.MethodPlaceholder1PctGross,
+			Params: map[string]string{"gross_fraction": "0.01"},
+		},
 	}
 }
 
@@ -222,6 +245,12 @@ func Delta(p *domain.Portfolio) v1.Measure {
 		Name:           MeasureDelta,
 		Value:          sumInBaseCurrency(p, false),
 		UncertaintyAbs: sumUncertaintyInBaseCurrency(p),
+		// AND THIS ONE IS SERVED ON EVERY DEPLOYMENT, not only the ones with no
+		// market-data DSN: it is in DefaultRegistry and RegisterGreeks — the
+		// only thing that overrides it — has no production caller. So the
+		// platform's Delta is NetExposure under another name, everywhere, and
+		// kanz_risk_measure_live{measure="Delta"} reads 1 for it.
+		Provenance: v1.MeasureProvenance{Method: v1.MethodNetExposurePlaceholder},
 	}
 }
 

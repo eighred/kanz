@@ -48,14 +48,20 @@ func maxDrawdown(pnl []float64, v0 float64) (fraction, amount float64) {
 // Reuses portfolioPnL, so it is consistent with VaR/ES over the same window.
 func MaxDrawdownFraction(cfg Config) compute.ReturnsMeasure {
 	window := cfg.Window
+	prov := historicalProvenance(cfg.confidence(), window)
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
 		var cov compute.Coverage
 		pnl, v0, ok := portfolioPnL(ctx, p, rp, window, &cov)
 		if !ok {
-			return zeroNamed(compute.MeasureMaxDrawdown, cov)
+			return zeroNamed(compute.MeasureMaxDrawdown, prov, cov)
 		}
 		frac, _ := maxDrawdown(pnl, v0)
-		return v1.Measure{Name: compute.MeasureMaxDrawdown, Value: floatToDecimal(frac, drawdownExponent), Coverage: cov.Result()}
+		return v1.Measure{
+			Name:       compute.MeasureMaxDrawdown,
+			Value:      floatToDecimal(frac, drawdownExponent),
+			Coverage:   cov.Result(),
+			Provenance: prov,
+		}
 	}
 }
 
@@ -63,13 +69,19 @@ func MaxDrawdownFraction(cfg Config) compute.ReturnsMeasure {
 // decline as an absolute base-currency loss (cents), the capital / margin layer.
 func MaxDrawdownAmount(cfg Config) compute.ReturnsMeasure {
 	window := cfg.Window
+	prov := historicalProvenance(cfg.confidence(), window)
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
 		var cov compute.Coverage
 		pnl, v0, ok := portfolioPnL(ctx, p, rp, window, &cov)
 		if !ok {
-			return zeroNamed(compute.MeasureMaxDrawdownAmount, cov)
+			return zeroNamed(compute.MeasureMaxDrawdownAmount, prov, cov)
 		}
 		_, amount := maxDrawdown(pnl, v0)
-		return v1.Measure{Name: compute.MeasureMaxDrawdownAmount, Value: floatToDecimal(amount, varExponent), Coverage: cov.Result()}
+		return v1.Measure{
+			Name:       compute.MeasureMaxDrawdownAmount,
+			Value:      floatToDecimal(amount, varExponent),
+			Coverage:   cov.Result(),
+			Provenance: prov,
+		}
 	}
 }

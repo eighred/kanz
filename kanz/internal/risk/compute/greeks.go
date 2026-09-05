@@ -178,7 +178,15 @@ func greekMeasure(ctx context.Context, name v1.MeasureName, p GreeksProviders, s
 			}
 			sum += contrib
 		}
-		return v1.Measure{Name: name, Value: floatToDecimal(sum, greekExp)}
+		// THE MODEL, NOT THE MEASURE NAME, IS WHAT SEPARATES THIS FROM THE
+		// PLACEHOLDER. MeasureDelta is served by this function when
+		// RegisterGreeks has run and by compute.Delta (net exposure) when it has
+		// not, and nothing on the wire told the two apart before #1037.
+		return v1.Measure{
+			Name:       name,
+			Value:      floatToDecimal(sum, greekExp),
+			Provenance: v1.MeasureProvenance{Method: v1.MethodOptionPricingGreeks},
+		}
 	}
 }
 

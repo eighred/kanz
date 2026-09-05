@@ -56,6 +56,71 @@ message RiskMeasure {
   // measure or how much, so a caller could not refuse the degraded
   // number without refusing the sound ones beside it (#509).
   InputCoverage coverage = 5;
+
+  // provenance names the MODEL that produced value. ABSENT means this
+  // measure does not declare a model — it does NOT mean the number is
+  // model-derived, and it does NOT mean it is a placeholder. See
+  // MeasureProvenance.
+  //
+  // The name was never enough of a key. "VaR99" was served by 1% of
+  // gross exposure and by historical simulation over a price panel,
+  // and the two were byte-identical on this message: same name, same
+  // Decimal, nothing else. Which one a deployment served depended on
+  // one environment variable, and the OMS pre-trade gate checked a
+  // mandate's VaR limit against whichever arrived (#1037).
+  MeasureProvenance provenance = 6;
+}
+
+// MeasureProvenance names the model behind one measure value — the
+// difference between a number a quant team calibrated and an
+// illustrative constant with the same name (#1037).
+//
+// PRESENCE IS THE SIGNAL, for the same reason InputCoverage is a
+// message and not two scalars on RiskMeasure. Absent means "this
+// producer declares no model"; present with method =
+// "placeholder_1pct_gross" means "it declares one, and it is a
+// placeholder". A bare string field would render both as "" and
+// re-create the conflation the record exists to break — and the
+// unsafe reading is the empty one, because every measure published
+// before this field existed carries no provenance at all.
+//
+// NO QUALITY CLAIM IS MADE BY THE SCHEMA. method is a name, not a
+// verdict; what a consumer may do with a given method is the
+// consumer's ruling, and this estate's is that a gating read
+// (order admission) REFUSES a placeholder method and leaves the
+// measure unknown, while an advisory read may display it labelled.
+// The Go vocabulary and the placeholder predicate live in one place,
+// kanz/internal/risk/api/v1 — a second copy is how the producer and
+// the gate come to disagree about which methods are real.
+message MeasureProvenance {
+  // method is the model that produced the value, from a closed
+  // low-cardinality vocabulary: "historical_simulation",
+  // "monte_carlo", "portfolio_arithmetic",
+  // "option_pricing_greeks", "placeholder_1pct_gross",
+  // "net_exposure_placeholder". Required when this message is
+  // present — a provenance that names no method says less than no
+  // provenance at all, because it looks like a declaration.
+  string method = 1;
+
+  // model_id keys the fitted model where one applies, matching
+  // factor.v1.FactorModel.model_id. Empty for methods that fit no
+  // model (portfolio arithmetic, the placeholders) — which is most
+  // of them, and is not a defect.
+  string model_id = 2;
+
+  // model_as_of is the domain time the model behind model_id was
+  // fitted at. It is NOT the measure's as_of: a VaR computed this
+  // morning off a factor model fitted last quarter is stale in a way
+  // RiskMeasureSet.as_of cannot express. Absent when no model was
+  // fitted.
+  google.protobuf.Timestamp model_as_of = 3;
+
+  // params are the model's parameters — lookback, confidence, seed —
+  // as the operator would need them to reproduce the number. LOW
+  // CARDINALITY BY CONTRACT: these travel on every measure of every
+  // FACT, and a reader may group by them. Never per-position data,
+  // never the inputs themselves.
+  map<string, string> params = 4;
 }
 
 // InputCoverage records how much of the book one measure was actually
