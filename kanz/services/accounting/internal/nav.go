@@ -8,6 +8,8 @@ package accounting
 import (
 	"fmt"
 	"math/big"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
@@ -29,8 +31,9 @@ type NAV struct {
 	// LocalExposure is the net book value contributed by each currency BEFORE
 	// conversion to the reporting currency (security + cash + accrued, in local
 	// terms). It is the base the FX attribution driver revalues (FXPnL) — the
-	// reporting-currency exposure is present but revalues to zero. nil for the
-	// single-currency ComputeNAV path.
+	// reporting-currency exposure is present but revalues to zero. A domestic
+	// book carries the reporting currency alone, which revalues to zero, so
+	// FXPnL over it is 0 exactly as it was when ComputeNAV returned nil here.
 	LocalExposure map[string]*big.Rat
 }
 
@@ -41,36 +44,34 @@ type PnlComponent struct {
 	Amount *big.Rat
 }
 
-// ComputeNAV values a book in its reporting currency at the given prices. Every
-// non-flat position must have a price — an incomplete valuation never produces a
-// NAV (the same completeness discipline as a regulatory filing). Positions and
-// cash are assumed in the reporting currency (the single-currency book; FX is the
-// attribution axis below and a carried-forward multi-currency seam).
+// ComputeNAV values a DOMESTIC book — one whose cash and accrued income are all
+// in the reporting currency — at the given prices, and REFUSES any other book.
+//
+// IT IS NO LONGER A SECOND IMPLEMENTATION, and that is the repair (#1041). It
+// was one, and the two had diverged in the direction that costs money: this
+// function read ONE cash bucket and ONE accrued bucket, so every other currency
+// the book held was not summed, not converted, and NOT REPORTED AS OMITTED. A
+// book holding USD 100 and EUR 50 answered NAV{Cash: 100} with a nil error —
+// understated by the entire value of every non-reporting currency the fund
+// holds, on the fund's headline number, in the direction that reads as "nothing
+// to act on". One EUR subscription through the cash-movement endpoint produces
+// such a book, and custody reconciliation was already comparing per-currency
+// balances the valuation could not express.
+//
+// It now delegates to ComputeNAVInCurrency with an IDENTITY rate table — the
+// relationship that function's own doc comment already asserted. The identity
+// table quotes the reporting currency at 1 and nothing else, so a foreign cash
+// or accrued bucket fails the completeness gate BY NAME instead of vanishing.
+//
+// WHAT IT STILL CANNOT PROVE, and the caller must. A position's quote currency
+// is not in the book — it is a security-master join (InstrumentCurrency), and
+// with none supplied every instrument defaults to the reporting currency. So
+// this entry point establishes domesticity for cash and accrued only. A caller
+// holding the join passes it to ComputeNAVInCurrency directly, which is what
+// Server.computeNAV does; a deployment that holds no join says so at startup
+// through the FX posture rather than discovering it one valuation at a time.
 func ComputeNAV(b *ledger.Book, currency string, asOf time.Time, prices map[string]*big.Rat) (NAV, error) {
-	sec := new(big.Rat)
-	for inst, p := range b.Positions {
-		if p.Qty.Sign() == 0 {
-			continue
-		}
-		px, ok := prices[inst]
-		if !ok {
-			return NAV{}, fmt.Errorf("accounting: NAV missing price for %q", inst)
-		}
-		sec.Add(sec, new(big.Rat).Mul(p.Qty, px))
-	}
-	cash := b.CashBalance(currency)
-	accrued := b.AccruedBalance(currency)
-	total := new(big.Rat).Add(cash, sec)
-	total.Add(total, accrued)
-	return NAV{
-		PortfolioID:   b.PortfolioID,
-		Currency:      currency,
-		Total:         total,
-		Cash:          cash,
-		SecurityValue: sec,
-		Accrued:       accrued,
-		AsOf:          asOf,
-	}, nil
+	return ComputeNAVInCurrency(b, currency, asOf, prices, nil, NewFXTable(currency, nil))
 }
 
 // ComputeNAVInCurrency values a MULTI-CURRENCY book in a single reporting
@@ -83,13 +84,20 @@ func ComputeNAV(b *ledger.Book, currency string, asOf time.Time, prices map[stri
 //
 // The returned NAV carries LocalExposure (per-currency pre-conversion book
 // value) so FXPnL can attribute the currency-revaluation driver from real rates.
-// A single-currency book with an identity FX table yields exactly ComputeNAV's
-// numbers, so this is the general form ComputeNAV is the fast path of.
+//
+// THIS IS THE ONLY VALUATION IN THIS PACKAGE (#1041). ComputeNAV used to be a
+// second one, described here as "the fast path of" this general form; that claim
+// was true of the arithmetic on a domestic book and false of everything else,
+// and the gap was the whole value of every foreign bucket. ComputeNAV now calls
+// this with an identity rate table, so the claim holds by construction rather
+// than by inspection — TestComputeNAVMatchesTheGeneralFormOnADomesticBook pins
+// the numbers from the other side.
 func ComputeNAVInCurrency(b *ledger.Book, reporting string, asOf time.Time, prices map[string]*big.Rat, instrCcy InstrumentCurrency, fx FXConverter) (NAV, error) {
 	if fx == nil {
 		return NAV{}, fmt.Errorf("accounting: NAV requires an FX converter")
 	}
 	local := map[string]*big.Rat{} // currency → net local-currency book value
+	var unvaluable currencySet
 
 	sec := new(big.Rat)
 	for inst, p := range b.Positions {
@@ -103,9 +111,10 @@ func ComputeNAVInCurrency(b *ledger.Book, reporting string, asOf time.Time, pric
 		ccy := instrCcy.Of(inst, reporting)
 		mvLocal := new(big.Rat).Mul(p.Qty, px)
 		addLocal(local, ccy, mvLocal)
-		conv, err := convert(fx, ccy, mvLocal)
-		if err != nil {
-			return NAV{}, err
+		conv, ok := convert(fx, ccy, mvLocal)
+		if !ok {
+			unvaluable.add(ccy)
+			continue
 		}
 		sec.Add(sec, conv)
 	}
@@ -116,9 +125,10 @@ func ComputeNAVInCurrency(b *ledger.Book, reporting string, asOf time.Time, pric
 			continue
 		}
 		addLocal(local, ccy, v)
-		conv, err := convert(fx, ccy, v)
-		if err != nil {
-			return NAV{}, err
+		conv, ok := convert(fx, ccy, v)
+		if !ok {
+			unvaluable.add(ccy)
+			continue
 		}
 		cash.Add(cash, conv)
 	}
@@ -129,11 +139,27 @@ func ComputeNAVInCurrency(b *ledger.Book, reporting string, asOf time.Time, pric
 			continue
 		}
 		addLocal(local, ccy, v)
-		conv, err := convert(fx, ccy, v)
-		if err != nil {
-			return NAV{}, err
+		conv, ok := convert(fx, ccy, v)
+		if !ok {
+			unvaluable.add(ccy)
+			continue
 		}
 		accrued.Add(accrued, conv)
+	}
+
+	// EVERY UNVALUABLE CURRENCY, NAMED, BEFORE ANY NUMBER IS RETURNED. The loops
+	// above accumulate rather than returning on the first miss so this message
+	// carries the whole list: an operator reading "no FX rate for EUR" configures
+	// one pair, gets the same refusal for CHF, and configures another. The list is
+	// sorted because map iteration order is not, and a refusal that names a
+	// different currency on each attempt reads as intermittency rather than as a
+	// missing configuration.
+	if missing := unvaluable.sorted(); len(missing) > 0 {
+		return NAV{}, fmt.Errorf("accounting: NAV in %s REFUSED — the book holds value in %s, and "+
+			"this valuation has no FX rate for %s. A NAV that left those buckets out would understate "+
+			"by their whole amount and look exactly like a correct one, so none is produced (#1041); "+
+			"configure the rate (ACCOUNTING_FX_PAIRS) or supply `fx` on the request",
+			reporting, strings.Join(missing, ", "), plural(len(missing), "it", "them"))
 	}
 
 	total := new(big.Rat).Add(cash, sec)
@@ -151,13 +177,56 @@ func ComputeNAVInCurrency(b *ledger.Book, reporting string, asOf time.Time, pric
 }
 
 // convert multiplies a local-currency amount by its FX rate into the reporting
-// currency, erroring loudly on a missing rate.
-func convert(fx FXConverter, ccy string, amount *big.Rat) (*big.Rat, error) {
+// currency. ok=false ⇒ no rate for that currency; the CALLER records which one
+// and refuses the whole valuation, because a per-item error names only the
+// currency it tripped over first and map iteration picks that one at random.
+func convert(fx FXConverter, ccy string, amount *big.Rat) (*big.Rat, bool) {
 	rate, ok := fx.Rate(ccy)
 	if !ok {
-		return nil, fmt.Errorf("accounting: NAV missing FX rate for %q", ccy)
+		return nil, false
 	}
-	return new(big.Rat).Mul(amount, rate), nil
+	return new(big.Rat).Mul(amount, rate), true
+}
+
+// currencySet accumulates the distinct currencies a valuation could not convert,
+// in no particular order until sorted.
+type currencySet struct {
+	seen  map[string]bool
+	names []string
+}
+
+func (s *currencySet) add(ccy string) {
+	if s.seen == nil {
+		s.seen = map[string]bool{}
+	}
+	if s.seen[ccy] {
+		return
+	}
+	s.seen[ccy] = true
+	s.names = append(s.names, ccy)
+}
+
+// sorted returns the currencies in a stable order. A blank currency — a cash leg
+// booked with no CashCurrency — is rendered as "" so the refusal names something
+// an operator can search the journal for rather than an empty gap in a sentence.
+func (s *currencySet) sorted() []string {
+	out := make([]string, 0, len(s.names))
+	for _, n := range s.names {
+		if n == "" {
+			n = `""`
+		}
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// plural picks the singular or plural form for a count.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // addLocal accumulates a per-currency exposure amount.
