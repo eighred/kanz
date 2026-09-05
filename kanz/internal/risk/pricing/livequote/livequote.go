@@ -24,6 +24,7 @@ import (
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/marketdata/eventtype"
 )
 
 // LiveQuotes is a concurrency-safe last-value cache: the most-recent market
@@ -45,8 +46,10 @@ import (
 //
 // The subscription stays a wildcard deliberately. midPrice reads a Quote, a
 // Trade or a Bar, so which subject a calibration instrument's price arrives on
-// is not derivable from the instrument id; the filter belongs on the map, not on
-// the subscription.
+// is not derivable from the instrument id; the INSTRUMENT filter belongs on the
+// map, not on the subscription. Which MESSAGE the wildcard carried is a
+// separate question, and Handler answers that one first — a decoder on a
+// wildcard is only safe if it refuses what it was not sent.
 type LiveQuotes struct {
 	mu     sync.RWMutex
 	latest map[string]*marketpb.MarketDataEvent
@@ -128,7 +131,29 @@ func (q *LiveQuotes) Universe() []string {
 // nacked. It is not this subscriber's message: on a `market.>` wildcard almost
 // every event is one, and nacking them would DLQ the market spine rather than
 // report anything.
+//
+// AN EVENT THAT IS NOT A MarketDataEvent AT ALL IS REFUSED BEFORE Unmarshal
+// (#1021), and that ordering is the whole of it. The wildcard also carries
+// market.book.snapshot, whose OrderBookSnapshot is wire-compatible with
+// MarketDataEvent (eventtype's package doc has the field-by-field reason): a
+// two-sided book decodes cleanly into a Quote whose bid_price is the DEEPEST
+// ASK level and whose ask_price is unset, so midPrice hands that back as the
+// instrument's rate and the curve is calibrated off the far end of the book.
+// proto.Unmarshal returns no error on it and dec.InDomainDeep passes it — the
+// number is well-formed, in-domain, and wrong by however deep the book is.
+// Nothing downstream can recover the distinction, so it has to be made here,
+// from the envelope, before the bytes are decoded.
+//
+// The refusal ACKS, for the same reason an out-of-universe instrument does: a
+// book snapshot on the market spine is a correct message on a subject this
+// subscriber shares, not a fault to report. What it must never be is a rate.
 func (q *LiveQuotes) Handler(_ context.Context, env *envelopepb.Envelope, payload []byte) error {
+	// All three variants are admitted, unlike the mark fold's two: midPrice reads
+	// a Quote, a Trade AND a Bar, so a bar is a calibration observation here even
+	// though it is not a mark.
+	if eventtype.Of(env.GetEventType()) == eventtype.None {
+		return nil
+	}
 	var ev marketpb.MarketDataEvent
 	if err := proto.Unmarshal(payload, &ev); err != nil {
 		return fmt.Errorf("livequote: %s unmarshal: %w", env.GetEventType(), err)
