@@ -32,6 +32,13 @@ import (
 	"sync"
 	"time"
 
+	// ALIASED because this package's own tests already define a helper called
+	// dec() — the exact-Decimal literal builder in postgres_test.go — and the
+	// short name is theirs by seniority. The comparison itself must still come
+	// from internal/dec: Cmp is exact across differing exponents, which is the
+	// whole reason a hand-rolled coefficient comparison is not an option on a
+	// capital path.
+	decimal "github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5"
@@ -566,6 +573,150 @@ var ErrQuarantinedNotRedispatched = errors.New("orderview: refusing to work an o
 // ingester reports it and the reconciler heals the same way.
 var ErrContended = errors.New("orderview: gave up on a conditional write after repeated concurrent changes to the same order")
 
+// ErrFilledQuantityRegressed is returned when a venue execution report carries a
+// CUMULATIVE filled quantity BELOW the one this adapter's view already holds for
+// the order (#1046). See refuseStale.
+var ErrFilledQuantityRegressed = errors.New("orderview: refusing a venue report whose cumulative filled quantity is below the one this adapter already recorded")
+
+// ErrReportOutOfOrder is returned when a venue execution report is stamped
+// EARLIER than the last venue report this adapter folded into the order (#1046).
+// See refuseStale.
+var ErrReportOutOfOrder = errors.New("orderview: refusing a venue report older than the last venue observation this adapter recorded")
+
+// The two reasons a venue execution report is refused as stale, and the label
+// values kanz_venue_orderview_stale_reports_total carries. They are exported
+// because the counter that SEEDS them and the classifier that INCREMENTS them
+// have to name the same set — a second copy written out in the metrics file is
+// how a seeded label and an incremented one come to be different series
+// (#963, #973, #1036).
+const (
+	// StaleQuantityRegressed is a report whose cumulative filled quantity went
+	// BACKWARDS. It is the one with the concrete cost: this view is the expected
+	// side of the healing watchdog's comparison against exchange truth.
+	StaleQuantityRegressed = "filled_quantity_regressed"
+	// StaleReportOutOfOrder is a report the venue's own clock says is older than
+	// the last one folded in. It covers the status and average-fill-price
+	// regressions a quantity comparison cannot see.
+	StaleReportOutOfOrder = "report_out_of_order"
+)
+
+// StaleReason names the stale-report refusal err carries, if it is one. It is
+// the ONE classifier: NewObservedSeam routes every onErr through it to decide
+// whether a failure is a stale report or an unreadable view, and nothing else
+// may re-derive that from the error text.
+func StaleReason(err error) (string, bool) {
+	switch {
+	case errors.Is(err, ErrFilledQuantityRegressed):
+		return StaleQuantityRegressed, true
+	case errors.Is(err, ErrReportOutOfOrder):
+		return StaleReportOutOfOrder, true
+	default:
+		return "", false
+	}
+}
+
+// refuseStale is Progress's ORDERING DISCIPLINE: it decides whether the venue
+// report in hand may be folded onto what the view already holds, or is a stale
+// or replayed one that must not be (#1046).
+//
+// # What having no ordering at all cost, because that is what was here
+//
+// Neither connector kept a sequence number or an event-time high-water mark, so
+// a report set delivered out of order — a reconnect that replays, a websocket
+// that interleaves two of one order's executions — was applied in ARRIVAL order.
+// carryVenueObserved then wrote filled_quantity and leaves_quantity
+// unconditionally whenever the report set them, so a cumulative of 8 followed by
+// a late cumulative of 3 left the view holding 3, with no error, no refusal and
+// no counter.
+//
+// That is not a bookkeeping blemish. This view is the EXPECTED side of the
+// healing watchdog's comparison against exchange truth (Reconciler.reconcile-
+// Orders), so a regressed view disagrees with the venue about an order that is
+// in fact fine, healedState finds "permanent drift", and the adapter emits a
+// StateHealed FACT describing a divergence that does not exist — the re-emit
+// loop #904 and #891 were filed to stop, reached through the VALUE this time
+// rather than through the retention.
+//
+// # Two gates, because they decide different things
+//
+// THE QUANTITY GATE NEEDS NO CLOCK. A venue's cumulative filled quantity is
+// monotone by construction: an exchange does not un-execute. So a report whose
+// cumulative is below the one already recorded is stale or replayed whatever any
+// timestamp says, and this is the gate that closes the demonstrated regression.
+// It is checked FIRST, because it is the one with the concrete cost.
+//
+// THE ORDERING GATE COVERS WHAT A QUANTITY CANNOT — a replayed report carrying
+// the same cumulative but an older STATUS or average fill price. Its token is
+// the venue's own timestamp for the observation, which is what as_of holds on
+// this path: Binance's E (the executionReport's event time, and as_of is defined
+// in order.v1 as "the event_time of the change that produced it"), OKX's uTime.
+//
+// # Why the ordering gate is conditional, and it is not timidity
+//
+// as_of is NOT one clock across every writer of this view. Dispatch seeds a row
+// from the OMS's own OrderState, whose as_of is the OMS's admission instant on
+// the OMS's host clock (services/oms/internal/order/aggregate.go). The venue's
+// clock is a different one and the two are only loosely tied — Binance and OKX
+// require request timestamps inside a recvWindow measured in SECONDS, so a skew
+// of tens of milliseconds is ordinary. A market order that fills inside that
+// skew would arrive with a venue timestamp EARLIER than the OMS's admission
+// stamp, and an unconditional gate would refuse the first real fill of every
+// fast order it happened to. That is a far worse failure than the one this
+// closes.
+//
+// So the gate applies only once the view already holds a VENUE observation — a
+// filled_quantity that is present and non-zero, which on this path only Progress
+// can have put there. From that point both sides of the comparison were written
+// out of the venue's own clock and the comparison is between like and like.
+// Before it, the quantity gate is still total, so the window is not unguarded.
+//
+// THE COMPARISON IS STRICTLY-OLDER, NOT NOT-NEWER, and that is deliberate. A
+// taker order sweeping several makers produces several execution reports inside
+// the SAME millisecond, with identical E / uTime; refusing everything that is
+// not strictly newer would drop real fills in the ordinary case the venue
+// produces most often. Equal timestamps fall through to the quantity gate, which
+// is exact and orders them correctly.
+func refuseStale(cur, reported *orderpb.OrderState) error {
+	id := reported.GetOrderId()
+	held, rep := cur.GetFilledQuantity(), reported.GetFilledQuantity()
+	if held != nil && rep != nil && decimal.Cmp(rep, held) < 0 {
+		return fmt.Errorf("%w: %s — the venue now reports cumulative %s and this adapter already "+
+			"recorded %s; an exchange does not un-execute, so this report is stale or replayed, and "+
+			"writing it would leave the healing watchdog in permanent disagreement with venue truth",
+			ErrFilledQuantityRegressed, id, decimal.Str(decimal.FromProto(rep)), decimal.Str(decimal.FromProto(held)))
+	}
+	if !venueObserved(cur) {
+		return nil
+	}
+	heldAt, repAt := cur.GetAsOf(), reported.GetAsOf()
+	if heldAt == nil || repAt == nil {
+		return nil
+	}
+	if repAt.AsTime().Before(heldAt.AsTime()) {
+		return fmt.Errorf("%w: %s — the report is stamped %s and the last venue observation folded "+
+			"in was stamped %s, so this one arrived out of order and its status, price and "+
+			"quantities are all older than what the view holds",
+			ErrReportOutOfOrder, id, repAt.AsTime().UTC().Format(time.RFC3339Nano),
+			heldAt.AsTime().UTC().Format(time.RFC3339Nano))
+	}
+	return nil
+}
+
+// venueObserved reports whether this view entry has already had a VENUE
+// execution report folded into it, which is what makes its as_of the venue's own
+// clock and so comparable with an incoming report's. See refuseStale for why
+// that qualification is load-bearing rather than defensive.
+//
+// A non-zero cumulative filled quantity is the marker because only Progress can
+// have written one: an order the OMS has just dispatched has traded nothing, and
+// on a RE-dispatch of a partially filled order carryVenueObserved keeps the
+// view's own filled_quantity rather than the OMS's copy (#944), so that value
+// and the as_of beside it came out of the same venue report.
+func venueObserved(cur *orderpb.OrderState) bool {
+	q := cur.GetFilledQuantity()
+	return q != nil && !decimal.IsZero(q)
+}
+
 // UpdateAttempts bounds Update's retry loop.
 //
 // A BOUND RATHER THAN A SPIN, because the loop's exit condition is another
@@ -723,6 +874,16 @@ func Progress(ctx context.Context, store Store, reported *orderpb.OrderState) er
 		if Terminal(cur.GetStatus()) && !Terminal(next) {
 			return nil, fmt.Errorf("%w: %s is %v and the venue now reports %v", ErrTerminalNotReopened, id, cur.GetStatus(), next)
 		}
+		// THE SAME JUDGEMENT, ONE AXIS OVER (#1046). The line above refuses a
+		// transition that runs BACKWARDS through the lifecycle; this refuses one
+		// that runs backwards through the venue's own quantities and clock. Both
+		// are "the venue cannot have said this after what it already said", and
+		// they live together because a caller that ran one and not the other is
+		// exactly how the cumulative regression got past a refusal that was
+		// already here.
+		if err := refuseStale(cur, reported); err != nil {
+			return nil, err
+		}
 		merged, mok := proto.Clone(cur).(*orderpb.OrderState)
 		if !mok {
 			return nil, fmt.Errorf("orderview: order %s did not clone", id)
@@ -752,6 +913,17 @@ func Progress(ctx context.Context, store Store, reported *orderpb.OrderState) er
 // as an order that traded nothing — the same sentence, whichever direction the
 // merge runs in. UNSPECIFIED is the status's nil: it is "we cannot read what was
 // said", never "no status", so it never overwrites a status somebody could read.
+//
+// A NON-NIL VALUE IS STILL WRITTEN UNCONDITIONALLY HERE, AND THAT IS NOT AN
+// OVERSIGHT ANY MORE (#1046). For a long time this guard considered only the nil
+// case, so a report carrying a SMALLER cumulative filled quantity — a replayed
+// or interleaved one — overwrote a larger one and the view went backwards
+// silently. The fix is not a comparison inside this function: it runs in BOTH
+// directions, and in the Dispatch direction dst is the OMS's fresh copy and src
+// is the view's own venue observations, where "smaller" carries no meaning at
+// all. Whether a report may be folded in is a decision about the REPORT, so it
+// is made once, before the merge, by refuseStale in Progress — the only
+// direction an out-of-order venue report can arrive from.
 func carryVenueObserved(dst, src *orderpb.OrderState) {
 	if s := src.GetStatus(); s != orderpb.OrderStatus_ORDER_STATUS_UNSPECIFIED {
 		dst.Status = s

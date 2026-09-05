@@ -18,6 +18,10 @@ const (
 	// did not publish as a fill FACT because it could not resolve it to an order
 	// this adapter holds.
 	MetricReportsDropped = "kanz_venue_fill_reports_dropped_total"
+	// MetricStaleReports is incremented for every venue execution report this
+	// adapter RESOLVED to one of its own orders and then refused to fold into the
+	// view because it was stale or out of order (#1046).
+	MetricStaleReports = "kanz_venue_orderview_stale_reports_total"
 )
 
 // Observability is the alertable half of the order view (#1047).
@@ -71,6 +75,18 @@ type Observability struct {
 	// that are not ours, and an operator who cannot see that trickle cannot tell
 	// an ordinary adapter from one that has just gone blind.
 	ReportsDropped *prometheus.CounterVec
+	// StaleReports is labelled by MIC and reason — StaleQuantityRegressed or
+	// StaleReportOutOfOrder.
+	//
+	// IT IS A DIFFERENT EVENT FROM BOTH OF THE ABOVE, and collapsing it into
+	// either would lose the thing an operator needs. ReportsDropped is a report
+	// this adapter could not RESOLVE to an order; this is one it resolved fine
+	// and then refused, because the venue's own sequence says the report is older
+	// than what the view already holds. Sustained non-zero here is a stream
+	// delivering out of order or replaying on reconnect — a venue-side condition
+	// with no store fault behind it, which is exactly why it must not raise the
+	// read-failure alert.
+	StaleReports *prometheus.CounterVec
 }
 
 // NewObservability builds and SEEDS both counters for one adapter. venue is the
@@ -95,17 +111,30 @@ func NewObservability(venue, mic string) Observability {
 				"to another account or replica.",
 			ConstLabels: prometheus.Labels{"venue": venue},
 		}, []string{"mic", "reason"}),
+		StaleReports: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: MetricStaleReports,
+			Help: "Venue execution reports this adapter resolved to one of its own orders and then " +
+				"REFUSED to fold into its view because they were stale, by MIC and reason. " +
+				"filled_quantity_regressed means the venue reported a cumulative below one already " +
+				"recorded; report_out_of_order means the venue's own timestamp is older than the " +
+				"last observation folded in. Sustained non-zero means the user-data stream is " +
+				"delivering out of order or replaying on reconnect.",
+			ConstLabels: prometheus.Labels{"venue": venue},
+		}, []string{"mic", "reason"}),
 	}
 	o.ReadFailures.WithLabelValues(mic)
 	for _, reason := range []string{execution.DropUnknownOrder, execution.DropStoreError} {
 		o.ReportsDropped.WithLabelValues(mic, reason)
+	}
+	for _, reason := range []string{StaleQuantityRegressed, StaleReportOutOfOrder} {
+		o.StaleReports.WithLabelValues(mic, reason)
 	}
 	return o
 }
 
 // Collectors is what the composition root hands MustRegister.
 func (o Observability) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{o.ReadFailures, o.ReportsDropped}
+	return []prometheus.Collector{o.ReadFailures, o.ReportsDropped, o.StaleReports}
 }
 
 // NewObservedSeam is the Seam a venue adapter actually wants: the store, wrapped,
@@ -143,6 +172,26 @@ func NewObservedSeam(store Store, o Observability, mic string, logger *slog.Logg
 		logger = slog.Default()
 	}
 	return NewSeam(store, func(err error) {
+		// A STALE REPORT IS NOT AN UNREADABLE VIEW, and sending it down the branch
+		// below would be worse than not counting it at all (#1046). The store is
+		// fine; the VENUE delivered a report out of order and this adapter refused
+		// it, on purpose. Counted on its own series so an alert on
+		// kanz_venue_orderview_read_failures_total keeps meaning "the adapter has
+		// gone blind", and logged with the sentence that is actually true —
+		// pointing an operator at Postgres for a websocket replay costs the whole
+		// value of the message.
+		if reason, stale := StaleReason(err); stale {
+			if o.StaleReports != nil {
+				o.StaleReports.WithLabelValues(mic, reason).Inc()
+			}
+			logger.Error("A VENUE EXECUTION REPORT WAS REFUSED AS STALE — the venue's own sequence "+
+				"places this report BEFORE the last one this adapter folded in, so applying it "+
+				"would run the order view backwards and put the healing watchdog into a "+
+				"disagreement with venue truth that does not exist. The fill FACT was already "+
+				"published and is unaffected; only this adapter's belief is",
+				"mic", mic, "reason", reason, "err", err)
+			return
+		}
 		if o.ReadFailures != nil {
 			o.ReadFailures.WithLabelValues(mic).Inc()
 		}

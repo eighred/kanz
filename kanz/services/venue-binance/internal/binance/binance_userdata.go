@@ -40,6 +40,29 @@ type executionReport struct {
 	OrderQty      string `json:"q"` // order quantity
 	TradeID       int64  `json:"t"`
 	TransactTime  int64  `json:"T"`
+	// EventTime is the stream's OWN clock for this report — when Binance emitted
+	// it, not when the trade matched — and it is the ORDERING TOKEN this adapter
+	// carries onto its view (#1046).
+	//
+	// IT IS WHAT order.v1's as_of IS DEFINED AS: "the event_time of the change
+	// that produced it". Before this, applyFillToState stamped as_of from T, the
+	// TRANSACT time, so the field the view orders by and the field the fill is
+	// executed at were the same number and neither meant what its name said. T
+	// stays on Fill.executed_at, which is the trade's own instant and the thing
+	// TCA and the ledger date the execution by.
+	//
+	// THERE IS NO SEQUENCE NUMBER TO USE INSTEAD, and that is a property of the
+	// venue rather than a shortcut here: Binance's spot executionReport carries no
+	// per-order update id — u is the depth stream's field, not this one — so E is
+	// the only monotone token the report offers. Decoding a field that is always
+	// zero would be worse than none, because a zero token compares equal to every
+	// other zero and silently disables the check it looks like it implements.
+	//
+	// ZERO MEANS THE FRAME DID NOT CARRY ONE, which is why reportAsOf falls back
+	// to T rather than stamping the epoch: a view whose as_of is 1970 is one every
+	// later report looks newer than, and the ordering gate would never fire again
+	// for that order.
+	EventTime int64 `json:"E"`
 }
 
 // UserDataIngester reads the Binance user-data stream and converts each fill
@@ -177,8 +200,29 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	//
 	// These become an order.order.filled FACT the ledger and position book fold.
 	// parseDec answered an unparseable string with ZERO and wrapped a large one,
-	// so a garbled LastPrice published a fill at price 0. Returning the error nacks
-	// the report instead; the reconciler re-reads venue truth.
+	// so a garbled LastPrice published a fill at price 0. Returning the error
+	// refuses to publish that instead.
+	//
+	// WHAT "RETURNING THE ERROR" ACTUALLY DOES, STATED CORRECTLY (#1046). This
+	// comment used to say it NACKS the report. It does not, and nothing on this
+	// path can: there is no acknowledgement to withhold. handle returns to Run,
+	// Run returns to runUserData, which logs "user-data stream ended;
+	// reconnecting", grows execution.UserDataBackoff and re-dials. Binance replays
+	// NOTHING on a new listenKey stream, so THIS report is gone. The recovery is
+	// the reconciler's next pass over Open orders and the OMS sweep, and the sweep
+	// only adopts an execution while its order is still non-terminal.
+	//
+	// The trade is still the right way round — a fill published at price 0 is a
+	// wrong number in the ledger, which is worse than a missing one the healing
+	// watchdog can re-derive — but it is a trade against a WEAKER recovery than
+	// the sentence it replaced claimed, and sizing it wrongly is how a stale
+	// comment justifying a trade-off costs something (see the same correction in
+	// the OKX ingester).
+	//
+	// LastQty (l), NOT CumQty (z), and that distinction is load-bearing: the OMS
+	// order aggregate ADDS fill.quantity to filled_quantity, so publishing the
+	// cumulative here double-counts every partially filled order. Pinned by
+	// TestUserData_TwoSequentialPartialsPublishIncrementsNotCumulatives.
 	qty, qok := parseDec(rep.LastQty)
 	px, pok := parseDec(rep.LastPrice)
 	if !qok || !pok {
@@ -252,8 +296,16 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	// worse failure than the unbounded view this closes.
 	//
 	// AFTER the publish, not before: the view must never claim an order finished
-	// on the strength of a FACT that did not reach the bus. A publish error nacks
-	// the report and the reconciler re-reads venue truth.
+	// on the strength of a FACT that did not reach the bus. A publish error ends
+	// the session and re-dials (it does not nack — see the conversion refusal
+	// above), and the reconciler re-reads venue truth on its next pass.
+	//
+	// Progressed MAY REFUSE THIS, and that is by design (#1046): healed carries
+	// the venue's own cumulative and event time, and orderview.Progress will not
+	// fold in a report older than the last one it recorded. The refusal is
+	// counted on kanz_venue_orderview_stale_reports_total and logged; the FACT
+	// above is already on the bus and is unaffected, because the fill's quantity
+	// is an INCREMENT and downstream dedups on fill_id.
 	i.orders.Progressed(healed)
 	// THE ONE THING THE RECONNECT BACK-OFF MAY RESET ON (#1047) — see
 	// resolvedThisSession.
@@ -288,8 +340,29 @@ func applyFillToState(st *orderpb.OrderState, rep executionReport) (*orderpb.Ord
 		OrderedQuantity: ordered, LimitPrice: st.GetLimitPrice(),
 		Status:         binanceStatusToProto(rep.OrderStatus),
 		FilledQuantity: cum, LeavesQuantity: leaves,
-		AsOf: timestamppb.New(time.UnixMilli(rep.TransactTime).UTC()),
+		// THE VENUE'S OWN ORDERING TOKEN, not this process's clock and not the
+		// trade time (#1046). orderview.Progress compares it against the token of
+		// the last report it folded in and refuses one that is older, so a replay
+		// after a reconnect cannot run this order's status, price and quantities
+		// backwards. See executionReport.EventTime.
+		AsOf: timestamppb.New(reportAsOf(rep)),
 	}, nil
+}
+
+// reportAsOf is the instant this execution report is EFFECTIVE at — Binance's
+// event time E, falling back to the transact time T when a frame carries no E.
+//
+// ONE FUNCTION BECAUSE THE FALLBACK IS THE WHOLE POINT. Written inline it would
+// be written twice, and the copy that forgot the fallback would stamp the view
+// with the Unix epoch on any frame without an E — a value every subsequent
+// report is newer than, which disables the ordering gate for that order without
+// disabling anything visible.
+func reportAsOf(rep executionReport) time.Time {
+	ms := rep.EventTime
+	if ms == 0 {
+		ms = rep.TransactTime
+	}
+	return time.UnixMilli(ms).UTC()
 }
 
 // reportFee reads the commission off a fill report. nil Money means NO FEE, so
