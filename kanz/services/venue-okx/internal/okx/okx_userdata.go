@@ -89,6 +89,19 @@ type OKXUserDataIngester struct {
 	// defect it answers was in both and a per-connector refusal is one that gets
 	// improved on one venue.
 	refusal ReportRefusal
+	// resolvedThisSession records that this websocket session got at least ONE
+	// execution report all the way to a published fill FACT (#1047).
+	//
+	// IT IS WHAT THE RECONNECT BACK-OFF RESETS ON, and nothing else may reset it.
+	// The loop used to reset its delay whenever Connect succeeded, which bounds
+	// nothing when the exchange is healthy and the order view is not: every
+	// session connected, died on the first report, and re-dialled instantly.
+	// Publishing a fill is the one event a store outage cannot fake, so it is the
+	// evidence the loop is allowed to treat as progress.
+	//
+	// Written by handle and read by the run loop, both on the goroutine that
+	// calls Run — there is no second writer and no lock.
+	resolvedThisSession bool
 }
 
 // OKXUserDataConfig configures the ingester. It is a struct rather than the
@@ -127,6 +140,9 @@ func newOKXUserDataIngester(cfg OKXUserDataConfig) *OKXUserDataIngester {
 
 // Run reads the stream until ctx is cancelled or the stream errors.
 func (i *OKXUserDataIngester) Run(ctx context.Context) error {
+	// A NEW SESSION HAS PROVED NOTHING YET. The flag is per-session on purpose:
+	// one success an hour ago must not excuse a stream that is flapping now.
+	i.resolvedThisSession = false
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -281,6 +297,9 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		// AFTER the publish, not before: the view must never claim an order
 		// finished on the strength of a FACT that did not reach the bus.
 		i.orders.Progressed(healed)
+		// THE ONE THING THE RECONNECT BACK-OFF MAY RESET ON (#1047) — see
+		// resolvedThisSession.
+		i.resolvedThisSession = true
 	}
 	return nil
 }
@@ -408,3 +427,7 @@ func (w *okxUserDataWS) keepAlive(ctx context.Context) {
 		}
 	}
 }
+
+// resolvedAReport reports whether this session published at least one fill FACT.
+// The reconnect loop resets its back-off on this and on nothing else.
+func (i *OKXUserDataIngester) resolvedAReport() bool { return i.resolvedThisSession }
