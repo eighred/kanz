@@ -269,12 +269,25 @@ func (s *Server) handleNAV(w http.ResponseWriter, r *http.Request) {
 
 // computeNAV values the book, choosing the FX source in precedence order: a
 // request-supplied `fx` table (explicit client override) wins; else the live FX
-// provider (WIRE-01d) values the multi-currency book with no `fx` in the
-// request; else the domestic single-currency path. The instrument→currency join
-// likewise prefers the request map, then the server default (the security
-// master). ComputeNAVInCurrency stays completeness-gated — a foreign holding
-// whose currency has no live rate yet fails the valuation loudly rather than
-// mis-valuing.
+// provider (WIRE-01d); else an IDENTITY table, which values a domestic book and
+// refuses anything else. The instrument→currency join likewise prefers the
+// request map, then the server default (the security master).
+//
+// THERE IS NO LONGER AN ARM THAT VALUES WITHOUT AN FX CONVERTER, and that is the
+// repair (#1041). The default used to call the single-currency ComputeNAV, which
+// read one cash bucket and summed foreign positions un-converted — and it was
+// not an edge case but the ONLY REACHABLE PATH on the estate: WithLiveFX is
+// appended only when ACCOUNTING_FX_PAIRS is non-empty and no manifest sets it,
+// so every deployed pod has a nil fxProvider and every caller that did not
+// hand-supply `fx` landed here. A EUR subscription booked through the
+// cash-movement endpoint below was enough to make the answer wrong, and it came
+// back 200 with an understated total and no flag.
+//
+// AN IDENTITY TABLE IS NOT "FX IS OFF". It quotes the reporting currency at 1
+// and nothing else, so a domestic book values exactly as it did and a book
+// holding anything else is refused by name. That is the distinction between
+// "nothing configured" and "checked, and fine": the unconfigured pod now says
+// which currency it cannot value instead of silently leaving it out.
 func (s *Server) computeNAV(book *ledger.Book, prices map[string]*big.Rat, req navRequest) (accounting.NAV, error) {
 	now := time.Now().UTC()
 
@@ -289,7 +302,7 @@ func (s *Server) computeNAV(book *ledger.Book, prices map[string]*big.Rat, req n
 	case s.fxProvider != nil:
 		fx = s.fxProvider()
 	default:
-		return accounting.ComputeNAV(book, s.baseCcy, now, prices)
+		fx = accounting.NewFXTable(s.baseCcy, nil)
 	}
 
 	return accounting.ComputeNAVInCurrency(book, s.baseCcy, now, prices, s.instrumentCurrencyFor(req), fx)

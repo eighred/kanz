@@ -130,6 +130,29 @@ var fillRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
 	ConstLabels: prometheus.Labels{"venue": "binance"},
 }, []string{"reason"})
 
+// closesUnhealable counts in-flight closes the healing watchdog dropped WITHOUT
+// asking the exchange anything, by reason (#1036).
+//
+// EVERY INCREMENT IS AN ORDER THAT MAY STILL BE RESTING AT THE EXCHANGE while the
+// OMS, the position book, risk, compliance and the IBOR have it CANCELLED —
+// terminal, so no sweep and no resume will revisit it, and a later fill reconciles
+// to QUARANTINE. There is no other signal: the drop used to happen on the same
+// Resolve() line as a close healed against venue truth, so a watchdog that has
+// never once reached the exchange looked exactly like one finding nothing wrong.
+//
+// SEEDED AT ZERO for both reasons (#622) and REGISTERED UNCONDITIONALLY beside the
+// other package-level collectors, NOT inside a branch that depends on the broker
+// or the exchange being reachable: a collector registered on one arm of an `if`
+// exports no series at all on the other, so an alert written `== 0` over it is
+// silent in exactly the deployment state it was written for.
+var closesUnhealable = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "kanz_venue_closes_unhealable_total",
+	Help: "In-flight closes the healing watchdog dropped without querying the exchange, by reason. " +
+		"Non-zero means an order this platform recorded as CANCELLED was never confirmed withdrawn " +
+		"at the venue and may still be resting and fillable.",
+	ConstLabels: prometheus.Labels{"venue": "binance"},
+}, []string{"reason"})
+
 func main() {
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
 	// run() registers fires before this line. The non-zero code is what makes a
@@ -204,7 +227,13 @@ func serve(cfg config.Config) error {
 	balanceReconConfigured := balancerecon.NewGauge("binance")
 	marginSourceConfigured := venuemargin.NewGauge("binance")
 	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured, marginSourceConfigured,
-		markTickDropped, fillRefused)
+		markTickDropped, fillRefused, closesUnhealable)
+	// SEEDED AT ZERO before anything can drop: an unseeded counter that never fires
+	// is indistinguishable from a counter nobody registered, so an operator cannot
+	// tell "no close was ever dropped unqueried" from "no metric" (#622).
+	for _, reason := range []string{execution.CloseDropNoInstrument, execution.CloseDropUnmappedSymbol} {
+		closesUnhealable.WithLabelValues(reason)
+	}
 
 	// The adapter's own order view — the state its workers read after the process
 	// split cut them off from the OMS store.
@@ -474,6 +503,20 @@ func serve(cfg config.Config) error {
 		// The mic is already the collector's const label.
 		OnFillRefused: func(_, _, reason string) {
 			fillRefused.WithLabelValues(reason).Inc()
+		},
+		// EVERY UNHEALABLE CLOSE IS COUNTED AND NAMED (#1036). Nil here would leave a
+		// close the watchdog could not even attempt indistinguishable from one it
+		// confirmed against venue truth — the silence that hid an empty instrument on
+		// every close this adapter tracked.
+		//
+		// THE ORDER ID IS NOT A LABEL, deliberately: it is unbounded. It is in the
+		// ERROR log, which is where the operator resolving the order against the
+		// exchange's own history reads it.
+		OnCloseUnhealable: func(orderID, instrumentID, reason string) {
+			closesUnhealable.WithLabelValues(reason).Inc()
+			logger.Error("venue-binance: an in-flight close was dropped without asking the exchange — the "+
+				"order may still be resting and fillable while this platform records it CANCELLED",
+				"order_id", orderID, "instrument_id", instrumentID, "reason", reason)
 		},
 		Logger: logger,
 	})

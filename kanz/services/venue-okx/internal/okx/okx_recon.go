@@ -37,6 +37,18 @@ type OKXReconciler struct {
 	// operator must be able to tell "reconciliation found nothing wrong" from
 	// "reconciliation could not check", and those look identical otherwise.
 	onUnknownBalance func(asset string)
+	// onCloseUnhealable is called for EVERY in-flight close this watchdog dropped
+	// WITHOUT asking the exchange anything (#1036), with the reason. Nil => silent,
+	// which is only right in a test.
+	//
+	// IT IS THE ALERTABLE HALF, and until this existed there was no other. A close
+	// the watchdog cannot even attempt was Resolved on exactly the same line as one
+	// it had healed against venue truth, so "the seam ran and everything was
+	// confirmed" and "the seam has never once reached the exchange" produced the
+	// identical silence — the whole class of defect that hid an empty InstrumentID
+	// on every close the venue adapter tracked. A drop means an order may still be
+	// resting and fillable at the exchange while the book of record says CANCELLED.
+	onCloseUnhealable func(orderID, instrumentID, reason string)
 }
 
 // OKXReconcilerConfig configures an OKXReconciler.
@@ -57,6 +69,9 @@ type OKXReconcilerConfig struct {
 	Tenant           string
 	Now              func() time.Time
 	OnUnknownBalance func(asset string)
+	// OnCloseUnhealable is called for every in-flight close dropped without a venue
+	// query, with the reason (#1036). Nil => the drop is silent.
+	OnCloseUnhealable func(orderID, instrumentID, reason string)
 }
 
 func newOKXReconciler(cfg OKXReconcilerConfig) *OKXReconciler {
@@ -73,7 +88,7 @@ func newOKXReconciler(cfg OKXReconcilerConfig) *OKXReconciler {
 		rest: cfg.REST, symbols: cfg.Symbols, expected: cfg.Expected, balances: cfg.Balances,
 		closes: cfg.Closes, closeTimeout: cfg.CloseTimeout,
 		pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant, now: cfg.Now,
-		onUnknownBalance: cfg.OnUnknownBalance,
+		onUnknownBalance: cfg.OnUnknownBalance, onCloseUnhealable: cfg.OnCloseUnhealable,
 	}
 }
 
@@ -137,9 +152,20 @@ func (r *OKXReconciler) HealClosures(ctx context.Context) error {
 	}
 	swept := false
 	for _, ci := range r.closes.DueCloses(r.now(), r.closeTimeout) {
+		// TWO DIFFERENT ANSWERS, COUNTED SEPARATELY (#1036). A malformed intent is a
+		// writer defect and used to be indistinguishable from "untradeable here",
+		// which is how an empty InstrumentID on every close the venue adapter
+		// tracked stayed invisible: Symbol("") misses, and the miss read as
+		// configuration.
+		if reason := ci.Unhealable(); reason != "" {
+			r.dropUnhealableClose(ci, reason)
+			continue
+		}
 		instID, ok := r.symbols.Symbol(ci.InstrumentID)
 		if !ok {
-			r.closes.Resolve(ci.OrderID) // untradeable here — stop watching it
+			// Untradeable here — stop watching it, and SAY SO. This is still a close
+			// nobody asked the exchange about.
+			r.dropUnhealableClose(ci, execution.CloseDropUnmappedSymbol)
 			continue
 		}
 		o, qErr := r.rest.queryOrder(ctx, instID, ci.OrderID)
@@ -171,6 +197,22 @@ func (r *OKXReconciler) HealClosures(ctx context.Context) error {
 	return nil
 }
 
+// dropUnhealableClose stops watching a close the watchdog could not turn into a
+// venue question, and says so.
+//
+// IT IS NOT A RESOLUTION AND MUST NOT LOOK LIKE ONE (#1036). The order may still
+// be resting and fillable at the exchange while the OMS, the position book, risk,
+// compliance and the IBOR all have it CANCELLED — and CANCELLED is terminal, so
+// no sweep and no resume will look at it again. The intent IS dropped rather than
+// retried forever, because it is unhealable by construction and a growing
+// registry of questions nobody can ask helps no one; the counter and the ERROR
+// log are what an operator acts on.
+func (r *OKXReconciler) dropUnhealableClose(ci CloseIntent, reason string) {
+	if r.onCloseUnhealable != nil {
+		r.onCloseUnhealable(ci.OrderID, ci.InstrumentID, reason)
+	}
+	r.closes.Resolve(ci.OrderID)
+}
 func (r *OKXReconciler) forceSweep(ctx context.Context, ci CloseIntent, instID string) error {
 	reason := "in-flight close timeout (>" + r.closeTimeout.String() + "); force-cleared"
 	// Sweep the residual exposure with an aggressive market order when there is

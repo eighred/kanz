@@ -60,7 +60,12 @@ func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
 			REST: c.rest, Symbols: StaticSymbolMap(c.settings.Symbols),
 			Expected: deps.Expected, Balances: deps.Balances, Pub: deps.Publisher,
 			Closes: deps.Closes, CloseTimeout: deps.CloseTimeout,
-			Venue: c.settings.MIC, Tenant: deps.Tenant,
+			// Every close this watchdog drops without asking the exchange is counted
+			// by the composition root (#1036). Nil here would put the seam back to
+			// where it was found: unhealable closes discarded on the same line as
+			// healed ones, with nothing an alert can reach.
+			OnCloseUnhealable: deps.OnCloseUnhealable,
+			Venue:             c.settings.MIC, Tenant: deps.Tenant,
 		})
 		if deps.Expected != nil {
 			go rec.Run(ctx, deps.ReconcileInterval)
