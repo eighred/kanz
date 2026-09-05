@@ -97,11 +97,23 @@ func (s SectorShock) Description() string {
 }
 
 // VolShock bumps the implied volatility used to reprice option positions, by an
-// absolute amount (AbsBump = 0.05 ⇒ +5 vol points). It only has an effect under
-// a full-revaluation scenario (EvaluateReval, DERIV-01e), where option positions
-// are repriced through Black-Scholes; the linear MarketValue path cannot express
-// a vega effect and treats it as a no-op. An empty UnderlyingID applies the bump
-// to every underlying — the textbook "vol up 5 points across the book" stress.
+// absolute amount (AbsBump = 0.05 ⇒ +5 vol points). An empty UnderlyingID
+// applies the bump to every underlying — the textbook "vol up 5 points across
+// the book" stress.
+//
+// IT IS THE ONE SHOCK KIND WITH NO LINEAR EXPRESSION, and therefore the one that
+// needs a wired seam to mean anything: option positions are repriced through
+// Black-Scholes only when a scenario.Revaluer is present (scenario.WithRevaluer
+// / EvaluateReval, DERIV-01e). WITHOUT ONE THE REQUEST IS REFUSED —
+// ErrScenarioUnresolvable, reason scenario.SkipNoRevaluer.
+//
+// This doc used to say the linear path "treats it as a no-op", which described
+// the behaviour accurately and mis-stated its cost. No Revaluer is constructed
+// at any composition root on this estate (compute.NewRevaluer is blocked on a
+// calibrated vol surface, #509/#203), so EVERY vol stress an external caller
+// could request after #1004 came back as the unshocked book with a CLEAN
+// coverage record — confidently unchanged rather than merely unresolved, which
+// is a stronger claim than #640's and a harder one to notice (#1035).
 type VolShock struct {
 	UnderlyingID InstrumentID
 	AbsBump      *commonpb.Decimal
