@@ -10,6 +10,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -27,10 +28,15 @@ func (s staticOrders) OpenOrders() []*orderpb.OrderState { return s }
 type staticBalances map[string]*big.Rat
 
 // A missing key is UNKNOWN, not zero (#418) — the distinction the reconciler
-// now depends on, so the double must make it too.
-func (b staticBalances) Balance(asset string) (*big.Rat, bool) {
+// now depends on, so the double must make it too. It names a REASON for the
+// unknown (#1063) for the same argument: a fixture that answered "" would prove
+// the callback fires without proving the label an operator is paged on is real.
+func (b staticBalances) Balance(asset string) (*big.Rat, bool, string) {
 	v, ok := b[asset]
-	return v, ok
+	if !ok {
+		return nil, false, execution.BalanceUnknownNeverAnnounced
+	}
+	return v, true, ""
 }
 
 func reconOver(f *fakeBinance, cap *reconCapture, exp staticOrders, bal staticBalances) *Reconciler {

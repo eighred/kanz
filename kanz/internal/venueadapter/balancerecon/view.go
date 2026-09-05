@@ -208,27 +208,36 @@ func (v *View) Handle(ctx context.Context, _ *envelopepb.Envelope, payload []byt
 // an asset absent from it is genuinely believed to be zero — and that is exactly
 // the case worth reconciling, because the exchange holding something we think we
 // do not is the discrepancy that matters most.
-func (v *View) Balance(asset string) (*big.Rat, bool) {
+//
+// THE UNKNOWN NAMES ITSELF (#1063). This view is the only place that knows WHICH
+// unknown it is answering, and the two are different incidents: never-announced
+// is a cash spine that has not delivered once — so this account has never been
+// compared against the exchange at all — while stale is one that has stopped.
+// Returning the reason here rather than exposing it as a second method is what
+// keeps the verdict and its explanation describing the same instant: the healing
+// watchdog reconciles balances from its own goroutine, and a caller that asked
+// afterwards could read a view that had since been announced to.
+func (v *View) Balance(asset string) (*big.Rat, bool, string) {
 	v.mu.RLock()
 	seen, asOf := v.seen, v.asOf
 	amount, held := v.assets[asset]
 	v.mu.RUnlock()
 
 	if !seen {
-		return nil, false
+		return nil, false, execution.BalanceUnknownNeverAnnounced
 	}
 	if v.maxAge > 0 {
 		if age := v.now().UTC().Sub(asOf); age > v.maxAge {
 			if v.onStale != nil {
 				v.onStale(age)
 			}
-			return nil, false
+			return nil, false, execution.BalanceUnknownStale
 		}
 	}
 	if !held {
-		return new(big.Rat), true
+		return new(big.Rat), true, ""
 	}
-	return new(big.Rat).Set(amount), true
+	return new(big.Rat).Set(amount), true, ""
 }
 
 // dropped records a discarded announcement: counted for the dashboard, logged

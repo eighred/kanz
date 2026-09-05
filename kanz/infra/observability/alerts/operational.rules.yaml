@@ -2068,3 +2068,49 @@ groups:
         annotations:
           summary: "The risk engine's Delta is the portfolio's net exposure, not a Greek — a Delta mandate refuses every order"
           description: "compute.RegisterGreeks has no caller in this build, so compute.Delta is what this engine serves: the signed base-currency sum of the book, which is NetExposure under a second name. It declares net_exposure_placeholder, the OMS admission gate refuses to fold a placeholder (#1037), and compliance.RiskLimitRule fails closed on an unknown measure — so every order under a mandate naming Delta is REFUSED rather than checked, on every deployment, permanently. THIS IS THE SAFE DIRECTION AND IT IS NOT A REGRESSION: before #1037 the same number folded silently and the limit was checked against net exposure. What to do now: confirm with kanz_risk_greek_model_live (Gamma/Vega/Theta/Rho read 0 because they are unregistered; Delta reads 0 because it answers and is not a model) and with kanz_oms_risk_measures_placeholder_total on the OMS, which counts the refusals. Then take the Delta limit out of any mandate that carries one — it cannot be satisfied and it cannot be evaluated. The real repair is a VolProvider behind compute.RegisterGreeks, blocked on option premiums nothing in this estate persists (#203, #345, #113); wiring it against an uncalibrated surface would return a MEASURED ZERO instead of a refusal, which is worse (#1044). This clears by itself the day RegisterGreeks has a caller."
+  # ==========================================================================
+  # VENUE BALANCE RECONCILIATION (#1063) — the layer that can notice a
+  # mis-booked position, and whether it is actually looking.
+  # ==========================================================================
+  #
+  # A venue adapter compares Kanz's books against the exchange's balances. When
+  # it has no usable expected balance for an asset it SKIPS that asset, which is
+  # correct — substituting zero would report every asset the exchange holds as a
+  # discrepancy on the first cold pass and train an operator to ignore the layer.
+  #
+  # THE SKIP IS THE THING THAT WAS INVISIBLE. accounting.balance.reconciled is
+  # emitted only on a DISCREPANCY, so a skipped asset and an agreeing one produce
+  # the identical estate: no FACT, no line, a pass that returns nil. Both
+  # reconcilers have had a callback for this since #418 and neither composition
+  # root wired it, so for as long as that lasted "reconciliation found nothing
+  # wrong" and "reconciliation could not check" were the same silence.
+  - name: venue_balance_reconciliation
+    rules:
+      # THE COMPARISON IS NOT HAPPENING, AND IT HAS NOT BEEN FOR HALF AN HOUR.
+      #
+      # increase(...) > 0 is the shape, not a comparison against a resting value.
+      # A healthy adapter never increments this counter, so any rule shaped
+      # `== 0` or `< N` would be evaluating a claim about a series whose absence
+      # is itself a failure mode — the defect that silenced two alerting layers
+      # on this estate (#973, #963). The counter is registered unconditionally
+      # and SEEDED at zero for every reason by balancerecon.NewUnknownCounter, so
+      # on a running, scraped adapter the family exists whether or not anything
+      # has been skipped; this rule then reads only movement.
+      #
+      # for: 30m IS THE COLD-START ALLOWANCE, not padding. reason="never_announced"
+      # legitimately increments between a pod starting and the first
+      # accounting.balance.portfolio announcement reaching it, and a rolling
+      # deploy passes every replica through that window. Thirty minutes of the
+      # counter climbing at EVERY evaluation is not a start-up window: it is an
+      # adapter that has not once compared this account against the exchange.
+      #
+      # THE REASON IS ON THE ALERT because the two send an operator to different
+      # places. never_announced is a cash spine that has not delivered — check
+      # the subscription and accounting itself; stale is one that has stopped.
+      - alert: VenueBalanceReconciliationCannotCheck
+        expr: increase(kanz_venue_balance_unknown_total[5m]) > 0
+        for: 30m
+        labels: { severity: warning, layer: operational }
+        annotations:
+          summary: "{{ $labels.venue }} balance reconciliation has been unable to check assets for 30 minutes ({{ $labels.reason }})"
+          description: "The {{ $labels.venue }} adapter's reconciliation pass has skipped at least one asset at every evaluation for the last thirty minutes because it has no usable expected balance for it (reason={{ $labels.reason }}). The pass completes and publishes no accounting.balance.reconciled FACT, which is exactly what a clean comparison also does — so this alert is the only thing that separates them. While it holds, nothing is comparing this exchange account's books against the venue, and balance reconciliation is the last layer able to notice a fill the user-data websocket missed, one posted to the wrong account, or a residual a healing sweep left behind. reason=never_announced means no accounting.balance.portfolio announcement has ever reached this pod: check that the broadcast subscription landed and that accounting is publishing (kanz_venue_binance_balance_announcements_dropped_total / the okx equivalent will show announcements arriving and being discarded). reason=stale means announcements arrived and stopped, so the balance aged past its freshness bound. reason=unattributed means the balance seam answered UNKNOWN without saying why, which is a defect in the seam rather than in the estate. Read kanz_venue_balance_reconciliation_configured beside this: 0 there means no comparison is wired at all, which is a different and worse state."

@@ -237,6 +237,11 @@ func serve(cfg config.Config) error {
 	for _, reason := range []string{execution.CloseDropNoInstrument, execution.CloseDropUnmappedSymbol} {
 		closesUnhealable.WithLabelValues(reason)
 	}
+	// THE BALANCE HALF, BUILT AND REGISTERED HERE — before the exchange handshake
+	// and the broker dial, so neither can decide whether these series exist. It
+	// returns both seams because both were missing something: the view was wired
+	// and the observer for what it could NOT answer was not (#1063).
+	balances := newBalanceSeams(obs.Registry, logger, "binance", cfg.Account)
 
 	// The adapter's own order view — the state its workers read after the process
 	// split cut them off from the OMS store.
@@ -369,33 +374,6 @@ func serve(cfg config.Config) error {
 	}, cfg.WSBase)
 
 	seam := orderview.NewObservedSeam(view, viewObs, cfg.MIC, logger)
-	// WHAT KANZ BELIEVES THIS EXCHANGE ACCOUNT HOLDS (#418), folded from the book
-	// of record's announcements (#450).
-	//
-	// BROADCAST, NOT A WORK QUEUE: every adapter replica needs the whole picture
-	// for its own account, and a consumer group would give each replica a subset —
-	// so one pod would reconcile against a balance the other did not have. A
-	// balance is replicated STATE, the same argument the OMS makes for its price
-	// spine and mandate registry.
-	// SEEDED AT ZERO before anything can drop (#622): an unseeded counter that
-	// never fires is indistinguishable from a counter nobody registered, so an
-	// operator cannot tell "no announcements lost" from "no metric".
-	for _, reason := range []string{balancerecon.DropUndecodable, balancerecon.DropOutOfDomain} {
-		balanceAnnouncementsDropped.WithLabelValues(reason)
-	}
-	obs.Registry.MustRegister(balanceAnnouncementsDropped)
-
-	expectedBalances := balancerecon.NewView(cfg.Account,
-		balancerecon.WithViewLogger(logger),
-		balancerecon.WithViewDropObserver(func(reason string) {
-			balanceAnnouncementsDropped.WithLabelValues(reason).Inc()
-		}),
-		balancerecon.WithViewOnStale(func(age time.Duration) {
-			logger.Warn("venue-binance: expected balances are too old to reconcile against — "+
-				"reconciliation is SKIPPING assets rather than reporting false breaks",
-				"account", cfg.Account, "age", age.String(), "subject", balancerecon.Subject)
-		}),
-	)
 	// WithDLQ EVEN THOUGH THE BROADCAST PATH NEVER CONSULTS IT. The exemption in
 	// test/arch/bus_dlq_test.go is for consumers that could NEVER hold a DLQ
 	// publisher — read-only observers whose grant denies all business publish.
@@ -432,7 +410,7 @@ func serve(cfg config.Config) error {
 	go func() {
 		logger.Info("venue-binance subscribing to the cash spine (broadcast)",
 			"subject", balancerecon.Subject, "account", cfg.Account)
-		if err := balanceConsumer.SubscribeBroadcast(ctx, balancerecon.Subject, expectedBalances.Handle); err != nil &&
+		if err := balanceConsumer.SubscribeBroadcast(ctx, balancerecon.Subject, balances.View.Handle); err != nil &&
 			!errors.Is(err, context.Canceled) {
 			// NOT FATAL. This adapter's job is to route and fill orders; losing the
 			// balance feed degrades RECONCILIATION, and taking the pod down over a
@@ -459,7 +437,7 @@ func serve(cfg config.Config) error {
 		// every asset reads UNKNOWN and reconciliation SKIPS it rather than
 		// comparing against zero — which would break on every asset the exchange
 		// holds and teach an operator to ignore the layer.
-		Balances: balancerecon.Announce(balanceReconConfigured, logger, "binance", expectedBalances),
+		Balances: balancerecon.Announce(balanceReconConfigured, logger, "binance", balances.View),
 		// NO MARGIN SOURCE ON THIS VENUE, AND THAT IS A FINDING RATHER THAN A GAP
 		// (#408, control 1). This adapter is SPOT: every signed call it makes is
 		// /api/v3, and GET /api/v3/account reports balances and commission rates —
@@ -520,6 +498,14 @@ func serve(cfg config.Config) error {
 		// THE ORDER ID IS NOT A LABEL, deliberately: it is unbounded. It is in the
 		// ERROR log, which is where the operator resolving the order against the
 		// exchange's own history reads it.
+		// EVERY ASSET THIS RECONCILIATION COULD NOT CHECK IS COUNTED AND NAMED
+		// (#1063). Nil here is what both venue adapters shipped: the reconcilers
+		// have honoured this callback since #418 and neither composition root ever
+		// supplied one, so an asset whose expected balance is UNKNOWN produced no
+		// FACT, no counter and no log — a pass that completed and reported nothing,
+		// which is exactly what a clean comparison also produces. Why this is a
+		// counter and NOT a break FACT is argued on balanceSeams.Unknown.
+		OnUnknownBalance: balances.Unknown.Observe,
 		OnCloseUnhealable: func(orderID, instrumentID, reason string) {
 			closesUnhealable.WithLabelValues(reason).Inc()
 			logger.Error("venue-binance: an in-flight close was dropped without asking the exchange — the "+

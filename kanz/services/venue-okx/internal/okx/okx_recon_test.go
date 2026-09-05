@@ -11,6 +11,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 )
 
 type okxStaticOrders []*orderpb.OrderState
@@ -21,9 +22,12 @@ type okxStaticBalances map[string]*big.Rat
 
 // A missing key is UNKNOWN, not zero (#418) — the distinction the reconciler
 // now depends on, so the double must make it too.
-func (b okxStaticBalances) Balance(asset string) (*big.Rat, bool) {
+func (b okxStaticBalances) Balance(asset string) (*big.Rat, bool, string) {
 	v, ok := b[asset]
-	return v, ok
+	if !ok {
+		return nil, false, execution.BalanceUnknownNeverAnnounced
+	}
+	return v, true, ""
 }
 
 func okxReconOver(f *fakeOKX, cap *okxCapture, exp okxStaticOrders, bal okxStaticBalances) *OKXReconciler {
