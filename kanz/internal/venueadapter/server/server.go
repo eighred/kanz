@@ -269,8 +269,37 @@ func (s *Server) CancelOrder(ctx context.Context, req *venuepb.CancelOrderReques
 		return nil, status.Error(codes.Unimplemented, "venue: this venue cannot withdraw an order at the exchange")
 	}
 
+	// THE INTENT CARRIES THE INSTRUMENT, AND THE RPC REFUSES ONE THAT DOES NOT (#1036).
+	//
+	// This is the sole production writer of a tracked close in the out-of-process
+	// deployment — the only deployment that reaches a real exchange — because
+	// GRPCVenue declares OwnsCloseTracking and the OMS therefore keeps its hands
+	// off. It recorded the order id alone, and both healing watchdogs open by
+	// mapping InstrumentID to a venue symbol and DROP the intent when it does not
+	// resolve. An empty id resolves to nothing, so every ambiguous cancel the
+	// adapter tracked was discarded without one question asked of the exchange:
+	// no venue query, no StateHealed, no force-clear, no balance re-anchor —
+	// while handleCancel had already written CANCELLED, which is terminal, so
+	// neither resume() nor either sweep would ever look at the order again. The
+	// exchange keeps a resting, fillable order the whole book of record believes
+	// withdrawn.
+	//
+	// AND THE REFUSAL IS THE FAIL-CLOSED HALF. A close this adapter could not heal
+	// must not be dispatched at all: an unanswered cancel it cannot resolve is
+	// exactly the state above. Refusing here names the caller — the OMS, on this
+	// RPC, for this order — instead of leaving an unhealable entry for a watchdog
+	// to shrug at minutes later. InvalidArgument, not Unavailable: the request is
+	// malformed and retrying it unchanged will fail identically.
+	ci := execution.CloseIntent{OrderID: st.GetOrderId(), InstrumentID: st.GetInstrumentId()}
+	if reason := ci.Unhealable(); reason != "" {
+		s.logger.Error("venue: refusing to withdraw an order whose close could not be healed",
+			"mic", s.venue.MIC(), "order_id", st.GetOrderId(), "reason", reason)
+		return nil, status.Errorf(codes.InvalidArgument,
+			"venue: cancel order %s: %s — a close this adapter cannot query at the exchange would "+
+				"leave a live order behind a CANCELLED book entry", st.GetOrderId(), reason)
+	}
 	if s.closes != nil {
-		s.closes.Track(execution.CloseIntent{OrderID: st.GetOrderId()})
+		s.closes.Track(ci)
 	}
 	if err := s.closer.CancelOrder(ctx, st); err != nil {
 		// The close stays tracked and in flight. The watchdog owns it now. Do NOT
