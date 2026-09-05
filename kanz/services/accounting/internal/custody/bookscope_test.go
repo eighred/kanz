@@ -18,13 +18,64 @@ package custody
 
 import (
 	"context"
+	"log/slog"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
+
+// captureLogger records what the loader said, so the residue statement is
+// asserted rather than assumed. A test that only checks the numbers cannot tell a
+// correct exclusion from a silent one, and "nothing reconciles this money" is the
+// half of #1073 that neither of the two disagreeing rules said out loud.
+type captureLogger struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (c *captureLogger) Enabled(context.Context, slog.Level) bool { return true }
+func (c *captureLogger) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.records = append(c.records, r)
+	return nil
+}
+func (c *captureLogger) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *captureLogger) WithGroup(string) slog.Handler      { return c }
+
+// sawAt reports whether a record at level contains needle in its message or in
+// any of its attribute values.
+func (c *captureLogger) sawAt(level slog.Level, needle string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range c.records {
+		if r.Level != level {
+			continue
+		}
+		if strings.Contains(r.Message, needle) {
+			return true
+		}
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if strings.Contains(a.Value.String(), needle) {
+				found = true
+			}
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *captureLogger) logger() *slog.Logger { return slog.New(c) }
+
+func testLogger() *slog.Logger { return slog.New(&captureLogger{}) }
 
 // seedEntry appends one position-and-cash entry settled against an exchange account.
 func seedEntry(t *testing.T, st ledger.Store, id, portfolio, account, instrument string, qty, cash int64) {
@@ -78,7 +129,7 @@ func TestEachCustodiansBookHoldsOnlyItsOwnAccounts(t *testing.T) {
 	seedEntry(t, st, "e-aapl", "PF1", "okx-sub-1", "AAPL", 100, -100)
 	seedEntry(t, st, "e-msft", "PF1", "bin-main", "MSFT", 250, -250)
 
-	load := LedgerBookLoader(st, twoCustodianScope(t))
+	load := LedgerBookLoader(st, twoCustodianScope(t), testLogger())
 
 	for _, tc := range []struct {
 		custodian string
@@ -134,7 +185,7 @@ func TestTwoCustodiansOnOnePortfolioReconcileClean(t *testing.T) {
 		}
 	}
 
-	r, err := NewReconciler(store, LedgerBookLoader(ledgerStore, twoCustodianScope(t)),
+	r, err := NewReconciler(store, LedgerBookLoader(ledgerStore, twoCustodianScope(t), testLogger()),
 		&capturePublisher{}, new(big.Rat), nil, nil, func() time.Time { return t0 })
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
@@ -175,7 +226,7 @@ func TestAnUnclaimedExchangeAccountFailsTheRun(t *testing.T) {
 		t.Fatalf("SaveStatement: %v", err)
 	}
 
-	r, err := NewReconciler(store, LedgerBookLoader(ledgerStore, twoCustodianScope(t)),
+	r, err := NewReconciler(store, LedgerBookLoader(ledgerStore, twoCustodianScope(t), testLogger()),
 		&capturePublisher{}, new(big.Rat), nil, nil, func() time.Time { return t0 })
 	if err != nil {
 		t.Fatalf("NewReconciler: %v", err)
@@ -197,16 +248,31 @@ func TestAnUnclaimedExchangeAccountFailsTheRun(t *testing.T) {
 	}
 }
 
-// A single-custodian portfolio does not move: the whole book against its one
-// custodian is correct, needs no declaration, and is what every existing
-// deployment gets. Only the configuration that was wrong changes.
-func TestASingleCustodianPortfolioStillComparesTheWholeBook(t *testing.T) {
+// THE COMPARISON BASIS EXCLUDES AN ENTRY THAT SETTLED AGAINST NO EXCHANGE
+// ACCOUNT, AT ONE CUSTODIAN EXACTLY AS AT SEVERAL (#1073).
+//
+// This test replaces TestASingleCustodianPortfolioStillComparesTheWholeBook,
+// which asserted the opposite and was the SPECIFICATION for the defect. That test
+// seeded the same +1000 USD entry, called it "an investor subscription into the
+// fund's own bank" in its own comment, and required the single-custodian book to
+// carry it. Both claims cannot be true: an exchange custodian's statement
+// describes what is at that exchange, so a subscription sitting in the fund's own
+// bank is not on it, and a basis that carries it reports the whole 1000 as a cash
+// break every run. The rule kept is ledger.MaterializeForAccounts's — un-attributed
+// entries are in NO custodian's basis — and the single-custodian path now derives
+// its scope from the accounts the journal touched rather than taking the whole book.
+//
+// What has NOT changed, and is asserted here so the repair cannot quietly shrink
+// the basis further: every entry that DID settle against an exchange account is
+// still in the one custodian's book, with no declaration required.
+func TestASingleCustodianBookExcludesAnUnattributedEntry(t *testing.T) {
 	ctx := context.Background()
 	st := ledger.NewMemoryStore()
 	seedEntry(t, st, "e-aapl", "PF1", "okx-sub-1", "AAPL", 100, -100)
 	seedEntry(t, st, "e-msft", "PF1", "bin-main", "MSFT", 250, -250)
-	// An entry settled against NO exchange account — an investor subscription
-	// into the fund's own bank. The whole-book path must still carry it.
+	// An entry settled against NO exchange account — an investor subscription into
+	// the fund's own bank. No exchange statement can report it, so no custodian's
+	// comparison basis may contain it.
 	if err := st.Append(ctx, &ledger.Event{
 		EntryID: "e-sub", PortfolioID: "PF1", Type: ledger.EntryTrade,
 		Cash: big.NewRat(1000, 1), CashCurrency: "USD", Effective: t0, Knowledge: t0,
@@ -218,22 +284,199 @@ func TestASingleCustodianPortfolioStillComparesTheWholeBook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBookScope: %v", err)
 	}
-	if scope.Scoped("PF1") {
-		t.Fatal("a portfolio with one custodian and no declaration is scoped — its book would shrink " +
-			"to a subset nobody asked for")
+	if scope.Declared("PF1") {
+		t.Fatal("a portfolio with one custodian and no declaration reports a DECLARED scope — the " +
+			"loader would then ask for accounts nobody declared and refuse the run")
 	}
-	book, err := LedgerBookLoader(st, scope)(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A"})
+	book, err := LedgerBookLoader(st, scope, testLogger())(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A"})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	for _, inst := range []string{"AAPL", "MSFT"} {
 		if p := book.Positions[inst]; p == nil || p.Qty.Sign() == 0 {
-			t.Errorf("the whole-book path lost %s", inst)
+			t.Errorf("the single-custodian basis lost %s, which DID settle against an exchange account "+
+				"— its one custodian holds every account the journal touched, so dropping it would "+
+				"report the position MISSING_IN_IBOR against a statement that lists it", inst)
 		}
 	}
-	if got := book.CashBalance("USD"); got.Cmp(big.NewRat(650, 1)) != 0 {
-		t.Errorf("cash = %v, want 650 (−100 −250 +1000) — the un-attributed bank entry belongs in the "+
-			"whole-book path", got)
+	if got := book.CashBalance("USD"); got.Cmp(big.NewRat(-350, 1)) != 0 {
+		t.Errorf("cash = %v, want -350 (-100 -250) — the +1000 that settled against NO exchange account "+
+			"is in no custodian's basis. Carrying it compares 650 against a statement that can only "+
+			"report -350 and manufactures a 1000 cash break on the DEFAULT configuration", got)
+	}
+}
+
+// THE FABRICATED BREAK, END TO END, THROUGH THE REAL RECONCILER (#1073).
+//
+// One custodian, no declaration — the default configuration and the shape of
+// every existing deployment. The custodian states exactly what it holds. The only
+// disagreement is an entry the custodian cannot see, and before this issue the
+// run reported it as a cash break for the full amount, every run, forever.
+//
+// An ops team that learns the break queue carries routine false positives stops
+// reading it, and the true break — a real position discrepancy at the custodian —
+// then arrives in a queue nobody trusts. That is the failure mode custody
+// reconciliation exists to prevent, so a clean run here is the whole point.
+func TestAnUnattributedEntryFabricatesNoBreakAtASingleCustodian(t *testing.T) {
+	ctx := context.Background()
+	ledgerStore := ledger.NewMemoryStore()
+	seedEntry(t, ledgerStore, "e-aapl", "PF1", "okx-sub-1", "AAPL", 100, -100)
+	seedEntry(t, ledgerStore, "e-msft", "PF1", "okx-sub-1", "MSFT", 250, -250)
+	if err := ledgerStore.Append(ctx, &ledger.Event{
+		EntryID: "e-sub", PortfolioID: "PF1", Type: ledger.EntryTrade,
+		Cash: big.NewRat(1000, 1), CashCurrency: "USD", Effective: t0, Knowledge: t0,
+	}, nil); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	store := NewMemoryStore()
+	// What CUST-A can state: the holdings in the exchange account it custodies,
+	// and the cash that settled there. It cannot report the fund's bank balance.
+	if err := store.SaveStatement(ctx, statement("S-A",
+		map[string]int64{"AAPL": 100, "MSFT": 250}, map[string]int64{"USD": -350})); err != nil {
+		t.Fatalf("SaveStatement: %v", err)
+	}
+
+	scope, err := NewBookScope([]Subject{{PortfolioID: "PF1", CustodianID: "CUST-A"}}, nil)
+	if err != nil {
+		t.Fatalf("NewBookScope: %v", err)
+	}
+	r, err := NewReconciler(store, LedgerBookLoader(ledgerStore, scope, testLogger()),
+		&capturePublisher{}, new(big.Rat), nil, nil, func() time.Time { return t0 })
+	if err != nil {
+		t.Fatalf("NewReconciler: %v", err)
+	}
+	run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	for _, b := range run.Breaks {
+		t.Errorf("a %s break was reported on key %q (ibor=%v custodian=%v diff=%v).\n\n"+
+			"The only disagreement between the book and the statement is an entry that settled "+
+			"against NO exchange account, and no exchange custodian can report it. A break here is "+
+			"manufactured on the DEFAULT configuration, and it ages, pages via CustodyBreakAgeing "+
+			"and trains an operator to ignore the queue that exists to surface the one break meaning "+
+			"a fill never reached the ledger.",
+			b.Kind, b.Key, b.IBOR, b.Custodian, b.Diff)
+	}
+	if run.Outcome != OutcomeClean {
+		t.Errorf("outcome = %v, want CLEAN", run.Outcome)
+	}
+}
+
+// THE RESIDUE IS SAID OUT LOUD, WITH ITS AMOUNT (#1073).
+//
+// Excluding the entry is only half the repair. Cash held away from every custodian
+// is real money in the book of record that no statement can confirm, so a run that
+// silently left it out would answer "clean" about a comparison that did not cover
+// everything in the book — and nothing anywhere would say which part it skipped.
+// Book.CashBalance still carries the portfolio total for NAV and every other
+// reader; what this asserts is that the reconciliation says what it did not
+// compare, and how much.
+func TestTheUnattributedEntryIsStatedRatherThanDroppedInSilence(t *testing.T) {
+	ctx := context.Background()
+	st := ledger.NewMemoryStore()
+	seedEntry(t, st, "e-aapl", "PF1", "okx-sub-1", "AAPL", 100, -100)
+	if err := st.Append(ctx, &ledger.Event{
+		EntryID: "e-sub", PortfolioID: "PF1", Type: ledger.EntryTrade,
+		Cash: big.NewRat(1000, 1), CashCurrency: "USD", Effective: t0, Knowledge: t0,
+	}, nil); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	scope, err := NewBookScope([]Subject{{PortfolioID: "PF1", CustodianID: "CUST-A"}}, nil)
+	if err != nil {
+		t.Fatalf("NewBookScope: %v", err)
+	}
+	stated := &captureLogger{}
+	if _, err := LedgerBookLoader(st, scope, stated.logger())(ctx,
+		Subject{PortfolioID: "PF1", CustodianID: "CUST-A"}); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	for _, want := range []string{"NOTHING RECONCILES THEM", "USD 1000.00000000", BasisDerived, "PF1"} {
+		if !stated.sawAt(slog.LevelWarn, want) {
+			t.Errorf("the excluded entry was dropped without saying %q — a clean run then reports a "+
+				"verdict about a comparison that skipped part of the book, and nothing says which part",
+				want)
+		}
+	}
+
+	// A book with nothing to exclude must be QUIET. A warning that fires on every
+	// run is one nobody reads, which is the same failure the break queue is being
+	// protected from.
+	clean := ledger.NewMemoryStore()
+	seedEntry(t, clean, "e-aapl", "PF1", "okx-sub-1", "AAPL", 100, -100)
+	quiet := &captureLogger{}
+	if _, err := LedgerBookLoader(clean, scope, quiet.logger())(ctx,
+		Subject{PortfolioID: "PF1", CustodianID: "CUST-A"}); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if quiet.sawAt(slog.LevelWarn, "NOTHING RECONCILES THEM") {
+		t.Error("a book whose every entry names an exchange account was warned about anyway — the " +
+			"warning fires always, so it says nothing")
+	}
+}
+
+// THE MIRROR-IMAGE DEFECT MUST BE REFUSED, NOT SERVED (#1073).
+//
+// venue_account_id is optional on the cash surface and is never defaulted, so a
+// deployment can hold a whole journal of entries that name no exchange account. Its
+// derived basis then folds to NOTHING, and every position the custodian reports
+// comes back as MISSING_IN_IBOR — the whole book as breaks, in the opposite
+// direction from the cash break this issue was filed on, and just as fabricated.
+//
+// NewBookScope already refuses an operator who DECLARES an empty account set, in
+// these words and for this reason. A basis derived to the same emptiness must not
+// be quieter than one declared, so the run FAILS and names what to stamp.
+func TestAnEmptyDerivedBasisRefusesRatherThanBreakingTheWholeBook(t *testing.T) {
+	ctx := context.Background()
+	ledgerStore := ledger.NewMemoryStore()
+	// Every entry settled against no exchange account — the shape a deployment
+	// that never stamps venue_account_id is in.
+	for _, e := range []*ledger.Event{
+		{EntryID: "c1", PortfolioID: "PF1", Type: ledger.EntryCash,
+			Cash: big.NewRat(100000, 1), CashCurrency: "USD", Effective: t0, Knowledge: t0},
+		{EntryID: "t1", PortfolioID: "PF1", Type: ledger.EntryTrade, InstrumentID: "AAPL",
+			Quantity: big.NewRat(100, 1), Price: big.NewRat(150, 1), Cash: big.NewRat(-15000, 1),
+			CashCurrency: "USD", Effective: t0, Knowledge: t0},
+	} {
+		if err := ledgerStore.Append(ctx, e, nil); err != nil {
+			t.Fatalf("Append %s: %v", e.EntryID, err)
+		}
+	}
+
+	store := NewMemoryStore()
+	if err := store.SaveStatement(ctx, statement("S-A",
+		map[string]int64{"AAPL": 100}, map[string]int64{"USD": 85000})); err != nil {
+		t.Fatalf("SaveStatement: %v", err)
+	}
+	scope, err := NewBookScope([]Subject{{PortfolioID: "PF1", CustodianID: "CUST-A"}}, nil)
+	if err != nil {
+		t.Fatalf("NewBookScope: %v", err)
+	}
+	r, err := NewReconciler(store, LedgerBookLoader(ledgerStore, scope, testLogger()),
+		&capturePublisher{}, new(big.Rat), nil, nil, func() time.Time { return t0 })
+	if err != nil {
+		t.Fatalf("NewReconciler: %v", err)
+	}
+	run, err := r.Reconcile(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A", BusinessDate: t0})
+	if err == nil {
+		t.Fatalf("the run succeeded over an EMPTY comparison basis and reported %d break(s): %+v.\n\n"+
+			"Nothing in this journal names an exchange account, so the basis folds to nothing and every "+
+			"holding the custodian reports breaks as MISSING_IN_IBOR. That is the whole book as breaks, "+
+			"which is what the repair was supposed to stop, arriving from the other side",
+			len(run.Breaks), run.Breaks)
+	}
+	if run.Outcome != OutcomeFailed {
+		t.Errorf("outcome = %v, want FAILED — a run that could not be trusted must be recorded as one, "+
+			"or it is indistinguishable from a run that never came due", run.Outcome)
+	}
+	// The refusal has to be actionable: an operator needs the portfolio, the
+	// amount at stake and the field to stamp.
+	for _, want := range []string{"PF1", "venue_account_id", "MISSING_IN_IBOR"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q, so an operator cannot act on it: %v", want, err)
+		}
 	}
 }
 

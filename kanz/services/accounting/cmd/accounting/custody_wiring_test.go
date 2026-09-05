@@ -83,7 +83,7 @@ func baseCfg() config.Config {
 func buildPlane(t *testing.T, cfg config.Config, h *capturingHandler) (*custodyPlane, error) {
 	t.Helper()
 	logger := slog.New(h)
-	cc, err := buildCustodyConfig(cfg, logger)
+	cc, err := buildCustodyConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +199,7 @@ func TestEveryConfiguredPairIsSeededOnTheRegistry(t *testing.T) {
 	cfg := baseCfg()
 	cfg.CustodyPairs = []string{"PF1:CUST-A", "PF2:CUST-B"}
 	logger := slog.New(&capturingHandler{})
-	cc, err := buildCustodyConfig(cfg, logger)
+	cc, err := buildCustodyConfig(cfg)
 	if err != nil {
 		t.Fatalf("buildCustodyConfig: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestTheConfiguredStatementSubjectMatchesThePackage(t *testing.T) {
 func TestTheBreakQueueAndTheSchedulerShareOneStore(t *testing.T) {
 	shared := custody.NewMemoryStore()
 	logger := slog.New(&capturingHandler{})
-	cc, err := buildCustodyConfig(baseCfg(), logger)
+	cc, err := buildCustodyConfig(baseCfg())
 	if err != nil {
 		t.Fatalf("buildCustodyConfig: %v", err)
 	}

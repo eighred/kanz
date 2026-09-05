@@ -67,8 +67,16 @@ type Config struct {
 	// custody.NewBookScope refuses the start without it (#1006). The book side of
 	// the comparison used to load the whole portfolio regardless of the custodian
 	// on the subject, so each custodian's run reported every position held at the
-	// other as MISSING_AT_CUSTODIAN. A single-custodian portfolio needs no entry:
-	// the whole book against its one custodian is correct.
+	// other as MISSING_AT_CUSTODIAN.
+	//
+	// A SINGLE-CUSTODIAN PORTFOLIO NEEDS NO ENTRY, AND IS STILL SCOPED (#1073).
+	// This used to say the whole book against its one custodian is correct, and it
+	// was not: the whole book includes the entries that settled against NO exchange
+	// account, and no exchange custodian statement can list one, so every investor
+	// subscription into the fund's own bank came back as a cash break for the full
+	// amount. The scope is derived from the accounts the journal touches instead —
+	// there is nothing for a declaration to add, because one custodian holds all of
+	// them.
 	CustodyAccounts string
 	// CustodyInterval is how often each pair is reconciled.
 	CustodyInterval time.Duration

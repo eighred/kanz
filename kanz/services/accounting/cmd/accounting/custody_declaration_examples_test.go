@@ -27,7 +27,6 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,10 +112,6 @@ func advertisedDeclarations(t *testing.T) []advertised {
 	}
 	return out
 }
-
-// testLogger discards the composition root's start-up narration; the assertions
-// here are about what it REFUSES, which arrives as an error rather than a log.
-func testLogger() *slog.Logger { return slog.New(&capturingHandler{}) }
 
 func readManifest(t *testing.T) string {
 	t.Helper()
@@ -229,7 +224,7 @@ func TestTheManifestsOwnExampleStartsTheService(t *testing.T) {
 	cfg.CustodyPairs = env.SplitList(pairsSpec)
 	cfg.CustodyAccounts = accountsSpec
 
-	cc, err := buildCustodyConfig(cfg, testLogger())
+	cc, err := buildCustodyConfig(cfg)
 	if err != nil {
 		t.Fatalf("the manifest's own example does not start this service: %v\n\n"+
 			"pairs=%q accounts=%q", err, pairsSpec, accountsSpec)
@@ -241,9 +236,11 @@ func TestTheManifestsOwnExampleStartsTheService(t *testing.T) {
 	}
 
 	portfolio := cc.pairs[0].PortfolioID
-	if !cc.scope.Scoped(portfolio) {
-		t.Fatalf("portfolio %s is NOT scoped per custodian by the manifest's example — every run would "+
-			"compare the whole book against one custodian's statement, which is #1006 itself",
+	if !cc.scope.Declared(portfolio) {
+		t.Fatalf("portfolio %s has NO declared per-custodian accounts in the manifest's example — the "+
+			"scope would have to be derived from the journal, which cannot say which of two custodians "+
+			"holds what, so every run compares one custodian's statement against holdings at both. "+
+			"That is #1006 itself",
 			portfolio)
 	}
 	several := false
@@ -353,7 +350,7 @@ func TestATwoAccountCustodianReachesTheBookScope(t *testing.T) {
 	cfg.CustodyPairs = env.SplitList("PF1:CUST-A,PF1:CUST-B")
 	cfg.CustodyAccounts = "PF1:CUST-A:okx-sub-1,okx-sub-2 PF1:CUST-B:bin-main"
 
-	cc, err := buildCustodyConfig(cfg, testLogger())
+	cc, err := buildCustodyConfig(cfg)
 	if err != nil {
 		t.Fatalf("a custodian holding two exchange accounts was refused: %v\n\n"+
 			"This is #1029: the declaration #1006's repair requires could not be written for the "+

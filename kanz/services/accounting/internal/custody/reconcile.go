@@ -43,16 +43,60 @@ type BookLoader func(ctx context.Context, subject Subject) (*ledger.Book, error)
 
 // LedgerBookLoader is the production BookLoader over a ledger store.
 //
-// A nil scope, or a portfolio with one custodian, loads the WHOLE book — the
-// pre-#1006 behaviour, which is correct for a single custodian and does not move.
-// A portfolio custodied in two or more places folds only the entries that settled
-// against THIS custodian's exchange accounts, and REFUSES when the journal holds
-// value on an account no custodian claims.
-func LedgerBookLoader(store ledger.Store, scope *BookScope) BookLoader {
+// EVERY PATH IS SCOPED, AND THAT IS THE POINT (#1073). A portfolio custodied in
+// two or more places folds only the entries that settled against THIS custodian's
+// declared exchange accounts, and REFUSES when the journal holds value on an
+// account no custodian claims. A portfolio custodied in ONE place folds the
+// entries that settled against the accounts its journal actually touched — which
+// needs no declaration, because a single custodian holds all of them.
+//
+// WHAT NO PATH DOES ANY MORE IS COMPARE THE WHOLE BOOK. The single-custodian
+// branch used to, and the two branches therefore disagreed about the same entries:
+// ledger.MaterializeForAccounts excludes an entry that settled against no exchange
+// account, and the whole-book branch included it. Running the second against a
+// custodian statement makes recon.Reconcile union the currencies and report the
+// entire un-attributed balance as a cash break — an investor subscription into the
+// fund's own bank, reported as a difference with a custodian that cannot see it,
+// on the DEFAULT configuration. A break queue with routine false positives in it
+// is one an operations team stops reading, and the real break then arrives in a
+// queue nobody trusts.
+//
+// THE RESIDUE IS SAID OUT LOUD RATHER THAN DROPPED. Cash held away from every
+// custodian is real money in the book of record that no custodian statement can
+// confirm, so it is an UNRECONCILED BUCKET rather than a break or a zero, and the
+// loader names it and its amount on every run that has one. Book.CashBalance
+// remains the portfolio total for NAV and every other reader.
+func LedgerBookLoader(store ledger.Store, scope *BookScope, logger *slog.Logger) BookLoader {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return func(ctx context.Context, subject Subject) (*ledger.Book, error) {
-		if !scope.Scoped(subject.PortfolioID) {
-			book, _, err := ledger.MaterializeCurrent(ctx, store, subject.PortfolioID)
-			return book, err
+		if !scope.Declared(subject.PortfolioID) {
+			// ONE CUSTODIAN: the scope is derived from the journal rather than
+			// declared. See ledger.MaterializeAttributed for why that is scoped by
+			// construction and why no declaration could add to it.
+			book, accounts, residue, err := ledger.MaterializeAttributed(ctx, store, subject.PortfolioID)
+			if err != nil {
+				return nil, err
+			}
+			if len(accounts) == 0 && !residue.Empty() {
+				// THE MIRROR-IMAGE DEFECT, REFUSED RATHER THAN SERVED. Every entry
+				// in this journal declares that it settled against NO exchange
+				// account, so the derived basis folds to NOTHING and every holding
+				// the custodian reports comes back as MISSING_IN_IBOR — the whole
+				// book as breaks, in the other direction from #1073's cash break.
+				// NewBookScope already refuses an operator who declares an empty
+				// account set, in these words and for this reason; a basis derived
+				// to the same emptiness must not be quieter than one declared.
+				return nil, fmt.Errorf("custody: portfolio %s holds value (%s) and NO journal entry names "+
+					"an exchange account, so the book slice compared against %s's statement would fold to "+
+					"nothing and every position the custodian holds would break as MISSING_IN_IBOR. The "+
+					"producers stamp venue_account_id and never default it: set it on the fills and cash "+
+					"movements that settled at this custodian",
+					subject.PortfolioID, residue.Describe(), subject.CustodianID)
+			}
+			stateResidue(logger, subject, BasisDerived, residue)
+			return book, nil
 		}
 		accounts, claimed := scope.For(subject.PortfolioID, subject.CustodianID)
 		if len(accounts) == 0 {
@@ -62,7 +106,7 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope) BookLoader {
 			return nil, fmt.Errorf("custody: no exchange accounts declared for %s:%s, so there is no "+
 				"book slice to compare its statement against", subject.PortfolioID, subject.CustodianID)
 		}
-		book, unmapped, err := ledger.MaterializeForAccounts(ctx, store, subject.PortfolioID, accounts, claimed)
+		book, unmapped, residue, err := ledger.MaterializeForAccounts(ctx, store, subject.PortfolioID, accounts, claimed)
 		if err != nil {
 			return nil, err
 		}
@@ -78,8 +122,40 @@ func LedgerBookLoader(store ledger.Store, scope *BookScope) BookLoader {
 				"a book missing those holdings and break every one of them; add each account to the custodian "+
 				"that holds it", subject.PortfolioID, strings.Join(unmapped, ", "), subject.CustodianID)
 		}
+		stateResidue(logger, subject, BasisDeclared, residue)
 		return book, nil
 	}
+}
+
+// The two ways a portfolio's comparison basis is scoped, named here because the
+// residue log and the composition root's posture gauge must use the SAME words —
+// an operator correlating a per-run WARN with kanz_accounting_custody_comparison_basis
+// is reading one fact through two surfaces.
+const (
+	BasisDeclared = "declared"
+	BasisDerived  = "derived"
+)
+
+// stateResidue names the entries the comparison basis excluded, and what that
+// means, whenever there are any.
+//
+// IT IS A WARN AND NOT AN INFO. "Nothing reconciles this money" is the sentence an
+// operator needs to have read before they treat a clean run as evidence the book
+// of record agrees with the world: the run they are looking at compared a SUBSET
+// of the portfolio, and Info is where that would be filtered out. It is not an
+// error either — the exclusion is correct, and a fund bank account is a legitimate
+// place for cash to be. What is wrong is not saying so.
+func stateResidue(logger *slog.Logger, subject Subject, basis string, residue ledger.UnattributedResidue) {
+	if residue.Empty() {
+		return
+	}
+	logger.Warn("accounting: custody reconciliation EXCLUDED entries that settled against no exchange "+
+		"account — no custodian statement can report them, so they are in no comparison basis and "+
+		"NOTHING RECONCILES THEM (#1073)",
+		"portfolio", subject.PortfolioID, "custodian", subject.CustodianID, "basis", basis,
+		"entries", residue.Entries, "residue", residue.Describe(),
+		"consequence", "the run's verdict is about the holdings attributable to an exchange account; "+
+			"this balance is real in the book of record and is confirmed by nobody")
 }
 
 // Reconciler performs one reconciliation and records what it concluded.

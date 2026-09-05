@@ -121,7 +121,16 @@ type custodyConfig struct {
 // sit where would compare the WHOLE book against each custodian in turn, and
 // report every position held at the other as MISSING_AT_CUSTODIAN. A control that
 // will assert a wrong answer must not reach a running pod.
-func buildCustodyConfig(cfg config.Config, logger *slog.Logger) (custodyConfig, error) {
+//
+// IT NO LONGER RECORDS THE POSTURE, AND THE LINE IT USED TO WRITE WAS WRONG
+// (#1073). An undeclared portfolio was logged at INFO as an affirmatively correct
+// configuration — "compares the whole portfolio book", reason "one custodian
+// configured for this portfolio" — while comparing the whole book against one
+// custodian's statement is what reported every entry with no exchange account as a
+// cash break. stateCustodyBasisPosture says what is true instead, as a gauge as
+// well as a line, and the composition root calls it unconditionally: this function
+// runs on every deployment and the custody PLANE does not.
+func buildCustodyConfig(cfg config.Config) (custodyConfig, error) {
 	pairs, err := parseCustodyPairs(cfg.CustodyPairs)
 	if err != nil {
 		return custodyConfig{}, err
@@ -133,18 +142,6 @@ func buildCustodyConfig(cfg config.Config, logger *slog.Logger) (custodyConfig, 
 	scope, err := custody.NewBookScope(pairs, accountDecl)
 	if err != nil {
 		return custodyConfig{}, err
-	}
-	for _, p := range pairs {
-		if scope.Scoped(p.PortfolioID) {
-			continue
-		}
-		// Said out loud because "one custodian, whole book" is CORRECT and
-		// "several custodians, whole book" is the defect — and from outside the
-		// process the two look identical. NewBookScope has already refused the
-		// second, so this line is the positive record of the first.
-		logger.Info("accounting: custody reconciliation compares the whole portfolio book",
-			"portfolio", p.PortfolioID, "custodian", p.CustodianID,
-			"reason", "one custodian configured for this portfolio")
 	}
 	return custodyConfig{pairs: pairs, scope: scope}, nil
 }
@@ -189,7 +186,7 @@ func buildCustodyPlane(
 	}
 
 	plane.reconciler, err = custody.NewReconciler(
-		plane.store, custody.LedgerBookLoader(ledgerStore, cc.scope), publisher, tolerance, plane.metrics, logger, nil)
+		plane.store, custody.LedgerBookLoader(ledgerStore, cc.scope, logger), publisher, tolerance, plane.metrics, logger, nil)
 	if err != nil {
 		return nil, err
 	}
