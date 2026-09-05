@@ -102,6 +102,10 @@ type OKXUserDataConfig struct {
 	Venue     string
 	Tenant    string
 	OnRefused func(mic, orderID, reason string)
+	// OnDropped counts an execution report this ingester could not resolve to an
+	// order it holds (#1047) — unknown_order or store_error. Distinct from
+	// OnRefused, which counts a report it DID resolve and will not honour.
+	OnDropped func(mic, orderID, reason string)
 	Logger    *slog.Logger
 }
 
@@ -115,7 +119,8 @@ func newOKXUserDataIngester(cfg OKXUserDataConfig) *OKXUserDataIngester {
 	return &OKXUserDataIngester{
 		stream: cfg.Stream, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
 		refusal: ReportRefusal{
-			Venue: cfg.Venue, Orders: cfg.Orders, OnRefused: cfg.OnRefused, Logger: cfg.Logger,
+			Venue: cfg.Venue, Orders: cfg.Orders, OnRefused: cfg.OnRefused,
+			OnDropped: cfg.OnDropped, Logger: cfg.Logger,
 		},
 	}
 }
@@ -153,8 +158,36 @@ func (i *OKXUserDataIngester) handle(ctx context.Context, raw []byte) error {
 		if d.AlgoClOrdID != "" {
 			orderID = d.AlgoClOrdID
 		}
-		st, ok := i.orders.Lookup(orderID)
+		st, ok, lerr := i.orders.Lookup(orderID)
+		if lerr != nil {
+			// AN UNREADABLE ORDER VIEW IS NOT "NOT OUR ORDER" (#1047).
+			//
+			// The identical collapse, in the identical shape, one connector over —
+			// which is why the drop lives in execution.ReportRefusal.Dropped and not
+			// in either ingester. A store failure came back from Lookup as the same
+			// (nil, false) an order this adapter does not hold comes back as, and the
+			// `continue` below consumed the report: no order.order.filled FACT, so the
+			// position book never books the position and the ledger never journals the
+			// cash.
+			//
+			// THE MESSAGE IS ABANDONED, NOT CONTINUED PAST. The over-fill refusal below
+			// continues, because that is a standing disagreement about ONE order and
+			// tearing the websocket down would cost every other order's fills on every
+			// repeat report. A store failure is process-wide — every order in this
+			// frame and the next one is failing the same read — so there are no other
+			// fills to preserve, and returning puts the fault where the connector's run
+			// loop can see it. It does not quarantine, for the reasons Dropped states.
+			i.refusal.Dropped(orderID, DropStoreError)
+			return fmt.Errorf("okx: order %s: the adapter's order view could not be read, so this "+
+				"execution report cannot be resolved to an order and must not be treated as another "+
+				"account's: %w", orderID, lerr)
+		}
 		if !ok {
+			// The view ANSWERED and does not hold this order — not ours, or not yet
+			// admitted. Still a skip: a shared exchange account and a second replica
+			// both produce these routinely. Counted so the store_error arm above has
+			// a baseline to be read against.
+			i.refusal.Dropped(orderID, DropUnknownOrder)
 			continue
 		}
 		// EVERY NUMBER ON THIS FILL IS CONVERTED BEFORE ANY OF IT IS PUBLISHED (#94).

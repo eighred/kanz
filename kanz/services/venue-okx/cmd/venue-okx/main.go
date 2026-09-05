@@ -227,8 +227,11 @@ func serve(cfg config.Config) error {
 
 	balanceReconConfigured := balancerecon.NewGauge("okx")
 	marginSourceConfigured := venuemargin.NewGauge("okx")
+	// THE ORDER VIEW'S OWN ALERTABLE HALF (#1047), built and SEEDED in one call.
+	viewObs := orderview.NewObservability("okx", cfg.MIC)
 	obs.Registry.MustRegister(orderViewDurable, balanceReconConfigured, marginSourceConfigured,
 		markTickDropped, fillRefused, closesUnhealable)
+	obs.Registry.MustRegister(viewObs.Collectors()...)
 	// SEEDED AT ZERO before anything can drop: an unseeded counter that never fires
 	// is indistinguishable from a counter nobody registered, so an operator cannot
 	// tell "no close was ever dropped unqueried" from "no metric" (#622).
@@ -367,10 +370,7 @@ func serve(cfg config.Config) error {
 		},
 	}, cfg.WSBase, cfg.TradingMode)
 
-	seam := orderview.NewSeam(view, func(err error) {
-		// A blind order view makes the healing watchdog blind. Never silent.
-		logger.Error("venue-okx: order view read failed — reconciliation is degraded", "err", err)
-	})
+	seam := orderview.NewObservedSeam(view, viewObs, cfg.MIC, logger)
 	// WHAT KANZ BELIEVES THIS EXCHANGE ACCOUNT HOLDS (#418), folded from the book
 	// of record's announcements (#450).
 	//
@@ -496,6 +496,14 @@ func serve(cfg config.Config) error {
 		// The mic is already the collector's const label.
 		OnFillRefused: func(_, _, reason string) {
 			fillRefused.WithLabelValues(reason).Inc()
+		},
+		// EVERY UNRESOLVED EXECUTION REPORT IS COUNTED, AND THE TWO REASONS ARE
+		// SEPARATED (#1047). Nil here puts the platform back where the issue found
+		// it: a store failure reads as "not our order", the report is skipped, and a
+		// real execution leaves the fill stream with nothing an alert can reach. The
+		// order id is NOT a label — it is unbounded; it is in the ERROR log.
+		OnFillDropped: func(mic, _, reason string) {
+			viewObs.ReportsDropped.WithLabelValues(mic, reason).Inc()
 		},
 		// EVERY UNHEALABLE CLOSE IS COUNTED AND NAMED (#1036). Nil here would leave a
 		// close the watchdog could not even attempt indistinguishable from one it
