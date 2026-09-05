@@ -106,6 +106,13 @@ var (
 
 	newMarkTickPublisher = execution.NewMarkTickPublisher
 
+	// The two DROP reasons an execution report carries when this connector could
+	// not RESOLVE it to an order it holds (#1047) — aliased as values, like the
+	// venue verdicts, so a connector cannot invent a third spelling of
+	// "store_error" and split the series it is meant to be alerted on.
+	DropUnknownOrder = execution.DropUnknownOrder
+	DropStoreError   = execution.DropStoreError
+
 	// The venue verdicts. Aliased as values rather than re-declared so a
 	// connector cannot invent a ninth answer, and so "which constant is UNKNOWN"
 	// has exactly one definition on the platform.

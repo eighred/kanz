@@ -107,7 +107,7 @@ func (c *BinanceConnector) Start(ctx context.Context, deps WorkerDeps) {
 func (c *BinanceConnector) runUserData(ctx context.Context, deps WorkerDeps) {
 	ing := newUserDataIngester(UserDataConfig{
 		Orders: deps.Orders, Pub: deps.Publisher, Venue: c.settings.MIC, Tenant: deps.Tenant,
-		OnRefused: deps.OnFillRefused, Logger: deps.Logger,
+		OnRefused: deps.OnFillRefused, OnDropped: deps.OnFillDropped, Logger: deps.Logger,
 	})
 	backoff := time.Second
 	for ctx.Err() == nil {

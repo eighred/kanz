@@ -73,6 +73,10 @@ type UserDataConfig struct {
 	Venue     string
 	Tenant    string
 	OnRefused func(mic, orderID, reason string)
+	// OnDropped counts an execution report this ingester could not resolve to an
+	// order it holds (#1047) — unknown_order or store_error. Distinct from
+	// OnRefused, which counts a report it DID resolve and will not honour.
+	OnDropped func(mic, orderID, reason string)
 	Logger    *slog.Logger
 }
 
@@ -86,7 +90,8 @@ func newUserDataIngester(cfg UserDataConfig) *UserDataIngester {
 	return &UserDataIngester{
 		stream: cfg.Stream, orders: cfg.Orders, pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant,
 		refusal: ReportRefusal{
-			Venue: cfg.Venue, Orders: cfg.Orders, OnRefused: cfg.OnRefused, Logger: cfg.Logger,
+			Venue: cfg.Venue, Orders: cfg.Orders, OnRefused: cfg.OnRefused,
+			OnDropped: cfg.OnDropped, Logger: cfg.Logger,
 		},
 	}
 }
@@ -113,9 +118,44 @@ func (i *UserDataIngester) handle(ctx context.Context, raw []byte) error {
 	if json.Unmarshal(raw, &rep) != nil || rep.Event != "executionReport" || rep.ExecType != "TRADE" {
 		return nil // not a fill — ignore
 	}
-	st, ok := i.orders.Lookup(rep.ClientOrderID)
+	st, ok, lerr := i.orders.Lookup(rep.ClientOrderID)
+	if lerr != nil {
+		// AN UNREADABLE ORDER VIEW IS NOT "NOT OUR ORDER" (#1047).
+		//
+		// These two answers were one value. A store failure came back from Lookup
+		// as the same (nil, false) an order this adapter does not hold comes back
+		// as, and the skip below consumed the report — so a Postgres blip in this
+		// adapter deleted real executions from the order.order.filled stream: no
+		// FACT, so the position book never books the position and the ledger never
+		// journals the cash, and nothing downstream can notice because there is
+		// nothing to notice.
+		//
+		// THE FRAME IS NOT SWALLOWED. Unlike the over-fill refusal below — a
+		// standing disagreement about ONE order, where returning an error would
+		// hot-loop the reconnect and cost every other order's fills — a store
+		// failure is process-wide: every order's Lookup is failing, so there are no
+		// other orders' fills to preserve by continuing. Returning ends this
+		// websocket run and reconnects, which is the same answer the conversion
+		// refusals above give, and it puts the fault where the connector's run loop
+		// can see it instead of absorbing it frame by frame.
+		//
+		// IT DOES NOT QUARANTINE. The freeze states that a specific order is
+		// contradicted; here the adapter cannot confirm it even holds the order,
+		// the write would go to the store whose read just failed, and a store
+		// outage would otherwise freeze the entire in-flight book on a transient
+		// fault. See execution.ReportRefusal.Dropped.
+		i.refusal.Dropped(rep.ClientOrderID, DropStoreError)
+		return fmt.Errorf("binance: order %s: the adapter's order view could not be read, so this "+
+			"execution report cannot be resolved to an order and must not be treated as another "+
+			"account's: %w", rep.ClientOrderID, lerr)
+	}
 	if !ok {
-		return nil // unknown order (not ours / not yet admitted) — skip
+		// The view ANSWERED and does not hold this order — not ours, or not yet
+		// admitted. Still a skip, and still the right one: a shared exchange
+		// account and a second replica both produce these routinely. Counted so
+		// the store_error arm above has a baseline to be read against.
+		i.refusal.Dropped(rep.ClientOrderID, DropUnknownOrder)
+		return nil
 	}
 	// EVERY NUMBER ON THIS FILL CONVERTS BEFORE ANY OF IT IS PUBLISHED (#94).
 	//

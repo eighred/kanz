@@ -947,30 +947,50 @@ func Quarantine(ctx context.Context, store Store, orderID, reason string, at tim
 	})
 }
 
-// Seam adapts a Store to the connector's OrderTracker + ExpectedOrders interfaces,
-// which are synchronous and non-failing by design (they sit inside websocket and
-// reconciler loops that must not block on an error path). A store failure here
-// degrades to "I don't know about this order" — the reconciler then treats it as
-// unknown rather than inventing context for it. It never fabricates.
+// Seam adapts a Store to the connector's OrderTracker + ExpectedOrders interfaces.
+// The WRITE half is non-failing by design (Progressed and Quarantined sit inside
+// websocket and reconciler loops that must not acquire an error path), and every
+// failure it swallows goes to onErr instead. It never fabricates.
+//
+// THE READ HALF IS NOT NON-FAILING, AND THAT WAS THE DEFECT (#1047). Lookup
+// returned (nil, false) for a store failure — the same pair it returns for an
+// order this adapter does not hold — so the user-data ingesters skipped the
+// report as somebody else's and a real execution left the order.order.filled
+// stream with one log line and no counter. The two answers now stay separate all
+// the way to the ingester; see execution.OrderLookup for why the collapse is the
+// unsafe direction rather than a tidy default.
 type Seam struct {
 	store Store
 	onErr func(error)
 }
 
-// NewSeam wraps store. onErr is called on a store failure (log it — a silently
-// empty order view makes the healing watchdog blind).
+// NewSeam wraps store. onErr is called on EVERY store failure — the read that
+// Lookup also returns, and the two writes that cannot return one.
+//
+// IT NAMES TWO CONSEQUENCES, and the composition roots' messages must too. The
+// one written here first was "reconciliation is degraded", which is the healing
+// watchdog going blind on a store it cannot enumerate; true, and the smaller
+// half. The larger half is that a fill report this adapter cannot resolve is a
+// trade the position book has not booked and the ledger has not journalled.
 func NewSeam(store Store, onErr func(error)) *Seam {
 	return &Seam{store: store, onErr: onErr}
 }
 
-// Lookup satisfies execution.OrderLookup.
-func (s *Seam) Lookup(orderID string) (*orderpb.OrderState, bool) {
+// Lookup satisfies execution.OrderLookup: (state, held, err), where a non-nil
+// err means the view could not be read and the caller knows NOTHING about the
+// order — never that this adapter does not hold it.
+//
+// The failure is reported to onErr AND returned. Both, deliberately: onErr is
+// where the read-failure counter hangs, which is what makes an outage alertable,
+// and the returned error is what stops the caller treating the answer as a
+// negative.
+func (s *Seam) Lookup(orderID string) (*orderpb.OrderState, bool, error) {
 	st, _, ok, err := s.store.Get(context.Background(), orderID)
 	if err != nil {
 		s.report(err)
-		return nil, false
+		return nil, false, err
 	}
-	return st, ok
+	return st, ok, nil
 }
 
 // OpenOrders satisfies execution.ExpectedOrders.

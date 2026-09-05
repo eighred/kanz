@@ -360,7 +360,7 @@ func TestSeamProgressedAdvancesTheView(t *testing.T) {
 	if open := seam.OpenOrders(); len(open) != 0 {
 		t.Fatalf("OpenOrders returns %d after the fill, want 0", len(open))
 	}
-	if st, ok := seam.Lookup("o1"); !ok || st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED {
-		t.Fatalf("Lookup = %v (ok=%v), want a FILLED order still readable for a late report", st, ok)
+	if st, ok, err := seam.Lookup("o1"); err != nil || !ok || st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_FILLED {
+		t.Fatalf("Lookup = %v (ok=%v err=%v), want a FILLED order still readable for a late report", st, ok, err)
 	}
 }
