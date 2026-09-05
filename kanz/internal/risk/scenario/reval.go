@@ -36,6 +36,15 @@ type Revaluer interface {
 // revalued state. p is not mutated. A nil reval falls back to the fully linear
 // Evaluate.
 //
+// # It is now a spelling of Evaluate(WithRevaluer(reval)), not a second path
+//
+// It used to assemble its own coverage and call cloneWithReval directly, and
+// that is exactly how the two paths came to disagree about VolShock: this one
+// priced the bump through RevalShocks.GlobalVolBump, the linear one no-opped it
+// and recorded nothing, and only the linear one had a caller — so the reachable
+// answer to a +15 vol-point stress was the unshocked book with a clean coverage
+// record (#1035). One entry point means a new shock class is considered once.
+//
 // It returns the SAME shock-application coverage Evaluate does, and for the same
 // reason: sectorFrac resolves each position's sector through the classifier, so
 // this path had the identical silent degradation (#640). It carries no caller
@@ -47,13 +56,13 @@ func EvaluateReval(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *com
 	if reval == nil {
 		return Evaluate(p, shocks, registry, opts...)
 	}
-	var cfg evalConfig
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-	cov := newShockCoverage()
-	shocked := cloneWithReval(p, shocks, reval, cfg, cov)
-	return compute.ComputeMeasures(shocked, registry, nil), cov.result()
+	// A FRESH SLICE, never append(opts, ...): opts belongs to the caller and
+	// appending in place would write WithRevaluer into its spare capacity, which
+	// a caller reusing one options slice across portfolios would carry silently.
+	withReval := make([]Option, 0, len(opts)+1)
+	withReval = append(withReval, opts...)
+	withReval = append(withReval, WithRevaluer(reval))
+	return Evaluate(p, shocks, registry, withReval...)
 }
 
 // cloneWithReval deep-copies p and applies the shocks: each option position is

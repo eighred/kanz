@@ -107,11 +107,17 @@ func Covid2020Crash() []v1.ScenarioShock {
 // long-gamma book's convexity and a short-vol book's vega losses both bite,
 // which a price-only curve cannot express. The ParallelShift drives the spot
 // drop on the linear path; the global VolShock only takes effect under full
-// revaluation (scenario.EvaluateReval), where option positions are repriced.
+// revaluation (scenario.WithRevaluer / EvaluateReval), where option positions
+// are repriced.
+//
+// SO IT IS REFUSED, NOT PARTIALLY SERVED, ON A DEPLOYMENT WITH NO REVALUER —
+// and that is the whole reason the shocks are paired here. Applying only the
+// spot leg is not a conservative approximation of this stress, it is a
+// different stress: it tells a short-vol desk that the regime built to hurt it
+// costs it the delta and nothing else (#1035).
 //
 // Unlike the GICS-curve scenarios it is not in the Named/Names catalog (those
-// are sector curves by construction); a caller passes it directly to
-// EvaluateReval.
+// are sector curves by construction); a caller passes it directly.
 func VolSpikeRiskOff() []v1.ScenarioShock {
 	return []v1.ScenarioShock{
 		v1.ParallelShift{Pct: pct(-20)},                                        // −20% across the book

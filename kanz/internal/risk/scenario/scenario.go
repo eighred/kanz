@@ -45,6 +45,7 @@ type Option func(*evalConfig)
 
 type evalConfig struct {
 	classifier factor.Classifier
+	revaluer   Revaluer
 }
 
 // WithClassifier wires the MODEL-01f factor model so SectorShocks can resolve
@@ -53,6 +54,24 @@ type evalConfig struct {
 // the unshocked book (#640).
 func WithClassifier(c factor.Classifier) Option {
 	return func(cfg *evalConfig) { cfg.classifier = c }
+}
+
+// WithRevaluer wires the DERIV-01e option pricer so a VolShock can move
+// something. It is the SECOND CLASS OF SHOCK made explicit: PriceShock,
+// ParallelShift and SectorShock are MarketValue arithmetic and the linear path
+// expresses them exactly, while a vol bump has no linear expression at all — it
+// reaches a book only by repricing options through vega.
+//
+// PRESENT ⇒ Evaluate routes through the full-revaluation clone and the VolShock
+// is real. ABSENT ⇒ applyShock records SkipNoRevaluer and the request is
+// refused, rather than answering with the unshocked book (#1035).
+//
+// It is an Option rather than a second entry point on purpose: EvaluateReval
+// used to be that second path and had no caller, so the day a Revaluer becomes
+// constructible the wiring is one line at the risk-engine composition root
+// beside WithClassifier, not a fork in the engine.
+func WithRevaluer(r Revaluer) Option {
+	return func(cfg *evalConfig) { cfg.revaluer = r }
 }
 
 // Reasons a shock could not be applied, in the closed-vocabulary form
@@ -73,6 +92,18 @@ const (
 	// so there is nothing to match against. A malformed shock, and the only
 	// reason here that is the caller's rather than the estate's.
 	SkipShockNamesNoSector = "sector_shock_names_no_sector"
+	// SkipNoRevaluer: a VolShock was requested and no Revaluer is wired, so the
+	// evaluation runs on the linear path where a vol bump has NO EXPRESSION —
+	// not a small effect, none. A whole-evaluation exclusion like
+	// SkipNoClassifier, and a composition-root gap for the same reason: it is a
+	// property of the deployment, not of any holding.
+	//
+	// It is a DIFFERENT operator action from SkipNoClassifier, which is why it is
+	// its own reason. No classifier is a reference-data source nobody wired; no
+	// revaluer is blocked further out, on observed option premiums this estate
+	// does not carry at all (#509/#203/#345). Loading instrument reference data
+	// will not fix it.
+	SkipNoRevaluer = "no_revaluer"
 )
 
 // Evaluate applies shocks to a deep clone of p and returns the
@@ -107,7 +138,18 @@ func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.
 		opt(&cfg)
 	}
 	cov := newShockCoverage()
-	shocked := cloneWithShocks(p, shocks, cfg, cov)
+	// ONE ENTRY POINT, TWO CLONE STRATEGIES. With a Revaluer wired the shocks are
+	// applied by repricing (cloneWithReval), which is the only way a VolShock
+	// moves a number; without one they are applied linearly, and applyShock
+	// records the vol shocks that therefore reach nothing. EvaluateReval funnels
+	// here rather than duplicating this, so there is one place the coverage is
+	// assembled and one place a new shock class has to be considered.
+	var shocked *domain.Portfolio
+	if cfg.revaluer == nil {
+		shocked = cloneWithShocks(p, shocks, cfg, cov)
+	} else {
+		shocked = cloneWithReval(p, shocks, cfg.revaluer, cfg, cov)
+	}
 	return compute.ComputeMeasures(shocked, registry, nil), cov.result()
 }
 
@@ -125,6 +167,7 @@ func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.
 type shockCoverage struct {
 	cov          compute.Coverage
 	noClassifier bool
+	noRevaluer   bool
 	// seen holds the positions already accounted for, contributed or excluded.
 	// One decision per position per evaluation: the classification does not
 	// change between shocks in the same batch, so the second look would be the
@@ -146,6 +189,21 @@ func (s *shockCoverage) noClassifierWired() {
 	}
 	s.noClassifier = true
 	s.cov.ExcludeWhole(SkipNoClassifier)
+}
+
+// noRevaluerWired records the whole-evaluation exclusion for a VolShock reaching
+// the linear path, at most once per evaluation.
+//
+// AT MOST ONCE, AND THAT IS NOT COSMETIC. A vol-surface stress is one VolShock
+// per underlying — a book with forty option underlyings sends forty — and
+// counting each would put "0 of 40 resolved" in the refusal, which reads as a
+// fact about the book. It is one fact about the deployment: no revaluer.
+func (s *shockCoverage) noRevaluerWired() {
+	if s.noRevaluer {
+		return
+	}
+	s.noRevaluer = true
+	s.cov.ExcludeWhole(SkipNoRevaluer)
 }
 
 // malformedShock records a shock that named no sector. Per SHOCK and not
@@ -197,9 +255,17 @@ func cloneWithShocks(p *domain.Portfolio, shocks []v1.ScenarioShock, cfg evalCon
 	return cp
 }
 
-// applyShock dispatches one shock to its handler. Unknown shock
-// types silently skip — the engine processes large scenario
-// batches and a single unrecognised shock should not abort the run.
+// applyShock dispatches one shock to its handler ON THE LINEAR PATH. Evaluate
+// routes to cloneWithReval when a Revaluer is wired, so reaching here means
+// MarketValue arithmetic is the only tool available. Unknown shock types
+// silently skip — the engine processes large scenario batches and a single
+// unrecognised shock should not abort the run.
+//
+// EVERY ARM MUST MOVE THE BOOK OR RECORD ON cov, and that is checked rather than
+// remembered: test/arch/every_shock_kind_answers_or_refuses_test.go derives the
+// shock set from the api/v1 AST and fails an arm that does neither. An arm that
+// does neither is a shock the caller can ask for and the response cannot
+// distinguish from "applied, and this book is neutral to it".
 func applyShock(p *domain.Portfolio, shock v1.ScenarioShock, cfg evalConfig, cov *shockCoverage) {
 	switch s := shock.(type) {
 	case v1.PriceShock:
@@ -209,11 +275,37 @@ func applyShock(p *domain.Portfolio, shock v1.ScenarioShock, cfg evalConfig, cov
 	case v1.SectorShock:
 		applySectorShock(p, s, cfg.classifier, cov)
 	case v1.VolShock:
-		// A vol shock has no linear MarketValue effect — it only reprices options
-		// under full revaluation (EvaluateReval, DERIV-01e). No-op here so it is a
-		// recognized (not dropped) shock on the linear path.
+		applyVolShock(cov)
 	}
 }
+
+// applyVolShock records that the vol bump reached nothing. It takes no
+// portfolio because there is nothing it could do to one: a vol shock moves an
+// option's price through vega, and a MarketValue has no vega.
+//
+// # Why a refusal and not a declaration on the response
+//
+// The alternative considered was to answer and label the projection — the
+// QualityFlagInputsUnresolved shape, or a MeasureProvenance saying "linear, vol
+// leg omitted" (#1037). It is the wrong call HERE for the reason
+// v1.ErrScenarioUnresolvable already gives for #640: a measure set with one
+// partial family still contains real answers worth returning with the bad part
+// labelled, while a scenario answers ONE question, and if a shock did not land
+// then every number in the response is the book as it already is. There is no
+// good part to keep. A +15 vol-point stress reporting VaR99 unchanged is not a
+// partial answer, it is a different scenario's answer, and it is plausible —
+// which is what makes a label something a desk reads past.
+//
+// It is also not merely the vol leg that is lost. library.VolSpikeRiskOff pairs
+// a −20% spot drop WITH the vol spike because an option book's convexity and its
+// vega only bite together; served linearly it degrades to the spot leg alone and
+// tells a short-vol desk its worst regime costs it the delta.
+//
+// This arm fires unconditionally rather than testing cfg.revaluer, because
+// Evaluate has already made that decision: applyShock is not reached when a
+// Revaluer is wired. A condition here would be a second copy of that routing and
+// would be dead in one of its two states.
+func applyVolShock(cov *shockCoverage) { cov.noRevaluerWired() }
 
 // applyPriceShock changes one instrument's MarketValue. A shock
 // targeting an instrument the portfolio does not hold is a no-op —
