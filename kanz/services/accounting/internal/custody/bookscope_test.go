@@ -304,15 +304,31 @@ func TestNewBookScopeRefusesAConfigurationItCannotJustify(t *testing.T) {
 }
 
 func TestParseCustodyAccounts(t *testing.T) {
-	got, err := ParseCustodyAccounts([]string{"PF1:CUST-A:okx-sub-1,okx-sub-2", " PF1:CUST-B:bin-main "})
+	// THE MULTI-ACCOUNT CUSTODIAN IS THE CASE #1006 EXISTS FOR, and until #1029 it
+	// could not be expressed at all: config split this value with env.SplitList,
+	// which splits on the same comma that separates one custodian's accounts, so
+	// the entry was cut in half and the pod exited 2 on the fragment "okx-sub-2".
+	// Entries are separated by WHITESPACE, and the value arrives here whole.
+	got, err := ParseCustodyAccounts("PF1:CUST-A:okx-sub-1,okx-sub-2 PF1:CUST-B:bin-main")
 	if err != nil {
 		t.Fatalf("ParseCustodyAccounts: %v", err)
 	}
 	if len(got["PF1"]["CUST-A"]) != 2 || got["PF1"]["CUST-A"][1] != "okx-sub-2" {
-		t.Errorf("CUST-A accounts = %v", got["PF1"]["CUST-A"])
+		t.Errorf("CUST-A accounts = %v, want both accounts of a two-account custodian", got["PF1"]["CUST-A"])
 	}
 	if len(got["PF1"]["CUST-B"]) != 1 || got["PF1"]["CUST-B"][0] != "bin-main" {
 		t.Errorf("CUST-B accounts = %v", got["PF1"]["CUST-B"])
+	}
+
+	// A manifest writes this across lines in a YAML block scalar, so the entry
+	// separator has to survive newlines and indentation rather than turning them
+	// into empty entries.
+	multiline, err := ParseCustodyAccounts("\n  PF1:CUST-A:okx-sub-1,okx-sub-2\n  PF1:CUST-B:bin-main\n")
+	if err != nil {
+		t.Fatalf("a multi-line declaration was refused: %v", err)
+	}
+	if len(multiline["PF1"]) != 2 {
+		t.Errorf("multi-line declaration parsed %d custodians, want 2: %v", len(multiline["PF1"]), multiline)
 	}
 
 	// A MALFORMED ENTRY IS AN ERROR AND NOT A SKIP: dropping one would un-scope a
@@ -323,12 +339,29 @@ func TestParseCustodyAccounts(t *testing.T) {
 		":CUST-A:okx-sub-1",      // no portfolio
 		"PF1::okx-sub-1",         // no custodian
 		"PF1:CUST-A:okx-sub-1,,", // an empty account id
+		"okx-sub-2",              // the fragment #1029's splitter produced
+		"PF1:CUST-A:okx-sub-1,PF1:CUST-B:bin-main", // comma between ENTRIES, not accounts
 	} {
-		if _, err := ParseCustodyAccounts([]string{bad}); err == nil {
+		if _, err := ParseCustodyAccounts(bad); err == nil {
 			t.Errorf("ParseCustodyAccounts(%q) was accepted", bad)
 		}
 	}
-	if _, err := ParseCustodyAccounts([]string{"PF1:CUST-A:a", "PF1:CUST-A:b"}); err == nil {
+
+	// The two separator mistakes #1029 makes likely are invisible in the fragment
+	// the operator is shown — they never typed "okx-sub-2", the splitter did — so
+	// the refusal has to name the SEPARATOR rather than only the fragment.
+	for _, tc := range []struct{ decl, wantIn string }{
+		{"okx-sub-2", "no ':' at all"},
+		{"PF1:CUST-A:okx-sub-1,PF1:CUST-B:bin-main", "two entries ran together"},
+	} {
+		_, err := ParseCustodyAccounts(tc.decl)
+		if err == nil || !strings.Contains(err.Error(), tc.wantIn) {
+			t.Errorf("ParseCustodyAccounts(%q) does not diagnose the separator (want %q): %v",
+				tc.decl, tc.wantIn, err)
+		}
+	}
+
+	if _, err := ParseCustodyAccounts("PF1:CUST-A:a PF1:CUST-A:b"); err == nil {
 		t.Error("a duplicated (portfolio, custodian) was accepted — one account set would win silently")
 	}
 }

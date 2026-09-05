@@ -88,3 +88,36 @@ func TestLoadFillSubjectsOverride(t *testing.T) {
 		t.Errorf("FillSubjects=%v want %v (trimmed, empties dropped)", cfg.FillSubjects, want)
 	}
 }
+
+// THE CUSTODY DECLARATION MUST REACH ITS PARSER WHOLE (#1029).
+//
+// Nothing in this package covered ACCOUNTING_CUSTODY_ACCOUNTS, and that is how
+// the defect shipped: Load() split it with env.SplitList — comma — while comma is
+// the separator between ONE custodian's exchange accounts, so a custodian holding
+// two of them had its entry cut in half and the pod exited 2 on a bare fragment.
+// #1006's custodian scoping was reachable only for single-account custodians,
+// which is not the shape an institutional portfolio is in.
+//
+// The value is carried RAW because custody.ParseCustodyAccounts owns both levels
+// of the grammar. A split here and an interpretation there is exactly the shape
+// that disagreed.
+func TestLoadCarriesTheCustodyDeclarationWhole(t *testing.T) {
+	const decl = "PF1:CUST-A:okx-sub-1,okx-sub-2 PF1:CUST-B:bin-main"
+	t.Setenv("ACCOUNTING_CUSTODY_PAIRS", "PF1:CUST-A,PF1:CUST-B")
+	t.Setenv("ACCOUNTING_CUSTODY_ACCOUNTS", decl)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CustodyAccounts != decl {
+		t.Errorf("CustodyAccounts=%q, want the declaration unmodified (%q).\n\n"+
+			"Anything this package does to the value is a second interpretation of a grammar that "+
+			"has one owner, and the last one cut a two-account custodian in half.",
+			cfg.CustodyAccounts, decl)
+	}
+	if !reflect.DeepEqual(cfg.CustodyPairs, []string{"PF1:CUST-A", "PF1:CUST-B"}) {
+		t.Errorf("CustodyPairs=%v, want both pairs — a dropped pair is a portfolio nothing reconciles",
+			cfg.CustodyPairs)
+	}
+}
