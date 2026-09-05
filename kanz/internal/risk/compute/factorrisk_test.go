@@ -4,11 +4,13 @@ import (
 	"context"
 	decutil "github.com/eighred/kanz/internal/dec"
 	"math"
+	"strconv"
 	"testing"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/factormodel"
 )
@@ -240,5 +242,84 @@ func TestRegisterFactorRisk_APositionOutsideTheUniverseIsReported(t *testing.T) 
 	if decutil.Float64Or(sysBefore.Value, 0) != decutil.Float64Or(sysAfter.Value, 0) {
 		t.Fatalf("SystematicRisk moved from %.2f to %.2f when D was added — the fixture is not "+
 			"exercising the silent drop this reports", decutil.Float64Or(sysBefore.Value, 0), decutil.Float64Or(sysAfter.Value, 0))
+	}
+}
+
+// THE JOIN BETWEEN THE NUMBER AND THE MODEL (#1039). Before this, a published
+// FactorVaR99 named no method, no model and no as-of: the fitted instance behind
+// it existed for the duration of one call and nothing on the wire referred to it,
+// so the number could be quoted and not reproduced.
+
+func TestRegisterFactorRisk_EveryMeasureCitesTheFittedInstance(t *testing.T) {
+	m := factorTestModel(t)
+	if m.ModelID == "" || m.AsOf.IsZero() {
+		t.Fatalf("fixture model names no instance (%q / %v) — the assertions below would be "+
+			"vacuous", m.ModelID, m.AsOf)
+	}
+	r := DefaultRegistry()
+	RegisterFactorRisk(context.Background(), r, FactorProviders{Model: staticModel{m: m}})
+	ms := ComputeMeasures(factorTestPortfolio(), r, nil)
+
+	for _, name := range []v1.MeasureName{MeasureFactorVaR99, MeasureSystematicRisk, MeasureSpecificRisk} {
+		got, ok := ms.Lookup(name)
+		if !ok {
+			t.Fatalf("%s missing", name)
+		}
+		prov := got.Provenance
+		if !prov.Declared() {
+			t.Errorf("%s declares no model — the OMS gate cannot tell it from an illustrative "+
+				"constant", name)
+			continue
+		}
+		if prov.Method != v1.MethodFactorModel {
+			t.Errorf("%s method=%q want %q", name, prov.Method, v1.MethodFactorModel)
+		}
+		if prov.Method.IsPlaceholder() {
+			t.Errorf("%s is classified as a placeholder — order admission would refuse a real "+
+				"factor decomposition", name)
+		}
+		if prov.ModelID != m.ModelID {
+			t.Errorf("%s model_id=%q want %q — the measure must cite the instance that produced "+
+				"THIS value", name, prov.ModelID, m.ModelID)
+		}
+		if !prov.ModelAsOf.Equal(m.AsOf) {
+			t.Errorf("%s model_as_of=%v want %v", name, prov.ModelAsOf, m.AsOf)
+		}
+		if prov.Params["factors"] != strconv.Itoa(len(m.Factors)) {
+			t.Errorf("%s params[factors]=%q want %d — the covariance dimension a retrieved "+
+				"snapshot must match", name, prov.Params["factors"], len(m.Factors))
+		}
+	}
+
+	// The confidence belongs to the VaR and to nothing else: stating it on the two
+	// risk measures would attach a parameter they do not use.
+	fvar, _ := ms.Lookup(MeasureFactorVaR99)
+	if fvar.Provenance.Params["confidence"] != "0.99" {
+		t.Errorf("FactorVaR99 params[confidence]=%q want 0.99", fvar.Provenance.Params["confidence"])
+	}
+	sys, _ := ms.Lookup(MeasureSystematicRisk)
+	if _, present := sys.Provenance.Params["confidence"]; present {
+		t.Error("SystematicRisk declares a confidence it does not use")
+	}
+}
+
+// A ZERO FROM A MISSING MODEL STILL DECLARES ITS METHOD AND STILL NAMES NO
+// INSTANCE. Declaring neither would leave the zero indistinguishable from a book
+// with no factor risk on the one field a consumer can act on; declaring a
+// ModelID would name an instance that does not exist.
+func TestRegisterFactorRisk_NoModelDeclaresTheMethodAndNoInstance(t *testing.T) {
+	r := DefaultRegistry()
+	RegisterFactorRisk(context.Background(), r, FactorProviders{Model: staticModel{m: nil}})
+	ms := ComputeMeasures(factorTestPortfolio(), r, nil)
+
+	for _, name := range []v1.MeasureName{MeasureFactorVaR99, MeasureSystematicRisk, MeasureSpecificRisk} {
+		got, _ := ms.Lookup(name)
+		if got.Provenance.Method != v1.MethodFactorModel {
+			t.Errorf("%s method=%q want %q even with no model", name, got.Provenance.Method, v1.MethodFactorModel)
+		}
+		if got.Provenance.ModelID != "" || !got.Provenance.ModelAsOf.IsZero() {
+			t.Errorf("%s names instance %q/%v with no model fitted", name,
+				got.Provenance.ModelID, got.Provenance.ModelAsOf)
+		}
 	}
 }

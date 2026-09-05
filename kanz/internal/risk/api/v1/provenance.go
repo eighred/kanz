@@ -92,6 +92,14 @@ const (
 	// the answer every deployment with no market-data DSN serves.
 	MethodPlaceholder1PctGross MeasureMethod = "placeholder_1pct_gross"
 
+	// MethodFactorModel is a multi-factor decomposition — FactorVaR99,
+	// SystematicRisk, SpecificRisk — read off a fitted factormodel.Model. A real
+	// model, and the ONLY method in this vocabulary for which ModelID and
+	// ModelAsOf are not empty: it is the one measure family this platform fits
+	// rather than evaluates, so it is the one whose output can only be reproduced
+	// by naming the instance behind it (#1039).
+	MethodFactorModel MeasureMethod = "factor_model"
+
 	// MethodNetExposurePlaceholder is the signed base-currency sum served under
 	// the name Delta — the "every $1 of position is $1 of delta to spot"
 	// assumption, which holds for cash equities and is wrong for derivatives.

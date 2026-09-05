@@ -189,6 +189,8 @@ data:
           { stream: { account: acme, subject: "risk.position.>" },      prefix: "tfact.acme" }
           { stream: { account: acme, subject: "risk.portfolio.>" },     prefix: "tfact.acme" }
           { stream: { account: acme, subject: "risk.exposure.>" },      prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "risk.curve.>" },         prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "risk.factor.>" },        prefix: "tfact.acme" }
           { stream: { account: acme, subject: "accounting.>" },         prefix: "tfact.acme" }
           { stream: { account: acme, subject: "compliance.breach.>" },  prefix: "tfact.acme" }
           { stream: { account: acme, subject: "compliance.mandate.>" }, prefix: "tfact.acme" }
@@ -520,8 +522,15 @@ data:
           # that produced.
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine"
             permissions: {
-              # RISK-10's Publisher (internal/risk/publish/publish.go) emits the
-              # engine's own two output FACTs. It subscribes the three RISK-04
+              # RISK-10's Publisher (internal/risk/publish) emits the engine's own
+              # FOUR output FACTs: the two RISK-10 results (publish.go) and the
+              # two MODEL ARTIFACTS the results were computed FROM
+              # (modelrecord.go, #1039) — risk.curve.calibrated, published by the
+              # calibration scheduler when RISK_ENGINE_CALIBRATION_RATES is set,
+              # and risk.factor.model_fitted, published once per fit cadence when
+              # RISK_ENGINE_MARKETDATA_DATABASE_URL is. Neither artifact subject
+              # needs a dlq.* grant: nothing subscribes to them here, and a DLQ
+              # grant is a property of a CONSUMER wired with bus.WithDLQ. It subscribes the three RISK-04
               # state subjects it ingests (internal/risk/app/ingest.go's
               # stateSubjects: EventTypePortfolioRevalued,
               # subject.PositionAll wildcard, EventTypePortfolioSnapshot) and,
@@ -536,6 +545,7 @@ data:
               publish: {
                 allow: [
                   "risk.portfolio.exposure_recomputed", "risk.portfolio.measures_computed",
+                  "risk.curve.calibrated", "risk.factor.model_fitted",
                   "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
                   "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
                 ]
@@ -1001,7 +1011,8 @@ data:
                 allow: [
                   "order.>", "strategy.>", "execution.>", "accounting.>", "settlement.>",
                   "compliance.breach.>", "compliance.mandate.>", "risk.portfolio.>", "risk.exposure.>",
-                  "risk.signal.>", "risk.command.>", "risk.position.>", "inference.>", "platform.>",
+                  "risk.signal.>", "risk.command.>", "risk.position.>",
+                  "risk.curve.>", "risk.factor.>", "inference.>", "platform.>",
                   "data.>", "_INBOX.>", "$JS.API.>",
                 ]
               }
@@ -1717,6 +1728,15 @@ data:
           { stream: "risk.position.>" }
           { stream: "risk.portfolio.>" }
           { stream: "risk.exposure.>" }
+          # THE MODEL ARTIFACTS THE TENANT'S OWN NUMBERS WERE COMPUTED FROM
+          # (#1039). Exported for the same reason risk.portfolio.> is: without a
+          # matching export the tenant's calibrated curves and fitted models cross
+          # no boundary, audit never records them, and every pod stays Ready while
+          # that tenant's risk history becomes unreproducible. The import half in
+          # the __system__ account names exactly this pair — both sides must name
+          # the same set or the bridge is one-directional and silent.
+          { stream: "risk.curve.>" }
+          { stream: "risk.factor.>" }
           { stream: "accounting.>" }
           { stream: "compliance.breach.>" }
           { stream: "compliance.mandate.>" }
@@ -1822,6 +1842,7 @@ data:
               publish: {
                 allow: [
                   "risk.portfolio.exposure_recomputed", "risk.portfolio.measures_computed",
+                  "risk.curve.calibrated", "risk.factor.model_fitted",
                   "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
                   "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
                 ]
@@ -1867,6 +1888,7 @@ data:
               publish: {
                 allow: [
                   "risk.portfolio.exposure_recomputed", "risk.portfolio.measures_computed",
+                  "risk.curve.calibrated", "risk.factor.model_fitted",
                   "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
                   "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
                 ]
@@ -2062,7 +2084,8 @@ data:
                 allow: [
                   "order.>", "strategy.>", "execution.>", "accounting.>", "settlement.>",
                   "compliance.breach.>", "compliance.mandate.>", "risk.portfolio.>", "risk.exposure.>",
-                  "risk.signal.>", "risk.command.>", "risk.position.>", "inference.>", "platform.>",
+                  "risk.signal.>", "risk.command.>", "risk.position.>",
+                  "risk.curve.>", "risk.factor.>", "inference.>", "platform.>",
                   "data.>", "_INBOX.>", "$JS.API.>",
                 ]
               }

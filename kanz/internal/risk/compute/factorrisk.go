@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	decutil "github.com/eighred/kanz/internal/dec"
+	"strconv"
 	"time"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
@@ -167,7 +168,18 @@ func factorMeasure(ctx context.Context, providers FactorProviders, name v1.Measu
 		zero := func() v1.Measure {
 			cov.ExcludeWhole(SkipNoModel)
 			skipFactor(providers, "", SkipNoModel)
-			return v1.Measure{Name: name, Value: floatToDecimal(0, factorRiskExp), Coverage: cov.Result()}
+			// THE METHOD IS DECLARED AND THE INSTANCE IS NOT, and the pair is the
+			// whole message: this number is served by the factor model, and no
+			// fitted model stood behind it. Declaring neither would leave the zero
+			// indistinguishable from a book with no factor risk on the one field a
+			// consumer can act on; declaring a ModelID would name an instance that
+			// does not exist.
+			return v1.Measure{
+				Name:       name,
+				Value:      floatToDecimal(0, factorRiskExp),
+				Coverage:   cov.Result(),
+				Provenance: v1.MeasureProvenance{Method: v1.MethodFactorModel},
+			}
 		}
 		if providers.Model == nil {
 			return zero()
@@ -177,14 +189,43 @@ func factorMeasure(ctx context.Context, providers FactorProviders, name v1.Measu
 			return zero()
 		}
 		values := factorValues(p, model, providers, &cov)
+		prov := factorProvenance(model, name)
 		switch name {
 		case MeasureFactorVaR99:
-			return v1.Measure{Name: name, Value: floatToDecimal(model.VaR(values, factorVaRConfidence), factorVaRExp), Coverage: cov.Result()}
+			return v1.Measure{Name: name, Value: floatToDecimal(model.VaR(values, factorVaRConfidence), factorVaRExp), Coverage: cov.Result(), Provenance: prov}
 		case MeasureSystematicRisk:
-			return v1.Measure{Name: name, Value: floatToDecimal(model.Risk(values).Systematic, factorRiskExp), Coverage: cov.Result()}
+			return v1.Measure{Name: name, Value: floatToDecimal(model.Risk(values).Systematic, factorRiskExp), Coverage: cov.Result(), Provenance: prov}
 		default: // MeasureSpecificRisk
-			return v1.Measure{Name: name, Value: floatToDecimal(model.Risk(values).Specific, factorRiskExp), Coverage: cov.Result()}
+			return v1.Measure{Name: name, Value: floatToDecimal(model.Risk(values).Specific, factorRiskExp), Coverage: cov.Result(), Provenance: prov}
 		}
+	}
+}
+
+// factorProvenance names the fitted INSTANCE behind one factor measure — the
+// join between a published number and the FactorModelSnapshot recorded on
+// risk.factor.model_fitted (#1039).
+//
+// ModelID and ModelAsOf are copied off the model rather than recomputed from
+// configuration: the measure must cite the instance that produced THIS value,
+// and a second derivation of "which model is live" is how the citation and the
+// artifact come to disagree.
+//
+// Params carry only what an operator needs to re-run the arithmetic on top of a
+// retrieved model, and nothing that scales with the book — the low-cardinality
+// contract MeasureProvenance.Params states. The factor count is the covariance
+// dimension the retrieved snapshot must match; the confidence applies only to
+// the VaR measure, and stating it on the two risk measures would attach a
+// parameter they do not use.
+func factorProvenance(model *factormodel.Model, name v1.MeasureName) v1.MeasureProvenance {
+	params := map[string]string{"factors": strconv.Itoa(len(model.Factors))}
+	if name == MeasureFactorVaR99 {
+		params["confidence"] = strconv.FormatFloat(factorVaRConfidence, 'f', -1, 64)
+	}
+	return v1.MeasureProvenance{
+		Method:    v1.MethodFactorModel,
+		ModelID:   model.ModelID,
+		ModelAsOf: model.AsOf,
+		Params:    params,
 	}
 }
 

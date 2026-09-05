@@ -52,6 +52,17 @@ type Config struct {
 	StatFactors int
 	// Ridge regularizes the cross-sectional OLS. 0 ⇒ DefaultRidge.
 	Ridge float64
+	// ModelID overrides the id Fit stamps on the fitted model. Empty ⇒
+	// DefaultModelID(cfg), which encodes the estimation parameters so a
+	// configuration change cannot silently redefine an existing id.
+	ModelID string
+}
+
+func (c Config) modelID() string {
+	if c.ModelID != "" {
+		return c.ModelID
+	}
+	return DefaultModelID(c)
 }
 
 func (c Config) window() int {
@@ -86,6 +97,19 @@ type Providers struct {
 // asOf. The universe is sorted internally for a deterministic factor model
 // (same inputs ⇒ identical model, the EVT-21d replay property).
 func Fit(ctx context.Context, cfg Config, instruments []string, asOf time.Time, p Providers) (*Model, error) {
+	m, err := fit(ctx, cfg, instruments, asOf, p)
+	if err != nil {
+		return nil, err
+	}
+	// STAMPED HERE, ON THE ONE PATH EVERY PRODUCTION FIT TAKES. The estimators
+	// assemble matrices and know neither the configuration's identity nor the
+	// as-of the caller asked for; a model that leaves this function unnamed is a
+	// number nobody can reproduce, which is the defect #1039 records.
+	m.ModelID, m.AsOf = cfg.modelID(), asOf
+	return m, nil
+}
+
+func fit(ctx context.Context, cfg Config, instruments []string, asOf time.Time, p Providers) (*Model, error) {
 	if p.Returns == nil {
 		return nil, fmt.Errorf("factormodel: a ReturnsProvider is required")
 	}

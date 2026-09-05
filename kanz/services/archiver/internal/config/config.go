@@ -35,6 +35,14 @@ var DefaultSubjects = []string{
 	"risk.signal.>",
 	"risk.command.>",
 	"risk.position.>",
+	// risk.curve.> / risk.factor.> (#1039): the model artifacts a risk number was
+	// computed FROM. Archived for the same reason risk.portfolio.> is, and with a
+	// sharper consequence: the number is on risk.portfolio.> and NOTHING ELSE
+	// holds the curve or the fitted model — the engine's own stores are in-memory
+	// and start empty, so an unarchived artifact is one nobody can ever recover.
+	// Leaving these out would archive the answer and discard the working.
+	"risk.curve.>",
+	"risk.factor.>",
 	"inference.>",
 	"platform.>",
 	"data.>",

@@ -113,6 +113,23 @@ data:
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes
+    # THE MODEL ARTIFACTS A RISK NUMBER WAS COMPUTED FROM (#1039). Beside
+    # risk.portfolio and on the SAME retention, deliberately: these are the inputs
+    # that explain the output on that topic, and ageing them faster would leave a
+    # VaR that can be quoted and not reproduced — which is the state that made
+    # them necessary. Permanence is the lakehouse's job here as everywhere else.
+    #
+    # DELETE, NOT COMPACT, and that is the whole point. Both are keyed by the
+    # artifact's identity (currency; model_id) and compaction retains only the
+    # newest value per key — which would keep exactly one curve per currency and
+    # one model per id, discarding every earlier instance. The earlier instances
+    # ARE the record: reproducing last Tuesday's number needs last Tuesday's
+    # model, not today's.
+    #
+    # 3 partitions, not 6: the key space is currencies and model ids, which is
+    # tens of keys against risk.portfolio's every portfolio.
+    risk.curve                 3   delete   2592000000  yes
+    risk.factor                3   delete   2592000000  yes
     alternatives.commitment    3   delete   604800000   yes
 
     # PLATFORM LIFECYCLE -> 30d + a DLQ. Authz/mode/compliance-config changes are
