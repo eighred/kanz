@@ -10,7 +10,7 @@ gateway_secret="${CAPITALPATH_GATEWAY_SECRET:-kanz-capitalpath-gateway}"
 ledger_secret="${CAPITALPATH_LEDGER_SECRET:-kanz-capitalpath-ledger}"
 
 required=(
-  KANZ_CAPITALPATH_IMAGE CAPITALPATH_DR_ATTESTATION_FILE
+  KANZ_CAPITALPATH_IMAGE KANZ_TESTNET_ECR_REGISTRY CAPITALPATH_DR_ATTESTATION_FILE
   CAPITALPATH_GATEWAY_URL CAPITALPATH_ENVIRONMENT CAPITALPATH_PORTFOLIO
   CAPITALPATH_INSTRUMENT CAPITALPATH_VENUE CAPITALPATH_VENUE_ACCOUNT
   CAPITALPATH_POSTURE CAPITALPATH_QUANTITY CAPITALPATH_LIMIT_PRICE
@@ -33,8 +33,14 @@ for cidr_name in CAPITALPATH_GATEWAY_CIDR CAPITALPATH_LEDGER_CIDR; do
     exit 2
   fi
 done
-if [[ ! "$KANZ_CAPITALPATH_IMAGE" =~ ^ghcr\.io/eighred/kanz-capitalpath@sha256:[0-9a-f]{64}$ ]]; then
-  echo "KANZ_CAPITALPATH_IMAGE must be the released ghcr.io/eighred/kanz-capitalpath image pinned by sha256 digest" >&2
+if [[ ! "$KANZ_TESTNET_ECR_REGISTRY" =~ ^[0-9]{12}\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com$ ]]; then
+  echo "KANZ_TESTNET_ECR_REGISTRY must be one private ap-northeast-1 ECR registry" >&2
+  exit 2
+fi
+image_prefix="${KANZ_TESTNET_ECR_REGISTRY}/kanz-capitalpath@"
+image_digest="${KANZ_CAPITALPATH_IMAGE#"$image_prefix"}"
+if [[ "$KANZ_CAPITALPATH_IMAGE" != "$image_prefix"* ]] || [[ ! "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "KANZ_CAPITALPATH_IMAGE must be the Tokyo ECR kanz-capitalpath image pinned by sha256 digest" >&2
   exit 2
 fi
 if [[ ! -r "$CAPITALPATH_DR_ATTESTATION_FILE" ]]; then
@@ -78,8 +84,6 @@ kind: ServiceAccount
 metadata:
   name: kanz-capitalpath
   namespace: ${namespace}
-imagePullSecrets:
-  - name: ghcr-pull
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
