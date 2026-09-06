@@ -1,7 +1,6 @@
 # Editor state. Nothing editor-specific is tracked in this repo: the build tags,
-# GOFLAGS and GOTMPDIR that a working setup needs live in CLAUDE.md’s
-# “Windows environment” section, so a clone carries no launch/run configuration and none
-# should be committed.
+# GOFLAGS and GOTMPDIR that a working setup needs live in the conditional
+# kanz-verify Windows reference, so a clone carries no editor launch config.
 .vscode/
 
 # Project-local Go temp dir. Windows Application Control intermittently blocks
@@ -21,9 +20,6 @@ bin/
 /kanz/kanz-provisioner
 /kanz/kanz-provisioner.exe
 
-# Agent worktrees (git worktree checkouts; never part of a commit)
-.claude/worktrees/
-
 # Compiled binaries. `go build ./cmd/<x>` from the module root drops the binary
 # beside the source, and one reached a commit that way (#410's branch). Untracked
 # is not enough — `git add -A` takes it.
@@ -39,3 +35,16 @@ bin/
 # three of them (1,474 lines of duplicated source, CRLF-rewritten by the
 # restore) — untracked was not enough, because `git add -A` took them.
 .mutbak/
+
+# Terraform working data and state. State is an operational secret even when a
+# module declares no secret inputs, and must never enter source control.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

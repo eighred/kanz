@@ -174,7 +174,7 @@ spec:
       shareProcessNamespace: true
       containers:
         - name: spire-server
-          image: ghcr.io/spiffe/spire-server:1.9.6
+          image: ghcr.io/spiffe/spire-server:1.15.3@sha256:3aa2dce70fc1098d6718a87c629aa8cadb83e4672c71dd63c5575ea5d0603789
           args: ["-config", "/run/spire/config/server.conf"]
           ports:
             - containerPort: 8081
@@ -192,7 +192,7 @@ spec:
             - { name: spire-server-socket, mountPath: /tmp/spire-server/private }
         # Controller-manager sidecar: declarative registration via CRDs.
         - name: spire-controller-manager
-          image: ghcr.io/spiffe/spire-controller-manager:0.5.0
+          image: ghcr.io/spiffe/spire-controller-manager:0.7.0@sha256:fb3bfc8f98f24c769004543d6b760142380c8f2d3a0354391ee2bfdd48039e59
           args: ["--config=/run/spire/controller-manager/controller-manager-config.yaml"]
           ports:
             # controller-runtime serves metrics on :8080 in this version (see the

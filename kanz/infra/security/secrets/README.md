@@ -11,15 +11,15 @@ lives in a manifest, a pod env var, or an etcd `Secret`.
 |---|---|
 | **Vault**, not k8s `Secret`s | k8s Secrets are base64 in etcd (plaintext at rest without KMS etcd-encryption) and readable by anyone with `get secret`. Vault gives versioning, audit, dynamic creds, and one rotation surface. |
 | **CSI file mount**, not env vars | env vars leak into `/proc/<pid>/environ`, crash dumps, and child processes. A tmpfs CSI mount is pod-scoped, never persisted, torn down with the pod. |
-| **SPIFFE/JWT auth to Vault** | Workloads authenticate with their SPIFFE JWT-SVID (SEC-01a's `default_jwt_svid_ttl=5m`) against Vault's `jwt` backend, validated via the SPIRE OIDC discovery endpoint. Secret access is gated on the **same attested identity** as mTLS transport (SEC-01b) — no second static credential to manage or leak. |
-| **Cloud KMS root** | One KMS key both auto-unseals Vault and backs the SPIRE `UpstreamAuthority`. Neither the Vault unseal key nor the SPIRE root CA key ever exists as recoverable plaintext. |
+| **Bound workload auth to Vault** | Vault OSS does not provide native SPIFFE auth. The CSI provider requests an audience-bound Kubernetes ServiceAccount token for the consuming pod; Vault binds its role to the exact namespace and ServiceAccount. SPIFFE remains the mTLS identity boundary. |
+| **Cloud KMS auto-unseal** | A dedicated, rotation-enabled KMS key wraps Vault's barrier key. The EC2 role has only `Encrypt`, `Decrypt`, and `DescribeKey`; the node keeps IMDSv2 hop limit 1 and only the host-networked Vault pod can obtain that role. |
 
 ## What plaintext config was removed
 
-The only genuine runtime secret in the platform is the **Postgres DSN** (risk
-state PERS-01, schema registry EVT-16a, and the HA SPIRE datastore). Everything
-else — peer auth, NATS/Kafka transport — is mTLS, where the SVID *is* the
-credential, so there is no password to store.
+Runtime secrets include Postgres/Redis credentials, venue testnet API
+credentials, identity signing material, webhook configuration, and any enabled
+model-provider key. Peer authentication and NATS/Kafka transport use rotating
+SVIDs instead of passwords.
 
 - `risk-engine` / `schema-registry`: `config.secret()` now reads the DSN from
   `<VAR>_FILE` (the CSI mount) in preference to the plaintext `<VAR>` env var.
@@ -34,35 +34,81 @@ credential, so there is no password to store.
 | `vault.yaml` | Vault StatefulSet — KMS auto-unseal, Raft storage, SVID-fronted TLS listener |
 | `csi.yaml` | Secrets Store CSI Driver + `vault-csi-provider` DaemonSet + `CSIDriver` |
 | `secretproviderclass.yaml` | DSN `SecretProviderClass` per consumer + the consumer pod patch |
-| `spire-upstream.yaml` | SPIRE server KMS-`UpstreamAuthority` + postgres-DataStore overlay (SEC-01a follow-up) |
+| `spire-upstream.yaml` | Undeployed SPIRE HA overlay; its upstream CA design remains blocked pending a cloud-identity redesign for this non-EKS node |
+| `../../../../tools/bootstrap-testnet-venues.sh` | Interactive, stdin-only Vault bootstrap and venue-credential rotation payload; contains no credential values |
 
 ## Deploy
 
 ```sh
+kubectl apply -f crds/             # vendored Secrets Store CSI v1.6.0 CRDs
 kubectl apply -f csi.yaml          # driver + Vault provider (once per cluster)
-kubectl apply -f vault.yaml        # Vault (unseals itself via KMS)
-# one-time Vault bootstrap (init writes recovery keys to the KMS-wrapped output):
-vault operator init -recovery-shares=1 -recovery-threshold=1
+kubectl apply -f vault.yaml        # Vault starts sealed and uninitialized
+```
+
+Initialize exactly once from an interactive operator session. `operator init`
+prints five recovery shares and the initial root token in plaintext. It does
+**not** store them in KMS. Distribute at least three shares to separate approved
+custodians and put the initial root token in the approved password manager only
+for the bootstrap window. Never paste any of these values into a ticket, chat,
+shell command line, repository file, or automation log.
+
+```sh
+kubectl -n vault exec -it vault-0 -c vault -- sh
+export VAULT_ADDR=https://127.0.0.1:8200
+export VAULT_TLS_SERVER_NAME=vault.vault.svc
+export VAULT_CACERT=/run/spire/certs/bundle.crt
+umask 077
+vault operator init -recovery-shares=5 -recovery-threshold=3
+read -rsp 'Initial root token: ' VAULT_TOKEN; export VAULT_TOKEN; echo
+
+vault audit enable file file_path=/vault/data/audit.log mode=0600
 vault secrets enable -path=kv kv-v2
 
-# JWT auth bound to SPIRE identities (step 4):
-vault auth enable -path=jwt-spiffe jwt
-vault write auth/jwt-spiffe/config \
-  oidc_discovery_url="https://spire-oidc.spire-system.svc" \
-  default_role="deny"
-vault write auth/jwt-spiffe/role/risk-engine \
-  role_type=jwt user_claim=sub bound_audiences=vault \
-  bound_subject="spiffe://kanz.internal/ns/kanz-services/sa/risk-engine" \
-  token_policies=risk-engine-read token_ttl=5m
+# Kubernetes auth bound to one namespace + ServiceAccount per workload.
+vault auth enable kubernetes
+vault write auth/kubernetes/config \
+  kubernetes_host="https://kubernetes.default.svc:443"
+vault write auth/kubernetes/role/risk-engine \
+  bound_service_account_names=risk-engine \
+  bound_service_account_namespaces=kanz-services \
+  audience=vault token_policies=risk-engine-read token_ttl=5m
 
 kubectl apply -f secretproviderclass.yaml
 ```
 
+Create the least-privilege policies before their roles and revoke the initial
+root token after a tested break-glass operator policy exists. A role must read
+only its own `kv/data/kanz/<service>` and `kv/metadata/kanz/<service>` paths.
+The `vault` ServiceAccount has only Kubernetes TokenReview delegation; it has no
+permission to read Kubernetes Secrets.
+
 Seed a secret:
 
 ```sh
-vault kv put kv/kanz/risk-engine dsn="postgres://risk:…@pg.kanz-data.svc/risk?sslmode=verify-full"
+read -rsp 'DSN: ' dsn; echo
+printf '%s' "$dsn" | vault kv put kv/kanz/risk-engine dsn=-
+dsn=''
 ```
+
+### Tokyo venue testnet bootstrap and rotation
+
+From Windows, use the repository-owned operator entry point. It resolves the
+current node from Terraform state, stages the secret-free shell payload through
+SSM, opens an interactive session, and verifies a completion marker afterward:
+
+```powershell
+.\tools\Invoke-VenueSecrets.ps1 -Mode Bootstrap
+.\tools\Invoke-VenueSecrets.ps1 -Mode Rotate
+```
+
+Both modes prompt with hidden input. Credential values travel only on the
+interactive session's stdin and Vault CLI stdin; they are absent from process
+arguments, SSM command documents, Terraform state, Kubernetes objects and local
+files. `Bootstrap` also configures audit, KV v2 and the two exact Kubernetes
+roles. `Rotate` only creates new KV versions. Until a durable human operator
+authentication method is commissioned, the initial root token remains an
+offline break-glass credential and must never be pasted into chat or a shell
+command.
 
 ## Secret-rotation runbook
 
@@ -72,8 +118,9 @@ let pods pick it up. There is never a window where a human holds plaintext.
 ### Application DB credential (`kv/kanz/<svc>`)
 
 1. Create the new Postgres role/password (or `ALTER ROLE … PASSWORD`).
-2. `vault kv put kv/kanz/risk-engine dsn="postgres://…<new>…"` — Vault keeps the
-   prior version, so a rollback is `vault kv rollback`.
+2. Read the replacement with hidden input and pipe it to
+   `vault kv put kv/kanz/risk-engine dsn=-`; never put it in argv. Vault keeps
+   the prior version, so a rollback is `vault kv rollback`.
 3. Recycle consumers: `kubectl -n kanz-services rollout restart deploy/risk-engine`.
    Each new pod re-mounts the CSI volume and reads the new DSN at boot. (Enable
    the provider `--rotation-poll-interval` to refresh the file in place without
@@ -82,16 +129,17 @@ let pods pick it up. There is never a window where a human holds plaintext.
 
 ### Vault unseal / KMS key
 
-KMS-managed: rotate the underlying `alias/kanz-vault-unseal` key in the cloud
-console; KMS keeps old versions for decrypt, so running Vault is unaffected and
-the next restart unseals against the new version. No Vault action required.
+KMS-managed: automatic annual rotation is enabled on
+`alias/kanz-vault-unseal`. KMS retains prior key material for decrypt, so a
+restart can unwrap existing Vault state. Do not replace or schedule deletion of
+the key as an ordinary rotation action.
 
-### SPIRE upstream root (KMS-backed CA)
+### SPIRE upstream root
 
-Rotate the `kanz/spire/upstream-ca-*` material in KMS/Secrets Manager, then
-`kubectl -n spire-system rollout restart statefulset/spire-server`. Leaf SVIDs
-keep rotating on their 1h TTL underneath; the SEC-01b go-spiffe clients track
-the new bundle automatically (no client action).
+The deployed testnet still uses SPIRE's existing local root. Do not apply
+`spire-upstream.yaml`: its AWS Secrets Manager upstream requires a dedicated
+workload-cloud-identity boundary that this non-EKS node does not yet provide.
+Track and review that migration independently from Vault auto-unseal.
 
 ### Workload identity (SVID)
 

@@ -1,27 +1,12 @@
-# Vendored from https://github.com/spiffe/spire-controller-manager, tag v0.5.0
+# Vendored from https://github.com/spiffe/spire-controller-manager, tag v0.7.0
 # Source path: config/crd/bases/spire.spiffe.io_clusterspiffeids.yaml
-#
-# registration.yaml declares a ClusterSPIFFEID custom resource. That resource
-# is meaningless without this CustomResourceDefinition installed first — on a
-# fresh cluster `kubectl apply -f registration.yaml` fails with
-# `no matches for kind "ClusterSPIFFEID"` because no CRD ever taught the API
-# server the shape. This file is that CRD, vendored rather than fetched at
-# apply time so the rig still rebuilds from the repository alone.
-#
-# The version here (v0.5.0) MUST match the spire-controller-manager image tag
-# in ../spire-server.yaml — the controller-manager binary and the CRD schema
-# it reconciles against are versioned together upstream. Do not bump one
-# without the other. kanz/test/arch/spire_crd_version_test.go fails the build
-# if they drift apart.
-#
-# Do not hand-edit. To re-vendor at a new tag:
-#   curl -sL https://raw.githubusercontent.com/spiffe/spire-controller-manager/<tag>/config/crd/bases/spire.spiffe.io_clusterspiffeids.yaml
+# Do not edit locally; update the controller image, CRDs, and RBAC as one unit.
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.14.0
+    controller-gen.kubebuilder.io/version: v0.19.0
   name: clusterspiffeids.spire.spiffe.io
 spec:
   group: spire.spiffe.io
@@ -83,6 +68,10 @@ spec:
                 description: Downstream indicates that the entry describes a downstream
                   SPIRE server.
                 type: boolean
+              fallback:
+                description: Apply this ID only if there are no other matching non
+                  fallback ClusterSPIFFEIDs.
+                type: boolean
               federatesWith:
                 description: |-
                   FederatesWith is a list of trust domain names that workloads that
@@ -90,6 +79,9 @@ spec:
                 items:
                   type: string
                 type: array
+              hint:
+                description: Set the entry hint
+                type: string
               jwtTtl:
                 description: |-
                   JWTTTL indicates an upper-bound time-to-live for JWT SVIDs minted for this
@@ -126,11 +118,13 @@ spec:
                           items:
                             type: string
                           type: array
+                          x-kubernetes-list-type: atomic
                       required:
                       - key
                       - operator
                       type: object
                     type: array
+                    x-kubernetes-list-type: atomic
                   matchLabels:
                     additionalProperties:
                       type: string
@@ -172,11 +166,13 @@ spec:
                           items:
                             type: string
                           type: array
+                          x-kubernetes-list-type: atomic
                       required:
                       - key
                       - operator
                       type: object
                     type: array
+                    x-kubernetes-list-type: atomic
                   matchLabels:
                     additionalProperties:
                       type: string
@@ -255,6 +251,9 @@ spec:
                     type: integer
                 type: object
             type: object
+        required:
+        - metadata
+        - spec
         type: object
     served: true
     storage: true

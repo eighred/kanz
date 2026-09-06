@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec > >(tee -a /var/log/kanz-bootstrap.log | logger -t kanz-bootstrap -s 2>/dev/console) 2>&1
+
+readonly data_volume_id="${data_volume_id}"
+readonly data_serial="$${data_volume_id//-/}"
+readonly k3s_version="${k3s_version}"
+readonly install_commit="${k3s_install_commit}"
+readonly install_sha="${k3s_install_sha}"
+readonly install_path="/var/tmp/k3s-install.sh"
+
+dnf install -y jq nvme-cli xfsprogs
+
+data_device=""
+for _ in $(seq 1 300); do
+  data_device="$(lsblk -dpno NAME,SERIAL | awk -v serial="$${data_serial}" '$2 == serial { print $1; exit }')"
+  if [[ -n "$${data_device}" ]]; then
+    break
+  fi
+  sleep 2
+done
+if [[ -z "$${data_device}" ]]; then
+  echo "attached data volume was not discovered" >&2
+  exit 1
+fi
+
+if ! blkid "$${data_device}" >/dev/null 2>&1; then
+  mkfs.xfs -L KANZ_DATA "$${data_device}"
+fi
+mkdir -p /var/lib/rancher
+data_uuid="$(blkid -s UUID -o value "$${data_device}")"
+if ! grep -q "UUID=$${data_uuid}" /etc/fstab; then
+  echo "UUID=$${data_uuid} /var/lib/rancher xfs defaults,nofail 0 2" >> /etc/fstab
+fi
+mountpoint -q /var/lib/rancher || mount /var/lib/rancher
+
+curl --fail --location --proto '=https' --tlsv1.2 \
+  "https://raw.githubusercontent.com/k3s-io/k3s/$${install_commit}/install.sh" \
+  --output "$${install_path}"
+echo "$${install_sha}  $${install_path}" | sha256sum --check --strict
+chmod 0700 "$${install_path}"
+
+INSTALL_K3S_VERSION="$${k3s_version}" \
+INSTALL_K3S_EXEC="server --cluster-init --disable traefik --disable servicelb --secrets-encryption --write-kubeconfig-mode 0600 --etcd-snapshot-retention 7 --etcd-snapshot-schedule-cron '0 */6 * * *'" \
+  "$${install_path}"
+
+rm -f "$${install_path}"
+systemctl enable --now amazon-ssm-agent
+systemctl is-active --quiet k3s
+for _ in $(seq 1 120); do
+  if /usr/local/bin/k3s kubectl get nodes -o name 2>/dev/null | grep -q '^node/'; then
+    break
+  fi
+  sleep 2
+done
+/usr/local/bin/k3s kubectl get nodes -o name | grep -q '^node/'
+/usr/local/bin/k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+touch /var/lib/rancher/.kanz-bootstrap-complete

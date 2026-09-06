@@ -99,7 +99,7 @@ spec:
               exit 1
       containers:
         - name: spire-agent
-          image: ghcr.io/spiffe/spire-agent:1.9.6
+          image: ghcr.io/spiffe/spire-agent:1.15.3@sha256:0d9c792d7f409b748d3a1fc93fe70b6d1450474c177d2a731ddc36e97a17e9fe
           args: ["-config", "/run/spire/config/agent.conf"]
           livenessProbe:
             httpGet: { path: /live, port: 8083 }
@@ -117,7 +117,7 @@ spec:
         # SPIFFE CSI driver: presents the agent socket as a CSI volume so
         # workloads mount it without a hostPath of their own.
         - name: spiffe-csi-driver
-          image: ghcr.io/spiffe/spiffe-csi-driver:0.2.6
+          image: ghcr.io/spiffe/spiffe-csi-driver:0.2.13@sha256:f2021bc5705741ad926ccb73619c65bd3ba3385b24c9fa63ab5b87701ad8a3a6
           # -node-id is required; the driver refuses to start without it
           # ("node ID is required"). It comes from the node the DaemonSet pod
           # landed on, via the downward API.

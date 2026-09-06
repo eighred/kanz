@@ -39,7 +39,10 @@ rules:
   # Controller-manager reconciles the SPIFFE CRDs and publishes the trust bundle.
   - apiGroups: ["spire.spiffe.io"]
     resources: ["clusterspiffeids", "clusterfederatedtrustdomains", "clusterstaticentries"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["create", "delete", "get", "list", "watch", "update", "patch"]
+  - apiGroups: ["spire.spiffe.io"]
+    resources: ["clusterspiffeids/finalizers", "clusterfederatedtrustdomains/finalizers", "clusterstaticentries/finalizers"]
+    verbs: ["update"]
   - apiGroups: ["spire.spiffe.io"]
     resources: ["clusterspiffeids/status", "clusterfederatedtrustdomains/status", "clusterstaticentries/status"]
     verbs: ["get", "update", "patch"]

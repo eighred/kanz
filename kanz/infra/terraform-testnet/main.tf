@@ -1,0 +1,389 @@
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+data "aws_ssm_parameter" "al2023_x86_64" {
+  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+}
+
+data "aws_caller_identity" "current" {}
+
+locals {
+  availability_zone = data.aws_availability_zones.available.names[0]
+  common_tags = {
+    Name                   = var.name
+    "kanz.io/capital-path" = "testnet-only"
+    "kanz.io/owner"        = "platform"
+  }
+}
+
+resource "aws_budgets_budget" "monthly" {
+  name         = "${var.name}-monthly"
+  budget_type  = "COST"
+  limit_amount = "100"
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  cost_types {
+    include_credit             = false
+    include_discount           = true
+    include_other_subscription = true
+    include_recurring          = true
+    include_refund             = false
+    include_subscription       = true
+    include_support            = true
+    include_tax                = true
+    include_upfront            = true
+    use_amortized              = false
+    use_blended                = false
+  }
+
+  dynamic "notification" {
+    for_each = toset(["50", "75", "90", "100"])
+    content {
+      comparison_operator        = "GREATER_THAN"
+      threshold                  = notification.value
+      threshold_type             = "ABSOLUTE_VALUE"
+      notification_type          = "ACTUAL"
+      subscriber_email_addresses = [var.budget_email]
+    }
+  }
+}
+
+resource "aws_vpc" "testnet" {
+  cidr_block           = "10.71.0.0/24"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags                 = local.common_tags
+}
+
+resource "aws_internet_gateway" "testnet" {
+  vpc_id = aws_vpc.testnet.id
+  tags   = local.common_tags
+}
+
+resource "aws_subnet" "testnet" {
+  vpc_id                  = aws_vpc.testnet.id
+  availability_zone       = local.availability_zone
+  cidr_block              = "10.71.0.0/26"
+  map_public_ip_on_launch = false
+  tags                    = local.common_tags
+}
+
+resource "aws_route_table" "testnet" {
+  vpc_id = aws_vpc.testnet.id
+  tags   = local.common_tags
+}
+
+resource "aws_route" "internet" {
+  route_table_id         = aws_route_table.testnet.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.testnet.id
+}
+
+resource "aws_route_table_association" "testnet" {
+  subnet_id      = aws_subnet.testnet.id
+  route_table_id = aws_route_table.testnet.id
+}
+
+resource "aws_security_group" "node" {
+  name        = "${var.name}-node"
+  description = "No ingress; SSM administration and outbound testnet connectivity only"
+  vpc_id      = aws_vpc.testnet.id
+
+  tags = local.common_tags
+
+  lifecycle {
+    create_before_destroy = true
+
+    postcondition {
+      condition     = length(self.ingress) == 0
+      error_message = "The testnet node must not expose any inbound security-group rule."
+    }
+  }
+}
+
+resource "aws_vpc_security_group_egress_rule" "https" {
+  security_group_id = aws_security_group.node.id
+  description       = "TLS to AWS control planes, registries, and exchange testnets"
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "dns_udp" {
+  security_group_id = aws_security_group.node.id
+  description       = "DNS resolution"
+  cidr_ipv4         = "10.71.0.2/32"
+  from_port         = 53
+  to_port           = 53
+  ip_protocol       = "udp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "dns_tcp" {
+  security_group_id = aws_security_group.node.id
+  description       = "DNS TCP fallback"
+  cidr_ipv4         = "10.71.0.2/32"
+  from_port         = 53
+  to_port           = 53
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "ntp" {
+  security_group_id = aws_security_group.node.id
+  description       = "Clock synchronization"
+  cidr_ipv4         = "169.254.169.123/32"
+  from_port         = 123
+  to_port           = 123
+  ip_protocol       = "udp"
+}
+
+resource "aws_iam_role" "node" {
+  name = "${var.name}-node"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "node" {
+  name = "${var.name}-node"
+  role = aws_iam_role.node.name
+  tags = local.common_tags
+}
+
+resource "aws_kms_key" "vault_unseal" {
+  description             = "Vault auto-unseal for the Issue 71 Tokyo testnet"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  key_usage               = "ENCRYPT_DECRYPT"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AccountRootAdministration"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "VaultAutoUnsealOnly"
+        Effect    = "Allow"
+        Principal = { AWS = aws_iam_role.node.arn }
+        Action    = ["kms:Encrypt", "kms:Decrypt", "kms:DescribeKey"]
+        Resource  = "*"
+      }
+    ]
+  })
+
+  tags = local.common_tags
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_kms_alias" "vault_unseal" {
+  name          = "alias/kanz-vault-unseal"
+  target_key_id = aws_kms_key.vault_unseal.key_id
+}
+
+resource "aws_iam_role_policy" "vault_unseal" {
+  name = "${var.name}-vault-unseal"
+  role = aws_iam_role.node.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["kms:Encrypt", "kms:Decrypt", "kms:DescribeKey"]
+      Resource = aws_kms_key.vault_unseal.arn
+    }]
+  })
+}
+
+resource "aws_ebs_volume" "data" {
+  availability_zone = local.availability_zone
+  encrypted         = true
+  size              = var.data_volume_gib
+  type              = "gp3"
+  iops              = 3000
+  throughput        = 125
+
+  tags = merge(local.common_tags, {
+    Name             = "${var.name}-data"
+    "kanz.io/backup" = "true"
+  })
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_instance" "node" {
+  ami                         = data.aws_ssm_parameter.al2023_x86_64.value
+  instance_type               = var.instance_type
+  availability_zone           = local.availability_zone
+  subnet_id                   = aws_subnet.testnet.id
+  vpc_security_group_ids      = [aws_security_group.node.id]
+  iam_instance_profile        = aws_iam_instance_profile.node.name
+  associate_public_ip_address = false
+  monitoring                  = false
+  disable_api_termination     = true
+  ebs_optimized               = true
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+    instance_metadata_tags      = "disabled"
+  }
+
+  credit_specification {
+    cpu_credits = "standard"
+  }
+
+  root_block_device {
+    encrypted             = true
+    volume_type           = "gp3"
+    volume_size           = var.root_volume_gib
+    iops                  = 3000
+    throughput            = 125
+    delete_on_termination = true
+  }
+
+  user_data = templatefile("${path.module}/user_data.sh.tftpl", {
+    data_volume_id     = aws_ebs_volume.data.id
+    k3s_version        = "v1.36.4+k3s1"
+    k3s_install_sha    = "46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
+    k3s_install_commit = "4dedb15be78017a8ddd5b9e81acd44f3481078ed"
+  })
+
+  tags = merge(local.common_tags, {
+    Name = "${var.name}-node"
+  })
+
+  depends_on = [
+    aws_iam_role_policy_attachment.ssm,
+    aws_route.internet,
+  ]
+
+  lifecycle {
+    # The EIP and durable data disk are owned by their dedicated resources.
+    # EC2 reflects both back onto the instance, which otherwise creates false
+    # replacement drift in the AWS provider.
+    ignore_changes = [
+      associate_public_ip_address,
+      ebs_block_device,
+    ]
+
+    precondition {
+      condition     = var.region == "ap-northeast-1" && var.instance_type == "t3a.large"
+      error_message = "The reviewed Issue #71 envelope is Tokyo t3a.large only."
+    }
+  }
+}
+
+resource "aws_volume_attachment" "data" {
+  device_name = "/dev/sdf"
+  volume_id   = aws_ebs_volume.data.id
+  instance_id = aws_instance.node.id
+}
+
+resource "aws_eip" "node" {
+  domain   = "vpc"
+  instance = aws_instance.node.id
+  tags     = local.common_tags
+}
+
+resource "aws_iam_role" "dlm" {
+  name = "${var.name}-dlm"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "dlm.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "dlm" {
+  name = "${var.name}-snapshots"
+  role = aws_iam_role.dlm.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateSnapshot",
+          "ec2:CreateSnapshots",
+          "ec2:DeleteSnapshot",
+          "ec2:DescribeInstances",
+          "ec2:DescribeSnapshots",
+          "ec2:DescribeTags",
+          "ec2:DescribeVolumes"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ec2:CreateTags"]
+        Resource = "arn:aws:ec2:${var.region}::snapshot/*"
+      }
+    ]
+  })
+}
+
+resource "aws_dlm_lifecycle_policy" "data" {
+  description        = "Daily snapshots for the Issue 71 Tokyo testnet data volume"
+  execution_role_arn = aws_iam_role.dlm.arn
+  state              = "ENABLED"
+
+  policy_details {
+    resource_types = ["VOLUME"]
+    target_tags = {
+      "kanz.io/backup" = "true"
+    }
+
+    schedule {
+      name      = "daily-seven-day-retention"
+      copy_tags = true
+
+      create_rule {
+        interval      = 24
+        interval_unit = "HOURS"
+        times         = ["18:00"]
+      }
+
+      retain_rule {
+        count = 7
+      }
+
+      tags_to_add = {
+        "kanz.io/restore-class" = "testnet-dr-evidence"
+      }
+    }
+  }
+
+  tags       = local.common_tags
+  depends_on = [aws_iam_role_policy.dlm]
+}
