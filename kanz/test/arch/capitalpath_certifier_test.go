@@ -106,8 +106,15 @@ func TestCapitalpathNATSIdentityIsBusinessReadOnly(t *testing.T) {
 		t.Fatal("could not bound capitalpath NATS permission block")
 	}
 	block := text[start : start+end]
-	if !strings.Contains(block, `publish: { allow: ["$JS.API.>", "$JS.ACK.>"] }`) {
-		t.Fatal("capitalpath NATS identity does not have the exact read-consumer publish grant")
+	wantPublish := []string{
+		"dlq.order.order.accepted", "dlq.order.order.rejected",
+		"dlq.order.order.routed", "dlq.order.order.partially_filled",
+		"dlq.order.order.filled", "dlq.accounting.balance.portfolio",
+		"$JS.API.>", "$JS.ACK.>",
+	}
+	gotPublish := parsePublishPerm(block).allow
+	if missing, extra := setDifference(wantPublish, gotPublish), setDifference(gotPublish, wantPublish); len(missing) != 0 || len(extra) != 0 {
+		t.Fatalf("capitalpath NATS identity has the wrong read-consumer/DLQ publish grant: missing=%v extra=%v", missing, extra)
 	}
 	for _, subject := range []string{"order.order.accepted", "order.order.routed", "order.order.filled", "accounting.balance.portfolio"} {
 		if !strings.Contains(block, subject) {

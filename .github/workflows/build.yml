@@ -30,6 +30,7 @@ on:
 permissions:
   contents: read
   packages: write   # push to ghcr.io on main
+  id-token: write   # main-only AWS federation; the IAM trust policy pins repo + branch
 
 jobs:
   image:
@@ -75,6 +76,7 @@ jobs:
             dockerfile: kanz-py/Dockerfile
           - service: risk-engine
             dockerfile: kanz/services/risk-engine/Dockerfile
+            testnet_ecr: true
           - service: schema-registry
             dockerfile: kanz/services/schema-registry/Dockerfile
           # The OMS image its deploy manifest has been pointing at all along, and
@@ -84,12 +86,14 @@ jobs:
           # build and must not share this tag.
           - service: oms
             dockerfile: kanz/services/oms/Dockerfile
+            testnet_ecr: true
           # INFRA-M6a: the migration runner. Not a service — a job image that a
           # Deployment runs as an initContainer before its pods start. It carries
           # every service's migrations/ (see its Dockerfile) and is selected per
           # pod with --dir /migrations/<service>.
           - service: kanz-migrate
             dockerfile: kanz/cmd/kanz-migrate/Dockerfile
+            testnet_ecr: true
           # SEC-M3c: the kill-switch needs an image because it needs an IDENTITY.
           # The production broker requires a client SVID and SPIRE issues one to a
           # POD, from its ServiceAccount — so the operator plane runs in-cluster as
@@ -104,13 +108,16 @@ jobs:
           # gateway principal, read-only ledger reader, and workload SVID.
           - service: kanz-capitalpath
             dockerfile: kanz/test/live/capitalpath/Dockerfile
+            testnet_ecr: true
           # INFRA-M7a-2: the Binance exchange as its own process. Unlike the oms
           # image this needs no GOTAGS — it IS the connector, so there is no
           # variant of it that silently trades against nothing.
           - service: venue-binance
             dockerfile: kanz/services/venue-binance/Dockerfile
+            testnet_ecr: true
           - service: venue-okx
             dockerfile: kanz/services/venue-okx/Dockerfile
+            testnet_ecr: true
           # INFRA-M7a-4: the market-data edge. Public quotes, no credentials, one
           # image — the venue build tags (and the silent-simulator fallback behind
           # them) are gone.
@@ -120,8 +127,10 @@ jobs:
           # already had an image; these three did not.
           - service: accounting
             dockerfile: kanz/services/accounting/Dockerfile
+            testnet_ecr: true
           - service: audit
             dockerfile: kanz/services/audit/Dockerfile
+            testnet_ecr: true
           - service: regulatory
             dockerfile: kanz/services/regulatory/Dockerfile
           # The last two services whose manifests referenced an image nothing built.
@@ -168,9 +177,11 @@ jobs:
           # The pre-trade mandate authority the OMS consumes FACTs from.
           - service: compliance
             dockerfile: kanz/services/compliance/Dockerfile
+            testnet_ecr: true
           # The external REST edge. It had an image target and no deployment.
           - service: api-gateway
             dockerfile: kanz/services/api-gateway/Dockerfile
+            testnet_ecr: true
           # The client stack (#364, #371). Both were written, tested and merged
           # with no Dockerfile and no entry here, so the web application and the
           # credential authority it signs into were finished, green and
@@ -182,6 +193,7 @@ jobs:
           # the session so the browser never sees one.
           - service: identity
             dockerfile: kanz/services/identity/Dockerfile
+            testnet_ecr: true
           - service: web-bff
             dockerfile: kanz/services/web-bff/Dockerfile
           # DATA-M1 (Task 7): the durable-log producer. archiver drains the NATS
@@ -482,6 +494,7 @@ jobs:
       # nothing to publish, so exporting the image to the daemon there would be
       # pure cost.
       - name: Build
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           # context: . uses the local checkout (incl. the generated gen/go),
@@ -510,3 +523,32 @@ jobs:
         run: |
           # shellcheck disable=SC2086 # TAGS is a newline-separated list, word splitting is intended
           .github/scripts/push-with-retry.sh $TAGS
+
+      # TESTNET REGISTRY BOUNDARY (#1093). Only the minimum capital-path image
+      # set is mirrored. AWS issues a short-lived session to this repository's
+      # main branch; no AWS key or GHCR package token is stored on the node.
+      - name: Obtain testnet ECR publisher identity
+        if: github.event_name == 'push' && matrix.testnet_ecr == true
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ vars.AWS_TESTNET_ECR_ROLE_ARN }}
+          aws-region: ap-northeast-1
+          mask-aws-account-id: true
+
+      - name: Log in to testnet ECR
+        if: github.event_name == 'push' && matrix.testnet_ecr == true
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Publish immutable testnet image
+        if: github.event_name == 'push' && matrix.testnet_ecr == true
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_ID: ${{ steps.build.outputs.imageid }}
+          IMAGE_TAG: ${{ github.sha }}
+          REPOSITORY: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          target="${ECR_REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
+          docker tag "${IMAGE_ID}" "${target}"
+          docker push "${target}"

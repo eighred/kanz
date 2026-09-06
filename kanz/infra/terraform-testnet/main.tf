@@ -10,11 +10,153 @@ data "aws_caller_identity" "current" {}
 
 locals {
   availability_zone = data.aws_availability_zones.available.names[0]
+  capital_path_images = toset([
+    "accounting",
+    "api-gateway",
+    "audit",
+    "compliance",
+    "identity",
+    "kanz-capitalpath",
+    "kanz-migrate",
+    "oms",
+    "risk-engine",
+    "venue-binance",
+    "venue-okx",
+  ])
   common_tags = {
     Name                   = var.name
     "kanz.io/capital-path" = "testnet-only"
     "kanz.io/owner"        = "platform"
   }
+}
+
+resource "aws_ecr_repository" "capital_path" {
+  for_each = local.capital_path_images
+
+  name                 = each.value
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = merge(local.common_tags, {
+    Name                  = each.value
+    "kanz.io/image-scope" = "capital-path"
+  })
+}
+
+resource "aws_ecr_lifecycle_policy" "capital_path" {
+  for_each   = aws_ecr_repository.capital_path
+  repository = each.value.name
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Retain the 20 newest immutable commit images"
+        selection = {
+          tagStatus      = "tagged"
+          tagPatternList = ["*"]
+          countType      = "imageCountMoreThan"
+          countNumber    = 20
+        }
+        action = { type = "expire" }
+      },
+      {
+        rulePriority = 2
+        description  = "Remove abandoned untagged layers after seven days"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 7
+        }
+        action = { type = "expire" }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_openid_connect_provider" "github_actions" {
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = []
+  tags            = local.common_tags
+}
+
+resource "aws_iam_role" "github_ecr_publish" {
+  name                 = "${var.name}-github-ecr-publish"
+  max_session_duration = 3600
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = aws_iam_openid_connect_provider.github_actions.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          "token.actions.githubusercontent.com:sub" = "repo:eighred/kanz:ref:refs/heads/main"
+        }
+      }
+    }]
+  })
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "github_ecr_publish" {
+  name = "${var.name}-ecr-publish"
+  role = aws_iam_role.github_ecr_publish.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "RegistryLogin"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PublishCapitalPathImages"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:CompleteLayerUpload",
+          "ecr:InitiateLayerUpload",
+          "ecr:PutImage",
+          "ecr:UploadLayerPart",
+        ]
+        Resource = [for repository in aws_ecr_repository.capital_path : repository.arn]
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "node_ecr_pull" {
+  name = "${var.name}-ecr-pull"
+  role = aws_iam_role.node.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "RegistryLogin"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PullCapitalPathImages"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+        ]
+        Resource = [for repository in aws_ecr_repository.capital_path : repository.arn]
+      },
+    ]
+  })
 }
 
 resource "aws_budgets_budget" "monthly" {
@@ -267,10 +409,11 @@ resource "aws_instance" "node" {
   }
 
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
-    data_volume_id     = aws_ebs_volume.data.id
-    k3s_version        = "v1.36.4+k3s1"
-    k3s_install_sha    = "46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
-    k3s_install_commit = "4dedb15be78017a8ddd5b9e81acd44f3481078ed"
+    data_volume_id        = aws_ebs_volume.data.id
+    ecr_provider_revision = "7656c21bcc13700566830f6bc4d753063513e6f7"
+    k3s_version           = "v1.36.4+k3s1"
+    k3s_install_sha       = "46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
+    k3s_install_commit    = "4dedb15be78017a8ddd5b9e81acd44f3481078ed"
   })
 
   tags = merge(local.common_tags, {

@@ -60,6 +60,24 @@ run "cost_and_security_envelope" {
   }
 
   assert {
+    condition     = length(aws_ecr_repository.capital_path) == 11 && alltrue([for repository in aws_ecr_repository.capital_path : repository.image_tag_mutability == "IMMUTABLE"])
+    error_message = "Every and only capital-path image repository must reject mutable tags."
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role.github_ecr_publish.assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == "repo:eighred/kanz:ref:refs/heads/main"
+    error_message = "The AWS publisher identity must be assumable only by this repository's main branch."
+  }
+
+  assert {
+    condition = toset(jsondecode(aws_iam_role_policy.node_ecr_pull.policy).Statement[1].Action) == toset([
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+    ])
+    error_message = "The node role must remain pull-only for capital-path ECR repositories."
+  }
+
+  assert {
     condition     = aws_instance.node.root_block_device[0].encrypted && aws_ebs_volume.data.encrypted
     error_message = "Both OS and durable data volumes must be encrypted."
   }
@@ -90,6 +108,15 @@ run "cost_and_security_envelope" {
   assert {
     condition     = strcontains(aws_instance.node.user_data, "kubectl get nodes -o name")
     error_message = "Bootstrap must wait for node registration before asserting readiness."
+  }
+
+  assert {
+    condition = (
+      strcontains(aws_instance.node.user_data, "7656c21bcc13700566830f6bc4d753063513e6f7") &&
+      strcontains(aws_instance.node.user_data, "credentialprovider.kubelet.k8s.io/v1") &&
+      strcontains(aws_instance.node.user_data, "/var/lib/rancher/credentialprovider/bin/ecr-credential-provider")
+    )
+    error_message = "Cold nodes must install the pinned kubelet ECR credential provider before k3s starts."
   }
 }
 

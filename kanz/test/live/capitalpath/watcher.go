@@ -37,7 +37,7 @@ func watchCapitalFacts(ctx context.Context, cfg config, collector *factCollector
 		_ = mesh.Close()
 		return nil, fmt.Errorf("capitalpath: dial mTLS event spine: %w", err)
 	}
-	consumer, err := bus.NewConsumer(client)
+	consumer, err := bus.NewConsumer(client, bus.WithDLQ(client))
 	if err != nil {
 		_ = client.Close()
 		_ = mesh.Close()
