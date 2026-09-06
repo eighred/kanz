@@ -250,6 +250,24 @@ func Delta(p *domain.Portfolio) v1.Measure {
 		// only thing that overrides it — has no production caller. So the
 		// platform's Delta is NetExposure under another name, everywhere, and
 		// kanz_risk_measure_live{measure="Delta"} reads 1 for it.
+		//
+		// AND IT STAYS IN DefaultRegistry, WHICH IS A DECISION AND NOT AN
+		// OVERSIGHT (#1055). Dropping it would make the dark Greek family read
+		// honestly as 0-of-5, and it would take the evidence with it: the OMS
+		// gate refuses this measure, so a Delta mandate refuses every order —
+		// and unregistered, that mandate would still refuse, but through the
+		// never-announced arm, which is the arm a risk-engine OUTAGE takes.
+		// riskfold.go's whole argument is that those refusals must stay
+		// distinguishable because different people fix them. Both existing
+		// signals would go quiet with it too (kanz_risk_measure_method stops
+		// reporting a placeholder; kanz_oms_risk_measures_placeholder_total
+		// stops counting), so the dashboards would improve while nothing about
+		// the platform's ability to measure delta changed.
+		//
+		// The posture is STATED instead, at the risk-engine composition root:
+		// services/risk-engine/internal/app/greek_model_posture.go derives
+		// kanz_risk_greek_model_live from this registry rather than asserting
+		// it, so the claim flips itself the day RegisterGreeks is wired.
 		Provenance: v1.MeasureProvenance{Method: v1.MethodNetExposurePlaceholder},
 	}
 }

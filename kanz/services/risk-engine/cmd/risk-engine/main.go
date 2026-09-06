@@ -130,9 +130,24 @@ func run() int {
 	// still announces itself, loudly, in the WARN below.
 	riskMetrics := engine.NewMetrics(obs.Registry)
 
+	// AND SO IS THE GREEK POSTURE, FOR THE SAME REASON AND ONE STEP FURTHER
+	// (#1055). Delta is registered in compute.DefaultRegistry and answers with the
+	// portfolio's net exposure on EVERY deployment — compute.RegisterGreeks, the
+	// only thing that overwrites it, has no production caller anywhere — so since
+	// #1037 the OMS gate refuses to fold it and a mandate naming Delta refuses
+	// every order. That is a live change in admission behaviour and nothing
+	// announced it.
+	//
+	// Registered HERE rather than beside MeasurePosture, which is inside runEngine
+	// and therefore behind cfg.NATSURL: the broker-less pod exports no
+	// kanz_risk_measure_live and no kanz_risk_measure_method at all, so an alert
+	// over either is silent on it. This series exists on every pod that starts.
+	// State fills it in with the final registry once there is one.
+	greekModels := app.NewGreekModelPosture(obs.Registry)
+
 	var runErr error
 	if cfg.NATSURL != "" {
-		if err := runEngine(ctx, cfg, readiness, logger, obs, riskMetrics); err != nil {
+		if err := runEngine(ctx, cfg, readiness, logger, obs, riskMetrics, greekModels); err != nil {
 			logger.Error("engine stopped with error", "err", err)
 			runErr = err
 		}
@@ -175,7 +190,7 @@ func hostOrigin() string {
 // runEngine builds the ingestion→recompute→publish pipeline over the live
 // NATS spine and runs it under the graceful-shutdown lifecycle. Returns
 // when ctx is canceled (signal) or ingestion fails.
-func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, riskMetrics *engine.Metrics) error {
+func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, riskMetrics *engine.Metrics, greekModels *app.GreekModelPosture) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 
 	// A HALF-CONFIGURED SHARD RING REFUSES THE START, AND IT DOES SO BEFORE ANY
@@ -522,30 +537,12 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		return err
 	}
 
-	// WHICH MEASURES THIS ENGINE ACTUALLY SERVES (#509).
-	//
-	// REPORTED HERE, the instant the registry is final, rather than beside the
-	// other postures 180 lines down — for the reason CalibrationPosture states
-	// about itself: the case that matters most is the one where startup does not
-	// get that far. A pod that dies wiring the bus still has a complete answer to
-	// "what would this build have served", and that answer is a static fact about
-	// the binary rather than about the run.
-	//
-	// Passed the SAME registry the query EngineImpl uses, deliberately — a posture
-	// computed from a fresh registry would describe an engine nobody talks to.
-	//
-	// THE COUNT IS NOT A FIXED PROPERTY OF THE BINARY — it is what the config
-	// above happens to unlock, which is exactly why the gauge exists rather than a
-	// number in a comment. It used to say "EIGHT of twenty-six" and was stale
-	// within the day: FACTOR-01c, FI-01d and LIQ-01d each added to it. A fully
-	// configured pod today serves sixteen of the twenty-six catalogued measures;
-	// one with no market-data DSN serves five. The query path DROPS the rest —
-	// engine.filterMeasures discards unknown names — so they are absent from a 200
-	// rather than refused, which is indistinguishable from a portfolio that holds
-	// none of that instrument.
-	app.MeasurePosture(obs.Registry, logger, registry)
-	// AND WHAT SERVES EACH ONE (#1037) — same final registry, so no series is absent.
-	measureMethods.Seed(registry)
+	// WHAT THIS ENGINE SERVES, WHAT SERVES IT, AND WHETHER ANY OF IT IS A MODEL —
+	// three postures over the SAME final registry, stated the instant it is final.
+	// They live in measureposture.go beside this file: the ratchet on this function
+	// refused the third one (#1055), the way it refused #713's and #1007's wiring
+	// on the OMS side, so the wiring moved rather than the budget going up.
+	stateMeasurePostures(obs.Registry, logger, registry, measureMethods, greekModels)
 	// THE AI LAYER GETS ITS INPUT (AI-M1).
 	//
 	// internal/prediction shipped a feature publisher, a resilient inference client and a
