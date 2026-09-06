@@ -81,9 +81,13 @@ func TestCapitalpathCertifierShipsAndRunsWithBoundedCredentials(t *testing.T) {
 			"service: kanz-capitalpath", "kanz/test/live/capitalpath/Dockerfile")
 	}
 	runner := mustContain(filepath.Join(root, "infra", "dr", "run-capitalpath-certification.sh"),
-		"@sha256:", "backoffLimit: 0", "CAPITALPATH_GATEWAY_TOKEN_FILE", "CAPITALPATH_LEDGER_DSN_FILE",
-		"readOnlyRootFilesystem: true", "CAPITALPATH_DR_ATTESTATION_FILE", "CAPITALPATH_GATEWAY_CIDR", "CAPITALPATH_LEDGER_CIDR")
-	for _, forbidden := range []string{"kubectl create secret", "OKX_API_KEY", "BINANCE_API_KEY", "0.0.0.0/0 } }"} {
+		"image_prefix=", "^sha256:[0-9a-f]{64}$", "backoffLimit: 0", "CAPITALPATH_GATEWAY_TOKEN_FILE", "CAPITALPATH_LEDGER_DSN_FILE",
+		"readOnlyRootFilesystem: true", "CAPITALPATH_DR_ATTESTATION_FILE", "CAPITALPATH_GATEWAY_CIDR", "CAPITALPATH_LEDGER_CIDR",
+		"KANZ_TESTNET_ECR_REGISTRY", "ap-northeast-1")
+	for _, forbidden := range []string{
+		"kubectl create secret", "OKX_API_KEY", "BINANCE_API_KEY", "0.0.0.0/0 } }",
+		"ghcr.io/", "imagePullSecrets:", "ghcr-pull",
+	} {
 		if strings.Contains(runner, forbidden) {
 			t.Errorf("capitalpath runner contains forbidden credential or open-egress shape %q", forbidden)
 		}
