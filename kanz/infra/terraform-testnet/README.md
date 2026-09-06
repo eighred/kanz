@@ -62,8 +62,12 @@ the checked-in installer once after applying the node's new pull policy:
 
 For a cold-pull proof, wait for an immutable image to reach ECR and repeat with
 `-ProbeImage` set to its digest-qualified ECR reference. The installer removes
-that exact cached image before pulling it and reports only status—never the
-short-lived registry authorization returned by the credential provider.
+that exact cached image, creates a short-lived probe Pod so the request passes
+through kubelet's credential-provider boundary, verifies the observed image
+digest, and removes the Pod. It reports only status—never the short-lived
+registry authorization returned by the credential provider. A direct
+`crictl pull` is not proof because it bypasses kubelet and therefore does not
+invoke the Kubernetes credential-provider plugin.
 
 The wrapper bridges AWS CLI v2 `login_session` authentication into Terraform as
 an in-memory, short-lived role session and clears it on exit. It never prints or
