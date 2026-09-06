@@ -99,6 +99,11 @@ jobs:
           # could not be brought live.
           - service: kanz-halt
             dockerfile: kanz/cmd/kanz-halt/Dockerfile
+          # Issue #71: the one-shot physical capital-path certification image.
+          # Exchange secrets remain in venue adapters; this image holds only a
+          # gateway principal, read-only ledger reader, and workload SVID.
+          - service: kanz-capitalpath
+            dockerfile: kanz/test/live/capitalpath/Dockerfile
           # INFRA-M7a-2: the Binance exchange as its own process. Unlike the oms
           # image this needs no GOTAGS — it IS the connector, so there is no
           # variant of it that silently trades against nothing.

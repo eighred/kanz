@@ -268,10 +268,9 @@ data:
           # see the SEC-M3e comment ahead of the risk-engine entry.
           #
           # Permission sets below were determined by inspecting the actual
-          # publisher (each tool's own subject constant) and PROVEN against a
-          # real nats-server + JetStream broker, not guessed — see
-          # .superpowers/sdd/operator-svid-split-report.md (repo root) for the
-          # transcript. Each publish-only tool needs subscribe access to its own reply inbox
+          # publisher (each tool's own subject constant) and proven against a
+          # real nats-server + JetStream broker. Each publish-only tool needs
+          # subscribe access to its own reply inbox
           # (`_INBOX.>`) to receive the JetStream publish ack; it does NOT
           # need `$JS.API.>` — these tools only call jetstream.PublishMsg,
           # which (as of nats.go v1.52.0) publishes directly to the stream
@@ -467,9 +466,7 @@ data:
           # publish/subscribe set below was DERIVED FROM CODE (bus.Event{Subject:
           # ...} literals, Subject*/EventType* constants, consumer.Subscribe /
           # SubscribeBroadcast(Ready) call sites, and each service's own config
-          # defaults for an env-overridable subject list), not guessed — see
-          # .superpowers/sdd/service-user-permissions-report.md for the full
-          # per-service table and citations.
+          # defaults for an env-overridable subject list), not guessed.
           #
           # TWO SHAPES REPEAT BELOW, factored here instead of in every entry:
           #
@@ -486,8 +483,7 @@ data:
           #    the broker for redelivery forever.
           #
           # 2. JETSTREAM CONSUMER PERMISSIONS — proven empirically against a real
-          #    nats-server + JetStream broker (.superpowers/sdd/service-user-
-          #    permissions-report.md), because a JS CONSUMER is NOT the same case
+          #    nats-server + JetStream broker, because a JS CONSUMER is NOT the same case
           #    as a JS PUBLISHER (operator-svid-split-report.md proved a publisher
           #    needs no `$JS.API.>`). A consumer's `StreamNameBySubject` and
           #    `CreateOrUpdateConsumer`/`CreateConsumer` calls (pkg/bus/nats.go)
@@ -1817,6 +1813,24 @@ data:
         ]
 
         users: [
+          # Issue #71 physical capital-path certifier. It observes only the
+          # canonical lifecycle and accounting commit subjects for one order.
+          # The allow-list contains no business publish subject: this SVID can
+          # operate JetStream consumers and ACK deliveries, but cannot place,
+          # cancel, amend, approve, or fabricate a FACT. Order admission stays
+          # exclusively behind the authenticated HTTP gateway principal.
+          { user: "spiffe://kanz.internal/ns/tenant-acme/sa/kanz-capitalpath"
+            permissions: {
+              publish: { allow: ["$JS.API.>", "$JS.ACK.>"] }
+              subscribe: {
+                allow: [
+                  "order.order.accepted", "order.order.rejected", "order.order.routed",
+                  "order.order.partially_filled", "order.order.filled",
+                  "accounting.balance.portfolio", "_INBOX.>",
+                ]
+              }
+            }
+          }
           # The tenant's workloads present this SVID; verify_and_map binds the
           # URI SAN to this user → account, scoping all its pub/sub.
           # THE TENANT'S RISK ENGINE (#630). It had no permissions block, so it
@@ -1995,7 +2009,7 @@ data:
           #
           # THAT IS A DR HOLE, NOT AN INTEGRATION GAP, which is why the archiver
           # is the first consumer moved rather than the ledger or the risk
-          # engine. CLAUDE.md's one sequencing rule that outlives any issue is
+          # engine. AGENTS.md's one sequencing rule that outlives any issue is
           # that real orders must never be placed against a store that may not be
           # backed up; a tenant provisioned without this pod can place them, and
           # every health check in the estate reads green while it does.
