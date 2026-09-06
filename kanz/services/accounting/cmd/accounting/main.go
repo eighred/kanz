@@ -147,6 +147,15 @@ func run() int {
 	// identical numbers. See settlement_basis_posture.go.
 	stateSettlementBasisPosture(obs.Registry, logger)
 
+	// AND AT WHAT GRAIN IT RECONCILES AGAINST A CUSTODIAN (#1049). Registered here
+	// for the same reason and unconditionally: the transaction pass runs only on a
+	// statement that declares it supplies trade lines, nothing in this build
+	// publishes a statement at any grain, and a netted-only comparison is
+	// indistinguishable from a trade-level one that matched everything — same
+	// outcome, same staleness gauge, same empty break list. See
+	// custody_grain_posture.go.
+	stateCustodyGrainPosture(obs.Registry, logger)
+
 	// AND WHETHER THIS POD CAN VALUE A FOREIGN HOLDING (#1041). Registered here
 	// for the same reason and before buildLiveFX below, which is silent on an
 	// ABSENT FX spec while failing the start on a malformed one — the asymmetry

@@ -139,7 +139,7 @@ func TestEachCustodiansBookHoldsOnlyItsOwnAccounts(t *testing.T) {
 		{"CUST-A", map[string]int64{"AAPL": 100}, "MSFT"},
 		{"CUST-B", map[string]int64{"MSFT": 250}, "AAPL"},
 	} {
-		book, err := load(ctx, Subject{PortfolioID: "PF1", CustodianID: tc.custodian, BusinessDate: t0})
+		book, _, err := load(ctx, Subject{PortfolioID: "PF1", CustodianID: tc.custodian, BusinessDate: t0})
 		if err != nil {
 			t.Fatalf("%s: load: %v", tc.custodian, err)
 		}
@@ -288,7 +288,7 @@ func TestASingleCustodianBookExcludesAnUnattributedEntry(t *testing.T) {
 		t.Fatal("a portfolio with one custodian and no declaration reports a DECLARED scope — the " +
 			"loader would then ask for accounts nobody declared and refuse the run")
 	}
-	book, err := LedgerBookLoader(st, scope, testLogger())(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A"})
+	book, _, err := LedgerBookLoader(st, scope, testLogger())(ctx, Subject{PortfolioID: "PF1", CustodianID: "CUST-A"})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestTheUnattributedEntryIsStatedRatherThanDroppedInSilence(t *testing.T) {
 		t.Fatalf("NewBookScope: %v", err)
 	}
 	stated := &captureLogger{}
-	if _, err := LedgerBookLoader(st, scope, stated.logger())(ctx,
+	if _, _, err := LedgerBookLoader(st, scope, stated.logger())(ctx,
 		Subject{PortfolioID: "PF1", CustodianID: "CUST-A"}); err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestTheUnattributedEntryIsStatedRatherThanDroppedInSilence(t *testing.T) {
 	clean := ledger.NewMemoryStore()
 	seedEntry(t, clean, "e-aapl", "PF1", "okx-sub-1", "AAPL", 100, -100)
 	quiet := &captureLogger{}
-	if _, err := LedgerBookLoader(clean, scope, quiet.logger())(ctx,
+	if _, _, err := LedgerBookLoader(clean, scope, quiet.logger())(ctx,
 		Subject{PortfolioID: "PF1", CustodianID: "CUST-A"}); err != nil {
 		t.Fatalf("load: %v", err)
 	}
