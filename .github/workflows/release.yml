@@ -43,6 +43,8 @@ jobs:
             dockerfile: kanz/cmd/kanz-migrate/Dockerfile
           - service: kanz-halt
             dockerfile: kanz/cmd/kanz-halt/Dockerfile
+          - service: kanz-capitalpath
+            dockerfile: kanz/test/live/capitalpath/Dockerfile
           - service: venue-binance
             dockerfile: kanz/services/venue-binance/Dockerfile
           - service: venue-okx
