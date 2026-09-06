@@ -14,6 +14,12 @@ separate restore drill produces a current DR attestation.
 - No inbound security-group rules and no SSH key. Administration is SSM only.
 - k3s `v1.36.4+k3s1`, pinned by version and a SHA-256-verified installer at an
   immutable commit; Traefik and ServiceLB are disabled.
+- Eleven immutable ECR repositories for the minimum capital-path workload.
+  Kubelet obtains short-lived pull credentials from the node role through the
+  upstream AWS credential provider; no `dockerconfigjson` or registry PAT is
+  stored in Kubernetes.
+- A GitHub OIDC role restricted to `repo:eighred/kanz` on `refs/heads/main`.
+  Its policy can upload layers only to those eleven repositories.
 - Embedded etcd with encrypted Kubernetes secrets and local snapshots every six
   hours; DLM snapshots the data EBS volume daily and retains seven.
 - A mandatory USD 100 monthly budget alerts at USD 50, 75, 90, and 100.
@@ -36,6 +42,28 @@ $env:TF_VAR_budget_email = '<billing-alert-address>'
 ./Invoke-Terraform.ps1 apply kanz-testnet.tfplan
 Remove-Item Env:TF_VAR_budget_email
 ```
+
+After the first apply, bind the non-secret role ARN to GitHub Actions. This is
+configuration, not a credential; GitHub exchanges its signed OIDC token for a
+short-lived AWS session on each `main` build.
+
+```powershell
+$roleArn = ./Invoke-Terraform.ps1 output -raw github_ecr_publish_role_arn
+gh variable set AWS_TESTNET_ECR_ROLE_ARN --repo eighred/kanz --body $roleArn
+```
+
+The existing node predates the credential-provider bootstrap in user data. Run
+the checked-in installer once after applying the node's new pull policy:
+
+```powershell
+../../../tools/Install-TestnetECRCredentialProvider.ps1 `
+  -InstanceId (./Invoke-Terraform.ps1 output -raw instance_id)
+```
+
+For a cold-pull proof, wait for an immutable image to reach ECR and repeat with
+`-ProbeImage` set to its digest-qualified ECR reference. The installer removes
+that exact cached image before pulling it and reports only status—never the
+short-lived registry authorization returned by the credential provider.
 
 The wrapper bridges AWS CLI v2 `login_session` authentication into Terraform as
 an in-memory, short-lived role session and clears it on exit. It never prints or

@@ -217,6 +217,30 @@ data:
         }
 
         users: [
+          # Issue #71's platform-tenant certifier. Its only domain publishes are
+          # DLQ records for replayed observations that could not be validated;
+          # it cannot submit, cancel, approve, or fabricate a lifecycle FACT.
+          # The tenant-acme entry mirrors this grant exactly, as required by the
+          # permission-parity guard.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/kanz-capitalpath"
+            permissions: {
+              publish: {
+                allow: [
+                  "dlq.order.order.accepted", "dlq.order.order.rejected",
+                  "dlq.order.order.routed", "dlq.order.order.partially_filled",
+                  "dlq.order.order.filled", "dlq.accounting.balance.portfolio",
+                  "$JS.API.>", "$JS.ACK.>",
+                ]
+              }
+              subscribe: {
+                allow: [
+                  "order.order.accepted", "order.order.rejected", "order.order.routed",
+                  "order.order.partially_filled", "order.order.filled",
+                  "accounting.balance.portfolio", "_INBOX.>",
+                ]
+              }
+            }
+          }
           # The bootstrap Job (bootstrap-job.yaml) — it CREATES the streams, so it
           # is admitted here before any service has anything to connect to. It
           # lives in kanz-messaging beside the broker, not in kanz-services.
@@ -1815,13 +1839,20 @@ data:
         users: [
           # Issue #71 physical capital-path certifier. It observes only the
           # canonical lifecycle and accounting commit subjects for one order.
-          # The allow-list contains no business publish subject: this SVID can
-          # operate JetStream consumers and ACK deliveries, but cannot place,
-          # cancel, amend, approve, or fabricate a FACT. Order admission stays
-          # exclusively behind the authenticated HTTP gateway principal.
-          { user: "spiffe://kanz.internal/ns/tenant-acme/sa/kanz-capitalpath"
-            permissions: {
-              publish: { allow: ["$JS.API.>", "$JS.ACK.>"] }
+            # The only domain publishes are DLQ records for observations which
+            # could not be validated. This SVID cannot place, cancel, amend,
+            # approve, or fabricate a FACT. Order admission stays exclusively
+            # behind the authenticated HTTP gateway principal.
+            { user: "spiffe://kanz.internal/ns/tenant-acme/sa/kanz-capitalpath"
+              permissions: {
+                publish: {
+                  allow: [
+                    "dlq.order.order.accepted", "dlq.order.order.rejected",
+                    "dlq.order.order.routed", "dlq.order.order.partially_filled",
+                    "dlq.order.order.filled", "dlq.accounting.balance.portfolio",
+                    "$JS.API.>", "$JS.ACK.>",
+                  ]
+                }
               subscribe: {
                 allow: [
                   "order.order.accepted", "order.order.rejected", "order.order.routed",

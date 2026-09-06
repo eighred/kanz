@@ -4,12 +4,50 @@ exec > >(tee -a /var/log/kanz-bootstrap.log | logger -t kanz-bootstrap -s 2>/dev
 
 readonly data_volume_id="${data_volume_id}"
 readonly data_serial="$${data_volume_id//-/}"
+readonly ecr_provider_revision="${ecr_provider_revision}"
+readonly ecr_provider_source="/var/tmp/cloud-provider-aws-$${ecr_provider_revision}"
 readonly k3s_version="${k3s_version}"
 readonly install_commit="${k3s_install_commit}"
 readonly install_sha="${k3s_install_sha}"
 readonly install_path="/var/tmp/k3s-install.sh"
 
-dnf install -y jq nvme-cli xfsprogs
+dnf install -y git golang jq nvme-cli xfsprogs
+
+# Kubernetes removed the in-tree AWS registry integration. Build the upstream
+# provider from an exact reviewed commit before k3s starts, then let kubelet
+# obtain short-lived ECR authorization through the EC2 role. No registry token
+# is written to cloud-init, Terraform state, a Kubernetes Secret, or this log.
+git clone --filter=blob:none --no-checkout \
+  https://github.com/kubernetes/cloud-provider-aws.git \
+  "$${ecr_provider_source}"
+git -C "$${ecr_provider_source}" checkout --detach "$${ecr_provider_revision}"
+test "$(git -C "$${ecr_provider_source}" rev-parse HEAD)" = "$${ecr_provider_revision}"
+install -d -m 0755 /var/lib/rancher/credentialprovider/bin
+install -d -m 0755 /var/lib/rancher/credentialprovider
+(
+  cd "$${ecr_provider_source}"
+  CGO_ENABLED=0 GOCACHE=/var/tmp/kanz-ecr-provider-cache \
+    GOMODCACHE=/var/tmp/kanz-ecr-provider-modcache \
+    go build -trimpath -ldflags='-s -w -buildid=' \
+      -o /var/lib/rancher/credentialprovider/bin/ecr-credential-provider \
+      ./cmd/ecr-credential-provider
+)
+chmod 0755 /var/lib/rancher/credentialprovider/bin/ecr-credential-provider
+cat >/var/lib/rancher/credentialprovider/config.yaml <<'EOF'
+apiVersion: kubelet.config.k8s.io/v1
+kind: CredentialProviderConfig
+providers:
+  - name: ecr-credential-provider
+    matchImages:
+      - "*.dkr.ecr.*.amazonaws.com"
+      - "*.dkr.ecr.*.amazonaws.com.cn"
+    defaultCacheDuration: 12h
+    apiVersion: credentialprovider.kubelet.k8s.io/v1
+EOF
+rm -rf "$${ecr_provider_source}" \
+  /var/tmp/kanz-ecr-provider-cache \
+  /var/tmp/kanz-ecr-provider-modcache
+dnf remove -y git golang
 
 data_device=""
 for _ in $(seq 1 300); do
