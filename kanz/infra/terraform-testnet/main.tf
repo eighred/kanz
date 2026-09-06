@@ -78,10 +78,9 @@ resource "aws_ecr_lifecycle_policy" "capital_path" {
 }
 
 resource "aws_iam_openid_connect_provider" "github_actions" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = []
-  tags            = local.common_tags
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
+  tags           = local.common_tags
 }
 
 resource "aws_iam_role" "github_ecr_publish" {
