@@ -6,14 +6,25 @@ references with same-account Tokyo ECR digests, removes their GHCR pull-secret
 dependency, and scales workloads to one replica. It does not weaken application
 risk, compliance, mandate, mTLS, tenant, or secret-provider boundaries.
 
-Render and inspect before applying:
+Use the repository-root installer from an exact, clean `origin/main` checkout.
+It renders the reviewed overlay locally, rejects mutable or non-Tokyo images,
+transfers a hashed manifest over SSM, verifies the data-plane prerequisites, and
+runs a server-side dry-run on the node. Dry-run is the default:
 
 ```powershell
-kubectl kustomize .\infra\overlays\testnet-tokyo `
-  --load-restrictor LoadRestrictionsNone > $env:TEMP\kanz-testnet-tokyo.yaml
-kubectl apply --server-side --dry-run=server -f $env:TEMP\kanz-testnet-tokyo.yaml
-kubectl diff -f $env:TEMP\kanz-testnet-tokyo.yaml
+.\tools\Install-TestnetWorkloads.ps1 -InstanceId <managed-node-id>
 ```
+
+Apply the same checked manifest only after reviewing the dry-run evidence:
+
+```powershell
+.\tools\Install-TestnetWorkloads.ps1 -InstanceId <managed-node-id> -Apply
+```
+
+The apply path waits for all eight Deployments and the risk-engine Rollout, then
+requires nine ready Pods whose running SHA-256 image IDs match the reviewed ECR
+lock. It also proves that no registry credential Secret exists in
+`kanz-services`. The installer submits no request or order to any service.
 
 Do not apply until the namespace, SPIFFE registrations, Vault
 `SecretProviderClass` objects, NATS, Postgres migrations, and Argo Rollouts CRD

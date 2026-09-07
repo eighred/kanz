@@ -1,0 +1,194 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^i-[0-9a-f]+$')]
+    [string]$InstanceId,
+
+    [ValidateSet('ap-northeast-1')]
+    [string]$Region = 'ap-northeast-1',
+
+    [string]$Profile = 'kanz-platform',
+
+    [switch]$Apply
+)
+
+$ErrorActionPreference = 'Stop'
+$aws = (Get-Command aws.exe -ErrorAction Stop).Source
+$kubectl = (Get-Command kubectl.exe -ErrorAction Stop).Source
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$overlay = Join-Path $repoRoot 'kanz\infra\overlays\testnet-tokyo'
+
+function Invoke-SsmCommands {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Commands,
+        [Parameter(Mandatory = $true)]
+        [string]$Comment,
+        [int]$TimeoutSeconds = 600
+    )
+
+    $parameters = @{ commands = $Commands } | ConvertTo-Json -Compress -Depth 4
+    $commandId = (& $aws ssm send-command --profile $Profile --region $Region `
+        --instance-ids $InstanceId --document-name AWS-RunShellScript `
+        --comment $Comment --parameters $parameters `
+        --query 'Command.CommandId' --output text).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $commandId) {
+        throw "AWS rejected SSM command: $Comment"
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        Start-Sleep -Milliseconds 750
+        $result = & $aws ssm get-command-invocation --profile $Profile --region $Region `
+            --command-id $commandId --instance-id $InstanceId `
+            --query '{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}' `
+            --output json 2>$null | ConvertFrom-Json
+        if ($result.Status -in @('Success', 'Cancelled', 'Failed', 'TimedOut')) { break }
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    if (-not $result -or $result.Status -in @('Pending', 'InProgress', 'Delayed')) {
+        throw "SSM command $commandId did not finish within $TimeoutSeconds seconds: $Comment"
+    }
+    if ($result.Status -ne 'Success') {
+        throw "SSM command $commandId failed ($Comment): $($result.Error)"
+    }
+    return [pscustomobject]@{
+        CommandId = $commandId
+        Output = $result.Output.Trim()
+    }
+}
+
+& git -C $repoRoot fetch origin main --quiet
+if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main.' }
+$releaseCommit = (& git -C $repoRoot rev-parse origin/main).Trim()
+$headCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
+if ($headCommit -ne $releaseCommit) {
+    throw "Workload installation is refused: HEAD $headCommit is not exact origin/main $releaseCommit."
+}
+$provenancePaths = @(
+    'tools/Install-TestnetWorkloads.ps1',
+    'kanz/infra/overlays/testnet-tokyo',
+    'kanz/infra/deploy/accounting-deploy.yaml',
+    'kanz/infra/deploy/api-gateway-deploy.yaml',
+    'kanz/infra/deploy/audit-deploy.yaml',
+    'kanz/infra/deploy/compliance-deploy.yaml',
+    'kanz/infra/deploy/identity-deploy.yaml',
+    'kanz/infra/deploy/oms-deploy.yaml',
+    'kanz/infra/deploy/risk-engine-rollout.yaml',
+    'kanz/infra/deploy/venue-binance-deploy.yaml',
+    'kanz/infra/deploy/venue-okx-deploy.yaml'
+)
+& git -C $repoRoot diff --quiet $releaseCommit -- @provenancePaths
+if ($LASTEXITCODE -ne 0) {
+    throw 'Workload installation is refused: a rendered input differs from merged origin/main.'
+}
+
+$renderedLines = & $kubectl kustomize --load-restrictor=LoadRestrictionsNone $overlay
+if ($LASTEXITCODE -ne 0 -or -not $renderedLines) {
+    throw 'The Tokyo workload overlay did not render.'
+}
+$rendered = ($renderedLines -join "`n") + "`n"
+$resourceCount = ([regex]::Matches($rendered, '(?m)^kind: ')).Count
+if ($resourceCount -ne 34) {
+    throw "Expected 34 rendered resources; found $resourceCount."
+}
+$images = [regex]::Matches($rendered, '(?m)^\s*image:\s+(\S+)\s*$')
+if ($images.Count -ne 16) { throw "Expected 16 rendered container images; found $($images.Count)." }
+foreach ($image in $images) {
+    if ($image.Groups[1].Value -notmatch '^012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/[a-z0-9-]+@sha256:[0-9a-f]{64}$') {
+        throw "Rendered workload image is outside the immutable Tokyo ECR boundary: $($image.Groups[1].Value)"
+    }
+}
+foreach ($forbidden in @('ghcr.io', 'ghcr-pull', 'imagePullSecrets:', 'kubernetes.io/dockerconfigjson')) {
+    if ($rendered.Contains($forbidden)) { throw "Rendered workload contains forbidden marker: $forbidden" }
+}
+
+$bytes = [Text.Encoding]::UTF8.GetBytes($rendered)
+$sha256 = [Security.Cryptography.SHA256]::Create()
+try {
+    $manifestHash = ([BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+}
+finally {
+    $sha256.Dispose()
+}
+$compressed = New-Object IO.MemoryStream
+$gzip = New-Object IO.Compression.GzipStream($compressed, [IO.Compression.CompressionLevel]::Optimal, $true)
+try {
+    $gzip.Write($bytes, 0, $bytes.Length)
+}
+finally {
+    $gzip.Dispose()
+}
+$payload = [Convert]::ToBase64String($compressed.ToArray())
+$compressed.Dispose()
+
+$transferId = [Guid]::NewGuid().ToString('N')
+$remoteBase = "/var/tmp/kanz-workloads-$transferId"
+$remotePayload = "$remoteBase.b64"
+$remoteManifest = "$remoteBase.yaml"
+Invoke-SsmCommands -Comment 'Initialize Kanz testnet workload transfer' -TimeoutSeconds 60 -Commands @(
+    'set -eu',
+    "umask 077; : > '$remotePayload'"
+) | Out-Null
+
+$chunkSize = 3000
+$chunks = for ($offset = 0; $offset -lt $payload.Length; $offset += $chunkSize) {
+    $length = [Math]::Min($chunkSize, $payload.Length - $offset)
+    $payload.Substring($offset, $length)
+}
+for ($batchStart = 0; $batchStart -lt $chunks.Count; $batchStart += 4) {
+    $batchEnd = [Math]::Min($batchStart + 4, $chunks.Count)
+    $commands = @('set -eu')
+    for ($index = $batchStart; $index -lt $batchEnd; $index++) {
+        $commands += "printf '%s' '$($chunks[$index])' >> '$remotePayload'"
+    }
+    Invoke-SsmCommands -Comment "Stage Kanz workload manifest $($batchStart + 1)-$batchEnd/$($chunks.Count)" `
+        -TimeoutSeconds 60 -Commands $commands | Out-Null
+}
+
+$applyFlag = if ($Apply) { '1' } else { '0' }
+$verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo workloads' -TimeoutSeconds 1800 -Commands @(
+    'set -Eeuo pipefail',
+    "payload='$remotePayload'",
+    "manifest='$remoteManifest'",
+    'cleanup() { rm -f "${payload}" "${manifest}"; }',
+    'trap cleanup EXIT',
+    'base64 -d "${payload}" | gzip -d > "${manifest}"',
+    ("printf '%s  %s\n' '$manifestHash' " + '"${manifest}" | sha256sum --check --status'),
+    ('test "$(grep -c ''^kind:'' "${manifest}")" = ''' + $resourceCount + "'"),
+    'test "$(grep -Ec ''^[[:space:]]*image: 012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/[a-z0-9-]+@sha256:[0-9a-f]{64}$'' "${manifest}")" = 16',
+    '! grep -Eq ''ghcr\.io|ghcr-pull|imagePullSecrets:|kubernetes\.io/dockerconfigjson'' "${manifest}"',
+    '/usr/local/bin/k3s kubectl get namespace kanz-services >/dev/null',
+    '/usr/local/bin/k3s kubectl -n kanz-data wait --for=condition=Ready cluster/kanz-testnet-postgres --timeout=60s >/dev/null',
+    '/usr/local/bin/k3s kubectl -n kanz-data wait --for=condition=complete job/postgres-migrations --timeout=60s >/dev/null',
+    '/usr/local/bin/k3s kubectl -n kanz-messaging rollout status statefulset/nats --timeout=60s >/dev/null',
+    '/usr/local/bin/k3s kubectl -n kanz-messaging rollout status statefulset/redis --timeout=60s >/dev/null',
+    '/usr/local/bin/k3s kubectl -n cnpg-system wait --for=condition=Available deployment/cnpg-controller-manager --timeout=60s >/dev/null',
+    '/usr/local/bin/k3s kubectl -n argo-rollouts wait --for=condition=Available deployment/argo-rollouts --timeout=60s >/dev/null',
+    '/usr/local/bin/k3s kubectl apply --server-side --dry-run=server --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
+    'echo workload-server-dry-run-ok',
+    "apply='$applyFlag'",
+    'if [[ "${apply}" = 0 ]]; then exit 0; fi',
+    '/usr/local/bin/k3s kubectl apply --server-side --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
+    'for deployment in identity compliance accounting audit oms venue-binance venue-okx api-gateway; do /usr/local/bin/k3s kubectl -n kanz-services rollout status "deployment/${deployment}" --timeout=600s >/dev/null; done',
+    '/usr/local/bin/k3s kubectl -n kanz-services wait --for=jsonpath=''{.status.phase}''=Healthy rollout/risk-engine --timeout=900s >/dev/null',
+    'pods=$(/usr/local/bin/k3s kubectl -n kanz-services get pods -l app.kubernetes.io/part-of=kanz -o json)',
+    'jq -e ''.items | length == 9'' <<<"${pods}" >/dev/null',
+    'jq -e ''all(.items[]; .status.phase=="Running" and all(.status.containerStatuses[]?; .ready==true) and all(.status.initContainerStatuses[]?; .state.terminated.exitCode==0))'' <<<"${pods}" >/dev/null',
+    'jq -e ''all(.items[]; all((.spec.initContainers // []) + .spec.containers; .image | test("^012619468098\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/[a-z0-9-]+@sha256:[0-9a-f]{64}$")))'' <<<"${pods}" >/dev/null',
+    'jq -e ''all(.items[]; . as $pod | all((($pod.status.initContainerStatuses // []) + $pod.status.containerStatuses)[]; . as $status | ((($pod.spec.initContainers // []) + $pod.spec.containers | map(select(.name==$status.name)) | first | .image | capture("@(?<digest>sha256:[0-9a-f]{64})$").digest) == ($status.imageID | capture("@(?<digest>sha256:[0-9a-f]{64})$").digest))))'' <<<"${pods}" >/dev/null',
+    'test "$(/usr/local/bin/k3s kubectl -n kanz-services get secret -o json | jq ''[.items[] | select(.type=="kubernetes.io/dockerconfigjson")] | length'')" = 0',
+    'echo workload-rollouts-ready',
+    'echo workload-images-match-reviewed-ecr-lock',
+    'echo workload-registry-secrets-absent'
+)
+
+[pscustomobject]@{
+    CommandId = $verification.CommandId
+    Mode = if ($Apply) { 'Apply' } else { 'ServerDryRun' }
+    ReleaseCommit = $releaseCommit
+    ManifestHash = $manifestHash
+    Resources = $resourceCount
+    Images = $images.Count
+    Evidence = $verification.Output
+}
