@@ -318,7 +318,7 @@ spec:
     - { name: tmp, emptyDir: { medium: Memory, sizeLimit: 32Mi } }
 EOF
   wait_for_pod_selector "$DRILL_NS" cnpg.io/cluster=kanz-postgres-drill 120
-  k -n "$DRILL_NS" wait --for=condition=Ready cluster/kanz-postgres-drill --timeout=300s >/dev/null
+  k -n "$DRILL_NS" wait --for=condition=Ready pod -l cnpg.io/cluster=kanz-postgres-drill --timeout=300s >/dev/null
   k -n "$DRILL_NS" wait --for=condition=Ready pod/postgres-restore --timeout=180s >/dev/null
 
   local postgres_ready=0
