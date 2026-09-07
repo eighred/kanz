@@ -18,6 +18,13 @@ mock_provider "aws" {
   }
 }
 
+# Terraform treats an aliased provider as a separate configuration.  Mock it
+# explicitly so the recovery-region tests never fall through to a developer's
+# ambient AWS credentials or IMDS.
+mock_provider "aws" {
+  alias = "recovery"
+}
+
 run "cost_and_security_envelope" {
   command = apply
 
@@ -99,6 +106,30 @@ run "cost_and_security_envelope" {
 
   assert {
     condition = (
+      aws_s3_bucket.recovery.object_lock_enabled &&
+      aws_s3_bucket_versioning.recovery.versioning_configuration[0].status == "Enabled" &&
+      aws_s3_bucket_object_lock_configuration.recovery.rule[0].default_retention[0].mode == "GOVERNANCE" &&
+      aws_s3_bucket_object_lock_configuration.recovery.rule[0].default_retention[0].days == 30
+    )
+    error_message = "Recovery evidence must be versioned and Object-Locked in Osaka for 30 days."
+  }
+
+  assert {
+    condition     = aws_kms_key.recovery.enable_key_rotation
+    error_message = "Recovery evidence must use a rotation-enabled customer-managed Osaka KMS key."
+  }
+
+  assert {
+    condition = (
+      aws_s3_bucket_lifecycle_configuration.recovery.rule[0].expiration[0].days == 45 &&
+      aws_s3_bucket_lifecycle_configuration.recovery.rule[0].noncurrent_version_expiration[0].noncurrent_days == 45 &&
+      aws_s3_bucket_lifecycle_configuration.recovery.rule[0].abort_incomplete_multipart_upload[0].days_after_initiation == 1
+    )
+    error_message = "Recovery storage must expire current/noncurrent evidence after 45 days and abort incomplete uploads."
+  }
+
+  assert {
+    condition = (
       strcontains(aws_instance.node.user_data, "for _ in $(seq 1 300)") &&
       !strcontains(aws_instance.node.user_data, "$$(seq 1 300)")
     )
@@ -129,6 +160,17 @@ run "rejects_non_tokyo_region" {
   }
 
   expect_failures = [var.region]
+}
+
+run "rejects_non_osaka_recovery_region" {
+  command = plan
+
+  variables {
+    recovery_region = "ap-northeast-2"
+    budget_email    = "alerts@example.invalid"
+  }
+
+  expect_failures = [var.recovery_region]
 }
 
 run "rejects_cost_expansion" {

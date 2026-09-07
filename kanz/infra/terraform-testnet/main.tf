@@ -357,6 +357,188 @@ resource "aws_iam_role_policy" "vault_unseal" {
   })
 }
 
+# Issue #1100: the single-node Tokyo estate has no recovery boundary if its
+# attached EBS volume or Region is lost.  This bucket is in Osaka and holds only
+# encrypted, redacted recovery artifacts.  Governance-mode Object Lock protects
+# a drill from an accidental or ordinary-operator delete while retaining a
+# controlled escape hatch during testnet development; production evidence uses
+# the separately governed compliance/air-gapped posture.
+resource "aws_kms_key" "recovery" {
+  provider                = aws.recovery
+  description             = "Kanz Tokyo testnet recovery artifacts in Osaka"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  key_usage               = "ENCRYPT_DECRYPT"
+
+  tags = merge(local.common_tags, {
+    Name = "${var.name}-recovery"
+  })
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_kms_alias" "recovery" {
+  provider      = aws.recovery
+  name          = "alias/${var.name}-recovery"
+  target_key_id = aws_kms_key.recovery.key_id
+}
+
+resource "aws_s3_bucket" "recovery" {
+  provider            = aws.recovery
+  bucket              = "${var.name}-recovery-${data.aws_caller_identity.current.account_id}"
+  object_lock_enabled = true
+
+  tags = merge(local.common_tags, {
+    Name                     = "${var.name}-recovery"
+    "kanz.io/data-residency" = "jp"
+  })
+
+}
+
+resource "aws_s3_bucket_versioning" "recovery" {
+  provider = aws.recovery
+  bucket   = aws_s3_bucket.recovery.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_object_lock_configuration" "recovery" {
+  provider = aws.recovery
+  bucket   = aws_s3_bucket.recovery.id
+
+  rule {
+    default_retention {
+      mode = "GOVERNANCE"
+      days = 30
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.recovery]
+}
+
+# Object Lock prevents deletion during the evidence window; lifecycle bounds
+# storage after that window.  Noncurrent versions get the same bound so a
+# replaced drill bundle cannot accumulate forever behind versioning.
+resource "aws_s3_bucket_lifecycle_configuration" "recovery" {
+  provider = aws.recovery
+  bucket   = aws_s3_bucket.recovery.id
+
+  rule {
+    id     = "expire-recovery-evidence"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = 45
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 45
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
+
+  depends_on = [aws_s3_bucket_object_lock_configuration.recovery]
+}
+
+resource "aws_s3_bucket_public_access_block" "recovery" {
+  provider = aws.recovery
+  bucket   = aws_s3_bucket.recovery.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "recovery" {
+  provider = aws.recovery
+  bucket   = aws_s3_bucket.recovery.id
+
+  rule {
+    bucket_key_enabled = true
+    apply_server_side_encryption_by_default {
+      kms_master_key_id = aws_kms_key.recovery.arn
+      sse_algorithm     = "aws:kms"
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "recovery" {
+  provider = aws.recovery
+  bucket   = aws_s3_bucket.recovery.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "DenyInsecureTransport"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource = [
+          aws_s3_bucket.recovery.arn,
+          "${aws_s3_bucket.recovery.arn}/*",
+        ]
+        Condition = {
+          Bool = { "aws:SecureTransport" = "false" }
+        }
+      },
+      {
+        Sid       = "DenyUnapprovedEncryption"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:PutObject"
+        Resource  = "${aws_s3_bucket.recovery.arn}/*"
+        Condition = {
+          StringNotEquals = {
+            "s3:x-amz-server-side-encryption"                = "aws:kms"
+            "s3:x-amz-server-side-encryption-aws-kms-key-id" = aws_kms_key.recovery.arn
+          }
+        }
+      },
+    ]
+  })
+}
+
+# Only the SSM-controlled host can write or read recovery objects. IMDSv2's hop
+# limit remains one, so ordinary pods cannot inherit this role. Backup tooling
+# runs on the host and never places AWS credentials in a Pod or Vault.
+resource "aws_iam_role_policy" "node_recovery" {
+  name = "${var.name}-recovery"
+  role = aws_iam_role.node.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ListRecoveryBucket"
+        Effect   = "Allow"
+        Action   = ["s3:GetBucketLocation", "s3:ListBucket"]
+        Resource = aws_s3_bucket.recovery.arn
+      },
+      {
+        Sid      = "ReadWriteRecoveryObjects"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"]
+        Resource = "${aws_s3_bucket.recovery.arn}/*"
+      },
+      {
+        Sid      = "UseRecoveryKey"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
+        Resource = aws_kms_key.recovery.arn
+      },
+    ]
+  })
+}
+
 resource "aws_ebs_volume" "data" {
   availability_zone = local.availability_zone
   encrypted         = true
