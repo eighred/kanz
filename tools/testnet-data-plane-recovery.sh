@@ -336,7 +336,7 @@ EOF
   local database expected_migrations expected_tables expected_unsafe source_lsn restored
   while IFS='|' read -r database expected_migrations expected_tables expected_unsafe source_lsn; do
     [[ " ${DATABASES[*]} " == *" $database "* ]] || die "artifact names unexpected database $database"
-    k -n "$DRILL_NS" exec postgres-restore -c restore -- bash -ceu '
+    k -n "$DRILL_NS" exec -i postgres-restore -c restore -- bash -ceu '
       export PGPASSWORD="$(cat /run/secrets/postgres/password)"
       host=$(cat /run/secrets/postgres/host)
       createdb --host "$host" --username kanz_restore "$1"
