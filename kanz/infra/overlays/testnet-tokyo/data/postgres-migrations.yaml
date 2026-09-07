@@ -1,0 +1,168 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-migrations
+  namespace: kanz-data
+  labels:
+    app.kubernetes.io/name: postgres-migrations
+    app.kubernetes.io/part-of: kanz
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-migrations
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: postgres-provisioner
+      imagePullSecrets:
+        - name: ghcr-pull
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 26
+        runAsGroup: 26
+        fsGroup: 26
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: build-dsns
+          image: ghcr.io/cloudnative-pg/postgresql:16.10-standard-bookworm
+          command: [bash, -ceu]
+          args:
+            - |
+              host=kanz-testnet-postgres-rw.kanz-data.svc.cluster.local
+              export PGPASSWORD="$(cat /run/secrets/bootstrap/password)"
+              until roles=$(psql --host "${host}" --username kanz_bootstrap --dbname kanz_control --no-psqlrc --tuples-only --no-align --command "select count(*) from pg_roles where rolname ~ '_(app|migrate)$'") && [ "${roles}" = 16 ]; do
+                sleep 2
+              done
+              umask 077
+              while IFS=: read -r service database stem; do
+                password=$(cat "/run/secrets/postgres/${service}-migrate")
+                printf 'postgresql://%s_migrate:%s@%s:5432/%s?sslmode=require' "${stem}" "${password}" "${host}" "${database}" > "/run/migration-dsns/${service}"
+              done <<'EOF'
+              accounting:accounting:accounting
+              audit:audit:audit
+              identity:identity:identity
+              oms:oms:oms
+              regulatory:regulatory:regulatory
+              risk-engine:risk_engine:risk_engine
+              venue-binance:venue_binance:venue_binance
+              venue-okx:venue_okx:venue_okx
+              EOF
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 96Mi }
+          securityContext: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: bootstrap, mountPath: /run/secrets/bootstrap, readOnly: true }
+            - { name: role-passwords, mountPath: /run/secrets/postgres, readOnly: true }
+            - { name: migration-dsns, mountPath: /run/migration-dsns }
+            - { name: tmp, mountPath: /tmp }
+        - &migration
+          name: migrate-accounting
+          image: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate@sha256:b5db20eb08b17a70d637dc378f5c797ca220874ebc7399786f8e6a7c0df10490
+          args: ["--dir", "/migrations/accounting"]
+          env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/accounting }]
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext: *restricted
+          volumeMounts: &dsn-mounts
+            - { name: migration-dsns, mountPath: /run/migration-dsns, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+        - <<: *migration
+          name: migrate-audit
+          args: ["--dir", "/migrations/audit"]
+          env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/audit }]
+        - <<: *migration
+          name: migrate-identity
+          args: ["--dir", "/migrations/identity"]
+          env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/identity }]
+        - <<: *migration
+          name: migrate-oms
+          args: ["--dir", "/migrations/oms"]
+          env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/oms }]
+        - <<: *migration
+          name: migrate-regulatory
+          args: ["--dir", "/migrations/regulatory"]
+          env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/regulatory }]
+        - <<: *migration
+          name: migrate-risk-engine
+          args: ["--dir", "/migrations/risk-engine"]
+          env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/risk-engine }]
+        - <<: *migration
+          name: migrate-venue-binance
+          args: ["--dir", "/migrations/venue-binance"]
+          env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/venue-binance }]
+        - <<: *migration
+          name: migrate-venue-okx
+          args: ["--dir", "/migrations/venue-okx"]
+          env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/venue-okx }]
+      containers:
+        - name: verify
+          image: ghcr.io/cloudnative-pg/postgresql:16.10-standard-bookworm
+          command: [bash, -ceu]
+          args:
+            - |
+              host=kanz-testnet-postgres-rw.kanz-data.svc.cluster.local
+              export PGPASSWORD="$(cat /run/secrets/bootstrap/password)"
+              for database in accounting audit identity oms regulatory risk_engine venue_binance venue_okx; do
+                applied=$(psql --host "${host}" --username kanz_bootstrap --dbname "${database}" --no-psqlrc --tuples-only --no-align --command 'select count(*) from schema_migrations')
+                unsafe=$(psql --host "${host}" --username kanz_bootstrap --dbname "${database}" --no-psqlrc --tuples-only --no-align --command "select count(*) from pg_class where relkind='r' and relrowsecurity and not relforcerowsecurity")
+                [ "${applied}" -gt 0 ] && [ "${unsafe}" = 0 ]
+                echo "verified ${database} migrations=${applied} forced-rls-gaps=${unsafe}"
+              done
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 96Mi }
+          securityContext: *restricted
+          volumeMounts:
+            - { name: bootstrap, mountPath: /run/secrets/bootstrap, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: bootstrap
+          secret:
+            secretName: kanz-testnet-postgres-app
+            defaultMode: 0440
+        - name: role-passwords
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: postgres-role-passwords
+        - name: migration-dsns
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 32Mi }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-migrations-egress
+  namespace: kanz-data
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-migrations
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: kanz-testnet-postgres
+      ports:
+        - { protocol: TCP, port: 5432 }

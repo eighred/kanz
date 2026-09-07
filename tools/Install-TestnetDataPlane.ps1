@@ -63,8 +63,8 @@ if ($LASTEXITCODE -ne 0 -or -not $renderedLines) {
 }
 $rendered = ($renderedLines -join "`n") + "`n"
 $resourceCount = ([regex]::Matches($rendered, '(?m)^kind: ')).Count
-if ($resourceCount -ne 35) {
-    throw "Expected 35 rendered resources; found $resourceCount. Review the transfer and readiness contract."
+if ($resourceCount -ne 37) {
+    throw "Expected 37 rendered resources; found $resourceCount. Review the transfer and readiness contract."
 }
 foreach ($required in @(
     'sync_interval: always', '--appendfsync always',
@@ -146,7 +146,7 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo data p
     # kubectl does not implement Argo's BeforeHookCreation policy. A previously
     # failed bootstrap Job is immutable and must be removed before a reviewed,
     # idempotent reapply; a completed Job is retained as evidence.
-    'for item in kanz-data/postgres-provisioner kanz-messaging/nats-bootstrap; do ns=${item%/*}; job=${item#*/}; if k3s kubectl -n "${ns}" get job "${job}" >/dev/null 2>&1; then succeeded=$(k3s kubectl -n "${ns}" get job "${job}" -o jsonpath=''{.status.succeeded}''); if [[ "${succeeded:-0}" != 1 ]]; then k3s kubectl -n "${ns}" delete job "${job}" --wait=true >/dev/null; fi; fi; done',
+    'for item in kanz-data/postgres-provisioner kanz-data/postgres-migrations kanz-messaging/nats-bootstrap; do ns=${item%/*}; job=${item#*/}; if k3s kubectl -n "${ns}" get job "${job}" >/dev/null 2>&1; then succeeded=$(k3s kubectl -n "${ns}" get job "${job}" -o jsonpath=''{.status.succeeded}''); if [[ "${succeeded:-0}" != 1 ]]; then k3s kubectl -n "${ns}" delete job "${job}" --wait=true >/dev/null; fi; fi; done',
     'k3s kubectl apply --server-side --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
     'redis_sa=$(k3s kubectl -n kanz-messaging get pod redis-0 -o jsonpath=''{.spec.serviceAccountName}'' 2>/dev/null || true)',
     'if [[ -n "${redis_sa}" && "${redis_sa}" != redis ]]; then k3s kubectl -n kanz-messaging delete pod redis-0 --wait=false >/dev/null; fi',
@@ -155,6 +155,7 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo data p
     'k3s kubectl -n kanz-messaging rollout status statefulset/nats --timeout=600s >/dev/null',
     'k3s kubectl -n kanz-messaging rollout status statefulset/redis --timeout=600s >/dev/null',
     'k3s kubectl -n kanz-data wait --for=condition=complete job/postgres-provisioner --timeout=600s >/dev/null',
+    'k3s kubectl -n kanz-data wait --for=condition=complete job/postgres-migrations --timeout=900s >/dev/null',
     'k3s kubectl -n kanz-messaging wait --for=condition=complete job/nats-bootstrap --timeout=600s >/dev/null',
     'pgpod=$(k3s kubectl -n kanz-data get pod -l cnpg.io/cluster=kanz-testnet-postgres,role=primary -o jsonpath=''{.items[0].metadata.name}'')',
     'test -n "${pgpod}"',
@@ -164,6 +165,7 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo data p
     'test "${redis_sync}" = always',
     'grep -Fq ''sync_interval: always'' "${manifest}"',
     'echo postgres-ready-and-roles-constrained',
+    'echo postgres-migrations-current-and-force-rls-verified',
     'echo nats-ready-and-fsync-before-ack',
     'echo redis-ready-and-appendfsync-always'
 )

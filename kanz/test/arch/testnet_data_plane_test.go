@@ -104,6 +104,36 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 			t.Errorf("testnet data-plane image %q is not pinned by digest", image)
 		}
 	}
+	migrations := mustReadArchFile(t, filepath.Join(dir, "postgres-migrations.yaml"))
+	if !regexp.MustCompile(`012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/kanz-migrate@sha256:[0-9a-f]{64}`).Match(migrations) {
+		t.Fatal("migration image must come from the immutable Tokyo ECR release")
+	}
+}
+
+func TestTokyoDatabaseMigrationsRunBeforeCapitalPathAdmission(t *testing.T) {
+	root := moduleRoot(t)
+	dir := filepath.Join(root, "infra", "overlays", "testnet-tokyo", "data")
+	raw := string(mustReadArchFile(t, filepath.Join(dir, "postgres-migrations.yaml")))
+	for _, service := range []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx"} {
+		if !strings.Contains(raw, "name: migrate-"+service) || !strings.Contains(raw, `"/migrations/`+service+`"`) {
+			t.Errorf("migration job does not apply %s's schema", service)
+		}
+		if !strings.Contains(raw, "value: /run/migration-dsns/"+service) {
+			t.Errorf("migration job does not give %s a file-backed DSN", service)
+		}
+	}
+	for _, required := range []string{
+		"serviceAccountName: postgres-provisioner", "secretProviderClass: postgres-role-passwords",
+		"defaultMode: 0440", "readOnlyRootFilesystem: true", "select count(*) from schema_migrations",
+		"relrowsecurity and not relforcerowsecurity", "activeDeadlineSeconds: 900",
+	} {
+		if !strings.Contains(raw, required) {
+			t.Errorf("migration job is missing fail-closed boundary %q", required)
+		}
+	}
+	if strings.Contains(raw, "secretObjects:") || strings.Contains(raw, "kind: Secret") {
+		t.Fatal("migration credentials must stay in Vault CSI files and memory-backed emptyDir")
+	}
 }
 
 func TestTokyoPostgresProvisionerKeepsApplicationRolesRLSConstrained(t *testing.T) {
@@ -197,13 +227,38 @@ func TestTokyoDataPlaneInstallerFailsClosedOnRenderAndRuntimeState(t *testing.T)
 	root := moduleRoot(t)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetDataPlane.ps1")))
 	for _, required := range []string{
-		"resourceCount -ne 35", "mutable image tag survived", "sha256sum --check --status",
+		"resourceCount -ne 37", "mutable image tag survived", "sha256sum --check --status",
 		"data-plane-server-dry-run-namespace-substitute=default", "apply --server-side --dry-run=server", "condition=Ready cluster/kanz-testnet-postgres",
-		"condition=complete job/postgres-provisioner", "condition=complete job/nats-bootstrap",
+		"condition=complete job/postgres-provisioner", "condition=complete job/postgres-migrations", "condition=complete job/nats-bootstrap",
 		"redis_sa", "not rolsuper and not rolbypassrls", "CONFIG GET appendfsync", "sync_interval: always",
 	} {
 		if !strings.Contains(raw, required) {
 			t.Errorf("Tokyo data-plane installer is missing fail-closed proof %q", required)
+		}
+	}
+}
+
+func TestTokyoRecoveryKeepsCredentialsInPodsAndProvesAnIsolatedRestore(t *testing.T) {
+	root := moduleRoot(t)
+	script := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "testnet-data-plane-recovery.sh")))
+	wrapper := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Invoke-TestnetDataPlaneRecovery.ps1")))
+	for _, required := range []string{
+		"refuse_active_writers", "postgres-migrations", "pg_dump", "redis-cli -a", "account backup --check",
+		"MANIFEST.sha256", "server-side-encryption aws:kms", "ObjectLockMode==\"GOVERNANCE\"",
+		"kind: Cluster", "name: kanz-postgres-drill", "kind: NetworkPolicy",
+		"pg_restore", "relrowsecurity and not relforcerowsecurity", "account restore --force",
+		"status:\"RESTORE_VERIFIED\"", "rpo_seconds", "rto_seconds",
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("data-plane recovery is missing fail-closed proof %q", required)
+		}
+	}
+	if strings.Contains(script, "aws_access_key_id") || strings.Contains(script, "secretObjects:") {
+		t.Fatal("recovery must not move AWS or Vault credentials into source or Kubernetes Secrets")
+	}
+	for _, required := range []string{"fetch origin main", "hash-object", "origin/main", "not the exact blob merged"} {
+		if !strings.Contains(wrapper, required) {
+			t.Errorf("recovery wrapper does not enforce merged-code provenance %q", required)
 		}
 	}
 }
