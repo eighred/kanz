@@ -3,6 +3,9 @@ param(
     [ValidateSet('Bootstrap', 'Rotate')]
     [string]$Mode = 'Rotate',
 
+    [ValidateSet('Venue', 'DataPlane')]
+    [string]$Target = 'Venue',
+
     [switch]$StageOnly
 )
 
@@ -12,7 +15,10 @@ $region = 'ap-northeast-1'
 $scriptRoot = $PSScriptRoot
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $terraformRoot = Join-Path $repositoryRoot 'kanz\infra\terraform-testnet'
-$bootstrapScript = Join-Path $scriptRoot 'bootstrap-testnet-venues.sh'
+$scriptName = if ($Target -eq 'DataPlane') { 'bootstrap-testnet-data-plane.sh' } else { 'bootstrap-testnet-venues.sh' }
+$bootstrapScript = Join-Path $scriptRoot $scriptName
+$remoteName = if ($Target -eq 'DataPlane') { 'testnet-data-plane-secrets' } else { 'testnet-venue-secrets' }
+$completionMarker = "/vault/run/$remoteName.complete"
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $terraformCommand = Get-Command terraform.exe -ErrorAction SilentlyContinue
 if (-not $terraformCommand) {
@@ -25,7 +31,10 @@ else {
 }
 
 if (-not (Test-Path -LiteralPath $bootstrapScript -PathType Leaf)) {
-    throw "Venue-secret bootstrap script not found: $bootstrapScript"
+    throw "Vault bootstrap script not found: $bootstrapScript"
+}
+if ($Target -eq 'DataPlane' -and $Mode -eq 'Rotate') {
+    throw 'Data-plane bootstrap is idempotent; use Bootstrap mode.'
 }
 if (-not (Get-Command session-manager-plugin.exe -ErrorAction SilentlyContinue)) {
     $pluginDirectory = 'C:\Program Files\Amazon\SessionManagerPlugin\bin'
@@ -39,10 +48,11 @@ if ($env:KANZ_TESTNET_INSTANCE_ID) {
     $instanceId = $env:KANZ_TESTNET_INSTANCE_ID
 }
 elseif ($terraformPath) {
-    $instanceId = (& $terraformPath "-chdir=$terraformRoot" output -raw instance_id 2>$null).Trim()
-    if ($LASTEXITCODE -ne 0) {
+    $instanceOutput = & $terraformPath "-chdir=$terraformRoot" output -raw instance_id 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $instanceOutput) {
         throw 'Terraform could not resolve the testnet EC2 instance from local state.'
     }
+    $instanceId = $instanceOutput.Trim()
 }
 else {
     throw 'Terraform is unavailable and KANZ_TESTNET_INSTANCE_ID is not set.'
@@ -52,15 +62,15 @@ if ($instanceId -notmatch '^i-[0-9a-f]+$') {
 }
 
 $payload = [Convert]::ToBase64String([IO.File]::ReadAllBytes($bootstrapScript))
-$remoteScript = '/vault/run/bootstrap-testnet-venues.sh'
+$remoteScript = "/vault/run/bootstrap-$remoteName.sh"
 $stageCommands = @(
-    "printf '%s' '$payload' | base64 -d > /var/tmp/kanz-bootstrap-testnet-venues.sh",
-    'chmod 0700 /var/tmp/kanz-bootstrap-testnet-venues.sh',
-    "k3s kubectl -n vault cp /var/tmp/kanz-bootstrap-testnet-venues.sh vault-0:$remoteScript -c vault",
+    "printf '%s' '$payload' | base64 -d > /var/tmp/kanz-bootstrap-$remoteName.sh",
+    "chmod 0700 /var/tmp/kanz-bootstrap-$remoteName.sh",
+    "k3s kubectl -n vault cp /var/tmp/kanz-bootstrap-$remoteName.sh vault-0:$remoteScript -c vault",
     "k3s kubectl -n vault exec vault-0 -c vault -- chmod 0700 $remoteScript",
     "k3s kubectl -n vault exec vault-0 -c vault -- /bin/sh -n $remoteScript",
-    'k3s kubectl -n vault exec vault-0 -c vault -- rm -f /vault/run/testnet-venue-secrets.complete',
-    'rm -f /var/tmp/kanz-bootstrap-testnet-venues.sh'
+    "k3s kubectl -n vault exec vault-0 -c vault -- rm -f $completionMarker",
+    "rm -f /var/tmp/kanz-bootstrap-$remoteName.sh"
 )
 $parameters = @{ commands = $stageCommands } | ConvertTo-Json -Compress
 $commandId = (& $aws ssm send-command `
@@ -90,12 +100,12 @@ if ($invocation.Status -ne 'Success') {
     throw "Vault operator script staging failed with status '$($invocation.Status)': $($invocation.StandardErrorContent)"
 }
 if ($StageOnly) {
-    Write-Host 'Secret-free Vault operator script staged and syntax-checked successfully.'
+    Write-Host "$Target Vault operator script staged and syntax-checked successfully."
     return
 }
 
-$remoteMode = $Mode.ToLowerInvariant()
-$interactiveCommand = "sudo k3s kubectl -n vault exec -it vault-0 -c vault -- /bin/sh $remoteScript $remoteMode"
+$remoteArgument = if ($Target -eq 'Venue') { ' ' + $Mode.ToLowerInvariant() } else { '' }
+$interactiveCommand = "sudo k3s kubectl -n vault exec -it vault-0 -c vault -- /bin/sh $remoteScript$remoteArgument"
 Write-Host 'Secrets are entered only in the remote Vault process. Hidden input is expected.'
 & $aws ssm start-session `
     --profile $profileName `
@@ -108,7 +118,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $checkParameters = @{ commands = @(
-    "k3s kubectl -n vault exec vault-0 -c vault -- test -f /vault/run/testnet-venue-secrets.complete"
+    "k3s kubectl -n vault exec vault-0 -c vault -- test -f $completionMarker"
 ) } | ConvertTo-Json -Compress
 $checkCommandId = (& $aws ssm send-command `
     --profile $profileName `
@@ -137,4 +147,4 @@ if ($check.Status -ne 'Success') {
     throw 'Vault did not emit its completion marker; credential rotation is not verified.'
 }
 
-Write-Host "$Mode completed and the remote completion marker was verified."
+Write-Host "$Target $Mode completed and the remote completion marker was verified."

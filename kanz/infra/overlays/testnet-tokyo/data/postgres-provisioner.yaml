@@ -1,0 +1,180 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: postgres-provisioner
+  namespace: kanz-data
+  labels:
+    app.kubernetes.io/name: postgres-provisioner
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-provisioner
+  namespace: kanz-data
+data:
+  provision.sh: |
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
+
+    readonly host=kanz-testnet-postgres-rw.kanz-data.svc.cluster.local
+    readonly secret_dir=/run/secrets/postgres
+    export PGCONNECT_TIMEOUT=5
+    export PGSSLMODE=require
+    export PGPASSWORD="$(cat /run/secrets/bootstrap/password)"
+    test -n "${PGPASSWORD}"
+
+    until pg_isready --host "${host}" --port 5432 --username kanz_bootstrap --dbname kanz_control; do
+      sleep 2
+    done
+
+    provision_database() {
+      local service="$1" database="$2" stem="$3"
+      local app_role="${stem}_app" migrate_role="${stem}_migrate"
+      local app_password migrate_password
+      app_password="$(cat "${secret_dir}/${service}-app")"
+      migrate_password="$(cat "${secret_dir}/${service}-migrate")"
+      test -n "${app_password}" && test -n "${migrate_password}"
+
+      psql --host "${host}" --username kanz_bootstrap --dbname kanz_control --no-psqlrc \
+        --set=ON_ERROR_STOP=1 --set=app_role="${app_role}" --set=migrate_role="${migrate_role}" \
+        --set=app_password="${app_password}" --set=migrate_password="${migrate_password}" \
+        --set=database="${database}" <<'SQL'
+    SELECT format('CREATE ROLE %I', :'app_role')
+      WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = :'app_role') \gexec
+    SELECT format('CREATE ROLE %I', :'migrate_role')
+      WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = :'migrate_role') \gexec
+    SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 20 PASSWORD %L', :'app_role', :'app_password') \gexec
+    SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 4 PASSWORD %L', :'migrate_role', :'migrate_password') \gexec
+    SELECT format('GRANT %I TO kanz_bootstrap WITH ADMIN OPTION', :'migrate_role') \gexec
+    SELECT format('CREATE DATABASE %I OWNER %I', :'database', :'migrate_role')
+      WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = :'database') \gexec
+    SQL
+
+      psql --host "${host}" --username kanz_bootstrap --dbname "${database}" --no-psqlrc \
+        --set=ON_ERROR_STOP=1 --set=app_role="${app_role}" --set=migrate_role="${migrate_role}" <<'SQL'
+    SELECT format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), :'app_role') \gexec
+    SELECT format('GRANT USAGE ON SCHEMA public TO %I', :'app_role') \gexec
+    SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', :'app_role') \gexec
+    SELECT format('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO %I', :'app_role') \gexec
+    SELECT format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO %I', :'app_role') \gexec
+    SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', :'migrate_role', :'app_role') \gexec
+    SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO %I', :'migrate_role', :'app_role') \gexec
+    SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO %I', :'migrate_role', :'app_role') \gexec
+    SQL
+      echo "provisioned ${service} roles and database"
+    }
+
+    provision_database accounting accounting accounting
+    provision_database audit audit audit
+    provision_database identity identity identity
+    provision_database oms oms oms
+    provision_database regulatory regulatory regulatory
+    provision_database risk-engine risk_engine risk_engine
+    provision_database venue-binance venue_binance venue_binance
+    provision_database venue-okx venue_okx venue_okx
+
+    psql --host "${host}" --username kanz_bootstrap --dbname kanz_control --no-psqlrc \
+      --set=ON_ERROR_STOP=1 --tuples-only --no-align <<'SQL'
+    SELECT count(*) = 16 AS roles_ok
+      FROM pg_catalog.pg_roles
+     WHERE rolname IN (
+       'accounting_app','accounting_migrate','audit_app','audit_migrate',
+       'identity_app','identity_migrate','oms_app','oms_migrate',
+       'regulatory_app','regulatory_migrate','risk_engine_app','risk_engine_migrate',
+       'venue_binance_app','venue_binance_migrate','venue_okx_app','venue_okx_migrate'
+     )
+       AND rolsuper = false
+       AND rolbypassrls = false \gset
+    \if :roles_ok
+    \else
+      \echo 'role verification failed' >&2
+      \quit 3
+    \endif
+    SQL
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-provisioner
+  namespace: kanz-data
+  labels:
+    app.kubernetes.io/name: postgres-provisioner
+    app.kubernetes.io/part-of: kanz
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-provisioner
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: postgres-provisioner
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 26
+        runAsGroup: 26
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provisioner
+          image: ghcr.io/cloudnative-pg/postgresql:16.10-standard-bookworm
+          command: [bash, /scripts/provision.sh]
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+            - { name: bootstrap, mountPath: /run/secrets/bootstrap, readOnly: true }
+            - { name: role-passwords, mountPath: /run/secrets/postgres, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: scripts
+          configMap:
+            name: postgres-provisioner
+            defaultMode: 0555
+        - name: bootstrap
+          secret:
+            secretName: kanz-testnet-postgres-app
+            defaultMode: 0440
+        - name: role-passwords
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: postgres-role-passwords
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 32Mi }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-provisioner-egress
+  namespace: kanz-data
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-provisioner
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: kanz-testnet-postgres
+      ports:
+        - { protocol: TCP, port: 5432 }

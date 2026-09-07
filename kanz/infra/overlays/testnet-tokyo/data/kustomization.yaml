@@ -1,0 +1,73 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - ../../../dr/postgres/priorityclass.yaml
+  - ../../../nats/namespace.yaml
+  - ../../../nats/tenancy.yaml
+  - ../../../nats/nats.yaml
+  - ../../../nats/bootstrap-job.yaml
+  - ../../../messaging/redis.yaml
+  - postgres.yaml
+  - postgres-provisioner.yaml
+  - postgres-aliases.yaml
+  - secret-provider-classes.yaml
+
+commonAnnotations:
+  kanz.io/availability: UNSUPPORTED
+  kanz.io/environment: testnet-tokyo
+  kanz.io/failure-domain: single-node
+
+patches:
+  - path: nats-config-patch.yaml
+  - path: nats-bootstrap-patch.yaml
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: nats
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+      - op: add
+        path: /spec/template/metadata/labels/kanz.io~1availability
+        value: UNSUPPORTED
+      - op: add
+        path: /spec/template/metadata/labels/kanz.io~1failure-domain
+        value: single-node
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 4Gi
+  - target:
+      group: policy
+      version: v1
+      kind: PodDisruptionBudget
+      name: nats
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 1
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: redis
+    patch: |-
+      - op: add
+        path: /spec/template/metadata/labels/kanz.io~1availability
+        value: UNSUPPORTED
+      - op: add
+        path: /spec/template/metadata/labels/kanz.io~1failure-domain
+        value: single-node
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests: { cpu: 50m, memory: 64Mi }
+          limits: { cpu: 250m, memory: 256Mi }
+
+images:
+  - name: ghcr.io/cloudnative-pg/postgresql
+    newName: ghcr.io/cloudnative-pg/postgresql
+    digest: sha256:533e45e0a00c156bdab7c4d9a84fffa87259594725a3909c898e8645727d9555
