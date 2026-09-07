@@ -608,7 +608,7 @@ func bookInDomain(b *Book) bool {
 // exactly ONE g.record among them — on the full-evaluation path. Nine paths
 // recorded nothing, and TWO of those returned Allowed: true: the ungoverned
 // portfolio and the mandate that constrains nothing. For an order admitted that
-// way the platform could not answer CLAUDE.md's attributability requirement —
+// way the platform could not answer AGENTS.md's attributability requirement —
 // "which mandate permitted it" — because nothing anywhere said a compliance
 // decision had been made at all. The ungoverned COUNTER gives an aggregate; a
 // reviewer asking about THIS order got silence.

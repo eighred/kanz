@@ -54,6 +54,17 @@ func TestEvaluateReval_SectorShockNoClassifierIsRecorded(t *testing.T) {
 	}
 }
 
+func TestEvaluateReval_UnknownShockTypeIsRecorded(t *testing.T) {
+	p := makePortfolio(
+		domain.Position{InstrumentID: "A", MarketValue: money(100, 0, "USD"), AsOf: baseTime},
+	)
+	_, cov := scenario.EvaluateReval(p, []v1.ScenarioShock{unknownShock{}}, nil, linearOnlyRevaluer{})
+	if cov.ExcludedCount != 1 || len(cov.Exclusions) != 1 ||
+		cov.Exclusions[0].Reason != "unknown_shock_type" {
+		t.Fatalf("coverage=%+v want one unknown_shock_type exclusion", cov)
+	}
+}
+
 func TestEvaluateReval_UnclassifiedInstrumentIsRecorded(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "BANK", MarketValue: money(1000, 0, "USD"), AsOf: baseTime},

@@ -21,7 +21,7 @@
 //
 // # Where this lives, and why it is not in pkg/
 //
-// CLAUDE.md: shared code starts in a service's internal/ and is promoted only
+// AGENTS.md: shared code starts in a service's internal/ and is promoted only
 // when a SECOND consumer appears. The OMS is the first, and it is the right
 // first: it holds all three markers and every commit-then-publish pair the issue
 // counted. `pkg/outbox` for one consumer is the mistake this repository has a

@@ -18,6 +18,10 @@ import (
 	"github.com/eighred/kanz/internal/risk/state"
 )
 
+type unknownScenarioShock struct{}
+
+func (unknownScenarioShock) Description() string { return "unknown" }
+
 // A NAMED STRESS SCENARIO WITH NO CLASSIFIER MUST NOT RETURN THE UNSHOCKED BOOK
 // (#640).
 //
@@ -80,6 +84,25 @@ func TestEvaluateScenario_NamedScenarioWithNoClassifierIsRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "no_classifier") {
 		t.Errorf("err=%q does not name the reason — an operator cannot tell a missing "+
 			"classifier from a reference-data gap without it", err)
+	}
+}
+
+func TestEvaluateScenario_UnknownShockTypeIsRefused(t *testing.T) {
+	e, s := newEngine()
+	applyPosition(t, s, "PORT-1", "BANK", 1000, time.Now().Add(-1*time.Second))
+
+	resp, err := e.EvaluateScenario(context.Background(), v1.ScenarioRequest{
+		PortfolioID: "PORT-1",
+		Shocks:      []v1.ScenarioShock{unknownScenarioShock{}},
+	})
+	if !errors.Is(err, v1.ErrScenarioUnresolvable) {
+		t.Fatalf("err=%v want ErrScenarioUnresolvable", err)
+	}
+	if resp.Projected != nil {
+		t.Errorf("Projected=%v want nil — an unknown shock must not return the current book", resp.Projected)
+	}
+	if !strings.Contains(err.Error(), "unknown_shock_type") {
+		t.Errorf("err=%q does not name unknown_shock_type", err)
 	}
 }
 

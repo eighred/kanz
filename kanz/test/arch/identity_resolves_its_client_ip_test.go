@@ -18,7 +18,7 @@ import (
 //
 // services/identity attributed every login attempt to X-Kanz-Client-IP, taken
 // straight off the request. The comment on the constant justified that with the
-// platform rule CLAUDE.md states for every other upstream — "a NetworkPolicy
+// platform rule AGENTS.md states for every other upstream — "a NetworkPolicy
 // makes the BFF the only caller that can reach this service".
 //
 // infra/security/runtime/network-policies.yaml says otherwise, in the same file
@@ -50,7 +50,7 @@ import (
 // what anyone adding a second attributed surface here would write first. It
 // would also be silent — login keeps working, every existing test keeps passing,
 // and the bound is gone. That is the shape this repository keeps paying for, and
-// CLAUDE.md's standing answer is that an invariant worth keeping is a guard.
+// AGENTS.md's standing answer is that an invariant worth keeping is a guard.
 //
 // # What is checked
 //

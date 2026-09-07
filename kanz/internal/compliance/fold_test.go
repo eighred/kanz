@@ -310,7 +310,7 @@ func TestTotalGross_HandsBackACopy(t *testing.T) {
 // against several mandates concurrently is a natural thing for a caller to
 // write. NOTE: without -race this proves the answers agree, not that the access
 // is race-free — the race detector needs cgo and does not run on the usual dev
-// box (CLAUDE.md, Constraints), so CI is what proves the second half.
+// box (AGENTS.md, Constraints), so CI is what proves the second half.
 func TestFold_IsSafeUnderConcurrentReaders(t *testing.T) {
 	book, cl := benchBook(64)
 	c := &Candidate{Book: book, Classifier: cl, AsOf: t0}

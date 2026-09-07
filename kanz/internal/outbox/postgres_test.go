@@ -14,7 +14,7 @@ package outbox
 // table exists.
 //
 // The role must be NOSUPERUSER, or the RLS assertion below passes falsely — see
-// CLAUDE.md and test/backing/up.sh, which verifies it rather than assuming it.
+// AGENTS.md and test/backing/up.sh, which verifies it rather than assuming it.
 
 import (
 	"context"
@@ -268,7 +268,7 @@ func TestPostgresOutboxDeliversAFactWhoseFirstPublishFailed(t *testing.T) {
 //
 // THIS TEST IS ONLY MEANINGFUL AS A NOSUPERUSER. A superuser bypasses RLS
 // entirely and would see both rows, so a passing run here on a superuser role is
-// a false green — the same trap CLAUDE.md names for the isolation tests.
+// a false green — the same trap AGENTS.md names for the isolation tests.
 func TestPostgresOutboxIsTenantIsolated(t *testing.T) {
 	acme := newPool(t, "acme")
 	applySchema(t)

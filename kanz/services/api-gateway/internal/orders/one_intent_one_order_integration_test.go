@@ -24,7 +24,7 @@ import (
 // AGAINST A REAL BROKER, BECAUSE THE FAKE CANNOT DISAGREE WITH ONE (#723).
 //
 // fakePub records the last Event and returns nil. It has no dedup window, no
-// Nats-Msg-Id and no envelope validation — CLAUDE.md's standing warning that "a
+// Nats-Msg-Id and no envelope validation — AGENTS.md's standing warning that "a
 // green suite using it is not a broker proof". The unit tests in the sibling
 // file can therefore prove that two attempts carry ONE key, but not that one key
 // yields ONE ORDER: that happens inside JetStream, keyed on a header this

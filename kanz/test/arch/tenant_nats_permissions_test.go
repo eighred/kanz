@@ -136,8 +136,13 @@ func TestEveryTenantNATSUserMirrorsItsPlatformPermissions(t *testing.T) {
 				problems = append(problems, tenant+": "+svid+" — "+why)
 				continue
 			}
+			key := tenant + "/" + service
+			live[key] = true
 			platformEntry, known := system[platformSVID]
 			if !known {
+				if _, exempt := tenantOnlyNATSUserExempt[key]; exempt {
+					continue
+				}
 				problems = append(problems, tenant+"/"+service+": the tenant user "+svid+" has no "+
 					"platform counterpart ("+platformSVID+" is not a __system__ user), so its allow-lists "+
 					"are derived from nothing and no guard checks them against the service's code. "+
@@ -145,9 +150,13 @@ func TestEveryTenantNATSUserMirrorsItsPlatformPermissions(t *testing.T) {
 					"either add the platform entry or exempt this pair with the reason.")
 				continue
 			}
+			if reason, exempt := tenantOnlyNATSUserExempt[key]; exempt {
+				problems = append(problems, "the tenant-only exemption for "+key+" is DEAD: a platform "+
+					"counterpart now exists, so compare the permissions normally and delete the exemption.\n"+
+					"      reason on file: "+reason)
+				continue
+			}
 
-			key := tenant + "/" + service
-			live[key] = true
 			diffs := permissionDiffs(users[svid], platformEntry)
 			if reason, exempt := tenantPermissionParityExempt[key]; exempt {
 				if len(diffs) == 0 {
@@ -182,6 +191,12 @@ func TestEveryTenantNATSUserMirrorsItsPlatformPermissions(t *testing.T) {
 				"user for that service.")
 		}
 	}
+	for key := range tenantOnlyNATSUserExempt {
+		if !live[key] {
+			problems = append(problems, "the tenant-only exemption for "+key+" is DEAD: this run never "+
+				"consulted it. Delete the stale identity decision or restore the tenant user it names.")
+		}
+	}
 
 	if len(problems) > 0 {
 		sort.Strings(problems)
@@ -208,6 +223,19 @@ func TestEveryTenantNATSUserMirrorsItsPlatformPermissions(t *testing.T) {
 // merely that they differ. The dead-entry arm above deletes it the moment the
 // pair mirrors again.
 var tenantPermissionParityExempt = map[string]string{}
+
+// tenantOnlyNATSUserExempt is for a workload that intentionally has no
+// __system__ deployment and therefore no platform permission set to mirror.
+// Each entry must name the issue and explain why adding a platform identity
+// would be excess authority. The loop above rejects the exemption the moment a
+// counterpart appears and the dead-entry arm rejects a vanished tenant user.
+var tenantOnlyNATSUserExempt = map[string]string{
+	"acme/kanz-capitalpath": "#71 — this is a one-shot certification Job in tenant-acme, not a " +
+		"platform service. Its random order id and tenant-scoped RLS proof must observe acme's " +
+		"private FACT stream, while a __system__ counterpart would be an unissuable extra broker " +
+		"credential with no ServiceAccount or runner. Its exact read-only subjects are guarded by " +
+		"capitalpath_certifier_test.go instead of being derived from a non-existent platform binary.",
+}
 
 // permissionDiffs returns a human-readable difference per permission array
 // between a tenant user's entry text and its platform counterpart's. An empty

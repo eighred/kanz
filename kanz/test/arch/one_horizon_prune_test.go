@@ -29,7 +29,7 @@ import (
 // internal/risk/api/v* from outside the risk module, and so was written with its
 // own prune carrying its own copy of the same clear(). Nothing was wrong with
 // either copy; the cost is that the NEXT defect of that class would have had to
-// be found twice, which is the failure mode CLAUDE.md prices at 17 services with
+// be found twice, which is the failure mode AGENTS.md prices at 17 services with
 // their own secret(), 15 of them wrong.
 //
 // #871 promoted pit to internal/pit, where anything may import it, and rewrote

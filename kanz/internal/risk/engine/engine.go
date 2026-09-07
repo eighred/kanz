@@ -289,8 +289,10 @@ func (e *EngineImpl) EvaluateScenario(ctx context.Context, req v1.ScenarioReques
 // SkipNoRevaluer is a composition-root gap too, but a DEEPER one: a vol stress
 // needs an option pricer, which needs a calibrated vol surface, which needs
 // observed option premiums nothing on this estate carries — so the answer to
-// "when can I run this" is an issue (#509/#203), not a config change. One error
-// with an unhelpful message would send all four to the same wrong place.
+// "when can I run this" is an issue (#509/#203), not a config change.
+// SkipUnknownShockType means the caller and engine disagree on the v1 shock
+// vocabulary, so neither data loading nor configuration can repair the request.
+// One unhelpful message would send these cases to the same wrong place.
 func unresolvableScenario(cov v1.InputCoverage) error {
 	reasons := make([]string, 0, len(cov.Exclusions))
 	seen := map[string]bool{}

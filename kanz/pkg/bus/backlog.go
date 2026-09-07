@@ -43,7 +43,7 @@ import (
 // backlogPollInterval is only meaningful RELATIVE to it, and
 // test/arch/backlog_poll_interval_test.go reads the YAML and fails the build if
 // this constant and that file ever disagree — a number copied out of a config
-// file is the dated-evidence trap CLAUDE.md names, so it is checked rather than
+// file is the dated-evidence trap AGENTS.md names, so it is checked rather than
 // trusted.
 const metricsScrapeInterval = 30 * time.Second
 
@@ -177,7 +177,7 @@ type backlogRead func(ctx context.Context) ([]PartitionBacklog, error)
 // It is started FROM Subscribe rather than wired at each composition root for
 // the reason tuningForSubject gives for living in tuning.go: twenty-odd binaries
 // build a bus client, and twenty copies of the same three lines is how a fix
-// stops spreading (CLAUDE.md's `secret()` lesson). A service gets the scale
+// stops spreading (AGENTS.md's `secret()` lesson). A service gets the scale
 // signal by subscribing, with nothing to wire and nothing to forget.
 //
 // Two ways it declines, and neither is silent in a way that matters:

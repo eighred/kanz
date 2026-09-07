@@ -214,7 +214,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// route requires in its most permissive configuration, which is the
 		// standard the materialize route above sets.
 		//
-		// It borrows Read rather than minting an "mcp" capability, per CLAUDE.md's
+		// It borrows Read rather than minting an "mcp" capability, per AGENTS.md's
 		// preference for existing authorization over a new security system: a
 		// caller entitled to read a portfolio's risk directly is entitled to read
 		// it through an agent, and the per-tool gate inside the plane is what

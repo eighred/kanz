@@ -484,7 +484,7 @@ func (h *Handler) write(w http.ResponseWriter, r *http.Request, resp proto.Messa
 // THIS IS NOT OPTIONAL BOOKKEEPING. Before #440 the upstream text went to the
 // caller and nowhere else; now it goes to the operator and nowhere else. Drop
 // this call and a 500 becomes genuinely undiagnosable — the failure would be
-// silent rather than merely misdirected, which is the trade CLAUDE.md forbids
+// silent rather than merely misdirected, which is the trade AGENTS.md forbids
 // ("nothing configured" and "checked, and fine" must never look the same).
 //
 // detail is empty exactly when the client already received the reason, so an

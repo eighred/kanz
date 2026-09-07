@@ -247,6 +247,16 @@ var dlqExemptBroadcastOnlyConsumers = map[string]string{
 		"capability that guard exists to deny it.\n" +
 		"Nothing is lost: the handler folds an envelope's partition key into a map and " +
 		"returns nil on every path, so it has no terminal failure to park.",
+	"test/live/capitalpath/watcher.go:watchCapitalFacts": "Issue #71 capital-path certifier: this " +
+		"Consumer makes only SubscribeReplay calls, whose ephemeral path never consults c.dlq. " +
+		"Its handler returns nil on every path and records any semantic refusal in the bounded " +
+		"factCollector, which wakes the main run and fails the Job; there is therefore no handler " +
+		"failure to park. It deliberately cannot hold a DLQ publisher: the tenant NATS grant for " +
+		"spiffe://kanz.internal/ns/tenant-acme/sa/kanz-capitalpath allows only JetStream consumer " +
+		"machinery ($JS.API.>/$JS.ACK.>) and the six business subjects are subscribe-only. Giving " +
+		"this evidence reader a business publisher merely to populate an inert field would weaken " +
+		"the property test/arch/capitalpath_certifier_test.go enforces — it observes the governed " +
+		"path and cannot become another entrance to it.",
 }
 
 func TestEveryBusConsumerWiresADLQ(t *testing.T) {

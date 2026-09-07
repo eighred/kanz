@@ -1,6 +1,6 @@
 // Package server is the MCP read plane's HTTP surface (#743).
 //
-// MCP IS AN AGENT-FACING READ PLANE AND NOTHING ELSE. CLAUDE.md states the
+// MCP IS AN AGENT-FACING READ PLANE AND NOTHING ELSE. AGENTS.md states the
 // boundary and this package is where it is kept: it may not place, cancel or
 // amend orders, may not call a venue, may not hold or proxy a venue credential,
 // and may not bypass OMS/risk/compliance. It reaches state through authorized

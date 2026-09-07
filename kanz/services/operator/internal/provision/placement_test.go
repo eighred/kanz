@@ -216,7 +216,7 @@ func TestPlacementReportsAnUnreadableInventoryAsAnError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a failed node list returned no error (verdict %+v). The caller cannot tell "+
 			"'checked, and nothing can run it' from 'could not check', which is the pair "+
-			"CLAUDE.md forbids collapsing", v)
+			"AGENTS.md forbids collapsing", v)
 	}
 	if !strings.Contains(err.Error(), "RBAC") {
 		t.Errorf("the cause was discarded: %v", err)

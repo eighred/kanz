@@ -11,7 +11,7 @@
 // change to the trading path made for a reporting reason.
 //
 // pkg/authbus built exactly this machinery for the first of them. The second one
-// arriving is CLAUDE.md's promotion rule — "shared code is promoted when a SECOND
+// arriving is AGENTS.md's promotion rule — "shared code is promoted when a SECOND
 // consumer appears" — and the alternative is the failure that rule exists to
 // prevent: a copied queue where a fix to one overflow accounting, one shutdown
 // drain or one publish timeout stops spreading.

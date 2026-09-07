@@ -42,7 +42,7 @@ import (
 // incident, by someone who already knows what to look for.
 //
 // This guard is where the two manifests are read together, which is the only
-// place the pair is visible before it ships. CLAUDE.md: an invariant worth
+// place the pair is visible before it ships. AGENTS.md: an invariant worth
 // keeping is a guard, not a paragraph.
 //
 // # What it does NOT assert

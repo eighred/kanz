@@ -19,8 +19,7 @@
 # spiffe://kanz.internal/ns/kanz-operator/sa/{name} for any ServiceAccount
 # that exists in this already-labeled namespace. Declaring the ServiceAccount
 # below is therefore the entire registration step for each of these three
-# tools — see .superpowers/sdd/operator-identity-manifests-report.md for the
-# file:line trace of that mechanism.
+# tools.
 #
 # tenancy.yaml's __system__ account already admits all three SVIDs below with
 # a restrictive `permissions` block scoped to exactly the one subject space

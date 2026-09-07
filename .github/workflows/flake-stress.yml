@@ -125,7 +125,7 @@ jobs:
       # -count=N with -run pinned to ONE test. The `| tee` is deliberate: the
       # per-iteration RUN/PASS lines are the artifact, because "ok pkg 40s" for a
       # test that SKIPPED every iteration is indistinguishable from 20 passes —
-      # the silent-skip trap CLAUDE.md names, and the one this workflow would be
+      # the silent-skip trap AGENTS.md names, and the one this workflow would be
       # most embarrassing to fall into.
       - name: Stress
         working-directory: kanz

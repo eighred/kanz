@@ -64,7 +64,7 @@ const defaultBatch = 256
 //     and the OTHER replica (oms-deploy.yaml runs replicas: 2) drains them.
 //
 // WHAT CHANGES WHEN A SECOND SERVICE ADOPTS THIS: nothing about the shape. This
-// package moves to kanz/internal/outbox at that point (CLAUDE.md's promotion
+// package moves to kanz/internal/outbox at that point (AGENTS.md's promotion
 // rule), each service runs its own Relay over its own pool and its own table,
 // and the per-key lock namespace — "<tenant>/oms/outbox" in
 // Postgres.LockKey — becomes "<tenant>/<service>/outbox". The one thing that

@@ -11,11 +11,9 @@
 // RISK-02's arch test forbids them from importing this package. So
 // the value types (PriceShock, ParallelShift) live in api/v1 where
 // outsiders can reach them; this package owns the DISPATCH + APPLY
-// logic, type-asserting on the api/v1 types it knows. Unknown shock
-// types (a future v1 addition the engine hasn't been rebuilt for,
-// or a third-party shock from a downstream wrapper) are silent
-// no-ops — same pattern as ComputeMeasures filter dropping unknown
-// names.
+// logic, type-asserting on the api/v1 types it knows. An unknown shock type
+// records SkipUnknownShockType so the engine refuses the projection: a caller
+// and engine that disagree on the vocabulary cannot claim a stress ran.
 //
 // # Why a deep clone, not a shallow one
 //
@@ -104,6 +102,10 @@ const (
 	// does not carry at all (#509/#203/#345). Loading instrument reference data
 	// will not fix it.
 	SkipNoRevaluer = "no_revaluer"
+	// SkipUnknownShockType: the Go API accepted a ScenarioShock implementation
+	// this engine does not dispatch. Serving the unchanged book would claim the
+	// stress ran, so the whole evaluation is refused.
+	SkipUnknownShockType = "unknown_shock_type"
 )
 
 // Evaluate applies shocks to a deep clone of p and returns the
@@ -138,6 +140,11 @@ func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.
 		opt(&cfg)
 	}
 	cov := newShockCoverage()
+	for _, shock := range shocks {
+		if !knownShockKind(shock) {
+			cov.unknownShockType()
+		}
+	}
 	// ONE ENTRY POINT, TWO CLONE STRATEGIES. With a Revaluer wired the shocks are
 	// applied by repricing (cloneWithReval), which is the only way a VolShock
 	// moves a number; without one they are applied linearly, and applyShock
@@ -168,11 +175,24 @@ type shockCoverage struct {
 	cov          compute.Coverage
 	noClassifier bool
 	noRevaluer   bool
+	unknownShock bool
 	// seen holds the positions already accounted for, contributed or excluded.
 	// One decision per position per evaluation: the classification does not
 	// change between shocks in the same batch, so the second look would be the
 	// same answer counted twice.
 	seen map[domain.InstrumentID]bool
+}
+
+// knownShockKind is the allocation-free admission check for the v1 shock
+// vocabulary. Keep it beside applyShock: one admits a kind and the other applies
+// it. The architecture guard derives the same vocabulary from api/v1.
+func knownShockKind(shock v1.ScenarioShock) bool {
+	switch shock.(type) {
+	case v1.PriceShock, v1.ParallelShift, v1.SectorShock, v1.VolShock:
+		return true
+	default:
+		return false
+	}
 }
 
 func newShockCoverage() *shockCoverage {
@@ -204,6 +224,16 @@ func (s *shockCoverage) noRevaluerWired() {
 	}
 	s.noRevaluer = true
 	s.cov.ExcludeWhole(SkipNoRevaluer)
+}
+
+// unknownShockType records one deployment/API incompatibility for the whole
+// batch. More unknown values do not make the same evaluation more incomplete.
+func (s *shockCoverage) unknownShockType() {
+	if s.unknownShock {
+		return
+	}
+	s.unknownShock = true
+	s.cov.ExcludeWhole(SkipUnknownShockType)
 }
 
 // malformedShock records a shock that named no sector. Per SHOCK and not
@@ -257,9 +287,8 @@ func cloneWithShocks(p *domain.Portfolio, shocks []v1.ScenarioShock, cfg evalCon
 
 // applyShock dispatches one shock to its handler ON THE LINEAR PATH. Evaluate
 // routes to cloneWithReval when a Revaluer is wired, so reaching here means
-// MarketValue arithmetic is the only tool available. Unknown shock types
-// silently skip — the engine processes large scenario batches and a single
-// unrecognised shock should not abort the run.
+// MarketValue arithmetic is the only tool available. Unknown shock types were
+// rejected by Evaluate's preflight before this dispatch runs.
 //
 // EVERY ARM MUST MOVE THE BOOK OR RECORD ON cov, and that is checked rather than
 // remembered: test/arch/every_shock_kind_answers_or_refuses_test.go derives the

@@ -13,7 +13,7 @@ import (
 // Three composition roots need this classifier — the OMS pre-trade gate, the
 // compliance post-trade monitor and the risk engine's scenario shocks — and
 // each would otherwise carry its own copy of "read a URL, parse an interval,
-// decide what an empty value means". CLAUDE.md names where that ends: 17
+// decide what an empty value means". AGENTS.md names where that ends: 17
 // services each had their own secret() and 15 were wrong. One reader, three
 // callers, and the meaning of an unset variable is decided once.
 

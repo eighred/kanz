@@ -17,7 +17,7 @@ import (
 // on the full-evaluation path. Nine paths recorded nothing, and TWO of those
 // returned Allowed: true: the ungoverned portfolio and the mandate that
 // constrains nothing. For an order admitted that way the platform could not
-// answer CLAUDE.md's attributability requirement — "which mandate permitted it"
+// answer AGENTS.md's attributability requirement — "which mandate permitted it"
 // — because nothing said a compliance decision had been made at all.
 //
 // The type's own doc had asserted "Every decision is recorded (COMP-01e), pass

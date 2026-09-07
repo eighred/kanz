@@ -111,7 +111,7 @@ It was placed first because its absence is the *silent* one: after a failover
 against an empty order store, `SweepInterrupted` logs `count=0` — the *same line
 a healthy clean start produces*. Nothing distinguishes "no interrupted orders"
 from "no orders at all", so the platform reports normal startup while holding
-positions at an exchange it has no record of. That is why `CLAUDE.md` sequences
+positions at an exchange it has no record of. That is why `AGENTS.md` sequences
 **M3 after this issue**.
 
 **`venue-binance` + `venue-okx` → `kanz-orders`, beside the OMS.** The same

@@ -140,7 +140,7 @@ func splitRoles(v string) []string {
 // "public dataset — allow" before it ever looks at the principal, and
 // lineage's catalog listing never asks for one at all. So an unauthenticated
 // caller and an authorized steward got the same 200, which is exactly the state
-// CLAUDE.md forbids — "nothing configured" and "checked, and fine" looking the
+// AGENTS.md forbids — "nothing configured" and "checked, and fine" looking the
 // same. It also failed in the OTHER direction at the same time: a real steward
 // proxied through the gateway was denied their own PII lineage, because the
 // principal that would have granted it never arrived.

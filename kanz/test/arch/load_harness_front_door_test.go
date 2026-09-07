@@ -18,7 +18,7 @@ import (
 //
 // # The rule this enforces, and why it is not a style preference
 //
-// CLAUDE.md: "No step is skippable — not by MCP, not by an admin endpoint, not by
+// AGENTS.md: "No step is skippable — not by MCP, not by an admin endpoint, not by
 // a test helper that 'just needs a fill.'" A write-path load generator is the
 // most tempting place in the estate to break that. Publishing
 // `order.order.submit` straight onto the bus is four lines, needs no gateway, no

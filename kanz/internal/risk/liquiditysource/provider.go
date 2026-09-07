@@ -59,7 +59,7 @@
 // is the number the engine already serves and therefore adds nothing while
 // subtracting nothing. A blanket ok=false degrades LiquidationHorizon toward
 // zero, which is a NEW claim, in the unsafe direction, and it is exactly the
-// shape CLAUDE.md forbids: "nothing configured" and "checked, and fine" reading
+// shape AGENTS.md forbids: "nothing configured" and "checked, and fine" reading
 // the same. WithNoSpread therefore exists — but it is opt-in and spelled, never
 // a zero-valued config field, and every spread it serves fires the observer so
 // the degeneracy is COUNTED rather than inferred from a suspiciously round LVaR.

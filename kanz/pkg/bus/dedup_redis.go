@@ -16,7 +16,7 @@ import (
 // RedisClient interface below, the same decoupling as NATSConfig.TLSConfig
 // taking a ready *tls.Config rather than importing go-spiffe. The deployment
 // wires go-redis / a Dragonfly client / a cluster client by implementing two
-// methods (see CLAUDE.md's "Coordination at N replicas" for the ~10-line adapter), so
+// methods (see AGENTS.md's "Coordination at N replicas" for the ~10-line adapter), so
 // no consumer pays for a Redis dependency it doesn't use.
 //
 // # Atomic claim, cross-pod

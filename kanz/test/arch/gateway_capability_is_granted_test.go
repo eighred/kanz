@@ -27,7 +27,7 @@ import (
 //
 // # This is the estate's own named failure mode, for the third time
 //
-// CLAUDE.md: "'Nothing configured' and 'checked, and fine' must never look the
+// AGENTS.md: "'Nothing configured' and 'checked, and fine' must never look the
 // same." A DECLARED THING WITH NO PRODUCER, after identity.StatusDisabled (#525 —
 // a status enforced everywhere and written nowhere) and store.Resolution1h (#509
 // — a series every query supported and nothing produced). Here the missing

@@ -86,7 +86,7 @@ const (
 	//     for defaultDedupTTL. A redrive inside that window is refused by Claim,
 	//     skipped, and ACKED: the handler never runs, the drain reports
 	//     "redriven 1", and its durable cursor has moved past the parked copy.
-	//     That is the precise shape CLAUDE.md forbids — nothing configured and
+	//     That is the precise shape AGENTS.md forbids — nothing configured and
 	//     checked-and-fine must not look the same.
 	//
 	// SO IT IS DERIVED FROM defaultDedupTTL, NOT CHOSEN. It was 5 minutes against

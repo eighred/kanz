@@ -6,7 +6,7 @@ package main
 // counters existed and all four sit at ZERO for an OMS with no venues at all, so
 // kanz_oms_unverified_venue_account_total == 0 meant "every adapter proved its
 // account" on a live deployment and "there are no adapters" on a simulator, with
-// nothing between them. That is the collapse CLAUDE.md names: "nothing
+// nothing between them. That is the collapse AGENTS.md names: "nothing
 // configured" and "checked, and fine" must never look the same.
 //
 // The write-path load harness (test/load/orderflow) refuses to submit a single

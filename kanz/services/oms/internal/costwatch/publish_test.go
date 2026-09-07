@@ -9,7 +9,7 @@ package costwatch_test
 // unit tests (which inject fake Publishers that never validate) and failed on the
 // first real broker."
 //
-// CLAUDE.md says the same thing as a constraint: "fakeBus does not validate
+// AGENTS.md says the same thing as a constraint: "fakeBus does not validate
 // envelopes, so it accepts what a real broker rejects. A green suite using it is
 // not a broker proof."
 //

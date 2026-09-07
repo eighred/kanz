@@ -15,7 +15,7 @@ every FACT it produces — the accepted order, the fills, `risk.position.changed
 and every service Ready throughout, because "this tenant produced no events" and
 "this tenant's events cannot reach me" are the same observable state.
 
-The archiver moved first because it is the DR path, and CLAUDE.md's one
+The archiver moved first because it is the DR path, and AGENTS.md's one
 sequencing rule that outlives any issue is that real orders must never be placed
 against a store that may not be backed up. It also could not be fixed any other
 way: exporting the tenant's FACTs into `__system__` would meet a platform

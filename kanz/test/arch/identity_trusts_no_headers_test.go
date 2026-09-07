@@ -15,7 +15,7 @@ import (
 //
 // # The platform rule, and the one service it does not cover
 //
-// CLAUDE.md states the arrangement every other upstream relies on:
+// AGENTS.md states the arrangement every other upstream relies on:
 //
 //	The gateway is the sole identity authority: it authenticates and injects
 //	X-Kanz-Principal-*; upstreams trust those headers, which is sound ONLY
@@ -41,7 +41,7 @@ import (
 // like consistency. It would also be silent: the route would work, the tests
 // would pass, and the hole opens only for a caller who bypasses the gateway,
 // which no test simulates by default. That is the shape this repository keeps
-// paying for, and CLAUDE.md's answer is the standing one — an invariant worth
+// paying for, and AGENTS.md's answer is the standing one — an invariant worth
 // keeping is a guard, not a paragraph.
 func TestIdentityServiceTrustsNoPrincipalHeaders(t *testing.T) {
 	root := moduleRoot(t)

@@ -224,7 +224,7 @@ func buildSigner(ctx context.Context, cfg config.Config, logger *slog.Logger) (s
 // and no error (#261), and buildSigner's Info line one frame up reported
 // `durable=false` next to `signer ready` — which is a fact stated at INFO in the
 // same breath as a success, i.e. exactly the "nothing configured" and "checked,
-// and fine" collision CLAUDE.md forbids.
+// and fine" collision AGENTS.md forbids.
 //
 // WHY THIS ONE REFUSES, AND WHY IT IS THE SHARPEST OF THE SIX. The manifest's
 // scale invariant is built on this store existing. infra/deploy/regulatory-

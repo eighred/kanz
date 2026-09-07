@@ -32,7 +32,7 @@ import (
 // `DROP TABLE IF EXISTS schema_migrations CASCADE` against whatever
 // TEST_POSTGRES_URL points at — and that database is not private to this
 // package. It is the ONE database every Postgres-gated test shares, which is why
-// CLAUDE.md mandates `go test -p 1`. So the ledger recording every service's
+// AGENTS.md mandates `go test -p 1`. So the ledger recording every service's
 // real schema was dropped by a test fixture, and the fixture's own rows
 // (0001_widgets.sql) were left behind in its place.
 //

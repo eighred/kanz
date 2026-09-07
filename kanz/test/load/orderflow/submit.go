@@ -35,7 +35,7 @@ type submission struct {
 // order COMMAND straight onto the bus would skip the gateway's authentication,
 // its trade-role check, its halt gate and its idempotency handling — four
 // controls on the capital path — and would then report a throughput number for a
-// path no client can take. CLAUDE.md's rule that no step is skippable "not by a
+// path no client can take. AGENTS.md's rule that no step is skippable "not by a
 // test helper that just needs a fill" is exactly this case, and
 // test/arch/load_harness_front_door_test.go enforces it over whatever lands in
 // test/load/ rather than trusting this paragraph.

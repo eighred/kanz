@@ -32,7 +32,7 @@ import (
 // TestScheduleE2E_ASecondPodDerivesTheIdenticalSchedule proves the ARITHMETIC:
 // given two registries holding different things, a pinned derivation agrees. It
 // hands both registries their profiles directly, so it proves nothing about the
-// transport — and the transport is the whole of #897. CLAUDE.md names the limit:
+// transport — and the transport is the whole of #897. AGENTS.md names the limit:
 // "fakeBus does not validate envelopes, so it accepts what a real broker rejects.
 // A green suite using it is not a broker proof."
 //

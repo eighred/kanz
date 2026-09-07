@@ -142,7 +142,7 @@ func (r *Registry) Invoke(ctx context.Context, p *auth.Principal, call llm.ToolC
 // msgNoGovernedData deliberately answers TWO different questions with one
 // sentence: the portfolio does not exist, and the portfolio belongs to another
 // tenant. A caller able to tell those apart can enumerate another tenant's
-// portfolios by id, which is the discovery CLAUDE.md puts out of reach ("one
+// portfolios by id, which is the discovery AGENTS.md puts out of reach ("one
 // tenant's agent must not be able to discover another's state"). The identical
 // wording is the control; keep it identical. Both arrive here as isolation deny
 // codes — the unknown portfolio because an unresolvable owner leaves the

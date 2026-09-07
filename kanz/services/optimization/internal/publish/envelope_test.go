@@ -17,7 +17,7 @@ import (
 
 // THESE RUN A REAL bus.Producer OVER A FAKE CLIENT, and that is the whole point.
 //
-// CLAUDE.md states it plainly: "fakeBus does not validate envelopes, so it
+// AGENTS.md states it plainly: "fakeBus does not validate envelopes, so it
 // accepts what a real broker rejects. A green suite using it is not a broker
 // proof." Every other test in this package uses such a double — they prove the
 // handler's decisions, not the wire. This file proves the envelopes: a real

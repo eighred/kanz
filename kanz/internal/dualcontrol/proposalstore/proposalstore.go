@@ -25,7 +25,7 @@
 // while the OMS's had a contract run against both of its backends.
 //
 // "A copied helper is how a fix stops spreading" — #562's act two would have
-// been the THIRD copy, and CLAUDE.md's promotion rule fired when the second
+// been the THIRD copy, and AGENTS.md's promotion rule fired when the second
 // consumer appeared. So the mechanics live here, once, and the contract in
 // proposalstoretest runs against every backend of every act.
 //

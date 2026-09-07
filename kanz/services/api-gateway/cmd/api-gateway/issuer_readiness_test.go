@@ -60,7 +60,7 @@ const testRetryInterval = 20 * time.Millisecond
 //
 // Worth stating plainly: none of this was visible locally. `-race` needs cgo and
 // does not run on the usual development box, so a concurrency claim here is
-// unproven until CI says otherwise — which is exactly what CLAUDE.md warns and
+// unproven until CI says otherwise — which is exactly what AGENTS.md warns and
 // what this test disregarded.
 func startProbe(t *testing.T, a *auth.OIDCAuthenticator, reg prometheus.Registerer, issuer string, ready *atomic.Bool, logs *captureHandler) {
 	t.Helper()

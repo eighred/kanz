@@ -27,7 +27,7 @@ import (
 // THE FAILURE IS INVISIBLE IN THE DIRECTION THAT MATTERS. accounting.balance
 // .reconciled is emitted only on a DISCREPANCY, so a dashboard filtered on it
 // shows zero events — which reads as "no discrepancies" and actually means "no
-// comparison has ever run". That is CLAUDE.md's rule verbatim: "nothing
+// comparison has ever run". That is AGENTS.md's rule verbatim: "nothing
 // configured" and "checked, and fine" must never look the same.
 //
 // WHY A GUARD AND NOT TWO EDITS. A per-root test only covers the roots somebody

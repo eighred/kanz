@@ -19,7 +19,7 @@ import (
 //
 // IT LIVES HERE BECAUSE A SECOND CONSUMER ARRIVED. It was kept inside
 // services/copilot for exactly as long as copilot was its only caller —
-// CLAUDE.md promotes shared code to internal/ or pkg/ only when a second
+// AGENTS.md promotes shared code to internal/ or pkg/ only when a second
 // consumer appears, and a package built for a caller nobody has written is the
 // speculative abstraction this repository keeps deleting. services/mcp is that
 // second consumer, so the promotion happens WITH it rather than ahead of it.
@@ -148,7 +148,7 @@ func (g *Gate) Authorize(ctx context.Context, p *auth.Principal, action auth.Act
 // notVisible deliberately answers TWO different questions with one sentence:
 // the resource does not exist, and it belongs to another tenant. A caller able
 // to tell those apart can enumerate another tenant's resources by id, which is
-// the discovery CLAUDE.md puts out of reach. The identical wording is the
+// the discovery AGENTS.md puts out of reach. The identical wording is the
 // control; keep it identical.
 // NotVisible is exported so a consumer can assert what its callers actually
 // see without copying the sentence — a duplicated refusal string drifts, and the

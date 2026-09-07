@@ -35,7 +35,7 @@ import (
 //
 // A metrics endpoint that cannot be reached, a metric family that is absent, a
 // canary that is refused, a canary that is never announced — every one of those
-// REFUSES. "Unknown" is the third value CLAUDE.md names and a critical unknown
+// REFUSES. "Unknown" is the third value AGENTS.md names and a critical unknown
 // fails closed: this harness never proceeds on the strength of something it could
 // not check.
 func preflight(ctx context.Context, cfg config, s *submitter, l *ledger) (promscrape.Scrape, error) {

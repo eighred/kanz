@@ -626,7 +626,7 @@ type candidateFold struct {
 // Candidate is exported with exported fields, and evaluating one book against
 // several mandates concurrently is a natural thing for a caller to write. An
 // unguarded lazy field would make that a silent data race on the capital path,
-// and `-race` does not run on the usual dev box (CLAUDE.md, Constraints) — so it
+// and `-race` does not run on the usual dev box (AGENTS.md, Constraints) — so it
 // would be found in production. Uncontended it costs tens of nanoseconds against
 // an evaluation measured in microseconds.
 func foldBook(c *Candidate) *candidateFold {

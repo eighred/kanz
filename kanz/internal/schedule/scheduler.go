@@ -10,7 +10,7 @@
 // prior point-in-time version serving, so the scheduler only has to log the
 // failure and keep ticking — a bad tick never unpublishes a good curve.
 // PROMOTED OUT OF internal/risk/pricing (2026-08-16). It lived there because the
-// curve calibrator was its only caller, and CLAUDE.md's rule is that shared code
+// curve calibrator was its only caller, and AGENTS.md's rule is that shared code
 // starts in one service's internal/ and moves only when a SECOND consumer
 // appears. That consumer is the bar rollup in market-data.
 //

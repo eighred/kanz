@@ -28,7 +28,7 @@ import (
 //
 // THE SECOND HALF WAS THE DIVERGENCE. Line 38 copied kanz-py/pyproject.toml into
 // the image and nothing ever installed from it, while lines 39-40 restated the
-// same four dependencies by hand — the `secret()` shape CLAUDE.md warns about
+// same four dependencies by hand — the `secret()` shape AGENTS.md warns about
 // ("17 services each had their own, and 15 were wrong"), applied to the
 // dependency set of the service that scores risk models. Two lists of the same
 // thing cannot be kept in step by care.

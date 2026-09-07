@@ -161,6 +161,22 @@ func TestEveryShockKindAnswersOrRefuses(t *testing.T) {
 		}
 	}
 
+	// The runtime preflight is the fail-closed half of the dispatch. If a new
+	// api/v1 shock reaches applyShock but is absent here, every request using it
+	// is refused as version skew even though this engine knows how to apply it.
+	knownFn := funcDeclNamed(file, "knownShockKind")
+	if knownFn == nil {
+		t.Fatalf("no func knownShockKind in %s — unknown Go shock implementations can again "+
+			"reach evaluation with no fail-closed admission check", scenarioGo)
+	}
+	knownArms := shockArmIdents(knownFn)
+	for _, name := range implementors {
+		if _, ok := knownArms[name]; !ok {
+			t.Errorf("scenario.knownShockKind has no case for v1.%s — the shock is declared and "+
+				"dispatched but runtime admission will refuse it as unknown", name)
+		}
+	}
+
 	// DEAD-ENTRY ARM: an exemption naming a type that no longer implements
 	// v1.ScenarioShock outlives its repair and silently widens the next one.
 	declared := map[string]bool{}

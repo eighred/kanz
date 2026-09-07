@@ -3,7 +3,7 @@
 //
 // IT LIVES IN THIS SERVICE'S internal/, AND IT CAME BACK HERE ON PURPOSE. It was
 // briefly promoted to kanz/internal/ when the terminal client became a second
-// consumer — which is exactly CLAUDE.md's trigger. That client is retired, so
+// consumer — which is exactly AGENTS.md's trigger. That client is retired, so
 // the BFF is the only consumer again and a package in kanz/internal/ would be a
 // shared abstraction with one caller: the same rule, pointed the other way.
 //

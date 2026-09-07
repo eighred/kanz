@@ -554,7 +554,7 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// the materialize route above sets.
 	//
 	// It reuses an existing capability rather than minting an "mcp" one, per
-	// CLAUDE.md's preference for existing authorization over a new security
+	// AGENTS.md's preference for existing authorization over a new security
 	// system: a caller entitled to read a portfolio's risk directly is entitled
 	// to read it through an agent, and the per-tool gate inside the plane is what
 	// scopes the answer to their tenant.

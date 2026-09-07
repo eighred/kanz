@@ -95,7 +95,7 @@ var factConsumerRoles = []factConsumerRole{
 	{
 		Name: "archiver",
 		Loses: "no archive and no DR — the tenant's FACTs live only in NATS and age off at the " +
-			"stream's max-age. This is the one CLAUDE.md's sequencing rule names: real orders must " +
+			"stream's max-age. This is the one AGENTS.md's sequencing rule names: real orders must " +
 			"never be placed against a store that may not be backed up",
 	},
 	{

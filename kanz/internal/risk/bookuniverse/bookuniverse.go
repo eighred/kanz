@@ -98,7 +98,7 @@ const DefaultMinInstruments = factormodel.DefaultStatFactors + 1
 // At startup the store is empty and fills from the bus, so "no book loaded yet"
 // is a real and expected state — which is exactly why it must not be returned as
 // a successful empty slice. An empty slice with a nil error says "checked, and
-// the firm holds nothing", and CLAUDE.md's rule is that this must never look the
+// the firm holds nothing", and AGENTS.md's rule is that this must never look the
 // same as "nothing has arrived".
 //
 // At today's only consumer the two are indistinguishable — LiveModelProvider.

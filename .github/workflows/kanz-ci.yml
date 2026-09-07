@@ -192,8 +192,8 @@ jobs:
       # KAFKA_AUTO_CREATE_TOPICS_ENABLE — switches the entrypoint from "use the
       # baked-in server.properties" to "assemble config purely from env" and it
       # then fails looking for zookeeper.connect). Started as a step, exactly like
-      # NATS above, with the exact env this workflow's own archiver Task 5 proved
-      # boots clean (see .superpowers/sdd/task-5-report.md). No `-js`-equivalent
+      # NATS above, with the exact env this workflow's archiver integration gate
+      # proves boots clean. No `-js`-equivalent
       # flag is needed here, only env, but the boot-and-poll shape matches NATS's
       # for the same reason: neither image's readiness is visible to Docker's own
       # health-check without a broker-specific probe this workflow doesn't need.
@@ -331,7 +331,7 @@ jobs:
           TEST_NATS_MTLS_CERT_DIR: /tmp/kanz-mtls
         # -p 1 IS REQUIRED, NOT A THROUGHPUT PREFERENCE. Every Postgres-gated
         # package shares ONE database (TEST_POSTGRES_URL above, a single
-        # `kanzapp`), and Go's default -p runs packages in parallel. CLAUDE.md
+        # `kanzapp`), and Go's default -p runs packages in parallel. AGENTS.md
         # has said "run go test -p 1 ./..." for exactly this reason; this step
         # did not, and the failure it produced is a good illustration of why the
         # collision is not obvious:
@@ -355,7 +355,7 @@ jobs:
         # -v BECAUSE A SKIP AND A PASS LOOK IDENTICAL WITHOUT IT.
         #
         # Plain `go test` prints `ok <pkg> 1.8s` for a package whose gated tests
-        # ALL skipped. CLAUDE.md names the trap — "TEST_POSTGRES_URL unset ⇒ 14
+        # ALL skipped. AGENTS.md names the trap — "TEST_POSTGRES_URL unset ⇒ 14
         # test files skip silently" — and this step is where it would bite: the
         # env block above is the only thing making those 52 gates run, and if a
         # variable were dropped, renamed, or a helper changed, every one of them
@@ -832,7 +832,7 @@ jobs:
       # An empty GOFLAGS in the environment does not override a persistent
       # `go env -w GOFLAGS=-mod=mod` — Go reads the env var as unset and falls
       # back to its own env file. This repository's documented Windows setup sets
-      # exactly that (CLAUDE.md, Windows environment #4), so a job written as
+      # exactly that (AGENTS.md, Windows environment #4), so a job written as
       # `env: GOFLAGS: ''` would be a no-op on every developer box that follows
       # the setup instructions, and would silently pass on the very graph it
       # exists to reject. Verified: with go env -w GOFLAGS=-mod=mod set, a build

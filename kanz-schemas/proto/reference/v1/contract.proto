@@ -176,7 +176,7 @@ message ContractTerms {
     // deliberate choice: what this store provides is "instrument_id ->
     // slowly-changing terms, as of a time", which is exactly a bond's need. A
     // second store keyed the same way, with the same point-in-time contract, is
-    // the duplication CLAUDE.md's one-implementation rule exists to prevent —
+    // the duplication AGENTS.md's one-implementation rule exists to prevent —
     // and the alternative is a naming preference paid for with a second
     // migration.
     BondTerms bond = 13;

@@ -243,7 +243,7 @@ func writeFrame(t *testing.T, ctx context.Context, broker, kafkaTopic, tenant, e
 			// envelope_version, publish_time, idempotency_key and
 			// payload_schema_ref; Kafka accepted it, the rebuild republished it,
 			// the stream stored it, and the subscription silently saw nothing —
-			// the exact "fakeBus accepts what a real broker rejects" gap CLAUDE.md
+			// the exact "fakeBus accepts what a real broker rejects" gap AGENTS.md
 			// warns about, reproduced by hand. FACT requires
 			// idempotency_key == event_id (event-class-rules §1).
 			EnvelopeVersion:  1,

@@ -14,7 +14,7 @@
 //
 // The PRODUCTION implementation is the Anthropic client built on
 // `github.com/anthropics/anthropic-sdk-go`, wired in `cmd/copilot` so the core
-// service module pulls no LLM SDK dependency (the CLAUDE.md no-bloat rule + the
+// service module pulls no LLM SDK dependency (the AGENTS.md no-bloat rule + the
 // EVT-15a build-without-external-regen stance). Its shape, parameterized by the
 // configured model id (defaults to the MAX / most-capable model, DefaultModelID):
 //

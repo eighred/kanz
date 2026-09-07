@@ -51,7 +51,7 @@ usage() { echo "usage: $0 --spire|--deploy [--cluster NAME]" >&2; exit 2; }
 require_repo_root() {
   [ -d "$SPIRE_DIR" ] || {
     echo "FATAL: $SPIRE_DIR not found. Run this script from the repository root" >&2
-    echo "(the directory containing kanz/, tools/, CLAUDE.md)." >&2
+    echo "(the directory containing kanz/, tools/, AGENTS.md)." >&2
     exit 2
   }
 }

@@ -115,7 +115,7 @@ type Store interface {
 	// persist a transition is the drift that produced three separate
 	// `*_announced_at` markers by instalment, and the plain one would stay the
 	// obvious choice for the next transition somebody adds. One method, and every
-	// caller states its answer — CLAUDE.md's "one implementation per concept",
+	// caller states its answer — AGENTS.md's "one implementation per concept",
 	// and the same signature Create already carries.
 	//
 	// nil announces nothing, which is a legitimate answer for a write that has no

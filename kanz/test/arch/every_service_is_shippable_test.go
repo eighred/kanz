@@ -38,7 +38,7 @@ import (
 // It is the same shape as #283 (a registered metric with no writer), as the
 // dark-capability audit (a package nothing imports), and as the DR classification
 // (a store with no backup and no exclusion): a thing that LOOKS complete because
-// completeness was never something anything checked. CLAUDE.md's answer is the
+// completeness was never something anything checked. AGENTS.md's answer is the
 // standing one — an invariant worth keeping is a guard, not a paragraph.
 //
 // # What this checks

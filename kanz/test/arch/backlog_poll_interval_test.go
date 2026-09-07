@@ -15,7 +15,7 @@ import (
 // exceed metricsScrapeInterval — invert them and the package stops building.
 // That assertion is only as good as metricsScrapeInterval, which is a 30s
 // constant copied out of infra/observability/prometheus.yaml. A number copied
-// from a config file is exactly the dated evidence CLAUDE.md warns about: raise
+// from a config file is exactly the dated evidence AGENTS.md warns about: raise
 // the scrape interval in the YAML and the Go constant keeps asserting against a
 // value the estate no longer uses, while the compiler goes on reporting success.
 //

@@ -43,7 +43,7 @@ import (
 // behind a tag escaped golangci-lint entirely: the action ran with no
 // --build-tags, so it analysed the DEFAULT build. Both copilot adapters and the
 // redis bus adapter were compiled, vetted and tested by CI and linted by
-// nothing — and the fourth gate is not decorative, it is the one CLAUDE.md
+// nothing — and the fourth gate is not decorative, it is the one AGENTS.md
 // records as rejecting code the other three accept. It was holding a live
 // finding: model_anthropic.go discarded acc.Accumulate's error and served a
 // partially assembled model message to a portfolio manager as analysis.

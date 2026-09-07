@@ -21,7 +21,7 @@ import (
 // neither for margin mode — DeclaresMarginModes() existed with zero callers — so
 // margin was the only member of this family with no dial-time signal at all.
 //
-// That is the CLAUDE.md line "nothing configured and checked-and-fine must never
+// That is the AGENTS.md line "nothing configured and checked-and-fine must never
 // look the same", and margin is where it costs most: an undeclared order type
 // produces an order that does nothing, an inexpressible time-in-force produces
 // one that does the wrong thing, and an unrefused collateral regime produces a

@@ -174,7 +174,7 @@ var Services = []Service{
 			"into the tenant's prefixed Kafka topics, which is what replay, the lakehouse and " +
 			"every regulatory reconstruction read. Without it the tenant's FACTs live only in " +
 			"NATS, age off at the stream's max-age, and are outside DR entirely — while every " +
-			"health check reports green. CLAUDE.md's one sequencing rule that outlives any issue " +
+			"health check reports green. AGENTS.md's one sequencing rule that outlives any issue " +
 			"is that real orders must never be placed against a store that may not be backed up.",
 	},
 	{

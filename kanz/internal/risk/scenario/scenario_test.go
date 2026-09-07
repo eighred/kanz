@@ -129,19 +129,16 @@ func TestEvaluate_ShocksApplyInOrder(t *testing.T) {
 	}
 }
 
-func TestEvaluate_UnknownShockTypeIsSilentlySkipped(t *testing.T) {
-	// A custom shock the engine doesn't dispatch on must not abort
-	// the run — large batches of mixed shock types should be
-	// best-effort.
+func TestEvaluate_UnknownShockTypeIsRecorded(t *testing.T) {
 	p := makePortfolio(
 		domain.Position{InstrumentID: "A", MarketValue: money(100, 0, "USD"), AsOf: baseTime},
 	)
-	got := evaluate(t, p, []v1.ScenarioShock{
+	_, cov := scenario.Evaluate(p, []v1.ScenarioShock{
 		unknownShock{},
 	}, nil)
-	m, _ := got.Lookup(compute.MeasureNetExposure)
-	if m.Value.Coefficient != 100 {
-		t.Errorf("NetExposure=%d want 100 (unknown shock must be no-op)", m.Value.Coefficient)
+	if cov.ExcludedCount != 1 || len(cov.Exclusions) != 1 ||
+		cov.Exclusions[0].Reason != "unknown_shock_type" {
+		t.Fatalf("coverage=%+v want one unknown_shock_type exclusion", cov)
 	}
 }
 
@@ -183,8 +180,8 @@ func TestEvaluate_CustomRegistryUsed(t *testing.T) {
 	}
 }
 
-// unknownShock implements v1.ScenarioShock but is not one of the
-// dispatched types. Verifies the silent-skip contract.
+// unknownShock implements v1.ScenarioShock but is not one of the concrete
+// types the engine knows. It verifies that API-version skew fails closed.
 type unknownShock struct{}
 
 func (unknownShock) Description() string { return "unknown" }

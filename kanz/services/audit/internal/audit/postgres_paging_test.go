@@ -4,7 +4,7 @@
 // test here ran against Memory. That matters more than usual for this store,
 // because Filter is implemented TWICE — once as Go predicates in matches() for
 // Memory, and once as pushed-down SQL in Postgres.Query. Two implementations of
-// one concept is the shape CLAUDE.md warns about, and the only thing that keeps
+// one concept is the shape AGENTS.md warns about, and the only thing that keeps
 // them honest is running the same property through both.
 //
 // The cursor is the reason this got written now. `AfterSeq` becomes `seq > $n`

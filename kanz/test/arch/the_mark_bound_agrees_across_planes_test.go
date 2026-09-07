@@ -19,7 +19,7 @@ import (
 // OMS_PRICE_MAX_AGE before the trade, the monitor's COMPLIANCE_PRICE_MAX_AGE
 // after it. infra/deploy/compliance-deploy.yaml has claimed "Matches
 // OMS_PRICE_MAX_AGE" since it was written and nothing compared them — a safety
-// property asserted in prose, which is the dated evidence CLAUDE.md warns about
+// property asserted in prose, which is the dated evidence AGENTS.md warns about
 // rather than a check.
 //
 // # Why EQUAL, and not "compliance no looser than the OMS"

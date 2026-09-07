@@ -16,7 +16,7 @@
 // THREE CALLERS SHIPPED WITHOUT IT, one after another: the Copilot REPL's client
 // (#198), provision-tenant.sh's isolation probes (#774), and services/web-bff
 // (#777). Each was repaired by re-deriving the signature at the call site, which
-// is why there was a fourth to find. CLAUDE.md names the shape exactly: "A
+// is why there was a fourth to find. AGENTS.md names the shape exactly: "A
 // copied helper is how a fix stops spreading."
 //
 // # Why the VERIFIER lives here too, and not only the signers

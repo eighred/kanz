@@ -27,7 +27,7 @@ import (
 // discarded by the next rollout. For accounting that store was the fund's book
 // of record. THE DEPLOYMENT THAT FORGOT ITS DSN AND THE DEPLOYMENT THAT WAS
 // CONFIGURED CORRECTLY LOOKED IDENTICAL FROM EVERY SIGNAL A HUMAN LOOKS AT,
-// which is exactly what CLAUDE.md forbids twice over: "never a default that
+// which is exactly what AGENTS.md forbids twice over: "never a default that
 // looks healthy", and "'nothing configured' and 'checked, and fine' must never
 // look the same".
 //

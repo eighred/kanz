@@ -14,11 +14,11 @@
 // outside the risk module, and the market-data edge depending on the risk
 // pricing tree is the inversion store.Window's doc already refuses. So the shape
 // was written a second time, carrying its own copy of #862's fix — the
-// copied-helper failure mode CLAUDE.md names by cost, and the reason the next
+// copied-helper failure mode AGENTS.md names by cost, and the reason the next
 // defect of that class would have had to be fixed twice.
 //
 // The package itself never had a risk dependency (sort and time), so the
-// ownership claim was the PATH and nothing else. CLAUDE.md's rule — shared code
+// ownership claim was the PATH and nothing else. AGENTS.md's rule — shared code
 // is promoted out of a service's internal/ when a SECOND consumer appears — is
 // what moved it here. test/arch/one_horizon_prune_test.go is the guard that
 // keeps a third copy from appearing quietly.

@@ -125,7 +125,7 @@ import (
 //
 // # Why both trees
 //
-// A service's internal/ tree is where code in this platform STARTS. CLAUDE.md's
+// A service's internal/ tree is where code in this platform STARTS. AGENTS.md's
 // promotion rule is explicit: shared code lives in a service's internal/ and
 // moves to kanz/internal/ or kanz/pkg/ only when a SECOND consumer appears. So a
 // capability spends its dark period under services/<name>/internal/ by

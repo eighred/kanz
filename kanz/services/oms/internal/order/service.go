@@ -2676,7 +2676,7 @@ const delegatedIssuerPrefix = "user:"
 // and carry that person's real allow-list. Self-stamping the portfolio it is
 // about to trade would make this check pass by construction — "nothing
 // configured" and "checked, and fine" looking the same, which is the one thing
-// CLAUDE.md forbids outright.
+// AGENTS.md forbids outright.
 //
 // handleCancel AND handleAmend STAY ON THE STRICT RULE (plain entitledTo) and
 // should: the api-gateway is the only producer of those two subjects, and

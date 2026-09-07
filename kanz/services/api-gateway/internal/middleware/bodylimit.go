@@ -25,7 +25,7 @@ import (
 // It used to be declared THREE times — internal/gateway/helpers.go,
 // internal/orders/orders.go and internal/proxy/helpers.go each had their own
 // `maxBodyBytes = 1 << 20`. Three spellings of one number is how a bound gets
-// raised in one place and not the others, and CLAUDE.md names the shape
+// raised in one place and not the others, and AGENTS.md names the shape
 // exactly: a copied helper is how a fix stops spreading. Those three now read
 // this one, and the middleware package is where it belongs because this layer is
 // the only one that sees a request BEFORE anything has authenticated it.

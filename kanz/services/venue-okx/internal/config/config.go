@@ -152,7 +152,7 @@ func Load() (Config, error) {
 	// was handed." That is no longer true: the header IS sent now, driven by
 	// OKX_TRADING_MODE below. Left unedited it would have been a comment asserting
 	// the absence of the very control the next block configures — the dated-evidence
-	// trap CLAUDE.md names, and one this file has already sprung once (an arch guard
+	// trap AGENTS.md names, and one this file has already sprung once (an arch guard
 	// read this paragraph's mention of the header as proof the header existed).
 	//
 	// The endpoint still has no default, for its own reason: it decides which

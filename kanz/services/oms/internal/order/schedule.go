@@ -172,7 +172,7 @@ func (s *Service) validateSchedule(cmd *orderpb.SubmitOrder) *RejectError {
 	// coarsely than the caller specified. The platform already KNOWS this: the OMS
 	// computes TightestSliceInterval on every pass and warns when the tick is
 	// slower than the tightest schedule it is working. This makes that an
-	// admission decision instead of a log line, which is what CLAUDE.md asks of
+	// admission decision instead of a log line, which is what AGENTS.md asks of
 	// this plane — "admission control, not reporting. Decides whether."
 	//
 	// It closes the allocation as a side effect rather than as its purpose: at a

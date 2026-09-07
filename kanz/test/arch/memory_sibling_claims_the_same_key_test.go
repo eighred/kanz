@@ -94,7 +94,7 @@ var claimSQLNoCols = regexp.MustCompile(`(?is)insert\s+into\s+([a-z_][a-z0-9_]*)
 // id, and no column name survives that. Following the field instead was tried
 // and rejected: the first version of this guard passed MemoryProposals by
 // matching the lease map inside the outbox it also holds — a green result for a
-// property nobody meant to assert, which is the failure mode CLAUDE.md names.
+// property nobody meant to assert, which is the failure mode AGENTS.md names.
 var memorySiblingExempt = map[string]string{
 	"services/oms/internal/order.MemoryProposals": "holds no map of its own: the duplicate is refused by " +
 		"internal/dualcontrol/proposalstore.Memory[T].Insert, which returns ErrExists for a held id under its " +

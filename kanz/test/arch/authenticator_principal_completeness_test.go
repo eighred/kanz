@@ -162,7 +162,7 @@ func isPrincipalLit(lit *ast.CompositeLit) bool {
 //
 // Delegates to exportedStructFields (workerdeps_completeness_test.go): the
 // WorkerDeps guard asks the identical question of a different struct, and two
-// copies of a field-name reader is the shape CLAUDE.md names as how a fix stops
+// copies of a field-name reader is the shape AGENTS.md names as how a fix stops
 // spreading.
 func principalFields(t *testing.T, path string) []string {
 	t.Helper()

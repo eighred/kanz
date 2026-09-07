@@ -19,7 +19,7 @@ import (
 // full-evaluation path. Nine recorded nothing, and TWO of those returned
 // Allowed: true — the ungoverned portfolio and the mandate that constrains
 // nothing. For an order admitted that way the platform could not answer
-// CLAUDE.md's attributability requirement, "which mandate permitted it": nothing
+// AGENTS.md's attributability requirement, "which mandate permitted it": nothing
 // anywhere said a compliance decision had been made at all. The refusal paths
 // were quieter but not better — an ORDER_REJECTED FACT says the ORDER was
 // refused, not that the enforcement point decided anything.
@@ -221,7 +221,7 @@ func TestEveryTerminalDecisionIsRecorded(t *testing.T) {
 			if len(rec.records) != 1 {
 				t.Fatalf("the enforcement point that decides whether capital moves left %d "+
 					"records, want 1.\n\nAn order the gate answered for and did not record is one "+
-					"the platform cannot say it checked. For an ADMISSION that is CLAUDE.md's "+
+					"the platform cannot say it checked. For an ADMISSION that is AGENTS.md's "+
 					"attributability requirement unanswerable: a reviewer holding this order id "+
 					"asking which mandate permitted it gets silence.", len(rec.records))
 			}

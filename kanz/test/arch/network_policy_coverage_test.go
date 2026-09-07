@@ -22,7 +22,7 @@ import (
 
 // NETWORK POLICY IS AUTHORIZATION HERE, NOT HYGIENE (#232).
 //
-// CLAUDE.md states the trust model in one sentence: the api-gateway is the sole
+// AGENTS.md states the trust model in one sentence: the api-gateway is the sole
 // identity authority, it injects X-Kanz-Principal-*, and upstreams trust those
 // headers "only because a NetworkPolicy makes the gateway their only reachable
 // caller." Every gap in the policy set is therefore a gap in authorization, and
@@ -540,7 +540,7 @@ func TestInternetFacingWorkloadsHaveEgress(t *testing.T) {
 // default-deny accepts ingress from ANY pod in the cluster, which for
 // kanz-messaging means the NATS/Kafka/Redis spine is reachable without going
 // through the gateway, the RLS-scoped DSN, or any part of the header-trust chain
-// CLAUDE.md's model rests on.
+// AGENTS.md's model rests on.
 //
 // They are exemptions rather than policies because writing a default-deny for a
 // clustered StatefulSet blind is how this file's existing gaps were created. The
@@ -650,7 +650,7 @@ func TestEveryCreatedNamespaceDefaultDenies(t *testing.T) {
 		t.Errorf("these namespaces are created by this repo and have no default-deny NetworkPolicy:\n  %s\n\n"+
 			"A NetworkPolicy governs only its own namespace, so pods here accept ingress from ANY pod "+
 			"in the cluster — including the upstreams that trust X-Kanz-Principal-* headers because "+
-			"\"a NetworkPolicy makes the gateway their only reachable caller\" (CLAUDE.md). Add a "+
+			"\"a NetworkPolicy makes the gateway their only reachable caller\" (AGENTS.md). Add a "+
 			"default-deny-all beside the namespace, or add an entry to defaultDenyExempt with the "+
 			"reason and the issue that retires it.", strings.Join(missing, "\n  "))
 	}
@@ -1052,7 +1052,7 @@ var tenantHeaderRead = regexp.MustCompile(
 // TestTenantHeaderTrustingServicesAreEnumerated fails when a service reads
 // X-Kanz-Principal-Tenant and is not in the map above.
 //
-// The header is the entire authorization story for these routes — CLAUDE.md:
+// The header is the entire authorization story for these routes — AGENTS.md:
 // upstreams trust it "only because a NetworkPolicy makes the gateway their only
 // reachable caller". A new service adopting that trust is adopting a network
 // obligation with it, and the obligation is currently unmet for all four existing

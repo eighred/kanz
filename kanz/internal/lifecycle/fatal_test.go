@@ -68,7 +68,7 @@ func TestFatalKeepsTheFirstError(t *testing.T) {
 }
 
 // TestFatalConcurrentRaise exercises the mutex. It cannot PROVE race-freedom
-// without -race, which does not run on the usual development box (see CLAUDE.md),
+// without -race, which does not run on the usual development box (see AGENTS.md),
 // so treat a pass as "the ordering is written down", not as a concurrency proof.
 func TestFatalConcurrentRaise(t *testing.T) {
 	_, cancel := context.WithCancel(context.Background())

@@ -1,6 +1,6 @@
 // Package riskread is the MCP plane's read of governed risk state (#743).
 //
-// IT READS query.v1 AND PROJECTS NARROWLY. CLAUDE.md requires the MCP plane be
+// IT READS query.v1 AND PROJECTS NARROWLY. AGENTS.md requires the MCP plane be
 // "server-side filtered and projected" rather than handing an agent whatever a
 // domain API returns, so this maps a MeasuresResponse down to name→value and
 // discards everything else the response carries. What an agent cannot be given

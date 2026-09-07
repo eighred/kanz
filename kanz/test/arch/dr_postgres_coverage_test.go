@@ -336,7 +336,7 @@ var drPosture = map[string]drClassification{
 		"the direction nobody checks. The exclusion still holds TODAY — losing it degrades backtest " +
 		"fidelity rather than the live book, and the live book is what DR exists for — but it holds " +
 		"only while no sizing decision reaching real capital is derived from this store. The alpha " +
-		"direction is aimed squarely at making that false, and CLAUDE.md's own sequencing rule (M3 " +
+		"direction is aimed squarely at making that false, and AGENTS.md's own sequencing rule (M3 " +
 		"must not precede DR coverage) is the reason this sentence is here rather than discovered " +
 		"later. ingestion_coverage (#591) is the FOURTH table and the only one that is not " +
 		"replayable AT ALL: nothing can reconstruct whether a feed was live last July, so a lost row " +

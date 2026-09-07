@@ -22,7 +22,7 @@ import (
 // Between them they are the entire recovery path for an event that failed —
 // including capital-path orders.
 //
-// They diverged exactly the way CLAUDE.md's `secret()` example predicts, and for
+// They diverged exactly the way AGENTS.md's `secret()` example predicts, and for
 // the reason that makes this class of bug survive: NOTHING READ THEM. pkg/bus
 // stamped `Kanz-DLQ-Original-Subject`; services/archiver stamped
 // `Kanz-DLQ-Subject` for the same field, plus a `Kanz-DLQ-Reason` of its own, and

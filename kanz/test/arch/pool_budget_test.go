@@ -533,7 +533,7 @@ func (tg pgTarget) demand(est *k8sEstateDocs) pgDemand {
 // and no terraform for CloudNativePG anywhere in the tree — only
 // `apiVersion: postgresql.cnpg.io/v1` and the kubectl plugin in the runbooks. So
 // an unset parameter here is not "the default, which is fine"; it is a number
-// nobody reading this repository can name, which is the one state CLAUDE.md
+// nobody reading this repository can name, which is the one state AGENTS.md
 // forbids. Declaring it is what makes it checkable at all.
 func undeclaredMaxConnectionsAdvice(tg pgTarget) string {
 	if tg.standbyOf != "" {

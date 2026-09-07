@@ -74,7 +74,7 @@ type OrderLookup interface {
 // IT IS ONE INTERFACE AND NOT TWO FIELDS, deliberately. A separate, nil-able
 // recorder seam would let a composition root wire the reader and forget the
 // writer, and the result would be exactly the defect above with nothing to say
-// so — CLAUDE.md's "nothing configured" and "checked, and fine" must never look
+// so — AGENTS.md's "nothing configured" and "checked, and fine" must never look
 // the same. Widening the type a venue adapter already supplies makes a
 // write-less order view a COMPILE error instead.
 type OrderTracker interface {
@@ -422,7 +422,7 @@ type WorkerDeps struct {
 	// that reconciled cleanly: no FACT, no counter, no log, a pass that returns
 	// nil. accounting.balance.reconciled is emitted only on a DISCREPANCY, so the
 	// silence of a skipped asset and the silence of an agreeing one are the same
-	// silence — CLAUDE.md's rule verbatim.
+	// silence — AGENTS.md's rule verbatim.
 	//
 	// WHY IT IS NOT A BREAK. A break FACT carries expected, actual and delta, and
 	// the whole condition here is that expected does not exist. Publishing one

@@ -22,7 +22,7 @@ import (
 // asked for, on the authority of a file they could not open, and the citation is
 // what made it look settled rather than stale.
 //
-// CLAUDE.md's standard is that "a comment justifying a trade-off is dated
+// AGENTS.md's standard is that "a comment justifying a trade-off is dated
 // evidence — verify its premise before relying on it". A citation to a missing
 // file cannot be verified at all. The reader's three options are to believe it,
 // ignore it, or go read the code and find out — and only the last is safe, which
@@ -58,7 +58,7 @@ import (
 //
 // The consequence is worth stating, because it got larger on 2026-08-26. The
 // docs/ trees were retired that day and their content folded into README files
-// and CLAUDE.md, so most citations now name one of those — and this guard
+// and AGENTS.md, so most citations now name one of those — and this guard
 // cannot tell a live "kanz-schemas/README.md § Subject Taxonomy §4" from a
 // citation to a section that has since been renamed or deleted. The basename
 // resolves either way. That is the same floor-not-ceiling limit stated above,
@@ -179,7 +179,7 @@ func TestCommentsCiteDocumentsThatExist(t *testing.T) {
 			"asked for, and the citation is what made that look settled (#513).\n"+
 			"Fix by stating the rule beside what enforces it, or by re-verifying the claim "+
 			"against the code and saying what is true now. DO NOT repoint the citation at "+
-			"CLAUDE.md — that preserves an unverified claim and re-authorises it against a "+
+			"AGENTS.md — that preserves an unverified claim and re-authorises it against a "+
 			"document that does not make it. If the citation is dated PROVENANCE for a rule the "+
 			"code enforces, add it to citationExempt with that argument.",
 			len(bad), b.String())

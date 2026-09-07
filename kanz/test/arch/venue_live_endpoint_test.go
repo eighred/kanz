@@ -15,7 +15,7 @@ import (
 // POSTGRES STORE IT DEPENDS ON IS UNBACKED.
 //
 // This is the one ordering error in this platform with an UNRECOVERABLE failure
-// mode, and until now it existed only as a paragraph in CLAUDE.md ("M3 must not
+// mode, and until now it existed only as a paragraph in AGENTS.md ("M3 must not
 // precede the DR-coverage issue in M0"). A paragraph does not fail a build.
 //
 // The failure it prevents, concretely: a real order is accepted at a real
@@ -187,7 +187,7 @@ func TestNoOrderPlacingVenueRunsLiveWhileItsStoreIsUnbacked(t *testing.T) {
 			"  (a) point the endpoint at a sandbox host and add it to nonLiveExchangeHosts with the "+
 			"reason it cannot move real assets;\n"+
 			"  (b) resolve the DR posture of the store(s) above (issue #60) so drPosture marks them "+
-			"drCovered — this is the fix CLAUDE.md sequences M3 behind;\n"+
+			"drCovered — this is the fix AGENTS.md sequences M3 behind;\n"+
 			"  (c) if the live endpoint is genuinely required before (b) lands, add a named entry to "+
 			"liveVenueUnbackedExemptions citing the issue that retires it and stating the real "+
 			"exposure. That is a money-path decision and belongs to a human, not to whoever is making "+

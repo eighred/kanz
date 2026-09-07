@@ -41,7 +41,7 @@ import (
 // screeningPosition is one holding, with its numbers as decimal STRINGS.
 //
 // Strings rather than JSON numbers because these are money and quantity, and
-// CLAUDE.md is explicit that neither is ever a float. dec.ParseRat reads them
+// AGENTS.md is explicit that neither is ever a float. dec.ParseRat reads them
 // exactly; a JSON number would have gone through float64 on the way in and the
 // screen would then be classifying a value the caller did not send.
 type screeningPosition struct {
