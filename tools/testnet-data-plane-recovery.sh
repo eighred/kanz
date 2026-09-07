@@ -19,6 +19,8 @@ readonly PG_IMAGE='ghcr.io/cloudnative-pg/postgresql:16.10-standard-bookworm@sha
 readonly REDIS_IMAGE='redis@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08'
 readonly NATS_IMAGE='nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da'
 readonly NATS_BOX_IMAGE='natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c'
+RECOVERY_WORK=''
+RECOVERY_ARCHIVE=''
 
 k() { k3s kubectl "$@"; }
 die() { printf 'recovery-refused: %s\n' "$*" >&2; exit 2; }
@@ -71,6 +73,8 @@ backup() {
   backup_id="$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s' "$RELEASE_COMMIT" | cut -c1-12)"
   work=$(mktemp -d "/var/tmp/kanz-backup-${backup_id}.XXXXXX")
   archive="/var/tmp/kanz-data-plane-${backup_id}.tar.gz"
+  RECOVERY_WORK=$work
+  RECOVERY_ARCHIVE=$archive
   key="testnet/data-plane/${backup_id}/bundle.tar.gz"
   primary=$(k -n "$DATA_NS" get cluster kanz-testnet-postgres -o jsonpath='{.status.currentPrimary}')
   [[ "$primary" == kanz-testnet-postgres-* ]] || die 'CloudNativePG did not report a bounded primary'
@@ -79,8 +83,8 @@ backup() {
   cleanup_backup() {
     k -n "$DATA_NS" delete pod postgres-backup-runner --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
     k -n "$MSG_NS" delete pod nats-backup-runner --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
-    rm -rf -- "$work"
-    rm -f -- "$archive" "${archive}.download"
+    [[ "$RECOVERY_WORK" == /var/tmp/kanz-backup-* ]] && rm -rf -- "$RECOVERY_WORK"
+    [[ "$RECOVERY_ARCHIVE" == /var/tmp/kanz-data-plane-*.tar.gz ]] && rm -f -- "$RECOVERY_ARCHIVE" "${RECOVERY_ARCHIVE}.download"
   }
   trap cleanup_backup EXIT
 
@@ -170,9 +174,11 @@ restore() {
   started=$(date -u +%s)
   work=$(mktemp -d /var/tmp/kanz-restore.XXXXXX)
   archive="$work/bundle.tar.gz"
+  RECOVERY_WORK=$work
+  RECOVERY_ARCHIVE=$archive
   cleanup_restore() {
     [[ "$DRILL_NS" == kanz-recovery-drill ]] && k delete namespace "$DRILL_NS" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
-    [[ "$work" == /var/tmp/kanz-restore.* ]] && rm -rf -- "$work"
+    [[ "$RECOVERY_WORK" == /var/tmp/kanz-restore.* ]] && rm -rf -- "$RECOVERY_WORK"
   }
   trap cleanup_restore EXIT
 
