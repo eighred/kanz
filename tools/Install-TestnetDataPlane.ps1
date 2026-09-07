@@ -133,12 +133,12 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo data p
     'base64 -d "${payload}" | gzip -d > "${manifest}"',
     ("printf '%s  %s\n' '$manifestHash' " + '"${manifest}" | sha256sum --check --status'),
     ('test "$(grep -c ''^kind:'' "${manifest}")" = ''' + $resourceCount + "'"),
-    'validation_manifest="${manifest}"',
-    'if ! k3s kubectl get namespace kanz-data >/dev/null 2>&1 || ! k3s kubectl get namespace kanz-messaging >/dev/null 2>&1; then',
-    '  sed -e ''s/^  namespace: kanz-data$/  namespace: default/'' -e ''s/^  namespace: kanz-messaging$/  namespace: default/'' "${manifest}" > "${validation}"',
-    '  validation_manifest="${validation}"',
-    '  echo data-plane-server-dry-run-namespace-substitute=default',
-    'fi',
+    # Validate against an isolated namespace name every time. Otherwise a
+    # legitimate Job template update is rejected as immutable before the
+    # installer can replace an incomplete Job below.
+    'sed -e ''s/^  namespace: kanz-data$/  namespace: default/'' -e ''s/^  namespace: kanz-messaging$/  namespace: default/'' "${manifest}" > "${validation}"',
+    'validation_manifest="${validation}"',
+    'echo data-plane-server-dry-run-namespace-substitute=default',
     'k3s kubectl apply --server-side --dry-run=server --field-manager=kanz-bootstrap -f "${validation_manifest}" >/dev/null',
     'echo data-plane-server-dry-run-ok',
     "apply='$applyFlag'",
@@ -146,7 +146,7 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo data p
     # kubectl does not implement Argo's BeforeHookCreation policy. A previously
     # failed bootstrap Job is immutable and must be removed before a reviewed,
     # idempotent reapply; a completed Job is retained as evidence.
-    'for item in kanz-data/postgres-provisioner kanz-messaging/nats-bootstrap; do ns=${item%/*}; job=${item#*/}; failed=$(k3s kubectl -n "${ns}" get job "${job}" -o jsonpath=''{.status.failed}'' 2>/dev/null || true); if [[ "${failed:-0}" -gt 0 ]]; then k3s kubectl -n "${ns}" delete job "${job}" --wait=true >/dev/null; fi; done',
+    'for item in kanz-data/postgres-provisioner kanz-messaging/nats-bootstrap; do ns=${item%/*}; job=${item#*/}; if k3s kubectl -n "${ns}" get job "${job}" >/dev/null 2>&1; then succeeded=$(k3s kubectl -n "${ns}" get job "${job}" -o jsonpath=''{.status.succeeded}''); if [[ "${succeeded:-0}" != 1 ]]; then k3s kubectl -n "${ns}" delete job "${job}" --wait=true >/dev/null; fi; fi; done',
     'k3s kubectl apply --server-side --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
     'redis_sa=$(k3s kubectl -n kanz-messaging get pod redis-0 -o jsonpath=''{.spec.serviceAccountName}'' 2>/dev/null || true)',
     'if [[ -n "${redis_sa}" && "${redis_sa}" != redis ]]; then k3s kubectl -n kanz-messaging delete pod redis-0 --wait=false >/dev/null; fi',
