@@ -1,14 +1,16 @@
 @echo off
 setlocal
-title Kanz Venue Testnet Secrets
+title Kanz Testnet Vault Bootstrap
 
 echo Choose an operation:
 echo   1. Rotate exchange testnet credentials
-echo   2. Re-run the idempotent Vault bootstrap
-set /p "CHOICE=Enter 1 or 2: "
+echo   2. Re-run the venue Vault bootstrap
+echo   3. Bootstrap generated Postgres and Redis credentials
+set /p "CHOICE=Enter 1, 2, or 3: "
 
-if "%CHOICE%"=="1" set "MODE=Rotate"
-if "%CHOICE%"=="2" set "MODE=Bootstrap"
+if "%CHOICE%"=="1" set "MODE=Rotate"& set "TARGET=Venue"
+if "%CHOICE%"=="2" set "MODE=Bootstrap"& set "TARGET=Venue"
+if "%CHOICE%"=="3" set "MODE=Bootstrap"& set "TARGET=DataPlane"
 if not defined MODE (
   echo Invalid choice. No changes were made.
   pause
@@ -26,7 +28,7 @@ if not defined PSHOST (
   exit /b 3
 )
 
-"%PSHOST%" -NoProfile -File "%~dp0Invoke-VenueSecrets.ps1" -Mode %MODE%
+"%PSHOST%" -NoProfile -File "%~dp0Invoke-VenueSecrets.ps1" -Mode %MODE% -Target %TARGET%
 if errorlevel 1 (
   echo The operation was not verified. Review the error above.
 ) else (

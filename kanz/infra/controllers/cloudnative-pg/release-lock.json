@@ -1,0 +1,7 @@
+{
+  "version": "v1.30.0",
+  "sourceCommit": "4b5e244a7d031f67e025c83c1555e7726ecbbfa1",
+  "manifestURL": "https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.30.0/cnpg-1.30.0.yaml",
+  "manifestSHA256": "f8bede43fe4ee0d478c2355b204a36876b2ae4faac60f2a9452280b293da3b88",
+  "controllerImage": "ghcr.io/cloudnative-pg/cloudnative-pg@sha256:a2701eb97cdd2a34b1fdb2cb51987f544b706e40bec72ae7146cd8580efefebb"
+}

@@ -1,0 +1,115 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kanz-testnet-postgres
+  namespace: kanz-data
+  labels:
+    app.kubernetes.io/part-of: kanz
+    app.kubernetes.io/component: operational-database
+    kanz.io/ha: UNSUPPORTED
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql@sha256:533e45e0a00c156bdab7c4d9a84fffa87259594725a3909c898e8645727d9555
+  enableSuperuserAccess: false
+  primaryUpdateStrategy: unsupervised
+  bootstrap:
+    initdb:
+      database: kanz_control
+      owner: kanz_bootstrap
+      dataChecksums: true
+      encoding: UTF8
+      localeCollate: C
+      localeCType: C
+      postInitApplicationSQL:
+        - ALTER ROLE kanz_bootstrap CREATEDB CREATEROLE NOSUPERUSER NOBYPASSRLS CONNECTION LIMIT 2
+  postgresql:
+    parameters:
+      archive_timeout: "30s"
+      max_connections: "200"
+      shared_buffers: 384MB
+      log_connections: "on"
+      log_disconnections: "on"
+      log_statement: ddl
+      password_encryption: scram-sha-256
+    pg_hba:
+      - hostssl all all 10.42.0.0/16 scram-sha-256
+  monitoring:
+    enablePodMonitor: false
+  inheritedMetadata:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9187"
+    labels:
+      kanz.io/availability: UNSUPPORTED
+      kanz.io/failure-domain: single-node
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1536Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  priorityClassName: kanz-data-critical
+  storage:
+    size: 20Gi
+    storageClass: local-path
+  walStorage:
+    size: 4Gi
+    storageClass: local-path
+  affinity:
+    enablePodAntiAffinity: false
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kanz-testnet-postgres
+  namespace: kanz-data
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      cnpg.io/cluster: kanz-testnet-postgres
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-default-deny
+  namespace: kanz-data
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-bounded-traffic
+  namespace: kanz-data
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: kanz-testnet-postgres
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-services
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres-provisioner
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - { protocol: TCP, port: 8000 }
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

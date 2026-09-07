@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata: { name: kanz-risk-rw, namespace: kanz-data }
+spec: { type: ExternalName, externalName: kanz-testnet-postgres-rw.kanz-data.svc.cluster.local }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: kanz-registry-rw, namespace: kanz-data }
+spec: { type: ExternalName, externalName: kanz-testnet-postgres-rw.kanz-data.svc.cluster.local }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: kanz-books-rw, namespace: kanz-data }
+spec: { type: ExternalName, externalName: kanz-testnet-postgres-rw.kanz-data.svc.cluster.local }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: kanz-orders-rw, namespace: kanz-data }
+spec: { type: ExternalName, externalName: kanz-testnet-postgres-rw.kanz-data.svc.cluster.local }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: kanz-compliance-rw, namespace: kanz-data }
+spec: { type: ExternalName, externalName: kanz-testnet-postgres-rw.kanz-data.svc.cluster.local }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: kanz-identity-rw, namespace: kanz-data }
+spec: { type: ExternalName, externalName: kanz-testnet-postgres-rw.kanz-data.svc.cluster.local }

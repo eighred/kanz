@@ -435,9 +435,12 @@ const canonicalImageOrg = "eighred"
 //   - spiffe:   SPIRE server/agent, the CSI driver and spiffe-helper — upstream
 //     sigstore/spiffe images.
 //   - gitleaks: the secret-scanning image security.yml runs; not built here.
+//   - cloudnative-pg: the PostgreSQL operator and operand images pinned by the
+//     Tokyo testnet release lock and data-plane architecture guard.
 var thirdPartyImageOrgs = map[string]struct{}{
-	"spiffe":   {},
-	"gitleaks": {},
+	"spiffe":         {},
+	"gitleaks":       {},
+	"cloudnative-pg": {},
 }
 
 // imageRefKeys are the YAML keys whose values carry an image reference.
