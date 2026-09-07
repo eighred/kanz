@@ -244,6 +244,7 @@ func TestTokyoRecoveryKeepsCredentialsInPodsAndProvesAnIsolatedRestore(t *testin
 	wrapper := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Invoke-TestnetDataPlaneRecovery.ps1")))
 	for _, required := range []string{
 		"refuse_active_writers", "postgres-migrations", "pg_dump", "redis-cli -a", "account backup --check",
+		"currentPrimary", "exec \"$primary\" -c postgres", "--username postgres",
 		"MANIFEST.sha256", "server-side-encryption aws:kms", "ObjectLockMode==\"GOVERNANCE\"",
 		"kind: Cluster", "name: kanz-postgres-drill", "kind: NetworkPolicy",
 		"pg_restore", "relrowsecurity and not relforcerowsecurity", "account restore --force",

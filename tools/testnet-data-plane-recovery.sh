@@ -66,17 +66,18 @@ backup() {
   require_boundary
   refuse_active_writers
 
-  local started backup_id work archive key archive_sha retain_until pg_runner nats_runner
+  local started backup_id work archive key archive_sha retain_until primary nats_runner
   started=$(date -u +%s)
   backup_id="$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s' "$RELEASE_COMMIT" | cut -c1-12)"
   work=$(mktemp -d "/var/tmp/kanz-backup-${backup_id}.XXXXXX")
   archive="/var/tmp/kanz-data-plane-${backup_id}.tar.gz"
   key="testnet/data-plane/${backup_id}/bundle.tar.gz"
-  pg_runner=postgres-backup-runner
+  primary=$(k -n "$DATA_NS" get cluster kanz-testnet-postgres -o jsonpath='{.status.currentPrimary}')
+  [[ "$primary" == kanz-testnet-postgres-* ]] || die 'CloudNativePG did not report a bounded primary'
   nats_runner=nats-backup-runner
 
   cleanup_backup() {
-    k -n "$DATA_NS" delete pod "$pg_runner" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+    k -n "$DATA_NS" delete pod postgres-backup-runner --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
     k -n "$MSG_NS" delete pod "$nats_runner" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
     rm -rf -- "$work"
     rm -f -- "$archive" "${archive}.download"
@@ -84,21 +85,17 @@ backup() {
   trap cleanup_backup EXIT
 
   mkdir -p "$work/postgres" "$work/nats" "$work/redis"
-  clone_job_as_runner "$DATA_NS" postgres-provisioner "$pg_runner" provisioner
-
   : >"$work/postgres/source.tsv"
   local database
   for database in "${DATABASES[@]}"; do
-    k -n "$DATA_NS" exec "$pg_runner" -c provisioner -- bash -ceu '
-      export PGPASSWORD="$(cat /run/secrets/bootstrap/password)"
-      exec pg_dump --host "$1" --username kanz_bootstrap --dbname "$2" \
+    k -n "$DATA_NS" exec "$primary" -c postgres -- bash -ceu '
+      exec pg_dump --username postgres --dbname "$1" \
         --format=custom --compress=zstd:3 --no-owner --no-privileges
-    ' _ "$PG_HOST" "$database" >"$work/postgres/${database}.dump"
-    k -n "$DATA_NS" exec "$pg_runner" -c provisioner -- bash -ceu '
-      export PGPASSWORD="$(cat /run/secrets/bootstrap/password)"
-      psql --host "$1" --username kanz_bootstrap --dbname "$2" --no-psqlrc --tuples-only --no-align \
+    ' _ "$database" >"$work/postgres/${database}.dump"
+    k -n "$DATA_NS" exec "$primary" -c postgres -- bash -ceu '
+      psql --username postgres --dbname "$1" --no-psqlrc --tuples-only --no-align \
         --command "select current_database(), (select count(*) from schema_migrations), (select count(*) from pg_class where relkind='"'"'r'"'"' and relnamespace=(select oid from pg_namespace where nspname='"'"'public'"'"')), (select count(*) from pg_class where relkind='"'"'r'"'"' and relrowsecurity and not relforcerowsecurity), pg_current_wal_lsn()"
-    ' _ "$PG_HOST" "$database" >>"$work/postgres/source.tsv"
+    ' _ "$database" >>"$work/postgres/source.tsv"
   done
 
   k -n "$MSG_NS" exec redis-0 -c redis -- sh -ceu '
