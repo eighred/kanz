@@ -50,7 +50,6 @@ data:
     -- an existing role does not retain the required posture.
     SELECT format('ALTER ROLE %I LOGIN NOCREATEDB NOCREATEROLE CONNECTION LIMIT 20 PASSWORD %L', :'app_role', :'app_password') \gexec
     SELECT format('ALTER ROLE %I LOGIN NOCREATEDB NOCREATEROLE CONNECTION LIMIT 4 PASSWORD %L', :'migrate_role', :'migrate_password') \gexec
-    SELECT format('GRANT %I TO kanz_bootstrap WITH ADMIN OPTION', :'migrate_role') \gexec
     SELECT format('CREATE DATABASE %I OWNER %I', :'database', :'migrate_role')
       WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = :'database') \gexec
     SQL
