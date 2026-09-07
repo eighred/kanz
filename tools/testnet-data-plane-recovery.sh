@@ -19,6 +19,8 @@ readonly PG_IMAGE='ghcr.io/cloudnative-pg/postgresql:16.10-standard-bookworm@sha
 readonly REDIS_IMAGE='redis@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08'
 readonly NATS_IMAGE='nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da'
 readonly NATS_BOX_IMAGE='natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c'
+RECOVERY_WORK=''
+RECOVERY_ARCHIVE=''
 
 k() { k3s kubectl "$@"; }
 die() { printf 'recovery-refused: %s\n' "$*" >&2; exit 2; }
@@ -62,6 +64,18 @@ clone_job_as_runner() {
   k -n "$namespace" wait --for=condition=Ready "pod/$pod" --timeout=120s >/dev/null
 }
 
+wait_for_pod_selector() {
+  local namespace=$1 selector=$2 timeout_seconds=$3 deadline
+  deadline=$(( SECONDS + timeout_seconds ))
+  while (( SECONDS < deadline )); do
+    if [[ -n "$(k -n "$namespace" get pod -l "$selector" -o name 2>/dev/null)" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  die "no pod appeared for selector $selector in namespace $namespace"
+}
+
 backup() {
   require_boundary
   refuse_active_writers
@@ -71,6 +85,8 @@ backup() {
   backup_id="$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%s' "$RELEASE_COMMIT" | cut -c1-12)"
   work=$(mktemp -d "/var/tmp/kanz-backup-${backup_id}.XXXXXX")
   archive="/var/tmp/kanz-data-plane-${backup_id}.tar.gz"
+  RECOVERY_WORK=$work
+  RECOVERY_ARCHIVE=$archive
   key="testnet/data-plane/${backup_id}/bundle.tar.gz"
   primary=$(k -n "$DATA_NS" get cluster kanz-testnet-postgres -o jsonpath='{.status.currentPrimary}')
   [[ "$primary" == kanz-testnet-postgres-* ]] || die 'CloudNativePG did not report a bounded primary'
@@ -79,8 +95,8 @@ backup() {
   cleanup_backup() {
     k -n "$DATA_NS" delete pod postgres-backup-runner --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
     k -n "$MSG_NS" delete pod nats-backup-runner --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
-    rm -rf -- "$work"
-    rm -f -- "$archive" "${archive}.download"
+    [[ "$RECOVERY_WORK" == /var/tmp/kanz-backup-* ]] && rm -rf -- "$RECOVERY_WORK"
+    [[ "$RECOVERY_ARCHIVE" == /var/tmp/kanz-data-plane-*.tar.gz ]] && rm -f -- "$RECOVERY_ARCHIVE" "${RECOVERY_ARCHIVE}.download"
   }
   trap cleanup_backup EXIT
 
@@ -170,9 +186,11 @@ restore() {
   started=$(date -u +%s)
   work=$(mktemp -d /var/tmp/kanz-restore.XXXXXX)
   archive="$work/bundle.tar.gz"
+  RECOVERY_WORK=$work
+  RECOVERY_ARCHIVE=$archive
   cleanup_restore() {
     [[ "$DRILL_NS" == kanz-recovery-drill ]] && k delete namespace "$DRILL_NS" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
-    [[ "$work" == /var/tmp/kanz-restore.* ]] && rm -rf -- "$work"
+    [[ "$RECOVERY_WORK" == /var/tmp/kanz-restore.* ]] && rm -rf -- "$RECOVERY_WORK"
   }
   trap cleanup_restore EXIT
 
@@ -299,13 +317,26 @@ spec:
     - { name: transfer, emptyDir: { sizeLimit: 1Gi } }
     - { name: tmp, emptyDir: { medium: Memory, sizeLimit: 32Mi } }
 EOF
+  wait_for_pod_selector "$DRILL_NS" cnpg.io/cluster=kanz-postgres-drill 120
   k -n "$DRILL_NS" wait --for=condition=Ready pod -l cnpg.io/cluster=kanz-postgres-drill --timeout=300s >/dev/null
   k -n "$DRILL_NS" wait --for=condition=Ready pod/postgres-restore --timeout=180s >/dev/null
+
+  local postgres_ready=0
+  for _ in $(seq 1 90); do
+    if k -n "$DRILL_NS" exec postgres-restore -c restore -- bash -ceu '
+      exec pg_isready --host "$(cat /run/secrets/postgres/host)" --username kanz_restore --dbname restore_control
+    ' >/dev/null 2>&1; then
+      postgres_ready=1
+      break
+    fi
+    sleep 2
+  done
+  [[ "$postgres_ready" == 1 ]] || die 'restored PostgreSQL service did not become reachable'
 
   local database expected_migrations expected_tables expected_unsafe source_lsn restored
   while IFS='|' read -r database expected_migrations expected_tables expected_unsafe source_lsn; do
     [[ " ${DATABASES[*]} " == *" $database "* ]] || die "artifact names unexpected database $database"
-    k -n "$DRILL_NS" exec postgres-restore -c restore -- bash -ceu '
+    k -n "$DRILL_NS" exec -i postgres-restore -c restore -- bash -ceu '
       export PGPASSWORD="$(cat /run/secrets/postgres/password)"
       host=$(cat /run/secrets/postgres/host)
       createdb --host "$host" --username kanz_restore "$1"
@@ -329,13 +360,13 @@ EOF
   [[ "$restored_redis" == "$expected_redis" ]] || die 'Redis restored key count differs from source'
 
   k -n "$DRILL_NS" exec -i nats-restore -c restore -- sh -ceu 'tar -C /restore -xzf -' <"$work/extracted/nats/account.tar.gz"
-  k -n "$DRILL_NS" exec nats-restore -c restore -- nats --server nats://127.0.0.1:4222 account restore --force /restore/nats-backup >/dev/null
+  k -n "$DRILL_NS" exec nats-restore -c restore -- nats --server nats://127.0.0.1:4222 account restore /restore/nats-backup >/dev/null
   local expected_streams expected_consumers expected_messages restored_jsz
   expected_streams=$(jq '.streams // 0' "$work/extracted/nats/source.json")
-  expected_consumers=$(jq '[.account_details[].stream_detail[].consumer_detail // [] | length] | add // 0' "$work/extracted/nats/source.json")
-  expected_messages=$(jq '[.account_details[].stream_detail[].state.messages // 0] | add // 0' "$work/extracted/nats/source.json")
+  expected_consumers=$(jq '[.account_details[]? | .stream_detail[]? | (.consumer_detail // [] | length)] | add // 0' "$work/extracted/nats/source.json")
+  expected_messages=$(jq '[.account_details[]? | .stream_detail[]? | (.state.messages // 0)] | add // 0' "$work/extracted/nats/source.json")
   restored_jsz=$(k -n "$DRILL_NS" exec nats-restore -c restore -- wget -qO- 'http://127.0.0.1:8222/jsz?streams=true&consumers=true')
-  jq -e --argjson streams "$expected_streams" --argjson consumers "$expected_consumers" --argjson messages "$expected_messages" '(.streams // 0)==$streams and ([.account_details[].stream_detail[].consumer_detail // [] | length] | add // 0)==$consumers and ([.account_details[].stream_detail[].state.messages // 0] | add // 0)==$messages' <<<"$restored_jsz" >/dev/null || die 'NATS restored totals differ from source'
+  jq -e --argjson streams "$expected_streams" --argjson consumers "$expected_consumers" --argjson messages "$expected_messages" '(.streams // 0)==$streams and ([.account_details[]? | .stream_detail[]? | (.consumer_detail // [] | length)] | add // 0)==$consumers and ([.account_details[]? | .stream_detail[]? | (.state.messages // 0)] | add // 0)==$messages' <<<"$restored_jsz" >/dev/null || die 'NATS restored totals differ from source'
 
   local elapsed metadata_release
   elapsed=$(( $(date -u +%s) - started ))
