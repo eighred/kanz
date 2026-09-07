@@ -9,7 +9,7 @@ metadata:
     kanz.io/ha: UNSUPPORTED
 spec:
   instances: 1
-  imageName: ghcr.io/cloudnative-pg/postgresql@sha256:533e45e0a00c156bdab7c4d9a84fffa87259594725a3909c898e8645727d9555
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.10-standard-bookworm@sha256:533e45e0a00c156bdab7c4d9a84fffa87259594725a3909c898e8645727d9555
   enableSuperuserAccess: false
   primaryUpdateStrategy: unsupervised
   bootstrap:
@@ -113,3 +113,9 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+    # CloudNativePG instance and initdb Pods call the Kubernetes API. On this
+    # k3s/kube-router node policy sees the post-DNAT endpoint.
+    - to:
+        - ipBlock: { cidr: 10.71.0.15/32 }
+      ports:
+        - { protocol: TCP, port: 6443 }

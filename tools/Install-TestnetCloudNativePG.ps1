@@ -67,7 +67,11 @@ $commands = @(
     'if [[ "${apply}" = 0 ]]; then exit 0; fi',
     '/usr/local/bin/k3s kubectl apply --server-side --field-manager=kanz-bootstrap -f "${work}/rendered.yaml" >/dev/null',
     'for crd in clusters.postgresql.cnpg.io backups.postgresql.cnpg.io scheduledbackups.postgresql.cnpg.io databases.postgresql.cnpg.io databaseroles.postgresql.cnpg.io; do /usr/local/bin/k3s kubectl wait --for=condition=Established "crd/${crd}" --timeout=180s >/dev/null; done',
-    '/usr/local/bin/k3s kubectl -n cnpg-system rollout status deployment/cnpg-controller-manager --timeout=240s >/dev/null',
+    # A repaired Deployment can remain ProgressDeadlineExceeded after its new
+    # Pod is Available; rollout status then reports the historical deadline as
+    # a current failure. Availability plus the exact image check below are the
+    # state this installer needs to prove.
+    '/usr/local/bin/k3s kubectl -n cnpg-system wait --for=condition=Available deployment/cnpg-controller-manager --timeout=240s >/dev/null',
     'test "$(/usr/local/bin/k3s kubectl -n cnpg-system get deployment cnpg-controller-manager -o jsonpath=''{.spec.template.spec.containers[?(@.name=="manager")].image}'')" = "${expected_image}"',
     'echo cloudnative-pg-controller-available',
     'echo cloudnative-pg-image-digest-locked'
