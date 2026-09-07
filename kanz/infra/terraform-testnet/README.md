@@ -22,12 +22,19 @@ separate restore drill produces a current DR attestation.
   Its policy can upload layers only to those eleven repositories.
 - Embedded etcd with encrypted Kubernetes secrets and local snapshots every six
   hours; DLM snapshots the data EBS volume daily and retains seven.
+- An Osaka (`ap-northeast-3`) recovery bucket with a dedicated rotation-enabled
+  KMS key, versioning, 30-day governance-mode Object Lock and 45-day lifecycle
+  expiry. The node can list/read/write recovery objects but cannot delete them
+  or bypass retention; workloads cannot obtain the node role through IMDS.
 - A mandatory USD 100 monthly budget alerts at USD 50, 75, 90, and 100.
 
 Expected steady-state base cost is approximately USD 86.72/month using the
 2026-09-06 Tokyo public prices and 20 GiB average incremental snapshot storage.
-Data transfer, excess CPU credits, and snapshot churn are variable. The pinned
-standard credit mode prevents T3 Unlimited surplus-credit charges.
+The recovery KMS key adds approximately USD 1/month; Object-Locked S3 storage,
+requests and cross-Region transfer vary with measured backup volume and remain
+bounded by the 45-day lifecycle. Data transfer, excess CPU credits, and snapshot
+churn are variable. The pinned standard credit mode prevents T3 Unlimited
+surplus-credit charges.
 
 ## Apply
 

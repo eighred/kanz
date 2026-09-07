@@ -32,3 +32,13 @@ output "capital_path_ecr_repositories" {
   description = "Immutable ECR repositories the node is permitted to pull."
   value       = { for name, repository in aws_ecr_repository.capital_path : name => repository.repository_url }
 }
+
+output "recovery_bucket" {
+  description = "Osaka Object-Locked bucket for encrypted testnet recovery artifacts."
+  value       = aws_s3_bucket.recovery.id
+}
+
+output "recovery_kms_key_arn" {
+  description = "Osaka KMS key required for recovery artifact encryption and restore."
+  value       = aws_kms_key.recovery.arn
+}

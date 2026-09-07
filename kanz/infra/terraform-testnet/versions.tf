@@ -21,3 +21,17 @@ provider "aws" {
     }
   }
 }
+
+provider "aws" {
+  alias  = "recovery"
+  region = var.recovery_region
+
+  default_tags {
+    tags = {
+      "app.kubernetes.io/part-of" = "kanz"
+      "kanz.io/environment"       = "testnet"
+      "kanz.io/managed-by"        = "terraform"
+      "kanz.io/issue"             = "1100"
+    }
+  }
+}

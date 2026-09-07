@@ -15,6 +15,17 @@ variable "region" {
   }
 }
 
+variable "recovery_region" {
+  description = "Geographically separate, same-country recovery region for immutable testnet evidence."
+  type        = string
+  default     = "ap-northeast-3"
+
+  validation {
+    condition     = var.recovery_region == "ap-northeast-3"
+    error_message = "Issue #1100 recovery evidence is approved only for Osaka (ap-northeast-3)."
+  }
+}
+
 variable "name" {
   description = "Resource name prefix."
   type        = string
