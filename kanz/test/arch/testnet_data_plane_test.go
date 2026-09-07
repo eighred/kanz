@@ -104,6 +104,35 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 			t.Errorf("testnet data-plane image %q is not pinned by digest", image)
 		}
 	}
+	if !regexp.MustCompile(`(?m)^  - name: ghcr\.io/eighred/kanz-migrate\n    newName: 012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/kanz-migrate\n    digest: sha256:[0-9a-f]{64}$`).Match(kustomization) {
+		t.Fatal("migration image must come from the immutable Tokyo ECR release")
+	}
+}
+
+func TestTokyoDatabaseMigrationsRunBeforeCapitalPathAdmission(t *testing.T) {
+	root := moduleRoot(t)
+	dir := filepath.Join(root, "infra", "overlays", "testnet-tokyo", "data")
+	raw := string(mustReadArchFile(t, filepath.Join(dir, "postgres-migrations.yaml")))
+	for _, service := range []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx"} {
+		if !strings.Contains(raw, "name: migrate-"+service) || !strings.Contains(raw, `"/migrations/`+service+`"`) {
+			t.Errorf("migration job does not apply %s's schema", service)
+		}
+		if !strings.Contains(raw, "value: /run/migration-dsns/"+service) {
+			t.Errorf("migration job does not give %s a file-backed DSN", service)
+		}
+	}
+	for _, required := range []string{
+		"serviceAccountName: postgres-provisioner", "secretProviderClass: postgres-role-passwords",
+		"defaultMode: 0440", "readOnlyRootFilesystem: true", "select count(*) from schema_migrations",
+		"relrowsecurity and not relforcerowsecurity", "activeDeadlineSeconds: 900",
+	} {
+		if !strings.Contains(raw, required) {
+			t.Errorf("migration job is missing fail-closed boundary %q", required)
+		}
+	}
+	if strings.Contains(raw, "secretObjects:") || strings.Contains(raw, "kind: Secret") {
+		t.Fatal("migration credentials must stay in Vault CSI files and memory-backed emptyDir")
+	}
 }
 
 func TestTokyoPostgresProvisionerKeepsApplicationRolesRLSConstrained(t *testing.T) {
@@ -197,9 +226,9 @@ func TestTokyoDataPlaneInstallerFailsClosedOnRenderAndRuntimeState(t *testing.T)
 	root := moduleRoot(t)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetDataPlane.ps1")))
 	for _, required := range []string{
-		"resourceCount -ne 35", "mutable image tag survived", "sha256sum --check --status",
+		"resourceCount -ne 37", "mutable image tag survived", "sha256sum --check --status",
 		"data-plane-server-dry-run-namespace-substitute=default", "apply --server-side --dry-run=server", "condition=Ready cluster/kanz-testnet-postgres",
-		"condition=complete job/postgres-provisioner", "condition=complete job/nats-bootstrap",
+		"condition=complete job/postgres-provisioner", "condition=complete job/postgres-migrations", "condition=complete job/nats-bootstrap",
 		"redis_sa", "not rolsuper and not rolbypassrls", "CONFIG GET appendfsync", "sync_interval: always",
 	} {
 		if !strings.Contains(raw, required) {

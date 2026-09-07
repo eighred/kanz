@@ -97,6 +97,9 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: postgres-provisioner
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres-migrations
       ports:
         - { protocol: TCP, port: 5432 }
     - from:

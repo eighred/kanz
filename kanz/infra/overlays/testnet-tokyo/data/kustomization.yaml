@@ -12,6 +12,7 @@ resources:
   - ../../../messaging/redis.yaml
   - postgres.yaml
   - postgres-provisioner.yaml
+  - postgres-migrations.yaml
   - postgres-aliases.yaml
   - secret-provider-classes.yaml
 
@@ -101,3 +102,6 @@ images:
     newName: ghcr.io/cloudnative-pg/postgresql
     newTag: 16.10-standard-bookworm
     digest: sha256:533e45e0a00c156bdab7c4d9a84fffa87259594725a3909c898e8645727d9555
+  - name: ghcr.io/eighred/kanz-migrate
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate
+    digest: sha256:b5db20eb08b17a70d637dc378f5c797ca220874ebc7399786f8e6a7c0df10490
