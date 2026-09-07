@@ -97,9 +97,15 @@ current node from Terraform state, stages the secret-free shell payload through
 SSM, opens an interactive session, and verifies a completion marker afterward:
 
 ```powershell
+.\tools\Kanz-Venue-Secrets.cmd
 .\tools\Invoke-VenueSecrets.ps1 -Mode Bootstrap
 .\tools\Invoke-VenueSecrets.ps1 -Mode Rotate
 ```
+
+The `.cmd` launcher resolves PowerShell 7 from `PATH`, the Codex bundled runtime,
+or Windows PowerShell, in that order. It invokes `Invoke-VenueSecrets.ps1` from
+the launcher's own repository directory, so a desktop shortcut does not embed a
+second mutable copy of the operator workflow.
 
 Both modes prompt with hidden input. Credential values travel only on the
 interactive session's stdin and Vault CLI stdin; they are absent from process
