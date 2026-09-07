@@ -122,6 +122,25 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	}
 }
 
+func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T) {
+	root := moduleRoot(t)
+	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
+	for _, required := range []string{
+		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
+		"resourceCount -ne 34", "Expected 16 rendered container images", "sha256sum --check --status",
+		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",
+		"rollout status statefulset/nats", "rollout status statefulset/redis",
+		"apply --server-side --dry-run=server", "rollout status \"deployment/${deployment}\"",
+		"condition=Available deployment/argo-rollouts", "status.phase}''=Healthy rollout/risk-engine",
+		"status.imageID", "capture(\"@(?<digest>sha256:[0-9a-f]{64})$\")",
+		"kubernetes.io/dockerconfigjson", "workload-registry-secrets-absent",
+	} {
+		if !strings.Contains(raw, required) {
+			t.Errorf("Tokyo workload installer is missing fail-closed proof %q", required)
+		}
+	}
+}
+
 func assertSameStrings(t *testing.T, name string, got, want []string) {
 	t.Helper()
 	got = append([]string(nil), got...)
