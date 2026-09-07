@@ -1,0 +1,73 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../deploy/accounting-deploy.yaml
+  - ../../deploy/api-gateway-deploy.yaml
+  - ../../deploy/audit-deploy.yaml
+  - ../../deploy/compliance-deploy.yaml
+  - ../../deploy/identity-deploy.yaml
+  - ../../deploy/oms-deploy.yaml
+  - ../../deploy/risk-engine-rollout.yaml
+  - ../../deploy/venue-binance-deploy.yaml
+  - ../../deploy/venue-okx-deploy.yaml
+
+commonAnnotations:
+  kanz.io/release-commit: a3dea5a5fb0f5d34229390911b55165f5fdb4c5b
+  kanz.io/testnet-region: ap-northeast-1
+
+images:
+  - name: ghcr.io/eighred/accounting
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/accounting
+    digest: sha256:fe00907d1137a01f77c3df7fd9daedf875bc6e168bcf08c4ea2771bd0bd722ea
+  - name: ghcr.io/eighred/api-gateway
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/api-gateway
+    digest: sha256:874fe46f0fd208b3fa68c29aea1e17bdfb02ef215232775cca6e0f6c80f913ef
+  - name: ghcr.io/eighred/audit
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/audit
+    digest: sha256:c4add5ad884ce8ee44dfbd492ced7a1ecb65d1e9b362179299471d672e8c119f
+  - name: ghcr.io/eighred/compliance
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/compliance
+    digest: sha256:57799387e45638b783703019b8528ebd4acd2d1fc264a2b987a10056d3d118ec
+  - name: ghcr.io/eighred/identity
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/identity
+    digest: sha256:80e68d6d4e617874f175db2aed5bd24cbf36b7c65dbaa138a7c2350b05cd9223
+  - name: ghcr.io/eighred/kanz-migrate
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate
+    digest: sha256:b5db20eb08b17a70d637dc378f5c797ca220874ebc7399786f8e6a7c0df10490
+  - name: ghcr.io/eighred/oms
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/oms
+    digest: sha256:6dc757e6c68ecbd2054e2beb7855ced838f1628a8c32fd47d53a6f731c3d2c5d
+  - name: ghcr.io/eighred/risk-engine
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/risk-engine
+    digest: sha256:9eb97ccc782900d182275858fea31f8b181fecfcb5bff8142493ebdb8a793fbe
+  - name: ghcr.io/eighred/venue-binance
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/venue-binance
+    digest: sha256:c474e60d43d199dabb10f78dd81c8148e1667a1050ae8bca2a4e4c3fbd551f6f
+  - name: ghcr.io/eighred/venue-okx
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/venue-okx
+    digest: sha256:6a456812cce7bf91bfc46d766a07cfb475b46886edd9054562acaebfc8e6f762
+
+patches:
+  - target:
+      kind: ServiceAccount
+      name: ^(accounting|api-gateway|audit|compliance|identity|oms|risk-engine|venue-binance|venue-okx)$
+    patch: |-
+      - op: remove
+        path: /imagePullSecrets
+  - target:
+      kind: Deployment
+      name: ^(accounting|api-gateway|audit|compliance|identity|oms|venue-binance|venue-okx)$
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Rollout
+      name: risk-engine
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
