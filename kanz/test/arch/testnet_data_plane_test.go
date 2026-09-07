@@ -154,6 +154,14 @@ func TestCloudNativePGReleaseIsChecksumAndDigestLocked(t *testing.T) {
 	}
 }
 
+func TestCloudNativePGControllerTargetsTheRealTokyoAPIServerEndpoint(t *testing.T) {
+	root := moduleRoot(t)
+	raw := string(mustReadArchFile(t, filepath.Join(root, "infra", "controllers", "cloudnative-pg", "network-policy.yaml")))
+	if strings.Contains(raw, "cidr: 10.43.0.1/32") || !regexp.MustCompile(`(?s)cidr: 10\.71\.0\.15/32.*port: 6443`).MatchString(raw) {
+		t.Fatal("CloudNativePG controller egress must target the post-DNAT Tokyo API endpoint 10.71.0.15:6443")
+	}
+}
+
 func mustReadArchFile(t *testing.T, path string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(path)
