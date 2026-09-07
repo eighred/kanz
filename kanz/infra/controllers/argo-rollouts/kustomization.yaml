@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: argo-rollouts
+resources:
+  - namespace.yaml
+  - upstream-install.yaml
+  - pdb.yaml
+  - network-policy.yaml
+images:
+  - name: quay.io/argoproj/argo-rollouts
+    newName: quay.io/argoproj/argo-rollouts
+    digest: sha256:187630ba722846bb8e079630364d3c29c8246a256be95785fd957b088f621c4e
+patches:
+  - path: deployment-patch.yaml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: argo-rollouts

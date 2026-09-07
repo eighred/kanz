@@ -833,6 +833,9 @@ var productionImageRef = regexp.MustCompile(
 // nothing parsed" alarm because the file genuinely has nothing pinnable in it
 // — a policy glob, not an image.
 var coverageGapExempt = map[string]string{
+	"infra/overlays/testnet-tokyo/kustomization.yaml": "Kustomize image transforms carry each " +
+		"canonical ghcr.io/eighred source name separately from its mandatory ECR digest; " +
+		"TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR parses and cross-checks that structure (#1098)",
 	"infra/security/admission/cluster-image-policy.yaml": "carries the sigstore glob `ghcr.io/eighred/**`, " +
 		"which has neither tag nor digest and is not a pinnable image reference",
 }

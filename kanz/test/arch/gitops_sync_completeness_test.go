@@ -165,6 +165,12 @@ var syncSurfaceExempt = map[string]string{
 		"file via catalog.locations. Argo would try to apply a kind no cluster in this estate serves, " +
 		"and the Application would sit permanently degraded on a CRD that will never exist.",
 
+	"controllers": "BOOTSTRAP CONTROL PLANES, APPLIED BY PINNED INSTALLERS. A controller cannot " +
+		"reconcile the custom resources that declare its own installation before its CRDs and process " +
+		"exist. infra/controllers/argo-rollouts is checksum-verified and installed through " +
+		"tools/Install-TestnetArgoRollouts.ps1; #1101 retires this exemption only after an independent " +
+		"cluster bootstrap reconciler owns that dependency order.",
+
 	"chaos": "EXPERIMENTS, RUN ON DEMAND (INFRA-01e). These are fault injections — az-kill.yaml " +
 		"terminates an availability zone — driven by verify.sh during a game day. Under " +
 		"automated{prune,selfHeal} a synced tree is applied continuously and re-applied when anyone " +
@@ -196,6 +202,11 @@ var syncSurfaceExempt = map[string]string{
 		"is about the Job, not the tree. RETIRING IT means naming halt-job.yaml in directory.exclude " +
 		"and adding the tree — deliberately left out of #625 so the kill switch's delivery is changed " +
 		"on its own, and not as a side effect of an observability fix.",
+
+	"overlays": "EXPLICIT TESTNET PROMOTION BOUNDARIES, NOT A PRODUCTION APPLICATIONSET COMPONENT. " +
+		"infra/overlays/testnet-tokyo binds one reviewed release to the cost-bounded Tokyo cluster and " +
+		"is applied only after external dependency and DR gates pass. #1098 owns its server-side " +
+		"apply, rollback, and eventual GitOps registration; auto-syncing it now would bypass those gates.",
 
 	"tenancy": "APPLIED PER RUN BY ITS OWN TOOLING (MT-01f). onboard-job.yaml is a template — the " +
 		"operator sets TENANT and the tenant.env vars and renames the Job per run — and tenantctl.sh " +
