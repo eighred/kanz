@@ -526,7 +526,7 @@ resource "aws_iam_role_policy" "node_recovery" {
       {
         Sid      = "ReadWriteRecoveryObjects"
         Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"]
+        Action   = ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectRetention", "s3:PutObject"]
         Resource = "${aws_s3_bucket.recovery.arn}/*"
       },
       {
