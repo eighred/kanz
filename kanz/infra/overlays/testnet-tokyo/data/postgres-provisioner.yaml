@@ -44,9 +44,13 @@ data:
       WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = :'app_role') \gexec
     SELECT format('CREATE ROLE %I', :'migrate_role')
       WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = :'migrate_role') \gexec
-    SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 20 PASSWORD %L', :'app_role', :'app_password') \gexec
-    SELECT format('ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 4 PASSWORD %L', :'migrate_role', :'migrate_password') \gexec
-    SELECT format('GRANT %I TO kanz_bootstrap WITH ADMIN OPTION', :'migrate_role') \gexec
+    -- PostgreSQL reserves SUPERUSER, REPLICATION and BYPASSRLS attribute
+    -- changes to a superuser, even when restating their safe NO* values. New
+    -- roles default to all three disabled, and the final query fails closed if
+    -- an existing role does not retain the required posture.
+    SELECT format('ALTER ROLE %I LOGIN NOCREATEDB NOCREATEROLE CONNECTION LIMIT 20 PASSWORD %L', :'app_role', :'app_password') \gexec
+    SELECT format('ALTER ROLE %I LOGIN NOCREATEDB NOCREATEROLE CONNECTION LIMIT 4 PASSWORD %L', :'migrate_role', :'migrate_password') \gexec
+    SELECT format('GRANT %I TO kanz_bootstrap', :'migrate_role') \gexec
     SELECT format('CREATE DATABASE %I OWNER %I', :'database', :'migrate_role')
       WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = :'database') \gexec
     SQL
@@ -119,6 +123,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 26
         runAsGroup: 26
+        fsGroup: 26
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: provisioner

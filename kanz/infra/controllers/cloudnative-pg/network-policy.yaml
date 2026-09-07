@@ -25,10 +25,14 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+    # kube-router evaluates this after Service DNAT, so the destination is the
+    # Tokyo control-plane endpoint, not kubernetes.default's 10.43.0.1:443.
+    # This /32 is deliberately installation-specific and fails closed if the
+    # single control-plane node is replaced.
     - to:
-        - ipBlock: { cidr: 10.43.0.1/32 }
+        - ipBlock: { cidr: 10.71.0.15/32 }
       ports:
-        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 6443 }
     - to:
         - namespaceSelector:
             matchLabels:

@@ -54,7 +54,7 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 	if cluster.Spec.EnableSuperuserAccess {
 		t.Fatal("CloudNativePG network superuser access must remain disabled")
 	}
-	if !regexp.MustCompile(`^ghcr\.io/cloudnative-pg/postgresql@sha256:[0-9a-f]{64}$`).MatchString(cluster.Spec.ImageName) {
+	if !regexp.MustCompile(`^ghcr\.io/cloudnative-pg/postgresql:16\.10-standard-bookworm@sha256:[0-9a-f]{64}$`).MatchString(cluster.Spec.ImageName) {
 		t.Fatalf("Postgres image is not immutable: %q", cluster.Spec.ImageName)
 	}
 	if cluster.Spec.Storage["size"] != "20Gi" || cluster.Spec.WALStorage["size"] != "4Gi" {
@@ -92,8 +92,14 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 	if !strings.Contains(string(kustomization), "--appendfsync always") {
 		t.Fatal("single-node Redis must fsync each nonce mutation before acknowledging it")
 	}
-	for _, image := range []string{"nats", "natsio/nats-box", "redis", "ghcr.io/cloudnative-pg/postgresql"} {
-		pattern := regexp.MustCompile(`(?m)^  - name: ` + regexp.QuoteMeta(image) + `\n    newName: ` + regexp.QuoteMeta(image) + `\n    digest: sha256:[0-9a-f]{64}$`)
+	if !strings.Contains(string(kustomization), "path: /spec/template/spec/serviceAccountName") || !strings.Contains(string(kustomization), "value: redis") {
+		t.Fatal("Redis must use the dedicated ServiceAccount bound by its Vault role")
+	}
+	if !strings.Contains(string(clusterRaw), "cidr: 10.71.0.15/32") || !strings.Contains(string(clusterRaw), "port: 6443") {
+		t.Fatal("CloudNativePG instance Pods cannot reach the post-DNAT Tokyo API endpoint")
+	}
+	for _, image := range []string{"ghcr.io/spiffe/spiffe-helper", "nats", "natsio/nats-box", "redis", "ghcr.io/cloudnative-pg/postgresql"} {
+		pattern := regexp.MustCompile(`(?m)^  - name: ` + regexp.QuoteMeta(image) + `\n    newName: ` + regexp.QuoteMeta(image) + `\n(?:    newTag: [^\n]+\n)?    digest: sha256:[0-9a-f]{64}$`)
 		if !pattern.Match(kustomization) {
 			t.Errorf("testnet data-plane image %q is not pinned by digest", image)
 		}
@@ -109,8 +115,17 @@ func TestTokyoPostgresProvisionerKeepsApplicationRolesRLSConstrained(t *testing.
 	if strings.Contains(text, "LOGIN SUPERUSER") || strings.Contains(text, "LOGIN BYPASSRLS") || strings.Contains(text, "secretObjects:") {
 		t.Fatal("provisioner must not grant RLS bypass or sync Vault values into Kubernetes Secrets")
 	}
-	if !strings.Contains(text, "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS") {
-		t.Fatal("provisioner no longer pins non-superuser/non-bypass role attributes")
+	if !strings.Contains(text, "ALTER ROLE %I LOGIN NOCREATEDB NOCREATEROLE CONNECTION LIMIT") {
+		t.Fatal("provisioner no longer constrains role creation and connection capabilities")
+	}
+	if !strings.Contains(text, "AND rolsuper = false") || !strings.Contains(text, "AND rolbypassrls = false") {
+		t.Fatal("provisioner no longer fails closed when a role can bypass tenant RLS")
+	}
+	if strings.Contains(text, "ALTER ROLE %I LOGIN NOSUPERUSER") || strings.Contains(text, "NOREPLICATION NOBYPASSRLS CONNECTION") {
+		t.Fatal("non-superuser bootstrap role cannot restate superuser-only role attributes")
+	}
+	if !strings.Contains(text, "GRANT %I TO kanz_bootstrap', :'migrate_role'") || strings.Contains(text, "TO kanz_bootstrap WITH ADMIN OPTION") {
+		t.Fatal("bootstrap needs SET ROLE membership without role-delegation authority")
 	}
 	services := []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx"}
 	for _, service := range services {
@@ -126,6 +141,9 @@ func TestTokyoPostgresProvisionerKeepsApplicationRolesRLSConstrained(t *testing.
 	}
 	if !strings.Contains(text, "secretProviderClass: postgres-role-passwords") {
 		t.Fatal("role passwords are not delivered through Vault CSI")
+	}
+	if !strings.Contains(text, "fsGroup: 26") || !strings.Contains(text, "defaultMode: 0440") {
+		t.Fatal("non-root provisioner cannot read the group-restricted bootstrap credential")
 	}
 }
 
@@ -151,6 +169,42 @@ func TestCloudNativePGReleaseIsChecksumAndDigestLocked(t *testing.T) {
 	}
 	if !strings.Contains(lock.ManifestURL, lock.Version) {
 		t.Fatalf("manifest URL %q does not match version %q", lock.ManifestURL, lock.Version)
+	}
+}
+
+func TestCloudNativePGControllerTargetsTheRealTokyoAPIServerEndpoint(t *testing.T) {
+	root := moduleRoot(t)
+	raw := string(mustReadArchFile(t, filepath.Join(root, "infra", "controllers", "cloudnative-pg", "network-policy.yaml")))
+	if strings.Contains(raw, "cidr: 10.43.0.1/32") || !regexp.MustCompile(`(?s)cidr: 10\.71\.0\.15/32.*port: 6443`).MatchString(raw) {
+		t.Fatal("CloudNativePG controller egress must target the post-DNAT Tokyo API endpoint 10.71.0.15:6443")
+	}
+}
+
+func TestCloudNativePGInstallerVerifiesAvailabilityAndExactImage(t *testing.T) {
+	root := moduleRoot(t)
+	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetCloudNativePG.ps1")))
+	if !strings.Contains(raw, "wait --for=condition=Available deployment/cnpg-controller-manager") ||
+		!strings.Contains(raw, "containers[?(@.name==") || !strings.Contains(raw, "].image}") ||
+		!strings.Contains(raw, `= "${expected_image}"`) {
+		t.Fatal("CloudNativePG installer must prove the controller is Available and running the locked image")
+	}
+	if strings.Contains(raw, "rollout status deployment/cnpg-controller-manager") {
+		t.Fatal("CloudNativePG installer must not treat a historical ProgressDeadlineExceeded as current availability")
+	}
+}
+
+func TestTokyoDataPlaneInstallerFailsClosedOnRenderAndRuntimeState(t *testing.T) {
+	root := moduleRoot(t)
+	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetDataPlane.ps1")))
+	for _, required := range []string{
+		"resourceCount -ne 35", "mutable image tag survived", "sha256sum --check --status",
+		"data-plane-server-dry-run-namespace-substitute=default", "apply --server-side --dry-run=server", "condition=Ready cluster/kanz-testnet-postgres",
+		"condition=complete job/postgres-provisioner", "condition=complete job/nats-bootstrap",
+		"redis_sa", "not rolsuper and not rolbypassrls", "CONFIG GET appendfsync", "sync_interval: always",
+	} {
+		if !strings.Contains(raw, required) {
+			t.Errorf("Tokyo data-plane installer is missing fail-closed proof %q", required)
+		}
 	}
 }
 
