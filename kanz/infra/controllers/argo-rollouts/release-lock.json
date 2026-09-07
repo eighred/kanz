@@ -1,0 +1,7 @@
+{
+  "version": "v1.10.0",
+  "sourceCommit": "d90700ae8d71d141561f0c546e19f999bb335cbd",
+  "manifestURL": "https://github.com/argoproj/argo-rollouts/releases/download/v1.10.0/install.yaml",
+  "manifestSHA256": "ca8a1785391026023627c8a12db5422e227d7a7a6ec7c01f99f7d5b1726ed53c",
+  "controllerImage": "quay.io/argoproj/argo-rollouts@sha256:187630ba722846bb8e079630364d3c29c8246a256be95785fd957b088f621c4e"
+}
