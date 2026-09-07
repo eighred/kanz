@@ -149,13 +149,15 @@ backup() {
     --checksum-mode ENABLED "${archive}.download" >/dev/null
   [[ "$(sha256sum "${archive}.download" | awk '{print $1}')" == "$archive_sha" ]] || die 'downloaded recovery artifact checksum differs from upload'
 
-  local head elapsed
+  local head retention elapsed
   head=$(aws s3api head-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" --checksum-mode ENABLED)
+  retention=$(aws s3api get-object-retention --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key")
   jq -e --arg kms "$RECOVERY_KMS_KEY_ARN" --arg sha "$archive_sha" '
     .ServerSideEncryption=="aws:kms" and .SSEKMSKeyId==$kms and
-    .ObjectLockMode=="GOVERNANCE" and .Metadata.sha256==$sha and (.ContentLength > 0)
-  ' <<<"$head" >/dev/null || die 'S3 object lacks the required KMS, Object Lock, checksum, or content boundary'
-  retain_until=$(jq -r .ObjectLockRetainUntilDate <<<"$head")
+    .Metadata.sha256==$sha and (.ContentLength > 0)
+  ' <<<"$head" >/dev/null || die 'S3 object lacks the required KMS, checksum, or content boundary'
+  jq -e '.Retention.Mode=="GOVERNANCE" and (.Retention.RetainUntilDate | length > 0)' <<<"$retention" >/dev/null || die 'S3 object lacks Governance retention'
+  retain_until=$(jq -r .Retention.RetainUntilDate <<<"$retention")
   elapsed=$(( $(date -u +%s) - started ))
   jq -n --arg backup_id "$backup_id" --arg key "$key" --arg sha256 "$archive_sha" \
     --arg retain_until "$retain_until" --argjson elapsed_seconds "$elapsed" \
@@ -164,7 +166,7 @@ backup() {
 
 restore() {
   require_boundary
-  local started work key archive archive_sha head
+  local started work key archive archive_sha head retention
   started=$(date -u +%s)
   work=$(mktemp -d /var/tmp/kanz-restore.XXXXXX)
   archive="$work/bundle.tar.gz"
@@ -177,8 +179,10 @@ restore() {
   key=$(aws s3api list-objects-v2 --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --prefix testnet/data-plane/ --query 'sort_by(Contents,&LastModified)[-1].Key' --output text)
   [[ "$key" == testnet/data-plane/*/bundle.tar.gz ]] || die 'no bounded data-plane recovery artifact exists'
   head=$(aws s3api head-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" --checksum-mode ENABLED)
+  retention=$(aws s3api get-object-retention --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key")
   archive_sha=$(jq -r '.Metadata.sha256 // empty' <<<"$head")
-  jq -e --arg kms "$RECOVERY_KMS_KEY_ARN" '.ServerSideEncryption=="aws:kms" and .SSEKMSKeyId==$kms and .ObjectLockMode=="GOVERNANCE" and (.ContentLength > 0)' <<<"$head" >/dev/null || die 'artifact lacks the required KMS and Object Lock boundary'
+  jq -e --arg kms "$RECOVERY_KMS_KEY_ARN" '.ServerSideEncryption=="aws:kms" and .SSEKMSKeyId==$kms and (.ContentLength > 0)' <<<"$head" >/dev/null || die 'artifact lacks the required KMS boundary'
+  jq -e '.Retention.Mode=="GOVERNANCE" and (.Retention.RetainUntilDate | length > 0)' <<<"$retention" >/dev/null || die 'artifact lacks Governance retention'
   [[ "$archive_sha" =~ ^[0-9a-f]{64}$ ]] || die 'artifact lacks SHA-256 metadata'
   aws s3api get-object --region "$RECOVERY_REGION" --bucket "$RECOVERY_BUCKET" --key "$key" --checksum-mode ENABLED "$archive" >/dev/null
   [[ "$(sha256sum "$archive" | awk '{print $1}')" == "$archive_sha" ]] || die 'artifact checksum differs from locked metadata'

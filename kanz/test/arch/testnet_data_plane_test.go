@@ -245,7 +245,8 @@ func TestTokyoRecoveryKeepsCredentialsInPodsAndProvesAnIsolatedRestore(t *testin
 	for _, required := range []string{
 		"refuse_active_writers", "postgres-migrations", "pg_dump", "redis-cli -a", "account backup --check",
 		"currentPrimary", "exec \"$primary\" -c postgres", "--username postgres",
-		"MANIFEST.sha256", "server-side-encryption aws:kms", "ObjectLockMode==\"GOVERNANCE\"",
+		"MANIFEST.sha256", "server-side-encryption aws:kms", "get-object-retention",
+		"Retention.Mode==\"GOVERNANCE\"",
 		"kind: Cluster", "name: kanz-postgres-drill", "kind: NetworkPolicy",
 		"pg_restore", "relrowsecurity and not relforcerowsecurity", "account restore --force",
 		"for _ in $(seq 1 30)", "NATS monitoring port-forward did not become ready",
