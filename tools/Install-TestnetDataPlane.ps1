@@ -148,6 +148,8 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo data p
     # idempotent reapply; a completed Job is retained as evidence.
     'for item in kanz-data/postgres-provisioner kanz-messaging/nats-bootstrap; do ns=${item%/*}; job=${item#*/}; failed=$(k3s kubectl -n "${ns}" get job "${job}" -o jsonpath=''{.status.failed}'' 2>/dev/null || true); if [[ "${failed:-0}" -gt 0 ]]; then k3s kubectl -n "${ns}" delete job "${job}" --wait=true >/dev/null; fi; done',
     'k3s kubectl apply --server-side --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
+    'redis_sa=$(k3s kubectl -n kanz-messaging get pod redis-0 -o jsonpath=''{.spec.serviceAccountName}'' 2>/dev/null || true)',
+    'if [[ -n "${redis_sa}" && "${redis_sa}" != redis ]]; then k3s kubectl -n kanz-messaging delete pod redis-0 --wait=false >/dev/null; fi',
     'k3s kubectl wait --for=jsonpath=''{.status.phase}''=Active namespace/kanz-data --timeout=60s >/dev/null',
     'k3s kubectl -n kanz-data wait --for=condition=Ready cluster/kanz-testnet-postgres --timeout=600s >/dev/null',
     'k3s kubectl -n kanz-messaging rollout status statefulset/nats --timeout=600s >/dev/null',

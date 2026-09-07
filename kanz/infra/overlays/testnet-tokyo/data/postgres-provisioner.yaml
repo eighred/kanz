@@ -119,6 +119,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 26
         runAsGroup: 26
+        fsGroup: 26
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: provisioner

@@ -133,6 +133,9 @@ func TestTokyoPostgresProvisionerKeepsApplicationRolesRLSConstrained(t *testing.
 	if !strings.Contains(text, "secretProviderClass: postgres-role-passwords") {
 		t.Fatal("role passwords are not delivered through Vault CSI")
 	}
+	if !strings.Contains(text, "fsGroup: 26") || !strings.Contains(text, "defaultMode: 0440") {
+		t.Fatal("non-root provisioner cannot read the group-restricted bootstrap credential")
+	}
 }
 
 func TestCloudNativePGReleaseIsChecksumAndDigestLocked(t *testing.T) {
@@ -188,7 +191,7 @@ func TestTokyoDataPlaneInstallerFailsClosedOnRenderAndRuntimeState(t *testing.T)
 		"resourceCount -ne 35", "mutable image tag survived", "sha256sum --check --status",
 		"data-plane-server-dry-run-namespace-substitute=default", "apply --server-side --dry-run=server", "condition=Ready cluster/kanz-testnet-postgres",
 		"condition=complete job/postgres-provisioner", "condition=complete job/nats-bootstrap",
-		"not rolsuper and not rolbypassrls", "CONFIG GET appendfsync", "sync_interval: always",
+		"redis_sa", "not rolsuper and not rolbypassrls", "CONFIG GET appendfsync", "sync_interval: always",
 	} {
 		if !strings.Contains(raw, required) {
 			t.Errorf("Tokyo data-plane installer is missing fail-closed proof %q", required)
