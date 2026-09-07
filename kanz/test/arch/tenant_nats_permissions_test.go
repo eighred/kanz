@@ -229,13 +229,7 @@ var tenantPermissionParityExempt = map[string]string{}
 // Each entry must name the issue and explain why adding a platform identity
 // would be excess authority. The loop above rejects the exemption the moment a
 // counterpart appears and the dead-entry arm rejects a vanished tenant user.
-var tenantOnlyNATSUserExempt = map[string]string{
-	"acme/kanz-capitalpath": "#71 — this is a one-shot certification Job in tenant-acme, not a " +
-		"platform service. Its random order id and tenant-scoped RLS proof must observe acme's " +
-		"private FACT stream, while a __system__ counterpart would be an unissuable extra broker " +
-		"credential with no ServiceAccount or runner. Its exact read-only subjects are guarded by " +
-		"capitalpath_certifier_test.go instead of being derived from a non-existent platform binary.",
-}
+var tenantOnlyNATSUserExempt = map[string]string{}
 
 // permissionDiffs returns a human-readable difference per permission array
 // between a tenant user's entry text and its platform counterpart's. An empty
