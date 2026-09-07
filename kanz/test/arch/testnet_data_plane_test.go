@@ -248,7 +248,7 @@ func TestTokyoRecoveryKeepsCredentialsInPodsAndProvesAnIsolatedRestore(t *testin
 		"MANIFEST.sha256", "server-side-encryption aws:kms", "get-object-retention",
 		"Retention.Mode==\"GOVERNANCE\"",
 		"kind: Cluster", "name: kanz-postgres-drill", "kind: NetworkPolicy",
-		"pg_restore", "relrowsecurity and not relforcerowsecurity", "account restore --force",
+		"pg_restore", "relrowsecurity and not relforcerowsecurity", "account restore /restore/nats-backup",
 		"for _ in $(seq 1 30)", "NATS monitoring port-forward did not become ready",
 		"timeout 30 /usr/local/bin/k3s kubectl",
 		"RECOVERY_WORK=''", "RECOVERY_ARCHIVE=''",
