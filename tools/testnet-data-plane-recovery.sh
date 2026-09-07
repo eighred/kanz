@@ -363,10 +363,10 @@ EOF
   k -n "$DRILL_NS" exec nats-restore -c restore -- nats --server nats://127.0.0.1:4222 account restore /restore/nats-backup >/dev/null
   local expected_streams expected_consumers expected_messages restored_jsz
   expected_streams=$(jq '.streams // 0' "$work/extracted/nats/source.json")
-  expected_consumers=$(jq '[.account_details[].stream_detail[].consumer_detail // [] | length] | add // 0' "$work/extracted/nats/source.json")
-  expected_messages=$(jq '[.account_details[].stream_detail[].state.messages // 0] | add // 0' "$work/extracted/nats/source.json")
+  expected_consumers=$(jq '[.account_details[]? | .stream_detail[]? | (.consumer_detail // [] | length)] | add // 0' "$work/extracted/nats/source.json")
+  expected_messages=$(jq '[.account_details[]? | .stream_detail[]? | (.state.messages // 0)] | add // 0' "$work/extracted/nats/source.json")
   restored_jsz=$(k -n "$DRILL_NS" exec nats-restore -c restore -- wget -qO- 'http://127.0.0.1:8222/jsz?streams=true&consumers=true')
-  jq -e --argjson streams "$expected_streams" --argjson consumers "$expected_consumers" --argjson messages "$expected_messages" '(.streams // 0)==$streams and ([.account_details[].stream_detail[].consumer_detail // [] | length] | add // 0)==$consumers and ([.account_details[].stream_detail[].state.messages // 0] | add // 0)==$messages' <<<"$restored_jsz" >/dev/null || die 'NATS restored totals differ from source'
+  jq -e --argjson streams "$expected_streams" --argjson consumers "$expected_consumers" --argjson messages "$expected_messages" '(.streams // 0)==$streams and ([.account_details[]? | .stream_detail[]? | (.consumer_detail // [] | length)] | add // 0)==$consumers and ([.account_details[]? | .stream_detail[]? | (.state.messages // 0)] | add // 0)==$messages' <<<"$restored_jsz" >/dev/null || die 'NATS restored totals differ from source'
 
   local elapsed metadata_release
   elapsed=$(( $(date -u +%s) - started ))
