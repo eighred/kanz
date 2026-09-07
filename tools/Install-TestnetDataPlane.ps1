@@ -63,8 +63,8 @@ if ($LASTEXITCODE -ne 0 -or -not $renderedLines) {
 }
 $rendered = ($renderedLines -join "`n") + "`n"
 $resourceCount = ([regex]::Matches($rendered, '(?m)^kind: ')).Count
-if ($resourceCount -ne 34) {
-    throw "Expected 34 rendered resources; found $resourceCount. Review the transfer and readiness contract."
+if ($resourceCount -ne 35) {
+    throw "Expected 35 rendered resources; found $resourceCount. Review the transfer and readiness contract."
 }
 foreach ($required in @(
     'sync_interval: always', '--appendfsync always',
@@ -143,6 +143,10 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo data p
     'echo data-plane-server-dry-run-ok',
     "apply='$applyFlag'",
     'if [[ "${apply}" = 0 ]]; then exit 0; fi',
+    # kubectl does not implement Argo's BeforeHookCreation policy. A previously
+    # failed bootstrap Job is immutable and must be removed before a reviewed,
+    # idempotent reapply; a completed Job is retained as evidence.
+    'for item in kanz-data/postgres-provisioner kanz-messaging/nats-bootstrap; do ns=${item%/*}; job=${item#*/}; failed=$(k3s kubectl -n "${ns}" get job "${job}" -o jsonpath=''{.status.failed}'' 2>/dev/null || true); if [[ "${failed:-0}" -gt 0 ]]; then k3s kubectl -n "${ns}" delete job "${job}" --wait=true >/dev/null; fi; done',
     'k3s kubectl apply --server-side --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
     'k3s kubectl wait --for=jsonpath=''{.status.phase}''=Active namespace/kanz-data --timeout=60s >/dev/null',
     'k3s kubectl -n kanz-data wait --for=condition=Ready cluster/kanz-testnet-postgres --timeout=600s >/dev/null',

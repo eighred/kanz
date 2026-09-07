@@ -92,6 +92,12 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 	if !strings.Contains(string(kustomization), "--appendfsync always") {
 		t.Fatal("single-node Redis must fsync each nonce mutation before acknowledging it")
 	}
+	if !strings.Contains(string(kustomization), "path: /spec/template/spec/serviceAccountName") || !strings.Contains(string(kustomization), "value: redis") {
+		t.Fatal("Redis must use the dedicated ServiceAccount bound by its Vault role")
+	}
+	if !strings.Contains(string(clusterRaw), "cidr: 10.71.0.15/32") || !strings.Contains(string(clusterRaw), "port: 6443") {
+		t.Fatal("CloudNativePG instance Pods cannot reach the post-DNAT Tokyo API endpoint")
+	}
 	for _, image := range []string{"ghcr.io/spiffe/spiffe-helper", "nats", "natsio/nats-box", "redis", "ghcr.io/cloudnative-pg/postgresql"} {
 		pattern := regexp.MustCompile(`(?m)^  - name: ` + regexp.QuoteMeta(image) + `\n    newName: ` + regexp.QuoteMeta(image) + `\n(?:    newTag: [^\n]+\n)?    digest: sha256:[0-9a-f]{64}$`)
 		if !pattern.Match(kustomization) {
@@ -179,7 +185,7 @@ func TestTokyoDataPlaneInstallerFailsClosedOnRenderAndRuntimeState(t *testing.T)
 	root := moduleRoot(t)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetDataPlane.ps1")))
 	for _, required := range []string{
-		"resourceCount -ne 34", "mutable image tag survived", "sha256sum --check --status",
+		"resourceCount -ne 35", "mutable image tag survived", "sha256sum --check --status",
 		"data-plane-server-dry-run-namespace-substitute=default", "apply --server-side --dry-run=server", "condition=Ready cluster/kanz-testnet-postgres",
 		"condition=complete job/postgres-provisioner", "condition=complete job/nats-bootstrap",
 		"not rolsuper and not rolbypassrls", "CONFIG GET appendfsync", "sync_interval: always",

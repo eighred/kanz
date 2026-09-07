@@ -113,3 +113,9 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+    # CloudNativePG instance and initdb Pods call the Kubernetes API. On this
+    # k3s/kube-router node policy sees the post-DNAT endpoint.
+    - to:
+        - ipBlock: { cidr: 10.71.0.15/32 }
+      ports:
+        - { protocol: TCP, port: 6443 }
