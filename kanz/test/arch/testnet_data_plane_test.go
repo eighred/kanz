@@ -124,6 +124,9 @@ func TestTokyoPostgresProvisionerKeepsApplicationRolesRLSConstrained(t *testing.
 	if strings.Contains(text, "ALTER ROLE %I LOGIN NOSUPERUSER") || strings.Contains(text, "NOREPLICATION NOBYPASSRLS CONNECTION") {
 		t.Fatal("non-superuser bootstrap role cannot restate superuser-only role attributes")
 	}
+	if !strings.Contains(text, "GRANT %I TO kanz_bootstrap', :'migrate_role'") || strings.Contains(text, "TO kanz_bootstrap WITH ADMIN OPTION") {
+		t.Fatal("bootstrap needs SET ROLE membership without role-delegation authority")
+	}
 	services := []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx"}
 	for _, service := range services {
 		if !strings.Contains(text, "provision_database "+service+" ") {
