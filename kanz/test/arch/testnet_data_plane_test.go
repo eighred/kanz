@@ -249,6 +249,7 @@ func TestTokyoRecoveryKeepsCredentialsInPodsAndProvesAnIsolatedRestore(t *testin
 		"kind: Cluster", "name: kanz-postgres-drill", "kind: NetworkPolicy",
 		"pg_restore", "relrowsecurity and not relforcerowsecurity", "account restore --force",
 		"for _ in $(seq 1 30)", "NATS monitoring port-forward did not become ready",
+		"timeout 30 /usr/local/bin/k3s kubectl",
 		"status:\"RESTORE_VERIFIED\"", "rpo_seconds", "rto_seconds",
 	} {
 		if !strings.Contains(script, required) {

@@ -117,7 +117,7 @@ backup() {
   [[ -s "$work/nats/account.tar.gz" ]] || die 'NATS produced an empty account backup'
 
   local pf
-  timeout 30 k -n "$MSG_NS" port-forward --address 127.0.0.1 pod/nats-0 18222:8222 >"$work/nats/port-forward.log" 2>&1 & pf=$!
+  timeout 30 /usr/local/bin/k3s kubectl -n "$MSG_NS" port-forward --address 127.0.0.1 pod/nats-0 18222:8222 >"$work/nats/port-forward.log" 2>&1 & pf=$!
   local ready=0
   for _ in $(seq 1 30); do
     if curl -fsS --max-time 2 'http://127.0.0.1:18222/jsz?streams=true&consumers=true&config=true' >"$work/nats/source.json" 2>/dev/null; then
