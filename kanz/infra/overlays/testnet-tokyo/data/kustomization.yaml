@@ -12,6 +12,7 @@ resources:
   - ../../../messaging/redis.yaml
   - postgres.yaml
   - postgres-provisioner.yaml
+  - postgres-migrations.yaml
   - postgres-aliases.yaml
   - secret-provider-classes.yaml
 
