@@ -115,8 +115,14 @@ func TestTokyoPostgresProvisionerKeepsApplicationRolesRLSConstrained(t *testing.
 	if strings.Contains(text, "LOGIN SUPERUSER") || strings.Contains(text, "LOGIN BYPASSRLS") || strings.Contains(text, "secretObjects:") {
 		t.Fatal("provisioner must not grant RLS bypass or sync Vault values into Kubernetes Secrets")
 	}
-	if !strings.Contains(text, "LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS") {
-		t.Fatal("provisioner no longer pins non-superuser/non-bypass role attributes")
+	if !strings.Contains(text, "ALTER ROLE %I LOGIN NOCREATEDB NOCREATEROLE CONNECTION LIMIT") {
+		t.Fatal("provisioner no longer constrains role creation and connection capabilities")
+	}
+	if !strings.Contains(text, "AND rolsuper = false") || !strings.Contains(text, "AND rolbypassrls = false") {
+		t.Fatal("provisioner no longer fails closed when a role can bypass tenant RLS")
+	}
+	if strings.Contains(text, "ALTER ROLE %I LOGIN NOSUPERUSER") || strings.Contains(text, "NOREPLICATION NOBYPASSRLS CONNECTION") {
+		t.Fatal("non-superuser bootstrap role cannot restate superuser-only role attributes")
 	}
 	services := []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx"}
 	for _, service := range services {
