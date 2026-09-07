@@ -1,6 +1,7 @@
 package arch
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -45,6 +46,8 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	}
 
 	wantResources := []string{
+		"../../security/secrets/secretproviderclass.yaml",
+		"../../deploy/analysis-template.yaml",
 		"../../deploy/accounting-deploy.yaml",
 		"../../deploy/api-gateway-deploy.yaml",
 		"../../deploy/audit-deploy.yaml",
@@ -119,6 +122,106 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	}
 	if !removesPullSecret || !scalesDeployments || !scalesRisk {
 		t.Fatalf("testnet patches incomplete: removesPullSecret=%t scalesDeployments=%t scalesRisk=%t", removesPullSecret, scalesDeployments, scalesRisk)
+	}
+}
+
+func TestTokyoTestnetOverlayRetainsExactlyTheVaultClassesItsWorkloadsMount(t *testing.T) {
+	root := moduleRoot(t)
+	overlayDir := filepath.Join(root, "infra", "overlays", "testnet-tokyo")
+	raw := mustReadArchFile(t, filepath.Join(overlayDir, "kustomization.yaml"))
+	var overlay testnetKustomization
+	if err := yaml.UnmarshalStrict(raw, &overlay); err != nil {
+		t.Fatal(err)
+	}
+
+	var deleted *regexp.Regexp
+	for _, patch := range overlay.Patches {
+		if patch.Target.Kind == "SecretProviderClass" && strings.Contains(patch.Patch, "$patch: delete") {
+			var err error
+			deleted, err = regexp.Compile(patch.Target.Name)
+			if err != nil {
+				t.Fatalf("compile SecretProviderClass exclusion: %v", err)
+			}
+		}
+	}
+	if deleted == nil {
+		t.Fatal("Tokyo overlay does not explicitly exclude unmounted canonical Vault classes")
+	}
+
+	type document struct {
+		Kind     string `yaml:"kind"`
+		Metadata struct {
+			Name string `yaml:"name"`
+		} `yaml:"metadata"`
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Volumes []struct {
+						CSI struct {
+							VolumeAttributes struct {
+								SecretProviderClass string `yaml:"secretProviderClass"`
+							} `yaml:"volumeAttributes"`
+						} `yaml:"csi"`
+					} `yaml:"volumes"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+
+	var mounted []string
+	for _, resource := range overlay.Resources {
+		if resource == "../../security/secrets/secretproviderclass.yaml" || resource == "../../deploy/analysis-template.yaml" {
+			continue
+		}
+		body := mustReadArchFile(t, filepath.Clean(filepath.Join(overlayDir, resource)))
+		for _, part := range bytes.Split(body, []byte("\n---")) {
+			var doc document
+			if err := yaml.Unmarshal(part, &doc); err != nil {
+				t.Fatalf("decode %s: %v", resource, err)
+			}
+			for _, volume := range doc.Spec.Template.Spec.Volumes {
+				if name := volume.CSI.VolumeAttributes.SecretProviderClass; name != "" {
+					mounted = append(mounted, name)
+				}
+			}
+		}
+	}
+
+	canonical := mustReadArchFile(t, filepath.Join(root, "infra", "security", "secrets", "secretproviderclass.yaml"))
+	var retained []string
+	for _, part := range bytes.Split(canonical, []byte("\n---")) {
+		var doc document
+		if err := yaml.Unmarshal(part, &doc); err != nil {
+			t.Fatalf("decode canonical Vault class: %v", err)
+		}
+		if doc.Kind == "SecretProviderClass" && !deleted.MatchString(doc.Metadata.Name) {
+			retained = append(retained, doc.Metadata.Name)
+		}
+	}
+	assertSameStrings(t, "retained Vault classes versus mounted classes", retained, mounted)
+	if len(retained) != 12 {
+		t.Fatalf("Tokyo minimum graph retained %d Vault classes, want 12", len(retained))
+	}
+}
+
+func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T) {
+	root := moduleRoot(t)
+	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
+	for _, required := range []string{
+		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
+		"resourceCount -ne 47", "Expected 16 rendered container images", "sha256sum --check --status",
+		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
+		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",
+		"rollout status statefulset/nats", "rollout status statefulset/redis",
+		"apply --server-side --dry-run=server", "rollout status \"deployment/${deployment}\"",
+		"condition=Available deployment/argo-rollouts", "status.phase}''=Healthy rollout/risk-engine",
+		"status.imageID", "capture(\"@(?<digest>sha256:[0-9a-f]{64})$\")",
+		"kubernetes.io/dockerconfigjson", "workload-registry-secrets-absent",
+		"workload installation refused: partial managed state", "fresh-install-rollback-started",
+	} {
+		if !strings.Contains(raw, required) {
+			t.Errorf("Tokyo workload installer is missing fail-closed proof %q", required)
+		}
 	}
 }
 
