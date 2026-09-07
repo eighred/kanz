@@ -78,7 +78,7 @@ backup() {
 
   cleanup_backup() {
     k -n "$DATA_NS" delete pod postgres-backup-runner --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
-    k -n "$MSG_NS" delete pod "$nats_runner" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+    k -n "$MSG_NS" delete pod nats-backup-runner --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
     rm -rf -- "$work"
     rm -f -- "$archive" "${archive}.download"
   }
@@ -118,8 +118,16 @@ backup() {
 
   local pf
   timeout 30 k -n "$MSG_NS" port-forward --address 127.0.0.1 pod/nats-0 18222:8222 >"$work/nats/port-forward.log" 2>&1 & pf=$!
-  sleep 3
-  curl -fsS --max-time 5 'http://127.0.0.1:18222/jsz?streams=true&consumers=true&config=true' >"$work/nats/source.json"
+  local ready=0
+  for _ in $(seq 1 30); do
+    if curl -fsS --max-time 2 'http://127.0.0.1:18222/jsz?streams=true&consumers=true&config=true' >"$work/nats/source.json" 2>/dev/null; then
+      ready=1
+      break
+    fi
+    kill -0 "$pf" 2>/dev/null || break
+    sleep 1
+  done
+  [[ "$ready" == 1 ]] || die "NATS monitoring port-forward did not become ready: $(cat "$work/nats/port-forward.log")"
   kill "$pf" >/dev/null 2>&1 || true
   wait "$pf" 2>/dev/null || true
   rm -f "$work/nats/port-forward.log"
