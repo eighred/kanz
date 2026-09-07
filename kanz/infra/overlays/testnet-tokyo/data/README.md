@@ -33,5 +33,15 @@ Deployment order is strict:
 5. Apply the capital-path workload overlay in dependency order.
 6. Run backup/restore and reconciliation certification before any testnet order.
 
+The checked-in recovery command is
+tools/Invoke-TestnetDataPlaneRecovery.ps1 -Operation Backup|Restore. It refuses
+a backup while application or venue writers are running, streams database,
+Redis and NATS artifacts without exposing mounted credentials to the host, and
+uploads only through the EC2 instance role to the KMS-encrypted, Object-Locked
+Osaka bucket. Restore creates a temporary, network-denied replacement namespace,
+checks every database's migration/table/RLS state plus Redis and NATS totals,
+reports measured RPO/RTO, and deletes the drill namespace. The wrapper refuses
+to execute unless the shell script is the exact blob on origin/main.
+
 The single node, each singleton store, and the local-path volumes are failure
 domains. Loss of any one is an outage, so readiness must never be reported as HA.

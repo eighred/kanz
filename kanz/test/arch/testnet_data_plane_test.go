@@ -104,7 +104,8 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 			t.Errorf("testnet data-plane image %q is not pinned by digest", image)
 		}
 	}
-	if !regexp.MustCompile(`(?m)^  - name: ghcr\.io/eighred/kanz-migrate\n    newName: 012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/kanz-migrate\n    digest: sha256:[0-9a-f]{64}$`).Match(kustomization) {
+	migrations := mustReadArchFile(t, filepath.Join(dir, "postgres-migrations.yaml"))
+	if !regexp.MustCompile(`012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/kanz-migrate@sha256:[0-9a-f]{64}`).Match(migrations) {
 		t.Fatal("migration image must come from the immutable Tokyo ECR release")
 	}
 }
@@ -233,6 +234,31 @@ func TestTokyoDataPlaneInstallerFailsClosedOnRenderAndRuntimeState(t *testing.T)
 	} {
 		if !strings.Contains(raw, required) {
 			t.Errorf("Tokyo data-plane installer is missing fail-closed proof %q", required)
+		}
+	}
+}
+
+func TestTokyoRecoveryKeepsCredentialsInPodsAndProvesAnIsolatedRestore(t *testing.T) {
+	root := moduleRoot(t)
+	script := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "testnet-data-plane-recovery.sh")))
+	wrapper := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Invoke-TestnetDataPlaneRecovery.ps1")))
+	for _, required := range []string{
+		"refuse_active_writers", "postgres-migrations", "pg_dump", "redis-cli -a", "account backup --check",
+		"MANIFEST.sha256", "server-side-encryption aws:kms", "ObjectLockMode==\"GOVERNANCE\"",
+		"kind: Cluster", "name: kanz-postgres-drill", "kind: NetworkPolicy",
+		"pg_restore", "relrowsecurity and not relforcerowsecurity", "account restore --force",
+		"status:\"RESTORE_VERIFIED\"", "rpo_seconds", "rto_seconds",
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("data-plane recovery is missing fail-closed proof %q", required)
+		}
+	}
+	if strings.Contains(script, "aws_access_key_id") || strings.Contains(script, "secretObjects:") {
+		t.Fatal("recovery must not move AWS or Vault credentials into source or Kubernetes Secrets")
+	}
+	for _, required := range []string{"fetch origin main", "hash-object", "origin/main", "not the exact blob merged"} {
+		if !strings.Contains(wrapper, required) {
+			t.Errorf("recovery wrapper does not enforce merged-code provenance %q", required)
 		}
 	}
 }

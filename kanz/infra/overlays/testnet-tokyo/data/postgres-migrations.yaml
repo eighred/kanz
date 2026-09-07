@@ -19,6 +19,8 @@ spec:
         app.kubernetes.io/part-of: kanz
     spec:
       serviceAccountName: postgres-provisioner
+      imagePullSecrets:
+        - name: ghcr-pull
       restartPolicy: OnFailure
       securityContext:
         runAsNonRoot: true
@@ -65,7 +67,7 @@ spec:
             - { name: tmp, mountPath: /tmp }
         - &migration
           name: migrate-accounting
-          image: ghcr.io/eighred/kanz-migrate:latest
+          image: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate@sha256:b5db20eb08b17a70d637dc378f5c797ca220874ebc7399786f8e6a7c0df10490
           args: ["--dir", "/migrations/accounting"]
           env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/accounting }]
           resources:
