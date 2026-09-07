@@ -64,6 +64,18 @@ clone_job_as_runner() {
   k -n "$namespace" wait --for=condition=Ready "pod/$pod" --timeout=120s >/dev/null
 }
 
+wait_for_pod_selector() {
+  local namespace=$1 selector=$2 timeout_seconds=$3 deadline
+  deadline=$(( SECONDS + timeout_seconds ))
+  while (( SECONDS < deadline )); do
+    if [[ -n "$(k -n "$namespace" get pod -l "$selector" -o name 2>/dev/null)" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  die "no pod appeared for selector $selector in namespace $namespace"
+}
+
 backup() {
   require_boundary
   refuse_active_writers
@@ -305,6 +317,7 @@ spec:
     - { name: transfer, emptyDir: { sizeLimit: 1Gi } }
     - { name: tmp, emptyDir: { medium: Memory, sizeLimit: 32Mi } }
 EOF
+  wait_for_pod_selector "$DRILL_NS" cnpg.io/cluster=kanz-postgres-drill 120
   k -n "$DRILL_NS" wait --for=condition=Ready pod -l cnpg.io/cluster=kanz-postgres-drill --timeout=300s >/dev/null
   k -n "$DRILL_NS" wait --for=condition=Ready pod/postgres-restore --timeout=180s >/dev/null
 
