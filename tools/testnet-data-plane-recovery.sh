@@ -318,8 +318,20 @@ spec:
     - { name: tmp, emptyDir: { medium: Memory, sizeLimit: 32Mi } }
 EOF
   wait_for_pod_selector "$DRILL_NS" cnpg.io/cluster=kanz-postgres-drill 120
-  k -n "$DRILL_NS" wait --for=condition=Ready pod -l cnpg.io/cluster=kanz-postgres-drill --timeout=300s >/dev/null
+  k -n "$DRILL_NS" wait --for=condition=Ready cluster/kanz-postgres-drill --timeout=300s >/dev/null
   k -n "$DRILL_NS" wait --for=condition=Ready pod/postgres-restore --timeout=180s >/dev/null
+
+  local postgres_ready=0
+  for _ in $(seq 1 90); do
+    if k -n "$DRILL_NS" exec postgres-restore -c restore -- bash -ceu '
+      exec pg_isready --host "$(cat /run/secrets/postgres/host)" --username kanz_restore --dbname restore_control
+    ' >/dev/null 2>&1; then
+      postgres_ready=1
+      break
+    fi
+    sleep 2
+  done
+  [[ "$postgres_ready" == 1 ]] || die 'restored PostgreSQL service did not become reachable'
 
   local database expected_migrations expected_tables expected_unsafe source_lsn restored
   while IFS='|' read -r database expected_migrations expected_tables expected_unsafe source_lsn; do
