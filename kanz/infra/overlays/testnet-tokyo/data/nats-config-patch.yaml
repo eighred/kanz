@@ -24,6 +24,9 @@ data:
       store_dir: /data/jetstream
       max_memory_store: 128MB
       max_file_store: 3GB
+      # This is a single-server testnet. An ACK must mean the FACT reached
+      # durable storage even if the host loses power immediately afterward.
+      sync_interval: always
     }
 
     lame_duck_duration: 30s

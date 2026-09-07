@@ -78,6 +78,9 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 	if strings.Contains(string(natsConfig), "cluster {") || !strings.Contains(string(natsConfig), "max_file_store: 3GB") {
 		t.Fatal("single-node NATS must be non-clustered with a bounded file store")
 	}
+	if !strings.Contains(string(natsConfig), "sync_interval: always") {
+		t.Fatal("single-node NATS must fsync every FACT before acknowledging it")
+	}
 	natsBootstrap := mustReadArchFile(t, filepath.Join(dir, "nats-bootstrap-patch.yaml"))
 	if !regexp.MustCompile(`(?s)name: NATS_REPLICAS\s+value: "1"`).Match(natsBootstrap) {
 		t.Fatal("NATS stream bootstrap must use replica factor one")
@@ -85,6 +88,12 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 
 	if !strings.Contains(string(kustomization), "memory: 64Mi") || !strings.Contains(string(kustomization), "memory: 256Mi") {
 		t.Fatal("Redis requests and limits must remain bounded")
+	}
+	for _, image := range []string{"nats", "natsio/nats-box", "redis", "ghcr.io/cloudnative-pg/postgresql"} {
+		pattern := regexp.MustCompile(`(?m)^  - name: ` + regexp.QuoteMeta(image) + `\n    newName: ` + regexp.QuoteMeta(image) + `\n    digest: sha256:[0-9a-f]{64}$`)
+		if !pattern.Match(kustomization) {
+			t.Errorf("testnet data-plane image %q is not pinned by digest", image)
+		}
 	}
 }
 

@@ -68,6 +68,15 @@ patches:
           limits: { cpu: 250m, memory: 256Mi }
 
 images:
+  - name: nats
+    newName: nats
+    digest: sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da
+  - name: natsio/nats-box
+    newName: natsio/nats-box
+    digest: sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c
+  - name: redis
+    newName: redis
+    digest: sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08
   - name: ghcr.io/cloudnative-pg/postgresql
     newName: ghcr.io/cloudnative-pg/postgresql
     digest: sha256:533e45e0a00c156bdab7c4d9a84fffa87259594725a3909c898e8645727d9555

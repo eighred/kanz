@@ -7,7 +7,7 @@ It deliberately reports HA as `UNSUPPORTED`:
 - one CloudNativePG primary with one logical database and two roles per active
   migration-owning service;
 - one file-backed JetStream server using the canonical tenancy and stream
-  bootstrap contracts with replica factor one;
+  bootstrap contracts with replica factor one and fsync-before-ack;
 - one AOF-backed Redis server for cross-pod idempotency and nonce protection.
 
 Application roles are `NOSUPERUSER` and `NOBYPASSRLS`. Migration roles own their
@@ -21,6 +21,7 @@ used by any service.
 The resource request envelope is 500m/1536Mi for Postgres, 250m/512Mi for NATS,
 and 50m/64Mi for Redis, plus bounded sidecars and one-shot jobs. Storage claims
 are 20 GiB data + 4 GiB WAL, 4 GiB JetStream, and 1 GiB Redis.
+All data-plane images changed by this overlay are immutable digest references.
 
 Deployment order is strict:
 
