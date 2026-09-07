@@ -360,7 +360,7 @@ EOF
   [[ "$restored_redis" == "$expected_redis" ]] || die 'Redis restored key count differs from source'
 
   k -n "$DRILL_NS" exec -i nats-restore -c restore -- sh -ceu 'tar -C /restore -xzf -' <"$work/extracted/nats/account.tar.gz"
-  k -n "$DRILL_NS" exec nats-restore -c restore -- nats --server nats://127.0.0.1:4222 account restore --force /restore/nats-backup >/dev/null
+  k -n "$DRILL_NS" exec nats-restore -c restore -- nats --server nats://127.0.0.1:4222 account restore /restore/nats-backup >/dev/null
   local expected_streams expected_consumers expected_messages restored_jsz
   expected_streams=$(jq '.streams // 0' "$work/extracted/nats/source.json")
   expected_consumers=$(jq '[.account_details[].stream_detail[].consumer_detail // [] | length] | add // 0' "$work/extracted/nats/source.json")
