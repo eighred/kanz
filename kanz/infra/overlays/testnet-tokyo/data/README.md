@@ -8,7 +8,8 @@ It deliberately reports HA as `UNSUPPORTED`:
   migration-owning service;
 - one file-backed JetStream server using the canonical tenancy and stream
   bootstrap contracts with replica factor one and fsync-before-ack;
-- one AOF-backed Redis server for cross-pod idempotency and nonce protection.
+- one AOF-backed Redis server with fsync on every write for cross-pod
+  idempotency and nonce protection.
 
 Application roles are `NOSUPERUSER` and `NOBYPASSRLS`. Migration roles own their
 database and receive DDL rights; application roles receive only runtime object

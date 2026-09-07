@@ -89,6 +89,9 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 	if !strings.Contains(string(kustomization), "memory: 64Mi") || !strings.Contains(string(kustomization), "memory: 256Mi") {
 		t.Fatal("Redis requests and limits must remain bounded")
 	}
+	if !strings.Contains(string(kustomization), "--appendfsync always") {
+		t.Fatal("single-node Redis must fsync each nonce mutation before acknowledging it")
+	}
 	for _, image := range []string{"nats", "natsio/nats-box", "redis", "ghcr.io/cloudnative-pg/postgresql"} {
 		pattern := regexp.MustCompile(`(?m)^  - name: ` + regexp.QuoteMeta(image) + `\n    newName: ` + regexp.QuoteMeta(image) + `\n    digest: sha256:[0-9a-f]{64}$`)
 		if !pattern.Match(kustomization) {

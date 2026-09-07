@@ -66,6 +66,19 @@ patches:
         value:
           requests: { cpu: 50m, memory: 64Mi }
           limits: { cpu: 250m, memory: 256Mi }
+      - op: replace
+        path: /spec/template/spec/containers/0/command
+        value:
+          - sh
+          - -c
+          - |-
+            set -eu
+            PW="$(cat /run/secrets/redis/password)"
+            if [ -z "$PW" ]; then
+              echo "redis: password file missing or empty - refusing to start UNAUTHENTICATED" >&2
+              exit 1
+            fi
+            exec redis-server --appendonly yes --appendfsync always --maxmemory-policy noeviction --requirepass "$PW"
 
 images:
   - name: nats
