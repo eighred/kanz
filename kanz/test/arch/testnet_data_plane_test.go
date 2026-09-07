@@ -54,7 +54,7 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 	if cluster.Spec.EnableSuperuserAccess {
 		t.Fatal("CloudNativePG network superuser access must remain disabled")
 	}
-	if !regexp.MustCompile(`^ghcr\.io/cloudnative-pg/postgresql@sha256:[0-9a-f]{64}$`).MatchString(cluster.Spec.ImageName) {
+	if !regexp.MustCompile(`^ghcr\.io/cloudnative-pg/postgresql:16\.10-standard-bookworm@sha256:[0-9a-f]{64}$`).MatchString(cluster.Spec.ImageName) {
 		t.Fatalf("Postgres image is not immutable: %q", cluster.Spec.ImageName)
 	}
 	if cluster.Spec.Storage["size"] != "20Gi" || cluster.Spec.WALStorage["size"] != "4Gi" {
@@ -92,8 +92,8 @@ func TestTokyoDataPlaneCannotClaimHighAvailability(t *testing.T) {
 	if !strings.Contains(string(kustomization), "--appendfsync always") {
 		t.Fatal("single-node Redis must fsync each nonce mutation before acknowledging it")
 	}
-	for _, image := range []string{"nats", "natsio/nats-box", "redis", "ghcr.io/cloudnative-pg/postgresql"} {
-		pattern := regexp.MustCompile(`(?m)^  - name: ` + regexp.QuoteMeta(image) + `\n    newName: ` + regexp.QuoteMeta(image) + `\n    digest: sha256:[0-9a-f]{64}$`)
+	for _, image := range []string{"ghcr.io/spiffe/spiffe-helper", "nats", "natsio/nats-box", "redis", "ghcr.io/cloudnative-pg/postgresql"} {
+		pattern := regexp.MustCompile(`(?m)^  - name: ` + regexp.QuoteMeta(image) + `\n    newName: ` + regexp.QuoteMeta(image) + `\n(?:    newTag: [^\n]+\n)?    digest: sha256:[0-9a-f]{64}$`)
 		if !pattern.Match(kustomization) {
 			t.Errorf("testnet data-plane image %q is not pinned by digest", image)
 		}
@@ -172,6 +172,21 @@ func TestCloudNativePGInstallerVerifiesAvailabilityAndExactImage(t *testing.T) {
 	}
 	if strings.Contains(raw, "rollout status deployment/cnpg-controller-manager") {
 		t.Fatal("CloudNativePG installer must not treat a historical ProgressDeadlineExceeded as current availability")
+	}
+}
+
+func TestTokyoDataPlaneInstallerFailsClosedOnRenderAndRuntimeState(t *testing.T) {
+	root := moduleRoot(t)
+	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetDataPlane.ps1")))
+	for _, required := range []string{
+		"resourceCount -ne 34", "mutable image tag survived", "sha256sum --check --status",
+		"data-plane-server-dry-run-namespace-substitute=default", "apply --server-side --dry-run=server", "condition=Ready cluster/kanz-testnet-postgres",
+		"condition=complete job/postgres-provisioner", "condition=complete job/nats-bootstrap",
+		"not rolsuper and not rolbypassrls", "CONFIG GET appendfsync", "sync_interval: always",
+	} {
+		if !strings.Contains(raw, required) {
+			t.Errorf("Tokyo data-plane installer is missing fail-closed proof %q", required)
+		}
 	}
 }
 

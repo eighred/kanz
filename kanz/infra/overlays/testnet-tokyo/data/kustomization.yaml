@@ -81,6 +81,9 @@ patches:
             exec redis-server --appendonly yes --appendfsync always --maxmemory-policy noeviction --requirepass "$PW"
 
 images:
+  - name: ghcr.io/spiffe/spiffe-helper
+    newName: ghcr.io/spiffe/spiffe-helper
+    digest: sha256:47f18fcd2bf1c99cbb9bdc6f4348b08fb74572f89ddd0bcf103de2a1b12ab6d9
   - name: nats
     newName: nats
     digest: sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da
@@ -92,4 +95,5 @@ images:
     digest: sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08
   - name: ghcr.io/cloudnative-pg/postgresql
     newName: ghcr.io/cloudnative-pg/postgresql
+    newTag: 16.10-standard-bookworm
     digest: sha256:533e45e0a00c156bdab7c4d9a84fffa87259594725a3909c898e8645727d9555
