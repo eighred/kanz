@@ -7,7 +7,8 @@ dependency, and scales workloads to one replica. It does not weaken application
 risk, compliance, mandate, mTLS, tenant, or secret-provider boundaries.
 
 Use the repository-root installer from an exact, clean `origin/main` checkout.
-It renders the reviewed overlay locally, rejects mutable or non-Tokyo images,
+It renders the reviewed overlay locally, retains only the canonical Vault
+classes mounted by this workload graph, rejects mutable or non-Tokyo images,
 transfers a hashed manifest over SSM, verifies the data-plane prerequisites, and
 runs a server-side dry-run on the node. Dry-run is the default:
 
@@ -24,7 +25,9 @@ Apply the same checked manifest only after reviewing the dry-run evidence:
 The apply path waits for all eight Deployments and the risk-engine Rollout, then
 requires nine ready Pods whose running SHA-256 image IDs match the reviewed ECR
 lock. It also proves that no registry credential Secret exists in
-`kanz-services`. The installer submits no request or order to any service.
+`kanz-services`. A failed first installation deletes the exact rendered object
+set; an ambiguous partial installation is refused before apply. The installer
+submits no request or order to any service.
 
 Do not apply until the namespace, SPIFFE registrations, Vault
 `SecretProviderClass` objects, NATS, Postgres migrations, and Argo Rollouts CRD
