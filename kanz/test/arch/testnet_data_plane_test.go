@@ -162,6 +162,18 @@ func TestCloudNativePGControllerTargetsTheRealTokyoAPIServerEndpoint(t *testing.
 	}
 }
 
+func TestCloudNativePGInstallerVerifiesAvailabilityAndExactImage(t *testing.T) {
+	root := moduleRoot(t)
+	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetCloudNativePG.ps1")))
+	if !strings.Contains(raw, "wait --for=condition=Available deployment/cnpg-controller-manager") ||
+		!strings.Contains(raw, "jsonpath='{.spec.template.spec.containers[?(@.name==\"manager\")].image}'") {
+		t.Fatal("CloudNativePG installer must prove the controller is Available and running the locked image")
+	}
+	if strings.Contains(raw, "rollout status deployment/cnpg-controller-manager") {
+		t.Fatal("CloudNativePG installer must not treat a historical ProgressDeadlineExceeded as current availability")
+	}
+}
+
 func mustReadArchFile(t *testing.T, path string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(path)
