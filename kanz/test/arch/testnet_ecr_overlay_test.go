@@ -2,7 +2,9 @@ package arch
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -216,13 +218,70 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"rollout status statefulset/nats", "rollout status statefulset/redis",
 		"apply --server-side --dry-run=server", "rollout status \"deployment/${deployment}\"",
 		"condition=Available deployment/argo-rollouts", "status.phase}''=Healthy rollout/risk-engine",
-		"status.imageID", "capture(\"@(?<digest>sha256:[0-9a-f]{64})$\")",
+		"Verify-TestnetWorkloadPods.jq", "jq -e -f \"${pod_filter}\"",
 		"kubernetes.io/dockerconfigjson", "workload-registry-secrets-absent",
 		"workload installation refused: partial managed state", "fresh-install-rollback-started",
 	} {
 		if !strings.Contains(raw, required) {
 			t.Errorf("Tokyo workload installer is missing fail-closed proof %q", required)
 		}
+	}
+}
+
+func TestTokyoWorkloadPodVerifierMatchesStatusesByContainerName(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is unavailable")
+	}
+	filter := filepath.Join(filepath.Dir(moduleRoot(t)), "tools", "Verify-TestnetWorkloadPods.jq")
+	const digestA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const digestB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	image := func(name, digest string) string {
+		return "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/" + name + "@" + digest
+	}
+	fixture := func(runtimeDigest string, omitMainStatus bool) []byte {
+		pods := make([]any, 0, 9)
+		for i := 0; i < 9; i++ {
+			statuses := []any{}
+			if !omitMainStatus {
+				statuses = append(statuses, map[string]any{
+					"name": "app", "ready": true, "imageID": image("service", runtimeDigest),
+				})
+			}
+			pods = append(pods, map[string]any{
+				"spec": map[string]any{
+					"initContainers": []any{map[string]any{"name": "migrate", "image": image("kanz-migrate", digestA)}},
+					"containers":     []any{map[string]any{"name": "app", "image": image("service", digestB)}},
+				},
+				"status": map[string]any{
+					"phase": "Running",
+					"initContainerStatuses": []any{map[string]any{
+						"name": "migrate", "imageID": image("kanz-migrate", digestA),
+						"state": map[string]any{"terminated": map[string]any{"exitCode": 0}},
+					}},
+					"containerStatuses": statuses,
+				},
+			})
+		}
+		body, marshalErr := json.Marshal(map[string]any{"items": pods})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return body
+	}
+	run := func(body []byte) error {
+		cmd := exec.Command(jq, "-e", "-f", filter)
+		cmd.Stdin = bytes.NewReader(body)
+		return cmd.Run()
+	}
+	if err := run(fixture(digestB, false)); err != nil {
+		t.Fatalf("valid reviewed and observed digests were rejected: %v", err)
+	}
+	if err := run(fixture(digestA, false)); err == nil {
+		t.Fatal("a runtime digest different from the reviewed spec was accepted")
+	}
+	if err := run(fixture(digestB, true)); err == nil {
+		t.Fatal("a Pod missing its main container status was accepted")
 	}
 }
 

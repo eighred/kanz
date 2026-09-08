@@ -17,6 +17,7 @@ $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $kubectl = (Get-Command kubectl.exe -ErrorAction Stop).Source
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $overlay = Join-Path $repoRoot 'kanz\infra\overlays\testnet-tokyo'
+$podVerifierPath = Join-Path $repoRoot 'tools\Verify-TestnetWorkloadPods.jq'
 
 function Invoke-SsmCommands {
     param(
@@ -67,6 +68,7 @@ if ($headCommit -ne $releaseCommit) {
 }
 $provenancePaths = @(
     'tools/Install-TestnetWorkloads.ps1',
+    'tools/Verify-TestnetWorkloadPods.jq',
     'kanz/infra/overlays/testnet-tokyo',
     'kanz/infra/deploy/accounting-deploy.yaml',
     'kanz/infra/deploy/api-gateway-deploy.yaml',
@@ -134,6 +136,13 @@ foreach ($required in @(
     if (-not $rendered.Contains($required)) { throw "Rendered workload is missing prerequisite: $required" }
 }
 
+$podVerifier = Get-Content -LiteralPath $podVerifierPath -Raw
+if ([string]::IsNullOrWhiteSpace($podVerifier)) {
+    throw 'The workload Pod verifier is empty.'
+}
+$podVerifierBytes = [Text.Encoding]::UTF8.GetBytes($podVerifier)
+$podVerifierPayload = [Convert]::ToBase64String($podVerifierBytes)
+
 $bytes = [Text.Encoding]::UTF8.GetBytes($rendered)
 $sha256 = [Security.Cryptography.SHA256]::Create()
 try {
@@ -157,6 +166,7 @@ $transferId = [Guid]::NewGuid().ToString('N')
 $remoteBase = "/var/tmp/kanz-workloads-$transferId"
 $remotePayload = "$remoteBase.b64"
 $remoteManifest = "$remoteBase.yaml"
+$remotePodVerifier = "$remoteBase.jq"
 Invoke-SsmCommands -Comment 'Initialize Kanz testnet workload transfer' -TimeoutSeconds 60 -Commands @(
     'set -eu',
     "umask 077; : > '$remotePayload'"
@@ -176,15 +186,20 @@ for ($batchStart = 0; $batchStart -lt $chunks.Count; $batchStart += 4) {
     Invoke-SsmCommands -Comment "Stage Kanz workload manifest $($batchStart + 1)-$batchEnd/$($chunks.Count)" `
         -TimeoutSeconds 60 -Commands $commands | Out-Null
 }
+Invoke-SsmCommands -Comment 'Stage Kanz workload Pod verifier' -TimeoutSeconds 60 -Commands @(
+    'set -eu',
+    "umask 077; printf '%s' '$podVerifierPayload' | base64 -d > '$remotePodVerifier'"
+) | Out-Null
 
 $applyFlag = if ($Apply) { '1' } else { '0' }
 $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo workloads' -TimeoutSeconds 1800 -Commands @(
     'set -Eeuo pipefail',
     "payload='$remotePayload'",
     "manifest='$remoteManifest'",
+    "pod_filter='$remotePodVerifier'",
     'applied=0',
     'fresh=0',
-    'finish() { rc=$?; if [[ "${rc}" != 0 && "${applied}" = 1 && "${fresh}" = 1 ]]; then echo fresh-install-rollback-started >&2; /usr/local/bin/k3s kubectl delete --ignore-not-found=true --wait=true -f "${manifest}" >&2 || true; fi; rm -f "${payload}" "${manifest}"; exit "${rc}"; }',
+    'finish() { rc=$?; if [[ "${rc}" != 0 && "${applied}" = 1 && "${fresh}" = 1 ]]; then echo fresh-install-rollback-started >&2; /usr/local/bin/k3s kubectl delete --ignore-not-found=true --wait=true -f "${manifest}" >&2 || true; fi; rm -f "${payload}" "${manifest}" "${pod_filter}"; exit "${rc}"; }',
     'trap finish EXIT',
     'base64 -d "${payload}" | gzip -d > "${manifest}"',
     ("printf '%s  %s\n' '$manifestHash' " + '"${manifest}" | sha256sum --check --status'),
@@ -212,10 +227,7 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo worklo
     'for deployment in identity compliance accounting audit oms venue-binance venue-okx api-gateway; do /usr/local/bin/k3s kubectl -n kanz-services rollout status "deployment/${deployment}" --timeout=600s >/dev/null; done',
     '/usr/local/bin/k3s kubectl -n kanz-services wait --for=jsonpath=''{.status.phase}''=Healthy rollout/risk-engine --timeout=900s >/dev/null',
     'pods=$(/usr/local/bin/k3s kubectl -n kanz-services get pods -l app.kubernetes.io/part-of=kanz -o json)',
-    'jq -e ''.items | length == 9'' <<<"${pods}" >/dev/null',
-    'jq -e ''all(.items[]; .status.phase=="Running" and all(.status.containerStatuses[]?; .ready==true) and all(.status.initContainerStatuses[]?; .state.terminated.exitCode==0))'' <<<"${pods}" >/dev/null',
-    'jq -e ''all(.items[]; all((.spec.initContainers // []) + .spec.containers; .image | test("^012619468098\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/[a-z0-9-]+@sha256:[0-9a-f]{64}$")))'' <<<"${pods}" >/dev/null',
-    'jq -e ''all(.items[]; . as $pod | all((($pod.status.initContainerStatuses // []) + $pod.status.containerStatuses)[]; . as $status | ((($pod.spec.initContainers // []) + $pod.spec.containers | map(select(.name==$status.name)) | first | .image | capture("@(?<digest>sha256:[0-9a-f]{64})$").digest) == ($status.imageID | capture("@(?<digest>sha256:[0-9a-f]{64})$").digest))))'' <<<"${pods}" >/dev/null',
+    'jq -e -f "${pod_filter}" <<<"${pods}" >/dev/null',
     'test "$(/usr/local/bin/k3s kubectl -n kanz-services get secret -o json | jq ''[.items[] | select(.type=="kubernetes.io/dockerconfigjson")] | length'')" = 0',
     'echo workload-rollouts-ready',
     'echo workload-images-match-reviewed-ecr-lock',
