@@ -46,3 +46,17 @@ not rotate an existing signing key on a rerun.
 The `kanz-capitalpath` certifier image is intentionally not a standing workload.
 Pass its ECR digest separately to `infra/dr/run-capitalpath-certification.sh`
 only after the DR attestation and order safety gates are green.
+
+Every OMS starts halted. Before any operator publishes a resume FACT, run the
+merged, repository-owned capital-admission preflight:
+
+```powershell
+.\tools\Test-TestnetOmsGoLive.ps1 -InstanceId <managed-node-id>
+```
+
+The preflight is read-only and refuses an OMS unless mandate enforcement,
+unique portfolio-to-account binding, exchange account proof, and dual control
+with an explicit threshold are armed. It also requires one Ready OMS Pod and
+rejects recent shared-collateral, unverified-account, advisory-mandate, absent
+dual-control, or incomplete-margin warnings. A passing preflight is necessary
+evidence for resume; it does not publish the resume FACT or submit an order.
