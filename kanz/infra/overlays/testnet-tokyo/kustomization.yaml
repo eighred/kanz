@@ -15,40 +15,40 @@ resources:
   - ../../deploy/venue-okx-deploy.yaml
 
 commonAnnotations:
-  kanz.io/release-commit: a3dea5a5fb0f5d34229390911b55165f5fdb4c5b
+  kanz.io/release-commit: a8e3d7c1f42302b79485488c435da7386040a2b5
   kanz.io/testnet-region: ap-northeast-1
 
 images:
   - name: ghcr.io/eighred/accounting
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/accounting
-    digest: sha256:fe00907d1137a01f77c3df7fd9daedf875bc6e168bcf08c4ea2771bd0bd722ea
+    digest: sha256:eb6dfd2bab5cf97380ad67e9e0a52c3609aaa00a5d94da67ff9cfffb46eaed3c
   - name: ghcr.io/eighred/api-gateway
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/api-gateway
-    digest: sha256:874fe46f0fd208b3fa68c29aea1e17bdfb02ef215232775cca6e0f6c80f913ef
+    digest: sha256:27c7874c7714ed8cf9a723b97a1b7c36193698ac7b960654dbb7271049825ef0
   - name: ghcr.io/eighred/audit
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/audit
-    digest: sha256:c4add5ad884ce8ee44dfbd492ced7a1ecb65d1e9b362179299471d672e8c119f
+    digest: sha256:08bac2486e23bc3e368ccee9556ee7c72b908f108885ade3b7769b06c31231f2
   - name: ghcr.io/eighred/compliance
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/compliance
-    digest: sha256:57799387e45638b783703019b8528ebd4acd2d1fc264a2b987a10056d3d118ec
+    digest: sha256:c3c42954b39a5885384861ba184a043baf399a6a208c04ad36e5b0875635874a
   - name: ghcr.io/eighred/identity
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/identity
-    digest: sha256:80e68d6d4e617874f175db2aed5bd24cbf36b7c65dbaa138a7c2350b05cd9223
+    digest: sha256:8ea779a6c070d794bfdcdbfd02f76c487ef75494993bcc4956831c1715f8e6db
   - name: ghcr.io/eighred/kanz-migrate
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate
-    digest: sha256:b5db20eb08b17a70d637dc378f5c797ca220874ebc7399786f8e6a7c0df10490
+    digest: sha256:678caec5c3c3a33806891b26de5ac3c52ae8bde0d804b2b780c9506cc43d6fbc
   - name: ghcr.io/eighred/oms
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/oms
-    digest: sha256:6dc757e6c68ecbd2054e2beb7855ced838f1628a8c32fd47d53a6f731c3d2c5d
+    digest: sha256:bd1d105eb28927c4f7da2fc27454541a07e15baf97c0763550c79378da576644
   - name: ghcr.io/eighred/risk-engine
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/risk-engine
-    digest: sha256:9eb97ccc782900d182275858fea31f8b181fecfcb5bff8142493ebdb8a793fbe
+    digest: sha256:8f3daac1f88eb060f3d90a1cf994ed545f098e1c63154ddc1757bab8c467b64a
   - name: ghcr.io/eighred/venue-binance
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/venue-binance
-    digest: sha256:c474e60d43d199dabb10f78dd81c8148e1667a1050ae8bca2a4e4c3fbd551f6f
+    digest: sha256:c5710ca9267777ea50bcc3ccc15f4cd1d30a03f2759a1046ab56937af0ab799c
   - name: ghcr.io/eighred/venue-okx
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/venue-okx
-    digest: sha256:6a456812cce7bf91bfc46d766a07cfb475b46886edd9054562acaebfc8e6f762
+    digest: sha256:5bdc9d3598eeb3d748af0b51727f7368e1bbf885f580b9e1daa385bcd5627ee7
 
 patches:
   # The canonical file is the sole owner of Vault paths and role bindings. This
