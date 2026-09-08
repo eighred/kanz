@@ -285,6 +285,73 @@ func TestTokyoWorkloadPodVerifierMatchesStatusesByContainerName(t *testing.T) {
 	}
 }
 
+func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skip("jq is unavailable")
+	}
+	filter := filepath.Join(filepath.Dir(moduleRoot(t)), "tools", "Verify-TestnetOmsGoLive.jq")
+	env := map[string]string{
+		"OMS_REQUIRE_MANDATE":           "true",
+		"OMS_REQUIRE_VENUE_ACCOUNT":     "true",
+		"OMS_REQUIRE_VERIFIED_ACCOUNT":  "true",
+		"OMS_REQUIRE_DUAL_CONTROL":      "true",
+		"OMS_DUAL_CONTROL_MIN_NOTIONAL": "1 USD",
+		"OMS_VENUE_ACCOUNTS":            "tenant/portfolio@XBIN=binance-main",
+	}
+	fixture := func(values map[string]string, logs string) []byte {
+		vars := make([]any, 0, len(values))
+		for name, value := range values {
+			vars = append(vars, map[string]any{"name": name, "value": value})
+		}
+		body, marshalErr := json.Marshal(map[string]any{
+			"deployment":  map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "oms", "env": vars}}}}}},
+			"pods":        map[string]any{"items": []any{map[string]any{"status": map[string]any{"phase": "Running", "containerStatuses": []any{map[string]any{"name": "oms", "ready": true}}}}}},
+			"recent_logs": logs,
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return body
+	}
+	run := func(body []byte) error {
+		cmd := exec.Command(jq, "-e", "-f", filter)
+		cmd.Stdin = bytes.NewReader(body)
+		return cmd.Run()
+	}
+	if err := run(fixture(env, "healthy")); err != nil {
+		t.Fatalf("armed, Ready OMS was rejected: %v", err)
+	}
+	for _, name := range []string{"OMS_REQUIRE_MANDATE", "OMS_REQUIRE_VENUE_ACCOUNT", "OMS_REQUIRE_VERIFIED_ACCOUNT", "OMS_REQUIRE_DUAL_CONTROL"} {
+		mutated := make(map[string]string, len(env))
+		for key, value := range env {
+			mutated[key] = value
+		}
+		mutated[name] = "false"
+		if err := run(fixture(mutated, "healthy")); err == nil {
+			t.Errorf("%s=false passed the go-live verifier", name)
+		}
+	}
+	for _, name := range []string{"OMS_DUAL_CONTROL_MIN_NOTIONAL", "OMS_VENUE_ACCOUNTS"} {
+		mutated := make(map[string]string, len(env))
+		for key, value := range env {
+			mutated[key] = value
+		}
+		mutated[name] = ""
+		if err := run(fixture(mutated, "healthy")); err == nil {
+			t.Errorf("empty %s passed the go-live verifier", name)
+		}
+	}
+	for _, warning := range []string{
+		"venue adapter registered with an UNVERIFIED account",
+		"the exchange did not report part of this account's margin state",
+	} {
+		if err := run(fixture(env, warning)); err == nil {
+			t.Errorf("unsafe recent OMS posture %q passed the go-live verifier", warning)
+		}
+	}
+}
+
 func assertSameStrings(t *testing.T, name string, got, want []string) {
 	t.Helper()
 	got = append([]string(nil), got...)
