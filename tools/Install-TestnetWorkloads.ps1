@@ -99,6 +99,28 @@ foreach ($image in $images) {
         throw "Rendered workload image is outside the immutable Tokyo ECR boundary: $($image.Groups[1].Value)"
     }
 }
+$releaseAnnotations = [regex]::Matches($rendered, '(?m)^\s*kanz\.io/release-commit:\s+([0-9a-f]{40})\s*$')
+if ($releaseAnnotations.Count -eq 0) {
+    throw 'Rendered workloads do not declare a release commit.'
+}
+$imageReleaseCommit = $releaseAnnotations[0].Groups[1].Value
+if ($releaseAnnotations | Where-Object { $_.Groups[1].Value -ne $imageReleaseCommit }) {
+    throw 'Rendered workloads contain inconsistent release commits.'
+}
+$uniqueImages = $images | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+foreach ($imageRef in $uniqueImages) {
+    if ($imageRef -notmatch '^012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/(?<repository>[a-z0-9-]+)@(?<digest>sha256:[0-9a-f]{64})$') {
+        throw "Cannot inspect malformed Tokyo ECR image: $imageRef"
+    }
+    $repository = $Matches.repository
+    $digest = $Matches.digest
+    $releaseDigest = (& $aws ecr describe-images --profile $Profile --region $Region `
+        --repository-name $repository --image-ids "imageTag=$imageReleaseCommit" `
+        --query 'imageDetails[0].imageDigest' --output text 2>$null).Trim()
+    if ($LASTEXITCODE -ne 0 -or $releaseDigest -ne $digest) {
+        throw "Tokyo ECR does not retain $repository@$digest under release $imageReleaseCommit."
+    }
+}
 foreach ($forbidden in @('ghcr.io', 'ghcr-pull', 'imagePullSecrets:', 'kubernetes.io/dockerconfigjson')) {
     if ($rendered.Contains($forbidden)) { throw "Rendered workload contains forbidden marker: $forbidden" }
 }

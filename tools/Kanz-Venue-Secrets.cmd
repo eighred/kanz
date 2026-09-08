@@ -5,7 +5,7 @@ title Kanz Testnet Vault Bootstrap
 echo Choose an operation:
 echo   1. Rotate exchange testnet credentials
 echo   2. Re-run the venue Vault bootstrap
-echo   3. Bootstrap generated Postgres and Redis credentials
+echo   3. Bootstrap generated data-plane credentials and signing keys
 set /p "CHOICE=Enter 1, 2, or 3: "
 
 if "%CHOICE%"=="1" set "MODE=Rotate"& set "TARGET=Venue"
