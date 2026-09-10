@@ -40,7 +40,14 @@ $parameters = @{ commands = @(
     '/usr/local/bin/k3s kubectl -n kanz-services get deployment oms -o json > "${base}-deployment.json"',
     '/usr/local/bin/k3s kubectl -n kanz-services get pods -l app=oms -o json > "${base}-pods.json"',
     '/usr/local/bin/k3s kubectl -n kanz-services logs deployment/oms -c oms --since=2m --tail=1000 > "${base}-logs.txt" 2>&1',
-    'jq -n --slurpfile deployment "${base}-deployment.json" --slurpfile pods "${base}-pods.json" --rawfile recent_logs "${base}-logs.txt" ''{deployment: $deployment[0], pods: $pods[0], recent_logs: $recent_logs}'' | jq -e -f "${base}.jq"'
+    'pgpod=$(/usr/local/bin/k3s kubectl -n kanz-data get pod -l cnpg.io/cluster=kanz-testnet-postgres,role=primary -o jsonpath=''{.items[0].metadata.name}'')',
+    'portfolio_count=$(/usr/local/bin/k3s kubectl -n kanz-data exec "${pgpod}" -c postgres -- psql -U postgres -d risk_engine -Atqc ''select count(*) from portfolios'')',
+    'nats_ip=$(/usr/local/bin/k3s kubectl -n kanz-messaging get pod nats-0 -o jsonpath=''{.status.podIP}'')',
+    'mandate_count=$(curl -fsS --connect-timeout 3 --max-time 5 "http://${nats_ip}:8222/jsz?streams=true&accounts=true" | jq ''[.account_details[]?.stream_detail[]? | select(.name == "MANDATE") | .state.messages] | if length == 1 then .[0] else error("expected one MANDATE stream") end'')',
+    'oms_metrics=$(/usr/local/bin/k3s kubectl get --raw /api/v1/namespaces/kanz-services/services/http:oms:8090/proxy/metrics)',
+    'report=$(jq -n --slurpfile deployment "${base}-deployment.json" --slurpfile pods "${base}-pods.json" --rawfile recent_logs "${base}-logs.txt" --argjson portfolio_count "${portfolio_count}" --argjson mandate_count "${mandate_count}" --arg oms_metrics "${oms_metrics}" ''{deployment: $deployment[0], pods: $pods[0], recent_logs: $recent_logs, portfolio_count: $portfolio_count, mandate_count: $mandate_count, oms_metrics: $oms_metrics}'' | jq -c -f "${base}.jq")',
+    'printf ''%s\n'' "${report}"',
+    'printf ''%s'' "${report}" | jq -e ''.verdict == "PASS"'' >/dev/null'
 ) } | ConvertTo-Json -Compress -Depth 4
 
 $commandId = (& $aws ssm send-command --profile $Profile --region $Region `
@@ -59,9 +66,14 @@ do {
     if ($result.Status -in @('Success', 'Cancelled', 'Failed', 'TimedOut')) { break }
 } while ([DateTime]::UtcNow -lt $deadline)
 
-if (-not $result -or $result.Status -ne 'Success') {
-    $detail = if ($result) { $result.Error.Trim() } else { 'no terminal SSM result' }
-    throw "OMS go-live verification $commandId refused resume: $detail"
+if (-not $result) {
+    throw "OMS go-live verification $commandId returned no terminal SSM result."
 }
 Write-Output "SSM command: $commandId"
-Write-Output $result.Output.Trim()
+if (-not [string]::IsNullOrWhiteSpace($result.Output)) {
+    Write-Output $result.Output.Trim()
+}
+if ($result.Status -ne 'Success') {
+    $detail = $result.Error.Trim()
+    throw "OMS go-live verification $commandId refused resume: $detail"
+}
