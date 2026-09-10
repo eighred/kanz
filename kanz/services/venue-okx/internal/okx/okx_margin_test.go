@@ -26,8 +26,10 @@ import (
 
 type fakeMarginOKX struct {
 	srv          *httptest.Server
+	configBody   string
 	balanceBody  string
 	positionBody string
+	configCode   int
 	balanceCode  int
 	positionCode int
 	positionHits int
@@ -35,8 +37,14 @@ type fakeMarginOKX struct {
 
 func newFakeMarginOKX(t *testing.T) *fakeMarginOKX {
 	t.Helper()
-	f := &fakeMarginOKX{}
+	f := &fakeMarginOKX{configBody: `{"code":"0","data":[{"uid":"44556677","acctLv":"3"}]}`}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v5/account/config", func(w http.ResponseWriter, _ *http.Request) {
+		if f.configCode != 0 {
+			w.WriteHeader(f.configCode)
+		}
+		_, _ = w.Write([]byte(f.configBody))
+	})
 	mux.HandleFunc("/api/v5/account/balance", func(w http.ResponseWriter, _ *http.Request) {
 		if f.balanceCode != 0 {
 			w.WriteHeader(f.balanceCode)
@@ -88,6 +96,10 @@ func TestMarginStateReadsOKXsOwnFigures(t *testing.T) {
 	if got.MarginRatio == nil || got.MarginRatio.Cmp(mrat(t, "3.75")) != 0 {
 		t.Errorf("margin ratio = %v, want 3.75 (OKX's mgnRatio)", got.MarginRatio)
 	}
+	if got.MaintenanceMarginSupport != SupportSupported || got.MarginRatioSupport != SupportSupported {
+		t.Errorf("support = (%v,%v), want both SUPPORTED for acctLv=3",
+			got.MaintenanceMarginSupport, got.MarginRatioSupport)
+	}
 	want := time.UnixMilli(1755691200000).UTC()
 	if !got.ObservedAt.Equal(want) {
 		t.Errorf("observedAt = %s, want OKX's own uTime %s — the fetch clock says how recently WE asked, "+
@@ -117,6 +129,7 @@ func TestMarginStateReadsOKXsOwnFigures(t *testing.T) {
 // collateral and liquidates at zero — the confident zero #408 singles out.
 func TestCashModeAccountReportsNoMarginAtAll(t *testing.T) {
 	f := newFakeMarginOKX(t)
+	f.configBody = `{"code":"0","data":[{"uid":"44556677","acctLv":"1"}]}`
 	f.balanceBody = `{"code":"0","msg":"","data":[{"uTime":"1755691200000","totalEq":"92000","imr":"","mmr":"","mgnRatio":""}]}`
 	f.positionBody = `{"code":"0","msg":"","data":[]}`
 
@@ -125,13 +138,37 @@ func TestCashModeAccountReportsNoMarginAtAll(t *testing.T) {
 		t.Fatalf("MarginState: %v", err)
 	}
 	if got.MaintenanceMargin != nil {
-		t.Errorf("maintenance margin = %v for an account OKX does not margin, want nil (UNKNOWN)", got.MaintenanceMargin)
+		t.Errorf("maintenance margin = %v for an account OKX does not margin, want nil", got.MaintenanceMargin)
 	}
 	if got.MarginRatio != nil {
-		t.Errorf("margin ratio = %v for an account OKX does not margin, want nil (UNKNOWN)", got.MarginRatio)
+		t.Errorf("margin ratio = %v for an account OKX does not margin, want nil", got.MarginRatio)
+	}
+	if got.MaintenanceMarginSupport != SupportUnsupported || got.MarginRatioSupport != SupportUnsupported {
+		t.Errorf("support = (%v,%v), want both UNSUPPORTED for acctLv=1",
+			got.MaintenanceMarginSupport, got.MarginRatioSupport)
 	}
 	if got.ObservedAt.IsZero() {
-		t.Error("observedAt is zero — an observation that reports UNKNOWN still has to be datable")
+		t.Error("observedAt is zero — an account-mode observation still has to be datable")
+	}
+}
+
+func TestFuturesModeAccountLevelMarginIsUnsupported(t *testing.T) {
+	f := newFakeMarginOKX(t)
+	f.configBody = `{"code":"0","data":[{"uid":"44556677","acctLv":"2"}]}`
+	f.balanceBody = `{"code":"0","data":[{"uTime":"1755691200000","mmr":"","mgnRatio":""}]}`
+	f.positionBody = `{"code":"0","data":[]}`
+
+	got, err := marginRESTOver(f).MarginState(context.Background())
+	if err != nil {
+		t.Fatalf("MarginState: %v", err)
+	}
+	if got.MaintenanceMargin != nil || got.MarginRatio != nil {
+		t.Fatalf("empty Futures-mode account fields became values: maintenance=%v ratio=%v",
+			got.MaintenanceMargin, got.MarginRatio)
+	}
+	if got.MaintenanceMarginSupport != SupportUnsupported || got.MarginRatioSupport != SupportUnsupported {
+		t.Errorf("support = (%v,%v), want both UNSUPPORTED for acctLv=2 account-level fields",
+			got.MaintenanceMarginSupport, got.MarginRatioSupport)
 	}
 }
 
@@ -162,13 +199,48 @@ func TestPositionsFailureDoesNotDiscardTheAccountFigures(t *testing.T) {
 // the truth is "we could not ask".
 func TestAccountFailureIsAnError(t *testing.T) {
 	f := newFakeMarginOKX(t)
-	f.balanceBody = `{"code":"50011","msg":"rate limited"}`
+	f.configBody = `{"code":"50011","msg":"rate limited"}`
 
 	if _, err := marginRESTOver(f).MarginState(context.Background()); err == nil {
 		t.Error("a failed account call produced an observation instead of an error")
 	}
 	if f.positionHits != 0 {
 		t.Errorf("positions was called %d times after the account leg failed, want 0", f.positionHits)
+	}
+}
+
+// A margin-capable account with empty fields has an incomplete observation. The
+// adapter must retain SUPPORTED so the reporter records UNKNOWN coverage rather
+// than treating the fields as inapplicable.
+func TestMarginModeEmptyFieldsRemainSupported(t *testing.T) {
+	f := newFakeMarginOKX(t)
+	f.balanceBody = `{"code":"0","data":[{"uTime":"1755691200000","mmr":"","mgnRatio":""}]}`
+	f.positionBody = `{"code":"0","data":[]}`
+
+	got, err := marginRESTOver(f).MarginState(context.Background())
+	if err != nil {
+		t.Fatalf("MarginState: %v", err)
+	}
+	if got.MaintenanceMargin != nil || got.MarginRatio != nil {
+		t.Fatalf("empty fields became values: maintenance=%v ratio=%v", got.MaintenanceMargin, got.MarginRatio)
+	}
+	if got.MaintenanceMarginSupport != SupportSupported || got.MarginRatioSupport != SupportSupported {
+		t.Errorf("support = (%v,%v), want both SUPPORTED", got.MaintenanceMarginSupport, got.MarginRatioSupport)
+	}
+}
+
+func TestUnknownAccountModeRemainsUnknown(t *testing.T) {
+	f := newFakeMarginOKX(t)
+	f.configBody = `{"code":"0","data":[{"uid":"44556677","acctLv":"9"}]}`
+	f.balanceBody = `{"code":"0","data":[{"uTime":"1755691200000","mmr":"","mgnRatio":""}]}`
+	f.positionBody = `{"code":"0","data":[]}`
+
+	got, err := marginRESTOver(f).MarginState(context.Background())
+	if err != nil {
+		t.Fatalf("MarginState: %v", err)
+	}
+	if got.MaintenanceMarginSupport != SupportUnknown || got.MarginRatioSupport != SupportUnknown {
+		t.Errorf("support = (%v,%v), want both UNKNOWN", got.MaintenanceMarginSupport, got.MarginRatioSupport)
 	}
 }
 

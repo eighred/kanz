@@ -105,18 +105,21 @@ type okxAccountConfig struct {
 		// it as a STRING (unlike Binance's numeric uid), so it is kept as one — the
 		// value is an identity to compare, never a number to do arithmetic on.
 		UID string `json:"uid"`
+		// AcctLv is OKX's account mode: 1 spot, 2 futures/single-currency,
+		// 3 multi-currency margin, 4 portfolio margin.
+		AcctLv string `json:"acctLv"`
 	} `json:"data"`
 }
 
-// okxAccountID asks OKX which account cred belongs to (GET
+// okxAccount asks OKX which account cred belongs to (GET
 // /api/v5/account/config). An empty uid is an ERROR, never "" — an empty id would
 // compare equal to nothing and would ride upstream as a verified account.
-func okxAccountID(ctx context.Context, cred Credential, opt Options) (string, error) {
+func okxAccount(ctx context.Context, cred Credential, opt Options) (AccountInfo, error) {
 	const requestPath = "/api/v5/account/config"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opt.BaseURL+requestPath, nil)
 	if err != nil {
-		return "", err
+		return AccountInfo{}, err
 	}
 	// THE MODE MATTERS ON A READ, TOO. Demo and live are separate OKX accounts
 	// with separate keys, so asking live "which account is this?" with a demo key
@@ -124,25 +127,25 @@ func okxAccountID(ctx context.Context, cred Credential, opt Options) (string, er
 	// call could do, and a verified-looking uid from the wrong environment is
 	// worse than a refusal.
 	if err := SignOKX(req.Header, cred, opt.Now(), http.MethodGet, requestPath, "", opt.OKXTrading); err != nil {
-		return "", err
+		return AccountInfo{}, err
 	}
 
 	raw, err := do(req, opt.HTTPClient)
 	if err != nil {
-		return "", err
+		return AccountInfo{}, err
 	}
 	var out okxAccountConfig
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", fmt.Errorf("exchangeauth: okx: decode account config: %w", err)
+		return AccountInfo{}, fmt.Errorf("exchangeauth: okx: decode account config: %w", err)
 	}
 	if out.Code != "0" {
-		return "", &execution.APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
+		return AccountInfo{}, &execution.APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
 	}
 	if len(out.Data) == 0 || out.Data[0].UID == "" {
-		return "", errors.New("exchangeauth: okx: GET /api/v5/account/config carried no uid — the exchange did not " +
+		return AccountInfo{}, errors.New("exchangeauth: okx: GET /api/v5/account/config carried no uid — the exchange did not " +
 			"say which account this API key belongs to, so it cannot be verified")
 	}
-	return out.Data[0].UID, nil
+	return AccountInfo{ID: out.Data[0].UID, AccountLevel: out.Data[0].AcctLv}, nil
 }
 
 // atoiSafe parses an OKX string code to int (0 on empty/parse failure).

@@ -5,12 +5,44 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+func TestPrometheusConsumersUseTheOwnedServiceNamespace(t *testing.T) {
+	root := moduleRoot(t)
+	serviceURL := regexp.MustCompile(`http://prometheus\.([a-z0-9-]+)\.svc:9090`)
+	found := 0
+	err := filepath.WalkDir(filepath.Join(root, "infra"), func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || (filepath.Ext(path) != ".yaml" && filepath.Ext(path) != ".sh") {
+			return nil
+		}
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, match := range serviceURL.FindAllSubmatch(body, -1) {
+			found++
+			if string(match[1]) != "kanz-observability" {
+				t.Errorf("%s addresses Prometheus in namespace %q; the Service is owned by kanz-observability", path, match[1])
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found == 0 {
+		t.Fatal("no in-cluster Prometheus consumer URL was found; the namespace check did not execute")
+	}
+}
 
 // THE SCRAPE CONFIG MUST AGREE WITH THE ESTATE IT SCRAPES.
 //
@@ -93,6 +125,7 @@ func TestPrometheusConfigMatchesTheEstate(t *testing.T) {
 			RelabelConfigs []struct {
 				SourceLabels []string `yaml:"source_labels"`
 				Action       string   `yaml:"action"`
+				TargetLabel  string   `yaml:"target_label"`
 			} `yaml:"relabel_configs"`
 		} `yaml:"scrape_configs"`
 	}
@@ -167,6 +200,28 @@ func TestPrometheusConfigMatchesTheEstate(t *testing.T) {
 				"config claims to read them. If it does not, no pod is kept and the target list is "+
 				"empty — which looks exactly like a healthy estate nobody has broken yet.", want)
 		}
+	}
+
+	const (
+		rolloutMetaLabel   = "__meta_kubernetes_pod_label_rollouts_pod_template_hash"
+		rolloutMetricLabel = "rollouts_pod_template_hash"
+	)
+	canaryLabelCopied := false
+	for _, sc := range cfg.ScrapeConfigs {
+		for _, rc := range sc.RelabelConfigs {
+			if rc.TargetLabel != rolloutMetricLabel {
+				continue
+			}
+			for _, source := range rc.SourceLabels {
+				if source == rolloutMetaLabel {
+					canaryLabelCopied = true
+				}
+			}
+		}
+	}
+	if !canaryLabelCopied {
+		t.Errorf("Prometheus does not copy %s to %s; risk canary queries cannot select the new ReplicaSet",
+			rolloutMetaLabel, rolloutMetricLabel)
 	}
 
 	// 3. THE RULES MOUNT MUST NOT BE OPTIONAL.

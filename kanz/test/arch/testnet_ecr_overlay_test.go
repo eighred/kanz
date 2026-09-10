@@ -3,6 +3,7 @@ package arch
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -221,10 +222,15 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"Verify-TestnetWorkloadPods.jq", "jq -e -f \"${pod_filter}\"",
 		"kubernetes.io/dockerconfigjson", "workload-registry-secrets-absent",
 		"workload installation refused: partial managed state", "fresh-install-rollback-started",
+		"prometheus.kanz-observability.svc:9090", "workload-analysis-provider-ready",
+		"update-rollback-started", "rollback_workloads", "update-rollback-complete",
 	} {
 		if !strings.Contains(raw, required) {
 			t.Errorf("Tokyo workload installer is missing fail-closed proof %q", required)
 		}
+	}
+	if strings.Contains(raw, "prometheus.observability.svc:9090") {
+		t.Fatal("Tokyo workload installer points at the nonexistent observability namespace")
 	}
 }
 
@@ -285,6 +291,43 @@ func TestTokyoWorkloadPodVerifierMatchesStatusesByContainerName(t *testing.T) {
 	}
 }
 
+func TestTokyoObservabilityInstallerPinsTheMinimumProviderToECR(t *testing.T) {
+	root := moduleRoot(t)
+	overlay := filepath.Join(root, "infra", "overlays", "testnet-tokyo-observability")
+	cmd := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", overlay)
+	rendered, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("render Tokyo observability: %v", err)
+	}
+	if got := len(regexp.MustCompile(`(?m)^kind: `).FindAll(rendered, -1)); got != 9 {
+		t.Fatalf("Tokyo observability rendered %d resources, want 9", got)
+	}
+	imagePattern := regexp.MustCompile(`(?m)^\s*image:\s+012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/prometheus@sha256:[0-9a-f]{64}\s*$`)
+	if got := len(imagePattern.FindAll(rendered, -1)); got != 1 {
+		t.Fatalf("Tokyo observability rendered %d reviewed ECR Prometheus images, want 1", got)
+	}
+	for _, forbidden := range []string{"quay.io", "imagePullSecrets:", "kubernetes.io/dockerconfigjson", "kind: DaemonSet"} {
+		if bytes.Contains(rendered, []byte(forbidden)) {
+			t.Errorf("Tokyo observability retained forbidden marker %q", forbidden)
+		}
+	}
+
+	installer := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetObservability.ps1")))
+	for _, required := range []string{
+		"HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
+		"Expected 9 rendered resources", "imageTag=v3.13.3-amd64",
+		"apply --server-side --dry-run=server", "{.status.phase}''=Bound pvc/prometheus-data",
+		"sed ''s/namespace: kanz-observability/namespace: default/g''",
+		"rollout status deployment/prometheus", "kubernetes.io/service-name=prometheus",
+		"/-/ready", "query=vector(1)", "observability-image-matches-reviewed-ecr-lock",
+		"fresh-observability-rollback-started",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Tokyo observability installer is missing proof %q", required)
+		}
+	}
+}
+
 func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 	jq, err := exec.LookPath("jq")
 	if err != nil {
@@ -297,17 +340,22 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 		"OMS_REQUIRE_VERIFIED_ACCOUNT":  "true",
 		"OMS_REQUIRE_DUAL_CONTROL":      "true",
 		"OMS_DUAL_CONTROL_MIN_NOTIONAL": "1 USD",
-		"OMS_VENUE_ACCOUNTS":            "tenant/portfolio@XBIN=binance-main",
+		"OMS_VENUE_ACCOUNTS":            "tenant/portfolio@XBIN=binance-main,tenant/portfolio@XOKX=okx-sub-1",
 	}
-	fixture := func(values map[string]string, logs string) []byte {
+	fixture := func(values map[string]string, logs string, portfolios, mandates int, unverified, uncovered, marginCurrent float64) []byte {
 		vars := make([]any, 0, len(values))
 		for name, value := range values {
 			vars = append(vars, map[string]any{"name": name, "value": value})
 		}
 		body, marshalErr := json.Marshal(map[string]any{
-			"deployment":  map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "oms", "env": vars}}}}}},
-			"pods":        map[string]any{"items": []any{map[string]any{"status": map[string]any{"phase": "Running", "containerStatuses": []any{map[string]any{"name": "oms", "ready": true}}}}}},
-			"recent_logs": logs,
+			"deployment":      map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "oms", "env": vars}}}}}},
+			"pods":            map[string]any{"items": []any{map[string]any{"status": map[string]any{"phase": "Running", "containerStatuses": []any{map[string]any{"name": "oms", "ready": true}}}}}},
+			"recent_logs":     logs,
+			"portfolio_count": portfolios,
+			"mandate_count":   mandates,
+			"oms_metrics": fmt.Sprintf("kanz_oms_unverified_venue_account_total %g\n"+
+				"kanz_oms_venue_margin_uncovered_total %g\n"+
+				"kanz_oms_venue_margin_accounts_current %g\n", unverified, uncovered, marginCurrent),
 		})
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
@@ -315,11 +363,24 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 		return body
 	}
 	run := func(body []byte) error {
-		cmd := exec.Command(jq, "-e", "-f", filter)
+		cmd := exec.Command(jq, "-c", "-f", filter)
 		cmd.Stdin = bytes.NewReader(body)
-		return cmd.Run()
+		output, runErr := cmd.Output()
+		if runErr != nil {
+			return runErr
+		}
+		var result struct {
+			Verdict string `json:"verdict"`
+		}
+		if err := json.Unmarshal(output, &result); err != nil {
+			return err
+		}
+		if result.Verdict != "PASS" {
+			return fmt.Errorf("verdict = %s", result.Verdict)
+		}
+		return nil
 	}
-	if err := run(fixture(env, "healthy")); err != nil {
+	if err := run(fixture(env, "healthy", 1, 1, 0, 0, 1)); err != nil {
 		t.Fatalf("armed, Ready OMS was rejected: %v", err)
 	}
 	for _, name := range []string{"OMS_REQUIRE_MANDATE", "OMS_REQUIRE_VENUE_ACCOUNT", "OMS_REQUIRE_VERIFIED_ACCOUNT", "OMS_REQUIRE_DUAL_CONTROL"} {
@@ -328,7 +389,7 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 			mutated[key] = value
 		}
 		mutated[name] = "false"
-		if err := run(fixture(mutated, "healthy")); err == nil {
+		if err := run(fixture(mutated, "healthy", 1, 1, 0, 0, 1)); err == nil {
 			t.Errorf("%s=false passed the go-live verifier", name)
 		}
 	}
@@ -338,7 +399,7 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 			mutated[key] = value
 		}
 		mutated[name] = ""
-		if err := run(fixture(mutated, "healthy")); err == nil {
+		if err := run(fixture(mutated, "healthy", 1, 1, 0, 0, 1)); err == nil {
 			t.Errorf("empty %s passed the go-live verifier", name)
 		}
 	}
@@ -346,8 +407,23 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 		"venue adapter registered with an UNVERIFIED account",
 		"the exchange did not report part of this account's margin state",
 	} {
-		if err := run(fixture(env, warning)); err == nil {
+		if err := run(fixture(env, warning, 1, 1, 0, 0, 1)); err == nil {
 			t.Errorf("unsafe recent OMS posture %q passed the go-live verifier", warning)
+		}
+	}
+	for _, tc := range []struct {
+		name                           string
+		portfolios, mandates           int
+		unverified, uncovered, current float64
+	}{
+		{name: "no portfolios", portfolios: 0, mandates: 0, current: 1},
+		{name: "missing mandate", portfolios: 1, mandates: 0, current: 1},
+		{name: "unverified account", portfolios: 1, mandates: 1, unverified: 1, current: 1},
+		{name: "unobserved OKX margin", portfolios: 1, mandates: 1},
+		{name: "incomplete OKX margin", portfolios: 1, mandates: 1, uncovered: 1, current: 1},
+	} {
+		if err := run(fixture(env, "healthy", tc.portfolios, tc.mandates, tc.unverified, tc.uncovered, tc.current)); err == nil {
+			t.Errorf("%s passed the go-live verifier", tc.name)
 		}
 	}
 }

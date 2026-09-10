@@ -160,6 +160,72 @@ func TestUnreportedQuantitiesAreAbsentNotZero(t *testing.T) {
 	}
 }
 
+func TestUnsupportedMarginFieldsAreCompleteWithoutInventingZero(t *testing.T) {
+	pub := &capturePub{}
+	obs := execution.VenueMargin{
+		ObservedAt:               observed,
+		MaintenanceMarginSupport: execution.SupportUnsupported,
+		MarginRatioSupport:       execution.SupportUnsupported,
+	}
+	if err := reporterOver(&fakeSource{obs: obs}, pub).Report(context.Background()); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	msg := onlyState(t, pub)
+	if msg.GetMaintenanceMargin() != nil || msg.GetMarginRatio() != nil {
+		t.Fatal("unsupported fields acquired numeric values")
+	}
+	if msg.GetMaintenanceMarginSupport() != collateralpb.SupportStatus_SUPPORT_STATUS_UNSUPPORTED ||
+		msg.GetMarginRatioSupport() != collateralpb.SupportStatus_SUPPORT_STATUS_UNSUPPORTED {
+		t.Errorf("support = (%v,%v), want both UNSUPPORTED",
+			msg.GetMaintenanceMarginSupport(), msg.GetMarginRatioSupport())
+	}
+	if cov := msg.GetCoverage(); cov.GetExcludedCount() != 0 {
+		t.Errorf("excluded = %d, want 0 for observed-inapplicable fields", cov.GetExcludedCount())
+	}
+	v := New(WithClock(frozen))
+	fold(t, v, msg)
+	if _, ok := v.MarginRatio("OKX", "acct-1"); ok {
+		t.Error("an unsupported absent ratio became an actionable numeric ratio")
+	}
+	if cov, ok := v.Coverage("OKX", "acct-1"); !ok || !cov.Complete() {
+		t.Errorf("unsupported fields did not produce a complete typed observation: coverage=%+v ok=%v", cov, ok)
+	}
+}
+
+func TestSupportedButAbsentMarginFieldsAreIncomplete(t *testing.T) {
+	pub := &capturePub{}
+	obs := execution.VenueMargin{
+		ObservedAt:               observed,
+		MaintenanceMarginSupport: execution.SupportSupported,
+		MarginRatioSupport:       execution.SupportSupported,
+	}
+	if err := reporterOver(&fakeSource{obs: obs}, pub).Report(context.Background()); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	msg := onlyState(t, pub)
+	if msg.GetMaintenanceMarginSupport() != collateralpb.SupportStatus_SUPPORT_STATUS_SUPPORTED ||
+		msg.GetMarginRatioSupport() != collateralpb.SupportStatus_SUPPORT_STATUS_SUPPORTED {
+		t.Errorf("support = (%v,%v), want both SUPPORTED",
+			msg.GetMaintenanceMarginSupport(), msg.GetMarginRatioSupport())
+	}
+	if cov := msg.GetCoverage(); cov.GetExcludedCount() != 2 {
+		t.Errorf("excluded = %d, want 2 for missing supported fields", cov.GetExcludedCount())
+	}
+}
+
+func TestUnsupportedMarginFieldCannotCarryAValue(t *testing.T) {
+	pub := &capturePub{}
+	obs := full()
+	obs.MaintenanceMarginSupport = execution.SupportUnsupported
+	err := reporterOver(&fakeSource{obs: obs}, pub).Report(context.Background())
+	if err == nil {
+		t.Fatal("unsupported field carrying a value was published")
+	}
+	if len(pub.events) != 0 {
+		t.Errorf("published %d events for contradictory support state, want 0", len(pub.events))
+	}
+}
+
 // TestAFruitlessObservationIsStillPublished: "we asked and the exchange told us
 // nothing" is a different operational state from this feed being silent, and the
 // two are indistinguishable if a fruitless poll publishes nothing.

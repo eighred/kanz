@@ -10,7 +10,7 @@
 # data loss) — so SRE-01d's GameDay workflow can gate on it. POSIX sh: it runs
 # both at a dev shell and in the GameDay verify Task (curl image, /bin/sh).
 set -eu
-PROM="${PROM:-http://prometheus.observability.svc:9090}"
+PROM="${PROM:-http://prometheus.kanz-observability.svc:9090}"
 EXP="${1:?usage: verify.sh <experiment>}"
 
 q() { # q <promql> -> scalar (empty if no data)

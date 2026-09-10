@@ -18,9 +18,10 @@ import (
 // Gated on TEST_OKX_TESTNET=1 plus OKX_TESTNET_KEY/_SECRET/_PASSPHRASE, the same
 // contract TestOKXTestnet_SignedRoundTrip uses.
 //
-// GET ONLY, STRUCTURALLY. MarginState issues two reads — /api/v5/account/balance
-// and /api/v5/account/positions — and the publisher below is a capture that
-// touches no network. Nothing in this file can place, amend or cancel an order.
+// GET ONLY, STRUCTURALLY. MarginState reads /api/v5/account/config to establish
+// the account mode, then /api/v5/account/balance and /api/v5/account/positions.
+// The publisher below is a capture that touches no network. Nothing in this
+// file can place, amend or cancel an order.
 //
 // # WHY THE TRANSPORT PROBES DID NOT ALREADY COVER THIS
 //
@@ -32,14 +33,14 @@ import (
 //
 // # THE TWO OUTCOMES ARE BOTH RESULTS, AND THE TEST SAYS WHICH
 //
-// A demo SPOT account may carry no margin ratio at all, and that is not a
-// failure — it is the UNKNOWN path, which is the one control 3 fails closed on.
-// So this asserts the invariant that holds either way and REPORTS which arm ran,
-// because they prove different halves and only one of them can be claimed from
-// any given run:
+// A demo SPOT account may carry no margin ratio because its observed account
+// mode does not support one. A margin-capable account with an absent ratio has
+// an UNKNOWN observation and remains uncovered. This test asserts the invariant
+// that holds in each arm and reports which one ran:
 //
 //	ratio REPORTED    → MarginRatio is set, and coverage counted it
-//	ratio ABSENT      → MarginRatio is nil AND an exclusion names no_margin_ratio
+//	ratio ABSENT + UNSUPPORTED → nil, no synthetic zero, complete for this field
+//	ratio ABSENT + SUPPORTED/UNKNOWN → nil and an exclusion names no_margin_ratio
 //
 // WHAT MUST NEVER HAPPEN IS THE THIRD OUTCOME: a MarginRatio present and zero
 // where the venue reported none. venuemargin.toDecimal returns (nil, false) for a
@@ -119,21 +120,25 @@ func TestOKXDemo_ReporterMapsLiveMarginState(t *testing.T) {
 				"would understate what the venue actually told us")
 		}
 	default:
-		// THE UNKNOWN PATH, AND IT IS A RESULT RATHER THAN A GAP. What must be
-		// true is that the field is ABSENT and the reason is NAMED — never a zero
-		// standing in for a number nobody sent.
-		t.Log("UNKNOWN: OKX demo reported no margin ratio for this account (expected for a spot " +
-			"demo account). #408 control 1's UNKNOWN path is exercised; its POPULATED path is not.")
-		if !containsReason(uncovered, venuemargin.SkipNoMarginRatio) {
-			t.Errorf("no margin ratio was reported and no %q exclusion was raised — the FACT is "+
-				"silently missing a quantity instead of saying it is missing (reasons seen: %v)",
-				venuemargin.SkipNoMarginRatio, uncovered)
-		}
-		cov := msg.GetCoverage()
-		if cov == nil || cov.GetExcludedCount() == 0 {
-			t.Error("no margin ratio, and coverage records no exclusion — \"the venue did not say\" " +
-				"and \"we did not ask\" are the same observable state, which is the conflation " +
-				"this whole feed exists to remove")
+		switch msg.GetMarginRatioSupport() {
+		case collateralpb.SupportStatus_SUPPORT_STATUS_UNSUPPORTED:
+			t.Log("UNSUPPORTED: OKX account mode does not support a margin ratio; the FACT carries no numeric value.")
+			if containsReason(uncovered, venuemargin.SkipNoMarginRatio) {
+				t.Errorf("unsupported margin ratio was counted as an observation failure (reasons: %v)", uncovered)
+			}
+		case collateralpb.SupportStatus_SUPPORT_STATUS_SUPPORTED,
+			collateralpb.SupportStatus_SUPPORT_STATUS_UNSPECIFIED:
+			t.Log("UNKNOWN: the account may support a margin ratio, but this observation carried none.")
+			if !containsReason(uncovered, venuemargin.SkipNoMarginRatio) {
+				t.Errorf("no margin ratio was reported and no %q exclusion was raised (reasons: %v)",
+					venuemargin.SkipNoMarginRatio, uncovered)
+			}
+			cov := msg.GetCoverage()
+			if cov == nil || cov.GetExcludedCount() == 0 {
+				t.Error("missing supported/unknown ratio was presented as complete coverage")
+			}
+		default:
+			t.Errorf("unknown margin-ratio support enum %v", msg.GetMarginRatioSupport())
 		}
 	}
 

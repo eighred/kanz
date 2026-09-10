@@ -190,16 +190,26 @@ func (r *Reporter) build(obs execution.VenueMargin) (*collateralpb.VenueMarginSt
 		}
 	}
 
+	maintenanceSupport, maintenanceMissing, err := fieldSupport(obs.MaintenanceMargin, obs.MaintenanceMarginSupport)
+	if err != nil {
+		return nil, fmt.Errorf("venuemargin: maintenance margin: %w", err)
+	}
+	msg.MaintenanceMarginSupport = maintenanceSupport
 	if d, ok := toDecimal(obs.MaintenanceMargin); ok {
 		msg.MaintenanceMargin = d
 		cov.Contributed++
-	} else {
+	} else if maintenanceMissing {
 		exclude("", reasonFor(obs.MaintenanceMargin, SkipNoMaintenanceMargin))
 	}
+	marginRatioSupport, marginRatioMissing, err := fieldSupport(obs.MarginRatio, obs.MarginRatioSupport)
+	if err != nil {
+		return nil, fmt.Errorf("venuemargin: margin ratio: %w", err)
+	}
+	msg.MarginRatioSupport = marginRatioSupport
 	if d, ok := toDecimal(obs.MarginRatio); ok {
 		msg.MarginRatio = d
 		cov.Contributed++
-	} else {
+	} else if marginRatioMissing {
 		exclude("", reasonFor(obs.MarginRatio, SkipNoMarginRatio))
 	}
 	for _, p := range obs.Positions {
@@ -247,6 +257,31 @@ func (r *Reporter) build(obs execution.VenueMargin) (*collateralpb.VenueMarginSt
 		}
 	}
 	return msg, nil
+}
+
+// fieldSupport maps the adapter's three-state capability onto the wire and
+// reports whether an absent value is incomplete coverage. A supported field may
+// still be absent, which is UNKNOWN observation state. An unsupported field is
+// complete without a value and can never carry a numeric claim.
+func fieldSupport(value *big.Rat, support execution.SupportStatus) (collateralpb.SupportStatus, bool, error) {
+	if value != nil {
+		if support == execution.SupportUnsupported {
+			return collateralpb.SupportStatus_SUPPORT_STATUS_UNSPECIFIED, false,
+				errors.New("source supplied a value for an unsupported field")
+		}
+		return collateralpb.SupportStatus_SUPPORT_STATUS_SUPPORTED, false, nil
+	}
+	switch support {
+	case execution.SupportUnknown:
+		return collateralpb.SupportStatus_SUPPORT_STATUS_UNSPECIFIED, true, nil
+	case execution.SupportSupported:
+		return collateralpb.SupportStatus_SUPPORT_STATUS_SUPPORTED, true, nil
+	case execution.SupportUnsupported:
+		return collateralpb.SupportStatus_SUPPORT_STATUS_UNSUPPORTED, false, nil
+	default:
+		return collateralpb.SupportStatus_SUPPORT_STATUS_UNSPECIFIED, false,
+			fmt.Errorf("unknown support status %d", support)
+	}
 }
 
 // maxExclusions caps the sample carried on one observation. It mirrors

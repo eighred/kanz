@@ -69,19 +69,33 @@ func Venues() []string {
 	return venues
 }
 
-// AccountID asks the venue which exchange account cred belongs to, returning the
-// exchange's own id for it. An exchange response that carries no id is an error,
-// never "" — an empty id would sail upstream looking like a verified account.
-func AccountID(ctx context.Context, venue string, cred Credential, opt Options) (string, error) {
+// AccountInfo is the exchange's own identity and capability metadata for the
+// account behind a credential. AccountLevel is populated by OKX from acctLv and
+// intentionally remains opaque here; only the OKX adapter interprets it.
+type AccountInfo struct {
+	ID           string
+	AccountLevel string
+}
+
+// Account asks the venue which exchange account cred belongs to. An exchange
+// response carrying no id is an error, never an empty, verified-looking record.
+func Account(ctx context.Context, venue string, cred Credential, opt Options) (AccountInfo, error) {
 	opt = opt.resolve()
 	switch venue {
 	case "okx":
-		return okxAccountID(ctx, cred, opt)
+		return okxAccount(ctx, cred, opt)
 	case "binance":
-		return binanceAccountID(ctx, cred, opt)
+		return binanceAccount(ctx, cred, opt)
 	default:
-		return "", fmt.Errorf("%w: %q", ErrUnsupportedVenue, venue)
+		return AccountInfo{}, fmt.Errorf("%w: %q", ErrUnsupportedVenue, venue)
 	}
+}
+
+// AccountID preserves the narrow account-proof API for callers that do not need
+// venue capability metadata.
+func AccountID(ctx context.Context, venue string, cred Credential, opt Options) (string, error) {
+	info, err := Account(ctx, venue, cred, opt)
+	return info.ID, err
 }
 
 // do executes req and returns the body for any status <500. It reads at most

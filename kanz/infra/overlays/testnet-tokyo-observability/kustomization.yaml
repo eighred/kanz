@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # node-exporter.yaml owns the namespace. Tokyo's minimum canary dependency
+  # does not need host mounts or a second third-party image, so the DaemonSet is
+  # removed below and can be introduced by a separate reviewed expansion.
+  - ../../observability/node-exporter.yaml
+  - ../../observability/rules-configmap.yaml
+  - ../../observability/prometheus.yaml
+
+images:
+  - name: quay.io/prometheus/prometheus
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/prometheus
+    digest: sha256:76a2c518c388979ed258d2bd0f1685a693cb412c28f92dd9f3f7177a850dfa0a
+
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: DaemonSet
+      name: node-exporter
+    patch: |-
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: node-exporter
+      $patch: delete
