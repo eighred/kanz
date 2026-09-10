@@ -195,7 +195,7 @@ Invoke-SsmCommands -Comment 'Stage Kanz workload Pod verifier' -TimeoutSeconds 6
 ) | Out-Null
 
 $applyFlag = if ($Apply) { '1' } else { '0' }
-$verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo workloads' -TimeoutSeconds 1800 -Commands @(
+$verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo workloads' -TimeoutSeconds 2400 -Commands @(
     'set -Eeuo pipefail',
     "payload='$remotePayload'",
     "manifest='$remoteManifest'",
@@ -203,7 +203,7 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo worklo
     "rollback='$remoteRollback'",
     'applied=0',
     'fresh=0',
-    'rollback_workloads() { jq -c ''.items[]'' "${rollback}" | while IFS= read -r item; do kind=$(jq -r ''.kind | ascii_downcase'' <<<"${item}"); name=$(jq -r ''.metadata.name'' <<<"${item}"); patch=$(jq -c ''[{op:"replace",path:"/spec",value:.spec}] + [(.metadata.annotations // {} | to_entries[]) as $a | {op:"add",path:("/metadata/annotations/" + ($a.key | gsub("~";"~0") | gsub("/";"~1"))),value:$a.value}]'' <<<"${item}"); /usr/local/bin/k3s kubectl -n kanz-services patch "${kind}/${name}" --type=json -p "${patch}" >&2 || return 1; done; }',
+    'rollback_workloads() { /usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap -f "${rollback}" >&2; }',
     'finish() { rc=$?; set +e; if [[ "${rc}" != 0 && "${applied}" = 1 ]]; then if [[ "${fresh}" = 1 ]]; then echo fresh-install-rollback-started >&2; /usr/local/bin/k3s kubectl delete --ignore-not-found=true --wait=true -f "${manifest}" >&2 || echo fresh-install-rollback-failed >&2; elif [[ -s "${rollback}" ]]; then echo update-rollback-started >&2; rollback_ok=1; rollback_workloads || rollback_ok=0; for deployment in identity compliance accounting audit oms venue-binance venue-okx api-gateway; do /usr/local/bin/k3s kubectl -n kanz-services rollout status "deployment/${deployment}" --timeout=600s >&2 || rollback_ok=0; done; /usr/local/bin/k3s kubectl -n kanz-services wait --for=jsonpath=''{.status.phase}''=Healthy rollout/risk-engine --timeout=900s >&2 || rollback_ok=0; if [[ "${rollback_ok}" = 1 ]]; then echo update-rollback-complete >&2; else echo update-rollback-failed >&2; fi; fi; fi; rm -f "${payload}" "${manifest}" "${pod_filter}" "${rollback}"; exit "${rc}"; }',
     'trap finish EXIT',
     'base64 -d "${payload}" | gzip -d > "${manifest}"',
@@ -218,7 +218,7 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo worklo
     '/usr/local/bin/k3s kubectl -n kanz-messaging rollout status statefulset/redis --timeout=60s >/dev/null',
     '/usr/local/bin/k3s kubectl -n cnpg-system wait --for=condition=Available deployment/cnpg-controller-manager --timeout=60s >/dev/null',
     '/usr/local/bin/k3s kubectl -n argo-rollouts wait --for=condition=Available deployment/argo-rollouts --timeout=60s >/dev/null',
-    '/usr/local/bin/k3s kubectl apply --server-side --dry-run=server --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
+    '/usr/local/bin/k3s kubectl apply --server-side --force-conflicts --dry-run=server --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
     'echo workload-server-dry-run-ok',
     "apply='$applyFlag'",
     'if [[ "${apply}" = 0 ]]; then exit 0; fi',
@@ -235,7 +235,7 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo worklo
     'if [[ "${accounting_exists}" = 0 ]]; then fresh=1; fi',
     'if [[ "${fresh}" = 0 ]]; then /usr/local/bin/k3s kubectl -n kanz-services get deployment/identity deployment/compliance deployment/accounting deployment/audit deployment/oms deployment/venue-binance deployment/venue-okx deployment/api-gateway rollout.argoproj.io/risk-engine -o json | jq ''{items:[.items[] | {apiVersion,kind,metadata:{name:.metadata.name,namespace:.metadata.namespace,annotations:((.metadata.annotations // {}) | with_entries(select(.key | startswith("kanz.io/"))))},spec:.spec}]}'' > "${rollback}"; test "$(jq ''.items | length'' "${rollback}")" = 9; fi',
     'applied=1',
-    '/usr/local/bin/k3s kubectl apply --server-side --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
+    '/usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
     'for deployment in identity compliance accounting audit oms venue-binance venue-okx api-gateway; do /usr/local/bin/k3s kubectl -n kanz-services rollout status "deployment/${deployment}" --timeout=600s >/dev/null; done',
     '/usr/local/bin/k3s kubectl -n kanz-services wait --for=jsonpath=''{.status.phase}''=Healthy rollout/risk-engine --timeout=900s >/dev/null',
     'pods=$(/usr/local/bin/k3s kubectl -n kanz-services get pods -l app.kubernetes.io/part-of=kanz -o json)',

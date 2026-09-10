@@ -217,13 +217,14 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",
 		"rollout status statefulset/nats", "rollout status statefulset/redis",
-		"apply --server-side --dry-run=server", "rollout status \"deployment/${deployment}\"",
+		"apply --server-side --force-conflicts --dry-run=server", "rollout status \"deployment/${deployment}\"",
 		"condition=Available deployment/argo-rollouts", "status.phase}''=Healthy rollout/risk-engine",
 		"Verify-TestnetWorkloadPods.jq", "jq -e -f \"${pod_filter}\"",
 		"kubernetes.io/dockerconfigjson", "workload-registry-secrets-absent",
 		"workload installation refused: partial managed state", "fresh-install-rollback-started",
 		"prometheus.kanz-observability.svc:9090", "workload-analysis-provider-ready",
 		"update-rollback-started", "rollback_workloads", "update-rollback-complete",
+		"rollback_workloads() { /usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap",
 	} {
 		if !strings.Contains(raw, required) {
 			t.Errorf("Tokyo workload installer is missing fail-closed proof %q", required)
@@ -231,6 +232,9 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	}
 	if strings.Contains(raw, "prometheus.observability.svc:9090") {
 		t.Fatal("Tokyo workload installer points at the nonexistent observability namespace")
+	}
+	if strings.Contains(raw, "kubectl -n kanz-services patch") {
+		t.Fatal("Tokyo workload rollback must not transfer managed fields to kubectl-patch")
 	}
 }
 
