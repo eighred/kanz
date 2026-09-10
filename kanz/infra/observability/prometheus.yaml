@@ -193,6 +193,15 @@ data:
           - source_labels: [__meta_kubernetes_pod_label_app]
             action: replace
             target_label: service
+          # Argo's AnalysisTemplate scopes its risk queries to the new ReplicaSet.
+          # Kubernetes discovery normalizes the Rollout's
+          # `rollouts-pod-template-hash` label to this meta label; Prometheus does
+          # not retain Kubernetes labels unless a relabel rule copies them.
+          # Without this rule both canary queries return an empty vector and an
+          # otherwise healthy rollout aborts for lack of evidence.
+          - source_labels: [__meta_kubernetes_pod_label_rollouts_pod_template_hash]
+            action: replace
+            target_label: rollouts_pod_template_hash
 ---
 apiVersion: apps/v1
 kind: Deployment
