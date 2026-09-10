@@ -256,6 +256,14 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// BEFORE the store because the store releases into it — see newStateStore.
 	cache := risk.NewCache()
 	store := newStateStore(sharding.StoreOptions(), cache)
+	// The canary must distinguish "this replica has no owned portfolios" from
+	// "portfolio recomputes disappeared". A halted, empty testnet has no honest
+	// recompute latency sample, while an active replica with the same empty RED
+	// counters is unsafe. Export the store inventory directly so the rollout can
+	// admit the former only when the always-present inflight and queue gauges also
+	// prove the replica is idle. GaugeFunc reads the same concurrency-safe store
+	// used by queries and recomputes; it creates no domain state or FACT.
+	registerPortfolioInventory(obs.Registry, store)
 	registry := compute.DefaultRegistry()
 	// RISK-12: with a market-data price store configured, override the RISK-07
 	// 1%×gross VaR99 placeholder with the real historical-simulation model, read
@@ -867,6 +875,13 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	}
 
 	return a.Run(ctx)
+}
+
+func registerPortfolioInventory(reg prometheus.Registerer, store *state.Store) {
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_risk_portfolios_loaded",
+		Help: "portfolios currently owned by this risk-engine replica; zero is an observed empty estate, not an inferred successful recompute.",
+	}, func() float64 { return float64(len(store.IDs())) }))
 }
 
 // startCalibration wires the WIRE-01c curve-calibration loop and launches it on
