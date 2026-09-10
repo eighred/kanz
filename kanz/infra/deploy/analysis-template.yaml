@@ -29,7 +29,7 @@ spec:
       failureLimit: 0
       provider:
         prometheus:
-          address: http://prometheus.observability.svc:9090
+          address: http://prometheus.kanz-observability.svc:9090
           query: >-
             sum(rate(kanz_risk_recompute_total{status="ok",
               rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
@@ -45,7 +45,7 @@ spec:
       failureLimit: 0
       provider:
         prometheus:
-          address: http://prometheus.observability.svc:9090
+          address: http://prometheus.kanz-observability.svc:9090
           query: >-
             histogram_quantile(0.99, sum(rate(
               kanz_risk_recompute_duration_seconds_bucket{

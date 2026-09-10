@@ -101,7 +101,7 @@ spec:
           command: ["/bin/sh", "/verify/verify.sh"]
           args: ["broker-kill"]
           env:
-            - { name: PROM, value: "http://prometheus.observability.svc:9090" }
+            - { name: PROM, value: "http://prometheus.kanz-observability.svc:9090" }
           volumeMounts:
             - { name: verify, mountPath: /verify }
         volumes:
@@ -117,7 +117,7 @@ spec:
           image: curlimages/curl:8.10.1
           command: ["/bin/sh", "/verify/verify.sh"]
           args: ["network-partition"]
-          env: [{ name: PROM, value: "http://prometheus.observability.svc:9090" }]
+          env: [{ name: PROM, value: "http://prometheus.kanz-observability.svc:9090" }]
           volumeMounts: [{ name: verify, mountPath: /verify }]
     - name: verify-latency
       templateType: Task
@@ -129,7 +129,7 @@ spec:
           image: curlimages/curl:8.10.1
           command: ["/bin/sh", "/verify/verify.sh"]
           args: ["latency-injection"]
-          env: [{ name: PROM, value: "http://prometheus.observability.svc:9090" }]
+          env: [{ name: PROM, value: "http://prometheus.kanz-observability.svc:9090" }]
           volumeMounts: [{ name: verify, mountPath: /verify }]
     - name: verify-pod-eviction
       templateType: Task
@@ -141,7 +141,7 @@ spec:
           image: curlimages/curl:8.10.1
           command: ["/bin/sh", "/verify/verify.sh"]
           args: ["pod-eviction"]
-          env: [{ name: PROM, value: "http://prometheus.observability.svc:9090" }]
+          env: [{ name: PROM, value: "http://prometheus.kanz-observability.svc:9090" }]
           volumeMounts: [{ name: verify, mountPath: /verify }]
 
     # Recovery dwell between faults — let lag drain / staleness clear / pods
