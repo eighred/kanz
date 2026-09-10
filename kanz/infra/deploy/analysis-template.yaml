@@ -24,30 +24,64 @@ spec:
     - name: recompute-success-rate
       interval: 30s
       count: 4
-      # >= 99% of recomputes on the canary must succeed.
+      # >= 99% of recomputes on the canary must succeed. A replica that owns no
+      # portfolios has no honest RED sample; admit that explicit state only when
+      # the inventory, inflight and queue gauges are all present and zero.
       successCondition: "result[0] >= 0.99"
       failureLimit: 0
       provider:
         prometheus:
           address: http://prometheus.kanz-observability.svc:9090
           query: >-
-            sum(rate(kanz_risk_recompute_total{status="ok",
-              rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
-            /
-            sum(rate(kanz_risk_recompute_total{
-              rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
+            (
+              sum(rate(kanz_risk_recompute_total{status="ok",
+                rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
+              /
+              sum(rate(kanz_risk_recompute_total{
+                rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
+              and
+              sum(rate(kanz_risk_recompute_total{
+                rollouts_pod_template_hash="{{args.canary-hash}}"}[2m])) > 0
+            )
+            or
+            (
+              vector(1)
+              and sum(kanz_risk_portfolios_loaded{
+                rollouts_pod_template_hash="{{args.canary-hash}}"}) == 0
+              and sum(kanz_risk_recompute_inflight{
+                rollouts_pod_template_hash="{{args.canary-hash}}"}) == 0
+              and sum(kanz_risk_recompute_queue_depth{
+                rollouts_pod_template_hash="{{args.canary-hash}}"}) == 0
+            )
     - name: recompute-p99-latency
       interval: 30s
       count: 4
       # p99 recompute latency on the canary stays under 500ms (the ORCH-01f
-      # budget the e2e harness already asserts in-process).
+      # budget the e2e harness already asserts in-process). The same explicit
+      # empty-and-idle state returns zero; active estates still require a
+      # non-empty histogram sample and NaN remains a failure.
       successCondition: "result[0] <= 0.5"
       failureLimit: 0
       provider:
         prometheus:
           address: http://prometheus.kanz-observability.svc:9090
           query: >-
-            histogram_quantile(0.99, sum(rate(
-              kanz_risk_recompute_duration_seconds_bucket{
-                rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
-            by (le))
+            (
+              histogram_quantile(0.99, sum(rate(
+                kanz_risk_recompute_duration_seconds_bucket{
+                  rollouts_pod_template_hash="{{args.canary-hash}}"}[2m]))
+              by (le))
+              and
+              sum(rate(kanz_risk_recompute_duration_seconds_count{
+                rollouts_pod_template_hash="{{args.canary-hash}}"}[2m])) > 0
+            )
+            or
+            (
+              vector(0)
+              and sum(kanz_risk_portfolios_loaded{
+                rollouts_pod_template_hash="{{args.canary-hash}}"}) == 0
+              and sum(kanz_risk_recompute_inflight{
+                rollouts_pod_template_hash="{{args.canary-hash}}"}) == 0
+              and sum(kanz_risk_recompute_queue_depth{
+                rollouts_pod_template_hash="{{args.canary-hash}}"}) == 0
+            )
