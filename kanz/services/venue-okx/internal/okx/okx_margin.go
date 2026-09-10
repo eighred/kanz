@@ -161,15 +161,16 @@ func (c *okxREST) MarginState(ctx context.Context) (VenueMargin, error) {
 	return out, nil
 }
 
-// marginSupport interprets OKX acctLv. Spot/simple accounts cannot take margin
-// and their empty mmr/mgnRatio fields are UNSUPPORTED, not a failed observation.
-// Every margin-capable mode says the fields are supported; an absent value in
-// those modes remains UNKNOWN and is recorded as incomplete coverage.
+// marginSupport interprets OKX acctLv for the ACCOUNT-LEVEL mmr and mgnRatio
+// fields returned by /account/balance. OKX documents those fields as
+// inapplicable in Spot/simple and Futures/single-currency modes; Futures mode
+// reports them inside each currency detail instead. Multi-currency and portfolio
+// modes support the account-level fields, where absence remains UNKNOWN.
 func marginSupport(accountLevel string) SupportStatus {
 	switch accountLevel {
-	case "1":
+	case "1", "2":
 		return SupportUnsupported
-	case "2", "3", "4":
+	case "3", "4":
 		return SupportSupported
 	default:
 		return SupportUnknown

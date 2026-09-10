@@ -37,7 +37,7 @@ type fakeMarginOKX struct {
 
 func newFakeMarginOKX(t *testing.T) *fakeMarginOKX {
 	t.Helper()
-	f := &fakeMarginOKX{configBody: `{"code":"0","data":[{"uid":"44556677","acctLv":"2"}]}`}
+	f := &fakeMarginOKX{configBody: `{"code":"0","data":[{"uid":"44556677","acctLv":"3"}]}`}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v5/account/config", func(w http.ResponseWriter, _ *http.Request) {
 		if f.configCode != 0 {
@@ -97,7 +97,7 @@ func TestMarginStateReadsOKXsOwnFigures(t *testing.T) {
 		t.Errorf("margin ratio = %v, want 3.75 (OKX's mgnRatio)", got.MarginRatio)
 	}
 	if got.MaintenanceMarginSupport != SupportSupported || got.MarginRatioSupport != SupportSupported {
-		t.Errorf("support = (%v,%v), want both SUPPORTED for acctLv=2",
+		t.Errorf("support = (%v,%v), want both SUPPORTED for acctLv=3",
 			got.MaintenanceMarginSupport, got.MarginRatioSupport)
 	}
 	want := time.UnixMilli(1755691200000).UTC()
@@ -149,6 +149,26 @@ func TestCashModeAccountReportsNoMarginAtAll(t *testing.T) {
 	}
 	if got.ObservedAt.IsZero() {
 		t.Error("observedAt is zero — an account-mode observation still has to be datable")
+	}
+}
+
+func TestFuturesModeAccountLevelMarginIsUnsupported(t *testing.T) {
+	f := newFakeMarginOKX(t)
+	f.configBody = `{"code":"0","data":[{"uid":"44556677","acctLv":"2"}]}`
+	f.balanceBody = `{"code":"0","data":[{"uTime":"1755691200000","mmr":"","mgnRatio":""}]}`
+	f.positionBody = `{"code":"0","data":[]}`
+
+	got, err := marginRESTOver(f).MarginState(context.Background())
+	if err != nil {
+		t.Fatalf("MarginState: %v", err)
+	}
+	if got.MaintenanceMargin != nil || got.MarginRatio != nil {
+		t.Fatalf("empty Futures-mode account fields became values: maintenance=%v ratio=%v",
+			got.MaintenanceMargin, got.MarginRatio)
+	}
+	if got.MaintenanceMarginSupport != SupportUnsupported || got.MarginRatioSupport != SupportUnsupported {
+		t.Errorf("support = (%v,%v), want both UNSUPPORTED for acctLv=2 account-level fields",
+			got.MaintenanceMarginSupport, got.MarginRatioSupport)
 	}
 }
 
