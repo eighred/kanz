@@ -67,7 +67,7 @@ run "cost_and_security_envelope" {
   }
 
   assert {
-    condition     = length(aws_ecr_repository.capital_path) == 11 && alltrue([for repository in aws_ecr_repository.capital_path : repository.image_tag_mutability == "IMMUTABLE"])
+    condition     = length(aws_ecr_repository.capital_path) == 12 && alltrue([for repository in aws_ecr_repository.capital_path : repository.image_tag_mutability == "IMMUTABLE"])
     error_message = "Every and only capital-path image repository must reject mutable tags."
   }
 

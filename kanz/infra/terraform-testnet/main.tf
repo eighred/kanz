@@ -19,6 +19,7 @@ locals {
     "kanz-capitalpath",
     "kanz-migrate",
     "oms",
+    "prometheus",
     "risk-engine",
     "venue-binance",
     "venue-okx",
