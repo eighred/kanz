@@ -30,6 +30,9 @@ spec:
     - name: http
       port: 8090
       targetPort: 8090
+    - name: query
+      port: 9090
+      targetPort: 9090
   selector:
     app: oms
     tenant: acme
@@ -69,6 +72,8 @@ spec:
               value: "true"
             - name: OMS_LISTEN
               value: :8090
+            - name: OMS_GRPC_LISTEN
+              value: :9090
             - name: OMS_NATS_URL
               value: nats://nats.kanz-messaging.svc:4222
             - name: OMS_SOURCE
@@ -108,6 +113,8 @@ spec:
           ports:
             - containerPort: 8090
               name: http
+            - containerPort: 9090
+              name: query
           readinessProbe:
             httpGet:
               path: /readyz

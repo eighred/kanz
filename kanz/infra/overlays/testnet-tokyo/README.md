@@ -60,3 +60,31 @@ with an explicit threshold are armed. It also requires one Ready OMS Pod and
 rejects recent shared-collateral, unverified-account, advisory-mandate, absent
 dual-control, or incomplete-margin warnings. A passing preflight is necessary
 evidence for resume; it does not publish the resume FACT or submit an order.
+
+The governance inputs have separate authoritative sources:
+
+- Portfolio inventory starts with the typed `test/load/seed` event used by
+  `infra/onboarding/provision-tenant.sh` and is materialized by risk-engine.
+  An empty risk inventory is not complete coverage.
+- Mandates are proposed and approved by two authenticated holders of
+  `kanz-mandate-signatory` through the gateway's compliance listener, then
+  retained as compacted FACTs in the MANDATE stream.
+- `OMS_VENUE_ACCOUNTS` is the reviewed account-master mapping from
+  `tenant/portfolio@MIC` to the adapter's logical account label. The Tokyo OMS
+  refuses every unbound portfolio; the overlay does not invent a mapping.
+- The Binance and OKX expected account UIDs come from independently reviewed
+  exchange account-opening evidence. They must never be copied from the
+  adapter's own signed observation. Until those values are configured and both
+  adapter escape hatches are removed, verified-account enforcement remains
+  unarmed and this preflight fails.
+- Identities are created through Identity's invite/redemption flow. A trader
+  and `kanz-order-approver` must be distinct active subjects in the same tenant;
+  mandate approval likewise requires two distinct active signatories. The
+  preflight reads only aggregate pair counts and never emits subject names or
+  credential hashes.
+
+Tokyo arms mandate, venue-binding, and all-orders dual-control enforcement even
+while their inventories are empty. Those missing inputs produce explicit
+refusals and trading remains startup-halted. Account-proof enforcement is the
+exception because arming it before expected UIDs exist prevents the OMS from
+becoming Ready and removes the observation surface needed to finish the proof.

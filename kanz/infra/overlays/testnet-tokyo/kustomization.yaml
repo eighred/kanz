@@ -13,6 +13,7 @@ resources:
   - ../../deploy/risk-engine-rollout.yaml
   - ../../deploy/venue-binance-deploy.yaml
   - ../../deploy/venue-okx-deploy.yaml
+  - governance-network-policies.yaml
 
 commonAnnotations:
   kanz.io/release-commit: a1b082676039503c6941bf26a5609424f2016ced
@@ -84,3 +85,43 @@ patches:
       - op: replace
         path: /spec/replicas
         value: 1
+  # Trading remains startup-halted. These three controls can be armed before
+  # their governed inventory exists because each missing input is an explicit
+  # refusal. Exchange-account proof is intentionally absent here: the adapters
+  # must first receive independently approved expected UIDs.
+  - target:
+      kind: Deployment
+      name: oms
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: oms
+      spec:
+        template:
+          spec:
+            containers:
+              - name: oms
+                env:
+                  - { name: OMS_REQUIRE_MANDATE, value: "true" }
+                  - { name: OMS_REQUIRE_VENUE_ACCOUNT, value: "true" }
+                  - { name: OMS_REQUIRE_DUAL_CONTROL, value: "true" }
+                  - { name: OMS_DUAL_CONTROL_MIN_NOTIONAL, value: "1 USD" }
+  - target:
+      kind: Deployment
+      name: api-gateway
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: api-gateway
+      spec:
+        template:
+          spec:
+            containers:
+              - name: api-gateway
+                env:
+                  - { name: API_GATEWAY_OMS_READ_ADDR, value: "oms.kanz-services.svc:9090" }
+                  - { name: API_GATEWAY_APPROVE_ROLE, value: "kanz-order-approver" }
+                  - { name: API_GATEWAY_COMPLIANCE_ADDR, value: "http://compliance.kanz-services.svc:8095" }
+                  - { name: API_GATEWAY_MANDATE_ROLE, value: "kanz-mandate-signatory" }

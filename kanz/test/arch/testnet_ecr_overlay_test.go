@@ -60,6 +60,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 		"../../deploy/risk-engine-rollout.yaml",
 		"../../deploy/venue-binance-deploy.yaml",
 		"../../deploy/venue-okx-deploy.yaml",
+		"governance-network-policies.yaml",
 	}
 	assertSameStrings(t, "overlay resources", overlay.Resources, wantResources)
 
@@ -125,6 +126,40 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	}
 	if !removesPullSecret || !scalesDeployments || !scalesRisk {
 		t.Fatalf("testnet patches incomplete: removesPullSecret=%t scalesDeployments=%t scalesRisk=%t", removesPullSecret, scalesDeployments, scalesRisk)
+	}
+}
+
+func TestTokyoArmsOnlyControlsWhoseMissingInputsRefusePerOrder(t *testing.T) {
+	root := moduleRoot(t)
+	overlay := filepath.Join(root, "infra", "overlays", "testnet-tokyo")
+	cmd := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", overlay)
+	rendered, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("render Tokyo overlay: %v", err)
+	}
+	text := string(rendered)
+	for name, value := range map[string]string{
+		"OMS_REQUIRE_MANDATE":           "true",
+		"OMS_REQUIRE_VENUE_ACCOUNT":     "true",
+		"OMS_REQUIRE_DUAL_CONTROL":      "true",
+		"OMS_DUAL_CONTROL_MIN_NOTIONAL": "1 USD",
+		"API_GATEWAY_OMS_READ_ADDR":     "oms.kanz-services.svc:9090",
+		"API_GATEWAY_APPROVE_ROLE":      "kanz-order-approver",
+		"API_GATEWAY_COMPLIANCE_ADDR":   "http://compliance.kanz-services.svc:8095",
+		"API_GATEWAY_MANDATE_ROLE":      "kanz-mandate-signatory",
+	} {
+		pattern := regexp.MustCompile(`(?m)- name: ` + regexp.QuoteMeta(name) + `\r?\n\s+value: "?` + regexp.QuoteMeta(value) + `"?$`)
+		if !pattern.MatchString(text) {
+			t.Errorf("Tokyo overlay does not render %s=%q", name, value)
+		}
+	}
+	for _, name := range []string{"allow-gateway-to-oms-query", "allow-oms-query-egress-from-gateway"} {
+		if !strings.Contains(text, "name: "+name) {
+			t.Errorf("Tokyo overlay omits NetworkPolicy %s", name)
+		}
+	}
+	if regexp.MustCompile(`(?m)- name: OMS_REQUIRE_VERIFIED_ACCOUNT\r?\n\s+value: "true"$`).MatchString(text) {
+		t.Fatal("Tokyo arms verified-account enforcement without independently supplied expected UIDs")
 	}
 }
 
@@ -212,7 +247,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 47", "Expected 16 rendered container images", "sha256sum --check --status",
+		"resourceCount -ne 49", "Expected 16 rendered container images", "sha256sum --check --status",
 		"imageTag=$imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",
@@ -347,17 +382,34 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 		"OMS_DUAL_CONTROL_MIN_NOTIONAL": "1 USD",
 		"OMS_VENUE_ACCOUNTS":            "tenant/portfolio@XBIN=binance-main,tenant/portfolio@XOKX=okx-sub-1",
 	}
-	fixture := func(values map[string]string, logs string, portfolios, mandates int, unverified, uncovered, marginCurrent float64) []byte {
+	gatewayEnv := map[string]string{
+		"API_GATEWAY_TRADE_ROLE":      "kanz-trader",
+		"API_GATEWAY_APPROVE_ROLE":    "kanz-order-approver",
+		"API_GATEWAY_OMS_READ_ADDR":   "oms.kanz-services.svc:9090",
+		"API_GATEWAY_COMPLIANCE_ADDR": "http://compliance.kanz-services.svc:8095",
+		"API_GATEWAY_MANDATE_ROLE":    "kanz-mandate-signatory",
+	}
+	fixture := func(values, gatewayValues map[string]string, logs string, portfolios, mandates int, unverified, uncovered, marginCurrent float64) []byte {
 		vars := make([]any, 0, len(values))
 		for name, value := range values {
 			vars = append(vars, map[string]any{"name": name, "value": value})
 		}
+		gatewayVars := make([]any, 0, len(gatewayValues))
+		for name, value := range gatewayValues {
+			gatewayVars = append(gatewayVars, map[string]any{"name": name, "value": value})
+		}
 		body, marshalErr := json.Marshal(map[string]any{
 			"deployment":      map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "oms", "env": vars}}}}}},
+			"api_gateway":     map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "api-gateway", "env": gatewayVars}}}}}},
 			"pods":            map[string]any{"items": []any{map[string]any{"status": map[string]any{"phase": "Running", "containerStatuses": []any{map[string]any{"name": "oms", "ready": true}}}}}},
 			"recent_logs":     logs,
 			"portfolio_count": portfolios,
 			"mandate_count":   mandates,
+			"identity":        map[string]any{"active_users": 3, "active_users_with_portfolios": 3, "maker_checker_pairs": 1, "mandate_signatory_pairs": 1},
+			"venue_proof": map[string]any{
+				"binance": map[string]any{"expected_uid_configured": true, "allow_unverified": "false"},
+				"okx":     map[string]any{"expected_uid_configured": true, "allow_unverified": "false"},
+			},
 			"oms_metrics": fmt.Sprintf("kanz_oms_unverified_venue_account_total %g\n"+
 				"kanz_oms_venue_margin_accounts_uncovered %g\n"+
 				"kanz_oms_venue_margin_accounts_current %g\n", unverified, uncovered, marginCurrent),
@@ -385,7 +437,7 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 		}
 		return nil
 	}
-	if err := run(fixture(env, "healthy", 1, 1, 0, 0, 1)); err != nil {
+	if err := run(fixture(env, gatewayEnv, "healthy", 1, 1, 0, 0, 1)); err != nil {
 		t.Fatalf("armed, Ready OMS was rejected: %v", err)
 	}
 	for _, name := range []string{"OMS_REQUIRE_MANDATE", "OMS_REQUIRE_VENUE_ACCOUNT", "OMS_REQUIRE_VERIFIED_ACCOUNT", "OMS_REQUIRE_DUAL_CONTROL"} {
@@ -394,7 +446,7 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 			mutated[key] = value
 		}
 		mutated[name] = "false"
-		if err := run(fixture(mutated, "healthy", 1, 1, 0, 0, 1)); err == nil {
+		if err := run(fixture(mutated, gatewayEnv, "healthy", 1, 1, 0, 0, 1)); err == nil {
 			t.Errorf("%s=false passed the go-live verifier", name)
 		}
 	}
@@ -404,7 +456,7 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 			mutated[key] = value
 		}
 		mutated[name] = ""
-		if err := run(fixture(mutated, "healthy", 1, 1, 0, 0, 1)); err == nil {
+		if err := run(fixture(mutated, gatewayEnv, "healthy", 1, 1, 0, 0, 1)); err == nil {
 			t.Errorf("empty %s passed the go-live verifier", name)
 		}
 	}
@@ -412,7 +464,7 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 		"venue adapter registered with an UNVERIFIED account",
 		"the exchange did not report part of this account's margin state",
 	} {
-		if err := run(fixture(env, warning, 1, 1, 0, 0, 1)); err == nil {
+		if err := run(fixture(env, gatewayEnv, warning, 1, 1, 0, 0, 1)); err == nil {
 			t.Errorf("unsafe recent OMS posture %q passed the go-live verifier", warning)
 		}
 	}
@@ -427,8 +479,42 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 		{name: "unobserved OKX margin", portfolios: 1, mandates: 1},
 		{name: "incomplete OKX margin", portfolios: 1, mandates: 1, uncovered: 1, current: 1},
 	} {
-		if err := run(fixture(env, "healthy", tc.portfolios, tc.mandates, tc.unverified, tc.uncovered, tc.current)); err == nil {
+		if err := run(fixture(env, gatewayEnv, "healthy", tc.portfolios, tc.mandates, tc.unverified, tc.uncovered, tc.current)); err == nil {
 			t.Errorf("%s passed the go-live verifier", tc.name)
+		}
+	}
+	for _, name := range []string{"API_GATEWAY_APPROVE_ROLE", "API_GATEWAY_OMS_READ_ADDR", "API_GATEWAY_COMPLIANCE_ADDR", "API_GATEWAY_MANDATE_ROLE"} {
+		mutated := make(map[string]string, len(gatewayEnv))
+		for key, value := range gatewayEnv {
+			mutated[key] = value
+		}
+		mutated[name] = ""
+		if err := run(fixture(env, mutated, "healthy", 1, 1, 0, 0, 1)); err == nil {
+			t.Errorf("empty %s passed the go-live verifier", name)
+		}
+	}
+	for _, field := range []string{"maker_checker_pairs", "mandate_signatory_pairs"} {
+		var body map[string]any
+		if err := json.Unmarshal(fixture(env, gatewayEnv, "healthy", 1, 1, 0, 0, 1), &body); err != nil {
+			t.Fatal(err)
+		}
+		body["identity"].(map[string]any)[field] = float64(0)
+		mutated, _ := json.Marshal(body)
+		if err := run(mutated); err == nil {
+			t.Errorf("zero %s passed the go-live verifier", field)
+		}
+	}
+	for _, venue := range []string{"binance", "okx"} {
+		var body map[string]any
+		if err := json.Unmarshal(fixture(env, gatewayEnv, "healthy", 1, 1, 0, 0, 1), &body); err != nil {
+			t.Fatal(err)
+		}
+		proof := body["venue_proof"].(map[string]any)[venue].(map[string]any)
+		proof["expected_uid_configured"] = false
+		proof["allow_unverified"] = "true"
+		mutated, _ := json.Marshal(body)
+		if err := run(mutated); err == nil {
+			t.Errorf("unproven %s account source passed the go-live verifier", venue)
 		}
 	}
 }
