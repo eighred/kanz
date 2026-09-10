@@ -92,8 +92,8 @@ if ($LASTEXITCODE -ne 0 -or -not $renderedLines) {
 }
 $rendered = ($renderedLines -join "`n") + "`n"
 $resourceCount = ([regex]::Matches($rendered, '(?m)^kind: ')).Count
-if ($resourceCount -ne 47) {
-    throw "Expected 47 rendered resources; found $resourceCount."
+if ($resourceCount -ne 49) {
+    throw "Expected 49 rendered resources; found $resourceCount."
 }
 $images = [regex]::Matches($rendered, '(?m)^\s*image:\s+(\S+)\s*$')
 if ($images.Count -ne 16) { throw "Expected 16 rendered container images; found $($images.Count)." }

@@ -77,6 +77,10 @@ spec:
     app: oms
   ports:
     - { name: http, port: 8090, targetPort: 8090 }
+    # Order history and the pending-approval queue. This is gRPC/mTLS and is
+    # reachable only from the API gateway under the NetworkPolicies in the
+    # Tokyo overlay; it is not a public order-submission surface.
+    - { name: query, port: 9090, targetPort: 9090 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -176,6 +180,7 @@ spec:
           image: ghcr.io/eighred/oms@sha256:94e500afa9492a360902da2fa249c219dac3a1e158b7904697fb77b5c08a5b74
           ports:
             - { containerPort: 8090, name: http }
+            - { containerPort: 9090, name: query }
           env:
             # DSN from the SEC-01d CSI secret file, not a plaintext env. This is
             # what makes replicas: 2 safe — see the invariant at the top.
@@ -226,6 +231,10 @@ spec:
             # when per-tenant compute (#97) provisions the second.
             - { name: OMS_REQUIRE_MANDATE, value: "false" }
             - { name: OMS_LISTEN, value: ":8090" }
+            # The authenticated read side used by the gateway to show a second
+            # signer the exact held command. Without it dual control can hold an
+            # order that no approver can discover.
+            - { name: OMS_GRPC_LISTEN, value: ":9090" }
             - { name: OMS_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: OMS_SOURCE, value: "oms" }
             # INFRA-M7a: EVERY venue is an out-of-process adapter reached over
@@ -329,18 +338,12 @@ spec:
             # is switched on. test/arch/deny_by_default_is_visible_test.go now fails the
             # build if a fourth one arrives unlisted.
             - { name: OMS_REQUIRE_ORDER_TYPE_SUPPORT, value: "false" }
-            # MAKER-CHECKER ON ORDER SUBMISSION (#410, act three). The fifth
-            # member of the family above, and the only one that CANNOT BE SET TO
-            # TRUE TODAY — the OMS refuses to start if it is.
-            #
-            # WHY THE REFUSAL RATHER THAN AN OMISSION. Arming needs somewhere to
-            # hold an order awaiting a second signature, and whether that is a
-            # pending status on the order or a proposal that never becomes a
-            # SubmitOrder is #410's open ruling. With nowhere to put one, arming
-            # would REJECT every order at or above the threshold instead of
-            # holding it — an act that neither takes effect nor can be approved.
-            # So the OMS says that at boot and exits, rather than shipping a
-            # control that looks armed and refuses trades.
+            # MAKER-CHECKER ON ORDER SUBMISSION (#410, act three). At or above
+            # the threshold the OMS stores an order proposal, publishes
+            # OrderPendingApproval, and does not create or route an order until
+            # a different authenticated subject approves the same digest. The
+            # gateway needs the OMS query listener as well as an approve role so
+            # the second signer can discover the held command.
             #
             # THE THRESHOLD IS THE SHIPPED HALF, and it is set BELOW rather than
             # here because it is a number and not a posture. Set it and the

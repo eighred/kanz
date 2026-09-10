@@ -1,11 +1,14 @@
-def oms_env:
-  (.deployment.spec.template.spec.containers | map(select(.name == "oms"))) as $containers
-  | if ($containers | length) != 1 then error("expected exactly one oms container") else
+def workload_env($deployment; $container):
+  ($deployment.spec.template.spec.containers | map(select(.name == $container))) as $containers
+  | if ($containers | length) != 1 then error("expected exactly one " + $container + " container") else
       ($containers[0].env // []
        | map(select(has("value")))
        | map({key: .name, value: .value})
        | from_entries)
     end;
+
+def oms_env: workload_env(.deployment; "oms");
+def gateway_env: workload_env(.api_gateway; "api-gateway");
 
 def metric($name):
   [.oms_metrics
@@ -22,6 +25,7 @@ def check($name; $pass; $observed):
   {name: $name, pass: $pass, observed: $observed};
 
 oms_env as $env
+| gateway_env as $gateway
 | bindings($env) as $bindings
 | ($bindings | map(split("@")[0]) | unique) as $bound_portfolios
 | (metric("kanz_oms_unverified_venue_account_total")) as $unverified
@@ -30,6 +34,16 @@ oms_env as $env
 | [
     check("mandate_enforcement"; $env.OMS_REQUIRE_MANDATE == "true";
       ($env.OMS_REQUIRE_MANDATE // "absent")),
+    check("mandate_change_surface";
+      (($gateway.API_GATEWAY_COMPLIANCE_ADDR // "") | length) > 0 and
+      (($gateway.API_GATEWAY_MANDATE_ROLE // "") | length) > 0 and
+      $gateway.API_GATEWAY_MANDATE_ROLE != $gateway.API_GATEWAY_APPROVE_ROLE;
+      {compliance_upstream: ((($gateway.API_GATEWAY_COMPLIANCE_ADDR // "") | length) > 0),
+       mandate_role: ((($gateway.API_GATEWAY_MANDATE_ROLE // "") | length) > 0),
+       role_separated: ($gateway.API_GATEWAY_MANDATE_ROLE != $gateway.API_GATEWAY_APPROVE_ROLE)}),
+    check("mandate_distinct_signatory_pairs";
+      .identity.mandate_signatory_pairs > 0;
+      .identity.mandate_signatory_pairs),
     check("portfolio_inventory"; .portfolio_count > 0; .portfolio_count),
     check("mandate_inventory";
       .portfolio_count > 0 and .mandate_count == .portfolio_count;
@@ -42,6 +56,12 @@ oms_env as $env
     check("exchange_account_proof_enforcement";
       $env.OMS_REQUIRE_VERIFIED_ACCOUNT == "true";
       ($env.OMS_REQUIRE_VERIFIED_ACCOUNT // "absent")),
+    check("exchange_account_proof_sources";
+      .venue_proof.binance.expected_uid_configured and
+      (.venue_proof.binance.allow_unverified == "false") and
+      .venue_proof.okx.expected_uid_configured and
+      (.venue_proof.okx.allow_unverified == "false");
+      .venue_proof),
     check("exchange_accounts_observed_verified";
       $unverified == 0;
       (if $unverified == null then "metric absent" else $unverified end)),
@@ -56,6 +76,14 @@ oms_env as $env
     check("dual_control_threshold";
       (($env.OMS_DUAL_CONTROL_MIN_NOTIONAL // "") | length) > 0;
       ($env.OMS_DUAL_CONTROL_MIN_NOTIONAL // "absent")),
+    check("order_approval_surface";
+      (($gateway.API_GATEWAY_APPROVE_ROLE // "") | length) > 0 and
+      (($gateway.API_GATEWAY_OMS_READ_ADDR // "") | length) > 0;
+      {approve_role: ((($gateway.API_GATEWAY_APPROVE_ROLE // "") | length) > 0),
+       pending_queue_upstream: ((($gateway.API_GATEWAY_OMS_READ_ADDR // "") | length) > 0)}),
+    check("distinct_maker_checker_pairs";
+      .identity.maker_checker_pairs > 0;
+      .identity.maker_checker_pairs),
     check("oms_singleton_ready";
       (.pods.items | length) == 1 and
       (.pods.items | all(.status.phase == "Running" and
