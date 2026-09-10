@@ -388,6 +388,12 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			"declared venue-margin rule can actually be checked against. held − current is the " +
 			"population whose orders that rule will refuse.",
 	}, func() float64 { _, live := margins.Stats(); return float64(live) }))
+	obs.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "kanz_oms_venue_margin_accounts_uncovered",
+		Help: "Exchange accounts whose CURRENT venue margin observation reports incomplete or absent " +
+			"coverage. ZERO means every current observation explicitly covers every applicable quantity; " +
+			"historical gaps remain visible in kanz_oms_venue_margin_uncovered_total.",
+	}, func() float64 { _, incomplete := margins.CoverageStats(); return float64(incomplete) }))
 
 	// THE PRE-TRADE GATE, BUILT BY A NAMED BUILDER (#643).
 	//

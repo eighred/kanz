@@ -320,6 +320,35 @@ func TestStatsSeparatesHeldFromCurrent(t *testing.T) {
 	}
 }
 
+func TestCoverageStatsDescribesCurrentPosture(t *testing.T) {
+	now := observed
+	v := New(WithClock(func() time.Time { return now }))
+	fold(t, v, state(t))
+	if current, incomplete := v.CoverageStats(); current != 1 || incomplete != 0 {
+		t.Fatalf("complete: current=%d incomplete=%d, want 1/0", current, incomplete)
+	}
+
+	incomplete := state(t)
+	incomplete.Coverage = &domainpb.InputCoverage{Contributed: 1, ExcludedCount: 1}
+	fold(t, v, incomplete)
+	if current, gaps := v.CoverageStats(); current != 1 || gaps != 1 {
+		t.Fatalf("incomplete: current=%d incomplete=%d, want 1/1", current, gaps)
+	}
+
+	now = observed.Add(DefaultMaxAge + time.Second)
+	if current, gaps := v.CoverageStats(); current != 0 || gaps != 0 {
+		t.Errorf("stale: current=%d incomplete=%d, want 0/0", current, gaps)
+	}
+
+	now = observed
+	unreported := state(t)
+	unreported.Coverage = nil
+	fold(t, v, unreported)
+	if current, gaps := v.CoverageStats(); current != 1 || gaps != 1 {
+		t.Errorf("unreported: current=%d incomplete=%d, want 1/1", current, gaps)
+	}
+}
+
 // TestValueIsACopy: the view hands the same fold to every caller, and *big.Rat
 // is mutable. One caller subtracting in place would silently rewrite the stored
 // maintenance margin for everybody else.
