@@ -153,10 +153,11 @@ func TestTokyoArmsOnlyControlsWhoseMissingInputsRefusePerOrder(t *testing.T) {
 			t.Errorf("Tokyo overlay does not render %s=%q", name, value)
 		}
 	}
-	for _, name := range []string{"allow-gateway-to-oms-query", "allow-oms-query-egress-from-gateway"} {
-		if !strings.Contains(text, "name: "+name) {
-			t.Errorf("Tokyo overlay omits NetworkPolicy %s", name)
-		}
+	if !strings.Contains(text, "name: allow-gateway-to-oms-query") {
+		t.Error("Tokyo overlay omits the destination-side OMS query NetworkPolicy")
+	}
+	if strings.Contains(text, "name: allow-oms-query-egress-from-gateway") {
+		t.Fatal("Tokyo overlay partially isolates gateway egress without installing its complete DNS, NATS, identity, and upstream policy set")
 	}
 	if regexp.MustCompile(`(?m)- name: OMS_REQUIRE_VERIFIED_ACCOUNT\r?\n\s+value: "true"$`).MatchString(text) {
 		t.Fatal("Tokyo arms verified-account enforcement without independently supplied expected UIDs")
@@ -247,7 +248,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 49", "Expected 16 rendered container images", "sha256sum --check --status",
+		"resourceCount -ne 48", "Expected 16 rendered container images", "sha256sum --check --status",
 		"imageTag=$imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",
@@ -259,6 +260,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"workload installation refused: partial managed state", "fresh-install-rollback-started",
 		"prometheus.kanz-observability.svc:9090", "workload-analysis-provider-ready",
 		"update-rollback-started", "rollback_workloads", "update-rollback-complete",
+		"policy_preexisting=0", "networkpolicy allow-gateway-to-oms-query --ignore-not-found=true",
 		"rollback_workloads() { /usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap",
 		"apiVersion:\"v1\",kind:\"List\",items:", "pods_ready=0; for attempt in $(seq 1 120)",
 	} {
