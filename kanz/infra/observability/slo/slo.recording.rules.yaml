@@ -222,8 +222,9 @@ groups:
       # available on the same surface as everything else.
       #
       # clamp() BOTH WAYS IS NOT DEFENSIVE PADDING. On an EMPTY database the
-      # metric is a max-int sentinel (9.22e15, verified against v3.1.0 — the
-      # digest this estate pins), so the subtraction is hugely NEGATIVE rather
+      # metric is a max-int sentinel (math.MaxInt64 / 1000, verified in the
+      # signed v3.13.3 source test — the digest this estate pins), so the
+      # subtraction is hugely NEGATIVE rather
       # than zero. Without the lower clamp a fresh Prometheus reports a large
       # negative coverage; with it, it reports 0, which is the truth.
       - record: slo:budget_window_coverage:ratio
