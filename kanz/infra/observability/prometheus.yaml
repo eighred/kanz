@@ -254,7 +254,7 @@ spec:
           # registry as the sibling component and no Hub rate limit.
           #
           # PINNED BY DIGEST, and the tag is retained only so a human can read
-          # which version this is. v3.1.0 is a MUTABLE tag upstream — the digest
+          # which version this is. v3.13.3 is a MUTABLE tag upstream — the digest
           # is what actually determines what runs.
           #
           # THIS IS AN UNMIRRORED THIRD-PARTY BASE. base-image-mirror.yml exists
@@ -262,7 +262,7 @@ spec:
           # cover the observability images (node-exporter has the same gap).
           # Populating the mirror and repointing are deliberately separate
           # changes in that workflow's own comment, and in that order.
-          image: quay.io/prometheus/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
+          image: quay.io/prometheus/prometheus:v3.13.3@sha256:6976aa8a60fec930796ce5772b8d12da7a318a5daa8d40d69c5c7819a05eeed7
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus

@@ -315,7 +315,7 @@ func TestTokyoObservabilityInstallerPinsTheMinimumProviderToECR(t *testing.T) {
 	installer := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetObservability.ps1")))
 	for _, required := range []string{
 		"HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"Expected 9 rendered resources", "imageTag=v3.1.0-amd64",
+		"Expected 9 rendered resources", "imageTag=v3.13.3-amd64",
 		"apply --server-side --dry-run=server", "{.status.phase}''=Bound pvc/prometheus-data",
 		"sed ''s/namespace: kanz-observability/namespace: default/g''",
 		"rollout status deployment/prometheus", "kubernetes.io/service-name=prometheus",

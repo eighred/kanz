@@ -82,10 +82,10 @@ if ($imageRef -notmatch '^012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com
 }
 $digest = $Matches.digest
 $retainedDigest = (& $aws ecr describe-images --profile $Profile --region $Region `
-    --repository-name prometheus --image-ids imageTag=v3.1.0-amd64 `
+    --repository-name prometheus --image-ids imageTag=v3.13.3-amd64 `
     --query 'imageDetails[0].imageDigest' --output text 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or $retainedDigest -ne $digest) {
-    throw "Tokyo ECR does not retain prometheus@$digest under immutable tag v3.1.0-amd64."
+    throw "Tokyo ECR does not retain prometheus@$digest under immutable tag v3.13.3-amd64."
 }
 foreach ($required in @('kind: Namespace', 'name: kanz-observability', 'kind: Deployment',
     'name: prometheus', 'name: prometheus-rules', 'claimName: prometheus-data')) {

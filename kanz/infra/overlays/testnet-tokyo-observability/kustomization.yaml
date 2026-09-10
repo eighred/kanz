@@ -12,7 +12,7 @@ resources:
 images:
   - name: quay.io/prometheus/prometheus
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/prometheus
-    digest: sha256:86e84899d210318d1ed2c4814194b529aab4bd0a5d3dc482b3de27a7e6cc9f75
+    digest: sha256:76a2c518c388979ed258d2bd0f1685a693cb412c28f92dd9f3f7177a850dfa0a
 
 patches:
   - target:
