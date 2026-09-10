@@ -222,10 +222,15 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"Verify-TestnetWorkloadPods.jq", "jq -e -f \"${pod_filter}\"",
 		"kubernetes.io/dockerconfigjson", "workload-registry-secrets-absent",
 		"workload installation refused: partial managed state", "fresh-install-rollback-started",
+		"prometheus.kanz-observability.svc:9090", "workload-analysis-provider-ready",
+		"update-rollback-started", "rollback_workloads", "update-rollback-complete",
 	} {
 		if !strings.Contains(raw, required) {
 			t.Errorf("Tokyo workload installer is missing fail-closed proof %q", required)
 		}
+	}
+	if strings.Contains(raw, "prometheus.observability.svc:9090") {
+		t.Fatal("Tokyo workload installer points at the nonexistent observability namespace")
 	}
 }
 

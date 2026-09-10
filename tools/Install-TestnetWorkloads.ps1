@@ -70,6 +70,7 @@ $provenancePaths = @(
     'tools/Install-TestnetWorkloads.ps1',
     'tools/Verify-TestnetWorkloadPods.jq',
     'kanz/infra/overlays/testnet-tokyo',
+    'kanz/infra/deploy/analysis-template.yaml',
     'kanz/infra/deploy/accounting-deploy.yaml',
     'kanz/infra/deploy/api-gateway-deploy.yaml',
     'kanz/infra/deploy/audit-deploy.yaml',
@@ -128,6 +129,7 @@ foreach ($forbidden in @('ghcr.io', 'ghcr-pull', 'imagePullSecrets:', 'kubernete
 }
 foreach ($required in @(
     'kind: AnalysisTemplate', 'name: risk-engine-canary',
+    'address: http://prometheus.kanz-observability.svc:9090',
     'name: accounting-db', 'name: api-gateway-redis', 'name: api-gateway-secrets',
     'name: audit-db', 'name: identity-db', 'name: identity-signing-key',
     'name: oms-db', 'name: risk-engine-db', 'name: venue-binance-db',
@@ -167,6 +169,7 @@ $remoteBase = "/var/tmp/kanz-workloads-$transferId"
 $remotePayload = "$remoteBase.b64"
 $remoteManifest = "$remoteBase.yaml"
 $remotePodVerifier = "$remoteBase.jq"
+$remoteRollback = "$remoteBase.rollback.json"
 Invoke-SsmCommands -Comment 'Initialize Kanz testnet workload transfer' -TimeoutSeconds 60 -Commands @(
     'set -eu',
     "umask 077; : > '$remotePayload'"
@@ -197,9 +200,11 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo worklo
     "payload='$remotePayload'",
     "manifest='$remoteManifest'",
     "pod_filter='$remotePodVerifier'",
+    "rollback='$remoteRollback'",
     'applied=0',
     'fresh=0',
-    'finish() { rc=$?; if [[ "${rc}" != 0 && "${applied}" = 1 && "${fresh}" = 1 ]]; then echo fresh-install-rollback-started >&2; /usr/local/bin/k3s kubectl delete --ignore-not-found=true --wait=true -f "${manifest}" >&2 || true; fi; rm -f "${payload}" "${manifest}" "${pod_filter}"; exit "${rc}"; }',
+    'rollback_workloads() { jq -c ''.items[]'' "${rollback}" | while IFS= read -r item; do kind=$(jq -r ''.kind | ascii_downcase'' <<<"${item}"); name=$(jq -r ''.metadata.name'' <<<"${item}"); patch=$(jq -c ''[{op:"replace",path:"/spec",value:.spec}] + [(.metadata.annotations // {} | to_entries[]) as $a | {op:"add",path:("/metadata/annotations/" + ($a.key | gsub("~";"~0") | gsub("/";"~1"))),value:$a.value}]'' <<<"${item}"); /usr/local/bin/k3s kubectl -n kanz-services patch "${kind}/${name}" --type=json -p "${patch}" >&2 || return 1; done; }',
+    'finish() { rc=$?; set +e; if [[ "${rc}" != 0 && "${applied}" = 1 ]]; then if [[ "${fresh}" = 1 ]]; then echo fresh-install-rollback-started >&2; /usr/local/bin/k3s kubectl delete --ignore-not-found=true --wait=true -f "${manifest}" >&2 || echo fresh-install-rollback-failed >&2; elif [[ -s "${rollback}" ]]; then echo update-rollback-started >&2; rollback_ok=1; rollback_workloads || rollback_ok=0; for deployment in identity compliance accounting audit oms venue-binance venue-okx api-gateway; do /usr/local/bin/k3s kubectl -n kanz-services rollout status "deployment/${deployment}" --timeout=600s >&2 || rollback_ok=0; done; /usr/local/bin/k3s kubectl -n kanz-services wait --for=jsonpath=''{.status.phase}''=Healthy rollout/risk-engine --timeout=900s >&2 || rollback_ok=0; if [[ "${rollback_ok}" = 1 ]]; then echo update-rollback-complete >&2; else echo update-rollback-failed >&2; fi; fi; fi; rm -f "${payload}" "${manifest}" "${pod_filter}" "${rollback}"; exit "${rc}"; }',
     'trap finish EXIT',
     'base64 -d "${payload}" | gzip -d > "${manifest}"',
     ("printf '%s  %s\n' '$manifestHash' " + '"${manifest}" | sha256sum --check --status'),
@@ -217,11 +222,18 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo worklo
     'echo workload-server-dry-run-ok',
     "apply='$applyFlag'",
     'if [[ "${apply}" = 0 ]]; then exit 0; fi',
+    '/usr/local/bin/k3s kubectl get namespace kanz-observability >/dev/null',
+    '/usr/local/bin/k3s kubectl -n kanz-observability get service/prometheus >/dev/null',
+    '/usr/local/bin/k3s kubectl -n kanz-observability get endpointslice -l kubernetes.io/service-name=prometheus -o json | jq -e ''[.items[].endpoints[]? | select(.conditions.ready != false) | .addresses[]?] | length > 0'' >/dev/null',
+    'prometheus_cluster_ip=$(/usr/local/bin/k3s kubectl -n kanz-observability get service/prometheus -o jsonpath=''{.spec.clusterIP}'')',
+    'curl -fsS --max-time 5 "http://${prometheus_cluster_ip}:9090/-/ready" >/dev/null',
+    'echo workload-analysis-provider-ready',
     'accounting_exists=0; risk_exists=0',
     'if /usr/local/bin/k3s kubectl -n kanz-services get deployment/accounting >/dev/null 2>&1; then accounting_exists=1; fi',
     'if /usr/local/bin/k3s kubectl -n kanz-services get rollout/risk-engine >/dev/null 2>&1; then risk_exists=1; fi',
     'if [[ "${accounting_exists}" != "${risk_exists}" ]]; then echo workload installation refused: partial managed state >&2; exit 1; fi',
     'if [[ "${accounting_exists}" = 0 ]]; then fresh=1; fi',
+    'if [[ "${fresh}" = 0 ]]; then /usr/local/bin/k3s kubectl -n kanz-services get deployment/identity deployment/compliance deployment/accounting deployment/audit deployment/oms deployment/venue-binance deployment/venue-okx deployment/api-gateway rollout.argoproj.io/risk-engine -o json | jq ''{items:[.items[] | {apiVersion,kind,metadata:{name:.metadata.name,namespace:.metadata.namespace,annotations:((.metadata.annotations // {}) | with_entries(select(.key | startswith("kanz.io/"))))},spec:.spec}]}'' > "${rollback}"; test "$(jq ''.items | length'' "${rollback}")" = 9; fi',
     'applied=1',
     '/usr/local/bin/k3s kubectl apply --server-side --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
     'for deployment in identity compliance accounting audit oms venue-binance venue-okx api-gateway; do /usr/local/bin/k3s kubectl -n kanz-services rollout status "deployment/${deployment}" --timeout=600s >/dev/null; done',

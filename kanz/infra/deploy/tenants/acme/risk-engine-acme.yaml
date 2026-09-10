@@ -223,6 +223,6 @@ spec:
         activationThreshold: "50"
         metricName: kanz_bus_pending_messages
         query: sum(kanz_bus_pending_messages{group="risk-engine"})
-        serverAddress: http://prometheus.observability.svc:9090
+        serverAddress: http://prometheus.kanz-observability.svc:9090
         threshold: "500"
       type: prometheus

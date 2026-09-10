@@ -35,7 +35,7 @@ spec:
   triggers:
     - type: prometheus
       metadata:
-        serverAddress: http://prometheus.observability.svc:9090
+        serverAddress: http://prometheus.kanz-observability.svc:9090
         metricName: kanz_bus_consumer_lag
         # Sum lag across the market-data consumer group; one replica drains
         # ~1000 messages of standing lag within the p99 budget, so lag past that
