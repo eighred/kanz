@@ -97,6 +97,12 @@ type okxPositionsResp struct {
 // The account leg is different: without it there is no observation at all, and
 // an error is the honest answer.
 func (c *okxREST) MarginState(ctx context.Context) (VenueMargin, error) {
+	account, err := c.exchangeAccount(ctx)
+	if err != nil {
+		return VenueMargin{}, err
+	}
+	support := marginSupport(account.AccountLevel)
+
 	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
 		return VenueMargin{}, ErrRateLimited
@@ -117,7 +123,11 @@ func (c *okxREST) MarginState(ctx context.Context) (VenueMargin, error) {
 	// how recently OKX looked, so using it where uTime exists would make a figure
 	// look fresher than it is by however long the account sat unchanged — the one
 	// direction of error a freshness bound cannot survive.
-	out := VenueMargin{ObservedAt: c.now().UTC()}
+	out := VenueMargin{
+		ObservedAt:               c.now().UTC(),
+		MaintenanceMarginSupport: support,
+		MarginRatioSupport:       support,
+	}
 	if len(acct.Data) > 0 {
 		d := acct.Data[0]
 		out.MaintenanceMargin = parseVenueRat(d.MMR)
@@ -149,6 +159,21 @@ func (c *okxREST) MarginState(ctx context.Context) (VenueMargin, error) {
 		})
 	}
 	return out, nil
+}
+
+// marginSupport interprets OKX acctLv. Spot/simple accounts cannot take margin
+// and their empty mmr/mgnRatio fields are UNSUPPORTED, not a failed observation.
+// Every margin-capable mode says the fields are supported; an absent value in
+// those modes remains UNKNOWN and is recorded as incomplete coverage.
+func marginSupport(accountLevel string) SupportStatus {
+	switch accountLevel {
+	case "1":
+		return SupportUnsupported
+	case "2", "3", "4":
+		return SupportSupported
+	default:
+		return SupportUnknown
+	}
 }
 
 // parseVenueRat converts an exchange decimal string EXACTLY, or reports UNKNOWN.

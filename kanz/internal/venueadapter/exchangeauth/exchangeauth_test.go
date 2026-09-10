@@ -125,6 +125,19 @@ func TestAccountIDOKX(t *testing.T) {
 	}
 }
 
+func TestAccountOKXCarriesAccountLevel(t *testing.T) {
+	srv := okxAccountServer(t, testCred.APISecret, http.StatusOK, `{"code":"0","data":[{"uid":"4711","acctLv":"3"}]}`)
+	defer srv.Close()
+
+	got, err := Account(context.Background(), "okx", testCred, Options{BaseURL: srv.URL, OKXTrading: OKXDemo})
+	if err != nil {
+		t.Fatalf("Account: %v", err)
+	}
+	if got.ID != "4711" || got.AccountLevel != "3" {
+		t.Errorf("Account = %+v, want ID 4711 and account level 3", got)
+	}
+}
+
 func TestAccountIDBinance(t *testing.T) {
 	srv := binanceAccountServer(t, testCred.APISecret, http.StatusOK, `{"uid":8822}`)
 	defer srv.Close()

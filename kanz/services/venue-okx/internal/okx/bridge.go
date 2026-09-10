@@ -40,6 +40,7 @@ type (
 	VenueMarginSource   = execution.VenueMarginSource
 	VenueMargin         = execution.VenueMargin
 	VenuePositionMargin = execution.VenuePositionMargin
+	SupportStatus       = execution.SupportStatus
 	// UserDataStream is the private-websocket transport seam (tests inject a fake).
 	UserDataStream = execution.UserDataStream
 
@@ -97,6 +98,12 @@ type (
 	InstrumentSymbol = execution.InstrumentSymbol
 	APIError         = execution.APIError
 	WeightBucket     = execution.WeightBucket
+)
+
+const (
+	SupportUnknown     = execution.SupportUnknown
+	SupportSupported   = execution.SupportSupported
+	SupportUnsupported = execution.SupportUnsupported
 )
 
 var (

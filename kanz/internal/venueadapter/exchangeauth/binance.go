@@ -36,7 +36,7 @@ type binanceAccountInfo struct {
 // /api/v3/account with timestamp+recvWindow=5000). A response with no uid is an
 // ERROR, never "" — an empty id would compare equal to nothing and would sail
 // upstream as a verified account.
-func binanceAccountID(ctx context.Context, cred Credential, opt Options) (string, error) {
+func binanceAccount(ctx context.Context, cred Credential, opt Options) (AccountInfo, error) {
 	const path = "/api/v3/account"
 
 	params := make(map[string]string, 2)
@@ -49,24 +49,24 @@ func binanceAccountID(ctx context.Context, cred Credential, opt Options) (string
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
 	if err != nil {
-		return "", err
+		return AccountInfo{}, err
 	}
 	req.Header.Set("X-MBX-APIKEY", cred.APIKey)
 
 	raw, err := do(req, opt.HTTPClient)
 	if err != nil {
-		return "", err
+		return AccountInfo{}, err
 	}
 	var out binanceAccountInfo
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", fmt.Errorf("exchangeauth: binance: decode account: %w", err)
+		return AccountInfo{}, fmt.Errorf("exchangeauth: binance: decode account: %w", err)
 	}
 	if out.Code != 0 {
-		return "", &execution.APIError{Code: out.Code, Msg: out.Msg}
+		return AccountInfo{}, &execution.APIError{Code: out.Code, Msg: out.Msg}
 	}
 	if out.UID == 0 {
-		return "", errors.New("exchangeauth: binance: GET /api/v3/account carried no uid — the exchange did not say " +
+		return AccountInfo{}, errors.New("exchangeauth: binance: GET /api/v3/account carried no uid — the exchange did not say " +
 			"which account this API key belongs to, so it cannot be verified")
 	}
-	return strconv.FormatInt(out.UID, 10), nil
+	return AccountInfo{ID: strconv.FormatInt(out.UID, 10)}, nil
 }
