@@ -508,4 +508,25 @@ func (v *View) Stats() (held, live int) {
 	return held, live
 }
 
+// CoverageStats reports how many accounts have current observations and how
+// many of those current observations explicitly carry incomplete coverage.
+// Historical gaps are deliberately excluded: incident counters retain that
+// history, while this posture answers whether the latest actionable level is
+// complete now.
+func (v *View) CoverageStats() (current, incomplete int) {
+	now := v.now().UTC()
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	for _, s := range v.byAcct {
+		if v.maxAge > 0 && now.Sub(s.observedAt) > v.maxAge {
+			continue
+		}
+		current++
+		if !s.coverage.Complete() {
+			incomplete++
+		}
+	}
+	return current, incomplete
+}
+
 var _ bus.EventHandler = (&View{}).Handle

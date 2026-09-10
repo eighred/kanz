@@ -25,7 +25,7 @@ oms_env as $env
 | bindings($env) as $bindings
 | ($bindings | map(split("@")[0]) | unique) as $bound_portfolios
 | (metric("kanz_oms_unverified_venue_account_total")) as $unverified
-| (metric("kanz_oms_venue_margin_uncovered_total")) as $uncovered
+| (metric("kanz_oms_venue_margin_accounts_uncovered")) as $uncovered
 | (metric("kanz_oms_venue_margin_accounts_current")) as $margin_current
 | [
     check("mandate_enforcement"; $env.OMS_REQUIRE_MANDATE == "true";

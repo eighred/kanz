@@ -359,7 +359,7 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 			"portfolio_count": portfolios,
 			"mandate_count":   mandates,
 			"oms_metrics": fmt.Sprintf("kanz_oms_unverified_venue_account_total %g\n"+
-				"kanz_oms_venue_margin_uncovered_total %g\n"+
+				"kanz_oms_venue_margin_accounts_uncovered %g\n"+
 				"kanz_oms_venue_margin_accounts_current %g\n", unverified, uncovered, marginCurrent),
 		})
 		if marshalErr != nil {
