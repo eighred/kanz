@@ -224,6 +224,17 @@ type VenueMarginSource interface {
 	MarginState(ctx context.Context) (VenueMargin, error)
 }
 
+// SupportStatus is the adapter's observed capability for one venue field.
+// Unknown fails closed. Unsupported says the field is inapplicable to the
+// observed account mode; it is never permission to substitute numeric zero.
+type SupportStatus uint8
+
+const (
+	SupportUnknown SupportStatus = iota
+	SupportSupported
+	SupportUnsupported
+)
+
 // VenueMargin is one observation of a venue account's margin state.
 //
 // EVERY QUANTITY IS A POINTER AND nil MEANS THE VENUE DID NOT REPORT IT. This is
@@ -241,10 +252,12 @@ type VenueMarginSource interface {
 type VenueMargin struct {
 	// MaintenanceMargin is the collateral the exchange requires the account to
 	// keep, in the account's own valuation currency. nil ⇒ UNKNOWN.
-	MaintenanceMargin *big.Rat
+	MaintenanceMargin        *big.Rat
+	MaintenanceMarginSupport SupportStatus
 	// MarginRatio is the exchange's own margin ratio for the account, in the
 	// VENUE'S units and direction — nothing normalises it. nil ⇒ UNKNOWN.
-	MarginRatio *big.Rat
+	MarginRatio        *big.Rat
+	MarginRatioSupport SupportStatus
 	// Positions are the open positions the venue reported, each with the
 	// liquidation price the venue gave for it — or a nil price where it gave
 	// none. A source lists the position EITHER WAY: dropping the ones without a

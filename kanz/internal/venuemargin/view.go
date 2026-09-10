@@ -8,6 +8,7 @@ import (
 	"time"
 
 	collateralpb "github.com/eighred/kanz/kanz-schemas-go/collateral/v1"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 
@@ -231,6 +232,13 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 		// Unattributable to a liquidation boundary, so it cannot gate anything.
 		return nil
 	}
+	if !validFieldSupport(msg.GetMaintenanceMargin(), msg.GetMaintenanceMarginSupport()) ||
+		!validFieldSupport(msg.GetMarginRatio(), msg.GetMarginRatioSupport()) {
+		// Invalid enum values and UNSUPPORTED fields carrying numeric claims are
+		// contradictory critical state. Drop the whole level rather than fold a
+		// partial answer under one fresh observation timestamp.
+		return nil
+	}
 	observedAt := msg.GetObservedAt().AsTime().UTC()
 	if observedAt.IsZero() || msg.GetObservedAt() == nil {
 		// AN UNDATED MARGIN FIGURE IS NOT A MARGIN FIGURE. Folding it would put a
@@ -283,6 +291,18 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 		v.onUncovered(key.venue, key.account, snap.coverage.excluded)
 	}
 	return nil
+}
+
+func validFieldSupport(value *commonpb.Decimal, support collateralpb.SupportStatus) bool {
+	switch support {
+	case collateralpb.SupportStatus_SUPPORT_STATUS_UNSPECIFIED,
+		collateralpb.SupportStatus_SUPPORT_STATUS_SUPPORTED:
+		return true
+	case collateralpb.SupportStatus_SUPPORT_STATUS_UNSUPPORTED:
+		return value == nil
+	default:
+		return false
+	}
 }
 
 // Coverage is what this account's last CURRENT observation said about how much

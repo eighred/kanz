@@ -312,11 +312,18 @@ func (c *okxREST) balances(ctx context.Context) (map[string]string, error) {
 // The signature, request, and uid-decode/validation live once in exchangeauth — this
 // method only spends the weight budget and delegates.
 func (c *okxREST) ExchangeAccountID(ctx context.Context) (string, error) {
+	info, err := c.exchangeAccount(ctx)
+	return info.ID, err
+}
+
+// exchangeAccount reads the identity and account mode from the same signed OKX
+// account/config response. The caller never receives credential material.
+func (c *okxREST) exchangeAccount(ctx context.Context) (exchangeauth.AccountInfo, error) {
 	if !c.buckets.allow(familyUnverified, 1) {
 		c.onThrottle()
-		return "", ErrRateLimited
+		return exchangeauth.AccountInfo{}, ErrRateLimited
 	}
-	return exchangeauth.AccountID(ctx, "okx", exchangeauth.Credential{
+	return exchangeauth.Account(ctx, "okx", exchangeauth.Credential{
 		APIKey:     c.apiKey,
 		APISecret:  string(c.apiSecret),
 		Passphrase: c.passphrase,

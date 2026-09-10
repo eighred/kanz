@@ -273,6 +273,36 @@ func TestUnattributedObservationIsDropped(t *testing.T) {
 	}
 }
 
+func TestContradictoryOrInvalidSupportStateIsDropped(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*collateralpb.VenueMarginState)
+	}{
+		{
+			name: "unsupported field carries value",
+			mutate: func(msg *collateralpb.VenueMarginState) {
+				msg.MaintenanceMarginSupport = collateralpb.SupportStatus_SUPPORT_STATUS_UNSUPPORTED
+			},
+		},
+		{
+			name: "unknown enum value",
+			mutate: func(msg *collateralpb.VenueMarginState) {
+				msg.MarginRatioSupport = collateralpb.SupportStatus(99)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := New(WithClock(frozen))
+			msg := state(t)
+			tc.mutate(msg)
+			fold(t, v, msg)
+			if held, _ := v.Stats(); held != 0 {
+				t.Errorf("view holds %d accounts after contradictory support state, want 0", held)
+			}
+		})
+	}
+}
+
 // TestStatsSeparatesHeldFromCurrent: the gap between the two is what tells an
 // operator a margin control is about to refuse every order, minutes before
 // anyone files a ticket about rejected orders.

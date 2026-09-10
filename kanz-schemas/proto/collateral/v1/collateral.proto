@@ -19,6 +19,16 @@ import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
 import "domain/v1/measure.proto";
 
+// SupportStatus is the three-state vocabulary for a venue field's capability.
+// UNKNOWN is fail-closed: the adapter could not establish whether the field
+// applies. UNSUPPORTED is an observed account capability, never a numeric zero.
+enum SupportStatus {
+  // UNSPECIFIED carries the domain's UNKNOWN state and therefore fails closed.
+  SUPPORT_STATUS_UNSPECIFIED = 0;
+  SUPPORT_STATUS_SUPPORTED = 1;
+  SUPPORT_STATUS_UNSUPPORTED = 2;
+}
+
 // MarginType distinguishes variation margin (against MtM moves) from initial
 // margin (the SIMM/grid potential-future-exposure buffer).
 enum MarginType {
@@ -219,6 +229,13 @@ message VenueMarginState {
   // already refuses an uncovered VaR refuses an uncovered margin ratio by the
   // same code path (#408 control 3, #527).
   domain.v1.InputCoverage coverage = 8;
+
+  // These fields separate an applicable quantity the venue failed to report
+  // (SUPPORTED + absent value => UNKNOWN observation) from a quantity the
+  // observed account mode does not support. UNSUPPORTED never authorizes a
+  // margin-enabled action and never synthesizes a numeric zero.
+  SupportStatus maintenance_margin_support = 9;
+  SupportStatus margin_ratio_support = 10;
 }
 
 // VenueLiquidationPrice is one open position's liquidation price at the venue.
