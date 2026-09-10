@@ -125,6 +125,7 @@ func TestPrometheusConfigMatchesTheEstate(t *testing.T) {
 			RelabelConfigs []struct {
 				SourceLabels []string `yaml:"source_labels"`
 				Action       string   `yaml:"action"`
+				TargetLabel  string   `yaml:"target_label"`
 			} `yaml:"relabel_configs"`
 		} `yaml:"scrape_configs"`
 	}
@@ -199,6 +200,28 @@ func TestPrometheusConfigMatchesTheEstate(t *testing.T) {
 				"config claims to read them. If it does not, no pod is kept and the target list is "+
 				"empty — which looks exactly like a healthy estate nobody has broken yet.", want)
 		}
+	}
+
+	const (
+		rolloutMetaLabel   = "__meta_kubernetes_pod_label_rollouts_pod_template_hash"
+		rolloutMetricLabel = "rollouts_pod_template_hash"
+	)
+	canaryLabelCopied := false
+	for _, sc := range cfg.ScrapeConfigs {
+		for _, rc := range sc.RelabelConfigs {
+			if rc.TargetLabel != rolloutMetricLabel {
+				continue
+			}
+			for _, source := range rc.SourceLabels {
+				if source == rolloutMetaLabel {
+					canaryLabelCopied = true
+				}
+			}
+		}
+	}
+	if !canaryLabelCopied {
+		t.Errorf("Prometheus does not copy %s to %s; risk canary queries cannot select the new ReplicaSet",
+			rolloutMetaLabel, rolloutMetricLabel)
 	}
 
 	// 3. THE RULES MOUNT MUST NOT BE OPTIONAL.

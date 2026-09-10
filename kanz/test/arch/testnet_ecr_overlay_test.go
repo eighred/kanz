@@ -291,6 +291,43 @@ func TestTokyoWorkloadPodVerifierMatchesStatusesByContainerName(t *testing.T) {
 	}
 }
 
+func TestTokyoObservabilityInstallerPinsTheMinimumProviderToECR(t *testing.T) {
+	root := moduleRoot(t)
+	overlay := filepath.Join(root, "infra", "overlays", "testnet-tokyo-observability")
+	cmd := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", overlay)
+	rendered, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("render Tokyo observability: %v", err)
+	}
+	if got := len(regexp.MustCompile(`(?m)^kind: `).FindAll(rendered, -1)); got != 9 {
+		t.Fatalf("Tokyo observability rendered %d resources, want 9", got)
+	}
+	imagePattern := regexp.MustCompile(`(?m)^\s*image:\s+012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/prometheus@sha256:[0-9a-f]{64}\s*$`)
+	if got := len(imagePattern.FindAll(rendered, -1)); got != 1 {
+		t.Fatalf("Tokyo observability rendered %d reviewed ECR Prometheus images, want 1", got)
+	}
+	for _, forbidden := range []string{"quay.io", "imagePullSecrets:", "kubernetes.io/dockerconfigjson", "kind: DaemonSet"} {
+		if bytes.Contains(rendered, []byte(forbidden)) {
+			t.Errorf("Tokyo observability retained forbidden marker %q", forbidden)
+		}
+	}
+
+	installer := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetObservability.ps1")))
+	for _, required := range []string{
+		"HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
+		"Expected 9 rendered resources", "imageTag=v3.13.3-amd64",
+		"apply --server-side --dry-run=server", "{.status.phase}''=Bound pvc/prometheus-data",
+		"sed ''s/namespace: kanz-observability/namespace: default/g''",
+		"rollout status deployment/prometheus", "kubernetes.io/service-name=prometheus",
+		"/-/ready", "query=vector(1)", "observability-image-matches-reviewed-ecr-lock",
+		"fresh-observability-rollback-started",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Errorf("Tokyo observability installer is missing proof %q", required)
+		}
+	}
+}
+
 func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 	jq, err := exec.LookPath("jq")
 	if err != nil {
