@@ -74,9 +74,11 @@ The governance inputs have separate authoritative sources:
   refuses every unbound portfolio; the overlay does not invent a mapping.
 - The Binance and OKX expected account UIDs come from independently reviewed
   exchange account-opening evidence. They must never be copied from the
-  adapter's own signed observation. Until those values are configured and both
-  adapter escape hatches are removed, verified-account enforcement remains
-  unarmed and this preflight fails.
+  adapter's own signed observation. Option 4 in `tools/Kanz-Venue-Secrets.cmd`
+  accepts them only inside the remote Vault process and stores them under
+  venue-separated account-master paths. The adapters mount those values as
+  files, reject an unreadable mount, and refuse a mismatch. Tokyo removes both
+  unverified-account escape hatches and requires verified accounts in the OMS.
 - Identities are created through Identity's invite/redemption flow. A trader
   and `kanz-order-approver` must be distinct active subjects in the same tenant;
   mandate approval likewise requires two distinct active signatories. The

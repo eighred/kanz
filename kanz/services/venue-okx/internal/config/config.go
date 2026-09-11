@@ -139,6 +139,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	accountUID, err := secret.Read("OKX_VENUE_ACCOUNT_UID")
+	if err != nil {
+		return Config{}, err
+	}
 
 	// THE ENDPOINT HAS NO SAFE DEFAULT, SO IT HAS NO DEFAULT (#147).
 	//
@@ -219,7 +223,7 @@ func Load() (Config, error) {
 
 		MIC:                    env.Or("OKX_MIC", "OKX"),
 		Account:                env.Or("OKX_VENUE_ACCOUNT", env.Or("OKX_MIC", "OKX")),
-		AccountUID:             os.Getenv("OKX_VENUE_ACCOUNT_UID"),
+		AccountUID:             accountUID,
 		AllowUnverifiedAccount: os.Getenv("OKX_ALLOW_UNVERIFIED_ACCOUNT") == "true",
 		BaseURL:                baseURL,
 		WSBase:                 wsBase,

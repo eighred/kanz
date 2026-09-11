@@ -3,7 +3,7 @@ param(
     [ValidateSet('Bootstrap', 'Rotate')]
     [string]$Mode = 'Rotate',
 
-    [ValidateSet('Venue', 'DataPlane')]
+    [ValidateSet('Venue', 'DataPlane', 'AccountProof')]
     [string]$Target = 'Venue',
 
     [switch]$StageOnly
@@ -17,7 +17,11 @@ $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $terraformRoot = Join-Path $repositoryRoot 'kanz\infra\terraform-testnet'
 $scriptName = if ($Target -eq 'DataPlane') { 'bootstrap-testnet-data-plane.sh' } else { 'bootstrap-testnet-venues.sh' }
 $bootstrapScript = Join-Path $scriptRoot $scriptName
-$remoteName = if ($Target -eq 'DataPlane') { 'testnet-data-plane-secrets' } else { 'testnet-venue-secrets' }
+$remoteName = switch ($Target) {
+    'DataPlane' { 'testnet-data-plane-secrets' }
+    'AccountProof' { 'testnet-venue-account-proof' }
+    default { 'testnet-venue-secrets' }
+}
 $completionMarker = "/vault/run/$remoteName.complete"
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $terraformCommand = Get-Command terraform.exe -ErrorAction SilentlyContinue
@@ -104,9 +108,13 @@ if ($StageOnly) {
     return
 }
 
-$remoteArgument = if ($Target -eq 'Venue') { ' ' + $Mode.ToLowerInvariant() } else { '' }
+$remoteArgument = switch ($Target) {
+    'Venue' { ' ' + $Mode.ToLowerInvariant() }
+    'AccountProof' { ' account-proof' }
+    default { '' }
+}
 $interactiveCommand = "sudo k3s kubectl -n vault exec -it vault-0 -c vault -- /bin/sh $remoteScript$remoteArgument"
-Write-Host 'Secrets are entered only in the remote Vault process. Hidden input is expected.'
+Write-Host 'Sensitive values are entered only in the remote Vault process. Hidden input is expected.'
 & $aws ssm start-session `
     --profile $profileName `
     --region $region `

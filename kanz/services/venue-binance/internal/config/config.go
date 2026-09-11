@@ -121,6 +121,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	accountUID, err := secret.Read("BINANCE_VENUE_ACCOUNT_UID")
+	if err != nil {
+		return Config{}, err
+	}
 
 	// PARSED, NOT STRING-COMPARED (#783). It used to read
 	// os.Getenv(key) == "true", which makes "True", "TRUE", "1" and a value a
@@ -147,7 +151,7 @@ func Load() (Config, error) {
 
 		MIC:                    env.Or("BINANCE_MIC", "BINANCE"),
 		Account:                env.Or("BINANCE_VENUE_ACCOUNT", env.Or("BINANCE_MIC", "BINANCE")),
-		AccountUID:             os.Getenv("BINANCE_VENUE_ACCOUNT_UID"),
+		AccountUID:             accountUID,
 		AllowUnverifiedAccount: os.Getenv("BINANCE_ALLOW_UNVERIFIED_ACCOUNT") == "true",
 		BaseURL:                env.Or("BINANCE_BASE_URL", "https://testnet.binance.vision"),
 		WSBase:                 env.Or("BINANCE_WS_BASE", "wss://testnet.binance.vision"),

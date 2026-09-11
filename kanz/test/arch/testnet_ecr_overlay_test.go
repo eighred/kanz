@@ -60,6 +60,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 		"../../deploy/risk-engine-rollout.yaml",
 		"../../deploy/venue-binance-deploy.yaml",
 		"../../deploy/venue-okx-deploy.yaml",
+		"account-proof-secret-provider-classes.yaml",
 		"governance-network-policies.yaml",
 	}
 	assertSameStrings(t, "overlay resources", overlay.Resources, wantResources)
@@ -129,7 +130,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	}
 }
 
-func TestTokyoArmsOnlyControlsWhoseMissingInputsRefusePerOrder(t *testing.T) {
+func TestTokyoArmsGovernanceControlsFromIndependentSources(t *testing.T) {
 	root := moduleRoot(t)
 	overlay := filepath.Join(root, "infra", "overlays", "testnet-tokyo")
 	cmd := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", overlay)
@@ -141,6 +142,7 @@ func TestTokyoArmsOnlyControlsWhoseMissingInputsRefusePerOrder(t *testing.T) {
 	for name, value := range map[string]string{
 		"OMS_REQUIRE_MANDATE":           "true",
 		"OMS_REQUIRE_VENUE_ACCOUNT":     "true",
+		"OMS_REQUIRE_VERIFIED_ACCOUNT":  "true",
 		"OMS_REQUIRE_DUAL_CONTROL":      "true",
 		"OMS_DUAL_CONTROL_MIN_NOTIONAL": "1 USD",
 		"API_GATEWAY_OMS_READ_ADDR":     "oms.kanz-services.svc:9090",
@@ -159,8 +161,24 @@ func TestTokyoArmsOnlyControlsWhoseMissingInputsRefusePerOrder(t *testing.T) {
 	if strings.Contains(text, "name: allow-oms-query-egress-from-gateway") {
 		t.Fatal("Tokyo overlay partially isolates gateway egress without installing its complete DNS, NATS, identity, and upstream policy set")
 	}
-	if regexp.MustCompile(`(?m)- name: OMS_REQUIRE_VERIFIED_ACCOUNT\r?\n\s+value: "true"$`).MatchString(text) {
-		t.Fatal("Tokyo arms verified-account enforcement without independently supplied expected UIDs")
+	for name, value := range map[string]string{
+		"BINANCE_VENUE_ACCOUNT_UID_FILE":   "/run/secrets/account-proof/expected-account-uid",
+		"OKX_VENUE_ACCOUNT_UID_FILE":       "/run/secrets/account-proof/expected-account-uid",
+		"BINANCE_ALLOW_UNVERIFIED_ACCOUNT": "false",
+		"OKX_ALLOW_UNVERIFIED_ACCOUNT":     "false",
+	} {
+		pattern := regexp.MustCompile(`(?m)- name: ` + regexp.QuoteMeta(name) + `\r?\n\s+value: "?` + regexp.QuoteMeta(value) + `"?$`)
+		if !pattern.MatchString(text) {
+			t.Errorf("Tokyo overlay does not render %s=%q", name, value)
+		}
+	}
+	for _, source := range []string{
+		"kv/data/kanz/account-master/binance",
+		"kv/data/kanz/account-master/okx",
+	} {
+		if !strings.Contains(text, source) {
+			t.Errorf("Tokyo account proof omits independent source %q", source)
+		}
 	}
 }
 
@@ -248,7 +266,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 48", "Expected 16 rendered container images", "sha256sum --check --status",
+		"resourceCount -ne 50", "Expected 16 rendered container images", "sha256sum --check --status",
 		"imageTag=$imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",
