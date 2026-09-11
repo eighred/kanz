@@ -2,6 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
+  - account-proof-secret-provider-classes.yaml
   - ../../security/secrets/secretproviderclass.yaml
   - ../../deploy/analysis-template.yaml
   - ../../deploy/accounting-deploy.yaml
@@ -105,6 +106,7 @@ patches:
                 env:
                   - { name: OMS_REQUIRE_MANDATE, value: "true" }
                   - { name: OMS_REQUIRE_VENUE_ACCOUNT, value: "true" }
+                  - { name: OMS_REQUIRE_VERIFIED_ACCOUNT, value: "true" }
                   - { name: OMS_REQUIRE_DUAL_CONTROL, value: "true" }
                   - { name: OMS_DUAL_CONTROL_MIN_NOTIONAL, value: "1 USD" }
   - target:
@@ -125,3 +127,53 @@ patches:
                   - { name: API_GATEWAY_APPROVE_ROLE, value: "kanz-order-approver" }
                   - { name: API_GATEWAY_COMPLIANCE_ADDR, value: "http://compliance.kanz-services.svc:8095" }
                   - { name: API_GATEWAY_MANDATE_ROLE, value: "kanz-mandate-signatory" }
+  - target:
+      kind: Deployment
+      name: venue-binance
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: venue-binance
+      spec:
+        template:
+          spec:
+            containers:
+              - name: venue-binance
+                env:
+                  - { name: BINANCE_VENUE_ACCOUNT_UID_FILE, value: "/run/secrets/account-proof/expected-account-uid" }
+                  - { name: BINANCE_ALLOW_UNVERIFIED_ACCOUNT, value: "false" }
+                volumeMounts:
+                  - { name: account-proof, mountPath: /run/secrets/account-proof, readOnly: true }
+            volumes:
+              - name: account-proof
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: venue-binance-account-proof
+  - target:
+      kind: Deployment
+      name: venue-okx
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: venue-okx
+      spec:
+        template:
+          spec:
+            containers:
+              - name: venue-okx
+                env:
+                  - { name: OKX_VENUE_ACCOUNT_UID_FILE, value: "/run/secrets/account-proof/expected-account-uid" }
+                  - { name: OKX_ALLOW_UNVERIFIED_ACCOUNT, value: "false" }
+                volumeMounts:
+                  - { name: account-proof, mountPath: /run/secrets/account-proof, readOnly: true }
+            volumes:
+              - name: account-proof
+                csi:
+                  driver: secrets-store.csi.k8s.io
+                  readOnly: true
+                  volumeAttributes:
+                    secretProviderClass: venue-okx-account-proof

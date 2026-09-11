@@ -9,9 +9,9 @@ umask 077
 
 mode=${1:-bootstrap}
 case "$mode" in
-    bootstrap|rotate) ;;
+    bootstrap|rotate|account-proof) ;;
     *)
-        printf 'usage: %s [bootstrap|rotate]\n' "$0" >&2
+        printf 'usage: %s [bootstrap|rotate|account-proof]\n' "$0" >&2
         exit 2
         ;;
 esac
@@ -32,6 +32,8 @@ binance_api_secret=''
 okx_api_key=''
 okx_api_secret=''
 okx_api_passphrase=''
+binance_account_uid=''
+okx_account_uid=''
 
 clear_secrets() {
     vault_token=''
@@ -40,10 +42,17 @@ clear_secrets() {
     okx_api_key=''
     okx_api_secret=''
     okx_api_passphrase=''
+    binance_account_uid=''
+    okx_account_uid=''
     unset VAULT_TOKEN
 }
 trap clear_secrets EXIT HUP INT TERM
-rm -f /vault/run/testnet-venue-secrets.complete
+if [ "$mode" = account-proof ]; then
+    completion_marker=/vault/run/testnet-venue-account-proof.complete
+else
+    completion_marker=/vault/run/testnet-venue-secrets.complete
+fi
+rm -f "$completion_marker"
 
 require_secret() {
     if [ -z "$1" ]; then
@@ -85,6 +94,12 @@ path "kv/data/kanz/venue-binance" {
 path "kv/metadata/kanz/venue-binance" {
   capabilities = ["read"]
 }
+path "kv/data/kanz/account-master/binance" {
+  capabilities = ["read"]
+}
+path "kv/metadata/kanz/account-master/binance" {
+  capabilities = ["read"]
+}
 EOF
 
     "$VAULT_BIN" policy write venue-okx-read - <<'EOF'
@@ -92,6 +107,12 @@ path "kv/data/kanz/venue-okx" {
   capabilities = ["read"]
 }
 path "kv/metadata/kanz/venue-okx" {
+  capabilities = ["read"]
+}
+path "kv/data/kanz/account-master/okx" {
+  capabilities = ["read"]
+}
+path "kv/metadata/kanz/account-master/okx" {
   capabilities = ["read"]
 }
 EOF
@@ -115,6 +136,63 @@ EOF
         token_type=service \
         token_ttl=5m \
         token_max_ttl=15m
+fi
+
+if [ "$mode" = account-proof ]; then
+    # Policy writes replace the whole policy. Repeat both the credential path and
+    # the independent account-master path so this mode is safe on an estate
+    # bootstrapped by an older revision of this script.
+    "$VAULT_BIN" policy write venue-binance-read - <<'EOF'
+path "kv/data/kanz/venue-binance" {
+  capabilities = ["read"]
+}
+path "kv/metadata/kanz/venue-binance" {
+  capabilities = ["read"]
+}
+path "kv/data/kanz/account-master/binance" {
+  capabilities = ["read"]
+}
+path "kv/metadata/kanz/account-master/binance" {
+  capabilities = ["read"]
+}
+EOF
+    "$VAULT_BIN" policy write venue-okx-read - <<'EOF'
+path "kv/data/kanz/venue-okx" {
+  capabilities = ["read"]
+}
+path "kv/metadata/kanz/venue-okx" {
+  capabilities = ["read"]
+}
+path "kv/data/kanz/account-master/okx" {
+  capabilities = ["read"]
+}
+path "kv/metadata/kanz/account-master/okx" {
+  capabilities = ["read"]
+}
+EOF
+
+    printf '%s\n' 'Enter UIDs only from independently reviewed exchange account-opening evidence.' >&2
+    printf '%s\n' 'Do not copy the adapter observation or derive either value from the mounted API credential.' >&2
+    printf '%s' 'Approved Binance testnet account UID: ' >&2
+    IFS= read -r -s binance_account_uid
+    printf '\n' >&2
+    require_secret "$binance_account_uid"
+    printf '%s' "$binance_account_uid" | "$VAULT_BIN" kv put kv/kanz/account-master/binance expected_uid=- >/dev/null
+    binance_account_uid=''
+
+    printf '%s' 'Approved OKX demo account UID: ' >&2
+    IFS= read -r -s okx_account_uid
+    printf '\n' >&2
+    require_secret "$okx_account_uid"
+    printf '%s' "$okx_account_uid" | "$VAULT_BIN" kv put kv/kanz/account-master/okx expected_uid=- >/dev/null
+    okx_account_uid=''
+
+    "$VAULT_BIN" kv metadata get kv/kanz/account-master/binance >/dev/null
+    "$VAULT_BIN" kv metadata get kv/kanz/account-master/okx >/dev/null
+    : > "$completion_marker"
+    printf '%s\n' 'ACCOUNT_PROOF_COMPLETE'
+    printf '%s\n' 'Both expected account UIDs are stored under separate account-master paths.'
+    exit 0
 fi
 
 printf '%s' 'Binance testnet API key: ' >&2
@@ -162,7 +240,7 @@ okx_api_passphrase=''
 
 "$VAULT_BIN" kv metadata get kv/kanz/venue-binance >/dev/null
 "$VAULT_BIN" kv metadata get kv/kanz/venue-okx >/dev/null
-: > /vault/run/testnet-venue-secrets.complete
+: > "$completion_marker"
 
 printf '%s\n' 'BOOTSTRAP_COMPLETE'
 if [ "$mode" = bootstrap ]; then

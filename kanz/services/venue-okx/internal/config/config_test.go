@@ -100,6 +100,34 @@ func TestNoDatabaseConfiguredLeavesDSNEmptyWithoutError(t *testing.T) {
 	}
 }
 
+func TestAccountUIDComesFromDeclaredProofFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "expected-account-uid")
+	if err := os.WriteFile(path, []byte("approved-okx-uid\n"), 0o600); err != nil {
+		t.Fatalf("write proof file: %v", err)
+	}
+	t.Setenv("OKX_VENUE_ACCOUNT_UID_FILE", path)
+	t.Setenv("OKX_VENUE_ACCOUNT_UID", "unreviewed-env-value")
+	setVenueEndpoints(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.AccountUID != "approved-okx-uid" {
+		t.Fatalf("AccountUID = %q, want the trimmed account-master value", cfg.AccountUID)
+	}
+}
+
+func TestUnreadableAccountUIDProofFailsFast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing")
+	t.Setenv("OKX_VENUE_ACCOUNT_UID_FILE", path)
+	setVenueEndpoints(t)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "OKX_VENUE_ACCOUNT_UID_FILE") {
+		t.Fatalf("Load() error = %v, want a refusal naming OKX_VENUE_ACCOUNT_UID_FILE", err)
+	}
+}
+
 // The generic <K>_FILE / <K> precedence and fail-fast rules used to be tested
 // here, against this package's own copy of secret(). That copy is gone and the
 // rules now live in pkg/secret, tested once in pkg/secret/secret_test.go —
