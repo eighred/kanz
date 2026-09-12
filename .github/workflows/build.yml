@@ -197,6 +197,9 @@ jobs:
           - service: web-bff
             dockerfile: kanz/services/web-bff/Dockerfile
             testnet_ecr: true
+          - service: cloudflared
+            dockerfile: kanz/infra/edge/Dockerfile.cloudflared
+            testnet_ecr: true
           # DATA-M1 (Task 7): the durable-log producer. archiver drains the NATS
           # live spine into the Kafka log of record; it had a Dockerfile, a
           # single-writer deploy manifest and real-broker integration tests
