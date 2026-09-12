@@ -65,6 +65,41 @@ if ($instanceId -notmatch '^i-[0-9a-f]+$') {
     throw 'Unable to resolve the testnet EC2 instance from Terraform state.'
 }
 
+function Send-SsmShellCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Commands,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Comment
+    )
+
+    # Windows PowerShell 5.1 strips the JSON quotes when a structured value is
+    # passed directly to a native executable. Let AWS CLI load the JSON from a
+    # short-lived, secret-free file so the same launcher works in 5.1 and 7+.
+    $parameterFile = Join-Path ([IO.Path]::GetTempPath()) ("kanz-ssm-parameters-{0}.json" -f [Guid]::NewGuid())
+    try {
+        $parameterJson = @{ commands = $Commands } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($parameterFile, $parameterJson, (New-Object Text.UTF8Encoding($false)))
+        $id = (& $aws ssm send-command `
+            --profile $profileName `
+            --region $region `
+            --instance-ids $instanceId `
+            --document-name AWS-RunShellScript `
+            --comment $Comment `
+            --parameters "file://$parameterFile" `
+            --query 'Command.CommandId' `
+            --output text).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $id) {
+            throw 'Failed to send the SSM shell command.'
+        }
+        return $id
+    }
+    finally {
+        Remove-Item -LiteralPath $parameterFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $payload = [Convert]::ToBase64String([IO.File]::ReadAllBytes($bootstrapScript))
 $remoteScript = "/vault/run/bootstrap-$remoteName.sh"
 $stageCommands = @(
@@ -76,18 +111,7 @@ $stageCommands = @(
     "k3s kubectl -n vault exec vault-0 -c vault -- rm -f $completionMarker",
     "rm -f /var/tmp/kanz-bootstrap-$remoteName.sh"
 )
-$parameters = @{ commands = $stageCommands } | ConvertTo-Json -Compress
-$commandId = (& $aws ssm send-command `
-    --profile $profileName `
-    --region $region `
-    --instance-ids $instanceId `
-    --document-name AWS-RunShellScript `
-    --parameters $parameters `
-    --query 'Command.CommandId' `
-    --output text).Trim()
-if ($LASTEXITCODE -ne 0 -or -not $commandId) {
-    throw 'Failed to stage the secret-free Vault operator script through SSM.'
-}
+$commandId = Send-SsmShellCommand -Commands $stageCommands -Comment "Stage the secret-free Kanz $remoteName operator script"
 
 $deadline = [DateTime]::UtcNow.AddMinutes(2)
 do {
@@ -125,20 +149,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "The interactive SSM session failed with exit code $LASTEXITCODE."
 }
 
-$checkParameters = @{ commands = @(
+$checkCommands = @(
     "k3s kubectl -n vault exec vault-0 -c vault -- test -f $completionMarker"
-) } | ConvertTo-Json -Compress
-$checkCommandId = (& $aws ssm send-command `
-    --profile $profileName `
-    --region $region `
-    --instance-ids $instanceId `
-    --document-name AWS-RunShellScript `
-    --parameters $checkParameters `
-    --query 'Command.CommandId' `
-    --output text).Trim()
-if ($LASTEXITCODE -ne 0 -or -not $checkCommandId) {
-    throw 'Unable to verify the Vault completion marker.'
-}
+)
+$checkCommandId = Send-SsmShellCommand -Commands $checkCommands -Comment "Verify the Kanz $remoteName completion marker"
 
 $deadline = [DateTime]::UtcNow.AddMinutes(1)
 do {
