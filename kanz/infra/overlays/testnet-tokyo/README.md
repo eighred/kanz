@@ -71,7 +71,10 @@ The governance inputs have separate authoritative sources:
   retained as compacted FACTs in the MANDATE stream.
 - `OMS_VENUE_ACCOUNTS` is the reviewed account-master mapping from
   `tenant/portfolio@MIC` to the adapter's logical account label. The Tokyo OMS
-  refuses every unbound portfolio; the overlay does not invent a mapping.
+  refuses every unbound portfolio. Tokyo carries one reviewed non-secret map:
+  `__system__/PF1` uses `binance-main` at `XBIN` and `okx-sub-1` at `XOKX`.
+  `RISK_ENGINE_VENUE_ACCOUNTS` mirrors it exactly so liquidation proximity is
+  measured against the same collateral account the OMS would spend.
 - The Binance and OKX expected account UIDs come from independently reviewed
   exchange account-opening evidence. They must never be copied from the
   adapter's own signed observation. Option 4 in `tools/Kanz-Venue-Secrets.cmd`

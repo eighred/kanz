@@ -241,6 +241,14 @@ data:
               }
             }
           }
+          # One-shot source of the first reviewed Tokyo portfolio. This identity
+          # cannot publish orders, mandates, platform mode, or any lifecycle FACT.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/kanz-portfolio-bootstrap"
+            permissions: {
+              publish: { allow: ["risk.portfolio.snapshot"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
           # The bootstrap Job (bootstrap-job.yaml) — it CREATES the streams, so it
           # is admitted here before any service has anything to connect to. It
           # lives in kanz-messaging beside the broker, not in kanz-services.
