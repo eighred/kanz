@@ -148,6 +148,33 @@ func TestPortfolioBootstrapQuotesPostgresLiteralsOnce(t *testing.T) {
 	}
 }
 
+func TestTokyoMandateTemplateCannotBeMistakenForAnApprovedDecision(t *testing.T) {
+	root := moduleRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "infra", "overlays", "testnet-tokyo", "mandate.json.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("mandate template is not JSON: %v", err)
+	}
+	text := string(raw)
+	for _, required := range []string{
+		`"tenantId": "__system__"`, `"portfolioId": "PF1"`,
+		`"type": "RULE_TYPE_RESTRICTION"`, `"dimension": "DIMENSION_INSTRUMENT"`,
+		`"mode": "RESTRICTION_MODE_ALLOW_ONLY"`, "REPLACE_WITH_APPROVED_",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("mandate template lacks %q", required)
+		}
+	}
+	for _, unavailable := range []string{"RISK_MEASURE", "VENUE_MARGIN", "BUYING_POWER", "GROSS_LEVERAGE", "CONCENTRATION"} {
+		if strings.Contains(text, unavailable) {
+			t.Errorf("mandate template asserts unavailable Tokyo input %q", unavailable)
+		}
+	}
+}
+
 func TestTokyoArmsGovernanceControlsFromIndependentSources(t *testing.T) {
 	root := moduleRoot(t)
 	overlay := filepath.Join(root, "infra", "overlays", "testnet-tokyo")

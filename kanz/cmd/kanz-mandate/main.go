@@ -125,6 +125,9 @@ func main() {
 // caller of the old form gets this error, which names the replacement.
 var errUsage = errors.New(`a mandate change takes two people (#410), so this tool takes two invocations:
 
+  kanz-mandate validate --tenant T --file mandate.json
+                                                    (records no decision)
+
   kanz-mandate propose --tenant T --file mandate.json --by operator:alice \
                --reason "why" --out proposal.json      (publishes nothing)
 
@@ -172,6 +175,8 @@ func run(args []string, out io.Writer) error {
 		return errUsage
 	}
 	switch args[0] {
+	case "validate":
+		return runValidate(args[1:], out)
 	case "propose":
 		return runPropose(args[1:], out)
 	case "approve":
@@ -179,6 +184,25 @@ func run(args []string, out io.Writer) error {
 	default:
 		return errUsage
 	}
+}
+
+// runValidate applies the same strict protojson and domain validation used by
+// both publishing paths. It requires no actor because it records no decision,
+// opens no network connection, and creates no proposal or approval artifact.
+func runValidate(args []string, out io.Writer) error {
+	opt, err := parseFlags("validate", args)
+	if err != nil {
+		return err
+	}
+	m, err := loadMandate(opt.file, opt.tenant)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "VALID — mandate %s v%d for tenant %s portfolio %s, %d rule(s), effective %s\n",
+		m.GetMandateId(), m.GetVersion(), m.GetTenantId(), m.GetPortfolioId(), len(m.GetRules()),
+		m.GetEffectiveAt().AsTime().UTC().Format(time.RFC3339))
+	fmt.Fprintln(out, "NOTHING WAS PROPOSED, APPROVED, OR PUBLISHED.")
+	return nil
 }
 
 // runPropose validates the mandate, digests it, and writes a proposal. It opens
@@ -325,13 +349,14 @@ func parseFlags(sub string, args []string) (options, error) {
 	var opt options
 	fs.StringVar(&opt.tenant, "tenant", env.Or("KANZ_TENANT", ""), "envelope tenant_id — REQUIRED (the bus rejects an untenanted envelope)")
 	fs.StringVar(&opt.file, "file", "", "path to the mandate, as protojson compliance.v1.Mandate — REQUIRED")
-	fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)
 	switch sub {
 	case "propose":
+		fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)
 		fs.StringVar(&opt.reason, "reason", "", "why this mandate is being set; recorded in the FACT and covered by the approval — REQUIRED")
 		fs.StringVar(&opt.out, "out", "", "write the proposal here ('-' or empty ⇒ stdout)")
 		fs.DurationVar(&opt.ttl, "ttl", dualcontrol.DefaultTTL, "how long the proposal stays approvable")
 	case "approve":
+		fs.StringVar(&opt.by, "by", "", `operator principal, "{type}:{id}" (e.g. operator:akif) — REQUIRED`)
 		fs.StringVar(&opt.proposal, "proposal", "", "path to the proposal emitted by `kanz-mandate propose` — REQUIRED")
 		fs.StringVar(&opt.natsURL, "nats", env.Or("KANZ_NATS_URL", "nats://localhost:4222"), "NATS URL of the spine")
 		fs.StringVar(&opt.spiffeSocket, "spiffe-socket", env.Or("SPIFFE_ENDPOINT_SOCKET", ""),
@@ -349,7 +374,7 @@ func parseFlags(sub string, args []string) (options, error) {
 		return options{}, errors.New("--tenant is required: the bus rejects an envelope with no tenant_id")
 	case opt.file == "":
 		return options{}, errors.New("--file is required: the mandate (protojson compliance.v1.Mandate). approve needs it too — the approval covers the VALUE, so it is re-derived from the file rather than taken from the proposal")
-	case opt.by == "":
+	case sub != "validate" && opt.by == "":
 		return options{}, errors.New("--by is required: a mandate change is attributed to a named human, or it is not made")
 	}
 	if sub == "propose" && opt.reason == "" {

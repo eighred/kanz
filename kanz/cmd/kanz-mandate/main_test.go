@@ -69,6 +69,28 @@ func TestRun_TheOldSingleCommandFormIsRefused(t *testing.T) {
 	}
 }
 
+func TestValidate_RecordsNoDecisionAndPublishesNothing(t *testing.T) {
+	dir := t.TempDir()
+	m := writeFile(t, dir, "mandate.json", mandateJSON)
+
+	var buf bytes.Buffer
+	if err := run([]string{"validate", "--tenant", "acme", "--file", m}, &buf); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	for _, want := range []string{"VALID", "mandate M-1 v3", "NOTHING WAS PROPOSED, APPROVED, OR PUBLISHED"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("output does not mention %q:\n%s", want, buf.String())
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "mandate.json" {
+		t.Fatalf("validate created a decision artifact: %v", entries)
+	}
+}
+
 // PROPOSE PUBLISHES NOTHING, AND SAYS SO.
 func TestPropose_PublishesNothing(t *testing.T) {
 	dir := t.TempDir()
