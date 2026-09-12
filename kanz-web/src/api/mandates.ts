@@ -52,26 +52,10 @@ import { StateLapsed, StatePending } from './dualcontrol'
 //     both inapplicable, and importing one "for consistency" would render every
 //     field as null. The numbers have their own hazard; see below.
 //
-// # WHAT THIS SURFACE DOES NOT CARRY, WHICH IS THE THING WORTH SAYING LOUDEST
-//
-// IT DOES NOT CARRY THE MANDATE. proposalJSON's own comment says the digest
-// travels "and not the mandate", because "the mandate is fetched by proposal id
-// rather than splashed across a list" — but NO SUCH FETCH EXISTS. compliance
-// registers exactly three routes and the gateway fronts exactly those three:
-// propose, approve, and this queue. There is no GET for one proposal, so the
-// rules an approver is about to put in force are unreachable by any client.
-//
-// What a signatory can actually see is: which portfolio, which mandate id, what
-// version it becomes, HOW MANY rules it carries, the stated reason, and the
-// digest. Not which rules, not which limits, and not what the portfolio is
-// governed by today — `previous` is deliberately nil on publish too, so no diff
-// exists anywhere on the platform.
-//
-// This module does not paper over that and it does not invent an endpoint to
-// close it. It names the gap in describeVisibility() so the screen can put it in
-// front of the person at the moment they sign. An approver signing a change they
-// cannot read is the forgeable-actor problem in a new costume: the two names on
-// the record are real, and neither of them read the rule.
+// The list deliberately carries only summary metadata. Approval first reads the
+// exact stored mandate through the proposal-id route and compares every queue
+// field before enabling the signature. That keeps a compact watch queue without
+// asking a person to approve rules they cannot inspect.
 
 /**
  * PendingMandateChange is one proposed mandate change awaiting a second signature.
@@ -151,6 +135,81 @@ export interface PendingMandateChange {
    * this client does not recognise must not render as untouched work.
    */
   state?: string
+}
+
+export interface MandateDocument {
+  mandate_id: string
+  tenant_id: string
+  portfolio_id: string
+  version: string
+  rules: unknown[]
+  effective_at: string
+  [key: string]: unknown
+}
+
+export interface MandateChangeDetail extends PendingMandateChange {
+  mandate: MandateDocument
+}
+
+export interface ProposedMandateChange {
+  status: 'PENDING_APPROVAL'
+  proposal_id: string
+  portfolio_id: string
+  mandate_id: string
+  version: string
+  rule_count: number
+  proposer: string
+  digest: string
+  expires_at: string
+  message?: string
+}
+
+const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
+
+export function readMandateDocument(value: unknown): MandateDocument | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const candidate = value as Record<string, unknown>
+  if (
+    typeof candidate.mandate_id !== 'string' ||
+    candidate.mandate_id.trim() === '' ||
+    typeof candidate.tenant_id !== 'string' ||
+    candidate.tenant_id.trim() === '' ||
+    typeof candidate.portfolio_id !== 'string' ||
+    candidate.portfolio_id.trim() === '' ||
+    typeof candidate.version !== 'string' ||
+    !CANONICAL_UINT64.test(candidate.version) ||
+    candidate.version === '0' ||
+    BigInt(candidate.version) > UINT64_MAX ||
+    !Array.isArray(candidate.rules) ||
+    typeof candidate.effective_at !== 'string' ||
+    !RFC3339.test(candidate.effective_at) ||
+    Number.isNaN(Date.parse(candidate.effective_at))
+  ) {
+    return null
+  }
+  return candidate as MandateDocument
+}
+
+export function detailMatchesQueue(queue: PendingMandateChange, detail: MandateChangeDetail): boolean {
+  const mandate = readMandateDocument(detail.mandate)
+  return (
+    mandate !== null &&
+    detail.proposal_id === queue.proposal_id &&
+    detail.portfolio_id === queue.portfolio_id &&
+    detail.mandate_id === queue.mandate_id &&
+    detail.version === queue.version &&
+    detail.rule_count === queue.rule_count &&
+    detail.proposer === queue.proposer &&
+    detail.reason === queue.reason &&
+    typeof queue.digest === 'string' &&
+    queue.digest.length > 0 &&
+    detail.digest === queue.digest &&
+    detail.state === queue.state &&
+    mandate.portfolio_id === queue.portfolio_id &&
+    mandate.mandate_id === queue.mandate_id &&
+    mandate.version === queue.version &&
+    mandate.rules.length === queue.rule_count
+  )
 }
 
 /**
@@ -344,6 +403,26 @@ export const mandates = {
     return body as PendingMandateChange[]
   },
 
+  detail: async (proposalId: string): Promise<MandateChangeDetail> => {
+    const body = await api.get<unknown>(
+      `/api/v1/mandates/pending-changes/${encodeURIComponent(proposalId)}`,
+    )
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      throw new Error('compliance returned something other than a mandate proposal')
+    }
+    const detail = body as MandateChangeDetail
+    if (readMandateDocument(detail.mandate) === null) {
+      throw new Error('compliance returned a proposal whose mandate cannot be rendered exactly')
+    }
+    return detail
+  },
+
+  propose: (mandate: MandateDocument, reason: string) =>
+    api.post<ProposedMandateChange>(
+      `/api/v1/portfolios/${encodeURIComponent(mandate.portfolio_id)}/mandate`,
+      { mandate, reason },
+    ),
+
   /**
    * approve gives the second signature, and it PUBLISHES the mandate on success.
    *
@@ -467,43 +546,4 @@ export function describeApproveFailure(e: unknown): string {
     default:
       return e.message
   }
-}
-
-/**
- * describeVisibility states what a signatory can and cannot see of the change.
- *
- * IT IS NOT A DISCLAIMER AND IT IS NOT DEFENSIVE PADDING. A mandate is the
- * control every order is checked against, so the one question this screen exists
- * to answer is "what is changing?" — and the queue does not carry the answer.
- * compliance serves the digest and not the mandate, on the stated reasoning that
- * "the mandate is fetched by proposal id rather than splashed across a list", and
- * no route to fetch one exists: propose, approve and this queue are all three.
- *
- * So what is visible is the shape of the change — which portfolio, which mandate,
- * what version it becomes, how many rules it will carry — plus the proposer's
- * stated reason. Not which rules, not which limits, and not what the portfolio is
- * governed by today. There is no diff on this platform to render: `previous` is
- * nil on publish too, deliberately, because the only registry compliance holds is
- * a replay-filled view that could disagree with the compacted stream.
- *
- * Saying so is the difference between a signatory who knows their signature
- * covers a digest they cannot expand, and one who believes the screen showed them
- * the change. The second is the forgeable-actor problem in a new costume: two
- * real names on the record, neither of whom read the rule.
- */
-export function describeVisibility(p: PendingMandateChange): string {
-  const rules = renderRuleCount(p)
-  const shape =
-    rules === null
-      ? 'This queue did not even state how many rules the proposed mandate carries.'
-      : rules === '0'
-        ? 'The proposed mandate carries NO RULES: approving it leaves this portfolio governed by a mandate that constrains nothing. That is legal, and it is not the same as having no mandate — every order will pass every check.'
-        : `The proposed mandate carries ${rules} rule${rules === '1' ? '' : 's'}.`
-  return (
-    `${shape} WHICH rules, and which limits, are NOT on this surface — compliance serves the ` +
-    'digest rather than the mandate, and no route exists to fetch one proposal’s mandate. ' +
-    'Neither is the mandate this portfolio is governed by today, so there is no diff to read. ' +
-    'Your signature will cover the digest below; what it covers can only be confirmed against ' +
-    'the proposal as it was submitted, from whoever proposed it.'
-  )
 }

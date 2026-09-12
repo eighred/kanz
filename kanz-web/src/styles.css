@@ -165,7 +165,6 @@ a {
   display: grid;
   gap: 14px;
 }
-
 label {
   display: flex;
   flex-direction: column;
@@ -192,6 +191,63 @@ textarea {
   border: 1px solid var(--border);
   border-radius: 6px;
   word-break: break-all;
+}
+
+.checkline {
+  flex-direction: row;
+  align-items: flex-start;
+  color: var(--text);
+}
+
+.checkline input {
+  margin-top: 4px;
+}
+
+.mandate-preview {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.mandate-preview h2 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+.mandate-preview dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 20px;
+  margin: 0 0 14px;
+}
+
+.mandate-preview dl div {
+  min-width: 0;
+}
+
+.mandate-preview dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.mandate-preview dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.mandate-preview pre {
+  max-height: 28rem;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.78rem;
 }
 
 input:focus-visible {
