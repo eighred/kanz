@@ -87,6 +87,8 @@ jobs:
             dockerfile: kanz/services/identity/Dockerfile
           - service: web-bff
             dockerfile: kanz/services/web-bff/Dockerfile
+          - service: cloudflared
+            dockerfile: kanz/infra/edge/Dockerfile.cloudflared
           - service: archiver
             dockerfile: kanz/services/archiver/Dockerfile
           - service: lake-sink

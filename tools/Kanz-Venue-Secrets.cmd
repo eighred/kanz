@@ -7,12 +7,14 @@ echo   1. Rotate exchange testnet credentials
 echo   2. Re-run the venue Vault bootstrap
 echo   3. Bootstrap generated data-plane credentials and signing keys
 echo   4. Bind independently approved exchange account UIDs
-set /p "CHOICE=Enter 1, 2, 3, or 4: "
+echo   5. Configure the governed web edge in Vault
+set /p "CHOICE=Enter 1, 2, 3, 4, or 5: "
 
 if "%CHOICE%"=="1" set "MODE=Rotate"& set "TARGET=Venue"
 if "%CHOICE%"=="2" set "MODE=Bootstrap"& set "TARGET=Venue"
 if "%CHOICE%"=="3" set "MODE=Bootstrap"& set "TARGET=DataPlane"
 if "%CHOICE%"=="4" set "MODE=Bootstrap"& set "TARGET=AccountProof"
+if "%CHOICE%"=="5" set "MODE=Bootstrap"& set "TARGET=WebEdge"
 if not defined MODE (
   echo Invalid choice. No changes were made.
   pause

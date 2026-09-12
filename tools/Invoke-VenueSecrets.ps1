@@ -3,7 +3,7 @@ param(
     [ValidateSet('Bootstrap', 'Rotate')]
     [string]$Mode = 'Rotate',
 
-    [ValidateSet('Venue', 'DataPlane', 'AccountProof')]
+    [ValidateSet('Venue', 'DataPlane', 'AccountProof', 'WebEdge')]
     [string]$Target = 'Venue',
 
     [switch]$StageOnly
@@ -15,11 +15,12 @@ $region = 'ap-northeast-1'
 $scriptRoot = $PSScriptRoot
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $terraformRoot = Join-Path $repositoryRoot 'kanz\infra\terraform-testnet'
-$scriptName = if ($Target -eq 'DataPlane') { 'bootstrap-testnet-data-plane.sh' } else { 'bootstrap-testnet-venues.sh' }
+$scriptName = if ($Target -eq 'DataPlane') { 'bootstrap-testnet-data-plane.sh' } elseif ($Target -eq 'WebEdge') { 'bootstrap-testnet-web-edge.sh' } else { 'bootstrap-testnet-venues.sh' }
 $bootstrapScript = Join-Path $scriptRoot $scriptName
 $remoteName = switch ($Target) {
     'DataPlane' { 'testnet-data-plane-secrets' }
     'AccountProof' { 'testnet-venue-account-proof' }
+    'WebEdge' { 'testnet-web-edge' }
     default { 'testnet-venue-secrets' }
 }
 $completionMarker = "/vault/run/$remoteName.complete"
@@ -135,6 +136,7 @@ if ($StageOnly) {
 $remoteArgument = switch ($Target) {
     'Venue' { ' ' + $Mode.ToLowerInvariant() }
     'AccountProof' { ' account-proof' }
+    'WebEdge' { '' }
     default { '' }
 }
 $interactiveCommand = "sudo k3s kubectl -n vault exec -it vault-0 -c vault -- /bin/sh $remoteScript$remoteArgument"
