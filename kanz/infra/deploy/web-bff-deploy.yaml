@@ -124,6 +124,11 @@ spec:
             # always speaks https to this application even though the tunnel's
             # last hop inside the pod is plaintext loopback.
             - { name: WEB_BFF_SESSION_TTL, value: "1h" }
+            # A projected, non-secret result from the repository-owned exact-main
+            # preflight. The ConfigMap is optional so a new estate starts and
+            # reports UNKNOWN rather than fabricating PASS before its first run.
+            - { name: WEB_BFF_PREFLIGHT_EVIDENCE_PATH, value: "/run/preflight/evidence.json" }
+            - { name: WEB_BFF_PREFLIGHT_EVIDENCE_MAX_AGE, value: "15m" }
           livenessProbe:
             httpGet: { path: /healthz, port: 8084 }
             initialDelaySeconds: 5
@@ -140,6 +145,7 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - { name: gateway, mountPath: /run/secrets/gateway, readOnly: true }
+            - { name: preflight-evidence, mountPath: /run/preflight, readOnly: true }
             - { name: tmp, mountPath: /tmp }
         # THE ONLY PUBLIC SURFACE IN THE ESTATE.
         #
@@ -185,3 +191,7 @@ spec:
               secretProviderClass: api-gateway-secrets
         - name: tmp
           emptyDir: {}
+        - name: preflight-evidence
+          configMap:
+            name: kanz-oms-preflight-evidence
+            optional: true

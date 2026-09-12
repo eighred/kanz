@@ -7,7 +7,13 @@ param(
     [ValidateSet('ap-northeast-1')]
     [string]$Region = 'ap-northeast-1',
 
-    [string]$Profile = 'kanz-platform'
+    [string]$Profile = 'kanz-platform',
+
+    # Persist the exact result for the authenticated web status page. This only
+    # updates a non-secret evidence ConfigMap; it never publishes a resume FACT,
+    # changes OMS state, or submits an order. Without the switch the preflight
+    # remains completely read-only, as before.
+    [switch]$PublishWebEvidence
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,7 +61,7 @@ $parameters = @{ commands = @(
     'nats_ip=$(/usr/local/bin/k3s kubectl -n kanz-messaging get pod nats-0 -o jsonpath=''{.status.podIP}'')',
     'mandate_count=$(curl -fsS --connect-timeout 3 --max-time 5 "http://${nats_ip}:8222/jsz?streams=true&accounts=true" | jq ''[.account_details[]?.stream_detail[]? | select(.name == "MANDATE") | .state.messages] | if length == 1 then .[0] else error("expected one MANDATE stream") end'')',
     'oms_metrics=$(/usr/local/bin/k3s kubectl get --raw /api/v1/namespaces/kanz-services/services/http:oms:8090/proxy/metrics)',
-    'report=$(jq -n --slurpfile deployment "${base}-deployment.json" --slurpfile api_gateway "${base}-gateway.json" --slurpfile pods "${base}-pods.json" --rawfile recent_logs "${base}-logs.txt" --argjson portfolio_count "${portfolio_count}" --argjson mandate_count "${mandate_count}" --argjson identity "${identity}" --argjson venue_proof "${venue_proof}" --arg oms_metrics "${oms_metrics}" ''{deployment: $deployment[0], api_gateway: $api_gateway[0], pods: $pods[0], recent_logs: $recent_logs, portfolio_count: $portfolio_count, mandate_count: $mandate_count, identity: $identity, venue_proof: $venue_proof, oms_metrics: $oms_metrics}'' | jq -c -f "${base}.jq")',
+    'report=$(jq -n --slurpfile deployment "${base}-deployment.json" --slurpfile api_gateway "${base}-gateway.json" --slurpfile binance "${base}-binance.json" --slurpfile okx "${base}-okx.json" --slurpfile pods "${base}-pods.json" --rawfile recent_logs "${base}-logs.txt" --argjson portfolio_count "${portfolio_count}" --argjson mandate_count "${mandate_count}" --argjson identity "${identity}" --argjson venue_proof "${venue_proof}" --arg oms_metrics "${oms_metrics}" ''{deployment: $deployment[0], api_gateway: $api_gateway[0], binance: $binance[0], okx: $okx[0], pods: $pods[0], recent_logs: $recent_logs, portfolio_count: $portfolio_count, mandate_count: $mandate_count, identity: $identity, venue_proof: $venue_proof, oms_metrics: $oms_metrics}'' | jq -c -f "${base}.jq")',
     'printf ''%s\n'' "${report}"',
     'printf ''%s'' "${report}" | jq -e ''.verdict == "PASS"'' >/dev/null'
 ) } | ConvertTo-Json -Compress -Depth 4
@@ -82,6 +88,45 @@ if (-not $result) {
 Write-Output "SSM command: $commandId"
 if (-not [string]::IsNullOrWhiteSpace($result.Output)) {
     Write-Output $result.Output.Trim()
+}
+
+if ($PublishWebEvidence) {
+    $reportLine = @($result.Output -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | Select-Object -Last 1
+    try {
+        $report = $reportLine | ConvertFrom-Json
+    } catch {
+        throw "OMS go-live verification $commandId returned no publishable JSON evidence."
+    }
+    if ($report.verdict -notin @('PASS', 'FAIL') -or -not $report.deployed_commit) {
+        throw "OMS go-live verification $commandId returned incomplete evidence; it was not published."
+    }
+    $evidence = [ordered]@{
+        format = 'kanz-oms-preflight-v1'
+        observed_at = [DateTime]::UtcNow.ToString('o')
+        verifier_commit = $releaseCommit
+        deployed_commit = $report.deployed_commit
+        command_id = $commandId
+        verdict = $report.verdict
+        checks = $report.checks
+        workload_images = $report.workload_images
+    } | ConvertTo-Json -Compress -Depth 20
+    $evidencePayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($evidence))
+    $publishParameters = @{ commands = @(
+        'set -eu',
+        "evidence='/var/tmp/kanz-oms-preflight-evidence-$([Guid]::NewGuid().ToString('N')).json'",
+        'finish() { rm -f "${evidence}"; }',
+        'trap finish EXIT',
+        "printf '%s' '$evidencePayload' | base64 -d > " + '"${evidence}"',
+        '/usr/local/bin/k3s kubectl -n kanz-services create configmap kanz-oms-preflight-evidence --from-file=evidence.json="${evidence}" --dry-run=client -o yaml | /usr/local/bin/k3s kubectl apply -f -'
+    ) } | ConvertTo-Json -Compress -Depth 4
+    $publishID = (& $aws ssm send-command --profile $Profile --region $Region `
+        --instance-ids $InstanceId --document-name AWS-RunShellScript `
+        --comment 'Publish non-secret Kanz OMS preflight evidence for kanz-web' `
+        --parameters $publishParameters --query 'Command.CommandId' --output text).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $publishID) { throw 'AWS rejected the web evidence publication command.' }
+    & $aws ssm wait command-executed --profile $Profile --region $Region --command-id $publishID --instance-id $InstanceId
+    if ($LASTEXITCODE -ne 0) { throw "Web evidence publication $publishID did not complete successfully." }
+    Write-Output "Web evidence published: $publishID"
 }
 if ($result.Status -ne 'Success') {
     $detail = $result.Error.Trim()
