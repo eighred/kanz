@@ -14,13 +14,13 @@
   "dependencies": {
     "pinia": "4.0.3",
     "vue": "3.5.42",
-    "vue-router": "5.3.0"
+    "vue-router": "5.3.1"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "@vitejs/plugin-vue": "6.0.8",
     "@vue/test-utils": "^2.5.0",
-    "happy-dom": "^20.11.15",
+    "happy-dom": "^20.14.0",
     "typescript": "5.7.3",
     "vite": "8.2.2",
     "vitest": "^4.1.11",
