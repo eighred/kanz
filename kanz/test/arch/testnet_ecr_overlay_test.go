@@ -131,6 +131,23 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	}
 }
 
+func TestPortfolioBootstrapQuotesPostgresLiteralsOnce(t *testing.T) {
+	root := moduleRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "..", "tools", "Initialize-TestnetPortfolio.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	query := `tenant_id=''__system__'' and portfolio_id=''PF1''`
+	if got := strings.Count(script, query); got != 2 {
+		t.Fatalf("bootstrap has %d correctly quoted PF1 queries, want 2", got)
+	}
+	if strings.Contains(script, `tenant_id=''''__system__''''`) ||
+		strings.Contains(script, `portfolio_id=''''PF1''''`) {
+		t.Fatal("bootstrap double-quotes SQL literals after PowerShell rendering; PostgreSQL will reject the query")
+	}
+}
+
 func TestTokyoArmsGovernanceControlsFromIndependentSources(t *testing.T) {
 	root := moduleRoot(t)
 	overlay := filepath.Join(root, "infra", "overlays", "testnet-tokyo")

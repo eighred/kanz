@@ -50,14 +50,14 @@ $parameters = @{ commands = @(
     ('test "$live_oms" = ''{0}'' || {{ echo ''REFUSED: live OMS binding does not match exact main'' >&2; exit 2; }}' -f $expectedBindings),
     'test -z "$live_risk" || { echo ''REFUSED: Tokyo risk margin binding must remain empty without a market-data database'' >&2; exit 2; }',
     'pgpod=$(/usr/local/bin/k3s kubectl -n kanz-data get pod -l cnpg.io/cluster=kanz-testnet-postgres,role=primary -o jsonpath=''{.items[0].metadata.name}'')',
-    'existing=$(/usr/local/bin/k3s kubectl -n kanz-data exec "${pgpod}" -c postgres -- psql -U postgres -d risk_engine -Atqc "select count(*) from portfolios where tenant_id=''''__system__'''' and portfolio_id=''''PF1''''")',
+    'existing=$(/usr/local/bin/k3s kubectl -n kanz-data exec "${pgpod}" -c postgres -- psql -U postgres -d risk_engine -Atqc "select count(*) from portfolios where tenant_id=''__system__'' and portfolio_id=''PF1''")',
     'total=$(/usr/local/bin/k3s kubectl -n kanz-data exec "${pgpod}" -c postgres -- psql -U postgres -d risk_engine -Atqc ''select count(*) from portfolios'')',
     'if [ "${existing}" = 1 ] && [ "${total}" = 1 ]; then echo ''portfolio-bootstrap: PF1 already materialized; no event republished''; exit 0; fi',
     'test "${existing}" = 0 -a "${total}" = 0 || { echo "REFUSED: portfolio inventory is not empty and is not the reviewed singleton PF1" >&2; exit 2; }',
     '/usr/local/bin/k3s kubectl apply --server-side --field-manager=kanz-portfolio-bootstrap -f "${manifest}" >/dev/null',
     '/usr/local/bin/k3s kubectl -n kanz-services wait --for=condition=complete job/kanz-portfolio-bootstrap --timeout=180s >/dev/null || { /usr/local/bin/k3s kubectl -n kanz-services logs job/kanz-portfolio-bootstrap >&2 || true; exit 1; }',
     '/usr/local/bin/k3s kubectl -n kanz-services logs job/kanz-portfolio-bootstrap',
-    'i=0; while [ "${i}" -lt 30 ]; do materialized=$(/usr/local/bin/k3s kubectl -n kanz-data exec "${pgpod}" -c postgres -- psql -U postgres -d risk_engine -Atqc "select count(*) from portfolios where tenant_id=''''__system__'''' and portfolio_id=''''PF1''''"); [ "${materialized}" = 1 ] && break; i=$((i+1)); sleep 1; done',
+    'i=0; while [ "${i}" -lt 30 ]; do materialized=$(/usr/local/bin/k3s kubectl -n kanz-data exec "${pgpod}" -c postgres -- psql -U postgres -d risk_engine -Atqc "select count(*) from portfolios where tenant_id=''__system__'' and portfolio_id=''PF1''"); [ "${materialized}" = 1 ] && break; i=$((i+1)); sleep 1; done',
     'test "${materialized:-0}" = 1 || { echo ''portfolio-bootstrap: typed event was not materialized'' >&2; exit 1; }',
     'echo ''portfolio-bootstrap: VERIFIED typed event materialized as __system__/PF1; no order, mandate, or platform-mode subject was published'''
 ) } | ConvertTo-Json -Compress -Depth 4
