@@ -60,6 +60,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 		"../../deploy/risk-engine-rollout.yaml",
 		"../../deploy/venue-binance-deploy.yaml",
 		"../../deploy/venue-okx-deploy.yaml",
+		"../../deploy/web-bff-deploy.yaml",
 		"account-proof-secret-provider-classes.yaml",
 		"governance-network-policies.yaml",
 		"portfolio-bootstrap-identity.yaml",
@@ -69,7 +70,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	const registry = "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/"
 	wantImages := []string{
 		"accounting", "api-gateway", "audit", "compliance", "identity",
-		"kanz-migrate", "oms", "risk-engine", "venue-binance", "venue-okx",
+		"kanz-migrate", "oms", "risk-engine", "venue-binance", "venue-okx", "web-bff", "cloudflared",
 	}
 	digestPattern := regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	mapped := make(map[string]struct{}, len(overlay.Images))
@@ -128,6 +129,73 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	}
 	if !removesPullSecret || !scalesDeployments || !scalesRisk {
 		t.Fatalf("testnet patches incomplete: removesPullSecret=%t scalesDeployments=%t scalesRisk=%t", removesPullSecret, scalesDeployments, scalesRisk)
+	}
+}
+
+func TestTokyoWebEdgeKeepsCredentialsInVaultAndExposesNoInboundService(t *testing.T) {
+	root := moduleRoot(t)
+	manifestPath := filepath.Join(root, "infra", "deploy", "web-bff-deploy.yaml")
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := string(raw)
+	for _, required := range []string{
+		"secretProviderClass: web-bff-secrets",
+		"WEB_BFF_SIGNING_SECRET_FILE",
+		"WEB_BFF_PREFLIGHT_EVIDENCE_PATH",
+		"--token-file",
+		"/run/secrets/web/tunnel-token",
+	} {
+		if !strings.Contains(manifest, required) {
+			t.Errorf("%s is missing %q", manifestPath, required)
+		}
+	}
+	for _, forbidden := range []string{
+		"secretKeyRef:",
+		"TUNNEL_TOKEN",
+		"docker.io/cloudflare/cloudflared",
+		"kind: Service\n",
+		"kind: Ingress\n",
+	} {
+		if strings.Contains(manifest, forbidden) {
+			t.Errorf("%s contains forbidden web-edge surface %q", manifestPath, forbidden)
+		}
+	}
+
+	spcPath := filepath.Join(root, "infra", "security", "secrets", "secretproviderclass.yaml")
+	spcRaw, err := os.ReadFile(spcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spc := string(spcRaw)
+	for _, required := range []string{
+		"name: web-bff-secrets",
+		"roleName: \"web-bff\"",
+		"secretPath: \"kv/data/kanz/api-gateway\"",
+		"secretPath: \"kv/data/kanz/cloudflare\"",
+	} {
+		if !strings.Contains(spc, required) {
+			t.Errorf("%s is missing %q", spcPath, required)
+		}
+	}
+
+	policyPath := filepath.Join(root, "infra", "overlays", "testnet-tokyo", "governance-network-policies.yaml")
+	policyRaw, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies := string(policyRaw)
+	for _, required := range []string{
+		"name: deny-web-bff-ingress",
+		"name: allow-web-bff-egress",
+		"name: allow-web-bff-to-gateway",
+		"name: allow-web-bff-to-identity",
+		"169.254.0.0/16",
+	} {
+		if !strings.Contains(policies, required) {
+			t.Errorf("%s is missing %q", policyPath, required)
+		}
 	}
 }
 
@@ -301,8 +369,8 @@ func TestTokyoTestnetOverlayRetainsExactlyTheVaultClassesItsWorkloadsMount(t *te
 		}
 	}
 	assertSameStrings(t, "retained Vault classes versus mounted classes", retained, mounted)
-	if len(retained) != 12 {
-		t.Fatalf("Tokyo minimum graph retained %d Vault classes, want 12", len(retained))
+	if len(retained) != 13 {
+		t.Fatalf("Tokyo minimum graph retained %d Vault classes, want 13", len(retained))
 	}
 }
 
@@ -311,7 +379,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 52", "Expected 16 rendered container images", "sha256sum --check --status",
+		"resourceCount -ne 60", "Expected 18 rendered container images", "sha256sum --check --status",
 		"imageTag=$imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",

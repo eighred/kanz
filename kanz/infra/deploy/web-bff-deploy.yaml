@@ -23,8 +23,8 @@
 # trust a CIDR (which is every pod in the range) or to keep a list in step with
 # the scheduler. Neither is a boundary.
 #
-# It also means the BFF is reachable from nothing else at all: no Service, so no
-# in-cluster path to a process holding live session tokens.
+# The Tokyo overlay also selects this pod with an ingress-deny NetworkPolicy, so
+# even a direct pod-IP route cannot reach the process holding live sessions.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -34,6 +34,17 @@ metadata:
     app.kubernetes.io/part-of: kanz
 imagePullSecrets:
   - name: ghcr-pull
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kanz-oms-preflight-evidence
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+# The exact-main verifier replaces this empty document with bounded evidence.
+# Until then the BFF reports UNKNOWN and offers no action that can resume trade.
+data: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -77,10 +88,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: web-bff
-          # NOT DIGEST-PINNED YET — declared in supplychain_test.go's
-          # mutableTagExempt, same as identity. Only release.yml signs and the
-          # admission policy requires a signature; this image entered the build
-          # matrix in #497, after the last release.
+          # The canonical image is signed and digest-pinned. The Tokyo overlay
+          # rewrites this source to its separately allowlisted ECR mirror.
           image: ghcr.io/eighred/web-bff@sha256:66771937970d87cf32bf2ba479ad0dc141e25771524289389e1e1e8538e6891f
           ports:
             - { containerPort: 8084, name: http }
@@ -102,7 +111,7 @@ spec:
             #
             # SAME SECRET, SAME MOUNT SHAPE as api-gateway's own. It is one
             # shared HMAC key, so both must be issued from one place.
-            - { name: WEB_BFF_SIGNING_SECRET_FILE, value: /run/secrets/gateway/signing-secret }
+            - { name: WEB_BFF_SIGNING_SECRET_FILE, value: /run/secrets/web/signing-secret }
             # How anyone signs in (#364). The BFF exchanges a credential here and
             # keeps the returned token server-side; the browser only ever holds
             # the opaque session id.
@@ -144,7 +153,7 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            - { name: gateway, mountPath: /run/secrets/gateway, readOnly: true }
+            - { name: web-secrets, mountPath: /run/secrets/web, readOnly: true }
             - { name: preflight-evidence, mountPath: /run/preflight, readOnly: true }
             - { name: tmp, mountPath: /tmp }
         # THE ONLY PUBLIC SURFACE IN THE ESTATE.
@@ -154,7 +163,7 @@ spec:
         # hostname — so it is mounted from Vault and never written here, the same
         # stance as every other credential (SEC-01d).
         - name: cloudflared
-          image: docker.io/cloudflare/cloudflared:2026.7.1
+          image: ghcr.io/eighred/cloudflared@sha256:028b784b33c17ef355571b10f8c4691012dcdafaa7e1193e93252b3fe396c8c6
           args:
             - tunnel
             - --no-autoupdate
@@ -163,12 +172,8 @@ spec:
             - --metrics
             - 127.0.0.1:2000
             - run
-          env:
-            - name: TUNNEL_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: cloudflared-tunnel
-                  key: token
+            - --token-file
+            - /run/secrets/web/tunnel-token
           livenessProbe:
             httpGet: { path: /ready, port: 2000, host: 127.0.0.1 }
             initialDelaySeconds: 10
@@ -180,15 +185,17 @@ spec:
             runAsUser: 65532
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - { name: web-secrets, mountPath: /run/secrets/web, readOnly: true }
       volumes:
         # Removing this volume does not degrade signing quietly: pkg/secret
         # refuses a DECLARED-but-unreadable mount, so the pod stops starting.
-        - name: gateway
+        - name: web-secrets
           csi:
             driver: secrets-store.csi.k8s.io
             readOnly: true
             volumeAttributes:
-              secretProviderClass: api-gateway-secrets
+              secretProviderClass: web-bff-secrets
         - name: tmp
           emptyDir: {}
         - name: preflight-evidence
