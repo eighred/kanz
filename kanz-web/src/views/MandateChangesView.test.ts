@@ -3,7 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import MandateChangesView from './MandateChangesView.vue'
 import * as mandatesApi from '../api/mandates'
-import type { PendingMandateChange } from '../api/mandates'
+import type { MandateChangeDetail, PendingMandateChange } from '../api/mandates'
 import { ApiError } from '../api/client'
 import { useSession } from '../stores/session'
 
@@ -25,9 +25,8 @@ import { useSession } from '../stores/session'
 //      JSON.parse would round anything above 2^53 before this code ran. Neither
 //      may be printed as fact and neither may be Number()'d into one; and a
 //      sweep that made the two agree would put the version back on a number.
-//   4. WHAT CANNOT BE SEEN IS SAID. This queue serves a digest, not a mandate,
-//      and no route expands one — so a signatory must be told before they sign,
-//      or the two names on the record belong to two people who never read the rule.
+//   4. THE EXACT STORED MANDATE IS READ BEFORE APPROVAL. A queue summary cannot
+//      substitute for the complete rules, and any mismatch disables signing.
 //   5. 404, 403 AND 401 ARE DIFFERENT DEPLOYMENTS. Absent is not forbidden (#535),
 //      and authz.Mandate is not authz.Approve.
 //   6. AN ERROR IS NEVER AN EMPTY QUEUE.
@@ -64,9 +63,34 @@ function signedInAs(subject: string) {
   s.resolved = true
 }
 
+function detailOf(p: PendingMandateChange): MandateChangeDetail {
+  const count = typeof p.rule_count === 'number' && p.rule_count >= 0 ? p.rule_count : 0
+  return {
+    ...p,
+    mandate: {
+      mandate_id: p.mandate_id ?? '',
+      tenant_id: 'acme',
+      portfolio_id: p.portfolio_id,
+      version: p.version ?? '',
+      effective_at: '2026-08-20T00:00:00Z',
+      rules: Array.from({ length: count }, (_, i) => ({
+        rule_id: `rule-${i + 1}`,
+        type: 'RULE_TYPE_RESTRICTION',
+      })),
+    },
+  }
+}
+
 async function open(resp: PendingMandateChange[] | Error) {
   if (resp instanceof Error) vi.spyOn(mandatesApi.mandates, 'list').mockRejectedValue(resp)
-  else vi.spyOn(mandatesApi.mandates, 'list').mockResolvedValue(resp)
+  else {
+    vi.spyOn(mandatesApi.mandates, 'list').mockResolvedValue(resp)
+    vi.spyOn(mandatesApi.mandates, 'detail').mockImplementation(async (proposalID) => {
+      const found = resp.find((p) => p.proposal_id === proposalID)
+      if (!found) throw new Error('proposal not found')
+      return detailOf(found)
+    })
+  }
   const wrapper = mount(MandateChangesView)
   await flushPromises()
   return wrapper
@@ -289,19 +313,15 @@ describe('the numbers are not coerced, in either direction', () => {
   })
 })
 
-describe('what cannot be seen is said before it is signed', () => {
-  // THE PROPERTY THIS ACT HAS THAT NEITHER SIBLING DOES. The queue serves the
-  // digest and not the mandate, and no route expands one — propose, approve and
-  // this queue are all three that exist. A signatory who believes this screen
-  // showed them the change is exactly the failure two signatures prevent.
-
-  it('tells the signatory the rules themselves are not on this surface', async () => {
+describe('the exact stored mandate is read before it is signed', () => {
+  it('renders the complete mandate returned by the by-id route', async () => {
     const wrapper = await open([entry()])
     const dialog = await confirm(wrapper)
 
-    expect(dialog.text()).toContain('You cannot read this change here')
-    expect(dialog.text()).toContain('WHICH rules, and which limits, are NOT on this surface')
-    expect(dialog.text()).toContain('no diff to read')
+    expect(mandatesApi.mandates.detail).toHaveBeenCalledWith('prop-1')
+    expect(dialog.find('.mandate-preview').text()).toContain('Exact mandate your signature covers')
+    expect(dialog.find('pre').text()).toContain('RULE_TYPE_RESTRICTION')
+    expect(dialog.find('pre').text()).toContain('2026-08-20T00:00:00Z')
   })
 
   it('shows the digest the signature covers, since it is the only handle there is', async () => {
@@ -318,6 +338,7 @@ describe('what cannot be seen is said before it is signed', () => {
 
     expect(dialog.text()).toContain('served no digest')
     expect(dialog.text()).toContain('Report this rather than signing')
+    expect(button(wrapper, 'Approve the mandate change')!.attributes('disabled')).toBeDefined()
   })
 
   it('shows the reason in full, since it is half the signed payload', async () => {
@@ -328,6 +349,18 @@ describe('what cannot be seen is said before it is signed', () => {
     // hashes the mandate AND the reason into the digest it re-checks.
     expect(cellsOf(wrapper, 0)[4]!.text()).toBe(reason)
     expect((await confirm(wrapper)).text()).toContain(reason)
+  })
+
+  it('disables approval when the exact record differs from the queue summary', async () => {
+    const wrapper = await open([entry()])
+    vi.mocked(mandatesApi.mandates.detail).mockResolvedValue({
+      ...detailOf(entry()),
+      digest: 'sha256:different',
+    })
+
+    const dialog = await confirm(wrapper)
+    expect(dialog.text()).toContain('does not match the queue row')
+    expect(button(wrapper, 'Approve the mandate change')!.attributes('disabled')).toBeDefined()
   })
 })
 
@@ -481,6 +514,7 @@ describe('the queue read reports absent, forbidden and untenanted differently', 
 
   it('clears a previously good list so a stale one cannot look current', async () => {
     const list = vi.spyOn(mandatesApi.mandates, 'list').mockResolvedValue([entry()])
+    vi.spyOn(mandatesApi.mandates, 'detail').mockResolvedValue(detailOf(entry()))
     const wrapper = mount(MandateChangesView)
     await flushPromises()
     expect(wrapper.findAll('tbody tr').length).toBeGreaterThan(0)

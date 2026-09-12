@@ -8,6 +8,7 @@ import ExposureView from '../views/ExposureView.vue'
 import OrdersView from '../views/OrdersView.vue'
 import OverridesView from '../views/OverridesView.vue'
 import MandateChangesView from '../views/MandateChangesView.vue'
+import MandateProposalView from '../views/MandateProposalView.vue'
 import InstrumentsView from '../views/InstrumentsView.vue'
 import PortfoliosView from '../views/PortfoliosView.vue'
 import ProvisionsView from '../views/ProvisionsView.vue'
@@ -53,6 +54,7 @@ export const router = createRouter({
     // So this link being visible to an order approver who then gets a 403 is the
     // control working, and that is what the view says.
     { path: '/mandate-changes', name: 'mandate-changes', component: MandateChangesView },
+    { path: '/mandate-proposal', name: 'mandate-proposal', component: MandateProposalView },
     { path: '/portfolios', name: 'portfolios', component: PortfoliosView },
     { path: '/portfolios/:id/exposure', name: 'exposure', component: ExposureView },
     { path: '/portfolios/:id/orders', name: 'orders', component: OrdersView },

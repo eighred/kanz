@@ -2,14 +2,15 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   classify,
+  detailMatchesQueue,
   describeApproveFailure,
   describeMandateQueue,
-  describeVisibility,
   mandates,
   renderRuleCount,
   renderVersion,
   describeVersionRefusal,
   signable,
+  type MandateChangeDetail,
   type PendingMandateChange,
   type Reading,
 } from '../api/mandates'
@@ -60,17 +61,9 @@ import { useSession } from '../stores/session'
 //
 // 5. IT MUST NOT DRAW AN ERROR AS AN EMPTY QUEUE.
 //
-// # AND THE ONE THING IT MUST SAY THAT NEITHER SIBLING HAS TO
-//
-// THE QUEUE DOES NOT CARRY THE MANDATE. compliance serves the digest and not the
-// rules, and there is no route to fetch one proposal's mandate — propose, approve
-// and this queue are all three that exist. So a signatory can see the SHAPE of
-// the change (portfolio, mandate, version, rule count, reason, digest) and not
-// its CONTENT, and no diff against today's mandate exists anywhere on the
-// platform. That is stated in front of the person at the moment they sign, by
-// describeVisibility(), rather than left for them to assume otherwise. An
-// approver signing a change they cannot read is the forgeable-actor problem in a
-// new costume: two real names on the record, neither of whom read the rule.
+// The queue is only an index. Before approval, this screen fetches the exact
+// stored mandate by proposal id, checks it against the row, and displays every
+// rule. A mismatch or unreadable detail disables the signature.
 
 const session = useSession()
 
@@ -82,6 +75,8 @@ const loaded = ref(false)
 
 /** confirming is the entry awaiting confirmation, or null when none is. */
 const confirming = ref<PendingMandateChange | null>(null)
+const exact = ref<MandateChangeDetail | null>(null)
+const reviewBusy = ref(false)
 const actionError = ref('')
 const notice = ref('')
 const busy = ref(false)
@@ -162,25 +157,40 @@ function versionRefusal(p: PendingMandateChange): string {
   return describeVersionRefusal(p) ?? ''
 }
 
-/** visibility states what is and is not readable about this change. */
-function visibility(p: PendingMandateChange): string {
-  return describeVisibility(p)
+function formatMandate(p: MandateChangeDetail): string {
+  return JSON.stringify(p.mandate, null, 2)
 }
 
-function ask(p: PendingMandateChange) {
+async function ask(p: PendingMandateChange) {
   confirming.value = p
+  exact.value = null
   actionError.value = ''
   notice.value = ''
+  reviewBusy.value = true
+  try {
+    const detail = await mandates.detail(p.proposal_id)
+    if (!detailMatchesQueue(p, detail)) {
+      throw new Error(
+        'The exact proposal does not match the queue row. Nothing can be signed until compliance returns one consistent record.',
+      )
+    }
+    exact.value = detail
+  } catch (e) {
+    actionError.value = e instanceof Error ? e.message : 'the exact mandate could not be loaded'
+  } finally {
+    reviewBusy.value = false
+  }
 }
 
 function cancel() {
   confirming.value = null
+  exact.value = null
   actionError.value = ''
 }
 
 async function sign() {
   const p = confirming.value
-  if (!p || busy.value) return
+  if (!p || !exact.value || busy.value || reviewBusy.value) return
   busy.value = true
   actionError.value = ''
   try {
@@ -201,6 +211,7 @@ async function sign() {
       `that boots tomorrow. Two people are on the record: ${p.proposer} proposed it and you ` +
       `approved it. Nothing further is pending on it.`
     confirming.value = null
+    exact.value = null
     await load()
   } catch (e) {
     // Several of these are the CONTROL FIRING rather than a transport failure,
@@ -383,9 +394,9 @@ async function sign() {
     </p>
   </template>
 
-  <!-- THE CONFIRMATION. What is being signed belongs in front of the person at
-       the moment they sign, not in a row they scrolled past — and on this act
-       that includes what CANNOT be seen, which is most of it. -->
+  <!-- The exact stored mandate is loaded again by proposal id before this
+       confirmation can submit. The queue row is a summary; a signature belongs
+       beside the complete payload compliance will publish. -->
   <div
     v-if="confirming"
     class="confirm card"
@@ -421,12 +432,13 @@ async function sign() {
       because: {{ confirming.reason || '(no reason given)' }}
     </p>
 
-    <!-- THE THING THIS ACT HAS TO SAY AND ITS SIBLINGS DO NOT. The queue serves
-         a digest, not a mandate, and no route exists to expand it. A signatory
-         who believes this screen showed them the change is exactly the failure
-         two signatures are supposed to prevent. -->
-    <p class="error" role="alert">
-      <strong>You cannot read this change here.</strong> {{ visibility(confirming) }}
+    <p v-if="reviewBusy" aria-live="polite">Loading the exact stored mandate…</p>
+    <section v-else-if="exact" class="mandate-preview" aria-labelledby="exact-mandate-title">
+      <h2 id="exact-mandate-title">Exact mandate your signature covers</h2>
+      <pre>{{ formatMandate(exact) }}</pre>
+    </section>
+    <p v-else class="error" role="alert">
+      The exact stored mandate is unavailable or inconsistent with the queue. Approval is disabled.
     </p>
 
     <p class="muted">
@@ -443,8 +455,8 @@ async function sign() {
     <p v-if="rules(confirming) === '0'" class="error" role="alert">
       This mandate carries no rules. Approving it means every order in portfolio
       {{ confirming.portfolio_id }} passes every mandate check from the moment it publishes. That is
-      legal and it is not the same as having no mandate — but it is the change most worth being
-      certain about, and this screen cannot show you that it is what was intended.
+      legal and it is not the same as having no mandate. Check the complete document above before
+      signing.
     </p>
 
     <p v-if="expired(confirming)" class="error" role="alert">
@@ -462,8 +474,8 @@ async function sign() {
     <p v-if="actionError" class="error" role="alert">{{ actionError }}</p>
 
     <div class="actions">
-      <button :disabled="busy" @click="sign">
-        {{ busy ? 'Approving…' : 'Approve the mandate change' }}
+      <button :disabled="busy || reviewBusy || !exact" @click="sign">
+        {{ busy ? 'Approving…' : reviewBusy ? 'Loading exact mandate…' : 'Approve the mandate change' }}
       </button>
       <button class="quiet" :disabled="busy" @click="cancel">Cancel</button>
     </div>
