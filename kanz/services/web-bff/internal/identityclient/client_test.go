@@ -3,12 +3,49 @@ package identityclient
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestInvitesUsesTheServerHeldBearerAndPreservesTheOneTimeResponse(t *testing.T) {
+	var auth, method, body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		method = r.Method
+		raw, _ := io.ReadAll(r.Body)
+		body = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"invite_token":"shown-once"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(srv.URL, "", time.Second)
+	got, err := c.Invites(context.Background(), http.MethodPost, "SESSION-TOKEN", []byte(`{"subject":"user:dana"}`))
+	if err != nil {
+		t.Fatalf("Invites: %v", err)
+	}
+	if auth != "Bearer SESSION-TOKEN" {
+		t.Errorf("authorization = %q, want the BFF-held bearer", auth)
+	}
+	if method != http.MethodPost || body != `{"subject":"user:dana"}` {
+		t.Errorf("request = %s %s, want the exact operator request", method, body)
+	}
+	if got.Status != http.StatusCreated || string(got.Body) != `{"invite_token":"shown-once"}` {
+		t.Fatalf("response = %d %s, want the one-time identity response unchanged", got.Status, got.Body)
+	}
+}
+
+func TestInvitesRefusesToBecomeAGenericIdentityProxy(t *testing.T) {
+	c := New("http://identity.invalid", "", time.Second)
+	if _, err := c.Invites(context.Background(), http.MethodDelete, "token", nil); err == nil {
+		t.Fatal("DELETE reached the invitation client — future identity routes would become web-visible implicitly")
+	}
+}
 
 // THIS PACKAGE HAD NO TESTS AT ALL (#364). Its error mapping is not plumbing —
 // each branch is a security decision about what a caller is allowed to learn —

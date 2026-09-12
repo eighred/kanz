@@ -18,6 +18,7 @@ async function signOut() {
       <RouterLink to="/approvals">Approvals</RouterLink>
       <RouterLink to="/overrides">Overrides</RouterLink>
       <RouterLink to="/mandate-changes">Mandate changes</RouterLink>
+      <RouterLink to="/invitations">Users</RouterLink>
       <RouterLink to="/portfolios">Portfolios</RouterLink>
       <RouterLink to="/estate">Estate</RouterLink>
       <RouterLink to="/nodes">Nodes</RouterLink>

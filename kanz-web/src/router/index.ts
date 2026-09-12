@@ -13,6 +13,7 @@ import PortfoliosView from '../views/PortfoliosView.vue'
 import ProvisionsView from '../views/ProvisionsView.vue'
 import RedeemView from '../views/RedeemView.vue'
 import VenuesView from '../views/VenuesView.vue'
+import InvitationsView from '../views/InvitationsView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -56,6 +57,7 @@ export const router = createRouter({
     { path: '/portfolios/:id/exposure', name: 'exposure', component: ExposureView },
     { path: '/portfolios/:id/orders', name: 'orders', component: OrdersView },
     { path: '/instruments', name: 'instruments', component: InstrumentsView },
+    { path: '/invitations', name: 'invitations', component: InvitationsView },
   ],
 })
 

@@ -158,6 +158,12 @@ func (s *Server) routes() {
 	}
 	s.mux.HandleFunc("POST /auth/logout", s.handleLogout)
 	s.mux.HandleFunc("GET /auth/me", s.handleMe)
+	// Identity provisioning is a separate authority from the gateway API. These
+	// two exact routes keep its bearer in the BFF session while avoiding a broad
+	// identity proxy that would expose future administrative endpoints by
+	// accident.
+	s.mux.HandleFunc("GET /api/identity/invites", s.handleInvites)
+	s.mux.HandleFunc("POST /api/identity/invites", s.handleInvites)
 	// Everything under /api/ is proxied to the gateway as the session's caller.
 	s.mux.HandleFunc("/api/", s.handleProxy)
 	// The SPA last, on "/" — every route above is registered on a more specific
@@ -376,6 +382,38 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"tenant":     sess.Tenant,
 		"expires_at": sess.Expiry.Format(time.RFC3339),
 	})
+}
+
+// handleInvites forwards the authenticated operator's invitation request to
+// identity. The browser's Authorization header is ignored; the only bearer
+// identity sees is the one held in the server-side session.
+func (s *Server) handleInvites(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.currentSession(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		return
+	}
+	var body []byte
+	if r.Method == http.MethodPost {
+		var err error
+		body, err = io.ReadAll(io.LimitReader(r.Body, (64<<10)+1))
+		if err != nil || len(body) > 64<<10 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
+			return
+		}
+	}
+	resp, err := s.identity.Invites(r.Context(), r.Method, sess.AccessToken, body)
+	if err != nil {
+		s.fail(w, http.StatusBadGateway, "the identity service is unavailable", err)
+		return
+	}
+	if resp.ContentType != "" {
+		w.Header().Set("Content-Type", resp.ContentType)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(resp.Status)
+	_, _ = w.Write(resp.Body)
 }
 
 // handleProxy forwards /api/* to the gateway /v1/* as the session's caller.
