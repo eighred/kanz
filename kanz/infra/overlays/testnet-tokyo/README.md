@@ -89,6 +89,38 @@ The governance inputs have separate authoritative sources:
   preflight reads only aggregate pair counts and never emits subject names or
   credential hashes.
 
+## Initial mandate review
+
+`mandate.json.example` is a deliberately incomplete proposal for the singleton
+test portfolio. It uses an instrument allow-list because that constraint is
+resolved directly from the position and does not assert the unavailable market
+data, NAV, buying-power, or liquidation-proximity inputs. An authorized capital
+owner must copy it to a working file outside the repository and replace every
+`REPLACE_WITH_...` value with an approved mandate ID, canonical test instrument,
+and effective time. Do not commit the completed decision merely to move it
+between signatories.
+
+Validate the authored protojson with the same domain validator used by both
+mandate publishers. This command has no actor flag, opens no network connection,
+and creates no decision artifact:
+
+```powershell
+go run ./cmd/kanz-mandate validate --tenant __system__ --file <reviewed-mandate.json>
+```
+
+Validation is not approval. The authorized proposer signs in through the
+gateway and submits the exact validated value plus the capital-owner rationale
+to `POST /v1/portfolios/PF1/mandate`. A different authenticated holder of
+`kanz-mandate-signatory` reads
+`GET /v1/mandates/pending-changes/{proposal_id}`, compares the full mandate,
+reason, and digest to the reviewed decision, and explicitly approves or rejects
+it at `POST /v1/portfolios/PF1/mandate/approve`. The gateway refuses
+self-approval after canonicalizing the subject. Do not use the unauthenticated
+break-glass CLI for this initial mandate.
+
+After publication, rerun `Test-TestnetOmsGoLive.ps1`. A PASS remains evidence
+for reassessment; it does not authorize a resume FACT or an order.
+
 Tokyo arms mandate, venue-binding, and all-orders dual-control enforcement even
 while their inventories are empty. Those missing inputs produce explicit
 refusals and trading remains startup-halted. Account-proof enforcement is the

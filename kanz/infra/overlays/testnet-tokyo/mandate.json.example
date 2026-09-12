@@ -1,0 +1,21 @@
+{
+  "mandateId": "REPLACE_WITH_STABLE_MANDATE_ID",
+  "tenantId": "__system__",
+  "portfolioId": "PF1",
+  "version": "1",
+  "rules": [
+    {
+      "ruleId": "approved-test-instrument-only",
+      "type": "RULE_TYPE_RESTRICTION",
+      "onViolation": "COMPLIANCE_STATUS_BREACH",
+      "restriction": {
+        "dimension": "DIMENSION_INSTRUMENT",
+        "values": [
+          "REPLACE_WITH_APPROVED_CANONICAL_INSTRUMENT_ID"
+        ],
+        "mode": "RESTRICTION_MODE_ALLOW_ONLY"
+      }
+    }
+  ],
+  "effectiveAt": "REPLACE_WITH_APPROVED_RFC3339_TIME"
+}
