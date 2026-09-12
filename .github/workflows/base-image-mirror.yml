@@ -147,6 +147,12 @@ jobs:
           # exactly like golang above.
           - source: docker.io/grafana/k6:2.1.0
             target: ghcr.io/eighred/base/k6:2.1.0
+          # The web control surface runs cloudflared beside the BFF so its only
+          # reachable path is an outbound tunnel. Mirror the pinned runtime
+          # before building the signed Tokyo ECR copy; otherwise deployment
+          # depends on Docker Hub at the capital-control boundary.
+          - source: docker.io/cloudflare/cloudflared:2026.7.1
+            target: ghcr.io/eighred/base/cloudflared:2026.7.1
           # THE BUILDER ITSELF, which every other entry here quietly depended on.
           #
           # #161 moved all 52 FROMs under ghcr.io/eighred/base/*, and the
