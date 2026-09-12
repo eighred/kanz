@@ -61,6 +61,14 @@ rejects recent shared-collateral, unverified-account, advisory-mandate, absent
 dual-control, or incomplete-margin warnings. A passing preflight is necessary
 evidence for resume; it does not publish the resume FACT or submit an order.
 
+To expose the same bounded result on the authenticated kanz-web **Preflight**
+page, add `-PublishWebEvidence`. The switch writes only the non-secret verdict,
+control observations, timestamp, SSM command ID, exact verifier commit, deployed
+release commit, and four digest-pinned capital-path image references to the
+`kanz-oms-preflight-evidence` ConfigMap. The page treats evidence older than 15
+minutes, missing evidence, an incomplete control set, or an unreadable artifact
+as `UNKNOWN`. Publishing evidence has no OMS, FACT, or order side effect.
+
 The governance inputs have separate authoritative sources:
 
 - Portfolio inventory starts with the typed `test/load/seed` event used by

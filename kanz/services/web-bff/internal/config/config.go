@@ -79,6 +79,13 @@ type Config struct {
 	// proxies /api and /auth back here.
 	StaticDir string
 
+	// PreflightEvidencePath is the projected, non-secret result produced by the
+	// repository-owned exact-main OMS preflight. Empty leaves the authenticated
+	// status endpoint available but UNKNOWN. PreflightEvidenceMaxAge is the
+	// maximum age that may still be represented as PASS or FAIL.
+	PreflightEvidencePath   string
+	PreflightEvidenceMaxAge time.Duration
+
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
 }
@@ -98,10 +105,13 @@ func Load() (Config, error) {
 		SecureCookies: os.Getenv("WEB_BFF_INSECURE_COOKIES") == "",
 		OTLPEndpoint:  os.Getenv("WEB_BFF_OTLP_ENDPOINT"),
 
-		IdentityURL:        strings.TrimRight(os.Getenv("WEB_BFF_IDENTITY_URL"), "/"),
-		TrustedProxyHeader: os.Getenv("WEB_BFF_TRUSTED_PROXY_HEADER"),
-		TrustedProxies:     env.SplitList(os.Getenv("WEB_BFF_TRUSTED_PROXIES")),
-		StaticDir:          os.Getenv("WEB_BFF_STATIC_DIR"),
+		IdentityURL:           strings.TrimRight(os.Getenv("WEB_BFF_IDENTITY_URL"), "/"),
+		TrustedProxyHeader:    os.Getenv("WEB_BFF_TRUSTED_PROXY_HEADER"),
+		TrustedProxies:        env.SplitList(os.Getenv("WEB_BFF_TRUSTED_PROXIES")),
+		StaticDir:             os.Getenv("WEB_BFF_STATIC_DIR"),
+		PreflightEvidencePath: os.Getenv("WEB_BFF_PREFLIGHT_EVIDENCE_PATH"),
+		PreflightEvidenceMaxAge: parseDuration(
+			os.Getenv("WEB_BFF_PREFLIGHT_EVIDENCE_MAX_AGE"), 15*time.Minute),
 	}
 	// Read AFTER the literal because it can fail, and an unreadable declared
 	// mount is a deployment fault that must not degrade to "" (pkg/secret).

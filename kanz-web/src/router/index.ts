@@ -15,6 +15,7 @@ import ProvisionsView from '../views/ProvisionsView.vue'
 import RedeemView from '../views/RedeemView.vue'
 import VenuesView from '../views/VenuesView.vue'
 import InvitationsView from '../views/InvitationsView.vue'
+import PreflightView from '../views/PreflightView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -60,6 +61,7 @@ export const router = createRouter({
     { path: '/portfolios/:id/orders', name: 'orders', component: OrdersView },
     { path: '/instruments', name: 'instruments', component: InstrumentsView },
     { path: '/invitations', name: 'invitations', component: InvitationsView },
+    { path: '/preflight', name: 'preflight', component: PreflightView },
   ],
 })
 

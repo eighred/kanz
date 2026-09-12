@@ -10,6 +10,11 @@ def workload_env($deployment; $container):
 def oms_env: workload_env(.deployment; "oms");
 def gateway_env: workload_env(.api_gateway; "api-gateway");
 
+def release_commit($deployment): ($deployment.metadata.annotations["kanz.io/release-commit"] // "");
+def workload_image($deployment; $container):
+  [$deployment.spec.template.spec.containers[] | select(.name == $container) | .image]
+  | if length == 1 then .[0] else "" end;
+
 def metric($name):
   [.oms_metrics
    | split("\n")[]
@@ -31,7 +36,11 @@ oms_env as $env
 | (metric("kanz_oms_unverified_venue_account_total")) as $unverified
 | (metric("kanz_oms_venue_margin_accounts_uncovered")) as $uncovered
 | (metric("kanz_oms_venue_margin_accounts_current")) as $margin_current
+| [release_commit(.deployment), release_commit(.api_gateway), release_commit(.binance), release_commit(.okx)] as $release_commits
 | [
+    check("deployed_release_identity";
+      ($release_commits | all(test("^[0-9a-f]{40}$"))) and ($release_commits | unique | length) == 1;
+      {commit: ($release_commits[0] // "absent"), consistent: (($release_commits | unique | length) == 1)}),
     check("mandate_enforcement"; $env.OMS_REQUIRE_MANDATE == "true";
       ($env.OMS_REQUIRE_MANDATE // "absent")),
     check("mandate_change_surface";
@@ -95,4 +104,14 @@ oms_env as $env
       (if (.recent_logs | test("MANDATE ADVISORY|COLLATERAL IS SHARED|UNVERIFIED account|NO DUAL-CONTROL|did not report part of this account's margin state"; "i"))
        then "unsafe warning present" else "no matching warning" end))
   ] as $checks
-| {verdict: (if ($checks | all(.pass)) then "PASS" else "FAIL" end), checks: $checks}
+| {
+    verdict: (if ($checks | all(.pass)) then "PASS" else "FAIL" end),
+    deployed_commit: ($release_commits[0] // ""),
+    workload_images: {
+      oms: workload_image(.deployment; "oms"),
+      api_gateway: workload_image(.api_gateway; "api-gateway"),
+      venue_binance: workload_image(.binance; "venue-binance"),
+      venue_okx: workload_image(.okx; "venue-okx")
+    },
+    checks: $checks
+  }

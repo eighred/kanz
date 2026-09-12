@@ -55,10 +55,12 @@ type Options struct {
 	// which every deployment manifest does -- and rejects an unsigned request
 	// BEFORE authentication runs. Empty sends no header, which is correct only
 	// against a gateway with signing disabled (#777).
-	SigningSecret string
-	SecureCookies bool
-	Logger        *slog.Logger
-	Metrics       http.Handler
+	SigningSecret           string
+	SecureCookies           bool
+	Logger                  *slog.Logger
+	Metrics                 http.Handler
+	PreflightEvidencePath   string
+	PreflightEvidenceMaxAge time.Duration
 }
 
 // Server wires the login flow and the authenticated proxy.
@@ -74,6 +76,7 @@ type Server struct {
 	secureCookies bool
 	logger        *slog.Logger
 	metrics       http.Handler
+	preflight     *preflightEvidence
 	mux           *http.ServeMux
 }
 
@@ -116,6 +119,7 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 		secureCookies: opts.SecureCookies,
 		logger:        logger,
 		metrics:       opts.Metrics,
+		preflight:     newPreflightEvidence(opts.PreflightEvidencePath, opts.PreflightEvidenceMaxAge),
 		mux:           http.NewServeMux(),
 	}
 	s.routes()
@@ -164,6 +168,7 @@ func (s *Server) routes() {
 	// accident.
 	s.mux.HandleFunc("GET /api/identity/invites", s.handleInvites)
 	s.mux.HandleFunc("POST /api/identity/invites", s.handleInvites)
+	s.mux.HandleFunc("GET /api/preflight", s.handlePreflight)
 	// Everything under /api/ is proxied to the gateway as the session's caller.
 	s.mux.HandleFunc("/api/", s.handleProxy)
 	// The SPA last, on "/" — every route above is registered on a more specific
@@ -172,6 +177,14 @@ func (s *Server) routes() {
 	if s.static != nil {
 		s.mux.Handle("/", s.static)
 	}
+}
+
+func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.currentSession(r); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.preflight.read(time.Now().UTC()))
 }
 
 // handleLogin starts the auth-code + PKCE flow: mint state + verifier, stash the

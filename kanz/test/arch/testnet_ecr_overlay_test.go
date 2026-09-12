@@ -455,6 +455,13 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 		"API_GATEWAY_MANDATE_ROLE":    "kanz-mandate-signatory",
 	}
 	fixture := func(values, gatewayValues map[string]string, logs string, portfolios, mandates int, unverified, uncovered, marginCurrent float64) []byte {
+		const release = "1111111111111111111111111111111111111111"
+		deployment := func(container, image string, vars []any) map[string]any {
+			return map[string]any{
+				"metadata": map[string]any{"annotations": map[string]any{"kanz.io/release-commit": release}},
+				"spec":     map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": container, "image": image, "env": vars}}}}},
+			}
+		}
 		vars := make([]any, 0, len(values))
 		for name, value := range values {
 			vars = append(vars, map[string]any{"name": name, "value": value})
@@ -464,8 +471,10 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 			gatewayVars = append(gatewayVars, map[string]any{"name": name, "value": value})
 		}
 		body, marshalErr := json.Marshal(map[string]any{
-			"deployment":      map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "oms", "env": vars}}}}}},
-			"api_gateway":     map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "api-gateway", "env": gatewayVars}}}}}},
+			"deployment":      deployment("oms", "registry/oms@sha256:one", vars),
+			"api_gateway":     deployment("api-gateway", "registry/api-gateway@sha256:two", gatewayVars),
+			"binance":         deployment("venue-binance", "registry/venue-binance@sha256:three", nil),
+			"okx":             deployment("venue-okx", "registry/venue-okx@sha256:four", nil),
 			"pods":            map[string]any{"items": []any{map[string]any{"status": map[string]any{"phase": "Running", "containerStatuses": []any{map[string]any{"name": "oms", "ready": true}}}}}},
 			"recent_logs":     logs,
 			"portfolio_count": portfolios,
@@ -581,6 +590,15 @@ func TestTokyoOmsGoLiveVerifierRejectsEachUnarmedControl(t *testing.T) {
 		if err := run(mutated); err == nil {
 			t.Errorf("unproven %s account source passed the go-live verifier", venue)
 		}
+	}
+	var releaseBody map[string]any
+	if err := json.Unmarshal(fixture(env, gatewayEnv, "healthy", 1, 1, 0, 0, 1), &releaseBody); err != nil {
+		t.Fatal(err)
+	}
+	releaseBody["okx"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)["kanz.io/release-commit"] = "2222222222222222222222222222222222222222"
+	mismatchedRelease, _ := json.Marshal(releaseBody)
+	if err := run(mismatchedRelease); err == nil {
+		t.Error("inconsistent deployed release commits passed the go-live verifier")
 	}
 }
 

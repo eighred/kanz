@@ -118,16 +118,18 @@ func run() int {
 
 	readiness := &server.Readiness{}
 	srv, err := server.New(readiness, server.Options{
-		Identity:      identityClient,
-		ClientIP:      ipResolver,
-		StaticDir:     cfg.StaticDir,
-		OIDC:          oidcClient,
-		Sessions:      sessions,
-		GatewayURL:    cfg.GatewayURL,
-		SigningSecret: cfg.SigningSecret,
-		SecureCookies: cfg.SecureCookies,
-		Logger:        logger,
-		Metrics:       obs.MetricsHandler(),
+		Identity:                identityClient,
+		ClientIP:                ipResolver,
+		StaticDir:               cfg.StaticDir,
+		OIDC:                    oidcClient,
+		Sessions:                sessions,
+		GatewayURL:              cfg.GatewayURL,
+		SigningSecret:           cfg.SigningSecret,
+		SecureCookies:           cfg.SecureCookies,
+		Logger:                  logger,
+		Metrics:                 obs.MetricsHandler(),
+		PreflightEvidencePath:   cfg.PreflightEvidencePath,
+		PreflightEvidenceMaxAge: cfg.PreflightEvidenceMaxAge,
 	})
 	if err != nil {
 		logger.Error("server init failed", "err", err)
