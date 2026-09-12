@@ -14,6 +14,13 @@ import (
 )
 
 func main() {
+	if os.Getenv("CAPITALPATH_MODE") == "portfolio-bootstrap" {
+		if err := runPortfolioBootstrap(context.Background(), time.Now); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	evidence, err := run(context.Background(), time.Now)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)

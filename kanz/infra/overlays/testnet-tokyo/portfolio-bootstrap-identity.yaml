@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kanz-portfolio-bootstrap
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kanz-portfolio-bootstrap-egress
+  namespace: kanz-services
+spec:
+  podSelector:
+    matchLabels: { app: kanz-portfolio-bootstrap }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kanz-messaging }
+          podSelector:
+            matchLabels: { app: nats }
+      ports: [{ protocol: TCP, port: 4222 }]
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]

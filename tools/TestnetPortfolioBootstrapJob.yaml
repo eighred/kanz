@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kanz-portfolio-bootstrap
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 180
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: { app: kanz-portfolio-bootstrap }
+    spec:
+      restartPolicy: Never
+      serviceAccountName: kanz-portfolio-bootstrap
+      containers:
+        - name: bootstrap
+          image: KANZ_CAPITALPATH_IMAGE
+          env:
+            - { name: CAPITALPATH_MODE, value: portfolio-bootstrap }
+            - { name: CAPITALPATH_TENANT, value: __system__ }
+            - { name: CAPITALPATH_PORTFOLIO, value: PF1 }
+            - { name: CAPITALPATH_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            - { name: CAPITALPATH_SPIFFE_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
+          volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: spiffe
+          csi: { driver: csi.spiffe.io, readOnly: true }

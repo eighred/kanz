@@ -62,6 +62,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 		"../../deploy/venue-okx-deploy.yaml",
 		"account-proof-secret-provider-classes.yaml",
 		"governance-network-policies.yaml",
+		"portfolio-bootstrap-identity.yaml",
 	}
 	assertSameStrings(t, "overlay resources", overlay.Resources, wantResources)
 
@@ -266,7 +267,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 50", "Expected 16 rendered container images", "sha256sum --check --status",
+		"resourceCount -ne 52", "Expected 16 rendered container images", "sha256sum --check --status",
 		"imageTag=$imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",

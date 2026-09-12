@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - account-proof-secret-provider-classes.yaml
+  - portfolio-bootstrap-identity.yaml
   - ../../security/secrets/secretproviderclass.yaml
   - ../../deploy/analysis-template.yaml
   - ../../deploy/accounting-deploy.yaml
@@ -109,6 +110,28 @@ patches:
                   - { name: OMS_REQUIRE_VERIFIED_ACCOUNT, value: "true" }
                   - { name: OMS_REQUIRE_DUAL_CONTROL, value: "true" }
                   - { name: OMS_DUAL_CONTROL_MIN_NOTIONAL, value: "1 USD" }
+                  # One reviewed portfolio, one collateral account at each venue.
+                  # These are adapter-local logical labels, never exchange UIDs.
+                  - { name: OMS_VENUE_ACCOUNTS, value: "__system__/PF1@XBIN=binance-main,__system__/PF1@XOKX=okx-sub-1" }
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Rollout
+      name: risk-engine
+    patch: |-
+      apiVersion: argoproj.io/v1alpha1
+      kind: Rollout
+      metadata:
+        name: risk-engine
+      spec:
+        template:
+          spec:
+            containers:
+              - name: risk-engine
+                env:
+                  # Must exactly mirror the OMS account master so margin is
+                  # observed for the same collateral pool the OMS would spend.
+                  - { name: RISK_ENGINE_VENUE_ACCOUNTS, value: "__system__/PF1@XBIN=binance-main,__system__/PF1@XOKX=okx-sub-1" }
   - target:
       kind: Deployment
       name: api-gateway
