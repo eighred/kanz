@@ -49,6 +49,14 @@ func runPortfolioBootstrap(parent context.Context, now func() time.Time) error {
 		return fmt.Errorf("portfolio-bootstrap: producer: %w", err)
 	}
 	at := now().UTC()
+	if err := publishPortfolioSnapshot(ctx, producer, tenant, portfolio, at); err != nil {
+		return err
+	}
+	fmt.Printf("portfolio-bootstrap: published risk.portfolio.snapshot tenant=%s portfolio=%s at=%s\n", tenant, portfolio, at.Format(time.RFC3339))
+	return nil
+}
+
+func publishPortfolioSnapshot(ctx context.Context, producer *bus.Producer, tenant, portfolio string, at time.Time) error {
 	event := bus.Event{
 		Subject: "risk.portfolio.snapshot", EventType: "risk.portfolio.snapshot",
 		EventClass: envelopepb.EventClass_EVENT_CLASS_STATE_SNAPSHOT, SchemaVersion: 1,
@@ -61,6 +69,5 @@ func runPortfolioBootstrap(parent context.Context, now func() time.Time) error {
 	if err := producer.Publish(ctx, event); err != nil {
 		return fmt.Errorf("portfolio-bootstrap: publish typed snapshot: %w", err)
 	}
-	fmt.Printf("portfolio-bootstrap: published risk.portfolio.snapshot tenant=%s portfolio=%s at=%s\n", tenant, portfolio, at.Format(time.RFC3339))
 	return nil
 }
