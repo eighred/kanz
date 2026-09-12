@@ -1,0 +1,5 @@
+# The tunnel runtime is copied through the estate-owned mirror so building and
+# releasing the web edge does not depend on Docker Hub. The release workflow
+# publishes and signs this as ghcr.io/eighred/cloudflared and mirrors the exact
+# main commit to Tokyo ECR like every other testnet capital-path image.
+FROM ghcr.io/eighred/base/cloudflared:2026.7.1
