@@ -73,8 +73,9 @@ The governance inputs have separate authoritative sources:
   `tenant/portfolio@MIC` to the adapter's logical account label. The Tokyo OMS
   refuses every unbound portfolio. Tokyo carries one reviewed non-secret map:
   `__system__/PF1` uses `binance-main` at `XBIN` and `okx-sub-1` at `XOKX`.
-  `RISK_ENGINE_VENUE_ACCOUNTS` mirrors it exactly so liquidation proximity is
-  measured against the same collateral account the OMS would spend.
+  The minimum topology has no market-data database, so it leaves
+  `RISK_ENGINE_VENUE_ACCOUNTS` empty and does not register liquidation proximity;
+  a mandate for this topology must not claim that measure is available.
 - The Binance and OKX expected account UIDs come from independently reviewed
   exchange account-opening evidence. They must never be copied from the
   adapter's own signed observation. Option 4 in `tools/Kanz-Venue-Secrets.cmd`

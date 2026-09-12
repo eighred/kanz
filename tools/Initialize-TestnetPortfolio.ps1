@@ -48,7 +48,7 @@ $parameters = @{ commands = @(
     'live_oms=$(/usr/local/bin/k3s kubectl -n kanz-services get deployment oms -o json | jq -r ''[.spec.template.spec.containers[] | select(.name=="oms") | .env[]? | select(.name=="OMS_VENUE_ACCOUNTS") | .value][0] // ""'')',
     'live_risk=$(/usr/local/bin/k3s kubectl -n kanz-services get rollout risk-engine -o json | jq -r ''[.spec.template.spec.containers[] | select(.name=="risk-engine") | .env[]? | select(.name=="RISK_ENGINE_VENUE_ACCOUNTS") | .value][0] // ""'')',
     ('test "$live_oms" = ''{0}'' || {{ echo ''REFUSED: live OMS binding does not match exact main'' >&2; exit 2; }}' -f $expectedBindings),
-    ('test "$live_risk" = ''{0}'' || {{ echo ''REFUSED: live risk binding does not match exact main'' >&2; exit 2; }}' -f $expectedBindings),
+    'test -z "$live_risk" || { echo ''REFUSED: Tokyo risk margin binding must remain empty without a market-data database'' >&2; exit 2; }',
     'pgpod=$(/usr/local/bin/k3s kubectl -n kanz-data get pod -l cnpg.io/cluster=kanz-testnet-postgres,role=primary -o jsonpath=''{.items[0].metadata.name}'')',
     'existing=$(/usr/local/bin/k3s kubectl -n kanz-data exec "${pgpod}" -c postgres -- psql -U postgres -d risk_engine -Atqc "select count(*) from portfolios where tenant_id=''''__system__'''' and portfolio_id=''''PF1''''")',
     'total=$(/usr/local/bin/k3s kubectl -n kanz-data exec "${pgpod}" -c postgres -- psql -U postgres -d risk_engine -Atqc ''select count(*) from portfolios'')',
