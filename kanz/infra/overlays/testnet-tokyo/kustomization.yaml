@@ -114,18 +114,6 @@ patches:
                   # These are adapter-local logical labels, never exchange UIDs.
                   - { name: OMS_VENUE_ACCOUNTS, value: "__system__/PF1@XBIN=binance-main,__system__/PF1@XOKX=okx-sub-1" }
   - target:
-      group: argoproj.io
-      version: v1alpha1
-      kind: Rollout
-      name: risk-engine
-    patch: |-
-      # The Rollout CRD has no built-in strategic merge schema. Patch the
-      # existing literal in place so Kustomize cannot replace the container
-      # list and silently remove the reviewed image reference.
-      - op: replace
-        path: /spec/template/spec/containers/0/env/5/value
-        value: "__system__/PF1@XBIN=binance-main,__system__/PF1@XOKX=okx-sub-1"
-  - target:
       kind: Deployment
       name: api-gateway
     patch: |-
