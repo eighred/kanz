@@ -132,6 +132,40 @@ a {
   gap: 14px;
 }
 
+.panel {
+  margin-top: 24px;
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 14px;
+}
+
+.panel h2,
+.secret-panel h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.grant-preview {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.secret-panel {
+  margin-top: 24px;
+  padding: 20px;
+  border: 2px solid var(--warn);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 14px;
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -147,6 +181,17 @@ input {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
+}
+
+textarea {
+  font: 0.82rem/1.45 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  padding: 9px 11px;
+  resize: vertical;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  word-break: break-all;
 }
 
 input:focus-visible {

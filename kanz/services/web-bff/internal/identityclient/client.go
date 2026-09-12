@@ -67,6 +67,16 @@ type Token struct {
 	Tenant  string    `json:"tenant"`
 }
 
+// ProvisioningResponse is an operator-facing identity response. The body stays
+// opaque to the BFF: on POST /invites it contains the one-time invitation
+// token, so decoding it into a struct here would create another place that
+// knows or might accidentally log that secret.
+type ProvisioningResponse struct {
+	Status      int
+	ContentType string
+	Body        []byte
+}
+
 // Client talks to the identity service.
 type Client struct {
 	base string
@@ -111,6 +121,46 @@ func (c *Client) Redeem(ctx context.Context, inviteToken, credential, clientIP s
 		"token":      inviteToken,
 		"credential": credential,
 	}, clientIP)
+}
+
+// Invites calls identity's authenticated invitation surface with the bearer
+// held in the BFF session. Only GET and POST are supported because exposing a
+// generic identity proxy would silently enlarge the browser's authority every
+// time identity gains another route.
+func (c *Client) Invites(ctx context.Context, method, bearer string, body []byte) (*ProvisioningResponse, error) {
+	if method != http.MethodGet && method != http.MethodPost {
+		return nil, fmt.Errorf("identityclient: invites: unsupported method %s", method)
+	}
+	var reader io.Reader
+	if len(body) > 0 {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+"/invites", reader)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	if len(body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("identityclient: invites: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return nil, fmt.Errorf("identityclient: invites: read response: %w", err)
+	}
+	if len(raw) > 1<<20 {
+		return nil, errors.New("identityclient: invites: oversized response")
+	}
+	return &ProvisioningResponse{
+		Status:      resp.StatusCode,
+		ContentType: resp.Header.Get("Content-Type"),
+		Body:        raw,
+	}, nil
 }
 
 func (c *Client) post(ctx context.Context, path string, body map[string]string, clientIP string) (*Token, error) {
