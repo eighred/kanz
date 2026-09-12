@@ -14,6 +14,7 @@ locals {
     "accounting",
     "api-gateway",
     "audit",
+    "cloudflared",
     "compliance",
     "identity",
     "kanz-capitalpath",
@@ -23,6 +24,7 @@ locals {
     "risk-engine",
     "venue-binance",
     "venue-okx",
+    "web-bff",
   ])
   common_tags = {
     Name                   = var.name
