@@ -201,6 +201,7 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 			// the operator's work does not. Overwriting status here is the bug
 			// that resets an assignment on every daily run.
 			prior.IBOR, prior.Custodian, prior.Diff = d.IBOR, d.Custodian, d.Diff
+			prior.ValuesVerified = true
 			prior.LastSeenAt = now
 			prior.Revision++
 			m.breaks[d.BreakID] = prior
@@ -211,6 +212,7 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 		// inherit the explanation that was written for the previous occurrence,
 		// which by definition did not hold.
 		fresh := d
+		fresh.ValuesVerified = true
 		fresh.FirstSeenAt, fresh.LastSeenAt, fresh.StatusChangedAt = now, now, now
 		fresh.Status = BreakOpen
 		fresh.Revision = 1

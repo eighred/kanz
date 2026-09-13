@@ -49,8 +49,9 @@ func (p *Postgres) ApplyAction(ctx context.Context, a Action) (ActionEvidence, e
 	}
 	var b Break
 	var status string
+	var ibor, custodian, difference string
 	b.BreakID = a.BreakID
-	err = tx.QueryRow(ctx, `SELECT status, assignee, explanation, revision FROM custody_breaks WHERE break_id=$1 FOR UPDATE`, a.BreakID).Scan(&status, &b.Assignee, &b.Explanation, &b.Revision)
+	err = tx.QueryRow(ctx, `SELECT status, assignee, explanation, revision, values_verified, ibor, custodian, difference FROM custody_breaks WHERE break_id=$1 FOR UPDATE`, a.BreakID).Scan(&status, &b.Assignee, &b.Explanation, &b.Revision, &b.ValuesVerified, &ibor, &custodian, &difference)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ActionEvidence{}, ErrNoBreak
 	}
@@ -58,10 +59,26 @@ func (p *Postgres) ApplyAction(ctx context.Context, a Action) (ActionEvidence, e
 		return ActionEvidence{}, err
 	}
 	b.Status = parseStatus(status)
+	if !b.ValuesVerified {
+		return ActionEvidence{}, ErrUnverifiedPrecision
+	}
+	texts := []string{ibor, custodian, difference}
+	for i, text := range texts {
+		value, err := parseStored(text)
+		if err != nil {
+			return ActionEvidence{}, err
+		}
+		exact, ok := ExactDecimalText(value)
+		if !ok {
+			return ActionEvidence{}, ErrUnverifiedPrecision
+		}
+		texts[i] = exact
+	}
 	after, e, err := applyAction(a, b, time.Now().UTC().Truncate(time.Microsecond))
 	if err != nil {
 		return ActionEvidence{}, err
 	}
+	e.Values = &ActionValues{IBOR: texts[0], Custodian: texts[1], Difference: texts[2]}
 	var revision int64
 	err = tx.QueryRow(ctx, `UPDATE custody_breaks SET status=$2, assignee=$3, explanation=$4,
         status_changed_at=CASE WHEN status<>$2 THEN $5 ELSE status_changed_at END

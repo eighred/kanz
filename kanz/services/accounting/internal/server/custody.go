@@ -26,7 +26,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 )
 
@@ -79,17 +78,31 @@ type breakView struct {
 	StatusChangedAt string `json:"status_changed_at"`
 	AgeSeconds      int64  `json:"age_seconds"`
 	Revision        int64  `json:"revision,string"`
+	ValuesState     string `json:"values_state"`
 }
 
 func toBreakView(b custody.Break, now time.Time) breakView {
+	ibor, iok := custody.ExactDecimalText(b.IBOR)
+	custodian, cok := custody.ExactDecimalText(b.Custodian)
+	difference, dok := custody.ExactDecimalText(b.Diff)
+	state := "exact"
+	if !b.ValuesVerified {
+		state = "legacy_unverified"
+	} else if !iok || !cok || !dok {
+		state = "unavailable"
+	}
+	if state != "exact" {
+		ibor, custodian, difference = "", "", ""
+	}
 	return breakView{
+		ValuesState: state,
 		BreakID:     b.BreakID,
 		Revision:    b.Revision,
 		Kind:        b.Kind.String(),
 		Key:         b.Key,
-		IBOR:        dec.Str(b.IBOR),
-		Custodian:   dec.Str(b.Custodian),
-		Difference:  dec.Str(b.Diff),
+		IBOR:        ibor,
+		Custodian:   custodian,
+		Difference:  difference,
 		Status:      b.Status.String(),
 		Assignee:    b.Assignee,
 		Explanation: b.Explanation,
@@ -111,10 +124,11 @@ func (s *Server) handleListBreaks(w http.ResponseWriter, r *http.Request) {
 	}
 	breaks, err := s.breaks.OutstandingBreaks(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "custody values could not be verified"})
 		return
 	}
 	now := time.Now().UTC()
+	w.Header().Set("Cache-Control", "no-store")
 	out := make([]breakView, 0, len(breaks))
 	for _, b := range breaks {
 		out = append(out, toBreakView(b, now))

@@ -14,7 +14,6 @@ import (
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
-	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
@@ -427,7 +426,7 @@ func (r *Reconciler) publish(ctx context.Context, run Run) error {
 // difference is worse than one that never ran — it is a control actively
 // reporting the wrong answer.
 func runToProto(run Run) (*accountingpb.ReconciliationRun, error) {
-	tolerance, ok := dec.ToProtoScaled(orZeroRat(run.Tolerance))
+	tolerance, ok := exactProto(orZeroRat(run.Tolerance))
 	if !ok {
 		return nil, fmt.Errorf("custody: run %s: tolerance is not representable as a Decimal", run.RunID)
 	}
@@ -447,9 +446,9 @@ func runToProto(run Run) (*accountingpb.ReconciliationRun, error) {
 		if !ok {
 			return nil, fmt.Errorf("custody: run %s: break kind %q has no wire representation", run.RunID, b.Kind)
 		}
-		ibor, iok := dec.ToProtoScaled(orZeroRat(b.IBOR))
-		cust, cok := dec.ToProtoScaled(orZeroRat(b.Custodian))
-		diff, dok := dec.ToProtoScaled(orZeroRat(b.Diff))
+		ibor, iok := exactProto(b.IBOR)
+		cust, cok := exactProto(b.Custodian)
+		diff, dok := exactProto(b.Diff)
 		if !iok || !cok || !dok {
 			return nil, fmt.Errorf("custody: run %s: break %s figures are not representable as Decimals", run.RunID, b.BreakID)
 		}

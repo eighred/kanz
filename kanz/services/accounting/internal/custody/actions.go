@@ -44,13 +44,20 @@ type ActionState struct {
 }
 
 type ActionEvidence struct {
-	RequestID  string      `json:"request_id"`
-	BreakID    string      `json:"break_id"`
-	Actor      string      `json:"actor"`
-	Action     string      `json:"action"`
-	Before     ActionState `json:"before"`
-	After      ActionState `json:"after"`
-	RecordedAt time.Time   `json:"recorded_at"`
+	RequestID  string        `json:"request_id"`
+	BreakID    string        `json:"break_id"`
+	Actor      string        `json:"actor"`
+	Action     string        `json:"action"`
+	Before     ActionState   `json:"before"`
+	After      ActionState   `json:"after"`
+	RecordedAt time.Time     `json:"recorded_at"`
+	Values     *ActionValues `json:"values,omitempty"`
+}
+
+type ActionValues struct {
+	IBOR       string `json:"ibor"`
+	Custodian  string `json:"custodian"`
+	Difference string `json:"difference"`
 }
 
 func (a Action) validate() error {
@@ -98,6 +105,10 @@ func applyAction(a Action, before Break, now time.Time) (Break, ActionEvidence, 
 const SubjectActionRecorded = "accounting.custody.action_recorded"
 
 func actionFact(ctx context.Context, tenant string, e ActionEvidence) (outbox.Record, error) {
+	var values *accountingpb.CustodyActionValues
+	if e.Values != nil {
+		values = &accountingpb.CustodyActionValues{Ibor: e.Values.IBOR, Custodian: e.Values.Custodian, Difference: e.Values.Difference}
+	}
 	state := func(s ActionState) *accountingpb.CustodyActionState {
 		return &accountingpb.CustodyActionState{Status: wireStatus(parseStatus(s.Status)), Assignee: s.Assignee, Explanation: s.Explanation, Revision: s.Revision}
 	}
@@ -105,7 +116,7 @@ func actionFact(ctx context.Context, tenant string, e ActionEvidence) (outbox.Re
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "accounting", TenantID: tenant,
 		EventTime: e.RecordedAt, CorrelationID: e.RequestID, PartitionKey: e.BreakID,
 		PayloadSchemaRef: "accounting.v1.CustodyActionRecorded:1", Payload: &accountingpb.CustodyActionRecorded{
-			RequestId: e.RequestID, BreakId: e.BreakID, Actor: e.Actor, Action: e.Action, Before: state(e.Before), After: state(e.After), RecordedAt: timestamppb.New(e.RecordedAt)},
+			RequestId: e.RequestID, BreakId: e.BreakID, Actor: e.Actor, Action: e.Action, Before: state(e.Before), After: state(e.After), RecordedAt: timestamppb.New(e.RecordedAt), Values: values},
 	})
 }
 

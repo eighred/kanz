@@ -51,7 +51,7 @@ func newCustodyPool(t *testing.T, tenant string) *pgxpool.Pool {
 }
 
 // applyCustodySchema drops and reapplies the accounting migrations.
-func applyCustodySchema(t *testing.T, pool *pgxpool.Pool) {
+func applyCustodySchema(t *testing.T, pool *pgxpool.Pool, before ...string) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx,
@@ -64,6 +64,9 @@ func applyCustodySchema(t *testing.T, pool *pgxpool.Pool) {
 	}
 	sort.Strings(files)
 	for _, f := range files {
+		if len(before) > 0 && filepath.Base(f) >= before[0] {
+			break
+		}
 		ddl, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("read migration %s: %v", f, err)

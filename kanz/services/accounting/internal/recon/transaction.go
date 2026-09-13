@@ -227,20 +227,28 @@ func transactionLeg(executions []ledger.Execution, stmt Statement) ([]Break, Leg
 		if _, matched := inStatement[ref]; matched {
 			continue
 		}
-		qty := orZero(e.Quantity)
+		qty := e.Quantity
+		var diff *big.Rat
+		if qty != nil {
+			diff = new(big.Rat).Set(qty)
+		}
 		breaks = append(breaks, Break{
 			Kind: BreakExecutionMissingAtCustodian, Key: ref,
-			IBOR: qty, Custodian: new(big.Rat), Diff: new(big.Rat).Set(qty),
+			IBOR: qty, Custodian: new(big.Rat), Diff: diff,
 		})
 	}
 	for ref, tx := range inStatement {
 		if _, matched := inBook[ref]; matched {
 			continue
 		}
-		qty := orZero(tx.Quantity)
+		qty := tx.Quantity
+		var diff *big.Rat
+		if qty != nil {
+			diff = new(big.Rat).Neg(qty)
+		}
 		breaks = append(breaks, Break{
 			Kind: BreakExecutionMissingInIBOR, Key: ref,
-			IBOR: new(big.Rat), Custodian: qty, Diff: new(big.Rat).Neg(qty),
+			IBOR: new(big.Rat), Custodian: qty, Diff: diff,
 		})
 	}
 	sort.SliceStable(breaks, func(i, j int) bool {

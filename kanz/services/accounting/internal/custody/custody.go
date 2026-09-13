@@ -404,10 +404,11 @@ type Break struct {
 	Custodian *big.Rat
 	Diff      *big.Rat
 
-	Status      BreakStatus
-	Assignee    string
-	Explanation string
-	Revision    int64
+	Status         BreakStatus
+	Assignee       string
+	Explanation    string
+	Revision       int64
+	ValuesVerified bool
 
 	// FirstSeenAt is when this break was first detected and is NEVER advanced by
 	// a redetection; LastSeenAt is the completed_at of the most recent run that
