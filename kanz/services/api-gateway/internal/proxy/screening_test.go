@@ -7,6 +7,18 @@ import (
 	"testing"
 )
 
+func TestVersionedScreenNeverFallsBackToLegacy(t *testing.T) {
+	be := &fakeBackend{resp: Response{Status: 404}}
+	mux := testMux()
+	New(be, Roles{}).Routes(mux)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v2/screening/esg", strings.NewReader(`{}`)), "test-actor", "test-tenant")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != 404 || be.last.Service != ServiceRegulatory || be.last.Path != "/v2/screening/esg" {
+		t.Fatalf("old backend did not refuse: %d %+v", rr.Code, be.last)
+	}
+}
+
 // THE ESG SCREEN IS REACHABLE, AND THE FILING ROUTES ARE NOT (#751 item 4).
 //
 // internal/sustainability.Screen was complete and uncalled: regulatory mounted

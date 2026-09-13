@@ -3,7 +3,10 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+
+	"google.golang.org/protobuf/encoding/protojson"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
@@ -41,9 +44,9 @@ import (
 // screeningPosition is one holding, with its numbers as decimal STRINGS.
 //
 // Strings rather than JSON numbers because these are money and quantity, and
-// CLAUDE.md is explicit that neither is ever a float. dec.ParseRat reads them
-// exactly; a JSON number would have gone through float64 on the way in and the
-// screen would then be classifying a value the caller did not send.
+// CLAUDE.md is explicit that neither is ever a float. ParseProtoExact preserves
+// every digit or refuses before classification; rounding could erase a small
+// excluded holding and wrapping could fabricate a large holding's value.
 type screeningPosition struct {
 	InstrumentID string `json:"instrument_id"`
 	Quantity     string `json:"quantity"`
@@ -96,22 +99,22 @@ func (r screeningRequest) book() (*compliance.Book, error) {
 		}
 		pos := compliance.Position{InstrumentID: p.InstrumentID}
 		if p.Quantity != "" {
-			q, err := dec.ParseRat(p.Quantity)
-			if err != nil {
-				return nil, fmt.Errorf("positions[%d].quantity: %q is not a decimal: %w", i, p.Quantity, err)
+			q, ok := dec.ParseProtoExact(p.Quantity)
+			if !ok {
+				return nil, fmt.Errorf("positions[%d].quantity: exact representable decimal required", i)
 			}
-			pos.Quantity = dec.ToProto(q)
+			pos.Quantity = q
 		}
 		if p.MarketValue != "" {
-			mv, err := dec.ParseRat(p.MarketValue)
-			if err != nil {
-				return nil, fmt.Errorf("positions[%d].market_value: %q is not a decimal: %w", i, p.MarketValue, err)
+			mv, ok := dec.ParseProtoExact(p.MarketValue)
+			if !ok {
+				return nil, fmt.Errorf("positions[%d].market_value: exact representable decimal required", i)
 			}
 			ccy := p.Currency
 			if ccy == "" {
 				ccy = r.BaseCurrency
 			}
-			pos.MarketValue = &commonpb.Money{Amount: dec.ToProto(mv), CurrencyCode: ccy}
+			pos.MarketValue = &commonpb.Money{Amount: mv, CurrencyCode: ccy}
 		}
 		b.Positions = append(b.Positions, pos)
 	}
@@ -126,6 +129,7 @@ func (r screeningRequest) book() (*compliance.Book, error) {
 // book could not price (#760) — and collapsing those into a boolean here would
 // throw away the only part an operator can act on.
 func (s *Server) handleESGScreen(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	var req screeningRequest
 	if !decode(w, r, &req) {
 		return
@@ -134,11 +138,41 @@ func (s *Server) handleESGScreen(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, fmt.Errorf("portfolio_id is required"))
 		return
 	}
+	versioned := r.Pattern == "POST /v2/screening/esg"
+	if versioned && (req.AsOf == nil || req.AsOf.IsZero() || req.BaseCurrency == "" || req.policy().Empty()) {
+		badRequest(w, fmt.Errorf("as_of, base_currency and a nonempty exclusion policy are required"))
+		return
+	}
+	if len(req.Positions) > 4096 || len(req.ExcludedSectors) > 256 || len(req.ExcludedIssuers) > 256 {
+		badRequest(w, fmt.Errorf("screening input exceeds supported bounds"))
+		return
+	}
+	for _, list := range [][]string{req.ExcludedSectors, req.ExcludedIssuers} {
+		for _, value := range list {
+			if strings.TrimSpace(value) == "" || len(value) > 256 {
+				badRequest(w, fmt.Errorf("exclusion identifiers must be nonempty and at most 256 bytes"))
+				return
+			}
+		}
+	}
 	book, err := req.book()
 	if err != nil {
 		badRequest(w, err)
 		return
 	}
 	result := sustainability.Screen(r.Context(), book, s.classifier, req.policy(), asOf(req.AsOf))
+	if versioned {
+		// A separate route refuses old deployments. Proto JSON preserves int64
+		// fields as strings and timestamps as RFC3339 for browser consumers.
+		data, err := (protojson.MarshalOptions{UseProtoNames: true, EmitUnpopulated: true}).Marshal(result)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "screening result is unavailable"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }

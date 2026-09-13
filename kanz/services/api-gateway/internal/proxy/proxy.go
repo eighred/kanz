@@ -574,6 +574,7 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// is appended — which is exactly what separates it from the filing routes on
 	// the same service, and why they are not mounted here.
 	mux.Handle(authz.Read, "POST /v1/screening/esg", h.handle(ServiceRegulatory, true, identityPath))
+	mux.Handle(authz.Read, "POST /v2/screening/esg", h.handle(ServiceRegulatory, true, identityPath))
 }
 
 // identityPath forwards the request path unchanged: regulatory serves

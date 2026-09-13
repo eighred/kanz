@@ -58,6 +58,7 @@ import (
 // to "fix" it (#189). The reasoning also lives beside the call, because a rule
 // recorded only in the guard is a rule the next reader does not see.
 var capitalPathPackages = []string{
+	"services/regulatory/internal/server",
 	"services/oms/internal/position",
 	"services/oms/internal/order",
 	"services/venue-okx/internal/okx",

@@ -2,9 +2,9 @@ package custody
 
 import (
 	"errors"
+	"github.com/eighred/kanz/internal/dec"
 	"math/big"
 	"regexp"
-	"strings"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
@@ -56,22 +56,5 @@ func ExactDecimalText(r *big.Rat) (string, bool) {
 }
 
 func exactProto(r *big.Rat) (*commonpb.Decimal, bool) {
-	text, ok := ExactDecimalText(r)
-	if !ok {
-		return nil, false
-	}
-	exponent := int32(0)
-	if dot := strings.IndexByte(text, '.'); dot >= 0 {
-		exponent = -int32(len(text) - dot - 1)
-		text = text[:dot] + text[dot+1:]
-	}
-	for len(text) > 1 && strings.HasSuffix(text, "0") {
-		text = strings.TrimSuffix(text, "0")
-		exponent++
-	}
-	coefficient, ok := new(big.Int).SetString(text, 10)
-	if !ok || !coefficient.IsInt64() || exponent < -60 || exponent > 60 {
-		return nil, false
-	}
-	return &commonpb.Decimal{Coefficient: coefficient.Int64(), Exponent: exponent}, true
+	return dec.ToProtoExact(r)
 }
