@@ -19,6 +19,9 @@ func (s *exportSpy) Scan(context.Context, func(*audit.Record) error) error { s.s
 func (s *exportSpy) Head(context.Context) (audit.Head, error)              { s.heads++; return audit.Head{}, nil }
 func (s *exportSpy) Query(_ context.Context, f audit.Filter) ([]*audit.Record, error) {
 	s.got = f
+	if f.ThroughSeq != nil && *f.ThroughSeq == 0 {
+		return nil, nil
+	}
 	return []*audit.Record{{Seq: 9007199254740993, EventID: "a", TenantID: f.Tenant, OccurredAt: time.Unix(1, 0)}, {Seq: 9007199254740994, EventID: "b", TenantID: f.Tenant, OccurredAt: time.Unix(2, 0)}}, nil
 }
 func TestTenantReportDoesNotScanOrDiscloseGlobalIntegrity(t *testing.T) {
@@ -59,7 +62,7 @@ func TestTenantReportDoesNotScanOrDiscloseGlobalIntegrity(t *testing.T) {
 	auth.SetPrincipalHeaders(req.Header, "test:operator", "acme", []string{"estate-verifier"})
 	rr = httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
-	if rr.Code != 200 || spy.scans != 1 || spy.heads != 1 {
+	if rr.Code != 200 || spy.scans != 1 || spy.heads != 0 || spy.got.ThroughSeq == nil || *spy.got.ThroughSeq != 0 {
 		t.Fatal("explicit verifier refused", rr.Code, spy)
 	}
 }
