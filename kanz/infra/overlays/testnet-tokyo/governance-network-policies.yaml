@@ -107,5 +107,30 @@ spec:
         - podSelector:
             matchLabels:
               app: web-bff
+        # The gateway must fetch Identity's JWKS before /readyz can pass. Tokyo
+        # enforces default-deny, so the issuer probe needs both policy halves.
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8087 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-identity-egress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: identity
       ports:
         - { protocol: TCP, port: 8087 }
