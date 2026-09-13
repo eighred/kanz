@@ -2,6 +2,7 @@ package soc2
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -74,15 +75,33 @@ func TestCollectFromStore_PullsWindowAndCollects(t *testing.T) {
 		{EventID: "q1", Kind: audit.KindDataQuality, EventType: "dq", OccurredAt: now},
 		{EventID: "cmd1", Kind: audit.KindCommandOutcome, EventType: "cmd", OccurredAt: now},
 	} {
+		r.TenantID = "test"
 		if _, err := store.Append(ctx, r); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	report, err := CollectFromStore(ctx, store, "", now.Add(-time.Hour), time.Time{})
+	report, err := CollectFromStore(ctx, store, "test", now.Add(-time.Hour), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if report.TotalCount != 3 {
 		t.Fatalf("collected %d supporting records, want 3", report.TotalCount)
+	}
+}
+
+type boundedEvidenceStore struct {
+	audit.Store
+	filter audit.Filter
+}
+
+func (s *boundedEvidenceStore) Query(_ context.Context, f audit.Filter) ([]*audit.Record, error) {
+	s.filter = f
+	return make([]*audit.Record, MaxEvidenceRecords+1), nil
+}
+func TestEvidenceWindowCannotBecomeAnUnboundedOrTruncatedPass(t *testing.T) {
+	s := &boundedEvidenceStore{}
+	_, err := CollectFromStore(context.Background(), s, "acme", time.Unix(1, 0), time.Unix(2, 0))
+	if !errors.Is(err, ErrTooManyRecords) || s.filter.Limit != MaxEvidenceRecords+1 || s.filter.Tenant != "acme" {
+		t.Fatal(err, s.filter)
 	}
 }
