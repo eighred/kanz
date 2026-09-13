@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/eighred/kanz/internal/audit/chain"
@@ -40,6 +41,7 @@ type Template struct {
 // Attestation is the integrity statement attached to every report: the result of
 // verifying the AUDIT-01b hash chain over the entire log at generation time.
 type Attestation struct {
+	State    string `json:"state"`
 	Verified bool   `json:"verified"`
 	Records  int    `json:"records"`
 	Head     string `json:"head_hash"`
@@ -98,15 +100,30 @@ type Report struct {
 // WORM log. One extra row is exact, costs one row, and cannot disagree with the
 // page it was read alongside.
 func Generate(ctx context.Context, store audit.Store, tmpl Template, now func() time.Time) (*Report, error) {
+	return generate(ctx, store, tmpl, now, true)
+}
+
+// GeneratePage selects bounded tenant evidence without claiming chain verification.
+func GeneratePage(ctx context.Context, store audit.Store, tmpl Template, now func() time.Time) (*Report, error) {
+	if tmpl.Filter.Tenant == "" {
+		return nil, errors.New("tenant is required for evidence selection")
+	}
+	return generate(ctx, store, tmpl, now, false)
+}
+func generate(ctx context.Context, store audit.Store, tmpl Template, now func() time.Time, attest bool) (*Report, error) {
 	if now == nil {
 		now = time.Now
 	}
-	if tmpl.Filter.Limit <= 0 {
+	if tmpl.Filter.Limit <= 0 || tmpl.Filter.Limit > MaxPageSize {
 		return nil, fmt.Errorf("%w: template %q", ErrUnboundedTemplate, tmpl.Name)
 	}
-	att, err := Verify(ctx, store)
-	if err != nil {
-		return nil, err
+	att := Attestation{State: "not_requested"}
+	if attest {
+		var err error
+		att, err = Verify(ctx, store)
+		if err != nil {
+			return nil, err
+		}
 	}
 	limit := tmpl.Filter.Limit
 	probe := tmpl.Filter
@@ -169,8 +186,9 @@ func Verify(ctx context.Context, store audit.Store) (Attestation, error) {
 	}); err != nil {
 		return Attestation{}, err
 	}
-	att := Attestation{Records: v.Count(), Head: head.Hash}
+	att := Attestation{State: "verified", Records: v.Count(), Head: head.Hash}
 	if idx, verr := v.Result(); verr != nil {
+		att.State = "failed"
 		att.Verified = false
 		att.Detail = fmt.Sprintf("chain broken at index %d: %v", idx, verr)
 	} else {
@@ -195,8 +213,12 @@ func (r *Report) RenderJSON() ([]byte, error) {
 // the artifact states it and names the cursor that continues it (#304).
 func (r *Report) RenderCSV() ([]byte, error) {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "# report: %s\n# generated_at: %s\n# integrity_verified: %t (records=%d head=%s)\n",
-		r.Title, r.GeneratedAt.Format(time.RFC3339), r.Integrity.Verified, r.Integrity.Records, r.Integrity.Head)
+	fmt.Fprintf(&buf, "# report: %s\n# generated_at: %s\n", strings.NewReplacer("\r", " ", "\n", " ").Replace(r.Title), r.GeneratedAt.Format(time.RFC3339))
+	if r.Integrity.State == "not_requested" {
+		fmt.Fprintln(&buf, "# integrity: not_requested — no chain attestation was requested or performed")
+	} else {
+		fmt.Fprintf(&buf, "# integrity_verified: %t (records=%d head=%s)\n", r.Integrity.Verified, r.Integrity.Records, r.Integrity.Head)
+	}
 	if r.Complete {
 		fmt.Fprintf(&buf, "# complete: true (%d record(s), end of selection)\n", r.Count)
 	} else {
@@ -212,10 +234,25 @@ func (r *Report) RenderCSV() ([]byte, error) {
 			fmt.Sprint(rec.Seq), rec.EventID, rec.OccurredAt.UTC().Format(time.RFC3339),
 			string(rec.Kind), rec.EventType, rec.TenantID, rec.CorrelationID, rec.Summary,
 		}
+		for i, cell := range row {
+			row[i] = spreadsheetLiteral(cell)
+		}
 		if err := w.Write(row); err != nil {
 			return nil, err
 		}
 	}
 	w.Flush()
 	return buf.Bytes(), w.Error()
+}
+
+// spreadsheetLiteral keeps data cells inert when an export is opened in Excel.
+func spreadsheetLiteral(value string) string {
+	trimmed := strings.TrimLeft(value, " \t\r\n\ufeff")
+	if trimmed != "" && strings.ContainsAny(trimmed[:1], "=+-@") {
+		return "'" + value
+	}
+	if strings.ContainsAny(value, "\t\r\n") {
+		return "'" + value
+	}
+	return value
 }

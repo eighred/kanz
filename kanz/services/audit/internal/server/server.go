@@ -126,7 +126,9 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("GET /v1/audit/lineage/{event_id}", s.handleLineage)
 		s.mux.HandleFunc("GET /v1/audit/verify", s.handleVerify)
 		s.mux.HandleFunc("GET /v1/audit/reports/{template}", s.handleReport)
+		s.mux.HandleFunc("GET /v2/audit/reports/{template}", s.handleReport)
 		s.mux.HandleFunc("GET /v1/soc2/evidence", s.handleSOC2Evidence)
+		s.mux.HandleFunc("GET /v2/soc2/evidence", s.handleSOC2Evidence)
 	}
 }
 
@@ -290,8 +292,15 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 // Bounding it needs periodically signed checkpoints, which is a security design
 // and not a query change; see the note on audit.Store.Scan.
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	tenant, authed := auth.RequireCallerTenant(w, r)
 	if !authed {
+		return
+	}
+	bounded := r.Pattern == "GET /v2/audit/reports/{template}"
+	if !bounded && !s.mayVerify(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "attested reports require estate verification authority"})
 		return
 	}
 	tmpl, ok := report.BuiltIns()[r.PathValue("template")]
@@ -300,6 +309,10 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if f := r.URL.Query().Get("format"); f != "" {
+		if f != "json" && f != "csv" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "format must be json or csv"})
+			return
+		}
 		tmpl.Format = report.Format(f)
 	}
 	// Scope the template's filter to the caller. BuiltIns() returns a fresh map
@@ -335,7 +348,13 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		tmpl.Filter.AfterSeq = n
 	}
 
-	rep, err := report.Generate(r.Context(), s.store, tmpl, time.Now)
+	var rep *report.Report
+	var err error
+	if bounded {
+		rep, err = report.GeneratePage(r.Context(), s.store, tmpl, time.Now)
+	} else {
+		rep, err = report.Generate(r.Context(), s.store, tmpl, time.Now)
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -347,10 +366,15 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, r, err)
 			return
 		}
-		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"audit-%s.csv\"", tmpl.Name))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(b)
 	default:
+		if bounded {
+			writeJSON(w, http.StatusOK, exactReport(rep, tenant))
+			return
+		}
 		b, err := rep.RenderJSON()
 		if err != nil {
 			s.fail(w, r, err)
@@ -367,6 +391,8 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 // mapped control has insufficient evidence — a Type II exception a monitor alerts
 // on, the same status-code-as-signal stance handleVerify uses for a broken chain.
 func (s *Server) handleSOC2Evidence(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	// Same boundary as the reports endpoint, and for the same reason: this
 	// evidence is compiled from audit records and handed to an AUDITOR, so an
 	// unscoped collection puts other tenants' history into a document that
@@ -376,6 +402,18 @@ func (s *Server) handleSOC2Evidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	if q.Get("from") == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from must be an explicit RFC3339 timestamp"})
+		return
+	}
+	for _, key := range []string{"from", "to"} {
+		if q.Get(key) != "" {
+			if parsed, ok := parseTime(q.Get(key)); !ok || parsed.IsZero() {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "audit window must use RFC3339 timestamps"})
+				return
+			}
+		}
+	}
 	var from, to time.Time
 	if t, ok := parseTime(q.Get("from")); ok {
 		from = t
@@ -384,6 +422,14 @@ func (s *Server) handleSOC2Evidence(w http.ResponseWriter, r *http.Request) {
 		to = t
 	}
 	rep, err := soc2.CollectFromStore(r.Context(), s.store, tenant, from, to)
+	if errors.Is(err, soc2.ErrWindow) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "audit window is invalid"})
+		return
+	}
+	if errors.Is(err, soc2.ErrTooManyRecords) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "narrow the evidence window; no complete result can be returned within the record bound"})
+		return
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -439,4 +485,21 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// Exact report transport keeps sequence identifiers outside JavaScript numbers.
+func exactReport(rep *report.Report, tenant string) map[string]any {
+	type record struct {
+		*audit.Record
+		Sequence string `json:"seq"`
+	}
+	rows := make([]record, 0, len(rep.Records))
+	for _, r := range rep.Records {
+		rows = append(rows, record{r, strconv.FormatInt(r.Seq, 10)})
+	}
+	next := ""
+	if !rep.Complete {
+		next = strconv.FormatInt(rep.NextCursor, 10)
+	}
+	return map[string]any{"version": 2, "tenant_id": tenant, "template": rep.Template, "title": rep.Title, "generated_at": rep.GeneratedAt, "integrity": map[string]string{"state": "not_requested"}, "count": rep.Count, "complete": rep.Complete, "next_cursor": next, "records": rows}
 }

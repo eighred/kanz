@@ -301,7 +301,7 @@ func TestSOC2Evidence_ScopesToThePrincipalsTenant(t *testing.T) {
 	spy := &filterSpy{}
 	srv := newAuditServer(spy)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/soc2/evidence", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/soc2/evidence?from=2026-01-01T00:00:00Z", nil)
 	req.Header.Set(auth.HeaderPrincipalTenant, "acme")
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
@@ -316,7 +316,7 @@ func TestSOC2Evidence_RefusesARequestCarryingNoPrincipal(t *testing.T) {
 	spy := &filterSpy{}
 	srv := newAuditServer(spy)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/soc2/evidence", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/soc2/evidence?from=2026-01-01T00:00:00Z", nil)
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
