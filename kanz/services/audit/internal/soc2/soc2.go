@@ -78,6 +78,9 @@ type ControlEvidence struct {
 
 // EvidenceReport is the SOC 2 evidence bundle for an audit window.
 type EvidenceReport struct {
+	Version    int               `json:"version"`
+	TenantID   string            `json:"tenant_id"`
+	Coverage   string            `json:"coverage"`
 	Assessment string            `json:"assessment"`
 	From       time.Time         `json:"from"`
 	To         time.Time         `json:"to"`
@@ -159,7 +162,11 @@ func CollectFromStore(ctx context.Context, store audit.Store, tenant string, fro
 	if len(recs) > MaxEvidenceRecords {
 		return EvidenceReport{}, ErrTooManyRecords
 	}
-	return Collect(DefaultControls(), recs, from, to), nil
+	out := Collect(DefaultControls(), recs, from, to)
+	out.Version = 2
+	out.TenantID = tenant
+	out.Coverage = "complete"
+	return out, nil
 }
 
 // inWindow reports whether t (an event's OccurredAt — when the controlled action
