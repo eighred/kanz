@@ -420,6 +420,8 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"policy_preexisting=0", "networkpolicy allow-gateway-to-oms-query --ignore-not-found=true",
 		"web_bff_preexisting=0", "delete deployment/web-bff --ignore-not-found=true --wait=true",
 		"policy_restored=0", "for attempt in 1 2 3 4 5",
+		"deployment_restored()", ".status.observedGeneration >= .metadata.generation",
+		"(.status.updatedReplicas // 0) == .spec.replicas", "deployment_restored \"${deployment}\"",
 		"rollback_workloads() { /usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap",
 		"apiVersion:\"v1\",kind:\"List\",items:", "pods_ready=0; for attempt in $(seq 1 120)",
 	} {
