@@ -213,7 +213,17 @@ func (r *Report) RenderJSON() ([]byte, error) {
 // the artifact states it and names the cursor that continues it (#304).
 func (r *Report) RenderCSV() ([]byte, error) {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "# report: %s\n# generated_at: %s\n", strings.NewReplacer("\r", " ", "\n", " ").Replace(r.Title), r.GeneratedAt.Format(time.RFC3339))
+	// Encode the title as one CSV field. Embedded line breaks stay inside that
+	// field instead of creating spreadsheet rows; no lossy sanitizer is needed.
+	header := csv.NewWriter(&buf)
+	if err := header.Write([]string{"# report: " + r.Title}); err != nil {
+		return nil, err
+	}
+	header.Flush()
+	if err := header.Error(); err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(&buf, "# generated_at: %s\n", r.GeneratedAt.Format(time.RFC3339))
 	if r.Integrity.State == "not_requested" {
 		fmt.Fprintln(&buf, "# integrity: not_requested — no chain attestation was requested or performed")
 	} else {

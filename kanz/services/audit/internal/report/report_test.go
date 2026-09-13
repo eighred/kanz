@@ -10,6 +10,24 @@ import (
 	"github.com/eighred/kanz/services/audit/internal/audit"
 )
 
+func TestCSVTitleCannotCreateAnExecutableRow(t *testing.T) {
+	title := "test, report\n=TEST_FORMULA(\"x\")"
+	r := &Report{Title: title, Complete: true, Integrity: Attestation{State: "not_requested"}}
+	data, err := r.RenderCSV()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := csv.NewReader(strings.NewReader(string(data)))
+	first, err := reader.Read()
+	if err != nil || len(first) != 1 || first[0] != "# report: "+title {
+		t.Fatalf("title escaped its field: %v %v", first, err)
+	}
+	second, err := reader.Read()
+	if err != nil || len(second) != 1 || !strings.HasPrefix(second[0], "# generated_at: ") {
+		t.Fatalf("title injected a row: %v %v", second, err)
+	}
+}
+
 func seedStore(t *testing.T) *audit.Memory {
 	t.Helper()
 	st := audit.NewMemory()
