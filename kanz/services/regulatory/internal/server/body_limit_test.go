@@ -48,6 +48,7 @@ func TestBodyLimit_AnOversizedBodyIsRefusedOnEveryRoute(t *testing.T) {
 	for _, path := range []string{
 		"/v1/filings/frtb", "/v1/filings/formpf", "/v1/filings/aifmd",
 		"/v1/filings/tcfd", "/v1/filings/sfdr", "/v1/screening/esg",
+		"/v2/screening/esg",
 	} {
 		rec := httptest.NewRecorder()
 		s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(huge)))
