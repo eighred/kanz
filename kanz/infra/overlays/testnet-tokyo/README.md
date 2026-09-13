@@ -23,12 +23,18 @@ Apply the same checked manifest only after reviewing the dry-run evidence:
 .\tools\Install-TestnetWorkloads.ps1 -InstanceId <managed-node-id> -Apply
 ```
 
-The apply path waits for all eight Deployments and the risk-engine Rollout, then
-requires nine ready Pods whose running SHA-256 image IDs match the reviewed ECR
+The apply path waits for all nine Deployments and the risk-engine Rollout, then
+requires ten ready Pods whose running SHA-256 image IDs match the reviewed ECR
 lock. It also proves that no registry credential Secret exists in
 `kanz-services`. A failed first installation deletes the exact rendered object
 set; an ambiguous partial installation is refused before apply. The installer
 submits no request or order to any service.
+
+Tokyo runs one risk-engine replica. Its overlay replaces the canonical 20/50%
+replica-weighted steps, which would round to zero canary Pods at that scale, with
+one 100% canary behind `maxSurge: 1` and `maxUnavailable: 0`. The stable Pod stays
+available until the canary is Ready; the same Prometheus analysis then admits or
+aborts that real canary before promotion.
 
 Do not apply until the namespace, SPIFFE registrations, Vault
 `SecretProviderClass` objects, NATS, Postgres migrations, and Argo Rollouts CRD

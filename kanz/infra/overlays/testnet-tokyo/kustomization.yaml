@@ -94,6 +94,28 @@ patches:
       - op: replace
         path: /spec/replicas
         value: 1
+      # Replica-weighted 20% rounds to zero canary Pods at singleton scale, so
+      # its hash can never produce the metrics the analysis requires. Keep the
+      # stable Pod available until one real canary is Ready, then analyze that
+      # canary before promotion. A failed analysis still restores the stable RS.
+      - op: add
+        path: /spec/strategy/canary/maxSurge
+        value: 1
+      - op: add
+        path: /spec/strategy/canary/maxUnavailable
+        value: 0
+      - op: replace
+        path: /spec/strategy/canary/steps
+        value:
+          - setWeight: 100
+          - pause: { duration: 60s }
+          - analysis:
+              templates:
+                - templateName: risk-engine-canary
+              args:
+                - name: canary-hash
+                  valueFrom:
+                    podTemplateHashValue: Latest
   # Trading remains startup-halted. These three controls can be armed before
   # their governed inventory exists because each missing input is an explicit
   # refusal. Exchange-account proof is intentionally absent here: the adapters

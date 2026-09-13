@@ -123,7 +123,12 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 			removesPullSecret = true
 		case patch.Target.Kind == "Deployment" && strings.Contains(patch.Patch, "/spec/replicas") && strings.Contains(patch.Patch, "value: 1"):
 			scalesDeployments = true
-		case patch.Target.Kind == "Rollout" && patch.Target.Name == "risk-engine" && strings.Contains(patch.Patch, "/spec/replicas") && strings.Contains(patch.Patch, "value: 1"):
+		case patch.Target.Kind == "Rollout" && patch.Target.Name == "risk-engine" &&
+			strings.Contains(patch.Patch, "/spec/replicas") && strings.Contains(patch.Patch, "value: 1") &&
+			strings.Contains(patch.Patch, "/spec/strategy/canary/maxSurge") &&
+			strings.Contains(patch.Patch, "/spec/strategy/canary/maxUnavailable") &&
+			strings.Contains(patch.Patch, "/spec/strategy/canary/steps") &&
+			strings.Contains(patch.Patch, "setWeight: 100"):
 			scalesRisk = true
 		}
 	}
@@ -420,8 +425,8 @@ func TestTokyoWorkloadPodVerifierMatchesStatusesByContainerName(t *testing.T) {
 		return "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/" + name + "@" + digest
 	}
 	fixture := func(runtimeDigest string, omitMainStatus bool) []byte {
-		pods := make([]any, 0, 9)
-		for i := 0; i < 9; i++ {
+		pods := make([]any, 0, 10)
+		for i := 0; i < 10; i++ {
 			statuses := []any{}
 			if !omitMainStatus {
 				statuses = append(statuses, map[string]any{
