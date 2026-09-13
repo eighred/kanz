@@ -17,6 +17,26 @@ export interface DataException {
   DetectedAt: string; overrideCount: number
 }
 
+export interface PriceObservation {
+  instrument_id: string; has_price: boolean; chosen?: string
+  exceptions: number; stale_candidates: number; observed_at: string; observation_only: true
+}
+
+function parsePrice(value: unknown, id: string): PriceObservation {
+  const invalid = () => { throw new Error('Invalid price observation.') }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
+  const row = value as Record<string, unknown>
+  if (row.instrument_id !== id || row.observation_only !== true || typeof row.has_price !== 'boolean' ||
+      typeof row.observed_at !== 'string' || !Number.isFinite(Date.parse(row.observed_at)) ||
+      !Number.isSafeInteger(row.exceptions) || (row.exceptions as number) < 0 ||
+      !Number.isSafeInteger(row.stale_candidates) || (row.stale_candidates as number) < 0 ||
+      (row.stale_candidates as number) > (row.exceptions as number)) return invalid()
+  if (row.has_price ? (typeof row.chosen !== 'string' || row.chosen.length > 256 || !/^-?\d+(\.\d+)?$/.test(row.chosen)) : row.chosen !== undefined) return invalid()
+  return { instrument_id: id, has_price: row.has_price, ...(row.has_price ? { chosen: row.chosen as string } : {}),
+    exceptions: row.exceptions as number, stale_candidates: row.stale_candidates as number,
+    observed_at: row.observed_at, observation_only: true }
+}
+
 function stringObject(value: unknown, keys: string[]): Record<string, string> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid reference-data response.')
   const row = value as Record<string, unknown>
@@ -53,6 +73,7 @@ function parseException(value: unknown): DataException {
 }
 
 export const reference = {
+  price: (id: string) => api.get<unknown>(`/api/v1/price-observations/${encodeURIComponent(id)}`).then((row) => parsePrice(row, id)),
   security: (id: string) => api.get<unknown>(`/api/v1/securities/${encodeURIComponent(id)}`).then((row) => parseSecurity(row, id)),
   async exceptions(): Promise<DataException[]> {
     const body = await api.get<unknown>('/api/v1/exceptions')

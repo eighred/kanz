@@ -26,9 +26,10 @@ func everyRoute(s *Server, tenant string) map[string]*httptest.ResponseRecorder 
 	out := map[string]*httptest.ResponseRecorder{}
 
 	for name, path := range map[string]string{
-		"security":   "/v1/securities/SEC1",
-		"price":      "/v1/prices/SEC1",
-		"exceptions": "/v1/exceptions",
+		"security":          "/v1/securities/SEC1",
+		"price":             "/v1/prices/SEC1",
+		"price observation": "/v1/price-observations/SEC1",
+		"exceptions":        "/v1/exceptions",
 	} {
 		rec := httptest.NewRecorder()
 		s.ServeHTTP(rec, asTenant(http.MethodGet, path, tenant))

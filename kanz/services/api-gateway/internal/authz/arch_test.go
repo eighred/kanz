@@ -295,11 +295,12 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"POST /v1/portfolios/{id}/reconcile": authz.Fund,
 
 		// Reference + wealth reads.
-		"GET /v1/households/{id}": authz.Read,
-		"GET /v1/securities/{id}": authz.Read,
-		"GET /v1/prices/{id}":     authz.Read,
-		"GET /v1/exceptions":      authz.Read,
-		"POST /v1/ask":            authz.Read,
+		"GET /v1/households/{id}":         authz.Read,
+		"GET /v1/securities/{id}":         authz.Read,
+		"GET /v1/prices/{id}":             authz.Read,
+		"GET /v1/price-observations/{id}": authz.Read,
+		"GET /v1/exceptions":              authz.Read,
+		"POST /v1/ask":                    authz.Read,
 
 		// MAKER-CHECKER ON THE PRICING OVERRIDE (#539, #410 act one). Should a read
 		// token be able to call these? NO, and the pending queue is the one where the

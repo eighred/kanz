@@ -222,7 +222,10 @@ func New(backend Backend, roles Roles) *Handler {
 func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Read, "GET /v1/households/{id}", h.handle(ServiceWealth, false, nil))
 	mux.Handle(authz.Read, "GET /v1/securities/{id}", h.handle(ServiceDataMaster, false, nil))
+	// Observation only (#1186): the projector records breaks independently.
+	// No evaluation command or override authority is implied by Read.
 	mux.Handle(authz.Read, "GET /v1/prices/{id}", h.handle(ServiceDataMaster, false, nil))
+	mux.Handle(authz.Read, "GET /v1/price-observations/{id}", h.handle(ServiceDataMaster, false, nil))
 	mux.Handle(authz.Read, "GET /v1/exceptions", h.handle(ServiceDataMaster, false, nil))
 	// The copilot is never anonymous: require the principal at the edge. It ASKS about the
 	// book, it does not move it — a read (SEC-M2).
@@ -596,7 +599,9 @@ func (h *Handler) handle(svc Service, requirePrincipal bool, rewrite func(string
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
 		}
-		path := r.URL.Path
+		// Forward URL syntax, not decoded identifier data (#1193). The backend
+		// parses this path as a URL; decoded ?, # or / would change its meaning.
+		path := r.URL.EscapedPath()
 		if rewrite != nil {
 			path = rewrite(path)
 		}

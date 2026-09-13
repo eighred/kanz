@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { describeReference, reference, type DataException, type SecurityRecord } from '../api/reference'
+import { describeReference, reference, type DataException, type SecurityRecord, type PriceObservation } from '../api/reference'
 
 const instrumentID = ref('')
 const security = ref<SecurityRecord | null>(null)
@@ -10,6 +10,21 @@ const exceptions = ref<DataException[]>([])
 const queueError = ref('')
 const queueLoading = ref(true)
 const provenance = computed(() => Object.entries(security.value?.provenance ?? {}))
+const priceID = ref('')
+const price = ref<PriceObservation | null>(null)
+const priceLoading = ref(false)
+const priceError = ref('')
+
+async function observePrice() {
+  const id = priceID.value.trim()
+  if (!id || priceLoading.value) return
+  priceLoading.value = true
+  price.value = null
+  priceError.value = ''
+  try { price.value = await reference.price(id) }
+  catch (e) { priceError.value = describeReference(e) }
+  finally { priceLoading.value = false }
+}
 
 onMounted(async () => {
   try { exceptions.value = await reference.exceptions() }
@@ -31,7 +46,7 @@ async function lookup() {
 
 <template>
   <h1>Reference data</h1>
-  <p class="muted">Look up the resolved security master and review open data-quality exceptions. Price observation remains unavailable until its read contract is side-effect free.</p>
+  <p class="muted">Look up the resolved security master, observe prices, and review open data-quality exceptions.</p>
   <form @submit.prevent="lookup">
     <label>Instrument ID<input v-model="instrumentID" name="instrument-id" required :disabled="securityLoading" /></label>
     <button type="submit" :disabled="securityLoading">{{ securityLoading ? 'Looking up…' : 'Look up security' }}</button>
@@ -47,6 +62,21 @@ async function lookup() {
     <div><dt>As of</dt><dd :class="security.as_of ? '' : 'state-warn'">{{ security.as_of || 'No source timestamp' }}</dd></div>
     <div><dt>Identifiers</dt><dd><span v-for="(value, key) in security.identifiers" :key="key"><template v-if="value"><strong>{{ key.toUpperCase() }}</strong> {{ value }}<br /></template></span></dd></div>
     <div><dt>Field provenance</dt><dd><span v-for="([field, vendor]) in provenance" :key="field"><strong>{{ field }}</strong> {{ vendor }}<br /></span><template v-if="provenance.length === 0">Unstated</template></dd></div>
+  </dl>
+
+  <h2>Price observation</h2>
+  <p class="muted">Observation does not record or resolve exceptions. The oversight queue is maintained independently.</p>
+  <form data-testid="price-form" @submit.prevent="observePrice">
+    <label>Price instrument ID<input v-model="priceID" name="price-instrument-id" required :disabled="priceLoading" /></label>
+    <button type="submit" :disabled="priceLoading">{{ priceLoading ? 'Loading price…' : 'Observe price' }}</button>
+  </form>
+  <p v-if="priceError" class="error" role="alert">{{ priceError }}</p>
+  <dl v-else-if="price" class="event-detail">
+    <div><dt>Instrument</dt><dd>{{ price.instrument_id }}</dd></div>
+    <div><dt>Observed at</dt><dd>{{ price.observed_at }}</dd></div>
+    <div><dt>Consensus price</dt><dd>{{ price.has_price ? price.chosen : 'No price available' }}</dd></div>
+    <div><dt>Stale candidates excluded</dt><dd>{{ price.stale_candidates }}</dd></div>
+    <div><dt>Observed exceptions</dt><dd>{{ price.exceptions }} — persistence and review status are not established by this observation.</dd></div>
   </dl>
 
   <h2>Open data exceptions</h2>
