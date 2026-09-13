@@ -19,6 +19,9 @@ import RedeemView from '../views/RedeemView.vue'
 import VenuesView from '../views/VenuesView.vue'
 import InvitationsView from '../views/InvitationsView.vue'
 import PreflightView from '../views/PreflightView.vue'
+import BrokerAccountsView from '../views/BrokerAccountsView.vue'
+import BrokerAccountView from '../views/BrokerAccountView.vue'
+import CustodyBreaksView from '../views/CustodyBreaksView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -67,6 +70,9 @@ export const router = createRouter({
     { path: '/instruments', name: 'instruments', component: InstrumentsView },
     { path: '/invitations', name: 'invitations', component: InvitationsView },
     { path: '/preflight', name: 'preflight', component: PreflightView },
+    { path: '/broker-accounts', name: 'broker-accounts', component: BrokerAccountsView },
+    { path: '/broker-accounts/:id', name: 'broker-account', component: BrokerAccountView },
+    { path: '/custody-breaks', name: 'custody-breaks', component: CustodyBreaksView },
     { path: '/:pathMatch(.*)*', name: 'not-found', component: NotFoundView },
   ],
 })
