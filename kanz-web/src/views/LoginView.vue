@@ -21,8 +21,8 @@ async function submit() {
     // `next` comes from the router guard, never from the server. It is checked
     // for a leading slash so a crafted link cannot turn a successful sign-in
     // into a redirect to another origin.
-    const next = typeof route.query.next === 'string' ? route.query.next : '/venues'
-    await router.push(next.startsWith('/') && !next.startsWith('//') ? next : '/venues')
+    const next = typeof route.query.next === 'string' ? route.query.next : '/overview'
+    await router.push(next.startsWith('/') && !next.startsWith('//') ? next : '/overview')
   } catch (e) {
     if (e instanceof ApiError && e.status === 429) {
       // 429 IS NOT 401, AND SAYING SO MATTERS. This caller may well be holding

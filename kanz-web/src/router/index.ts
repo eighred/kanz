@@ -1,3 +1,6 @@
+import OverviewView from '../views/OverviewView.vue'
+import AuditView from '../views/AuditView.vue'
+import NotFoundView from '../views/NotFoundView.vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import { useSession } from '../stores/session'
 import LoginView from '../views/LoginView.vue'
@@ -20,7 +23,9 @@ import PreflightView from '../views/PreflightView.vue'
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', redirect: '/venues' },
+    { path: '/', redirect: '/overview' },
+    { path: '/overview', name: 'overview', component: OverviewView },
+    { path: '/audit', name: 'audit', component: AuditView },
     { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
     // PUBLIC BY NECESSITY: whoever opens this holds an invitation and nothing
     // else — requiring a session to accept one would be a loop with no entry.
@@ -62,6 +67,7 @@ export const router = createRouter({
     { path: '/instruments', name: 'instruments', component: InstrumentsView },
     { path: '/invitations', name: 'invitations', component: InvitationsView },
     { path: '/preflight', name: 'preflight', component: PreflightView },
+    { path: '/:pathMatch(.*)*', name: 'not-found', component: NotFoundView },
   ],
 })
 
