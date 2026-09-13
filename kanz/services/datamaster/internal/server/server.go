@@ -224,8 +224,11 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handlePrice arbitrates an instrument's price candidates and files any breaks.
+// handlePrice observes candidates without writing the oversight queue (#1186).
+// The projector owns durable detection. Refreshes and prefetches must never
+// create exceptions, and observed breaks are not evidence of persisted review.
 func (s *Server) handlePrice(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	if !s.callerOwnsThisInstance(w, r) {
 		return
 	}
@@ -236,25 +239,44 @@ func (s *Server) handlePrice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "vendor feed unavailable"})
 		return
 	}
-	a := pricing.Arbitrate(id, cands, nil, 0, s.now())
-	// A break that cannot be recorded must not be reported as recorded: the queue
-	// is the oversight surface a human works, and an exception that vanished on the
-	// way to it is worse than a failed read.
-	if err := s.exceptions.AddAll(r.Context(), a.Exceptions); err != nil {
-		s.logger.Error("exception file failed", "instrument_id", id, "err", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "exception store unavailable"})
-		return
+	observedAt := s.now()
+	a := pricing.Arbitrate(id, cands, nil, 0, observedAt)
+	stale := 0
+	for _, ex := range a.Exceptions {
+		if ex.Kind == pricing.KindStalePrice {
+			stale++
+		}
 	}
 	// The consensus goes out as an exact decimal STRING, never a JSON number: this
 	// is the mark the instrument is valued at, and a regulator or a reconciler must
 	// not have to guess which double we meant.
 	out := map[string]any{
-		"instrument_id": a.InstrumentID,
-		"has_price":     a.HasPrice,
-		"exceptions":    len(a.Exceptions),
+		"instrument_id":    a.InstrumentID,
+		"has_price":        a.HasPrice,
+		"exceptions":       len(a.Exceptions),
+		"observation_only": true,
+		"observed_at":      observedAt.UTC().Format(time.RFC3339Nano),
+		"stale_candidates": stale,
 	}
 	if a.HasPrice {
-		out["chosen"] = dec.Str(a.Chosen)
+		// dec.Str rounds to eight places, including an even-candidate median
+		// between two eight-place quotes. Bound work before determining decimal
+		// precision, then refuse non-terminating or oversized observations.
+		if a.Chosen.Num().BitLen() > 512 || a.Chosen.Denom().BitLen() > 512 {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "price cannot be represented exactly"})
+			return
+		}
+		places, exact := a.Chosen.FloatPrec()
+		if !exact || places > 128 {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "price cannot be represented exactly"})
+			return
+		}
+		chosen := a.Chosen.FloatString(places)
+		if len(chosen) > 256 {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "price cannot be represented exactly"})
+			return
+		}
+		out["chosen"] = chosen
 	}
 	writeJSON(w, http.StatusOK, out)
 }

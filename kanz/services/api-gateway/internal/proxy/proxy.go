@@ -222,6 +222,8 @@ func New(backend Backend, roles Roles) *Handler {
 func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Read, "GET /v1/households/{id}", h.handle(ServiceWealth, false, nil))
 	mux.Handle(authz.Read, "GET /v1/securities/{id}", h.handle(ServiceDataMaster, false, nil))
+	// Observation only (#1186): the projector records breaks independently.
+	// No evaluation command or override authority is implied by Read.
 	mux.Handle(authz.Read, "GET /v1/prices/{id}", h.handle(ServiceDataMaster, false, nil))
 	mux.Handle(authz.Read, "GET /v1/exceptions", h.handle(ServiceDataMaster, false, nil))
 	// The copilot is never anonymous: require the principal at the edge. It ASKS about the

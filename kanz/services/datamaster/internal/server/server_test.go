@@ -196,8 +196,8 @@ func TestPriceAndOverrideFlow(t *testing.T) {
 	s, exceptions := newServer(t)
 	ctx := context.Background()
 
-	// Arbitrate: the ICE outlier breaches tolerance ⇒ an open exception, filed in
-	// the durable store rather than a queue private to this process.
+	// newServer's projector already filed the ICE tolerance break. Observation
+	// reports the price without creating the evidence used by the override.
 	if rec := get(t, s, "/v1/prices/INST1"); rec.Code != http.StatusOK {
 		t.Fatalf("price: want 200 got %d", rec.Code)
 	}
