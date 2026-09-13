@@ -63,6 +63,19 @@ spec:
               app: identity
       ports:
         - { protocol: TCP, port: 8087 }
+    # cloudflared discovers the nearest tunnel edges through DNS SRV records.
+    # Select CoreDNS explicitly so the default-deny policy does not grant access
+    # to any other kube-system workload.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
