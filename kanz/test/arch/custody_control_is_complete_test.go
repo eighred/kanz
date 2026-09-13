@@ -389,11 +389,11 @@ func TestCustodySubjectsAreGrantedInTenancy(t *testing.T) {
 
 	custodySrc := readAllStripped(t, custodyPkgDir)
 	subjects := map[string]string{}
-	for _, m := range regexp.MustCompile(`Subject(Statement|Run)\s*=\s*"([a-z0-9.]+)"`).FindAllStringSubmatch(custodySrc, -1) {
+	for _, m := range regexp.MustCompile(`Subject(Statement|Run|ActionRecorded)\s*=\s*"([a-z0-9._]+)"`).FindAllStringSubmatch(custodySrc, -1) {
 		subjects[m[1]] = m[2]
 	}
-	if len(subjects) != 2 {
-		t.Fatalf("derived %d custody subjects from the package, want 2 (SubjectStatement and SubjectRun)", len(subjects))
+	if len(subjects) != 3 {
+		t.Fatalf("derived %d custody subjects from the package, want 3 (SubjectStatement, SubjectRun and SubjectActionRecorded)", len(subjects))
 	}
 
 	// Both accounting users — the platform one and the per-tenant one — must

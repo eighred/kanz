@@ -271,6 +271,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"GET /v1/custody/breaks":               authz.Fund,
 		"POST /v1/custody/breaks/{id}/assign":  authz.Fund,
 		"POST /v1/custody/breaks/{id}/explain": authz.Fund,
+		"POST /v1/custody/breaks/{id}/actions": authz.Fund,
 
 		// THE AD-HOC CUSTODY COMPARISON (#1025, #967) — "here is the statement in
 		// my hand; what does it say about the book right now".

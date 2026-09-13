@@ -195,7 +195,7 @@ func TestPostgresReconciliationNamesTheExecutionTheCustodianNeverSaw(t *testing.
 	if err := b.Assign("ops-desk", t0); err != nil {
 		t.Fatalf("Assign: %v", err)
 	}
-	if err := store.SaveBreak(ctx, b); err != nil {
+	if err := recordFixtureLifecycle(t, store, ctx, b); err != nil {
 		t.Fatalf("SaveBreak: %v", err)
 	}
 	later := t0.Add(24 * time.Hour)

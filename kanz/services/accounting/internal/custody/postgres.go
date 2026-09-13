@@ -247,7 +247,7 @@ WHERE portfolio_id = $1 AND custodian_id = $2
 func (p *Postgres) OutstandingBreaks(ctx context.Context) ([]Break, error) {
 	const q = `
 SELECT break_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
-       first_seen_at, last_seen_at, status_changed_at
+       first_seen_at, last_seen_at, status_changed_at, revision
 FROM custody_breaks
 WHERE status IN ('open', 'assigned', 'explained')
 ORDER BY break_id`
@@ -263,7 +263,7 @@ ORDER BY break_id`
 func (p *Postgres) LoadBreak(ctx context.Context, breakID string) (Break, error) {
 	const q = `
 SELECT break_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
-       first_seen_at, last_seen_at, status_changed_at
+       first_seen_at, last_seen_at, status_changed_at, revision
 FROM custody_breaks
 WHERE break_id = $1`
 	rows, err := p.pool.Query(ctx, q, breakID)
@@ -279,25 +279,6 @@ WHERE break_id = $1`
 		return Break{}, ErrNoBreak
 	}
 	return out[0], nil
-}
-
-// SaveBreak implements Store. It refuses to create a break that was never
-// detected — an operator may move a break through its lifecycle, but may not
-// invent one, and a lifecycle write that silently inserted would let a typo in a
-// break id manufacture a working item nothing ever found.
-func (p *Postgres) SaveBreak(ctx context.Context, b Break) error {
-	const q = `
-UPDATE custody_breaks
-SET status = $2, assignee = $3, explanation = $4, status_changed_at = $5
-WHERE break_id = $1`
-	tag, err := p.pool.Exec(ctx, q, b.BreakID, b.Status.String(), b.Assignee, b.Explanation, b.StatusChangedAt.UTC())
-	if err != nil {
-		return fmt.Errorf("custody: save break %s: %w", b.BreakID, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNoBreak
-	}
-	return nil
 }
 
 // Subjects implements Store.
@@ -332,7 +313,7 @@ func scanBreaks(rows pgx.Rows) ([]Break, error) {
 			firstSeen, lastSeen, statusChanged time.Time
 		)
 		if err := rows.Scan(&b.BreakID, &kind, &b.Key, &ibor, &custodian, &difference,
-			&status, &b.Assignee, &b.Explanation, &firstSeen, &lastSeen, &statusChanged); err != nil {
+			&status, &b.Assignee, &b.Explanation, &firstSeen, &lastSeen, &statusChanged, &b.Revision); err != nil {
 			return nil, fmt.Errorf("custody: scan break: %w", err)
 		}
 		b.Kind = parseKind(kind)
