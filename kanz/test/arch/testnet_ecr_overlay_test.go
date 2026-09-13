@@ -217,6 +217,8 @@ func TestTokyoWebEdgeKeepsCredentialsInVaultAndExposesNoInboundService(t *testin
 		"k8s-app: kube-dns",
 		"protocol: UDP, port: 53",
 		"protocol: TCP, port: 53",
+		"protocol: UDP, port: 7844",
+		"protocol: TCP, port: 7844",
 		"169.254.0.0/16",
 	} {
 		if !strings.Contains(policies, required) {
