@@ -2,22 +2,16 @@ package dec
 
 import (
 	"math/big"
-	"regexp"
 	"strings"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
-var exactInput = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+|/[1-9][0-9]*)?$`)
-
 // ParseProtoExact bounds work before parsing and refuses any value that the
 // canonical Decimal cannot represent exactly. Missing input is not zero.
 func ParseProtoExact(text string) (*commonpb.Decimal, bool) {
-	if len(text) > 400 || !exactInput.MatchString(text) {
-		return nil, false
-	}
-	r, ok := new(big.Rat).SetString(text)
-	if !ok {
+	r, err := Exact(text).Rat()
+	if err != nil {
 		return nil, false
 	}
 	return ToProtoExact(r)
