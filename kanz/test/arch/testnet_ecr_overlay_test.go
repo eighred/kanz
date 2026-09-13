@@ -213,6 +213,10 @@ func TestTokyoWebEdgeKeepsCredentialsInVaultAndExposesNoInboundService(t *testin
 		"name: allow-web-bff-to-gateway",
 		"name: allow-web-bff-to-identity",
 		"name: allow-gateway-identity-egress",
+		"kubernetes.io/metadata.name: kube-system",
+		"k8s-app: kube-dns",
+		"protocol: UDP, port: 53",
+		"protocol: TCP, port: 53",
 		"169.254.0.0/16",
 	} {
 		if !strings.Contains(policies, required) {
