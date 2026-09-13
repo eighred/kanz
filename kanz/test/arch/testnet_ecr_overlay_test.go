@@ -137,6 +137,22 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	}
 }
 
+func TestRiskEngineCanaryAdmitsOnlyProvenIdleStartupRecompute(t *testing.T) {
+	raw := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "infra", "deploy", "analysis-template.yaml")))
+	for _, required := range []string{
+		`kanz_risk_recompute_total{status="ok"`,
+		`kanz_risk_recompute_total{status!="ok"`,
+		`kanz_risk_recompute_duration_seconds_count{`,
+		`kanz_risk_recompute_inflight{`,
+		`kanz_risk_recompute_queue_depth{`,
+		`or vector(0)`,
+	} {
+		if !strings.Contains(raw, required) {
+			t.Errorf("risk canary idle proof is missing %q", required)
+		}
+	}
+}
+
 func TestTokyoWebEdgeKeepsCredentialsInVaultAndExposesNoInboundService(t *testing.T) {
 	root := moduleRoot(t)
 	manifestPath := filepath.Join(root, "infra", "deploy", "web-bff-deploy.yaml")
@@ -196,6 +212,7 @@ func TestTokyoWebEdgeKeepsCredentialsInVaultAndExposesNoInboundService(t *testin
 		"name: allow-web-bff-egress",
 		"name: allow-web-bff-to-gateway",
 		"name: allow-web-bff-to-identity",
+		"name: allow-gateway-identity-egress",
 		"169.254.0.0/16",
 	} {
 		if !strings.Contains(policies, required) {
@@ -384,7 +401,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 60", "Expected 18 rendered container images", "sha256sum --check --status",
+		"resourceCount -ne 61", "Expected 18 rendered container images", "sha256sum --check --status",
 		"imageTag=$imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",
@@ -398,6 +415,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"update-rollback-started", "rollback_workloads", "update-rollback-complete",
 		"policy_preexisting=0", "networkpolicy allow-gateway-to-oms-query --ignore-not-found=true",
 		"web_bff_preexisting=0", "delete deployment/web-bff --ignore-not-found=true --wait=true",
+		"policy_restored=0", "for attempt in 1 2 3 4 5",
 		"rollback_workloads() { /usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap",
 		"apiVersion:\"v1\",kind:\"List\",items:", "pods_ready=0; for attempt in $(seq 1 120)",
 	} {
