@@ -27,6 +27,19 @@ beforeEach(async () => {
 })
 
 describe('the sign-in guard', () => {
+  it.each(['/overview', '/audit', '/missing-page'])('protects %s from signed-out access', async (path) => {
+    signedOut()
+    await router.push(path)
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.next).toBe(path)
+  })
+
+  it('shows a recovery page for an unknown signed-in route', async () => {
+    signedIn()
+    await router.push('/missing-page')
+    expect(router.currentRoute.value.name).toBe('not-found')
+  })
+
   it('sends a signed-out visitor to /login and remembers where they were going', async () => {
     signedOut()
     await router.push('/venues')
@@ -50,10 +63,10 @@ describe('the sign-in guard', () => {
     expect(me).not.toHaveBeenCalled()
   })
 
-  it('sends / to the venues screen', async () => {
+  it('sends / to the workspace', async () => {
     signedIn()
     await router.push('/')
-    expect(router.currentRoute.value.path).toBe('/venues')
+    expect(router.currentRoute.value.path).toBe('/overview')
   })
 
   // ONE QUESTION PER NAVIGATION, not one per guarded route. resolve() caches,

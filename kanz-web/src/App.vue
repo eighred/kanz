@@ -1,9 +1,18 @@
 <script setup lang="ts">
+import { workspaces } from './navigation'
 import { useRouter } from 'vue-router'
 import { useSession } from './stores/session'
 
 const session = useSession()
 const router = useRouter()
+
+function closeMenu(event: Event) {
+  const menu = (event.target as HTMLElement).closest('details')
+  if (menu) {
+    menu.open = false
+    if (event.type === 'keydown') menu.querySelector('summary')?.focus()
+  }
+}
 
 async function signOut() {
   await session.signOut()
@@ -14,18 +23,14 @@ async function signOut() {
 <template>
   <header v-if="session.signedIn" class="topbar">
     <span class="brand">KANZ</span>
-    <nav>
-      <RouterLink to="/approvals">Approvals</RouterLink>
-      <RouterLink to="/overrides">Overrides</RouterLink>
-      <RouterLink to="/mandate-changes">Mandate changes</RouterLink>
-      <RouterLink to="/preflight">Preflight</RouterLink>
-      <RouterLink to="/invitations">Users</RouterLink>
-      <RouterLink to="/mandate-proposal">Propose mandate</RouterLink>
-      <RouterLink to="/portfolios">Portfolios</RouterLink>
-      <RouterLink to="/estate">Estate</RouterLink>
-      <RouterLink to="/nodes">Nodes</RouterLink>
-      <RouterLink to="/provisions">Provisions</RouterLink>
-      <RouterLink to="/venues">Venues</RouterLink>
+    <nav aria-label="Main navigation">
+      <RouterLink to="/overview">Workspace</RouterLink>
+      <details v-for="group in workspaces" :key="group.title" name="workspace-navigation" class="nav-group" @keydown.esc="closeMenu">
+        <summary>{{ group.title }}</summary>
+        <div class="nav-menu">
+          <RouterLink v-for="page in group.pages" :key="page.to" :to="page.to" @click="closeMenu">{{ page.title }}</RouterLink>
+        </div>
+      </details>
     </nav>
     <!-- WHO YOU ARE ACTING AS, on every screen. The most expensive mistake
          available on a multi-tenant control plane is doing the right thing in
