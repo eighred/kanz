@@ -20,6 +20,9 @@ export function validScreenInput(input: ScreenInput): boolean {
       && [p.quantity, p.market_value].every(s => s === '' || (s.length <= 400 && exact.test(s))))
 }
 const evidenceKeys = new Set(['dimension', 'bucket', 'mode', 'instrument', 'issuer', 'classifier', 'holdings', 'unresolved', 'unresolved_instruments', 'unmarked_holdings', 'unmarked_sample', 'unmarked_reasons'])
+function positiveCount(value: unknown): boolean {
+  return typeof value === 'string' && /^[1-9]\d{0,3}$/.test(value) && BigInt(value) <= 4096n
+}
 export function parseScreenResult(value: unknown, input: ScreenInput): ScreenResult {
   const r = object(value)
   if (r.portfolio_id !== input.portfolio_id || r.mandate_id !== 'esg-exclusion' || r.mandate_version !== '1'
@@ -34,6 +37,17 @@ export function parseScreenResult(value: unknown, input: ScreenInput): ScreenRes
     const evidence = object(v.evidence)
     if (Object.entries(evidence).some(([key, item]) => !evidenceKeys.has(key) || !str(item, 16384))) throw new Error('Invalid evidence')
     const unavailable = evidence.classifier === 'unavailable' || evidence.unresolved !== undefined || evidence.unmarked_holdings !== undefined
+    const dimension = v.rule_id === 'esg-sector-exclusion' ? 'DIMENSION_SECTOR' : 'DIMENSION_ISSUER'
+    if (evidence.unmarked_holdings !== undefined) {
+      if (!positiveCount(evidence.unmarked_holdings) || !evidence.unmarked_sample || !evidence.unmarked_reasons) throw new Error('Invalid missing-value evidence')
+    } else if (evidence.classifier === 'unavailable') {
+      if (evidence.dimension !== dimension || !positiveCount(evidence.holdings)) throw new Error('Invalid classifier evidence')
+    } else if (evidence.unresolved !== undefined) {
+      if (evidence.classifier !== 'present' || evidence.dimension !== dimension || !positiveCount(evidence.holdings)
+        || !positiveCount(evidence.unresolved) || BigInt(String(evidence.unresolved)) > BigInt(String(evidence.holdings)) || !evidence.unresolved_instruments) throw new Error('Invalid unresolved evidence')
+    } else if (!evidence.instrument || (v.rule_id === 'esg-sector-exclusion'
+      ? evidence.dimension !== dimension || evidence.mode !== 'RESTRICTION_MODE_DENY' || !evidence.bucket
+      : !evidence.issuer)) throw new Error('Missing excluded holding evidence')
     return { rule_id: String(v.rule_id), message: v.message, evidence: { ...evidence } as Record<string, string>, unavailable }
   })
   if ((r.status === 'COMPLIANCE_STATUS_PASS') !== (violations.length === 0) || new Set(violations.map(v => v.rule_id)).size !== violations.length) throw new Error('Inconsistent screen result')

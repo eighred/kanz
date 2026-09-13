@@ -13,9 +13,12 @@ it('sends exact strings to the versioned endpoint only', async () => {
 it.each([{ ...result, mandate_version: 1 }, { ...result, portfolio_id: 'other' }, { ...result, evaluated_at: '2025-01-01T00:00:00Z' }, { ...result, status: 'COMPLIANCE_STATUS_BREACH' }, { ...result, violations: null }])('refuses a mismatched or legacy response', value => {
   expect(() => parseScreenResult(value, input)).toThrow()
 })
-it.each([{ classifier: 'unavailable' }, { unmarked_holdings: '1', unmarked_reasons: 'missing_amount' }, { unresolved: '1', unresolved_instruments: 'TEST' }])('retains explicit unavailable data', evidence => {
+it.each([{ classifier: 'unavailable', dimension: 'DIMENSION_SECTOR', holdings: '1' }, { unmarked_holdings: '1', unmarked_sample: 'TEST', unmarked_reasons: 'missing_amount' }, { classifier: 'present', dimension: 'DIMENSION_SECTOR', holdings: '1', unresolved: '1', unresolved_instruments: 'TEST' }])('retains explicit unavailable data', evidence => {
   const value = { ...result, status: 'COMPLIANCE_STATUS_BREACH', violations: [{ rule_id: 'esg-sector-exclusion', rule_type: 'RULE_TYPE_RESTRICTION', severity: 'COMPLIANCE_STATUS_BREACH', message: 'Cannot verify', evidence }] }
   expect(parseScreenResult(value, input).violations[0]?.unavailable).toBe(true)
+})
+it.each([{}, { unmarked_holdings: '0' }, { classifier: 'unavailable', holdings: '0' }])('refuses empty or inconsistent breach evidence', evidence => {
+  expect(() => parseScreenResult({ ...result, status: 'COMPLIANCE_STATUS_BREACH', violations: [{ rule_id: 'esg-sector-exclusion', rule_type: 'RULE_TYPE_RESTRICTION', severity: 'COMPLIANCE_STATUS_BREACH', message: 'No evidence', evidence }] }, input)).toThrow()
 })
 it('requires an explicit policy and time, but preserves missing amounts', () => {
   expect(validScreenInput({ ...input, excluded_sectors: [] })).toBe(false)
