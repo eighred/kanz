@@ -96,6 +96,9 @@ func (a *Agent) Ask(ctx context.Context, p *auth.Principal, question string) (An
 	if p == nil {
 		return Answer{}, ErrUnauthenticated
 	}
+	if err := ValidateQuestion(question); err != nil {
+		return Answer{}, err
+	}
 
 	req := llm.Request{
 		System:   systemPrompt,
