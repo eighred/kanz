@@ -82,15 +82,6 @@ func (m *Memory) Scan(_ context.Context, yield func(*Record) error) error {
 	return nil
 }
 
-func (m *Memory) Head(_ context.Context) (Head, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if n := len(m.records); n > 0 {
-		return Head{Seq: m.records[n-1].Seq, Hash: m.records[n-1].HashV}, nil
-	}
-	return Head{Seq: 0, Hash: chain.Genesis}, nil
-}
-
 func (m *Memory) Ping(context.Context) error { return nil }
 
 var _ Store = (*Memory)(nil)

@@ -41,6 +41,7 @@ type Template struct {
 // Attestation is the integrity statement attached to every report: the result of
 // verifying the AUDIT-01b hash chain over the entire log at generation time.
 type Attestation struct {
+	HeadSeq  int64  `json:"head_seq,string"`
 	State    string `json:"state"`
 	Verified bool   `json:"verified"`
 	Records  int    `json:"records"`
@@ -128,6 +129,11 @@ func generate(ctx context.Context, store audit.Store, tmpl Template, now func() 
 	limit := tmpl.Filter.Limit
 	probe := tmpl.Filter
 	probe.Limit = limit + 1
+	if attest && (probe.ThroughSeq == nil || *probe.ThroughSeq > att.HeadSeq) {
+		// Query can run after new appends. Its rows must still belong to the
+		// prefix just scanned, including when that prefix was empty.
+		probe.ThroughSeq = &att.HeadSeq
+	}
 	records, err := store.Query(ctx, probe)
 	if err != nil {
 		return nil, err
@@ -170,10 +176,7 @@ func generate(ctx context.Context, store audit.Store, tmpl Template, now func() 
 // everything before it, so bounding this read means periodically signed
 // checkpoints, which is a security design and not a query change.
 func Verify(ctx context.Context, store audit.Store) (Attestation, error) {
-	head, err := store.Head(ctx)
-	if err != nil {
-		return Attestation{}, err
-	}
+	head := audit.Head{Hash: chain.Genesis}
 	v := chain.NewVerifier()
 	// The verifier records the FIRST break and tolerates everything after it, so
 	// yield never returns an error and the scan runs to completion. That is on
@@ -182,11 +185,12 @@ func Verify(ctx context.Context, store audit.Store) (Attestation, error) {
 	// exists is the wrong way to fail a tamper check.
 	if err := store.Scan(ctx, func(r *audit.Record) error {
 		_ = v.Push(r)
+		head = audit.Head{Seq: r.Seq, Hash: r.Hash()}
 		return nil
 	}); err != nil {
 		return Attestation{}, err
 	}
-	att := Attestation{State: "verified", Records: v.Count(), Head: head.Hash}
+	att := Attestation{State: "verified", Records: v.Count(), Head: head.Hash, HeadSeq: head.Seq}
 	if idx, verr := v.Result(); verr != nil {
 		att.State = "failed"
 		att.Verified = false
@@ -228,6 +232,7 @@ func (r *Report) RenderCSV() ([]byte, error) {
 		fmt.Fprintln(&buf, "# integrity: not_requested — no chain attestation was requested or performed")
 	} else {
 		fmt.Fprintf(&buf, "# integrity_verified: %t (records=%d head=%s)\n", r.Integrity.Verified, r.Integrity.Records, r.Integrity.Head)
+		fmt.Fprintf(&buf, "# scanned_through_seq: %d (completeness is relative to this scanned prefix)\n", r.Integrity.HeadSeq)
 	}
 	if r.Complete {
 		fmt.Fprintf(&buf, "# complete: true (%d record(s), end of selection)\n", r.Count)
