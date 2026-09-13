@@ -53,6 +53,18 @@ run "cost_and_security_envelope" {
   }
 
   assert {
+    condition = (
+      length(aws_vpc_security_group_egress_rule.cloudflare_tunnel_quic) == 20 &&
+      length(aws_vpc_security_group_egress_rule.cloudflare_tunnel_http2) == 20 &&
+      alltrue([for rule in aws_vpc_security_group_egress_rule.cloudflare_tunnel_quic : rule.ip_protocol == "udp" && rule.from_port == 7844 && rule.to_port == 7844]) &&
+      alltrue([for rule in aws_vpc_security_group_egress_rule.cloudflare_tunnel_http2 : rule.ip_protocol == "tcp" && rule.from_port == 7844 && rule.to_port == 7844]) &&
+      toset([for rule in aws_vpc_security_group_egress_rule.cloudflare_tunnel_quic : rule.cidr_ipv4]) == local.cloudflare_tunnel_edge_ipv4 &&
+      toset([for rule in aws_vpc_security_group_egress_rule.cloudflare_tunnel_http2 : rule.cidr_ipv4]) == local.cloudflare_tunnel_edge_ipv4
+    )
+    error_message = "Cloudflare Tunnel transport must be limited to the published edge /32s on UDP/TCP 7844."
+  }
+
+  assert {
     condition     = aws_kms_key.vault_unseal.enable_key_rotation
     error_message = "Vault auto-unseal must use a rotation-enabled customer-managed KMS key."
   }
