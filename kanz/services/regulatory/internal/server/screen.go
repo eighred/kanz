@@ -41,9 +41,9 @@ import (
 // screeningPosition is one holding, with its numbers as decimal STRINGS.
 //
 // Strings rather than JSON numbers because these are money and quantity, and
-// CLAUDE.md is explicit that neither is ever a float. dec.ParseRat reads them
-// exactly; a JSON number would have gone through float64 on the way in and the
-// screen would then be classifying a value the caller did not send.
+// CLAUDE.md is explicit that neither is ever a float. ParseProtoExact preserves
+// every digit or refuses before classification; rounding could erase a small
+// excluded holding and wrapping could fabricate a large holding's value.
 type screeningPosition struct {
 	InstrumentID string `json:"instrument_id"`
 	Quantity     string `json:"quantity"`
@@ -96,22 +96,22 @@ func (r screeningRequest) book() (*compliance.Book, error) {
 		}
 		pos := compliance.Position{InstrumentID: p.InstrumentID}
 		if p.Quantity != "" {
-			q, err := dec.ParseRat(p.Quantity)
-			if err != nil {
-				return nil, fmt.Errorf("positions[%d].quantity: %q is not a decimal: %w", i, p.Quantity, err)
+			q, ok := dec.ParseProtoExact(p.Quantity)
+			if !ok {
+				return nil, fmt.Errorf("positions[%d].quantity: exact representable decimal required", i)
 			}
-			pos.Quantity = dec.ToProto(q)
+			pos.Quantity = q
 		}
 		if p.MarketValue != "" {
-			mv, err := dec.ParseRat(p.MarketValue)
-			if err != nil {
-				return nil, fmt.Errorf("positions[%d].market_value: %q is not a decimal: %w", i, p.MarketValue, err)
+			mv, ok := dec.ParseProtoExact(p.MarketValue)
+			if !ok {
+				return nil, fmt.Errorf("positions[%d].market_value: exact representable decimal required", i)
 			}
 			ccy := p.Currency
 			if ccy == "" {
 				ccy = r.BaseCurrency
 			}
-			pos.MarketValue = &commonpb.Money{Amount: dec.ToProto(mv), CurrencyCode: ccy}
+			pos.MarketValue = &commonpb.Money{Amount: mv, CurrencyCode: ccy}
 		}
 		b.Positions = append(b.Positions, pos)
 	}
