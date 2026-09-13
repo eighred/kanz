@@ -13,6 +13,7 @@ export const workspaces = [
     { to: '/broker-accounts', title: 'Broker accounts', description: 'Inspect account state, positions, orders, and executions.' },
     { to: '/custody-breaks', title: 'Custody breaks', description: 'Review outstanding book-to-custodian differences.' },
     { to: '/instruments', title: 'Instruments', description: 'Look up supported instrument definitions.' },
+    { to: '/reference-data', title: 'Reference data', description: 'Inspect resolved security records and data-quality exceptions.' },
   ] },
   { title: 'Operations', pages: [
     { to: '/estate', title: 'Estate', description: 'Read cluster and node health.' },
