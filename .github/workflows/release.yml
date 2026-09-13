@@ -172,6 +172,9 @@ jobs:
           npm run build
           test -f dist/index.html || { echo "::error::kanz-web/dist/index.html is missing after build — the BFF image would ship without the SPA"; exit 1; }
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          # Keep release builders on the readiness fix used by kanz-build (#1192).
+          version: v0.37.1
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:

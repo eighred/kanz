@@ -452,6 +452,9 @@ jobs:
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
         with:
+          # #1192: v0.37.0 can give a new client only milliseconds to connect.
+          # v0.37.1 includes docker/buildx#4050's full bounded readiness wait.
+          version: v0.37.1
           driver-opts: image=ghcr.io/eighred/base/buildkit:buildx-stable-1
 
       # WARM THE BASES BEFORE BUILDING, WITH A RETRY (#320).
