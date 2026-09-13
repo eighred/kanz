@@ -1028,23 +1028,11 @@ func TestEveryStatusRendersOntoTheWire(t *testing.T) {
 	}
 }
 
-// A LARGE DIFFERENCE KEEPS ITS MAGNITUDE AND ITS SIGN — it is never wrapped.
-//
-// dec.ToProto is documented to wrap a coefficient that will not fit an int64, via
-// big.Int.Int64(), and a wrapped value is a fabricated number: #86 and #216 are
-// both incidents where one was acted on (compliance admitted an order worth
-// billions against a "tiny" position; a -20%% stress came back POSITIVE). A
-// reconciliation that reported a break as smaller than it is — or, after a sign
-// flip, as pointing the other way — would be a control actively producing the
-// wrong answer, which is worse than one that never ran.
-//
-// dec.ToProtoScaled preserves magnitude by raising the exponent instead, and it
-// refuses only when the exponent itself cannot move (exp >= MaxInt32, which no
-// finite rational reaches). So the property to assert is PRESERVATION, not
-// refusal: this test fails if runToProto is ever switched to ToProto.
+// Large representable values must round-trip exactly; unrepresentable coefficients
+// are refused by TestCustodyExactRenderingAndWireRefusal.
 func TestALargeDifferenceKeepsItsMagnitudeAndSign(t *testing.T) {
 	// $92bn is roughly where ToProto wraps at scale -8; go well past it.
-	huge := dec.Rat("9223372036854.775808e3")
+	huge := dec.Rat("100000000000000000000")
 	msg, err := runToProto(Run{
 		RunID: "r1", Subject: subject(), Outcome: OutcomeBreaks, Tolerance: new(big.Rat), CompletedAt: t0,
 		Breaks: []Break{{BreakID: "b1", Kind: recon.BreakQuantity, Key: "AAPL", IBOR: huge, Custodian: new(big.Rat), Diff: huge}},
@@ -1056,13 +1044,8 @@ func TestALargeDifferenceKeepsItsMagnitudeAndSign(t *testing.T) {
 	if got.Sign() != huge.Sign() {
 		t.Fatalf("difference sign = %d, want %d — the coefficient wrapped", got.Sign(), huge.Sign())
 	}
-	// Magnitude preserved to within the rounding ToProtoScaled is allowed: the
-	// relative error must be tiny, where a wrap would be order-of-magnitude.
-	delta := new(big.Rat).Sub(got, huge)
-	delta.Abs(delta)
-	tolerance := new(big.Rat).Quo(new(big.Rat).Abs(huge), big.NewRat(1_000_000, 1))
-	if delta.Cmp(tolerance) > 0 {
-		t.Fatalf("difference = %s, want ~%s — magnitude was not preserved", got.FloatString(2), huge.FloatString(2))
+	if got.Cmp(huge) != 0 {
+		t.Fatalf("difference = %s, want exactly %s", got.RatString(), huge.RatString())
 	}
 }
 

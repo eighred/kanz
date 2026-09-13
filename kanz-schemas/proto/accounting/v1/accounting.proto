@@ -810,4 +810,13 @@ message CustodyActionRecorded {
   CustodyActionState before = 5;
   CustodyActionState after = 6;
   google.protobuf.Timestamp recorded_at = 7;
+  CustodyActionValues values = 8;
+}
+
+// The exact figures attached to the reviewed revision. Text avoids Decimal's
+// int64 coefficient limit; legacy action evidence has no values message.
+message CustodyActionValues {
+  string ibor = 1;
+  string custodian = 2;
+  string difference = 3;
 }

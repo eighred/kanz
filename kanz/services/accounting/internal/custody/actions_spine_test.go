@@ -90,4 +90,7 @@ func TestCustodyActionDurableFACTReachesRealSpine(t *testing.T) {
 	if env.GetTenantId() != tenant || env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_FACT || env.GetCorrelationId() != e.RequestID || fact.GetActor() != e.Actor || fact.GetBreakId() != id || fact.GetBefore().GetRevision() != 1 || fact.GetAfter().GetRevision() != 2 {
 		t.Fatalf("wrong wire evidence: %v %v", env, &fact)
 	}
+	if fact.GetValues().GetIbor() != "100" || fact.GetValues().GetCustodian() != "90" || fact.GetValues().GetDifference() != "10" {
+		t.Fatalf("reviewed figures missing from durable FACT: %v", &fact)
+	}
 }

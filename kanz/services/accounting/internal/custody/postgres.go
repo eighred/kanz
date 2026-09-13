@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
 )
 
@@ -67,8 +66,8 @@ func (p *Postgres) SaveStatement(ctx context.Context, s Statement) error {
 	}
 	const q = `
 INSERT INTO custody_statements
-    (statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at, transactions, grain)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    (statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at, transactions, grain, values_verified)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
 ON CONFLICT (tenant_id, statement_id) DO UPDATE SET
     custodian_id  = EXCLUDED.custodian_id,
     portfolio_id  = EXCLUDED.portfolio_id,
@@ -77,20 +76,25 @@ ON CONFLICT (tenant_id, statement_id) DO UPDATE SET
     cash          = EXCLUDED.cash,
     received_at   = EXCLUDED.received_at,
     transactions  = EXCLUDED.transactions,
-    grain         = EXCLUDED.grain`
-	_, err = p.pool.Exec(ctx, q,
+    grain         = EXCLUDED.grain, values_verified = true`
+	tx, err := p.exactTransaction(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, q,
 		s.StatementID, s.CustodianID, s.PortfolioID, BusinessDay(s.BusinessDate),
 		positions, cash, s.ReceivedAt.UTC(), transactions, s.Grain.String())
 	if err != nil {
 		return fmt.Errorf("custody: save statement %s: %w", s.StatementID, err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // LatestStatement implements Store.
 func (p *Postgres) LatestStatement(ctx context.Context, subject Subject) (Statement, error) {
 	const q = `
-SELECT statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at, transactions, grain
+SELECT statement_id, custodian_id, portfolio_id, business_date, positions, cash, received_at, transactions, grain, values_verified
 FROM custody_statements
 WHERE portfolio_id = $1 AND custodian_id = $2 AND business_date = $3
 ORDER BY received_at DESC
@@ -100,16 +104,20 @@ LIMIT 1`
 		positions, cash    []byte
 		transactions       []byte
 		grain              string
+		verified           bool
 		businessDate, recv time.Time
 	)
 	err := p.pool.QueryRow(ctx, q, subject.PortfolioID, subject.CustodianID, BusinessDay(subject.BusinessDate)).
 		Scan(&s.StatementID, &s.CustodianID, &s.PortfolioID, &businessDate, &positions, &cash, &recv,
-			&transactions, &grain)
+			&transactions, &grain, &verified)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Statement{}, ErrNoStatement
 	}
 	if err != nil {
 		return Statement{}, fmt.Errorf("custody: latest statement: %w", err)
+	}
+	if !verified {
+		return Statement{}, ErrUnverifiedPrecision
 	}
 	s.BusinessDate = BusinessDay(businessDate)
 	s.ReceivedAt = recv.UTC()
@@ -130,24 +138,33 @@ LIMIT 1`
 // written here — they live in custody_breaks under their own cross-run identity,
 // and UpsertBreaks owns them.
 func (p *Postgres) SaveRun(ctx context.Context, r Run) error {
+	tolerance, err := exactStored(orZeroRat(r.Tolerance))
+	if err != nil {
+		return err
+	}
 	const q = `
 INSERT INTO custody_runs
-    (run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    (run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
 ON CONFLICT (tenant_id, run_id) DO NOTHING`
-	_, err := p.pool.Exec(ctx, q,
+	tx, err := p.exactTransaction(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, q,
 		r.RunID, r.Subject.PortfolioID, r.Subject.CustodianID, BusinessDay(r.Subject.BusinessDate),
-		r.Outcome.String(), r.StatementID, dec.Str(orZeroRat(r.Tolerance)), r.CompletedAt.UTC(), r.FailureReason)
+		r.Outcome.String(), r.StatementID, tolerance, r.CompletedAt.UTC(), r.FailureReason)
 	if err != nil {
 		return fmt.Errorf("custody: save run %s: %w", r.RunID, err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // LatestRun implements Store.
 func (p *Postgres) LatestRun(ctx context.Context, portfolioID, custodianID string) (Run, error) {
 	const q = `
-SELECT run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason
+SELECT run_id, portfolio_id, custodian_id, business_date, outcome, statement_id, tolerance, completed_at, failure_reason, values_verified
 FROM custody_runs
 WHERE portfolio_id = $1 AND custodian_id = $2
 ORDER BY completed_at DESC
@@ -156,10 +173,11 @@ LIMIT 1`
 		r                         Run
 		outcome, tolerance        string
 		businessDate, completedAt time.Time
+		verified                  bool
 	)
 	err := p.pool.QueryRow(ctx, q, portfolioID, custodianID).Scan(
 		&r.RunID, &r.Subject.PortfolioID, &r.Subject.CustodianID, &businessDate,
-		&outcome, &r.StatementID, &tolerance, &completedAt, &r.FailureReason)
+		&outcome, &r.StatementID, &tolerance, &completedAt, &r.FailureReason, &verified)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Run{}, ErrNoRun
 	}
@@ -169,7 +187,13 @@ LIMIT 1`
 	r.Subject.BusinessDate = BusinessDay(businessDate)
 	r.CompletedAt = completedAt.UTC()
 	r.Outcome = parseOutcome(outcome)
-	r.Tolerance = dec.Rat(tolerance)
+	if !verified {
+		return Run{}, ErrUnverifiedPrecision
+	}
+	r.Tolerance, err = parseStored(tolerance)
+	if err != nil {
+		return Run{}, err
+	}
 	return r, nil
 }
 
@@ -181,7 +205,7 @@ LIMIT 1`
 // "still detected" and "resolved because absent", which is a lifecycle state no
 // operator can reason about and no later run repairs.
 func (p *Postgres) UpsertBreaks(ctx context.Context, subject Subject, detected []Break, now time.Time) ([]Break, error) {
-	tx, err := p.pool.Begin(ctx)
+	tx, err := p.exactTransaction(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("custody: begin: %w", err)
 	}
@@ -189,6 +213,18 @@ func (p *Postgres) UpsertBreaks(ctx context.Context, subject Subject, detected [
 
 	ids := make([]string, 0, len(detected))
 	for _, b := range detected {
+		ibor, err := optionalStored(b.IBOR)
+		if err != nil {
+			return nil, err
+		}
+		custodian, err := optionalStored(b.Custodian)
+		if err != nil {
+			return nil, err
+		}
+		difference, err := optionalStored(b.Diff)
+		if err != nil {
+			return nil, err
+		}
 		ids = append(ids, b.BreakID)
 		// THE UPDATE LIST IS DELIBERATELY THE THREE FIGURES AND last_seen_at.
 		// status, assignee, explanation and first_seen_at are the operator's
@@ -202,13 +238,13 @@ func (p *Postgres) UpsertBreaks(ctx context.Context, subject Subject, detected [
 		const q = `
 INSERT INTO custody_breaks
     (break_id, portfolio_id, custodian_id, kind, break_key, ibor, custodian, difference,
-     status, assignee, explanation, first_seen_at, last_seen_at, status_changed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', '', '', $9, $9, $9)
+     status, assignee, explanation, first_seen_at, last_seen_at, status_changed_at, values_verified)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', '', '', $9, $9, $9, true)
 ON CONFLICT (tenant_id, break_id) DO UPDATE SET
     ibor              = EXCLUDED.ibor,
     custodian         = EXCLUDED.custodian,
     difference        = EXCLUDED.difference,
-    last_seen_at      = EXCLUDED.last_seen_at,
+    last_seen_at      = EXCLUDED.last_seen_at, values_verified = true,
     status            = CASE WHEN custody_breaks.status = 'resolved' THEN 'open'  ELSE custody_breaks.status END,
     assignee          = CASE WHEN custody_breaks.status = 'resolved' THEN ''      ELSE custody_breaks.assignee END,
     explanation       = CASE WHEN custody_breaks.status = 'resolved' THEN ''      ELSE custody_breaks.explanation END,
@@ -216,7 +252,7 @@ ON CONFLICT (tenant_id, break_id) DO UPDATE SET
     status_changed_at = CASE WHEN custody_breaks.status = 'resolved' THEN EXCLUDED.status_changed_at ELSE custody_breaks.status_changed_at END`
 		if _, err := tx.Exec(ctx, q,
 			b.BreakID, subject.PortfolioID, subject.CustodianID, b.Kind.String(), b.Key,
-			dec.Str(orZeroRat(b.IBOR)), dec.Str(orZeroRat(b.Custodian)), dec.Str(orZeroRat(b.Diff)),
+			ibor, custodian, difference,
 			now.UTC()); err != nil {
 			return nil, fmt.Errorf("custody: upsert break %s: %w", b.BreakID, err)
 		}
@@ -247,7 +283,7 @@ WHERE portfolio_id = $1 AND custodian_id = $2
 func (p *Postgres) OutstandingBreaks(ctx context.Context) ([]Break, error) {
 	const q = `
 SELECT break_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
-       first_seen_at, last_seen_at, status_changed_at, revision
+       first_seen_at, last_seen_at, status_changed_at, revision, values_verified
 FROM custody_breaks
 WHERE status IN ('open', 'assigned', 'explained')
 ORDER BY break_id`
@@ -263,7 +299,7 @@ ORDER BY break_id`
 func (p *Postgres) LoadBreak(ctx context.Context, breakID string) (Break, error) {
 	const q = `
 SELECT break_id, kind, break_key, ibor, custodian, difference, status, assignee, explanation,
-       first_seen_at, last_seen_at, status_changed_at, revision
+       first_seen_at, last_seen_at, status_changed_at, revision, values_verified
 FROM custody_breaks
 WHERE break_id = $1`
 	rows, err := p.pool.Query(ctx, q, breakID)
@@ -313,12 +349,26 @@ func scanBreaks(rows pgx.Rows) ([]Break, error) {
 			firstSeen, lastSeen, statusChanged time.Time
 		)
 		if err := rows.Scan(&b.BreakID, &kind, &b.Key, &ibor, &custodian, &difference,
-			&status, &b.Assignee, &b.Explanation, &firstSeen, &lastSeen, &statusChanged, &b.Revision); err != nil {
+			&status, &b.Assignee, &b.Explanation, &firstSeen, &lastSeen, &statusChanged, &b.Revision, &b.ValuesVerified); err != nil {
 			return nil, fmt.Errorf("custody: scan break: %w", err)
 		}
 		b.Kind = parseKind(kind)
 		b.Status = parseStatus(status)
-		b.IBOR, b.Custodian, b.Diff = dec.Rat(ibor), dec.Rat(custodian), dec.Rat(difference)
+		if b.ValuesVerified {
+			var err error
+			b.IBOR, err = parseRatText(ibor)
+			if err != nil {
+				return nil, err
+			}
+			b.Custodian, err = parseRatText(custodian)
+			if err != nil {
+				return nil, err
+			}
+			b.Diff, err = parseRatText(difference)
+			if err != nil {
+				return nil, err
+			}
+		}
 		b.FirstSeenAt, b.LastSeenAt, b.StatusChangedAt = firstSeen.UTC(), lastSeen.UTC(), statusChanged.UTC()
 		out = append(out, b)
 	}
@@ -374,7 +424,7 @@ func parseOutcome(name string) Outcome {
 	return OutcomeUnspecified
 }
 
-// ratsToJSON renders a rat map as {key: decimal-text}.
+// ratsToJSON renders a rat map as {key: exact rational text}.
 //
 // TEXT, NEVER A JSON NUMBER. encoding/json renders a number as float64, so a
 // quantity with more precision than a float carries would be silently rounded on
@@ -386,7 +436,11 @@ func ratsToJSON(in map[string]*big.Rat) ([]byte, error) {
 		if v == nil {
 			return nil, fmt.Errorf("nil value for %q", k)
 		}
-		out[k] = dec.Str(v)
+		text, err := exactStored(v)
+		if err != nil {
+			return nil, err
+		}
+		out[k] = text
 	}
 	return json.Marshal(out)
 }
@@ -412,6 +466,11 @@ type storedTransaction struct {
 func transactionsToJSON(in []recon.Transaction) ([]byte, error) {
 	out := make([]storedTransaction, 0, len(in))
 	for _, tx := range in {
+		for _, r := range []*big.Rat{tx.Quantity, tx.Price, tx.Cash} {
+			if r != nil && !boundedRat(r) {
+				return nil, ErrUnverifiedPrecision
+			}
+		}
 		if tx.ExternalRef == "" {
 			return nil, fmt.Errorf("transaction with no external_ref")
 		}
@@ -476,14 +535,14 @@ func ratText(r *big.Rat) string {
 	if r == nil {
 		return ""
 	}
-	return dec.Str(r)
+	return r.RatString()
 }
 
 func parseRatText(text string) (*big.Rat, error) {
 	if text == "" {
 		return nil, nil
 	}
-	return dec.ParseRat(text)
+	return parseStored(text)
 }
 
 func formatTime(t time.Time) string {
@@ -517,7 +576,7 @@ func jsonToRats(raw []byte) (map[string]*big.Rat, error) {
 	}
 	out := make(map[string]*big.Rat, len(text))
 	for k, v := range text {
-		r, err := dec.ParseRat(v)
+		r, err := parseStored(v)
 		if err != nil {
 			return nil, fmt.Errorf("%q: %w", k, err)
 		}

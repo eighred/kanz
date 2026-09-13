@@ -37,6 +37,7 @@ func (s *Server) custodyAction(w http.ResponseWriter, r *http.Request, legacyAct
 		Action           string `json:"action"`
 		Assignee         string `json:"assignee"`
 		Explanation      string `json:"explanation"`
+		ReviewContract   string `json:"review_contract"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	decoder := json.NewDecoder(r.Body)
@@ -56,6 +57,10 @@ func (s *Server) custodyAction(w http.ResponseWriter, r *http.Request, legacyAct
 			return
 		}
 		body.Action = legacyAction
+	}
+	if body.ReviewContract != "" && body.ReviewContract != "exact-v1" {
+		writeJSON(w, 400, map[string]string{"error": "unsupported custody review contract"})
+		return
 	}
 	if body.Assignee != "" && (body.Action != "claim" || body.Assignee != actor) {
 		writeJSON(w, 400, map[string]string{"error": "assignment is an authenticated self-claim"})
@@ -83,6 +88,9 @@ func (s *Server) custodyAction(w http.ResponseWriter, r *http.Request, legacyAct
 		case errors.Is(err, custody.ErrDurableActionStore):
 			status = 503
 			message = "durable custody actions unavailable"
+		case errors.Is(err, custody.ErrUnverifiedPrecision):
+			status = 503
+			message = "exact custody values unavailable; replay source data and reconcile"
 		}
 		writeJSON(w, status, map[string]string{"error": message})
 		return
