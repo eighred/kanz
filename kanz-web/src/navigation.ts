@@ -11,6 +11,7 @@ export const workspaces = [
   ] },
   { title: 'Portfolio and risk', pages: [
     { to: '/households', title: 'Households', description: 'Review exact household valuations, allocation, and model drift.' },
+    { to: '/screening', title: 'ESG screening', description: 'Screen a supplied snapshot against explicit exclusions.' },
     { to: '/copilot', title: 'Copilot investigation', description: 'Ask governed questions and review source citations and grounding.' },
     { to: '/portfolios', title: 'Portfolios', description: 'Open portfolio exposure, risk measures, scenarios, and orders.' },
     { to: '/broker-accounts', title: 'Broker accounts', description: 'Inspect account state, positions, orders, and executions.' },
