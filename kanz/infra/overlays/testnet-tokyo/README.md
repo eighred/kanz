@@ -33,7 +33,7 @@ submits no request or order to any service.
 Do not apply until the namespace, SPIFFE registrations, Vault
 `SecretProviderClass` objects, NATS, Postgres migrations, and Argo Rollouts CRD
 are healthy. The digest lock identifies build commit
-`a8e3d7c1f42302b79485488c435da7386040a2b5`; changing it requires resolving all
+`8e28e37d1780c589fa90b512863394f8ac12a8ce`; changing it requires resolving all
 ten workload/migration images from one successful main build and rerunning the
 overlay architecture guard.
 
