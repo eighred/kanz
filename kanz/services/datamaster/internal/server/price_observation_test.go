@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -78,5 +79,15 @@ func TestPriceObservationExactAndMissing(t *testing.T) {
 				t.Fatalf("observation wrote exceptions: %v %v", open, err)
 			}
 		})
+	}
+}
+
+func TestPriceObservationRefusesUnrepresentableConsensus(t *testing.T) {
+	for _, value := range []*big.Rat{big.NewRat(1, 3), new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 513))} {
+		s := New(&Readiness{}, nil, testTenant, nil, nil, []feed.VendorFeed{feed.SimFeed{Name: "test", Candidates: []pricing.Candidate{{InstrumentID: "X", Source: "test", Price: value, AsOf: now}}}}, WithClock(func() time.Time { return now }))
+		r := get(t, s, "/v1/prices/X")
+		if r.Code != http.StatusBadGateway {
+			t.Fatalf("unrepresentable price returned %d: %s", r.Code, r.Body.String())
+		}
 	}
 }
