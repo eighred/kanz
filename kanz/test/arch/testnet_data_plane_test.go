@@ -231,6 +231,8 @@ func TestTokyoDataPlaneInstallerFailsClosedOnRenderAndRuntimeState(t *testing.T)
 		"data-plane-server-dry-run-namespace-substitute=default", "apply --server-side --dry-run=server", "condition=Ready cluster/kanz-testnet-postgres",
 		"condition=complete job/postgres-provisioner", "condition=complete job/postgres-migrations", "condition=complete job/nats-bootstrap",
 		"redis_sa", "not rolsuper and not rolbypassrls", "CONFIG GET appendfsync", "sync_interval: always",
+		"tenancy_before", "tenancy_after", "cat /etc/nats/tenants.conf", "nats-server -t -c /etc/nats/nats.conf",
+		"nats-server --signal reload", "nats-tenancy-reloaded-after-config-change",
 	} {
 		if !strings.Contains(raw, required) {
 			t.Errorf("Tokyo data-plane installer is missing fail-closed proof %q", required)
