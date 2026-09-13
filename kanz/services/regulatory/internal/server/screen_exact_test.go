@@ -29,6 +29,10 @@ func TestVersionedESGRequiresExplicitPolicyAndTime(t *testing.T) {
 		}
 		input[key] = saved
 	}
+	input["excluded_sectors"] = []string{"   "}
+	if rec := post(t, s, "/v2/screening/esg", input); rec.Code != 400 {
+		t.Fatal("blank policy identifier accepted")
+	}
 }
 
 func TestESGExactInputPreservation(t *testing.T) {

@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -145,6 +146,14 @@ func (s *Server) handleESGScreen(w http.ResponseWriter, r *http.Request) {
 	if len(req.Positions) > 4096 || len(req.ExcludedSectors) > 256 || len(req.ExcludedIssuers) > 256 {
 		badRequest(w, fmt.Errorf("screening input exceeds supported bounds"))
 		return
+	}
+	for _, list := range [][]string{req.ExcludedSectors, req.ExcludedIssuers} {
+		for _, value := range list {
+			if strings.TrimSpace(value) == "" || len(value) > 256 {
+				badRequest(w, fmt.Errorf("exclusion identifiers must be nonempty and at most 256 bytes"))
+				return
+			}
+		}
 	}
 	book, err := req.book()
 	if err != nil {
