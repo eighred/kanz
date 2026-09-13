@@ -1,5 +1,6 @@
 export const workspaces = [
   { title: 'Governance', pages: [
+    { to: '/audit-evidence', title: 'Audit evidence', description: 'Read bounded tenant reports and control evidence windows.' },
     { to: '/preflight', title: 'Preflight', description: 'Review verified admission controls and outstanding prerequisites.' },
     { to: '/invitations', title: 'User invitations', description: 'Invite an authorized person to activate their own account.' },
     { to: '/mandate-proposal', title: 'Propose mandate', description: 'Enter approved portfolio terms for independent review.' },
