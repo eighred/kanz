@@ -50,7 +50,7 @@ func newPool(t *testing.T) *pgxpool.Pool {
 func applySchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS custody_actions, ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))

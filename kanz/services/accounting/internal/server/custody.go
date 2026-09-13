@@ -4,7 +4,7 @@ package server
 // lifecycle #962 added.
 //
 // WHY THIS EXISTS AT ALL, AND WHY SHIPPING WITHOUT IT WOULD HAVE BEEN A DEFECT.
-// custody.Break.Assign/Explain/Resolve are the half of the lifecycle a PERSON
+// custody.Break.Assign/Explain are the half of the lifecycle a PERSON
 // drives; the automatic half (detect ⇒ OPEN, agreement ⇒ RESOLVED) runs on every
 // scheduled run and needs nobody. Without a route, the manual half would be
 // complete, unit-tested, architecturally sound and CALLED BY NOTHING — the "dark
@@ -17,14 +17,12 @@ package server
 // run can establish; Store.UpsertBreaks does it automatically and is the single
 // path into the terminal state. An operator may record what they know about a
 // break (assign it, explain it) and may not invent, erase or close one — which is
-// why SaveBreak refuses to insert and why custody.Break has no Resolve method.
+// why ApplyAction refuses unknown breaks and custody.Break has no Resolve method.
 // See the note in custody/lifecycle.go for why a "resolve if the sides agree"
 // route cannot be made safe without re-running the comparison.
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
@@ -37,8 +35,8 @@ import (
 // on the two operations it calls rather than on the whole store.
 type BreakStore interface {
 	OutstandingBreaks(ctx context.Context) ([]custody.Break, error)
-	LoadBreak(ctx context.Context, breakID string) (custody.Break, error)
-	SaveBreak(ctx context.Context, b custody.Break) error
+	ApplyAction(ctx context.Context, action custody.Action) (custody.ActionEvidence, error)
+	ActionsEnabled() bool
 }
 
 // WithBreakStore mounts the custody break queue. Without it the routes are not
@@ -59,6 +57,7 @@ func (s *Server) custodyRoutes() {
 	s.mux.HandleFunc("GET /v1/custody/breaks", s.handleListBreaks)
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/assign", s.handleAssignBreak)
 	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/explain", s.handleExplainBreak)
+	s.mux.HandleFunc("POST /v1/custody/breaks/{id}/actions", s.handleCustodyAction)
 }
 
 // breakView is one break as an operator sees it. Figures are rendered as exact
@@ -79,11 +78,13 @@ type breakView struct {
 	LastSeenAt      string `json:"last_seen_at"`
 	StatusChangedAt string `json:"status_changed_at"`
 	AgeSeconds      int64  `json:"age_seconds"`
+	Revision        int64  `json:"revision,string"`
 }
 
 func toBreakView(b custody.Break, now time.Time) breakView {
 	return breakView{
 		BreakID:     b.BreakID,
+		Revision:    b.Revision,
 		Kind:        b.Kind.String(),
 		Key:         b.Key,
 		IBOR:        dec.Str(b.IBOR),
@@ -118,93 +119,5 @@ func (s *Server) handleListBreaks(w http.ResponseWriter, r *http.Request) {
 	for _, b := range breaks {
 		out = append(out, toBreakView(b, now))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"breaks": out, "count": len(out)})
-}
-
-type breakTransitionRequest struct {
-	Assignee    string `json:"assignee"`
-	Explanation string `json:"explanation"`
-}
-
-// transition loads a break, applies a lifecycle move, and persists it.
-//
-// THE STORE IS RE-READ RATHER THAN TRUSTED FROM THE REQUEST. An operator's client
-// may be showing a break as it was some minutes ago, and the transitions are
-// state-dependent — Resolve refuses while the difference is still detected. A
-// move applied to a stale copy would be a decision taken against a book that has
-// since moved.
-func (s *Server) transition(w http.ResponseWriter, r *http.Request, apply func(*custody.Break, time.Time) error) {
-	if !s.callerOwnsThisInstance(w, r) {
-		return
-	}
-	id := r.PathValue("id")
-	b, err := s.breaks.LoadBreak(r.Context(), id)
-	if errors.Is(err, custody.ErrNoBreak) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such break"})
-		return
-	}
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if err := apply(&b, time.Now().UTC()); err != nil {
-		// AN ILLEGAL TRANSITION IS A 409, NOT A 400. The request is well-formed
-		// and the caller is entitled to make it; the break is simply not in a
-		// state that admits it — usually because somebody else moved it first, or
-		// because the difference the caller believes is gone is still there. 400
-		// would tell them to fix their request, which is the wrong instruction.
-		status := http.StatusConflict
-		if errors.Is(err, errBadTransitionInput) {
-			status = http.StatusBadRequest
-		}
-		writeJSON(w, status, map[string]string{"error": err.Error()})
-		return
-	}
-	if err := s.breaks.SaveBreak(r.Context(), b); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, toBreakView(b, time.Now().UTC()))
-}
-
-// errBadTransitionInput marks a refusal caused by the REQUEST rather than by the
-// break's state, so the handler can answer 400 instead of 409.
-var errBadTransitionInput = errors.New("accounting: invalid break transition request")
-
-func decodeTransition(w http.ResponseWriter, r *http.Request) (breakTransitionRequest, bool) {
-	var req breakTransitionRequest
-	if r.ContentLength == 0 {
-		return req, true
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return req, false
-	}
-	return req, true
-}
-
-func (s *Server) handleAssignBreak(w http.ResponseWriter, r *http.Request) {
-	req, ok := decodeTransition(w, r)
-	if !ok {
-		return
-	}
-	s.transition(w, r, func(b *custody.Break, now time.Time) error {
-		if req.Assignee == "" {
-			return errBadTransitionInput
-		}
-		return b.Assign(req.Assignee, now)
-	})
-}
-
-func (s *Server) handleExplainBreak(w http.ResponseWriter, r *http.Request) {
-	req, ok := decodeTransition(w, r)
-	if !ok {
-		return
-	}
-	s.transition(w, r, func(b *custody.Break, now time.Time) error {
-		if req.Explanation == "" {
-			return errBadTransitionInput
-		}
-		return b.Explain(req.Explanation, now)
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"breaks": out, "count": len(out), "actions_enabled": s.breaks.ActionsEnabled()})
 }

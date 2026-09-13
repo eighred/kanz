@@ -367,6 +367,10 @@ func (h *Handler) Routes(mux *authz.Mux) {
 			h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/explain",
 			h.handle(ServiceAccounting, true, nil))
+		// The browser uses this audited command route; old backends refuse it
+		// instead of accepting an explanation without attribution (#1188).
+		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/actions",
+			h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/reconcile",
 			h.handle(ServiceAccounting, true, nil))
 	}

@@ -68,9 +68,10 @@ type Store interface {
 	// LoadBreak returns one break by id, or ErrNoBreak.
 	LoadBreak(ctx context.Context, breakID string) (Break, error)
 
-	// SaveBreak persists an operator's transition. It must not create a break
-	// that was never detected.
-	SaveBreak(ctx context.Context, b Break) error
+	// ApplyAction atomically binds a decision to its actor, revision, retry key
+	// and durable evidence. Only reconciliation may create or resolve a break.
+	ApplyAction(ctx context.Context, a Action) (ActionEvidence, error)
+	ActionsEnabled() bool
 
 	// Subjects returns the (portfolio, custodian) pairs the store has ever seen a
 	// statement for. It is the scheduler's fallback work list when the deployment
@@ -201,6 +202,7 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 			// that resets an assignment on every daily run.
 			prior.IBOR, prior.Custodian, prior.Diff = d.IBOR, d.Custodian, d.Diff
 			prior.LastSeenAt = now
+			prior.Revision++
 			m.breaks[d.BreakID] = prior
 			continue
 		}
@@ -211,6 +213,10 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 		fresh := d
 		fresh.FirstSeenAt, fresh.LastSeenAt, fresh.StatusChangedAt = now, now, now
 		fresh.Status = BreakOpen
+		fresh.Revision = 1
+		if prior, ok := m.breaks[d.BreakID]; ok {
+			fresh.Revision = prior.Revision + 1
+		}
 		fresh.Assignee, fresh.Explanation = "", ""
 		m.breaks[d.BreakID] = fresh
 	}
@@ -230,6 +236,7 @@ func (m *MemoryStore) UpsertBreaks(_ context.Context, subject Subject, detected 
 			continue
 		}
 		b.Status = BreakResolved
+		b.Revision++
 		b.StatusChangedAt = now
 		m.breaks[id] = b
 	}
@@ -270,17 +277,6 @@ func (m *MemoryStore) LoadBreak(_ context.Context, breakID string) (Break, error
 		return Break{}, ErrNoBreak
 	}
 	return b, nil
-}
-
-// SaveBreak implements Store.
-func (m *MemoryStore) SaveBreak(_ context.Context, b Break) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.breaks[b.BreakID]; !ok {
-		return ErrNoBreak
-	}
-	m.breaks[b.BreakID] = b
-	return nil
 }
 
 // Subjects implements Store.

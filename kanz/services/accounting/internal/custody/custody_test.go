@@ -315,7 +315,7 @@ func TestRedetectionPreservesTheOperatorsWork(t *testing.T) {
 	if err := b.Explain("late settlement, clears T+2", t0.Add(2*time.Hour)); err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
-	if err := store.SaveBreak(ctx, b); err != nil {
+	if err := recordFixtureLifecycle(t, store, ctx, b); err != nil {
 		t.Fatalf("SaveBreak: %v", err)
 	}
 
@@ -386,7 +386,7 @@ func TestThePublishedRunCarriesTheStoredLifecycle(t *testing.T) {
 	if err := b.Explain("late settlement, clears T+2", t0.Add(2*time.Hour)); err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
-	if err := store.SaveBreak(ctx, b); err != nil {
+	if err := recordFixtureLifecycle(t, store, ctx, b); err != nil {
 		t.Fatalf("SaveBreak: %v", err)
 	}
 
@@ -477,7 +477,7 @@ func TestAReturningBreakDoesNotInheritTheStaleExplanation(t *testing.T) {
 	if err := b.Explain("clears T+2", t0); err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
-	if err := store.SaveBreak(ctx, b); err != nil {
+	if err := recordFixtureLifecycle(t, store, ctx, b); err != nil {
 		t.Fatalf("SaveBreak: %v", err)
 	}
 	// It clears...

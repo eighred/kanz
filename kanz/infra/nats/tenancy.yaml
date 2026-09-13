@@ -842,6 +842,7 @@ data:
                   # locally and invisible, and the staleness alert has no series
                   # to age.
                   "accounting.custody.reconciled",
+                  "accounting.custody.action_recorded",
                   "dlq.accounting.cash.>", "dlq.market.fx.>",
                   "dlq.accounting.custody.statement",
                   "$JS.API.>", "$JS.ACK.>",
@@ -2114,6 +2115,7 @@ data:
                   # platform accounting entry above for why it is published on
                   # every outcome.
                   "accounting.custody.reconciled",
+                  "accounting.custody.action_recorded",
                   "dlq.accounting.cash.>", "dlq.market.fx.>",
                   "dlq.accounting.custody.statement",
                   "$JS.API.>", "$JS.ACK.>",

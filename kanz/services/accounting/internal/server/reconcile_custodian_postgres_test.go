@@ -60,7 +60,7 @@ func newServerPool(t *testing.T) *pgxpool.Pool {
 
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx,
-		`DROP TABLE IF EXISTS ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`,
+		`DROP TABLE IF EXISTS custody_actions, ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`,
 	); err != nil {
 		t.Fatalf("drop: %v", err)
 	}

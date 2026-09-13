@@ -143,27 +143,18 @@ func TestBreakQueueIsAbsentWithoutAStore(t *testing.T) {
 }
 
 func TestAssignAndExplainMoveTheLifecycle(t *testing.T) {
-	store := seededBreakStore(t)
-	s := breakServer(t, store)
-
-	w := do(t, s, "POST", "/v1/custody/breaks/"+breakID()+"/assign", testTenant, `{"assignee":"alice"}`)
+	store, s := durableBreakServer(t)
+	w := do(t, s, "POST", "/v1/custody/breaks/"+breakID()+"/assign", "__system__", `{"request_id":"claim-1","expected_revision":"1","assignee":"alice@kanz"}`)
 	if w.Code != http.StatusOK {
-		t.Fatalf("assign status = %d (body %s)", w.Code, w.Body.String())
+		t.Fatalf("claim: %d %s", w.Code, w.Body.String())
 	}
-	w = do(t, s, "POST", "/v1/custody/breaks/"+breakID()+"/explain", testTenant, `{"explanation":"late settlement, clears T+2"}`)
+	w = do(t, s, "POST", "/v1/custody/breaks/"+breakID()+"/explain", "__system__", `{"request_id":"explain-1","expected_revision":"2","explanation":"late settlement, clears T+2"}`)
 	if w.Code != http.StatusOK {
-		t.Fatalf("explain status = %d (body %s)", w.Code, w.Body.String())
+		t.Fatalf("explain: %d %s", w.Code, w.Body.String())
 	}
-
 	got, err := store.LoadBreak(context.Background(), breakID())
-	if err != nil {
-		t.Fatalf("LoadBreak: %v", err)
-	}
-	if got.Status != custody.BreakExplained {
-		t.Fatalf("status = %s, want explained", got.Status)
-	}
-	if got.Assignee != "alice" || got.Explanation == "" {
-		t.Fatalf("assignee=%q explanation=%q", got.Assignee, got.Explanation)
+	if err != nil || got.Status != custody.BreakExplained || got.Assignee != "alice@kanz" || got.Revision != 3 {
+		t.Fatalf("stored action: %+v %v", got, err)
 	}
 }
 
@@ -171,15 +162,15 @@ func TestAssignAndExplainMoveTheLifecycle(t *testing.T) {
 // silence the whole control abolishes, one level in.
 func TestExplainWithoutAnExplanationIsRefused(t *testing.T) {
 	s := breakServer(t, seededBreakStore(t))
-	w := do(t, s, "POST", "/v1/custody/breaks/"+breakID()+"/explain", testTenant, `{"explanation":""}`)
+	w := do(t, s, "POST", "/v1/custody/breaks/"+breakID()+"/explain", testTenant, `{"request_id":"blank-explain","expected_revision":"1","explanation":""}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
 }
 
-func TestAssignWithoutAnAssigneeIsRefused(t *testing.T) {
+func TestAssignRefusesBlankBodySuppliedAttribution(t *testing.T) {
 	s := breakServer(t, seededBreakStore(t))
-	w := do(t, s, "POST", "/v1/custody/breaks/"+breakID()+"/assign", testTenant, `{"assignee":"  "}`)
+	w := do(t, s, "POST", "/v1/custody/breaks/"+breakID()+"/assign", testTenant, `{"request_id":"blank-assign","expected_revision":"1","assignee":"  "}`)
 	if w.Code == http.StatusOK {
 		t.Fatalf("status = %d, want a refusal for a blank assignee", w.Code)
 	}
@@ -212,8 +203,8 @@ func TestThereIsNoResolveRoute(t *testing.T) {
 // A BREAK NOTHING EVER DETECTED IS A 404, NOT A CREATION. An operator may record
 // what they know about a break and may not invent one.
 func TestATransitionOnAnUnknownBreakIs404(t *testing.T) {
-	s := breakServer(t, seededBreakStore(t))
-	w := do(t, s, "POST", "/v1/custody/breaks/PF1%7CCUST-A%7Cquantity%7CNEVER/assign", testTenant, `{"assignee":"alice"}`)
+	_, s := durableBreakServer(t)
+	w := do(t, s, "POST", "/v1/custody/breaks/PF1%7CCUST-A%7Cquantity%7CNEVER/actions", "__system__", `{"request_id":"unknown-1","expected_revision":"1","action":"claim"}`)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", w.Code)
 	}

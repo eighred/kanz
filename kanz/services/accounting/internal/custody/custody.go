@@ -407,6 +407,7 @@ type Break struct {
 	Status      BreakStatus
 	Assignee    string
 	Explanation string
+	Revision    int64
 
 	// FirstSeenAt is when this break was first detected and is NEVER advanced by
 	// a redetection; LastSeenAt is the completed_at of the most recent run that

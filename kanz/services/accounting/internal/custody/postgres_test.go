@@ -55,7 +55,7 @@ func applyCustodySchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx,
-		`DROP TABLE IF EXISTS custody_statements, custody_runs, custody_breaks, ledger_entries, ledger_snapshots, outbox CASCADE`); err != nil {
+		`DROP TABLE IF EXISTS custody_actions, custody_statements, custody_runs, custody_breaks, ledger_entries, ledger_snapshots, outbox CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(custodyMigrationDir, "*.sql"))
@@ -171,7 +171,7 @@ func TestPostgresRedetectionPreservesTheOperatorsWork(t *testing.T) {
 	if err := b.Explain("late settlement, clears T+2", t0.Add(2*time.Hour)); err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
-	if err := st.SaveBreak(ctx, b); err != nil {
+	if err := recordFixtureLifecycle(t, st, ctx, b); err != nil {
 		t.Fatalf("SaveBreak: %v", err)
 	}
 
@@ -245,7 +245,7 @@ func TestPostgresAReturningBreakDoesNotInheritTheStaleExplanation(t *testing.T) 
 	if err := b.Explain("clears T+2", t0); err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
-	if err := st.SaveBreak(ctx, b); err != nil {
+	if err := recordFixtureLifecycle(t, st, ctx, b); err != nil {
 		t.Fatalf("SaveBreak: %v", err)
 	}
 	// It clears...
@@ -272,13 +272,14 @@ func TestPostgresAReturningBreakDoesNotInheritTheStaleExplanation(t *testing.T) 
 	}
 }
 
-func TestPostgresSaveBreakRefusesToInventOne(t *testing.T) {
+func TestPostgresActionRefusesToInventABreak(t *testing.T) {
 	st, ctx := newCustodyStore(t)
-	err := st.SaveBreak(ctx, Break{
-		BreakID: "PF1|CUST-A|quantity|NEVER-DETECTED", Status: BreakAssigned, StatusChangedAt: t0,
+	_, err := st.ApplyAction(ctx, Action{
+		Tenant: "__system__", Actor: "test-operator", RequestID: "unknown-break", Kind: "claim", ExpectedRevision: 1,
+		BreakID: "PF1|CUST-A|quantity|NEVER-DETECTED",
 	})
 	if err == nil {
-		t.Fatal("SaveBreak created a break nothing ever detected — a typo in an id would manufacture a working item")
+		t.Fatal("action created a break nothing ever detected")
 	}
 }
 

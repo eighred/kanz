@@ -790,3 +790,24 @@ message ReconciliationRun {
   // failure_reason names why a FAILED run could not complete. Empty otherwise.
   string failure_reason = 10;
 }
+
+// CustodyActionState is the lifecycle evidence at one revision. A revision
+// advances for reconciliation observations as well as operator actions.
+message CustodyActionState {
+  BreakStatus status = 1;
+  string assignee = 2;
+  string explanation = 3;
+  int64 revision = 4;
+}
+
+// CustodyActionRecorded is committed atomically with an authenticated operator
+// action. It never establishes that the book and custodian agree.
+message CustodyActionRecorded {
+  string request_id = 1;
+  string break_id = 2;
+  string actor = 3;
+  string action = 4;
+  CustodyActionState before = 5;
+  CustodyActionState after = 6;
+  google.protobuf.Timestamp recorded_at = 7;
+}

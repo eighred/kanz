@@ -64,7 +64,7 @@ func tenantPool(t *testing.T, ctx context.Context, dsn, tenant string) *pgxpool.
 	}
 	t.Cleanup(pool.Close)
 
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS custody_actions, ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join("../../migrations", "*.sql"))
