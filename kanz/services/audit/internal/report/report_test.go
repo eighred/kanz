@@ -2,6 +2,7 @@ package report
 
 import (
 	"context"
+	"encoding/csv"
 	"strings"
 	"testing"
 	"time"
@@ -115,4 +116,30 @@ func ids(rs []*audit.Record) []string {
 		out[i] = r.EventID
 	}
 	return out
+}
+
+func TestSpreadsheetFormulaCellsAreInert(t *testing.T) {
+	for _, cell := range []string{"=HYPERLINK(\"https://invalid.test\")", " +cmd", "-1+1", "@SUM(1)", "\t=1", "\r\n=1", "\ufeff=1"} {
+		rep := &Report{Template: "test", Title: "test", Integrity: Attestation{State: "not_requested"}, Complete: true, Records: []*audit.Record{{EventID: cell, Summary: cell}}}
+		raw, err := rep.RenderCSV()
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(raw), "\n")
+		start := 0
+		for start < len(lines) && strings.HasPrefix(lines[start], "#") {
+			start++
+		}
+		reader := csv.NewReader(strings.NewReader(strings.Join(lines[start:], "\n")))
+		rows, err := reader.ReadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 2 || !strings.HasPrefix(rows[1][1], "'") || !strings.HasPrefix(rows[1][7], "'") {
+			t.Fatalf("active spreadsheet cell: %q", rows)
+		}
+		if strings.Contains(string(raw), "integrity_verified") {
+			t.Fatal("unrequested integrity presented as a boolean result")
+		}
+	}
 }

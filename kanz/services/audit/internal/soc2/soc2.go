@@ -15,6 +15,7 @@ package soc2
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/eighred/kanz/services/audit/internal/audit"
@@ -77,6 +78,7 @@ type ControlEvidence struct {
 
 // EvidenceReport is the SOC 2 evidence bundle for an audit window.
 type EvidenceReport struct {
+	Assessment string            `json:"assessment"`
 	From       time.Time         `json:"from"`
 	To         time.Time         `json:"to"`
 	Controls   []ControlEvidence `json:"controls"`
@@ -122,7 +124,7 @@ func Collect(controls []Control, records []*audit.Record, from, to time.Time) Ev
 		}
 	}
 
-	out := EvidenceReport{From: from, To: to, Satisfied: true, TotalCount: total}
+	out := EvidenceReport{Assessment: "not_assessed", From: from, To: to, Satisfied: true, TotalCount: total}
 	for i, c := range controls {
 		satisfied := counts[i] >= c.MinPerWindow
 		if !satisfied {
@@ -141,12 +143,21 @@ func Collect(controls []Control, records []*audit.Record, from, to time.Time) Ev
 // matrix. This is what a nightly job (or the /v1/soc2/evidence endpoint) calls to
 // produce the running Type II evidence file. An empty/zero `to` means "now".
 func CollectFromStore(ctx context.Context, store audit.Store, tenant string, from, to time.Time) (EvidenceReport, error) {
+	if tenant == "" || from.IsZero() {
+		return EvidenceReport{}, ErrWindow
+	}
 	if to.IsZero() {
 		to = time.Now()
 	}
-	recs, err := store.Query(ctx, audit.Filter{Tenant: tenant, Since: from, Until: to, Limit: 0})
+	if to.Before(from) {
+		return EvidenceReport{}, ErrWindow
+	}
+	recs, err := store.Query(ctx, audit.Filter{Tenant: tenant, Since: from, Until: to, Limit: MaxEvidenceRecords + 1})
 	if err != nil {
 		return EvidenceReport{}, err
+	}
+	if len(recs) > MaxEvidenceRecords {
+		return EvidenceReport{}, ErrTooManyRecords
 	}
 	return Collect(DefaultControls(), recs, from, to), nil
 }
@@ -163,3 +174,8 @@ func inWindow(t, from, to time.Time) bool {
 	}
 	return true
 }
+
+const MaxEvidenceRecords = 10000
+
+var ErrWindow = errors.New("an explicit start and ordered audit window are required")
+var ErrTooManyRecords = errors.New("evidence window exceeds the record bound; narrow the window")
