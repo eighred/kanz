@@ -8,11 +8,8 @@ syntax = "proto3";
 // target allocation for a risk profile; a Proposal is the minimal trade list that
 // moves a household's drifted book back onto its model.
 //
-// # Money is Decimal, weights/probabilities are double
-//
-// Target amounts and account values are money ⇒ common.v1.Decimal (the EVT-14
-// exact-money rule). Model weights, drift, and a goal's probability-of-success
-// are dimensionless derived statistics ⇒ double. Times are Timestamp.
+// Money uses exact Decimal. Version 2 model allocations use bounded exact text.
+// Probability projections remain estimates; legacy double policy is unverified.
 package wealth.v1;
 
 import "google/protobuf/timestamp.proto";
@@ -119,7 +116,7 @@ message ModelPortfolio {
   RiskProfile risk_profile = 3;
 
   // target_weights maps instrument id to its target portfolio weight; the weights
-  // sum to 1. Dimensionless ⇒ double per EVT-14. Required.
+  // sum to 1. Legacy, unverified: new publishers use exact_target_weights.
   map<string, double> target_weights = 4;
 
   // drift_tolerance is the per-instrument weight band this model is allowed to
@@ -152,6 +149,11 @@ message ModelPortfolio {
   // decision or review it records. Required, for the same compaction reason as
   // recorded_by. Retained for audit.
   string reason = 7;
+
+  // Version 2 uses bounded exact decimal or rational text; legacy doubles are unverified.
+  map<string, string> exact_target_weights = 8;
+  string exact_drift_tolerance = 9;
+  uint32 arithmetic_version = 10;
 }
 
 // ProposedTrade is one leg of a rebalancing Proposal — the same shape as
@@ -307,6 +309,6 @@ message ValuedHolding {
 
   // market_value is the position's value in the parent HouseholdValued's
   // currency_code. Exact Decimal on the wire; the analytics edge lands it as
-  // float64 (EVT-14).
+  // exact rational arithmetic and a versioned string projection.
   common.v1.Decimal market_value = 3;
 }

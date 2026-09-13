@@ -8,7 +8,7 @@ package book
 
 import (
 	"context"
-	"errors"
+
 	"sync"
 
 	"github.com/eighred/kanz/internal/wealth"
@@ -36,12 +36,12 @@ func NewMemoryStore() *MemoryStore {
 
 // Put records a household, keyed on its id.
 func (m *MemoryStore) Put(_ context.Context, h wealth.Household) error {
-	if h.HouseholdID == "" {
-		return errors.New("book: cannot store household with empty household_id")
+	if err := h.ValidateValuation(); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.households[h.HouseholdID] = h
+	m.households[h.HouseholdID] = h.Clone()
 	return nil
 }
 
@@ -50,5 +50,5 @@ func (m *MemoryStore) Get(_ context.Context, householdID string) (wealth.Househo
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	h, ok := m.households[householdID]
-	return h, ok, nil
+	return h.Clone(), ok, nil
 }

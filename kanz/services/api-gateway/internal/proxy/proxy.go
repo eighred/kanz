@@ -221,6 +221,7 @@ func New(backend Backend, roles Roles) *Handler {
 // upstream path.
 func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Read, "GET /v1/households/{id}", h.handle(ServiceWealth, false, nil))
+	mux.Handle(authz.Read, "GET /v2/households/{id}", h.handle(ServiceWealth, false, nil))
 	mux.Handle(authz.Read, "GET /v1/securities/{id}", h.handle(ServiceDataMaster, false, nil))
 	// Observation only (#1186): the projector records breaks independently.
 	// No evaluation command or override authority is implied by Read.

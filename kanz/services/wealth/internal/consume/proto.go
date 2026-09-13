@@ -19,19 +19,11 @@ import (
 // wealth.Household as JSON, which is not what a HouseholdValued FACT carries —
 // it was a placeholder for exactly this, and consume.go's own doc says so.
 //
-// # Decimal crosses to float64 here, by design
-//
-// internal/wealth is float64 BY DESIGN (household.go's own doc: money is exact
-// Decimal at the wire, float at the analytics edge — EVT-14). So every
-// common.v1.Decimal below is decoded with dec.FromProtoChecked — NOT FromProto
-// — because this is untrusted wire input: an exponent outside the
-// representable range is not a small number, it is one this platform cannot
-// hold, and coercing it to zero would fold a household holding worth nothing
-// into the book while reporting success. FromProtoChecked's *big.Rat is then
-// converted to float64 via Float64() to land at the analytics-edge shape
-// internal/wealth expects. Do NOT change internal/wealth to big.Rat — that
-// package's float64 stance is deliberate and documented.
+// Exact Decimal values remain exact through aggregation and durable storage.
 func DecodeProto(payload []byte) (wealth.Household, error) {
+	if len(payload) > 8<<20 {
+		return wealth.Household{}, wealth.ErrValuation
+	}
 	var m wealthpb.HouseholdValued
 	if err := proto.Unmarshal(payload, &m); err != nil {
 		return wealth.Household{}, fmt.Errorf("consume: HouseholdValued decode: %w", err)
@@ -40,25 +32,34 @@ func DecodeProto(payload []byte) (wealth.Household, error) {
 	accounts := make([]wealth.Account, 0, len(m.GetAccounts()))
 	for _, va := range m.GetAccounts() {
 		cash, ok := dec.FromProtoChecked(va.GetCash())
-		if !ok {
+		if !ok || va.GetCash() == nil {
 			return wealth.Household{}, fmt.Errorf(
 				"consume: household %s account %s carries a cash balance this platform "+
 					"cannot represent exactly; refusing rather than rounding it",
 				m.GetHouseholdId(), va.GetAccountId())
 		}
-		cashF, _ := cash.Float64()
+		cashF, err := dec.ExactFromRat(cash)
+		if err != nil {
+			return wealth.Household{}, err
+		}
 
 		holdings := make([]wealth.Holding, 0, len(va.GetHoldings()))
 		for _, vh := range va.GetHoldings() {
 			mv, ok := dec.FromProtoChecked(vh.GetMarketValue())
-			if !ok {
+			if !ok || va.GetCash() == nil {
 				return wealth.Household{}, fmt.Errorf(
 					"consume: household %s account %s holding %s carries a market value "+
 						"this platform cannot represent exactly; refusing rather than "+
 						"rounding it",
 					m.GetHouseholdId(), va.GetAccountId(), vh.GetInstrumentId())
 			}
-			mvF, _ := mv.Float64()
+			if vh.GetMarketValue() == nil {
+				return wealth.Household{}, wealth.ErrValuation
+			}
+			mvF, err := dec.ExactFromRat(mv)
+			if err != nil {
+				return wealth.Household{}, err
+			}
 			holdings = append(holdings, wealth.Holding{
 				InstrumentID: vh.GetInstrumentId(),
 				AssetClass:   vh.GetAssetClass(),
@@ -86,11 +87,19 @@ func DecodeProto(payload []byte) (wealth.Household, error) {
 			m.GetHouseholdId(), m.GetRiskProfile())
 	}
 
-	return wealth.Household{
-		HouseholdID: m.GetHouseholdId(),
-		Accounts:    accounts,
-		RiskProfile: profile,
-	}, nil
+	if m.GetAsOf() == nil || m.GetAsOf().CheckValid() != nil {
+		return wealth.Household{}, wealth.ErrValuation
+	}
+	h := wealth.Household{
+		HouseholdID:  m.GetHouseholdId(),
+		Accounts:     accounts,
+		RiskProfile:  profile,
+		CurrencyCode: m.GetCurrencyCode(),
+		AsOf:         m.GetAsOf().AsTime(),
+		RecordedBy:   m.GetRecordedBy(),
+		Reason:       m.GetReason(),
+	}
+	return h, h.ValidateValuation()
 }
 
 // domainProfile maps the wire risk profile onto the domain one. It is an EXPLICIT
@@ -118,18 +127,11 @@ func domainProfile(p wealthpb.RiskProfile) (wealth.RiskProfile, bool) {
 	}
 }
 
-// DecodeModelProto turns a wealth.v1.ModelPortfolio payload into the domain model
-// portfolio the catalogue holds. It is the WEALTH-01d twin of DecodeProto above
-// and lives beside it for the same reason: internal/wealth imports no wealthpb by
-// design (see internal/wealth's package doc on the float-at-the-analytics-edge
-// stance), so the wire→domain crossing happens here and nowhere else.
-//
-// Target weights are already dimensionless double on the wire, so unlike a
-// valuation there is no Decimal crossing and nothing to lose exactly. What CAN be
-// lost is the meaning of the numbers, which is why the shape is validated by
-// wealth.ModelPortfolio.Validate at the registry rather than here — one rule, at
-// the point of admission, shared with cmd/kanz-model's pre-flight check.
+// DecodeModelProto preserves exact policy inputs. Legacy policy must be republished.
 func DecodeModelProto(payload []byte) (wealth.ModelPortfolio, error) {
+	if len(payload) > 2<<20 {
+		return wealth.ModelPortfolio{}, wealth.ErrValuation
+	}
 	var m wealthpb.ModelPortfolio
 	if err := proto.Unmarshal(payload, &m); err != nil {
 		return wealth.ModelPortfolio{}, fmt.Errorf("consume: ModelPortfolio decode: %w", err)
@@ -141,15 +143,15 @@ func DecodeModelProto(payload []byte) (wealth.ModelPortfolio, error) {
 				"than admitting a model no household can be matched to",
 			m.GetModelId(), m.GetRiskProfile())
 	}
-	targets := make(map[string]float64, len(m.GetTargetWeights()))
-	for id, w := range m.GetTargetWeights() {
-		targets[id] = w
+	targets := make(map[string]wealth.Number, len(m.GetExactTargetWeights()))
+	for id, w := range m.GetExactTargetWeights() {
+		targets[id] = wealth.Number(w)
 	}
 	return wealth.ModelPortfolio{
-		ModelID:    m.GetModelId(),
-		Profile:    profile,
-		Targets:    targets,
-		Tolerance:  m.GetDriftTolerance(),
+		ModelID:   m.GetModelId(),
+		Profile:   profile,
+		Targets:   targets,
+		Tolerance: wealth.Number(m.GetExactDriftTolerance()), LegacyPrecision: m.GetArithmeticVersion() != 2 || len(m.GetTargetWeights()) != 0 || m.GetDriftTolerance() != 0,
 		RecordedBy: m.GetRecordedBy(),
 		Reason:     m.GetReason(),
 	}, nil

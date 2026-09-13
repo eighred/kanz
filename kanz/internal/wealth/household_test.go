@@ -1,7 +1,8 @@
 package wealth
 
 import (
-	"math"
+	"errors"
+	"math/big"
 	"testing"
 )
 
@@ -11,88 +12,89 @@ func sampleHousehold() Household {
 		Accounts: []Account{
 			{
 				AccountID: "A1",
-				Cash:      100,
+				Cash:      "100",
 				Holdings: []Holding{
-					{InstrumentID: "VTI", AssetClass: "EQUITY", MarketValue: 600},
-					{InstrumentID: "BND", AssetClass: "FIXED_INCOME", MarketValue: 300},
+					{InstrumentID: "VTI", AssetClass: "EQUITY", MarketValue: "600"},
+					{InstrumentID: "BND", AssetClass: "FIXED_INCOME", MarketValue: "300"},
 				},
 			},
 			{
 				AccountID: "A2",
-				Cash:      0,
+				Cash:      "0",
 				Holdings: []Holding{
-					{InstrumentID: "VTI", AssetClass: "EQUITY", MarketValue: 400},
-					{InstrumentID: "BND", AssetClass: "FIXED_INCOME", MarketValue: 100},
+					{InstrumentID: "VTI", AssetClass: "EQUITY", MarketValue: "400"},
+					{InstrumentID: "BND", AssetClass: "FIXED_INCOME", MarketValue: "100"},
 				},
 			},
 		},
 	}
 }
 
+func mustAggregate(t *testing.T, h Household) VirtualPortfolio {
+	t.Helper()
+	v, err := Aggregate(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
 func TestAggregate_SumsAcrossAccounts(t *testing.T) {
-	vp := Aggregate(sampleHousehold())
-
-	// VTI: 600+400=1000, BND: 300+100=400, cash 100 ⇒ total 1500.
-	if vp.Holdings["VTI"] != 1000 {
-		t.Errorf("VTI aggregate = %v, want 1000", vp.Holdings["VTI"])
-	}
-	if vp.Holdings["BND"] != 400 {
-		t.Errorf("BND aggregate = %v, want 400", vp.Holdings["BND"])
-	}
-	if vp.Cash != 100 {
-		t.Errorf("cash = %v, want 100", vp.Cash)
-	}
-	if vp.TotalValue != 1500 {
-		t.Errorf("total = %v, want 1500", vp.TotalValue)
+	vp := mustAggregate(t, sampleHousehold())
+	if vp.Holdings["VTI"] != "1000" || vp.Holdings["BND"] != "400" || vp.Cash != "100" || vp.TotalValue != "1500" {
+		t.Fatalf("wrong exact aggregate: %+v", vp)
 	}
 }
-
 func TestWeights_ShareOfTotalIncludingCash(t *testing.T) {
-	vp := Aggregate(sampleHousehold())
-	w := vp.Weights()
-	if math.Abs(w["VTI"]-1000.0/1500) > 1e-12 {
-		t.Errorf("VTI weight = %v, want %v", w["VTI"], 1000.0/1500)
+	vp := mustAggregate(t, sampleHousehold())
+	w, err := vp.Weights()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if math.Abs(w["BND"]-400.0/1500) > 1e-12 {
-		t.Errorf("BND weight = %v", w["BND"])
-	}
-	// Invested weights sum to 1 − cash share.
-	sum := w["VTI"] + w["BND"]
-	if math.Abs(sum-(1-100.0/1500)) > 1e-12 {
-		t.Errorf("invested weight sum = %v, want %v", sum, 1-100.0/1500)
+	if w["VTI"] != "2/3" || w["BND"] != "4/15" {
+		t.Fatalf("wrong exact weights: %v", w)
 	}
 }
-
 func TestAssetClassExposure_GroupsAndIncludesCash(t *testing.T) {
-	vp := Aggregate(sampleHousehold())
-	exp := vp.AssetClassExposure()
-	if math.Abs(exp["EQUITY"]-1000.0/1500) > 1e-12 {
-		t.Errorf("EQUITY exposure = %v", exp["EQUITY"])
+	vp := mustAggregate(t, sampleHousehold())
+	exp, err := vp.AssetClassExposure()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if math.Abs(exp["FIXED_INCOME"]-400.0/1500) > 1e-12 {
-		t.Errorf("FIXED_INCOME exposure = %v", exp["FIXED_INCOME"])
+	if exp["EQUITY"] != "2/3" || exp["FIXED_INCOME"] != "4/15" || exp["CASH"] != "1/15" {
+		t.Fatalf("wrong exposure: %v", exp)
 	}
-	if math.Abs(exp["CASH"]-100.0/1500) > 1e-12 {
-		t.Errorf("CASH exposure = %v", exp["CASH"])
-	}
-	var total float64
+	total := new(big.Rat)
 	for _, v := range exp {
-		total += v
+		r, err := v.Rat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		total.Add(total, r)
 	}
-	if math.Abs(total-1) > 1e-12 {
-		t.Errorf("exposure sums to %v, want 1", total)
+	if total.Cmp(big.NewRat(1, 1)) != 0 {
+		t.Fatal(total)
 	}
 }
-
-func TestAggregate_EmptyHouseholdDegradesToZero(t *testing.T) {
-	vp := Aggregate(Household{HouseholdID: "EMPTY"})
-	if vp.TotalValue != 0 {
-		t.Fatalf("empty total = %v, want 0", vp.TotalValue)
+func TestAggregate_ZeroHasUndefinedWeights(t *testing.T) {
+	vp := mustAggregate(t, Household{HouseholdID: "EMPTY"})
+	if vp.TotalValue != "0" {
+		t.Fatal(vp)
 	}
-	if len(vp.Weights()) != 0 {
-		t.Errorf("empty weights = %v, want empty", vp.Weights())
+	if _, err := vp.Weights(); !errors.Is(err, ErrWeights) {
+		t.Fatalf("zero weight result: %v", err)
 	}
-	if len(vp.AssetClassExposure()) != 0 {
-		t.Errorf("empty exposure = %v, want empty", vp.AssetClassExposure())
+	if _, err := vp.AssetClassExposure(); !errors.Is(err, ErrWeights) {
+		t.Fatalf("zero exposure result: %v", err)
+	}
+}
+func TestAggregate_PreservesBeyondFloatAndMissing(t *testing.T) {
+	h := Household{HouseholdID: "exact", Accounts: []Account{{AccountID: "a", Cash: "9007199254740993.000000001", Holdings: []Holding{{InstrumentID: "x", MarketValue: "0.000000002"}}}}}
+	v := mustAggregate(t, h)
+	if v.TotalValue != "9007199254740993.000000003" {
+		t.Fatal(v.TotalValue)
+	}
+	h.Accounts[0].Cash = ""
+	if _, err := Aggregate(h); err == nil {
+		t.Fatal("missing cash became zero")
 	}
 }

@@ -61,13 +61,13 @@ func newTestProducer(t *testing.T, tenant string) (*bus.Producer, *captureClient
 
 func model() *wealthpb.ModelPortfolio {
 	return &wealthpb.ModelPortfolio{
-		ModelId:        "growth-2026",
-		Name:           "Growth",
-		RiskProfile:    wealthpb.RiskProfile_RISK_PROFILE_GROWTH,
-		TargetWeights:  map[string]float64{"BTC-USD": 0.6, "ETH-USD": 0.4},
-		DriftTolerance: 0.05,
-		RecordedBy:     "operator:akif",
-		Reason:         "IC review 2026-09",
+		ModelId:             "growth-2026",
+		Name:                "Growth",
+		RiskProfile:         wealthpb.RiskProfile_RISK_PROFILE_GROWTH,
+		ExactTargetWeights:  map[string]string{"BTC-USD": "0.6", "ETH-USD": "0.4"},
+		ExactDriftTolerance: "0.05", ArithmeticVersion: 2,
+		RecordedBy: "operator:akif",
+		Reason:     "IC review 2026-09",
 	}
 }
 
@@ -189,32 +189,32 @@ func TestLoadModelRefusesAModelTheCatalogueWouldNotAdmit(t *testing.T) {
 	}{
 		{
 			name:    "no drift tolerance",
-			body:    `{"modelId":"m1","riskProfile":"RISK_PROFILE_GROWTH","targetWeights":{"BTC-USD":1.0}}`,
+			body:    `{"arithmeticVersion":2,"modelId":"m1","riskProfile":"RISK_PROFILE_GROWTH","exactTargetWeights":{"BTC-USD":"1.0"}}`,
 			wantErr: "drift_tolerance",
 		},
 		{
 			name:    "tolerance wider than the whole book",
-			body:    `{"modelId":"m1","riskProfile":"RISK_PROFILE_GROWTH","driftTolerance":1.5,"targetWeights":{"BTC-USD":1.0}}`,
+			body:    `{"arithmeticVersion":2,"modelId":"m1","riskProfile":"RISK_PROFILE_GROWTH","exactDriftTolerance":"1.5","exactTargetWeights":{"BTC-USD":"1.0"}}`,
 			wantErr: "drift_tolerance",
 		},
 		{
 			name:    "unspecified risk profile",
-			body:    `{"modelId":"m1","driftTolerance":0.05,"targetWeights":{"BTC-USD":1.0}}`,
+			body:    `{"arithmeticVersion":2,"modelId":"m1","exactDriftTolerance":"0.05","exactTargetWeights":{"BTC-USD":"1.0"}}`,
 			wantErr: "risk_profile",
 		},
 		{
 			name:    "weights do not sum to 1",
-			body:    `{"modelId":"m1","riskProfile":"RISK_PROFILE_GROWTH","driftTolerance":0.05,"targetWeights":{"BTC-USD":0.6,"ETH-USD":0.3}}`,
+			body:    `{"arithmeticVersion":2,"modelId":"m1","riskProfile":"RISK_PROFILE_GROWTH","exactDriftTolerance":"0.05","exactTargetWeights":{"BTC-USD":"0.6","ETH-USD":"0.3"}}`,
 			wantErr: "sum to",
 		},
 		{
 			name:    "no targets at all",
-			body:    `{"modelId":"m1","riskProfile":"RISK_PROFILE_GROWTH","driftTolerance":0.05}`,
+			body:    `{"arithmeticVersion":2,"modelId":"m1","riskProfile":"RISK_PROFILE_GROWTH","exactDriftTolerance":"0.05"}`,
 			wantErr: "target_weights",
 		},
 		{
 			name:    "no model id",
-			body:    `{"riskProfile":"RISK_PROFILE_GROWTH","driftTolerance":0.05,"targetWeights":{"BTC-USD":1.0}}`,
+			body:    `{"arithmeticVersion":2,"riskProfile":"RISK_PROFILE_GROWTH","exactDriftTolerance":"0.05","exactTargetWeights":{"BTC-USD":"1.0"}}`,
 			wantErr: "model_id",
 		},
 	}
@@ -243,7 +243,7 @@ func TestLoadModelRefusesAModelTheCatalogueWouldNotAdmit(t *testing.T) {
 // record of who changed the firm's target allocation and why.
 func TestLoadModelStampsProvenanceOntoThePayload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "model.json")
-	body := `{"modelId":"m1","riskProfile":"RISK_PROFILE_BALANCED","driftTolerance":0.03,"targetWeights":{"BTC-USD":0.5,"ETH-USD":0.5}}`
+	body := `{"arithmeticVersion":2,"modelId":"m1","riskProfile":"RISK_PROFILE_BALANCED","exactDriftTolerance":"0.03","exactTargetWeights":{"BTC-USD":"0.5","ETH-USD":"0.5"}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}

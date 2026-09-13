@@ -1,119 +1,92 @@
 package wealth
 
 import (
-	"math"
+	"errors"
+	"github.com/eighred/kanz/internal/optimization"
 	"testing"
 	"time"
-
-	"github.com/eighred/kanz/internal/optimization"
 )
 
 func modelCatalog() []ModelPortfolio {
 	return []ModelPortfolio{
-		{ModelID: "M-CONS", Profile: ProfileConservative, Targets: map[string]float64{"VTI": 0.30, "BND": 0.70}},
-		{ModelID: "M-BAL", Profile: ProfileBalanced, Targets: map[string]float64{"VTI": 0.60, "BND": 0.40}},
-		{ModelID: "M-AGG", Profile: ProfileAggressive, Targets: map[string]float64{"VTI": 0.90, "BND": 0.10}},
+		{ModelID: "M-CONS", Profile: ProfileConservative, Targets: map[string]Number{"VTI": "0.3", "BND": "0.7"}, Tolerance: "0.05", RecordedBy: "test:advisor", Reason: "test model"},
+		{ModelID: "M-BAL", Profile: ProfileBalanced, Targets: map[string]Number{"VTI": "0.6", "BND": "0.4"}, Tolerance: "0.05", RecordedBy: "test:advisor", Reason: "test model"},
+		{ModelID: "M-AGG", Profile: ProfileAggressive, Targets: map[string]Number{"VTI": "0.9", "BND": "0.1"}, Tolerance: "0.05", RecordedBy: "test:advisor", Reason: "test model"},
 	}
 }
-
 func TestSelectModel(t *testing.T) {
 	m, ok := SelectModel(ProfileBalanced, modelCatalog())
 	if !ok || m.ModelID != "M-BAL" {
-		t.Fatalf("SelectModel(Balanced) = %q,%v", m.ModelID, ok)
+		t.Fatal(m, ok)
 	}
 	if _, ok := SelectModel(ProfileGrowth, modelCatalog()); ok {
-		t.Errorf("expected no model for Growth")
+		t.Fatal("missing model selected")
 	}
 }
-
 func TestComputeDrift(t *testing.T) {
-	// Actual is overweight equity vs the balanced model.
-	actual := map[string]float64{"VTI": 0.75, "BND": 0.25}
-	model := ModelPortfolio{Targets: map[string]float64{"VTI": 0.60, "BND": 0.40}}
-	d := ComputeDrift(actual, model)
-	if math.Abs(d.ByInstrument["VTI"]-0.15) > 1e-12 {
-		t.Errorf("VTI drift = %v, want 0.15", d.ByInstrument["VTI"])
+	d, err := ComputeDrift(map[string]Number{"VTI": "0.75", "BND": "0.25"}, modelCatalog()[1])
+	if err != nil {
+		t.Fatal(err)
 	}
-	if math.Abs(d.ByInstrument["BND"]-(-0.15)) > 1e-12 {
-		t.Errorf("BND drift = %v, want -0.15", d.ByInstrument["BND"])
+	if d.ByInstrument["VTI"] != "0.15" || d.ByInstrument["BND"] != "-0.15" || d.Max != "0.15" || d.Total != "0.3" {
+		t.Fatal(d)
 	}
-	if math.Abs(d.Max-0.15) > 1e-12 {
-		t.Errorf("max drift = %v, want 0.15", d.Max)
-	}
-	if math.Abs(d.Total-0.30) > 1e-12 {
-		t.Errorf("total drift = %v, want 0.30", d.Total)
-	}
-	if !d.Breached(0.10) {
-		t.Errorf("0.15 drift should breach a 0.10 band")
-	}
-	if d.Breached(0.20) {
-		t.Errorf("0.15 drift should not breach a 0.20 band")
+	for _, tc := range []struct {
+		band Number
+		want bool
+	}{{"0.1", true}, {"0.15", false}, {"0.2", false}} {
+		got, err := d.Breached(tc.band)
+		if err != nil || got != tc.want {
+			t.Fatal(tc, got, err)
+		}
 	}
 }
-
 func TestComputeDrift_CoversModelNotHeld(t *testing.T) {
-	// Held only VTI; model wants BND too — BND drifts by its full target.
-	d := ComputeDrift(map[string]float64{"VTI": 1.0}, ModelPortfolio{Targets: map[string]float64{"VTI": 0.6, "BND": 0.4}})
-	if math.Abs(d.ByInstrument["BND"]-(-0.4)) > 1e-12 {
-		t.Errorf("unheld BND drift = %v, want -0.4", d.ByInstrument["BND"])
+	d, err := ComputeDrift(map[string]Number{"VTI": "1"}, modelCatalog()[1])
+	if err != nil || d.ByInstrument["BND"] != "-0.4" {
+		t.Fatal(d, err)
 	}
 }
-
 func TestPropose_RespectsRiskProfile(t *testing.T) {
-	// A balanced household drifted into an aggressive-looking book.
-	h := Household{HouseholdID: "HH1", Accounts: []Account{{
-		AccountID: "A1",
-		Holdings: []Holding{
-			{InstrumentID: "VTI", AssetClass: "EQUITY", MarketValue: 900},
-			{InstrumentID: "BND", AssetClass: "FIXED_INCOME", MarketValue: 100},
-		},
-	}}}
-	vp := Aggregate(h)
-	prices := map[string]float64{"VTI": 100, "BND": 50}
-
-	prop, ok := Propose(ProfileBalanced, modelCatalog(), vp, prices, 0.01, time.Unix(0, 0))
-	if !ok {
-		t.Fatal("Propose returned !ok for a profile with a model")
+	h := Household{HouseholdID: "HH1", Accounts: []Account{{AccountID: "A1", Cash: "0", Holdings: []Holding{{InstrumentID: "VTI", MarketValue: "900"}, {InstrumentID: "BND", MarketValue: "100"}}}}}
+	vp := mustAggregate(t, h)
+	prices := map[string]Number{"VTI": "100", "BND": "50"}
+	p, err := Propose(ProfileBalanced, modelCatalog(), vp, prices, "0.01", time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The proposal targets the BALANCED model — respecting the risk profile.
-	if prop.ModelID != "M-BAL" {
-		t.Errorf("proposal model = %q, want M-BAL", prop.ModelID)
+	if p.ModelID != "M-BAL" || p.Profile != ProfileBalanced || p.Rebalance.Targets["VTI"] != "0.6" || p.Rebalance.Targets["BND"] != "0.4" || len(p.Rebalance.Trades) != 2 {
+		t.Fatal(p)
 	}
-	if prop.Profile != ProfileBalanced {
-		t.Errorf("proposal profile = %v, want Balanced", prop.Profile)
-	}
-	// Rebalance targets must equal the balanced model exactly (no asset outside
-	// the model, no weight off the model) — the "respects the profile" invariant.
-	want := map[string]float64{"VTI": 0.60, "BND": 0.40}
-	for id, w := range want {
-		if math.Abs(prop.Rebalance.Targets[id]-w) > 1e-12 {
-			t.Errorf("target[%s] = %v, want %v", id, prop.Rebalance.Targets[id], w)
+	for _, tr := range p.Rebalance.Trades {
+		if tr.Notional != "300" {
+			t.Fatal(tr)
+		}
+		if tr.InstrumentID == "VTI" && (tr.Side != optimization.Sell || tr.Quantity != "3") {
+			t.Fatal(tr)
+		}
+		if tr.InstrumentID == "BND" && (tr.Side != optimization.Buy || tr.Quantity != "6") {
+			t.Fatal(tr)
 		}
 	}
-	if len(prop.Rebalance.Targets) != len(want) {
-		t.Errorf("targets carry %d instruments, want %d", len(prop.Rebalance.Targets), len(want))
-	}
-	// Drifted 0.90→0.60 equity ⇒ the proposal must SELL VTI / BUY BND.
-	var soldVTI, boughtBND bool
-	for _, tr := range prop.Rebalance.Trades {
-		if tr.InstrumentID == "VTI" && tr.Side == optimization.Sell {
-			soldVTI = true
-		}
-		if tr.InstrumentID == "BND" && tr.Side == optimization.Buy {
-			boughtBND = true
-		}
-	}
-	if !soldVTI || !boughtBND {
-		t.Errorf("expected SELL VTI + BUY BND, got trades %+v", prop.Rebalance.Trades)
-	}
-	if !prop.Drift.Breached(0.10) {
-		t.Errorf("0.30 equity drift should breach a 0.10 band")
+	if _, err := Propose(ProfileBalanced, modelCatalog(), vp, nil, "0.01", time.Unix(0, 0)); err == nil {
+		t.Fatal("missing prices invented quantities")
 	}
 }
-
 func TestPropose_NoModelForProfile(t *testing.T) {
-	vp := Aggregate(sampleHousehold())
-	if _, ok := Propose(ProfileGrowth, modelCatalog(), vp, nil, 0.01, time.Unix(0, 0)); ok {
-		t.Errorf("expected !ok for a profile with no model")
+	_, err := Propose(ProfileGrowth, modelCatalog(), mustAggregate(t, sampleHousehold()), nil, "0.01", time.Unix(0, 0))
+	if !errors.Is(err, ErrNoModelForProfile) {
+		t.Fatal(err)
+	}
+}
+func TestDriftUsesExactBandBoundary(t *testing.T) {
+	m := modelCatalog()[1]
+	d, err := ComputeDrift(map[string]Number{"VTI": "0.650000000000000000001", "BND": "0.349999999999999999999"}, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	breached, err := d.Breached("0.05")
+	if err != nil || !breached {
+		t.Fatalf("rounded boundary: %+v %v", d, err)
 	}
 }

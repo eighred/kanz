@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/eighred/kanz/internal/wealth"
 	"github.com/eighred/kanz/services/wealth/internal/book"
@@ -16,11 +17,11 @@ import (
 func seedProfiled(t *testing.T, store book.Store, profile wealth.RiskProfile) {
 	t.Helper()
 	h := wealth.Household{
-		HouseholdID: "HH-D",
+		HouseholdID: "HH-D", CurrencyCode: "USD", AsOf: time.Unix(1700000000, 0), RecordedBy: "test:advisor", Reason: "test valuation",
 		RiskProfile: profile,
-		Accounts: []wealth.Account{{AccountID: "A1", Holdings: []wealth.Holding{
-			{InstrumentID: "VTI", AssetClass: "EQUITY", MarketValue: 800},
-			{InstrumentID: "BND", AssetClass: "FIXED_INCOME", MarketValue: 200},
+		Accounts: []wealth.Account{{AccountID: "A1", Cash: "0", Holdings: []wealth.Holding{
+			{InstrumentID: "VTI", AssetClass: "EQUITY", MarketValue: "800"},
+			{InstrumentID: "BND", AssetClass: "FIXED_INCOME", MarketValue: "200"},
 		}}},
 	}
 	if err := store.Put(context.Background(), h); err != nil {
@@ -34,8 +35,8 @@ func armedMonitor(t *testing.T) *drift.Monitor {
 	err := r.Put(testTenant, wealth.ModelPortfolio{
 		ModelID:    "balanced-2026",
 		Profile:    wealth.ProfileBalanced,
-		Targets:    map[string]float64{"VTI": 0.6, "BND": 0.4},
-		Tolerance:  0.05,
+		Targets:    map[string]wealth.Number{"VTI": "0.6", "BND": "0.4"},
+		Tolerance:  "0.05",
 		RecordedBy: "operator:akif",
 		Reason:     "IC review",
 	})
@@ -87,7 +88,7 @@ func TestHouseholdViewReportsDriftFromTheModel(t *testing.T) {
 		t.Errorf("drift.model_id = %v — the view does not say WHICH target it was measured against", d["model_id"])
 	}
 	// 800/1000 = 0.80 against a 0.60 target ⇒ +0.20, four times the 0.05 band.
-	if got, _ := d["max"].(float64); got < 0.199 || got > 0.201 {
+	if got, _ := d["max"].(string); got != "0.2" {
 		t.Errorf("drift.max = %v, want 0.20", got)
 	}
 	if d["breached"] != true {

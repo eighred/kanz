@@ -55,6 +55,7 @@ func TestRoutes_NilBackend_503(t *testing.T) {
 		method, path string
 	}{
 		{http.MethodGet, "/v1/households/h1"},
+		{http.MethodGet, "/v2/households/h1"},
 		{http.MethodGet, "/v1/securities/s1"},
 		{http.MethodGet, "/v1/prices/s1"},
 		{http.MethodGet, "/v1/exceptions"},

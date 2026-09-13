@@ -10,8 +10,8 @@ func growth() ModelPortfolio {
 	return ModelPortfolio{
 		ModelID:    "growth-2026",
 		Profile:    ProfileGrowth,
-		Targets:    map[string]float64{"BTC-USD": 0.6, "ETH-USD": 0.4},
-		Tolerance:  0.05,
+		Targets:    map[string]Number{"BTC-USD": "0.6", "ETH-USD": "0.4"},
+		Tolerance:  "0.05",
 		RecordedBy: "operator:akif",
 		Reason:     "IC review",
 	}
@@ -62,7 +62,7 @@ func TestModelResolvesThePublishedModelForAProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Model: %v", err)
 	}
-	if got.ModelID != "growth-2026" || got.Tolerance != 0.05 {
+	if got.ModelID != "growth-2026" || got.Tolerance != "0.05" {
 		t.Errorf("resolved %+v, want the published growth model with its own band", got)
 	}
 	// A profile nobody published a model for stays a miss, even with a catalogue
@@ -80,7 +80,7 @@ func TestModelIsScopedToItsTenant(t *testing.T) {
 	r := NewModelRegistry()
 	acme := growth()
 	other := growth()
-	other.Targets = map[string]float64{"BTC-USD": 1.0}
+	other.Targets = map[string]Number{"BTC-USD": "1.0"}
 	if err := r.Put("acme", acme); err != nil {
 		t.Fatalf("Put acme: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestPutReplacesAModelWithTheSameID(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 	edited := growth()
-	edited.Tolerance = 0.02
+	edited.Tolerance = "0.02"
 	if err := r.Put("acme", edited); err != nil {
 		t.Fatalf("Put again: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestPutReplacesAModelWithTheSameID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Model: %v", err)
 	}
-	if got.Tolerance != 0.02 {
+	if got.Tolerance != "0.02" {
 		t.Errorf("tolerance = %v, want the republished 0.02 — the catalogue kept the superseded model", got.Tolerance)
 	}
 }
@@ -180,10 +180,10 @@ func TestPutRefusesAndRecordsAModelThatWouldProduceWrongDrift(t *testing.T) {
 		mutate  func(*ModelPortfolio)
 		wantErr string
 	}{
-		{"zero tolerance", func(m *ModelPortfolio) { m.Tolerance = 0 }, "drift_tolerance"},
-		{"tolerance above 1", func(m *ModelPortfolio) { m.Tolerance = 1.5 }, "drift_tolerance"},
+		{"zero tolerance", func(m *ModelPortfolio) { m.Tolerance = "0" }, "drift_tolerance"},
+		{"tolerance above 1", func(m *ModelPortfolio) { m.Tolerance = "1.5" }, "drift_tolerance"},
 		{"unspecified profile", func(m *ModelPortfolio) { m.Profile = ProfileUnspecified }, "risk_profile"},
-		{"weights sum to 0.9", func(m *ModelPortfolio) { m.Targets = map[string]float64{"BTC-USD": 0.9} }, "sum to"},
+		{"weights sum to 0.9", func(m *ModelPortfolio) { m.Targets = map[string]Number{"BTC-USD": "0.9"} }, "sum to"},
 		{"no targets", func(m *ModelPortfolio) { m.Targets = nil }, "target_weights"},
 		{"no model id", func(m *ModelPortfolio) { m.ModelID = "" }, "model_id"},
 		{"no recorded_by", func(m *ModelPortfolio) { m.RecordedBy = "" }, "recorded_by"},
@@ -208,7 +208,11 @@ func TestPutRefusesAndRecordsAModelThatWouldProduceWrongDrift(t *testing.T) {
 					"the failing message is redelivered on every boot, so a catalogue that forgets it "+
 					"cannot tell 'this model is unreadable' from 'nobody published one'", got)
 			}
-			if _, err := r.Model("acme", ProfileGrowth); !errors.Is(err, ErrNoModelForProfile) {
+			want := ErrModelRejected
+			if m.Profile != ProfileGrowth {
+				want = ErrNoModelForProfile
+			}
+			if _, err := r.Model("acme", ProfileGrowth); !errors.Is(err, want) {
 				t.Errorf("a refused model still resolved: %v", err)
 			}
 		})
@@ -220,7 +224,7 @@ func TestPutRefusesAndRecordsAModelThatWouldProduceWrongDrift(t *testing.T) {
 func TestPutClearsAPriorRejection(t *testing.T) {
 	r := NewModelRegistry()
 	bad := growth()
-	bad.Tolerance = 0
+	bad.Tolerance = "0"
 	if err := r.Put("acme", bad); err == nil {
 		t.Fatal("the bad model was admitted")
 	}
@@ -237,5 +241,40 @@ func TestPutClearsAPriorRejection(t *testing.T) {
 func TestPutRefusesAnUntenantedModel(t *testing.T) {
 	if err := NewModelRegistry().Put("", growth()); err == nil {
 		t.Fatal("a model with no tenant was admitted to the catalogue")
+	}
+}
+
+func TestRejectedReplacementInvalidatesPreviousModel(t *testing.T) {
+	r := NewModelRegistry()
+	m := growth()
+	if err := r.Put("acme", m); err != nil {
+		t.Fatal(err)
+	}
+	r.Arm()
+	m.Targets["BTC-USD"] = "0.9"
+	got, err := r.Model("acme", ProfileGrowth)
+	if err != nil || got.Targets["BTC-USD"] != "0.6" {
+		t.Fatal("input map alias", got, err)
+	}
+	got.Targets["BTC-USD"] = "0.1"
+	got, err = r.Model("acme", ProfileGrowth)
+	if err != nil || got.Targets["BTC-USD"] != "0.6" {
+		t.Fatal("output map alias", got, err)
+	}
+	m.LegacyPrecision = true
+	if err := r.Put("acme", m); !errors.Is(err, ErrLegacyPrecision) {
+		t.Fatal(err)
+	}
+	if _, err := r.Model("acme", ProfileGrowth); !errors.Is(err, ErrModelRejected) {
+		t.Fatal("superseded model remains active", err)
+	}
+	if r.Count() != 0 {
+		t.Fatal("rejected model counted active")
+	}
+	if err := r.Put("acme", growth()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Model("acme", ProfileGrowth); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -1,138 +1,198 @@
-// Package wealth is the goals-based wealth & advisory layer (WEALTH-01) —
-// household aggregation, goals-based analytics, model portfolios, and rebalancing
-// proposals: Aladdin Wealth atop the institutional engine (ROI #40).
-//
-// # Outside the risk module — the risk engine consumes a virtual portfolio
-//
-// wealth lives at kanz/internal/wealth, OUTSIDE kanz/internal/risk, so the
-// RISK-02 boundary forbids importing the risk impl packages. Householding
-// therefore aggregates accounts into a VIRTUAL PORTFOLIO (an instrument→value
-// book) and exposure vectors that the risk engine consumes through its api/v*
-// surface at the composition root — the same "produce the input, don't reach in"
-// stance optimization and alternatives take. The rebalance proposal (WEALTH-01d)
-// DOES reuse internal/optimization directly (a peer outside risk, no boundary
-// there) — one trade-list engine for both the PM and the advisor workflow.
-//
-// All values are float64 — a household's aggregate market value, weights, and a
-// goal's probability-of-success are derived statistics (the EVT-14 rule; money is
-// exact Decimal at the wire, lands as float at the analytics edge).
+// Package wealth aggregates exact household valuations and model allocations.
+// Probabilistic goal projections are estimates; they do not supply these books.
 package wealth
 
-import "sort"
+import (
+	"errors"
+	"math/big"
+	"sort"
+	"strings"
+	"time"
 
-// Holding is one position in an account, marked to the household's reporting
-// currency. AssetClass groups holdings for the asset-class exposure view.
+	"github.com/eighred/kanz/internal/dec"
+)
+
+type Number = dec.Exact
+
+var ErrValuation = errors.New("wealth: exact valuation unavailable")
+var ErrWeights = errors.New("wealth: weights require positive total value")
+
 type Holding struct {
 	InstrumentID string
 	AssetClass   string
-	MarketValue  float64
+	MarketValue  Number
 }
-
-// Account is an investment account in a household — the leaf householding
-// aggregates over. Cash is the un-invested balance (it carries no instrument but
-// counts toward total value).
 type Account struct {
 	AccountID string
 	Holdings  []Holding
-	Cash      float64
+	Cash      Number
 }
-
-// Household is the set of accounts advice is given at — the unit exposure and
-// risk are aggregated to.
 type Household struct {
-	HouseholdID string
-	Accounts    []Account
-	// RiskProfile is the household's agreed risk tolerance. It is the ONLY input
-	// that selects which ModelPortfolio the household's book is measured against
-	// (SelectModel), so a household that arrives without one has no target
-	// allocation and its drift cannot be computed at all.
-	//
-	// ProfileUnspecified is therefore a THIRD VALUE, not a default: it means the
-	// valuation on the wire asserted no profile, which is a different fact from
-	// "measured, and in band". Callers must branch on it explicitly — see
-	// services/wealth/internal/drift, which counts it under its own metric label
-	// rather than letting an unevaluable household read as a clean one. Before
-	// #1010 this field did not exist and wealth.v1.Household.risk_profile had no
-	// producer anywhere in the estate, so the drift half of this package had no
-	// reachable input and never ran.
-	RiskProfile RiskProfile
+	HouseholdID  string
+	Accounts     []Account
+	RiskProfile  RiskProfile
+	CurrencyCode string
+	AsOf         time.Time
+	RecordedBy   string
+	Reason       string
 }
 
-// VirtualPortfolio is the household's accounts collapsed into one book — the
-// input the risk engine scores as if it were a single portfolio (WEALTH-01b). It
-// carries the per-instrument aggregate market value (the virtual positions), the
-// total value, and the derived weight + asset-class exposure views.
+func (h Household) Clone() Household {
+	h.Accounts = append([]Account(nil), h.Accounts...)
+	for i := range h.Accounts {
+		h.Accounts[i].Holdings = append([]Holding(nil), h.Accounts[i].Holdings...)
+	}
+	return h
+}
+
+func (h Household) ValidateValuation() error {
+	if h.HouseholdID == "" || len(h.HouseholdID) > 256 || strings.TrimSpace(h.CurrencyCode) == "" || len(h.CurrencyCode) > 16 || h.AsOf.IsZero() || strings.TrimSpace(h.RecordedBy) == "" || strings.TrimSpace(h.Reason) == "" {
+		return ErrValuation
+	}
+	_, err := Aggregate(h)
+	return err
+}
+
 type VirtualPortfolio struct {
 	HouseholdID string
-	// Holdings is instrument id → aggregate market value across every account.
-	Holdings map[string]float64
-	// Cash is the household's total un-invested balance.
-	Cash float64
-	// TotalValue is Σ holdings + cash — the denominator for weights.
-	TotalValue float64
-	// assetClass is instrument id → its asset class, for the exposure view.
-	assetClass map[string]string
+	Holdings    map[string]Number
+	Cash        Number
+	TotalValue  Number
+	assetClass  map[string]string
 }
 
-// Aggregate collapses a household's accounts into a virtual portfolio: it sums
-// each instrument's market value across accounts and totals the cash. The result
-// is the single book the risk engine scores for a household-level risk view.
-func Aggregate(h Household) VirtualPortfolio {
-	vp := VirtualPortfolio{
-		HouseholdID: h.HouseholdID,
-		Holdings:    map[string]float64{},
-		assetClass:  map[string]string{},
+// Aggregate never changes its inputs. All arithmetic remains rational, and an
+// absent amount refuses the valuation rather than becoming a measured zero.
+func Aggregate(h Household) (VirtualPortfolio, error) {
+	if len(h.Accounts) > 4096 {
+		return VirtualPortfolio{}, ErrValuation
 	}
-	for _, acct := range h.Accounts {
-		vp.Cash += acct.Cash
-		vp.TotalValue += acct.Cash
-		for _, hold := range acct.Holdings {
-			vp.Holdings[hold.InstrumentID] += hold.MarketValue
-			vp.TotalValue += hold.MarketValue
-			if hold.AssetClass != "" {
-				vp.assetClass[hold.InstrumentID] = hold.AssetClass
+	values := map[string]*big.Rat{}
+	classes := map[string]string{}
+	accounts := map[string]bool{}
+	cash, total := new(big.Rat), new(big.Rat)
+	count := 0
+	for _, account := range h.Accounts {
+		if account.AccountID == "" || len(account.AccountID) > 256 || accounts[account.AccountID] {
+			return VirtualPortfolio{}, ErrValuation
+		}
+		accounts[account.AccountID] = true
+		c, err := account.Cash.Rat()
+		if err != nil {
+			return VirtualPortfolio{}, ErrValuation
+		}
+		cash.Add(cash, c)
+		total.Add(total, c)
+		if !bounded(cash) || !bounded(total) {
+			return VirtualPortfolio{}, ErrValuation
+		}
+		for _, holding := range account.Holdings {
+			count++
+			if count > 100000 || holding.InstrumentID == "" || len(holding.InstrumentID) > 256 {
+				return VirtualPortfolio{}, ErrValuation
+			}
+			v, err := holding.MarketValue.Rat()
+			if err != nil {
+				return VirtualPortfolio{}, ErrValuation
+			}
+			if prior, ok := classes[holding.InstrumentID]; ok && prior != holding.AssetClass {
+				return VirtualPortfolio{}, errors.New("wealth: conflicting asset classification")
+			}
+			classes[holding.InstrumentID] = holding.AssetClass
+			if values[holding.InstrumentID] == nil {
+				values[holding.InstrumentID] = new(big.Rat)
+			}
+			values[holding.InstrumentID].Add(values[holding.InstrumentID], v)
+			total.Add(total, v)
+			if !bounded(values[holding.InstrumentID]) || !bounded(total) {
+				return VirtualPortfolio{}, ErrValuation
 			}
 		}
 	}
-	return vp
+	vp := VirtualPortfolio{HouseholdID: h.HouseholdID, Holdings: map[string]Number{}, assetClass: classes}
+	var err error
+	vp.Cash, err = dec.ExactFromRat(cash)
+	if err != nil {
+		return VirtualPortfolio{}, err
+	}
+	vp.TotalValue, err = dec.ExactFromRat(total)
+	if err != nil {
+		return VirtualPortfolio{}, err
+	}
+	for id, v := range values {
+		vp.Holdings[id], err = dec.ExactFromRat(v)
+		if err != nil {
+			return VirtualPortfolio{}, err
+		}
+	}
+	return vp, nil
 }
 
-// Weights returns each instrument's share of total household value. A zero (or
-// negative) total yields an empty map — weights are undefined, reported empty
-// rather than as NaN/Inf (the degraded-to-zero discipline). Cash is excluded
-// from the weight numerators but is in the denominator, so invested weights sum
-// to (1 − cash share).
-func (vp VirtualPortfolio) Weights() map[string]float64 {
-	out := make(map[string]float64, len(vp.Holdings))
-	if vp.TotalValue <= 0 {
-		return out
+func (vp VirtualPortfolio) Weights() (map[string]Number, error) {
+	total, err := vp.TotalValue.Rat()
+	if err != nil || total.Sign() <= 0 {
+		return nil, ErrWeights
 	}
-	for id, mv := range vp.Holdings {
-		out[id] = mv / vp.TotalValue
+	out := map[string]Number{}
+	for _, id := range vp.Instruments() {
+		value := vp.Holdings[id]
+		r, err := value.Rat()
+		if err != nil {
+			return nil, err
+		}
+		out[id], err = dec.ExactFromRat(new(big.Rat).Quo(r, total))
+		if err != nil {
+			return nil, err
+		}
 	}
-	return out
+	return out, nil
 }
 
-// AssetClassExposure returns each asset class's share of total household value —
-// the household's allocation across equity/fixed-income/etc. Holdings with no
-// asset class are grouped under "" (unclassified); cash is reported under
-// "CASH". A zero total yields an empty map.
-func (vp VirtualPortfolio) AssetClassExposure() map[string]float64 {
-	out := map[string]float64{}
-	if vp.TotalValue <= 0 {
-		return out
+func (vp VirtualPortfolio) AssetClassExposure() (map[string]Number, error) {
+	total, err := vp.TotalValue.Rat()
+	if err != nil || total.Sign() <= 0 {
+		return nil, ErrWeights
 	}
-	for id, mv := range vp.Holdings {
-		out[vp.assetClass[id]] += mv / vp.TotalValue
+	values := map[string]*big.Rat{}
+	for _, id := range vp.Instruments() {
+		value := vp.Holdings[id]
+		r, err := value.Rat()
+		if err != nil {
+			return nil, err
+		}
+		class := vp.assetClass[id]
+		if values[class] == nil {
+			values[class] = new(big.Rat)
+		}
+		values[class].Add(values[class], r)
+		if !bounded(values[class]) {
+			return nil, ErrValuation
+		}
 	}
-	if vp.Cash != 0 {
-		out["CASH"] += vp.Cash / vp.TotalValue
+	cash, err := vp.Cash.Rat()
+	if err != nil {
+		return nil, err
 	}
-	return out
+	if cash.Sign() != 0 {
+		if values["CASH"] == nil {
+			values["CASH"] = new(big.Rat)
+		}
+		values["CASH"].Add(values["CASH"], cash)
+	}
+	out := map[string]Number{}
+	for class, value := range values {
+		out[class], err = dec.ExactFromRat(new(big.Rat).Quo(value, total))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
-// Instruments returns the virtual portfolio's instrument ids in deterministic
-// (sorted) order — the universe a risk recompute / a rebalance iterates over.
+func bounded(r *big.Rat) bool {
+	return r != nil && r.Num().BitLen() <= 512 && r.Denom().BitLen() <= 512
+}
+
 func (vp VirtualPortfolio) Instruments() []string {
 	out := make([]string, 0, len(vp.Holdings))
 	for id := range vp.Holdings {

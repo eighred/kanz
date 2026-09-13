@@ -296,6 +296,7 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		"POST /v1/portfolios/{id}/reconcile": authz.Fund,
 
 		// Reference + wealth reads.
+		"GET /v2/households/{id}":         authz.Read,
 		"GET /v1/households/{id}":         authz.Read,
 		"GET /v1/securities/{id}":         authz.Read,
 		"GET /v1/prices/{id}":             authz.Read,

@@ -38,6 +38,7 @@ package drift
 import (
 	"errors"
 	"log/slog"
+	"math/big"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -82,7 +83,7 @@ const (
 // is silent in exactly the state it was written to detect — which this repository
 // has now shipped twice (#963, #973).
 var outcomes = []Outcome{
-	OutcomeInBand, OutcomeBreached, OutcomeNoProfile,
+	OutcomeInvalidValuation, OutcomeInvalidModel, OutcomeUndefinedWeights, OutcomeInBand, OutcomeBreached, OutcomeNoProfile,
 	OutcomeNoModel, OutcomeCatalogueUnarmed, OutcomeAmbiguousModel,
 }
 
@@ -152,7 +153,7 @@ type Result struct {
 	// absence of a measurement, not a book that matches its model exactly.
 	Evaluated bool
 	ModelID   string
-	Tolerance float64
+	Tolerance wealth.Number
 	Drift     wealth.Drift
 	Breached  bool
 	// Reason is the registry's own error text for an unevaluated household, so an
@@ -195,6 +196,8 @@ func (m *Monitor) Evaluate(h wealth.Household) Result {
 	if err != nil {
 		res.Reason = err.Error()
 		switch {
+		case errors.Is(err, wealth.ErrModelRejected):
+			res.Outcome = OutcomeInvalidModel
 		case errors.Is(err, wealth.ErrModelCatalogueUnarmed):
 			res.Outcome = OutcomeCatalogueUnarmed
 		case errors.Is(err, wealth.ErrModelProfileAmbiguous):
@@ -211,13 +214,35 @@ func (m *Monitor) Evaluate(h wealth.Household) Result {
 		return res
 	}
 
-	vp := wealth.Aggregate(h)
-	d := wealth.ComputeDrift(vp.Weights(), model)
+	vp, err := wealth.Aggregate(h)
+	if err != nil {
+		res.Outcome = OutcomeInvalidValuation
+		res.Reason = "exact valuation unavailable"
+		return res
+	}
+	weights, err := vp.Weights()
+	if err != nil {
+		res.Outcome = OutcomeUndefinedWeights
+		res.Reason = "weights require a positive, representable total"
+		return res
+	}
+	d, err := wealth.ComputeDrift(weights, model)
+	if err != nil {
+		res.Outcome = OutcomeInvalidValuation
+		res.Reason = "exact drift unavailable"
+		return res
+	}
 	res.Evaluated = true
 	res.ModelID = model.ModelID
 	res.Tolerance = model.Tolerance
 	res.Drift = d
-	res.Breached = d.Breached(model.Tolerance)
+	res.Breached, err = d.Breached(model.Tolerance)
+	if err != nil {
+		res.Evaluated = false
+		res.Outcome = OutcomeInvalidModel
+		res.Reason = "exact model band unavailable"
+		return res
+	}
 	if res.Breached {
 		res.Outcome = OutcomeBreached
 	} else {
@@ -269,13 +294,14 @@ func (m *Monitor) Observe(h wealth.Household) {
 // when the drift map is empty. Ties resolve on instrument id so the log line for a
 // given book does not change between evaluations.
 func worstInstrument(d wealth.Drift) string {
-	worst, best := "", -1.0
+	worst, best := "", big.NewRat(-1, 1)
 	for id, dw := range d.ByInstrument {
-		a := dw
-		if a < 0 {
-			a = -a
+		a, err := dw.Rat()
+		if err != nil {
+			continue
 		}
-		if a > best || (a == best && id < worst) {
+		a.Abs(a)
+		if a.Cmp(best) > 0 || (a.Cmp(best) == 0 && id < worst) {
 			worst, best = id, a
 		}
 	}
@@ -288,3 +314,9 @@ func boolGauge(b bool) float64 {
 	}
 	return 0
 }
+
+const (
+	OutcomeInvalidValuation Outcome = "invalid_valuation"
+	OutcomeInvalidModel     Outcome = "invalid_model"
+	OutcomeUndefinedWeights Outcome = "undefined_weights"
+)
