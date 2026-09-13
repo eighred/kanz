@@ -599,7 +599,9 @@ func (h *Handler) handle(svc Service, requirePrincipal bool, rewrite func(string
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
 		}
-		path := r.URL.Path
+		// Forward URL syntax, not decoded identifier data (#1193). The backend
+		// parses this path as a URL; decoded ?, # or / would change its meaning.
+		path := r.URL.EscapedPath()
 		if rewrite != nil {
 			path = rewrite(path)
 		}

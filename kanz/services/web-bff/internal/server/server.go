@@ -439,6 +439,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	out := r.Clone(r.Context())
 	// Strip the /api prefix so /api/v1/ask reaches the gateway as /v1/ask.
 	out.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+	// Keep encoded identifier characters as data at the gateway (#1193).
+	// A RawPath retaining /api no longer matches Path, so net/url discards it.
+	out.URL.RawPath = strings.TrimPrefix(r.URL.EscapedPath(), "/api")
 	// Attach the server-held bearer; never forward the browser's session cookie
 	// or any client-supplied Authorization to the gateway.
 	out.Header.Del("Cookie")
