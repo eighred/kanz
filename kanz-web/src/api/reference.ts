@@ -73,7 +73,7 @@ function parseException(value: unknown): DataException {
 }
 
 export const reference = {
-  price: (id: string) => api.get<unknown>(`/api/v1/prices/${encodeURIComponent(id)}`).then((row) => parsePrice(row, id)),
+  price: (id: string) => api.get<unknown>(`/api/v1/price-observations/${encodeURIComponent(id)}`).then((row) => parsePrice(row, id)),
   security: (id: string) => api.get<unknown>(`/api/v1/securities/${encodeURIComponent(id)}`).then((row) => parseSecurity(row, id)),
   async exceptions(): Promise<DataException[]> {
     const body = await api.get<unknown>('/api/v1/exceptions')

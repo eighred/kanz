@@ -105,6 +105,9 @@ func (s *Server) routes() {
 	}
 	s.mux.HandleFunc("GET /v1/securities/{id}", s.handleSecurity)
 	s.mux.HandleFunc("GET /v1/prices/{id}", s.handlePrice)
+	// A separate route lets new clients fail closed during rolling deployment:
+	// old servers must refuse before entering their side-effecting price GET.
+	s.mux.HandleFunc("GET /v1/price-observations/{id}", s.handlePrice)
 	s.mux.HandleFunc("GET /v1/exceptions", s.handleExceptions)
 	s.mux.HandleFunc("POST /v1/exceptions/{id}/override", s.handleOverride)
 	// The second signature, and the list that makes an unapproved override

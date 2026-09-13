@@ -23,9 +23,9 @@ func TestPriceObservationNeverTouchesExceptionStore(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 16 {
 		wg.Go(func() {
-			for _, id := range []string{"INST1", "UNKNOWN"} {
+			for _, path := range []string{"/v1/prices/INST1", "/v1/prices/UNKNOWN", "/v1/price-observations/INST1", "/v1/price-observations/UNKNOWN"} {
 				r := httptest.NewRecorder()
-				s.ServeHTTP(r, asTenant(http.MethodGet, "/v1/prices/"+id, testTenant))
+				s.ServeHTTP(r, asTenant(http.MethodGet, path, testTenant))
 				if r.Code != http.StatusOK {
 					t.Errorf("read status: %d", r.Code)
 				}

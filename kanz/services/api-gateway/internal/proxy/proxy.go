@@ -225,6 +225,7 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// Observation only (#1186): the projector records breaks independently.
 	// No evaluation command or override authority is implied by Read.
 	mux.Handle(authz.Read, "GET /v1/prices/{id}", h.handle(ServiceDataMaster, false, nil))
+	mux.Handle(authz.Read, "GET /v1/price-observations/{id}", h.handle(ServiceDataMaster, false, nil))
 	mux.Handle(authz.Read, "GET /v1/exceptions", h.handle(ServiceDataMaster, false, nil))
 	// The copilot is never anonymous: require the principal at the edge. It ASKS about the
 	// book, it does not move it — a read (SEC-M2).

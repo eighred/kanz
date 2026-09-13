@@ -11,11 +11,11 @@ func TestPriceObservationHasNoEvaluationCommand(t *testing.T) {
 	mux := testMux()
 	New(backend, Roles{}).Routes(mux)
 	read := httptest.NewRecorder()
-	mux.ServeHTTP(read, authed(httptest.NewRequest(http.MethodGet, "/v1/prices/X", nil), "reader", "tenant"))
+	mux.ServeHTTP(read, authed(httptest.NewRequest(http.MethodGet, "/v1/price-observations/X", nil), "reader", "tenant"))
 	if read.Code != http.StatusOK {
 		t.Fatalf("Read capability cannot observe: %d", read.Code)
 	}
-	for _, path := range []string{"/v1/prices/X", "/v1/prices/X/evaluate"} {
+	for _, path := range []string{"/v1/price-observations/X", "/v1/price-observations/X/evaluate"} {
 		write := httptest.NewRecorder()
 		mux.ServeHTTP(write, authed(httptest.NewRequest(http.MethodPost, path, nil), "reader", "tenant"))
 		if write.Code != http.StatusMethodNotAllowed && write.Code != http.StatusNotFound {
