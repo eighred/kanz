@@ -43,7 +43,7 @@ async function search() {
         <thead><tr><th>Occurred at</th><th>Event</th><th>Type</th><th>Kind</th><th>Source</th><th>Correlation</th></tr></thead>
         <tbody>
           <tr v-for="event in rows" :key="event.event_id">
-            <td>{{ event.occurred_at }}</td><td>{{ event.event_id }}</td><td>{{ event.event_type }}</td>
+            <td>{{ event.occurred_at }}</td><td><RouterLink :to="{ name: 'audit-event', params: { id: event.event_id } }"><code>{{ event.event_id }}</code></RouterLink></td><td>{{ event.event_type }}</td>
             <td>{{ event.kind }}</td><td>{{ event.source }}</td><td>{{ event.correlation_id || '—' }}</td>
           </tr>
           <tr v-if="rows.length === 0"><td colspan="6">No recorded events matched this search.</td></tr>

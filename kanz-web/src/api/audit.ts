@@ -9,6 +9,29 @@ export interface AuditEvent {
   source: string
 }
 
+export interface AuditRecord extends AuditEvent {
+  causation_id: string
+  domain: string
+  event_class: string
+  recorded_at: string
+  schema_ref: string
+  prev_hash: string
+  hash: string
+}
+
+export interface AuditLineage { target: AuditRecord; ancestry: AuditRecord[] }
+
+const eventKeys = ['event_id', 'correlation_id', 'event_type', 'kind', 'occurred_at', 'source'] as const
+const recordKeys = [...eventKeys, 'causation_id', 'domain', 'event_class', 'recorded_at', 'schema_ref', 'prev_hash', 'hash'] as const
+
+function projected<T>(value: unknown, keys: readonly string[], dates: readonly string[]): T {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid audit event.')
+  const row = value as Record<string, unknown>
+  if (keys.some((key) => typeof row[key] !== 'string') || !row.event_id ||
+      dates.some((key) => !Number.isFinite(Date.parse(row[key] as string)))) throw new Error('Invalid audit event.')
+  return Object.fromEntries(keys.map((key) => [key, row[key]])) as T
+}
+
 export const audit = {
   async events(correlation: string, eventType: string): Promise<AuditEvent[]> {
     const query = new URLSearchParams({ limit: '100' })
@@ -21,15 +44,25 @@ export const audit = {
     if (!Array.isArray(rows) || body.count !== rows.length || rows.length > 100) {
       throw new Error('The audit service returned an invalid result. No events are shown.')
     }
-    return rows.map((row: unknown) => {
-      if (!row || typeof row !== 'object') throw new Error('Invalid audit event.')
-      const r = row as Record<string, unknown>
-      const keys = ['event_id', 'correlation_id', 'event_type', 'kind', 'occurred_at', 'source'] as const
-      if (keys.some((key) => typeof r[key] !== 'string') || !r.event_id ||
-          !Number.isFinite(Date.parse(r.occurred_at as string))) throw new Error('Invalid audit event.')
-      // Explicit projection: do not render arbitrary event attributes or payloads.
-      return Object.fromEntries(keys.map((key) => [key, r[key]])) as unknown as AuditEvent
-    })
+    return rows.map((row: unknown) => projected<AuditEvent>(row, eventKeys, ['occurred_at']))
+  },
+  async event(id: string): Promise<AuditRecord> {
+    const record = projected<AuditRecord>(
+      await api.get<unknown>(`/api/v1/audit/events/${encodeURIComponent(id)}`),
+      recordKeys, ['occurred_at', 'recorded_at'],
+    )
+    if (record.event_id !== id) throw new Error('Invalid audit event.')
+    return record
+  },
+  async lineage(id: string): Promise<AuditLineage> {
+    const body = await api.get<{ target: unknown; ancestry: unknown }>(`/api/v1/audit/lineage/${encodeURIComponent(id)}`)
+    const target = projected<AuditRecord>(body?.target, recordKeys, ['occurred_at', 'recorded_at'])
+    if (!Array.isArray(body?.ancestry)) throw new Error('Invalid audit lineage.')
+    const ancestry = body.ancestry.map((row) => projected<AuditRecord>(row, recordKeys, ['occurred_at', 'recorded_at']))
+    if (target.event_id !== id || ancestry.at(-1)?.event_id !== id) throw new Error('Invalid audit lineage.')
+    // The server also returns a recursive correlation tree. The detail page uses
+    // the bounded direct ancestry and does not render arbitrary record payloads.
+    return { target, ancestry }
   },
 }
 
