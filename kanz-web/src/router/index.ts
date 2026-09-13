@@ -1,3 +1,4 @@
+import HouseholdView from '../views/HouseholdView.vue'
 import OverviewView from '../views/OverviewView.vue'
 import AuditView from '../views/AuditView.vue'
 import AuditEventView from '../views/AuditEventView.vue'
@@ -28,6 +29,7 @@ import ReferenceDataView from '../views/ReferenceDataView.vue'
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
+    { path: '/households', name: 'households', component: HouseholdView },
     { path: '/', redirect: '/overview' },
     { path: '/overview', name: 'overview', component: OverviewView },
     { path: '/audit', name: 'audit', component: AuditView },

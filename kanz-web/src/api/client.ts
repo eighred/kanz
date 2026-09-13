@@ -12,7 +12,7 @@
 // working the moment you stop using the dev server.
 
 export class ApiError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly code?: string) {
     super(message)
     this.name = 'ApiError'
   }
@@ -59,13 +59,15 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     // body is NOT surfaced otherwise, because an upstream error page is not a
     // message for a user and may carry internals.
     let message = `request failed (${res.status})`
+    let code: string | undefined
     try {
       const data = await res.json()
       if (typeof data?.error === 'string') message = data.error
+      if (typeof data?.code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(data.code)) code = data.code
     } catch {
       /* not JSON — keep the generic message */
     }
-    throw new ApiError(res.status, message)
+    throw new ApiError(res.status, message, code)
   }
   if (res.status === 204) return undefined as T
   return (await res.json()) as T
