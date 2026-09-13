@@ -22,6 +22,7 @@ import PreflightView from '../views/PreflightView.vue'
 import BrokerAccountsView from '../views/BrokerAccountsView.vue'
 import BrokerAccountView from '../views/BrokerAccountView.vue'
 import CustodyBreaksView from '../views/CustodyBreaksView.vue'
+import ReferenceDataView from '../views/ReferenceDataView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -73,6 +74,7 @@ export const router = createRouter({
     { path: '/broker-accounts', name: 'broker-accounts', component: BrokerAccountsView },
     { path: '/broker-accounts/:id', name: 'broker-account', component: BrokerAccountView },
     { path: '/custody-breaks', name: 'custody-breaks', component: CustodyBreaksView },
+    { path: '/reference-data', name: 'reference-data', component: ReferenceDataView },
     { path: '/:pathMatch(.*)*', name: 'not-found', component: NotFoundView },
   ],
 })
