@@ -24,7 +24,7 @@ function router() {
     history: createWebHistory(),
     routes: [
       { path: '/redeem', name: 'redeem', component: RedeemView },
-      { path: '/venues', name: 'venues', component: { template: '<div />' } },
+      { path: '/overview', name: 'overview', component: { template: '<div />' } },
       { path: '/login', name: 'login', component: { template: '<div />' } },
     ],
   })
@@ -116,7 +116,7 @@ describe('the confirmation field', () => {
 
   it('submits once both match and are long enough', async () => {
     const redeem = vi.spyOn(client.auth, 'redeem').mockResolvedValue(identity)
-    const { wrapper } = await open('?token=a-single-use-token')
+    const { wrapper, r } = await open('?token=a-single-use-token')
 
     const { chosen, confirmed } = passwords(wrapper)
     await chosen.setValue('a-properly-long-passphrase')
@@ -124,7 +124,9 @@ describe('the confirmation field', () => {
     await wrapper.vm.$nextTick()
 
     await wrapper.find('form').trigger('submit.prevent')
+    await flushPromises()
     expect(redeem).toHaveBeenCalledWith('a-single-use-token', 'a-properly-long-passphrase')
+    expect(r.currentRoute.value.path).toBe('/overview')
   })
 })
 

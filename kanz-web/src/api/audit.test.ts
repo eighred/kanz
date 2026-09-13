@@ -3,6 +3,7 @@ import { api, ApiError } from './client'
 import { audit, describeAudit } from './audit'
 
 const event = { event_id: 'test-event', correlation_id: '', event_type: 'test.type', kind: 'domain', occurred_at: '2026-01-01T00:00:00Z', source: 'test' }
+const record = { ...event, causation_id: '', domain: 'orders', event_class: 'FACT', recorded_at: '2026-01-01T00:00:01Z', schema_ref: '', prev_hash: '', hash: 'abc' }
 afterEach(() => vi.restoreAllMocks())
 
 describe('audit response boundary', () => {
@@ -30,5 +31,20 @@ describe('audit response boundary', () => {
 
   it.each([401, 403, 404, 503, 500])('does not disclose upstream errors (%s)', (status) => {
     expect(describeAudit(new ApiError(status, 'private server details'))).not.toContain('private server details')
+  })
+
+  it('reads a tenant-scoped event and its direct ancestry with encoded ids', async () => {
+    const slashRecord = { ...record, event_id: 'test/event' }
+    const get = vi.spyOn(api, 'get')
+      .mockResolvedValueOnce({ ...slashRecord, attributes: { hidden: 'value' } })
+      .mockResolvedValueOnce({ target: record, ancestry: [record], tree: { record } })
+    expect(await audit.event('test/event')).toEqual(slashRecord)
+    expect((await audit.lineage('test-event')).ancestry).toEqual([record])
+    expect(get.mock.calls[0]?.[0]).toBe('/api/v1/audit/events/test%2Fevent')
+  })
+
+  it('rejects lineage that does not terminate at the requested event', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ target: record, ancestry: [{ ...record, event_id: 'other' }] })
+    await expect(audit.lineage('test-event')).rejects.toThrow('Invalid audit lineage')
   })
 })

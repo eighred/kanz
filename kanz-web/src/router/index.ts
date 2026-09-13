@@ -1,5 +1,6 @@
 import OverviewView from '../views/OverviewView.vue'
 import AuditView from '../views/AuditView.vue'
+import AuditEventView from '../views/AuditEventView.vue'
 import NotFoundView from '../views/NotFoundView.vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import { useSession } from '../stores/session'
@@ -30,6 +31,7 @@ export const router = createRouter({
     { path: '/', redirect: '/overview' },
     { path: '/overview', name: 'overview', component: OverviewView },
     { path: '/audit', name: 'audit', component: AuditView },
+    { path: '/audit/events/:id', name: 'audit-event', component: AuditEventView },
     { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
     // PUBLIC BY NECESSITY: whoever opens this holds an invitation and nothing
     // else — requiring a session to accept one would be a loop with no entry.

@@ -57,7 +57,7 @@ async function submit() {
   busy.value = true
   try {
     await session.redeem(token.value, credential.value)
-    await router.push('/venues')
+    await router.push('/overview')
   } catch (e) {
     if (e instanceof ApiError && e.status === 429) {
       error.value = 'Too many attempts from your network. Wait a moment and try again.'
