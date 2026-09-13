@@ -10,6 +10,8 @@ export const workspaces = [
   ] },
   { title: 'Portfolio and risk', pages: [
     { to: '/portfolios', title: 'Portfolios', description: 'Open portfolio exposure, risk measures, scenarios, and orders.' },
+    { to: '/broker-accounts', title: 'Broker accounts', description: 'Inspect account state, positions, orders, and executions.' },
+    { to: '/custody-breaks', title: 'Custody breaks', description: 'Review outstanding book-to-custodian differences.' },
     { to: '/instruments', title: 'Instruments', description: 'Look up supported instrument definitions.' },
   ] },
   { title: 'Operations', pages: [
