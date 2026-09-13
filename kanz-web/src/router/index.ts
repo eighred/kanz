@@ -1,5 +1,6 @@
 import HouseholdView from '../views/HouseholdView.vue'
 import EvidenceView from '../views/EvidenceView.vue'
+import CopilotView from '../views/CopilotView.vue'
 import OverviewView from '../views/OverviewView.vue'
 import AuditView from '../views/AuditView.vue'
 import AuditEventView from '../views/AuditEventView.vue'
@@ -31,6 +32,7 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/households', name: 'households', component: HouseholdView },
+    { path: '/copilot', name: 'copilot', component: CopilotView },
     { path: '/audit-evidence', name: 'audit-evidence', component: EvidenceView },
     { path: '/', redirect: '/overview' },
     { path: '/overview', name: 'overview', component: OverviewView },
