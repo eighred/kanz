@@ -150,7 +150,7 @@ func (s *Server) handleHousehold(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, wealth.ErrLegacyPrecision) {
 			state = "legacy_unverified"
 		}
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "exact household valuation unavailable", "values_state": state})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "exact household valuation unavailable", "values_state": state, "code": state})
 		return
 	}
 	if !ok {
