@@ -97,11 +97,11 @@ func run(args []string, out *os.File) error {
 	}
 
 	subject := wealth.SubjectModelFor(opt.tenant, mp.GetModelId())
-	fmt.Fprintf(out, "model %s — profile %s, %d target(s), drift band %.4f\n",
-		mp.GetModelId(), mp.GetRiskProfile(), len(mp.GetTargetWeights()), mp.GetDriftTolerance())
+	fmt.Fprintf(out, "model %s — profile %s, %d target(s), drift band %s\n",
+		mp.GetModelId(), mp.GetRiskProfile(), len(mp.GetExactTargetWeights()), mp.GetExactDriftTolerance())
 	fmt.Fprintf(out, "subject: %s\n", subject)
-	for _, id := range sortedKeys(mp.GetTargetWeights()) {
-		fmt.Fprintf(out, "  %-24s %8.4f\n", id, mp.GetTargetWeights()[id])
+	for _, id := range sortedKeys(mp.GetExactTargetWeights()) {
+		fmt.Fprintf(out, "  %-24s %s\n", id, mp.GetExactTargetWeights()[id])
 	}
 	if opt.dryRun {
 		// Marshalled, not just summarised. This subject is COMPACTED to the LAST
@@ -285,15 +285,15 @@ func toDomain(mp *wealthpb.ModelPortfolio) (wealth.ModelPortfolio, error) {
 			"risk_profile %v is not one this build knows; publishing it would put a model in the catalogue "+
 				"that no household can ever be matched to", mp.GetRiskProfile())
 	}
-	targets := make(map[string]float64, len(mp.GetTargetWeights()))
-	for id, w := range mp.GetTargetWeights() {
-		targets[id] = w
+	targets := make(map[string]wealth.Number, len(mp.GetExactTargetWeights()))
+	for id, w := range mp.GetExactTargetWeights() {
+		targets[id] = wealth.Number(w)
 	}
 	return wealth.ModelPortfolio{
-		ModelID:    mp.GetModelId(),
-		Profile:    profile,
-		Targets:    targets,
-		Tolerance:  mp.GetDriftTolerance(),
+		ModelID:   mp.GetModelId(),
+		Profile:   profile,
+		Targets:   targets,
+		Tolerance: wealth.Number(mp.GetExactDriftTolerance()), LegacyPrecision: mp.GetArithmeticVersion() != 2 || len(mp.GetTargetWeights()) != 0 || mp.GetDriftTolerance() != 0,
 		RecordedBy: mp.GetRecordedBy(),
 		Reason:     mp.GetReason(),
 	}, nil
@@ -302,7 +302,7 @@ func toDomain(mp *wealthpb.ModelPortfolio) (wealth.ModelPortfolio, error) {
 // sortedKeys orders the target instruments so the printed preview — the thing an
 // operator reads before overwriting a firm's target allocation — is the same on
 // every run rather than in Go's map order.
-func sortedKeys(m map[string]float64) []string {
+func sortedKeys(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

@@ -2,6 +2,7 @@ package consume
 
 import (
 	"context"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"strings"
 	"testing"
 
@@ -24,12 +25,12 @@ func modelPayload(t *testing.T, m *wealthpb.ModelPortfolio) []byte {
 
 func wireModel() *wealthpb.ModelPortfolio {
 	return &wealthpb.ModelPortfolio{
-		ModelId:        "growth-2026",
-		RiskProfile:    wealthpb.RiskProfile_RISK_PROFILE_GROWTH,
-		TargetWeights:  map[string]float64{"BTC-USD": 0.6, "ETH-USD": 0.4},
-		DriftTolerance: 0.05,
-		RecordedBy:     "operator:akif",
-		Reason:         "IC review",
+		ModelId:            "growth-2026",
+		RiskProfile:        wealthpb.RiskProfile_RISK_PROFILE_GROWTH,
+		ExactTargetWeights: map[string]string{"BTC-USD": "0.6", "ETH-USD": "0.4"},
+		ArithmeticVersion:  2, ExactDriftTolerance: "0.05",
+		RecordedBy: "operator:akif",
+		Reason:     "IC review",
 	}
 }
 
@@ -45,7 +46,7 @@ func TestDecodeModelProtoCarriesEveryFieldTheCatalogueNeeds(t *testing.T) {
 	if got.ModelID != "growth-2026" || got.Profile != wealth.ProfileGrowth {
 		t.Errorf("identity/profile lost: %+v", got)
 	}
-	if got.Tolerance != 0.05 {
+	if got.Tolerance != "0.05" {
 		t.Errorf("drift_tolerance = %v, want 0.05. Dropped, it decodes to 0 and Breached compares "+
 			"max > 0, so every household holding anything is permanently breached", got.Tolerance)
 	}
@@ -53,7 +54,7 @@ func TestDecodeModelProtoCarriesEveryFieldTheCatalogueNeeds(t *testing.T) {
 		t.Errorf("provenance lost: %+v — this subject is compacted, so the model this one replaced "+
 			"is gone and these are the only record of who changed it", got)
 	}
-	if len(got.Targets) != 2 || got.Targets["BTC-USD"] != 0.6 {
+	if len(got.Targets) != 2 || got.Targets["BTC-USD"] != "0.6" {
 		t.Errorf("targets = %v", got.Targets)
 	}
 	if err := got.Validate(); err != nil {
@@ -72,7 +73,7 @@ func TestDecodeRefusesARiskProfileThisBuildDoesNotKnow(t *testing.T) {
 			"catalogue and matched to no household, forever")
 	}
 
-	hv := &wealthpb.HouseholdValued{HouseholdId: "hh-1", RiskProfile: wealthpb.RiskProfile(99)}
+	hv := &wealthpb.HouseholdValued{CurrencyCode: "USD", AsOf: &timestamppb.Timestamp{Seconds: 1700000000}, RecordedBy: "test:advisor", Reason: "test valuation", HouseholdId: "hh-1", RiskProfile: wealthpb.RiskProfile(99)}
 	b, err := proto.Marshal(hv)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -91,7 +92,7 @@ func TestDecodeRefusesARiskProfileThisBuildDoesNotKnow(t *testing.T) {
 // field had no producer and no path into the domain at all, so SelectModel's only
 // input did not exist in the running system.
 func TestDecodeProtoCarriesTheRiskProfile(t *testing.T) {
-	hv := &wealthpb.HouseholdValued{HouseholdId: "hh-1", RiskProfile: wealthpb.RiskProfile_RISK_PROFILE_BALANCED}
+	hv := &wealthpb.HouseholdValued{CurrencyCode: "USD", AsOf: &timestamppb.Timestamp{Seconds: 1700000000}, RecordedBy: "test:advisor", Reason: "test valuation", HouseholdId: "hh-1", RiskProfile: wealthpb.RiskProfile_RISK_PROFILE_BALANCED}
 	b, err := proto.Marshal(hv)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -130,7 +131,7 @@ func TestModelFolderRefusesAnotherTenantsModel(t *testing.T) {
 // anywhere of the message meant to supply one.
 func TestModelFolderReturnsAnErrorSoARefusedModelDLQs(t *testing.T) {
 	m := wireModel()
-	m.DriftTolerance = 0
+	m.ExactDriftTolerance = "0"
 	f, err := NewModelFolder("acme", wealth.NewModelRegistry(), nil)
 	if err != nil {
 		t.Fatalf("NewModelFolder: %v", err)
@@ -157,7 +158,7 @@ func TestFolderObservesDriftAfterTheBookIsWritten(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFolder: %v", err)
 	}
-	hv := &wealthpb.HouseholdValued{HouseholdId: "hh-1", RiskProfile: wealthpb.RiskProfile_RISK_PROFILE_GROWTH}
+	hv := &wealthpb.HouseholdValued{CurrencyCode: "USD", AsOf: &timestamppb.Timestamp{Seconds: 1700000000}, RecordedBy: "test:advisor", Reason: "test valuation", HouseholdId: "hh-1", RiskProfile: wealthpb.RiskProfile_RISK_PROFILE_GROWTH}
 	b, err := proto.Marshal(hv)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -188,7 +189,7 @@ func TestFolderWithNoObserverStillFolds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFolder: %v", err)
 	}
-	hv := &wealthpb.HouseholdValued{HouseholdId: "hh-1"}
+	hv := &wealthpb.HouseholdValued{CurrencyCode: "USD", AsOf: &timestamppb.Timestamp{Seconds: 1700000000}, RecordedBy: "test:advisor", Reason: "test valuation", HouseholdId: "hh-1"}
 	b, err := proto.Marshal(hv)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -199,5 +200,30 @@ func TestFolderWithNoObserverStillFolds(t *testing.T) {
 	}
 	if _, ok, _ := store.Get(context.Background(), "hh-1"); !ok {
 		t.Error("a fold with no drift observer stopped writing the book")
+	}
+}
+
+func TestLegacyModelReplacementFailsClosed(t *testing.T) {
+	r := wealth.NewModelRegistry()
+	f, err := NewModelFolder("acme", r, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := &envelopepb.Envelope{TenantId: "acme", EventType: wealth.EventTypeModelPublished}
+	if err := f.Handle(context.Background(), env, modelPayload(t, wireModel())); err != nil {
+		t.Fatal(err)
+	}
+	r.Arm()
+	m := wireModel()
+	m.ArithmeticVersion = 0
+	m.ExactTargetWeights = nil
+	m.ExactDriftTolerance = ""
+	m.TargetWeights = map[string]float64{"BTC-USD": 0.6, "ETH-USD": 0.4}
+	m.DriftTolerance = 0.05
+	if err := f.Handle(context.Background(), env, modelPayload(t, m)); err == nil {
+		t.Fatal("legacy model admitted")
+	}
+	if _, err := r.Model("acme", wealth.ProfileGrowth); err == nil {
+		t.Fatal("old model survives rejected compacted replacement")
 	}
 }

@@ -10,6 +10,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync/atomic"
@@ -93,6 +94,7 @@ func (s *Server) routes() {
 		s.mux.Handle("GET /metrics", s.metrics)
 	}
 	s.mux.HandleFunc("GET /v1/households/{id}", s.handleHousehold)
+	s.mux.HandleFunc("GET /v2/households/{id}", s.handleHousehold)
 }
 
 // notFoundBody is the ONE body this surface returns for "no such household",
@@ -137,27 +139,44 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 // handleHousehold aggregates a household's accounts into a virtual portfolio and
 // returns its total value, instrument weights, and asset-class exposure.
 func (s *Server) handleHousehold(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	if !s.callerOwnsThisInstance(w, r) {
 		return
 	}
 	id := r.PathValue("id")
 	h, ok, err := s.store.Get(r.Context(), id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		state := "unavailable"
+		if errors.Is(err, wealth.ErrLegacyPrecision) {
+			state = "legacy_unverified"
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "exact household valuation unavailable", "values_state": state, "code": state})
 		return
 	}
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": notFoundBody})
 		return
 	}
-	vp := wealth.Aggregate(h)
+	vp, err := wealth.Aggregate(h)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "exact household valuation unavailable"})
+		return
+	}
+	weights, weightsErr := vp.Weights()
+	classes, classesErr := vp.AssetClassExposure()
+	weightsState := "exact"
+	if weightsErr != nil || classesErr != nil {
+		weightsState = "unavailable"
+		weights = nil
+		classes = nil
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"household_id": vp.HouseholdID,
 		"total_value":  vp.TotalValue,
 		"cash":         vp.Cash,
 		"holdings":     vp.Holdings,
-		"weights":      vp.Weights(),
-		"asset_class":  vp.AssetClassExposure(),
+		"weights":      weights, "weights_state": weightsState,
+		"asset_class": classes, "arithmetic_version": 2, "currency_code": h.CurrencyCode, "as_of": h.AsOf, "recorded_by": h.RecordedBy, "source_reason": h.Reason,
 		"risk_profile": h.RiskProfile.String(),
 		"drift":        s.driftView(h),
 	})

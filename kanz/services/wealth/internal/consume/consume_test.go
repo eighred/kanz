@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 
@@ -36,10 +37,10 @@ func TestFolderFoldsCompositionIntoBook(t *testing.T) {
 	env := &envelopepb.Envelope{EventType: "wealth.household.updated"}
 
 	h := wealth.Household{
-		HouseholdID: "HH-1",
+		HouseholdID: "HH-1", CurrencyCode: "USD", AsOf: time.Unix(1700000000, 0), RecordedBy: "test:advisor", Reason: "test valuation",
 		Accounts: []wealth.Account{
-			{AccountID: "A-1", Cash: 5000, Holdings: []wealth.Holding{
-				{InstrumentID: "VTI", AssetClass: "EQUITY", MarketValue: 95_000},
+			{AccountID: "A-1", Cash: "5000", Holdings: []wealth.Holding{
+				{InstrumentID: "VTI", AssetClass: "EQUITY", MarketValue: "95000"},
 			}},
 		},
 	}
@@ -47,7 +48,7 @@ func TestFolderFoldsCompositionIntoBook(t *testing.T) {
 		t.Fatalf("handle: %v", err)
 	}
 	// Last-write-wins replace.
-	h.Accounts[0].Cash = 8000
+	h.Accounts[0].Cash = "8000"
 	if err := f.Handle(ctx, env, payload(t, h)); err != nil {
 		t.Fatalf("replace: %v", err)
 	}
@@ -56,13 +57,16 @@ func TestFolderFoldsCompositionIntoBook(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("get: ok=%v err=%v", ok, err)
 	}
-	if got.Accounts[0].Cash != 8000 {
+	if got.Accounts[0].Cash != "8000" {
 		t.Fatalf("cash = %v, want 8000 (last write wins)", got.Accounts[0].Cash)
 	}
 
 	// The live composition aggregates correctly.
-	vp := wealth.Aggregate(got)
-	if vp.Holdings["VTI"] != 95_000 || vp.Cash != 8000 {
+	vp, err := wealth.Aggregate(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vp.Holdings["VTI"] != "95000" || vp.Cash != "8000" {
 		t.Fatalf("aggregate over live composition: %+v", vp)
 	}
 }

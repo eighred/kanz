@@ -28,12 +28,18 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres { return &Postgres{pool: pool} }
 // Put records (or replaces) a household's composition — last-write-wins on
 // household_id (a current-state projection, not a journal).
 func (p *Postgres) Put(ctx context.Context, h wealth.Household) error {
-	if h.HouseholdID == "" {
-		return errors.New("book: cannot store household with empty household_id")
+	if err := h.ValidateValuation(); err != nil {
+		return err
 	}
-	blob, err := json.Marshal(h)
+	blob, err := json.Marshal(struct {
+		wealth.Household
+		SchemaVersion int `json:"schema_version"`
+	}{h, 2})
 	if err != nil {
 		return fmt.Errorf("encode household %s: %w", h.HouseholdID, err)
+	}
+	if len(blob) > 8<<20 {
+		return wealth.ErrValuation
 	}
 	_, err = p.pool.Exec(ctx, `
 		INSERT INTO households (tenant_id, household_id, composition, updated_at)
@@ -60,9 +66,21 @@ func (p *Postgres) Get(ctx context.Context, householdID string) (wealth.Househol
 	if err != nil {
 		return wealth.Household{}, false, fmt.Errorf("get household %s: %w", householdID, err)
 	}
+	var version struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if len(blob) > 8<<20 {
+		return wealth.Household{}, false, wealth.ErrValuation
+	}
+	if json.Unmarshal(blob, &version) != nil || version.SchemaVersion != 2 {
+		return wealth.Household{}, false, wealth.ErrLegacyPrecision
+	}
 	var h wealth.Household
 	if err := json.Unmarshal(blob, &h); err != nil {
 		return wealth.Household{}, false, fmt.Errorf("decode household %s: %w", householdID, err)
+	}
+	if err := h.ValidateValuation(); err != nil {
+		return wealth.Household{}, false, err
 	}
 	return h, true, nil
 }

@@ -432,16 +432,6 @@ var mapEvictionExempt = map[string]evictionExemption{
 		"same writer and same source as byKey — one entry per portfolio some tenant has published a " +
 			"mandate for. It exists so a missed lookup can say WHY (#243), and it cannot outgrow the " +
 			"set of published mandates.", ""},
-	"internal/wealth: ModelRegistry.byKey": {boundedByConstruction,
-		"keyed by (tenant, model_id) and written only by Put, whose only caller is the model replay " +
-			"off the COMPACTED wealth.model.published.> subject — one retained message per model, " +
-			"forever. An entry exists because an operator ran cmd/kanz-model; nothing a trading or " +
-			"advisory caller sends can create one, and a household valuation never writes here at " +
-			"all. The bound is tighter still than the mandate registry's beside it: WEALTH-01d is " +
-			"one model per RISK PROFILE and there are five profiles, so a well-formed catalogue is " +
-			"five entries per tenant and a malformed one is refused by Validate before it lands " +
-			"(#1010). The map VALUE is a ModelPortfolio whose Targets map is bounded by the " +
-			"instrument universe the operator wrote into that one file.", ""},
 	"internal/exchange/netdial: CachedDialer.cache": {boundedByConstruction,
 		"keyed by the HOSTNAME half of the address being dialled, and every non-test caller dials a " +
 			"venue REST or WS base out of that adapter's own config — one to three exchange hosts per " +

@@ -80,9 +80,10 @@ type ModelRegistry struct {
 	// the message that failed is the LAST one on that model's subject and every
 	// consumer that boots re-reads it, forever (the #619 shape). Kept so a caller
 	// can say "unreadable" rather than "not published".
-	rejected map[modelKey]error
-	armed    bool
-	logger   *slog.Logger
+	rejected         map[modelKey]error
+	rejectedProfiles map[modelKey]RiskProfile
+	armed            bool
+	logger           *slog.Logger
 }
 
 // ModelRegistryOption customizes the registry.
@@ -105,8 +106,8 @@ func WithModelLogger(l *slog.Logger) ModelRegistryOption {
 func NewModelRegistry(opts ...ModelRegistryOption) *ModelRegistry {
 	r := &ModelRegistry{
 		byKey:    make(map[modelKey]ModelPortfolio),
-		rejected: make(map[modelKey]error),
-		logger:   slog.Default(),
+		rejected: make(map[modelKey]error), rejectedProfiles: make(map[modelKey]RiskProfile),
+		logger: slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -173,6 +174,8 @@ func (r *ModelRegistry) Put(tenantID string, m ModelPortfolio) error {
 	if err := m.Validate(); err != nil {
 		r.mu.Lock()
 		r.rejected[key] = err
+		r.rejectedProfiles[key] = m.Profile
+		delete(r.byKey, key)
 		r.mu.Unlock()
 		r.logger.Error("model portfolio REFUSED — no household on this profile has a target allocation",
 			"tenant", tenantID, "model_id", m.ModelID, "err", err)
@@ -181,7 +184,8 @@ func (r *ModelRegistry) Put(tenantID string, m ModelPortfolio) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.rejected, key)
-	r.byKey[key] = m
+	delete(r.rejectedProfiles, key)
+	r.byKey[key] = m.Clone()
 	return nil
 }
 
@@ -219,6 +223,11 @@ func (r *ModelRegistry) Model(tenantID string, profile RiskProfile) (ModelPortfo
 		return ModelPortfolio{}, ErrModelCatalogueUnarmed
 	}
 
+	for key, rejectedProfile := range r.rejectedProfiles {
+		if key.tenant == tenantID && rejectedProfile == profile {
+			return ModelPortfolio{}, ErrModelRejected
+		}
+	}
 	candidates := make([]ModelPortfolio, 0, len(r.byKey))
 	claiming := make([]string, 0, 2)
 	for k, m := range r.byKey {
@@ -255,3 +264,5 @@ func (r *ModelRegistry) Model(tenantID string, profile RiskProfile) (ModelPortfo
 	}
 	return m, nil
 }
+
+var ErrModelRejected = errors.New("wealth: model precision or policy is invalid; exact republish required")

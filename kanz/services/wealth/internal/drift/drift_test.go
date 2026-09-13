@@ -14,8 +14,8 @@ func model() wealth.ModelPortfolio {
 	return wealth.ModelPortfolio{
 		ModelID:    "growth-2026",
 		Profile:    wealth.ProfileGrowth,
-		Targets:    map[string]float64{"BTC-USD": 0.6, "ETH-USD": 0.4},
-		Tolerance:  0.05,
+		Targets:    map[string]wealth.Number{"BTC-USD": "0.6", "ETH-USD": "0.4"},
+		Tolerance:  "0.05",
 		RecordedBy: "operator:akif",
 		Reason:     "IC review",
 	}
@@ -23,12 +23,12 @@ func model() wealth.ModelPortfolio {
 
 // household builds a one-account household holding btc and eth at the given
 // market values, on the given profile.
-func household(profile wealth.RiskProfile, btc, eth float64) wealth.Household {
+func household(profile wealth.RiskProfile, btc, eth wealth.Number) wealth.Household {
 	return wealth.Household{
 		HouseholdID: "hh-1",
 		RiskProfile: profile,
 		Accounts: []wealth.Account{{
-			AccountID: "acct-1",
+			AccountID: "acct-1", Cash: "0",
 			Holdings: []wealth.Holding{
 				{InstrumentID: "BTC-USD", AssetClass: "CRYPTO", MarketValue: btc},
 				{InstrumentID: "ETH-USD", AssetClass: "CRYPTO", MarketValue: eth},
@@ -54,25 +54,25 @@ func armedCatalogue(t *testing.T) *wealth.ModelRegistry {
 func TestEvaluateMeasuresTheBookAgainstItsModel(t *testing.T) {
 	m := New("acme", armedCatalogue(t), nil, nil)
 
-	onModel := m.Evaluate(household(wealth.ProfileGrowth, 6000, 4000))
+	onModel := m.Evaluate(household(wealth.ProfileGrowth, "6000", "4000"))
 	if onModel.Outcome != OutcomeInBand || !onModel.Evaluated {
 		t.Fatalf("a book sitting exactly on its model reported %+v", onModel)
 	}
-	if onModel.Drift.Max > 1e-9 {
+	if onModel.Drift.Max != "0" {
 		t.Errorf("max drift = %v on a book that matches its model exactly", onModel.Drift.Max)
 	}
-	if onModel.ModelID != "growth-2026" || onModel.Tolerance != 0.05 {
+	if onModel.ModelID != "growth-2026" || onModel.Tolerance != "0.05" {
 		t.Errorf("the result does not carry the model it was measured against: %+v", onModel)
 	}
 
-	drifted := m.Evaluate(household(wealth.ProfileGrowth, 8000, 2000))
+	drifted := m.Evaluate(household(wealth.ProfileGrowth, "8000", "2000"))
 	if drifted.Outcome != OutcomeBreached || !drifted.Breached {
 		t.Fatalf("a book 20 points off a 5-point band reported %+v — nothing would ever flag a "+
 			"rebalance", drifted)
 	}
 	// 0.8 - 0.6 = 0.2 exactly; float64 over these values is exact enough to compare
 	// against a tolerance far tighter than the band.
-	if got := drifted.Drift.Max; got < 0.199 || got > 0.201 {
+	if got := drifted.Drift.Max; got != "0.2" {
 		t.Errorf("max drift = %v, want 0.20 (BTC at 0.80 against a 0.60 target)", got)
 	}
 }
@@ -90,13 +90,13 @@ func TestUnevaluableHouseholdsAreNeverReportedAsInBand(t *testing.T) {
 		want    Outcome
 	}{
 		{"catalogue still replaying", New("acme", wealth.NewModelRegistry(), nil, nil),
-			household(wealth.ProfileGrowth, 6000, 4000), OutcomeCatalogueUnarmed},
+			household(wealth.ProfileGrowth, "6000", "4000"), OutcomeCatalogueUnarmed},
 		{"household asserts no profile", New("acme", armed, nil, nil),
-			household(wealth.ProfileUnspecified, 6000, 4000), OutcomeNoProfile},
+			household(wealth.ProfileUnspecified, "6000", "4000"), OutcomeNoProfile},
 		{"no model for this profile", New("acme", armed, nil, nil),
-			household(wealth.ProfileConservative, 6000, 4000), OutcomeNoModel},
+			household(wealth.ProfileConservative, "6000", "4000"), OutcomeNoModel},
 		{"another tenant's catalogue", New("zenith", armed, nil, nil),
-			household(wealth.ProfileGrowth, 6000, 4000), OutcomeNoModel},
+			household(wealth.ProfileGrowth, "6000", "4000"), OutcomeNoModel},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestUnevaluableHouseholdsAreNeverReportedAsInBand(t *testing.T) {
 				t.Error("Evaluated is true on a household that was not measured — a caller reading " +
 					"Drift.Max off this result would read 0 as 'matches its model exactly'")
 			}
-			if res.Drift.Max != 0 || res.ModelID != "" {
+			if res.Drift.Max != "" || res.ModelID != "" {
 				t.Errorf("an unevaluated result carries measurements: %+v", res)
 			}
 			if res.Reason == "" {
@@ -132,7 +132,7 @@ func TestAnAmbiguousProfileHasItsOwnOutcome(t *testing.T) {
 	}
 	r.Arm()
 
-	res := New("acme", r, nil, nil).Evaluate(household(wealth.ProfileGrowth, 6000, 4000))
+	res := New("acme", r, nil, nil).Evaluate(household(wealth.ProfileGrowth, "6000", "4000"))
 	if res.Outcome != OutcomeAmbiguousModel {
 		t.Fatalf("outcome = %q, want %q — with two models resident one of them silently became the "+
 			"target for every household on the profile", res.Outcome, OutcomeAmbiguousModel)
@@ -175,7 +175,7 @@ func TestEveryOutcomeSeriesExistsBeforeAnythingIsEvaluated(t *testing.T) {
 func TestObserveRecordsAndEvaluateDoesNot(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("acme", armedCatalogue(t), NewMetrics(reg, armedCatalogue(t)), nil)
-	drifted := household(wealth.ProfileGrowth, 8000, 2000)
+	drifted := household(wealth.ProfileGrowth, "8000", "2000")
 
 	m.Evaluate(drifted)
 	m.Evaluate(drifted)
@@ -206,7 +206,7 @@ func TestObserveCountsAnUnevaluableHousehold(t *testing.T) {
 		return New("acme", unarmed, NewMetrics(reg, unarmed), nil)
 	}()
 
-	m.Observe(household(wealth.ProfileGrowth, 6000, 4000))
+	m.Observe(household(wealth.ProfileGrowth, "6000", "4000"))
 
 	series := counterSeries(t, reg, "kanz_wealth_drift_evaluations_total")
 	if series[string(OutcomeCatalogueUnarmed)] != 1 {
