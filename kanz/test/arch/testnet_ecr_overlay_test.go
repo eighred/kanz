@@ -419,13 +419,18 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"workload installation refused: partial managed state", "fresh-install-rollback-started",
 		"prometheus.kanz-observability.svc:9090", "workload-analysis-provider-ready",
 		"update-rollback-started", "rollback_workloads", "update-rollback-complete",
+		"update-rollback-state-exact", "update-rollback-state-mismatch", "cmp -s \"${rollback}\" \"${rollback_verify}\"",
 		"policy_preexisting=0", "networkpolicy allow-gateway-to-oms-query --ignore-not-found=true",
 		"web_bff_preexisting=0", "delete deployment/web-bff --ignore-not-found=true --wait=true",
 		"policy_restored=0", "for attempt in 1 2 3 4 5",
 		"deployment_restored()", ".status.observedGeneration >= .metadata.generation",
 		"(.status.updatedReplicas // 0) == .spec.replicas", "deployment_restored \"${deployment}\"",
 		"rollback_workloads() { /usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap",
+		"capture_workloads()", "sort_by(.kind,.metadata.name)",
 		"apiVersion:\"v1\",kind:\"List\",items:", "pods_ready=0; for attempt in $(seq 1 120)",
+		"-VerifyRollback requires -Apply", "workload-rollback-probe-advanced", "exit 86",
+		"workload rollback probe refused: complete preexisting estate required", "$(jq ''.items | length'' \"${rollback}\")\" != 10",
+		"set env deployment/identity KANZ_ROLLBACK_PROBE=", "rollout status deployment/identity",
 	} {
 		if !strings.Contains(raw, required) {
 			t.Errorf("Tokyo workload installer is missing fail-closed proof %q", required)
