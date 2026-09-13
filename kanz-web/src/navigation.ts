@@ -9,6 +9,7 @@ export const workspaces = [
     { to: '/audit', title: 'Audit events', description: 'Search recorded events within your authorized tenant.' },
   ] },
   { title: 'Portfolio and risk', pages: [
+    { to: '/households', title: 'Households', description: 'Review exact household valuations, allocation, and model drift.' },
     { to: '/portfolios', title: 'Portfolios', description: 'Open portfolio exposure, risk measures, scenarios, and orders.' },
     { to: '/broker-accounts', title: 'Broker accounts', description: 'Inspect account state, positions, orders, and executions.' },
     { to: '/custody-breaks', title: 'Custody breaks', description: 'Review outstanding book-to-custodian differences.' },
