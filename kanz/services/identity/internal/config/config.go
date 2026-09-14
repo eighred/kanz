@@ -8,7 +8,9 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/internal/identity"
 	"log/slog"
 	"os"
 	"strconv"
@@ -83,7 +85,8 @@ type Config struct {
 
 	// InviteTTL is how long a new invitation stays redeemable; zero uses the
 	// domain default.
-	InviteTTL time.Duration
+	InviteTTL     time.Duration
+	InviteDomains identity.InviteDomainPolicy
 
 	// OTLPEndpoint is the OTel collector for span export. Empty ⇒ none.
 	OTLPEndpoint string
@@ -151,6 +154,10 @@ func Load() (Config, error) {
 		return Config{}, errors.New("IDENTITY_SIGNING_KEY_FILE and IDENTITY_ALLOW_EPHEMERAL_KEY are " +
 			"both set — these are alternatives, and silently preferring one would hide which key " +
 			"is actually signing tokens")
+	}
+	cfg.InviteDomains, err = identity.ParseInviteDomainPolicy(os.Getenv("IDENTITY_INVITE_EMAIL_DOMAINS"))
+	if err != nil {
+		return Config{}, fmt.Errorf("IDENTITY_INVITE_EMAIL_DOMAINS: %w", err)
 	}
 	return cfg, nil
 }

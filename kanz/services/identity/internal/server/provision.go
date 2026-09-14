@@ -71,7 +71,8 @@ type Provisioning struct {
 	OperatorRole string
 	// InviteTTL is how long a new invitation stays redeemable; zero uses the
 	// domain default.
-	InviteTTL time.Duration
+	InviteTTL     time.Duration
+	InviteDomains identity.InviteDomainPolicy
 
 	// Audit records who disabled or re-enabled whom (#525). REQUIRED, and New
 	// refuses provisioning without it.
@@ -145,6 +146,10 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.provisioning.InviteDomains.Check(req.Subject); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
 	raw, hash, err := identity.NewInviteToken()
 	if err != nil {
 		s.logger.Error("cannot mint an invite token", "err", err)

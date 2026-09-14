@@ -160,7 +160,8 @@ func run() int {
 		// principal.* attributes it partitions and tenants on.
 		opts = append(opts, server.WithProvisioning(server.Provisioning{
 			Verifier: signer, Store: store, OperatorRole: cfg.OperatorRole, InviteTTL: cfg.InviteTTL,
-			Audit: auth.NewSlogRecorder(logger),
+			InviteDomains: cfg.InviteDomains,
+			Audit:         auth.NewSlogRecorder(logger),
 		}))
 		logger.Info("authenticated provisioning enabled", "operator_role", cfg.OperatorRole,
 			"routes", "POST /invites, GET /invites, POST /users/{subject}/disable, "+
