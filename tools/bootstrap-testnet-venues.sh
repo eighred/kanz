@@ -36,8 +36,18 @@ binance_account_uid=''
 okx_account_uid=''
 secret_pipe_dir=''
 secret_writer_pids=''
+secret_input=''
+terminal_echo_disabled=0
+
+restore_terminal_echo() {
+    if [ "$terminal_echo_disabled" -eq 1 ]; then
+        stty echo 2>/dev/null || true
+        terminal_echo_disabled=0
+    fi
+}
 
 clear_secrets() {
+    restore_terminal_echo
     if [ -n "$secret_writer_pids" ]; then
         # A failed Vault request may stop before opening every FIFO. Terminate
         # any writer still blocked on open so cleanup itself cannot hang.
@@ -49,6 +59,7 @@ clear_secrets() {
     fi
     secret_writer_pids=''
     secret_pipe_dir=''
+    secret_input=''
     vault_token=''
     binance_api_key=''
     binance_api_secret=''
@@ -72,6 +83,22 @@ require_secret() {
         printf '%s\n' 'A required value was empty; no further changes were made.' >&2
         exit 1
     fi
+}
+
+read_hidden() {
+    printf '%s' "$1" >&2
+    if [ -t 0 ]; then
+        stty -echo
+        terminal_echo_disabled=1
+    fi
+    if ! IFS= read -r secret_input; then
+        restore_terminal_echo
+        printf '\n%s\n' 'Input ended before a required value was read; no further changes were made.' >&2
+        exit 1
+    fi
+    restore_terminal_echo
+    printf '\n' >&2
+    require_secret "$secret_input"
 }
 
 write_venue_credentials() {
@@ -124,10 +151,9 @@ write_venue_credentials() {
     return "$vault_status"
 }
 
-printf '%s' 'Vault operator token: ' >&2
-IFS= read -r -s vault_token
-printf '\n' >&2
-require_secret "$vault_token"
+read_hidden 'Vault operator token: '
+vault_token=$secret_input
+secret_input=''
 VAULT_TOKEN=$vault_token
 export VAULT_TOKEN
 vault_token=''
@@ -236,17 +262,15 @@ EOF
 
     printf '%s\n' 'Enter UIDs only from independently reviewed exchange account-opening evidence.' >&2
     printf '%s\n' 'Do not copy the adapter observation or derive either value from the mounted API credential.' >&2
-    printf '%s' 'Approved Binance testnet account UID: ' >&2
-    IFS= read -r -s binance_account_uid
-    printf '\n' >&2
-    require_secret "$binance_account_uid"
+    read_hidden 'Approved Binance testnet account UID: '
+    binance_account_uid=$secret_input
+    secret_input=''
     printf '%s' "$binance_account_uid" | "$VAULT_BIN" kv put kv/kanz/account-master/binance expected_uid=- >/dev/null
     binance_account_uid=''
 
-    printf '%s' 'Approved OKX demo account UID: ' >&2
-    IFS= read -r -s okx_account_uid
-    printf '\n' >&2
-    require_secret "$okx_account_uid"
+    read_hidden 'Approved OKX demo account UID: '
+    okx_account_uid=$secret_input
+    secret_input=''
     printf '%s' "$okx_account_uid" | "$VAULT_BIN" kv put kv/kanz/account-master/okx expected_uid=- >/dev/null
     okx_account_uid=''
 
@@ -258,30 +282,25 @@ EOF
     exit 0
 fi
 
-printf '%s' 'Binance testnet API key: ' >&2
-IFS= read -r -s binance_api_key
-printf '\n' >&2
-require_secret "$binance_api_key"
+read_hidden 'Binance testnet API key: '
+binance_api_key=$secret_input
+secret_input=''
 
-printf '%s' 'Binance testnet API secret: ' >&2
-IFS= read -r -s binance_api_secret
-printf '\n' >&2
-require_secret "$binance_api_secret"
+read_hidden 'Binance testnet API secret: '
+binance_api_secret=$secret_input
+secret_input=''
 
-printf '%s' 'OKX demo API key: ' >&2
-IFS= read -r -s okx_api_key
-printf '\n' >&2
-require_secret "$okx_api_key"
+read_hidden 'OKX demo API key: '
+okx_api_key=$secret_input
+secret_input=''
 
-printf '%s' 'OKX demo API secret: ' >&2
-IFS= read -r -s okx_api_secret
-printf '\n' >&2
-require_secret "$okx_api_secret"
+read_hidden 'OKX demo API secret: '
+okx_api_secret=$secret_input
+secret_input=''
 
-printf '%s' 'OKX demo API passphrase: ' >&2
-IFS= read -r -s okx_api_passphrase
-printf '\n' >&2
-require_secret "$okx_api_passphrase"
+read_hidden 'OKX demo API passphrase: '
+okx_api_passphrase=$secret_input
+secret_input=''
 
 # All required values are present before the first mutation. Each call creates
 # one complete KV version for that venue and preserves unrelated fields (the
