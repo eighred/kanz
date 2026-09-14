@@ -42,7 +42,7 @@ export function setUnauthenticatedHandler(fn: () => void): void {
   onUnauthenticated = fn
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, acceptConflict = false): Promise<T> {
   const res = await fetch(path, {
     method,
     credentials: 'same-origin',
@@ -54,7 +54,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     onUnauthenticated?.()
     throw new Unauthenticated()
   }
-  if (!res.ok) {
+  if (!res.ok && !(acceptConflict && res.status === 409)) {
     // The server's message is shown as-is when it is JSON we recognise; the raw
     // body is NOT surfaced otherwise, because an upstream error page is not a
     // message for a user and may carry internals.
@@ -74,7 +74,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>('GET', path),
+  get: <T>(path: string, options?: { acceptConflict?: boolean }) => request<T>('GET', path, undefined, options?.acceptConflict),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
 }
