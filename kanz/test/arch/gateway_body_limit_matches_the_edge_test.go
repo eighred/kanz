@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// THE GATEWAY'S BODY CEILING AND THE EDGE'S MUST BE THE SAME NUMBER (#887).
+// THE CONTROL-PLANE BODY CEILING AND THE EDGE'S MUST BE THE SAME NUMBER (#887/#1228).
 //
-// `middleware.MaxRequestBody` is not an invented threshold. It is derived from
+// `requestbody.MaxBytes` is not an invented threshold. It is derived from
 // `nginx.ingress.kubernetes.io/proxy-body-size` in
 // infra/deploy/api-gateway-ingress.yaml, on the argument that a body the edge
 // already refuses cannot be one the gateway is obliged to accept.
@@ -36,7 +36,7 @@ import (
 // becoming a second place a threshold is written down, which would be the defect
 // it exists to prevent (derive the set from the source of truth, never restate
 // it).
-func TestTheGatewayBodyLimitMatchesTheEdge(t *testing.T) {
+func TestTheControlPlaneBodyLimitMatchesTheEdge(t *testing.T) {
 	root := moduleRoot(t)
 
 	ingress := readFile(t, filepath.Join(root, "infra", "deploy", "api-gateway-ingress.yaml"))
@@ -50,21 +50,21 @@ func TestTheGatewayBodyLimitMatchesTheEdge(t *testing.T) {
 	}
 	edge := parseByteSize(t, m[1], m[2])
 
-	src := readFile(t, filepath.Join(root, "services", "api-gateway", "internal", "middleware", "bodylimit.go"))
+	src := readFile(t, filepath.Join(root, "internal", "requestbody", "limit.go"))
 	// The declaration, not any mention of it: this file's own doc comment
 	// discusses the constant at length, and a looser match would read the prose.
-	c := regexp.MustCompile(`(?m)^const MaxRequestBody = (\d+) << (\d+)`).FindStringSubmatch(src)
+	c := regexp.MustCompile(`(?m)^const MaxBytes = (\d+) << (\d+)`).FindStringSubmatch(src)
 	if c == nil {
-		t.Fatalf("could not find `const MaxRequestBody = N << M` in middleware/bodylimit.go.\n\n" +
+		t.Fatalf("could not find `const MaxBytes = N << M` in internal/requestbody/limit.go.\n\n" +
 			"This guard reads the declaration itself rather than a mention of it. If the constant " +
 			"moved or changed shape, move this matcher with it rather than dropping the check.")
 	}
 	mant, _ := strconv.ParseInt(c[1], 10, 64)
 	shift, _ := strconv.ParseInt(c[2], 10, 64)
-	gateway := mant << uint(shift)
+	controlPlane := mant << uint(shift)
 
-	if gateway != edge {
-		t.Fatalf("middleware.MaxRequestBody = %d bytes but the Ingress allows %d (%s%s).\n\n"+
+	if controlPlane != edge {
+		t.Fatalf("requestbody.MaxBytes = %d bytes but the Ingress allows %d (%s%s).\n\n"+
 			"These are the same bound expressed twice and they have drifted. The gateway's "+
 			"constant is DERIVED from the edge's — a body nginx already refuses is not one the "+
 			"gateway must accept — so the two cannot disagree without one of them being "+
@@ -72,10 +72,10 @@ func TestTheGatewayBodyLimitMatchesTheEdge(t *testing.T) {
 			"If the intent was to raise the ceiling, raise both. If the intent was for the "+
 			"gateway to be STRICTER than the edge, that is a real design and it needs saying "+
 			"out loud in bodylimit.go, because it changes what this guard should check.",
-			gateway, edge, m[1], m[2])
+			controlPlane, edge, m[1], m[2])
 	}
 
-	t.Logf("gateway MaxRequestBody = ingress proxy-body-size = %d bytes", gateway)
+	t.Logf("control-plane MaxBytes = ingress proxy-body-size = %d bytes", controlPlane)
 }
 
 // parseByteSize turns nginx's size shorthand ("1m", "512k", "1048576") into
