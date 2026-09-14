@@ -193,7 +193,13 @@ func (v *BinanceVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*
 		if errors.Is(err, ErrRateLimited) {
 			return nil, err // budget exhausted — order rests; caller backs off + alerts
 		}
-		q, qErr := v.rest.queryOrder(ctx, symbol, st.GetOrderId())
+		// The placement context is commonly the source of this error. Reusing it
+		// makes the recovery query fail locally with context deadline exceeded,
+		// before a byte reaches Binance. Preserve its values, detach its expired
+		// cancellation, and apply the shared finite recovery bound.
+		recoveryCtx, cancelRecovery := newPlacementRecoveryContext(ctx)
+		defer cancelRecovery()
+		q, qErr := v.rest.queryOrder(recoveryCtx, symbol, st.GetOrderId())
 		if qErr != nil {
 			return nil, err
 		}
