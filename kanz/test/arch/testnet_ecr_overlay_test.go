@@ -123,12 +123,33 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 			removesPullSecret = true
 		case patch.Target.Kind == "Deployment" && strings.Contains(patch.Patch, "/spec/replicas") && strings.Contains(patch.Patch, "value: 1"):
 			scalesDeployments = true
-		case patch.Target.Kind == "Rollout" && patch.Target.Name == "risk-engine" && strings.Contains(patch.Patch, "/spec/replicas") && strings.Contains(patch.Patch, "value: 1"):
+		case patch.Target.Kind == "Rollout" && patch.Target.Name == "risk-engine" &&
+			strings.Contains(patch.Patch, "/spec/replicas") && strings.Contains(patch.Patch, "value: 1") &&
+			strings.Contains(patch.Patch, "/spec/strategy/canary/maxSurge") &&
+			strings.Contains(patch.Patch, "/spec/strategy/canary/maxUnavailable") &&
+			strings.Contains(patch.Patch, "/spec/strategy/canary/steps") &&
+			strings.Contains(patch.Patch, "setWeight: 100"):
 			scalesRisk = true
 		}
 	}
 	if !removesPullSecret || !scalesDeployments || !scalesRisk {
 		t.Fatalf("testnet patches incomplete: removesPullSecret=%t scalesDeployments=%t scalesRisk=%t", removesPullSecret, scalesDeployments, scalesRisk)
+	}
+}
+
+func TestRiskEngineCanaryAdmitsOnlyProvenIdleStartupRecompute(t *testing.T) {
+	raw := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "infra", "deploy", "analysis-template.yaml")))
+	for _, required := range []string{
+		`kanz_risk_recompute_total{status="ok"`,
+		`kanz_risk_recompute_total{status!="ok"`,
+		`kanz_risk_recompute_duration_seconds_count{`,
+		`kanz_risk_recompute_inflight{`,
+		`kanz_risk_recompute_queue_depth{`,
+		`or vector(0)`,
+	} {
+		if !strings.Contains(raw, required) {
+			t.Errorf("risk canary idle proof is missing %q", required)
+		}
 	}
 }
 
@@ -191,6 +212,13 @@ func TestTokyoWebEdgeKeepsCredentialsInVaultAndExposesNoInboundService(t *testin
 		"name: allow-web-bff-egress",
 		"name: allow-web-bff-to-gateway",
 		"name: allow-web-bff-to-identity",
+		"name: allow-gateway-identity-egress",
+		"kubernetes.io/metadata.name: kube-system",
+		"k8s-app: kube-dns",
+		"protocol: UDP, port: 53",
+		"protocol: TCP, port: 53",
+		"protocol: UDP, port: 7844",
+		"protocol: TCP, port: 7844",
 		"169.254.0.0/16",
 	} {
 		if !strings.Contains(policies, required) {
@@ -379,7 +407,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 60", "Expected 18 rendered container images", "sha256sum --check --status",
+		"resourceCount -ne 61", "Expected 18 rendered container images", "sha256sum --check --status",
 		"imageTag=$imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",
@@ -391,9 +419,20 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"workload installation refused: partial managed state", "fresh-install-rollback-started",
 		"prometheus.kanz-observability.svc:9090", "workload-analysis-provider-ready",
 		"update-rollback-started", "rollback_workloads", "update-rollback-complete",
+		"update-rollback-state-exact", "update-rollback-state-mismatch", "cmp -s \"${rollback}\" \"${rollback_verify}\"",
 		"policy_preexisting=0", "networkpolicy allow-gateway-to-oms-query --ignore-not-found=true",
-		"rollback_workloads() { /usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap",
+		"web_bff_preexisting=0", "delete deployment/web-bff --ignore-not-found=true --wait=true",
+		"policy_restored=0", "for attempt in 1 2 3 4 5",
+		"deployment_restored()", ".status.observedGeneration >= .metadata.generation",
+		"(.status.updatedReplicas // 0) == .spec.replicas", "deployment_restored \"${deployment}\"",
+		"rollback_workloads() { rollback_apply_ok=1; while IFS=$''\\t'' read -r kind name", "spec:$desired.spec",
+		"|| rollback_apply_ok=0", "[[ \"${rollback_apply_ok}\" = 1 ]]",
+		"kubectl replace --field-manager=kanz-bootstrap -f -", ".items[] | [.kind,.metadata.name] | @tsv",
+		"capture_workloads()", "sort_by(.kind,.metadata.name)",
 		"apiVersion:\"v1\",kind:\"List\",items:", "pods_ready=0; for attempt in $(seq 1 120)",
+		"-VerifyRollback requires -Apply", "workload-rollback-probe-advanced", "exit 86",
+		"workload rollback probe refused: complete preexisting estate required", "$(jq ''.items | length'' \"${rollback}\")\" != 10",
+		"set env deployment/identity KANZ_ROLLBACK_PROBE=", "rollout status deployment/identity",
 	} {
 		if !strings.Contains(raw, required) {
 			t.Errorf("Tokyo workload installer is missing fail-closed proof %q", required)
@@ -419,8 +458,8 @@ func TestTokyoWorkloadPodVerifierMatchesStatusesByContainerName(t *testing.T) {
 		return "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/" + name + "@" + digest
 	}
 	fixture := func(runtimeDigest string, omitMainStatus bool) []byte {
-		pods := make([]any, 0, 9)
-		for i := 0; i < 9; i++ {
+		pods := make([]any, 0, 10)
+		for i := 0; i < 10; i++ {
 			statuses := []any{}
 			if !omitMainStatus {
 				statuses = append(statuses, map[string]any{

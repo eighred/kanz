@@ -27,10 +27,11 @@ import (
 // signingGateway verifies API-01d the way the real middleware does and reports
 // what it saw, so a test can tell "no signature" from "wrong signature".
 type signingGateway struct {
-	secret []byte
-	sawSig string
-	sawPth string
-	ok     bool
+	secret  []byte
+	sawSig  string
+	sawPth  string
+	sawBody int
+	ok      bool
 }
 
 func (g *signingGateway) start(t *testing.T) *httptest.Server {
@@ -39,6 +40,7 @@ func (g *signingGateway) start(t *testing.T) *httptest.Server {
 		body, _ := io.ReadAll(r.Body)
 		g.sawSig = r.Header.Get("X-Signature")
 		g.sawPth = r.URL.Path
+		g.sawBody = len(body)
 		if g.sawSig == "" {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"missing request signature"}`))
