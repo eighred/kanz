@@ -32,6 +32,7 @@ type fakeBinance struct {
 
 	newOrderStatus int    // HTTP status for POST /api/v3/order
 	newOrderBody   string // body for POST
+	onPost         func() // may expire the caller after the venue receives POST
 	queryBody      string // body for GET /api/v3/order
 	queryStatus    int    // HTTP status for GET /api/v3/order (0 ⇒ 200)
 	// GET /api/v3/myTrades — the executions behind a filled order (#920). It is a
@@ -63,6 +64,9 @@ func newFakeBinance(t *testing.T) *fakeBinance {
 			f.posts++
 			f.sawClientOrderID = q.Get("newClientOrderId")
 			f.sawType = q.Get("type")
+			if f.onPost != nil {
+				f.onPost()
+			}
 			w.WriteHeader(f.newOrderStatus)
 			_, _ = w.Write([]byte(f.newOrderBody))
 		case http.MethodDelete:
@@ -186,6 +190,30 @@ func TestBinance_DuplicateRecoversViaQuery(t *testing.T) {
 	}
 	if len(fills) != 1 {
 		t.Fatalf("recovered fills = %d, want 1 (no double-execution)", len(fills))
+	}
+}
+
+func TestBinance_AmbiguousTimeoutQueriesWithAFreshBoundedContext(t *testing.T) {
+	f := newFakeBinance(t)
+	ctx, expirePlacement := context.WithCancel(context.Background())
+	f.onPost = expirePlacement
+	f.newOrderStatus = http.StatusInternalServerError
+	f.newOrderBody = `{"code":-1007,"msg":"Timeout waiting for response from backend server."}`
+	f.queryBody = `{"symbol":"BTCUSDT","orderId":9,"clientOrderId":"TIMEOUT-1","status":"NEW","executedQty":"0"}`
+
+	fills, err := venueOverFake(f).Execute(ctx, marketOrder("TIMEOUT-1"))
+	if err != nil {
+		t.Fatalf("Execute did not recover the accepted order after its placement context expired: %v", err)
+	}
+	if len(fills) != 0 {
+		t.Fatalf("working order returned %d fills, want 0", len(fills))
+	}
+	if f.posts != 1 || f.gets != 1 {
+		t.Fatalf("requests = %d POST, %d GET; want exactly one placement followed by one clOrdId query",
+			f.posts, f.gets)
+	}
+	if f.sawClientOrderID != "TIMEOUT-1" {
+		t.Fatalf("placement client id = %q, want TIMEOUT-1", f.sawClientOrderID)
 	}
 }
 

@@ -120,8 +120,9 @@ var (
 	// both of their failure paths. Reaching for them again here would be a second
 	// re-dial policy, which is how the venue-safety bound came to differ from the
 	// connect-failure bound in the first place.
-	NewExchangeHTTPClient = execution.NewExchangeHTTPClient
-	NewCloseRegistry      = execution.NewCloseRegistry
+	NewExchangeHTTPClient       = execution.NewExchangeHTTPClient
+	NewPlacementRecoveryContext = execution.NewPlacementRecoveryContext
+	NewCloseRegistry            = execution.NewCloseRegistry
 
 	NewMarkTickPublisher = execution.NewMarkTickPublisher
 

@@ -143,11 +143,14 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo data p
     'echo data-plane-server-dry-run-ok',
     "apply='$applyFlag'",
     'if [[ "${apply}" = 0 ]]; then exit 0; fi',
+    'tenancy_before=absent; if k3s kubectl -n kanz-messaging get configmap/nats-tenants >/dev/null 2>&1; then tenancy_before=$(k3s kubectl -n kanz-messaging get configmap/nats-tenants -o jsonpath=''{.data.tenants\.conf}'' | sha256sum | awk ''{print $1}''); fi',
     # kubectl does not implement Argo's BeforeHookCreation policy. A previously
     # failed bootstrap Job is immutable and must be removed before a reviewed,
     # idempotent reapply; a completed Job is retained as evidence.
     'for item in kanz-data/postgres-provisioner kanz-data/postgres-migrations kanz-messaging/nats-bootstrap; do ns=${item%/*}; job=${item#*/}; if k3s kubectl -n "${ns}" get job "${job}" >/dev/null 2>&1; then succeeded=$(k3s kubectl -n "${ns}" get job "${job}" -o jsonpath=''{.status.succeeded}''); if [[ "${succeeded:-0}" != 1 ]]; then k3s kubectl -n "${ns}" delete job "${job}" --wait=true >/dev/null; fi; fi; done',
     'k3s kubectl apply --server-side --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
+    'tenancy_after=$(k3s kubectl -n kanz-messaging get configmap/nats-tenants -o jsonpath=''{.data.tenants\.conf}'' | sha256sum | awk ''{print $1}'')',
+    'if [[ "${tenancy_before}" != absent && "${tenancy_before}" != "${tenancy_after}" ]] && k3s kubectl -n kanz-messaging get pod/nats-0 >/dev/null 2>&1; then mounted=; for attempt in $(seq 1 120); do mounted=$(k3s kubectl -n kanz-messaging exec nats-0 -c nats -- cat /etc/nats/tenants.conf | sha256sum | awk ''{print $1}'') || true; [[ "${mounted}" = "${tenancy_after}" ]] && break; sleep 1; done; [[ "${mounted}" = "${tenancy_after}" ]]; k3s kubectl -n kanz-messaging exec nats-0 -c nats -- nats-server -t -c /etc/nats/nats.conf >/dev/null; k3s kubectl -n kanz-messaging exec nats-0 -c nats -- nats-server --signal reload >/dev/null; echo nats-tenancy-reloaded-after-config-change; fi',
     'redis_sa=$(k3s kubectl -n kanz-messaging get pod redis-0 -o jsonpath=''{.spec.serviceAccountName}'' 2>/dev/null || true)',
     'if [[ -n "${redis_sa}" && "${redis_sa}" != redis ]]; then k3s kubectl -n kanz-messaging delete pod redis-0 --wait=false >/dev/null; fi',
     'k3s kubectl wait --for=jsonpath=''{.status.phase}''=Active namespace/kanz-data --timeout=60s >/dev/null',

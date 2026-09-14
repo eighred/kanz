@@ -208,7 +208,9 @@ func (v *OKXVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orde
 			// Idempotency recovery, same shape as the regular path: an ambiguous
 			// failure may mean the order landed. Ask by OUR id — no instId needed
 			// on this endpoint — and treat a resting stop as placed.
-			if _, qErr := v.rest.queryAlgoOrder(ctx, st.GetOrderId()); qErr == nil {
+			recoveryCtx, cancelRecovery := NewPlacementRecoveryContext(ctx)
+			defer cancelRecovery()
+			if _, qErr := v.rest.queryAlgoOrder(recoveryCtx, st.GetOrderId()); qErr == nil {
 				return nil, nil
 			}
 			return nil, aerr
@@ -227,8 +229,14 @@ func (v *OKXVenue) Execute(ctx context.Context, st *orderpb.OrderState) ([]*orde
 		}
 		// Idempotency recovery: a duplicate clOrdId / ambiguous timeout may mean
 		// the order landed. Query by clOrdId; if present, adopt its state.
-		if o, qErr := v.rest.queryOrder(ctx, instID, st.GetOrderId()); qErr == nil {
-			return v.tradedFills(ctx, o, st, instID)
+		// The placement deadline is often already expired here. A query derived
+		// directly from ctx would be cancelled before it reached OKX and turn the
+		// recovery seam into a disguised re-delivery. Detach cancellation under
+		// the shared finite bound, preserving request values for attribution.
+		recoveryCtx, cancelRecovery := NewPlacementRecoveryContext(ctx)
+		defer cancelRecovery()
+		if o, qErr := v.rest.queryOrder(recoveryCtx, instID, st.GetOrderId()); qErr == nil {
+			return v.tradedFills(recoveryCtx, o, st, instID)
 		}
 		return nil, err
 	}

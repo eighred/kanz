@@ -167,17 +167,34 @@ spec:
           args:
             - tunnel
             - --no-autoupdate
-            # Metrics on loopback so the sidecar has a liveness signal that does
-            # not require exposing it.
+            # Kubelet HTTP/TCP probes originate outside the pod network namespace
+            # and target the pod IP. Binding this listener to loopback makes every
+            # probe hit the NODE's 127.0.0.1 and kills an otherwise healthy tunnel.
+            # There is no Service for this port and default-deny ingress remains in
+            # force, so the listener is reachable by kubelet without becoming a
+            # public or cluster application surface.
             - --metrics
-            - 127.0.0.1:2000
+            - 0.0.0.0:2000
             - run
             - --token-file
             - /run/secrets/web/tunnel-token
+          ports:
+            - { containerPort: 2000, name: tunnel-metrics, protocol: TCP }
           livenessProbe:
-            httpGet: { path: /ready, port: 2000, host: 127.0.0.1 }
+            # Liveness asks whether cloudflared's local control listener is alive.
+            # A transient edge outage must not create a restart storm.
+            tcpSocket: { port: tunnel-metrics }
             initialDelaySeconds: 10
             periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            # /ready is connection-aware: keep the whole pod out of Ready until
+            # cloudflared has at least one registered edge connection.
+            httpGet: { path: /ready, port: tunnel-metrics }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
