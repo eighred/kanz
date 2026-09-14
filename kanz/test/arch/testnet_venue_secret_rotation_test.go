@@ -78,7 +78,7 @@ exit 92
 		cmd.Stdin = strings.NewReader(input)
 		output, err := cmd.CombinedOutput()
 		logBody, readErr := os.ReadFile(logPath)
-		if readErr != nil {
+		if readErr != nil && !os.IsNotExist(readErr) {
 			t.Fatal(readErr)
 		}
 		return string(output), string(logBody), marker, err
