@@ -46,6 +46,14 @@ func run() int {
 		appURL     = flag.String("app-url", "", "base URL of the web surface; when set, prints a redemption link instead of a bare token")
 	)
 	flag.Parse()
+	policy, err := identity.ParseInviteDomainPolicy(os.Getenv("IDENTITY_INVITE_EMAIL_DOMAINS"))
+	if err == nil {
+		err = policy.Check(*subject)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kanz-invite: %v\n", err)
+		return 2
+	}
 
 	missing := []string{}
 	for name, v := range map[string]string{
