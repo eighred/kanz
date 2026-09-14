@@ -505,7 +505,9 @@ func (h *Handler) Routes(mux *authz.Mux) {
 		mux.Handle(authz.Audit, "GET /v1/audit/events/{event_id}", h.handle(ServiceAudit, true, nil))
 		mux.Handle(authz.Audit, "GET /v1/audit/lineage/{event_id}", h.handle(ServiceAudit, true, nil))
 		mux.Handle(authz.Audit, "GET /v1/audit/reports/{template}", h.handle(ServiceAudit, true, nil))
+		mux.Handle(authz.Audit, "GET /v2/audit/reports/{template}", h.handle(ServiceAudit, true, nil))
 		mux.Handle(authz.Audit, "GET /v1/soc2/evidence", h.handle(ServiceAudit, true, nil))
+		mux.Handle(authz.Audit, "GET /v2/soc2/evidence", h.handle(ServiceAudit, true, nil))
 		// THE ESTATE-WIDE ONE, and it carries a SECOND gate this capability does
 		// not replace. The chain is one sequence across every tenant, so the
 		// attestation cannot be tenant-scoped and its record count tells the caller
@@ -574,6 +576,7 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// is appended — which is exactly what separates it from the filing routes on
 	// the same service, and why they are not mounted here.
 	mux.Handle(authz.Read, "POST /v1/screening/esg", h.handle(ServiceRegulatory, true, identityPath))
+	mux.Handle(authz.Read, "POST /v2/screening/esg", h.handle(ServiceRegulatory, true, identityPath))
 }
 
 // identityPath forwards the request path unchanged: regulatory serves

@@ -12,7 +12,7 @@
 // working the moment you stop using the dev server.
 
 export class ApiError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly code?: string) {
     super(message)
     this.name = 'ApiError'
   }
@@ -42,7 +42,7 @@ export function setUnauthenticatedHandler(fn: () => void): void {
   onUnauthenticated = fn
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, acceptConflict = false): Promise<T> {
   const res = await fetch(path, {
     method,
     credentials: 'same-origin',
@@ -54,25 +54,27 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     onUnauthenticated?.()
     throw new Unauthenticated()
   }
-  if (!res.ok) {
+  if (!res.ok && !(acceptConflict && res.status === 409)) {
     // The server's message is shown as-is when it is JSON we recognise; the raw
     // body is NOT surfaced otherwise, because an upstream error page is not a
     // message for a user and may carry internals.
     let message = `request failed (${res.status})`
+    let code: string | undefined
     try {
       const data = await res.json()
       if (typeof data?.error === 'string') message = data.error
+      if (typeof data?.code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(data.code)) code = data.code
     } catch {
       /* not JSON — keep the generic message */
     }
-    throw new ApiError(res.status, message)
+    throw new ApiError(res.status, message, code)
   }
   if (res.status === 204) return undefined as T
   return (await res.json()) as T
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>('GET', path),
+  get: <T>(path: string, options?: { acceptConflict?: boolean }) => request<T>('GET', path, undefined, options?.acceptConflict),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
 }

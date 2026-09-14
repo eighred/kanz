@@ -118,6 +118,7 @@ func (s *Server) routes() {
 	// the book the caller supplies — and unlike the filing routes above it signs
 	// nothing and appends nothing to the AUDIT-01 chain. See screen.go.
 	s.mux.HandleFunc("POST /v1/screening/esg", s.handleESGScreen)
+	s.mux.HandleFunc("POST /v2/screening/esg", s.handleESGScreen)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

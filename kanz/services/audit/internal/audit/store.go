@@ -33,7 +33,10 @@ type Filter struct {
 	// AfterSeq returns only records with seq strictly greater than it. Zero
 	// means "from the beginning" — seq starts at 1, so no record is excluded.
 	AfterSeq int64
-	Limit    int
+	// ThroughSeq is an inclusive upper bound. A non-nil zero selects the empty
+	// prefix; nil leaves the query unbounded above.
+	ThroughSeq *int64
+	Limit      int
 }
 
 // Store is the append-only audit log. Implementations MUST be append-only — no
@@ -75,8 +78,6 @@ type Store interface {
 	// design (who signs, where the anchor lives, what stops it being rewritten
 	// alongside the log) and not a refactor.
 	Scan(ctx context.Context, yield func(*Record) error) error
-	// Head returns the current chain tip (Genesis-derived for an empty log).
-	Head(ctx context.Context) (Head, error)
 	// Ping checks store liveness for readiness.
 	Ping(ctx context.Context) error
 }
@@ -84,6 +85,9 @@ type Store interface {
 // matches reports whether r satisfies f (shared by the in-memory store and
 // tests; the Postgres store pushes the same predicates into SQL).
 func matches(r *Record, f Filter) bool {
+	if f.ThroughSeq != nil && r.Seq > *f.ThroughSeq {
+		return false
+	}
 	if f.AfterSeq > 0 && r.Seq <= f.AfterSeq {
 		return false
 	}
