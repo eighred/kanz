@@ -9,10 +9,19 @@ param(
 
     [string]$Profile = 'kanz-platform',
 
-    [switch]$Apply
+    [switch]$Apply,
+
+    # Deliberately advances one harmless pod-template environment variable after the
+    # exact-main apply, then exits non-zero. The EXIT trap must restore the
+    # complete pre-apply controller state. This is a testnet transaction proof,
+    # never a production deployment option.
+    [switch]$VerifyRollback
 )
 
 $ErrorActionPreference = 'Stop'
+if ($VerifyRollback -and -not $Apply) {
+    throw '-VerifyRollback requires -Apply because rollback cannot be proved without a mutation.'
+}
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $kubectl = (Get-Command kubectl.exe -ErrorAction Stop).Source
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -96,8 +105,8 @@ if ($LASTEXITCODE -ne 0 -or -not $renderedLines) {
 }
 $rendered = ($renderedLines -join "`n") + "`n"
 $resourceCount = ([regex]::Matches($rendered, '(?m)^kind: ')).Count
-if ($resourceCount -ne 60) {
-    throw "Expected 60 rendered resources; found $resourceCount."
+if ($resourceCount -ne 61) {
+    throw "Expected 61 rendered resources; found $resourceCount."
 }
 $images = [regex]::Matches($rendered, '(?m)^\s*image:\s+(\S+)\s*$')
 if ($images.Count -ne 18) { throw "Expected 18 rendered container images; found $($images.Count)." }
@@ -174,6 +183,7 @@ $remotePayload = "$remoteBase.b64"
 $remoteManifest = "$remoteBase.yaml"
 $remotePodVerifier = "$remoteBase.jq"
 $remoteRollback = "$remoteBase.rollback.json"
+$remoteRollbackVerify = "$remoteBase.rollback-verify.json"
 $remotePolicyRollback = "$remoteBase.policy-rollback.json"
 Invoke-SsmCommands -Comment 'Initialize Kanz testnet workload transfer' -TimeoutSeconds 60 -Commands @(
     'set -eu',
@@ -200,18 +210,25 @@ Invoke-SsmCommands -Comment 'Stage Kanz workload Pod verifier' -TimeoutSeconds 6
 ) | Out-Null
 
 $applyFlag = if ($Apply) { '1' } else { '0' }
+$rollbackProbeFlag = if ($VerifyRollback) { '1' } else { '0' }
 $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo workloads' -TimeoutSeconds 2400 -Commands @(
     'set -Eeuo pipefail',
     "payload='$remotePayload'",
     "manifest='$remoteManifest'",
     "pod_filter='$remotePodVerifier'",
     "rollback='$remoteRollback'",
+    "rollback_verify='$remoteRollbackVerify'",
     "policy_rollback='$remotePolicyRollback'",
+    "rollback_probe='$rollbackProbeFlag'",
+    "rollback_probe_id='$transferId'",
     'applied=0',
     'fresh=0',
     'policy_preexisting=0',
-    'rollback_workloads() { /usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap -f "${rollback}" >&2; }',
-    'finish() { rc=$?; set +e; if [[ "${rc}" != 0 && "${applied}" = 1 ]]; then if [[ "${fresh}" = 1 ]]; then echo fresh-install-rollback-started >&2; /usr/local/bin/k3s kubectl delete --ignore-not-found=true --wait=true -f "${manifest}" >&2 || echo fresh-install-rollback-failed >&2; elif [[ -s "${rollback}" ]]; then echo update-rollback-started >&2; rollback_ok=1; rollback_workloads || rollback_ok=0; if [[ "${policy_preexisting}" = 1 ]]; then /usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap -f "${policy_rollback}" >&2 || rollback_ok=0; else /usr/local/bin/k3s kubectl -n kanz-services delete networkpolicy allow-gateway-to-oms-query --ignore-not-found=true >&2 || rollback_ok=0; fi; for deployment in identity compliance accounting audit oms venue-binance venue-okx api-gateway web-bff; do /usr/local/bin/k3s kubectl -n kanz-services rollout status "deployment/${deployment}" --timeout=600s >&2 || rollback_ok=0; done; /usr/local/bin/k3s kubectl -n kanz-services wait --for=jsonpath=''{.status.phase}''=Healthy rollout/risk-engine --timeout=900s >&2 || rollback_ok=0; if [[ "${rollback_ok}" = 1 ]]; then echo update-rollback-complete >&2; else echo update-rollback-failed >&2; fi; fi; fi; rm -f "${payload}" "${manifest}" "${pod_filter}" "${rollback}" "${policy_rollback}"; exit "${rc}"; }',
+    'web_bff_preexisting=0',
+    'capture_workloads() { /usr/local/bin/k3s kubectl -n kanz-services get deployment/identity deployment/compliance deployment/accounting deployment/audit deployment/oms deployment/venue-binance deployment/venue-okx deployment/api-gateway deployment/web-bff rollout.argoproj.io/risk-engine --ignore-not-found=true -o json | jq -S -c ''{apiVersion:"v1",kind:"List",items:[.items[] | {apiVersion,kind,metadata:{name:.metadata.name,namespace:.metadata.namespace,annotations:((.metadata.annotations // {}) | with_entries(select(.key | startswith("kanz.io/"))))},spec:.spec}] | sort_by(.kind,.metadata.name)}''; }',
+    'rollback_workloads() { rollback_apply_ok=1; while IFS=$''\t'' read -r kind name; do if ! current=$(/usr/local/bin/k3s kubectl -n kanz-services get "${kind}/${name}" -o json); then rollback_apply_ok=0; continue; fi; if ! desired=$(jq -ce --arg kind "${kind}" --arg name "${name}" ''.items[] | select(.kind == $kind and .metadata.name == $name)'' "${rollback}"); then rollback_apply_ok=0; continue; fi; jq -cn --argjson current "${current}" --argjson desired "${desired}" ''{apiVersion:$current.apiVersion,kind:$current.kind,metadata:(($current.metadata | {name,namespace,resourceVersion,labels,annotations,finalizers,ownerReferences}) | with_entries(select(.value != null))),spec:$desired.spec} | .metadata.annotations = (((.metadata.annotations // {}) | with_entries(select((.key | startswith("kanz.io/")) | not))) + ($desired.metadata.annotations // {}))'' | /usr/local/bin/k3s kubectl replace --field-manager=kanz-bootstrap -f - >&2 || rollback_apply_ok=0; done < <(jq -r ''.items[] | [.kind,.metadata.name] | @tsv'' "${rollback}"); [[ "${rollback_apply_ok}" = 1 ]]; }',
+    'deployment_restored() { name=$1; deadline=$((SECONDS+600)); while (( SECONDS < deadline )); do if /usr/local/bin/k3s kubectl -n kanz-services get "deployment/${name}" -o json | jq -e ''.status.observedGeneration >= .metadata.generation and (.status.updatedReplicas // 0) == .spec.replicas and (.status.availableReplicas // 0) == .spec.replicas and (.status.readyReplicas // 0) == .spec.replicas'' >/dev/null; then echo "deployment/${name} restored" >&2; return 0; fi; sleep 2; done; echo "deployment/${name} did not restore its current generation" >&2; return 1; }',
+    'finish() { rc=$?; set +e; if [[ "${rc}" != 0 && "${applied}" = 1 ]]; then if [[ "${fresh}" = 1 ]]; then echo fresh-install-rollback-started >&2; /usr/local/bin/k3s kubectl delete --ignore-not-found=true --wait=true -f "${manifest}" >&2 || echo fresh-install-rollback-failed >&2; elif [[ -s "${rollback}" ]]; then echo update-rollback-started >&2; rollback_ok=1; rollback_workloads || rollback_ok=0; if [[ "${web_bff_preexisting}" = 0 ]]; then /usr/local/bin/k3s kubectl -n kanz-services delete deployment/web-bff --ignore-not-found=true --wait=true >&2 || rollback_ok=0; fi; if [[ "${policy_preexisting}" = 1 ]]; then policy_restored=0; for attempt in 1 2 3 4 5; do /usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap -f "${policy_rollback}" >&2 && { policy_restored=1; break; }; sleep 1; done; [[ "${policy_restored}" = 1 ]] || rollback_ok=0; else /usr/local/bin/k3s kubectl -n kanz-services delete networkpolicy allow-gateway-to-oms-query --ignore-not-found=true >&2 || rollback_ok=0; fi; for deployment in identity compliance accounting audit oms venue-binance venue-okx api-gateway; do deployment_restored "${deployment}" || rollback_ok=0; done; if [[ "${web_bff_preexisting}" = 1 ]]; then deployment_restored web-bff || rollback_ok=0; fi; /usr/local/bin/k3s kubectl -n kanz-services wait --for=jsonpath=''{.status.phase}''=Healthy rollout/risk-engine --timeout=900s >&2 || rollback_ok=0; capture_workloads > "${rollback_verify}" || rollback_ok=0; if cmp -s "${rollback}" "${rollback_verify}"; then echo update-rollback-state-exact >&2; else echo update-rollback-state-mismatch >&2; rollback_ok=0; fi; if [[ "${rollback_ok}" = 1 ]]; then echo update-rollback-complete >&2; else echo update-rollback-failed >&2; fi; fi; fi; rm -f "${payload}" "${manifest}" "${pod_filter}" "${rollback}" "${rollback_verify}" "${policy_rollback}"; exit "${rc}"; }',
     'trap finish EXIT',
     'base64 -d "${payload}" | gzip -d > "${manifest}"',
     ("printf '%s  %s\n' '$manifestHash' " + '"${manifest}" | sha256sum --check --status'),
@@ -240,10 +257,12 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo worklo
     'if /usr/local/bin/k3s kubectl -n kanz-services get rollout/risk-engine >/dev/null 2>&1; then risk_exists=1; fi',
     'if [[ "${accounting_exists}" != "${risk_exists}" ]]; then echo workload installation refused: partial managed state >&2; exit 1; fi',
     'if [[ "${accounting_exists}" = 0 ]]; then fresh=1; fi',
-    'if [[ "${fresh}" = 0 ]]; then /usr/local/bin/k3s kubectl -n kanz-services get deployment/identity deployment/compliance deployment/accounting deployment/audit deployment/oms deployment/venue-binance deployment/venue-okx deployment/api-gateway deployment/web-bff rollout.argoproj.io/risk-engine -o json | jq ''{apiVersion:"v1",kind:"List",items:[.items[] | {apiVersion,kind,metadata:{name:.metadata.name,namespace:.metadata.namespace,annotations:((.metadata.annotations // {}) | with_entries(select(.key | startswith("kanz.io/"))))},spec:.spec}]}'' > "${rollback}"; test "$(jq ''.items | length'' "${rollback}")" = 10; fi',
+    'if [[ "${fresh}" = 0 ]]; then /usr/local/bin/k3s kubectl -n kanz-services get deployment/identity deployment/compliance deployment/accounting deployment/audit deployment/oms deployment/venue-binance deployment/venue-okx deployment/api-gateway rollout.argoproj.io/risk-engine >/dev/null; if /usr/local/bin/k3s kubectl -n kanz-services get deployment/web-bff >/dev/null 2>&1; then web_bff_preexisting=1; fi; capture_workloads > "${rollback}"; test "$(jq ''.items | length'' "${rollback}")" -ge 9; fi',
+    'if [[ "${rollback_probe}" = 1 ]] && { [[ "${fresh}" = 1 ]] || [[ "${web_bff_preexisting}" = 0 ]] || [[ "$(jq ''.items | length'' "${rollback}")" != 10 ]]; }; then echo workload rollback probe refused: complete preexisting estate required >&2; exit 1; fi',
     'if [[ "${fresh}" = 0 ]] && /usr/local/bin/k3s kubectl -n kanz-services get networkpolicy/allow-gateway-to-oms-query -o json > "${policy_rollback}" 2>/dev/null; then policy_preexisting=1; fi',
     'applied=1',
     '/usr/local/bin/k3s kubectl apply --server-side --force-conflicts --field-manager=kanz-bootstrap -f "${manifest}" >/dev/null',
+    'if [[ "${rollback_probe}" = 1 ]]; then probe_generation_before=$(/usr/local/bin/k3s kubectl -n kanz-services get deployment/identity -o jsonpath=''{.metadata.generation}''); /usr/local/bin/k3s kubectl -n kanz-services set env deployment/identity KANZ_ROLLBACK_PROBE="${rollback_probe_id}" >/dev/null; probe_generation_after=$(/usr/local/bin/k3s kubectl -n kanz-services get deployment/identity -o jsonpath=''{.metadata.generation}''); test "${probe_generation_after}" -gt "${probe_generation_before}"; /usr/local/bin/k3s kubectl -n kanz-services rollout status deployment/identity --timeout=600s >/dev/null; echo workload-rollback-probe-advanced >&2; exit 86; fi',
     'for deployment in identity compliance accounting audit oms venue-binance venue-okx api-gateway web-bff; do /usr/local/bin/k3s kubectl -n kanz-services rollout status "deployment/${deployment}" --timeout=600s >/dev/null; done',
     '/usr/local/bin/k3s kubectl -n kanz-services wait --for=jsonpath=''{.status.phase}''=Healthy rollout/risk-engine --timeout=900s >/dev/null',
     'pods_ready=0; for attempt in $(seq 1 120); do pods=$(/usr/local/bin/k3s kubectl -n kanz-services get pods -l app.kubernetes.io/part-of=kanz -o json); if jq -e -f "${pod_filter}" <<<"${pods}" >/dev/null; then pods_ready=1; break; fi; sleep 1; done; test "${pods_ready}" = 1',

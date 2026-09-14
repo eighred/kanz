@@ -8,8 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eighred/kanz/internal/outbox"
+	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestPostgresCustodyActionConcurrentRetriesAndIsolation(t *testing.T) {
@@ -65,12 +66,24 @@ func TestPostgresCustodyActionConcurrentRetriesAndIsolation(t *testing.T) {
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM custody_actions`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("evidence count %d: %v", count, err)
 	}
-	records, err := outbox.NewPostgres(st.pool, "accounting").Pending(ctx, id, 100)
-	if err != nil || len(records) != 1 || records[0].Record.Subject != SubjectActionRecorded || records[0].Record.TenantID != a.Tenant {
-		t.Fatalf("outbox: %+v %v", records, err)
+	// Inspect durable history rather than Pending: the repository's real relay is
+	// allowed to publish this row before the assertion runs. Published FACTs are
+	// still the atomic evidence this test needs to prove; treating a successful
+	// relay as a missing enqueue made this concurrency proof timing-dependent.
+	var factTenant, subject, schemaRef string
+	var payload []byte
+	var factCount int
+	if err := st.pool.QueryRow(ctx, `SELECT envelope_tenant_id, subject, payload_schema_ref, payload, count(*) OVER ()
+		FROM outbox WHERE partition_key=$1 AND correlation_id=$2`, id, a.RequestID).
+		Scan(&factTenant, &subject, &schemaRef, &payload, &factCount); err != nil {
+		t.Fatalf("durable outbox FACT: %v", err)
 	}
-	if _, err := records[0].Record.Event(); err != nil {
-		t.Fatalf("FACT cannot be decoded: %v", err)
+	if factCount != 1 || factTenant != a.Tenant || subject != SubjectActionRecorded || schemaRef != "accounting.v1.CustodyActionRecorded:1" {
+		t.Fatalf("durable outbox FACT: count=%d tenant=%q subject=%q schema=%q", factCount, factTenant, subject, schemaRef)
+	}
+	var fact accountingpb.CustodyActionRecorded
+	if err := proto.Unmarshal(payload, &fact); err != nil || fact.RequestId != a.RequestID || fact.BreakId != id || fact.Actor != a.Actor {
+		t.Fatalf("durable outbox FACT payload: %+v %v", &fact, err)
 	}
 	for _, sql := range []string{`UPDATE custody_actions SET actor='mallory'`, `DELETE FROM custody_actions`, `TRUNCATE custody_actions`} {
 		if _, err := st.pool.Exec(ctx, sql); err == nil {
