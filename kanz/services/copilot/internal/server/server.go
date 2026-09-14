@@ -15,6 +15,8 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync/atomic"
@@ -88,6 +90,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 
 // handleAsk answers a governed question as the authenticated Principal.
 func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	p, ok := auth.PrincipalFromContext(r.Context())
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
@@ -96,13 +99,36 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Question string `json:"question"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Question == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "question is required"})
+	r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(&body)
+	if err == nil {
+		var trailing any
+		if next := decoder.Decode(&trailing); next != io.EOF {
+			err = errors.New("invalid trailing request data")
+			var oversized *http.MaxBytesError
+			if errors.As(next, &oversized) {
+				err = next
+			}
+		}
+	}
+	if err != nil || agent.ValidateQuestion(body.Question) != nil {
+		status := http.StatusBadRequest
+		var oversized *http.MaxBytesError
+		if errors.As(err, &oversized) || len(body.Question) > agent.MaxQuestionBytes {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": "a valid question of at most 16384 bytes is required"})
+		return
+	}
+	if s.agent == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "copilot is unavailable", "code": "unavailable"})
 		return
 	}
 	ans, err := s.agent.Ask(r.Context(), p, body.Question)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "copilot could not complete this investigation", "code": "unavailable"})
 		return
 	}
 	cites := make([]string, 0, len(ans.Citations))
