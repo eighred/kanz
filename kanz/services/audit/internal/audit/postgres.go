@@ -117,6 +117,9 @@ func (p *Postgres) Query(ctx context.Context, f Filter) ([]*Record, error) {
 	if f.AfterSeq > 0 {
 		add("seq > $%d", f.AfterSeq)
 	}
+	if f.ThroughSeq != nil {
+		add("seq <= $%d", *f.ThroughSeq)
+	}
 	if f.Correlation != "" {
 		add("correlation_id = $%d", f.Correlation)
 	}
@@ -167,15 +170,6 @@ func (p *Postgres) Scan(ctx context.Context, yield func(*Record) error) error {
 		}
 	}
 	return rows.Err()
-}
-
-func (p *Postgres) Head(ctx context.Context) (Head, error) {
-	var h Head
-	err := p.pool.QueryRow(ctx, `SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1`).Scan(&h.Seq, &h.Hash)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Head{Seq: 0, Hash: chain.Genesis}, nil
-	}
-	return h, err
 }
 
 func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
