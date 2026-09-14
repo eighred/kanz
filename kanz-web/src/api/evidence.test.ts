@@ -42,5 +42,3 @@ describe('bounded evidence contract', () => {
     expect(describeEvidence(new ApiError(422, 'private'))).toContain('Narrow it')
   })
 })
-
-
