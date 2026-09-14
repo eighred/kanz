@@ -17,9 +17,9 @@ case "$mode" in
 esac
 
 VAULT_BIN=${VAULT_BIN:-/bin/vault}
-export VAULT_ADDR=https://127.0.0.1:8200
-export VAULT_CACERT=/run/spire/certs/bundle.crt
-export VAULT_TLS_SERVER_NAME=vault.vault.svc.cluster.local
+export VAULT_ADDR=${VAULT_ADDR:-https://127.0.0.1:8200}
+export VAULT_CACERT=${VAULT_CACERT:-/run/spire/certs/bundle.crt}
+export VAULT_TLS_SERVER_NAME=${VAULT_TLS_SERVER_NAME:-vault.vault.svc.cluster.local}
 
 if [ ! -r "$VAULT_CACERT" ]; then
     printf 'Vault trust bundle is not readable at %s; refusing bootstrap.\n' "$VAULT_CACERT" >&2
@@ -34,8 +34,21 @@ okx_api_secret=''
 okx_api_passphrase=''
 binance_account_uid=''
 okx_account_uid=''
+secret_pipe_dir=''
+secret_writer_pids=''
 
 clear_secrets() {
+    if [ -n "$secret_writer_pids" ]; then
+        # A failed Vault request may stop before opening every FIFO. Terminate
+        # any writer still blocked on open so cleanup itself cannot hang.
+        kill $secret_writer_pids 2>/dev/null || true
+        wait $secret_writer_pids 2>/dev/null || true
+    fi
+    if [ -n "$secret_pipe_dir" ]; then
+        rm -rf "$secret_pipe_dir"
+    fi
+    secret_writer_pids=''
+    secret_pipe_dir=''
     vault_token=''
     binance_api_key=''
     binance_api_secret=''
@@ -48,9 +61,9 @@ clear_secrets() {
 }
 trap clear_secrets EXIT HUP INT TERM
 if [ "$mode" = account-proof ]; then
-    completion_marker=/vault/run/testnet-venue-account-proof.complete
+    completion_marker=${COMPLETION_MARKER:-/vault/run/testnet-venue-account-proof.complete}
 else
-    completion_marker=/vault/run/testnet-venue-secrets.complete
+    completion_marker=${COMPLETION_MARKER:-/vault/run/testnet-venue-secrets.complete}
 fi
 rm -f "$completion_marker"
 
@@ -59,6 +72,56 @@ require_secret() {
         printf '%s\n' 'A required value was empty; no further changes were made.' >&2
         exit 1
     fi
+}
+
+write_venue_credentials() {
+    venue_path=$1
+    shift
+
+    pipe_root=${VENUE_SECRET_FIFO_ROOT:-/vault/run}
+    secret_pipe_dir=$(mktemp -d "$pipe_root/venue-secrets.XXXXXX")
+    secret_writer_pids=''
+    vault_args=''
+    field_number=0
+
+    while [ "$#" -gt 0 ]; do
+        field_name=$1
+        field_value=$2
+        shift 2
+        field_number=$((field_number + 1))
+        field_pipe=$secret_pipe_dir/field-$field_number
+        mkfifo "$field_pipe"
+        chmod 0600 "$field_pipe"
+        printf '%s' "$field_value" > "$field_pipe" &
+        secret_writer_pids="$secret_writer_pids $!"
+        # Only the FIFO path enters argv. The credential remains in memory and
+        # crosses into Vault through the pipe opened by Vault's @file syntax.
+        vault_args="$vault_args $field_name=@$field_pipe"
+    done
+
+    if "$VAULT_BIN" kv metadata get "$venue_path" >/dev/null 2>&1; then
+        vault_action=patch
+    else
+        vault_action=put
+    fi
+
+    set +e
+    # Field names and generated FIFO paths contain no shell metacharacters.
+    # Splitting vault_args is intentional: Vault requires one key=@file argv
+    # entry per field.
+    # shellcheck disable=SC2086
+    "$VAULT_BIN" kv "$vault_action" "$venue_path" $vault_args >/dev/null
+    vault_status=$?
+    set -e
+
+    if [ "$vault_status" -ne 0 ]; then
+        kill $secret_writer_pids 2>/dev/null || true
+    fi
+    wait $secret_writer_pids 2>/dev/null || true
+    secret_writer_pids=''
+    rm -rf "$secret_pipe_dir"
+    secret_pipe_dir=''
+    return "$vault_status"
 }
 
 printf '%s' 'Vault operator token: ' >&2
@@ -199,44 +262,40 @@ printf '%s' 'Binance testnet API key: ' >&2
 IFS= read -r -s binance_api_key
 printf '\n' >&2
 require_secret "$binance_api_key"
-if "$VAULT_BIN" kv metadata get kv/kanz/venue-binance >/dev/null 2>&1; then
-    printf '%s' "$binance_api_key" | "$VAULT_BIN" kv patch kv/kanz/venue-binance api_key=- >/dev/null
-else
-    printf '%s' "$binance_api_key" | "$VAULT_BIN" kv put kv/kanz/venue-binance api_key=- >/dev/null
-fi
-binance_api_key=''
 
 printf '%s' 'Binance testnet API secret: ' >&2
 IFS= read -r -s binance_api_secret
 printf '\n' >&2
 require_secret "$binance_api_secret"
-printf '%s' "$binance_api_secret" | "$VAULT_BIN" kv patch kv/kanz/venue-binance api_secret=- >/dev/null
-binance_api_secret=''
 
 printf '%s' 'OKX demo API key: ' >&2
 IFS= read -r -s okx_api_key
 printf '\n' >&2
 require_secret "$okx_api_key"
-if "$VAULT_BIN" kv metadata get kv/kanz/venue-okx >/dev/null 2>&1; then
-    printf '%s' "$okx_api_key" | "$VAULT_BIN" kv patch kv/kanz/venue-okx api_key=- >/dev/null
-else
-    printf '%s' "$okx_api_key" | "$VAULT_BIN" kv put kv/kanz/venue-okx api_key=- >/dev/null
-fi
-okx_api_key=''
 
 printf '%s' 'OKX demo API secret: ' >&2
 IFS= read -r -s okx_api_secret
 printf '\n' >&2
 require_secret "$okx_api_secret"
-printf '%s' "$okx_api_secret" | "$VAULT_BIN" kv patch kv/kanz/venue-okx api_secret=- >/dev/null
-okx_api_secret=''
 
 printf '%s' 'OKX demo API passphrase: ' >&2
 IFS= read -r -s okx_api_passphrase
 printf '\n' >&2
 require_secret "$okx_api_passphrase"
-printf '%s' "$okx_api_passphrase" | "$VAULT_BIN" kv patch kv/kanz/venue-okx api_passphrase=- >/dev/null
-okx_api_passphrase=''
+
+# All required values are present before the first mutation. Each call creates
+# one complete KV version for that venue and preserves unrelated fields (the
+# database DSNs share these paths) through `kv patch` on existing records.
+write_venue_credentials kv/kanz/venue-binance \
+    api_key "$binance_api_key" \
+    api_secret "$binance_api_secret"
+unset binance_api_key binance_api_secret
+
+write_venue_credentials kv/kanz/venue-okx \
+    api_key "$okx_api_key" \
+    api_secret "$okx_api_secret" \
+    api_passphrase "$okx_api_passphrase"
+unset okx_api_key okx_api_secret okx_api_passphrase
 
 "$VAULT_BIN" kv metadata get kv/kanz/venue-binance >/dev/null
 "$VAULT_BIN" kv metadata get kv/kanz/venue-okx >/dev/null
