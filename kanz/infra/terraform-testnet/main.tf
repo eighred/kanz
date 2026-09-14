@@ -26,6 +26,30 @@ locals {
     "venue-okx",
     "web-bff",
   ])
+  # Cloudflare publishes these exact edge endpoints for Tunnel transport.
+  # Keep them as /32s so opening 7844 does not grant arbitrary Internet egress.
+  cloudflare_tunnel_edge_ipv4 = toset([
+    "198.41.192.7/32",
+    "198.41.192.27/32",
+    "198.41.192.37/32",
+    "198.41.192.47/32",
+    "198.41.192.57/32",
+    "198.41.192.67/32",
+    "198.41.192.77/32",
+    "198.41.192.107/32",
+    "198.41.192.167/32",
+    "198.41.192.227/32",
+    "198.41.200.13/32",
+    "198.41.200.23/32",
+    "198.41.200.33/32",
+    "198.41.200.43/32",
+    "198.41.200.53/32",
+    "198.41.200.63/32",
+    "198.41.200.73/32",
+    "198.41.200.113/32",
+    "198.41.200.193/32",
+    "198.41.200.233/32",
+  ])
   common_tags = {
     Name                   = var.name
     "kanz.io/capital-path" = "testnet-only"
@@ -253,6 +277,28 @@ resource "aws_vpc_security_group_egress_rule" "https" {
   cidr_ipv4         = "0.0.0.0/0"
   from_port         = 443
   to_port           = 443
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "cloudflare_tunnel_quic" {
+  for_each = local.cloudflare_tunnel_edge_ipv4
+
+  security_group_id = aws_security_group.node.id
+  description       = "Cloudflare Tunnel QUIC"
+  cidr_ipv4         = each.value
+  from_port         = 7844
+  to_port           = 7844
+  ip_protocol       = "udp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "cloudflare_tunnel_http2" {
+  for_each = local.cloudflare_tunnel_edge_ipv4
+
+  security_group_id = aws_security_group.node.id
+  description       = "Cloudflare Tunnel HTTP/2 fallback"
+  cidr_ipv4         = each.value
+  from_port         = 7844
+  to_port           = 7844
   ip_protocol       = "tcp"
 }
 

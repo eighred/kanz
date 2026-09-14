@@ -21,6 +21,7 @@ import (
 
 	"github.com/eighred/kanz/internal/clientip"
 	"github.com/eighred/kanz/internal/gatewaysig"
+	"github.com/eighred/kanz/internal/requestbody"
 	"github.com/eighred/kanz/services/web-bff/internal/identityclient"
 	"github.com/eighred/kanz/services/web-bff/internal/oidc"
 	"github.com/eighred/kanz/services/web-bff/internal/session"
@@ -436,6 +437,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
 		return
 	}
+	body, ok := s.readProxyBody(w, r)
+	if !ok {
+		return
+	}
 	out := r.Clone(r.Context())
 	// Strip the /api prefix so /api/v1/ask reaches the gateway as /v1/ask.
 	out.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
@@ -447,24 +452,43 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	out.Header.Del("Cookie")
 	out.Header.Set("Authorization", "Bearer "+sess.AccessToken)
 	// SIGN IT, or the gateway refuses before it ever authenticates (#777). The
-	// signature covers the body, so the body has to be read here and put back --
-	// r.Clone shares the original ReadCloser, and a consumed one forwards empty.
+	// signature covers the body, which readProxyBody bounded before allocating.
+	// Put the bytes back because r.Clone shares the consumed ReadCloser.
 	//
 	// The PATH SIGNED IS THE GATEWAY'S, not this server's: the middleware hashes
 	// the path it receives, so signing "/api/v1/..." produces a valid signature
 	// for a request nobody makes.
+	out.Body = io.NopCloser(bytes.NewReader(body))
+	out.ContentLength = int64(len(body))
 	if len(s.signingSecret) > 0 {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			s.fail(w, http.StatusBadRequest, "read body failed", err)
-			return
-		}
-		_ = r.Body.Close()
-		out.Body = io.NopCloser(bytes.NewReader(body))
-		out.ContentLength = int64(len(body))
 		gatewaysig.SignRequest(out, s.signingSecret, body)
 	}
 	s.proxy.ServeHTTP(w, out)
+}
+
+// readProxyBody enforces the public request-body contract before the singleton
+// BFF buffers or signs bytes. Content-Length rejects known oversize requests
+// without touching their streams; MaxBytesReader covers chunked bodies and
+// callers that understate the length.
+func (s *Server) readProxyBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	if r.ContentLength > requestbody.MaxBytes {
+		_ = r.Body.Close()
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+		return nil, false
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, requestbody.MaxBytes))
+	_ = r.Body.Close()
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return nil, false
+		}
+		s.fail(w, http.StatusBadRequest, "read body failed", err)
+		return nil, false
+	}
+	return body, true
 }
 
 // THE REPRODUCTION IS GONE (#781). It used to live here, and its own comment

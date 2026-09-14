@@ -17,7 +17,7 @@ def digest:
   capture("@(?<digest>sha256:[0-9a-f]{64})$").digest;
 
 .items as $pods
-| ($pods | length) == 9
+| ($pods | length) == 10
   and all($pods[];
     . as $pod
     | $pod.status.phase == "Running"

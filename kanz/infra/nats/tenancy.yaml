@@ -551,7 +551,8 @@ data:
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/risk-engine"
             permissions: {
               # RISK-10's Publisher (internal/risk/publish) emits the engine's own
-              # FOUR output FACTs: the two RISK-10 results (publish.go) and the
+              # FIVE output FACTs: the two RISK-10 results (publish.go), the
+              # feature vector observed after each recompute, and the
               # two MODEL ARTIFACTS the results were computed FROM
               # (modelrecord.go, #1039) — risk.curve.calibrated, published by the
               # calibration scheduler when RISK_ENGINE_CALIBRATION_RATES is set,
@@ -573,6 +574,7 @@ data:
               publish: {
                 allow: [
                   "risk.portfolio.exposure_recomputed", "risk.portfolio.measures_computed",
+                  "inference.feature.computed",
                   "risk.curve.calibrated", "risk.factor.model_fitted",
                   "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
                   "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
@@ -1896,6 +1898,7 @@ data:
               publish: {
                 allow: [
                   "risk.portfolio.exposure_recomputed", "risk.portfolio.measures_computed",
+                  "inference.feature.computed",
                   "risk.curve.calibrated", "risk.factor.model_fitted",
                   "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
                   "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
@@ -1942,6 +1945,7 @@ data:
               publish: {
                 allow: [
                   "risk.portfolio.exposure_recomputed", "risk.portfolio.measures_computed",
+                  "inference.feature.computed",
                   "risk.curve.calibrated", "risk.factor.model_fitted",
                   "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
                   "dlq.market.>", "$JS.API.>", "$JS.ACK.>",

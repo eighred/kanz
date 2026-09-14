@@ -293,6 +293,98 @@ func TestEveryProbePointsAtARouteTheServiceServes(t *testing.T) {
 	}
 }
 
+// CLOUDFLARED'S HEALTH CHECKS MUST CROSS THE KUBELET/POD NAMESPACE BOUNDARY.
+//
+// An HTTP probe with host: 127.0.0.1 is issued by kubelet, so it reaches the
+// node's loopback rather than the sidecar's listener. The tunnel can establish
+// every edge connection and still be killed forever by that probe. Liveness also
+// must not mean "the external edge is reachable": cloudflared reconnects on
+// transient edge failures, while restarting it turns an outage into a crash loop.
+// Readiness owns edge connectivity; liveness owns the local process listener.
+func TestCloudflaredProbesUsePodReachableMetricsAndCorrectSemantics(t *testing.T) {
+	root := moduleRoot(t)
+	body, err := os.ReadFile(filepath.Join(root, "infra", "deploy", "web-bff-deploy.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cloudflared *cloudflaredProbeContainer
+	dec := yaml.NewDecoder(strings.NewReader(string(body)))
+	for cloudflared == nil {
+		var workload cloudflaredProbeWorkload
+		if err := dec.Decode(&workload); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("decode web-bff workload: %v", err)
+		}
+		for i := range workload.Spec.Template.Spec.Containers {
+			if workload.Spec.Template.Spec.Containers[i].Name == "cloudflared" {
+				cloudflared = &workload.Spec.Template.Spec.Containers[i]
+				break
+			}
+		}
+	}
+	if cloudflared == nil {
+		t.Fatal("web-bff workload has no cloudflared sidecar")
+	}
+
+	metricsAddress := ""
+	for i := 0; i+1 < len(cloudflared.Args); i++ {
+		if cloudflared.Args[i] == "--metrics" {
+			metricsAddress = cloudflared.Args[i+1]
+			break
+		}
+	}
+	if metricsAddress != "0.0.0.0:2000" {
+		t.Fatalf("cloudflared metrics address = %q, want pod-reachable 0.0.0.0:2000", metricsAddress)
+	}
+	if len(cloudflared.Ports) != 1 || cloudflared.Ports[0].Name != "tunnel-metrics" || cloudflared.Ports[0].ContainerPort != 2000 {
+		t.Fatalf("cloudflared ports = %+v, want named tunnel-metrics port 2000", cloudflared.Ports)
+	}
+	if cloudflared.LivenessProbe.TCPSocket.Port != "tunnel-metrics" || cloudflared.LivenessProbe.HTTPGet.Path != "" {
+		t.Fatalf("cloudflared liveness must test the local TCP listener, not edge readiness: %+v", cloudflared.LivenessProbe)
+	}
+	ready := cloudflared.ReadinessProbe.HTTPGet
+	if ready.Path != "/ready" || ready.Port != "tunnel-metrics" || ready.Host != "" {
+		t.Fatalf("cloudflared readiness = %+v, want /ready on the pod IP's tunnel-metrics port", ready)
+	}
+}
+
+type cloudflaredProbeContainer struct {
+	Name  string   `yaml:"name"`
+	Args  []string `yaml:"args"`
+	Ports []struct {
+		Name          string `yaml:"name"`
+		ContainerPort int    `yaml:"containerPort"`
+	} `yaml:"ports"`
+	LivenessProbe struct {
+		TCPSocket struct {
+			Port string `yaml:"port"`
+		} `yaml:"tcpSocket"`
+		HTTPGet struct {
+			Path string `yaml:"path"`
+		} `yaml:"httpGet"`
+	} `yaml:"livenessProbe"`
+	ReadinessProbe struct {
+		HTTPGet struct {
+			Host string `yaml:"host"`
+			Path string `yaml:"path"`
+			Port string `yaml:"port"`
+		} `yaml:"httpGet"`
+	} `yaml:"readinessProbe"`
+}
+
+type cloudflaredProbeWorkload struct {
+	Spec struct {
+		Template struct {
+			Spec struct {
+				Containers []cloudflaredProbeContainer `yaml:"containers"`
+			} `yaml:"spec"`
+		} `yaml:"template"`
+	} `yaml:"spec"`
+}
+
 // A DECLARED VOLUME MUST BE MOUNTED, OR IT IS DEAD CONFIGURATION THAT READS AS
 // WORKING.
 //

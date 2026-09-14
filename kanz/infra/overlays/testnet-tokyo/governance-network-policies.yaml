@@ -63,12 +63,29 @@ spec:
               app: identity
       ports:
         - { protocol: TCP, port: 8087 }
+    # cloudflared discovers the nearest tunnel edges through DNS SRV records.
+    # Select CoreDNS explicitly so the default-deny policy does not grant access
+    # to any other kube-system workload.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
       ports:
         - { protocol: TCP, port: 443 }
+        # Cloudflare Tunnel transport: QUIC prefers UDP and falls back to
+        # HTTP/2 over TCP on the same required edge port.
+        - { protocol: UDP, port: 7844 }
+        - { protocol: TCP, port: 7844 }
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -107,5 +124,30 @@ spec:
         - podSelector:
             matchLabels:
               app: web-bff
+        # The gateway must fetch Identity's JWKS before /readyz can pass. Tokyo
+        # enforces default-deny, so the issuer probe needs both policy halves.
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8087 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-identity-egress
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: identity
       ports:
         - { protocol: TCP, port: 8087 }

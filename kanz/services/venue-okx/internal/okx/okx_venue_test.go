@@ -27,6 +27,8 @@ type fakeOKX struct {
 	posts       int
 	gets        int // GET /api/v5/trade/order count — a reconciler query-order (#904)
 	placeBody   string
+	placeStatus int
+	onPost      func() // may expire the caller after the venue receives POST
 	queryBody   string
 	balanceBody string
 	tickerBody  string
@@ -68,6 +70,12 @@ func newFakeOKX(t *testing.T) *fakeOKX {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.sawPostCl = body.ClOrdID
 			f.sawPostSz = body.Sz
+			if f.onPost != nil {
+				f.onPost()
+			}
+			if f.placeStatus != 0 {
+				w.WriteHeader(f.placeStatus)
+			}
 			_, _ = w.Write([]byte(f.placeBody))
 			return
 		}
@@ -196,6 +204,30 @@ func TestOKX_DuplicateRecoversViaQuery(t *testing.T) {
 	}
 	if f.sawClOrd != "o1" {
 		t.Fatalf("recovery queried clOrdId %q, want o1", f.sawClOrd)
+	}
+}
+
+func TestOKX_AmbiguousTimeoutQueriesWithAFreshBoundedContext(t *testing.T) {
+	f := newFakeOKX(t)
+	ctx, expirePlacement := context.WithCancel(context.Background())
+	f.onPost = expirePlacement
+	f.placeStatus = http.StatusInternalServerError
+	f.placeBody = `{"code":"50011","msg":"request timeout","data":[]}`
+	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"312","clOrdId":"timeout1","state":"live","accFillSz":"0"}]}`
+
+	fills, err := okxVenueOver(f).Execute(ctx, okxMarket("timeout1"))
+	if err != nil {
+		t.Fatalf("Execute did not recover the accepted order after its placement context expired: %v", err)
+	}
+	if len(fills) != 0 {
+		t.Fatalf("working order returned %d fills, want 0", len(fills))
+	}
+	if f.posts != 1 || f.gets != 1 {
+		t.Fatalf("requests = %d POST, %d GET; want exactly one placement followed by one clOrdId query",
+			f.posts, f.gets)
+	}
+	if f.sawPostCl != "timeout1" || f.sawClOrd != "timeout1" {
+		t.Fatalf("placement/query ids = %q/%q, want timeout1/timeout1", f.sawPostCl, f.sawClOrd)
 	}
 }
 
