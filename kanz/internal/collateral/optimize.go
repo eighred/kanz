@@ -1,151 +1,214 @@
 package collateral
 
-import "sort"
+import (
+	"context"
+	"errors"
+	"github.com/eighred/kanz/internal/dec"
+	"math/big"
+	"sort"
+	"strings"
+)
 
-// COLL-01c — collateral optimization: the cheapest-to-deliver allocation of a
-// pool of collateral assets across margin requirements, under each agreement's
-// eligibility schedule and haircuts, minimizing the total opportunity cost of
-// posting. It is an OPT-01b-style allocation, but where OPT-01 solves a
-// quadratic portfolio, this is a linear transportation problem with a separable
-// per-asset cost — so the cheapest-first greedy is cost-OPTIMAL for the
-// fractional (divisible-collateral) case, no QP needed (the "small, dependency-
-// free" stance).
-
-// Asset is a postable collateral asset and its opportunity cost.
+// Asset describes exact market value in one explicitly named currency. FX
+// conversion and immutable valuation provenance belong to the calling domain.
 type Asset struct {
-	// ID is the canonical asset id (a cash currency, a bond, an equity).
-	ID string
-	// Available is the market value of the asset available to post.
-	Available float64
-	// Cost is the opportunity cost per unit of MARKET value posted (e.g. the
-	// asset's funding spread or convenience yield) — cheaper assets are delivered
-	// first.
-	Cost float64
+	ID, Currency    string
+	Available, Cost dec.Exact
 }
-
-// Eligibility is one asset's terms under one agreement.
 type Eligibility struct {
 	Eligible bool
-	// Haircut is the valuation haircut; post-value = market-value × (1 − haircut).
-	Haircut float64
+	Haircut  dec.Exact
 }
-
-// Requirement is one agreement's collateral need plus its eligibility schedule.
 type Requirement struct {
-	AgreementID string
-	// Amount is the required POST-value (haircut-adjusted) to satisfy the call.
-	Amount float64
-	// Schedule maps asset id → its eligibility/haircut under this agreement.
-	Schedule map[string]Eligibility
+	AgreementID, Currency string
+	Amount                dec.Exact
+	Schedule              map[string]Eligibility
 }
-
-// Allocation is one posting decision: UsedValue of the asset's market value is
-// posted to the agreement, contributing PostedValue of haircut-adjusted value.
 type Allocation struct {
-	AgreementID string
-	AssetID     string
-	UsedValue   float64 // market value consumed
-	PostedValue float64 // haircut-adjusted value delivered
-	Cost        float64 // opportunity cost incurred (UsedValue × asset cost)
+	AgreementID, AssetID         string
+	UsedValue, PostedValue, Cost dec.Exact
 }
 
-// option is one (requirement, asset) candidate posting, with its effective cost
-// per unit of post-value (the cheapest-to-deliver ranking key).
-type option struct {
-	reqIdx     int
-	asset      *Asset
-	haircut    float64
-	effective  float64 // cost per unit of post-value = Cost / (1 − haircut)
-	postPerVal float64 // post-value per unit of market value = (1 − haircut)
+// Certificate contains dual multipliers for an independently verifiable optimum
+// or Farkas infeasibility witness. A resource refusal is never infeasibility.
+type Certificate struct{ Capacity, Coverage map[string]dec.Exact }
+type AllocationResult struct {
+	Currency    string
+	Feasible    bool
+	Allocations []Allocation
+	Cost        dec.Exact
+	Certificate Certificate
 }
 
-// Optimize allocates the asset pool across the requirements cheapest-to-deliver.
-// It returns the allocations and ok=true when every requirement is fully met;
-// ok=false (with the partial allocations) when the eligible pool is insufficient.
-// Cost is minimized: every (agreement, asset) option is ranked by its cost per
-// unit of delivered post-value and filled in that order, subject to per-asset
-// availability and per-requirement need.
-func Optimize(assets []Asset, requirements []Requirement) ([]Allocation, bool) {
-	// Mutable copies of the availabilities and remaining needs.
-	pool := make([]Asset, len(assets))
-	copy(pool, assets)
-	byID := make(map[string]*Asset, len(pool))
-	for i := range pool {
-		byID[pool[i].ID] = &pool[i]
-	}
-	remaining := make([]float64, len(requirements))
-	for i, r := range requirements {
-		remaining[i] = r.Amount
-	}
+var (
+	ErrAllocationInput       = errors.New("collateral: invalid or unavailable allocation input")
+	ErrAllocationLimit       = errors.New("collateral: exact allocation resource bound exceeded")
+	ErrAllocationCertificate = errors.New("collateral: invalid allocation certificate")
+)
 
-	// Build the eligible options, cheapest effective cost first.
-	var opts []option
-	for ri, r := range requirements {
+const MaxAllocationAssets = 32
+const MaxAllocationAgreements = 32
+const MaxAllocationEdges = 512
+
+type allocationEdge struct {
+	asset, requirement int
+	coverage, cost     *big.Rat
+}
+type allocationModel struct {
+	assets          []Asset
+	requirements    []Requirement
+	available, need []*big.Rat
+	edges           []allocationEdge
+	currency        string
+}
+
+func allocationNumber(v dec.Exact) (*big.Rat, error) {
+	r, err := v.Rat()
+	if err != nil || r.Sign() < 0 {
+		return nil, ErrAllocationInput
+	}
+	return r, nil
+}
+func buildAllocationModel(assets []Asset, requirements []Requirement) (*allocationModel, error) {
+	if len(assets) > MaxAllocationAssets || len(requirements) > MaxAllocationAgreements {
+		return nil, ErrAllocationLimit
+	}
+	m := &allocationModel{assets: append([]Asset(nil), assets...), requirements: append([]Requirement(nil), requirements...)}
+	sort.Slice(m.assets, func(i, j int) bool { return m.assets[i].ID < m.assets[j].ID })
+	sort.Slice(m.requirements, func(i, j int) bool { return m.requirements[i].AgreementID < m.requirements[j].AgreementID })
+	checkCurrency := func(c string) bool {
+		if len(c) != 3 || strings.IndexFunc(c, func(r rune) bool { return r < 'A' || r > 'Z' }) >= 0 {
+			return false
+		}
+		if m.currency == "" {
+			m.currency = c
+		}
+		return m.currency == c
+	}
+	ids := map[string]int{}
+	costs := make([]*big.Rat, len(m.assets))
+	for i, a := range m.assets {
+		if a.ID == "" || strings.TrimSpace(a.ID) != a.ID || len(a.ID) > 256 || !checkCurrency(a.Currency) {
+			return nil, ErrAllocationInput
+		}
+		if _, ok := ids[a.ID]; ok {
+			return nil, ErrAllocationInput
+		}
+		ids[a.ID] = i
+		v, err := allocationNumber(a.Available)
+		if err != nil {
+			return nil, err
+		}
+		m.available = append(m.available, v)
+		costs[i], err = allocationNumber(a.Cost)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for i, r := range m.requirements {
+		if r.AgreementID == "" || strings.TrimSpace(r.AgreementID) != r.AgreementID || len(r.AgreementID) > 256 || !checkCurrency(r.Currency) || (i > 0 && m.requirements[i-1].AgreementID == r.AgreementID) {
+			return nil, ErrAllocationInput
+		}
+		v, err := allocationNumber(r.Amount)
+		if err != nil {
+			return nil, err
+		}
+		m.need = append(m.need, v)
+		if len(r.Schedule) > MaxAllocationAssets {
+			return nil, ErrAllocationLimit
+		}
 		for id, e := range r.Schedule {
-			if !e.Eligible || e.Haircut >= 1 {
+			if _, ok := ids[id]; !ok {
+				return nil, ErrAllocationInput
+			}
+			h, err := allocationNumber(e.Haircut)
+			if err != nil || h.Cmp(big.NewRat(1, 1)) >= 0 {
+				return nil, ErrAllocationInput
+			}
+		}
+		for ai, a := range m.assets {
+			e, ok := r.Schedule[a.ID]
+			if !ok || !e.Eligible {
 				continue
 			}
-			a, ok := byID[id]
-			if !ok {
-				continue
-			}
-			postPerVal := 1 - e.Haircut
-			opts = append(opts, option{
-				reqIdx:     ri,
-				asset:      a,
-				haircut:    e.Haircut,
-				effective:  a.Cost / postPerVal,
-				postPerVal: postPerVal,
-			})
+			h, _ := e.Haircut.Rat()
+			m.edges = append(m.edges, allocationEdge{ai, i, new(big.Rat).Sub(big.NewRat(1, 1), h), costs[ai]})
 		}
 	}
-	sort.SliceStable(opts, func(i, j int) bool {
-		if opts[i].effective != opts[j].effective {
-			return opts[i].effective < opts[j].effective
-		}
-		return opts[i].asset.ID < opts[j].asset.ID // deterministic tie-break
-	})
-
-	var allocations []Allocation
-	for _, o := range opts {
-		need := remaining[o.reqIdx]
-		if need <= 0 || o.asset.Available <= 0 {
-			continue
-		}
-		// Post-value the asset can still deliver vs what the requirement needs.
-		maxPost := o.asset.Available * o.postPerVal
-		post := need
-		if maxPost < post {
-			post = maxPost
-		}
-		used := post / o.postPerVal
-		o.asset.Available -= used
-		remaining[o.reqIdx] -= post
-		allocations = append(allocations, Allocation{
-			AgreementID: requirements[o.reqIdx].AgreementID,
-			AssetID:     o.asset.ID,
-			UsedValue:   used,
-			PostedValue: post,
-			Cost:        used * o.asset.Cost,
-		})
+	if len(m.edges) > MaxAllocationEdges {
+		return nil, ErrAllocationLimit
 	}
-
-	ok := true
-	for _, rem := range remaining {
-		if rem > 1e-9 {
-			ok = false
-			break
-		}
-	}
-	return allocations, ok
+	return m, nil
 }
 
-// TotalCost sums the opportunity cost of an allocation set — the objective
-// Optimize minimizes.
-func TotalCost(allocations []Allocation) float64 {
-	var c float64
-	for _, a := range allocations {
-		c += a.Cost
+// Optimize solves a bounded divisible-collateral LP with agreement-specific
+// haircut coefficients. Nonnegative costs permit exact coverage equalities:
+// excess posting can always be reduced without worsening cost or feasibility.
+// Canonical IDs and Bland pivots make input permutations economically identical.
+func Optimize(ctx context.Context, assets []Asset, requirements []Requirement) (AllocationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return AllocationResult{}, err
 	}
-	return c
+	m, err := buildAllocationModel(assets, requirements)
+	if err != nil {
+		return AllocationResult{}, err
+	}
+	t := newAllocationTableau(m)
+	phaseOne := make([]big.Rat, t.columns)
+	for j := len(m.edges) + len(m.assets); j < t.columns; j++ {
+		phaseOne[j].SetInt64(1)
+	}
+	if err = t.minimize(ctx, phaseOne, t.columns); err != nil {
+		return AllocationResult{}, err
+	}
+	feasible := t.objective(phaseOne).Sign() == 0
+	costs := phaseOne
+	if feasible {
+		if err = t.removeArtificial(ctx, len(m.edges)+len(m.assets)); err != nil {
+			return AllocationResult{}, err
+		}
+		costs = make([]big.Rat, t.columns)
+		for j, e := range m.edges {
+			costs[j].Set(e.cost)
+		}
+		if err = t.minimize(ctx, costs, len(m.edges)+len(m.assets)); err != nil {
+			return AllocationResult{}, err
+		}
+	}
+	result := AllocationResult{Currency: m.currency, Feasible: feasible, Cost: "0", Certificate: Certificate{Capacity: map[string]dec.Exact{}, Coverage: map[string]dec.Exact{}}}
+	dual := t.dual(costs, len(m.edges), len(m.assets)+len(m.requirements))
+	for i, v := range dual {
+		exact, e := dec.ExactFromRat(&v)
+		if e != nil {
+			return AllocationResult{}, ErrAllocationLimit
+		}
+		if i < len(m.assets) {
+			result.Certificate.Capacity[m.assets[i].ID] = exact
+		} else {
+			result.Certificate.Coverage[m.requirements[i-len(m.assets)].AgreementID] = exact
+		}
+	}
+	if feasible {
+		values := t.solution(len(m.edges))
+		for j, e := range m.edges {
+			if values[j].Sign() == 0 {
+				continue
+			}
+			used, e1 := dec.ExactFromRat(&values[j])
+			posted, e2 := dec.ExactFromRat(new(big.Rat).Mul(&values[j], e.coverage))
+			cost, e3 := dec.ExactFromRat(new(big.Rat).Mul(&values[j], e.cost))
+			if e1 != nil || e2 != nil || e3 != nil {
+				return AllocationResult{}, ErrAllocationLimit
+			}
+			result.Allocations = append(result.Allocations, Allocation{m.requirements[e.requirement].AgreementID, m.assets[e.asset].ID, used, posted, cost})
+		}
+		result.Cost, err = dec.ExactFromRat(t.objective(costs))
+		if err != nil {
+			return AllocationResult{}, ErrAllocationLimit
+		}
+	}
+	if err = VerifyAllocation(assets, requirements, result); err != nil {
+		return AllocationResult{}, err
+	}
+	return result, nil
 }
