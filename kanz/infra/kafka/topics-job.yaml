@@ -110,6 +110,7 @@ data:
     # that made the control necessary. Partitioned by (portfolio, custodian),
     # which is the unit a reconciliation is defined over.
     accounting.custody         6   delete   2592000000  yes
+    accounting.collateral      6   delete   2592000000  yes
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes

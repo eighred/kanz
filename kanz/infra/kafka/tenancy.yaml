@@ -105,6 +105,7 @@ data:
     # one and publishes the same subject, so a topic missing here is a hard
     # publish failure for that tenant with auto-create disabled.
     accounting.custody         6   delete   2592000000  yes
+    accounting.collateral      6   delete   2592000000  yes
     settlement.instruction     3   delete   2592000000  yes
     compliance.breach          3   delete   2592000000  yes
     risk.portfolio             6   delete   2592000000  yes
