@@ -37,6 +37,13 @@ CREATE TABLE IF NOT EXISTS collateral_reservations (
     PRIMARY KEY (tenant_id,workflow_id,agreement_id,lot_id),
     FOREIGN KEY (tenant_id,workflow_id) REFERENCES collateral_workflows(tenant_id,workflow_id)
 );
+CREATE TABLE IF NOT EXISTS collateral_allocation_proofs (
+    tenant_id TEXT NOT NULL DEFAULT app_current_tenant(),
+    workflow_id TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    PRIMARY KEY(tenant_id,workflow_id),
+    FOREIGN KEY(tenant_id,workflow_id) REFERENCES collateral_workflows(tenant_id,workflow_id)
+);
 CREATE INDEX IF NOT EXISTS collateral_reserved_lot ON collateral_reservations(tenant_id,lot_id);
 CREATE TABLE IF NOT EXISTS collateral_requests (
     tenant_id TEXT NOT NULL DEFAULT app_current_tenant(),
@@ -67,7 +74,7 @@ CREATE TABLE IF NOT EXISTS collateral_active_agreements (
 DO $$
 DECLARE table_name TEXT;
 BEGIN
-    FOREACH table_name IN ARRAY ARRAY['collateral_snapshots','collateral_workflows','collateral_reservations','collateral_requests','collateral_confirmations','collateral_active_agreements','collateral_lots'] LOOP
+    FOREACH table_name IN ARRAY ARRAY['collateral_snapshots','collateral_workflows','collateral_reservations','collateral_requests','collateral_confirmations','collateral_active_agreements','collateral_lots','collateral_allocation_proofs'] LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY',table_name);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY',table_name);
         IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=current_schema() AND tablename=table_name AND policyname='tenant_isolation') THEN
@@ -80,7 +87,7 @@ BEGIN RAISE EXCEPTION 'collateral evidence is immutable'; END $$;
 DO $$
 DECLARE table_name TEXT;
 BEGIN
-    FOREACH table_name IN ARRAY ARRAY['collateral_snapshots','collateral_requests','collateral_confirmations'] LOOP
+    FOREACH table_name IN ARRAY ARRAY['collateral_snapshots','collateral_requests','collateral_confirmations','collateral_allocation_proofs'] LOOP
         EXECUTE format('CREATE OR REPLACE TRIGGER collateral_immutable BEFORE UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION refuse_collateral_evidence_mutation()',table_name);
         EXECUTE format('CREATE OR REPLACE TRIGGER collateral_no_truncate BEFORE TRUNCATE ON %I FOR EACH STATEMENT EXECUTE FUNCTION refuse_collateral_evidence_mutation()',table_name);
     END LOOP;

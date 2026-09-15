@@ -364,6 +364,7 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	if h.roles.Fund != "" {
 		mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/collateral/actions", h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "GET /v1/portfolios/{id}/collateral/{workflow}", h.handle(ServiceAccounting, true, nil))
+		mux.Handle(authz.Fund, "GET /v1/portfolios/{id}/collateral/{workflow}/proof", h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "GET /v1/custody/breaks",
 			h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "POST /v1/custody/breaks/{id}/assign",

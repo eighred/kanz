@@ -251,7 +251,7 @@ if step storage; then
     # ARRAY[...]` loop, not individual `ALTER TABLE x FORCE` statements).
     case "$c" in
       kanz-risk)  tables="portfolios positions applied_keys"; db="$RISK_DB_NAME" ;;
-      kanz-books) tables="ledger_entries ledger_snapshots outbox custody_statements custody_runs custody_breaks custody_actions collateral_snapshots collateral_workflows collateral_reservations collateral_requests collateral_confirmations collateral_active_agreements collateral_lots"; db="$BOOKS_DB_NAME" ;;
+      kanz-books) tables="ledger_entries ledger_snapshots outbox custody_statements custody_runs custody_breaks custody_actions collateral_snapshots collateral_workflows collateral_reservations collateral_requests collateral_confirmations collateral_active_agreements collateral_lots collateral_allocation_proofs"; db="$BOOKS_DB_NAME" ;;
       *) echo "FATAL: no table set declared for $c" >&2; exit 1 ;;
     esac
     expected="$(set -- $tables; echo $#)"

@@ -22,6 +22,19 @@ func (s *Server) collateralRoutes() {
 	}
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/collateral/actions", s.collateralAction)
 	s.mux.HandleFunc("GET /v1/portfolios/{id}/collateral/{workflow}", s.collateralRead)
+	s.mux.HandleFunc("GET /v1/portfolios/{id}/collateral/{workflow}/proof", s.collateralProof)
+}
+
+func (s *Server) collateralProof(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.collateralAuthorize(w, r, "", r.PathValue("workflow")); !ok {
+		return
+	}
+	proof, err := s.collateral.Proof(r.Context(), s.tenant, r.PathValue("workflow"))
+	if err != nil {
+		http.Error(w, "verified allocation proof unavailable", 503)
+		return
+	}
+	writeJSON(w, http.StatusOK, proof)
 }
 func (s *Server) collateralAuthorize(w http.ResponseWriter, r *http.Request, snapshot, workflow string) (*auth.Principal, bool) {
 	if !s.callerOwnsThisInstance(w, r) {

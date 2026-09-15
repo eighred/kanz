@@ -45,7 +45,7 @@ func database(t *testing.T) (*Store, func(string) *Store) {
 	}
 	// Accounting migration history targets the shared test schema. Like the
 	// custody/ledger suites, run with -p 1, never against a production database.
-	if _, err = base.Exec(t.Context(), `DROP TABLE IF EXISTS collateral_confirmations,collateral_requests,collateral_reservations,collateral_active_agreements,collateral_workflows,collateral_snapshots,collateral_lots,custody_actions,custody_statements,custody_runs,custody_breaks,ledger_entries,ledger_snapshots,outbox CASCADE`); err != nil {
+	if _, err = base.Exec(t.Context(), `DROP TABLE IF EXISTS collateral_allocation_proofs,collateral_confirmations,collateral_requests,collateral_reservations,collateral_active_agreements,collateral_workflows,collateral_snapshots,collateral_lots,custody_actions,custody_statements,custody_runs,custody_breaks,ledger_entries,ledger_snapshots,outbox CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(base.Close)
@@ -186,7 +186,11 @@ func TestPostgresCollateralCompleteLifecycle(t *testing.T) {
 	if err := s.pool.QueryRow(t.Context(), `SELECT count(*) FROM collateral_reservations`).Scan(&reservations); err != nil || reservations != 0 {
 		t.Fatalf("reservations: %d %v", reservations, err)
 	}
-	for _, table := range []string{"collateral_snapshots", "collateral_requests", "collateral_confirmations"} {
+	proof, err := New(s.pool).Proof(t.Context(), "tenant-A", state.WorkflowId)
+	if err != nil || proof.Cost != "60" || !proof.Feasible {
+		t.Fatalf("historical proof after release: %+v %v", proof, err)
+	}
+	for _, table := range []string{"collateral_snapshots", "collateral_requests", "collateral_confirmations", "collateral_allocation_proofs"} {
 		if _, err := s.pool.Exec(t.Context(), `DELETE FROM `+table); err == nil {
 			t.Fatalf("mutable evidence: %s", table)
 		}
@@ -225,6 +229,10 @@ func TestPostgresCollateralConcurrentReservationsAndRetries(t *testing.T) {
 	state, err := s.Apply(t.Context(), a)
 	if err != nil || state.Status != pb.WorkflowStatus_WORKFLOW_STATUS_INFEASIBLE {
 		t.Fatalf("double allocated: %+v %v", state, err)
+	}
+	proof, err := s.Proof(t.Context(), "tenant-A", state.WorkflowId)
+	if err != nil || proof.Feasible || proof.Assets[0].Available != "40" {
+		t.Fatalf("did not preserve residual capacity proof: %+v %v", proof, err)
 	}
 	var count int
 	if err = s.pool.QueryRow(t.Context(), `SELECT count(*) FROM collateral_reservations`).Scan(&count); err != nil || count != 1 {

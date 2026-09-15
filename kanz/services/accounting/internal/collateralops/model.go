@@ -25,6 +25,15 @@ var (
 	ErrUnsupported = errors.New("collateral workflow: allocation requires unsupported quantity precision; no instruction issued")
 )
 
+// AllocationProof retains the actual bounded program after subtracting other
+// reservations. Releasing those reservations must not erase the decision inputs.
+type AllocationProof struct {
+	collateral.AllocationResult
+	Assets       []collateral.Asset
+	Requirements []collateral.Requirement
+	Limits       []collateral.AllocationLimit
+}
+
 func identifier(s string) bool { return s != "" && len(s) <= 256 && strings.TrimSpace(s) == s }
 func exact(p *commonpb.Decimal, signed bool) (dec.Exact, error) {
 	if p == nil {
@@ -125,9 +134,9 @@ func validateSnapshot(s *pb.WorkflowSnapshot) error {
 // plan subtracts tenant-wide live reservations before solving all agreements
 // together. Issuer concentration is on credited value; liquidity on market
 // value. Unknown wrong-way clearance and late settlement exclude an edge.
-func plan(ctx context.Context, s *pb.WorkflowSnapshot, reserved map[string]*big.Rat) ([]*pb.PostingLeg, collateral.AllocationResult, error) {
+func plan(ctx context.Context, s *pb.WorkflowSnapshot, reserved map[string]*big.Rat) ([]*pb.PostingLeg, AllocationProof, error) {
 	if err := validateSnapshot(s); err != nil {
-		return nil, collateral.AllocationResult{}, err
+		return nil, AllocationProof{}, err
 	}
 	assets := []collateral.Asset{}
 	requirements := []collateral.Requirement{}
@@ -143,11 +152,11 @@ func plan(ctx context.Context, s *pb.WorkflowSnapshot, reserved map[string]*big.
 			available.Sub(available, new(big.Rat).Mul(v, rat(l.UnitValue)))
 		}
 		if available.Sign() < 0 {
-			return nil, collateral.AllocationResult{}, ErrConflict
+			return nil, AllocationProof{}, ErrConflict
 		}
 		value, err := dec.ExactFromRat(available)
 		if err != nil {
-			return nil, collateral.AllocationResult{}, err
+			return nil, AllocationProof{}, err
 		}
 		cost, _ := exact(l.OpportunityCost, false)
 		assets = append(assets, collateral.Asset{ID: l.LotId, Currency: s.CurrencyCode, Available: value, Cost: cost})
@@ -163,13 +172,13 @@ func plan(ctx context.Context, s *pb.WorkflowSnapshot, reserved map[string]*big.
 		rounding, _ := exact(a.Rounding, false)
 		margin, err := collateral.CalculateMargin(exposure, held, im, collateral.ExactCSATerms{Currency: s.CurrencyCode, Threshold: threshold, MinimumTransfer: mta, IndependentAmount: ia, Rounding: rounding})
 		if err != nil {
-			return nil, collateral.AllocationResult{}, err
+			return nil, AllocationProof{}, err
 		}
 		need, _ := margin.Movement.Rat()
 		// Existing collateral returns refer to settled workflow legs, never to a
 		// fresh inventory lot invented from a negative margin calculation.
 		if need.Sign() < 0 {
-			return nil, collateral.AllocationResult{}, ErrUnsupported
+			return nil, AllocationProof{}, ErrUnsupported
 		}
 		r := collateral.Requirement{AgreementID: a.AgreementId, Currency: s.CurrencyCode, Amount: margin.Movement, Schedule: map[string]collateral.Eligibility{}}
 		byIssuer := map[string][]collateral.AllocationLimitTerm{}
@@ -196,7 +205,7 @@ func plan(ctx context.Context, s *pb.WorkflowSnapshot, reserved map[string]*big.
 				}
 			}
 			if need.Sign() > 0 && rat(a.Held).Sign() > 0 && !matched {
-				return nil, collateral.AllocationResult{}, ErrInput
+				return nil, AllocationProof{}, ErrInput
 			}
 			identity, _ := json.Marshal([]string{a.AgreementId, issuer})
 			id := "issuer/" + digest(identity)
@@ -204,7 +213,8 @@ func plan(ctx context.Context, s *pb.WorkflowSnapshot, reserved map[string]*big.
 		}
 		requirements = append(requirements, r)
 	}
-	result, err := collateral.OptimizeConstrained(ctx, assets, requirements, limits)
+	solution, err := collateral.OptimizeConstrained(ctx, assets, requirements, limits)
+	result := AllocationProof{AllocationResult: solution, Assets: assets, Requirements: requirements, Limits: limits}
 	if err != nil || !result.Feasible {
 		return nil, result, err
 	}
@@ -215,13 +225,13 @@ func plan(ctx context.Context, s *pb.WorkflowSnapshot, reserved map[string]*big.
 		credited, _ := a.PostedValue.Rat()
 		quantity := new(big.Rat).Quo(value, rat(l.UnitValue))
 		if !new(big.Rat).Quo(quantity, rat(l.QuantityIncrement)).IsInt() {
-			return nil, collateral.AllocationResult{}, ErrUnsupported
+			return nil, AllocationProof{}, ErrUnsupported
 		}
 		q, e1 := wire(quantity)
 		v, e2 := wire(value)
 		c, e3 := wire(credited)
 		if e1 != nil || e2 != nil || e3 != nil {
-			return nil, collateral.AllocationResult{}, ErrUnsupported
+			return nil, AllocationProof{}, ErrUnsupported
 		}
 		legs = append(legs, &pb.PostingLeg{AgreementId: a.AgreementID, LotId: a.AssetID, CustodianId: l.CustodianId, AccountId: l.AccountId, Quantity: q, MarketValue: v, CreditedValue: c})
 	}

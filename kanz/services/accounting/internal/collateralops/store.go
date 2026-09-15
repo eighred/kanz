@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/eighred/kanz/internal/collateral"
 	"math/big"
 	"time"
 
@@ -24,7 +25,31 @@ const SubjectRecorded = "accounting.collateral.recorded"
 type Store struct{ pool *pgxpool.Pool }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
-func digest(b []byte) string        { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+
+func (s *Store) Proof(ctx context.Context, tenant, workflow string) (AllocationProof, error) {
+	tx, err := s.begin(ctx, tenant)
+	if err != nil {
+		return AllocationProof{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var blob []byte
+	err = tx.QueryRow(ctx, `SELECT payload FROM collateral_allocation_proofs WHERE workflow_id=$1`, workflow).Scan(&blob)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AllocationProof{}, ErrNotFound
+	}
+	if err != nil {
+		return AllocationProof{}, err
+	}
+	var proof AllocationProof
+	if err = json.Unmarshal(blob, &proof); err != nil {
+		return AllocationProof{}, err
+	}
+	if err = collateral.VerifyConstrainedAllocation(proof.Assets, proof.Requirements, proof.Limits, proof.AllocationResult); err != nil {
+		return AllocationProof{}, err
+	}
+	return proof, tx.Commit(ctx)
+}
+func digest(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 func marshal(m proto.Message) ([]byte, error) {
 	return proto.MarshalOptions{Deterministic: true}.Marshal(m)
 }
@@ -268,6 +293,13 @@ func (s *Store) Apply(ctx context.Context, a Action) (*pb.WorkflowRecorded, erro
 			return nil, err
 		}
 		if _, err = tx.Exec(ctx, `INSERT INTO collateral_workflows(workflow_id,snapshot_id,revision,payload) VALUES($1,$2,1,$3)`, a.WorkflowID, a.SnapshotID, blob); err != nil {
+			return nil, err
+		}
+		proof, err := json.Marshal(result)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO collateral_allocation_proofs(workflow_id,payload) VALUES($1,$2)`, a.WorkflowID, proof); err != nil {
 			return nil, err
 		}
 		for _, leg := range legs {

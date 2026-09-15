@@ -55,7 +55,7 @@ func applyCustodySchema(t *testing.T, pool *pgxpool.Pool, before ...string) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx,
-		`DROP TABLE IF EXISTS collateral_confirmations, collateral_requests, collateral_reservations, collateral_active_agreements, collateral_workflows, collateral_snapshots, collateral_lots, custody_actions, custody_statements, custody_runs, custody_breaks, ledger_entries, ledger_snapshots, outbox CASCADE`); err != nil {
+		`DROP TABLE IF EXISTS collateral_allocation_proofs,collateral_confirmations, collateral_requests, collateral_reservations, collateral_active_agreements, collateral_workflows, collateral_snapshots, collateral_lots, custody_actions, custody_statements, custody_runs, custody_breaks, ledger_entries, ledger_snapshots, outbox CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(custodyMigrationDir, "*.sql"))
