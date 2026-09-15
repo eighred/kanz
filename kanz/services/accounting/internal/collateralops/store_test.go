@@ -142,8 +142,13 @@ func TestPostgresCollateralCompleteLifecycle(t *testing.T) {
 	if state.Status != pb.WorkflowStatus_WORKFLOW_STATUS_INSTRUCTED {
 		t.Fatal("partial marked settled")
 	}
-	if err := s.Confirm(t.Context(), "tenant-A", confirmed(state, "settle-old", 20, false)); err != nil {
+	older := confirmed(state, "settle-old", 20, false)
+	older.SettledAt = state.PostingInstructedAt
+	if err := s.Confirm(t.Context(), "tenant-A", older); err != nil {
 		t.Fatal(err)
+	}
+	if err := s.Confirm(t.Context(), "tenant-A", confirmed(state, "decreasing-newer", 20, false)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("accepted contradictory newer cumulative report: %v", err)
 	}
 	if err := s.Confirm(t.Context(), "tenant-A", confirmed(state, "overfill", 61, false)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("overfill accepted: %v", err)

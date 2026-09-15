@@ -102,6 +102,14 @@ func (s *Store) Confirm(ctx context.Context, tenant string, c *pb.PostingConfirm
 		}
 		key := [2]string{report.AgreementId, report.LotId}
 		value := rat(report.CumulativeQuantity)
+		if key == [2]string{c.AgreementId, c.LotId} {
+			quantityOrder := rat(c.CumulativeQuantity).Cmp(value)
+			timeOrder := c.SettledAt.AsTime().Compare(report.SettledAt.AsTime())
+			if (timeOrder > 0 && quantityOrder < 0) || (timeOrder < 0 && quantityOrder > 0) || (timeOrder == 0 && quantityOrder != 0) {
+				err = ErrConflict
+				break
+			}
+		}
 		if old := maximum[key]; old == nil || value.Cmp(old) > 0 {
 			maximum[key] = value
 		}
