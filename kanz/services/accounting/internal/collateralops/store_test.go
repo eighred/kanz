@@ -337,3 +337,85 @@ func TestCollateralSharedLiquidityAndExistingIssuerHeadroom(t *testing.T) {
 		t.Fatalf("ignored held issuer concentration: %+v %v", result, err)
 	}
 }
+
+func TestPostgresCollateralDifferentCallsCompeteForOneLot(t *testing.T) {
+	s, _ := database(t)
+	input := fixture()
+	if err := s.ImportSnapshot(t.Context(), "tenant-A", input); err != nil {
+		t.Fatal(err)
+	}
+	second := proto.Clone(input).(*pb.WorkflowSnapshot)
+	second.SnapshotId = "snap-2"
+	second.Agreements[0].AgreementId = "CSA2"
+	if err := s.ImportSnapshot(t.Context(), "tenant-A", second); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	states := make([]*pb.WorkflowRecorded, 2)
+	errs := make([]error, 2)
+	for i, snapshot := range []string{input.SnapshotId, second.SnapshotId} {
+		wg.Add(1)
+		go func(i int, snapshot string) {
+			defer wg.Done()
+			<-start
+			states[i], errs[i] = New(s.pool).Apply(t.Context(), Action{Tenant: "tenant-A", Actor: "maker", RequestID: fmt.Sprintf("race-%d", i), WorkflowID: fmt.Sprintf("race-workflow-%d", i), SnapshotID: snapshot, Kind: "propose"})
+		}(i, snapshot)
+	}
+	close(start)
+	wg.Wait()
+	proposed, infeasible := 0, 0
+	for i, state := range states {
+		if errs[i] != nil {
+			t.Fatal(errs[i])
+		}
+		switch state.Status {
+		case pb.WorkflowStatus_WORKFLOW_STATUS_PROPOSED:
+			proposed++
+		case pb.WorkflowStatus_WORKFLOW_STATUS_INFEASIBLE:
+			infeasible++
+		default:
+			t.Fatalf("unexpected state: %+v", state)
+		}
+	}
+	if proposed != 1 || infeasible != 1 {
+		t.Fatalf("double allocated: proposed=%d infeasible=%d", proposed, infeasible)
+	}
+}
+
+func TestPostgresCollateralReturnOutboxFailureRestoresReservation(t *testing.T) {
+	s, _ := database(t)
+	state := act(t, s, propose(t, s), "checker", "approve")
+	if err := s.Confirm(t.Context(), "tenant-A", confirmed(state, "settle", 60, false)); err != nil {
+		t.Fatal(err)
+	}
+	state = act(t, s, reload(t, s), "maker", "return")
+	state = act(t, s, state, "checker", "approve_return")
+	_, err := s.pool.Exec(t.Context(), `CREATE OR REPLACE FUNCTION reject_collateral_outbox() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected failure'; END $$; CREATE TRIGGER reject_collateral_outbox BEFORE INSERT ON outbox FOR EACH ROW EXECUTE FUNCTION reject_collateral_outbox()`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmation := confirmed(state, "return-final", 60, true)
+	if err = s.Confirm(t.Context(), "tenant-A", confirmation); err == nil {
+		t.Fatal("released without durable fact")
+	}
+	if got := reload(t, s); !proto.Equal(got, state) {
+		t.Fatalf("rollback changed state: %+v", got)
+	}
+	var count int
+	if err = s.pool.QueryRow(t.Context(), `SELECT count(*) FROM collateral_reservations`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("lost reservation: %d %v", count, err)
+	}
+	if err = s.pool.QueryRow(t.Context(), `SELECT count(*) FROM collateral_confirmations WHERE source_id='return-final'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("retained rolled-back confirmation: %d %v", count, err)
+	}
+	if _, err = s.pool.Exec(t.Context(), `DROP TRIGGER reject_collateral_outbox ON outbox`); err != nil {
+		t.Fatal(err)
+	}
+	if err = New(s.pool).Confirm(t.Context(), "tenant-A", confirmation); err != nil {
+		t.Fatalf("release retry: %v", err)
+	}
+	if got := reload(t, s); got.Status != pb.WorkflowStatus_WORKFLOW_STATUS_RELEASED {
+		t.Fatal("return failed after retry")
+	}
+}
