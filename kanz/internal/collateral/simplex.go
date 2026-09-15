@@ -21,21 +21,27 @@ const maxAllocationBits = 8192
 func newAllocationTableau(m *allocationModel) *allocationTableau {
 	n := len(m.edges)
 	a := len(m.assets)
+	slacks := a + len(m.limits)
 	r := len(m.requirements)
-	t := &allocationTableau{columns: n + a + r, basis: make([]int, a+r), rows: make([][]big.Rat, a+r)}
+	t := &allocationTableau{columns: n + slacks + r, basis: make([]int, slacks+r), rows: make([][]big.Rat, slacks+r)}
 	for i := range t.rows {
 		t.rows[i] = make([]big.Rat, t.columns+1)
 		t.basis[i] = n + i
 		t.rows[i][n+i].SetInt64(1)
 		if i < a {
 			t.rows[i][t.columns].Set(m.available[i])
+		} else if i < slacks {
+			t.rows[i][t.columns].Set(m.limitValues[i-a])
 		} else {
-			t.rows[i][t.columns].Set(m.need[i-a])
+			t.rows[i][t.columns].Set(m.need[i-slacks])
 		}
 	}
 	for j, e := range m.edges {
 		t.rows[e.asset][j].SetInt64(1)
-		t.rows[a+e.requirement][j].Set(e.coverage)
+		t.rows[slacks+e.requirement][j].Set(e.coverage)
+		for k := range m.limits {
+			t.rows[a+k][j].Set(&m.limitWeights[k][j])
+		}
 	}
 	return t
 }

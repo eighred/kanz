@@ -35,7 +35,9 @@ type Config struct {
 	// read/reconcile endpoints on an in-memory journal without a broker).
 	NATSURL string
 	// Source is the consumer identity (logging / durable consumer name).
-	Source string
+	Source                   string
+	CollateralInputSource    string
+	CollateralCustodySources string
 	// ConsumerGroup is the durable consumer name the fill subjects subscribe under.
 	ConsumerGroup string
 
@@ -251,17 +253,19 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Listen:        env.Or("ACCOUNTING_LISTEN", ":8101"),
-		MetricsListen: env.Or("ACCOUNTING_METRICS_LISTEN", ":8080"),
-		LogLevel:      env.ParseLevelOr(os.Getenv("ACCOUNTING_LOG_LEVEL"), slog.LevelInfo),
-		BaseCurrency:  env.Or("ACCOUNTING_BASE_CURRENCY", "USD"),
-		NATSURL:       os.Getenv("ACCOUNTING_NATS_URL"),
-		Source:        env.Or("ACCOUNTING_SOURCE", "accounting"),
-		ConsumerGroup: env.Or("ACCOUNTING_CONSUMER_GROUP", "accounting"),
-		FillSubjects:  subjects,
-		CashSubjects:  cashSubjects,
-		DatabaseURL:   databaseURL,
-		Tenant:        env.Or("ACCOUNTING_TENANT", "__system__"),
+		Listen:                   env.Or("ACCOUNTING_LISTEN", ":8101"),
+		MetricsListen:            env.Or("ACCOUNTING_METRICS_LISTEN", ":8080"),
+		LogLevel:                 env.ParseLevelOr(os.Getenv("ACCOUNTING_LOG_LEVEL"), slog.LevelInfo),
+		BaseCurrency:             env.Or("ACCOUNTING_BASE_CURRENCY", "USD"),
+		NATSURL:                  os.Getenv("ACCOUNTING_NATS_URL"),
+		Source:                   env.Or("ACCOUNTING_SOURCE", "accounting"),
+		CollateralInputSource:    os.Getenv("ACCOUNTING_COLLATERAL_INPUT_SOURCE"),
+		CollateralCustodySources: os.Getenv("ACCOUNTING_COLLATERAL_CUSTODY_SOURCES"),
+		ConsumerGroup:            env.Or("ACCOUNTING_CONSUMER_GROUP", "accounting"),
+		FillSubjects:             subjects,
+		CashSubjects:             cashSubjects,
+		DatabaseURL:              databaseURL,
+		Tenant:                   env.Or("ACCOUNTING_TENANT", "__system__"),
 
 		AllowEphemeralLedger: os.Getenv("ACCOUNTING_ALLOW_EPHEMERAL_LEDGER") == "true",
 
