@@ -137,9 +137,7 @@ jobs:
           # image was built. No guard could have caught it — the shell is valid, it
           # is only wrong at runtime — and release.yml had never executed a job, so
           # nothing had ever run these three lines.
-          cd gen/go
-          go mod init github.com/eighred/kanz/kanz-schemas-go || true
-          go mod tidy
+          bash bootstrap-go-sdk.sh
 
       # THE BFF'S IMAGE MUST CONTAIN THE SPA (#371).
       #
