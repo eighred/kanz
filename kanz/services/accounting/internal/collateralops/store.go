@@ -87,6 +87,11 @@ func (s *Store) ImportSnapshot(ctx context.Context, tenant string, input *pb.Wor
 	if err := validateSnapshot(input); err != nil {
 		return err
 	}
+	if input.AsOf.AsTime().After(time.Now().UTC()) {
+		return ErrStale
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	blob, err := marshal(input)
 	if err != nil {
 		return err
@@ -105,6 +110,9 @@ func (s *Store) ImportSnapshot(ctx context.Context, tenant string, input *pb.Wor
 		return tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if err = checkObligationIdentity(ctx, tx, input); err != nil {
 		return err
 	}
 	for _, lot := range input.Inventory {
@@ -142,6 +150,40 @@ func (s *Store) ImportSnapshot(ctx context.Context, tenant string, input *pb.Wor
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// A source may batch disjoint agreements at the same observation time, but may
+// not rename an obligation into a second snapshot. Otherwise contradictory
+// obligations both pass freshness checks and a released call can be replayed
+// under a new snapshot ID. The tenant lock protects the read and insert across
+// replicas. Use the database's microsecond precision rather than pretending it
+// can establish an order between observations within the same microsecond.
+func checkObligationIdentity(ctx context.Context, tx pgx.Tx, input *pb.WorkflowSnapshot) error {
+	ids := make(map[string]bool, len(input.Agreements))
+	for _, a := range input.Agreements {
+		ids[a.AgreementId] = true
+	}
+	rows, err := tx.Query(ctx, `SELECT payload FROM collateral_snapshots WHERE as_of=$1`, input.AsOf.AsTime().Truncate(time.Microsecond))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var blob []byte
+		if err := rows.Scan(&blob); err != nil {
+			return err
+		}
+		prior := new(pb.WorkflowSnapshot)
+		if err := proto.Unmarshal(blob, prior); err != nil {
+			return err
+		}
+		for _, a := range prior.Agreements {
+			if ids[a.GetAgreementId()] {
+				return ErrConflict
+			}
+		}
+	}
+	return rows.Err()
 }
 
 type Action struct {
