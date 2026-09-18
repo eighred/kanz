@@ -2,8 +2,10 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 // The mesh identity headers — the SVCWIRE-01c trusted-header contract, and the
@@ -28,9 +30,10 @@ import (
 // is what let a service adopt the name and reinvent the check; test/arch's
 // TestPrincipalHeadersLiveOnlyInPkgAuth is what keeps that from happening again.
 const (
-	HeaderPrincipalSubject = "X-Kanz-Principal-Subject"
-	HeaderPrincipalTenant  = "X-Kanz-Principal-Tenant"
-	HeaderPrincipalRoles   = "X-Kanz-Principal-Roles" // comma-separated
+	HeaderPrincipalSubject    = "X-Kanz-Principal-Subject"
+	HeaderPrincipalTenant     = "X-Kanz-Principal-Tenant"
+	HeaderPrincipalRoles      = "X-Kanz-Principal-Roles"      // comma-separated
+	HeaderPrincipalPortfolios = "X-Kanz-Principal-Portfolios" // JSON array, never delimiter-split
 )
 
 // SetPrincipalHeaders writes the verified principal onto an OUTBOUND request —
@@ -46,11 +49,43 @@ const (
 // principal (middleware.Principal, which also carries the portfolio allow-list)
 // is a different type from auth.Principal and both must inject identically.
 func SetPrincipalHeaders(h http.Header, subject, tenant string, roles []string) {
+	h.Del(HeaderPrincipalPortfolios)
 	h.Set(HeaderPrincipalSubject, subject)
 	h.Set(HeaderPrincipalTenant, tenant)
 	if len(roles) > 0 {
 		h.Set(HeaderPrincipalRoles, strings.Join(roles, ","))
 	}
+}
+
+// SetPrincipalPortfolios preserves an authenticated allow-list across the mesh.
+// Call after SetPrincipalHeaders. A failed validation clears any old scope and
+// must abort forwarding; it must never silently become tenant-wide read access.
+func SetPrincipalPortfolios(h http.Header, portfolios []string) error {
+	h.Del(HeaderPrincipalPortfolios)
+	if !validPortfolioScope(portfolios) {
+		return errors.New("auth: invalid portfolio scope")
+	}
+	if portfolios == nil {
+		portfolios = []string{}
+	}
+	blob, err := json.Marshal(portfolios)
+	if err != nil || len(blob) > 64<<10 {
+		return errors.New("auth: invalid portfolio scope")
+	}
+	h.Set(HeaderPrincipalPortfolios, string(blob))
+	return nil
+}
+
+func validPortfolioScope(portfolios []string) bool {
+	if len(portfolios) > 1024 {
+		return false
+	}
+	for _, id := range portfolios {
+		if id == "" || len(id) > 256 || !utf8.ValidString(id) || strings.TrimSpace(id) != id {
+			return false
+		}
+	}
+	return true
 }
 
 // PrincipalFromHeaders is the READING half of SetPrincipalHeaders — the seam
@@ -78,22 +113,11 @@ func SetPrincipalHeaders(h http.Header, subject, tenant string, roles []string) 
 // that is an escalation. No IdP-issued role on this platform contains one; the
 // day one might, the encoding has to change, not this reader.
 //
-// WHAT IT CANNOT RECONSTRUCT. The wire carries subject, tenant and roles only, so
-// both Claims and Portfolios are always empty — including the ABAC portfolio
-// allow-list PolicyAuthorizer reads through PortfolioInScope and copilot's tool
-// gate relies on (services/copilot/internal/tools/tools.go's Registry.authorize).
-// On a READ path an absent allow-list means "every portfolio within the caller's
-// own tenant", so copilot's portfolio sub-scope is inert by construction, and
-// portfolio.go argues why making it deny-on-empty would refuse every governed
-// tool call rather than tighten anything.
+// Portfolio allow-lists round-trip as bounded JSON through SetPrincipalPortfolios.
+// An absent list preserves the established read semantics, while capital paths
+// still require explicit PortfolioEntitled membership. Malformed or repeated
+// scope headers invalidate the principal. Arbitrary Claims are not forwarded.
 //
-// Putting a fourth header on the mesh would forward an empty list and look like a
-// fix. #225 repaired the gateway's OIDC bridge, which used to drop the claim
-// before it ever reached the wire, so the list is now real INSIDE the gateway —
-// and the OMS reads it off the command envelope, not off these headers. Nothing
-// downstream of this seam has a use for it that an empty header would satisfy.
-// Tenant isolation and RBAC ARE enforced upstream; portfolio sub-scope within a
-// tenant is not.
 // IssuedAt IS ALSO ABSENT ON THIS SEAM, and there is no fifth header for it
 // either. It exists so the GATEWAY can date a token against a revocation mark
 // (#532); an upstream reads no feed and makes no such decision, and the gateway
@@ -106,7 +130,13 @@ func PrincipalFromHeaders(h http.Header) (*Principal, bool) {
 	if subject == "" || tenant == "" {
 		return nil, false
 	}
-	return &Principal{Subject: subject, Tenant: tenant, Roles: splitRoles(h.Get(HeaderPrincipalRoles))}, true
+	var portfolios []string
+	if values, present := h[http.CanonicalHeaderKey(HeaderPrincipalPortfolios)]; present {
+		if len(values) != 1 || len(values[0]) > 64<<10 || values[0] == "null" || json.Unmarshal([]byte(values[0]), &portfolios) != nil || portfolios == nil || !validPortfolioScope(portfolios) {
+			return nil, false
+		}
+	}
+	return &Principal{Subject: subject, Tenant: tenant, Roles: splitRoles(h.Get(HeaderPrincipalRoles)), Portfolios: portfolios}, true
 }
 
 // splitRoles is the inverse of the strings.Join in SetPrincipalHeaders. Returns
