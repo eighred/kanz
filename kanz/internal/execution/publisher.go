@@ -460,6 +460,8 @@ type WorkerDeps struct {
 	// That guard is the reason this field exists HERE rather than only on the two
 	// ReconcilerConfigs — the omission it repairs was in the composition roots.
 	OnUnknownBalance func(asset, reason string)
+	// OnReconcileError reports failed reconciliation/healing passes without exposing raw errors.
+	OnReconcileError func(context.Context, string, error)
 
 	Logger *slog.Logger
 }

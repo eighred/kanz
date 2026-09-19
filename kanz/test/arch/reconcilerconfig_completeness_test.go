@@ -88,7 +88,7 @@ var reconcilerConfigOptional = map[string]string{
 // exists to require. Named explicitly as a non-vacuity arm, in the shape #1036's
 // guard uses: if one of them left the struct, or somebody exempted it, the guard
 // would keep passing while requiring nothing it was written for.
-var reconcilerConfigRequired = []string{"Balances", "OnUnknownBalance", "OnCloseUnhealable", "Pub"}
+var reconcilerConfigRequired = []string{"Balances", "OnUnknownBalance", "OnCloseUnhealable", "OnReconcileError", "Pub"}
 
 func TestEveryReconcilerConfigLiteralNamesEverySeam(t *testing.T) {
 	root := moduleRoot(t)

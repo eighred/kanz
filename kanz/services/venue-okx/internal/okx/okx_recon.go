@@ -39,6 +39,7 @@ type OKXReconciler struct {
 	// and those look identical otherwise — which is what both composition roots
 	// shipped, because both left this nil for a year.
 	onUnknownBalance func(asset, reason string)
+	onReconcileError func(context.Context, string, error)
 	// onCloseUnhealable is called for EVERY in-flight close this watchdog dropped
 	// WITHOUT asking the exchange anything (#1036), with the reason. Nil => silent,
 	// which is only right in a test.
@@ -76,6 +77,8 @@ type OKXReconcilerConfig struct {
 	// from execution.WorkerDeps, where the completeness guard makes omitting it a
 	// visible decision rather than a field nobody typed.
 	OnUnknownBalance func(asset, reason string)
+	// OnReconcileError observes every returned periodic error; production supplies metrics and bounded logs.
+	OnReconcileError func(context.Context, string, error)
 	// OnCloseUnhealable is called for every in-flight close dropped without a venue
 	// query, with the reason (#1036). Nil => the drop is silent.
 	OnCloseUnhealable func(orderID, instrumentID, reason string)
@@ -88,6 +91,9 @@ func newOKXReconciler(cfg OKXReconcilerConfig) *OKXReconciler {
 	if cfg.Venue == "" {
 		cfg.Venue = "OKX"
 	}
+	if cfg.OnReconcileError == nil {
+		cfg.OnReconcileError = execution.NewReconcileErrorObserver(nil, nil, cfg.Venue).Observe
+	}
 	if cfg.CloseTimeout <= 0 {
 		cfg.CloseTimeout = execution.DefaultCloseTimeout
 	}
@@ -95,6 +101,7 @@ func newOKXReconciler(cfg OKXReconcilerConfig) *OKXReconciler {
 		rest: cfg.REST, symbols: cfg.Symbols, expected: cfg.Expected, balances: cfg.Balances,
 		closes: cfg.Closes, closeTimeout: cfg.CloseTimeout,
 		pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant, now: cfg.Now,
+		onReconcileError: cfg.OnReconcileError,
 		onUnknownBalance: cfg.OnUnknownBalance, onCloseUnhealable: cfg.OnCloseUnhealable,
 	}
 }
@@ -111,7 +118,10 @@ func (r *OKXReconciler) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_ = r.Reconcile(ctx)
+			r.onReconcileError(ctx, "reconcile", r.Reconcile(ctx))
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}
 }
@@ -142,7 +152,10 @@ func (r *OKXReconciler) RunHealing(ctx context.Context, tick time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_ = r.HealClosures(ctx)
+			r.onReconcileError(ctx, "healing", r.HealClosures(ctx))
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}
 }
@@ -278,15 +291,15 @@ func okxTerminal(state string) bool {
 func okxHealedFromQuery(ci CloseIntent, o *okxOrder, now time.Time) (*orderpb.OrderState, bool, error) {
 	filled, parseErr := dec.Exact(o.AccFillSz).Rat()
 	if parseErr != nil || filled.Sign() < 0 {
-		return nil, false, fmt.Errorf("okx: invalid reconciliation filled quantity")
+		return nil, false, fmt.Errorf("%w: okx filled quantity", execution.ErrReconcileEvidence)
 	}
 	// EXACT, NEVER ROUNDED. AccFillSz is an exchange string; a token filled
 	// quantity in the trillions wraps through dec.ToProto and this FACT would
 	// then heal the order to a filled size that never traded.
 	filledD, ok := dec.ToProtoExact(filled)
 	if !ok {
-		return nil, false, fmt.Errorf("okx: order %s filled quantity %q is not representable as a Decimal",
-			ci.OrderID, o.AccFillSz)
+		return nil, false, fmt.Errorf("okx: order %s filled quantity %q is not representable as a Decimal: %w",
+			ci.OrderID, o.AccFillSz, execution.ErrReconcileEvidence)
 	}
 	return &orderpb.OrderState{
 		OrderId: ci.OrderID, InstrumentId: ci.InstrumentID,
@@ -335,7 +348,7 @@ func (r *OKXReconciler) reconcileBalances(ctx context.Context) error {
 	for ccy, cashBal := range bals {
 		actual, parseErr := dec.Exact(cashBal).Rat()
 		if parseErr != nil {
-			return fmt.Errorf("okx: invalid reconciliation balance")
+			return fmt.Errorf("%w: okx balance", execution.ErrReconcileEvidence)
 		}
 		// UNKNOWN SKIPS, IT DOES NOT COMPARE AGAINST ZERO (#418). Substituting
 		// zero for a balance nobody has announced reports every asset the exchange
@@ -362,7 +375,7 @@ func (r *OKXReconciler) reconcileBalances(ctx context.Context) error {
 func okxHealedState(exp *orderpb.OrderState, o *okxOrder, now time.Time) (*orderpb.OrderState, bool, error) {
 	exFilled, parseErr := dec.Exact(o.AccFillSz).Rat()
 	if parseErr != nil || exFilled.Sign() < 0 {
-		return nil, false, fmt.Errorf("okx: invalid reconciliation filled quantity")
+		return nil, false, fmt.Errorf("%w: okx filled quantity", execution.ErrReconcileEvidence)
 	}
 	status := okxStateToProto(o.State)
 	if exFilled.Cmp(dec.FromProto(exp.GetFilledQuantity())) == 0 && status == exp.GetStatus() {
@@ -377,7 +390,7 @@ func okxHealedState(exp *orderpb.OrderState, o *okxOrder, now time.Time) (*order
 	leavesD, lok := dec.ToProtoExact(leaves)
 	if !fok || !lok {
 		return nil, false, fmt.Errorf("okx: order %s healed quantities are not representable as a Decimal "+
-			"(filled=%s leaves=%s)", exp.GetOrderId(), exFilled.FloatString(8), leaves.FloatString(8))
+			"(filled=%s leaves=%s): %w", exp.GetOrderId(), exFilled.FloatString(8), leaves.FloatString(8), execution.ErrReconcileEvidence)
 	}
 	return &orderpb.OrderState{
 		OrderId: exp.GetOrderId(), PortfolioId: exp.GetPortfolioId(), InstrumentId: exp.GetInstrumentId(),
@@ -415,8 +428,8 @@ func (r *OKXReconciler) emitBalanceReconciled(ctx context.Context, asset string,
 	deltaD, dok := dec.ToProtoExact(delta)
 	if !eok || !aok || !dok {
 		return fmt.Errorf("okx: %s balance reconciliation is not representable as a Decimal "+
-			"(expected=%s actual=%s) — refusing to publish a break with fabricated figures",
-			asset, expected.FloatString(8), actual.FloatString(8))
+			"(expected=%s actual=%s) — refusing to publish a break with fabricated figures: %w",
+			asset, expected.FloatString(8), actual.FloatString(8), execution.ErrReconcileEvidence)
 	}
 	return r.pub.Publish(ctx, bus.Event{
 		Subject: SubjectBalanceRecon, EventType: SubjectBalanceRecon,

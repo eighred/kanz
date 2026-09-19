@@ -40,6 +40,7 @@ type Reconciler struct {
 	// and those look identical otherwise — which is what both composition roots
 	// shipped, because both left this nil for a year.
 	onUnknownBalance func(asset, reason string)
+	onReconcileError func(context.Context, string, error)
 	// onCloseUnhealable is called for EVERY in-flight close this watchdog dropped
 	// WITHOUT asking the exchange anything (#1036), with the reason. Nil => silent,
 	// which is only right in a test.
@@ -77,6 +78,8 @@ type ReconcilerConfig struct {
 	// from execution.WorkerDeps, where the completeness guard makes omitting it a
 	// visible decision rather than a field nobody typed.
 	OnUnknownBalance func(asset, reason string)
+	// OnReconcileError observes every returned periodic error; production supplies metrics and bounded logs.
+	OnReconcileError func(context.Context, string, error)
 	// OnCloseUnhealable is called for every in-flight close dropped without a venue
 	// query, with the reason (#1036). Nil => the drop is silent.
 	OnCloseUnhealable func(orderID, instrumentID, reason string)
@@ -89,6 +92,9 @@ func newReconciler(cfg ReconcilerConfig) *Reconciler {
 	if cfg.Venue == "" {
 		cfg.Venue = "BINANCE"
 	}
+	if cfg.OnReconcileError == nil {
+		cfg.OnReconcileError = execution.NewReconcileErrorObserver(nil, nil, cfg.Venue).Observe
+	}
 	if cfg.CloseTimeout <= 0 {
 		cfg.CloseTimeout = execution.DefaultCloseTimeout
 	}
@@ -96,14 +102,13 @@ func newReconciler(cfg ReconcilerConfig) *Reconciler {
 		rest: cfg.REST, symbols: cfg.Symbols, expected: cfg.Expected, balances: cfg.Balances,
 		closes: cfg.Closes, closeTimeout: cfg.CloseTimeout,
 		pub: cfg.Pub, venue: cfg.Venue, tenant: cfg.Tenant, now: cfg.Now,
+		onReconcileError: cfg.OnReconcileError,
 		onUnknownBalance: cfg.OnUnknownBalance, onCloseUnhealable: cfg.OnCloseUnhealable,
 	}
 }
 
-// Run polls every interval until ctx is cancelled. A per-pass error is returned
-// only when it is a rate-limit exhaustion the caller should alert on; ordinary
-// transient faults are logged-and-continued by the caller. It backs off rather
-// than hammering the exchange.
+// Run polls until cancellation, reporting every returned error to the observer.
+// Attempts retain the configured cadence; an error never triggers a tight retry.
 func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = execution.DefaultReconcileInterval
@@ -115,7 +120,10 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_ = r.Reconcile(ctx)
+			r.onReconcileError(ctx, "reconcile", r.Reconcile(ctx))
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}
 }
@@ -149,7 +157,10 @@ func (r *Reconciler) RunHealing(ctx context.Context, tick time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_ = r.HealClosures(ctx)
+			r.onReconcileError(ctx, "healing", r.HealClosures(ctx))
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}
 }
@@ -283,12 +294,12 @@ func binanceTerminal(status string) bool {
 func binanceHealedFromQuery(ci CloseIntent, truth *orderResponse, venue string, now time.Time) (*orderpb.OrderState, error) {
 	filled, parseErr := dec.Exact(truth.ExecutedQty).Rat()
 	if parseErr != nil || filled.Sign() < 0 {
-		return nil, fmt.Errorf("binance: invalid reconciliation filled quantity")
+		return nil, fmt.Errorf("%w: binance filled quantity", execution.ErrReconcileEvidence)
 	}
 	filledD, ok := dec.ToProtoExact(filled)
 	if !ok {
-		return nil, fmt.Errorf("binance: order %s filled quantity %q is not representable as a Decimal",
-			ci.OrderID, truth.ExecutedQty)
+		return nil, fmt.Errorf("binance: order %s filled quantity %q is not representable as a Decimal: %w",
+			ci.OrderID, truth.ExecutedQty, execution.ErrReconcileEvidence)
 	}
 	return &orderpb.OrderState{
 		OrderId: ci.OrderID, InstrumentId: ci.InstrumentID,
@@ -335,7 +346,7 @@ func (r *Reconciler) reconcileBalances(ctx context.Context) error {
 		free, freeErr := dec.Exact(b.Free).Rat()
 		locked, lockedErr := dec.Exact(b.Locked).Rat()
 		if freeErr != nil || lockedErr != nil {
-			return fmt.Errorf("binance: invalid reconciliation balance")
+			return fmt.Errorf("%w: binance balance", execution.ErrReconcileEvidence)
 		}
 		actual := new(big.Rat).Add(free, locked)
 		// UNKNOWN SKIPS, IT DOES NOT COMPARE AGAINST ZERO (#418). Substituting
@@ -366,7 +377,7 @@ func (r *Reconciler) reconcileBalances(ctx context.Context) error {
 func healedState(exp *orderpb.OrderState, truth *orderResponse, now time.Time) (*orderpb.OrderState, bool, error) {
 	exFilled, parseErr := dec.Exact(truth.ExecutedQty).Rat()
 	if parseErr != nil || exFilled.Sign() < 0 {
-		return nil, false, fmt.Errorf("binance: invalid reconciliation filled quantity")
+		return nil, false, fmt.Errorf("%w: binance filled quantity", execution.ErrReconcileEvidence)
 	}
 	status := binanceStatusToProto(truth.Status)
 	kanzFilled := dec.FromProto(exp.GetFilledQuantity())
@@ -381,7 +392,7 @@ func healedState(exp *orderpb.OrderState, truth *orderResponse, now time.Time) (
 	leavesD, lok := dec.ToProtoExact(leaves)
 	if !fok || !lok {
 		return nil, false, fmt.Errorf("binance: order %s healed quantities are not representable as a Decimal "+
-			"(filled=%s leaves=%s)", exp.GetOrderId(), exFilled.FloatString(8), leaves.FloatString(8))
+			"(filled=%s leaves=%s): %w", exp.GetOrderId(), exFilled.FloatString(8), leaves.FloatString(8), execution.ErrReconcileEvidence)
 	}
 	healed := &orderpb.OrderState{
 		OrderId: exp.GetOrderId(), PortfolioId: exp.GetPortfolioId(), InstrumentId: exp.GetInstrumentId(),
@@ -418,8 +429,8 @@ func (r *Reconciler) emitBalanceReconciled(ctx context.Context, asset string, ex
 	deltaD, dok := dec.ToProtoExact(delta)
 	if !eok || !aok || !dok {
 		return fmt.Errorf("binance: %s balance reconciliation is not representable as a Decimal "+
-			"(expected=%s actual=%s) — refusing to publish a break with fabricated figures",
-			asset, expected.FloatString(8), actual.FloatString(8))
+			"(expected=%s actual=%s) — refusing to publish a break with fabricated figures: %w",
+			asset, expected.FloatString(8), actual.FloatString(8), execution.ErrReconcileEvidence)
 	}
 	return r.pub.Publish(ctx, bus.Event{
 		Subject: subjectBalanceRecon, EventType: subjectBalanceRecon,
