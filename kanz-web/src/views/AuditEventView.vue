@@ -40,7 +40,15 @@ onMounted(async () => {
       <div><dt>Previous hash</dt><dd><code>{{ record.prev_hash || '—' }}</code></dd></div>
       <div><dt>Record hash</dt><dd><code>{{ record.hash }}</code></dd></div>
     </dl>
-    <p class="muted">Payload attributes and free-form summaries are intentionally omitted from the browser view.</p>
+    <section v-if="record.discrepancy" aria-labelledby="discrepancy-heading">
+      <h2 id="discrepancy-heading">Venue discrepancy — investigation required</h2>
+      <p class="state-warn">This is observed evidence, not a completed repair. No cash adjustment, settlement, or terminal-order reopening is authorized by this event. Reported scope is unverified; legacy balance producers used a tenant ID as the portfolio field.</p>
+      <dl class="event-detail">
+        <div v-for="(value, key) in record.discrepancy" :key="key"><dt>{{ key.replaceAll('_', ' ') }}</dt><dd>{{ value || 'Not supplied' }}</dd></div>
+      </dl>
+      <p>Compare this observation with the venue order and trade history and the authorized account ledger. Resolve missing fill identities and account attribution before requesting a correction.</p>
+    </section>
+    <p class="muted">Other payload attributes and free-form summaries are intentionally omitted from the browser view.</p>
 
     <h2>Direct causal ancestry</h2>
     <p v-if="lineageError" class="error" role="alert">{{ lineageError }}</p>

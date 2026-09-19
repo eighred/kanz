@@ -38,3 +38,14 @@ describe('audit event investigation', () => {
     expect(wrapper.text()).not.toContain('private detail')
   })
 })
+
+
+it('shows venue evidence as an investigation rather than a completed repair', async () => {
+  vi.spyOn(audit, 'event').mockResolvedValue({ ...record, kind: 'venue_discrepancy', event_type: 'accounting.balance.reconciled', discrepancy: { disposition: 'investigate', actual: '1/1000000000', scope_status: 'unverified' } })
+  vi.spyOn(audit, 'lineage').mockResolvedValue({ target: record, ancestry: [record] })
+  const wrapper = mount(AuditEventView, { global: { plugins: [await router()] } })
+  await flushPromises()
+  expect(wrapper.text()).toContain('investigation required')
+  expect(wrapper.text()).toContain('1/1000000000')
+  expect(wrapper.text()).toContain('not a completed repair')
+})

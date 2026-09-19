@@ -21,7 +21,7 @@ import (
 // Binance for the venue truth and, where Kanz's state has drifted (a fill the
 // websocket missed, an unrecorded fee), emits a correcting FACT. The exchange is
 // the source of truth; this NEVER edits the ledger — it publishes StateHealed /
-// BalanceReconciled and lets the journal fold them bitemporally.
+// BalanceReconciled as operator-facing discrepancy evidence (#1040).
 type Reconciler struct {
 	rest         *binanceREST
 	symbols      SymbolMapper
@@ -281,11 +281,11 @@ func binanceTerminal(status string) bool {
 // exchange string, and a token filled quantity in the trillions wraps through
 // dec.ToProto — healing the order to a filled size that never traded.
 func binanceHealedFromQuery(ci CloseIntent, truth *orderResponse, venue string, now time.Time) (*orderpb.OrderState, error) {
-	filled, _ := new(big.Rat).SetString(truth.ExecutedQty)
-	if filled == nil {
-		filled = new(big.Rat)
+	filled, parseErr := dec.Exact(truth.ExecutedQty).Rat()
+	if parseErr != nil || filled.Sign() < 0 {
+		return nil, fmt.Errorf("binance: invalid reconciliation filled quantity")
 	}
-	filledD, ok := dec.ToProtoScaled(filled)
+	filledD, ok := dec.ToProtoExact(filled)
 	if !ok {
 		return nil, fmt.Errorf("binance: order %s filled quantity %q is not representable as a Decimal",
 			ci.OrderID, truth.ExecutedQty)
@@ -332,15 +332,12 @@ func (r *Reconciler) reconcileBalances(ctx context.Context) error {
 		return err
 	}
 	for _, b := range acct.Balances {
-		actual := new(big.Rat)
-		free, ok1 := new(big.Rat).SetString(b.Free)
-		locked, ok2 := new(big.Rat).SetString(b.Locked)
-		if ok1 {
-			actual.Add(actual, free)
+		free, freeErr := dec.Exact(b.Free).Rat()
+		locked, lockedErr := dec.Exact(b.Locked).Rat()
+		if freeErr != nil || lockedErr != nil {
+			return fmt.Errorf("binance: invalid reconciliation balance")
 		}
-		if ok2 {
-			actual.Add(actual, locked)
-		}
+		actual := new(big.Rat).Add(free, locked)
 		// UNKNOWN SKIPS, IT DOES NOT COMPARE AGAINST ZERO (#418). Substituting
 		// zero for a balance nobody has announced reports every asset the exchange
 		// holds as a discrepancy — a break storm on the first run, which teaches an
@@ -367,9 +364,9 @@ func (r *Reconciler) reconcileBalances(ctx context.Context) error {
 // carries only the Decimal-representation failure (#94); the bool means "there is
 // drift worth emitting" and reusing it would drop a correction silently.
 func healedState(exp *orderpb.OrderState, truth *orderResponse, now time.Time) (*orderpb.OrderState, bool, error) {
-	exFilled, _ := new(big.Rat).SetString(truth.ExecutedQty)
-	if exFilled == nil {
-		exFilled = new(big.Rat)
+	exFilled, parseErr := dec.Exact(truth.ExecutedQty).Rat()
+	if parseErr != nil || exFilled.Sign() < 0 {
+		return nil, false, fmt.Errorf("binance: invalid reconciliation filled quantity")
 	}
 	status := binanceStatusToProto(truth.Status)
 	kanzFilled := dec.FromProto(exp.GetFilledQuantity())
@@ -378,10 +375,10 @@ func healedState(exp *orderpb.OrderState, truth *orderResponse, now time.Time) (
 	}
 	ordered := dec.FromProto(exp.GetOrderedQuantity())
 	leaves := new(big.Rat).Sub(ordered, exFilled)
-	// SCALED, NOT WRAPPING: these become the healed order's sizes in the FACT the
-	// journal folds, so a wrapped value corrects the book to a size nothing traded.
-	filledD, fok := dec.ToProtoScaled(exFilled)
-	leavesD, lok := dec.ToProtoScaled(leaves)
+	// EXACT, NEVER ROUNDED: these are observed sizes, not journal commands. The
+	// operator must see the precise discrepancy, including sub-scale quantities.
+	filledD, fok := dec.ToProtoExact(exFilled)
+	leavesD, lok := dec.ToProtoExact(leaves)
 	if !fok || !lok {
 		return nil, false, fmt.Errorf("binance: order %s healed quantities are not representable as a Decimal "+
 			"(filled=%s leaves=%s)", exp.GetOrderId(), exFilled.FloatString(8), leaves.FloatString(8))
@@ -412,13 +409,13 @@ func (r *Reconciler) emitStateHealed(ctx context.Context, state *orderpb.OrderSt
 
 func (r *Reconciler) emitBalanceReconciled(ctx context.Context, asset string, expected, actual *big.Rat) error {
 	delta := new(big.Rat).Sub(actual, expected)
-	// SCALED, NOT WRAPPING (#94) — the same reasoning as the OKX reconciler. These
+	// EXACT, NEVER ROUNDED (#94) — the same reasoning as the OKX reconciler. These
 	// three numbers ARE the balance break; a wrapped Delta does not understate it,
 	// it reports a different break entirely, and can make a real one look like a
 	// match. Refusing to publish is the only safe failure.
-	expectedD, eok := dec.ToProtoScaled(expected)
-	actualD, aok := dec.ToProtoScaled(actual)
-	deltaD, dok := dec.ToProtoScaled(delta)
+	expectedD, eok := dec.ToProtoExact(expected)
+	actualD, aok := dec.ToProtoExact(actual)
+	deltaD, dok := dec.ToProtoExact(delta)
 	if !eok || !aok || !dok {
 		return fmt.Errorf("binance: %s balance reconciliation is not representable as a Decimal "+
 			"(expected=%s actual=%s) — refusing to publish a break with fabricated figures",

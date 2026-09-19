@@ -306,7 +306,19 @@ func run() int {
 // leaving an audit gap.
 func runProjection(ctx context.Context, cfg config.Config, store audit.Store, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
-	projector := audit.NewProjector(store, time.Now)
+	discrepancies := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kanz_audit_venue_discrepancy_delivery_total",
+		Help: "Durable venue discrepancy delivery outcomes, including redeliveries; not a count of repairs.",
+	}, []string{"kind", "result"})
+	obs.Registry.MustRegister(discrepancies)
+	for _, kind := range []string{"order", "balance"} {
+		for _, result := range []string{"observed", "invalid", "legacy", "failed"} {
+			discrepancies.WithLabelValues(kind, result)
+		}
+	}
+	projector := audit.NewProjector(store, time.Now, audit.WithDiscrepancyObserver(func(kind, result string) {
+		discrepancies.WithLabelValues(kind, result).Inc()
+	}))
 
 	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
 	// plaintext client it refuses at the handshake.

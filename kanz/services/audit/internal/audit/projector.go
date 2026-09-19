@@ -12,17 +12,30 @@ import (
 // the audited subjects directly. It records EVERY delivered event — recognized
 // payloads enriched, the rest generic — because a dropped event is an audit gap.
 type Projector struct {
-	store Store
-	now   func() time.Time
+	store               Store
+	now                 func() time.Time
+	discrepancyObserved func(kind, result string)
+}
+
+type ProjectorOption func(*Projector)
+
+// WithDiscrepancyObserver counts delivery outcomes after the durable append.
+// Redeliveries count as deliveries, never as distinct unresolved incidents.
+func WithDiscrepancyObserver(fn func(kind, result string)) ProjectorOption {
+	return func(p *Projector) { p.discrepancyObserved = fn }
 }
 
 // NewProjector builds a projector writing to store. now defaults to time.Now and
 // is injectable for deterministic tests.
-func NewProjector(store Store, now func() time.Time) *Projector {
+func NewProjector(store Store, now func() time.Time, opts ...ProjectorOption) *Projector {
 	if now == nil {
 		now = time.Now
 	}
-	return &Projector{store: store, now: now}
+	p := &Projector{store: store, now: now}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Handle projects one event into the audit log. It is idempotent (the store
@@ -47,6 +60,16 @@ func (p *Projector) Handle(ctx context.Context, env *envelopepb.Envelope, payloa
 		Attributes:    c.attrs,
 		SchemaRef:     env.GetPayloadSchemaRef(),
 	}
-	_, err := p.store.Append(ctx, rec)
+	saved, err := p.store.Append(ctx, rec)
+	if c.kind == KindVenueDiscrepancy && p.discrepancyObserved != nil {
+		result := "failed"
+		if err == nil {
+			result = "legacy"
+			if saved.Kind == KindVenueDiscrepancy {
+				result = saved.Attributes["evidence_status"]
+			}
+		}
+		p.discrepancyObserved(c.attrs["discrepancy_type"], result)
+	}
 	return err
 }

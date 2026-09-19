@@ -10,6 +10,7 @@ export interface AuditEvent {
 }
 
 export interface AuditRecord extends AuditEvent {
+  discrepancy?: Record<string, string>
   causation_id: string
   domain: string
   event_class: string
@@ -24,6 +25,26 @@ export interface AuditLineage { target: AuditRecord; ancestry: AuditRecord[] }
 const eventKeys = ['event_id', 'correlation_id', 'event_type', 'kind', 'occurred_at', 'source'] as const
 const recordKeys = [...eventKeys, 'causation_id', 'domain', 'event_class', 'recorded_at', 'schema_ref', 'prev_hash', 'hash'] as const
 
+// A closed projection for venue evidence, never a generic attributes viewer.
+function discrepancy(value: unknown): Record<string, string> {
+  const attrs = (value as { attributes?: unknown }).attributes
+  if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs)) throw new Error('Invalid discrepancy evidence.')
+  const row = attrs as Record<string, unknown>
+  if (row.disposition !== 'investigate' || !['observed', 'invalid'].includes(String(row.evidence_status)) ||
+      !['order', 'balance'].includes(String(row.discrepancy_type)) || row.scope_status !== 'unverified' ||
+      typeof row.payload_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(row.payload_sha256)) throw new Error('Invalid discrepancy evidence.')
+  const keys = ['discrepancy_type', 'disposition', 'evidence_status', 'scope_status', 'payload_sha256']
+  if (row.evidence_status === 'observed') keys.push('venue', 'detected_at', 'reported_portfolio_id',
+    ...(row.discrepancy_type === 'order' ? ['order_id', 'instrument_id', 'order_status', 'filled_quantity'] : ['asset', 'expected', 'actual', 'delta']))
+  const result: Record<string, string> = {}
+  for (const key of keys) {
+    const item = row[key]
+    if (typeof item !== 'string' || item.length > 1024) throw new Error('Invalid discrepancy evidence.')
+    result[key] = item
+  }
+  return result
+}
+
 function projected<T>(value: unknown, keys: readonly string[], dates: readonly string[]): T {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid audit event.')
   const row = value as Record<string, unknown>
@@ -33,10 +54,11 @@ function projected<T>(value: unknown, keys: readonly string[], dates: readonly s
 }
 
 export const audit = {
-  async events(correlation: string, eventType: string): Promise<AuditEvent[]> {
+  async events(correlation: string, eventType: string, since = ''): Promise<AuditEvent[]> {
     const query = new URLSearchParams({ limit: '100' })
     if (correlation.trim()) query.set('correlation', correlation.trim())
     if (eventType.trim()) query.set('event_type', eventType.trim())
+    if (since) query.set('since', new Date(since).toISOString())
     const body = await api.get<{ records: unknown; count: unknown }>(`/api/audit/events?${query}`)
     // Go encodes an empty nil slice as null. Other malformed results cannot
     // become an empty audit trail and falsely suggest nothing happened.
@@ -47,11 +69,15 @@ export const audit = {
     return rows.map((row: unknown) => projected<AuditEvent>(row, eventKeys, ['occurred_at']))
   },
   async event(id: string): Promise<AuditRecord> {
+    const raw = await api.get<unknown>(`/api/v1/audit/events/${encodeURIComponent(id)}`)
     const record = projected<AuditRecord>(
-      await api.get<unknown>(`/api/v1/audit/events/${encodeURIComponent(id)}`),
+      raw,
       recordKeys, ['occurred_at', 'recorded_at'],
     )
     if (record.event_id !== id) throw new Error('Invalid audit event.')
+    if (record.kind === 'venue_discrepancy' && ['order.order.healed', 'accounting.balance.reconciled'].includes(record.event_type)) {
+      record.discrepancy = discrepancy(raw)
+    }
     return record
   },
   async lineage(id: string): Promise<AuditLineage> {

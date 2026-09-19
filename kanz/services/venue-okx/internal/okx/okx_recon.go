@@ -20,7 +20,7 @@ import (
 // OKXReconciler is the OKX secondary audit layer — the analog of the Binance
 // Reconciler. It polls OKX for the venue truth and, where Kanz's state has
 // drifted, emits a correcting FACT (StateHealed / BalanceReconciled). It never
-// edits state; the journal folds the FACTs to restore parity bitemporally.
+// edits state; audit records the FACTs as operator-facing evidence (#1040).
 type OKXReconciler struct {
 	rest         *okxREST
 	symbols      SymbolMapper
@@ -276,14 +276,14 @@ func okxTerminal(state string) bool {
 // the correction silently, which is the failure this whole reconciler exists to
 // catch.
 func okxHealedFromQuery(ci CloseIntent, o *okxOrder, now time.Time) (*orderpb.OrderState, bool, error) {
-	filled, _ := new(big.Rat).SetString(o.AccFillSz)
-	if filled == nil {
-		filled = new(big.Rat)
+	filled, parseErr := dec.Exact(o.AccFillSz).Rat()
+	if parseErr != nil || filled.Sign() < 0 {
+		return nil, false, fmt.Errorf("okx: invalid reconciliation filled quantity")
 	}
-	// SCALED, NOT WRAPPING. AccFillSz is an exchange string; a token filled
+	// EXACT, NEVER ROUNDED. AccFillSz is an exchange string; a token filled
 	// quantity in the trillions wraps through dec.ToProto and this FACT would
 	// then heal the order to a filled size that never traded.
-	filledD, ok := dec.ToProtoScaled(filled)
+	filledD, ok := dec.ToProtoExact(filled)
 	if !ok {
 		return nil, false, fmt.Errorf("okx: order %s filled quantity %q is not representable as a Decimal",
 			ci.OrderID, o.AccFillSz)
@@ -333,9 +333,9 @@ func (r *OKXReconciler) reconcileBalances(ctx context.Context) error {
 		return err
 	}
 	for ccy, cashBal := range bals {
-		actual, ok := new(big.Rat).SetString(cashBal)
-		if !ok {
-			continue
+		actual, parseErr := dec.Exact(cashBal).Rat()
+		if parseErr != nil {
+			return fmt.Errorf("okx: invalid reconciliation balance")
 		}
 		// UNKNOWN SKIPS, IT DOES NOT COMPARE AGAINST ZERO (#418). Substituting
 		// zero for a balance nobody has announced reports every asset the exchange
@@ -360,9 +360,9 @@ func (r *OKXReconciler) reconcileBalances(ctx context.Context) error {
 // carries only the Decimal-representation failure (#94) — see okxHealedFromQuery
 // for why it cannot share the drift bool.
 func okxHealedState(exp *orderpb.OrderState, o *okxOrder, now time.Time) (*orderpb.OrderState, bool, error) {
-	exFilled, _ := new(big.Rat).SetString(o.AccFillSz)
-	if exFilled == nil {
-		exFilled = new(big.Rat)
+	exFilled, parseErr := dec.Exact(o.AccFillSz).Rat()
+	if parseErr != nil || exFilled.Sign() < 0 {
+		return nil, false, fmt.Errorf("okx: invalid reconciliation filled quantity")
 	}
 	status := okxStateToProto(o.State)
 	if exFilled.Cmp(dec.FromProto(exp.GetFilledQuantity())) == 0 && status == exp.GetStatus() {
@@ -370,11 +370,11 @@ func okxHealedState(exp *orderpb.OrderState, o *okxOrder, now time.Time) (*order
 	}
 	ordered := dec.FromProto(exp.GetOrderedQuantity())
 	leaves := new(big.Rat).Sub(ordered, exFilled)
-	// SCALED, NOT WRAPPING. These two become the order's filled and leaves sizes
-	// in the healed FACT the journal folds; a wrapped value corrects the book to a
-	// size that never traded, which is worse than the drift being healed.
-	filledD, fok := dec.ToProtoScaled(exFilled)
-	leavesD, lok := dec.ToProtoScaled(leaves)
+	// EXACT, NEVER ROUNDED. These two become the order's filled and leaves sizes
+	// in the observed FACT; a wrapped or rounded value would hide the actual
+	// discrepancy from the investigating operator.
+	filledD, fok := dec.ToProtoExact(exFilled)
+	leavesD, lok := dec.ToProtoExact(leaves)
 	if !fok || !lok {
 		return nil, false, fmt.Errorf("okx: order %s healed quantities are not representable as a Decimal "+
 			"(filled=%s leaves=%s)", exp.GetOrderId(), exFilled.FloatString(8), leaves.FloatString(8))
@@ -404,15 +404,15 @@ func (r *OKXReconciler) emitStateHealed(ctx context.Context, state *orderpb.Orde
 
 func (r *OKXReconciler) emitBalanceReconciled(ctx context.Context, asset string, expected, actual *big.Rat) error {
 	delta := new(big.Rat).Sub(actual, expected)
-	// SCALED, NOT WRAPPING (#94). These three numbers ARE the balance break — the
+	// EXACT, NEVER ROUNDED (#94). These three numbers ARE the balance break — the
 	// figures an operator reads to decide whether the book or the exchange is
 	// wrong. dec.ToProto wraps above ~92.2 billion units at scale 8, which a
 	// token balance reaches, and a wrapped Delta does not report a smaller break:
 	// it reports a DIFFERENT one, and can turn a real break into an apparent
 	// match. Refusing to publish is the only safe failure here.
-	expectedD, eok := dec.ToProtoScaled(expected)
-	actualD, aok := dec.ToProtoScaled(actual)
-	deltaD, dok := dec.ToProtoScaled(delta)
+	expectedD, eok := dec.ToProtoExact(expected)
+	actualD, aok := dec.ToProtoExact(actual)
+	deltaD, dok := dec.ToProtoExact(delta)
 	if !eok || !aok || !dok {
 		return fmt.Errorf("okx: %s balance reconciliation is not representable as a Decimal "+
 			"(expected=%s actual=%s) — refusing to publish a break with fabricated figures",
