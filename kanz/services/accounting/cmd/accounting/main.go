@@ -251,19 +251,12 @@ func run() int {
 		return 2
 	}
 
-	// Cash-movement producer (WIRE-01f): with a broker configured, mount the
-	// cash-movement endpoint whose posts are EMITTED as accounting.v1 FACTs and
-	// folded back by the consumer below — the event-sourced path, so booking a
-	// subscription/redemption/fee is replayable. A dial failure is fatal (a
-	// configured broker that won't connect is a misconfiguration).
-	if cfg.NATSURL != "" {
-		pub, closePub, err := buildCashPublisher(ctx, cfg, mesh, busMetrics)
-		if err != nil {
-			logger.Error("cash publisher init failed", "err", err)
-			return 2
-		}
-		defer closePub()
-		opts = append(opts, server.WithCashPublisher(pub))
+	// Acceptance and its FACT must commit together. The existing accounting
+	// outbox relay publishes queued commands after a broker outage or restart.
+	if cfg.NATSURL != "" && ledgerPool != nil {
+		opts = append(opts, server.WithCashCommands(cashmove.NewCommands(ledgerPool)))
+	} else {
+		logger.Warn("cash commands disabled: durable PostgreSQL and NATS are required")
 	}
 
 	readiness := &server.Readiness{}
@@ -713,44 +706,15 @@ func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfi
 	return firstErr
 }
 
-// cashProducerConfig is the producer identity the cash-movement publisher runs
-// under. It is split out of buildCashPublisher, which cannot be unit-tested
-// because it dials a broker first (#245).
-//
-// TENANT IS NOT OPTIONAL HERE, AND ITS ABSENCE IS NOT A DEGRADED MODE (MT-01b).
-// A cash movement is raised by an HTTP request — POST /portfolios/{id}/cash —
-// not by an inbound bus delivery, so there is no ctx tenant for the producer to
-// inherit and this fallback is the ONLY source of one. Configured without it,
-// bus.Validate refused EVERY subscription, redemption and fee with "tenant_id
-// required": the endpoint answered 400, the service stayed ready, and the
-// ledger's non-trade cash inputs never reached NAV. market-ingest's composition
-// root carries the same note for the same reason; the OMS crash-looped on it.
+// cashProducerConfig supplies the accounting producer identity for durable
+// outbox delivery and journal announcements. A configured tenant is required
+// because background relay work has no inbound request context to inherit.
 func cashProducerConfig(cfg config.Config) bus.ProducerConfig {
 	return bus.ProducerConfig{
 		Source:          cfg.Source,
 		ProducerVersion: version.String(),
 		Tenant:          cfg.Tenant,
 	}
-}
-
-// buildCashPublisher dials a producer connection and builds the WIRE-01f
-// cash-movement publisher. It returns a close func for the producer client.
-func buildCashPublisher(ctx context.Context, cfg config.Config, mesh *transport.Mesh, busMetrics *bus.BusMetrics) (*cashmove.Publisher, func(), error) {
-	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source + "-producer", TLSConfig: mesh.Client, Metrics: busMetrics})
-	if err != nil {
-		return nil, nil, err
-	}
-	producer, err := bus.NewProducer(client, cashProducerConfig(cfg))
-	if err != nil {
-		_ = client.Close()
-		return nil, nil, err
-	}
-	pub, err := cashmove.NewPublisher(producer, nil)
-	if err != nil {
-		_ = client.Close()
-		return nil, nil, err
-	}
-	return pub, func() { _ = client.Close() }, nil
 }
 
 // buildLiveFX parses the WIRE-01d FX configuration and, when configured, builds

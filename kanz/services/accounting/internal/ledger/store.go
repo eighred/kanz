@@ -309,9 +309,26 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 	if e == nil || e.EntryID == "" {
 		return errors.New("ledger: cannot append entry with empty entry_id")
 	}
+	if isCashMovement(e) {
+		if !validCashEntry(e) {
+			return ErrCashConflict
+		}
+		owned := *e
+		owned.Cash = new(big.Rat).Set(e.Cash)
+		e = &owned
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.seen[e.EntryID] {
+		if isCashMovement(e) {
+			for _, entries := range m.journal {
+				for _, old := range entries {
+					if old.EntryID == e.EntryID && !sameCash(e, old) {
+						return ErrCashConflict
+					}
+				}
+			}
+		}
 		// IDEMPOTENT, AND THAT INCLUDES THE ANNOUNCEMENT. A redelivered entry
 		// changes no balance, so re-announcing would enqueue a duplicate level for
 		// a fold that did not happen — harmless on the wire and noise in the

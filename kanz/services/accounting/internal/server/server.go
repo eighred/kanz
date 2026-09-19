@@ -35,13 +35,6 @@ type Readiness struct{ ready atomic.Bool }
 func (r *Readiness) Set(ready bool) { r.ready.Store(ready) }
 func (r *Readiness) Ready() bool    { return r.ready.Load() }
 
-// CashPublisher emits a cash movement as an accounting.v1 FACT (WIRE-01f). The
-// composition root injects the bus-backed cashmove.Publisher when a broker is
-// configured; without it the cash-movement endpoint is not mounted.
-type CashPublisher interface {
-	Publish(ctx context.Context, m cashmove.CashMovement) error
-}
-
 // Server is the HTTP handler.
 type Server struct {
 	logger        *slog.Logger
@@ -51,7 +44,7 @@ type Server struct {
 	metrics       http.Handler
 	fxProvider    func() accounting.FXConverter
 	instrumentCcy accounting.InstrumentCurrency
-	cashPublisher CashPublisher
+	cashCommands  *cashmove.Commands
 	collateral    *collateralops.Store
 	// breaks is the custody reconciliation break queue (#962). Nil ⇒ the routes
 	// are not registered and the surface answers 404, which is the truthful
@@ -109,15 +102,12 @@ func WithSnapshotMetrics(m *ledger.SnapshotMetrics) Option {
 	return func(s *Server) { s.snapshotMetrics = m }
 }
 
-// WithCashPublisher wires the cash-movement FACT producer (WIRE-01f) and mounts
-// the POST /v1/portfolios/{id}/cash-movements endpoint. Absent ⇒ the endpoint is
-// not mounted (no broker configured).
 // WithTenant pins the instance to the one tenant it serves — the same value main
 // gives pg.NewTenantPool. Without it every /v1 route refuses (#415).
 func WithTenant(t string) Option { return func(s *Server) { s.tenant = t } }
 
-func WithCashPublisher(p CashPublisher) Option {
-	return func(s *Server) { s.cashPublisher = p }
+func WithCashCommands(commands *cashmove.Commands) Option {
+	return func(s *Server) { s.cashCommands = commands }
 }
 
 // WithCustodyBookScope supplies the (portfolio, custodian) → exchange-account
@@ -180,8 +170,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/nav", s.handleNAV)
 	s.mux.HandleFunc("GET /v1/portfolios/{id}/cash-forecast", s.cashForecast)
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/reconcile", s.handleReconcile)
-	if s.cashPublisher != nil {
+	if s.cashCommands != nil {
 		s.mux.HandleFunc("POST /v1/portfolios/{id}/cash-movements", s.handleCashMovement)
+		s.mux.HandleFunc("POST /v1/portfolios/{id}/cash-movements/preview", s.previewCashMovement)
+		s.mux.HandleFunc("GET /v1/portfolios/{id}/cash-movements/{movement}", s.cashMovementStatus)
 	}
 	s.custodyRoutes()
 	s.collateralRoutes()
@@ -474,77 +466,6 @@ func custodianList(custodians []string) string {
 }
 
 // --- cash movements (WIRE-01f) -----------------------------------------------
-
-type cashMovementRequest struct {
-	MovementID string `json:"movement_id"`
-	Kind       string `json:"kind"`      // subscription | redemption | fee
-	Amount     string `json:"amount"`    // positive decimal magnitude
-	Currency   string `json:"currency"`  // ISO 4217; default base currency
-	Effective  string `json:"effective"` // optional RFC-3339
-	SourceRef  string `json:"source_ref"`
-	// VenueAccountID scopes the movement to an exchange account (#415): "PF1 holds
-	// 100 of the USDT in okx-sub-1", rather than only "PF1 holds 100 USDT".
-	//
-	// OPTIONAL, AND OMITTING IT IS A STATEMENT. Migration 0003 reads '' as the
-	// positive declaration that the entry touched no exchange account — true for an
-	// investor subscription into the fund's own bank, false for a transfer that
-	// funded okx-sub-1. It is never defaulted, because a guessed account posts cash
-	// against collateral it never reached.
-	VenueAccountID string `json:"venue_account_id"`
-}
-
-// handleCashMovement books a non-trade cash movement by EMITTING it as a FACT
-// (not writing the store directly) — the event-sourced path: the FACT lands on
-// the bus and the WIRE-01f consumer folds it into the journal, so a replay
-// reproduces the book. Returns 202 Accepted (the fold is asynchronous).
-func (s *Server) handleCashMovement(w http.ResponseWriter, r *http.Request) {
-	if !s.callerOwnsThisInstance(w, r) {
-		return
-	}
-	id := r.PathValue("id")
-	var req cashMovementRequest
-	if !decode(w, r, &req) {
-		return
-	}
-	kind, err := parseKind(req.Kind)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	amount, err := parseRat(req.Amount)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	ccy := req.Currency
-	if ccy == "" {
-		ccy = s.baseCcy
-	}
-	var eff time.Time
-	if req.Effective != "" {
-		if eff, err = time.Parse(time.RFC3339, req.Effective); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid effective time"})
-			return
-		}
-	}
-	mv := cashmove.CashMovement{
-		MovementID:     req.MovementID,
-		PortfolioID:    id,
-		Kind:           kind,
-		Amount:         amount,
-		Currency:       ccy,
-		Effective:      eff,
-		SourceRef:      req.SourceRef,
-		VenueAccountID: req.VenueAccountID,
-	}
-	if err := s.cashPublisher.Publish(r.Context(), mv); err != nil {
-		// A validation error is the client's (bad movement); anything else is a
-		// publish failure (broker) — surface both, but a bad request is 400.
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "movement_id": req.MovementID})
-}
 
 func parseKind(s string) (cashmove.Kind, error) {
 	switch s {

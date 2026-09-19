@@ -53,6 +53,20 @@ type BookScope struct {
 	claimed map[string]ledger.AccountScope
 }
 
+// CashAccountAllowed requires an explicit, unambiguous portfolio assignment.
+// Derived journal accounts are read evidence, not cash-command authority.
+func (s *BookScope) CashAccountAllowed(portfolio, account string) bool {
+	if account == "" || !s.claimed[portfolio][account] {
+		return false
+	}
+	for other, accounts := range s.claimed {
+		if other != portfolio && accounts[account] {
+			return false
+		}
+	}
+	return true
+}
+
 // NewBookScope builds the scope from the configured pairs and the account
 // declaration, refusing every configuration that would reconcile against a book
 // it cannot justify.

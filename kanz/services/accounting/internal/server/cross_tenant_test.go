@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/accounting/internal/cashmove"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 )
 
@@ -45,17 +46,18 @@ func tenantServer(t *testing.T) *Server {
 	r := &Readiness{}
 	r.Set(true)
 	return New(r, nil, ledger.NewMemoryStore(), "USD",
-		WithTenant(testTenant), WithCashPublisher(&fakeCashPublisher{}))
+		WithTenant(testTenant), WithCashCommands(cashmove.NewCommands(nil)))
 }
 
-// everyV1Route drives all three writable routes, so a new one cannot be added
+// everyV1Route drives the writable portfolio routes, so a new one cannot be added
 // without a decision about whether it belongs in this list.
 func everyV1Route(s *Server, tenant string) map[string]*httptest.ResponseRecorder {
 	out := map[string]*httptest.ResponseRecorder{}
 	for name, body := range map[string]string{
-		"cash-movements": `{"movement_id":"M1","kind":"subscription","amount":"100"}`,
-		"nav":            `{}`,
-		"reconcile":      `{}`,
+		"cash-movements":         `{"movement_id":"M1","kind":"subscription","amount":"100"}`,
+		"cash-movements/preview": `{}`,
+		"nav":                    `{}`,
+		"reconcile":              `{}`,
 	} {
 		path := "/v1/portfolios/PF1/" + name
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
@@ -63,6 +65,9 @@ func everyV1Route(s *Server, tenant string) map[string]*httptest.ResponseRecorde
 			req.Header.Set(auth.HeaderPrincipalTenant, tenant)
 		}
 		req.Header.Set(auth.HeaderPrincipalSubject, "alice@kanz")
+		if err := auth.SetPrincipalPortfolios(req.Header, []string{"PF1"}); err != nil {
+			panic(err)
+		}
 		rec := httptest.NewRecorder()
 		s.ServeHTTP(rec, req)
 		out[name] = rec
@@ -111,7 +116,7 @@ func TestTheInstancesOwnTenantIsStillServed(t *testing.T) {
 func TestAServerWithNoConfiguredTenantRefusesEveryone(t *testing.T) {
 	r := &Readiness{}
 	r.Set(true)
-	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithCashPublisher(&fakeCashPublisher{}))
+	s := New(r, nil, ledger.NewMemoryStore(), "USD", WithCashCommands(cashmove.NewCommands(nil)))
 	for name, rec := range everyV1Route(s, testTenant) {
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("%s: an instance with no configured tenant answered HTTP %d, want 404 — "+
@@ -141,5 +146,8 @@ func postV1(method, path string, body io.Reader) *http.Request {
 	req := httptest.NewRequest(method, path, body)
 	req.Header.Set(auth.HeaderPrincipalTenant, testTenant)
 	req.Header.Set(auth.HeaderPrincipalSubject, "alice@kanz")
+	if err := auth.SetPrincipalPortfolios(req.Header, []string{"PF1"}); err != nil {
+		panic(err)
+	}
 	return req
 }

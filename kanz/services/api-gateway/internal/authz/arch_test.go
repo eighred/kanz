@@ -245,7 +245,9 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// obvious half. The person who can move money is never the person who
 		// trades it; giving Trade this route hands every strategy operator the
 		// authority to book a redemption against the IBOR.
-		"POST /v1/portfolios/{id}/cash-movements": authz.Fund,
+		"POST /v1/portfolios/{id}/cash-movements":           authz.Fund,
+		"POST /v1/portfolios/{id}/cash-movements/preview":   authz.Fund,
+		"GET /v1/portfolios/{id}/cash-movements/{movement}": authz.Fund,
 
 		// THE CUSTODY RECONCILIATION BREAK QUEUE (#962) — the operator surface for
 		// the control that checks the book of record against the custodian.

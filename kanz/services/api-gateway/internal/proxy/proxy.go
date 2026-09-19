@@ -296,6 +296,8 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	if h.roles.Fund != "" {
 		mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/cash-movements",
 			h.handle(ServiceAccounting, true, nil))
+		mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/cash-movements/preview", h.handle(ServiceAccounting, true, nil))
+		mux.Handle(authz.Fund, "GET /v1/portfolios/{id}/cash-movements/{movement}", h.handle(ServiceAccounting, false, nil))
 	}
 
 	// THE CUSTODY RECONCILIATION BREAK QUEUE (#962) — the operator surface for
