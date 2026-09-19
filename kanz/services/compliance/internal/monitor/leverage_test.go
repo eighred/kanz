@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	"strings"
 	"testing"
 	"time"
@@ -54,11 +55,12 @@ func clockAt(at time.Time) func() time.Time { return func() time.Time { return a
 func foldCash(t *testing.T, v *cashview.View, portfolio string, total int64, at time.Time) {
 	t.Helper()
 	payload, err := proto.Marshal(&accountingpb.PortfolioCashBalance{
-		PortfolioId:   portfolio,
-		BaseCurrency:  "USD",
-		Total:         decv(total, 0),
-		AsOf:          timestamppb.New(at),
-		KnowledgeTime: timestamppb.New(at),
+		CurrencyCoverage: &domainpb.InputCoverage{Contributed: 1},
+		PortfolioId:      portfolio,
+		BaseCurrency:     "USD",
+		Total:            decv(total, 0),
+		AsOf:             timestamppb.New(at),
+		KnowledgeTime:    timestamppb.New(at),
 	})
 	if err != nil {
 		t.Fatalf("marshal balance: %v", err)

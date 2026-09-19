@@ -2,6 +2,7 @@ package cashview
 
 import (
 	"context"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	"testing"
 	"time"
 
@@ -18,12 +19,13 @@ var t0 = time.Unix(1_700_000_000, 0).UTC()
 func announcement(t *testing.T, portfolio string, total int64, asOf time.Time, accounts ...*accountingpb.VenueAccountCash) []byte {
 	t.Helper()
 	b, err := proto.Marshal(&accountingpb.PortfolioCashBalance{
-		PortfolioId:    portfolio,
-		BaseCurrency:   "USD",
-		Total:          &commonpb.Decimal{Coefficient: total},
-		ByVenueAccount: accounts,
-		AsOf:           timestamppb.New(asOf),
-		KnowledgeTime:  timestamppb.New(asOf),
+		CurrencyCoverage: &domainpb.InputCoverage{Contributed: 1},
+		PortfolioId:      portfolio,
+		BaseCurrency:     "USD",
+		Total:            &commonpb.Decimal{Coefficient: total},
+		ByVenueAccount:   accounts,
+		AsOf:             timestamppb.New(asOf),
+		KnowledgeTime:    timestamppb.New(asOf),
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -162,10 +164,11 @@ func TestHandle_AcksGarbage(t *testing.T) {
 func TestHandle_RefusesAnOutOfDomainExponent(t *testing.T) {
 	v := New(WithClock(func() time.Time { return t0 }))
 	payload, err := proto.Marshal(&accountingpb.PortfolioCashBalance{
-		PortfolioId:  "PF1",
-		BaseCurrency: "USD",
-		Total:        &commonpb.Decimal{Coefficient: 1, Exponent: 2_000_000_000},
-		AsOf:         timestamppb.New(t0),
+		CurrencyCoverage: &domainpb.InputCoverage{Contributed: 1},
+		PortfolioId:      "PF1",
+		BaseCurrency:     "USD",
+		Total:            &commonpb.Decimal{Coefficient: 1, Exponent: 2_000_000_000},
+		AsOf:             timestamppb.New(t0),
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

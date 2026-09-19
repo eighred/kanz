@@ -163,11 +163,12 @@ func foldPrint(t *testing.T, v postTradeValuation, instrument string, price int6
 func announce(t *testing.T, v postTradeValuation, mon *monitor.Monitor, portfolio string, total int64, at time.Time) {
 	t.Helper()
 	payload, err := proto.Marshal(&accountingpb.PortfolioCashBalance{
-		PortfolioId:   portfolio,
-		BaseCurrency:  "USD",
-		Total:         dec(total, 0),
-		AsOf:          timestamppb.New(at),
-		KnowledgeTime: timestamppb.New(at),
+		CurrencyCoverage: &domainpb.InputCoverage{Contributed: 1},
+		PortfolioId:      portfolio,
+		BaseCurrency:     "USD",
+		Total:            dec(total, 0),
+		AsOf:             timestamppb.New(at),
+		KnowledgeTime:    timestamppb.New(at),
 	})
 	if err != nil {
 		t.Fatalf("marshal balance: %v", err)

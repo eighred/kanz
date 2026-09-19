@@ -2,6 +2,7 @@ package cashview
 
 import (
 	"context"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	"testing"
 	"time"
 
@@ -24,12 +25,13 @@ func announcementWith(t *testing.T, total int64, cp *accountingpb.BalanceComplet
 	asOf time.Time) []byte {
 	t.Helper()
 	b, err := proto.Marshal(&accountingpb.PortfolioCashBalance{
-		PortfolioId:   "PF1",
-		BaseCurrency:  "USD",
-		Total:         &commonpb.Decimal{Coefficient: total},
-		AsOf:          timestamppb.New(asOf),
-		KnowledgeTime: timestamppb.New(asOf),
-		Completeness:  cp,
+		CurrencyCoverage: &domainpb.InputCoverage{Contributed: 1},
+		PortfolioId:      "PF1",
+		BaseCurrency:     "USD",
+		Total:            &commonpb.Decimal{Coefficient: total},
+		AsOf:             timestamppb.New(asOf),
+		KnowledgeTime:    timestamppb.New(asOf),
+		Completeness:     cp,
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

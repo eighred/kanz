@@ -22,8 +22,9 @@ syntax = "proto3";
 // was known then (IBOR-01c, knowledge-time correct).
 package accounting.v1;
 
-import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
+import "domain/v1/measure.proto";
+import "google/protobuf/timestamp.proto";
 
 // EntryType classifies a ledger journal entry by what produced it.
 enum EntryType {
@@ -278,8 +279,9 @@ message PortfolioCashBalance {
   // reporting currency. Required.
   string base_currency = 2;
 
-  // total is uninvested cash across every account, in base_currency: the number a
-  // buying-power check compares against. Required.
+  // total is the exact base_currency cash bucket across every account. It is
+  // NOT an FX-converted total and does not establish custody settlement.
+  // Controls must refuse absent or incomplete currency_coverage. Required.
   common.v1.Decimal total = 3;
 
   // by_venue_account is cash held per EXCHANGE ACCOUNT, keyed by
@@ -326,6 +328,17 @@ message PortfolioCashBalance {
   // UNSTATED: a consumer has not been shown that this balance is whole, and it
   // must not assume it is.
   BalanceCompleteness completeness = 7;
+
+  // Coverage of nonzero cash currency buckets in total. Present with no
+  // exclusions means every nonzero bucket is in base_currency; absent means
+  // unstated, including legacy producers. Independent of entry-source posture.
+  // contributed/excluded_count count currency buckets, not positions.
+  domain.v1.InputCoverage currency_coverage = 8;
+
+  // Sorted sample (at most 32) of nonzero currencies excluded from total.
+  // currency_coverage.excluded_count is authoritative even if the sample is
+  // truncated. Both positive balances and liabilities must be reported.
+  repeated string excluded_currencies = 9;
 }
 
 // BalanceCompleteness is a producer's statement of what its balance contains
