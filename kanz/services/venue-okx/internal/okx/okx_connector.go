@@ -92,6 +92,7 @@ func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
 			// no log — output identical to an asset that reconciled cleanly, on the
 			// last layer that can notice a mis-booked position.
 			OnUnknownBalance: deps.OnUnknownBalance,
+			OnReconcileError: deps.OnReconcileError,
 			Venue:            c.settings.MIC, Tenant: deps.Tenant,
 		})
 		if deps.Expected != nil {

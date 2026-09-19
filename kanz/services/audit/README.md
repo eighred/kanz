@@ -63,8 +63,10 @@ correction workflow. Provenance-complete automated corrections are tracked in
 outcomes, including retries. `VenueDiscrepancyObserved`,
 `VenueDiscrepancyPublishFailed`, `VenueDiscrepancyEvidenceInvalid`, and
 `VenueDiscrepancyRecordingFailed` are included in the deployed operational rules.
-A quiet rate is not resolution of an outstanding discrepancy. Failures before
-publication remain the reconciler-loop observability scope of #1082.
+A quiet rate is not resolution of an outstanding discrepancy. Returned failures
+before publication are counted by `kanz_venue_reconciliation_errors_total`
+(#1082), with separate reconciliation/healing loops and bounded reasons. The
+structural-failure and pass-failed operational alerts cover those failures.
 
 Rollout does not rewrite the immutable log: previously archived generic records
 stay generic even when redelivered (`result="legacy"`). New records receive typed

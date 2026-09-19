@@ -499,6 +499,7 @@ func serve(cfg config.Config) error {
 		// which is exactly what a clean comparison also produces. Why this is a
 		// counter and NOT a break FACT is argued on balanceSeams.Unknown.
 		OnUnknownBalance: balances.Unknown.Observe,
+		OnReconcileError: execution.NewReconcileErrorObserver(obs.Registry, logger, "OKX").Observe,
 		OnCloseUnhealable: func(orderID, instrumentID, reason string) {
 			closesUnhealable.WithLabelValues(reason).Inc()
 			logger.Error("venue-okx: an in-flight close was dropped without asking the exchange — the "+

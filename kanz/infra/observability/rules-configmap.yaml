@@ -2165,6 +2165,20 @@ data:
             annotations:
               summary: "Venue discrepancy recording failed"
               description: "Restore the audit store and inspect consumer retry and DLQ state. Do not interpret missing audit evidence as a reconciled account."
+
+          - alert: VenueReconciliationStructuralFailure
+            expr: increase(kanz_venue_reconciliation_errors_total{reason=~"rate_limited|invalid_evidence|access_denied"}[5m]) > 0
+            labels: { severity: critical, layer: operational }
+            annotations:
+              summary: "Venue reconciliation cannot establish agreement"
+              description: "A reconciliation or healing pass failed on rate budget, invalid financial evidence, or access denial. Inspect the venue and adapter configuration; no discrepancy event is not proof of agreement."
+
+          - alert: VenueReconciliationPassFailed
+            expr: increase(kanz_venue_reconciliation_errors_total{reason=~"timeout|other"}[5m]) > 0
+            labels: { severity: warning, layer: operational }
+            annotations:
+              summary: "Venue reconciliation pass failed"
+              description: "A pass failed before completing. Inspect venue connectivity and event delivery; the counter counts failed passes, not corrected positions."
   slo.alerts.rules.yaml: |
     # SLO multi-window burn-rate alerts (SRE-01b) — over slo.recording.rules.yaml.
     #

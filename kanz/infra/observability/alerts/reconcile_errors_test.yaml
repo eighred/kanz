@@ -1,0 +1,34 @@
+rule_files:
+  - operational.rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'kanz_venue_reconciliation_errors_total{venue="BINANCE",loop="reconcile",reason="rate_limited"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: VenueReconciliationStructuralFailure
+        exp_alerts:
+          - exp_labels: {venue: BINANCE, loop: reconcile, reason: rate_limited, severity: critical, layer: operational}
+            exp_annotations:
+              summary: "Venue reconciliation cannot establish agreement"
+              description: "A reconciliation or healing pass failed on rate budget, invalid financial evidence, or access denial. Inspect the venue and adapter configuration; no discrepancy event is not proof of agreement."
+      - eval_time: 1m
+        alertname: VenueReconciliationStructuralFailure
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'kanz_venue_reconciliation_errors_total{venue="BINANCE",loop="reconcile",reason="other"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: VenueReconciliationPassFailed
+        exp_alerts:
+          - exp_labels: {venue: BINANCE, loop: reconcile, reason: other, severity: warning, layer: operational}
+            exp_annotations:
+              summary: "Venue reconciliation pass failed"
+              description: "A pass failed before completing. Inspect venue connectivity and event delivery; the counter counts failed passes, not corrected positions."
+      - eval_time: 1m
+        alertname: VenueReconciliationPassFailed
+        exp_alerts: []
