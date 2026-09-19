@@ -59,7 +59,7 @@ export const audit = {
     if (correlation.trim()) query.set('correlation', correlation.trim())
     if (eventType.trim()) query.set('event_type', eventType.trim())
     if (since) query.set('since', new Date(since).toISOString())
-    const body = await api.get<{ records: unknown; count: unknown }>(`/api/audit/events?${query}`)
+    const body = await api.get<{ records: unknown; count: unknown }>(`/api/v1/audit/events?${query}`)
     // Go encodes an empty nil slice as null. Other malformed results cannot
     // become an empty audit trail and falsely suggest nothing happened.
     const rows = body?.records === null && body.count === 0 ? [] : body?.records

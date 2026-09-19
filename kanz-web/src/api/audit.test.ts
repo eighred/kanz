@@ -9,8 +9,8 @@ afterEach(() => vi.restoreAllMocks())
 describe('audit response boundary', () => {
   it('encodes filters and projects only display metadata', async () => {
     const get = vi.spyOn(api, 'get').mockResolvedValue({ records: [{ ...event, attributes: { internal: 'omitted' }, summary: 'omitted' }], count: 1 })
-    expect(await audit.events(' a&tenant=other ', ' x/y ')).toEqual([event])
-    expect(get).toHaveBeenCalledWith('/api/audit/events?limit=100&correlation=a%26tenant%3Dother&event_type=x%2Fy')
+    expect(await audit.events(' a&tenant=other ', ' x/y ', '2026-09-01T00:00:00Z')).toEqual([event])
+    expect(get).toHaveBeenCalledWith('/api/v1/audit/events?limit=100&correlation=a%26tenant%3Dother&event_type=x%2Fy&since=2026-09-01T00%3A00%3A00.000Z')
   })
 
   it.each([[], null])('accepts the server empty representation %j', async (records) => {
