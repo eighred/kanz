@@ -29,6 +29,7 @@ import (
 	"github.com/eighred/kanz/pkg/transport"
 	accounting "github.com/eighred/kanz/services/accounting/internal"
 	"github.com/eighred/kanz/services/accounting/internal/cashmove"
+	"github.com/eighred/kanz/services/accounting/internal/collateralops"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eighred/kanz/services/accounting/internal/config"
@@ -228,6 +229,22 @@ func run() int {
 		server.WithBreakStore(custodyStore),
 		server.WithCustodyBookScope(custodyCfg.scope),
 	}
+	var collateralConsumer *collateralops.Consumer
+	if cfg.CollateralInputSource != "" || cfg.CollateralCustodySources != "" {
+		if ledgerPool == nil || cfg.NATSURL == "" {
+			logger.Error("collateral workflows require PostgreSQL and NATS")
+			return 2
+		}
+		collateralStore := collateralops.New(ledgerPool)
+		collateralConsumer, err = collateralops.NewConsumer(collateralStore, cfg.Tenant, cfg.CollateralInputSource, cfg.CollateralCustodySources)
+		if err != nil {
+			logger.Error("invalid collateral source authority configuration", "err", err)
+			return 2
+		}
+		opts = append(opts, server.WithCollateral(collateralStore))
+	} else {
+		logger.Warn("collateral lifecycle disabled: authoritative input and custody sources are not configured")
+	}
 	liveFX, err := buildLiveFX(cfg, &opts)
 	if err != nil {
 		logger.Error("FX config invalid", "err", err)
@@ -322,7 +339,7 @@ func run() int {
 		consumers.Add(1)
 		go func() {
 			defer consumers.Done()
-			if err := runConsumer(ctx, cfg, custodyCfg, store, ledgerPool, custodyStore, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runConsumer(ctx, cfg, custodyCfg, store, ledgerPool, custodyStore, collateralConsumer, mesh, logger, obs, busMetrics); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("fill consumer stopped with error", "err", err)
 				fatal.Raise(err)
 			}
@@ -535,7 +552,7 @@ func openStore(ctx context.Context, cfg config.Config, logger *slog.Logger) (led
 // so a broken subscription brings folding down rather than running silently
 // degraded (book-of-record data loss must be loud). Idempotency is handled below
 // this layer (consumer dedup + ledger.Store.Append on the entry id).
-func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfig, store ledger.Store, ledgerPool *pgxpool.Pool, custodyStore custody.Store, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
+func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfig, store ledger.Store, ledgerPool *pgxpool.Pool, custodyStore custody.Store, collateralConsumer *collateralops.Consumer, mesh *transport.Mesh, logger *slog.Logger, obs *observability.Provider, busMetrics *bus.BusMetrics) error {
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: cfg.NATSURL, Name: cfg.Source, TLSConfig: mesh.Client, Metrics: busMetrics})
 	if err != nil {
 		return err
@@ -622,6 +639,12 @@ func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfi
 	}
 	for _, subject := range cfg.CashSubjects {
 		subscribe(subject, folder.HandleCash)
+	}
+	if collateralConsumer != nil {
+		subscribe(collateralops.SubjectSnapshot, collateralConsumer.HandleSnapshot)
+		for subject, handler := range collateralConsumer.ConfirmationHandlers() {
+			subscribe(subject, handler)
+		}
 	}
 
 	// CUSTODY RECONCILIATION (#962) — the control around the comparison engine.

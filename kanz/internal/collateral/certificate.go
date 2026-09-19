@@ -7,9 +7,18 @@ import "math/big"
 // Primal/dual objective equality certifies global optimality. For infeasibility,
 // y*A<=0 and y*b>0 contradict any nonnegative feasible original variables.
 func VerifyAllocation(assets []Asset, requirements []Requirement, result AllocationResult) error {
+	return VerifyConstrainedAllocation(assets, requirements, nil, result)
+}
+func VerifyConstrainedAllocation(assets []Asset, requirements []Requirement, limits []AllocationLimit, result AllocationResult) error {
 	m, err := buildAllocationModel(assets, requirements)
 	if err != nil {
 		return err
+	}
+	if err = m.addLimits(limits); err != nil {
+		return err
+	}
+	if len(result.Certificate.Limits) != len(m.limits) {
+		return ErrAllocationCertificate
 	}
 	if result.Currency != m.currency || len(result.Certificate.Capacity) != len(m.assets) || len(result.Certificate.Coverage) != len(m.requirements) || len(result.Allocations) > len(m.edges) {
 		return ErrAllocationCertificate
@@ -17,6 +26,15 @@ func VerifyAllocation(assets []Asset, requirements []Requirement, result Allocat
 	capacity := make([]*big.Rat, len(m.assets))
 	coverage := make([]*big.Rat, len(m.requirements))
 	dualValue := new(big.Rat)
+	limitDual := make([]*big.Rat, len(m.limits))
+	for i, l := range m.limits {
+		v, err := result.Certificate.Limits[l.ID].Rat()
+		if err != nil || v.Sign() > 0 {
+			return ErrAllocationCertificate
+		}
+		limitDual[i] = v
+		dualValue.Add(dualValue, new(big.Rat).Mul(v, m.limitValues[i]))
+	}
 	for i, a := range m.assets {
 		v, err := result.Certificate.Capacity[a.ID].Rat()
 		if err != nil || v.Sign() > 0 {
@@ -34,8 +52,11 @@ func VerifyAllocation(assets []Asset, requirements []Requirement, result Allocat
 		dualValue.Add(dualValue, new(big.Rat).Mul(v, m.need[i]))
 	}
 	edgeByID := map[[2]string]allocationEdge{}
-	for _, e := range m.edges {
+	for j, e := range m.edges {
 		bound := new(big.Rat).Add(capacity[e.asset], new(big.Rat).Mul(coverage[e.requirement], e.coverage))
+		for i := range m.limits {
+			bound.Add(bound, new(big.Rat).Mul(limitDual[i], &m.limitWeights[i][j]))
+		}
 		cost := new(big.Rat)
 		if result.Feasible {
 			cost.Set(e.cost)
@@ -58,6 +79,7 @@ func VerifyAllocation(assets []Asset, requirements []Requirement, result Allocat
 	used := make([]big.Rat, len(m.assets))
 	posted := make([]big.Rat, len(m.requirements))
 	total := new(big.Rat)
+	limitUsed := make([]big.Rat, len(m.limits))
 	seen := map[[2]string]bool{}
 	for _, a := range result.Allocations {
 		key := [2]string{a.AssetID, a.AgreementID}
@@ -76,11 +98,24 @@ func VerifyAllocation(assets []Asset, requirements []Requirement, result Allocat
 			return ErrAllocationCertificate
 		}
 		used[e.asset].Add(&used[e.asset], value)
+		for j, edge := range m.edges {
+			if edge.asset == e.asset && edge.requirement == e.requirement {
+				for i := range m.limits {
+					limitUsed[i].Add(&limitUsed[i], new(big.Rat).Mul(value, &m.limitWeights[i][j]))
+				}
+				break
+			}
+		}
 		posted[e.requirement].Add(&posted[e.requirement], post)
 		total.Add(total, cost)
 	}
 	for i := range used {
 		if used[i].Cmp(m.available[i]) > 0 {
+			return ErrAllocationCertificate
+		}
+	}
+	for i := range limitUsed {
+		if limitUsed[i].Cmp(m.limitValues[i]) > 0 {
 			return ErrAllocationCertificate
 		}
 	}

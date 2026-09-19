@@ -163,6 +163,9 @@ func (b *MeshBackend) Forward(ctx context.Context, req Request) (Response, error
 	}
 	if p := req.Principal; p != nil {
 		auth.SetPrincipalHeaders(hreq.Header, p.Subject, p.Tenant, p.Roles)
+		if err := auth.SetPrincipalPortfolios(hreq.Header, p.Portfolios); err != nil {
+			return Response{}, err
+		}
 	}
 
 	hresp, err := b.client.Do(hreq)

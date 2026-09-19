@@ -89,6 +89,9 @@ func (c *LineageCatalog) Resolve(ctx context.Context, sourceEventID string) (str
 	// copilot's SVID.
 	if p, ok := auth.PrincipalFromContext(ctx); ok && p != nil {
 		auth.SetPrincipalHeaders(req.Header, p.Subject, p.Tenant, p.Roles)
+		if auth.SetPrincipalPortfolios(req.Header, p.Portfolios) != nil {
+			return "", false
+		}
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {

@@ -37,7 +37,7 @@ func TestMeshBackend_ForwardsRequestAndPrincipal(t *testing.T) {
 		Method:    http.MethodPost,
 		Path:      "/v1/ask",
 		Body:      []byte(`{"question":"q"}`),
-		Principal: &middleware.Principal{Subject: "u1", Tenant: "t1", Roles: []string{"analyst", "pm"}},
+		Principal: &middleware.Principal{Subject: "u1", Tenant: "t1", Roles: []string{"analyst", "pm"}, Portfolios: []string{"PF,1"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +54,10 @@ func TestMeshBackend_ForwardsRequestAndPrincipal(t *testing.T) {
 	}
 	if got.Header.Get(auth.HeaderPrincipalRoles) != "analyst,pm" {
 		t.Fatalf("roles header = %q, want analyst,pm", got.Header.Get(auth.HeaderPrincipalRoles))
+	}
+	p, ok := auth.PrincipalFromHeaders(got.Header)
+	if !ok || !auth.PortfolioEntitled(p.Portfolios, "PF,1") || auth.PortfolioEntitled(p.Portfolios, "PF") {
+		t.Fatalf("portfolio scope lost or widened: %+v", p)
 	}
 }
 

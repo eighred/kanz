@@ -31,7 +31,20 @@ type Allocation struct {
 
 // Certificate contains dual multipliers for an independently verifiable optimum
 // or Farkas infeasibility witness. A resource refusal is never infeasibility.
-type Certificate struct{ Capacity, Coverage map[string]dec.Exact }
+type Certificate struct{ Capacity, Coverage, Limits map[string]dec.Exact }
+
+// AllocationLimit bounds a nonnegative weighted sum of market value on named
+// agreement/asset edges. It represents issuer concentration, liquidity budgets
+// and custodian settlement capacity in the same globally solved program.
+type AllocationLimit struct {
+	ID      string
+	Maximum dec.Exact
+	Terms   []AllocationLimitTerm
+}
+type AllocationLimitTerm struct {
+	AssetID, AgreementID string
+	Weight               dec.Exact
+}
 type AllocationResult struct {
 	Currency    string
 	Feasible    bool
@@ -60,6 +73,9 @@ type allocationModel struct {
 	available, need []*big.Rat
 	edges           []allocationEdge
 	currency        string
+	limits          []AllocationLimit
+	limitValues     []*big.Rat
+	limitWeights    [][]big.Rat
 }
 
 func allocationNumber(v dec.Exact) (*big.Rat, error) {
@@ -146,6 +162,10 @@ func buildAllocationModel(assets []Asset, requirements []Requirement) (*allocati
 // excess posting can always be reduced without worsening cost or feasibility.
 // Canonical IDs and Bland pivots make input permutations economically identical.
 func Optimize(ctx context.Context, assets []Asset, requirements []Requirement) (AllocationResult, error) {
+	return OptimizeConstrained(ctx, assets, requirements, nil)
+}
+
+func OptimizeConstrained(ctx context.Context, assets []Asset, requirements []Requirement, limits []AllocationLimit) (AllocationResult, error) {
 	if err := ctx.Err(); err != nil {
 		return AllocationResult{}, err
 	}
@@ -153,9 +173,13 @@ func Optimize(ctx context.Context, assets []Asset, requirements []Requirement) (
 	if err != nil {
 		return AllocationResult{}, err
 	}
+	if err = m.addLimits(limits); err != nil {
+		return AllocationResult{}, err
+	}
+	slacks := len(m.assets) + len(m.limits)
 	t := newAllocationTableau(m)
 	phaseOne := make([]big.Rat, t.columns)
-	for j := len(m.edges) + len(m.assets); j < t.columns; j++ {
+	for j := len(m.edges) + slacks; j < t.columns; j++ {
 		phaseOne[j].SetInt64(1)
 	}
 	if err = t.minimize(ctx, phaseOne, t.columns); err != nil {
@@ -164,19 +188,19 @@ func Optimize(ctx context.Context, assets []Asset, requirements []Requirement) (
 	feasible := t.objective(phaseOne).Sign() == 0
 	costs := phaseOne
 	if feasible {
-		if err = t.removeArtificial(ctx, len(m.edges)+len(m.assets)); err != nil {
+		if err = t.removeArtificial(ctx, len(m.edges)+slacks); err != nil {
 			return AllocationResult{}, err
 		}
 		costs = make([]big.Rat, t.columns)
 		for j, e := range m.edges {
 			costs[j].Set(e.cost)
 		}
-		if err = t.minimize(ctx, costs, len(m.edges)+len(m.assets)); err != nil {
+		if err = t.minimize(ctx, costs, len(m.edges)+slacks); err != nil {
 			return AllocationResult{}, err
 		}
 	}
-	result := AllocationResult{Currency: m.currency, Feasible: feasible, Cost: "0", Certificate: Certificate{Capacity: map[string]dec.Exact{}, Coverage: map[string]dec.Exact{}}}
-	dual := t.dual(costs, len(m.edges), len(m.assets)+len(m.requirements))
+	result := AllocationResult{Currency: m.currency, Feasible: feasible, Cost: "0", Certificate: Certificate{Capacity: map[string]dec.Exact{}, Coverage: map[string]dec.Exact{}, Limits: map[string]dec.Exact{}}}
+	dual := t.dual(costs, len(m.edges), slacks+len(m.requirements))
 	for i, v := range dual {
 		exact, e := dec.ExactFromRat(&v)
 		if e != nil {
@@ -184,8 +208,10 @@ func Optimize(ctx context.Context, assets []Asset, requirements []Requirement) (
 		}
 		if i < len(m.assets) {
 			result.Certificate.Capacity[m.assets[i].ID] = exact
+		} else if i < slacks {
+			result.Certificate.Limits[m.limits[i-len(m.assets)].ID] = exact
 		} else {
-			result.Certificate.Coverage[m.requirements[i-len(m.assets)].AgreementID] = exact
+			result.Certificate.Coverage[m.requirements[i-slacks].AgreementID] = exact
 		}
 	}
 	if feasible {
@@ -207,7 +233,7 @@ func Optimize(ctx context.Context, assets []Asset, requirements []Requirement) (
 			return AllocationResult{}, ErrAllocationLimit
 		}
 	}
-	if err = VerifyAllocation(assets, requirements, result); err != nil {
+	if err = VerifyConstrainedAllocation(assets, requirements, limits, result); err != nil {
 		return AllocationResult{}, err
 	}
 	return result, nil

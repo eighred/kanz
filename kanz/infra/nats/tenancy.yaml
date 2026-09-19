@@ -845,6 +845,9 @@ data:
                   # to age.
                   "accounting.custody.reconciled",
                   "accounting.custody.action_recorded",
+                  "accounting.collateral.recorded",
+                  "dlq.accounting.collateral.snapshot",
+                  "dlq.accounting.collateral.confirmation.*",
                   "dlq.accounting.cash.>", "dlq.market.fx.>",
                   "dlq.accounting.custody.statement",
                   "$JS.API.>", "$JS.ACK.>",
@@ -869,6 +872,8 @@ data:
                   # to publish, and so the estate reports the absence out loud
                   # instead of being silent about it.
                   "accounting.custody.statement",
+                  "accounting.collateral.snapshot",
+                  "accounting.collateral.confirmation.*",
                 ]
               }
             }
@@ -2120,6 +2125,9 @@ data:
                   # every outcome.
                   "accounting.custody.reconciled",
                   "accounting.custody.action_recorded",
+                  "accounting.collateral.recorded",
+                  "dlq.accounting.collateral.snapshot",
+                  "dlq.accounting.collateral.confirmation.*",
                   "dlq.accounting.cash.>", "dlq.market.fx.>",
                   "dlq.accounting.custody.statement",
                   "$JS.API.>", "$JS.ACK.>",
@@ -2132,6 +2140,8 @@ data:
                   # The custodian statement feed (#962); see the platform
                   # accounting entry above.
                   "accounting.custody.statement",
+                  "accounting.collateral.snapshot",
+                  "accounting.collateral.confirmation.*",
                 ]
               }
             }

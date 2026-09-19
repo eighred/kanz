@@ -301,9 +301,7 @@ jobs:
               opt: paths=source_relative
           EOF
           buf generate --template /tmp/buf.gen.go.yaml
-          cd gen/go
-          go mod init github.com/eighred/kanz/kanz-schemas-go || true
-          go mod tidy
+          bash bootstrap-go-sdk.sh
 
 
       # THE BFF'S IMAGE MUST CONTAIN THE SPA (#371).

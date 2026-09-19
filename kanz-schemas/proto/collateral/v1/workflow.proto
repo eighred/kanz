@@ -1,0 +1,138 @@
+syntax = "proto3";
+package collateral.v1;
+
+import "common/v1/decimal.proto";
+import "google/protobuf/timestamp.proto";
+
+// WorkflowSnapshot is an immutable, complete batch of obligations and available
+// inventory in one currency. Producers must assert all four source versions;
+// absent data is UNKNOWN, never a zero balance. Snapshot IDs are immutable.
+message WorkflowSnapshot {
+  string snapshot_id = 1;
+  string portfolio_id = 2;
+  string currency_code = 3;
+  string positions_version = 4;
+  string valuations_version = 5;
+  string cash_forecast_version = 6;
+  string exposure_model_version = 7;
+  google.protobuf.Timestamp as_of = 8;
+  google.protobuf.Timestamp valid_until = 9;
+  repeated WorkflowAgreement agreements = 10;
+  repeated WorkflowInventory inventory = 11;
+}
+
+// All amounts use the posting party's obligation to the holder: positive net
+// exposure is owed to the holder. IM is a separately versioned approved input.
+message WorkflowAgreement {
+  string agreement_id = 1;
+  string version = 2;
+  string counterparty_id = 3;
+  common.v1.Decimal exposure = 4;
+  common.v1.Decimal held = 5;
+  common.v1.Decimal initial_margin = 6;
+  common.v1.Decimal threshold = 7;
+  common.v1.Decimal minimum_transfer = 8;
+  common.v1.Decimal independent_amount = 9;
+  common.v1.Decimal rounding = 10;
+  repeated WorkflowEligibility schedule = 11;
+  google.protobuf.Timestamp settlement_deadline = 12;
+  // Aggregate haircut-adjusted posting limit per issuer, absolute currency units.
+  common.v1.Decimal issuer_limit = 13;
+  // Required for every eligible issuer when held collateral is nonzero. This
+  // is remaining headroom after existing collateral, in credited currency value.
+  repeated WorkflowIssuerHeadroom issuer_headroom = 14;
+}
+
+message WorkflowIssuerHeadroom {
+  string issuer_id = 1;
+  common.v1.Decimal remaining = 2;
+}
+
+message WorkflowEligibility {
+  string asset_id = 1;
+  common.v1.Decimal haircut = 2;
+  bool eligible = 3;
+  // Explicit independent risk approval: false excludes the asset.
+  bool wrong_way_risk_cleared = 4;
+}
+
+message WorkflowInventory {
+  // Lot identity is tenant-wide, including custodian/account; never portfolio-local.
+  string lot_id = 1;
+  string asset_id = 2;
+  string issuer_id = 3;
+  string custodian_id = 4;
+  string account_id = 5;
+  common.v1.Decimal quantity = 6;
+  common.v1.Decimal unit_value = 7;
+  common.v1.Decimal quantity_increment = 8;
+  common.v1.Decimal opportunity_cost = 9;
+  // Cash forecast/encumbrance-adjusted maximum deployable value for this lot.
+  common.v1.Decimal liquidity_budget = 10;
+  google.protobuf.Timestamp available_at = 11;
+}
+
+enum WorkflowStatus {
+  WORKFLOW_STATUS_UNSPECIFIED = 0;
+  WORKFLOW_STATUS_PROPOSED = 1;
+  WORKFLOW_STATUS_INSTRUCTED = 2;
+  WORKFLOW_STATUS_SETTLED = 3;
+  WORKFLOW_STATUS_DISPUTED = 4;
+  WORKFLOW_STATUS_RETURN_INSTRUCTED = 5;
+  WORKFLOW_STATUS_RELEASED = 6;
+  WORKFLOW_STATUS_INFEASIBLE = 7;
+  WORKFLOW_STATUS_RETURN_PROPOSED = 8;
+  WORKFLOW_STATUS_NO_MOVEMENT = 9;
+  WORKFLOW_STATUS_CANCELLED = 10;
+}
+
+message PostingLeg {
+  string agreement_id = 1;
+  string lot_id = 2;
+  string custodian_id = 3;
+  string account_id = 4;
+  common.v1.Decimal quantity = 5;
+  common.v1.Decimal market_value = 6;
+  common.v1.Decimal credited_value = 7;
+}
+
+// Each revision is a complete auditable state, emitted atomically with inventory
+// reservation. INSTRUCTED is a command to custody, not a settlement assertion.
+message WorkflowRecorded {
+  string workflow_id = 1;
+  string snapshot_id = 2;
+  string request_id = 3;
+  int64 revision = 4;
+  WorkflowStatus status = 5;
+  string maker = 6;
+  string actor = 7;
+  string currency_code = 8;
+  repeated PostingLeg legs = 9;
+  google.protobuf.Timestamp recorded_at = 10;
+  string explanation = 11;
+  int64 posting_revision = 12;
+  int64 return_revision = 13;
+  string return_maker = 14;
+  WorkflowStatus disputed_status = 15;
+  string dispute_actor = 16;
+  google.protobuf.Timestamp posting_instructed_at = 17;
+  google.protobuf.Timestamp return_instructed_at = 18;
+  string allocation_model_version = 19;
+}
+
+// Authoritative custody evidence for one instruction leg. Stable source IDs
+// deduplicate delivery; exact cumulative quantities reject partial/over-fills.
+// Each custodian may assert only its configured account and custodian scope.
+message PostingConfirmation {
+  string source_id = 1;
+  string workflow_id = 2;
+  string agreement_id = 3;
+  string lot_id = 4;
+  string custodian_id = 5;
+  string account_id = 6;
+  common.v1.Decimal cumulative_quantity = 7;
+  bool returned = 8;
+  google.protobuf.Timestamp settled_at = 9;
+  // Revision of the instruction being confirmed, not the current workflow revision.
+  int64 instruction_revision = 10;
+}

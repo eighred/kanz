@@ -71,9 +71,7 @@ jobs:
         working-directory: kanz-schemas
         run: |
           buf generate
-          cd gen/go
-          go mod init github.com/eighred/kanz/kanz-schemas-go || true
-          go mod tidy
+          bash bootstrap-go-sdk.sh
 
       # THIS WORKFLOW BUILDS IMAGES TOO, and had no ghcr login at all (#161).
       #
@@ -205,9 +203,7 @@ jobs:
         working-directory: kanz-schemas
         run: |
           buf generate
-          cd gen/go
-          go mod init github.com/eighred/kanz/kanz-schemas-go || true
-          go mod tidy
+          bash bootstrap-go-sdk.sh
       - name: Run compute benchmarks
         working-directory: kanz
         run: go test -run '^$' -bench . -benchmem -benchtime=10x -p 1 ./internal/risk/compute/...

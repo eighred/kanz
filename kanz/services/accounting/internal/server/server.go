@@ -22,6 +22,7 @@ import (
 	"github.com/eighred/kanz/pkg/auth"
 	accounting "github.com/eighred/kanz/services/accounting/internal"
 	"github.com/eighred/kanz/services/accounting/internal/cashmove"
+	"github.com/eighred/kanz/services/accounting/internal/collateralops"
 	"github.com/eighred/kanz/services/accounting/internal/custody"
 	"github.com/eighred/kanz/services/accounting/internal/ledger"
 	"github.com/eighred/kanz/services/accounting/internal/recon"
@@ -51,6 +52,7 @@ type Server struct {
 	fxProvider    func() accounting.FXConverter
 	instrumentCcy accounting.InstrumentCurrency
 	cashPublisher CashPublisher
+	collateral    *collateralops.Store
 	// breaks is the custody reconciliation break queue (#962). Nil ⇒ the routes
 	// are not registered and the surface answers 404, which is the truthful
 	// answer for a deployment with no custody reconciliation.
@@ -176,11 +178,13 @@ func (s *Server) routes() {
 		s.mux.Handle("GET /metrics", s.metrics)
 	}
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/nav", s.handleNAV)
+	s.mux.HandleFunc("GET /v1/portfolios/{id}/cash-forecast", s.cashForecast)
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/reconcile", s.handleReconcile)
 	if s.cashPublisher != nil {
 		s.mux.HandleFunc("POST /v1/portfolios/{id}/cash-movements", s.handleCashMovement)
 	}
 	s.custodyRoutes()
+	s.collateralRoutes()
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
