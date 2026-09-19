@@ -1,0 +1,64 @@
+rule_files:
+  - operational.rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'kanz_venue_discrepancy_publish_total{result="published",kind="order"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: VenueDiscrepancyObserved
+        exp_alerts:
+          - exp_labels: {severity: warning, layer: operational, kind: order, result: published}
+            exp_annotations:
+              summary: "Venue discrepancy observed"
+              description: "Inspect the tenant-authorized audit discrepancy view. This signal is an observation, not a repair or proof of settlement."
+      - eval_time: 1m
+        alertname: VenueDiscrepancyObserved
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'kanz_venue_discrepancy_publish_total{result="failed",kind="order"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: VenueDiscrepancyPublishFailed
+        exp_alerts:
+          - exp_labels: {severity: critical, layer: operational, kind: order, result: failed}
+            exp_annotations:
+              summary: "Venue discrepancy publication failed"
+              description: "Restore event delivery and inspect the venue order and account history; discrepancy evidence may not have reached the durable audit store."
+      - eval_time: 1m
+        alertname: VenueDiscrepancyPublishFailed
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'kanz_audit_venue_discrepancy_delivery_total{result="invalid",kind="order"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: VenueDiscrepancyEvidenceInvalid
+        exp_alerts:
+          - exp_labels: {severity: warning, layer: operational, kind: order, result: invalid}
+            exp_annotations:
+              summary: "Venue discrepancy evidence is invalid"
+              description: "The durable record preserves the payload hash but cannot establish valid financial evidence. Investigate the producer before any correction."
+      - eval_time: 1m
+        alertname: VenueDiscrepancyEvidenceInvalid
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'kanz_audit_venue_discrepancy_delivery_total{result="failed",kind="order"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: VenueDiscrepancyRecordingFailed
+        exp_alerts:
+          - exp_labels: {severity: critical, layer: operational, kind: order, result: failed}
+            exp_annotations:
+              summary: "Venue discrepancy recording failed"
+              description: "Restore the audit store and inspect consumer retry and DLQ state. Do not interpret missing audit evidence as a reconciled account."
+      - eval_time: 1m
+        alertname: VenueDiscrepancyRecordingFailed
+        exp_alerts: []

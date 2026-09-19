@@ -4,6 +4,7 @@ import { audit, describeAudit, type AuditEvent } from '../api/audit'
 
 const correlation = ref('')
 const eventType = ref('')
+const since = ref('')
 const rows = ref<AuditEvent[]>([])
 const loading = ref(false)
 const searched = ref(false)
@@ -16,7 +17,7 @@ async function search() {
   error.value = ''
   searched.value = false
   try {
-    rows.value = await audit.events(correlation.value, eventType.value)
+    rows.value = await audit.events(correlation.value, eventType.value, since.value)
     searched.value = true
   } catch (e) {
     error.value = describeAudit(e)
@@ -32,8 +33,12 @@ async function search() {
   <form @submit.prevent="search">
     <label>Correlation ID<input v-model="correlation" :disabled="loading" name="correlation" /></label>
     <label>Event type<input v-model="eventType" :disabled="loading" name="event-type" /></label>
+    <label>Observed since<input v-model="since" :disabled="loading" name="since" type="datetime-local" /></label>
+    <button type="button" :disabled="loading" @click="eventType = 'order.order.healed'; search()">Order discrepancies</button>
+    <button type="button" :disabled="loading" @click="eventType = 'accounting.balance.reconciled'; search()">Balance discrepancies</button>
     <button type="submit" :disabled="loading">{{ loading ? 'Searching…' : 'Search events' }}</button>
   </form>
+  <p class="muted">Venue discrepancies require investigation. A recorded observation does not mean an order, cash balance, or settlement was corrected.</p>
   <p v-if="error" class="error" role="alert">{{ error }}</p>
   <template v-else-if="searched">
     <p role="status">{{ rows.length }} events returned.</p>

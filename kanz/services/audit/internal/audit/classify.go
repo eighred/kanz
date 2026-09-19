@@ -29,6 +29,9 @@ type classification struct {
 // The event is still recorded generically; the projector never drops an event
 // because its payload was malformed (that itself is auditable).
 func classify(env *envelopepb.Envelope, payload []byte) classification {
+	if c, ok := discrepancy(env, payload); ok {
+		return c
+	}
 	class := env.GetEventClass()
 
 	// 1) AUTH-01d authz decision — a DecisionLog on the platform authz subject.

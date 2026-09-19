@@ -27,3 +27,20 @@ func TestProxyPreservesEscapedInstrumentIdentifier(t *testing.T) {
 		})
 	}
 }
+
+func TestProxyReachesVersionedAuditSearchWithFilters(t *testing.T) {
+	gateway := http.NewServeMux()
+	gateway.HandleFunc("GET /v1/audit/events", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("event_type") != "order.order.healed" || r.URL.Query().Get("since") != "2026-09-01T00:00:00Z" || r.URL.Query().Get("limit") != "100" {
+			t.Error("audit search filters changed")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	upstream := httptest.NewServer(gateway)
+	defer upstream.Close()
+	srv := bffWithSigning(t, upstream.URL, "")
+	response := proxyAs(t, srv, http.MethodGet, "/api/v1/audit/events?limit=100&event_type=order.order.healed&since=2026-09-01T00%3A00%3A00Z", "")
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("audit proxy status: %d", response.Code)
+	}
+}

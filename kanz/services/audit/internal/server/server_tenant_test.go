@@ -164,6 +164,23 @@ func TestGet_ReturnsTheCallersOwnRecord(t *testing.T) {
 	}
 }
 
+func TestVenueDiscrepancyDetailTenantIsolation(t *testing.T) {
+	st := &oneRecord{rec: &audit.Record{EventID: "discrepancy", TenantID: "acme", Kind: audit.KindVenueDiscrepancy, Attributes: map[string]string{"actual": "1/1000000000", "disposition": "investigate"}}}
+	for _, tenant := range []string{"acme", "other"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/audit/events/discrepancy", nil)
+		req.Header.Set(auth.HeaderPrincipalTenant, tenant)
+		rr := httptest.NewRecorder()
+		newAuditServer(st).ServeHTTP(rr, req)
+		if tenant == "acme" {
+			if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "1/1000000000") {
+				t.Fatal("owner cannot inspect exact evidence")
+			}
+		} else if rr.Code != http.StatusNotFound || strings.Contains(rr.Body.String(), "1/1000000000") {
+			t.Fatal("cross-tenant evidence leak")
+		}
+	}
+}
+
 // --- lineage / verify / reports ---
 //
 // These three were left unscoped when the query and get endpoints were fixed,

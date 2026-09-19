@@ -15,7 +15,7 @@ describe('audit search', () => {
     await wrapper.find('input[name=correlation]').setValue('test-correlation')
     await wrapper.find('form').trigger('submit')
     await flushPromises()
-    expect(search).toHaveBeenCalledWith('test-correlation', '')
+    expect(search).toHaveBeenCalledWith('test-correlation', '', '')
     expect(wrapper.text()).toContain('No recorded events matched')
   })
 

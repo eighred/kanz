@@ -37,6 +37,40 @@ would misread a metric as a decision.
 
 ## API
 
+### Venue discrepancy evidence (#1040)
+
+`order.order.healed` and `accounting.balance.reconciled` are classified as
+`venue_discrepancy` before the generic classifiers. The existing `order.>` and
+`accounting.>` durable audit subscriptions record typed, exact evidence and a
+SHA-256 digest of the source payload. Invalid evidence is explicitly marked;
+free-form reasons are not exposed in the web projection. Search the Audit page
+using **Order discrepancies** or **Balance discrepancies**, narrow by occurrence
+time/correlation, and open an event for its evidence. Existing audit capability
+and authenticated-tenant access controls apply.
+
+These events are investigation evidence, **not correction commands**. OMS query
+reconciliation remains the mechanism of record for nonterminal orders. A
+terminal contradiction requires trade-history investigation; cumulative
+quantities cannot create fills or reopen an order. Balance scope is unverified:
+legacy publishers put the tenant ID in `portfolio_id`, without a venue-account
+identity. Compare authorized account ledgers and venue executions, establish
+fill identities/economics and account attribution, then use the controlled
+correction workflow. Provenance-complete automated corrections are tracked in
+#1249; this projection never books a cash adjustment or claims settlement.
+
+`kanz_venue_discrepancy_publish_total{kind,result}` counts publication outcomes;
+`kanz_audit_venue_discrepancy_delivery_total{kind,result}` counts durable delivery
+outcomes, including retries. `VenueDiscrepancyObserved`,
+`VenueDiscrepancyPublishFailed`, `VenueDiscrepancyEvidenceInvalid`, and
+`VenueDiscrepancyRecordingFailed` are included in the deployed operational rules.
+A quiet rate is not resolution of an outstanding discrepancy. Failures before
+publication remain the reconciler-loop observability scope of #1082.
+
+Rollout does not rewrite the immutable log: previously archived generic records
+stay generic even when redelivered (`result="legacy"`). New records receive typed
+evidence. Recover historical raw payloads through the retained event archive;
+the audit evidence digest binds the source but does not replace it.
+
 ```
 GET /v1/audit/events?correlation=&tenant=&kind=&event_type=&since=&until=&limit=
 GET /v1/audit/events/{event_id}

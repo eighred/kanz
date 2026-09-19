@@ -13,9 +13,9 @@ syntax = "proto3";
 // re-derive it.
 package order.v1;
 
-import "google/protobuf/timestamp.proto";
 import "common/v1/decimal.proto";
 import "common/v1/money.proto";
+import "google/protobuf/timestamp.proto";
 import "order/v1/order.proto";
 
 // OrderStatus is the lifecycle state of an order aggregate. It moves
@@ -678,7 +678,9 @@ message OrderExpired {
 // truth — a missed websocket frame, a fill seen only on the periodic REST poll.
 // The exchange is the source of truth: the reconciler NEVER edits state
 // directly, it emits this correcting FACT carrying the venue-truth OrderState,
-// and the journal/projection fold it to restore parity. It should ride the
+// and the audit projection records it for operator investigation. This snapshot
+// lacks fill identities/prices/fees; it must not reopen a terminal order or
+// synthesize fills. OMS query reconciliation owns non-terminal recovery. It rides the
 // envelope with QUALITY_FLAG_REVISED and a causation_id back to the order.
 message StateHealed {
   // order_id is the order whose state was healed. Required.
@@ -687,8 +689,8 @@ message StateHealed {
   // venue is the ISO 10383 MIC / venue code the truth came from. Required.
   string venue = 2;
 
-  // state is the reconciled, venue-truth OrderState the reader should adopt
-  // (it supersedes the drifted internal state). Required.
+  // state is the venue-observed aggregate, not an instruction to overwrite an
+  // order or journal. Static fields may be absent in close-watchdog reports.
   OrderState state = 3;
 
   // reason is a human-readable description of the drift that was healed (e.g.

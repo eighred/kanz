@@ -308,7 +308,7 @@ func serve(cfg config.Config) error {
 	// and losing the results. It must stop taking orders, not keep answering gRPC
 	// while money moves unrecorded — so publish health feeds /readyz, the pod drops
 	// out of its Service, and the OMS's router hard-errors on this MIC.
-	publishHealth := bus.NewHealthPublisher(rawProducer, bus.DefaultPublishFailureThreshold)
+	publishHealth := bus.NewHealthPublisher(execution.NewDiscrepancyPublisher(rawProducer, obs.Registry), bus.DefaultPublishFailureThreshold)
 	readiness.TrackPublisher(publishHealth)
 
 	// The in-flight-close registry now lives HERE. The gRPC CancelOrder handler is
