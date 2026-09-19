@@ -43,6 +43,7 @@ import (
 
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/proto"
 
@@ -90,6 +91,10 @@ type Balance struct {
 	// doc, and comp.CashCompleteness for why the number must not be corrected by
 	// it.
 	Completeness *comp.CashCompleteness
+	// CurrencyCoverage qualifies the base bucket independently of entry sources.
+	// Nil is unstated; omitted currencies make it unusable for cash controls.
+	CurrencyCoverage   *domainpb.InputCoverage
+	ExcludedCurrencies []string
 }
 
 // View is the OMS's memory of the announced balances. Safe for concurrent use:
@@ -168,10 +173,12 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 	}
 
 	b := Balance{
-		Total:          msg.GetTotal(),
-		Currency:       msg.GetBaseCurrency(),
-		AsOf:           msg.GetAsOf().AsTime(),
-		ByVenueAccount: map[string]map[string]*commonpb.Decimal{},
+		Total:              msg.GetTotal(),
+		Currency:           msg.GetBaseCurrency(),
+		AsOf:               msg.GetAsOf().AsTime(),
+		ByVenueAccount:     map[string]map[string]*commonpb.Decimal{},
+		CurrencyCoverage:   msg.GetCurrencyCoverage(),
+		ExcludedCurrencies: append([]string(nil), msg.GetExcludedCurrencies()...),
 	}
 	// UNSTATED IS NOT COMPLETE. proto3 cannot tell an empty repeated field from an
 	// absent one, so a BalanceCompleteness naming neither produced nor unproduced
@@ -217,6 +224,21 @@ func (v *View) Handle(_ context.Context, _ *envelopepb.Envelope, payload []byte)
 // difference decides whether an order is refused for a reason or refused for a
 // fiction.
 func (v *View) Lookup(portfolioID string) (Balance, bool) {
+	b, ok := v.lookup(portfolioID)
+	if !ok {
+		return Balance{}, false
+	}
+	// Callers may inspect or annotate the report; never let that mutate the
+	// coverage used by the next admission decision.
+	if b.CurrencyCoverage != nil {
+		b.CurrencyCoverage = proto.Clone(b.CurrencyCoverage).(*domainpb.InputCoverage)
+	}
+	b.ExcludedCurrencies = append([]string(nil), b.ExcludedCurrencies...)
+	return b, true
+}
+
+// lookup reads the immutable coverage without copying it on the admission path.
+func (v *View) lookup(portfolioID string) (Balance, bool) {
 	v.mu.RLock()
 	b, ok := v.byPF[portfolioID]
 	v.mu.RUnlock()
@@ -248,8 +270,10 @@ func (v *View) Lookup(portfolioID string) (Balance, bool) {
 // announcements, and a qualification that does not belong to the figure it
 // qualifies is worse than none.
 func (v *View) Spendable(portfolioID string) (*commonpb.Decimal, string, *comp.CashCompleteness, bool) {
-	b, ok := v.Lookup(portfolioID)
-	if !ok {
+	b, ok := v.lookup(portfolioID)
+	// Replace even a previously complete level with an incomplete one. Ignoring
+	// the new report would keep admitting orders against the old complete cash.
+	if !ok || b.CurrencyCoverage == nil || b.CurrencyCoverage.GetExcludedCount() != 0 || len(b.CurrencyCoverage.GetExclusions()) != 0 || len(b.ExcludedCurrencies) != 0 {
 		return nil, "", nil, false
 	}
 	return b.Total, b.Currency, b.Completeness, true

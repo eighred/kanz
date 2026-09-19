@@ -2,6 +2,7 @@ package compliance
 
 import (
 	"context"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	"strings"
 	"testing"
 	"time"
@@ -31,11 +32,12 @@ func announceWithPosture(t *testing.T, v *cashview.View, total int64, at time.Ti
 	produced, unproduced []string) {
 	t.Helper()
 	msg := &accountingpb.PortfolioCashBalance{
-		PortfolioId:   "PF1",
-		BaseCurrency:  "USD",
-		Total:         &commonpb.Decimal{Coefficient: total},
-		AsOf:          timestamppb.New(at),
-		KnowledgeTime: timestamppb.New(at),
+		CurrencyCoverage: &domainpb.InputCoverage{Contributed: 1},
+		PortfolioId:      "PF1",
+		BaseCurrency:     "USD",
+		Total:            &commonpb.Decimal{Coefficient: total},
+		AsOf:             timestamppb.New(at),
+		KnowledgeTime:    timestamppb.New(at),
 	}
 	if len(produced) > 0 || len(unproduced) > 0 {
 		msg.Completeness = &accountingpb.BalanceCompleteness{

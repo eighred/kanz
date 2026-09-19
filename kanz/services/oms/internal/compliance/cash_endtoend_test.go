@@ -62,11 +62,12 @@ func snapshotFor(portfolioID string) *domainpb.PortfolioSnapshot {
 func announce(t *testing.T, v *cashview.View, portfolioID string, total int64, at time.Time) {
 	t.Helper()
 	payload, err := proto.Marshal(&accountingpb.PortfolioCashBalance{
-		PortfolioId:   portfolioID,
-		BaseCurrency:  "USD",
-		Total:         &commonpb.Decimal{Coefficient: total},
-		AsOf:          timestamppb.New(at),
-		KnowledgeTime: timestamppb.New(at),
+		CurrencyCoverage: &domainpb.InputCoverage{Contributed: 1},
+		PortfolioId:      portfolioID,
+		BaseCurrency:     "USD",
+		Total:            &commonpb.Decimal{Coefficient: total},
+		AsOf:             timestamppb.New(at),
+		KnowledgeTime:    timestamppb.New(at),
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

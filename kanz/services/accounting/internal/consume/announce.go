@@ -9,6 +9,7 @@ import (
 	"time"
 
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -183,9 +184,9 @@ func (a *Announcer) Records(ctx context.Context, st ledger.Store, portfolioID st
 	if err != nil {
 		return nil, fmt.Errorf("announce %s: materialize: %w", portfolioID, err)
 	}
-	total, ok := dec.ToProtoScaled(book.CashBalance(a.baseCcy))
+	total, ok := dec.ToProtoExact(book.CashBalance(a.baseCcy))
 	if !ok {
-		// SCALED, NOT WRAPPING (#94). A balance the platform cannot represent
+		// EXACT, NEVER ROUNDED (#1062). A balance the platform cannot represent
 		// exactly must not be announced as a smaller one: a consumer would compare
 		// a wrapped figure against a spending limit and admit an order the fund
 		// cannot pay for.
@@ -204,14 +205,17 @@ func (a *Announcer) Records(ctx context.Context, st ledger.Store, portfolioID st
 	}
 
 	now := a.now().UTC()
+	coverage, excluded := cashCurrencyCoverage(book, a.baseCcy)
 	msg := &accountingpb.PortfolioCashBalance{
-		PortfolioId:    portfolioID,
-		BaseCurrency:   a.baseCcy,
-		Total:          total,
-		ByVenueAccount: perAccount,
-		AsOf:           timestamppb.New(now),
-		KnowledgeTime:  timestamppb.New(now),
-		Completeness:   a.posture.toProto(),
+		PortfolioId:        portfolioID,
+		BaseCurrency:       a.baseCcy,
+		Total:              total,
+		ByVenueAccount:     perAccount,
+		AsOf:               timestamppb.New(now),
+		KnowledgeTime:      timestamppb.New(now),
+		Completeness:       a.posture.toProto(),
+		CurrencyCoverage:   coverage,
+		ExcludedCurrencies: excluded,
 	}
 	// outbox.From resolves the tenant and the lineage off ctx exactly as
 	// bus.Producer.stamp would have — the relay publishes from a ticker, long
@@ -264,7 +268,7 @@ func (a *Announcer) byVenueAccount(ctx context.Context, st ledger.Store, portfol
 		}
 		sort.Strings(assets)
 		for _, asset := range assets {
-			amount, ok := dec.ToProtoScaled(orZero(byAsset[asset]))
+			amount, ok := dec.ToProtoExact(orZero(byAsset[asset]))
 			if !ok {
 				return nil, fmt.Errorf("announce %s: %s balance in %s is not representable as a Decimal",
 					portfolioID, asset, account)
@@ -277,6 +281,29 @@ func (a *Announcer) byVenueAccount(ctx context.Context, st ledger.Store, portfol
 		}
 	}
 	return out, nil
+}
+
+// A base bucket is not a portfolio total when another currency has a nonzero
+// asset OR liability. No FX or settlement claim is inferred from the journal.
+func cashCurrencyCoverage(book *ledger.Book, base string) (*domainpb.InputCoverage, []string) {
+	coverage := &domainpb.InputCoverage{}
+	var excluded []string
+	for currency, amount := range book.Cash {
+		if amount == nil || amount.Sign() == 0 {
+			continue
+		}
+		if currency == base {
+			coverage.Contributed++
+		} else {
+			coverage.ExcludedCount++
+			excluded = append(excluded, currency)
+		}
+	}
+	sort.Strings(excluded)
+	if len(excluded) > 32 {
+		excluded = excluded[:32]
+	}
+	return coverage, excluded
 }
 
 func orZero(r *big.Rat) *big.Rat {
