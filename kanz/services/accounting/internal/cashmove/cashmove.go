@@ -5,10 +5,11 @@
 // non-trade cash legs a fund book actually moves — had no producer, so a
 // subscription or a management fee never reached NAV. This closes that gap.
 //
-// It reuses the OMS posttrade.BusFailSink pattern: a shared bus.Producer wrapped
+// Trusted producer integrations reuse the OMS posttrade.BusFailSink pattern: a shared bus.Producer wrapped
 // with a domain→FACT encoder, so producer_sequence stays monotonic across
 // emitted movements. Idempotency rides the entry id ("cash:"+MovementID) — the
-// Folder's Append is idempotent, so a redelivered movement is a no-op.
+// Folder refuses changed content under the same identity. Human HTTP commands
+// use Commands to commit reviewed actor-bound evidence and an outbox atomically.
 package cashmove
 
 import (
@@ -165,12 +166,9 @@ func encode(m CashMovement, knowledge time.Time) (*accountingpb.LedgerEntry, str
 	if eff.IsZero() {
 		eff = knowledge
 	}
-	// SCALED, NOT WRAPPING (#94). This is the cash leg posted to the BOOK OF
-	// RECORD. dec.ToProto wraps above ~$92bn at scale 8 and the ledger would then
-	// carry, and report, a figure the platform invented — a subscription or a
-	// redemption for an amount nobody moved. A fund large enough to reach that
-	// threshold is exactly the fund whose NAV nobody can afford to be wrong.
-	cash, ok := dec.ToProtoScaled(m.Kind.signedCash(m.Amount))
+	// Preserve every digit (#1206). Scaled conversion avoids integer wrapping
+	// but rounds to eight places; even a small rounded cash leg changes the book.
+	cash, ok := dec.ToProtoExact(m.Kind.signedCash(m.Amount))
 	if !ok {
 		return nil, "", fmt.Errorf("cashmove: movement %q amount is not representable as a Decimal "+
 			"— refusing to post a cash entry the ledger cannot hold exactly", m.MovementID)

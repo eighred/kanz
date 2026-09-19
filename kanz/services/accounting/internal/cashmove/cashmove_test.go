@@ -21,6 +21,23 @@ func mv(kind Kind, amount string) CashMovement {
 	}
 }
 
+func TestEncodeNeverRoundsCash(t *testing.T) {
+	for _, amount := range []string{"0.000000001", "123456789012345678.9"} {
+		entry, _, err := encode(mv(Subscription, amount), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dec.FromProto(entry.Cash).Cmp(dec.Rat(amount)) != 0 {
+			t.Fatalf("rounded %s", amount)
+		}
+	}
+	for _, amount := range []string{"1/3", "9223372036854775809.1"} {
+		if _, _, err := encode(mv(Subscription, amount), time.Now()); err == nil {
+			t.Fatalf("accepted inexact %s", amount)
+		}
+	}
+}
+
 // A subscription encodes to a positive CASH entry; the entry id is idempotent
 // on the movement id and the subject routes by kind.
 func TestEncodeSubscription(t *testing.T) {

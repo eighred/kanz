@@ -110,6 +110,15 @@ func (p *Postgres) Append(ctx context.Context, e *Event, announce Announcer) err
 		return fmt.Errorf("append entry %s: begin: %w", e.EntryID, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+	if isCashMovement(e) {
+		duplicate, err := checkCashEntry(ctx, tx, e)
+		if err != nil {
+			return err
+		}
+		if duplicate {
+			return tx.Commit(ctx)
+		}
+	}
 
 	// THE PER-PORTFOLIO LOCK, FIRST, AND IT IS WHAT MAKES THE OUTBOX ORDERED (#804).
 	//
