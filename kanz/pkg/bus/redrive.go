@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -218,6 +219,13 @@ func PlanRedrive(parked Message, opt RedriveOptions, now time.Time) (Message, er
 	if IsDLQSubject(dest) {
 		return refuse("%s is %q, which is itself a DLQ subject — publishing there would bury the "+
 			"message one level deeper (dlq.dlq.…) instead of draining it", HeaderDLQOriginalSubject, dest)
+	}
+	// Older wildcard consumers parked their subscription filter as the source.
+	// It does not identify the original route; replaying it can miss the exact
+	// subscriber. Leave that evidence parked for investigation, never guess.
+	if strings.ContainsAny(dest, "*>") {
+		return refuse("%s is a wildcard filter %q, not a concrete source; investigate the original route before redrive",
+			HeaderDLQOriginalSubject, dest)
 	}
 	// The header and the subject must agree. They always do for a message this
 	// package parked (publishDLQ derives one from the other), so a mismatch means

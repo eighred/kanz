@@ -123,7 +123,7 @@ func NewBusMetrics(reg prometheus.Registerer) *BusMetrics {
 		// observable thing without depending on a broker answering.
 		dlqParked: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kanz_bus_dlq_parked_total",
-			Help: "messages parked on dlq.<subject> after a delivery failed, by ORIGINAL subject, consumer group and failure class (transient|terminal). Counted only once the DLQ publish succeeded, so every increment is a message a redrive can still find.",
+			Help: "messages parked on dlq.<subject> after a delivery failed, by subscription filter, consumer group and failure class (transient|terminal). Counted only once the DLQ publish succeeded, so every increment is a message a redrive can still find.",
 		}, []string{"subject", "group", "class"}),
 		// THE DRAIN'S OWN RED SIGNAL (#220). Labelled by DESTINATION subject and
 		// result (ok|refused|error), because the three outcomes need different
