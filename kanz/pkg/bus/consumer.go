@@ -289,6 +289,9 @@ func (c *Consumer) routeToDLQ(ctx context.Context, origSubject, group string, ms
 }
 
 func (c *Consumer) publishDLQ(ctx context.Context, origSubject, group string, msg Message, attempts int, dispatchErr error) error {
+	// Metrics retain subscription cardinality even when routing needs a concrete
+	// source. Per-delivery subjects may contain unbounded instrument/tenant IDs.
+	metricSubject := origSubject
 	// Subscription filters may contain wildcards, not concrete delivery
 	// addresses. Retain the transport's concrete source for both parking and
 	// redrive. A concrete filter is sufficient for subscribers omitting Subject;
@@ -315,7 +318,7 @@ func (c *Consumer) publishDLQ(ctx context.Context, origSubject, group string, ms
 	// no series moved that distinguished it from a delivery that simply failed
 	// and was retried. The class comes out of the headers rather than being
 	// re-derived so the metric and the parked message cannot disagree.
-	c.metrics.observeDLQPark(origSubject, group, headers[HeaderDLQClass])
+	c.metrics.observeDLQPark(metricSubject, group, headers[HeaderDLQClass])
 	return nil
 }
 

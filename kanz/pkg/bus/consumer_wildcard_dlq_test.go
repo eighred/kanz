@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
@@ -72,6 +75,35 @@ func TestPlanRedriveRefusesHistoricalWildcardDestination(t *testing.T) {
 		msg.Subject = "dlq." + subject
 		if _, err := bus.PlanRedrive(msg, bus.RedriveOptions{}, time.Now()); !errors.Is(err, bus.ErrRedriveRefused) {
 			t.Errorf("historical wildcard destination %q must require investigation, got %v", subject, err)
+		}
+	}
+}
+
+func TestWildcardDLQMetricsKeepSubscriptionCardinality(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	metrics := bus.NewBusMetrics(reg)
+	dlq := &captureClient{}
+	for i := range 10 {
+		sub := &oneShotSub{msg: bus.Message{Subject: fmt.Sprintf("market.crypto.instrument%d", i), Body: frame(t, validEnvelope(), nil)}}
+		consumer, _ := bus.NewConsumer(sub, bus.WithDLQ(dlq), bus.WithBusMetrics(metrics))
+		if err := consumer.Subscribe(context.Background(), "market.>", "g", func(context.Context, *envelopepb.Envelope, []byte) error { return errors.New("refused") }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(dlq.sent) != 10 {
+		t.Fatalf("parked %d of 10 deliveries", len(dlq.sent))
+	}
+	got, ok := counterByLabels(t, reg, "kanz_bus_dlq_parked_total", map[string]string{"subject": "market.>", "group": "g", "class": bus.ClassTransient})
+	if !ok || got != 10 {
+		t.Fatalf("subscription counter=%v, present=%v; concrete subjects must not create per-delivery metric labels", got, ok)
+	}
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == "kanz_bus_dlq_parked_total" && len(family.Metric) != 1 {
+			t.Fatalf("DLQ created %d metric series for one subscription", len(family.Metric))
 		}
 	}
 }
