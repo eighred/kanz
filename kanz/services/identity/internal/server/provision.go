@@ -55,20 +55,20 @@ type Verifier interface {
 // power, and splitting them across two gates would let a deployment enable one
 // without the other.
 type Provisioner interface {
-	CreateInvite(ctx context.Context, inv *identity.Invite) error
+	CreateInviteAs(ctx context.Context, actor identity.Administration, inv *identity.Invite) error
 	InvitesFor(ctx context.Context, tenant string) ([]*identity.Invite, error)
 	UserBySubject(ctx context.Context, subject string) (*identity.User, error)
-	SetStatus(ctx context.Context, subject string, status identity.Status, now time.Time) error
+	SetStatus(ctx context.Context, actor identity.Administration, subject string, status identity.Status, now time.Time) error
 }
 
 // Provisioning configures the authenticated invite and account-status routes.
 type Provisioning struct {
 	Verifier Verifier
 	Store    Provisioner
-	// OperatorRole is the role a caller must hold. Required: defaulting it would
+	// AdminRole is the role a caller must hold. Required: defaulting it would
 	// pick the authority that may create accounts, which is a deployment's
 	// decision and not this package's.
-	OperatorRole string
+	AdminRole string
 	// InviteTTL is how long a new invitation stays redeemable; zero uses the
 	// domain default.
 	InviteTTL     time.Duration
@@ -167,7 +167,11 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.provisioning.Store.CreateInvite(r.Context(), inv); err != nil {
+	if err := s.provisioning.Store.CreateInviteAs(r.Context(), identity.Administration{Subject: claims.Subject, Tenant: claims.Tenant, IssuedAt: claims.IssuedAt}, inv); err != nil {
+		if errors.Is(err, identity.ErrAdminAuthority) {
+			writeErr(w, http.StatusUnauthorized, "the token was rejected")
+			return
+		}
 		s.logger.Error("cannot store the invitation", "subject", inv.Subject, "err", err)
 		writeErr(w, http.StatusInternalServerError, "cannot create the invitation")
 		return
@@ -248,14 +252,14 @@ func (s *Server) operator(w http.ResponseWriter, r *http.Request) (*identity.Cla
 		writeErr(w, http.StatusUnauthorized, "the token was rejected")
 		return nil, false
 	}
-	if !claims.HasRole(s.provisioning.OperatorRole) {
+	if !claims.HasRole(s.provisioning.AdminRole) || identity.ValidateAdminRoles(claims.Roles) != nil {
 		// WARN and named. Somebody holding a valid platform token attempted to
 		// create an account, and that is worth seeing whether it was a
 		// misconfiguration or an attempt.
 		s.logger.Warn("provisioning refused: the caller does not hold the operator role",
 			"subject", claims.Subject, "tenant", claims.Tenant, "roles", claims.Roles,
-			"required", s.provisioning.OperatorRole)
-		writeErr(w, http.StatusForbidden, "creating an account requires the "+s.provisioning.OperatorRole+" role")
+			"required", s.provisioning.AdminRole)
+		writeErr(w, http.StatusForbidden, "creating an account requires the "+s.provisioning.AdminRole+" role")
 		return nil, false
 	}
 
@@ -289,14 +293,14 @@ func (s *Server) operator(w http.ResponseWriter, r *http.Request) (*identity.Cla
 			"subject", claims.Subject, "err", err)
 		writeErr(w, http.StatusServiceUnavailable, "the operator's account status could not be checked")
 		return nil, false
-	case err != nil || !u.Active():
+	case err != nil || !(identity.Administration{Subject: claims.Subject, Tenant: claims.Tenant, IssuedAt: claims.IssuedAt}).Allows(u):
 		// THE SAME 401 AS A REJECTED TOKEN, AND NO REASON — the stance this
 		// function's doc states. A disabled operator learning "disabled" rather
 		// than "rejected" learns that their subject is still a known account; a
 		// validly-signed token naming no account at all (deleted, or minted by
 		// something that should not have) is the same refusal for the same reason.
 		// The log tells them apart.
-		reason := "the account is disabled"
+		reason := "the account authority no longer matches the token"
 		if err != nil {
 			reason = "the token names no account in this store"
 		}

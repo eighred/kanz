@@ -36,6 +36,7 @@ func newStatusServer(t *testing.T, claims *identity.Claims) statusFixture {
 	accounts := map[string]*identity.User{}
 	if claims != nil && claims.Subject != "" {
 		accounts[claims.Subject] = account(claims.Subject, claims.Tenant)
+		accounts[claims.Subject].Roles = append([]string(nil), claims.Roles...)
 	}
 	prov := &fakeProvisioner{accounts: accounts}
 	vfy := &fakeVerifier{claims: claims}
@@ -44,7 +45,7 @@ func newStatusServer(t *testing.T, claims *identity.Claims) statusFixture {
 	s, err := New(&fakeStore{users: accounts}, minter, &allowN{n: 100},
 		func() any { return map[string]any{"keys": []any{}} }, "https://identity.test", quiet(),
 		WithProvisioning(Provisioning{
-			Verifier: vfy, Store: prov, OperatorRole: operatorRole, Audit: audit,
+			Verifier: vfy, Store: prov, AdminRole: operatorRole, Audit: audit,
 		}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -238,7 +239,7 @@ func TestStatus_APrincipalHeaderIsNotAnIdentity(t *testing.T) {
 	}
 }
 
-func TestStatus_RefusesACallerWithoutTheOperatorRole(t *testing.T) {
+func TestStatus_RefusesACallerWithoutTheAdminRole(t *testing.T) {
 	claims := &identity.Claims{
 		Subject: "user:trent", Tenant: "acme",
 		Roles: []string{"kanz-trader"}, Expiry: provNow.Add(time.Hour),

@@ -236,6 +236,7 @@ type Claims struct {
 	Roles      []string
 	Portfolios []string
 	Expiry     time.Time
+	IssuedAt   time.Time
 }
 
 // HasRole reports whether the token carries role, compared exactly.
@@ -324,8 +325,13 @@ func (s *Signer) Verify(raw string, now time.Time) (*Claims, error) {
 	if v, ok := bag[auth.ClaimPortfolios]; ok {
 		portfolios = toStrings(v)
 	}
+	var issuedAt time.Time
+	if std.IssuedAt != nil {
+		issuedAt = std.IssuedAt.Time()
+	}
 	return &Claims{
 		Subject:    std.Subject,
+		IssuedAt:   issuedAt,
 		Tenant:     custom.Tenant,
 		Roles:      append([]string{}, custom.Roles...),
 		Portfolios: portfolios,

@@ -1,0 +1,17 @@
+# Staged strategic-merge patch. Not an automatically synced workload.
+# Follow ../ADMINISTRATION.md and update the image digest in the SAME rollout.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity
+  namespace: kanz-services
+spec:
+  template:
+    spec:
+      containers:
+        - name: identity
+          env:
+            - name: IDENTITY_OPERATOR_ROLE
+              $patch: delete
+            - name: IDENTITY_ADMIN_ROLE
+              value: kanz-identity-admin

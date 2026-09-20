@@ -62,6 +62,9 @@ func TestVerify_AcceptsItsOwnTokenAndCarriesTheClaims(t *testing.T) {
 		t.Errorf("portfolios = %v, want the two the account carries — an entitlement list that "+
 			"does not survive verification silently widens or narrows access", c.Portfolios)
 	}
+	if !c.IssuedAt.Equal(verifyNow) {
+		t.Fatalf("issued-at lost during verification: %v", c.IssuedAt)
+	}
 	if c.Expiry.IsZero() {
 		t.Error("expiry did not survive verification")
 	}

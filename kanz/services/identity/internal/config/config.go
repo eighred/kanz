@@ -68,7 +68,7 @@ type Config struct {
 	// header nobody sends and believe it had configured something.
 	TrustedProxies []string
 
-	// OperatorRole enables AUTHENTICATED provisioning (#364) and names the role a
+	// AdminRole enables AUTHENTICATED provisioning (#364) and names the role a
 	// caller must hold to create an account.
 	//
 	// EMPTY DISABLES THE ROUTES ENTIRELY rather than defaulting to a role name.
@@ -81,7 +81,7 @@ type Config struct {
 	// Until this is set, cmd/kanz-invite (which needs the database credential)
 	// remains the only path — correct for bootstrapping the first operator, and
 	// not attributable to a person, which is why this exists.
-	OperatorRole string
+	AdminRole string
 
 	// InviteTTL is how long a new invitation stays redeemable; zero uses the
 	// domain default.
@@ -122,7 +122,7 @@ func Load() (Config, error) {
 		TokenIssuer:       os.Getenv("IDENTITY_TOKEN_ISSUER"),
 		TokenAudience:     os.Getenv("IDENTITY_TOKEN_AUDIENCE"),
 		TokenTTL:          parseDuration(os.Getenv("IDENTITY_TOKEN_TTL"), 0),
-		OperatorRole:      strings.TrimSpace(os.Getenv("IDENTITY_OPERATOR_ROLE")),
+		AdminRole:         strings.TrimSpace(os.Getenv("IDENTITY_ADMIN_ROLE")),
 		InviteTTL:         parseDuration(os.Getenv("IDENTITY_INVITE_TTL"), 0),
 		LoginBurst:        parseInt(os.Getenv("IDENTITY_LOGIN_BURST"), 0),
 		LoginRefill:       parseDuration(os.Getenv("IDENTITY_LOGIN_REFILL"), 0),
@@ -130,6 +130,12 @@ func Load() (Config, error) {
 		OTLPEndpoint:      os.Getenv("IDENTITY_OTLP_ENDPOINT"),
 	}
 
+	if strings.TrimSpace(os.Getenv("IDENTITY_OPERATOR_ROLE")) != "" {
+		return Config{}, errors.New("IDENTITY_OPERATOR_ROLE is retired: verify a separate identity administrator before setting IDENTITY_ADMIN_ROLE=kanz-identity-admin; see the identity administration runbook")
+	}
+	if cfg.AdminRole != "" && cfg.AdminRole != identity.AdminRole {
+		return Config{}, errors.New("IDENTITY_ADMIN_ROLE must be kanz-identity-admin; infrastructure authority cannot administer identities")
+	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("IDENTITY_DATABASE_URL is required — the credential store is " +
 			"this service's entire state, and there is no in-memory mode that would be anything " +

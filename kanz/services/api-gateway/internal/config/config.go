@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/internal/identity"
 	"log/slog"
 	"os"
 	"strconv"
@@ -429,6 +430,11 @@ func Load() (Config, error) {
 // and it is enforced here the same way — by refusing to run, not by logging a
 // warning that scrolls past.
 func (c Config) validateAuth() error {
+	for _, role := range []string{c.RequiredRole, c.TradeRole, c.OperatorRole, c.FundRole, c.ApproveRole, c.MandateRole, c.AuditRole} {
+		if role == identity.AdminRole {
+			return errors.New("api-gateway: kanz-identity-admin is reserved for identity administration, not gateway capabilities")
+		}
+	}
 	if c.OIDCIssuer == "" && c.JWTSecret == "" {
 		return errors.New("api-gateway: no authentication configured — set API_GATEWAY_OIDC_ISSUER " +
 			"(production, OIDC/JWKS) or API_GATEWAY_JWT_SECRET with API_GATEWAY_ALLOW_DEV_HS256=true " +
