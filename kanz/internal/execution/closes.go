@@ -145,6 +145,9 @@ func (r *CloseRegistry) DueCloses(ctx context.Context, now time.Time, timeout ti
 		}
 	}
 	sort.Slice(due, func(i, j int) bool {
+		if !r.next[due[i].OrderID].Equal(r.next[due[j].OrderID]) {
+			return r.next[due[i].OrderID].Before(r.next[due[j].OrderID])
+		}
 		if due[i].RequestedAt.Equal(due[j].RequestedAt) {
 			return due[i].OrderID < due[j].OrderID
 		}
