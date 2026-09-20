@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/eighred/kanz/internal/execution"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,7 +101,7 @@ func TestReconciliationReportsMixedCoverage(t *testing.T) {
 		&orderpb.OrderState{OrderId: "o1", InstrumentId: "BTC-USD", OrderedQuantity: odec("1")},
 	}, nil)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if strings.Contains(req.URL.RawQuery, "bad") {
+		if req.URL.Query().Get("clOrdId") == "bad" {
 			w.WriteHeader(503)
 			return
 		}
@@ -130,4 +131,18 @@ func TestReconciliationReportsMixedCoverage(t *testing.T) {
 		t.Fatalf("mixed close coverage lost: err=%v events=%d pending=%d", err, len(capture.events), reg.Len())
 	}
 
+}
+
+func TestOrderLookupFailureDoesNotSuppressBalanceChecks(t *testing.T) {
+	f := newFakeOKX(t)
+	f.queryBody = "{"
+	f.balanceBody = `{"code":"0","data":[{"details":[{"ccy":"USD","cashBal":"1"}]}]}`
+	capture := &okxCapture{}
+	r := okxReconOver(f, capture, okxStaticOrders{&orderpb.OrderState{OrderId: "bad", InstrumentId: "BTC-USD"}}, okxStaticBalances{"USD": big.NewRat(0, 1)})
+	if err := r.Reconcile(context.Background()); err == nil {
+		t.Fatal("failed lookup disappeared")
+	}
+	if len(capture.events) != 1 || capture.events[0].Subject != execution.SubjectBalanceRecon {
+		t.Fatalf("independent balance evidence missing: %v", capture.events)
+	}
 }

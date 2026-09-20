@@ -132,10 +132,12 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 // returns the first non-recoverable error; a rate-limit denial aborts the pass
 // (back off) rather than partial-polling.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
-	if err := r.reconcileOrders(ctx); err != nil {
-		return err
+	orderErr := r.reconcileOrders(ctx)
+	if errors.Is(orderErr, ErrRateLimited) || ctx.Err() != nil {
+		return orderErr
 	}
-	return r.reconcileBalances(ctx)
+	// An unavailable order must not blind independent balance observation.
+	return errors.Join(orderErr, r.reconcileBalances(ctx))
 }
 
 // RunHealing observes overdue closes at a bounded cadence until cancellation.
