@@ -211,13 +211,51 @@ func analyseLockedScans(fset *token.FileSet, rel string, f *ast.File) []lockedSc
 			continue
 		}
 		decls := declaredIn(fd.Body)
+		// Follow an unambiguously assigned Query result into rows.Scan. Reassignment
+		// or shadowing refuses this shortcut; the literal/scan coverage check then
+		// requires explicit analysis rather than guessing at lexical binding.
+		lockedRows := map[string]token.Pos{}
+		writes := map[string]int{}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if declaration, ok := n.(*ast.ValueSpec); ok {
+				for _, name := range declaration.Names {
+					writes[name.Name]++
+				}
+			}
+			assignment, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, lhs := range assignment.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					writes[id.Name]++
+				}
+			}
+			if len(assignment.Lhs) == 0 || len(assignment.Rhs) != 1 {
+				return true
+			}
+			id, ok := assignment.Lhs[0].(*ast.Ident)
+			if ok && mentionsForUpdate(assignment.Rhs[0]) {
+				lockedRows[id.Name] = assignment.End()
+			}
+			return true
+		})
 		ast.Inspect(fd.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Scan" || !mentionsForUpdate(sel.X) {
+			if !ok || sel.Sel.Name != "Scan" {
+				return true
+			}
+			locked := mentionsForUpdate(sel.X)
+			if id, ok := sel.X.(*ast.Ident); ok && writes[id.Name] == 1 {
+				if at, exists := lockedRows[id.Name]; exists && at < call.Pos() {
+					locked = true
+				}
+			}
+			if !locked {
 				return true
 			}
 			ls := lockedScan{
@@ -487,4 +525,34 @@ func TestALockedRowIsCheckedAndNotJustLocked(t *testing.T) {
 		"is to answer 'who decided this, and when' with one name.\n\n"+
 		"Either branch on the value or stop selecting it.",
 		len(offending), strings.Join(offending, "\n  "))
+}
+
+// The claim CTE returns rows rather than a chained QueryRow. It must not make
+// unread locked values invisible to the existing guard.
+func TestLockedRowsScanAnalysis(t *testing.T) {
+	for _, use := range []bool{false, true} {
+		tail := "return payload"
+		if use {
+			tail = "return payload + at"
+		}
+		fixture := `package fixture
+func claim() string {
+ rows, err := db.Query(ctx, "WITH due AS (SELECT id FROM pending FOR UPDATE SKIP LOCKED) UPDATE pending SET attempts=1 FROM due RETURNING intent, requested_at")
+ if err != nil { return "error" }
+ for rows.Next() {
+  var payload, at string
+  if err := rows.Scan(&payload, &at); err != nil { return "error" }
+  ` + tail + `
+ }
+ return ""
+}`
+		scans := analyseLockedScansText(t, "rows.go", fixture)
+		want := 1
+		if use {
+			want = 0
+		}
+		if len(scans) != 1 || len(scans[0].unread) != want {
+			t.Fatalf("use=%v scans=%+v", use, scans)
+		}
+	}
 }

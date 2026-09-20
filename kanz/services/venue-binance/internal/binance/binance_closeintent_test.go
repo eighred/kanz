@@ -90,7 +90,10 @@ func TestBinanceCloseIntent_AnAmbiguousCancelIsQueriedAtTheVenueNotDropped(t *te
 
 	// 1. THE INTENT MUST CARRY THE INSTRUMENT. Without it the watchdog cannot map
 	//    a venue symbol and cannot form the query at all.
-	due := closes.DueCloses(time.Now().Add(time.Hour), 0)
+	due, err := closes.DueCloses(context.Background(), time.Now().Add(2*time.Second), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(due) != 1 {
 		t.Fatalf("the registry holds %d in-flight closes after an unanswered cancel, want 1 — "+
 			"the watchdog has nothing to heal and the order stays live at the exchange", len(due))
@@ -102,38 +105,13 @@ func TestBinanceCloseIntent_AnAmbiguousCancelIsQueriedAtTheVenueNotDropped(t *te
 			"deployment is discarded without one question asked of the exchange (#1036)", got, "BTC-USD")
 	}
 
-	// 2. AND THE WATCHDOG MUST ACTUALLY ASK. The count is taken at the exchange,
-	//    not at a seam a double could answer for.
 	before := f.gets
 	cap := &reconCapture{}
-	if err := healReconOverFake(f, cap, closes).HealClosures(ctx); err != nil {
-		t.Fatalf("HealClosures: %v", err)
+	if err := healReconOverFake(f, cap, closes).HealClosures(ctx); err == nil {
+		t.Fatal("working close must remain unconfirmed")
 	}
-	if f.gets != before+1 {
-		t.Fatalf("the healing watchdog issued %d query-order calls for an unconfirmed close, want 1. "+
-			"It resolved the intent without asking the exchange anything: no StateHealed, no "+
-			"force-clear, no balance re-anchor — and the OMS has already recorded the order CANCELLED",
-			f.gets-before)
-	}
-	if closes.Len() != 0 {
-		t.Fatalf("the registry still holds %d closes after healing — the watchdog would re-heal it forever", closes.Len())
-	}
-	// A cancelled resting order carries no residual exposure: force-clear, never sweep.
-	if f.posts != 0 {
-		t.Fatalf("the watchdog placed %d market orders healing a CANCEL — a withdrawn resting order "+
-			"has not traded, so sweeping it opens a brand-new position out of nothing", f.posts)
-	}
-	healed := healedFrom(cap)
-	if healed == nil {
-		t.Fatal("no StateHealed FACT was emitted for a close the exchange still reports working — " +
-			"nothing downstream ever learns the withdrawal did not land")
-	}
-	if got := healed.GetState().GetStatus(); got != orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
-		t.Fatalf("StateHealed carries %v, want CANCELLED (force-cleared)", got)
-	}
-	if got := healed.GetState().GetInstrumentId(); got != "BTC-USD" {
-		t.Fatalf("the correcting FACT names instrument %q, want BTC-USD — a StateHealed with no "+
-			"instrument cannot be folded into a position book", got)
+	if f.gets != before+1 || f.posts != 0 || len(cap.events) != 0 || closes.Len() != 1 {
+		t.Fatalf("close ownership lost: gets=%d posts=%d events=%d pending=%d", f.gets-before, f.posts, len(cap.events), closes.Len())
 	}
 }
 
@@ -158,7 +136,7 @@ func TestBinanceCloseIntent_AnUnhealableCloseIsReportedNotSilentlyResolved(t *te
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeBinance(t)
 			reg := NewCloseRegistry()
-			reg.Track(CloseIntent{
+			_ = reg.Track(context.Background(), CloseIntent{
 				OrderID: "o1", InstrumentID: tc.instrument,
 				RequestedAt: time.Now().Add(-2 * time.Second).UTC(),
 			})
@@ -173,8 +151,8 @@ func TestBinanceCloseIntent_AnUnhealableCloseIsReportedNotSilentlyResolved(t *te
 				OnCloseUnhealable: func(_, _, reason string) { reasons = append(reasons, reason) },
 			})
 
-			if err := rec.HealClosures(context.Background()); err != nil {
-				t.Fatalf("HealClosures: %v", err)
+			if err := rec.HealClosures(context.Background()); err == nil {
+				t.Fatal("unqueryable close must report incomplete pass")
 			}
 			if len(reasons) != 1 || reasons[0] != tc.want {
 				t.Fatalf("the watchdog reported %v for a close it could not attempt, want exactly [%s]. "+

@@ -20,7 +20,7 @@ func TestReconcileErrorLoopsReport(t *testing.T) {
 		for _, failure := range []string{"rate_limited", "invalid_evidence", "broker"} {
 			t.Run(phase+"/"+failure, func(t *testing.T) {
 				f := newFakeOKX(t)
-				f.queryBody = `{"code":"0","data":[{"state":"canceled","accFillSz":"0"}]}`
+				f.queryBody = `{"code":"0","data":[{"clOrdId":"o1","state":"canceled","accFillSz":"0"}]}`
 				f.balanceBody = `{"code":"0","data":[{"details":[{"ccy":"USD","cashBal":"1"}]}]}`
 				cap := &okxCapture{}
 				r := okxReconOver(f, cap, okxStaticOrders{}, okxStaticBalances{"USD": big.NewRat(0, 1)})
@@ -29,7 +29,7 @@ func TestReconcileErrorLoopsReport(t *testing.T) {
 				observer := execution.NewReconcileErrorObserver(registry, slog.New(slog.NewJSONHandler(&logs, nil)), "OKX")
 				if phase == "healing" {
 					closes := NewCloseRegistry()
-					closes.Track(CloseIntent{OrderID: "o1", InstrumentID: "BTC-USD", RequestedAt: time.Now().Add(-time.Hour)})
+					_ = closes.Track(context.Background(), CloseIntent{OrderID: "o1", InstrumentID: "BTC-USD", RequestedAt: time.Now().Add(-time.Hour)})
 					r.closes = closes
 				}
 				want := failure
@@ -40,11 +40,10 @@ func TestReconcileErrorLoopsReport(t *testing.T) {
 						t.Fatal("could not exhaust budget")
 					}
 					r.rest.buckets = newOKXBuckets(bucket, nil)
-					// Healing deliberately retains its existing force-clear policy. Its
-					// post-sweep balance pass returns the exhausted budget to the loop.
+					// An unanswered query must reach the loop without resolving the close.
 				case "invalid_evidence":
 					if phase == "healing" {
-						f.queryBody = `{"code":"0","data":[{"state":"canceled","accFillSz":"invalid"}]}`
+						f.queryBody = `{"code":"0","data":[{"clOrdId":"o1","state":"canceled","accFillSz":"invalid"}]}`
 					} else {
 						f.balanceBody = `{"code":"0","data":[{"details":[{"ccy":"USD","cashBal":"invalid"}]}]}`
 					}

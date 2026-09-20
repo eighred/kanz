@@ -41,7 +41,7 @@ type Reconciler struct {
 	// shipped, because both left this nil for a year.
 	onUnknownBalance func(asset, reason string)
 	onReconcileError func(context.Context, string, error)
-	// onCloseUnhealable is called for EVERY in-flight close this watchdog dropped
+	// onCloseUnhealable is called for EVERY in-flight close this watchdog retains
 	// WITHOUT asking the exchange anything (#1036), with the reason. Nil => silent,
 	// which is only right in a test.
 	//
@@ -65,7 +65,7 @@ type ReconcilerConfig struct {
 	// healing seam is disabled (order/balance reconciliation still runs).
 	Closes PendingCloses
 	// CloseTimeout is how long a close may stay unconfirmed before the healing
-	// loop force-clears it. <=0 ⇒ execution.DefaultCloseTimeout (the mandate's
+	// loop first queries it. <=0 ⇒ execution.DefaultCloseTimeout (the mandate's
 	// trigger).
 	CloseTimeout time.Duration
 	Pub          Publisher
@@ -80,7 +80,7 @@ type ReconcilerConfig struct {
 	OnUnknownBalance func(asset, reason string)
 	// OnReconcileError observes every returned periodic error; production supplies metrics and bounded logs.
 	OnReconcileError func(context.Context, string, error)
-	// OnCloseUnhealable is called for every in-flight close dropped without a venue
+	// OnCloseUnhealable is called for every in-flight close retained without a venue
 	// query, with the reason (#1036). Nil => the drop is silent.
 	OnCloseUnhealable func(orderID, instrumentID, reason string)
 }
@@ -132,17 +132,15 @@ func (r *Reconciler) Run(ctx context.Context, interval time.Duration) {
 // returns the first non-recoverable error; a rate-limit denial aborts the pass
 // (back off) rather than partial-polling.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
-	if err := r.reconcileOrders(ctx); err != nil {
-		return err
+	orderErr := r.reconcileOrders(ctx)
+	if errors.Is(orderErr, ErrRateLimited) || ctx.Err() != nil {
+		return orderErr
 	}
-	return r.reconcileBalances(ctx)
+	// An unavailable order must not blind independent balance observation.
+	return errors.Join(orderErr, r.reconcileBalances(ctx))
 }
 
-// RunHealing drives the In-Flight Certainty watchdog on a fast tick (independent
-// of the slower order/balance cron): every tick it force-resolves any close that
-// has stayed unconfirmed past CloseTimeout so the ledger never freezes. No-op
-// when no close registry is configured. The Binance half of the shared seam —
-// identical semantics to OKXReconciler.RunHealing.
+// RunHealing observes overdue closes at a bounded cadence until cancellation.
 func (r *Reconciler) RunHealing(ctx context.Context, tick time.Duration) {
 	if r.closes == nil {
 		return
@@ -165,115 +163,67 @@ func (r *Reconciler) RunHealing(ctx context.Context, tick time.Duration) {
 	}
 }
 
-// HealClosures resolves every close past the timeout. For each: query the venue
-// by clOrdId; if the venue confirms it terminal, emit a StateHealed carrying that
-// truth. If the order is still working or the venue is unresponsive, force-clear
-// it (StateHealed → CANCELLED) and sweep any residual exposure with an aggressive
-// market order, then reconcile balances so a BalanceReconciled FACT re-anchors
-// the ledger from real venue truth — never a fabricated balance.
+// HealClosures publishes terminal evidence only after an authoritative query.
+// Working and unknown orders stay owned; timeout never authorizes a new trade.
 func (r *Reconciler) HealClosures(ctx context.Context) error {
 	if r.closes == nil {
 		return nil
 	}
-	swept := false
-	for _, ci := range r.closes.DueCloses(r.now(), r.closeTimeout) {
-		// TWO DIFFERENT ANSWERS, COUNTED SEPARATELY (#1036). A malformed intent is a
-		// writer defect and used to be indistinguishable from "untradeable here",
-		// which is how an empty InstrumentID on every close the venue adapter
-		// tracked stayed invisible: Symbol("") misses, and the miss read as
-		// configuration.
+	due, err := r.closes.DueCloses(ctx, r.now(), r.closeTimeout)
+	if err != nil {
+		return err
+	}
+	pass := &execution.ReconcilePassError{Total: len(due)}
+	for _, ci := range due {
+		pass.Checked++
 		if reason := ci.Unhealable(); reason != "" {
-			r.dropUnhealableClose(ci, reason)
+			r.reportUnhealableClose(ci, reason)
+			pass.FailOrder(ci.OrderID, execution.ErrReconcileEvidence)
 			continue
 		}
 		symbol, ok := r.symbols.Symbol(ci.InstrumentID)
 		if !ok {
-			// Untradeable here — stop watching it, and SAY SO. This is still a close
-			// nobody asked the exchange about.
-			r.dropUnhealableClose(ci, execution.CloseDropUnmappedSymbol)
+			r.reportUnhealableClose(ci, execution.CloseDropUnmappedSymbol)
+			pass.FailOrder(ci.OrderID, execution.ErrReconcileEvidence)
 			continue
 		}
 		truth, qErr := r.rest.queryOrder(ctx, symbol, ci.OrderID)
-		if qErr == nil && binanceTerminal(truth.Status) {
-			// Venue confirms the close landed — adopt its truth and stop.
-			healed, hErr := binanceHealedFromQuery(ci, truth, r.venue, r.now())
-			if hErr != nil {
-				return hErr
+		if qErr != nil {
+			pass.FailOrder(ci.OrderID, qErr)
+			if errors.Is(qErr, ErrRateLimited) || ctx.Err() != nil {
+				break
 			}
-			if err := r.emitStateHealed(ctx, healed,
-				"in-flight close confirmed terminal on venue query"); err != nil {
-				return err
-			}
-			r.closes.Resolve(ci.OrderID)
 			continue
 		}
-		// Stuck or unresponsive: force-clear and sweep so nothing freezes.
-		if err := r.forceSweep(ctx, ci, symbol); err != nil {
-			return err
+		if truth == nil || truth.ClientOrderID != ci.OrderID {
+			pass.FailOrder(ci.OrderID, execution.ErrReconcileEvidence)
+			continue
 		}
-		swept = true
-		r.closes.Resolve(ci.OrderID)
+		if !binanceTerminal(truth.Status) {
+			pass.FailOrder(ci.OrderID, execution.ErrCloseUnconfirmed)
+			continue
+		}
+		healed, hErr := binanceHealedFromQuery(ci, truth, r.venue, r.now())
+		if hErr != nil {
+			pass.FailOrder(ci.OrderID, hErr)
+			continue
+		}
+		if err := r.emitStateHealed(ctx, healed, "in-flight close confirmed terminal on venue query"); err != nil {
+			pass.FailOrder(ci.OrderID, err)
+			continue
+		}
+		if err := r.closes.Resolve(ctx, ci.OrderID); err != nil {
+			pass.FailOrder(ci.OrderID, err)
+		}
 	}
-	if swept {
-		// Re-anchor balances from real venue truth after the sweep(s).
-		return r.reconcileBalances(ctx)
-	}
-	return nil
+	return pass.Result()
 }
 
-// dropUnhealableClose stops watching a close the watchdog could not turn into a
-// venue question, and says so.
-//
-// IT IS NOT A RESOLUTION AND MUST NOT LOOK LIKE ONE (#1036). The order may still
-// be resting and fillable at the exchange while the OMS, the position book, risk,
-// compliance and the IBOR all have it CANCELLED — and CANCELLED is terminal, so
-// no sweep and no resume will look at it again. The intent IS dropped rather than
-// retried forever, because it is unhealable by construction and a growing
-// registry of questions nobody can ask helps no one; the counter and the ERROR
-// log are what an operator acts on.
-func (r *Reconciler) dropUnhealableClose(ci CloseIntent, reason string) {
+// reportUnhealableClose retains ownership and reports why no venue query was possible.
+func (r *Reconciler) reportUnhealableClose(ci CloseIntent, reason string) {
 	if r.onCloseUnhealable != nil {
 		r.onCloseUnhealable(ci.OrderID, ci.InstrumentID, reason)
 	}
-	r.closes.Resolve(ci.OrderID)
-}
-
-// forceSweep force-clears a stuck close and flattens whatever exposure it left
-// open. The sweep is best-effort: its failure is recorded in the reason but must
-// not block the force-clear — the ledger must progress. The sweep's REAL fills
-// arrive via the user-data stream / the next balance pass; none is fabricated.
-// A close carrying no residual exposure (a cancelled resting order — see
-// CloseIntent) force-clears without a sweep.
-func (r *Reconciler) forceSweep(ctx context.Context, ci CloseIntent, symbol string) error {
-	reason := "in-flight close timeout (>" + r.closeTimeout.String() + "); force-cleared"
-	if ci.Leaves != nil && ci.Leaves.Sign() > 0 && ci.SweepSide != orderpb.Side_SIDE_UNSPECIFIED {
-		side, sErr := binanceSide(ci.SweepSide)
-		if sErr == nil {
-			// SCALED, NOT WRAPPING (#94) — the same reasoning as the OKX sweep. This
-			// quantity becomes a live MARKET order; dec.ToProto wraps above ~92.2
-			// billion units at scale 8, which a meme-coin residual reaches, and the
-			// order would be placed for a size the platform fabricated.
-			scaled, ok := dec.ToProtoScaled(ci.Leaves)
-			switch {
-			case !ok:
-				reason += "; sweep REFUSED: residual " + ci.Leaves.FloatString(8) +
-					" cannot be represented as a Decimal, and this platform does not send an order size it invented"
-			default:
-				qty := formatDec(scaled)
-				if _, err := r.rest.sweepMarket(ctx, symbol, side, qty, "heal-"+ci.OrderID); err != nil {
-					reason += "; sweep error: " + err.Error()
-				} else {
-					reason += "; swept residual " + ci.Leaves.FloatString(8) + " via market " + side
-				}
-			}
-		}
-	}
-	cleared := &orderpb.OrderState{
-		OrderId: ci.OrderID, InstrumentId: ci.InstrumentID,
-		Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED,
-		Venue:  r.venue, AsOf: timestamppb.New(r.now().UTC()),
-	}
-	return r.emitStateHealed(ctx, cleared, reason)
 }
 
 // binanceTerminal reports whether a Binance order status is terminal.
@@ -309,29 +259,46 @@ func binanceHealedFromQuery(ci CloseIntent, truth *orderResponse, venue string, 
 }
 
 func (r *Reconciler) reconcileOrders(ctx context.Context) error {
-	for _, exp := range r.expected.OpenOrders() {
+	if r.expected == nil {
+		return nil
+	}
+	orders := r.expected.OpenOrders()
+	pass := &execution.ReconcilePassError{Total: len(orders)}
+	for _, exp := range orders {
+		if err := ctx.Err(); err != nil {
+			pass.FailOrder(exp.GetOrderId(), err)
+			break
+		}
+		pass.Checked++
 		symbol, ok := r.symbols.Symbol(exp.GetInstrumentId())
 		if !ok {
+			pass.FailOrder(exp.GetOrderId(), execution.ErrReconcileEvidence)
 			continue
 		}
 		truth, err := r.rest.queryOrder(ctx, symbol, exp.GetOrderId())
 		if err != nil {
-			if errors.Is(err, ErrRateLimited) {
-				return err // back off — do not keep polling
+			pass.FailOrder(exp.GetOrderId(), err)
+			if errors.Is(err, ErrRateLimited) || ctx.Err() != nil {
+				break
 			}
-			continue // transient / not-found: leave it for the next pass
+			continue
 		}
-		healed, drift, hErr := healedState(exp, truth, r.now())
-		if hErr != nil {
-			return hErr
+		if truth == nil || truth.ClientOrderID != exp.GetOrderId() {
+			pass.FailOrder(exp.GetOrderId(), execution.ErrReconcileEvidence)
+			continue
+		}
+		healed, drift, err := healedState(exp, truth, r.now())
+		if err != nil {
+			pass.FailOrder(exp.GetOrderId(), err)
+			continue
 		}
 		if drift {
 			if err := r.emitStateHealed(ctx, healed, driftReason(exp, truth)); err != nil {
-				return err
+				pass.FailOrder(exp.GetOrderId(), err)
 			}
 		}
 	}
-	return nil
+	return pass.Result()
 }
 
 func (r *Reconciler) reconcileBalances(ctx context.Context) error {
@@ -380,6 +347,9 @@ func healedState(exp *orderpb.OrderState, truth *orderResponse, now time.Time) (
 		return nil, false, fmt.Errorf("%w: binance filled quantity", execution.ErrReconcileEvidence)
 	}
 	status := binanceStatusToProto(truth.Status)
+	if status == orderpb.OrderStatus_ORDER_STATUS_UNSPECIFIED {
+		return nil, false, execution.ErrReconcileEvidence
+	}
 	kanzFilled := dec.FromProto(exp.GetFilledQuantity())
 	if exFilled.Cmp(kanzFilled) == 0 && status == exp.GetStatus() {
 		return nil, false, nil // in parity

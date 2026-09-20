@@ -43,7 +43,7 @@ func healReconOver(f *fakeOKX, cap *okxCapture, reg PendingCloses) *OKXReconcile
 }
 
 func trackedClose(reg *CloseRegistry, id string, age time.Duration) {
-	reg.Track(CloseIntent{
+	_ = reg.Track(context.Background(), CloseIntent{
 		OrderID: id, InstrumentID: "BTC-USD",
 		SweepSide: orderpb.Side_SIDE_SELL, Leaves: big.NewRat(1, 1),
 		RequestedAt: time.Now().Add(-age).UTC(),
@@ -79,9 +79,8 @@ func TestHeal_ConfirmedTerminalNoSweep(t *testing.T) {
 	}
 }
 
-// A close the venue still reports working (stuck) is force-cleared and the
-// residual swept via an aggressive market order; StateHealed → CANCELLED.
-func TestHeal_StuckForceClearsAndSweeps(t *testing.T) {
+// Unconfirmed closes remain tracked regardless of residual size; no trade is authorized.
+func TestHeal_WorkingRemainsPending(t *testing.T) {
 	f := newFakeOKX(t)
 	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"9","clOrdId":"o1","state":"live","accFillSz":"0"}]}`
 	f.placeBody = `{"code":"0","msg":"","data":[{"ordId":"sweep1","clOrdId":"heal-o1","sCode":"0","sMsg":""}]}`
@@ -90,32 +89,16 @@ func TestHeal_StuckForceClearsAndSweeps(t *testing.T) {
 	reg := NewCloseRegistry()
 	trackedClose(reg, "o1", 2*time.Second)
 
-	if err := healReconOver(f, cap, reg).HealClosures(context.Background()); err != nil {
-		t.Fatalf("HealClosures: %v", err)
+	if err := healReconOver(f, cap, reg).HealClosures(context.Background()); err == nil {
+		t.Fatal("unconfirmed close reported success")
 	}
-	if f.posts != 1 {
-		t.Fatalf("posts = %d, want 1 (a sweep market order)", f.posts)
-	}
-	if f.sawPostCl != "heal-o1" {
-		t.Fatalf("sweep clOrdId = %q, want heal-o1 (idempotent)", f.sawPostCl)
-	}
-	if reg.Len() != 0 {
-		t.Fatal("stuck close not resolved")
-	}
-	var healed *orderpb.StateHealed
-	for _, e := range cap.events {
-		if h, ok := e.Payload.(*orderpb.StateHealed); ok {
-			healed = h
-		}
-	}
-	if healed == nil || healed.GetState().GetStatus() != orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
-		t.Fatal("stuck close must force-clear to CANCELLED")
+	if f.posts != 0 || len(cap.events) != 0 || reg.Len() != 1 {
+		t.Fatalf("uncertainty lost: posts=%d events=%d pending=%d", f.posts, len(cap.events), reg.Len())
 	}
 }
 
-// An unresponsive venue (query returns an error code) still force-clears + sweeps
-// — the ledger must never freeze.
-func TestHeal_UnresponsiveVenueStillClears(t *testing.T) {
+// Unconfirmed closes remain tracked regardless of residual size; no trade is authorized.
+func TestHeal_UnresponsiveVenueRemainsPending(t *testing.T) {
 	f := newFakeOKX(t)
 	f.queryBody = `{"code":"51000","msg":"unavailable","data":[]}` // queryOrder → error
 	f.placeBody = `{"code":"0","msg":"","data":[{"ordId":"sweep1","clOrdId":"heal-o1","sCode":"0","sMsg":""}]}`
@@ -124,14 +107,11 @@ func TestHeal_UnresponsiveVenueStillClears(t *testing.T) {
 	reg := NewCloseRegistry()
 	trackedClose(reg, "o1", 2*time.Second)
 
-	if err := healReconOver(f, cap, reg).HealClosures(context.Background()); err != nil {
-		t.Fatalf("HealClosures: %v", err)
+	if err := healReconOver(f, cap, reg).HealClosures(context.Background()); err == nil {
+		t.Fatal("unconfirmed close reported success")
 	}
-	if f.posts != 1 {
-		t.Fatalf("posts = %d, want 1 (sweep despite unresponsive query)", f.posts)
-	}
-	if reg.Len() != 0 {
-		t.Fatal("close must resolve even when the venue is unresponsive")
+	if f.posts != 0 || len(cap.events) != 0 || reg.Len() != 1 {
+		t.Fatalf("uncertainty lost: posts=%d events=%d pending=%d", f.posts, len(cap.events), reg.Len())
 	}
 }
 
@@ -156,30 +136,23 @@ func TestHeal_NotYetDueLeftAlone(t *testing.T) {
 func TestCloseRegistry_TrackPreservesRequestedAt(t *testing.T) {
 	reg := NewCloseRegistry()
 	t0 := time.Now().Add(-2 * time.Second).UTC()
-	reg.Track(CloseIntent{OrderID: "o1", InstrumentID: "BTC-USD", RequestedAt: t0})
+	_ = reg.Track(context.Background(), CloseIntent{OrderID: "o1", InstrumentID: "BTC-USD", RequestedAt: t0})
 	// A re-track (retry) must not reset the timeout clock.
-	reg.Track(CloseIntent{OrderID: "o1", InstrumentID: "BTC-USD", Leaves: big.NewRat(2, 1)})
-	due := reg.DueCloses(time.Now(), 1500*time.Millisecond)
+	_ = reg.Track(context.Background(), CloseIntent{OrderID: "o1", InstrumentID: "BTC-USD", Leaves: big.NewRat(2, 1)})
+	due, err := reg.DueCloses(context.Background(), time.Now(), 1500*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(due) != 1 {
 		t.Fatalf("due = %d, want 1 (original RequestedAt preserved)", len(due))
 	}
-	if got := dec.FromProto(dec.ToProto(due[0].Leaves)); got.Cmp(big.NewRat(2, 1)) != 0 {
-		t.Fatalf("re-track should update Leaves, got %s", got.RatString())
+	if due[0].Leaves != nil {
+		t.Fatal("redelivery replaced original intent")
 	}
 }
 
-// THE SWEEP MUST SEND THE RESIDUAL IT WAS GIVEN, NOT A WRAPPED ONE (#94).
-//
-// forceSweep places a live MARKET order to flatten what a stuck close left open.
-// It sized that order through dec.ToProto, which wraps once the scaled
-// coefficient exceeds an int64 — about 92.2 billion units at scale 8. That is
-// $92bn in money terms but an ordinary position in tokens, and OKX lists assets
-// that trade in the trillions.
-//
-// A residual of 1e12 rendered as 77662796314.5224192: the sweep meant to flatten
-// the book would have market-sold about 7.8% of it and reported success, leaving
-// 92% of the exposure open with the close resolved and nothing failing.
-func TestHeal_SweepSizeIsNotWrappedForALargeResidual(t *testing.T) {
+// Unconfirmed closes remain tracked regardless of residual size; no trade is authorized.
+func TestHeal_LargeResidualDoesNotAuthorizeSweep(t *testing.T) {
 	const residual = "1000000000000" // 1e12 units — a normal meme-coin position
 
 	f := newFakeOKX(t)
@@ -188,27 +161,22 @@ func TestHeal_SweepSizeIsNotWrappedForALargeResidual(t *testing.T) {
 	f.balanceBody = `{"code":"0","msg":"","data":[{"details":[{"ccy":"BTC","cashBal":"0"}]}]}`
 	cap := &okxCapture{}
 	reg := NewCloseRegistry()
-	reg.Track(CloseIntent{
+	_ = reg.Track(context.Background(), CloseIntent{
 		OrderID: "o1", InstrumentID: "BTC-USD",
 		SweepSide: orderpb.Side_SIDE_SELL, Leaves: dec.Rat(residual),
 		RequestedAt: time.Now().Add(-2 * time.Second).UTC(),
 	})
 
-	if err := healReconOver(f, cap, reg).HealClosures(context.Background()); err != nil {
-		t.Fatalf("HealClosures: %v", err)
+	if err := healReconOver(f, cap, reg).HealClosures(context.Background()); err == nil {
+		t.Fatal("unconfirmed close reported success")
 	}
-	if f.posts != 1 {
-		t.Fatalf("posts = %d, want 1 (a sweep market order)", f.posts)
-	}
-	if f.sawPostSz != residual {
-		t.Fatalf("swept size = %q, want %q — the venue was sent a quantity the platform "+
-			"invented, and a market order is immediate and irreversible", f.sawPostSz, residual)
+	if f.posts != 0 || len(cap.events) != 0 || reg.Len() != 1 {
+		t.Fatalf("uncertainty lost: posts=%d events=%d pending=%d", f.posts, len(cap.events), reg.Len())
 	}
 }
 
-// NON-VACUITY: an ordinary residual still sweeps at its exact size, so the guard
-// above is not satisfied by a sweep that refuses everything.
-func TestHeal_SweepSizeIsExactForAnOrdinaryResidual(t *testing.T) {
+// Unconfirmed closes remain tracked regardless of residual size; no trade is authorized.
+func TestHeal_OrdinaryResidualDoesNotAuthorizeSweep(t *testing.T) {
 	f := newFakeOKX(t)
 	f.queryBody = `{"code":"0","msg":"","data":[{"ordId":"9","clOrdId":"o1","state":"live","accFillSz":"0"}]}`
 	f.placeBody = `{"code":"0","msg":"","data":[{"ordId":"sweep1","clOrdId":"heal-o1","sCode":"0","sMsg":""}]}`
@@ -217,10 +185,10 @@ func TestHeal_SweepSizeIsExactForAnOrdinaryResidual(t *testing.T) {
 	reg := NewCloseRegistry()
 	trackedClose(reg, "o1", 2*time.Second)
 
-	if err := healReconOver(f, cap, reg).HealClosures(context.Background()); err != nil {
-		t.Fatalf("HealClosures: %v", err)
+	if err := healReconOver(f, cap, reg).HealClosures(context.Background()); err == nil {
+		t.Fatal("unconfirmed close reported success")
 	}
-	if f.sawPostSz != "1" {
-		t.Fatalf("swept size = %q, want \"1\"", f.sawPostSz)
+	if f.posts != 0 || len(cap.events) != 0 || reg.Len() != 1 {
+		t.Fatalf("uncertainty lost: posts=%d events=%d pending=%d", f.posts, len(cap.events), reg.Len())
 	}
 }

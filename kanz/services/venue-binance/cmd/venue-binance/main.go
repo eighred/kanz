@@ -130,7 +130,7 @@ var fillRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
 	ConstLabels: prometheus.Labels{"venue": "binance"},
 }, []string{"reason"})
 
-// closesUnhealable counts in-flight closes the healing watchdog dropped WITHOUT
+// closesUnhealable counts in-flight closes the healing watchdog retained WITHOUT
 // asking the exchange anything, by reason (#1036).
 //
 // EVERY INCREMENT IS AN ORDER THAT MAY STILL BE RESTING AT THE EXCHANGE while the
@@ -147,7 +147,7 @@ var fillRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
 // silent in exactly the deployment state it was written for.
 var closesUnhealable = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "kanz_venue_closes_unhealable_total",
-	Help: "In-flight closes the healing watchdog dropped without querying the exchange, by reason. " +
+	Help: "In-flight closes the healing watchdog retained without querying the exchange, by reason. " +
 		"Non-zero means an order this platform recorded as CANCELLED was never confirmed withdrawn " +
 		"at the venue and may still be resting and fillable.",
 	ConstLabels: prometheus.Labels{"venue": "binance"},
@@ -314,7 +314,7 @@ func serve(cfg config.Config) error {
 	// the writer; the connector's healing watchdog is the reader. Before the split
 	// the OMS wrote it across an in-process pointer — it no longer tracks these at
 	// all (execution.SelfHealing).
-	closes := execution.NewCloseRegistry()
+	closes := view
 
 	// DOES EACH MAPPING SAY WHAT IT ACTUALLY TRADES? (#407)
 	//
@@ -509,7 +509,7 @@ func serve(cfg config.Config) error {
 		OnReconcileError: execution.NewReconcileErrorObserver(obs.Registry, logger, "BINANCE").Observe,
 		OnCloseUnhealable: func(orderID, instrumentID, reason string) {
 			closesUnhealable.WithLabelValues(reason).Inc()
-			logger.Error("venue-binance: an in-flight close was dropped without asking the exchange — the "+
+			logger.Error("venue-binance: an in-flight close remains pending without asking the exchange — the "+
 				"order may still be resting and fillable while this platform records it CANCELLED",
 				"order_id", orderID, "instrument_id", instrumentID, "reason", reason)
 		},

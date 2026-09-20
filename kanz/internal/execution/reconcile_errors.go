@@ -81,6 +81,14 @@ func (o *ReconcileErrorObserver) Observe(ctx context.Context, loop string, err e
 	}
 	o.mu.Unlock()
 	if due {
-		o.logger.Error("venue reconciliation pass failed; absence of discrepancy events does not establish agreement with the venue", "venue", o.venue, "loop", reconcileLoops[l], "reason", reconcileReasons[r])
+		var coverage *ReconcilePassError
+		total, checked, failed := 0, 0, 0
+		if errors.As(err, &coverage) {
+			total, checked, failed = coverage.Total, coverage.Checked, coverage.Failed
+		}
+		o.logger.Error("venue reconciliation pass failed; absence of discrepancy events does not establish agreement with the venue", "venue", o.venue, "loop", reconcileLoops[l], "reason", reconcileReasons[r], "orders_total", total, "orders_checked", checked, "orders_failed", failed)
 	}
 }
+
+// ErrCloseUnconfirmed means the venue has not confirmed a terminal close.
+var ErrCloseUnconfirmed = errors.New("venue close remains unconfirmed")

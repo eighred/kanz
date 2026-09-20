@@ -10,8 +10,8 @@ import (
 )
 
 // The Binance half of the In-Flight Certainty seam, mirroring the OKX healing
-// suite: a close that stays unconfirmed past the 1500ms timeout is force-resolved
-// against venue truth so the ledger never freezes.
+// suite: a close that stays unconfirmed past the 1500ms timeout is queried
+// against venue truth and retained while its outcome remains unconfirmed.
 
 func healReconOverBinance(f *fakeBinance, cap *reconCapture, reg PendingCloses) *Reconciler {
 	bucket := newWeightBucket(1200, time.Minute, nil)
@@ -26,7 +26,7 @@ func healReconOverBinance(f *fakeBinance, cap *reconCapture, reg PendingCloses) 
 // trackedFlatten is a POSITION close (an IOC market flatten): it leaves residual
 // exposure if it does not land, so it carries a sweep side + leaves.
 func trackedFlatten(reg *CloseRegistry, id string, age time.Duration) {
-	reg.Track(CloseIntent{
+	_ = reg.Track(context.Background(), CloseIntent{
 		OrderID: id, InstrumentID: "BTC-USD",
 		SweepSide: orderpb.Side_SIDE_SELL, Leaves: big.NewRat(1, 1),
 		RequestedAt: time.Now().Add(-age).UTC(),
@@ -88,10 +88,8 @@ func TestBinanceHeal_ConfirmedFilledAdoptsVenueTruth(t *testing.T) {
 	}
 }
 
-// A close the venue still reports working (stuck) is force-cleared and its
-// residual exposure swept via an aggressive market order under an idempotent
-// heal- clOrdId; StateHealed → CANCELLED.
-func TestBinanceHeal_StuckForceClearsAndSweeps(t *testing.T) {
+// Unconfirmed closes remain tracked regardless of residual size; no trade is authorized.
+func TestBinanceHeal_WorkingRemainsPending(t *testing.T) {
 	f := newFakeBinance(t)
 	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"NEW","executedQty":"0"}`
 	f.newOrderBody = `{"symbol":"BTCUSDT","orderId":9,"clientOrderId":"heal-o1","status":"FILLED","executedQty":"1.00000000"}`
@@ -100,30 +98,16 @@ func TestBinanceHeal_StuckForceClearsAndSweeps(t *testing.T) {
 	reg := NewCloseRegistry()
 	trackedFlatten(reg, "o1", 2*time.Second)
 
-	if err := healReconOverBinance(f, cap, reg).HealClosures(context.Background()); err != nil {
-		t.Fatalf("HealClosures: %v", err)
+	if err := healReconOverBinance(f, cap, reg).HealClosures(context.Background()); err == nil {
+		t.Fatal("unconfirmed close reported success")
 	}
-	if f.posts != 1 {
-		t.Fatalf("posts = %d, want 1 (a sweep market order)", f.posts)
-	}
-	if f.sawClientOrderID != "heal-o1" {
-		t.Fatalf("sweep clOrdId = %q, want heal-o1 (idempotent — never double-flattens)", f.sawClientOrderID)
-	}
-	if f.sawType != "MARKET" {
-		t.Fatalf("sweep type = %q, want MARKET (aggressive)", f.sawType)
-	}
-	if reg.Len() != 0 {
-		t.Fatal("stuck close not resolved")
-	}
-	healed := healedFrom(cap)
-	if healed == nil || healed.GetState().GetStatus() != orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
-		t.Fatal("stuck close must force-clear to CANCELLED")
+	if f.posts != 0 || len(cap.events) != 0 || reg.Len() != 1 {
+		t.Fatalf("uncertainty lost: posts=%d events=%d pending=%d", f.posts, len(cap.events), reg.Len())
 	}
 }
 
-// An unresponsive venue (query returns an error body) still force-clears + sweeps
-// — the ledger must never freeze on a venue that will not answer.
-func TestBinanceHeal_UnresponsiveVenueStillClears(t *testing.T) {
+// Unconfirmed closes remain tracked regardless of residual size; no trade is authorized.
+func TestBinanceHeal_UnresponsiveVenueRemainsPending(t *testing.T) {
 	f := newFakeBinance(t)
 	f.queryBody = `{"code":-1001,"msg":"internal error"}` // queryOrder → APIError
 	f.newOrderBody = `{"symbol":"BTCUSDT","orderId":9,"clientOrderId":"heal-o1","status":"FILLED","executedQty":"1.00000000"}`
@@ -132,20 +116,15 @@ func TestBinanceHeal_UnresponsiveVenueStillClears(t *testing.T) {
 	reg := NewCloseRegistry()
 	trackedFlatten(reg, "o1", 2*time.Second)
 
-	if err := healReconOverBinance(f, cap, reg).HealClosures(context.Background()); err != nil {
-		t.Fatalf("HealClosures: %v", err)
+	if err := healReconOverBinance(f, cap, reg).HealClosures(context.Background()); err == nil {
+		t.Fatal("unconfirmed close reported success")
 	}
-	if f.posts != 1 {
-		t.Fatalf("posts = %d, want 1 (sweep despite an unresponsive query)", f.posts)
-	}
-	if reg.Len() != 0 {
-		t.Fatal("close must resolve even when the venue is unresponsive")
+	if f.posts != 0 || len(cap.events) != 0 || reg.Len() != 1 {
+		t.Fatalf("uncertainty lost: posts=%d events=%d pending=%d", f.posts, len(cap.events), reg.Len())
 	}
 }
 
-// A cancelled RESTING order carries no residual exposure (it never traded), so a
-// stuck cancel force-clears WITHOUT sweeping — sweeping would open a brand-new
-// position in the opposite direction out of thin air.
+// Unconfirmed closes remain tracked regardless of residual size; no trade is authorized.
 func TestBinanceHeal_CancelledRestingOrderNeverSweeps(t *testing.T) {
 	f := newFakeBinance(t)
 	f.queryBody = `{"symbol":"BTCUSDT","clientOrderId":"o1","status":"NEW","executedQty":"0"}` // stuck
@@ -153,23 +132,16 @@ func TestBinanceHeal_CancelledRestingOrderNeverSweeps(t *testing.T) {
 	cap := &reconCapture{}
 	reg := NewCloseRegistry()
 	// The shape the OMS cancel path Tracks: no SweepSide, no Leaves.
-	reg.Track(CloseIntent{
+	_ = reg.Track(context.Background(), CloseIntent{
 		OrderID: "o1", InstrumentID: "BTC-USD",
 		RequestedAt: time.Now().Add(-2 * time.Second).UTC(),
 	})
 
-	if err := healReconOverBinance(f, cap, reg).HealClosures(context.Background()); err != nil {
-		t.Fatalf("HealClosures: %v", err)
+	if err := healReconOverBinance(f, cap, reg).HealClosures(context.Background()); err == nil {
+		t.Fatal("unconfirmed close reported success")
 	}
-	if f.posts != 0 {
-		t.Fatalf("posts = %d, want 0 — a cancelled resting order must NEVER be swept", f.posts)
-	}
-	healed := healedFrom(cap)
-	if healed == nil || healed.GetState().GetStatus() != orderpb.OrderStatus_ORDER_STATUS_CANCELLED {
-		t.Fatal("a stuck cancel must still force-clear to CANCELLED")
-	}
-	if reg.Len() != 0 {
-		t.Fatal("close not resolved")
+	if f.posts != 0 || len(cap.events) != 0 || reg.Len() != 1 {
+		t.Fatalf("uncertainty lost: posts=%d events=%d pending=%d", f.posts, len(cap.events), reg.Len())
 	}
 }
 

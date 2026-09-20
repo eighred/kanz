@@ -307,8 +307,7 @@ const (
 	// exchange before something re-checks.
 	DefaultReconcileInterval = time.Minute
 	// DefaultCloseTimeout is how long an in-flight close may stay unconfirmed
-	// before the healing watchdog force-clears it (the In-Flight Certainty
-	// mandate's trigger).
+	// before the healing watchdog first queries its venue.
 	DefaultCloseTimeout = 1500 * time.Millisecond
 	// DefaultHealInterval is the healing watchdog's own tick — deliberately
 	// faster than DefaultCloseTimeout, so a close becoming due is acted on inside
@@ -345,7 +344,7 @@ type WorkerDeps struct {
 	// Closes is the in-flight-close registry the healing watchdog drains. Nil ⇒
 	// the healing seam is disabled.
 	Closes PendingCloses
-	// CloseTimeout is the in-flight-close force-clear trigger. <=0 ⇒ DefaultCloseTimeout.
+	// CloseTimeout is the in-flight-close observation trigger. <=0 ⇒ DefaultCloseTimeout.
 	CloseTimeout time.Duration
 	// HealInterval is the healing watchdog tick. <=0 ⇒ DefaultHealInterval.
 	HealInterval time.Duration

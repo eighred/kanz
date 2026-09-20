@@ -20,7 +20,7 @@ func TestReconcileErrorLoopsReport(t *testing.T) {
 		for _, failure := range []string{"rate_limited", "invalid_evidence", "broker"} {
 			t.Run(phase+"/"+failure, func(t *testing.T) {
 				f := newFakeBinance(t)
-				f.queryBody = `{"status":"CANCELED","executedQty":"0"}`
+				f.queryBody = `{"clientOrderId":"o1","status":"CANCELED","executedQty":"0"}`
 				f.accountBody = `{"balances":[{"asset":"USD","free":"1","locked":"0"}]}`
 				cap := &reconCapture{}
 				r := reconOver(f, cap, staticOrders{}, staticBalances{"USD": big.NewRat(0, 1)})
@@ -29,18 +29,17 @@ func TestReconcileErrorLoopsReport(t *testing.T) {
 				observer := execution.NewReconcileErrorObserver(registry, slog.New(slog.NewJSONHandler(&logs, nil)), "BINANCE")
 				if phase == "healing" {
 					closes := NewCloseRegistry()
-					closes.Track(CloseIntent{OrderID: "o1", InstrumentID: "BTC-USD", RequestedAt: time.Now().Add(-time.Hour)})
+					_ = closes.Track(context.Background(), CloseIntent{OrderID: "o1", InstrumentID: "BTC-USD", RequestedAt: time.Now().Add(-time.Hour)})
 					r.closes = closes
 				}
 				want := failure
 				switch failure {
 				case "rate_limited":
 					r.rest.bucket = newWeightBucket(1, time.Hour, nil)
-					// Healing deliberately retains its existing force-clear policy. Its
-					// post-sweep balance pass returns the exhausted budget to the loop.
+					// An unanswered query must reach the loop without resolving the close.
 				case "invalid_evidence":
 					if phase == "healing" {
-						f.queryBody = `{"status":"CANCELED","executedQty":"invalid"}`
+						f.queryBody = `{"clientOrderId":"o1","status":"CANCELED","executedQty":"invalid"}`
 					} else {
 						f.accountBody = `{"balances":[{"asset":"USD","free":"invalid","locked":"0"}]}`
 					}

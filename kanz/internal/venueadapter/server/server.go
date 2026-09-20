@@ -299,7 +299,9 @@ func (s *Server) CancelOrder(ctx context.Context, req *venuepb.CancelOrderReques
 				"leave a live order behind a CANCELLED book entry", st.GetOrderId(), reason)
 	}
 	if s.closes != nil {
-		s.closes.Track(ci)
+		if err := s.closes.Track(ctx, ci); err != nil {
+			return nil, status.Error(codes.Unavailable, "venue: cannot persist close ownership")
+		}
 	}
 	if err := s.closer.CancelOrder(ctx, st); err != nil {
 		// The close stays tracked and in flight. The watchdog owns it now. Do NOT
@@ -308,7 +310,9 @@ func (s *Server) CancelOrder(ctx context.Context, req *venuepb.CancelOrderReques
 	}
 	// Confirmed at the venue.
 	if s.closes != nil {
-		s.closes.Resolve(st.GetOrderId())
+		if err := s.closes.Resolve(ctx, st.GetOrderId()); err != nil {
+			s.logger.Error("venue: confirmed close remains pending persistence", "order_id", st.GetOrderId())
+		}
 	}
 	if err := s.recordStatus(ctx, st, orderpb.OrderStatus_ORDER_STATUS_CANCELLED); err != nil {
 		// The cancel landed; only our local view is stale. Log it — do not fail the

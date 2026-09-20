@@ -56,6 +56,8 @@ import (
 // consulted by the write path at all, and the test would go green while
 // asserting nothing about it. One read method cannot be half-overridden.
 type Store interface {
+	execution.CloseTracker
+	execution.PendingCloses
 	// Record stores (or refreshes) an order this adapter has been asked to work.
 	// It is UNCONDITIONAL, and that is the seed/refresh contract: an adapter
 	// asked to work an order it already holds must refresh it, not be rejected.
@@ -172,8 +174,7 @@ func Terminal(s orderpb.OrderStatus) bool {
 //     watchdog's view is bit-identical before and after this eviction, and no
 //     order it can act on is reachable by it.
 //   - HealClosures does not read this store at all: an in-flight close is
-//     carried by execution.CloseRegistry, which the OMS writes at dispatch and
-//     the watchdog force-clears on its own timeout.
+//     stored separately from the order view and retained until terminal evidence.
 //   - Get, through Seam.Lookup, is the one remaining reader — the user-data
 //     ingester enriching an exchange execution report with the order's terms.
 //
@@ -197,7 +198,7 @@ func Terminal(s orderpb.OrderStatus) bool {
 // the posture already declares out loud, and unbounded growth does not.
 const DefaultTerminalRetention = execution.DefaultReconcileInterval
 
-// Compile-time assertion: retention must outlast the in-flight-close force-clear
+// Compile-time assertion: retention must outlast the initial in-flight-close observation
 // window, or an order could be evicted while the healing watchdog is still
 // deciding what to do about the close that terminated it. Inverting the two
 // makes this expression negative and the package stops compiling — the
@@ -222,6 +223,7 @@ const _ = uint(DefaultTerminalRetention - execution.DefaultCloseTimeout - 1)
 // still believes is working at the exchange is the one thing this store exists
 // to be able to answer for.
 type Memory struct {
+	*execution.CloseRegistry
 	mu     sync.RWMutex
 	orders map[string]memEntry
 	// retain is how long a terminal order stays readable. <=0 disables eviction.
@@ -256,10 +258,11 @@ type memEntry struct {
 // NewMemory returns an empty in-memory Store.
 func NewMemory() *Memory {
 	return &Memory{
-		orders:    make(map[string]memEntry),
-		retain:    DefaultTerminalRetention,
-		lastSweep: time.Now(),
-		now:       time.Now,
+		CloseRegistry: execution.NewCloseRegistry(),
+		orders:        make(map[string]memEntry),
+		retain:        DefaultTerminalRetention,
+		lastSweep:     time.Now(),
+		now:           time.Now,
 	}
 }
 

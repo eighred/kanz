@@ -248,20 +248,6 @@ func (c *binanceREST) cancelOrder(ctx context.Context, symbol, origClientOrderID
 	return c.signedOrderCall(ctx, http.MethodDelete, "/api/v3/order", params, 1)
 }
 
-// sweepMarket places an aggressive MARKET order to flatten a residual exposure
-// left by a close that did not land (the healing sweep). clOrdID is the
-// deterministic "heal-"+orderID, so a retried sweep resolves to the original
-// sweep at the venue and NEVER double-flattens the position.
-func (c *binanceREST) sweepMarket(ctx context.Context, symbol, side, qty, clOrdID string) (*orderResponse, error) {
-	return c.newOrder(ctx, url.Values{
-		"symbol":           {symbol},
-		"side":             {side},
-		"type":             {"MARKET"},
-		"quantity":         {qty},
-		"newClientOrderId": {clOrdID},
-	})
-}
-
 // tickerPrice returns the last price for a symbol (GET /api/v3/ticker/price,
 // weight 1) — feeds the MarkSource seam for live unrealized P&L.
 func (c *binanceREST) tickerPrice(ctx context.Context, symbol string) (string, error) {
@@ -335,6 +321,12 @@ func (c *binanceREST) do(req *http.Request) ([]byte, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("%w: status %d", ErrEgressDenied, resp.StatusCode)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 418 {
+		return nil, ErrRateLimited
 	}
 	if resp.StatusCode >= 500 {
 		return nil, fmt.Errorf("binance: %s: status %d", req.URL.Path, resp.StatusCode)
