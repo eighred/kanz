@@ -99,7 +99,7 @@ func (c *OKXConnector) Start(ctx context.Context, deps WorkerDeps) {
 			go rec.Run(ctx, deps.ReconcileInterval)
 		}
 		if deps.Closes != nil {
-			// In-Flight Certainty watchdog — force-clears stuck closes fast.
+			// In-Flight Certainty watchdog — observes unresolved closes without fabricating terminal state.
 			go rec.RunHealing(ctx, deps.HealInterval)
 		}
 	}

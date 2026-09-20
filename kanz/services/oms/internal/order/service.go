@@ -1858,18 +1858,23 @@ func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now 
 	// registry the in-process OKX reconciler drains indiscriminately — and it would
 	// then try to heal another venue's order. Hands off.
 	if _, selfHealing := closer.(execution.SelfHealing); !selfHealing {
-		s.closes.Track(execution.CloseIntent{
+		if err := s.closes.Track(ctx, execution.CloseIntent{
 			OrderID:      st.GetOrderId(),
 			InstrumentID: st.GetInstrumentId(),
 			RequestedAt:  now,
-		})
+		}); err != nil {
+			s.logger.Error("oms: cannot track close", "err", err)
+			return
+		}
 	}
 	if err := closer.CancelOrder(ctx, st); err != nil {
 		s.logger.Error("oms: venue cancel unconfirmed — left to the healing watchdog",
 			"order_id", st.GetOrderId(), "venue", venue.MIC(), "err", err)
 		return
 	}
-	s.closes.Resolve(st.GetOrderId()) // venue confirmed the withdrawal — nothing to heal
+	if err := s.closes.Resolve(ctx, st.GetOrderId()); err != nil {
+		s.logger.Error("oms: confirmed close still tracked", "err", err)
+	}
 }
 
 func (s *Service) handleAmend(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {

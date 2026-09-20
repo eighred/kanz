@@ -222,22 +222,6 @@ func (c *okxREST) fillsHistory(ctx context.Context, instID, ordID string) ([]okx
 	return out.Data, nil
 }
 
-// sweepMarket places an aggressive market order to flatten a residual exposure
-// when an in-flight close is stuck (the healing seam). side is "buy"/"sell", sz
-// is the base quantity. clOrdId is deterministic ("heal-"+orderID) so a retried
-// sweep is idempotent exchange-side and never double-flattens.
-func (c *okxREST) sweepMarket(ctx context.Context, instID, side, sz, clOrdID string) (*okxPlaceData, error) {
-	return c.placeOrder(ctx, map[string]string{
-		"instId":  instID,
-		"tdMode":  "cash",
-		"side":    side,
-		"ordType": "market",
-		"tgtCcy":  "base_ccy",
-		"clOrdId": clOrdID,
-		"sz":      sz,
-	})
-}
-
 // cancelOrder withdraws a working order by clOrdId (POST
 // /api/v5/trade/cancel-order, weight 1). It addresses the order by the SAME
 // deterministic clOrdId the submit stamped, so a retried cancel resolves to the
@@ -385,6 +369,9 @@ func (c *okxREST) do(req *http.Request) ([]byte, error) {
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("%w: %s status %d", ErrEgressDenied, req.URL.Path, resp.StatusCode)
 	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, ErrRateLimited
+	}
 	if resp.StatusCode >= 500 {
 		return nil, fmt.Errorf("okx: %s: status %d", req.URL.Path, resp.StatusCode)
 	}
@@ -437,6 +424,9 @@ func (c *okxREST) signedRequestRaw(ctx context.Context, method, requestPath stri
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("%w: %s status %d", ErrEgressDenied, requestPath, resp.StatusCode)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, ErrRateLimited
 	}
 	if resp.StatusCode >= 500 {
 		return nil, fmt.Errorf("okx: %s: status %d", requestPath, resp.StatusCode)

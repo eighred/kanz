@@ -40,7 +40,7 @@ type OKXReconciler struct {
 	// shipped, because both left this nil for a year.
 	onUnknownBalance func(asset, reason string)
 	onReconcileError func(context.Context, string, error)
-	// onCloseUnhealable is called for EVERY in-flight close this watchdog dropped
+	// onCloseUnhealable is called for EVERY in-flight close this watchdog retains
 	// WITHOUT asking the exchange anything (#1036), with the reason. Nil => silent,
 	// which is only right in a test.
 	//
@@ -64,7 +64,7 @@ type OKXReconcilerConfig struct {
 	// healing seam is disabled (order/balance reconciliation still runs).
 	Closes PendingCloses
 	// CloseTimeout is how long a close may stay unconfirmed before the healing
-	// loop force-clears it. <=0 ⇒ execution.DefaultCloseTimeout (the mandate's
+	// loop first queries it. <=0 ⇒ execution.DefaultCloseTimeout (the mandate's
 	// trigger).
 	CloseTimeout time.Duration
 	Pub          Publisher
@@ -79,7 +79,7 @@ type OKXReconcilerConfig struct {
 	OnUnknownBalance func(asset, reason string)
 	// OnReconcileError observes every returned periodic error; production supplies metrics and bounded logs.
 	OnReconcileError func(context.Context, string, error)
-	// OnCloseUnhealable is called for every in-flight close dropped without a venue
+	// OnCloseUnhealable is called for every in-flight close retained without a venue
 	// query, with the reason (#1036). Nil => the drop is silent.
 	OnCloseUnhealable func(orderID, instrumentID, reason string)
 }
@@ -134,10 +134,7 @@ func (r *OKXReconciler) Reconcile(ctx context.Context) error {
 	return r.reconcileBalances(ctx)
 }
 
-// RunHealing drives the In-Flight Certainty watchdog on a fast tick (independent
-// of the slower order/balance cron): every tick it force-resolves any close that
-// has stayed unconfirmed past CloseTimeout so the ledger never freezes. No-op
-// when no close registry is configured.
+// RunHealing observes overdue closes at a bounded cadence until cancellation.
 func (r *OKXReconciler) RunHealing(ctx context.Context, tick time.Duration) {
 	if r.closes == nil {
 		return
@@ -160,124 +157,72 @@ func (r *OKXReconciler) RunHealing(ctx context.Context, tick time.Duration) {
 	}
 }
 
-// HealClosures resolves every close past the timeout. For each: query the venue
-// by clOrdId; if the venue confirms it terminal, emit a StateHealed carrying the
-// truth. If the order is still working or the venue is unresponsive, force-clear
-// it (StateHealed → CANCELLED) and sweep the residual exposure with an aggressive
-// market order, then reconcile balances so a BalanceReconciled FACT re-anchors
-// the ledger from real venue truth — never a fabricated balance.
+// HealClosures publishes terminal evidence only after an authoritative query.
+// Working and unknown orders stay owned; timeout never authorizes a new trade.
 func (r *OKXReconciler) HealClosures(ctx context.Context) error {
 	if r.closes == nil {
 		return nil
 	}
-	swept := false
-	for _, ci := range r.closes.DueCloses(r.now(), r.closeTimeout) {
-		// TWO DIFFERENT ANSWERS, COUNTED SEPARATELY (#1036). A malformed intent is a
-		// writer defect and used to be indistinguishable from "untradeable here",
-		// which is how an empty InstrumentID on every close the venue adapter
-		// tracked stayed invisible: Symbol("") misses, and the miss read as
-		// configuration.
+	due, err := r.closes.DueCloses(ctx, r.now(), r.closeTimeout)
+	if err != nil {
+		return err
+	}
+	pass := &execution.ReconcilePassError{Total: len(due)}
+	for _, ci := range due {
+		pass.Checked++
 		if reason := ci.Unhealable(); reason != "" {
-			r.dropUnhealableClose(ci, reason)
+			r.reportUnhealableClose(ci, reason)
+			pass.FailOrder(ci.OrderID, execution.ErrReconcileEvidence)
 			continue
 		}
-		instID, ok := r.symbols.Symbol(ci.InstrumentID)
+		symbol, ok := r.symbols.Symbol(ci.InstrumentID)
 		if !ok {
-			// Untradeable here — stop watching it, and SAY SO. This is still a close
-			// nobody asked the exchange about.
-			r.dropUnhealableClose(ci, execution.CloseDropUnmappedSymbol)
+			r.reportUnhealableClose(ci, execution.CloseDropUnmappedSymbol)
+			pass.FailOrder(ci.OrderID, execution.ErrReconcileEvidence)
 			continue
 		}
-		o, qErr := r.rest.queryOrder(ctx, instID, ci.OrderID)
-		if qErr == nil && okxTerminal(o.State) {
-			// Venue confirms the close landed — adopt its truth and stop.
-			healed, drift, hErr := okxHealedFromQuery(ci, o, r.now())
-			if hErr != nil {
-				return hErr
+		o, qErr := r.rest.queryOrder(ctx, symbol, ci.OrderID)
+		if qErr != nil {
+			pass.FailOrder(ci.OrderID, qErr)
+			if errors.Is(qErr, ErrRateLimited) || ctx.Err() != nil {
+				break
 			}
-			if drift {
-				if err := r.emitStateHealed(ctx, healed, "in-flight close confirmed terminal on venue query"); err != nil {
-					return err
-				}
-			}
-			r.closes.Resolve(ci.OrderID)
 			continue
 		}
-		// Stuck or unresponsive: force-clear and sweep so nothing freezes.
-		if err := r.forceSweep(ctx, ci, instID); err != nil {
-			return err
+		if o == nil || o.ClOrdID != ci.OrderID {
+			pass.FailOrder(ci.OrderID, execution.ErrReconcileEvidence)
+			continue
 		}
-		swept = true
-		r.closes.Resolve(ci.OrderID)
+		if !okxTerminal(o.State) {
+			pass.FailOrder(ci.OrderID, execution.ErrCloseUnconfirmed)
+			continue
+		}
+		healed, _, hErr := okxHealedFromQuery(ci, o, r.now())
+		if hErr != nil {
+			pass.FailOrder(ci.OrderID, hErr)
+			continue
+		}
+		if err := r.emitStateHealed(ctx, healed, "in-flight close confirmed terminal on venue query"); err != nil {
+			pass.FailOrder(ci.OrderID, err)
+			continue
+		}
+		if err := r.closes.Resolve(ctx, ci.OrderID); err != nil {
+			pass.FailOrder(ci.OrderID, err)
+		}
 	}
-	if swept {
-		// Re-anchor balances from real venue truth after the sweep(s).
-		return r.reconcileBalances(ctx)
-	}
-	return nil
+	return pass.Result()
 }
 
-// dropUnhealableClose stops watching a close the watchdog could not turn into a
-// venue question, and says so.
-//
-// IT IS NOT A RESOLUTION AND MUST NOT LOOK LIKE ONE (#1036). The order may still
-// be resting and fillable at the exchange while the OMS, the position book, risk,
-// compliance and the IBOR all have it CANCELLED — and CANCELLED is terminal, so
-// no sweep and no resume will look at it again. The intent IS dropped rather than
-// retried forever, because it is unhealable by construction and a growing
-// registry of questions nobody can ask helps no one; the counter and the ERROR
-// log are what an operator acts on.
-func (r *OKXReconciler) dropUnhealableClose(ci CloseIntent, reason string) {
+// reportUnhealableClose retains ownership and reports why no venue query was possible.
+func (r *OKXReconciler) reportUnhealableClose(ci CloseIntent, reason string) {
 	if r.onCloseUnhealable != nil {
 		r.onCloseUnhealable(ci.OrderID, ci.InstrumentID, reason)
 	}
-	r.closes.Resolve(ci.OrderID)
-}
-func (r *OKXReconciler) forceSweep(ctx context.Context, ci CloseIntent, instID string) error {
-	reason := "in-flight close timeout (>" + r.closeTimeout.String() + "); force-cleared"
-	// Sweep the residual exposure with an aggressive market order when there is
-	// something to flatten and a direction to flatten it in. Best-effort: a sweep
-	// failure raises a structural alert but must not block the force-clear — the
-	// ledger must progress. The sweep's real fills arrive via the user-data
-	// stream / next balance pass; we never fabricate them.
-	if ci.Leaves != nil && ci.Leaves.Sign() > 0 && ci.SweepSide != orderpb.Side_SIDE_UNSPECIFIED {
-		side, sErr := okxSide(ci.SweepSide)
-		if sErr == nil {
-			// SCALED, NOT WRAPPING (#94). This size becomes a live MARKET order at OKX.
-			// dec.ToProto wraps once the scaled coefficient exceeds an int64 — about
-			// 92.2 billion units at scale 8 — and a residual past that is not
-			// hypothetical here: a meme-coin position trades in the trillions on this
-			// venue. A residual of 1e12 renders through ToProto as 77662796314.5224192,
-			// so the sweep meant to flatten the book would instead market-buy a
-			// fabricated size, immediately and irreversibly.
-			sz, ok := dec.ToProtoScaled(ci.Leaves)
-			switch {
-			case !ok:
-				// Refusing leaves a residual open, which is bad. Sending a number the
-				// platform made up is worse, and unrecoverable. The force-clear below
-				// still runs and the break is still raised, so this surfaces.
-				reason += "; sweep REFUSED: residual " + ci.Leaves.FloatString(8) +
-					" cannot be represented as a Decimal, and this platform does not send an order size it invented"
-			default:
-				if _, err := r.rest.sweepMarket(ctx, instID, side, FormatDec(sz), "heal-"+ci.OrderID); err != nil {
-					reason += "; sweep error: " + err.Error()
-				} else {
-					reason += "; swept residual " + ci.Leaves.FloatString(8) + " via market " + side
-				}
-			}
-		}
-	}
-	cleared := &orderpb.OrderState{
-		OrderId: ci.OrderID, InstrumentId: ci.InstrumentID,
-		Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED,
-		Venue:  r.venue, AsOf: timestamppb.New(r.now().UTC()),
-	}
-	return r.emitStateHealed(ctx, cleared, reason)
 }
 
 // okxTerminal reports whether an OKX order state is terminal.
 func okxTerminal(state string) bool {
-	return state == "filled" || state == "canceled"
+	return state == "filled" || state == "canceled" || state == "mmp_canceled"
 }
 
 // okxHealedFromQuery builds the venue-truth state for a close the venue confirms
@@ -309,32 +254,49 @@ func okxHealedFromQuery(ci CloseIntent, o *okxOrder, now time.Time) (*orderpb.Or
 }
 
 func (r *OKXReconciler) reconcileOrders(ctx context.Context) error {
-	for _, exp := range r.expected.OpenOrders() {
-		instID, ok := r.symbols.Symbol(exp.GetInstrumentId())
+	if r.expected == nil {
+		return nil
+	}
+	orders := r.expected.OpenOrders()
+	pass := &execution.ReconcilePassError{Total: len(orders)}
+	for _, exp := range orders {
+		if err := ctx.Err(); err != nil {
+			pass.FailOrder(exp.GetOrderId(), err)
+			break
+		}
+		pass.Checked++
+		symbol, ok := r.symbols.Symbol(exp.GetInstrumentId())
 		if !ok {
+			pass.FailOrder(exp.GetOrderId(), execution.ErrReconcileEvidence)
 			continue
 		}
-		o, err := r.queryByType(ctx, instID, exp)
+		truth, err := r.queryByType(ctx, symbol, exp)
 		if err != nil {
-			if errors.Is(err, ErrRateLimited) {
-				return err
+			pass.FailOrder(exp.GetOrderId(), err)
+			if errors.Is(err, ErrRateLimited) || ctx.Err() != nil {
+				break
 			}
 			continue
 		}
-		if o == nil {
-			continue // resting, and the venue agrees — nothing to heal
+		if truth == nil {
+			continue
+		} // queryByType explicitly confirmed a resting conditional order
+		if truth.ClOrdID != exp.GetOrderId() && truth.AlgoClOrdID != exp.GetOrderId() {
+			pass.FailOrder(exp.GetOrderId(), execution.ErrReconcileEvidence)
+			continue
 		}
-		healed, drift, hErr := okxHealedState(exp, o, r.now())
-		if hErr != nil {
-			return hErr
+		healed, drift, err := okxHealedState(exp, truth, r.now())
+		if err != nil {
+			pass.FailOrder(exp.GetOrderId(), err)
+			continue
 		}
 		if drift {
-			if err := r.emitStateHealed(ctx, healed, okxDriftReason(exp, o)); err != nil {
-				return err
+			if err := r.emitStateHealed(ctx, healed, okxDriftReason(exp, truth)); err != nil {
+				pass.FailOrder(exp.GetOrderId(), err)
 			}
 		}
 	}
-	return nil
+	return pass.Result()
 }
 
 func (r *OKXReconciler) reconcileBalances(ctx context.Context) error {
@@ -378,6 +340,9 @@ func okxHealedState(exp *orderpb.OrderState, o *okxOrder, now time.Time) (*order
 		return nil, false, fmt.Errorf("%w: okx filled quantity", execution.ErrReconcileEvidence)
 	}
 	status := okxStateToProto(o.State)
+	if status == orderpb.OrderStatus_ORDER_STATUS_UNSPECIFIED {
+		return nil, false, execution.ErrReconcileEvidence
+	}
 	if exFilled.Cmp(dec.FromProto(exp.GetFilledQuantity())) == 0 && status == exp.GetStatus() {
 		return nil, false, nil
 	}
@@ -509,7 +474,7 @@ func (r *OKXReconciler) queryByType(ctx context.Context, instID string, exp *ord
 		return nil, nil
 	case "effective":
 		return r.rest.queryTriggeredOrder(ctx, instID, exp.GetOrderId())
-	default:
+	case "canceled", "order_failed":
 		// "canceled", "order_failed" — the stop will never fire. Presented in the
 		// regular order's shape so the one healing path handles it: no fills, and
 		// a state the aggregate already knows how to make terminal.
@@ -517,5 +482,7 @@ func (r *OKXReconciler) queryByType(ctx context.Context, instID string, exp *ord
 			ClOrdID: exp.GetOrderId(), State: "canceled",
 			Sz: algo.Sz, AccFillSz: "0", AlgoClOrdID: exp.GetOrderId(),
 		}, nil
+	default:
+		return nil, execution.ErrReconcileEvidence
 	}
 }

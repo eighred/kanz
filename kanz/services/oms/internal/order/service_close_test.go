@@ -112,7 +112,10 @@ func TestCancel_TrackedCloseCarriesNoSweep(t *testing.T) {
 	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
-	due := reg.DueCloses(time.Now(), 0) // timeout 0 ⇒ every tracked close is due
+	due, err := reg.DueCloses(context.Background(), time.Now(), 0) // timeout 0 ⇒ every tracked close is due
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(due) != 1 {
 		t.Fatalf("due = %d, want 1", len(due))
 	}
