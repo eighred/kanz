@@ -50,7 +50,7 @@ func (p *Postgres) CreateInviteAs(ctx context.Context, actor Administration, inv
 	if inv.Tenant != actor.Tenant || inv.CreatedBy != actor.Subject {
 		return ErrAdminAuthority
 	}
-	tx, err := p.pool.Begin(ctx)
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("identity: begin invitation: %w", err)
 	}
@@ -217,7 +217,7 @@ func (p *Postgres) SetStatus(ctx context.Context, actor Administration, subject 
 	if err := status.Validate(); err != nil {
 		return err
 	}
-	tx, err := p.pool.Begin(ctx)
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("identity: begin administration: %w", err)
 	}

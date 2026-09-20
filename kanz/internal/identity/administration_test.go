@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -196,6 +198,16 @@ func TestAdministratorRevocationBoundaryIsConservative(t *testing.T) {
 }
 
 func TestAdministrationRechecksActorAfterWaitingForTenantLock(t *testing.T) {
+	if dsn := os.Getenv("TEST_POSTGRES_URL"); dsn != "" {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := u.Query()
+		q.Set("default_transaction_isolation", "repeatable read")
+		u.RawQuery = q.Encode()
+		t.Setenv("TEST_POSTGRES_URL", u.String())
+	}
 	st, pool := newStorePool(t)
 	peer := administrationAccount(t, st, "test:peer", "acme", []string{identity.AdminRole})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
