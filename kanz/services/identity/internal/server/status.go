@@ -11,21 +11,8 @@ package server
 // credential was a human running UPDATE against the production database: not
 // attributable, not repeatable, and not a control anybody could test.
 //
-// # WHAT A DISABLE COVERS, AND WHAT IT DOES NOT
-//
-// It stops the NEXT login and every token minted after it. It does NOT stop the
-// session already in flight: identity.DefaultTokenTTL is 8h and the api-gateway
-// verifies signatures against JWKS without ever reading identity's database, so
-// an outstanding token keeps working until it expires.
-//
-// THAT IS DEFENSIBLE FOR AN OFFBOARDING AND NOT FOR A COMPROMISED CREDENTIAL,
-// which is the case people reach for this control in — so the response says so
-// out loud rather than leaving an operator to assume otherwise. Closing it is
-// #525 step 4 (a disabled_at column plus a gateway check that refuses a token
-// minted before it), which costs the gateway a read it does not currently make
-// and is therefore a real architectural change, argued separately. Nothing here
-// forecloses it: SetStatus already owns the one statement that would stamp the
-// column.
+// A disable atomically stamps the revocation feed consumed by the gateway.
+// Enabling does not clear that watermark or resurrect prior sessions.
 
 import (
 	"errors"
@@ -93,7 +80,15 @@ func (s *Server) setStatus(w http.ResponseWriter, r *http.Request, status identi
 		return
 	}
 
-	if err := s.provisioning.Store.SetStatus(r.Context(), subject, status, s.now().UTC()); err != nil {
+	if err := s.provisioning.Store.SetStatus(r.Context(), identity.Administration{Subject: claims.Subject, Tenant: claims.Tenant, IssuedAt: claims.IssuedAt}, subject, status, s.now().UTC()); err != nil {
+		if errors.Is(err, identity.ErrSelfDisable) || errors.Is(err, identity.ErrLastAdmin) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		if errors.Is(err, identity.ErrAdminAuthority) {
+			writeErr(w, http.StatusUnauthorized, "the token was rejected")
+			return
+		}
 		if errors.Is(err, identity.ErrUserNotFound) {
 			// The account was removed between the load and the write. Zero rows
 			// affected is reported as an error by SetStatus rather than as success,
@@ -133,8 +128,7 @@ func (s *Server) setStatus(w http.ResponseWriter, r *http.Request, status identi
 		// SAID IN THE RESPONSE, not only in a comment nobody reading the API will
 		// see. An operator disabling a compromised credential must not believe the
 		// session in flight is over.
-		"note": "a token already issued to this account stays valid until it expires; this stops " +
-			"the next login, not the session in flight (#525 step 4)",
+		"note": "disabling revokes issued tokens through the gateway revocation feed; re-enabling requires a fresh login",
 	})
 }
 

@@ -138,6 +138,9 @@ func NewInvite(id, tokenHash, subject, tenant string, roles, portfolios []string
 		// question asked after an incident.
 		return nil, errors.New("identity: invite creator required")
 	}
+	if err := ValidateAdminRoles(roles); err != nil {
+		return nil, err
+	}
 	if ttl <= 0 {
 		ttl = DefaultInviteTTL
 	}

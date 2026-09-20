@@ -72,14 +72,15 @@ var ErrLoginFailed = errors.New("identity: login failed")
 // set from the INVITE — never from anything the account holder supplies. See the
 // package comment.
 type User struct {
-	Subject    string
-	Tenant     string
-	Roles      []string
-	Portfolios []string
-	Credential Hash
-	Status     Status
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	Subject             string
+	Tenant              string
+	Roles               []string
+	Portfolios          []string
+	Credential          Hash
+	Status              Status
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	TokensInvalidBefore *time.Time
 }
 
 // Active reports whether this account may authenticate at all.

@@ -176,10 +176,8 @@ func New(store Store, minter Minter, limiter Limiter, jwks func() any, issuer st
 				"reachable without a token, so a provisioning route that does not verify one is open")
 		case p.Store == nil:
 			return nil, errors.New("identity/server: provisioning needs a store")
-		case strings.TrimSpace(p.OperatorRole) == "":
-			return nil, errors.New("identity/server: provisioning needs the operator role named — an " +
-				"empty role matches nothing, so every authenticated caller would be refused, and a " +
-				"role check nobody can pass is indistinguishable from a broken deployment")
+		case p.AdminRole != identity.AdminRole:
+			return nil, errors.New("identity/server: provisioning requires the reserved kanz-identity-admin role")
 		case p.Audit == nil:
 			return nil, errors.New("identity/server: provisioning needs an audit recorder — these " +
 				"routes create and disable accounts, and an account disabled by nobody-in-particular " +

@@ -35,9 +35,17 @@ import (
 	"github.com/eighred/kanz/internal/revocation"
 )
 
+var testAdmin = identity.Administration{Subject: "test:admin", Tenant: "acme"}
+
 var now0 = time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
 
 func newStore(t *testing.T) *identity.Postgres {
+	t.Helper()
+	st, _ := newStorePool(t)
+	return st
+}
+
+func newStorePool(t *testing.T) (*identity.Postgres, *pgxpool.Pool) {
 	t.Helper()
 	url := os.Getenv("TEST_POSTGRES_URL")
 	if url == "" {
@@ -60,6 +68,8 @@ func newStore(t *testing.T) *identity.Postgres {
 		t.Fatalf("parse config: %v", err)
 	}
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	cfg.ConnConfig.RuntimeParams["application_name"] = schema
+	cfg.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -102,7 +112,11 @@ func newStore(t *testing.T) *identity.Postgres {
 			t.Fatalf("apply migration %s: %v", f, eerr)
 		}
 	}
-	return identity.NewPostgres(pool)
+	if _, err := pool.Exec(ctx, `INSERT INTO identity_users(subject, tenant_id, roles, credential_hash, status)
+        VALUES ('test:admin', 'acme', ARRAY['kanz-identity-admin'], 'test-only-hash', 'active')`); err != nil {
+		t.Fatal(err)
+	}
+	return identity.NewPostgres(pool), pool
 }
 
 // invite stores one invite and returns its raw token.
@@ -366,7 +380,7 @@ func TestSetStatusDisablesAnAccountAndMintThenRefusesIt(t *testing.T) {
 	}
 
 	later := now0.Add(2 * time.Hour)
-	if err := st.SetStatus(context.Background(), "user:grace", identity.StatusDisabled, later); err != nil {
+	if err := st.SetStatus(context.Background(), testAdmin, "user:grace", identity.StatusDisabled, later); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
@@ -390,7 +404,7 @@ func TestSetStatusDisablesAnAccountAndMintThenRefusesIt(t *testing.T) {
 
 	// AND BACK. Without the inverse, a mistaken disable needs the hand-run UPDATE
 	// this method was written to eliminate.
-	if err := st.SetStatus(context.Background(), "user:grace", identity.StatusActive, later.Add(time.Hour)); err != nil {
+	if err := st.SetStatus(context.Background(), testAdmin, "user:grace", identity.StatusActive, later.Add(time.Hour)); err != nil {
 		t.Fatalf("SetStatus (re-enable): %v", err)
 	}
 	back, err := st.UserBySubject(context.Background(), "user:grace")
@@ -434,7 +448,7 @@ func TestDisablingAnAccountPublishesARevocationMarkAndEnablingDoesNotClearIt(t *
 	}
 
 	disabledAt := now0.Add(2 * time.Hour)
-	if err := st.SetStatus(ctx, "user:hank", identity.StatusDisabled, disabledAt); err != nil {
+	if err := st.SetStatus(ctx, testAdmin, "user:hank", identity.StatusDisabled, disabledAt); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
 	entries, err = st.Revocations(ctx)
@@ -458,7 +472,7 @@ func TestDisablingAnAccountPublishesARevocationMarkAndEnablingDoesNotClearIt(t *
 	}
 
 	// RE-ENABLE KEEPS THE MARK.
-	if err := st.SetStatus(ctx, "user:hank", identity.StatusActive, disabledAt.Add(time.Hour)); err != nil {
+	if err := st.SetStatus(ctx, testAdmin, "user:hank", identity.StatusActive, disabledAt.Add(time.Hour)); err != nil {
 		t.Fatalf("SetStatus (re-enable): %v", err)
 	}
 	entries, err = st.Revocations(ctx)
@@ -472,7 +486,7 @@ func TestDisablingAnAccountPublishesARevocationMarkAndEnablingDoesNotClearIt(t *
 
 	// A LATER DISABLE MOVES IT FORWARD.
 	again := disabledAt.Add(3 * time.Hour)
-	if err := st.SetStatus(ctx, "user:hank", identity.StatusDisabled, again); err != nil {
+	if err := st.SetStatus(ctx, testAdmin, "user:hank", identity.StatusDisabled, again); err != nil {
 		t.Fatalf("SetStatus (second disable): %v", err)
 	}
 	entries, _ = st.Revocations(ctx)
@@ -483,7 +497,7 @@ func TestDisablingAnAccountPublishesARevocationMarkAndEnablingDoesNotClearIt(t *
 	// AND AN EARLIER ONE DOES NOT MOVE IT BACK. GREATEST() is what makes a
 	// stepped-back clock, or a replayed request, unable to narrow a revocation
 	// that has already been published to every gateway.
-	if err := st.SetStatus(ctx, "user:hank", identity.StatusDisabled, disabledAt); err != nil {
+	if err := st.SetStatus(ctx, testAdmin, "user:hank", identity.StatusDisabled, disabledAt); err != nil {
 		t.Fatalf("SetStatus (backdated): %v", err)
 	}
 	entries, _ = st.Revocations(ctx)
@@ -500,7 +514,7 @@ func TestDisablingAnAccountPublishesARevocationMarkAndEnablingDoesNotClearIt(t *
 // from a completed disable.
 func TestSetStatusForAnUnknownSubjectIsNotFound(t *testing.T) {
 	st := newStore(t)
-	err := st.SetStatus(context.Background(), "user:nobody", identity.StatusDisabled, now0)
+	err := st.SetStatus(context.Background(), testAdmin, "user:nobody", identity.StatusDisabled, now0)
 	if !errors.Is(err, identity.ErrUserNotFound) {
 		t.Fatalf("SetStatus for an unknown subject = %v, want ErrUserNotFound", err)
 	}
@@ -520,7 +534,7 @@ func TestSetStatusRefusesAnUnknownStatusWithoutTouchingTheRow(t *testing.T) {
 		t.Fatalf("Redeem: %v", err)
 	}
 
-	err := st.SetStatus(context.Background(), "user:heidi", identity.Status("suspended"), now0.Add(time.Hour))
+	err := st.SetStatus(context.Background(), testAdmin, "user:heidi", identity.Status("suspended"), now0.Add(time.Hour))
 	if !errors.Is(err, identity.ErrUnknownStatus) {
 		t.Fatalf("SetStatus with an unknown status = %v, want ErrUnknownStatus — a constraint "+
 			"violation reaches the caller as a database error indistinguishable from a "+
@@ -554,7 +568,7 @@ func TestSetStatusRefusesAnUnknownStatusWithoutTouchingTheRow(t *testing.T) {
 // developed on is a guarantee nothing checks.
 func TestSetStatusRefusesAnUnknownStatusWithoutReachingTheDatabase(t *testing.T) {
 	st := identity.NewPostgres(nil)
-	err := st.SetStatus(context.Background(), "user:anyone", identity.Status("suspended"), now0)
+	err := st.SetStatus(context.Background(), testAdmin, "user:anyone", identity.Status("suspended"), now0)
 	if !errors.Is(err, identity.ErrUnknownStatus) {
 		t.Fatalf("SetStatus over a nil pool = %v, want ErrUnknownStatus", err)
 	}

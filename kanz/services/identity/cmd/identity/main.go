@@ -143,7 +143,7 @@ func run() int {
 	// a header arriving here is a string the caller typed.
 	store := identity.NewPostgres(pool)
 	opts := []server.Option{server.WithClientIP(ipResolver)}
-	if cfg.OperatorRole != "" {
+	if cfg.AdminRole != "" {
 		// THE AUDIT SINK IS STDOUT, AND THAT IS A CHOICE WITH A COST.
 		//
 		// auth.SlogRecorder is a real sink and not a stub — kanz logs are stdout
@@ -159,11 +159,11 @@ func run() int {
 		// satisfies the same seam, and statusDecisionLog already stamps the
 		// principal.* attributes it partitions and tenants on.
 		opts = append(opts, server.WithProvisioning(server.Provisioning{
-			Verifier: signer, Store: store, OperatorRole: cfg.OperatorRole, InviteTTL: cfg.InviteTTL,
+			Verifier: signer, Store: store, AdminRole: cfg.AdminRole, InviteTTL: cfg.InviteTTL,
 			InviteDomains: cfg.InviteDomains,
 			Audit:         auth.NewSlogRecorder(logger),
 		}))
-		logger.Info("authenticated provisioning enabled", "operator_role", cfg.OperatorRole,
+		logger.Info("authenticated provisioning enabled", "operator_role", cfg.AdminRole,
 			"routes", "POST /invites, GET /invites, POST /users/{subject}/disable, "+
 				"POST /users/{subject}/enable",
 			"audit_sink", "stdout (slog) — NOT the AUDIT-01 projection; this service has no bus")
@@ -176,7 +176,7 @@ func run() int {
 			"whoever holds it rather than against a named operator, and THERE IS NO WAY TO DISABLE "+
 			"AN ACCOUNT AT ALL: an offboarded trader or a compromised credential can be locked out "+
 			"only by a hand-run UPDATE against this database (#525)",
-			"enable_with", "IDENTITY_OPERATOR_ROLE")
+			"enable_with", "IDENTITY_ADMIN_ROLE")
 	}
 
 	srv, err := server.New(store, signer, limiter,

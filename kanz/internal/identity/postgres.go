@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eighred/kanz/internal/revocation"
@@ -39,7 +41,38 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres { return &Postgres{pool: pool} }
 // check that races. Two live invites are two authorities competing to become one
 // account, and the loser is silent.
 func (p *Postgres) CreateInvite(ctx context.Context, inv *Invite) error {
-	_, err := p.pool.Exec(ctx, `
+	return insertInvite(ctx, p.pool, inv)
+}
+
+// CreateInviteAs revalidates the caller inside the same tenant lock used by
+// deprovisioning. A disabled administrator cannot win a race to mint authority.
+func (p *Postgres) CreateInviteAs(ctx context.Context, actor Administration, inv *Invite) error {
+	if inv.Tenant != actor.Tenant || inv.CreatedBy != actor.Subject {
+		return ErrAdminAuthority
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("identity: begin invitation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAdministrator(ctx, tx, actor); err != nil {
+		return err
+	}
+	if err := insertInvite(ctx, tx, inv); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+type inviteWriter interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func insertInvite(ctx context.Context, db inviteWriter, inv *Invite) error {
+	if err := ValidateAdminRoles(inv.Roles); err != nil {
+		return err
+	}
+	_, err := db.Exec(ctx, `
 		INSERT INTO identity_invites
 			(id, token_hash, subject, tenant_id, roles, portfolios, created_by, created_at, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -90,6 +123,9 @@ func (p *Postgres) Redeem(ctx context.Context, rawToken string, cred Hash, now t
 		return nil, fmt.Errorf("identity: redeem: %w", err)
 	}
 
+	if err := ValidateAdminRoles(inv.Roles); err != nil {
+		return nil, err
+	}
 	u := UserFromInvite(&inv, cred, now)
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO identity_users
@@ -112,10 +148,10 @@ func (p *Postgres) UserBySubject(ctx context.Context, subject string) (*User, er
 	var u User
 	var status string
 	err := p.pool.QueryRow(ctx, `
-		SELECT subject, tenant_id, roles, portfolios, credential_hash, status, created_at, updated_at
+		SELECT subject, tenant_id, roles, portfolios, credential_hash, status, created_at, updated_at, tokens_invalid_before
 		  FROM identity_users WHERE subject = $1`, subject,
 	).Scan(&u.Subject, &u.Tenant, &u.Roles, &u.Portfolios, &u.Credential, &status,
-		&u.CreatedAt, &u.UpdatedAt)
+		&u.CreatedAt, &u.UpdatedAt, &u.TokensInvalidBefore)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
@@ -177,26 +213,59 @@ func (p *Postgres) UpdateCredential(ctx context.Context, subject string, cred Ha
 // token the disable killed; the account's next login mints a newer one, which
 // the gateway admits with no operator action. The condition below is what makes
 // enable leave the mark alone.
-func (p *Postgres) SetStatus(ctx context.Context, subject string, status Status, now time.Time) error {
+func (p *Postgres) SetStatus(ctx context.Context, actor Administration, subject string, status Status, now time.Time) error {
 	if err := status.Validate(); err != nil {
 		return err
 	}
-	tag, err := p.pool.Exec(ctx, `
-		UPDATE identity_users
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("identity: begin administration: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAdministrator(ctx, tx, actor); err != nil {
+		return err
+	}
+	var targetStatus string
+	var roles []string
+	if err := tx.QueryRow(ctx, `SELECT status, roles FROM identity_users
+        WHERE subject = $1 AND tenant_id = $2 FOR UPDATE`, subject, actor.Tenant).Scan(&targetStatus, &roles); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		return fmt.Errorf("identity: lock target: %w", err)
+	}
+	if status == StatusDisabled {
+		if targetStatus == string(StatusActive) && slices.Contains(roles, AdminRole) {
+			var remaining int
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM identity_users
+                WHERE tenant_id = $1 AND subject <> $2 AND status = 'active'
+                AND $3 = ANY(roles) AND roles <@ ARRAY[$3, 'kanz-user']::text[]`, actor.Tenant, subject, AdminRole).Scan(&remaining); err != nil {
+				return fmt.Errorf("identity: count administrators: %w", err)
+			}
+			if remaining == 0 {
+				return ErrLastAdmin
+			}
+		}
+		if subject == actor.Subject {
+			return ErrSelfDisable
+		}
+	}
+	tag, err := tx.Exec(ctx, `
+        UPDATE identity_users
 		   SET status = $2,
 		       updated_at = $3,
 		       tokens_invalid_before = CASE WHEN $2 = 'disabled'
 		           THEN GREATEST(tokens_invalid_before, $3::timestamptz)
 		           ELSE tokens_invalid_before END
-		 WHERE subject = $1`,
-		subject, string(status), now.UTC())
+		 WHERE subject = $1 AND tenant_id = $4`,
+		subject, string(status), now.UTC(), actor.Tenant)
 	if err != nil {
 		return fmt.Errorf("identity: set status: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrUserNotFound
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // Revocations is the feed the api-gateway enforces (#532): every account with a
@@ -270,4 +339,32 @@ func (p *Postgres) InvitesFor(ctx context.Context, tenant string) ([]*Invite, er
 		out = append(out, &inv)
 	}
 	return out, rows.Err()
+}
+
+// lockAdministrator serializes status decisions per tenant. READ COMMITTED
+// gives the next statement a fresh snapshot after waiting for the transaction
+// lock, so competing administrators cannot both disable one another based on
+// a stale count. The actor row lock also fences out concurrent role changes.
+func lockAdministrator(ctx context.Context, tx pgx.Tx, actor Administration) error {
+	if actor.Subject == "" || actor.Tenant == "" {
+		return ErrAdminAuthority
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('identity-administration:' || $1, 0))`, actor.Tenant); err != nil {
+		return fmt.Errorf("identity: lock administration: %w", err)
+	}
+	var u User
+	var status string
+	err := tx.QueryRow(ctx, `SELECT subject, tenant_id, roles, status, tokens_invalid_before FROM identity_users
+        WHERE subject = $1 AND tenant_id = $2 FOR SHARE`, actor.Subject, actor.Tenant).Scan(&u.Subject, &u.Tenant, &u.Roles, &status, &u.TokensInvalidBefore)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAdminAuthority
+	}
+	if err != nil {
+		return fmt.Errorf("identity: load administrator: %w", err)
+	}
+	u.Status = Status(status)
+	if !actor.Allows(&u) {
+		return ErrAdminAuthority
+	}
+	return nil
 }

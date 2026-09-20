@@ -22,7 +22,7 @@ import (
 	"github.com/eighred/kanz/internal/identity"
 )
 
-const operatorRole = "kanz-operator"
+const operatorRole = identity.AdminRole
 
 var provNow = time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 
@@ -40,7 +40,7 @@ type fakeProvisioner struct {
 	statusWrites []statusWrite
 }
 
-func (f *fakeProvisioner) CreateInvite(_ context.Context, inv *identity.Invite) error {
+func (f *fakeProvisioner) CreateInviteAs(_ context.Context, _ identity.Administration, inv *identity.Invite) error {
 	if f.err != nil {
 		return f.err
 	}
@@ -71,7 +71,7 @@ func (f *fakeProvisioner) UserBySubject(_ context.Context, subject string) (*ide
 }
 
 func (f *fakeProvisioner) SetStatus(
-	_ context.Context, subject string, status identity.Status, now time.Time,
+	_ context.Context, _ identity.Administration, subject string, status identity.Status, now time.Time,
 ) error {
 	f.statusWrites = append(f.statusWrites, statusWrite{subject: subject, status: status, at: now})
 	if f.statusErr != nil {
@@ -152,13 +152,14 @@ func newProvServer(t *testing.T, claims *identity.Claims, verifyErr error) provF
 	// #364 tests keep asserting what they were written to assert.
 	if claims != nil && claims.Subject != "" {
 		store.accounts[claims.Subject] = account(claims.Subject, claims.Tenant)
+		store.accounts[claims.Subject].Roles = append([]string(nil), claims.Roles...)
 	}
 	vfy := &fakeVerifier{claims: claims, err: verifyErr}
 	audit := &fakeAudit{}
 	s, err := New(&fakeStore{}, &fakeMinter{}, &allowN{n: 100},
 		func() any { return map[string]any{"keys": []any{}} }, "https://identity.test", quiet(),
 		WithProvisioning(Provisioning{
-			Verifier: vfy, Store: store, OperatorRole: operatorRole, Audit: audit,
+			Verifier: vfy, Store: store, AdminRole: operatorRole, Audit: audit,
 		}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -300,7 +301,7 @@ func TestProvision_ARejectedTokenIsRefusedWithoutSayingWhy(t *testing.T) {
 // A VALID TOKEN WITHOUT THE OPERATOR ROLE IS 403.
 //
 // A trader holds a perfectly good token. It does not make accounts.
-func TestProvision_AValidTokenWithoutTheOperatorRoleIsRefused(t *testing.T) {
+func TestProvision_AValidTokenWithoutTheAdminRoleIsRefused(t *testing.T) {
 	trader := &identity.Claims{Subject: "user:trish", Tenant: "acme",
 		Roles: []string{"kanz-user", "kanz-trader"}, Expiry: provNow.Add(time.Hour)}
 	f := newProvServer(t, trader, nil)
@@ -315,7 +316,7 @@ func TestProvision_AValidTokenWithoutTheOperatorRoleIsRefused(t *testing.T) {
 }
 
 // THE ROLE IS MATCHED EXACTLY. A near-miss is not the operator role.
-func TestProvision_TheOperatorRoleIsNotFuzzyMatched(t *testing.T) {
+func TestProvision_TheAdminRoleIsNotFuzzyMatched(t *testing.T) {
 	for _, role := range []string{"KANZ-OPERATOR", "Kanz-Operator", "kanz-operator ", "operator", "kanz-operators"} {
 		c := &identity.Claims{Subject: "user:mallory", Tenant: "acme",
 			Roles: []string{role}, Expiry: provNow.Add(time.Hour)}
@@ -375,8 +376,8 @@ func TestProvision_ATenantlessOperatorIsRefused(t *testing.T) {
 	f := newProvServer(t, c, nil)
 
 	rec := f.req(t, http.MethodPost, "/invites", "tok", validBody(), nil)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("tenantless operator: want 403 got %d (%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("tenantless operator: want 401 got %d (%s)", rec.Code, rec.Body.String())
 	}
 	if len(f.store.created) != 0 {
 		t.Fatalf("an invitation was created with tenant %q", f.store.created[0].Tenant)
@@ -418,7 +419,7 @@ func TestProvision_ListingIsTenantScopedAndLeaksNoToken(t *testing.T) {
 	}
 }
 
-func TestProvision_ListingRequiresTheOperatorRole(t *testing.T) {
+func TestProvision_ListingRequiresTheAdminRole(t *testing.T) {
 	trader := &identity.Claims{Subject: "user:trish", Tenant: "acme",
 		Roles: []string{"kanz-trader"}, Expiry: provNow.Add(time.Hour)}
 	f := newProvServer(t, trader, nil)
@@ -454,17 +455,17 @@ func TestProvision_HalfWiredConfigurationIsRefusedAtConstruction(t *testing.T) {
 		name string
 		p    Provisioning
 	}{
-		{"no verifier", Provisioning{Store: &fakeProvisioner{}, OperatorRole: operatorRole, Audit: &fakeAudit{}}},
-		{"no store", Provisioning{Verifier: &fakeVerifier{}, OperatorRole: operatorRole, Audit: &fakeAudit{}}},
+		{"no verifier", Provisioning{Store: &fakeProvisioner{}, AdminRole: operatorRole, Audit: &fakeAudit{}}},
+		{"no store", Provisioning{Verifier: &fakeVerifier{}, AdminRole: operatorRole, Audit: &fakeAudit{}}},
 		{"no operator role", Provisioning{Verifier: &fakeVerifier{}, Store: &fakeProvisioner{}, Audit: &fakeAudit{}}},
 		{"blank operator role", Provisioning{
-			Verifier: &fakeVerifier{}, Store: &fakeProvisioner{}, OperatorRole: "  ", Audit: &fakeAudit{},
+			Verifier: &fakeVerifier{}, Store: &fakeProvisioner{}, AdminRole: "  ", Audit: &fakeAudit{},
 		}},
 		// #525: an account disabled by nobody-in-particular is the unattributable
 		// hand-run UPDATE these routes exist to replace. A deployment that wired
 		// the power without the record must not start.
 		{"no audit recorder", Provisioning{
-			Verifier: &fakeVerifier{}, Store: &fakeProvisioner{}, OperatorRole: operatorRole,
+			Verifier: &fakeVerifier{}, Store: &fakeProvisioner{}, AdminRole: operatorRole,
 		}},
 	}
 	for _, c := range cases {
