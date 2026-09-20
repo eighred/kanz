@@ -1385,11 +1385,12 @@ func (o oidcAuthenticator) Authenticate(token string) (*middleware.Principal, er
 // literal.
 func edgePrincipal(p *auth.Principal) *middleware.Principal {
 	return &middleware.Principal{
-		Subject:    p.Subject,
-		Tenant:     p.Tenant,
-		Roles:      p.Roles,
-		Portfolios: p.Portfolios,
-		IssuedAt:   p.IssuedAt,
+		Subject:      p.Subject,
+		Tenant:       p.Tenant,
+		Roles:        p.Roles,
+		Portfolios:   p.Portfolios,
+		IssuedAt:     p.IssuedAt,
+		SessionEpoch: p.SessionEpoch,
 	}
 }
 

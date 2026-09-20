@@ -52,7 +52,7 @@ func mustCache(t *testing.T, cfg Config) *Cache {
 func TestCacheThatHasNeverFetchedRefusesEverybody(t *testing.T) {
 	c := mustCache(t, Config{URL: "http://example.invalid/revocations"})
 
-	err := c.Check("anyone", time.Now())
+	err := c.Check("anyone", time.Now(), 0)
 	if !errors.Is(err, ErrUnusable) {
 		t.Fatalf("a cache that has never fetched the feed admitted a caller: got %v, want ErrUnusable. "+
 			"A pod that knows nothing about who is disabled must not answer 'not revoked'", err)
@@ -70,31 +70,30 @@ func TestCacheThatHasNeverFetchedRefusesEverybody(t *testing.T) {
 	}
 }
 
-// The revocation instant, not the account's current status: a token minted
-// BEFORE the mark is refused, one minted after it is not.
-func TestCheckComparesTheTokenAgainstTheRevocationInstant(t *testing.T) {
+// Disable advances the generation; only a fresh account snapshot can match it.
+func TestCheckComparesTheTokenAgainstTheSessionGeneration(t *testing.T) {
 	revokedAt := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
 	srv, _ := feedServer(t, &Feed{
 		AsOf:    revokedAt.Unix(),
-		Entries: []Entry{{SubjectHash: HashSubject("trader-a"), NotBefore: revokedAt.Unix()}},
+		Entries: []Entry{{SubjectHash: HashSubject("trader-a"), SessionEpoch: 1, NotBefore: revokedAt.Unix()}},
 	})
 	c := mustCache(t, Config{URL: srv.URL})
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
 
-	if err := c.Check("trader-a", revokedAt.Add(-time.Minute)); !errors.Is(err, ErrRevoked) {
+	if err := c.Check("trader-a", revokedAt.Add(-time.Minute), 0); !errors.Is(err, ErrRevoked) {
 		t.Errorf("a token minted BEFORE the revocation was admitted: got %v, want ErrRevoked", err)
 	}
-	// THE RE-ENABLE CASE, and the reason this is a timestamp and not a flag. An
+	// THE RE-ENABLE CASE: enabling preserves the generation. An
 	// operator who disables and then re-enables an account must not resurrect the
 	// old token — but the fresh one from the account's next login has to work
 	// with no further operator action.
-	if err := c.Check("trader-a", revokedAt.Add(time.Minute)); err != nil {
+	if err := c.Check("trader-a", revokedAt.Add(time.Minute), 1); err != nil {
 		t.Errorf("a token minted AFTER the revocation was refused: %v. A re-enabled account could "+
 			"never log back in", err)
 	}
-	if err := c.Check("trader-b", time.Time{}); err != nil {
+	if err := c.Check("trader-b", time.Time{}, 0); err != nil {
 		t.Errorf("an unmarked subject was refused: %v", err)
 	}
 }
@@ -104,17 +103,17 @@ func TestCheckComparesTheTokenAgainstTheRevocationInstant(t *testing.T) {
 // same way as "is old". `iat` is optional in RFC 7519, so this is reachable.
 func TestAMarkedSubjectWithNoIssuedAtIsRefused(t *testing.T) {
 	srv, _ := feedServer(t, &Feed{Entries: []Entry{{
-		SubjectHash: HashSubject("trader-a"), NotBefore: time.Now().Add(-time.Hour).Unix(),
+		SubjectHash: HashSubject("trader-a"), SessionEpoch: 1, NotBefore: time.Now().Add(-time.Hour).Unix(),
 	}}})
 	c := mustCache(t, Config{URL: srv.URL})
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if err := c.Check("trader-a", time.Time{}); !errors.Is(err, ErrRevoked) {
+	if err := c.Check("trader-a", time.Time{}, 0); !errors.Is(err, ErrRevoked) {
 		t.Fatalf("a revoked subject presenting an undatable token was admitted: got %v, want ErrRevoked", err)
 	}
 	// And it costs nothing for the accounts nobody has disabled.
-	if err := c.Check("trader-b", time.Time{}); err != nil {
+	if err := c.Check("trader-b", time.Time{}, 0); err != nil {
 		t.Fatalf("an unmarked subject with no iat was refused: %v — every token without an `iat` "+
 			"claim would fail authentication", err)
 	}
@@ -138,7 +137,7 @@ func TestAFeedPastItsCeilingRefusesRatherThanAssumingNobodyIsRevoked(t *testing.
 	}
 
 	clock = now.Add(9 * time.Minute)
-	if err := c.Check("trader-a", now); err != nil {
+	if err := c.Check("trader-a", now, 0); err != nil {
 		t.Fatalf("a feed inside its ceiling refused: %v — a brief identity blip would become a "+
 			"trading outage", err)
 	}
@@ -147,7 +146,7 @@ func TestAFeedPastItsCeilingRefusesRatherThanAssumingNobodyIsRevoked(t *testing.
 	}
 
 	clock = now.Add(11 * time.Minute)
-	if err := c.Check("trader-a", now); !errors.Is(err, ErrUnusable) {
+	if err := c.Check("trader-a", now, 0); !errors.Is(err, ErrUnusable) {
 		t.Fatalf("a feed past its ceiling still answered: got %v, want ErrUnusable", err)
 	}
 	if c.Usable() {
@@ -168,7 +167,7 @@ func TestAFailedRefreshKeepsTheSnapshotItAlreadyHas(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(Feed{Kind: FeedKind, Entries: []Entry{{
-			SubjectHash: HashSubject("trader-a"), NotBefore: revokedAt.Unix(),
+			SubjectHash: HashSubject("trader-a"), SessionEpoch: 1, NotBefore: revokedAt.Unix(),
 		}}})
 	}))
 	t.Cleanup(srv.Close)
@@ -182,17 +181,16 @@ func TestAFailedRefreshKeepsTheSnapshotItAlreadyHas(t *testing.T) {
 		t.Fatal("a 503 from the feed was reported as a successful refresh — the cache would age " +
 			"silently and the operator would learn about it from the ceiling")
 	}
-	if err := c.Check("trader-a", revokedAt.Add(-time.Minute)); !errors.Is(err, ErrRevoked) {
+	if err := c.Check("trader-a", revokedAt.Add(-time.Minute), 0); !errors.Is(err, ErrRevoked) {
 		t.Fatalf("a failed refresh discarded the revocation it already held: got %v, want ErrRevoked", err)
 	}
 }
 
-// The feed is a SNAPSHOT, so a successful fetch replaces the map rather than
-// merging into it: an entry identity has dropped must not survive here.
-func TestASuccessfulRefreshReplacesTheSnapshotRatherThanMergingIntoIt(t *testing.T) {
+// A revoked generation cannot disappear from a later snapshot.
+func TestARefreshCannotEraseAnEstablishedGeneration(t *testing.T) {
 	revokedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
 	var entries atomic.Value
-	entries.Store([]Entry{{SubjectHash: HashSubject("trader-a"), NotBefore: revokedAt.Unix()}})
+	entries.Store([]Entry{{SubjectHash: HashSubject("trader-a"), SessionEpoch: 1, NotBefore: revokedAt.Unix()}})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		//nolint:errcheck // the encoder writes to a test recorder
 		_ = json.NewEncoder(w).Encode(Feed{Kind: FeedKind, Entries: entries.Load().([]Entry)})
@@ -204,12 +202,13 @@ func TestASuccessfulRefreshReplacesTheSnapshotRatherThanMergingIntoIt(t *testing
 		t.Fatalf("Refresh: %v", err)
 	}
 	entries.Store([]Entry{})
-	if err := c.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
+	if err := c.Refresh(context.Background()); err == nil {
+		t.Fatal("feed erased an established revocation")
 	}
-	if err := c.Check("trader-a", revokedAt.Add(-time.Minute)); err != nil {
-		t.Fatalf("an entry the feed no longer carries still refused a caller: %v", err)
+	if err := c.Check("trader-a", revokedAt.Add(-time.Minute), 0); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("lost revocation: %v", err)
 	}
+
 }
 
 // A NON-200 IS NOT AN EMPTY FEED. Parsing an error page as "nobody is revoked"
@@ -224,7 +223,7 @@ func TestANonOKResponseIsAFailureAndNotAnEmptyFeed(t *testing.T) {
 	if err := c.Refresh(context.Background()); err == nil {
 		t.Fatal("a 404 was accepted as a revocation feed")
 	}
-	if err := c.Check("anyone", time.Now()); !errors.Is(err, ErrUnusable) {
+	if err := c.Check("anyone", time.Now(), 0); !errors.Is(err, ErrUnusable) {
 		t.Fatalf("after a failed first fetch the cache admitted a caller: got %v, want ErrUnusable", err)
 	}
 }
@@ -256,7 +255,7 @@ func TestAnOversizedFeedIsRefusedRatherThanTruncated(t *testing.T) {
 // An entry with no subject means the server and this reader disagree about the
 // wire shape. Accepting it grows the list while protecting nobody.
 func TestAnEntryWithNoSubjectIsAWireDisagreementAndNotAnEntry(t *testing.T) {
-	srv, _ := feedServer(t, &Feed{Entries: []Entry{{SubjectHash: "", NotBefore: 1}}})
+	srv, _ := feedServer(t, &Feed{Entries: []Entry{{SubjectHash: "", SessionEpoch: 1, NotBefore: 1}}})
 	c := mustCache(t, Config{URL: srv.URL})
 	if err := c.Refresh(context.Background()); err == nil {
 		t.Fatal("an entry naming no subject was accepted into the denylist")
@@ -287,7 +286,7 @@ func TestAJSONBodyFromTheWrongEndpointIsRefusedAndNotReadAsAnEmptyDenylist(t *te
 	if !strings.Contains(err.Error(), "not a revocation feed") {
 		t.Errorf("the refusal does not name what went wrong: %v", err)
 	}
-	if cerr := c.Check("anyone", time.Now()); !errors.Is(cerr, ErrUnusable) {
+	if cerr := c.Check("anyone", time.Now(), 0); !errors.Is(cerr, ErrUnusable) {
 		t.Fatalf("after refusing the wrong body the cache admitted a caller: got %v, want ErrUnusable", cerr)
 	}
 	if c.Usable() {

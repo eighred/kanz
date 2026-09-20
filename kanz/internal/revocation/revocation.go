@@ -12,20 +12,14 @@
 // exfiltrated from a process: a leaked log, an operator's `curl`, a compromised
 // pod. Shortening the TTL (#552) bounded that window; it did not close it.
 //
-// # Why a monotonic timestamp and not a list of disabled subjects
+// # Durable session generations
 //
-// An entry is "every token this subject holds that was minted before T is
-// refused", NOT "this subject is currently disabled". The difference shows up
-// on re-enable: with a currently-disabled list, enabling an account
-// RESURRECTS the very token the disable was meant to kill. NotBefore only ever
-// moves forward, so a token minted before a disable stays dead for good, while
-// the fresh token from the re-enabled account's next login is admitted with no
-// operator action at all.
-//
-// It is also what makes the feed safe to fetch repeatedly and in any order: the
-// state is a per-subject high-water mark, so a fetch that arrives late or twice
-// converges on the same answer. There is nothing to replay and no ordering to
-// preserve.
+// A disable increments the account generation in the same database statement as
+// its status. Tokens retain the generation from the authenticated account snapshot,
+// even if signing happens after disable commits. Re-enable preserves the generation:
+// only a fresh login can acquire it. Timestamp ordering cannot provide this fence.
+// A v2 feed requires a positive generation on every marked subject. Legacy tokens
+// have generation zero and remain usable only for subjects never revoked.
 //
 // # Why subjects are hashed
 //
@@ -49,15 +43,13 @@ import (
 
 // Entry is one account's revocation high-water mark.
 type Entry struct {
+	// SessionEpoch fences tokens minted from an account snapshot before disable.
+	SessionEpoch int64 `json:"session_epoch,string"`
 	// SubjectHash is HashSubject(subject). Never the subject itself; see the
 	// package comment.
 	SubjectHash string `json:"subject_hash"`
-	// NotBefore is Unix SECONDS. Every token for this subject with an `iat`
-	// strictly before it is refused.
-	//
-	// SECONDS, not nanoseconds, because that is the unit `iat` is in (RFC 7519
-	// §4.1.6) and the comparison is against `iat`. Carrying a finer unit here
-	// would invent precision the other side of the comparison does not have.
+	// NotBefore is the historical Unix-second watermark, retained for diagnostics
+	// and migration. SessionEpoch is authoritative for token admission.
 	NotBefore int64 `json:"not_before"`
 }
 

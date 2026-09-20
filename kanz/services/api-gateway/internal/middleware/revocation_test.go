@@ -29,7 +29,7 @@ type stubChecker struct {
 	sawIssuedAt time.Time
 }
 
-func (s *stubChecker) Check(subject string, issuedAt time.Time) error {
+func (s *stubChecker) Check(subject string, issuedAt time.Time, epoch int64) error {
 	s.sawSubject, s.sawIssuedAt = subject, issuedAt
 	return s.err
 }

@@ -21,14 +21,14 @@ import (
 var ErrAuthUnavailable = errors.New("auth: the gateway cannot judge this credential right now")
 
 // RevocationChecker answers whether an already-verified token is still
-// honoured, given its subject and when it was minted. internal/revocation.Cache
+// honoured, given its subject, issuance time and session generation. internal/revocation.Cache
 // is the implementation the gateway wires; the interface is here so this
 // package can be tested without an HTTP server behind it.
 type RevocationChecker interface {
 	// Check returns nil when the token stands, revocation.ErrRevoked when the
-	// subject was disabled after the token was minted, and revocation.ErrUnusable
+	// subject generation supersedes the token, and revocation.ErrUnusable
 	// when it cannot answer at all.
-	Check(subject string, issuedAt time.Time) error
+	Check(subject string, issuedAt time.Time, epoch int64) error
 }
 
 // Revoking wraps an Authenticator with the per-subject revocation check (#532).
@@ -83,7 +83,7 @@ func (r *Revoking) Authenticate(token string) (*Principal, error) {
 	if p == nil {
 		return nil, fmt.Errorf("%w: the authenticator returned no principal and no error", ErrAuthUnavailable)
 	}
-	switch err := r.rev.Check(p.Subject, p.IssuedAt); {
+	switch err := r.rev.Check(p.Subject, p.IssuedAt, p.SessionEpoch); {
 	case err == nil:
 		return p, nil
 	case errors.Is(err, revocation.ErrRevoked):

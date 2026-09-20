@@ -91,7 +91,7 @@ func TestAStoreFailureRefusesRatherThanServingAnEmptyDenylist(t *testing.T) {
 func TestTheFeedCarriesHashesAndNotSubjects(t *testing.T) {
 	const subject = "trader-a@eighred.com"
 	s, _ := testServer(t, &fakeStore{revocations: []revocation.Entry{{
-		SubjectHash: revocation.HashSubject(subject), NotBefore: 1755500000,
+		SubjectHash: revocation.HashSubject(subject), SessionEpoch: 1, NotBefore: 1755500000,
 	}}}, nil)
 	rec := getFeed(t, s)
 	if rec.Code != http.StatusOK {
@@ -130,7 +130,7 @@ func TestTheGatewaysRealReaderAcceptsIdentitysRealFeed(t *testing.T) {
 	revokedAt := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
 
 	s, _ := testServer(t, &fakeStore{revocations: []revocation.Entry{{
-		SubjectHash: revocation.HashSubject(subject), NotBefore: revokedAt.Unix(),
+		SubjectHash: revocation.HashSubject(subject), SessionEpoch: 1, NotBefore: revokedAt.Unix(),
 	}}}, nil)
 	mux := http.NewServeMux()
 	s.Routes(mux)
@@ -147,14 +147,14 @@ func TestTheGatewaysRealReaderAcceptsIdentitysRealFeed(t *testing.T) {
 			"honoured until somebody noticed the gateway was never ready", err)
 	}
 
-	if err := c.Check(subject, revokedAt.Add(-time.Minute)); !errors.Is(err, revocation.ErrRevoked) {
+	if err := c.Check(subject, revokedAt.Add(-time.Minute), 0); !errors.Is(err, revocation.ErrRevoked) {
 		t.Fatalf("a token minted before the revocation was admitted end to end: got %v, want "+
 			"ErrRevoked", err)
 	}
-	if err := c.Check(subject, revokedAt.Add(time.Minute)); err != nil {
+	if err := c.Check(subject, revokedAt.Add(time.Minute), 1); err != nil {
 		t.Errorf("a token minted after the revocation was refused end to end: %v", err)
 	}
-	if err := c.Check("user:someone-else", time.Time{}); err != nil {
+	if err := c.Check("user:someone-else", time.Time{}, 0); err != nil {
 		t.Errorf("an unmarked subject was refused end to end: %v", err)
 	}
 }

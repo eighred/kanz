@@ -80,7 +80,7 @@ func (s *Server) setStatus(w http.ResponseWriter, r *http.Request, status identi
 		return
 	}
 
-	if err := s.provisioning.Store.SetStatus(r.Context(), identity.Administration{Subject: claims.Subject, Tenant: claims.Tenant, IssuedAt: claims.IssuedAt}, subject, status, s.now().UTC()); err != nil {
+	if err := s.provisioning.Store.SetStatus(r.Context(), identity.Administration{Subject: claims.Subject, Tenant: claims.Tenant, IssuedAt: claims.IssuedAt, SessionEpoch: claims.SessionEpoch}, subject, status, s.now().UTC()); err != nil {
 		if errors.Is(err, identity.ErrSelfDisable) || errors.Is(err, identity.ErrLastAdmin) {
 			writeErr(w, http.StatusConflict, err.Error())
 			return

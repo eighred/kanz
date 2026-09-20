@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -116,12 +117,15 @@ func GenerateKey() (*ecdsa.PrivateKey, error) {
 
 // Mint issues a bearer token for an account.
 //
-// A DISABLED ACCOUNT IS REFUSED HERE, not only at login. This is the last point
-// that sees the User, so a future caller that mints from a cached record cannot
-// route around the status check.
+// A disabled snapshot is refused here. A stale active snapshot can still reach
+// signing after disable; its original SessionEpoch is preserved so admission
+// rejects it once the revocation feed observes the committed disable.
 func (s *Signer) Mint(u *User) (string, time.Time, error) {
 	if u == nil || u.Subject == "" {
 		return "", time.Time{}, errors.New("identity: cannot mint a token for no subject")
+	}
+	if u.SessionEpoch < 0 {
+		return "", time.Time{}, errors.New("identity: invalid session epoch")
 	}
 	if !u.Active() {
 		return "", time.Time{}, fmt.Errorf("identity: account %s is %s", u.Subject, u.Status)
@@ -158,9 +162,10 @@ func (s *Signer) Mint(u *User) (string, time.Time, error) {
 	// are the shape both read, and minting the shape only one arm accepts is how
 	// a token works in dev and fails in production.
 	custom := map[string]any{
-		"tenant":             u.Tenant,
-		"roles":              append([]string{}, u.Roles...),
-		auth.ClaimPortfolios: append([]string{}, u.Portfolios...),
+		"tenant":               u.Tenant,
+		auth.ClaimSessionEpoch: strconv.FormatInt(u.SessionEpoch, 10),
+		"roles":                append([]string{}, u.Roles...),
+		auth.ClaimPortfolios:   append([]string{}, u.Portfolios...),
 	}
 
 	raw, err := jwt.Signed(sig).Claims(claims).Claims(custom).Serialize()
@@ -231,12 +236,13 @@ var ErrToken = errors.New("identity: token rejected")
 
 // Claims is what a verified token asserts.
 type Claims struct {
-	Subject    string
-	Tenant     string
-	Roles      []string
-	Portfolios []string
-	Expiry     time.Time
-	IssuedAt   time.Time
+	SessionEpoch int64
+	Subject      string
+	Tenant       string
+	Roles        []string
+	Portfolios   []string
+	Expiry       time.Time
+	IssuedAt     time.Time
 }
 
 // HasRole reports whether the token carries role, compared exactly.
@@ -329,13 +335,18 @@ func (s *Signer) Verify(raw string, now time.Time) (*Claims, error) {
 	if std.IssuedAt != nil {
 		issuedAt = std.IssuedAt.Time()
 	}
+	epoch, err := auth.SessionEpoch(bag)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrToken, err)
+	}
 	return &Claims{
-		Subject:    std.Subject,
-		IssuedAt:   issuedAt,
-		Tenant:     custom.Tenant,
-		Roles:      append([]string{}, custom.Roles...),
-		Portfolios: portfolios,
-		Expiry:     std.Expiry.Time(),
+		SessionEpoch: epoch,
+		Subject:      std.Subject,
+		IssuedAt:     issuedAt,
+		Tenant:       custom.Tenant,
+		Roles:        append([]string{}, custom.Roles...),
+		Portfolios:   portfolios,
+		Expiry:       std.Expiry.Time(),
 	}, nil
 }
 

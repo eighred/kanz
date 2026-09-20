@@ -91,7 +91,7 @@ func newIdentityStub(t *testing.T) *identityStub {
 // revoke marks a subject from `at`, as identity's SetStatus does.
 func (s *identityStub) revoke(subject string, at time.Time) {
 	s.entries.Store([]revocation.Entry{{
-		SubjectHash: revocation.HashSubject(subject), NotBefore: at.Unix(),
+		SubjectHash: revocation.HashSubject(subject), SessionEpoch: 1, NotBefore: at.Unix(),
 	}})
 }
 
@@ -267,5 +267,33 @@ func TestPrimeRevocationsReturnsImmediatelyWithoutAFeed(t *testing.T) {
 	if _, ok := findGauge(t, reg, "kanz_api_gateway_revocations_usable"); ok {
 		t.Error("the revocation gauge was registered on the HS256 arm — it would sit at 0 forever " +
 			"on a deployment that has no feed to read")
+	}
+}
+
+func TestGatewayPreservesSignedSessionGeneration(t *testing.T) {
+	st := newIdentityStub(t)
+	st.feedUp.Store(true)
+	st.entries.Store([]revocation.Entry{{SubjectHash: revocation.HashSubject("trader-a"), SessionEpoch: 9007199254740993, NotBefore: time.Now().Unix()}})
+	authn, cache := buildWired(t, st, &captureHandler{})
+	if err := cache.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, epoch := range []int64{0, 9007199254740992, 9007199254740993, 9007199254740994} {
+		tok, _, err := st.signer.Mint(&identity.User{Subject: "trader-a", Tenant: "acme", Roles: []string{"kanz-user"}, Status: identity.StatusActive, SessionEpoch: epoch})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := authn.Authenticate(tok)
+		if epoch == 9007199254740993 {
+			if err != nil || p.SessionEpoch != epoch {
+				t.Fatalf("fresh exact generation: %v %v", p, err)
+			}
+		} else if epoch > 9007199254740993 {
+			if !errors.Is(err, middleware.ErrAuthUnavailable) {
+				t.Fatalf("ahead of feed: %v", err)
+			}
+		} else if !errors.Is(err, middleware.ErrUnauthenticated) {
+			t.Fatalf("stale generation admitted: %d %v", epoch, err)
+		}
 	}
 }

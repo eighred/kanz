@@ -11,13 +11,9 @@ import (
 	"time"
 )
 
-// ErrRevoked is returned for a token minted before its subject's revocation
-// mark. The token itself verifies perfectly — the account behind it was
-// disabled after the token was issued — so a caller maps this to 401, exactly
-// as it would a bad signature. The caller is told nothing more: "your account
-// was disabled at 14:03" is a fact about someone else's operational response
-// that a holder of a stolen token has no business learning.
-var ErrRevoked = errors.New("revocation: token predates this subject's revocation")
+// ErrRevoked means a signed token does not match its subject's current session
+// generation. The caller receives the same 401 as any invalid credential.
+var ErrRevoked = errors.New("revocation: session generation revoked")
 
 // ErrUnusable is returned when the cache CANNOT ANSWER — it has never fetched
 // the feed, or its newest successful fetch is older than MaxAge.
@@ -97,10 +93,9 @@ type Cache struct {
 	now     func() time.Time
 
 	mu sync.RWMutex
-	// marks maps subject hash -> NotBefore. Rebuilt whole on every successful
-	// fetch, because the feed is a snapshot: merging would keep an entry
-	// identity has deliberately dropped.
-	marks map[string]time.Time
+	// marks maps subject hashes to durable generations. A refresh that lowers or
+	// removes an established generation fails without renewing cache freshness.
+	marks map[string]Entry
 	// fetchedAt is the zero time until the FIRST successful fetch. That zero is
 	// what makes a cold pod refuse instead of admitting everybody — see Check.
 	fetchedAt time.Time
@@ -179,7 +174,7 @@ func (c *Cache) Refresh(ctx context.Context) error {
 			"reports as healthy", c.url, feed.Kind, FeedKind)
 	}
 
-	marks := make(map[string]time.Time, len(feed.Entries))
+	marks := make(map[string]Entry, len(feed.Entries))
 	for _, e := range feed.Entries {
 		if e.SubjectHash == "" {
 			// An entry naming no subject cannot be matched against any token, so
@@ -188,10 +183,22 @@ func (c *Cache) Refresh(ctx context.Context) error {
 			return fmt.Errorf("revocation: feed at %s carries an entry with no subject_hash — "+
 				"the feed and this reader disagree about the wire contract", c.url)
 		}
-		marks[e.SubjectHash] = time.Unix(e.NotBefore, 0).UTC()
+		if e.SessionEpoch <= 0 {
+			return fmt.Errorf("revocation: missing or nonpositive session epoch")
+		}
+		if _, exists := marks[e.SubjectHash]; exists {
+			return fmt.Errorf("revocation: duplicate subject")
+		}
+		marks[e.SubjectHash] = e
 	}
 
 	c.mu.Lock()
+	for subject, old := range c.marks {
+		if marks[subject].SessionEpoch < old.SessionEpoch {
+			c.mu.Unlock()
+			return fmt.Errorf("revocation: session epoch regressed or disappeared")
+		}
+	}
 	c.marks = marks
 	c.fetchedAt = c.now()
 	c.mu.Unlock()
@@ -220,18 +227,11 @@ func (c *Cache) Run(ctx context.Context, onErr func(error)) {
 	}
 }
 
-// Check reports whether a verified token may still be honoured.
-//
-// subject is the token's `sub` IN PLAINTEXT — the hashing happens here so no
-// caller has to know the feed's representation. issuedAt is the token's `iat`.
-//
-// A ZERO issuedAt IS REFUSED WHENEVER THE SUBJECT IS MARKED, and that is
-// deliberate. `iat` is optional in RFC 7519; a token without one cannot be
-// PROVEN to postdate the revocation, and "cannot prove it is new" must resolve
-// the same way as "is old" on a control whose entire job is to refuse old
-// tokens. An unmarked subject needs no `iat` at all, so this costs nothing for
-// the accounts nobody has disabled.
-func (c *Cache) Check(subject string, issuedAt time.Time) error {
+// Check compares a verified token's account snapshot generation with the feed.
+// Missing iat fails closed for marked subjects. Issuance time cannot order an
+// in-flight login against disable; epoch equality is the authoritative fence.
+// Never-revoked subjects may continue to use legacy generation-zero tokens.
+func (c *Cache) Check(subject string, issuedAt time.Time, epoch int64) error {
 	c.mu.RLock()
 	fetchedAt, marks := c.fetchedAt, c.marks
 	c.mu.RUnlock()
@@ -247,11 +247,17 @@ func (c *Cache) Check(subject string, issuedAt time.Time) error {
 		return fmt.Errorf("%w: last fetch %s ago, ceiling %s", ErrUnusable, age.Truncate(time.Second), c.maxAge)
 	}
 
-	notBefore, marked := marks[HashSubject(subject)]
+	mark, marked := marks[HashSubject(subject)]
+	if epoch < 0 {
+		return ErrRevoked
+	}
+	if epoch > mark.SessionEpoch {
+		return fmt.Errorf("%w: token generation ahead of cached feed", ErrUnusable)
+	}
 	if !marked {
 		return nil
 	}
-	if issuedAt.IsZero() || issuedAt.Before(notBefore) {
+	if epoch != mark.SessionEpoch || issuedAt.IsZero() {
 		return ErrRevoked
 	}
 	return nil

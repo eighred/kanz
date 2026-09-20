@@ -464,3 +464,22 @@ func TestJWTAuthenticator_AbsentPortfolioClaimIsEmptyNotUnrestricted(t *testing.
 		t.Fatalf("portfolios = %v, want empty — absence must not be widened", p.Portfolios)
 	}
 }
+
+func TestJWTSessionEpochParsing(t *testing.T) {
+	a := NewJWTAuthenticator(testSecret)
+	for _, value := range []any{nil, float64(1), "-1", "01", "9223372036854775808"} {
+		payload := validPayload()
+		payload[auth.ClaimSessionEpoch] = value
+		token := mintRawJWT(t, map[string]any{"alg": "HS256", "typ": "JWT"}, payload)
+		if _, err := a.Authenticate(token); err == nil {
+			t.Errorf("accepted malformed generation %v", value)
+		}
+	}
+	payload := validPayload()
+	payload[auth.ClaimSessionEpoch] = "9007199254740993"
+	token := mintRawJWT(t, map[string]any{"alg": "HS256", "typ": "JWT"}, payload)
+	p, err := a.Authenticate(token)
+	if err != nil || p.SessionEpoch != 9007199254740993 {
+		t.Fatalf("precision lost: %v %v", p, err)
+	}
+}

@@ -33,14 +33,20 @@ func ValidateAdminRoles(roles []string) error {
 // Administration is derived from a verified token, never from request JSON.
 // The durable store rechecks it under the tenant administration lock.
 type Administration struct {
-	Subject  string
-	Tenant   string
-	IssuedAt time.Time
+	SessionEpoch int64
+	Subject      string
+	Tenant       string
+	IssuedAt     time.Time
 }
 
 func (a Administration) Allows(u *User) bool {
-	return a.Subject != "" && a.Tenant != "" && u != nil &&
-		u.Subject == a.Subject && u.Tenant == a.Tenant && u.Active() &&
-		slices.Contains(u.Roles, AdminRole) && ValidateAdminRoles(u.Roles) == nil &&
-		(u.TokensInvalidBefore == nil || (!a.IssuedAt.IsZero() && a.IssuedAt.Unix() > u.TokensInvalidBefore.Unix()))
+	if a.Subject == "" || a.Tenant == "" || u == nil || u.Subject != a.Subject ||
+		u.Tenant != a.Tenant || !u.Active() || !slices.Contains(u.Roles, AdminRole) ||
+		ValidateAdminRoles(u.Roles) != nil || a.SessionEpoch != u.SessionEpoch {
+		return false
+	}
+	if u.SessionEpoch > 0 {
+		return !a.IssuedAt.IsZero()
+	}
+	return u.TokensInvalidBefore == nil || (!a.IssuedAt.IsZero() && a.IssuedAt.Unix() > u.TokensInvalidBefore.Unix())
 }
