@@ -70,6 +70,7 @@ func TestOfClassifiesTheWildcardTraffic(t *testing.T) {
 		{"market.crypto.volume_profile", eventtype.None, "another different message on the same domain"},
 		{"market.crypto.trade.v2", eventtype.None, "a fourth token is not the shape bussink stamps"},
 		{"market.trade", eventtype.None, "two tokens: no asset class, so no taxonomy"},
+		{"market..trade", eventtype.None, "empty asset class"},
 		{"market.", eventtype.None, "a trailing dot is not a variant"},
 		{"market", eventtype.None, "the domain alone"},
 		{"", eventtype.None, "an envelope with no event_type at all"},
@@ -81,6 +82,24 @@ func TestOfClassifiesTheWildcardTraffic(t *testing.T) {
 		}
 	}
 }
+
+func TestKnownNonPriceIsAnExactAllowList(t *testing.T) {
+	for _, typ := range []string{"market.book.snapshot", "market.crypto.volume_profile"} {
+		if !eventtype.KnownNonPrice(typ) {
+			t.Errorf("%s must be recognized as non-price", typ)
+		}
+	}
+	for _, typ := range []string{"", "market.crypto.trade", "market.crypto.ingestion_coverage", "market.book.unknown", "market.book.snapshot.v2", "market.equity.volume_profile"} {
+		if eventtype.KnownNonPrice(typ) {
+			t.Errorf("%s must not be silently dropped by durable ingestion", typ)
+		}
+	}
+	if n := testing.AllocsPerRun(100, func() { nonPriceSink = eventtype.KnownNonPrice("market.book.snapshot") }); n != 0 {
+		t.Fatalf("non-price classification allocates: %v", n)
+	}
+}
+
+var nonPriceSink bool
 
 // Of sits on the per-tick fold of two subscribers to the whole market spine, so
 // it must not allocate: an allocation here is one per tick, per fold, forever.

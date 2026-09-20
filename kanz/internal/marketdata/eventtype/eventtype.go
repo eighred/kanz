@@ -50,6 +50,18 @@ const (
 // domain is the first event_type token every MarketDataEvent shares.
 const domain = "market."
 
+// KnownNonPrice identifies messages owned by other folds on market.>. Durable
+// price ingestion acknowledges these without decoding them. Unknown types must
+// still fail loudly; None alone is not evidence that dropping a message is safe.
+func KnownNonPrice(eventType string) bool {
+	switch eventType {
+	case "market.book.snapshot", "market.crypto.volume_profile":
+		return true
+	default:
+		return false
+	}
+}
+
 // Of classifies eventType against the taxonomy the producer stamps.
 //
 // services/market-data/internal/feed/bussink.go emits every MarketDataEvent as
@@ -70,7 +82,7 @@ func Of(eventType string) Variant {
 	}
 	rest := eventType[len(domain):]
 	i := strings.IndexByte(rest, '.')
-	if i < 0 {
+	if i <= 0 {
 		return None
 	}
 	// A fourth token means this is not the shape bussink stamps, whatever the

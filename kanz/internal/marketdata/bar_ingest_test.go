@@ -37,7 +37,7 @@ func barEvent(mic string, open, close time.Time) *marketpb.MarketDataEvent {
 
 func barEnvelope() *envelopepb.Envelope {
 	return &envelopepb.Envelope{
-		EventType:     "market.bar",
+		EventType:     "market.crypto.bar",
 		IngestionTime: timestamppb.New(barTime.Add(time.Minute)),
 	}
 }
@@ -225,7 +225,9 @@ func TestHandlerWritesNoBarForATrade(t *testing.T) {
 		}},
 	})
 
-	if err := ing.Handler(context.Background(), barEnvelope(), payload); err != nil {
+	envelope := barEnvelope()
+	envelope.EventType = "market.crypto.trade"
+	if err := ing.Handler(context.Background(), envelope, payload); err != nil {
 		t.Fatalf("Handler: %v", err)
 	}
 	if len(fw.bars) != 0 {

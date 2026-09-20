@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -288,6 +289,16 @@ func (c *Consumer) routeToDLQ(ctx context.Context, origSubject, group string, ms
 }
 
 func (c *Consumer) publishDLQ(ctx context.Context, origSubject, group string, msg Message, attempts int, dispatchErr error) error {
+	// Subscription filters may contain wildcards, which are not publishable
+	// subjects. Retain the transport's concrete source for both parking and
+	// redrive. A concrete filter is sufficient for subscribers omitting Subject;
+	// a wildcard with no delivered subject must remain unacknowledged.
+	if msg.Subject != "" {
+		origSubject = msg.Subject
+	}
+	if origSubject == "" || strings.ContainsAny(origSubject, "*>") {
+		return fmt.Errorf("dlq: missing concrete source subject (original: %w)", dispatchErr)
+	}
 	headers := dlqHeaders(msg.Headers, origSubject, attempts, dispatchErr, time.Now())
 	dlqMsg := Message{
 		Subject: dlqSubject(origSubject),

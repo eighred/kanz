@@ -26,6 +26,7 @@ import (
 	marketpb "github.com/eighred/kanz/kanz-schemas-go/market/v1"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/marketdata/eventtype"
 	"github.com/eighred/kanz/internal/marketdata/store"
 	"github.com/eighred/kanz/internal/marketedge/coverage"
 )
@@ -94,9 +95,25 @@ func (i *Ingestor) Handler(ctx context.Context, env *envelopepb.Envelope, payloa
 	if env.GetEventType() == coverage.Subject {
 		return i.handleCoverage(ctx, env, payload)
 	}
+	// Protobuf wire compatibility cannot establish message identity: a book's
+	// deepest bid can decode as a trade. Classify before decoding; only known
+	// non-price traffic may be acknowledged without a write. Unknown types must
+	// reach the DLQ rather than silently disappear from the book of record.
+	if eventtype.KnownNonPrice(env.GetEventType()) {
+		return nil
+	}
+	variant := eventtype.Of(env.GetEventType())
+	if variant == eventtype.None {
+		return fmt.Errorf("marketdata: unsupported event type %q", env.GetEventType())
+	}
 	var ev marketpb.MarketDataEvent
 	if err := proto.Unmarshal(payload, &ev); err != nil {
 		return fmt.Errorf("marketdata: %s unmarshal: %w", env.GetEventType(), err)
+	}
+	if !(variant == eventtype.Trade && ev.GetTrade() != nil ||
+		variant == eventtype.Quote && ev.GetQuote() != nil ||
+		variant == eventtype.Bar && ev.GetBar() != nil) {
+		return fmt.Errorf("marketdata: %s payload variant mismatch", env.GetEventType())
 	}
 	// Prices off market.> are the platform's least trusted numbers, and this is the
 	// store-writing path rather than the mark fold that was bounded first (#95).
