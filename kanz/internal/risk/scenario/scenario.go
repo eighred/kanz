@@ -12,10 +12,8 @@
 // the value types (PriceShock, ParallelShift) live in api/v1 where
 // outsiders can reach them; this package owns the DISPATCH + APPLY
 // logic, type-asserting on the api/v1 types it knows. Unknown shock
-// types (a future v1 addition the engine hasn't been rebuilt for,
-// or a third-party shock from a downstream wrapper) are silent
-// no-ops — same pattern as ComputeMeasures filter dropping unknown
-// names.
+// types invalidate the whole evaluation: an omitted stress must never
+// look like evidence that a portfolio withstands it.
 //
 // # Why a deep clone, not a shallow one
 //
@@ -79,6 +77,9 @@ func WithRevaluer(r Revaluer) Option {
 // measure-side siblings). They are metric and audit labels, so they are
 // constants here rather than free text at the call site.
 const (
+	// SkipUnknownShockType rejects a batch containing a shock neither valuation
+	// path can apply. One exclusion per evaluation, independent of book size.
+	SkipUnknownShockType = "unknown_shock_type"
 	// SkipNoClassifier: no factor.Classifier is wired, so NO position's sector
 	// can be resolved and a SectorShock reaches nothing. A whole-evaluation
 	// exclusion (empty instrument id), not one per position — the shock never
@@ -111,6 +112,8 @@ const (
 // the SHOCK APPLICATION itself. p is not mutated. The registry parameter
 // selects which measures to compute; nil falls back to
 // compute.DefaultRegistry() for parity with compute.ComputeMeasures.
+// An unknown shock rejects the entire batch before valuation and returns nil
+// measures with one whole-evaluation exclusion, even for an empty portfolio.
 //
 // # The second return value is the whole point, and a zero one is a claim
 //
@@ -133,6 +136,11 @@ const (
 // ExcludedCount is non-zero — see v1.ErrScenarioUnresolvable for why a refusal
 // and not a quality flag.
 func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.Registry, opts ...Option) (*domain.MeasureSet, v1.InputCoverage) {
+	if hasUnknownShock(shocks) {
+		var cov compute.Coverage
+		cov.ExcludeWhole(SkipUnknownShockType)
+		return nil, cov.Result()
+	}
 	var cfg evalConfig
 	for _, opt := range opts {
 		opt(&cfg)
@@ -151,6 +159,20 @@ func Evaluate(p *domain.Portfolio, shocks []v1.ScenarioShock, registry *compute.
 		shocked = cloneWithReval(p, shocks, cfg.revaluer, cfg, cov)
 	}
 	return compute.ComputeMeasures(shocked, registry, nil), cov.result()
+}
+
+// hasUnknownShock validates the entire batch before cloning, applying any
+// shock, or invoking a revaluer. Do not call Description: callers implement
+// this open interface, and a label cannot establish supported semantics.
+func hasUnknownShock(shocks []v1.ScenarioShock) bool {
+	for _, shock := range shocks {
+		switch shock.(type) {
+		case v1.PriceShock, v1.ParallelShift, v1.SectorShock, v1.VolShock:
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // shockCoverage is compute.Coverage plus the per-EVALUATION dedup a shock batch
@@ -257,9 +279,8 @@ func cloneWithShocks(p *domain.Portfolio, shocks []v1.ScenarioShock, cfg evalCon
 
 // applyShock dispatches one shock to its handler ON THE LINEAR PATH. Evaluate
 // routes to cloneWithReval when a Revaluer is wired, so reaching here means
-// MarketValue arithmetic is the only tool available. Unknown shock types
-// silently skip — the engine processes large scenario batches and a single
-// unrecognised shock should not abort the run.
+// MarketValue arithmetic is the only tool available. Evaluate's preflight
+// rejects unknown types before either valuation path can reach the book.
 //
 // EVERY ARM MUST MOVE THE BOOK OR RECORD ON cov, and that is checked rather than
 // remembered: test/arch/every_shock_kind_answers_or_refuses_test.go derives the

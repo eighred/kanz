@@ -370,6 +370,9 @@ type ScenarioRequest struct {
 // ScenarioShock is one perturbation in a scenario. RISK-09 provides
 // concrete shock types (parallel-shift, factor-shock, etc.).
 type ScenarioShock interface {
+	// Evaluation accepts the concrete value types declared in scenario.go.
+	// Other implementations (including pointers and nil) refuse the entire
+	// scenario with ErrScenarioUnresolvable; they are never ignored.
 	// Description is a human-readable label for the shock, suitable
 	// for inclusion in audit logs and scenario reports.
 	Description() string
