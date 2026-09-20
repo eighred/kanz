@@ -126,6 +126,16 @@ func TestEveryShockKindAnswersOrRefuses(t *testing.T) {
 	}
 
 	arms := shockArmIdents(fn)
+	preflight := funcDeclNamed(file, "hasUnknownShock")
+	if preflight == nil {
+		t.Fatal("missing shared shock-type preflight")
+	}
+	accepted := shockArmIdents(preflight)
+	for _, name := range implementors {
+		if _, ok := accepted[name]; !ok {
+			t.Errorf("shock preflight does not recognize declared v1.%s", name)
+		}
+	}
 	// NON-VACUITY (4/5): the type switch must have been found.
 	if len(arms) == 0 {
 		t.Fatalf("applyShock contains no type switch over v1 shock types — the dispatch was " +
