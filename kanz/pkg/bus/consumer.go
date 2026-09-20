@@ -289,8 +289,8 @@ func (c *Consumer) routeToDLQ(ctx context.Context, origSubject, group string, ms
 }
 
 func (c *Consumer) publishDLQ(ctx context.Context, origSubject, group string, msg Message, attempts int, dispatchErr error) error {
-	// Subscription filters may contain wildcards, which are not publishable
-	// subjects. Retain the transport's concrete source for both parking and
+	// Subscription filters may contain wildcards, not concrete delivery
+	// addresses. Retain the transport's concrete source for both parking and
 	// redrive. A concrete filter is sufficient for subscribers omitting Subject;
 	// a wildcard with no delivered subject must remain unacknowledged.
 	if msg.Subject != "" {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
@@ -61,6 +62,16 @@ func TestWildcardDLQWithoutConcreteSubjectRefusesAcknowledgement(t *testing.T) {
 		err := consumer.Subscribe(context.Background(), "market.>", "g", func(context.Context, *envelopepb.Envelope, []byte) error { return nil })
 		if err == nil || len(dlq.sent) != 0 {
 			t.Fatalf("subject=%q: invalid DLQ destination acknowledged/published: %v", subject, err)
+		}
+	}
+}
+
+func TestPlanRedriveRefusesHistoricalWildcardDestination(t *testing.T) {
+	for _, subject := range []string{"market.>", "market.*.trade"} {
+		msg := parkedMsg(func(headers map[string]string) { headers[bus.HeaderDLQOriginalSubject] = subject })
+		msg.Subject = "dlq." + subject
+		if _, err := bus.PlanRedrive(msg, bus.RedriveOptions{}, time.Now()); !errors.Is(err, bus.ErrRedriveRefused) {
+			t.Errorf("historical wildcard destination %q must require investigation, got %v", subject, err)
 		}
 	}
 }
