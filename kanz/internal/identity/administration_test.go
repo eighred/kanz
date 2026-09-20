@@ -180,6 +180,21 @@ func TestAdministratorRolesCannotCombineOperationalAuthority(t *testing.T) {
 	}
 }
 
+func TestAdministratorRevocationBoundaryIsConservative(t *testing.T) {
+	mark := now0.Add(500 * time.Millisecond)
+	u := &identity.User{Subject: "admin", Tenant: "acme", Roles: []string{identity.AdminRole}, Status: identity.StatusActive, TokensInvalidBefore: &mark}
+	for _, issued := range []time.Time{{}, now0.Add(-time.Second), now0, now0.Add(999 * time.Millisecond)} {
+		actor := identity.Administration{Subject: u.Subject, Tenant: u.Tenant, IssuedAt: issued}
+		if actor.Allows(u) {
+			t.Fatalf("revoked or unprovable token admitted at %v", issued)
+		}
+	}
+	actor := identity.Administration{Subject: u.Subject, Tenant: u.Tenant, IssuedAt: now0.Add(time.Second)}
+	if !actor.Allows(u) {
+		t.Fatal("fresh token refused after revocation second")
+	}
+}
+
 func TestAdministrationRechecksActorAfterWaitingForTenantLock(t *testing.T) {
 	st, pool := newStorePool(t)
 	peer := administrationAccount(t, st, "test:peer", "acme", []string{identity.AdminRole})
