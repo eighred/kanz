@@ -148,10 +148,10 @@ func (p *Postgres) UserBySubject(ctx context.Context, subject string) (*User, er
 	var u User
 	var status string
 	err := p.pool.QueryRow(ctx, `
-		SELECT subject, tenant_id, roles, portfolios, credential_hash, status, created_at, updated_at, tokens_invalid_before
+		SELECT subject, tenant_id, roles, portfolios, credential_hash, status, created_at, updated_at, tokens_invalid_before, session_epoch
 		  FROM identity_users WHERE subject = $1`, subject,
 	).Scan(&u.Subject, &u.Tenant, &u.Roles, &u.Portfolios, &u.Credential, &status,
-		&u.CreatedAt, &u.UpdatedAt, &u.TokensInvalidBefore)
+		&u.CreatedAt, &u.UpdatedAt, &u.TokensInvalidBefore, &u.SessionEpoch)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
@@ -193,26 +193,12 @@ func (p *Postgres) UpdateCredential(ctx context.Context, subject string, cred Ha
 // told the account is locked out, the audit record says it was, and it was not.
 // A typo'd subject must not be indistinguishable from a completed disable.
 //
-// IT ALSO REVOKES THE TOKEN THE ACCOUNT ALREADY HOLDS (#532), which it did not
-// used to. A disable stamps tokens_invalid_before in the SAME statement, and
-// Revocations below publishes that mark to the gateway, which refuses every
-// token for the subject minted before it. Two properties come from stamping it
-// here rather than in a second write:
-//
-//   - The mark cannot lag the status. A disable that committed and then failed
-//     to record its revocation instant would report success while leaving the
-//     session in flight untouched — the precise gap this closes.
-//   - GREATEST() rather than an assignment, so the mark only ever moves FORWARD.
-//     A clock that steps backwards, or a replayed request, cannot narrow a
-//     revocation that has already been published. GREATEST ignores NULLs, which
-//     is what makes the FIRST disable — where the column is still NULL — land on
-//     $3 without a COALESCE. The explicit ::timestamptz is because $3 appears in
-//     two positions and the planner should not have to infer it from either.
-//
-// AN ENABLE DOES NOT CLEAR IT. Re-enabling an account must not resurrect the
-// token the disable killed; the account's next login mints a newer one, which
-// the gateway admits with no operator action. The condition below is what makes
-// enable leave the mark alone.
+// Disable advances session_epoch in the SAME statement as status and the legacy
+// timestamp watermark. Tokens retain their authenticated snapshot's epoch, so a
+// login that finishes after this transaction cannot escape revocation by acquiring
+// a later iat. Overflow aborts the transaction; it must never wrap the generation.
+// Enable preserves both marks. Caller time is retained for audit compatibility,
+// but is no longer an admission boundary and cannot weaken the generation fence.
 func (p *Postgres) SetStatus(ctx context.Context, actor Administration, subject string, status Status, now time.Time) error {
 	if err := status.Validate(); err != nil {
 		return err
@@ -253,6 +239,7 @@ func (p *Postgres) SetStatus(ctx context.Context, actor Administration, subject 
 	tag, err := tx.Exec(ctx, `
         UPDATE identity_users
 		   SET status = $2,
+               session_epoch = CASE WHEN $2 = 'disabled' THEN session_epoch + 1 ELSE session_epoch END,
 		       updated_at = $3,
 		       tokens_invalid_before = CASE WHEN $2 = 'disabled'
 		           THEN GREATEST(tokens_invalid_before, $3::timestamptz)
@@ -284,7 +271,7 @@ func (p *Postgres) SetStatus(ctx context.Context, actor Administration, subject 
 // a bound worth having over one that depends on config history.
 func (p *Postgres) Revocations(ctx context.Context) ([]revocation.Entry, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT subject, tokens_invalid_before
+		SELECT subject, tokens_invalid_before, session_epoch
 		  FROM identity_users
 		 WHERE tokens_invalid_before IS NOT NULL`)
 	if err != nil {
@@ -299,12 +286,14 @@ func (p *Postgres) Revocations(ctx context.Context) ([]revocation.Entry, error) 
 	for rows.Next() {
 		var subject string
 		var notBefore time.Time
-		if err := rows.Scan(&subject, &notBefore); err != nil {
+		var epoch int64
+		if err := rows.Scan(&subject, &notBefore, &epoch); err != nil {
 			return nil, fmt.Errorf("identity: scan revocation: %w", err)
 		}
 		out = append(out, revocation.Entry{
-			SubjectHash: revocation.HashSubject(subject),
-			NotBefore:   notBefore.UTC().Unix(),
+			SubjectHash:  revocation.HashSubject(subject),
+			NotBefore:    notBefore.UTC().Unix(),
+			SessionEpoch: epoch,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -354,8 +343,8 @@ func lockAdministrator(ctx context.Context, tx pgx.Tx, actor Administration) err
 	}
 	var u User
 	var status string
-	err := tx.QueryRow(ctx, `SELECT subject, tenant_id, roles, status, tokens_invalid_before FROM identity_users
-        WHERE subject = $1 AND tenant_id = $2 FOR SHARE`, actor.Subject, actor.Tenant).Scan(&u.Subject, &u.Tenant, &u.Roles, &status, &u.TokensInvalidBefore)
+	err := tx.QueryRow(ctx, `SELECT subject, tenant_id, roles, status, tokens_invalid_before, session_epoch FROM identity_users
+        WHERE subject = $1 AND tenant_id = $2 FOR SHARE`, actor.Subject, actor.Tenant).Scan(&u.Subject, &u.Tenant, &u.Roles, &status, &u.TokensInvalidBefore, &u.SessionEpoch)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrAdminAuthority
 	}

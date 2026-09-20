@@ -125,6 +125,7 @@ func TestAdministrationOldTokenCannotActAfterReenable(t *testing.T) {
 		t.Fatalf("old token: %v", err)
 	}
 	peer.IssuedAt = now0.Add(2 * time.Second)
+	peer.SessionEpoch = 1
 	if err := st.SetStatus(ctx, peer, testAdmin.Subject, identity.StatusDisabled, now0.Add(3*time.Second)); err != nil {
 		t.Fatalf("fresh token: %v", err)
 	}

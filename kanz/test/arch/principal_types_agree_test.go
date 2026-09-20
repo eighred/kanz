@@ -67,6 +67,7 @@ var edgeOmits = map[string]string{
 // must not supply. Narrower than it looks: a NEW canonical field is not in here,
 // so both conversion sites go red the day one is added, which is the point.
 var reverseOmits = map[string]string{
+	"SessionEpoch": "Verified by the gateway revocation feed before mesh forwarding (#1256); upstream services neither read that feed nor accept bearer tokens. Like IssuedAt, it is not a mesh header.",
 	"Claims": "not carried on the edge type at all (see edgeOmits), so there is " +
 		"nothing to convert from.",
 	"IssuedAt": "deliberately absent past this seam, and pkg/auth/meshheader.go " +

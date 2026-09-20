@@ -19,4 +19,4 @@ package revocation
 // IT IS VERSIONED because the day the wire shape changes, a gateway running the
 // old reader must refuse the new feed rather than silently read fewer entries
 // out of it.
-const FeedKind = "kanz.revocations.v1"
+const FeedKind = "kanz.revocations.v2"

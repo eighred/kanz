@@ -297,11 +297,16 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, token string) (*Pr
 		issuedAt = std.IssuedAt.Time()
 	}
 
+	epoch, err := SessionEpoch(custom)
+	if err != nil {
+		return nil, ErrUnauthenticated
+	}
 	return &Principal{
-		Subject:  std.Subject,
-		Tenant:   stringClaim(custom[a.cfg.TenantClaim]),
-		Roles:    stringListClaim(custom[a.cfg.RolesClaim]),
-		IssuedAt: issuedAt,
+		SessionEpoch: epoch,
+		Subject:      std.Subject,
+		Tenant:       stringClaim(custom[a.cfg.TenantClaim]),
+		Roles:        stringListClaim(custom[a.cfg.RolesClaim]),
+		IssuedAt:     issuedAt,
 		// NORMALIZED HERE AND NOWHERE ELSE (#225). The claim is absent from
 		// every token this estate's IdP issues today (#99), so this is an empty
 		// list on the production path — which the capital path reads as "no

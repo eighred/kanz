@@ -52,9 +52,10 @@ import (
 // conversion — cannot recur one level up from where the completeness guard
 // watches.
 type Principal struct {
-	Subject string
-	Tenant  string
-	Roles   []string
+	SessionEpoch int64
+	Subject      string
+	Tenant       string
+	Roles        []string
 
 	// Portfolios is the portfolio allow-list this principal is entitled to, from
 	// the token's `portfolios` claim. Roles say WHAT a caller may do; this says
@@ -237,7 +238,8 @@ type jwtClaims struct {
 	// per-subject revocation (#532) dates the token against the subject's
 	// revocation mark; 0 means the claim was absent, which the revocation check
 	// treats as undatable rather than as fresh.
-	IssuedAt int64 `json:"iat"`
+	IssuedAt     int64           `json:"iat"`
+	SessionEpoch json.RawMessage `json:"session_epoch,omitempty"`
 }
 
 // jwtAudience decodes `aud` in both RFC 7519 shapes — a bare string and an
@@ -368,12 +370,25 @@ func (a *JWTAuthenticator) Authenticate(token string) (*Principal, error) {
 	if c.IssuedAt != 0 {
 		issuedAt = time.Unix(c.IssuedAt, 0).UTC()
 	}
+	bag := map[string]any{}
+	if c.SessionEpoch != nil {
+		var value any
+		if err := json.Unmarshal(c.SessionEpoch, &value); err != nil {
+			return nil, ErrUnauthenticated
+		}
+		bag[auth.ClaimSessionEpoch] = value
+	}
+	epoch, err := auth.SessionEpoch(bag)
+	if err != nil {
+		return nil, ErrUnauthenticated
+	}
 	return &Principal{
-		Subject:    c.Subject,
-		Tenant:     c.Tenant,
-		Roles:      c.Roles,
-		Portfolios: c.Portfolios,
-		IssuedAt:   issuedAt,
+		Subject:      c.Subject,
+		Tenant:       c.Tenant,
+		Roles:        c.Roles,
+		Portfolios:   c.Portfolios,
+		IssuedAt:     issuedAt,
+		SessionEpoch: epoch,
 	}, nil
 }
 

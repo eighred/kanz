@@ -48,8 +48,9 @@ active administrator must perform offboarding. A tenant transaction lock
 serializes status changes and authenticated invite writes; current actor roles,
 tenant, status and revocation watermark are checked while holding it. Competing
 administrators cannot both disable each other. Enable does not erase revocation:
-the re-enabled administrator must log in again (tokens issued in the revocation
-second are conservatively refused).
+the re-enabled administrator must log in again to acquire the current session
+generation. A login started before disable remains revoked even if signing finishes
+afterward. Fresh logins work within the same second and after clock rollback.
 
 ## Infrastructure bootstrap / break-glass recovery
 
@@ -73,3 +74,33 @@ tenant lock and preserve the active-administrator invariant.
 Status changes retain the existing atomic token-revocation write and structured
 audit logging. Identity audit logs are not yet an atomic tamper-evident outbox;
 that separate audit-authority work remains tracked by #1227/#1198/#1207.
+
+
+## Session-generation rollout (#1256)
+
+Migration `0003_session_epoch.sql` adds a nonnegative BIGINT generation and
+backfills every previously revoked account to generation one. Disable increments
+it atomically; enable never resets it. The signed `session_epoch` claim and v2
+feed encode generations as decimal strings to avoid JSON number precision loss.
+Legacy tokens (missing generation) are generation zero: previously revoked users
+must log in again. Never-revoked users retain their existing sessions.
+
+The feed kind changes to `kanz.revocations.v2`. Old readers refuse v2 and new
+readers refuse v1. Do not mix these versions behind a load balancer. Quiesce
+identity login, redemption and administration and drain gateway traffic, apply the
+migration, deploy matching identity and gateway image digests, verify v2 feed
+priming and fresh login/revocation probes, then reopen traffic. Keep the current
+administrator active throughout the separately gated replacement procedure above.
+Do not roll identity back alone: an old writer does not increment generations.
+Rollback requires maintenance mode and a coordinated identity/gateway version;
+retain the migration and revoke outstanding sessions before restoring admission.
+
+Revocation remains bounded by the existing feed polling policy: normally 30 seconds
+plus fetch latency, with a 15-minute maximum cached-feed age during an outage.
+A token ahead of the cached generation receives 503 until the feed catches up,
+preserving its session instead of misclassifying it as revoked.
+Generation fencing closes the timestamp and late-mint escape; it does not turn
+polling into synchronous revocation. Regressed or incomplete snapshots cannot
+renew freshness. Database restore must preserve all published generations; restoring
+older identity state requires invalidating old signing keys and draining verifier
+caches before serving traffic. Deleting/recreating subjects is not a supported API.

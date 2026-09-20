@@ -72,6 +72,7 @@ var ErrLoginFailed = errors.New("identity: login failed")
 // set from the INVITE — never from anything the account holder supplies. See the
 // package comment.
 type User struct {
+	SessionEpoch        int64
 	Subject             string
 	Tenant              string
 	Roles               []string
