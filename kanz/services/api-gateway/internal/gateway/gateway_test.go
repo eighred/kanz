@@ -41,6 +41,8 @@ const testTenant = "t1"
 // fakeClient is a querypb.RiskQueryServiceClient that records the last request
 // and returns canned responses/errors.
 type fakeClient struct {
+	feeResp      *orderpb.GetExecutionFeeCorrectionResponse
+	gotFee       *orderpb.GetExecutionFeeCorrectionRequest
 	exposureResp *querypb.ExposureResponse
 	measuresResp *querypb.MeasuresResponse
 	scenarioResp *querypb.EvaluateScenarioResponse
@@ -57,6 +59,11 @@ type fakeClient struct {
 	gotExposure *querypb.ExposureRequest
 	gotMeasures *querypb.MeasuresRequest
 	gotScenario *querypb.EvaluateScenarioRequest
+}
+
+func (f *fakeClient) GetExecutionFeeCorrection(_ context.Context, in *orderpb.GetExecutionFeeCorrectionRequest, _ ...grpc.CallOption) (*orderpb.GetExecutionFeeCorrectionResponse, error) {
+	f.gotFee = in
+	return f.feeResp, f.err
 }
 
 func (f *fakeClient) Exposure(_ context.Context, in *querypb.ExposureRequest, _ ...grpc.CallOption) (*querypb.ExposureResponse, error) {

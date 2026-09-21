@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"time"
 
@@ -212,6 +213,34 @@ const myTradesWeight = 20
 // decode is attempted first: a {code,msg} that unmarshals is the exchange
 // refusing, and anything else falls through to the list.
 func (c *binanceREST) myTrades(ctx context.Context, symbol string, orderID int64) ([]tradeEntry, error) {
+	const pageSize = 1000
+	const maxPages = 8
+	var all []tradeEntry
+	var cursor int64
+	for page := 0; page < maxPages; page++ {
+		trades, err := c.myTradesPage(ctx, symbol, orderID, cursor, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		if len(trades) > pageSize {
+			return nil, fmt.Errorf("binance: trade history exceeds requested page size")
+		}
+		sort.Slice(trades, func(i, j int) bool { return trades[i].ID < trades[j].ID })
+		for _, trade := range trades {
+			if trade.Symbol != symbol || trade.OrderID != orderID || trade.ID < cursor || trade.ID == 1<<63-1 {
+				return nil, fmt.Errorf("binance: trade history scope or cursor mismatch")
+			}
+			cursor = trade.ID + 1
+		}
+		all = append(all, trades...)
+		if len(trades) < pageSize {
+			return all, nil
+		}
+	}
+	return nil, fmt.Errorf("binance: trade history exceeds bounded query; completeness unknown")
+}
+
+func (c *binanceREST) myTradesPage(ctx context.Context, symbol string, orderID, fromID int64, limit int) ([]tradeEntry, error) {
 	if !c.bucket.Allow(myTradesWeight) {
 		c.onThrottle()
 		return nil, ErrRateLimited
@@ -219,6 +248,8 @@ func (c *binanceREST) myTrades(ctx context.Context, symbol string, orderID int64
 	body, err := c.signedGet(ctx, "/api/v3/myTrades", url.Values{
 		"symbol":  {symbol},
 		"orderId": {strconv.FormatInt(orderID, 10)},
+		"fromId":  {strconv.FormatInt(fromID, 10)},
+		"limit":   {strconv.Itoa(limit)},
 	})
 	if err != nil {
 		return nil, err

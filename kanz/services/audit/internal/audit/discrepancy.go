@@ -3,9 +3,12 @@ package audit
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/dualcontrol"
+	"github.com/eighred/kanz/internal/fillfact"
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -19,6 +22,12 @@ const KindVenueDiscrepancy Kind = "venue_discrepancy"
 // Record evidence for investigation; never interpret their deltas as journal
 // commands or reopen a terminal order from a cumulative quantity.
 func discrepancy(env *envelopepb.Envelope, payload []byte) (classification, bool) {
+	if env.GetEventType() == "order.order.fee_correction_proposed" || env.GetEventType() == "order.order.fee_correction_approved" {
+		return feeCorrectionEvidence(env, payload), true
+	}
+	if env.GetEventType() == "order.order.recovery_recorded" {
+		return recoveryDiscrepancy(env, payload), true
+	}
 	kind := ""
 	switch env.GetEventType() {
 	case "order.order.healed":
@@ -88,6 +97,78 @@ func discrepancy(env *envelopepb.Envelope, payload []byte) (classification, bool
 	}
 	attrs["evidence_status"] = "observed"
 	return c, true
+}
+
+func feeCorrectionEvidence(env *envelopepb.Envelope, payload []byte) classification {
+	digest := sha256.Sum256(payload)
+	attrs := map[string]string{"discrepancy_type": "execution_fee", "evidence_status": "invalid", "payload_sha256": hex.EncodeToString(digest[:])}
+	c := classification{KindVenueDiscrepancy, "Execution fee correction evidence", attrs}
+	if len(payload) > 512<<10 || env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_FACT {
+		return c
+	}
+	if env.GetEventType() == "order.order.fee_correction_proposed" {
+		var p orderpb.ExecutionFeeCorrectionProposed
+		if proto.Unmarshal(payload, &p) != nil || p.CaseId == "" || p.OrderId == "" || p.PortfolioId == "" || len(p.Changes) == 0 {
+			return c
+		}
+		actual, err := fillfact.FeeProposalDigest(env.GetTenantId(), &p)
+		if err != nil || actual != p.Digest {
+			return c
+		}
+		attrs["case_id"], attrs["order_id"], attrs["portfolio_id"], attrs["approval_digest"], attrs["proposer"], attrs["disposition"] = p.CaseId, p.OrderId, p.PortfolioId, p.Digest, p.Proposer, "awaiting_approval"
+	} else {
+		var a orderpb.ExecutionFeeCorrectionApproved
+		if proto.Unmarshal(payload, &a) != nil || a.CaseId == "" || a.OrderId == "" || a.PortfolioId == "" || strings.TrimSpace(a.Proposer) == "" || strings.TrimSpace(a.Approver) == "" || dualcontrol.SameSubject(a.Proposer, a.Approver) || a.ApprovedAt == nil || a.ApprovedAt.CheckValid() != nil {
+			return c
+		}
+		d, err := hex.DecodeString(a.Digest)
+		if err != nil || len(d) != 32 {
+			return c
+		}
+		attrs["case_id"], attrs["order_id"], attrs["portfolio_id"], attrs["approval_digest"], attrs["proposer"], attrs["approver"], attrs["disposition"] = a.CaseId, a.OrderId, a.PortfolioId, a.Digest, a.Proposer, a.Approver, "approved_pending_book_proof"
+	}
+	attrs["evidence_status"] = "valid"
+	return c
+}
+
+func recoveryDiscrepancy(env *envelopepb.Envelope, payload []byte) classification {
+	digest := sha256.Sum256(payload)
+	attrs := map[string]string{"discrepancy_type": "execution_recovery", "disposition": "investigate", "evidence_status": "invalid", "payload_sha256": hex.EncodeToString(digest[:]), "scope_status": "unverified"}
+	c := classification{KindVenueDiscrepancy, "Invalid execution recovery lifecycle evidence requires investigation", attrs}
+	if len(payload) > 1<<20 || env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_FACT {
+		return c
+	}
+	var fact orderpb.ExecutionRecoveryRecorded
+	if proto.Unmarshal(payload, &fact) != nil || fact.GetCaseId() == "" || fact.GetOrderId() == "" || fact.GetRecordedAt() == nil || fact.GetRecordedAt().CheckValid() != nil || fact.GetSourceCursor() == "" {
+		return c
+	}
+	if bytes, err := hex.DecodeString(fact.GetPayloadDigest()); err != nil || len(bytes) != 32 {
+		return c
+	}
+	switch fact.GetStatus() {
+	case "observed", "investigating", "blocked":
+	case "corrected":
+		if fact.GetMappingVersion() == "" || fact.GetPortfolioId() == "" || fact.GetVenueAccountId() == "" {
+			return c
+		}
+	default:
+		return c
+	}
+	for _, value := range []string{fact.CaseId, fact.OrderId, fact.PortfolioId, fact.Venue, fact.VenueAccountId, fact.MappingVersion, fact.SourceCursor, fact.Reason} {
+		if len(value) > 2048 || strings.ContainsRune(value, '\x00') {
+			return c
+		}
+	}
+	attrs["case_id"], attrs["order_id"], attrs["portfolio_id"] = fact.CaseId, fact.OrderId, fact.PortfolioId
+	attrs["venue"], attrs["venue_account_id"], attrs["mapping_version"] = fact.Venue, fact.VenueAccountId, fact.MappingVersion
+	attrs["source_cursor"], attrs["source_payload_sha256"] = fact.SourceCursor, fact.PayloadDigest
+	attrs["disposition"], attrs["evidence_status"], attrs["reason"] = fact.Status, "observed", fact.Reason
+	attrs["checkpoint"] = fmt.Sprint(fact.Checkpoint)
+	if fact.MappingVersion != "" {
+		attrs["scope_status"] = "verified_mapping"
+	}
+	c.summary = "Execution recovery " + fact.Status
+	return c
 }
 
 func exactEvidence(d *commonpb.Decimal) (string, bool) {

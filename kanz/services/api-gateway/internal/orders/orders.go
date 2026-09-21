@@ -202,6 +202,8 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Trade, "POST /v1/orders", h.submit)
 	mux.Handle(authz.Trade, "POST /v1/orders/{id}/cancel", h.cancel)
 	if h.approveRole != "" {
+		mux.Handle(authz.Trade, "POST /v1/orders/{id}/execution-recoveries/{case}/fee-correction/propose", h.proposeFeeCorrection)
+		mux.Handle(authz.Approve, "POST /v1/orders/{id}/execution-recoveries/{case}/fee-correction/approve", h.approveFeeCorrection)
 		mux.Handle(authz.Approve, "POST /v1/orders/{id}/approve", h.approve)
 	}
 }

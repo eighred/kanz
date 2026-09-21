@@ -25,6 +25,7 @@ import "order/v1/order_events.proto";
 // it never accepts one — commands arrive on the bus and nowhere else, so that
 // the admission gate, the compliance gate and the outbox stay on one path.
 service OrderQueryService {
+  rpc GetExecutionFeeCorrection(GetExecutionFeeCorrectionRequest) returns (GetExecutionFeeCorrectionResponse);
   // ListOrders returns one portfolio's orders, newest first.
   rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
 
@@ -44,6 +45,19 @@ service OrderQueryService {
   // second door into the capital path with none of the admission gate, the
   // compliance gate or the outbox behind it.
   rpc ListPendingApprovals(ListPendingApprovalsRequest) returns (ListPendingApprovalsResponse);
+}
+
+message GetExecutionFeeCorrectionRequest {
+  string portfolio_id = 1;
+  string case_id = 2;
+}
+
+message GetExecutionFeeCorrectionResponse {
+  ExecutionFeeCorrectionProposed proposal = 1;
+  ExecutionFeeCorrectionApproved approval = 2;
+  string status = 3;
+  string reason = 4;
+  string owner_tenant = 5;
 }
 
 message ListOrdersRequest {

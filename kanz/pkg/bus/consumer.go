@@ -302,6 +302,12 @@ func (c *Consumer) publishDLQ(ctx context.Context, origSubject, group string, ms
 	if origSubject == "" || strings.ContainsAny(origSubject, "*>") {
 		return fmt.Errorf("dlq: missing concrete source subject (original: %w)", dispatchErr)
 	}
+	// A DLQ processor must keep failed work on its original durable stream.
+	// Parking it again would acknowledge that evidence and move it to an
+	// unprovisioned recursive subject which operators do not monitor.
+	if strings.HasPrefix(origSubject, "dlq.") {
+		return fmt.Errorf("dlq: parked delivery remains unresolved: %w", dispatchErr)
+	}
 	headers := dlqHeaders(msg.Headers, origSubject, attempts, dispatchErr, time.Now())
 	dlqMsg := Message{
 		Subject: dlqSubject(origSubject),

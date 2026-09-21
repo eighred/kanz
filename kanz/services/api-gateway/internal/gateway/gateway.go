@@ -103,6 +103,7 @@ func New(client querypb.RiskQueryServiceClient, orders orderpb.OrderQueryService
 func (h *Handler) Routes(mux *authz.Mux) {
 	mux.Handle(authz.Read, "GET /v1/portfolios", h.listPortfolios)
 	if h.orders != nil {
+		mux.Handle(authz.Read, "GET /v1/portfolios/{id}/execution-recoveries/{case}/fee-correction", h.getFeeCorrection)
 		mux.Handle(authz.Read, "GET /v1/portfolios/{id}/orders", h.listOrders)
 	}
 	if h.instruments != nil {
@@ -264,6 +265,19 @@ func (h *Handler) listPendingApprovals(w http.ResponseWriter, r *http.Request) {
 		PortfolioId: r.URL.Query().Get("portfolio"),
 		Limit:       parseLimit(r),
 	})
+	h.writeOwned(w, r, resp, err)
+}
+
+func (h *Handler) getFeeCorrection(w http.ResponseWriter, r *http.Request) {
+	portfolio, ok := h.portfolioInScope(w, r)
+	if !ok {
+		return
+	}
+	resp, err := h.orders.GetExecutionFeeCorrection(r.Context(), &orderpb.GetExecutionFeeCorrectionRequest{PortfolioId: portfolio, CaseId: r.PathValue("case")})
+	if err == nil && resp.GetProposal().GetPortfolioId() != portfolio {
+		writeError(w, http.StatusNotFound, "fee correction not found")
+		return
+	}
 	h.writeOwned(w, r, resp, err)
 }
 

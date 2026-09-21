@@ -172,7 +172,7 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 	}
 
 	claim, err := tx.Exec(ctx,
-		`INSERT INTO position_fills (fill_id) VALUES ($1) ON CONFLICT DO NOTHING`, fill.GetFillId())
+		`INSERT INTO position_fills (fill_id,raw_fill_id) VALUES ($1,$2) ON CONFLICT (tenant_id,fill_id) DO NOTHING`, fillfact.ExecutionKey(fill), fill.GetFillId())
 	if err != nil {
 		return nil, fmt.Errorf("position: claim fill %s: %w", fill.GetFillId(), err)
 	}
@@ -184,11 +184,14 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 
 	// Already folded by somebody else: return the book as it stands, do NOT count it again.
 	if claim.RowsAffected() > 0 {
-		signed := dec.FromProto(fill.GetQuantity())
-		if fill.GetSide() == orderpb.Side_SIDE_SELL {
-			signed = new(big.Rat).Neg(signed)
+		fold, err := recordExecution(ctx, tx, portfolioID, fill, asOf, l)
+		if err != nil {
+			return nil, err
 		}
-		costbasis.Fold(l, signed, price)
+		l, price = fold.lot, fold.price
+		if asOf.Before(fold.asOf) {
+			asOf = fold.asOf
+		}
 
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO positions (portfolio_id, venue, instrument_id, quantity, average_price, realized_pnl)
@@ -200,6 +203,20 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 			    updated_at = now()`,
 			portfolioID, venue, instrument, l.Qty.RatString(), l.AvgCost.RatString(), l.Realized.RatString()); err != nil {
 			return nil, fmt.Errorf("position: upsert %s/%s/%s: %w", portfolioID, venue, instrument, err)
+		}
+	} else {
+		if err := verifyPositionDuplicate(ctx, tx, portfolioID, fill); err != nil {
+			return nil, err
+		}
+		latestPrice, latestTime, err := latestExecutionMark(ctx, tx, portfolioID, fill)
+		if err != nil {
+			return nil, err
+		}
+		if latestPrice != nil {
+			price = latestPrice
+		}
+		if asOf.Before(latestTime) {
+			asOf = latestTime
 		}
 	}
 

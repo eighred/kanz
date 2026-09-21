@@ -81,6 +81,8 @@ data:
           # tenant's import of it resolves to nothing, the broker accepts the
           # config, and an approval that tenant sends is delivered NOWHERE.
           { stream: "tenant.*.order.order.approve" }
+          { stream: "tenant.*.order.order.propose_fee_correction" }
+          { stream: "tenant.*.order.order.approve_fee_correction" }
           # THE PLATFORM KILL-SWITCH CROSSES THE SAME BOUNDARY (#635), and it is
           # the one subject here that is NOT tenant-prefixed — deliberately. A
           # halt is platform-wide by definition: one FACT, published once by
@@ -182,6 +184,12 @@ data:
           { stream: { account: acme, subject: "order.order.rejected" }, prefix: "tfact.acme" }
           { stream: { account: acme, subject: "order.order.expired" }, prefix: "tfact.acme" }
           { stream: { account: acme, subject: "order.order.healed" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.recovery_ledger_applied" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.recovery_position_applied" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.execution_recovered" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.recovery_recorded" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.fee_correction_proposed" }, prefix: "tfact.acme" }
+          { stream: { account: acme, subject: "order.order.fee_correction_approved" }, prefix: "tfact.acme" }
           { stream: { account: acme, subject: "order.order.outcome" }, prefix: "tfact.acme" }
           { stream: { account: acme, subject: "order.order.approved" }, prefix: "tfact.acme" }
           { stream: { account: acme, subject: "order.order.pending_approval" }, prefix: "tfact.acme" }
@@ -214,6 +222,8 @@ data:
           # approvals land on a subject nothing subscribes and every order held
           # for dual control stays held, with no error on either side.
           "tenant.__system__.order.order.approve": "order.order.approve"
+          "tenant.__system__.order.order.propose_fee_correction": "order.order.propose_fee_correction"
+          "tenant.__system__.order.order.approve_fee_correction": "order.order.approve_fee_correction"
         }
 
         users: [
@@ -685,6 +695,8 @@ data:
                   "tenant.*.order.order.submit", "tenant.*.order.order.cancel",
                   "order.order.submit", "order.order.cancel",
                   "tenant.*.order.order.approve", "order.order.approve",
+                  "tenant.*.order.order.propose_fee_correction", "order.order.propose_fee_correction",
+                  "tenant.*.order.order.approve_fee_correction", "order.order.approve_fee_correction",
                   "platform.authz.decision",
                   # JETSTREAM MACHINERY, required from the moment this gateway
                   # became a CONSUMER (#635). It now binds an ephemeral consumer
@@ -805,6 +817,7 @@ data:
             permissions: {
               publish: {
                 allow: [
+                  "order.order.recovery_ledger_applied", "dlq.order.order.execution_recovered",
                   "accounting.cash.>",
                   # THE BOOK OF RECORD ANNOUNCES WHAT A PORTFOLIO CAN SPEND
                   # (#450). accounting is the only component that folds trade
@@ -855,6 +868,7 @@ data:
               }
               subscribe: {
                 allow: [
+                  "order.order.execution_recovered",
                   "order.order.filled", "order.order.partially_filled",
                   "accounting.cash.>", "market.fx.>", "_INBOX.>",
                   # THE CUSTODIAN'S OWN VIEW (#962), published by a custodian
@@ -1244,9 +1258,13 @@ data:
             permissions: {
               publish: {
                 allow: [
+                  "order.order.execution_recovered", "order.order.recovery_position_applied",
+                  "dlq.order.order.healed", "dlq.order.order.execution_recovered",
+                  "dlq.order.order.recovery_position_applied", "dlq.order.order.recovery_ledger_applied",
                   "order.order.accepted", "order.order.rejected", "order.order.routed",
                   "order.order.filled", "order.order.partially_filled", "order.order.cancelled",
-                  "order.order.expired", "order.order.outcome",
+                  "order.order.expired", "order.order.outcome", "order.order.recovery_recorded",
+                  "order.order.fee_correction_proposed", "order.order.fee_correction_approved",
                   # AN ORDER HELD FOR A SECOND SIGNATURE (#410). It is the ONLY
                   # thing the estate hears about an order the maker-checker gate
                   # held: such an order is deliberately not in the book, so
@@ -1346,12 +1364,16 @@ data:
                   # publishDLQ's own error surfaces and the message goes straight
                   # back on the broker for redelivery forever.
                   "dlq.order.order.approve",
+                  "dlq.order.order.propose_fee_correction",
+                  "dlq.order.order.approve_fee_correction",
                   "dlq.order.order.filled", "dlq.order.order.partially_filled",
                   "$JS.API.>", "$JS.ACK.>",
                 ]
               }
               subscribe: {
                 allow: [
+                  "order.order.healed", "order.order.execution_recovered", "dlq.order.order.execution_recovered",
+                  "order.order.recovery_position_applied", "order.order.recovery_ledger_applied",
                   "order.order.submit", "order.order.amend", "order.order.cancel",
                   # THE SECOND SIGNATURE (#539) joined config.CommandSubjects with
                   # the maker-checker gate. A subscriber with no matching entry is
@@ -1359,6 +1381,8 @@ data:
                   # receives an approval, and every order it holds stays held with
                   # nothing anywhere reporting an error.
                   "order.order.approve",
+                  "order.order.propose_fee_correction",
+                  "order.order.approve_fee_correction",
                   "order.order.filled", "order.order.partially_filled",
                   "market.*.trade", "market.*.quote", "compliance.mandate.changed.>",
                   # THE INTRADAY VOLUME PROFILE (#897), which is what makes a VWAP
@@ -1757,6 +1781,12 @@ data:
           { stream: "order.order.rejected" }
           { stream: "order.order.expired" }
           { stream: "order.order.healed" }
+          { stream: "order.order.recovery_ledger_applied" }
+          { stream: "order.order.recovery_position_applied" }
+          { stream: "order.order.execution_recovered" }
+          { stream: "order.order.recovery_recorded" }
+          { stream: "order.order.fee_correction_proposed" }
+          { stream: "order.order.fee_correction_approved" }
           { stream: "order.order.outcome" }
           { stream: "order.order.approved" }
           { stream: "order.order.pending_approval" }
@@ -1805,6 +1835,10 @@ data:
           # submit path.
           { stream: { account: __system__, subject: "tenant.acme.order.order.approve" }
             to: "order.order.approve" }
+          { stream: { account: __system__, subject: "tenant.acme.order.order.propose_fee_correction" }
+            to: "order.order.propose_fee_correction" }
+          { stream: { account: __system__, subject: "tenant.acme.order.order.approve_fee_correction" }
+            to: "order.order.approve_fee_correction" }
           # THE HALT (#635). No `to:` — the subject is the same on both sides
           # because there is only ever ONE of these, for the whole platform.
           #
@@ -2001,9 +2035,13 @@ data:
             permissions: {
               publish: {
                 allow: [
+                  "order.order.execution_recovered", "order.order.recovery_position_applied",
+                  "dlq.order.order.healed", "dlq.order.order.execution_recovered",
+                  "dlq.order.order.recovery_position_applied", "dlq.order.order.recovery_ledger_applied",
                   "order.order.accepted", "order.order.rejected", "order.order.routed",
                   "order.order.filled", "order.order.partially_filled", "order.order.cancelled",
-                  "order.order.expired", "order.order.outcome",
+                  "order.order.expired", "order.order.outcome", "order.order.recovery_recorded",
+                  "order.order.fee_correction_proposed", "order.order.fee_correction_approved",
                   "order.order.pending_approval",
                   "order.order.approved",
                   "order.cost.recorded",
@@ -2018,14 +2056,20 @@ data:
                   "platform.compliance.decision",
                   "dlq.order.order.submit", "dlq.order.order.amend", "dlq.order.order.cancel",
                   "dlq.order.order.approve",
+                  "dlq.order.order.propose_fee_correction",
+                  "dlq.order.order.approve_fee_correction",
                   "dlq.order.order.filled", "dlq.order.order.partially_filled",
                   "$JS.API.>", "$JS.ACK.>",
                 ]
               }
               subscribe: {
                 allow: [
+                  "order.order.healed", "order.order.execution_recovered", "dlq.order.order.execution_recovered",
+                  "order.order.recovery_position_applied", "order.order.recovery_ledger_applied",
                   "order.order.submit", "order.order.amend", "order.order.cancel",
                   "order.order.approve",
+                  "order.order.propose_fee_correction",
+                  "order.order.approve_fee_correction",
                   "order.order.filled", "order.order.partially_filled",
                   "market.*.trade", "market.*.quote", "compliance.mandate.changed.>",
                   # The intraday volume profile (#897) - mirrors the platform
@@ -2117,6 +2161,7 @@ data:
             permissions: {
               publish: {
                 allow: [
+                  "order.order.recovery_ledger_applied", "dlq.order.order.execution_recovered",
                   "accounting.cash.>",
                   "accounting.balance.portfolio",
                   "dlq.order.order.filled", "dlq.order.order.partially_filled",
@@ -2135,6 +2180,7 @@ data:
               }
               subscribe: {
                 allow: [
+                  "order.order.execution_recovered",
                   "order.order.filled", "order.order.partially_filled",
                   "accounting.cash.>", "market.fx.>", "_INBOX.>",
                   # The custodian statement feed (#962); see the platform

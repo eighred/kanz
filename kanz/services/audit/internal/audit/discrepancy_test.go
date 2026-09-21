@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,32 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestRecoveryLifecycleReportsEvidenceWithoutInferringCompletion(t *testing.T) {
+	env := &envelopepb.Envelope{EventType: "order.order.recovery_recorded", EventClass: envelopepb.EventClass_EVENT_CLASS_FACT}
+	for _, status := range []string{"observed", "investigating", "blocked", "corrected"} {
+		fact := &orderpb.ExecutionRecoveryRecorded{CaseId: "case", OrderId: "order", PortfolioId: "fund", Venue: "venue", VenueAccountId: "account", MappingVersion: "mapping", SourceCursor: "source", PayloadDigest: strings.Repeat("a", 64), Status: status, Checkpoint: 2, RecordedAt: timestamppb.Now()}
+		payload, err := proto.Marshal(fact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := classify(env, payload)
+		if c.kind != KindVenueDiscrepancy || c.attrs["disposition"] != status || c.attrs["case_id"] != "case" || c.attrs["source_payload_sha256"] != fact.PayloadDigest || c.attrs["scope_status"] != "verified_mapping" {
+			t.Fatalf("lost lifecycle evidence: %+v", c)
+		}
+		if status == "corrected" {
+			fact.MappingVersion = ""
+			payload, err = proto.Marshal(fact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c = classify(env, payload)
+			if c.attrs["disposition"] == "corrected" || c.attrs["evidence_status"] != "invalid" {
+				t.Fatalf("unproven correction accepted: %+v", c)
+			}
+		}
+	}
+}
 
 func discrepancyBalance() *accountingpb.BalanceReconciled {
 	return &accountingpb.BalanceReconciled{PortfolioId: "tenant-legacy", Venue: "BINANCE", Asset: "USD", Expected: &commonpb.Decimal{}, Actual: &commonpb.Decimal{Coefficient: 1, Exponent: -9}, Delta: &commonpb.Decimal{Coefficient: 1, Exponent: -9}, DetectedAt: timestamppb.New(time.Unix(1700000000, 0))}

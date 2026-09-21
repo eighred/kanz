@@ -250,5 +250,9 @@ func branchQuarantines(st ast.Stmt, errName string) bool {
 	if !ok || lhs.Name != errName {
 		return false
 	}
-	return selectorNamesIn(ifs.Body)["quarantine"]
+	// Terminal execution recovery freezes its durable investigation case instead
+	// of replacing the order's terminal disposition with QUARANTINED. Require
+	// the blocking write in the same refusal branch, just like live quarantine.
+	calls := selectorNamesIn(ifs.Body)
+	return calls["quarantine"] || calls["BlockRecovery"]
 }

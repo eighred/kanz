@@ -144,18 +144,25 @@ func (p *Postgres) Append(ctx context.Context, e *Event, announce Announcer) err
 	if _, err := tx.Exec(ctx, `SELECT set_config('app.venue_account_id', $1, true)`, e.VenueAccountID); err != nil {
 		return fmt.Errorf("append entry %s: declare venue account: %w", e.EntryID, err)
 	}
-	_, err = tx.Exec(ctx, `
+	prepared, err := prepareExecutionEntry(ctx, tx, e)
+	if err != nil {
+		return err
+	}
+	if prepared != nil {
+		e = prepared
+		_, err = tx.Exec(ctx, `
 		INSERT INTO ledger_entries
 			(tenant_id, entry_id, portfolio_id, venue_account_id, entry_type, instrument_id,
 			 quantity, price, cash, cash_currency, action,
-			 effective_time, knowledge_time, settlement_status, settlement_date, source_ref)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			 effective_time, knowledge_time, settlement_status, settlement_date, source_ref, execution_evidence)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (tenant_id, entry_id) DO NOTHING
 	`, e.EntryID, e.PortfolioID, e.VenueAccountID, int(e.Type), e.InstrumentID,
-		ratText(e.Quantity), ratText(e.Price), ratText(e.Cash), e.CashCurrency, action,
-		e.Effective, e.Knowledge, int(e.SettlementBasis), nullTime(e.SettlementDate), e.SourceRef)
-	if err != nil {
-		return fmt.Errorf("append entry %s: %w", e.EntryID, err)
+			ratText(e.Quantity), ratText(e.Price), ratText(e.Cash), e.CashCurrency, action,
+			e.Effective, e.Knowledge, int(e.SettlementBasis), nullTime(e.SettlementDate), e.SourceRef, e.ExecutionEvidence)
+		if err != nil {
+			return fmt.Errorf("append entry %s: %w", e.EntryID, err)
+		}
 	}
 	// THE ANNOUNCEMENT COMMITS WITH THE ENTRY (#804, #292). It reads through
 	// p.withTx(tx), so the level it computes INCLUDES the entry above — the fold's
@@ -256,7 +263,7 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 	rows, err := p.q.Query(ctx, `
 		SELECT entry_id, portfolio_id, venue_account_id, entry_type, instrument_id,
 		       quantity, price, cash, cash_currency, action,
-		       effective_time, knowledge_time, settlement_status, settlement_date, source_ref
+		       effective_time, knowledge_time, settlement_status, settlement_date, source_ref, execution_evidence
 		FROM ledger_entries
 		WHERE portfolio_id = $1
 		  AND ($2::timestamptz IS NULL OR effective_time <= $2)
@@ -283,7 +290,7 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 		)
 		if err := rows.Scan(&e.EntryID, &e.PortfolioID, &e.VenueAccountID, &e.Type, &e.InstrumentID,
 			&qty, &price, &cash, &e.CashCurrency, &action,
-			&e.Effective, &e.Knowledge, &e.SettlementBasis, &settlementDate, &e.SourceRef); err != nil {
+			&e.Effective, &e.Knowledge, &e.SettlementBasis, &settlementDate, &e.SourceRef, &e.ExecutionEvidence); err != nil {
 			return nil, fmt.Errorf("scan entry %s: %w", portfolioID, err)
 		}
 		if settlementDate != nil {

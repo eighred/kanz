@@ -223,6 +223,14 @@ func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload [
 	if fill == nil {
 		return nil // not a fill-bearing event; ack
 	}
+	if fill.GetRecovery() != nil {
+		if env.GetEventType() != fillfact.SubjectRecovered || env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_FACT {
+			return errors.New("consume: recovery provenance requires a recovery FACT")
+		}
+		if err := fillfact.RequireRecoveryTenant(env, f.tenant); err != nil {
+			return err
+		}
+	}
 	entry, err := ledger.FromFill(portfolioID, fill, f.cashCurrency, knowledgeTime(env))
 	if err != nil {
 		// A fee the cash leg cannot represent (a BTC fee against a USD book, #221)
@@ -231,7 +239,26 @@ func (f *Folder) Handle(ctx context.Context, env *envelopepb.Envelope, payload [
 		// carry the fee's own asset.
 		return fmt.Errorf("consume: %s: %w", env.GetEventType(), err)
 	}
-	if err := f.store.Append(ctx, entry, f.announcerFor(portfolioID)); err != nil {
+	announce := f.announcerFor(portfolioID)
+	if fill.GetRecovery() != nil {
+		if announce == nil || f.relay == nil {
+			return errors.New("consume: recovery requires the durable acknowledgement relay")
+		}
+		balances := announce
+		announce = func(ctx context.Context, store ledger.Store) ([]outbox.Record, error) {
+			records, err := balances(ctx, store)
+			if err != nil {
+				return nil, err
+			}
+			ack, err := fillfact.RecoveryAck(ctx, fillfact.RecoveryLedgerApplied, fill, time.Now())
+			if err != nil {
+				return nil, err
+			}
+			ack.PartitionKey = portfolioID
+			return append(records, *ack), nil
+		}
+	}
+	if err := f.store.Append(ctx, entry, announce); err != nil {
 		return err
 	}
 	f.flush(ctx, portfolioID)
@@ -354,6 +381,8 @@ func knowledgeTime(env *envelopepb.Envelope) time.Time {
 // (mirrors the OMS position projector's decodeFill).
 func decodeFill(eventType string, payload []byte) (*orderpb.Fill, string, error) {
 	switch eventType {
+	case fillfact.SubjectRecovered:
+		return fillfact.DecodeRecovery(payload)
 	case orderEventFilled:
 		var ev orderpb.OrderFilled
 		if err := proto.Unmarshal(payload, &ev); err != nil {

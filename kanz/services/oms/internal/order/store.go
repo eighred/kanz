@@ -9,6 +9,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/outbox"
 )
 
@@ -303,14 +304,19 @@ type MemoryStore struct {
 	// venue/routing defect Postgres.claimFill deliberately refuses; the value is
 	// what lets AppliedFills answer "which fills does THIS order hold" (#798)
 	// without weakening that.
-	appliedFills map[string]string
+	appliedFills map[string]memoryFillClaim
+}
+
+type memoryFillClaim struct {
+	orderID, rawID string
+	fill           *orderpb.Fill
 }
 
 // NewMemoryStore returns an empty in-memory Store.
 func NewMemoryStore(opts ...MemoryStoreOption) *MemoryStore {
 	m := &MemoryStore{
 		orders:       make(map[string]*versioned),
-		appliedFills: make(map[string]string),
+		appliedFills: make(map[string]memoryFillClaim),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -404,12 +410,41 @@ func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVe
 	if cur.ver != expectedVersion {
 		return ErrConflict
 	}
+	key := fillID
+	var fill *orderpb.Fill
+	if fillID != "" {
+		var err error
+		fill, err = announcedExecution(st.GetOrderId(), fillID, announce)
+		if err != nil {
+			return err
+		}
+		if fill != nil {
+			key = fillfact.ExecutionKey(fill)
+		}
+	}
 	// THE CLAIM BEFORE ANYTHING ELSE IS WRITTEN, mirroring Postgres: a fill this
 	// aggregate already contains means this write must not land at all, and
 	// returning after the outbox append would leave a FACT for a fold that did
 	// not happen.
 	if fillID != "" {
-		if _, held := m.appliedFills[fillID]; held {
+		if key != fillID {
+			if legacy, exists := m.appliedFills[fillID]; exists {
+				if legacy.orderID == st.GetOrderId() {
+					return ErrFillApplied
+				}
+				return fillfact.ErrExecutionIdentityConflict
+			}
+		} else {
+			for heldKey, claim := range m.appliedFills {
+				if heldKey != fillID && claim.rawID == fillID {
+					return ErrFillApplied
+				}
+			}
+		}
+		if original, held := m.appliedFills[key]; held {
+			if (key != fillID || original.orderID == st.GetOrderId()) && original.fill != nil && fill != nil && !fillfact.SameExecution(original.fill, fill) {
+				return fillfact.ErrExecutionIdentityConflict
+			}
 			return ErrFillApplied
 		}
 	}
@@ -419,7 +454,7 @@ func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVe
 		}
 	}
 	if fillID != "" {
-		m.appliedFills[fillID] = st.GetOrderId()
+		m.appliedFills[key] = memoryFillClaim{st.GetOrderId(), fillID, fill}
 	}
 	m.orders[st.GetOrderId()] = &versioned{
 		st:  proto.Clone(st).(*orderpb.OrderState),
@@ -448,9 +483,9 @@ func (m *MemoryStore) AppliedFills(_ context.Context, orderID string) (map[strin
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make(map[string]bool)
-	for fillID, claimedBy := range m.appliedFills {
-		if claimedBy == orderID {
-			out[fillID] = true
+	for _, claim := range m.appliedFills {
+		if claim.orderID == orderID {
+			out[claim.rawID] = true
 		}
 	}
 	return out, nil

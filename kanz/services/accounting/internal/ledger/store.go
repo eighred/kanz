@@ -8,7 +8,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/outbox"
+	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // Store is the durable home of the append-only journal and the periodic book
@@ -286,7 +289,7 @@ func replayAll(ctx context.Context, st Store, portfolioID string) (*Book, error)
 type MemoryStore struct {
 	mu        sync.RWMutex
 	journal   map[string][]*Event // portfolio -> entries
-	seen      map[string]bool     // entry dedup across the journal
+	seen      map[string]*Event   // immutable entry and dedup identity across the journal
 	snapshots map[string]*Snapshot
 	outbox    *outbox.Memory
 }
@@ -295,7 +298,7 @@ type MemoryStore struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		journal:   make(map[string][]*Event),
-		seen:      make(map[string]bool),
+		seen:      make(map[string]*Event),
 		snapshots: make(map[string]*Snapshot),
 		outbox:    outbox.NewMemory(),
 	}
@@ -309,6 +312,22 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 	if e == nil || e.EntryID == "" {
 		return errors.New("ledger: cannot append entry with empty entry_id")
 	}
+	fill, err := executionFromEntry(e)
+	if err != nil {
+		return err
+	}
+	owned := *e
+	owned.ExecutionEvidence = append([]byte(nil), e.ExecutionEvidence...)
+	if e.Quantity != nil {
+		owned.Quantity = new(big.Rat).Set(e.Quantity)
+	}
+	if e.Price != nil {
+		owned.Price = new(big.Rat).Set(e.Price)
+	}
+	if e.Cash != nil {
+		owned.Cash = new(big.Rat).Set(e.Cash)
+	}
+	e = &owned
 	if isCashMovement(e) {
 		if !validCashEntry(e) {
 			return ErrCashConflict
@@ -319,7 +338,57 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.seen[e.EntryID] {
+	if fill != nil {
+		legacy := "fill:" + fill.GetFillId()
+		if legacy != e.EntryID && m.seen[legacy] != nil {
+			return ErrLegacyExecutionUnknown
+		}
+		if original := m.seen[e.EntryID]; original != nil {
+			if len(original.ExecutionEvidence) == 0 {
+				return ErrLegacyExecutionUnknown
+			}
+			oldFill, err := executionFromEntry(original)
+			if err != nil {
+				return err
+			}
+			if original.PortfolioID != e.PortfolioID {
+				return fillfact.ErrExecutionIdentityConflict
+			}
+			var revisions []*orderpb.Fill
+			for _, entry := range m.journal[e.PortfolioID] {
+				if len(entry.ExecutionEvidence) == 0 {
+					continue
+				}
+				var revision orderpb.Fill
+				if err := proto.Unmarshal(entry.ExecutionEvidence, &revision); err != nil {
+					return err
+				}
+				if fillfact.ExecutionKey(&revision) == fillfact.ExecutionKey(fill) && revision.GetRecovery().GetFeeApproval() != nil {
+					if len(revisions) >= fillfact.MaxMemoryFeeRevisions {
+						return fillfact.ErrFeeRevision
+					}
+					revisions = append(revisions, &revision)
+				}
+			}
+			if fill.GetRecovery().GetFeeApproval() != nil {
+				delta, fresh, err := fillfact.CheckMemoryFeeRevision(oldFill, revisions, fill)
+				if err != nil {
+					return err
+				}
+				if fresh {
+					e = feeAdjustment(e, fill, delta)
+				}
+			} else if !fillfact.SameExecution(fillfact.MemoryFeeHead(oldFill, revisions), fill) && !(fill.Recovery == nil && fillfact.SameExecution(oldFill, fill)) {
+				return fillfact.ErrExecutionIdentityConflict
+			}
+		}
+		if fill.GetRecovery().GetFeeApproval() != nil {
+			if _, err := fillfact.FeeRevisionTerms(fill); err != nil {
+				return err
+			}
+		}
+	}
+	if m.seen[e.EntryID] != nil {
 		if isCashMovement(e) {
 			for _, entries := range m.journal {
 				for _, old := range entries {
@@ -335,17 +404,22 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 		// outbox. Postgres reaches the same place by a different route: its INSERT
 		// is ON CONFLICT DO NOTHING, so the level the announcer computes is
 		// unchanged and the record it enqueues is a correct restatement.
+		if fill.GetRecovery() != nil && announce != nil {
+			// The execution can already be booked while this new recovery case
+			// still needs proof from this book. Acknowledge without reposting it.
+			records, err := announce(ctx, memoryReader{m: m})
+			if err != nil {
+				return err
+			}
+			return m.outbox.Append(records...)
+		}
 		return nil
 	}
-	m.seen[e.EntryID] = true
-	m.journal[e.PortfolioID] = append(m.journal[e.PortfolioID], e)
-
-	// ENQUEUED UNDER THE SAME LOCK THAT WROTE THE ENTRY — this store's whole
-	// equivalent of the transaction Postgres.Append opens, and the same argument
-	// order.MemoryStore.Create makes. The announcer reads m through the unexported
-	// readers below, which do not re-take the lock.
+	// The announcer reads a staged entry without changing committed state. All
+	// failure points precede the journal and claim writes, matching a SQL rollback
+	// without temporarily deleting or truncating the financial journal.
 	if announce != nil {
-		records, err := announce(ctx, memoryReader{m})
+		records, err := announce(ctx, memoryReader{m: m, pending: e})
 		if err != nil {
 			return err
 		}
@@ -353,6 +427,8 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 			return err
 		}
 	}
+	m.seen[e.EntryID] = e
+	m.journal[e.PortfolioID] = append(m.journal[e.PortfolioID], e)
 	return nil
 }
 
@@ -365,7 +441,10 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 // between the entry and the level computed from it — the reordering the durable
 // store's advisory lock exists to prevent, reintroduced in the seam every
 // DB-free test runs on.
-type memoryReader struct{ m *MemoryStore }
+type memoryReader struct {
+	m       *MemoryStore
+	pending *Event
+}
 
 func (r memoryReader) Append(context.Context, *Event, Announcer) error {
 	return errors.New("ledger: an announcer must not append")
@@ -375,6 +454,9 @@ func (r memoryReader) Journal(_ context.Context, portfolioID string) ([]*Event, 
 	src := r.m.journal[portfolioID]
 	out := make([]*Event, len(src))
 	copy(out, src)
+	if r.pending != nil && r.pending.PortfolioID == portfolioID {
+		out = append(out, r.pending)
+	}
 	return out, nil
 }
 
@@ -384,6 +466,9 @@ func (r memoryReader) JournalSince(_ context.Context, portfolioID string, after 
 		if e.Knowledge.After(after) {
 			out = append(out, e)
 		}
+	}
+	if r.pending != nil && r.pending.PortfolioID == portfolioID && r.pending.Knowledge.After(after) {
+		out = append(out, r.pending)
 	}
 	return out, nil
 }
