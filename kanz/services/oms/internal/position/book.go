@@ -15,7 +15,9 @@ package position
 import (
 	"context"
 	"fmt"
+	"google.golang.org/protobuf/proto"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -64,13 +66,11 @@ type Book struct {
 	// certified exactly-once folding against a store that doubled the position —
 	// the same divergence order.MemoryStore.appliedFills was added to end.
 	//
-	// IT GROWS WITHOUT BOUND, AND SO DOES position_fills. Exactly-once over an
-	// unbounded stream of fills costs one key per fill in either backend; the
-	// durable one pays it in a table an operator can see and archive, this one in
-	// a map that dies with the process. That is a real cost of this store rather
-	// than a defect of the claim, and it is one more reason the in-memory book is
-	// a single-replica seam and not a deployment.
-	appliedFills map[string]bool
+	// Financial evidence cannot be evicted without reopening the duplicate window.
+	// This ephemeral store refuses new claims at maxPositionReplay total entries;
+	// production history belongs in PostgreSQL, where retention is durable.
+	appliedFills map[string]memoryExecution
+	histories    map[key][]memoryExecution
 }
 
 // BookOption configures the in-memory book.
@@ -101,7 +101,8 @@ func NewBook(baseCcy string, opts ...BookOption) *Book {
 	}
 	b := &Book{
 		lots:         make(map[key]*lot),
-		appliedFills: make(map[string]bool),
+		appliedFills: make(map[string]memoryExecution),
+		histories:    make(map[key][]memoryExecution),
 		baseCcy:      baseCcy,
 		queue:        outbox.NewMemory(),
 	}
@@ -123,86 +124,161 @@ func (b *Book) Outbox() outbox.Queue { return b.queue }
 // fill price. market_value and unrealized_pnl are marked at the fill price (the
 // latest trade), until a market-data mark is wired.
 //
-// IN-PROCESS, AND THEREFORE CORRECT FOR EXACTLY ONE REPLICA. It cannot fail and it
-// cannot be shared: two pods are two maps, each folding the fills its consumer group
-// handed it, each publishing an ABSOLUTE position built from a fraction of the trades
-// (EXEC-M18). Use Postgres in any deployment that runs more than one pod — which the
-// shipped one does. The ctx and error exist to satisfy Store; neither is used here.
+// In-process and correct for one replica only. Validation, capacity, history,
+// and announcement failures leave both the position and its claim unchanged.
+// Production replicas must share the durable PostgreSQL book.
 func (b *Book) Apply(ctx context.Context, portfolioID string, fill *orderpb.Fill, asOf time.Time, announce Announcer) (*Applied, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	// THE SAME VALIDATION THE POSTGRES BOOK USES (#631). This one checked venue
-	// and quantity and NOT fill_id, so the in-memory book folded a fill the
-	// durable book parked — two implementations of one contract inside a single
-	// package, disagreeing. It gains the identity check by sharing the rule.
 	if err := fillfact.Validate(fill); err != nil {
 		return nil, err
 	}
-	// THE CLAIM BEFORE THE FOLD, WHICH IS WHAT position_fills DOES (#818). The
-	// Store contract this type satisfies says a fill already folded — by a
-	// redelivery, or by another pod — is not counted again; the durable book
-	// honoured that with an INSERT ... ON CONFLICT DO NOTHING whose RowsAffected
-	// it read, and this one honoured it not at all. Two implementations of one
-	// contract inside a single package, disagreeing about the answer that
-	// matters most: how much the fund holds.
-	//
-	// A double-counted fill does not fail. It publishes an ABSOLUTE
-	// PositionState on a compacted subject, and the risk engine, the compliance
-	// monitor and the OMS's own pre-trade gate all admit orders against it.
-	claimed := !b.appliedFills[fill.GetFillId()]
-	if claimed {
-		b.appliedFills[fill.GetFillId()] = true
+	scopedFillID := fillfact.ExecutionKey(fill)
+	original, duplicate := b.appliedFills[scopedFillID]
+	// The ephemeral implementation retains proof rather than evicting financial
+	// history. Once its explicit storage budget is full, require durable storage.
+	if !duplicate && len(b.appliedFills) >= maxPositionReplay {
+		return nil, ErrPositionHistoryUnknown
 	}
-
+	var revisedHistory []*orderpb.Fill
+	if duplicate {
+		if original.portfolio != portfolioID {
+			return nil, fillfact.ErrExecutionIdentityConflict
+		}
+		if fill.GetRecovery().GetFeeApproval() != nil {
+			_, fresh, err := fillfact.CheckMemoryFeeRevision(original.fill, original.revisions, fill)
+			if err != nil {
+				return nil, err
+			}
+			if fresh {
+				revisedHistory = append(append([]*orderpb.Fill(nil), original.revisions...), proto.Clone(fill).(*orderpb.Fill))
+			}
+		} else if !fillfact.SameExecution(fillfact.MemoryFeeHead(original.fill, original.revisions), fill) && !(fill.Recovery == nil && fillfact.SameExecution(original.fill, fill)) {
+			return nil, fillfact.ErrExecutionIdentityConflict
+		}
+	}
+	if scopedFillID != fill.GetFillId() {
+		if _, legacy := b.appliedFills[fill.GetFillId()]; legacy {
+			return nil, ErrPositionHistoryUnknown
+		}
+	} else {
+		for heldKey, held := range b.appliedFills {
+			if heldKey != scopedFillID && held.fill.GetFillId() == fill.GetFillId() {
+				return nil, ErrPositionHistoryUnknown
+			}
+		}
+	}
 	k := key{portfolioID, fill.GetVenue(), fill.GetInstrumentId()}
-	l := b.lots[k]
-	if l == nil {
-		l = zeroLot()
-		// A SKIPPED FOLD LEAVES NO HOLDING BEHIND, mirroring the durable store,
-		// which upserts `positions` only inside the same branch as the fold. A
-		// zero lot recorded here would surface from Snapshot as a position the
-		// fund does not hold.
-		if claimed {
-			b.lots[k] = l
-		}
+	current := b.lots[k]
+	next := zeroLot()
+	if current != nil {
+		next = &lot{Qty: new(big.Rat).Set(current.Qty), AvgCost: new(big.Rat).Set(current.AvgCost), Realized: new(big.Rat).Set(current.Realized)}
 	}
-
+	history := b.histories[k]
 	price := dec.FromProto(fill.GetPrice())
-	if claimed {
-		signed := dec.FromProto(fill.GetQuantity())
-		if fill.GetSide() == orderpb.Side_SIDE_SELL {
-			signed = new(big.Rat).Neg(signed)
+	var pending memoryExecution
+	var replay []memoryExecution
+	if !duplicate {
+		pending = memoryExecution{key: scopedFillID, portfolio: portfolioID, fill: proto.Clone(fill).(*orderpb.Fill), at: asOf.UTC()}
+		if fill.GetRecovery().GetFeeApproval() != nil {
+			if _, err := fillfact.FeeRevisionTerms(fill); err != nil {
+				return nil, err
+			}
+			pending.revisions = []*orderpb.Fill{proto.Clone(fill).(*orderpb.Fill)}
 		}
-		costbasis.Fold(l, signed, price)
+		pending.proven = fill.GetExecutedAt() != nil && fill.GetExecutedAt().CheckValid() == nil && fill.GetExecutedAt().AsTime().Unix() > 0
+		if pending.proven {
+			pending.at = fill.GetExecutedAt().AsTime()
+		}
+		complete := pending.proven
+		if len(history) > 0 {
+			complete = complete && history[len(history)-1].complete
+		}
+		pending.complete = complete
+		backdated := len(history) > 0 && memoryExecutionBefore(pending, history[len(history)-1])
+		if (backdated || fill.GetRecovery() != nil) && !complete {
+			return nil, ErrPositionHistoryUnknown
+		}
+		if backdated {
+			if len(history) >= maxPositionReplay {
+				return nil, ErrPositionHistoryUnknown
+			}
+			replay = append(append([]memoryExecution(nil), history...), pending)
+			sort.Slice(replay, func(i, j int) bool { return memoryExecutionBefore(replay[i], replay[j]) })
+			next = zeroLot()
+			for _, execution := range replay {
+				foldExecution(next, execution.fill)
+			}
+			latest := replay[len(replay)-1]
+			price = dec.FromProto(latest.fill.GetPrice())
+			if asOf.Before(latest.at) {
+				asOf = latest.at
+			}
+		} else {
+			foldExecution(next, fill)
+		}
+	} else if len(history) > 0 {
+		latest := history[len(history)-1]
+		price = dec.FromProto(latest.fill.GetPrice())
+		if asOf.Before(latest.at) {
+			asOf = latest.at
+		}
 	}
-
-	venueState, err := b.stateOf(portfolioID, fill.GetVenue(), fill.GetInstrumentId(), l, price, asOf)
+	venueState, err := b.stateOf(portfolioID, fill.GetVenue(), fill.GetInstrumentId(), next, price, asOf)
 	if err != nil {
 		return nil, err
 	}
-	aggState, err := b.stateOf(portfolioID, "", fill.GetInstrumentId(), b.aggregate(portfolioID, fill.GetInstrumentId()), price, asOf)
+	aggregate := costbasis.NewAggregator()
+	for existingKey, existing := range b.lots {
+		if existingKey != k && existingKey.portfolio == portfolioID && existingKey.instrument == fill.GetInstrumentId() {
+			aggregate.Add(existing)
+		}
+	}
+	aggregate.Add(next)
+	aggState, err := b.stateOf(portfolioID, "", fill.GetInstrumentId(), aggregate.Lot(), price, asOf)
 	if err != nil {
 		return nil, err
 	}
 	applied := &Applied{Venue: venueState, Aggregate: aggState}
-
-	// THE ANNOUNCEMENT HAPPENS UNDER b.mu, which is this store's whole equivalent
-	// of the transaction the durable one opens — the same argument
-	// order.MemoryStore.Create makes for enqueuing inside its lock hold. A
-	// permissive double certifies behaviour production does not have, and the
-	// behaviour under test here is that the FACT cannot be built from a fold
-	// another goroutine has already moved past.
 	if announce != nil {
-		records, aerr := announce(ctx, applied)
-		if aerr != nil {
-			return nil, aerr
+		records, err := announce(ctx, applied)
+		if err != nil {
+			return nil, err
 		}
 		if err := b.queue.Append(records...); err != nil {
 			return nil, err
 		}
 	}
+	// Only publish the staged in-memory writes after every fallible operation.
+	if duplicate && revisedHistory != nil {
+		original.revisions = revisedHistory
+		b.appliedFills[scopedFillID] = original
+	}
+	if !duplicate {
+		b.lots[k] = next
+		b.appliedFills[scopedFillID] = pending
+		if replay != nil {
+			b.histories[k] = replay
+		} else {
+			b.histories[k] = append(history, pending)
+		}
+	}
 	return applied, nil
+}
+
+type memoryExecution struct {
+	revisions        []*orderpb.Fill
+	key, portfolio   string
+	fill             *orderpb.Fill
+	at               time.Time
+	proven, complete bool
+}
+
+func memoryExecutionBefore(a, b memoryExecution) bool {
+	if a.at.Equal(b.at) {
+		return a.key < b.key
+	}
+	return a.at.Before(b.at)
 }
 
 // aggregate sums every venue's holding of one instrument into the fund's position — the

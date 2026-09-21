@@ -9,6 +9,7 @@ import (
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/proto"
 )
 
 // THE FILL CLAIM IS A STORE GUARANTEE, SO IT IS TESTED AT THE STORE (#782).
@@ -31,12 +32,16 @@ import (
 // and proved only that a path which folds nothing changes nothing.
 
 // claimFacts is one announcement, the shape a fill fold carries.
-func claimFacts(orderID string) []outbox.Record {
+func claimFacts(orderID, fillID string) []outbox.Record {
+	data, err := proto.Marshal(&orderpb.OrderFilled{OrderId: orderID, Fill: &orderpb.Fill{OrderId: orderID, FillId: fillID}})
+	if err != nil {
+		panic(err)
+	}
 	return []outbox.Record{{
 		Subject: EventTypeFilled, EventType: EventTypeFilled, PartitionKey: orderID,
 		EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: Domain,
 		PayloadSchemaRef: "order.v1.OrderFilled:1", EventTime: t0,
-		TenantID: testTenant, Payload: []byte{0x01},
+		TenantID: testTenant, Payload: data,
 	}}
 }
 
@@ -56,7 +61,7 @@ func TestMemoryStoreRefusesAFillItAlreadyHolds(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 
-	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), ver, claimFacts(id), "f1"); err != nil {
+	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), ver, claimFacts(id, "f1"), "f1"); err != nil {
 		t.Fatalf("first fold of f1: %v", err)
 	}
 	_, ver2, err := m.Load(ctx, id)
@@ -66,7 +71,7 @@ func TestMemoryStoreRefusesAFillItAlreadyHolds(t *testing.T) {
 
 	// The same fill again, at the CORRECT version — so nothing but the claim can
 	// refuse it. A version conflict would prove the wrong thing.
-	err = m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver2, claimFacts(id), "f1")
+	err = m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver2, claimFacts(id, "f1"), "f1")
 	if !errors.Is(err, ErrFillApplied) {
 		t.Fatalf("re-folding f1 returned %v, want ErrFillApplied. Without the claim the fold lands "+
 			"and filled_quantity and average_fill_price are silently double-counted", err)
@@ -88,7 +93,7 @@ func TestMemoryStoreRefusesAFillItAlreadyHolds(t *testing.T) {
 
 	// A DIFFERENT FILL STILL FOLDS. A claim that refused everything would satisfy
 	// the assertions above and break every partial execution on the platform.
-	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver2, claimFacts(id), "f2"); err != nil {
+	if err := m.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver2, claimFacts(id, "f2"), "f2"); err != nil {
 		t.Fatalf("folding a DIFFERENT fill f2: %v", err)
 	}
 }
@@ -138,7 +143,7 @@ func TestPostgresRefusesAFillItAlreadyHolds(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 
-	if err := st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), ver, claimFacts(id), "pgf1"); err != nil {
+	if err := st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), ver, claimFacts(id, "pgf1"), "pgf1"); err != nil {
 		t.Fatalf("first fold of pgf1: %v", err)
 	}
 	_, ver2, err := st.Load(ctx, id)
@@ -147,7 +152,7 @@ func TestPostgresRefusesAFillItAlreadyHolds(t *testing.T) {
 	}
 	queued := outboxDepth(t, pool)
 
-	err = st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver2, claimFacts(id), "pgf1")
+	err = st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver2, claimFacts(id, "pgf1"), "pgf1")
 	if !errors.Is(err, ErrFillApplied) {
 		t.Fatalf("re-folding pgf1 returned %v, want ErrFillApplied", err)
 	}
@@ -168,7 +173,7 @@ func TestPostgresRefusesAFillItAlreadyHolds(t *testing.T) {
 	}
 
 	// A different fill still folds, on the same order.
-	if err := st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver2, claimFacts(id), "pgf2"); err != nil {
+	if err := st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver2, claimFacts(id, "pgf2"), "pgf2"); err != nil {
 		t.Fatalf("folding a DIFFERENT fill pgf2: %v", err)
 	}
 }
@@ -215,7 +220,7 @@ func TestAClaimRollsBackWithTheFoldThatFailed(t *testing.T) {
 	}
 
 	// A STALE version: the claim is made, then the CAS refuses.
-	err = st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver+99, claimFacts(id), "rollback-f1")
+	err = st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver+99, claimFacts(id, "rollback-f1"), "rollback-f1")
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("a stale Save returned %v, want ErrConflict — this test needs the CAS to refuse "+
 			"AFTER the claim, or it proves nothing about the rollback", err)
@@ -223,7 +228,7 @@ func TestAClaimRollsBackWithTheFoldThatFailed(t *testing.T) {
 
 	// THE SAME FILL, AT THE RIGHT VERSION. If the claim committed outside the
 	// transaction it is still there, and this fold is refused forever.
-	if err := st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver, claimFacts(id), "rollback-f1"); err != nil {
+	if err := st.Save(ctx, state(id, orderpb.OrderStatus_ORDER_STATUS_FILLED), ver, claimFacts(id, "rollback-f1"), "rollback-f1"); err != nil {
 		t.Fatalf("re-folding after a ROLLED BACK fold returned %v, want success. The claim outlived "+
 			"the transaction that made it, so this fill can never be applied by anyone — the "+
 			"execution is lost, which is worse than the double-count the claim prevents", err)
@@ -265,10 +270,10 @@ func TestMemoryStoreAppliedFillsAnswersOnlyThisOrdersClaims(t *testing.T) {
 		t.Fatalf("AppliedFills = %v on an order that has folded nothing, want empty", held)
 	}
 
-	if err := m.Save(ctx, state(mine, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), 0, claimFacts(mine), "mine-f1"); err != nil {
+	if err := m.Save(ctx, state(mine, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), 0, claimFacts(mine, "mine-f1"), "mine-f1"); err != nil {
 		t.Fatalf("fold mine-f1: %v", err)
 	}
-	if err := m.Save(ctx, state(theirs, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), 0, claimFacts(theirs), "theirs-f1"); err != nil {
+	if err := m.Save(ctx, state(theirs, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), 0, claimFacts(theirs, "theirs-f1"), "theirs-f1"); err != nil {
 		t.Fatalf("fold theirs-f1: %v", err)
 	}
 
@@ -320,14 +325,14 @@ func TestPostgresAppliedFillsAnswersOnlyThisOrdersClaims(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load %s: %v", mine, err)
 	}
-	if err := st.Save(ctx, state(mine, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), ver, claimFacts(mine), "applied-pgf1"); err != nil {
+	if err := st.Save(ctx, state(mine, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), ver, claimFacts(mine, "applied-pgf1"), "applied-pgf1"); err != nil {
 		t.Fatalf("fold applied-pgf1: %v", err)
 	}
 	_, tver, err := st.Load(ctx, theirs)
 	if err != nil {
 		t.Fatalf("load %s: %v", theirs, err)
 	}
-	if err := st.Save(ctx, state(theirs, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), tver, claimFacts(theirs), "applied-pgf2"); err != nil {
+	if err := st.Save(ctx, state(theirs, orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED), tver, claimFacts(theirs, "applied-pgf2"), "applied-pgf2"); err != nil {
 		t.Fatalf("fold applied-pgf2: %v", err)
 	}
 

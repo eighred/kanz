@@ -31,6 +31,7 @@ syntax = "proto3";
 package venue.v1;
 
 import "order/v1/order.proto";
+import "common/v1/decimal.proto";
 import "order/v1/order_events.proto";
 
 // VenueAdapterService is one exchange, out of process. One adapter serves one venue;
@@ -363,6 +364,11 @@ message QueryOrderResponse {
   // the quarantine record an operator reads. It is the only thing that tells
   // them WHICH exchange condition froze the order.
   string reason = 3;
+
+  // Exact cumulative execution quantity reported by the order endpoint.
+  // Recovery verifies that the individual execution history sums to this
+  // quantity. Absent means completeness was not established.
+  common.v1.Decimal executed_quantity = 4;
 }
 
 message ListInstrumentsRequest {}

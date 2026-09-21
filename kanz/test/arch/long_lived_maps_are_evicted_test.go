@@ -680,9 +680,18 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"admission. A flat lot is retained deliberately: it carries cumulative realised P&L, and " +
 			"nothing re-derives that if the entry goes.", ""},
 	"services/oms/internal/position: Book.appliedFills": {isTheStore,
-		"keyed by fill_id, and the field's own comment already argues this: it grows without bound and " +
-			"so does position_fills, which is a cost of the store rather than a defect of the claim " +
-			"(#818).", ""},
+		"the scoped execution claim and immutable evidence, capped at maxPositionReplay total entries. " +
+			"Evicting a claim would double-book a later redelivery; the capacity test proves refusal " +
+			"without forgetting a previously booked execution.", ""},
+	"services/oms/internal/position: Book.histories": {isTheStore,
+		"the chronological execution journal required to reconstruct cost basis after a late fill. " +
+			"Apply refuses new executions at maxPositionReplay TOTAL claims before creating any history key; " +
+			"TestMemoryExecutionHistoryCapacityRefusesWithoutEvictingEvidence proves the cap and retention. " +
+			"Eviction would fabricate a zero opening balance. Production uses PostgreSQL.", ""},
+	"services/oms/internal/position: Book.histories[]": {isTheStore,
+		"each slice contains only executions also claimed by appliedFills, whose global maxPositionReplay " +
+			"capacity bounds the sum of all histories. TestMemoryExecutionHistoryCapacityRefusesWithoutEvictingEvidence " +
+			"proves refusal without losing an earlier execution or its idempotency claim.", ""},
 	"services/schema-registry/internal/storage: Memory.schemas": {isTheStore,
 		"keyed by (schema_id, version), which is immutable once published — the registry's content, " +
 			"not a cache of it. A version that disappeared would make an already-published payload " +

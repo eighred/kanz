@@ -221,7 +221,7 @@ fi
 # if a table is in neither this list nor a verified arm — a new RLS'd table
 # cannot silently widen the unchecked surface, it has to be triaged. Same shape
 # as the archiver's unbackedByDesign map.
-UNVERIFIED_RLS_TABLES="oms:orders,positions,position_fills,order_fills,outbox,order_proposals alternatives:fund_events datamaster:golden_records,exceptions,exception_overrides,exception_override_proposals,outbox wealth:households tv-sync:tv_facts,tv_checkpoints venue-binance:venue_orders,venue_pending_closes venue-okx:venue_orders,venue_pending_closes"
+UNVERIFIED_RLS_TABLES="oms:orders,positions,position_fills,order_fills,outbox,order_proposals,execution_account_mappings,execution_recovery_cases,execution_recovery_history,execution_recovery_targets,execution_recovery_acks,order_executions,position_execution_history,position_execution_basis,execution_fee_revisions,execution_fee_proposals,execution_fee_approvals alternatives:fund_events datamaster:golden_records,exceptions,exception_overrides,exception_override_proposals,outbox wealth:households tv-sync:tv_facts,tv_checkpoints venue-binance:venue_orders,venue_pending_closes venue-okx:venue_orders,venue_pending_closes"
 
 if step storage; then
   echo "-- [1/6] verify RLS isolation is active (kanz-risk, kanz-books)"
@@ -251,7 +251,7 @@ if step storage; then
     # ARRAY[...]` loop, not individual `ALTER TABLE x FORCE` statements).
     case "$c" in
       kanz-risk)  tables="portfolios positions applied_keys"; db="$RISK_DB_NAME" ;;
-      kanz-books) tables="ledger_entries ledger_snapshots outbox custody_statements custody_runs custody_breaks custody_actions collateral_snapshots collateral_workflows collateral_reservations collateral_requests collateral_confirmations collateral_active_agreements collateral_lots collateral_allocation_proofs cash_commands"; db="$BOOKS_DB_NAME" ;;
+      kanz-books) tables="ledger_entries ledger_snapshots outbox custody_statements custody_runs custody_breaks custody_actions collateral_snapshots collateral_workflows collateral_reservations collateral_requests collateral_confirmations collateral_active_agreements collateral_lots collateral_allocation_proofs cash_commands execution_fee_revisions"; db="$BOOKS_DB_NAME" ;;
       *) echo "FATAL: no table set declared for $c" >&2; exit 1 ;;
     esac
     expected="$(set -- $tables; echo $#)"
@@ -381,6 +381,10 @@ if step compute; then
   echo "         to: \"order.order.cancel\" }"
   echo "       { stream: { account: __system__, subject: \"tenant.${TENANT}.order.order.approve\" }"
   echo "         to: \"order.order.approve\" }"
+  echo "       { stream: { account: __system__, subject: \"tenant.${TENANT}.order.order.propose_fee_correction\" }"
+  echo "         to: \"order.order.propose_fee_correction\" }"
+  echo "       { stream: { account: __system__, subject: \"tenant.${TENANT}.order.order.approve_fee_correction\" }"
+  echo "         to: \"order.order.approve_fee_correction\" }"
   echo "       { stream: { account: __system__, subject: \"platform.mode.changed\" } }"
   echo "     ]"
   echo ""

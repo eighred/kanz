@@ -168,9 +168,10 @@ func (v *GRPCVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (Ord
 		return OrderView{}, fmt.Errorf("venue %s: query order %s: %w", v.mic, st.GetOrderId(), err)
 	}
 	return OrderView{
-		State:  orderViewState(resp.GetState()),
-		Fills:  resp.GetFills(),
-		Reason: resp.GetReason(),
+		State:            orderViewState(resp.GetState()),
+		Fills:            resp.GetFills(),
+		Reason:           resp.GetReason(),
+		ExecutedQuantity: resp.GetExecutedQuantity(),
 	}, nil
 }
 

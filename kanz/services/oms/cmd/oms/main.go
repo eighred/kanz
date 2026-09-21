@@ -19,6 +19,7 @@ import (
 
 	comp "github.com/eighred/kanz/internal/compliance"
 	"github.com/eighred/kanz/internal/execution"
+	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/mark"
 	"github.com/eighred/kanz/internal/outbox"
@@ -691,6 +692,12 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	if err != nil {
 		return false, err
 	}
+	// A parked recovery is already durable on the DLQ. If its lifecycle update
+	// fails, retry that delivery rather than moving it into a nested DLQ.
+	recoveryFailures, err := recoveryFailureConsumer(client, busMetrics)
+	if err != nil {
+		return false, err
+	}
 
 	// group is per-subscription, NOT one shared name. Two handlers on the SAME
 	// subject under the SAME durable group LOAD-BALANCE: each would receive a
@@ -706,6 +713,14 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	for _, s := range cfg.CommandSubjects() {
 		subs = append(subs, sub{s, cfg.ConsumerGroup, svc.Handle})
 	}
+	subs = append(subs,
+		sub{order.SubjectFeePropose, cfg.ConsumerGroup + "-fee-propose", svc.HandleFeeCorrection},
+		sub{order.SubjectFeeApprove, cfg.ConsumerGroup + "-fee-approve", svc.HandleFeeCorrection},
+		sub{execution.SubjectStateHealed, cfg.ConsumerGroup + "-recovery", svc.HandleRecovery},
+		sub{fillfact.SubjectRecovered, cfg.ConsumerGroup + "-recovery-position", projector.Handle},
+		sub{fillfact.RecoveryPositionApplied, cfg.ConsumerGroup + "-recovery-ack", svc.HandleRecoveryAck},
+		sub{fillfact.RecoveryLedgerApplied, cfg.ConsumerGroup + "-recovery-ack", svc.HandleRecoveryAck},
+	)
 	// REALIZED EXECUTION COST, PER FILL, BY VENUE (#436).
 	//
 	// A THIRD consumer of the same fill FACTs, on its own durable group so it
@@ -896,6 +911,14 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 			}
 		}(s)
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := recoveryFailures.Subscribe(ctx, "dlq.order.order.execution_recovered", cfg.ConsumerGroup+"-recovery-failures", svc.HandleRecoveryParked)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			once.Do(func() { firstErr = err; cancel() })
+		}
+	}()
 	// THE CASH SPINE — BROADCAST, NOT A WORK QUEUE, for exactly the reason the
 	// price spine above and the mandate registry below are (#450).
 	//
@@ -1332,6 +1355,10 @@ mandateArmWait:
 	wg.Wait()
 	readiness.Set(false)
 	return true, firstErr
+}
+
+func recoveryFailureConsumer(client bus.Client, metrics *bus.BusMetrics) (*bus.Consumer, error) {
+	return bus.NewConsumer(client, bus.WithBusMetrics(metrics), bus.WithDLQ(client))
 }
 
 // openStore selects the durable Postgres order store when a DSN is set

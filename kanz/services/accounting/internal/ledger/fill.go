@@ -3,6 +3,7 @@ package ledger
 import (
 	"fmt"
 	"github.com/eighred/kanz/internal/fillfact"
+	"google.golang.org/protobuf/proto"
 	"math/big"
 	"time"
 
@@ -75,9 +76,14 @@ func FromFill(portfolioID string, fill *orderpb.Fill, cashCurrency string, knowl
 		eff = knowledge
 	}
 	basis, settlementDate := fillSettlement(eff)
+	evidence, err := proto.MarshalOptions{Deterministic: true}.Marshal(fill)
+	if err != nil {
+		return nil, err
+	}
 	return &Event{
-		EntryID:     "fill:" + fill.GetFillId(),
-		PortfolioID: portfolioID,
+		ExecutionEvidence: evidence,
+		EntryID:           "fill:" + fillfact.ExecutionKey(fill),
+		PortfolioID:       portfolioID,
 		// The account the fill SETTLED against — reported by the venue that executed
 		// it, not inferred from the order's intent. Where the cash actually went is
 		// the only thing a book of record may say about where the cash went.

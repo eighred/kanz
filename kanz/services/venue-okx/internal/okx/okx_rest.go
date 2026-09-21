@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
@@ -157,6 +159,7 @@ func (c *okxREST) queryOrder(ctx context.Context, instID, clOrdID string) (*okxO
 // execution two names, and the order aggregate and the position book both make
 // folding exactly-once by deduping on that name.
 type okxFill struct {
+	BillID  string `json:"billId"`
 	InstID  string `json:"instId"`
 	TradeID string `json:"tradeId"`
 	OrdID   string `json:"ordId"`
@@ -199,11 +202,59 @@ type okxFill struct {
 // as a venue refusal. The caller decides what an empty answer means, and its two
 // callers answer it differently — see okx_venue.go's tradedFills.
 func (c *okxREST) fillsHistory(ctx context.Context, instID, ordID string) ([]okxFill, error) {
+	const pageSize = 100
+	const maxPages = 8
+	var all []okxFill
+	cursor := ""
+	for page := 0; page < maxPages; page++ {
+		trades, err := c.fillsHistoryPage(ctx, instID, ordID, cursor)
+		if err != nil {
+			return nil, err
+		}
+		if len(trades) > pageSize {
+			return nil, fmt.Errorf("okx: trade history exceeds requested page size")
+		}
+		for _, trade := range trades {
+			if (trade.InstID != "" && trade.InstID != instID) || trade.OrdID != ordID {
+				return nil, fmt.Errorf("okx: trade history scope mismatch")
+			}
+		}
+		all = append(all, trades...)
+		// OKX's `after` walks backwards by billId, not tradeId. Require
+		// every full page to make strict progress before asking for more.
+		for _, trade := range trades {
+			if cursor == "" && len(trades) < pageSize {
+				break
+			}
+			id, ok := new(big.Int).SetString(trade.BillID, 10)
+			if !ok || id.Sign() <= 0 {
+				return nil, fmt.Errorf("okx: missing trade history cursor")
+			}
+			if cursor != "" {
+				previous, _ := new(big.Int).SetString(cursor, 10)
+				if id.Cmp(previous) >= 0 {
+					return nil, fmt.Errorf("okx: trade history cursor did not advance")
+				}
+			}
+			cursor = trade.BillID
+		}
+		if len(trades) < pageSize {
+			return all, nil
+		}
+	}
+	return nil, fmt.Errorf("okx: trade history exceeds bounded query; completeness unknown")
+}
+
+func (c *okxREST) fillsHistoryPage(ctx context.Context, instID, ordID, after string) ([]okxFill, error) {
 	if !c.buckets.allow(familyFillsHistory, 1) {
 		c.onThrottle()
 		return nil, ErrRateLimited
 	}
-	path := "/api/v5/trade/fills-history?instType=SPOT&instId=" + instID + "&ordId=" + ordID
+	params := url.Values{"instType": {"SPOT"}, "instId": {instID}, "ordId": {ordID}, "limit": {"100"}}
+	if after != "" {
+		params.Set("after", after)
+	}
+	path := "/api/v5/trade/fills-history?" + params.Encode()
 	raw, err := c.signedRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err

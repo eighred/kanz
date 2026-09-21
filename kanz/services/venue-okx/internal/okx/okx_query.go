@@ -55,6 +55,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/execution"
 	"math/big"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -231,7 +232,12 @@ func okxStateWithdrawn(state string) bool {
 //
 // Split out from QueryOrder so a test can drive every OKX state without an HTTP
 // server.
-func okxOrderView(st *orderpb.OrderState, state, accFillSz string, fetch func() ([]*orderpb.Fill, error)) (OrderView, error) {
+func okxOrderView(st *orderpb.OrderState, state, accFillSz string, fetch func() ([]*orderpb.Fill, error)) (result OrderView, err error) {
+	defer func() {
+		if err == nil {
+			result = execution.WithExecutionTotal(result, accFillSz)
+		}
+	}()
 	switch {
 	case state == "live":
 		return OrderView{State: OrderViewWorking}, nil

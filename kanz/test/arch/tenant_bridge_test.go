@@ -63,7 +63,7 @@ var nonTenantAccounts = map[string]bool{"SYS": true, "__system__": true}
 // across the bridge but not approve would have every large order stick.
 // Deliberately still no order.order.amend: the gateway does not publish it, so
 // bridging it would open a path nothing uses.
-var bridgedSubjects = []string{"order.order.submit", "order.order.cancel", "order.order.approve"}
+var bridgedSubjects = []string{"order.order.submit", "order.order.cancel", "order.order.approve", "order.order.propose_fee_correction", "order.order.approve_fee_correction"}
 
 // platformWideImports are the subjects every tenant account imports UNPREFIXED,
 // because there is exactly one of them for the whole estate (#635).

@@ -468,6 +468,109 @@ message Fill {
 
   // executed_at is the venue execution timestamp. Required.
   google.protobuf.Timestamp executed_at = 10;
+
+  // Present when this execution was recovered from verified venue history.
+  // This is provenance, never authority to place or reopen an order.
+  ExecutionRecoveryProvenance recovery = 12;
+}
+
+message ExecutionRecoveryProvenance {
+  string case_id = 1;
+  string mapping_version = 2;
+  string source_cursor = 3;
+  string payload_digest = 4;
+  google.protobuf.Timestamp observed_at = 5;
+  string execution_digest = 6;
+  ExecutionFeeApproval fee_approval = 7;
+}
+
+// A fee-only revision authorized by two different authenticated principals.
+// Original trade economics remain immutable. Books append the fee difference.
+message ExecutionFeeApproval {
+  string proposal_id = 1;
+  string digest = 2;
+  string proposer = 3;
+  string approver = 4;
+  google.protobuf.Timestamp approved_at = 5;
+  string previous_execution_digest = 6;
+  common.v1.Money previous_fee = 7;
+}
+
+message ExecutionFeeChange {
+  Fill previous = 1;
+  Fill revised = 2;
+}
+
+// The exact reviewed terms; the authority comes from authenticated command
+// metadata and the OMS's durable dual-control claim, never from a venue.
+message ExecutionFeeCorrectionProposed {
+  string case_id = 1;
+  string order_id = 2;
+  string portfolio_id = 3;
+  string mapping_version = 4;
+  string history_digest = 5;
+  string digest = 6;
+  string proposer = 7;
+  google.protobuf.Timestamp proposed_at = 8;
+  google.protobuf.Timestamp expires_at = 9;
+  repeated ExecutionFeeChange changes = 10;
+  string reason = 11;
+}
+
+message ExecutionFeeCorrectionApproved {
+  string case_id = 1;
+  string order_id = 2;
+  string portfolio_id = 3;
+  string digest = 4;
+  string proposer = 5;
+  string approver = 6;
+  google.protobuf.Timestamp approved_at = 7;
+}
+
+// Immutable, complete history selected for one recovery case. The cumulative
+// quantity is independently observed at the venue, never calculated from fills.
+message ExecutionRecoveryHistory {
+  string order_id = 1;
+  string mapping_version = 2;
+  repeated Fill fills = 3;
+  common.v1.Decimal executed_quantity = 4;
+  google.protobuf.Timestamp observed_at = 5;
+}
+
+// ExecutionRecoveryRecorded is the durable investigation/correction status.
+// A blocked case is unresolved even when no new discrepancy arrives.
+message ExecutionRecoveryRecorded {
+  string case_id = 1;
+  string order_id = 2;
+  string portfolio_id = 3;
+  string venue = 4;
+  string venue_account_id = 5;
+  string mapping_version = 6;
+  string source_cursor = 7;
+  string payload_digest = 8;
+  string status = 9;
+  string reason = 10;
+  uint32 checkpoint = 11;
+  google.protobuf.Timestamp recorded_at = 12;
+}
+
+// ExecutionRecovered requests idempotent book reconciliation against frozen
+// execution evidence. It is separate from a new-fill lifecycle announcement:
+// already booked executions must not count again in execution-cost consumers.
+message ExecutionRecovered {
+  Fill fill = 1;
+  OrderState state = 2;
+}
+
+// Published only after a recovered execution has committed in the named book.
+// Separate ledger/position subjects bind the acknowledgement to its producer.
+message ExecutionRecoveryApplied {
+  string case_id = 1;
+  string order_id = 2;
+  string execution_key = 3;
+  string payload_digest = 4;
+  google.protobuf.Timestamp recorded_at = 5;
+  string execution_digest = 6;
 }
 
 // OrderAccepted is the FACT that an order passed validation, authority, and

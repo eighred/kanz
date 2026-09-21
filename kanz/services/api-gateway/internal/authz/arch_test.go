@@ -184,6 +184,11 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// name collides with the trade role — the segregation is configuration the
 		// process will not run without, not a convention.
 		"POST /v1/orders/{id}/approve": authz.Approve,
+		// Fee corrections retain the same separation of duties: read immutable
+		// portfolio-scoped terms, propose with Trade, authorize with Approve.
+		"GET /v1/portfolios/{id}/execution-recoveries/{case}/fee-correction":      authz.Read,
+		"POST /v1/orders/{id}/execution-recoveries/{case}/fee-correction/propose": authz.Trade,
+		"POST /v1/orders/{id}/execution-recoveries/{case}/fee-correction/approve": authz.Approve,
 
 		// MODEL PORTFOLIOS (#409), and the guard's prompt is the whole point here.
 		//

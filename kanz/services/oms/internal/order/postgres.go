@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/outbox"
 )
 
@@ -205,12 +206,39 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 	// claiming before the CAS means the rollback has nothing to undo rather than
 	// something to be trusted to undo. It also puts the cheapest refusal first.
 	if fillID != "" {
-		claimed, cerr := p.claimFill(ctx, tx, st.GetOrderId(), fillID)
+		fill, err := announcedExecution(st.GetOrderId(), fillID, announce)
+		if err != nil {
+			return err
+		}
+		key := fillID
+		if fill != nil {
+			key = fillfact.ExecutionKey(fill)
+		}
+		if key != fillID {
+			var legacyOrder string
+			err := tx.QueryRow(ctx, `SELECT order_id FROM order_fills WHERE fill_id=$1`, fillID).Scan(&legacyOrder)
+			if err == nil {
+				if legacyOrder == st.GetOrderId() {
+					return ErrFillApplied
+				}
+				return fmt.Errorf("%w: legacy fill alias belongs to another order", fillfact.ErrExecutionIdentityConflict)
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+		}
+		claimed, cerr := p.claimFill(ctx, tx, st.GetOrderId(), key, fillID)
 		if cerr != nil {
 			return cerr
 		}
 		if !claimed {
+			if err := verifyDuplicateExecution(ctx, tx, fill); err != nil {
+				return err
+			}
 			return ErrFillApplied
+		}
+		if err := journalExecution(ctx, tx, st.GetOrderId(), fillID, announce); err != nil {
+			return err
 		}
 	}
 	// THE CAS SECOND, THE ANNOUNCEMENT THIRD. A conflict means another writer
@@ -234,8 +262,8 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 // reintroduce the check-then-act window two replicas reconciling the same order
 // would drive straight through.
 const claimFillSQL = `
-	INSERT INTO order_fills (tenant_id, order_id, fill_id)
-	VALUES (current_setting('app.tenant_id'), $1, $2)
+	INSERT INTO order_fills (tenant_id, order_id, fill_id, raw_fill_id)
+	VALUES (current_setting('app.tenant_id'), $1, $2, $3)
 	ON CONFLICT (tenant_id, fill_id) DO NOTHING
 `
 
@@ -248,8 +276,8 @@ const claimFillSQL = `
 // folding it into both aggregates is the worst available outcome. Keyed this
 // way the second order's fold is refused and the operator gets an order that
 // will not advance, which is the failure that gets looked at.
-func (p *Postgres) claimFill(ctx context.Context, db execer, orderID, fillID string) (bool, error) {
-	tag, err := db.Exec(ctx, claimFillSQL, orderID, fillID)
+func (p *Postgres) claimFill(ctx context.Context, db execer, orderID, fillID, rawFillID string) (bool, error) {
+	tag, err := db.Exec(ctx, claimFillSQL, orderID, fillID, rawFillID)
 	if err != nil {
 		return false, fmt.Errorf("claim fill %s for order %s: %w", fillID, orderID, err)
 	}
@@ -266,7 +294,7 @@ func (p *Postgres) claimFill(ctx context.Context, db execer, orderID, fillID str
 // and an empty set is the one wrong answer here, because it makes every fill look
 // new and walks the caller back into the over-fill quarantine this read exists to
 // prevent.
-const appliedFillsSQL = `SELECT fill_id FROM order_fills WHERE order_id = $1`
+const appliedFillsSQL = `SELECT COALESCE(NULLIF(raw_fill_id,''),fill_id) FROM order_fills WHERE order_id = $1`
 
 // AppliedFills reads the claims committed for one order. See Store.AppliedFills
 // for why the result may only be used to SKIP a fold and never to permit one.

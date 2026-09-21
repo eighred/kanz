@@ -3,7 +3,9 @@ package execution
 import (
 	"context"
 	"fmt"
+	"github.com/eighred/kanz/internal/dec"
 
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 )
 
@@ -87,6 +89,9 @@ func (s OrderViewState) String() string {
 // folds on fill_id (position_fills), so a venue that renames its fills when
 // re-queried turns exactly-once into double-counting.
 type OrderView struct {
+	// ExecutedQuantity is the independent order-endpoint total. Recovery refuses
+	// absent totals or a trade list that does not reconcile exactly to it.
+	ExecutedQuantity *commonpb.Decimal
 	// State is the venue's verdict. Zero value quarantines.
 	State OrderViewState
 	// Fills are the executions the venue attributes to this order, for the
@@ -135,4 +140,15 @@ type OrderView struct {
 // two turns a network blip into a re-driven order.
 type Querier interface {
 	QueryOrder(ctx context.Context, st *orderpb.OrderState) (OrderView, error)
+}
+
+// WithExecutionTotal preserves the independent venue total needed to establish
+// history completeness. Missing, malformed, or negative totals remain unknown.
+func WithExecutionTotal(view OrderView, raw string) OrderView {
+	view.ExecutedQuantity = nil
+	quantity, ok := ParseDec(raw)
+	if ok && dec.FromProto(quantity).Sign() >= 0 {
+		view.ExecutedQuantity = quantity
+	}
+	return view
 }

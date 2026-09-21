@@ -90,6 +90,9 @@ import (
 type Act string
 
 const (
+	// ActExecutionFeeCorrection changes a previously booked execution's fee.
+	// It never authorizes changing its quantity, price, account, or timestamp.
+	ActExecutionFeeCorrection Act = "EXECUTION_FEE_CORRECTION"
 	// ActPricingOverride is a human override of a pricing-oversight exception —
 	// the first act wired, chosen because it is one endpoint with a durable
 	// append-only trail whose actor is authenticated (#444).

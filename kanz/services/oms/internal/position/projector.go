@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/eighred/kanz/internal/fillfact"
+	"time"
 
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -81,6 +82,14 @@ func (p *Projector) Handle(ctx context.Context, env *envelopepb.Envelope, payloa
 	if fill == nil {
 		return nil // not a fill-bearing event; ack
 	}
+	if fill.GetRecovery() != nil {
+		if env.GetEventType() != fillfact.SubjectRecovered || env.GetEventClass() != envelopepb.EventClass_EVENT_CLASS_FACT {
+			return errors.New("position: recovery provenance requires a recovery FACT")
+		}
+		if err := fillfact.RequireRecoveryTenant(env, p.tenant); err != nil {
+			return err
+		}
+	}
 	// THE ENTITY THE FOLD IS ORDERED ON, and therefore the key both FACTs are
 	// announced under: (tenant, portfolio, instrument) — exactly the advisory
 	// lock the durable store holds from before its first write to its commit.
@@ -100,7 +109,21 @@ func (p *Projector) Handle(ctx context.Context, env *envelopepb.Envelope, payloa
 
 	if _, err := p.book.Apply(ctx, portfolioID, fill, fill.GetExecutedAt().AsTime(),
 		func(ctx context.Context, a *Applied) ([]outbox.Record, error) {
-			return p.records(ctx, key, portfolioID, fill, a)
+			records, err := p.records(ctx, key, portfolioID, fill, a)
+			if err != nil {
+				return nil, err
+			}
+			ack, err := fillfact.RecoveryAck(ctx, fillfact.RecoveryPositionApplied, fill, time.Now())
+			if err != nil {
+				return nil, err
+			}
+			if ack != nil {
+				// Same partition as the position facts: the instrument lock orders
+				// all records produced by this transaction.
+				ack.PartitionKey = key
+				records = append(records, *ack)
+			}
+			return records, nil
 		}); err != nil {
 		// Never announce a position we could not fold. A PositionState built from a failed
 		// write is a number the risk engine, the compliance monitor and the pre-trade gate
@@ -181,6 +204,8 @@ func (p *Projector) record(ctx context.Context, key, subj, eventType string, st 
 // This is the last point at which the whole message is in one place to refuse.
 func decodeFill(eventType string, payload []byte) (*orderpb.Fill, string, error) {
 	switch eventType {
+	case fillfact.SubjectRecovered:
+		return fillfact.DecodeRecovery(payload)
 	case orderEventFilled:
 		var ev orderpb.OrderFilled
 		if err := proto.Unmarshal(payload, &ev); err != nil {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
@@ -630,6 +631,7 @@ func runConsumer(ctx context.Context, cfg config.Config, custodyCfg custodyConfi
 	for _, subject := range cfg.FillSubjects {
 		subscribe(subject, folder.Handle)
 	}
+	subscribe(fillfact.SubjectRecovered, folder.Handle)
 	for _, subject := range cfg.CashSubjects {
 		subscribe(subject, folder.HandleCash)
 	}

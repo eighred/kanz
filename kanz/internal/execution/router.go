@@ -129,12 +129,12 @@ func (r *Router) DefaultVenue() (Venue, bool) {
 	case r.defaultMIC != "":
 		for _, v := range r.venues {
 			if v.MIC() == r.defaultMIC {
-				return v, true
+				return operationalVenue(v), true
 			}
 		}
 		return nil, false
 	case len(r.venues) == 1:
-		return r.venues[0], true
+		return operationalVenue(r.venues[0]), true
 	default:
 		return nil, false
 	}
@@ -170,7 +170,7 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 			if account != "" && v.Account() != account {
 				continue // right venue, WRONG COLLATERAL — keep looking
 			}
-			return v, nil
+			return operationalVenue(v), nil
 		}
 		if account != "" {
 			return nil, fmt.Errorf("%w: no adapter at %q holds account %q", ErrVenueNotConfigured, target, account)
@@ -213,7 +213,7 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 		if mic, ok := r.ranker.Preferred(placeable); ok {
 			for _, v := range r.venues {
 				if v.MIC() == mic {
-					return v, nil
+					return operationalVenue(v), nil
 				}
 			}
 			// The ranker named a venue this router does not hold. Nothing to do
@@ -240,7 +240,7 @@ func (r *Router) Route(st *orderpb.OrderState) (Venue, error) {
 	if len(placeable) == 1 {
 		for _, cand := range r.venues {
 			if cand.MIC() == placeable[0] {
-				return cand, nil
+				return operationalVenue(cand), nil
 			}
 		}
 	}
@@ -385,7 +385,7 @@ func (r *Router) SupportsOrderType(mic string, t orderpb.OrderType) bool {
 		if v.MIC() != mic {
 			continue
 		}
-		if aware, ok := v.(OrderTypeAware); ok {
+		if aware, ok := venueCapability[OrderTypeAware](v); ok {
 			return aware.SupportsOrderType(t)
 		}
 		return true
@@ -487,7 +487,7 @@ func (r *Router) SupportsTimeInForce(mic string, t orderpb.TimeInForce) bool {
 		if v.MIC() != mic {
 			continue
 		}
-		if aware, ok := v.(TimeInForceAware); ok {
+		if aware, ok := venueCapability[TimeInForceAware](v); ok {
 			return aware.SupportsTimeInForce(t)
 		}
 		return true
@@ -578,7 +578,7 @@ func (r *Router) SupportsMarginMode(mic string, m orderpb.MarginMode) bool {
 		if v.MIC() != mic {
 			continue
 		}
-		if aware, ok := v.(MarginModeAware); ok {
+		if aware, ok := venueCapability[MarginModeAware](v); ok {
 			return aware.SupportsMarginMode(m)
 		}
 		return true

@@ -98,8 +98,11 @@ func (t EntryType) String() string {
 // accounting.v1.LedgerEntry. Money and quantity are exact (*big.Rat); the journal
 // is append-only, so a correction is a new offsetting Event, never a mutation.
 type Event struct {
-	EntryID     string
-	PortfolioID string
+	// ExecutionEvidence preserves exact venue execution economics and recovery
+	// provenance; the immutable journal must retain more than a dedup alias.
+	ExecutionEvidence []byte
+	EntryID           string
+	PortfolioID       string
 	// VenueAccountID is the EXCHANGE ACCOUNT whose collateral this entry moved.
 	//
 	// The ledger has always kept cash per PORTFOLIO. An exchange does not: it margins

@@ -368,6 +368,23 @@ message CancelOrder {
   string order_id = 2;
 }
 
+// Requests review of fee-only changes in a frozen recovery history. The OMS
+// derives the old and new terms from durable evidence; callers cannot supply
+// substitute executions or principals.
+message ProposeExecutionFeeCorrection {
+  command.v1.CommandMetadata metadata = 1;
+  string order_id = 2;
+  string case_id = 3;
+  string reason = 4;
+}
+
+message ApproveExecutionFeeCorrection {
+  command.v1.CommandMetadata metadata = 1;
+  string order_id = 2;
+  string case_id = 3;
+  string digest = 4;
+}
+
 // ApproveOrder gives the SECOND SIGNATURE on an order the OMS is holding
 // (#539, #410 act three).
 //

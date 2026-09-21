@@ -40,6 +40,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/execution"
 	"math/big"
 	"time"
 
@@ -61,7 +62,7 @@ const binanceOrderDoesNotExist = -2013
 //
 // It satisfies execution.Querier, which the venue adapter's gRPC face serves to
 // the OMS. Safe to call repeatedly: it places nothing and mutates nothing.
-func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (OrderView, error) {
+func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (result OrderView, err error) {
 	if st == nil {
 		return OrderView{}, errors.New("binance: nil order state")
 	}
@@ -98,6 +99,11 @@ func (v *BinanceVenue) QueryOrder(ctx context.Context, st *orderpb.OrderState) (
 		return OrderView{}, err
 	}
 
+	defer func() {
+		if err == nil {
+			result = execution.WithExecutionTotal(result, resp.ExecutedQty)
+		}
+	}()
 	switch resp.Status {
 	case "NEW":
 		return OrderView{State: OrderViewWorking}, nil

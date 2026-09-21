@@ -389,9 +389,10 @@ func (s *Server) QueryOrder(ctx context.Context, req *venuepb.QueryOrderRequest)
 			"venue: could not ask %s about order %s: %v", s.venue.MIC(), st.GetOrderId(), err)
 	}
 	return &venuepb.QueryOrderResponse{
-		State:  execution.OrderViewStateProto(view.State),
-		Fills:  view.Fills,
-		Reason: view.Reason,
+		State:            execution.OrderViewStateProto(view.State),
+		Fills:            view.Fills,
+		Reason:           view.Reason,
+		ExecutedQuantity: view.ExecutedQuantity,
 	}, nil
 }
 
