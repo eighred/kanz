@@ -1,0 +1,12 @@
+# #1271: the BFF and its tunnel image come from the same verified main build.
+# Identity, gateway and the capital-path workloads retain their release pins.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-bff
+  namespace: kanz-services
+spec:
+  template:
+    metadata:
+      labels:
+        kanz.io/release: 33858a909df304ced9779344c87ed1e25a8cb237
