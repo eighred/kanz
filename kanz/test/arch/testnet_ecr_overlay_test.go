@@ -20,12 +20,27 @@ type testnetKustomization struct {
 	Kind              string            `yaml:"kind"`
 	Resources         []string          `yaml:"resources"`
 	CommonAnnotations map[string]string `yaml:"commonAnnotations"`
-	Images            []struct {
+	Replacements      []struct {
+		Source struct {
+			Kind      string
+			Name      string
+			FieldPath string
+		}
+		Targets []struct {
+			Select struct {
+				Kind string
+				Name string
+			}
+			FieldPaths []string
+		}
+	}
+	Images []struct {
 		Name    string `yaml:"name"`
 		NewName string `yaml:"newName"`
 		Digest  string `yaml:"digest"`
 	} `yaml:"images"`
 	Patches []struct {
+		Path   string
 		Target struct {
 			Group   string `yaml:"group"`
 			Version string `yaml:"version"`
@@ -63,6 +78,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 		"../../deploy/web-bff-deploy.yaml",
 		"account-proof-secret-provider-classes.yaml",
 		"governance-network-policies.yaml",
+		"gateway-runtime-egress.yaml",
 		"portfolio-bootstrap-identity.yaml",
 	}
 	assertSameStrings(t, "overlay resources", overlay.Resources, wantResources)
@@ -407,7 +423,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 61", "Expected 18 rendered container images", "sha256sum --check --status",
+		"resourceCount -ne 62", "Expected 18 rendered container images", "sha256sum --check --status",
 		"imageTag=$imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",

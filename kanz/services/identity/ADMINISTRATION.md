@@ -14,9 +14,13 @@ settings are present. There is no silent legacy authorization fallback.
 
 Live cutover and replacement verification are tracked separately in #1255.
 
-The active GitOps manifest and image digest deliberately remain unchanged. The
-staged `deploy/admin-role-patch.yaml` is outside every synced workload path;
-apply it only together with a verified image digest from this change.
+The Tokyo overlay applies the dedicated role together with the verified identity,
+migrator and gateway images in `identity-authority-cutover.yaml`. Its replacement
+administrator verification and operational evidence are recorded in #1255. Other
+environments retain their existing configuration: the staged
+`deploy/admin-role-patch.yaml` must only be applied with a verified image digest
+after the replacement checks below. Account status and roles are not changed by
+the deployment patch.
 
 Do not roll out the changed deployment configuration before completing the
 replacement steps. Applying the new configuration to old accounts alone would

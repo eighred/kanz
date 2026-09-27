@@ -17,10 +17,26 @@ resources:
   - ../../deploy/venue-okx-deploy.yaml
   - ../../deploy/web-bff-deploy.yaml
   - governance-network-policies.yaml
+  - gateway-runtime-egress.yaml
 
 commonAnnotations:
   kanz.io/release-commit: 8e28e37d1780c589fa90b512863394f8ac12a8ce
   kanz.io/testnet-region: ap-northeast-1
+
+# Replacement runs after commonAnnotations: these two workloads deliberately
+# advance independently of the rest of the testnet release.
+replacements:
+  - source:
+      kind: Deployment
+      name: identity
+      fieldPath: spec.template.metadata.labels.[kanz.io/release]
+    targets:
+      - select:
+          kind: Deployment
+          name: (identity|api-gateway)
+        fieldPaths:
+          - metadata.annotations.[kanz.io/release-commit]
+          - spec.template.metadata.annotations.[kanz.io/release-commit]
 
 images:
   - name: ghcr.io/eighred/accounting
@@ -28,7 +44,7 @@ images:
     digest: sha256:433bbf9050b12c220727f42f3c5c430d6e2ee544ea20b4d54c91d322634d9421
   - name: ghcr.io/eighred/api-gateway
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/api-gateway
-    digest: sha256:7f1316ff7bba5bb2e74a92476684c2bd5025ed2dffda20fc02b9c14ab5659e2a
+    digest: sha256:a3df6f8e8d93f3542616f6caa508a9d4d358dfda5f96b5a217f53aaad0fcc633
   - name: ghcr.io/eighred/audit
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/audit
     digest: sha256:095eb9edf40256a1a53f9cfc43a1a63ba3b84c757f1c7acb8b3077ce2b503cbc
@@ -37,7 +53,7 @@ images:
     digest: sha256:206127ec29aed986ec04a50e9b39bea350f5d950370f122a48ad10e1b93ab8fa
   - name: ghcr.io/eighred/identity
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/identity
-    digest: sha256:510354e7d67cb4c37ec89541e6dc17f6654b4a8c9ec83014b48f2a33f1a5b126
+    digest: sha256:c0de444c170c675c5728522501f3605d7c4b6d4e2a1c2697c4004f1a68315e50
   - name: ghcr.io/eighred/kanz-migrate
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate
     digest: sha256:5c21d2142e98c51b02918dbde906b820f139331ea766630e4a6188a6b03b7613
@@ -61,6 +77,7 @@ images:
     digest: sha256:3a6e2ddd0d61f9ab78f4d206875df5536c90f8d21748582416870d900909aec3
 
 patches:
+  - path: identity-authority-cutover.yaml
   # The canonical file is the sole owner of Vault paths and role bindings. This
   # overlay retains only classes mounted by its minimum capital-path graph.
   - target:
