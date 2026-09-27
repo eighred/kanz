@@ -78,19 +78,11 @@ resource "aws_ecr_lifecycle_policy" "capital_path" {
   repository = each.value.name
   policy = jsonencode({
     rules = [
+      # Commit tags are release custody, not a recent-build cache. A count or
+      # age rule can delete the image still pinned by a live/rollback manifest
+      # (#1269). Tagged artifacts require explicit audited retirement.
       {
         rulePriority = 1
-        description  = "Retain the 20 newest immutable commit images"
-        selection = {
-          tagStatus      = "tagged"
-          tagPatternList = ["*"]
-          countType      = "imageCountMoreThan"
-          countNumber    = 20
-        }
-        action = { type = "expire" }
-      },
-      {
-        rulePriority = 2
         description  = "Remove abandoned untagged layers after seven days"
         selection = {
           tagStatus   = "untagged"

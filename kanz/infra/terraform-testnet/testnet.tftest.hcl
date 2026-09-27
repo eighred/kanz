@@ -84,6 +84,18 @@ run "cost_and_security_envelope" {
   }
 
   assert {
+    condition = alltrue([for policy in aws_ecr_lifecycle_policy.capital_path :
+      length(jsondecode(policy.policy).rules) == 1 &&
+      jsondecode(policy.policy).rules[0].selection.tagStatus == "untagged" &&
+      jsondecode(policy.policy).rules[0].selection.countType == "sinceImagePushed" &&
+      jsondecode(policy.policy).rules[0].selection.countUnit == "days" &&
+      jsondecode(policy.policy).rules[0].selection.countNumber == 7 &&
+      jsondecode(policy.policy).rules[0].action.type == "expire"
+    ])
+    error_message = "Active and rollback commit tags must never expire through age/count-based build retention."
+  }
+
+  assert {
     condition     = jsondecode(aws_iam_role.github_ecr_publish.assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == "repo:eighred/kanz:ref:refs/heads/main"
     error_message = "The AWS publisher identity must be assumable only by this repository's main branch."
   }

@@ -23,6 +23,11 @@ on:
       - 'kanz-schemas/buf.gen.yaml'
       # sdk-guard: a committed generated tree must trigger the run that rejects it.
       - 'kanz-schemas/gen/**'
+      - 'tools/*Ecr*.ps1'
+      - 'tools/*ecr*.py'
+      - 'tools/Install-TestnetWorkloads.ps1'
+      - 'tools/Install-TestnetObservability.ps1'
+      - 'tools/Initialize-TestnetPortfolio.ps1'
       - '.github/workflows/kanz-ci.yml'
   push:
     branches: [main]
@@ -48,6 +53,16 @@ env:
   GOFLAGS: -mod=mod
 
 jobs:
+  release-custody:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify artifact integrity and credential redirect boundary
+        run: python3 -m unittest discover -s tools -p test_ecr_release_recovery.py
+      - name: Verify installer fails closed on registry errors
+        shell: pwsh
+        run: ./tools/Test-EcrReleaseDigest.ps1
+
   go:
     runs-on: ubuntu-latest
     # A live Postgres for the durable-store integration suites. Without it every

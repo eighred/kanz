@@ -23,15 +23,12 @@ $headCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($headCommit -ne $releaseCommit) {
     throw "Portfolio bootstrap is refused: HEAD $headCommit is not exact origin/main $releaseCommit."
 }
-& git -C $repoRoot diff --quiet $releaseCommit -- tools/Initialize-TestnetPortfolio.ps1 tools/TestnetPortfolioBootstrapJob.yaml kanz/test/live/capitalpath kanz/infra/nats/tenancy.yaml kanz/infra/overlays/testnet-tokyo
+& git -C $repoRoot diff --quiet $releaseCommit -- tools/Resolve-EcrReleaseDigest.ps1 tools/Initialize-TestnetPortfolio.ps1 tools/TestnetPortfolioBootstrapJob.yaml kanz/test/live/capitalpath kanz/infra/nats/tenancy.yaml kanz/infra/overlays/testnet-tokyo
 if ($LASTEXITCODE -ne 0) { throw 'Portfolio bootstrap inputs differ from merged origin/main.' }
 
-$digest = (& $aws ecr describe-images --profile $Profile --region $Region `
-    --repository-name kanz-capitalpath --image-ids "imageTag=$releaseCommit" `
-    --query 'imageDetails[0].imageDigest' --output text 2>$null).Trim()
-if ($LASTEXITCODE -ne 0 -or $digest -notmatch '^sha256:[0-9a-f]{64}$') {
-    throw "The signed kanz-capitalpath image for $releaseCommit is not available in Tokyo ECR."
-}
+. (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')
+
+$digest = Resolve-EcrReleaseDigest -Aws $aws -Profile $Profile -Region $Region -Repository kanz-capitalpath -ReleaseTag $releaseCommit
 $image = "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-capitalpath@$digest"
 $manifest = (Get-Content -LiteralPath $templatePath -Raw).Replace('KANZ_CAPITALPATH_IMAGE', $image)
 if ($manifest.Contains('KANZ_CAPITALPATH_IMAGE')) { throw 'The bootstrap image placeholder was not resolved.' }

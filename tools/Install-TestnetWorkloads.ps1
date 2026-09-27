@@ -76,6 +76,7 @@ if ($headCommit -ne $releaseCommit) {
     throw "Workload installation is refused: HEAD $headCommit is not exact origin/main $releaseCommit."
 }
 $provenancePaths = @(
+    'tools/Resolve-EcrReleaseDigest.ps1',
     'tools/Install-TestnetWorkloads.ps1',
     'tools/Verify-TestnetWorkloadPods.jq',
     'kanz/infra/overlays/testnet-tokyo',
@@ -98,6 +99,8 @@ $provenancePaths = @(
 if ($LASTEXITCODE -ne 0) {
     throw 'Workload installation is refused: a rendered input differs from merged origin/main.'
 }
+
+. (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')
 
 $renderedLines = & $kubectl kustomize --load-restrictor=LoadRestrictionsNone $overlay
 if ($LASTEXITCODE -ne 0 -or -not $renderedLines) {
@@ -138,10 +141,8 @@ foreach ($provenance in ($imageProvenance | Sort-Object -Unique)) {
     }
     $repository = $Matches.repository
     $digest = $Matches.digest
-    $releaseDigest = (& $aws ecr describe-images --profile $Profile --region $Region `
-        --repository-name $repository --image-ids "imageTag=$imageReleaseCommit" `
-        --query 'imageDetails[0].imageDigest' --output text 2>$null).Trim()
-    if ($LASTEXITCODE -ne 0 -or $releaseDigest -ne $digest) {
+    $releaseDigest = Resolve-EcrReleaseDigest -Aws $aws -Profile $Profile -Region $Region -Repository $repository -ReleaseTag $imageReleaseCommit
+    if ($releaseDigest -ne $digest) {
         throw "Tokyo ECR does not retain $repository@$digest under release $imageReleaseCommit."
     }
 }
