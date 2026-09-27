@@ -58,6 +58,7 @@ if ($headCommit -ne $releaseCommit) {
     throw "Observability installation is refused: HEAD $headCommit is not exact origin/main $releaseCommit."
 }
 $provenancePaths = @(
+    'tools/Resolve-EcrReleaseDigest.ps1',
     'tools/Install-TestnetObservability.ps1',
     'kanz/infra/overlays/testnet-tokyo-observability',
     'kanz/infra/observability/node-exporter.yaml',
@@ -68,6 +69,8 @@ $provenancePaths = @(
 if ($LASTEXITCODE -ne 0) {
     throw 'Observability installation is refused: a rendered input differs from merged origin/main.'
 }
+
+. (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')
 
 $renderedLines = & $kubectl kustomize --load-restrictor=LoadRestrictionsNone $overlay
 if ($LASTEXITCODE -ne 0 -or -not $renderedLines) { throw 'The Tokyo observability overlay did not render.' }
@@ -81,10 +84,8 @@ if ($imageRef -notmatch '^012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com
     throw "Rendered Prometheus image is outside the immutable Tokyo ECR boundary: $imageRef"
 }
 $digest = $Matches.digest
-$retainedDigest = (& $aws ecr describe-images --profile $Profile --region $Region `
-    --repository-name prometheus --image-ids imageTag=v3.13.3-amd64 `
-    --query 'imageDetails[0].imageDigest' --output text 2>$null).Trim()
-if ($LASTEXITCODE -ne 0 -or $retainedDigest -ne $digest) {
+$retainedDigest = Resolve-EcrReleaseDigest -Aws $aws -Profile $Profile -Region $Region -Repository prometheus -ReleaseTag 'v3.13.3-amd64'
+if ($retainedDigest -ne $digest) {
     throw "Tokyo ECR does not retain prometheus@$digest under immutable tag v3.13.3-amd64."
 }
 foreach ($required in @('kind: Namespace', 'name: kanz-observability', 'kind: Deployment',

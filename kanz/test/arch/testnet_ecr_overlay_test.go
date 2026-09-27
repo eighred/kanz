@@ -424,7 +424,8 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
 		"resourceCount -ne 62", "Expected 18 rendered container images", "sha256sum --check --status",
-		"imageTag=$imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
+		"-ReleaseTag $imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
+		"'tools/Resolve-EcrReleaseDigest.ps1'", ". (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",
 		"rollout status statefulset/nats", "rollout status statefulset/redis",
@@ -543,7 +544,7 @@ func TestTokyoObservabilityInstallerPinsTheMinimumProviderToECR(t *testing.T) {
 	installer := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetObservability.ps1")))
 	for _, required := range []string{
 		"HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"Expected 9 rendered resources", "imageTag=v3.13.3-amd64",
+		"Expected 9 rendered resources", "-ReleaseTag 'v3.13.3-amd64'",
 		"apply --server-side --dry-run=server", "{.status.phase}''=Bound pvc/prometheus-data",
 		"sed ''s/namespace: kanz-observability/namespace: default/g''",
 		"rollout status deployment/prometheus", "kubernetes.io/service-name=prometheus",
