@@ -38,10 +38,26 @@ aborts that real canary before promotion.
 
 Do not apply until the namespace, SPIFFE registrations, Vault
 `SecretProviderClass` objects, NATS, Postgres migrations, and Argo Rollouts CRD
-are healthy. The digest lock identifies build commit
-`8e28e37d1780c589fa90b512863394f8ac12a8ce`; changing it requires resolving all
-ten workload/migration images from one successful main build and rerunning the
-overlay architecture guard.
+are healthy. The default digest lock identifies build commit
+`8e28e37d1780c589fa90b512863394f8ac12a8ce`. Identity/gateway and the browser edge
+have explicit per-workload release overrides. Each workload's containers must
+resolve to the successful main build named by its release annotation; rerun the
+overlay architecture guard and exact-main installer dry-run after changing pins.
+
+The browser-security release is `33858a909df304ced9779344c87ed1e25a8cb237`.
+Apply its rendered `web-bff` Deployment only after the image canary and reviewed
+server dry-run. Recreate prevents overlapping in-memory session owners, so expect
+a brief web interruption and sign in again. Verify the live edge as described in
+`../../edge/README.md`. This release does not change trading state.
+
+For the initial transition from RollingUpdate, apply the rendered `web-bff`
+Deployment as a JSON merge patch with `--field-manager=kanz-bootstrap`, after
+running that same patch with `--dry-run=server`. The explicit
+`strategy.rollingUpdate: null` removes retained API defaults atomically with the
+image/template update; a server-side apply alone can retain those defaults and
+reject Recreate. Preserve the pre-update controller for rollback, require its
+resourceVersion as a precondition, wait for both containers to be Ready at the
+reviewed digests, and rerun the whole-overlay installer dry-run afterward.
 
 Before the first workload install, use option 3 in
 `tools/Kanz-Venue-Secrets.cmd`. The data-plane bootstrap preserves complete

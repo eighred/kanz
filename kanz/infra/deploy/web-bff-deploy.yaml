@@ -68,6 +68,8 @@ spec:
   # Stop the old process before admitting the new one; users sign in again.
   strategy:
     type: Recreate
+    # Clear the API-defaulted field when migrating an existing Deployment.
+    rollingUpdate: null
   revisionHistoryLimit: 5
   selector:
     matchLabels:

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -40,6 +41,20 @@ func TestBFFRolloutPreservesSingleSessionOwner(t *testing.T) {
 				}
 				if d.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType || d.Spec.Strategy.RollingUpdate != nil {
 					t.Fatal("BFF rollout can admit overlapping session owners")
+				}
+				var object map[string]any
+				if err := yaml.Unmarshal(doc, &object); err != nil {
+					t.Fatal(err)
+				}
+				strategy := object["spec"].(map[string]any)["strategy"].(map[string]any)
+				if value, present := strategy["rollingUpdate"]; !present || value != nil {
+					t.Fatal("Recreate must explicitly clear the existing API-defaulted rollingUpdate field")
+				}
+				if name == "Tokyo" {
+					release := d.Spec.Template.Labels["kanz.io/release"]
+					if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(release) || d.Annotations["kanz.io/release-commit"] != release || d.Spec.Template.Annotations["kanz.io/release-commit"] != release {
+						t.Fatal("BFF release provenance must survive the overlay's common annotations")
+					}
 				}
 			}
 			if found != 1 {
