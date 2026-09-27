@@ -64,6 +64,10 @@ spec:
   # out at random. Raising this needs a shared session store first; it is a
   # correctness pin, not a capacity choice.
   replicas: 1
+  # RollingUpdate may surge to two tunnel/session owners even with replicas: 1.
+  # Stop the old process before admitting the new one; users sign in again.
+  strategy:
+    type: Recreate
   revisionHistoryLimit: 5
   selector:
     matchLabels:

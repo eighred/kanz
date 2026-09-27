@@ -2,6 +2,25 @@
 
 The public surface is a **Cloudflare Tunnel**, and it is the only one.
 
+## Browser policy at the edge
+
+The BFF owns CSP and the other browser headers. Preserve the public Host through
+the tunnel and keep secure cookies enabled on the HTTPS public origin. Do not
+inject third-party scripts or weaken CSP to accommodate edge analytics.
+
+`kanz-browser-security-rule.json` is the hostname-scoped Cloudflare configuration
+rule for the `http_config_settings` phase. Apply it to the `eighred.com` zone's
+existing phase entrypoint without replacing unrelated rules. It disables RUM
+script injection only on `kanz.eighred.com`; other hosts retain their analytics.
+Cloudflare [configuration rules take precedence over Web Analytics rules](https://developers.cloudflare.com/web-analytics/configuration-options/rules/).
+
+After deployment, verify public HTML has no injected external script, same-origin
+logout succeeds, sibling-origin unsafe requests return 403, authentication/API
+responses are `no-store`, and browser security headers survive the tunnel.
+Exercise login and navigation in a real browser and inspect CSP violations.
+The BFF uses Recreate while sessions are process-local: expect a brief web
+interruption and require sign-in again after replacement.
+
 ## The property this buys
 
 `cloudflared` holds an **outbound** connection to Cloudflare. Nothing in the

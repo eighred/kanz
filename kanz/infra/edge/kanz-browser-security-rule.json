@@ -1,0 +1,10 @@
+{
+  "ref": "kanz_disable_rum_injection",
+  "description": "Kanz: disable injected external analytics under same-origin CSP",
+  "expression": "http.host eq \"kanz.eighred.com\"",
+  "action": "set_config",
+  "action_parameters": {
+    "disable_rum": true
+  },
+  "enabled": true
+}
