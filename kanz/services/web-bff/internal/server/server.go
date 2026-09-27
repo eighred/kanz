@@ -79,6 +79,7 @@ type Server struct {
 	metrics       http.Handler
 	preflight     *preflightEvidence
 	mux           *http.ServeMux
+	browserOrigin http.CrossOriginProtection
 }
 
 // New builds the server. gatewayURL must be a valid absolute URL.
@@ -124,10 +125,28 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 		mux:           http.NewServeMux(),
 	}
 	s.routes()
+	// The browser-facing origin owns these headers, including proxied errors.
+	// ReverseProxy otherwise appends upstream headers to our response policy.
+	s.proxy.ModifyResponse = func(r *http.Response) error {
+		discardUpstreamBrowserPolicy(r.Header)
+		r.Header.Del("Cache-Control")
+		r.Header.Del("Expires")
+		return nil
+	}
 	return s, nil
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	setBrowserHeaders(w.Header(), s.secureCookies)
+	if strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/api/") {
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	if !s.browserRequestAllowed(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request refused"})
+		return
+	}
+	s.mux.ServeHTTP(w, r)
+}
 
 // Close releases the OS resources the Server owns — today, the static root's
 // directory handle. Safe to call on a Server that serves no static build.
