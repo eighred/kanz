@@ -1,0 +1,42 @@
+# #1255: apply only as a coordinated identity/gateway transition after the
+# replacement administrator canary. Other workloads retain their existing release.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity
+  namespace: kanz-services
+  annotations:
+    kanz.io/release-commit: b4106263ca95cf0ca6ce0a12a30c43890fcaa29f
+spec:
+  template:
+    metadata:
+      labels:
+        kanz.io/release: b4106263ca95cf0ca6ce0a12a30c43890fcaa29f
+      annotations:
+        kanz.io/release-commit: b4106263ca95cf0ca6ce0a12a30c43890fcaa29f
+    spec:
+      initContainers:
+        - name: migrate
+          image: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate@sha256:bb917df3b095e8c1ab2cc81f5091c7f779128c72beedfb0f2047f8daaccdb867
+      containers:
+        - name: identity
+          env:
+            - name: IDENTITY_OPERATOR_ROLE
+              $patch: delete
+            - name: IDENTITY_ADMIN_ROLE
+              value: kanz-identity-admin
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: kanz-services
+  annotations:
+    kanz.io/release-commit: b4106263ca95cf0ca6ce0a12a30c43890fcaa29f
+spec:
+  template:
+    metadata:
+      labels:
+        kanz.io/release: b4106263ca95cf0ca6ce0a12a30c43890fcaa29f
+      annotations:
+        kanz.io/release-commit: b4106263ca95cf0ca6ce0a12a30c43890fcaa29f

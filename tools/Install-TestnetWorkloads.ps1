@@ -105,8 +105,8 @@ if ($LASTEXITCODE -ne 0 -or -not $renderedLines) {
 }
 $rendered = ($renderedLines -join "`n") + "`n"
 $resourceCount = ([regex]::Matches($rendered, '(?m)^kind: ')).Count
-if ($resourceCount -ne 61) {
-    throw "Expected 61 rendered resources; found $resourceCount."
+if ($resourceCount -ne 62) {
+    throw "Expected 62 rendered resources; found $resourceCount."
 }
 $images = [regex]::Matches($rendered, '(?m)^\s*image:\s+(\S+)\s*$')
 if ($images.Count -ne 18) { throw "Expected 18 rendered container images; found $($images.Count)." }
@@ -115,16 +115,24 @@ foreach ($image in $images) {
         throw "Rendered workload image is outside the immutable Tokyo ECR boundary: $($image.Groups[1].Value)"
     }
 }
-$releaseAnnotations = [regex]::Matches($rendered, '(?m)^\s*kanz\.io/release-commit:\s+([0-9a-f]{40})\s*$')
-if ($releaseAnnotations.Count -eq 0) {
-    throw 'Rendered workloads do not declare a release commit.'
+# A coordinated identity/gateway release may advance independently. Bind each
+# image (including init containers) to its own rendered workload's provenance;
+# accepting any digest from any declared release would weaken this check.
+$imageProvenance = foreach ($document in [regex]::Split($rendered, '(?m)^---\s*$')) {
+    $documentImages = [regex]::Matches($document, '(?m)^\s*image:\s+(\S+)\s*$')
+    if ($documentImages.Count -eq 0) { continue }
+    $releaseAnnotations = [regex]::Matches($document, '(?m)^\s*kanz\.io/release-commit:\s+([0-9a-f]{40})\s*$')
+    if ($releaseAnnotations.Count -eq 0) { throw 'Rendered workload does not declare a release commit.' }
+    $imageReleaseCommit = $releaseAnnotations[0].Groups[1].Value
+    if ($releaseAnnotations | Where-Object { $_.Groups[1].Value -ne $imageReleaseCommit }) {
+        throw 'Rendered workload contains inconsistent release commits.'
+    }
+    foreach ($image in $documentImages) {
+        "$imageReleaseCommit $($image.Groups[1].Value)"
+    }
 }
-$imageReleaseCommit = $releaseAnnotations[0].Groups[1].Value
-if ($releaseAnnotations | Where-Object { $_.Groups[1].Value -ne $imageReleaseCommit }) {
-    throw 'Rendered workloads contain inconsistent release commits.'
-}
-$uniqueImages = $images | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
-foreach ($imageRef in $uniqueImages) {
+foreach ($provenance in ($imageProvenance | Sort-Object -Unique)) {
+    $imageReleaseCommit, $imageRef = $provenance.Split(' ', 2)
     if ($imageRef -notmatch '^012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/(?<repository>[a-z0-9-]+)@(?<digest>sha256:[0-9a-f]{64})$') {
         throw "Cannot inspect malformed Tokyo ECR image: $imageRef"
     }
