@@ -210,6 +210,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 		// here", not 403, because it truthfully cannot.
 		mux.HandleFunc("POST /users/{subject}/disable", s.disableUser)
 		mux.HandleFunc("POST /users/{subject}/enable", s.enableUser)
+		mux.HandleFunc("GET /users", s.listUsers)
+		mux.HandleFunc("PUT /users/{subject}/access", s.setAccess)
+		mux.HandleFunc("GET /permissions", s.permissions)
 	}
 }
 

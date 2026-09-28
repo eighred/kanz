@@ -59,6 +59,8 @@ type Provisioner interface {
 	InvitesFor(ctx context.Context, tenant string) ([]*identity.Invite, error)
 	UserBySubject(ctx context.Context, subject string) (*identity.User, error)
 	SetStatus(ctx context.Context, actor identity.Administration, subject string, status identity.Status, now time.Time) error
+	UsersFor(ctx context.Context, actor identity.Administration, after string) ([]*identity.Access, error)
+	SetAccess(ctx context.Context, actor identity.Administration, subject string, revision int64, roles, portfolios []string, now time.Time) (*identity.Access, error)
 }
 
 // Provisioning configures the authenticated invite and account-status routes.
@@ -74,25 +76,15 @@ type Provisioning struct {
 	InviteTTL     time.Duration
 	InviteDomains identity.InviteDomainPolicy
 
-	// Audit records who disabled or re-enabled whom (#525). REQUIRED, and New
-	// refuses provisioning without it.
-	//
-	// A disable with no record of who ordered it is a switch, not a control — it
-	// is the same unattributable act as the hand-run UPDATE this route exists to
-	// replace, only faster. Defaulting it to a no-op here would make "this
-	// deployment records nothing" and "this deployment records everything" look
-	// identical from the code and from the logs.
-	//
-	// The type is pkg/auth's, not a new one: observation.v1.DecisionLog already
-	// models "who decided what, and on what grounds", AUDIT-01's projection
-	// already materializes it, and a second audit shape would be a second answer.
-	// auth.NewSlogRecorder is the estate's named default when a composition root
-	// has no bus.Producer — see cmd/identity for what that costs.
+	// Audit is the additional operational status projection. REQUIRED so its
+	// absence cannot silently remove existing operational visibility. The store
+	// commits canonical DecisionLog evidence with each access/status mutation;
+	// this recorder is not the durability boundary.
 	Audit auth.DecisionRecorder
 }
 
-// WithProvisioning enables POST/GET /invites and the account-status routes
-// (POST /users/{subject}/disable and /enable, #525).
+// WithProvisioning enables invitations, account status/access administration,
+// the tenant directory and current identity permissions.
 //
 // PROVISIONING IS OFF UNTIL WIRED, and the routes do not exist when it is off —
 // they are not registered rather than registered-and-refusing. A 404 and a 403

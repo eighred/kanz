@@ -131,11 +131,16 @@ func (c *Client) Invites(ctx context.Context, method, bearer string, body []byte
 	if method != http.MethodGet && method != http.MethodPost {
 		return nil, fmt.Errorf("identityclient: invites: unsupported method %s", method)
 	}
+	return c.Administration(ctx, method, "/invites", bearer, body)
+}
+
+// Administration sends a path selected by the BFF's explicit route table.
+func (c *Client) Administration(ctx context.Context, method, path, bearer string, body []byte) (*ProvisioningResponse, error) {
 	var reader io.Reader
 	if len(body) > 0 {
 		reader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+"/invites", reader)
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
 	if err != nil {
 		return nil, err
 	}
@@ -149,11 +154,16 @@ func (c *Client) Invites(ctx context.Context, method, bearer string, body []byte
 		return nil, fmt.Errorf("identityclient: invites: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	limit := int64(1 << 20)
+	if method == http.MethodGet && strings.HasPrefix(path, "/users?") {
+		// A directory page contains multiple bounded authority records.
+		limit = 4 << 20
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("identityclient: invites: read response: %w", err)
 	}
-	if len(raw) > 1<<20 {
+	if int64(len(raw)) > limit {
 		return nil, errors.New("identityclient: invites: oversized response")
 	}
 	return &ProvisioningResponse{

@@ -144,20 +144,10 @@ func run() int {
 	store := identity.NewPostgres(pool)
 	opts := []server.Option{server.WithClientIP(ipResolver)}
 	if cfg.AdminRole != "" {
-		// THE AUDIT SINK IS STDOUT, AND THAT IS A CHOICE WITH A COST.
-		//
-		// auth.SlogRecorder is a real sink and not a stub — kanz logs are stdout
-		// JSON shipped by the platform (OBS-01a), so "operator X disabled account
-		// Y" reaches the same pipeline every other service's audit lines do. What
-		// it does NOT reach is AUDIT-01's append-only projection, which is the
-		// tamper-evident system of record: that one is fed off the bus, and THIS
-		// SERVICE HAS NO bus.Producer. Giving it one means giving the credential
-		// authority a NATS connection and a NetworkPolicy hole it does not have
-		// today, which is a larger change than #525 asked for.
-		//
-		// The upgrade is one line the day that changes — pkg/authbus.NewBusRecorder
-		// satisfies the same seam, and statusDecisionLog already stamps the
-		// principal.* attributes it partitions and tenants on.
+		// Access/status mutations commit canonical DecisionLog evidence in the
+		// PostgreSQL transaction. Stdout is an additional operational projection.
+		// Central audit delivery must consume the durable journal; a best-effort
+		// BusRecorder alone would not preserve the commit/evidence guarantee.
 		opts = append(opts, server.WithProvisioning(server.Provisioning{
 			Verifier: signer, Store: store, AdminRole: cfg.AdminRole, InviteTTL: cfg.InviteTTL,
 			InviteDomains: cfg.InviteDomains,
@@ -165,8 +155,8 @@ func run() int {
 		}))
 		logger.Info("authenticated provisioning enabled", "operator_role", cfg.AdminRole,
 			"routes", "POST /invites, GET /invites, POST /users/{subject}/disable, "+
-				"POST /users/{subject}/enable",
-			"audit_sink", "stdout (slog) — NOT the AUDIT-01 projection; this service has no bus")
+				"POST /users/{subject}/enable, GET /users, PUT /users/{subject}/access, GET /permissions",
+			"audit_sink", "transactional PostgreSQL access journal; additional status projection to stdout")
 	} else {
 		// WARN, not Info. Without this the ONLY way to create an account is
 		// cmd/kanz-invite, which writes to the store directly — so every account on

@@ -104,14 +104,9 @@ func (s *Server) setStatus(w http.ResponseWriter, r *http.Request, status identi
 
 	at := s.now().UTC()
 	if err := s.provisioning.Audit.Record(r.Context(), statusDecisionLog(claims, u, status, at)); err != nil {
-		// THE STATUS CHANGE IS ALREADY DURABLE, so this is not a failure the
-		// caller can retry into consistency — answering 500 would tell an operator
-		// the disable did not happen when it did, and send them to the hand-run
-		// UPDATE this route exists to remove. The record is lost and the loss is
-		// LOUD: an ERROR line naming the change that went unaudited is the one
-		// thing a reviewer can reconcile against later.
-		s.logger.Error("account status changed WITHOUT an audit record — the change is durable and "+
-			"unattributed; reconcile from this line",
+		// PostgreSQL committed canonical evidence with the status. This recorder
+		// is an additional operational projection; its failure loses no attribution.
+		s.logger.Error("account status audit projection failed; durable access journal retained",
 			"subject", u.Subject, "tenant", u.Tenant, "status", string(status),
 			"operator", claims.Subject, "at", at, "err", err)
 	}
