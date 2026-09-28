@@ -164,15 +164,16 @@ func (p *Postgres) UserBySubject(ctx context.Context, subject string) (*User, er
 
 // UpdateCredential rewrites an account's credential — the rehash-on-login
 // upgrade path (see NeedsRehash), and the only write the login path makes.
-func (p *Postgres) UpdateCredential(ctx context.Context, subject string, cred Hash, now time.Time) error {
+// Compare the verified hash so a delayed rehash cannot undo credential rotation.
+func (p *Postgres) UpdateCredential(ctx context.Context, subject string, previous, cred Hash, now time.Time) error {
 	tag, err := p.pool.Exec(ctx, `
-		UPDATE identity_users SET credential_hash = $2, updated_at = $3 WHERE subject = $1`,
-		subject, string(cred), now.UTC())
+		UPDATE identity_users SET credential_hash = $2, updated_at = $3 WHERE subject = $1 AND credential_hash=$4`,
+		subject, string(cred), now.UTC(), string(previous))
 	if err != nil {
 		return fmt.Errorf("identity: update credential: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrUserNotFound
+		return ErrCredentialMismatch
 	}
 	return nil
 }

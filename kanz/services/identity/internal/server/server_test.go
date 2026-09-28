@@ -60,7 +60,10 @@ func (f *fakeStore) UserBySubject(_ context.Context, subject string) (*identity.
 	return u, nil
 }
 
-func (f *fakeStore) UpdateCredential(_ context.Context, subject string, cred identity.Hash, _ time.Time) error {
+func (f *fakeStore) UpdateCredential(_ context.Context, subject string, previous, cred identity.Hash, _ time.Time) error {
+	if f.users[subject] == nil || f.users[subject].Credential != previous {
+		return identity.ErrCredentialMismatch
+	}
 	if f.updated == nil {
 		f.updated = map[string]identity.Hash{}
 	}

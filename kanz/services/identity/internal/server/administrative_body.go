@@ -18,13 +18,17 @@ const administrativeBodyTimeout = 5 * time.Second
 // waiting for the rest of a command. Handlers validate the buffered payload
 // after authorization and before mutation.
 func administrativeBody(next http.HandlerFunc) http.HandlerFunc {
+	return boundedAdministrativeBody(next, maxBody)
+}
+
+func boundedAdministrativeBody(next http.HandlerFunc, limit int64) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		controller := http.NewResponseController(w)
 		if err := controller.SetReadDeadline(time.Now().Add(administrativeBodyTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			writeErr(w, http.StatusServiceUnavailable, "request body deadline unavailable")
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 		if err != nil {
 			w.Header().Set("Connection", "close")
 			var oversized *http.MaxBytesError

@@ -40,6 +40,10 @@ type fakeProvisioner struct {
 	statusWrites []statusWrite
 }
 
+func (f *fakeProvisioner) RotateCredential(_ context.Context, _ identity.Administration, _, _ identity.Hash, _ time.Time) error {
+	return f.err
+}
+
 func (f *fakeProvisioner) CreateInviteAs(_ context.Context, _ identity.Administration, inv *identity.Invite) error {
 	if f.err != nil {
 		return f.err

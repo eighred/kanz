@@ -50,7 +50,7 @@ import (
 // identity.Postgres it actually calls, so a test can substitute one.
 type Store interface {
 	UserBySubject(ctx context.Context, subject string) (*identity.User, error)
-	UpdateCredential(ctx context.Context, subject string, cred identity.Hash, now time.Time) error
+	UpdateCredential(ctx context.Context, subject string, previous, cred identity.Hash, now time.Time) error
 	Redeem(ctx context.Context, rawToken string, cred identity.Hash, now time.Time) (*identity.User, error)
 	// Revocations feeds the api-gateway's per-subject revocation check (#532).
 	// It is on the BASE interface and not on Provisioning because the feed must
@@ -203,6 +203,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	// deployment without it answers 404 rather than 403 — "there is no
 	// provisioning surface here" is the truthful answer to someone probing.
 	if s.provisioning != nil {
+		// Two maximum-length UTF-8 credentials plus JSON framing.
+		mux.HandleFunc("POST /credential", boundedAdministrativeBody(s.rotateCredential, 16<<10))
 		mux.HandleFunc("POST /invites", administrativeBody(s.createInvite))
 		mux.HandleFunc("GET /invites", administrativeBody(s.listInvites))
 		// DEPROVISIONING (#525), on the SAME gate and for the same reason: an
@@ -272,9 +274,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	// failed would turn a hardening step into an outage.
 	if identity.NeedsRehash(u.Credential) {
 		if fresh, herr := identity.HashCredential(req.Credential); herr == nil {
-			if uerr := s.store.UpdateCredential(r.Context(), u.Subject, fresh, s.now()); uerr != nil {
-				s.logger.Warn("credential rehash failed; the account still uses older parameters",
-					"subject", u.Subject, "err", uerr)
+			if uerr := s.store.UpdateCredential(r.Context(), u.Subject, u.Credential, fresh, s.now()); uerr != nil {
+				s.logger.Warn("credential rehash was not applied",
+					"subject", u.Subject)
 			}
 		}
 	}

@@ -136,6 +136,15 @@ func (c *Client) Invites(ctx context.Context, method, bearer string, body []byte
 
 // Administration sends a path selected by the BFF's explicit route table.
 func (c *Client) Administration(ctx context.Context, method, path, bearer string, body []byte) (*ProvisioningResponse, error) {
+	return c.authenticated(ctx, method, path, bearer, body, "")
+}
+
+// RotateCredential forwards only the server-held bearer and resolved source IP.
+func (c *Client) RotateCredential(ctx context.Context, bearer string, body []byte, clientIP string) (*ProvisioningResponse, error) {
+	return c.authenticated(ctx, http.MethodPost, "/credential", bearer, body, clientIP)
+}
+
+func (c *Client) authenticated(ctx context.Context, method, path, bearer string, body []byte, clientIP string) (*ProvisioningResponse, error) {
 	var reader io.Reader
 	if len(body) > 0 {
 		reader = bytes.NewReader(body)
@@ -145,6 +154,9 @@ func (c *Client) Administration(ctx context.Context, method, path, bearer string
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+bearer)
+	if c.forwardHeader != "" && clientIP != "" {
+		req.Header.Set(c.forwardHeader, clientIP)
+	}
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}

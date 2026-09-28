@@ -1,5 +1,6 @@
 export const workspaces = [
   { title: 'Governance', pages: [
+    { to: '/password', title: 'Change password', description: 'Replace your password and revoke existing sessions.' },
     { to: '/users', title: 'Users and permissions', description: 'Review effective permissions and administer tenant account access.' },
     { to: '/audit-evidence', title: 'Audit evidence', description: 'Read bounded tenant reports and control evidence windows.' },
     { to: '/preflight', title: 'Preflight', description: 'Review verified admission controls and outstanding prerequisites.' },

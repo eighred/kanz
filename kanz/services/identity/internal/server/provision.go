@@ -55,6 +55,7 @@ type Verifier interface {
 // power, and splitting them across two gates would let a deployment enable one
 // without the other.
 type Provisioner interface {
+	RotateCredential(ctx context.Context, actor identity.Administration, previous, replacement identity.Hash, now time.Time) error
 	CreateInviteAs(ctx context.Context, actor identity.Administration, inv *identity.Invite) error
 	InvitesFor(ctx context.Context, tenant string) ([]*identity.Invite, error)
 	UserBySubject(ctx context.Context, subject string) (*identity.User, error)
