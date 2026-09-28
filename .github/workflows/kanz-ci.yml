@@ -336,6 +336,7 @@ jobs:
           TEST_NATS_URL: nats://localhost:4222
           TEST_KAFKA_BROKERS: localhost:9092
           TEST_OMS_ON_BUS: "1"
+          TEST_SESSION_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/sessions.cjs
           TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/mfa.cjs
           TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/kanz-web/node_modules/playwright
           TEST_MFA_NODE: node
@@ -423,6 +424,10 @@ jobs:
             echo "changed helper, or a service container that failed to come up."
             exit 1
           fi
+          grep -q 'Chromium shared-session inventory and revocation PASS' "$render" || {
+            echo "::error::shared-session Chromium proof did not run"
+            exit 1
+          }
           printf 'no backing-service test skipped; %d SKIP line(s) total, all for other reasons\n' \
             "$(grep -c -- '--- SKIP' "$render" || true)"
 

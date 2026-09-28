@@ -86,6 +86,6 @@ onUnmounted(() => { controller.abort(); clearTimeout(expiryTimer); password.valu
         <button type="submit" :disabled="busy || !name || !password || status.factors.length >= 5 || (status.enabled && !status.recent)">Add security key or passkey</button>
       </form>
     </template>
-    <RouterLink to="/password">Password</RouterLink> · <RouterLink to="/mailbox">Recovery mailbox</RouterLink>
+    <RouterLink to="/sessions">Browser sessions</RouterLink> · <RouterLink to="/password">Password</RouterLink> · <RouterLink to="/mailbox">Recovery mailbox</RouterLink>
   </section>
 </template>

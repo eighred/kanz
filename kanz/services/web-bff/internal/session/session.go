@@ -1,169 +1,202 @@
-// Package session holds the BFF's server-side browser sessions and in-flight
-// login transactions. The browser only ever holds an opaque, httpOnly session
-// id; the token itself never leaves the server (the core BFF security property
-// — a token in browser-reachable JS is an exfiltration target). The in-memory
-// store is the single-replica default; a shared backend (Redis, the PARITY-05
-// stance) plugs in behind the same Manager for horizontal scale.
+// Package session owns bounded server-side browser authority. Shared mode has
+// no local read cache: a committed revoke applies at the next replica lookup.
 package session
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
-	"sync"
 	"time"
 )
 
-// PendingTTL bounds how long a started login (its PKCE verifier) is redeemable
-// before the user must restart — long enough to authenticate, short enough to
-// bound the window an intercepted state value is useful.
 const PendingTTL = 10 * time.Minute
+const MaxPayload = 64 << 10
 
-// Session is one authenticated browser session's server-side state.
+var ErrUnavailable = errors.New("session authority unavailable")
+var ErrCapacity = errors.New("session capacity reached")
+var ErrNotFound = errors.New("session not found")
+var ErrMissing = errors.New("session no longer active")
+var ErrInvalid = errors.New("invalid session")
+
+type Limits struct{ Sessions, Pending, PerSubject int }
+
+func DefaultLimits() Limits { return Limits{10000, 1000, 20} }
+func (l Limits) Validate() error {
+	if l.Sessions < 1 || l.Sessions > 100000 || l.Pending < 1 || l.Pending > 10000 || l.PerSubject < 1 || l.PerSubject > 100 || l.PerSubject > l.Sessions {
+		return ErrInvalid
+	}
+	return nil
+}
+
 type Session struct {
 	AccessToken  string
 	RefreshToken string
-	// Subject and Tenant are decoded from the id/access token for display and
-	// logging; they are not an authorization decision (the gateway re-validates
-	// the token on every proxied call).
-	Subject string
-	Tenant  string
-	Expiry  time.Time
+	Subject      string
+	Tenant       string
+	Authority    string
+	Expiry       time.Time
 }
-
-type entry[V any] struct {
-	val V
-	exp time.Time
+type Summary struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Current   bool      `json:"current"`
 }
-
-type ttlStore[V any] struct {
-	mu  sync.Mutex
-	m   map[string]entry[V]
-	now func() time.Time
+type stored struct {
+	Session Session
+	Created time.Time
 }
-
-func newTTLStore[V any](now func() time.Time) *ttlStore[V] {
-	return &ttlStore[V]{m: make(map[string]entry[V]), now: now}
+type backend interface {
+	put(context.Context, string, Session, string, bool) error
+	get(context.Context, string) (Session, bool, error)
+	del(context.Context, string) error
+	list(context.Context, string) ([]Summary, error)
+	revoke(context.Context, string, string) error
+	pendingPut(context.Context, string, string) error
+	pendingTake(context.Context, string) (string, bool, error)
+	ping(context.Context) error
+	sweep(context.Context) error
 }
-
-func (s *ttlStore[V]) put(key string, v V, ttl time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.m[key] = entry[V]{val: v, exp: s.now().Add(ttl)}
-}
-
-func (s *ttlStore[V]) get(key string) (V, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.m[key]
-	if !ok || s.now().After(e.exp) {
-		if ok {
-			delete(s.m, key)
-		}
-		var zero V
-		return zero, false
-	}
-	return e.val, true
-}
-
-// take returns the value and removes it — one-time redemption.
-func (s *ttlStore[V]) take(key string) (V, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.m[key]
-	if ok {
-		delete(s.m, key)
-	}
-	if !ok || s.now().After(e.exp) {
-		var zero V
-		return zero, false
-	}
-	return e.val, true
-}
-
-func (s *ttlStore[V]) del(key string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.m, key)
-}
-
-func (s *ttlStore[V]) sweep() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
-	for k, e := range s.m {
-		if now.After(e.exp) {
-			delete(s.m, k)
-		}
-	}
-}
-
-// Manager owns the authenticated sessions and the in-flight login
-// transactions. Safe for concurrent use.
 type Manager struct {
-	sessions *ttlStore[Session]
-	pending  *ttlStore[string] // state -> PKCE verifier
-	ttl      time.Duration
-	now      func() time.Time
+	store backend
+	ttl   time.Duration
+	now   func() time.Time
 }
 
-// NewManager returns an in-memory Manager whose sessions live for ttl.
 func NewManager(ttl time.Duration) *Manager { return newManager(ttl, time.Now) }
-
 func newManager(ttl time.Duration, now func() time.Time) *Manager {
-	return &Manager{
-		sessions: newTTLStore[Session](now),
-		pending:  newTTLStore[string](now),
-		ttl:      ttl,
-		now:      now,
+	m, err := NewBounded(ttl, DefaultLimits())
+	if err != nil {
+		return nil
 	}
+	m.now = now
+	m.store.(*memory).now = now
+	return m
+}
+func NewBounded(ttl time.Duration, l Limits) (*Manager, error) {
+	if ttl <= 0 || ttl > 24*time.Hour || l.Validate() != nil {
+		return nil, ErrInvalid
+	}
+	return &Manager{store: newMemory(l), ttl: ttl, now: time.Now}, nil
+}
+func (m *Manager) Create(ctx context.Context, s Session) (string, error) {
+	return m.Replace(ctx, "", s, false)
 }
 
-// Create stores an authenticated session and returns its opaque id. The
-// session lives for min(ttl, until token expiry) so a session never outlives
-// the token it holds.
-func (m *Manager) Create(s Session) (string, error) {
+// strict replacement cannot recreate a session after another replica revoked it.
+func (m *Manager) Replace(ctx context.Context, previous string, s Session, strict bool) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	if s.Authority == "" {
+		s.Authority = "native"
+	}
+	if s.Subject == "" || s.Tenant == "" || len(s.Subject) > 256 || len(s.Tenant) > 128 || len(s.Authority) > 1024 {
+		return "", ErrInvalid
+	}
+	now := m.now().UTC()
+	expiry := now.Add(m.ttl)
+	if !s.Expiry.IsZero() && s.Expiry.Before(expiry) {
+		expiry = s.Expiry
+	}
+	if !expiry.After(now) {
+		return "", ErrInvalid
+	}
+	s.Expiry = expiry.UTC().Truncate(time.Microsecond)
+	raw, err := json.Marshal(s)
+	if err != nil || len(raw) > MaxPayload {
+		return "", ErrInvalid
+	}
 	id, err := randomID()
 	if err != nil {
+		return "", ErrUnavailable
+	}
+	if err = m.store.put(ctx, id, s, previous, strict); err != nil {
 		return "", err
 	}
-	ttl := m.ttl
-	if !s.Expiry.IsZero() {
-		if until := s.Expiry.Sub(m.now()); until < ttl {
-			ttl = until
-		}
-	}
-	if ttl <= 0 {
-		return "", errors.New("session: token already expired")
-	}
-	m.sessions.put(id, s, ttl)
 	return id, nil
 }
-
-// Get returns the session for id, or false when unknown/expired.
-func (m *Manager) Get(id string) (Session, bool) { return m.sessions.get(id) }
-
-// Delete ends a session (logout).
-func (m *Manager) Delete(id string) { m.sessions.del(id) }
-
-// PutPending records a started login's PKCE verifier keyed by its state value.
-func (m *Manager) PutPending(state, verifier string) { m.pending.put(state, verifier, PendingTTL) }
-
-// TakePending redeems and removes the verifier for state (one-time), so a
-// replayed callback with the same state cannot exchange a second time.
-func (m *Manager) TakePending(state string) (string, bool) { return m.pending.take(state) }
-
-// Sweep drops expired sessions and pending logins. A caller runs it on a
-// ticker so abandoned entries do not accumulate.
-func (m *Manager) Sweep() {
-	m.sessions.sweep()
-	m.pending.sweep()
+func (m *Manager) Get(ctx context.Context, id string) (Session, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if len(id) != 43 {
+		return Session{}, false, nil
+	}
+	return m.store.get(ctx, id)
 }
-
+func (m *Manager) Delete(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if len(id) != 43 {
+		return nil
+	}
+	return m.store.del(ctx, id)
+}
+func (m *Manager) List(ctx context.Context, id string) ([]Summary, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if len(id) != 43 {
+		return nil, ErrMissing
+	}
+	return m.store.list(ctx, id)
+}
+func (m *Manager) Revoke(ctx context.Context, id, target string) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if len(id) != 43 {
+		return ErrMissing
+	}
+	if len(target) != 64 {
+		return ErrNotFound
+	}
+	return m.store.revoke(ctx, id, target)
+}
+func (m *Manager) PutPending(ctx context.Context, state, verifier string) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if len(state) > 128 || len(state) < 1 || len(verifier) > 128 || len(verifier) < 1 {
+		return ErrInvalid
+	}
+	return m.store.pendingPut(ctx, state, verifier)
+}
+func (m *Manager) TakePending(ctx context.Context, state string) (string, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if len(state) > 128 || state == "" {
+		return "", false, nil
+	}
+	return m.store.pendingTake(ctx, state)
+}
+func (m *Manager) Sweep(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return m.store.sweep(ctx)
+}
+func (m *Manager) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return m.store.ping(ctx)
+}
+func digest(id string) string { sum := sha256.Sum256([]byte(id)); return hex.EncodeToString(sum[:]) }
+func sameOwner(a, b Session) bool {
+	return a.Subject == b.Subject && a.Tenant == b.Tenant && a.Authority == b.Authority
+}
 func randomID() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func (m *Manager) Expiry(token time.Time) time.Time {
+	v := m.now().UTC().Add(m.ttl)
+	if !token.IsZero() && token.Before(v) {
+		v = token
+	}
+	return v.Truncate(time.Microsecond)
 }

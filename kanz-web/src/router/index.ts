@@ -1,3 +1,4 @@
+import SessionsView from '../views/SessionsView.vue'
 import AuthenticationView from '../views/AuthenticationView.vue'
 import UsersView from '../views/UsersView.vue'
 import PasswordView from '../views/PasswordView.vue'
@@ -37,6 +38,7 @@ import ReferenceDataView from '../views/ReferenceDataView.vue'
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
+    { path: '/sessions', name: 'sessions', component: SessionsView },
     { path: '/authentication', name: 'authentication', component: AuthenticationView },
     { path: '/households', name: 'households', component: HouseholdView },
     { path: '/copilot', name: 'copilot', component: CopilotView },

@@ -221,7 +221,8 @@ fi
 # if a table is in neither this list nor a verified arm — a new RLS'd table
 # cannot silently widen the unchecked surface, it has to be triaged. Same shape
 # as the archiver's unbackedByDesign map.
-UNVERIFIED_RLS_TABLES="oms:orders,positions,position_fills,order_fills,outbox,order_proposals,execution_account_mappings,execution_recovery_cases,execution_recovery_history,execution_recovery_targets,execution_recovery_acks,order_executions,position_execution_history,position_execution_basis,execution_fee_revisions,execution_fee_proposals,execution_fee_approvals alternatives:fund_events datamaster:golden_records,exceptions,exception_overrides,exception_override_proposals,outbox wealth:households tv-sync:tv_facts,tv_checkpoints venue-binance:venue_orders,venue_pending_closes venue-okx:venue_orders,venue_pending_closes"
+# #1288: shared browser authority is opt-in and has no live database placement yet.
+UNVERIFIED_RLS_TABLES="web-bff:bff_sessions,bff_session_audit oms:orders,positions,position_fills,order_fills,outbox,order_proposals,execution_account_mappings,execution_recovery_cases,execution_recovery_history,execution_recovery_targets,execution_recovery_acks,order_executions,position_execution_history,position_execution_basis,execution_fee_revisions,execution_fee_proposals,execution_fee_approvals alternatives:fund_events datamaster:golden_records,exceptions,exception_overrides,exception_override_proposals,outbox wealth:households tv-sync:tv_facts,tv_checkpoints venue-binance:venue_orders,venue_pending_closes venue-okx:venue_orders,venue_pending_closes"
 
 if step storage; then
   echo "-- [1/6] verify RLS isolation is active (kanz-risk, kanz-books)"

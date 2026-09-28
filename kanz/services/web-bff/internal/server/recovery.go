@@ -17,9 +17,8 @@ func (s *Server) handleRecovery(w http.ResponseWriter, r *http.Request) {
 	}
 	bearer := ""
 	if path == "/mailbox" {
-		sess, found := s.currentSession(r)
+		sess, found := s.currentSession(w, r)
 		if !found {
-			writeJSON(w, 401, map[string]string{"error": "invalid credentials"})
 			return
 		}
 		bearer = sess.AccessToken
@@ -57,8 +56,9 @@ func (s *Server) handleRecovery(w http.ResponseWriter, r *http.Request) {
 	}
 	if resp.Status == http.StatusAccepted || resp.Status == http.StatusNoContent {
 		if path == "/recovery/consume" && resp.Status == http.StatusNoContent {
-			if c, e := r.Cookie(sessionCookie); e == nil {
-				s.sessions.Delete(c.Value)
+			if err := s.sessions.Delete(r.Context(), sessionID(r)); err != nil {
+				s.sessionError(w, err)
+				return
 			}
 			s.clearSessionCookie(w)
 		}

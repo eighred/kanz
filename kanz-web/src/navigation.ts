@@ -1,5 +1,6 @@
 export const workspaces = [
   { title: 'Governance', pages: [
+    { to: '/sessions', title: 'Browser sessions', description: 'Review and sign out active browser sessions.' },
     { to: '/authentication', title: 'Authentication', description: 'Manage security keys and verify privileged access.' },
     { to: '/password', title: 'Change password', description: 'Replace your password and revoke existing sessions.' },
     { to: '/users', title: 'Users and permissions', description: 'Review effective permissions and administer tenant account access.' },

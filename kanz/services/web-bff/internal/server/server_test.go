@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,22 +9,11 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/clientip"
+	"github.com/eighred/kanz/internal/identity"
 	"github.com/eighred/kanz/services/web-bff/internal/identityclient"
 	"github.com/eighred/kanz/services/web-bff/internal/oidc"
 	"github.com/eighred/kanz/services/web-bff/internal/session"
 )
-
-// idToken builds an unsigned JWT whose payload carries sub/tenant, so claimsOf
-// decodes an identity for the session (the BFF never verifies it — the gateway
-// does).
-func idToken(sub, tenant string) string {
-	enc := func(v any) string {
-		b, _ := json.Marshal(v)
-		return base64.RawURLEncoding.EncodeToString(b)
-	}
-	return enc(map[string]string{"alg": "none"}) + "." +
-		enc(map[string]string{"sub": sub, "tenant": tenant}) + "."
-}
 
 type harness struct {
 	srv     *Server
@@ -44,22 +32,33 @@ func newHarness(t *testing.T) *harness {
 
 	// Fake SSO: discovery + token endpoint.
 	var sso *httptest.Server
+	var signer *identity.Signer
 	ssoMux := http.NewServeMux()
 	ssoMux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"issuer":                 sso.URL,
+			"jwks_uri":               sso.URL + "/jwks",
 			"authorization_endpoint": sso.URL + "/authorize",
 			"token_endpoint":         sso.URL + "/token",
 		})
 	})
+	ssoMux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(signer.JWKS()) })
 	ssoMux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "ACCESS-TOK", "id_token": idToken("u-1", "acme"),
+			"access_token": "ACCESS-TOK", "id_token": signedTestToken(t, signer),
 			"token_type": "Bearer", "expires_in": 3600,
 		})
 	})
 	sso = httptest.NewServer(ssoMux)
 	t.Cleanup(sso.Close)
+	key, err := identity.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err = identity.NewSigner(key, sso.URL, "kanz-web", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Fake gateway: record what the proxy forwarded.
 	gc := &gatewayCapture{}
@@ -109,8 +108,13 @@ func (h *harness) login(t *testing.T) *http.Cookie {
 	}
 
 	// 2. /auth/callback with a code + the state → sets the session cookie.
+	binding := rec.Result().Cookies()
 	rec = httptest.NewRecorder()
-	h.srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?code=CODE&state="+state, nil))
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=CODE&state="+state, nil)
+	for _, c := range binding {
+		req.AddCookie(c)
+	}
+	h.srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("/auth/callback status = %d, want 302 (body %s)", rec.Code, rec.Body)
 	}
@@ -258,4 +262,13 @@ func testIdentity(t *testing.T, baseURL string) *identityclient.Client {
 		baseURL = "http://identity.invalid"
 	}
 	return identityclient.New(baseURL, "", time.Second)
+}
+
+func signedTestToken(t *testing.T, s *identity.Signer) string {
+	t.Helper()
+	v, _, err := s.Mint(&identity.User{Subject: "u-1", Tenant: "acme", Status: identity.StatusActive, Roles: []string{"kanz-user"}})
+	if err != nil {
+		t.Error(err)
+	}
+	return v
 }

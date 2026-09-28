@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -103,7 +104,7 @@ func TestPreflightEndpointRequiresSessionAndNeverProxies(t *testing.T) {
 		t.Fatalf("without session = %d, want 401", rec.Code)
 	}
 
-	id, err := sessions.Create(session.Session{Subject: "user:operator", Tenant: "__system__", AccessToken: "held-server-side", Expiry: time.Now().Add(time.Hour)})
+	id, err := sessions.Create(context.Background(), session.Session{Subject: "user:operator", Tenant: "__system__", AccessToken: "held-server-side", Expiry: time.Now().Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}

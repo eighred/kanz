@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 )
 
@@ -145,5 +146,28 @@ func TestNew_Validation(t *testing.T) {
 		if _, err := New(cfg); err == nil {
 			t.Errorf("New(%+v) should have failed validation", cfg)
 		}
+	}
+}
+
+func TestConcurrentDiscoveryIsConsistent(t *testing.T) {
+	f := newFakeSSO(t)
+	c := newClient(t, f)
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Go(func() {
+			u, e := c.AuthCodeURL(context.Background(), "state", "challenge")
+			if e != nil || u == "" {
+				t.Error("discovery failed", e)
+			}
+		})
+	}
+	wg.Wait()
+}
+func TestIdentityRefusesUnsignedClaims(t *testing.T) {
+	f := newFakeSSO(t)
+	c := newClient(t, f)
+	token := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`)) + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"admin","tenant":"victim"}`)) + "."
+	if _, e := c.Identity(context.Background(), token); e == nil {
+		t.Fatal("unsigned ownership accepted")
 	}
 }

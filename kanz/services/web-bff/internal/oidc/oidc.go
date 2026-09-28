@@ -15,10 +15,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // Config configures the auth-code client.
@@ -33,9 +37,11 @@ type Config struct {
 
 // Client runs the authorization-code + PKCE flow.
 type Client struct {
-	cfg   Config
-	httpc *http.Client
-	now   func() time.Time
+	mu       sync.Mutex
+	verifier *auth.OIDCAuthenticator
+	cfg      Config
+	httpc    *http.Client
+	now      func() time.Time
 
 	authEndpoint  string
 	tokenEndpoint string
@@ -59,7 +65,11 @@ func New(cfg Config) (*Client, error) {
 	if cfg.now == nil {
 		cfg.now = time.Now
 	}
-	return &Client{cfg: cfg, httpc: cfg.HTTPClient, now: cfg.now}, nil
+	verifier, err := auth.NewOIDCAuthenticator(auth.OIDCConfig{Issuer: cfg.Issuer, Audience: cfg.ClientID, HTTPClient: cfg.HTTPClient})
+	if err != nil {
+		return nil, err
+	}
+	return &Client{cfg: cfg, httpc: cfg.HTTPClient, now: cfg.now, verifier: verifier}, nil
 }
 
 // Token is the credential set the flow yields on a successful code exchange.
@@ -151,15 +161,15 @@ func (c *Client) Exchange(ctx context.Context, code, verifier string) (*Token, e
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("oidc: token endpoint status %d", resp.StatusCode)
 	}
 	var out tokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("oidc: decode token response: %w", err)
 	}
 	if out.Error != "" {
-		return nil, fmt.Errorf("oidc: token exchange failed: %s (%s)", out.Error, out.ErrorDescription)
+		return nil, errors.New("oidc: token exchange refused")
 	}
 	if out.AccessToken == "" {
 		return nil, errors.New("oidc: token response has no access_token")
@@ -177,6 +187,8 @@ func (c *Client) Exchange(ctx context.Context, code, verifier string) (*Token, e
 // authorize and token endpoints. The discovered issuer must match the
 // configured one.
 func (c *Client) resolveEndpoints(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.authEndpoint != "" && c.tokenEndpoint != "" {
 		return nil
 	}
@@ -199,7 +211,7 @@ func (c *Client) resolveEndpoints(ctx context.Context) error {
 		AuthorizationEndpoint string `json:"authorization_endpoint"`
 		TokenEndpoint         string `json:"token_endpoint"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&doc); err != nil {
 		return fmt.Errorf("oidc: decode discovery: %w", err)
 	}
 	if doc.Issuer != c.cfg.Issuer {
@@ -221,3 +233,13 @@ func randomURLSafe(n int) (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
+
+// Identity verifies the ID token before its claims become session ownership.
+func (c *Client) Identity(ctx context.Context, token string) (*auth.Principal, error) {
+	p, err := c.verifier.Authenticate(ctx, token)
+	if err != nil || p == nil || p.Subject == "" || p.Tenant == "" {
+		return nil, errors.New("oidc: verified subject and tenant required")
+	}
+	return p, nil
+}
+func (c *Client) Issuer() string { return c.cfg.Issuer }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/eighred/kanz/internal/clientip"
 	"github.com/eighred/kanz/internal/lifecycle"
+	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/observability"
@@ -113,8 +114,30 @@ func run() int {
 		logger.Info("OIDC login enabled alongside credential login", "issuer", cfg.Issuer)
 	}
 
-	sessions := session.NewManager(cfg.SessionTTL)
-	go sweepLoop(ctx, sessions)
+	var sessions *session.Manager
+	if cfg.SessionMode == "postgres" {
+		bootCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		pool, poolErr := pg.NewGlobalPool(bootCtx, cfg.SessionDSN, "browser cookie lookup precedes tenant resolution; session transactions enforce tenant/subject RLS")
+		if poolErr != nil {
+			cancel()
+			logger.Error("session database connection failed")
+			return 2
+		}
+		defer pool.Close()
+		sessions, err = session.NewPostgres(bootCtx, pool, cfg.SessionKey, cfg.SessionTTL, cfg.SessionLimits)
+		cancel()
+	} else {
+		sessions, err = session.NewBounded(cfg.SessionTTL, cfg.SessionLimits)
+	}
+	if err != nil {
+		logger.Error("session authority initialization failed", "err", err)
+		return 2
+	}
+	logger.Info("browser session authority configured", "mode", cfg.SessionMode)
+	sweepCtx, stopSweep := context.WithCancel(ctx)
+	sweepDone := make(chan struct{})
+	go func() { defer close(sweepDone); sweepLoop(sweepCtx, sessions) }()
+	defer func() { stopSweep(); <-sweepDone }()
 
 	readiness := &server.Readiness{}
 	srv, err := server.New(readiness, server.Options{
@@ -172,7 +195,9 @@ func sweepLoop(ctx context.Context, m *session.Manager) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			m.Sweep()
+			if err := m.Sweep(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("session expiry cleanup failed")
+			}
 		}
 	}
 }

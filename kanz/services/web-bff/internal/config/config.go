@@ -7,14 +7,18 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
-	"github.com/eighred/kanz/internal/env"
-	"github.com/eighred/kanz/pkg/secret"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/pkg/secret"
+	"github.com/eighred/kanz/services/web-bff/internal/session"
 )
 
 // Config is the resolved BFF configuration.
@@ -39,7 +43,11 @@ type Config struct {
 
 	// SessionTTL bounds how long a browser session (and its held token) lives
 	// before re-login is required.
-	SessionTTL time.Duration
+	SessionTTL    time.Duration
+	SessionMode   string
+	SessionDSN    string
+	SessionKey    []byte
+	SessionLimits session.Limits
 	// SecureCookies sets the Secure flag on cookies. Default true; set
 	// WEB_BFF_INSECURE_COOKIES=1 for local http development only.
 	// SigningSecret is the gateway's API-01d request-signing secret, read via
@@ -148,6 +156,9 @@ func Load() (Config, error) {
 		return Config{}, errors.New("WEB_BFF_TRUSTED_PROXY_HEADER and WEB_BFF_TRUSTED_PROXIES must be " +
 			"set together or not at all — one without the other reads as configured and honours nothing")
 	}
+	if err := loadSessions(&cfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 func parseDuration(s string, def time.Duration) time.Duration {
@@ -159,4 +170,52 @@ func parseDuration(s string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func loadSessions(c *Config) error {
+	c.SessionMode = env.Or("WEB_BFF_SESSION_MODE", "memory")
+	c.SessionLimits = session.DefaultLimits()
+	for name, dst := range map[string]*int{"WEB_BFF_MAX_SESSIONS": &c.SessionLimits.Sessions, "WEB_BFF_MAX_PENDING_LOGINS": &c.SessionLimits.Pending, "WEB_BFF_MAX_SESSIONS_PER_SUBJECT": &c.SessionLimits.PerSubject} {
+		if raw, ok := os.LookupEnv(name); ok {
+			v, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("%s must be an integer", name)
+			}
+			*dst = v
+		}
+	}
+	if c.SessionLimits.Validate() != nil {
+		return errors.New("invalid browser session capacity limits")
+	}
+	if raw := os.Getenv("WEB_BFF_SESSION_TTL"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil || v <= 0 || v > 24*time.Hour {
+			return errors.New("WEB_BFF_SESSION_TTL must be positive and at most 24h")
+		}
+		c.SessionTTL = v
+	}
+	dsn, err := secret.Read("WEB_BFF_SESSION_DSN")
+	if err != nil {
+		return errors.New("cannot read WEB_BFF_SESSION_DSN")
+	}
+	key, err := secret.Read("WEB_BFF_SESSION_KEY")
+	if err != nil {
+		return errors.New("cannot read WEB_BFF_SESSION_KEY")
+	}
+	switch c.SessionMode {
+	case "memory":
+		if dsn != "" || key != "" {
+			return errors.New("shared session settings require postgres mode")
+		}
+	case "postgres":
+		decoded, err := base64.StdEncoding.DecodeString(key)
+		if dsn == "" || err != nil || len(decoded) != 32 {
+			return errors.New("postgres sessions require DSN and base64-encoded 32-byte key")
+		}
+		c.SessionDSN = dsn
+		c.SessionKey = decoded
+	default:
+		return errors.New("WEB_BFF_SESSION_MODE must be memory or postgres")
+	}
+	return nil
 }

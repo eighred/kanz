@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,12 +59,12 @@ func TestRecoveryProxyKeepsAuthorityAndErrorsServerSide(t *testing.T) {
 	request("/auth/recovery", "http://app", 202)
 	status = 401
 	request("/auth/recovery/consume", "http://app", 401)
-	if _, ok := h.srv.sessions.Get(cookie.Value); !ok {
+	if _, ok, _ := h.srv.sessions.Get(context.Background(), cookie.Value); !ok {
 		t.Fatal("failed reset destroyed session")
 	}
 	status = 204
 	request("/auth/recovery/consume", "http://app", 204)
-	if _, ok := h.srv.sessions.Get(cookie.Value); ok {
+	if _, ok, _ := h.srv.sessions.Get(context.Background(), cookie.Value); ok {
 		t.Fatal("successful reset retained local session")
 	}
 }
