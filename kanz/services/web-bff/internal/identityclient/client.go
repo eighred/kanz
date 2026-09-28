@@ -144,6 +144,16 @@ func (c *Client) RotateCredential(ctx context.Context, bearer string, body []byt
 	return c.authenticated(ctx, http.MethodPost, "/credential", bearer, body, clientIP)
 }
 
+// Recovery accepts only the four explicitly supported identity commands.
+func (c *Client) Recovery(ctx context.Context, path, bearer string, body []byte, clientIP string) (*ProvisioningResponse, error) {
+	switch path {
+	case "/mailbox", "/mailbox/verify", "/recovery", "/recovery/consume":
+		return c.authenticated(ctx, http.MethodPost, path, bearer, body, clientIP)
+	default:
+		return nil, errors.New("identityclient: unsupported recovery command")
+	}
+}
+
 func (c *Client) authenticated(ctx context.Context, method, path, bearer string, body []byte, clientIP string) (*ProvisioningResponse, error) {
 	var reader io.Reader
 	if len(body) > 0 {
@@ -153,7 +163,9 @@ func (c *Client) authenticated(ctx context.Context, method, path, bearer string,
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	if c.forwardHeader != "" && clientIP != "" {
 		req.Header.Set(c.forwardHeader, clientIP)
 	}

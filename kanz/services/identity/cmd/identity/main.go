@@ -33,6 +33,7 @@ import (
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/services/identity/internal/config"
+	"github.com/eighred/kanz/services/identity/internal/delivery"
 	"github.com/eighred/kanz/services/identity/internal/ratelimit"
 	"github.com/eighred/kanz/services/identity/internal/server"
 	"github.com/eighred/kanz/services/identity/internal/signingkey"
@@ -169,6 +170,28 @@ func run() int {
 			"enable_with", "IDENTITY_ADMIN_ROLE")
 	}
 
+	if cfg.Recovery != nil {
+		if cfg.AdminRole == "" {
+			logger.Error("recovery requires identity provisioning")
+			return 2
+		}
+		mailer, mailErr := delivery.New(cfg.Recovery.SMTP)
+		if mailErr != nil {
+			logger.Error("SMTP configuration invalid")
+			return 2
+		}
+		opts = append(opts, server.WithRecovery(store))
+		mailCtx, cancelMail := context.WithCancel(ctx)
+		mailDone := make(chan struct{})
+		go func() {
+			defer close(mailDone)
+			if err := delivery.Run(mailCtx, pool, store, mailer, cfg.Recovery.Origin, logger); err != nil && mailCtx.Err() == nil {
+				logger.Error("identity mail worker stopped")
+				fatal.Raise(err)
+			}
+		}()
+		defer func() { cancelMail(); <-mailDone }()
+	}
 	srv, err := server.New(store, signer, limiter,
 		func() any { return signer.JWKS() }, cfg.TokenIssuer, logger, opts...)
 	if err != nil {

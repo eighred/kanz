@@ -182,6 +182,11 @@ func (s *Server) routes() {
 	}
 	s.mux.HandleFunc("POST /auth/logout", s.handleLogout)
 	s.mux.HandleFunc("POST /auth/credential", s.handleCredentialRotation)
+	s.mux.HandleFunc("POST /auth/mailbox", s.handleRecovery)
+	s.mux.HandleFunc("GET /auth/mailbox", s.handleRecovery)
+	s.mux.HandleFunc("POST /auth/mailbox/verify", s.handleRecovery)
+	s.mux.HandleFunc("POST /auth/recovery", s.handleRecovery)
+	s.mux.HandleFunc("POST /auth/recovery/consume", s.handleRecovery)
 	s.mux.HandleFunc("GET /auth/me", s.handleMe)
 	// Identity provisioning is a separate authority from the gateway API. These
 	// two exact routes keep its bearer in the BFF session while avoiding a broad
