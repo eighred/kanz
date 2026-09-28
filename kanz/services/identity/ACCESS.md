@@ -45,8 +45,9 @@ DecisionLog records in the existing forced-RLS, append-only identity journal,
 including actor, before/after summaries and the replacement's authority. Audit
 failure rolls back all state changes. Neither token nor hash is audited or
 logged. Initial creation/redemption retain their existing logging behavior;
-complete lifecycle export to central audit, automated delivery, forgotten-password
-recovery and MFA remain separate #1227 slices.
+complete lifecycle export to central audit, automated invitation delivery and
+MFA remain separate #1227 slices. Verified mailbox delivery and forgotten-password
+recovery are available through the opt-in [recovery flow](RECOVERY.md).
 
 ## Self-service password rotation
 

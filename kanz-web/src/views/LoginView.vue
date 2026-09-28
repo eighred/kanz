@@ -46,6 +46,7 @@ async function submit() {
 <template>
   <form class="card" @submit.prevent="submit">
     <h1>Sign in</h1>
+    <RouterLink to="/recover">Forgot password?</RouterLink>
     <p class="muted">Eighred operator and trading control plane.</p>
 
     <label>

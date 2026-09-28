@@ -85,12 +85,13 @@ type Limiter interface {
 
 // Server serves the credential surface.
 type Server struct {
-	store   Store
-	minter  Minter
-	limiter Limiter
-	logger  *slog.Logger
-	jwks    func() any
-	now     func() time.Time
+	recovery RecoveryStore
+	store    Store
+	minter   Minter
+	limiter  Limiter
+	logger   *slog.Logger
+	jwks     func() any
+	now      func() time.Time
 
 	// issuer is this service's own base URL, published in the discovery document
 	// so a gateway configured with nothing but an issuer can find the key.
@@ -185,6 +186,9 @@ func New(store Store, minter Minter, limiter Limiter, jwks func() any, issuer st
 				"auth.NewSlogRecorder(logger) if this deployment has no bus")
 		}
 	}
+	if s.recovery != nil && s.provisioning == nil {
+		return nil, errors.New("mailbox recovery requires provisioning verifier")
+	}
 	return s, nil
 }
 
@@ -199,6 +203,13 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	// that registered it only when provisioning was wired would take the
 	// platform's sole ingress out of service by omission.
 	mux.HandleFunc("GET /revocations", s.revocationsHandler)
+	if s.recovery != nil {
+		mux.HandleFunc("GET /mailbox", administrativeBody(s.mailboxStatus))
+		mux.HandleFunc("POST /mailbox", administrativeBody(s.enrollMailbox))
+		mux.HandleFunc("POST /mailbox/verify", administrativeBody(s.verifyMailbox))
+		mux.HandleFunc("POST /recovery", administrativeBody(s.requestRecovery))
+		mux.HandleFunc("POST /recovery/consume", administrativeBody(s.resetCredential))
+	}
 	// AUTHENTICATED provisioning (#364). Registered only when wired, so a
 	// deployment without it answers 404 rather than 403 — "there is no
 	// provisioning surface here" is the truthful answer to someone probing.

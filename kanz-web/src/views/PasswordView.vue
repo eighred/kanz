@@ -33,6 +33,7 @@ async function submit() {
 <template>
   <section class="card">
     <h1>Change password</h1>
+    <RouterLink to="/mailbox">Set up a recovery mailbox</RouterLink>
     <p v-if="done" role="status">Password changed. Sign in again with your new password.</p>
     <form v-else @submit.prevent="submit">
       <p class="muted">Choose a different password of 12 to 1024 characters. This revokes your existing sessions.</p>

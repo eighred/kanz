@@ -1,5 +1,7 @@
 import UsersView from '../views/UsersView.vue'
 import PasswordView from '../views/PasswordView.vue'
+import RecoveryView from '../views/RecoveryView.vue'
+import MailboxView from '../views/MailboxView.vue'
 import HouseholdView from '../views/HouseholdView.vue'
 import EvidenceView from '../views/EvidenceView.vue'
 import CopilotView from '../views/CopilotView.vue'
@@ -41,6 +43,9 @@ export const router = createRouter({
     { path: '/', redirect: '/overview' },
     { path: '/users', name: 'users', component: UsersView },
     { path: '/password', name: 'password', component: PasswordView },
+    { path: '/mailbox', name: 'mailbox', component: MailboxView },
+    { path: '/recover', name: 'recover', component: RecoveryView, meta: { public: true } },
+    { path: '/verify-mailbox', name: 'verify-mailbox', component: RecoveryView, meta: { public: true } },
     { path: '/overview', name: 'overview', component: OverviewView },
     { path: '/audit', name: 'audit', component: AuditView },
     { path: '/audit/events/:id', name: 'audit-event', component: AuditEventView },
