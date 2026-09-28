@@ -141,7 +141,9 @@ func audit(ctx context.Context, tx pgx.Tx, s Session, action, target string) err
 	if e := scope(ctx, tx, s); e != nil {
 		return e
 	}
-	entry := auth.BuildDecisionLog("web-bff", auth.Request{Principal: &auth.Principal{Subject: s.Subject, Tenant: s.Tenant}, Action: auth.Action("identity.session." + action), Resource: auth.Resource{Type: "browser-session", ID: target, Tenant: s.Tenant}}, auth.Decision{Allow: true, Reason: "session authority transaction"})
+	// This record attributes cookie ownership only. Gateway roles and portfolios
+	// are not asserted by this store and must not be invented for session audit.
+	entry := auth.BuildDecisionLog("web-bff", auth.Request{Principal: &auth.Principal{Subject: s.Subject, Tenant: s.Tenant, Roles: nil, Portfolios: nil}, Action: auth.Action("identity.session." + action), Resource: auth.Resource{Type: "browser-session", ID: target, Tenant: s.Tenant}}, auth.Decision{Allow: true, Reason: "session authority transaction"})
 	entry.Attributes["session.authority"] = s.Authority
 	raw, e := protojson.Marshal(entry)
 	if e != nil {
