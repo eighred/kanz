@@ -14,9 +14,8 @@ func (s *Server) handleMFA(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/auth")
 	bearer := ""
 	if path != "/mfa/login/finish" {
-		sess, ok := s.currentSession(r)
+		sess, ok := s.currentSession(w, r)
 		if !ok {
-			writeJSON(w, 401, map[string]string{"error": "invalid credentials"})
 			return
 		}
 		bearer = sess.AccessToken

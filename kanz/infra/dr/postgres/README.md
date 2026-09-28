@@ -42,6 +42,7 @@ what gets read, so it is not allowed to be the stale copy.
 
 | Service | DR status | Cluster / reason |
 |---|---|---|
+| `web-bff` | NOT COVERED | #1288: optional shared browser authority and session audit require database placement, sizing and a restore drill that invalidates restored cookies and rotates the key. Existing deployment remains memory singleton until that proof. |
 | `risk-engine` | covered | `kanz-risk` |
 | `schema-registry` | covered | `kanz-registry` |
 | `accounting` | covered | `kanz-books` (IBOR ledger journal + snapshots) |

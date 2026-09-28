@@ -7,9 +7,8 @@ import (
 )
 
 func (s *Server) handleIdentityAccess(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.currentSession(r)
+	sess, ok := s.currentSession(w, r)
 	if !ok {
-		writeJSON(w, 401, map[string]string{"error": "not authenticated"})
 		return
 	}
 	path := "/permissions"

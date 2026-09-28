@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,7 +30,7 @@ func invitationServer(t *testing.T, identityURL string) (*Server, *http.Cookie) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := srv.sessions.Create(session.Session{
+	id, err := srv.sessions.Create(context.Background(), session.Session{
 		AccessToken: "operator-session-token",
 		Subject:     "user:operator",
 		Tenant:      "acme",

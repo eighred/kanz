@@ -315,6 +315,7 @@ type drClassification struct {
 // where an operator looks during a failover and the README is not what fails a
 // build.
 var drPosture = map[string]drClassification{
+	"web-bff":         {status: drUnresolved, reason: "#1288: optional shared browser authority and immutable audit have no production placement or revocation-safe restore drill; memory singleton remains deployed until verified."},
 	"risk-engine":     {status: drCovered, cluster: "kanz-risk", reason: "PERS-01 portfolio positions and risk state"},
 	"schema-registry": {status: drCovered, cluster: "kanz-registry", reason: "EVT-16 registered payload schemas"},
 	"accounting":      {status: drCovered, cluster: "kanz-books", reason: "PARITY-02 IBOR ledger journal + snapshots"},

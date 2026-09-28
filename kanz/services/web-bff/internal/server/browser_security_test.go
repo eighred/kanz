@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,7 @@ import (
 func TestBrowserBoundaryRejectsBeforeBodySessionOrUpstream(t *testing.T) {
 	srv := bffWithIdentity(t, "http://127.0.0.1:1", "http://127.0.0.1:1")
 	srv.secureCookies = true
-	id, err := srv.sessions.Create(session.Session{Subject: "operator", Expiry: time.Now().Add(time.Hour)})
+	id, err := srv.sessions.Create(context.Background(), session.Session{Tenant: "acme", Subject: "operator", Expiry: time.Now().Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,7 @@ func TestBrowserBoundaryRejectsBeforeBodySessionOrUpstream(t *testing.T) {
 				if w.Code != http.StatusForbidden || len(w.Result().Cookies()) != 0 {
 					t.Fatalf("status/cookies = %d/%v", w.Code, w.Result().Cookies())
 				}
-				if _, ok := srv.sessions.Get(id); !ok {
+				if _, ok, _ := srv.sessions.Get(context.Background(), id); !ok {
 					t.Fatal("rejected request deleted the session")
 				}
 				assertBrowserHeaders(t, w.Header(), true)
@@ -100,7 +101,7 @@ func TestBrowserBoundaryRealTLSConcurrentLogout(t *testing.T) {
 	t.Cleanup(network.Close)
 	client := network.Client()
 	client.Timeout = 5 * time.Second
-	id, err := srv.sessions.Create(session.Session{Subject: "operator", Expiry: time.Now().Add(time.Hour)})
+	id, err := srv.sessions.Create(context.Background(), session.Session{Tenant: "acme", Subject: "operator", Expiry: time.Now().Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestBrowserBoundaryRealTLSConcurrentLogout(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	if _, ok := srv.sessions.Get(id); !ok {
+	if _, ok, _ := srv.sessions.Get(context.Background(), id); !ok {
 		t.Fatal("concurrent forged logout destroyed the session")
 	}
 	r, err := http.NewRequest(http.MethodPost, network.URL+"/auth/logout", nil)
@@ -148,7 +149,7 @@ func TestBrowserBoundaryRealTLSConcurrentLogout(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("legitimate logout = %d", res.StatusCode)
 	}
-	if _, ok := srv.sessions.Get(id); ok {
+	if _, ok, _ := srv.sessions.Get(context.Background(), id); ok {
 		t.Fatal("legitimate logout did not delete the session")
 	}
 	assertBrowserHeaders(t, res.Header, true)
@@ -202,7 +203,7 @@ func TestGatewayCannotOverrideBrowserPolicyOverRealHTTP(t *testing.T) {
 	srv.secureCookies = true
 	network := httptest.NewServer(srv)
 	t.Cleanup(network.Close)
-	id, err := srv.sessions.Create(session.Session{AccessToken: "test-only", Subject: "operator", Expiry: time.Now().Add(time.Hour)})
+	id, err := srv.sessions.Create(context.Background(), session.Session{Tenant: "acme", AccessToken: "test-only", Subject: "operator", Expiry: time.Now().Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}

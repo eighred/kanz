@@ -36,6 +36,7 @@ import (
 // SECURITY to its migrations directory. Derived from the migrations, not from
 // what the script happens to name.
 var allTenantScopedServices = map[string]string{
+	"web-bff":       "services/web-bff/migrations",
 	"accounting":    "services/accounting/migrations",
 	"alternatives":  "services/alternatives/migrations",
 	"datamaster":    "services/datamaster/migrations",

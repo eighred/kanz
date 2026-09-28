@@ -7,7 +7,9 @@ package server
 
 import (
 	"bytes"
-	"encoding/base64"
+	"context"
+	"crypto/subtle"
+
 	"encoding/json"
 	"errors"
 	"io"
@@ -94,6 +96,9 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 	// all together — one user's failures throttle everybody, and an attacker's
 	// attempts hide in the same bucket. Both are silent, and both are the kind of
 	// thing a zero value provides happily.
+	if opts.Sessions == nil {
+		return nil, errors.New("web-bff: session authority required")
+	}
 	if opts.Identity == nil {
 		return nil, errors.New("web-bff: identity client required — it is the only way anyone signs in")
 	}
@@ -164,8 +169,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	s.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if !s.readiness.Ready() {
+	s.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if !s.readiness.Ready() || s.sessions.Ping(ctx) != nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
 			return
 		}
@@ -193,6 +200,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /auth/recovery", s.handleRecovery)
 	s.mux.HandleFunc("POST /auth/recovery/consume", s.handleRecovery)
 	s.mux.HandleFunc("GET /auth/me", s.handleMe)
+	s.mux.HandleFunc("GET /auth/sessions", s.handleSessions)
+	s.mux.HandleFunc("POST /auth/sessions/{id}/revoke", s.handleRevokeSession)
 	// Identity provisioning is a separate authority from the gateway API. These
 	// two exact routes keep its bearer in the BFF session while avoiding a broad
 	// identity proxy that would expose future administrative endpoints by
@@ -218,8 +227,7 @@ func (s *Server) routes() {
 }
 
 func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.currentSession(r); !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+	if _, ok := s.currentSession(w, r); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.preflight.read(time.Now().UTC()))
@@ -238,12 +246,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusInternalServerError, "login init failed", err)
 		return
 	}
-	s.sessions.PutPending(state, pkce.Verifier)
+	if err = s.sessions.PutPending(r.Context(), state, pkce.Verifier); err != nil {
+		s.sessionError(w, err)
+		return
+	}
 	authURL, err := s.oidc.AuthCodeURL(r.Context(), state, pkce.Challenge)
 	if err != nil {
 		s.fail(w, http.StatusBadGateway, "cannot reach identity provider", err)
 		return
 	}
+	http.SetCookie(w, &http.Cookie{Name: "kanz_login", Value: state, Path: "/auth/callback", MaxAge: int(session.PendingTTL.Seconds()), HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -260,7 +272,17 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadRequest, "missing code or state", nil)
 		return
 	}
-	verifier, ok := s.sessions.TakePending(state)
+	binding, e := r.Cookie("kanz_login")
+	if e != nil || subtle.ConstantTimeCompare([]byte(binding.Value), []byte(state)) != 1 {
+		s.fail(w, 400, "invalid or expired login state", nil)
+		return
+	}
+	verifier, ok, takeErr := s.sessions.TakePending(r.Context(), state)
+	if takeErr != nil {
+		s.sessionError(w, takeErr)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "kanz_login", Value: "", Path: "/auth/callback", MaxAge: -1, HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteLaxMode})
 	if !ok {
 		// Unknown/expired/replayed state — the anti-forgery check (a forged
 		// callback has no matching pending login).
@@ -272,19 +294,22 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusBadGateway, "token exchange failed", err)
 		return
 	}
-	sub, tenant := claimsOf(tok.IDToken)
-	if sub == "" {
-		sub, tenant = claimsOf(tok.AccessToken)
+	principal, err := s.oidc.Identity(r.Context(), tok.IDToken)
+	if err != nil {
+		s.fail(w, http.StatusUnauthorized, "sign-in identity could not be verified", nil)
+		return
 	}
-	id, err := s.sessions.Create(session.Session{
+	tok.Expiry = s.sessions.Expiry(tok.Expiry)
+	id, err := s.sessions.Replace(r.Context(), sessionID(r), session.Session{
 		AccessToken:  tok.AccessToken,
 		RefreshToken: tok.RefreshToken,
-		Subject:      sub,
-		Tenant:       tenant,
+		Subject:      principal.Subject,
+		Tenant:       principal.Tenant,
 		Expiry:       tok.Expiry,
-	})
+		Authority:    "oidc:" + s.oidc.Issuer(),
+	}, false)
 	if err != nil {
-		s.fail(w, http.StatusInternalServerError, "could not start session", err)
+		s.sessionError(w, err)
 		return
 	}
 	s.setSessionCookie(w, id, tok.Expiry)
@@ -384,18 +409,17 @@ func (s *Server) completeLogin(w http.ResponseWriter, r *http.Request, tok *iden
 		return
 	}
 
-	id, cerr := s.sessions.Create(session.Session{
+	strict := strings.HasPrefix(r.URL.Path, "/auth/mfa/") && r.URL.Path != "/auth/mfa/login/finish"
+	tok.Expires = s.sessions.Expiry(tok.Expires)
+	id, cerr := s.sessions.Replace(r.Context(), sessionID(r), session.Session{
 		AccessToken: tok.Token,
 		Subject:     tok.Subject,
 		Tenant:      tok.Tenant,
 		Expiry:      tok.Expires,
-	})
+	}, strict)
 	if cerr != nil {
-		s.fail(w, http.StatusInternalServerError, "could not start session", cerr)
+		s.sessionError(w, cerr)
 		return
-	}
-	if old, e := r.Cookie(sessionCookie); e == nil {
-		s.sessions.Delete(old.Value)
 	}
 	s.setSessionCookie(w, id, tok.Expires)
 	// JSON rather than a redirect: the caller is a fetch() from the SPA, and a
@@ -423,17 +447,17 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(sessionCookie); err == nil {
-		s.sessions.Delete(c.Value)
+	if err := s.sessions.Delete(r.Context(), sessionID(r)); err != nil {
+		s.sessionError(w, err)
+		return
 	}
 	s.clearSessionCookie(w)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "signed out"})
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.currentSession(r)
+	sess, ok := s.currentSession(w, r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -447,9 +471,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // identity. The browser's Authorization header is ignored; the only bearer
 // identity sees is the one held in the server-side session.
 func (s *Server) handleInvites(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.currentSession(r)
+	sess, ok := s.currentSession(w, r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
 		return
 	}
 	var body []byte
@@ -485,9 +508,8 @@ func (s *Server) handleInvites(w http.ResponseWriter, r *http.Request) {
 
 // handleProxy forwards /api/* to the gateway /v1/* as the session's caller.
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.currentSession(r)
+	sess, ok := s.currentSession(w, r)
 	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
 		return
 	}
 	body, ok := s.readProxyBody(w, r)
@@ -553,12 +575,37 @@ func (s *Server) readProxyBody(w http.ResponseWriter, r *http.Request) ([]byte, 
 // call is no longer half a fact.
 
 // currentSession resolves the session from the request cookie.
-func (s *Server) currentSession(r *http.Request) (session.Session, bool) {
-	c, err := r.Cookie(sessionCookie)
+func (s *Server) currentSession(w http.ResponseWriter, r *http.Request) (session.Session, bool) {
+	v, ok, err := s.sessions.Get(r.Context(), sessionID(r))
 	if err != nil {
+		s.sessionError(w, err)
 		return session.Session{}, false
 	}
-	return s.sessions.Get(c.Value)
+	if !ok {
+		writeJSON(w, 401, map[string]string{"error": "not authenticated"})
+	}
+	return v, ok
+}
+func sessionID(r *http.Request) string {
+	c, e := r.Cookie(sessionCookie)
+	if e != nil {
+		return ""
+	}
+	return c.Value
+}
+func (s *Server) sessionError(w http.ResponseWriter, e error) {
+	status, msg := 503, "Session service unavailable. Try again shortly."
+	switch {
+	case errors.Is(e, session.ErrCapacity):
+		status, msg = 429, "Session capacity reached. Sign out another session or try again later."
+	case errors.Is(e, session.ErrNotFound):
+		status, msg = 404, "Session not found. Refresh the session list."
+	case errors.Is(e, session.ErrMissing):
+		status, msg = 401, "Session no longer active. Sign in again."
+	case errors.Is(e, session.ErrInvalid):
+		status, msg = 400, "Session could not be established."
+	}
+	writeJSON(w, status, map[string]string{"error": msg})
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, id string, expiry time.Time) {
@@ -602,27 +649,6 @@ func newProxy(target *url.URL) *httputil.ReverseProxy {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream unavailable"})
 	}
 	return p
-}
-
-// claimsOf base64url-decodes a JWT payload WITHOUT verifying the signature —
-// display/logging only. The gateway is the authority that verifies the token.
-func claimsOf(jwt string) (subject, tenant string) {
-	parts := strings.Split(jwt, ".")
-	if len(parts) != 3 {
-		return "", ""
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", ""
-	}
-	var c struct {
-		Sub    string `json:"sub"`
-		Tenant string `json:"tenant"`
-	}
-	if json.Unmarshal(payload, &c) != nil {
-		return "", ""
-	}
-	return c.Sub, c.Tenant
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,11 +10,16 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/services/web-bff/internal/identityclient"
+	"github.com/eighred/kanz/services/web-bff/internal/session"
 )
 
 func TestMFAProxySeparatesPublicChallengesFromBearerSessions(t *testing.T) {
 	h := newHarness(t)
-	cookie := h.login(t)
+	id, err := h.srv.sessions.Create(context.Background(), session.Session{Subject: "person", Tenant: "tenant", AccessToken: "ACCESS-TOK"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := &http.Cookie{Name: sessionCookie, Value: id}
 	status := 200
 	calls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +63,7 @@ func TestMFAProxySeparatesPublicChallengesFromBearerSessions(t *testing.T) {
 	request("/auth/mfa/stepup/begin", "http://app", 200)
 	status = 401
 	request("/auth/mfa/login/finish", "http://app", 401)
-	if _, ok := h.srv.sessions.Get(cookie.Value); !ok {
+	if _, ok, _ := h.srv.sessions.Get(context.Background(), cookie.Value); !ok {
 		t.Fatal("failed MFA destroyed existing session")
 	}
 	status = 200
@@ -65,7 +71,7 @@ func TestMFAProxySeparatesPublicChallengesFromBearerSessions(t *testing.T) {
 	if len(w.Result().Cookies()) == 0 {
 		t.Fatal("verified MFA did not rotate cookie")
 	}
-	if _, ok := h.srv.sessions.Get(cookie.Value); ok {
+	if _, ok, _ := h.srv.sessions.Get(context.Background(), cookie.Value); ok {
 		t.Fatal("old BFF session retained after step-up")
 	}
 }

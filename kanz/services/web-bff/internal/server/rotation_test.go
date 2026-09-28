@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -48,12 +49,12 @@ func TestRotationProxyPinsBearerSourceAndDeletesSessionOnlyOnSuccess(t *testing.
 		t.Fatal("cross-origin rotation reached identity")
 	}
 	request("http://app", 400)
-	if _, ok := h.srv.sessions.Get(cookie.Value); !ok {
+	if _, ok, _ := h.srv.sessions.Get(context.Background(), cookie.Value); !ok {
 		t.Fatal("failed rotation destroyed session")
 	}
 	status = 204
 	request("http://app", 204)
-	if _, ok := h.srv.sessions.Get(cookie.Value); ok {
+	if _, ok, _ := h.srv.sessions.Get(context.Background(), cookie.Value); ok {
 		t.Fatal("rotation left local session active")
 	}
 	request("http://app", 401)

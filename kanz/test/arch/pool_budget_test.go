@@ -360,6 +360,7 @@ func barePoolConstructions(t *testing.T, root string) map[string]bool {
 // belongs in a PITR cluster, and consequently neither has a server declared here
 // to size. Their DSNs come from Vault (#59), like every production DSN.
 var undeclaredServerPools = map[string]string{
+	"web-bff/cfg.SessionDSN": "#1288: optional shared-session authority reserves four connections per BFF; production database placement and scaling budget remain unverified. Existing memory singleton deployment opens no session pool.",
 	"audit/cfg.DatabaseURL": "audit is drExcluded (AUDIT-01b WORM store with its own tamper-resistant " +
 		"retention), so no CNPG cluster holds it and no manifest here declares the server it reaches. " +
 		"Its demand is small — one pool at a ceiling of 2 — but it is UNSIZED, not zero. Closing this " +
@@ -387,6 +388,7 @@ var undeclaredServerPools = map[string]string{
 // Keyed "service/<dsn expression>" → the service whose database is on the other
 // end. A dead entry fails the guard.
 var foreignPoolReaches = map[string]string{
+	"web-bff/cfg.SessionDSN":        "web-bff", // #1288: optional service-owned session authority, separately named config field.
 	"risk-engine/cfg.MarketDataURL": "market-data",
 }
 

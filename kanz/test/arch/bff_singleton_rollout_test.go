@@ -14,6 +14,7 @@ import (
 
 // Two tunnel connectors can route one browser to different in-memory stores.
 // replicas: 1 alone permits that split during the default rolling update.
+// #1288 must verify shared-store production placement and DR before this pin changes.
 func TestBFFRolloutPreservesSingleSessionOwner(t *testing.T) {
 	root := moduleRoot(t)
 	canonical, err := os.ReadFile(filepath.Join(root, "infra/deploy/web-bff-deploy.yaml"))
@@ -36,6 +37,16 @@ func TestBFFRolloutPreservesSingleSessionOwner(t *testing.T) {
 					continue
 				}
 				found++
+				for _, container := range d.Spec.Template.Spec.Containers {
+					for _, env := range container.Env {
+						if env.Name == "WEB_BFF_SESSION_MODE" && (env.Value != "memory" || env.ValueFrom != nil) {
+							t.Fatal("shared-session production activation requires #1288 rollout proof")
+						}
+						if env.Name == "WEB_BFF_SESSION_DSN" || env.Name == "WEB_BFF_SESSION_DSN_FILE" || env.Name == "WEB_BFF_SESSION_KEY" || env.Name == "WEB_BFF_SESSION_KEY_FILE" {
+							t.Fatal("production shared-session secret wiring requires #1288 rollout proof")
+						}
+					}
+				}
 				if d.Spec.Replicas == nil || *d.Spec.Replicas != 1 || d.Labels[drSingletonLabel] != "true" {
 					t.Fatal("BFF must retain its labelled singleton pin until sessions are shared")
 				}

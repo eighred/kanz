@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -173,7 +174,7 @@ func bffWithSigning(t *testing.T, gatewayURL, secret string) *Server {
 // unauthenticated probe would 401 for the wrong reason and prove nothing.
 func proxyAs(t *testing.T, srv *Server, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	id, err := srv.sessions.Create(session.Session{
+	id, err := srv.sessions.Create(context.Background(), session.Session{
 		AccessToken: "the-server-held-token",
 		Subject:     "user:fiona",
 		Tenant:      "acme",

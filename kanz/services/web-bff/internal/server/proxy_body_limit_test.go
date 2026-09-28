@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -102,7 +103,7 @@ func TestProxyForwardsAndSignsBodyExactlyAtTheLimit(t *testing.T) {
 
 func proxyRequestAs(t *testing.T, srv *Server, r *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
-	id, err := srv.sessions.Create(session.Session{
+	id, err := srv.sessions.Create(context.Background(), session.Session{
 		AccessToken: "the-server-held-token",
 		Subject:     "user:fiona",
 		Tenant:      "acme",

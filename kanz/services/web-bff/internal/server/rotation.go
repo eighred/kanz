@@ -3,9 +3,8 @@ package server
 import "net/http"
 
 func (s *Server) handleCredentialRotation(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.currentSession(r)
+	sess, ok := s.currentSession(w, r)
 	if !ok {
-		writeJSON(w, 401, map[string]string{"error": "invalid credentials"})
 		return
 	}
 	body, ok := s.readProxyBody(w, r)
@@ -18,8 +17,9 @@ func (s *Server) handleCredentialRotation(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if resp.Status == http.StatusNoContent {
-		if c, err := r.Cookie(sessionCookie); err == nil {
-			s.sessions.Delete(c.Value)
+		if err := s.sessions.Delete(r.Context(), sessionID(r)); err != nil {
+			s.sessionError(w, err)
+			return
 		}
 		s.clearSessionCookie(w)
 		w.WriteHeader(http.StatusNoContent)
