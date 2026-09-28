@@ -189,6 +189,8 @@ func (s *Server) routes() {
 	// accident.
 	s.mux.HandleFunc("GET /api/identity/invites", s.handleInvites)
 	s.mux.HandleFunc("POST /api/identity/invites", s.handleInvites)
+	s.mux.HandleFunc("POST /api/identity/invites/{id}/revoke", s.handleInvites)
+	s.mux.HandleFunc("POST /api/identity/invites/{id}/reissue", s.handleInvites)
 	s.mux.HandleFunc("GET /api/identity/users", s.handleIdentityAccess)
 	s.mux.HandleFunc("PUT /api/identity/users/{subject}/access", s.handleIdentityAccess)
 	s.mux.HandleFunc("POST /api/identity/users/{subject}/disable", s.handleIdentityAccess)
@@ -441,7 +443,15 @@ func (s *Server) handleInvites(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	resp, err := s.identity.Invites(r.Context(), r.Method, sess.AccessToken, body)
+	path := "/invites"
+	if id := r.PathValue("id"); id != "" {
+		action := "revoke"
+		if strings.HasSuffix(r.Pattern, "/reissue") {
+			action = "reissue"
+		}
+		path += "/" + url.PathEscape(id) + "/" + action
+	}
+	resp, err := s.identity.Administration(r.Context(), r.Method, path, sess.AccessToken, body)
 	if err != nil {
 		s.fail(w, http.StatusBadGateway, "the identity service is unavailable", err)
 		return

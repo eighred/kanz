@@ -1,5 +1,53 @@
 # Account access administration
 
+## Invitation revocation and reissue
+
+Apply `0005_invitation_lifecycle.sql` with **old identity writers stopped**, then
+start the updated identity binary before admitting traffic. An old binary lacks
+the lifecycle routes and projections; the database constraint independently
+refuses marking a revoked row as redeemed. Migrations 0001–0004
+must already be applied. The migration preserves existing tokens/authority and
+can itself be applied twice. Do not replay migration 0001 after the upgrade:
+its retired index cannot represent multiple revoked historical invitations.
+
+The invitation list reports server-derived `pending`, `accepted`, `expired`, or
+`revoked`, plus revision, lifecycle timestamps, revoker and replacement ID.
+Expiry is evaluated when the list is read; reload for current state. Token and
+token hash are absent. The existing private-channel handoff remains: the browser
+shows the initial or replacement link once; the application does not send email
+or attest delivery. Dismissing the panel discards its copy, not the clipboard.
+
+`POST /invites/{id}/revoke` and `POST /invites/{id}/reissue` accept only
+`{"revision": <reviewed revision>}` and require a current identity administrator
+in the invitation's tenant. The BFF exposes those exact paths under
+`/api/identity/invites`, with its server-held bearer and same-origin guard.
+Unknown and foreign invitations both return 404. A stale revision, accepted
+invitation, already replaced source, or conflicting outstanding offer returns
+409. A reviewed repeat revoke is a no-op; it adds no duplicate audit entry.
+
+Reissue copies subject, tenant, roles and portfolios from the locked source,
+rechecks current domain/authority policy, assigns a fresh ID/token and current
+configured TTL, and revokes the original in one transaction. Revoked or expired
+offers may be reissued after review. Accepted offers cannot: use account controls
+for existing accounts. The original source becomes terminal once reissued. If a
+response is lost, reload, locate its replacement and explicitly reissue that
+record; the previous secret cannot be recovered and mutations are not retried
+automatically.
+
+Redemption's conditional update and lifecycle commands serialize on the same
+invitation row. Either redemption wins and the command refuses, or the command
+commits and the old token is unusable. The live-subject index excludes revoked
+records but keeps expired ones until an explicit revoke/reissue. This prevents
+an expired offer from silently becoming a competing authority.
+
+Revoke/reissue commit canonical `identity.invitation.revoke` / `.reissue`
+DecisionLog records in the existing forced-RLS, append-only identity journal,
+including actor, before/after summaries and the replacement's authority. Audit
+failure rolls back all state changes. Neither token nor hash is audited or
+logged. Initial creation/redemption retain their existing logging behavior;
+complete lifecycle export to central audit, automated delivery, forgotten-password
+recovery and MFA remain separate #1227 slices.
+
 ## Self-service password rotation
 
 After signing in with a platform credential, open **Governance → Change

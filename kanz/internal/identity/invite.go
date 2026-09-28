@@ -32,6 +32,9 @@ var (
 	// credential. Single use is the whole point: a redeemed invite that still
 	// works is a shared password with an expiry date.
 	ErrInviteAlreadyRedeemed = errors.New("identity: invite has already been redeemed")
+	ErrInviteRevoked         = errors.New("identity: invite has been revoked")
+	ErrInviteConflict        = errors.New("identity: invitation changed or cannot be changed; reload before retrying")
+	ErrInvitePolicy          = errors.New("identity: invitation does not satisfy current domain policy")
 )
 
 // Invite is an operator's offer of an account, carrying the authority that
@@ -61,6 +64,10 @@ type Invite struct {
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	RedeemedAt *time.Time // nil until redeemed
+	RevokedAt  *time.Time
+	RevokedBy  string
+	Revision   int64
+	ReissuedAs *string
 }
 
 // NewInviteToken mints a raw token and its storable hash.
@@ -95,12 +102,15 @@ func InviteTokenHash(raw string) string {
 
 // Redeemable reports why an invite cannot be used, or nil if it can.
 //
-// The three states are kept distinct HERE, at the domain layer, so an operator
+// Lifecycle states are kept distinct HERE, at the domain layer, so an operator
 // listing invites can see which are expired and which were used. The transport
 // layer collapses them for an unauthenticated caller — see the comment on
 // ErrInviteNotFound — because telling a stranger "that invite exists but has
 // expired" confirms an account was offered to someone.
 func (i *Invite) Redeemable(now time.Time) error {
+	if i.RevokedAt != nil {
+		return ErrInviteRevoked
+	}
 	if i.RedeemedAt != nil {
 		return ErrInviteAlreadyRedeemed
 	}

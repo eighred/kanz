@@ -9,6 +9,12 @@ export interface InvitationSummary {
   created_by: string
   expires_at: string
   redeemable: boolean
+  state: 'pending' | 'accepted' | 'expired' | 'revoked'
+  revision: number
+  revoked_by?: string
+  revoked_at?: string
+  redeemed_at?: string
+  reissued_as?: string
 }
 
 export interface CreatedInvitation extends InvitationSummary {
@@ -32,4 +38,6 @@ export const invitations = {
   },
   create: (request: CreateInvitation) =>
     api.post<CreatedInvitation>('/api/identity/invites', request),
+  revoke: (invite: InvitationSummary) => api.post<InvitationSummary>(`/api/identity/invites/${encodeURIComponent(invite.invite_id)}/revoke`, { revision: invite.revision }),
+  reissue: (invite: InvitationSummary) => api.post<CreatedInvitation>(`/api/identity/invites/${encodeURIComponent(invite.invite_id)}/reissue`, { revision: invite.revision }),
 }

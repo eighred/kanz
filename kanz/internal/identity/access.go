@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -164,15 +165,19 @@ func recordAccess(ctx context.Context, tx pgx.Tx, actor Administration, actorUse
 	entry.Attributes["account.before"] = string(oldJSON)
 	entry.Attributes["account.after"] = string(newJSON)
 	entry.Attributes["occurred_at"] = now.UTC().Format(time.RFC3339Nano)
+	return persistIdentityDecision(ctx, tx, after.Tenant, after.Subject, now, entry)
+}
+
+func persistIdentityDecision(ctx context.Context, tx pgx.Tx, tenant, subject string, now time.Time, entry *observationpb.DecisionLog) error {
 	payload, err := protojson.Marshal(entry)
 	if err != nil {
 		return err
 	}
 	// Transaction-local scope cannot leak into the unscoped login pool.
-	if _, err = tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", actor.Tenant); err != nil {
+	if _, err = tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenant); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO identity_access_audit(tenant_id,subject,occurred_at,decision) VALUES($1,$2,$3,$4::jsonb)`, after.Tenant, after.Subject, now.UTC(), string(payload))
+	_, err = tx.Exec(ctx, `INSERT INTO identity_access_audit(tenant_id,subject,occurred_at,decision) VALUES($1,$2,$3,$4::jsonb)`, tenant, subject, now.UTC(), string(payload))
 	if err != nil {
 		return fmt.Errorf("identity: persist access audit: %w", err)
 	}

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { invitations, type CreatedInvitation, type InvitationSummary } from '../api/invitations'
 
 const entries = ref<InvitationSummary[]>([])
@@ -11,6 +11,8 @@ const busy = ref(false)
 const error = ref('')
 const created = ref<CreatedInvitation | null>(null)
 const copied = ref(false)
+const message = ref('')
+const review = ref<{ invite: InvitationSummary; action: 'revoke' | 'reissue' } | null>(null)
 
 function values(value: string): string[] {
   return [...new Set(value.split(/[\s,]+/).map((part) => part.trim()).filter(Boolean))]
@@ -68,9 +70,41 @@ async function create() {
 
 async function copyLink() {
   if (!activationLink.value) return
-  await navigator.clipboard.writeText(activationLink.value)
-  copied.value = true
+  try {
+    await navigator.clipboard.writeText(activationLink.value)
+    copied.value = true
+  } catch { error.value = 'Copy failed. Select the activation link and copy it manually.' }
 }
+
+function prepare(invite: InvitationSummary, action: 'revoke' | 'reissue') {
+  if (busy.value) return
+  review.value = { invite, action }
+  message.value = ''
+  error.value = ''
+}
+
+async function change() {
+  if (!review.value || busy.value) return
+  const { invite, action } = review.value
+  busy.value = true
+  error.value = ''
+  dismissSecret()
+  try {
+    if (action === 'reissue') {
+      created.value = await invitations.reissue(invite)
+      message.value = 'Invitation reissued. The previous token is revoked.'
+    } else {
+      await invitations.revoke(invite)
+      message.value = 'Invitation revoked. Its token can no longer activate an account.'
+    }
+    review.value = null
+    await load()
+  } catch (e) {
+    error.value = (e instanceof Error ? e.message : 'The change could not be confirmed') + '. Reload invitations before another attempt.'
+  } finally { busy.value = false }
+}
+
+onBeforeUnmount(dismissSecret)
 
 function dismissSecret() {
   created.value = null
@@ -146,9 +180,20 @@ onMounted(load)
   </section>
 
   <p v-if="error" class="error" role="alert">{{ error }}</p>
-  <p v-else-if="loading">Loading…</p>
+  <p v-if="message" role="status">{{ message }}</p>
+  <section v-if="review" class="panel" aria-labelledby="invitation-review-title">
+    <h2 id="invitation-review-title">Review {{ review.action }}</h2>
+    <p><strong>{{ review.invite.subject }}</strong> · {{ review.invite.tenant }} · {{ review.invite.invite_id }}</p>
+    <p>Roles: {{ review.invite.roles.join(', ') }}. Portfolios: {{ review.invite.portfolios.join(', ') || 'none' }}.</p>
+    <p v-if="review.action === 'reissue'">The old token will stop working. A new one-time link will carry the same authority and a new expiry. Transfer it through an approved private channel.</p>
+    <p v-else>This prevents this invitation from activating an account. An already accepted invitation cannot be revoked; use account access controls instead.</p>
+    <button type="button" :disabled="busy" @click="change">Confirm {{ review.action }}</button>
+    <button type="button" class="quiet" :disabled="busy" @click="review = null">Cancel</button>
+  </section>
+  <button type="button" class="quiet" :disabled="busy || loading" @click="review = null; load()">Reload invitations</button>
+  <p v-if="loading">Loading…</p>
 
-  <table v-else>
+  <table v-else-if="!error">
     <thead>
       <tr>
         <th>Subject</th>
@@ -156,6 +201,7 @@ onMounted(load)
         <th>Created by</th>
         <th>Expires</th>
         <th>Status</th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody>
@@ -168,11 +214,19 @@ onMounted(load)
         <td>{{ invite.created_by }}</td>
         <td>{{ when(invite.expires_at) }}</td>
         <td :class="invite.redeemable ? 'state-warn' : 'state-unset'">
-          {{ invite.redeemable ? 'awaiting activation' : 'used or expired' }}
+          {{ invite.state }}
+          <span v-if="invite.revoked_by" class="muted"><br />revoked by {{ invite.revoked_by }}</span>
+          <span v-if="invite.reissued_as" class="muted"><br />reissued as {{ invite.reissued_as }}</span>
+        </td>
+        <td>
+          <template v-if="invite.state !== 'accepted' && !invite.reissued_as">
+            <button v-if="invite.state !== 'revoked'" type="button" :aria-label="`Revoke invitation ${invite.invite_id}`" :disabled="busy" @click="prepare(invite, 'revoke')">Revoke</button>
+            <button type="button" :aria-label="`Reissue invitation ${invite.invite_id}`" :disabled="busy" @click="prepare(invite, 'reissue')">Reissue</button>
+          </template>
         </td>
       </tr>
       <tr v-if="entries.length === 0">
-        <td colspan="5">No invitation records were returned for this tenant.</td>
+        <td colspan="6">No invitation records were returned for this tenant.</td>
       </tr>
     </tbody>
   </table>
