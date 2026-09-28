@@ -36,7 +36,7 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres { return &Postgres{pool: pool} }
 
 // CreateInvite stores an operator's offer of an account.
 //
-// The unique partial index on (subject) WHERE redeemed_at IS NULL means a second
+// The unique partial index on unredeemed, unrevoked subjects means a second
 // live invite for the same person is refused by the DATABASE rather than by a
 // check that races. Two live invites are two authorities competing to become one
 // account, and the loser is silent.
@@ -104,16 +104,17 @@ func (p *Postgres) Redeem(ctx context.Context, rawToken string, cred Hash, now t
 	var inv Invite
 	err = tx.QueryRow(ctx, `
 		UPDATE identity_invites
-		   SET redeemed_at = $2
+		   SET redeemed_at = $2, revision = revision + 1
 		 WHERE token_hash = $1
 		   AND redeemed_at IS NULL
+		   AND revoked_at IS NULL
 		   AND expires_at > $2
 		RETURNING id, subject, tenant_id, roles, portfolios, created_by, created_at, expires_at`,
 		InviteTokenHash(rawToken), now.UTC(),
 	).Scan(&inv.ID, &inv.Subject, &inv.Tenant, &inv.Roles, &inv.Portfolios,
 		&inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// ONE ERROR FOR THREE STATES — unknown, expired, already redeemed. The
+		// ONE ERROR for unknown, expired, redeemed or revoked invitations. The
 		// caller here is unauthenticated and holds only a link; telling them
 		// "that invite exists but expired" confirms an account was offered to
 		// someone. The operator-facing list distinguishes them.
@@ -313,7 +314,7 @@ func (p *Postgres) Revocations(ctx context.Context) ([]revocation.Entry, error) 
 // a surface that can leak them.
 func (p *Postgres) InvitesFor(ctx context.Context, tenant string) ([]*Invite, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT id, subject, tenant_id, roles, portfolios, created_by, created_at, expires_at, redeemed_at
+		SELECT id, subject, tenant_id, roles, portfolios, created_by, created_at, expires_at, redeemed_at, revoked_at, revoked_by, revision, reissued_as
 		  FROM identity_invites WHERE tenant_id = $1 ORDER BY created_at DESC`, tenant)
 	if err != nil {
 		return nil, fmt.Errorf("identity: list invites: %w", err)
@@ -324,7 +325,7 @@ func (p *Postgres) InvitesFor(ctx context.Context, tenant string) ([]*Invite, er
 	for rows.Next() {
 		var inv Invite
 		if err := rows.Scan(&inv.ID, &inv.Subject, &inv.Tenant, &inv.Roles, &inv.Portfolios,
-			&inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt, &inv.RedeemedAt); err != nil {
+			&inv.CreatedBy, &inv.CreatedAt, &inv.ExpiresAt, &inv.RedeemedAt, &inv.RevokedAt, &inv.RevokedBy, &inv.Revision, &inv.ReissuedAs); err != nil {
 			return nil, fmt.Errorf("identity: scan invite: %w", err)
 		}
 		out = append(out, &inv)

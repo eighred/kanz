@@ -12,6 +12,8 @@ const existing = {
   created_by: 'user:operator',
   expires_at: '2099-01-01T00:00:00Z',
   redeemable: true,
+  state: 'pending' as const,
+  revision: 0,
 }
 
 beforeEach(() => {
@@ -19,6 +21,45 @@ beforeEach(() => {
 })
 
 describe('operator invitation creation', () => {
+  it('reviews a reissue before submitting its exact revision and displays the new token once', async () => {
+    const reissue = vi.spyOn(invitationApi.invitations, 'reissue').mockResolvedValue({ ...existing, invite_id: 'replacement', invite_token: 'replacement-once' })
+    const wrapper = mount(InvitationsView); await flushPromises()
+    await wrapper.get('[aria-label="Reissue invitation invite-1"]').trigger('click')
+    expect(reissue).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('The old token will stop working')
+    const confirm = wrapper.findAll('button').find(b => b.text() === 'Confirm reissue')!
+    await confirm.trigger('click'); await flushPromises()
+    expect(reissue).toHaveBeenCalledExactlyOnceWith(existing)
+    expect(wrapper.get('textarea').element.value).toContain('replacement-once')
+    await wrapper.findAll('button').find(b => b.text() === 'I have transferred it')!.trigger('click')
+    expect(wrapper.find('textarea').exists()).toBe(false)
+  })
+
+  it('shows exact lifecycle states and prevents actions on accepted or replaced offers', async () => {
+    vi.mocked(invitationApi.invitations.list).mockResolvedValue([
+      existing,
+      { ...existing, invite_id: 'accepted', state: 'accepted', redeemable: false },
+      { ...existing, invite_id: 'expired', state: 'expired', redeemable: false },
+      { ...existing, invite_id: 'revoked', state: 'revoked', redeemable: false },
+      { ...existing, invite_id: 'replaced', state: 'revoked', reissued_as: 'new-id', redeemable: false },
+    ])
+    const wrapper = mount(InvitationsView); await flushPromises()
+    for (const state of ['pending', 'accepted', 'expired', 'revoked']) expect(wrapper.text()).toContain(state)
+    expect(wrapper.find('[aria-label="Reissue invitation accepted"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="Reissue invitation replaced"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="Revoke invitation revoked"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="Reissue invitation revoked"]').exists()).toBe(true)
+  })
+
+  it('does not retry a conflict or claim a failed revoke succeeded', async () => {
+    const revoke = vi.spyOn(invitationApi.invitations, 'revoke').mockRejectedValue(new Error('invitation changed'))
+    const wrapper = mount(InvitationsView); await flushPromises()
+    await wrapper.get('[aria-label="Revoke invitation invite-1"]').trigger('click')
+    await wrapper.findAll('button').find(b => b.text() === 'Confirm revoke')!.trigger('click'); await flushPromises()
+    expect(revoke).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[role="alert"]').text()).toContain('Reload invitations')
+    expect(wrapper.text()).not.toContain('Invitation revoked.')
+  })
   it('sends only the authority the operator entered and shows the one-time activation link', async () => {
     const create = vi.spyOn(invitationApi.invitations, 'create').mockResolvedValue({
       ...existing,

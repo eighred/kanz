@@ -207,6 +207,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /credential", boundedAdministrativeBody(s.rotateCredential, 16<<10))
 		mux.HandleFunc("POST /invites", administrativeBody(s.createInvite))
 		mux.HandleFunc("GET /invites", administrativeBody(s.listInvites))
+		mux.HandleFunc("POST /invites/{id}/revoke", administrativeBody(s.revokeInvite))
+		mux.HandleFunc("POST /invites/{id}/reissue", administrativeBody(s.reissueInvite))
 		// DEPROVISIONING (#525), on the SAME gate and for the same reason: an
 		// unconfigured deployment must answer 404 to "can I disable an account
 		// here", not 403, because it truthfully cannot.

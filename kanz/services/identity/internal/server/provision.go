@@ -55,6 +55,8 @@ type Verifier interface {
 // power, and splitting them across two gates would let a deployment enable one
 // without the other.
 type Provisioner interface {
+	RevokeInvite(ctx context.Context, actor identity.Administration, id string, revision int64, now time.Time) (*identity.Invite, error)
+	ReissueInvite(ctx context.Context, actor identity.Administration, id string, revision int64, newID, tokenHash string, policy identity.InviteDomainPolicy, now time.Time, ttl time.Duration) (*identity.Invite, error)
 	RotateCredential(ctx context.Context, actor identity.Administration, previous, replacement identity.Hash, now time.Time) error
 	CreateInviteAs(ctx context.Context, actor identity.Administration, inv *identity.Invite) error
 	InvitesFor(ctx context.Context, tenant string) ([]*identity.Invite, error)
@@ -176,17 +178,8 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 	// stored, which is the same property that makes a leaked database useless for
 	// impersonating an invitee — and the reason this response is the only chance
 	// to capture it.
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"invite_token": raw,
-		"invite_id":    inv.ID,
-		"subject":      inv.Subject,
-		"tenant":       inv.Tenant,
-		"roles":        inv.Roles,
-		"portfolios":   inv.Portfolios,
-		"expires_at":   inv.ExpiresAt,
-		"created_by":   inv.CreatedBy,
-		"note":         "the invite_token is shown once and is not recoverable; only its hash is stored",
-	})
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusCreated, issuedInvitation{InvitationSummary: inv.Summary(s.now().UTC()), Token: raw, Note: "the invite_token is shown once and is not recoverable; only its hash is stored"})
 }
 
 // listInvites shows the operator's tenant's outstanding invitations.
@@ -206,22 +199,11 @@ func (s *Server) listInvites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.now().UTC()
-	out := make([]map[string]any, 0, len(invites))
+	out := make([]identity.InvitationSummary, 0, len(invites))
 	for _, inv := range invites {
-		out = append(out, map[string]any{
-			"invite_id":  inv.ID,
-			"subject":    inv.Subject,
-			"tenant":     inv.Tenant,
-			"roles":      inv.Roles,
-			"portfolios": inv.Portfolios,
-			"created_by": inv.CreatedBy,
-			"expires_at": inv.ExpiresAt,
-			// Redeemable now, rather than a raw redeemed_at: an operator asking
-			// "can this still be used" should not have to compare two timestamps
-			// and know which of expiry or redemption takes precedence.
-			"redeemable": inv.Redeemable(now) == nil,
-		})
+		out = append(out, inv.Summary(now))
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, out)
 }
 

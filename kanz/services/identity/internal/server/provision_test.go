@@ -28,10 +28,11 @@ var provNow = time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 
 // fakeProvisioner records what was stored.
 type fakeProvisioner struct {
-	created   []*identity.Invite
-	listed    []*identity.Invite
-	err       error
-	forTenant string
+	inviteChanges int
+	created       []*identity.Invite
+	listed        []*identity.Invite
+	err           error
+	forTenant     string
 
 	// #525: the account side.
 	accounts     map[string]*identity.User
@@ -42,6 +43,16 @@ type fakeProvisioner struct {
 
 func (f *fakeProvisioner) RotateCredential(_ context.Context, _ identity.Administration, _, _ identity.Hash, _ time.Time) error {
 	return f.err
+}
+
+func (f *fakeProvisioner) RevokeInvite(_ context.Context, _ identity.Administration, _ string, _ int64, _ time.Time) (*identity.Invite, error) {
+	f.inviteChanges++
+	return &identity.Invite{}, f.err
+}
+
+func (f *fakeProvisioner) ReissueInvite(_ context.Context, _ identity.Administration, _ string, _ int64, _, _ string, _ identity.InviteDomainPolicy, _ time.Time, _ time.Duration) (*identity.Invite, error) {
+	f.inviteChanges++
+	return &identity.Invite{}, f.err
 }
 
 func (f *fakeProvisioner) CreateInviteAs(_ context.Context, _ identity.Administration, inv *identity.Invite) error {
