@@ -49,6 +49,9 @@ func (s *Server) setStatus(w http.ResponseWriter, r *http.Request, status identi
 	if !ok {
 		return
 	}
+	if !emptyAdministrativeBody(w, r) {
+		return
+	}
 	subject := strings.TrimSpace(r.PathValue("subject"))
 	if subject == "" {
 		writeErr(w, http.StatusBadRequest, "a subject is required")

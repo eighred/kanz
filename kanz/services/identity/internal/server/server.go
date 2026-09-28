@@ -203,16 +203,16 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	// deployment without it answers 404 rather than 403 — "there is no
 	// provisioning surface here" is the truthful answer to someone probing.
 	if s.provisioning != nil {
-		mux.HandleFunc("POST /invites", s.createInvite)
-		mux.HandleFunc("GET /invites", s.listInvites)
+		mux.HandleFunc("POST /invites", administrativeBody(s.createInvite))
+		mux.HandleFunc("GET /invites", administrativeBody(s.listInvites))
 		// DEPROVISIONING (#525), on the SAME gate and for the same reason: an
 		// unconfigured deployment must answer 404 to "can I disable an account
 		// here", not 403, because it truthfully cannot.
-		mux.HandleFunc("POST /users/{subject}/disable", s.disableUser)
-		mux.HandleFunc("POST /users/{subject}/enable", s.enableUser)
-		mux.HandleFunc("GET /users", s.listUsers)
-		mux.HandleFunc("PUT /users/{subject}/access", s.setAccess)
-		mux.HandleFunc("GET /permissions", s.permissions)
+		mux.HandleFunc("POST /users/{subject}/disable", administrativeBody(s.disableUser))
+		mux.HandleFunc("POST /users/{subject}/enable", administrativeBody(s.enableUser))
+		mux.HandleFunc("GET /users", administrativeBody(s.listUsers))
+		mux.HandleFunc("PUT /users/{subject}/access", administrativeBody(s.setAccess))
+		mux.HandleFunc("GET /permissions", administrativeBody(s.permissions))
 	}
 }
 

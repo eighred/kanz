@@ -4,6 +4,15 @@ Apply all identity migrations, including `0004_access_audit.sql`, before running
 the updated service. The new binary fails access writes if the journal is absent;
 it never substitutes a log line for durable evidence.
 
+Administrative requests consume at most 8 KiB before authorization can respond,
+with a five-second body-read deadline. This prevents unread bytes from resetting
+a `Connection: close` response while bounding slow or oversized callers. Oversize
+bodies receive 413; timed-out bodies receive 408; neither reaches a mutation.
+After authentication, status-only commands accept no body or an empty JSON
+object and reject other payloads with 400. Small unauthorized requests retain
+their authentication/authorization refusal rather than becoming body-validation
+errors. No automatic mutation retry hides a lost response.
+
 `GET /users?after=<subject>` requires current identity-administrator authority and
 returns at most 25 tenant-local accounts with `next_cursor`. An empty cursor means
 the page is complete; a full final page can be followed by an empty page. Records
