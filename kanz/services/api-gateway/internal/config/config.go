@@ -16,8 +16,9 @@ import (
 // Config is the api-gateway runtime configuration, sourced from the
 // environment so it composes with the CSI/Vault secret mounts (SEC-01d).
 type Config struct {
-	Listen   string
-	LogLevel slog.Level
+	MFARequired bool
+	Listen      string
+	LogLevel    slog.Level
 
 	// Source is the gateway's service identity (logs, metrics, spans).
 	Source string
@@ -417,6 +418,13 @@ func Load() (Config, error) {
 		return Config{}, errors.New("API_GATEWAY_TRUSTED_PROXY_HEADER and API_GATEWAY_TRUSTED_PROXIES " +
 			"must be set together or not at all — one without the other reads as configured and " +
 			"honours nothing, and the pre-auth limiter would key on the proxy instead of the caller")
+	}
+	switch os.Getenv("API_GATEWAY_MFA_REQUIRED") {
+	case "", "false":
+	case "true":
+		cfg.MFARequired = true
+	default:
+		return Config{}, errors.New("API_GATEWAY_MFA_REQUIRED must be true or false")
 	}
 	return cfg, nil
 }

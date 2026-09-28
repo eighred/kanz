@@ -694,3 +694,23 @@ func hs256Token(t *testing.T, std jwt.Claims) string {
 	}
 	return tok
 }
+func TestOIDCMFAAssuranceSurvivesVerifiedJWKSBoundary(t *testing.T) {
+	f := newOIDCFixture(t)
+	s := newSigner(t, "mfa")
+	f.publish(s.jwk())
+	a := f.auth(t, nil)
+	now := time.Now().UTC().Truncate(time.Second)
+	a.now = func() time.Time { return now }
+	proof := MFA{Required: true, VerifiedAt: now.Add(-time.Minute)}
+	token := s.sign(t, baseClaims(f.srv.URL), map[string]any{"tenant": "acme", ClaimMFA: proof.Claim()})
+	principal, err := a.Authenticate(context.Background(), token)
+	if err != nil || principal.MFA != proof {
+		t.Fatal("OIDC dropped verified assurance", err)
+	}
+	for _, value := range []any{nil, true, map[string]any{"method": "pwd", "verified_at": "1"}, (MFA{Required: true, VerifiedAt: now.Add(time.Second)}).Claim()} {
+		token = s.sign(t, baseClaims(f.srv.URL), map[string]any{ClaimMFA: value})
+		if _, err = a.Authenticate(context.Background(), token); err == nil {
+			t.Fatal("malformed OIDC assurance accepted")
+		}
+	}
+}

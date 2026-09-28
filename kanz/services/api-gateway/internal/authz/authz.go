@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/eighred/kanz/pkg/auth"
 	"github.com/eighred/kanz/services/api-gateway/internal/middleware"
@@ -252,11 +253,16 @@ type Route struct {
 // handler at registration, so it is not a middleware that a future composition root can
 // leave out of a chain.
 type Mux struct {
-	mux      *http.ServeMux
-	grants   Grants
-	routes   []Route
-	recorder auth.DecisionRecorder
+	mfaRequired bool
+	mux         *http.ServeMux
+	grants      Grants
+	routes      []Route
+	recorder    auth.DecisionRecorder
 }
+
+type Option func(*Mux)
+
+func WithMFARequired(required bool) Option { return func(m *Mux) { m.mfaRequired = required } }
 
 // NewMux returns a Mux enforcing grants and recording every decision it makes.
 //
@@ -273,8 +279,12 @@ type Mux struct {
 //
 // A nil recorder means "record nothing" and is for tests only. The composition root is
 // guarded by test/arch/gateway_decision_recorder_test.go, which fails if main.go passes one.
-func NewMux(grants Grants, recorder auth.DecisionRecorder) *Mux {
-	return &Mux{mux: http.NewServeMux(), grants: grants, recorder: recorder}
+func NewMux(grants Grants, recorder auth.DecisionRecorder, opts ...Option) *Mux {
+	m := &Mux{mux: http.NewServeMux(), grants: grants, recorder: recorder}
+	for _, o := range opts {
+		o(m)
+	}
+	return m
 }
 
 // Handle registers pattern, reachable only by a principal whose roles carry cap.
@@ -320,6 +330,13 @@ func (m *Mux) require(cap Capability, pattern string, next http.HandlerFunc) htt
 			return
 		}
 		role, allowed := m.grants.grantingRole(p.Roles, cap)
+		if allowed && cap != Read && (m.mfaRequired || p.MFA.Required) && !p.MFA.Recent(time.Now()) {
+			m.record(r, p, cap, pattern, auth.Decision{Reason: "recent WebAuthn MFA required"})
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"Recent MFA required. Verify your security key on the Authentication page.","code":"mfa_required"}`))
+			return
+		}
 		m.record(r, p, cap, pattern, decisionFor(cap, role, allowed, p.Roles))
 		if !allowed {
 			forbidden(w)
@@ -355,7 +372,7 @@ func (m *Mux) record(r *http.Request, p *middleware.Principal, cap Capability, p
 	var principal *auth.Principal
 	tenant := ""
 	if p != nil {
-		principal = &auth.Principal{Subject: p.Subject, Tenant: p.Tenant, Roles: p.Roles, Portfolios: p.Portfolios}
+		principal = &auth.Principal{MFA: p.MFA, Subject: p.Subject, Tenant: p.Tenant, Roles: p.Roles, Portfolios: p.Portfolios}
 		tenant = p.Tenant
 	}
 	entry := auth.BuildDecisionLog(decider, auth.Request{

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	observationpb "github.com/eighred/kanz/kanz-schemas-go/observation/v1"
 )
@@ -67,6 +68,10 @@ func BuildDecisionLog(decider string, req Request, d Decision) *observationpb.De
 		}
 		if req.Principal.Tenant != "" {
 			attrs["principal.tenant"] = req.Principal.Tenant
+		}
+		if req.Principal.MFA.Required && !req.Principal.MFA.VerifiedAt.IsZero() {
+			attrs["principal.mfa.method"] = "webauthn-uv"
+			attrs["principal.mfa.verified_at"] = req.Principal.MFA.VerifiedAt.UTC().Format(time.RFC3339)
 		}
 	}
 	if req.Resource.Type != "" {

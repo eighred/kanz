@@ -85,6 +85,7 @@ type Limiter interface {
 
 // Server serves the credential surface.
 type Server struct {
+	mfa      *MFAConfig
 	recovery RecoveryStore
 	store    Store
 	minter   Minter
@@ -189,11 +190,24 @@ func New(store Store, minter Minter, limiter Limiter, jwks func() any, issuer st
 	if s.recovery != nil && s.provisioning == nil {
 		return nil, errors.New("mailbox recovery requires provisioning verifier")
 	}
+	if s.mfa != nil && (s.mfa.Store == nil || s.mfa.WebAuthn == nil || s.provisioning == nil) {
+		return nil, errors.New("MFA requires durable store, WebAuthn and provisioning verifier")
+	}
 	return s, nil
 }
 
 // Routes registers the surface on a mux.
 func (s *Server) Routes(mux *http.ServeMux) {
+	if s.mfa != nil {
+		mux.HandleFunc("GET /mfa", administrativeBody(s.mfaStatus))
+		mux.HandleFunc("POST /mfa/register/begin", administrativeBody(s.mfaBegin("register")))
+		mux.HandleFunc("POST /mfa/register/finish", boundedAdministrativeBody(s.mfaFinish("register"), 80<<10))
+		mux.HandleFunc("POST /mfa/login/finish", boundedAdministrativeBody(s.mfaFinish("login"), 80<<10))
+		mux.HandleFunc("POST /mfa/stepup/begin", administrativeBody(s.mfaBegin("stepup")))
+		mux.HandleFunc("POST /mfa/stepup/finish", boundedAdministrativeBody(s.mfaFinish("stepup"), 80<<10))
+		mux.HandleFunc("POST /mfa/remove", administrativeBody(s.mfaRemove))
+	}
+
 	mux.HandleFunc("POST /login", s.login)
 	mux.HandleFunc("POST /invites/redeem", s.redeem)
 	mux.HandleFunc("GET /jwks.json", s.jwksHandler)
@@ -290,10 +304,26 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			if uerr := s.store.UpdateCredential(r.Context(), u.Subject, u.Credential, fresh, s.now()); uerr != nil {
 				s.logger.Warn("credential rehash was not applied",
 					"subject", u.Subject)
+			} else {
+				u.Credential = fresh
 			}
 		}
 	}
 
+	if u.MFA.Required {
+		w.Header().Set("Cache-Control", "no-store")
+		if s.mfa == nil {
+			writeErr(w, 503, "MFA service unavailable")
+			return
+		}
+		c, err := s.mfa.Store.BeginMFA(r.Context(), identity.Administration{Subject: u.Subject, Tenant: u.Tenant, SessionEpoch: u.SessionEpoch, IssuedAt: s.now().UTC()}, u.Credential, "login", "", s.now().UTC(), s.mfa.WebAuthn)
+		if err != nil {
+			s.mfaError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, c)
+		return
+	}
 	s.issue(w, u)
 }
 

@@ -32,6 +32,7 @@ async function submit() {
 
 <template>
   <section class="card">
+    <RouterLink to="/authentication">Authentication and security keys</RouterLink>
     <h1>Change password</h1>
     <RouterLink to="/mailbox">Set up a recovery mailbox</RouterLink>
     <p v-if="done" role="status">Password changed. Sign in again with your new password.</p>

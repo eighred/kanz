@@ -22,6 +22,7 @@ import (
 
 // Config is the resolved identity configuration.
 type Config struct {
+	MFA      *MFA
 	Recovery *Recovery
 	Listen   string
 	LogLevel slog.Level
@@ -167,6 +168,10 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("IDENTITY_INVITE_EMAIL_DOMAINS: %w", err)
 	}
 	cfg.Recovery, err = loadRecovery()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MFA, err = loadMFA()
 	if err != nil {
 		return Config{}, err
 	}

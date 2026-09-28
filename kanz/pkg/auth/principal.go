@@ -14,6 +14,7 @@ import (
 // platform shares: the api-gateway edge (API-01d), the authorization layer
 // (AUTH-01b), and command-issuer binding (AUTH-01c) all read it from ctx.
 type Principal struct {
+	MFA          MFA
 	SessionEpoch int64
 	// Subject is the OIDC `sub` — the stable, unique principal identifier.
 	Subject string

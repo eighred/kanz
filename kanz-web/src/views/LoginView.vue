@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { WebAuthnError } from '../api/webauthn'
 import { useRoute, useRouter } from 'vue-router'
 import { useSession } from '../stores/session'
 import { ApiError } from '../api/client'
@@ -24,7 +25,9 @@ async function submit() {
     const next = typeof route.query.next === 'string' ? route.query.next : '/overview'
     await router.push(next.startsWith('/') && !next.startsWith('//') ? next : '/overview')
   } catch (e) {
-    if (e instanceof ApiError && e.status === 429) {
+    if (e instanceof WebAuthnError) {
+      error.value = e.message
+    } else if (e instanceof ApiError && e.status === 429) {
       // 429 IS NOT 401, AND SAYING SO MATTERS. This caller may well be holding
       // the correct credential — telling them it was wrong sends them to reset
       // a password that works, while the real answer is to wait.

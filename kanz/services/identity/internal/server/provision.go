@@ -162,7 +162,7 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.provisioning.Store.CreateInviteAs(r.Context(), identity.Administration{Subject: claims.Subject, Tenant: claims.Tenant, IssuedAt: claims.IssuedAt, SessionEpoch: claims.SessionEpoch}, inv); err != nil {
+	if err := s.provisioning.Store.CreateInviteAs(r.Context(), identity.Administration{Subject: claims.Subject, Tenant: claims.Tenant, IssuedAt: claims.IssuedAt, SessionEpoch: claims.SessionEpoch, MFA: claims.MFA}, inv); err != nil {
 		if errors.Is(err, identity.ErrAdminAuthority) {
 			writeErr(w, http.StatusUnauthorized, "the token was rejected")
 			return
@@ -268,7 +268,7 @@ func (s *Server) operator(w http.ResponseWriter, r *http.Request) (*identity.Cla
 			"subject", claims.Subject, "err", err)
 		writeErr(w, http.StatusServiceUnavailable, "the operator's account status could not be checked")
 		return nil, false
-	case err != nil || !(identity.Administration{Subject: claims.Subject, Tenant: claims.Tenant, IssuedAt: claims.IssuedAt, SessionEpoch: claims.SessionEpoch}).Allows(u):
+	case err != nil || !(identity.Administration{Subject: claims.Subject, Tenant: claims.Tenant, IssuedAt: claims.IssuedAt, SessionEpoch: claims.SessionEpoch, MFA: claims.MFA}).Allows(u):
 		// THE SAME 401 AS A REJECTED TOKEN, AND NO REASON — the stance this
 		// function's doc states. A disabled operator learning "disabled" rather
 		// than "rejected" learns that their subject is still a known account; a
@@ -282,6 +282,10 @@ func (s *Server) operator(w http.ResponseWriter, r *http.Request) (*identity.Cla
 		s.logger.Warn("provisioning refused: a valid token whose account may not act",
 			"subject", claims.Subject, "tenant", claims.Tenant, "reason", reason)
 		writeErr(w, http.StatusUnauthorized, "the token was rejected")
+		return nil, false
+	}
+	if (u.MFA.Required || (s.mfa != nil && s.mfa.RequirePrivileged)) && !claims.MFA.Recent(s.now().UTC()) {
+		writeErr(w, 403, "recent MFA required")
 		return nil, false
 	}
 	return claims, true

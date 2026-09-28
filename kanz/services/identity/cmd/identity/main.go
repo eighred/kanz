@@ -192,6 +192,9 @@ func run() int {
 		}()
 		defer func() { cancelMail(); <-mailDone }()
 	}
+	if cfg.MFA != nil {
+		opts = append(opts, server.WithMFA(server.MFAConfig{Store: store, WebAuthn: cfg.MFA.WebAuthn, RequirePrivileged: cfg.MFA.RequirePrivileged}))
+	}
 	srv, err := server.New(store, signer, limiter,
 		func() any { return signer.JWKS() }, cfg.TokenIssuer, logger, opts...)
 	if err != nil {

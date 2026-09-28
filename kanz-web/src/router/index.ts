@@ -1,3 +1,4 @@
+import AuthenticationView from '../views/AuthenticationView.vue'
 import UsersView from '../views/UsersView.vue'
 import PasswordView from '../views/PasswordView.vue'
 import RecoveryView from '../views/RecoveryView.vue'
@@ -36,6 +37,7 @@ import ReferenceDataView from '../views/ReferenceDataView.vue'
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
+    { path: '/authentication', name: 'authentication', component: AuthenticationView },
     { path: '/households', name: 'households', component: HouseholdView },
     { path: '/copilot', name: 'copilot', component: CopilotView },
     { path: '/screening', name: 'screening', component: ScreeningView },

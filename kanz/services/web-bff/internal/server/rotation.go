@@ -29,6 +29,8 @@ func (s *Server) handleCredentialRotation(w http.ResponseWriter, r *http.Request
 	// messages also prevent a future driver error from echoing credential data.
 	status, message := resp.Status, "credential change is unavailable"
 	switch status {
+	case 403:
+		message = "Recent MFA required. Verify your security key on the Authentication page."
 	case 401:
 		message = "invalid credentials"
 	case 400:

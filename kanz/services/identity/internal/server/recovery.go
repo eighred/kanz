@@ -94,6 +94,10 @@ func (s *Server) enrollMailbox(w http.ResponseWriter, r *http.Request) {
 	}
 	verified := identity.Verify(hash, req.Credential) == nil
 	actor := administration(c)
+	if u != nil && u.MFA.Required && !c.MFA.Recent(s.now().UTC()) {
+		writeErr(w, 403, "recent MFA required")
+		return
+	}
 	if !verified || !actor.Current(u) {
 		writeErr(w, 401, "invalid credentials")
 		return

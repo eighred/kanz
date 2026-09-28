@@ -301,7 +301,12 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, token string) (*Pr
 	if err != nil {
 		return nil, ErrUnauthenticated
 	}
+	mfa, err := ParseMFA(custom, a.now())
+	if err != nil {
+		return nil, ErrUnauthenticated
+	}
 	return &Principal{
+		MFA:          mfa,
 		SessionEpoch: epoch,
 		Subject:      std.Subject,
 		Tenant:       stringClaim(custom[a.cfg.TenantClaim]),

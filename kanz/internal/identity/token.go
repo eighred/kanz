@@ -132,6 +132,9 @@ func (s *Signer) Mint(u *User) (string, time.Time, error) {
 	}
 
 	now := s.now().UTC()
+	if u.MFA.Required && !u.MFA.Recent(now) {
+		return "", time.Time{}, errors.New("identity: recent MFA required for issuance")
+	}
 	expiry := now.Add(s.ttl)
 
 	sig, err := jose.NewSigner(
@@ -168,6 +171,9 @@ func (s *Signer) Mint(u *User) (string, time.Time, error) {
 		auth.ClaimPortfolios:   append([]string{}, u.Portfolios...),
 	}
 
+	if u.MFA.Required {
+		custom[auth.ClaimMFA] = u.MFA.Claim()
+	}
 	raw, err := jwt.Signed(sig).Claims(claims).Claims(custom).Serialize()
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("identity: sign: %w", err)
@@ -236,6 +242,7 @@ var ErrToken = errors.New("identity: token rejected")
 
 // Claims is what a verified token asserts.
 type Claims struct {
+	MFA          auth.MFA
 	SessionEpoch int64
 	Subject      string
 	Tenant       string
@@ -339,7 +346,12 @@ func (s *Signer) Verify(raw string, now time.Time) (*Claims, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrToken, err)
 	}
+	mfa, err := auth.ParseMFA(bag, now)
+	if err != nil {
+		return nil, ErrToken
+	}
 	return &Claims{
+		MFA:          mfa,
 		SessionEpoch: epoch,
 		Subject:      std.Subject,
 		IssuedAt:     issuedAt,

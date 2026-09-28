@@ -118,6 +118,7 @@ func validPortfolioScope(portfolios []string) bool {
 // still require explicit PortfolioEntitled membership. Malformed or repeated
 // scope headers invalidate the principal. Arbitrary Claims are not forwarded.
 //
+// MFA is enforced at the gateway capability mux, never asserted by mesh headers (#1282).
 // SessionEpoch is also absent: revocation is enforced at the gateway before
 // forwarding, and upstream services do not consume the revocation feed.
 // IssuedAt IS ALSO ABSENT ON THIS SEAM, and there is no fifth header for it

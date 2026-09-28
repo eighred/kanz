@@ -91,8 +91,9 @@ inbox delivery from the HTTP 202 response or the `sent` state.
 The BFF exposes only `/auth/mailbox`, `/auth/mailbox/verify`, `/auth/recovery`,
 and `/auth/recovery/consume`; all unsafe browser requests use the existing
 same-origin guard. Recovery routes remain absent at identity when disabled.
-Existing MFA, central lifecycle audit export and shared-session inventory work
-remain tracked separately in #1227; this feature establishes no MFA assurance.
+Recovery preserves enrolled [MFA factors and requirements](MFA.md) and grants no
+MFA assurance. Central lifecycle audit export and shared-session inventory work
+remain tracked separately in #1227.
 
 ## Verification
 

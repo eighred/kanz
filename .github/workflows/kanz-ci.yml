@@ -316,6 +316,19 @@ jobs:
       - name: Install PyYAML
         run: pip install pyyaml
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: kanz-web/.nvmrc
+
+      - name: Build the real MFA browser boundary
+        run: |
+          cd kanz-web
+          npm ci --no-audit --no-fund
+          npx --no-install playwright install --with-deps chromium
+          npm run build
+          cd ../kanz
+          go build -o "$RUNNER_TEMP/mfa-web-bff" ./services/web-bff/cmd/web-bff
+
       - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
         working-directory: kanz
         env:
@@ -323,6 +336,11 @@ jobs:
           TEST_NATS_URL: nats://localhost:4222
           TEST_KAFKA_BROKERS: localhost:9092
           TEST_OMS_ON_BUS: "1"
+          TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/mfa.cjs
+          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/kanz-web/node_modules/playwright
+          TEST_MFA_NODE: node
+          TEST_MFA_BFF: ${{ runner.temp }}/mfa-web-bff
+          TEST_MFA_STATIC_DIR: ${{ github.workspace }}/kanz-web/dist
           # Both are required by the mTLS suite; a test that gated on one alone
           # would FAIL rather than skip when the other went missing.
           TEST_NATS_MTLS_URL: nats://localhost:4223
@@ -395,7 +413,7 @@ jobs:
           # -A3 keeps the SKIP line together with the indented reason beneath it,
           # so a bare mention of a variable elsewhere in the log is not a match.
           offenders="$(grep -A3 -- '--- SKIP' "$render" \
-            | grep -E 'TEST_(POSTGRES_URL|NATS_URL|KAFKA_BROKERS|REDIS_URL|NATS_MTLS_URL|NATS_MTLS_CERT_DIR)' || true)"
+            | grep -E 'TEST_(POSTGRES_URL|NATS_URL|KAFKA_BROKERS|REDIS_URL|NATS_MTLS_URL|NATS_MTLS_CERT_DIR|MFA_BROWSER_SCRIPT)' || true)"
           if [ -n "$offenders" ]; then
             echo "::error::a test skipped citing a backing service this job provides — it did not run, and the suite was green anyway"
             echo "$offenders"
