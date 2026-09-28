@@ -32,6 +32,9 @@ export default defineConfig({
   // mistaken for a control. happy-dom rather than jsdom because nothing here
   // needs a layout engine.
   test: {
+    // Bound concurrent DOM environments so cold composition-root imports are
+    // not starved by one worker per reported CPU on large development hosts.
+    maxWorkers: 4,
     environment: 'happy-dom',
     include: ['src/**/*.test.ts'],
     restoreMocks: true,

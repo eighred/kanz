@@ -1,5 +1,45 @@
 # Account access administration
 
+## Self-service password rotation
+
+After signing in with a platform credential, open **Governance → Change
+password** (`/password`). Enter the current password and a different replacement
+of 12–1024 Unicode characters, confirm it, and submit once. Successful rotation
+clears the current BFF session; sign in again with the replacement. No command,
+shell history, token copy, or administrator privilege is required. External
+OIDC credentials must be changed at their issuing provider.
+
+The BFF's exact `POST /auth/credential` route forwards the server-held bearer and
+resolved client address to identity's `POST /credential`. The request contains
+only `current_credential` and `new_credential`; subject and tenant come from the
+verified token. Both login and rotation spend the same per-subject/per-source
+rate-limit budgets. Rotation is available when authenticated provisioning is
+wired, but does not require the identity-administrator role. It consumes at
+most 16 KiB (two UTF-8 credentials) with the same five-second body deadline.
+
+Identity verifies the current credential before checking replacement policy.
+Missing accounts, incorrect credentials, disabled accounts and stale sessions
+receive the same generic 401; policy refusals are 400 and throttling is 429.
+Argon2id work happens outside database locks. Inside the existing tenant lock,
+the transaction rechecks account status, tenant, session epoch and the exact
+verified hash, then atomically replaces the hash, increments session epoch and
+access revision, advances the legacy revocation watermark, and inserts canonical
+`identity.account.credential.rotate` evidence. No plaintext or hash enters audit
+records, logs or responses. Audit failure rolls the whole transaction back.
+Competing changes can invalidate a verified snapshot; sign in again and retry.
+Login rehash compares the original hash, so it cannot restore an old password
+after rotation. A login already in flight keeps its older epoch and is revoked.
+
+Identity rejects old sessions immediately; gateway enforcement follows its
+existing bounded-refresh, fail-closed revocation feed. Already admitted requests
+are not retroactively cancelled. Other BFF session records may remain until
+expiry, but their old bearer loses authority at enforcement. There is no automatic
+retry: after an uncertain network result, try signing in with the replacement,
+then the previous password if refused. This is an authenticated password change,
+not forgotten-password recovery or MFA enrollment.
+
+## Administrative access
+
 Apply all identity migrations, including `0004_access_audit.sql`, before running
 the updated service. The new binary fails access writes if the journal is absent;
 it never substitutes a log line for durable evidence.

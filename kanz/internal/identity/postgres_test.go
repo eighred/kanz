@@ -322,7 +322,7 @@ func TestUpdateCredentialRewritesTheHash(t *testing.T) {
 	}
 
 	second, _ := identity.HashCredential("second")
-	if err := st.UpdateCredential(context.Background(), "user:frank", second, now0.Add(time.Hour)); err != nil {
+	if err := st.UpdateCredential(context.Background(), "user:frank", first, second, now0.Add(time.Hour)); err != nil {
 		t.Fatalf("UpdateCredential: %v", err)
 	}
 	u, err := st.UserBySubject(context.Background(), "user:frank")
@@ -336,8 +336,8 @@ func TestUpdateCredentialRewritesTheHash(t *testing.T) {
 		t.Fatal("the OLD credential still verifies — a rotation that leaves the previous " +
 			"password working is not a rotation")
 	}
-	if err := st.UpdateCredential(context.Background(), "user:nobody", second, now0); err != identity.ErrUserNotFound {
-		t.Errorf("UpdateCredential for an unknown subject = %v, want ErrUserNotFound", err)
+	if err := st.UpdateCredential(context.Background(), "user:nobody", first, second, now0); err != identity.ErrCredentialMismatch {
+		t.Errorf("UpdateCredential for an unknown subject = %v, want ErrCredentialMismatch", err)
 	}
 }
 

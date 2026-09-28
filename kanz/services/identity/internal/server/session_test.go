@@ -38,14 +38,18 @@ func (p *pausedSigner) Mint(u *identity.User) (string, time.Time, error) {
 }
 
 func TestHTTPLoginMintingAfterDisableCannotRegainGatewayAdmission(t *testing.T) {
-	testHTTPLoginMintingAfterAuthorityChange(t, true)
+	testHTTPLoginMintingAfterAuthorityChange(t, "disable")
 }
 
 func TestHTTPLoginMintingAfterAccessChangeCannotRegainGatewayAdmission(t *testing.T) {
-	testHTTPLoginMintingAfterAuthorityChange(t, false)
+	testHTTPLoginMintingAfterAuthorityChange(t, "access")
 }
 
-func testHTTPLoginMintingAfterAuthorityChange(t *testing.T, disable bool) {
+func TestHTTPLoginMintingAfterRotationCannotRegainGatewayAdmission(t *testing.T) {
+	testHTTPLoginMintingAfterAuthorityChange(t, "rotation")
+}
+
+func testHTTPLoginMintingAfterAuthorityChange(t *testing.T, change string) {
 	t.Helper()
 	st, _ := sessionStorePool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -101,8 +105,9 @@ func testHTTPLoginMintingAfterAuthorityChange(t *testing.T, disable bool) {
 		token string
 		err   error
 	}
+	loginBody := `{"subject":"user:epoch","credential":"synthetic-session-regression"}`
 	login := func() result {
-		req, e := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/login", strings.NewReader(`{"subject":"user:epoch","credential":"synthetic-session-regression"}`))
+		req, e := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/login", strings.NewReader(loginBody))
 		if e != nil {
 			return result{err: e}
 		}
@@ -125,8 +130,17 @@ func testHTTPLoginMintingAfterAuthorityChange(t *testing.T, disable bool) {
 		t.Fatal(ctx.Err())
 	}
 	actor := identity.Administration{Subject: "test:admin", Tenant: "acme"}
-	if disable {
+	if change == "disable" {
 		if err := st.SetStatus(ctx, actor, "user:epoch", identity.StatusDisabled, now); err != nil {
+			t.Fatal(err)
+		}
+	} else if change == "rotation" {
+		replacement, err := identity.HashCredential("synthetic-session-replacement")
+		if err != nil {
+			t.Fatal(err)
+		}
+		self := identity.Administration{Subject: "user:epoch", Tenant: "acme", IssuedAt: now}
+		if err = st.RotateCredential(ctx, self, cred, replacement, now); err != nil {
 			t.Fatal(err)
 		}
 	} else {
@@ -149,13 +163,19 @@ func testHTTPLoginMintingAfterAuthorityChange(t *testing.T, disable bool) {
 	if err := cache.Check(p.Subject, p.IssuedAt, p.SessionEpoch); !errors.Is(err, revocation.ErrRevoked) {
 		t.Fatalf("late login admitted: %v", err)
 	}
-	if disable {
+	if change == "disable" {
 		if got := login(); got.err != nil || got.code != http.StatusUnauthorized {
 			t.Fatalf("disabled login: %d %v", got.code, got.err)
 		}
 		if err := st.SetStatus(ctx, actor, "user:epoch", identity.StatusActive, now); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if change == "rotation" {
+		if got := login(); got.err != nil || got.code != http.StatusUnauthorized {
+			t.Fatal("old password admitted after rotation")
+		}
+		loginBody = `{"subject":"user:epoch","credential":"synthetic-session-replacement"}`
 	}
 	fresh := login()
 	if fresh.err != nil || fresh.code != http.StatusOK {
@@ -165,7 +185,7 @@ func testHTTPLoginMintingAfterAuthorityChange(t *testing.T, disable bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !disable && (!q.HasRole("kanz-trader") || len(q.Portfolios) != 1 || q.Portfolios[0] != "pf-new") {
+	if change == "access" && (!q.HasRole("kanz-trader") || len(q.Portfolios) != 1 || q.Portfolios[0] != "pf-new") {
 		t.Fatal("fresh login lost updated authority")
 	}
 	if q.SessionEpoch != 1 {

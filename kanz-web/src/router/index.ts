@@ -1,4 +1,5 @@
 import UsersView from '../views/UsersView.vue'
+import PasswordView from '../views/PasswordView.vue'
 import HouseholdView from '../views/HouseholdView.vue'
 import EvidenceView from '../views/EvidenceView.vue'
 import CopilotView from '../views/CopilotView.vue'
@@ -39,6 +40,7 @@ export const router = createRouter({
     { path: '/audit-evidence', name: 'audit-evidence', component: EvidenceView },
     { path: '/', redirect: '/overview' },
     { path: '/users', name: 'users', component: UsersView },
+    { path: '/password', name: 'password', component: PasswordView },
     { path: '/overview', name: 'overview', component: OverviewView },
     { path: '/audit', name: 'audit', component: AuditView },
     { path: '/audit/events/:id', name: 'audit-event', component: AuditEventView },

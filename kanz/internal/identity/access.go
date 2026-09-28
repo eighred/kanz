@@ -148,7 +148,11 @@ func preserveAdministrator(ctx context.Context, tx pgx.Tx, tenant, subject strin
 }
 
 func recordAccess(ctx context.Context, tx pgx.Tx, actor Administration, actorUser *User, action string, before, after *Access, now time.Time) error {
-	entry := auth.BuildDecisionLog("operator:"+actor.Subject, auth.Request{Principal: &auth.Principal{Subject: actor.Subject, Tenant: actor.Tenant, Roles: actorUser.Roles, Portfolios: actorUser.Portfolios, SessionEpoch: actor.SessionEpoch, IssuedAt: actor.IssuedAt}, Action: auth.Action("identity.account." + action), Resource: auth.Resource{Type: "account", ID: after.Subject, Tenant: after.Tenant}}, auth.Decision{Allow: true, Reason: "current administrator authority verified under tenant lock"})
+	reason := "current administrator authority verified under tenant lock"
+	if action == "credential.rotate" {
+		reason = "current session and verified credential snapshot checked under tenant lock"
+	}
+	entry := auth.BuildDecisionLog("operator:"+actor.Subject, auth.Request{Principal: &auth.Principal{Subject: actor.Subject, Tenant: actor.Tenant, Roles: actorUser.Roles, Portfolios: actorUser.Portfolios, SessionEpoch: actor.SessionEpoch, IssuedAt: actor.IssuedAt}, Action: auth.Action("identity.account." + action), Resource: auth.Resource{Type: "account", ID: after.Subject, Tenant: after.Tenant}}, auth.Decision{Allow: true, Reason: reason})
 	oldJSON, err := json.Marshal(before)
 	if err != nil {
 		return err
