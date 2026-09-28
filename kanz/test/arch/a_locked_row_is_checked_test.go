@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -302,6 +303,44 @@ func countForUpdateLiterals(f *ast.File) int {
 	return n
 }
 
+// reviewedTerminalMailSQL consumes both locked keys inside one atomic UPDATE.
+// No result set exists to scan. Pin the complete statement and its owner so a
+// changed predicate, key join, bound, or call form requires fresh review (#1279).
+const reviewedTerminalMailSQL = `WITH terminal AS (SELECT subject,purpose FROM identity_mail_challenges WHERE state IN ('pending','sending') AND (expires_at<=$1 OR (attempts=3 AND lease_until<=$1)) LIMIT 100 FOR UPDATE SKIP LOCKED) UPDATE identity_mail_challenges c SET state='failed',token_hash=NULL FROM terminal t WHERE c.subject=t.subject AND c.purpose=t.purpose`
+
+func reviewedLockedMutations(rel string, f *ast.File) int {
+	if rel != "internal/identity/recovery.go" {
+		return 0
+	}
+	n := 0
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "ClaimMail" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || len(call.Args) != 3 {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Exec" {
+				return true
+			}
+			lit, ok := call.Args[1].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			sql, err := strconv.Unquote(lit.Value)
+			if err == nil && strings.Join(strings.Fields(sql), " ") == reviewedTerminalMailSQL {
+				n++
+			}
+			return true
+		})
+	}
+	return n
+}
+
 // analyseLockedScansText runs the analysis over a source literal, so the
 // pre-#816 shape can be pinned forever without leaving a broken store in the
 // tree for the guard to find.
@@ -434,12 +473,19 @@ func TestALockedRowIsCheckedAndNotJustLocked(t *testing.T) {
 
 	root := moduleRoot(t)
 	var (
-		scans    []lockedScan
-		literals int
+		scans     []lockedScan
+		literals  int
+		mutations int
 	)
 	for _, src := range forUpdateSources(t, root) {
 		literals += countForUpdateLiterals(src.file)
+		mutations += reviewedLockedMutations(src.rel, src.file)
 		scans = append(scans, analyseLockedScans(src.fset, src.rel, src.file)...)
+	}
+
+	// Dead-entry and duplicate protection for the sole reviewed no-result mutation.
+	if mutations != 1 {
+		t.Fatalf("reviewed terminal-mail mutation count = %d, want exactly 1; re-review or remove the pinned case", mutations)
 	}
 
 	// NON-VACUITY 1: the estate has FOR UPDATE query sites. Zero means the walk,
@@ -454,21 +500,22 @@ func TestALockedRowIsCheckedAndNotJustLocked(t *testing.T) {
 	}
 
 	// NON-VACUITY 2, and the answer to the chained-Scan limitation. Every row
-	// lock must have produced an analysed Scan. A query written as
+	// lock must have produced an analysed Scan or the reviewed atomic mutation.
+	// A query written as
 	// `row := tx.QueryRow(...)` followed by `row.Scan(...)`, or one read through
 	// tx.Query and a rows loop, lands here rather than passing unexamined.
-	if len(scans) < literals {
+	if len(scans)+mutations < literals {
 		var seen []string
 		for _, s := range scans {
 			seen = append(seen, s.site)
 		}
 		sort.Strings(seen)
-		t.Fatalf("found %d `SELECT ... FOR UPDATE` query literal(s) but only %d scan site(s) the "+
+		t.Fatalf("found %d `SELECT ... FOR UPDATE` query literal(s) but %d reviewed atomic mutation(s) and only %d scan site(s) the "+
 			"analyser could read (%s).\n\nA row lock whose columns this guard cannot follow is a "+
 			"row lock nobody is checking. Either the query does not scan (say so with a comment "+
 			"and a case here), or it uses the `row := QueryRow(...)` / `row.Scan(...)` form the "+
 			"analyser does not recognise — extend analyseLockedScans rather than leaving the site "+
-			"unexamined.", literals, len(scans), strings.Join(seen, ", "))
+			"unexamined.", literals, mutations, len(scans), strings.Join(seen, ", "))
 	}
 
 	// NON-VACUITY 3: the scans must actually bind column names. An analyser that
@@ -554,5 +601,35 @@ func claim() string {
 		if len(scans) != 1 || len(scans[0].unread) != want {
 			t.Fatalf("use=%v scans=%+v", use, scans)
 		}
+	}
+}
+
+func TestReviewedLockedMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, method, sql string
+		want                    int
+	}{
+		{"reviewed", "internal/identity/recovery.go", "Exec", reviewedTerminalMailSQL, 1},
+		{"other owner", "internal/other.go", "Exec", reviewedTerminalMailSQL, 0},
+		{"row read", "internal/identity/recovery.go", "QueryRow", reviewedTerminalMailSQL, 0},
+		{"missing key", "internal/identity/recovery.go", "Exec", strings.ReplaceAll(reviewedTerminalMailSQL, " AND c.purpose=t.purpose", ""), 0},
+		{"unbounded", "internal/identity/recovery.go", "Exec", strings.ReplaceAll(reviewedTerminalMailSQL, "LIMIT 100", ""), 0},
+		{"early expiry", "internal/identity/recovery.go", "Exec", strings.ReplaceAll(reviewedTerminalMailSQL, "expires_at<=$1", "expires_at>$1"), 0},
+		{"retained proof", "internal/identity/recovery.go", "Exec", strings.ReplaceAll(reviewedTerminalMailSQL, ",token_hash=NULL", ""), 0},
+		{"discarded select", "internal/identity/recovery.go", "Exec", "SELECT subject FROM identity_mail_challenges FOR UPDATE", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "package fixture; func ClaimMail() { db." + tc.method + "(ctx," + strconv.Quote(tc.sql) + ", now) }"
+			f, err := parser.ParseFile(token.NewFileSet(), tc.path, src, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := reviewedLockedMutations(tc.path, f); got != tc.want {
+				t.Fatalf("got %d, want %d", got, tc.want)
+			}
+			if countForUpdateLiterals(f) != 1 {
+				t.Fatal("mutation disappeared from independent literal count")
+			}
+		})
 	}
 }
