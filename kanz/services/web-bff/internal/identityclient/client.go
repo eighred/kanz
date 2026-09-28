@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/eighred/kanz/internal/identity"
 	"io"
 	"net/http"
 	"strings"
@@ -61,10 +62,11 @@ var ErrThrottled = errors.New("identityclient: too many attempts")
 
 // Token is a minted credential and the identity it carries.
 type Token struct {
-	Token   string    `json:"token"`
-	Expires time.Time `json:"expires_at"`
-	Subject string    `json:"subject"`
-	Tenant  string    `json:"tenant"`
+	MFA     *identity.MFACeremony `json:"-"`
+	Token   string                `json:"token"`
+	Expires time.Time             `json:"expires_at"`
+	Subject string                `json:"subject"`
+	Tenant  string                `json:"tenant"`
 }
 
 // ProvisioningResponse is an operator-facing identity response. The body stays
@@ -218,6 +220,19 @@ func (c *Client) post(ctx context.Context, path string, body map[string]string, 
 	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
+	case http.StatusAccepted:
+		if path != "/login" {
+			return nil, errors.New("unexpected MFA challenge")
+		}
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if err != nil {
+			return nil, err
+		}
+		ceremony, err := ProjectMFACeremony(raw, false)
+		if err != nil {
+			return nil, err
+		}
+		return &Token{MFA: ceremony}, nil
 	case http.StatusOK:
 	case http.StatusUnauthorized:
 		return nil, ErrRejected

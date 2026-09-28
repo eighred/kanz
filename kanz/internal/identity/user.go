@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // Status is an account's lifecycle state. A disabled account keeps its row —
@@ -72,6 +74,7 @@ var ErrLoginFailed = errors.New("identity: login failed")
 // set from the INVITE — never from anything the account holder supplies. See the
 // package comment.
 type User struct {
+	MFA                 auth.MFA
 	SessionEpoch        int64
 	Subject             string
 	Tenant              string

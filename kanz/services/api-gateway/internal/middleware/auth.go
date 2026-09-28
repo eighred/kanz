@@ -52,6 +52,7 @@ import (
 // conversion — cannot recur one level up from where the completeness guard
 // watches.
 type Principal struct {
+	MFA          auth.MFA
 	SessionEpoch int64
 	Subject      string
 	Tenant       string
@@ -240,6 +241,7 @@ type jwtClaims struct {
 	// treats as undatable rather than as fresh.
 	IssuedAt     int64           `json:"iat"`
 	SessionEpoch json.RawMessage `json:"session_epoch,omitempty"`
+	MFA          json.RawMessage `json:"kanz_mfa,omitempty"`
 }
 
 // jwtAudience decodes `aud` in both RFC 7519 shapes — a bare string and an
@@ -378,6 +380,17 @@ func (a *JWTAuthenticator) Authenticate(token string) (*Principal, error) {
 		}
 		bag[auth.ClaimSessionEpoch] = value
 	}
+	if c.MFA != nil {
+		var value any
+		if err := json.Unmarshal(c.MFA, &value); err != nil {
+			return nil, auth.ErrUnauthenticated
+		}
+		bag[auth.ClaimMFA] = value
+	}
+	mfa, err := auth.ParseMFA(bag, time.Now())
+	if err != nil {
+		return nil, auth.ErrUnauthenticated
+	}
 	epoch, err := auth.SessionEpoch(bag)
 	if err != nil {
 		return nil, ErrUnauthenticated
@@ -388,6 +401,7 @@ func (a *JWTAuthenticator) Authenticate(token string) (*Principal, error) {
 		Roles:        c.Roles,
 		Portfolios:   c.Portfolios,
 		IssuedAt:     issuedAt,
+		MFA:          mfa,
 		SessionEpoch: epoch,
 	}, nil
 }

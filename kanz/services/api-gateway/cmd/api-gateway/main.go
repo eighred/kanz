@@ -1151,7 +1151,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	if cfg.AuditRole != "" {
 		grants[cfg.AuditRole] = []authz.Capability{authz.Read, authz.Audit}
 	}
-	gwMux := authz.NewMux(grants, recorder)
+	gwMux := authz.NewMux(grants, recorder, authz.WithMFARequired(cfg.MFARequired))
 	gwMux.Handle(authz.Read, "GET /v1/permissions", gwMux.Permissions)
 	h.Routes(gwMux)
 	o.Routes(gwMux)
@@ -1391,6 +1391,7 @@ func edgePrincipal(p *auth.Principal) *middleware.Principal {
 		Roles:        p.Roles,
 		Portfolios:   p.Portfolios,
 		IssuedAt:     p.IssuedAt,
+		MFA:          p.MFA,
 		SessionEpoch: p.SessionEpoch,
 	}
 }

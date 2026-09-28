@@ -4,6 +4,8 @@ import (
 	"errors"
 	"slices"
 	"time"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 // AdminRole is reserved for identity administration, never a gateway capability.
@@ -33,6 +35,7 @@ func ValidateAdminRoles(roles []string) error {
 // Administration is derived from a verified token, never from request JSON.
 // The durable store rechecks it under the tenant administration lock.
 type Administration struct {
+	MFA          auth.MFA
 	SessionEpoch int64
 	Subject      string
 	Tenant       string

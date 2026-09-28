@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -481,5 +482,28 @@ func TestJWTSessionEpochParsing(t *testing.T) {
 	p, err := a.Authenticate(token)
 	if err != nil || p.SessionEpoch != 9007199254740993 {
 		t.Fatalf("precision lost: %v %v", p, err)
+	}
+}
+func TestJWTMFAAssuranceRequiresSignedStrictClaims(t *testing.T) {
+	a := NewJWTAuthenticator(testSecret)
+	for _, value := range []any{nil, true, "webauthn-uv", map[string]any{"method": "pwd", "verified_at": "1"}, map[string]any{"method": "webauthn-uv", "verified_at": time.Now().Unix()}} {
+		payload := validPayload()
+		payload[auth.ClaimMFA] = value
+		token := mintRawJWT(t, map[string]any{"alg": "HS256", "typ": "JWT"}, payload)
+		if _, err := a.Authenticate(token); err == nil {
+			t.Fatal("malformed signed MFA accepted")
+		}
+	}
+	payload := validPayload()
+	payload[auth.ClaimMFA] = (auth.MFA{Required: true, VerifiedAt: time.Now().Add(-time.Minute)}).Claim()
+	token := mintRawJWT(t, map[string]any{"alg": "HS256", "typ": "JWT"}, payload)
+	p, err := a.Authenticate(token)
+	if err != nil || !p.MFA.Recent(time.Now()) {
+		t.Fatal("valid MFA lost", err)
+	}
+	parts := strings.Split(token, ".")
+	parts[1] = base64.RawURLEncoding.EncodeToString([]byte(`{"kanz_mfa":{"method":"webauthn-uv","verified_at":"1800000000"}}`))
+	if _, err = a.Authenticate(strings.Join(parts, ".")); err == nil {
+		t.Fatal("unsigned assurance accepted")
 	}
 }

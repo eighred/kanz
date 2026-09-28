@@ -71,6 +71,8 @@ func (s *Server) handleRecovery(w http.ResponseWriter, r *http.Request) {
 	}
 	status, message := resp.Status, "recovery unavailable"
 	switch status {
+	case 403:
+		message = "Recent MFA required. Verify your security key on the Authentication page."
 	case 400:
 		message = "check the address and password requirements"
 	case 401:

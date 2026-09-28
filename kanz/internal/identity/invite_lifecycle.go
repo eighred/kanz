@@ -60,7 +60,7 @@ func (p *Postgres) RevokeInvite(ctx context.Context, actor Administration, id st
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	u, err := lockAdministrator(ctx, tx, actor)
+	u, err := lockAdministrator(ctx, tx, actor, now)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func (p *Postgres) ReissueInvite(ctx context.Context, actor Administration, id s
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	u, err := lockAdministrator(ctx, tx, actor)
+	u, err := lockAdministrator(ctx, tx, actor, now)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func (p *Postgres) ReissueInvite(ctx context.Context, actor Administration, id s
 }
 
 func recordInvitation(ctx context.Context, tx pgx.Tx, actor Administration, u *User, action string, before, after InvitationSummary, replacement *Invite, now time.Time) error {
-	entry := auth.BuildDecisionLog("operator:"+actor.Subject, auth.Request{Principal: &auth.Principal{Subject: actor.Subject, Tenant: actor.Tenant, Roles: u.Roles, Portfolios: u.Portfolios, SessionEpoch: actor.SessionEpoch, IssuedAt: actor.IssuedAt}, Action: auth.Action("identity.invitation." + action), Resource: auth.Resource{Type: "invitation", ID: after.ID, Tenant: after.Tenant}}, auth.Decision{Allow: true, Reason: "current administrator authority and invitation revision verified under lock"})
+	entry := auth.BuildDecisionLog("operator:"+actor.Subject, auth.Request{Principal: &auth.Principal{MFA: actor.MFA, Subject: actor.Subject, Tenant: actor.Tenant, Roles: u.Roles, Portfolios: u.Portfolios, SessionEpoch: actor.SessionEpoch, IssuedAt: actor.IssuedAt}, Action: auth.Action("identity.invitation." + action), Resource: auth.Resource{Type: "invitation", ID: after.ID, Tenant: after.Tenant}}, auth.Decision{Allow: true, Reason: "current administrator authority and invitation revision verified under lock"})
 	oldJSON, err := json.Marshal(before)
 	if err != nil {
 		return err

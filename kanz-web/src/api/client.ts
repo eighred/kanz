@@ -1,3 +1,4 @@
+import { webAuthn, type MFACeremony } from './webauthn'
 // The browser's only way to reach the estate (#371).
 //
 // THERE IS NO TOKEN HERE, AND THERE MUST NEVER BE ONE. Authentication is the
@@ -87,8 +88,14 @@ export interface Identity {
 
 export const auth = {
   /** Exchange a credential for a session. The token stays on the server. */
-  login: (subject: string, credential: string) =>
-    api.post<Identity>('/auth/login', { subject, credential }),
+  login: async (subject: string, credential: string): Promise<Identity> => {
+    const result = await api.post<Identity | { mfa: MFACeremony }>('/auth/login', { subject, credential })
+    if ('mfa' in result) {
+      const proof = await webAuthn(result.mfa, false)
+      return api.post<Identity>('/auth/mfa/login/finish', { id: result.mfa.id, credential: proof })
+    }
+    return result
+  },
   /** Accept an invitation: sets the credential AND signs in, in one step. */
   redeem: (token: string, credential: string) =>
     api.post<Identity>('/auth/redeem', { token, credential }),

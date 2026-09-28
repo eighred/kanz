@@ -55,7 +55,7 @@ func (p *Postgres) CreateInviteAs(ctx context.Context, actor Administration, inv
 		return fmt.Errorf("identity: begin invitation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := lockAdministrator(ctx, tx, actor); err != nil {
+	if _, err := lockAdministrator(ctx, tx, actor, inv.CreatedAt); err != nil {
 		return err
 	}
 	if err := insertInvite(ctx, tx, inv); err != nil {
@@ -149,10 +149,10 @@ func (p *Postgres) UserBySubject(ctx context.Context, subject string) (*User, er
 	var u User
 	var status string
 	err := p.pool.QueryRow(ctx, `
-		SELECT subject, tenant_id, roles, portfolios, credential_hash, status, created_at, updated_at, tokens_invalid_before, session_epoch
+		SELECT subject, tenant_id, roles, portfolios, credential_hash, status, created_at, updated_at, tokens_invalid_before, session_epoch, mfa_enabled
 		  FROM identity_users WHERE subject = $1`, subject,
 	).Scan(&u.Subject, &u.Tenant, &u.Roles, &u.Portfolios, &u.Credential, &status,
-		&u.CreatedAt, &u.UpdatedAt, &u.TokensInvalidBefore, &u.SessionEpoch)
+		&u.CreatedAt, &u.UpdatedAt, &u.TokensInvalidBefore, &u.SessionEpoch, &u.MFA.Required)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
@@ -210,7 +210,7 @@ func (p *Postgres) SetStatus(ctx context.Context, actor Administration, subject 
 		return fmt.Errorf("identity: begin administration: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	actorUser, err := lockAdministrator(ctx, tx, actor)
+	actorUser, err := lockAdministrator(ctx, tx, actor, now)
 	if err != nil {
 		return err
 	}
@@ -337,7 +337,7 @@ func (p *Postgres) InvitesFor(ctx context.Context, tenant string) ([]*Invite, er
 // gives the next statement a fresh snapshot after waiting for the transaction
 // lock, so competing administrators cannot both disable one another based on
 // a stale count. The actor row lock also fences out concurrent role changes.
-func lockAdministrator(ctx context.Context, tx pgx.Tx, actor Administration) (*User, error) {
+func lockAdministrator(ctx context.Context, tx pgx.Tx, actor Administration, now time.Time) (*User, error) {
 	if actor.Subject == "" || actor.Tenant == "" {
 		return nil, ErrAdminAuthority
 	}
@@ -346,8 +346,8 @@ func lockAdministrator(ctx context.Context, tx pgx.Tx, actor Administration) (*U
 	}
 	var u User
 	var status string
-	err := tx.QueryRow(ctx, `SELECT subject, tenant_id, roles, portfolios, status, tokens_invalid_before, session_epoch FROM identity_users
-        WHERE subject = $1 AND tenant_id = $2 FOR SHARE`, actor.Subject, actor.Tenant).Scan(&u.Subject, &u.Tenant, &u.Roles, &u.Portfolios, &status, &u.TokensInvalidBefore, &u.SessionEpoch)
+	err := tx.QueryRow(ctx, `SELECT subject, tenant_id, roles, portfolios, status, tokens_invalid_before, session_epoch, mfa_enabled FROM identity_users
+        WHERE subject = $1 AND tenant_id = $2 FOR SHARE`, actor.Subject, actor.Tenant).Scan(&u.Subject, &u.Tenant, &u.Roles, &u.Portfolios, &status, &u.TokensInvalidBefore, &u.SessionEpoch, &u.MFA.Required)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrAdminAuthority
 	}
@@ -355,7 +355,7 @@ func lockAdministrator(ctx context.Context, tx pgx.Tx, actor Administration) (*U
 		return nil, fmt.Errorf("identity: load administrator: %w", err)
 	}
 	u.Status = Status(status)
-	if !actor.Allows(&u) {
+	if !actor.Allows(&u) || (u.MFA.Required && !actor.MFA.Recent(now)) {
 		return nil, ErrAdminAuthority
 	}
 	return &u, nil

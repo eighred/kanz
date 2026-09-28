@@ -73,7 +73,7 @@ func lockRecoveryUser(ctx context.Context, tx pgx.Tx, subject, tenant string) (*
 		return nil, err
 	}
 	var u User
-	err := tx.QueryRow(ctx, `SELECT subject,tenant_id,roles,portfolios,status,credential_hash,session_epoch,tokens_invalid_before FROM identity_users WHERE subject=$1 AND tenant_id=$2 FOR UPDATE`, subject, tenant).Scan(&u.Subject, &u.Tenant, &u.Roles, &u.Portfolios, &u.Status, &u.Credential, &u.SessionEpoch, &u.TokensInvalidBefore)
+	err := tx.QueryRow(ctx, `SELECT subject,tenant_id,roles,portfolios,status,credential_hash,session_epoch,tokens_invalid_before,mfa_enabled FROM identity_users WHERE subject=$1 AND tenant_id=$2 FOR UPDATE`, subject, tenant).Scan(&u.Subject, &u.Tenant, &u.Roles, &u.Portfolios, &u.Status, &u.Credential, &u.SessionEpoch, &u.TokensInvalidBefore, &u.MFA.Required)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrRecovery
 	}
@@ -96,7 +96,7 @@ func (p *Postgres) EnrollMailbox(ctx context.Context, actor Administration, prev
 	if err != nil {
 		return err
 	}
-	if !actor.Current(u) || u.Credential != previous {
+	if !actor.Current(u) || u.Credential != previous || (u.MFA.Required && !actor.MFA.Recent(now)) {
 		return ErrCredentialMismatch
 	}
 	if err = queueChallenge(ctx, tx, u, "verify", address, now); err != nil {

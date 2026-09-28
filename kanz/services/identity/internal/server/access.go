@@ -8,7 +8,7 @@ import (
 )
 
 func administration(c *identity.Claims) identity.Administration {
-	return identity.Administration{Subject: c.Subject, Tenant: c.Tenant, IssuedAt: c.IssuedAt, SessionEpoch: c.SessionEpoch}
+	return identity.Administration{Subject: c.Subject, Tenant: c.Tenant, IssuedAt: c.IssuedAt, SessionEpoch: c.SessionEpoch, MFA: c.MFA}
 }
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {

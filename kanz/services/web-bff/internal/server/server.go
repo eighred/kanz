@@ -156,6 +156,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Close() error { return s.static.Close() }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("GET /auth/mfa", s.handleMFA)
+	for _, path := range []string{"register/begin", "register/finish", "login/finish", "stepup/begin", "stepup/finish", "remove"} {
+		s.mux.HandleFunc("POST /auth/mfa/"+path, s.handleMFA)
+	}
+
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -341,6 +346,11 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 // completeLogin turns a minted token into a session + cookie, or an error into
 // the one answer the browser is allowed to see.
 func (s *Server) completeLogin(w http.ResponseWriter, r *http.Request, tok *identityclient.Token, err error) {
+	if err == nil && tok != nil && tok.MFA != nil {
+		writeJSON(w, http.StatusAccepted, map[string]any{"mfa": tok.MFA})
+		return
+	}
+
 	var invalid *identityclient.ErrInvalidInput
 	switch {
 	case errors.As(err, &invalid):
@@ -383,6 +393,9 @@ func (s *Server) completeLogin(w http.ResponseWriter, r *http.Request, tok *iden
 	if cerr != nil {
 		s.fail(w, http.StatusInternalServerError, "could not start session", cerr)
 		return
+	}
+	if old, e := r.Cookie(sessionCookie); e == nil {
+		s.sessions.Delete(old.Value)
 	}
 	s.setSessionCookie(w, id, tok.Expires)
 	// JSON rather than a redirect: the caller is a fetch() from the SPA, and a

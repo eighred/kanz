@@ -73,7 +73,7 @@ func (p *Postgres) UsersFor(ctx context.Context, actor Administration, after str
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err = lockAdministrator(ctx, tx, actor); err != nil {
+	if _, err = lockAdministrator(ctx, tx, actor, time.Now()); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `SELECT `+accessColumns+` FROM identity_users u WHERE u.tenant_id=$1 AND u.subject>$2 ORDER BY u.subject LIMIT $3`, actor.Tenant, after, UserPageSize)
@@ -108,7 +108,7 @@ func (p *Postgres) SetAccess(ctx context.Context, actor Administration, subject 
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	actorUser, err := lockAdministrator(ctx, tx, actor)
+	actorUser, err := lockAdministrator(ctx, tx, actor, now)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func recordAccess(ctx context.Context, tx pgx.Tx, actor Administration, actorUse
 	if action == "credential.rotate" {
 		reason = "current session and verified credential snapshot checked under tenant lock"
 	}
-	entry := auth.BuildDecisionLog("operator:"+actor.Subject, auth.Request{Principal: &auth.Principal{Subject: actor.Subject, Tenant: actor.Tenant, Roles: actorUser.Roles, Portfolios: actorUser.Portfolios, SessionEpoch: actor.SessionEpoch, IssuedAt: actor.IssuedAt}, Action: auth.Action("identity.account." + action), Resource: auth.Resource{Type: "account", ID: after.Subject, Tenant: after.Tenant}}, auth.Decision{Allow: true, Reason: reason})
+	entry := auth.BuildDecisionLog("operator:"+actor.Subject, auth.Request{Principal: &auth.Principal{MFA: actor.MFA, Subject: actor.Subject, Tenant: actor.Tenant, Roles: actorUser.Roles, Portfolios: actorUser.Portfolios, SessionEpoch: actor.SessionEpoch, IssuedAt: actor.IssuedAt}, Action: auth.Action("identity.account." + action), Resource: auth.Resource{Type: "account", ID: after.Subject, Tenant: after.Tenant}}, auth.Decision{Allow: true, Reason: reason})
 	oldJSON, err := json.Marshal(before)
 	if err != nil {
 		return err
