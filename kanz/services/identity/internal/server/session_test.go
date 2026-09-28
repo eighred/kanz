@@ -38,6 +38,15 @@ func (p *pausedSigner) Mint(u *identity.User) (string, time.Time, error) {
 }
 
 func TestHTTPLoginMintingAfterDisableCannotRegainGatewayAdmission(t *testing.T) {
+	testHTTPLoginMintingAfterAuthorityChange(t, true)
+}
+
+func TestHTTPLoginMintingAfterAccessChangeCannotRegainGatewayAdmission(t *testing.T) {
+	testHTTPLoginMintingAfterAuthorityChange(t, false)
+}
+
+func testHTTPLoginMintingAfterAuthorityChange(t *testing.T, disable bool) {
+	t.Helper()
 	st, _ := sessionStorePool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -116,8 +125,14 @@ func TestHTTPLoginMintingAfterDisableCannotRegainGatewayAdmission(t *testing.T) 
 		t.Fatal(ctx.Err())
 	}
 	actor := identity.Administration{Subject: "test:admin", Tenant: "acme"}
-	if err := st.SetStatus(ctx, actor, "user:epoch", identity.StatusDisabled, now); err != nil {
-		t.Fatal(err)
+	if disable {
+		if err := st.SetStatus(ctx, actor, "user:epoch", identity.StatusDisabled, now); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if _, err := st.SetAccess(ctx, actor, "user:epoch", 0, []string{"kanz-user", "kanz-trader"}, []string{"pf-new"}, now); err != nil {
+			t.Fatal(err)
+		}
 	}
 	release.Do(func() { close(paused.release) })
 	late := <-done
@@ -134,11 +149,13 @@ func TestHTTPLoginMintingAfterDisableCannotRegainGatewayAdmission(t *testing.T) 
 	if err := cache.Check(p.Subject, p.IssuedAt, p.SessionEpoch); !errors.Is(err, revocation.ErrRevoked) {
 		t.Fatalf("late login admitted: %v", err)
 	}
-	if got := login(); got.err != nil || got.code != http.StatusUnauthorized {
-		t.Fatalf("disabled login: %d %v", got.code, got.err)
-	}
-	if err := st.SetStatus(ctx, actor, "user:epoch", identity.StatusActive, now); err != nil {
-		t.Fatal(err)
+	if disable {
+		if got := login(); got.err != nil || got.code != http.StatusUnauthorized {
+			t.Fatalf("disabled login: %d %v", got.code, got.err)
+		}
+		if err := st.SetStatus(ctx, actor, "user:epoch", identity.StatusActive, now); err != nil {
+			t.Fatal(err)
+		}
 	}
 	fresh := login()
 	if fresh.err != nil || fresh.code != http.StatusOK {
@@ -147,6 +164,9 @@ func TestHTTPLoginMintingAfterDisableCannotRegainGatewayAdmission(t *testing.T) 
 	q, err := reader.Authenticate(ctx, fresh.token)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !disable && (!q.HasRole("kanz-trader") || len(q.Portfolios) != 1 || q.Portfolios[0] != "pf-new") {
+		t.Fatal("fresh login lost updated authority")
 	}
 	if q.SessionEpoch != 1 {
 		t.Fatalf("lost generation: %d", q.SessionEpoch)

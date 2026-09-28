@@ -40,9 +40,13 @@ type Administration struct {
 }
 
 func (a Administration) Allows(u *User) bool {
+	return a.Current(u) && slices.Contains(u.Roles, AdminRole) && ValidateAdminRoles(u.Roles) == nil
+}
+
+// Current checks the durable session fence without granting administration.
+func (a Administration) Current(u *User) bool {
 	if a.Subject == "" || a.Tenant == "" || u == nil || u.Subject != a.Subject ||
-		u.Tenant != a.Tenant || !u.Active() || !slices.Contains(u.Roles, AdminRole) ||
-		ValidateAdminRoles(u.Roles) != nil || a.SessionEpoch != u.SessionEpoch {
+		u.Tenant != a.Tenant || !u.Active() || a.SessionEpoch != u.SessionEpoch {
 		return false
 	}
 	if u.SessionEpoch > 0 {

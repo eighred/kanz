@@ -55,7 +55,7 @@ func (p *Postgres) CreateInviteAs(ctx context.Context, actor Administration, inv
 		return fmt.Errorf("identity: begin invitation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAdministrator(ctx, tx, actor); err != nil {
+	if _, err := lockAdministrator(ctx, tx, actor); err != nil {
 		return err
 	}
 	if err := insertInvite(ctx, tx, inv); err != nil {
@@ -208,28 +208,18 @@ func (p *Postgres) SetStatus(ctx context.Context, actor Administration, subject 
 		return fmt.Errorf("identity: begin administration: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := lockAdministrator(ctx, tx, actor); err != nil {
+	actorUser, err := lockAdministrator(ctx, tx, actor)
+	if err != nil {
 		return err
 	}
-	var targetStatus string
-	var roles []string
-	if err := tx.QueryRow(ctx, `SELECT status, roles FROM identity_users
-        WHERE subject = $1 AND tenant_id = $2 FOR UPDATE`, subject, actor.Tenant).Scan(&targetStatus, &roles); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrUserNotFound
-		}
-		return fmt.Errorf("identity: lock target: %w", err)
+	before, err := lockAccess(ctx, tx, subject, actor.Tenant)
+	if err != nil {
+		return err
 	}
 	if status == StatusDisabled {
-		if targetStatus == string(StatusActive) && slices.Contains(roles, AdminRole) {
-			var remaining int
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM identity_users
-                WHERE tenant_id = $1 AND subject <> $2 AND status = 'active'
-                AND $3 = ANY(roles) AND roles <@ ARRAY[$3, 'kanz-user']::text[]`, actor.Tenant, subject, AdminRole).Scan(&remaining); err != nil {
-				return fmt.Errorf("identity: count administrators: %w", err)
-			}
-			if remaining == 0 {
-				return ErrLastAdmin
+		if before.Status == StatusActive && slices.Contains(before.Roles, AdminRole) {
+			if err := preserveAdministrator(ctx, tx, actor.Tenant, subject); err != nil {
+				return err
 			}
 		}
 		if subject == actor.Subject {
@@ -238,7 +228,7 @@ func (p *Postgres) SetStatus(ctx context.Context, actor Administration, subject 
 	}
 	tag, err := tx.Exec(ctx, `
         UPDATE identity_users
-		   SET status = $2,
+		   SET status = $2, access_revision = access_revision + 1,
                session_epoch = CASE WHEN $2 = 'disabled' THEN session_epoch + 1 ELSE session_epoch END,
 		       updated_at = $3,
 		       tokens_invalid_before = CASE WHEN $2 = 'disabled'
@@ -251,6 +241,17 @@ func (p *Postgres) SetStatus(ctx context.Context, actor Administration, subject 
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrUserNotFound
+	}
+	after, err := scanAccess(tx.QueryRow(ctx, `SELECT `+accessColumns+` FROM identity_users u WHERE u.subject=$1 AND u.tenant_id=$2`, subject, actor.Tenant))
+	if err != nil {
+		return err
+	}
+	action := "enable"
+	if status == StatusDisabled {
+		action = "disable"
+	}
+	if err := recordAccess(ctx, tx, actor, actorUser, action, before, after, now); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -334,26 +335,26 @@ func (p *Postgres) InvitesFor(ctx context.Context, tenant string) ([]*Invite, er
 // gives the next statement a fresh snapshot after waiting for the transaction
 // lock, so competing administrators cannot both disable one another based on
 // a stale count. The actor row lock also fences out concurrent role changes.
-func lockAdministrator(ctx context.Context, tx pgx.Tx, actor Administration) error {
+func lockAdministrator(ctx context.Context, tx pgx.Tx, actor Administration) (*User, error) {
 	if actor.Subject == "" || actor.Tenant == "" {
-		return ErrAdminAuthority
+		return nil, ErrAdminAuthority
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('identity-administration:' || $1, 0))`, actor.Tenant); err != nil {
-		return fmt.Errorf("identity: lock administration: %w", err)
+		return nil, fmt.Errorf("identity: lock administration: %w", err)
 	}
 	var u User
 	var status string
-	err := tx.QueryRow(ctx, `SELECT subject, tenant_id, roles, status, tokens_invalid_before, session_epoch FROM identity_users
-        WHERE subject = $1 AND tenant_id = $2 FOR SHARE`, actor.Subject, actor.Tenant).Scan(&u.Subject, &u.Tenant, &u.Roles, &status, &u.TokensInvalidBefore, &u.SessionEpoch)
+	err := tx.QueryRow(ctx, `SELECT subject, tenant_id, roles, portfolios, status, tokens_invalid_before, session_epoch FROM identity_users
+        WHERE subject = $1 AND tenant_id = $2 FOR SHARE`, actor.Subject, actor.Tenant).Scan(&u.Subject, &u.Tenant, &u.Roles, &u.Portfolios, &status, &u.TokensInvalidBefore, &u.SessionEpoch)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrAdminAuthority
+		return nil, ErrAdminAuthority
 	}
 	if err != nil {
-		return fmt.Errorf("identity: load administrator: %w", err)
+		return nil, fmt.Errorf("identity: load administrator: %w", err)
 	}
 	u.Status = Status(status)
 	if !actor.Allows(&u) {
-		return ErrAdminAuthority
+		return nil, ErrAdminAuthority
 	}
-	return nil
+	return &u, nil
 }

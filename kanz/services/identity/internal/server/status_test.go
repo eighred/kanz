@@ -186,8 +186,8 @@ func TestStatus_ADisableEmitsAnAuditRecordNamingTheOperator(t *testing.T) {
 //
 // The status change is already durable at that point. Answering 500 would tell an
 // operator the lockout did not happen when it did, and send them straight to the
-// hand-run UPDATE. The record is lost loudly (an ERROR line) rather than the
-// change being misreported.
+// hand-run UPDATE. The canonical journal is committed in the store transaction;
+// this test covers failure of the additional operational projection.
 func TestStatus_AnAuditFailureDoesNotHideACompletedDisable(t *testing.T) {
 	f := newStatusServer(t, operatorClaims())
 	f.accounts["user:bob"] = account("user:bob", "acme")

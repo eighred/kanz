@@ -513,3 +513,10 @@ func TestProvision_AMalformedInvitationIsRefusedWithAReason(t *testing.T) {
 		t.Fatal("a malformed invitation was stored")
 	}
 }
+
+func (f *fakeProvisioner) UsersFor(_ context.Context, _ identity.Administration, _ string) ([]*identity.Access, error) {
+	return []*identity.Access{}, nil
+}
+func (f *fakeProvisioner) SetAccess(_ context.Context, _ identity.Administration, _ string, _ int64, _, _ []string, _ time.Time) (*identity.Access, error) {
+	return nil, identity.ErrUserNotFound
+}

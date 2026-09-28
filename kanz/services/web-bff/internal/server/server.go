@@ -188,6 +188,11 @@ func (s *Server) routes() {
 	// accident.
 	s.mux.HandleFunc("GET /api/identity/invites", s.handleInvites)
 	s.mux.HandleFunc("POST /api/identity/invites", s.handleInvites)
+	s.mux.HandleFunc("GET /api/identity/users", s.handleIdentityAccess)
+	s.mux.HandleFunc("PUT /api/identity/users/{subject}/access", s.handleIdentityAccess)
+	s.mux.HandleFunc("POST /api/identity/users/{subject}/disable", s.handleIdentityAccess)
+	s.mux.HandleFunc("POST /api/identity/users/{subject}/enable", s.handleIdentityAccess)
+	s.mux.HandleFunc("GET /auth/permissions", s.handleIdentityAccess)
 	s.mux.HandleFunc("GET /api/preflight", s.handlePreflight)
 	// Everything under /api/ is proxied to the gateway as the session's caller.
 	s.mux.HandleFunc("/api/", s.handleProxy)

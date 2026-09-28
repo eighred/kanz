@@ -1152,6 +1152,7 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 		grants[cfg.AuditRole] = []authz.Capability{authz.Read, authz.Audit}
 	}
 	gwMux := authz.NewMux(grants, recorder)
+	gwMux.Handle(authz.Read, "GET /v1/permissions", gwMux.Permissions)
 	h.Routes(gwMux)
 	o.Routes(gwMux)
 	p.Routes(gwMux)
