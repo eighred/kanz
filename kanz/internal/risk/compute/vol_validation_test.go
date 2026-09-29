@@ -20,8 +20,11 @@ func TestInvalidVolatilityIsExcludedFromGreeksAndRevaluation(t *testing.T) {
 		// No OnSkip callback: the published coverage must stand on its own.
 		var wg sync.WaitGroup
 		for range 8 {
+			// Production gives each query an owned snapshot (#821). The registry
+			// and providers are shared, but Portfolio's lazy cache is not.
+			snapshot := p.Clone()
 			wg.Go(func() {
-				ms := ComputeMeasures(p, r, nil)
+				ms := ComputeMeasures(snapshot, r, nil)
 				for _, name := range []v1.MeasureName{MeasureDelta, MeasureGamma, MeasureVega, MeasureTheta, MeasureRho} {
 					m, ok := ms.Lookup(name)
 					if !ok || m.Value.GetCoefficient() != 0 || m.Coverage.Contributed != 0 || m.Coverage.ExcludedCount != 1 || len(m.Coverage.Exclusions) != 1 || m.Coverage.Exclusions[0].Reason != SkipNoVol {
