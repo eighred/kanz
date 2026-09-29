@@ -3,6 +3,7 @@ package publish
 import (
 	"context"
 	"errors"
+	"maps"
 	"math"
 	"time"
 
@@ -272,6 +273,7 @@ func ToProtoFactorModelSnapshot(m *factormodel.Model) *factorpb.FactorModelSnaps
 	}
 
 	return &factorpb.FactorModelSnapshot{
+		InputProvenance: maps.Clone(m.InputProvenance),
 		Model: &factorpb.FactorModel{
 			ModelId:    m.ModelID,
 			AsOf:       asOf,

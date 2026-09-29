@@ -92,14 +92,16 @@ type Model struct {
 	// a citable instance — absence is "this names no instance", never "the
 	// instance is unnamed".
 	ModelID string
-	AsOf    time.Time
+	// InputProvenance identifies the dated panel recorded with the fitted artifact.
+	InputProvenance map[string]string
+	AsOf            time.Time
 
 	// index memoizes instrument id → row for O(1) lookup.
 	index map[string]int
 }
 
 // DefaultModelID derives a model's canonical id from the configuration that
-// produced it — "STATISTICAL-3F-250D", "FUNDAMENTAL-250D", "BLEND-3F-250D".
+// produced it — "STATISTICAL-3F-250D-DATED1", "FUNDAMENTAL-250D-DATED1".
 //
 // THE ESTIMATION PARAMETERS ARE IN THE ID ON PURPOSE, and it is the whole
 // difference between an id that identifies a model and one that identifies a
@@ -118,7 +120,8 @@ func DefaultModelID(cfg Config) string {
 	if cfg.Type != Fundamental {
 		parts = append(parts, fmt.Sprintf("%dF", cfg.statFactors()))
 	}
-	parts = append(parts, fmt.Sprintf("%dD", cfg.window()))
+	// Dated fits must not redefine a historical tail-aligned artifact's key.
+	parts = append(parts, fmt.Sprintf("%dD", cfg.window()), "DATED1")
 	return strings.Join(parts, "-")
 }
 

@@ -92,8 +92,8 @@ func TestDefaultModelID_ChangesWithTheEstimationParameters(t *testing.T) {
 		}
 		seen[id] = name
 	}
-	if got := DefaultModelID(base); got != "STATISTICAL-3F-250D" {
-		t.Errorf("DefaultModelID(base)=%q want STATISTICAL-3F-250D", got)
+	if got := DefaultModelID(base); got != "STATISTICAL-3F-250D-DATED1" {
+		t.Errorf("DefaultModelID(base)=%q want STATISTICAL-3F-250D-DATED1", got)
 	}
 }
 

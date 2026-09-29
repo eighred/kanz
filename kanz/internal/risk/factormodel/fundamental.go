@@ -206,15 +206,17 @@ func fitFundamental(ctx context.Context, cfg Config, instruments []string, asOf 
 	}
 	factors, loadings := buildFundamentalLoadings(cfg.StyleFactors, universe, charMap)
 
-	returns, err := alignedReturns(ctx, rp, universe, asOf, cfg.window())
+	panel, err := alignedReturns(ctx, rp, universe, asOf, cfg.window())
 	if err != nil {
 		return nil, nil, err
 	}
-	factorCov, specificSlice, residuals := crossSectionalFit(loadings, returns, cfg.ridge())
+	factorCov, specificSlice, residuals := crossSectionalFit(loadings, panel.Values, cfg.ridge())
 
 	specific := make(map[string]float64, len(universe))
 	for i, id := range universe {
 		specific[id] = specificSlice[i]
 	}
-	return newModel(factors, universe, loadings, factorCov, specific), residuals, nil
+	m := newModel(factors, universe, loadings, factorCov, specific)
+	m.InputProvenance = panel.Params()
+	return m, residuals, nil
 }

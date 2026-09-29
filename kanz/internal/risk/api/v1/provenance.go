@@ -1,6 +1,9 @@
 package v1
 
-import "time"
+import (
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	"time"
+)
 
 // MeasureProvenance names the MODEL behind one measure value (#1037).
 //
@@ -46,6 +49,11 @@ type MeasureProvenance struct {
 	// every measure of every FACT and a reader may group by them, so never
 	// per-position data and never the inputs themselves.
 	Params map[string]string
+	// InputDigest is high-cardinality audit identity, never a grouping parameter.
+	InputDigest string
+	// ExcludedGross is exact excluded absolute exposure in portfolio base currency.
+	// Nil means unreported or unrepresentable, not zero.
+	ExcludedGross *commonpb.Decimal
 }
 
 // Declared reports whether this producer named a model at all. The three-valued

@@ -279,12 +279,13 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"REGISTERED, which is a code change. Its sibling `excluded` is set to nil on the same " +
 			"path and is credited rather than exempted.", ""},
 
-	"internal/risk/factormodel: Model.Factors":     factorModelArtifact("the factor names"),
-	"internal/risk/factormodel: Model.Instruments": factorModelArtifact("the instrument universe"),
-	"internal/risk/factormodel: Model.Loadings":    factorModelArtifact("the loadings matrix, one row per instrument"),
-	"internal/risk/factormodel: Model.FactorCov":   factorModelArtifact("the factor covariance matrix, factors x factors"),
-	"internal/risk/factormodel: Model.SpecificVar": factorModelArtifact("specific variance, one entry per instrument"),
-	"internal/risk/factormodel: Model.index":       factorModelArtifact("the instrument-to-row index over the same universe"),
+	"internal/risk/factormodel: Model.Factors":         factorModelArtifact("the factor names"),
+	"internal/risk/factormodel: Model.Instruments":     factorModelArtifact("the instrument universe"),
+	"internal/risk/factormodel: Model.Loadings":        factorModelArtifact("the loadings matrix, one row per instrument"),
+	"internal/risk/factormodel: Model.FactorCov":       factorModelArtifact("the factor covariance matrix, factors x factors"),
+	"internal/risk/factormodel: Model.SpecificVar":     factorModelArtifact("specific variance, one entry per instrument"),
+	"internal/risk/factormodel: Model.InputProvenance": factorModelArtifact("the fixed literal key set returned by returns.Panel.Params (#1293); rebuilt per fit, never appended per request"),
+	"internal/risk/factormodel: Model.index":           factorModelArtifact("the instrument-to-row index over the same universe"),
 
 	"services/accounting/internal/ledger: Snapshot.Positions": ledgerSnapshot("open positions, keyed by instrument"),
 	"services/accounting/internal/ledger: Snapshot.Cash":      ledgerSnapshot("cash, keyed by currency"),

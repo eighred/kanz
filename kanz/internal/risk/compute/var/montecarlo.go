@@ -7,8 +7,6 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/eighred/kanz/internal/dec"
-
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/domain"
@@ -60,45 +58,14 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 	}
 	prov.Params["draws"] = strconv.Itoa(draws)
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
-		// SAME COVERAGE CONTRACT AS THE HISTORICAL PATH, and it has to be
-		// open-coded here because this estimator needs the per-instrument series
-		// rather than the folded P&L that portfolioPnL returns. The reasons are the
-		// shared ones so the two estimators cannot report the same gap under
-		// different names.
+		evaluation := prov
 		var cover compute.Coverage
-		base := p.BaseCurrency()
-		var values []float64 // position value per instrument
-		var series [][]float64
-		minLen := -1
-		for _, pos := range p.Positions() {
-			if !pos.InBaseCurrency(base) {
-				continue
-			}
-			r, err := rp.Returns(ctx, string(pos.InstrumentID), p.AsOf(), window)
-			if err != nil || len(r) == 0 {
-				cover.Exclude(pos.InstrumentID, SkipNoReturns)
-				continue
-			}
-			cover.Contributed++
-			values = append(values, dec.Float64Or(pos.MarketValue.Amount, 0))
-			series = append(series, r)
-			if minLen < 0 || len(r) < minLen {
-				minLen = len(r)
-			}
+		panel, values, ok := portfolioPanel(ctx, p, rp, window, &cover, &evaluation, false)
+		if !ok {
+			return zeroMeasure(evaluation, cover)
 		}
-		// Need ≥2 scenarios for a sample covariance.
-		if len(series) == 0 || minLen < 2 {
-			cover.ExcludeWhole(SkipInsufficientHistory)
-			return zeroMeasure(prov, cover)
-		}
-
-		// Tail-align every series to the common window (matching Historical), so
-		// the covariance is estimated over aligned scenarios.
-		n := len(series)
-		r := make([][]float64, n) // r[i] = aligned returns of instrument i
-		for i, s := range series {
-			r[i] = s[len(s)-minLen:]
-		}
+		r := panel.Values
+		n := len(r)
 
 		mean := rowMeans(r)
 		cov := covariance(r, mean)
@@ -132,7 +99,7 @@ func MonteCarlo(cfg Config) compute.ReturnsMeasure {
 			Name:       compute.MeasureVaR99,
 			Value:      floatToDecimal(v, varExponent),
 			Coverage:   cover.Result(),
-			Provenance: prov,
+			Provenance: evaluation,
 		}
 	}
 }

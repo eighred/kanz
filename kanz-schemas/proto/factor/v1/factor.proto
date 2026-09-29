@@ -170,4 +170,8 @@ message FactorModelSnapshot {
 
   // covariance is the K×K factor-return covariance for this instance. Required.
   FactorCovariance covariance = 3;
+
+  // Canonical dated-panel digest, sampling policy and coverage counts.
+  // Absent on historical artifacts produced before dated alignment.
+  map<string, string> input_provenance = 4;
 }

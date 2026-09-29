@@ -26,8 +26,6 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/eighred/kanz/internal/dec"
-
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
@@ -76,10 +74,8 @@ func (c Config) confidence() float64 {
 // For every position (in the portfolio base currency — the RISK-07 same-
 // currency convention; cross-currency needs an FX layer this package does not
 // have), it pulls the instrument's return series via the provider and forms
-// per-scenario P&L = Σ_i value_i × return_i. Scenarios are tail-aligned to the
-// shortest available series (the providers return most-recent-N, so the recent
-// tail lines up; exact date alignment is a MODEL-01b refinement once the
-// provider returns date-tagged returns). VaR_α = −quantile(P&L, 1−α), floored
+// per-scenario P&L = Σ_i value_i × return_i. Scenarios intersect exact dated
+// intervals under the declared daily sampling convention. VaR_α = −quantile(P&L, 1−α), floored
 // at zero (a non-loss quantile ⇒ no VaR). Insufficient data yields a zero-value
 // measure, never an error — the MeasureFunc contract; the response layer marks
 // it degraded.
@@ -92,10 +88,11 @@ func Historical(cfg Config) compute.ReturnsMeasure {
 	// this, the calibrated answer and the illustrative one are the same bytes.
 	prov := historicalProvenance(conf, window)
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
+		evaluation := prov
 		var cov compute.Coverage
-		pnl, _, ok := portfolioPnL(ctx, p, rp, window, &cov)
+		pnl, _, ok := portfolioPnL(ctx, p, rp, window, &cov, &evaluation, false)
 		if !ok {
-			return zeroNamed(compute.MeasureVaR99, prov, cov)
+			return zeroNamed(compute.MeasureVaR99, evaluation, cov)
 		}
 		sorted := append([]float64(nil), pnl...)
 		sort.Float64s(sorted)
@@ -107,7 +104,7 @@ func Historical(cfg Config) compute.ReturnsMeasure {
 			Name:       compute.MeasureVaR99,
 			Value:      floatToDecimal(loss, varExponent),
 			Coverage:   cov.Result(),
-			Provenance: prov,
+			Provenance: evaluation,
 		}
 	}
 }
@@ -138,9 +135,7 @@ const (
 )
 
 // portfolioPnL builds the TIME-ORDERED per-scenario P&L series for the
-// portfolio's base-currency positions over the window, tail-aligned to the
-// shortest available series (providers return most-recent-N, so the recent
-// tail lines up). pnl[t] = Σ_i value_i × return_i[t]. v0 is the signed sum of
+// portfolio's base-currency positions over their exact common dated intervals. pnl[t] = Σ_i value_i × return_i[t]. v0 is the signed sum of
 // the included positions' base-currency values — the starting portfolio value
 // the drawdown path folds P&L onto. ok=false on insufficient data (no legs, or
 // the common window < 2), matching Historical's original guard. The series is
@@ -154,40 +149,16 @@ const (
 // The other-currency skip is NOT recorded here: those positions are already
 // reported as v1.QualityFlagCurrencyExcluded off the portfolio (#257), and
 // counting them again under a second name would double-report one exclusion.
-func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider, window int, cov *compute.Coverage) (pnl []float64, v0 float64, ok bool) {
-	base := p.BaseCurrency()
-	type leg struct {
-		value   float64
-		returns []float64
-	}
-	var legs []leg
-	minLen := -1
-	for _, pos := range p.Positions() {
-		if !pos.InBaseCurrency(base) {
-			continue
-		}
-		r, err := rp.Returns(ctx, string(pos.InstrumentID), p.AsOf(), window)
-		if err != nil || len(r) == 0 {
-			cov.Exclude(pos.InstrumentID, SkipNoReturns)
-			continue
-		}
-		val := dec.Float64Or(pos.MarketValue.Amount, 0)
-		legs = append(legs, leg{value: val, returns: r})
-		cov.Contributed++
-		v0 += val
-		if minLen < 0 || len(r) < minLen {
-			minLen = len(r)
-		}
-	}
-	if len(legs) == 0 || minLen < 2 {
-		cov.ExcludeWhole(SkipInsufficientHistory)
+func portfolioPnL(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider, window int, cov *compute.Coverage, prov *v1.MeasureProvenance, requirePath bool) (pnl []float64, v0 float64, ok bool) {
+	panel, values, ok := portfolioPanel(ctx, p, rp, window, cov, prov, requirePath)
+	if !ok {
 		return nil, 0, false
 	}
-	pnl = make([]float64, minLen)
-	for _, lg := range legs {
-		off := len(lg.returns) - minLen // tail-align to the common window
-		for t := 0; t < minLen; t++ {
-			pnl[t] += lg.value * lg.returns[off+t]
+	pnl = make([]float64, len(panel.Intervals))
+	for i, row := range panel.Values {
+		v0 += values[i]
+		for j, value := range row {
+			pnl[j] += values[i] * value
 		}
 	}
 	return pnl, v0, true
