@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	decutil "github.com/eighred/kanz/internal/dec"
+	"math"
 	"time"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
@@ -166,15 +167,28 @@ func greekMeasure(ctx context.Context, name v1.MeasureName, p GreeksProviders, s
 	return func(port *domain.Portfolio) v1.Measure {
 		asOf := port.AsOf()
 		var sum float64
+		var cov Coverage
+		var skipped bool
+		evaluation := p
+		evaluation.OnSkip = func(id, reason string) {
+			skipped = true
+			cov.Exclude(domain.InstrumentID(id), reason)
+			skipOption(p, id, reason)
+		}
 		for _, pos := range port.Positions() {
-			contrib, isOption := positionGreekContribution(ctx, p, pos, asOf, name, sel)
+			skipped = false
+			contrib, isOption := positionGreekContribution(ctx, evaluation, pos, asOf, name, sel)
 			if !isOption {
 				// Linear (non-option) position: Δ≡1 ⇒ contributes its signed
 				// MarketValue to Delta, nothing to higher-order Greeks.
 				if name == MeasureDelta {
 					sum += decutil.Float64Or(pos.MarketValue.GetAmount(), 0)
+					cov.Contributed++
 				}
 				continue
+			}
+			if !skipped {
+				cov.Contributed++
 			}
 			sum += contrib
 		}
@@ -185,6 +199,7 @@ func greekMeasure(ctx context.Context, name v1.MeasureName, p GreeksProviders, s
 		return v1.Measure{
 			Name:       name,
 			Value:      floatToDecimal(sum, greekExp),
+			Coverage:   cov.Result(),
 			Provenance: v1.MeasureProvenance{Method: v1.MethodOptionPricingGreeks},
 		}
 	}
@@ -241,7 +256,7 @@ func positionGreekContribution(ctx context.Context, p GreeksProviders, pos domai
 	if p.Vol != nil {
 		vol, volOK = p.Vol.Vol(ctx, spec.UnderlyingID, spec.Strike, ttm, asOf)
 	}
-	if !volOK || vol <= 0 {
+	if !volOK || vol <= 0 || math.IsNaN(vol) || math.IsInf(vol, 0) {
 		skipOption(p, string(pos.InstrumentID), SkipNoVol)
 		return 0, true
 	}

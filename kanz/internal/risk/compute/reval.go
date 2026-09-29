@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	decutil "github.com/eighred/kanz/internal/dec"
+	"math"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -98,7 +99,7 @@ func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf
 	} else {
 		ok = false
 	}
-	if !ok || vol <= 0 {
+	if !ok || vol <= 0 || math.IsNaN(vol) || math.IsInf(vol, 0) {
 		skipOption(rv.providers, instrumentID, SkipNoVol)
 		return nil, false
 	}
