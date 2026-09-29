@@ -3,6 +3,7 @@ package factormodel
 import (
 	"context"
 	"fmt"
+	"github.com/eighred/kanz/internal/marketdata/returns"
 	"sort"
 	"time"
 )
@@ -97,6 +98,13 @@ type Providers struct {
 // asOf. The universe is sorted internally for a deterministic factor model
 // (same inputs ⇒ identical model, the EVT-21d replay property).
 func Fit(ctx context.Context, cfg Config, instruments []string, asOf time.Time, p Providers) (*Model, error) {
+	seen := map[string]bool{}
+	for _, id := range instruments {
+		if id == "" || seen[id] {
+			return nil, fmt.Errorf("factormodel: empty or duplicate instrument %q", id)
+		}
+		seen[id] = true
+	}
 	m, err := fit(ctx, cfg, instruments, asOf, p)
 	if err != nil {
 		return nil, err
@@ -117,11 +125,13 @@ func fit(ctx context.Context, cfg Config, instruments []string, asOf time.Time, 
 	case Statistical:
 		universe := append([]string(nil), instruments...)
 		sort.Strings(universe)
-		returns, err := alignedReturns(ctx, p.Returns, universe, asOf, cfg.window())
+		panel, err := alignedReturns(ctx, p.Returns, universe, asOf, cfg.window())
 		if err != nil {
 			return nil, err
 		}
-		return fitStatistical(universe, returns, cfg.statFactors(), "PC"), nil
+		m := fitStatistical(universe, panel.Values, cfg.statFactors(), "PC")
+		m.InputProvenance = panel.Params()
+		return m, nil
 	case Blend:
 		if p.Characteristics == nil {
 			return nil, fmt.Errorf("factormodel: Blend requires a CharacteristicProvider")
@@ -131,7 +141,9 @@ func fit(ctx context.Context, cfg Config, instruments []string, asOf time.Time, 
 			return nil, err
 		}
 		stat := fitStatistical(fund.Instruments, residuals, cfg.statFactors(), "SPC")
-		return blend(fund, stat), nil
+		m := blend(fund, stat)
+		m.InputProvenance = fund.InputProvenance
+		return m, nil
 	default: // Fundamental
 		if p.Characteristics == nil {
 			return nil, fmt.Errorf("factormodel: Fundamental requires a CharacteristicProvider")
@@ -232,34 +244,15 @@ func blend(fund, stat *Model) *Model {
 	return newModel(factors, fund.Instruments, loadings, factorCov, stat.SpecificVar)
 }
 
-// alignedReturns reads each instrument's return series and tail-aligns them to a
-// common length (the shortest series with ≥2 points), so the covariance/
-// regression sees one rectangular N×L panel. An instrument with no (or too
-// little) history gets a zero row — it contributes no factor/PC structure and a
-// zero specific variance, surfaced as a coverage concern a layer up.
-func alignedReturns(ctx context.Context, rp ReturnsProvider, instruments []string, asOf time.Time, window int) ([][]float64, error) {
-	series := make([][]float64, len(instruments))
-	minLen := -1
-	for i, id := range instruments {
-		r, err := rp.Returns(ctx, id, asOf, window)
-		if err != nil {
-			return nil, err
-		}
-		series[i] = r
-		if len(r) >= 2 && (minLen < 0 || len(r) < minLen) {
-			minLen = len(r)
-		}
+// alignedReturns refuses incomplete universes: an absent history is not a
+// zero-risk row. Every estimator uses the same canonical dated panel as VaR.
+func alignedReturns(ctx context.Context, rp ReturnsProvider, instruments []string, asOf time.Time, window int) (returns.Panel, error) {
+	panel, err := returns.Load(ctx, rp, instruments, asOf, window)
+	if err != nil {
+		return panel, err
 	}
-	if minLen < 2 {
-		return nil, fmt.Errorf("factormodel: insufficient return history to estimate a covariance")
+	if len(panel.Missing) != 0 {
+		return panel, fmt.Errorf("factormodel: incomplete dated universe: %v", panel.Missing)
 	}
-	out := make([][]float64, len(instruments))
-	for i, r := range series {
-		row := make([]float64, minLen)
-		if len(r) >= minLen {
-			copy(row, r[len(r)-minLen:]) // tail-align
-		}
-		out[i] = row
-	}
-	return out, nil
+	return panel, nil
 }

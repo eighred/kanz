@@ -50,17 +50,18 @@ func MaxDrawdownFraction(cfg Config) compute.ReturnsMeasure {
 	window := cfg.Window
 	prov := historicalProvenance(cfg.confidence(), window)
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
+		evaluation := prov
 		var cov compute.Coverage
-		pnl, v0, ok := portfolioPnL(ctx, p, rp, window, &cov)
+		pnl, v0, ok := portfolioPnL(ctx, p, rp, window, &cov, &evaluation, true)
 		if !ok {
-			return zeroNamed(compute.MeasureMaxDrawdown, prov, cov)
+			return zeroNamed(compute.MeasureMaxDrawdown, evaluation, cov)
 		}
 		frac, _ := maxDrawdown(pnl, v0)
 		return v1.Measure{
 			Name:       compute.MeasureMaxDrawdown,
 			Value:      floatToDecimal(frac, drawdownExponent),
 			Coverage:   cov.Result(),
-			Provenance: prov,
+			Provenance: evaluation,
 		}
 	}
 }
@@ -71,17 +72,18 @@ func MaxDrawdownAmount(cfg Config) compute.ReturnsMeasure {
 	window := cfg.Window
 	prov := historicalProvenance(cfg.confidence(), window)
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
+		evaluation := prov
 		var cov compute.Coverage
-		pnl, v0, ok := portfolioPnL(ctx, p, rp, window, &cov)
+		pnl, v0, ok := portfolioPnL(ctx, p, rp, window, &cov, &evaluation, true)
 		if !ok {
-			return zeroNamed(compute.MeasureMaxDrawdownAmount, prov, cov)
+			return zeroNamed(compute.MeasureMaxDrawdownAmount, evaluation, cov)
 		}
 		_, amount := maxDrawdown(pnl, v0)
 		return v1.Measure{
 			Name:       compute.MeasureMaxDrawdownAmount,
 			Value:      floatToDecimal(amount, varExponent),
 			Coverage:   cov.Result(),
-			Provenance: prov,
+			Provenance: evaluation,
 		}
 	}
 }

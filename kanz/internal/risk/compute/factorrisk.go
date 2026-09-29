@@ -218,6 +218,9 @@ func factorMeasure(ctx context.Context, providers FactorProviders, name v1.Measu
 // parameter they do not use.
 func factorProvenance(model *factormodel.Model, name v1.MeasureName) v1.MeasureProvenance {
 	params := map[string]string{"factors": strconv.Itoa(len(model.Factors))}
+	for key, value := range model.InputProvenance {
+		params[key] = value
+	}
 	if name == MeasureFactorVaR99 {
 		params["confidence"] = strconv.FormatFloat(factorVaRConfidence, 'f', -1, 64)
 	}

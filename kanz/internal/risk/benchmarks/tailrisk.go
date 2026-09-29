@@ -3,6 +3,8 @@ package benchmarks
 import (
 	"context"
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/marketdata/returns"
+	"github.com/eighred/kanz/internal/marketdata/returns/returnstest"
 	"math"
 	"time"
 
@@ -22,7 +24,7 @@ import (
 // varmodel.Historical and varmodel.ExpectedShortfall AS DEPLOYED — through a
 // real domain.Portfolio and a real compute.ReturnsProvider, not by reaching into
 // the estimator. Every case below therefore also crosses portfolioPnL, the
-// base-currency filter and the tail-alignment, because a VaR that is right about
+// base-currency filter and exact dated alignment, because a VaR that is right about
 // the wrong P&L series is wrong in exactly the way nobody notices.
 //
 // The two are listed separately in Inventory() and validated separately here,
@@ -77,7 +79,7 @@ const (
 )
 
 // tailAsOf is the portfolio state time. Fixed, because the provider below
-// ignores it and a benchmark must not vary with the wall clock.
+// dates its synthetic grid relative to it; benchmarks do not use the wall clock.
 var tailAsOf = time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 
 // legReturns is a per-instrument return series provider — per-instrument rather
@@ -88,6 +90,12 @@ type legReturns map[string][]float64
 
 func (l legReturns) Returns(_ context.Context, id string, _ time.Time, _ int) ([]float64, error) {
 	return l[id], nil
+}
+
+// These analytical scenarios have a declared synthetic daily grid; this is a
+// benchmark input, never a timestamp fallback for a market-data provider.
+func (l legReturns) DatedReturns(_ context.Context, id string, asOf time.Time, _ int) (returns.Series, error) {
+	return returnstest.Series(id, asOf, l[id]), nil
 }
 
 // tailPortfolio builds a USD portfolio of unit-priced legs. Each leg's value is

@@ -23,10 +23,11 @@ func ExpectedShortfall(cfg Config) compute.ReturnsMeasure {
 	window := cfg.Window
 	prov := historicalProvenance(conf, window)
 	return func(ctx context.Context, p *domain.Portfolio, rp compute.ReturnsProvider) v1.Measure {
+		evaluation := prov
 		var cov compute.Coverage
-		pnl, _, ok := portfolioPnL(ctx, p, rp, window, &cov)
+		pnl, _, ok := portfolioPnL(ctx, p, rp, window, &cov, &evaluation, false)
 		if !ok {
-			return zeroNamed(compute.MeasureES99, prov, cov)
+			return zeroNamed(compute.MeasureES99, evaluation, cov)
 		}
 		sorted := append([]float64(nil), pnl...)
 		sort.Float64s(sorted) // ascending: worst (most negative) first
@@ -73,7 +74,7 @@ func ExpectedShortfall(cfg Config) compute.ReturnsMeasure {
 			Name:       compute.MeasureES99,
 			Value:      floatToDecimal(es, varExponent),
 			Coverage:   cov.Result(),
-			Provenance: prov,
+			Provenance: evaluation,
 		}
 	}
 }
