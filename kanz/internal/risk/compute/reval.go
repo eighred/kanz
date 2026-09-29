@@ -105,6 +105,10 @@ func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf
 	}
 	r := rv.providers.Curve.Rate(ttm)
 	basePrice := pricing.Price(spec.Type, spec.Exercise, spot, spec.Strike, ttm, r, 0, vol)
+	if math.IsNaN(basePrice) || math.IsInf(basePrice, 0) {
+		skipOption(rv.providers, instrumentID, SkipInvalidPricing)
+		return nil, false
+	}
 	if basePrice <= 0 {
 		return nil, false // cannot scale off a zero base
 	}
@@ -118,5 +122,9 @@ func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf
 
 	ratio := shockedPrice / basePrice
 	newAmount := decutil.Float64Or(baseMV.GetAmount(), 0) * ratio
+	if !representablePricingAmount(newAmount, revalMoneyExp) {
+		skipOption(rv.providers, instrumentID, SkipInvalidPricing)
+		return nil, false
+	}
 	return &commonpb.Money{Amount: floatToDecimal(newAmount, revalMoneyExp), CurrencyCode: baseMV.GetCurrencyCode()}, true
 }

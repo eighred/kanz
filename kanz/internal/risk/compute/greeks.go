@@ -137,6 +137,9 @@ const (
 	// the calibration gap rather than a data gap: the option is known, its
 	// underlying is marked, and the surface cannot quote it.
 	SkipNoVol = "no_vol"
+	// Finite inputs can still overflow pricing or its Decimal coefficient.
+	// Such an output is unassessed, never a saturated money/sensitivity value.
+	SkipInvalidPricing = "invalid_pricing_result"
 	// SkipExpired: the option's expiry is at or before the valuation time. This is
 	// the one skip whose zero is arithmetically CORRECT — an expired option really
 	// does have no Greeks — and it is still reported, because an expired contract
@@ -191,6 +194,10 @@ func greekMeasure(ctx context.Context, name v1.MeasureName, p GreeksProviders, s
 				cov.Contributed++
 			}
 			sum += contrib
+		}
+		if !representablePricingAmount(sum, greekExp) {
+			cov.ExcludeWhole(SkipInvalidPricing)
+			sum = 0
 		}
 		// THE MODEL, NOT THE MEASURE NAME, IS WHAT SEPARATES THIS FROM THE
 		// PLACEHOLDER. MeasureDelta is served by this function when
@@ -267,7 +274,19 @@ func positionGreekContribution(ctx context.Context, p GreeksProviders, pos domai
 		mult = 1
 	}
 	n := decutil.Float64Or(pos.Quantity, 0) * mult
-	return sel(g, spot, n), true
+	value := sel(g, spot, n)
+	if !representablePricingAmount(value, greekExp) {
+		skipOption(p, string(pos.InstrumentID), SkipInvalidPricing)
+		return 0, true
+	}
+	return value, true
+}
+
+// floatToDecimal assumes a representable coefficient. Check the rounded value
+// before conversion: NaN/overflow converted to int64 can masquerade as money.
+func representablePricingAmount(value float64, exponent int32) bool {
+	scaled := math.Round(value * math.Pow10(int(-exponent)))
+	return !math.IsNaN(scaled) && !math.IsInf(scaled, 0) && scaled >= -0x1p63 && scaled < 0x1p63
 }
 
 // skipOption reports an option that priced to nothing, if the caller asked to
