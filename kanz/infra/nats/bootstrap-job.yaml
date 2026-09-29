@@ -175,7 +175,7 @@ data:
     #                 settlement.instruction.fail. A failed settlement that cannot
     #                 be reported is a failed settlement nobody knows about.
     #
-    #                 SETTLEMENT HAS NO PRODUCER (#589). Read that sentence before
+    #                 SETTLEMENT HAS NO PRODUCER (#1301). Read that sentence before
     #                 you read the stream. posttrade.BusFailSink is defined and
     #                 NOTHING CONSTRUCTS IT, so this stream is empty on every
     #                 deployment — and an empty stream of settlement fails is
@@ -186,9 +186,13 @@ data:
     #                 them later is worse than carrying them now. But a stream
     #                 provisioned for a producer that does not exist is a claim
     #                 this estate makes about itself, so the OMS states the posture
-    #                 at startup and exports kanz_oms_settlement_plane_running —
-    #                 which distinguishes "not running here" from "running, nothing
-    #                 failed". DO NOT DELETE THIS NOTE while that gauge still reads
+    #                 at startup and exports kanz_oms_settlement_plane_running.
+    #                 kanz_oms_settlement_plane_applicability distinguishes the
+    #                 current direct-spot model (not_required) from required or
+    #                 unknown deferred settlement. Spot trades use the accounting
+    #                 settled ledger and venue evidence, not this instruction stream.
+    #                 Neither metric certifies launch readiness or individual trades.
+    #                 DO NOT DELETE THIS NOTE while the running gauge still reads
     #                 0: test/arch/provisioned_stream_claims_a_producer_test.go
     #                 binds it to the dark-capability exemption and will fail both
     #                 ways.
