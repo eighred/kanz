@@ -419,7 +419,7 @@ func Load() (Config, error) {
 	// they would check to find out says the control is on.
 	//
 	// env.Bool refuses instead — a value strconv.ParseBool cannot read is a
-	// startup error naming the key and the value, which is CLAUDE.md's rule that a
+	// startup error naming the key and the value, which is AGENTS.md's rule that a
 	// misconfiguration surfaces as a refusal to start rather than a default that
 	// looks healthy. It also accepts every spelling Go accepts, so "1" and "TRUE"
 	// now arm the control rather than silently disarming it.

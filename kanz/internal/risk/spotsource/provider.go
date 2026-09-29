@@ -294,7 +294,7 @@ func (p *Provider) Spot(ctx context.Context, instrumentID string, asOf time.Time
 // compute.SpotProvider is float64 because the pricing library it feeds is: a
 // Black-Scholes greek is a floating-point number whatever it is handed. A margin
 // control is the opposite — it divides the venue's own liquidation price by this
-// mark and compares the result to a mandate's ceiling, and CLAUDE.md's rule
+// mark and compares the result to a mandate's ceiling, and AGENTS.md's rule
 // applies with full force there: money and quantities are exact, never float. A
 // proximity of 0.9499999999999999 refused where 0.95 is the limit is a refusal an
 // operator cannot reconcile against the two prices it came from.

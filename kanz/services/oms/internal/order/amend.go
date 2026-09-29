@@ -128,7 +128,7 @@ func amendReducesExposure(prev, next *orderpb.OrderState) bool {
 // So: an order for 100 clears the mandate and rests. An amend raises it to
 // 1,000,000. A venue is configured later, the startup sweep routes the amended
 // size, and no mandate rule, no second signature and no kill switch ever saw the
-// number that traded. CLAUDE.md's order path says no step is skippable; this was
+// number that traded. AGENTS.md's order path says no step is skippable; this was
 // the one mutation that skipped all of them at once.
 //
 // # Why it is a re-entry and not a new control

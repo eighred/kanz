@@ -6,7 +6,7 @@
 # a clean checkout: across the 24 packages that read TEST_POSTGRES_URL,
 # TEST_NATS_URL or TEST_KAFKA_BROKERS, **73 tests skip** — and they skip
 # SILENTLY, one t.Skip line each, inside an otherwise passing run. Nothing in the
-# output says a third of the integration surface did not execute. CLAUDE.md warns
+# output says a third of the integration surface did not execute. AGENTS.md warns
 # about exactly this for Postgres ("TEST_POSTGRES_URL unset ⇒ 14 test files skip
 # silently"); the same trap covers the bus and Kafka, and the only reason it
 # stayed invisible is that the recipe lived in a CI workflow nobody runs locally.

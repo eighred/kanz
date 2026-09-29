@@ -25,7 +25,7 @@ import (
 
 // #713'S "VERIFIED WHEN", AGAINST A REAL BROKER.
 //
-// Every other test of the asynchronous recorder drives a FAKE bus, and CLAUDE.md
+// Every other test of the asynchronous recorder drives a FAKE bus, and AGENTS.md
 // names that limit precisely: "fakeBus does not validate envelopes, so it accepts
 // what a real broker rejects. A green suite using it is not a broker proof."
 //

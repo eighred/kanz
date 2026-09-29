@@ -20,13 +20,13 @@ import (
 //
 // So the entire guarantee rested on one property of the DSN. That property was
 // asserted in fifteen comments across the deploy manifests, cmd/kanz-migrate,
-// secretproviderclass.yaml and CLAUDE.md; it was SET by a single CREATE ROLE
+// secretproviderclass.yaml and AGENTS.md; it was SET by a single CREATE ROLE
 // line in a manifest labelled `kanz.eighred.com/posture: dev-only`; and it was
 // checked by nothing that runs. A repo-wide grep for the only ways to ask —
 // rolsuper, rolbypassrls, pg_roles, pg_has_role — returned zero hits in any .go
 // file.
 //
-// The failure that produces is the one CLAUDE.md's standards forbid by name: a
+// The failure that produces is the one AGENTS.md's standards forbid by name: a
 // Vault entry written with the wrong role gives a service that starts cleanly,
 // passes readiness, sets app.tenant_id on every connection, logs nothing
 // unusual, and serves every tenant's rows to every tenant. No error, no metric,
@@ -34,7 +34,7 @@ import (
 // observable event.
 //
 // It also compromised the EVIDENCE. The Postgres-gated isolation tests pass
-// identically against a superuser TEST_POSTGRES_URL; CLAUDE.md warns about
+// identically against a superuser TEST_POSTGRES_URL; AGENTS.md warns about
 // exactly that ("the isolation tests pass falsely"). Because those tests open
 // their pools through NewTenantPool, the refusal added there now fails them
 // instead — a green RLS suite means the suite ran against a role RLS applies to.

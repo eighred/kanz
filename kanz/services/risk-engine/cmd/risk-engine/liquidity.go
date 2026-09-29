@@ -130,7 +130,7 @@ func registerLiquidityRisk(
 	if bars == nil {
 		// THE OPERATOR ASKED AND THERE IS NOTHING TO READ. Degrading here would
 		// leave a deployment that named a venue looking exactly like one that
-		// never wanted liquidity, which is the shape CLAUDE.md forbids. Nothing
+		// never wanted liquidity, which is the shape AGENTS.md forbids. Nothing
 		// sets this variable today, so the only way to reach this line is to have
 		// just added it — where a crash-loop is cheap and a silent dark family is
 		// not.

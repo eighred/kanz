@@ -24,7 +24,7 @@ import (
 // THE FAILURE IS INVISIBLE IN THE DIRECTION THAT MATTERS. accounting.balance
 // .reconciled is emitted only on a DISCREPANCY, so an asset that was SKIPPED and
 // an asset that AGREED produce the identical observable estate: no FACT, no
-// counter, no line. That is CLAUDE.md's rule verbatim — "nothing configured" and
+// counter, no line. That is AGENTS.md's rule verbatim — "nothing configured" and
 // "checked, and fine" must never look the same — and it lands on the layer that
 // is the last thing able to notice a mis-booked position, a fill the websocket
 // missed, or an execution posted to the wrong account.

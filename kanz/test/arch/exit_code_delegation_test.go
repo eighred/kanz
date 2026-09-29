@@ -46,7 +46,7 @@ import (
 // reads exitCode 0 / reason "Completed" for both, so
 // kube_pod_container_status_last_terminated_reason{reason="Error"} never fires.
 // The benign case is the most common event in the cluster, so the failure hides
-// inside it. CLAUDE.md's rule, applied to shutdown: "crashed" and "shut down
+// inside it. AGENTS.md's rule, applied to shutdown: "crashed" and "shut down
 // cleanly" must never look the same.
 //
 // THE EXIT-CODE VOCABULARY the delegate function returns:

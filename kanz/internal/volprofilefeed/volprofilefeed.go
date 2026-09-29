@@ -18,7 +18,7 @@
 //
 // # WHY A FACT, AND NOT A QUERY
 //
-// CLAUDE.md's rule is "everything is event-driven; state changes flow as FACTs on
+// AGENTS.md's rule is "everything is event-driven; state changes flow as FACTs on
 // the bus; nothing polls", and it is the right answer here for three reasons that
 // are specific rather than stylistic.
 //

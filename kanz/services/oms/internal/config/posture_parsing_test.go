@@ -17,7 +17,7 @@ import (
 // "TRUE" is what a spreadsheet exports, and `value: |` in YAML keeps the newline.
 // Each of them silently disarmed a deny-by-default control on the capital path.
 //
-// env.Bool refuses a value strconv.ParseBool cannot read, which is CLAUDE.md's
+// env.Bool refuses a value strconv.ParseBool cannot read, which is AGENTS.md's
 // rule that a misconfiguration surfaces as a refusal to start rather than a
 // default that looks healthy. These tests pin all three halves of that: the
 // spellings that must arm, the values that must refuse, and the absence that

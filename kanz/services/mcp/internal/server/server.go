@@ -36,7 +36,7 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 //
 // It is DELIBERATELY NOT the copilot's governed.Client. That client is one
 // service's projection of the risk read surface; this plane projects its own,
-// narrower, because CLAUDE.md requires MCP be "server-side filtered and
+// narrower, because AGENTS.md requires MCP be "server-side filtered and
 // projected" rather than handing an agent whatever a domain API returns.
 type Reader interface {
 	// Measures returns the portfolio's risk measures, already projected to what

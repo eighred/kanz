@@ -16,7 +16,7 @@ import (
 // MCP IS AN AGENT-FACING READ PLANE, AND THE IMPORT GRAPH IS WHERE THAT IS TRUE
 // OR NOT (#743).
 //
-// CLAUDE.md states three boundaries for any MCP surface, and calls each one
+// AGENTS.md states three boundaries for any MCP surface, and calls each one
 // worth a guard:
 //
 //  1. It must never receive, expose, store or proxy a venue credential.
@@ -128,7 +128,7 @@ func TestTheMCPPlaneCannotReachACapitalOrVenueCapability(t *testing.T) {
 	if len(breaches) > 0 {
 		sort.Strings(breaches)
 		t.Errorf("%d import(s) put a capital or venue capability within reach of the MCP plane: %v.\n"+
-			"CLAUDE.md: MCP is read-only, deny-by-default, and NOT the venue transport — it may not "+
+			"AGENTS.md: MCP is read-only, deny-by-default, and NOT the venue transport — it may not "+
 			"place, cancel or amend orders, may not call a venue, and may not hold a credential. An "+
 			"import is how that becomes possible, and it arrives before the tool that uses it. If "+
 			"this plane genuinely needs one of these, that is a decision with its own issue (#743 "+

@@ -35,7 +35,7 @@ import (
 // deliberately identical orders are a normal thing for a fund to send, and
 // silently collapsing them is a worse failure than refusing an ambiguous one.
 //
-// So the unsafe combination is refused, which is CLAUDE.md's "fail loudly,
+// So the unsafe combination is refused, which is AGENTS.md's "fail loudly,
 // never silently" — the client learns its order was NOT placed and is told the
 // two ways to make it safe, instead of the platform quietly placing two.
 const submitBodyNoID = `{"portfolioId":"pf1","instrumentId":"AAPL","side":"SIDE_BUY",` +

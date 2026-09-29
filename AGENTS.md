@@ -330,7 +330,7 @@ in git history, or in claude-mem.
 **That extends to project state, and it is not negotiable.** Do not add
 `project-state.md`, progress files, status files, roadmap files, session notes or
 scratchpad documents — not under `docs/`, not anywhere. The persistent record is:
-CLAUDE.md for stable rules, **Issues** for discovered work, blockers, deferred
+AGENTS.md for stable rules, **Issues** for discovered work, blockers, deferred
 work and decisions, **PRs** for implementation and verification history, and git
 history for the code. A status file is a fifth answer that goes stale the day
 after it is written, and this repository has already deleted 38 plan files and an
@@ -344,7 +344,7 @@ conversation. Reference the issue from the PR so discovery → implementation �
 verification stays connected.
 
 **Starting a session, read the repository rather than the last transcript**:
-CLAUDE.md, `git status`, the current branch, open PRs, open Issues, and main's
+AGENTS.md, `git status`, the current branch, open PRs, open Issues, and main's
 latest commit. Then pick the highest-priority unfinished issue. A previous
 conversation is not state.
 

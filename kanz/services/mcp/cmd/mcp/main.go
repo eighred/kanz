@@ -79,7 +79,7 @@ func run() int {
 	//
 	// A missing policy file yields an authorizer that denies every action, so a
 	// deployment that forgot the ConfigMap serves NO tenant's data rather than
-	// every tenant's. That is the deny-by-default posture CLAUDE.md requires of
+	// every tenant's. That is the deny-by-default posture AGENTS.md requires of
 	// this plane specifically, and it is the direction a misconfiguration must
 	// fail in when the thing being served is somebody's book.
 	authorizer, err := loadAuthorizer(cfg.PolicyFile, logger)

@@ -14,7 +14,7 @@ import (
 // It was two maps. PreTradeGate.firstTime and MandateRegistry.warnOnce were the
 // same eleven lines twice, and when the first of them turned out to be keyed by
 // something a caller supplies (#814), only one of the two copies would have been
-// repaired. That is the failure mode CLAUDE.md names outright — a copied helper
+// repaired. That is the failure mode AGENTS.md names outright — a copied helper
 // is how a fix stops spreading — and it is the same argument middleware.bucketSet
 // makes one service out, where two leaking token-bucket maps became one type with
 // the eviction discipline written once.

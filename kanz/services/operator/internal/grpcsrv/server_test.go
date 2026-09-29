@@ -369,7 +369,7 @@ func TestAddNodeSeparatesADrainFromAnEstateThatCanNeverSchedule(t *testing.T) {
 
 // CANNOT-TELL REFUSES. If the node inventory cannot be read, "will this schedule?" has
 // no answer, and an unanswered question that proceeds is the default that looks healthy
-// — the exact shape CLAUDE.md refuses. It must not be Aborted either: nothing is known
+// — the exact shape AGENTS.md refuses. It must not be Aborted either: nothing is known
 // to be drained, and 409 would send the operator to uncordon a node that is fine.
 func TestAddNodeRefusesWhenSchedulabilityCannotBeDetermined(t *testing.T) {
 	sp := &stubProvisioner{

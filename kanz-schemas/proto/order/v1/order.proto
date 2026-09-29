@@ -277,7 +277,7 @@ message ExecutionSchedule {
   // So the profile is pinned once, at admission, and every later derivation
   // resolves THAT version: the child-admission check, the driver tick, and the
   // same pod after a restart. The pin also makes the order auditable in the sense
-  // CLAUDE.md requires — "which venue capability was used" extends to which
+  // AGENTS.md requires — "which venue capability was used" extends to which
   // measured shape the desk's VWAP was sized against, and the version addresses
   // an immutable one.
   //

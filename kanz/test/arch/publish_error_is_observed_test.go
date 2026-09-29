@@ -19,7 +19,7 @@ import (
 // used it on every other failure path in the same file; neither used it here,
 // and there was no counter. So a subject the broker refused on every tick
 // produced the same observable estate as an exchange with nothing to report —
-// no line, no series, no difference. That is CLAUDE.md's rule verbatim:
+// no line, no series, no difference. That is AGENTS.md's rule verbatim:
 // "nothing configured" and "checked, and fine" must never look the same.
 //
 // The CONSEQUENCE was contained, and the guard is not claiming otherwise. The

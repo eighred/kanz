@@ -6,7 +6,7 @@
 # there is no second list to keep in step by hand. That is deliberate — it used
 # to restate these four dependencies inline at :39-40 while COPYing pyproject.toml
 # into the image without ever installing from it, which is two lists of the same
-# thing and the `secret()` shape CLAUDE.md warns about.
+# thing and the `secret()` shape AGENTS.md warns about.
 #
 # TO REGENERATE (from the repository root, network required):
 #

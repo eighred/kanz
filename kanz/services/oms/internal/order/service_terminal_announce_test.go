@@ -77,7 +77,7 @@ func TestSubmit_ResumesInterruptedFillAnnouncement_FillFactFails(t *testing.T) {
 	// A capturing logger, because the SIGNAL is part of the behaviour here.
 	// completeTerminalOutcome logs at ERROR that the fill is unrecoverable, and
 	// that line is what an operator would page on. Emitting it on a successful
-	// recovery is CLAUDE.md's "nothing configured and checked-and-fine must never
+	// recovery is AGENTS.md's "nothing configured and checked-and-fine must never
 	// look the same", pointed the other way: an alert that fires on every healthy
 	// recovery stops being read.
 	logs := &captureHandler{}

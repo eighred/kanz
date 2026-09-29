@@ -6,7 +6,7 @@ package ingest
 // on the decoded message before any Decimal reaches dec.FromProto. What could not
 // be shown was this issue's own wording — "proven against a real broker" —
 // because fakeBus does not validate envelopes and therefore accepts what a real
-// broker rejects (CLAUDE.md), so a green unit suite is explicitly not the proof.
+// broker rejects (AGENTS.md), so a green unit suite is explicitly not the proof.
 //
 // This drives the OMS black-box over a real NATS, exactly as the M1 loop test
 // beside it does, and for the same reason: the isolation invariant forbids

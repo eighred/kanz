@@ -16,7 +16,7 @@
 //
 // This package exists so those two states are told apart, and it lives here
 // rather than in each main because it was otherwise fifteen lines of identical
-// prose in two composition roots — the copied-helper shape CLAUDE.md names as
+// prose in two composition roots — the copied-helper shape AGENTS.md names as
 // how a fix stops spreading.
 package balancerecon
 

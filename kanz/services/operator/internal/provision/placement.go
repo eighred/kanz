@@ -23,7 +23,7 @@ import (
 // bootstrap SSH key and K3S_TOKEN mounted on a pod that would never start, because the
 // only node its nodeSelector admits was cordoned by the drain they had started five
 // minutes earlier. Nothing in the answer, in ListProvisions, or in the logs named the
-// drain. That is exactly the failure CLAUDE.md's "nothing configured and checked-and-fine
+// drain. That is exactly the failure AGENTS.md's "nothing configured and checked-and-fine
 // must never look the same" rule is about, one level up: accepted-and-doomed looked
 // identical to accepted-and-working.
 //

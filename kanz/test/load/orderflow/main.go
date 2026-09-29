@@ -26,7 +26,7 @@
 // routed to a venue.
 //
 // THE ONLY THING SIMULATED IS THE EXCHANGE, and the harness REFUSES TO RUN unless
-// that is true (see preflight.go). Every control on CLAUDE.md's order path runs;
+// that is true (see preflight.go). Every control on AGENTS.md's order path runs;
 // what does not run is the venue adapter's exchange REST/WS hop, because a load
 // test may not place real orders. That is the honest boundary of the number this
 // produces: it is an ADMISSION capacity, not an execution capacity, and the

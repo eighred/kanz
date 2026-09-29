@@ -44,7 +44,7 @@ import (
 // screeningPosition is one holding, with its numbers as decimal STRINGS.
 //
 // Strings rather than JSON numbers because these are money and quantity, and
-// CLAUDE.md is explicit that neither is ever a float. ParseProtoExact preserves
+// AGENTS.md is explicit that neither is ever a float. ParseProtoExact preserves
 // every digit or refuses before classification; rounding could erase a small
 // excluded holding and wrapping could fabricate a large holding's value.
 type screeningPosition struct {

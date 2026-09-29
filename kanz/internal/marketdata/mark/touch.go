@@ -17,7 +17,7 @@ import (
 //
 // So the two legs are retained here rather than recomputed anywhere else. The
 // alternative — a second fold of the same subjects, in the OMS, to hold bid and
-// ask — is the shape CLAUDE.md names: one concept, two implementations, and the
+// ask — is the shape AGENTS.md names: one concept, two implementations, and the
 // first divergence is whichever of the two nobody remembers to fix. A leverage
 // cap checked against one feed and a spread measured against another would give
 // two answers about the same instant for reasons no operator could see.

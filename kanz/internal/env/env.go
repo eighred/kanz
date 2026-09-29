@@ -3,7 +3,7 @@
 //
 // # Why it exists
 //
-// CLAUDE.md names the shape it ends: "A copied helper is how a fix stops
+// AGENTS.md names the shape it ends: "A copied helper is how a fix stops
 // spreading: 17 services each had their own secret() and 15 were wrong while 2
 // were right." That one was repaired and guarded. Its siblings in the SAME FILES
 // were never touched, and they had grown larger than the original — 40 copies of
@@ -156,7 +156,7 @@ func SplitList(s string) []string {
 // reason the function returns one. Silently falling back leaves a service on a
 // schedule the operator did not choose while the deployment reports a clean
 // start — "nothing configured" and "checked, and fine" looking the same, which is
-// the rule CLAUDE.md states and the shape this package exists to end.
+// the rule AGENTS.md states and the shape this package exists to end.
 //
 // It mattered most where it was least visible. datamaster parsed five intervals
 // through a swallowing copy, two of which — DATAMASTER_DUAL_CONTROL_TTL and

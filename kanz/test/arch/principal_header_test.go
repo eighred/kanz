@@ -27,7 +27,7 @@ import (
 // plus a sixth lowercase copy in copilot's lineage client. Each carried its own
 // enforcement, and they had already begun to diverge: wealth and datamaster
 // (#222) answered a wrong-tenant caller with a no-oracle 404, while audit and
-// tv-sync predated that reasoning. CLAUDE.md names the end state of this exactly:
+// tv-sync predated that reasoning. AGENTS.md names the end state of this exactly:
 // "17 services each had their own secret() and 15 were wrong while 2 were right".
 //
 // The copies were not laziness. The canonical constants lived under

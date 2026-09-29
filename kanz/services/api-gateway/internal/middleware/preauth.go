@@ -35,7 +35,7 @@ import (
 // request and every attempt lands in a fresh bucket, while the metrics show a
 // wide spread of well-behaved clients.
 //
-// CLAUDE.md licenses the reverse trust, not this one: upstreams trust the
+// AGENTS.md licenses the reverse trust, not this one: upstreams trust the
 // gateway's X-Kanz-Principal-* headers because a NetworkPolicy makes the gateway
 // their only reachable caller. Nothing makes ingress-nginx the gateway's only
 // reachable caller — the observability namespace reaches :8080, and web-bff
@@ -73,7 +73,7 @@ import (
 //
 // # ONE PROCESS, NOT SHARED STATE, AND THAT IS THE RIGHT UNIT
 //
-// The bucket is per-replica (CLAUDE.md "best-effort, per-process"). The quantity
+// The bucket is per-replica (AGENTS.md "best-effort, per-process"). The quantity
 // being bounded is the CPU of THIS pod: each replica verifies its own HMACs and
 // its own tokens, so a per-pod budget is the honest unit and a shared one would
 // have to be divided by a replica count nothing here knows. A shared backend

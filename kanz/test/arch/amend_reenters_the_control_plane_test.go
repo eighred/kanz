@@ -22,7 +22,7 @@ import (
 // about compliance and does not cover an order resting in PENDING_NEW or
 // ACCEPTED. An order for 100 cleared the mandate, an amend raised it to
 // 1,000,000, and the startup sweep routed the amended size past every control
-// CLAUDE.md names as admission control.
+// AGENTS.md names as admission control.
 //
 // The repair is a re-entry: handleAmend builds the command the amended order
 // would be and asks the same three seams submit asks. The property worth guarding

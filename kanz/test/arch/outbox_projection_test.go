@@ -11,7 +11,7 @@ package arch
 // number of destinations".
 //
 // That failure is reachable ONLY on a machine with TEST_POSTGRES_URL set. Every
-// Postgres-gated test in this repository SKIPS SILENTLY without it (CLAUDE.md
+// Postgres-gated test in this repository SKIPS SILENTLY without it (AGENTS.md
 // says so, and dozens of files report `ok` while asserting nothing), so a
 // developer box, `go build`, `go vet` and golangci-lint are all green on a
 // projection that cannot execute. The first thing to find out would be the OMS
