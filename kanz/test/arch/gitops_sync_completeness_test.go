@@ -33,7 +33,7 @@ import (
 // That is the failure mode this guard exists for. Not a tree that is
 // deliberately unsynced — several legitimately are — but a tree whose status
 // nobody stated, where "decided against" and "never considered" look identical.
-// CLAUDE.md's rule is the general form: "nothing configured" and "checked, and
+// AGENTS.md's rule is the general form: "nothing configured" and "checked, and
 // fine" must never look the same.
 //
 // # What it checks

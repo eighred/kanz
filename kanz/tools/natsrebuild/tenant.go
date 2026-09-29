@@ -20,7 +20,7 @@ import (
 // services/archiver/internal/ where Go's scoping put it out of reach — and it was
 // guarded by a test that read the archiver's source and failed on divergence.
 // That guard worked, but it protected a duplicate rather than removing one. This
-// tool becoming the second consumer is exactly the trigger CLAUDE.md names for
+// tool becoming the second consumer is exactly the trigger AGENTS.md names for
 // promoting shared code to kanz/internal/, so the package moved and both sides
 // now call the same function.
 const SystemTenant = topic.SystemTenant

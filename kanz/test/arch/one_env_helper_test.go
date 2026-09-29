@@ -15,7 +15,7 @@ import (
 //
 // # What went wrong without it
 //
-// CLAUDE.md names the shape: "A copied helper is how a fix stops spreading: 17
+// AGENTS.md names the shape: "A copied helper is how a fix stops spreading: 17
 // services each had their own secret() and 15 were wrong while 2 were right."
 // That one was repaired and is guarded. Its siblings in the SAME FILES were
 // never touched, and had grown LARGER than the original — 40 copies of envOr in

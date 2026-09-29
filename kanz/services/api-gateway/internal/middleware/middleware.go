@@ -128,7 +128,7 @@ func rateKey(r *http.Request) string {
 // Redis-backed one, exactly as risk-engine and webhook-ingest already do.
 //
 // A duplicate this pod cannot answer from its body cache is REFUSED with 409,
-// not executed. That is the fail-loud choice CLAUDE.md asks for: the client
+// not executed. That is the fail-loud choice AGENTS.md asks for: the client
 // learns its retry was not run, instead of the platform placing a second order.
 //
 // # THE CLAIM STORE IS A PARAMETER, AND THERE IS NO CONVENIENCE TWIN

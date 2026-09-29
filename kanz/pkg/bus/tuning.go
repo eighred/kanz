@@ -166,7 +166,7 @@ const (
 // alone. The fix there was a budget local to that handler. This is the same
 // budget where it belongs: the delivery contract is owned by the layer that owns
 // AckWait, and a per-handler copy in twenty services is the `secret()` pattern
-// CLAUDE.md names — 17 copies, 15 of them wrong.
+// AGENTS.md names — 17 copies, 15 of them wrong.
 //
 // # Why three quarters, and why a FRACTION rather than a constant
 //
@@ -346,7 +346,7 @@ const tickSubjectPrefix = "market."
 // WHY THE TABLE LIVES HERE AND NOT AT EACH COMPOSITION ROOT. Twenty-odd
 // binaries build a bus.NATSConfig. A per-service knob would be twenty copies of
 // the same three numbers, and the copies are how a fix stops spreading — the
-// `secret()` lesson in CLAUDE.md, where 17 services each had their own and 15
+// `secret()` lesson in AGENTS.md, where 17 services each had their own and 15
 // were wrong. Resolving from the subject means a service gets the right
 // contract by subscribing, with nothing to wire and nothing to forget.
 //

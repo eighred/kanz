@@ -30,7 +30,7 @@
 // makes that promotion mandatory rather than stylistic: a package under
 // services/web-bff/internal is importable only from services/web-bff, so the
 // alternative to moving it is a second copy — and a copied helper is how a fix
-// stops spreading (CLAUDE.md). The two callers face the same question with two
+// stops spreading (AGENTS.md). The two callers face the same question with two
 // different edges in front of them (cloudflared for the BFF, ingress-nginx for
 // the gateway), which is exactly why the trusted set is configuration and not a
 // constant in here.

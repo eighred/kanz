@@ -19,7 +19,7 @@ import (
 // server exists, because an MCP server needs exactly it and a second copy is how
 // a fix stops spreading. It was kept inside services/copilot until services/mcp
 // existed, so the promotion arrived WITH its second consumer rather than ahead
-// of one — CLAUDE.md's rule, and the reason moving it was a file move.
+// of one — AGENTS.md's rule, and the reason moving it was a file move.
 //
 // EVERY TEST BELOW CONSTRUCTS THE GATE DIRECTLY: no Registry, no governed
 // client, no tool definitions, and nothing from either service. That is the

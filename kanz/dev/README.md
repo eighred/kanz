@@ -9,7 +9,7 @@ portfolio. `make help` lists every target.
 - Go (see `go.mod` for the version), Docker, and [buf](https://buf.build/docs/installation).
 - The repo expects `kanz/` and `kanz-schemas/` as **sibling** directories — the
   Go module `replace`s the schema SDK to `../kanz-schemas/gen/go` (EVT-15a).
-- **On Windows, read CLAUDE.md's "Windows environment" section first.** A
+- **On Windows, read AGENTS.md's "Windows environment" section first.** A
   `GOTMPDIR` outside `%TEMP%`, `GOFLAGS`, build tags and the LF line-ending rule
   are required there, and skipping them makes `go test` fail at random while the
   suite silently under-runs.

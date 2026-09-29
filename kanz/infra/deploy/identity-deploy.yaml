@@ -4,7 +4,7 @@
 #
 # # This service is the one that is NOT behind the gateway
 #
-# CLAUDE.md's trust model — "upstreams trust the X-Kanz-Principal-* headers only
+# AGENTS.md's trust model — "upstreams trust the X-Kanz-Principal-* headers only
 # because a NetworkPolicy makes the gateway their only reachable caller" — does
 # NOT apply here, permanently. /login and /invites/redeem exist to be reached by
 # people who hold no token; that is the whole purpose of the service. So it takes

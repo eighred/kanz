@@ -32,7 +32,7 @@ breaking:
     # way, or retyping BondTerms.coupon_frequency are all breaking under it. The
     # remaining alternatives were duplicating BondTerms into contract.proto, or
     # storing two message types in one column. Both trade a one-line exception
-    # for a second definition of one concept, which is the thing CLAUDE.md's
+    # for a second definition of one concept, which is the thing AGENTS.md's
     # one-implementation rule exists to prevent.
     #
     # WHY THE MOVE WAS NEEDED: contract.proto had to import fixed_income.proto to

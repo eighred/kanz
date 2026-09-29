@@ -24,7 +24,7 @@ import (
 //
 // So the seam was an indirection with exactly ONE possible implementation, whose
 // justification did not hold, and which a composition root had to supply before
-// a BusFailSink could exist at all. CLAUDE.md's rule is one implementation per
+// a BusFailSink could exist at all. AGENTS.md's rule is one implementation per
 // concept; this is that one implementation, in the package that owns the type.
 //
 // # It does not arm anything

@@ -33,7 +33,7 @@ func IsDLQSubject(subject string) bool { return strings.HasPrefix(subject, dlqSu
 // services/archiver independently grew its own near-miss spelling of the same
 // idea — `Kanz-DLQ-Subject` where this package writes
 // `Kanz-DLQ-Original-Subject`. Nothing caught it because nothing read either
-// one. That is the `secret()` shape from CLAUDE.md, caught one consumer earlier
+// one. That is the `secret()` shape from AGENTS.md, caught one consumer earlier
 // than usual. #285 migrated the archiver onto these constants and deleted its
 // third field, `Kanz-DLQ-Reason`, whose two values were both ClassTerminal.
 //

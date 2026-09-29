@@ -2,7 +2,7 @@
 //
 // WITHOUT THIS FILE THE BAR STORE HAS NO COVERAGE ON A BARE CHECKOUT. Every
 // other bar test is gated on TEST_POSTGRES_URL and SKIPS when it is unset — the
-// trap CLAUDE.md names — and the ingest tests run against a fake writer, not a
+// trap AGENTS.md names — and the ingest tests run against a fake writer, not a
 // store. So on a clean clone the entire OHLCV feature would report ok with not
 // one line of either store executed.
 //

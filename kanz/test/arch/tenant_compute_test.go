@@ -332,7 +332,7 @@ var tenantctlComputeKafkaSAs = regexp.MustCompile(`(?m)^: "\$\{COMPUTE_KAFKA_SAS
 // auto-create is disabled, so an ungranted principal cannot create or write
 // those topics: the pod comes up Ready, subscribes, and NACKs every event
 // forever with nothing reaching the durable log. That is a tenant trading
-// against a store that is not backed up — the one ordering error CLAUDE.md says
+// against a store that is not backed up — the one ordering error AGENTS.md says
 // outlives any issue.
 //
 // It also fails the other way: a name in the shell list that tenantgen does not

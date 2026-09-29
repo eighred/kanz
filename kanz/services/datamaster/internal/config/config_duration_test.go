@@ -14,7 +14,7 @@ import (
 // parse error and returned the default, so a typo left this service on a
 // schedule the operator did not choose while the deployment reported a clean
 // start — "nothing configured" and "checked, and fine" looking the same, which
-// is the rule CLAUDE.md states.
+// is the rule AGENTS.md states.
 //
 // TWO OF THE FIVE BOUND AN AUTHORIZATION WINDOW. DATAMASTER_DUAL_CONTROL_TTL is
 // how long a dual-control proposal stays approvable and

@@ -157,7 +157,7 @@ func (h *Handler) refuseIfHalted(w http.ResponseWriter) bool {
 // deliberately identical orders, and a fund sending the same order twice on
 // purpose is ordinary. Between silently placing two orders and silently placing
 // none, this path takes neither — it refuses in the client's own response, and
-// names both remedies so the refusal is actionable. That is CLAUDE.md's
+// names both remedies so the refusal is actionable. That is AGENTS.md's
 // fail-loudly rule on the one path where the silent alternative spends capital.
 //
 // A READ-ONLY GATEWAY IS EXEMPT, for the reason refuseIfHalted gives one line

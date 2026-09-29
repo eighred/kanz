@@ -23,7 +23,7 @@ import (
 // projection, not a request-time computation — so the classification a mandate
 // needs is already resolved, in another service's database, behind an
 // authenticated read. Reproducing survivorship in each consumer would be the
-// second implementation of the concept CLAUDE.md names as the way a fix stops
+// second implementation of the concept AGENTS.md names as the way a fix stops
 // spreading.
 //
 // # Identity on this hop

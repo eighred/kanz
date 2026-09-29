@@ -39,7 +39,7 @@ type Info struct {
 //
 // A bool cannot hold that difference, and a provenance service in which "I have
 // no record" and "there is no record" read the same has failed at the only thing
-// it does (CLAUDE.md: "'nothing configured' and 'checked, and fine' must never
+// it does (AGENTS.md: "'nothing configured' and 'checked, and fine' must never
 // look the same"). String-valued so it crosses the API as itself, the same shape
 // as governance.Sensitivity in this service.
 type Lookup string

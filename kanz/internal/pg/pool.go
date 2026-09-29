@@ -293,7 +293,7 @@ func NewTenantPool(ctx context.Context, dsn, tenant string) (*pgxpool.Pool, erro
 		// the only ways to ask — rolsuper, rolbypassrls, pg_roles, pg_has_role —
 		// returned zero hits in any .go file.
 		//
-		// The failure it prevents is the one CLAUDE.md's standards forbid by name:
+		// The failure it prevents is the one AGENTS.md's standards forbid by name:
 		// a Vault entry written with the wrong role produces a service that starts
 		// cleanly, passes readiness, sets app.tenant_id on every connection, logs
 		// nothing unusual, and serves every tenant's rows to every tenant.

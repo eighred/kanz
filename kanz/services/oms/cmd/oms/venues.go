@@ -115,7 +115,7 @@ func newVenueCapabilityCounters(reg prometheus.Registerer) venueCapabilityCounte
 		// dial-time signal at all: DeclaresMarginModes() existed and had zero
 		// callers, so an adapter with a silently open margin gate was
 		// indistinguishable from one that had been checked and was fine. That is
-		// the distinction CLAUDE.md says must never collapse.
+		// the distinction AGENTS.md says must never collapse.
 		//
 		// Its consequence is the most expensive of the four. An undeclared order
 		// type produces an order that does NOTHING; an inexpressible
@@ -147,7 +147,7 @@ func newVenueCapabilityCounters(reg prometheus.Registerer) venueCapabilityCounte
 // — and a log line is not a thing an alert, a dashboard, or a caller can read.
 // Every other venue signal on this process is a COUNTER OF GAPS, and all four sit
 // at zero for an OMS with NO VENUES AT ALL, which is exactly the collapse
-// CLAUDE.md forbids: "nothing configured" and "checked, and fine" read identically.
+// AGENTS.md forbids: "nothing configured" and "checked, and fine" read identically.
 // kanz_oms_unverified_venue_account_total == 0 means "every adapter proved its
 // account" on a live deployment and "there are no adapters" on a simulator, and
 // nothing distinguishes them.

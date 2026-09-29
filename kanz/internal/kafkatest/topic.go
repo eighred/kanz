@@ -5,7 +5,7 @@
 // created a topic and published immediately; one — tools/natsrebuild's
 // tenant_rebuild_integration_test.go — had worked out the correct wait, written
 // down the measurements, and kept them where nothing else could find them. That
-// is CLAUDE.md's secret() shape with the polarity reversed: the right
+// is AGENTS.md's secret() shape with the polarity reversed: the right
 // implementation existed and did not spread, so the wrong one kept being
 // rediscovered as a flaky test.
 //

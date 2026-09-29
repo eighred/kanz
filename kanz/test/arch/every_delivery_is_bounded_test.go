@@ -33,7 +33,7 @@ import (
 // per-order claim and one venue round-trip per child, all on one delivery,
 // against a 60s AckWait. It was fixed with a budget local to that one handler,
 // which is how the estate ends up with twenty copies of one number and nineteen
-// of them wrong — the `secret()` pattern CLAUDE.md names.
+// of them wrong — the `secret()` pattern AGENTS.md names.
 //
 // # What this checks
 //
