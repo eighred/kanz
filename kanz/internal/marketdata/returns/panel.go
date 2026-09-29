@@ -55,15 +55,13 @@ func (p *StoreReturnsProvider) DatedReturns(ctx context.Context, id string, asOf
 	if asOf.IsZero() || (s.Method != ReturnSimple && s.Method != ReturnLog) {
 		return s, errors.New("returns: explicit horizon and valid return convention required")
 	}
-	if window <= 0 {
-		window = p.cfg.Window
-	}
-	obs, err := p.store.History(ctx, store.Query{InstrumentID: id, Kind: p.cfg.Kind, End: asOf, AsOf: asOf})
+	limit, err := p.historyLimit(window)
 	if err != nil {
 		return s, err
 	}
-	if window < len(obs)-1 {
-		obs = obs[len(obs)-window-1:]
+	obs, err := p.store.History(ctx, store.Query{Limit: limit, InstrumentID: id, Kind: p.cfg.Kind, End: asOf, AsOf: asOf})
+	if err != nil {
+		return s, err
 	}
 	for i := 1; i < len(obs); i++ {
 		a, b := obs[i-1], obs[i]
