@@ -15,7 +15,7 @@ func settleDate() time.Time { return time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
 
 func fillFixture(id string) *orderpb.Fill {
 	return &orderpb.Fill{
-		FillId: id, OrderId: "O1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY,
+		FillId: id, OrderId: "O1", InstrumentId: "AAPL", Side: orderpb.Side_SIDE_BUY, VenueAccountId: "account-1",
 		Quantity: dnum(100), Price: dnum(150),
 		Fee: &commonpb.Money{Amount: dnum(5), CurrencyCode: "USD"},
 	}
@@ -23,7 +23,7 @@ func fillFixture(id string) *orderpb.Fill {
 
 func confFixture(fillID string) Confirmation {
 	return Confirmation{
-		ConfirmationID: "C-" + fillID, FillID: fillID, InstrumentID: "AAPL",
+		ConfirmationID: "C-" + fillID, FillID: fillID, InstrumentID: "AAPL", VenueAccountID: "account-1",
 		Side: orderpb.Side_SIDE_BUY, Quantity: big.NewRat(100, 1), Price: big.NewRat(150, 1),
 		Counterparty: "CP1", SettlementDate: settleDate(),
 	}
