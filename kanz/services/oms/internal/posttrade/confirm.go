@@ -115,16 +115,16 @@ func Reconcile(fills []*orderpb.Fill, confs []Confirmation, tol MatchTolerance) 
 	// all evidence so the desk can resolve it before any instruction is emitted.
 	byFill := make(map[string][]Confirmation, len(confs))
 	type identity struct{ counterparty, id string }
-	identities := make(map[identity]Confirmation, len(confs))
+	identities := make(map[identity]confirmationKey, len(confs))
 	identityConflict := make(map[identity]bool)
 	deliveries := make(map[confirmationKey]bool, len(confs))
 	for _, c := range confs {
 		key := identity{c.Counterparty, c.ConfirmationID}
-		if previous, ok := identities[key]; ok && !sameConfirmation(previous, c) {
+		delivery := confirmationEvidenceKey(c)
+		if previous, ok := identities[key]; ok && previous != delivery {
 			identityConflict[key] = true
 		}
-		identities[key] = c
-		delivery := confirmationEvidenceKey(c)
+		identities[key] = delivery
 		if !deliveries[delivery] {
 			byFill[c.FillID] = append(byFill[c.FillID], c)
 			deliveries[delivery] = true
@@ -209,18 +209,4 @@ func beyond(a, b, tolerance *big.Rat) bool {
 	}
 	diff := new(big.Rat).Abs(new(big.Rat).Sub(a, b))
 	return diff.Cmp(tolerance) > 0
-}
-
-func sameConfirmation(a, b Confirmation) bool {
-	return a.ConfirmationID == b.ConfirmationID && a.FillID == b.FillID &&
-		a.VenueAccountID == b.VenueAccountID && a.InstrumentID == b.InstrumentID &&
-		a.Side == b.Side && equalRat(a.Quantity, b.Quantity) && equalRat(a.Price, b.Price) &&
-		a.Counterparty == b.Counterparty && a.SettlementDate.Equal(b.SettlementDate)
-}
-
-func equalRat(a, b *big.Rat) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.Cmp(b) == 0
 }
