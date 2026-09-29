@@ -222,18 +222,13 @@ var darkPackageExempt = map[string]string{
 		"corporate_action_absence_is_stated_test.go binds this entry to the five places that tell " +
 		"the rest of the platform accounting folds corporate actions, so the claim and the " +
 		"exemption cannot drift apart in either direction.",
-	"services/oms/internal/posttrade": "#589 — the POST-01/PARITY-04 post-trade plane: confirmation " +
-		"matching, settlement instruction generation, T+N tracking and business-day fail aging. THE " +
-		"ESTATE FOR IT IS ALREADY PROVISIONED and that is the sharp part — infra/nats/" +
-		"bootstrap-job.yaml creates the SETTLEMENT stream and infra/nats/tenancy.yaml grants publish " +
-		"on settlement.instruction.fail, naming posttrade.BusFailSink by symbol — while no publisher " +
-		"was ever constructed, so that stream is permanently empty and reads as 'nothing failed'. It " +
-		"is blocked on a COUNTERPARTY confirmation feed: nothing here receives a confirmation from a " +
-		"broker, custodian or CSD, and SimSettlementVenue simulates the settlement-venue half only. " +
-		"NOTE WHAT WIRING THE CALENDAR ALONE WOULD NOT FIX, since #583 raised it as the small-change " +
-		"candidate: DetectFailsWithCalendar already consumes it, and there is no settlement dating " +
-		"anywhere else in the module to give it a second caller — what is dark is the plane, not the " +
-		"calendar inside it.",
+	"services/oms/internal/posttrade": "#1301 — the conditional confirmation/instruction/T+N " +
+		"lifecycle remains unwired. Current direct-spot adapters settle through venue execution " +
+		"evidence and accounting's settled ledger; a second instruction is not required (#589). " +
+		"The provisioned SETTLEMENT stream does not prove fail monitoring runs. OMS reports both " +
+		"stage wiring and applicability; the architecture guard rejects an unreviewed venue. " +
+		"Activate these helpers only for a supported convention requiring them, with durable " +
+		"evidence, authoritative status and business-day aging. SimSettlementVenue is not proof.",
 	"services/operator/internal/revocation": "#108 — the SOV-04 revocation ORDER (halt, then scale " +
 		"to zero, then purge Vault-CSI secrets) and the abort rule that stops on a failed halt. It " +
 		"has no production caller BY DESIGN, and this entry is the record of that decision rather " +

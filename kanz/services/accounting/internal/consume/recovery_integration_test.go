@@ -2,6 +2,7 @@ package consume_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -88,6 +89,11 @@ func TestRecoveredExecutionsBookOnceAndAcknowledgeThroughRealSpine(t *testing.T)
 	for _, account := range []string{"account-a", "account-b"} {
 		fill := &orderpb.Fill{FillId: "raw-7", VenueExecutionId: "7", OrderId: "order-" + account, InstrumentId: "BTC-USD", Venue: "BINANCE", VenueAccountId: account, Side: orderpb.Side_SIDE_BUY,
 			Quantity: &commonpb.Decimal{Coefficient: 1}, Price: &commonpb.Decimal{Coefficient: 100}, Fee: &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 1}, CurrencyCode: "USD"}, ExecutedAt: timestamppb.New(time.Unix(1700000000, 0))}
+		if account == "account-b" {
+			// Arrival order is not settlement order. An older recovered trade
+			// retains its venue execution time even after a later trade is booked.
+			fill.ExecutedAt = timestamppb.New(fill.ExecutedAt.AsTime().Add(-time.Hour))
+		}
 		digest, err := fillfact.ExecutionDigest(fill)
 		if err != nil {
 			t.Fatal(err)
@@ -157,6 +163,37 @@ func TestRecoveredExecutionsBookOnceAndAcknowledgeThroughRealSpine(t *testing.T)
 	if book.CashBalance("USD").Cmp(big.NewRat(-202, 1)) != 0 || book.Positions["BTC-USD"].Qty.Cmp(big.NewRat(2, 1)) != 0 {
 		t.Fatalf("cash=%v position=%v", book.CashBalance("USD"), book.Positions["BTC-USD"])
 	}
+	assertRecoveredSpotSettlement(t, journal, book, -202)
+	// A contradictory execution delivered over the real bus must not become
+	// a successful duplicate or change either the traded or settled book.
+	conflict := proto.Clone(original).(*orderpb.ExecutionRecovered)
+	conflict.Fill.Quantity.Coefficient = 2
+	conflict.Fill.Recovery.ExecutionDigest, err = fillfact.ExecutionDigest(conflict.Fill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := oms.Publish(ctx, bus.Event{Subject: fillfact.SubjectRecovered, EventType: fillfact.SubjectRecovered, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "order", PartitionKey: conflict.Fill.OrderId, EventTime: time.Now(), Payload: conflict}); err != nil {
+		t.Fatal(err)
+	}
+	conflictMessage, err := input.Next(jetstream.FetchMaxWait(5 * time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictEnvelope, conflictPayload, err := bus.Unframe(conflictMessage.Data())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := newFolder().Handle(ctx, conflictEnvelope, conflictPayload); !errors.Is(err, fillfact.ErrExecutionIdentityConflict) {
+		t.Fatalf("conflicting execution was not refused: %v", err)
+	}
+	if err := conflictMessage.Term(); err != nil {
+		t.Fatal(err)
+	}
+	journal, err = ledger.NewPostgres(pool).Journal(ctx, "fund")
+	if err != nil || len(journal) != 2 {
+		t.Fatalf("conflict changed durable journal: %d %v", len(journal), err)
+	}
+	assertRecoveredSpotSettlement(t, journal, ledger.Replay("fund", journal), -202)
 	// A later conflicting fee cannot hide behind successful deduplication.
 	changed := proto.Clone(original).(*orderpb.ExecutionRecovered)
 	changed.Fill.Fee.Amount.Coefficient = 2
@@ -238,5 +275,27 @@ func TestRecoveredExecutionsBookOnceAndAcknowledgeThroughRealSpine(t *testing.T)
 	book = ledger.Replay("fund", journal)
 	if book.CashBalance("USD").Cmp(big.NewRat(-203, 1)) != 0 || book.Positions["BTC-USD"].Qty.Cmp(big.NewRat(2, 1)) != 0 {
 		t.Fatalf("fee redelivery changed economics: cash=%v position=%v", book.CashBalance("USD"), book.Positions["BTC-USD"])
+	}
+	assertRecoveredSpotSettlement(t, journal, book, -203)
+}
+
+func assertRecoveredSpotSettlement(t *testing.T, journal []*ledger.Event, book *ledger.Book, cash int64) {
+	t.Helper()
+	if !book.SettlementBasisComplete() || book.SettledCash["USD"] == nil || book.SettledCash["USD"].Cmp(big.NewRat(cash, 1)) != 0 || book.SettledPositions["BTC-USD"] == nil || book.SettledPositions["BTC-USD"].Qty.Cmp(big.NewRat(2, 1)) != 0 {
+		t.Fatalf("spot settlement changed through restart/redelivery: complete=%v cash=%v positions=%v", book.SettlementBasisComplete(), book.SettledCash["USD"], book.SettledPositions)
+	}
+	accounts := map[string]bool{}
+	for _, entry := range journal {
+		var evidence orderpb.Fill
+		if err := proto.Unmarshal(entry.ExecutionEvidence, &evidence); err != nil {
+			t.Fatal(err)
+		}
+		if entry.SettlementBasis != ledger.SettlementSettled || !entry.SettlementDate.Equal(evidence.GetExecutedAt().AsTime()) || entry.VenueAccountID != evidence.GetVenueAccountId() {
+			t.Fatalf("settlement lost its venue evidence: %+v", entry)
+		}
+		accounts[entry.VenueAccountID] = true
+	}
+	if len(accounts) != 2 || !accounts["account-a"] || !accounts["account-b"] {
+		t.Fatalf("account identity collapsed: %v", accounts)
 	}
 }

@@ -25,7 +25,8 @@ import (
 // return MARGIN_MODE_UNSPECIFIED alone, the cash/spot regime — and spot on those
 // venues settles atomically with the match. So ledger.fillSettlement asserts
 // SettlementSettled at the execution time, nothing in this platform ever produces
-// a PENDING entry, and the settled book equals the traded book by construction.
+// a PENDING entry. Supported spot fill legs enter both bases at execution; cash,
+// accrual and corporate-action entries can still have an unknown settlement basis.
 //
 // WHY A GAUGE AND NOT A COMMENT. "This deployment books every trade as settled at
 // execution" and "this deployment tracks settlement and nothing is outstanding"
@@ -90,13 +91,13 @@ func settlementBasisPostures() map[ledger.SettlementBasis]settlementBasis {
 			what:     "ledger.fillSettlement, returning a future settlement date for a T+n venue",
 			why: "EVERY WIRED VENUE ADAPTER IS CRYPTO SPOT AND DECLARES IT: BinanceVenue.MarginModes " +
 				"and OKXVenue.MarginModes each return MARGIN_MODE_UNSPECIFIED alone, the cash/spot " +
-				"regime, and spot on both venues settles atomically with the match. So every entry " +
-				"this book folds settles at execution, the settled fold equals the traded fold, and " +
-				"nothing is ever traded-not-settled. The axis, the fold and the durable column are " +
+				"regime, and spot on both venues settles atomically with the match. Supported spot " +
+				"fills enter both bases at execution; other entry sources can retain an unknown " +
+				"settlement basis. The axis, the fold and the durable column are " +
 				"built and tested; what is missing is an instrument that needs them",
 			arm: "a venue adapter declaring a non-CASH margin mode or a T+n instrument family — then " +
 				"ledger.fillSettlement returns SettlementPending with the contractual date, and " +
-				"#589's confirmation plane has a column to write the custodian's answer into. " +
+				"#1301's deferred settlement plane has a column for authoritative settlement evidence. " +
 				"Fabricating a settlement date is NOT the fix (#345): a buying-power gate would " +
 				"spend against a date nobody established",
 		},
@@ -161,7 +162,7 @@ func seedSettlementBasisPosture(reg prometheus.Registerer, logger *slog.Logger, 
 	g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "kanz_accounting_settlement_basis_produced",
 		Help: "1 when something in this build produces a journal entry on this settlement basis, 0 " +
-			"when the book can fold it and nothing does. pending=0 means every entry settles at " +
+			"when the book can fold it and nothing does. pending=0 means supported spot fills settle at " +
 			"execution because every wired venue is crypto spot — a stated posture, not an error, " +
 			"and indistinguishable from a settled ladder without this series (#1043).",
 	}, []string{"basis"})
@@ -189,8 +190,8 @@ func seedSettlementBasisPosture(reg prometheus.Registerer, logger *slog.Logger, 
 		}
 		p := postures[b]
 		logger.Warn("accounting: NOTHING PRODUCES a journal entry on this settlement basis — the "+
-			"book folds it correctly and never receives one, so the settled view and the traded "+
-			"view are the same number and nothing says which one you are reading",
+			"book can fold it but currently receives none; this does not establish settlement "+
+			"for entries whose basis is unknown",
 			"basis", name, "producer", p.what, "why", p.why, "would_arm_it", p.arm,
 			"gauge", "kanz_accounting_settlement_basis_produced{basis=\""+name+"\"}=0")
 	}
@@ -205,10 +206,10 @@ func seedSettlementBasisPosture(reg prometheus.Registerer, logger *slog.Logger, 
 	// trust a buying-power refusal or a NAV struck on trade date, and Info is
 	// where it would be filtered out.
 	logger.Warn("accounting: NOT every settlement basis this book folds has a producer — every "+
-		"entry settles at execution, so the traded book and the settled book are the same "+
-		"number and no control can tell 'we own it' from 'we have merely bought it'",
+		"supported spot fill is booked as settled at execution; entries with an unknown "+
+		"basis remain unproven",
 		"produced", settlementBasisNames(producedBases), "not_produced", unproduced,
 		"consequence", "NAV, exposure, leverage, mandate headroom and buying power (internal/cashview) "+
-			"all read a book in which every trade is final at the instant it matched")
+			"must preserve the distinction between supported spot fills and entries with an unknown settlement basis")
 	return unproduced
 }

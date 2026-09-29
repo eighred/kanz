@@ -1319,16 +1319,17 @@ data:
                   # an analytic on the capital path.
                   "order.cost.attributed",
                   "risk.position.changed.>", "risk.position.venue.changed.>",
-                  # GRANTED, AND NOTHING PUBLISHES IT (#589). posttrade.BusFailSink
+                  # GRANTED, AND NOTHING PUBLISHES IT (#1301). posttrade.BusFailSink
                   # is defined and never constructed, so this grant is exercised by
                   # no process and the SETTLEMENT stream is empty everywhere. The
                   # grant stays — revoking it would make wiring the plane a
                   # tenancy change as well as a code change — but it must not be
                   # read as evidence that settlement fails are being reported. The
-                  # OMS composition root WARNs the posture at startup and exports
+                  # OMS composition root reports applicability and wiring separately:
                   # kanz_oms_settlement_plane_running{stage="fail_publication"}=0,
-                  # which is the only thing separating "not running on this
-                  # deployment" from "running, and nothing has failed".
+                  # kanz_oms_settlement_plane_applicability{status="not_required"}=1
+                  # for this build's direct-spot adapters. Their settlement evidence
+                  # reaches accounting directly; this grant is not launch readiness.
                   "settlement.instruction.fail",
                   # THE PRE-TRADE COMPLIANCE DECISION (#713). Every order this
                   # gate admits OR refuses is published as an
