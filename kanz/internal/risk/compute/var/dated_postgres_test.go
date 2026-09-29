@@ -103,7 +103,7 @@ func TestDatedRiskPanelThroughRealPostgres(t *testing.T) {
 	if dec.Float64Or(h.Value, 0) != 198.5 || dec.Float64Or(es.Value, 0) != 200 || h.Coverage.ExcludedCount != 0 {
 		t.Fatalf("VaR=%v ES=%v coverage=%+v", h.Value, es.Value, h.Coverage)
 	}
-	if h.Provenance.Params["panel_digest"] != panel.Digest {
+	if h.Provenance.InputDigest != panel.Digest {
 		t.Fatal("measure lost panel identity")
 	}
 	m, err := factormodel.Fit(ctx, factormodel.Config{Type: factormodel.Statistical, StatFactors: 2}, []string{"B", "A"}, day(8), factormodel.Providers{Returns: rp})
@@ -115,7 +115,7 @@ func TestDatedRiskPanelThroughRealPostgres(t *testing.T) {
 		t.Fatalf("factor covariance disagrees with dated reference: %+v", risk)
 	}
 	mc := MonteCarlo(Config{Draws: 100000, Seed: 17})(ctx, p, rp)
-	if mc.Provenance.Params["panel_digest"] != panel.Digest || math.Abs(dec.Float64Or(mc.Value, 0)-(50+2.326347874*math.Sqrt(65000.0/3))) > 4 {
+	if mc.Provenance.InputDigest != panel.Digest || math.Abs(dec.Float64Or(mc.Value, 0)-(50+2.326347874*math.Sqrt(65000.0/3))) > 4 {
 		t.Fatalf("MC disagrees with independent normal reference: %+v", mc)
 	}
 	dd := MaxDrawdownAmount(Config{})(ctx, p, rp)

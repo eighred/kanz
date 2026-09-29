@@ -2,6 +2,7 @@ package arch
 
 import (
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"path/filepath"
 	"sort"
@@ -207,6 +208,9 @@ import (
 // empty while four consumers read past it; the dead-entry arm below deletes the
 // entry for you the day a producer lands.
 var storedSeriesWithoutAProducerExempt = map[string]string{
+	"internal/marketdata/returns.DefaultReturnMethod": "#1293: a typed alias of ReturnLog, not a distinct stored convention. " +
+		"The dated provider produces the configured ReturnLog value. TestDefaultReturnMethodRemainsAnAlias " +
+		"binds this exemption to that exact source alias; a new default value requires fresh producer review.",
 	"internal/marketdata/store.PriceKindAdjustedClose": storedSeriesDarkPriceKind,
 	"internal/marketdata/store.PriceKindOpen":          storedSeriesDarkPriceKind,
 	"internal/marketdata/store.PriceKindVWAP":          storedSeriesDarkPriceKind,
@@ -304,6 +308,30 @@ type storedSeriesFamily struct {
 	carrier string // the struct whose field made it durable, for the message
 	members []string
 	zero    map[string]bool
+}
+
+// A default alias is not a second partition. Keep the named exemption exact:
+// changing its target or spelling a new value must reopen the producer audit.
+func TestDefaultReturnMethodRemainsAnAlias(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(moduleRoot(t), "internal/marketdata/returns/returns.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		v, ok := n.(*ast.ValueSpec)
+		if !ok || len(v.Names) != 1 || v.Names[0].Name != "DefaultReturnMethod" {
+			return true
+		}
+		if len(v.Values) == 1 {
+			target, ok := v.Values[0].(*ast.Ident)
+			found = ok && target.Name == "ReturnLog"
+		}
+		return false
+	})
+	if !found {
+		t.Fatal("default return convention changed; re-derive the stored-series alias exemption")
+	}
 }
 
 func TestEveryStoredSeriesValueHasAProducer(t *testing.T) {

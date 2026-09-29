@@ -219,16 +219,19 @@ func factorMeasure(ctx context.Context, providers FactorProviders, name v1.Measu
 func factorProvenance(model *factormodel.Model, name v1.MeasureName) v1.MeasureProvenance {
 	params := map[string]string{"factors": strconv.Itoa(len(model.Factors))}
 	for key, value := range model.InputProvenance {
-		params[key] = value
+		if key != "panel_digest" {
+			params[key] = value
+		}
 	}
 	if name == MeasureFactorVaR99 {
 		params["confidence"] = strconv.FormatFloat(factorVaRConfidence, 'f', -1, 64)
 	}
 	return v1.MeasureProvenance{
-		Method:    v1.MethodFactorModel,
-		ModelID:   model.ModelID,
-		ModelAsOf: model.AsOf,
-		Params:    params,
+		Method:      v1.MethodFactorModel,
+		ModelID:     model.ModelID,
+		ModelAsOf:   model.AsOf,
+		Params:      params,
+		InputDigest: model.InputProvenance["panel_digest"],
 	}
 }
 

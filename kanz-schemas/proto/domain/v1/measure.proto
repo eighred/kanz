@@ -121,6 +121,14 @@ message MeasureProvenance {
   // FACT, and a reader may group by them. Never per-position data,
   // never the inputs themselves.
   map<string, string> params = 4;
+
+  // Digest of the actual dated input panel. High-cardinality audit identity,
+  // deliberately separate from grouping parameters. Empty means undeclared.
+  string input_digest = 5;
+
+  // Absolute market value excluded from this panel calculation, in portfolio
+  // base currency. Absent means unreported/unrepresentable, never zero.
+  common.v1.Decimal excluded_gross = 6;
 }
 
 // InputCoverage records how much of the book one measure was actually

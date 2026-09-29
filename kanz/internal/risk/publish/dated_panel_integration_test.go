@@ -9,7 +9,16 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/bustest"
+	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/marketdata/returns"
+	"github.com/eighred/kanz/internal/marketdata/store"
+	v1 "github.com/eighred/kanz/internal/risk/api/v1"
+	"github.com/eighred/kanz/internal/risk/compute"
+	varmodel "github.com/eighred/kanz/internal/risk/compute/var"
+	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/publish"
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
+	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	factorpb "github.com/eighred/kanz/kanz-schemas-go/factor/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/nats-io/nats.go"
@@ -84,6 +93,57 @@ func TestDatedPanelProvenanceSurvivesRealJetStream(t *testing.T) {
 		t.Fatalf("durable artifact lost panel provenance: %v", snapshot.InputProvenance)
 	}
 	if err := msg.DoubleAck(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The portfolio's audit digest and excluded money also cross the real
+	// boundary in dedicated typed fields, never the grouping-parameter map.
+	bustest.EnsureSubjects(t, ctx, js, "DATED_MEASURES_"+suffix, []string{publish.EventTypeMeasuresComputed})
+	measureStream, err := bustest.StreamFor(ctx, js, publish.EventTypeMeasuresComputed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	measureConsumer, err := js.CreateConsumer(ctx, measureStream, jetstream.ConsumerConfig{Name: name + "-measures", FilterSubject: publish.EventTypeMeasuresComputed, DeliverPolicy: jetstream.DeliverNewPolicy, AckPolicy: jetstream.AckExplicitPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = js.DeleteConsumer(context.Background(), measureStream, name+"-measures") }()
+	prices := store.NewMemory()
+	for i, value := range []int64{100, 90, 100} {
+		at := baseTime.Add(time.Duration(i-2) * 24 * time.Hour)
+		if err := prices.Put(ctx, []store.Observation{{InstrumentID: "A", ObservationTime: at, KnowledgeTime: at, Kind: store.PriceKindClose, Price: &commonpb.Decimal{Coefficient: value}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	portfolio := domain.NewPortfolio("dated", "USD")
+	portfolio.SetAggregate(domain.AggregateUpdate{AsOf: baseTime, BaseCurrency: "USD"})
+	for id, value := range map[string]int64{"A": 1000, "MISSING": -500} {
+		portfolio.SetPosition(domain.Position{InstrumentID: domain.InstrumentID(id), MarketValue: &commonpb.Money{CurrencyCode: "USD", Amount: &commonpb.Decimal{Coefficient: value}}})
+	}
+	measure := varmodel.Historical(varmodel.Config{})(ctx, portfolio, returns.NewStoreReturnsProvider(prices, returns.ReturnsConfig{}))
+	set := domain.NewMeasureSet("dated", baseTime, map[v1.MeasureName]v1.Measure{compute.MeasureVaR99: measure})
+	if err := publisher.EmitMeasures(ctx, set, nil); err != nil {
+		t.Fatal(err)
+	}
+	message, err := measureConsumer.Next(jetstream.FetchMaxWait(5 * time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := bus.Unframe(message.Data())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record domainpb.RiskMeasureSet
+	if err := proto.Unmarshal(body, &record); err != nil {
+		t.Fatal(err)
+	}
+	if len(record.Measures) != 1 {
+		t.Fatal("missing measure")
+	}
+	provenance := record.Measures[0].GetProvenance()
+	if provenance.GetInputDigest() == "" || provenance.GetInputDigest() != measure.Provenance.InputDigest || dec.Float64Or(provenance.GetExcludedGross(), -1) != 500 || provenance.GetParams()["panel_digest"] != "" {
+		t.Fatalf("typed provenance was lost: %v", provenance)
+	}
+	if err := message.DoubleAck(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
