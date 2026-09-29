@@ -50,7 +50,7 @@ func boundedPostgres(t testing.TB) *Postgres {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	for _, name := range []string{"0001_price_history.sql", "0006_bounded_price_history.sql"} {
+	for _, name := range []string{"0001_price_history.sql"} {
 		sql, err := os.ReadFile(filepath.Join("..", "..", "..", "services", "market-data", "migrations", name))
 		if err != nil {
 			t.Fatal(err)

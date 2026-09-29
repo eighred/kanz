@@ -11,7 +11,7 @@ import (
 // BoundedHistoryTimeout caps database and pool waits even without a caller deadline.
 const BoundedHistoryTimeout = 5 * time.Second
 
-// The descending index feeds Unique lazily. LIMIT is above revision collapse,
+// The existing primary key scanned backward feeds Unique lazily. LIMIT is above revision collapse,
 // never on raw rows: multiple corrections cannot consume the requested window.
 const boundedHistorySQL = `SELECT observation_time, kind, price, currency_code, knowledge_time
  FROM (
