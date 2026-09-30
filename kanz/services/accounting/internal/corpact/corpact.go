@@ -30,6 +30,7 @@ const (
 // .CorporateAction. Cash factors are exact (*big.Rat); ratios are exact rationals
 // too (a 3:2 split is 1.5 exactly).
 type CorporateAction struct {
+	ledger.ActionLifecycle
 	ActionID     string
 	PortfolioID  string
 	Kind         Kind
@@ -54,28 +55,38 @@ type CorporateAction struct {
 // ToEntry builds the journal entry for the action. The entry is an
 // EntryCorporateAction whose Action the book folds against the position at the
 // ex-date; the entry is bitemporal (ExDate effective, AnnouncedAt knowledge).
-func (c CorporateAction) ToEntry() *ledger.Event {
-	return &ledger.Event{
-		EntryID:      "corpact:" + c.ActionID,
+func (c CorporateAction) ToEntry() (*ledger.Event, error) {
+	lifecycle := c.ActionLifecycle
+	lifecycle.ActionID = c.ActionID
+	e := &ledger.Event{
+		EntryID:      ledger.ActionEntryID(c.PortfolioID, c.ActionID, c.Revision),
 		PortfolioID:  c.PortfolioID,
 		Type:         ledger.EntryCorporateAction,
 		InstrumentID: c.InstrumentID,
 		Action: &ledger.Action{
-			Kind:     toLedgerKind(c.Kind),
-			Ratio:    c.Ratio,
-			PerUnit:  c.PerUnit,
-			Target:   c.Target,
-			Currency: c.Currency,
+			ActionLifecycle: lifecycle,
+			Kind:            toLedgerKind(c.Kind),
+			Ratio:           clone(c.Ratio),
+			PerUnit:         clone(c.PerUnit),
+			Target:          c.Target,
+			Currency:        c.Currency,
 		},
-		// SettlementBasis is deliberately left at ledger.SettlementUnknown (#1043):
-		// nothing announces a corporate action in this platform, and an announcement
-		// that did arrive would carry a pay date this type does not model. An
-		// unasserted basis keeps the action out of the settled book instead of
-		// claiming a dividend has been paid on the day it was declared.
+		// Settlement is derived only from confirmed payment evidence during replay.
 		Effective: c.ExDate,
 		Knowledge: c.AnnouncedAt,
 		SourceRef: c.ActionID,
 	}
+	if err := ledger.ValidateActionEntry(e); err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func clone(r *big.Rat) *big.Rat {
+	if r == nil {
+		return nil
+	}
+	return new(big.Rat).Set(r)
 }
 
 func toLedgerKind(k Kind) ledger.CorpActKind {

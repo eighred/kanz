@@ -129,7 +129,7 @@ func TestStockSplitConservesMarketValue(t *testing.T) {
 	}
 }
 
-func TestDividendPaysOnHeldQuantity(t *testing.T) {
+func TestLegacyDividendAccruesOnHeldQuantity(t *testing.T) {
 	b := NewBook("PF")
 	b.Apply(trade("t1", "AAPL", "100", "10", 1, 1))
 	div := &Event{
@@ -138,8 +138,8 @@ func TestDividendPaysOnHeldQuantity(t *testing.T) {
 		Effective: day(2), Knowledge: day(2),
 	}
 	b.Apply(div)
-	// cash = -1000 (the buy) + 100*0.5 = -950
-	if got := b.CashBalance("USD"); got.Cmp(big.NewRat(-950, 1)) != 0 {
+	// An unconfirmed dividend is accrued, never spendable cash.
+	if got := b.CashBalance("USD"); got.Cmp(big.NewRat(-1000, 1)) != 0 {
 		t.Fatalf("dividend cash: want -950 got %s", got.RatString())
 	}
 }

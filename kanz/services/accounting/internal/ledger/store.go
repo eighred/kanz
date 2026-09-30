@@ -77,10 +77,12 @@ var ErrNoSnapshot = errors.New("ledger: no snapshot")
 // and folds the journal directly; the snapshot only accelerates the
 // current-knowledge book.
 type Snapshot struct {
-	PortfolioID string
-	Positions   map[string]*Position
-	Cash        map[string]*big.Rat
-	Accrued     map[string]*big.Rat
+	NextEffective time.Time // checkpoint expires when this known economic effect becomes due
+	ActionCount   int64     // rejects a checkpoint computed before a concurrent action append
+	PortfolioID   string
+	Positions     map[string]*Position
+	Cash          map[string]*big.Rat
+	Accrued       map[string]*big.Rat
 	// Through is the knowledge watermark: every journal entry with Knowledge at or
 	// before Through is already folded into this snapshot.
 	Through time.Time
@@ -131,6 +133,8 @@ type Snapshot struct {
 // corrupt it.
 func (b *Book) Snapshot(through time.Time) *Snapshot {
 	s := &Snapshot{
+		NextEffective:    b.nextEffective,
+		ActionCount:      b.actionCount,
 		PortfolioID:      b.PortfolioID,
 		Positions:        make(map[string]*Position, len(b.Positions)),
 		Cash:             make(map[string]*big.Rat, len(b.Cash)),
@@ -180,6 +184,8 @@ func copyPositions(dst, src map[string]*Position) {
 // not re-apply entries already folded into the snapshot.
 func RestoreBook(s *Snapshot) *Book {
 	b := NewBook(s.PortfolioID)
+	b.actionCount = s.ActionCount
+	b.nextEffective = s.NextEffective
 	b.maxEffective = s.MaxEffective
 	copyPositions(b.Positions, s.Positions)
 	copyPositions(b.SettledPositions, s.SettledPositions)
@@ -215,7 +221,10 @@ const (
 	// FullScanNoSnapshot: the portfolio has no checkpoint yet. Expected for a
 	// new portfolio; SUSTAINED means the Snapshotter is not running or not
 	// keeping up.
-	FullScanNoSnapshot FullScanReason = "no_snapshot"
+	FullScanNoSnapshot     FullScanReason = "no_snapshot"
+	FullScanActionRevision FullScanReason = "corporate_action_revision"
+	FullScanFutureSnapshot FullScanReason = "future_snapshot"
+	FullScanDueSnapshot    FullScanReason = "due_snapshot"
 	// FullScanBackdatedTail: a checkpoint exists but the tail contains an entry
 	// effective BEFORE the checkpoint's fence, so resuming from it would not
 	// equal a replay. See Snapshot.MaxEffective.
@@ -239,17 +248,44 @@ const (
 // The second return value names why the bounded path was not taken, so a caller
 // can count it. An empty reason means the read was served from a checkpoint.
 func MaterializeCurrent(ctx context.Context, st Store, portfolioID string) (*Book, FullScanReason, error) {
+	if consistent, ok := st.(interface {
+		currentBook(context.Context, string, time.Time) (*Book, FullScanReason, error)
+	}); ok {
+		return consistent.currentBook(ctx, portfolioID, time.Now())
+	}
+	return materializeCurrentAt(ctx, st, portfolioID, time.Now())
+}
+
+// Checkpoint and tail must belong to one view. Otherwise a concurrently
+// invalidated checkpoint can be combined with a newer tail that omits the
+// backdated announcement responsible for invalidating it.
+func (m *MemoryStore) currentBook(ctx context.Context, portfolioID string, now time.Time) (*Book, FullScanReason, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return materializeCurrentAt(ctx, memoryReader{m: m}, portfolioID, now)
+}
+
+func materializeCurrentAt(ctx context.Context, st Store, portfolioID string, now time.Time) (*Book, FullScanReason, error) {
 	snap, err := st.LoadSnapshot(ctx, portfolioID)
 	if err != nil && !errors.Is(err, ErrNoSnapshot) {
 		return nil, "", err
 	}
 	if err != nil {
-		b, ferr := replayAll(ctx, st, portfolioID)
+		b, ferr := replayAll(ctx, st, portfolioID, now)
 		return b, FullScanNoSnapshot, ferr
 	}
 	if snap.MaxEffective.IsZero() {
-		b, ferr := replayAll(ctx, st, portfolioID)
+		b, ferr := replayAll(ctx, st, portfolioID, now)
 		return b, FullScanUnfencedSnapshot, ferr
+	}
+
+	if !snap.NextEffective.IsZero() && !now.Before(snap.NextEffective) {
+		b, ferr := replayAll(ctx, st, portfolioID, now)
+		return b, FullScanDueSnapshot, ferr
+	}
+	if snap.MaxEffective.After(now) {
+		b, ferr := replayAll(ctx, st, portfolioID, now)
+		return b, FullScanFutureSnapshot, ferr
 	}
 
 	// The bounded read: only what the checkpoint has not absorbed.
@@ -258,31 +294,33 @@ func MaterializeCurrent(ctx context.Context, st Store, portfolioID string) (*Boo
 		return nil, "", err
 	}
 	for _, e := range tail {
+		if e.Type == EntryCorporateAction {
+			b, ferr := replayAll(ctx, st, portfolioID, now)
+			return b, FullScanActionRevision, ferr
+		}
 		if e.Effective.Before(snap.MaxEffective) {
 			// A backdated entry cannot be folded onto a checkpoint (see
 			// Snapshot.MaxEffective). Pay for the replay; the Snapshotter's
 			// next pass rebuilds the fence and the next read is bounded again.
-			b, ferr := replayAll(ctx, st, portfolioID)
+			b, ferr := replayAll(ctx, st, portfolioID, now)
 			return b, FullScanBackdatedTail, ferr
 		}
 	}
 
 	b := RestoreBook(snap)
-	for _, e := range sortedFor(tail, time.Time{}, time.Time{}, false) {
-		b.Apply(e)
-	}
+	b.applyUntil(tail, now, time.Time{})
 	return b, "", nil
 }
 
 // replayAll is the unbounded fallback: the whole journal, folded from empty.
 // Correct at any journal size and unusable at a large one — every caller
 // records a FullScanReason so that cost is visible rather than assumed away.
-func replayAll(ctx context.Context, st Store, portfolioID string) (*Book, error) {
+func replayAll(ctx context.Context, st Store, portfolioID string, now time.Time) (*Book, error) {
 	events, err := st.Journal(ctx, portfolioID)
 	if err != nil {
 		return nil, err
 	}
-	return Replay(portfolioID, events), nil
+	return ReplayAsOf(portfolioID, events, now, time.Time{}), nil
 }
 
 // MemoryStore is the in-process Store. Goroutine-safe.
@@ -317,6 +355,16 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 		return err
 	}
 	owned := *e
+	if e.Action != nil {
+		a := *e.Action
+		if a.Ratio != nil {
+			a.Ratio = new(big.Rat).Set(a.Ratio)
+		}
+		if a.PerUnit != nil {
+			a.PerUnit = new(big.Rat).Set(a.PerUnit)
+		}
+		owned.Action = &a
+	}
 	owned.ExecutionEvidence = append([]byte(nil), e.ExecutionEvidence...)
 	if e.Quantity != nil {
 		owned.Quantity = new(big.Rat).Set(e.Quantity)
@@ -338,6 +386,26 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if e.Type == EntryCorporateAction {
+		if err := ValidateActionEntry(e); err != nil {
+			return err
+		}
+		if old := m.seen[e.EntryID]; old != nil {
+			if old.Action == nil || !sameActionEntry(e, old) {
+				return ErrActionConflict
+			}
+			return nil
+		}
+		var head *Event
+		for _, old := range m.journal[e.PortfolioID] {
+			if old.Action != nil && old.Action.ActionID == e.Action.ActionID && (head == nil || old.Action.Revision > head.Action.Revision) {
+				head = old
+			}
+		}
+		if _, err := checkActionRevision(e, head); err != nil {
+			return err
+		}
+	}
 	if fill != nil {
 		legacy := "fill:" + fill.GetFillId()
 		if legacy != e.EntryID && m.seen[legacy] != nil {
@@ -429,6 +497,11 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 	}
 	m.seen[e.EntryID] = e
 	m.journal[e.PortfolioID] = append(m.journal[e.PortfolioID], e)
+	if e.Type == EntryCorporateAction {
+		// The checkpoint is derived, never financial history. Only invalidate
+		// after the staged announcement/outbox succeeded, matching SQL rollback.
+		delete(m.snapshots, e.PortfolioID)
+	}
 	return nil
 }
 
@@ -478,6 +551,9 @@ func (r memoryReader) SaveSnapshot(context.Context, *Snapshot) error {
 }
 
 func (r memoryReader) LoadSnapshot(_ context.Context, portfolioID string) (*Snapshot, error) {
+	if r.pending != nil && r.pending.Type == EntryCorporateAction && r.pending.PortfolioID == portfolioID {
+		return nil, ErrNoSnapshot
+	}
 	snap, ok := r.m.snapshots[portfolioID]
 	if !ok {
 		return nil, ErrNoSnapshot
@@ -524,7 +600,7 @@ func (m *MemoryStore) StalePortfolios(_ context.Context, limit int) ([]string, e
 	for id, entries := range m.journal {
 		snap, ok := m.snapshots[id]
 		for _, e := range entries {
-			if !ok || e.Knowledge.After(snap.Through) {
+			if !ok || e.Knowledge.After(snap.Through) || (!snap.NextEffective.IsZero() && !time.Now().Before(snap.NextEffective)) {
 				out = append(out, id)
 				break
 			}
@@ -549,6 +625,9 @@ func (m *MemoryStore) SaveSnapshot(_ context.Context, snap *Snapshot) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if snap.ActionCount != countActionEntries(snap.PortfolioID, m.journal[snap.PortfolioID], time.Time{}) {
+		return ErrStaleActionSnapshot
+	}
 	// Monotonic watermark, matching the Postgres upsert's WHERE clause — see
 	// there for why moving it backwards is worse than declining the write.
 	if cur, ok := m.snapshots[snap.PortfolioID]; ok && snap.Through.Before(cur.Through) {

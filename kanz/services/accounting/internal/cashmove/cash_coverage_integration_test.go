@@ -157,4 +157,52 @@ func TestCashBalanceAnnouncePostgresJetStreamBuyingPower(t *testing.T) {
 	if err != nil || len(entries) != 3 {
 		t.Fatalf("rollback journal: %d %v", len(entries), err)
 	}
+	// #1038: the production announcement must exclude unpaid entitlement, then
+	// carry the confirmed amount through the same transactional outbox/spine.
+	base := time.Now().UTC().Add(-30 * 24 * time.Hour).Truncate(time.Microsecond)
+	holding := &ledger.Event{EntryID: name + ":holding", PortfolioID: name, Type: ledger.EntryTrade, InstrumentID: "EQ", Quantity: big.NewRat(100, 1), Price: big.NewRat(1, 1), Effective: base, Knowledge: base}
+	if err := st.Append(ctx, holding, nil); err != nil {
+		t.Fatal(err)
+	}
+	for revision := uint64(1); revision <= 3; revision++ {
+		perUnit := big.NewRat(1, 2)
+		if revision > 1 {
+			perUnit = big.NewRat(55, 100)
+		}
+		action := &ledger.Action{ActionLifecycle: ledger.ActionLifecycle{ActionID: "dividend", Revision: revision, PayDate: base.Add(22 * 24 * time.Hour)}, Kind: ledger.CorpActDividend, PerUnit: perUnit, Currency: "USD"}
+		if revision == 3 {
+			action.PaidAt = action.PayDate
+			action.PaymentRef = "custody-confirmed"
+		}
+		e := &ledger.Event{EntryID: ledger.ActionEntryID(name, action.ActionID, revision), PortfolioID: name, Type: ledger.EntryCorporateAction, InstrumentID: "EQ", Action: action, Effective: base.Add(24 * time.Hour), Knowledge: base.Add(time.Duration(22+revision) * 24 * time.Hour), SourceRef: action.ActionID}
+		if err := st.Append(ctx, e, func(ctx context.Context, reader ledger.Store) ([]outbox.Record, error) {
+			return ann.Records(bus.WithTenantID(ctx, "tenant-A"), reader, name)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := relay.Flush(ctx, name); err != nil {
+			t.Fatal(err)
+		}
+		var msg *pb.PortfolioCashBalance
+		select {
+		case msg = <-received:
+		case <-ctx.Done():
+			t.Fatal("income balance not delivered")
+		}
+		want := new(big.Rat).Set(amounts[0])
+		if revision == 3 {
+			want.Add(want, big.NewRat(55, 1))
+		}
+		if dec.FromProto(msg.Total).Cmp(want) != 0 {
+			t.Fatalf("revision %d announced %v, want %s", revision, msg.Total, want)
+		}
+		book := &comp.Book{PortfolioID: name, BaseCurrency: "USD"}
+		comp.JoinEquity(book, view, nil)
+		incomeFloor := &compliancepb.Rule{Params: &compliancepb.Rule_BuyingPower{BuyingPower: &compliancepb.BuyingPowerLimit{MinCashAfter: &commonpb.Decimal{Coefficient: 50}}}}
+		violation := comp.BuyingPowerRule(&comp.Candidate{Book: book}, incomeFloor)
+		if (revision < 3) != (violation != nil) {
+			t.Fatalf("unpaid income admitted or paid income unavailable: revision %d: %v", revision, violation)
+		}
+	}
+
 }

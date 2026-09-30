@@ -59,6 +59,27 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres { return &Postgres{pool: pool, q:
 // succeeding quietly.
 func (p *Postgres) withTx(tx pgx.Tx) *Postgres { return &Postgres{pool: p.pool, q: tx} }
 
+func (p *Postgres) currentBook(ctx context.Context, portfolioID string, now time.Time) (*Book, FullScanReason, error) {
+	if _, insideAppend := p.q.(pgx.Tx); insideAppend {
+		// Append already owns the portfolio lock, and its announcement must see
+		// the uncommitted entry rather than open a second transaction.
+		return materializeCurrentAt(ctx, p, portfolioID, now)
+	}
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	book, reason, err := materializeCurrentAt(ctx, p.withTx(tx), portfolioID, now)
+	if err != nil {
+		return nil, reason, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, reason, err
+	}
+	return book, reason, nil
+}
+
 // Outbox is the durable queue this store enqueues announcements into. Built on
 // the same pool the journal is written through, so the relay reads under the
 // same RLS scope that wrote the record and there is no cross-tenant read to be
@@ -144,6 +165,21 @@ func (p *Postgres) Append(ctx context.Context, e *Event, announce Announcer) err
 	if _, err := tx.Exec(ctx, `SELECT set_config('app.venue_account_id', $1, true)`, e.VenueAccountID); err != nil {
 		return fmt.Errorf("append entry %s: declare venue account: %w", e.EntryID, err)
 	}
+	if e.Type == EntryCorporateAction {
+		duplicate, err := checkPostgresAction(ctx, tx, e)
+		if err != nil {
+			return err
+		}
+		if duplicate {
+			return tx.Commit(ctx)
+		}
+		// Announcement time may precede an existing checkpoint's watermark.
+		// Invalidate in the SAME transaction, before its announcement reads the
+		// book; JournalSince alone cannot discover a backdated knowledge time.
+		if _, err := tx.Exec(ctx, `UPDATE ledger_snapshots SET corporate_action_version = NULL WHERE portfolio_id = $1`, e.PortfolioID); err != nil {
+			return fmt.Errorf("invalidate action checkpoint: %w", err)
+		}
+	}
 	prepared, err := prepareExecutionEntry(ctx, tx, e)
 	if err != nil {
 		return err
@@ -208,19 +244,17 @@ func (p *Postgres) JournalSince(ctx context.Context, portfolioID string, after t
 	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, after)
 }
 
-// JournalAsOf returns the entries economically effective at or before
-// effectiveAsOf and known at or before knowledgeAsOf — the bitemporal
-// point-in-time read pushed into Postgres as an indexed range scan. A zero time
-// on either axis means "no bound on that axis". Replay over the result equals
-// the in-memory ReplayAsOf.
-//
-// This is the HEAD read (at or before a bound), NOT the snapshot tail — #229
-// proposed reusing it for MaterializeCurrent, which would have bounded the
-// wrong side. Use JournalSince for the tail. It still has no production caller;
-// the bitemporal restatement API that will use it is not built yet, and its
-// Postgres-gated test is what keeps the range scan honest until then.
+// JournalAsOf returns replay-ready effects at the two PIT cutoffs. The SQL
+// bounds knowledge first; revision selection must precede the effective filter
+// so a moved ex-date cannot resurrect a superseded version. Confirmed payments
+// are derived replay stages, never additional persisted journal records. Replay
+// over this result equals ReplayAsOf over the immutable full journal.
 func (p *Postgres) JournalAsOf(ctx context.Context, portfolioID string, effectiveAsOf, knowledgeAsOf time.Time) ([]*Event, error) {
-	return p.journal(ctx, portfolioID, effectiveAsOf, knowledgeAsOf, time.Time{})
+	events, err := p.journal(ctx, portfolioID, time.Time{}, knowledgeAsOf, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	return sortedFor(events, effectiveAsOf, knowledgeAsOf, true), nil
 }
 
 // StalePortfolios returns up to limit portfolios whose journal has entries past
@@ -239,8 +273,8 @@ func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, er
 		SELECT e.portfolio_id
 		FROM ledger_entries e
 		LEFT JOIN ledger_snapshots s ON s.portfolio_id = e.portfolio_id
-		GROUP BY e.portfolio_id, s.through_time
-		HAVING s.through_time IS NULL OR max(e.knowledge_time) > s.through_time
+		GROUP BY e.portfolio_id, s.through_time, s.corporate_action_version, s.next_effective_time
+		HAVING s.through_time IS NULL OR s.corporate_action_version IS DISTINCT FROM 1 OR max(e.knowledge_time) > s.through_time OR s.next_effective_time <= now()
 		ORDER BY s.through_time ASC NULLS FIRST, e.portfolio_id
 		LIMIT $1
 	`, limit)
@@ -360,12 +394,27 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 		unknownSettlement = snap.UnknownSettlement
 		pendingSettlement = snap.PendingSettlement
 	}
-	_, err = p.q.Exec(ctx, `
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(app_current_tenant()), hashtext($1))`, snap.PortfolioID); err != nil {
+		return err
+	}
+	var actionCount int64
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_entries WHERE portfolio_id=$1 AND entry_type=$2 AND action IS NOT NULL`, snap.PortfolioID, int(EntryCorporateAction)).Scan(&actionCount); err != nil {
+		return err
+	}
+	if actionCount != snap.ActionCount {
+		return ErrStaleActionSnapshot
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO ledger_snapshots
 			(tenant_id, portfolio_id, positions, cash, accrued, through_time,
 			 max_effective_time, settled_positions, settled_cash,
-			 unknown_settlement, pending_settlement, updated_at)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+			 unknown_settlement, pending_settlement, corporate_action_version, action_count, next_effective_time, updated_at)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, now())
 		ON CONFLICT (tenant_id, portfolio_id) DO UPDATE SET
 			positions          = EXCLUDED.positions,
 			cash               = EXCLUDED.cash,
@@ -376,6 +425,9 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 			settled_cash       = EXCLUDED.settled_cash,
 			unknown_settlement = EXCLUDED.unknown_settlement,
 			pending_settlement = EXCLUDED.pending_settlement,
+			corporate_action_version = 1,
+			action_count = EXCLUDED.action_count,
+			next_effective_time = EXCLUDED.next_effective_time,
 			updated_at         = now()
 		-- MONOTONIC WATERMARK. Two Snapshotter replicas, or one restarting mid-
 		-- pass, can present checkpoints out of order; a full-replace upsert would
@@ -386,11 +438,11 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 		-- least as new as the one offered.
 		WHERE EXCLUDED.through_time >= ledger_snapshots.through_time
 	`, snap.PortfolioID, positions, cash, accrued, snap.Through, snap.MaxEffective,
-		settledPositions, settledCash, unknownSettlement, pendingSettlement)
+		settledPositions, settledCash, unknownSettlement, pendingSettlement, snap.ActionCount, nullTime(snap.NextEffective))
 	if err != nil {
 		return fmt.Errorf("save snapshot %s: %w", snap.PortfolioID, err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // LoadSnapshot returns a portfolio's latest snapshot, or ErrNoSnapshot.
@@ -405,6 +457,9 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	// "unrecorded" is one value on both sides rather than a sentinel timestamp
 	// whose comparison could be written backwards.
 	var maxEffective *time.Time
+	var actionVersion *int
+	var actionCount int64
+	var nextEffective *time.Time
 	// A NULL settled_positions is a checkpoint that STATES NO SETTLED VIEW — see
 	// Snapshot.SettlementStated. Scanned into pointers so the absence survives as
 	// an absence rather than as an empty map that looks like a computed answer.
@@ -412,18 +467,21 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	var unknownSettlement, pendingSettlement *int
 	err := p.q.QueryRow(ctx, `
 		SELECT positions, cash, accrued, through_time, max_effective_time,
-		       settled_positions, settled_cash, unknown_settlement, pending_settlement
+		       settled_positions, settled_cash, unknown_settlement, pending_settlement, corporate_action_version, action_count, next_effective_time
 		FROM ledger_snapshots WHERE portfolio_id = $1
 	`, portfolioID).Scan(&positions, &cash, &accrued, &through, &maxEffective,
-		&settledPositions, &settledCash, &unknownSettlement, &pendingSettlement)
+		&settledPositions, &settledCash, &unknownSettlement, &pendingSettlement, &actionVersion, &actionCount, &nextEffective)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoSnapshot
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load snapshot %s: %w", portfolioID, err)
 	}
-	snap := &Snapshot{PortfolioID: portfolioID, Through: through}
-	if maxEffective != nil {
+	snap := &Snapshot{PortfolioID: portfolioID, Through: through, ActionCount: actionCount}
+	if nextEffective != nil {
+		snap.NextEffective = *nextEffective
+	}
+	if maxEffective != nil && actionVersion != nil && *actionVersion == 1 {
 		snap.MaxEffective = *maxEffective
 	}
 	if snap.Positions, err = decodePositions(positions); err != nil {
@@ -555,6 +613,7 @@ func decodeRatMap(b []byte) (map[string]*big.Rat, error) {
 
 // actionJSON is the JSON shape of a corporate-action Action.
 type actionJSON struct {
+	ActionLifecycle
 	Kind     int    `json:"kind"`
 	Ratio    string `json:"ratio,omitempty"`
 	PerUnit  string `json:"per_unit,omitempty"`
@@ -566,7 +625,7 @@ func encodeAction(a *Action) (any, error) {
 	if a == nil {
 		return nil, nil
 	}
-	aj := actionJSON{Kind: int(a.Kind), Target: a.Target, Currency: a.Currency}
+	aj := actionJSON{ActionLifecycle: a.ActionLifecycle, Kind: int(a.Kind), Target: a.Target, Currency: a.Currency}
 	if a.Ratio != nil {
 		aj.Ratio = a.Ratio.RatString()
 	}
@@ -584,7 +643,7 @@ func decodeAction(b []byte) (*Action, error) {
 	if err := json.Unmarshal(b, &aj); err != nil {
 		return nil, err
 	}
-	a := &Action{Kind: CorpActKind(aj.Kind), Target: aj.Target, Currency: aj.Currency}
+	a := &Action{ActionLifecycle: aj.ActionLifecycle, Kind: CorpActKind(aj.Kind), Target: aj.Target, Currency: aj.Currency}
 	if aj.Ratio != "" {
 		r, err := mustRat(aj.Ratio)
 		if err != nil {
