@@ -248,7 +248,21 @@ const (
 // The second return value names why the bounded path was not taken, so a caller
 // can count it. An empty reason means the read was served from a checkpoint.
 func MaterializeCurrent(ctx context.Context, st Store, portfolioID string) (*Book, FullScanReason, error) {
+	if consistent, ok := st.(interface {
+		currentBook(context.Context, string, time.Time) (*Book, FullScanReason, error)
+	}); ok {
+		return consistent.currentBook(ctx, portfolioID, time.Now())
+	}
 	return materializeCurrentAt(ctx, st, portfolioID, time.Now())
+}
+
+// Checkpoint and tail must belong to one view. Otherwise a concurrently
+// invalidated checkpoint can be combined with a newer tail that omits the
+// backdated announcement responsible for invalidating it.
+func (m *MemoryStore) currentBook(ctx context.Context, portfolioID string, now time.Time) (*Book, FullScanReason, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return materializeCurrentAt(ctx, memoryReader{m: m}, portfolioID, now)
 }
 
 func materializeCurrentAt(ctx context.Context, st Store, portfolioID string, now time.Time) (*Book, FullScanReason, error) {

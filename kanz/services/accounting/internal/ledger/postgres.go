@@ -59,6 +59,27 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres { return &Postgres{pool: pool, q:
 // succeeding quietly.
 func (p *Postgres) withTx(tx pgx.Tx) *Postgres { return &Postgres{pool: p.pool, q: tx} }
 
+func (p *Postgres) currentBook(ctx context.Context, portfolioID string, now time.Time) (*Book, FullScanReason, error) {
+	if _, insideAppend := p.q.(pgx.Tx); insideAppend {
+		// Append already owns the portfolio lock, and its announcement must see
+		// the uncommitted entry rather than open a second transaction.
+		return materializeCurrentAt(ctx, p, portfolioID, now)
+	}
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	book, reason, err := materializeCurrentAt(ctx, p.withTx(tx), portfolioID, now)
+	if err != nil {
+		return nil, reason, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, reason, err
+	}
+	return book, reason, nil
+}
+
 // Outbox is the durable queue this store enqueues announcements into. Built on
 // the same pool the journal is written through, so the relay reads under the
 // same RLS scope that wrote the record and there is no cross-tenant read to be
