@@ -250,7 +250,7 @@ func (s *Snapshotter) checkpoint(ctx context.Context, portfolioID string) error 
 			through = e.Knowledge
 		}
 	}
-	book := Replay(portfolioID, events)
+	book := ReplayAsOf(portfolioID, events, s.now(), time.Time{})
 	// Book.Snapshot carries the MaxEffective fence off the book itself, so it
 	// records what was folded rather than what the caller believed was folded.
 	return s.store.SaveSnapshot(ctx, book.Snapshot(through))

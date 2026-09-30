@@ -223,12 +223,13 @@ func newPosition() *Position { return costbasis.NewLot() }
 // The settled fold is only as good as what the producers assert, so a caller that
 // reads it MUST check SettlementBasisComplete first. See SettlementBasis.
 type Book struct {
-	actionCount  int64               // immutable action records represented by this fold
-	entitlements map[string]*big.Rat // replay-local; any action tail forces full replay
-	PortfolioID  string
-	Positions    map[string]*Position
-	Cash         map[string]*big.Rat
-	Accrued      map[string]*big.Rat
+	nextEffective time.Time           // next known economic effect beyond the replay cutoff
+	actionCount   int64               // immutable action records represented by this fold
+	entitlements  map[string]*big.Rat // replay-local; any action tail forces full replay
+	PortfolioID   string
+	Positions     map[string]*Position
+	Cash          map[string]*big.Rat
+	Accrued       map[string]*big.Rat
 
 	// SettledPositions and SettledCash are the settled-basis fold of the same
 	// journal: an entry contributes to them only when it asserts
@@ -478,14 +479,15 @@ func (b *Book) AccruedBalance(currency string) *big.Rat {
 // canonical reconstruction. Replaying the same journal yields the same book.
 func Replay(portfolioID string, events []*Event) *Book {
 	b := NewBook(portfolioID)
-	// Cancelled heads still fence a checkpoint of the journal prefix.
-	for _, e := range events {
-		if e != nil && e.PortfolioID == portfolioID && e.Effective.After(b.maxEffective) {
-			b.maxEffective = e.Effective
-		}
-	}
 	for _, e := range sortedFor(events, time.Time{}, time.Time{}, false) {
 		b.Apply(e)
+	}
+	if b.maxEffective.IsZero() {
+		for _, e := range events {
+			if e != nil && e.PortfolioID == portfolioID && e.Knowledge.After(b.maxEffective) {
+				b.maxEffective = e.Knowledge
+			}
+		}
 	}
 	b.actionCount = countActionEntries(portfolioID, events, time.Time{})
 	return b
@@ -498,11 +500,29 @@ func Replay(portfolioID string, events []*Event) *Book {
 // the book had not yet learned of.
 func ReplayAsOf(portfolioID string, events []*Event, effectiveAsOf, knowledgeAsOf time.Time) *Book {
 	b := NewBook(portfolioID)
-	for _, e := range sortedFor(events, effectiveAsOf, knowledgeAsOf, true) {
-		b.Apply(e)
+	b.applyUntil(events, effectiveAsOf, knowledgeAsOf)
+	if b.maxEffective.IsZero() {
+		b.maxEffective = effectiveAsOf
 	}
 	b.actionCount = countActionEntries(portfolioID, events, knowledgeAsOf)
 	return b
+}
+
+// applyUntil retains the next due effect so a current checkpoint can be reused
+// until that instant, rather than full-scanning throughout an announcement lead time.
+func (b *Book) applyUntil(events []*Event, effectiveAsOf, knowledgeAsOf time.Time) {
+	for _, e := range sortedFor(events, time.Time{}, knowledgeAsOf, true) {
+		if e.PortfolioID != "" && e.PortfolioID != b.PortfolioID {
+			continue
+		}
+		if !effectiveAsOf.IsZero() && e.Effective.After(effectiveAsOf) {
+			if b.nextEffective.IsZero() || e.Effective.Before(b.nextEffective) {
+				b.nextEffective = e.Effective
+			}
+			continue
+		}
+		b.Apply(e)
+	}
 }
 
 // sortedFor returns the events, optionally filtered to those at or before the

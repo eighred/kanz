@@ -252,8 +252,8 @@ func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, er
 		SELECT e.portfolio_id
 		FROM ledger_entries e
 		LEFT JOIN ledger_snapshots s ON s.portfolio_id = e.portfolio_id
-		GROUP BY e.portfolio_id, s.through_time, s.corporate_action_version
-		HAVING s.through_time IS NULL OR s.corporate_action_version IS DISTINCT FROM 1 OR max(e.knowledge_time) > s.through_time
+		GROUP BY e.portfolio_id, s.through_time, s.corporate_action_version, s.next_effective_time
+		HAVING s.through_time IS NULL OR s.corporate_action_version IS DISTINCT FROM 1 OR max(e.knowledge_time) > s.through_time OR s.next_effective_time <= now()
 		ORDER BY s.through_time ASC NULLS FIRST, e.portfolio_id
 		LIMIT $1
 	`, limit)
@@ -392,8 +392,8 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 		INSERT INTO ledger_snapshots
 			(tenant_id, portfolio_id, positions, cash, accrued, through_time,
 			 max_effective_time, settled_positions, settled_cash,
-			 unknown_settlement, pending_settlement, corporate_action_version, action_count, updated_at)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, now())
+			 unknown_settlement, pending_settlement, corporate_action_version, action_count, next_effective_time, updated_at)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, now())
 		ON CONFLICT (tenant_id, portfolio_id) DO UPDATE SET
 			positions          = EXCLUDED.positions,
 			cash               = EXCLUDED.cash,
@@ -406,6 +406,7 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 			pending_settlement = EXCLUDED.pending_settlement,
 			corporate_action_version = 1,
 			action_count = EXCLUDED.action_count,
+			next_effective_time = EXCLUDED.next_effective_time,
 			updated_at         = now()
 		-- MONOTONIC WATERMARK. Two Snapshotter replicas, or one restarting mid-
 		-- pass, can present checkpoints out of order; a full-replace upsert would
@@ -416,7 +417,7 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 		-- least as new as the one offered.
 		WHERE EXCLUDED.through_time >= ledger_snapshots.through_time
 	`, snap.PortfolioID, positions, cash, accrued, snap.Through, snap.MaxEffective,
-		settledPositions, settledCash, unknownSettlement, pendingSettlement, snap.ActionCount)
+		settledPositions, settledCash, unknownSettlement, pendingSettlement, snap.ActionCount, nullTime(snap.NextEffective))
 	if err != nil {
 		return fmt.Errorf("save snapshot %s: %w", snap.PortfolioID, err)
 	}
@@ -437,6 +438,7 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	var maxEffective *time.Time
 	var actionVersion *int
 	var actionCount int64
+	var nextEffective *time.Time
 	// A NULL settled_positions is a checkpoint that STATES NO SETTLED VIEW — see
 	// Snapshot.SettlementStated. Scanned into pointers so the absence survives as
 	// an absence rather than as an empty map that looks like a computed answer.
@@ -444,10 +446,10 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	var unknownSettlement, pendingSettlement *int
 	err := p.q.QueryRow(ctx, `
 		SELECT positions, cash, accrued, through_time, max_effective_time,
-		       settled_positions, settled_cash, unknown_settlement, pending_settlement, corporate_action_version, action_count
+		       settled_positions, settled_cash, unknown_settlement, pending_settlement, corporate_action_version, action_count, next_effective_time
 		FROM ledger_snapshots WHERE portfolio_id = $1
 	`, portfolioID).Scan(&positions, &cash, &accrued, &through, &maxEffective,
-		&settledPositions, &settledCash, &unknownSettlement, &pendingSettlement, &actionVersion, &actionCount)
+		&settledPositions, &settledCash, &unknownSettlement, &pendingSettlement, &actionVersion, &actionCount, &nextEffective)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoSnapshot
 	}
@@ -455,6 +457,9 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 		return nil, fmt.Errorf("load snapshot %s: %w", portfolioID, err)
 	}
 	snap := &Snapshot{PortfolioID: portfolioID, Through: through, ActionCount: actionCount}
+	if nextEffective != nil {
+		snap.NextEffective = *nextEffective
+	}
 	if maxEffective != nil && actionVersion != nil && *actionVersion == 1 {
 		snap.MaxEffective = *maxEffective
 	}

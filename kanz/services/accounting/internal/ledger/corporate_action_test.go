@@ -307,3 +307,77 @@ func TestPostgresRetiresOldCorporateActionSnapshots(t *testing.T) {
 		t.Fatalf("old checkpoint not queued for rebuild: %v %v", stale, err)
 	}
 }
+
+func TestScheduledIncomeCheckpointIsBoundedUntilDue(t *testing.T) {
+	for _, backend := range []string{"memory", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			var store Store = NewMemoryStore()
+			if backend == "postgres" {
+				store = NewPostgres(newPool(t))
+			}
+			st := &countingStore{Store: store}
+			ctx := context.Background()
+			base := time.Now().UTC().Add(-5 * 24 * time.Hour).Truncate(time.Microsecond)
+			at := func(d int) time.Time { return base.Add(time.Duration(d) * 24 * time.Hour) }
+			hold := trade("hold", "AAPL", "100", "10", 1, 1)
+			hold.Cash, hold.Effective, hold.Knowledge = nil, at(1), at(1)
+			ann := income(1, "1", 2)
+			ann.Effective, ann.Knowledge, ann.Action.PayDate = at(3), at(2), at(25)
+			for _, e := range []*Event{hold, ann} {
+				if err := st.Append(ctx, e, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cutoff := at(2)
+			writer := &Snapshotter{store: st, now: func() time.Time { return cutoff }}
+			if err := writer.checkpoint(ctx, "PF"); err != nil {
+				t.Fatal(err)
+			}
+			st.journalCalls = 0
+			book, reason, err := materializeCurrentAt(ctx, st, "PF", cutoff)
+			if err != nil || reason != "" || st.journalCalls != 0 {
+				t.Fatalf("future announcement forced a full scan: %s %d %v", reason, st.journalCalls, err)
+			}
+			assertIncome(t, book, "0", "0", "0")
+			if !book.nextEffective.Equal(at(3)) {
+				t.Fatal("next due date lost across checkpoint")
+			}
+			book, reason, err = materializeCurrentAt(ctx, st, "PF", at(4))
+			if err != nil || reason != FullScanDueSnapshot {
+				t.Fatalf("due checkpoint served stale accrual: %s %v", reason, err)
+			}
+			assertIncome(t, book, "0", "100", "0")
+			stale, err := st.StalePortfolios(ctx, 10)
+			if err != nil || len(stale) != 1 || stale[0] != "PF" {
+				t.Fatalf("due checkpoint not queued: %v %v", stale, err)
+			}
+			cutoff = at(4)
+			if err := writer.checkpoint(ctx, "PF"); err != nil {
+				t.Fatal(err)
+			}
+			st.journalCalls = 0
+			book, reason, err = materializeCurrentAt(ctx, st, "PF", cutoff)
+			if err != nil || reason != "" || st.journalCalls != 0 {
+				t.Fatalf("refreshed checkpoint unbounded: %s %v", reason, err)
+			}
+			assertIncome(t, book, "0", "100", "0")
+			// A cancelled future action has no due effect and must not keep the
+			// book in full-replay mode until its former scheduled date.
+			cancelled := income(2, "1", 3)
+			cancelled.Effective, cancelled.Knowledge, cancelled.Action.PayDate = at(3), at(2).Add(time.Hour), at(25)
+			cancelled.Action.Cancelled = true
+			if err := st.Append(ctx, cancelled, nil); err != nil {
+				t.Fatal(err)
+			}
+			cutoff = at(2).Add(2 * time.Hour)
+			if err := writer.checkpoint(ctx, "PF"); err != nil {
+				t.Fatal(err)
+			}
+			book, reason, err = materializeCurrentAt(ctx, st, "PF", cutoff)
+			if err != nil || reason != "" || !book.nextEffective.IsZero() {
+				t.Fatalf("cancelled schedule retained: %s %v", reason, err)
+			}
+			assertIncome(t, book, "0", "0", "0")
+		})
+	}
+}

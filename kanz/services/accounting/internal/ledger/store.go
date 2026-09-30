@@ -77,11 +77,12 @@ var ErrNoSnapshot = errors.New("ledger: no snapshot")
 // and folds the journal directly; the snapshot only accelerates the
 // current-knowledge book.
 type Snapshot struct {
-	ActionCount int64 // rejects a checkpoint computed before a concurrent action append
-	PortfolioID string
-	Positions   map[string]*Position
-	Cash        map[string]*big.Rat
-	Accrued     map[string]*big.Rat
+	NextEffective time.Time // checkpoint expires when this known economic effect becomes due
+	ActionCount   int64     // rejects a checkpoint computed before a concurrent action append
+	PortfolioID   string
+	Positions     map[string]*Position
+	Cash          map[string]*big.Rat
+	Accrued       map[string]*big.Rat
 	// Through is the knowledge watermark: every journal entry with Knowledge at or
 	// before Through is already folded into this snapshot.
 	Through time.Time
@@ -132,6 +133,7 @@ type Snapshot struct {
 // corrupt it.
 func (b *Book) Snapshot(through time.Time) *Snapshot {
 	s := &Snapshot{
+		NextEffective:    b.nextEffective,
 		ActionCount:      b.actionCount,
 		PortfolioID:      b.PortfolioID,
 		Positions:        make(map[string]*Position, len(b.Positions)),
@@ -183,6 +185,7 @@ func copyPositions(dst, src map[string]*Position) {
 func RestoreBook(s *Snapshot) *Book {
 	b := NewBook(s.PortfolioID)
 	b.actionCount = s.ActionCount
+	b.nextEffective = s.NextEffective
 	b.maxEffective = s.MaxEffective
 	copyPositions(b.Positions, s.Positions)
 	copyPositions(b.SettledPositions, s.SettledPositions)
@@ -221,6 +224,7 @@ const (
 	FullScanNoSnapshot     FullScanReason = "no_snapshot"
 	FullScanActionRevision FullScanReason = "corporate_action_revision"
 	FullScanFutureSnapshot FullScanReason = "future_snapshot"
+	FullScanDueSnapshot    FullScanReason = "due_snapshot"
 	// FullScanBackdatedTail: a checkpoint exists but the tail contains an entry
 	// effective BEFORE the checkpoint's fence, so resuming from it would not
 	// equal a replay. See Snapshot.MaxEffective.
@@ -261,6 +265,10 @@ func materializeCurrentAt(ctx context.Context, st Store, portfolioID string, now
 		return b, FullScanUnfencedSnapshot, ferr
 	}
 
+	if !snap.NextEffective.IsZero() && !now.Before(snap.NextEffective) {
+		b, ferr := replayAll(ctx, st, portfolioID, now)
+		return b, FullScanDueSnapshot, ferr
+	}
 	if snap.MaxEffective.After(now) {
 		b, ferr := replayAll(ctx, st, portfolioID, now)
 		return b, FullScanFutureSnapshot, ferr
@@ -286,9 +294,7 @@ func materializeCurrentAt(ctx context.Context, st Store, portfolioID string, now
 	}
 
 	b := RestoreBook(snap)
-	for _, e := range sortedFor(tail, now, time.Time{}, true) {
-		b.Apply(e)
-	}
+	b.applyUntil(tail, now, time.Time{})
 	return b, "", nil
 }
 
@@ -580,7 +586,7 @@ func (m *MemoryStore) StalePortfolios(_ context.Context, limit int) ([]string, e
 	for id, entries := range m.journal {
 		snap, ok := m.snapshots[id]
 		for _, e := range entries {
-			if !ok || e.Knowledge.After(snap.Through) {
+			if !ok || e.Knowledge.After(snap.Through) || (!snap.NextEffective.IsZero() && !time.Now().Before(snap.NextEffective)) {
 				out = append(out, id)
 				break
 			}
