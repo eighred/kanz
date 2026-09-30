@@ -2,6 +2,10 @@ package compute
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	marketreturns "github.com/eighred/kanz/internal/marketdata/returns"
 	"math"
 	"sync"
 	"time"
@@ -59,8 +63,8 @@ func (c CharacteristicConfig) skip() int {
 
 // StoreCharacteristicProvider is the production factormodel.CharacteristicProvider:
 // momentum and volatility derived from the point-in-time return history, the
-// industry label from the reference classification. An instrument with neither
-// history nor classification is unknown (ok=false).
+// industry label from the reference classification. A complete dated return
+// panel is required; unavailable descriptors remain absent rather than zero.
 type StoreCharacteristicProvider struct {
 	returns ReturnsProvider
 	sector  SectorFunc
@@ -81,20 +85,28 @@ func (p *StoreCharacteristicProvider) Characteristics(ctx context.Context, instr
 			c.Industry = ind
 		}
 	}
-	rets, err := p.returns.Returns(ctx, instrumentID, asOf, p.cfg.window())
-	if err != nil || len(rets) == 0 {
-		if c.Industry == "" {
-			return factormodel.Characteristics{}, false
-		}
-		return c, true // classified but priceless (e.g. a fresh listing)
+	if asOf.IsZero() {
+		return factormodel.Characteristics{}, false
 	}
+	panel, err := marketreturns.Load(ctx, p.returns, []string{instrumentID}, asOf, p.cfg.window())
+	if err != nil || !panel.Contiguous() {
+		return factormodel.Characteristics{}, false
+	}
+	rets := panel.Values[0]
+	c.Style = map[string]float64{}
 	momEnd := len(rets) - p.cfg.skip()
-	if momEnd < 0 {
-		momEnd = 0
-	}
-	compound := 1.0
-	for _, r := range rets[:momEnd] {
-		compound *= 1 + r
+	if momEnd > 0 {
+		compound := 1.0
+		for _, r := range rets[:momEnd] {
+			if panel.Method == "log" {
+				r = math.Expm1(r)
+			}
+			compound *= 1 + r
+		}
+		momentum := compound - 1
+		if !math.IsNaN(momentum) && !math.IsInf(momentum, 0) {
+			c.Style[StyleMomentum] = momentum
+		}
 	}
 	var mean, varSum float64
 	for _, r := range rets {
@@ -104,14 +116,18 @@ func (p *StoreCharacteristicProvider) Characteristics(ctx context.Context, instr
 	for _, r := range rets {
 		varSum += (r - mean) * (r - mean)
 	}
-	vol := 0.0
-	if len(rets) > 1 {
-		vol = math.Sqrt(varSum / float64(len(rets)-1))
+	vol := math.Sqrt(varSum / float64(len(rets)-1))
+	if !math.IsNaN(vol) && !math.IsInf(vol, 0) {
+		c.Style[StyleVolatility] = vol
 	}
-	c.Style = map[string]float64{
-		StyleMomentum:   compound - 1,
-		StyleVolatility: vol,
-	}
+	c.AsOf = asOf.UTC()
+	source, _ := json.Marshal(struct {
+		Panel, Industry string
+		Window, Skip    int
+	}{panel.Digest, c.Industry, p.cfg.window(), p.cfg.skip()})
+	digest := sha256.Sum256(source)
+	c.SourceDigest = hex.EncodeToString(digest[:])
+
 	return c, true
 }
 

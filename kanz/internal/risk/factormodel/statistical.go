@@ -34,9 +34,8 @@ const (
 const (
 	DefaultWindow      = 250
 	DefaultStatFactors = 3
-	// DefaultRidge regularizes the cross-sectional normal equations so collinear
-	// industry/country dummies stay invertible; tiny relative to BᵀB so it does
-	// not bias a well-conditioned fit.
+	// DefaultRidge regularizes an already identified cross-sectional design.
+	// Rank deficiency is rejected before regularization.
 	DefaultRidge = 1e-8
 )
 

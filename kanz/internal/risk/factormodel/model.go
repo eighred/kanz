@@ -25,6 +25,8 @@
 package factormodel
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -122,6 +124,15 @@ func DefaultModelID(cfg Config) string {
 	}
 	// Dated fits must not redefine a historical tail-aligned artifact's key.
 	parts = append(parts, fmt.Sprintf("%dD", cfg.window()), "DATED1")
+	if cfg.Type == Fundamental || cfg.Type == Blend {
+		policy, _ := json.Marshal(struct {
+			Policy string
+			Styles []string
+			Ridge  float64
+		}{DescriptorPolicy, cfg.StyleFactors, cfg.ridge()})
+		digest := sha256.Sum256(policy)
+		parts = append(parts, fmt.Sprintf("DESC1-%x", digest[:8]))
+	}
 	return strings.Join(parts, "-")
 }
 
