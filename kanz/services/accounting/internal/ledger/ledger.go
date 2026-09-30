@@ -223,6 +223,7 @@ func newPosition() *Position { return costbasis.NewLot() }
 // The settled fold is only as good as what the producers assert, so a caller that
 // reads it MUST check SettlementBasisComplete first. See SettlementBasis.
 type Book struct {
+	actionCount  int64               // immutable action records represented by this fold
 	entitlements map[string]*big.Rat // replay-local; any action tail forces full replay
 	PortfolioID  string
 	Positions    map[string]*Position
@@ -486,6 +487,7 @@ func Replay(portfolioID string, events []*Event) *Book {
 	for _, e := range sortedFor(events, time.Time{}, time.Time{}, false) {
 		b.Apply(e)
 	}
+	b.actionCount = countActionEntries(portfolioID, events, time.Time{})
 	return b
 }
 
@@ -499,6 +501,7 @@ func ReplayAsOf(portfolioID string, events []*Event, effectiveAsOf, knowledgeAsO
 	for _, e := range sortedFor(events, effectiveAsOf, knowledgeAsOf, true) {
 		b.Apply(e)
 	}
+	b.actionCount = countActionEntries(portfolioID, events, knowledgeAsOf)
 	return b
 }
 

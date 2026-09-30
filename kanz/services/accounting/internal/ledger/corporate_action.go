@@ -27,6 +27,20 @@ type ActionLifecycle struct {
 
 var ErrActionConflict = errors.New("ledger: conflicting corporate-action revision")
 
+var ErrStaleActionSnapshot = errors.New("ledger: checkpoint predates a corporate-action append")
+
+// WORM makes the count a generation: actions can be added but never replaced
+// or removed. The checkpoint writer compares it while holding the append lock.
+func countActionEntries(portfolio string, events []*Event, known time.Time) int64 {
+	seen := make(map[string]struct{})
+	for _, e := range events {
+		if e != nil && e.PortfolioID == portfolio && e.Type == EntryCorporateAction && e.Action != nil && e.actionStage != 2 && (known.IsZero() || !e.Knowledge.After(known)) {
+			seen[e.EntryID] = struct{}{}
+		}
+	}
+	return int64(len(seen))
+}
+
 // ActionEntryID scopes the immutable identity to the book as well as the event.
 func ActionEntryID(portfolio, action string, revision uint64) string {
 	b, _ := json.Marshal([]any{portfolio, action, revision})

@@ -207,6 +207,12 @@ func TestActionAppendInvalidatesBackdatedKnowledgeAtomically(t *testing.T) {
 			if err := st.Append(ctx, late, nil); err != nil {
 				t.Fatal(err)
 			}
+			// Simulate a checkpoint writer that read before the append but writes
+			// afterwards. It must not resurrect the invalidated cached balances.
+			stale := Replay("PF", []*Event{hold, sale}).Snapshot(day(10))
+			if err := st.SaveSnapshot(ctx, stale); !errors.Is(err, ErrStaleActionSnapshot) {
+				t.Fatalf("stale checkpoint writer was not fenced: %v", err)
+			}
 			book, _, err = MaterializeCurrent(ctx, st, "PF")
 			if err != nil {
 				t.Fatal(err)

@@ -77,6 +77,7 @@ var ErrNoSnapshot = errors.New("ledger: no snapshot")
 // and folds the journal directly; the snapshot only accelerates the
 // current-knowledge book.
 type Snapshot struct {
+	ActionCount int64 // rejects a checkpoint computed before a concurrent action append
 	PortfolioID string
 	Positions   map[string]*Position
 	Cash        map[string]*big.Rat
@@ -131,6 +132,7 @@ type Snapshot struct {
 // corrupt it.
 func (b *Book) Snapshot(through time.Time) *Snapshot {
 	s := &Snapshot{
+		ActionCount:      b.actionCount,
 		PortfolioID:      b.PortfolioID,
 		Positions:        make(map[string]*Position, len(b.Positions)),
 		Cash:             make(map[string]*big.Rat, len(b.Cash)),
@@ -180,6 +182,7 @@ func copyPositions(dst, src map[string]*Position) {
 // not re-apply entries already folded into the snapshot.
 func RestoreBook(s *Snapshot) *Book {
 	b := NewBook(s.PortfolioID)
+	b.actionCount = s.ActionCount
 	b.maxEffective = s.MaxEffective
 	copyPositions(b.Positions, s.Positions)
 	copyPositions(b.SettledPositions, s.SettledPositions)
@@ -602,6 +605,9 @@ func (m *MemoryStore) SaveSnapshot(_ context.Context, snap *Snapshot) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if snap.ActionCount != countActionEntries(snap.PortfolioID, m.journal[snap.PortfolioID], time.Time{}) {
+		return ErrStaleActionSnapshot
+	}
 	// Monotonic watermark, matching the Postgres upsert's WHERE clause — see
 	// there for why moving it backwards is worse than declining the write.
 	if cur, ok := m.snapshots[snap.PortfolioID]; ok && snap.Through.Before(cur.Through) {

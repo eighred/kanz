@@ -373,12 +373,27 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 		unknownSettlement = snap.UnknownSettlement
 		pendingSettlement = snap.PendingSettlement
 	}
-	_, err = p.q.Exec(ctx, `
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(app_current_tenant()), hashtext($1))`, snap.PortfolioID); err != nil {
+		return err
+	}
+	var actionCount int64
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_entries WHERE portfolio_id=$1 AND entry_type=$2 AND action IS NOT NULL`, snap.PortfolioID, int(EntryCorporateAction)).Scan(&actionCount); err != nil {
+		return err
+	}
+	if actionCount != snap.ActionCount {
+		return ErrStaleActionSnapshot
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO ledger_snapshots
 			(tenant_id, portfolio_id, positions, cash, accrued, through_time,
 			 max_effective_time, settled_positions, settled_cash,
-			 unknown_settlement, pending_settlement, corporate_action_version, updated_at)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, now())
+			 unknown_settlement, pending_settlement, corporate_action_version, action_count, updated_at)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, now())
 		ON CONFLICT (tenant_id, portfolio_id) DO UPDATE SET
 			positions          = EXCLUDED.positions,
 			cash               = EXCLUDED.cash,
@@ -390,6 +405,7 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 			unknown_settlement = EXCLUDED.unknown_settlement,
 			pending_settlement = EXCLUDED.pending_settlement,
 			corporate_action_version = 1,
+			action_count = EXCLUDED.action_count,
 			updated_at         = now()
 		-- MONOTONIC WATERMARK. Two Snapshotter replicas, or one restarting mid-
 		-- pass, can present checkpoints out of order; a full-replace upsert would
@@ -400,11 +416,11 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 		-- least as new as the one offered.
 		WHERE EXCLUDED.through_time >= ledger_snapshots.through_time
 	`, snap.PortfolioID, positions, cash, accrued, snap.Through, snap.MaxEffective,
-		settledPositions, settledCash, unknownSettlement, pendingSettlement)
+		settledPositions, settledCash, unknownSettlement, pendingSettlement, snap.ActionCount)
 	if err != nil {
 		return fmt.Errorf("save snapshot %s: %w", snap.PortfolioID, err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // LoadSnapshot returns a portfolio's latest snapshot, or ErrNoSnapshot.
@@ -420,6 +436,7 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	// whose comparison could be written backwards.
 	var maxEffective *time.Time
 	var actionVersion *int
+	var actionCount int64
 	// A NULL settled_positions is a checkpoint that STATES NO SETTLED VIEW — see
 	// Snapshot.SettlementStated. Scanned into pointers so the absence survives as
 	// an absence rather than as an empty map that looks like a computed answer.
@@ -427,17 +444,17 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	var unknownSettlement, pendingSettlement *int
 	err := p.q.QueryRow(ctx, `
 		SELECT positions, cash, accrued, through_time, max_effective_time,
-		       settled_positions, settled_cash, unknown_settlement, pending_settlement, corporate_action_version
+		       settled_positions, settled_cash, unknown_settlement, pending_settlement, corporate_action_version, action_count
 		FROM ledger_snapshots WHERE portfolio_id = $1
 	`, portfolioID).Scan(&positions, &cash, &accrued, &through, &maxEffective,
-		&settledPositions, &settledCash, &unknownSettlement, &pendingSettlement, &actionVersion)
+		&settledPositions, &settledCash, &unknownSettlement, &pendingSettlement, &actionVersion, &actionCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoSnapshot
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load snapshot %s: %w", portfolioID, err)
 	}
-	snap := &Snapshot{PortfolioID: portfolioID, Through: through}
+	snap := &Snapshot{PortfolioID: portfolioID, Through: through, ActionCount: actionCount}
 	if maxEffective != nil && actionVersion != nil && *actionVersion == 1 {
 		snap.MaxEffective = *maxEffective
 	}
