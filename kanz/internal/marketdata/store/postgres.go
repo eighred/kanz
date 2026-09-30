@@ -97,6 +97,12 @@ func (p *Postgres) Put(ctx context.Context, obs []Observation) error {
 // Memory's restatement collapse. The leading ORDER BY columns match the
 // DISTINCT ON, so the result is already observation_time ascending.
 func (p *Postgres) History(ctx context.Context, q Query) ([]Observation, error) {
+	if q.Limit < 0 || q.Limit > MaxHistoryLimit {
+		return nil, ErrHistoryLimit
+	}
+	if q.Limit > 0 {
+		return p.boundedHistory(ctx, q)
+	}
 	if q.InstrumentID == "" {
 		return nil, errors.New("store: history with empty instrument_id")
 	}
