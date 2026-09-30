@@ -98,6 +98,7 @@ func (t EntryType) String() string {
 // accounting.v1.LedgerEntry. Money and quantity are exact (*big.Rat); the journal
 // is append-only, so a correction is a new offsetting Event, never a mutation.
 type Event struct {
+	actionStage uint8 // replay-only: 1 entitlement, 2 confirmed payment; never persisted
 	// ExecutionEvidence preserves exact venue execution economics and recovery
 	// provenance; the immutable journal must retain more than a dedup alias.
 	ExecutionEvidence []byte
@@ -178,6 +179,7 @@ const (
 // Action is the parameters of a corporate action, applied at fold time against
 // the affected position. The package corpact builds these from a CorporateAction.
 type Action struct {
+	ActionLifecycle
 	Kind CorpActKind
 
 	// Ratio is the share-conversion factor for a SPLIT (2.0 = 2:1) or a MERGER
@@ -221,10 +223,11 @@ func newPosition() *Position { return costbasis.NewLot() }
 // The settled fold is only as good as what the producers assert, so a caller that
 // reads it MUST check SettlementBasisComplete first. See SettlementBasis.
 type Book struct {
-	PortfolioID string
-	Positions   map[string]*Position
-	Cash        map[string]*big.Rat
-	Accrued     map[string]*big.Rat
+	entitlements map[string]*big.Rat // replay-local; any action tail forces full replay
+	PortfolioID  string
+	Positions    map[string]*Position
+	Cash         map[string]*big.Rat
+	Accrued      map[string]*big.Rat
 
 	// SettledPositions and SettledCash are the settled-basis fold of the same
 	// journal: an entry contributes to them only when it asserts
@@ -267,6 +270,7 @@ func NewBook(portfolioID string) *Book {
 		Positions:        make(map[string]*Position),
 		Cash:             make(map[string]*big.Rat),
 		Accrued:          make(map[string]*big.Rat),
+		entitlements:     make(map[string]*big.Rat),
 		SettledPositions: make(map[string]*Position),
 		SettledCash:      make(map[string]*big.Rat),
 		// An empty book has folded nothing, so its empty settled view is a
@@ -301,12 +305,20 @@ func (b *Book) Apply(e *Event) {
 	if e == nil || e.EntryID == "" || (e.PortfolioID != "" && e.PortfolioID != b.PortfolioID) {
 		return
 	}
+	if e.Action != nil && e.Action.Cancelled {
+		return
+	}
 	if b.seen[e.EntryID] {
 		return
 	}
 	b.seen[e.EntryID] = true
 	if e.Effective.After(b.maxEffective) {
 		b.maxEffective = e.Effective
+	}
+
+	if e.Type == EntryCorporateAction && e.Action != nil && (e.Action.Kind == CorpActDividend || e.Action.Kind == CorpActCoupon) {
+		b.foldIncome(e)
+		return
 	}
 
 	// THE BASIS IS COUNTED BEFORE ANY LEG IS LOOKED AT, and before the
@@ -395,14 +407,6 @@ func (f basisFold) foldCorpAct(instrument string, a *Action) {
 		l.Qty = new(big.Rat).Mul(l.Qty, a.Ratio)
 		l.AvgCost = new(big.Rat).Quo(l.AvgCost, a.Ratio)
 
-	case CorpActDividend, CorpActCoupon:
-		if a.PerUnit == nil {
-			return
-		}
-		// Cash on the held quantity (absolute: a long receives, a short pays).
-		cash := new(big.Rat).Mul(l.Qty, a.PerUnit)
-		add(f.cash, a.Currency, cash)
-
 	case CorpActMerger:
 		if a.Target == "" || a.Ratio == nil {
 			return
@@ -473,6 +477,12 @@ func (b *Book) AccruedBalance(currency string) *big.Rat {
 // canonical reconstruction. Replaying the same journal yields the same book.
 func Replay(portfolioID string, events []*Event) *Book {
 	b := NewBook(portfolioID)
+	// Cancelled heads still fence a checkpoint of the journal prefix.
+	for _, e := range events {
+		if e != nil && e.PortfolioID == portfolioID && e.Effective.After(b.maxEffective) {
+			b.maxEffective = e.Effective
+		}
+	}
 	for _, e := range sortedFor(events, time.Time{}, time.Time{}, false) {
 		b.Apply(e)
 	}
@@ -497,7 +507,11 @@ func ReplayAsOf(portfolioID string, events []*Event, effectiveAsOf, knowledgeAsO
 // knowledge, then entry id).
 func sortedFor(events []*Event, effBound, knowBound time.Time, filter bool) []*Event {
 	out := make([]*Event, 0, len(events))
-	for _, e := range events {
+	bound := time.Time{}
+	if filter {
+		bound = knowBound
+	}
+	for _, e := range actionEvents(events, bound) {
 		if filter {
 			if !effBound.IsZero() && e.Effective.After(effBound) {
 				continue
