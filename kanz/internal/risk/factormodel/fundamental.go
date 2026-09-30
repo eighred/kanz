@@ -2,7 +2,13 @@ package factormodel
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -26,6 +32,10 @@ type ReturnsProvider interface {
 // Characteristics is the factor-relevant reference data for one instrument — the
 // raw inputs the fundamental loadings are built from.
 type Characteristics struct {
+	// AsOf is the requested PIT cut, not an invented observation timestamp.
+	AsOf time.Time
+	// SourceDigest identifies the input artifact used to derive these values.
+	SourceDigest string
 	// Style maps a style-factor name to its raw cross-sectional characteristic
 	// (e.g. "Size": ln(market cap), "Momentum": trailing 12-1 return). Raw values
 	// are z-scored across the universe into loadings.
@@ -45,9 +55,8 @@ type CharacteristicProvider interface {
 // buildFundamentalLoadings assembles the N×K loading matrix and the factor
 // descriptors from the universe's characteristics: z-scored style columns, then
 // one 0/1 dummy per distinct industry and country present (sorted for
-// determinism). An instrument missing a style value contributes the cross-
-// sectional mean (z-score 0); a missing industry/country sets no dummy.
-func buildFundamentalLoadings(styleNames, instruments []string, chars map[string]Characteristics) ([]Factor, [][]float64) {
+// determinism). Callers must first exclude incomplete descriptor rows.
+func buildFundamentalLoadings(styleNames, instruments []string, chars map[string]Characteristics) ([]Factor, [][]float64, error) {
 	n := len(instruments)
 
 	// Style columns: collect raw, z-score.
@@ -55,13 +64,26 @@ func buildFundamentalLoadings(styleNames, instruments []string, chars map[string
 	for s, name := range styleNames {
 		raw := make([]float64, n)
 		for i, id := range instruments {
-			raw[i] = chars[id].Style[name] // missing ⇒ 0, recentered by z-score
+			v, ok := chars[id].Style[name]
+			if !ok || !finiteDescriptor(v) {
+				return nil, nil, fmt.Errorf("factormodel: missing/non-finite %s for %s", name, id)
+			}
+			raw[i] = v
 		}
-		styleCols[s] = zScore(raw)
+		var err error
+		styleCols[s], err = descriptorScores(raw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("style %s: %w", name, err)
+		}
 	}
 
 	industries := distinctLabels(instruments, chars, func(c Characteristics) string { return c.Industry })
 	countries := distinctLabels(instruments, chars, func(c Characteristics) string { return c.Country })
+	// Full industry indicators already span the intercept. Omit a canonical
+	// country baseline so the two complete partitions do not duplicate it.
+	if len(industries) > 0 && len(countries) > 0 {
+		countries = countries[1:]
+	}
 
 	factors := make([]Factor, 0, len(styleNames)+len(industries)+len(countries))
 	for _, name := range styleNames {
@@ -74,6 +96,13 @@ func buildFundamentalLoadings(styleNames, instruments []string, chars map[string
 		factors = append(factors, Factor{Name: "CTY:" + ctry, Type: FactorCountry})
 	}
 
+	names := map[string]bool{}
+	for _, factor := range factors {
+		if names[factor.Name] {
+			return nil, nil, fmt.Errorf("factormodel: duplicate factor name %s", factor.Name)
+		}
+		names[factor.Name] = true
+	}
 	loadings := make([][]float64, n)
 	for i, id := range instruments {
 		row := make([]float64, len(factors))
@@ -97,7 +126,7 @@ func buildFundamentalLoadings(styleNames, instruments []string, chars map[string
 		}
 		loadings[i] = row
 	}
-	return factors, loadings
+	return factors, loadings, nil
 }
 
 func distinctLabels(instruments []string, chars map[string]Characteristics, pick func(Characteristics) string) []string {
@@ -115,102 +144,189 @@ func distinctLabels(instruments []string, chars map[string]Characteristics, pick
 	return out
 }
 
-// crossSectionalFit estimates factor returns and the factor covariance from a
-// loading matrix B (N×K) and aligned instrument returns (rows: N instruments ×
-// L periods). At each period t it solves the ridge-regularized normal equations
-// (BᵀB + λI) f_t = Bᵀ r_t (the ridge keeps collinear industry/country dummies
-// invertible), then the factor covariance is sampleCov(f) and the specific
-// variance is the residual variance per instrument. Returns the factor-return
-// series (K×L), the factor covariance (K×K), the specific variances, and the
-// residual series (N×L) the blend model factors further.
-func crossSectionalFit(b [][]float64, returns [][]float64, ridge float64) (factorCov [][]float64, specific []float64, residuals [][]float64) {
-	n := len(b)
-	if n == 0 {
-		return nil, nil, nil
+// crossSectionalFit refuses unidentified designs before ridge regularization.
+// QR of [B; sqrt(ridge) I] avoids squaring the design condition number.
+func crossSectionalFit(b [][]float64, values [][]float64, ridge float64) ([][]float64, []float64, [][]float64, error) {
+	fail := func() ([][]float64, []float64, [][]float64, error) {
+		return nil, nil, nil, fmt.Errorf("factormodel: invalid or unidentified cross-sectional fit")
 	}
-	k := len(b[0])
-	l := len(returns[0])
-
-	// Normal-equation matrix M = BᵀB + λI (constant across t).
-	m := make([][]float64, k)
-	for a := 0; a < k; a++ {
-		m[a] = make([]float64, k)
-		for c := 0; c < k; c++ {
-			var s float64
-			for i := 0; i < n; i++ {
-				s += b[i][a] * b[i][c]
+	n := len(b)
+	if n < 2 || len(b[0]) == 0 || len(values) != n || len(values[0]) < 2 || !finiteDescriptor(ridge) || ridge < 0 {
+		return fail()
+	}
+	k, l := len(b[0]), len(values[0])
+	if n <= k {
+		return fail()
+	}
+	for i := range b {
+		if len(b[i]) != k || len(values[i]) != l {
+			return fail()
+		}
+		for _, v := range b[i] {
+			if !finiteDescriptor(v) {
+				return fail()
 			}
-			if a == c {
-				s += ridge
+		}
+		for _, v := range values[i] {
+			if !finiteDescriptor(v) {
+				return fail()
 			}
-			m[a][c] = s
 		}
 	}
-
-	factorSeries := make([][]float64, k) // factorSeries[f] = f_f over t
-	for f := range factorSeries {
-		factorSeries[f] = make([]float64, l)
+	if _, _, err := designQR(b); err != nil {
+		return fail()
 	}
-	residuals = make([][]float64, n)
+	augmented := make([][]float64, n+k)
+	copy(augmented, b)
+	for j := 0; j < k; j++ {
+		augmented[n+j] = make([]float64, k)
+		augmented[n+j][j] = math.Sqrt(ridge)
+	}
+	q, r, err := designQR(augmented)
+	if err != nil {
+		return fail()
+	}
+	series := make([][]float64, k)
+	for j := range series {
+		series[j] = make([]float64, l)
+	}
+	residuals := make([][]float64, n)
 	for i := range residuals {
 		residuals[i] = make([]float64, l)
 	}
-
-	rhs := make([]float64, k)
 	for t := 0; t < l; t++ {
-		// Bᵀ r_t.
-		for a := 0; a < k; a++ {
-			var s float64
+		f := make([]float64, k)
+		for j := k - 1; j >= 0; j-- {
+			v := 0.0
 			for i := 0; i < n; i++ {
-				s += b[i][a] * returns[i][t]
+				v += q[j][i] * values[i][t]
 			}
-			rhs[a] = s
+			for h := j + 1; h < k; h++ {
+				v -= r[j][h] * f[h]
+			}
+			f[j] = v / r[j][j]
+			if !finiteDescriptor(f[j]) {
+				return fail()
+			}
+			series[j][t] = f[j]
 		}
-		f, ok := solveLinear(m, rhs)
-		if !ok {
-			f = make([]float64, k) // singular even with ridge ⇒ no factor return this period
-		}
-		for a := 0; a < k; a++ {
-			factorSeries[a][t] = f[a]
-		}
-		// Residual ε_i,t = r_i,t − B_i·f_t.
 		for i := 0; i < n; i++ {
-			fitted := 0.0
-			for a := 0; a < k; a++ {
-				fitted += b[i][a] * f[a]
+			v := values[i][t]
+			for j := 0; j < k; j++ {
+				v -= b[i][j] * f[j]
 			}
-			residuals[i][t] = returns[i][t] - fitted
+			if !finiteDescriptor(v) {
+				return fail()
+			}
+			residuals[i][t] = v
 		}
 	}
-
-	factorCov = sampleCov(factorSeries)
-	specific = make([]float64, n)
-	for i := 0; i < n; i++ {
-		specific[i] = sampleVar(residuals[i])
+	cov := sampleCov(series)
+	specific := make([]float64, n)
+	for _, row := range cov {
+		for _, v := range row {
+			if !finiteDescriptor(v) {
+				return fail()
+			}
+		}
 	}
-	return factorCov, specific, residuals
+	for i := range specific {
+		specific[i] = sampleVar(residuals[i])
+		if !finiteDescriptor(specific[i]) {
+			return fail()
+		}
+	}
+	return cov, specific, residuals, nil
 }
 
 // fitFundamental builds the fundamental model over the universe, returning the
 // model plus the residual return series (N×L, instrument-row order) the blend
 // model runs PCA on. instruments is sorted for a deterministic universe order.
 func fitFundamental(ctx context.Context, cfg Config, instruments []string, asOf time.Time, chars CharacteristicProvider, rp ReturnsProvider) (*Model, [][]float64, error) {
+	if asOf.IsZero() || !finiteDescriptor(cfg.Ridge) || cfg.Ridge < 0 {
+		return nil, nil, fmt.Errorf("factormodel: invalid horizon or ridge")
+	}
+	seen := map[string]bool{}
+	for _, name := range cfg.StyleFactors {
+		if name == "" || seen[name] {
+			return nil, nil, fmt.Errorf("factormodel: empty/duplicate style factor")
+		}
+		seen[name] = true
+	}
 	universe := append([]string(nil), instruments...)
 	sort.Strings(universe)
-
 	charMap := make(map[string]Characteristics, len(universe))
+	excluded := map[string]string{}
 	for _, id := range universe {
-		if c, ok := chars.Characteristics(ctx, id, asOf); ok {
-			charMap[id] = c
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
 		}
+		c, ok := chars.Characteristics(ctx, id, asOf)
+		reason := ""
+		switch {
+		case !ok:
+			reason = "missing_characteristics"
+		case !c.AsOf.Equal(asOf) || c.SourceDigest == "":
+			reason = "unproven_characteristics"
+		default:
+			for _, name := range cfg.StyleFactors {
+				v, present := c.Style[name]
+				if !present {
+					reason = "missing_style:" + name
+					break
+				}
+				if !finiteDescriptor(v) {
+					reason = "nonfinite_style:" + name
+					break
+				}
+			}
+		}
+		if reason != "" {
+			excluded[id] = reason
+			continue
+		}
+		// Snapshot only configured, finite fields; unused vendor descriptors neither
+		// contaminate normalization nor introduce NaNs into artifact serialization.
+		c.Style = copyStyles(c.Style, cfg.StyleFactors)
+		c.AsOf = c.AsOf.UTC()
+		charMap[id] = c
 	}
-	factors, loadings := buildFundamentalLoadings(cfg.StyleFactors, universe, charMap)
+	industry, country := false, false
+	for _, c := range charMap {
+		industry = industry || c.Industry != ""
+		country = country || c.Country != ""
+	}
+	eligible := make([]string, 0, len(universe))
+	for _, id := range universe {
+		c, ok := charMap[id]
+		if !ok {
+			continue
+		}
+		if (industry && c.Industry == "") || (country && c.Country == "") {
+			excluded[id] = "missing_classification"
+			delete(charMap, id)
+			continue
+		}
+		eligible = append(eligible, id)
+	}
+	universe = eligible
+	if len(universe) < 2 {
+		return nil, nil, fmt.Errorf("factormodel: insufficient descriptor coverage: %v", excluded)
+	}
+
+	factors, loadings, err := buildFundamentalLoadings(cfg.StyleFactors, universe, charMap)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	panel, err := alignedReturns(ctx, rp, universe, asOf, cfg.window())
 	if err != nil {
 		return nil, nil, err
 	}
-	factorCov, specificSlice, residuals := crossSectionalFit(loadings, panel.Values, cfg.ridge())
+	factorCov, specificSlice, residuals, err := crossSectionalFit(loadings, panel.Values, cfg.ridge())
+	if err != nil {
+		return nil, nil, err
+	}
 
 	specific := make(map[string]float64, len(universe))
 	for i, id := range universe {
@@ -218,5 +334,25 @@ func fitFundamental(ctx context.Context, cfg Config, instruments []string, asOf 
 	}
 	m := newModel(factors, universe, loadings, factorCov, specific)
 	m.InputProvenance = panel.Params()
+	descriptor, err := json.Marshal(struct {
+		Policy   string
+		Config   Config
+		Values   map[string]Characteristics
+		Excluded map[string]string
+	}{DescriptorPolicy, cfg, charMap, excluded})
+	if err != nil {
+		return nil, nil, err
+	}
+	digest := sha256.Sum256(descriptor)
+	exclusions, _ := json.Marshal(excluded)
+	m.InputProvenance["descriptor_policy"] = DescriptorPolicy
+	m.InputProvenance["descriptor_digest"] = hex.EncodeToString(digest[:])
+	m.InputProvenance["descriptor_exclusions"] = string(exclusions)
+	m.InputProvenance["descriptor_eligible"] = strconv.Itoa(len(universe))
+	if industry && country {
+		m.InputProvenance["country_reference"] = distinctLabels(universe, charMap, func(c Characteristics) string { return c.Country })[0]
+	}
+	combined := sha256.Sum256([]byte(panel.Digest + ":" + hex.EncodeToString(digest[:])))
+	m.InputProvenance["input_digest"] = hex.EncodeToString(combined[:])
 	return m, residuals, nil
 }

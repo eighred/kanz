@@ -17,8 +17,10 @@ func (m matrixReturns) Returns(_ context.Context, id string, _ time.Time, _ int)
 
 type staticChars map[string]Characteristics
 
-func (c staticChars) Characteristics(_ context.Context, id string, _ time.Time) (Characteristics, bool) {
+func (c staticChars) Characteristics(_ context.Context, id string, asOf time.Time) (Characteristics, bool) {
 	v, ok := c[id]
+	v.AsOf = asOf
+	v.SourceDigest = "fixture:" + id
 	return v, ok
 }
 
@@ -57,7 +59,10 @@ func TestFit_Dispatch(t *testing.T) {
 		"B": {Style: map[string]float64{"Size": 2}, Industry: "Tech"},
 		"C": {Style: map[string]float64{"Size": 3}, Industry: "Bank"},
 	}
-	p := Providers{Characteristics: chars, Returns: testReturns}
+	ids = append(ids, "D")
+	chars["D"] = Characteristics{Style: map[string]float64{"Size": 4}, Industry: "Bank"}
+	rets := matrixReturns{"A": testReturns["A"], "B": testReturns["B"], "C": testReturns["C"], "D": {.03, -.01, .01, .02, -.03, .01}}
+	p := Providers{Characteristics: chars, Returns: rets}
 
 	stat, err := Fit(ctx, Config{Type: Statistical, StatFactors: 2}, ids, asOf, p)
 	if err != nil {

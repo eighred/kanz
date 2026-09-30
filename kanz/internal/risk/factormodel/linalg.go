@@ -5,58 +5,9 @@ import "math"
 // Dependency-free linear algebra for the factor model — the same "own the small
 // numerical core, no gonum" stance the VaR/curve/optimization math takes. Only
 // what the fundamental (cross-sectional OLS) and statistical (PCA) estimators
-// need: a symmetric solver, a symmetric eigendecomposition, sample
-// mean/covariance, cross-sectional z-scoring, and an inverse-normal CDF for
+// need: a symmetric eigendecomposition, sample
+// mean/covariance and an inverse-normal CDF for
 // parametric factor VaR.
-
-// solveLinear solves A·x = b for a square A by Gaussian elimination with partial
-// pivoting. ok=false when A is singular (a zero pivot) — the caller adds a ridge
-// term and retries rather than dividing by zero.
-func solveLinear(a [][]float64, b []float64) ([]float64, bool) {
-	n := len(a)
-	// Work on copies so the caller's matrix/vector are untouched.
-	m := make([][]float64, n)
-	for i := range m {
-		m[i] = append([]float64(nil), a[i]...)
-	}
-	x := append([]float64(nil), b...)
-	for col := 0; col < n; col++ {
-		// Partial pivot: swap in the row with the largest |pivot|.
-		piv := col
-		max := math.Abs(m[col][col])
-		for r := col + 1; r < n; r++ {
-			if v := math.Abs(m[r][col]); v > max {
-				max, piv = v, r
-			}
-		}
-		if max == 0 {
-			return nil, false
-		}
-		m[col], m[piv] = m[piv], m[col]
-		x[col], x[piv] = x[piv], x[col]
-		// Eliminate below.
-		for r := col + 1; r < n; r++ {
-			f := m[r][col] / m[col][col]
-			if f == 0 {
-				continue
-			}
-			for c := col; c < n; c++ {
-				m[r][c] -= f * m[col][c]
-			}
-			x[r] -= f * x[col]
-		}
-	}
-	// Back-substitute.
-	out := make([]float64, n)
-	for i := n - 1; i >= 0; i-- {
-		s := x[i]
-		for c := i + 1; c < n; c++ {
-			s -= m[i][c] * out[c]
-		}
-		out[i] = s / m[i][i]
-	}
-	return out, true
-}
 
 // eigenSym returns the eigenvalues and eigenvectors of a symmetric matrix via the
 // cyclic Jacobi rotation method (robust and dependency-free for the small
@@ -203,22 +154,6 @@ func sampleCov(rows [][]float64) [][]float64 {
 		}
 	}
 	return cov
-}
-
-// zScore standardizes xs cross-sectionally to mean 0 / unit standard deviation —
-// the BARRA convention that puts every style factor on one comparable scale. A
-// zero-variance input (every value identical) returns all zeros (no exposure).
-func zScore(xs []float64) []float64 {
-	mu := mean(xs)
-	sd := math.Sqrt(sampleVar(xs))
-	out := make([]float64, len(xs))
-	if sd == 0 {
-		return out
-	}
-	for i, x := range xs {
-		out[i] = (x - mu) / sd
-	}
-	return out
 }
 
 // quadForm returns xᵀ M x for a square M.

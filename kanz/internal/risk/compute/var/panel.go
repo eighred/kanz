@@ -3,14 +3,12 @@ package varmodel
 import (
 	"context"
 	"maps"
-	"math/big"
 
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/marketdata/returns"
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/domain"
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 )
 
 // One panel owns both empirical P&L and Monte-Carlo covariance. Provenance is
@@ -42,9 +40,7 @@ func portfolioPanel(ctx context.Context, p *domain.Portfolio, rp compute.Returns
 	for i, id := range panel.Instruments {
 		row[id] = i
 	}
-	excluded := new(big.Rat)
-	excludedDecimal := &commonpb.Decimal{}
-	excludedKnown := true
+	var excluded compute.ExcludedExposure
 	for _, pos := range positions {
 		if !pos.InBaseCurrency(p.BaseCurrency()) {
 			continue
@@ -54,29 +50,13 @@ func portfolioPanel(ctx context.Context, p *domain.Portfolio, rp compute.Returns
 			if missing {
 				cov.Exclude(pos.InstrumentID, SkipNoReturns)
 			}
-			amount, valid := dec.FromProtoChecked(pos.MarketValue.Amount)
-			if valid {
-				excluded.Add(excluded, amount.Abs(amount))
-				absolute, fits := dec.Abs(pos.MarketValue.Amount)
-				if fits {
-					excludedDecimal, fits = dec.Add(excludedDecimal, absolute)
-				}
-				excludedKnown = excludedKnown && fits
-			} else {
-				excludedKnown = false
-			}
+			excluded.Add(pos.MarketValue.Amount)
 			continue
 		}
 		values[row[id]] += dec.Float64Or(pos.MarketValue.Amount, 0)
 		cov.Contributed++
 	}
-	// Metadata is still money: never serialize a rounded exclusion as exact.
-	if excludedKnown && dec.FromProto(excludedDecimal).Cmp(excluded) == 0 {
-		prov.ExcludedGross = excludedDecimal
-	} else {
-		prov.ExcludedGross = nil
-		cov.ExcludeWhole("excluded_exposure_unrepresentable")
-	}
+	prov.ExcludedGross = excluded.Result(cov)
 	if failed {
 		reason := SkipInsufficientHistory
 		if err == nil {
