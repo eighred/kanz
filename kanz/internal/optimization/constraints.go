@@ -4,9 +4,9 @@ import (
 	"context"
 	"github.com/eighred/kanz/internal/dec"
 	"math"
+	"strconv"
 	"time"
 
-	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 
 	"github.com/eighred/kanz/internal/compliance"
@@ -140,53 +140,19 @@ func loFloor(longOnly bool) float64 {
 // portfolio" and "every rule was satisfied" the same answer — the shape
 // compliance.Decision already refuses under its own name (Ungoverned) rather
 // than letting it fall through to a pass.
+// Deprecated: float callers cannot recover source precision. Live proposal APIs
+// use CheckMandateExact. This compatibility function no longer rounds to cents.
 func CheckMandate(ctx context.Context, weights map[string]float64, nav float64, currency string, classifier compliance.Classifier, engine *compliance.Engine, mandate *compliancepb.Mandate, asOf time.Time) (MandateStatus, []string) {
-	if mandate == nil {
-		return MandateUnchecked, nil
-	}
-	if engine == nil {
-		engine = compliance.NewEngine(nil)
-	}
-	// NAVBasisEquity IS A CLAIM, and here it is true by construction rather than
-	// by provenance (#780). The positions below are w x nav, so the leverage
-	// ratio LeverageRule computes is
-	//
-	//	sum(|w_i| x nav) / nav  =  sum(|w_i|)
-	//
-	// and nav CANCELS. The check is therefore about the proposed weight vector —
-	// exactly what a rebalance proposal should be checked for — and it binds for
-	// any positive nav whatever that number's own lineage is. That is not true of
-	// a real portfolio book, where the numerator is a sum of independently valued
-	// holdings and the denominator has to actually be equity; see BookSource.
-	book := &compliance.Book{
-		PortfolioID:  mandate.GetPortfolioId(),
-		BaseCurrency: currency,
-		NAV:          money(nav, currency),
-		NAVBasis:     compliance.NAVBasisEquity,
-	}
+	exact := make(map[string]dec.Exact, len(weights))
 	for id, w := range weights {
-		book.Positions = append(book.Positions, compliance.Position{
-			InstrumentID: id,
-			MarketValue:  money(w*nav, currency),
-		})
-	}
-	res := engine.Evaluate(ctx, &compliance.Candidate{Book: book, Classifier: classifier, AsOf: asOf}, mandate)
-	if res.GetStatus() == compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH {
-		msgs := make([]string, 0, len(res.GetViolations()))
-		for _, v := range res.GetViolations() {
-			if v.GetSeverity() == compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH {
-				msgs = append(msgs, v.GetMessage())
-			}
+		if math.IsNaN(w) || math.IsInf(w, 0) {
+			return MandateInfeasible, []string{ErrExactProposal.Error()}
 		}
-		return MandateInfeasible, msgs
+		exact[id] = dec.Exact(strconv.FormatFloat(w, 'f', -1, 64))
 	}
-	return MandateFeasible, nil
-}
-
-// money builds a Money at cents precision in the given currency.
-func money(amount float64, currency string) *commonpb.Money {
-	return &commonpb.Money{
-		Amount:       &commonpb.Decimal{Coefficient: int64(math.Round(amount * 100)), Exponent: -2},
-		CurrencyCode: currency,
+	status, violations, err := CheckMandateExact(ctx, exact, dec.Exact(strconv.FormatFloat(nav, 'f', -1, 64)), currency, classifier, engine, mandate, asOf)
+	if err != nil {
+		return MandateInfeasible, []string{err.Error()}
 	}
+	return status, violations
 }

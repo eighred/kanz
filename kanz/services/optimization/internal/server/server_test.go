@@ -5,6 +5,7 @@ import (
 
 	"encoding/json"
 	"fmt"
+	"github.com/eighred/kanz/internal/dec"
 	"io"
 	"log/slog"
 	"net/http"
@@ -60,14 +61,14 @@ func TestServer_Propose(t *testing.T) {
 	body := `{"portfolio_id":"PF","instruments":["A","B"],
 		"covariance":[[0.04,0],[0,0.04]],
 		"objective":{"Type":1},
-		"current_weights":{"A":1.0},"nav":100000,
-		"prices":{"A":10,"B":10}}`
-	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
+		"currency":"USD","current_weights":{"A":"1.0"},"nav":"100000","threshold":"0.005",
+		"prices":{"A":"10","B":"10"}}`
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v2/propose", body, "user:pm")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Targets map[string]float64
+		Targets map[string]dec.Exact
 		Trades  []struct {
 			InstrumentID string
 			Side         int
@@ -76,15 +77,15 @@ func TestServer_Propose(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if d := resp.Targets["A"] - 0.5; d > 1e-2 || d < -1e-2 {
-		t.Fatalf("target A should be ~0.5, got %.4f", resp.Targets["A"])
+	if resp.Targets["A"] != "0.5" {
+		t.Fatalf("target A should be ~0.5, got %s", resp.Targets["A"])
 	}
 	if len(resp.Trades) == 0 {
 		t.Fatal("expected trades to move from 100%% A to 50/50")
 	}
 }
 
-// ordersBody is a proposal in the shape a client gets back from /v1/propose: no
+// ordersBody is a proposal in the shape a client gets back from /v2/propose: no
 // mandate verdict on it, because nothing checked it. It used to carry
 // "MandateFeasible":true, which is what every proposal this service built said
 // about itself (#646).
@@ -223,12 +224,12 @@ func TestASuppliedVerdictIsDecodedWhateverItsCase(t *testing.T) {
 	}
 }
 
-// AN ECHOED /v1/propose RESPONSE IS REFUSED FOR THE RIGHT REASON. A client that
+// AN ECHOED /v2/propose RESPONSE IS REFUSED FOR THE RIGHT REASON. A client that
 // round-trips the proposal it was handed is not doing anything wrong, so it must
 // be told what is actually missing (nothing checked this) rather than being sent
 // away over a field it merely copied back.
-func TestARoundTrippedProposalIsRefusedAsUncheckedNotAsForged(t *testing.T) {
-	// A REAL-CLOCK BOUND FOR THIS ONE TEST. /v1/propose stamps AsOf with the
+func TestExactReadOnlyProposalCannotEnterLegacyOrders(t *testing.T) {
+	// A REAL-CLOCK BOUND FOR THIS ONE TEST. /v2/propose stamps AsOf with the
 	// wall clock, so a server pinned to testClock would see its own freshly
 	// built proposal as dated in the future and refuse it as stale — measuring
 	// the harness rather than the issuer rule this test is about (#970).
@@ -239,9 +240,9 @@ func TestARoundTrippedProposalIsRefusedAsUncheckedNotAsForged(t *testing.T) {
 	proposeBody := `{"portfolio_id":"PF","instruments":["A","B"],
 		"covariance":[[0.04,0],[0,0.04]],
 		"objective":{"Type":1},
-		"current_weights":{"A":1.0},"nav":100000,
-		"prices":{"A":10,"B":10}}`
-	proposed := asPrincipal(t, s, http.MethodPost, "/v1/propose", proposeBody, "user:pm")
+		"currency":"USD","current_weights":{"A":"1.0"},"nav":"100000","threshold":"0.005",
+		"prices":{"A":"10","B":"10"}}`
+	proposed := asPrincipal(t, s, http.MethodPost, "/v2/propose", proposeBody, "user:pm")
 	if proposed.Code != http.StatusOK {
 		t.Fatalf("propose: got %d body %s", proposed.Code, proposed.Body.String())
 	}
@@ -250,14 +251,14 @@ func TestARoundTrippedProposalIsRefusedAsUncheckedNotAsForged(t *testing.T) {
 		t.Fatal(err)
 	}
 	if asSeen.MandateStatus != "UNCHECKED" {
-		t.Fatalf("/v1/propose reported MandateStatus %q — it consults no mandate and must say so",
+		t.Fatalf("/v2/propose reported MandateStatus %q — it consults no mandate and must say so",
 			asSeen.MandateStatus)
 	}
 
 	rec := asPrincipal(t, s, http.MethodPost, "/v1/orders",
 		`{"proposal":`+proposed.Body.String()+`}`, "alice")
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("an echoed proposal got %d, want 422: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("an exact proposal cannot enter legacy orders; got %d, want 400: %s", rec.Code, rec.Body.String())
 	}
 	if strings.Contains(rec.Body.String(), "must not be supplied in the body") {
 		t.Error("a client echoing the proposal it was given was blamed for supplying a verdict; " +
@@ -328,19 +329,21 @@ func TestServer_Propose_BlackLitterman(t *testing.T) {
 		"objective":{"Type":2},
 		"black_litterman":{"market_weights":[0.5,0.5],"risk_aversion":2.5,"tau":0.05,
 			"views":[{"p":[1,0],"q":0.20,"omega":0}]},
-		"current_weights":{"A":0.5,"B":0.5},"nav":100000,"prices":{"A":10,"B":10}}`
-	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
+		"currency":"USD","current_weights":{"A":"0.5","B":"0.5"},"nav":"100000","threshold":"0.005","prices":{"A":"10","B":"10"}}`
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v2/propose", body, "user:pm")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("propose+BL: got %d body %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Targets map[string]float64
+		Targets map[string]dec.Exact
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Targets["A"] <= 0.5 {
-		t.Fatalf("bullish BL view on A should raise A's target above 0.5, got %.4f", resp.Targets["A"])
+	a, _ := resp.Targets["A"].Rat()
+	approx, _ := a.Float64()
+	if approx <= 0.5 {
+		t.Fatalf("bullish BL view on A should raise A's target above 0.5, got %s", resp.Targets["A"])
 	}
 }
 
@@ -351,8 +354,8 @@ func TestServer_Propose_BlackLittermanInvalid(t *testing.T) {
 		"objective":{"Type":2},
 		"black_litterman":{"market_weights":[0.5,0.5],"risk_aversion":0,"tau":0.05,
 			"views":[{"p":[1,0],"q":0.20,"omega":0}]},
-		"current_weights":{"A":0.5,"B":0.5},"nav":100000,"prices":{"A":10,"B":10}}`
-	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
+		"currency":"USD","current_weights":{"A":"0.5","B":"0.5"},"nav":"100000","threshold":"0.005","prices":{"A":"10","B":"10"}}`
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v2/propose", body, "user:pm")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed BL ⇒ 400, got %d", rec.Code)
 	}
@@ -362,7 +365,7 @@ func TestServer_Propose_BodyTooLarge(t *testing.T) {
 	// A body over the 8 MiB cap ⇒ 400 (MaxBytesReader makes the decoder error).
 	big := strings.Repeat("A", (8<<20)+1024)
 	body := `{"portfolio_id":"` + big + `","instruments":["A"],"covariance":[[0.04]],"objective":{"Type":1}}`
-	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v2/propose", body, "user:pm")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("oversized body ⇒ 400, got %d", rec.Code)
 	}
@@ -378,9 +381,9 @@ func TestProposeDoesNotReportZeroRiskFromAZeroCovariance(t *testing.T) {
 	body := `{"portfolio_id":"PF","instruments":["A","B"],
 		"covariance":[[0,0],[0,0]],
 		"objective":{"Type":1},
-		"current_weights":{"A":1.0},"nav":100000,
-		"prices":{"A":10,"B":10}}`
-	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
+		"currency":"USD","current_weights":{"A":"1.0"},"nav":"100000","threshold":"0.005",
+		"prices":{"A":"10","B":"10"}}`
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v2/propose", body, "user:pm")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
 	}
@@ -394,7 +397,7 @@ func TestProposeDoesNotReportZeroRiskFromAZeroCovariance(t *testing.T) {
 	var resp struct {
 		ExpectedRisk      *float64
 		CovarianceQuality string
-		Targets           map[string]float64
+		Targets           map[string]dec.Exact
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
@@ -421,8 +424,8 @@ func TestProposeReportsWhetherTheCovarianceWasVouchedFor(t *testing.T) {
 	const base = `{"portfolio_id":"PF","instruments":["A","B"],
 		"covariance":[[0.04,0],[0,0.04]],
 		"objective":{"Type":1},
-		"current_weights":{"A":1.0},"nav":100000,
-		"prices":{"A":10,"B":10}%s}`
+		"currency":"USD","current_weights":{"A":"1.0"},"nav":"100000","threshold":"0.005",
+		"prices":{"A":"10","B":"10"}%s}`
 	cases := []struct {
 		name  string
 		extra string
@@ -435,7 +438,7 @@ func TestProposeReportsWhetherTheCovarianceWasVouchedFor(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", fmt.Sprintf(base, tc.extra), "user:pm")
+			rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v2/propose", fmt.Sprintf(base, tc.extra), "user:pm")
 			if rec.Code != http.StatusOK {
 				t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
 			}
@@ -474,9 +477,9 @@ func TestProposeRefusesAnUndefinedTangencyPortfolio(t *testing.T) {
 		"covariance":[[0.04,0.04],[0.04,0.04]],
 		"expected_returns":[0.05,0.10],
 		"objective":{"Type":2},
-		"current_weights":{"A":1.0},"nav":100000,
-		"prices":{"A":10,"B":10}}`
-	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", body, "user:pm")
+		"currency":"USD","current_weights":{"A":"1.0"},"nav":"100000","threshold":"0.005",
+		"prices":{"A":"10","B":"10"}}`
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v2/propose", body, "user:pm")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("a singular Σ under MaxSharpe got %d, want 400: %s", rec.Code, rec.Body.String())
 	}
