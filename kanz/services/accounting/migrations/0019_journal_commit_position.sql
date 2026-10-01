@@ -6,6 +6,7 @@ CREATE TABLE ledger_heads (
     tenant_id TEXT NOT NULL DEFAULT app_current_tenant(),
     portfolio_id TEXT NOT NULL,
     position BIGINT NOT NULL CHECK (position >= 0),
+    legacy_position BIGINT NOT NULL DEFAULT 0 CHECK (legacy_position >= 0 AND legacy_position <= position),
     PRIMARY KEY (tenant_id, portfolio_id)
 );
 CREATE TABLE ledger_append_positions (
@@ -44,8 +45,8 @@ CREATE OR REPLACE FUNCTION ledger_prepare_append() RETURNS trigger AS $$
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtext(NEW.tenant_id), hashtext(NEW.portfolio_id));
     IF NOT EXISTS (SELECT 1 FROM ledger_heads WHERE tenant_id=NEW.tenant_id AND portfolio_id=NEW.portfolio_id) THEN
-        INSERT INTO ledger_heads (tenant_id, portfolio_id, position)
-        SELECT NEW.tenant_id, NEW.portfolio_id, count(*)
+        INSERT INTO ledger_heads (tenant_id, portfolio_id, position, legacy_position)
+        SELECT NEW.tenant_id, NEW.portfolio_id, count(*), count(*)
         FROM ledger_entries WHERE tenant_id=NEW.tenant_id AND portfolio_id=NEW.portfolio_id;
     END IF;
     RETURN NEW;
@@ -79,7 +80,7 @@ ALTER TABLE ledger_snapshots ADD COLUMN max_effective_time TIMESTAMPTZ;
 -- replay the journal. Reject old writers too: an old UPSERT could otherwise
 -- retain a new position while replacing the balances with an obsolete fold.
 CREATE OR REPLACE FUNCTION ledger_fence_checkpoint() RETURNS trigger AS $$
-DECLARE head_position bigint;
+DECLARE head_position bigint; legacy_floor bigint;
 BEGIN
     IF TG_OP='UPDATE' AND NEW.corporate_action_version IS NULL THEN
         -- Allow the old/new action invalidation path, but leave no usable cursor.
@@ -90,9 +91,9 @@ BEGIN
         RAISE EXCEPTION 'ledger checkpoint requires commit-position version 2';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtext(NEW.tenant_id), hashtext(NEW.portfolio_id));
-    SELECT position INTO head_position FROM ledger_heads
+    SELECT position, legacy_position INTO head_position, legacy_floor FROM ledger_heads
       WHERE tenant_id=NEW.tenant_id AND portfolio_id=NEW.portfolio_id;
-    IF head_position IS NULL OR NEW.journal_position > head_position OR NEW.journal_position <= 0 THEN
+    IF head_position IS NULL OR NEW.journal_position > head_position OR NEW.journal_position < legacy_floor OR NEW.journal_position <= 0 THEN
         RAISE EXCEPTION 'stale ledger checkpoint position';
     END IF;
     RETURN NEW;

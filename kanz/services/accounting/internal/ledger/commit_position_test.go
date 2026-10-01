@@ -370,6 +370,35 @@ func TestPostgresPITEffectsCannotCertifyCurrentCheckpoint(t *testing.T) {
 	}
 }
 
+func TestPostgresCheckpointCannotOmitUnindexedLegacyPrefix(t *testing.T) {
+	pool := newPoolThrough(t, "0018_corporate_action_revisions.sql")
+	ctx := t.Context()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT set_config('app.venue_account_id','',false)`); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id string) {
+		t.Helper()
+		if _, err := conn.Exec(ctx, `INSERT INTO ledger_entries(tenant_id,entry_id,portfolio_id,entry_type,instrument_id,quantity,price,effective_time,knowledge_time) VALUES(app_current_tenant(),$1,'PF',0,'AAPL','1','10',$2,$3)`, id, day(1), day(10)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := NewPostgres(pool)
+	insert("legacy-one")
+	prefix := replayJournal(t, st, "PF").Snapshot(day(10))
+	insert("legacy-two")
+	applyCommitPositionMigration(t, pool)
+	if err := st.SaveSnapshot(ctx, prefix); !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("checkpoint omitted an unindexed legacy commit: %v", err)
+	}
+	checkpointAll(t, st, "PF")
+	equalCurrentJournal(t, st, "PF")
+}
+
 func TestConflictingInsertCannotQueueAnEmptyPortfolio(t *testing.T) {
 	commitStores(t, func(t *testing.T, st Store) {
 		e := trade("first", "AAPL", "100", "10", 1, 10)

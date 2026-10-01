@@ -427,16 +427,16 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 	if actionCount != snap.ActionCount {
 		return ErrStaleActionSnapshot
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO ledger_heads (tenant_id, portfolio_id, position)
-		SELECT current_setting('app.tenant_id'), $1, count(*) FROM ledger_entries WHERE portfolio_id=$1
+	if _, err := tx.Exec(ctx, `INSERT INTO ledger_heads (tenant_id, portfolio_id, position, legacy_position)
+		SELECT current_setting('app.tenant_id'), $1, count(*), count(*) FROM ledger_entries WHERE portfolio_id=$1
 		ON CONFLICT (tenant_id, portfolio_id) DO NOTHING`, snap.PortfolioID); err != nil {
 		return err
 	}
-	var head int64
-	if err := tx.QueryRow(ctx, `SELECT position FROM ledger_heads WHERE portfolio_id=$1`, snap.PortfolioID).Scan(&head); err != nil {
+	var head, legacyFloor int64
+	if err := tx.QueryRow(ctx, `SELECT position, legacy_position FROM ledger_heads WHERE portfolio_id=$1`, snap.PortfolioID).Scan(&head, &legacyFloor); err != nil {
 		return err
 	}
-	if snap.JournalPosition > head || snap.JournalPosition <= 0 || !snap.commitPrefix {
+	if snap.JournalPosition > head || snap.JournalPosition < legacyFloor || snap.JournalPosition <= 0 || !snap.commitPrefix {
 		return ErrStaleSnapshot
 	}
 	_, err = tx.Exec(ctx, `
