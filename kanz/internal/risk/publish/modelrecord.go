@@ -5,6 +5,8 @@ import (
 	"errors"
 	"maps"
 	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -74,15 +76,6 @@ const (
 	schemaVersionFactorModel = 1
 )
 
-// curveRateExp is the scale calibrated zero rates are carried at on the wire.
-//
-// TEN DECIMAL PLACES, and it is not cosmetic. A zero rate is a small number
-// whose LAST digits are the curve: two curves that agree to 1e-6 still disagree
-// on a 30-year DV01 by an amount a desk would notice, and a record of a curve
-// exists precisely so somebody can re-derive the number that was published from
-// it. The coefficient at this scale is ~5e8 for a 5% rate, nowhere near int64.
-const curveRateExp int32 = -10
-
 // CurveMethodMixedStrip is the one method this engine calibrates by: deposits,
 // rate futures and par swaps solved sequentially in ascending maturity
 // (curve.Calibrate). A closed vocabulary of one, named rather than left empty,
@@ -123,6 +116,10 @@ func (p *Publisher) EmitCalibratedCurve(ctx context.Context, currency string, as
 	if currency == "" {
 		return errors.New("publish: curve currency is empty")
 	}
+	artifact := ToProtoCalibratedCurve(currency, asOf, c)
+	if _, err := curve.FromArtifact(artifact); err != nil {
+		return err
+	}
 	return p.producer.Publish(ctx, bus.Event{
 		Subject:          EventTypeCurveCalibrated,
 		EventType:        EventTypeCurveCalibrated,
@@ -132,7 +129,7 @@ func (p *Publisher) EmitCalibratedCurve(ctx context.Context, currency string, as
 		EventTime:        asOf,
 		PartitionKey:     currency,
 		PayloadSchemaRef: schemaRefCalibratedCurve,
-		Payload:          ToProtoCalibratedCurve(currency, asOf, c),
+		Payload:          artifact,
 	})
 }
 
@@ -155,6 +152,10 @@ func (p *Publisher) EmitFactorModel(ctx context.Context, m *factormodel.Model) e
 	if m.ModelID == "" || m.AsOf.IsZero() {
 		return ErrModelNamesNoInstance
 	}
+	artifact := ToProtoFactorModelSnapshot(m)
+	if _, err := factormodel.FromSnapshot(artifact); err != nil {
+		return err
+	}
 	return p.producer.Publish(ctx, bus.Event{
 		Subject:          EventTypeFactorModelFitted,
 		EventType:        EventTypeFactorModelFitted,
@@ -164,7 +165,7 @@ func (p *Publisher) EmitFactorModel(ctx context.Context, m *factormodel.Model) e
 		EventTime:        m.AsOf,
 		PartitionKey:     m.ModelID,
 		PayloadSchemaRef: schemaRefFactorSnapshot,
-		Payload:          ToProtoFactorModelSnapshot(m),
+		Payload:          artifact,
 	})
 }
 
@@ -307,17 +308,30 @@ func toProtoFactorType(t factormodel.FactorType) factorpb.FactorType {
 	}
 }
 
-// rateDecimal carries a continuously-compounded zero rate at curveRateExp. A
-// non-finite rate is not representable and must not become a plausible-looking
-// zero: Calibrate has already refused a NaN discount factor, so reaching here
-// with one is a defect, and a zero rate is a FLAT curve — the shape that prices
-// a bond book at no rate risk at all.
+// rateDecimal preserves the shortest decimal that round-trips to the calibrated
+// binary rate. Fixed-scale rounding changes the curve and makes exact replay
+// impossible. These are model rates, never money or position quantities.
 func rateDecimal(r float64) *commonpb.Decimal {
 	if math.IsNaN(r) || math.IsInf(r, 0) {
 		return nil
 	}
-	return &commonpb.Decimal{
-		Coefficient: int64(math.Round(r * math.Pow10(int(-curveRateExp)))),
-		Exponent:    curveRateExp,
+	parts := strings.Split(strconv.FormatFloat(r, 'e', -1, 64), "e")
+	whole, fraction, _ := strings.Cut(parts[0], ".")
+	digits := whole + fraction
+	coefficient, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return nil
 	}
+	exponent, err := strconv.ParseInt(parts[1], 10, 32)
+	if err != nil {
+		return nil
+	}
+	if dot := strings.IndexByte(parts[0], '.'); dot >= 0 {
+		exponent -= int64(len(parts[0]) - dot - 1)
+	}
+	// Match the platform's bounded Decimal domain at the untrusted boundary.
+	if exponent < -64 || exponent > 64 {
+		return nil
+	}
+	return &commonpb.Decimal{Coefficient: coefficient, Exponent: int32(exponent)}
 }

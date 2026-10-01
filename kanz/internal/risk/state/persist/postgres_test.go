@@ -67,7 +67,7 @@ func tenantPool(t *testing.T, tenant string) *pgxpool.Pool {
 func applySchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS applied_keys, positions, portfolios CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS risk_model_artifacts, applied_keys, positions, portfolios CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))

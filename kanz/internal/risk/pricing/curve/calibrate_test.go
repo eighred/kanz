@@ -8,6 +8,26 @@ import (
 	"time"
 )
 
+func TestCalibratorFailedRecordPreservesPriorCurve(t *testing.T) {
+	ctx := context.Background()
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store := NewStore()
+	prior, err := NewZeroCurve([]float64{1}, []float64{.03}, Continuous, LinearZero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Put("USD", at, prior)
+	failure := errors.New("artifact publication unavailable")
+	cal := &Calibrator{Store: store, Source: staticQuotes{qs: []RateQuote{{Kind: Deposit, Tenor: 1, Value: .05}}},
+		OnCalibrated: func(context.Context, string, time.Time, *Curve) error { return failure }}
+	if _, err := cal.Refresh(ctx, "USD", at.Add(time.Hour)); !errors.Is(err, failure) {
+		t.Fatalf("error = %v", err)
+	}
+	if got, ok := store.Curve(ctx, "USD", at.Add(time.Hour)); !ok || got != prior {
+		t.Fatal("failed commit displaced the prior curve")
+	}
+}
+
 // On a swaps-only annual strip Calibrate must reproduce Bootstrap exactly —
 // the two solve the same par condition, one by recurrence, one by bisection.
 func TestCalibrate_SwapsOnlyMatchesBootstrap(t *testing.T) {
@@ -187,11 +207,11 @@ func TestCalibrator_OnCalibratedRecordsWhatReachedTheStore(t *testing.T) {
 		},
 		Store:  store,
 		Interp: LogLinearDF,
-		OnCalibrated: func(_ context.Context, ccy string, at time.Time, c *Curve) {
-			// AFTER Put, NOT BEFORE: the observer must record what a reader can
-			// actually resolve, so the store is interrogated from inside it.
+		OnCalibrated: func(_ context.Context, ccy string, at time.Time, c *Curve) error {
+			// The curve must remain invisible until recording succeeds.
 			got, ok := store.Curve(ctx, ccy, at)
 			seen = append(seen, record{ccy, at, c, ok && got == c})
+			return nil
 		},
 	}
 	if _, err := cal.Refresh(ctx, "USD", asOf); err != nil {
@@ -203,9 +223,11 @@ func TestCalibrator_OnCalibratedRecordsWhatReachedTheStore(t *testing.T) {
 	if seen[0].currency != "USD" || !seen[0].asOf.Equal(asOf) {
 		t.Errorf("OnCalibrated(%q, %v) want (USD, %v)", seen[0].currency, seen[0].asOf, asOf)
 	}
-	if !seen[0].inStore {
-		t.Error("OnCalibrated fired with a curve the store does not serve — the record would " +
-			"name an artifact that never priced anything")
+	if seen[0].inStore {
+		t.Error("curve became visible before its artifact was recorded")
+	}
+	if got, ok := store.Curve(ctx, "USD", asOf); !ok || got != seen[0].c {
+		t.Fatal("recorded curve was not installed")
 	}
 	// THE COVERAGE MUST BE ON THE CURVE THE OBSERVER SEES. Refresh stamps it
 	// before Put; an observer handed the pre-stamp curve would record a complete-

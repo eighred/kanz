@@ -587,12 +587,14 @@ data:
                   "inference.feature.computed",
                   "risk.curve.calibrated", "risk.factor.model_fitted",
                   "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
+                  "dlq.risk.curve.calibrated", "dlq.risk.factor.model_fitted",
                   "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
                 ]
               }
               subscribe: {
                 allow: [
                   "risk.portfolio.revalued", "risk.position.changed.>", "risk.portfolio.snapshot",
+                  "risk.curve.calibrated", "risk.factor.model_fitted",
                   "market.>",
                   # THE MODEL REGISTRY'S APPEND LOG (#112). The engine folds it
                   # from the oldest retained entry to answer one question: does a
@@ -1954,12 +1956,14 @@ data:
                   "inference.feature.computed",
                   "risk.curve.calibrated", "risk.factor.model_fitted",
                   "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
+                  "dlq.risk.curve.calibrated", "dlq.risk.factor.model_fitted",
                   "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
                 ]
               }
               subscribe: {
                 allow: [
                   "risk.portfolio.revalued", "risk.position.changed.>", "risk.portfolio.snapshot",
+                  "risk.curve.calibrated", "risk.factor.model_fitted",
                   "market.>",
                   "platform.model.registered",
                   # The exchange's own margin state for the accounts this tenant's
@@ -2001,12 +2005,14 @@ data:
                   "inference.feature.computed",
                   "risk.curve.calibrated", "risk.factor.model_fitted",
                   "dlq.risk.portfolio.revalued", "dlq.risk.position.changed.>", "dlq.risk.portfolio.snapshot",
+                  "dlq.risk.curve.calibrated", "dlq.risk.factor.model_fitted",
                   "dlq.market.>", "$JS.API.>", "$JS.ACK.>",
                 ]
               }
               subscribe: {
                 allow: [
                   "risk.portfolio.revalued", "risk.position.changed.>", "risk.portfolio.snapshot",
+                  "risk.curve.calibrated", "risk.factor.model_fitted",
                   "market.>",
                   "platform.model.registered",
                   # The exchange's own margin state for the accounts this tenant's

@@ -185,8 +185,8 @@ func (m *Model) Loading(id string) ([]float64, bool) {
 func (m *Model) FactorExposures(values map[string]float64) []float64 {
 	k := len(m.Factors)
 	e := make([]float64, k)
-	for id, v := range values {
-		i, ok := m.index[id]
+	for i, id := range m.Instruments {
+		v, ok := values[id]
 		if !ok {
 			continue
 		}
@@ -222,7 +222,8 @@ func (m *Model) Risk(values map[string]float64) RiskBreakdown {
 		sysVar = 0 // guard tiny negative round-off
 	}
 	var specVar float64
-	for id, v := range values {
+	for _, id := range m.Instruments {
+		v := values[id]
 		specVar += v * v * m.SpecificVar[id]
 	}
 	return RiskBreakdown{
@@ -273,8 +274,8 @@ func (m *Model) covApply(values map[string]float64) (perInstrument map[string]fl
 	e := m.FactorExposures(values)
 	fe := matVec(m.FactorCov, e) // F·e, a K-vector
 	perInstrument = make(map[string]float64, len(values))
-	for id, v := range values {
-		i, ok := m.index[id]
+	for i, id := range m.Instruments {
+		v, ok := values[id]
 		if !ok {
 			continue
 		}

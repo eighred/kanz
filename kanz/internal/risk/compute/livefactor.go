@@ -194,9 +194,11 @@ type LiveModelProvider struct {
 	universe  UniverseFunc
 	providers factormodel.Providers
 	cadence   time.Duration
-	onFit     func(ctx context.Context, m *factormodel.Model)
+	onFit     func(ctx context.Context, m *factormodel.Model) error
+	lookup    func(ctx context.Context, asOf time.Time) (*factormodel.Model, error)
 
 	mu    sync.Mutex
+	fit   chan struct{}                // serializes fitting, recording and publication to the cache
 	cache map[int64]*factormodel.Model // keyed by cadence-period epoch, UnixNano
 }
 
@@ -219,20 +221,18 @@ func WithFitCadence(d time.Duration) LiveModelOption {
 	}
 }
 
-// WithFitObserver is called ONCE PER FIT, with the model that was just
-// estimated — the seam the composition root hangs the factor.v1 publisher on.
-//
-// ON THE FIT AND NOT ON THE READ, deliberately. A model instance is worth
-// recording once; hanging the record on Model() would republish the same
-// instance on every measure of every portfolio for the whole period, and the
-// record's whole purpose is that (model_id, as_of) names one thing.
-//
-// It runs SYNCHRONOUSLY on the fitting call, which the cadence is what makes
-// affordable: a publish now costs one bus round-trip per period rather than one
-// per evaluation. An observer that blocks blocks a recompute, so an observer
-// that can be slow must do its own handoff.
-func WithFitObserver(fn func(ctx context.Context, m *factormodel.Model)) LiveModelOption {
+// WithFitObserver commits a newly fitted instance before any reader can use it.
+// It runs synchronously; an error refuses the instance without caching it. The
+// next evaluation may retry. A callback must not hand off unfinished recording
+// and return success, since success is the pricing admission boundary (#1039).
+func WithFitObserver(fn func(ctx context.Context, m *factormodel.Model) error) LiveModelOption {
 	return func(p *LiveModelProvider) { p.onFit = fn }
+}
+
+// WithFitLookup restores retained instances before fitting. An unavailable
+// store refuses the request; only an explicit nil model permits a new fit.
+func WithFitLookup(fn func(context.Context, time.Time) (*factormodel.Model, error)) LiveModelOption {
+	return func(p *LiveModelProvider) { p.lookup = fn }
 }
 
 // NewLiveModelProvider builds the provider. universe and providers.Returns are
@@ -244,6 +244,7 @@ func NewLiveModelProvider(cfg factormodel.Config, universe UniverseFunc, provide
 		providers: providers,
 		cadence:   DefaultFitCadence,
 		cache:     map[int64]*factormodel.Model{},
+		fit:       make(chan struct{}, 1),
 	}
 	for _, o := range opts {
 		o(p)
@@ -259,6 +260,28 @@ func (p *LiveModelProvider) epoch(asOf time.Time) int64 {
 
 // Model implements ModelProvider.
 func (p *LiveModelProvider) Model(ctx context.Context, asOf time.Time) (*factormodel.Model, bool) {
+	if ctx.Err() != nil || asOf.IsZero() {
+		return nil, false
+	}
+	// Committed cache hits do not queue behind an unrelated period's fit.
+	p.mu.Lock()
+	ready := p.cache[p.epoch(asOf)]
+	p.mu.Unlock()
+	if ready != nil && !ready.AsOf.After(asOf) {
+		return ready, true
+	}
+
+	// A competing evaluation must never see an instance before its durable
+	// record succeeds, or replace it with another concurrent fit (#1039).
+	select {
+	case p.fit <- struct{}{}:
+		defer func() { <-p.fit }()
+	case <-ctx.Done():
+		return nil, false
+	}
+	if ctx.Err() != nil || asOf.IsZero() {
+		return nil, false
+	}
 	key := p.epoch(asOf)
 	p.mu.Lock()
 	cached, hit := p.cache[key]
@@ -274,6 +297,18 @@ func (p *LiveModelProvider) Model(ctx context.Context, asOf time.Time) (*factorm
 	if hit && !cached.AsOf.After(asOf) {
 		return cached, true
 	}
+	if p.lookup != nil {
+		m, err := p.lookup(ctx, asOf)
+		if err != nil {
+			return nil, false
+		}
+		if m != nil && !m.AsOf.After(asOf) && p.epoch(m.AsOf) == key {
+			if !hit {
+				p.cacheFit(key, m)
+			}
+			return m, true
+		}
+	}
 
 	instruments, err := p.universe(ctx, asOf)
 	if err != nil || len(instruments) == 0 {
@@ -283,18 +318,24 @@ func (p *LiveModelProvider) Model(ctx context.Context, asOf time.Time) (*factorm
 	if err != nil {
 		return nil, false
 	}
-	if !hit {
-		p.mu.Lock()
-		if len(p.cache) >= maxCachedFits {
-			p.cache = map[int64]*factormodel.Model{}
-		}
-		p.cache[key] = m
-		p.mu.Unlock()
-	}
 	if p.onFit != nil {
-		p.onFit(ctx, m)
+		if err := p.onFit(ctx, m); err != nil {
+			return nil, false
+		}
+	}
+	if !hit {
+		p.cacheFit(key, m)
 	}
 	return m, true
+}
+
+func (p *LiveModelProvider) cacheFit(key int64, m *factormodel.Model) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.cache) >= maxCachedFits {
+		p.cache = map[int64]*factormodel.Model{}
+	}
+	p.cache[key] = m
 }
 
 var _ ModelProvider = (*LiveModelProvider)(nil)
