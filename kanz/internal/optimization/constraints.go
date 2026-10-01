@@ -1,15 +1,10 @@
 package optimization
 
 import (
-	"context"
 	"github.com/eighred/kanz/internal/dec"
 	"math"
-	"strconv"
-	"time"
 
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
-
-	"github.com/eighred/kanz/internal/compliance"
 )
 
 // Constraint engine (OPT-01c): the optimizer's feasible region, plus the
@@ -127,32 +122,4 @@ func loFloor(longOnly bool) float64 {
 		return 0
 	}
 	return -1
-}
-
-// CheckMandate projects the target weights into a compliance.Book (each weight ×
-// NAV becomes the position MarketValue) and runs the COMP-01 engine against the
-// mandate — the authoritative feasibility check reusing the exact rules the
-// pre-trade gate enforces. Returns MandateInfeasible plus the breached rule
-// messages on a BREACH (WARN is admitted, matching the gate).
-//
-// A NIL MANDATE IS MandateUnchecked, NOT VACUOUSLY FEASIBLE (#646). It used to
-// return feasible=true, which made "this deployment holds no mandate for the
-// portfolio" and "every rule was satisfied" the same answer — the shape
-// compliance.Decision already refuses under its own name (Ungoverned) rather
-// than letting it fall through to a pass.
-// Deprecated: float callers cannot recover source precision. Live proposal APIs
-// use CheckMandateExact. This compatibility function no longer rounds to cents.
-func CheckMandate(ctx context.Context, weights map[string]float64, nav float64, currency string, classifier compliance.Classifier, engine *compliance.Engine, mandate *compliancepb.Mandate, asOf time.Time) (MandateStatus, []string) {
-	exact := make(map[string]dec.Exact, len(weights))
-	for id, w := range weights {
-		if math.IsNaN(w) || math.IsInf(w, 0) {
-			return MandateInfeasible, []string{ErrExactProposal.Error()}
-		}
-		exact[id] = dec.Exact(strconv.FormatFloat(w, 'f', -1, 64))
-	}
-	status, violations, err := CheckMandateExact(ctx, exact, dec.Exact(strconv.FormatFloat(nav, 'f', -1, 64)), currency, classifier, engine, mandate, asOf)
-	if err != nil {
-		return MandateInfeasible, []string{err.Error()}
-	}
-	return status, violations
 }
