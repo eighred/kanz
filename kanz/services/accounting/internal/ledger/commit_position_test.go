@@ -271,12 +271,56 @@ func TestCommitPositionRollbackAndStaleCheckpointFence(t *testing.T) {
 		if err := st.Append(ctx, late, nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.SaveSnapshot(ctx, old); !errors.Is(err, ErrStaleSnapshot) {
-			t.Fatalf("stale snapshot accepted: %v", err)
+		if err := st.SaveSnapshot(ctx, old); err != nil {
+			t.Fatalf("verified prefix was refused: %v", err)
 		}
 		equalCurrentJournal(t, st, "PF")
 		if snap := checkpointAll(t, st, "PF"); snap.JournalPosition != 2 {
 			t.Fatalf("rollback left gap: %d", snap.JournalPosition)
+		}
+	})
+}
+
+func TestCheckpointRefreshProgressesWhileOrdinaryCommitsContinue(t *testing.T) {
+	commitStores(t, func(t *testing.T, st Store) {
+		ctx := t.Context()
+		if err := st.Append(ctx, trade("first", "AAPL", "100", "10", 1, 10), nil); err != nil {
+			t.Fatal(err)
+		}
+		original := checkpointAll(t, st, "PF")
+		for i := 1; i <= 20; i++ {
+			events, err := st.Journal(ctx, "PF")
+			if err != nil {
+				t.Fatal(err)
+			}
+			prefix := Replay("PF", events).Snapshot(day(10))
+			// Deterministically commit between the snapshotter's read and save.
+			if err := st.Append(ctx, trade(fmt.Sprintf("busy-%d", i), "AAPL", "1", "10", i+1, 1), nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.SaveSnapshot(ctx, prefix); err != nil {
+				t.Fatalf("busy book checkpoint starved: %v", err)
+			}
+			if err := st.SaveSnapshot(ctx, original); err != nil {
+				t.Fatal(err)
+			}
+			got, err := st.LoadSnapshot(ctx, "PF")
+			if err != nil || got.JournalPosition != int64(i) {
+				t.Fatalf("checkpoint failed to advance monotonically: %+v %v", got, err)
+			}
+			if reason := equalCurrentJournal(t, st, "PF"); reason != "" {
+				t.Fatalf("busy ordinary tail was not bounded: %s", reason)
+			}
+		}
+		all, err := st.Journal(ctx, "PF")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A slice of a complete read is not a prefix proof: it may omit any row,
+		// including the initial holding, and cannot use cardinality as a cursor.
+		partial := Replay("PF", all[1:]).Snapshot(day(10))
+		if err := st.SaveSnapshot(ctx, partial); !errors.Is(err, ErrStaleSnapshot) {
+			t.Fatalf("partial journal accepted as commit prefix: %v", err)
 		}
 	})
 }
@@ -337,7 +381,7 @@ func TestPostgresLegacyPositionMigrationAndOldWriterRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = conn.Exec(ctx, `INSERT INTO ledger_snapshots(tenant_id,portfolio_id,positions,through_time,max_effective_time,corporate_action_version) VALUES(current_setting('app.tenant_id'),'PF','{}',$1,$1,1)`, day(10))
+	_, err = conn.Exec(ctx, `INSERT INTO ledger_snapshots(tenant_id,portfolio_id,positions,through_time,max_effective_time,corporate_action_version) VALUES(current_setting('app.tenant_id'),'PF','{}',$1,$1,1)`, day(30))
 	if err != nil {
 		t.Fatal(err)
 	}

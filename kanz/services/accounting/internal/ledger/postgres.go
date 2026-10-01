@@ -346,7 +346,19 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 		}
 		out = append(out, &e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if effBound.IsZero() && knowBound.IsZero() {
+		position := int64(len(out))
+		if after != nil {
+			position += *after
+		}
+		for _, e := range out {
+			e.journalReadPosition = position
+		}
+	}
+	return out, nil
 }
 
 // SaveSnapshot upserts a portfolio's latest book snapshot (full replace).
@@ -420,7 +432,7 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 	if err := tx.QueryRow(ctx, `SELECT position FROM ledger_heads WHERE portfolio_id=$1`, snap.PortfolioID).Scan(&head); err != nil {
 		return err
 	}
-	if snap.JournalPosition != head || snap.JournalPosition <= 0 {
+	if snap.JournalPosition > head || snap.JournalPosition <= 0 || (!snap.commitPrefix && snap.JournalPosition != head) {
 		return ErrStaleSnapshot
 	}
 	_, err = tx.Exec(ctx, `
@@ -444,14 +456,9 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 			action_count = EXCLUDED.action_count,
 			next_effective_time = EXCLUDED.next_effective_time,
 			updated_at         = now()
-		-- MONOTONIC WATERMARK. Two Snapshotter replicas, or one restarting mid-
-		-- pass, can present checkpoints out of order; a full-replace upsert would
-		-- let the older one win and silently move the watermark BACKWARDS. That is
-		-- not a wrong book (a shorter watermark just means more tail to fold) but
-		-- it is an unbounded read that no longer converges. Declining the stale
-		-- write is a no-op, not a failure: the store already holds a checkpoint at
-		-- least as new as the one offered.
-		WHERE EXCLUDED.through_time >= ledger_snapshots.through_time
+		-- A verified prefix may lag a busy head, but cannot replace newer progress.
+		-- Financial knowledge metadata does not order commit prefixes.
+		WHERE ledger_snapshots.journal_position IS NULL OR EXCLUDED.journal_position >= ledger_snapshots.journal_position
 	`, snap.PortfolioID, positions, cash, accrued, snap.Through, snap.MaxEffective,
 		settledPositions, settledCash, unknownSettlement, pendingSettlement, snap.ActionCount, nullTime(snap.NextEffective), snap.JournalPosition)
 	if err != nil {
@@ -502,6 +509,7 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	}
 	if maxEffective != nil && actionVersion != nil && *actionVersion == 2 && journalPosition != nil {
 		snap.MaxEffective = *maxEffective
+		snap.commitPrefix = true
 	}
 	if snap.Positions, err = decodePositions(positions); err != nil {
 		return nil, fmt.Errorf("decode positions %s: %w", portfolioID, err)

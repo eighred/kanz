@@ -98,7 +98,8 @@ func (t EntryType) String() string {
 // accounting.v1.LedgerEntry. Money and quantity are exact (*big.Rat); the journal
 // is append-only, so a correction is a new offsetting Event, never a mutation.
 type Event struct {
-	actionStage uint8 // replay-only: 1 entitlement, 2 confirmed payment; never persisted
+	journalReadPosition int64 // store-issued complete read receipt; never financial history
+	actionStage         uint8 // replay-only: 1 entitlement, 2 confirmed payment; never persisted
 	// ExecutionEvidence preserves exact venue execution economics and recovery
 	// provenance; the immutable journal must retain more than a dedup alias.
 	ExecutionEvidence []byte
@@ -223,6 +224,7 @@ func newPosition() *Position { return costbasis.NewLot() }
 // The settled fold is only as good as what the producers assert, so a caller that
 // reads it MUST check SettlementBasisComplete first. See SettlementBasis.
 type Book struct {
+	commitPrefix    bool                // source entries prove a complete immutable commit prefix
 	journalPosition int64               // count of immutable source entries, not replay stages
 	nextEffective   time.Time           // next known economic effect beyond the replay cutoff
 	actionCount     int64               // immutable action records represented by this fold
@@ -491,6 +493,7 @@ func Replay(portfolioID string, events []*Event) *Book {
 		}
 	}
 	b.journalPosition = countJournalEntries(portfolioID, events, time.Time{})
+	b.commitPrefix = hasJournalReadPosition(portfolioID, events, b.journalPosition)
 	b.actionCount = countActionEntries(portfolioID, events, time.Time{})
 	return b
 }
@@ -507,6 +510,7 @@ func ReplayAsOf(portfolioID string, events []*Event, effectiveAsOf, knowledgeAsO
 		b.maxEffective = effectiveAsOf
 	}
 	b.journalPosition = countJournalEntries(portfolioID, events, knowledgeAsOf)
+	b.commitPrefix = hasJournalReadPosition(portfolioID, events, b.journalPosition)
 	b.actionCount = countActionEntries(portfolioID, events, knowledgeAsOf)
 	return b
 }
@@ -587,4 +591,18 @@ func countJournalEntries(portfolio string, events []*Event, known time.Time) int
 		}
 	}
 	return int64(len(seen))
+}
+
+// A subset or mixed read cannot claim the complete read's cursor just because
+// it contains N entries. The receipt is private, attached only by Store reads.
+func hasJournalReadPosition(portfolio string, events []*Event, position int64) bool {
+	if position <= 0 {
+		return false
+	}
+	for _, e := range events {
+		if e != nil && e.PortfolioID == portfolio && e.actionStage != 2 && e.journalReadPosition != position {
+			return false
+		}
+	}
+	return true
 }

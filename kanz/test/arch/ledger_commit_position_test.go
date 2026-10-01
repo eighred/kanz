@@ -23,7 +23,7 @@ func TestLedgerCheckpointUsesCommitProgress(t *testing.T) {
 		"services/accounting/migrations/0019_journal_commit_position.sql": {
 			"AFTER INSERT ON ledger_entries", "pg_advisory_xact_lock(hashtext(NEW.tenant_id), hashtext(NEW.portfolio_id))",
 			"UPDATE ledger_heads SET position=position+1", "BEFORE UPDATE OR DELETE ON ledger_append_positions",
-			"NEW.journal_position <> head_position", "NEW.corporate_action_version IS DISTINCT FROM 2",
+			"NEW.journal_position > head_position", "NEW.corporate_action_version IS DISTINCT FROM 2",
 		},
 	} {
 		data, err := os.ReadFile(filepath.Join(moduleRoot(t), filepath.FromSlash(path)))

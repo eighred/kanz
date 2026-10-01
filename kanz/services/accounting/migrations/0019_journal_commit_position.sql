@@ -92,7 +92,7 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtext(NEW.tenant_id), hashtext(NEW.portfolio_id));
     SELECT position INTO head_position FROM ledger_heads
       WHERE tenant_id=NEW.tenant_id AND portfolio_id=NEW.portfolio_id;
-    IF head_position IS NULL OR NEW.journal_position <> head_position THEN
+    IF head_position IS NULL OR NEW.journal_position > head_position OR NEW.journal_position <= 0 THEN
         RAISE EXCEPTION 'stale ledger checkpoint position';
     END IF;
     RETURN NEW;

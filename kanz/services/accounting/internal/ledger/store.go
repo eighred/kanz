@@ -68,7 +68,7 @@ type Announcer func(ctx context.Context, st Store) ([]outbox.Record, error)
 // ErrNoSnapshot is returned by LoadSnapshot when a portfolio has no snapshot yet.
 var ErrNoSnapshot = errors.New("ledger: no snapshot")
 
-var ErrStaleSnapshot = errors.New("ledger: checkpoint does not cover current committed journal")
+var ErrStaleSnapshot = errors.New("ledger: checkpoint lacks a valid committed prefix")
 
 // Snapshot is a point-in-time materialization of a book plus the committed
 // append position it represents — the PERS-01 checkpoint that bounds replay
@@ -76,6 +76,7 @@ var ErrStaleSnapshot = errors.New("ledger: checkpoint does not cover current com
 // and folds the journal directly; the snapshot only accelerates the
 // current-knowledge book.
 type Snapshot struct {
+	commitPrefix    bool      // private full-read receipt permits a safe prefix behind the latest head
 	JournalPosition int64     // committed source entries represented, including scheduled effects
 	NextEffective   time.Time // checkpoint expires when this known economic effect becomes due
 	ActionCount     int64     // rejects a checkpoint computed before a concurrent action append
@@ -132,6 +133,7 @@ type Snapshot struct {
 // corrupt it.
 func (b *Book) Snapshot(through time.Time) *Snapshot {
 	s := &Snapshot{
+		commitPrefix:     b.commitPrefix,
 		JournalPosition:  b.journalPosition,
 		NextEffective:    b.nextEffective,
 		ActionCount:      b.actionCount,
@@ -184,6 +186,7 @@ func copyPositions(dst, src map[string]*Position) {
 // not re-apply entries already folded into the snapshot.
 func RestoreBook(s *Snapshot) *Book {
 	b := NewBook(s.PortfolioID)
+	b.commitPrefix = s.commitPrefix
 	b.journalPosition = s.JournalPosition
 	b.actionCount = s.ActionCount
 	b.nextEffective = s.NextEffective
@@ -311,6 +314,7 @@ func materializeCurrentAt(ctx context.Context, st Store, portfolioID string, now
 	b := RestoreBook(snap)
 	b.applyUntil(tail, now, time.Time{})
 	b.journalPosition += countJournalEntries(portfolioID, tail, time.Time{})
+	b.commitPrefix = b.commitPrefix && hasJournalReadPosition(portfolioID, tail, b.journalPosition)
 	return b, "", nil
 }
 
@@ -357,6 +361,7 @@ func (m *MemoryStore) Append(ctx context.Context, e *Event, announce Announcer) 
 		return err
 	}
 	owned := *e
+	owned.journalReadPosition = 0
 	if e.Action != nil {
 		a := *e.Action
 		if a.Ratio != nil {
@@ -525,14 +530,8 @@ func (r memoryReader) Append(context.Context, *Event, Announcer) error {
 	return errors.New("ledger: an announcer must not append")
 }
 
-func (r memoryReader) Journal(_ context.Context, portfolioID string) ([]*Event, error) {
-	src := r.m.journal[portfolioID]
-	out := make([]*Event, len(src))
-	copy(out, src)
-	if r.pending != nil && r.pending.PortfolioID == portfolioID {
-		out = append(out, r.pending)
-	}
-	return out, nil
+func (r memoryReader) Journal(ctx context.Context, portfolioID string) ([]*Event, error) {
+	return r.JournalSince(ctx, portfolioID, 0)
 }
 
 func (r memoryReader) JournalSince(_ context.Context, portfolioID string, after int64) ([]*Event, error) {
@@ -540,9 +539,22 @@ func (r memoryReader) JournalSince(_ context.Context, portfolioID string, after 
 	if after < 0 || after > int64(len(src)) {
 		return nil, ErrStaleSnapshot
 	}
-	out := append([]*Event(nil), src[after:]...)
-	if r.pending != nil && r.pending.PortfolioID == portfolioID {
-		out = append(out, r.pending)
+	position := int64(len(src))
+	pending := r.pending != nil && r.pending.PortfolioID == portfolioID
+	if pending {
+		position++
+	}
+	out := make([]*Event, 0, position-after)
+	copyEntry := func(e *Event) {
+		owned := *e
+		owned.journalReadPosition = position
+		out = append(out, &owned)
+	}
+	for _, e := range src[after:] {
+		copyEntry(e)
+	}
+	if pending {
+		copyEntry(r.pending)
 	}
 	return out, nil
 }
@@ -566,13 +578,10 @@ func (r memoryReader) StalePortfolios(context.Context, int) ([]string, error) {
 	return nil, errors.New("ledger: an announcer must not scan for stale portfolios")
 }
 
-func (m *MemoryStore) Journal(_ context.Context, portfolioID string) ([]*Event, error) {
+func (m *MemoryStore) Journal(ctx context.Context, portfolioID string) ([]*Event, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	src := m.journal[portfolioID]
-	out := make([]*Event, len(src))
-	copy(out, src)
-	return out, nil
+	return (memoryReader{m: m}).Journal(ctx, portfolioID)
 }
 
 // JournalSince slices the append-ordered log: work is proportional to the tail.
@@ -617,15 +626,18 @@ func (m *MemoryStore) SaveSnapshot(_ context.Context, snap *Snapshot) error {
 	if snap.ActionCount != countActionEntries(snap.PortfolioID, m.journal[snap.PortfolioID], time.Time{}) {
 		return ErrStaleActionSnapshot
 	}
-	if snap.JournalPosition != int64(len(m.journal[snap.PortfolioID])) || snap.JournalPosition <= 0 {
+	head := int64(len(m.journal[snap.PortfolioID]))
+	if snap.JournalPosition > head || snap.JournalPosition <= 0 || (!snap.commitPrefix && snap.JournalPosition != head) {
 		return ErrStaleSnapshot
 	}
 	// Monotonic watermark, matching the Postgres upsert's WHERE clause — see
 	// there for why moving it backwards is worse than declining the write.
-	if cur, ok := m.snapshots[snap.PortfolioID]; ok && snap.Through.Before(cur.Through) {
+	if cur, ok := m.snapshots[snap.PortfolioID]; ok && snap.JournalPosition < cur.JournalPosition {
 		return nil
 	}
-	m.snapshots[snap.PortfolioID] = snap
+	owned := *snap
+	owned.commitPrefix = true
+	m.snapshots[snap.PortfolioID] = &owned
 	return nil
 }
 
