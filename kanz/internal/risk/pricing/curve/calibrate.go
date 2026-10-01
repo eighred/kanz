@@ -207,27 +207,11 @@ type Calibrator struct {
 	// later, at an arbitrary as-of, through the point-in-time store.
 	OnCoverage func(currency string, cov StripCoverage)
 
-	// OnCalibrated is called with every curve that reaches the store, after the
-	// Put that publishes it. Optional; nil disables it.
-	//
-	// IT IS THE DURABILITY SEAM, and it exists because the store is not one
-	// (#1039). Store is in-memory and starts empty: a deploy, a KEDA scale event
-	// or an OOM kill leaves it holding no versions at all, so the curve that
-	// discounted a published DV01 is gone with the pod while the DV01 itself
-	// lives 30 days on the risk.portfolio topic. The number survives its own
-	// inputs, which is the state that makes "reproduce last Tuesday's valuation"
-	// unanswerable.
-	//
-	// AFTER Put AND NOT BEFORE. The observer records what a reader can actually
-	// resolve out of the store; recording a curve the store then rejected — or
-	// recording before a panic between the two — would put an artifact in the
-	// permanent record that never priced anything.
-	//
-	// SEPARATE FROM OnCoverage, which fires on every refresh INCLUDING the ones
-	// that produced no curve. Coverage is a metric about the attempt; this is the
-	// record of an artifact, and there is nothing to record when calibration
-	// refused.
-	OnCalibrated func(ctx context.Context, currency string, asOf time.Time, c *Curve)
+	// OnCalibrated commits the artifact before it becomes visible to pricing.
+	// Failure leaves the previous curve in service and refuses this refresh.
+	// A retained artifact need not have priced a book, but every curve that did
+	// price one must be retained. Nil is for callers with no durability contract.
+	OnCalibrated func(ctx context.Context, currency string, asOf time.Time, c *Curve) error
 }
 
 // Refresh calibrates the currency's curve from quotes as of asOf and publishes
@@ -253,9 +237,11 @@ func (cal *Calibrator) Refresh(ctx context.Context, currency string, asOf time.T
 	// Stamped before Put, so no reader can resolve this curve out of the
 	// point-in-time store without the record of what it was built from.
 	stored := c.withStripCoverage(strip.Coverage)
-	cal.Store.Put(currency, asOf, stored)
 	if cal.OnCalibrated != nil {
-		cal.OnCalibrated(ctx, currency, asOf, stored)
+		if err := cal.OnCalibrated(ctx, currency, asOf, stored); err != nil {
+			return nil, fmt.Errorf("curve: record %s: %w", currency, err)
+		}
 	}
+	cal.Store.Put(currency, asOf, stored)
 	return c, nil
 }

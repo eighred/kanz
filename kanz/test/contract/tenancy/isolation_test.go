@@ -313,7 +313,7 @@ func pool(t *testing.T, url, tenant string) *pgxpool.Pool {
 func applySchema(t *testing.T, p *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := p.Exec(ctx, `DROP TABLE IF EXISTS applied_keys, positions, portfolios CASCADE`); err != nil {
+	if _, err := p.Exec(ctx, `DROP TABLE IF EXISTS risk_model_artifacts, applied_keys, positions, portfolios CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob("../../../services/risk-engine/migrations/*.sql")
