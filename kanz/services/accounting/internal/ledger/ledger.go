@@ -98,7 +98,8 @@ func (t EntryType) String() string {
 // accounting.v1.LedgerEntry. Money and quantity are exact (*big.Rat); the journal
 // is append-only, so a correction is a new offsetting Event, never a mutation.
 type Event struct {
-	actionStage uint8 // replay-only: 1 entitlement, 2 confirmed payment; never persisted
+	journalReadPosition int64 // store-issued complete read receipt; never financial history
+	actionStage         uint8 // replay-only: 1 entitlement, 2 confirmed payment; never persisted
 	// ExecutionEvidence preserves exact venue execution economics and recovery
 	// provenance; the immutable journal must retain more than a dedup alias.
 	ExecutionEvidence []byte
@@ -223,13 +224,15 @@ func newPosition() *Position { return costbasis.NewLot() }
 // The settled fold is only as good as what the producers assert, so a caller that
 // reads it MUST check SettlementBasisComplete first. See SettlementBasis.
 type Book struct {
-	nextEffective time.Time           // next known economic effect beyond the replay cutoff
-	actionCount   int64               // immutable action records represented by this fold
-	entitlements  map[string]*big.Rat // replay-local; any action tail forces full replay
-	PortfolioID   string
-	Positions     map[string]*Position
-	Cash          map[string]*big.Rat
-	Accrued       map[string]*big.Rat
+	commitPrefix    bool                // source entries prove a complete immutable commit prefix
+	journalPosition int64               // count of immutable source entries, not replay stages
+	nextEffective   time.Time           // next known economic effect beyond the replay cutoff
+	actionCount     int64               // immutable action records represented by this fold
+	entitlements    map[string]*big.Rat // replay-local; any action tail forces full replay
+	PortfolioID     string
+	Positions       map[string]*Position
+	Cash            map[string]*big.Rat
+	Accrued         map[string]*big.Rat
 
 	// SettledPositions and SettledCash are the settled-basis fold of the same
 	// journal: an entry contributes to them only when it asserts
@@ -314,6 +317,7 @@ func (b *Book) Apply(e *Event) {
 		return
 	}
 	b.seen[e.EntryID] = true
+	b.commitPrefix = false // a manual fold cannot retain a store-read checkpoint receipt
 	if e.Effective.After(b.maxEffective) {
 		b.maxEffective = e.Effective
 	}
@@ -489,6 +493,8 @@ func Replay(portfolioID string, events []*Event) *Book {
 			}
 		}
 	}
+	b.journalPosition = countJournalEntries(portfolioID, events, time.Time{})
+	b.commitPrefix = hasJournalReadPosition(portfolioID, events, b.journalPosition)
 	b.actionCount = countActionEntries(portfolioID, events, time.Time{})
 	return b
 }
@@ -504,6 +510,8 @@ func ReplayAsOf(portfolioID string, events []*Event, effectiveAsOf, knowledgeAsO
 	if b.maxEffective.IsZero() {
 		b.maxEffective = effectiveAsOf
 	}
+	b.journalPosition = countJournalEntries(portfolioID, events, knowledgeAsOf)
+	b.commitPrefix = hasJournalReadPosition(portfolioID, events, b.journalPosition)
 	b.actionCount = countActionEntries(portfolioID, events, knowledgeAsOf)
 	return b
 }
@@ -571,4 +579,31 @@ func orZero(r *big.Rat) *big.Rat {
 		return new(big.Rat)
 	}
 	return r
+}
+
+// Full reads contain each immutable source entry once. Revisions and future
+// effects count, derived payment stages do not. Under the append lock this is
+// the dense commit position, including the unmodified legacy prefix.
+func countJournalEntries(portfolio string, events []*Event, known time.Time) int64 {
+	seen := make(map[string]struct{}, len(events))
+	for _, e := range events {
+		if e != nil && e.PortfolioID == portfolio && e.actionStage != 2 && (known.IsZero() || !e.Knowledge.After(known)) {
+			seen[e.EntryID] = struct{}{}
+		}
+	}
+	return int64(len(seen))
+}
+
+// A subset or mixed read cannot claim the complete read's cursor just because
+// it contains N entries. The receipt is private, attached only by Store reads.
+func hasJournalReadPosition(portfolio string, events []*Event, position int64) bool {
+	if position <= 0 {
+		return false
+	}
+	for _, e := range events {
+		if e != nil && e.PortfolioID == portfolio && e.actionStage != 2 && e.journalReadPosition != position {
+			return false
+		}
+	}
+	return true
 }

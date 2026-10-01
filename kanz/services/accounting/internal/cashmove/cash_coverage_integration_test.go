@@ -204,5 +204,43 @@ func TestCashBalanceAnnouncePostgresJetStreamBuyingPower(t *testing.T) {
 			t.Fatalf("unpaid income admitted or paid income unavailable: revision %d: %v", revision, violation)
 		}
 	}
-
+	// #1309: a late-knowledge buy must reduce the announced cash even when a
+	// checkpoint already covers a newer knowledge timestamp. The actual buying
+	// power rule must revoke admission after delivery through the real spine.
+	entries, err = st.Journal(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var through time.Time
+	for _, e := range entries {
+		if e.Knowledge.After(through) {
+			through = e.Knowledge
+		}
+	}
+	if err := st.SaveSnapshot(ctx, ledger.ReplayAsOf(name, entries, time.Now(), time.Time{}).Snapshot(through)); err != nil {
+		t.Fatal(err)
+	}
+	late := &ledger.Event{EntryID: name + ":late-buy", PortfolioID: name, Type: ledger.EntryTrade, InstrumentID: "EQ", Quantity: big.NewRat(1, 1), Price: big.NewRat(60, 1), Cash: big.NewRat(-60, 1), CashCurrency: "USD", Effective: time.Now().UTC().Truncate(time.Microsecond), Knowledge: base}
+	if err := st.Append(ctx, late, func(ctx context.Context, reader ledger.Store) ([]outbox.Record, error) {
+		return ann.Records(bus.WithTenantID(ctx, "tenant-A"), reader, name)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.Flush(ctx, name); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case msg := <-received:
+		want := new(big.Rat).Sub(amounts[0], big.NewRat(5, 1))
+		if dec.FromProto(msg.Total).Cmp(want) != 0 {
+			t.Fatalf("late buy omitted from cash announcement: %v want %s", msg.Total, want)
+		}
+	case <-ctx.Done():
+		t.Fatal("late-buy balance not delivered")
+	}
+	book := &comp.Book{PortfolioID: name, BaseCurrency: "USD"}
+	comp.JoinEquity(book, view, nil)
+	if comp.BuyingPowerRule(&comp.Candidate{Book: book}, rule) == nil {
+		t.Fatal("checkpoint omission admitted an order after a late buy exhausted cash")
+	}
 }

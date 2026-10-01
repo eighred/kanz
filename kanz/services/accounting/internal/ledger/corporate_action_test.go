@@ -184,7 +184,7 @@ func TestActionAppendInvalidatesBackdatedKnowledgeAtomically(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := st.SaveSnapshot(ctx, Replay("PF", []*Event{hold, sale}).Snapshot(day(10))); err != nil {
+			if err := st.SaveSnapshot(ctx, replayJournal(t, st, "PF").Snapshot(day(10))); err != nil {
 				t.Fatal(err)
 			}
 			late := income(1, "1", 2)
@@ -256,7 +256,7 @@ func TestFutureExDateIsNotAccruedEarlyAcrossCheckpoint(t *testing.T) {
 	}
 	for _, checkpoint := range []bool{false, true} {
 		if checkpoint {
-			b := Replay("PF", []*Event{hold, announced})
+			b := replayJournal(t, st, "PF")
 			if err := st.SaveSnapshot(ctx, b.Snapshot(day(2))); err != nil {
 				t.Fatal(err)
 			}
@@ -286,7 +286,7 @@ func TestPostgresRetiresOldCorporateActionSnapshots(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := st.SaveSnapshot(ctx, Replay("PF", events).Snapshot(day(2))); err != nil {
+	if err := st.SaveSnapshot(ctx, replayJournal(t, st, "PF").Snapshot(day(2))); err != nil {
 		t.Fatal(err)
 	}
 	// Model the old writer's cash classification, then read through a new store

@@ -229,19 +229,18 @@ func (p *Postgres) Append(ctx context.Context, e *Event, announce Announcer) err
 // it is the query that made #229 a request-path liability. Reach for
 // JournalSince instead unless you genuinely need the whole book from empty.
 func (p *Postgres) Journal(ctx context.Context, portfolioID string) ([]*Event, error) {
-	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, time.Time{})
+	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, nil)
 }
 
-// JournalSince returns the entries known strictly after the given watermark —
-// the snapshot tail (#229), and the read on the NAV/reconcile path.
-//
-// Served as a range scan by ledger_entries_knowledge_idx
-// (0005_ledger_snapshot_tail.sql). Without that index this predicate is an
-// in-index FILTER over the whole portfolio: heap fetches and *big.Rat
-// allocations would still be bounded to the tail, but the scan would not be —
-// which is why the index ships in the same change as this method.
-func (p *Postgres) JournalSince(ctx context.Context, portfolioID string, after time.Time) ([]*Event, error) {
-	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, after)
+// JournalSince seeks the immutable append index, never financial timestamps.
+func (p *Postgres) JournalSince(ctx context.Context, portfolioID string, after int64) ([]*Event, error) {
+	if after < 0 {
+		return nil, ErrStaleSnapshot
+	}
+	if after == 0 {
+		return p.Journal(ctx, portfolioID)
+	}
+	return p.journal(ctx, portfolioID, time.Time{}, time.Time{}, &after)
 }
 
 // JournalAsOf returns replay-ready effects at the two PIT cutoffs. The SQL
@@ -250,32 +249,33 @@ func (p *Postgres) JournalSince(ctx context.Context, portfolioID string, after t
 // are derived replay stages, never additional persisted journal records. Replay
 // over this result equals ReplayAsOf over the immutable full journal.
 func (p *Postgres) JournalAsOf(ctx context.Context, portfolioID string, effectiveAsOf, knowledgeAsOf time.Time) ([]*Event, error) {
-	events, err := p.journal(ctx, portfolioID, time.Time{}, knowledgeAsOf, time.Time{})
+	events, err := p.journal(ctx, portfolioID, time.Time{}, knowledgeAsOf, nil)
 	if err != nil {
 		return nil, err
 	}
-	return sortedFor(events, effectiveAsOf, knowledgeAsOf, true), nil
+	out := sortedFor(events, effectiveAsOf, knowledgeAsOf, true)
+	for _, e := range out {
+		e.journalReadPosition = 0
+	} // PIT effects cannot certify a current checkpoint.
+	return out, nil
 }
 
-// StalePortfolios returns up to limit portfolios whose journal has entries past
-// their snapshot watermark, oldest watermark first — the Snapshotter's queue.
-//
-// This aggregate does scan the journal index. It runs on a background ticker at
-// a bounded concurrency of one, NOT on a request path, and it is what stops
-// every request path from doing the same thing. LIMIT bounds the work handed to
-// one pass, not the scan; a cheaper queue needs a written-side watermark table,
-// which is a larger change than #229 and would be its own decision.
+// StalePortfolios also discovers untouched legacy portfolios with no head.
+// New portfolios compare commit positions, including late/equal-knowledge fills.
 func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, errors.New("ledger: StalePortfolios needs a positive limit")
 	}
 	rows, err := p.q.Query(ctx, `
-		SELECT e.portfolio_id
-		FROM ledger_entries e
-		LEFT JOIN ledger_snapshots s ON s.portfolio_id = e.portfolio_id
-		GROUP BY e.portfolio_id, s.through_time, s.corporate_action_version, s.next_effective_time
-		HAVING s.through_time IS NULL OR s.corporate_action_version IS DISTINCT FROM 1 OR max(e.knowledge_time) > s.through_time OR s.next_effective_time <= now()
-		ORDER BY s.through_time ASC NULLS FIRST, e.portfolio_id
+		SELECT p.portfolio_id
+		FROM (SELECT portfolio_id FROM ledger_heads WHERE position > 0
+		      UNION SELECT portfolio_id FROM ledger_entries e WHERE NOT EXISTS
+		        (SELECT 1 FROM ledger_heads h WHERE h.portfolio_id=e.portfolio_id)) p
+		LEFT JOIN ledger_heads h ON h.portfolio_id=p.portfolio_id
+		LEFT JOIN ledger_snapshots s ON s.portfolio_id=p.portfolio_id
+		WHERE s.journal_position IS NULL OR s.corporate_action_version IS DISTINCT FROM 2
+		   OR h.position IS NULL OR h.position <> s.journal_position OR s.next_effective_time <= now()
+		ORDER BY s.updated_at ASC NULLS FIRST, p.portfolio_id
 		LIMIT $1
 	`, limit)
 	if err != nil {
@@ -293,18 +293,24 @@ func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, er
 	return out, rows.Err()
 }
 
-func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, knowBound, knowAfter time.Time) ([]*Event, error) {
+func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, knowBound time.Time, after *int64) ([]*Event, error) {
+	join, positionBound := "", ""
+	args := []any{portfolioID, nullTime(effBound), nullTime(knowBound)}
+	if after != nil {
+		join = ` JOIN ledger_append_positions USING (tenant_id, portfolio_id, entry_id)`
+		positionBound = ` AND position > $4`
+		args = append(args, *after)
+	}
 	rows, err := p.q.Query(ctx, `
 		SELECT entry_id, portfolio_id, venue_account_id, entry_type, instrument_id,
 		       quantity, price, cash, cash_currency, action,
 		       effective_time, knowledge_time, settlement_status, settlement_date, source_ref, execution_evidence
-		FROM ledger_entries
+		FROM ledger_entries `+join+`
 		WHERE portfolio_id = $1
 		  AND ($2::timestamptz IS NULL OR effective_time <= $2)
-		  AND ($3::timestamptz IS NULL OR knowledge_time <= $3)
-		  AND ($4::timestamptz IS NULL OR knowledge_time > $4)
+		  AND ($3::timestamptz IS NULL OR knowledge_time <= $3) `+positionBound+`
 		ORDER BY effective_time, knowledge_time, entry_id
-	`, portfolioID, nullTime(effBound), nullTime(knowBound), nullTime(knowAfter))
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query journal %s: %w", portfolioID, err)
 	}
@@ -344,7 +350,19 @@ func (p *Postgres) journal(ctx context.Context, portfolioID string, effBound, kn
 		}
 		out = append(out, &e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if effBound.IsZero() && knowBound.IsZero() {
+		position := int64(len(out))
+		if after != nil {
+			position += *after
+		}
+		for _, e := range out {
+			e.journalReadPosition = position
+		}
+	}
+	return out, nil
 }
 
 // SaveSnapshot upserts a portfolio's latest book snapshot (full replace).
@@ -409,12 +427,24 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 	if actionCount != snap.ActionCount {
 		return ErrStaleActionSnapshot
 	}
+	if _, err := tx.Exec(ctx, `INSERT INTO ledger_heads (tenant_id, portfolio_id, position, legacy_position)
+		SELECT current_setting('app.tenant_id'), $1, count(*), count(*) FROM ledger_entries WHERE portfolio_id=$1
+		ON CONFLICT (tenant_id, portfolio_id) DO NOTHING`, snap.PortfolioID); err != nil {
+		return err
+	}
+	var head, legacyFloor int64
+	if err := tx.QueryRow(ctx, `SELECT position, legacy_position FROM ledger_heads WHERE portfolio_id=$1`, snap.PortfolioID).Scan(&head, &legacyFloor); err != nil {
+		return err
+	}
+	if snap.JournalPosition > head || snap.JournalPosition < legacyFloor || snap.JournalPosition <= 0 || !snap.commitPrefix {
+		return ErrStaleSnapshot
+	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO ledger_snapshots
 			(tenant_id, portfolio_id, positions, cash, accrued, through_time,
 			 max_effective_time, settled_positions, settled_cash,
-			 unknown_settlement, pending_settlement, corporate_action_version, action_count, next_effective_time, updated_at)
-		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, now())
+			 unknown_settlement, pending_settlement, corporate_action_version, action_count, next_effective_time, journal_position, updated_at)
+		VALUES (current_setting('app.tenant_id'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 2, $11, $12, $13, now())
 		ON CONFLICT (tenant_id, portfolio_id) DO UPDATE SET
 			positions          = EXCLUDED.positions,
 			cash               = EXCLUDED.cash,
@@ -425,20 +455,16 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 			settled_cash       = EXCLUDED.settled_cash,
 			unknown_settlement = EXCLUDED.unknown_settlement,
 			pending_settlement = EXCLUDED.pending_settlement,
-			corporate_action_version = 1,
+			corporate_action_version = 2,
+			journal_position = EXCLUDED.journal_position,
 			action_count = EXCLUDED.action_count,
 			next_effective_time = EXCLUDED.next_effective_time,
 			updated_at         = now()
-		-- MONOTONIC WATERMARK. Two Snapshotter replicas, or one restarting mid-
-		-- pass, can present checkpoints out of order; a full-replace upsert would
-		-- let the older one win and silently move the watermark BACKWARDS. That is
-		-- not a wrong book (a shorter watermark just means more tail to fold) but
-		-- it is an unbounded read that no longer converges. Declining the stale
-		-- write is a no-op, not a failure: the store already holds a checkpoint at
-		-- least as new as the one offered.
-		WHERE EXCLUDED.through_time >= ledger_snapshots.through_time
+		-- A verified prefix may lag a busy head, but cannot replace newer progress.
+		-- Financial knowledge metadata does not order commit prefixes.
+		WHERE ledger_snapshots.journal_position IS NULL OR EXCLUDED.journal_position >= ledger_snapshots.journal_position
 	`, snap.PortfolioID, positions, cash, accrued, snap.Through, snap.MaxEffective,
-		settledPositions, settledCash, unknownSettlement, pendingSettlement, snap.ActionCount, nullTime(snap.NextEffective))
+		settledPositions, settledCash, unknownSettlement, pendingSettlement, snap.ActionCount, nullTime(snap.NextEffective), snap.JournalPosition)
 	if err != nil {
 		return fmt.Errorf("save snapshot %s: %w", snap.PortfolioID, err)
 	}
@@ -459,6 +485,7 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	var maxEffective *time.Time
 	var actionVersion *int
 	var actionCount int64
+	var journalPosition *int64
 	var nextEffective *time.Time
 	// A NULL settled_positions is a checkpoint that STATES NO SETTLED VIEW — see
 	// Snapshot.SettlementStated. Scanned into pointers so the absence survives as
@@ -467,10 +494,10 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	var unknownSettlement, pendingSettlement *int
 	err := p.q.QueryRow(ctx, `
 		SELECT positions, cash, accrued, through_time, max_effective_time,
-		       settled_positions, settled_cash, unknown_settlement, pending_settlement, corporate_action_version, action_count, next_effective_time
+		       settled_positions, settled_cash, unknown_settlement, pending_settlement, corporate_action_version, action_count, next_effective_time, journal_position
 		FROM ledger_snapshots WHERE portfolio_id = $1
 	`, portfolioID).Scan(&positions, &cash, &accrued, &through, &maxEffective,
-		&settledPositions, &settledCash, &unknownSettlement, &pendingSettlement, &actionVersion, &actionCount, &nextEffective)
+		&settledPositions, &settledCash, &unknownSettlement, &pendingSettlement, &actionVersion, &actionCount, &nextEffective, &journalPosition)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoSnapshot
 	}
@@ -481,8 +508,12 @@ func (p *Postgres) LoadSnapshot(ctx context.Context, portfolioID string) (*Snaps
 	if nextEffective != nil {
 		snap.NextEffective = *nextEffective
 	}
-	if maxEffective != nil && actionVersion != nil && *actionVersion == 1 {
+	if journalPosition != nil {
+		snap.JournalPosition = *journalPosition
+	}
+	if maxEffective != nil && actionVersion != nil && *actionVersion == 2 && journalPosition != nil {
 		snap.MaxEffective = *maxEffective
+		snap.commitPrefix = true
 	}
 	if snap.Positions, err = decodePositions(positions); err != nil {
 		return nil, fmt.Errorf("decode positions %s: %w", portfolioID, err)

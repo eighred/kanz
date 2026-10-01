@@ -113,15 +113,20 @@ func TestPostgresSnapshotRoundTripsTheSettledFold(t *testing.T) {
 	ctx := context.Background()
 
 	eff := time.Now().UTC().Truncate(time.Millisecond)
-	b := NewBook("PORT-SNAP")
+	var b *Book
 	settled := tradeEvent("snap:settled", "BTC-USD", 2, 100, -200, eff, eff)
 	settled.PortfolioID = "PORT-SNAP"
 	settled.SettlementBasis = SettlementSettled
 	settled.SettlementDate = eff
-	b.Apply(settled)
+	if err := st.Append(ctx, settled, nil); err != nil {
+		t.Fatal(err)
+	}
 	unknown := tradeEvent("snap:unknown", "ETH-USD", 5, 10, -50, eff, eff)
 	unknown.PortfolioID = "PORT-SNAP"
-	b.Apply(unknown)
+	if err := st.Append(ctx, unknown, nil); err != nil {
+		t.Fatal(err)
+	}
+	b = replayJournal(t, st, "PORT-SNAP")
 
 	if err := st.SaveSnapshot(ctx, b.Snapshot(eff)); err != nil {
 		t.Fatalf("save snapshot: %v", err)
@@ -159,7 +164,7 @@ func TestPostgresSnapshotRoundTripsTheSettledFold(t *testing.T) {
 // 0005_ledger_snapshot_tail.sql's max_effective_time takes on a fenceless
 // checkpoint.
 func TestPostgresLoadSnapshotWrittenBeforeTheAxisStatesNoSettledView(t *testing.T) {
-	pool := newPool(t)
+	pool := newPoolThrough(t, "0018_corporate_action_revisions.sql")
 	st := NewPostgres(pool)
 	ctx := context.Background()
 	eff := time.Now().UTC().Truncate(time.Millisecond)
@@ -176,6 +181,7 @@ func TestPostgresLoadSnapshotWrittenBeforeTheAxisStatesNoSettledView(t *testing.
 		t.Fatalf("insert legacy snapshot: %v", err)
 	}
 
+	applyCommitPositionMigration(t, pool)
 	loaded, err := st.LoadSnapshot(ctx, "PORT-LEGACY")
 	if err != nil {
 		t.Fatalf("load snapshot: %v", err)
