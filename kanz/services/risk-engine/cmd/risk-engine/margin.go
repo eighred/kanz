@@ -15,6 +15,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/spotsource"
 	"github.com/eighred/kanz/internal/venuemargin"
 	"github.com/eighred/kanz/services/risk-engine/internal/config"
+	"github.com/eighred/kanz/services/risk-engine/internal/replay"
 )
 
 // THE MARGIN MEASURE (#408 control 4) — the last of the set's four controls, and
@@ -369,12 +370,12 @@ func registerMarginRisk(
 			"measure is refusing for them.",
 	}, func() float64 { _, live := fold.Stats(); return float64(live) }))
 
-	compute.RegisterMarginRisk(ctx, registry, &marginProvider{
+	compute.RegisterMarginRisk(ctx, registry, replay.Margins{Source: &marginProvider{
 		tenant:   cfg.Tenant,
 		bindings: bindings,
 		fold:     fold,
 		marks:    marks,
-	}, compute.WithMarginObserver(func(_, reason string) {
+	}}, compute.WithMarginObserver(func(_, reason string) {
 		// COUNTED BY REASON, NEVER LABELLED BY INSTRUMENT — one series per
 		// instrument ever held is unbounded cardinality, and the question an
 		// operator has is "is the margin measure falling silent", which a count

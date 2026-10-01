@@ -11,6 +11,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/liquidity"
 	"github.com/eighred/kanz/internal/risk/liquiditysource"
 	"github.com/eighred/kanz/services/risk-engine/internal/config"
+	"github.com/eighred/kanz/services/risk-engine/internal/replay"
 )
 
 // THE LIQUIDITY MEASURES (#509) — the last of the dark compute seams.
@@ -248,7 +249,7 @@ func registerLiquidityRisk(
 		return err
 	}
 
-	compute.RegisterLiquidityRisk(ctx, registry, provider, liquidity.DefaultModel(),
+	compute.RegisterLiquidityRisk(ctx, registry, replay.Liquidity{Source: provider}, liquidity.DefaultModel(),
 		// nil baseVaR ⇒ the REGISTRY's VaR99, resolved at EVALUATION time. Passing
 		// compute.VaR99 explicitly would pin LVaR to the RISK-07 1%×gross
 		// placeholder while the engine served the historical-simulation model —

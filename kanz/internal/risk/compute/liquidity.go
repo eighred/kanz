@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	decutil "github.com/eighred/kanz/internal/dec"
+	"strconv"
 
 	v1 "github.com/eighred/kanz/internal/risk/api/v1"
 	"github.com/eighred/kanz/internal/risk/domain"
@@ -236,15 +237,28 @@ func RegisterLiquidityRisk(ctx context.Context, r *Registry, provider liquidity.
 			opt(o)
 		}
 	}
-	if baseVaR == nil {
-		baseVaR = registryVaR99(r)
-	}
-	r.Register(MeasureLiquidationHorizon, liquidationHorizonMeasure(ctx, provider, model, o))
+	r.RegisterScoped(MeasureLiquidationHorizon, ctx, func(evalCtx context.Context) MeasureFunc {
+		return liquidationHorizonMeasure(evalCtx, provider, model, o)
+	})
+	r.SetParameters(MeasureLiquidationHorizon, map[string]string{"participation_rate": strconv.FormatFloat(model.ParticipationRate, 'g', -1, 64), "impact_coefficient": strconv.FormatFloat(model.ImpactCoeff, 'g', -1, 64)})
 	if !ServesSpread(provider) {
 		o.skip("", SkipNoSpreadSource)
 		return
 	}
-	r.Register(MeasureLVaR99, lvarMeasure(ctx, provider, model, baseVaR, o))
+	r.RegisterScoped(MeasureLVaR99, ctx, func(evalCtx context.Context) MeasureFunc {
+		base := baseVaR
+		if base == nil {
+			base = registryVaR99(evalCtx, r, true)
+		}
+		return lvarMeasure(evalCtx, provider, model, base, o)
+	})
+	// Legacy ComputeMeasures keeps the VaR registrar's captured context. The
+	// explicit context API above instead shares one scope across both models.
+	legacyBase := baseVaR
+	if legacyBase == nil {
+		legacyBase = registryVaR99(ctx, r, false)
+	}
+	r.funcs[MeasureLVaR99] = lvarMeasure(ctx, provider, model, legacyBase, o)
 }
 
 // registryVaR99 is the LATE-BOUND registry VaR: it reads MeasureVaR99 out of r
@@ -252,8 +266,11 @@ func RegisterLiquidityRisk(ctx context.Context, r *Registry, provider liquidity.
 // regardless of the order the two registrations happened in. Falls back to the
 // package placeholder only if nothing at all is registered under the name, which
 // DefaultRegistry makes impossible.
-func registryVaR99(r *Registry) MeasureFunc {
+func registryVaR99(ctx context.Context, r *Registry, scoped bool) MeasureFunc {
 	return func(p *domain.Portfolio) v1.Measure {
+		if factory := r.scoped[MeasureVaR99]; scoped && factory != nil {
+			return factory(ctx)(p)
+		}
 		if fn, ok := r.funcs[MeasureVaR99]; ok && fn != nil {
 			return fn(p)
 		}
