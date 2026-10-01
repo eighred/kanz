@@ -100,6 +100,8 @@ spec:
           ports:
             - { containerPort: 8084, name: http }
           env:
+            - { name: WEB_BFF_AUDIT_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
+            - { name: SPIFFE_ENDPOINT_SOCKET, value: "unix:///run/spiffe/spire-agent.sock" }
             - { name: WEB_BFF_LISTEN, value: ":8084" }
             # THE SPA SHIPS IN THIS IMAGE at /srv/spa, so it is served on the
             # BFF's OWN origin and the session cookie stays SameSite=Lax. A
@@ -159,6 +161,7 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
             - { name: web-secrets, mountPath: /run/secrets/web, readOnly: true }
             - { name: preflight-evidence, mountPath: /run/preflight, readOnly: true }
             - { name: tmp, mountPath: /tmp }
@@ -211,6 +214,10 @@ spec:
           volumeMounts:
             - { name: web-secrets, mountPath: /run/secrets/web, readOnly: true }
       volumes:
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
         # Removing this volume does not degrade signing quietly: pkg/secret
         # refuses a DECLARED-but-unreadable mount, so the pod stops starting.
         - name: web-secrets

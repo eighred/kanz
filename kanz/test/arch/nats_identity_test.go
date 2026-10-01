@@ -308,6 +308,9 @@ func dialsNATSInDir(t *testing.T, dir string) bool {
 // dialsNATS reports whether a service's entrypoint tree calls bus.DialNATS.
 func dialsNATS(t *testing.T, root, svc string) bool {
 	t.Helper()
+	if svc == "identity" || svc == "web-bff" {
+		return dialsNATSInDir(t, filepath.Join(root, "internal/auditdelivery"))
+	}
 	return dialsNATSInDir(t, filepath.Join(root, "services", svc, "cmd"))
 }
 

@@ -1,0 +1,89 @@
+rule_files:
+- operational.rules.yaml
+evaluation_interval: 1m
+tests:
+- interval: 1m
+  name: AuthorityAuditDeliveryUnhealthy detects persistent failure
+  input_series:
+  - series: kanz_authority_audit_scan_healthy
+    values: '0x10'
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: AuthorityAuditDeliveryUnhealthy
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        layer: operational
+      exp_annotations:
+        summary: Authority evidence delivery is failing
+        description: Inspect PostgreSQL, NATS connectivity and invalid journal evidence.
+          Pending rows remain durable; missing central evidence is not an absence
+          of authority changes.
+  - eval_time: 1m
+    alertname: AuthorityAuditDeliveryUnhealthy
+    exp_alerts: []
+- interval: 1m
+  name: AuthorityAuditDeliveryUnhealthy stays quiet when healthy
+  input_series:
+  - series: kanz_authority_audit_scan_healthy
+    values: 1x10
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: AuthorityAuditDeliveryUnhealthy
+    exp_alerts: []
+- interval: 1m
+  name: AuthorityAuditScanStale detects persistent failure
+  input_series:
+  - series: kanz_authority_audit_last_scan_timestamp_seconds
+    values: '0x10'
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: AuthorityAuditScanStale
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        layer: operational
+      exp_annotations:
+        summary: Authority audit backlog has not been fully scanned
+        description: The delivery worker has stopped completing scans. Treat backlog
+          gauges as stale and inspect worker/database health.
+  - eval_time: 1m
+    alertname: AuthorityAuditScanStale
+    exp_alerts: []
+- interval: 1m
+  name: AuthorityAuditScanStale stays quiet when healthy
+  input_series:
+  - series: kanz_authority_audit_last_scan_timestamp_seconds
+    values: 0+60x10
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: AuthorityAuditScanStale
+    exp_alerts: []
+- interval: 1m
+  name: AuthorityAuditDeliveryDisabled detects persistent failure
+  input_series:
+  - series: kanz_authority_audit_enabled
+    values: '0x10'
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: AuthorityAuditDeliveryDisabled
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        layer: operational
+      exp_annotations:
+        summary: Durable authority audit delivery is disabled
+        description: Configure the service audit NATS URL. Local journals retain evidence,
+          but central audit delivery is not active.
+  - eval_time: 1m
+    alertname: AuthorityAuditDeliveryDisabled
+    exp_alerts: []
+- interval: 1m
+  name: AuthorityAuditDeliveryDisabled stays quiet when healthy
+  input_series:
+  - series: kanz_authority_audit_enabled
+    values: 1x10
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: AuthorityAuditDeliveryDisabled
+    exp_alerts: []

@@ -1077,6 +1077,19 @@ data:
           # as a subset. It publishes nothing itself except dlq.<whatever it
           # was subscribed to>, which for a ">" subscription is only bounded by
           # dlq.> in turn.
+          # Authority journal exporters publish evidence only, never capital commands.
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/identity"
+            permissions: {
+              publish: { allow: ["audit.authority.decision"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
+          { user: "spiffe://kanz.internal/ns/kanz-services/sa/web-bff"
+            permissions: {
+              publish: { allow: ["audit.authority.decision"] }
+              subscribe: { allow: ["_INBOX.>"] }
+            }
+          }
           { user: "spiffe://kanz.internal/ns/kanz-services/sa/audit"
             permissions: {
               publish: { allow: ["dlq.>", "$JS.API.>", "$JS.ACK.>"] }

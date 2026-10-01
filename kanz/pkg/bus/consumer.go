@@ -36,22 +36,24 @@ type EventHandler func(ctx context.Context, env *envelopepb.Envelope, payload []
 // requires WithDLQ on every consumer. Without retry, the first failure is
 // terminal.
 type Consumer struct {
-	subscriber Subscriber
-	dlq        Publisher
-	dedup      Deduper
-	retry      RetryConfig
-	validate   func(*envelopepb.Envelope) error
-	metrics    *BusMetrics
+	retainedRetries map[string]bool
+	subscriber      Subscriber
+	dlq             Publisher
+	dedup           Deduper
+	retry           RetryConfig
+	validate        func(*envelopepb.Envelope) error
+	metrics         *BusMetrics
 }
 
 type consumerOptions struct {
-	dedupTTL  time.Duration
-	dedupMax  int
-	deduper   Deduper
-	retry     RetryConfig
-	dlq       Publisher
-	validator func(*envelopepb.Envelope) error
-	metrics   *BusMetrics
+	retainedRetries map[string]bool
+	dedupTTL        time.Duration
+	dedupMax        int
+	deduper         Deduper
+	retry           RetryConfig
+	dlq             Publisher
+	validator       func(*envelopepb.Envelope) error
+	metrics         *BusMetrics
 }
 
 // ConsumerOption customizes Consumer construction.
@@ -89,6 +91,20 @@ func WithDeduper(d Deduper) ConsumerOption {
 // resilience.
 func WithRetry(cfg RetryConfig) ConsumerOption {
 	return func(o *consumerOptions) { o.retry = cfg }
+}
+
+// WithRetainedRetries keeps transient failures on the source stream for named
+// durable subjects with unbounded broker redelivery. Terminal bytes still go to
+// the configured DLQ; a database outage must not require manual redrive.
+func WithRetainedRetries(subjects ...string) ConsumerOption {
+	return func(o *consumerOptions) {
+		if o.retainedRetries == nil {
+			o.retainedRetries = map[string]bool{}
+		}
+		for _, subject := range subjects {
+			o.retainedRetries[subject] = true
+		}
+	}
 }
 
 // WithValidator overrides the per-message envelope validator. Default is
@@ -153,13 +169,19 @@ func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
 	if dedup == nil {
 		dedup = NewDedupWindow(o.dedupTTL, o.dedupMax)
 	}
+	for subject := range o.retainedRetries {
+		if tuningForSubject(subject).MaxDeliver != -1 {
+			return nil, fmt.Errorf("retained retries require an unbounded delivery profile for %q", subject)
+		}
+	}
 	return &Consumer{
-		subscriber: s,
-		dlq:        o.dlq,
-		dedup:      dedup,
-		retry:      o.retry.withDefaults(),
-		validate:   o.validator,
-		metrics:    o.metrics,
+		retainedRetries: o.retainedRetries,
+		subscriber:      s,
+		dlq:             o.dlq,
+		dedup:           dedup,
+		retry:           o.retry.withDefaults(),
+		validate:        o.validator,
+		metrics:         o.metrics,
 	}, nil
 }
 
@@ -260,6 +282,10 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 		// Retries exhausted — the dispatch failed regardless of DLQ routing.
 		endSpan(span, lastErr)
 		c.metrics.observeConsume(subject, group, time.Since(start), lastErr)
+		if c.retainedRetries[subject] && !IsTerminal(lastErr) {
+			c.dedup.Release(env.IdempotencyKey)
+			return lastErr
+		}
 		if c.dlq != nil {
 			if err := c.publishDLQ(ctx, subject, group, msg, attemptsMade, lastErr); err != nil {
 				// The DLQ publish itself failed, so this event is neither handled nor

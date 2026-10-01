@@ -148,30 +148,31 @@ type Config struct {
 // them (POSITION is compacted, max-msgs-per-subject=1) is why they are separate
 // streams at all.
 var DefaultSubjects = []string{
-	"market.>",             // MARKET
-	"risk.portfolio.>",     // RISK
-	"risk.exposure.>",      // RISK
-	"risk.signal.>",        // RISK
-	"risk.command.>",       // RISK
-	"risk.curve.>",         // RISK — the calibrated curve a valuation discounted (#1039)
-	"risk.factor.>",        // RISK — the fitted factor model a VaR was read off (#1039)
-	"execution.>",          // EXECUTION
-	"strategy.>",           // EXECUTION
-	"order.>",              // EXECUTION
-	"optimization.>",       // EXECUTION
-	"tenant.*.order.>",     // TENANT_ORDER — the MT-02 command bridge
-	"inference.>",          // INFERENCE
-	"platform.>",           // PLATFORM
-	"data.>",               // DATA
-	"observability.>",      // OBSERVABILITY
-	"accounting.>",         // ACCOUNTING
-	"compliance.breach.>",  // COMPLIANCE
-	"settlement.>",         // SETTLEMENT
-	"alternatives.>",       // ALTERNATIVES
-	"compliance.mandate.>", // MANDATE
-	"wealth.>",             // WEALTH
-	"risk.position.>",      // POSITION
-	"dlq.>",                // DLQ — a dropped event is an audit fact of its own
+	"audit.authority.decision", // AUTHORITY_AUDIT: durable authority journals (#1292)
+	"market.>",                 // MARKET
+	"risk.portfolio.>",         // RISK
+	"risk.exposure.>",          // RISK
+	"risk.signal.>",            // RISK
+	"risk.command.>",           // RISK
+	"risk.curve.>",             // RISK — the calibrated curve a valuation discounted (#1039)
+	"risk.factor.>",            // RISK — the fitted factor model a VaR was read off (#1039)
+	"execution.>",              // EXECUTION
+	"strategy.>",               // EXECUTION
+	"order.>",                  // EXECUTION
+	"optimization.>",           // EXECUTION
+	"tenant.*.order.>",         // TENANT_ORDER — the MT-02 command bridge
+	"inference.>",              // INFERENCE
+	"platform.>",               // PLATFORM
+	"data.>",                   // DATA
+	"observability.>",          // OBSERVABILITY
+	"accounting.>",             // ACCOUNTING
+	"compliance.breach.>",      // COMPLIANCE
+	"settlement.>",             // SETTLEMENT
+	"alternatives.>",           // ALTERNATIVES
+	"compliance.mandate.>",     // MANDATE
+	"wealth.>",                 // WEALTH
+	"risk.position.>",          // POSITION
+	"dlq.>",                    // DLQ — a dropped event is an audit fact of its own
 	// TENANT_FACT — every provisioned tenant's FACTs, arriving under a
 	// tfact.<tenant>. prefix through the #668 return path. THIS ENTRY IS THE
 	// TENANT'S COMPLIANCE TRAIL: NATS accounts are isolated by construction, so

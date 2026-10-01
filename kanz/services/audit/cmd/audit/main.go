@@ -21,6 +21,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/eighred/kanz/internal/auditdelivery"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
 	"github.com/eighred/kanz/internal/platform/httpserver"
@@ -334,7 +335,7 @@ func runProjection(ctx context.Context, cfg config.Config, store audit.Store, re
 	}
 	defer func() { _ = client.Close() }()
 
-	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client))
+	consumer, err := bus.NewConsumer(client, bus.WithBusMetrics(busMetrics), bus.WithDLQ(client), bus.WithRetainedRetries(auditdelivery.Subject))
 	if err != nil {
 		return err
 	}
