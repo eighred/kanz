@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/eighred/kanz/internal/optimization"
@@ -78,6 +79,43 @@ func TestExactProposalCapacityIsBounded(t *testing.T) {
 	r := asPrincipal(t, s, http.MethodPost, "/v2/propose", exactBody, "pm")
 	if r.Code != http.StatusServiceUnavailable {
 		t.Fatalf("unbounded solve: %d", r.Code)
+	}
+}
+
+func TestConcurrentExactHTTPRequestsReleaseCapacity(t *testing.T) {
+	s := newTestServer()
+	upstream := httptest.NewServer(s)
+	defer upstream.Close()
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Go(func() {
+			req, err := http.NewRequest(http.MethodPost, upstream.URL+"/v2/propose", strings.NewReader(exactBody))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			auth.SetPrincipalHeaders(req.Header, "user:pm", "acme", []string{"pm"})
+			resp, err := upstream.Client().Do(req)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusServiceUnavailable {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				return
+			}
+			var p optimization.ExactProposal
+			if err := json.NewDecoder(resp.Body).Decode(&p); err != nil || resp.StatusCode != 200 || len(p.Trades) != 1 || p.Trades[0].Notional != "9007199254740993" {
+				t.Errorf("concurrent response: status=%d p=%+v error=%v", resp.StatusCode, p, err)
+			}
+		})
+	}
+	wg.Wait()
+	// Every success and overload path must leave the next request serviceable.
+	r := asPrincipal(t, s, http.MethodPost, "/v2/propose", exactBody, "pm")
+	if r.Code != 200 {
+		t.Fatalf("capacity leaked: %d %s", r.Code, r.Body)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/eighred/kanz/pkg/auth"
+	"github.com/eighred/kanz/services/api-gateway/internal/authz"
 )
 
 func TestExactProposalGatewayPreservesWireAndTenant(t *testing.T) {
@@ -31,5 +32,18 @@ func TestExactProposalGatewayPreservesWireAndTenant(t *testing.T) {
 	mux.ServeHTTP(rr, authed(httptest.NewRequest(http.MethodPost, "/v2/model-portfolios/propose", strings.NewReader(body)), "u1", "t1"))
 	if rr.Code != 200 || !called || rr.Body.String() != `{"ReadOnly":true}` {
 		t.Fatalf("%d %s called=%v", rr.Code, rr.Body, called)
+	}
+}
+
+func TestLegacyModelPortfolioRoutesKeepUpstreamVersion(t *testing.T) {
+	for _, leaf := range []string{"propose", "orders"} {
+		be := &fakeBackend{resp: Response{Status: 410}}
+		mux := authz.NewMux(authz.Grants{"analyst": {authz.Read, authz.Trade}}, nil)
+		New(be, Roles{}).Routes(mux)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, authed(httptest.NewRequest(http.MethodPost, "/v1/model-portfolios/"+leaf, strings.NewReader(`{}`)), "u1", "t1"))
+		if rr.Code != 410 || be.last.Path != "/v1/"+leaf {
+			t.Fatalf("%s routed as %s, status=%d", leaf, be.last.Path, rr.Code)
+		}
 	}
 }

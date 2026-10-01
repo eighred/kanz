@@ -55,6 +55,9 @@ func ProposeExact(ctx context.Context, portfolioID string, in MarketInputs, obj 
 	if err := ValidateProposalInputs(portfolioID, in, current); err != nil {
 		return ExactProposal{}, err
 	}
+	if mandate != nil && mandate.GetPortfolioId() != portfolioID {
+		return ExactProposal{}, ErrExactProposal
+	}
 	solverConstraints, err := constraints.solver(in.Instruments)
 	if err != nil {
 		return ExactProposal{}, err
