@@ -253,7 +253,11 @@ func (p *Postgres) JournalAsOf(ctx context.Context, portfolioID string, effectiv
 	if err != nil {
 		return nil, err
 	}
-	return sortedFor(events, effectiveAsOf, knowledgeAsOf, true), nil
+	out := sortedFor(events, effectiveAsOf, knowledgeAsOf, true)
+	for _, e := range out {
+		e.journalReadPosition = 0
+	} // PIT effects cannot certify a current checkpoint.
+	return out, nil
 }
 
 // StalePortfolios also discovers untouched legacy portfolios with no head.
@@ -432,7 +436,7 @@ func (p *Postgres) SaveSnapshot(ctx context.Context, snap *Snapshot) error {
 	if err := tx.QueryRow(ctx, `SELECT position FROM ledger_heads WHERE portfolio_id=$1`, snap.PortfolioID).Scan(&head); err != nil {
 		return err
 	}
-	if snap.JournalPosition > head || snap.JournalPosition <= 0 || (!snap.commitPrefix && snap.JournalPosition != head) {
+	if snap.JournalPosition > head || snap.JournalPosition <= 0 || !snap.commitPrefix {
 		return ErrStaleSnapshot
 	}
 	_, err = tx.Exec(ctx, `

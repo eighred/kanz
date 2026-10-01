@@ -105,7 +105,7 @@ func TestMaterializeCurrentReadsOnlyTheTail(t *testing.T) {
 	st.journalCalls, st.journalRows = 0, 0 // seeding is not a read
 
 	// Checkpoint through the 15th entry; 5 remain in the tail.
-	snap := Replay("PF", events[:15]).Snapshot(events[14].Knowledge)
+	snap := replayJournal(t, mem, "PF").Snapshot(events[14].Knowledge)
 	if err := st.SaveSnapshot(ctx, snap); err != nil {
 		t.Fatalf("save snapshot: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestMaterializeCurrentRefusesABackdatedTail(t *testing.T) {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	snap := Replay("PF", []*Event{buy, sell}).Snapshot(sell.Knowledge)
+	snap := replayJournal(t, mem, "PF").Snapshot(sell.Knowledge)
 	if err := st.SaveSnapshot(ctx, snap); err != nil {
 		t.Fatalf("save snapshot: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestSaveSnapshotWatermarkIsMonotonic(t *testing.T) {
 	mem := NewMemoryStore()
 	events := seed(t, mem, "PF", 6)
 
-	newer := Replay("PF", events).Snapshot(events[5].Knowledge)
+	newer := replayJournal(t, mem, "PF").Snapshot(events[5].Knowledge)
 	older := Replay("PF", events[:2]).Snapshot(events[1].Knowledge)
 	if err := mem.SaveSnapshot(ctx, newer); err != nil {
 		t.Fatalf("save newer: %v", err)
@@ -432,7 +432,7 @@ func TestStalePortfoliosIsTheUnsnapshottedSet(t *testing.T) {
 	seed(t, mem, "B", 3)
 	seed(t, mem, "C", 3)
 
-	if err := mem.SaveSnapshot(ctx, Replay("A", a).Snapshot(a[2].Knowledge)); err != nil {
+	if err := mem.SaveSnapshot(ctx, replayJournal(t, mem, "A").Snapshot(a[2].Knowledge)); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	got, err := mem.StalePortfolios(ctx, 10)

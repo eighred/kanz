@@ -325,6 +325,51 @@ func TestCheckpointRefreshProgressesWhileOrdinaryCommitsContinue(t *testing.T) {
 	})
 }
 
+func TestRawAndManuallyExtendedBooksCannotCertifyCheckpoints(t *testing.T) {
+	commitStores(t, func(t *testing.T, st Store) {
+		e := trade("first", "AAPL", "100", "10", 1, 10)
+		if err := st.Append(t.Context(), e, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SaveSnapshot(t.Context(), Replay("PF", []*Event{e}).Snapshot(day(10))); !errors.Is(err, ErrStaleSnapshot) {
+			t.Fatalf("raw fold certified a checkpoint: %v", err)
+		}
+		book := replayJournal(t, st, "PF")
+		book.Apply(trade("not-committed", "AAPL", "1", "10", 2, 2))
+		if err := st.SaveSnapshot(t.Context(), book.Snapshot(day(10))); !errors.Is(err, ErrStaleSnapshot) {
+			t.Fatalf("manual fold retained a checkpoint receipt: %v", err)
+		}
+	})
+}
+
+func TestPostgresPITEffectsCannotCertifyCurrentCheckpoint(t *testing.T) {
+	st := NewPostgres(newPool(t))
+	hold := trade("hold", "AAPL", "100", "10", 1, 1)
+	hold.Cash = nil
+	paid := income(1, "1", 24)
+	paid.Action.PaidAt = day(23)
+	paid.Action.PaymentRef = "confirmed"
+	for _, e := range []*Event{hold, paid} {
+		if err := st.Append(t.Context(), e, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := st.JournalAsOf(t.Context(), "PF", day(15), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := Replay("PF", rows)
+	assertIncome(t, book, "0", "100", "0")
+	// All physical entries are present, but the future payment stage was cut
+	// from this PIT read. Cardinality alone cannot certify its current balance.
+	if book.journalPosition != 2 {
+		t.Fatal("test did not preserve the full source-entry count")
+	}
+	if err := st.SaveSnapshot(t.Context(), book.Snapshot(day(24))); !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("PIT view poisoned current checkpoint: %v", err)
+	}
+}
+
 func TestConflictingInsertCannotQueueAnEmptyPortfolio(t *testing.T) {
 	commitStores(t, func(t *testing.T, st Store) {
 		e := trade("first", "AAPL", "100", "10", 1, 10)
@@ -477,4 +522,13 @@ func TestPostgresLegacyPositionMigrationAndOldWriterRejection(t *testing.T) {
 	if _, err := other.Exec(ctx, `INSERT INTO ledger_heads(tenant_id,portfolio_id,position) VALUES('__system__','foreign',0)`); err == nil {
 		t.Fatal("cross-tenant head insertion accepted")
 	}
+}
+
+func replayJournal(t *testing.T, st Store, portfolio string) *Book {
+	t.Helper()
+	events, err := st.Journal(t.Context(), portfolio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Replay(portfolio, events)
 }

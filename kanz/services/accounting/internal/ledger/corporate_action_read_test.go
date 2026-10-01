@@ -48,7 +48,7 @@ func TestPostgresCurrentBookCannotMixInvalidatedCheckpointWithNewTail(t *testing
 	if err := writer.Append(ctx, hold, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.SaveSnapshot(ctx, Replay("PF", []*Event{hold}).Snapshot(day(10))); err != nil {
+	if err := writer.SaveSnapshot(ctx, replayJournal(t, writer, "PF").Snapshot(day(10))); err != nil {
 		t.Fatal(err)
 	}
 	pause := &checkpointReadPause{loaded: make(chan struct{}), resume: make(chan struct{})}

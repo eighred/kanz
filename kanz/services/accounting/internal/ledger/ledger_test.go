@@ -69,7 +69,7 @@ func TestReplayDeterministicNAV(t *testing.T) {
 	for _, e := range events[:2] {
 		_ = st.Append(context.Background(), e, nil)
 	}
-	mid := Replay("PF", events[:2])
+	mid := replayJournal(t, st, "PF")
 	snap := mid.Snapshot(day(2))
 	if err := st.SaveSnapshot(context.Background(), snap); err != nil {
 		t.Fatal(err)

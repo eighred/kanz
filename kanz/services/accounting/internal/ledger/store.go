@@ -312,9 +312,10 @@ func materializeCurrentAt(ctx context.Context, st Store, portfolioID string, now
 	}
 
 	b := RestoreBook(snap)
+	completePrefix := b.commitPrefix
 	b.applyUntil(tail, now, time.Time{})
 	b.journalPosition += countJournalEntries(portfolioID, tail, time.Time{})
-	b.commitPrefix = b.commitPrefix && hasJournalReadPosition(portfolioID, tail, b.journalPosition)
+	b.commitPrefix = completePrefix && hasJournalReadPosition(portfolioID, tail, b.journalPosition)
 	return b, "", nil
 }
 
@@ -627,7 +628,7 @@ func (m *MemoryStore) SaveSnapshot(_ context.Context, snap *Snapshot) error {
 		return ErrStaleActionSnapshot
 	}
 	head := int64(len(m.journal[snap.PortfolioID]))
-	if snap.JournalPosition > head || snap.JournalPosition <= 0 || (!snap.commitPrefix && snap.JournalPosition != head) {
+	if snap.JournalPosition > head || snap.JournalPosition <= 0 || !snap.commitPrefix {
 		return ErrStaleSnapshot
 	}
 	// Monotonic watermark, matching the Postgres upsert's WHERE clause — see

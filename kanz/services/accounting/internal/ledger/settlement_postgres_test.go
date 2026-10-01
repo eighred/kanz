@@ -126,7 +126,7 @@ func TestPostgresSnapshotRoundTripsTheSettledFold(t *testing.T) {
 	if err := st.Append(ctx, unknown, nil); err != nil {
 		t.Fatal(err)
 	}
-	b = Replay("PORT-SNAP", []*Event{settled, unknown})
+	b = replayJournal(t, st, "PORT-SNAP")
 
 	if err := st.SaveSnapshot(ctx, b.Snapshot(eff)); err != nil {
 		t.Fatalf("save snapshot: %v", err)

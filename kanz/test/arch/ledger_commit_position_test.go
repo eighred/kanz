@@ -18,7 +18,7 @@ func TestLedgerCheckpointUsesCommitProgress(t *testing.T) {
 		},
 		"services/accounting/internal/ledger/postgres.go": {
 			"AND position > $4", "JOIN ledger_append_positions",
-			"snap.JournalPosition != head", "pgx.RepeatableRead",
+			"!snap.commitPrefix", "pgx.RepeatableRead",
 		},
 		"services/accounting/migrations/0019_journal_commit_position.sql": {
 			"AFTER INSERT ON ledger_entries", "pg_advisory_xact_lock(hashtext(NEW.tenant_id), hashtext(NEW.portfolio_id))",

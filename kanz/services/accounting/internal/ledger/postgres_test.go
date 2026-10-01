@@ -167,7 +167,7 @@ func TestPostgresSnapshotTailEqualsFullReplay(t *testing.T) {
 	}
 
 	// Snapshot through t0, then append a tail entry past the watermark.
-	snap := Replay("PORT-1", []*Event{first}).Snapshot(t0)
+	snap := replayJournal(t, st, "PORT-1").Snapshot(t0)
 	if err := st.SaveSnapshot(ctx, snap); err != nil {
 		t.Fatalf("save snapshot: %v", err)
 	}

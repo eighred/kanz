@@ -317,6 +317,7 @@ func (b *Book) Apply(e *Event) {
 		return
 	}
 	b.seen[e.EntryID] = true
+	b.commitPrefix = false // a manual fold cannot retain a store-read checkpoint receipt
 	if e.Effective.After(b.maxEffective) {
 		b.maxEffective = e.Effective
 	}
