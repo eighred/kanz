@@ -101,8 +101,24 @@ func TestAuthorityRuntimeNotificationShutdownAndRetention(t *testing.T) {
 	}
 	stop()
 	stop()
-	if pool.Stat().AcquiredConns() != 0 || authorityMetric(t, registry, "enabled") != 0 {
-		t.Fatal("shutdown leaked a connection or active-delivery claim")
+	if authorityMetric(t, registry, "enabled") != 0 {
+		t.Fatal("stopped worker still claims active delivery")
+	}
+	// Cancellation may close a connection in flight. pgxpool.Release then
+	// delegates to puddle.Resource.Destroy, whose destructor runs in its own
+	// goroutine and retains the acquired count until it finishes. Joining the
+	// worker guarantees release was called, not that pool housekeeping already
+	// ran. A bounded drain still fails on an actual retained connection.
+	drain := time.NewTimer(3 * time.Second)
+	defer drain.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for pool.Stat().AcquiredConns() != 0 {
+		select {
+		case <-drain.C:
+			t.Fatalf("shutdown retained %d pool connections", pool.Stat().AcquiredConns())
+		case <-tick.C:
+		}
 	}
 	if _, err = pool.Exec(ctx, `SELECT 1`); err != nil {
 		t.Fatal("worker closed caller-owned pool", err)
