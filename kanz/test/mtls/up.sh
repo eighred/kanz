@@ -150,6 +150,9 @@ mint gateway "$GATEWAY_ID"
 mint tenantoms "$TENANT_OMS_ID"
 mint systemoms "$SYSTEM_OMS_ID"
 mint marketingest "$MARKET_INGEST_ID"
+# Authority exporters have publish-only grants on their dedicated evidence stream.
+mint identity "spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/identity"
+mint webbff "spiffe://${TRUST_DOMAIN}/ns/kanz-services/sa/web-bff"
 # spiffe-helper writes the broker's SVID under these exact names (see the
 # nats-spiffe-helper ConfigMap); nats.conf reads them by path.
 cp server.pem svid.pem && cp server.key svid_key.pem

@@ -62,6 +62,11 @@ data:
     # (test/arch) — which is exactly the check that caught it when I wrote one.
     ensure_stream() {
       name="$1"; subjects="$2"; max_age="$3"; shift 3
+      # CLI flags cannot repeat: preserve the default unless explicitly overridden.
+      discard=--discard=old
+      for flag in "$@"; do
+        case "$flag" in --discard=*) discard= ;; esac
+      done
       if nats --server "$NATS_URL" stream info "$name" >/dev/null 2>&1; then
         echo "stream $name — updating"
         nats --server "$NATS_URL" stream edit "$name" --force \
@@ -70,7 +75,7 @@ data:
         echo "stream $name — creating"
         nats --server "$NATS_URL" stream add "$name" --defaults \
           --subjects="$subjects" --storage=file --retention=limits \
-          --replicas="$NATS_REPLICAS" --discard=old --dupe-window=2m --max-age="$max_age" "$@"
+          --replicas="$NATS_REPLICAS" ${discard:+"$discard"} --dupe-window=2m --max-age="$max_age" "$@"
       fi
     }
 
@@ -154,6 +159,11 @@ data:
     # it ages off, and a weekend plus a bank holiday is longer than a day.
     ensure_stream TENANT_FACT   "tfact.*.>"       168h
     ensure_stream INFERENCE     "inference.>"     24h
+    # Authority evidence must survive a projector outage without ageing out.
+    # At capacity refuse new writes so the durable source queue retains them.
+    # #1292: canonical platform.authz evidence from cross-tenant authority journals.
+    # Central audit consumes it directly; single-tenant Kafka archivers cannot.
+    ensure_stream AUTHORITY_AUDIT "audit.authority.decision" 0 --discard=new --max-msgs=-1 --max-bytes=-1 --max-msgs-per-subject=-1
     ensure_stream PLATFORM      "platform.>"      168h
     ensure_stream DATA          "data.>"          168h
     ensure_stream OBSERVABILITY "observability.>" 1h

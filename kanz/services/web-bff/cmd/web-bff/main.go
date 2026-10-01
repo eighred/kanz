@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/auditdelivery"
 	"github.com/eighred/kanz/internal/clientip"
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/pg"
@@ -126,6 +127,14 @@ func run() int {
 		defer pool.Close()
 		sessions, err = session.NewPostgres(bootCtx, pool, cfg.SessionKey, cfg.SessionTTL, cfg.SessionLimits)
 		cancel()
+		if err == nil {
+			stopAudit, auditErr := auditdelivery.Start(ctx, pool, auditdelivery.Session, cfg.AuditDelivery, obs.Registry, logger, fatal.Raise)
+			if auditErr != nil {
+				logger.Error("session audit initialization failed", "err", auditErr)
+				return 2
+			}
+			defer stopAudit()
+		}
 	} else {
 		sessions, err = session.NewBounded(cfg.SessionTTL, cfg.SessionLimits)
 	}

@@ -2156,3 +2156,28 @@ groups:
         annotations:
           summary: "Venue reconciliation pass failed"
           description: "A pass failed before completing. Inspect venue connectivity and event delivery; the counter counts failed passes, not corrected positions."
+
+      # #1292: two 30s recovery scans plus scrape/evaluation allowance.
+      - alert: AuthorityAuditDeliveryUnhealthy
+        expr: kanz_authority_audit_scan_healthy == 0
+        for: 2m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "Authority evidence delivery is failing"
+          description: "Inspect PostgreSQL, NATS connectivity and invalid journal evidence. Pending rows remain durable; missing central evidence is not an absence of authority changes."
+
+      - alert: AuthorityAuditScanStale
+        expr: time() - kanz_authority_audit_last_scan_timestamp_seconds > 120
+        for: 1m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "Authority audit backlog has not been fully scanned"
+          description: "The delivery worker has stopped completing scans. Treat backlog gauges as stale and inspect worker/database health."
+
+      - alert: AuthorityAuditDeliveryDisabled
+        expr: kanz_authority_audit_enabled == 0
+        for: 2m
+        labels: { severity: critical, layer: operational }
+        annotations:
+          summary: "Durable authority audit delivery is disabled"
+          description: "Configure the service audit NATS URL. Local journals retain evidence, but central audit delivery is not active."
