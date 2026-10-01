@@ -136,6 +136,8 @@ message ExposureRequest {
   // Missing inputs or an unverifiable reconstruction yield FAILED_PRECONDITION;
   // a deployment without durable evaluation storage yields INVALID_ARGUMENT.
   // No historical request falls back to live state (#1039).
+  // Explicit timestamps must be valid and fit the retained signed 64-bit
+  // nanosecond range; malformed or out-of-range values yield INVALID_ARGUMENT.
   google.protobuf.Timestamp as_of = 2;
 }
 
