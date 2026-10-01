@@ -285,12 +285,10 @@ if step storage; then
     done
 
     [ "$found_count" -eq "$expected" ] || { echo "FATAL: FORCE RLS not active on $c for:$missing (expected $expected of {$tables}, database '$db') — MT-01d not deployed for the named table(s), or FORCE RLS was turned off" >&2; exit 1; }
+    echo "   VERIFIED: FORCE RLS active on $c {$tables} (database '$db')"
   done
 
-  # State the SCOPE of what just passed. This step verifies five tables; the
-  # tenant-scoped estate is larger, and an operator reading "RLS isolation is
-  # active" was previously entitled to assume it covered everything.
-  echo "   VERIFIED: FORCE RLS active on risk-engine{portfolios,positions,applied_keys} + accounting{ledger_entries,ledger_snapshots,outbox,custody_statements,custody_runs,custody_breaks,custody_actions}"
+  # Report exactly the table sets checked above, without a second stale list.
   echo "   NOT VERIFIED by this step (ONBOARD-M6: database/cluster unresolved, and this script will not guess):" >&2
   for group in $UNVERIFIED_RLS_TABLES; do
     echo "     - ${group%%:*}: $(printf '%s' "${group#*:}" | tr ',' ' ')" >&2
