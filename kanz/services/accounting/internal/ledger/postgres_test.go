@@ -24,7 +24,9 @@ import (
 
 const migrationDir = "../../migrations"
 
-func newPool(t *testing.T) *pgxpool.Pool {
+func newPool(t *testing.T) *pgxpool.Pool { return newPoolThrough(t, "") }
+
+func newPoolThrough(t *testing.T, last string) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("TEST_POSTGRES_URL")
 	if url == "" {
@@ -43,14 +45,14 @@ func newPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	applySchema(t, pool)
+	applySchemaThrough(t, pool, last)
 	return pool
 }
 
-func applySchema(t *testing.T, pool *pgxpool.Pool) {
+func applySchemaThrough(t *testing.T, pool *pgxpool.Pool, last string) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations, collateral_requests, collateral_reservations, collateral_active_agreements, collateral_workflows, collateral_snapshots, collateral_lots, custody_actions, ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS ledger_append_positions,ledger_heads,execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations, collateral_requests, collateral_reservations, collateral_active_agreements, collateral_workflows, collateral_snapshots, collateral_lots, custody_actions, ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))
@@ -59,6 +61,9 @@ func applySchema(t *testing.T, pool *pgxpool.Pool) {
 	}
 	sort.Strings(files)
 	for _, f := range files {
+		if last != "" && filepath.Base(f) > last {
+			break
+		}
 		ddl, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("read migration %s: %v", f, err)
@@ -237,7 +242,7 @@ func TestPostgresCrossReplicaConsistency(t *testing.T) {
 // snapshot_test.go proves MaterializeCurrent asks for the tail. It cannot prove
 // the tail read is CHEAP — that is a property of the query plan, and the
 // in-memory store has no plan. These two tests are the ones that fail if
-// 0005_ledger_snapshot_tail.sql is reverted or its index is renamed.
+// the commit-position index is removed or the production tail query changes.
 func TestPostgresJournalSinceReturnsOnlyTheTail(t *testing.T) {
 	pool := newPool(t)
 	st := NewPostgres(pool)
@@ -252,7 +257,7 @@ func TestPostgresJournalSinceReturnsOnlyTheTail(t *testing.T) {
 	}
 
 	watermark := t0.Add(14 * time.Hour) // entries e00..e14 are at or before it
-	tail, err := st.JournalSince(ctx, "PORT-1", watermark)
+	tail, err := st.JournalSince(ctx, "PORT-1", 15)
 	if err != nil {
 		t.Fatalf("journal since: %v", err)
 	}
@@ -276,17 +281,9 @@ func TestPostgresJournalSinceReturnsOnlyTheTail(t *testing.T) {
 	}
 }
 
-// The tail read must be a RANGE SCAN over ledger_entries_knowledge_idx, not a
-// filtered scan of the portfolio's whole journal.
-//
-// This is the assertion the issue's own "verified when" reaches for and that no
-// amount of in-memory testing can supply: with only 0001's bitemporal index
-// (tenant, portfolio, effective, knowledge, entry), knowledge_time has no
-// bounded column ahead of it, so Postgres can only seek on (tenant, portfolio)
-// and filters the rest — the scan stays proportional to the LIFETIME journal
-// even though the result is proportional to the tail. That is the shape of
-// #229 surviving its own fix, and it looks identical from Go.
-func TestPostgresJournalSinceUsesTheKnowledgeIndex(t *testing.T) {
+// Capture the production tail SQL and EXPLAIN that exact statement. Returning
+// nine rows is insufficient if reaching them scans the whole journal (#229).
+func TestPostgresJournalSinceUsesTheCommitPositionIndex(t *testing.T) {
 	pool := newPool(t)
 	st := NewPostgres(pool)
 	ctx := context.Background()
@@ -301,17 +298,26 @@ func TestPostgresJournalSinceUsesTheKnowledgeIndex(t *testing.T) {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
-	if _, err := pool.Exec(ctx, `ANALYZE ledger_entries`); err != nil {
+	if _, err := pool.Exec(ctx, `ANALYZE ledger_entries; ANALYZE ledger_append_positions`); err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
 
-	watermark := t0.Add(1990 * time.Minute) // 9 rows in the tail
-	rows, err := pool.Query(ctx, `
-		EXPLAIN (ANALYZE, FORMAT TEXT)
-		SELECT entry_id FROM ledger_entries
-		WHERE portfolio_id = $1 AND knowledge_time > $2
-		ORDER BY effective_time, knowledge_time, entry_id
-	`, "PORT-1", watermark)
+	capture := &journalQueryCapture{}
+	cfg := pool.Config()
+	cfg.ConnConfig.Tracer = capture
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	tail, err := NewPostgres(traced).JournalSince(ctx, "PORT-1", 1991)
+	if err != nil || len(tail) != 9 {
+		t.Fatalf("tail: %d %v", len(tail), err)
+	}
+	if capture.sql == "" {
+		t.Fatal("did not capture production journal tail query")
+	}
+	rows, err := pool.Query(ctx, "EXPLAIN (ANALYZE, FORMAT TEXT) "+capture.sql, capture.args...)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
@@ -331,8 +337,8 @@ func TestPostgresJournalSinceUsesTheKnowledgeIndex(t *testing.T) {
 	}
 
 	got := plan.String()
-	if !strings.Contains(got, "ledger_entries_knowledge_idx") {
-		t.Fatalf("the tail read did not use ledger_entries_knowledge_idx — it is scanning more "+
+	if !strings.Contains(got, "ledger_append_positions_pkey") {
+		t.Fatalf("the tail read did not use ledger_append_positions_pkey — it is scanning more "+
 			"than the tail, which is #229 with a bounded RESULT and an unbounded READ.\nplan:\n%s", got)
 	}
 	// NON-VACUITY: naming the index is not enough — a bitmap scan over the whole
@@ -398,3 +404,17 @@ func TestPostgresWithoutTenantGUCIsFailClosed(t *testing.T) {
 		t.Fatal("Append succeeded with no app.tenant_id GUC set — RLS is not protecting this table, or the tenant scoping is gone")
 	}
 }
+
+type journalQueryCapture struct {
+	sql  string
+	args []any
+}
+
+func (c *journalQueryCapture) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(data.SQL, "JOIN ledger_append_positions") {
+		c.sql = data.SQL
+		c.args = append([]any(nil), data.Args...)
+	}
+	return ctx
+}
+func (*journalQueryCapture) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}

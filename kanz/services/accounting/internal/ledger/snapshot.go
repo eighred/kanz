@@ -228,12 +228,10 @@ func (s *Snapshotter) Once(ctx context.Context) (int, error) {
 
 // checkpoint folds one portfolio's whole journal and stores the result.
 //
-// It reads the FULL journal on purpose — that is what building a checkpoint
-// from an event-sourced log means, and it is the one place in the service
-// entitled to. Deriving the watermarks from the entries actually folded, rather
-// than from the clock, is what makes the checkpoint honest: `now()` would claim
-// a knowledge watermark covering entries this pass never saw, and the tail read
-// would then skip them forever.
+// It reads the full immutable journal in one view. Replay derives the dense
+// append position from source entries; SaveSnapshot checks that position under
+// the portfolio lock so a concurrent commit cannot be hidden by this write.
+// Through remains descriptive knowledge metadata and never bounds the tail.
 func (s *Snapshotter) checkpoint(ctx context.Context, portfolioID string) error {
 	events, err := s.store.Journal(ctx, portfolioID)
 	if err != nil {

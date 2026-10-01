@@ -47,7 +47,7 @@ func (c *countingStore) Journal(ctx context.Context, id string) ([]*Event, error
 	return out, err
 }
 
-func (c *countingStore) JournalSince(ctx context.Context, id string, after time.Time) ([]*Event, error) {
+func (c *countingStore) JournalSince(ctx context.Context, id string, after int64) ([]*Event, error) {
 	out, err := c.Store.JournalSince(ctx, id, after)
 	c.journalSinceCalls++
 	c.journalSinceRows += len(out)
@@ -101,13 +101,22 @@ func TestMaterializeCurrentReadsOnlyTheTail(t *testing.T) {
 	ctx := context.Background()
 	mem := NewMemoryStore()
 	st := &countingStore{Store: mem}
-	events := seed(t, st, "PF", 20)
+	events := seed(t, st, "PF", 15)
 	st.journalCalls, st.journalRows = 0, 0 // seeding is not a read
 
 	// Checkpoint through the 15th entry; 5 remain in the tail.
 	snap := Replay("PF", events[:15]).Snapshot(events[14].Knowledge)
 	if err := st.SaveSnapshot(ctx, snap); err != nil {
 		t.Fatalf("save snapshot: %v", err)
+	}
+	for i := 15; i < 20; i++ {
+		e := trade("tail-"+time.Duration(i).String(), "AAPL", "10", "100", i+1, i+1)
+		e.Effective = events[0].Effective.Add(time.Duration(i) * time.Hour)
+		e.Knowledge = e.Effective
+		if err := st.Append(ctx, e, nil); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, e)
 	}
 
 	book, reason, err := MaterializeCurrent(ctx, st, "PF")
@@ -383,7 +392,7 @@ func TestSaveSnapshotWatermarkIsMonotonic(t *testing.T) {
 	if err := mem.SaveSnapshot(ctx, newer); err != nil {
 		t.Fatalf("save newer: %v", err)
 	}
-	if err := mem.SaveSnapshot(ctx, older); err != nil {
+	if err := mem.SaveSnapshot(ctx, older); !errors.Is(err, ErrStaleSnapshot) {
 		t.Fatalf("save older: %v", err)
 	}
 	got, err := mem.LoadSnapshot(ctx, "PF")
