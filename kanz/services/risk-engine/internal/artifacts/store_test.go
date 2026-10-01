@@ -111,14 +111,14 @@ func TestDurableModelIdentityIsolationAndRestart(t *testing.T) {
 	if _, err := a.ModelAt(ctx, "model-v1", at, before); !errors.Is(err, ErrMissing) {
 		t.Fatalf("future knowledge leaked: %v", err)
 	}
-	if _, err := b.ModelAt(ctx, "model-v1", at, time.Now()); !errors.Is(err, ErrMissing) {
+	if _, err := b.ModelAt(ctx, "model-v1", at, retainedKnowledge(t, a)); !errors.Is(err, ErrMissing) {
 		t.Fatalf("cross tenant read: %v", err)
 	}
-	if _, err := a.ModelAt(ctx, "model-v1", at.Add(-time.Nanosecond), time.Now()); !errors.Is(err, ErrMissing) {
+	if _, err := a.ModelAt(ctx, "model-v1", at.Add(-time.Nanosecond), retainedKnowledge(t, a)); !errors.Is(err, ErrMissing) {
 		t.Fatalf("future effective version leaked: %v", err)
 	}
 	// Recreate the repository object: no in-process cache survives this read.
-	restored, err := New(a.pool).ModelAt(ctx, "model-v1", at, time.Now())
+	restored, err := New(a.pool).ModelAt(ctx, "model-v1", at, retainedKnowledge(t, a))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,10 @@ func TestDurableCurveSurvivesHorizonWithoutRounding(t *testing.T) {
 	if err := a.RecordCurve(ctx, "USD", at, c); err != nil {
 		t.Fatal(err)
 	}
-	got, err := New(a.pool).CurveAt(ctx, "USD", at, time.Now())
+	if _, err := a.CurveAt(ctx, "USD", at, retainedKnowledge(t, a).Add(-time.Microsecond)); !errors.Is(err, ErrMissing) {
+		t.Fatalf("pre-admission curve leaked: %v", err)
+	}
+	got, err := New(a.pool).CurveAt(ctx, "USD", at, retainedKnowledge(t, a))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,4 +183,16 @@ func TestDurableCurveSurvivesHorizonWithoutRounding(t *testing.T) {
 	if err := a.SaveCurve(ctx, bad); err == nil {
 		t.Fatal("absent rate accepted as zero")
 	}
+}
+
+// Admission is stamped by PostgreSQL. A client wall clock may lag that clock
+// (observed 722 microseconds on Windows), even after the write has returned.
+// Use the retained knowledge boundary instead of weakening the cutoff or sleeping.
+func retainedKnowledge(t *testing.T, s *Store) time.Time {
+	t.Helper()
+	var at time.Time
+	if err := s.pool.QueryRow(context.Background(), `SELECT max(recorded_at) FROM risk_model_artifacts`).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	return at
 }

@@ -83,7 +83,7 @@ func TestJetStreamFactMaterializesBeforeAcknowledgement(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := New(a.pool).CurveAt(ctx, "USD", at, time.Now())
+	got, err := New(a.pool).CurveAt(ctx, "USD", at, retainedKnowledge(t, a))
 	if err != nil {
 		t.Fatal(err)
 	}
