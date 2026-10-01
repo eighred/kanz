@@ -144,9 +144,15 @@ const (
 // each closing over ctx + providers. Call at engine startup after
 // DefaultRegistry; tests register against a static model provider.
 func RegisterFactorRisk(ctx context.Context, r *Registry, providers FactorProviders) {
-	r.Register(MeasureFactorVaR99, factorMeasure(ctx, providers, MeasureFactorVaR99))
-	r.Register(MeasureSystematicRisk, factorMeasure(ctx, providers, MeasureSystematicRisk))
-	r.Register(MeasureSpecificRisk, factorMeasure(ctx, providers, MeasureSpecificRisk))
+	r.RegisterScoped(MeasureFactorVaR99, ctx, func(evalCtx context.Context) MeasureFunc {
+		return factorMeasure(evalCtx, providers, MeasureFactorVaR99)
+	})
+	r.RegisterScoped(MeasureSystematicRisk, ctx, func(evalCtx context.Context) MeasureFunc {
+		return factorMeasure(evalCtx, providers, MeasureSystematicRisk)
+	})
+	r.RegisterScoped(MeasureSpecificRisk, ctx, func(evalCtx context.Context) MeasureFunc {
+		return factorMeasure(evalCtx, providers, MeasureSpecificRisk)
+	})
 }
 
 // factorMeasure builds the MeasureFunc for one factor measure. It resolves the

@@ -506,6 +506,8 @@ func mapError(err error) error {
 		// this refusal exists to break. The message names the reason and a
 		// bounded sample of the holdings.
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, v1.ErrHistoryUnavailable):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, v1.ErrInvalidRequest):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, context.Canceled):

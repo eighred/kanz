@@ -172,9 +172,13 @@ const (
 // guard's dead-entry arm insists once a seam has a caller, which is what keeps
 // an exemption from outliving its repair.
 func RegisterStructuredRisk(ctx context.Context, r *Registry, providers StructuredProviders) {
-	r.Register(MeasureStructDuration, structMeasure(ctx, MeasureStructDuration, providers))
-	r.Register(MeasureStructConvexity, structMeasure(ctx, MeasureStructConvexity, providers))
-	r.Register(MeasureStructWAL, structMeasure(ctx, MeasureStructWAL, providers))
+	r.RegisterScoped(MeasureStructDuration, ctx, func(evalCtx context.Context) MeasureFunc {
+		return structMeasure(evalCtx, MeasureStructDuration, providers)
+	})
+	r.RegisterScoped(MeasureStructConvexity, ctx, func(evalCtx context.Context) MeasureFunc {
+		return structMeasure(evalCtx, MeasureStructConvexity, providers)
+	})
+	r.RegisterScoped(MeasureStructWAL, ctx, func(evalCtx context.Context) MeasureFunc { return structMeasure(evalCtx, MeasureStructWAL, providers) })
 }
 
 // structMeasure builds the MeasureFunc for one structured measure — a |MV|-

@@ -57,6 +57,7 @@ import (
 	"github.com/eighred/kanz/services/risk-engine/internal/app"
 	"github.com/eighred/kanz/services/risk-engine/internal/config"
 	"github.com/eighred/kanz/services/risk-engine/internal/grpcsrv"
+	"github.com/eighred/kanz/services/risk-engine/internal/replay"
 	"github.com/eighred/kanz/services/risk-engine/internal/server"
 	"github.com/eighred/kanz/services/risk-engine/internal/shard"
 )
@@ -403,7 +404,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		barStore = priceStore
 		prices = priceStore
 		provider := returns.NewStoreReturnsProvider(priceStore, returns.ReturnsConfig{})
-		varmodel.Register(context.Background(), registry, provider, varmodel.Config{})
+		varmodel.Register(context.Background(), registry, replay.Returns{Source: provider}, varmodel.Config{})
 		logger.Info("RISK-12/RISK-M1: historical-simulation VaR99 + ES99 + MaxDrawdown(+Amount) registered off market-data price store")
 
 		// THE FACTOR MEASURES (#509). The last missing piece was the estimation
@@ -442,7 +443,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			artifacts.FitOptions()...,
 		)
 		compute.RegisterFactorRisk(context.Background(), registry, compute.FactorProviders{
-			Model: modelProvider,
+			Model: replay.Models{Source: modelProvider},
 			// COUNTED BY REASON, NOT BY INSTRUMENT — one series per instrument
 			// ever held is unbounded cardinality. Note the two reasons answer
 			// different questions: no_model means the whole book's factor risk is
@@ -462,8 +463,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			contractTerms := termsource.NewProvider(terms.NewPostgres(pricePool),
 				termsource.WithMissingTermsObserver(func(string) { fiTermsMissing.Inc() }))
 			compute.RegisterFIRisk(context.Background(), registry, compute.FIProviders{
-				Terms: contractTerms,
-				Curve: curveStore,
+				Terms: replay.Bonds{Source: contractTerms},
+				Curve: replay.Curves{Source: curveStore},
 				// COUNTED, NOT LABELLED BY INSTRUMENT. An instrument id label is
 				// unbounded cardinality — one series per bond ever held — and the
 				// question an operator has is "are bonds falling out of the rate
@@ -487,8 +488,8 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			// would flag every response — the argument the FI else-branch below
 			// makes about signal, and it applies here identically.
 			compute.RegisterStructuredRisk(context.Background(), registry, compute.StructuredProviders{
-				Terms:  contractTerms,
-				Curve:  curveStore,
+				Terms:  replay.Structures{Source: contractTerms},
+				Curve:  replay.Curves{Source: curveStore},
 				OnSkip: func(_, reason string) { structSkipped.WithLabelValues(reason).Inc() },
 			})
 			logger.Info("STRUCT-01d: StructDuration + StructConvexity + StructWAL registered off "+
@@ -590,6 +591,11 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// Recomputer baseCtx is app-scoped (Background), not the signal ctx, so
 	// the shutdown Drain can still publish the last settled state after the
 	// signal cancels ingestion.
+	evaluator, err := newRiskEvaluator(ctx, pool, registry)
+	if err != nil {
+		return err
+	}
+	recomputeOpts = append(recomputeOpts, engine.WithRecomputeEvaluator(evaluator))
 	recomputer := engine.NewRecomputer(context.Background(), store, registry,
 		cache, publisher, engine.DefaultDebounceInterval, logger, recomputeOpts...)
 
@@ -870,6 +876,7 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 		// WithOwnership: this Service fans out across every replica, so a query for
 		// a portfolio held elsewhere must be refused by name rather than answered
 		// from the local cache or reported as not-found (#110).
+		engineOpts = append(engineOpts, engine.WithEvaluator(evaluator))
 		engineImpl := engine.New(store, registry, cache, risk.NewDetector(), engineOpts...)
 		stopGRPC, err := serveQueryGRPC(ctx, cfg, mesh.Source, engineImpl, logger)
 		if err != nil {

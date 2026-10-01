@@ -251,7 +251,7 @@ if step storage; then
     # `FORCE  ROW LEVEL SECURITY` with TWO SPACES, in a `FOREACH t IN ARRAY
     # ARRAY[...]` loop, not individual `ALTER TABLE x FORCE` statements).
     case "$c" in
-      kanz-risk)  tables="portfolios positions applied_keys risk_model_artifacts"; db="$RISK_DB_NAME" ;;
+      kanz-risk)  tables="portfolios positions applied_keys risk_model_artifacts risk_input_objects risk_evaluations risk_evaluation_inputs"; db="$RISK_DB_NAME" ;;
       kanz-books) tables="ledger_entries ledger_snapshots ledger_heads ledger_append_positions outbox custody_statements custody_runs custody_breaks custody_actions collateral_snapshots collateral_workflows collateral_reservations collateral_requests collateral_confirmations collateral_active_agreements collateral_lots collateral_allocation_proofs cash_commands execution_fee_revisions"; db="$BOOKS_DB_NAME" ;;
       *) echo "FATAL: no table set declared for $c" >&2; exit 1 ;;
     esac

@@ -129,6 +129,11 @@ message MeasureProvenance {
   // Absolute market value excluded from this panel calculation, in portfolio
   // base currency. Absent means unreported/unrepresentable, never zero.
   common.v1.Decimal excluded_gross = 6;
+
+  // Digest of the complete retained evaluation manifest: portfolio state,
+  // resolved pricing inputs and calculator profile. Separate from the dated
+  // panel digest; absent means the evaluation makes no durable replay claim.
+  string input_manifest_digest = 7;
 }
 
 // InputCoverage records how much of the book one measure was actually

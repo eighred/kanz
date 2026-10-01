@@ -51,6 +51,8 @@ type MeasureProvenance struct {
 	Params map[string]string
 	// InputDigest is high-cardinality audit identity, never a grouping parameter.
 	InputDigest string
+	// InputManifestDigest identifies the complete durable evaluation inputs.
+	InputManifestDigest string
 	// ExcludedGross is exact excluded absolute exposure in portfolio base currency.
 	// Nil means unreported or unrepresentable, not zero.
 	ExcludedGross *commonpb.Decimal

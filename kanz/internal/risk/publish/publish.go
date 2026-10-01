@@ -306,11 +306,12 @@ func toProtoProvenance(p v1.MeasureProvenance) *domainpb.MeasureProvenance {
 		return nil
 	}
 	out := &domainpb.MeasureProvenance{
-		Method:        string(p.Method),
-		ModelId:       p.ModelID,
-		Params:        p.Params,
-		InputDigest:   p.InputDigest,
-		ExcludedGross: p.ExcludedGross,
+		Method:              string(p.Method),
+		ModelId:             p.ModelID,
+		Params:              p.Params,
+		InputDigest:         p.InputDigest,
+		InputManifestDigest: p.InputManifestDigest,
+		ExcludedGross:       p.ExcludedGross,
 	}
 	if !p.ModelAsOf.IsZero() {
 		out.ModelAsOf = timestamppb.New(p.ModelAsOf)

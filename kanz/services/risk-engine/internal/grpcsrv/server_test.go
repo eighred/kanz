@@ -356,6 +356,7 @@ func TestErrorMapping(t *testing.T) {
 	}{
 		{"not_found", v1.ErrPortfolioNotFound, codes.NotFound},
 		{"invalid", v1.ErrInvalidRequest, codes.InvalidArgument},
+		{"history", v1.ErrHistoryUnavailable, codes.FailedPrecondition},
 		{"other", context.DeadlineExceeded, codes.DeadlineExceeded},
 		// #110: a shard refusal must NOT arrive as NotFound. One Service fans
 		// out across every replica, so "no such portfolio" would be the answer

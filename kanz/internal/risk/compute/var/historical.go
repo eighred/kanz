@@ -221,10 +221,19 @@ func modelParams(conf float64, window int, seed *int64) map[string]string {
 // VaR (compute.VaR99) and serves none of the tail measures (HHI, being
 // positions-only, is already in DefaultRegistry).
 func Register(ctx context.Context, r *compute.Registry, provider compute.ReturnsProvider, cfg Config) {
-	r.Register(compute.MeasureVaR99, compute.BindReturns(ctx, provider, Historical(cfg)))
-	r.Register(compute.MeasureES99, compute.BindReturns(ctx, provider, ExpectedShortfall(cfg)))
-	r.Register(compute.MeasureMaxDrawdown, compute.BindReturns(ctx, provider, MaxDrawdownFraction(cfg)))
-	r.Register(compute.MeasureMaxDrawdownAmount, compute.BindReturns(ctx, provider, MaxDrawdownAmount(cfg)))
+	r.RegisterScoped(compute.MeasureVaR99, ctx, func(evalCtx context.Context) compute.MeasureFunc {
+		return compute.BindReturns(evalCtx, provider, Historical(cfg))
+	})
+	r.RegisterScoped(compute.MeasureES99, ctx, func(evalCtx context.Context) compute.MeasureFunc {
+		return compute.BindReturns(evalCtx, provider, ExpectedShortfall(cfg))
+	})
+	r.RegisterScoped(compute.MeasureMaxDrawdown, ctx, func(evalCtx context.Context) compute.MeasureFunc {
+		return compute.BindReturns(evalCtx, provider, MaxDrawdownFraction(cfg))
+	})
+	r.RegisterScoped(compute.MeasureMaxDrawdownAmount, ctx, func(evalCtx context.Context) compute.MeasureFunc {
+		return compute.BindReturns(evalCtx, provider, MaxDrawdownAmount(cfg))
+	})
+	r.SetParameters(compute.MeasureVaR99, map[string]string{"confidence": strconv.FormatFloat(cfg.confidence(), 'g', -1, 64), "window": strconv.Itoa(cfg.Window)})
 }
 
 // quantile is the empirical α-quantile of an ascending-sorted sample, with

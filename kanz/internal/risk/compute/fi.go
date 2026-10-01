@@ -222,10 +222,10 @@ const (
 // closing over ctx + providers. Call at engine startup after DefaultRegistry;
 // tests register against deterministic providers.
 func RegisterFIRisk(ctx context.Context, r *Registry, providers FIProviders) {
-	r.Register(MeasureDV01, fiMeasure(ctx, MeasureDV01, providers))
-	r.Register(MeasureDuration, fiMeasure(ctx, MeasureDuration, providers))
-	r.Register(MeasureConvexity, fiMeasure(ctx, MeasureConvexity, providers))
-	r.Register(MeasureSpreadDuration, fiMeasure(ctx, MeasureSpreadDuration, providers))
+	r.RegisterScoped(MeasureDV01, ctx, func(evalCtx context.Context) MeasureFunc { return fiMeasure(evalCtx, MeasureDV01, providers) })
+	r.RegisterScoped(MeasureDuration, ctx, func(evalCtx context.Context) MeasureFunc { return fiMeasure(evalCtx, MeasureDuration, providers) })
+	r.RegisterScoped(MeasureConvexity, ctx, func(evalCtx context.Context) MeasureFunc { return fiMeasure(evalCtx, MeasureConvexity, providers) })
+	r.RegisterScoped(MeasureSpreadDuration, ctx, func(evalCtx context.Context) MeasureFunc { return fiMeasure(evalCtx, MeasureSpreadDuration, providers) })
 }
 
 // fiMeasure builds the MeasureFunc for one FI risk measure. DV01 is a dollar
