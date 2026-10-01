@@ -406,3 +406,21 @@ func TestExposureAsOfDecodeAndZeroElision(t *testing.T) {
 		t.Errorf("zero response as_of should elide to nil, got %v", resp.GetAsOf())
 	}
 }
+
+func TestInvalidHistoricalTimestampCannotBecomeALiveRead(t *testing.T) {
+	// Nil callbacks panic if malformed input reaches the engine at all.
+	srv := grpcsrv.New(fakeEngine{}, "acme")
+	for _, at := range []*timestamppb.Timestamp{
+		{Seconds: 100, Nanos: -1}, {Seconds: 100, Nanos: 1000000000},
+		timestamppb.New(time.Time{}), timestamppb.New(time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)),
+	} {
+		_, err := srv.Exposure(context.Background(), &querypb.ExposureRequest{PortfolioId: "PF1", AsOf: at})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("exposure timestamp %v: %v", at, err)
+		}
+		_, err = srv.Measures(context.Background(), &querypb.MeasuresRequest{PortfolioId: "PF1", AsOf: at})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("measures timestamp %v: %v", at, err)
+		}
+	}
+}

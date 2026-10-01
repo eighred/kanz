@@ -119,9 +119,13 @@ func (s *Server) Exposure(ctx context.Context, req *querypb.ExposureRequest) (*q
 	if err := requireDecimalDomain(req); err != nil {
 		return nil, err
 	}
+	asOf, err := asOfTime(req.GetAsOf())
+	if err != nil {
+		return nil, err
+	}
 	resp, err := s.engine.Exposure(ctx, v1.ExposureRequest{
 		PortfolioID: v1.PortfolioID(req.GetPortfolioId()),
-		AsOf:        asOfTime(req.GetAsOf()),
+		AsOf:        asOf,
 	})
 	if err != nil {
 		return nil, mapError(err)
@@ -148,9 +152,13 @@ func (s *Server) Measures(ctx context.Context, req *querypb.MeasuresRequest) (*q
 	if err := requireDecimalDomain(req); err != nil {
 		return nil, err
 	}
+	asOf, err := asOfTime(req.GetAsOf())
+	if err != nil {
+		return nil, err
+	}
 	resp, err := s.engine.Measures(ctx, v1.MeasuresRequest{
 		PortfolioID: v1.PortfolioID(req.GetPortfolioId()),
-		AsOf:        asOfTime(req.GetAsOf()),
+		AsOf:        asOf,
 		Measures:    measureNames(req.GetMeasures()),
 	})
 	if err != nil {
@@ -253,11 +261,20 @@ func (s *Server) Health(ctx context.Context, _ *querypb.HealthRequest) (*querypb
 
 // asOfTime maps an optional request timestamp to a time.Time; a nil
 // timestamp ⇒ zero time, which the Engine reads as "latest".
-func asOfTime(ts *timestamppb.Timestamp) time.Time {
+func asOfTime(ts *timestamppb.Timestamp) (time.Time, error) {
 	if ts == nil {
-		return time.Time{}
+		return time.Time{}, nil
 	}
-	return ts.AsTime()
+	if err := ts.CheckValid(); err != nil {
+		return time.Time{}, status.Error(codes.InvalidArgument, "as_of is not a valid timestamp")
+	}
+	at := ts.AsTime()
+	// Explicit year one must not become the Go API's zero/latest sentinel.
+	// Retained state uses exact int64 nanoseconds, so reject wider timestamps.
+	if at.IsZero() || !time.Unix(0, at.UnixNano()).Equal(at) {
+		return time.Time{}, status.Error(codes.InvalidArgument, "as_of is outside the retained nanosecond domain")
+	}
+	return at, nil
 }
 
 func measureNames(in []string) []v1.MeasureName {
