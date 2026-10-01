@@ -87,6 +87,16 @@ func ProposeExact(ctx context.Context, portfolioID string, in MarketInputs, obj 
 	for _, trade := range proposal.Trades {
 		actual[trade.InstrumentID] = trade.TargetWeight
 	}
+	total := new(big.Rat)
+	for _, value := range actual {
+		r, _ := value.Rat()
+		total.Add(total, r)
+	}
+	// Omitting only one side of a rebalance can imply borrowing or an undeclared
+	// cash allocation. This contract cannot certify either without a cash model.
+	if total.Cmp(big.NewRat(1, 1)) != 0 && !(total.Sign() == 0 && len(proposal.Trades) == 0) {
+		return ExactProposal{}, ErrExactProposal
+	}
 	if err := constraints.check(ctx, proposal, classifier, asOf); err != nil {
 		return ExactProposal{}, err
 	}

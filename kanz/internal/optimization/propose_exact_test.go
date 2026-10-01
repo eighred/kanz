@@ -104,3 +104,11 @@ func TestExactFinancialConstraintsCannotRoundIntoCompliance(t *testing.T) {
 		}
 	}
 }
+
+func TestThresholdCannotInventFinancing(t *testing.T) {
+	in := MarketInputs{Instruments: []string{"A", "B", "C"}, ExpectedReturns: []float64{0, 0.1, 0}}
+	f := FinancialInputs{Current: map[string]dec.Exact{"A": "0.004", "B": "0.396", "C": "0.6"}, NAV: "100", Prices: map[string]dec.Exact{"A": "1", "B": "1", "C": "1"}, Threshold: "0.005", Currency: "USD"}
+	if _, err := ProposeExact(context.Background(), "PF", in, Objective{}, nil, f, nil, nil, nil, time.Now()); err == nil {
+		t.Fatal("omitted sale silently financed excess purchases")
+	}
+}

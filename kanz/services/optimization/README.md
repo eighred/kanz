@@ -69,7 +69,8 @@ instrument units. A missing holding in an explicitly supplied map is zero;
 missing price, NAV, currency, map, or threshold is unknown and refused. All
 instruments require positive prices. This contract supports long-only fully
 invested holdings (sum exactly one) or an explicitly empty initial book. Cash
-allocation and short financing are not inferred. Holdings/prices outside the
+allocation and short financing are not inferred. Threshold omissions that change
+the unit budget are refused rather than inventing cash or borrowing. Holdings/prices outside the
 supplied universe are refused. Exact rational quantities remain strings, e.g.
 `"1/3"`; no lot-size rounding or execution authority is implied.
 
