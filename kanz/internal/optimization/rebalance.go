@@ -1,7 +1,6 @@
 package optimization
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -11,10 +10,6 @@ import (
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
-
-	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
-
-	"github.com/eighred/kanz/internal/compliance"
 )
 
 // Rebalancing (OPT-01d): diff the optimized target weights against the current
@@ -275,38 +270,6 @@ func Rebalance(portfolioID string, current, target map[string]float64, nav float
 		Turnover:    gross / 2,
 		AsOf:        asOf,
 	}
-}
-
-// Propose runs the full OPT-01 pipeline: optimize the targets, check them
-// against the COMP-01 mandate (deny-by-default), and diff into a minimal trade
-// list — the one call a PM workflow / the OPT-01e service drives. The mandate
-// constraints are folded into the optimization box up front (a book you can't
-// hold, you can't optimize into) AND the result is re-checked against the full
-// mandate; an infeasible result is still returned (MandateInfeasible +
-// violations) so the PM sees why, never silently dropped.
-//
-// A NIL MANDATE DOES NOT PASS. CheckMandate reports MandateUnchecked for it, and
-// the proposal carries that verdict out — so "this deployment has no mandate for
-// the portfolio" and "the mandate was satisfied" are different answers, and only
-// the second materializes into orders.
-func Propose(ctx context.Context, portfolioID string, in MarketInputs, obj Objective, cons *ConstraintSet,
-	current map[string]float64, nav float64, prices map[string]float64, threshold float64,
-	classifier compliance.Classifier, engine *compliance.Engine, mandate *compliancepb.Mandate, currency string, asOf time.Time) (RebalanceProposal, error) {
-
-	res, err := Optimize(in, obj, cons)
-	if err != nil {
-		return RebalanceProposal{}, err
-	}
-	proposal := Rebalance(portfolioID, current, res.Weights, nav, prices, threshold, asOf)
-	proposal.Objective = obj
-	proposal.ExpectedReturn = res.ExpectedReturn
-	proposal.ExpectedRisk = res.ExpectedRisk
-	proposal.CovarianceQuality = res.CovarianceQuality
-
-	status, violations := CheckMandate(ctx, res.Weights, nav, currency, classifier, engine, mandate, asOf)
-	proposal.MandateStatus = status
-	proposal.Violations = violations
-	return proposal, nil
 }
 
 func unionKeys(a, b map[string]float64) []string {
