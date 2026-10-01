@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/eighred/kanz/pkg/auth"
@@ -13,9 +14,9 @@ import (
 
 func TestExactProposalGatewayPreservesWireAndTenant(t *testing.T) {
 	const body = `{"nav":"9007199254740993","prices":{"A":"0.000000000001"}}`
-	called := false
+	var called atomic.Bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
+		called.Store(true)
 		p, ok := auth.PrincipalFromHeaders(r.Header)
 		b, err := io.ReadAll(r.Body)
 		if !ok || p.Tenant != "t1" || p.Subject != "u1" || r.URL.Path != "/v2/propose" || string(b) != body || err != nil {
@@ -30,8 +31,8 @@ func TestExactProposalGatewayPreservesWireAndTenant(t *testing.T) {
 	New(backend, Roles{}).Routes(mux)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, authed(httptest.NewRequest(http.MethodPost, "/v2/model-portfolios/propose", strings.NewReader(body)), "u1", "t1"))
-	if rr.Code != 200 || !called || rr.Body.String() != `{"ReadOnly":true}` {
-		t.Fatalf("%d %s called=%v", rr.Code, rr.Body, called)
+	if rr.Code != 200 || !called.Load() || rr.Body.String() != `{"ReadOnly":true}` {
+		t.Fatalf("%d %s called=%v", rr.Code, rr.Body, called.Load())
 	}
 }
 
