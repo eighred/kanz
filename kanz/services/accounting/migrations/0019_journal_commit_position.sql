@@ -33,6 +33,9 @@ END $$;
 CREATE TRIGGER ledger_append_positions_no_mutate
     BEFORE UPDATE OR DELETE ON ledger_append_positions
     FOR EACH ROW EXECUTE FUNCTION ledger_entries_worm();
+CREATE TRIGGER ledger_append_positions_no_truncate
+    BEFORE TRUNCATE ON ledger_append_positions
+    FOR EACH STATEMENT EXECUTE FUNCTION ledger_entries_worm();
 
 -- Initialize BEFORE the insert: an AFTER-row trigger for a multi-row INSERT
 -- already sees the whole batch, so count(*)-1 there would create cursor gaps.

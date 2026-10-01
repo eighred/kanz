@@ -281,6 +281,25 @@ func TestCommitPositionRollbackAndStaleCheckpointFence(t *testing.T) {
 	})
 }
 
+func TestConflictingInsertCannotQueueAnEmptyPortfolio(t *testing.T) {
+	commitStores(t, func(t *testing.T, st Store) {
+		e := trade("first", "AAPL", "100", "10", 1, 10)
+		if err := st.Append(t.Context(), e, nil); err != nil {
+			t.Fatal(err)
+		}
+		checkpointAll(t, st, "PF")
+		duplicate := *e
+		duplicate.PortfolioID = "EMPTY"
+		if err := st.Append(t.Context(), &duplicate, nil); err != nil {
+			t.Fatal(err)
+		}
+		stale, err := st.StalePortfolios(t.Context(), 10)
+		if err != nil || len(stale) != 0 {
+			t.Fatalf("duplicate insert queued an empty portfolio: %v %v", stale, err)
+		}
+	})
+}
+
 func TestEqualEffectiveTailReplaysCanonicalOrder(t *testing.T) {
 	commitStores(t, func(t *testing.T, st Store) {
 		// The late buy sorts before the sale even though it commits afterwards.
@@ -365,6 +384,9 @@ func TestPostgresLegacyPositionMigrationAndOldWriterRejection(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `DELETE FROM ledger_append_positions WHERE portfolio_id='PF'`); err == nil {
 		t.Fatal("append index can be deleted")
+	}
+	if _, err := pool.Exec(ctx, `TRUNCATE ledger_append_positions`); err == nil {
+		t.Fatal("append index can be truncated")
 	}
 	snap = checkpointAll(t, st, "PF")
 	if snap.JournalPosition != 2 {

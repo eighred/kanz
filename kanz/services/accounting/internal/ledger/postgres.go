@@ -264,7 +264,7 @@ func (p *Postgres) StalePortfolios(ctx context.Context, limit int) ([]string, er
 	}
 	rows, err := p.q.Query(ctx, `
 		SELECT p.portfolio_id
-		FROM (SELECT portfolio_id FROM ledger_heads
+		FROM (SELECT portfolio_id FROM ledger_heads WHERE position > 0
 		      UNION SELECT portfolio_id FROM ledger_entries e WHERE NOT EXISTS
 		        (SELECT 1 FROM ledger_heads h WHERE h.portfolio_id=e.portfolio_id)) p
 		LEFT JOIN ledger_heads h ON h.portfolio_id=p.portfolio_id
