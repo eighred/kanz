@@ -7,6 +7,7 @@ CREATE TABLE capital_balances (
     revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0),
     gap_revision bigint NOT NULL DEFAULT 0 CHECK (gap_revision >= 0),
     conflicted boolean NOT NULL DEFAULT false,
+    coverage_complete boolean NOT NULL DEFAULT false,
     total text NOT NULL DEFAULT '0',
     reserved text NOT NULL DEFAULT '0',
     observed_at_ns bigint,

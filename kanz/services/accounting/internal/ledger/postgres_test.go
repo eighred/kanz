@@ -52,7 +52,7 @@ func newPoolThrough(t *testing.T, last string) *pgxpool.Pool {
 func applySchemaThrough(t *testing.T, pool *pgxpool.Pool, last string) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS ledger_append_positions,ledger_heads,execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations, collateral_requests, collateral_reservations, collateral_active_agreements, collateral_workflows, collateral_snapshots, collateral_lots, custody_actions, ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS cash_commit_history,cash_commit_debits,cash_commit_heads,ledger_append_positions,ledger_heads,execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations, collateral_requests, collateral_reservations, collateral_active_agreements, collateral_workflows, collateral_snapshots, collateral_lots, custody_actions, ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))

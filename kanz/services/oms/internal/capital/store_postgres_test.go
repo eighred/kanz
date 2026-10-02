@@ -89,7 +89,83 @@ func transaction(p *pgxpool.Pool, run func(pgx.Tx) error) error {
 }
 
 func snapshot(rev int64, total string) CashEvent {
-	return CashEvent{PortfolioID: "fund", Currency: "USD", Revision: rev, Total: dec.Exact(total), ObservedAt: time.Date(2026, 10, 2, 10, 0, 0, 123, time.UTC)}
+	return CashEvent{Complete: true, PortfolioID: "fund", Currency: "USD", Revision: rev, Total: dec.Exact(total), ObservedAt: time.Date(2026, 10, 2, 10, 0, 0, 123, time.UTC)}
+}
+
+func TestIncompleteCoverageImmediatelyStopsNewSpending(t *testing.T) {
+	p := database(t)
+	ctx := context.Background()
+	opening := snapshot(1, "250")
+	if err := Apply(ctx, p, opening); err != nil {
+		t.Fatal(err)
+	}
+	reserve := func(id string, amount dec.Exact) error {
+		return transaction(p, func(tx pgx.Tx) error {
+			return Reserve(ctx, tx, "fund", "USD", id, amount, opening.ObservedAt, time.Minute)
+		})
+	}
+	if err := reserve("existing", "100"); err != nil {
+		t.Fatal(err)
+	}
+	incomplete := snapshot(2, "250")
+	incomplete.Complete = false
+	if err := Apply(ctx, p, incomplete); err != nil {
+		t.Fatal(err)
+	}
+	if err := reserve("new", "1"); !errors.Is(err, ErrUnknown) {
+		t.Fatalf("old complete cash remained usable: %v", err)
+	}
+	if err := transaction(p, func(tx pgx.Tx) error {
+		return Change(ctx, tx, "fund", "USD", "existing", 1, "101", opening.ObservedAt, time.Minute)
+	}); !errors.Is(err, ErrUnknown) {
+		t.Fatalf("increased commitment on incomplete source: %v", err)
+	}
+	// A confirmed exposure reduction remains possible during a source outage.
+	if err := transaction(p, func(tx pgx.Tx) error {
+		return Change(ctx, tx, "fund", "USD", "existing", 1, "50", opening.ObservedAt, time.Minute)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(ctx, p, snapshot(3, "250")); err != nil {
+		t.Fatal(err)
+	}
+	if err := reserve("new", "200"); err != nil {
+		t.Fatalf("complete source failed to restore exact remaining capacity: %v", err)
+	}
+}
+
+func TestCashCoverageIdentityIncludesTheWholeSourceFact(t *testing.T) {
+	p := database(t)
+	ctx := context.Background()
+	msg := coverageBalance()
+	msg.CashCommit.Applied = nil
+	event, err := FromBalance(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(ctx, p, event); err != nil {
+		t.Fatal(err)
+	}
+	// Same revision and financial totals, contradictory source-feed posture.
+	msg.Completeness.UnproducedEntryTypes = []string{"fee"}
+	changed, err := FromBalance(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.SourceDigest == event.SourceDigest {
+		t.Fatal("source posture omitted from receipt identity")
+	}
+	if err := Apply(ctx, p, changed); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting source revision accepted: %v", err)
+	}
+	if err := Apply(ctx, p, event); err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction(p, func(tx pgx.Tx) error {
+		return Reserve(ctx, tx, "fund", "USD", "order", "1", event.ObservedAt, time.Minute)
+	}); !errors.Is(err, ErrUnknown) {
+		t.Fatalf("replay cleared conflict quarantine: %v", err)
+	}
 }
 
 func reserve(p *pgxpool.Pool, id, amount string) error {

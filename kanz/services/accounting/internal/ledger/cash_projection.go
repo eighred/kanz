@@ -15,6 +15,8 @@ import (
 type CashProjection struct {
 	Book     *Book
 	Accounts map[string]map[string]*big.Rat
+	asOf     time.Time
+	events   []*Event
 }
 
 // MaterializeCash preserves the checkpoint path for the portfolio book. The
@@ -55,7 +57,7 @@ func MaterializeCash(ctx context.Context, st Store, portfolio string, asOf time.
 		if err != nil {
 			return CashProjection{}, err
 		}
-		return CashProjection{Book: ReplayAsOf(portfolio, events, asOf, time.Time{}), Accounts: cashAccountsAsOf(portfolio, events, asOf)}, nil
+		return newCashProjection(ReplayAsOf(portfolio, events, asOf, time.Time{}), events, asOf), nil
 	}
 }
 
@@ -68,16 +70,16 @@ func materializeCash(ctx context.Context, st Store, portfolio string, asOf time.
 	if err != nil {
 		return CashProjection{}, err
 	}
-	return CashProjection{Book: book, Accounts: cashAccountsAsOf(portfolio, events, asOf)}, nil
+	return newCashProjection(book, events, asOf), nil
 }
 
-func cashAccountsAsOf(portfolio string, events []*Event, asOf time.Time) map[string]map[string]*big.Rat {
+func newCashProjection(book *Book, events []*Event, asOf time.Time) CashProjection {
 	selected := sortedFor(events, asOf, time.Time{}, true)
 	kept := selected[:0]
 	for _, e := range selected {
-		if e.PortfolioID == "" || e.PortfolioID == portfolio {
+		if e.PortfolioID == "" || e.PortfolioID == book.PortfolioID {
 			kept = append(kept, e)
 		}
 	}
-	return VenueAccountCash(kept)
+	return CashProjection{Book: book, Accounts: VenueAccountCash(kept), events: kept, asOf: asOf}
 }

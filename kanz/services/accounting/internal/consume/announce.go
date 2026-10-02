@@ -218,6 +218,13 @@ func (a *Announcer) Records(ctx context.Context, st ledger.Store, portfolioID st
 		CurrencyCoverage:   coverage,
 		ExcludedCurrencies: excluded,
 	}
+	if sealer, ok := st.(interface {
+		SealCashBalance(context.Context, *accountingpb.PortfolioCashBalance, ledger.CashProjection) error
+	}); ok {
+		if err := sealer.SealCashBalance(ctx, msg, projection); err != nil {
+			return nil, fmt.Errorf("announce %s: seal cash coverage: %w", portfolioID, err)
+		}
+	}
 	// outbox.From resolves the tenant and the lineage off ctx exactly as
 	// bus.Producer.stamp would have — the relay publishes from a ticker, long
 	// after the fold's context is gone, so a record that did not capture them

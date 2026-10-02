@@ -37,17 +37,20 @@ type Applied struct {
 // First revision requires an authoritative opening balance and no unaccounted
 // legacy orders. It is not permission to infer a zero opening balance.
 type CashEvent struct {
-	PortfolioID string
-	Currency    string
-	Revision    int64
-	Total       dec.Exact
-	ObservedAt  time.Time
-	Applied     []Applied
+	PortfolioID  string
+	Currency     string
+	Revision     int64
+	Total        dec.Exact
+	ObservedAt   time.Time
+	Complete     bool     // explicitly established source and execution coverage
+	SourceDigest [32]byte // binds the complete accounting payload, including source posture
+	Applied      []Applied
 }
 
 type balance struct {
 	revision, gap   int64
 	conflicted      bool
+	complete        bool
 	total, reserved *big.Rat
 	observed        *int64
 }
@@ -73,8 +76,8 @@ func need(required, booked *big.Rat) *big.Rat {
 func lock(ctx context.Context, tx pgx.Tx, portfolio, currency string) (balance, error) {
 	var b balance
 	var total, reserved string
-	err := tx.QueryRow(ctx, `SELECT revision,gap_revision,conflicted,total,reserved,observed_at_ns FROM capital_balances
-		WHERE portfolio_id=$1 AND currency=$2 FOR UPDATE`, portfolio, currency).Scan(&b.revision, &b.gap, &b.conflicted, &total, &reserved, &b.observed)
+	err := tx.QueryRow(ctx, `SELECT revision,gap_revision,conflicted,coverage_complete,total,reserved,observed_at_ns FROM capital_balances
+		WHERE portfolio_id=$1 AND currency=$2 FOR UPDATE`, portfolio, currency).Scan(&b.revision, &b.gap, &b.conflicted, &b.complete, &total, &reserved, &b.observed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, ErrUnknown
 	}
@@ -104,7 +107,7 @@ func Reserve(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string
 	if err != nil {
 		return err
 	}
-	if b.conflicted || b.revision == 0 || b.gap > b.revision || b.observed == nil || time.Unix(0, *b.observed).After(now) || now.Sub(time.Unix(0, *b.observed)) > maxAge {
+	if !b.complete || b.conflicted || b.revision == 0 || b.gap > b.revision || b.observed == nil || time.Unix(0, *b.observed).After(now) || now.Sub(time.Unix(0, *b.observed)) > maxAge {
 		return ErrUnknown
 	}
 	next := new(big.Rat).Add(b.reserved, required)
@@ -168,7 +171,7 @@ func Change(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string,
 	before, after := need(old, booked), need(required, booked)
 	next := new(big.Rat).Add(new(big.Rat).Sub(b.reserved, before), after)
 	if after.Cmp(before) > 0 {
-		if b.conflicted || b.revision == 0 || b.gap > b.revision || b.observed == nil || time.Unix(0, *b.observed).After(now) || now.Sub(time.Unix(0, *b.observed)) > maxAge {
+		if !b.complete || b.conflicted || b.revision == 0 || b.gap > b.revision || b.observed == nil || time.Unix(0, *b.observed).After(now) || now.Sub(time.Unix(0, *b.observed)) > maxAge {
 			return ErrUnknown
 		}
 		if next.Cmp(b.total) > 0 {
@@ -355,7 +358,7 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, event CashEvent) error {
 	if err = writeReserved(ctx, tx, event.PortfolioID, event.Currency, b.reserved); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE capital_balances SET revision=$3,total=$4,observed_at_ns=$5 WHERE portfolio_id=$1 AND currency=$2`, event.PortfolioID, event.Currency, event.Revision, total.RatString(), event.ObservedAt.UnixNano()); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE capital_balances SET revision=$3,total=$4,observed_at_ns=$5,coverage_complete=$6 WHERE portfolio_id=$1 AND currency=$2`, event.PortfolioID, event.Currency, event.Revision, total.RatString(), event.ObservedAt.UnixNano(), event.Complete); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
