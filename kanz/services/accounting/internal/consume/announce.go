@@ -180,10 +180,12 @@ func (a *Announcer) Records(ctx context.Context, st ledger.Store, portfolioID st
 	if a.publisher == nil || portfolioID == "" {
 		return nil, nil
 	}
-	book, _, err := ledger.MaterializeCurrent(ctx, st, portfolioID)
+	now := a.now().UTC()
+	projection, err := ledger.MaterializeCash(ctx, st, portfolioID, now)
 	if err != nil {
 		return nil, fmt.Errorf("announce %s: materialize: %w", portfolioID, err)
 	}
+	book := projection.Book
 	total, ok := dec.ToProtoExact(book.CashBalance(a.baseCcy))
 	if !ok {
 		// EXACT, NEVER ROUNDED (#1062). A balance the platform cannot represent
@@ -199,12 +201,11 @@ func (a *Announcer) Records(ctx context.Context, st ledger.Store, portfolioID st
 		return nil, fmt.Errorf("announce %s: cash balance is not representable as a Decimal", portfolioID)
 	}
 
-	perAccount, err := a.byVenueAccount(ctx, st, portfolioID)
+	perAccount, err := byVenueAccount(projection.Accounts, portfolioID)
 	if err != nil {
 		return nil, err
 	}
 
-	now := a.now().UTC()
 	coverage, excluded := cashCurrencyCoverage(book, a.baseCcy)
 	msg := &accountingpb.PortfolioCashBalance{
 		PortfolioId:        portfolioID,
@@ -246,19 +247,12 @@ func (a *Announcer) Records(ctx context.Context, st ledger.Store, portfolioID st
 	return []outbox.Record{rec}, nil
 }
 
-// byVenueAccount folds the journal into per-(exchange account, asset) balances —
-// the half execution.ExpectedBalances needs (#418), carried on the same FACT so
-// one publisher serves both consumers rather than two drifting apart.
+// byVenueAccount encodes the account half of the same cash projection used for
+// the portfolio total. execution.ExpectedBalances consumes this half (#418).
 //
 // Sorted, so the announcement is byte-stable for a given book: an unsorted map
 // range would make every republish look like a change to anything diffing them.
-func (a *Announcer) byVenueAccount(ctx context.Context, st ledger.Store, portfolioID string) ([]*accountingpb.VenueAccountCash, error) {
-	events, err := st.Journal(ctx, portfolioID)
-	if err != nil {
-		return nil, fmt.Errorf("announce %s: journal: %w", portfolioID, err)
-	}
-	balances := ledger.VenueAccountCash(events)
-
+func byVenueAccount(balances map[string]map[string]*big.Rat, portfolioID string) ([]*accountingpb.VenueAccountCash, error) {
 	var out []*accountingpb.VenueAccountCash
 	for _, account := range ledger.VenueAccounts(balances) {
 		byAsset := balances[account]
