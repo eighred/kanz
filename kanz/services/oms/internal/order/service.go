@@ -1835,10 +1835,9 @@ func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now 
 		return nil // work commits ROUTED before dispatch; CAS prevents a racing placement
 	}
 	if s.router == nil {
-		if st.GetVenue() != "" || st.GetVenueAckAt() != nil {
-			return errors.New("oms: cannot confirm cancellation without the order's venue router")
-		}
-		return nil // paper order with no external route
+		// A missing MIC/ack does not prove this was unsent: a default route
+		// may have accepted it before its placement acknowledgement was lost.
+		return errors.New("oms: cannot confirm cancellation without the order's venue router")
 	}
 	venue, err := s.router.Route(st)
 	if err != nil {
