@@ -296,8 +296,8 @@ func (s *Service) abandonClaim(command, orderID string, err error) error {
 // NewService wires the handler. gate defaults to deny-nothing (compliance.AllowAll)
 // when nil; router may be nil to admit orders without working them (they rest).
 // closes is the in-flight-close registry the venue-close dispatch path writes to
-// and the reconcilers' healing watchdogs drain; nil disables venue-side cancel
-// dispatch (the cancel stays ledger-only).
+// and the reconcilers' healing watchdogs drain. Self-healing remote adapters own
+// their tracking; other external closers require a tracker before dispatch.
 // tenant is the tenant THIS OMS serves. Required, and refused when empty for the
 // same reason pg.NewTenantPool refuses one: a service that cannot say whose book
 // it is writing must not write. It is the input to the cross-tenant refusal in
@@ -1686,7 +1686,9 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 		// Without this the ledger calls the order CANCELLED while it is still
 		// resting — and still fillable — on the exchange. st (not next) carries
 		// the pre-cancel quantities the close intent is built from.
-		s.closeAtVenue(ctx, st, now)
+		if err := s.closeAtVenue(ctx, st, now); err != nil {
+			return err // an attempted withdrawal is not a terminal financial fact
+		}
 	}
 
 	// THE CANCELLATION AND ITS ANNOUNCEMENT ARE NOW ONE WRITE (#292).
@@ -1823,24 +1825,31 @@ func (s *Service) completeCancelAnnouncement(ctx context.Context, st *orderpb.Or
 // Certainty seam). A venue with nothing resting externally (SimVenue) does not
 // implement execution.Closer and is skipped — its cancel is ledger-only.
 //
-// It deliberately reports no error: the ledger must never freeze on a venue that
-// will not answer. A failed or hung cancel stays TRACKED and the watchdog
-// force-resolves it against venue truth. Returning it as a transient fault would
-// instead nack the command and redeliver a cancel the venue may already have
-// applied.
+// A failed or hung cancellation retains the live state and remains retryable.
+// The watchdog can reconcile venue truth, but its future result cannot justify
+// a CANCELLED fact now. Retrying addresses the same venue order identity.
 // It takes no version: it dispatches to the venue and writes nothing to the
 // store, so there is no CAS for a version to govern.
-func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now time.Time) {
-	if s.router == nil || s.closes == nil {
-		return
+func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now time.Time) error {
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW && st.GetVenueAckAt() == nil {
+		return nil // work commits ROUTED before dispatch; CAS prevents a racing placement
+	}
+	if s.router == nil {
+		if st.GetVenue() != "" || st.GetVenueAckAt() != nil {
+			return errors.New("oms: cannot confirm cancellation without the order's venue router")
+		}
+		return nil // paper order with no external route
 	}
 	venue, err := s.router.Route(st)
 	if err != nil {
-		return // nothing is working this order at a venue
+		return fmt.Errorf("oms: cannot route cancellation: %w", err)
 	}
 	closer, ok := venue.(execution.Closer)
 	if !ok {
-		return // no order resting at an exchange to withdraw
+		if _, simulated := venue.(*execution.SimVenue); simulated {
+			return nil // this implementation cannot leave an external order working
+		}
+		return errors.New("oms: venue has not declared a cancellation capability")
 	}
 
 	// Track BEFORE dispatch: if the call hangs, times out ambiguously, or the
@@ -1858,23 +1867,26 @@ func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now 
 	// registry the in-process OKX reconciler drains indiscriminately — and it would
 	// then try to heal another venue's order. Hands off.
 	if _, selfHealing := closer.(execution.SelfHealing); !selfHealing {
+		if s.closes == nil {
+			return errors.New("oms: cannot dispatch external cancellation without close tracking")
+		}
 		if err := s.closes.Track(ctx, execution.CloseIntent{
 			OrderID:      st.GetOrderId(),
 			InstrumentID: st.GetInstrumentId(),
 			RequestedAt:  now,
 		}); err != nil {
-			s.logger.Error("oms: cannot track close", "err", err)
-			return
+			return fmt.Errorf("oms: cannot track close: %w", err)
 		}
 	}
 	if err := closer.CancelOrder(ctx, st); err != nil {
-		s.logger.Error("oms: venue cancel unconfirmed — left to the healing watchdog",
-			"order_id", st.GetOrderId(), "venue", venue.MIC(), "err", err)
-		return
+		return fmt.Errorf("oms: venue cancel unconfirmed for %s at %s: %w", st.GetOrderId(), venue.MIC(), err)
 	}
-	if err := s.closes.Resolve(ctx, st.GetOrderId()); err != nil {
-		s.logger.Error("oms: confirmed close still tracked", "err", err)
+	if _, selfHealing := closer.(execution.SelfHealing); !selfHealing {
+		if err := s.closes.Resolve(ctx, st.GetOrderId()); err != nil {
+			s.logger.Error("oms: confirmed close still tracked", "err", err)
+		}
 	}
+	return nil
 }
 
 func (s *Service) handleAmend(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {

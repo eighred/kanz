@@ -79,26 +79,26 @@ func TestCancel_DispatchesToVenueAndResolves(t *testing.T) {
 }
 
 // A venue that will not confirm the cancel leaves the close TRACKED for the
-// healing watchdog — and the ledger still progresses. The ledger must never
-// freeze on an exchange that does not answer.
+// healing watchdog. The ledger retains executable exposure until withdrawal
+// is confirmed; it must not publish success for an unanswered request.
 func TestCancel_UnconfirmedVenueLeavesCloseTracked(t *testing.T) {
 	fb := &fakeBus{}
 	venue := &closerVenue{mic: "BINANCE", err: errors.New("timeout")}
 	svc, reg := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
-		t.Fatalf("cancel returned %v — an unconfirmed venue cancel must not nack the command", err)
+	before := len(fb.types())
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err == nil {
+		t.Fatal("unconfirmed venue cancel must remain retryable")
 	}
 	if reg.Len() != 1 {
 		t.Fatalf("registry holds %d closes, want 1 (an unconfirmed close is the watchdog's to resolve)", reg.Len())
 	}
-	// The ledger did not freeze: the cancellation FACT + outcome still went out.
-	if fb.last(EventTypeCancelled) == nil {
-		t.Fatal("no OrderCancelled emitted — the ledger froze on an unresponsive venue")
+	if fb.last(EventTypeCancelled) != nil || len(fb.types()) != before {
+		t.Fatal("unconfirmed cancellation published a terminal fact or outcome")
 	}
-	oc := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
-	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED {
-		t.Fatalf("outcome = %v, want EXECUTED", oc.GetStatus())
+	st, _, err := svc.store.Load(context.Background(), "o1")
+	if err != nil || IsTerminal(st) || st.GetCancelAnnouncedAt() != nil {
+		t.Fatalf("unconfirmed order lost its exposure: %v %v", st, err)
 	}
 }
 
@@ -109,8 +109,8 @@ func TestCancel_TrackedCloseCarriesNoSweep(t *testing.T) {
 	venue := &closerVenue{mic: "BINANCE", err: errors.New("timeout")}
 	svc, reg := restingOrderOn(t, fb, venue)
 
-	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
-		t.Fatalf("cancel: %v", err)
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err == nil {
+		t.Fatal("unconfirmed close must return an error")
 	}
 	due, err := reg.DueCloses(context.Background(), time.Now(), 0) // timeout 0 ⇒ every tracked close is due
 	if err != nil {
@@ -203,5 +203,61 @@ func marketOrder() *orderpb.SubmitOrder {
 		Side: orderpb.Side_SIDE_BUY, Quantity: d(100, 0),
 		OrderType:   orderpb.OrderType_ORDER_TYPE_MARKET,
 		TimeInForce: orderpb.TimeInForce_TIME_IN_FORCE_DAY,
+	}
+}
+
+type failingCloseTracker struct {
+	trackErr, resolveErr error
+}
+
+func (f failingCloseTracker) Track(context.Context, execution.CloseIntent) error { return f.trackErr }
+func (f failingCloseTracker) Resolve(context.Context, string) error              { return f.resolveErr }
+
+// Embedding only Venue deliberately hides the underlying test venue's Closer.
+type undeclaredCloser struct{ execution.Venue }
+
+func TestCancel_UnknownWithdrawalBoundaryCannotProduceSuccess(t *testing.T) {
+	for name, breakBoundary := range map[string]func(*Service, *closerVenue){
+		"no router":     func(s *Service, _ *closerVenue) { s.router = nil },
+		"missing route": func(s *Service, _ *closerVenue) { s.router = execution.NewRouter(nil) },
+		"no tracker":    func(s *Service, _ *closerVenue) { s.closes = nil },
+		"tracking failed": func(s *Service, _ *closerVenue) {
+			s.closes = failingCloseTracker{trackErr: errors.New("tracking unavailable")}
+		},
+		"undeclared closer": func(s *Service, v *closerVenue) {
+			s.router = execution.NewRouter([]execution.Venue{undeclaredCloser{v}})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fb := &fakeBus{}
+			venue := &closerVenue{mic: "BINANCE"}
+			svc, _ := restingOrderOn(t, fb, venue)
+			breakBoundary(svc, venue)
+			before := len(fb.types())
+			if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err == nil {
+				t.Fatal("unknown withdrawal boundary acknowledged cancellation")
+			}
+			if len(venue.cancelled) != 0 || len(fb.types()) != before {
+				t.Fatal("invalid boundary dispatched or announced cancellation")
+			}
+			st, _, err := svc.store.Load(context.Background(), "o1")
+			if err != nil || IsTerminal(st) || st.GetCancelAnnouncedAt() != nil {
+				t.Fatalf("live exposure was discarded: %v %v", st, err)
+			}
+		})
+	}
+}
+
+func TestCancel_ConfirmedWithdrawalSurvivesTrackerCleanupFailure(t *testing.T) {
+	fb := &fakeBus{}
+	venue := &closerVenue{mic: "BINANCE"}
+	svc, _ := restingOrderOn(t, fb, venue)
+	svc.closes = failingCloseTracker{resolveErr: errors.New("cleanup unavailable")}
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := svc.store.Load(context.Background(), "o1")
+	if err != nil || st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_CANCELLED || fb.last(EventTypeCancelled) == nil {
+		t.Fatalf("confirmed venue truth lost to cleanup failure: %v %v", st, err)
 	}
 }
