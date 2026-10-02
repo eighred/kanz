@@ -261,3 +261,29 @@ func TestCancel_ConfirmedWithdrawalSurvivesTrackerCleanupFailure(t *testing.T) {
 		t.Fatalf("confirmed venue truth lost to cleanup failure: %v %v", st, err)
 	}
 }
+
+// A default route has no explicit MIC on the order. A lost placement reply
+// leaves no ack either; ROUTED still means the venue may hold live exposure.
+func TestCancel_LostPlacementAckAndRouterCannotBecomePaperCancellation(t *testing.T) {
+	fb := &fakeBus{}
+	venue := &closerVenue{mic: "BINANCE"}
+	svc, _ := restingOrderOn(t, fb, venue)
+	st, ver, err := svc.store.Load(testCtx(), "o1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Venue = ""
+	st.VenueAckAt = nil
+	if err := svc.store.Save(testCtx(), st, ver, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	svc.router = nil
+	before := len(fb.types())
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err == nil {
+		t.Fatal("uncertain routed order was treated as an unsent paper order")
+	}
+	after, _, err := svc.store.Load(testCtx(), "o1")
+	if err != nil || after.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_ROUTED || after.GetCancelAnnouncedAt() != nil || len(fb.types()) != before || len(venue.cancelled) != 0 {
+		t.Fatalf("uncertain exposure changed without confirmation: %v %v", after, err)
+	}
+}
