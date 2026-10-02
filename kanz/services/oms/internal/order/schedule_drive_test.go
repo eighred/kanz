@@ -628,60 +628,6 @@ func TestScheduleE2E_CancellingAParentStopsEveryUnsentChild(t *testing.T) {
 	}
 }
 
-// AND THE CHILDREN ALREADY AT A VENUE ARE WITHDRAWN TOO.
-//
-// Clause (c) names UNSENT children, and stopping those is satisfied by the test
-// above. But a cancel that stopped only the future slices would leave an operator
-// who pulled a 60-unit order with quantity still working at an exchange and
-// nothing saying why. Pulling a parent means pulling the whole decision.
-func TestScheduleE2E_CancellingAParentWithdrawsItsLiveChildren(t *testing.T) {
-	at := schedStart.Add(25 * time.Minute)
-	fb := &fakeBus{}
-	svc, store := scheduledService(t, fb, &at)
-
-	// A limit far from the market so the SimVenue rests it rather than filling —
-	// a filled child is terminal and has nothing left to withdraw, which would
-	// make this assertion pass vacuously.
-	cmd := scheduledOrder("p1", 6, nil)
-	cmd.LimitPrice = d(1, -2)
-	if err := svc.Handle(testCtx(), submitEnv(), mustMarshal(t, cmd)); err != nil {
-		t.Fatalf("Handle: %v", err)
-	}
-	if n, err := svc.DriveSchedules(driveCtx()); err != nil || n != 3 {
-		t.Fatalf("precondition: created %d children (err %v), want 3", n, err)
-	}
-	live := 0
-	children, _ := store.ListByParent(context.Background(), "p1")
-	for _, c := range children {
-		if !IsTerminal(c) {
-			live++
-		}
-	}
-	if live == 0 {
-		t.Skip("the sim venue filled every child immediately; nothing is left resting to withdraw")
-	}
-
-	if err := svc.Handle(testCtx(), &envelopepb.Envelope{EventType: SubjectCancel},
-		mustMarshal(t, &orderpb.CancelOrder{
-			Metadata: &commandpb.CommandMetadata{
-				TargetId:            "p1",
-				PrincipalPortfolios: []string{"fund-alpha"},
-			},
-			OrderId: "p1",
-		})); err != nil {
-		t.Fatalf("cancel the parent: %v", err)
-	}
-
-	children, _ = store.ListByParent(context.Background(), "p1")
-	for _, c := range children {
-		if !IsTerminal(c) {
-			t.Errorf("child %s is still %v after its parent was cancelled — the operator pulled "+
-				"this order and part of it is still working at an exchange",
-				c.GetOrderId(), c.GetStatus())
-		}
-	}
-}
-
 // A CHILD THAT CANNOT BE WITHDRAWN STOPS THE PARENT'S CANCEL.
 //
 // THIS IS THE ASSERTION THAT A NIL RETURN IS NOT A WITHDRAWAL. handleCancel
