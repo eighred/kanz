@@ -103,6 +103,13 @@ func Reserve(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string
 	if err != nil {
 		return err
 	}
+	faulted, err := sourceFault(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if faulted {
+		return ErrUnknown
+	}
 	b, err := lock(ctx, tx, portfolio, currency)
 	if err != nil {
 		return err
@@ -140,6 +147,10 @@ func Change(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string,
 	if err != nil {
 		return err
 	}
+	faulted, err := sourceFault(ctx, tx)
+	if err != nil {
+		return err
+	}
 	b, err := lock(ctx, tx, portfolio, currency)
 	if err != nil {
 		return err
@@ -171,7 +182,7 @@ func Change(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string,
 	before, after := need(old, booked), need(required, booked)
 	next := new(big.Rat).Add(new(big.Rat).Sub(b.reserved, before), after)
 	if after.Cmp(before) > 0 {
-		if !b.complete || b.conflicted || b.revision == 0 || b.gap > b.revision || b.observed == nil || time.Unix(0, *b.observed).After(now) || now.Sub(time.Unix(0, *b.observed)) > maxAge {
+		if faulted || !b.complete || b.conflicted || b.revision == 0 || b.gap > b.revision || b.observed == nil || time.Unix(0, *b.observed).After(now) || now.Sub(time.Unix(0, *b.observed)) > maxAge {
 			return ErrUnknown
 		}
 		if next.Cmp(b.total) > 0 {
@@ -198,6 +209,9 @@ func ObserveExecution(ctx context.Context, tx pgx.Tx, portfolio, currency, order
 	}
 	executed, err := amount(string(debit), true)
 	if err != nil {
+		return err
+	}
+	if _, err := sourceFault(ctx, tx); err != nil {
 		return err
 	}
 	b, err := lock(ctx, tx, portfolio, currency)
@@ -284,6 +298,12 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, event CashEvent) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err = tx.Exec(ctx, `INSERT INTO capital_source_health DEFAULT VALUES ON CONFLICT DO NOTHING`); err != nil {
+		return err
+	}
+	if _, err = sourceFault(ctx, tx); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO capital_balances(portfolio_id,currency) VALUES($1,$2) ON CONFLICT DO NOTHING`, event.PortfolioID, event.Currency); err != nil {
 		return err
 	}
