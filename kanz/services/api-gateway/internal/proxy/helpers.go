@@ -42,6 +42,9 @@ func writeUpstream(w http.ResponseWriter, resp Response) {
 		ct = "application/json"
 	}
 	w.Header().Set("Content-Type", ct)
+	if resp.CacheControl != "" {
+		w.Header().Set("Cache-Control", resp.CacheControl)
+	}
 	status := resp.Status
 	if status == 0 {
 		status = http.StatusOK

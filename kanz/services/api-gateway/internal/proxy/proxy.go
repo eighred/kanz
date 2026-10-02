@@ -152,9 +152,10 @@ type Request struct {
 
 // Response is the upstream reply, written back to the client verbatim.
 type Response struct {
-	Status      int
-	ContentType string
-	Body        []byte
+	Status       int
+	ContentType  string
+	CacheControl string
+	Body         []byte
 }
 
 // Backend forwards a Request to its upstream service over the mesh. The concrete
