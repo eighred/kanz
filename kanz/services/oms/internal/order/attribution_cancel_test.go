@@ -42,6 +42,11 @@ func TestAWithdrawnOrderIsMeasuredOnWhatItActuallyTraded(t *testing.T) {
 	ctx := testCtx()
 	fb := &fakeBus{}
 	svc, store := newServiceNoVenue(t, fb)
+	// Attribution follows a confirmed withdrawal, even when the fill history
+	// is seeded. A missing router cannot certify a routed order as cancelled.
+	venue := &closerVenue{mic: "XSIM"}
+	svc.router = execution.NewRouter([]execution.Venue{venue})
+	svc.closes = execution.NewCloseRegistry()
 
 	seeded := &orderpb.OrderState{
 		OrderId:          "withdrawn1",
@@ -72,6 +77,9 @@ func TestAWithdrawnOrderIsMeasuredOnWhatItActuallyTraded(t *testing.T) {
 	}
 	if err := svc.handleCancel(ctx, mustMarshal(t, cancel)); err != nil {
 		t.Fatalf("handleCancel: %v", err)
+	}
+	if len(venue.cancelled) != 1 || venue.cancelled[0] != seeded.GetOrderId() {
+		t.Fatal("attribution bypassed the confirmed withdrawal")
 	}
 
 	after, _, err := store.Load(ctx, seeded.GetOrderId())
@@ -128,6 +136,11 @@ func TestAWithdrawnOrderThatNeverTradedPublishesNothing(t *testing.T) {
 	ctx := testCtx()
 	fb := &fakeBus{}
 	svc, store := newServiceNoVenue(t, fb)
+	// Attribution follows a confirmed withdrawal, even when the fill history
+	// is seeded. A missing router cannot certify a routed order as cancelled.
+	venue := &closerVenue{mic: "XSIM"}
+	svc.router = execution.NewRouter([]execution.Venue{venue})
+	svc.closes = execution.NewCloseRegistry()
 
 	seeded := &orderpb.OrderState{
 		OrderId:         "withdrawn2",
@@ -155,6 +168,9 @@ func TestAWithdrawnOrderThatNeverTradedPublishesNothing(t *testing.T) {
 	}
 	if err := svc.handleCancel(ctx, mustMarshal(t, cancel)); err != nil {
 		t.Fatalf("handleCancel: %v", err)
+	}
+	if len(venue.cancelled) != 1 || venue.cancelled[0] != seeded.GetOrderId() {
+		t.Fatal("attribution bypassed the confirmed withdrawal")
 	}
 	if fb.last(EventTypeAttributed) != nil {
 		t.Fatal("an attribution was published for an order that never traded — a zero-cost record " +
