@@ -101,6 +101,9 @@ func (s *Service) DriveSchedules(ctx context.Context) (int, error) {
 
 // driveOne emits the children of one parent that are due and do not yet exist.
 func (s *Service) driveOne(ctx context.Context, parentSt *orderpb.OrderState, tenant string, now time.Time) (int, error) {
+	if parentSt.GetCancellationRequest() != nil {
+		return 0, s.resumeParentCancellation(ctx, parentSt)
+	}
 	parent, err := parentOf(parentSt)
 	if err != nil {
 		// A PARENT RESTING WITHOUT A DERIVABLE SCHEDULE IS LOUD, NOT SKIPPED.
@@ -242,7 +245,7 @@ func (s *Service) retireIfFinished(ctx context.Context, parentSt *orderpb.OrderS
 	if err != nil {
 		return err
 	}
-	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED {
+	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED || st.GetCancellationRequest() != nil {
 		return nil // somebody else finished it
 	}
 
@@ -269,7 +272,13 @@ func (s *Service) retireIfFinished(ctx context.Context, parentSt *orderpb.OrderS
 	// handed the list this pass began with, because a cancel may have landed
 	// since and the record must describe what actually traded.
 	announce := s.withAttribution(ctx, next, now, fact)
-	if err := s.store.Save(ctx, next, ver, announce, ""); err != nil {
+	var saveErr error
+	if s.capital == nil {
+		saveErr = s.store.Save(ctx, next, ver, announce, "")
+	} else {
+		saveErr = s.store.(FundedTerminalStore).SaveFundedTerminal(ctx, next, ver, announce, now)
+	}
+	if err := saveErr; err != nil {
 		return err
 	}
 	if _, err := s.relay.Flush(ctx, next.GetOrderId()); err != nil {

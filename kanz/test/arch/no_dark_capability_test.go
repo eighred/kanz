@@ -222,6 +222,13 @@ var darkPackageExempt = map[string]string{
 		"corporate_action_absence_is_stated_test.go binds this entry to the five places that tell " +
 		"the rest of the platform accounting folds corporate actions, so the claim and the " +
 		"exemption cannot drift apart in either direction.",
+	"services/oms/internal/capital": "#1316 — transaction-backed cash commitments for #1297 are " +
+		"under implementation. No production order path invokes them yet. Retire this entry only " +
+		"when ordinary OMS admissions, amendments, scheduled parent/child ownership and terminal " +
+		"execution updates use the same atomic reservation, fed by a durable accounting coverage " +
+		"protocol. The existing cash level cannot prove which fills it includes; wiring it as " +
+		"coverage would release money on an inference. PostgreSQL primitive tests do not prove " +
+		"integrated capital admission, and a dummy importer must not retire this entry.",
 	"services/oms/internal/posttrade": "#1301 — the conditional confirmation/instruction/T+N " +
 		"lifecycle remains unwired. Current direct-spot adapters settle through venue execution " +
 		"evidence and accounting's settled ledger; a second instruction is not required (#589). " +

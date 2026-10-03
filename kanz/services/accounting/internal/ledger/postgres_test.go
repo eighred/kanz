@@ -24,6 +24,10 @@ import (
 
 const migrationDir = "../../migrations"
 
+// CI keeps a live OMS process against the default schema. Its relay must never
+// drain accounting-test facts, nor may these migrations replace its tables.
+const ledgerTestSchema = "accounting_ledger_test"
+
 func newPool(t *testing.T) *pgxpool.Pool { return newPoolThrough(t, "") }
 
 func newPoolThrough(t *testing.T, last string) *pgxpool.Pool {
@@ -36,6 +40,7 @@ func newPoolThrough(t *testing.T, last string) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("parse config: %v", err)
 	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = ledgerTestSchema
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", "__system__")
 		return err
@@ -52,7 +57,7 @@ func newPoolThrough(t *testing.T, last string) *pgxpool.Pool {
 func applySchemaThrough(t *testing.T, pool *pgxpool.Pool, last string) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS ledger_append_positions,ledger_heads,execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations, collateral_requests, collateral_reservations, collateral_active_agreements, collateral_workflows, collateral_snapshots, collateral_lots, custody_actions, ledger_entries, ledger_snapshots, outbox, custody_statements, custody_runs, custody_breaks CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `DROP SCHEMA IF EXISTS accounting_ledger_test CASCADE; CREATE SCHEMA accounting_ledger_test`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(migrationDir, "*.sql"))
@@ -87,6 +92,39 @@ func tradeEvent(id, instrument string, qty, price, cash int64, eff, know time.Ti
 		Effective:    eff,
 		Knowledge:    know,
 		SourceRef:    id,
+	}
+}
+
+// A neighboring service or test schema must neither contribute policy names to
+// this migration nor lose its own policies when accounting tightens its writes.
+func TestVenueAccountMigrationScopesPolicyLookup(t *testing.T) {
+	pool := newPoolThrough(t, "0002_tenant_scope_required.sql")
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	peer := fmt.Sprintf("accounting_policy_peer_%d", time.Now().UnixNano())
+	quoted := pgx.Identifier{peer}.Sanitize()
+	if _, err := tx.Exec(ctx, `CREATE SCHEMA `+quoted+`;
+		CREATE TABLE `+quoted+`.ledger_entries (tenant_id text);
+		ALTER TABLE `+quoted+`.ledger_entries ENABLE ROW LEVEL SECURITY;
+		CREATE POLICY tenant_isolation ON `+quoted+`.ledger_entries USING (false);
+		CREATE POLICY peer_only ON `+quoted+`.ledger_entries USING (false)`); err != nil {
+		t.Fatal(err)
+	}
+	ddl, err := os.ReadFile(filepath.Join(migrationDir, "0003_venue_account_scope.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, string(ddl)); err != nil {
+		t.Fatalf("migration with neighboring policies: %v", err)
+	}
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_policies
+		WHERE schemaname=$1 AND tablename='ledger_entries' AND qual='false'`, peer).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("neighboring policies changed: count=%d err=%v", count, err)
 	}
 }
 
@@ -381,7 +419,12 @@ func TestPostgresWithoutTenantGUCIsFailClosed(t *testing.T) {
 	// the GUC — the old production path.
 	newPool(t)
 
-	bare, err := pgxpool.New(context.Background(), url)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = ledgerTestSchema
+	bare, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

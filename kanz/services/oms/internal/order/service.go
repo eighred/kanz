@@ -28,6 +28,7 @@ import (
 	"github.com/eighred/kanz/internal/outbox"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/services/oms/internal/approval"
+	"github.com/eighred/kanz/services/oms/internal/capital"
 	"github.com/eighred/kanz/services/oms/internal/compliance"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -49,6 +50,7 @@ type Service struct {
 	// compares the inbound envelope against it (#223).
 	tenant  string
 	store   Store
+	capital CapitalTerms
 	gate    compliance.Gate
 	emitter *Emitter
 	router  *execution.Router
@@ -167,6 +169,13 @@ type Service struct {
 
 // ServiceOption customizes the handler.
 type ServiceOption func(*Service)
+
+// WithCapitalTerms makes ordinary admission resolve complete settlement and fee
+// obligations before it reaches the durable store. Production must supply this;
+// a missing or unknown term is an explicit refusal, never a zero-cost order.
+func WithCapitalTerms(terms CapitalTerms) ServiceOption {
+	return func(s *Service) { s.capital = terms }
+}
 
 // WithHaltGate wires the platform kill-switch. IT IS REQUIRED: NewService returns
 // an error without it (#635).
@@ -333,6 +342,17 @@ func NewService(tenant string, store Store, emitter *Emitter, gate compliance.Ga
 	if svc.halted == nil {
 		return nil, errors.New("oms: halt gate is required (order.WithHaltGate) — an OMS that " +
 			"cannot hear the platform kill-switch would admit orders through a declared halt")
+	}
+	if svc.capital != nil {
+		if _, ok := store.(FundedAdmissionStore); !ok {
+			return nil, errors.New("oms: capital admission requires a durable funded order store")
+		}
+		if _, ok := store.(FundedAmendStore); !ok {
+			return nil, errors.New("oms: capital amendments require a durable funded order store")
+		}
+		if _, ok := store.(FundedTerminalStore); !ok {
+			return nil, errors.New("oms: capital termination requires a durable funded order store")
+		}
 	}
 	// THE RELAY IS BUILT LAST, from this store's own outbox and this emitter's
 	// own bus, so a Service always has a drain for the FACTs its store commits
@@ -947,7 +967,29 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 	// and stops, HERE, before s.work() below routes it to a venue. The old
 	// Load()-then-Save() let both deliveries through this point and both reached the
 	// venue: the state converged (Save upserts) while the fund traded twice.
-	if err := s.store.Create(ctx, admitted, []outbox.Record{accepted}); err != nil {
+	var admissionErr error
+	if s.capital == nil {
+		admissionErr = s.store.Create(ctx, admitted, []outbox.Record{accepted})
+	} else {
+		debits, termsErr := s.capital.Debits(ctx, admitted, now)
+		if termsErr != nil {
+			if errors.Is(termsErr, ErrCapitalTermsUnknown) {
+				return s.refuse(ctx, cmd.GetOrderId(), "CAPITAL_TERMS_UNKNOWN", termsErr.Error(), now)
+			}
+			return termsErr
+		}
+		admissionErr = s.store.(FundedAdmissionStore).CreateFunded(ctx, admitted, []outbox.Record{accepted}, debits, now, time.Minute)
+	}
+	if err := admissionErr; err != nil {
+		if errors.Is(err, ErrUnreconciledOrders) {
+			return s.refuse(ctx, cmd.GetOrderId(), "CAPITAL_ACTIVATION_REQUIRED", err.Error(), now)
+		}
+		if errors.Is(err, capital.ErrUnknown) || errors.Is(err, capital.ErrInsufficient) || errors.Is(err, capital.ErrInvalid) {
+			return s.refuse(ctx, cmd.GetOrderId(), "CAPITAL_REFUSED", err.Error(), now)
+		}
+		if errors.Is(err, ErrParentStopped) {
+			return s.outcomeReject(ctx, cmd.GetOrderId(), "PARENT_NOT_WORKING", err.Error(), now)
+		}
 		if errors.Is(err, ErrExists) {
 			// Lost the admission race — the winner works the order. Deliberately NOT
 			// a resume: the winner is mid-flight by construction, and the interrupted
@@ -1094,7 +1136,7 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 		// alongside the records it describes is what makes it true the instant
 		// it is durable, instead of after two more writes that can each fail.
 		rejected.OutcomeAnnouncedAt = timestamppb.New(rejectedAt)
-		if serr := s.store.Save(ctx, rejected, ver, []outbox.Record{rejFact, outFact}, ""); serr != nil {
+		if serr := s.saveTerminal(ctx, rejected, ver, []outbox.Record{rejFact, outFact}, rejectedAt); serr != nil {
 			return serr
 		}
 		// Flushed here because the submitter is waiting on this outcome; the
@@ -1666,9 +1708,26 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// a child that was already cancelled is safe, because the redelivery finds it
 	// terminal and skips it.
 	//
-	// It is also why nothing is re-created behind us: the driver asks which
-	// children EXIST, and a cancelled child still exists.
+	// The durable request below closes child admission before the scan. Existing
+	// child IDs remain occupied; unsent slices cannot enter after this barrier.
 	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED {
+		if st.GetCancellationRequest() == nil {
+			requested := cloneState(st)
+			requested.CancellationRequest = &orderpb.OrderCancellationRequest{
+				Command: proto.Clone(&cmd).(*orderpb.CancelOrder), RequestedAt: timestamppb.New(now),
+				CorrelationId: bus.CorrelationIDFromContext(ctx), CausationId: bus.CausationIDFromContext(ctx),
+			}
+			// This write serializes with child admission and dispatch in the store.
+			// Failure leaves the parent live; no venue withdrawal has started yet.
+			if err := s.store.Save(ctx, requested, ver, nil, ""); err != nil {
+				return err
+			}
+			st = requested
+			ver++
+		}
+		next.CancellationRequest = proto.Clone(st.GetCancellationRequest()).(*orderpb.OrderCancellationRequest)
+		ctx = bus.WithCorrelationID(ctx, st.GetCancellationRequest().GetCorrelationId())
+		ctx = bus.WithCausationID(ctx, st.GetCancellationRequest().GetCausationId())
 		unsent, uerr := s.cancelChildren(ctx, st, now)
 		if uerr != nil {
 			return uerr
@@ -1751,7 +1810,13 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// record at all — a zero shortfall on an execution that did not happen is a
 	// datapoint claiming a perfect fill.
 	announce := s.withAttribution(ctx, next, now, cancelled, outFact)
-	if err := s.store.Save(ctx, next, ver, announce, ""); err != nil {
+	var cancelErr error
+	if s.capital == nil {
+		cancelErr = s.store.Save(ctx, next, ver, announce, "")
+	} else {
+		cancelErr = s.store.(FundedTerminalStore).SaveFundedTerminal(ctx, next, ver, announce, now)
+	}
+	if err := cancelErr; err != nil {
 		return err
 	}
 	// Flushed where the publishes stood: the operator issuing the cancel is
@@ -1849,6 +1914,11 @@ func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now 
 			return nil // this implementation cannot leave an external order working
 		}
 		return errors.New("oms: venue has not declared a cancellation capability")
+	}
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_ROUTED && st.GetVenueAckAt() == nil {
+		// ROUTED commits before Execute starts. A cancel or query returning
+		// not-found cannot rule out another replica's still-in-flight placement.
+		return errors.New("oms: placement acknowledgement is unresolved; cancellation cannot establish termination")
 	}
 
 	// Track BEFORE dispatch: if the call hangs, times out ambiguously, or the
@@ -1958,6 +2028,9 @@ func (s *Service) handleAmend(ctx context.Context, env *envelopepb.Envelope, pay
 				"order history before it can be amended. quarantine reason: %s (frozen %s ago, at %s)",
 			q.GetReason(), quarantineAge(q, now), q.GetAt().AsTime().UTC().Format(time.RFC3339)), now)
 	}
+	if st.GetCancellationRequest() != nil {
+		return s.outcomeReject(ctx, cmd.GetOrderId(), "CANCELLATION_PENDING", ErrCancellationPending.Error(), now)
+	}
 	// AN AMEND MUST NOT REWRITE TERMS A VENUE IS STILL WORKING (#740).
 	//
 	// Nothing in this module sends an amend to an exchange: venue.v1 has four
@@ -2031,7 +2104,23 @@ func (s *Service) handleAmend(ctx context.Context, env *envelopepb.Envelope, pay
 	if ferr != nil {
 		return ferr
 	}
-	if err := s.store.Save(ctx, next, ver, []outbox.Record{fact}, ""); err != nil {
+	var saveErr error
+	if s.capital == nil {
+		saveErr = s.store.Save(ctx, next, ver, []outbox.Record{fact}, "")
+	} else {
+		debits, termsErr := s.capital.Debits(ctx, next, now)
+		if termsErr != nil {
+			if errors.Is(termsErr, ErrCapitalTermsUnknown) {
+				return s.outcomeReject(ctx, cmd.GetOrderId(), "CAPITAL_TERMS_UNKNOWN", termsErr.Error(), now)
+			}
+			return termsErr
+		}
+		saveErr = s.store.(FundedAmendStore).SaveFundedAmend(ctx, next, ver, []outbox.Record{fact}, debits, now)
+	}
+	if err := saveErr; err != nil {
+		if errors.Is(err, capital.ErrUnknown) || errors.Is(err, capital.ErrInsufficient) || errors.Is(err, capital.ErrInvalid) {
+			return s.outcomeReject(ctx, cmd.GetOrderId(), "CAPITAL_REFUSED", err.Error(), now)
+		}
 		return err
 	}
 	// Flushed where EmitOutcome stood: the caller is waiting on this outcome, so
@@ -3041,6 +3130,16 @@ func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderSta
 	return s.store.Save(ctx, announced, ver, announce, "")
 }
 
+// saveTerminal commits the venue-confirmed terminal state, its FACTs and the
+// release of unexecuted capital in one transaction. A failed write retains the
+// reservation so a retry cannot silently trade against cash already released.
+func (s *Service) saveTerminal(ctx context.Context, st *orderpb.OrderState, ver int64, announce []outbox.Record, now time.Time) error {
+	if s.capital != nil {
+		return s.store.(FundedTerminalStore).SaveFundedTerminal(ctx, st, ver, announce, now)
+	}
+	return s.store.Save(ctx, st, ver, announce, "")
+}
+
 // completeTerminalOutcome re-publishes the CommandOutcome for a SubmitOrder
 // whose terminal state (FILLED or REJECTED) was persisted but never
 // announced — a delivery that Saved the terminal OrderState and then failed
@@ -3185,7 +3284,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 		// order_events.proto) — and, like it, stamped in the SAME write rather
 		// than two writes later, so it is true the instant it is durable.
 		rejected.OutcomeAnnouncedAt = timestamppb.New(now)
-		if err := s.store.Save(ctx, rejected, ver, []outbox.Record{rejFact, outFact}, ""); err != nil {
+		if err := s.saveTerminal(ctx, rejected, ver, []outbox.Record{rejFact, outFact}, now); err != nil {
 			return err
 		}
 		// Flushed where refuse() stood, so the FACTs leave in the same order and at
@@ -3458,7 +3557,7 @@ func (s *Service) adoptWithdrawal(ctx context.Context, st *orderpb.OrderState, v
 	// — the same call, for the same reason, handleCancel makes. An order that
 	// traded NOTHING produces no record at all, which is what an expired IOC is.
 	announce := s.withAttribution(ctx, next, now, lifecycle, outFact)
-	if err := s.store.Save(ctx, next, ver, announce, ""); err != nil {
+	if err := s.saveTerminal(ctx, next, ver, announce, now); err != nil {
 		return err
 	}
 	s.logger.Info("oms adopted a venue withdrawal for an interrupted order",

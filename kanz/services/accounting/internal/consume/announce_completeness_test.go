@@ -101,6 +101,13 @@ func TestAnnounce_ADividendMovesTheAnnouncedBalance(t *testing.T) {
 			if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
 				t.Fatalf("Announce: %v", err)
 			}
+			if got := dec.FromProto(pub.last().GetTotal()); got.Cmp(before) != 0 {
+				t.Fatalf("future dividend changed cash before its payment: %s", got)
+			}
+			a.now = func() time.Time { return at.Add(24 * time.Hour) }
+			if err := announceVia(t, ctx, a, st, "PF1"); err != nil {
+				t.Fatal(err)
+			}
 			after := dec.FromProto(pub.last().GetTotal())
 			if after.Cmp(tc.want) != 0 {
 				t.Fatalf("post-dividend total = %s, want %s — the announced balance did not move "+

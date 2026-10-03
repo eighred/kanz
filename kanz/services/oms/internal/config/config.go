@@ -40,6 +40,9 @@ type Config struct {
 	// pods over two in-memory maps both admit the same order_id and both route
 	// it to the venue.
 	DatabaseURL string
+	// CashHistoryGateway is the HTTPS gateway origin for authenticated retained
+	// accounting evidence. Empty leaves transport gaps closed pending redrive.
+	CashHistoryGateway string
 	// Tenant is the owning tenant of this OMS deployment, carried as the
 	// `app.tenant_id` GUC on every DB connection so Postgres RLS scopes the order
 	// store (MT-01d). Defaults to __system__, the risk-engine convention; a
@@ -457,6 +460,7 @@ func Load() (Config, error) {
 		NATSURL:                 os.Getenv("OMS_NATS_URL"),
 		ConsumerGroup:           env.Or("OMS_CONSUMER_GROUP", "oms"),
 		DatabaseURL:             databaseURL,
+		CashHistoryGateway:      strings.TrimSpace(os.Getenv("OMS_CASH_HISTORY_GATEWAY")),
 		Tenant:                  env.Or("OMS_TENANT", "__system__"),
 		RefData:                 refData,
 		RequireMandate:          requireMandate,

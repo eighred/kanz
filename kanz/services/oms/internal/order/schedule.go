@@ -342,10 +342,9 @@ func (s *Service) authorizeChild(ctx context.Context, cmd *orderpb.SubmitOrder) 
 		return nil, nil, err // transient ⇒ redeliver
 	}
 
-	if parent.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED {
-		// COVERS THE CANCEL RACE. A parent an operator cancelled while this child
-		// was in flight is no longer WORKING_SCHEDULED, and this is the only thing
-		// standing between that command and a venue.
+	if parent.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED || parent.GetCancellationRequest() != nil {
+		// This gives an early refusal. The store repeats the decision under the
+		// parent row lock so cancellation cannot race the child's actual admission.
 		return nil, reject("PARENT_NOT_WORKING",
 			"order %s is a slice of %s, which is %s rather than being worked as a schedule — a "+
 				"parent that has stopped must not acquire new children",

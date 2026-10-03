@@ -633,6 +633,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	realisedTape := bindRealisedTape(obs, logger)
 
 	svc, err := order.NewService(cfg.Tenant, store, emitter, gate, routing.Router, closeRegistry, logger,
+		order.WithCapitalTerms(order.SimPhysicalTerms{References: refCache, Router: routing.Router}),
 		// The decision-time benchmark for every admitted order (#436). The same
 		// mark fold the pre-trade gate values MARKET/STOP orders against — one
 		// price source, so a cost measure and a compliance check can never
@@ -711,6 +712,23 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		handler bus.EventHandler
 	}
 	var subs []sub
+	if durable, ok := store.(*order.Postgres); ok {
+		history, err := capitalCashHistory(cfg)
+		if err != nil {
+			return false, err
+		}
+		if history == nil {
+			logger.Warn("retained cash history recovery is unconfigured; revision gaps require operator redrive")
+		}
+		if closer, ok := history.(interface{ CloseIdleConnections() }); ok {
+			defer closer.CloseIdleConnections() // consumers join before this frame returns
+		}
+		// Unlike the per-pod cash view, commitments need EVERY revision. The
+		// shared database arbitrates replicas and persists gaps before refusal.
+		subs = append(subs, sub{cashview.Subject, cfg.ConsumerGroup + "-capital-cash", durable.CapitalCashHandler(cfg.Tenant, history)})
+	} else {
+		logger.Warn("cash commitment projection unavailable without the durable OMS store")
+	}
 	for _, s := range cfg.CommandSubjects() {
 		subs = append(subs, sub{s, cfg.ConsumerGroup, svc.Handle})
 	}

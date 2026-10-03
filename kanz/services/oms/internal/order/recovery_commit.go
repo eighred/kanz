@@ -145,6 +145,9 @@ func (p *Postgres) CommitRecovery(ctx context.Context, c RecoveryCase, now time.
 			return err
 		}
 	}
+	if err := p.observeFundedRecovery(ctx, tx, next, all, now); err != nil {
+		return err
+	}
 	data, err := proto.Marshal(next)
 	if err != nil {
 		return err
