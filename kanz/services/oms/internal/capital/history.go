@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -42,16 +43,31 @@ func NewHistoryClient(endpoint string, client *http.Client, token func(context.C
 		(base.Path != "" && base.Path != "/") || token == nil {
 		return nil, errors.New("capital: history requires an HTTPS gateway origin and credential provider")
 	}
-	if client == nil {
-		client = http.DefaultClient
+	var bounded http.Client
+	if client != nil {
+		bounded = *client
 	}
-	bounded := *client
-	bounded.Timeout = 15 * time.Second
+	if bounded.Transport == nil {
+		bounded.Transport = &http.Transport{
+			Proxy:        http.ProxyFromEnvironment,
+			DialContext:  (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			MaxIdleConns: 32, MaxIdleConnsPerHost: 8, MaxConnsPerHost: 8,
+			IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 5 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second, ExpectContinueTimeout: time.Second,
+		}
+	}
+	bounded.Timeout = 0 // request context owns the complete call budget
 	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &HistoryClient{base: base, http: &bounded, token: token}, nil
 }
 
+// CloseIdleConnections releases pooled sockets after the caller has stopped
+// and joined its consumers. It does not interrupt an active evidence request.
+func (c *HistoryClient) CloseIdleConnections() { c.http.CloseIdleConnections() }
+
 func (c *HistoryClient) ReadCashCommits(ctx context.Context, portfolio, currency string, after, through int64, limit int) (cashview.CommitPage, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	var page cashview.CommitPage
 	if bus.TenantIDFromContext(ctx) == "" || !validID(portfolio) || !validID(currency) || after < 0 || through < 0 || through != 0 && after > through || limit < 1 || limit > 64 {
 		return page, ErrInvalid
