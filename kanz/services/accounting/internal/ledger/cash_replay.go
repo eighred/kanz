@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/eighred/kanz/internal/cashview"
 	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
@@ -20,19 +21,8 @@ const maxCashReplayBytes = 4 << 20
 // CashCommitRecord carries the original protobuf bytes, not a reconstructed
 // balance. JSON encodes Payload as base64 and revisions as strings so an
 // operator client cannot round an int64 revision or rewrite Decimal evidence.
-type CashCommitRecord struct {
-	Revision int64  `json:"revision,string"`
-	Payload  []byte `json:"payload"`
-}
-
-type CashCommitPage struct {
-	PortfolioID string             `json:"portfolio_id"`
-	Currency    string             `json:"currency"`
-	Through     int64              `json:"through_revision,string"`
-	Next        int64              `json:"next_revision,string"`
-	HasMore     bool               `json:"has_more"`
-	Records     []CashCommitRecord `json:"records"`
-}
+type CashCommitRecord = cashview.CommitRecord
+type CashCommitPage = cashview.CommitPage
 
 // ReadCashCommits returns a contiguous, bounded slice of retained source
 // evidence. through=0 freezes the current committed head; every subsequent page
@@ -49,7 +39,8 @@ func (p *Postgres) ReadCashCommits(ctx context.Context, portfolio, currency stri
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var head int64
-	if err := tx.QueryRow(ctx, `SELECT revision FROM cash_commit_heads WHERE portfolio_id=$1 AND currency=$2`, portfolio, currency).Scan(&head); err != nil {
+	var tenant string
+	if err := tx.QueryRow(ctx, `SELECT revision,tenant_id FROM cash_commit_heads WHERE portfolio_id=$1 AND currency=$2`, portfolio, currency).Scan(&head, &tenant); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return CashCommitPage{}, ErrNoCashHistory
 		}
@@ -64,7 +55,7 @@ func (p *Postgres) ReadCashCommits(ctx context.Context, portfolio, currency stri
 	if through > head || after > through {
 		return CashCommitPage{}, ErrCashReplayBounds
 	}
-	page := CashCommitPage{PortfolioID: portfolio, Currency: currency, Through: through, Next: after, Records: []CashCommitRecord{}}
+	page := CashCommitPage{TenantID: tenant, PortfolioID: portfolio, Currency: currency, Through: through, Next: after, Records: []CashCommitRecord{}}
 	rows, err := tx.Query(ctx, `SELECT revision,payload FROM cash_commit_history
 		WHERE portfolio_id=$1 AND currency=$2 AND revision>$3 AND revision<=$4
 		ORDER BY revision LIMIT $5`, portfolio, currency, after, through, limit)

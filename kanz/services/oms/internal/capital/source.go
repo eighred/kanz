@@ -36,14 +36,18 @@ func ApplyPayload(ctx context.Context, pool *pgxpool.Pool, payload []byte) error
 		}
 	}
 	digest := sha256.Sum256(payload)
+	if dbErr := invalidateSource(ctx, pool, digest); dbErr != nil {
+		return dbErr
+	}
+	return err
+}
+
+func invalidateSource(ctx context.Context, pool *pgxpool.Pool, digest [32]byte) error {
 	// The conflicting UPDATE waits for admitted transactions holding the shared
 	// health lock. Once this commits, no subsequent reservation can use old cash.
 	_, dbErr := pool.Exec(ctx, `INSERT INTO capital_source_health(fault_digest) VALUES($1)
 		ON CONFLICT (tenant_id) DO UPDATE SET fault_digest=COALESCE(capital_source_health.fault_digest,EXCLUDED.fault_digest)`, digest[:])
-	if dbErr != nil {
-		return dbErr
-	}
-	return err
+	return dbErr
 }
 
 // sourceFault is locked BEFORE a cash balance. Shared locks let independent

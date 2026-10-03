@@ -53,7 +53,7 @@ func TestPostgresCashReplayPinsHeadAndPreservesOriginalEvidence(t *testing.T) {
 		appendReplayFact(t, store, fmt.Sprint(i), 0)
 	}
 	page, err := store.ReadCashCommits(t.Context(), "fund", "USD", 0, 0, 2)
-	if err != nil || page.Through != 3 || page.Next != 2 || !page.HasMore || len(page.Records) != 2 {
+	if err != nil || page.TenantID != "__system__" || page.Through != 3 || page.Next != 2 || !page.HasMore || len(page.Records) != 2 {
 		t.Fatalf("first page=%+v err=%v", page, err)
 	}
 	appendReplayFact(t, store, "later", 0)
