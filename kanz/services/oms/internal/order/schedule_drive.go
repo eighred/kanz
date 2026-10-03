@@ -272,7 +272,13 @@ func (s *Service) retireIfFinished(ctx context.Context, parentSt *orderpb.OrderS
 	// handed the list this pass began with, because a cancel may have landed
 	// since and the record must describe what actually traded.
 	announce := s.withAttribution(ctx, next, now, fact)
-	if err := s.store.Save(ctx, next, ver, announce, ""); err != nil {
+	var saveErr error
+	if s.capital == nil {
+		saveErr = s.store.Save(ctx, next, ver, announce, "")
+	} else {
+		saveErr = s.store.(FundedTerminalStore).SaveFundedTerminal(ctx, next, ver, announce, now)
+	}
+	if err := saveErr; err != nil {
 		return err
 	}
 	if _, err := s.relay.Flush(ctx, next.GetOrderId()); err != nil {

@@ -230,6 +230,10 @@ func ObserveExecution(ctx context.Context, tx pgx.Tx, portfolio, currency, order
 	if err != nil {
 		return err
 	}
+	return observeExecutionLocked(ctx, tx, portfolio, currency, orderID, executed, b, m)
+}
+
+func observeExecutionLocked(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string, executed *big.Rat, b balance, m member) error {
 	if m.memberExecuted.Cmp(executed) == 0 {
 		return nil
 	}
@@ -247,13 +251,62 @@ func ObserveExecution(ctx context.Context, tx pgx.Tx, portfolio, currency, order
 	if _, err := amount(b.reserved.RatString(), true); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE capital_members SET executed_debit=$2 WHERE order_id=$1 AND currency=$3`, orderID, executed.RatString(), currency); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE capital_members SET executed_debit=$2 WHERE order_id=$1 AND currency=$3`, orderID, executed.RatString(), currency); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET executed_debit=$2,required_debit=$3,version=version+1 WHERE order_id=$1 AND currency=$4`, m.owner, totalExecuted.RatString(), m.required.RatString(), currency); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE capital_commitments SET executed_debit=$2,required_debit=$3,version=version+1 WHERE order_id=$1 AND currency=$4`, m.owner, totalExecuted.RatString(), m.required.RatString(), currency); err != nil {
 		return err
 	}
 	return writeReserved(ctx, tx, portfolio, currency, b.reserved)
+}
+
+// AddExecution folds an already claimed fill's exact cash debit into the
+// member's cumulative observation. The caller must claim execution identity in
+// this transaction first; the balance lock serializes competing sibling fills.
+// A negative correction is permitted only when the resulting total remains
+// nonnegative. This never releases the original reserved obligation.
+func AddExecution(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string, delta dec.Exact) error {
+	change, err := amount(string(delta), false)
+	if err != nil {
+		return err
+	}
+	if _, err := sourceFault(ctx, tx); err != nil {
+		return err
+	}
+	b, err := lock(ctx, tx, portfolio, currency)
+	if err != nil {
+		return err
+	}
+	member, err := loadMember(ctx, tx, portfolio, currency, orderID)
+	if err != nil {
+		return err
+	}
+	next := new(big.Rat).Add(member.memberExecuted, change)
+	if _, err := amount(next.RatString(), true); err != nil {
+		return err
+	}
+	return observeExecutionLocked(ctx, tx, portfolio, currency, orderID, next, b, member)
+}
+
+// FinishExecution releases only the unexecuted portion after the order has
+// reached a provable terminal state. The observed debit remains committed until
+// accounting's immutable inclusion proof reduces the reservation.
+func FinishExecution(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string, now time.Time) error {
+	if _, err := lock(ctx, tx, portfolio, currency); err != nil {
+		return err
+	}
+	m, err := loadMember(ctx, tx, portfolio, currency, orderID)
+	if err != nil {
+		return err
+	}
+	if m.owner != orderID {
+		return ErrInvalid
+	}
+	var version int64
+	if err := tx.QueryRow(ctx, `SELECT version FROM capital_commitments WHERE order_id=$1 AND currency=$2`, orderID, currency).Scan(&version); err != nil {
+		return err
+	}
+	return Change(ctx, tx, portfolio, currency, orderID, version, dec.Exact(m.executed.RatString()), now, time.Minute)
 }
 
 func writeReserved(ctx context.Context, tx pgx.Tx, portfolio, currency string, reserved *big.Rat) error {

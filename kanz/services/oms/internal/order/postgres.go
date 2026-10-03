@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/jackc/pgx/v5"
@@ -11,8 +12,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/outbox"
+	"github.com/eighred/kanz/services/oms/internal/capital"
 )
 
 // Postgres is the durable Store backed by the 0001_orders.sql schema (EXEC-M7c).
@@ -60,6 +63,10 @@ func (p *Postgres) Proposals() ProposalStore { return p.proposals }
 // once cancellation commits, no new child can enter behind the cancellation scan.
 // A refused admission rolls back both the order and its outbox records.
 func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce []outbox.Record) error {
+	return p.create(ctx, st, announce, nil, nil)
+}
+
+func (p *Postgres) create(ctx context.Context, st *orderpb.OrderState, announce []outbox.Record, fund, afterParent func(pgx.Tx) error) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot create order with empty order_id")
 	}
@@ -72,6 +79,13 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce 
 		return fmt.Errorf("create order %s: begin: %w", st.GetOrderId(), err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+	if fund != nil {
+		// Cash currencies precede parent/order locks. A reservation must never
+		// survive a failed order INSERT or acceptance-outbox enqueue.
+		if err := fund(tx); err != nil {
+			return err
+		}
+	}
 	if err := lockWorkingParent(ctx, tx, st); err != nil {
 		if errors.Is(err, ErrParentStopped) {
 			var exists bool
@@ -83,6 +97,11 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce 
 			}
 		}
 		return err
+	}
+	if afterParent != nil {
+		if err := afterParent(tx); err != nil {
+			return err
+		}
 	}
 
 	// portfolio_id is denormalized out of the blob (#399), like order_id and
@@ -113,6 +132,10 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce 
 // parent before the child; other transitions lock only the order. No lock spans
 // a venue call. A stale writer returns ErrConflict and announces nothing.
 func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record, fillID string) error {
+	return p.save(ctx, st, expectedVersion, announce, fillID, nil)
+}
+
+func (p *Postgres) save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record, fillID string, fund func(pgx.Tx) error) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot save order with empty order_id")
 	}
@@ -170,6 +193,14 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 		if err := journalExecution(ctx, tx, st.GetOrderId(), fillID, announce); err != nil {
 			return err
 		}
+		if err := p.observeFundedFill(ctx, tx, st, fill); err != nil {
+			return err
+		}
+	}
+	if fund != nil {
+		if err := fund(tx); err != nil {
+			return err
+		}
 	}
 	// Execution claims precede the order lock, as in recovery_commit.go.
 	var previous []byte
@@ -202,6 +233,69 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("save order %s: commit: %w", st.GetOrderId(), err)
+	}
+	return nil
+}
+
+// observeFundedFill runs after the execution claim and before the order lock.
+// The current funded route is the explicit zero-fee physical simulator. A fee,
+// an extra currency or malformed fill cannot be silently charged against an
+// unrelated reservation. Real venue terms need their own durable model.
+func (p *Postgres) observeFundedFill(ctx context.Context, tx pgx.Tx, st *orderpb.OrderState, fill *orderpb.Fill) error {
+	rows, err := tx.Query(ctx, `SELECT currency FROM capital_members WHERE order_id=$1 ORDER BY currency`, st.GetOrderId())
+	if err != nil {
+		return err
+	}
+	var currencies []string
+	for rows.Next() {
+		var currency string
+		if err := rows.Scan(&currency); err != nil {
+			rows.Close()
+			return err
+		}
+		currencies = append(currencies, currency)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(currencies) == 0 {
+		return nil
+	} // legacy order; activation must resolve it before new cash admission
+	if len(currencies) != 1 || fill == nil {
+		return capital.ErrInvalid
+	}
+	fee, err := capitalFee(fill.GetFee(), currencies[0])
+	if err != nil {
+		return err
+	}
+	quantity, ok := dec.FromProtoChecked(fill.GetQuantity())
+	if !ok || quantity.Sign() <= 0 {
+		return capital.ErrInvalid
+	}
+	debit := quantity
+	if st.GetSide() == orderpb.Side_SIDE_BUY {
+		price, ok := dec.FromProtoChecked(fill.GetPrice())
+		if !ok || price.Sign() <= 0 {
+			return capital.ErrInvalid
+		}
+		debit = new(big.Rat).Mul(quantity, price)
+	} else if st.GetSide() != orderpb.Side_SIDE_SELL {
+		return capital.ErrInvalid
+	}
+	debit = new(big.Rat).Add(debit, fee)
+	if err := capital.AddExecution(ctx, tx, st.GetPortfolioId(), currencies[0], st.GetOrderId(), dec.Exact(debit.RatString())); err != nil {
+		return err
+	}
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_FILLED && st.GetParentOrderId() == "" {
+		if st.GetAsOf() == nil {
+			return capital.ErrInvalid
+		}
+		if err := st.GetAsOf().CheckValid(); err != nil {
+			return capital.ErrInvalid
+		}
+		return capital.FinishExecution(ctx, tx, st.GetPortfolioId(), currencies[0], st.GetOrderId(), st.GetAsOf().AsTime())
 	}
 	return nil
 }
