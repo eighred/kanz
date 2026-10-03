@@ -39,6 +39,13 @@ execution depend on the intelligence plane is wrong no matter how it tests.
 - **Python** — `kanz-py/`, the inference service.
 - **Kubernetes + SPIFFE/SPIRE** — deployment and workload identity.
 
+Keep these sibling directories in place: the Go module and build contexts depend
+on that layout. The browser client is `kanz-web/`; deployment configuration is
+`kanz/infra/`; host/operator scripts are `tools/`; CI lives in `.github/`.
+Start developer setup at `kanz/dev/README.md`, schema generation at
+`kanz-schemas/README.md`, and Python setup at `kanz-py/README.md`. Operational
+runbooks stay beside their component. Do not move packages merely for tidiness.
+
 ## Architecture
 
 ```
@@ -143,7 +150,7 @@ go test -p 1 ./internal/... -count=1
 go test -p 1 ./services/... -count=1
 go test -p 1 ./test/arch/   -count=1
 
-cd kanz-schemas && buf generate    # regenerate the Go/Python SDKs
+cd kanz-schemas && buf generate && bash bootstrap-go-sdk.sh
 ```
 
 ## Constraints
@@ -201,12 +208,13 @@ file list rather than walking the tree.
 
 **3. Build tags.** There are **no `binance`/`okx` tags and never were** — the
 venue connectors are hand-rolled over `github.com/coder/websocket` and compile in
-the default build (#100 retired that claim). Three tags exist:
+the default build (#100 retired that claim). Four tags exist:
 
 | Tag | Selects | Default (`!tag`) |
 |---|---|---|
 | `redis` | `pkg/redisadapter/goredis.go`, `risk-engine/dedup_redis.go`, `webhook-ingest/nonces_redis.go` | `dedup_default.go`, `nonces_default.go` |
 | `anthropic` | `copilot/model_anthropic.go` | `copilot/model_stub.go` |
+| `openrouter` | `copilot/model_openrouter.go` and its tests | provider absent |
 | `perf` | `internal/risk/compute/latency_budget_test.go` | — |
 
 The default build is vendor-free of go-redis and the Anthropic SDK — not of any
@@ -215,8 +223,9 @@ venue. Tags must reach `gopls` per-editor; in VS Code, `.vscode/settings.json`
 grey out with errors, and the `!tag` defaults beside them are what the untagged
 build compiles.
 
-**4. `go env -w GOFLAGS=-mod=mod`** so a stale generated SDK is regenerated
-rather than failing the build.
+**4. `go env -w GOFLAGS=-mod=mod`** permits module dependency resolution.
+It does not generate code: run `buf generate` and `bash bootstrap-go-sdk.sh`
+explicitly after schema changes and in every fresh checkout.
 
 **5. Line endings.** `.gitattributes` pins `*.go` and `*.proto` to `text eol=lf`
 because gofmt emits LF; a CRLF working copy makes `gofmt -l` list files whose
@@ -325,7 +334,7 @@ Two consequences that are easy to get wrong:
 **GitHub Issues** on `eighred/kanz`. There is no task board, no plan files and no
 architecture document in this repository; all three were tried and each became a
 second answer competing with the code. Everything durable lives beside the code,
-in git history, or in claude-mem.
+in git history, or GitHub Issues and PRs.
 
 **That extends to project state, and it is not negotiable.** Do not add
 `project-state.md`, progress files, status files, roadmap files, session notes or
@@ -368,15 +377,21 @@ quoted result), **Verified when** (a runnable command and its expected result),
 - **Never place real orders against a store that may not be backed up.** The one
   ordering error with an unrecoverable failure mode. DR coverage lands first.
 
-## Skills
+## Engineering and verification references
 
-Long procedures live in skills, not here.
+This repository does not require a private agent plugin. The retired
+`kanz-forge` skills are not part of a checkout (migration #1087); do not ask an
+operator to restore them to begin engineering work. Use the plane boundaries,
+invariants, coding standards and tracking rules in this file. Additional skills
+may assist when available, but do not replace these requirements.
 
-| Skill | For |
-|---|---|
-| `kanz-forge:engineering-standard` | what "good" means; whether work is worth doing |
-| `kanz-forge:kanz-verify` | what counts as proof, and the traps that have produced false green |
-| `kanz-forge:stack-routing` | which layer owns a job; which artifacts must not be created |
+Read the affected component's code, migrations and architecture guards before
+changing its contracts. Use `.github/workflows/kanz-ci.yml` for the actual CI
+jobs and `kanz/.golangci.yml` for lint policy. Report the tested commit, package
+coverage, real dependencies and skipped tests; a skipped dependency test is not
+verification. A merge is not closure until the issue's acceptance conditions
+and merged revision have been verified. Developer entrypoint repairs are
+tracked in #1323; do not substitute a green smoke stack for capital-path proof.
 
 **An invariant worth keeping is a guard, not a paragraph.** The arch tests in
 `kanz/test/arch/` enforce these rules — default-deny, with named exemptions that
