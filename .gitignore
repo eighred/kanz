@@ -1,6 +1,6 @@
 # Editor state. Nothing editor-specific is tracked in this repo: the build tags,
-# GOFLAGS and GOTMPDIR that a working setup needs live in the conditional
-# kanz-verify Windows reference, so a clone carries no editor launch config.
+# GOFLAGS and GOTMPDIR that a working setup needs live in AGENTS.md's
+# Windows environment section, so a clone carries no editor launch config.
 .vscode/
 
 # Project-local Go temp dir. Windows Application Control intermittently blocks
