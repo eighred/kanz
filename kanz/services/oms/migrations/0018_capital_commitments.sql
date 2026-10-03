@@ -49,5 +49,5 @@ CREATE FUNCTION reject_capital_receipt_update() RETURNS trigger LANGUAGE plpgsql
 BEGIN
     RAISE EXCEPTION 'capital accounting receipt identity is immutable' USING ERRCODE='23514';
 END $$;
-CREATE TRIGGER capital_receipt_immutable BEFORE UPDATE ON capital_cash_events
+CREATE TRIGGER capital_receipt_immutable BEFORE UPDATE OR DELETE ON capital_cash_events
     FOR EACH ROW EXECUTE FUNCTION reject_capital_receipt_update();

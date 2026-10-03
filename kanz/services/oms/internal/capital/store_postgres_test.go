@@ -295,6 +295,14 @@ func TestPostgresCapitalGapConflictAndTenantIsolation(t *testing.T) {
 	if err := Apply(ctx, p, snapshot(1, "100")); err != nil {
 		t.Fatal(err)
 	}
+	for _, statement := range []string{
+		`UPDATE capital_cash_events SET digest=decode(repeat('00',32),'hex') WHERE revision=1`,
+		`DELETE FROM capital_cash_events WHERE revision=1`,
+	} {
+		if _, err := p.Exec(ctx, statement); err == nil {
+			t.Fatal("database allowed immutable cash evidence to be replaced or removed")
+		}
+	}
 	if err := Apply(ctx, p, snapshot(3, "50")); !errors.Is(err, ErrUnknown) {
 		t.Fatal(err)
 	}
