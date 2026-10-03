@@ -64,7 +64,8 @@ CREATE INDEX IF NOT EXISTS ledger_entries_venue_account_idx
 DO $$
 DECLARE pol RECORD;
 BEGIN
-    FOR pol IN SELECT policyname FROM pg_policies WHERE tablename = 'ledger_entries'
+    FOR pol IN SELECT policyname FROM pg_policies
+        WHERE schemaname = current_schema() AND tablename = 'ledger_entries'
     LOOP
         EXECUTE format('DROP POLICY %I ON ledger_entries', pol.policyname);
     END LOOP;
