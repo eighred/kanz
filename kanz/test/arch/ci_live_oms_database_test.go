@@ -44,9 +44,13 @@ func TestCILiveOMSDatabaseIsSeparateFromFixtures(t *testing.T) {
 	}
 	var live string
 	var fixtures []string
+	var liveReaders []string
 	for _, step := range workflow.Jobs["go"].Steps {
 		if value := step.Env["TEST_POSTGRES_URL"]; value != "" {
 			fixtures = append(fixtures, database("TEST_POSTGRES_URL", value))
+		}
+		if step.Env["TEST_OMS_ON_BUS"] != "" {
+			liveReaders = append(liveReaders, database("TEST_OMS_POSTGRES_URL", step.Env["TEST_OMS_POSTGRES_URL"]))
 		}
 		if value := step.Env["OMS_DATABASE_URL"]; value != "" {
 			if live != "" {
@@ -63,8 +67,13 @@ func TestCILiveOMSDatabaseIsSeparateFromFixtures(t *testing.T) {
 			}
 		}
 	}
-	if live == "" || len(fixtures) == 0 {
-		t.Fatal("isolation check found no live OMS or fixture database")
+	if live == "" || len(fixtures) == 0 || len(liveReaders) == 0 {
+		t.Fatal("isolation check found no live OMS, persistence reader, or fixture database")
+	}
+	for _, reader := range liveReaders {
+		if reader != live {
+			t.Fatal("live OMS persistence assertions must query the live OMS database, not a fixture database")
+		}
 	}
 	for _, fixture := range fixtures {
 		if live == fixture {

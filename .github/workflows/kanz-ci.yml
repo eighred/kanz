@@ -342,6 +342,7 @@ jobs:
           TEST_NATS_URL: nats://localhost:4222
           TEST_KAFKA_BROKERS: localhost:9092
           TEST_OMS_ON_BUS: "1"
+          TEST_OMS_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
           TEST_SESSION_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/sessions.cjs
           TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/mfa.cjs
           TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/kanz-web/node_modules/playwright
