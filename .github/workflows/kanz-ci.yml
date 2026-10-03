@@ -115,8 +115,11 @@ jobs:
         run: |
           psql -h localhost -U kanz -d kanz -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE kanzapp LOGIN PASSWORD 'kanz' NOSUPERUSER;" \
-            -c "CREATE DATABASE kanzapp OWNER kanzapp;"
+            -c "CREATE DATABASE kanzapp OWNER kanzapp;" \
+            -c "CREATE DATABASE kanz_oms_ci OWNER kanzapp;"
           psql -h localhost -U kanz -d kanzapp -v ON_ERROR_STOP=1 \
+            -c "GRANT ALL ON SCHEMA public TO kanzapp;"
+          psql -h localhost -U kanz -d kanz_oms_ci -v ON_ERROR_STOP=1 \
             -c "GRANT ALL ON SCHEMA public TO kanzapp;"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -243,12 +246,15 @@ jobs:
       - name: Start the OMS on the bus (for the M1 loop certification)
         working-directory: kanz
         env:
-          KANZ_MIGRATE_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+          # Test packages drop/recreate their tables. Their database cannot also
+          # host a live process: its relay would drain fixture facts and its
+          # queries would race those migrations even with go test -p 1.
+          KANZ_MIGRATE_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
+          OMS_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
         run: |
           go run ./cmd/kanz-migrate --dir services/oms/migrations
           go build -o /tmp/oms ./services/oms/cmd/oms
           OMS_NATS_URL=nats://localhost:4222 \
-          OMS_DATABASE_URL='postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable' \
           OMS_TENANT=__system__ \
           OMS_SIM_VENUE_MIC=XNAS,XLON \
           /tmp/oms > /tmp/oms.log 2>&1 &
