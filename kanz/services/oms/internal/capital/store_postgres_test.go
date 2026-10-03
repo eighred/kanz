@@ -50,6 +50,11 @@ func tenantPool(t *testing.T, tenant string) *pgxpool.Pool {
 
 func database(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	return databaseBefore(t, "")
+}
+
+func databaseBefore(t *testing.T, before string) *pgxpool.Pool {
+	t.Helper()
 	p := tenantPool(t, "tenant-a")
 	ctx := context.Background()
 	if _, err := p.Exec(ctx, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`); err != nil {
@@ -64,6 +69,9 @@ func database(t *testing.T) *pgxpool.Pool {
 	}
 	sort.Strings(files)
 	for _, f := range files {
+		if filepath.Base(f) == before {
+			break
+		}
 		data, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)

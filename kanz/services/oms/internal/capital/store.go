@@ -55,6 +55,11 @@ type balance struct {
 	observed        *int64
 }
 
+func cashKnown(b balance, now time.Time, maxAge time.Duration) bool {
+	return b.complete && !b.conflicted && b.revision > 0 && b.gap <= b.revision && b.observed != nil &&
+		!time.Unix(0, *b.observed).After(now) && now.Sub(time.Unix(0, *b.observed)) <= maxAge
+}
+
 func validID(s string) bool { return strings.TrimSpace(s) != "" && len(s) <= 256 }
 
 func amount(s string, nonnegative bool) (*big.Rat, error) {
@@ -114,7 +119,7 @@ func Reserve(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string
 	if err != nil {
 		return err
 	}
-	if !b.complete || b.conflicted || b.revision == 0 || b.gap > b.revision || b.observed == nil || time.Unix(0, *b.observed).After(now) || now.Sub(time.Unix(0, *b.observed)) > maxAge {
+	if !cashKnown(b, now, maxAge) {
 		return ErrUnknown
 	}
 	next := new(big.Rat).Add(b.reserved, required)
@@ -131,6 +136,9 @@ func Reserve(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string
 	}
 	if tag.RowsAffected() != 1 {
 		return ErrConflict
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id) VALUES($1,$1)`, orderID); err != nil {
+		return err
 	}
 	return writeReserved(ctx, tx, portfolio, currency, next)
 }
@@ -182,7 +190,7 @@ func Change(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string,
 	before, after := need(old, booked), need(required, booked)
 	next := new(big.Rat).Add(new(big.Rat).Sub(b.reserved, before), after)
 	if after.Cmp(before) > 0 {
-		if faulted || !b.complete || b.conflicted || b.revision == 0 || b.gap > b.revision || b.observed == nil || time.Unix(0, *b.observed).After(now) || now.Sub(time.Unix(0, *b.observed)) > maxAge {
+		if faulted || !cashKnown(b, now, maxAge) {
 			return ErrUnknown
 		}
 		if next.Cmp(b.total) > 0 {
@@ -218,39 +226,31 @@ func ObserveExecution(ctx context.Context, tx pgx.Tx, portfolio, currency, order
 	if err != nil {
 		return err
 	}
-	var requiredText, bookedText, executedText string
-	err = tx.QueryRow(ctx, `SELECT required_debit,booked_debit,executed_debit FROM capital_commitments WHERE order_id=$1 AND portfolio_id=$2 AND currency=$3 FOR UPDATE`, orderID, portfolio, currency).Scan(&requiredText, &bookedText, &executedText)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrConflict
-	}
+	m, err := loadMember(ctx, tx, portfolio, currency, orderID)
 	if err != nil {
 		return err
 	}
-	previous, err := amount(executedText, true)
-	if err != nil {
-		return err
-	}
-	if previous.Cmp(executed) == 0 {
+	if m.memberExecuted.Cmp(executed) == 0 {
 		return nil
 	}
-	required, err := amount(requiredText, true)
-	if err != nil {
+	totalExecuted := new(big.Rat).Sub(m.executed, m.memberExecuted)
+	totalExecuted.Add(totalExecuted, executed)
+	if _, err := amount(totalExecuted.RatString(), true); err != nil {
 		return err
 	}
-	booked, err := amount(bookedText, true)
-	if err != nil {
-		return err
-	}
-	before := need(required, booked)
-	if executed.Cmp(required) > 0 {
-		required.Set(executed)
+	before := need(m.required, m.booked)
+	if totalExecuted.Cmp(m.required) > 0 {
+		m.required.Set(totalExecuted)
 	}
 	b.reserved.Sub(b.reserved, before)
-	b.reserved.Add(b.reserved, need(required, booked))
+	b.reserved.Add(b.reserved, need(m.required, m.booked))
 	if _, err := amount(b.reserved.RatString(), true); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET executed_debit=$2,required_debit=$3,version=version+1 WHERE order_id=$1`, orderID, executed.RatString(), required.RatString()); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE capital_members SET executed_debit=$2 WHERE order_id=$1`, orderID, executed.RatString()); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET executed_debit=$2,required_debit=$3,version=version+1 WHERE order_id=$1`, m.owner, totalExecuted.RatString(), m.required.RatString()); err != nil {
 		return err
 	}
 	return writeReserved(ctx, tx, portfolio, currency, b.reserved)
@@ -342,11 +342,10 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, event CashEvent) error {
 		return err
 	}
 	for _, a := range event.Applied {
-		var requiredText, bookedText string
-		err = tx.QueryRow(ctx, `SELECT required_debit,booked_debit FROM capital_commitments WHERE order_id=$1 AND portfolio_id=$2 AND currency=$3 FOR UPDATE`, a.OrderID, event.PortfolioID, event.Currency).Scan(&requiredText, &bookedText)
+		m, memberErr := loadMember(ctx, tx, event.PortfolioID, event.Currency, a.OrderID)
 		// A proof for an unknown commitment cannot be silently discarded; that
 		// would permit the same order identity to acquire new spending capacity.
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(memberErr, ErrConflict) {
 			// Preserve the conflicting receipt and quarantine, but undo every
 			// earlier application in this event before committing the latch.
 			if _, err = tx.Exec(ctx, `ROLLBACK TO SAVEPOINT cash_proofs`); err != nil {
@@ -354,24 +353,24 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, event CashEvent) error {
 			}
 			return latchConflict(ctx, tx, event.PortfolioID, event.Currency)
 		}
-		if err != nil {
-			return err
-		}
-		required, err := amount(requiredText, true)
-		if err != nil {
-			return err
-		}
-		before, err := amount(bookedText, true)
-		if err != nil {
-			return err
+		if memberErr != nil {
+			return memberErr
 		}
 		after, err := amount(string(a.Debit), true)
 		if err != nil {
 			return err
 		}
-		b.reserved.Sub(b.reserved, need(required, before))
-		b.reserved.Add(b.reserved, need(required, after))
-		if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET booked_debit=$2 WHERE order_id=$1`, a.OrderID, after.RatString()); err != nil {
+		ownerBooked := new(big.Rat).Sub(m.booked, m.memberBooked)
+		ownerBooked.Add(ownerBooked, after)
+		if _, err := amount(ownerBooked.RatString(), true); err != nil {
+			return err
+		}
+		b.reserved.Sub(b.reserved, need(m.required, m.booked))
+		b.reserved.Add(b.reserved, need(m.required, ownerBooked))
+		if _, err = tx.Exec(ctx, `UPDATE capital_members SET booked_debit=$2 WHERE order_id=$1`, a.OrderID, after.RatString()); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET booked_debit=$2 WHERE order_id=$1`, m.owner, ownerBooked.RatString()); err != nil {
 			return err
 		}
 	}
