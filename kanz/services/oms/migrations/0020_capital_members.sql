@@ -6,11 +6,12 @@ CREATE TABLE capital_members (
     tenant_id text NOT NULL DEFAULT app_current_tenant(),
     order_id text NOT NULL,
     owner_order_id text NOT NULL,
+    currency text NOT NULL,
     booked_debit text NOT NULL DEFAULT '0',
     executed_debit text NOT NULL DEFAULT '0',
-    PRIMARY KEY (tenant_id, order_id),
-    FOREIGN KEY (tenant_id, owner_order_id)
-        REFERENCES capital_commitments (tenant_id, order_id)
+    PRIMARY KEY (tenant_id, order_id, currency),
+    FOREIGN KEY (tenant_id, owner_order_id, currency)
+        REFERENCES capital_commitments (tenant_id, order_id, currency)
 );
 CREATE INDEX capital_members_owner ON capital_members (tenant_id, owner_order_id);
 ALTER TABLE capital_members ENABLE ROW LEVEL SECURITY;
@@ -26,6 +27,7 @@ CREATE FUNCTION reject_capital_member_reassignment() RETURNS trigger LANGUAGE pl
 BEGIN
     IF TG_OP = 'DELETE' OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
         OR NEW.order_id IS DISTINCT FROM OLD.order_id
+        OR NEW.currency IS DISTINCT FROM OLD.currency
         OR NEW.owner_order_id IS DISTINCT FROM OLD.owner_order_id THEN
         RAISE EXCEPTION 'capital commitment ownership is immutable' USING ERRCODE='23514';
     END IF;

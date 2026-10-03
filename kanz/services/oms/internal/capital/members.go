@@ -23,7 +23,7 @@ func loadMember(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID str
 	var required, booked, executed, memberBooked, memberExecuted string
 	read := func() error {
 		return tx.QueryRow(ctx, `SELECT c.order_id,c.required_debit,c.booked_debit,c.executed_debit,m.booked_debit,m.executed_debit
-		FROM capital_members m JOIN capital_commitments c ON c.tenant_id=m.tenant_id AND c.order_id=m.owner_order_id
+		FROM capital_members m JOIN capital_commitments c ON c.tenant_id=m.tenant_id AND c.order_id=m.owner_order_id AND c.currency=m.currency
 		WHERE m.order_id=$1 AND c.portfolio_id=$2 AND c.currency=$3 FOR UPDATE OF c,m`, orderID, portfolio, currency).
 			Scan(&m.owner, &required, &booked, &executed, &memberBooked, &memberExecuted)
 	}
@@ -33,10 +33,10 @@ func loadMember(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID str
 		// already-held cash lock. Copy the exact retained heads, never zero them.
 		// An owner with existing children but no self-member is inconsistent: its
 		// aggregate cannot safely be attributed to itself, so leave it refused.
-		if _, insertErr := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id,booked_debit,executed_debit)
-		SELECT c.order_id,c.order_id,c.booked_debit,c.executed_debit FROM capital_commitments c
+		if _, insertErr := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id,currency,booked_debit,executed_debit)
+		SELECT c.order_id,c.order_id,c.currency,c.booked_debit,c.executed_debit FROM capital_commitments c
 		WHERE c.order_id=$1 AND c.portfolio_id=$2 AND c.currency=$3
-		AND NOT EXISTS (SELECT 1 FROM capital_members m WHERE m.tenant_id=c.tenant_id AND m.owner_order_id=c.order_id)
+		AND NOT EXISTS (SELECT 1 FROM capital_members m WHERE m.tenant_id=c.tenant_id AND m.owner_order_id=c.order_id AND m.currency=c.currency)
 		ON CONFLICT DO NOTHING`, orderID, portfolio, currency); insertErr != nil {
 			return m, insertErr
 		}
@@ -91,7 +91,7 @@ func RegisterChild(ctx context.Context, tx pgx.Tx, portfolio, currency, owner, c
 	if m.owner != owner {
 		return ErrInvalid
 	} // nested ownership is never a schedule
-	tag, err := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, child, owner)
+	tag, err := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id,currency) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, child, owner, currency)
 	if err != nil {
 		return err
 	}

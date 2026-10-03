@@ -30,7 +30,7 @@ CREATE TABLE capital_commitments (
     booked_debit text NOT NULL DEFAULT '0',
     executed_debit text NOT NULL DEFAULT '0',
     version bigint NOT NULL DEFAULT 1 CHECK (version > 0),
-    PRIMARY KEY (tenant_id, order_id),
+    PRIMARY KEY (tenant_id, order_id, currency),
     FOREIGN KEY (tenant_id, portfolio_id, currency)
         REFERENCES capital_balances (tenant_id, portfolio_id, currency)
 );

@@ -137,7 +137,7 @@ func Reserve(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string
 	if tag.RowsAffected() != 1 {
 		return ErrConflict
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id) VALUES($1,$1)`, orderID); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id,currency) VALUES($1,$1,$2)`, orderID, currency); err != nil {
 		return err
 	}
 	return writeReserved(ctx, tx, portfolio, currency, next)
@@ -200,7 +200,7 @@ func Change(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string,
 	if _, err := amount(next.RatString(), true); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET required_debit=$2,version=version+1 WHERE order_id=$1`, orderID, required.RatString()); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET required_debit=$2,version=version+1 WHERE order_id=$1 AND currency=$3`, orderID, required.RatString(), currency); err != nil {
 		return err
 	}
 	return writeReserved(ctx, tx, portfolio, currency, next)
@@ -247,10 +247,10 @@ func ObserveExecution(ctx context.Context, tx pgx.Tx, portfolio, currency, order
 	if _, err := amount(b.reserved.RatString(), true); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE capital_members SET executed_debit=$2 WHERE order_id=$1`, orderID, executed.RatString()); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE capital_members SET executed_debit=$2 WHERE order_id=$1 AND currency=$3`, orderID, executed.RatString(), currency); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET executed_debit=$2,required_debit=$3,version=version+1 WHERE order_id=$1`, m.owner, totalExecuted.RatString(), m.required.RatString()); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET executed_debit=$2,required_debit=$3,version=version+1 WHERE order_id=$1 AND currency=$4`, m.owner, totalExecuted.RatString(), m.required.RatString(), currency); err != nil {
 		return err
 	}
 	return writeReserved(ctx, tx, portfolio, currency, b.reserved)
@@ -367,10 +367,10 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, event CashEvent) error {
 		}
 		b.reserved.Sub(b.reserved, need(m.required, m.booked))
 		b.reserved.Add(b.reserved, need(m.required, ownerBooked))
-		if _, err = tx.Exec(ctx, `UPDATE capital_members SET booked_debit=$2 WHERE order_id=$1`, a.OrderID, after.RatString()); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE capital_members SET booked_debit=$2 WHERE order_id=$1 AND currency=$3`, a.OrderID, after.RatString(), event.Currency); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET booked_debit=$2 WHERE order_id=$1`, m.owner, ownerBooked.RatString()); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE capital_commitments SET booked_debit=$2 WHERE order_id=$1 AND currency=$3`, m.owner, ownerBooked.RatString(), event.Currency); err != nil {
 			return err
 		}
 	}
