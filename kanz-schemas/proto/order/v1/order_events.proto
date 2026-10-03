@@ -400,6 +400,20 @@ message OrderState {
   google.protobuf.Timestamp release_at = 30;
   common.v1.Decimal release_bid = 31;
   common.v1.Decimal release_ask = 32;
+
+  // Persisted before a scheduled parent's cancellation fans out. While set,
+  // no new child may be admitted or dispatched. It survives failed withdrawals
+  // and restart; only confirmed child termination permits parent termination.
+  OrderCancellationRequest cancellation_request = 33;
+}
+
+// OrderCancellationRequest retains the authorized command and its audit lineage
+// so restart recovery finishes the same withdrawal without inventing an issuer.
+message OrderCancellationRequest {
+  CancelOrder command = 1;
+  google.protobuf.Timestamp requested_at = 2;
+  string correlation_id = 3;
+  string causation_id = 4;
 }
 
 // OrderQuarantine records an order whose true state at the venue could not be

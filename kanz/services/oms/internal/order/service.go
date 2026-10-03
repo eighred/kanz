@@ -948,6 +948,9 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 	// Load()-then-Save() let both deliveries through this point and both reached the
 	// venue: the state converged (Save upserts) while the fund traded twice.
 	if err := s.store.Create(ctx, admitted, []outbox.Record{accepted}); err != nil {
+		if errors.Is(err, ErrParentStopped) {
+			return s.outcomeReject(ctx, cmd.GetOrderId(), "PARENT_NOT_WORKING", err.Error(), now)
+		}
 		if errors.Is(err, ErrExists) {
 			// Lost the admission race — the winner works the order. Deliberately NOT
 			// a resume: the winner is mid-flight by construction, and the interrupted
@@ -1666,9 +1669,26 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// a child that was already cancelled is safe, because the redelivery finds it
 	// terminal and skips it.
 	//
-	// It is also why nothing is re-created behind us: the driver asks which
-	// children EXIST, and a cancelled child still exists.
+	// The durable request below closes child admission before the scan. Existing
+	// child IDs remain occupied; unsent slices cannot enter after this barrier.
 	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED {
+		if st.GetCancellationRequest() == nil {
+			requested := cloneState(st)
+			requested.CancellationRequest = &orderpb.OrderCancellationRequest{
+				Command: proto.Clone(&cmd).(*orderpb.CancelOrder), RequestedAt: timestamppb.New(now),
+				CorrelationId: bus.CorrelationIDFromContext(ctx), CausationId: bus.CausationIDFromContext(ctx),
+			}
+			// This write serializes with child admission and dispatch in the store.
+			// Failure leaves the parent live; no venue withdrawal has started yet.
+			if err := s.store.Save(ctx, requested, ver, nil, ""); err != nil {
+				return err
+			}
+			st = requested
+			ver++
+		}
+		next.CancellationRequest = proto.Clone(st.GetCancellationRequest()).(*orderpb.OrderCancellationRequest)
+		ctx = bus.WithCorrelationID(ctx, st.GetCancellationRequest().GetCorrelationId())
+		ctx = bus.WithCausationID(ctx, st.GetCancellationRequest().GetCausationId())
 		unsent, uerr := s.cancelChildren(ctx, st, now)
 		if uerr != nil {
 			return uerr
@@ -1850,6 +1870,11 @@ func (s *Service) closeAtVenue(ctx context.Context, st *orderpb.OrderState, now 
 		}
 		return errors.New("oms: venue has not declared a cancellation capability")
 	}
+	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_ROUTED && st.GetVenueAckAt() == nil {
+		// ROUTED commits before Execute starts. A cancel or query returning
+		// not-found cannot rule out another replica's still-in-flight placement.
+		return errors.New("oms: placement acknowledgement is unresolved; cancellation cannot establish termination")
+	}
 
 	// Track BEFORE dispatch: if the call hangs, times out ambiguously, or the
 	// process dies mid-flight, the watchdog still sees the close. Tracking after
@@ -1957,6 +1982,9 @@ func (s *Service) handleAmend(ctx context.Context, env *envelopepb.Envelope, pay
 				"acting on it now would be a guess. It must be resolved against the venue's own "+
 				"order history before it can be amended. quarantine reason: %s (frozen %s ago, at %s)",
 			q.GetReason(), quarantineAge(q, now), q.GetAt().AsTime().UTC().Format(time.RFC3339)), now)
+	}
+	if st.GetCancellationRequest() != nil {
+		return s.outcomeReject(ctx, cmd.GetOrderId(), "CANCELLATION_PENDING", ErrCancellationPending.Error(), now)
 	}
 	// AN AMEND MUST NOT REWRITE TERMS A VENUE IS STILL WORKING (#740).
 	//

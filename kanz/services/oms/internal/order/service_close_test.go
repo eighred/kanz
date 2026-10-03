@@ -78,6 +78,30 @@ func TestCancel_DispatchesToVenueAndResolves(t *testing.T) {
 	}
 }
 
+func TestCancel_UnacknowledgedPlacementCannotBeDeclaredWithdrawn(t *testing.T) {
+	fb := &fakeBus{}
+	venue := &closerVenue{mic: "BINANCE"}
+	svc, _ := restingOrderOn(t, fb, venue)
+	st, version, err := svc.store.Load(testCtx(), "o1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.VenueAckAt = nil // durable ROUTED, but placement acknowledgement was lost
+	if err := svc.store.Save(testCtx(), st, version, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Handle(testCtx(), cancelEnv(), mustMarshal(t, cancelAs("pf1"))); err == nil {
+		t.Fatal("unresolved placement was declared withdrawn")
+	}
+	if len(venue.cancelled) != 0 || fb.last(EventTypeCancelled) != nil {
+		t.Fatal("a not-found cancellation could overtake an in-flight placement")
+	}
+	st, _, err = svc.store.Load(testCtx(), "o1")
+	if err != nil || IsTerminal(st) {
+		t.Fatalf("unresolved exposure was discarded: %v %v", st, err)
+	}
+}
+
 // A venue that will not confirm the cancel leaves the close TRACKED for the
 // healing watchdog. The ledger retains executable exposure until withdrawal
 // is confirmed; it must not publish success for an unanswered request.

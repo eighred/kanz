@@ -101,6 +101,9 @@ func (s *Service) DriveSchedules(ctx context.Context) (int, error) {
 
 // driveOne emits the children of one parent that are due and do not yet exist.
 func (s *Service) driveOne(ctx context.Context, parentSt *orderpb.OrderState, tenant string, now time.Time) (int, error) {
+	if parentSt.GetCancellationRequest() != nil {
+		return 0, s.resumeParentCancellation(ctx, parentSt)
+	}
 	parent, err := parentOf(parentSt)
 	if err != nil {
 		// A PARENT RESTING WITHOUT A DERIVABLE SCHEDULE IS LOUD, NOT SKIPPED.
@@ -242,7 +245,7 @@ func (s *Service) retireIfFinished(ctx context.Context, parentSt *orderpb.OrderS
 	if err != nil {
 		return err
 	}
-	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED {
+	if st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED || st.GetCancellationRequest() != nil {
 		return nil // somebody else finished it
 	}
 

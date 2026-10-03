@@ -55,44 +55,10 @@ func (p *Postgres) Outbox() outbox.Queue { return p.queue }
 // Store.Proposals for why it is handed out through the store.
 func (p *Postgres) Proposals() ProposalStore { return p.proposals }
 
-// Create is the ATOMIC ADMISSION GATE, and since #292 it is also the point at
-// which the order's announcement becomes as durable as the order.
-//
-// The gate is still one statement — an INSERT that the engine either applies or
-// discards on conflict — and the RowsAffected it reports is still the verdict:
-// 1 ⇒ this delivery won and owns the order; 0 ⇒ another delivery already created
-// it, so this one lost and MUST NOT route to the venue (ErrExists is that
-// signal).
-//
-// Never rewrite this as a SELECT followed by an INSERT. The check-then-act
-// window between them is exactly the double-trade bug this store was built to
-// close, and it is invisible in tests because Save is an upsert: the state still
-// converges while the fund trades twice.
-//
-// # WHY THERE IS NOW A TRANSACTION AROUND ONE STATEMENT
-//
-// Because there are two. The outbox records ride the SAME transaction as the
-// order row, which is the entire point of #292: admission used to be
-// store.Create and then emitter.EmitAccepted, two independent writes, so a
-// publish failure left a durable PENDING_NEW order that no downstream service
-// had ever heard of. Risk carried no exposure for it, tv-sync never admitted it
-// and therefore also dropped the ORDER_ROUTED a later re-drive emitted. #238
-// added a marker and a sweep to find those orders afterwards. This makes them
-// not exist: the estate's copy of the announcement is committed by the same
-// COMMIT that admits the order.
-//
-// THE LOSER OF THE ADMISSION RACE ENQUEUES NOTHING. The ErrExists path rolls
-// back, so a duplicate delivery cannot leave a second ACCEPTED record behind for
-// the relay to publish. That is what the deferred Rollback is for, and it is not
-// decoration — without it a lost race would announce the order twice.
-//
-// # WHY THE TRANSACTION IS NOT AN ISOLATION CHANGE
-//
-// It runs at the pool's default READ COMMITTED. Nothing here reads before it
-// writes, so there is no snapshot to protect; the transaction exists purely to
-// make the two INSERTs one durable unit. Raising the isolation level would buy
-// nothing and would introduce 40001 serialization failures on the admission
-// path, where MaxAttempts is 1 and there is nobody to retry them.
+// Create commits admission and its announcement together. The unique order key
+// arbitrates duplicate deliveries across replicas. A child first locks its parent:
+// once cancellation commits, no new child can enter behind the cancellation scan.
+// A refused admission rolls back both the order and its outbox records.
 func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce []outbox.Record) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot create order with empty order_id")
@@ -106,6 +72,18 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce 
 		return fmt.Errorf("create order %s: begin: %w", st.GetOrderId(), err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+	if err := lockWorkingParent(ctx, tx, st); err != nil {
+		if errors.Is(err, ErrParentStopped) {
+			var exists bool
+			if queryErr := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orders WHERE order_id=$1)`, st.GetOrderId()).Scan(&exists); queryErr != nil {
+				return queryErr
+			}
+			if exists {
+				return ErrExists // a duplicate is not a new rejected child
+			}
+		}
+		return err
+	}
 
 	// portfolio_id is denormalized out of the blob (#399), like order_id and
 	// status before it, and parent_order_id joins them (#435). The blob stays
@@ -130,56 +108,10 @@ func (p *Postgres) Create(ctx context.Context, st *orderpb.OrderState, announce 
 	return nil
 }
 
-// Save is the post-admission compare-and-swap: every state transition after
-// Create, applied only if the order is still at the version the caller loaded.
-//
-// THE PREDICATE IS THE WHOLE POINT, AND RowsAffected IS THE VERDICT — the same
-// shape Create uses two functions above. 1 ⇒ this writer won and the version
-// advanced; 0 ⇒ somebody else moved the order since this caller read it, and
-// applying this write would DISCARD their transition, so it is refused with
-// ErrConflict.
-//
-// This used to be a blind upsert, justified by the claim that "the bus
-// partition_key serializes transitions per order_id". THAT WAS NEVER TRUE.
-// partition_key is stamped by producers (pkg/bus/producer.go) and read by the
-// consumer only to copy onto a DLQ republish (pkg/bus/consumer.go); nothing
-// anywhere serializes deliveries by it, and submit, amend and cancel arrive on
-// three separate durables with three cursors and three dispatch goroutines
-// (pkg/bus/nats.go). The consumer's only exclusion is its dedup claim, keyed on
-// idempotency_key — which differs between a submit and a cancel. Believing that
-// sentence is how a cancel came to be overwritten by a fill that never saw it.
-// Do not reintroduce a serialization claim here.
-//
-// The service's per-order lock (internal/order/orderlock.go) excludes writers
-// within one process. It cannot reach across pods by construction, and
-// oms-deploy.yaml runs replicas: 2 — so the version is what makes a multi-replica
-// OMS safe, exactly as the ON CONFLICT DO NOTHING in Create is what makes
-// admission safe (#122).
-//
-// The INSERT arm still exists because Save must remain callable for an order
-// this process created; on the insert path the row lands at version 0 and no
-// predicate applies, because there is nothing yet to conflict with.
-//
-// # WHY A TRANSACTION ONLY WHEN THERE IS SOMETHING TO ANNOUNCE
-//
-// announce rides the SAME transaction as the state change, which is the whole of
-// #292 applied to the fill fold: work() and adopt() hand this the ORDER_FILLED /
-// ORDER_PARTIALLY_FILLED FACT with the state that records it, so a crash or a
-// broker refusal between them is not reachable. A fill is the one FACT no
-// compensator can rebuild — completeTerminalOutcome says so in its own comment —
-// so "the write landed and the FACT did not" had no recovery at all.
-//
-// Most Saves announce nothing (a marker stamp, a quarantine freeze, the venue
-// ack), and wrapping those in BEGIN/COMMIT would add two round trips per
-// transition on the capital path to protect an empty set. So the announce-less
-// path stays a single statement — but THE STATEMENT AND ITS VERDICT ARE SHARED,
-// not copied. saveSQL exists once and cas() interprets RowsAffected once; two
-// copies of a compare-and-swap is how one of them quietly stops refusing.
-//
-// THE CAS PREDICATE IS UNCHANGED BY ANY OF THIS (#122). Same SQL, same
-// `WHERE orders.version = $4`, same 0-rows-means-ErrConflict verdict, whether it
-// runs on the pool or inside the transaction — and a refused CAS returns before
-// the enqueue, so a loser announces nothing. cas_test.go pins it.
+// Save atomically compares the loaded version, preserves durable cancellation,
+// folds execution identity, and records the announcement. Dispatch locks the
+// parent before the child; other transitions lock only the order. No lock spans
+// a venue call. A stale writer returns ErrConflict and announces nothing.
 func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record, fillID string) error {
 	if st.GetOrderId() == "" {
 		return errors.New("oms: cannot save order with empty order_id")
@@ -188,19 +120,17 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 	if err != nil {
 		return fmt.Errorf("marshal order %s: %w", st.GetOrderId(), err)
 	}
-	// THE POOL FAST PATH IS ONLY AVAILABLE WHEN THERE IS NOTHING TO COMMIT
-	// ALONGSIDE. A fill claim needs the transaction for the same reason the
-	// outbox record does: a claim that commits apart from the fold loses the fill
-	// if the fold then fails, and a fold that commits apart from its claim
-	// double-counts on the next redelivery (#782).
-	if len(announce) == 0 && fillID == "" {
-		return p.cas(ctx, p.pool, st, blob, expectedVersion)
-	}
+	// Even an announcement-free marker must preserve a pending withdrawal.
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("save order %s: begin: %w", st.GetOrderId(), err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+	if announcesDispatch(announce) {
+		if err := lockWorkingParent(ctx, tx, st); err != nil {
+			return err
+		}
+	}
 	// THE CLAIM FIRST OF ALL (#782). A fill this order already contains means
 	// this write must not land at all — not the state, not the FACT — and
 	// claiming before the CAS means the rollback has nothing to undo rather than
@@ -240,6 +170,25 @@ func (p *Postgres) Save(ctx context.Context, st *orderpb.OrderState, expectedVer
 		if err := journalExecution(ctx, tx, st.GetOrderId(), fillID, announce); err != nil {
 			return err
 		}
+	}
+	// Execution claims precede the order lock, as in recovery_commit.go.
+	var previous []byte
+	var version int64
+	if err := tx.QueryRow(ctx, `SELECT state, version FROM orders WHERE order_id=$1 FOR UPDATE`, st.GetOrderId()).Scan(&previous, &version); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if version != expectedVersion {
+		return ErrConflict
+	}
+	current, err := unmarshalState(previous, st.GetOrderId())
+	if err != nil {
+		return err
+	}
+	if err := preserveCancellation(current, st); err != nil {
+		return err
 	}
 	// THE CAS SECOND, THE ANNOUNCEMENT THIRD. A conflict means another writer
 	// moved the order, so this delivery's FACT describes a transition that never
