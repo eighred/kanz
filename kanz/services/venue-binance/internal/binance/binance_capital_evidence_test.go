@@ -12,7 +12,7 @@ import (
 
 func TestBinanceCapitalEvidenceReadsSignedCurrentCommissionAndExchangeSettlement(t *testing.T) {
 	quote := "USDT"
-	commission := `{"symbol":"BTCUSDT","standardCommission":{"maker":"0.001","taker":"0.002","buyer":"0","seller":"0"},"specialCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"taxCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"discount":{"discountAsset":"BNB"}}`
+	commission := `{"symbol":"BTCUSDT","standardCommission":{"maker":"0.001","taker":"0.002","buyer":"0","seller":"0"},"specialCommission":{"maker":"0","taker":"0","buyer":"0","seller":"0"},"taxCommission":{"maker":0.00000112,"taker":0.00000114,"buyer":0,"seller":0},"discount":{"discountAsset":"BNB"}}`
 	var mu sync.Mutex
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/exchangeInfo", func(w http.ResponseWriter, r *http.Request) {
@@ -46,6 +46,9 @@ func TestBinanceCapitalEvidenceReadsSignedCurrentCommissionAndExchangeSettlement
 	}
 	if len(evidence.GetCurrentFee().GetComponents()) != 3 || evidence.GetCurrentFee().GetFeeCurrencyMode() != "UNKNOWN_FROM_COMMISSION_ENDPOINT" {
 		t.Fatalf("collapsed fee components or invented currency: %+v", evidence.GetCurrentFee())
+	}
+	if got := evidence.GetCurrentFee().GetComponents()[2].GetMakerRate(); got != "0.00000112" {
+		t.Fatalf("JSON number tax rate was not retained exactly: %q", got)
 	}
 	mu.Lock()
 	quote = "USD"

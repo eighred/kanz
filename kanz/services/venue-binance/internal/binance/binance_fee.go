@@ -13,10 +13,32 @@ import (
 )
 
 type commissionComponent struct {
-	Maker  string `json:"maker"`
-	Taker  string `json:"taker"`
-	Buyer  string `json:"buyer"`
-	Seller string `json:"seller"`
+	Maker  commissionRate `json:"maker"`
+	Taker  commissionRate `json:"taker"`
+	Buyer  commissionRate `json:"buyer"`
+	Seller commissionRate `json:"seller"`
+}
+
+// Binance documents rates as strings but also emits JSON numbers in its tax
+// examples. Preserve the decimal lexeme in either form; float decoding would
+// change financial evidence before the OMS sees it.
+type commissionRate string
+
+func (r *commissionRate) UnmarshalJSON(raw []byte) error {
+	var value string
+	if len(raw) > 0 && raw[0] == '"' {
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+	} else {
+		value = string(raw)
+	}
+	parsed, ok := new(big.Rat).SetString(value)
+	if !ok || parsed.Sign() < 0 {
+		return fmt.Errorf("binance: invalid commission rate")
+	}
+	*r = commissionRate(value)
+	return nil
 }
 
 // currentCommission is an observation of the account's present symbol rate.
@@ -58,15 +80,14 @@ func (c *binanceREST) currentCommission(ctx context.Context, symbol string) (*ve
 	}{
 		{"standard", out.Standard}, {"special", out.Special}, {"tax", out.Tax},
 	} {
-		for _, rate := range []string{named.c.Maker, named.c.Taker, named.c.Buyer, named.c.Seller} {
-			r, ok := new(big.Rat).SetString(rate)
-			if !ok || r.Sign() < 0 {
-				return nil, fmt.Errorf("binance: invalid %s current commission component", named.name)
+		for _, rate := range []commissionRate{named.c.Maker, named.c.Taker, named.c.Buyer, named.c.Seller} {
+			if rate == "" {
+				return nil, fmt.Errorf("binance: missing %s current commission component", named.name)
 			}
 		}
 		fee.Components = append(fee.Components, &venuepb.FeeRateComponent{
-			Name: named.name, MakerRate: named.c.Maker, TakerRate: named.c.Taker,
-			BuyerRate: named.c.Buyer, SellerRate: named.c.Seller,
+			Name: named.name, MakerRate: string(named.c.Maker), TakerRate: string(named.c.Taker),
+			BuyerRate: string(named.c.Buyer), SellerRate: string(named.c.Seller),
 		})
 	}
 	digest := sha256.Sum256(raw)
