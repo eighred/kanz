@@ -386,6 +386,9 @@ history (#1328). It does not replace the plane boundaries, invariants, coding
 standards and tracking rules in this file; do not seek an old private cache to
 begin engineering work.
 
+To enable the reconstructed skills in Codex from this checkout, run
+`codex plugin marketplace add .` and `codex plugin add kanz-forge@kanz-local`.
+
 Read the affected component's code, migrations and architecture guards before
 changing its contracts. Use `.github/workflows/kanz-ci.yml` for the actual CI
 jobs and `kanz/.golangci.yml` for lint policy. Report the tested commit, package
