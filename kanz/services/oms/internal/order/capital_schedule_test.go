@@ -33,22 +33,19 @@ func TestPostgresScheduledChildrenUseOneParentCommitment(t *testing.T) {
 			OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT, Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW,
 			OrderedQuantity: d(coeff, -1), LimitPrice: d(100, 0)}
 	}
-	for _, item := range []struct {
-		id       string
-		quantity int64
-	}{{"first", 6}, {"second", 4}} {
-		st := child(item.id, item.quantity)
-		if err := store.CreateFunded(ctx, st, nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(item.quantity*10, 0)}}, now, time.Minute); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := store.CreateFunded(ctx, child("over", 1), nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(10, 0)}}, now, time.Minute); !errors.Is(err, capital.ErrInvalid) {
-		t.Fatalf("over-allocation: %v", err)
+	if err := store.CreateFunded(ctx, child("first", 6), nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(60, 0)}}, now, time.Minute); err != nil {
+		t.Fatal(err)
 	}
 	wrong := child("wrong-price", 1)
 	wrong.LimitPrice = d(101, 0)
-	if err := store.CreateFunded(ctx, wrong, nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(101, 0)}}, now, time.Minute); !errors.Is(err, capital.ErrInvalid) {
+	if err := store.CreateFunded(ctx, wrong, nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(101, -1)}}, now, time.Minute); !errors.Is(err, capital.ErrInvalid) {
 		t.Fatalf("price escalation: %v", err)
+	}
+	if err := store.CreateFunded(ctx, child("second", 4), nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(40, 0)}}, now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateFunded(ctx, child("over", 1), nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(10, 0)}}, now, time.Minute); !errors.Is(err, capital.ErrInvalid) {
+		t.Fatalf("over-allocation: %v", err)
 	}
 	var owners, members int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM capital_commitments`).Scan(&owners); err != nil || owners != 1 {
