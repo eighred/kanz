@@ -372,6 +372,9 @@ func serve(cfg config.Config) error {
 			logger.Error("binance: REST weight budget exhausted — backing off (structural alert)")
 		},
 	}, cfg.WSBase)
+	if err := conn.VerifyCatalogue(ctx); err != nil {
+		return fmt.Errorf("BINANCE_SYMBOLS exchange verification: %w", err)
+	}
 
 	seam := orderview.NewObservedSeam(view, viewObs, cfg.MIC, logger)
 	// WithDLQ EVEN THOUGH THE BROADCAST PATH NEVER CONSULTS IT. The exemption in

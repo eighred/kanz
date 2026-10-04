@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/eighred/kanz/internal/dec"
@@ -93,8 +94,8 @@ func (p *Postgres) SaveFundedTerminal(ctx context.Context, st *orderpb.OrderStat
 		if len(currencies) == 0 {
 			return nil
 		} // legacy cancel must remain possible while activation is halted
-		if len(currencies) != 1 {
-			return capital.ErrInvalid
+		if _, err := fundedSettlement(st, currencies); err != nil {
+			return err
 		}
 		if st.GetParentOrderId() != "" {
 			return nil
@@ -138,26 +139,71 @@ func (p *Postgres) SaveFundedTerminal(ctx context.Context, st *orderpb.OrderStat
 			}
 			children.Close()
 		}
-		return capital.FinishExecution(ctx, tx, st.GetPortfolioId(), currencies[0], st.GetOrderId(), now)
+		for _, currency := range currencies {
+			if err := capital.FinishExecution(ctx, tx, st.GetPortfolioId(), currency, st.GetOrderId(), now); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
 // SaveFundedAmend changes the cash bound before taking the order row lock, then
 // commits the new order version and command outcome under the same transaction.
 func (p *Postgres) SaveFundedAmend(ctx context.Context, st *orderpb.OrderState, expectedVersion int64, announce []outbox.Record, debits []*commonpb.Money, now time.Time) error {
-	if st == nil || st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW || st.GetParentOrderId() != "" || len(debits) != 1 || debits[0] == nil || debits[0].Amount == nil {
+	if st == nil || st.GetStatus() != orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW || st.GetParentOrderId() != "" || len(debits) == 0 {
 		return capital.ErrInvalid
 	}
-	value, ok := dec.FromProtoChecked(debits[0].Amount)
-	if !ok || value.Sign() < 0 {
-		return capital.ErrInvalid
+	for i, debit := range debits {
+		if debit == nil || debit.Amount == nil || i > 0 && debits[i-1].CurrencyCode >= debit.CurrencyCode {
+			return capital.ErrInvalid
+		}
+		value, ok := dec.FromProtoChecked(debit.Amount)
+		if !ok || value.Sign() < 0 {
+			return capital.ErrInvalid
+		}
 	}
 	return p.save(ctx, st, expectedVersion, announce, "", func(tx pgx.Tx) error {
-		var version int64
-		if err := tx.QueryRow(ctx, `SELECT version FROM capital_commitments WHERE order_id=$1 AND currency=$2 AND portfolio_id=$3`, st.GetOrderId(), debits[0].CurrencyCode, st.GetPortfolioId()).Scan(&version); err != nil {
+		rows, err := tx.Query(ctx, `SELECT currency FROM capital_commitments WHERE order_id=$1 ORDER BY currency`, st.GetOrderId())
+		if err != nil {
 			return err
 		}
-		return capital.Change(ctx, tx, st.GetPortfolioId(), debits[0].CurrencyCode, st.GetOrderId(), version, dec.Exact(value.RatString()), now, time.Minute)
+		var currencies []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				rows.Close()
+				return err
+			}
+			currencies = append(currencies, c)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if len(currencies) != len(debits) {
+			return capital.ErrInvalid
+		}
+		for i, currency := range currencies {
+			if debits[i].CurrencyCode != currency {
+				return capital.ErrInvalid
+			}
+		}
+		if _, err := fundedSettlement(st, currencies); err != nil {
+			return err
+		}
+		for _, debit := range debits {
+			value, _ := dec.FromProtoChecked(debit.Amount)
+			var version int64
+			if err := tx.QueryRow(ctx, `SELECT version FROM capital_commitments WHERE order_id=$1 AND currency=$2 AND portfolio_id=$3`, st.GetOrderId(), debit.CurrencyCode, st.GetPortfolioId()).Scan(&version); err != nil {
+				return err
+			}
+			if err := capital.Change(ctx, tx, st.GetPortfolioId(), debit.CurrencyCode, st.GetOrderId(), version, dec.Exact(value.RatString()), now, time.Minute); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -187,17 +233,17 @@ func (p *Postgres) observeFundedRecovery(ctx context.Context, tx pgx.Tx, st *ord
 	if len(currencies) == 0 {
 		return nil
 	} // pre-capital order; activation reconciliation owns it
-	if len(currencies) != 1 {
-		return capital.ErrInvalid
+	settlement, err := fundedSettlement(st, currencies)
+	if err != nil {
+		return err
 	}
-	actual := new(big.Rat)
+	actual := make(map[string]*big.Rat)
+	for _, currency := range currencies {
+		actual[currency] = new(big.Rat)
+	}
 	for _, fill := range fills {
 		if fill == nil {
 			return capital.ErrInvalid
-		}
-		fee, err := capitalFee(fill.GetFee(), currencies[0])
-		if err != nil {
-			return err
 		}
 		quantity, ok := dec.FromProtoChecked(fill.GetQuantity())
 		if !ok || quantity.Sign() <= 0 {
@@ -208,19 +254,27 @@ func (p *Postgres) observeFundedRecovery(ctx context.Context, tx pgx.Tx, st *ord
 			if !ok || price.Sign() <= 0 {
 				return capital.ErrInvalid
 			}
-			actual.Add(actual, new(big.Rat).Mul(quantity, price))
+			actual[settlement].Add(actual[settlement], new(big.Rat).Mul(quantity, price))
 		} else if st.GetSide() == orderpb.Side_SIDE_SELL {
-			actual.Add(actual, quantity)
+			actual[settlement].Add(actual[settlement], quantity)
 		} else {
 			return capital.ErrInvalid
 		}
-		actual.Add(actual, fee)
+		if err := addFundedFee(actual, fill.GetFee(), currencies); err != nil {
+			return err
+		}
 	}
-	if err := capital.ObserveExecution(ctx, tx, st.GetPortfolioId(), currencies[0], st.GetOrderId(), dec.Exact(actual.RatString())); err != nil {
-		return err
+	for _, currency := range currencies {
+		if err := capital.ObserveExecution(ctx, tx, st.GetPortfolioId(), currency, st.GetOrderId(), dec.Exact(actual[currency].RatString())); err != nil {
+			return err
+		}
 	}
 	if IsTerminal(st) && st.GetParentOrderId() == "" {
-		return capital.FinishExecution(ctx, tx, st.GetPortfolioId(), currencies[0], st.GetOrderId(), now)
+		for _, currency := range currencies {
+			if err := capital.FinishExecution(ctx, tx, st.GetPortfolioId(), currency, st.GetOrderId(), now); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -258,10 +312,43 @@ func (p *Postgres) CreateFunded(ctx context.Context, st *orderpb.OrderState, ann
 		var err error
 		if st.GetParentOrderId() == "" {
 			err = capital.ReserveMany(ctx, tx, st.GetPortfolioId(), st.GetOrderId(), debits, now, maxAge)
-		} else if len(debits) != 1 || debits[0] == nil || debits[0].Amount == nil {
-			err = capital.ErrInvalid
 		} else {
-			err = capital.RegisterChild(ctx, tx, st.GetPortfolioId(), debits[0].CurrencyCode, st.GetParentOrderId(), st.GetOrderId(), now, maxAge)
+			// The parent's reservation owns EVERY debit currency. Registering
+			// only its settlement leg would leave a later fee in another asset
+			// without a member to attribute the execution or accounting receipt.
+			// RegisterChild does not reserve again; each member shares the owner.
+			parentRows, queryErr := tx.Query(ctx, `SELECT currency FROM capital_commitments WHERE order_id=$1 ORDER BY currency`, st.GetParentOrderId())
+			if queryErr != nil {
+				err = queryErr
+			} else {
+				var parentCurrencies []string
+				for parentRows.Next() {
+					var currency string
+					if scanErr := parentRows.Scan(&currency); scanErr != nil {
+						err = scanErr
+						break
+					}
+					parentCurrencies = append(parentCurrencies, currency)
+				}
+				if err == nil {
+					err = parentRows.Err()
+				}
+				parentRows.Close()
+				if err == nil && len(parentCurrencies) != len(debits) {
+					err = capital.ErrInvalid
+				}
+				if err == nil {
+					for i, currency := range parentCurrencies {
+						if debits[i] == nil || debits[i].Amount == nil || debits[i].CurrencyCode != currency {
+							err = capital.ErrInvalid
+							break
+						}
+						if err = capital.RegisterChild(ctx, tx, st.GetPortfolioId(), currency, st.GetParentOrderId(), st.GetOrderId(), now, maxAge); err != nil {
+							break
+						}
+					}
+				}
+			}
 		}
 		if err != nil {
 			// ReserveMany rolls back its savepoint on refusal. A racing winner
@@ -328,13 +415,41 @@ func sameCapitalDecimal(a, b *commonpb.Decimal) bool {
 // An unexpected same-currency fee is observed as actual liability even when it
 // exceeds the admission bound. A different fee currency needs a separate cash
 // commitment and cannot be silently netted against this one.
-func capitalFee(fee *commonpb.Money, settlement string) (*big.Rat, error) {
+func fundedSettlement(st *orderpb.OrderState, currencies []string) (string, error) {
+	parts := strings.Split(st.GetInstrumentId(), "-")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", capital.ErrInvalid
+	}
+	settlement := parts[1]
+	if st.GetSide() == orderpb.Side_SIDE_SELL {
+		settlement = parts[0]
+	} else if st.GetSide() != orderpb.Side_SIDE_BUY {
+		return "", capital.ErrInvalid
+	}
+	for _, currency := range currencies {
+		if currency == settlement {
+			return settlement, nil
+		}
+	}
+	return "", capital.ErrInvalid
+}
+
+func addFundedFee(actual map[string]*big.Rat, fee *commonpb.Money, currencies []string) error {
 	if fee == nil {
-		return new(big.Rat), nil
+		return nil
 	}
 	value, ok := dec.FromProtoChecked(fee.GetAmount())
-	if !ok || fee.GetCurrencyCode() != settlement {
-		return nil, capital.ErrInvalid
+	if !ok {
+		return capital.ErrInvalid
 	}
-	return value, nil
+	for _, currency := range currencies {
+		if currency == fee.GetCurrencyCode() {
+			if actual[currency] == nil {
+				actual[currency] = new(big.Rat)
+			}
+			actual[currency].Add(actual[currency], value)
+			return nil
+		}
+	}
+	return capital.ErrInvalid
 }

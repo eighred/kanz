@@ -28,22 +28,33 @@ func TestCashHistoryGatewayPreservesPrincipalBoundsAndCachePolicy(t *testing.T) 
 		_, _ = w.Write([]byte(`{"next_revision":"9007199254740994","records":[]}`))
 	}))
 	defer upstream.Close()
-	handler := New(NewMeshBackend(map[Service]string{ServiceAccounting: upstream.URL}, upstream.Client()), Roles{Fund: "treasury"})
-	m := authz.NewMux(authz.Grants{"treasury": {authz.Fund}, "trader": {authz.Trade}, "analyst": {authz.Read}}, nil)
+	handler := New(NewMeshBackend(map[Service]string{ServiceAccounting: upstream.URL}, upstream.Client()), Roles{Fund: "treasury", CashHistory: "oms-history"})
+	m := authz.NewMux(authz.Grants{"treasury": {authz.Fund, authz.CashHistory}, "oms-history": {authz.CashHistory}, "trader": {authz.Trade}, "analyst": {authz.Read}}, nil)
 	handler.Routes(m)
-	for _, role := range []string{"trader", "analyst", "treasury"} {
+	for _, role := range []string{"trader", "analyst", "treasury", "oms-history"} {
 		r := httptest.NewRequest(http.MethodGet, "/v1/portfolios/PF/cash-commits?currency=USD&after=9007199254740993&through=9007199254740994&limit=2", nil)
 		r = r.WithContext(middleware.WithPrincipal(r.Context(), &middleware.Principal{Subject: "operator", Tenant: "tenant", Roles: []string{role}, Portfolios: []string{"PF"}}))
 		w := httptest.NewRecorder()
 		m.ServeHTTP(w, r)
-		if role != "treasury" {
+		if role != "treasury" && role != "oms-history" {
 			if w.Code != 403 || calls.Load() != 0 {
 				t.Fatalf("role %s reached financial replay: status=%d calls=%d", role, w.Code, calls.Load())
 			}
 			continue
 		}
-		if w.Code != 200 || calls.Load() != 1 || w.Header().Get("Cache-Control") != "private, no-store" || w.Header().Get("X-Internal-Only") != "" || w.Body.String() != `{"next_revision":"9007199254740994","records":[]}` {
+		wantCalls := int32(1)
+		if role == "oms-history" {
+			wantCalls = 2
+		}
+		if w.Code != 200 || calls.Load() != wantCalls || w.Header().Get("Cache-Control") != "private, no-store" || w.Header().Get("X-Internal-Only") != "" || w.Body.String() != `{"next_revision":"9007199254740994","records":[]}` {
 			t.Fatalf("replay response changed: status=%d headers=%v body=%s", w.Code, w.Header(), w.Body.String())
 		}
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/portfolios/PF/cash-movements", nil)
+	r = r.WithContext(middleware.WithPrincipal(r.Context(), &middleware.Principal{Subject: "oms", Tenant: "tenant", Roles: []string{"oms-history"}, Portfolios: []string{"PF"}}))
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden || calls.Load() != 2 {
+		t.Fatalf("history-only workload gained cash-write authority: status=%d calls=%d", w.Code, calls.Load())
 	}
 }

@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -373,13 +374,47 @@ func run() int {
 		Write:      gatewayWriteTimeout,
 		Idle:       gatewayIdleTimeout,
 	})
+	// Both listeners share one fatal latch; losing the private evidence listener
+	// must fail the rollout rather than leave a healthy-looking gateway behind.
+	fatal := lifecycle.NewFatal(stop)
+	var historyServer *http.Server
+	if cfg.HistoryListen != "" {
+		// This is a separate private listener because the public ingress terminates
+		// TLS outside the pod. OMS needs end-to-end confidentiality for its bearer
+		// and retained financial evidence, with its own SVID verified at the peer.
+		source, err := transport.NewSource(ctx, cfg.SPIFFESocket)
+		if err != nil {
+			logger.Error("cash-history mTLS source unavailable", "err", err)
+			return 2
+		}
+		defer func() { _ = source.Close() }()
+		omsID, err := spiffeid.FromString("spiffe://kanz.internal/ns/kanz-services/sa/oms")
+		if err != nil {
+			logger.Error("cash-history OMS identity invalid", "err", err)
+			return 2
+		}
+		listener, err := net.Listen("tcp", cfg.HistoryListen)
+		if err != nil {
+			logger.Error("cash-history listener unavailable", "err", err)
+			return 2
+		}
+		historyServer = httpserver.New(cfg.HistoryListen, onlyCashHistory(router), httpserver.Standard())
+		privateTLS := transport.ServerTLSConfig(source, transport.AuthorizeServices(omsID))
+		tlsListener := tls.NewListener(listener, privateTLS)
+		defer func() { _ = tlsListener.Close() }()
+		go func() {
+			if err := historyServer.Serve(tlsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("cash-history mTLS server failed", "err", err)
+				fatal.Raise(err)
+			}
+		}()
+	}
 
-	// The serve loop is the only thing that can die AFTER startup has completed
+	// Either serve loop can die AFTER startup has completed
 	// (rule 6, #266): lifecycle.Fatal lets the goroutine that observes the
 	// failure hand it to run() without an os.Exit of its own, and stop()
 	// cancelling ctx is what makes <-ctx.Done() below the join that guarantees
 	// the write happens-before the read.
-	fatal := lifecycle.NewFatal(stop)
 
 	// READINESS MEANS "THIS GATEWAY CAN AUTHENTICATE SOMEBODY", NOT "THE PORT IS
 	// OPEN" (#457).
@@ -445,8 +480,26 @@ func run() int {
 	if err := srv.Shutdown(sctx); err != nil {
 		logger.Error("http shutdown error", "err", err)
 	}
+	if historyServer != nil {
+		if err := historyServer.Shutdown(sctx); err != nil {
+			logger.Error("cash-history mTLS shutdown error", "err", err)
+		}
+	}
 
 	return fatal.Code()
+}
+
+// onlyCashHistory makes the private mTLS listener a one-route surface even if
+// future gateway grants or routes change. The ordinary router still performs
+// bearer authentication, tenant/portfolio projection and capability checks.
+func onlyCashHistory(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/portfolios/") || !strings.HasSuffix(r.URL.Path, "/cash-commits") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // buildBus dials the spine and returns the producer the gateway publishes
@@ -817,7 +870,7 @@ func buildProxy(ctx context.Context, cfg config.Config, logger *slog.Logger) (*p
 // discoverable only by running a gateway with no upstreams and noticing a 404
 // where a 503 belonged.
 func proxyRoles(cfg config.Config) proxy.Roles {
-	return proxy.Roles{Fund: cfg.FundRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole, Audit: cfg.AuditRole}
+	return proxy.Roles{Fund: cfg.FundRole, CashHistory: cfg.CashHistoryRole, Approve: cfg.ApproveRole, Mandate: cfg.MandateRole, Audit: cfg.AuditRole}
 }
 
 // issuerProbeTimeout bounds one attempt to reach the issuer. Generous, because
@@ -1091,7 +1144,10 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	// It carries Read for the same reason the two above do, and Read is not a
 	// widening: every caller who reaches /v1 at all already holds the baseline role.
 	if cfg.FundRole != "" {
-		grants[cfg.FundRole] = []authz.Capability{authz.Read, authz.Fund}
+		grants[cfg.FundRole] = []authz.Capability{authz.Read, authz.Fund, authz.CashHistory}
+	}
+	if cfg.CashHistoryRole != "" {
+		grants[cfg.CashHistoryRole] = []authz.Capability{authz.CashHistory}
 	}
 	// THE APPROVER GIVES THE SECOND SIGNATURE (#539, #410 act one) on an act
 	// somebody else proposed. Conditional for the same reason the fund role is —

@@ -238,9 +238,8 @@ func (p *Postgres) save(ctx context.Context, st *orderpb.OrderState, expectedVer
 }
 
 // observeFundedFill runs after the execution claim and before the order lock.
-// The current funded route is the explicit zero-fee physical simulator. A fee,
-// an extra currency or malformed fill cannot be silently charged against an
-// unrelated reservation. Real venue terms need their own durable model.
+// The catalogue-verified canonical pair identifies the physical settlement leg.
+// Each fee currency must have its own member under the same reservation owner.
 func (p *Postgres) observeFundedFill(ctx context.Context, tx pgx.Tx, st *orderpb.OrderState, fill *orderpb.Fill) error {
 	rows, err := tx.Query(ctx, `SELECT currency FROM capital_members WHERE order_id=$1 ORDER BY currency`, st.GetOrderId())
 	if err != nil {
@@ -263,10 +262,10 @@ func (p *Postgres) observeFundedFill(ctx context.Context, tx pgx.Tx, st *orderpb
 	if len(currencies) == 0 {
 		return nil
 	} // legacy order; activation must resolve it before new cash admission
-	if len(currencies) != 1 || fill == nil {
+	if fill == nil {
 		return capital.ErrInvalid
 	}
-	fee, err := capitalFee(fill.GetFee(), currencies[0])
+	settlement, err := fundedSettlement(st, currencies)
 	if err != nil {
 		return err
 	}
@@ -284,18 +283,28 @@ func (p *Postgres) observeFundedFill(ctx context.Context, tx pgx.Tx, st *orderpb
 	} else if st.GetSide() != orderpb.Side_SIDE_SELL {
 		return capital.ErrInvalid
 	}
-	debit = new(big.Rat).Add(debit, fee)
-	if err := capital.AddExecution(ctx, tx, st.GetPortfolioId(), currencies[0], st.GetOrderId(), dec.Exact(debit.RatString())); err != nil {
+	actual := map[string]*big.Rat{settlement: debit}
+	if err := addFundedFee(actual, fill.GetFee(), currencies); err != nil {
 		return err
 	}
+	for _, currency := range currencies {
+		value := actual[currency]
+		if value == nil {
+			continue
+		}
+		if err := capital.AddExecution(ctx, tx, st.GetPortfolioId(), currency, st.GetOrderId(), dec.Exact(value.RatString())); err != nil {
+			return err
+		}
+	}
 	if st.GetStatus() == orderpb.OrderStatus_ORDER_STATUS_FILLED && st.GetParentOrderId() == "" {
-		if st.GetAsOf() == nil {
+		if st.GetAsOf() == nil || st.GetAsOf().CheckValid() != nil {
 			return capital.ErrInvalid
 		}
-		if err := st.GetAsOf().CheckValid(); err != nil {
-			return capital.ErrInvalid
+		for _, currency := range currencies {
+			if err := capital.FinishExecution(ctx, tx, st.GetPortfolioId(), currency, st.GetOrderId(), st.GetAsOf().AsTime()); err != nil {
+				return err
+			}
 		}
-		return capital.FinishExecution(ctx, tx, st.GetPortfolioId(), currencies[0], st.GetOrderId(), st.GetAsOf().AsTime())
 	}
 	return nil
 }

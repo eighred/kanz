@@ -3,6 +3,8 @@ package okx
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 )
 
@@ -404,6 +407,49 @@ func (c *okxREST) tickerPrice(ctx context.Context, instID string) (string, error
 		return "", &APIError{Code: atoiSafe(out.Code), Msg: "ticker unavailable"}
 	}
 	return out.Data[0].Last, nil
+}
+
+// exchangeInstrument reads OKX's public instrument catalogue for this spot
+// symbol. The adapter refuses to claim a settlement currency from its local map.
+func (c *okxREST) exchangeInstrument(ctx context.Context, instID string) (execution.ExchangeInstrument, error) {
+	if !c.buckets.allow(familyUnverified, 1) {
+		c.onThrottle()
+		return execution.ExchangeInstrument{}, ErrRateLimited
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/api/v5/public/instruments?instType=SPOT&instId="+url.QueryEscape(instID), nil)
+	if err != nil {
+		return execution.ExchangeInstrument{}, err
+	}
+	raw, err := c.do(req)
+	if err != nil {
+		return execution.ExchangeInstrument{}, err
+	}
+	var out struct {
+		Code string `json:"code"`
+		Msg  string `json:"msg"`
+		Data []struct {
+			InstID   string `json:"instId"`
+			InstType string `json:"instType"`
+			Base     string `json:"baseCcy"`
+			Quote    string `json:"quoteCcy"`
+			State    string `json:"state"`
+			GroupID  string `json:"groupId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return execution.ExchangeInstrument{}, fmt.Errorf("okx: decode instruments: %w", err)
+	}
+	if out.Code != "0" {
+		return execution.ExchangeInstrument{}, &APIError{Code: atoiSafe(out.Code), Msg: out.Msg}
+	}
+	if len(out.Data) != 1 || out.Data[0].InstID != instID || out.Data[0].InstType != "SPOT" {
+		return execution.ExchangeInstrument{}, fmt.Errorf("okx: instruments did not identify exactly spot %q", instID)
+	}
+	in := out.Data[0]
+	digest := sha256.Sum256(raw)
+	return execution.ExchangeInstrument{Symbol: in.InstID, Base: in.Base, Quote: in.Quote, State: in.State, FeeGroup: in.GroupID,
+		Digest: hex.EncodeToString(digest[:]), ObservedAtUnixMillis: c.now().UnixMilli()}, nil
 }
 
 // do executes a request and returns the body for any <500 status.

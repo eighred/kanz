@@ -2,9 +2,11 @@ package okx
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 	"github.com/eighred/kanz/internal/venuemargin"
@@ -56,6 +58,21 @@ func (c *OKXConnector) Venue() Venue { return c.venue }
 // startup, and refuses to serve orders if OKX names a different account than this
 // deployment claims to be.
 func (c *OKXConnector) Exchange() accountproof.Exchange { return c.rest }
+
+// VerifyCatalogue binds every configured pair to OKX's actual settlement
+// assets before this adapter can serve orders.
+func (c *OKXConnector) VerifyCatalogue(ctx context.Context) error {
+	configured := StaticSymbolMap(c.settings.Symbols).Instruments()
+	actual := make([]execution.ExchangeInstrument, 0, len(configured))
+	for _, in := range configured {
+		entry, err := c.rest.exchangeInstrument(ctx, in.VenueSymbol)
+		if err != nil {
+			return fmt.Errorf("okx catalogue %s: %w", in.VenueSymbol, err)
+		}
+		actual = append(actual, entry)
+	}
+	return execution.CheckExchangeCatalogue(configured, actual, "live")
+}
 
 // MarginSource is the seam that reads OKX's OWN margin state for this adapter's
 // account (#408, control 1) — satisfied by the same signed REST client the

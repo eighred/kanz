@@ -18,7 +18,10 @@ import (
 type Config struct {
 	MFARequired bool
 	Listen      string
-	LogLevel    slog.Level
+	// HistoryListen serves the same authenticated routes on a private mTLS port.
+	// Its peer allow-list admits OMS only; the narrow bearer role is still checked.
+	HistoryListen string
+	LogLevel      slog.Level
 
 	// Source is the gateway's service identity (logs, metrics, spans).
 	Source string
@@ -262,6 +265,9 @@ type Config struct {
 	// other direction: once AccountingAddr IS set the role becomes REQUIRED, so the
 	// funding surface cannot be exposed without saying who may reach it.
 	FundRole string
+	// CashHistoryRole grants only the retained cash-commit read. It is intended
+	// for the OMS workload token and must never grant Fund's cash-write routes.
+	CashHistoryRole string
 	// ApproveRole is the role carrying authz.Approve — the second signature on an
 	// act somebody else proposed (#539, #410 act one). EMPTY ⇒ the three override
 	// routes are not registered, and datamaster's maker-checker workflow is
@@ -363,6 +369,7 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		Listen:             env.Or("API_GATEWAY_LISTEN", ":8080"),
+		HistoryListen:      os.Getenv("API_GATEWAY_HISTORY_LISTEN"),
 		LogLevel:           env.ParseLevelOr(env.Or("API_GATEWAY_LOG_LEVEL", "info"), slog.LevelInfo),
 		Source:             env.Or("API_GATEWAY_SOURCE", "api-gateway"),
 		OTLPEndpoint:       os.Getenv("API_GATEWAY_OTLP_ENDPOINT"),
@@ -400,6 +407,7 @@ func Load() (Config, error) {
 		AccountingAddr:     os.Getenv("API_GATEWAY_ACCOUNTING_ADDR"),
 		PerTenantUpstreams: env.SplitList(os.Getenv("API_GATEWAY_PER_TENANT_UPSTREAMS")),
 		FundRole:           os.Getenv("API_GATEWAY_FUND_ROLE"),
+		CashHistoryRole:    os.Getenv("API_GATEWAY_CASH_HISTORY_ROLE"),
 		ApproveRole:        os.Getenv("API_GATEWAY_APPROVE_ROLE"),
 		ComplianceAddr:     os.Getenv("API_GATEWAY_COMPLIANCE_ADDR"),
 		MandateRole:        os.Getenv("API_GATEWAY_MANDATE_ROLE"),
@@ -438,7 +446,10 @@ func Load() (Config, error) {
 // and it is enforced here the same way — by refusing to run, not by logging a
 // warning that scrolls past.
 func (c Config) validateAuth() error {
-	for _, role := range []string{c.RequiredRole, c.TradeRole, c.OperatorRole, c.FundRole, c.ApproveRole, c.MandateRole, c.AuditRole} {
+	if c.HistoryListen != "" && c.SPIFFESocket == "" {
+		return errors.New("api-gateway: API_GATEWAY_HISTORY_LISTEN requires API_GATEWAY_SPIFFE_SOCKET for mTLS")
+	}
+	for _, role := range []string{c.RequiredRole, c.TradeRole, c.OperatorRole, c.FundRole, c.CashHistoryRole, c.ApproveRole, c.MandateRole, c.AuditRole} {
 		if role == identity.AdminRole {
 			return errors.New("api-gateway: kanz-identity-admin is reserved for identity administration, not gateway capabilities")
 		}
@@ -541,12 +552,20 @@ func (c Config) validateAuth() error {
 	// exists got a 403. A capability granted to nobody is not a strict control, it
 	// is an outage of that capability wearing one — and from outside the two are
 	// identical.
-	if c.AccountingAddr != "" && c.FundRole == "" {
+	if c.AccountingAddr != "" && c.FundRole == "" && c.CashHistoryRole == "" {
 		return errors.New("api-gateway: API_GATEWAY_ACCOUNTING_ADDR is set but API_GATEWAY_FUND_ROLE " +
-			"is not. That route posts subscriptions, redemptions and fees to the book of record, and " +
-			"with no role carrying authz.Fund it would answer 403 to EVERY principal that exists — " +
-			"which reads as a working control and is a total outage of the capability (#535). Name " +
-			"the funder, or unset API_GATEWAY_ACCOUNTING_ADDR and the route is not registered at all")
+			"and API_GATEWAY_CASH_HISTORY_ROLE are both unset. No accounting route would be reachable; " +
+			"name a narrow history reader, a funder, or unset API_GATEWAY_ACCOUNTING_ADDR")
+	}
+	if c.CashHistoryRole != "" {
+		if c.AccountingAddr == "" {
+			return errors.New("api-gateway: API_GATEWAY_CASH_HISTORY_ROLE requires API_GATEWAY_ACCOUNTING_ADDR")
+		}
+		for _, other := range []string{c.RequiredRole, c.TradeRole, c.OperatorRole, c.FundRole, c.ApproveRole, c.MandateRole, c.AuditRole} {
+			if other != "" && c.CashHistoryRole == other {
+				return errors.New("api-gateway: API_GATEWAY_CASH_HISTORY_ROLE must be a dedicated read-only workload role")
+			}
+		}
 	}
 	// The collisions, on the same argument as the operator role's: a shared name
 	// silently merges two authorities that exist to be separate. THE TRADE ONE IS

@@ -713,7 +713,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	}
 	var subs []sub
 	if durable, ok := store.(*order.Postgres); ok {
-		history, err := capitalCashHistory(cfg)
+		history, err := capitalCashHistory(cfg, mesh.Source)
 		if err != nil {
 			return false, err
 		}
