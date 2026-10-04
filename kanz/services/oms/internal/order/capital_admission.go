@@ -309,6 +309,27 @@ func (p *Postgres) CreateFunded(ctx context.Context, st *orderpb.OrderState, ann
 		if err := armCapitalAdmission(ctx, tx); err != nil {
 			return err
 		}
+		if st.GetParentOrderId() != "" {
+			// A terminal parent must be reported as stopped even if its original
+			// allocation is already exhausted. This read does not lock: the
+			// authoritative parent-row lock in create still arbitrates a racing
+			// cancellation after the currency locks have been acquired.
+			var blob []byte
+			err := tx.QueryRow(ctx, `SELECT state FROM orders WHERE order_id=$1`, st.GetParentOrderId()).Scan(&blob)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrParentStopped
+			}
+			if err != nil {
+				return err
+			}
+			parent, err := unmarshalState(blob, st.GetParentOrderId())
+			if err != nil {
+				return err
+			}
+			if err := checkWorkingParent(parent, st); err != nil {
+				return err
+			}
+		}
 		var err error
 		if st.GetParentOrderId() == "" {
 			err = capital.ReserveMany(ctx, tx, st.GetPortfolioId(), st.GetOrderId(), debits, now, maxAge)
