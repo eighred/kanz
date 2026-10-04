@@ -2,6 +2,7 @@ package binance
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,15 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCommissionRateRejectsUnboundedExchangeNumber(t *testing.T) {
+	for _, raw := range []string{"1e2000000000", `"` + strings.Repeat("9", 401) + `"`} {
+		var rate commissionRate
+		if err := json.Unmarshal([]byte(raw), &rate); err == nil {
+			t.Fatalf("accepted unbounded commission rate %q", raw[:min(len(raw), 32)])
+		}
+	}
+}
 
 func TestBinanceCapitalEvidenceReadsSignedCurrentCommissionAndExchangeSettlement(t *testing.T) {
 	quote := "USDT"

@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"net/url"
 
+	"github.com/eighred/kanz/internal/dec"
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 )
 
@@ -33,8 +33,8 @@ func (r *commissionRate) UnmarshalJSON(raw []byte) error {
 	} else {
 		value = string(raw)
 	}
-	parsed, ok := new(big.Rat).SetString(value)
-	if !ok || parsed.Sign() < 0 {
+	parsed, err := dec.Exact(value).Rat()
+	if err != nil || parsed.Sign() < 0 {
 		return fmt.Errorf("binance: invalid commission rate")
 	}
 	*r = commissionRate(value)
