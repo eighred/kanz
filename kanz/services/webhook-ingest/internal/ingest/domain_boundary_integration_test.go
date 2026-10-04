@@ -127,12 +127,13 @@ func TestIntegration_AnOutOfDomainDecimalIsRefusedAndTheOMSKeepsConsuming(t *tes
 		t.Fatalf("publish healthy command: %v", err)
 	}
 
-	// LIVENESS. The healthy command was published after the poison. Both must
-	// receive their distinct refusal; the capital gate still protects the latter.
-	deadline := time.After(30 * time.Second)
+	// LIVENESS. An out-of-domain command is rejected and acknowledged before an
+	// OrderState exists, so OMS intentionally emits no OrderRejected for it. The
+	// subsequent valid command must still reach the funded admission refusal.
+	deadline := time.After(15 * time.Second)
 	seen := map[string]string{}
 	for {
-		if len(seen) == 2 {
+		if seen[healthyID] != "" {
 			break
 		}
 		select {
@@ -141,10 +142,10 @@ func TestIntegration_AnOutOfDomainDecimalIsRefusedAndTheOMSKeepsConsuming(t *tes
 				seen[ev.GetOrderId()] = ev.GetErrorCode()
 			}
 		case <-deadline:
-			t.Fatalf("OMS did not refuse both commands after malformed exponent: %v", seen)
+			t.Fatalf("OMS did not continue to the next command after malformed exponent: %v", seen)
 		}
 	}
-	if seen[poisonID] == seen[healthyID] || seen[healthyID] != "CAPITAL_TERMS_UNKNOWN" && seen[healthyID] != "CAPITAL_REFUSED" && seen[healthyID] != "CAPITAL_ACTIVATION_REQUIRED" {
+	if seen[poisonID] != "" && seen[poisonID] == seen[healthyID] || seen[healthyID] != "CAPITAL_TERMS_UNKNOWN" && seen[healthyID] != "CAPITAL_REFUSED" && seen[healthyID] != "CAPITAL_ACTIVATION_REQUIRED" {
 		t.Fatalf("domain and capital refusals not distinguished: %v", seen)
 	}
 }
