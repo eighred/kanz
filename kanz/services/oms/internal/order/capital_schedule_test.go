@@ -11,6 +11,7 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/services/oms/internal/capital"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestPostgresScheduledChildrenUseOneParentCommitment(t *testing.T) {
@@ -59,9 +60,9 @@ func TestPostgresScheduledChildrenUseOneParentCommitment(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT reserved FROM capital_balances WHERE portfolio_id='fund' AND currency='USD'`).Scan(&reserved); err != nil || reserved != "100" {
 		t.Fatalf("double reservation=%s err=%v", reserved, err)
 	}
-	terminalParent := *parent
+	terminalParent := proto.Clone(parent).(*orderpb.OrderState)
 	terminalParent.Status = orderpb.OrderStatus_ORDER_STATUS_CANCELLED
-	if err := store.SaveFundedTerminal(ctx, &terminalParent, 0, nil, now); !errors.Is(err, ErrParentStopped) {
+	if err := store.SaveFundedTerminal(ctx, terminalParent, 0, nil, now); !errors.Is(err, ErrParentStopped) {
 		t.Fatalf("parent released while children worked: %v", err)
 	}
 	for _, item := range []struct {
@@ -74,7 +75,7 @@ func TestPostgresScheduledChildrenUseOneParentCommitment(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.SaveFundedTerminal(ctx, &terminalParent, 0, nil, now); err != nil {
+	if err := store.SaveFundedTerminal(ctx, terminalParent, 0, nil, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CreateFunded(ctx, child("late", 1), nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(10, 0)}}, now, time.Minute); !errors.Is(err, ErrParentStopped) {
@@ -145,9 +146,9 @@ func TestPostgresScheduledChildCannotCrossParentCancellation(t *testing.T) {
 	})
 	wg.Go(func() {
 		<-start
-		terminalParent := *parent
+		terminalParent := proto.Clone(parent).(*orderpb.OrderState)
 		terminalParent.Status = orderpb.OrderStatus_ORDER_STATUS_CANCELLED
-		results <- NewPostgres(pool).SaveFundedTerminal(ctx, &terminalParent, 0, nil, now)
+		results <- NewPostgres(pool).SaveFundedTerminal(ctx, terminalParent, 0, nil, now)
 	})
 	close(start)
 	wg.Wait()
