@@ -18,7 +18,7 @@ func TestPostgresConfirmedFundedCancelReleasesOnlyUnexecutedCash(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewPostgres(pool)
-	st := &orderpb.OrderState{OrderId: "cancel", PortfolioId: "fund", Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW}
+	st := &orderpb.OrderState{OrderId: "cancel", PortfolioId: "fund", InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY, Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW}
 	if err := store.CreateFunded(ctx, st, nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(80, 0)}}, now, time.Minute); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestPostgresConfirmedFundedRejectionAndExpiryReleaseCash(t *testing.T) {
 				t.Fatal(err)
 			}
 			store := NewPostgres(pool)
-			st := &orderpb.OrderState{OrderId: "terminal", PortfolioId: "fund", Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW}
+			st := &orderpb.OrderState{OrderId: "terminal", PortfolioId: "fund", InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY, Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW}
 			if err := store.CreateFunded(ctx, st, nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(80, 0)}}, now, time.Minute); err != nil {
 				t.Fatal(err)
 			}

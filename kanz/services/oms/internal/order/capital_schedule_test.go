@@ -59,15 +59,22 @@ func TestPostgresScheduledChildrenUseOneParentCommitment(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT reserved FROM capital_balances WHERE portfolio_id='fund' AND currency='USD'`).Scan(&reserved); err != nil || reserved != "100" {
 		t.Fatalf("double reservation=%s err=%v", reserved, err)
 	}
-	if err := store.SaveFundedTerminal(ctx, &orderpb.OrderState{OrderId: "parent", PortfolioId: "fund", Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED}, 0, nil, now); !errors.Is(err, ErrParentStopped) {
+	terminalParent := *parent
+	terminalParent.Status = orderpb.OrderStatus_ORDER_STATUS_CANCELLED
+	if err := store.SaveFundedTerminal(ctx, &terminalParent, 0, nil, now); !errors.Is(err, ErrParentStopped) {
 		t.Fatalf("parent released while children worked: %v", err)
 	}
-	for _, id := range []string{"first", "second"} {
-		if err := store.SaveFundedTerminal(ctx, &orderpb.OrderState{OrderId: id, ParentOrderId: "parent", PortfolioId: "fund", Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED}, 0, nil, now); err != nil {
+	for _, item := range []struct {
+		id       string
+		quantity int64
+	}{{"first", 6}, {"second", 4}} {
+		terminalChild := child(item.id, item.quantity)
+		terminalChild.Status = orderpb.OrderStatus_ORDER_STATUS_CANCELLED
+		if err := store.SaveFundedTerminal(ctx, terminalChild, 0, nil, now); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := store.SaveFundedTerminal(ctx, &orderpb.OrderState{OrderId: "parent", PortfolioId: "fund", Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED}, 0, nil, now); err != nil {
+	if err := store.SaveFundedTerminal(ctx, &terminalParent, 0, nil, now); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CreateFunded(ctx, child("late", 1), nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(10, 0)}}, now, time.Minute); !errors.Is(err, ErrParentStopped) {
@@ -138,8 +145,9 @@ func TestPostgresScheduledChildCannotCrossParentCancellation(t *testing.T) {
 	})
 	wg.Go(func() {
 		<-start
-		results <- NewPostgres(pool).SaveFundedTerminal(ctx, &orderpb.OrderState{OrderId: "parent", PortfolioId: "fund",
-			Status: orderpb.OrderStatus_ORDER_STATUS_CANCELLED}, 0, nil, now)
+		terminalParent := *parent
+		terminalParent.Status = orderpb.OrderStatus_ORDER_STATUS_CANCELLED
+		results <- NewPostgres(pool).SaveFundedTerminal(ctx, &terminalParent, 0, nil, now)
 	})
 	close(start)
 	wg.Wait()
