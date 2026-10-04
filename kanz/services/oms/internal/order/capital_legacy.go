@@ -51,7 +51,7 @@ func (p *Postgres) ReconcileLegacy(ctx context.Context, orderID string, authorit
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(terms.Source) == "" || strings.TrimSpace(terms.Version) == "" || strings.TrimSpace(terms.ApprovedBy) == "" || len(terms.Required) == 0 || len(terms.Required) > 32 {
+	if strings.TrimSpace(terms.Source) == "" || len(terms.Source) > 256 || strings.TrimSpace(terms.Version) == "" || len(terms.Version) > 256 || strings.TrimSpace(terms.ApprovedBy) == "" || len(terms.ApprovedBy) > 256 || len(terms.Required) == 0 || len(terms.Required) > 32 {
 		return capital.ErrInvalid
 	}
 	currencies := make([]string, len(terms.Required))

@@ -34,6 +34,9 @@ func capitalCashHistory(cfg config.Config, source transport.Source) (capital.His
 		return nil, err
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
+	// A proxy would see the bearer or could redirect the service connection;
+	// this is an in-cluster SVID-authorized hop, not general outbound HTTP.
+	tr.Proxy = nil
 	tr.TLSClientConfig = transport.ClientTLSConfig(source, transport.AuthorizeServices(gatewayID))
 	tr.MaxConnsPerHost = 8
 	tr.MaxIdleConnsPerHost = 8
