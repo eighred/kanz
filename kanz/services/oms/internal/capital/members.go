@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -99,4 +100,70 @@ func RegisterChild(ctx context.Context, tx pgx.Tx, portfolio, currency, owner, c
 		return ErrConflict
 	}
 	return nil
+}
+
+// AllocateChild registers ownership and atomically consumes this child's
+// worst-case debit from the parent's ORIGINAL approved allocation envelope.
+// required_debit can rise after an over-budget fill; it must never silently
+// become new authority for yet-uncreated scheduled children.
+func AllocateChild(ctx context.Context, tx pgx.Tx, portfolio, currency, owner, child string, debit dec.Exact, now time.Time, maxAge time.Duration) error {
+	allocation, err := amount(string(debit), true)
+	if err != nil {
+		return err
+	}
+	if !validID(portfolio) || !validID(currency) || !validID(owner) || !validID(child) || owner == child || now.IsZero() || maxAge <= 0 {
+		return ErrInvalid
+	}
+	faulted, err := sourceFault(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if faulted {
+		return ErrUnknown
+	}
+	b, err := lock(ctx, tx, portfolio, currency)
+	if err != nil {
+		return err
+	}
+	if !cashKnown(b, now, maxAge) {
+		return ErrUnknown
+	}
+	if b.reserved.Cmp(b.total) > 0 {
+		return ErrInsufficient
+	}
+	m, err := loadMember(ctx, tx, portfolio, currency, owner)
+	if err != nil {
+		return err
+	}
+	if m.owner != owner {
+		return ErrInvalid
+	}
+	var limitText, allocatedText *string
+	if err := tx.QueryRow(ctx, `SELECT admission_debit,allocated_debit FROM capital_commitments WHERE order_id=$1 AND currency=$2 AND portfolio_id=$3 FOR UPDATE`, owner, currency, portfolio).Scan(&limitText, &allocatedText); err != nil {
+		return err
+	}
+	if limitText == nil || allocatedText == nil {
+		return ErrUnknown
+	}
+	limit, err := amount(*limitText, true)
+	if err != nil {
+		return err
+	}
+	allocated, err := amount(*allocatedText, true)
+	if err != nil {
+		return err
+	}
+	next := new(big.Rat).Add(allocated, allocation)
+	if next.Cmp(limit) > 0 {
+		return ErrInvalid
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id,currency,allocated_debit) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, child, owner, currency, allocation.RatString())
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	_, err = tx.Exec(ctx, `UPDATE capital_commitments SET allocated_debit=$2 WHERE order_id=$1 AND currency=$3`, owner, next.RatString(), currency)
+	return err
 }

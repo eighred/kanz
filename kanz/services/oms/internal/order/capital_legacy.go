@@ -189,12 +189,12 @@ func (p *Postgres) ReconcileLegacy(ctx context.Context, orderID string, authorit
 			if IsTerminal(st) {
 				amount = actual[currency]
 			}
-			if err := capital.ImportLegacy(ctx, tx, st.GetPortfolioId(), currency, orderID, dec.Exact(amount.RatString()), dec.Exact(actual[currency].RatString())); err != nil {
+			if err := capital.ImportLegacy(ctx, tx, st.GetPortfolioId(), currency, orderID, dec.Exact(amount.RatString()), dec.Exact(actual[currency].RatString()), dec.Exact(required[currency].RatString())); err != nil {
 				return err
 			}
 		}
 	} else {
-		if err := p.reconcileLegacyChild(ctx, tx, st, currencies, actual); err != nil {
+		if err := p.reconcileLegacyChild(ctx, tx, st, currencies, required, actual); err != nil {
 			return err
 		}
 	}
@@ -204,7 +204,7 @@ func (p *Postgres) ReconcileLegacy(ctx context.Context, orderID string, authorit
 	return tx.Commit(ctx)
 }
 
-func (p *Postgres) reconcileLegacyChild(ctx context.Context, tx pgx.Tx, st *orderpb.OrderState, currencies []string, actual map[string]*big.Rat) error {
+func (p *Postgres) reconcileLegacyChild(ctx context.Context, tx pgx.Tx, st *orderpb.OrderState, currencies []string, required, actual map[string]*big.Rat) error {
 	var parentBytes []byte
 	if err := tx.QueryRow(ctx, `SELECT state FROM orders WHERE order_id=$1`, st.GetParentOrderId()).Scan(&parentBytes); err != nil {
 		return err
@@ -243,7 +243,7 @@ func (p *Postgres) reconcileLegacyChild(ctx context.Context, tx pgx.Tx, st *orde
 		}
 	}
 	for _, currency := range currencies {
-		if err := capital.ImportLegacyChild(ctx, tx, st.GetPortfolioId(), currency, st.GetParentOrderId(), st.GetOrderId()); err != nil {
+		if err := capital.ImportLegacyChild(ctx, tx, st.GetPortfolioId(), currency, st.GetParentOrderId(), st.GetOrderId(), dec.Exact(required[currency].RatString())); err != nil {
 			return err
 		}
 		if err := capital.ObserveExecution(ctx, tx, st.GetPortfolioId(), currency, st.GetOrderId(), dec.Exact(actual[currency].RatString())); err != nil {

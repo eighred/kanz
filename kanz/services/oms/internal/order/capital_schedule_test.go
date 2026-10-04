@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eighred/kanz/internal/dec"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/services/oms/internal/capital"
@@ -71,6 +72,44 @@ func TestPostgresScheduledChildrenUseOneParentCommitment(t *testing.T) {
 	}
 	if err := store.CreateFunded(ctx, child("late", 1), nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(10, 0)}}, now, time.Minute); !errors.Is(err, ErrParentStopped) {
 		t.Fatalf("late child=%v", err)
+	}
+}
+
+func TestScheduledFeeCurrencyCannotOutrunParentAuthority(t *testing.T) {
+	pool := newPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, item := range []struct{ currency, total string }{{"BNB", "3"}, {"USD", "100"}} {
+		if err := capital.Apply(ctx, pool, capital.CashEvent{PortfolioID: "fund", Currency: item.currency, Revision: 1, Total: dec.Exact(item.total), Complete: true, ObservedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := NewPostgres(pool)
+	parent := &orderpb.OrderState{OrderId: "fee-parent", PortfolioId: "fund", InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY,
+		OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT, Status: orderpb.OrderStatus_ORDER_STATUS_WORKING_SCHEDULED,
+		OrderedQuantity: d(1, 0), LimitPrice: d(100, 0), ExecutionSchedule: &orderpb.ExecutionSchedule{}}
+	if err := store.CreateFunded(ctx, parent, nil, []*commonpb.Money{{CurrencyCode: "BNB", Amount: d(2, 0)}, {CurrencyCode: "USD", Amount: d(100, 0)}}, now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	child := func(id string, quantity int64) *orderpb.OrderState {
+		return &orderpb.OrderState{OrderId: id, ParentOrderId: parent.OrderId, PortfolioId: "fund", InstrumentId: parent.InstrumentId, Side: parent.Side,
+			OrderType: parent.OrderType, Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW, OrderedQuantity: d(quantity, -1), LimitPrice: parent.LimitPrice}
+	}
+	if err := store.CreateFunded(ctx, child("fee-one", 6), nil, []*commonpb.Money{{CurrencyCode: "BNB", Amount: d(15, -1)}, {CurrencyCode: "USD", Amount: d(60, 0)}}, now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateFunded(ctx, child("fee-over", 4), nil, []*commonpb.Money{{CurrencyCode: "BNB", Amount: d(1, 0)}, {CurrencyCode: "USD", Amount: d(40, 0)}}, now, time.Minute); !errors.Is(err, capital.ErrInvalid) {
+		t.Fatalf("child fees exceeded original parent authority: %v", err)
+	}
+	var reserved, allocated string
+	if err := pool.QueryRow(ctx, `SELECT reserved FROM capital_balances WHERE portfolio_id='fund' AND currency='BNB'`).Scan(&reserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT allocated_debit FROM capital_commitments WHERE order_id=$1 AND currency='BNB'`, parent.OrderId).Scan(&allocated); err != nil {
+		t.Fatal(err)
+	}
+	if reserved != "2" || allocated != "3/2" {
+		t.Fatalf("fee reservation/allocation changed on refusal: reserved=%s allocated=%s", reserved, allocated)
 	}
 }
 

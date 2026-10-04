@@ -69,16 +69,13 @@ func (s SimPhysicalTerms) Debits(ctx context.Context, st *orderpb.OrderState, no
 		fees = []*commonpb.Money{}
 	} else {
 		reader, ok := venue.(capitalEvidenceReader)
-		if !ok || st.GetVenueAccountId() != venue.Account() {
+		if !ok || s.ApprovedFees == nil || st.GetVenueAccountId() != venue.Account() {
 			return nil, ErrCapitalTermsUnknown
 		}
 		evidence, err := reader.ReadCapitalEvidence(ctx, st.GetInstrumentId())
 		if err != nil || evidence == nil || evidence.GetBaseAsset() != record.BaseAsset || evidence.GetQuoteAsset() != record.QuoteAsset ||
 			evidence.GetSettlementSourceVersion().GetSource() == "" || evidence.GetSettlementSourceVersion().GetContentSha256() == "" ||
 			evidence.GetCurrentFee().GetSourceVersion().GetSource() == "" || evidence.GetCurrentFee().GetSourceVersion().GetContentSha256() == "" {
-			return nil, ErrCapitalTermsUnknown
-		}
-		if s.ApprovedFees == nil {
 			return nil, ErrCapitalTermsUnknown
 		}
 		policy, err := s.ApprovedFees.MaximumFee(ctx, st, evidence.GetVenueSymbol())

@@ -130,6 +130,9 @@ func TestLegacyImportRefusesAppliedCashPrefix(t *testing.T) {
 }
 
 func TestLegacyActivationReplaysAuthenticatedCashHistory(t *testing.T) {
+	// This deliberately synthetic future-source fixture proves the reconciliation
+	// algorithm only. The deployed accounting publisher still reports corporate
+	// actions and accruals unproduced, so this is no production activation proof.
 	pool := newPool(t)
 	ctx := bus.WithTenantID(context.Background(), testTenant)
 	now := time.Now().UTC()

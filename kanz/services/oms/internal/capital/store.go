@@ -129,8 +129,8 @@ func Reserve(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string
 	if _, err := amount(next.RatString(), true); err != nil {
 		return err
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO capital_commitments(order_id,portfolio_id,currency,required_debit)
-		VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, orderID, portfolio, currency, required.RatString())
+	tag, err := tx.Exec(ctx, `INSERT INTO capital_commitments(order_id,portfolio_id,currency,required_debit,admission_debit)
+		VALUES($1,$2,$3,$4,$4) ON CONFLICT DO NOTHING`, orderID, portfolio, currency, required.RatString())
 	if err != nil {
 		return err
 	}

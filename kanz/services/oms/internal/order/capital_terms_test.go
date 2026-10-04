@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,9 +27,13 @@ type unboundedVenue struct{}
 type capitalEvidenceVenue struct {
 	unboundedVenue
 	evidence *venuepb.ReadCapitalEvidenceResponse
+	reads    *atomic.Int32
 }
 
 func (v capitalEvidenceVenue) ReadCapitalEvidence(context.Context, string) (*venuepb.ReadCapitalEvidenceResponse, error) {
+	if v.reads != nil {
+		v.reads.Add(1)
+	}
 	return v.evidence, nil
 }
 
@@ -59,9 +64,13 @@ func TestCurrentVenueFeeCannotAuthorizeAdmission(t *testing.T) {
 	evidence := &venuepb.ReadCapitalEvidenceResponse{VenueSymbol: "BTCUSD", BaseAsset: "BTC", QuoteAsset: "USD", TradingState: "TRADING",
 		SettlementSourceVersion: &venuepb.SourceVersion{Source: "venue:catalogue", ContentSha256: "catalogue-digest"},
 		CurrentFee:              &venuepb.CurrentVenueFee{Components: []*venuepb.FeeRateComponent{{Name: "spot", TakerRate: "0.001"}}, SourceVersion: &venuepb.SourceVersion{Source: "venue:commission", ContentSha256: "fee-digest"}}}
-	terms := SimPhysicalTerms{References: cache, Router: execution.NewRouter([]execution.Venue{capitalEvidenceVenue{evidence: evidence}})}
+	var reads atomic.Int32
+	terms := SimPhysicalTerms{References: cache, Router: execution.NewRouter([]execution.Venue{capitalEvidenceVenue{evidence: evidence, reads: &reads}})}
 	if _, err := terms.Debits(context.Background(), st, now); !errors.Is(err, ErrCapitalTermsUnknown) {
 		t.Fatalf("current fee authorized order: %v", err)
+	}
+	if reads.Load() != 0 {
+		t.Fatal("looked up current fee without an approved maximum authority")
 	}
 	policy := ApprovedMaximumFee{Venue: "XREAL", Account: "account", InstrumentID: "BTC-USD", VenueSymbol: "BTCUSD", Side: st.Side,
 		OrderType: st.OrderType, TimeInForce: st.TimeInForce, Source: "approved:fee-policy", Version: "v1", ApprovedBy: "risk-control",
@@ -74,6 +83,9 @@ func TestCurrentVenueFeeCannotAuthorizeAdmission(t *testing.T) {
 		t.Fatalf("physical: %v", directErr)
 	}
 	debits, err := terms.Debits(context.Background(), st, now)
+	if reads.Load() != 1 {
+		t.Fatalf("approved path did not read exchange terms: %d", reads.Load())
+	}
 	if err != nil || len(debits) != 1 || dec.FromProto(debits[0].Amount).RatString() != "102" {
 		t.Fatalf("approved maximum debit=%v err=%v", debits, err)
 	}

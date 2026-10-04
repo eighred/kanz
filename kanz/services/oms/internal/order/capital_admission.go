@@ -343,7 +343,12 @@ func (p *Postgres) CreateFunded(ctx context.Context, st *orderpb.OrderState, ann
 							err = capital.ErrInvalid
 							break
 						}
-						if err = capital.RegisterChild(ctx, tx, st.GetPortfolioId(), currency, st.GetParentOrderId(), st.GetOrderId(), now, maxAge); err != nil {
+						value, ok := dec.FromProtoChecked(debits[i].Amount)
+						if !ok || value.Sign() < 0 {
+							err = capital.ErrInvalid
+							break
+						}
+						if err = capital.AllocateChild(ctx, tx, st.GetPortfolioId(), currency, st.GetParentOrderId(), st.GetOrderId(), dec.Exact(value.RatString()), now, maxAge); err != nil {
 							break
 						}
 					}

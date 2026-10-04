@@ -13,7 +13,7 @@ import (
 // historical receipt for an unknown order would already have quarantined that
 // currency. This intentionally does not require a known cash total; the zero
 // revision balance stays incomplete until the real accounting opening arrives.
-func ImportLegacy(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string, required, executed dec.Exact) error {
+func ImportLegacy(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string, required, executed, admissionLimit dec.Exact) error {
 	if !validID(portfolio) || !validID(currency) || !validID(orderID) {
 		return ErrInvalid
 	}
@@ -24,6 +24,10 @@ func ImportLegacy(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID s
 	actual, err := amount(string(executed), true)
 	if err != nil || want.Cmp(actual) < 0 {
 		return ErrInvalid
+	}
+	limit, err := amount(string(admissionLimit), true)
+	if err != nil {
+		return err
 	}
 	faulted, err := sourceFault(ctx, tx)
 	if err != nil {
@@ -46,8 +50,8 @@ func ImportLegacy(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID s
 	if _, err := amount(next.RatString(), true); err != nil {
 		return err
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO capital_commitments(order_id,portfolio_id,currency,required_debit,executed_debit)
-		VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, orderID, portfolio, currency, want.RatString(), actual.RatString())
+	tag, err := tx.Exec(ctx, `INSERT INTO capital_commitments(order_id,portfolio_id,currency,required_debit,executed_debit,admission_debit)
+		VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, orderID, portfolio, currency, want.RatString(), actual.RatString(), limit.RatString())
 	if err != nil {
 		return err
 	}
@@ -60,11 +64,16 @@ func ImportLegacy(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID s
 	return writeReserved(ctx, tx, portfolio, currency, next)
 }
 
-// ImportLegacyChild attributes executions to an existing parent without
-// reserving a second copy of the same scheduled quantity.
-func ImportLegacyChild(ctx context.Context, tx pgx.Tx, portfolio, currency, owner, child string) error {
+// ImportLegacyChild attributes executions and approved child allocation to an
+// existing parent without reserving a second copy of scheduled cash. A later
+// child must see this historical allocation before it can use the parent cap.
+func ImportLegacyChild(ctx context.Context, tx pgx.Tx, portfolio, currency, owner, child string, debit dec.Exact) error {
 	if !validID(portfolio) || !validID(currency) || !validID(owner) || !validID(child) || owner == child {
 		return ErrInvalid
+	}
+	allocation, err := amount(string(debit), true)
+	if err != nil {
+		return err
 	}
 	faulted, err := sourceFault(ctx, tx)
 	if err != nil {
@@ -87,12 +96,32 @@ func ImportLegacyChild(ctx context.Context, tx pgx.Tx, portfolio, currency, owne
 	if m.owner != owner {
 		return ErrInvalid
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id,currency) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, child, owner, currency)
+	var limitText, allocatedText *string
+	if err := tx.QueryRow(ctx, `SELECT admission_debit,allocated_debit FROM capital_commitments WHERE order_id=$1 AND currency=$2 AND portfolio_id=$3 FOR UPDATE`, owner, currency, portfolio).Scan(&limitText, &allocatedText); err != nil {
+		return err
+	}
+	if limitText == nil || allocatedText == nil {
+		return ErrUnknown
+	}
+	limit, err := amount(*limitText, true)
+	if err != nil {
+		return err
+	}
+	allocated, err := amount(*allocatedText, true)
+	if err != nil {
+		return err
+	}
+	next := new(big.Rat).Add(allocated, allocation)
+	if next.Cmp(limit) > 0 {
+		return ErrInvalid
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO capital_members(order_id,owner_order_id,currency,allocated_debit) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, child, owner, currency, allocation.RatString())
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() != 1 {
 		return ErrConflict
 	}
-	return nil
+	_, err = tx.Exec(ctx, `UPDATE capital_commitments SET allocated_debit=$2 WHERE order_id=$1 AND currency=$3`, owner, next.RatString(), currency)
+	return err
 }
