@@ -33,8 +33,12 @@ func TestPostgresScheduledChildrenUseOneParentCommitment(t *testing.T) {
 			OrderType: orderpb.OrderType_ORDER_TYPE_LIMIT, Status: orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW,
 			OrderedQuantity: d(coeff, -1), LimitPrice: d(100, 0)}
 	}
-	for _, st := range []*orderpb.OrderState{child("first", 6), child("second", 4)} {
-		if err := store.CreateFunded(ctx, st, nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(60, 0)}}, now, time.Minute); err != nil {
+	for _, item := range []struct {
+		id       string
+		quantity int64
+	}{{"first", 6}, {"second", 4}} {
+		st := child(item.id, item.quantity)
+		if err := store.CreateFunded(ctx, st, nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(item.quantity*10, 0)}}, now, time.Minute); err != nil {
 			t.Fatal(err)
 		}
 	}

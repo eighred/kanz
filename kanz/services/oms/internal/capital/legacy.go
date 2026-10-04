@@ -29,6 +29,12 @@ func ImportLegacy(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID s
 	if err != nil {
 		return err
 	}
+	// Import precedes the first accounting cash receipt. Initialize the tenant's
+	// corruption latch exactly as Apply does; revision zero still leaves every
+	// cash balance UNKNOWN until authenticated history establishes coverage.
+	if _, err := tx.Exec(ctx, `INSERT INTO capital_source_health DEFAULT VALUES ON CONFLICT DO NOTHING`); err != nil {
+		return err
+	}
 	faulted, err := sourceFault(ctx, tx)
 	if err != nil {
 		return err
