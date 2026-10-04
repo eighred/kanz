@@ -164,7 +164,7 @@ func publishSubmit(ctx context.Context, p *bus.Producer, orderID string, limit *
 		OrderType:    orderpb.OrderType_ORDER_TYPE_LIMIT,
 		LimitPrice:   limit,
 		TimeInForce:  orderpb.TimeInForce_TIME_IN_FORCE_GTC,
-		Venue:        "XNAS", // a SimVenue MIC, so a limit order fills deterministically
+		Venue:        "XNAS", // a SimVenue MIC; funded admission still needs complete cash evidence
 	}
 	return p.Publish(ctx, bus.Event{
 		Subject:        translate.SubjectSubmit,

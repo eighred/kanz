@@ -103,7 +103,7 @@ func TestIntegration_FundedAdmissionRefusesUncoveredFanout(t *testing.T) {
 	// SubmitOrder, and the real EXECUTION stream's 2-minute duplicate window
 	// (infra/nats/bootstrap-job.yaml) then SILENTLY DEDUPLICATES it at the broker.
 	// The publish succeeds, the command never lands, and the OMS never sees an order
-	// to fill. Exactly-once is doing its job; the test was replaying a command.
+	// to refuse. Exactly-once is doing its job; the test was replaying a command.
 	// The `ts` is not decoration: #416 made it MANDATORY, so this literal without
 	// one is refused at Process and the M1 certification never reaches the bus at
 	// all. That is how it broke — the fixture predates the rule, and this is the
