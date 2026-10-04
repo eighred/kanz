@@ -96,6 +96,7 @@ var claimSQLNoCols = regexp.MustCompile(`(?is)insert\s+into\s+([a-z_][a-z0-9_]*)
 // matching the lease map inside the outbox it also holds — a green result for a
 // property nobody meant to assert, which is the failure mode AGENTS.md names.
 var memorySiblingExempt = map[string]string{
+	"services/oms/internal/order.MemoryStore": "capital_balances is initialized with INSERT ON CONFLICT DO NOTHING during PostgreSQL capital reconciliation, not used to claim an order identity. MemoryStore cannot implement FundedAdmissionStore and the OMS refuses funded admission without that interface; TestMemoryStoreCannotAdmitFundedOrders proves the boundary. The same guard still checks its order_fills claim against appliedFills.",
 	"services/oms/internal/order.MemoryProposals": "holds no map of its own: the duplicate is refused by " +
 		"internal/dualcontrol/proposalstore.Memory[T].Insert, which returns ErrExists for a held id under its " +
 		"own lock. Parity with PostgresProposals is proven EXECUTABLY rather than here — both backends run the " +

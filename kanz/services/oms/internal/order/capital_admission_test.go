@@ -4,15 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/eighred/kanz/internal/outbox"
+	"github.com/eighred/kanz/internal/platform/halt"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/services/oms/internal/capital"
 )
+
+func TestMemoryStoreCannotAdmitFundedOrders(t *testing.T) {
+	_, err := NewService("tenant", NewMemoryStore(), &Emitter{}, nil, nil, nil, nil,
+		WithHaltGate(halt.OpenGate(nil)), WithCapitalTerms(SimPhysicalTerms{}))
+	if err == nil || !strings.Contains(err.Error(), "durable funded order store") {
+		t.Fatalf("memory store entered the funded admission path: %v", err)
+	}
+}
 
 func TestPostgresFundedAdmissionCompetitionAndRedelivery(t *testing.T) {
 	for _, sameID := range []bool{false, true} {
