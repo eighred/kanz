@@ -379,11 +379,15 @@ quoted result), **Verified when** (a runnable command and its expected result),
 
 ## Engineering and verification references
 
-This repository does not require a private agent plugin. The retired
-`kanz-forge` skills are not part of a checkout (migration #1087); do not ask an
-operator to restore them to begin engineering work. Use the plane boundaries,
-invariants, coding standards and tracking rules in this file. Additional skills
-may assist when available, but do not replace these requirements.
+The original private `kanz-forge` package was retired in #1087 and its source
+was not tracked. The repo-owned Codex reconstruction under `plugins/kanz-forge/`
+restores its engineering, verification and stack-routing roles from tracked
+history (#1328). It does not replace the plane boundaries, invariants, coding
+standards and tracking rules in this file; do not seek an old private cache to
+begin engineering work.
+
+To enable the reconstructed skills in Codex from this checkout, run
+`codex plugin marketplace add .` and `codex plugin add kanz-forge@kanz-local`.
 
 Read the affected component's code, migrations and architecture guards before
 changing its contracts. Use `.github/workflows/kanz-ci.yml` for the actual CI
