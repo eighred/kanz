@@ -136,10 +136,7 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Generate kanz-schemas Go SDK
-        working-directory: kanz-schemas
-        run: |
-          buf generate
-          bash bootstrap-go-sdk.sh
+        run: make -C kanz generate
 
       - name: Build
         working-directory: kanz
