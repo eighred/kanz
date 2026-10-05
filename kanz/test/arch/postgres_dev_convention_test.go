@@ -1,6 +1,7 @@
 package arch
 
 import (
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -33,11 +34,32 @@ func TestDevPostgresMatchesTheCIConvention(t *testing.T) {
 
 	role := mustFindOne(t, ci, `CREATE ROLE (\w+) LOGIN PASSWORD '([^']+)' NOSUPERUSER`,
 		"CI no longer declares the app role with a literal CREATE ROLE ... NOSUPERUSER")
-	db := mustFindOne(t, ci, `CREATE DATABASE (\w+) OWNER (\w+)`,
+	// CI's background OMS has a separate database so fixture teardown cannot
+	// destroy it. The dev convention follows the database the tests actually use,
+	// not whichever CREATE DATABASE statement happens to appear first.
+	fixtureURLs := regexp.MustCompile(`(?m)^\s*TEST_POSTGRES_URL:\s*(\S+)`).FindAllStringSubmatch(ci, -1)
+	if len(fixtureURLs) == 0 {
+		t.Fatal("CI must declare its PostgreSQL fixture URL")
+	}
+	for _, fixture := range fixtureURLs {
+		if fixture[1] != fixtureURLs[0][1] {
+			t.Fatal("CI has multiple fixture database conventions; explicitly map each to its dev rig")
+		}
+	}
+	fixtureURL, err := url.Parse(fixtureURLs[0][1])
+	if err != nil || fixtureURL == nil || fixtureURL.Path == "" || fixtureURL.Path == "/" || fixtureURL.User == nil {
+		t.Fatal("CI fixture URL must identify its database and application role")
+	}
+	fixtureDB := strings.TrimPrefix(fixtureURL.Path, "/")
+	db := mustFindOne(t, ci, `CREATE DATABASE (`+regexp.QuoteMeta(fixtureDB)+`) OWNER (\w+)`,
 		"CI no longer declares the app database with a literal CREATE DATABASE ... OWNER")
 
 	roleName, rolePassword := role[1], role[2]
 	dbName, dbOwner := db[1], db[2]
+	fixturePassword, hasPassword := fixtureURL.User.Password()
+	if fixtureURL.User.Username() != roleName || !hasPassword || fixturePassword != rolePassword {
+		t.Fatal("CI fixture URL does not use its declared application role credentials")
+	}
 
 	if dbOwner != roleName {
 		t.Fatalf("CI declares database %q owned by %q but the app role is %q. This guard assumes "+

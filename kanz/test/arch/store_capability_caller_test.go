@@ -57,26 +57,12 @@ var storeCapabilityInterfaces = []struct {
 // permitted to have no production caller, keyed "<iface>.<Method>". An entry
 // needs the issue that retires it, and the dead-entry arm below fails the build
 // if one stops matching — an exemption must not outlive its repair.
-// Both entries below were FOUND BY THIS GUARD on the commit that introduced it.
-// They are the same defect as SaveSnapshot — a declared, implemented, tested
-// capability with no production caller — and they are recorded here rather than
-// fixed because neither is a correctness or scaling liability the way
-// SaveSnapshot was: both are bounded reads that simply nothing invokes yet.
-// Writing them down is the point. An unreachable capability that is listed is a
-// known gap; an unreachable capability that is invisible is a false guarantee,
-// and that is what cost #229. #1343 owns the remaining method disposition.
-var storeCapabilityExempt = map[string]string{
-	// audit.Store.Get(eventID) is the point lookup AUDIT-01c specified for the
-	// lineage walk. The lineage API reads through Query/All instead, so Get has
-	// two implementations, a test, and no caller.
-	"audit.Store.Get": "#1343 (unreachable; remove or wire a bounded lineage lookup)",
-	// fund.Store.Commitments is documented "for inspection/bootstrap" and no
-	// inspection or bootstrap path was ever built. Note the Postgres
-	// implementation is `SELECT DISTINCT commitment_id FROM fund_events`, an
-	// unbounded full scan — harmless while unreachable, and a #229-shaped
-	// liability the moment something mounts it on a handler.
-	"fund.Store.Commitments": "#1343 (unbounded scan, currently unreachable; never expose as a request read)",
-}
+// #1343 removed the unused fund-wide enumeration. audit.Store.Get was never
+// unused: handleGet and lineage.Reconstruct have called it since AUDIT-01.
+// Retain that operational API and reject an exemption masking its callers.
+// This scanner resolves selector names, not receiver types; a matching name
+// still needs caller/type review before claiming a reachable domain workflow.
+var storeCapabilityExempt = map[string]string{}
 
 func TestStoreCapabilitiesHaveProductionCallers(t *testing.T) {
 	root := moduleRoot(t)
@@ -106,12 +92,17 @@ func TestStoreCapabilitiesHaveProductionCallers(t *testing.T) {
 
 		for _, m := range methods {
 			key := pkg + "." + target.name + "." + m
+			callers := callSitesOf(prod, m)
 			if reason, ok := storeCapabilityExempt[key]; ok {
 				seenExempt[key] = true
-				t.Logf("exempt: %s has no production caller (%s)", key, reason)
+				if len(callers) > 0 {
+					t.Errorf("storeCapabilityExempt %s is stale: %d production selector call(s) now satisfy this guard; review their receiver types and remove the exemption", key, len(callers))
+				} else {
+					t.Logf("exempt: %s has no production caller (%s)", key, reason)
+				}
 				continue
 			}
-			if callers := callSitesOf(prod, m); len(callers) == 0 {
+			if len(callers) == 0 {
 				t.Errorf("%s is declared on the %s.%s interface and implemented, but NOTHING "+
 					"outside a _test.go file calls it.\n"+
 					"That is #229: SaveSnapshot had an interface entry, two implementations, a "+

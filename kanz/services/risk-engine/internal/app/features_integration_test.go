@@ -22,6 +22,7 @@ package app_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -53,6 +54,8 @@ func TestIntegration_TheModelScoresTheEnginesFeatures(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// A durable prediction from a previous run must not satisfy this run's proof.
+	subjectID := fmt.Sprintf("ci-feature-%d", time.Now().UnixNano())
 
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "ai-m1-it"})
 	if err != nil {
@@ -78,7 +81,7 @@ func TestIntegration_TheModelScoresTheEnginesFeatures(t *testing.T) {
 				if err := proto.Unmarshal(payload, &p); err != nil {
 					return nil
 				}
-				if p.GetSubjectId() != "fund-alpha" {
+				if p.GetSubjectId() != subjectID {
 					return nil
 				}
 				mu.Lock()
@@ -103,7 +106,7 @@ func TestIntegration_TheModelScoresTheEnginesFeatures(t *testing.T) {
 
 	// EXACTLY what the risk engine now publishes on every recompute.
 	fv := prediction.FeatureVector{
-		SubjectID:     "fund-alpha",
+		SubjectID:     prediction.SubjectID(subjectID),
 		FeatureSetRef: app.FeatureSetPortfolioRisk,
 		AsOf:          time.Now().UTC(),
 		Values: map[prediction.FeatureName]prediction.FeatureValue{

@@ -40,6 +40,11 @@ const testSchema = "oms_outbox_test"
 
 func newPool(t *testing.T, tenant string) *pgxpool.Pool {
 	t.Helper()
+	return newPoolForSchema(t, tenant, testSchema)
+}
+
+func newPoolForSchema(t *testing.T, tenant, schema string) *pgxpool.Pool {
+	t.Helper()
 	url := os.Getenv("TEST_POSTGRES_URL")
 	if url == "" {
 		t.Skip("set TEST_POSTGRES_URL to run outbox Postgres integration tests")
@@ -49,7 +54,7 @@ func newPool(t *testing.T, tenant string) *pgxpool.Pool {
 		t.Fatalf("parse config: %v", err)
 	}
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		if _, err := conn.Exec(ctx, "SET search_path TO "+testSchema); err != nil {
+		if _, err := conn.Exec(ctx, "SET search_path TO "+pgx.Identifier{schema}.Sanitize()); err != nil {
 			return err
 		}
 		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenant)
@@ -83,16 +88,26 @@ const omsMigrations = "../../services/oms/migrations"
 // production.
 func applySchema(t *testing.T) {
 	t.Helper()
+	applySchemaBefore(t, "")
+}
+
+func applySchemaBefore(t *testing.T, stopBefore string) {
+	t.Helper()
+	applySchemaIn(t, testSchema, stopBefore)
+}
+
+func applySchemaIn(t *testing.T, schema, stopBefore string) {
+	t.Helper()
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, os.Getenv("TEST_POSTGRES_URL"))
 	if err != nil {
 		t.Fatalf("admin connect: %v", err)
 	}
 	defer admin.Close()
-	if _, err := admin.Exec(ctx, `DROP SCHEMA IF EXISTS `+testSchema+` CASCADE`); err != nil {
+	if _, err := admin.Exec(ctx, `DROP SCHEMA IF EXISTS `+pgx.Identifier{schema}.Sanitize()+` CASCADE`); err != nil {
 		t.Fatalf("drop schema: %v", err)
 	}
-	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+testSchema); err != nil {
+	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+pgx.Identifier{schema}.Sanitize()); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
 	files, err := filepath.Glob(filepath.Join(omsMigrations, "*.sql"))
@@ -107,13 +122,16 @@ func applySchema(t *testing.T) {
 		t.Fatalf("acquire: %v", err)
 	}
 	defer conn.Release()
-	if _, err := conn.Exec(ctx, "SET search_path TO "+testSchema); err != nil {
+	if _, err := conn.Exec(ctx, "SET search_path TO "+pgx.Identifier{schema}.Sanitize()); err != nil {
 		t.Fatalf("set search_path: %v", err)
 	}
 	if _, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', 'acme', false)"); err != nil {
 		t.Fatalf("set tenant: %v", err)
 	}
 	for _, f := range files {
+		if filepath.Base(f) == stopBefore {
+			return
+		}
 		ddl, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("read migration %s: %v", f, err)
@@ -121,6 +139,9 @@ func applySchema(t *testing.T) {
 		if _, err := conn.Exec(ctx, string(ddl)); err != nil {
 			t.Fatalf("apply migration %s: %v", f, err)
 		}
+	}
+	if stopBefore != "" {
+		t.Fatalf("migration %s not found", stopBefore)
 	}
 }
 
@@ -151,7 +172,7 @@ func TestPostgresOutboxRollsBackWithItsTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := Enqueue(ctx, tx, pgFact(t, ctx, "order.order.accepted", "rollback-1")); err != nil {
+	if err := Enqueue(ctx, tx, ServiceOMS, pgFact(t, ctx, "order.order.accepted", "rollback-1")); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if err := tx.Rollback(ctx); err != nil {
@@ -172,7 +193,7 @@ func TestPostgresOutboxRollsBackWithItsTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := Enqueue(ctx, tx, pgFact(t, ctx, "order.order.accepted", "commit-1")); err != nil {
+	if err := Enqueue(ctx, tx, ServiceOMS, pgFact(t, ctx, "order.order.accepted", "commit-1")); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -209,7 +230,7 @@ func TestPostgresOutboxDeliversAFactWhoseFirstPublishFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := Enqueue(ctx, tx,
+	if err := Enqueue(ctx, tx, ServiceOMS,
 		pgFact(t, ctx, "order.order.accepted", "o1"),
 		pgFact(t, ctx, "order.order.routed", "o1")); err != nil {
 		t.Fatalf("Enqueue: %v", err)
@@ -279,7 +300,7 @@ func TestPostgresOutboxIsTenantIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := Enqueue(acmeCtx, tx, pgFact(t, acmeCtx, "order.order.accepted", "shared-id")); err != nil {
+	if err := Enqueue(acmeCtx, tx, ServiceOMS, pgFact(t, acmeCtx, "order.order.accepted", "shared-id")); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if err := tx.Commit(acmeCtx); err != nil {
@@ -331,7 +352,7 @@ func TestPostgresOutboxIsTenantIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := Enqueue(acmeCtx, tx, foreign); err != nil {
+	if err := Enqueue(acmeCtx, tx, ServiceOMS, foreign); err != nil {
 		t.Fatalf("an acme-scoped OMS could not enqueue a FACT destined for tenant globex: %v — on "+
 			"the current deployment EVERY real order is this shape (OMS_TENANT=__system__, caller "+
 			"tenant on the envelope), so this failing is a total admission outage", err)
@@ -418,7 +439,7 @@ func TestPostgresOutboxPublishesEveryConcurrentEnqueueExactlyOnce(t *testing.T) 
 				errs[i] = err
 				return
 			}
-			if err := Enqueue(ctx, tx, pgFact(t, ctx, "order.order.accepted", "o1")); err != nil {
+			if err := Enqueue(ctx, tx, ServiceOMS, pgFact(t, ctx, "order.order.accepted", "o1")); err != nil {
 				errs[i] = err
 				_ = tx.Rollback(ctx)
 				return
@@ -475,7 +496,7 @@ func TestPostgresOutboxReportsWhyTheHeadOfAKeyIsStuck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := Enqueue(ctx, tx,
+	if err := Enqueue(ctx, tx, ServiceOMS,
 		pgFact(t, ctx, "order.order.accepted", "o1"),
 		pgFact(t, ctx, "order.order.routed", "o1")); err != nil {
 		t.Fatalf("Enqueue: %v", err)
@@ -555,7 +576,7 @@ func TestPostgresOutboxClearsTheCauseWhenTheRecordFinallyPublishes(t *testing.T)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := Enqueue(ctx, tx, pgFact(t, ctx, "order.order.accepted", "o1")); err != nil {
+	if err := Enqueue(ctx, tx, ServiceOMS, pgFact(t, ctx, "order.order.accepted", "o1")); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -606,7 +627,7 @@ func TestPostgresOutboxBoundsTheCauseItStores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := Enqueue(ctx, tx, pgFact(t, ctx, "order.order.accepted", "o1")); err != nil {
+	if err := Enqueue(ctx, tx, ServiceOMS, pgFact(t, ctx, "order.order.accepted", "o1")); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

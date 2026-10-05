@@ -236,10 +236,9 @@ func (r *Relay) DrainOnce(ctx context.Context) (int, error) {
 // pass having reached the same order microseconds earlier; nacking a live
 // trading command over that would be a self-inflicted DLQ entry.
 //
-// WHAT IT COSTS, SAID PLAINLY: a lock, a read, one publish per record, one
-// UPDATE per record and an unlock — so four database round trips plus the
-// publish on the admission path, and four on a cancel or an amend whose order
-// has nothing queued at all. It is deliberately NOT short-circuited by an
+// WHAT IT COSTS, SAID PLAINLY: a lock, a legacy-ownership check, a read, one
+// publish and UPDATE per record, and an unlock. That is five database round
+// trips for one FACT and four when nothing is queued. It is not short-circuited by an
 // unlocked "is anything pending?" read first: that check would be answered from
 // a snapshot taken before the lock, and a record committed in the gap would be
 // exactly the one a concurrent admission just wrote. Buying three round trips

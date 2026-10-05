@@ -99,9 +99,4 @@ func TestPostgresFundJournalRoundTrip(t *testing.T) {
 		t.Fatalf("durable position != memory: called %v/%v distributed %v/%v",
 			durable.Called, memory.Called, durable.Distributed, memory.Distributed)
 	}
-
-	ids, err := st.Commitments(ctx)
-	if err != nil || len(ids) != 1 || ids[0] != "CMT-1" {
-		t.Fatalf("commitments = %v err=%v", ids, err)
-	}
 }

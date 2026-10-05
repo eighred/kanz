@@ -36,6 +36,19 @@ fixtures and `.github/workflows/kanz-ci.yml` for the current bootstrap sequence.
 Never use a production DSN. PostgreSQL isolation tests require a role with both
 `NOSUPERUSER` and `NOBYPASSRLS`; the Compose bootstrap role is not that role.
 
+Architecture tests invoke `bash` by name. In PowerShell, check
+`Get-Command bash -All` before running them. If Windows resolves the unconfigured
+WSL launcher, select the installed Git Bash for the current process (adjust the
+installation path if necessary):
+
+```powershell
+$env:PATH = 'C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin;' + $env:PATH
+Get-Command bash
+```
+
+An `execvpe(/bin/bash) failed` result is a shell setup failure; it does not
+exercise the script's refusal or retry behavior.
+
 Run Go tests with `-p 1`, in bounded package groups (for example `./internal/...`,
 then individual `./services/<name>/...`, then `./test/arch/`). Compare package
 results with `go list` for each group and inspect skipped tests. A missing

@@ -129,7 +129,7 @@ func (p *Postgres) ProposeFeeCorrection(ctx context.Context, c RecoveryCase, act
 	if _, err := tx.Exec(ctx, `INSERT INTO execution_fee_proposals(case_id,order_id,digest,proposal) VALUES($1,$2,$3,$4)`, c.ID, c.OrderID, proposal.Digest, data); err != nil {
 		return err
 	}
-	if err := outbox.Enqueue(ctx, tx, record); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, record); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -222,7 +222,7 @@ func (p *Postgres) ApproveFeeCorrection(ctx context.Context, c RecoveryCase, act
 	if _, err := tx.Exec(ctx, `INSERT INTO execution_fee_approvals(case_id,approval) VALUES($1,$2)`, c.ID, data); err != nil {
 		return err
 	}
-	if err := outbox.Enqueue(ctx, tx, record); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, record); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

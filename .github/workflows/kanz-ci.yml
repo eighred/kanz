@@ -29,6 +29,10 @@ on:
       - 'tools/Install-TestnetObservability.ps1'
       - 'tools/Initialize-TestnetPortfolio.ps1'
       - '.github/workflows/kanz-ci.yml'
+      - '.github/scripts/go_test_evidence.py'
+      - '.github/scripts/test_go_test_evidence.py'
+      - '.github/scripts/go_mod_download.py'
+      - '.github/scripts/test_go_mod_download.py'
   push:
     branches: [main]
     # DOCS DO NOT BUILD IMAGES.
@@ -115,8 +119,11 @@ jobs:
         run: |
           psql -h localhost -U kanz -d kanz -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE kanzapp LOGIN PASSWORD 'kanz' NOSUPERUSER;" \
-            -c "CREATE DATABASE kanzapp OWNER kanzapp;"
+            -c "CREATE DATABASE kanzapp OWNER kanzapp;" \
+            -c "CREATE DATABASE kanz_oms_ci OWNER kanzapp;"
           psql -h localhost -U kanz -d kanzapp -v ON_ERROR_STOP=1 \
+            -c "GRANT ALL ON SCHEMA public TO kanzapp;"
+          psql -h localhost -U kanz -d kanz_oms_ci -v ON_ERROR_STOP=1 \
             -c "GRANT ALL ON SCHEMA public TO kanzapp;"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -137,6 +144,12 @@ jobs:
 
       - name: Generate kanz-schemas Go SDK
         run: make -C kanz generate
+
+      - name: Download reviewed Go dependencies with bounded transport retries
+        working-directory: kanz
+        run: |
+          python3 -B -m unittest discover -s ../.github/scripts -p test_go_mod_download.py
+          python3 ../.github/scripts/go_mod_download.py
 
       - name: Build
         working-directory: kanz
@@ -240,12 +253,14 @@ jobs:
       - name: Start the OMS on the bus (for the M1 loop certification)
         working-directory: kanz
         env:
-          KANZ_MIGRATE_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+          # A live relay must not share tables that package fixtures recreate.
+          # Extracted from #1317's harness repair; this does not activate funding.
+          KANZ_MIGRATE_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
+          OMS_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
         run: |
           go run ./cmd/kanz-migrate --dir services/oms/migrations
           go build -o /tmp/oms ./services/oms/cmd/oms
           OMS_NATS_URL=nats://localhost:4222 \
-          OMS_DATABASE_URL='postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable' \
           OMS_TENANT=__system__ \
           OMS_SIM_VENUE_MIC=XNAS,XLON \
           /tmp/oms > /tmp/oms.log 2>&1 &
@@ -313,6 +328,61 @@ jobs:
       - name: Install PyYAML
         run: pip install pyyaml
 
+      # The cross-language Go test requires a running Python consumer, not just
+      # NATS. Use the shipped runtime and a disposable, explicitly synthetic
+      # model card; this proves transport/scoring, not production model approval.
+      - name: Start Python inference on the real bus
+        env:
+          PYTHONPATH: ${{ github.workspace }}/kanz-schemas/gen/python:${{ github.workspace }}/kanz-py
+          KANZ_INFERENCE_MODELS: ${{ runner.temp }}/inference-ci-model.json
+          KANZ_INFERENCE_NATS_URL: nats://localhost:4222
+          KANZ_INFERENCE_ALLOW_INSECURE_GRPC: "true"
+          KANZ_INFERENCE_BIND: 127.0.0.1:50051
+          KANZ_INFERENCE_METRICS_BIND: 127.0.0.1:8099
+        run: |
+          python -m venv "$RUNNER_TEMP/inference-ci"
+          "$RUNNER_TEMP/inference-ci/bin/pip" install --require-hashes -r kanz-py/requirements.txt -r kanz-py/requirements-codegen.txt
+          mkdir -p kanz-schemas/gen/python
+          "$RUNNER_TEMP/inference-ci/bin/python" -m grpc_tools.protoc \
+            -I kanz-schemas/proto --python_out=kanz-schemas/gen/python \
+            --grpc_python_out=kanz-schemas/gen/python $(find kanz-schemas/proto -name '*.proto')
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          now = datetime.now(timezone.utc)
+          Path(os.environ["KANZ_INFERENCE_MODELS"]).write_text(json.dumps({
+              "model_id": "ci-synthetic-portfolio-risk@1.0.0",
+              "feature_set_ref": "portfolio-risk:1", "confidence_threshold": 0.5,
+              "weights": {"GrossExposure": 0.4, "VaR99": -0.9}, "bias": 0.1,
+              "validated_at": now.isoformat(), "expires_at": (now + timedelta(hours=2)).isoformat(),
+              "validation_passed": True, "report_uri": "fixture://ci-only/synthetic-linear-model"
+          }), encoding="utf-8")
+          PY
+          "$RUNNER_TEMP/inference-ci/bin/python" -m kanz_inference > "$RUNNER_TEMP/inference-ci.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/inference-ci.pid"
+          for i in $(seq 1 30); do
+            kill -0 "$(cat "$RUNNER_TEMP/inference-ci.pid")" || break
+            if curl --fail --silent --max-time 2 http://127.0.0.1:8099/readyz; then exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/inference-ci.log"
+          exit 1
+
+      - name: Verify Go to Python inference before the full race suite
+        working-directory: kanz
+        env:
+          TEST_NATS_URL: nats://localhost:4222
+          TEST_INFERENCE_ON_BUS: "1"
+        run: go test -race -p 1 ./services/risk-engine/internal/app -run '^TestIntegration_TheModelScoresTheEnginesFeatures$' -count=1 -v
+
+      - name: Verify durable Kafka fixtures across repeated tenant rebuilds
+        working-directory: kanz
+        env:
+          TEST_KAFKA_BROKERS: localhost:9092
+          TEST_NATS_URL: nats://localhost:4222
+        run: go test -race -p 1 ./tools/natsrebuild -run '^TestIntegration_RebuildRestoresEveryTenantsPrefixedTopic$' -count=5 -v
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: kanz-web/.nvmrc
@@ -333,6 +403,8 @@ jobs:
           TEST_NATS_URL: nats://localhost:4222
           TEST_KAFKA_BROKERS: localhost:9092
           TEST_OMS_ON_BUS: "1"
+          TEST_INFERENCE_ON_BUS: "1"
+          TEST_OMS_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
           TEST_SESSION_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/sessions.cjs
           TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/mfa.cjs
           TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/kanz-web/node_modules/playwright
@@ -380,13 +452,14 @@ jobs:
         # distinguish "ran" from "skipped". -v puts the SKIP lines and their
         # reasons in the log; the step below turns them into a failure.
         #
-        # -v RATHER THAN -json, deliberately: -json would need rendering back to
-        # text for a human to read the log, which means a jq dependency in the
-        # one job that must never fail for its own reasons. -p 1 already runs
-        # packages sequentially, so -v output cannot interleave.
+        # JSON retains test attribution even when parallel subtests interleave.
+        # The standard-library renderer preserves readable Actions output; the
+        # next gate checks the original events, not neighboring text (#1352).
         run: |
           set -euo pipefail
-          go test -race -p 1 -v ./... | tee "$RUNNER_TEMP/gotest.txt"
+          go list -race ./... > "$RUNNER_TEMP/gotest-packages.txt"
+          go test -race -p 1 -count=1 -json ./... | tee "$RUNNER_TEMP/gotest.jsonl" \
+            | python3 ../.github/scripts/go_test_evidence.py --render
 
       # A SKIP CITING A BACKING SERVICE THIS JOB PROVIDES IS A FAILURE.
       #
@@ -403,30 +476,8 @@ jobs:
         working-directory: kanz
         run: |
           set -euo pipefail
-          render="$RUNNER_TEMP/gotest.txt"
-          if [ ! -s "$render" ]; then
-            echo "::error::no suite output at $render — the Test step did not run, so this check proved nothing"
-            exit 1
-          fi
-          # -A3 keeps the SKIP line together with the indented reason beneath it,
-          # so a bare mention of a variable elsewhere in the log is not a match.
-          offenders="$(grep -A3 -- '--- SKIP' "$render" \
-            | grep -E 'TEST_(POSTGRES_URL|NATS_URL|KAFKA_BROKERS|REDIS_URL|NATS_MTLS_URL|NATS_MTLS_CERT_DIR|MFA_BROWSER_SCRIPT)' || true)"
-          if [ -n "$offenders" ]; then
-            echo "::error::a test skipped citing a backing service this job provides — it did not run, and the suite was green anyway"
-            echo "$offenders"
-            echo
-            echo "Every one of those variables is set in the Test step's env block."
-            echo "A skip means the gate stopped seeing it: a renamed variable, a"
-            echo "changed helper, or a service container that failed to come up."
-            exit 1
-          fi
-          grep -q 'Chromium shared-session inventory and revocation PASS' "$render" || {
-            echo "::error::shared-session Chromium proof did not run"
-            exit 1
-          }
-          printf 'no backing-service test skipped; %d SKIP line(s) total, all for other reasons\n' \
-            "$(grep -c -- '--- SKIP' "$render" || true)"
+          python3 -m unittest discover -s ../.github/scripts -p test_go_test_evidence.py
+          python3 ../.github/scripts/go_test_evidence.py --packages "$RUNNER_TEMP/gotest-packages.txt" "$RUNNER_TEMP/gotest.jsonl"
 
       # THE `redis` BUILD (EXEC-M22). This tag is what webhook-ingest's production image is
       # built with, and it is the ONLY thing that makes `replicas: 2` on the platform's
@@ -463,7 +514,7 @@ jobs:
         run: |
           go build -tags anthropic,openrouter ./...
           go vet -tags anthropic,openrouter ./services/copilot/...
-          go test -tags anthropic,openrouter -p 1 ./services/copilot/...
+          go test -tags anthropic,openrouter -p 1 -count=1 ./services/copilot/...
 
       # api-gateway is in the test list because its CROSS-POD IDEMPOTENCY CLAIM (#721)
       # is only exercised under this tag: idempotency_realredis_test.go stands two
@@ -490,11 +541,17 @@ jobs:
         run: |
           go build -tags redis ./...
           go vet -tags redis ./...
-          go test -tags redis -p 1 -race ./services/webhook-ingest/... ./services/api-gateway/... ./pkg/redisadapter/... ./pkg/bus/...
+          go test -tags redis -p 1 -race -count=1 ./services/webhook-ingest/... ./services/api-gateway/... ./pkg/redisadapter/... ./pkg/bus/...
 
       - name: OMS log (on failure)
         if: failure()
         run: cat /tmp/oms.log || true
+
+      - name: Stop CI inference and retain its diagnostic log
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/inference-ci.log" ]; then cat "$RUNNER_TEMP/inference-ci.log"; fi
+          if [ -f "$RUNNER_TEMP/inference-ci.pid" ]; then kill "$(cat "$RUNNER_TEMP/inference-ci.pid")" 2>/dev/null || true; fi
 
       - name: golangci-lint
         # v7 is REQUIRED for golangci-lint v2: v6 only knows the v1 module path
@@ -857,12 +914,19 @@ jobs:
       # The flag also beats the workflow-level GOFLAGS above it, so this job
       # needs no env override at all — which is the point: the assertion should
       # not depend on the absence of a setting.
+      - name: Acquire the module graph with bounded transfer retries
+        working-directory: kanz
+        run: |
+          python3 ../.github/scripts/go_mod_download.py
+          # Acquisition may not silently repair the graph before the readonly build.
+          git diff --exit-code -- go.mod go.sum
+
       - name: Build under Go's default module mode
         working-directory: kanz
         run: |
           set -euo pipefail
           if ! go build -mod=readonly ./...; then
-            echo '::error file=kanz/go.mod::the committed module graph is INCOMPLETE — this builds only because every other path sets GOFLAGS=-mod=mod, which repairs the graph in memory and discards the repair. Run `cd kanz && go mod tidy` and commit go.mod and go.sum. Review the result as a dependency change: `go mod tidy` resolves against whatever the proxy currently serves.'
+            echo '::error::readonly build failed; inspect the preceding compiler, dependency or transport diagnostic. Do not run go mod tidy unless Go reports that the committed graph needs updates.'
             exit 1
           fi
 

@@ -24,8 +24,6 @@ type Store interface {
 	// Journal returns a commitment's events (the caller folds them via
 	// alternatives.Replay).
 	Journal(ctx context.Context, commitmentID string) ([]*alternatives.Event, error)
-	// Commitments returns the known commitment ids, for inspection/bootstrap.
-	Commitments(ctx context.Context) ([]string, error)
 }
 
 // MemoryStore is the in-process Store. Goroutine-safe.
@@ -65,17 +63,6 @@ func (m *MemoryStore) Journal(_ context.Context, commitmentID string) ([]*altern
 	src := m.journal[commitmentID]
 	out := make([]*alternatives.Event, len(src))
 	copy(out, src)
-	return out, nil
-}
-
-// Commitments returns the known commitment ids.
-func (m *MemoryStore) Commitments(_ context.Context) ([]string, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]string, 0, len(m.journal))
-	for id := range m.journal {
-		out = append(out, id)
-	}
 	return out, nil
 }
 
