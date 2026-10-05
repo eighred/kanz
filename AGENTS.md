@@ -31,7 +31,7 @@ execution depend on the intelligence plane is wrong no matter how it tests.
 
 ## Stack
 
-- **Go 1.26.1** — `kanz/`, module `github.com/eighred/kanz`. Services under
+- **Go 1.26.1 language / 1.26.8 toolchain** — `kanz/`, module `github.com/eighred/kanz`. Services under
   `services/`, CLI binaries under `cmd/`.
 - **Postgres** (pgx v5) — durable state, multi-tenant via RLS.
 - **NATS JetStream** — the event spine. **Kafka** (segmentio) — the archival/CDC path.

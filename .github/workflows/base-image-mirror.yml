@@ -43,7 +43,7 @@ name: base-image-mirror
 
 on:
   # A MIRROR WITHOUT A REFRESH PATH SILENTLY AGES, and that is worse than not
-  # mirroring at all. `golang:1.26.5` is a MUTABLE tag: upstream rebuilds it
+  # mirroring at all. `golang:1.26.8` is a MUTABLE tag: upstream rebuilds it
   # with OS security patches under the same name. Copy it once and the estate
   # stops receiving those patches while every Dockerfile still points at the
   # tag, believing it current — so the mirror converts a supply-chain
@@ -93,8 +93,8 @@ jobs:
           # The tag is part of the target on purpose: the mirror is not "latest
           # golang", it is the exact version the estate builds on. A bump means
           # a new entry here AND a Dockerfile change, together.
-          - source: docker.io/library/golang:1.26.5
-            target: ghcr.io/eighred/base/golang:1.26.5
+          - source: docker.io/library/golang:1.26.8
+            target: ghcr.io/eighred/base/golang:1.26.8
           - source: gcr.io/distroless/static:nonroot
             target: ghcr.io/eighred/base/distroless-static:nonroot
           # kanz-py's base. OUTSIDE issue #55's original scope — its acceptance

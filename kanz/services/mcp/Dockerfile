@@ -24,7 +24,7 @@
 # github.com/eighred/kanz/kanz-schemas-go => ../kanz-schemas/gen/go, which is
 # generated-not-committed (EVT-15a). Build with:
 #   docker build -f kanz/services/mcp/Dockerfile .
-FROM ghcr.io/eighred/base/golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.8 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
