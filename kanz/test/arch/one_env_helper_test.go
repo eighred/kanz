@@ -128,11 +128,10 @@ func TestTheEnvironmentIsReadThroughOneHelper(t *testing.T) {
 }
 
 // envHelperExempt names environment-reading wrappers allowed outside
-// internal/env, with the issue that retires each.
+// internal/env, with the decision that permits each.
 //
-// Empty. All eighty were retired and none needed to stay — including the one in
-// tools/scaffold's template, which is why a newly scaffolded service now calls
-// env.Or rather than being born with copy forty-one.
+// The key-and-default copies were retired, including tools/scaffold's template.
+// One intentional signature collision remains: the CLI's path-and-key reader.
 var envHelperExempt = map[string]string{
 	// A SHAPE COLLISION, NOT A COPY (#692). secretFrom(path, envKey string) has
 	// two string parameters and returns (string, error), which is the same
