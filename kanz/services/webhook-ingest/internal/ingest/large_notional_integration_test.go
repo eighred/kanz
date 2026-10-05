@@ -79,9 +79,14 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 	}
 	// The persisted half is a SEPARATE precondition, declared separately: without
 	// it this would still prove the wire and quietly prove nothing about the store.
-	pgURL := os.Getenv("TEST_POSTGRES_URL")
+	// CI keeps the live OMS apart from tables recreated by package fixtures.
+	// A local rig may explicitly use the same database for both roles.
+	pgURL := os.Getenv("TEST_OMS_POSTGRES_URL")
 	if pgURL == "" {
-		t.Skip("set TEST_POSTGRES_URL to the database the OMS writes to")
+		pgURL = os.Getenv("TEST_POSTGRES_URL")
+	}
+	if pgURL == "" {
+		t.Skip("set TEST_OMS_POSTGRES_URL (or TEST_POSTGRES_URL for a shared local rig) to the database the OMS writes to")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)

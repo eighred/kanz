@@ -11,7 +11,7 @@ ALTER TABLE outbox ADD CONSTRAINT outbox_producer_service_required
 
 -- A known owner is immutable. Reconciliation may classify NULL legacy rows,
 -- but it may not transfer a committed FACT between producers.
-CREATE FUNCTION outbox_preserve_producer_service() RETURNS trigger
+CREATE OR REPLACE FUNCTION outbox_preserve_producer_service() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
     IF OLD.producer_service IS NOT NULL
