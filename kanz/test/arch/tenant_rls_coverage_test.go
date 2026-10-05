@@ -61,11 +61,9 @@ import (
 // rlsExempt is a DEFAULT-DENY allow-list: every tenant-scoped table declared in
 // the migrations is checked unless it is named here with a reason.
 //
-// THREE ENTRIES, AND ALL THREE WERE ALREADY DECIDED — in a comment at the top of
-// their own migration, where nothing checked that the comment still described the
-// file. That is the change this guard makes to them: the reason stays where it
-// was written, and the exemption now has to be restated here, so a table that
-// quietly loses its reason is a red build rather than a paragraph nobody re-read.
+// This guard checks that an exempt table still exists; it does not prove the
+// exception's safety premise. The named directory, authentication and audit
+// controls need their own tests. #1331 tracks that remaining premise audit.
 var rlsExempt = map[string]string{
 	"identity_access_audit_tenants": "#1292: routing directory contains only tenant IDs; payload and pending records remain FORCE RLS scoped, with no directory API.",
 	"bff_session_audit_tenants":     "#1292: routing directory contains only tenant IDs; payload and pending records remain FORCE RLS scoped, with no directory API.",

@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -53,6 +54,7 @@ func TestEveryMeasureCarriesItsCoverage(t *testing.T) {
 	dir := filepath.Join(moduleRoot(t), "internal", "risk", "compute")
 
 	var bare []string
+	usedExempt := map[string]bool{}
 	seen := 0
 	for _, path := range goFilesInTree(t, dir) {
 		if strings.HasSuffix(path, "_test.go") {
@@ -66,28 +68,15 @@ func TestEveryMeasureCarriesItsCoverage(t *testing.T) {
 		rel, _ := filepath.Rel(moduleRoot(t), path)
 		rel = filepath.ToSlash(rel)
 
-		ast.Inspect(f, func(n ast.Node) bool {
-			fn, ok := n.(*ast.FuncDecl)
-			if !ok {
-				return true
+		count, builders := measureBuildersWithoutCoverage(f)
+		seen += count
+		for _, fn := range builders {
+			if _, exempt := bareMeasureExempt[fn]; exempt {
+				usedExempt[fn] = true
+				continue
 			}
-			ast.Inspect(fn, func(m ast.Node) bool {
-				lit, ok := m.(*ast.CompositeLit)
-				if !ok || !isMeasureLiteral(lit) {
-					return true
-				}
-				seen++
-				if hasField(lit, "Coverage") {
-					return true
-				}
-				if _, exempt := bareMeasureExempt[fn.Name.Name]; exempt {
-					return true
-				}
-				bare = append(bare, rel+" "+fn.Name.Name+" builds a v1.Measure with no Coverage")
-				return true
-			})
-			return false // one enclosing FuncDecl per literal is enough
-		})
+			bare = append(bare, rel+" "+fn+" builds a v1.Measure with no Coverage")
+		}
 	}
 
 	// NON-VACUITY. A parse that finds no Measure literals passes this guard no
@@ -112,14 +101,15 @@ func TestEveryMeasureCarriesItsCoverage(t *testing.T) {
 	// DEAD-ENTRY ARM. An exemption for a function that no longer builds a bare
 	// measure is a standing licence the next reader takes as a decision.
 	for fn := range bareMeasureExempt {
-		if !strings.Contains(measureBuilderNames(t, dir), fn) {
-			t.Errorf("bareMeasureExempt names %q, which builds no v1.Measure any more — delete it", fn)
+		if !usedExempt[fn] {
+			t.Errorf("bareMeasureExempt names %q, which builds no v1.Measure without Coverage — delete it", fn)
 		}
 	}
 }
 
-// bareMeasureExempt are functions that build a v1.Measure without Coverage, with
-// the reason. Two kinds only.
+// bareMeasureExempt are provider-free builders that need no per-input coverage.
+// Placeholder provenance and OMS refusal are separately tested in compute's
+// provenance_test.go and services/oms/internal/riskview/placeholder_test.go.
 var bareMeasureExempt = map[string]string{
 	// NO PROVIDER, SO NOTHING TO EXCLUDE. These read the portfolio directly; a
 	// zero from them is arithmetic over the whole book and is always a claim the
@@ -139,13 +129,6 @@ var bareMeasureExempt = map[string]string{
 	"Delta": "the net-exposure placeholder that EVERY deployment serves — arithmetic over the " +
 		"book, no provider to decline. Nothing overwrites it (#1055)",
 	"HHI": "concentration over the book itself — no provider can decline",
-
-	// DARK AND TRACKED. These DO have providers and DO have the #527 shape, and
-	// they are unregistered — which is a schedule, not a safeguard. Each is
-	// blocked on something with its own home, and the entry retires when the
-	// blocker does.
-	"greekMeasure": "#509/#345 — RegisterGreeks has no production caller; blocked on a VolProvider, " +
-		"which needs option premiums nothing in this estate persists. Widen this seam when it is wired.",
 
 	// structMeasure WAS HERE AND IS NOT ANY MORE (#572). Its entry said the
 	// schema had to come first — and that is still true of the schema ruling,
@@ -181,36 +164,59 @@ func hasField(lit *ast.CompositeLit, name string) bool {
 	return false
 }
 
-// measureBuilderNames returns the concatenated names of every function in dir
-// that builds a v1.Measure, for the dead-entry arm.
-func measureBuilderNames(t *testing.T, dir string) string {
-	t.Helper()
-	var b strings.Builder
-	for _, path := range goFilesInTree(t, dir) {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
+// measureBuildersWithoutCoverage uses the same scan for violations and live
+// exemptions. Adding Coverage retires an exemption even when the builder stays
+// in place; a similarly named function cannot keep that exemption alive (#1331).
+func measureBuildersWithoutCoverage(f *ast.File) (seen int, bare []string) {
+	ast.Inspect(f, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok {
+			return true
 		}
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			continue
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			fn, ok := n.(*ast.FuncDecl)
-			if !ok {
+		ast.Inspect(fn, func(m ast.Node) bool {
+			lit, ok := m.(*ast.CompositeLit)
+			if !ok || !isMeasureLiteral(lit) {
 				return true
 			}
-			ast.Inspect(fn, func(m ast.Node) bool {
-				if lit, ok := m.(*ast.CompositeLit); ok && isMeasureLiteral(lit) {
-					b.WriteString(fn.Name.Name)
-					b.WriteString(" ")
-				}
-				return true
-			})
-			return false
+			seen++
+			if !hasField(lit, "Coverage") {
+				bare = append(bare, fn.Name.Name)
+			}
+			return true
+		})
+		return false
+	})
+	return seen, bare
+}
+
+func TestMeasureCoverageExemptionTracksOnlyBareLiterals(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"bare", `func VaR99() v1.Measure { return v1.Measure{Value: "0"} }`, []string{"VaR99"}},
+		{"coverage retires exemption", `func VaR99() v1.Measure { return v1.Measure{Value: "0", Coverage: cov.Result()} }`, nil},
+		{"renamed builder cannot keep old exemption", `func PortfolioVaR99() v1.Measure { return v1.Measure{Value: "0"} }`, []string{"PortfolioVaR99"}},
+		{"covered sibling does not hide bare branch", `func VaR99() v1.Measure {
+			if ready { return v1.Measure{Coverage: cov.Result()} }
+			return v1.Measure{Value: "0"}
+		}`, []string{"VaR99"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := parser.ParseFile(token.NewFileSet(), "fixture.go", "package compute\n"+tc.body, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen, bare := measureBuildersWithoutCoverage(f)
+			if seen == 0 {
+				t.Fatal("fixture found no measure literals")
+			}
+			if !slices.Equal(bare, tc.want) {
+				t.Fatalf("builders requiring exemptions = %v, want %v", bare, tc.want)
+			}
 		})
 	}
-	return b.String()
 }
 
 // goFilesInTree lists the .go files directly under dir and its subdirectories.
