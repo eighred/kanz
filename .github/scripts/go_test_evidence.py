@@ -9,7 +9,8 @@ from collections import defaultdict
 
 BACKING = re.compile(
     r"\bTEST_(?:POSTGRES_URL|NATS_URL|KAFKA_BROKERS|REDIS_URL|"
-    r"NATS_MTLS_URL|NATS_MTLS_CERT_DIR|MFA_BROWSER_SCRIPT)\b"
+    r"NATS_MTLS_URL|NATS_MTLS_CERT_DIR|OMS_ON_BUS|SESSION_BROWSER_SCRIPT|"
+    r"MFA_(?:BROWSER_SCRIPT|PLAYWRIGHT|NODE|BFF|STATIC_DIR))\b"
 )
 BROWSER_PROOF = "Chromium shared-session inventory and revocation PASS"
 

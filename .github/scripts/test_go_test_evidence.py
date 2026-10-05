@@ -1,5 +1,7 @@
 import io
 import json
+from pathlib import Path
+import re
 import unittest
 
 from go_test_evidence import BACKING, BROWSER_PROOF, check
@@ -67,6 +69,15 @@ class EvidenceTests(unittest.TestCase):
         for text in ("", "not JSON\n", "[]\n", "{}\n", event("run", "TestUnfinished")):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 check(io.StringIO(text))
+
+    def test_every_supplied_race_dependency_is_recognized(self):
+        workflow = Path(__file__).resolve().parents[1] / "workflows" / "kanz-ci.yml"
+        race_step = workflow.read_text(encoding="utf-8").split("- name: Test (race)", 1)[1].split("# -p 1 IS REQUIRED", 1)[0]
+        supplied = re.findall(r"^\s+(TEST_[A-Z_]+):", race_step, re.MULTILINE)
+        self.assertGreaterEqual(len(supplied), 10)
+        for variable in supplied:
+            with self.subTest(variable=variable):
+                self.assertIsNotNone(BACKING.fullmatch(variable))
 
     def test_browser_proof_is_still_required(self):
         problems, _, _ = check(io.StringIO(event("pass")))
