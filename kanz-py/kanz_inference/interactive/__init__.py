@@ -10,9 +10,10 @@ the same ``Model`` protocol but with different concurrency models:
   pressure shows up as admission rejections (DEGRADED responses
   with degraded_reason = "pool_saturated").
 
-The two paths are PROCESS-ISOLATED per KANZ_BRAIN — a burst of
-interactive requests must not starve the streaming worker, and a
-slow streaming workload must not delay interactive calls.
+The current entrypoint hosts both paths in one asyncio process with a shared
+model router. Interactive admission is bounded; the streaming worker is a
+separate task. Cross-path interference and latency budgets need measured
+proof before an isolation claim (#1348).
 """
 
 from kanz_inference.interactive.servicer import (

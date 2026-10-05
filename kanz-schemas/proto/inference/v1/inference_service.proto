@@ -14,11 +14,11 @@ syntax = "proto3";
 // code. The replay-determinism property (EVT-21d-style) extends
 // across transports.
 //
-// # Target latency
+// # Latency and capacity
 //
-// p99 < 50ms per KANZ_BRAIN. PRED-07's circuit breaker fails over
-// to the streaming path's cache when the inference layer can't hold
-// that budget.
+// No repository-wide p99 budget is certified for this RPC. The Go client
+// applies its own deadline and circuit breaker; #1348 owns a measured
+// concurrent budget for the shared streaming and interactive process.
 package inference.v1;
 
 import "inference/v1/feature_vector.proto";
