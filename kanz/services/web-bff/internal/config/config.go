@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eighred/kanz/internal/auditdelivery"
 	"github.com/eighred/kanz/internal/env"
 	"github.com/eighred/kanz/pkg/secret"
 	"github.com/eighred/kanz/services/web-bff/internal/session"
@@ -23,8 +24,9 @@ import (
 
 // Config is the resolved BFF configuration.
 type Config struct {
-	Listen   string
-	LogLevel slog.Level
+	AuditDelivery auditdelivery.Config
+	Listen        string
+	LogLevel      slog.Level
 
 	// Issuer is the Eighred SSO issuer base URL the login flow runs against.
 	// Endpoints are discovered from {Issuer}/.well-known/openid-configuration.
@@ -102,6 +104,7 @@ type Config struct {
 // production-safe defaults, and validates the required values.
 func Load() (Config, error) {
 	cfg := Config{
+		AuditDelivery: auditdelivery.Config{NATSURL: os.Getenv("WEB_BFF_AUDIT_NATS_URL"), SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET")},
 		Listen:        env.Or("WEB_BFF_LISTEN", ":8084"),
 		LogLevel:      env.ParseLevelOr(os.Getenv("WEB_BFF_LOG_LEVEL"), slog.LevelInfo),
 		Issuer:        strings.TrimRight(os.Getenv("WEB_BFF_SSO_ISSUER"), "/"),

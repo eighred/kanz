@@ -98,6 +98,8 @@ func (t EntryType) String() string {
 // accounting.v1.LedgerEntry. Money and quantity are exact (*big.Rat); the journal
 // is append-only, so a correction is a new offsetting Event, never a mutation.
 type Event struct {
+	journalReadPosition int64 // store-issued complete read receipt; never financial history
+	actionStage         uint8 // replay-only: 1 entitlement, 2 confirmed payment; never persisted
 	// ExecutionEvidence preserves exact venue execution economics and recovery
 	// provenance; the immutable journal must retain more than a dedup alias.
 	ExecutionEvidence []byte
@@ -178,6 +180,7 @@ const (
 // Action is the parameters of a corporate action, applied at fold time against
 // the affected position. The package corpact builds these from a CorporateAction.
 type Action struct {
+	ActionLifecycle
 	Kind CorpActKind
 
 	// Ratio is the share-conversion factor for a SPLIT (2.0 = 2:1) or a MERGER
@@ -221,10 +224,15 @@ func newPosition() *Position { return costbasis.NewLot() }
 // The settled fold is only as good as what the producers assert, so a caller that
 // reads it MUST check SettlementBasisComplete first. See SettlementBasis.
 type Book struct {
-	PortfolioID string
-	Positions   map[string]*Position
-	Cash        map[string]*big.Rat
-	Accrued     map[string]*big.Rat
+	commitPrefix    bool                // source entries prove a complete immutable commit prefix
+	journalPosition int64               // count of immutable source entries, not replay stages
+	nextEffective   time.Time           // next known economic effect beyond the replay cutoff
+	actionCount     int64               // immutable action records represented by this fold
+	entitlements    map[string]*big.Rat // replay-local; any action tail forces full replay
+	PortfolioID     string
+	Positions       map[string]*Position
+	Cash            map[string]*big.Rat
+	Accrued         map[string]*big.Rat
 
 	// SettledPositions and SettledCash are the settled-basis fold of the same
 	// journal: an entry contributes to them only when it asserts
@@ -267,6 +275,7 @@ func NewBook(portfolioID string) *Book {
 		Positions:        make(map[string]*Position),
 		Cash:             make(map[string]*big.Rat),
 		Accrued:          make(map[string]*big.Rat),
+		entitlements:     make(map[string]*big.Rat),
 		SettledPositions: make(map[string]*Position),
 		SettledCash:      make(map[string]*big.Rat),
 		// An empty book has folded nothing, so its empty settled view is a
@@ -301,12 +310,21 @@ func (b *Book) Apply(e *Event) {
 	if e == nil || e.EntryID == "" || (e.PortfolioID != "" && e.PortfolioID != b.PortfolioID) {
 		return
 	}
+	if e.Action != nil && e.Action.Cancelled {
+		return
+	}
 	if b.seen[e.EntryID] {
 		return
 	}
 	b.seen[e.EntryID] = true
+	b.commitPrefix = false // a manual fold cannot retain a store-read checkpoint receipt
 	if e.Effective.After(b.maxEffective) {
 		b.maxEffective = e.Effective
+	}
+
+	if e.Type == EntryCorporateAction && e.Action != nil && (e.Action.Kind == CorpActDividend || e.Action.Kind == CorpActCoupon) {
+		b.foldIncome(e)
+		return
 	}
 
 	// THE BASIS IS COUNTED BEFORE ANY LEG IS LOOKED AT, and before the
@@ -395,14 +413,6 @@ func (f basisFold) foldCorpAct(instrument string, a *Action) {
 		l.Qty = new(big.Rat).Mul(l.Qty, a.Ratio)
 		l.AvgCost = new(big.Rat).Quo(l.AvgCost, a.Ratio)
 
-	case CorpActDividend, CorpActCoupon:
-		if a.PerUnit == nil {
-			return
-		}
-		// Cash on the held quantity (absolute: a long receives, a short pays).
-		cash := new(big.Rat).Mul(l.Qty, a.PerUnit)
-		add(f.cash, a.Currency, cash)
-
 	case CorpActMerger:
 		if a.Target == "" || a.Ratio == nil {
 			return
@@ -476,6 +486,16 @@ func Replay(portfolioID string, events []*Event) *Book {
 	for _, e := range sortedFor(events, time.Time{}, time.Time{}, false) {
 		b.Apply(e)
 	}
+	if b.maxEffective.IsZero() {
+		for _, e := range events {
+			if e != nil && e.PortfolioID == portfolioID && e.Knowledge.After(b.maxEffective) {
+				b.maxEffective = e.Knowledge
+			}
+		}
+	}
+	b.journalPosition = countJournalEntries(portfolioID, events, time.Time{})
+	b.commitPrefix = hasJournalReadPosition(portfolioID, events, b.journalPosition)
+	b.actionCount = countActionEntries(portfolioID, events, time.Time{})
 	return b
 }
 
@@ -486,10 +506,31 @@ func Replay(portfolioID string, events []*Event) *Book {
 // the book had not yet learned of.
 func ReplayAsOf(portfolioID string, events []*Event, effectiveAsOf, knowledgeAsOf time.Time) *Book {
 	b := NewBook(portfolioID)
-	for _, e := range sortedFor(events, effectiveAsOf, knowledgeAsOf, true) {
+	b.applyUntil(events, effectiveAsOf, knowledgeAsOf)
+	if b.maxEffective.IsZero() {
+		b.maxEffective = effectiveAsOf
+	}
+	b.journalPosition = countJournalEntries(portfolioID, events, knowledgeAsOf)
+	b.commitPrefix = hasJournalReadPosition(portfolioID, events, b.journalPosition)
+	b.actionCount = countActionEntries(portfolioID, events, knowledgeAsOf)
+	return b
+}
+
+// applyUntil retains the next due effect so a current checkpoint can be reused
+// until that instant, rather than full-scanning throughout an announcement lead time.
+func (b *Book) applyUntil(events []*Event, effectiveAsOf, knowledgeAsOf time.Time) {
+	for _, e := range sortedFor(events, time.Time{}, knowledgeAsOf, true) {
+		if e.PortfolioID != "" && e.PortfolioID != b.PortfolioID {
+			continue
+		}
+		if !effectiveAsOf.IsZero() && e.Effective.After(effectiveAsOf) {
+			if b.nextEffective.IsZero() || e.Effective.Before(b.nextEffective) {
+				b.nextEffective = e.Effective
+			}
+			continue
+		}
 		b.Apply(e)
 	}
-	return b
 }
 
 // sortedFor returns the events, optionally filtered to those at or before the
@@ -497,7 +538,11 @@ func ReplayAsOf(portfolioID string, events []*Event, effectiveAsOf, knowledgeAsO
 // knowledge, then entry id).
 func sortedFor(events []*Event, effBound, knowBound time.Time, filter bool) []*Event {
 	out := make([]*Event, 0, len(events))
-	for _, e := range events {
+	bound := time.Time{}
+	if filter {
+		bound = knowBound
+	}
+	for _, e := range actionEvents(events, bound) {
 		if filter {
 			if !effBound.IsZero() && e.Effective.After(effBound) {
 				continue
@@ -534,4 +579,31 @@ func orZero(r *big.Rat) *big.Rat {
 		return new(big.Rat)
 	}
 	return r
+}
+
+// Full reads contain each immutable source entry once. Revisions and future
+// effects count, derived payment stages do not. Under the append lock this is
+// the dense commit position, including the unmodified legacy prefix.
+func countJournalEntries(portfolio string, events []*Event, known time.Time) int64 {
+	seen := make(map[string]struct{}, len(events))
+	for _, e := range events {
+		if e != nil && e.PortfolioID == portfolio && e.actionStage != 2 && (known.IsZero() || !e.Knowledge.After(known)) {
+			seen[e.EntryID] = struct{}{}
+		}
+	}
+	return int64(len(seen))
+}
+
+// A subset or mixed read cannot claim the complete read's cursor just because
+// it contains N entries. The receipt is private, attached only by Store reads.
+func hasJournalReadPosition(portfolio string, events []*Event, position int64) bool {
+	if position <= 0 {
+		return false
+	}
+	for _, e := range events {
+		if e != nil && e.PortfolioID == portfolio && e.actionStage != 2 && e.journalReadPosition != position {
+			return false
+		}
+	}
+	return true
 }

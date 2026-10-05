@@ -93,13 +93,13 @@ func proposeBody(currency string) string {
 	return `{"portfolio_id":"PF","instruments":["A","B"],
 		"covariance":[[0.04,0],[0,0.04]],
 		"objective":{"Type":1},
-		"current_weights":{"A":1.0},"nav":100000,
-		"prices":{"A":10,"B":10},"currency":"` + currency + `"}`
+		"current_weights":{"A":"1.0"},"nav":"100000","threshold":"0.005",
+		"prices":{"A":"10","B":"10"},"currency":"` + currency + `"}`
 }
 
-func decodeProposal(t *testing.T, body []byte) optimization.RebalanceProposal {
+func decodeProposal(t *testing.T, body []byte) optimization.ExactProposal {
 	t.Helper()
-	var p optimization.RebalanceProposal
+	var p optimization.ExactProposal
 	if err := json.Unmarshal(body, &p); err != nil {
 		t.Fatalf("decode proposal: %v — body %s", err, body)
 	}
@@ -113,7 +113,7 @@ func TestPropose_AMandateThePortfolioSatisfiesReturnsFeasible(t *testing.T) {
 		"acme": concentrationMandate("acme", "PF", 60),
 	}})
 
-	rec := asPrincipal(t, s, http.MethodPost, "/v1/propose", proposeBody("USD"), "user:pm")
+	rec := asPrincipal(t, s, http.MethodPost, "/v2/propose", proposeBody("USD"), "user:pm")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
 	}
@@ -136,7 +136,7 @@ func TestPropose_AMandateThePortfolioBreachesReturnsInfeasible(t *testing.T) {
 		"acme": concentrationMandate("acme", "PF", 40),
 	}})
 
-	rec := asPrincipal(t, s, http.MethodPost, "/v1/propose", proposeBody("USD"), "user:pm")
+	rec := asPrincipal(t, s, http.MethodPost, "/v2/propose", proposeBody("USD"), "user:pm")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
 	}
@@ -158,7 +158,7 @@ func TestPropose_AnotherTenantsMandateDoesNotGovern(t *testing.T) {
 		"globex": concentrationMandate("globex", "PF", 40), // would breach, if it applied
 	}})
 
-	rec := asPrincipal(t, s, http.MethodPost, "/v1/propose", proposeBody("USD"), "user:pm")
+	rec := asPrincipal(t, s, http.MethodPost, "/v2/propose", proposeBody("USD"), "user:pm")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
 	}
@@ -180,7 +180,7 @@ func TestPropose_AnotherTenantsMandateDoesNotGovern(t *testing.T) {
 func TestPropose_AnUnreadableMandateSourceRefuses(t *testing.T) {
 	s := gatedServer(t, staticMandates{err: errors.New("registry unavailable")})
 
-	rec := asPrincipal(t, s, http.MethodPost, "/v1/propose", proposeBody("USD"), "user:pm")
+	rec := asPrincipal(t, s, http.MethodPost, "/v2/propose", proposeBody("USD"), "user:pm")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("got %d, want 503 — an unreadable mandate source must not produce a proposal: %s",
 			rec.Code, rec.Body.String())
@@ -203,7 +203,7 @@ func TestPropose_EveryTerminalMandateSentinelRefusesOnce(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := gatedServer(t, staticMandates{err: sentinel})
-			rec := asPrincipal(t, s, http.MethodPost, "/v1/propose", proposeBody("USD"), "user:pm")
+			rec := asPrincipal(t, s, http.MethodPost, "/v2/propose", proposeBody("USD"), "user:pm")
 			if rec.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("got %d, want 422 — %s is terminal, and a 503 invites a retry against "+
 					"data that cannot change: %s", rec.Code, name, rec.Body.String())
@@ -220,7 +220,7 @@ func TestPropose_AGoverningMandateNeedsTheCurrency(t *testing.T) {
 		"acme": concentrationMandate("acme", "PF", 60),
 	}})
 
-	rec := asPrincipal(t, s, http.MethodPost, "/v1/propose", proposeBody(""), "user:pm")
+	rec := asPrincipal(t, s, http.MethodPost, "/v2/propose", proposeBody(""), "user:pm")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400 for a governed portfolio with no currency: %s", rec.Code, rec.Body.String())
 	}
@@ -230,7 +230,7 @@ func TestPropose_AGoverningMandateNeedsTheCurrency(t *testing.T) {
 // honest: no mandate source, so no verdict, so /v1/orders still declines. A
 // deployment that has not wired a mandate stream is no less safe than before.
 func TestPropose_WithNoMandateSourceStaysUnchecked(t *testing.T) {
-	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v1/propose", proposeBody("USD"), "user:pm")
+	rec := asPrincipal(t, newTestServer(), http.MethodPost, "/v2/propose", proposeBody("USD"), "user:pm")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("propose: got %d body %s", rec.Code, rec.Body.String())
 	}
@@ -243,7 +243,7 @@ func TestPropose_WithNoMandateSourceStaysUnchecked(t *testing.T) {
 // The propose route now needs an identity, because a mandate is resolved per
 // TENANT and the tenant comes from the principal the gateway injects.
 func TestPropose_WithoutAPrincipalIsRefused(t *testing.T) {
-	rec := do(t, newTestServer(), http.MethodPost, "/v1/propose", proposeBody("USD"))
+	rec := do(t, newTestServer(), http.MethodPost, "/v2/propose", proposeBody("USD"))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("got %d, want 401 — whose mandate governs a portfolio cannot be answered without a principal",
 			rec.Code)

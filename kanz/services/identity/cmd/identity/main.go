@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eighred/kanz/internal/auditdelivery"
 	"github.com/eighred/kanz/internal/clientip"
 	"github.com/eighred/kanz/internal/identity"
 	"github.com/eighred/kanz/internal/lifecycle"
@@ -84,6 +85,12 @@ func run() int {
 		return 2
 	}
 	defer pool.Close()
+	stopAudit, auditErr := auditdelivery.Start(ctx, pool, auditdelivery.Identity, cfg.AuditDelivery, obs.Registry, logger, fatal.Raise)
+	if auditErr != nil {
+		logger.Error("authority audit initialization failed", "err", auditErr)
+		return 2
+	}
+	defer stopAudit()
 
 	key, err := signingkey.Load(cfg.SigningKeyFile, cfg.AllowEphemeralKey, logger)
 	if err != nil {
@@ -147,8 +154,8 @@ func run() int {
 	if cfg.AdminRole != "" {
 		// Access/status mutations commit canonical DecisionLog evidence in the
 		// PostgreSQL transaction. Stdout is an additional operational projection.
-		// Central audit delivery must consume the durable journal; a best-effort
-		// BusRecorder alone would not preserve the commit/evidence guarantee.
+		// The authority delivery worker projects that journal after commit;
+		// its pending queue preserves evidence across transport outages.
 		opts = append(opts, server.WithProvisioning(server.Provisioning{
 			Verifier: signer, Store: store, AdminRole: cfg.AdminRole, InviteTTL: cfg.InviteTTL,
 			InviteDomains: cfg.InviteDomains,

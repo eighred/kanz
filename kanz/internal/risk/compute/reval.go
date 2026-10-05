@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	decutil "github.com/eighred/kanz/internal/dec"
+	"math"
 	"time"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -98,12 +99,16 @@ func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf
 	} else {
 		ok = false
 	}
-	if !ok || vol <= 0 {
+	if !ok || vol <= 0 || math.IsNaN(vol) || math.IsInf(vol, 0) {
 		skipOption(rv.providers, instrumentID, SkipNoVol)
 		return nil, false
 	}
 	r := rv.providers.Curve.Rate(ttm)
 	basePrice := pricing.Price(spec.Type, spec.Exercise, spot, spec.Strike, ttm, r, 0, vol)
+	if math.IsNaN(basePrice) || math.IsInf(basePrice, 0) {
+		skipOption(rv.providers, instrumentID, SkipInvalidPricing)
+		return nil, false
+	}
 	if basePrice <= 0 {
 		return nil, false // cannot scale off a zero base
 	}
@@ -117,5 +122,9 @@ func (rv *Revaluer) RevalueOption(ctx context.Context, instrumentID string, asOf
 
 	ratio := shockedPrice / basePrice
 	newAmount := decutil.Float64Or(baseMV.GetAmount(), 0) * ratio
+	if !representablePricingAmount(newAmount, revalMoneyExp) {
+		skipOption(rv.providers, instrumentID, SkipInvalidPricing)
+		return nil, false
+	}
 	return &commonpb.Money{Amount: floatToDecimal(newAmount, revalMoneyExp), CurrencyCode: baseMV.GetCurrencyCode()}, true
 }

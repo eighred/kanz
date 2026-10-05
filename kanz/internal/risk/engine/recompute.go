@@ -144,6 +144,7 @@ type Recomputer struct {
 	logger    *slog.Logger
 	metrics   *Metrics
 	volModel  compute.VolModel
+	evaluator Evaluator
 
 	// baseCtx scopes publishes + the worker; when it is canceled (hard
 	// shutdown) the worker exits and in-flight recomputes skip the publish.
@@ -505,12 +506,26 @@ func (r *Recomputer) recompute(id v1.PortfolioID) {
 	}
 	start := time.Now()
 	compute.PopulateUncertainty(r.baseCtx, p, r.volModel)
-	es := compute.ComputeExposure(p)
-	ms := compute.ComputeMeasures(p, r.registry, nil)
+	var es *domain.ExposureSet
+	var ms *domain.MeasureSet
+	if r.evaluator != nil {
+		result, err := r.evaluator.Compute(r.baseCtx, p, nil)
+		if err != nil {
+			r.logger.Error("retain risk evaluation failed", "portfolio", id, "err", err)
+			r.markAwaitingEmit(id)
+			r.metrics.observeRecompute(time.Since(start), err)
+			return
+		}
+		es, ms = result.Exposure, result.Measures
+	} else {
+		es = compute.ComputeExposure(p)
+		ms = compute.ComputeMeasures(p, r.registry, nil)
+	}
 	r.cache.StoreExposure(id, es)
 	r.cache.StoreMeasures(id, ms)
 
 	if r.publisher == nil {
+		r.clearAwaitingEmit(id)
 		r.metrics.observeRecompute(time.Since(start), nil)
 		return
 	}

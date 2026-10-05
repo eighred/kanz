@@ -107,7 +107,7 @@ func stageGauge(t *testing.T, reg *prometheus.Registry, stage string) (float64, 
 func TestSettlementPlanePostureSeedsEveryStageAtZero(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	logs := &postureLogs{}
-	settlementPlanePosture(reg, logs.logger(), nil)
+	settlementPlanePosture(reg, logs.logger(), nil, settlementDeferred)
 
 	fams, err := reg.Gather()
 	if err != nil {
@@ -258,7 +258,7 @@ func TestSettlementPlanePostureCoversEveryPosttradeEntrypoint(t *testing.T) {
 // exist, and the fact that empty means unmonitored rather than clean.
 func TestSettlementPlanePostureWarnsThatFailDetectionIsNotRunning(t *testing.T) {
 	logs := &postureLogs{}
-	settlementPlanePosture(prometheus.NewRegistry(), logs.logger(), nil)
+	settlementPlanePosture(prometheus.NewRegistry(), logs.logger(), nil, settlementDeferred)
 
 	warn := logs.atLevel(slog.LevelWarn)
 	if warn == "" {
@@ -299,7 +299,7 @@ func TestSettlementPlanePostureWarnsThatFailDetectionIsNotRunning(t *testing.T) 
 func TestSettlementPlanePostureReportsAWiredStage(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	logs := &postureLogs{}
-	settlementPlanePosture(reg, logs.logger(), map[string]bool{"fail_publication": true})
+	settlementPlanePosture(reg, logs.logger(), map[string]bool{"fail_publication": true}, settlementDeferred)
 
 	if v, ok := stageGauge(t, reg, "fail_publication"); !ok || v != 1 {
 		t.Errorf("fail_publication = %v (present=%v), want 1", v, ok)
@@ -326,7 +326,7 @@ func TestSettlementPlanePostureIsQuietWhenEverythingRuns(t *testing.T) {
 	for _, s := range settlementStages {
 		running[s.stage] = true
 	}
-	settlementPlanePosture(reg, logs.logger(), running)
+	settlementPlanePosture(reg, logs.logger(), running, settlementDeferred)
 
 	if warn := logs.atLevel(slog.LevelWarn); warn != "" {
 		t.Errorf("a fully wired plane still WARNs:\n%s", warn)
@@ -338,6 +338,75 @@ func TestSettlementPlanePostureIsQuietWhenEverythingRuns(t *testing.T) {
 	for _, s := range settlementStages {
 		if v, ok := stageGauge(t, reg, s.stage); !ok || v != 1 {
 			t.Errorf("%s = %v (present=%v), want 1", s.stage, v, ok)
+		}
+	}
+}
+
+func TestSettlementApplicabilityDoesNotClaimStageWiring(t *testing.T) {
+	for _, tc := range []struct {
+		model settlementModel
+		want  string
+		warn  bool
+	}{
+		{settlementDirectSpot, "not_required", false},
+		{settlementDeferred, "required", true},
+		{settlementUnknown, "unknown", true},
+		{"", "unknown", true},
+		{"unrecognized", "unknown", true},
+	} {
+		t.Run(string(tc.model), func(t *testing.T) {
+			reg, logs := prometheus.NewRegistry(), &postureLogs{}
+			settlementPlanePosture(reg, logs.logger(), nil, tc.model)
+			families, err := reg.Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			values := map[string]float64{}
+			for _, family := range families {
+				if family.GetName() != settlementApplicabilityMetric {
+					continue
+				}
+				for _, metric := range family.GetMetric() {
+					for _, label := range metric.GetLabel() {
+						if label.GetName() == "status" {
+							values[label.GetValue()] = metric.GetGauge().GetValue()
+						}
+					}
+				}
+			}
+			if len(values) != 3 {
+				t.Fatalf("missing applicability states: %v", values)
+			}
+			for status, value := range values {
+				want := 0.0
+				if status == tc.want {
+					want = 1
+				}
+				if value != want {
+					t.Fatalf("%s=%v want %v", status, value, want)
+				}
+			}
+			for _, stage := range settlementStages {
+				if value, present := stageGauge(t, reg, stage.stage); !present || value != 0 {
+					t.Fatalf("applicability fabricated running stage %s: %v/%v", stage.stage, present, value)
+				}
+			}
+			if (logs.atLevel(slog.LevelWarn) != "") != tc.warn {
+				t.Fatal(logs.all())
+			}
+			if tc.model == settlementDirectSpot && !strings.Contains(logs.all(), "P0 launch gates remain mandatory") {
+				t.Fatal("build capability was reported without its launch-readiness boundary")
+			}
+		})
+	}
+}
+
+func TestSettlementApplicabilityWarnsOnInconsistentWiring(t *testing.T) {
+	for _, model := range []settlementModel{settlementDirectSpot, settlementUnknown} {
+		logs := &postureLogs{}
+		settlementPlanePosture(prometheus.NewRegistry(), logs.logger(), map[string]bool{"fail_publication": true}, model)
+		if logs.atLevel(slog.LevelWarn) == "" {
+			t.Fatalf("inconsistent model %s reported as healthy", model)
 		}
 	}
 }

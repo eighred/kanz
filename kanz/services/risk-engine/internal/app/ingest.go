@@ -14,6 +14,7 @@ import (
 
 	"github.com/eighred/kanz/internal/platform/subject"
 	"github.com/eighred/kanz/internal/risk/ingest"
+	"github.com/eighred/kanz/internal/risk/publish"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
@@ -53,6 +54,7 @@ var stateSubjects = []string{
 type Ingest struct {
 	consumer *bus.Consumer
 	handler  bus.EventHandler
+	artifact bus.EventHandler
 	group    string
 	logger   *slog.Logger
 }
@@ -61,7 +63,7 @@ type Ingest struct {
 // bus.Consumer (caller chooses transport + retry/DLQ policy); applier is
 // the engine's state.Store. group defaults to DefaultConsumerGroup when
 // empty.
-func NewIngest(consumer *bus.Consumer, applier ingest.Applier, group string, logger *slog.Logger) (*Ingest, error) {
+func NewIngest(consumer *bus.Consumer, applier ingest.Applier, group string, logger *slog.Logger, artifacts ...bus.EventHandler) (*Ingest, error) {
 	if consumer == nil {
 		return nil, errors.New("app: consumer is nil")
 	}
@@ -75,7 +77,12 @@ func NewIngest(consumer *bus.Consumer, applier ingest.Applier, group string, log
 	if group == "" {
 		group = DefaultConsumerGroup
 	}
+	var artifact bus.EventHandler
+	if len(artifacts) > 0 {
+		artifact = artifacts[0]
+	}
 	return &Ingest{
+		artifact: artifact,
 		consumer: consumer,
 		handler:  ingestor.Handler,
 		group:    group,
@@ -98,12 +105,20 @@ func (i *Ingest) Run(ctx context.Context) error {
 		once     sync.Once
 		firstErr error
 	)
-	for _, subject := range stateSubjects {
+	subjects := append([]string(nil), stateSubjects...)
+	if i.artifact != nil {
+		subjects = append(subjects, publish.EventTypeCurveCalibrated, publish.EventTypeFactorModelFitted)
+	}
+	for _, subject := range subjects {
 		wg.Add(1)
 		go func(subject string) {
 			defer wg.Done()
 			i.logger.Info("risk-engine subscribing", "subject", subject, "group", i.group)
-			err := i.consumer.Subscribe(ctx, subject, i.group, i.handler)
+			handler := i.handler
+			if subject == publish.EventTypeCurveCalibrated || subject == publish.EventTypeFactorModelFitted {
+				handler = i.artifact
+			}
+			err := i.consumer.Subscribe(ctx, subject, i.group, handler)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				once.Do(func() {
 					firstErr = fmt.Errorf("subscribe %s: %w", subject, err)

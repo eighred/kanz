@@ -58,6 +58,7 @@ type EngineImpl struct {
 	volModel   compute.VolModel
 	classifier factor.Classifier
 	ownership  Ownership
+	evaluator  Evaluator
 }
 
 // Ownership is the query side of the shard ring (#110): which portfolios may
@@ -154,28 +155,27 @@ func (e *EngineImpl) Exposure(ctx context.Context, req v1.ExposureRequest) (v1.E
 	if req.PortfolioID == "" {
 		return v1.ExposureResponse{}, v1.ErrInvalidRequest
 	}
-	// A PINNED QUERY IS REFUSED, NOT QUIETLY ANSWERED FROM LIVE STATE (#859).
-	//
-	// exposureSet below reads store.Snapshot(id) — the latest applied state, and
-	// the only state this engine holds. Answering a historical as_of from it
-	// returns today's book stamped with today's timestamp, which is not a
-	// slightly-wrong answer but a confidently wrong one: internally consistent,
-	// unflagged, and indistinguishable from the real thing to a reconciliation
-	// or a regulatory as-of report.
-	//
-	// REFUSED HERE RATHER THAN AT THE GATEWAY, because the gateway is not the
-	// only caller. services/mcp and services/copilot build these requests
-	// directly against the gRPC surface, and a boundary check would leave them
-	// with the silent answer. EngineImpl is the single v1.Engine implementation,
-	// so this is the one place every path converges.
 	if !req.AsOf.IsZero() {
-		return v1.ExposureResponse{}, v1.ErrAsOfNotSupported
+		if e.evaluator == nil {
+			return v1.ExposureResponse{}, v1.ErrAsOfNotSupported
+		}
+		if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
+			return v1.ExposureResponse{}, err
+		}
+		result, err := e.evaluator.Replay(ctx, req.PortfolioID, req.AsOf)
+		if err != nil {
+			return v1.ExposureResponse{}, err
+		}
+		return v1.ExposureResponse{PortfolioID: req.PortfolioID, AsOf: result.Exposure.AsOf(), Set: result.Exposure, SourcePosition: result.SourcePosition}, nil
 	}
 	if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
 		return v1.ExposureResponse{}, err
 	}
 
-	es, pos, ok := e.exposureSet(ctx, req.PortfolioID)
+	es, pos, ok, err := e.exposureSet(ctx, req.PortfolioID)
+	if err != nil {
+		return v1.ExposureResponse{}, err
+	}
 	if !ok {
 		return v1.ExposureResponse{}, v1.ErrPortfolioNotFound
 	}
@@ -199,18 +199,28 @@ func (e *EngineImpl) Measures(ctx context.Context, req v1.MeasuresRequest) (v1.M
 	if req.PortfolioID == "" {
 		return v1.MeasuresResponse{}, v1.ErrInvalidRequest
 	}
-	// Refused for the reason Exposure gives above (#859), and it matters more
-	// here: a MeasureSet carries VaR and the sensitivities a desk hedges on, so
-	// a pinned query answered from live state hands back today's risk numbers
-	// under a historical label.
 	if !req.AsOf.IsZero() {
-		return v1.MeasuresResponse{}, v1.ErrAsOfNotSupported
+		if e.evaluator == nil {
+			return v1.MeasuresResponse{}, v1.ErrAsOfNotSupported
+		}
+		if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
+			return v1.MeasuresResponse{}, err
+		}
+		result, err := e.evaluator.Replay(ctx, req.PortfolioID, req.AsOf)
+		if err != nil {
+			return v1.MeasuresResponse{}, err
+		}
+		served := filterMeasures(result.Measures, req.Measures)
+		return v1.MeasuresResponse{PortfolioID: req.PortfolioID, AsOf: served.AsOf(), Set: served, SourcePosition: result.SourcePosition, QualityFlags: withCoverageFlags(nil, served)}, nil
 	}
 	if err := e.refuseIfNotOwned(req.PortfolioID); err != nil {
 		return v1.MeasuresResponse{}, err
 	}
 
-	full, pos, ok := e.measureSet(ctx, req.PortfolioID)
+	full, pos, ok, err := e.measureSet(ctx, req.PortfolioID)
+	if err != nil {
+		return v1.MeasuresResponse{}, err
+	}
 	if !ok {
 		return v1.MeasuresResponse{}, v1.ErrPortfolioNotFound
 	}
@@ -407,9 +417,18 @@ func (e *EngineImpl) refuseIfNotOwned(id v1.PortfolioID) error {
 // value on a store miss. The position is nil on the cache-fallback path: a
 // cached value has no live portfolio in hand, so no log anchor. The bool is
 // false only when neither the store nor the cache knows the portfolio.
-func (e *EngineImpl) exposureSet(ctx context.Context, id v1.PortfolioID) (*domain.ExposureSet, *commonpb.LogPosition, bool) {
+func (e *EngineImpl) exposureSet(ctx context.Context, id v1.PortfolioID) (*domain.ExposureSet, *commonpb.LogPosition, bool, error) {
 	if p, found := e.store.Snapshot(id); found {
 		compute.PopulateUncertainty(ctx, p, e.volModel)
+		if e.evaluator != nil {
+			result, err := e.evaluator.Compute(ctx, p, e.classifier)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			e.cache.StoreExposure(id, result.Exposure)
+			e.cache.StoreMeasures(id, result.Measures)
+			return result.Exposure, result.SourcePosition, true, nil
+		}
 		// THE SECTOR DIMENSION IS SERVED ONLY WHEN IT CAN BE RESOLVED (#640).
 		// factor.ComputeExposure layers ExposureBySector onto the instrument and
 		// currency dimensions compute.ComputeExposure produces; this branch used
@@ -427,23 +446,32 @@ func (e *EngineImpl) exposureSet(ctx context.Context, id v1.PortfolioID) (*domai
 			es = factor.ComputeExposure(ctx, p, e.classifier)
 		}
 		e.cache.StoreExposure(id, es)
-		return es, p.LogPosition(), true
+		return es, p.LogPosition(), true, nil
 	}
 	es, ok := e.cache.LookupExposure(id)
-	return es, nil, ok
+	return es, nil, ok, nil
 }
 
 // measureSet mirrors exposureSet for the full measure set, returning the
 // same live snapshot LogPosition (nil on the cache-fallback path).
-func (e *EngineImpl) measureSet(ctx context.Context, id v1.PortfolioID) (*domain.MeasureSet, *commonpb.LogPosition, bool) {
+func (e *EngineImpl) measureSet(ctx context.Context, id v1.PortfolioID) (*domain.MeasureSet, *commonpb.LogPosition, bool, error) {
 	if p, found := e.store.Snapshot(id); found {
 		compute.PopulateUncertainty(ctx, p, e.volModel)
+		if e.evaluator != nil {
+			result, err := e.evaluator.Compute(ctx, p, e.classifier)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			e.cache.StoreExposure(id, result.Exposure)
+			e.cache.StoreMeasures(id, result.Measures)
+			return result.Measures, result.SourcePosition, true, nil
+		}
 		ms := compute.ComputeMeasures(p, e.registry, nil)
 		e.cache.StoreMeasures(id, ms)
-		return ms, p.LogPosition(), true
+		return ms, p.LogPosition(), true, nil
 	}
 	ms, ok := e.cache.LookupMeasures(id)
-	return ms, nil, ok
+	return ms, nil, ok, nil
 }
 
 // latestAsOf is the max AsOf across all known portfolios, or the zero

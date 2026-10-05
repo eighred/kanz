@@ -6,12 +6,8 @@
 // optimize/propose path. A real deployment wires the bus publisher + pre-trade
 // gate behind the bridge seams at the composition root.
 //
-// IT CANNOT MATERIALIZE ANYTHING TODAY, AND THAT IS DELIBERATE (#646). No
-// mandate reaches this service — not in the request, not from a registry — so
-// /v1/propose returns proposals whose MandateStatus is UNCHECKED, and /v1/orders
-// refuses to turn an unchecked proposal into order commands. The route is kept,
-// and refuses out loud, rather than emitting capital commands certified by a
-// check that never ran; Server.materialize carries what wiring retires it.
+// The v2 proposal contract uses exact financial values and is read-only.
+// The retired v1 proposal contract refuses; order admission remains independent.
 package server
 
 import (
@@ -33,6 +29,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 
 	"github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/optimization"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/auth"
@@ -56,6 +53,7 @@ type Server struct {
 	logger    *slog.Logger
 	readiness *Readiness
 	mux       *http.ServeMux
+	solves    chan struct{}
 
 	// freshness bounds how old a proposal's inputs may be when it becomes orders
 	// (#970). Its ZERO VALUE REFUSES EVERYTHING — see bridge.ErrFreshnessUnbounded
@@ -217,7 +215,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.Serve
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
-	s.mux.HandleFunc("POST /v1/propose", s.handlePropose)
+	s.solves = make(chan struct{}, 4)
+	s.mux.HandleFunc("POST /v1/propose", s.handleLegacyPropose)
+	s.mux.HandleFunc("POST /v2/propose", s.handlePropose)
 	s.mux.HandleFunc("POST /v1/orders", s.handleOrders)
 }
 
@@ -245,14 +245,14 @@ type proposeRequest struct {
 	// carries CovarianceQuality FULL_RANK rather than OBSERVED, so a caller can
 	// tell a covariance nobody vouched for from one that was checked against its
 	// own sample size (#621).
-	Observations   int                         `json:"observations"`
-	BlackLitterman *blRequest                  `json:"black_litterman"`
-	Objective      optimization.Objective      `json:"objective"`
-	Constraints    *optimization.ConstraintSet `json:"constraints"`
-	Current        map[string]float64          `json:"current_weights"`
-	NAV            float64                     `json:"nav"`
-	Prices         map[string]float64          `json:"prices"`
-	Threshold      float64                     `json:"threshold"`
+	Observations   int                              `json:"observations"`
+	BlackLitterman *blRequest                       `json:"black_litterman"`
+	Objective      optimization.Objective           `json:"objective"`
+	Constraints    *optimization.ExactConstraintSet `json:"constraints"`
+	Current        map[string]dec.Exact             `json:"current_weights"`
+	NAV            dec.Exact                        `json:"nav"`
+	Prices         map[string]dec.Exact             `json:"prices"`
+	Threshold      dec.Exact                        `json:"threshold"`
 	// Currency is the unit NAV and Prices are quoted in, needed to build the
 	// candidate book a mandate is evaluated against.
 	//
@@ -296,14 +296,30 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req proposeRequest
-	if !decode(w, r, &req) {
+	if !decodeProposalRequest(w, r, &req) {
 		return
 	}
+	select {
+	case s.solves <- struct{}{}:
+		defer func() { <-s.solves }()
+	default:
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "proposal computation capacity reached"})
+		return
+	}
+	financial := optimization.FinancialInputs{Current: req.Current, NAV: req.NAV, Prices: req.Prices, Threshold: req.Threshold, Currency: req.Currency}
 	in := optimization.MarketInputs{
 		Instruments:     req.Instruments,
 		ExpectedReturns: req.ExpectedReturns,
 		Covariance:      req.Covariance,
 		Observations:    req.Observations,
+	}
+	if err := optimization.ValidateProposalInputs(req.PortfolioID, in, financial); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.BlackLitterman != nil && len(req.BlackLitterman.Views) > optimization.MaxProposalInstruments {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "too many views"})
+		return
 	}
 	if req.BlackLitterman != nil {
 		mu, err := blMu(req)
@@ -313,28 +329,14 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 		}
 		in.ExpectedReturns = mu
 	}
-	// ONE CALL, NOT TWO STEPS AND A MISSING THIRD (#751). This handler used to
-	// run Optimize then Rebalance inline and stop — which is every step of
-	// optimization.Propose except the mandate check, so the proposal it returned
-	// carried MandateStatus's zero value and /v1/orders refused it. Calling
-	// Propose is what makes a MandateFeasible proposal reachable; the mandate
-	// below is what makes the verdict real rather than asserted.
+	// Feasibility is evaluated for this caller's hypothetical book only.
 	now := time.Now()
 	mandate, ok := s.resolveMandate(w, r, principal, req.PortfolioID, now)
 	if !ok {
 		return
 	}
-	if mandate != nil && req.Currency == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "currency is required when a mandate governs this portfolio: the candidate book " +
-				"is valued in it, and a currency restriction evaluated against an unstated unit " +
-				"would be a verdict about nothing",
-		})
-		return
-	}
-	proposal, err := optimization.Propose(r.Context(), req.PortfolioID, in, req.Objective, req.Constraints,
-		req.Current, req.NAV, req.Prices, req.Threshold,
-		s.gate.Classifier, s.gate.Engine, mandate, req.Currency, now)
+	proposal, err := optimization.ProposeExact(r.Context(), req.PortfolioID, in, req.Objective, req.Constraints, financial,
+		s.gate.Classifier, s.gate.Engine, mandate, now)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -399,6 +401,10 @@ func (s *Server) resolveMandate(w http.ResponseWriter, r *http.Request, principa
 		// reading and it is recorded on #751 rather than papered over by
 		// returning a verdict nothing produced.
 		return nil, true
+	}
+	if found != compliance.Governed || m == nil || m.GetTenantId() != principal.Tenant || m.GetPortfolioId() != portfolioID {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "mandate identity or governance could not be established"})
+		return nil, false
 	}
 	return m, true
 }
@@ -832,15 +838,6 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 		return nil, false
 	}
 	return b, true
-}
-
-func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-		return false
-	}
-	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
