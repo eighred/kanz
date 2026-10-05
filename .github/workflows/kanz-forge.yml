@@ -1,0 +1,27 @@
+name: kanz-forge
+
+on:
+  pull_request:
+    paths:
+      - '.agents/**'
+      - 'plugins/kanz-forge/**'
+      - 'AGENTS.md'
+      - '.github/workflows/kanz-forge.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.agents/**'
+      - 'plugins/kanz-forge/**'
+      - 'AGENTS.md'
+      - '.github/workflows/kanz-forge.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  repository-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate marketplace, plugin, tracked skills and references
+        run: python3 .agents/plugins/kanz-forge/scripts/validate.py --tracked

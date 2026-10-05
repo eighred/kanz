@@ -6,7 +6,7 @@
 # tears it down. Auth/signing/quotas are OFF (local paths), upstream is plaintext
 # — this is a dev loop, not a security posture (that is infra/security in anger).
 #
-# Build context is the repo ROOT (..): the service Dockerfiles COPY the generated
+# Build context is the repo ROOT (../..): the service Dockerfiles COPY the generated
 # kanz-schemas Go SDK, so `make generate` must run before first build.
 name: kanz-dev
 
@@ -76,7 +76,7 @@ services:
 
   risk-engine:
     build:
-      context: ..
+      context: ../..
       dockerfile: kanz/services/risk-engine/Dockerfile
     depends_on:
       nats-init:
@@ -96,7 +96,7 @@ services:
 
   api-gateway:
     build:
-      context: ..
+      context: ../..
       dockerfile: kanz/services/api-gateway/Dockerfile
     depends_on:
       risk-engine:

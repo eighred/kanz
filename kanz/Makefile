@@ -3,8 +3,8 @@
 # protoc-gen-go-grpc plugin). `make help` lists everything; `make bootstrap`
 # then `make generate test` is the from-scratch path. See dev/README.md.
 
-# The kanz module pins -mod=mod so a stale gen/ SDK is regenerated rather than
-# failing the build (the EVT-15a generated-not-committed stance).
+# Module resolution is permitted, but this flag never generates the ignored
+# schema SDK. The generate target below runs both required steps.
 export GOFLAGS := -mod=mod
 
 # Windows Application Control intermittently blocks freshly built test binaries
@@ -13,10 +13,6 @@ export GOFLAGS := -mod=mod
 # so every target that compiles a binary points GOTMPDIR here. Exported (not
 # per-target) so it holds for an ad-hoc `go test` run from this directory too.
 export GOTMPDIR := $(CURDIR)/.gotmp
-
-# The exchange connectors are compiled in behind build tags; the default build is
-# vendor-free. VENUE_TAGS is what the *-venues targets link.
-VENUE_TAGS := binance okx
 
 SCHEMAS_DIR := ../kanz-schemas
 PROTOC_GEN_GO_VERSION := v1.36.11
@@ -30,14 +26,14 @@ help: ## List the available targets
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: bootstrap
-bootstrap: ## Install the codegen tools (buf, protoc-gen-go, protoc-gen-go-grpc)
+bootstrap: | $(GOTMPDIR) ## Install the protoc plugins and check for buf
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
-	@command -v buf >/dev/null || echo "install buf: https://buf.build/docs/installation"
+	@command -v buf >/dev/null || { echo "install buf: https://buf.build/docs/installation" >&2; exit 1; }
 
 .PHONY: generate
-generate: ## Regenerate the kanz-schemas SDKs (buf generate)
-	cd $(SCHEMAS_DIR) && buf generate
+generate: | $(GOTMPDIR) ## Regenerate and initialize the kanz-schemas Go SDK
+	cd $(SCHEMAS_DIR) && buf generate && bash bootstrap-go-sdk.sh
 
 .PHONY: build
 # THE BINARIES HAVE TO LAND IN ONE DIRECTORY, TOGETHER.
@@ -57,15 +53,15 @@ generate: ## Regenerate the kanz-schemas SDKs (buf generate)
 # -o with a DIRECTORY writes one executable per main package and ignores the
 # rest, so `./...` stays honest: it still compiles everything, and now the
 # things that can be run can be found. bin/ is already gitignored.
-build: ## Build every package, emitting the binaries into bin/
+build: generate | $(GOTMPDIR) ## Build every package, emitting the binaries into bin/
 	@mkdir -p bin
 	go build -ldflags="$(VERSION_LDFLAGS)" -o bin/ ./...
 
 # Production release build (IP-security mandate). -ldflags="-s -w" strips the
 # symbol table (-s) and DWARF debug info (-w) so the shipped binary resists
 # decompilation of the proprietary execution logic; -trimpath removes local
-# filesystem paths from the binary. Exchange connectors are linked in via TAGS
-# (e.g. `make release TAGS="binance okx"`); the default binary stays vendor-free.
+# filesystem paths from the binary. Exchange connectors compile by default;
+# TAGS selects optional integrations such as redis or model providers.
 # Secrets never enter the binary — keys are fetched at runtime into RAM via the
 # env / mock-Vault (`*_FILE`) boundary, never hardcoded or committed.
 # VERSION is what the binary reports as its own version — on every OTel span
@@ -86,7 +82,7 @@ GO_RELEASE_LDFLAGS := -s -w $(VERSION_LDFLAGS)
 TAGS ?=
 
 .PHONY: release
-release: ## Build stripped, trimpath production binaries into bin/ (TAGS="binance okx" to link venues)
+release: generate | $(GOTMPDIR) ## Build stripped, trimpath production binaries into bin/ (TAGS selects optional integrations)
 	@mkdir -p bin
 	go build -trimpath -ldflags="$(GO_RELEASE_LDFLAGS)" -tags "$(TAGS)" -o bin/ ./services/...
 
@@ -94,53 +90,63 @@ release: ## Build stripped, trimpath production binaries into bin/ (TAGS="binanc
 # fails with "-race requires cgo"; run `make test` there and `make test-race`
 # where cgo is available (CI).
 .PHONY: test
-test: | $(GOTMPDIR) ## Run the test suite (default, vendor-free build)
-	go test ./...
+test: generate | $(GOTMPDIR) ## Run serial tests in bounded package groups
+	go test -p 1 -count=1 ./internal/...
+	go test -p 1 -count=1 ./pkg/...
+	go test -p 1 -count=1 ./services/...
+	go test -p 1 -count=1 ./cmd/...
+	go test -p 1 -count=1 ./test/...
+	go test -p 1 -count=1 ./tools/...
 
 .PHONY: test-race
-test-race: | $(GOTMPDIR) ## Run the test suite with the race detector (needs CGO_ENABLED=1)
-	go test -race ./...
+test-race: generate | $(GOTMPDIR) ## Run serial tests with the race detector (needs CGO_ENABLED=1)
+	go test -race -p 1 -count=1 ./internal/...
+	go test -race -p 1 -count=1 ./pkg/...
+	go test -race -p 1 -count=1 ./services/...
+	go test -race -p 1 -count=1 ./cmd/...
+	go test -race -p 1 -count=1 ./test/...
+	go test -race -p 1 -count=1 ./tools/...
 
-.PHONY: test-venues
-test-venues: | $(GOTMPDIR) ## Run the test suite with the exchange connectors linked
-	go test -tags "$(VENUE_TAGS)" ./...
-
-.PHONY: build-venues
-build-venues: ## Build every package with the exchange connectors linked
-	go build -tags "$(VENUE_TAGS)" ./...
+# #100 put venue adapters in the default build. Preserve the old target names
+# for callers outside this repository without pretending obsolete tags select them.
+.PHONY: test-venues build-venues
+test-venues: test ## Compatibility alias; venue adapters run in the default tests
+build-venues: generate | $(GOTMPDIR) ## Compatibility alias; venue adapters compile by default
+	go build ./...
 
 $(GOTMPDIR):
-	@mkdir -p $(GOTMPDIR)
+	@mkdir -p "$(GOTMPDIR)"
 
 .PHONY: vet
-vet: ## go vet
+vet: generate | $(GOTMPDIR) ## go vet
 	go vet ./...
 
 .PHONY: fmt
-fmt: ## gofmt-check every Go file (fails if any need formatting)
-	@unformatted=$$(gofmt -l .); \
+fmt: ## gofmt-check tracked Go files (fails if any need formatting)
+	@unformatted=$$(git ls-files -z '*.go' | xargs -0 gofmt -l); \
 	if [ -n "$$unformatted" ]; then echo "needs gofmt:"; echo "$$unformatted"; exit 1; fi
 
 .PHONY: lint
-lint: vet fmt ## vet + gofmt check
+lint: vet fmt ## vet + tracked gofmt + golangci-lint
+	golangci-lint run ./...
 
 .PHONY: tidy
-tidy: ## go mod tidy
+tidy: generate | $(GOTMPDIR) ## go mod tidy
 	go mod tidy
 
 .PHONY: scaffold
-scaffold: ## Scaffold a new service: make scaffold NAME=my-service
+scaffold: | $(GOTMPDIR) ## Scaffold a new service: make scaffold NAME=my-service
 	@test -n "$(NAME)" || (echo "usage: make scaffold NAME=my-service" && exit 2)
 	go run ./tools/scaffold/cmd/scaffold -name $(NAME)
 
 .PHONY: up
-up: ## Bring up the local dev stack (NATS+Kafka+Postgres+services+seed)
+up: generate | $(GOTMPDIR) ## Bring up the local dev stack (NATS+Kafka+Postgres+services+seed)
 	docker compose -f dev/docker-compose.yml up -d --build
-	go run ./test/load/seed || true
+	go run ./test/load/seed
 
 .PHONY: down
 down: ## Tear down the local dev stack
-	docker compose -f dev/docker-compose.yml down -v
+	docker compose -f dev/docker-compose.yml down
 
 .PHONY: ci
-ci: generate lint build test ## What CI runs: regenerate, lint, build, test
+ci: generate lint build test ## Local convenience chain; see kanz-ci.yml for CI gates

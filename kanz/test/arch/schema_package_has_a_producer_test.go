@@ -149,16 +149,15 @@ func TestEverySchemaPackageHasAProducer(t *testing.T) {
 var schemaPackageWithoutAProducerExempt = map[string]string{
 	"performance/v1": "PERF-01 return/attribution wire shapes. The performance module computes " +
 		"attribution in-process and serves it over the query surface; nothing ever builds a " +
-		"performance.v1 message. #1039 found it; it needs its own issue and its own producer.",
+		"performance.v1 message. #1072 owns its producer, conditional on #1028's surface decision.",
 	"regulatory/v1": "Regulatory filing wire shapes. The filing path assembles its own in-process " +
-		"shapes and this package is named by neither Go, Python nor TypeScript. #1039 found it; " +
-		"it needs its own issue and its own producer.",
+		"shapes and this package is named by neither Go, Python nor TypeScript. #1070 owns its producer.",
 	"sustainability/v1": "Climate/ESG wire shapes. Same finding as regulatory/v1 and found by the " +
 		"same scan on 2026-09-05 — declared, generated into three SDKs, produced by nothing in " +
-		"any of them. #1039 found it; it needs its own issue and its own producer.",
+		"any of them. #1069 owns its producer.",
 	"xva/v1": "XVA (CVA/DVA/FVA) wire shapes. internal/risk/xva computes the adjustments and the " +
 		"credit curve behind them entirely in Go structs; the proto package is named nowhere. " +
-		"#1039 found it; it needs its own issue and its own producer.",
+		"#1071 owns the composition path before its producer can be made live.",
 }
 
 // schemaPackages returns every "<domain>/<version>" directory under

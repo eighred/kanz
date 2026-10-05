@@ -612,8 +612,9 @@ caught only by CODEOWNERS review (§5).
 Governs how the prediction layer behaves when it cannot serve a fresh,
 fully-trusted prediction — and what consumers MUST do with the response.
 
-Companion to `proto/inference/v1/prediction.proto` (PRED-01) and the
-hybrid streaming + sync-gRPC architecture described in KANZ_BRAIN.
+Companion to `proto/inference/v1/prediction.proto` (PRED-01). The current
+streaming and typed sync-gRPC boundaries are defined by that contract, its
+producers and consumers, and root `AGENTS.md`.
 
 ### 1. The core rule
 

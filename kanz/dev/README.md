@@ -21,10 +21,7 @@ equivalent to repository CI. `make help` lists the available targets.
 ```sh
 cd kanz
 make bootstrap     # install protoc-gen-go + protoc-gen-go-grpc
-make generate      # buf generate → the schema SDKs (gen/go is NOT committed)
-cd ../kanz-schemas
-bash bootstrap-go-sdk.sh  # initialize gen/go/go.mod from reviewed dependencies
-cd ../kanz
+make generate      # buf generate + initialize the ignored Go SDK module
 go build ./...
 go vet ./...
 golangci-lint run ./...
@@ -47,28 +44,27 @@ same relevant groups with `-race` on a cgo-capable host; Windows without cgo doe
 not establish race safety. Include `pkg`, `cmd`, tools and other test directories
 when claiming a complete suite, not only the example groups above.
 
-### Why `make generate` is step one
+### Why generation precedes builds
 
 Generated code is never committed (EVT-15a). The kanz module `replace`s
 `kanz-schemas-go` to `../kanz-schemas/gen/go`, so that tree must exist before
 anything builds. `buf generate` needs `protoc-gen-go-grpc` on `PATH` — it emits
 the inference + query gRPC stubs that `protoc-gen-go` alone omits — and `make
 bootstrap` installs it. `GOFLAGS=-mod=mod` permits dependency resolution; it
-does not regenerate schemas. After generation, `bootstrap-go-sdk.sh` initializes
-the ignored Go SDK module using the consumer's reviewed dependency versions,
-as CI does.
+does not regenerate schemas. `make generate` runs `bootstrap-go-sdk.sh` after
+generation to initialize the ignored Go SDK module using the consumer's
+reviewed dependency versions, as CI does.
 
 ## Quick start
 
 ```sh
-make up            # intended smoke loop; known setup defects are tracked in #1323
+make up            # generates the SDK, then starts the smoke stack and seeds it
 # ... develop ...
-docker compose -f dev/docker-compose.yml down   # stop without deleting volumes
+make down          # stop without deleting volumes
 ```
 
-`make down` currently adds `-v` and deletes volumes. Reserve it for an intentional
-reset of disposable data. `make up` currently suppresses seed failures, so its
-exit status alone is not readiness evidence.
+`make up` propagates seeding errors. Its exit status is still not proof of the
+capital path; this stack lacks OMS, compliance, mandates and venue adapters.
 
 The repository also contains a Tilt configuration (live dashboard and logs):
 
@@ -95,7 +91,7 @@ curl localhost:8080/v1/portfolios/PF1/exposure   # the seeded portfolio
 ## Notes
 
 - Build context is the repo root: the service Dockerfiles COPY the generated
-  `kanz-schemas/gen/go` SDK, so run `make generate` before the first `make up`.
+  `kanz-schemas/gen/go` SDK. `make up`, build, vet and test run generation first.
 - Auth/signing/quotas are disabled — this is a dev loop, not a security posture.
 - Seeding reuses `test/load/seed` (`SEED_NATS_URL` / `SEED_TENANT`).
 
@@ -118,8 +114,8 @@ the portal.
 |---|---|
 | `make generate` | regenerate the schema SDKs (after a `.proto` change) |
 | `make build` | build binaries into `bin/` |
-| `make test` / `make test-race` | current unchunked tests without / with race detection; use serialized groups above until #1323 is fixed |
-| `make lint` | current `go vet` + gofmt check; does not run required golangci-lint |
+| `make test` / `make test-race` | serialized bounded package groups without / with race detection |
+| `make lint` | go vet, tracked gofmt check and golangci-lint |
 | `make up` / `make down` | local dev stack |
 | `make scaffold NAME=x` | new service skeleton |
 | `make ci` | local convenience chain; actual CI is `.github/workflows/kanz-ci.yml` |

@@ -16,9 +16,9 @@ import (
 // KANZ_BRAIN.md (2026-07-16, lead): "THE ESTATE IS KUBERNETES-MANAGED. SSH-pushed
 // hosts are CANCELLED." The sovereign blueprint still describes, at length, an
 // operator TUI pushing pre-compiled binaries to host vectors over SSH pipelines.
-// That blueprint is the document a new engineer reads first, and it does not know
-// it was overruled — so the cancelled plane arrives as an import, from someone
-// implementing a spec in good faith.
+// The blueprint is now deleted; the quote is dated provenance for this guard,
+// not an instruction to recover it. An old SSH design can still arrive as an
+// import from someone implementing a historical spec in good faith.
 //
 // The same file names the failure mode this guards: "A decision whose stated
 // rationale names a thing that no longer exists is not a decision any more — it is
@@ -61,8 +61,8 @@ import (
 // join over SSH. SSH returns to the estate at exactly this one point (KANZ_BRAIN.md,
 // "estate is Kubernetes-managed", refined 2026-07-24: the node-join handshake). The
 // same import ANYWHERE ELSE is still the cancelled operator plane arriving and
-// offends. This is a lead decision (the hybrid-k3s substrate) with a BRAIN amendment,
-// per this file's own rule.
+// offends. The allowed node-join exception is enforced by this map and must be
+// reviewed as an architecture change if its scope changes.
 //
 // Keyed to a (importPath, dirPrefix) pair: the value is the repo-relative directory
 // prefix the import is allowed under.
@@ -172,17 +172,17 @@ func TestNoSSHPlane(t *testing.T) {
 		for _, o := range offences {
 			b.WriteString("  " + o.file + " imports " + o.importPath + "\n")
 		}
-		b.WriteString("\nSSH-pushed hosts were cancelled on 2026-07-16 (KANZ_BRAIN.md): the estate is\n" +
+		b.WriteString("\nSSH-pushed hosts were cancelled on 2026-07-16: the estate is\n" +
 			"Kubernetes-managed, so deployment is a GitOps commit authenticated by the\n" +
 			"git/CI/cosign chain — there is no host to push a binary to and no SSH handshake\n" +
-			"to carry an identity in. The sovereign blueprint still describes the SSH operator\n" +
-			"plane; the blueprint is superseded on this point.\n\n" +
-			"If you are implementing node deployment or revocation, read KANZ_BRAIN.md's\n" +
-			"'THE ESTATE IS KUBERNETES-MANAGED' entry first — the k8s equivalents already\n" +
-			"exist (GitOps, Vault-CSI secret purge, scale-to-zero, kanz-halt's broadcast).\n\n" +
+			"to carry an identity in. The historical sovereign blueprint is superseded\n" +
+			"on this point.\n\n" +
+			"For node deployment or tenant revocation, inspect AGENTS.md, this guard,\n" +
+			"and the current operator code and Issues. The node-join SSH exception is\n" +
+			"limited to cmd/kanz-provisioner; tenant revocation remains incomplete (#108).\n\n" +
 			"If this import is genuinely not the operator plane returning, add it to\n" +
 			"sshImportAllowed with the reason why. Reviving the SSH plane is a lead decision\n" +
-			"and amends KANZ_BRAIN.md — it is not a test edit.")
+			"recorded in an Issue with an updated guard — it is not a test edit alone.")
 		t.Fatal(b.String())
 	}
 
