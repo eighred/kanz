@@ -190,7 +190,7 @@ spec:
             # the trust domain holds a valid SVID, so verifying one proves only that
             # the caller is some Kanz workload. This list is what makes the gateway a
             # gateway. It names api-gateway alone — the platform's single identity
-            # authority (KANZ_BRAIN) — so an operator authenticates as a PERSON there
+            # authority (root AGENTS.md) — so an operator authenticates as a PERSON there
             # and never holds a cluster credential.
             - name: OPERATOR_ALLOWED_CLIENTS
               value: "spiffe://kanz.internal/ns/kanz-services/sa/api-gateway"

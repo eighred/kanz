@@ -13,7 +13,7 @@
 # operator ran the binary from a laptop. The production broker does not — it
 # requires an SVID (nats.yaml `tls { verify: true, verify_and_map: true }`), and
 # SPIRE issues an SVID to a POD, from its ServiceAccount. So the operator plane
-# runs IN the cluster now (the 2026-07-16 decision; see KANZ_BRAIN.md), and a pod
+# runs IN the cluster now (the 2026-07-16 decision; see root AGENTS.md), and a pod
 # needs an image.
 #
 # Consequence to hold onto, because it is the cost of that decision: the brake is

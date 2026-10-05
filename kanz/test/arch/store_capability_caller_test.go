@@ -64,18 +64,18 @@ var storeCapabilityInterfaces = []struct {
 // SaveSnapshot was: both are bounded reads that simply nothing invokes yet.
 // Writing them down is the point. An unreachable capability that is listed is a
 // known gap; an unreachable capability that is invisible is a false guarantee,
-// and that is what cost #229.
+// and that is what cost #229. #1343 owns the remaining method disposition.
 var storeCapabilityExempt = map[string]string{
 	// audit.Store.Get(eventID) is the point lookup AUDIT-01c specified for the
 	// lineage walk. The lineage API reads through Query/All instead, so Get has
 	// two implementations, a test, and no caller.
-	"audit.Store.Get": "#229 (found by this guard; unreachable, not wrong)",
+	"audit.Store.Get": "#1343 (unreachable; remove or wire a bounded lineage lookup)",
 	// fund.Store.Commitments is documented "for inspection/bootstrap" and no
 	// inspection or bootstrap path was ever built. Note the Postgres
 	// implementation is `SELECT DISTINCT commitment_id FROM fund_events`, an
 	// unbounded full scan — harmless while unreachable, and a #229-shaped
 	// liability the moment something mounts it on a handler.
-	"fund.Store.Commitments": "#229 (found by this guard; unbounded scan, currently unreachable)",
+	"fund.Store.Commitments": "#1343 (unbounded scan, currently unreachable; never expose as a request read)",
 }
 
 func TestStoreCapabilitiesHaveProductionCallers(t *testing.T) {
