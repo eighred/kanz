@@ -11,7 +11,7 @@ import (
 )
 
 // A STORE THAT IS READ IN PRODUCTION AND NEVER WRITTEN IN PRODUCTION IS AN
-// EMPTY TABLE SERVING ZEROS.
+// EMPTY TABLE LEAVING RISK MEASURES WITHOUT COVERAGE.
 //
 // #509 again, one level below where the other two guards can see it.
 //
@@ -28,13 +28,10 @@ import (
 // target inside the READ path. Nothing in this repository has ever produced a
 // contract term.
 //
-// So four fixed-income measures are registered, served, and computing over an
-// empty table. Every bond in every portfolio resolves to no terms and the
-// measures return zero — which is exactly what a portfolio holding no bonds
-// returns. "Nothing configured" and "checked, and fine" look the same, and the
-// only thing that says otherwise is a counter (kanz_risk_fi_terms_missing_total,
-// registered by the risk-engine composition root in main.go) that nobody is
-// required to look at.
+// The four fixed-income measures therefore lack production terms coverage.
+// Missing terms exclude positions from InputCoverage; OMS refuses those
+// measures for admission (#527). The writer gap is still an institutional
+// coverage failure, but no longer a silent capital-path zero.
 //
 // # Why the two existing dark-capability guards are both green on this
 //
@@ -150,7 +147,7 @@ import (
 
 // storeWithoutAWriterExempt maps "<package>.<Type>" to the issue that will
 // supply the writer, and to WHAT THE WRITER IS. An entry saying only "not wired
-// yet" is how a store stays empty for a year while four measures report zero off
+// yet" is how a store stays empty for a year while four measures cannot cover
 // it. The dead-entry arm below deletes the entry for you the day a writer lands.
 var storeWithoutAWriterExempt = map[string]string{
 	"internal/marketdata/terms.Postgres": "#345 (option/future) and #1341 (bond/swap/structured) — the contract-terms store. Put has TWO callers " +
@@ -160,12 +157,12 @@ var storeWithoutAWriterExempt = map[string]string{
 		"target on the way OUT. Nothing has ever produced a term. The reader is live and reaches " +
 		"production: termsource.Provider is built at services/risk-engine/cmd/risk-engine/" +
 		"main.go and handed to compute.RegisterFIRisk on the next line, so DV01, Duration, " +
-		"Convexity and SpreadDuration are registered and computing over an empty table today — " +
-		"every bond resolves to no terms and every measure returns zero, indistinguishable from a " +
-		"portfolio holding no bonds. THE WRITER EXISTS BUT IS NOT WIRED: " +
+		"Convexity and SpreadDuration are registered over an empty table today. Missing " +
+		"terms produce excluded InputCoverage and OMS refuses those measures for admission " +
+		"(#527). THE WRITER EXISTS BUT IS NOT WIRED: " +
 		"internal/marketdata/termsload, a contract-terms loader that produces ContractTerms and " +
 		"calls terms.Postgres.Put. Until it has an authorized source and caller, kanz_risk_fi_terms_missing_total " +
-		"(main.go) is the only thing in the estate that says the measures are hollow. " +
+		"(main.go) records missing terms alongside the measure coverage signal. " +
 		"SECOND, SMALLER GAP IN THE SAME STORE, tracked by the same issue and NOT separately " +
 		"exempt because this guard is whole-store: ChainAsOf has no production caller either, so " +
 		"the option-chain read path is dark on top of being unfed.",
@@ -365,11 +362,11 @@ func TestEveryStoreReadInProductionIsAlsoWrittenInProduction(t *testing.T) {
 	if len(unwritten) > 0 {
 		sort.Strings(unwritten)
 		t.Errorf("%d durable store(s) have a production READER and NO production WRITER: %v.\n"+
-			"That is an empty table serving zeros. internal/marketdata/terms is why this guard "+
+			"That is an empty table leaving risk measures without coverage. internal/marketdata/terms is why this guard "+
 			"exists (#509): its reader reaches production through termsource.Provider into "+
 			"compute.RegisterFIRisk, so DV01/Duration/Convexity/SpreadDuration are registered and "+
-			"computing over a table nothing has ever written — and a bond book returning zero is "+
-			"indistinguishable from a portfolio holding no bonds.\n"+
+			"computing over a table nothing has ever written. Missing terms exclude positions "+
+			"from InputCoverage, so OMS refuses those measures for admission (#527).\n"+
 			"Neither other guard can see this. no_dark_capability_test.go works at IMPORT "+
 			"granularity and the package IS imported; no_dark_measure_seam_test.go works at SEAM "+
 			"granularity and RegisterFIRisk IS called. Both are green and the data is not there.\n"+
