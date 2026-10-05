@@ -178,7 +178,7 @@ func (s *Commands) Accept(ctx context.Context, c Command, reviewed string) (Rece
 	if err != nil {
 		return Receipt{}, err
 	}
-	if err = outbox.Enqueue(ctx, tx, fact); err != nil {
+	if err = outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, fact); err != nil {
 		return Receipt{}, err
 	}
 	return r, tx.Commit(ctx)

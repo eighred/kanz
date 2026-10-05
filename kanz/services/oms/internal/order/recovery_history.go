@@ -71,7 +71,7 @@ func (p *Postgres) FreezeRecoveryHistory(ctx context.Context, c RecoveryCase, ma
 	if err != nil {
 		return err
 	}
-	if err := outbox.Enqueue(ctx, tx, record); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, record); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -127,7 +127,7 @@ func (p *Postgres) BlockRecovery(ctx context.Context, c RecoveryCase, st *orderp
 	if err != nil {
 		return err
 	}
-	if err := outbox.Enqueue(ctx, tx, record); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, record); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

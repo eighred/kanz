@@ -513,7 +513,7 @@ func (p *PostgresProposals) Put(ctx context.Context, prop OrderProposal, announc
 	if tag.RowsAffected() == 0 {
 		return ErrProposalExists
 	}
-	if err := outbox.Enqueue(ctx, tx, announce...); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, announce...); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -613,7 +613,7 @@ func (p *PostgresProposals) Claim(ctx context.Context, orderID, approver string,
 		// before the enqueue so the rollback discards the announcement.
 		return false, nil
 	}
-	if err := outbox.Enqueue(ctx, tx, announce...); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, announce...); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -737,7 +737,7 @@ func (p *PostgresProposals) AnnounceExpiry(ctx context.Context, orderID string, 
 		// FACT that must not go out.
 		return false, nil
 	}
-	if err := outbox.Enqueue(ctx, tx, announce...); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, announce...); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {

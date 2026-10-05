@@ -236,7 +236,7 @@ func (p *PostgresExceptions) Override(ctx context.Context, id string, o pricing.
 	if err != nil {
 		return fmt.Errorf("build override outbox record %s: %w", id, err)
 	}
-	if err := outbox.Enqueue(ctx, tx, rec); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceDatamaster, rec); err != nil {
 		return fmt.Errorf("enqueue override FACT %s: %w", id, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
