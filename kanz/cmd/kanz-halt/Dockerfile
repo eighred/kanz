@@ -28,7 +28,7 @@
 # identity layer — not the pipeline). The one tool that must work while the system
 # is on fire is not coupled to the system that is on fire, and this image carries
 # nothing but it.
-FROM ghcr.io/eighred/base/golang:1.26.5 AS build
+FROM ghcr.io/eighred/base/golang:1.26.8 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
