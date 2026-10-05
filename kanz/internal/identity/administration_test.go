@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/eighred/kanz/internal/identity"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func administrationAccount(t *testing.T, st *identity.Postgres, subject, tenant string, roles []string) identity.Administration {
@@ -200,14 +202,11 @@ func TestAdministratorRevocationBoundaryIsConservative(t *testing.T) {
 
 func TestAdministrationRechecksActorAfterWaitingForTenantLock(t *testing.T) {
 	if dsn := os.Getenv("TEST_POSTGRES_URL"); dsn != "" {
-		u, err := url.Parse(dsn)
+		isolated, err := repeatableReadDSN(dsn)
 		if err != nil {
 			t.Fatal(err)
 		}
-		q := u.Query()
-		q.Set("default_transaction_isolation", "repeatable read")
-		u.RawQuery = q.Encode()
-		t.Setenv("TEST_POSTGRES_URL", u.String())
+		t.Setenv("TEST_POSTGRES_URL", isolated)
 	}
 	st, pool := newStorePool(t)
 	peer := administrationAccount(t, st, "test:peer", "acme", []string{identity.AdminRole})
@@ -254,6 +253,36 @@ func TestAdministrationRechecksActorAfterWaitingForTenantLock(t *testing.T) {
 	u, err := st.UserBySubject(ctx, testAdmin.Subject)
 	if err != nil || !u.Active() {
 		t.Fatalf("administrator lost: %v %v", u, err)
+	}
+}
+
+func repeatableReadDSN(dsn string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("default_transaction_isolation", "repeatable read")
+	// url.Values.Encode uses form encoding (+ for space). pgx URI parsing follows
+	// libpq and treats + literally, so the server would reject repeatable+read.
+	u.RawQuery = strings.ReplaceAll(q.Encode(), "+", "%20")
+	return u.String(), nil
+}
+
+func TestRepeatableReadDSNUsesURISpaceEncoding(t *testing.T) {
+	dsn, err := repeatableReadDSN("postgres://test@localhost/test?application_name=kanz%2Bidentity&sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := pgconn.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config.RuntimeParams["default_transaction_isolation"]; got != "repeatable read" {
+		t.Fatalf("parsed isolation = %q, want repeatable read", got)
+	}
+	if got := config.RuntimeParams["application_name"]; got != "kanz+identity" {
+		t.Fatalf("parsed application name = %q, want literal plus", got)
 	}
 }
 
