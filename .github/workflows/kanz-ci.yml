@@ -852,12 +852,19 @@ jobs:
       # The flag also beats the workflow-level GOFLAGS above it, so this job
       # needs no env override at all — which is the point: the assertion should
       # not depend on the absence of a setting.
+      - name: Acquire the module graph with bounded transfer retries
+        working-directory: kanz
+        run: |
+          python3 ../.github/scripts/go_mod_download.py
+          # Acquisition may not silently repair the graph before the readonly build.
+          git diff --exit-code -- go.mod go.sum
+
       - name: Build under Go's default module mode
         working-directory: kanz
         run: |
           set -euo pipefail
           if ! go build -mod=readonly ./...; then
-            echo '::error file=kanz/go.mod::the committed module graph is INCOMPLETE — this builds only because every other path sets GOFLAGS=-mod=mod, which repairs the graph in memory and discards the repair. Run `cd kanz && go mod tidy` and commit go.mod and go.sum. Review the result as a dependency change: `go mod tidy` resolves against whatever the proxy currently serves.'
+            echo '::error::readonly build failed; inspect the preceding compiler, dependency or transport diagnostic. Do not run go mod tidy unless Go reports that the committed graph needs updates.'
             exit 1
           fi
 
