@@ -187,7 +187,7 @@ blocked by Windows Application Control: a *downloaded* exe is blocked, one you
 *build into a project-local directory* runs. So build it:
 
 ```sh
-GOBIN="$(pwd)/.gotmp/bin" go install github.com/bufbuild/buf/cmd/buf@v1.45.0
+GOBIN="$(pwd)/.gotmp/bin" go install github.com/bufbuild/buf/cmd/buf@v1.69.0
 ```
 
 **2. Move `GOTMPDIR` out of `%TEMP%` — do this first.** Windows Application
