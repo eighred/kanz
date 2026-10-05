@@ -158,7 +158,7 @@ func TestPostgresOutboxPhysicalTablesDoNotShareRowsOrDrainLocks(t *testing.T) {
 	}
 }
 
-const ownershipMigration = "0018_outbox_service_owner.sql"
+const ownershipMigration = "0025_outbox_service_owner.sql"
 
 func TestPostgresOutboxLegacyOwnershipBlocksStateCommitAndDrain(t *testing.T) {
 	pool := newPool(t, testTenant)

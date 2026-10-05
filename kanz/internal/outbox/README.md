@@ -12,6 +12,12 @@ to combine service databases or replace domain transaction boundaries.
 
 ## Upgrade an existing database
 
+The new ownership migrations are OMS `0025`, accounting `0021`, and datamaster
+`0006`. The gaps reserve the versions already assigned in draft #1317; they do
+not activate that draft or require its capital tables. The runner tracks each
+version individually, so later delivery of those independent migrations must
+retain their original numbers and checksums.
+
 1. Preserve the admission halt and verify the database backup/recovery posture.
    Stop writers and relays using the affected outbox before applying the migration.
    Do not run old relays beside new ones: old binaries do not filter by service.
