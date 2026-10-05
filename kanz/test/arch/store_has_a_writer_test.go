@@ -153,7 +153,7 @@ import (
 // yet" is how a store stays empty for a year while four measures report zero off
 // it. The dead-entry arm below deletes the entry for you the day a writer lands.
 var storeWithoutAWriterExempt = map[string]string{
-	"internal/marketdata/terms.Postgres": "#509 — the contract-terms store. Put has TWO callers " +
+	"internal/marketdata/terms.Postgres": "#345 (option/future) and #1341 (bond/swap/structured) — the contract-terms store. Put has TWO callers " +
 		"and both are _test.go (internal/marketdata/terms/postgres_test.go, " +
 		"internal/risk/termsource/provider_test.go); the only non-test construction of a " +
 		"reference.v1.ContractTerms in the module is postgres.go, which is the unmarshal " +
@@ -162,9 +162,9 @@ var storeWithoutAWriterExempt = map[string]string{
 		"main.go and handed to compute.RegisterFIRisk on the next line, so DV01, Duration, " +
 		"Convexity and SpreadDuration are registered and computing over an empty table today — " +
 		"every bond resolves to no terms and every measure returns zero, indistinguishable from a " +
-		"portfolio holding no bonds. THE WRITER IS NAMED AND IS BEING BUILT: " +
+		"portfolio holding no bonds. THE WRITER EXISTS BUT IS NOT WIRED: " +
 		"internal/marketdata/termsload, a contract-terms loader that produces ContractTerms and " +
-		"calls terms.Postgres.Put. Until it lands, kanz_risk_fi_terms_missing_total " +
+		"calls terms.Postgres.Put. Until it has an authorized source and caller, kanz_risk_fi_terms_missing_total " +
 		"(main.go) is the only thing in the estate that says the measures are hollow. " +
 		"SECOND, SMALLER GAP IN THE SAME STORE, tracked by the same issue and NOT separately " +
 		"exempt because this guard is whole-store: ChainAsOf has no production caller either, so " +

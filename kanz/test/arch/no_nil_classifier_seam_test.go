@@ -110,10 +110,9 @@ var nilClassifierExempt = map[string]string{
 	// lifecycle.v1.ConfigChanged FACTs the OMS consumes, and calls Propose. The
 	// dead-entry check below removed both entries.
 	//
-	// THEY NAME #751, NOT #640. #640 is closed — its own three seams are wired
-	// and proven against a running datamaster — and an exemption pointing at a
-	// closed issue names nothing that will retire it, which is the one thing this
-	// map may not do.
+	// THE REMAINING ENTRY NAMES #1028. #640 is closed — its own three seams are
+	// wired and proven against a running datamaster. #1028 owns the parked
+	// performance surface decision; #1072 owns the wire output if it ships.
 	//
 	// THERE WERE FIVE. internal/risk/compute/factor.SectorExposure left by being
 	// FIXED rather than exempted: it was never an unfilled seam, only one this
@@ -121,7 +120,7 @@ var nilClassifierExempt = map[string]string{
 	// package. The rule now resolves a same-package caller that is itself wired
 	// (see 2b), so the seam reports what it always was, and the dead-entry check
 	// below is what removed the entry.
-	"internal/performance.BucketBySector": "#751 — Brinson sector attribution. DARK FOR WANT OF " +
+	"internal/performance.BucketBySector": "#1028 — Brinson sector attribution. DARK FOR WANT OF " +
 		"SOMETHING DOWNSTREAM, and the retirement condition this entry used to give was the wrong " +
 		"one. Two things are missing and only one is reference data: performance.Classifier has NO " +
 		"implementation anywhere in the module, not even a StaticClassifier; and services/performance " +
