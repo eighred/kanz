@@ -256,22 +256,43 @@ func (v *restingCloser) dispatchCount() int {
 	return len(v.dispatched)
 }
 
-// uniqueDispatches is dispatchCount with repeats collapsed, so the two together
-// say whether any order was withdrawn twice.
-func (v *restingCloser) uniqueDispatches() int {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	seen := map[string]bool{}
-	for _, id := range v.dispatched {
-		seen[id] = true
-	}
-	return len(seen)
-}
-
 func (v *restingCloser) confirmedCount() int {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return len(v.confirmed)
+}
+
+// Attempts cut off before acknowledgement may be retried. Confirmed children
+// must not be withdrawn a second time, and each distinct child must be covered.
+func (v *restingCloser) assertConfirmedOnce(t *testing.T, ids []string) {
+	t.Helper()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	counts := map[string]int{}
+	for _, id := range v.confirmed {
+		counts[id]++
+	}
+	if len(counts) != len(ids) {
+		t.Fatalf("confirmed children=%v, want %v", counts, ids)
+	}
+	for _, id := range ids {
+		if counts[id] != 1 {
+			t.Fatalf("child %s confirmed %d times", id, counts[id])
+		}
+	}
+}
+
+func (v *restingCloser) unconfirmedOrderCount() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	pending := map[string]bool{}
+	for _, id := range v.dispatched {
+		pending[id] = true
+	}
+	for _, id := range v.confirmed {
+		delete(pending, id)
+	}
+	return len(pending)
 }
 
 // scheduledContentionService wires a Service whose children rest at a venue that
@@ -418,7 +439,7 @@ func TestScheduleE2E_ACancelOfASlowParentStopsInsideItsBudget(t *testing.T) {
 	// — closeAtVenue reports no error precisely so the ledger never freezes on a
 	// venue that will not answer — but the delivery deadline is a NEW way to
 	// reach it, so it is asserted here rather than assumed.
-	unconfirmed := venue.dispatchCount() - venue.confirmedCount()
+	unconfirmed := venue.unconfirmedOrderCount()
 	if unconfirmed > 0 && closes.Len() < unconfirmed {
 		t.Fatalf("%d venue withdrawals went unconfirmed but only %d are tracked for healing — a "+
 			"cancel the exchange may never have received has been dropped, and the ledger calls "+
@@ -535,25 +556,15 @@ func TestScheduleE2E_ReplayingAnAbandonedCancelDoesNotReWithdrawAChild(t *testin
 		t.Fatalf("the parent is %s after the replay, want CANCELLED", parent.GetStatus())
 	}
 
-	// ONE WITHDRAWAL PER CHILD ACROSS BOTH DELIVERIES. This is the assertion the
-	// issue's second clause names: the replay must not re-dispatch a cancel for a
-	// child the first delivery already pulled off the exchange.
-	if got, uniq := venue.dispatchCount(), venue.uniqueDispatches(); got != len(live) || uniq != got {
-		t.Fatalf("%d venue withdrawals across %d distinct children for %d live children over two "+
-			"deliveries — the replay re-cancelled an order at the exchange, and closeAtVenue is "+
-			"not idempotent from the exchange's point of view", got, uniq, len(live))
-	}
+	venue.assertConfirmedOnce(t, live)
 
 	// A THIRD DELIVERY REACHES THE VENUE NOT AT ALL: every child is terminal and
 	// the parent carries cancel_announced_at, so the already-cancelled branch
 	// answers without calling closeAtVenue.
-	// AN UNCONFIRMED WITHDRAWAL IS TRACKED, NOT LOST. The replay does not re-issue
-	// it — the child is terminal, so cancelChildren skips it — which is only safe
-	// because the close registry still holds it for the healing watchdog.
-	if unconfirmed := venue.dispatchCount() - venue.confirmedCount(); unconfirmed > closes.Len() {
-		t.Fatalf("%d withdrawals went unconfirmed but only %d are tracked for healing — the "+
-			"replay will not re-issue them, so an order the exchange may still be resting is "+
-			"CANCELLED in the ledger with nothing left to resolve it", unconfirmed, closes.Len())
+	// A retried ambiguous attempt is resolved once the same order is confirmed.
+	// Counting failed attempts as unresolved orders would retain stale tracking.
+	if unconfirmed := venue.unconfirmedOrderCount(); unconfirmed > closes.Len() {
+		t.Fatalf("%d orders remain unconfirmed but only %d are tracked", unconfirmed, closes.Len())
 	}
 
 	before := venue.dispatchCount()

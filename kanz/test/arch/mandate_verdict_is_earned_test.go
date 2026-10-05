@@ -163,19 +163,19 @@ func TestNoFunctionAssertsAMandateVerdictItCannotCompute(t *testing.T) {
 
 	// NON-VACUITY, second arm: somebody must write the verdict. A zero-writer
 	// estate means the AST rules are broken, not that the code is clean —
-	// optimization.Propose assigns it from CheckMandate on every call.
+	// optimization.ProposeExact assigns it from CheckMandateExact on every call.
 	if len(writers) == 0 {
 		t.Fatal("no function in the module writes a MandateStatus — the composite-literal and " +
-			"assignment rules are broken. optimization.Propose assigns proposal.MandateStatus from " +
-			"CheckMandate and must be found")
+			"assignment rules are broken. optimization.ProposeExact assigns proposal.MandateStatus from " +
+			"CheckMandateExact and must be found")
 	}
 
 	// NON-VACUITY, third arm: the parameter rule must resolve at least one writer
 	// as compliant. A hasMandateInput that answered false for everything would put
 	// the whole estate in the failure list and drive the exemption map to cover a
 	// bug in this file.
-	if !compliant["internal/optimization.Propose"] {
-		t.Fatalf("optimization.Propose was not recognised as holding a mandate — hasMandateInput or "+
+	if !compliant["internal/optimization.ProposeExact"] {
+		t.Fatalf("optimization.ProposeExact was not recognised as holding a mandate — hasMandateInput or "+
 			"the parameter walk is broken, and every other verdict in this list is being judged by "+
 			"the same rule. Writers found: %v", sortedUnique(writers))
 	}

@@ -26,10 +26,17 @@ type Store struct {
 	mu         sync.RWMutex
 	byCurrency map[string][]pit.Version[*Curve] // ascending by AsOf
 	horizon    time.Duration
+	fallback   func(context.Context, string, time.Time) (*Curve, bool)
 }
 
 // Option configures a Store.
 type Option func(*Store)
+
+// WithFallback resolves a cache miss from durable history. A cache eviction
+// does not imply the pricing input has ceased to exist.
+func WithFallback(fn func(context.Context, string, time.Time) (*Curve, bool)) Option {
+	return func(s *Store) { s.fallback = fn }
+}
 
 // WithHorizon sets how far back versions are retained, measured from the newest
 // version held for that currency. Zero or negative selects pit.DefaultHorizon —
@@ -64,9 +71,16 @@ func (s *Store) Put(currency string, asOf time.Time, c *Curve) {
 // Curve resolves the latest curve effective at or before asOf — the
 // compute.CurveProvider contract. ok=false when the currency has no curve yet
 // or asOf predates the first version retained.
-func (s *Store) Curve(_ context.Context, currency string, asOf time.Time) (*Curve, bool) {
+func (s *Store) Curve(ctx context.Context, currency string, asOf time.Time) (*Curve, bool) {
+	c, ok := s.cachedCurve(currency, asOf)
+	if ok || s.fallback == nil {
+		return c, ok
+	}
+	return s.fallback(ctx, currency, asOf)
+}
+
+func (s *Store) cachedCurve(currency string, asOf time.Time) (*Curve, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	vs := s.byCurrency[currency]
-	return pit.At(vs, asOf)
+	return pit.At(s.byCurrency[currency], asOf)
 }

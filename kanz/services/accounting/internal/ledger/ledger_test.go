@@ -66,12 +66,19 @@ func TestReplayDeterministicNAV(t *testing.T) {
 
 	// Snapshot midway then fold the tail must equal a full replay.
 	st := NewMemoryStore()
-	for _, e := range events {
+	for _, e := range events[:2] {
 		_ = st.Append(context.Background(), e, nil)
 	}
-	mid := Replay("PF", events[:2])
+	mid := replayJournal(t, st, "PF")
 	snap := mid.Snapshot(day(2))
-	_ = st.SaveSnapshot(context.Background(), snap)
+	if err := st.SaveSnapshot(context.Background(), snap); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events[2:] {
+		if err := st.Append(context.Background(), e, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
 	got, reason, err := MaterializeCurrent(context.Background(), st, "PF")
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +136,7 @@ func TestStockSplitConservesMarketValue(t *testing.T) {
 	}
 }
 
-func TestDividendPaysOnHeldQuantity(t *testing.T) {
+func TestLegacyDividendAccruesOnHeldQuantity(t *testing.T) {
 	b := NewBook("PF")
 	b.Apply(trade("t1", "AAPL", "100", "10", 1, 1))
 	div := &Event{
@@ -138,8 +145,8 @@ func TestDividendPaysOnHeldQuantity(t *testing.T) {
 		Effective: day(2), Knowledge: day(2),
 	}
 	b.Apply(div)
-	// cash = -1000 (the buy) + 100*0.5 = -950
-	if got := b.CashBalance("USD"); got.Cmp(big.NewRat(-950, 1)) != 0 {
+	// An unconfirmed dividend is accrued, never spendable cash.
+	if got := b.CashBalance("USD"); got.Cmp(big.NewRat(-1000, 1)) != 0 {
 		t.Fatalf("dividend cash: want -950 got %s", got.RatString())
 	}
 }

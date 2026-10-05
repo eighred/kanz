@@ -93,9 +93,17 @@ func (o Observation) validate() error {
 	return nil
 }
 
+// MaxHistoryLimit caps bounded analytics reads independently of retained history.
+const MaxHistoryLimit = 10001
+
+var ErrHistoryLimit = errors.New("store: history limit must be between 0 and 10001")
+
 // Query selects a slice of an instrument's history. The window is on
 // ObservationTime; AsOf is the bitemporal knowledge horizon.
 type Query struct {
+	// Limit selects the newest N visible (time, kind) identities AFTER revision
+	// collapse, returned ascending by time then kind. Zero is archival/unbounded.
+	Limit int
 	// InstrumentID is required.
 	InstrumentID string
 	// Kind filters to one price kind; PriceKindUnspecified ⇒ any kind.

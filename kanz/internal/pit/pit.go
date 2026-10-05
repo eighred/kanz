@@ -38,18 +38,14 @@
 //
 // # Why a horizon is safe here, and what it is NOT
 //
-// THESE STORES ARE IN-MEMORY AND START EMPTY. Nothing persists them, nothing
-// replays them, and a pod restart (a deploy, a KEDA scale event, an OOM kill)
-// leaves them holding no versions at all. So the depth a read can ever reach is
-// already bounded by process uptime, and a read for an as-of older than the
-// process start ALREADY resolves ok=false — the "predates the first version"
-// arm every store has had since it was written.
+// These caches start empty and do not themselves retain audit evidence. The
+// risk-engine service separately persists calibrated curves and fitted factor
+// models, and retains complete evaluation inputs for historical reconstruction
+// (#1039). Historical risk queries use that durable manifest, never this cache.
+// A missing retained input is refused rather than substituted with a live value.
 //
-// That is the fact that makes a horizon a bound on an already-bounded thing
-// rather than a decision to destroy audit evidence. Reproducing what the book
-// was worth on the 3rd is a durable-storage question and this store is not the
-// answer to it — it cannot be, because it does not survive to the 4th. What the
-// store genuinely provides is a SHORT point-in-time window: a portfolio's as-of
+// The horizon therefore bounds live lookup memory without deleting the durable
+// evidence. This cache provides a short point-in-time window: a portfolio's as-of
 // is the timestamp of the newest event applied to it, so a valuation commonly
 // runs slightly behind the newest calibration and must not silently pick up a
 // curve from after the state it is pricing.
@@ -96,12 +92,10 @@ import (
 // handed domain.Portfolio.AsOf(), the timestamp of
 // the newest event applied to that portfolio, advanced monotonically by
 // Portfolio.SetPosition and Portfolio.SetAggregate and never set by a caller.
-// query.v1's ExposureRequest.as_of / MeasuresRequest.as_of are carried across
-// every hop and then ignored by the only engine implementation, so no query
-// API, MCP tool, scheduled report or backtest in this tree asks these stores
-// for an operator-chosen historical instant. The gap a horizon has to cover is
-// therefore the lag between a portfolio's last event and the valuation pricing
-// it — the same gap spotsource sized.
+// Historical ExposureRequest.as_of / MeasuresRequest.as_of use the service's
+// retained evaluation manifests and bypass these caches. The horizon still
+// covers the lag between a portfolio's last event and its live valuation,
+// rather than the length of the audit history.
 //
 // RAISING IT IS AN OPERATOR DECISION THAT MOVES TOGETHER. spotsource's own
 // comment names the case its week does not clear: Lunar New Year and Golden

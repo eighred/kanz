@@ -711,6 +711,8 @@ var crossPackagePublishSurfaces = map[string][]string{
 	// left this guard GREEN. The block's presence was checked; its contents were
 	// not. A wrong or deleted grant would then be found only at runtime, by the
 	// broker denying every authorization decision.
+	"identity":    {"internal/auditdelivery"},
+	"web-bff":     {"internal/auditdelivery"},
 	"api-gateway": {"pkg/authbus"},
 	"copilot":     {"pkg/authbus"},
 	// COMP-01e (#713): the compliance-decision publisher is internal/compliancebus,

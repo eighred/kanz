@@ -319,7 +319,7 @@ func RegisterMarginRisk(ctx context.Context, r *Registry, provider MarginProvide
 		o.skip("", SkipNoMarginProvider)
 		return
 	}
-	r.Register(MeasureLiquidationProximity, liquidationProximityMeasure(ctx, provider, o))
+	r.RegisterScoped(MeasureLiquidationProximity, ctx, func(evalCtx context.Context) MeasureFunc { return liquidationProximityMeasure(evalCtx, provider, o) })
 }
 
 // liquidationProximityMeasure emits the worst liquidation proximity across every

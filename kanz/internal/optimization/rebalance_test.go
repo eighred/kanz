@@ -11,6 +11,7 @@ import (
 	compliancepb "github.com/eighred/kanz/kanz-schemas-go/compliance/v1"
 
 	"github.com/eighred/kanz/internal/compliance"
+	"github.com/eighred/kanz/internal/dec"
 )
 
 func TestRebalance_MinimalTradeList(t *testing.T) {
@@ -59,9 +60,9 @@ func TestPropose_MandateInfeasibleFlagged(t *testing.T) {
 			OnViolation: compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH,
 		}},
 	}
-	p, err := Propose(context.Background(), "PF", in, Objective{Type: MaxReturn}, nil,
-		map[string]float64{"A": 0.5, "B": 0.5}, 100000, map[string]float64{"A": 10, "B": 10}, 0.005,
-		nil, compliance.NewEngine(nil), mandate, "USD", time.Now())
+	p, err := ProposeExact(context.Background(), "PF", in, Objective{Type: MaxReturn}, nil,
+		FinancialInputs{Current: map[string]dec.Exact{"A": "0.5", "B": "0.5"}, NAV: "100000", Prices: map[string]dec.Exact{"A": "10", "B": "10"}, Threshold: "0.005", Currency: "USD"},
+		nil, compliance.NewEngine(nil), mandate, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,9 +89,9 @@ func TestPropose_MandateFeasiblePasses(t *testing.T) {
 			OnViolation: compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH,
 		}},
 	}
-	p, err := Propose(context.Background(), "PF", in, Objective{Type: MinVariance}, nil,
-		map[string]float64{"A": 1.0}, 100000, map[string]float64{"A": 10, "B": 10}, 0.005,
-		nil, compliance.NewEngine(nil), mandate, "USD", time.Now())
+	p, err := ProposeExact(context.Background(), "PF", in, Objective{Type: MinVariance}, nil,
+		FinancialInputs{Current: map[string]dec.Exact{"A": "1"}, NAV: "100000", Prices: map[string]dec.Exact{"A": "10", "B": "10"}, Threshold: "0.005", Currency: "USD"},
+		nil, compliance.NewEngine(nil), mandate, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,9 +126,9 @@ func TestRebalanceCannotCertifyAProposalItDidNotCheck(t *testing.T) {
 // rule was satisfied" were the same answer at the gate that emits orders.
 func TestProposeWithNoMandateIsUncheckedNotFeasible(t *testing.T) {
 	in := MarketInputs{Instruments: []string{"A", "B"}, Covariance: diag(0.04, 0.04)}
-	p, err := Propose(context.Background(), "PF", in, Objective{Type: MinVariance}, nil,
-		map[string]float64{"A": 1.0}, 100000, map[string]float64{"A": 10, "B": 10}, 0.005,
-		nil, compliance.NewEngine(nil), nil, "USD", time.Now())
+	p, err := ProposeExact(context.Background(), "PF", in, Objective{Type: MinVariance}, nil,
+		FinancialInputs{Current: map[string]dec.Exact{"A": "1"}, NAV: "100000", Prices: map[string]dec.Exact{"A": "10", "B": "10"}, Threshold: "0.005", Currency: "USD"},
+		nil, compliance.NewEngine(nil), nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

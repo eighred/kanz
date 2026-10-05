@@ -25,6 +25,8 @@
 package factormodel
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -92,14 +94,16 @@ type Model struct {
 	// a citable instance — absence is "this names no instance", never "the
 	// instance is unnamed".
 	ModelID string
-	AsOf    time.Time
+	// InputProvenance identifies the dated panel recorded with the fitted artifact.
+	InputProvenance map[string]string
+	AsOf            time.Time
 
 	// index memoizes instrument id → row for O(1) lookup.
 	index map[string]int
 }
 
 // DefaultModelID derives a model's canonical id from the configuration that
-// produced it — "STATISTICAL-3F-250D", "FUNDAMENTAL-250D", "BLEND-3F-250D".
+// produced it — "STATISTICAL-3F-250D-DATED1", "FUNDAMENTAL-250D-DATED1".
 //
 // THE ESTIMATION PARAMETERS ARE IN THE ID ON PURPOSE, and it is the whole
 // difference between an id that identifies a model and one that identifies a
@@ -118,7 +122,17 @@ func DefaultModelID(cfg Config) string {
 	if cfg.Type != Fundamental {
 		parts = append(parts, fmt.Sprintf("%dF", cfg.statFactors()))
 	}
-	parts = append(parts, fmt.Sprintf("%dD", cfg.window()))
+	// Dated fits must not redefine a historical tail-aligned artifact's key.
+	parts = append(parts, fmt.Sprintf("%dD", cfg.window()), "DATED1")
+	if cfg.Type == Fundamental || cfg.Type == Blend {
+		policy, _ := json.Marshal(struct {
+			Policy string
+			Styles []string
+			Ridge  float64
+		}{DescriptorPolicy, cfg.StyleFactors, cfg.ridge()})
+		digest := sha256.Sum256(policy)
+		parts = append(parts, fmt.Sprintf("DESC1-%x", digest[:8]))
+	}
 	return strings.Join(parts, "-")
 }
 
@@ -171,8 +185,8 @@ func (m *Model) Loading(id string) ([]float64, bool) {
 func (m *Model) FactorExposures(values map[string]float64) []float64 {
 	k := len(m.Factors)
 	e := make([]float64, k)
-	for id, v := range values {
-		i, ok := m.index[id]
+	for i, id := range m.Instruments {
+		v, ok := values[id]
 		if !ok {
 			continue
 		}
@@ -208,7 +222,8 @@ func (m *Model) Risk(values map[string]float64) RiskBreakdown {
 		sysVar = 0 // guard tiny negative round-off
 	}
 	var specVar float64
-	for id, v := range values {
+	for _, id := range m.Instruments {
+		v := values[id]
 		specVar += v * v * m.SpecificVar[id]
 	}
 	return RiskBreakdown{
@@ -259,8 +274,8 @@ func (m *Model) covApply(values map[string]float64) (perInstrument map[string]fl
 	e := m.FactorExposures(values)
 	fe := matVec(m.FactorCov, e) // F·e, a K-vector
 	perInstrument = make(map[string]float64, len(values))
-	for id, v := range values {
-		i, ok := m.index[id]
+	for i, id := range m.Instruments {
+		v, ok := values[id]
 		if !ok {
 			continue
 		}
