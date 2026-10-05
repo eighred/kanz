@@ -137,45 +137,24 @@ import (
 // the analytics above them to be benchmarked (#471) before anyone noticed they
 // do not reach production.
 var darkSeamExempt = map[string]string{
-	"internal/risk/compute.RegisterGreeks": "#509 — Delta/Gamma/Vega/Theta/Rho. CORRECTED " +
-		"2026-08-16: this entry used to say the TermsProvider was unconstructed and that " +
-		"SpotProvider had zero implementations. Both are now false. termsource.Provider is built " +
-		"at services/risk-engine/cmd/risk-engine/main.go for the FI seam and satisfies the option " +
-		"seam with the same value; internal/risk/spotsource is the production SpotProvider. Curve " +
-		"is satisfiable too — RegisterGreeks defaults it to FlatCurve(0) and *curve.Curve " +
-		"implements pricing.DiscountCurve directly. ONE SEAM BLOCKS THIS, and it is not a Go " +
-		"problem: VolProvider needs a volsurface.QuoteProvider, which needs OBSERVED OPTION " +
-		"PREMIUMS, and nothing in this repository carries them. market-ingest opens one websocket " +
-		"per configured (instrument, venue) and the deployed maps are spot-only; the vendor Source " +
-		"is an unimplemented SDK seam serving synthetic prices; backfill writes bars rather than " +
-		"price_observations. Ahead of even that, the contract-terms store HAS NO PRODUCTION " +
-		"WRITER — terms.Postgres.Put has only test callers — so the chain a QuoteProvider would " +
-		"read is empty, and the FI measures wired in #519 are computing over an empty terms table " +
-		"today (kanz_risk_fi_terms_missing_total is what says so). A contract-terms loader is the " +
-		"first honest step and it pays for FI before it pays for Greeks. Note also that wiring " +
-		"this OVERWRITES the DefaultRegistry Delta placeholder, so it changes an already-served " +
-		"measure rather than adding five.",
-	"internal/risk/compute.RegisterXVA": "#509 — CVA/DVA/FVA. Needs an XVAProvider (exposure " +
-		"profiles + counterparty credit curves). internal/risk/pricing/credit holds the calibrator " +
-		"and is itself dark for want of a live CDS quote source (#113, #203), so this cannot be wired " +
-		"to anything real without synthesising counterparty spreads — which #345 rules out " +
-		"explicitly: a SUCCESSFUL calibration of invented quotes is worse than a failed one.",
-	"internal/risk/compute.NewRevaluer": "#509 — full-revaluation scenario shocks, as opposed to " +
-		"the sensitivity approximation. Takes GreeksProviders, so it is blocked on exactly what " +
-		"RegisterGreeks is blocked on.",
-	"internal/risk/compute.NewBondRevaluer": "#509 — curve-shift revaluation for bonds. Takes " +
-		"FIProviders, so it is blocked on the same missing BondTerms schema.",
-	"internal/risk/scenario.EvaluateCurveShift": "#509 — needs a BondRevaluer, which is " +
-		"NewBondRevaluer, which is dark. Reachable the moment the FI branch is.",
-	"internal/risk/scenario.EvaluateReval": "#509 — needs a Revaluer, which is NewRevaluer, which " +
-		"is dark. Reachable the moment the Greeks branch is.",
-	"internal/risk/scenario.EvaluateFactorShock": "#509 — needs a *factormodel.Model, produced by " +
-		"factormodel.Fit through NewLiveModelProvider, which is dark.",
-	"internal/risk/compute/var.RegisterMonteCarlo": "#509 — MODEL-01e Monte-Carlo VaR. The " +
-		"historical sibling (varmodel.Register) IS wired at risk-engine/main.go, so this one is " +
-		"dark by CHOICE rather than by a missing provider: it takes the same ReturnsProvider. " +
-		"Deciding whether to serve both is the open question, and until it is answered the platform " +
-		"ships a Monte-Carlo VaR nobody can request.",
+	"internal/risk/compute.RegisterGreeks": "#1230 — live Greeks require authoritative option terms " +
+		"and observed premiums joined point-in-time (#345); #1333 must distinguish unknown terms " +
+		"from a known linear instrument before replacing the served Delta placeholder.",
+	"internal/risk/compute.RegisterXVA": "#1071 — decide the served XVA contract and wire an " +
+		"XVAProvider with authoritative exposure profiles and counterparty credit curves (#203).",
+	"internal/risk/compute.NewRevaluer": "#1232 — full scenario revaluation needs the live " +
+		"Greeks inputs tracked in #1230/#345, then an admitted scenario caller.",
+	"internal/risk/compute.NewBondRevaluer": "#1341 — BondTerms schemas and FI registration exist; " +
+		"authoritative PIT terms writers are still absent. #1232 owns scenario dispatch after inputs exist.",
+	"internal/risk/scenario.EvaluateCurveShift": "#1232 — connect curve-shift revaluation after " +
+		"the bond revaluer has authoritative terms (#1341); registered FI measures alone do not wire this seam.",
+	"internal/risk/scenario.EvaluateReval": "#1232 — connect full revaluation after its Greeks " +
+		"provider is live (#1230); the present sensitivity approximation is a different method.",
+	"internal/risk/scenario.EvaluateFactorShock": "#1044 — the live model is statistical (PC names), " +
+		"while the catalog names style factors. Refuse unmatched shocks before any dispatch; " +
+		"#1231 owns fundamental inputs and #1232 owns historical scenario wiring.",
+	"internal/risk/compute/var.RegisterMonteCarlo": "#1044 — the ReturnsProvider is live; decide " +
+		"whether to serve Monte-Carlo VaR with an explicit method identity or retire it. No data blocker.",
 }
 
 // seamRef is a composition-root seam: an exported function that takes the

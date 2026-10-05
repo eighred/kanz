@@ -2,7 +2,7 @@ module github.com/eighred/kanz
 
 go 1.26.1
 
-toolchain go1.26.5
+toolchain go1.26.8
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.75.0
@@ -29,7 +29,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
 	golang.org/x/crypto v0.57.0
-	google.golang.org/grpc v1.84.0
+	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.37.1
