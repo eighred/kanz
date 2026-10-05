@@ -23,14 +23,17 @@ def events(lines):
         yield event
 
 
-def check(lines):
+def check(lines, expected_packages=None):
     reasons = defaultdict(set)
     skipped = set()
     packages = set()
+    cached = set()
     browser_proven = False
     for event in events(lines):
         key = (event.get("Package", ""), event.get("Test", ""))
         output = event.get("Output", "")
+        if not key[1] and re.match(r"^ok\s+\S+\s+\(cached\)", output):
+            cached.add(key[0])
         reasons[key].update(BACKING.findall(output))
         browser_proven |= BROWSER_PROOF in output
         if event["Action"] == "skip":
@@ -44,6 +47,13 @@ def check(lines):
         for package, test in sorted(skipped)
         if reasons[(package, test)]
     ]
+    problems.extend(f"cached package result is not fresh verification: {package}" for package in sorted(cached))
+    if expected_packages is not None:
+        expected = {package.strip() for package in expected_packages if package.strip()}
+        if not expected:
+            raise ValueError("empty expected package inventory")
+        problems.extend(f"package result missing: {package}" for package in sorted(expected - packages))
+        problems.extend(f"unexpected package result: {package}" for package in sorted(packages - expected))
     if not browser_proven:
         problems.append("shared-session Chromium proof did not run")
     return problems, len(skipped), len(packages)
@@ -52,6 +62,7 @@ def check(lines):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--render", action="store_true")
+    parser.add_argument("--packages", help="go list inventory for this test invocation")
     parser.add_argument("path", nargs="?")
     args = parser.parse_args()
     try:
@@ -62,15 +73,17 @@ def main():
                 sys.stdout.write(event.get("Output", ""))
                 sys.stdout.flush()
             return 0
-        if not args.path:
-            parser.error("path is required without --render")
+        if not args.path or not args.packages:
+            parser.error("path and --packages are required without --render")
+        with open(args.packages, encoding="utf-8") as inventory:
+            expected = list(inventory)
         with open(args.path, encoding="utf-8") as source:
-            problems, skipped, packages = check(source)
+            problems, skipped, packages = check(source, expected)
         for problem in problems:
             print(f"::error::{problem}")
         if problems:
             return 1
-        print(f"{packages} package results; {skipped} skips, none citing supplied backing services; browser proof present")
+        print(f"{packages} fresh package results match go list; {skipped} skips, none citing supplied backing services; browser proof present")
         return 0
     except (OSError, ValueError, TypeError) as exc:
         print(f"::error::invalid Go test evidence: {exc}", file=sys.stderr)

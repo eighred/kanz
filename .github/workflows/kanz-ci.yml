@@ -457,7 +457,8 @@ jobs:
         # next gate checks the original events, not neighboring text (#1352).
         run: |
           set -euo pipefail
-          go test -race -p 1 -json ./... | tee "$RUNNER_TEMP/gotest.jsonl" \
+          go list -race ./... > "$RUNNER_TEMP/gotest-packages.txt"
+          go test -race -p 1 -count=1 -json ./... | tee "$RUNNER_TEMP/gotest.jsonl" \
             | python3 ../.github/scripts/go_test_evidence.py --render
 
       # A SKIP CITING A BACKING SERVICE THIS JOB PROVIDES IS A FAILURE.
@@ -476,7 +477,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s ../.github/scripts -p test_go_test_evidence.py
-          python3 ../.github/scripts/go_test_evidence.py "$RUNNER_TEMP/gotest.jsonl"
+          python3 ../.github/scripts/go_test_evidence.py --packages "$RUNNER_TEMP/gotest-packages.txt" "$RUNNER_TEMP/gotest.jsonl"
 
       # THE `redis` BUILD (EXEC-M22). This tag is what webhook-ingest's production image is
       # built with, and it is the ONLY thing that makes `replicas: 2` on the platform's
@@ -513,7 +514,7 @@ jobs:
         run: |
           go build -tags anthropic,openrouter ./...
           go vet -tags anthropic,openrouter ./services/copilot/...
-          go test -tags anthropic,openrouter -p 1 ./services/copilot/...
+          go test -tags anthropic,openrouter -p 1 -count=1 ./services/copilot/...
 
       # api-gateway is in the test list because its CROSS-POD IDEMPOTENCY CLAIM (#721)
       # is only exercised under this tag: idempotency_realredis_test.go stands two
@@ -540,7 +541,7 @@ jobs:
         run: |
           go build -tags redis ./...
           go vet -tags redis ./...
-          go test -tags redis -p 1 -race ./services/webhook-ingest/... ./services/api-gateway/... ./pkg/redisadapter/... ./pkg/bus/...
+          go test -tags redis -p 1 -race -count=1 ./services/webhook-ingest/... ./services/api-gateway/... ./pkg/redisadapter/... ./pkg/bus/...
 
       - name: OMS log (on failure)
         if: failure()
