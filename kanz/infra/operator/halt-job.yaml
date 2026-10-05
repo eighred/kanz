@@ -1,6 +1,6 @@
 ---
-# THE OPERATOR PLANE (SEC-M3c). Decided 2026-07-16 — see KANZ_BRAIN.md,
-# "TWO IDENTITY PLANES" and "THE ESTATE IS KUBERNETES-MANAGED".
+# THE OPERATOR PLANE (SEC-M3c). Decided 2026-07-16; root AGENTS.md
+# and the current operator manifests define the live identity boundary.
 #
 # The sovereign blueprint put the operator plane on SSH keys, because it was to be
 # an SSH transport pushing binaries to host vectors. That transport is cancelled:

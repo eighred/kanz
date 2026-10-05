@@ -200,7 +200,7 @@ var syncSurfaceExempt = map[string]string{
 		"again when anyone deleted it. The tree's OTHER manifest (cli-identities.yaml: ServiceAccount " +
 		"and NetworkPolicy for the three shell-run CLIs) is ordinary and syncable, so this exemption " +
 		"is about the Job, not the tree. RETIRING IT means naming halt-job.yaml in directory.exclude " +
-		"and adding the tree — deliberately left out of #625 so the kill switch's delivery is changed " +
+		"and adding the tree (#1342) — deliberately left out of #625 so the kill switch's delivery is changed " +
 		"on its own, and not as a side effect of an observability fix.",
 
 	"overlays": "EXPLICIT TESTNET PROMOTION BOUNDARIES, NOT A PRODUCTION APPLICATIONSET COMPONENT. " +

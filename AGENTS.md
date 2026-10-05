@@ -187,7 +187,7 @@ blocked by Windows Application Control: a *downloaded* exe is blocked, one you
 *build into a project-local directory* runs. So build it:
 
 ```sh
-GOBIN="$(pwd)/.gotmp/bin" go install github.com/bufbuild/buf/cmd/buf@v1.45.0
+GOBIN="$(pwd)/.gotmp/bin" go install github.com/bufbuild/buf/cmd/buf@v1.69.0
 ```
 
 **2. Move `GOTMPDIR` out of `%TEMP%` — do this first.** Windows Application
@@ -379,11 +379,17 @@ quoted result), **Verified when** (a runnable command and its expected result),
 
 ## Engineering and verification references
 
-This repository does not require a private agent plugin. The retired
-`kanz-forge` skills are not part of a checkout (migration #1087); do not ask an
-operator to restore them to begin engineering work. Use the plane boundaries,
-invariants, coding standards and tracking rules in this file. Additional skills
-may assist when available, but do not replace these requirements.
+The original private `kanz-forge` package was retired in #1087. The single
+repository-owned plugin is under `.agents/plugins/kanz-forge/`; its marketplace
+entry is `.agents/plugins/marketplace.json`. Its focused skills help investigate,
+route, implement, verify and deliver work. This file remains authoritative for
+platform boundaries and safety rules; a skill cannot amend them implicitly.
+
+On a fresh checkout, run
+`python .agents/plugins/kanz-forge/scripts/validate.py`, then
+`codex plugin marketplace add .` and `codex plugin add kanz-forge@kanz-local`.
+The validator and `.github/workflows/kanz-forge.yml` check the repository-owned
+manifest, marketplace path, skill entrypoints and supporting references.
 
 Read the affected component's code, migrations and architecture guards before
 changing its contracts. Use `.github/workflows/kanz-ci.yml` for the actual CI

@@ -256,30 +256,17 @@ var storedSeriesWithoutAProducerExempt = map[string]string{
 // retire them independently: whichever kind gets a producer first should force
 // its own line to be deleted rather than let a joint entry keep vouching for the
 // other three.
-const storedSeriesDarkPriceKind = "REAL FINDING, tracked under #509 as the same class — FOUR OF " +
-	"THE EIGHT PriceKinds ARE ACCEPTED BY CONFIGURATION AND WRITTEN BY NOTHING. The ingest path " +
-	"stamps exactly three (internal/marketdata/ingest.go — Close, Last, Mid) and " +
-	"AdjustedClose, Open, VWAP and Settlement are formed nowhere in the module. THE REASON THIS " +
-	"IS A FINDING AND NOT A DORMANT ENUM is internal/risk/spotsource: isKnownKind (provider.go) " +
-	"admits `k >= PriceKindClose && k <= PriceKindLast`, i.e. all seven non-zero kinds, so " +
-	"WithPriceKind(store.PriceKindVWAP) passes construction validation and every option in the " +
-	"book then resolves to no spot — SkipNoSpot on every position, a Gamma of zero, and a book " +
-	"that looks like it holds no options. That package's own doc (provider.go) describes " +
-	"exactly this failure for a DIFFERENT kind and calls it total and uniform; what it does not " +
-	"say is that four of the kinds it accepts can never match, whatever the deployment does. The " +
-	"same range check guards nothing on the store side either: Observation.validate refuses only " +
-	"the zero kind. THE CHEAP HALF OF THE FIX is to narrow the accepted set to the kinds the " +
-	"estate writes and fail construction loudly on the rest — 'nothing configured' and 'checked, " +
-	"and fine' must not look the same. The expensive half is a vendor feed that supplies them, " +
-	"which no path in this repository carries: backfill writes bars, market-ingest folds quotes " +
-	"to a mid, and the vendor Source is an unimplemented SDK seam. Deleting the constants is NOT " +
-	"the remedy — PriceKind mirrors reference.v1.PriceKind by number so the two never drift, and " +
-	"renumbering a wire enum to tidy a Go const block is a data-corruption bug."
+const storedSeriesDarkPriceKind = "#1340 — no production writer for AdjustedClose, Open, VWAP or Settlement. " +
+	"Market ingest forms Close, Last and Mid only. The old accepted-range defect was fixed by " +
+	"spotsource.producedKinds in 2bc9fe1a (#509): FromStore now refuses each unwritten kind " +
+	"before a missing mark can become a false-zero Greek. This exemption names missing PIT " +
+	"series, not an unsafe live selector. Admit another kind only with an authorized source, " +
+	"writer and replay proof; the wire enum numbers stay stable."
 
 // storedSeriesDarkTermsKind is the shared half of the two contract-terms labels
 // nothing writes. Split into two entries for the same reason as the PriceKinds:
 // whichever gets a producer first must retire its own line.
-const storedSeriesDarkTermsKind = "#509 — a contract-terms LABEL nothing writes, two levels " +
+const storedSeriesDarkTermsKind = "#1341 — a contract-terms LABEL nothing writes, two levels " +
 	"below a store that has no production writer at all. terms.Postgres is already exempt in " +
 	"store_has_a_writer_test.go because Put has no non-test caller; the only thing in the module " +
 	"that produces a terms.Record is internal/marketdata/termsload, which is itself exempt in " +

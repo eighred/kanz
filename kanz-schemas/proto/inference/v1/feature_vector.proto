@@ -4,7 +4,7 @@ syntax = "proto3";
 // prediction layer — feature vectors flowing into models and
 // predictions flowing out (prediction.proto).
 //
-// The prediction layer is hybrid (architecture note in KANZ_BRAIN):
+// The prediction layer is hybrid (kanz-py/kanz_inference/__main__.py):
 // async streaming path (default) + sync gRPC path for interactive
 // calls. Both paths transport these payloads — the streaming path
 // wraps them in the universal Envelope on the bus; the sync path

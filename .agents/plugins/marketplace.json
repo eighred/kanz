@@ -1,0 +1,20 @@
+{
+  "name": "kanz-local",
+  "interface": {
+    "displayName": "Kanz Local"
+  },
+  "plugins": [
+    {
+      "name": "kanz-forge",
+      "source": {
+        "source": "local",
+        "path": "./.agents/plugins/kanz-forge"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

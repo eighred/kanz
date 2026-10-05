@@ -270,7 +270,7 @@ func TestOperatorCLIsHaveServiceAccounts(t *testing.T) {
 // dialsNATSInDir reports whether a directory tree calls bus.DialNATS.
 // AST, not grep: a comment naming DialNATS is not a dial, and this codebase's
 // prose discusses the calls it makes (retiring internal/integrity turned on
-// exactly that distinction — see KANZ_BRAIN.md).
+// exactly that distinction). The AST check below is the live rule.
 func dialsNATSInDir(t *testing.T, dir string) bool {
 	t.Helper()
 	found := false
