@@ -9,23 +9,25 @@ package config
 import (
 	"errors"
 	"fmt"
-	"github.com/eighred/kanz/internal/env"
-	"github.com/eighred/kanz/internal/identity"
 	"log/slog"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/eighred/kanz/internal/auditdelivery"
+	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/internal/identity"
 	"github.com/eighred/kanz/pkg/secret"
 )
 
 // Config is the resolved identity configuration.
 type Config struct {
-	MFA      *MFA
-	Recovery *Recovery
-	Listen   string
-	LogLevel slog.Level
+	AuditDelivery auditdelivery.Config
+	MFA           *MFA
+	Recovery      *Recovery
+	Listen        string
+	LogLevel      slog.Level
 
 	// DatabaseURL is the credential store. It is deliberately UNSCOPED by tenant
 	// — see identity.WhyNoTenantScope: login must find an account before it knows
@@ -116,6 +118,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{
+		AuditDelivery:     auditdelivery.Config{NATSURL: os.Getenv("IDENTITY_AUDIT_NATS_URL"), SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET")},
 		Listen:            env.Or("IDENTITY_LISTEN", ":8087"),
 		LogLevel:          env.ParseLevelOr(os.Getenv("IDENTITY_LOG_LEVEL"), slog.LevelInfo),
 		DatabaseURL:       databaseURL,

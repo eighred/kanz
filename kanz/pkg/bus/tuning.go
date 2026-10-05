@@ -402,7 +402,9 @@ func tuningFor(subject string, class deliveryClass) ConsumerTuning {
 	if strings.HasPrefix(subject, tickSubjectPrefix) {
 		return tickTuning
 	}
-	if class == deliveryBroadcast {
+	// Authority evidence is low-rate control work whose database may recover
+	// after the ordinary delivery budget. Never abandon it while retained.
+	if class == deliveryBroadcast || subject == "audit.authority.decision" {
 		return controlTuning
 	}
 	return workTuning

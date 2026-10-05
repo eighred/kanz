@@ -144,9 +144,15 @@ const (
 // each closing over ctx + providers. Call at engine startup after
 // DefaultRegistry; tests register against a static model provider.
 func RegisterFactorRisk(ctx context.Context, r *Registry, providers FactorProviders) {
-	r.Register(MeasureFactorVaR99, factorMeasure(ctx, providers, MeasureFactorVaR99))
-	r.Register(MeasureSystematicRisk, factorMeasure(ctx, providers, MeasureSystematicRisk))
-	r.Register(MeasureSpecificRisk, factorMeasure(ctx, providers, MeasureSpecificRisk))
+	r.RegisterScoped(MeasureFactorVaR99, ctx, func(evalCtx context.Context) MeasureFunc {
+		return factorMeasure(evalCtx, providers, MeasureFactorVaR99)
+	})
+	r.RegisterScoped(MeasureSystematicRisk, ctx, func(evalCtx context.Context) MeasureFunc {
+		return factorMeasure(evalCtx, providers, MeasureSystematicRisk)
+	})
+	r.RegisterScoped(MeasureSpecificRisk, ctx, func(evalCtx context.Context) MeasureFunc {
+		return factorMeasure(evalCtx, providers, MeasureSpecificRisk)
+	})
 }
 
 // factorMeasure builds the MeasureFunc for one factor measure. It resolves the
@@ -168,6 +174,13 @@ func factorMeasure(ctx context.Context, providers FactorProviders, name v1.Measu
 		zero := func() v1.Measure {
 			cov.ExcludeWhole(SkipNoModel)
 			skipFactor(providers, "", SkipNoModel)
+			var excluded ExcludedExposure
+			for _, pos := range p.Positions() {
+				if pos.InBaseCurrency(p.BaseCurrency()) {
+					excluded.Add(pos.MarketValue.GetAmount())
+				}
+			}
+			gross := excluded.Result(&cov)
 			// THE METHOD IS DECLARED AND THE INSTANCE IS NOT, and the pair is the
 			// whole message: this number is served by the factor model, and no
 			// fitted model stood behind it. Declaring neither would leave the zero
@@ -178,7 +191,7 @@ func factorMeasure(ctx context.Context, providers FactorProviders, name v1.Measu
 				Name:       name,
 				Value:      floatToDecimal(0, factorRiskExp),
 				Coverage:   cov.Result(),
-				Provenance: v1.MeasureProvenance{Method: v1.MethodFactorModel},
+				Provenance: v1.MeasureProvenance{Method: v1.MethodFactorModel, ExcludedGross: gross},
 			}
 		}
 		if providers.Model == nil {
@@ -188,8 +201,8 @@ func factorMeasure(ctx context.Context, providers FactorProviders, name v1.Measu
 		if !ok || model == nil {
 			return zero()
 		}
-		values := factorValues(p, model, providers, &cov)
 		prov := factorProvenance(model, name)
+		values := factorValues(p, model, providers, &cov, &prov)
 		switch name {
 		case MeasureFactorVaR99:
 			return v1.Measure{Name: name, Value: floatToDecimal(model.VaR(values, factorVaRConfidence), factorVaRExp), Coverage: cov.Result(), Provenance: prov}
@@ -218,14 +231,20 @@ func factorMeasure(ctx context.Context, providers FactorProviders, name v1.Measu
 // parameter they do not use.
 func factorProvenance(model *factormodel.Model, name v1.MeasureName) v1.MeasureProvenance {
 	params := map[string]string{"factors": strconv.Itoa(len(model.Factors))}
+	for key, value := range model.InputProvenance {
+		if key != "panel_digest" && key != "descriptor_digest" && key != "input_digest" && key != "descriptor_exclusions" {
+			params[key] = value
+		}
+	}
 	if name == MeasureFactorVaR99 {
 		params["confidence"] = strconv.FormatFloat(factorVaRConfidence, 'f', -1, 64)
 	}
 	return v1.MeasureProvenance{
-		Method:    v1.MethodFactorModel,
-		ModelID:   model.ModelID,
-		ModelAsOf: model.AsOf,
-		Params:    params,
+		Method:      v1.MethodFactorModel,
+		ModelID:     model.ModelID,
+		ModelAsOf:   model.AsOf,
+		Params:      params,
+		InputDigest: factorInputDigest(model),
 	}
 }
 
@@ -242,7 +261,8 @@ func factorProvenance(model *factormodel.Model, name v1.MeasureName) v1.MeasureP
 // here — and this function's job is to make the drop visible, not to move where
 // it happens. Changing the arithmetic inside an observability fix is how a
 // "reporting-only" change ships a silent number change.
-func factorValues(p *domain.Portfolio, model *factormodel.Model, providers FactorProviders, cov *Coverage) map[string]float64 {
+func factorValues(p *domain.Portfolio, model *factormodel.Model, providers FactorProviders, cov *Coverage, prov *v1.MeasureProvenance) map[string]float64 {
+	var excluded ExcludedExposure
 	base := p.BaseCurrency()
 	values := make(map[string]float64)
 	for _, pos := range p.Positions() {
@@ -257,11 +277,13 @@ func factorValues(p *domain.Portfolio, model *factormodel.Model, providers Facto
 		if _, covered := model.Loading(id); !covered {
 			skipFactor(providers, id, SkipNotInModel)
 			cov.Exclude(pos.InstrumentID, SkipNotInModel)
+			excluded.Add(pos.MarketValue.GetAmount())
 		} else {
 			cov.Contributed++
 		}
 		values[id] = decutil.Float64Or(pos.MarketValue.GetAmount(), 0)
 	}
+	prov.ExcludedGross = excluded.Result(cov)
 	return values
 }
 
@@ -271,4 +293,11 @@ func skipFactor(providers FactorProviders, instrumentID, reason string) {
 	if providers.OnSkip != nil {
 		providers.OnSkip(instrumentID, reason)
 	}
+}
+
+func factorInputDigest(m *factormodel.Model) string {
+	if d := m.InputProvenance["input_digest"]; d != "" {
+		return d
+	}
+	return m.InputProvenance["panel_digest"]
 }

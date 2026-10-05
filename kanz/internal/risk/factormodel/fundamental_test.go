@@ -14,7 +14,10 @@ func TestBuildLoadings_ReproduceKnownExposures(t *testing.T) {
 		"B": {Style: map[string]float64{"Size": 2}, Industry: "Tech"},
 		"C": {Style: map[string]float64{"Size": 3}, Industry: "Bank"},
 	}
-	factors, b := buildFundamentalLoadings([]string{"Size"}, instruments, chars)
+	factors, b, err := buildFundamentalLoadings([]string{"Size"}, instruments, chars)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Factors: Size (style), then sorted industries IND:Bank, IND:Tech.
 	wantNames := []string{"Size", "IND:Bank", "IND:Tech"}
@@ -62,7 +65,10 @@ func TestCrossSectionalFit_RecoversFactorReturns(t *testing.T) {
 			returns[i][t] = b[i][0]*f[0][t] + b[i][1]*f[1][t]
 		}
 	}
-	factorCov, specific, residuals := crossSectionalFit(b, returns, DefaultRidge)
+	factorCov, specific, residuals, err := crossSectionalFit(b, returns, DefaultRidge)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	wantCov := sampleCov(f)
 	for i := 0; i < 2; i++ {

@@ -65,13 +65,13 @@ var settlementManifestNotes = []struct {
 }{
 	{
 		path:   filepath.Join("infra", "nats", "bootstrap-job.yaml"),
-		marker: "SETTLEMENT HAS NO PRODUCER (#589)",
+		marker: "SETTLEMENT HAS NO PRODUCER (#1301)",
 		why: "the bootstrap job creates the stream. Without the note, the only thing this file " +
 			"says about SETTLEMENT is that it matters enough to retain for 168h",
 	},
 	{
 		path:   filepath.Join("infra", "nats", "tenancy.yaml"),
-		marker: "GRANTED, AND NOTHING PUBLISHES IT (#589)",
+		marker: "GRANTED, AND NOTHING PUBLISHES IT (#1301)",
 		why: "the grant on settlement.instruction.fail names posttrade.BusFailSink by symbol, " +
 			"which reads as a producer that exists and runs",
 	},
@@ -144,6 +144,11 @@ func TestOMSCompositionRootReportsTheSettlementPosture(t *testing.T) {
 		}
 		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == fn {
 			called = true
+			if len(call.Args) != 4 {
+				t.Error("settlement posture must receive explicit build applicability")
+			} else if model, ok := call.Args[3].(*ast.Ident); !ok || model.Name != "wiredSettlementModel" {
+				t.Error("composition root must use the architecture-verified settlement model")
+			}
 		}
 		return true
 	})

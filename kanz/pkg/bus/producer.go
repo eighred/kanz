@@ -41,10 +41,13 @@ const headerNatsMsgID = "Nats-Msg-Id"
 const headerExpectedLastSubjectSeq = "Nats-Expected-Last-Subject-Sequence"
 
 // Event is the producer-facing form: caller-known envelope fields plus the
-// domain payload. Auto fields (event_id, publish_time, source,
+// domain payload. Auto fields (event_id unless persisted, publish_time, source,
 // producer_version, producer_sequence, envelope_version, correlation_id for
 // roots, idempotency_key for non-COMMAND classes) are stamped by Publish.
 type Event struct {
+	// EventID is a previously persisted UUIDv7 for durable outbox retries.
+	// Empty allocates a fresh identity; COMMAND callers must use IdempotencyKey.
+	EventID string
 	Subject string
 
 	EventType        string
@@ -304,11 +307,19 @@ func (p *Producer) stamp(ctx context.Context, e Event) (*envelopepb.Envelope, er
 	if e.EventTime.IsZero() {
 		return nil, errors.New("Event.EventTime required")
 	}
-	eid, err := uuid.NewV7()
-	if err != nil {
-		return nil, fmt.Errorf("uuid v7: %w", err)
+	eventID := e.EventID
+	if eventID == "" {
+		eid, err := uuid.NewV7()
+		if err != nil {
+			return nil, fmt.Errorf("uuid v7: %w", err)
+		}
+		eventID = eid.String()
+	} else {
+		id, err := uuid.Parse(eventID)
+		if err != nil || id.Version() != 7 || id.Variant() != uuid.RFC4122 || id.String() != eventID || e.EventClass == envelopepb.EventClass_EVENT_CLASS_COMMAND {
+			return nil, errors.New("persisted event_id must be a canonical UUIDv7 on a non-command event")
+		}
 	}
-	eventID := eid.String()
 
 	now := time.Now().UTC()
 	ing := e.IngestionTime

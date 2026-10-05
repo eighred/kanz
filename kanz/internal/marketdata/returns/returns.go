@@ -25,10 +25,11 @@ package returns
 
 import (
 	"context"
-	"github.com/eighred/kanz/internal/dec"
+	"fmt"
 	"math"
 	"time"
 
+	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/marketdata/store"
 )
 
@@ -105,10 +106,12 @@ func NewStoreReturnsProvider(s store.Store, cfg ReturnsConfig) *StoreReturnsProv
 
 // Returns reads the point-in-time close series and differences it into returns.
 func (p *StoreReturnsProvider) Returns(ctx context.Context, instrumentID string, asOf time.Time, window int) ([]float64, error) {
-	if window <= 0 {
-		window = p.cfg.Window
+	limit, err := p.historyLimit(window)
+	if err != nil {
+		return nil, err
 	}
 	obs, err := p.store.History(ctx, store.Query{
+		Limit:        limit,
 		InstrumentID: instrumentID,
 		Kind:         p.cfg.Kind,
 		End:          asOf, // observation_time <= asOf
@@ -120,10 +123,6 @@ func (p *StoreReturnsProvider) Returns(ctx context.Context, instrumentID string,
 	prices := make([]float64, 0, len(obs))
 	for _, o := range obs {
 		prices = append(prices, dec.Float64Or(o.Price, 0))
-	}
-	// window returns need window+1 prices; keep only the most recent tail.
-	if n := window + 1; len(prices) > n {
-		prices = prices[len(prices)-n:]
 	}
 	return computeReturns(prices, p.cfg.Method), nil
 }
@@ -156,3 +155,16 @@ func computeReturns(prices []float64, method ReturnMethod) []float64 {
 
 // Compile-time assertion that StoreReturnsProvider satisfies ReturnsProvider.
 var _ ReturnsProvider = (*StoreReturnsProvider)(nil)
+
+// MaxReturnWindow bounds both scalar features and dated risk panels.
+const MaxReturnWindow = store.MaxHistoryLimit - 1
+
+func (p *StoreReturnsProvider) historyLimit(window int) (int, error) {
+	if window <= 0 {
+		window = p.cfg.Window
+	}
+	if window > MaxReturnWindow {
+		return 0, fmt.Errorf("returns: window exceeds maximum %d", MaxReturnWindow)
+	}
+	return window + 1, nil
+}

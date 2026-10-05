@@ -39,17 +39,26 @@ type SVIParams struct {
 
 // TotalVar returns w(k), the total implied variance at log-moneyness k.
 func (p SVIParams) TotalVar(k float64) float64 {
+	if p.B == 0 {
+		return p.A
+	}
 	d := k - p.M
-	return p.A + p.B*(p.Rho*d+math.Sqrt(d*d+p.Sigma*p.Sigma))
+	return p.A + p.B*(p.Rho*d+math.Hypot(d, p.Sigma))
 }
 
 // dw and d2w are the analytic first/second derivatives of w(k).
 func (p SVIParams) dw(k float64) float64 {
+	if p.B == 0 {
+		return 0
+	}
 	d := k - p.M
 	return p.B * (p.Rho + d/math.Sqrt(d*d+p.Sigma*p.Sigma))
 }
 
 func (p SVIParams) d2w(k float64) float64 {
+	if p.B == 0 {
+		return 0
+	}
 	d := k - p.M
 	s := math.Sqrt(d*d + p.Sigma*p.Sigma)
 	return p.B * p.Sigma * p.Sigma / (s * s * s)
@@ -62,20 +71,27 @@ func (p SVIParams) d2w(k float64) float64 {
 //
 // must be ≥ 0 (and w > 0) everywhere — g < 0 means a negative implied density.
 func (p SVIParams) ButterflyFree(kLo, kHi float64) bool {
+	if !p.valid() || !finite(kLo) || !finite(kHi) || kLo > kHi || !finite(kHi-kLo) {
+		return false
+	}
 	const steps = 200
 	for i := 0; i <= steps; i++ {
 		k := kLo + (kHi-kLo)*float64(i)/steps
 		w := p.TotalVar(k)
-		if w <= 0 {
+		if !positive(w) {
 			return false
 		}
 		w1, w2 := p.dw(k), p.d2w(k)
 		g := (1-k*w1/(2*w))*(1-k*w1/(2*w)) - (w1*w1/4)*(1/w+0.25) + w2/2
-		if g < 0 {
+		if !finite(g) || g < 0 {
 			return false
 		}
 	}
 	return true
+}
+
+func (p SVIParams) valid() bool {
+	return finite(p.A) && finite(p.B) && finite(p.Rho) && finite(p.M) && finite(p.Sigma) && p.B >= 0 && math.Abs(p.Rho) <= 1 && p.Sigma >= 0 && (p.B == 0 || p.Sigma > 0)
 }
 
 // ErrSVIFit is returned when a quote set cannot be fitted (too few valid
@@ -102,21 +118,33 @@ type SVISurface struct {
 // PARITY-03a calibrated curve satisfies pricing.DiscountCurve); divYield is
 // the flat dividend/carry yield. A slice needs ≥ 3 valid quotes.
 func FitSVI(quotes []OptionQuote, spot float64, disc pricing.DiscountCurve, divYield float64) (*SVISurface, error) {
-	if spot <= 0 || disc == nil {
+	if !positive(spot) || !finite(divYield) || disc == nil {
 		return nil, fmt.Errorf("%w: spot and discount curve required", ErrSVIFit)
 	}
 	type smilePt struct{ k, w float64 }
 	smiles := map[float64][]smilePt{}
-	for _, q := range quotes {
-		r := disc.Rate(q.Expiry)
-		iv, ok := ImpliedVol(q.Type, q.Price, spot, q.Strike, q.Expiry, r, divYield)
-		if !ok {
-			continue // outside the arbitrage band — same skip as FromQuotes
+	rates := map[float64]float64{}
+	for i, q := range quotes {
+		if !validQuote(q) {
+			return nil, fmt.Errorf("%w: quote %d: %w", ErrSVIFit, i, ErrInvalidInput)
+		}
+		r, seen := rates[q.Expiry]
+		if !seen {
+			r = disc.Rate(q.Expiry)
+			rates[q.Expiry] = r
+		}
+		iv, err := impliedVol(q.Type, q.Price, spot, q.Strike, q.Expiry, r, divYield)
+		if err != nil {
+			return nil, fmt.Errorf("%w: quote %d: %w", ErrSVIFit, i, err)
 		}
 		fwd := spot * math.Exp((r-divYield)*q.Expiry)
+		k, w := math.Log(q.Strike)-math.Log(fwd), iv*iv*q.Expiry
+		if !positive(fwd) || !finite(k) || !positive(w) {
+			return nil, fmt.Errorf("%w: non-finite forward or total variance", ErrSVIFit)
+		}
 		smiles[q.Expiry] = append(smiles[q.Expiry], smilePt{
-			k: math.Log(q.Strike / fwd),
-			w: iv * iv * q.Expiry,
+			k: k,
+			w: w,
 		})
 	}
 	if len(smiles) == 0 {
@@ -142,7 +170,7 @@ func FitSVI(quotes []OptionQuote, spot float64, disc pricing.DiscountCurve, divY
 		if !params.ButterflyFree(kLo, kHi) {
 			return nil, fmt.Errorf("%w: butterfly (negative density) at expiry %.4g", ErrArbitrage, expiry)
 		}
-		r := disc.Rate(expiry)
+		r := rates[expiry]
 		surf.expiries = append(surf.expiries, expiry)
 		surf.forwards = append(surf.forwards, spot*math.Exp((r-divYield)*expiry))
 		surf.slices = append(surf.slices, params)
@@ -153,7 +181,8 @@ func FitSVI(quotes []OptionQuote, spot float64, disc pricing.DiscountCurve, divY
 	for i := 1; i < len(surf.slices); i++ {
 		for j := 0; j <= 40; j++ {
 			k := -kSpan + 2*kSpan*float64(j)/40
-			if surf.slices[i].TotalVar(k) < surf.slices[i-1].TotalVar(k)-1e-9 {
+			current, previous := surf.slices[i].TotalVar(k), surf.slices[i-1].TotalVar(k)
+			if !positive(current) || !positive(previous) || current < previous-1e-9 {
 				return nil, fmt.Errorf("%w: calendar (total variance decreasing %.4g→%.4g at k=%.2f)",
 					ErrArbitrage, surf.expiries[i-1], surf.expiries[i], k)
 			}
@@ -207,6 +236,9 @@ func fitSlice(ks, ws []float64) (SVIParams, error) {
 		for j := -4; j <= 4; j++ {
 			try(m0+0.05*span*float64(i), s0*math.Pow(1.15, float64(j)))
 		}
+	}
+	if !best.valid() || !finite(bestSSE) || !positive(best.A+best.B*best.Sigma*math.Sqrt(1-best.Rho*best.Rho)) {
+		return SVIParams{}, ErrSVIFit
 	}
 	return best, nil
 }
@@ -268,7 +300,7 @@ func solveLinear(ks, ws []float64, m, sigma float64) (SVIParams, bool) {
 		}
 	}
 	p := SVIParams{A: a, B: c / sigma, Rho: rho, M: m, Sigma: sigma}
-	if p.A+p.B*p.Sigma*math.Sqrt(1-p.Rho*p.Rho) < 0 {
+	if !p.valid() || !positive(p.A+p.B*p.Sigma*math.Sqrt(1-p.Rho*p.Rho)) {
 		return SVIParams{}, false // minimum total variance negative
 	}
 	return p, true
@@ -288,26 +320,38 @@ func sse(p SVIParams, ks, ws []float64) float64 {
 // fitted expiries the nearest slice's vol clamps. ok=false only for an empty
 // surface or non-positive inputs.
 func (s *SVISurface) Vol(strike, expiry float64) (float64, bool) {
-	if s == nil || len(s.slices) == 0 || strike <= 0 || expiry <= 0 {
+	if s == nil || len(s.slices) == 0 || !positive(strike) || !positive(expiry) {
 		return 0, false
 	}
 	wAt := func(i int) float64 {
-		return s.slices[i].TotalVar(math.Log(strike / s.forwards[i]))
+		return s.slices[i].TotalVar(math.Log(strike) - math.Log(s.forwards[i]))
+	}
+	vol := func(w, t float64) (float64, bool) {
+		v := math.Sqrt(w / t)
+		if !positive(w) || !positive(v) {
+			return 0, false
+		}
+		return v, true
 	}
 	n := len(s.expiries)
 	if expiry <= s.expiries[0] {
-		return math.Sqrt(wAt(0) / s.expiries[0]), true
+		return vol(wAt(0), s.expiries[0])
 	}
 	if expiry >= s.expiries[n-1] {
-		return math.Sqrt(wAt(n-1) / s.expiries[n-1]), true
+		return vol(wAt(n-1), s.expiries[n-1])
 	}
 	i := sort.SearchFloat64s(s.expiries, expiry)
 	if s.expiries[i] == expiry {
-		return math.Sqrt(wAt(i) / expiry), true
+		return vol(wAt(i), expiry)
 	}
 	t0, t1 := s.expiries[i-1], s.expiries[i]
-	w := wAt(i-1) + (wAt(i)-wAt(i-1))*(expiry-t0)/(t1-t0)
-	return math.Sqrt(w / expiry), true
+	w0, w1 := wAt(i-1), wAt(i)
+	if !positive(w0) || !positive(w1) {
+		return 0, false
+	}
+	a := (expiry - t0) / (t1 - t0)
+	w := w0*(1-a) + w1*a
+	return vol(w, expiry)
 }
 
 // Expiries returns the fitted slice expiries (ascending). Copy.

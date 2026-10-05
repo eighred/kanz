@@ -144,7 +144,7 @@ func cadenceProvider(t *testing.T, cadence time.Duration, observed *[]*factormod
 		universe,
 		factormodel.Providers{Returns: rp},
 		WithFitCadence(cadence),
-		WithFitObserver(func(_ context.Context, m *factormodel.Model) { *observed = append(*observed, m) }),
+		WithFitObserver(func(_ context.Context, m *factormodel.Model) error { *observed = append(*observed, m); return nil }),
 	)
 }
 

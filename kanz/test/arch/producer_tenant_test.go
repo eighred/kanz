@@ -246,6 +246,7 @@ var producersWithoutATenantFallback = map[string]tenantRoute{
 			"reintroduce the defect this entry exists to prevent.",
 		stampedIn: "services/api-gateway/internal/orders/orders.go",
 	},
+	"internal/auditdelivery": {why: "Authority journal workers scope reads with transaction-local tenant RLS and stamp the same tenant on each event (#1292).", stampedIn: "internal/auditdelivery/worker.go"},
 	"services/copilot/cmd/copilot": {
 		why: "ROUTE 2. The only publisher on this producer is the AUTH-01d decision recorder " +
 			"(buildDecisionRecorder), and pkg/authbus stamps Event.TenantID on every decision: the " +

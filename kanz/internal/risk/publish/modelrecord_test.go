@@ -152,7 +152,7 @@ func TestEmitCalibratedCurve_ReconstructsTheCurveFromTheFact(t *testing.T) {
 	}
 	for _, tau := range []float64{0.5, 1, 3, 7, 10} {
 		want, got := c.Discount(tau), rebuilt.Discount(tau)
-		if math.Abs(want-got) > 1e-9 {
+		if want != got {
 			t.Errorf("DF(%.1fy) rebuilt from the FACT = %.12f, original %.12f — the record "+
 				"does not reproduce the curve it claims to be", tau, got, want)
 		}

@@ -45,7 +45,7 @@ func database(t *testing.T) (*Store, func(string) *Store) {
 	}
 	// Accounting migration history targets the shared test schema. Like the
 	// custody/ledger suites, run with -p 1, never against a production database.
-	if _, err = base.Exec(t.Context(), `DROP TABLE IF EXISTS execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations,collateral_requests,collateral_reservations,collateral_active_agreements,collateral_workflows,collateral_snapshots,collateral_lots,custody_actions,custody_statements,custody_runs,custody_breaks,ledger_entries,ledger_snapshots,outbox CASCADE`); err != nil {
+	if _, err = base.Exec(t.Context(), `DROP TABLE IF EXISTS ledger_append_positions,ledger_heads,execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations,collateral_requests,collateral_reservations,collateral_active_agreements,collateral_workflows,collateral_snapshots,collateral_lots,custody_actions,custody_statements,custody_runs,custody_breaks,ledger_entries,ledger_snapshots,outbox CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(base.Close)

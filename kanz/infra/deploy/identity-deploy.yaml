@@ -115,6 +115,7 @@ spec:
           ports:
             - { containerPort: 8087, name: http }
           env:
+            - { name: IDENTITY_AUDIT_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: IDENTITY_LISTEN, value: ":8087" }
             # DSN from the SEC-01d CSI secret file, not a plaintext env.
             - { name: IDENTITY_DATABASE_URL_FILE, value: /run/secrets/db/database-url }
