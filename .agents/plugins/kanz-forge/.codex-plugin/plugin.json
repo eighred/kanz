@@ -1,0 +1,21 @@
+{
+  "name": "kanz-forge",
+  "version": "0.2.0+codex.20261005042405",
+  "description": "Repository-owned workflows for Kanz investigation, implementation, verification, and delivery.",
+  "author": {
+    "name": "Eighred"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Kanz Forge",
+    "shortDescription": "Investigate, build, verify, and deliver Kanz changes.",
+    "longDescription": "Focused repository workflows that route to current code, guards, CI, git history, and GitHub Issues. AGENTS.md remains the authority for platform invariants and safety boundaries.",
+    "developerName": "Eighred",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": "Use Kanz Forge to investigate and deliver the next actionable Kanz issue."
+  }
+}

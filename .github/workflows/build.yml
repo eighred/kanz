@@ -448,7 +448,7 @@ jobs:
         id: warm_builder
         run: .github/scripts/warm-builder.sh ghcr.io/eighred/base/buildkit:buildx-stable-1
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           # #1192: v0.37.0 can give a new client only milliseconds to connect.
           # v0.37.1 includes docker/buildx#4050's full bounded readiness wait.
@@ -500,7 +500,7 @@ jobs:
       # pure cost.
       - name: Build
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           # context: . uses the local checkout (incl. the generated gen/go),
           # not the git context which would omit the uncommitted SDK.
@@ -534,7 +534,7 @@ jobs:
       # main branch; no AWS key or GHCR package token is stored on the node.
       - name: Obtain testnet ECR publisher identity
         if: github.event_name == 'push' && matrix.testnet_ecr == true
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_TESTNET_ECR_ROLE_ARN }}
           aws-region: ap-northeast-1
