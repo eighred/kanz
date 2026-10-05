@@ -256,7 +256,7 @@ var storedSeriesWithoutAProducerExempt = map[string]string{
 // retire them independently: whichever kind gets a producer first should force
 // its own line to be deleted rather than let a joint entry keep vouching for the
 // other three.
-const storedSeriesDarkPriceKind = "REAL FINDING, tracked under #509 as the same class — FOUR OF " +
+const storedSeriesDarkPriceKind = "#1340 — REAL FINDING: FOUR OF " +
 	"THE EIGHT PriceKinds ARE ACCEPTED BY CONFIGURATION AND WRITTEN BY NOTHING. The ingest path " +
 	"stamps exactly three (internal/marketdata/ingest.go — Close, Last, Mid) and " +
 	"AdjustedClose, Open, VWAP and Settlement are formed nowhere in the module. THE REASON THIS " +
@@ -279,7 +279,7 @@ const storedSeriesDarkPriceKind = "REAL FINDING, tracked under #509 as the same 
 // storedSeriesDarkTermsKind is the shared half of the two contract-terms labels
 // nothing writes. Split into two entries for the same reason as the PriceKinds:
 // whichever gets a producer first must retire its own line.
-const storedSeriesDarkTermsKind = "#509 — a contract-terms LABEL nothing writes, two levels " +
+const storedSeriesDarkTermsKind = "#1341 — a contract-terms LABEL nothing writes, two levels " +
 	"below a store that has no production writer at all. terms.Postgres is already exempt in " +
 	"store_has_a_writer_test.go because Put has no non-test caller; the only thing in the module " +
 	"that produces a terms.Record is internal/marketdata/termsload, which is itself exempt in " +

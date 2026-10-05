@@ -164,13 +164,13 @@ var exemptionNamesTrackingIssue = regexp.MustCompile(`^#[0-9]+\b`)
 // stays dark for a year. The dead-entry arm below deletes the entry for you when
 // the package finally gets an importer.
 var darkPackageExempt = map[string]string{
-	"internal/marketdata/termsload": "#509 — the contract-terms LOADER, and the writer the " +
+	"internal/marketdata/termsload": "#345 — the option/future contract-terms loader and PIT quote join; #1341 owns bond, swap and structured terms. The writer the " +
 		"contract_terms store has never had. It is dark for one step: what remains is a CLI to " +
 		"run it (the kanz-backfill shape — pull venue reference data into a store), which is " +
 		"deliberately not written blind, because it cannot be exercised here against the venue " +
 		"endpoint it exists to read. Until it is wired the FI measures keep computing over an " +
 		"empty table, and kanz_risk_fi_terms_missing_total is the only thing that says so.",
-	"internal/risk/pricing/credit": "#113 — the credit calibrator carries the same Refresh seam the " +
+	"internal/risk/pricing/credit": "#203 — the credit calibrator carries the same Refresh seam the " +
 		"scheduler drives, and is not scheduled because no live CDS quote source exists (#203). " +
 		"kanz_risk_calibration_scheduled{kind=\"credit\"} reports 0 so the gap is visible.",
 	"internal/alpha/barview": "#416 C2 — the point-in-time bar seam the owner ruled for on " +
