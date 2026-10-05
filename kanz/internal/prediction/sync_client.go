@@ -53,8 +53,8 @@ const (
 )
 
 // SyncClientOptions tunes the resilience primitives. Defaults via
-// DefaultSyncClientOptions cover the BRAIN's <50ms target plus a
-// conservative breaker.
+// DefaultSyncClientOptions choose a bounded deadline and conservative breaker;
+// #1348 owns a measured latency contract for the shared inference process.
 type SyncClientOptions struct {
 	// Timeout is the per-call deadline. The gRPC server treats
 	// exceeded deadlines as PRED-02 §2.2 (returns DEGRADED with
