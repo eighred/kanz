@@ -83,6 +83,23 @@ class EvidenceTests(unittest.TestCase):
         problems, _, _ = check(io.StringIO(event("pass")))
         self.assertIn("shared-session Chromium proof did not run", problems)
 
+    def test_cached_results_do_not_count_as_fresh_service_proof(self):
+        problems, _, _ = check(suite(event("output", output="ok  example/store  (cached)\n")))
+        self.assertIn("cached package result is not fresh verification", problems[0])
+
+    def test_partial_and_unexpected_package_sets_are_rejected(self):
+        problems, _, _ = check(suite(), ["example/store", "example/missing"])
+        self.assertEqual(problems, ["package result missing: example/missing"])
+        problems, _, _ = check(suite(), ["example/other"])
+        self.assertIn("unexpected package result: example/store", problems)
+        with self.assertRaises(ValueError):
+            check(suite(), [])
+
+    def test_complete_inventory_includes_packages_without_tests(self):
+        records = suite(event("skip", package="example/config"))
+        problems, skips, count = check(records, ["example/store\n", "example/config\n"])
+        self.assertEqual((problems, skips, count), ([], 1, 2))
+
 
 if __name__ == "__main__":
     unittest.main()

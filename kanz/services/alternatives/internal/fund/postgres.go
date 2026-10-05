@@ -77,24 +77,6 @@ func (p *Postgres) Journal(ctx context.Context, commitmentID string) ([]*alterna
 	return out, rows.Err()
 }
 
-// Commitments returns the distinct commitment ids known to the store.
-func (p *Postgres) Commitments(ctx context.Context) ([]string, error) {
-	rows, err := p.pool.Query(ctx, `SELECT DISTINCT commitment_id FROM fund_events ORDER BY commitment_id`)
-	if err != nil {
-		return nil, fmt.Errorf("query commitments: %w", err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan commitment: %w", err)
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
-}
-
 // amountText marshals a *big.Rat to its lossless RatString, or nil (⇒ SQL NULL).
 func amountText(r *big.Rat) any {
 	if r == nil {

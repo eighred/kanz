@@ -289,6 +289,10 @@ func writeFrame(t *testing.T, ctx context.Context, broker, kafkaTopic, tenant, e
 		Topic:        kafkaTopic,
 		BatchTimeout: 100 * time.Millisecond,
 		Transport:    tr,
+		// A direct Writer defaults to RequireNone, unlike NewWriter. Opening
+		// the finite replay snapshot before the fixture is acknowledged can
+		// legitimately see an empty log and falsely fail the DR proof (#1358).
+		RequiredAcks: kafka.RequireAll,
 	}
 	defer func() { _ = w.Close() }()
 
