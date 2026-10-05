@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - '.agents/**'
+      - 'plugins/kanz-forge/**'
       - 'AGENTS.md'
       - '.github/workflows/kanz-forge.yml'
   push:
     branches: [main]
     paths:
       - '.agents/**'
+      - 'plugins/kanz-forge/**'
       - 'AGENTS.md'
       - '.github/workflows/kanz-forge.yml'
 
