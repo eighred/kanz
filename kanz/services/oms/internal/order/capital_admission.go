@@ -94,6 +94,9 @@ func (p *Postgres) SaveFundedTerminal(ctx context.Context, st *orderpb.OrderStat
 		if len(currencies) == 0 {
 			return nil
 		} // legacy cancel must remain possible while activation is halted
+		if err := capital.LockBalances(ctx, tx, st.GetPortfolioId(), currencies); err != nil {
+			return err
+		}
 		if _, err := fundedSettlement(st, currencies); err != nil {
 			return err
 		}

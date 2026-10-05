@@ -292,7 +292,7 @@ func AddExecution(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID s
 // reached a provable terminal state. The observed debit remains committed until
 // accounting's immutable inclusion proof reduces the reservation.
 func FinishExecution(ctx context.Context, tx pgx.Tx, portfolio, currency, orderID string, now time.Time) error {
-	if _, err := lock(ctx, tx, portfolio, currency); err != nil {
+	if err := LockBalances(ctx, tx, portfolio, []string{currency}); err != nil {
 		return err
 	}
 	m, err := loadMember(ctx, tx, portfolio, currency, orderID)

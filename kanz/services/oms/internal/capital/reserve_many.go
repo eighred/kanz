@@ -10,6 +10,30 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// LockBalances establishes the source-health -> lexical currency lock order
+// before a lifecycle decision reads child orders or changes any commitment.
+// A quarantined source still permits confirmed reductions and execution facts;
+// this lock is not permission to admit new exposure.
+func LockBalances(ctx context.Context, tx pgx.Tx, portfolio string, currencies []string) error {
+	if !validID(portfolio) || len(currencies) == 0 || len(currencies) > 32 {
+		return ErrInvalid
+	}
+	for i, currency := range currencies {
+		if !validID(currency) || i > 0 && currencies[i-1] >= currency {
+			return ErrInvalid
+		}
+	}
+	if _, err := sourceFault(ctx, tx); err != nil {
+		return err
+	}
+	for _, currency := range currencies {
+		if _, err := lock(ctx, tx, portfolio, currency); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ReserveMany funds every debit currency of one order, including fees paid in
 // another asset. No FX substitution is made. The caller supplies authoritative
 // worst-case debits; an absent fee currency is not proof that fees are zero.

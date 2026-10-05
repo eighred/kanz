@@ -262,6 +262,12 @@ func (p *Postgres) observeFundedFill(ctx context.Context, tx pgx.Tx, st *orderpb
 	if len(currencies) == 0 {
 		return nil
 	} // legacy order; activation must resolve it before new cash admission
+	// A terminal fill also releases currencies with no actual fee. Lock the
+	// complete set before its settlement debit, or USD -> unused BNB can invert
+	// the order used by admissions, accounting and another fee-bearing fill.
+	if err := capital.LockBalances(ctx, tx, st.GetPortfolioId(), currencies); err != nil {
+		return err
+	}
 	if fill == nil {
 		return capital.ErrInvalid
 	}
