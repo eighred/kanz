@@ -328,6 +328,54 @@ jobs:
       - name: Install PyYAML
         run: pip install pyyaml
 
+      # The cross-language Go test requires a running Python consumer, not just
+      # NATS. Use the shipped runtime and a disposable, explicitly synthetic
+      # model card; this proves transport/scoring, not production model approval.
+      - name: Start Python inference on the real bus
+        env:
+          PYTHONPATH: ${{ github.workspace }}/kanz-schemas/gen/python:${{ github.workspace }}/kanz-py
+          KANZ_INFERENCE_MODELS: ${{ runner.temp }}/inference-ci-model.json
+          KANZ_INFERENCE_NATS_URL: nats://localhost:4222
+          KANZ_INFERENCE_ALLOW_INSECURE_GRPC: "true"
+          KANZ_INFERENCE_BIND: 127.0.0.1:50051
+          KANZ_INFERENCE_METRICS_BIND: 127.0.0.1:8099
+        run: |
+          python -m venv "$RUNNER_TEMP/inference-ci"
+          "$RUNNER_TEMP/inference-ci/bin/pip" install --require-hashes -r kanz-py/requirements.txt -r kanz-py/requirements-codegen.txt
+          mkdir -p kanz-schemas/gen/python
+          "$RUNNER_TEMP/inference-ci/bin/python" -m grpc_tools.protoc \
+            -I kanz-schemas/proto --python_out=kanz-schemas/gen/python \
+            --grpc_python_out=kanz-schemas/gen/python $(find kanz-schemas/proto -name '*.proto')
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          now = datetime.now(timezone.utc)
+          Path(os.environ["KANZ_INFERENCE_MODELS"]).write_text(json.dumps({
+              "model_id": "ci-synthetic-portfolio-risk@1.0.0",
+              "feature_set_ref": "portfolio-risk:1", "confidence_threshold": 0.5,
+              "weights": {"GrossExposure": 0.4, "VaR99": -0.9}, "bias": 0.1,
+              "validated_at": now.isoformat(), "expires_at": (now + timedelta(hours=2)).isoformat(),
+              "validation_passed": True, "report_uri": "fixture://ci-only/synthetic-linear-model"
+          }), encoding="utf-8")
+          PY
+          "$RUNNER_TEMP/inference-ci/bin/python" -m kanz_inference > "$RUNNER_TEMP/inference-ci.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/inference-ci.pid"
+          for i in $(seq 1 30); do
+            kill -0 "$(cat "$RUNNER_TEMP/inference-ci.pid")" || break
+            if curl --fail --silent --max-time 2 http://127.0.0.1:8099/readyz; then exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/inference-ci.log"
+          exit 1
+
+      - name: Verify Go to Python inference before the full race suite
+        working-directory: kanz
+        env:
+          TEST_NATS_URL: nats://localhost:4222
+          TEST_INFERENCE_ON_BUS: "1"
+        run: go test -race -p 1 ./services/risk-engine/internal/app -run '^TestIntegration_TheModelScoresTheEnginesFeatures$' -count=1 -v
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: kanz-web/.nvmrc
@@ -348,6 +396,7 @@ jobs:
           TEST_NATS_URL: nats://localhost:4222
           TEST_KAFKA_BROKERS: localhost:9092
           TEST_OMS_ON_BUS: "1"
+          TEST_INFERENCE_ON_BUS: "1"
           TEST_OMS_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
           TEST_SESSION_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/sessions.cjs
           TEST_MFA_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/mfa.cjs
@@ -489,6 +538,12 @@ jobs:
       - name: OMS log (on failure)
         if: failure()
         run: cat /tmp/oms.log || true
+
+      - name: Stop CI inference and retain its diagnostic log
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/inference-ci.log" ]; then cat "$RUNNER_TEMP/inference-ci.log"; fi
+          if [ -f "$RUNNER_TEMP/inference-ci.pid" ]; then kill "$(cat "$RUNNER_TEMP/inference-ci.pid")" 2>/dev/null || true; fi
 
       - name: golangci-lint
         # v7 is REQUIRED for golangci-lint v2: v6 only knows the v1 module path
