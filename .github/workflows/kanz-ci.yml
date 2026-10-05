@@ -191,7 +191,7 @@ jobs:
       # baked-in server.properties" to "assemble config purely from env" and it
       # then fails looking for zookeeper.connect). Started as a step, exactly like
       # NATS above, with the exact env this workflow's own archiver Task 5 proved
-      # boots clean (see .superpowers/sdd/task-5-report.md). No `-js`-equivalent
+      # boots clean. No `-js`-equivalent
       # flag is needed here, only env, but the boot-and-poll shape matches NATS's
       # for the same reason: neither image's readiness is visible to Docker's own
       # health-check without a broker-specific probe this workflow doesn't need.
