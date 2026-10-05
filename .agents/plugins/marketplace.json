@@ -8,7 +8,7 @@
       "name": "kanz-forge",
       "source": {
         "source": "local",
-        "path": "./plugins/kanz-forge"
+        "path": "./.agents/plugins/kanz-forge"
       },
       "policy": {
         "installation": "AVAILABLE",
