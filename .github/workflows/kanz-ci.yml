@@ -29,6 +29,8 @@ on:
       - 'tools/Install-TestnetObservability.ps1'
       - 'tools/Initialize-TestnetPortfolio.ps1'
       - '.github/workflows/kanz-ci.yml'
+      - '.github/scripts/go_test_evidence.py'
+      - '.github/scripts/test_go_test_evidence.py'
   push:
     branches: [main]
     # DOCS DO NOT BUILD IMAGES.
@@ -380,13 +382,13 @@ jobs:
         # distinguish "ran" from "skipped". -v puts the SKIP lines and their
         # reasons in the log; the step below turns them into a failure.
         #
-        # -v RATHER THAN -json, deliberately: -json would need rendering back to
-        # text for a human to read the log, which means a jq dependency in the
-        # one job that must never fail for its own reasons. -p 1 already runs
-        # packages sequentially, so -v output cannot interleave.
+        # JSON retains test attribution even when parallel subtests interleave.
+        # The standard-library renderer preserves readable Actions output; the
+        # next gate checks the original events, not neighboring text (#1352).
         run: |
           set -euo pipefail
-          go test -race -p 1 -v ./... | tee "$RUNNER_TEMP/gotest.txt"
+          go test -race -p 1 -json ./... | tee "$RUNNER_TEMP/gotest.jsonl" \
+            | python3 ../.github/scripts/go_test_evidence.py --render
 
       # A SKIP CITING A BACKING SERVICE THIS JOB PROVIDES IS A FAILURE.
       #
@@ -403,30 +405,8 @@ jobs:
         working-directory: kanz
         run: |
           set -euo pipefail
-          render="$RUNNER_TEMP/gotest.txt"
-          if [ ! -s "$render" ]; then
-            echo "::error::no suite output at $render — the Test step did not run, so this check proved nothing"
-            exit 1
-          fi
-          # -A3 keeps the SKIP line together with the indented reason beneath it,
-          # so a bare mention of a variable elsewhere in the log is not a match.
-          offenders="$(grep -A3 -- '--- SKIP' "$render" \
-            | grep -E 'TEST_(POSTGRES_URL|NATS_URL|KAFKA_BROKERS|REDIS_URL|NATS_MTLS_URL|NATS_MTLS_CERT_DIR|MFA_BROWSER_SCRIPT)' || true)"
-          if [ -n "$offenders" ]; then
-            echo "::error::a test skipped citing a backing service this job provides — it did not run, and the suite was green anyway"
-            echo "$offenders"
-            echo
-            echo "Every one of those variables is set in the Test step's env block."
-            echo "A skip means the gate stopped seeing it: a renamed variable, a"
-            echo "changed helper, or a service container that failed to come up."
-            exit 1
-          fi
-          grep -q 'Chromium shared-session inventory and revocation PASS' "$render" || {
-            echo "::error::shared-session Chromium proof did not run"
-            exit 1
-          }
-          printf 'no backing-service test skipped; %d SKIP line(s) total, all for other reasons\n' \
-            "$(grep -c -- '--- SKIP' "$render" || true)"
+          python3 -m unittest discover -s ../.github/scripts -p test_go_test_evidence.py
+          python3 ../.github/scripts/go_test_evidence.py "$RUNNER_TEMP/gotest.jsonl"
 
       # THE `redis` BUILD (EXEC-M22). This tag is what webhook-ingest's production image is
       # built with, and it is the ONLY thing that makes `replicas: 2` on the platform's
