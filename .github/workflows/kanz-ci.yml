@@ -31,6 +31,8 @@ on:
       - '.github/workflows/kanz-ci.yml'
       - '.github/scripts/go_test_evidence.py'
       - '.github/scripts/test_go_test_evidence.py'
+      - '.github/scripts/go_mod_download.py'
+      - '.github/scripts/test_go_mod_download.py'
   push:
     branches: [main]
     # DOCS DO NOT BUILD IMAGES.
@@ -139,6 +141,12 @@ jobs:
 
       - name: Generate kanz-schemas Go SDK
         run: make -C kanz generate
+
+      - name: Download reviewed Go dependencies with bounded transport retries
+        working-directory: kanz
+        run: |
+          python3 -B -m unittest discover -s ../.github/scripts -p test_go_mod_download.py
+          python3 ../.github/scripts/go_mod_download.py
 
       - name: Build
         working-directory: kanz
