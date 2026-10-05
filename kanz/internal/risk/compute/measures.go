@@ -1,6 +1,8 @@
 package compute
 
 import (
+	"context"
+	"maps"
 	"sort"
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
@@ -74,12 +76,14 @@ type MeasureFunc func(p *domain.Portfolio) v1.Measure
 // are pure functions keyed by MeasureName — adding a measure means
 // inserting one entry; removing means deleting one.
 type Registry struct {
-	funcs map[v1.MeasureName]MeasureFunc
+	funcs      map[v1.MeasureName]MeasureFunc
+	scoped     map[v1.MeasureName]func(context.Context) MeasureFunc
+	parameters map[v1.MeasureName]map[string]string
 }
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{funcs: make(map[v1.MeasureName]MeasureFunc)}
+	return &Registry{funcs: make(map[v1.MeasureName]MeasureFunc), scoped: make(map[v1.MeasureName]func(context.Context) MeasureFunc), parameters: make(map[v1.MeasureName]map[string]string)}
 }
 
 // Register adds or replaces a measure. Quants plug in real models
@@ -87,6 +91,29 @@ func NewRegistry() *Registry {
 // use the same hook to substitute deterministic implementations.
 func (r *Registry) Register(name v1.MeasureName, fn MeasureFunc) {
 	r.funcs[name] = fn
+	delete(r.scoped, name)
+	delete(r.parameters, name)
+}
+
+// SetParameters binds reproducible model configuration to an existing startup
+// registration. Replacement invalidates it; callers cannot mutate retained maps.
+func (r *Registry) SetParameters(name v1.MeasureName, parameters map[string]string) {
+	if _, ok := r.funcs[name]; ok {
+		r.parameters[name] = maps.Clone(parameters)
+	}
+}
+
+func (r *Registry) Parameters(name v1.MeasureName) (map[string]string, bool) {
+	parameters, ok := r.parameters[name]
+	return maps.Clone(parameters), ok
+}
+
+// RegisterScoped retains the legacy binding while allowing one evaluation to
+// supply a context for input recording, cancellation and replay. The factory
+// must capture its argument locally; registry state is immutable after startup.
+func (r *Registry) RegisterScoped(name v1.MeasureName, base context.Context, factory func(context.Context) MeasureFunc) {
+	r.Register(name, factory(base))
+	r.scoped[name] = factory
 }
 
 // Names returns the registered measure names in stable lexicographic
@@ -120,6 +147,15 @@ func DefaultRegistry() *Registry {
 // names in filter that are not in the registry are silently
 // dropped (matches v1.MeasureSet.Lookup's miss semantics).
 func ComputeMeasures(p *domain.Portfolio, r *Registry, filter []v1.MeasureName) *domain.MeasureSet {
+	return computeMeasures(context.Background(), false, p, r, filter)
+}
+
+// ComputeMeasuresContext evaluates provider reads in a single caller scope.
+func ComputeMeasuresContext(ctx context.Context, p *domain.Portfolio, r *Registry, filter []v1.MeasureName) *domain.MeasureSet {
+	return computeMeasures(ctx, true, p, r, filter)
+}
+
+func computeMeasures(ctx context.Context, scoped bool, p *domain.Portfolio, r *Registry, filter []v1.MeasureName) *domain.MeasureSet {
 	if r == nil {
 		r = DefaultRegistry()
 	}
@@ -135,9 +171,13 @@ func ComputeMeasures(p *domain.Portfolio, r *Registry, filter []v1.MeasureName) 
 		return false
 	}
 	results := make(map[v1.MeasureName]v1.Measure)
-	for name, fn := range r.funcs {
+	for _, name := range r.Names() {
 		if !want(name) {
 			continue
+		}
+		fn := r.funcs[name]
+		if scoped && r.scoped[name] != nil {
+			fn = r.scoped[name](ctx)
 		}
 		results[name] = fn(p)
 	}

@@ -279,12 +279,13 @@ var mapEvictionExempt = map[string]evictionExemption{
 			"REGISTERED, which is a code change. Its sibling `excluded` is set to nil on the same " +
 			"path and is credited rather than exempted.", ""},
 
-	"internal/risk/factormodel: Model.Factors":     factorModelArtifact("the factor names"),
-	"internal/risk/factormodel: Model.Instruments": factorModelArtifact("the instrument universe"),
-	"internal/risk/factormodel: Model.Loadings":    factorModelArtifact("the loadings matrix, one row per instrument"),
-	"internal/risk/factormodel: Model.FactorCov":   factorModelArtifact("the factor covariance matrix, factors x factors"),
-	"internal/risk/factormodel: Model.SpecificVar": factorModelArtifact("specific variance, one entry per instrument"),
-	"internal/risk/factormodel: Model.index":       factorModelArtifact("the instrument-to-row index over the same universe"),
+	"internal/risk/factormodel: Model.Factors":         factorModelArtifact("the factor names"),
+	"internal/risk/factormodel: Model.Instruments":     factorModelArtifact("the instrument universe"),
+	"internal/risk/factormodel: Model.Loadings":        factorModelArtifact("the loadings matrix, one row per instrument"),
+	"internal/risk/factormodel: Model.FactorCov":       factorModelArtifact("the factor covariance matrix, factors x factors"),
+	"internal/risk/factormodel: Model.SpecificVar":     factorModelArtifact("specific variance, one entry per instrument"),
+	"internal/risk/factormodel: Model.InputProvenance": factorModelArtifact("the fixed literal key set returned by returns.Panel.Params (#1293); rebuilt per fit, never appended per request"),
+	"internal/risk/factormodel: Model.index":           factorModelArtifact("the instrument-to-row index over the same universe"),
 
 	"services/accounting/internal/ledger: Snapshot.Positions": ledgerSnapshot("open positions, keyed by instrument"),
 	"services/accounting/internal/ledger: Snapshot.Cash":      ledgerSnapshot("cash, keyed by currency"),
@@ -645,9 +646,6 @@ var mapEvictionExempt = map[string]evictionExemption{
 	"services/accounting/internal/ledger: MemoryStore.seen": {isTheStore,
 		"keyed by entry_id, the journal's idempotency ledger. Forgetting an id re-books the posting it " +
 			"was refusing.", ""},
-	"services/accounting/internal/ledger: MemoryStore.snapshots": {isTheStore,
-		"one snapshot per portfolio, the resume point a fold restarts from. There is one entry per " +
-			"portfolio the ledger books for, and it is data rather than cache.", ""},
 	"services/alternatives/internal/fund: MemoryStore.journal": {isTheStore,
 		"the commitment journal keyed by commitment_id, opted into through " +
 			"ALTERNATIVES_ALLOW_EPHEMERAL_JOURNAL. It is the replay source a fund position is derived " +
@@ -2065,9 +2063,9 @@ func factorModelArtifact(what string) evictionExemption {
 // SIZED BY THE BOOK, NOT BY TRAFFIC. A snapshot is one portfolio's resume point
 // and is rebuilt whole on each save; these grow with the instruments the fund
 // holds and the currencies it settles in, which are estate quantities. The holder
-// MemoryStore.snapshots is already exempt as isTheStore for the same reason —
-// it is data rather than cache — and #951 extends that reasoning one level in
-// rather than restating it.
+// MemoryStore invalidates entire checkpoints on corporate-action appends. The
+// contained maps describe one finite book state and are replaced with their
+// checkpoint; they are not independently accumulating event caches.
 func ledgerSnapshot(what string) evictionExemption {
 	return evictionExemption{boundedByConstruction,
 		"one portfolio's " + what + ", rebuilt whole on each snapshot save. It grows with the " +

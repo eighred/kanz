@@ -27,10 +27,11 @@ func corpActDividend(id, portfolio, instrument, ccy string, perUnit *big.Rat, at
 	// clear the exemption without wiring a feed, and take five claim-site
 	// assertions down with it. This is the same entry that package builds.
 	return &ledger.Event{
-		EntryID: id, PortfolioID: portfolio, Type: ledger.EntryCorporateAction,
+		EntryID: ledger.ActionEntryID(portfolio, id, 1), PortfolioID: portfolio, Type: ledger.EntryCorporateAction,
 		InstrumentID: instrument,
 		Action: &ledger.Action{
-			Kind: ledger.CorpActDividend, PerUnit: perUnit, Currency: ccy,
+			ActionLifecycle: ledger.ActionLifecycle{ActionID: id, Revision: 1, PayDate: at, PaidAt: at, PaymentRef: "paid:" + id},
+			Kind:            ledger.CorpActDividend, PerUnit: perUnit, Currency: ccy,
 		},
 		Effective: at, Knowledge: at,
 	}

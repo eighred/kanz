@@ -152,9 +152,10 @@ type Request struct {
 
 // Response is the upstream reply, written back to the client verbatim.
 type Response struct {
-	Status      int
-	ContentType string
-	Body        []byte
+	Status       int
+	ContentType  string
+	CacheControl string
+	Body         []byte
 }
 
 // Backend forwards a Request to its upstream service over the mesh. The concrete
@@ -544,8 +545,9 @@ func (h *Handler) Routes(mux *authz.Mux) {
 	// feature's name: "basket" means the deploy-time portfolio↔exchange-account
 	// binding in this repo, guarded by test/arch/basket_contract_test.go, so this
 	// feature is Model Portfolios and must not borrow that word.
-	toUpstream := func(p string) string { return strings.TrimPrefix(p, "/v1/model-portfolios") }
+	toUpstream := func(p string) string { return "/v1" + strings.TrimPrefix(p, "/v1/model-portfolios") }
 	mux.Handle(authz.Read, "POST /v1/model-portfolios/propose", h.handle(ServiceOptimization, true, toUpstream))
+	mux.Handle(authz.Read, "POST /v2/model-portfolios/propose", h.handle(ServiceOptimization, true, func(string) string { return "/v2/propose" }))
 
 	// MATERIALIZE IS TRADE, UNCONDITIONALLY — and that is a deliberate choice about
 	// what a capability means. This route emits the order commands for a proposal,

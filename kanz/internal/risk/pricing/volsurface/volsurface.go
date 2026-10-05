@@ -16,6 +16,8 @@ package volsurface
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -45,33 +47,56 @@ type QuoteProvider interface {
 }
 
 // ImpliedVol backs the Black-Scholes implied volatility out of a European option
-// price by bisection. It returns ok=false when the price is outside the no-
-// arbitrage band [intrinsic, spot] (no finite vol reproduces it). Bisection (not
-// Newton) is used for unconditional robustness — vega collapses deep ITM/OTM
-// where Newton diverges.
+// price by bisection on the supported [1e-6, 5] volatility bracket. Success
+// requires finite inputs, a non-flat price bracket and a repricing residual
+// certificate. An unbracketed price need not imply arbitrage: it may require a
+// volatility outside this solver's supported range.
 func ImpliedVol(otype pricing.OptionType, price, S, K, t, r, q float64) (float64, bool) {
-	if price <= 0 || S <= 0 || K <= 0 || t <= 0 {
-		return 0, false
+	vol, err := impliedVol(otype, price, S, K, t, r, q)
+	return vol, err == nil
+}
+
+// Error classes let calibration callers distinguish corrupt inputs from quotes
+// that cannot be reproduced within the supported numerical bracket.
+var (
+	ErrInvalidInput = errors.New("volsurface: invalid input")
+	ErrCalibration  = errors.New("volsurface: implied volatility not calibrated")
+	ErrGrid         = errors.New("volsurface: invalid grid")
+)
+
+func finite(v float64) bool   { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+func positive(v float64) bool { return finite(v) && v > 0 }
+
+func validQuote(q OptionQuote) bool {
+	return (q.Type == pricing.Call || q.Type == pricing.Put) && positive(q.Price) && positive(q.Strike) && positive(q.Expiry)
+}
+
+func impliedVol(otype pricing.OptionType, price, S, K, t, r, q float64) (float64, error) {
+	if !validQuote(OptionQuote{Type: otype, Price: price, Strike: K, Expiry: t}) || !positive(S) || !finite(r) || !finite(q) {
+		return 0, ErrInvalidInput
 	}
 	const (
 		lo   = 1e-6
 		hi   = 5.0 // 500% vol upper bracket
 		iter = 100
-		tol  = 1e-8
 	)
+	tol := 1e-10 * math.Max(1, price)
 	f := func(sigma float64) float64 {
 		return pricing.BlackScholesPrice(otype, S, K, t, r, q, sigma) - price
 	}
 	flo, fhi := f(lo), f(hi)
-	if flo > 0 || fhi < 0 {
-		return 0, false // price not bracketed ⇒ outside the arbitrage band
+	if !finite(flo) || !finite(fhi) || flo > 0 || fhi < 0 || flo >= fhi {
+		return 0, ErrCalibration // no finite, non-flat bracket
 	}
 	a, b := lo, hi
 	for i := 0; i < iter; i++ {
 		mid := 0.5 * (a + b)
 		fm := f(mid)
-		if fm > -tol && fm < tol {
-			return mid, true
+		if !finite(fm) {
+			return 0, ErrCalibration
+		}
+		if math.Abs(fm) <= tol && b-a <= 1e-8*math.Max(1, mid) {
+			return mid, nil
 		}
 		if fm < 0 {
 			a = mid
@@ -79,7 +104,7 @@ func ImpliedVol(otype pricing.OptionType, price, S, K, t, r, q float64) (float64
 			b = mid
 		}
 	}
-	return 0.5 * (a + b), true
+	return 0, ErrCalibration // exhausted iterations are not a convergence certificate
 }
 
 // Surface is an implied-vol grid over sorted strikes and expiries. Vol queries
@@ -96,16 +121,24 @@ type Surface struct {
 // or duplicated cell is an error, so the surface is never silently full of holes.
 func Build(points []Point) (*Surface, error) {
 	if len(points) == 0 {
-		return nil, errors.New("volsurface: no points")
+		return nil, fmt.Errorf("%w: no points", ErrGrid)
 	}
 	strikeSet := map[float64]bool{}
 	expirySet := map[float64]bool{}
 	for _, p := range points {
+		if !positive(p.Strike) || !positive(p.Expiry) || !positive(p.Vol) {
+			return nil, fmt.Errorf("%w: strike, expiry and volatility must be finite and positive", ErrInvalidInput)
+		}
 		strikeSet[p.Strike] = true
 		expirySet[p.Expiry] = true
 	}
 	strikes := sortedKeys(strikeSet)
 	expiries := sortedKeys(expirySet)
+	// Prove the rectangle fits the supplied input before allocating its product.
+	// A diagonal list must not cause quadratic allocation before being rejected.
+	if len(strikes) > len(points)/len(expiries) || len(strikes)*len(expiries) != len(points) {
+		return nil, fmt.Errorf("%w: incomplete rectangle", ErrGrid)
+	}
 
 	vol := make([][]float64, len(expiries))
 	filled := make([][]bool, len(expiries))
@@ -118,7 +151,7 @@ func Build(points []Point) (*Surface, error) {
 	for _, p := range points {
 		i, j := ei[p.Expiry], si[p.Strike]
 		if filled[i][j] {
-			return nil, errors.New("volsurface: duplicate grid point")
+			return nil, fmt.Errorf("%w: duplicate grid point", ErrGrid)
 		}
 		vol[i][j] = p.Vol
 		filled[i][j] = true
@@ -126,7 +159,7 @@ func Build(points []Point) (*Surface, error) {
 	for i := range filled {
 		for j := range filled[i] {
 			if !filled[i][j] {
-				return nil, errors.New("volsurface: incomplete grid (missing strike×expiry cell)")
+				return nil, fmt.Errorf("%w: missing strike/expiry cell", ErrGrid)
 			}
 		}
 	}
@@ -134,28 +167,28 @@ func Build(points []Point) (*Surface, error) {
 }
 
 // FromQuotes builds a Surface by solving each quote's implied vol against the
-// shared spot/rate, then assembling the grid. Quotes whose price is outside the
-// arbitrage band are skipped; an empty result is an error.
+// shared spot/rate, then assembling the grid. Every supplied quote must calibrate:
+// dropping an entire bad row could otherwise fabricate a smaller complete grid.
 func FromQuotes(quotes []OptionQuote, S, r, q float64) (*Surface, error) {
 	points := make([]Point, 0, len(quotes))
-	for _, qt := range quotes {
-		iv, ok := ImpliedVol(qt.Type, qt.Price, S, qt.Strike, qt.Expiry, r, q)
-		if !ok {
-			continue
+	for i, qt := range quotes {
+		iv, err := impliedVol(qt.Type, qt.Price, S, qt.Strike, qt.Expiry, r, q)
+		if err != nil {
+			return nil, fmt.Errorf("quote %d: %w", i, err)
 		}
 		points = append(points, Point{Strike: qt.Strike, Expiry: qt.Expiry, Vol: iv})
 	}
 	if len(points) == 0 {
-		return nil, errors.New("volsurface: no quotes yielded a valid implied vol")
+		return nil, fmt.Errorf("%w: no quotes", ErrCalibration)
 	}
 	return Build(points)
 }
 
 // Vol returns the interpolated implied vol at (strike, expiry). Inside the grid
 // it bilinearly interpolates; outside it clamps to the nearest edge (flat
-// extrapolation). ok=false only for an empty surface.
+// extrapolation). Non-finite and non-positive queries are invalid, not edges.
 func (s *Surface) Vol(strike, expiry float64) (float64, bool) {
-	if s == nil || len(s.strikes) == 0 || len(s.expiries) == 0 {
+	if s == nil || len(s.strikes) == 0 || len(s.expiries) == 0 || !positive(strike) || !positive(expiry) {
 		return 0, false
 	}
 	i0, i1, ti := bracket(s.expiries, expiry)
@@ -167,7 +200,11 @@ func (s *Surface) Vol(strike, expiry float64) (float64, bool) {
 	v11 := s.vol[i1][j1]
 	top := v00*(1-tj) + v01*tj
 	bot := v10*(1-tj) + v11*tj
-	return top*(1-ti) + bot*ti, true
+	v := top*(1-ti) + bot*ti
+	if !positive(v) {
+		return 0, false
+	}
+	return v, true
 }
 
 // bracket finds the indices lo,hi in a sorted axis that bound x and the

@@ -88,25 +88,15 @@ func TestPostgres_AnAbandonedFanOutWithdrawsEachChildExactlyOnce(t *testing.T) {
 		t.Fatalf("%d of %d children are terminal after the replay", got, len(live))
 	}
 
-	// THE MEASUREMENT. One venue withdrawal per child across both deliveries.
-	//
-	// A count above len(live) means a child was dispatched to the exchange by the
-	// abandoned delivery and dispatched AGAIN by the replay — which is only
-	// possible if the first delivery told the venue something the ledger never
-	// recorded. That is the duplicate cancel-replace traffic #801 is about, and
-	// the whole argument for abandoning being safe rests on it not happening.
-	if got, uniq := venue.dispatchCount(), venue.uniqueDispatches(); got != len(live) || uniq != got {
-		t.Fatalf("%d venue withdrawals across %d distinct children for %d live children over an "+
-			"abandoned delivery and its replay — a slice was cancelled at the exchange twice, "+
-			"and closeAtVenue is not idempotent from the exchange's point of view",
-			got, uniq, len(live))
-	}
+	// Confirmed children are skipped on replay. An unconfirmed request may need
+	// another attempt, but every child must receive exactly one confirmation.
+	venue.assertConfirmedOnce(t, live)
 
 	// AND NOTHING IS LEFT DANGLING. A withdrawal the deadline cut off mid-flight
 	// is unconfirmed but TRACKED, so the healing watchdog resolves it against
 	// venue truth; one that is neither confirmed nor tracked is a cancel nobody
 	// will ever reconcile.
-	if unconfirmed := venue.dispatchCount() - venue.confirmedCount(); unconfirmed > closes.Len() {
+	if unconfirmed := venue.unconfirmedOrderCount(); unconfirmed > closes.Len() {
 		t.Fatalf("%d withdrawals went unconfirmed but only %d are tracked for healing",
 			unconfirmed, closes.Len())
 	}

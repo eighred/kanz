@@ -125,26 +125,18 @@ type MeasureName string
 // ExposureRequest scopes an exposure query.
 type ExposureRequest struct {
 	PortfolioID PortfolioID
-	// AsOf is RESERVED AND NOT HONOURED. Zero ⇒ latest, which is the only
-	// query this engine can answer; any other value is REFUSED with
-	// ErrAsOfNotSupported rather than silently answered from live state
-	// (#859). Retiring that refusal needs a point-in-time read of risk
-	// state, which internal/risk/state does not have.
-	//
-	// The field is kept rather than deleted because the wire contract
-	// (query.v1.ExposureRequest.as_of) is additive-only within v1 and the
-	// gateway already accepts the parameter; removing it here would move the
-	// refusal to a shape mismatch nobody can read.
+	// AsOf zero selects current state. A non-zero cutoff reconstructs the latest
+	// retained evaluation whose effective and knowledge times precede it. Missing
+	// history is refused; current state is never substituted. Deployments without
+	// durable evaluation storage return ErrAsOfNotSupported.
 	AsOf time.Time
 }
 
 // ExposureResponse is the engine's reply to ExposureRequest.
 type ExposureResponse struct {
 	PortfolioID PortfolioID
-	// AsOf is the state timestamp the response was computed against. It is
-	// always the latest applied state, because ExposureRequest.AsOf is
-	// refused rather than honoured (#859) — so this reports what the answer
-	// IS, never what the caller asked for.
+	// AsOf is the actual state timestamp of the served evaluation, which may
+	// precede the requested historical cutoff.
 	AsOf time.Time
 	// Set is the exposure aggregate. The concrete implementation lives
 	// in `kanz/internal/risk/domain` (RISK-03); api/v1 keeps the
@@ -180,8 +172,7 @@ type ExposureSet interface {
 // MeasuresRequest scopes a risk-measure query.
 type MeasuresRequest struct {
 	PortfolioID PortfolioID
-	// AsOf is RESERVED AND NOT HONOURED — see ExposureRequest.AsOf. Zero ⇒
-	// latest; any other value is REFUSED with ErrAsOfNotSupported (#859).
+	// AsOf uses the same effective/knowledge cutoff as ExposureRequest.AsOf.
 	AsOf time.Time
 	// Measures narrows the response to a named subset (e.g.
 	// {"VaR99", "Delta"}); empty ⇒ all measures the engine computes.
@@ -191,9 +182,7 @@ type MeasuresRequest struct {
 // MeasuresResponse is the engine's reply to MeasuresRequest.
 type MeasuresResponse struct {
 	PortfolioID PortfolioID
-	// AsOf is the state timestamp the response was computed against, which is
-	// always the latest applied state — MeasuresRequest.AsOf is refused
-	// rather than honoured (#859).
+	// AsOf is the actual state timestamp of the served evaluation.
 	AsOf         time.Time
 	Set          MeasureSet
 	QualityFlags []QualityFlag
@@ -538,49 +527,14 @@ var (
 	// transport/runtime errors so callers can branch correctly.
 	ErrInvalidRequest = errors.New("risk: invalid request")
 
-	// ErrAsOfNotSupported: the caller pinned a query to a point in time and
-	// this engine cannot answer one (#859).
-	//
-	// # A REFUSAL, BECAUSE THE ALTERNATIVE WAS A LIE
-	//
-	// ExposureRequest.AsOf and MeasuresRequest.AsOf were declared, documented
-	// as working, parsed by the gateway and forwarded through gRPC — and then
-	// never read. Both queries answered from store.Snapshot(id), the LIVE
-	// portfolio, and stamped the response with the live state's timestamp. So
-	// "what were this portfolio's exposures last Tuesday" returned today's
-	// book, internally consistent and wrong, with nothing logged, counted or
-	// flagged. A reconciliation, a regulatory as-of report or an investigation
-	// pinning a date could not tell.
-	//
-	// A silently ignored parameter is worse than an unsupported one precisely
-	// because the caller cannot tell — the platform's "nothing configured" and
-	// "checked, and fine" rule, applied to a request field. This makes the gap
-	// visible to every caller on the first call instead of to nobody, ever.
-	//
-	// # It wraps ErrInvalidRequest, deliberately
-	//
-	// So the existing transport mapping carries it unchanged: the gRPC server
-	// already answers ErrInvalidRequest with codes.InvalidArgument, and the
-	// gateway already renders that as 400. A second sentinel with its own
-	// mapping would be a second thing to keep in step. Callers that want to
-	// distinguish "not supported yet" from "malformed" still can, with
-	// errors.Is(err, ErrAsOfNotSupported).
-	//
-	// # What retires it
-	//
-	// A point-in-time read of risk state. internal/risk/state has none today —
-	// Snapshot(id) is live-only — so honouring as_of is a persistence change,
-	// not a branch here. It is tracked separately, and whoever does it must
-	// revisit internal/pit.DefaultHorizon in the same change: that
-	// horizon was sized on the fact that no caller can pin a historical as-of
-	// (#811), and a pricing store that starts empty on every pod would answer
-	// an arbitrary historical as-of with no curve — reporting DV01 = 0, which
-	// is this same defect one layer down.
-	ErrAsOfNotSupported = fmt.Errorf(
-		"%w: as_of is accepted by the API and cannot be honoured by this engine — "+
-			"it would be answered from live state and stamped with the live timestamp, so the "+
-			"answer would look consistent and describe the wrong instant. Omit as_of to query "+
-			"the latest state (#859)", ErrInvalidRequest)
+	// ErrAsOfNotSupported means this deployment has no durable evaluator.
+	// Configured evaluators answer retained history or ErrHistoryUnavailable;
+	// neither posture substitutes current state for a historical query.
+	ErrAsOfNotSupported = fmt.Errorf("%w: as_of requires durable historical risk storage; live state cannot answer a historical query (#859, #1039)", ErrInvalidRequest)
+
+	// ErrHistoryUnavailable means the requested evaluation or a necessary input
+	// cannot be reconstructed and verified. It is not a zero-risk result.
+	ErrHistoryUnavailable = errors.New("risk: verified historical evaluation unavailable")
 
 	// ErrPortfolioNotOwned: this REPLICA does not own the portfolio, so it
 	// has no state for it and will not answer. The portfolio exists; another

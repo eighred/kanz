@@ -47,6 +47,13 @@ func TestEverySubjectHasAKafkaTopic(t *testing.T) {
 
 	missing := map[string]bool{}
 	for _, s := range subjects {
+		// #1292: this transport alias carries canonical platform.authz.decision
+		// evidence to central audit. Its cross-tenant, non-expiring stream is
+		// deliberately not subscribed by the single-tenant Kafka archiver.
+		// internal/auditdelivery's wire test pins the logical event type.
+		if s == "audit.authority.decision" {
+			s = "platform.authz.decision"
+		}
 		parts := strings.Split(s, ".")
 		if len(parts) != 3 {
 			continue // not a {domain}.{entity}.{event_type} logical name

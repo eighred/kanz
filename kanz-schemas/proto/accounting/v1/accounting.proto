@@ -6,12 +6,13 @@ syntax = "proto3";
 // OMS-01 fills and cash movements into, the CorporateAction events that adjust
 // positions/cash and restate history, and the NAV / Accrual the book produces.
 //
-// # Money is Decimal, ratios/rates are double
+// # Corporate-action economics use exact Decimal
 //
 // Cash amounts, prices, NAV, and accruals are money/quantity ⇒ common.v1.Decimal
 // (the EVT-14 exact-money rule — a book-of-record never rounds through float).
-// Split ratios, dividend-per-share factors, and coupon rates are dimensionless
-// ⇒ double.
+// Corporate-action ratios and periodic income factors are exact Decimal too.
+// Legacy double fields remain only for wire compatibility and are refused by
+// the accounting mapper; dividend-per-share is money, not a dimensionless rate.
 //
 // # Bitemporal
 //
@@ -114,12 +115,13 @@ enum CorporateActionType {
   // A stock split / reverse split: positions scale by ratio, cost basis
   // inversely — market value is conserved.
   CORPORATE_ACTION_TYPE_SPLIT = 1;
-  // A cash dividend: cash += holding × dividend_per_share.
+  // A cash dividend: accrue ex-date holding times exact income_per_unit;
+  // recognize cash only on confirmed payment.
   CORPORATE_ACTION_TYPE_DIVIDEND = 2;
   // A merger / exchange: holdings in instrument_id convert to target_instrument
   // at ratio (shares) plus cash_per_share.
   CORPORATE_ACTION_TYPE_MERGER = 3;
-  // A bond coupon: cash += face × coupon_rate.
+  // A bond coupon: accrue face times exact periodic income_per_unit.
   CORPORATE_ACTION_TYPE_COUPON = 4;
 }
 
@@ -127,7 +129,7 @@ enum CorporateActionType {
 // ledger entries adjusting positions and/or cash. It is bitemporal: a late
 // announcement restates history without losing what was previously known.
 message CorporateAction {
-  // action_id is the unique identity. Required.
+  // action_id identifies the action across its immutable revisions. Required.
   string action_id = 1;
 
   // action_type is the kind. Required.
@@ -145,12 +147,12 @@ message CorporateAction {
 
   // ratio is the share-conversion factor: shares-out per share-in for a split
   // (2.0 = 2:1 split) or a merger exchange. double. Set for SPLIT/MERGER.
-  double ratio = 6;
+  double ratio = 6 [deprecated = true];
 
   // dividend_per_share / coupon_rate carry the cash factor for DIVIDEND/COUPON.
   // double.
-  double dividend_per_share = 7;
-  double coupon_rate = 8;
+  double dividend_per_share = 7 [deprecated = true];
+  double coupon_rate = 8 [deprecated = true];
 
   // target_instrument is the instrument received in a MERGER. Set for MERGER.
   string target_instrument = 9;
@@ -162,6 +164,22 @@ message CorporateAction {
   // currency_code is the ISO 4217 currency of any cash leg. Required when a cash
   // leg is produced.
   string currency_code = 11;
+
+  // Required immutable, consecutive announcement revision; starts at one.
+  uint64 announcement_revision = 12;
+  // Withdraws this action at the announcement knowledge time.
+  bool cancelled = 13;
+  // Required for dividend/coupon. A scheduled date is not payment evidence.
+  google.protobuf.Timestamp pay_date = 14;
+  // Exact shares-out per share-in, replacing the legacy floating ratio.
+  common.v1.Decimal exact_ratio = 15;
+  // Exact PERIODIC cash per share or unit of face. A semiannual 6% coupon
+  // is 0.03 per unit of face, not the annual rate 0.06.
+  common.v1.Decimal income_per_unit = 16;
+  // Observed payment date and immutable source reference; both or neither.
+  // The ledger never infers receipt from the scheduled pay_date.
+  google.protobuf.Timestamp paid_at = 17;
+  string payment_ref = 18;
 }
 
 // Accrual is the daily-accreted income (interest on a bond, declared dividend)

@@ -67,6 +67,8 @@ import (
 // was written, and the exemption now has to be restated here, so a table that
 // quietly loses its reason is a red build rather than a paragraph nobody re-read.
 var rlsExempt = map[string]string{
+	"identity_access_audit_tenants": "#1292: routing directory contains only tenant IDs; payload and pending records remain FORCE RLS scoped, with no directory API.",
+	"bff_session_audit_tenants":     "#1292: routing directory contains only tenant IDs; payload and pending records remain FORCE RLS scoped, with no directory API.",
 	// #364. "Login must find an account BEFORE it knows which tenant that account
 	// belongs to. A tenant-scoped pool binds app.tenant_id once at connect, so a
 	// credential lookup through one could only ever find users of whichever tenant
@@ -96,13 +98,12 @@ var (
 	alterRLS = regexp.MustCompile(`(?is)ALTER\s+TABLE\s+"?([a-z_][a-z0-9_]*)"?\s+(ENABLE|FORCE)\s+ROW\s+LEVEL\s+SECURITY`)
 	// ARRAY['a', 'b'] — the dynamic form's table list.
 	arrayList = regexp.MustCompile(`(?is)ARRAY\s*\[([^\]]*)\]`)
-	// CREATE POLICY <name> ON <table>
-	createPolicy = regexp.MustCompile(`(?is)CREATE\s+POLICY\s+[a-z_][a-z0-9_]*\s+ON\s+(?:%I|"?([a-z_][a-z0-9_]*)"?)`)
-	quoted       = regexp.MustCompile(`'([^']*)'`)
+	quoted    = regexp.MustCompile(`'([^']*)'`)
 )
 
 // tableDecl is one CREATE TABLE and what the same migration set says about it.
 type tableDecl struct {
+	policies    map[string]bool
 	file        string
 	tenantScope bool
 	enabled     bool
@@ -186,8 +187,8 @@ func TestEveryTenantScopedTableIsUnderForcedRLS(t *testing.T) {
 //
 // IN MIGRATION ORDER. os.ReadDir sorts by name and the files are NNNN_-prefixed,
 // so reading them in that order is reading them in the order Postgres applied
-// them — which is what makes "the last policy definition" the one that is
-// actually in force.
+// them. CREATE and DROP are folded by policy name so every surviving policy
+// is checked; a later scoped policy cannot hide an earlier permissive one.
 func scanMigrationsForTenantTables(t *testing.T, root string) map[string]*tableDecl {
 	t.Helper()
 	out := map[string]*tableDecl{}
@@ -224,7 +225,7 @@ func decl(out map[string]*tableDecl, name, file string) *tableDecl {
 	if d, ok := out[name]; ok {
 		return d
 	}
-	d := &tableDecl{file: file}
+	d := &tableDecl{file: file, policies: map[string]bool{}}
 	out[name] = d
 	return d
 }
@@ -271,10 +272,11 @@ func scanOneMigration(out map[string]*tableDecl, file, sql string) {
 		// USING (true) inside it would have been vouched for by its own error
 		// message. Proven by mutation, which is the only reason it is not still
 		// written that way.
-		guarded := false
+		definitions := map[string]bool{}
 		for _, body := range dynamicPolicyBodies(sql) {
-			if policyScoped(body) {
-				guarded = true
+			fields := strings.Fields(body)
+			if len(fields) >= 3 {
+				definitions[fields[2]] = policyScoped(body)
 			}
 		}
 		for _, a := range arrayList.FindAllStringSubmatch(sql, -1) {
@@ -286,31 +288,34 @@ func scanOneMigration(out map[string]*tableDecl, file, sql string) {
 				d := decl(out, name, file)
 				d.enabled = d.enabled || enable
 				d.forced = d.forced || force
-				// LAST DEFINITION WINS, because migrations are sequential and a later
-				// CREATE POLICY supersedes an earlier one. OR-ing these was the second
-				// mistake this guard made: it asked whether the table had EVER been
-				// given a scoped policy, so widening the current one to USING (true)
-				// was vouched for by the definition it replaced. Both mutations
-				// survived until this line changed.
+				// Retain each policy by name. The final check evaluates all policies
+				// still present, including a permissive sibling of a scoped one.
 				if policy {
-					d.policy = true
-					d.guarded = guarded
+					for name, scoped := range definitions {
+						d.policies[name] = scoped
+					}
 				}
 			}
 		}
 	}
 
-	// CREATE POLICY, direct form. The predicate must name the session GUC: a
-	// policy of USING (true) is the leak that counting policies cannot see.
-	for _, m := range createPolicy.FindAllStringSubmatchIndex(sql, -1) {
-		if m[2] < 0 {
-			continue // the %I form, handled above
+	// Fold policy creation and removal in statement order. Permissive policies
+	// combine with OR: a later narrow policy cannot hide an earlier broad one.
+	changes := regexp.MustCompile(`(?is)(CREATE|DROP)\s+POLICY\s+(?:IF\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s+ON\s+"?([a-z_][a-z0-9_]*)"?([^;]*);`)
+	for _, m := range changes.FindAllStringSubmatch(sql, -1) {
+		d := decl(out, m[3], file)
+		if strings.EqualFold(m[1], "DROP") {
+			delete(d.policies, m[2])
+		} else {
+			d.policies[m[2]] = policyScoped(m[4])
 		}
-		name := sql[m[2]:m[3]]
-		d := decl(out, name, file)
-		d.policy = true
-		// Last definition wins — see the dynamic branch above for why.
-		d.guarded = policyScoped(policyBody(sql[m[1]:]))
+	}
+	for _, d := range out {
+		d.policy = len(d.policies) > 0
+		d.guarded = d.policy
+		for _, scoped := range d.policies {
+			d.guarded = d.guarded && scoped
+		}
 	}
 }
 
@@ -323,15 +328,6 @@ func tenantColumn(body string) bool {
 		}
 	}
 	return false
-}
-
-// policyBody returns the text up to the statement terminator, so one policy's
-// predicate cannot be read off the next one.
-func policyBody(s string) string {
-	if i := strings.Index(s, ";"); i >= 0 {
-		return s[:i]
-	}
-	return s
 }
 
 // dynamicPolicyBodies returns the text of each CREATE POLICY ... ON %I statement

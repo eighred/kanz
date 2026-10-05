@@ -281,3 +281,29 @@ func TestUserDirectoryPagesDoNotRepeatOrCrossTenants(t *testing.T) {
 		t.Fatalf("directory lost accounts: %d", len(seen))
 	}
 }
+
+func TestAccessQueueFailureRollsBackAuthorityAndStatus(t *testing.T) {
+	st, pool := newStorePool(t)
+	ctx := context.Background()
+	raw := invite(t, st, "rollback-invite", "alice")
+	if _, err := st.Redeem(ctx, raw, identity.Hash("test-only-hash"), now0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `CREATE FUNCTION refuse_access_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test audit outage'; END $$;
+ CREATE TRIGGER refuse_access_audit BEFORE INSERT ON identity_access_audit_pending FOR EACH STATEMENT EXECUTE FUNCTION refuse_access_audit()`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetAccess(ctx, testAdmin, "alice", 0, []string{"kanz-user"}, nil, now0); err == nil {
+		t.Fatal("access committed without audit")
+	}
+	if err := st.SetStatus(ctx, testAdmin, "alice", identity.StatusDisabled, now0); err == nil {
+		t.Fatal("status committed without audit")
+	}
+	u, err := st.UserBySubject(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !u.Active() || u.SessionEpoch != 0 || u.TokensInvalidBefore != nil || u.Roles[0] != "kanz-trader" {
+		t.Fatal("failed transaction changed authority")
+	}
+}

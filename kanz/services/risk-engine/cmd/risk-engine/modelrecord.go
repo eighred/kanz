@@ -2,6 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
+	"github.com/eighred/kanz/internal/pg"
+	"github.com/eighred/kanz/pkg/bus"
+	modelartifacts "github.com/eighred/kanz/services/risk-engine/internal/artifacts"
+	"github.com/eighred/kanz/services/risk-engine/internal/config"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"log/slog"
 	"time"
 
@@ -13,32 +19,11 @@ import (
 	"github.com/eighred/kanz/internal/risk/publish"
 )
 
-// THE COMPOSITION ROOT'S RECORD OF WHAT THE ENGINE PRICED WITH (#1039).
-//
-// # Why this file exists at all
-//
-// The calibration and the fit happen deep inside the risk module, which has no
-// bus. Both seams — curve.Calibrator.OnCalibrated and compute.WithFitObserver —
-// hand the artifact to whoever wired them, and this is the only place that holds
-// both the artifact seams and the producer. It is the same closure-injection
-// stance every other data seam in this service takes.
-//
-// # Why the counters are registered here, unconditionally
-//
-// Both artifacts are produced behind configuration branches: the factor fit only
-// runs when RISK_ENGINE_MARKETDATA_DATABASE_URL is set, and the curve
-// calibration only when RISK_ENGINE_CALIBRATION_INTERVAL and
-// RISK_ENGINE_CALIBRATION_RATES both are. NEITHER IS SET BY ANY MANIFEST IN
-// infra/. A collector registered inside those branches would export no series at
-// all in exactly the deployment that records nothing, so an alert written over
-// it — "this pod has recorded no model artifact" — would be silent in the one
-// state it exists to detect. That has shipped twice here (#973, #963), so the
-// vector is registered before every branch and every artifact label is seeded to
-// zero.
-//
-// A counter at zero and a counter absent are different answers, and only the
-// first one says "checked, and nothing".
+// modelRecorder commits pricing artifacts before they become usable. Counters
+// are registered even when the calibration/fit configuration is absent, so an
+// inactive source is distinguishable from an exporter that never registered.
 type modelRecorder struct {
+	store     *modelartifacts.Store
 	publisher *publish.Publisher
 	logger    *slog.Logger
 	recorded  *prometheus.CounterVec
@@ -59,18 +44,11 @@ const (
 func newModelRecorder(publisher *publish.Publisher, logger *slog.Logger, reg prometheus.Registerer) *modelRecorder {
 	recorded := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "kanz_risk_model_artifact_recorded_total",
-		Help: "Model artifacts published as FACTs, by artifact. factor_model = one fitted " +
-			"factor-model instance (loadings, covariance, specific variance) on " +
-			"risk.factor.model_fitted; curve = one calibrated discount curve on " +
-			"risk.curve.calibrated. ZERO MEANS NOTHING THIS POD PRICED WITH CAN BE " +
-			"REPRODUCED: the published risk number outlives its inputs, which is the " +
-			"state #1039 records.",
+		Help: "Model artifacts published and, when a database is configured, durably retained by this process, by artifact. Zero does not imply retained history is empty.",
 	}, []string{"artifact"})
 	failed := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "kanz_risk_model_artifact_record_failed_total",
-		Help: "Model-artifact publishes that failed, by artifact. The artifact was still USED " +
-			"to price the book — the recompute is not failed for it — so a rising count is a " +
-			"book being priced by a model instance that no longer exists anywhere (#1039).",
+		Help: "Artifact persistence or publication failures that refused installation into pricing, by artifact.",
 	}, []string{"artifact"})
 	reg.MustRegister(recorded, failed)
 	for _, a := range []string{artifactFactorModel, artifactCurve} {
@@ -98,19 +76,17 @@ func (r *modelRecorder) FitOptions() []compute.LiveModelOption {
 	return []compute.LiveModelOption{
 		compute.WithFitCadence(compute.DefaultFitCadence),
 		compute.WithFitObserver(r.FactorModelFitted),
+		compute.WithFitLookup(r.storedModel),
 	}
 }
 
 // FactorModelFitted records one fitted factor-model instance. It satisfies
 // compute.WithFitObserver.
 //
-// A FAILURE IS COUNTED AND LOGGED, NEVER PROPAGATED, and the asymmetry is
-// deliberate. The observer runs inside the measure evaluation that fitted the
-// model; returning an error here would mean a broker hiccup takes down a
-// recompute that has a perfectly good model in hand. The book keeps being
-// priced, and the counter says the price is no longer reproducible — which is a
-// degradation an operator can act on rather than an outage.
-func (r *modelRecorder) FactorModelFitted(ctx context.Context, m *factormodel.Model) {
+// Failed publication refuses the fit before it enters the provider cache. The
+// caller reports unresolved inputs and retries on its next evaluation.
+func (r *modelRecorder) FactorModelFitted(ctx context.Context, m *factormodel.Model) error {
+
 	if err := r.publisher.EmitFactorModel(ctx, m); err != nil {
 		r.failed.WithLabelValues(artifactFactorModel).Inc()
 		// The identity is read off the model only when there is one. A nil model
@@ -121,26 +97,84 @@ func (r *modelRecorder) FactorModelFitted(ctx context.Context, m *factormodel.Mo
 		if m != nil {
 			modelID, asOf = m.ModelID, m.AsOf
 		}
-		r.logger.Error("risk-engine: the fitted factor model was not recorded — measures citing "+
-			"it name a model instance that exists nowhere",
+		r.logger.Error("risk-engine: factor artifact publication failed; refusing model use",
 			"err", err, "model_id", modelID, "as_of", asOf,
 			"subject", publish.EventTypeFactorModelFitted)
-		return
+		return err
+	}
+	if r.store != nil {
+		if err := r.store.RecordModel(ctx, m); err != nil {
+			r.failed.WithLabelValues(artifactFactorModel).Inc()
+			return err
+		}
 	}
 	r.recorded.WithLabelValues(artifactFactorModel).Inc()
+	return nil
 }
 
 // CurveCalibrated records one calibrated discount curve. It satisfies
-// curve.Calibrator.OnCalibrated, and degrades the same way FactorModelFitted
-// does: the curve is already in the store and already pricing the book.
-func (r *modelRecorder) CurveCalibrated(ctx context.Context, currency string, asOf time.Time, c *curve.Curve) {
+// curve.Calibrator.OnCalibrated, and refuses installation if the artifact cannot be published.
+func (r *modelRecorder) CurveCalibrated(ctx context.Context, currency string, asOf time.Time, c *curve.Curve) error {
+
 	if err := r.publisher.EmitCalibratedCurve(ctx, currency, asOf, c); err != nil {
 		r.failed.WithLabelValues(artifactCurve).Inc()
-		r.logger.Error("risk-engine: the calibrated curve was not recorded — the DV01 it "+
-			"discounts will outlive the curve that produced it",
+		r.logger.Error("risk-engine: curve artifact publication failed; refusing installation",
 			"err", err, "currency", currency, "as_of", asOf,
 			"subject", publish.EventTypeCurveCalibrated)
-		return
+		return err
+	}
+	if r.store != nil {
+		if err := r.store.RecordCurve(ctx, currency, asOf, c); err != nil {
+			r.failed.WithLabelValues(artifactCurve).Inc()
+			return err
+		}
 	}
 	r.recorded.WithLabelValues(artifactCurve).Inc()
+	return nil
+}
+
+// The same tenant pool backs recovery snapshots and retained pricing inputs;
+// adding reconstruction must not double the per-replica connection budget.
+func newDurableModelRecorder(ctx context.Context, cfg config.Config, publisher *publish.Publisher, logger *slog.Logger, reg prometheus.Registerer) (*pgxpool.Pool, *modelRecorder, error) {
+	r := newModelRecorder(publisher, logger, reg)
+	if cfg.DatabaseURL == "" {
+		return nil, r, nil
+	}
+	pool, err := pg.NewTenantPool(ctx, cfg.DatabaseURL, cfg.Tenant)
+	if err != nil {
+		return nil, nil, err
+	}
+	r.store = modelartifacts.New(pool)
+	if err := r.store.Check(ctx); err != nil {
+		pool.Close()
+		return nil, nil, err
+	}
+	return pool, r, nil
+}
+
+func (r *modelRecorder) storedModel(ctx context.Context, asOf time.Time) (*factormodel.Model, error) {
+	if r.store == nil {
+		return nil, nil
+	}
+	id := factormodel.DefaultModelID(factormodel.Config{Type: factormodel.Statistical})
+	m, err := r.store.ModelAt(ctx, id, asOf, time.Now())
+	if errors.Is(err, modelartifacts.ErrMissing) {
+		return nil, nil
+	}
+	return m, err
+}
+
+func (r *modelRecorder) storedCurve(ctx context.Context, currency string, asOf time.Time) (*curve.Curve, bool) {
+	if r.store == nil {
+		return nil, false
+	}
+	c, err := r.store.CurveAt(ctx, currency, asOf, time.Now())
+	return c, err == nil
+}
+
+func (r *modelRecorder) handler(tenant string) bus.EventHandler {
+	if r.store == nil {
+		return nil
+	}
+	return r.store.Handler(tenant)
 }

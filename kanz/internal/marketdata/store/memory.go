@@ -63,7 +63,13 @@ func (m *Memory) Put(_ context.Context, obs []Observation) error {
 	return nil
 }
 
-func (m *Memory) History(_ context.Context, q Query) ([]Observation, error) {
+func (m *Memory) History(ctx context.Context, q Query) ([]Observation, error) {
+	if q.Limit < 0 || q.Limit > MaxHistoryLimit {
+		return nil, ErrHistoryLimit
+	}
+	if q.Limit > 0 {
+		return m.boundedHistory(ctx, q)
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

@@ -239,8 +239,9 @@ func TestTheWholeRouteTableIsDeclared(t *testing.T) {
 		// evidence, and making it while wiring a screening route is how a
 		// capability ends up meaning nothing — the failure the model-portfolios
 		// entry above guards against from the other direction.
-		"POST /v1/screening/esg": authz.Read,
-		"POST /v2/screening/esg": authz.Read,
+		"POST /v1/screening/esg":            authz.Read,
+		"POST /v2/screening/esg":            authz.Read,
+		"POST /v2/model-portfolios/propose": authz.Read,
 
 		// THE FUNDING PATH (#415) — the fund's OWN capital, not the market's.
 		//

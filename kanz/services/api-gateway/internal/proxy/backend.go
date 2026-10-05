@@ -173,14 +173,18 @@ func (b *MeshBackend) Forward(ctx context.Context, req Request) (Response, error
 		return Response{}, err
 	}
 	defer func() { _ = hresp.Body.Close() }()
-	respBody, err := io.ReadAll(io.LimitReader(hresp.Body, maxRespBytes))
+	respBody, err := io.ReadAll(io.LimitReader(hresp.Body, maxRespBytes+1))
 	if err != nil {
 		return Response{}, err
 	}
+	if len(respBody) > maxRespBytes {
+		return Response{}, fmt.Errorf("proxy: upstream response exceeds %d bytes", maxRespBytes)
+	}
 	return Response{
-		Status:      hresp.StatusCode,
-		ContentType: hresp.Header.Get("Content-Type"),
-		Body:        respBody,
+		Status:       hresp.StatusCode,
+		ContentType:  hresp.Header.Get("Content-Type"),
+		CacheControl: strings.Join(hresp.Header.Values("Cache-Control"), ", "),
+		Body:         respBody,
 	}, nil
 }
 

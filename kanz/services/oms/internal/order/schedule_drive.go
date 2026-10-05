@@ -468,6 +468,10 @@ func (s *Service) cancelChildren(ctx context.Context, parentSt *orderpb.OrderSta
 				child.GetOrderId(), merr)
 		}
 		if cerr := s.handleCancel(ctx, payload); cerr != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("%w: %d of %d children were withdrawn; child %s is unconfirmed: %w",
+					errBudgetSpent, withdrawn, len(children), child.GetOrderId(), cerr)
+			}
 			return nil, fmt.Errorf("oms: could not withdraw child %s of cancelled parent %s: %w",
 				child.GetOrderId(), parentSt.GetOrderId(), cerr)
 		}
