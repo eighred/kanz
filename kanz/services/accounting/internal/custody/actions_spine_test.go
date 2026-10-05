@@ -55,7 +55,7 @@ func TestCustodyActionDurableFACTReachesRealSpine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := outbox.NewPostgres(pool, "accounting").Pending(ctx, id, 10)
+	records, err := outbox.NewPostgres(pool, outbox.ServiceAccounting).Pending(ctx, id, 10)
 	if err != nil || len(records) != 1 {
 		t.Fatalf("outbox: %+v %v", records, err)
 	}

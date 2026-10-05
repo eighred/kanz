@@ -188,7 +188,7 @@ func (p *Postgres) CommitRecovery(ctx context.Context, c RecoveryCase, now time.
 		return err
 	}
 	records = append(records, lifecycle)
-	if err := outbox.Enqueue(ctx, tx, records...); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, records...); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

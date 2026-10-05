@@ -100,7 +100,7 @@ func (p *Postgres) ApplyAction(ctx context.Context, a Action) (ActionEvidence, e
 	if err != nil {
 		return ActionEvidence{}, err
 	}
-	if err = outbox.Enqueue(ctx, tx, fact); err != nil {
+	if err = outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, fact); err != nil {
 		return ActionEvidence{}, err
 	}
 	return e, tx.Commit(ctx)

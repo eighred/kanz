@@ -415,7 +415,7 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (st
 	// The outbox reads through the SAME tenant-scoped pool, which is what keeps
 	// the relay unable to publish another tenant's FACTs — see outbox.Relay.
 	return store.NewPostgresGolden(pool), store.NewPostgresExceptions(pool, cfg.Tenant), store.NewPostgresProposals(pool),
-		outbox.NewPostgres(pool, "datamaster"),
+		outbox.NewPostgres(pool, outbox.ServiceDatamaster),
 		store.NewPostgresCycleLock(pool, cfg.Tenant), pool.Close, nil
 }
 

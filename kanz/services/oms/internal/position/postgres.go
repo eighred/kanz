@@ -123,7 +123,7 @@ func NewPostgres(pool *pgxpool.Pool, baseCcy string) *Postgres {
 	// the portfolio: two keys in one table must not be able to interleave their
 	// commits, and the advisory lock Apply holds is per (tenant, portfolio,
 	// instrument).
-	return &Postgres{pool: pool, baseCcy: baseCcy, queue: outbox.NewPostgres(pool, "oms")}
+	return &Postgres{pool: pool, baseCcy: baseCcy, queue: outbox.NewPostgres(pool, outbox.ServiceOMS)}
 }
 
 // Outbox is the durable queue this store enqueues announced FACTs into.
@@ -249,7 +249,7 @@ func (p *Postgres) Apply(ctx context.Context, portfolioID string, fill *orderpb.
 		if aerr != nil {
 			return nil, aerr
 		}
-		if err := outbox.Enqueue(ctx, tx, records...); err != nil {
+		if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, records...); err != nil {
 			return nil, err
 		}
 	}

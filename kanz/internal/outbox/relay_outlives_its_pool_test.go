@@ -81,7 +81,7 @@ func TestPostgresOutboxARelayLeftRunningIsStillHoldingTheDrainLock(t *testing.T)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := Enqueue(ctx, tx, pgFact(t, ctx, "datamaster.exception.overridden", "unjoined-1")); err != nil {
+	if err := Enqueue(ctx, tx, ServiceDatamaster, pgFact(t, ctx, "datamaster.exception.overridden", "unjoined-1")); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

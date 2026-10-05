@@ -98,7 +98,7 @@ func TestPostgresJetStreamCollateralRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	relay, err := outbox.NewRelay(outbox.NewPostgres(s.pool, "accounting"), producer, nil)
+	relay, err := outbox.NewRelay(outbox.NewPostgres(s.pool, outbox.ServiceAccounting), producer, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -153,7 +153,7 @@ func (s *Store) Confirm(ctx context.Context, tenant string, c *pb.PostingConfirm
 	if err != nil {
 		return err
 	}
-	if err = outbox.Enqueue(ctx, tx, fact); err != nil {
+	if err = outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, fact); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

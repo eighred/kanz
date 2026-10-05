@@ -72,7 +72,7 @@ func (p *Postgres) AcknowledgeRecovery(ctx context.Context, ack *orderpb.Executi
 	if err != nil {
 		return err
 	}
-	if err := outbox.Enqueue(ctx, tx, record); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, record); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

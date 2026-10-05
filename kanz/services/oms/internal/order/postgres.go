@@ -46,7 +46,7 @@ type Postgres struct {
 // NewPostgres returns a Postgres store over an existing pool. The caller owns
 // the pool lifecycle (Close).
 func NewPostgres(pool *pgxpool.Pool) *Postgres {
-	q := outbox.NewPostgres(pool, "oms")
+	q := outbox.NewPostgres(pool, outbox.ServiceOMS)
 	return &Postgres{pool: pool, queue: q, proposals: NewPostgresProposals(pool, q)}
 }
 
@@ -118,7 +118,7 @@ func (p *Postgres) create(ctx context.Context, st *orderpb.OrderState, announce 
 	if tag.RowsAffected() == 0 {
 		return ErrExists // the deferred Rollback discards the announcement with it
 	}
-	if err := outbox.Enqueue(ctx, tx, announce...); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, announce...); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -228,7 +228,7 @@ func (p *Postgres) save(ctx context.Context, st *orderpb.OrderState, expectedVer
 	if err := p.cas(ctx, tx, st, blob, expectedVersion); err != nil {
 		return err
 	}
-	if err := outbox.Enqueue(ctx, tx, announce...); err != nil {
+	if err := outbox.Enqueue(ctx, tx, outbox.ServiceOMS, announce...); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

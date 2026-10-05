@@ -12,6 +12,22 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	ServiceOMS        = "oms"
+	ServiceAccounting = "accounting"
+	ServiceDatamaster = "datamaster"
+)
+
+var (
+	ErrInvalidService = errors.New("outbox: explicit service owner required")
+	ErrUnownedPending = errors.New("outbox: legacy pending records have no service owner; reconcile before enqueue or drain")
+	ErrRecordNotOwned = errors.New("outbox: record unavailable in this tenant and service scope")
+)
+
+func validService(service string) bool {
+	return service != "" && strings.TrimSpace(service) == service
+}
+
 // Enqueue writes records into the outbox INSIDE AN EXISTING TRANSACTION.
 //
 // IT TAKES A pgx.Tx, NOT A POOL, AND THAT IS THE WHOLE DESIGN. An outbox row
@@ -36,7 +52,14 @@ import (
 // #223 until #97. Writing the envelope's tenant into tenant_id would put the row
 // outside the connection's RLS scope and the WITH CHECK would refuse it: not a
 // subtle bug, a total admission outage. See migrations/0006_outbox.sql.
-func Enqueue(ctx context.Context, tx pgx.Tx, records ...Record) error {
+// service is captured with the FACT, not inferred later from its subject. The
+// insert refuses while this tenant has legacy pending rows of unknown ownership,
+// so the caller rolls back its state change instead of extending an undrainable
+// history. This check shares the insert's round trip (#1325).
+func Enqueue(ctx context.Context, tx pgx.Tx, service string, records ...Record) error {
+	if !validService(service) {
+		return ErrInvalidService
+	}
 	for _, r := range records {
 		if r.TenantID == "" {
 			// Belt for From's braces: a hand-built Record must not reach the
@@ -45,17 +68,25 @@ func Enqueue(ctx context.Context, tx pgx.Tx, records ...Record) error {
 			// head of its key blocking every FACT behind it.
 			return fmt.Errorf("%w: %s", ErrNoTenant, r.EventType)
 		}
-		if _, err := tx.Exec(ctx, `
+		tag, err := tx.Exec(ctx, `
 			INSERT INTO outbox (
+				producer_service,
 				envelope_tenant_id, partition_key, subject, event_type, event_class,
 				schema_version, domain, payload_schema_ref, event_time,
 				correlation_id, causation_id, trace_context, payload
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-			r.TenantID, r.PartitionKey, r.Subject, r.EventType, int32(r.EventClass),
+			) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+			WHERE NOT EXISTS (
+				SELECT 1 FROM outbox WHERE published_at IS NULL AND producer_service IS NULL
+			)`,
+			service, r.TenantID, r.PartitionKey, r.Subject, r.EventType, int32(r.EventClass),
 			int32(r.SchemaVersion), r.Domain, r.PayloadSchemaRef, r.EventTime.UTC(),
 			r.CorrelationID, r.CausationID, r.TraceContext, r.Payload,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("outbox: enqueue %s for %s: %w", r.EventType, r.PartitionKey, err)
+		}
+		if tag.RowsAffected() != 1 {
+			return ErrUnownedPending
 		}
 	}
 	return nil
@@ -67,12 +98,12 @@ func Enqueue(ctx context.Context, tx pgx.Tx, records ...Record) error {
 // that is a decision, not a convenience — see the RLS argument on Relay.
 type Postgres struct {
 	pool *pgxpool.Pool
-	// service namespaces the advisory lock. Relay's doc named this as the one
+	// service scopes durable rows and the advisory lock. Relay's doc named this as the one
 	// thing that changes when a second service adopts the outbox, and #410 is
 	// that second service.
 	//
 	// WITHOUT IT, TWO SERVICES SHARING A DATABASE SERIALISE AGAINST EACH OTHER.
-	// pg_advisory_lock keys are cluster-wide integers, not per-table: a namespace
+	// pg_advisory_lock keys do not identify a table: a namespace
 	// of "<tenant>/outbox" would make the OMS's drain of order-id "X" block
 	// datamaster's drain of exception-id "X" whenever the two collide in
 	// hashtext. Nothing would break — the relays would just take turns for no
@@ -85,18 +116,37 @@ type Postgres struct {
 // service is REQUIRED and is not defaulted: a default would put two services in
 // one lock namespace, which is the failure described above and is invisible.
 func NewPostgres(pool *pgxpool.Pool, service string) *Postgres {
-	if strings.TrimSpace(service) == "" {
-		panic("outbox: NewPostgres requires a service name for the advisory-lock namespace")
+	if !validService(service) {
+		panic(ErrInvalidService)
 	}
 	return &Postgres{pool: pool, service: service}
 }
 
-// lockNamespace is "<tenant>/<service>/outbox", built in ONE place so the three
-// advisory-lock calls cannot drift — a lock taken in one namespace and released
-// in another leaks the lock for the life of the connection.
+// The SQL prefix resolves the physical table through this connection's search
+// path. Separate schemas using the same service/tenant/key must not share a drain
+// lock. The pinned connection uses the same expression to unlock (#1325).
+const drainLockScope = `current_database() || '/' || ('outbox'::regclass)::oid::text || '/' || app_current_tenant() || $2`
+
+// lockNamespace is the service suffix of the physical-table and tenant scope.
 func (p *Postgres) lockNamespace() string { return "/" + p.service + "/outbox" }
 
 var _ Queue = (*Postgres)(nil)
+
+// The migration rejects new unowned writes. A successful check therefore cannot
+// race a legacy writer inserting another ambiguous row; a verified operator
+// reconciliation can only reduce this backlog. Tenant RLS scopes the check.
+func (p *Postgres) requireOwnedPending(ctx context.Context) error {
+	var unowned bool
+	if err := p.pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM outbox WHERE published_at IS NULL AND producer_service IS NULL
+	)`).Scan(&unowned); err != nil {
+		return fmt.Errorf("outbox: check legacy ownership: %w", err)
+	}
+	if unowned {
+		return ErrUnownedPending
+	}
+	return nil
+}
 
 // pendingColumns is the projection every read shares, so a column added to one
 // read and forgotten in the other cannot make two relays publish different
@@ -127,13 +177,16 @@ func (p *Postgres) PendingKeys(ctx context.Context, limit int) ([]string, error)
 	if limit <= 0 {
 		return nil, nil
 	}
+	if err := p.requireOwnedPending(ctx); err != nil {
+		return nil, err
+	}
 	rows, err := p.pool.Query(ctx, `
 		SELECT partition_key
 		FROM outbox
-		WHERE published_at IS NULL
+		WHERE published_at IS NULL AND producer_service = $2
 		GROUP BY partition_key
 		ORDER BY MIN(id)
-		LIMIT $1`, limit)
+		LIMIT $1`, limit, p.service)
 	if err != nil {
 		return nil, fmt.Errorf("outbox: list pending keys: %w", err)
 	}
@@ -195,7 +248,7 @@ func (p *Postgres) LockKey(ctx context.Context, key string, wait bool) (func(), 
 		// Cancellation is the caller's ctx — pgx cancels the query, so a
 		// shutdown does not strand a handler inside the lock wait.
 		if _, err := conn.Exec(ctx,
-			`SELECT pg_advisory_lock(hashtext(app_current_tenant() || $2), hashtext($1))`,
+			`SELECT pg_advisory_lock(hashtext(`+drainLockScope+`), hashtext($1))`,
 			key, p.lockNamespace()); err != nil {
 			conn.Release()
 			return nil, false, fmt.Errorf("outbox: wait for the %s drain lock: %w", key, err)
@@ -204,7 +257,7 @@ func (p *Postgres) LockKey(ctx context.Context, key string, wait bool) (func(), 
 	}
 	var won bool
 	if err := conn.QueryRow(ctx,
-		`SELECT pg_try_advisory_lock(hashtext(app_current_tenant() || $2), hashtext($1))`,
+		`SELECT pg_try_advisory_lock(hashtext(`+drainLockScope+`), hashtext($1))`,
 		key, p.lockNamespace()).Scan(&won); err != nil {
 		conn.Release()
 		return nil, false, fmt.Errorf("outbox: try the %s drain lock: %w", key, err)
@@ -230,7 +283,7 @@ func (p *Postgres) unlock(conn *pgxpool.Conn, key string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := conn.Exec(ctx,
-		`SELECT pg_advisory_unlock(hashtext(app_current_tenant() || $2), hashtext($1))`,
+		`SELECT pg_advisory_unlock(hashtext(`+drainLockScope+`), hashtext($1))`,
 		key, p.lockNamespace()); err != nil {
 		if c := conn.Hijack(); c != nil {
 			_ = c.Close(ctx)
@@ -247,12 +300,15 @@ func (p *Postgres) Pending(ctx context.Context, key string, limit int) ([]Pendin
 	if limit <= 0 {
 		return nil, nil
 	}
+	if err := p.requireOwnedPending(ctx); err != nil {
+		return nil, err
+	}
 	rows, err := p.pool.Query(ctx, `
 		SELECT `+pendingColumns+`
 		FROM outbox
-		WHERE published_at IS NULL AND partition_key = $1
+		WHERE published_at IS NULL AND partition_key = $1 AND producer_service = $3
 		ORDER BY id
-		LIMIT $2`, key, limit)
+		LIMIT $2`, key, limit, p.service)
 	if err != nil {
 		return nil, fmt.Errorf("outbox: read pending for %s: %w", key, err)
 	}
@@ -289,14 +345,13 @@ func (p *Postgres) Pending(ctx context.Context, key string, limit int) ([]Pendin
 // exists to remove.
 func (p *Postgres) MarkPublished(ctx context.Context, id int64) error {
 	tag, err := p.pool.Exec(ctx,
-		`UPDATE outbox SET published_at = now(), last_error = '' WHERE id = $1 AND published_at IS NULL`, id)
+		`UPDATE outbox SET published_at = COALESCE(published_at, now()), last_error = ''
+		 WHERE id = $1 AND producer_service = $2`, id, p.service)
 	if err != nil {
 		return fmt.Errorf("outbox: mark %d published: %w", id, err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Another relay published it between our read and this update, or RLS
-		// hid it. Neither is an error for this caller: the record is out.
-		return nil
+		return ErrRecordNotOwned
 	}
 	return nil
 }
@@ -315,10 +370,21 @@ func (p *Postgres) MarkPublished(ctx context.Context, id int64) error {
 // than only the symptom it just saw (#817).
 func (p *Postgres) MarkFailed(ctx context.Context, id int64, cause error) error {
 	msg := boundedCause(cause)
-	if _, err := p.pool.Exec(ctx,
-		`UPDATE outbox SET attempts = attempts + 1, last_error = $2 WHERE id = $1 AND published_at IS NULL`,
-		id, msg); err != nil {
+	var owned bool
+	err := p.pool.QueryRow(ctx, `
+		WITH owned AS (
+			SELECT id FROM outbox WHERE id = $1 AND producer_service = $3
+		), updated AS (
+			UPDATE outbox SET attempts = attempts + 1, last_error = $2
+			WHERE id IN (SELECT id FROM owned) AND published_at IS NULL
+			RETURNING id
+		)
+		SELECT EXISTS (SELECT 1 FROM owned)`, id, msg, p.service).Scan(&owned)
+	if err != nil {
 		return fmt.Errorf("outbox: mark %d failed: %w", id, err)
+	}
+	if !owned {
+		return ErrRecordNotOwned
 	}
 	return nil
 }
@@ -331,9 +397,12 @@ func (p *Postgres) MarkFailed(ctx context.Context, id int64, cause error) error 
 // error on every healthy pass and the gauge would go stale while the log filled
 // with a failure that was not one.
 func (p *Postgres) OldestPendingAge(ctx context.Context, now time.Time) (time.Duration, bool, error) {
+	if err := p.requireOwnedPending(ctx); err != nil {
+		return 0, false, err
+	}
 	var oldest *time.Time
 	err := p.pool.QueryRow(ctx,
-		`SELECT MIN(enqueued_at) FROM outbox WHERE published_at IS NULL`).Scan(&oldest)
+		`SELECT MIN(enqueued_at) FROM outbox WHERE published_at IS NULL AND producer_service = $1`, p.service).Scan(&oldest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}

@@ -84,7 +84,7 @@ func (p *Postgres) currentBook(ctx context.Context, portfolioID string, now time
 // the same pool the journal is written through, so the relay reads under the
 // same RLS scope that wrote the record and there is no cross-tenant read to be
 // had.
-func (p *Postgres) Outbox() outbox.Queue { return outbox.NewPostgres(p.pool, "accounting") }
+func (p *Postgres) Outbox() outbox.Queue { return outbox.NewPostgres(p.pool, outbox.ServiceAccounting) }
 
 // Append records one journal entry, idempotent on entry_id (ON CONFLICT DO
 // NOTHING) — the journal is exactly-once over an at-least-once producer.
@@ -208,7 +208,7 @@ func (p *Postgres) Append(ctx context.Context, e *Event, announce Announcer) err
 		if aerr != nil {
 			return fmt.Errorf("append entry %s: announce: %w", e.EntryID, aerr)
 		}
-		if err := outbox.Enqueue(ctx, tx, records...); err != nil {
+		if err := outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, records...); err != nil {
 			return fmt.Errorf("append entry %s: enqueue announcement: %w", e.EntryID, err)
 		}
 	}

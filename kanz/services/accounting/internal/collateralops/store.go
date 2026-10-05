@@ -435,7 +435,7 @@ func (s *Store) Apply(ctx context.Context, a Action) (*pb.WorkflowRecorded, erro
 	if err != nil {
 		return nil, err
 	}
-	if err = outbox.Enqueue(ctx, tx, fact); err != nil {
+	if err = outbox.Enqueue(ctx, tx, outbox.ServiceAccounting, fact); err != nil {
 		return nil, err
 	}
 	blob, err = marshal(state)
