@@ -376,6 +376,13 @@ jobs:
           TEST_INFERENCE_ON_BUS: "1"
         run: go test -race -p 1 ./services/risk-engine/internal/app -run '^TestIntegration_TheModelScoresTheEnginesFeatures$' -count=1 -v
 
+      - name: Verify durable Kafka fixtures across repeated tenant rebuilds
+        working-directory: kanz
+        env:
+          TEST_KAFKA_BROKERS: localhost:9092
+          TEST_NATS_URL: nats://localhost:4222
+        run: go test -race -p 1 ./tools/natsrebuild -run '^TestIntegration_RebuildRestoresEveryTenantsPrefixedTopic$' -count=5 -v
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: kanz-web/.nvmrc
