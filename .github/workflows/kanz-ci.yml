@@ -383,7 +383,7 @@ jobs:
           TEST_NATS_URL: nats://localhost:4222
         run: go test -race -p 1 ./tools/natsrebuild -run '^TestIntegration_RebuildRestoresEveryTenantsPrefixedTopic$' -count=5 -v
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: kanz-web/.nvmrc
 
@@ -678,7 +678,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # Read the version from .nvmrc rather than repeating it here, so CI and
           # a developer's local shell cannot drift apart — the file IS the pin.
@@ -767,7 +767,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # Its OWN .nvmrc, not kanz-bus's: two independently versioned
           # workspaces sharing one pin means bumping either one silently moves
