@@ -74,6 +74,9 @@ def run(action, target):
         subprocess.run(cmd, cwd=cwd, check=True, timeout=900)
     root = Path(subprocess.check_output(["git","rev-parse","--show-toplevel"],text=True).strip())
     if not (root / "kanz/go.mod").is_file(): raise ValueError("run from the Kanz checkout")
+    if action in {"/doctor","/remember","/recall","/memory","/route","/prioritize"}:
+        import intelligence
+        return intelligence.run(action,target,root,run)
     if action == "/alerts":
         if target: raise ValueError("/alerts takes no target")
         raw = subprocess.check_output(["gh","api","--paginate","--slurp",

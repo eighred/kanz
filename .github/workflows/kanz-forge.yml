@@ -29,3 +29,5 @@ jobs:
         run: node --test .agents/plugins/kanz-forge/skills/security-audit/*.test.cjs
       - name: Verify Forge command contracts and upstream provenance
         run: python3 -B .agents/plugins/kanz-forge/scripts/test_evidence.py
+      - name: Check memory isolation, freshness, planning boundaries and dependency links
+        run: python3 -B .agents/plugins/kanz-forge/scripts/test_intelligence.py

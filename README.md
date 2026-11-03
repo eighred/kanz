@@ -27,7 +27,7 @@ codex plugin list --marketplace kanz-local --json
 Stop if validation fails. In the final command's installed entry, check that
 enabled is true, version matches the manifest in your checkout, and source.path
 ends in .agents/plugins/kanz-forge. The candidate version is
-0.4.0+codex.20261103; its tracked validator reports eight skills. A five-skill
+0.5.0+codex.20261104; its tracked validator reports eight skills. A five-skill
 result on the earlier main revision is expected.
 
 ## Use and update
@@ -122,3 +122,35 @@ plugin contents, and requests fresh skill discovery from an app-server process.
 It does not change the active user marketplace. For the SDK-backed Go suites,
 follow kanz-schemas/README.md before invoking /financial. GitHub metadata
 requires gh access; local pricing checks do not require upstream API access.
+## Forge Next: commands and dependencies
+
+[Dependencies and upstream GitHub links](.agents/plugins/kanz-forge/DEPENDENCIES.md)
+lists runtime tools separately from optional research references. The pin
+registry remains the authority; changes to a pin must update its linked entry.
+
+Run from a Kanz checkout using the candidate launcher:
+
+    python -B .agents/plugins/kanz-forge/scripts/command.py /doctor
+    python -B .agents/plugins/kanz-forge/scripts/command.py /remember pricing
+    python -B .agents/plugins/kanz-forge/scripts/command.py /memory
+    python -B .agents/plugins/kanz-forge/scripts/command.py /route kanz/go.mod
+    python -B .agents/plugins/kanz-forge/scripts/command.py /prioritize
+
+Remember runs both Go pricing suites and accepts only complete, skip-free
+results with unchanged scoped inputs. It does not accept caller-supplied
+claims, free-text notes or approval records. Recall (also /memory) reads the
+last ten scoped receipts without creating an empty database. Records use a
+local Git common-directory identity so worktrees share history; the source
+digest is recomputed from the current worktree. It covers pricing, its
+benchmarks, the terms adapter and the Go module manifests, not every transitive
+dependency, compiler or environment setting. Unchanged bytes never mean fresh
+verification. Independent clones have independent identities. Deleting the
+index loses receipt history; evidence can be generated again by rerunning
+the tests, not by reconstructing the exact historical execution.
+
+Route suggests checks without dispatch. Prioritize screens a live issue
+snapshot; it cannot establish feasibility from labels alone. /deps, /review
+and /hunt are interactive agent workflows, not automated certifications.
+For pricing investigations, inspect /memory first, then /trace the affected
+symbol and run a fresh /financial or /remember check before accepting results.
+No background scheduler, production authority or merge permission is added.

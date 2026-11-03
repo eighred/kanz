@@ -1,6 +1,7 @@
 """Launch a Kanz Forge action in interactive Codex using the current permissions."""
 import argparse
 import json
+import sqlite3
 import shutil
 import sys
 import evidence
@@ -31,7 +32,7 @@ def main():
         try:
             print(json.dumps(evidence.run(args.action, target), indent=2))
             return 0
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        except (sqlite3.Error, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
     prompt = (f"$kanz-forge:commands {args.action}\n{entry['workflow']}\n"
