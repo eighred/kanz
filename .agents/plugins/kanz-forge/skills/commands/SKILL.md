@@ -16,4 +16,6 @@ destructive operations, disabling checks, or changing an admission halt.
 
 For mode=evidence invoke scripts/command.py in the repository-owned Forge plugin with the exact action and target. Present output, skips and exit status. Never substitute a prompt for a failed executable check.
 
-For /help show only catalog entries with primary=true, plus /help all. For /help all show every entry. For /ship and /gaps in this chat, perform the workflow directly; do not launch a second Codex session.
+For /help show only catalog entries with primary=true, plus /help all. For /help all show public entries; omit internal collectors. For /ship and /gaps in this chat, perform the workflow directly; do not launch a second Codex session.
+
+Read only the selected catalog entry for execution. From a matching checkout, the launcher --preview option prints its instructions without starting another session. Never require the user to name a financial test suite; select appropriate evidence after locating the code.

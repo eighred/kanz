@@ -4,6 +4,14 @@ For the application stack, start with [local development](kanz/dev/README.md).
 For the repository-owned Codex engineering skills, follow the steps below.
 Forge setup does not start services or require venue credentials.
 
+## Describe the engineering outcome
+
+For example: “Investigate what Kanz is missing to replay a portfolio through a
+historical stress episode.” Give the decision you need and any known constraints.
+Forge should find the owning code, missing data and architectural gap, choose
+relevant methodology, and only then select tests. No finance-mode or suite name
+is needed. See the [design evidence guide](.agents/plugins/kanz-forge/skills/engineering-standard/references/design-evidence.md).
+
 ## Four everyday commands
 
 In **Codex chat**, send a message such as `Kanz /ship #1385`. In a terminal
@@ -44,16 +52,15 @@ codex plugin list --marketplace kanz-local --json
 Stop if validation fails. In the final command's installed entry, check that
 enabled is true, version matches the manifest in your checkout, and source.path
 ends in .agents/plugins/kanz-forge. The candidate version is
-0.6.0+codex.20261104; its tracked validator reports eight skills. A five-skill
+0.6.1+codex.20261104; its tracked validator reports eight skills. A five-skill
 result on the earlier main revision is expected.
 
 ## Use and update
 
 Start a new Codex task in the repository. For example, ask:
-“Use Kanz Forge financial-verification to review the ACT/ACT accrual test and
-explain which inputs it verifies.” The financial-verification and security-audit
-skills require the eight-skill candidate. Routine use needs no manual copying
-into a user skill directory.
+“Trace where a missing instrument convention could change an order decision;
+show me the current behavior and what we need to change.” You do not need to
+choose a test suite or copy skills into a user directory.
 
 After changing the checkout revision, repeat validation, installation and the
 version/source check. To roll back, run those same commands from a checkout of
@@ -107,7 +114,7 @@ evidence that a task was completed. Check the linked PR, tests and revision.
 | Dependency exposure | /alerts | Read-only GitHub Dependabot findings by advisory and manifest. Needs repository alert access. A permission failure is not zero alerts. |
 | Symbol investigation | /trace YearFraction | Searches tracked source; returns at most 100 lexical matches and total count, not a type-resolved call graph. |
 | Inventory, history, dependency edges | scripts/evidence.py, /repo | Git status, three commits and Go import edges for pricing. No complete symbol/call graph, edit-impact oracle or semantic index. |
-| Financial verification | /financial pricing, risk, portfolio, tca or backtest | Runs owning Go tests with -count=1 and readonly dependencies. Pricing includes the rational ACT/ACT oracle, yields and boundary cases. A passing test is not an institutional valuation or a production-data audit. Inspect skips; generate schema SDK first. |
+| Financial verification | Internal Go suite collector (chosen by Forge) | Runs owning Go tests with -count=1 and readonly dependencies. Pricing includes the rational ACT/ACT oracle, yields and boundary cases. A passing test is not an institutional valuation or a production-data audit. Inspect skips; generate schema SDK first. |
 | Security and supply chain | /security | Checks imported bytes and runs Node validator regression tests. These validate findings formats and safe input handling. They do not scan the repository for vulnerabilities. Full findings CLI requires POSIX protections. |
 | Upstream intelligence | /upstream or /upstream cloudflare/security-audit-skill | Local registry inventory or read-only gh API comparison against pinned SHA. Emits JSON; redirect to a file for review. Requires GitHub access for live checks. Does not write pins, download code for execution, or establish legal compatibility. |
 | Benchmarking | /bench | Five elapsed times and median for tracked Forge validation. No inference speed or runtime trading benchmark. |
@@ -137,7 +144,7 @@ From the candidate checkout:
 The installation test uses an empty disposable CLI profile, compares tracked
 plugin contents, and requests fresh skill discovery from an app-server process.
 It does not change the active user marketplace. For the SDK-backed Go suites,
-follow kanz-schemas/README.md before invoking /financial. GitHub metadata
+follow kanz-schemas/README.md before running Go suites. GitHub metadata
 requires gh access; local pricing checks do not require upstream API access.
 ## Forge Next: commands and dependencies
 
@@ -169,5 +176,5 @@ Route suggests checks without dispatch. Prioritize screens a live issue
 snapshot; it cannot establish feasibility from labels alone. /deps, /review
 and /hunt are interactive agent workflows, not automated certifications.
 For pricing investigations, inspect /memory first, then /trace the affected
-symbol and run a fresh /financial or /remember check before accepting results.
+symbol and run the relevant fresh numerical checks before accepting results.
 No background scheduler, production authority or merge permission is added.

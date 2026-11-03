@@ -49,7 +49,7 @@ class ForgeTests(unittest.TestCase):
             if item.get("mode")!="evidence":
                 with patch.object(sys,"argv",["forge",*args]),patch("shutil.which",return_value="codex.exe"),patch("subprocess.call",return_value=17) as invoke:
                     self.assertEqual(command.main(),17)
-                    self.assertEqual(len(invoke.call_args.args[0]),2)
+                    self.assertEqual(invoke.call_args.args[0], ["codex.exe", "$kanz-forge:commands " + " ".join(args)])
 
     def test_installed_skills_referenced_by_manifest(self):
         base=evidence.PLUGIN

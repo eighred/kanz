@@ -21,6 +21,7 @@ class InterfaceTests(unittest.TestCase):
             self.assertIn(name+" ", short)
         self.assertNotIn("/bench ", short)
         self.assertIn("/bench ", self.help("all"))
+        self.assertNotIn("/financial ", self.help("all"))
 
     def test_only_missing_relative_file_is_reported(self):
         doc = """[ok](here.md#anchor) [directory](sub/) [url](https://example.org)
