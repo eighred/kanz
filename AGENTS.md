@@ -410,3 +410,17 @@ Read them before filing a bug: an absence that looks like an oversight is often
 a guarded decision, and the exemption states why. A guard that passes proves
 what it *resolved*, not what its name claims — mutate the artifact to find out
 which.
+
+## Security and quantitative review
+
+For changes to identity, RLS, message validation, signing or release workflows,
+use the security-audit skill to identify the affected principal, resource and
+trust boundary. Run the findings CLI on Linux: Windows lacks the required
+no-follow/nonblocking input flags. Never disable those safeguards to make a
+local check pass. The imported skill is pinned in its entry point and carries
+its MIT notice. Node is a development-time validator dependency only.
+
+For pricing, portfolio and backtest changes use financial-verification before
+acceptance. Keep production computations in the owning service or Go library.
+For rollback reinstall the previous tracked plugin revision from its checkout;
+do not hand-edit the installed cache.

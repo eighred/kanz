@@ -25,3 +25,5 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate marketplace, plugin, tracked skills and references
         run: python3 .agents/plugins/kanz-forge/scripts/validate.py --tracked
+      - name: Exercise offline audit validators on Linux
+        run: node --test .agents/plugins/kanz-forge/skills/security-audit/*.test.cjs
