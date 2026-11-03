@@ -27,7 +27,7 @@ codex plugin list --marketplace kanz-local --json
 Stop if validation fails. In the final command's installed entry, check that
 enabled is true, version matches the manifest in your checkout, and source.path
 ends in .agents/plugins/kanz-forge. The candidate version is
-0.3.1+codex.20261103; its tracked validator reports eight skills. A five-skill
+0.4.0+codex.20261103; its tracked validator reports eight skills. A five-skill
 result on the earlier main revision is expected.
 
 ## Use and update

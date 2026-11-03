@@ -46,7 +46,7 @@ def check(row, api=github):
     releases = api(base + "/releases?per_page=1")
     old = row["pin"]
     diff = api(base + "/compare/" + old + "..." + head) if head != old else {}
-    files = [f["filename"] for f in diff.get("files", [])]
+    files = sorted({p for f in diff.get("files", []) for p in (f["filename"], f.get("previous_filename")) if p})
     relevant = {f["source"] for f in row["imports"]}
     license_paths = [f for f in files if re.search("license|copying|notice", f, re.I)]
     messages = [c["commit"]["message"].splitlines()[0] for c in diff.get("commits", [])]
@@ -82,7 +82,19 @@ def run(action, target):
     elif action == "/financial":
         groups={"pricing":["./internal/risk/pricing","./internal/risk/benchmarks"],"risk":["./internal/risk/compute"],"portfolio":["./internal/performance"],"tca":["./internal/execution/tca"],"backtest":["./tools/backtest"]}
         if target not in groups: raise ValueError("choose "+", ".join(groups))
-        execute(["go","test","-mod=readonly","-p","1","-count=1",*groups[target]],root/"kanz")
+        proc = subprocess.run(["go","test","-json","-mod=readonly","-p","1","-count=1",*groups[target]],
+                              cwd=root/"kanz", stdout=subprocess.PIPE, text=True, timeout=900)
+        packages, failed, skipped = [], [], []
+        for line in proc.stdout.splitlines():
+            event = json.loads(line)
+            label = event.get("Package","") + ":" + event.get("Test","")
+            if event["Action"] == "skip": skipped.append(label)
+            if event["Action"] == "fail": failed.append(label)
+            if event["Action"] == "pass" and not event.get("Test"): packages.append(event["Package"])
+        summary = {"packages_passed":packages,"failures":failed,"skips":skipped}
+        if proc.returncode or failed or len(packages) != len(groups[target]):
+            raise ValueError("incomplete or failed test suite: " + json.dumps(summary))
+        return summary
     elif action == "/security":
         if target: raise ValueError("/security takes no target")
         registry()
