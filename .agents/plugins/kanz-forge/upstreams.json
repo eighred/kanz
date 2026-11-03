@@ -1,0 +1,594 @@
+[
+  {
+    "repo": "garrytan/gstack",
+    "url": "https://github.com/garrytan/gstack",
+    "pin": "72761513d370dc47113809f46ee8d45f3b35daf0",
+    "observed_head": "f8085aa0e499085c411f712d6d5c00a81d1b104a",
+    "release": "v1.92.55.0",
+    "checked_at": "2026-11-03T20:23:51.042441+00:00",
+    "license": "MIT",
+    "license_sources": [
+      {
+        "path": "LICENSE",
+        "blob": "35029511144443297cad2d26e4bac17d0e352f93"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": true
+  },
+  {
+    "repo": "cloudflare/security-audit-skill",
+    "url": "https://github.com/cloudflare/security-audit-skill",
+    "pin": "c1c8a8c1471069fb0e188eeaff69b8e8db6564a8",
+    "observed_head": "c1c8a8c1471069fb0e188eeaff69b8e8db6564a8",
+    "release": null,
+    "checked_at": "2026-11-03T20:23:50.908119+00:00",
+    "license": "MIT",
+    "license_sources": [
+      {
+        "path": "LICENSE",
+        "blob": "6dbc9ecb3a5b9080e95b962869e8c7ab16cfdc20"
+      }
+    ],
+    "adoption": "vendored with overlay",
+    "imports": [
+      {
+        "source": "LICENSE",
+        "blob": "6dbc9ecb3a5b9080e95b962869e8c7ab16cfdc20",
+        "local": "skills/security-audit/LICENSE",
+        "sha256_lf": "e598e694aa506650c7192d5ea3be0e50aca0d356ea00551c53429f0b01eb6391",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/AI-AND-LLM.md",
+        "blob": "02ba9039eca4cec811fefc77bce0d7349b379aae",
+        "local": "skills/security-audit/AI-AND-LLM.md",
+        "sha256_lf": "7335a95c43554eadefcf03ece639291bb0e038c398a179299e3887ffe06bd2ef",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/ATTACK-CLASSES.md",
+        "blob": "18a2beb4dbb554fb52b0a0293b8bd9108207f8fa",
+        "local": "skills/security-audit/ATTACK-CLASSES.md",
+        "sha256_lf": "3ee4f00c6e8c9dcf6dd02dd5ac2a4ceb322e2085f3e9fbe79cf0c6330bc7ef83",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/CLIENT-SIDE.md",
+        "blob": "8ba673e9e7e3d02f5518aa0219bcbeec7957531b",
+        "local": "skills/security-audit/CLIENT-SIDE.md",
+        "sha256_lf": "613f6b98f86083e045525c5b60154ffdab122bac35f1e05eb17488e6e453370c",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/CLOUD-AND-DEPLOYMENT.md",
+        "blob": "5569f76c7740744aa3f60aaa89eaefe275f2e6c9",
+        "local": "skills/security-audit/CLOUD-AND-DEPLOYMENT.md",
+        "sha256_lf": "3c80f3088be22345e07b057c056d6ed99fe2b0304f794398964f7ccd5a496ca3",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/DATA-ISOLATION-AND-LIFECYCLE.md",
+        "blob": "0cba1fa463b62c9b0caba710a201e29c1eecd0ec",
+        "local": "skills/security-audit/DATA-ISOLATION-AND-LIFECYCLE.md",
+        "sha256_lf": "307dcb3e24d292715c4a041190e7bb135646a37eb6187619ae01d000a634a4ad",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/DESKTOP-MOBILE-AND-LOCAL-IPC.md",
+        "blob": "d6230098651bff6348d3868c11f566bfb1306e7f",
+        "local": "skills/security-audit/DESKTOP-MOBILE-AND-LOCAL-IPC.md",
+        "sha256_lf": "58eae8ee0ca6a46611c501ec5a3ab47fdff88dd7db0d8d74789bbf8bb19d8cb2",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/HUNTING.md",
+        "blob": "377d4dcfbe88a049379448cd7892717185401597",
+        "local": "skills/security-audit/HUNTING.md",
+        "sha256_lf": "71c121decea1322c47c718f6e110f1a892980bb4266bd7ac55ef043a213ade09",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/MEMORY-SAFETY-AND-BINARY.md",
+        "blob": "86ff4920752661fc4a31a35ca4f962ace5dd5f48",
+        "local": "skills/security-audit/MEMORY-SAFETY-AND-BINARY.md",
+        "sha256_lf": "7c8b0dccfb35315cca2455509674d49632b2fe37e1f3aac16c1a496a7e9924a7",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/PROTOCOLS-RPC-AND-MESSAGING.md",
+        "blob": "b04ab88f852224838fdc9683d9fcccd858b0778a",
+        "local": "skills/security-audit/PROTOCOLS-RPC-AND-MESSAGING.md",
+        "sha256_lf": "8b73816fa5b3697c9c40977f0c836b40f01d6e81929ff2720fe83ce089e9a619",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/RECONNAISSANCE.md",
+        "blob": "1a170a93ab76b93dc5ac268a5b690beb423a8aa9",
+        "local": "skills/security-audit/RECONNAISSANCE.md",
+        "sha256_lf": "02ca887aca84de8ae137f1891bd2f0a54f28d3fa6da92a27f54734382b3381a2",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/RESOURCE-EXHAUSTION-AND-AVAILABILITY.md",
+        "blob": "6cbbd1e2cfa482068c8279c2f7da9db43d3f54b8",
+        "local": "skills/security-audit/RESOURCE-EXHAUSTION-AND-AVAILABILITY.md",
+        "sha256_lf": "4326fab5c92a0b4c420a70196254040105cd794026562130b59bf1a6db3e4baa",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/SKILL.md",
+        "blob": "92178dad304d3f63e37582a297026a7874e12c62",
+        "local": "skills/security-audit/SKILL.md",
+        "sha256_lf": "97ae8b37edb8bb7d0cb764129fc6292ebb455e66a65fb5980e6d795c02fc7eac",
+        "adapted": true
+      },
+      {
+        "source": "skills/security-audit/SUPPLY-CHAIN-AND-RELEASE.md",
+        "blob": "bf96aed0803bc07471483ab129dea86759c3e305",
+        "local": "skills/security-audit/SUPPLY-CHAIN-AND-RELEASE.md",
+        "sha256_lf": "f372e919940e335468ba1ae09f99026c3986a345f7fe26f8068f132e199f52a5",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/VALIDATION-AND-REPORTING.md",
+        "blob": "5e200d7387e665e53e0e4190fa4a5814c334c507",
+        "local": "skills/security-audit/VALIDATION-AND-REPORTING.md",
+        "sha256_lf": "b892470cb89bb31f33403e050d4bdfbe2cdaef940ade1496fa65e32b2e129449",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/WEB-PROTOCOL-AND-AUTH.md",
+        "blob": "1a099fa575cf52a61e9a627f91b61015120fa517",
+        "local": "skills/security-audit/WEB-PROTOCOL-AND-AUTH.md",
+        "sha256_lf": "4f3066dffa23c5635859187be9b96c32f2aff29a688186b91ff0c63e47d62b5c",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/report-schema.json",
+        "blob": "55815a3687a45fff63d8ebf20068611bd6ad6d9a",
+        "local": "skills/security-audit/report-schema.json",
+        "sha256_lf": "6575c9de4a62255699ea052ebf9a49ebfb373a32891bcd89af6f55cc84b35519",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/validate-coverage-ledger.cjs",
+        "blob": "0ef58657bef18b26a92321df6c8e3d31bc8e6659",
+        "local": "skills/security-audit/validate-coverage-ledger.cjs",
+        "sha256_lf": "2eb280bd2e33c002916f86db9b29f9edfedb6454e5db973c766290465b868ac8",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/validate-coverage-ledger.test.cjs",
+        "blob": "b1444f57e1b021a61175733b8c356171861c8701",
+        "local": "skills/security-audit/validate-coverage-ledger.test.cjs",
+        "sha256_lf": "cfb9df26b03469a4279a70e7664a2a5434dd6f8c2c204e91f9b0aeb9dd71e648",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/validate-findings.cjs",
+        "blob": "2843feceddb7e30bf10d6e4f7bbe6640e4c57799",
+        "local": "skills/security-audit/validate-findings.cjs",
+        "sha256_lf": "e85f232e36bfac0f866f244da50376692d6b45c690beadcb00608b0e6c8b5283",
+        "adapted": false
+      },
+      {
+        "source": "skills/security-audit/validate-findings.test.cjs",
+        "blob": "8d245b226bbe2fdf28b46b3203b99c2824039d2d",
+        "local": "skills/security-audit/validate-findings.test.cjs",
+        "sha256_lf": "b92001117a92c4161d43777a0ba2fa182a8a4d97f2304cc8c0cee5331497b73b",
+        "adapted": false
+      }
+    ],
+    "security": "reviewed development tooling; no production authority",
+    "compatibility": "Linux validators; limited Windows support",
+    "update_available": false
+  },
+  {
+    "repo": "Graphify-Labs/graphify",
+    "url": "https://github.com/Graphify-Labs/graphify",
+    "pin": "8e6a6d2129d4aeffc7a0e9ed79b153f7f057f42b",
+    "observed_head": "8e6a6d2129d4aeffc7a0e9ed79b153f7f057f42b",
+    "release": "v0.9.101",
+    "checked_at": "2026-11-03T20:23:50.896550+00:00",
+    "license": "Apache-2.0",
+    "license_sources": [
+      {
+        "path": "LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  },
+  {
+    "repo": "juliusbrussee/caveman",
+    "url": "https://github.com/juliusbrussee/caveman",
+    "pin": "2e068f735253cce28256744804785f01887d9646",
+    "observed_head": "2e068f735253cce28256744804785f01887d9646",
+    "release": "bin-v4.0.2",
+    "checked_at": "2026-11-03T20:23:51.156377+00:00",
+    "license": "Apache-2.0",
+    "license_sources": [
+      {
+        "path": "LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "browse/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "engine/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "extension/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "mcp/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "mem/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "proxy/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "shrink/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "mem/js/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "mem/py/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "packages/cli/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "packages/device-auth/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "packages/pi-extension/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "packages/subagent-tax/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "shared/platform/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "shared/provider-catalog/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "packages/middleware/python/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "packages/middleware/typescript/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "packages/sdk/python/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "packages/sdk/typescript/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "packages/shared/binary-installer/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "packages/shared/contracts/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "src/mcp-servers/caveman-shrink/LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  },
+  {
+    "repo": "DietrichGebert/ponytail",
+    "url": "https://github.com/DietrichGebert/ponytail",
+    "pin": "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+    "observed_head": "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+    "release": "v5.3.3",
+    "checked_at": "2026-11-03T20:23:51.057520+00:00",
+    "license": "MIT",
+    "license_sources": [
+      {
+        "path": "LICENSE",
+        "blob": "715d483338cea4365f0d91a27799cf61226d6bcf"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  },
+  {
+    "repo": "anthropics/financial-services",
+    "url": "https://github.com/anthropics/financial-services",
+    "pin": "60565064557ca77b12f62aa7877f365d111c129d",
+    "observed_head": "60565064557ca77b12f62aa7877f365d111c129d",
+    "release": null,
+    "checked_at": "2026-11-03T20:23:51.049809+00:00",
+    "license": "Apache-2.0",
+    "license_sources": [
+      {
+        "path": "LICENSE",
+        "blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+      },
+      {
+        "path": "plugins/partner-built/spglobal/LICENSE",
+        "blob": "deb652346dcf870e91b39e9dfb0ac1d3bbec6c7f"
+      },
+      {
+        "path": "plugins/partner-built/spglobal/skills/earnings-preview-beta/LICENSE",
+        "blob": "deb652346dcf870e91b39e9dfb0ac1d3bbec6c7f"
+      },
+      {
+        "path": "plugins/partner-built/spglobal/skills/funding-digest/LICENSE",
+        "blob": "deb652346dcf870e91b39e9dfb0ac1d3bbec6c7f"
+      },
+      {
+        "path": "plugins/partner-built/spglobal/skills/tear-sheet/LICENSE",
+        "blob": "deb652346dcf870e91b39e9dfb0ac1d3bbec6c7f"
+      },
+      {
+        "path": "plugins/vertical-plugins/financial-analysis/skills/skill-creator/LICENSE.txt",
+        "blob": "7a4a3ea2424c09fbe48d455aed1eaa94d9124835"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  },
+  {
+    "repo": "JoelLewis/finance_skills",
+    "url": "https://github.com/JoelLewis/finance_skills",
+    "pin": "5c498eacf7057e31238c4c5a8012a1afe9ec7c8a",
+    "observed_head": "5c498eacf7057e31238c4c5a8012a1afe9ec7c8a",
+    "release": null,
+    "checked_at": "2026-11-03T20:23:54.234785+00:00",
+    "license": "MIT",
+    "license_sources": [
+      {
+        "path": "LICENSE",
+        "blob": "83b4133380e414e0d8b70b98c0d283117f7c6a4d"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  },
+  {
+    "repo": "RW-git-hub/claude-quant",
+    "url": "https://github.com/RW-git-hub/claude-quant",
+    "pin": "f96a2628128c5e707c52117992dcc6149dd682e4",
+    "observed_head": "f96a2628128c5e707c52117992dcc6149dd682e4",
+    "release": "v2.1.0",
+    "checked_at": "2026-11-03T20:23:53.666573+00:00",
+    "license": "MIT",
+    "license_sources": [
+      {
+        "path": "LICENSE",
+        "blob": "dc37fcc1363f24978800672a9fc83c0d1ddfda0a"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  },
+  {
+    "repo": "AI4Finance-Foundation/FinRobot",
+    "url": "https://github.com/AI4Finance-Foundation/FinRobot",
+    "pin": "63e1884a42ea7b729551a5424b4bd6a65af636e0",
+    "observed_head": "63e1884a42ea7b729551a5424b4bd6a65af636e0",
+    "release": "desktop-v0.1.0",
+    "checked_at": "2026-11-03T20:23:53.808474+00:00",
+    "license": "Apache-2.0",
+    "license_sources": [
+      {
+        "path": "LICENSE",
+        "blob": "6cc0d28c44e482825bba73c84761e3d65f138f42"
+      },
+      {
+        "path": "finrobot_desktop/LICENSE",
+        "blob": "f3ecc4e26260f47e55724f138ad5ca4f36fb7595"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  },
+  {
+    "repo": "lballabio/QuantLib",
+    "url": "https://github.com/lballabio/QuantLib",
+    "pin": "84fbf0a0ecb9aa1cd6022ec468129f9dee5464be",
+    "observed_head": "84fbf0a0ecb9aa1cd6022ec468129f9dee5464be",
+    "release": "v1.44",
+    "checked_at": "2026-11-03T20:23:53.906046+00:00",
+    "license": "NOASSERTION",
+    "license_sources": [
+      {
+        "path": "LICENSE.TXT",
+        "blob": "1782fdb6bfdd9b5cfc9a5bbfa9afa2e1e3064171"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  },
+  {
+    "repo": "dcajasn/Riskfolio-Lib",
+    "url": "https://github.com/dcajasn/Riskfolio-Lib",
+    "pin": "7c5429f486d4b3d76bcee4c43a8864a11cfd9795",
+    "observed_head": "7c5429f486d4b3d76bcee4c43a8864a11cfd9795",
+    "release": null,
+    "checked_at": "2026-11-03T20:23:53.909401+00:00",
+    "license": "BSD-3-Clause",
+    "license_sources": [
+      {
+        "path": "LICENSE.txt",
+        "blob": "4c041489b7cd925cb6f5c7af1616ba4188557da8"
+      },
+      {
+        "path": "docs/source/riskfoliolib/LICENSE.txt",
+        "blob": "4c041489b7cd925cb6f5c7af1616ba4188557da8"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  },
+  {
+    "repo": "AI4Finance-Foundation/FinRL",
+    "url": "https://github.com/AI4Finance-Foundation/FinRL",
+    "pin": "7e98df461cbc7772f16a545a2f13b521e5d0b8f4",
+    "observed_head": "7e98df461cbc7772f16a545a2f13b521e5d0b8f4",
+    "release": "v0.3.8",
+    "checked_at": "2026-11-03T20:23:53.787979+00:00",
+    "license": "MIT",
+    "license_sources": [
+      {
+        "path": "LICENSE",
+        "blob": "cbeb60a100b33079b5c90102fb89b4f9f229437c"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  },
+  {
+    "repo": "anthropics/skills",
+    "url": "https://github.com/anthropics/skills",
+    "pin": "ca45fc496a3436251f191354091d557da31c15b5",
+    "observed_head": "ca45fc496a3436251f191354091d557da31c15b5",
+    "release": null,
+    "checked_at": "2026-11-03T20:23:56.606033+00:00",
+    "license": "scope-specific; review per file",
+    "license_sources": [
+      {
+        "path": "skills/academy-guide/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/algorithmic-art/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/brand-guidelines/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/canvas-design/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/claude-api/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/discernment-nudge/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/docx/LICENSE.txt",
+        "blob": "c55ab42224874608473643de0a85736b7fec0730"
+      },
+      {
+        "path": "skills/frontend-design/LICENSE.txt",
+        "blob": "f433b1a53f5b830a205fd2df78e2b34974656c7b"
+      },
+      {
+        "path": "skills/internal-comms/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/mcp-builder/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/pdf/LICENSE.txt",
+        "blob": "c55ab42224874608473643de0a85736b7fec0730"
+      },
+      {
+        "path": "skills/pptx/LICENSE.txt",
+        "blob": "c55ab42224874608473643de0a85736b7fec0730"
+      },
+      {
+        "path": "skills/skill-creator/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/slack-gif-creator/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/theme-factory/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/web-artifacts-builder/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/webapp-testing/LICENSE.txt",
+        "blob": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9"
+      },
+      {
+        "path": "skills/xlsx/LICENSE.txt",
+        "blob": "c55ab42224874608473643de0a85736b7fec0730"
+      }
+    ],
+    "adoption": "reference only",
+    "imports": [],
+    "security": "not approved for execution",
+    "compatibility": "not integrated",
+    "update_available": false
+  }
+]
