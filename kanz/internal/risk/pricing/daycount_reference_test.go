@@ -31,3 +31,26 @@ func TestActualActualAgainstRationalDailyAccrual(t *testing.T) {
 		}
 	}
 }
+
+func TestUnknownDayCountHasNoYearFraction(t *testing.T) {
+	start := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	for _, dc := range []DayCount{-1, 99} {
+		if got := YearFraction(start, start.AddDate(0, 1, 0), dc); !math.IsNaN(got) {
+			t.Errorf("unsupported convention %d produced accrual %g", dc, got)
+		}
+	}
+}
+
+func TestYieldSolverDoesNotTurnUnknownPriceIntoEndpoint(t *testing.T) {
+	settle := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	bond := Bond{Face: 100, Issue: settle, Maturity: settle.AddDate(1, 0, 0), DayCount: DayCount(99)}
+	if y := bond.YieldFromPrice(settle, 98); !math.IsNaN(y) {
+		t.Fatalf("unknown basis priced as yield %g", y)
+	}
+	bond.DayCount = Actual365Fixed
+	for _, p := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if y := bond.YieldFromPrice(settle, p); !math.IsNaN(y) {
+			t.Fatalf("nonfinite price produced yield %g", y)
+		}
+	}
+}

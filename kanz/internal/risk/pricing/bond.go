@@ -146,10 +146,17 @@ func (b Bond) Risk(settle time.Time, y float64) BondRisk {
 // bisection (price is monotone decreasing in yield). Returns the yield in
 // [-0.5, 2.0]; a price outside that band clamps to the nearest endpoint.
 func (b Bond) YieldFromPrice(settle time.Time, dirtyPrice float64) float64 {
+	if math.IsNaN(dirtyPrice) || math.IsInf(dirtyPrice, 0) {
+		return math.NaN()
+	}
 	lo, hi := -0.5, 2.0
 	for i := 0; i < 200; i++ {
 		mid := (lo + hi) / 2
-		if b.PriceFromYield(settle, mid) > dirtyPrice {
+		price := b.PriceFromYield(settle, mid)
+		if math.IsNaN(price) {
+			return math.NaN()
+		}
+		if price > dirtyPrice {
 			lo = mid // price too high ⇒ yield too low
 		} else {
 			hi = mid
