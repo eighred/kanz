@@ -58,6 +58,20 @@ class ForgeTests(unittest.TestCase):
         self.assertEqual(names,{"commands","engineering-standard","financial-verification",
             "issue-archaeology","kanz-verify","pr-delivery","security-audit","stack-routing"})
 
+    def test_tampered_import_is_rejected(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            row=evidence.registry()["cloudflare/security-audit-skill"].copy()
+            item=row["imports"][0]
+            row["imports"]=[item]
+            path=root/item["local"]
+            path.parent.mkdir(parents=True)
+            path.write_text("changed")
+            (root/"upstreams.json").write_text(json.dumps([row]))
+            with patch.object(evidence,"PLUGIN",root), self.assertRaisesRegex(ValueError,"import drift"):
+                evidence.registry()
+
     def test_invalid_command(self):
         with patch.object(sys,"argv",["forge","/typo"]),contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit) as ex:
             command.main()

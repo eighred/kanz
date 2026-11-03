@@ -74,6 +74,22 @@ def run(action, target):
         subprocess.run(cmd, cwd=cwd, check=True, timeout=900)
     root = Path(subprocess.check_output(["git","rev-parse","--show-toplevel"],text=True).strip())
     if not (root / "kanz/go.mod").is_file(): raise ValueError("run from the Kanz checkout")
+    if action == "/alerts":
+        if target: raise ValueError("/alerts takes no target")
+        raw = subprocess.check_output(["gh","api","--paginate","--slurp",
+            "repos/eighred/kanz/dependabot/alerts?state=open&per_page=100"],timeout=90)
+        alerts = [a for page in json.loads(raw) for a in page]
+        return {"repository":"eighred/kanz","alerts":[{"number":a["number"],
+            "package":a["dependency"]["package"]["name"],"manifest":a["dependency"]["manifest_path"],
+            "advisory":a["security_advisory"]["ghsa_id"],"severity":a["security_vulnerability"]["severity"]}
+            for a in alerts],"scope":"GitHub dependency alerts, not proof of call-path reachability"}
+    if action == "/trace":
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}",target): raise ValueError("expected one symbol identifier")
+        query = subprocess.run(["git","grep","-n","-w","-F","-e",target,"--","*.go","*.proto","*.py","*.ts"],
+                               cwd=root,capture_output=True,text=True,timeout=90)
+        if query.returncode not in (0,1): raise ValueError("git grep failed")
+        return {"symbol":target,"matches":query.stdout.splitlines()[:100],
+                "total":len(query.stdout.splitlines()),"scope":"lexical occurrences, not resolved calls"}
     if action == "/repo":
         if target: raise ValueError("/repo takes no target")
         execute(["git","status","--short","--branch"],root)

@@ -58,5 +58,17 @@
     "target": "required",
     "description": "Review and verify a specified PR.",
     "workflow": "Use pr-delivery. Inspect exact head, CI, reviewers and base. Do not merge without explicit approval for this PR."
+  },
+  "/alerts": {
+    "mode": "evidence",
+    "target": "optional",
+    "description": "Read current Kanz GitHub dependency alerts without exposing credentials.",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/trace": {
+    "mode": "evidence",
+    "target": "required",
+    "description": "Locate tracked lexical symbol occurrences; no inferred call graph.",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
   }
 }

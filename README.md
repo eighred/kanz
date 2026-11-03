@@ -87,6 +87,8 @@ evidence that a task was completed. Check the linked PR, tests and revision.
 
 | Capability | Implementation and invocation | Evidence and limits |
 |---|---|---|
+| Dependency exposure | /alerts | Read-only GitHub Dependabot findings by advisory and manifest. Needs repository alert access. A permission failure is not zero alerts. |
+| Symbol investigation | /trace YearFraction | Searches tracked source; returns at most 100 lexical matches and total count, not a type-resolved call graph. |
 | Inventory, history, dependency edges | scripts/evidence.py, /repo | Git status, three commits and Go import edges for pricing. No complete symbol/call graph, edit-impact oracle or semantic index. |
 | Financial verification | /financial pricing, risk, portfolio, tca or backtest | Runs owning Go tests with -count=1 and readonly dependencies. Pricing includes the rational ACT/ACT oracle, yields and boundary cases. A passing test is not an institutional valuation or a production-data audit. Inspect skips; generate schema SDK first. |
 | Security and supply chain | /security | Checks imported bytes and runs Node validator regression tests. These validate findings formats and safe input handling. They do not scan the repository for vulnerabilities. Full findings CLI requires POSIX protections. |
