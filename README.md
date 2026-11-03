@@ -78,3 +78,31 @@ Alternatively, in the integrated PowerShell terminal at the repository root:
 
 Quote issue numbers in PowerShell. Preview prints the request without starting
 work; normal execution launches interactive Codex under its existing permissions.
+## Engineering evidence commands (0.4 candidate)
+
+From the root of a Kanz checkout, run
+`python .agents/plugins/kanz-forge/scripts/command.py /help`.
+Use the launcher for reproducible results. A Codex workflow exit is **not**
+evidence that a task was completed. Check the linked PR, tests and revision.
+
+| Capability | Implementation and invocation | Evidence and limits |
+|---|---|---|
+| Inventory, history, dependency edges | scripts/evidence.py, /repo | Git status, three commits and Go import edges for pricing. No complete symbol/call graph, edit-impact oracle or semantic index. |
+| Financial verification | /financial pricing, risk, portfolio, tca or backtest | Runs owning Go tests with -count=1 and readonly dependencies. Pricing includes the rational ACT/ACT oracle, yields and boundary cases. A passing test is not an institutional valuation or a production-data audit. Inspect skips; generate schema SDK first. |
+| Security and supply chain | /security | Checks imported bytes and runs Node validator regression tests. These validate findings formats and safe input handling. They do not scan the repository for vulnerabilities. Full findings CLI requires POSIX protections. |
+| Upstream intelligence | /upstream or /upstream cloudflare/security-audit-skill | Local registry inventory or read-only gh API comparison against pinned SHA. Emits JSON; redirect to a file for review. Requires GitHub access for live checks. Does not write pins, download code for execution, or establish legal compatibility. |
+| Benchmarking | /bench | Five elapsed times and median for tracked Forge validation. No inference speed or runtime trading benchmark. |
+| Planning, trace investigation, threat modeling, configuration review | /audit, /investigate, /work | Agent-assisted instructions with interactive Codex, not deterministic source analysis. |
+| Delivery, CI diagnosis, verification | /deliver, /ci, /verify | Interactive Git/GitHub workflow. No autonomous proof of reviews, checks, merge or deployment. /deliver requires explicit merge authorization. |
+
+Script paths in the table are relative to .agents/plugins/kanz-forge.
+Registry fields identify the GitHub repository, immutable pin, observed commit/release,
+license files at that pin, adoption status and review limitations. For imported files
+both the upstream Git blob and the local LF-normalized SHA-256 are recorded.
+Cloudflare SKILL.md has a local overlay; compare both versions during review.
+Commit messages matching security keywords are triage leads only. A truncated
+comparison requires manual review. For a proposed update inspect changed imports,
+license notices and the overlay, then run test_evidence.py, validate.py --tracked
+and the Linux Node tests before requesting adoption approval. No update scheduler
+or automatic adoption is installed. Do not register a temporary worktree as a
+permanent marketplace; install from the selected durable checkout after review.

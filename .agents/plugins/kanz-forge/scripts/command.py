@@ -2,6 +2,8 @@
 import argparse
 import json
 import shutil
+import sys
+import evidence
 import subprocess
 from pathlib import Path
 
@@ -22,6 +24,16 @@ def main():
     entry = catalog[args.action]
     if not target and entry["target"] == "required":
         parser.error(f"{args.action} requires an issue, PR, run, or description")
+    if entry.get("mode") == "evidence":
+        if args.preview:
+            print(entry["description"], target)
+            return 0
+        try:
+            print(json.dumps(evidence.run(args.action, target), indent=2))
+            return 0
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     prompt = (f"$kanz-forge:commands {args.action}\n{entry['workflow']}\n"
               f"User target: {json.dumps(target, ensure_ascii=False)}")
     if args.preview:
