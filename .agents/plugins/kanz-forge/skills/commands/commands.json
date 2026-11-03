@@ -2,7 +2,8 @@
   "/work": {
     "target": "optional",
     "description": "Deliver one issue or task through verification on main.",
-    "workflow": "For an empty target query current GitHub issues, PRs, main and working state. Rank by capital risk, security, data integrity and structural impact. Explain any higher-ranked externally blocked item and choose the highest actionable one. For a specified target reconcile existing code and issues first. Use engineering-standard, financial-verification where applicable, kanz-verify and pr-delivery. Identify root cause, owning plane and failure conditions; implement a permanent scoped correction. Verify invariants, failure and recovery with applicable real dependencies, formatting, static analysis and regression gates. Preserve unrelated edits. Commit, push, open or update the PR, investigate failures, wait for required checks and approvals, merge when authorized and verify the merged revision before closing the issue. Report tested revision, dependencies, skips and closure state. Recommend one next issue and ask before starting it. Require explicit authorization for the specific merge; never adopt external code without approval. For a pricing task retrieve /memory before repeating discovery, and cross-check adapters and independent oracles. A receipt never satisfies fresh acceptance. For an untargeted /work use /prioritize as a shortlist only: verify actual blockers, shipped patches and duplicates before selecting."
+    "workflow": "For an empty target query current GitHub issues, PRs, main and working state. Rank by capital risk, security, data integrity and structural impact. Explain any higher-ranked externally blocked item and choose the highest actionable one. For a specified target reconcile existing code and issues first. Use engineering-standard to derive the implementation brief from the requested change. Retrieve financial methodology only if the change affects a financial decision. Use kanz-verify and pr-delivery. Identify root cause, owning plane and failure conditions; implement a permanent scoped correction. Verify invariants, failure and recovery with applicable real dependencies, formatting, static analysis and regression gates. Preserve unrelated edits. Commit, push, open or update the PR, investigate failures, wait for required checks and approvals, merge when authorized and verify the merged revision before closing the issue. Report tested revision, dependencies, skips and closure state. Recommend one next issue and ask before starting it. Require explicit authorization for the specific merge; never adopt external code without approval. For a pricing task retrieve /memory before repeating discovery, and cross-check adapters and independent oracles. A receipt never satisfies fresh acceptance. For an untargeted /work use /prioritize as a shortlist only: verify actual blockers, shipped patches and duplicates before selecting.",
+    "primary": true
   },
   "/audit": {
     "target": "optional",
@@ -35,7 +36,8 @@
     "target": "required",
     "description": "Run an existing Go financial verification suite.",
     "mode": "evidence",
-    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output.",
+    "internal": true
   },
   "/security": {
     "target": "optional",
@@ -52,7 +54,7 @@
   "/investigate": {
     "target": "required",
     "description": "Investigate one issue without implementation.",
-    "workflow": "Use issue-archaeology. Verify current code, evidence and acceptance. Report findings without changing files or issues. For a pricing task retrieve /memory before repeating discovery, and cross-check adapters and independent oracles. A receipt never satisfies fresh acceptance. For an untargeted /work use /prioritize as a shortlist only: verify actual blockers, shipped patches and duplicates before selecting."
+    "workflow": "Use issue-archaeology. Trace the user-visible decision through its current caller, contract, implementation and evidence on the requested revision. Distinguish missing behavior from missing inputs, integration or verification. Retrieve financial sources only where they change the conclusion. Report without editing."
   },
   "/deliver": {
     "target": "required",
@@ -121,5 +123,35 @@
     "target": "required",
     "description": "Investigate a bounded defect hypothesis.",
     "workflow": "Use read-only repository evidence and scoped tests; do not probe production or execute hostile code. Separate confirmed, disproved and unverified hypotheses."
+  },
+  "/ship": {
+    "target": "optional",
+    "description": "Deliver a change: PR, CI repair, authorized merge and main verification.",
+    "workflow": "Resolve target as a PR, branch, issue or change in this checkout. Without a target use the current branch and its PR; on main without a unique change show open PR candidates and ask rather than selecting one. Inspect status, preserve unrelated edits, prepare or update the PR, review the diff, run applicable local checks, investigate and repair CI failures, and wait for required checks/reviews on the exact head. Merge only with specific authorization. Verify the resulting main SHA and its checks. Report PR, SHA, test evidence and blockers. Delivery here ends at verified main. Deployment needs a separately named environment, authorization and rollback plan; never modify the capital halt.",
+    "primary": true
+  },
+  "/gaps": {
+    "target": "optional",
+    "description": "Find missing repository files, verify gaps and file nonduplicate GitHub issues.",
+    "workflow": "First run python forge.py /scan-files from the repository root. For each candidate in scope reconcile its source line and target with current remote main and path history. Also inspect required files in the relevant manifests, build entrypoints and CI: a missing generated SDK, optional file or local deletion is not automatically a repo defect. Search open and closed GitHub issues by path and purpose, reuse existing issues, and file one issue per distinct confirmed unresolved cause using the repository labels and Evidence, Verified when, Blocked by and Source sections. Never file solely from a string match. Return the new or reused issue links and skipped false positives. Do not implement repairs under this action.",
+    "primary": true
+  },
+  "/scan-files": {
+    "target": "optional",
+    "description": "Print missing-file candidates without filing issues.",
+    "mode": "evidence",
+    "workflow": "Run python forge.py /scan-files; candidates are not verified defects."
+  },
+  "/update": {
+    "primary": true,
+    "target": "optional",
+    "description": "Review and update Kanz Forge dependencies; prepare and test a dependency PR.",
+    "workflow": "Maintain Kanz Forge dependencies, not the installed Codex cache or unrelated trading-service dependencies. Read DEPENDENCIES.md and upstreams.json. Resolve any named dependency to a unique registry entry or documented development tool; refuse unknown or ambiguous names. Use /upstream to discover pins and check the selected registered projects (all if omitted), compare releases, patches, advisories, changed files, local overlays, compatibility, license evidence and integrity. For unpinned development tools inspect the owning CI/toolchain declaration and supported versions; report host-only tools separately, never install or globally upgrade them without authorization. Separate adopted dependencies from reference-only projects. Prepare an actionable old-to-new proposal with source, reason, risk and rollback; if already current say so. Before adopting changed external code obtain explicit approval for that pin. After approval update only reviewed files, preserve overlays, regenerate provenance digests, update pins and dependency links, run installation, discovery and applicable regression tests, and open or update a reviewable PR. Do not silently turn a reference into a dependency, merge, deploy or alter the capital halt."
+  },
+  "/agents": {
+    "target": "optional",
+    "description": "Show Forge specialist availability, or activate the repository profiles with /agents setup.",
+    "mode": "evidence",
+    "workflow": "Run the repository launcher for this action. To delegate in a host supporting named Codex agents, ask the user which task they want delegated if none was given. Do not start workers merely to list or activate profiles."
   }
 }

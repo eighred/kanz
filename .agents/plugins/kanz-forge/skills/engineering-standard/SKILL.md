@@ -23,3 +23,15 @@ when the old failure could recur. A guard must fail for a representative
 violation and must not silently bless a dead exemption. Ask `kanz-verify` to
 choose evidence for the actual risk boundary. Record decisions and deferred work
 in Issues, not a second architecture or progress document.
+
+## Turn an ordinary request into an implementation brief
+
+Start with the behavior the human needs. For a local code change inspect the
+definition, callers, types and nearest tests (use gopls when available). Expand
+to Git history or repository-wide search only to answer a specific uncertainty.
+Do not load financial references for unrelated UI, build or tooling changes.
+
+For financial changes, use [the design evidence guide](references/design-evidence.md)
+before choosing an algorithm. Return the smallest decision-useful brief:
+what Kanz must do, what it already does, the specific gap, and the next change
+with its proof. State material unknowns. Skip this formal brief for trivial edits.

@@ -48,3 +48,8 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+
+# Machine-local Codex discovery copies; authoritative agent profiles live in Forge.
+/.codex/agents/kanz_mapper.toml
+/.codex/agents/kanz_reviewer.toml
+/.codex/agents/kanz_security.toml

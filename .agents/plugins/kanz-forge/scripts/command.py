@@ -18,8 +18,14 @@ def main():
     parser.add_argument("target", nargs="*")
     args = parser.parse_args()
     if args.action == "/help":
+        if args.target not in ([], ["all"]):
+            parser.error("use /help or /help all")
         for name, entry in catalog.items():
+            if entry.get("internal") or (not args.target and not entry.get("primary")):
+                continue
             print(f"{name:8} {entry['description']}")
+        if not args.target:
+            print("/help all   Show specialist commands")
         return 0
     target = " ".join(args.target).strip()
     entry = catalog[args.action]
@@ -44,7 +50,9 @@ def main():
     exe = shutil.which("codex.exe") or shutil.which("codex")
     if not exe or Path(exe).suffix.lower() in {".cmd", ".bat"}:
         parser.error("A native Codex CLI is required; use --preview for chat instead")
-    return subprocess.call([exe, prompt])
+    # The installed skill resolves one workflow. Repeating it here feeds the
+    # same policy to the model twice and can pair two different revisions.
+    return subprocess.call([exe, f"$kanz-forge:commands {args.action} {target}".rstrip()])
 
 
 if __name__ == "__main__":

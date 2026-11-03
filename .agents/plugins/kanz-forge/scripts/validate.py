@@ -117,6 +117,10 @@ def validate(check_tracked: bool) -> None:
     if ".agents/plugins/kanz-forge/" not in agents:
         fail("AGENTS.md does not point to the plugin authority")
     files.extend([PLUGIN / "upstreams.json", *(PLUGIN / "scripts").glob("*.py")])
+    profiles = sorted((PLUGIN / "agents").glob("*.toml"))
+    if {p.stem for p in profiles} != {"kanz_mapper","kanz_reviewer","kanz_security"}:
+        fail("unexpected specialist profile inventory")
+    files.extend(profiles)
     if check_tracked:
         tracked(files)
     print(f"kanz-forge: {len(skills)} skills, {len(files)} required files, marketplace={marketplace['name']}: OK")
