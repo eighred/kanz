@@ -61,7 +61,7 @@ const DefaultFetchTimeout = 5 * time.Second
 const maxBodyBytes = 1 << 20
 
 // NewHTTPSource builds the source. baseURL is datamaster's root
-// ("http://datamaster.kanz-services.svc:8080"); tenant is the tenant this
+// ("http://datamaster.kanz-services.svc:8112"); tenant is the tenant this
 // deployment serves; subject names the CALLING SERVICE, and appears in
 // datamaster's logs as who asked.
 func NewHTTPSource(baseURL, tenant, subject string) (*HTTPSource, error) {

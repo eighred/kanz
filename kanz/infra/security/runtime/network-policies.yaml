@@ -244,15 +244,9 @@ spec:
 # the two disagree in either direction. A new service with a new metrics port now
 # turns a test red instead of vanishing from the dashboards.
 #
-# WHAT THIS DOES NOT FIX, and cannot. audit (:8083) and tv-sync (:8091) serve their
-# TENANT-SCOPED READ APIs on the same plaintext mux and port as /metrics, and both
-# trust X-Kanz-Principal-Tenant — the header the api-gateway injects, sound only
-# because the gateway is their only reachable caller. A port list cannot separate
-# two surfaces that share a port, so a pod in kanz-observability can still send a
-# self-chosen tenant header to /v1/audit/events or /broker/accounts. Closing that
-# needs a SECOND LISTENER (metrics on its own port), which is a code change in each
-# service, not a manifest one. Tracked by #232; the guard named above pins the set
-# of services with a co-located surface so a third cannot be added unnoticed.
+# The remaining shared listeners in #232 are wealth and tv-sync.
+# Datamaster keeps probes/metrics on 8080, gateway API on 8111 and
+# security lookups only on 8112. Neither restricted port belongs here.
 #
 # The per-service scrape rules elsewhere in this file are now redundant but harmless
 # (NetworkPolicy is additive). They are left alone rather than deleted: each also
@@ -278,7 +272,7 @@ spec:
       ports:
         # accounting's entry here is now its METRICS-ONLY listener (#447); its API
         # moved to 8101, which this rule deliberately does not admit.
-        - { protocol: TCP, port: 8080 } # api-gateway, accounting (metrics only), alternatives, copilot, datamaster, schema-registry, wealth
+        - { protocol: TCP, port: 8080 } # api-gateway, accounting (metrics only), alternatives, copilot, datamaster (metrics only), schema-registry, wealth
         - { protocol: TCP, port: 8081 } # risk-engine
         - { protocol: TCP, port: 8082 } # market-data
         # regulatory's entry here is now its METRICS-ONLY listener (#765); its
@@ -757,9 +751,15 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [wealth, datamaster, copilot]
+                values: [wealth, copilot]
       ports:
         - { protocol: TCP, port: 8080 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: datamaster
+      ports:
+        - { protocol: TCP, port: 8111 }
     # FUNDING THE BOOK OF RECORD (#415), and it is deliberately its own entry
     # rather than a fourth name in the 8080 group above. That group is the
     # PHASE-7 READ surfaces; accounting is the only upstream here whose proxied
@@ -1144,7 +1144,7 @@ spec:
     matchExpressions:
       - key: app
         operator: In
-        values: [wealth, datamaster, copilot]
+        values: [wealth, copilot]
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -1518,7 +1518,7 @@ spec:
 # And it was the ONLY route in. No rule here selected app: audit, and the gateway
 # did not proxy it, so the surface was dark to every legitimate reader while
 # remaining open to the one namespace that authenticates nothing. For wealth,
-# datamaster and tv-sync a shared port is the price of a surface the gateway
+# tv-sync a shared port is the price of a surface the gateway
 # genuinely proxies; here the price bought nothing at all.
 #
 # THE API IS ON 8102 AND ADMITS EXACTLY ONE PEER. 8083 keeps /metrics and the
@@ -1581,13 +1581,7 @@ spec:
 # that can open the port may choose for itself. The set of workloads allowed to
 # reach it is therefore load-bearing, and it is three.
 #
-# THE PORT IS ALREADY WIDER THAN THESE THREE, and that is #232's gap rather than
-# this rule's: datamaster's tenant-scoped /v1 routes share :8080 with /metrics,
-# so allow-observability-scrape admits kanz-observability to the same surface.
-# This change does not widen it — it adds the three callers that have a reason
-# to be there. Splitting datamaster's listeners the way accounting (#447),
-# compliance (#562) and audit (#627) split theirs is the repair, and it is
-# tracked in tenantHeaderTrustingServices, not here.
+# Classifiers reach only the security lookup mux, never the override API.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -1608,7 +1602,7 @@ spec:
             matchLabels:
               app: datamaster
       ports:
-        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8112 }
 ---
 # The ingress half. default-deny-all selects every pod in this namespace for
 # BOTH directions, so the egress rule above alone leaves datamaster refusing the
@@ -1629,9 +1623,32 @@ spec:
   ingress:
     - from:
         - podSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values: [oms, compliance, risk-engine]
+            matchLabels:
+              app: oms
+        - podSelector:
+            matchLabels:
+              app: compliance
+        - podSelector:
+            matchLabels:
+              app: risk-engine
       ports:
-        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8112 }
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-datamaster-api
+  namespace: kanz-services
+spec:
+  podSelector:
+    matchLabels:
+      app: datamaster
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8111 }

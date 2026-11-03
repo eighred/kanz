@@ -192,7 +192,7 @@ spec:
             # allow-classifier-reads-datamaster in
             # infra/security/runtime/network-policies.yaml is the other half: without
             # that rule every lookup fails and the cache stays empty.
-            - { name: RISK_ENGINE_DATAMASTER_URL, value: "http://datamaster.kanz-services.svc:8080" }
+            - { name: RISK_ENGINE_DATAMASTER_URL, value: "http://datamaster.kanz-services.svc:8112" }
             # THE QUERY SERVER STARTS ONLY WHEN THIS IS SET. cfg.GRPCListen has no
             # default and this manifest never set it, so risk-engine ran "probes +
             # ingestion only" (its own config comment) — the gRPC read surface the

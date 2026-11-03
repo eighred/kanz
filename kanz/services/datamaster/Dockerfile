@@ -49,5 +49,5 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/
 FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/datamaster /datamaster
 USER nonroot:nonroot
-EXPOSE 8080
+EXPOSE 8080 8111 8112
 ENTRYPOINT ["/datamaster"]

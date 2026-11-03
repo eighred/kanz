@@ -68,7 +68,9 @@ spec:
   selector:
     app: datamaster
   ports:
-    - { name: http, port: 8080, targetPort: 8080 }
+    - { name: http, port: 8111, targetPort: 8111 }
+    - { name: classifier, port: 8112, targetPort: 8112 }
+    - { name: metrics, port: 8080, targetPort: 8080 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -138,7 +140,9 @@ spec:
         - name: datamaster
           image: ghcr.io/eighred/datamaster@sha256:3830426b6416c8457a303e358ecd6fd055654089b365d30bce7dbdf9634052e8
           ports:
-            - { containerPort: 8080, name: http }
+            - { containerPort: 8111, name: http }
+            - { containerPort: 8112, name: classifier }
+            - { containerPort: 8080, name: metrics }
           env:
             # DSN from the SEC-01d CSI secret file, not a plaintext env. It is
             # REQUIRED: without it the pod REFUSES TO START (exit 2) rather than
@@ -154,7 +158,9 @@ spec:
             # tables are FORCE RLS; a wrong or missing tenant does not error, it
             # silently returns nothing (the accounting incident).
             - { name: DATAMASTER_TENANT, value: "__system__" }
-            - { name: DATAMASTER_LISTEN, value: ":8080" }
+            - { name: DATAMASTER_LISTEN, value: ":8111" }
+            - { name: DATAMASTER_CLASSIFIER_LISTEN, value: ":8112" }
+            - { name: DATAMASTER_METRICS_LISTEN, value: ":8080" }
             - { name: DATAMASTER_REFRESH_INTERVAL, value: "5m" }
             # MAKER-CHECKER ON THE PRICING OVERRIDE (#410).
             #

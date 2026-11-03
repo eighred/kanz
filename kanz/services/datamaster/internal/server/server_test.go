@@ -101,7 +101,9 @@ func get(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
 func TestHealthAndReady(t *testing.T) {
 	s, _ := newServer(t)
 	for _, path := range []string{"/healthz", "/readyz"} {
-		if rec := get(t, s, path); rec.Code != http.StatusOK {
+		rec := httptest.NewRecorder()
+		s.OperationsHandler().ServeHTTP(rec, asTenant("GET", path, testTenant))
+		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: want 200 got %d", path, rec.Code)
 		}
 	}

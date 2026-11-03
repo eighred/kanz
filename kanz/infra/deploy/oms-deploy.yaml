@@ -201,7 +201,7 @@ spec:
             # allow-classifier-reads-datamaster in
             # infra/security/runtime/network-policies.yaml is the other half: without
             # that rule every lookup fails and the cache stays empty.
-            - { name: OMS_DATAMASTER_URL, value: "http://datamaster.kanz-services.svc:8080" }
+            - { name: OMS_DATAMASTER_URL, value: "http://datamaster.kanz-services.svc:8112" }
             # THE MANDATE POSTURE — a deployment decision, and it is stated in the
             # OMS's startup log either way (EXEC-M14).
             #

@@ -218,7 +218,7 @@ spec:
             - { name: API_GATEWAY_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             # Phase-7 read upstreams. Unset ⇒ those routes 503.
             - { name: API_GATEWAY_WEALTH_ADDR, value: "http://wealth.kanz-services.svc:8080" }
-            - { name: API_GATEWAY_DATAMASTER_ADDR, value: "http://datamaster.kanz-services.svc:8080" }
+            - { name: API_GATEWAY_DATAMASTER_ADDR, value: "http://datamaster.kanz-services.svc:8111" }
             - { name: API_GATEWAY_COPILOT_ADDR, value: "http://copilot.kanz-services.svc:8080" }
             # tv-sync — the Broker API behind /v1/broker/*, which is how an authorized
             # human (or a TradingView chart) sees the orders Kanz opened. It is
