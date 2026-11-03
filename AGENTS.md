@@ -385,6 +385,8 @@ entry is `.agents/plugins/marketplace.json`. Its focused skills help investigate
 route, implement, verify and deliver work. This file remains authoritative for
 platform boundaries and safety rules; a skill cannot amend them implicitly.
 
+For installation, verification, first use and rollback, see [Kanz setup](README.md).
+
 On a fresh checkout, run
 `python .agents/plugins/kanz-forge/scripts/validate.py`, then
 `codex plugin marketplace add .` and `codex plugin add kanz-forge@kanz-local`.
