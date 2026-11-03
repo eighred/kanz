@@ -2,7 +2,7 @@
   "/work": {
     "target": "optional",
     "description": "Deliver one issue or task through verification on main.",
-    "workflow": "For an empty target query current GitHub issues, PRs, main and working state. Rank by capital risk, security, data integrity and structural impact. Explain any higher-ranked externally blocked item and choose the highest actionable one. For a specified target reconcile existing code and issues first. Use engineering-standard, financial-verification where applicable, kanz-verify and pr-delivery. Identify root cause, owning plane and failure conditions; implement a permanent scoped correction. Verify invariants, failure and recovery with applicable real dependencies, formatting, static analysis and regression gates. Preserve unrelated edits. Commit, push, open or update the PR, investigate failures, wait for required checks and approvals, merge when authorized and verify the merged revision before closing the issue. Report tested revision, dependencies, skips and closure state. Recommend one next issue and ask before starting it."
+    "workflow": "For an empty target query current GitHub issues, PRs, main and working state. Rank by capital risk, security, data integrity and structural impact. Explain any higher-ranked externally blocked item and choose the highest actionable one. For a specified target reconcile existing code and issues first. Use engineering-standard, financial-verification where applicable, kanz-verify and pr-delivery. Identify root cause, owning plane and failure conditions; implement a permanent scoped correction. Verify invariants, failure and recovery with applicable real dependencies, formatting, static analysis and regression gates. Preserve unrelated edits. Commit, push, open or update the PR, investigate failures, wait for required checks and approvals, merge when authorized and verify the merged revision before closing the issue. Report tested revision, dependencies, skips and closure state. Recommend one next issue and ask before starting it. Require explicit authorization for the specific merge; never adopt external code without approval. For a pricing task retrieve /memory before repeating discovery, and cross-check adapters and independent oracles. A receipt never satisfies fresh acceptance. For an untargeted /work use /prioritize as a shortlist only: verify actual blockers, shipped patches and duplicates before selecting."
   },
   "/audit": {
     "target": "optional",
@@ -18,5 +18,108 @@
     "target": "required",
     "description": "Verify acceptance of an issue, PR or financial calculation.",
     "workflow": "Use kanz-verify and, for valuation or backtests, financial-verification. Resolve exact revisions and runnable acceptance criteria. Test affected boundaries, financial precision, failure and recovery with appropriate dependencies. Report pass, fail, skipped, unproven and blocked separately. Do not implement, merge, close issues, or activate production under this command."
+  },
+  "/upstream": {
+    "target": "optional",
+    "description": "List pins or check one upstream; never adopt code.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/repo": {
+    "target": "optional",
+    "description": "Print Git state, recent history and pricing package import edges.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/financial": {
+    "target": "required",
+    "description": "Run an existing Go financial verification suite.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/security": {
+    "target": "optional",
+    "description": "Verify imported file provenance and run offline security-validator tests.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/bench": {
+    "target": "optional",
+    "description": "Measure checkout plugin validator latency across five runs.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/investigate": {
+    "target": "required",
+    "description": "Investigate one issue without implementation.",
+    "workflow": "Use issue-archaeology. Verify current code, evidence and acceptance. Report findings without changing files or issues. For a pricing task retrieve /memory before repeating discovery, and cross-check adapters and independent oracles. A receipt never satisfies fresh acceptance. For an untargeted /work use /prioritize as a shortlist only: verify actual blockers, shipped patches and duplicates before selecting."
+  },
+  "/deliver": {
+    "target": "required",
+    "description": "Review and verify a specified PR.",
+    "workflow": "Use pr-delivery. Inspect exact head, CI, reviewers and base. Do not merge without explicit approval for this PR."
+  },
+  "/alerts": {
+    "mode": "evidence",
+    "target": "optional",
+    "description": "Read current Kanz GitHub dependency alerts without exposing credentials.",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/trace": {
+    "mode": "evidence",
+    "target": "required",
+    "description": "Locate tracked lexical symbol occurrences; no inferred call graph.",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/doctor": {
+    "target": "optional",
+    "description": "Compare installed and checked-out Forge state.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/remember": {
+    "target": "optional",
+    "description": "Run fresh pricing verification and store a scoped local receipt.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/recall": {
+    "target": "optional",
+    "description": "Revalidate prior pricing receipts without executing tests.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/memory": {
+    "target": "optional",
+    "description": "Inspect pricing receipt history and scope.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/route": {
+    "target": "optional",
+    "description": "Suggest review actions for changed paths without dispatch.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/prioritize": {
+    "target": "optional",
+    "description": "Screen live issues and produce a shortlist for source investigation.",
+    "mode": "evidence",
+    "workflow": "Run the repository Forge command.py launcher with this action and validated target; report its actual exit status and output."
+  },
+  "/deps": {
+    "target": "required",
+    "description": "Assess one dependency before proposing adoption.",
+    "workflow": "Inspect manifest, lock, advisories, reachability, provenance and licensing; compare fixes and propose a regression gate. Do not adopt or upgrade."
+  },
+  "/review": {
+    "target": "required",
+    "description": "Review an exact diff independently of implementation.",
+    "workflow": "Resolve both revisions; inspect financial correctness, authorization boundaries and test coverage. Provide source-linked findings. Never approve your own change or merge."
+  },
+  "/hunt": {
+    "target": "required",
+    "description": "Investigate a bounded defect hypothesis.",
+    "workflow": "Use read-only repository evidence and scoped tests; do not probe production or execute hostile code. Separate confirmed, disproved and unverified hypotheses."
   }
 }

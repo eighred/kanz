@@ -116,6 +116,7 @@ def validate(check_tracked: bool) -> None:
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8-sig")
     if ".agents/plugins/kanz-forge/" not in agents:
         fail("AGENTS.md does not point to the plugin authority")
+    files.extend([PLUGIN / "upstreams.json", *(PLUGIN / "scripts").glob("*.py")])
     if check_tracked:
         tracked(files)
     print(f"kanz-forge: {len(skills)} skills, {len(files)} required files, marketplace={marketplace['name']}: OK")
