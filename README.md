@@ -10,9 +10,9 @@ Prerequisites: Git, Python 3.9 or later, and a Codex CLI with the plugin
 subcommand (`codex plugin --help`). Run these PowerShell commands from the
 repository root, which contains AGENTS.md and the .agents directory.
 
-Choose your source revision first. On a fresh clone, main at fceffb9a contains
-the five-skill release. To try the eight-skill candidate from PR #1382 in a
-fresh clone, run `git switch --track origin/eighred/forge-financial-verification`.
+Choose your source revision first. On a fresh clone, main at 1a78a837 contains
+the five-skill release. To try the upstream-review candidate from PR #1384 in a
+fresh clone, run `git switch --track origin/eighred/forge-upstream-review`.
 If you already have a checkout, inspect `git status -sb` first; do not discard
 local work to install Forge. Keep the checkout available because Codex registers
 its path as the marketplace root.
@@ -108,3 +108,17 @@ license notices and the overlay, then run test_evidence.py, validate.py --tracke
 and the Linux Node tests before requesting adoption approval. No update scheduler
 or automatic adoption is installed. Do not register a temporary worktree as a
 permanent marketplace; install from the selected durable checkout after review.
+
+### Local acceptance checks
+
+From the candidate checkout:
+
+    python -B .agents/plugins/kanz-forge/scripts/test_evidence.py
+    python -B .agents/plugins/kanz-forge/scripts/test_install.py
+    python -B .agents/plugins/kanz-forge/scripts/command.py /upstream cloudflare/security-audit-skill
+
+The installation test uses an empty disposable CLI profile, compares tracked
+plugin contents, and requests fresh skill discovery from an app-server process.
+It does not change the active user marketplace. For the SDK-backed Go suites,
+follow kanz-schemas/README.md before invoking /financial. GitHub metadata
+requires gh access; local pricing checks do not require upstream API access.
