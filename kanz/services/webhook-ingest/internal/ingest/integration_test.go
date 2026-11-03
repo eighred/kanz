@@ -1,18 +1,16 @@
 package ingest
 
-// NATS + OMS + Ingest end-to-end integration (M1 certification over the real
-// bus). Gated on TEST_NATS_URL — it requires a live NATS AND a running OMS
-// (subscribed to order.order.submit with a SimVenue) on that bus, so it skips
-// by default, mirroring the TEST_POSTGRES_URL-gated store tests. The core
+// NATS + OMS + Ingest admission integration over the real bus. It requires a
+// live NATS and a running funded OMS on that bus. The core
 // isolation invariant forbids importing the OMS internals in-process, so this
-// drives the loop black-box: fan out real SubmitOrder commands onto NATS and
-// assert the OMS's OrderFilled FACTs come back.
+// drives the loop black-box. Without authoritative cash coverage, the funded
+// OMS must reject every fanned-out order before it reaches a simulator.
 //
 // Run it with the dev stack up:
 //
 //	./start.sh                 # NATS + Kafka + Postgres
 //	go run ./services/oms/cmd/oms &     # OMS consuming order.order.submit
-//	TEST_NATS_URL=nats://localhost:4222 go test -run TestIntegration_LoopOverNATS \
+//	TEST_NATS_URL=nats://localhost:4222 go test -run TestIntegration_FundedAdmissionRefusesUncoveredFanout \
 //	    ./services/webhook-ingest/internal/ingest/
 
 import (
@@ -21,7 +19,6 @@ import (
 	"math/big"
 	"net"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
@@ -29,12 +26,11 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/platform/halt"
 	"github.com/eighred/kanz/pkg/bus"
 )
 
-func TestIntegration_LoopOverNATS(t *testing.T) {
+func TestIntegration_FundedAdmissionRefusesUncoveredFanout(t *testing.T) {
 	url := os.Getenv("TEST_NATS_URL")
 	if url == "" {
 		t.Skip("set TEST_NATS_URL (with the dev stack + OMS running) to run the end-to-end loop")
@@ -59,24 +55,20 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	// Observe the OMS's fills coming back on the bus.
+	// Observe terminal refusals. No authoritative cash or reference publisher is
+	// bootstrapped in this job; a fill would be a capital-control breach.
 	consumer, err := bus.NewConsumer(client)
 	if err != nil {
 		t.Fatalf("consumer: %v", err)
 	}
-	var mu sync.Mutex
-	filled := map[string]*big.Rat{} // order_id -> filled qty
-	fills := make(chan struct{}, 8)
+	rejected := make(chan *orderpb.OrderRejected, 8)
 	go func() {
-		_ = consumer.Subscribe(ctx, "order.order.filled", "webhook-ingest-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
-			var ev orderpb.OrderFilled
+		_ = consumer.Subscribe(ctx, "order.order.rejected", "webhook-ingest-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
+			var ev orderpb.OrderRejected
 			if err := proto.Unmarshal(payload, &ev); err != nil {
 				return nil
 			}
-			mu.Lock()
-			filled[ev.GetOrderId()] = dec.FromProto(ev.GetState().GetFilledQuantity())
-			mu.Unlock()
-			fills <- struct{}{}
+			rejected <- &ev
 			return nil
 		})
 	}()
@@ -87,8 +79,7 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 		t.Fatalf("producer: %v", err)
 	}
 
-	// A limit order fills at the limit in SimVenue regardless of the OMS's price
-	// config — so the loop produces fills deterministically.
+	// The producer still drives its real two-venue fan-out onto the broker.
 	p, err := NewPipeline(Options{
 		Authority: ingestTestAuthority(t),
 		Auth:      NewAuthenticator(StaticSecrets{"momentum": testSecret}, nil, time.Minute, time.Now),
@@ -112,7 +103,7 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 	// SubmitOrder, and the real EXECUTION stream's 2-minute duplicate window
 	// (infra/nats/bootstrap-job.yaml) then SILENTLY DEDUPLICATES it at the broker.
 	// The publish succeeds, the command never lands, and the OMS never sees an order
-	// to fill. Exactly-once is doing its job; the test was replaying a command.
+	// to refuse. Exactly-once is doing its job; the test was replaying a command.
 	// The `ts` is not decoration: #416 made it MANDATORY, so this literal without
 	// one is refused at Process and the M1 certification never reaches the bus at
 	// all. That is how it broke — the fixture predates the rule, and this is the
@@ -129,47 +120,27 @@ func TestIntegration_LoopOverNATS(t *testing.T) {
 		t.Fatalf("fanned out %d orders, want 2", len(res.OrderIDs))
 	}
 
-	// Wait for THIS RUN'S fills, matched by order id.
-	//
-	// It used to count any two deliveries on order.order.filled and then look up
-	// its own ids, which is only correct on a broker whose EXECUTION stream is
-	// empty. It is not: the durable replays earlier runs, and any other test that
-	// legitimately fills an order — the domain-boundary proof beside this one
-	// does — contributes deliveries too. Two of someone else's fills satisfied the
-	// counter, the lookup then found nothing, and the failure read as "the OMS did
-	// not fill my order" when the OMS had filled it perfectly well. Same shared-
-	// stream reasoning as the RISK-stream note above; this loop had not applied it.
+	// Match only this run's ids; the durable stream also replays earlier runs.
 	deadline := time.After(15 * time.Second)
+	seen := map[string]string{}
 	for {
-		mu.Lock()
-		have := 0
-		for _, id := range res.OrderIDs {
-			if _, ok := filled[id]; ok {
-				have++
-			}
-		}
-		mu.Unlock()
-		if have == len(res.OrderIDs) {
+		if len(seen) == len(res.OrderIDs) {
 			break
 		}
 		select {
-		case <-fills:
+		case ev := <-rejected:
+			for _, id := range res.OrderIDs {
+				if ev.GetOrderId() == id {
+					seen[id] = ev.GetErrorCode()
+				}
+			}
 		case <-deadline:
-			t.Fatalf("timed out waiting for this run's OMS fills; have %d/%d of %v (is the OMS running on %s?)",
-				have, len(res.OrderIDs), res.OrderIDs, url)
+			t.Fatalf("timed out waiting for this run's OMS capital refusals; have %d/%d of %v (OMS on %s)", len(seen), len(res.OrderIDs), res.OrderIDs, url)
 		}
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	total := new(big.Rat)
 	for _, id := range res.OrderIDs {
-		q, ok := filled[id]
-		if !ok {
-			t.Fatalf("no fill for order %s", id)
+		if seen[id] != "CAPITAL_TERMS_UNKNOWN" && seen[id] != "CAPITAL_REFUSED" && seen[id] != "CAPITAL_ACTIVATION_REQUIRED" {
+			t.Fatalf("order %s rejected for %q, not missing authoritative capital input", id, seen[id])
 		}
-		total.Add(total, q)
-	}
-	if total.Cmp(big.NewRat(1, 1)) != 0 {
-		t.Fatalf("total filled = %s, want 1 (fan-out must conserve size end to end)", total.RatString())
 	}
 }

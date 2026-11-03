@@ -2,9 +2,11 @@ package binance
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/accountproof"
 	"github.com/eighred/kanz/internal/venuemargin"
 )
@@ -59,6 +61,21 @@ func (c *BinanceConnector) Venue() Venue { return c.venue }
 // startup, and refuses to serve orders if the exchange names a different account than
 // this deployment claims to be.
 func (c *BinanceConnector) Exchange() accountproof.Exchange { return c.rest }
+
+// VerifyCatalogue binds every configured pair to Binance's actual settlement
+// assets before this adapter can serve orders.
+func (c *BinanceConnector) VerifyCatalogue(ctx context.Context) error {
+	configured := StaticSymbolMap(c.settings.Symbols).Instruments()
+	actual := make([]execution.ExchangeInstrument, 0, len(configured))
+	for _, in := range configured {
+		entry, err := c.rest.exchangeInstrument(ctx, in.VenueSymbol)
+		if err != nil {
+			return fmt.Errorf("binance catalogue %s: %w", in.VenueSymbol, err)
+		}
+		actual = append(actual, entry)
+	}
+	return execution.CheckExchangeCatalogue(configured, actual, "TRADING")
+}
 
 // Start launches the reconciler, the user-data ingester (with reconnect), and
 // the ticker feed as background goroutines until ctx is cancelled.

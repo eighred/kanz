@@ -1,6 +1,7 @@
 package consume_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/eighred/kanz/internal/bustest"
 	"github.com/eighred/kanz/internal/fillfact"
+	accountingpb "github.com/eighred/kanz/kanz-schemas-go/accounting/v1"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -62,6 +64,16 @@ func TestRecoveredExecutionsBookOnceAndAcknowledgeThroughRealSpine(t *testing.T)
 		return c
 	}
 	input, acks := pull("recover-input-", fillfact.SubjectRecovered), pull("recover-ack-", fillfact.RecoveryLedgerApplied)
+	cashStream, err := bustest.StreamFor(ctx, js, consume.SubjectPortfolioCash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cashName := "cash-coverage-" + suffix
+	cashFacts, err := js.CreateConsumer(ctx, cashStream, jetstream.ConsumerConfig{Name: cashName, FilterSubject: consume.SubjectPortfolioCash, DeliverPolicy: jetstream.DeliverNewPolicy, AckPolicy: jetstream.AckExplicitPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = js.DeleteConsumer(context.Background(), cashStream, cashName) })
 	client, err := bus.DialNATS(ctx, bus.NATSConfig{URL: url, Name: "recovery-books"})
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +98,7 @@ func TestRecoveredExecutionsBookOnceAndAcknowledgeThroughRealSpine(t *testing.T)
 	}
 	ctx = bus.WithTenantID(ctx, tenant)
 	var original *orderpb.ExecutionRecovered
+	var cashRevision int64
 	for _, account := range []string{"account-a", "account-b"} {
 		fill := &orderpb.Fill{FillId: "raw-7", VenueExecutionId: "7", OrderId: "order-" + account, InstrumentId: "BTC-USD", Venue: "BINANCE", VenueAccountId: account, Side: orderpb.Side_SIDE_BUY,
 			Quantity: &commonpb.Decimal{Coefficient: 1}, Price: &commonpb.Decimal{Coefficient: 100}, Fee: &commonpb.Money{Amount: &commonpb.Decimal{Coefficient: 1}, CurrencyCode: "USD"}, ExecutedAt: timestamppb.New(time.Unix(1700000000, 0))}
@@ -118,6 +131,37 @@ func TestRecoveredExecutionsBookOnceAndAcknowledgeThroughRealSpine(t *testing.T)
 				t.Fatal(err)
 			}
 			if err := newFolder().Handle(ctx, env, payload); err != nil {
+				t.Fatal(err)
+			}
+			cashMsg, err := cashFacts.Next(jetstream.FetchMaxWait(5 * time.Second))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cashEnv, cashBytes, err := bus.Unframe(cashMsg.Data())
+			if err != nil || bus.Validate(cashEnv) != nil || cashEnv.GetTenantId() != tenant {
+				t.Fatalf("invalid cash envelope: %v", err)
+			}
+			var cash accountingpb.PortfolioCashBalance
+			if err := proto.Unmarshal(cashBytes, &cash); err != nil {
+				t.Fatal(err)
+			}
+			cashRevision++
+			coverage := cash.GetCashCommit()
+			if coverage.GetRevision() != cashRevision || !coverage.GetComplete() {
+				t.Fatalf("missing ordered durable coverage: %v", coverage)
+			}
+			if delivery == 0 {
+				if len(coverage.Applied) != 1 || coverage.Applied[0].OrderId != fill.OrderId || coverage.Applied[0].Debit.Coefficient != 101 || coverage.Applied[0].Debit.Exponent != 0 {
+					t.Fatalf("execution cash not covered exactly: %v", coverage)
+				}
+			} else if len(coverage.Applied) != 0 {
+				t.Fatalf("redelivery changed debit coverage: %v", coverage)
+			}
+			var retained []byte
+			if err := pool.QueryRow(ctx, `SELECT payload FROM cash_commit_history WHERE portfolio_id='fund' AND currency='USD' AND revision=$1`, cashRevision).Scan(&retained); err != nil || !bytes.Equal(retained, cashBytes) {
+				t.Fatalf("published cash differs from replay history: %v", err)
+			}
+			if err := cashMsg.DoubleAck(ctx); err != nil {
 				t.Fatal(err)
 			}
 			meta, err := msg.Metadata()

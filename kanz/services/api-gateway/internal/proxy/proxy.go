@@ -191,6 +191,8 @@ type Roles struct {
 	// Fund is the deployment's funder (API_GATEWAY_FUND_ROLE). EMPTY ⇒ the
 	// cash-movement route is not registered.
 	Fund string
+	// CashHistory is a narrow read-only role for the OMS workload.
+	CashHistory string
 	// Approve is the deployment's approver (API_GATEWAY_APPROVE_ROLE). EMPTY ⇒ the
 	// three override routes are not registered (#539).
 	Approve string
@@ -381,6 +383,9 @@ func (h *Handler) Routes(mux *authz.Mux) {
 			h.handle(ServiceAccounting, true, nil))
 		mux.Handle(authz.Fund, "POST /v1/portfolios/{id}/reconcile",
 			h.handle(ServiceAccounting, true, nil))
+	}
+	if h.roles.Fund != "" || h.roles.CashHistory != "" {
+		mux.Handle(authz.CashHistory, "GET /v1/portfolios/{id}/cash-commits", h.handle(ServiceAccounting, true, nil))
 	}
 
 	// THE SECOND SIGNATURE, AND THE DOOR IT NEEDED (#539, #410 act one).

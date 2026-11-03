@@ -20,21 +20,18 @@ package ingest
 // A test that only asserted the poison command produced no fill would PASS if the
 // OMS had died on it, which is the failure it exists to catch.
 //
-// So the assertion is LIVENESS: after the poison, a well-formed command still fills.
+// So the assertion is LIVENESS: after the poison, a well-formed command receives
+// the funded-admission refusal while authoritative cash input is unavailable.
 //
 // WHAT THIS TEST DOES **NOT** ISOLATE, established by running it against both
 // mutations rather than assumed:
 //
 //	guard present ............ refused at ingress; the OMS logs
 //	                           "out-of-domain exponent — refusing" naming limit_price.
-//	OMS guard removed ........ STILL REFUSED, and the test still passes. The order
-//	                           reaches internal/compliance's pre-trade gate, whose
-//	                           own maxDecimalExponent (64 — the same number,
-//	                           deliberately duplicated because dec and compliance
-//	                           must not import each other) refuses it with
-//	                           "its notional cannot be represented".
-//	BOTH removed ............. the OMS WEDGES. The healthy order never fills and
-//	                           this test fails on the 30s deadline, with the
+//	OMS guard removed ........ STILL REFUSED by compliance's independent decimal
+//	                           exponent gate.
+//	BOTH removed ............. the OMS WEDGES. The healthy order never receives
+//	                           its capital refusal; this test fails on deadline,
 //	                           process still burning CPU on 10^2000000000.
 //
 // So this is a proof of the PROPERTY, not of either guard: two independent layers
@@ -48,7 +45,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
@@ -94,19 +90,14 @@ func TestIntegration_AnOutOfDomainDecimalIsRefusedAndTheOMSKeepsConsuming(t *tes
 	if err != nil {
 		t.Fatalf("consumer: %v", err)
 	}
-	var mu sync.Mutex
-	seen := map[string]bool{}
-	fills := make(chan string, 8)
+	rejections := make(chan *orderpb.OrderRejected, 8)
 	go func() {
-		_ = consumer.Subscribe(ctx, "order.order.filled", "domain-boundary-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
-			var ev orderpb.OrderFilled
+		_ = consumer.Subscribe(ctx, "order.order.rejected", "domain-boundary-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
+			var ev orderpb.OrderRejected
 			if err := proto.Unmarshal(payload, &ev); err != nil {
 				return nil
 			}
-			mu.Lock()
-			seen[ev.GetOrderId()] = true
-			mu.Unlock()
-			fills <- ev.GetOrderId()
+			rejections <- &ev
 			return nil
 		})
 	}()
@@ -136,36 +127,26 @@ func TestIntegration_AnOutOfDomainDecimalIsRefusedAndTheOMSKeepsConsuming(t *tes
 		t.Fatalf("publish healthy command: %v", err)
 	}
 
-	// LIVENESS. The healthy command was published AFTER the poison, onto the same
-	// partition-ordered subject, so it can only fill if the OMS survived the
-	// poison and kept consuming.
-	deadline := time.After(30 * time.Second)
+	// LIVENESS. An out-of-domain command is rejected and acknowledged before an
+	// OrderState exists, so OMS intentionally emits no OrderRejected for it. The
+	// subsequent valid command must still reach the funded admission refusal.
+	deadline := time.After(15 * time.Second)
+	seen := map[string]string{}
 	for {
+		if seen[healthyID] != "" {
+			break
+		}
 		select {
-		case id := <-fills:
-			if id == healthyID {
-				goto alive
+		case ev := <-rejections:
+			if ev.GetOrderId() == poisonID || ev.GetOrderId() == healthyID {
+				seen[ev.GetOrderId()] = ev.GetErrorCode()
 			}
 		case <-deadline:
-			t.Fatalf("the OMS never filled the well-formed order published after an out-of-domain "+
-				"command (order %s). Either it refused a valid order, or — the case this test "+
-				"exists for — the out-of-domain exponent reached dec.FromProto, which materialises "+
-				"10^%d and does not return, wedging the consumer. Check the OMS log for "+
-				"'out-of-domain exponent — refusing'; its absence means the guard did not run.",
-				healthyID, poisonExponent)
+			t.Fatalf("OMS did not continue to the next command after malformed exponent: %v", seen)
 		}
 	}
-
-alive:
-	// And the poison itself must NOT have produced a fill. Checked after liveness
-	// rather than before, because on its own this assertion is satisfied by a dead
-	// OMS — it is only meaningful once the service is known to still be working.
-	mu.Lock()
-	defer mu.Unlock()
-	if seen[poisonID] {
-		t.Errorf("the OMS FILLED an order whose limit price carries exponent %d — the domain "+
-			"boundary did not refuse it, and a price no one can represent reached the venue path",
-			poisonExponent)
+	if seen[poisonID] != "" && seen[poisonID] == seen[healthyID] || seen[healthyID] != "CAPITAL_TERMS_UNKNOWN" && seen[healthyID] != "CAPITAL_REFUSED" && seen[healthyID] != "CAPITAL_ACTIVATION_REQUIRED" {
+		t.Fatalf("domain and capital refusals not distinguished: %v", seen)
 	}
 }
 
@@ -183,7 +164,7 @@ func publishSubmit(ctx context.Context, p *bus.Producer, orderID string, limit *
 		OrderType:    orderpb.OrderType_ORDER_TYPE_LIMIT,
 		LimitPrice:   limit,
 		TimeInForce:  orderpb.TimeInForce_TIME_IN_FORCE_GTC,
-		Venue:        "XNAS", // a SimVenue MIC, so a limit order fills deterministically
+		Venue:        "XNAS", // a SimVenue MIC; funded admission still needs complete cash evidence
 	}
 	return p.Publish(ctx, bus.Event{
 		Subject:        translate.SubjectSubmit,

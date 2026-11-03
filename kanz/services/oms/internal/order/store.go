@@ -371,6 +371,15 @@ func (m *MemoryStore) Create(_ context.Context, st *orderpb.OrderState, announce
 	if _, ok := m.orders[st.GetOrderId()]; ok {
 		return ErrExists
 	}
+	if st.GetParentOrderId() != "" {
+		parent := m.orders[st.GetParentOrderId()]
+		if parent == nil {
+			return ErrParentStopped
+		}
+		if err := checkWorkingParent(parent.st, st); err != nil {
+			return err
+		}
+	}
 	// THE OUTBOX FIRST, THE ORDER SECOND. A failure here must leave NOTHING
 	// behind — the same all-or-nothing the Postgres transaction gives — and the
 	// map write cannot fail, so the only ordering that can honour that is the
@@ -409,6 +418,18 @@ func (m *MemoryStore) Save(_ context.Context, st *orderpb.OrderState, expectedVe
 	}
 	if cur.ver != expectedVersion {
 		return ErrConflict
+	}
+	if err := preserveCancellation(cur.st, st); err != nil {
+		return err
+	}
+	if st.GetParentOrderId() != "" && announcesDispatch(announce) {
+		parent := m.orders[st.GetParentOrderId()]
+		if parent == nil {
+			return ErrParentStopped
+		}
+		if err := checkWorkingParent(parent.st, st); err != nil {
+			return err
+		}
 	}
 	key := fillID
 	var fill *orderpb.Fill

@@ -359,6 +359,32 @@ message PortfolioCashBalance {
   // currency_coverage.excluded_count is authoritative even if the sample is
   // truncated. Both positive balances and liabilities must be reported.
   repeated string excluded_currencies = 9;
+
+  // Durable reservation handoff. Absent on legacy or non-durable producers;
+  // absence MUST NOT release an OMS commitment. Consumers must apply every
+  // revision in sequence and recover gaps from accounting's retained history.
+  CashCommitCoverage cash_commit = 10;
+}
+
+// CashCommitCoverage is committed with the ledger entry, the balance above,
+// and its outbox record. Its sequence is per tenant/portfolio/base_currency,
+// independent of financial timestamps and journal positions. It proves debit
+// inclusion, not permission to trade or completeness of external source feeds.
+message CashCommitCoverage {
+  int64 revision = 1;
+  // False means execution attribution could not be established. Consumers
+  // must stop new spending; they must never interpret an empty list as proof.
+  bool complete = 2;
+  uint64 unattributed_entries = 3;
+  // Only changed orders, sorted by order_id. Each debit is cumulative and
+  // already INCLUDED in PortfolioCashBalance.total, not an amount to subtract
+  // again. Fee corrections may reduce it. Zero explicitly reverses coverage.
+  repeated OrderCashDebit applied = 4;
+}
+
+message OrderCashDebit {
+  string order_id = 1;
+  common.v1.Decimal debit = 2;
 }
 
 // BalanceCompleteness is a producer's statement of what its balance contains

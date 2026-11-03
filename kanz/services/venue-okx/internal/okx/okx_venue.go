@@ -9,9 +9,11 @@ import (
 
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
+	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/eighred/kanz/internal/dec"
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/orderid"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 )
@@ -79,6 +81,34 @@ func (v *OKXVenue) MIC() string { return v.mic }
 // Account is the exchange account this adapter's API credential belongs to — the
 // collateral pool every fill it produces settles against.
 func (v *OKXVenue) Account() string { return v.account }
+
+// ReadCapitalEvidence rechecks OKX metadata and reports present fee evidence.
+// A separately approved maximum remains mandatory before funded admission.
+func (v *OKXVenue) ReadCapitalEvidence(ctx context.Context, instrumentID, account string) (*venuepb.ReadCapitalEvidenceResponse, error) {
+	if account == "" || account != v.account || v.symbols == nil || v.rest == nil {
+		return nil, fmt.Errorf("okx: capital evidence account or adapter unavailable")
+	}
+	symbol, ok := v.symbols.Symbol(instrumentID)
+	if !ok {
+		return nil, fmt.Errorf("okx: instrument %q is not configured", instrumentID)
+	}
+	in, err := v.rest.exchangeInstrument(ctx, symbol)
+	if err != nil {
+		return nil, err
+	}
+	if err := execution.CheckExchangeCatalogue(StaticSymbolMap{instrumentID: symbol}.Instruments(), []execution.ExchangeInstrument{in}, "live"); err != nil {
+		return nil, err
+	}
+	fee, err := v.rest.currentTradeFee(ctx, symbol, in.FeeGroup)
+	if err != nil {
+		return nil, err
+	}
+	return &venuepb.ReadCapitalEvidenceResponse{
+		VenueSymbol: in.Symbol, BaseAsset: in.Base, QuoteAsset: in.Quote, TradingState: in.State,
+		SettlementSourceVersion: &venuepb.SourceVersion{Source: "okx:/api/v5/public/instruments", ContentSha256: in.Digest, ObservedAtUnixMillis: in.ObservedAtUnixMillis},
+		CurrentFee:              fee,
+	}, nil
+}
 
 // Instruments reports every pair this adapter is configured to trade at OKX,
 // which is what a picker offers and what an operator reads to answer "what can

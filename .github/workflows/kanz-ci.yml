@@ -180,7 +180,7 @@ jobs:
           # -c nats-dev.conf, not bare -js: MT-02 (#358/#360) publishes orders on
           # tenant.<t>.order.order.submit, and without the routing mappings in
           # that file they land on a subject nothing subscribes — the OMS goes
-          # quiet and the M1 loop certification below fails with a publish that
+          # quiet and the funded input-path test below fails with a publish that
           # reported success. Same config the local rig uses (test/backing/up.sh).
           docker run -d --name kanz-ci-nats -p 4222:4222             -v "$GITHUB_WORKSPACE/kanz/test/backing/nats-dev.conf":/etc/nats/nats-dev.conf:ro             nats:2 -c /etc/nats/nats-dev.conf
           for i in $(seq 1 30); do
@@ -241,20 +241,21 @@ jobs:
             -e NATS_URL=nats://localhost:4222 -e NATS_REPLICAS=1 \
             natsio/nats-box:0.14.5 sh -s < /tmp/bootstrap.sh
 
-      # The M1 loop certification (webhook-ingest's TestIntegration_LoopOverNATS)
-      # drives a real SubmitOrder onto the real spine and asserts the OMS's
-      # OrderFilled FACTs come back. It needs an OMS ON THE BUS, and it has never
+      # The webhook input-path test drives a real SubmitOrder onto the spine and
+      # asserts funded OMS refuses it while authoritative cash input is absent.
+      # It needs an OMS ON THE BUS, and it has never
       # had one — so it has never run anywhere but a developer's laptop, and the
       # first time it was run it failed for three separate production reasons.
       #
       # OMS_SIM_VENUE_MIC takes both MICs the allocation fans out to: the router
       # matches a leg to the venue whose MIC equals the leg's target, so a
       # single-venue simulator cannot work a multi-venue allocation at all.
-      - name: Start the OMS on the bus (for the M1 loop certification)
+      - name: Start funded OMS on the bus (for fail-closed input-path tests)
         working-directory: kanz
         env:
-          # A live relay must not share tables that package fixtures recreate.
-          # Extracted from #1317's harness repair; this does not activate funding.
+          # Test packages drop/recreate their tables. Their database cannot also
+          # host a live process: its relay would drain fixture facts and its
+          # queries would race those migrations even with go test -p 1.
           KANZ_MIGRATE_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
           OMS_DATABASE_URL: postgres://kanzapp:kanz@localhost:5432/kanz_oms_ci?sslmode=disable
         run: |
@@ -383,6 +384,12 @@ jobs:
           TEST_NATS_URL: nats://localhost:4222
         run: go test -race -p 1 ./tools/natsrebuild -run '^TestIntegration_RebuildRestoresEveryTenantsPrefixedTopic$' -count=5 -v
 
+      - name: Verify capital cancellation and terminal currency lock order
+        working-directory: kanz
+        env:
+          TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+        run: go test -race -p 1 ./services/oms/internal/order -run '^TestPostgresCapital(CancellationLocksCashBeforeScanningChildren|TerminalFillLocksUnusedFeeCurrencyFirst)$' -count=1 -v
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: kanz-web/.nvmrc
@@ -396,7 +403,7 @@ jobs:
           cd ../kanz
           go build -o "$RUNNER_TEMP/mfa-web-bff" ./services/web-bff/cmd/web-bff
 
-      - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
+      - name: Test (race) — incl. arch + contract + Postgres + real-bus + funded OMS
         working-directory: kanz
         env:
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable

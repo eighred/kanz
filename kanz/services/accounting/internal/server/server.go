@@ -169,6 +169,7 @@ func (s *Server) routes() {
 	}
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/nav", s.handleNAV)
 	s.mux.HandleFunc("GET /v1/portfolios/{id}/cash-forecast", s.cashForecast)
+	s.mux.HandleFunc("GET /v1/portfolios/{id}/cash-commits", s.cashCommitHistory)
 	s.mux.HandleFunc("POST /v1/portfolios/{id}/reconcile", s.handleReconcile)
 	if s.cashCommands != nil {
 		s.mux.HandleFunc("POST /v1/portfolios/{id}/cash-movements", s.handleCashMovement)

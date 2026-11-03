@@ -107,6 +107,10 @@ type Record struct {
 	// it is indistinguishable from "the vendor did not report one", so a rule
 	// that needs an issuer refuses on it rather than bucketing under "".
 	IssuerID string
+	// Denomination and pair legs retain their distinct reference.v1 meanings.
+	// Missing legs remain unknown; currency_code is not a quote-asset fallback.
+	CurrencyCode          string
+	BaseAsset, QuoteAsset string
 	// AsOf is the effective time of the snapshot the master resolved. It is what
 	// makes a point-in-time question answerable-or-refusable instead of silently
 	// answered with today's classification.

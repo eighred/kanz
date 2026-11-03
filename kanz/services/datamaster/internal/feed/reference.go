@@ -31,10 +31,11 @@ type RefRow struct {
 	// deliberately NOT derived from the description or the ticker: an issuer key
 	// guessed from a security name silently merges two entities that share a
 	// prefix, which is a concentration limit measuring the wrong exposure.
-	IssuerID    string
-	Currency    string
-	Description string
-	AsOf        time.Time
+	IssuerID              string
+	Currency              string
+	BaseAsset, QuoteAsset string
+	Description           string
+	AsOf                  time.Time
 }
 
 // RefSource is the vendor reference-feed transport seam. The real Bloomberg /
@@ -120,6 +121,8 @@ func (a *ReferenceAdapter) decode(row RefRow, instrumentID string) master.Vendor
 		Sector:       master.Sector{Taxonomy: row.SectorTaxonomy, Code: row.SectorCode, Name: row.SectorName},
 		IssuerID:     row.IssuerID,
 		CurrencyCode: row.Currency,
+		BaseAsset:    row.BaseAsset,
+		QuoteAsset:   row.QuoteAsset,
 		Description:  row.Description,
 		AsOf:         row.AsOf,
 		Priority:     a.src.Priority(),

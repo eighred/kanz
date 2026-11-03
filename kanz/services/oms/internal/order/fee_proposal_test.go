@@ -14,17 +14,36 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/services/oms/internal/capital"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func feeRecoveryFixture(t *testing.T) (*Postgres, context.Context, RecoveryCase, *orderpb.Fill) {
+	return feeRecoveryFixtureMode(t, false)
+}
+
+func feeRecoveryFixtureMode(t *testing.T, funded bool) (*Postgres, context.Context, RecoveryCase, *orderpb.Fill) {
 	t.Helper()
 	s := NewPostgres(newPool(t))
 	ctx := bus.WithTenantID(context.Background(), testTenant)
 	d := func(n int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: n} }
 	st := &orderpb.OrderState{OrderId: "fee-order", PortfolioId: "fund", Venue: "BINANCE", VenueAccountId: "account", InstrumentId: "BTC-USD", Side: orderpb.Side_SIDE_BUY, OrderedQuantity: d(1), LeavesQuantity: d(1), Status: orderpb.OrderStatus_ORDER_STATUS_ROUTED}
-	if err := s.Create(ctx, st, nil); err != nil {
+	fillVersion := int64(0)
+	if funded {
+		if err := capital.Apply(ctx, s.pool, capital.CashEvent{PortfolioID: "fund", Currency: "USD", Revision: 1, Total: "1000", Complete: true, ObservedAt: t0}); err != nil {
+			t.Fatal(err)
+		}
+		st.Status = orderpb.OrderStatus_ORDER_STATUS_PENDING_NEW
+		if err := s.CreateFunded(ctx, st, nil, []*commonpb.Money{{CurrencyCode: "USD", Amount: d(100)}}, t0, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		st.Status = orderpb.OrderStatus_ORDER_STATUS_ROUTED
+		if err := s.Save(ctx, st, 0, nil, ""); err != nil {
+			t.Fatal(err)
+		}
+		fillVersion = 1
+	} else if err := s.Create(ctx, st, nil); err != nil {
 		t.Fatal(err)
 	}
 	f := &orderpb.Fill{OrderId: st.OrderId, FillId: "original", VenueExecutionId: "trade", Venue: st.Venue, VenueAccountId: st.VenueAccountId, InstrumentId: st.InstrumentId, Side: st.Side, Quantity: d(1), Price: d(100), Fee: &commonpb.Money{Amount: d(2), CurrencyCode: "USD"}, ExecutedAt: timestamppb.New(t0)}
@@ -37,7 +56,7 @@ func feeRecoveryFixture(t *testing.T) (*Postgres, context.Context, RecoveryCase,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Save(ctx, next, 0, []outbox.Record{record}, f.FillId); err != nil {
+	if err := s.Save(ctx, next, fillVersion, []outbox.Record{record}, f.FillId); err != nil {
 		t.Fatal(err)
 	}
 	m := RecoveryMapping{testTenant, "fund", "BINANCE", "account", "verified-account"}
@@ -152,5 +171,36 @@ func TestFeeProposalRequiresTwoPeopleAndPreservesOriginalExecution(t *testing.T)
 		if _, err := s.pool.Exec(ctx, sql); err == nil {
 			t.Fatal("approval evidence modified")
 		}
+	}
+}
+
+func TestFundedFeeCorrectionKeepsActualLiabilityUntilAccounting(t *testing.T) {
+	s, ctx, c, _ := feeRecoveryFixtureMode(t, true)
+	if err := s.ProposeFeeCorrection(ctx, c, "user:maker", "venue statement verified", t0); err != nil {
+		t.Fatal(err)
+	}
+	proposal, err := s.FeeProposal(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApproveFeeCorrection(ctx, c, "user:checker", proposal.Digest, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	c, err = s.RecoveryCase(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CommitRecovery(ctx, c, t0.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var required, executed, reserved string
+	if err := s.pool.QueryRow(ctx, `SELECT required_debit,executed_debit FROM capital_commitments WHERE order_id='fee-order'`).Scan(&required, &executed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT reserved FROM capital_balances WHERE portfolio_id='fund' AND currency='USD'`).Scan(&reserved); err != nil {
+		t.Fatal(err)
+	}
+	if required != "101" || executed != "101" || reserved != "101" {
+		t.Fatalf("corrected required=%s executed=%s reserved=%s, want 101 pending accounting", required, executed, reserved)
 	}
 }

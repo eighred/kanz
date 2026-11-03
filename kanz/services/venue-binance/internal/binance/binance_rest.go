@@ -2,6 +2,8 @@ package binance
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/venueadapter/exchangeauth"
 )
 
@@ -307,6 +310,47 @@ func (c *binanceREST) tickerPrice(ctx context.Context, symbol string) (string, e
 		return "", &APIError{Code: out.Code, Msg: out.Msg}
 	}
 	return out.Price, nil
+}
+
+// exchangeInstrument reads Binance's own base/quote and trading state. A
+// configured symbol spelling is never authoritative settlement metadata.
+func (c *binanceREST) exchangeInstrument(ctx context.Context, symbol string) (execution.ExchangeInstrument, error) {
+	if !c.bucket.Allow(20) {
+		c.onThrottle()
+		return execution.ExchangeInstrument{}, ErrRateLimited
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/api/v3/exchangeInfo?symbol="+url.QueryEscape(symbol), nil)
+	if err != nil {
+		return execution.ExchangeInstrument{}, err
+	}
+	raw, err := c.do(req)
+	if err != nil {
+		return execution.ExchangeInstrument{}, err
+	}
+	var out struct {
+		Code    int    `json:"code"`
+		Msg     string `json:"msg"`
+		Symbols []struct {
+			Symbol string `json:"symbol"`
+			Base   string `json:"baseAsset"`
+			Quote  string `json:"quoteAsset"`
+			Status string `json:"status"`
+		} `json:"symbols"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return execution.ExchangeInstrument{}, fmt.Errorf("binance: decode exchangeInfo: %w", err)
+	}
+	if out.Code != 0 {
+		return execution.ExchangeInstrument{}, &APIError{Code: out.Code, Msg: out.Msg}
+	}
+	if len(out.Symbols) != 1 || out.Symbols[0].Symbol != symbol {
+		return execution.ExchangeInstrument{}, fmt.Errorf("binance: exchangeInfo did not identify exactly %q", symbol)
+	}
+	in := out.Symbols[0]
+	digest := sha256.Sum256(raw)
+	return execution.ExchangeInstrument{Symbol: in.Symbol, Base: in.Base, Quote: in.Quote, State: in.Status,
+		Digest: hex.EncodeToString(digest[:]), ObservedAtUnixMillis: c.now().UnixMilli()}, nil
 }
 
 func (c *binanceREST) signedOrderCall(ctx context.Context, method, path string, params url.Values, weight int) (*orderResponse, error) {

@@ -80,6 +80,10 @@ const (
 	//
 	// NOT Read, obviously: reading the ledger is Read, and this writes it.
 	Fund Capability = "fund"
+	// CashHistory is the read-only retained accounting evidence OMS needs to
+	// reconcile cash commitments. It is separate from Fund: a service credential
+	// allowed to reconstruct coverage must never be able to post a redemption.
+	CashHistory Capability = "cash-history"
 	// Approve: GIVE THE SECOND SIGNATURE. Sign off an act another person proposed — today a
 	// pricing/compliance override (#410 act one), and by design the order and mandate
 	// approvals that follow (#539).
@@ -330,7 +334,7 @@ func (m *Mux) require(cap Capability, pattern string, next http.HandlerFunc) htt
 			return
 		}
 		role, allowed := m.grants.grantingRole(p.Roles, cap)
-		if allowed && cap != Read && (m.mfaRequired || p.MFA.Required) && !p.MFA.Recent(time.Now()) {
+		if allowed && cap != Read && cap != CashHistory && (m.mfaRequired || p.MFA.Required) && !p.MFA.Recent(time.Now()) {
 			m.record(r, p, cap, pattern, auth.Decision{Reason: "recent WebAuthn MFA required"})
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)

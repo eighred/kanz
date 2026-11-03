@@ -64,6 +64,12 @@ spec:
         - { protocol: TCP, port: 8095 }
     - to:
         - podSelector:
+            matchLabels:
+              app: accounting
+      ports:
+        - { protocol: TCP, port: 8101 }
+    - to:
+        - podSelector:
             matchExpressions:
               - { key: app, operator: In, values: [wealth, datamaster, copilot] }
       ports:

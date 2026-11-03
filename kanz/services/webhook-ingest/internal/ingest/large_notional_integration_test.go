@@ -23,12 +23,9 @@ package ingest
 // not need eight decimal places on $100bn; you do need the magnitude to be
 // right" (dec.go).
 //
-// So the assertion is MAGNITUDE PRESERVATION end to end. A quantity chosen above
-// the wrap threshold is submitted over a real broker, and the number that comes
-// back on the wire — and the number that lands in Postgres — must still be that
-// quantity. Under the pre-fix conversion the coefficient overflows into a small
-// or negative value, which is exactly what this catches: not an error, a
-// plausible wrong number.
+// The broker assertion covers the published SubmitOrder quantity. Funded OMS
+// correctly refuses it when no authoritative cash is bootstrapped, and the
+// Postgres assertion proves that refusal did not persist an unfunded order.
 //
 // Three of #86's four fixes are on this one path: the OMS aggregate's capital
 // conversion (6cfc1cc), the pre-trade gate's notional arithmetic (6568855 — the
@@ -41,7 +38,6 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
@@ -69,7 +65,7 @@ import (
 // anything but what it is.
 const largeQuantityUnits = 1_000_000_000_000 // 1e12
 
-func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *testing.T) {
+func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusButIsUnfunded(t *testing.T) {
 	url := os.Getenv("TEST_NATS_URL")
 	if url == "" {
 		t.Skip("set TEST_NATS_URL (with the dev stack + OMS running) to run the money-arithmetic proof")
@@ -79,14 +75,9 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 	}
 	// The persisted half is a SEPARATE precondition, declared separately: without
 	// it this would still prove the wire and quietly prove nothing about the store.
-	// CI keeps the live OMS apart from tables recreated by package fixtures.
-	// A local rig may explicitly use the same database for both roles.
 	pgURL := os.Getenv("TEST_OMS_POSTGRES_URL")
 	if pgURL == "" {
-		pgURL = os.Getenv("TEST_POSTGRES_URL")
-	}
-	if pgURL == "" {
-		t.Skip("set TEST_OMS_POSTGRES_URL (or TEST_POSTGRES_URL for a shared local rig) to the database the OMS writes to")
+		t.Fatal("set TEST_OMS_POSTGRES_URL to the live OMS database; TEST_POSTGRES_URL belongs to destructive fixtures")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
@@ -102,19 +93,24 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 	if err != nil {
 		t.Fatalf("consumer: %v", err)
 	}
-	var mu sync.Mutex
-	filled := map[string]*big.Rat{}
-	fills := make(chan string, 8)
+	rejections := make(chan *orderpb.OrderRejected, 8)
+	submitted := make(chan *orderpb.SubmitOrder, 8)
 	go func() {
-		_ = consumer.Subscribe(ctx, "order.order.filled", "large-notional-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
-			var ev orderpb.OrderFilled
+		_ = consumer.Subscribe(ctx, "order.order.submit", "large-notional-observe", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
+			var cmd orderpb.SubmitOrder
+			if proto.Unmarshal(payload, &cmd) == nil {
+				submitted <- &cmd
+			}
+			return nil
+		})
+	}()
+	go func() {
+		_ = consumer.Subscribe(ctx, "order.order.rejected", "large-notional-it", func(_ context.Context, _ *envelopepb.Envelope, payload []byte) error {
+			var ev orderpb.OrderRejected
 			if err := proto.Unmarshal(payload, &ev); err != nil {
 				return nil
 			}
-			mu.Lock()
-			filled[ev.GetOrderId()] = dec.FromProto(ev.GetState().GetFilledQuantity())
-			mu.Unlock()
-			fills <- ev.GetOrderId()
+			rejections <- &ev
 			return nil
 		})
 	}()
@@ -142,40 +138,41 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 	if err := publishLargeSubmit(ctx, producer, orderID, qty); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
+	for deadline := time.After(15 * time.Second); ; {
+		select {
+		case cmd := <-submitted:
+			if cmd.GetOrderId() != orderID {
+				continue
+			}
+			if got := dec.FromProto(cmd.GetQuantity()); got.Cmp(want) != 0 {
+				t.Fatalf("broker quantity=%s want=%s", got.RatString(), want.RatString())
+			}
+			goto observed
+		case <-deadline:
+			t.Fatalf("broker did not deliver large command %s", orderID)
+		}
+	}
+observed:
 
 	deadline := time.After(30 * time.Second)
 	for {
-		mu.Lock()
-		got, have := filled[orderID]
-		mu.Unlock()
-		if have {
-			// THE WIRE. A wrapped coefficient shows up here as a small or negative
-			// number, never as an error, so equality against the submitted quantity
-			// is the whole assertion.
-			if got.Cmp(want) != 0 {
-				t.Fatalf("filled quantity came back as %s, want %s — the magnitude did not survive "+
-					"the round trip. A wrapped coefficient is a fabricated number the platform then "+
-					"acts on; %s was the notional class that admitted $184bn against an $80k book",
-					got.RatString(), want.RatString(), got.RatString())
-			}
-			if got.Sign() <= 0 {
-				t.Fatalf("filled quantity is %s — non-positive for a buy of %s", got.RatString(), want.RatString())
-			}
-			break
-		}
 		select {
-		case <-fills:
+		case ev := <-rejections:
+			if ev.GetOrderId() != orderID {
+				continue
+			}
+			if ev.GetErrorCode() != "CAPITAL_TERMS_UNKNOWN" && ev.GetErrorCode() != "CAPITAL_REFUSED" && ev.GetErrorCode() != "CAPITAL_ACTIVATION_REQUIRED" {
+				t.Fatalf("large order refused for %q, not missing authoritative capital input", ev.GetErrorCode())
+			}
+			goto refused
 		case <-deadline:
-			t.Fatalf("no fill for %s within 30s. The OMS either refused a representable large order "+
-				"or did not survive it; check its log for a conversion refusal", orderID)
+			t.Fatalf("no OMS capital refusal for %s within 30s", orderID)
 		}
 	}
 
-	// THE STORE. The wire could be right while the persisted state is wrong — they
-	// are different conversions — so the order is read back out of Postgres and
-	// decoded. This also runs under FORCED row-level security as a NOSUPERUSER
-	// role, so the read only succeeds with the tenant set, which is the posture
-	// production runs in rather than a convenient bypass.
+refused:
+
+	// FORCED RLS read: the order must be absent because the cash source is absent.
 	conn, err := pgx.Connect(ctx, pgURL)
 	if err != nil {
 		t.Fatalf("connect postgres: %v", err)
@@ -184,20 +181,9 @@ func TestIntegration_ALargeQuantityKeepsItsMagnitudeOverTheBusAndInPostgres(t *t
 	if _, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", "__system__"); err != nil {
 		t.Fatalf("set tenant: %v", err)
 	}
-	var stateBytes []byte
-	if err := conn.QueryRow(ctx, `SELECT state FROM orders WHERE order_id = $1`, orderID).Scan(&stateBytes); err != nil {
-		t.Fatalf("read persisted order %s: %v (RLS is FORCED here — a missing row can also mean the "+
-			"tenant was not set)", orderID, err)
-	}
-	var st orderpb.OrderState
-	if err := proto.Unmarshal(stateBytes, &st); err != nil {
-		t.Fatalf("decode persisted state: %v", err)
-	}
-	stored := dec.FromProto(st.GetFilledQuantity())
-	if stored.Cmp(want) != 0 {
-		t.Errorf("the PERSISTED filled quantity is %s, want %s — the wire survived the magnitude but "+
-			"the store did not, which is the worse of the two: the bus record and the book disagree",
-			stored.RatString(), want.RatString())
+	var persistedID string
+	if err := conn.QueryRow(ctx, `SELECT order_id FROM orders WHERE order_id = $1`, orderID).Scan(&persistedID); err != pgx.ErrNoRows {
+		t.Fatalf("unfunded order persisted despite refusal: id=%s err=%v", persistedID, err)
 	}
 }
 

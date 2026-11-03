@@ -55,7 +55,7 @@ func poolFor(t *testing.T, tenant string) *pgxpool.Pool {
 func database(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	p := poolFor(t, "tenant-A")
-	if _, err := p.Exec(t.Context(), `DROP TABLE IF EXISTS ledger_append_positions,ledger_heads,execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations,collateral_requests,collateral_reservations,collateral_active_agreements,collateral_workflows,collateral_snapshots,collateral_lots,custody_actions,custody_statements,custody_runs,custody_breaks,ledger_entries,ledger_snapshots,outbox CASCADE`); err != nil {
+	if _, err := p.Exec(t.Context(), `DROP TABLE IF EXISTS cash_commit_history,cash_commit_debits,cash_commit_heads,ledger_append_positions,ledger_heads,execution_fee_revisions,cash_commands,collateral_allocation_proofs,collateral_confirmations,collateral_requests,collateral_reservations,collateral_active_agreements,collateral_workflows,collateral_snapshots,collateral_lots,custody_actions,custody_statements,custody_runs,custody_breaks,ledger_entries,ledger_snapshots,outbox CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	files, err := filepath.Glob("../../migrations/*.sql")

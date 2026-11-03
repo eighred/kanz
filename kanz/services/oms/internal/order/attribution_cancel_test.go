@@ -16,6 +16,8 @@ package order
 import (
 	"testing"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	commandpb "github.com/eighred/kanz/kanz-schemas-go/command/v1"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
@@ -50,6 +52,7 @@ func TestAWithdrawnOrderIsMeasuredOnWhatItActuallyTraded(t *testing.T) {
 
 	seeded := &orderpb.OrderState{
 		OrderId:          "withdrawn1",
+		VenueAckAt:       timestamppb.New(t0),
 		PortfolioId:      "fund-alpha",
 		InstrumentId:     "BTC-USD",
 		Side:             orderpb.Side_SIDE_BUY,
@@ -144,6 +147,7 @@ func TestAWithdrawnOrderThatNeverTradedPublishesNothing(t *testing.T) {
 
 	seeded := &orderpb.OrderState{
 		OrderId:         "withdrawn2",
+		VenueAckAt:      timestamppb.New(t0),
 		PortfolioId:     "fund-alpha",
 		InstrumentId:    "BTC-USD",
 		Side:            orderpb.Side_SIDE_BUY,

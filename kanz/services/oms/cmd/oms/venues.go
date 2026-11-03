@@ -242,11 +242,10 @@ func configuredVenues(ctx context.Context, cfg config.Config, store order.Store,
 		// platform is multi-venue by construction: an allocation fans one signal out
 		// across venues and stamps each leg with its target MIC, and the router sends
 		// a leg only to the venue whose MIC matches. A simulator that can be exactly
-		// ONE venue therefore cannot simulate this platform's own core loop — every
-		// leg addressed to any other MIC is refused. That is why the M1 end-to-end
-		// loop certification (webhook-ingest's TestIntegration_LoopOverNATS, which
-		// fans out to XNAS and XLON) has never once passed: with a single XSIM venue
-		// both legs were unroutable, so no fills ever came back.
+		// ONE venue therefore cannot simulate this platform's own core fan-out —
+		// every leg addressed to any other MIC is refused. The broker input-path
+		// test targets XNAS and XLON to exercise both routes before funded admission
+		// refuses absent authoritative capital inputs.
 		mics := parseMICs(cfg.SimVenueMIC)
 		logger.Warn("NO REAL VENUES CONFIGURED — every order will be filled by an in-process SimVenue and NOTHING will reach an exchange",
 			"sim_mics", mics,
