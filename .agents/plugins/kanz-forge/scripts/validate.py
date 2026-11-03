@@ -13,7 +13,10 @@ ROOT = PLUGIN.parents[2]
 MARKETPLACE = ROOT / ".agents/plugins/marketplace.json"
 MANIFEST = PLUGIN / ".codex-plugin/plugin.json"
 EXPECTED_SKILLS = {
+    "commands",
     "engineering-standard",
+    "financial-verification",
+    "security-audit",
     "issue-archaeology",
     "kanz-verify",
     "pr-delivery",
@@ -68,17 +71,11 @@ def referenced_files(skill: Path) -> list[Path]:
 
 
 def tracked(paths: list[Path]) -> None:
-    for path in paths:
-        rel = path.relative_to(ROOT).as_posix()
-        result = subprocess.run(
-            ["git", "ls-files", "--error-unmatch", "--", rel],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode:
-            fail(f"required plugin file is not tracked: {rel}")
+    required = {path.relative_to(ROOT).as_posix() for path in paths}
+    raw = subprocess.check_output(["git", "ls-files", "-z", "--", ".agents/plugins"], cwd=ROOT)
+    missing = required - set(raw.decode("utf-8").split("\0"))
+    if missing:
+        fail("required plugin files not tracked: " + ", ".join(sorted(missing)))
 
 
 def validate(check_tracked: bool) -> None:

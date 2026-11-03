@@ -1,0 +1,22 @@
+{
+  "/work": {
+    "target": "optional",
+    "description": "Deliver one issue or task through verification on main.",
+    "workflow": "For an empty target query current GitHub issues, PRs, main and working state. Rank by capital risk, security, data integrity and structural impact. Explain any higher-ranked externally blocked item and choose the highest actionable one. For a specified target reconcile existing code and issues first. Use engineering-standard, financial-verification where applicable, kanz-verify and pr-delivery. Identify root cause, owning plane and failure conditions; implement a permanent scoped correction. Verify invariants, failure and recovery with applicable real dependencies, formatting, static analysis and regression gates. Preserve unrelated edits. Commit, push, open or update the PR, investigate failures, wait for required checks and approvals, merge when authorized and verify the merged revision before closing the issue. Report tested revision, dependencies, skips and closure state. Recommend one next issue and ask before starting it."
+  },
+  "/audit": {
+    "target": "optional",
+    "description": "Audit institutional capabilities or a domain; stop before implementation.",
+    "workflow": "Default to the whole repository. Trace served code, data sources, guards, exemptions, history, tests and active issues across portfolio, quantitative risk, execution, operations, settlement, PIT replay and concurrency. Separate a library, a wired production path and observed estate evidence. Compare institutional capabilities only against attributable sources. Rank financial gaps and integrity vulnerabilities by severity, evidence and impact. Reuse or file actionable issues per AGENTS.md. Report the 2-3 largest gaps, target architecture, prioritized roadmap and one recommended task with test strategy. Ask for explicit authorization before implementing. No code or production changes."
+  },
+  "/ci": {
+    "target": "required",
+    "description": "Diagnose and repair a PR or workflow-run failure.",
+    "workflow": "Resolve the PR/run and exact SHA. Inspect full failed-job logs, distinguish infrastructure faults from regressions and assess financial impact. Reproduce the failure, make a permanent scoped repair, add discriminating regression coverage and rerun the affected gate and required CI. Do not use a retry as proof of repair or bypass reviews. Use pr-delivery. Report exactly three bullets: Root Cause, Permanent Fix, Verification, with actual merge/main status."
+  },
+  "/verify": {
+    "target": "required",
+    "description": "Verify acceptance of an issue, PR or financial calculation.",
+    "workflow": "Use kanz-verify and, for valuation or backtests, financial-verification. Resolve exact revisions and runnable acceptance criteria. Test affected boundaries, financial precision, failure and recovery with appropriate dependencies. Report pass, fail, skipped, unproven and blocked separately. Do not implement, merge, close issues, or activate production under this command."
+  }
+}

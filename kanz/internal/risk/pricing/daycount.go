@@ -1,6 +1,9 @@
 package pricing
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // Day-count conventions (FI-01c) — the accrual basis for coupon interest and the
 // year fractions bond analytics discount over. Mirrors
@@ -33,8 +36,10 @@ func YearFraction(start, end time.Time, dc DayCount) float64 {
 		return actualDays(start, end) / 365
 	case Thirty360:
 		return thirty360Days(start, end) / 360
-	default: // ActualActual (ISDA)
+	case ActualActual:
 		return actActISDA(start, end)
+	default:
+		return math.NaN()
 	}
 }
 
