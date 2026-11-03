@@ -147,5 +147,11 @@
     "target": "optional",
     "description": "Review and update Kanz Forge dependencies; prepare and test a dependency PR.",
     "workflow": "Maintain Kanz Forge dependencies, not the installed Codex cache or unrelated trading-service dependencies. Read DEPENDENCIES.md and upstreams.json. Resolve any named dependency to a unique registry entry or documented development tool; refuse unknown or ambiguous names. Use /upstream to discover pins and check the selected registered projects (all if omitted), compare releases, patches, advisories, changed files, local overlays, compatibility, license evidence and integrity. For unpinned development tools inspect the owning CI/toolchain declaration and supported versions; report host-only tools separately, never install or globally upgrade them without authorization. Separate adopted dependencies from reference-only projects. Prepare an actionable old-to-new proposal with source, reason, risk and rollback; if already current say so. Before adopting changed external code obtain explicit approval for that pin. After approval update only reviewed files, preserve overlays, regenerate provenance digests, update pins and dependency links, run installation, discovery and applicable regression tests, and open or update a reviewable PR. Do not silently turn a reference into a dependency, merge, deploy or alter the capital halt."
+  },
+  "/agents": {
+    "target": "optional",
+    "description": "Show Forge specialist availability, or activate the repository profiles with /agents setup.",
+    "mode": "evidence",
+    "workflow": "Run the repository launcher for this action. To delegate in a host supporting named Codex agents, ask the user which task they want delegated if none was given. Do not start workers merely to list or activate profiles."
   }
 }

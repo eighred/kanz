@@ -23,6 +23,22 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn("/bench ", self.help("all"))
         self.assertNotIn("/financial ", self.help("all"))
 
+    def test_agent_setup_preserves_custom_profiles(self):
+        import tempfile
+        from pathlib import Path
+        from specialists import profiles
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self.assertTrue(all(p["state"] == "missing" for p in profiles(root, "")["profiles"]))
+            self.assertFalse((root/".codex").exists())
+            ready = profiles(root, "setup")
+            self.assertEqual(ready, profiles(root, "setup"))
+            self.assertTrue(all(p["state"] == "ready" for p in ready["profiles"]))
+            role = root/".codex/agents/kanz_mapper.toml"
+            role.write_text("user-owned")
+            with self.assertRaises(ValueError): profiles(root, "setup")
+            self.assertEqual(role.read_text(), "user-owned")
+
     def test_only_missing_relative_file_is_reported(self):
         doc = """[ok](here.md#anchor) [directory](sub/) [url](https://example.org)
 [missing](gone.md) [outside](../../external)

@@ -74,6 +74,9 @@ def run(action, target):
         subprocess.run(cmd, cwd=cwd, check=True, timeout=900)
     root = Path(subprocess.check_output(["git","rev-parse","--show-toplevel"],text=True).strip())
     if not (root / "kanz/go.mod").is_file(): raise ValueError("run from the Kanz checkout")
+    if action == "/agents":
+        from specialists import profiles
+        return profiles(root, target)
     if action == "/scan-files":
         if target: raise ValueError("/scan-files takes no target")
         from gaps import scan

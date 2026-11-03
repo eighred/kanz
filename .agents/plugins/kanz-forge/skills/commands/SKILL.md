@@ -19,3 +19,5 @@ For mode=evidence invoke scripts/command.py in the repository-owned Forge plugin
 For /help show only catalog entries with primary=true, plus /help all. For /help all show public entries; omit internal collectors. For /ship and /gaps in this chat, perform the workflow directly; do not launch a second Codex session.
 
 Read only the selected catalog entry for execution. From a matching checkout, the launcher --preview option prints its instructions without starting another session. Never require the user to name a financial test suite; select appropriate evidence after locating the code.
+
+When the user requests specialist delegation, use kanz_mapper for locating code paths, kanz_reviewer for change review and kanz_security for trust boundaries. Give each requested worker a distinct question and exact revision. Use named roles only when the host supports them. Otherwise explicitly identify the fallback: a general subagent with the selected Forge profile instructions, or a single-agent review. Never report a delegated review without a worker result.

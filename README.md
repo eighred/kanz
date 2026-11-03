@@ -31,6 +31,23 @@ For a read-only missing-link scan use `python forge.py /scan-files`; for a
 dependency check without preparing changes use `Kanz /upstream owner/repo`.
 No slash-menu installation or PowerShell function is required.
 
+## Ask for a specialist agent
+
+Examples for Codex chat:
+
+- “Delegate to kanz_mapper: trace the callers of YearFraction and return source locations.”
+- “Use kanz_reviewer on PR #1385. Which failure case matters most?”
+- “Have kanz_security review the Datamaster trust boundary; do not probe a live cluster.”
+
+From this checkout run `python forge.py /agents setup` once, then start a new
+Codex session. `python forge.py /agents` checks the project discovery copies
+against [the authoritative profiles](.agents/plugins/kanz-forge/agents).
+Setup refuses to overwrite a different profile. If it reports a conflict,
+compare the named files before replacing a generated copy. Do not edit the cache.
+These roles inherit host permissions; their instructions alone are not a sandbox.
+Request one specialist for a bounded question. Additional agents cost tokens;
+no speed or cost improvement has been established.
+
 ## Install Kanz Forge
 
 Prerequisites: Git, Python 3.9 or later, and a Codex CLI with the plugin
@@ -52,7 +69,7 @@ codex plugin list --marketplace kanz-local --json
 Stop if validation fails. In the final command's installed entry, check that
 enabled is true, version matches the manifest in your checkout, and source.path
 ends in .agents/plugins/kanz-forge. The candidate version is
-0.6.1+codex.20261104; its tracked validator reports eight skills. A five-skill
+0.7.0+codex.20261104; its tracked validator reports eight skills. A five-skill
 result on the earlier main revision is expected.
 
 ## Use and update
