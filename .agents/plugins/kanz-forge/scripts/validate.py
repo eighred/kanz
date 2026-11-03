@@ -13,6 +13,7 @@ ROOT = PLUGIN.parents[2]
 MARKETPLACE = ROOT / ".agents/plugins/marketplace.json"
 MANIFEST = PLUGIN / ".codex-plugin/plugin.json"
 EXPECTED_SKILLS = {
+    "commands",
     "engineering-standard",
     "financial-verification",
     "security-audit",
