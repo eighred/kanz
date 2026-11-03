@@ -4,15 +4,32 @@ For the application stack, start with [local development](kanz/dev/README.md).
 For the repository-owned Codex engineering skills, follow the steps below.
 Forge setup does not start services or require venue credentials.
 
+## Four everyday commands
+
+In **Codex chat**, send a message such as `Kanz /ship #1385`. In a terminal
+at the repository root, use `python forge.py /ship '#1385'`. Quote issue
+numbers in PowerShell. The terminal starts interactive Codex for workflows;
+in an existing chat Forge performs the workflow there.
+
+| Command | Use it for |
+|---|---|
+| `Kanz /work #1234` | Implement an issue. Omit the number to select actionable work. |
+| `Kanz /ship #1385` | One delivery workflow: prepare the PR, diagnose/fix CI, merge when authorized, verify on main. Does not deploy to production. |
+| `Kanz /gaps` | Check missing file references and required artifacts against main; file or reuse issues for confirmed gaps. |
+| `Kanz /update` | Maintain Forge dependencies: identify relevant upgrades, review provenance and compatibility, then test and propose approved changes in a PR. Add an owner/repo to narrow the scope. |
+
+`Kanz /help` shows these four. `Kanz /help all` lists specialist commands.
+For a read-only missing-link scan use `python forge.py /scan-files`; for a
+dependency check without preparing changes use `Kanz /upstream owner/repo`.
+No slash-menu installation or PowerShell function is required.
+
 ## Install Kanz Forge
 
 Prerequisites: Git, Python 3.9 or later, and a Codex CLI with the plugin
 subcommand (`codex plugin --help`). Run these PowerShell commands from the
 repository root, which contains AGENTS.md and the .agents directory.
 
-Choose your source revision first. On a fresh clone, main at 1a78a837 contains
-the five-skill release. To try the upstream-review candidate from PR #1384 in a
-fresh clone, run `git switch --track origin/eighred/forge-upstream-review`.
+Use the checkout containing the Forge revision you intend to install.
 If you already have a checkout, inspect `git status -sb` first; do not discard
 local work to install Forge. Keep the checkout available because Codex registers
 its path as the marketplace root.
@@ -27,7 +44,7 @@ codex plugin list --marketplace kanz-local --json
 Stop if validation fails. In the final command's installed entry, check that
 enabled is true, version matches the manifest in your checkout, and source.path
 ends in .agents/plugins/kanz-forge. The candidate version is
-0.5.0+codex.20261104; its tracked validator reports eight skills. A five-skill
+0.6.0+codex.20261104; its tracked validator reports eight skills. A five-skill
 result on the earlier main revision is expected.
 
 ## Use and update
@@ -78,7 +95,7 @@ Alternatively, in the integrated PowerShell terminal at the repository root:
 
 Quote issue numbers in PowerShell. Preview prints the request without starting
 work; normal execution launches interactive Codex under its existing permissions.
-## Engineering evidence commands (0.4 candidate)
+## Specialist evidence commands
 
 From the root of a Kanz checkout, run
 `python .agents/plugins/kanz-forge/scripts/command.py /help`.

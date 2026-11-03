@@ -18,8 +18,14 @@ def main():
     parser.add_argument("target", nargs="*")
     args = parser.parse_args()
     if args.action == "/help":
+        if args.target not in ([], ["all"]):
+            parser.error("use /help or /help all")
         for name, entry in catalog.items():
+            if not args.target and not entry.get("primary"):
+                continue
             print(f"{name:8} {entry['description']}")
+        if not args.target:
+            print("/help all   Show specialist commands")
         return 0
     target = " ".join(args.target).strip()
     entry = catalog[args.action]

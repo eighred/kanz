@@ -15,3 +15,5 @@ permissions. These commands do not authorize real trades, production deployment,
 destructive operations, disabling checks, or changing an admission halt.
 
 For mode=evidence invoke scripts/command.py in the repository-owned Forge plugin with the exact action and target. Present output, skips and exit status. Never substitute a prompt for a failed executable check.
+
+For /help show only catalog entries with primary=true, plus /help all. For /help all show every entry. For /ship and /gaps in this chat, perform the workflow directly; do not launch a second Codex session.

@@ -31,3 +31,5 @@ jobs:
         run: python3 -B .agents/plugins/kanz-forge/scripts/test_evidence.py
       - name: Check memory isolation, freshness, planning boundaries and dependency links
         run: python3 -B .agents/plugins/kanz-forge/scripts/test_intelligence.py
+      - name: Check everyday commands and missing-file detection
+        run: python3 -B .agents/plugins/kanz-forge/scripts/test_interface.py
