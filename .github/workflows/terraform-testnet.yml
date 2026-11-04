@@ -1,0 +1,95 @@
+name: terraform-testnet
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# This check is required on main. Keep the workflow running for every PR so
+# unrelated changes receive a successful check instead of a pending one.
+permissions:
+  contents: read
+
+jobs:
+  terraform-testnet:
+    name: terraform-testnet
+    runs-on: ubuntu-latest
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "0"
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_SHARED_CREDENTIALS_FILE: /dev/null
+      AWS_CONFIG_FILE: /dev/null
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Find Terraform testnet changes
+        id: scope
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            base_sha="$PR_BASE_SHA"
+          else
+            base_sha="$PUSH_BEFORE_SHA"
+          fi
+          changed="$(git diff --name-only "$base_sha" "$GITHUB_SHA" -- kanz/infra/terraform-testnet/ .github/workflows/terraform-testnet.yml)"
+          if [[ -n "$changed" ]]; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+            echo 'No Terraform testnet or gate changes in this revision.'
+          fi
+
+      # The CLI archive is downloaded from HashiCorp and verified against its
+      # published SHA-256 before execution. The AWS provider is pinned by the
+      # committed Terraform lockfile and init never connects to the state backend.
+      - name: Install Terraform 1.15.8
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/terraform_1.15.8_linux_amd64.zip"
+          curl --fail --location --silent --show-error --retry 3 \
+            'https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_linux_amd64.zip' \
+            --output "$archive"
+          printf '%s  %s\n' \
+            'd25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d' \
+            "$archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/terraform-bin"
+          unzip -q "$archive" terraform -d "$RUNNER_TEMP/terraform-bin"
+          echo "$RUNNER_TEMP/terraform-bin" >> "$GITHUB_PATH"
+
+      - name: Record tool version and tested head
+        if: steps.scope.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform version -json
+          printf 'Tested commit: %s\n' "$GITHUB_SHA"
+
+      - name: Check Terraform formatting
+        if: steps.scope.outputs.run == 'true'
+        working-directory: kanz/infra/terraform-testnet
+        run: terraform fmt -check -recursive
+
+      - name: Initialize providers without backend
+        if: steps.scope.outputs.run == 'true'
+        working-directory: kanz/infra/terraform-testnet
+        run: terraform init -backend=false -input=false -lockfile=readonly -no-color
+
+      - name: Validate Terraform configuration
+        if: steps.scope.outputs.run == 'true'
+        working-directory: kanz/infra/terraform-testnet
+        run: terraform validate -no-color
+
+      - name: Run mocked Terraform tests
+        if: steps.scope.outputs.run == 'true'
+        working-directory: kanz/infra/terraform-testnet
+        run: terraform test -no-color
