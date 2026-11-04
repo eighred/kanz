@@ -69,10 +69,15 @@ jobs:
       - name: Record tool version and tested head
         if: steps.scope.outputs.run == 'true'
         shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           terraform version -json
           printf 'Tested commit: %s\n' "$GITHUB_SHA"
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            printf 'PR head: %s\n' "$PR_HEAD_SHA"
+          fi
 
       - name: Check Terraform formatting
         if: steps.scope.outputs.run == 'true'
