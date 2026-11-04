@@ -2,6 +2,9 @@
 
 Use external sources to answer a specific design question. Do not include a
 whole upstream repository, registry, or financial glossary in the prompt.
+The deliverable is an implementable Kanz system behavior with proof. Financial
+knowledge supplies domain constraints and method choices; it does not turn an
+engineering task into a portfolio recommendation or an analyst report.
 
 1. **Required outcome.** Name the decision, actor, timing, instrument and failure
    consequence. Cite an approved Kanz requirement, mandate, issue or attributable
@@ -18,6 +21,13 @@ whole upstream repository, registry, or financial glossary in the prompt.
    semantics, failure behavior, owning package and the smallest discriminating
    example. If the required definition is unknown, ask for that definition;
    do not fill the gap with an alleged proprietary algorithm.
+
+Classify the uncertainty before writing code. A missing approved policy needs
+its owner; missing market/contract terms need an attributable input and unknown
+behavior; a missing algorithm needs a justified method and independent example;
+an unwired library needs a consumer and boundary test. Those are different
+repairs. Existing public methodology can inform the implementation without
+adding its reference repository as a Forge dependency.
 
 Example: BlackRock publicly describes portfolio stress testing and scenario
 analysis ([Aladdin Risk](https://www.blackrock.com/aladdin/platforms/products/aladdin-risk)).

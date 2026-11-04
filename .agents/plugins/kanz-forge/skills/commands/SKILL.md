@@ -35,6 +35,7 @@ Re-evaluate after locating callers and after the diff changes scope.
 | Implementation or refactor | [engineering-standard](../engineering-standard/SKILL.md) | Smallest complete change in the existing owner |
 | Identity, authorization, tenant scope, input trust, secrets, CI/release, or agent tools | [security-audit](../security-audit/SKILL.md), guidance mode | Principal → input → control → resource, reachable failure and safe evidence |
 | Pricing, money, quantities, portfolio attribution or strategy claims | [financial-verification](../financial-verification/SKILL.md) | Dated inputs, units, independent numerical reference and limits |
+| Mandates, operational approvals or policy controls | [engineering-standard](../engineering-standard/SKILL.md) and [security-audit](../security-audit/SKILL.md), guidance mode | Policy version → enforcement before effects → durable decision evidence; missing policy authority remains explicit |
 | Any completion or capability claim | [kanz-verify](../kanz-verify/SKILL.md) | Discriminating check at the claimed boundary, exact revision and skips |
 | PR delivery or `/ship` | [pr-delivery](../pr-delivery/SKILL.md) | Reviewed current head, applicable CI, merge authority and acceptance disposition |
 
@@ -52,6 +53,17 @@ For example, a tenant-scoped API change combines routing, engineering,
 security and verification. A comment correction needs the owning context and
 a diff check. A pricing fix adds financial verification; it does not require
 the user to know the pricing test command. Choose the smallest sufficient set.
+
+Financial methodology supports implementation choices and their proof; it does
+not turn an ordinary development task into an investment-analysis assignment.
+For policy changes, follow enforcement and audit evidence with engineering and
+security guidance. A documented policy without a gate is an incomplete behavior.
+
+Before dispatch, resolve the task's behavior and the smallest complete change
+in its existing owner. After mapping, associate each affected boundary with a
+check; after editing, review the connected callers and configuration again.
+Let these results determine the next skill and worker. A checklist completed
+without source evidence does not advance the task.
 
 ## Execute and coordinate
 
@@ -91,3 +103,10 @@ code, commands, paths, negation, units, error text, assumptions and failed or
 skipped checks. Summarize noisy output only after inspecting its decisive
 evidence and completion status. Never truncate away failures to save tokens.
 Do not claim a token-saving percentage without a measured comparable run.
+
+For multi-tool tasks, use [context and evidence handling](references/context-and-evidence.md)
+to select source reads, summarize complete test results and reduce repeated work.
+When the user sees different files than the installed plugin, compare the named
+checkout's branch/commit and local edits with the installed source and current
+main before making an installation claim. Preserve unrelated work when bringing
+reviewed Forge files into an older checkout; never edit an installed cache.

@@ -22,6 +22,14 @@ security review. Money, valuation, portfolio attribution, and backtests trigger
 financial verification. Cross-component changes trigger caller and contract
 tracing. The user does not need to invoke every specialist separately.
 
+Each skill produces a decision and evidence for the next step. Financial
+guidance helps implement institutional pricing, risk and execution methods;
+it does not generate investment-analysis deliverables or assert undocumented
+proprietary algorithms. Policy guidance follows the actual enforcement point
+and audit record. Relationship tracing connects affected contracts and consumers
+to their verification checks. A missing critical edge or skipped dependency
+stays unresolved, even if the changed function's unit test passes.
+
 These are instructions dispatched by the installed
 [commands skill](skills/commands/SKILL.md), not registered terminal commands.
 The explicit skill invocation is `$kanz-forge:commands /work #1234`. The former
@@ -114,6 +122,30 @@ there is no stored status file that can silently become stale.
 Graphify and Caveman are not installed dependencies. Forge uses native source
 tools and explicit tracing for relationships, and bounded retrieval and concise
 communication for context. It makes no Graphify indexing or Caveman proxy claim.
+
+The useful mechanisms are integrated directly: [Ponytail's](https://github.com/DietrichGebert/ponytail)
+necessity/reuse discipline informs the existing-owner-first implementation
+choice and connected-code review; [Graphify's](https://github.com/Graphify-Labs/graphify/tree/v8)
+relationship approach informs the source-backed impact map; and
+[Caveman's](https://github.com/JuliusBrussee/caveman) efficiency goal is implemented
+as bounded reads and evidence-preserving output reduction. Forge uses normal,
+precise language, retains failed/skipped results, and stops repeating sufficient
+checks. No lifecycle hook, persistent graph, cloud model router, or proxy is
+installed by these original workflows. See
+[context and evidence handling](skills/commands/references/context-and-evidence.md).
+
+### Why Python checks remain
+
+| Files | Concrete purpose |
+|---|---|
+| `validate.py` | Catch broken packaging, skill routes and local references. |
+| `provenance.py`, `test_provenance.py` | Verify imported bytes and detect tampering or broken dispatch references. |
+| `skill_discovery.py`, `test_install.py` | Check real CLI discovery and installed bytes in a disposable profile. |
+| `receipts.py`, `test_receipts.py` | Optional compatibility with existing local test history; unnecessary for ordinary Chat work. |
+
+These checks use the standard library. Replacing deterministic integrity and
+installation checks with prose would remove their regression protection.
+`forge.py` and the orchestration wrappers remain deleted.
 
 The [Forge CI workflow](../../../.github/workflows/kanz-forge.yml) verifies
 structure, imported-source integrity, Linux security validators, and optional

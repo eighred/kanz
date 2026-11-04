@@ -1,62 +1,53 @@
 # Kanz Forge dependencies
 
-Forge's development workflow runs in the current Codex Chat. It needs no Python
-launcher, agent scheduler, graph database, compression proxy or additional model
-account. These are development tools, not Kanz production dependencies.
+Forge runs inside Codex Chat. Its skills use the host's source, editing, worker
+and verification tools; no separate agent scheduler, proxy or finance library is
+required. A repository link is not an installed capability.
 
-| Tool | Actual dependency |
+| Requirement | Why it remains |
 |---|---|
-| Codex host tools | Source inspection, edits, native workers and task coordination; available tools determine what this chat can do |
-| Git | Revision, diff and tracked-file identity |
-| GitHub connector or CLI | Current Issues, PRs and CI evidence; use the available authenticated interface |
-| Codex CLI | Plugin installation and the optional CLI discovery test; not required to dispatch a Chat command |
-| Python standard library | Package/provenance validation and install tests; optional run receipts. No Python dependency for ordinary Chat routing |
-| Go and the component's real test dependencies | Existing Kanz financial, benchmark and domain suites; not a second calculation engine in Forge |
-| Node.js | Offline security finding/coverage validators; their protected-input CLI requires Linux support |
+| Codex host tools | Execute the workflows and delegate when native workers are available. |
+| Git | Resolve source identity, callers/history and reviewed diffs. |
+| GitHub connector or CLI | Retrieve live Issues, PRs, checks and delivery evidence. |
+| Codex CLI | Install the plugin and verify fresh CLI skill discovery; Chat dispatch does not launch it. |
+| Python 3.9+ standard library | Deterministic package/provenance and installation checks; no third-party Python package. Optional historical receipts are separate from ordinary work. |
+| Node.js on Linux | Test the bundled security report validators, whose protected-input CLI needs Linux facilities. |
 
-## Vendored upstream
+The affected Kanz component supplies its own build and test toolchain. For
+example, Go is needed to verify a Go implementation; it is not a Forge agent
+runtime. Financial methodology is information for designing and testing Kanz's
+pricing, risk and execution behavior, not a finance-package dependency or a
+financial-analysis product.
+
+## Imported source
 
 The only imported external project is
 [cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill),
 pinned at
 [`c1c8a8c1471069fb0e188eeaff69b8e8db6564a8`](https://github.com/cloudflare/security-audit-skill/tree/c1c8a8c1471069fb0e188eeaff69b8e8db6564a8).
-Its MIT license is retained in `skills/security-audit/LICENSE`. The imported file
-list, upstream Git blob IDs and local LF-normalized SHA-256 hashes are recorded
-in [upstreams.json](upstreams.json). `skills/security-audit/SKILL.md` has a Kanz
-overlay; review that difference when updating. The validators check report
-structure and evidence contracts, not whether an alleged vulnerability is real.
+Its MIT license is retained in `skills/security-audit/LICENSE`.
+[upstreams.json](upstreams.json) records each upstream Git blob and local
+LF-normalized SHA-256. The security entrypoint has a local Kanz overlay;
+`references/kanz-boundaries.md` is original local guidance. Imported companions
+retain their pinned bytes. Verify them from the repository root:
 
-The entrypoint selects focused guidance or a full audit. `ATTACK-CLASSES.md`
-selects domain companions; `RECONNAISSANCE.md`, `HUNTING.md` and
-`VALIDATION-AND-REPORTING.md` implement full-audit coverage and independent
-verification. Domain companions are loaded for observed boundaries, not all at
-once. Their isolation requirements remain binding; these tools do not authorize
-production probes. Run `python .agents/plugins/kanz-forge/scripts/provenance.py`
-from the repository root to verify the pinned local imports.
+```powershell
+python -B .agents/plugins/kanz-forge/scripts/provenance.py
+```
 
-## Evaluated alternatives, not installed dependencies
+The report validators check structure and evidence contracts; they do not prove
+that Kanz is secure. Full-audit isolation requirements remain binding. Hostile
+code and production probes are not authorized by installation.
 
-[Graphify](https://github.com/Graphify-Labs/graphify) builds a persisted,
-queryable graph with local AST parsing and explicit extracted/inferred edges.
-Its document/media semantic pass can use a model backend. It needs Python and
-additional packages. Forge instead traverses current source, typed contracts,
-resolved references and package metadata on demand. This covers scoped impact
-analysis without claiming a complete indexed graph. A future index must justify
-its maintenance, language coverage, freshness and source-handling costs. No
-Graphify package, cloud service or source upload is configured by Forge.
+## Optional history
 
-[Caveman](https://github.com/JuliusBrussee/caveman) separates concise replies
-from a runtime that compresses tool input and can route models. Its current
-runtime documents telemetry and optional cloud request sharing. These add data
-handling and configuration beyond concise writing. Forge uses short, precise
-instructions and bounded reads directly, preserving evidence and exact payloads.
-The advertised 65% is not a measured Kanz saving:
-[JetBrains' paired coding-task experiment](https://blog.jetbrains.com/ai/2026/07/speak-to-ai-agents-like-cavemen-tosave-tokens/)
-reported 8.5% fewer output tokens in its tested setup, without detectable quality
-degradation. Neither result predicts this host's savings. No Caveman code,
-proxy, telemetry or model-routing service is installed by Forge.
+`scripts/receipts.py` preserves the existing local pricing-test receipt format.
+It is not required for `/work`, `/ship`, skill selection, graph tracing or worker
+coordination. Its source digest does not cover every execution input, so reads
+never count as fresh proof. The tool remains for existing history compatibility,
+not as a project memory service. No SQL server or SQLite package is installed.
 
-Research references do not become dependencies or update targets. Financial
-methods require an attributable primary specification and independent numerical
-checks scoped to the Kanz decision; reference-only finance repositories are not
-part of Forge.
+Graphify, Caveman and Ponytail runtimes are not dependencies. The
+[Forge guide](README.md) explains the concrete native methods used for their
+quality and efficiency goals. Reference-only finance repository catalogs are
+not maintained or installed by Forge.
