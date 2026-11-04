@@ -12,41 +12,12 @@
 # shorthand) jobs plus a `buf lint`+`buf breaking` schema gate.
 name: kanz-ci
 
+# Workflow-level path filters leave required checks pending forever. Scope is
+# evaluated inside the workflow so every PR receives kanz-ci-required.
 on:
   pull_request:
-    paths:
-      - 'kanz/**'
-      - 'kanz-py/**'
-      - 'kanz-web/**'
-      - 'kanz-schemas/proto/**'
-      - 'kanz-schemas/buf.yaml'
-      - 'kanz-schemas/buf.gen.yaml'
-      # sdk-guard: a committed generated tree must trigger the run that rejects it.
-      - 'kanz-schemas/gen/**'
-      - 'tools/*Ecr*.ps1'
-      - 'tools/*ecr*.py'
-      - 'tools/Install-TestnetWorkloads.ps1'
-      - 'tools/Install-TestnetObservability.ps1'
-      - 'tools/Initialize-TestnetPortfolio.ps1'
-      - '.github/workflows/kanz-ci.yml'
-      - '.github/scripts/go_test_evidence.py'
-      - '.github/scripts/test_go_test_evidence.py'
-      - '.github/scripts/go_mod_download.py'
-      - '.github/scripts/test_go_mod_download.py'
   push:
     branches: [main]
-    # DOCS DO NOT BUILD IMAGES.
-    #
-    # The pull_request trigger above is already path-filtered; this one was not, so a
-    # commit touching only markdown ran the full matrix — for kanz-build, that is 19
-    # Docker image builds to record that a board item moved. On a private repo billing per
-    # minute, that is real money for zero signal.
-    #
-    # paths-ignore only skips a push when EVERY changed file matches, so a commit mixing
-    # docs and code still runs the gate.
-    paths-ignore:
-      - '**/*.md'
-      - '.gitignore'
 
 permissions:
   contents: read
@@ -57,7 +28,25 @@ env:
   GOFLAGS: -mod=mod
 
 jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      application: ${{ steps.scope.outputs.application }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Verify CI scope and required-result policy
+        run: python3 -B -m unittest discover -s .github/scripts -p test_required_ci.py
+      - name: Verify release source policy
+        run: python3 -B -m unittest discover -s .github/scripts -p release_source_test.py
+      - name: Select application scope from checked Git history
+        id: scope
+        run: python3 .github/scripts/required_ci.py scope
+
   release-custody:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -68,6 +57,8 @@ jobs:
         run: ./tools/Test-EcrReleaseDigest.ps1
 
   go:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     # A live Postgres for the durable-store integration suites. Without it every
     # test gated on TEST_POSTGRES_URL silently SKIPS — including EXEC-M7c's
@@ -592,6 +583,8 @@ jobs:
           args: --timeout=5m --build-tags=anthropic,openrouter,redis
 
   python:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -674,6 +667,8 @@ jobs:
           PYTHONPATH=/tmp/gen /tmp/runtime/bin/python -c "import envelope.v1.envelope_pb2, domain.v1.portfolio_pb2, inference.v1.inference_service_pb2_grpc; print('the shipped gencode imports under the shipped runtime')"
 
   ts:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -763,6 +758,8 @@ jobs:
   # There is no linter step because the repository has no JS/TS linter anywhere;
   # the compiler is the quality gate, exactly as it is for kanz/ts/kanz-bus.
   web:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -804,6 +801,8 @@ jobs:
   # from then on any surviving local kanz-schemas replace fails CI so the module
   # stays pinned to published releases.
   sdk-guard:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -870,6 +869,8 @@ jobs:
   # job needs no database, no broker and no Docker, so it lands in a couple of
   # minutes.
   module-graph:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -965,6 +966,8 @@ jobs:
   # A test harness nobody executes is not a weaker test. It is a claim of
   # coverage with nothing behind it.
   observability:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1104,6 +1107,8 @@ jobs:
           done
 
   buf-breaking:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1129,3 +1134,16 @@ jobs:
       - name: Breaking-change check
         working-directory: kanz-schemas
         run: buf breaking --against '../.git#ref=origin/main,subdir=kanz-schemas'
+
+  # The only application context required by the main ruleset. Missing results,
+  # cancellation, and accidental skips must never masquerade as successful CI.
+  kanz-ci-required:
+    if: ${{ always() }}
+    needs: [scope, release-custody, go, python, ts, web, sdk-guard, module-graph, observability, buf-breaking]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require complete results for the selected application scope
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/required_ci.py aggregate

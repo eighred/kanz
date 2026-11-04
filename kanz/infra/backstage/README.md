@@ -16,7 +16,7 @@ owner, its runbooks, and its schemas — and to create a new service on-conventi
 
 | Facet | Source |
 |---|---|
-| Services + ownership | `catalog-info.yaml` Components (owners track CODEOWNERS) |
+| Services + ownership | `catalog-info.yaml` Component owners; these catalog groups are separate from GitHub review routing in `.github/CODEOWNERS` |
 | Runbooks | **nothing** — see below |
 | Schemas / APIs | the `risk-query-v1` API entity → the EVT-16 registry proto |
 | Lineage / datasets | complemented by the LIN-01 lineage service + its DataHub catalog (`infra/catalog`) |

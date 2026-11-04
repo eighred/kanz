@@ -15,7 +15,7 @@ answers "where did this *number* come from" at the *dataset* granularity.
 | Task | Package | What |
 |---|---|---|
 | LIN-01a | `internal/openlineage`, `internal/harvest`, `internal/graph` | harvest envelope lineage into an OpenLineage emitter + an in-memory dataset graph |
-| LIN-01b | `kanz/infra/catalog/` | DataHub catalog: datasets, schemas (EVT-16 registry), ownership (CODEOWNERS), classification |
+| LIN-01b | `kanz/infra/catalog/` | DataHub catalog: datasets, schemas (EVT-16 registry), explicit steward mapping, classification |
 | LIN-01c | `internal/governance` | PII tagging + deny-by-default access via the AUTH-01b authorizer, every PII access logged (AUTH-01d), MT-01d tenant scope |
 | LIN-01d | `internal/query` | "where did this come from" provenance over the graph, governed |
 
