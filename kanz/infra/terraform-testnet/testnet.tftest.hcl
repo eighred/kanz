@@ -101,6 +101,18 @@ run "cost_and_security_envelope" {
   }
 
   assert {
+    condition = toset(jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement[1].Action) == toset([
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:CompleteLayerUpload",
+      "ecr:InitiateLayerUpload",
+      "ecr:PutImage",
+      "ecr:UploadLayerPart",
+    ])
+    error_message = "The publisher must have only the repository-scoped actions required to push immutable testnet images."
+  }
+
+  assert {
     condition = toset(jsondecode(aws_iam_role_policy.node_ecr_pull.policy).Statement[1].Action) == toset([
       "ecr:BatchGetImage",
       "ecr:GetDownloadUrlForLayer",
