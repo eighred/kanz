@@ -27,7 +27,5 @@ request to reproduce an observed stress episode, inspect Kanz scenario code and
 issue #1232 first: a manually specified shock and an immutable observed market
 history are different inputs. Decide which is required before implementing math.
 
-The Anthropic financial-services repository is an optional workflow reference
-only. Do not use it as evidence of a pricing method, Aladdin internals or Kanz
-requirements. Prefer an approved in-house source where available; keep licensed
-data outside model context unless the owner authorizes that use.
+Prefer an approved in-house source where available. Keep licensed data outside
+model context unless the owner authorizes that use.

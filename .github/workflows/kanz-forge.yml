@@ -6,6 +6,8 @@ on:
       - '.agents/**'
       - 'plugins/kanz-forge/**'
       - 'AGENTS.md'
+      - 'forge.py'
+      - 'README.md'
       - '.github/workflows/kanz-forge.yml'
   push:
     branches: [main]
@@ -13,6 +15,8 @@ on:
       - '.agents/**'
       - 'plugins/kanz-forge/**'
       - 'AGENTS.md'
+      - 'forge.py'
+      - 'README.md'
       - '.github/workflows/kanz-forge.yml'
 
 permissions:
