@@ -1,4 +1,4 @@
-"""Bounded read-only Codex CLI skill discovery for doctor and install verification."""
+"""Bounded read-only Codex CLI skill discovery for disposable install verification."""
 
 import json
 import queue

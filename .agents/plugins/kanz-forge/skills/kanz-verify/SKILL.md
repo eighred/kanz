@@ -22,3 +22,19 @@ operator authority, and observed outcome. Treat code completion, live
 verification, and permission to trade as separate claims. Leave an issue open
 when its acceptance needs evidence that does not exist; state the missing input
 precisely. Never place credentials in test files, logs, reports, or agent context.
+
+For a Forge capability or `/doctor`, separate four claims: **implemented** (the
+entrypoint and supporting files exist), **configured** (this host exposes its
+tools and dependencies), **operational** (a representative operation succeeded
+with observed evidence), and **incomplete** (the missing step). Report each with
+its scope and evidence; a manifest check proves implementation structure, not
+Chat routing, native delegation, live access or completion of an audit. Inspect
+tools before attempting a probe and avoid mutations for a status check.
+
+For instruction changes, exercise representative tasks through the actual
+workflow: skill selection, source traversal, output boundary and missing-tool
+behavior. A scenario checked by reading instructions is static validation;
+claim live operation only when the host actually ran it. For parallel work,
+worker completion and conflict/failure recovery are different claims. Installation
+discovery, CLI discovery and the current Chat's loaded skill version are also
+separate. Recheck changed dependencies or revisions before reusing prior evidence.

@@ -18,6 +18,13 @@ financial state. For capital-path changes, read
 existing typed contracts. Make the smallest change that completes the accepted
 workflow; a speculative abstraction or unrelated cleanup needs its own issue.
 
+Before adding a helper, search the owner and its actual consumers for an existing
+implementation. Keep a helper local until a second consumer establishes shared
+ownership. Preserve public behavior during refactors; separate intended behavior
+changes from moves so a reviewer can see both. Prefer an explicit branch or typed
+contract over an abstraction whose only consumer is the new code. Check error
+propagation, resource cleanup, cancellation and retry boundaries where relevant.
+
 Place a lasting invariant in the closest meaningful test or architecture guard
 when the old failure could recur. A guard must fail for a representative
 violation and must not silently bless a dead exemption. Ask `kanz-verify` to
@@ -35,3 +42,10 @@ For financial changes, use [the design evidence guide](references/design-evidenc
 before choosing an algorithm. Return the smallest decision-useful brief:
 what Kanz must do, what it already does, the specific gap, and the next change
 with its proof. State material unknowns. Skip this formal brief for trivial edits.
+
+Use the [commands routing table](../commands/SKILL.md) to add focused security,
+financial or delivery work when the change reaches those boundaries. Finish with
+a diff review against acceptance: no unrelated churn, obsolete compatibility
+paths, duplicate implementation, undocumented behavior change or unexplained
+generated output. A useful review explains why the chosen change is sufficient;
+line count and stylistic uniformity alone do not establish maintainability.
