@@ -2,10 +2,6 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
-data "aws_ssm_parameter" "al2023_x86_64" {
-  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
-}
-
 data "aws_caller_identity" "current" {}
 
 locals {
@@ -600,7 +596,9 @@ resource "aws_ebs_volume" "data" {
 }
 
 resource "aws_instance" "node" {
-  ami                         = data.aws_ssm_parameter.al2023_x86_64.value
+  # An unrelated apply must not replace the live node when AWS advances its latest-AMI pointer.
+  # Rotate this image only through a reviewed maintenance and rollback plan (#1393).
+  ami                         = "ami-0794a632d5c1058bf"
   instance_type               = var.instance_type
   availability_zone           = local.availability_zone
   subnet_id                   = aws_subnet.testnet.id

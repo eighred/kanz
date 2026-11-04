@@ -5,12 +5,6 @@ mock_provider "aws" {
     }
   }
 
-  mock_data "aws_ssm_parameter" {
-    defaults = {
-      value = "ami-testnet-x86"
-    }
-  }
-
   mock_resource "aws_iam_role" {
     defaults = {
       arn = "arn:aws:iam::123456789012:role/kanz-test-role"
@@ -30,6 +24,11 @@ run "cost_and_security_envelope" {
 
   variables {
     budget_email = "alerts@example.invalid"
+  }
+
+  assert {
+    condition     = aws_instance.node.ami == "ami-0794a632d5c1058bf"
+    error_message = "The Tokyo node AMI changed without a reviewed rotation and rollback plan."
   }
 
   assert {

@@ -9,6 +9,9 @@ separate restore drill produces a current DR attestation.
 ## Reviewed envelope
 
 - Tokyo (`ap-northeast-1`), one `t3a.large` in standard CPU-credit mode.
+- The node AMI is pinned to `ami-0794a632d5c1058bf` (Amazon Linux 2023,
+  `2023.12.20260831.0`, x86_64), the image of the existing node. A moving
+  latest-AMI pointer must not replace that node during an unrelated apply.
 - 20 GiB encrypted gp3 root + 80 GiB encrypted gp3 durable data.
 - One stable Elastic IP for outbound exchange allowlisting.
 - No inbound security-group rules and no SSH key. Administration is SSM only.
@@ -81,6 +84,13 @@ invoke the Kubernetes credential-provider plugin.
 The wrapper bridges AWS CLI v2 `login_session` authentication into Terraform as
 an in-memory, short-lived role session and clears it on exit. It never prints or
 persists the session credentials.
+
+AMI rotation is a separate maintenance action. Select a reviewed Tokyo x86_64
+image, confirm a current recovery attestation and data snapshot, and review a
+full Terraform plan that names the node, data-volume attachment, and EIP effects.
+Schedule the replacement and rollback with the operator before changing the
+pinned AMI. Never accept a node replacement as incidental drift in a policy or
+other routine apply.
 
 Terraform state is ignored by git but remains sensitive operational state. This
 single-operator testnet starts with local state; migrate it to an encrypted,
