@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -274,21 +275,41 @@ func run() int {
 		}()
 	}
 
-	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, cfg.Tenant, golden, exceptions, feeds,
+	api := server.New(readiness, logger, cfg.Tenant, golden, exceptions, feeds,
 		server.WithMetrics(obs.MetricsHandler()),
 		server.WithDualControl(server.DualControl{
 			Proposals:  proposals,
 			Require:    cfg.RequireDualControl,
 			TTL:        cfg.DualControlTTL,
 			Registerer: obs.Registry,
-		})), httpserver.Standard())
-	go func() {
-		logger.Info("datamaster listening", "addr", cfg.Listen)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("http server failed", "err", err)
-			fatal.Raise(err)
+		}))
+	servers := []*http.Server{
+		httpserver.New(cfg.Listen, api, httpserver.Standard()),
+		httpserver.New(cfg.ClassifierListen, api.ClassifierHandler(), httpserver.Standard()),
+		httpserver.New(cfg.MetricsListen, api.OperationsHandler(), httpserver.Standard()),
+	}
+	// Bind every address before exposing any surface or declaring readiness.
+	var listeners []net.Listener
+	lc := net.ListenConfig{}
+	for _, srv := range servers {
+		ln, err := lc.Listen(ctx, "tcp", srv.Addr)
+		if err != nil {
+			for _, opened := range listeners {
+				_ = opened.Close()
+			}
+			logger.Error("datamaster bind failed", "addr", srv.Addr, "err", err)
+			return 2
 		}
-	}()
+		listeners = append(listeners, ln)
+	}
+	for i, srv := range servers {
+		go func() {
+			if err := srv.Serve(listeners[i]); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("datamaster listener failed", "addr", srv.Addr, "err", err)
+				fatal.Raise(err)
+			}
+		}()
+	}
 
 	if len(feeds) > 0 {
 		// The cycle lock elects ONE replica per cycle. Concurrent projection is
@@ -328,8 +349,11 @@ func run() int {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("http shutdown error", "err", err)
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("http shutdown error", "addr", srv.Addr, "err", err)
+			_ = srv.Close()
+		}
 	}
 
 	return fatal.Code()

@@ -101,7 +101,7 @@ spec:
             - name: RISK_ENGINE_VENUE_ACCOUNTS
               value: ""
             - name: RISK_ENGINE_DATAMASTER_URL
-              value: http://datamaster.kanz-services.svc:8080
+              value: http://datamaster.kanz-services.svc:8112
             - name: RISK_ENGINE_GRPC_LISTEN
               value: :9090
             - name: RISK_ENGINE_SPIFFE_SOCKET

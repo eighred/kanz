@@ -907,42 +907,19 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // off an inbound request and serve the named tenant's data, mapped to the port
 // they serve it on.
 //
-// THE SET IS THREE, AND IT WAS FOUR. audit and tv-sync were the known pair; #222
-// added the same trust to wealth and datamaster, and the guard below found them.
-// audit SPLIT in #627 and moved to the map below — the count is maintained here
-// rather than restated, because a set that says four while holding three is how
-// a reader concludes the remaining exposure is someone else's. Setting
-// the header is a different act and is deliberately NOT in scope: api-gateway
-// (proxy/backend.go) injects it as the identity authority, and copilot
-// (retrieval/lineage_catalog.go) forwards the caller's principal onward to
-// lineage — both now through auth.SetPrincipalHeaders. Neither serves a route
-// whose authorization is a header it received.
-//
-// EVERY ONE SERVES THAT SURFACE ON THE SAME PORT AS /metrics, so
-// allow-observability-scrape's port list — the fix for every other overreach in
-// that rule — cannot separate them. A pod in kanz-observability can still send a
-// self-chosen tenant header to tv-sync's /broker/accounts, or wealth's and
-// datamaster's :8080 routes, and be served another tenant's book. Removing the blanket rule would not close it either:
-// allow-gateway-to-tv-sync and allow-gateway-to-phase7 each admit
-// kanz-observability to the same ports independently, for the same scrape.
-//
-// The fix is a SECOND LISTENER: /metrics on its own port, the tenant-scoped API
-// on the port only the gateway may reach. That is a code change in four
-// composition roots plus a prometheus.io/port annotation change per service, not
-// a manifest edit, and it is beyond what #232's policy work can prove without a
-// cluster. This map is what keeps the residual named and bounded: a fifth service
-// adopting the trust has to be written down here, in a diff a reviewer sees.
+// These workloads still share the metrics and tenant API listener. Both the
+// scrape policy and service-specific rules can admit the monitoring namespace;
+// merely narrowing one rule does not establish gateway-only API access.
 var tenantHeaderTrustingServices = map[string]int{
-	"datamaster": 8080,
-	"tv-sync":    8091,
-	"wealth":     8080,
+	"tv-sync": 8091,
+	"wealth":  8080,
 }
 
 // tenantHeaderTrustingSplitListeners is the SAME trust, taken on by a service
 // that serves its API and its /metrics on DIFFERENT ports (#409).
 //
 // It is a separate set because the assertion is the opposite of the one above.
-// For the four services in tenantHeaderTrustingServices the guard checks that
+// For services in tenantHeaderTrustingServices the guard checks that
 // the recorded port IS the metrics port, because their tenant-scoped routes
 // share it — which is precisely the exposure #232 named and could not close:
 // allow-observability-scrape must admit that port, so a pod in
@@ -954,6 +931,7 @@ var tenantHeaderTrustingServices = map[string]int{
 // allow-observability-scrape's list — so the separation cannot quietly collapse
 // back into one port while the entry keeps claiming otherwise.
 var tenantHeaderTrustingSplitListeners = map[string]int{
+	"datamaster": 8111,
 	// The API materializes a rebalance proposal into order commands and takes the
 	// issuer — the field the audit trail records as the person who moved the
 	// capital — from the injected principal. A trading surface is the one place
@@ -1055,7 +1033,7 @@ var tenantHeaderRead = regexp.MustCompile(
 // The header is the entire authorization story for these routes — AGENTS.md:
 // upstreams trust it "only because a NetworkPolicy makes the gateway their only
 // reachable caller". A new service adopting that trust is adopting a network
-// obligation with it, and the obligation is currently unmet for all four existing
+// obligation with it, and the obligation is currently unmet for the remaining
 // members. Nothing should join them by accident.
 func TestTenantHeaderTrustingServicesAreEnumerated(t *testing.T) {
 	root := filepath.Join(moduleRoot(t), "services")

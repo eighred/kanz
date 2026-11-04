@@ -212,7 +212,7 @@ spec:
             # allow-classifier-reads-datamaster in
             # infra/security/runtime/network-policies.yaml is the other half: without
             # that rule every lookup fails and the cache stays empty.
-            - { name: COMPLIANCE_DATAMASTER_URL, value: "http://datamaster.kanz-services.svc:8080" }
+            - { name: COMPLIANCE_DATAMASTER_URL, value: "http://datamaster.kanz-services.svc:8112" }
             # SEC-01a. infra/nats/nats.yaml serves `tls { verify: true,
             # verify_and_map: true }` — the bus is mTLS-ONLY. Without this socket the
             # mesh is disabled (transport.NewMesh("").Enabled() == false), the client

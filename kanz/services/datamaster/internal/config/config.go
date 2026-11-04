@@ -19,8 +19,10 @@ import (
 // (MASTER-01). A real Bloomberg/Refinitiv/ICE adapter plugs in behind the
 // feed.RefSource seam at the composition root.
 type Config struct {
-	Listen   string
-	LogLevel slog.Level
+	Listen           string
+	MetricsListen    string
+	ClassifierListen string
+	LogLevel         slog.Level
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01). Empty ⇒ none.
 	OTLPEndpoint string
@@ -201,13 +203,15 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen:          env.Or("DATAMASTER_LISTEN", ":8080"),
-		LogLevel:        env.ParseLevelOr(os.Getenv("DATAMASTER_LOG_LEVEL"), slog.LevelInfo),
-		OTLPEndpoint:    os.Getenv("DATAMASTER_OTLP_ENDPOINT"),
-		DatabaseURL:     databaseURL,
-		Tenant:          env.Or("DATAMASTER_TENANT", "__system__"),
-		RefreshInterval: refreshInterval,
-		AllowSim:        allowSim,
+		Listen:           env.Or("DATAMASTER_LISTEN", ":8111"),
+		MetricsListen:    env.Or("DATAMASTER_METRICS_LISTEN", ":8080"),
+		ClassifierListen: env.Or("DATAMASTER_CLASSIFIER_LISTEN", ":8112"),
+		LogLevel:         env.ParseLevelOr(os.Getenv("DATAMASTER_LOG_LEVEL"), slog.LevelInfo),
+		OTLPEndpoint:     os.Getenv("DATAMASTER_OTLP_ENDPOINT"),
+		DatabaseURL:      databaseURL,
+		Tenant:           env.Or("DATAMASTER_TENANT", "__system__"),
+		RefreshInterval:  refreshInterval,
+		AllowSim:         allowSim,
 
 		AllowEphemeralMaster: allowEphemeralMaster,
 

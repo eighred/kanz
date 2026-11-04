@@ -97,12 +97,24 @@ func New(readiness *Readiness, logger *slog.Logger, tenant string, golden store.
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
-func (s *Server) routes() {
-	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
-	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
+func (s *Server) OperationsHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	if s.metrics != nil {
-		s.mux.Handle("GET /metrics", s.metrics)
+		mux.Handle("GET /metrics", s.metrics)
 	}
+	return mux
+}
+
+// ClassifierHandler grants reference-data clients only the lookup they need.
+func (s *Server) ClassifierHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/securities/{id}", s.handleSecurity)
+	return mux
+}
+
+func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/securities/{id}", s.handleSecurity)
 	s.mux.HandleFunc("GET /v1/prices/{id}", s.handlePrice)
 	// A separate route lets new clients fail closed during rolling deployment:
