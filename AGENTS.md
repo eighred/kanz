@@ -1,428 +1,302 @@
-# kanz
+# Kanz engineering boundaries
 
-**Eighred** is the company. **Kanz** is Eighred's institutional investment
-operating system: one financial model, one controlled execution core, one
-auditable state model, several secure interfaces. It is not an exchange
-connector, a trading bot, or a bag of venue APIs — execution is one component of
-a system that also owns risk, compliance, portfolio, margin, accounting and
-audit.
+**Eighred** is the company. **Kanz** is its institutional investment operating
+system: one financial model, controlled execution core and auditable state model
+across secure interfaces. Risk, compliance, portfolio, margin, accounting and
+audit belong to that model. The objective is to know the institutional state,
+decide what is permitted, execute deterministically, record what happened and
+explain why. An exchange connector or order router alone does not meet it.
 
-The architecture is institutional in the sense systems like BlackRock Aladdin
-are: the book of record, the controls that govern it, and the execution that acts
-on it are one coherent model rather than an order router with reporting bolted
-beside it. That is the standard changes are judged against.
+## Instruction ownership
 
-The objective is never "place an order on an exchange." It is: know the
-institutional state, decide what is permitted, execute deterministically, record
-what happened, and explain why.
+This file owns stable Kanz architecture, safety, environment and evidence rules.
+The repository-owned [Kanz Forge plugin](.agents/plugins/kanz-forge/README.md)
+owns engineering workflows, skill routing, specialist instructions and command
+usage. Its source is `.agents/plugins/kanz-forge/`; the marketplace is
+`.agents/plugins/marketplace.json`. The former private package was retired in
+#1087. Do not create a second workflow manual or copy these invariants into each
+skill. Forge cannot implicitly amend platform boundaries or grant authority.
 
-## Planes
+For `/work`, `/ship` and related commands, use Forge's `commands` skill, which
+selects the required investigation, engineering, verification and delivery
+skills. Read the affected code, migrations and architecture guards before
+changing a contract. Load supporting instructions for the task at hand rather
+than every skill. Missing tools or an unavailable skill must be reported; their
+presence in a manifest is not evidence of an operational capability.
 
-Know which plane you are in before changing anything.
+## Planes and layout
 
-| Plane | Owns | Rule |
+| Plane | Owns | Boundary |
 |---|---|---|
-| **Execution** | OMS, execution router, venue adapters, fills, exchange protocol and auth | Deterministic, typed, low-latency, fail-closed, independently testable. |
-| **Control** | risk, compliance, mandates, portfolio limits, leverage, margin, collateral, kill switches | Admission control, not reporting. Decides *whether*. |
-| **Intelligence** | MCP, analytics, copilot, operational investigation | Reasons over state. Never owns the execution path. |
+| Execution | OMS, router, venue adapters, fills, exchange protocol and auth | Deterministic, typed, low-latency, fail-closed, independently testable. |
+| Control | Risk, compliance, mandates, portfolio limits, leverage, margin, collateral, kill switches | Admission control: decides whether an action is permitted. |
+| Intelligence | MCP, analytics, copilot, operational investigation | Reasons over state; never owns or becomes a dependency of execution. |
 
-Collapsing one plane into another is not a refactor. A change that makes
-execution depend on the intelligence plane is wrong no matter how it tests.
+Identify the owning plane before editing. If AI, prompts, tool discovery or MCP
+disappear, trading must continue. Moving execution into intelligence is an
+architecture violation even when tests pass.
 
-## Stack
+| Location | Responsibility |
+|---|---|
+| `kanz/` | Go module `github.com/eighred/kanz`; Go 1.26.1 language / 1.26.8 toolchain. Services in `services/`, binaries in `cmd/`. |
+| `kanz-schemas/` | Protobuf + buf; generated Go SDK in `gen/go`. |
+| `kanz-py/` | Python inference service. |
+| `kanz-web/` | Browser client. |
+| `kanz/infra/` | Deployment; Kubernetes and SPIFFE/SPIRE workload identity. |
+| `tools/`, `.github/` | Host/operator scripts and CI. |
 
-- **Go 1.26.1 language / 1.26.8 toolchain** — `kanz/`, module `github.com/eighred/kanz`. Services under
-  `services/`, CLI binaries under `cmd/`.
-- **Postgres** (pgx v5) — durable state, multi-tenant via RLS.
-- **NATS JetStream** — the event spine. **Kafka** (segmentio) — the archival/CDC path.
-- **Protobuf + buf** — `kanz-schemas/`, generated SDK at `kanz-schemas/gen/go`.
-- **Python** — `kanz-py/`, the inference service.
-- **Kubernetes + SPIFFE/SPIRE** — deployment and workload identity.
+Keep sibling directories in place: Go replacements and build contexts depend on
+them. Postgres uses pgx v5 and tenant RLS. NATS JetStream is the event spine;
+Kafka (segmentio) is the derived archival/CDC path. Start setup at
+`kanz/dev/README.md`, schema generation at `kanz-schemas/README.md`, and Python
+setup at `kanz-py/README.md`. Keep operational runbooks beside their component;
+do not move packages merely for tidiness.
 
-Keep these sibling directories in place: the Go module and build contexts depend
-on that layout. The browser client is `kanz-web/`; deployment configuration is
-`kanz/infra/`; host/operator scripts are `tools/`; CI lives in `.github/`.
-Start developer setup at `kanz/dev/README.md`, schema generation at
-`kanz-schemas/README.md`, and Python setup at `kanz-py/README.md`. Operational
-runbooks stay beside their component. Do not move packages merely for tidiness.
+## Execution and trust boundaries
 
-## Architecture
+```text
+commands -> api-gateway -> NATS -> services -> Postgres
+             authN/Z      FACTs    domain       RLS
 
-```
-commands ──▶ api-gateway ──▶ NATS ──▶ services ──▶ Postgres
-                (authN/Z)     (FACTs)   (per-domain)   (RLS)
-```
-
-- **Everything is event-driven.** State changes flow as FACTs on the bus; nothing polls.
-- Services are `package main` under `services/<name>/cmd/<name>/`, configured from
-  the environment in `internal/config`.
-- Shared code starts in a service's `internal/`, and is promoted to `kanz/internal/`
-  or `kanz/pkg/` only when a **second** consumer appears.
-- The gateway is the sole identity authority: it authenticates and injects
-  `X-Kanz-Principal-*`; upstreams trust those headers, which is sound **only**
-  because a NetworkPolicy makes the gateway their only reachable caller.
-
-The order path is fixed, and every hop is typed:
-
-```
-strategy ─▶ intent ─▶ risk ─▶ compliance ─▶ mandate ─▶ OMS
-         ─▶ execution router ─▶ venue adapter ─▶ exchange
+strategy -> intent -> risk -> compliance -> mandate -> OMS
+         -> execution router -> venue adapter -> exchange
 ```
 
-No step is skippable — not by MCP, not by an admin endpoint, not by a test helper
-that "just needs a fill." If the AI layer disappears entirely, trading continues.
-The execution core must not depend on an LLM, a prompt, dynamic tool discovery,
-or MCP being up.
+State changes flow as FACTs on the bus, without polling. Services are
+`package main` under `services/<name>/cmd/<name>/`, with environment configuration
+in `internal/config`. Shared code starts in a service's `internal/`; promote it
+to `kanz/internal/` or `kanz/pkg/` only when a second consumer exists.
 
-**The transports on that path are settled.** OMS → venue adapter is typed
-gRPC/mTLS over `venue.v1`, and exchange REST/WS lives inside the venue adapter
-and nowhere else. Both are load-bearing rather than incidental: the typed hop is
-what `buf breaking` gates and what the capability declarations ride on, and
-keeping the exchange protocol inside the adapter is what makes "credentials
-terminate at the venue adapter" structural instead of a promise. Changing either
-is an architectural decision with its own issue, not a refactor.
+The gateway is the sole identity authority. It authenticates and injects
+`X-Kanz-Principal-*`; upstream trust is sound only while NetworkPolicy makes the
+gateway their only reachable caller. Do not trust those headers independently
+of that network boundary.
 
-## Invariants
+Every order-path step is mandatory, including for admins, MCP and test helpers.
+OMS to venue adapter uses typed gRPC/mTLS over `venue.v1`, gated by `buf breaking`
+and capability declarations. Exchange REST/WS and signing live only in the
+adapter. Changing either transport requires an architectural decision with its
+own issue; it is not a refactor.
 
-These are here because they change what you write. Each one has already cost
-something.
+- **Three-state truth:** capability and financial state are `SUPPORTED`,
+  `UNSUPPORTED` or `UNKNOWN`. An empty capability set asserts nothing. Critical
+  unknowns fail closed: unknown margin must never become `0.0` and permit an
+  order. Missing configuration and a successful check must remain distinct.
+- **Credential isolation:** credentials terminate at the venue adapter. No
+  credentials in source, git history, logs, MCP responses, agent context, audit
+  facts, test artifacts or web responses.
+- **MCP:** read-only, deny-by-default, narrowly scoped, server-side filtered and
+  projected, using authorized domain APIs. It cannot place, cancel or amend
+  orders, contact a venue directly or bypass OMS/risk/compliance. It is not the
+  venue transport. Security and execution-path hardening outrank MCP work.
+- **Attribution:** every order identifies strategy, portfolio, tenant, mandate,
+  passed risk/compliance checks, venue capability/account, outbound request,
+  venue response, fills and resulting state changes.
+- **Canonical models:** domain concepts belong in the core; venue and endpoint
+  shapes stay at the boundary. Money and quantities use `common.v1.Decimal`,
+  never float.
+- **Tenant isolation:** deny by default across portfolios, accounts, orders,
+  positions, strategies, risk, mandates, credentials, audit and AI capabilities.
+  One tenant must not even discover another tenant's state.
+- **Commands and facts:** a command requests; a fact observes or commits.
+  History must reconstruct knowledge, beliefs, controls and admission/rejection.
+- **Recovery first:** never place real orders against a store that may not be
+  backed up. Disaster-recovery coverage precedes live orders.
 
-- **`UNKNOWN` is a third value.** Capability and financial state are
-  `SUPPORTED` / `UNSUPPORTED` / `UNKNOWN`. An empty capability set means *the
-  venue did not assert support* — it does not mean unsupported. This is the same
-  rule as "nothing configured" ≠ "checked, and fine," applied to money.
-- **A critical unknown fails closed.** Unknown margin ratio ⇒ risk cannot
-  establish safety ⇒ order refused. Never unknown ⇒ `0.0` ⇒ proceed as if known.
-- **Credentials terminate at the venue adapter.** Signing logic and exchange auth
-  live there and nowhere else. No credential in source, git history, logs, MCP
-  responses, agent context, audit facts, test artifacts or web responses.
-- **MCP is read-only, deny-by-default, narrowly scoped, server-side filtered and
-  projected.** It may not place, cancel or amend orders, call a venue directly,
-  or bypass OMS/risk/compliance. It reaches state through authorized domain APIs
-  like any other caller. It is an agent-facing operational and read plane, and it
-  is **not the venue transport** — a proposal to move OMS → adapter onto it is a
-  proposal to replace a typed, gated, credential-isolating boundary with a
-  discovery-oriented one, and the boundary it would provide already exists.
-- **Security and execution-path hardening outrank MCP work**, always. MCP is an
-  interface; a hole on the capital path is money. When both are open, the
-  hardening lands first — and an MCP task never justifies deferring one.
-- **Every order must be attributable.** For any order the system answers: which
-  strategy, portfolio and tenant; which mandate permitted it; which risk and
-  compliance checks passed; which venue capability and account were used; what
-  was sent; what the venue returned; what filled; what state changed.
-- **Canonical model in the core, venue shapes at the boundary.** The same concept
-  must not be modelled differently by each integration, and endpoint-specific
-  models are not a second domain model.
-- **Tenant isolation is deny-by-default** and covers portfolios, accounts, orders,
-  positions, strategies, risk state, mandates, credentials, audit and AI
-  capabilities. One tenant's agent must not be able to *discover* another's state.
-- **Commands and facts are distinct.** A command is requested; a fact is observed
-  or committed. The history must reconstruct what the system knew, what it
-  believed, which controls ran, and why the action was permitted or rejected.
+## Implementation and scale
 
-## Coding standards
+Misconfiguration must fail loudly at the first event through denial, DLQ or
+startup refusal, never a healthy-looking default. Keep one implementation per
+concept so fixes reach every consumer. Comments explain operational consequences
+and trade-offs; verify a comment's premise before relying on it.
 
-- **Fail loudly, never silently.** A misconfiguration must surface on the first
-  event — a denial, a DLQ, a refusal to start. Never a default that looks healthy.
-- **"Nothing configured" and "checked, and fine" must never look the same.**
-- **One implementation per concept.** A copied helper is how a fix stops
-  spreading: 17 services each had their own `secret()` and 15 were wrong while 2
-  were right.
-- **Comments carry the operational consequence**, not a restatement of the code.
-  A comment justifying a trade-off is dated evidence — verify its premise before
-  relying on it.
-- Money and quantities are `common.v1.Decimal`; never float.
+Prefer existing typed contracts and authorization, canonical models, explicit
+capabilities, server-side projection, deterministic execution, small migrations
+and measured behavior. Preserve security boundaries over convenience. MCP cannot
+justify rewriting execution; adapter deduplication must preserve isolation and
+venue-specific semantics.
 
-## Commands
+The TUI is retained until Web equivalents achieve operational parity and
+production verification, followed by deliberate retirement. A route unused by
+the web is not dead: `internal/tui/universe` owns calls to live gateway node
+provisioning routes. Preserve every required human operation throughout migration.
+
+Idempotent handlers are the correctness floor at every replica count. Per-process
+state is a best-effort optimization that re-baselines on restart. Shared state is
+an opt-in reduction of duplicate work, not a replacement for idempotency.
+
+| Component | Default | Shared mode / seam |
+|---|---|---|
+| Bus dedup | Per-instance `DedupWindow` | `RedisDedup` via `bus.WithDeduper`; go-redis binding `redisadapter.New`. |
+| PRED-09 model registry | Local `Registry` | `registry.CoordinatedRegistry` over `platform.model`. |
+| Gap, staleness, watermark, drift detectors | Per-process, per-partition | No shared backend; `partition_key` already routes to one consumer in a group. |
+
+Do not add shared state where partitioning gives single ownership. Shared
+coordination backends fail open: a Redis error means no dedup, never a fabricated
+hit that drops consumption. Idempotency makes that safe; this does not relax
+critical financial admission controls.
+
+`platform.model` is the infinite-retention append log of record (EVT-09).
+Replicas replay from offset 0 into a local materialized registry, publish keyed
+by `model_id` so `record_validation` precedes primary registration, and carry
+producer `origin` so replicas skip their own events.
+
+Kafka is derived from NATS through one archiver (DATA-M1). The old reconciler and
+`internal/integrity` were removed (DATA-M4); preserve
+`kanz/test/arch/drain_single_writer_gate_test.go` (#819) rather than rebuilding
+two independent sources of truth.
+
+## Verification rules
+
+Use `.github/workflows/kanz-ci.yml` for actual CI jobs and `kanz/.golangci.yml`
+for lint policy. These are independent gates:
 
 ```sh
 cd kanz
 go build ./...
 go vet ./...
-golangci-lint run ./...     # the FOURTH gate — build, vet and test all pass on code it rejects
-git ls-files -z '*.go' | xargs -0 gofmt -l   # not `gofmt -l .` — GOTMPDIR is in-module (Windows environment #2), so a tree walk lists _testmain.go build artifacts as violations
-
-# -p 1 is REQUIRED (see Constraints). Run in chunks, never as one ./... —
-# the harness reaps a child at ~10 min, and a truncated run ends with 0 FAIL,
-# which reads as green. Diff the packages reported against `go list` to prove
-# the run finished.
 go test -p 1 ./internal/... -count=1
 go test -p 1 ./services/... -count=1
-go test -p 1 ./test/arch/   -count=1
+go test -p 1 ./test/arch/ -count=1
+golangci-lint run ./...
+git ls-files -z '*.go' | xargs -0 gofmt -l
 
-cd kanz-schemas && buf generate && bash bootstrap-go-sdk.sh
+cd ../kanz-schemas
+buf generate
+bash bootstrap-go-sdk.sh
 ```
 
-## Constraints
+Run the relevant checks for the change, with these evidence constraints:
 
-- **`go test -p 1`** — the Postgres-gated tests share one database and race otherwise.
-- **`TEST_POSTGRES_URL` unset ⇒ the Postgres-gated tests skip silently** — dozens
-  of files, reported as `ok`. The role must be **NOSUPERUSER**, or RLS is
-  bypassed and the isolation tests pass falsely.
-- **`-race` needs cgo** — it does not run on the usual Windows box. Concurrency
-  claims are unproven until CI runs them.
-- **`fakeBus` does not validate envelopes**, so it accepts what a real broker
-  rejects. A green suite using it is not a broker proof.
-- Never commit secrets; never point a test at a production DSN. **Do not persist
-  a credential anywhere** — not a file, not a fixture, not a commit, not an env
-  file left behind after a probe. Verify external integrations with demo/testnet
-  credentials only, passed in for one run and rotated after.
-- **Do not work around a sandbox or security restriction.** A blocked action is a
-  decision to respect and report, not an obstacle to route around — writing a
-  credential to a file to dodge a classifier defeats the control and breaks the
-  rule above at the same time. Say what was blocked and what it would have proved.
+- `go test -p 1` is required: Postgres-gated tests share a database. Chunk tests
+  rather than running one `./...`; the harness can reap a child at about ten
+  minutes. Compare reported packages with `go list` to detect truncation even
+  when the output contains no failures.
+- Unset `TEST_POSTGRES_URL` silently skips database tests. Use a **NOSUPERUSER**
+  role or RLS tests bypass isolation and pass falsely.
+- `-race` requires cgo and does not run on the usual Windows host. Concurrency
+  claims need CI evidence. `fakeBus` does not validate envelopes; it proves
+  neither broker acceptance nor real messaging integration.
+- Report tested commit, package coverage, actual dependencies and skipped tests.
+  Local passes, CI, real integrations and production acceptance are distinct.
+  A merge is not closure until acceptance is verified on the merged revision.
+  Developer smoke setup (#1323) is not capital-path proof.
+- Never use production DSNs or persist credentials in files, fixtures, commits
+  or leftover environment files. External verification uses demo/testnet
+  credentials for one run, rotated afterward.
+- Respect sandbox and security blocks. Report the blocked action and what it
+  would have proved; never reroute it or weaken safeguards to obtain a pass.
+
+Read architecture guards in `kanz/test/arch/` before reporting a suspected gap.
+They default-deny, with named exemptions tied to retirement issues and dead-entry
+checks. Prefer an executable guard to another paragraph here. A passing guard
+proves what it resolves, not its name; use an allowed mutation probe to verify
+its reach. Do not remove an invariant until its replacement guard covers it.
+
+For identity, RLS, message validation, signing or release changes, Forge must
+route to `security-audit` and identify principal, resource and trust boundary.
+Run the findings CLI on Linux: Windows lacks required no-follow/nonblocking
+flags, which must remain enabled. The imported methodology is pinned and carries
+its MIT notice; Node is a development-time validator dependency only.
+Pricing, portfolio and backtest acceptance requires `financial-verification`;
+production computation stays in its owning service or Go library.
 
 ## Windows environment
 
-Five things that make the project look broken — or make tests fail at random — if
-you skip them. They are **environment**, not editor: they apply to the CLI, to
-`go vet`, and to whatever editor points at the tree. Numbered, because the
-`gofmt` note under Commands cites #2.
+These requirements apply to CLI tools and editors. The examples below use Git
+Bash; use equivalent native commands in PowerShell.
 
-**1. Generate the schema SDK before anything else.** `kanz/go.mod` `replace`s the
-schema SDK to `../kanz-schemas/gen/go` and `gen/` is gitignored (generated code is
-never committed, EVT-15a). Skip it and you get thousands of unresolved imports —
-the project is not broken, the SDK is missing. `~/go/bin/buf.exe` is permanently
-blocked by Windows Application Control: a *downloaded* exe is blocked, one you
-*build into a project-local directory* runs. So build it:
+1. **Set `GOTMPDIR` before building.** Windows Application Control intermittently
+   blocks test binaries under `%TEMP%`, causing incomplete runs. Set Go's own
+   environment so all tools see it:
 
-```sh
-GOBIN="$(pwd)/.gotmp/bin" go install github.com/bufbuild/buf/cmd/buf@v1.69.0
-```
+   ```sh
+   mkdir -p "$HOME/.go-tmp"
+   go env -w GOTMPDIR="$HOME/.go-tmp"  # undo: go env -u GOTMPDIR
+   ```
 
-**2. Move `GOTMPDIR` out of `%TEMP%` — do this first.** Windows Application
-Control intermittently blocks freshly built test binaries in `%TEMP%`
-(`Uygulama Denetimi ilkesi bu dosyayı engelledi`). `go test` then fails at random
-and **the suite silently under-runs**, which is the dangerous part: a run that
-never compiled half the packages still exits 0.
+   The Makefile overrides this with in-module `kanz/.gotmp` in CI. Use
+   `git ls-files` for gofmt, never a tree walk that includes generated test mains.
 
-```sh
-mkdir -p "$HOME/.go-tmp"
-go env -w GOTMPDIR="$HOME/.go-tmp"     # undo with: go env -u GOTMPDIR
-```
+2. **Generate the schema SDK.** `kanz/go.mod` replaces the SDK with
+   `../kanz-schemas/gen/go`; ignored `gen/` is never committed (EVT-15a).
+   Missing generated code causes unresolved imports in a fresh checkout. The
+   host's downloaded `~/go/bin/buf.exe` is blocked; the established project-local
+   source build is:
 
-Set it in Go's own env so it reaches every tool, not just one shell. The Makefile
-exports its own `GOTMPDIR` pointing at `kanz/.gotmp` for CI — that path is
-*inside* the module and gitignored, which is why the fmt check asks git for the
-file list rather than walking the tree.
+   ```sh
+   GOBIN="$(pwd)/.gotmp/bin" go install github.com/bufbuild/buf/cmd/buf@v1.69.0
+   ```
 
-**3. Build tags.** There are **no `binance`/`okx` tags and never were** — the
-venue connectors are hand-rolled over `github.com/coder/websocket` and compile in
-the default build (#100 retired that claim). Four tags exist:
+   If policy blocks that build too, report it rather than trying alternate
+   routes. Run `buf generate` and `bash bootstrap-go-sdk.sh` in `kanz-schemas`
+   after schema changes and on fresh checkouts.
 
-| Tag | Selects | Default (`!tag`) |
-|---|---|---|
-| `redis` | `pkg/redisadapter/goredis.go`, `risk-engine/dedup_redis.go`, `webhook-ingest/nonces_redis.go` | `dedup_default.go`, `nonces_default.go` |
-| `anthropic` | `copilot/model_anthropic.go` | `copilot/model_stub.go` |
-| `openrouter` | `copilot/model_openrouter.go` and its tests | provider absent |
-| `perf` | `internal/risk/compute/latency_budget_test.go` | — |
+3. **Use actual build tags.** There are no `binance` or `okx` tags; venue
+   connectors use `github.com/coder/websocket` in the default build (#100).
 
-The default build is vendor-free of go-redis and the Anthropic SDK — not of any
-venue. Tags must reach `gopls` per-editor; in VS Code, `.vscode/settings.json`
-(untracked): `{ "go.buildTags": "redis anthropic" }`. Without them those files
-grey out with errors, and the `!tag` defaults beside them are what the untagged
-build compiles.
+   | Tag | Selects | Default (`!tag`) |
+   |---|---|---|
+   | `redis` | `pkg/redisadapter/goredis.go`, `risk-engine/dedup_redis.go`, `webhook-ingest/nonces_redis.go` | `dedup_default.go`, `nonces_default.go` |
+   | `anthropic` | `copilot/model_anthropic.go` | `copilot/model_stub.go` |
+   | `openrouter` | `copilot/model_openrouter.go` and tests | Provider absent |
+   | `perf` | `internal/risk/compute/latency_budget_test.go` | No performance test |
 
-**4. `go env -w GOFLAGS=-mod=mod`** permits module dependency resolution.
-It does not generate code: run `buf generate` and `bash bootstrap-go-sdk.sh`
-explicitly after schema changes and in every fresh checkout.
+   The default excludes go-redis and Anthropic SDK bindings, not venues. Pass
+   tags to `gopls` too; for example untracked `.vscode/settings.json` can use
+   `{ "go.buildTags": "redis anthropic" }`.
 
-**5. Line endings.** `.gitattributes` pins `*.go` and `*.proto` to `text eol=lf`
-because gofmt emits LF; a CRLF working copy makes `gofmt -l` list files whose
-formatting is perfect. The attribute only applies to files checked out *after* it
-was added, so a clone predating it keeps CRLF forever.
+4. **Permit dependency resolution:** `go env -w GOFLAGS=-mod=mod`. This does not
+   generate schemas; generation remains an explicit step.
 
-**Diagnose with `git ls-files --eol`, never by grepping for carriage returns.**
+5. **Diagnose line endings through Git.** `.gitattributes` pins Go and Protobuf
+   to LF, but old worktrees can retain CRLF:
 
-```sh
-git ls-files --eol '*.go' | awk '$2 == "w/crlf" {print $NF}'   # worktree is CRLF
-git ls-files --eol '*.go' | awk '$1 != "i/lf"   {print $NF}'   # index is not LF
-```
+   ```sh
+   git ls-files --eol '*.go'
+   ```
 
-`i/lf` means the index — what git stores — is LF and there is nothing to commit;
-`w/crlf` means your working copy is stale, fix it locally and do **not** commit.
-Every `.go` file in this repo is already `i/lf`, so a `w/crlf` hit is always a
-local artifact: `rm <files> && git checkout -- <files>`, then confirm `git status`
-shows nothing modified.
+   `i/lf` is committed LF; `w/crlf` is a local checkout condition. Restore only
+   confirmed clean affected files after preserving local edits, then confirm
+   `git status`. Do not commit line-ending churn. Do not use carriage-return
+   grep counts: Git Bash escaping can become an empty pattern and falsely count
+   every line as CRLF.
 
-The tempting check — `git show HEAD:file.go | grep -c $'\r'` — is wrong and has
-already caused a false diagnosis. In Git Bash `$'\r'` does not reliably survive
-into `grep`; degraded to an empty pattern it matches **every** line, and the count
-comes back equal to the file's line count, which reads exactly like "every line
-ends CRLF". That turns a local checkout artifact into an apparent committed-CRLF
-problem whose "fix" is line-ending churn across files nobody touched.
+Git for Windows does not ship `make`. The Makefile remains the canonical task
+list; use its underlying commands or install make through the normal setup.
+The cgo/race limitation above remains a verification limitation.
 
-**Not blockers, but know them:** `-race` requires cgo and does not run here (see
-Constraints); `make` is not shipped with Git for Windows — the Makefile is the
-canonical task list and works in CI/WSL/Linux, so on Windows either
-`scoop install make` or run the underlying `go` commands.
+## Durable context and work tracking
 
-## Coordination at N replicas
+Use the repository and GitHub on `eighred/kanz`, not the last transcript, as
+authority. At session start read these rules, working-tree status, current branch,
+main's latest commit and relevant open PRs/issues. Respect the user's current
+scope; when selecting work, prefer the highest-priority unfinished issue.
 
-How stateful consumers behave when scaled out. Two guarantee classes, and the
-choice is per component rather than platform-wide:
+Stable rules live here, implementation beside its code and in git history,
+decisions/blockers/deferred work in Issues, and implementation/verification
+history in PRs. Forge workflows retrieve that context; a second memory database
+or project-state document is not needed. Do not add plan files, project-state,
+progress, status, roadmap, session-note or scratchpad documents anywhere in the
+repository. Keep transient coordination in the chat; revalidate remembered facts
+against the current revision.
 
-- **Best-effort (per-process, the default).** State lives in each replica's
-  memory. Correct under scale-out *because the handlers are idempotent* — the
-  per-process state is an optimization and an in-instance safety net, not the
-  correctness boundary. Re-baselines on restart.
-- **Strong (shared-state, opt-in).** State lives in a store every replica shares
-  (Redis/Dragonfly, or the `platform.model` log), so replicas coordinate.
+For discovered defects, blockers or decisions outside the current PR, search
+Issues first and reuse a matching issue before opening another. Record discovered
+work before the session ends and link it from the PR, subject to explicit user
+instructions about issue creation. Do not leave engineering decisions solely in
+conversation or misrepresent unresolved work as complete.
 
-**The floor is always idempotent handlers.** Shared state reduces duplicate
-*work* and false cross-replica divergence; it does not replace handler
-idempotency, and where the shared operation cannot be atomic across pods the
-handler is still the thing that makes a duplicate harmless.
+Issues carry one kind (`open-work`, `needs-verification`, `blocked-external`,
+`decision-needed`), one priority (`P0`/`P1`/`P2`) and an area label. Bodies state
+Evidence (file/commit/result), Verified when (command and expected result),
+Blocked by and Source. `needs-verification` means merged without its required
+operational proof. Historical M0-M6 milestones (#55-#85) are not today's work
+plan; M0, M1 and M6 are complete, and unmilestoned work is not unplanned.
 
-| Component | Best-effort default | Shared-state mode | Seam |
-|---|---|---|---|
-| Bus dedup | `DedupWindow` (per-instance) | `RedisDedup` (cross-pod seen-set) | `bus.WithDeduper`; go-redis binding `redisadapter.New` |
-| PRED-09 model registry | process-local `Registry` | `CoordinatedRegistry` over `platform.model` | `registry.CoordinatedRegistry` |
-| Gap / staleness / watermark / drift detectors | per-process, per-partition | — | n/a |
-
-Three rules that are easy to get wrong, and each has a cost attached:
-
-- **Do not add shared state where partitioning already gives single ownership.**
-  The detectors key on a `partition_key` the bus already routes to one consumer
-  in a group, so per-process state is correct without coordination.
-- **There is no longer a NATS/Kafka reconciler here, and that is the point.**
-  DATA-M1 made Kafka DERIVED from NATS by a single archiver, so there are no two
-  independent transports left to reconcile, and DATA-M4 deleted
-  `internal/integrity` outright. The single-writer shape that replaced it is held
-  by `test/arch/drain_single_writer_gate_test.go` — the rule left and the guard
-  stayed, which is the disposition this file prescribes for an invariant that has
-  acquired one (#819).
-- **Every shared backend fails OPEN, never closed.** A Redis error degrades dedup
-  to no-dedup rather than to a fabricated hit. An outage must not block
-  consumption, and idempotent handlers are what makes that safe.
-
-`platform.model` is the append log of record (infinite retention, EVT-09): a
-starting replica replays it from offset 0 to rebuild the registry, so the topic
-is the source of truth and the local `Registry` is a materialized cache. Publish
-keyed by `model_id` so a model's `record_validation` precedes its primary
-register in per-partition order, and carry the producing replica's `origin` so a
-replica skips applying its own events.
-
-## Changing the platform
-
-Kanz evolves incrementally. Prefer, in this order:
-
-existing typed contracts over parallel ones · existing authorization over a new
-security system · canonical domain models over endpoint-specific ones · explicit
-capabilities over implicit defaults · server-side projection over agent context ·
-deterministic execution over agent-mediated execution · small migrations over
-broad rewrites · existing precedent over speculative abstraction · measured
-behavior over assumption · security boundaries over convenience.
-
-Two consequences that are easy to get wrong:
-
-- **MCP augments Kanz; it does not redefine it.** It is an interface
-  architecture, and never a reason to rewrite execution. Deduplicating venue
-  adapters is a separate piece of work that must not weaken isolation or flatten
-  venue-specific semantics.
-- **The TUI is retained for now, and is not deletable on sight.** The long-term
-  direction is the Web app as the primary operator interface, and getting there
-  is a deliberate TUI → Web *migration*, never dead-code cleanup: web equivalent
-  → operational parity → production verification → retire → remove. **Unused by
-  the web client is not evidence an operation is dead** — `internal/tui/universe`
-  is today the only caller of two live gateway control routes, so deleting it on
-  that reasoning would orphan node provisioning. Every required human operation
-  must remain available before and after retirement.
-
-## Where work is tracked
-
-**GitHub Issues** on `eighred/kanz`. There is no task board, no plan files and no
-architecture document in this repository; all three were tried and each became a
-second answer competing with the code. Everything durable lives beside the code,
-in git history, or GitHub Issues and PRs.
-
-**That extends to project state, and it is not negotiable.** Do not add
-`project-state.md`, progress files, status files, roadmap files, session notes or
-scratchpad documents — not under `docs/`, not anywhere. The persistent record is:
-AGENTS.md for stable rules, **Issues** for discovered work, blockers, deferred
-work and decisions, **PRs** for implementation and verification history, and git
-history for the code. A status file is a fifth answer that goes stale the day
-after it is written, and this repository has already deleted 38 plan files and an
-architecture document for exactly that reason.
-
-**Discovered work goes to an Issue before the session ends.** If investigation
-turns up a defect, a blocker, an architectural decision, or work outside the
-current PR: search Issues first, reuse one if it fits, and open one if it does
-not. No engineering decision or discovered defect should exist only in a
-conversation. Reference the issue from the PR so discovery → implementation →
-verification stays connected.
-
-**Starting a session, read the repository rather than the last transcript**:
-AGENTS.md, `git status`, the current branch, open PRs, open Issues, and main's
-latest commit. Then pick the highest-priority unfinished issue. A previous
-conversation is not state.
-
-The `M0`…`M6` milestones covered issues #55–#85 and were then abandoned: M0, M1
-and M6 are **closed and complete**, and most open issues carry no milestone at
-all. Read them as history. Do not force-fit new work into them, and do not treat
-an unmilestoned issue as unplanned.
-
-Every issue carries one **kind** label (`open-work`, `needs-verification`,
-`blocked-external`, `decision-needed`), one **priority** (`P0`/`P1`/`P2`), and an
-**area**. `needs-verification` means *merged, and nothing has run it* — a
-distinct state from done, because a merged fix and a green suite are not
-evidence.
-
-An issue body states four things: **Evidence** (`file:line`, a commit, or a
-quoted result), **Verified when** (a runnable command and its expected result),
-**Blocked by**, and **Source**.
-
-### Sequencing that outlives any one issue
-
-- **Never place real orders against a store that may not be backed up.** The one
-  ordering error with an unrecoverable failure mode. DR coverage lands first.
-
-## Engineering and verification references
-
-The original private `kanz-forge` package was retired in #1087. The single
-repository-owned plugin is under `.agents/plugins/kanz-forge/`; its marketplace
-entry is `.agents/plugins/marketplace.json`. Its focused skills help investigate,
-route, implement, verify and deliver work. This file remains authoritative for
-platform boundaries and safety rules; a skill cannot amend them implicitly.
-
-For installation, verification, first use and rollback, see [Kanz setup](README.md).
-
-On a fresh checkout, run
-`python .agents/plugins/kanz-forge/scripts/validate.py`, then
-`codex plugin marketplace add .` and `codex plugin add kanz-forge@kanz-local`.
-The validator and `.github/workflows/kanz-forge.yml` check the repository-owned
-manifest, marketplace path, skill entrypoints and supporting references.
-
-Read the affected component's code, migrations and architecture guards before
-changing its contracts. Use `.github/workflows/kanz-ci.yml` for the actual CI
-jobs and `kanz/.golangci.yml` for lint policy. Report the tested commit, package
-coverage, real dependencies and skipped tests; a skipped dependency test is not
-verification. A merge is not closure until the issue's acceptance conditions
-and merged revision have been verified. Developer entrypoint repairs are
-tracked in #1323; do not substitute a green smoke stack for capital-path proof.
-
-**An invariant worth keeping is a guard, not a paragraph.** The arch tests in
-`kanz/test/arch/` enforce these rules — default-deny, with named exemptions that
-carry the issue retiring them and a dead-entry check so an exemption cannot
-outlive its repair. Add one there rather than a rule here. The Invariants section
-above is the exception, not the precedent: each line is there because no guard
-covers it yet, and each should leave when one does.
-
-Read them before filing a bug: an absence that looks like an oversight is often
-a guarded decision, and the exemption states why. A guard that passes proves
-what it *resolved*, not what its name claims — mutate the artifact to find out
-which.
-
-## Security and quantitative review
-
-For changes to identity, RLS, message validation, signing or release workflows,
-use the security-audit skill to identify the affected principal, resource and
-trust boundary. Run the findings CLI on Linux: Windows lacks the required
-no-follow/nonblocking input flags. Never disable those safeguards to make a
-local check pass. The imported skill is pinned in its entry point and carries
-its MIT notice. Node is a development-time validator dependency only.
-
-For pricing, portfolio and backtest changes use financial-verification before
-acceptance. Keep production computations in the owning service or Go library.
-For rollback reinstall the previous tracked plugin revision from its checkout;
-do not hand-edit the installed cache.
+Forge installation, verification and rollback belong in its README. Validate
+the tracked plugin with `python .agents/plugins/kanz-forge/scripts/validate.py`;
+`.github/workflows/kanz-forge.yml` checks its package and supporting references.
+Update or roll back through a tracked checkout and supported plugin installation,
+never by hand-editing the installed cache. Host discovery configuration is an
+adapter, not a separate source of engineering instructions.

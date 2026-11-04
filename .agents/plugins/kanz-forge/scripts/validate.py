@@ -57,22 +57,53 @@ def frontmatter(skill: Path) -> dict[str, str]:
     return fields
 
 
-def referenced_files(skill: Path) -> list[Path]:
+def referenced_files(skill: Path, boundary: Path = PLUGIN) -> list[Path]:
     text = skill.read_text(encoding="utf-8-sig")
     references = []
     for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
         if target.startswith(("https://", "http://", "#")):
             continue
-        path = (skill.parent / target).resolve()
-        if not path.is_relative_to(PLUGIN) or not path.is_file():
+        path = (skill.parent / target.split("#", 1)[0]).resolve()
+        if not path.is_relative_to(boundary) or not path.is_file():
             fail(f"missing or escaping skill reference {target!r} in {skill}")
         references.append(path)
     return references
 
 
+def command_files() -> list[Path]:
+    """Reject broken Chat routes without pretending to execute an agent workflow."""
+    catalog_path = PLUGIN / "skills/commands/commands.json"
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    files = [catalog_path]
+    if not {"/work", "/ship"}.issubset(catalog):
+        fail("core native commands are missing")
+    for name, item in catalog.items():
+        if not re.fullmatch(r"/[a-z-]+", name) or item.get("target") not in {"optional", "required"}:
+            fail(f"invalid native command: {name}")
+        if item.get("mode") or not item.get("workflow") or not item.get("description"):
+            fail(f"command must have a native workflow: {name}")
+        skills = item.get("skills", [])
+        if not skills or not isinstance(skills, list) or any(skill not in EXPECTED_SKILLS for skill in skills):
+            fail(f"unknown or missing skill mapping: {name}")
+        for skill in skills:
+            path = PLUGIN / "skills" / skill / "SKILL.md"
+            if not path.is_file():
+                fail(f"missing mapped skill: {name} -> {skill}")
+            files.append(path)
+        # Catalog instruction paths must survive packaging too, even when the
+        # corresponding optional tool is not installed on this host.
+        for relative in re.findall(r"(?:references|scripts)/[A-Za-z0-9_./-]+\.(?:md|py)", item["workflow"]):
+            base = PLUGIN / "skills/commands" if relative.startswith("references/") else PLUGIN
+            path = (base / relative).resolve()
+            if not path.is_relative_to(PLUGIN) or not path.is_file():
+                fail(f"missing or escaping command reference: {name} -> {relative}")
+            files.append(path)
+    return files
+
+
 def tracked(paths: list[Path]) -> None:
     required = {path.relative_to(ROOT).as_posix() for path in paths}
-    raw = subprocess.check_output(["git", "ls-files", "-z", "--", ".agents/plugins"], cwd=ROOT)
+    raw = subprocess.check_output(["git", "ls-files", "-z", "--", *sorted(required)], cwd=ROOT)
     missing = required - set(raw.decode("utf-8").split("\0"))
     if missing:
         fail("required plugin files not tracked: " + ", ".join(sorted(missing)))
@@ -113,6 +144,10 @@ def validate(check_tracked: bool) -> None:
             fail(f"skill name does not match its directory: {skill}")
         files.append(skill)
         files.extend(referenced_files(skill))
+    files.extend(command_files())
+    for document in PLUGIN.rglob("*.md"):
+        files.append(document)
+        files.extend(referenced_files(document, ROOT if document.parent == PLUGIN else PLUGIN))
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8-sig")
     if ".agents/plugins/kanz-forge/" not in agents:
         fail("AGENTS.md does not point to the plugin authority")
@@ -121,6 +156,7 @@ def validate(check_tracked: bool) -> None:
     if {p.stem for p in profiles} != {"kanz_mapper","kanz_reviewer","kanz_security"}:
         fail("unexpected specialist profile inventory")
     files.extend(profiles)
+    files = sorted(set(files))
     if check_tracked:
         tracked(files)
     print(f"kanz-forge: {len(skills)} skills, {len(files)} required files, marketplace={marketplace['name']}: OK")

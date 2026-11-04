@@ -23,5 +23,14 @@ While one exact head is in CI, independent issues may proceed in separate
 worktrees. Keep that PR head fixed until its checks finish; a new push needs
 new evidence. Sequence work that shares files, contracts or live state.
 
+Use the [routing table](../commands/SKILL.md) on the final diff, including
+security review for changed trust boundaries and financial verification for
+changed calculations. A review of an earlier scope is insufficient after a
+new contract or permission is added. Compare the full applicable check set
+with the expected workflow, including unexpected skips and missing jobs.
+Use an event or bounded wait when available; while CI runs, continue authorized
+independent work instead of repeatedly polling unchanged state. Carry already
+granted merge permission for this specific PR forward, within its stated scope.
+
 Report the exact head tested, merge commit or blocker, dependency proof, skipped
 tests and linked issue disposition. Keep user worktree changes out of the PR.
