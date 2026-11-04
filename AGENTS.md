@@ -72,7 +72,8 @@ The gateway is the sole identity authority. It authenticates and injects
 gateway their only reachable caller. Do not trust those headers independently
 of that network boundary.
 
-Every order-path step is mandatory, including for admins, MCP and test helpers.
+Every order-path hop is typed and every step is mandatory, including for admins,
+MCP and test helpers.
 OMS to venue adapter uses typed gRPC/mTLS over `venue.v1`, gated by `buf breaking`
 and capability declarations. Exchange REST/WS and signing live only in the
 adapter. Changing either transport requires an architectural decision with its
