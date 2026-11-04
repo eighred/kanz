@@ -20,7 +20,8 @@ separate restore drill produces a current DR attestation.
   upstream AWS credential provider; no `dockerconfigjson` or registry PAT is
   stored in Kubernetes.
 - A GitHub OIDC role restricted to `repo:eighred/kanz` on `refs/heads/main`.
-  Its policy can upload layers only to those fourteen repositories.
+  Its policy can publish only to those fourteen repositories, including the
+  manifest read ECR requires during `docker push`.
 - Embedded etcd with encrypted Kubernetes secrets and local snapshots every six
   hours; DLM snapshots the data EBS volume daily and retains seven.
 - An Osaka (`ap-northeast-3`) recovery bucket with a dedicated rotation-enabled
