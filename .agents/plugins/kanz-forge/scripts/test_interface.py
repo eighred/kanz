@@ -1,5 +1,7 @@
 import contextlib
 import io
+from pathlib import Path
+import subprocess
 import sys
 import unittest
 from unittest.mock import patch
@@ -22,6 +24,21 @@ class InterfaceTests(unittest.TestCase):
         self.assertNotIn("/bench ", short)
         self.assertIn("/bench ", self.help("all"))
         self.assertNotIn("/financial ", self.help("all"))
+
+    def test_work_subagent_target_reaches_the_native_parallel_workflow(self):
+        out = io.StringIO()
+        with patch.object(sys, "argv", ["forge", "--preview", "/work", "subagents", "2", "#1106"]), contextlib.redirect_stdout(out):
+            self.assertEqual(command.main(), 0)
+        self.assertIn("$kanz-forge:commands /work", out.getvalue())
+        self.assertIn("references/parallel-work.md", out.getvalue())
+        self.assertIn('User target: "subagents 2 #1106"', out.getvalue())
+
+    def test_root_cli_shim_keeps_the_documented_preview(self):
+        root=Path(__file__).resolve().parents[4]
+        result=subprocess.run([sys.executable,str(root/"forge.py"),"--preview","/work","subagents","2","#1106"],
+                              cwd=root,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('User target: "subagents 2 #1106"',result.stdout)
 
     def test_agent_setup_preserves_custom_profiles(self):
         import tempfile

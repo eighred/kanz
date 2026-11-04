@@ -30,7 +30,7 @@ class ForgeTests(unittest.TestCase):
 
     def test_inventory_and_provenance(self):
         entries=evidence.registry()
-        self.assertGreaterEqual(len(entries),12)
+        self.assertEqual(set(entries), {"cloudflare/security-audit-skill"})
         for row in entries.values():
             self.assertTrue(row["license_sources"])
             self.assertTrue(evidence.OID.fullmatch(row["pin"]))

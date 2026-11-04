@@ -19,5 +19,9 @@ For a genuine external blocker, leave one authoritative draft with a concrete
 missing input and no implied production approval. Do not convert a draft
 capital-path PR to ready or lift the admission halt from CI alone.
 
+While one exact head is in CI, independent issues may proceed in separate
+worktrees. Keep that PR head fixed until its checks finish; a new push needs
+new evidence. Sequence work that shares files, contracts or live state.
+
 Report the exact head tested, merge commit or blocker, dependency proof, skipped
 tests and linked issue disposition. Keep user worktree changes out of the PR.

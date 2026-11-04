@@ -6,8 +6,11 @@ import json
 import os
 from pathlib import Path, PureWindowsPath
 import re
+import shutil
 import sqlite3
 import subprocess
+import sys
+from skill_discovery import discover_skills
 
 VERSION = 1
 SCOPES = ("kanz/internal/risk/pricing", "kanz/internal/risk/benchmarks",
@@ -99,6 +102,134 @@ def prioritize(issues):
             "decision":"Investigate code, dependencies, duplicates and existing approvals before selection. No task dispatched."}
 
 
+def _probe(args, root, timeout=30):
+    try:
+        return subprocess.run(args, cwd=root, capture_output=True, text=True, timeout=timeout), None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, type(exc).__name__
+
+
+def doctor(root):
+    """Report observed capabilities without certifying a Chat session or production path."""
+    from evidence import PLUGIN, registry
+
+    manifest = json.loads((PLUGIN / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
+    version = manifest["version"]
+    sha = git(root, "rev-parse", "HEAD").decode().strip()
+    result = {"checkout": {"path": str(root), "sha": sha,
+                           "dirty": bool(git(root, "status", "--porcelain")),
+                           "plugin_version": version}, "features": {}}
+    features = result["features"]
+
+    validation, error = _probe([sys.executable, str(PLUGIN / "scripts/validate.py"), "--tracked"], root, 30)
+    rows = {}
+    try:
+        rows = registry()
+        provenance = {"status": "verified", "imports": sum(len(row["imports"]) for row in rows.values())}
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        provenance = {"status": "failed", "reason": type(exc).__name__}
+    if validation and validation.returncode == 0 and provenance["status"] == "verified":
+        features["plugin_structure"] = {"status": "implemented", "evidence": "tracked validator and imported-file provenance passed", "provenance": provenance}
+    else:
+        features["plugin_structure"] = {"status": "incomplete", "reason": error or "validator or import provenance failed", "provenance": provenance}
+
+    preview, error = _probe([sys.executable, str(PLUGIN / "scripts/command.py"), "--preview", "/work", "sample"], root, 10)
+    features["command_preview"] = ({"status": "operational", "evidence": "terminal workflow preview passed"}
+                                    if preview and preview.returncode == 0 and "$kanz-forge:commands /work" in preview.stdout else
+                                    {"status": "incomplete" if preview else "unverified",
+                                     "reason": "workflow preview failed" if preview else "preview probe unavailable: " + error})
+    inventory, error = _probe([sys.executable, str(PLUGIN / "scripts/command.py"), "/upstream"], root, 10)
+    try:
+        inventory_ok = (inventory is not None and inventory.returncode == 0 and
+                        {entry["repo"] for entry in json.loads(inventory.stdout)} == set(rows))
+    except (ValueError, KeyError, TypeError):
+        inventory_ok = False
+    features["upstream_inventory"] = ({"status": "operational", "evidence": "local upstream inventory and provenance passed"}
+                                      if inventory_ok else {"status": "incomplete" if inventory else "unverified",
+                                                            "reason": "inventory probe failed" if inventory else "inventory probe unavailable: " + error})
+    features["financial_verification"] = {"status": "unverified", "evidence": "existing Go financial suites are callable",
+                                          "reason": "doctor does not run financial tests or certify a fresh result"}
+
+    cli = shutil.which("codex.exe") or shutil.which("codex")
+    installed = {"status": "unverified", "reason": "native Codex CLI unavailable"}
+    if cli and Path(cli).suffix.lower() not in {".cmd", ".bat"}:
+        listing, error = _probe([cli, "plugin", "list", "--marketplace", "kanz-local", "--json"], root, 30)
+        if not listing:
+            installed = {"status": "unverified", "reason": "CLI plugin query unavailable: " + error}
+        elif listing.returncode:
+            installed = {"status": "incomplete", "reason": "CLI plugin query failed"}
+        else:
+            try:
+                entries = json.loads(listing.stdout)["installed"]
+                matches = [entry for entry in entries if entry.get("name") == "kanz-forge" and entry.get("enabled")]
+                source = matches[0].get("source", {}).get("path", "") if len(matches) == 1 else ""
+                if len(matches) != 1 or matches[0].get("version") != version or Path(source).resolve() != PLUGIN:
+                    installed = {"status": "incomplete", "reason": "enabled installation does not match this checkout",
+                                 "observed_source": source, "observed_version": matches[0].get("version") if matches else None}
+                else:
+                    installed = {"status": "configured", "source": source, "version": version}
+                    try:
+                        cache = (Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) /
+                                 "plugins/cache/kanz-local/kanz-forge" / version).resolve()
+                        found = {skill["name"] for skill in discover_skills(cli, root)
+                                 if skill.get("enabled") and Path(skill["path"]).resolve().is_relative_to(cache)}
+                        expected = {"kanz-forge:" + path.parent.name for path in (PLUGIN / "skills").glob("*/SKILL.md")}
+                        installed["discovered_skills"] = sorted(found & expected)
+                        if expected <= found:
+                            installed["status"] = "operational"
+                        else:
+                            installed["status"] = "incomplete"
+                            installed["reason"] = "CLI skill discovery missed installed Forge skills"
+                    except (OSError, ValueError, KeyError, TimeoutError, subprocess.TimeoutExpired) as exc:
+                        installed["reason"] = "CLI skill discovery unverified: " + type(exc).__name__
+            except (ValueError, KeyError, TypeError) as exc:
+                installed = {"status": "incomplete", "reason": "invalid CLI plugin result: " + type(exc).__name__}
+    features["installed_skills"] = installed
+
+    features["native_subagent_delegation"] = {"status": "unverified", "reason": "Python cannot observe delegation in the current Codex Chat host"}
+    features["ci_aware_coordination"] = {"status": "unverified", "reason": "requires an exact-head PR check and coordination result"}
+
+    db = database(root)
+    if not db.exists():
+        features["receipt_memory"] = {"status": "implemented", "observed": "empty", "scope": "pricing receipts only; no fresh verification claim"}
+    else:
+        try:
+            receipt = recall(root)
+            features["receipt_memory"] = {"status": "operational", "observed": "readable", "receipt_count": len(receipt["receipts"]),
+                                          "scope": "pricing receipts only; unchanged source is not a fresh test"}
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            features["receipt_memory"] = {"status": "incomplete", "reason": "receipt read failed: " + type(exc).__name__}
+
+    tests = sorted((PLUGIN / "skills/security-audit").glob("*.test.cjs"))
+    node = shutil.which("node")
+    if provenance["status"] != "verified" or not tests:
+        features["security_audit_validator"] = {"status": "incomplete", "reason": "import provenance or test inventory failed"}
+    elif not sys.platform.startswith("linux"):
+        features["security_audit_validator"] = {"status": "unverified", "reason": "offline validator suite requires Linux file protections"}
+    elif not node:
+        features["security_audit_validator"] = {"status": "unverified", "reason": "Node.js unavailable"}
+    else:
+        tested, error = _probe([node, "--test", *map(str, tests)], root, 90)
+        features["security_audit_validator"] = ({"status": "operational", "evidence": "offline Node validator tests passed"}
+                                                 if tested and tested.returncode == 0 else
+                                                 {"status": "incomplete" if tested else "unverified",
+                                                  "reason": "offline Node tests failed" if tested else "Node test probe unavailable: " + error})
+    features["security_audit_findings_cli"] = {"status": "unverified",
+                                               "reason": "findings CLI requires Linux and was not run" if not sys.platform.startswith("linux")
+                                               else "no safe fixture probe was run by doctor"}
+
+    gh = shutil.which("gh")
+    if not gh:
+        features["github_repo_read"] = {"status": "unverified", "reason": "GitHub CLI unavailable"}
+    else:
+        checked, error = _probe([gh, "api", "--method", "GET", "repos/eighred/kanz", "--jq", ".full_name"], root, 15)
+        features["github_repo_read"] = ({"status": "operational", "evidence": "read-only repository API returned eighred/kanz"}
+                                               if checked and checked.returncode == 0 and checked.stdout.strip() == "eighred/kanz" else
+                                               {"status": "incomplete" if checked else "unverified",
+                                                "reason": "repository API probe failed" if checked else "GitHub probe unavailable: " + error})
+    return result
+
+
 def run(action,target,root,collector):
     if action in {"/remember","/memory","/recall"}:
         if target not in ("","pricing"): raise ValueError("supported receipt scope: pricing")
@@ -113,9 +244,4 @@ def run(action,target,root,collector):
         if len(rows)>=1000: raise ValueError("issue snapshot possibly truncated")
         return prioritize(rows)
     if action!="/doctor": raise ValueError("unknown planning operation")
-    config=root/".agents/plugins/kanz-forge/.codex-plugin/plugin.json"
-    installed=json.loads(subprocess.check_output(["codex","plugin","list","--marketplace","kanz-local","--json"],timeout=45))
-    return {"checkout":str(root),"sha":git(root,"rev-parse","HEAD").decode().strip(),
-            "dirty":bool(git(root,"status","--porcelain")),"checkout_version":json.loads(config.read_text())["version"],
-            "installed":[{"version":p["version"],"enabled":p["enabled"],"source":p["source"]["path"]} for p in installed["installed"] if p["name"]=="kanz-forge"],
-            "memory_exists":database(root).is_file(),"scope":"observed state; no repair performed"}
+    return doctor(root)

@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from skill_discovery import discover_skills
 
 root = Path(__file__).resolve().parents[4]
 source = root / ".agents/plugins/kanz-forge"
@@ -52,39 +53,9 @@ with disposable_profile() as profile:
         assert src.read_bytes().replace(b"\r\n",b"\n") == dst.read_bytes().replace(b"\r\n",b"\n"), path
     print(f"Verified {len(tracked)-1} installed files in disposable profile: {result['version']}")
 
-    import queue
-    import threading
-    messages = queue.Queue()
-    proc = subprocess.Popen([cli,"app-server","--stdio"], cwd=root,
-                            env={**os.environ,"CODEX_HOME":profile}, stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,encoding="utf-8")
-    def consume():
-        for line in proc.stdout:
-            messages.put(json.loads(line))
-    threading.Thread(target=consume,daemon=True).start()
-    def send(message):
-        proc.stdin.write(json.dumps(message)+"\n")
-        proc.stdin.flush()
-    def receive(identifier):
-        import time
-        deadline=time.monotonic()+30
-        while True:
-            msg=messages.get(timeout=max(0,deadline-time.monotonic()))
-            if msg.get("id")==identifier:
-                if "error" in msg: raise RuntimeError(msg["error"])
-                return msg["result"]
-    try:
-        send({"id":1,"method":"initialize","params":{"clientInfo":{"name":"forge_verification","version":"1"}}})
-        receive(1)
-        send({"method":"initialized","params":{}})
-        send({"id":2,"method":"skills/list","params":{"cwds":[str(root)],"forceReload":True}})
-        entries=receive(2)["data"]
-        expected={"kanz-forge:"+p.parent.name for p in (source/"skills").glob("*/SKILL.md")}
-        found={s["name"] for e in entries for s in e["skills"] if s["enabled"]
-               and Path(s["path"]).is_relative_to(installed)}
-        assert found==expected,(found,expected)
-        print(f"Fresh Codex discovery: {len(found)} enabled Forge skills")
-    finally:
-        proc.stdin.close()
-        try:proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:proc.terminate();proc.wait(timeout=5)
+    entries=discover_skills(cli,root,env={**os.environ,"CODEX_HOME":profile})
+    expected={"kanz-forge:"+p.parent.name for p in (source/"skills").glob("*/SKILL.md")}
+    found={s["name"] for s in entries if s["enabled"]
+           and Path(s["path"]).resolve().is_relative_to(installed)}
+    assert found==expected,(found,expected)
+    print(f"Fresh Codex discovery: {len(found)} enabled Forge skills")

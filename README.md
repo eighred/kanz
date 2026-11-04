@@ -1,197 +1,123 @@
-# Kanz setup
+# Kanz and Kanz Forge
 
-For the application stack, start with [local development](kanz/dev/README.md).
-For the repository-owned Codex engineering skills, follow the steps below.
-Forge setup does not start services or require venue credentials.
+## Main repository overview
 
-## Describe the engineering outcome
+Kanz is Eighred's institutional investment operating system. The Go services,
+schemas, web client, inference service, and deployment configuration live in
+this repository. Start application development with
+[the developer guide](kanz/dev/README.md). Forge does not start those services
+or grant authority to trade or deploy.
 
-For example: “Investigate what Kanz is missing to replay a portfolio through a
-historical stress episode.” Give the decision you need and any known constraints.
-Forge should find the owning code, missing data and architectural gap, choose
-relevant methodology, and only then select tests. No finance-mode or suite name
-is needed. See the [design evidence guide](.agents/plugins/kanz-forge/skills/engineering-standard/references/design-evidence.md).
+## What is Kanz Forge?
 
-## Four everyday commands
+Kanz Forge is the repository-owned Codex engineering plugin in
+[.agents/plugins/kanz-forge](.agents/plugins/kanz-forge). It helps investigate an
+issue, find its owning component, implement a scoped change, verify the actual
+risk boundary, and deliver a PR. The marketplace entry is
+[.agents/plugins/marketplace.json](.agents/plugins/marketplace.json).
 
-In **Codex chat**, send a message such as `Kanz /ship #1385`. In a terminal
-at the repository root, use `python forge.py /ship '#1385'`. Quote issue
-numbers in PowerShell. The terminal starts interactive Codex for workflows;
-in an existing chat Forge performs the workflow there.
+Forge uses Codex's native skills and, when the host provides them, subagents.
+It does not run an agent service or a background task scheduler.
 
-| Command | Use it for |
+## Kanz Forge instructions
+
+[AGENTS.md](AGENTS.md) owns the platform's stable rules. Forge's
+[skills](.agents/plugins/kanz-forge/skills) provide focused workflows; the
+[command catalog](.agents/plugins/kanz-forge/skills/commands/commands.json)
+routes requested actions. The three tracked specialist profiles live in
+[the plugin](.agents/plugins/kanz-forge/agents). Optional `/agents setup`
+creates ignored `.codex/agents` compatibility copies for project discovery.
+Edit the plugin profiles, not those copies or the installed cache.
+
+Durable decisions and deferred work belong in GitHub Issues and PRs, alongside
+code and git history. `/remember pricing` stores only scoped test receipts in
+`~/.kanz-forge/receipts-v1.sqlite`; `/memory` reports whether their source
+bytes changed. Receipts do not replace fresh verification or store project
+decisions. Independent clones have separate receipt identities.
+
+## Core capabilities
+
+Forge routes issue work, scoped reviews, verification, PR delivery, missing-file
+reconciliation, and review of its imported source. Its evidence commands are
+deterministic checks with stated limits; they do not certify production state.
+
+## Usage in Codex Chat
+
+In a Codex Chat opened on this repository, use:
+
+| Request | Result |
 |---|---|
-| `Kanz /work #1234` | Implement an issue. Omit the number to select actionable work. |
-| `Kanz /ship #1385` | One delivery workflow: prepare the PR, diagnose/fix CI, merge when authorized, verify on main. Does not deploy to production. |
-| `Kanz /gaps` | Check missing file references and required artifacts against main; file or reuse issues for confirmed gaps. |
-| `Kanz /update` | Maintain Forge dependencies: identify relevant upgrades, review provenance and compatibility, then test and propose approved changes in a PR. Add an owner/repo to narrow the scope. |
+| `Kanz /work #1234` | Reconcile and implement one issue, then verify and prepare delivery. |
+| `Kanz /work` | Inspect live Issues, PRs, and current code before selecting actionable work. |
+| `Kanz /work subagents 2` | Request two native workers for independent work. Specific issues may follow the count. |
+| `Kanz /ship #1234` | Review a PR, repair failures, and merge only with approval for that PR. |
+| `Kanz /verify #1234` | Check the acceptance evidence without treating skips as passes. |
+| `Kanz /gaps` | Reconcile missing-file candidates with main and existing Issues. |
+| `Kanz /update` | Review Forge's registered external source and prepare an approved update. |
 
-`Kanz /help` shows these four. `Kanz /help all` lists specialist commands.
-For a read-only missing-link scan use `python forge.py /scan-files`; for a
-dependency check without preparing changes use `Kanz /upstream owner/repo`.
-No slash-menu installation or PowerShell function is required.
+`Kanz /help` shows everyday commands; `Kanz /help all` shows specialist
+commands. You can also invoke the installed skill explicitly as
+`$kanz-forge:commands /work #1234`.
 
-## Ask for a specialist agent
+For parallel work, the coordinating agent checks dependencies and file overlap,
+assigns distinct owners and worktrees, and keeps each CI result tied to the
+commit it tested. Workers continue independent tasks while CI runs; dependent
+tasks wait for their required result. The coordinator reviews worker results,
+handles failures, and integrates only after applicable checks and approvals.
+The requested count is limited by host capacity; Forge reports the effective
+count. If native subagents are unavailable, it reports that limit instead of
+claiming parallel execution. An instruction alone is not a running worker.
 
-Examples for Codex chat:
+## Configuration and requirements
 
-- “Delegate to kanz_mapper: trace the callers of YearFraction and return source locations.”
-- “Use kanz_reviewer on PR #1385. Which failure case matters most?”
-- “Have kanz_security review the Datamaster trust boundary; do not probe a live cluster.”
-
-From this checkout run `python forge.py /agents setup` once, then start a new
-Codex session. `python forge.py /agents` checks the project discovery copies
-against [the authoritative profiles](.agents/plugins/kanz-forge/agents).
-Setup refuses to overwrite a different profile. If it reports a conflict,
-compare the named files before replacing a generated copy. Do not edit the cache.
-These roles inherit host permissions; their instructions alone are not a sandbox.
-Request one specialist for a bounded question. Additional agents cost tokens;
-no speed or cost improvement has been established.
-
-## Install Kanz Forge
-
-Prerequisites: Git, Python 3.9 or later, and a Codex CLI with the plugin
-subcommand (`codex plugin --help`). Run these PowerShell commands from the
-repository root, which contains AGENTS.md and the .agents directory.
-
-Use the checkout containing the Forge revision you intend to install.
-If you already have a checkout, inspect `git status -sb` first; do not discard
-local work to install Forge. Keep the checkout available because Codex registers
-its path as the marketplace root.
+For Codex Chat, install the plugin from the checkout you intend to use. Python
+3.9 or later is needed for the repository validator and optional evidence CLI;
+ordinary Chat skill workflows use Codex directly. Git and GitHub access are
+needed for live issue and PR work. The host must expose native subagents for
+parallel work.
 
 ```powershell
-python .agents/plugins/kanz-forge/scripts/validate.py --tracked
+python -B .agents/plugins/kanz-forge/scripts/validate.py --tracked
 codex plugin marketplace add .
 codex plugin add kanz-forge@kanz-local
-codex plugin list --marketplace kanz-local --json
+python -B forge.py /doctor
 ```
 
-Stop if validation fails. In the final command's installed entry, check that
-enabled is true, version matches the manifest in your checkout, and source.path
-ends in .agents/plugins/kanz-forge. The candidate version is
-0.7.0+codex.20261104; its tracked validator reports eight skills. A five-skill
-result on the earlier main revision is expected.
+The validator checks tracked plugin structure. `/doctor` checks the current
+checkout, installed version and source, and CLI skill discovery when available.
+After changing the registered checkout revision, validate and install again,
+then start a new Codex task. Do not register a disposable worktree as a
+permanent marketplace or edit the installed cache. For rollback, install the
+previous reviewed checkout revision.
 
-## Use and update
+`forge.py` is the root terminal entry point. `python -B forge.py /help`
+lists commands, `python -B forge.py --preview /work '#1234'` prints the
+request, and normal terminal workflow commands launch interactive Codex.
+Quote issue numbers in PowerShell. From an existing Codex Chat, invoke the
+skill directly so the workflow stays in that chat. Deterministic evidence
+commands such as `/doctor`, `/memory`, and `/upstream` run locally.
+See [dependencies](.agents/plugins/kanz-forge/DEPENDENCIES.md) for the small
+set of development tools and imported source.
 
-Start a new Codex task in the repository. For example, ask:
-“Trace where a missing instrument convention could change an order decision;
-show me the current behavior and what we need to change.” You do not need to
-choose a test suite or copy skills into a user directory.
+## Feature status
 
-After changing the checkout revision, repeat validation, installation and the
-version/source check. To roll back, run those same commands from a checkout of
-the previous approved revision. Do not edit the installed cache.
+`python -B forge.py /doctor` reports **implemented** when checkout structure
+passes validation, **configured** when an enabled installed plugin matches
+that checkout, and **operational** when fresh CLI discovery finds its skills.
+It reports **incomplete** for an observed failure and **unverified** when a
+probe cannot run. This is an observed local status, not certification of every
+workflow or of the Codex Chat host. Its feature map covers command preview,
+upstream inventory, financial verification, installed skills, receipt memory,
+security validators, repository metadata access, native delegation, and CI
+coordination. Each result is limited to the probe named in its entry.
 
-## Optional security-validator tests
+| Feature | Evidence needed beyond configuration |
+|---|---|
+| Parallel work and CI-aware coordination | A live Chat run with native workers, separate ownership, exact-head CI, and a coordinated result. |
+| Financial receipt memory | Fresh, complete Go pricing suites for `/remember pricing`; `/memory` only reports receipt freshness. |
+| Security audit | Bundled offline validator tests on Linux, then a scoped review of the actual trust boundary. |
+| PR delivery | Required checks and reviews on the exact head, specific merge approval, and merged-main verification. |
 
-From the repository root on Linux with Node.js 22 available:
-
-```sh
-node --test .agents/plugins/kanz-forge/skills/security-audit/*.test.cjs
-```
-
-Node is needed for these offline validators, not to install the Markdown skills.
-On Windows the findings CLI refuses inputs when the required OS file protections
-are unavailable. Use Linux for the complete validator suite; keep the safeguards
-enabled. Installing Forge provides no authority to probe production systems.
-
-## Forge commands in VS Code
-
-In a new Codex chat in this repository, type:
-
-    $kanz-forge:commands /help
-    $kanz-forge:commands /work #1234
-    $kanz-forge:commands /audit settlement
-    $kanz-forge:commands /verify #1317
-    $kanz-forge:commands /ci #1382
-
-Use /work without a target to select and execute the highest-priority actionable
-issue. /audit proposes an implementation and waits for approval. /verify only
-checks evidence. These actions belong to the skill, not the global slash menu.
-
-Alternatively, in the integrated PowerShell terminal at the repository root:
-
-    function kf { python .agents/plugins/kanz-forge/scripts/command.py @args }
-    kf /help
-    kf --preview /work '#1234'
-    kf /audit settlement
-
-Quote issue numbers in PowerShell. Preview prints the request without starting
-work; normal execution launches interactive Codex under its existing permissions.
-## Specialist evidence commands
-
-From the root of a Kanz checkout, run
-`python .agents/plugins/kanz-forge/scripts/command.py /help`.
-Use the launcher for reproducible results. A Codex workflow exit is **not**
-evidence that a task was completed. Check the linked PR, tests and revision.
-
-| Capability | Implementation and invocation | Evidence and limits |
-|---|---|---|
-| Dependency exposure | /alerts | Read-only GitHub Dependabot findings by advisory and manifest. Needs repository alert access. A permission failure is not zero alerts. |
-| Symbol investigation | /trace YearFraction | Searches tracked source; returns at most 100 lexical matches and total count, not a type-resolved call graph. |
-| Inventory, history, dependency edges | scripts/evidence.py, /repo | Git status, three commits and Go import edges for pricing. No complete symbol/call graph, edit-impact oracle or semantic index. |
-| Financial verification | Internal Go suite collector (chosen by Forge) | Runs owning Go tests with -count=1 and readonly dependencies. Pricing includes the rational ACT/ACT oracle, yields and boundary cases. A passing test is not an institutional valuation or a production-data audit. Inspect skips; generate schema SDK first. |
-| Security and supply chain | /security | Checks imported bytes and runs Node validator regression tests. These validate findings formats and safe input handling. They do not scan the repository for vulnerabilities. Full findings CLI requires POSIX protections. |
-| Upstream intelligence | /upstream or /upstream cloudflare/security-audit-skill | Local registry inventory or read-only gh API comparison against pinned SHA. Emits JSON; redirect to a file for review. Requires GitHub access for live checks. Does not write pins, download code for execution, or establish legal compatibility. |
-| Benchmarking | /bench | Five elapsed times and median for tracked Forge validation. No inference speed or runtime trading benchmark. |
-| Planning, trace investigation, threat modeling, configuration review | /audit, /investigate, /work | Agent-assisted instructions with interactive Codex, not deterministic source analysis. |
-| Delivery, CI diagnosis, verification | /deliver, /ci, /verify | Interactive Git/GitHub workflow. No autonomous proof of reviews, checks, merge or deployment. /deliver requires explicit merge authorization. |
-
-Script paths in the table are relative to .agents/plugins/kanz-forge.
-Registry fields identify the GitHub repository, immutable pin, observed commit/release,
-license files at that pin, adoption status and review limitations. For imported files
-both the upstream Git blob and the local LF-normalized SHA-256 are recorded.
-Cloudflare SKILL.md has a local overlay; compare both versions during review.
-Commit messages matching security keywords are triage leads only. A truncated
-comparison requires manual review. For a proposed update inspect changed imports,
-license notices and the overlay, then run test_evidence.py, validate.py --tracked
-and the Linux Node tests before requesting adoption approval. No update scheduler
-or automatic adoption is installed. Do not register a temporary worktree as a
-permanent marketplace; install from the selected durable checkout after review.
-
-### Local acceptance checks
-
-From the candidate checkout:
-
-    python -B .agents/plugins/kanz-forge/scripts/test_evidence.py
-    python -B .agents/plugins/kanz-forge/scripts/test_install.py
-    python -B .agents/plugins/kanz-forge/scripts/command.py /upstream cloudflare/security-audit-skill
-
-The installation test uses an empty disposable CLI profile, compares tracked
-plugin contents, and requests fresh skill discovery from an app-server process.
-It does not change the active user marketplace. For the SDK-backed Go suites,
-follow kanz-schemas/README.md before running Go suites. GitHub metadata
-requires gh access; local pricing checks do not require upstream API access.
-## Forge Next: commands and dependencies
-
-[Dependencies and upstream GitHub links](.agents/plugins/kanz-forge/DEPENDENCIES.md)
-lists runtime tools separately from optional research references. The pin
-registry remains the authority; changes to a pin must update its linked entry.
-
-Run from a Kanz checkout using the candidate launcher:
-
-    python -B .agents/plugins/kanz-forge/scripts/command.py /doctor
-    python -B .agents/plugins/kanz-forge/scripts/command.py /remember pricing
-    python -B .agents/plugins/kanz-forge/scripts/command.py /memory
-    python -B .agents/plugins/kanz-forge/scripts/command.py /route kanz/go.mod
-    python -B .agents/plugins/kanz-forge/scripts/command.py /prioritize
-
-Remember runs both Go pricing suites and accepts only complete, skip-free
-results with unchanged scoped inputs. It does not accept caller-supplied
-claims, free-text notes or approval records. Recall (also /memory) reads the
-last ten scoped receipts without creating an empty database. Records use a
-local Git common-directory identity so worktrees share history; the source
-digest is recomputed from the current worktree. It covers pricing, its
-benchmarks, the terms adapter and the Go module manifests, not every transitive
-dependency, compiler or environment setting. Unchanged bytes never mean fresh
-verification. Independent clones have independent identities. Deleting the
-index loses receipt history; evidence can be generated again by rerunning
-the tests, not by reconstructing the exact historical execution.
-
-Route suggests checks without dispatch. Prioritize screens a live issue
-snapshot; it cannot establish feasibility from labels alone. /deps, /review
-and /hunt are interactive agent workflows, not automated certifications.
-For pricing investigations, inspect /memory first, then /trace the affected
-symbol and run the relevant fresh numerical checks before accepting results.
-No background scheduler, production authority or merge permission is added.
+The CI workflow in [.github/workflows/kanz-forge.yml](.github/workflows/kanz-forge.yml)
+checks plugin structure and offline command contracts. It does not prove live
+delegation, a production dependency, or authorization to merge or deploy.

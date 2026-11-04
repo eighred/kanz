@@ -1,8 +1,8 @@
 {
   "/work": {
     "target": "optional",
-    "description": "Deliver one issue or task through verification on main.",
-    "workflow": "For an empty target query current GitHub issues, PRs, main and working state. Rank by capital risk, security, data integrity and structural impact. Explain any higher-ranked externally blocked item and choose the highest actionable one. For a specified target reconcile existing code and issues first. Use engineering-standard to derive the implementation brief from the requested change. Retrieve financial methodology only if the change affects a financial decision. Use kanz-verify and pr-delivery. Identify root cause, owning plane and failure conditions; implement a permanent scoped correction. Verify invariants, failure and recovery with applicable real dependencies, formatting, static analysis and regression gates. Preserve unrelated edits. Commit, push, open or update the PR, investigate failures, wait for required checks and approvals, merge when authorized and verify the merged revision before closing the issue. Report tested revision, dependencies, skips and closure state. Recommend one next issue and ask before starting it. Require explicit authorization for the specific merge; never adopt external code without approval. For a pricing task retrieve /memory before repeating discovery, and cross-check adapters and independent oracles. A receipt never satisfies fresh acceptance. For an untargeted /work use /prioritize as a shortlist only: verify actual blockers, shipped patches and duplicates before selecting.",
+    "description": "Deliver one issue, or coordinate independent issues with /work subagents N.",
+    "workflow": "If the user supplied 'subagents N' immediately after /work, follow the commands skill's references/parallel-work.md using native Codex workers and the available host slots; optional text after N names target issues. Do not run a Python scheduler or claim concurrency without actual workers. Otherwise deliver one issue: inspect current main, working state, Issues and PRs; for an empty target use /prioritize only as a shortlist and verify blockers, shipped patches and duplicates before selection. Use engineering-standard, kanz-verify and pr-delivery to implement the smallest durable correction and verify its affected boundary. For financial decisions consult financial-verification and /memory, then run fresh independent checks; a receipt does not satisfy acceptance. Record exact revisions, dependencies, skips and unresolved work in Issues/PRs. Require explicit authorization for each merge and before adopting external code; verify merged main before closing an issue. Do not deploy or alter a capital halt under /work.",
     "primary": true
   },
   "/audit": {
@@ -150,8 +150,8 @@
   },
   "/agents": {
     "target": "optional",
-    "description": "Show Forge specialist availability, or activate the repository profiles with /agents setup.",
+    "description": "Inspect or create ignored project discovery copies of Forge specialist profiles.",
     "mode": "evidence",
-    "workflow": "Run the repository launcher for this action. To delegate in a host supporting named Codex agents, ask the user which task they want delegated if none was given. Do not start workers merely to list or activate profiles."
+    "workflow": "Run the repository launcher for this action. Output reports compatibility-copy state, not whether this chat host can delegate. To delegate in a host supporting named Codex agents, ask the user which task they want delegated if none was given. Do not start workers merely to list or copy profiles."
   }
 }
