@@ -32,6 +32,11 @@ run "cost_and_security_envelope" {
   }
 
   assert {
+    condition     = !strcontains(aws_instance.node.user_data, "\r")
+    error_message = "EC2 user data must render with LF endings so Bash can run its shebang and Windows checkouts do not drift."
+  }
+
+  assert {
     condition     = aws_instance.node.instance_type == "t3a.large"
     error_message = "The testnet instance escaped the reviewed t3a.large cost envelope."
   }

@@ -629,13 +629,15 @@ resource "aws_instance" "node" {
     delete_on_termination = true
   }
 
-  user_data = templatefile("${path.module}/user_data.sh.tftpl", {
+  # Normalize a copied Windows template too: CRLF can break the Bash shebang
+  # and makes an unrelated Terraform plan update the live node (#1106).
+  user_data = replace(templatefile("${path.module}/user_data.sh.tftpl", {
     data_volume_id        = aws_ebs_volume.data.id
     ecr_provider_revision = "7656c21bcc13700566830f6bc4d753063513e6f7"
     k3s_version           = "v1.36.4+k3s1"
     k3s_install_sha       = "46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
     k3s_install_commit    = "4dedb15be78017a8ddd5b9e81acd44f3481078ed"
-  })
+  }), "\r\n", "\n")
 
   tags = merge(local.common_tags, {
     Name = "${var.name}-node"

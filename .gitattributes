@@ -4,6 +4,10 @@
 *.sh text eol=lf
 kanz/.githooks/* text eol=lf
 
+# EC2 user data runs as Bash; CRLF breaks its shebang and makes Terraform plan
+# an incidental node update from a Windows checkout (#1106).
+kanz/infra/terraform-testnet/user_data.sh.tftpl text eol=lf
+
 # Go and proto sources MUST keep LF for the same class of reason: gofmt emits LF,
 # so a CRLF checkout (core.autocrlf=true on Windows) makes `gofmt -l` flag every
 # file and breaks `make fmt` / `make lint` — the difference is line endings, not
