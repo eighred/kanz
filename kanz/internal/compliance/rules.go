@@ -46,12 +46,15 @@ func ConcentrationRule(c *Candidate, rule *compliancepb.Rule) *compliancepb.Viol
 	}
 	max := ratFromDecimal(cl.GetMaxWeight())
 	buckets := grossByDimension(c, cl.GetDimension())
+	limitGross := new(big.Rat).Mul(total, max)
 
 	check := func(key string, g *big.Rat) *compliancepb.Violation {
-		weight := new(big.Rat).Quo(g, total)
-		if weight.Cmp(max) <= 0 {
+		// total is positive, so comparing gross amounts is exactly equivalent to
+		// dividing every bucket by total. Only a breach needs the weight string.
+		if g.Cmp(limitGross) <= 0 {
 			return nil
 		}
+		weight := new(big.Rat).Quo(g, total)
 		return &compliancepb.Violation{
 			Message: "concentration exceeds limit",
 			Evidence: map[string]string{

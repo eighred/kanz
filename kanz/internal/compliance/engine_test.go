@@ -71,6 +71,45 @@ func TestConcentration_AllowAndBreach(t *testing.T) {
 	}
 }
 
+func TestConcentration_ExactBoundaryAcrossBuckets(t *testing.T) {
+	rule := &compliancepb.Rule{
+		RuleId: "c1", Type: compliancepb.RuleType_RULE_TYPE_CONCENTRATION,
+		Params: &compliancepb.Rule_Concentration{Concentration: &compliancepb.ConcentrationLimit{
+			Dimension: compliancepb.Dimension_DIMENSION_INSTRUMENT,
+			MaxWeight: dec(60, -2),
+		}},
+	}
+	for _, tc := range []struct {
+		name, observed string
+		first          int64
+		want           compliancepb.ComplianceStatus
+	}{
+		{"below", "", 599999, compliancepb.ComplianceStatus_COMPLIANCE_STATUS_PASS},
+		{"equal", "", 600000, compliancepb.ComplianceStatus_COMPLIANCE_STATUS_PASS},
+		{"above", "0.600001", 600001, compliancepb.ComplianceStatus_COMPLIANCE_STATUS_BREACH},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Gross is exactly 1,000,000 USD units, so the boundary is
+			// 600,000/1,000,000 = 0.6 without any rounding tolerance.
+			book := &Book{PortfolioID: "p1", BaseCurrency: "USD", Positions: []Position{
+				pos("A", tc.first, 0, "USD"), pos("B", 1000000-tc.first, 0, "USD"),
+			}}
+			res := evalStatus(t, book, nil, rule)
+			if res.GetStatus() != tc.want {
+				t.Fatalf("status = %v, want %v", res.GetStatus(), tc.want)
+			}
+			if tc.observed != "" {
+				if len(res.GetViolations()) != 1 {
+					t.Fatalf("violations = %d, want 1", len(res.GetViolations()))
+				}
+				if got := res.GetViolations()[0].GetEvidence()["observed"]; got != tc.observed {
+					t.Fatalf("observed = %q, want %q", got, tc.observed)
+				}
+			}
+		})
+	}
+}
+
 func TestConcentration_BucketScoped_Sector(t *testing.T) {
 	cl := StaticClassifier{
 		"AAPL": {Sector: "TECH"}, "MSFT": {Sector: "TECH"}, "XOM": {Sector: "ENERGY"},
