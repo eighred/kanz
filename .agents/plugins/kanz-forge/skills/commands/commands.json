@@ -57,8 +57,8 @@
   },
   "/financial": {
     "target": "required",
-    "description": "Verify a financial change against independent numerical evidence.",
-    "workflow": "Use financial-verification to select the owning Go packages, independent reference and necessary fixtures. Run exact scoped tests with -p 1, enumerate expected package completions and report skips. Existing pricing and benchmark suites are useful only when applicable; do not make Python receipts an acceptance gate.",
+    "description": "Choose and verify methods for pricing, risk or execution implementation.",
+    "workflow": "Use financial-verification as engineering methodology for the requested system behavior: identify current owner/callers, attributable method, typed input/output contract and implementation proof. Do not generate investment analysis or infer proprietary competitor algorithms. Select independent numerical references and scoped owning-package tests, enumerate completions and skips, and follow the existing admission path. External finance repositories and Python receipts are not required.",
     "internal": true,
     "skills": [
       "financial-verification"
@@ -115,7 +115,7 @@
   "/doctor": {
     "target": "optional",
     "description": "Check actual plugin installation and host capabilities.",
-    "workflow": "Read the plugin manifest and available skills/tools in this chat. Inspect codex plugin list --json when CLI exists; compare enabled version and source to the checkout. Run validate.py and provenance.py under .agents/plugins/kanz-forge/scripts when Python exists; a disposable test_install.py verifies CLI cache bytes and skill discovery, not this chat. Check GitHub access with a read-only repository query. Report implemented, configured, operational, incomplete or unverified per capability, with probe, revision and limitation. A listed profile is not a spawned worker; CI coordination requires observed independent work and exact-head CI evidence. Do not launch workers or mutate live installation merely for a status check.",
+    "workflow": "Read the plugin manifest and available skills/tools in this chat. Inspect codex plugin list --json when CLI exists; compare enabled version and source to the checkout. Run validate.py and provenance.py under .agents/plugins/kanz-forge/scripts when Python exists; a disposable test_install.py verifies CLI cache bytes and skill discovery, not this chat. Check GitHub access with a read-only repository query. Report implemented, configured, operational, incomplete or unverified per capability, with probe, revision and limitation. A listed profile is not a spawned worker; CI coordination requires observed independent work and exact-head CI evidence. Do not launch workers or mutate live installation merely for a status check. If a user names a different checkout or sees stale files, compare that checkout revision and local edits with installed source and current main; report each identity separately, preserving unrelated changes during reconciliation.",
     "skills": [
       "commands"
     ]

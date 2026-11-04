@@ -11,6 +11,12 @@ Start with path-limited `rg` and the owning Issue; widen only when a concrete
 caller or event crosses the initial boundary. [The route map](references/map.md)
 lists useful entrypoints and searches; read it when ownership is unclear.
 
+Fix the graph question first: ownership, impact of a proposed edit, a missing
+runtime connection, or safe removal. Record source revision and dirty inputs.
+Start at the changed symbol or user-facing operation, not every package in the
+repository. Stop expanding when its relevant callers, effects and guards are
+accounted for; report the uninspected boundary instead of implying full coverage.
+
 Check whether a proposed route already exists in schema, gateway, domain API,
 or event subjects before adding a parallel one. Preserve execution's fixed
 risk → compliance → mandate → OMS → router → venue-adapter sequence. Keep
@@ -23,8 +29,17 @@ language server; use package metadata such as `go list` for imports. `rg` finds
 candidates, not resolved calls. For each relevant edge record the relation
 (calls, imports, publishes, subscribes, reads, writes or protects), source and
 destination, revision, `file:line`, and whether it is resolved or inferred.
+Use `unknown` when the available source/tooling cannot establish an edge; do
+not silently promote naming similarity or an absent search result to certainty.
 Trace interface implementations and wiring; a symbol with no lexical caller
 may still be reached through registration, reflection, tags or deployment.
+
+An import establishes package dependence, not that a particular function runs.
+A resolved call establishes a possible source path, not deployed reachability.
+Bind interfaces at constructors/registries, event handlers at subscriptions and
+endpoints at startup/configuration before claiming a runtime connection. Inspect
+the destination's authorization and state transition when the edge crosses a
+trust boundary. Group multiple callers only if they share that same contract.
 
 Follow both directions: upstream inputs and callers show compatibility impact;
 downstream consumers, stores and guards show validation scope. Event producers
@@ -38,6 +53,14 @@ clearer. If two planes must change, state the interface between them and test
 each side at the boundary that can actually fail. For file placement, follow
 the nearest owning component and existing second-consumer rule in AGENTS.md;
 directory tidiness alone is not a reason to move code.
+
+For an impact assessment, attach each proposed changed node to affected callers,
+wire or storage compatibility, required test scopes and rollout dependencies.
+Revisit that map after the diff changes; a new consumer or configuration change
+can invalidate the original ownership and verification scope.
+For a new file, state its owner, who calls it and why an existing location cannot
+hold the responsibility. Use the placement decisions in the route map; a new
+directory is not itself an architectural boundary.
 
 This is on-demand source traversal, not an installed Graphify index. If an
 optional graph tool is already available, check its indexed revision, language

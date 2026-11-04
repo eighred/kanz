@@ -5,7 +5,7 @@ description: Review Kanz trust boundaries and validate security findings with th
 
 # Security Audit
 
-Kanz overlay: Follow AGENTS.md. Agent fan-out needs explicit authorization. Never run probes against live brokers, CI credentials, or production. In an unrestricted workspace use source review only for hostile targets. Record redacted findings in Issues. Upstream: cloudflare/security-audit-skill at c1c8a8c1471069fb0e188eeaff69b8e8db6564a8; retain the [MIT notice](LICENSE).
+Kanz overlay: Follow AGENTS.md. Agent fan-out needs explicit authorization. Never run probes against live brokers, CI credentials, or production. In an unrestricted workspace use source review only for hostile targets. Record redacted findings in Issues within the user's scope. For focused Kanz changes, use [the local boundary guide](references/kanz-boundaries.md) to select entrypoints, enforcement questions and evidence. Upstream: cloudflare/security-audit-skill at c1c8a8c1471069fb0e188eeaff69b8e8db6564a8; retain the [MIT notice](LICENSE).
 
 Find vulnerabilities that violate a real trust boundary, then give owners the source evidence, safe reproduction, priority, and smallest effective fix. This is a defensive, source-first workflow. A candidate without a concrete affected principal, resource, or security outcome is not a confirmed finding.
 

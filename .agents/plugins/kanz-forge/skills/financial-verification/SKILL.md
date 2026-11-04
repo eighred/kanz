@@ -1,16 +1,64 @@
 ---
 name: financial-verification
-description: Verify a Kanz financial calculation, portfolio attribution, or backtest against dated inputs and independent numerical evidence.
+description: Select evidence for Kanz pricing, risk and execution methods, then verify their implementation and governed decision path with independent numerical checks.
 ---
 
-# Verify a financial result
+# Build and verify institutional behavior
 
-Start with the decision the figure informs. Identify tenant, portfolio, instrument, currency, quantity units, event time and when each input became known. Label observations, assumptions, estimates and simulations separately. Missing critical terms mean the result is unavailable.
+Use financial knowledge to implement a reliable Kanz capability: pricing an
+instrument, constraining risk, executing an approved intent or recording its
+outcome. The deliverable is a justified code/design decision and its proof, not
+an investment recommendation or a financial-analysis report. Keep production
+computation in its existing Go/service owner and execution on the typed admission
+path defined by AGENTS.md.
 
-Route accrual and discount calculations to kanz/internal/risk/pricing; portfolio attribution to kanz/internal/performance; fill-cost attribution to kanz/internal/execution/tca; replay to kanz/tools/backtest. Inspect the consuming service before treating a library function as a served capability. Do not implement another pricing engine in this plugin.
+## Turn the requirement into an implementable method
 
-For accrual, identify day-count convention, calendar, accrual boundaries and normalization to civil dates. Compare the Go output to a hand-derived or separately implemented rational reference. State tolerance in the output unit. Exercise month ends, leap years, zero intervals and reversed intervals where defined. From the Go module run go test -p 1 -count=1 ./internal/risk/pricing.
+Start with the behavior, actor, timing and failure consequence. Follow the
+[design evidence guide](../engineering-standard/references/design-evidence.md)
+to distinguish an absent algorithm from missing terms, wiring, data or authority.
+Use attributable public methodology or an approved owner-supplied specification;
+a competitor's advertised capability does not reveal its proprietary algorithm.
+Do not add a finance repository or a parallel calculation engine to Forge.
 
-For strategy evidence freeze the point-in-time universe (including delistings), training cutoff, holdout and walk-forward schedule before fitting. Account for spread, fees, impact and rejected trades. Record every parameter trial; multiple searches on one holdout do not yield independent confirmations. Separate simulation from live evidence.
+Compare only plausible methods for this requirement: valid instrument/domain,
+required inputs, calibration and stability, precision, computational cost,
+determinism, and the failure behavior the consumer needs. A more sophisticated
+method is not an improvement if its inputs cannot be established or it cannot
+meet the owning path's latency/recovery contract. State why the existing method
+can be reused, must be extended, or fails the required behavior.
 
-Return the methodology version, source identities and revisions, reproducible command, expected and observed values, tolerance and remaining unknowns. Human owners approve valuation policy, mandates and regulated actions. This skill cannot authorize trades or ledger postings.
+Specify typed inputs/outputs, units, sign, rounding, valuation/event and knowledge
+time, source revision, coverage and error semantics before implementation. Read
+only the affected [domain recipe](references/domain-checks.md). Trace the value
+through conversion, calculation and its caller/gate/posting: a correct formula
+is insufficient if the served path drops a quality flag or uses future data.
+
+## Make the implementation falsifiable
+
+Choose an independent oracle: a dated primary worked example, hand-derived
+rational result, or separately structured implementation. Expected values must
+not call the production helper or repeat its branches. Fix assumptions and
+tolerance in output units before testing; justify absolute/relative error near
+zero. Do not widen a tolerance or plug a residual to hide a disagreement.
+
+Preserve canonical Decimal boundaries and exact arithmetic for money/quantities.
+For existing floating-point analytics, inspect conversions, finite-value handling
+and error bounds without extending float into the book. Test cases that expose
+the changed behavior: boundary equality and either side, missing/stale inputs,
+signs, scale/currency conversion, partial coverage and recovery where stateful.
+Use conservation or monotonicity only where the chosen model guarantees it.
+
+If the oracle disagrees, reconcile conventions, timestamps, units and rounding
+before changing code or expected values. If a method/policy definition is absent,
+name the missing decision; do not invent it. A critical unknown cannot permit
+admission, while failure of a noncritical analytic must not stop recording a real
+fill. Numerical tests cannot authorize trades or change mandates.
+
+Run the owning-package tests and the consumer/gate/posting checks needed for the
+claim, following repository dependency and serialization rules. Return the
+implementation decision, exact revision, source/oracle, expected and observed
+result with units/tolerance, commands, skipped tests and unproven boundaries.
+Separate arithmetic, served integration and deployment evidence. For control
+changes identify the approved rule version/effective interval and decision record;
+a technical pass does not establish legal applicability or policy approval.
