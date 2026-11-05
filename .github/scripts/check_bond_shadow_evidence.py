@@ -7,7 +7,7 @@ from check_migration_evidence import verify
 REQUIRED = {
     "services/risk-engine/tools/bond-risk-conformance": {"TestRustBondRiskProcessConformance", "TestBondCorpusIndependentAnalytics"},
     "services/risk-engine/internal/bondshadow": {"TestRustBondShadowActualProcess"},
-    "services/risk-engine/internal/shadowprocess": set(),
+    "internal/shadowprocess": set(),
 }
 
 if __name__ == "__main__":

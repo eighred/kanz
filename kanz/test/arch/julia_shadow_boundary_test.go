@@ -28,7 +28,7 @@ func juliaShadowBoundary(files map[string]string) error {
 		}
 		for _, imp := range f.Imports {
 			path, _ := strconv.Unquote(imp.Path.Value)
-			if strings.HasPrefix(path, modulePath+"/") && !strings.HasPrefix(path, modulePath+"/kanz-schemas-go/") && path != modulePath+"/internal/risk/pricing/curve" && path != modulePath+"/services/risk-engine/internal/shadowprocess" {
+			if strings.HasPrefix(path, modulePath+"/") && !strings.HasPrefix(path, modulePath+"/kanz-schemas-go/") && path != modulePath+"/internal/risk/pricing/curve" && path != modulePath+"/internal/shadowprocess" {
 				return fmt.Errorf("shadow dependency grants authority: %s", path)
 			}
 			if path == "syscall" || strings.HasPrefix(path, "net") {
@@ -97,7 +97,7 @@ func juliaBoundarySources(t *testing.T) map[string]string {
 	root := moduleRoot(t)
 	files := map[string]string{}
 	paths := map[string]string{"main": "services/risk-engine/cmd/risk-engine/main.go", "builder": "services/risk-engine/cmd/risk-engine/julia_shadow.go", "calibrate": "internal/risk/pricing/curve/calibrate.go", "ratesource": "internal/risk/pricing/livequote/ratesource.go"}
-	processRoot := "services/risk-engine/internal/shadowprocess"
+	processRoot := "internal/shadowprocess"
 	processEntries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(processRoot)))
 	if err != nil {
 		t.Fatal(err)

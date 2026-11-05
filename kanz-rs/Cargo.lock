@@ -891,6 +891,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanz-oms-fold-shadow"
+version = "0.1.0"
+dependencies = [
+ "kanz-decimal-compat",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "protoc-bin-vendored",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

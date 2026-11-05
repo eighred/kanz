@@ -86,7 +86,7 @@ func (p *Postgres) CommitRecovery(ctx context.Context, c RecoveryCase, now time.
 		if _, exists := posted[fillfact.ExecutionKey(fill)]; exists {
 			continue
 		}
-		next, err = p.applyRecoveredExecution(ctx, c, next, fill, now)
+		next, err = p.applyRecoveredExecution(ctx, c, next, fill, now, version)
 		if err != nil {
 			return err
 		}
@@ -260,7 +260,7 @@ func (p *Postgres) postedRecoveryExecutions(ctx context.Context, st *orderpb.Ord
 	return posted, nil
 }
 
-func (p *Postgres) applyRecoveredExecution(ctx context.Context, c RecoveryCase, st *orderpb.OrderState, fill *orderpb.Fill, now time.Time) (*orderpb.OrderState, error) {
+func (p *Postgres) applyRecoveredExecution(ctx context.Context, c RecoveryCase, st *orderpb.OrderState, fill *orderpb.Fill, now time.Time, expectedVersion int64) (*orderpb.OrderState, error) {
 	if fill.GetRecovery() == nil {
 		return nil, ErrRecoveryEvidenceConflict
 	}
@@ -278,11 +278,13 @@ func (p *Postgres) applyRecoveredExecution(ctx context.Context, c RecoveryCase, 
 	working.LeavesQuantity = leaves
 	next, err := ApplyFill(working, fill, now)
 	if err != nil {
+		defer observeFillFold(ctx, p.fillFoldObserver, "recovery", expectedVersion, working, fill, now, next, err)
 		if blockErr := p.BlockRecovery(ctx, c, st, "verified execution cannot be represented in the order aggregate; operator investigation required", now); blockErr != nil {
 			return nil, blockErr
 		}
 		return nil, ErrRecoveryBlocked
 	}
+	observeFillFold(ctx, p.fillFoldObserver, "recovery", expectedVersion, working, fill, now, next, err)
 	if terminal {
 		next.Status = st.GetStatus()
 	}

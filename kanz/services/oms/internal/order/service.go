@@ -45,6 +45,7 @@ import (
 // validation or compliance rejection — is terminal: it is acked (nil) after a
 // REJECTED outcome, so a poison command never blocks the partition.
 type Service struct {
+	fillFoldObserver func(FillFoldCapture)
 	// tenant is the tenant this OMS serves; Handle's cross-tenant refusal
 	// compares the inbound envelope against it (#223).
 	tenant  string
@@ -1381,6 +1382,7 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 	for _, fill := range fills {
 		next, aerr := ApplyFill(st, fill, fill.GetExecutedAt().AsTime())
 		if aerr != nil {
+			defer observeFillFold(ctx, s.fillFoldObserver, "live", ver, st, fill, fill.GetExecutedAt().AsTime(), next, aerr)
 			// THE SAME DISAGREEMENT THE RECOVERY PATH FREEZES ON, ANSWERED THE SAME
 			// WAY (#808).
 			//
@@ -1408,6 +1410,7 @@ func (s *Service) work(ctx context.Context, st *orderpb.OrderState, ver int64) (
 				"venue reported a fill this order cannot accept (%v). The venue's record and "+
 					"ours describe different orders under one id", aerr))
 		}
+		observeFillFold(ctx, s.fillFoldObserver, "live", ver, st, fill, fill.GetExecutedAt().AsTime(), next, aerr)
 		// THE FILL AND ITS FACT ARE NOW ONE WRITE (#292), AND THIS IS THE PAIR
 		// THAT MOST NEEDED IT.
 		//
@@ -3291,6 +3294,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 		}
 		next, aerr := ApplyFill(st, fill, fill.GetExecutedAt().AsTime())
 		if aerr != nil {
+			defer observeFillFold(ctx, s.fillFoldObserver, "reconcile", ver, st, fill, fill.GetExecutedAt().AsTime(), next, aerr)
 			// The venue's own fills do not fit the order we hold. That is not a
 			// transient fault and re-driving cannot help; it is a disagreement
 			// about what this order IS, and it freezes.
@@ -3302,6 +3306,7 @@ func (s *Service) adopt(ctx context.Context, st *orderpb.OrderState, ver int64, 
 				"venue reported a fill this order cannot accept (%v). The venue's record and "+
 					"ours describe different orders under one id", aerr))
 		}
+		observeFillFold(ctx, s.fillFoldObserver, "reconcile", ver, st, fill, fill.GetExecutedAt().AsTime(), next, aerr)
 		// THE ADOPTED FILL RIDES ITS OWN TRANSACTION TOO (#292), for exactly the
 		// reasons work()'s does — and this path matters more, not less, because it
 		// is the recovery path: the process that reaches here is the one that

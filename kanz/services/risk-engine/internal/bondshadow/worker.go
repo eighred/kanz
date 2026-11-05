@@ -16,8 +16,8 @@ import (
 	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/pricing"
+	"github.com/eighred/kanz/internal/shadowprocess"
 	quantpb "github.com/eighred/kanz/kanz-schemas-go/quant/v1"
-	"github.com/eighred/kanz/services/risk-engine/internal/shadowprocess"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )

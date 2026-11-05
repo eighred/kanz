@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
+	"github.com/eighred/kanz/internal/shadowprocess"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	refpb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
 	researchpb "github.com/eighred/kanz/kanz-schemas-go/research/v1"
-	"github.com/eighred/kanz/services/risk-engine/internal/shadowprocess"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
