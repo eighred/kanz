@@ -42,6 +42,51 @@ def broker_subject_pattern(sa):
     return 'C=US,O=SPIRE,CN=[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?,' + subject(sa).replace('.', '[.]')
 
 
+def broker_diagnostics(logs):
+    # Consume bounded broker logs privately; emit only verified public fixture DN
+    # attributes and fixed property names. Never retain arbitrary log lines.
+    subjects = set()
+    invalid = set()
+    missing_bootstrap = False
+    for line in logs.splitlines():
+        if "Can't load config bootstrap file:" in line:
+            missing_bootstrap = True
+        for key in ('kafka_enable_authorization', 'superusers', 'kafka_mtls_principal_mapping_rules'):
+            if 'Ignoring invalid property: ' + key + '=' in line:
+                invalid.add(key)
+        marker = 'failed to extract principal from distinguished name: '
+        if marker not in line:
+            continue
+        dn = line.split(marker, 1)[1]
+        if len(dn) > 512:
+            continue
+        parts = dn.split(',')
+        if len(parts) != 4:
+            continue
+        fields = {}
+        for part in parts:
+            key, separator, value = part.strip().partition('=')
+            if not separator or key in fields:
+                break
+            fields[key] = value
+        else:
+            if fields.pop('C', None) != 'US' or fields.pop('O', None) != 'SPIRE':
+                continue
+            if not re.fullmatch(r'[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?', fields.pop('CN', '')):
+                continue
+            if len(fields) != 1:
+                continue
+            key, value = next(iter(fields.items()))
+            if key not in ('2.5.4.45', 'OID.2.5.4.45', 'x500UniqueIdentifier', 'UID'):
+                continue
+            for sa in SAS:
+                digest = hashlib.sha256(identity(sa).encode()).digest()[:16].hex()
+                if value in (digest, '#1320' + digest.encode().hex(), '#0c20' + digest.encode().hex()):
+                    subjects.add(dn)
+    return {'unmappedSubjects': sorted(subjects), 'invalidProperties': sorted(invalid),
+            'missingBootstrapFile': missing_bootstrap}
+
+
 def spire_objects():
     docs = shared.spire_objects()
     config = next(d for d in docs if d['kind']=='ConfigMap' and d['metadata']['name']=='spire-server')
@@ -185,6 +230,11 @@ def main():
                         evidence['probeFailureClass']=match[2]
                 except Exception:
                     pass  # Diagnostic collection can never change the failed verdict.
+            try:
+                logs=k('-n','kanz-messaging','logs','deployment/redpanda','-c','redpanda','--tail=200','--limit-bytes=65536')
+                evidence['brokerDiagnostics']=broker_diagnostics(logs)
+            except Exception:
+                pass  # Optional public diagnosis cannot turn a failure into success.
             raise
         finally:
             try:

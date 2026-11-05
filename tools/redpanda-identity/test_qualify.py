@@ -80,6 +80,18 @@ class QualificationTests(unittest.TestCase):
         self.assertFalse(any('hostPath' in v for v in pod['volumes']))
         self.assertEqual({e['name'] for e in pod['containers'][0]['env']},{'PROOF_SA','PROOF_MODE'})
 
+    def test_broker_diagnostics_only_known_public_subjects(self):
+        dn = 'C=US,O=SPIRE,CN=bootstrap-abcde,' + qualify.subject('proof-bootstrap')
+        marker = 'failed to extract principal from distinguished name: '
+        output = qualify.broker_diagnostics('INFO ' + marker + dn)
+        self.assertEqual(output['unmappedSubjects'], [dn])
+        for bad in (dn + ',secret=private', dn.replace('C=US', 'C=private'),
+                    dn.replace('bootstrap-abcde', '/private/key'), 'private arbitrary text'):
+            self.assertEqual(qualify.broker_diagnostics(marker + bad)['unmappedSubjects'], [])
+        result = qualify.broker_diagnostics('Ignoring invalid property: superusers=private arbitrary text')
+        self.assertEqual(result['invalidProperties'], ['superusers'])
+        self.assertNotIn('private', str(result))
+
     def test_exact_dn_serializations(self):
         uid = qualify.subject('proof-a')
         for pattern, value in (
