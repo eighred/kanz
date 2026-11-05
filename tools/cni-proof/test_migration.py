@@ -9,6 +9,29 @@ import proof
 
 
 class MigrationTests(unittest.TestCase):
+    def test_bpffs_propagation_is_only_new_mount(self):
+        before = {"1": ("/", "overlay", frozenset()), "2": ("/sys", "sysfs", frozenset()),
+                  "3": ("/sys/fs", "tmpfs", frozenset())}
+        mounted = {**before, "4": ("/sys/fs/bpf", "bpf", frozenset())}
+        self.assertEqual(migration.private_bpffs_boundary(before, mounted), "4")
+        shared = {**mounted, "4": ("/sys/fs/bpf", "bpf", frozenset({"shared:99"}))}
+        self.assertEqual(migration.private_bpffs_boundary(before, shared, "4"), "4")
+        for identity in before:
+            changed = {**before, identity: (before[identity][0], before[identity][1], frozenset({"master:77"}))}
+            with self.assertRaises(proof.ProofError):
+                migration.private_bpffs_boundary(changed)
+        for changed in (
+                {**shared, "3": ("/sys/fs", "tmpfs", frozenset({"shared:77"}))},
+                {**shared, "5": ("/unrelated", "tmpfs", frozenset({"shared:77"}))},
+                {**mounted, "4": ("/sys/fs/bpf", "bpf", frozenset({"shared:99", "master:77"}))},
+                {key: value for key, value in shared.items() if key != "3"}):
+            with self.assertRaises(proof.ProofError):
+                migration.private_bpffs_boundary(before, changed, "4")
+        with self.assertRaises(proof.ProofError):
+            migration.private_bpffs_boundary(mounted)
+        with self.assertRaises(proof.ProofError):
+            migration.private_bpffs_boundary(before, shared, "different-mount")
+
     def test_policy_cleanup_requires_successful_nonempty_save(self):
         f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
         for result in ("", proof.ProofError("failed")):
@@ -54,6 +77,8 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(f.ownership(), "fixed")
         for mutate in (lambda x: x["Config"].update(Image="latest"),
                        lambda x: x["Config"].update(Labels={}),
+                       lambda x: x.update(HostConfig={"PidMode": "host"}),
+                       lambda x: x.update(HostConfig={"NetworkMode": "host"}),
                        lambda x: x["Mounts"].append({"Type": "bind"})):
             obj = copy.deepcopy(valid)
             mutate(obj)

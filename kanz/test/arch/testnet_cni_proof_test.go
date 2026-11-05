@@ -56,6 +56,8 @@ var cniProofRequirements = map[string][]string{
 		`rules = self.inside("iptables-save")`, `self.inside("iptables-restore", "--test", data=filtered)`, `self.inside("iptables-restore", data=filtered)`,
 		`"new_pod_not_owned_by_Cilium"`, `"storage_image_digest_mismatch"`,
 		`"unexpected_K3s_version"`, `"Cilium_remains_after_rollback"`, `f.datapath()`,
+		`private_bpffs_boundary(before)`, `private_bpffs_boundary(before, mounted)`, `private_bpffs_boundary(before, shared, identity)`,
+		`"unrelated_mount_propagation_changed"`, `"preexisting_bpffs_mount_refused"`, `self.prepare_private_bpffs()`,
 	},
 	".github/workflows/k3s-cni-migration.yml": {
 		"disposable-transition:", "persist-credentials: false", "timeout-minutes: 30",

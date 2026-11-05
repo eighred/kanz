@@ -39,6 +39,53 @@ def validate_name(name):
         raise proof.ProofError("invalid_disposable_name")
 
 
+def mount_inventory(raw):
+    result = {}
+    for line in raw.splitlines():
+        left, right = line.split(" - ", 1)
+        fields = left.split()
+        if len(fields) < 6 or not right.split() or fields[0] in result:
+            raise proof.ProofError("invalid_mount_inventory")
+        tags = frozenset(flag for flag in fields[6:] if flag.startswith(("shared:", "master:")))
+        result[fields[0]] = (fields[4], right.split()[0], tags)
+    return result
+
+
+def private_bpffs_boundary(before, after=None, new_id=None):
+    target = "/sys/fs/bpf"
+    if not {"/", "/sys"}.issubset({row[0] for row in before.values()}):
+        raise proof.ProofError("mount_ancestors_unknown")
+    for path, _, tags in before.values():
+        if (path == target or target.startswith(path.rstrip("/") + "/")) and tags:
+            raise proof.ProofError("mount_ancestor_not_private")
+        if path == target:
+            raise proof.ProofError("preexisting_bpffs_mount_refused")
+    if after is None:
+        return None
+    matches = [(identity, row) for identity, row in after.items() if row[0] == target]
+    if len(matches) != 1 or matches[0][0] in before or matches[0][1][1] != "bpf":
+        raise proof.ProofError("new_bpffs_mount_not_identified")
+    identity, (_, _, tags) = matches[0]
+    if new_id is None:
+        if tags:
+            raise proof.ProofError("new_bpffs_not_private")
+    elif identity != new_id or not any(tag.startswith("shared:") for tag in tags) or any(tag.startswith("master:") for tag in tags):
+        raise proof.ProofError("new_bpffs_shared_state_not_verified")
+    # The only propagation change allowed is on the newly created bpffs mount.
+    for other_id, (path, _, other_tags) in after.items():
+        if other_id == identity:
+            continue
+        old = before.get(other_id)
+        if (old is None and other_tags) or (old is not None and other_tags != old[2]):
+            raise proof.ProofError("unrelated_mount_propagation_changed")
+        if target.startswith(path.rstrip("/") + "/") and other_tags:
+            raise proof.ProofError("mount_ancestor_not_private")
+    for old_id, row in before.items():
+        if target.startswith(row[0].rstrip("/") + "/") and after.get(old_id) != row:
+            raise proof.ProofError("mount_ancestor_changed")
+    return identity
+
+
 class Fixture:
     def __init__(self, name):
         validate_name(name)
@@ -57,6 +104,8 @@ class Fixture:
         expected_id = command(["docker", "image", "inspect", NODE, "--format", "{{.Id}}"])
         if (obj["Config"]["Labels"].get(LABEL) != self.name or obj["Image"] != expected_id or
                 obj["Config"]["Image"] != NODE or
+                obj.get("HostConfig", {}).get("PidMode", "") not in ("", "private") or
+                obj.get("HostConfig", {}).get("NetworkMode") == "host" or
                 any(m["Type"] == "bind" for m in obj["Mounts"])):
             raise proof.ProofError("disposable_ownership_mismatch")
         return obj["Id"]
@@ -263,6 +312,23 @@ class Fixture:
             raise proof.ProofError("old_policy_rules_remain")
         self.rule_diagnostic["status"] = "removed_verified"
 
+    def prepare_private_bpffs(self):
+        # Cilium's supported nested K3s setup needs shared bpffs. Only this new
+        # filesystem propagates to nested Pods; outer mounts remain private.
+        self.stage = "cilium_private_bpffs_preflight"
+        self.ownership()
+        before = mount_inventory(self.inside("cat", "/proc/self/mountinfo"))
+        private_bpffs_boundary(before)
+        self.stage = "cilium_private_bpffs_mount"
+        self.inside("mount", "-t", "bpf", "bpffs", "/sys/fs/bpf")
+        mounted = mount_inventory(self.inside("cat", "/proc/self/mountinfo"))
+        identity = private_bpffs_boundary(before, mounted)
+        self.inside("mount", "--make-shared", "/sys/fs/bpf")
+        self.stage = "cilium_private_bpffs_verify"
+        shared = mount_inventory(self.inside("cat", "/proc/self/mountinfo"))
+        private_bpffs_boundary(before, shared, identity)
+        self.ownership()
+
     def switch_to_cilium(self):
         self.stage = "cilium_quiesce_system"
         self.quiesce_system()
@@ -278,6 +344,7 @@ class Fixture:
         self.remove_old_policy_rules()
         self.stage = "cilium_remove_old_links"
         self.inside("sh", "-ceu", "for link in flannel.1 cni0; do if ip link show \"$link\" >/dev/null 2>&1; then ip link delete \"$link\"; fi; done")
+        self.prepare_private_bpffs()
         self.stage = "cilium_install"
         self.inside("helm", "install", "cilium", "/tmp/cilium.tgz", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml",
                     "--namespace", "kube-system", "--set", "kubeProxyReplacement=false",
