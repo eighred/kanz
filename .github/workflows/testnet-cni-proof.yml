@@ -1,0 +1,52 @@
+name: testnet-cni-proof
+on:
+  pull_request:
+    paths:
+      - 'tools/cni-proof/**'
+      - 'tools/Test-TestnetCNI.ps1'
+      - 'tools/feed-identity/**'
+      - '.github/workflows/testnet-cni-proof.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/cni-proof/**'
+      - 'tools/Test-TestnetCNI.ps1'
+      - 'tools/feed-identity/**'
+      - '.github/workflows/testnet-cni-proof.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  disposable-cni:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 -B -m unittest discover -s tools/cni-proof -p 'test_*.py'
+      - run: python3 -B -m unittest discover -s tools/feed-identity -p 'test_*.py'
+      - run: bash tools/feed-identity/install.sh
+      - name: Verify synthetic policy enforcement and cleanup
+        run: python3 -B tools/cni-proof/ci.py
+      - name: Remove disposable CI cluster after interruption
+        if: always()
+        run: |
+          if command -v kind >/dev/null; then
+            while IFS= read -r cluster; do
+              if [[ "$cluster" =~ ^cni-proof-[0-9a-f]{12}$ ]]; then
+                kind delete cluster --name "$cluster"
+              fi
+            done < <(kind get clusters)
+          fi
+      - name: Preserve sanitized CNI evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: testnet-cni-proof
+          path: ${{ runner.temp }}/cni-proof.json
+          if-no-files-found: error
