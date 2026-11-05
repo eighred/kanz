@@ -35,7 +35,7 @@ import (
 func TestRustDepthProcessThroughJetStream(t *testing.T) {
 	endpoint, binary := os.Getenv("TEST_NATS_URL"), os.Getenv("KANZ_BINANCE_DEPTH_BIN")
 	if binary == "" {
-		t.Skip("set KANZ_BINANCE_DEPTH_BIN to opt into Rust runtime integration (also requires TEST_NATS_URL)")
+		t.Skip("KANZ_BINANCE_DEPTH_BIN not configured; architecture-migration requires this runtime proof")
 	}
 	if endpoint == "" {
 		t.Fatal("both TEST_NATS_URL and KANZ_BINANCE_DEPTH_BIN are required")
