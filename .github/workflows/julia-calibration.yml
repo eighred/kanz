@@ -1,0 +1,97 @@
+name: julia-calibration
+
+on:
+  pull_request:
+    paths:
+      - 'kanz-jl/**'
+      - 'kanz-schemas/proto/**'
+      - 'kanz/internal/risk/pricing/curve/**'
+      - 'kanz/internal/risk/pricing/livequote/**'
+      - 'kanz/services/risk-engine/**'
+      - 'kanz/test/arch/**'
+      - '.github/scripts/*migration_evidence.py'
+      - '.github/workflows/julia-calibration.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'kanz-jl/**'
+      - 'kanz-schemas/proto/**'
+      - 'kanz/internal/risk/pricing/curve/**'
+      - 'kanz/internal/risk/pricing/livequote/**'
+      - 'kanz/services/risk-engine/**'
+      - 'kanz/test/arch/**'
+      - '.github/scripts/*migration_evidence.py'
+      - '.github/workflows/julia-calibration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=mod
+
+jobs:
+  shadow-calibration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Generate the canonical Go contracts
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - name: Install the verified Julia runtime
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/julia.tar.gz" https://julialang-s3.julialang.org/bin/linux/x64/1.13/julia-1.13.3-linux-x86_64.tar.gz
+          echo "5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4  $RUNNER_TEMP/julia.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/julia.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/julia-1.13.3/bin" >> "$GITHUB_PATH"
+          echo "JULIA_DEPOT_PATH=$RUNNER_TEMP/julia-depot" >> "$GITHUB_ENV"
+      - name: Instantiate the pinned environment and generate Julia contracts
+        run: |
+          julia --startup-file=no --history-file=no --project=kanz-jl -e 'using Pkg; Pkg.instantiate()'
+          git diff --exit-code -- kanz-jl/Project.toml kanz-jl/Manifest.toml
+          julia --startup-file=no --history-file=no --project=kanz-jl kanz-jl/generate.jl
+      - name: Independent numerical goldens and wire refusal tests
+        env:
+          JULIA_PKG_OFFLINE: 'true'
+        run: julia --startup-file=no --history-file=no --project=kanz-jl kanz-jl/test/runtests.jl
+      - name: Exercise the actual worker from the Go owner
+        working-directory: kanz
+        env:
+          TEST_JULIA_EXECUTABLE: ${{ runner.temp }}/julia-1.13.3/bin/julia
+          TEST_JULIA_PROJECT: ${{ github.workspace }}/kanz-jl
+          TEST_JULIA_DEPOT: ${{ runner.temp }}/julia-depot
+        run: |
+          set -o pipefail
+          go test -race -p 1 ./internal/risk/pricing/curve ./internal/risk/pricing/livequote ./services/risk-engine/internal/calibrationshadow ./services/risk-engine/internal/config -count=1 -json | tee "$RUNNER_TEMP/julia-tests.jsonl"
+          python3 - "$RUNNER_TEMP/julia-tests.jsonl" <<'PY'
+          import json, sys
+          sys.path.insert(0, '../.github/scripts')
+          from check_migration_evidence import verify
+          with open(sys.argv[1], encoding='utf-8') as evidence:
+              verify((json.loads(line) for line in evidence), {
+                  'internal/risk/pricing/curve': set(),
+                  'internal/risk/pricing/livequote': set(),
+                  'services/risk-engine/internal/config': set(),
+                  'services/risk-engine/internal/calibrationshadow': {
+                      'TestJuliaIntegration', 'TestProcessBoundaries',
+                      'TestComparisonRefusesUnboundAndInvalidResults',
+                      'TestEnqueueDoesNotWaitOrMutate',
+                  },
+              })
+          print('Real Julia worker and all four Go packages passed without skips')
+          PY
+          go vet ./internal/risk/pricing/curve ./internal/risk/pricing/livequote ./services/risk-engine/internal/calibrationshadow ./services/risk-engine/internal/config ./services/risk-engine/cmd/risk-engine
+      - name: Enforce the shadow authority boundary
+        working-directory: kanz
+        run: go test -p 1 ./test/arch -run 'Test(Julia|EveryWorkflowGoTestIsSerialised)' -count=1
