@@ -8,7 +8,15 @@ REQUIRED = {
     "services/oms/tools/fill-conformance": {
         "TestFillCorpusIndependentOracle", "TestRustFillFoldProcessConformance",
     },
-    "services/oms/internal/foldshadow": {"TestRustOMSFillShadowActualProcess"},
+    "services/oms/internal/foldshadow": {
+        "TestRustOMSFillShadowActualProcess", "TestRustTransactionCandidateBinding",
+        "TestRustOMSPostgresTransactions",
+        *{"TestRustOMSPostgresTransactions/" + case for case in (
+            "durable-restart-duplicate-conflict", "concurrent-duplicate",
+            "cancel-wins-stale-fill", "fill-wins-stale-cancel",
+            "commit-failure-rolls-back-all-owners", "tenant-isolation",
+        )},
+    },
     "internal/shadowprocess": set(),
 }
 
