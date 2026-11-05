@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -87,9 +88,22 @@ func (q *LiveQuotes) Update(ev *marketpb.MarketDataEvent) {
 	}
 	q.mu.Lock()
 	if id := ev.GetInstrumentId(); q.wanted[id] {
-		q.latest[id] = ev
+		q.latest[id] = proto.Clone(ev).(*marketpb.MarketDataEvent)
 	}
 	q.mu.Unlock()
+}
+
+// snapshot captures every admitted observation under one lock. Cloning keeps
+// later updates and shadow consumers from changing the captured calibration.
+func (q *LiveQuotes) snapshot() (map[string]*marketpb.MarketDataEvent, time.Time) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	at := time.Now().UTC()
+	out := make(map[string]*marketpb.MarketDataEvent, len(q.latest))
+	for id, ev := range q.latest {
+		out[id] = proto.Clone(ev).(*marketpb.MarketDataEvent)
+	}
+	return out, at
 }
 
 // Latest returns the most-recent event for an instrument, ok=false if none seen.
@@ -97,7 +111,10 @@ func (q *LiveQuotes) Latest(instrumentID string) (*marketpb.MarketDataEvent, boo
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	ev, ok := q.latest[instrumentID]
-	return ev, ok
+	if !ok {
+		return nil, false
+	}
+	return proto.Clone(ev).(*marketpb.MarketDataEvent), true
 }
 
 // Universe returns the instrument ids this cache admits, sorted — the bound
