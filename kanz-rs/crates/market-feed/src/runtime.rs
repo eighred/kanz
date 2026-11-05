@@ -527,8 +527,7 @@ mod identity_proof {
             } else {
                 assert_eq!(
                     control
-                        .err()
-                        .expect("unregistered identity must be denied")
+                        .expect_err("unregistered identity must be denied")
                         .kind(),
                     async_nats::ConnectErrorKind::AuthorizationViolation
                 );
@@ -573,7 +572,6 @@ mod identity_proof {
                     last_update_sequence: 1,
                     bids: vec![level(100)],
                     asks: vec![level(101)],
-                    ..Default::default()
                 };
                 let mut framer = Framer::new(
                     config.tenant,
