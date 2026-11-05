@@ -84,6 +84,14 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(call.call_args_list[1].args[2], "get")
             self.assertEqual(call.call_args_list[2].args[2], "rollout")
 
+    def test_cilium_diagnostic_omits_logs_and_arbitrary_values(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        value = {"items": [{"spec": {"token": "not-retained"}, "status": {
+            "initContainerStatuses": [{"name": "unexpected-private-value", "state": {
+                "terminated": {"reason": "unexpected-private-value", "message": "not-retained", "exitCode": 7}}}]}}]}
+        with patch.object(f, "k", return_value=json.dumps(value)):
+            self.assertEqual(f.cilium_diagnostic(), [[{"name": "Other", "reason": "Other", "exitCode": 7, "running": False, "ready": False}]])
+
 
 if __name__ == "__main__":
     unittest.main()

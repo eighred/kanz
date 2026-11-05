@@ -28,6 +28,8 @@ def command(args, data=None, timeout=120):
     if result.returncode or len(result.stdout) > 1 << 20:
         if "cpus" in result.stderr.lower() and "range" in result.stderr.lower():
             raise proof.ProofError("fixture_CPU_limit_exceeds_host")
+        if any(marker in result.stderr.lower() for marker in ("context deadline exceeded", "timed out waiting")):
+            raise proof.ProofError("fixture_reported_timeout")
         raise proof.ProofError("fixture_command_failed")
     return result.stdout.strip()
 
@@ -217,23 +219,50 @@ class Fixture:
                                           "exitCode": detail.get("exitCode") if isinstance(detail.get("exitCode"), int) else None})
         return result
 
+    def cilium_diagnostic(self):
+        pods = json.loads(self.k("-n", "kube-system", "get", "pods", "-l", "k8s-app=cilium", "-o", "json"))["items"]
+        allowed = {"ContainerCreating", "PodInitializing", "ErrImagePull", "ImagePullBackOff", "CrashLoopBackOff", "Completed", "Error", "OOMKilled", "RunContainerError", "CreateContainerError"}
+        names = {"config", "mount-cgroup", "apply-sysctl-overwrites", "mount-bpf-fs", "clean-cilium-state", "install-cni-binaries", "cilium-agent"}
+        result = []
+        for pod in pods[:2]:
+            status = pod.get("status", {})
+            states = []
+            for item in (status.get("initContainerStatuses", []) + status.get("containerStatuses", []))[:16]:
+                state = item.get("state", {})
+                detail = state.get("waiting", state.get("terminated", {}))
+                states.append({"name": item.get("name") if item.get("name") in names else "Other",
+                               "reason": detail.get("reason") if detail.get("reason") in allowed else "Other",
+                               "running": "running" in state, "ready": item.get("ready") is True,
+                               "exitCode": detail.get("exitCode") if isinstance(detail.get("exitCode"), int) else None})
+            result.append(states)
+        return result
+
     def switch_to_cilium(self):
+        self.stage = "cilium_quiesce_system"
         self.quiesce_system()
+        self.stage = "cilium_capture_flannel_config"
         self.inside("cp", CNI_DIR + "/10-flannel.conflist", "/tmp/original-flannel.conflist")
         self.configure(True)
+        self.stage = "cilium_restart_K3s"
         command(["docker", "restart", "--timeout", "30", self.name], timeout=90)
+        self.stage = "cilium_API_ready"
         self.api_ready()
         # K3s deliberately retains kube-router rules when disabled. Remove only
         # those rules inside this owned fixture, before Cilium owns enforcement.
+        self.stage = "cilium_remove_old_rules"
         self.inside("sh", "-ceu", "set -o pipefail; iptables-save > /tmp/before-policy-rules; test -s /tmp/before-policy-rules; grep -v KUBE-ROUTER /tmp/before-policy-rules > /tmp/after-policy-rules; test -s /tmp/after-policy-rules; iptables-restore < /tmp/after-policy-rules")
+        self.stage = "cilium_remove_old_links"
         self.inside("sh", "-ceu", "for link in flannel.1 cni0; do if ip link show \"$link\" >/dev/null 2>&1; then ip link delete \"$link\"; fi; done")
+        self.stage = "cilium_install"
         self.inside("helm", "install", "cilium", "/tmp/cilium.tgz", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml",
                     "--namespace", "kube-system", "--set", "kubeProxyReplacement=false",
                     "--set", "ipam.mode=kubernetes", "--set", "operator.replicas=1",
                     "--set", "cni.binPath=/var/lib/rancher/k3s/data/cni",
                     "--set", "cni.confPath=" + CNI_DIR,
                     "--wait", "--timeout", "5m", timeout=330)
+        self.stage = "cilium_node_ready"
         self.ready()
+        self.stage = "cilium_restore_system"
         self.recycle_system()
         self.mode = "cilium"
 
@@ -317,6 +346,11 @@ def main():
             evidence["storageDiagnostic"] = f.storage_diagnostic()
         except (OSError, ValueError, proof.ProofError, subprocess.TimeoutExpired):
             evidence["storageDiagnostic"] = {"pod": "unknown"}
+        if phase == "cilium":
+            try:
+                evidence["ciliumDiagnostic"] = f.cilium_diagnostic()
+            except (OSError, ValueError, proof.ProofError, subprocess.TimeoutExpired):
+                evidence["ciliumDiagnostic"] = "unknown"
     finally:
         try:
             # Names originate only in this process; ownership is checked before
