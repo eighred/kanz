@@ -40,8 +40,12 @@ class InputTests(unittest.TestCase):
     @patch('isolation.run')
     def test_every_signature_and_attestation_binds_sha_and_tag(self, run):
         run.return_value = SHA
-        isolation.verify_release(IMAGE, 'v1', SHA)
-        isolation.verify_release(MIGRATION_IMAGE, 'v1', SHA, 'kanz-migrate')
+        candidate = 'e' * 40
+        isolation.verify_release(IMAGE, 'v1', SHA, candidate_sha=candidate)
+        isolation.verify_release(MIGRATION_IMAGE, 'v1', SHA, 'kanz-migrate', candidate_sha=candidate)
+        ancestry = [c.args[3:] for c in run.call_args_list if 'merge-base' in c.args]
+        self.assertEqual(ancestry.count(('merge-base', '--is-ancestor', SHA, candidate)), 2)
+        self.assertEqual(ancestry.count(('merge-base', '--is-ancestor', SHA, 'origin/main')), 2)
         calls = [c.args for c in run.call_args_list if c.args[0] == 'cosign']
         self.assertEqual(len(calls), 6)
         for image in (IMAGE, MIGRATION_IMAGE):
@@ -53,6 +57,52 @@ class InputTests(unittest.TestCase):
             self.assertEqual(call[call.index('--certificate-github-workflow-sha') + 1], SHA)
             self.assertEqual(call[call.index('--certificate-identity') + 1],
                              'https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/v1')
+
+
+class ExportTests(unittest.TestCase):
+    @patch('isolation.run')
+    def test_exports_only_manifest_blobs_with_literal_git_arguments(self, run):
+        content = b'kind: NetworkPolicy\n'
+        oid = 'd' * 40
+        listing = (f'100644 blob {oid} {len(content)}\tkanz/infra/policy.yaml\0'
+                   f'100755 blob {oid} 20\tkanz/infra/bootstrap.sh\0').encode()
+        run.side_effect = [SHA, listing, content]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sources = isolation.export_manifests(SHA, root)
+            self.assertEqual((root/'kanz/infra/policy.yaml').read_bytes(), content)
+            self.assertFalse((root/'kanz/infra/bootstrap.sh').exists())
+            self.assertEqual(sources[0]['blob'], oid)
+            self.assertEqual(len(sources[0]['sha256']), 64)
+        calls = [c.args for c in run.call_args_list]
+        self.assertEqual(calls[0][3:], ('rev-parse', '--verify', SHA + '^{commit}'))
+        self.assertEqual(calls[1][3:], ('ls-tree', '-r', '-l', '-z', SHA, '--', 'kanz/infra'))
+        self.assertEqual(calls[2][3:], ('show', oid))
+
+    @patch('isolation.run')
+    def test_symlinks_gitlinks_escapes_and_oversize_refused_before_blob_read(self, run):
+        oid = 'd' * 40
+        for mode, kind, size, path in [
+            ('120000', 'blob', '10', 'kanz/infra/linked.yaml'),
+            ('160000', 'commit', '-', 'kanz/infra/module'),
+            ('100644', 'blob', '1', 'kanz/infra/../escape.yaml'),
+            ('100644', 'blob', '1', '/kanz/infra/escape.yaml'),
+            ('100644', 'blob', '1', 'kanz/infra/a\\escape.yaml'),
+            ('100644', 'blob', str(16*1024*1024+1), 'kanz/infra/huge.yaml'),
+        ]:
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as temp:
+                run.reset_mock()
+                run.side_effect = [SHA, f'{mode} {kind} {oid} {size}\t{path}\0'.encode()]
+                with self.assertRaises(RuntimeError):
+                    isolation.export_manifests(SHA, Path(temp))
+                self.assertEqual(run.call_count, 2)
+
+    @patch('isolation.run')
+    def test_candidate_argument_injection_never_reaches_git(self, run):
+        for sha in ('--help', SHA+'; touch bad', SHA+'\n'):
+            with self.assertRaises(ValueError):
+                isolation.resolve_candidate(sha)
+        run.assert_not_called()
 
 
 class CandidateTests(unittest.TestCase):
@@ -126,9 +176,11 @@ class InventoryTests(unittest.TestCase):
             original=json.loads((infra/'0.yaml').read_text(encoding='utf-8'))
             (infra/'nested.yml').write_text(json.dumps({'kind':'List','items':[{'kind':'List','items':[original]}]}),encoding='utf-8')
             (infra/'extra.json').write_text(json.dumps(original),encoding='utf-8')
+            for suffix in ('YAML', 'YML', 'JSON'):
+                (infra/('uppercase.'+suffix)).write_text(json.dumps(original), encoding='utf-8')
             policies, sources = isolation.policy_inventory(root)
-            self.assertEqual(len(policies), 22)
-            self.assertEqual(len({p['metadata']['name'] for p in policies}), 22)
+            self.assertEqual(len(policies), 25)
+            self.assertEqual(len({p['metadata']['name'] for p in policies}), 25)
             self.assertEqual({s['name'] for s in sources}, {'same-overlay-name'})
             self.assertTrue(all(s['spec_sha256'] for s in sources))
 

@@ -73,7 +73,8 @@ jobs:
         with:
           persist-credentials: false
           path: trusted
-      - name: Validate immutable inputs before checkout or registry access
+          fetch-depth: 0
+      - name: Validate immutable inputs before registry access
         env:
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           RELEASE_IMAGE: ${{ inputs.image }}
@@ -94,12 +95,6 @@ jobs:
               if not re.fullmatch(pattern, os.environ[key]):
                   raise SystemExit('invalid ' + key)
           PY
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.candidate_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-          path: candidate
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: trusted/kanz/go.mod
@@ -121,13 +116,14 @@ jobs:
         run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_ACTOR" --password-stdin
       - name: Exercise the actual released image in disposable K3s
         env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           RELEASE_IMAGE: ${{ inputs.image }}
           MIGRATION_IMAGE: ${{ inputs.migration_image }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
           python3 -B trusted/kanz/services/tv-sync/test/isolation.py \
-            --candidate-dir "$GITHUB_WORKSPACE/candidate" \
+            --candidate-sha "$CANDIDATE_SHA" \
             --image "$RELEASE_IMAGE" --migration-image "$MIGRATION_IMAGE" --release-tag "$RELEASE_TAG" \
             --release-sha "$RELEASE_SHA" --evidence "$RUNNER_TEMP/tv-sync-isolation.json"
       - name: Remove disposable nodes after interruption

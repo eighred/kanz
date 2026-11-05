@@ -4,7 +4,7 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -27,10 +27,10 @@ ROOT = TRUSTED_ROOT
 REPO = ROOT.parent
 
 
-def run(*args, data=None, timeout=120, env=None):
+def run(*args, data=None, timeout=120, env=None, binary=False):
     # Commands/ambient environment are deliberately not dumped: Docker's login
     # is needed by the trusted parent only, never mounted into the test cluster.
-    result = subprocess.run(args, input=data, text=True, capture_output=True,
+    result = subprocess.run(args, input=data, text=not binary, capture_output=True,
                             timeout=timeout, check=False, env=env)
     if result.returncode:
         raise RuntimeError(f"{args[0]} {args[1] if len(args)>1 else ''} failed ({result.returncode}): {result.stderr[-4000:]}")
@@ -46,13 +46,13 @@ def validate_inputs(image, tag, sha, service="tv-sync"):
         raise ValueError("release SHA must be 40 lowercase hex characters")
 
 
-def verify_release(image, tag, sha, service="tv-sync"):
+def verify_release(image, tag, sha, service="tv-sync", candidate_sha="HEAD"):
     validate_inputs(image, tag, sha, service)
     peeled = run("git", "-C", str(REPO), "rev-parse", f"refs/tags/{tag}^{{commit}}").strip()
     if peeled != sha:
         raise RuntimeError("release tag does not resolve to expected source SHA")
     run("git", "-C", str(REPO), "merge-base", "--is-ancestor", sha, "origin/main")
-    run("git", "-C", str(REPO), "merge-base", "--is-ancestor", sha, "HEAD")
+    run("git", "-C", str(REPO), "merge-base", "--is-ancestor", sha, candidate_sha)
     identity = ["--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
                 "--certificate-identity", f"https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/{tag}",
                 "--certificate-github-workflow-sha", sha]
@@ -60,6 +60,56 @@ def verify_release(image, tag, sha, service="tv-sync"):
     for predicate in ("spdxjson", "vuln"):
         run("cosign", "verify-attestation", image, "--type", predicate, *identity, timeout=180)
 
+
+
+def resolve_candidate(sha):
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError("candidate SHA must be 40 lowercase hex characters")
+    resolved = run("git", "-C", str(REPO), "rev-parse", "--verify", sha + "^{commit}").strip()
+    if resolved != sha:
+        raise RuntimeError("candidate does not resolve to the supplied commit")
+    return sha
+
+
+def export_manifests(sha, destination):
+    """Read objects from trusted Git; never check out candidate executable code."""
+    resolve_candidate(sha)
+    listing = run("git", "-C", str(REPO), "ls-tree", "-r", "-l", "-z", sha,
+                  "--", "kanz/infra", binary=True)
+    sources = []
+    total = 0
+    for entry in listing.split(b"\0"):
+        if not entry:
+            continue
+        header, raw_path = entry.split(b"\t", 1)
+        mode, kind, oid, size = header.decode("ascii").split()
+        path = raw_path.decode("utf-8")
+        relative = PurePosixPath(path)
+        if (relative.is_absolute() or ".." in relative.parts or "\\" in path
+                or ":" in path or str(relative) != path
+                or relative.parts[:2] != ("kanz", "infra")):
+            raise RuntimeError("candidate manifest path escapes infra")
+        if mode not in ("100644", "100755") or kind != "blob":
+            raise RuntimeError("candidate infra contains a symlink or nonregular object")
+        if relative.suffix.lower() not in (".yaml", ".yml", ".json"):
+            continue
+        length = int(size)
+        total += length
+        if length > 16*1024*1024 or total > 128*1024*1024:
+            raise RuntimeError("candidate manifest size limit exceeded")
+        if not re.fullmatch(r"[0-9a-f]{40}", oid):
+            raise RuntimeError("invalid candidate blob identity")
+        content = run("git", "-C", str(REPO), "show", oid, binary=True)
+        if len(content) != length:
+            raise RuntimeError("candidate blob size differs from tree")
+        target = destination.joinpath(*relative.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("xb") as output:
+            output.write(content)
+        sources.append({"path": path, "blob": oid, "sha256": hashlib.sha256(content).hexdigest()})
+    if not sources:
+        raise RuntimeError("candidate contains no manifest blobs")
+    return sources
 
 
 def safe_read(path, root):
@@ -131,7 +181,7 @@ def policy_inventory(root):
     for path in sorted((root/"infra").rglob("*")):
         if path.is_symlink():
             raise RuntimeError("candidate infra contains a symlink")
-        if not path.is_file() or path.suffix not in (".yaml",".yml",".json"):
+        if not path.is_file() or path.suffix.lower() not in (".yaml",".yml",".json"):
             continue
         raw=safe_read(path,root)
         try:
@@ -243,27 +293,29 @@ def exercise(cluster, targets, phase, evidence):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidate-dir",required=True,type=Path)
+    parser.add_argument("--candidate-sha",required=True)
     parser.add_argument("--image",required=True)
     parser.add_argument("--migration-image",required=True)
     parser.add_argument("--release-tag",required=True)
     parser.add_argument("--release-sha",required=True)
     parser.add_argument("--evidence",required=True,type=Path)
     args=parser.parse_args()
-    global ROOT, REPO
-    REPO=args.candidate_dir.resolve()
-    ROOT=REPO/"kanz"
+    global ROOT
+    candidate_sha=resolve_candidate(args.candidate_sha)
     if sys.platform != "linux":
         raise RuntimeError("requires a disposable Linux Docker host")
-    verify_release(args.image,args.release_tag,args.release_sha)
-    verify_release(args.migration_image,args.release_tag,args.release_sha,"kanz-migrate")
+    verify_release(args.image,args.release_tag,args.release_sha,candidate_sha=candidate_sha)
+    verify_release(args.migration_image,args.release_tag,args.release_sha,"kanz-migrate",candidate_sha=candidate_sha)
     name="kanz-tv-isolation-"+uuid.uuid4().hex[:12]
     c=Cluster(name)
-    evidence={"candidate_sha":run("git","-C",str(REPO),"rev-parse","HEAD").strip(),
+    evidence={"candidate_sha":candidate_sha,
+              "harness_sha":run("git","-C",str(TRUSTED_ROOT.parent),"rev-parse","HEAD").strip(),
               "release_sha":args.release_sha,"release_tag":args.release_tag,"released_image":args.image,"released_migration_image":args.migration_image,
               "dependencies":IMAGES,"observations":[],"result":"failed"}
     with tempfile.TemporaryDirectory(prefix="kanz-tv-isolation-") as temp:
         scratch=Path(temp)
+        evidence["manifest_sources"]=export_manifests(candidate_sha,scratch/"candidate")
+        ROOT=scratch/"candidate/kanz"
         try:
             run("docker","run","-d","--name",name,"--label","io.kanz.tv-sync-isolation=true","--privileged",f"--cpus={min(4, os.cpu_count() or 1)}","--memory=4g",
                 "--pids-limit=4096","--tmpfs","/run","--tmpfs","/var/run",IMAGES["k3s"],

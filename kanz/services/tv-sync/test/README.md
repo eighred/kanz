@@ -8,7 +8,10 @@ this workflow available.
 
 The workflow accepts a full candidate SHA and immutable tv-sync and kanz-migrate release images,
 and their shared version tag and source SHA. Trusted code stays in the main checkout; the
-candidate checkout supplies only validated manifests. Cosign must verify the
+candidate is never checked out. The harness reads only regular YAML/YML/JSON
+blobs under `kanz/infra` from the trusted checkout's Git object database into a
+temporary directory. Symlinks, nonregular objects, escaping paths and oversized
+blobs fail closed; evidence records each source blob and SHA-256 hash. Cosign must verify the
 signature, SPDX and vulnerability attestations for both images against the exact release tag
 identity and workflow SHA. The release SHA must be an ancestor of current main
 and the candidate. The candidate Deployment must name those same app and init-container image digests.
@@ -51,11 +54,12 @@ go -C kanz test -p 1 ./services/tv-sync/test/probe
 ```
 
 On a disposable Linux runner with Docker, Go, Python/PyYAML 6.0.3 and cosign 3.0.6,
-a separate candidate checkout and registry read authentication:
+a trusted main checkout with full Git history (including the candidate commit)
+and registry read authentication:
 
 ```sh
 python3 -B kanz/services/tv-sync/test/isolation.py \
-  --candidate-dir /absolute/candidate \
+  --candidate-sha REVIEWED_CANDIDATE_SHA \
   --image ghcr.io/eighred/tv-sync@sha256:REVIEWED_DIGEST \
   --migration-image ghcr.io/eighred/kanz-migrate@sha256:REVIEWED_MIGRATION_DIGEST \
   --release-tag REVIEWED_VERSION_TAG --release-sha REVIEWED_SOURCE_SHA \
