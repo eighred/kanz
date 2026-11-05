@@ -57,7 +57,7 @@ func TestEveryWorkflowGoTestIsSerialised(t *testing.T) {
 			// Comments discuss `go test` constantly — kanz-ci.yml's own -p 1 note
 			// does, and so does this guard's rationale. Matching prose would flag a
 			// workflow for explaining itself.
-			if strings.HasPrefix(line, "#") || !strings.Contains(line, "go test") {
+			if strings.HasPrefix(line, "#") || !workflowGoTest.MatchString(line) {
 				continue
 			}
 			inv := invocation{where: filepath.ToSlash(rel) + ":" + strconv.Itoa(i+1), line: line}
@@ -93,4 +93,21 @@ func TestEveryWorkflowGoTestIsSerialised(t *testing.T) {
 	}
 
 	t.Logf("%d workflow `go test` invocation(s), all serialised with -p 1", len(all))
+}
+
+// A command-token boundary matters now that Rust CI contains `cargo test`.
+// Keep detecting Go under shell wrappers without classifying Cargo as Go.
+var workflowGoTest = regexp.MustCompile(`\bgo[\t ]+test\b`)
+
+func TestWorkflowGoTestMatcherDistinguishesCargo(t *testing.T) {
+	for _, line := range []string{"go test ./...", "go\ttest ./...", "(cd kanz && go test ./...)", "env GOFLAGS=-mod=mod go test ./..."} {
+		if !workflowGoTest.MatchString(line) {
+			t.Errorf("missed Go invocation %q", line)
+		}
+	}
+	for _, line := range []string{"cargo test --locked --lib", "cargo +1.90.0 test --lib", "go testing", "cargo fmt"} {
+		if workflowGoTest.MatchString(line) {
+			t.Errorf("classified a non-Go invocation as Go: %q", line)
+		}
+	}
 }
