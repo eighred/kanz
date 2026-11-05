@@ -1055,7 +1055,7 @@ enum ParticipationQuality {
 // timing ARE observable — each is a difference between two real observations the
 // OMS recorded at defined instants — so impact is defined as what is left:
 //
-//	impact_bps = shortfall_bps - spread_bps - timing_bps
+// The residual identity is `impact_bps = shortfall_bps - spread_bps - timing_bps`.
 //
 // That identity is exact, and a test pins it. What it means is only as good as
 // the two measured legs: a NEGATIVE impact_bps is the ordinary result of resting
