@@ -25,7 +25,9 @@ REQUIRED = {
 }
 
 
-def verify(events):
+def verify(events, required=None):
+    if required is None:
+        required = REQUIRED
     passed = set()
     completed = set()
     for event in events:
@@ -38,7 +40,7 @@ def verify(events):
                 passed.add((package, test))
             else:
                 completed.add(package)
-    for package, names in REQUIRED.items():
+    for package, names in required.items():
         full = PREFIX + package
         if full not in completed:
             raise ValueError(f"missing completed package: {full}")

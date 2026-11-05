@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package research.v1;
+
+import "domain/v1/calibration.proto";
+import "google/protobuf/timestamp.proto";
+import "market/v1/market_data.proto";
+import "reference/v1/fixed_income.proto";
+
+// Shadow-only numerical input; never an instruction to install or publish a curve.
+// The caller bounds input/output sizes and validates finite numerical values.
+message CurveCalibrationJob {
+  string capture_id = 1;
+  bytes capture_digest = 2;
+  string currency = 3;
+  google.protobuf.Timestamp requested_as_of = 4;
+  google.protobuf.Timestamp captured_at = 5;
+  reference.v1.Interpolation interpolation = 6;
+  repeated CalibrationInput inputs = 7;
+  domain.v1.CalibrationCoverage coverage = 8;
+  // True means a latest-cache cut, NOT historical knowledge as of requested_as_of.
+  bool latest_observations = 9;
+}
+
+// Observed money stays in canonical market/common protobufs. resolved_rate is
+// the existing Go numerical solver input (decimal rate, not percent or price).
+// Deposits/forwards use simple interest; swaps use annual fixed coupon dates.
+message CalibrationInput {
+  string instrument_id = 1;
+  RateQuoteKind kind = 2;
+  double tenor_years = 3;
+  double span_years = 4; // Future period; zero means 0.25 years.
+  market.v1.MarketDataEvent observation = 5;
+  // Explicit oneof preserves absent versus observed zero across generated SDKs,
+  // including ProtoBuf.jl. An unusable configured input leaves rate unset.
+  oneof rate {
+    double resolved_rate = 6;
+  }
+}
+
+enum RateQuoteKind {
+  RATE_QUOTE_KIND_UNSPECIFIED = 0;
+  RATE_QUOTE_KIND_DEPOSIT = 1;
+  RATE_QUOTE_KIND_FUTURE = 2;
+  RATE_QUOTE_KIND_SWAP = 3;
+}
+
+// Candidates are numerical intermediates, not authoritative YieldCurve records.
+message CurveCalibrationPillar {
+  double tenor_years = 1;
+  double zero_rate = 2; // Continuously compounded decimal rate.
+}
+
+message CurveCalibrationResult {
+  string capture_id = 1;
+  bytes capture_digest = 2;
+  repeated CurveCalibrationPillar pillars = 3;
+  CurveCalibrationFailure failure = 4;
+}
+
+enum CurveCalibrationFailure {
+  CURVE_CALIBRATION_FAILURE_UNSPECIFIED = 0;
+  CURVE_CALIBRATION_FAILURE_NONE = 1;
+  CURVE_CALIBRATION_FAILURE_INVALID_INPUT = 2;
+  CURVE_CALIBRATION_FAILURE_UNSUPPORTED_CONVENTION = 3;
+  CURVE_CALIBRATION_FAILURE_NUMERICAL_FAILURE = 4;
+}
