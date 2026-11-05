@@ -827,6 +827,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanz-bond-risk-shadow"
+version = "0.1.0"
+dependencies = [
+ "kanz-decimal-compat",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "protoc-bin-vendored",
+]
+
+[[package]]
 name = "kanz-decimal-compat"
 version = "0.1.0"
 dependencies = [

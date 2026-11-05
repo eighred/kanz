@@ -50,6 +50,14 @@ type cashflow struct {
 	amount float64
 }
 
+// BondPayment projects the existing schedule without introducing a rounded
+// cashflow amount. A shadow kernel derives amounts from canonical bond terms.
+type BondPayment struct {
+	Date       time.Time
+	Coupon     bool
+	Redemption bool
+}
+
 // cFreq is the compounding frequency: the coupon frequency, or 1 (annual) for a
 // zero-coupon bond.
 func (b Bond) cFreq() int {
@@ -87,20 +95,33 @@ func (b Bond) couponAmount() float64 {
 // futureCashflows returns the cashflows strictly after settle, with the face
 // added to the final (maturity) payment.
 func (b Bond) futureCashflows(settle time.Time) []cashflow {
-	sched := b.schedule()
 	coupon := b.couponAmount()
-	cfs := make([]cashflow, 0, len(sched))
-	for i, d := range sched {
-		if !d.After(settle) {
-			continue
+	payments := b.PaymentsAfter(settle)
+	cfs := make([]cashflow, 0, len(payments))
+	for _, payment := range payments {
+		amt := 0.0
+		if payment.Coupon {
+			amt = coupon
 		}
-		amt := coupon
-		if i == len(sched)-1 {
+		if payment.Redemption {
 			amt += b.Face
 		}
-		cfs = append(cfs, cashflow{d, amt})
+		cfs = append(cfs, cashflow{payment.Date, amt})
 	}
 	return cfs
+}
+
+// PaymentsAfter uses the same backward AddDate schedule and strict settlement
+// exclusion as pricing. It does not change initial-stub or month-end conventions.
+func (b Bond) PaymentsAfter(settle time.Time) []BondPayment {
+	sched := b.schedule()
+	out := make([]BondPayment, 0, len(sched))
+	for i, date := range sched {
+		if date.After(settle) {
+			out = append(out, BondPayment{Date: date, Coupon: b.Frequency > 0 && b.CouponRate != 0, Redemption: i == len(sched)-1})
+		}
+	}
+	return out
 }
 
 // PriceFromYield returns the dirty price (PV of future cashflows) at yield y,

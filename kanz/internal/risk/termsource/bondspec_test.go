@@ -67,6 +67,23 @@ func TestToBondSpec_MapsEveryField(t *testing.T) {
 	}
 }
 
+func TestBondSpecRetainsDetachedCanonicalTerms(t *testing.T) {
+	original := aBond()
+	spec, ok := BondSpecFromTerms(original)
+	if !ok || spec.CanonicalTerms == nil {
+		t.Fatal("resolved terms lost canonical values")
+	}
+	original.FaceValue.Coefficient = 1
+	original.IssueDate.Seconds = 0
+	if spec.CanonicalTerms.FaceValue.Coefficient != 1000 || !spec.CanonicalTerms.IssueDate.AsTime().Equal(bondIssue) {
+		t.Fatal("resolved terms alias provider record")
+	}
+	spec.CanonicalTerms.CouponRate.Coefficient = 9
+	if original.CouponRate.Coefficient != 5 {
+		t.Fatal("canonical diagnostic capture changed source terms")
+	}
+}
+
 // EVERY DAY COUNT MAPS TO THE RIGHT CONVENTION, AND THE MAP IS NOT A CAST.
 //
 // This is the case that matters most in the file. The proto and the Go iota

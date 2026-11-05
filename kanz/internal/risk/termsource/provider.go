@@ -7,6 +7,7 @@ import (
 	"time"
 
 	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/marketdata/terms"
 	"github.com/eighred/kanz/internal/risk/compute"
@@ -261,7 +262,14 @@ func toBondSpec(b *referencepb.BondTerms) (compute.BondSpec, bool) {
 		Face: face, CouponRate: coupon, Frequency: freq,
 		Issue: issue, Maturity: maturity, DayCount: dc,
 		Currency: b.GetCurrencyCode(), IssuerID: b.GetIssuerId(),
+		CanonicalTerms: proto.Clone(b).(*referencepb.BondTerms),
 	}, true
+}
+
+// BondSpecFromTerms applies the same conversion used by the live terms provider.
+// It returns detached canonical terms alongside the existing analytic values.
+func BondSpecFromTerms(b *referencepb.BondTerms) (compute.BondSpec, bool) {
+	return toBondSpec(b)
 }
 
 // toDayCount maps the wire convention to the pricing one.

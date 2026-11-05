@@ -1,0 +1,89 @@
+name: rust-bond-shadow
+
+on:
+  pull_request:
+    paths:
+      - 'kanz-rs/**'
+      - 'kanz-schemas/proto/**'
+      - 'kanz/internal/risk/pricing/**'
+      - 'kanz/internal/risk/compute/**'
+      - 'kanz/internal/risk/termsource/**'
+      - 'kanz/services/risk-engine/**'
+      - 'kanz/tools/bond-risk-conformance/**'
+      - 'kanz/test/arch/**'
+      - '.github/scripts/*migration_evidence.py'
+      - '.github/scripts/check_bond_shadow_evidence.py'
+      - '.github/workflows/rust-bond-shadow.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'kanz-rs/**'
+      - 'kanz-schemas/proto/**'
+      - 'kanz/internal/risk/pricing/**'
+      - 'kanz/internal/risk/compute/**'
+      - 'kanz/internal/risk/termsource/**'
+      - 'kanz/services/risk-engine/**'
+      - 'kanz/tools/bond-risk-conformance/**'
+      - 'kanz/test/arch/**'
+      - '.github/scripts/*migration_evidence.py'
+      - '.github/scripts/check_bond_shadow_evidence.py'
+      - '.github/workflows/rust-bond-shadow.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=mod
+
+jobs:
+  bond-shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Generate canonical Go contracts
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - name: Build and verify the pinned Rust kernel
+        working-directory: kanz-rs
+        env:
+          KANZ_BUILD_VERSION: ${{ github.sha }}
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+          cargo fmt --all -- --check
+          cargo test --locked -p kanz-bond-risk-shadow
+          cargo clippy --locked -p kanz-bond-risk-shadow --all-targets -- -D warnings
+          cargo build --locked -p kanz-bond-risk-shadow
+      - name: Verify source boundaries and affected Go owners
+        working-directory: kanz
+        run: |
+          go test -p 1 ./test/arch -run 'Test(Rust|Julia|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
+          go test -p 1 ./internal/risk/pricing/... ./internal/risk/compute/... ./internal/risk/termsource ./services/risk-engine/internal/replay ./services/risk-engine/internal/config ./services/risk-engine/cmd/risk-engine -count=1
+      - name: Compare actual stamped worker through the production supervisor
+        working-directory: kanz
+        env:
+          KANZ_BOND_RISK_BIN: ${{ github.workspace }}/kanz-rs/target/debug/kanz-bond-risk-shadow
+          KANZ_BOND_RISK_VERSION: ${{ github.sha }}
+        run: |
+          set -o pipefail
+          go test -race -p 1 ./tools/bond-risk-conformance ./services/risk-engine/internal/bondshadow ./services/risk-engine/internal/shadowprocess -count=1 -json | tee "$RUNNER_TEMP/bond-shadow.jsonl"
+          python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
+          python3 ../.github/scripts/check_bond_shadow_evidence.py "$RUNNER_TEMP/bond-shadow.jsonl"
+      - name: Preserve numerical execution evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bond-shadow-evidence
+          path: ${{ runner.temp }}/bond-shadow.jsonl
+          if-no-files-found: warn

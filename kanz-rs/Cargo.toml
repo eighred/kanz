@@ -6,7 +6,7 @@ rust-version = "1.90"
 publish = false
 
 [workspace]
-members = ["crates/market-feed", "services/binance-depth", "services/okx-depth"]
+members = ["crates/market-feed", "services/binance-depth", "services/okx-depth", "services/bond-risk-shadow"]
 resolver = "2"
 
 [dependencies]
