@@ -43,6 +43,7 @@ class Fixture:
         self.name = name
         self.volume = name + "-data"
         self.mode = "flannel"
+        self.stage = "initialize"
         self.k = proof.Kubectl(["docker", "exec", "-i", name, "kubectl"])
 
     def inside(self, *args, data=None, timeout=120):
@@ -130,6 +131,7 @@ class Fixture:
 
     def storage(self, claim, marker, create):
         if create:
+            self.stage = "storage_apply_claim"
             self.k("apply", "-f", "-", value={"apiVersion": "v1", "kind": "PersistentVolumeClaim",
                    "metadata": {"name": claim, "namespace": self.name},
                    "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": "local-path",
@@ -149,8 +151,11 @@ class Fixture:
                                                       "limits": {"cpu": "100m", "memory": "64Mi"}},
                                         "volumeMounts": [{"name": "state", "mountPath": "/state"}]}],
                         "volumes": [{"name": "state", "persistentVolumeClaim": {"claimName": claim}}]}}
+        self.stage = "storage_apply_pod"
         self.k("apply", "-f", "-", value=pod)
+        self.stage = "storage_wait_pod"
         self.k("-n", self.name, "wait", "--for=condition=Ready", "pod/storage-check", "--timeout=120s", timeout=130)
+        self.stage = "storage_image"
         loaded = json.loads(self.k("-n", self.name, "get", "pod/storage-check", "-o", "json"))
         image_id = loaded["status"]["containerStatuses"][0].get("imageID", "")
         if not image_id.endswith("@" + proof.IMAGE.split("@")[1]):
@@ -168,15 +173,35 @@ class Fixture:
                 raise proof.ProofError("new_pod_not_owned_by_Cilium")
         # Ready alone precedes the script's write/assert; explicit exec observes
         # both persisted bytes and functional cluster DNS after startup.
+        self.stage = "storage_DNS_and_marker"
         observed = self.k("-n", self.name, "exec", "storage-check", "--", "python3", "-c",
                           "from pathlib import Path;import socket,time;socket.getaddrinfo('kubernetes.default.svc.cluster.local',443);"
                           "p=Path('/state/marker');end=time.monotonic()+10\nwhile not p.exists() and time.monotonic()<end: time.sleep(.1)\nprint(p.read_text())")
         if observed != marker:
             raise proof.ProofError("persistent_marker_mismatch")
+        self.stage = "storage_identity"
         pvc = json.loads(self.k("-n", self.name, "get", "pvc", claim, "-o", "json"))
         pv = json.loads(self.k("get", "pv", pvc["spec"]["volumeName"], "-o", "json"))
+        self.stage = "storage_delete_probe"
         self.k("-n", self.name, "delete", "pod/storage-check", "--wait=true", "--timeout=60s", timeout=70)
         return {"pvc": pvc["metadata"]["uid"], "pv": pv["metadata"]["uid"], "imageID": image_id}
+
+    def storage_diagnostic(self):
+        # Only finite status categories from our own synthetic Pod; never logs,
+        # termination messages, Pod specification, kubeconfig or node token.
+        raw = self.k("-n", self.name, "get", "pod", "storage-check", "--ignore-not-found", "-o", "json")
+        if not raw:
+            return {"pod": "absent"}
+        status = json.loads(raw).get("status", {})
+        phases = {"Pending", "Running", "Succeeded", "Failed", "Unknown"}
+        reasons = {"ContainerCreating", "ErrImagePull", "ImagePullBackOff", "CrashLoopBackOff", "Completed", "Error", "OOMKilled", "RunContainerError", "CreateContainerError"}
+        result = {"pod": status.get("phase") if status.get("phase") in phases else "Unknown", "containers": []}
+        for entry in status.get("containerStatuses", [])[:1]:
+            state = entry.get("state", {})
+            detail = state.get("waiting", state.get("terminated", {}))
+            result["containers"].append({"reason": detail.get("reason") if detail.get("reason") in reasons else "Other",
+                                          "exitCode": detail.get("exitCode") if isinstance(detail.get("exitCode"), int) else None})
+        return result
 
     def switch_to_cilium(self):
         self.quiesce_system()
@@ -241,6 +266,9 @@ def main():
         phase = "initial_node_ready"
         node = f.ready()
         node_uid = node["metadata"]["uid"]
+        phase = "initial_system_ready"
+        for deployment in ("coredns", "local-path-provisioner"):
+            f.k("-n", "kube-system", "rollout", "status", "deployment/" + deployment, "--timeout=180s", timeout=190)
         f.k("create", "namespace", name)
         nonce = uuid.uuid4().hex
         f.k("apply", "-f", "-", value={"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "etcd-marker", "namespace": name}, "data": {"marker": nonce}})
@@ -270,7 +298,12 @@ def main():
         evidence["verdict"] = "PASS"
     except (OSError, ValueError, RuntimeError, proof.ProofError, subprocess.TimeoutExpired) as error:
         evidence["failedPhase"] = phase
+        evidence["failedStage"] = f.stage
         evidence["reason"] = str(error) if isinstance(error, proof.ProofError) else "fixture_transport_or_decode_failure"
+        try:
+            evidence["storageDiagnostic"] = f.storage_diagnostic()
+        except (OSError, ValueError, proof.ProofError, subprocess.TimeoutExpired):
+            evidence["storageDiagnostic"] = {"pod": "unknown"}
     finally:
         try:
             # Names originate only in this process; ownership is checked before

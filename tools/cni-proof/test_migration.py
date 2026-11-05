@@ -68,6 +68,13 @@ class MigrationTests(unittest.TestCase):
             with self.assertRaisesRegex(proof.ProofError, "Cilium_remains_after_rollback"):
                 f.datapath()
 
+    def test_storage_diagnostic_projects_only_finite_status(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        pod = {"spec": {"secret": "not-retained"}, "status": {"phase": "Failed", "message": "not-retained",
+               "containerStatuses": [{"state": {"terminated": {"reason": "Error", "exitCode": 1, "message": "not-retained"}}}]}}
+        with patch.object(f, "k", return_value=json.dumps(pod)):
+            self.assertEqual(f.storage_diagnostic(), {"pod": "Failed", "containers": [{"reason": "Error", "exitCode": 1}]})
+
 
 if __name__ == "__main__":
     unittest.main()
