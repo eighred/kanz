@@ -127,7 +127,7 @@ def policy(allow=False):
 
 def create_enforcing_cluster(name, scratch):
     """Shared disposable kind/Cilium setup; accepts no existing context."""
-    if not re.fullmatch(r"(?:feed-proof|cni-proof)-[0-9a-f]{12}", name):
+    if not re.fullmatch(r"(?:feed-proof|cni-proof|redpanda-proof)-[0-9a-f]{12}", name):
         raise ValueError("invalid disposable cluster name")
     kubeconfig = str(scratch/'kubeconfig')
     def k(*args):

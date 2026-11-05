@@ -179,13 +179,8 @@ def main():
             image='kanz-redpanda-proof:'+sha
             shared.command(['docker','build','--build-arg','VERSION='+sha,'-f','tools/redpanda-identity/Dockerfile','-t',image,'.'],timeout=1200)
             evidence['probeImageID']=shared.command(['docker','image','inspect','--format','{{.Id}}',image])
-            config=scratch/'kind.yaml'
-            config.write_text(yaml.safe_dump({'kind':'Cluster','apiVersion':'kind.x-k8s.io/v1alpha4','networking':{'disableDefaultCNI':True},'nodes':[{'role':'control-plane'}]}))
-            evidence['stage']='create kind'
-            shared.command(['kind','create','cluster','--name',name,'--image',shared.NODE,'--config',str(config),'--kubeconfig',kubeconfig,'--wait','0s'])
-            evidence['stage']='install Cilium'
-            shared.command(['helm','install','cilium',str(Path(os.environ['RUNNER_TEMP'])/'cilium.tgz'),'--kubeconfig',kubeconfig,'--kube-context','kind-'+name,'--namespace','kube-system','--set','ipam.mode=kubernetes','--set','operator.replicas=1','--wait','--timeout','5m'],timeout=360)
-            k('wait','--for=condition=Ready','node','--all','--timeout=180s')
+            evidence['stage']='create enforcing kind/Cilium cluster'
+            shared.create_enforcing_cluster(name, scratch)
             shared.command(['kind','load','docker-image',image,'--name',name])
             evidence['stage']='install SPIRE'
             crds=[]
