@@ -338,6 +338,13 @@ async fn session(
 ) -> Result<(), SourceError> {
     let mut epoch = 0_u64;
     cfg.validate()?;
+    // reqwest's rustls-no-provider feature deliberately supplies no fallback.
+    // Library callers do not execute main's initialization. Install our pinned
+    // ring provider once; an already-installed application provider wins, and a
+    // concurrent installer is safe because rustls uses a process-wide OnceLock.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(IO_TIMEOUT)
