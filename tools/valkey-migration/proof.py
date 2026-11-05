@@ -10,6 +10,7 @@ import uuid
 
 REDIS = "redis@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08"
 VALKEY = "valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b"
+REDIS_VERSION = "7.4.5"
 LABEL = "io.kanz.valkey-migration"
 KEYS = {"tenant-a:nonce:retained": "claimed", "tenant-b:nonce:retained": "independent",
         "tenant-a:idempotency": 'response:<>&\u2028\n"exact"', "tenant-a:counter": "19"}
@@ -48,6 +49,18 @@ def info(text):
     return dict(line.split(":", 1) for line in text.splitlines() if line and not line.startswith("#") and ":" in line)
 
 
+def startup_category(log):
+    # Only fixed classifications leave this function, never raw server logs.
+    for marker, category in (("Can't handle RDB format version", "unsupported_rdb_version"),
+                             ("Wrong signature trying to load DB", "unsupported_rdb_signature"),
+                             ("Permission denied", "filesystem_permission_refused"),
+                             ("Bad file format reading the append only file", "aof_format_refused"),
+                             ("Address already in use", "bind_refused")):
+        if marker in log:
+            return category
+    return "unclassified_startup_refusal"
+
+
 def verify_snapshot(actual, expected):
     if actual != expected:
         raise Refused("state_or_absolute_expiry_changed")
@@ -63,7 +76,7 @@ def validate_report(report, source):
         observed = report["phases"][name]
         if (observed.get("image") != image or not re.fullmatch(r"sha256:[0-9a-f]{64}", observed.get("imageID", ""))
                 or (image == VALKEY and observed.get("version") != "9.1.3")
-                or (image == REDIS and not str(observed.get("version")).startswith("7."))):
+                or (image == REDIS and observed.get("version") != REDIS_VERSION)):
             raise Refused("unexpected_runtime_identity")
     if (report["phases"]["redis"] != report["phases"]["redis_rollback"]
             or report["phases"]["valkey"] != report["phases"]["valkey_restart"]):
@@ -99,7 +112,8 @@ class Fixture:
         return ["docker", "run", "--name", self.name, "--label", LABEL + "=" + self.name,
                 "--network", "none", "--user", "999:999", "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges", "--read-only", "--memory=192m", "--cpus=1",
-                "--pids-limit=64", "--log-driver=none", "--mount", "type=volume,src=" + self.volume + ",dst=/data"]
+                "--pids-limit=64", "--log-driver=local", "--log-opt=max-size=1m", "--log-opt=max-file=1",
+                "--mount", "type=volume,src=" + self.volume + ",dst=/data"]
 
     def start(self, image, preamble):
         self.volume_owned()
@@ -119,10 +133,18 @@ class Fixture:
                 pass
             time.sleep(.2)
         else:
-            raise Refused("server_not_ready")
+            # Docker logs are bounded and stay inside this disposable runner;
+            # fixture credentials/config and free text never enter the artifact.
+            try:
+                raw = subprocess.run(["docker", "logs", "--tail", "80", self.name], capture_output=True,
+                                     text=True, encoding="utf-8", timeout=10)
+                category = startup_category(raw.stdout + raw.stderr) if raw.returncode == 0 else "startup_diagnostic_unavailable"
+            except (OSError, subprocess.TimeoutExpired):
+                category = "startup_diagnostic_unavailable"
+            raise Refused(category)
         server_info = info(self.raw("INFO", "server"))
         version = server_info.get("valkey_version") if image == VALKEY else server_info.get("redis_version")
-        if (image == VALKEY and version != "9.1.3") or (image == REDIS and not str(version).startswith("7.")):
+        if (image == VALKEY and version != "9.1.3") or (image == REDIS and version != REDIS_VERSION):
             raise Refused("unexpected_server_version")
         for key, value in {"appendonly": "yes", "appendfsync": "always", "maxmemory-policy": "noeviction", "maxmemory": "67108864",
                            "aof-use-rdb-preamble": "yes" if preamble else "no"}.items():

@@ -81,7 +81,7 @@ class MigrationBoundaryTests(unittest.TestCase):
     def test_evidence_requires_exact_complete_runtime_and_cleanup(self):
         identity = lambda image, version: {"image": image, "version": version, "imageID": "sha256:" + "b" * 64}
         report = {"source": "a" * 40, "verdict": "PASS", "cleanup": "verified_absent", "cases": proof.CASES,
-                  "phases": {"redis": identity(proof.REDIS, "7.2.4"), "redis_rollback": identity(proof.REDIS, "7.2.4"),
+                  "phases": {"redis": identity(proof.REDIS, "7.4.5"), "redis_rollback": identity(proof.REDIS, "7.4.5"),
                              "valkey": identity(proof.VALKEY, "9.1.3"), "valkey_restart": identity(proof.VALKEY, "9.1.3")}}
         proof.validate_report(report, "a" * 40)
         for mutate in (lambda x: x.update(source="c" * 40), lambda x: x.update(cleanup="unknown"),
@@ -92,6 +92,14 @@ class MigrationBoundaryTests(unittest.TestCase):
             mutate(changed)
             with self.assertRaises(proof.Refused):
                 proof.validate_report(changed, "a" * 40)
+
+    def test_startup_diagnostics_never_return_raw_text(self):
+        sentinel = "private-fixture-value-not-for-artifacts"
+        for text, category in (("Can't handle RDB format version 12", "unsupported_rdb_version"),
+                               ("Permission denied", "filesystem_permission_refused"),
+                               ("an unexpected message", "unclassified_startup_refusal")):
+            self.assertEqual(proof.startup_category(text + sentinel), category)
+            self.assertNotIn(sentinel, proof.startup_category(text + sentinel))
 
 
 if __name__ == "__main__":
