@@ -156,3 +156,37 @@ while their inventories are empty. Those missing inputs produce explicit
 refusals and trading remains startup-halted. Account-proof enforcement is the
 exception because arming it before expected UIDs exist prevents the OMS from
 becoming Ready and removes the observation surface needed to finish the proof.
+
+
+### Disposable CNI capability proof
+
+`tools/Test-TestnetCNI.ps1` is a separate, explicitly invoked operator check.
+It refuses a checkout that is not exact, unmodified `origin/main`, an unexpected
+AWS account/region/instance, or a different `kube-system` UID. It creates only a
+random `kanz-cni-proof-<uuid>` namespace with three bounded, unprivileged synthetic
+pods; it does not contact brokers, venue adapters or domain services. No caller
+can select a target or fixture namespace. Review and merge its exact-source CI
+proof before invoking it through the normal authenticated operator profile.
+
+The same Python engine runs in disposable kind with the shared pinned Cilium
+installer. A CI-only negative control disables enforcement in that disposable
+cluster, verifies the loaded Cilium mode, and requires baseline success followed
+by default-deny failure and verified cleanup. The operator has no such override.
+The engine compares Pod-IP and Service-IP baseline, default-deny, selected
+allow/unselected deny, and post-removal restoration: 16 observations plus verified
+namespace cleanup with UID-preconditioned deletion. Every pod must match the
+pinned image and loaded manifest digest; actual image IDs are retained. Socket
+timeout/refusal counts only within those positive
+controls; command errors and unknown results fail. Cleanup uncertainty prevents
+PASS. The operator emits sanitized source/image/namespace/case/cleanup evidence.
+
+This proves only the fixture's NetworkPolicy behavior on the measured cluster.
+It does not certify production allow-sets, namespace isolation coverage,
+TradingView/tv-sync activation or permission to resume capital execution. Keep
+#232 and the separate #1410 promotion acceptance open. Cluster reinstallation
+requires a reviewed UID update rather than an override.
+
+Fixture image: official Python 3.13.18 Alpine linux/amd64 manifest, digest pinned in
+`tools/cni-proof/proof.py`; [Python CLI](https://docs.python.org/3.13/using/cmdline.html)
+and [socket outcomes](https://docs.python.org/3.13/library/socket.html) define the
+probe behavior. No third-party Python packages run inside the fixture pods.
