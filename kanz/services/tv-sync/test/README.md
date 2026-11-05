@@ -17,8 +17,11 @@ identity and workflow SHA. The release SHA must be an ancestor of current main
 and the candidate. The candidate Deployment must name those same app and init-container image digests.
 
 Each registry image is pulled by digest, exported and imported into the isolated
-node without exposing registry credentials to fixture pods. Its Docker config
-ID, imported CRI config ID and running pod image identity must agree. All
+node without exposing registry credentials to fixture pods. The pulled repository digest and local tag must resolve to the same Docker
+reference ID. The SHA-256 of the saved image's raw config bytes, imported CRI
+config ID and running pod image identity must agree. Docker reference IDs may
+identify an index or manifest rather than a config; evidence keeps these digest
+types separate and retains partial identity diagnostics on failure. All
 Postgres roles, tenant headers and data are disposable fixtures. The runtime
 role is explicitly NOSUPERUSER/NOBYPASSRLS. The verified migration image runs
 the real tv-sync migration directory; its completed init-container image identity
