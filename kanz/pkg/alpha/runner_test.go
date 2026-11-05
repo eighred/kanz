@@ -28,6 +28,75 @@ type capture struct {
 	events []bus.Event
 }
 
+func TestExternalDepthRejectsAmbiguousOrEngineFeeds(t *testing.T) {
+	trade := trades.NewSimSource(trades.SimConfig{Interval: time.Millisecond})
+	for _, tc := range []struct {
+		name    string
+		feed    Feed
+		engines []Engine
+	}{
+		{"missing-trades", Feed{ExternalDepth: true}, nil},
+		{"local-and-external", Feed{ExternalDepth: true, Trades: trade, Depth: depth.NewSimSource(depth.SimConfig{})}, nil},
+		{"engines", Feed{ExternalDepth: true, Trades: trade}, []Engine{&staticEngine{}}},
+		{"missing-local-depth", Feed{Trades: trade}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := New(Config{Publisher: &capture{}, Feeds: []Feed{tc.feed}, Engines: tc.engines}); err == nil {
+				t.Fatal("invalid feed accepted")
+			}
+		})
+	}
+}
+
+func TestExternalDepthRunsTradesWithoutBookPublishing(t *testing.T) {
+	pub := &capture{}
+	source := &externalTradeFixture{folded: make(chan struct{})}
+	r, err := New(Config{Publisher: pub, Bars: pub, Now: func() time.Time { return time.Now().Add(2 * time.Minute) }, Feeds: []Feed{{InstrumentID: "BTC-USD", MIC: "BINANCE", ExternalDepth: true, Trades: source}}, SnapshotInterval: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	select {
+	case <-source.folded:
+		cancel()
+	case <-ctx.Done():
+		t.Fatal("trade tape did not request next trade")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if r.Views()[0].LastPrice() == nil {
+		t.Fatal("trade tape did not fold")
+	}
+	if r.Views()[0].BestBid() != nil || r.Views()[0].BestAsk() != nil {
+		t.Fatal("external feed fabricated depth")
+	}
+	if len(pub.byType("market.book.snapshot")) != 0 || len(pub.byType("market.crypto.quote")) != 0 {
+		t.Fatal("external feed published Go depth")
+	}
+	if len(pub.byType("market.crypto.bar")) != 1 {
+		t.Fatal("external feed candle tee/flush did not run")
+	}
+}
+
+type externalTradeFixture struct {
+	folded chan struct{}
+	sent   bool
+}
+
+func (s *externalTradeFixture) Recv(ctx context.Context) (trades.Trade, error) {
+	if !s.sent {
+		s.sent = true
+		return trades.Trade{Price: big.NewRat(10, 1), Size: big.NewRat(1, 1), TakerSide: trades.SideBuy, EventTime: time.Now()}, nil
+	}
+	close(s.folded)
+	<-ctx.Done()
+	return trades.Trade{}, ctx.Err()
+}
+
 func (c *capture) Publish(_ context.Context, e bus.Event) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

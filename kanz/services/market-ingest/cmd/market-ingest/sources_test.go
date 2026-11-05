@@ -29,6 +29,31 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func TestExternalBinanceDepthPreservesTradesAndOKX(t *testing.T) {
+	cfg := config.Config{Instruments: []string{"BTC-USD", "ETH-USD"}, BinanceSymbols: map[string]string{"BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT"}, OKXSymbols: map[string]string{"BTC-USD": "BTC-USDT"}, BinanceExternalDepthInstruments: []string{"BTC-USD"}}
+	got, err := feeds(cfg, testRecorder(t), quietLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("feeds=%d", len(got))
+	}
+	if !got[0].ExternalDepth || got[0].Depth != nil || got[0].Trades == nil {
+		t.Fatal("assigned Binance feed not trade-only")
+	}
+	for _, f := range got[1:] {
+		if f.ExternalDepth || f.Depth == nil || f.Trades == nil {
+			t.Fatal("unassigned Binance/OKX feed changed")
+		}
+	}
+	for _, bad := range [][]string{{""}, {"BTC-USD", "BTC-USD"}, {"UNKNOWN"}, {" BTC-USD"}} {
+		cfg.BinanceExternalDepthInstruments = bad
+		if _, err := feeds(cfg, testRecorder(t), quietLogger()); err == nil {
+			t.Fatalf("invalid assignment accepted: %q", bad)
+		}
+	}
+}
+
 // testRecorder is the ingestion-coverage record these composition-root tests
 // hand to feeds(). It is a REAL recorder rather than nil: nil is the "attest
 // nothing" path, and a test that passed nil would prove the wiring compiles

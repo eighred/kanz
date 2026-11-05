@@ -23,7 +23,8 @@ import (
 )
 
 // Feed is one (instrument, venue) pair's live inputs: the L2 depth stream and the
-// trade tape. Depth is required; a nil Trades source simply leaves the volume
+// trade tape. Depth is required unless ExternalDepth explicitly selects a
+// trade-only feed with no registered engines. A nil Trades source leaves the volume
 // side of the view empty (an engine that reads Volumes gets zeroes rather than a
 // fabricated number).
 type Feed struct {
@@ -31,6 +32,9 @@ type Feed struct {
 	MIC          string
 	Depth        depth.DepthSource
 	Trades       trades.TradeSource
+	// ExternalDepth selects a trade-only feed when another process owns depth.
+	// It is incompatible with engines and a local Depth source. It is not a lease.
+	ExternalDepth bool
 }
 
 // Config configures a Runner.
@@ -165,6 +169,11 @@ func New(cfg Config) (*Runner, error) {
 	}
 
 	r := &Runner{cfg: cfg, logger: cfg.Logger}
+	for _, f := range cfg.Feeds {
+		if f.ExternalDepth && (len(cfg.Engines) != 0 || f.Depth != nil || f.Trades == nil) {
+			return nil, fmt.Errorf("alpha: external depth feed %s/%s requires trades, no local depth and no engines", f.InstrumentID, f.MIC)
+		}
+	}
 	if len(cfg.Engines) > 0 {
 		tr, err := translate.New(translate.Options{
 			Prices: cfg.Prices, Equity: cfg.Equity, Positions: cfg.Positions,
@@ -177,7 +186,7 @@ func New(cfg Config) (*Runner, error) {
 		r.tr = tr
 	}
 	for _, f := range cfg.Feeds {
-		if f.Depth == nil {
+		if f.Depth == nil && !f.ExternalDepth {
 			return nil, fmt.Errorf("alpha: feed %s/%s has no depth source", f.InstrumentID, f.MIC)
 		}
 		b := book.New(f.InstrumentID, f.InstrumentID, f.MIC)
@@ -204,20 +213,24 @@ func (r *Runner) Run(ctx context.Context) error {
 	for i, f := range r.cfg.Feeds {
 		b, tp := r.books[i], r.tapes[i]
 
-		// Depth fold + bounded snapshot publish (the delivered ingest engine).
-		eng := ingest.New(ingest.Config{
-			Book: b, Source: f.Depth, Publisher: r.cfg.Publisher, Logger: r.logger,
-			SnapshotInterval: r.cfg.SnapshotInterval, SnapshotDepth: r.cfg.SnapshotDepth,
-			Now: r.cfg.Now, Tenant: r.cfg.MarketDataTenant,
-		})
-		wg.Add(1)
-		go func(inst, mic string) {
-			defer wg.Done()
-			if err := eng.Run(ctx); err != nil && ctx.Err() == nil {
-				r.logger.Error("depth fold stopped", "instrument", inst, "venue", mic, "err", err)
-				errc <- err
-			}
-		}(f.InstrumentID, f.MIC)
+		// External ownership disables both the reader and snapshot/quote publisher;
+		// the trade tape and its candle/profile tees remain owned here.
+		if !f.ExternalDepth {
+			// Depth fold + bounded snapshot publish (the delivered ingest engine).
+			eng := ingest.New(ingest.Config{
+				Book: b, Source: f.Depth, Publisher: r.cfg.Publisher, Logger: r.logger,
+				SnapshotInterval: r.cfg.SnapshotInterval, SnapshotDepth: r.cfg.SnapshotDepth,
+				Now: r.cfg.Now, Tenant: r.cfg.MarketDataTenant,
+			})
+			wg.Add(1)
+			go func(inst, mic string) {
+				defer wg.Done()
+				if err := eng.Run(ctx); err != nil && ctx.Err() == nil {
+					r.logger.Error("depth fold stopped", "instrument", inst, "venue", mic, "err", err)
+					errc <- err
+				}
+			}(f.InstrumentID, f.MIC)
+		}
 
 		// Trade tape fold. Optional: no source ⇒ the volume side stays empty.
 		if f.Trades != nil {

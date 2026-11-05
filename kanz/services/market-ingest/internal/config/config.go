@@ -7,6 +7,7 @@
 package config
 
 import (
+	"fmt"
 	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
@@ -68,6 +69,10 @@ type Config struct {
 	BinanceWSBase   string            // websocket origin
 	BinanceRESTBase string            // REST origin (the depth-snapshot anchor)
 	BinanceSymbols  map[string]string // instrument_id -> venue symbol (BTC-USD=BTCUSDT)
+	// BinanceExternalDepthInstruments assigns only depth to another process;
+	// trades, coverage, candles and profiles stay in this Go service. Promotion
+	// must pair this exact instrument set with the external owner's assignment.
+	BinanceExternalDepthInstruments []string
 
 	OKXMIC     string
 	OKXWSURL   string            // public v5 websocket
@@ -132,10 +137,11 @@ func Load() Config {
 		SnapshotInterval: parseDuration(os.Getenv("MARKET_INGEST_SNAPSHOT_INTERVAL"), time.Second),
 		SnapshotDepth:    parseInt(os.Getenv("MARKET_INGEST_SNAPSHOT_DEPTH"), 20),
 
-		BinanceMIC:      env.Or("MARKET_INGEST_BINANCE_MIC", "BINANCE"),
-		BinanceWSBase:   env.Or("MARKET_INGEST_BINANCE_WS_BASE", "wss://stream.binance.com:9443"),
-		BinanceRESTBase: env.Or("MARKET_INGEST_BINANCE_REST_BASE", "https://api.binance.com"),
-		BinanceSymbols:  parseSymbolMap(os.Getenv("MARKET_INGEST_BINANCE_SYMBOLS")),
+		BinanceMIC:                      env.Or("MARKET_INGEST_BINANCE_MIC", "BINANCE"),
+		BinanceWSBase:                   env.Or("MARKET_INGEST_BINANCE_WS_BASE", "wss://stream.binance.com:9443"),
+		BinanceRESTBase:                 env.Or("MARKET_INGEST_BINANCE_REST_BASE", "https://api.binance.com"),
+		BinanceSymbols:                  parseSymbolMap(os.Getenv("MARKET_INGEST_BINANCE_SYMBOLS")),
+		BinanceExternalDepthInstruments: externalDepthList(os.Getenv("MARKET_INGEST_BINANCE_EXTERNAL_DEPTH_INSTRUMENTS")),
 
 		OKXMIC:     env.Or("MARKET_INGEST_OKX_MIC", "OKX"),
 		OKXWSURL:   env.Or("MARKET_INGEST_OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public"),
@@ -156,6 +162,39 @@ func Load() Config {
 		VolumeProfileBucket:      parseDuration(os.Getenv("MARKET_INGEST_VOLUME_PROFILE_BUCKET"), 0),
 		VolumeProfileHorizon:     parseDuration(os.Getenv("MARKET_INGEST_VOLUME_PROFILE_HORIZON"), 0),
 	}
+}
+
+func externalDepthList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, ",") // retain empty tokens so validation refuses typos
+}
+
+// ValidateExternalDepth refuses assignments that would silently disable no feed.
+// It validates local configuration, not cross-process exclusivity or readiness.
+func (c Config) ValidateExternalDepth() error {
+	tracked := make(map[string]bool, len(c.Instruments))
+	for _, instrument := range c.Instruments {
+		tracked[instrument] = true
+	}
+	seen := make(map[string]bool)
+	for _, instrument := range c.BinanceExternalDepthInstruments {
+		if instrument == "" || instrument != strings.TrimSpace(instrument) || seen[instrument] || !tracked[instrument] || strings.TrimSpace(c.BinanceSymbols[instrument]) == "" {
+			return fmt.Errorf("market-ingest: invalid external Binance depth assignment %q (must be unique, tracked and mapped)", instrument)
+		}
+		seen[instrument] = true
+	}
+	return nil
+}
+
+func (c Config) BinanceDepthExternal(instrument string) bool {
+	for _, assigned := range c.BinanceExternalDepthInstruments {
+		if assigned == instrument {
+			return true
+		}
+	}
+	return false
 }
 
 // parseSymbolMap parses "BTC-USD=BTCUSDT,ETH-USD=ETHUSDT" into a map.

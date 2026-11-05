@@ -1,4 +1,4 @@
-//! Compatibility foundation only: no runtime caller or admission authority.
+//! Canonical decimal primitives shared with the public depth runtime; no admission authority.
 //! Missing fields follow Go internal/dec predicates; requiredness belongs to callers.
 pub mod common {
     pub mod v1 {
