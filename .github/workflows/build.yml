@@ -89,11 +89,9 @@ jobs:
             testnet_ecr: true
           - service: schema-registry
             dockerfile: kanz/services/schema-registry/Dockerfile
-          # The OMS image its deploy manifest has been pointing at all along, and
-          # which nothing built. NOTE: this is the vendor-free build — no Binance,
-          # no OKX, SimVenue only (see the Dockerfile's GOTAGS section). It is a
-          # SIMULATOR. A trading image is an explicit --build-arg GOTAGS=binance,okx
-          # build and must not share this tag.
+          # One OMS image uses typed, out-of-process venue adapters selected by
+          # OMS_VENUE_ENDPOINTS. Binance and OKX have separate adapter images;
+          # there are no venue build tags or exchange credentials in the OMS.
           - service: oms
             dockerfile: kanz/services/oms/Dockerfile
             testnet_ecr: true
