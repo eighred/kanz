@@ -53,7 +53,8 @@ var cniProofRequirements = map[string][]string{
 		`"etcd_state_changed"`, `"persistent_volume_identity_changed"`, `f.storage("fresh-" + phase, nonce, True)`,
 		`for phase in ("flannel", "cilium", "rollback")`, `proof.validate_report(report, source)`,
 		`"cleanup"] == "verified_absent"`, `vol.get("Labels", {}).get(LABEL) != name`,
-		`set -o pipefail; iptables-save`, `"new_pod_not_owned_by_Cilium"`, `"storage_image_digest_mismatch"`,
+		`rules = self.inside("iptables-save")`, `self.inside("iptables-restore", "--test", data=filtered)`, `self.inside("iptables-restore", data=filtered)`,
+		`"new_pod_not_owned_by_Cilium"`, `"storage_image_digest_mismatch"`,
 		`"unexpected_K3s_version"`, `"Cilium_remains_after_rollback"`, `f.datapath()`,
 	},
 	".github/workflows/k3s-cni-migration.yml": {

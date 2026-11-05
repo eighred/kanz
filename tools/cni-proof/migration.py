@@ -46,6 +46,7 @@ class Fixture:
         self.volume = name + "-data"
         self.mode = "flannel"
         self.stage = "initialize"
+        self.rule_diagnostic = {"status": "not_started"}
         self.k = proof.Kubectl(["docker", "exec", "-i", name, "kubectl"])
 
     def inside(self, *args, data=None, timeout=120):
@@ -237,6 +238,31 @@ class Fixture:
             result.append(states)
         return result
 
+    def remove_old_policy_rules(self):
+        # Capture success and content separately. A failed save is never treated
+        # as an empty ruleset, and an unchanged ruleset is never restored.
+        self.stage = "cilium_save_old_rules"
+        rules = self.inside("iptables-save")
+        lines = rules.splitlines()
+        old = sum("KUBE-ROUTER" in line for line in lines)
+        self.rule_diagnostic = {"status": "captured", "lines": len(lines), "oldPolicyLines": old}
+        if not lines:
+            raise proof.ProofError("saved_rules_empty")
+        if old == 0:
+            self.rule_diagnostic["status"] = "no_old_rules"
+            return
+        filtered = "\n".join(line for line in lines if "KUBE-ROUTER" not in line) + "\n"
+        if not filtered.strip():
+            raise proof.ProofError("filtered_rules_lack_tables")
+        self.stage = "cilium_validate_filtered_rules"
+        self.inside("iptables-restore", "--test", data=filtered)
+        self.stage = "cilium_restore_filtered_rules"
+        self.inside("iptables-restore", data=filtered)
+        self.stage = "cilium_verify_old_rules_absent"
+        if "KUBE-ROUTER" in self.inside("iptables-save"):
+            raise proof.ProofError("old_policy_rules_remain")
+        self.rule_diagnostic["status"] = "removed_verified"
+
     def switch_to_cilium(self):
         self.stage = "cilium_quiesce_system"
         self.quiesce_system()
@@ -249,8 +275,7 @@ class Fixture:
         self.api_ready()
         # K3s deliberately retains kube-router rules when disabled. Remove only
         # those rules inside this owned fixture, before Cilium owns enforcement.
-        self.stage = "cilium_remove_old_rules"
-        self.inside("sh", "-ceu", "set -o pipefail; iptables-save > /tmp/before-policy-rules; test -s /tmp/before-policy-rules; grep -v KUBE-ROUTER /tmp/before-policy-rules > /tmp/after-policy-rules; test -s /tmp/after-policy-rules; iptables-restore < /tmp/after-policy-rules")
+        self.remove_old_policy_rules()
         self.stage = "cilium_remove_old_links"
         self.inside("sh", "-ceu", "for link in flannel.1 cni0; do if ip link show \"$link\" >/dev/null 2>&1; then ip link delete \"$link\"; fi; done")
         self.stage = "cilium_install"
@@ -322,6 +347,7 @@ def main():
         for phase in ("flannel", "cilium", "rollback"):
             if phase == "cilium":
                 f.switch_to_cilium()
+                evidence["oldPolicyCleanup"] = f.rule_diagnostic
             elif phase == "rollback":
                 f.rollback()
             if f.ownership() != container_id or f.ready()["metadata"]["uid"] != node_uid:
@@ -341,6 +367,7 @@ def main():
     except (OSError, ValueError, RuntimeError, proof.ProofError, subprocess.TimeoutExpired) as error:
         evidence["failedPhase"] = phase
         evidence["failedStage"] = f.stage
+        evidence["oldPolicyCleanup"] = f.rule_diagnostic
         evidence["reason"] = str(error) if isinstance(error, proof.ProofError) else "fixture_transport_or_decode_failure"
         try:
             evidence["storageDiagnostic"] = f.storage_diagnostic()

@@ -9,6 +9,32 @@ import proof
 
 
 class MigrationTests(unittest.TestCase):
+    def test_policy_cleanup_requires_successful_nonempty_save(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        for result in ("", proof.ProofError("failed")):
+            with patch.object(f, "inside", side_effect=[result]) as call:
+                with self.assertRaises(proof.ProofError):
+                    f.remove_old_policy_rules()
+                self.assertEqual(call.call_count, 1)
+
+    def test_no_old_policy_does_not_restore_other_rules(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        with patch.object(f, "inside", return_value="*filter\n:INPUT ACCEPT [0:0]\nCOMMIT") as call:
+            f.remove_old_policy_rules()
+            self.assertEqual(call.call_count, 1)
+            self.assertEqual(f.rule_diagnostic["status"], "no_old_rules")
+
+    def test_old_policy_cleanup_checks_restore_and_rechecks_absence(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        original = "*filter\n:INPUT ACCEPT [0:0]\n:KUBE-ROUTER - [0:0]\n-A INPUT -j KUBE-ROUTER\nCOMMIT"
+        expected = "*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n"
+        with patch.object(f, "inside", side_effect=[original, "", "", expected]) as call:
+            f.remove_old_policy_rules()
+            self.assertEqual(call.call_args_list[1].args, ("iptables-restore", "--test"))
+            self.assertEqual(call.call_args_list[1].kwargs, {"data": expected})
+            self.assertEqual(call.call_args_list[2].args, ("iptables-restore",))
+            self.assertEqual(f.rule_diagnostic["status"], "removed_verified")
+
     def test_cpu_bound_follows_host_and_caps_at_four(self):
         for available, expected in ((None, 1), (1, 1), (2, 2), (16, 4)):
             with patch.object(migration.os, "cpu_count", return_value=available):
