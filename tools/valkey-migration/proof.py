@@ -28,13 +28,33 @@ def command(args, data=None, timeout=60):
     except (OSError, subprocess.TimeoutExpired):
         raise Refused("command_unavailable_or_timeout") from None
     if result.returncode:
-        raise Refused("command_failed")
+        raise Refused(command_failure(args, result.stderr))
     return result.stdout.strip()
 
 
 def validate_name(name):
     if not re.fullmatch(r"kanz-valkey-proof-[0-9a-f]{24}", name):
         raise Refused("invalid_fixture_name")
+
+
+def command_failure(args, diagnostic):
+    operation = args[1] if args[:1] == ["docker"] and len(args) > 1 and args[1] in {
+        "run", "exec", "inspect", "stop", "rm", "volume", "image", "ps"} else "other"
+    text = diagnostic.lower()
+    for marker, category in (("toomanyrequests", "registry_rate_limit"),
+                             ("failed to resolve reference", "registry_resolution_failed"),
+                             ("pull access denied", "image_pull_refused"),
+                             ("unknown log opt", "logging_option_refused"),
+                             ("failed to initialize logging driver", "logging_driver_refused"),
+                             ("no space left on device", "runner_storage_full"),
+                             ("permission denied", "permission_refused"),
+                             ("cannot connect to the docker daemon", "daemon_unavailable"),
+                             ("oci runtime create failed", "container_create_failed"),
+                             ("failed to create task", "container_task_failed"),
+                             ("exec format error", "binary_format_refused")):
+        if marker in text:
+            return operation + ":" + category
+    return operation + ":unclassified_command_failure"
 
 
 def config(password, preamble):

@@ -101,6 +101,12 @@ class MigrationBoundaryTests(unittest.TestCase):
             self.assertEqual(proof.startup_category(text + sentinel), category)
             self.assertNotIn(sentinel, proof.startup_category(text + sentinel))
 
+    def test_command_diagnostics_project_only_fixed_category(self):
+        sentinel = "private-fixture-value"
+        self.assertEqual(proof.command_failure(["docker", "run", sentinel], "unknown log opt max-file " + sentinel),
+                         "run:logging_option_refused")
+        self.assertEqual(proof.command_failure(["docker", sentinel], sentinel), "other:unclassified_command_failure")
+
 
 if __name__ == "__main__":
     unittest.main()
