@@ -13,6 +13,38 @@ MIGRATION_IMAGE = 'ghcr.io/eighred/kanz-migrate@sha256:' + 'c' * 64
 SHA = 'b' * 40
 
 
+class ContainerCLITests(unittest.TestCase):
+    @patch('isolation.subprocess.run')
+    def test_unlisted_container_tool_is_refused_before_execution(self, command):
+        with self.assertRaises(KeyError):
+            isolation.Cluster('fixture-node').cli('sh', '-c', 'unexpected')
+        command.assert_not_called()
+
+    @patch('isolation.subprocess.run')
+    def test_multicall_aliases_preserve_arguments_stdin_and_deadlines(self, command):
+        # Model the pinned image's argv[0] dispatch at the subprocess boundary.
+        # A "k3s kubectl" invocation leaves kubectl in argv[1] and must fail.
+        def dispatch(argv, **kwargs):
+            self.assertEqual(argv[:4], ('docker', 'exec', '-i', 'fixture-node'))
+            executable, arguments = argv[4], argv[5:]
+            expected = {
+                '/bin/kubectl': ('apply', '-f', '-'),
+                '/bin/ctr': ('images', 'import', '/tmp/probe.tar'),
+                '/bin/crictl': ('inspecti', 'sha256:fixture'),
+            }
+            self.assertIn(executable, expected)
+            self.assertEqual(arguments, expected[executable])
+            self.assertEqual(kwargs['timeout'], 17)
+            self.assertEqual(kwargs['input'], 'manifest' if executable.endswith('kubectl') else None)
+            return isolation.subprocess.CompletedProcess(argv, 0, stdout='ok', stderr='')
+        command.side_effect = dispatch
+        cluster = isolation.Cluster('fixture-node')
+        self.assertEqual(cluster.k('apply', '-f', '-', data='manifest', timeout=17), 'ok')
+        cluster.cli('ctr', 'images', 'import', '/tmp/probe.tar', timeout=17)
+        cluster.cli('crictl', 'inspecti', 'sha256:fixture', timeout=17)
+        self.assertEqual(command.call_count, 3)
+
+
 class InputTests(unittest.TestCase):
     def test_digest_and_reference_validation(self):
         isolation.validate_inputs(IMAGE, 'v2026.11.1', SHA)
