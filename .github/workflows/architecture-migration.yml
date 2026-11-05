@@ -1,0 +1,101 @@
+name: architecture-migration
+
+on:
+  pull_request:
+    paths:
+      - 'kanz-rs/**'
+      - 'kanz-schemas/proto/**'
+      - 'kanz/internal/dec/**'
+      - 'kanz/tools/decimal-conformance/**'
+      - 'kanz/dev/**'
+      - 'kanz/pkg/bus/**'
+      - 'kanz/services/archiver/**'
+      - 'kanz/services/lake-sink/**'
+      - 'kanz/tools/replay/**'
+      - 'kanz/test/arch/**'
+      - '.github/scripts/*migration_evidence.py'
+      - '.github/workflows/architecture-migration.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'kanz-rs/**'
+      - 'kanz-schemas/proto/**'
+      - 'kanz/internal/dec/**'
+      - 'kanz/tools/decimal-conformance/**'
+      - 'kanz/dev/**'
+      - 'kanz/pkg/bus/**'
+      - 'kanz/services/archiver/**'
+      - 'kanz/services/lake-sink/**'
+      - 'kanz/tools/replay/**'
+      - 'kanz/test/arch/**'
+      - '.github/scripts/*migration_evidence.py'
+      - '.github/workflows/architecture-migration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=mod
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Generate existing canonical Go SDK
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - name: Install pinned Rust toolchain
+        working-directory: kanz-rs
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+          rustup show active-toolchain
+      - name: Verify migration boundary even on Rust-only changes
+        working-directory: kanz
+        run: go test -p 1 ./test/arch -run 'Test(RustMigration|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
+      - name: Rust format, compile and unit tests
+        working-directory: kanz-rs
+        run: |
+          cargo fmt --all -- --check
+          cargo check --locked --all-targets
+          cargo test --locked --lib
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Differential proof against current Go authority
+        env:
+          DECIMAL_CONFORMANCE_FIXTURE: ${{ runner.temp }}/kanz-decimal-conformance.json
+        run: |
+          (cd kanz && go test -p 1 ./internal/dec ./tools/decimal-conformance -count=1)
+          (cd kanz && go run ./tools/decimal-conformance) > "$DECIMAL_CONFORMANCE_FIXTURE"
+          cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml --test go_conformance -- --ignored
+      - name: Start the actual local Redpanda and NATS configuration
+        run: docker compose -f kanz/dev/docker-compose.yml up -d --wait --wait-timeout 120 kafka nats
+      - name: Real protocol, archive, drain and replay compatibility
+        working-directory: kanz
+        env:
+          TEST_KAFKA_BROKERS: 127.0.0.1:9092
+          TEST_NATS_URL: nats://127.0.0.1:4222
+        run: |
+          set -o pipefail
+          go test -race -p 1 ./pkg/bus ./services/archiver/internal/archive ./tools/replay ./services/lake-sink/internal/cdc \
+            -run '^(TestKafkaPublishSubscribe|TestBacklogPollerReportsKafkaLag|TestKafkaBacklogRefusesToReportZeroForAnUnreachableBroker|TestIntegration_KafkaHandlerFailureWithDeadDLQKeepsTheMessageReachable|TestArchiver_|TestDrain_|TestReaderRange|TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted)' \
+            -count=1 -json | tee "$RUNNER_TEMP/redpanda-tests.jsonl"
+          python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
+          python3 ../.github/scripts/check_migration_evidence.py "$RUNNER_TEMP/redpanda-tests.jsonl"
+      - name: Preserve broker diagnostics on failure
+        if: failure()
+        run: docker compose -f kanz/dev/docker-compose.yml logs --no-color kafka nats
+      - name: Stop disposable CI services
+        if: always()
+        run: docker compose -f kanz/dev/docker-compose.yml down

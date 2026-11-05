@@ -18,6 +18,12 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	sigyaml "sigs.k8s.io/yaml"
 )
 
 // NETWORK POLICY IS AUTHORIZATION HERE, NOT HYGIENE (#232).
@@ -907,31 +913,10 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // off an inbound request and serve the named tenant's data, mapped to the port
 // they serve it on.
 //
-// THE SET IS THREE, AND IT WAS FOUR. audit and tv-sync were the known pair; #222
-// added the same trust to wealth and datamaster, and the guard below found them.
-// audit SPLIT in #627 and moved to the map below — the count is maintained here
-// rather than restated, because a set that says four while holding three is how
-// a reader concludes the remaining exposure is someone else's. Setting
-// the header is a different act and is deliberately NOT in scope: api-gateway
-// (proxy/backend.go) injects it as the identity authority, and copilot
-// (retrieval/lineage_catalog.go) forwards the caller's principal onward to
-// lineage — both now through auth.SetPrincipalHeaders. Neither serves a route
-// whose authorization is a header it received.
-//
-// EVERY ONE SERVES THAT SURFACE ON THE SAME PORT AS /metrics, so
-// allow-observability-scrape's port list — the fix for every other overreach in
-// that rule — cannot separate them. A pod in kanz-observability can still send a
-// self-chosen tenant header to tv-sync's /broker/accounts, or wealth's and
-// datamaster's :8080 routes, and be served another tenant's book. Removing the blanket rule would not close it either:
-// allow-gateway-to-tv-sync and allow-gateway-to-phase7 each admit
-// kanz-observability to the same ports independently, for the same scrape.
-//
-// The fix is a SECOND LISTENER: /metrics on its own port, the tenant-scoped API
-// on the port only the gateway may reach. That is a code change in four
-// composition roots plus a prometheus.io/port annotation change per service, not
-// a manifest edit, and it is beyond what #232's policy work can prove without a
-// cluster. This map is what keeps the residual named and bounded: a fifth service
-// adopting the trust has to be written down here, in a diff a reviewer sees.
+// datamaster, tv-sync and wealth still deploy their tenant API on the metrics port.
+// Their listener separation and live verification remain under #232. Services
+// that split move to the map below; neither an annotation nor a policy alone
+// proves that the running process separates its routes.
 var tenantHeaderTrustingServices = map[string]int{
 	"datamaster": 8080,
 	"tv-sync":    8091,
@@ -942,7 +927,7 @@ var tenantHeaderTrustingServices = map[string]int{
 // that serves its API and its /metrics on DIFFERENT ports (#409).
 //
 // It is a separate set because the assertion is the opposite of the one above.
-// For the four services in tenantHeaderTrustingServices the guard checks that
+// For the services in tenantHeaderTrustingServices the guard checks that
 // the recorded port IS the metrics port, because their tenant-scoped routes
 // share it — which is precisely the exposure #232 named and could not close:
 // allow-observability-scrape must admit that port, so a pod in
@@ -1055,8 +1040,7 @@ var tenantHeaderRead = regexp.MustCompile(
 // The header is the entire authorization story for these routes — AGENTS.md:
 // upstreams trust it "only because a NetworkPolicy makes the gateway their only
 // reachable caller". A new service adopting that trust is adopting a network
-// obligation with it, and the obligation is currently unmet for all four existing
-// members. Nothing should join them by accident.
+// obligation with it, and the shared-listener map records the remaining gaps. Nothing should join them by accident.
 func TestTenantHeaderTrustingServicesAreEnumerated(t *testing.T) {
 	root := filepath.Join(moduleRoot(t), "services")
 	entries, err := os.ReadDir(root)
@@ -1114,7 +1098,7 @@ func TestTenantHeaderTrustingServicesAreEnumerated(t *testing.T) {
 			"That header is the whole authorization decision for the routes behind it, and it is "+
 			"sound ONLY while the api-gateway is the service's only reachable caller. Adding the "+
 			"trust adds a network obligation: the service must serve those routes on a port no "+
-			"other namespace may open. All four existing members serve theirs on the same port as "+
+			"other namespace may open. The remaining shared-listener services serve theirs on the same port as "+
 			"/metrics, which allow-observability-scrape must permit — so kanz-observability can "+
 			"choose a tenant and read its book (#232). Add the service here with its port, and say "+
 			"which listener serves the tenant-scoped routes.", strings.Join(unlisted, "\n  "))
@@ -1230,4 +1214,279 @@ func scrapePolicyPorts(t *testing.T) map[int]bool {
 			"set and every assertion built on it passes by checking nothing")
 	}
 	return out
+}
+
+// TestTVSyncDeploymentListenerMode keeps the exception aligned with the deployed
+// configuration while split-capable source is staged before image promotion.
+// Enabling the API listener must retire the exception and satisfy the union of
+// ingress policies; one narrow policy cannot cancel another policy's grant.
+// Neither mode is evidence of enforcement by a deployed CNI.
+func TestTVSyncDeploymentListenerMode(t *testing.T) {
+	var policies []networkingv1.NetworkPolicy
+	for _, path := range infraYAMLFiles(t) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		docs, err := decodeYAMLStream[yaml.Node](raw)
+		if err != nil {
+			if strings.Contains(string(raw), "kind: NetworkPolicy") {
+				t.Fatalf("decode %s: %v", path, err)
+			}
+			continue
+		}
+		for _, doc := range docs {
+			body, err := yaml.Marshal(&doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var meta metav1.TypeMeta
+			if err := sigyaml.Unmarshal(body, &meta); err != nil {
+				t.Fatal(err)
+			}
+			if meta.Kind != "NetworkPolicy" {
+				continue
+			}
+			var policy networkingv1.NetworkPolicy
+			if err := sigyaml.Unmarshal(body, &policy); err != nil {
+				t.Fatalf("decode policy %s: %v", path, err)
+			}
+			policies = append(policies, policy)
+		}
+	}
+	found := false
+	for _, w := range allWorkloads(t) {
+		if w.Metadata.Namespace != "kanz-services" || w.app() != "tv-sync" {
+			continue
+		}
+		found = true
+		if got := w.Spec.Template.Metadata.Annotations["prometheus.io/port"]; got != "8091" {
+			t.Errorf("tv-sync operations scrape port = %q, want 8091", got)
+		}
+		foundContainer := false
+		split := false
+		for _, c := range w.Spec.Template.Spec.Containers {
+			if c.Name != "tv-sync" {
+				continue
+			}
+			foundContainer = true
+			env := map[string]string{}
+			for _, e := range c.Env {
+				env[e.Name] = e.Value
+			}
+			if env["TV_SYNC_LISTEN"] != ":8091" {
+				t.Errorf("tv-sync operations listener must remain explicitly bound to :8091")
+			}
+			api, configured := env["TV_SYNC_API_LISTEN"]
+			var err error
+			split, err = tvSyncListenerMode(api, configured, tenantHeaderTrustingServices["tv-sync"], tenantHeaderTrustingSplitListeners["tv-sync"])
+			if err != nil {
+				t.Error(err)
+			}
+		}
+		if !foundContainer {
+			t.Error("tv-sync workload has no tv-sync container: listener configuration was not checked")
+		}
+		if split {
+			for _, problem := range tvSyncIngressProblems(policies, w.Spec.Template.Metadata.Labels) {
+				t.Error(problem)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no deployed tv-sync workload: listener isolation was not checked")
+	}
+}
+
+// Missing API_LISTEN deliberately retains the deployed legacy surface until a
+// reviewed image and manifest promotion. An explicit value is never a fallback.
+func tvSyncListenerMode(api string, configured bool, sharedPort, splitPort int) (bool, error) {
+	if !configured {
+		if sharedPort != 8091 || splitPort != 0 {
+			return false, fmt.Errorf("tv-sync legacy deployment must retain only the shared-port :8091 exception under #232")
+		}
+		return false, nil
+	}
+	if api != ":8113" {
+		return false, fmt.Errorf("tv-sync explicit API listener must be :8113, got %q", api)
+	}
+	if splitPort != 8113 || sharedPort != 0 {
+		return true, fmt.Errorf("tv-sync split deployment must retire its shared-port exception and record only API :8113")
+	}
+	return true, nil
+}
+
+func TestTVSyncDeploymentListenerModeTransitions(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		api                  string
+		configured           bool
+		shared, split        int
+		wantSplit, wantError bool
+	}{
+		{name: "staged legacy", shared: 8091},
+		{name: "promoted split", api: ":8113", configured: true, split: 8113, wantSplit: true},
+		{name: "blank explicit listener", configured: true, shared: 8091, wantError: true},
+		{name: "collapsed listener", api: ":8091", configured: true, shared: 8091, wantError: true},
+		{name: "legacy exemption retired early", split: 8113, wantError: true},
+		{name: "split with stale legacy exemption", api: ":8113", configured: true, shared: 8091, wantSplit: true, wantError: true},
+		{name: "both classifications", api: ":8113", configured: true, shared: 8091, split: 8113, wantSplit: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			split, err := tvSyncListenerMode(tc.api, tc.configured, tc.shared, tc.split)
+			if split != tc.wantSplit || (err != nil) != tc.wantError {
+				t.Fatalf("split=%v err=%v, want split=%v error=%v", split, err, tc.wantSplit, tc.wantError)
+			}
+		})
+	}
+}
+
+func tvSyncIngressProblems(policies []networkingv1.NetworkPolicy, podLabels map[string]string) []string {
+	var problems []string
+	var gateway, monitoring, isolated bool
+	for _, p := range policies {
+		if p.Namespace != "kanz-services" {
+			continue
+		}
+		selector, err := metav1.LabelSelectorAsSelector(&p.Spec.PodSelector)
+		if err != nil {
+			problems = append(problems, p.Name+": invalid pod selector")
+			continue
+		}
+		if !selector.Matches(labels.Set(podLabels)) {
+			continue
+		}
+		for _, typ := range p.Spec.PolicyTypes {
+			if typ == networkingv1.PolicyTypeIngress {
+				isolated = true
+			}
+		}
+		// Kubernetes defaults an omitted policyTypes to include Ingress.
+		if len(p.Spec.PolicyTypes) == 0 {
+			isolated = true
+		}
+		for _, rule := range p.Spec.Ingress {
+			api, ops := len(rule.Ports) == 0, len(rule.Ports) == 0
+			for _, port := range rule.Ports {
+				if port.Protocol != nil && *port.Protocol != corev1.ProtocolTCP {
+					continue
+				}
+				if port.Port == nil {
+					api, ops = true, true
+					continue
+				}
+				if port.Port.Type == intstr.String {
+					// Named container ports may be renamed independently; refuse an
+					// unresolved name instead of silently excluding it from the union.
+					problems = append(problems, p.Name+": tv-sync ingress uses unresolved named port "+port.Port.StrVal)
+					continue
+				}
+				first, last := port.Port.IntVal, port.Port.IntVal
+				if port.EndPort != nil {
+					last = *port.EndPort
+				}
+				api = api || first <= 8113 && 8113 <= last
+				ops = ops || first <= 8091 && 8091 <= last
+			}
+			if api && len(rule.From) == 0 {
+				problems = append(problems, p.Name+": tv-sync API admits every source")
+			}
+			for _, peer := range rule.From {
+				if api {
+					local := peer.NamespaceSelector == nil || (peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] == "kanz-services")
+					onlyGateway := peer.IPBlock == nil && local && peer.PodSelector != nil && peer.PodSelector.MatchLabels["app"] == "api-gateway"
+					if !onlyGateway {
+						problems = append(problems, p.Name+": tv-sync API admits a non-gateway peer")
+						continue
+					}
+					// A restrictive expression must not accidentally remove the sole
+					// authorized caller while the syntax still names it.
+					ps, err := metav1.LabelSelectorAsSelector(peer.PodSelector)
+					if err == nil && ps.Matches(labels.Set{"app": "api-gateway"}) {
+						if peer.NamespaceSelector == nil {
+							gateway = true
+						} else {
+							ns, err := metav1.LabelSelectorAsSelector(peer.NamespaceSelector)
+							gateway = gateway || err == nil && ns.Matches(labels.Set{"kubernetes.io/metadata.name": "kanz-services"})
+						}
+					}
+				}
+				if ops && peer.IPBlock == nil && peer.NamespaceSelector != nil && peer.PodSelector == nil {
+					ns, err := metav1.LabelSelectorAsSelector(peer.NamespaceSelector)
+					monitoring = monitoring || err == nil && ns.Matches(labels.Set{"kubernetes.io/metadata.name": "kanz-observability"})
+				}
+			}
+		}
+	}
+	if !isolated {
+		problems = append(problems, "tv-sync has no ingress isolation")
+	}
+	if !gateway {
+		problems = append(problems, "tv-sync API :8113 is unreachable by api-gateway")
+	}
+	if !monitoring {
+		problems = append(problems, "tv-sync operations :8091 are unreachable by monitoring")
+	}
+	return problems
+}
+
+func TestTVSyncSplitListenerPolicyMutations(t *testing.T) {
+	var baseline networkingv1.NetworkPolicy
+	if err := sigyaml.Unmarshal([]byte(`
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: tv-sync, namespace: kanz-services}
+spec:
+  podSelector: {matchLabels: {app: tv-sync}}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: api-gateway}}}]
+      ports: [{port: 8113}]
+    - from: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kanz-observability}}}]
+      ports: [{port: 8091}]
+`), &baseline); err != nil {
+		t.Fatal(err)
+	}
+	podLabels := map[string]string{"app": "tv-sync"}
+	if got := tvSyncIngressProblems([]networkingv1.NetworkPolicy{baseline}, podLabels); len(got) != 0 {
+		t.Fatal(got)
+	}
+	for name, mutate := range map[string]func(*networkingv1.NetworkPolicy){
+		"monitoring reaches API": func(p *networkingv1.NetworkPolicy) {
+			p.Spec.Ingress[1].Ports[0].Port = &intstr.IntOrString{IntVal: 8113}
+		},
+		"all ports":              func(p *networkingv1.NetworkPolicy) { p.Spec.Ingress[1].Ports = nil },
+		"port range reaches API": func(p *networkingv1.NetworkPolicy) { end := int32(8113); p.Spec.Ingress[1].Ports[0].EndPort = &end },
+		"all sources":            func(p *networkingv1.NetworkPolicy) { p.Spec.Ingress[0].From = nil },
+		"all namespaces": func(p *networkingv1.NetworkPolicy) {
+			p.Spec.Ingress[0].From[0].NamespaceSelector = &metav1.LabelSelector{}
+		},
+		"gateway selector removed": func(p *networkingv1.NetworkPolicy) { p.Spec.Ingress[0].From[0].PodSelector = &metav1.LabelSelector{} },
+		"gateway port stale": func(p *networkingv1.NetworkPolicy) {
+			p.Spec.Ingress[0].Ports[0].Port = &intstr.IntOrString{IntVal: 8091}
+		},
+		"named port unresolved": func(p *networkingv1.NetworkPolicy) {
+			value := intstr.FromString("api")
+			p.Spec.Ingress[1].Ports[0].Port = &value
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mutant := baseline.DeepCopy()
+			mutate(mutant)
+			if got := tvSyncIngressProblems([]networkingv1.NetworkPolicy{*mutant}, podLabels); len(got) == 0 {
+				t.Fatal("mutation escaped")
+			}
+		})
+	}
+	t.Run("additive wildcard policy", func(t *testing.T) {
+		wide := baseline.DeepCopy()
+		wide.Spec.PodSelector = metav1.LabelSelector{}
+		wide.Spec.Ingress[0].From = nil
+		if got := tvSyncIngressProblems([]networkingv1.NetworkPolicy{baseline, *wide}, podLabels); len(got) == 0 {
+			t.Fatal("additive ingress escaped")
+		}
+	})
+	if got := tvSyncIngressProblems(nil, podLabels); len(got) == 0 {
+		t.Fatal("empty policy inventory passed")
+	}
 }

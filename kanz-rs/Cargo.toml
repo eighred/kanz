@@ -1,0 +1,20 @@
+[package]
+name = "kanz-decimal-compat"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+prost = "=0.14.1"
+
+[build-dependencies]
+prost-build = "=0.14.1"
+protoc-bin-vendored = "=3.2.0"
+
+[dev-dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+
+[profile.release]
+overflow-checks = true

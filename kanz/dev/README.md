@@ -1,6 +1,6 @@
 # Local dev stack (DEVX-01a)
 
-The development stack contains NATS, Kafka, Postgres, risk-engine and
+The development stack contains NATS, Redpanda (Kafka API), Postgres, risk-engine and
 api-gateway. It is a smoke environment, not proof of the complete capital path
 or tenant isolation. Fresh-checkout tooling and Compose repairs are tracked in
 [#1323](https://github.com/eighred/kanz/issues/1323); the current `make ci` is not
@@ -94,7 +94,7 @@ tilt up
 | api-gateway | 8080 | the read surface (auth/signing/quotas OFF for dev) |
 | risk-engine | 8082 (HTTP), 8081 (gRPC) | durable state in Postgres |
 | NATS | 4222, 8222 | JetStream spine, `RISK` stream provisioned by `nats-init` |
-| Kafka | 9092 | single-node KRaft (durable log for CDC/replay work) |
+| Redpanda (`kafka` alias) | 127.0.0.1:9092 | single-node Kafka-compatible broker; container clients use kafka:9092 |
 | Postgres | 5432 | `kanz/kanz`, db `kanz` |
 
 ```sh
@@ -102,6 +102,47 @@ curl localhost:8080/v1/portfolios/PF1/exposure   # the seeded portfolio
 ```
 
 ## Notes
+
+### Local broker migration
+
+The existing `kafka` service now runs the version-pinned Redpanda `v26.2.6`
+image in place of Bitnami Kafka. There is one broker, not a parallel replacement
+platform. Separate internal and external advertised listeners allow both Compose
+clients (`kafka:9092`) and host tests (`127.0.0.1:9092`) to follow broker metadata.
+Only the external Kafka listener is published, on host loopback. The resource
+flags and listener layout follow Redpanda's
+[single-broker example](https://docs.redpanda.com/labs/docker-compose/single-broker/).
+We explicitly disable topic auto-creation and write caching, use replication
+factor one and pass `--unsafe-bypass-fsync=false`. The image can inherit
+[`dev-container` defaults](https://docs.redpanda.com/streaming/current/reference/rpk/rpk-redpanda/rpk-redpanda-start/)
+even without an explicit mode argument, so omitting the mode is insufficient.
+Each `--set` and its value are separate command tokens, as required by rpk's
+[`parseConfigKvs` implementation](https://github.com/redpanda-data/redpanda/blob/dev/src/go/rpk/pkg/cli/redpanda/start.go).
+This remains a local
+plaintext smoke environment, not a production durability or authorization proof.
+
+The named `redpanda-data` volume is new storage; existing Kafka storage is never
+mounted or converted. `make down` retains it. To roll back the local broker,
+stop the smoke stack and restore the previous Compose broker definition before
+starting it again; retain both stores separately. This does not transfer
+Redpanda history or consumer offsets back into Kafka. Do not delete volumes as
+part of rollback.
+
+NATS JetStream remains the live event spine. The existing single archiver remains
+the NATS-to-Kafka-API writer, preserving original envelope bytes and acknowledging
+only after successful archive/DLQ publication. Its single-writer/drain gate and
+all financial authority stay unchanged. This smoke stack does not run archiver
+or lake-sink, so starting its broker does not prove archival/replay compatibility.
+Production Kafka manifests, security configuration, stored history and migration
+are outside this local change.
+
+Topics must be explicitly provisioned by the relevant integration fixture; the
+local broker does not automatically provision the production topic catalog.
+For dependency tests use `TEST_KAFKA_BROKERS=127.0.0.1:9092` and the real NATS
+fixture configuration. Required compatibility evidence includes bus produce/read,
+lag and dead-DLQ behavior, archiver ordering/outage/drain/tenant cases, replay
+ranges and lake-sink durability. A YAML/config validation pass is not runtime
+evidence; record actual suite results and dependency skips separately.
 
 - Build context is the repo root: the service Dockerfiles COPY the generated
   `kanz-schemas/gen/go` SDK. `make up`, build, vet and test run generation first.

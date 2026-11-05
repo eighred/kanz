@@ -131,6 +131,8 @@ func (c StripCoverage) clone() StripCoverage {
 // are. The two travel as ONE value because they are one answer — a caller that
 // can take the quotes without the coverage is the caller this issue is about.
 type Strip struct {
+	// Capture is optional; a source without observed inputs must not fabricate it.
+	Capture *InputCapture
 	// Quotes are the usable calibration instruments, in no particular order.
 	Quotes []RateQuote
 	// Coverage says what Quotes is a subset OF. Its zero value is the

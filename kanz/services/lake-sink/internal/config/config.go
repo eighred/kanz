@@ -39,6 +39,9 @@ type Config struct {
 
 	// OTLPEndpoint is the OTel collector for span export (OBS-01).
 	OTLPEndpoint string
+	// SPIFFESocket selects the rotating workload identity for the Kafka client.
+	// Empty preserves local plaintext; a configured source failure is fatal.
+	SPIFFESocket string
 }
 
 func Load() (Config, error) {
@@ -52,6 +55,7 @@ func Load() (Config, error) {
 		RegistryURL:   strings.TrimRight(os.Getenv("LAKE_SINK_REGISTRY_URL"), "/"),
 		OutputDir:     os.Getenv("LAKE_SINK_OUTPUT_DIR"),
 		OTLPEndpoint:  os.Getenv("LAKE_SINK_OTLP_ENDPOINT"),
+		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}
 	if len(cfg.Brokers) == 0 {
 		return Config{}, errors.New("LAKE_SINK_BROKERS is required")

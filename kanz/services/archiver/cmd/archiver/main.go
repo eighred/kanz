@@ -78,15 +78,8 @@ func run() int {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	kafka, err := bus.DialKafka(bus.KafkaConfig{Brokers: cfg.Brokers, ClientID: cfg.Source})
-	if err != nil {
-		logger.Error("kafka dial failed", "err", err)
-		return 2
-	}
-	defer func() { _ = kafka.Close() }()
-
-	// SEC-M3: the production broker requires a client SVID; a nil TLSConfig is a
-	// plaintext client it refuses at the handshake.
+	// Keep the rotating identity alive until both broker clients have closed.
+	// A configured source failure must not fall back to plaintext.
 	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
 	if err != nil {
 		logger.Error("spiffe source init failed", "err", err)
@@ -94,6 +87,12 @@ func run() int {
 	}
 	defer func() { _ = mesh.Close() }()
 	logger.Info("bus transport", "mtls", mesh.Enabled())
+	kafka, err := bus.DialKafka(bus.KafkaConfig{Brokers: cfg.Brokers, ClientID: cfg.Source, TLSConfig: mesh.Client})
+	if err != nil {
+		logger.Error("kafka dial failed", "err", err)
+		return 2
+	}
+	defer func() { _ = kafka.Close() }()
 
 	// ONE BusMetrics, CREATED BEFORE THE DIAL (#636). The connection's state and
 	// its transitions are only exported when DialNATS is given this; a service

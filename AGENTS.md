@@ -26,6 +26,16 @@ presence in a manifest is not evidence of an operational capability.
 
 ## Planes and layout
 
+The user-authorized architecture migration is tracked in #1413. Migrate this
+repository in place: Rust for critical execution/financial/market-data components,
+Go for orchestration and the BFF, the existing Vue client, and a JVM-free Redpanda
+event transport target. Preserve existing features, identities, canonical schemas,
+stored history and financial controls. Desktop prototypes are reference material,
+not replacement contracts or deployment sources. Each component changes ownership
+only after compatibility, recovery and rollback evidence; the current NATS spine,
+single archiver and PostgreSQL writers remain authoritative until their explicit
+cutover. Adding Rust compatibility tests does not activate a Rust trading path.
+
 | Plane | Owns | Boundary |
 |---|---|---|
 | Execution | OMS, router, venue adapters, fills, exchange protocol and auth | Deterministic, typed, low-latency, fail-closed, independently testable. |
@@ -42,6 +52,7 @@ architecture violation even when tests pass.
 | `kanz-schemas/` | Protobuf + buf; generated Go SDK in `gen/go`. |
 | `kanz-py/` | Python inference service. |
 | `kanz-web/` | Browser client. |
+| `kanz-rs/` | Incremental Rust migration; canonical-schema compatibility kernel first, no production authority until #1413 acceptance. |
 | `kanz/infra/` | Deployment; Kubernetes and SPIFFE/SPIRE workload identity. |
 | `tools/`, `.github/` | Host/operator scripts and CI. |
 

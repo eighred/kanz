@@ -179,9 +179,13 @@ type QuoteSource interface {
 // close + intraday); the Store then resolves the curve at any as_of for the
 // FI-01d CurveProvider seam.
 type Calibrator struct {
-	Source QuoteSource
-	Store  *Store
-	Interp Interpolation
+	// OnCaptured observes successful authoritative installation only. It must
+	// enqueue nonblocking; shadow execution belongs outside Refresh. It receives
+	// detached data and cannot replace the installed curve or return a refusal.
+	OnCaptured func(CalibrationCapture)
+	Source     QuoteSource
+	Store      *Store
+	Interp     Interpolation
 
 	// OnCoverage is called on EVERY refresh with what the source resolved,
 	// before calibration is attempted. Optional; nil disables it.
@@ -243,5 +247,8 @@ func (cal *Calibrator) Refresh(ctx context.Context, currency string, asOf time.T
 		}
 	}
 	cal.Store.Put(currency, asOf, stored)
+	if cal.OnCaptured != nil && strip.Capture != nil {
+		cal.OnCaptured(CalibrationCapture{Currency: currency, RequestedAsOf: asOf, CapturedAt: strip.Capture.CapturedAt, Interp: cal.Interp, Strip: strip.clone(), Tenors: stored.Tenors(), Zeros: stored.Zeros()})
+	}
 	return c, nil
 }

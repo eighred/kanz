@@ -41,6 +41,7 @@ import (
 
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/archiver/internal/archive"
 	"github.com/eighred/kanz/services/archiver/internal/config"
 )
@@ -73,14 +74,15 @@ func drain(args []string, out, errOut io.Writer) int {
 }
 
 type options struct {
-	natsURL  string
-	brokers  string
-	tenant   string
-	group    string
-	subjects string
-	write    bool
-	max      int
-	timeout  time.Duration
+	natsURL      string
+	brokers      string
+	tenant       string
+	group        string
+	subjects     string
+	write        bool
+	max          int
+	timeout      time.Duration
+	spiffeSocket string
 }
 
 func run(ctx context.Context, args []string, out io.Writer) error {
@@ -106,10 +108,18 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	defer cancel()
 
 	logger := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	mesh, err := transport.NewMesh(ctx, opt.spiffeSocket)
+	if err != nil {
+		return fmt.Errorf("initialize workload identity: %w", err)
+	}
+	// Registered before the clients: close them before their rotating SVID source.
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
 
 	kafka, err := bus.DialKafka(bus.KafkaConfig{
-		Brokers:  strings.Split(opt.brokers, ","),
-		ClientID: "archiver-drain",
+		Brokers:   strings.Split(opt.brokers, ","),
+		ClientID:  "archiver-drain",
+		TLSConfig: mesh.Client,
 	})
 	if err != nil {
 		return fmt.Errorf("dial kafka: %w", err)
@@ -121,7 +131,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	// its JetStream durable, so the only honest probe lives there. An
 	// --archiver-is-stopped flag would have removed this dependency and replaced a
 	// measurement with an assertion that can be wrong while looking right.
-	nats, err := bus.DialNATS(ctx, bus.NATSConfig{URL: opt.natsURL, Name: "archiver-drain"})
+	nats, err := bus.DialNATS(ctx, bus.NATSConfig{URL: opt.natsURL, Name: "archiver-drain", TLSConfig: mesh.Client})
 	if err != nil {
 		return fmt.Errorf("dial nats (needed for the single-writer gate): %w", err)
 	}
@@ -186,6 +196,7 @@ func writeReport(out io.Writer, rep archive.DrainReport) {
 func parseFlags(args []string) (options, error) {
 	fs := flag.NewFlagSet("archiver-drain", flag.ContinueOnError)
 	var o options
+	o.spiffeSocket = os.Getenv("SPIFFE_ENDPOINT_SOCKET")
 	fs.StringVar(&o.natsURL, "nats-url", os.Getenv("ARCHIVER_NATS_URL"), "NATS URL — used ONLY by the single-writer gate")
 	fs.StringVar(&o.brokers, "brokers", os.Getenv("ARCHIVER_KAFKA_BROKERS"), "comma-separated Kafka brokers")
 	fs.StringVar(&o.tenant, "tenant", os.Getenv("ARCHIVER_TENANT"), "tenant the routing table routes against")
