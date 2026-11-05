@@ -70,14 +70,14 @@ jobs:
       # EXEC-M22 — webhook-ingest's cross-pod nonce store. The `redis` build tag was
       # NEVER COMPILED by this pipeline, so nonces_redis.go and pkg/redisadapter were
       # dead code as far as CI was concerned — and they are what makes the platform's
-      # ENTRANCE safe to run on more than one pod. A real Redis runs here now, and the
+      # ENTRANCE safe to run on more than one pod. A real Valkey runs here now, and the
       # tagged build is compiled, vetted and tested against it.
       redis:
-        image: redis:7-alpine
+        image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
         ports:
           - 6379:6379
         options: >-
-          --health-cmd "redis-cli ping"
+          --health-cmd "valkey-cli ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -477,7 +477,7 @@ jobs:
       # only test that touched RedisNonces drove it against a FAKE, which cannot prove that
       # ClaimNX is really an atomic SET NX PX.
       #
-      # Built, vetted and tested against a REAL Redis, so the tag cannot rot back into dead
+      # Built, vetted and tested against a REAL Valkey, so the tag cannot rot back into dead
       # code the next time someone changes the adapter.
       # THE `anthropic` TAG (AI-M1). copilot's PRODUCTION IMAGE is built with it
       # (build.yml), and this pipeline never vetted, tested or linted it — the same hole
@@ -509,14 +509,15 @@ jobs:
 
       # api-gateway is in the test list because its CROSS-POD IDEMPOTENCY CLAIM (#721)
       # is only exercised under this tag: idempotency_realredis_test.go stands two
-      # independently constructed middleware chains up against one Redis, which is the
+      # independently constructed middleware chains up against one Valkey, which is the
       # only way to prove what `replicas: 2` actually needs. build+vet alone would
       # compile that file and never run it — the precise "dead code that deploys" shape
       # test/arch/build_tag_coverage_test.go exists to prevent.
-      - name: Build + vet + test the `redis` tag (real Redis)
+      - name: Build + vet + test the `redis` tag (real Valkey)
         working-directory: kanz
         env:
           TEST_REDIS_URL: redis://localhost:6379/0
+          TEST_VALKEY_VERSION: 9.1.3
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
           TEST_NATS_URL: nats://localhost:4222
           # This re-runs ./pkg/bus/..., which includes kafka_integration_test.go —
@@ -530,9 +531,13 @@ jobs:
         # rule was written there as prose and nothing carried it here.
         # test/arch/ci_test_parallelism_test.go now enforces it on every invocation.
         run: |
+          set -o pipefail
+          python -m unittest discover -s ../.github/scripts -p test_check_valkey_evidence.py
           go build -tags redis ./...
           go vet -tags redis ./...
           go test -tags redis -p 1 -race -count=1 ./services/webhook-ingest/... ./services/api-gateway/... ./pkg/redisadapter/... ./pkg/bus/...
+          go test -tags redis -p 1 -race -json -count=1 -run "$(python ../.github/scripts/check_valkey_evidence.py --pattern)" ./pkg/redisadapter ./services/webhook-ingest/internal/ingest ./services/api-gateway/internal/middleware | tee "$RUNNER_TEMP/valkey-proof.jsonl"
+          python ../.github/scripts/check_valkey_evidence.py "$RUNNER_TEMP/valkey-proof.jsonl"
 
       - name: OMS log (on failure)
         if: failure()
