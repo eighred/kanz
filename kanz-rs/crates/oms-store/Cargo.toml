@@ -1,0 +1,20 @@
+[package]
+name = "kanz-oms-store"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+kanz-oms-fold-shadow = { path = "../../services/oms-fold-shadow" }
+kanz-decimal-compat = { path = "../.." }
+prost = "=0.14.1"
+prost-types = "=0.14.1"
+sha2 = "=0.10.9"
+tokio-postgres = "=0.7.18"
+
+[dev-dependencies]
+tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "time"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+base64 = "=0.22.1"
