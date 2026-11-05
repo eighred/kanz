@@ -1,0 +1,168 @@
+name: tv-sync-isolation
+
+# Merge this harness before the manifest promotion. Dispatch from main against
+# an immutable candidate commit; candidate code is never executed on the runner.
+on:
+  pull_request:
+    paths:
+      - 'kanz/services/tv-sync/test/**'
+      - '.github/workflows/tv-sync-isolation.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'kanz/services/tv-sync/test/**'
+      - '.github/workflows/tv-sync-isolation.yml'
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full SHA of the unmerged manifest promotion candidate
+        required: true
+        type: string
+      image:
+        description: Released ghcr.io/eighred/tv-sync@sha256 digest
+        required: true
+        type: string
+      migration_image:
+        description: Released ghcr.io/eighred/kanz-migrate@sha256 digest from the same release
+        required: true
+        type: string
+      release_tag:
+        description: Exact protected version tag that signed the image
+        required: true
+        type: string
+      release_sha:
+        description: Full reviewed main commit named by that release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache: false
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Generate trusted Go SDK
+        working-directory: kanz-schemas
+        run: |
+          buf generate
+          bash bootstrap-go-sdk.sh
+      - run: python3 -m pip install 'PyYAML==6.0.3'
+      - run: python3 -B -m unittest discover -s kanz/services/tv-sync/test -p 'test_*.py'
+      - name: Compile and vet the principal-header probe
+        working-directory: kanz
+        run: |
+          go test -p 1 ./services/tv-sync/test/probe
+          go vet ./services/tv-sync/test/probe
+  isolation:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'eighred/kanz' && github.ref == 'refs/heads/main'
+    needs: offline
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: trusted
+          fetch-depth: 0
+      - name: Validate immutable inputs before registry access
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          RELEASE_IMAGE: ${{ inputs.image }}
+          MIGRATION_IMAGE: ${{ inputs.migration_image }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          patterns = {
+              'CANDIDATE_SHA': r'[0-9a-f]{40}',
+              'RELEASE_SHA': r'[0-9a-f]{40}',
+              'RELEASE_TAG': r'v[0-9A-Za-z][0-9A-Za-z._-]{0,100}',
+              'RELEASE_IMAGE': r'ghcr\.io/eighred/tv-sync@sha256:[0-9a-f]{64}',
+              'MIGRATION_IMAGE': r'ghcr\.io/eighred/kanz-migrate@sha256:[0-9a-f]{64}',
+          }
+          for key, pattern in patterns.items():
+              if not re.fullmatch(pattern, os.environ[key]):
+                  raise SystemExit('invalid ' + key)
+          PY
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: trusted/kanz/go.mod
+          cache: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: ./trusted/.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Install protoc plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Generate trusted Go SDK
+        working-directory: trusted/kanz-schemas
+        run: |
+          buf generate
+          bash bootstrap-go-sdk.sh
+      - name: Install existing YAML parser at an explicit version
+        run: python3 -m pip install 'PyYAML==6.0.3'
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+      - name: Check trusted harness
+        run: python3 -B -m unittest discover -s trusted/kanz/services/tv-sync/test -p 'test_*.py'
+      - name: Authenticate registry reads
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_ACTOR: ${{ github.actor }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_ACTOR" --password-stdin
+      - name: Exercise the actual released image in disposable K3s
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          RELEASE_IMAGE: ${{ inputs.image }}
+          MIGRATION_IMAGE: ${{ inputs.migration_image }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          python3 -B trusted/kanz/services/tv-sync/test/isolation.py \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --image "$RELEASE_IMAGE" --migration-image "$MIGRATION_IMAGE" --release-tag "$RELEASE_TAG" \
+            --release-sha "$RELEASE_SHA" --evidence "$RUNNER_TEMP/tv-sync-isolation.json"
+      - name: Remove disposable nodes after interruption
+        if: always()
+        run: |
+          docker ps -aq --filter label=io.kanz.tv-sync-isolation=true | xargs -r docker rm -f -v
+      - name: Remove registry authentication
+        if: always()
+        run: docker logout ghcr.io
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: tv-sync-isolation
+          path: ${{ runner.temp }}/tv-sync-isolation.json
+          if-no-files-found: error
+          retention-days: 14
