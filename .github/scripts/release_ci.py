@@ -18,6 +18,7 @@ POLICY = {
     "rust-bond-shadow.yml": {"bond-shadow"},
     "rust-oms-fold.yml": {"fill-shadow"},
     "feed-identity-proof.yml": {"developmental-identity"},
+    "redpanda-identity-proof.yml": {"developmental-redpanda-identity"},
 }
 
 

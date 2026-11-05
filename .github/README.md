@@ -33,8 +33,9 @@ canonical-main push or manual run and latest attempt to have succeeded. It
 requires `kanz-ci.yml` / `kanz-ci-required`, plus the following workflows when
 their files exist in the release source: `architecture-migration.yml` /
 `compatibility`, `julia-calibration.yml` / `shadow-calibration`,
-`rust-bond-shadow.yml` / `bond-shadow`, `rust-oms-fold.yml` / `fill-shadow`, and
-`feed-identity-proof.yml` / `developmental-identity`. Repository, workflow
+`rust-bond-shadow.yml` / `bond-shadow`, `rust-oms-fold.yml` / `fill-shadow`,
+`feed-identity-proof.yml` / `developmental-identity`, and
+`redpanda-identity-proof.yml` / `developmental-redpanda-identity`. Repository, workflow
 ID/path, event, branch, SHA, attempt and required job identities must agree.
 Missing, skipped, pending, failed or cancelled proof refuses release; a previous
 successful attempt, another workflow's check name or an ancestor's green run
