@@ -19,7 +19,7 @@ services:
       - "8222:8222"
 
   # One local Redpanda broker replaces the JVM broker, retaining the kafka alias.
-  # No dev-container mode: it enables auto-create and unsafe-bypass-fsync.
+  # Explicit overrides defeat development defaults inherited from the image.
   # This fresh volume never mounts existing Kafka data; no history is migrated.
   kafka:
     image: docker.redpanda.com/redpandadata/redpanda:v26.2.6
@@ -31,13 +31,19 @@ services:
       - --reserve-memory=0M
       - --overprovisioned
       - --check=false
+      - --unsafe-bypass-fsync=false
       - --node-id=0
       - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
       - --advertise-kafka-addr=internal://kafka:9092,external://127.0.0.1:9092
       - --rpc-addr=0.0.0.0:33145
       - --advertise-rpc-addr=kafka:33145
-      - --set=redpanda.auto_create_topics_enabled=false
-      - --set=redpanda.default_topic_replications=1
+      # rpk parses --set as a separate token; --set=value leaks to the broker.
+      - --set
+      - redpanda.auto_create_topics_enabled=false
+      - --set
+      - redpanda.default_topic_replications=1
+      - --set
+      - redpanda.write_caching_default=false
     volumes:
       - redpanda-data:/var/lib/redpanda/data
     ports:

@@ -59,7 +59,9 @@ jobs:
           make -C kanz generate
       - name: Install pinned Rust toolchain
         working-directory: kanz-rs
-        run: rustup show active-toolchain
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+          rustup show active-toolchain
       - name: Rust format, compile and unit tests
         working-directory: kanz-rs
         run: |

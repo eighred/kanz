@@ -112,9 +112,13 @@ clients (`kafka:9092`) and host tests (`127.0.0.1:9092`) to follow broker metada
 Only the external Kafka listener is published, on host loopback. The resource
 flags and listener layout follow Redpanda's
 [single-broker example](https://docs.redpanda.com/labs/docker-compose/single-broker/).
-We explicitly disable topic auto-creation and use replication factor one. We do
-not use [`dev-container` mode](https://docs.redpanda.com/streaming/current/reference/rpk/rpk-redpanda/rpk-redpanda-start/),
-which enables auto-creation and bypasses fsync by default. This remains a local
+We explicitly disable topic auto-creation and write caching, use replication
+factor one and pass `--unsafe-bypass-fsync=false`. The image can inherit
+[`dev-container` defaults](https://docs.redpanda.com/streaming/current/reference/rpk/rpk-redpanda/rpk-redpanda-start/)
+even without an explicit mode argument, so omitting the mode is insufficient.
+Each `--set` and its value are separate command tokens, as required by rpk's
+[`parseConfigKvs` implementation](https://github.com/redpanda-data/redpanda/blob/dev/src/go/rpk/pkg/cli/redpanda/start.go).
+This remains a local
 plaintext smoke environment, not a production durability or authorization proof.
 
 The named `redpanda-data` volume is new storage; existing Kafka storage is never

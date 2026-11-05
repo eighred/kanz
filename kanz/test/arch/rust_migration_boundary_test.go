@@ -54,6 +54,81 @@ const rustMigrationBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> 
 
 func rustMigrationCompact(s string) string { return strings.Join(strings.Fields(s), "") }
 
+// Mask Rust line comments and nested block comments without joining tokens.
+// Quoted strings (including Rust raw strings) are retained; this is a lexical
+// helper, not a Rust parser. Keeping literals prevents comment-looking text in
+// an include path or diagnostic from hiding the source that follows it.
+func rustMigrationWithoutComments(source string) (string, error) {
+	out := []byte(source)
+	mask := func(start, end int) {
+		for p := start; p < end; p++ {
+			if out[p] != '\n' && out[p] != '\r' {
+				out[p] = ' '
+			}
+		}
+	}
+	for i := 0; i < len(source); {
+		if strings.HasPrefix(source[i:], "//") {
+			end := i
+			for end < len(source) && source[end] != '\n' {
+				end++
+			}
+			mask(i, end)
+			i = end
+		} else if strings.HasPrefix(source[i:], "/*") {
+			start, depth := i, 1
+			i += 2
+			for i < len(source) && depth > 0 {
+				switch {
+				case strings.HasPrefix(source[i:], "/*"):
+					depth++
+					i += 2
+				case strings.HasPrefix(source[i:], "*/"):
+					depth--
+					i += 2
+				default:
+					i++
+				}
+			}
+			if depth != 0 {
+				return "", fmt.Errorf("unterminated Rust block comment")
+			}
+			mask(start, i)
+		} else if source[i] == 'r' {
+			j := i + 1
+			for j < len(source) && source[j] == '#' {
+				j++
+			}
+			if j < len(source) && source[j] == '"' {
+				endMark := "\"" + source[i+1:j]
+				end := strings.Index(source[j+1:], endMark)
+				if end < 0 {
+					return "", fmt.Errorf("unterminated Rust raw string")
+				}
+				i = j + 1 + end + len(endMark)
+			} else {
+				i++
+			}
+		} else if source[i] == '"' {
+			i++
+			for i < len(source) {
+				if source[i] == '\\' {
+					i += 2
+					continue
+				}
+				if source[i] == '"' {
+					i++
+					break
+				}
+				i++
+			}
+		} else {
+			i++
+		}
+	}
+	return string(out), nil
+}
+
 func checkRustMigrationBoundary(root string) error {
 	raw, err := os.ReadFile(filepath.Join(root, "Cargo.toml"))
 	if err != nil {
@@ -95,8 +170,8 @@ func checkRustMigrationBoundary(root string) error {
 		return fmt.Errorf("Rust build must generate only the canonical common/v1/decimal.proto via the reviewed build recipe")
 	}
 
-	// Conservative token checks also inspect comments and strings. They may ask
-	// for review of harmless new prose; they do not expand macros or resolve Rust.
+	// Conservative token checks ignore comments but retain strings. They may ask
+	// for review of harmless new literals; they do not expand macros or resolve Rust.
 	// Range syntax (0..10) is not mistaken for an unsuffixed decimal literal.
 	floats := regexp.MustCompile(`\bf(?:32|64)\b|\b[0-9][0-9_]*f(?:32|64)\b|\b[0-9][0-9_]*\.[0-9][0-9_]*|\b[0-9][0-9_]*(?:\.[0-9_]*)?[eE][+-]?[0-9]|\b[0-9][0-9_]*\.(?:[^.a-zA-Z0-9_]|$)`)
 	copiedDecimal := regexp.MustCompile(`\b(?:struct|enum|union|type)\s+(?:r#)?Decimal\b`)
@@ -143,6 +218,11 @@ func checkRustMigrationBoundary(root string) error {
 		if err != nil {
 			return err
 		}
+		code, err := rustMigrationWithoutComments(string(body))
+		if err != nil {
+			return fmt.Errorf("%s: %w", rel, err)
+		}
+		body = []byte(code)
 		if floats.Match(body) || copiedDecimal.Match(body) {
 			return fmt.Errorf("Rust financial float token or copied Decimal declaration in %s", rel)
 		}
@@ -179,6 +259,8 @@ func TestRustMigrationBoundaryRejectsMutations(t *testing.T) {
 		{"copied_decimal", "src/lib.rs", "\npub struct Decimal { coefficient: i64, exponent: i32 }\n"},
 		{"financial_float", "src/lib.rs", "\npub fn amount() -> f64 { 1.0 }\n"},
 		{"unsuffixed_float", "src/lib.rs", "\npub fn amount() { let x = 1e3; }\n"},
+		{"trailing_dot_float", "src/lib.rs", "\npub fn amount() { let x = 18.; }\n"},
+		{"float_after_string", "src/lib.rs", "\npub fn amount() { let s = \"https://example.invalid/*\"; let x = 1.5; }\n"},
 		{"alternate_build_input", "build.rs", "\nfn extra() { prost_build::compile_protos(&[\"copied.proto\"], &[\".\"]).unwrap(); }\n"},
 		{"storage_in_library", "src/lib.rs", "\npub fn read() { std::fs::read(\"file\").unwrap(); }\n"},
 	} {
@@ -199,6 +281,18 @@ func TestRustMigrationBoundaryRejectsMutations(t *testing.T) {
 			}
 			if err := checkRustMigrationBoundary(dst); err != nil {
 				t.Fatalf("baseline: %v", err)
+			}
+			lib := filepath.Join(dst, "src", "lib.rs")
+			body, err := os.ReadFile(lib)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = append(body, []byte("\n// Equal decimal orders imply exponent gap <=18. Never use f64.\n/* No runtime: /* fn main() {} */ and no struct Decimal copy. */\n")...)
+			if err := os.WriteFile(lib, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkRustMigrationBoundary(dst); err != nil {
+				t.Fatalf("valid explanatory prose: %v", err)
 			}
 			path := filepath.Join(dst, filepath.FromSlash(tc.path))
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
