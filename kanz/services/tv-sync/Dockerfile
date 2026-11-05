@@ -38,5 +38,5 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/
 FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/tv-sync /tv-sync
 USER nonroot:nonroot
-EXPOSE 8091
+EXPOSE 8091 8113
 ENTRYPOINT ["/tv-sync"]
