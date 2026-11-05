@@ -165,25 +165,6 @@ async fn duplicate(tx: &Transaction<'_>, fill: Option<&Fill>) -> Result<(), Erro
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn nested_wire_preservation_and_ambiguity() {
-        let bytes = [18, 3, 0x78, 0x81, 1];
-        assert_eq!(fill_wire(&bytes).unwrap(), vec![0x78, 0x81, 1]);
-        for malformed in [
-            &[18, 5, 1][..],
-            &[18, 0, 18, 0][..],
-            &[19, 20][..],
-            &[0][..],
-            &[255; 11][..],
-        ] {
-            assert_eq!(fill_wire(malformed), Err(Error::InvalidInput));
-        }
-    }
-}
-
 /// Trusted repository boundary: caller owns admission and FACT construction.
 /// Raw protobuf bytes are stored verbatim, including optional/unknown fields.
 /// Tenant is transaction-local, never inferred from a payload or retained on a pool.
@@ -287,4 +268,23 @@ pub async fn save(
     // reconcile durable state before retrying; never report a fabricated success.
     tx.commit().await.map_err(|_| Error::CommitUnconfirmed)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nested_wire_preservation_and_ambiguity() {
+        let bytes = [18, 3, 0x78, 0x81, 1];
+        assert_eq!(fill_wire(&bytes).unwrap(), vec![0x78, 0x81, 1]);
+        for malformed in [
+            &[18, 5, 1][..],
+            &[18, 0, 18, 0][..],
+            &[19, 20][..],
+            &[0][..],
+            &[255; 11][..],
+        ] {
+            assert_eq!(fill_wire(malformed), Err(Error::InvalidInput));
+        }
+    }
 }

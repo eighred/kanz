@@ -146,25 +146,6 @@ fn local_config(config: &tokio_postgres::Config) -> bool {
             .iter()
             .all(|h| matches!(h,Host::Tcp(s) if s=="127.0.0.1"||s=="localhost"||s=="::1"))
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn destination_is_loopback_only() {
-        for s in ["host=localhost", "host=127.0.0.1", "host=::1"] {
-            assert!(local_config(&s.parse().unwrap()));
-        }
-        for s in [
-            "host=localhost hostaddr=203.0.113.1",
-            "host=localhost hostaddr=127.0.0.1",
-            "host=example.invalid",
-            "host=/tmp",
-            "user=fixture",
-        ] {
-            assert!(!local_config(&s.parse().unwrap()));
-        }
-    }
-}
 #[tokio::main]
 async fn main() {
     let result = async {
@@ -195,5 +176,25 @@ async fn main() {
     if result.is_err() {
         eprintln!("OMS store fixture refused or outcome unconfirmed");
         std::process::exit(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn destination_is_loopback_only() {
+        for s in ["host=localhost", "host=127.0.0.1", "host=::1"] {
+            assert!(local_config(&s.parse().unwrap()));
+        }
+        for s in [
+            "host=localhost hostaddr=203.0.113.1",
+            "host=localhost hostaddr=127.0.0.1",
+            "host=example.invalid",
+            "host=/tmp",
+            "user=fixture",
+        ] {
+            assert!(!local_config(&s.parse().unwrap()));
+        }
     }
 }
