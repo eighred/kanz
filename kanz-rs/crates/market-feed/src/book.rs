@@ -63,9 +63,21 @@ impl Book {
         Ok(())
     }
     pub fn apply_delta(&mut self, delta: &OrderBookDelta) -> Result<(), BookError> {
+        self.fold_delta(delta, None)
+    }
+    /// Venue-observed sequences include zero: require the exact predecessor
+    /// and store zero resets. Legacy Go fixtures retain apply_delta semantics.
+    pub fn apply_delta_observed(&mut self, delta: &OrderBookDelta) -> Result<(), BookError> {
+        self.fold_delta(delta, Some(delta.last_update_sequence))
+    }
+    fn fold_delta(
+        &mut self,
+        delta: &OrderBookDelta,
+        observed_sequence: Option<u64>,
+    ) -> Result<(), BookError> {
         if self.seeded
-            && self.metadata.last_update_sequence != 0
-            && delta.prev_update_sequence != 0
+            && (observed_sequence.is_some()
+                || (self.metadata.last_update_sequence != 0 && delta.prev_update_sequence != 0))
             && delta.prev_update_sequence != self.metadata.last_update_sequence
         {
             return Err(BookError::SequenceGap);
@@ -79,8 +91,10 @@ impl Book {
         capacity(&self.asks, &asks, false, MAX_LEVELS_PER_SIDE)?;
         apply(&mut self.bids, bids);
         apply(&mut self.asks, asks);
-        if delta.last_update_sequence != 0 {
-            self.metadata.last_update_sequence = delta.last_update_sequence;
+        if let Some(sequence) = observed_sequence
+            .or_else(|| (delta.last_update_sequence != 0).then_some(delta.last_update_sequence))
+        {
+            self.metadata.last_update_sequence = sequence;
         }
         if delta.event_time.is_some() {
             self.metadata.event_time = delta.event_time;
@@ -162,6 +176,39 @@ fn levels<'a>(
 mod tests {
     use super::*;
     use crate::decimal::parse;
+    #[test]
+    fn explicit_zero_reset_and_predecessor_are_not_legacy_omissions() {
+        let mut book = book();
+        book.apply_snapshot(&seed(vec![row("100", "1")])).unwrap();
+        let reset = OrderBookDelta {
+            prev_update_sequence: 10,
+            last_update_sequence: 0,
+            bids: vec![row("100", "2")],
+            ..Default::default()
+        };
+        book.apply_delta_observed(&reset).unwrap();
+        assert_eq!(book.snapshot(0).last_update_sequence, 0);
+        let before = book.snapshot(0);
+        assert_eq!(
+            book.apply_delta_observed(&OrderBookDelta {
+                prev_update_sequence: 10,
+                last_update_sequence: 1,
+                bids: vec![row("100", "0")],
+                ..Default::default()
+            }),
+            Err(BookError::SequenceGap)
+        );
+        assert_eq!(book.snapshot(0), before);
+        book.apply_delta_observed(&OrderBookDelta {
+            prev_update_sequence: 0,
+            last_update_sequence: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(book.snapshot(0).last_update_sequence, 1);
+        book.apply_delta(&OrderBookDelta::default()).unwrap();
+        assert_eq!(book.snapshot(0).last_update_sequence, 1);
+    }
     fn row(price: &str, size: &str) -> PriceLevel {
         PriceLevel {
             price: parse(price),

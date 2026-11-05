@@ -19,10 +19,18 @@ func okxFeeds(cfg config.Config, instrument string, cov *coverage.Recorder, logg
 	}
 	logger.Info("okx feed wired",
 		"instrument", instrument, "inst_id", instID, "ws", cfg.OKXWSURL)
-	return []alpha.Feed{alpha.OKXFeed(alpha.VenueFeedConfig{
+	feed := alpha.OKXFeed(alpha.VenueFeedConfig{
 		InstrumentID: instrument, Symbol: instID, MIC: cfg.OKXMIC,
 		WSBase: cfg.OKXWSURL, DNSTTL: cfg.DNSTTL,
 		// The ingestion-coverage record (#591) — see binanceFeeds.
 		Coverage: cov,
-	})}
+	})
+	if cfg.OKXDepthExternal(instrument) {
+		// Construction does not dial. Keep the same trade source and its coverage
+		// observer; only the local depth reader/publisher is disabled.
+		feed.Depth = nil
+		feed.ExternalDepth = true
+		logger.Warn("OKX depth assigned externally; Go retains trades only", "instrument", instrument, "inst_id", instID)
+	}
+	return []alpha.Feed{feed}
 }

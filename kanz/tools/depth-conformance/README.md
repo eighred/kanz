@@ -1,5 +1,18 @@
 # Depth compatibility oracle
 
+Use `go run ./tools/depth-conformance --okx` for the OKX corpus, generated through
+the public Go OKX source and book using local websocket frames. It covers positive
+sequence snapshots/updates, sorting, equivalent prices, deletion and decimal
+rounding/rescaling. The replacement runtime's zero-sequence reset is verified
+separately because the legacy Go book treats zero delta sequence as omitted.
+
+`TestRustOKXDepthProcessThroughJetStream` opts in with an absolute
+`KANZ_OKX_DEPTH_BIN` plus `TEST_NATS_URL`. It validates real Rust publication into
+JetStream and Go mark consumption, including initial readiness, zero reset,
+continuity failure and replacement snapshot recovery. CI must require this named
+test to PASS rather than SKIP. The exchange endpoint is a loopback fixture;
+production workload identity, ACLs and ownership handoff remain separate proof.
+
 Run `go run ./tools/depth-conformance > <temporary-output.json>` from `kanz`.
 The command exercises the public Go Binance source using a local HTTP/websocket
 fixture, then the actual Go book snapshot/delta path. It never contacts an

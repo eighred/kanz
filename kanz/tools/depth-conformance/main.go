@@ -95,7 +95,7 @@ func evaluate(f *fixture) error {
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		ctx := conn.CloseRead(r.Context())
 		for _, event := range f.Events {
 			if conn.Write(ctx, websocket.MessageText, []byte(event)) != nil {
@@ -158,7 +158,14 @@ func run(w io.Writer) error {
 	return json.NewEncoder(w).Encode(c)
 }
 func main() {
-	if err := run(os.Stdout); err != nil {
+	selected := run
+	if len(os.Args) == 2 && os.Args[1] == "--okx" {
+		selected = runOKX
+	} else if len(os.Args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: depth-conformance [--okx]")
+		os.Exit(2)
+	}
+	if err := selected(os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

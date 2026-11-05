@@ -55,11 +55,32 @@ pub fn quote(snapshot: &OrderBookSnapshot) -> Option<MarketDataEvent> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Venue {
+    Binance,
+    Okx,
+}
+impl Venue {
+    pub fn mic(self) -> &'static str {
+        match self {
+            Self::Binance => "BINANCE",
+            Self::Okx => "OKX",
+        }
+    }
+    pub fn metric_prefix(self) -> &'static str {
+        match self {
+            Self::Binance => "kanz_binance_depth",
+            Self::Okx => "kanz_okx_depth",
+        }
+    }
+}
+
 pub struct Framer {
     tenant: String,
     source: String,
     version: String,
     instrument: String,
+    venue: Venue,
     sequence: [u64; 2],
 }
 
@@ -69,6 +90,7 @@ impl Framer {
         source: String,
         version: String,
         instrument: String,
+        venue: Venue,
     ) -> Result<Self> {
         if [&tenant, &source, &version, &instrument]
             .iter()
@@ -84,6 +106,7 @@ impl Framer {
             source,
             version,
             instrument,
+            venue,
             sequence: [0; 2],
         })
     }
@@ -94,7 +117,7 @@ impl Framer {
         published: Timestamp,
     ) -> Result<Vec<(&'static str, EventFrame)>> {
         if snapshot.instrument_id != self.instrument
-            || snapshot.mic != "BINANCE"
+            || snapshot.mic != self.venue.mic()
             || snapshot.symbol.is_empty()
         {
             return Err("book identity does not match this single-instrument publisher".into());
@@ -263,6 +286,32 @@ async fn guarded_ack(
 mod tests {
     use super::*;
     use crate::{decimal::parse, proto::market::v1::PriceLevel};
+    #[test]
+    fn each_framer_is_bound_to_one_venue() {
+        for venue in [Venue::Binance, Venue::Okx] {
+            let mut framer = Framer::new(
+                "t".into(),
+                "feed/test".into(),
+                "sha".into(),
+                "BTC-USDT".into(),
+                venue,
+            )
+            .unwrap();
+            let mut snap = snapshot();
+            snap.mic = venue.mic().into();
+            let frames = framer.frames(&snap, now()).unwrap();
+            assert_eq!(frames.len(), 2);
+            assert_eq!(frames[0].0, BOOK_SUBJECT);
+            assert_eq!(frames[1].0, QUOTE_SUBJECT);
+            snap.mic = if venue == Venue::Binance {
+                "OKX"
+            } else {
+                "BINANCE"
+            }
+            .into();
+            assert!(framer.frames(&snap, now()).is_err());
+        }
+    }
     #[tokio::test]
     async fn invalidation_during_blocked_ack_prevents_next_frame() {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -323,6 +372,7 @@ mod tests {
             "binance-depth/test".into(),
             "sha".into(),
             "BTC-USDT".into(),
+            Venue::Binance,
         )
         .unwrap();
         let frames = framer.frames(&snapshot, now()).unwrap();
@@ -371,9 +421,22 @@ mod tests {
     }
     #[test]
     fn required_identity_and_time_fail_closed() {
-        assert!(Framer::new("".into(), "s/i".into(), "v".into(), "BTC-USDT".into()).is_err());
-        let mut framer =
-            Framer::new("t".into(), "s/i".into(), "v".into(), "BTC-USDT".into()).unwrap();
+        assert!(Framer::new(
+            "".into(),
+            "s/i".into(),
+            "v".into(),
+            "BTC-USDT".into(),
+            Venue::Binance
+        )
+        .is_err());
+        let mut framer = Framer::new(
+            "t".into(),
+            "s/i".into(),
+            "v".into(),
+            "BTC-USDT".into(),
+            Venue::Binance,
+        )
+        .unwrap();
         let mut snap = snapshot();
         snap.instrument_id = "OTHER".into();
         assert!(framer.frames(&snap, now()).is_err());

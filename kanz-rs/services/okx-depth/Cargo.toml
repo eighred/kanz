@@ -1,0 +1,18 @@
+[package]
+name = "kanz-okx-depth"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+kanz-decimal-compat = { path = "../.." }
+kanz-market-feed = { path = "../../crates/market-feed" }
+prost-types = "=0.14.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "time", "net", "sync"] }
+futures-util = { version = "=0.3.34", features = ["sink"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+url = "=2.5.8"
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }

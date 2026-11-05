@@ -78,7 +78,7 @@ jobs:
           cargo fmt --all -- --check
           cargo check --locked --workspace --all-targets
           cargo test --locked --workspace --lib --bins
-          cargo build --locked -p kanz-binance-depth
+          cargo build --locked -p kanz-binance-depth -p kanz-okx-depth
           cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Differential proof against current Go authority
         env:
@@ -90,10 +90,13 @@ jobs:
       - name: Differential depth proof and ownership handoff tests
         env:
           KANZ_DEPTH_CORPUS: ${{ runner.temp }}/kanz-depth-conformance.json
+          KANZ_OKX_DEPTH_CORPUS: ${{ runner.temp }}/kanz-okx-depth-conformance.json
         run: |
           (cd kanz && go test -p 1 ./tools/depth-conformance ./internal/marketedge/depth ./internal/marketedge/book ./pkg/alpha ./services/market-ingest/... -count=1)
           (cd kanz && go run ./tools/depth-conformance) > "$KANZ_DEPTH_CORPUS"
+          (cd kanz && go run ./tools/depth-conformance --okx) > "$KANZ_OKX_DEPTH_CORPUS"
           cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml -p kanz-binance-depth --test go_conformance
+          cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml -p kanz-market-feed --test go_okx_conformance
       - name: Start the actual local Redpanda and NATS configuration
         run: docker compose -f kanz/dev/docker-compose.yml up -d --wait --wait-timeout 120 kafka nats
       - name: Real protocol, archive, drain and replay compatibility
@@ -102,10 +105,11 @@ jobs:
           TEST_KAFKA_BROKERS: 127.0.0.1:9092
           TEST_NATS_URL: nats://127.0.0.1:4222
           KANZ_BINANCE_DEPTH_BIN: ${{ github.workspace }}/kanz-rs/target/debug/kanz-binance-depth
+          KANZ_OKX_DEPTH_BIN: ${{ github.workspace }}/kanz-rs/target/debug/kanz-okx-depth
         run: |
           set -o pipefail
           go test -race -p 1 ./pkg/bus ./services/archiver/internal/archive ./tools/replay ./services/lake-sink/internal/cdc ./tools/depth-conformance \
-            -run '^(TestKafkaPublishSubscribe|TestBacklogPollerReportsKafkaLag|TestKafkaBacklogRefusesToReportZeroForAnUnreachableBroker|TestIntegration_KafkaHandlerFailureWithDeadDLQKeepsTheMessageReachable|TestArchiver_|TestDrain_|TestReaderRange|TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted|TestRustDepthProcessThroughJetStream)' \
+            -run '^(TestKafkaPublishSubscribe|TestBacklogPollerReportsKafkaLag|TestKafkaBacklogRefusesToReportZeroForAnUnreachableBroker|TestIntegration_KafkaHandlerFailureWithDeadDLQKeepsTheMessageReachable|TestArchiver_|TestDrain_|TestReaderRange|TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted|TestRustDepthProcessThroughJetStream|TestRustOKXDepthProcessThroughJetStream)' \
             -count=1 -json | tee "$RUNNER_TEMP/redpanda-tests.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 ../.github/scripts/check_migration_evidence.py "$RUNNER_TEMP/redpanda-tests.jsonl"
@@ -115,8 +119,10 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build the Rust feed container from pinned bases
-        run: docker build --build-arg VERSION=${{ github.sha }} --file kanz-rs/services/binance-depth/Dockerfile --tag kanz-binance-depth:verification .
+      - name: Build the Rust feed containers from pinned bases
+        run: |
+          docker build --build-arg VERSION=${{ github.sha }} --file kanz-rs/services/binance-depth/Dockerfile --tag kanz-binance-depth:verification .
+          docker build --build-arg VERSION=${{ github.sha }} --file kanz-rs/services/okx-depth/Dockerfile --tag kanz-okx-depth:verification .
       - name: Preserve broker diagnostics on failure
         if: failure()
         run: docker compose -f kanz/dev/docker-compose.yml logs --no-color kafka nats

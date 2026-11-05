@@ -84,7 +84,7 @@ func TestRustDepthProcessThroughJetStream(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		readCtx := conn.CloseRead(r.Context())
 		select {
 		case <-permit:

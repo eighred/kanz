@@ -29,6 +29,29 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func TestExternalOKXDepthPreservesTradesAndBinance(t *testing.T) {
+	cfg := config.Config{Instruments: []string{"BTC-USD", "ETH-USD"}, BinanceSymbols: map[string]string{"BTC-USD": "BTCUSDT"}, OKXSymbols: map[string]string{"BTC-USD": "BTC-USDT", "ETH-USD": "ETH-USDT"}, OKXExternalDepthInstruments: []string{"BTC-USD"}}
+	got, err := feeds(cfg, testRecorder(t), quietLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("feeds=%d", len(got))
+	}
+	if !got[1].ExternalDepth || got[1].Depth != nil || got[1].Trades == nil {
+		t.Fatal("assigned OKX feed not trade-only")
+	}
+	for _, i := range []int{0, 2} {
+		if got[i].ExternalDepth || got[i].Depth == nil || got[i].Trades == nil {
+			t.Fatal("unassigned depth/trade feed changed")
+		}
+	}
+	cfg.OKXExternalDepthInstruments = []string{"UNKNOWN"}
+	if _, err := feeds(cfg, testRecorder(t), quietLogger()); err == nil {
+		t.Fatal("unmapped external OKX ownership accepted")
+	}
+}
+
 func TestExternalBinanceDepthPreservesTradesAndOKX(t *testing.T) {
 	cfg := config.Config{Instruments: []string{"BTC-USD", "ETH-USD"}, BinanceSymbols: map[string]string{"BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT"}, OKXSymbols: map[string]string{"BTC-USD": "BTC-USDT"}, BinanceExternalDepthInstruments: []string{"BTC-USD"}}
 	got, err := feeds(cfg, testRecorder(t), quietLogger())

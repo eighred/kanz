@@ -77,6 +77,8 @@ type Config struct {
 	OKXMIC     string
 	OKXWSURL   string            // public v5 websocket
 	OKXSymbols map[string]string // instrument_id -> venue instId (BTC-USD=BTC-USDT)
+	// Only depth ownership moves; Go retains its one trade/coverage subscription.
+	OKXExternalDepthInstruments []string
 
 	// DepthLimit is the REST snapshot depth Binance anchors on (<=0 ⇒ 1000).
 	DepthLimit int
@@ -143,9 +145,10 @@ func Load() Config {
 		BinanceSymbols:                  parseSymbolMap(os.Getenv("MARKET_INGEST_BINANCE_SYMBOLS")),
 		BinanceExternalDepthInstruments: externalDepthList(os.Getenv("MARKET_INGEST_BINANCE_EXTERNAL_DEPTH_INSTRUMENTS")),
 
-		OKXMIC:     env.Or("MARKET_INGEST_OKX_MIC", "OKX"),
-		OKXWSURL:   env.Or("MARKET_INGEST_OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public"),
-		OKXSymbols: parseSymbolMap(os.Getenv("MARKET_INGEST_OKX_SYMBOLS")),
+		OKXMIC:                      env.Or("MARKET_INGEST_OKX_MIC", "OKX"),
+		OKXWSURL:                    env.Or("MARKET_INGEST_OKX_WS_URL", "wss://ws.okx.com:8443/ws/v5/public"),
+		OKXSymbols:                  parseSymbolMap(os.Getenv("MARKET_INGEST_OKX_SYMBOLS")),
+		OKXExternalDepthInstruments: externalDepthList(os.Getenv("MARKET_INGEST_OKX_EXTERNAL_DEPTH_INSTRUMENTS")),
 
 		DepthLimit:     parseInt(os.Getenv("MARKET_INGEST_DEPTH_LIMIT"), 1000),
 		DNSTTL:         parseDuration(os.Getenv("MARKET_INGEST_DNS_TTL"), 5*time.Minute),
@@ -178,14 +181,32 @@ func (c Config) ValidateExternalDepth() error {
 	for _, instrument := range c.Instruments {
 		tracked[instrument] = true
 	}
-	seen := make(map[string]bool)
-	for _, instrument := range c.BinanceExternalDepthInstruments {
-		if instrument == "" || instrument != strings.TrimSpace(instrument) || seen[instrument] || !tracked[instrument] || strings.TrimSpace(c.BinanceSymbols[instrument]) == "" {
-			return fmt.Errorf("market-ingest: invalid external Binance depth assignment %q (must be unique, tracked and mapped)", instrument)
+	for _, venue := range []struct {
+		name     string
+		assigned []string
+		symbols  map[string]string
+	}{
+		{"Binance", c.BinanceExternalDepthInstruments, c.BinanceSymbols},
+		{"OKX", c.OKXExternalDepthInstruments, c.OKXSymbols},
+	} {
+		seen := make(map[string]bool)
+		for _, instrument := range venue.assigned {
+			if instrument == "" || instrument != strings.TrimSpace(instrument) || seen[instrument] || !tracked[instrument] || strings.TrimSpace(venue.symbols[instrument]) == "" {
+				return fmt.Errorf("market-ingest: invalid external %s depth assignment %q (must be unique, tracked and mapped)", venue.name, instrument)
+			}
+			seen[instrument] = true
 		}
-		seen[instrument] = true
 	}
 	return nil
+}
+
+func (c Config) OKXDepthExternal(instrument string) bool {
+	for _, assigned := range c.OKXExternalDepthInstruments {
+		if assigned == instrument {
+			return true
+		}
+	}
+	return false
 }
 
 func (c Config) BinanceDepthExternal(instrument string) bool {
