@@ -13,6 +13,7 @@ import (
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	quantpb "github.com/eighred/kanz/kanz-schemas-go/quant/v1"
 	refpb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -134,5 +135,29 @@ func TestRustBondShadowActualProcess(t *testing.T) {
 	cfg.ExpectedVersion = "wrong-stamp"
 	if s := evaluate(context.Background(), cfg, "tenant", "go-test", c); s != "invalid_result" {
 		t.Fatal(s)
+	}
+}
+
+func TestSubmitRefusesOversizedCanonicalBeforeCopy(t *testing.T) {
+	c := fixture(t)
+	unknown := protowire.AppendTag(nil, 100, protowire.BytesType)
+	unknown = protowire.AppendBytes(unknown, make([]byte, pricing.MaxBondTermsBytes))
+	c.Terms.ProtoReflect().SetUnknown(unknown)
+	observed := 0
+	w := &Worker{done: make(chan struct{}), queue: make(chan compute.BondRiskCapture, 1), observe: func(s string) {
+		if s != "invalid_input" {
+			t.Fatal(s)
+		}
+		observed++
+	}}
+	allocations := testing.AllocsPerRun(10, func() { w.Submit(c) })
+	if observed == 0 || len(w.queue) != 0 {
+		t.Fatal("oversized diagnostic enqueued")
+	}
+	if allocations != 0 {
+		t.Fatalf("oversized Submit copied metadata: allocations=%v", allocations)
+	}
+	if c.Terms.FaceValue.Coefficient != 1000 || len(c.Terms.ProtoReflect().GetUnknown()) != len(unknown) {
+		t.Fatal("input was altered or truncated")
 	}
 }

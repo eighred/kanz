@@ -7,7 +7,6 @@ import (
 	"time"
 
 	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/eighred/kanz/internal/marketdata/terms"
 	"github.com/eighred/kanz/internal/risk/compute"
@@ -262,7 +261,7 @@ func toBondSpec(b *referencepb.BondTerms) (compute.BondSpec, bool) {
 		Face: face, CouponRate: coupon, Frequency: freq,
 		Issue: issue, Maturity: maturity, DayCount: dc,
 		Currency: b.GetCurrencyCode(), IssuerID: b.GetIssuerId(),
-		CanonicalTerms: proto.Clone(b).(*referencepb.BondTerms),
+		CanonicalTerms: pricing.CloneBoundedBondTerms(b),
 	}, true
 }
 

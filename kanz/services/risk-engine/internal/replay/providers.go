@@ -11,12 +11,11 @@ import (
 	"github.com/eighred/kanz/internal/risk/compute/factor"
 	"github.com/eighred/kanz/internal/risk/factormodel"
 	"github.com/eighred/kanz/internal/risk/liquidity"
+	"github.com/eighred/kanz/internal/risk/pricing"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 	"github.com/eighred/kanz/internal/risk/publish"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	factorpb "github.com/eighred/kanz/kanz-schemas-go/factor/v1"
-	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
-	"google.golang.org/protobuf/proto"
 )
 
 type Returns struct{ Source compute.ReturnsProvider }
@@ -117,7 +116,7 @@ func (r Bonds) BondTerms(ctx context.Context, id string, at time.Time) (compute.
 		return answer[compute.BondSpec]{Value: v, Status: int(status)}
 	})
 	if a.Value.CanonicalTerms != nil {
-		a.Value.CanonicalTerms = proto.Clone(a.Value.CanonicalTerms).(*referencepb.BondTerms)
+		a.Value.CanonicalTerms = pricing.CloneBoundedBondTerms(a.Value.CanonicalTerms)
 	}
 	return a.Value, compute.TermsResolution(a.Status)
 }

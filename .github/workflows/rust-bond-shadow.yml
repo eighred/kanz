@@ -9,7 +9,7 @@ on:
       - 'kanz/internal/risk/compute/**'
       - 'kanz/internal/risk/termsource/**'
       - 'kanz/services/risk-engine/**'
-      - 'kanz/internal/risk/tools/bond-risk-conformance/**'
+      - 'kanz/services/risk-engine/tools/bond-risk-conformance/**'
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
       - '.github/scripts/check_bond_shadow_evidence.py'
@@ -23,7 +23,7 @@ on:
       - 'kanz/internal/risk/compute/**'
       - 'kanz/internal/risk/termsource/**'
       - 'kanz/services/risk-engine/**'
-      - 'kanz/internal/risk/tools/bond-risk-conformance/**'
+      - 'kanz/services/risk-engine/tools/bond-risk-conformance/**'
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
       - '.github/scripts/check_bond_shadow_evidence.py'
@@ -68,7 +68,7 @@ jobs:
       - name: Verify source boundaries and affected Go owners
         working-directory: kanz
         run: |
-          go test -p 1 ./test/arch -run 'Test(Rust|Julia|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
+          go test -p 1 ./test/arch -run 'Test(Rust|Julia|BondCanonicalClone|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
           go test -p 1 ./internal/risk/pricing/... ./internal/risk/compute/... ./internal/risk/termsource ./services/risk-engine/internal/replay ./services/risk-engine/internal/config ./services/risk-engine/cmd/risk-engine -count=1
       - name: Compare actual stamped worker through the production supervisor
         working-directory: kanz
@@ -77,7 +77,7 @@ jobs:
           KANZ_BOND_RISK_VERSION: ${{ github.sha }}
         run: |
           set -o pipefail
-          go test -race -p 1 ./internal/risk/tools/bond-risk-conformance ./services/risk-engine/internal/bondshadow ./services/risk-engine/internal/shadowprocess -count=1 -json | tee "$RUNNER_TEMP/bond-shadow.jsonl"
+          go test -race -p 1 ./services/risk-engine/tools/bond-risk-conformance ./services/risk-engine/internal/bondshadow ./services/risk-engine/internal/shadowprocess -count=1 -json | tee "$RUNNER_TEMP/bond-shadow.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 ../.github/scripts/check_bond_shadow_evidence.py "$RUNNER_TEMP/bond-shadow.jsonl"
       - name: Preserve numerical execution evidence

@@ -10,7 +10,6 @@ import (
 	"github.com/eighred/kanz/internal/risk/pricing"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
-	"google.golang.org/protobuf/proto"
 )
 
 // FI-01d wires real fixed-income rate risk into the RISK-07 measure registry —
@@ -360,7 +359,7 @@ func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, a
 	if p.OnBondRisk != nil {
 		var canonical *referencepb.BondTerms
 		if spec.CanonicalTerms != nil {
-			canonical = proto.Clone(spec.CanonicalTerms).(*referencepb.BondTerms)
+			canonical = pricing.CloneBoundedBondTerms(spec.CanonicalTerms)
 		}
 		p.OnBondRisk(BondRiskCapture{InstrumentID: string(pos.InstrumentID), AsOf: asOf, CapturedAt: time.Now().UTC(), Terms: canonical, Bond: bond, Curve: c, Result: cr})
 	}

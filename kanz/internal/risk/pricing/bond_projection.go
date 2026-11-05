@@ -23,6 +23,7 @@ type BondRiskCaptureMeta struct {
 // ProjectBondRisk detaches exactly the payment schedule and working zero pillars
 // used by the existing pricer. It does not re-query terms or round coupon amounts.
 func ProjectBondRisk(terms *referencepb.BondTerms, bond Bond, c *curve.Curve, meta BondRiskCaptureMeta) (*quantpb.BondRiskRequest, error) {
+	terms = CloneBoundedBondTerms(terms)
 	if terms == nil || c == nil || meta.CaptureID == "" || meta.InstrumentID == "" || meta.TenantID == "" || meta.SourceRevision == "" || meta.AsOf.IsZero() || meta.CapturedAt.IsZero() {
 		return nil, errors.New("bond shadow capture identity or inputs missing")
 	}
@@ -37,7 +38,7 @@ func ProjectBondRisk(terms *referencepb.BondTerms, bond Bond, c *curve.Curve, me
 	r := &quantpb.BondRiskRequest{
 		CaptureId: meta.CaptureID, InstrumentId: meta.InstrumentID, TenantId: meta.TenantID,
 		AsOf: timestamppb.New(meta.AsOf), CapturedAt: timestamppb.New(meta.CapturedAt),
-		Terms: proto.Clone(terms).(*referencepb.BondTerms), SourceRevision: meta.SourceRevision,
+		Terms: terms, SourceRevision: meta.SourceRevision,
 		ScheduleConvention: "go_bond_schedule_v1",
 	}
 	if r.AsOf.CheckValid() != nil || r.CapturedAt.CheckValid() != nil {

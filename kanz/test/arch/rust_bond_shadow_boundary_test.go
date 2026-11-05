@@ -1,7 +1,12 @@
 package arch
 
 import (
+	"bytes"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -78,6 +83,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     std::io::stdout().lock().write_all(&output)?;
     Ok(())
 }
+
 fn main() {
     if run().is_err() {
         eprintln!("bond shadow worker refused request");
@@ -242,6 +248,134 @@ func TestRustBondShadowBoundaryMutations(t *testing.T) {
 			}
 			if err := checkRustBondShadowBoundary(dst); err == nil {
 				t.Fatal("mutation accepted")
+			}
+		})
+	}
+}
+
+// This is a bounded syntax/recipe guard over named owners, not arbitrary Go
+// data-flow proof. Parsing drops comments so an inert example cannot satisfy it.
+var bondCloneOwners = []struct{ path, function, call string }{
+	{"internal/risk/termsource/provider.go", "toBondSpec", "CanonicalTerms: pricing.CloneBoundedBondTerms(b)"},
+	{"services/risk-engine/internal/replay/providers.go", "BondTerms", "a.Value.CanonicalTerms = pricing.CloneBoundedBondTerms(a.Value.CanonicalTerms)"},
+	{"internal/risk/compute/fi.go", "positionBondRisk", "canonical = pricing.CloneBoundedBondTerms(spec.CanonicalTerms)"},
+	{"services/risk-engine/internal/bondshadow/worker.go", "Submit", "c.Terms = pricing.CloneBoundedBondTerms(c.Terms)"},
+	{"internal/risk/pricing/bond_projection.go", "ProjectBondRisk", "terms = CloneBoundedBondTerms(terms)"},
+}
+
+func bondCloneNode(node ast.Node) string {
+	var out bytes.Buffer
+	if err := format.Node(&out, token.NewFileSet(), node); err != nil {
+		return ""
+	}
+	return rustMigrationCompact(out.String())
+}
+
+func checkBondCloneBoundary(root string) error {
+	const helper = "internal/risk/pricing/bond_terms.go"
+	f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(root, filepath.FromSlash(helper)), nil, 0)
+	if err != nil {
+		return err
+	}
+	bound, body := false, ""
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "CloneBoundedBondTerms" {
+			body = bondCloneNode(fn.Body)
+		}
+		if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.CONST {
+			for _, spec := range gen.Specs {
+				if value, ok := spec.(*ast.ValueSpec); ok && len(value.Names) == 1 && value.Names[0].Name == "MaxBondTermsBytes" && len(value.Values) == 1 {
+					bound = bondCloneNode(value.Values[0]) == "1<<20"
+				}
+			}
+		}
+	}
+	want := `{ if terms == nil || proto.Size(terms) > MaxBondTermsBytes { return nil }; return proto.Clone(terms).(*referencepb.BondTerms) }`
+	// Parse the expected body too: format.Node normalizes semicolon spelling.
+	expected, err := parser.ParseFile(token.NewFileSet(), "expected.go", "package expected; func clone() "+want, 0)
+	if err != nil {
+		return err
+	}
+	if !bound || body != bondCloneNode(expected.Decls[0].(*ast.FuncDecl).Body) {
+		return fmt.Errorf("bond metadata clone must check 1MiB size before cloning")
+	}
+	for _, owner := range bondCloneOwners {
+		f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(root, filepath.FromSlash(owner.path)), nil, 0)
+		if err != nil {
+			return err
+		}
+		matches := 0
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != owner.function {
+				continue
+			}
+			matches++
+			code := bondCloneNode(fn.Body)
+			if strings.Count(code, rustMigrationCompact(owner.call)) != 1 || strings.Contains(code, "proto.Clone(") {
+				return fmt.Errorf("%s:%s must use bounded canonical metadata clone", owner.path, owner.function)
+			}
+		}
+		if matches != 1 {
+			return fmt.Errorf("missing or ambiguous bond clone owner %s:%s", owner.path, owner.function)
+		}
+	}
+	return nil
+}
+
+func TestBondCanonicalCloneBoundaries(t *testing.T) {
+	if err := checkBondCloneBoundary(moduleRoot(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBondCanonicalCloneBoundaryMutations(t *testing.T) {
+	const helper = "internal/risk/pricing/bond_terms.go"
+	cases := []struct{ name, path, old, replacement string }{
+		{"size-check-removed", helper, "proto.Size(terms) > MaxBondTermsBytes", "false"},
+		{"limit-expanded", helper, "1 << 20", "1 << 30"},
+		{"clone-before-size", helper, "if terms == nil", "_ = proto.Clone(terms)\n if terms == nil"},
+	}
+	for _, owner := range bondCloneOwners {
+		cases = append(cases, struct{ name, path, old, replacement string }{"bypass-" + owner.function, owner.path, "CloneBoundedBondTerms(", "UnboundedClone("})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := t.TempDir()
+			paths := []string{helper}
+			for _, owner := range bondCloneOwners {
+				paths = append(paths, owner.path)
+			}
+			for _, path := range paths {
+				body, err := os.ReadFile(filepath.Join(moduleRoot(t), filepath.FromSlash(path)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(dst, filepath.FromSlash(path))
+				if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, body, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := checkBondCloneBoundary(dst); err != nil {
+				t.Fatalf("baseline: %v", err)
+			}
+			path := filepath.Join(dst, filepath.FromSlash(tc.path))
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := strings.Replace(string(body), tc.old, tc.replacement, 1)
+			if changed == string(body) {
+				t.Fatal("mutation missed")
+			}
+			if err := os.WriteFile(path, []byte(changed), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkBondCloneBoundary(dst); err == nil {
+				t.Fatal("unbounded metadata clone accepted")
 			}
 		})
 	}

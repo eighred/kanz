@@ -17,7 +17,6 @@ import (
 	"github.com/eighred/kanz/internal/risk/compute"
 	"github.com/eighred/kanz/internal/risk/pricing"
 	quantpb "github.com/eighred/kanz/kanz-schemas-go/quant/v1"
-	refpb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
 	"github.com/eighred/kanz/services/risk-engine/internal/shadowprocess"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -100,7 +99,11 @@ func (w *Worker) Submit(c compute.BondRiskCapture) {
 	}
 	// Capture terms remain private even if an internal caller retains its pointer.
 	if c.Terms != nil {
-		c.Terms = proto.Clone(c.Terms).(*refpb.BondTerms)
+		c.Terms = pricing.CloneBoundedBondTerms(c.Terms)
+		if c.Terms == nil {
+			w.observe("invalid_input")
+			return
+		}
 	}
 	select {
 	case w.queue <- c:
