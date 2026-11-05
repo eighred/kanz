@@ -7,9 +7,12 @@ from check_migration_evidence import verify
 REQUIRED = {
     "services/oms/tools/fill-conformance": {
         "TestFillCorpusIndependentOracle", "TestRustFillFoldProcessConformance",
+        "TestTerminalCorpusIndependentState", "TestRustTerminalFoldProcessConformance",
+        "TestRustFillThenTerminalReplay",
     },
     "services/oms/internal/foldshadow": {
         "TestRustOMSFillShadowActualProcess", "TestRustTransactionCandidateBinding",
+        "TestRustOMSTerminalShadowActualProcess", "TestTerminalResultBindingAndPresence", "TestTerminalSharesBoundedQueue",
         "TestRustOMSPostgresTransactions",
         *{"TestRustOMSPostgresTransactions/" + case for case in (
             "durable-restart-duplicate-conflict", "concurrent-duplicate",
@@ -18,6 +21,17 @@ REQUIRED = {
         )},
     },
     "internal/shadowprocess": set(),
+    "services/oms/tools/store-conformance": {
+        "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity",
+        "TestRustExecutionEconomics", "TestRustRepositoryTransactions",
+        *{"TestRustRepositoryTransactions/" + case for case in (
+            "durable-restart-exact-bytes", "duplicate-conflict-and-alias",
+            "concurrent-duplicate", "fill-wins-cancel", "cancel-wins-fill",
+            "commit-failure-rollback-reclaim", "tenant-and-missing-scope",
+            "legacy-alias", "fee-head-duplicate-and-corruption",
+            "unowned-outbox-refusal", "unsafe-rls-and-invalid-record",
+        )},
+    },
 }
 
 if __name__ == "__main__":

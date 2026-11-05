@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Diagnostic canonical ApplyFill only. No storage, network, or execution authority.
+//! Diagnostic canonical fill and terminal folds. No storage, network, or execution authority.
 pub mod proto {
     pub use kanz_decimal_compat::common;
     pub mod command {
@@ -82,6 +82,69 @@ fn timestamp(t: &prost_types::Timestamp) -> bool {
 }
 fn id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)
+}
+
+pub fn evaluate_terminal(
+    r: &proto::oms::v1::TerminalFoldRequest,
+    version: &str,
+) -> proto::oms::v1::TerminalFoldResult {
+    use proto::oms::v1::{TerminalFoldOperation, TerminalFoldResult, TerminalFoldStatus};
+    let mut out = TerminalFoldResult {
+        capture_id: r.capture_id.clone(),
+        capture_digest: r.capture_digest.clone(),
+        tenant_id: r.tenant_id.clone(),
+        producer_version: version.into(),
+        expected_version: r.expected_version,
+        operation: r.operation,
+        status: TerminalFoldStatus::UnsupportedInput as i32,
+        ..Default::default()
+    };
+    if !id(&r.capture_id)
+        || !id(&r.tenant_id)
+        || !id(&r.source_revision)
+        || r.capture_digest.len() != 32
+        || r.expected_version.is_none_or(|v| v < 0)
+        || !matches!(r.path.as_str(), "cancel" | "reconcile" | "schedule")
+    {
+        return out;
+    }
+    let target = match TerminalFoldOperation::try_from(r.operation) {
+        Ok(TerminalFoldOperation::Cancel) => OrderStatus::Cancelled,
+        Ok(TerminalFoldOperation::Expire) => OrderStatus::Expired,
+        _ => return out,
+    };
+    if r.path != "reconcile"
+        && !((r.path == "cancel" && target == OrderStatus::Cancelled)
+            || (r.path == "schedule" && target == OrderStatus::Expired))
+    {
+        return out;
+    }
+    let (Some(state), Some(now), Some(captured)) = (&r.state, &r.event_time, &r.captured_at) else {
+        return out;
+    };
+    if !timestamp(now) || !timestamp(captured) {
+        return out;
+    }
+    let Ok(status) = OrderStatus::try_from(state.status) else {
+        return out;
+    };
+    if matches!(
+        status,
+        OrderStatus::Filled | OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired
+    ) {
+        out.status = TerminalFoldStatus::Rejected as i32;
+        out.rejection_code = "ORDER_TERMINAL".into();
+        return out;
+    }
+    // No arithmetic, domain conversion or normalization: Go preserves every
+    // optional Decimal, even absent leaves and extreme wire exponents.
+    let mut candidate = state.clone();
+    candidate.status = target as i32;
+    candidate.as_of = Some(*now);
+    out.unfilled_quantity = state.leaves_quantity;
+    out.candidate = Some(candidate);
+    out.status = TerminalFoldStatus::Ok as i32;
+    out
 }
 pub fn evaluate(r: &FillFoldRequest, version: &str) -> FillFoldResult {
     let mut out = FillFoldResult {
@@ -291,5 +354,48 @@ mod tests {
         r.expected_version = Some(7);
         r.fill.as_mut().unwrap().price = Some(d(1, 65));
         assert!(evaluate(&r, "stamp").candidate.is_none());
+    }
+    #[test]
+    fn terminal_preserves_optional_quantity_and_refuses_replay() {
+        use proto::oms::v1::{TerminalFoldOperation, TerminalFoldRequest, TerminalFoldStatus};
+        for operation in [TerminalFoldOperation::Cancel, TerminalFoldOperation::Expire] {
+            for quantity in [
+                None,
+                Some(d(0, 0)),
+                Some(d(-1, i32::MIN)),
+                Some(d(i64::MAX, i32::MAX)),
+            ] {
+                let fill = fixture();
+                let mut r = TerminalFoldRequest {
+                    capture_id: fill.capture_id,
+                    capture_digest: fill.capture_digest,
+                    tenant_id: fill.tenant_id,
+                    source_revision: fill.source_revision,
+                    expected_version: fill.expected_version,
+                    state: fill.state,
+                    event_time: fill.event_time,
+                    captured_at: fill.captured_at,
+                    operation: operation as i32,
+                    path: "reconcile".into(),
+                };
+                r.state.as_mut().unwrap().leaves_quantity = quantity;
+                let original = r.clone();
+                let result = evaluate_terminal(&r, "stamp");
+                assert_eq!(result.status, TerminalFoldStatus::Ok as i32);
+                assert_eq!(result.unfilled_quantity, quantity);
+                assert_eq!(r, original);
+                let candidate = result.candidate.unwrap();
+                assert_eq!(
+                    candidate.filled_quantity,
+                    r.state.as_ref().unwrap().filled_quantity
+                );
+                assert_eq!(candidate.leaves_quantity, quantity);
+                assert_eq!(candidate.as_of, r.event_time);
+                r.state = Some(candidate);
+                let replay = evaluate_terminal(&r, "stamp");
+                assert_eq!(replay.status, TerminalFoldStatus::Rejected as i32);
+                assert!(replay.candidate.is_none() && replay.unfilled_quantity.is_none());
+            }
+        }
     }
 }

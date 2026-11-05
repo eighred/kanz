@@ -1,6 +1,7 @@
 syntax = "proto3";
 package oms.v1;
 
+import "common/v1/decimal.proto";
 import "google/protobuf/timestamp.proto";
 import "order/v1/order_events.proto";
 
@@ -35,4 +36,41 @@ message FillFoldResult {
   string rejection_code = 6;
   order.v1.OrderState candidate = 7; // Present only on OK; no persistence authority.
   optional int64 expected_version = 8;
+}
+
+// Separate diagnostic protocol; never reinterpret the existing FillFoldRequest.
+enum TerminalFoldOperation {
+  TERMINAL_FOLD_OPERATION_UNSPECIFIED = 0;
+  TERMINAL_FOLD_OPERATION_CANCEL = 1;
+  TERMINAL_FOLD_OPERATION_EXPIRE = 2;
+}
+message TerminalFoldRequest {
+  string capture_id = 1;
+  bytes capture_digest = 2;
+  string tenant_id = 3;
+  string source_revision = 4;
+  optional int64 expected_version = 5;
+  order.v1.OrderState state = 6;
+  google.protobuf.Timestamp event_time = 7;
+  google.protobuf.Timestamp captured_at = 8;
+  TerminalFoldOperation operation = 9;
+  string path = 10; // cancel, reconcile, or schedule; not execution permission.
+}
+enum TerminalFoldStatus {
+  TERMINAL_FOLD_STATUS_UNSPECIFIED = 0;
+  TERMINAL_FOLD_STATUS_OK = 1;
+  TERMINAL_FOLD_STATUS_REJECTED = 2;
+  TERMINAL_FOLD_STATUS_UNSUPPORTED_INPUT = 3;
+}
+message TerminalFoldResult {
+  string capture_id = 1;
+  bytes capture_digest = 2;
+  string tenant_id = 3;
+  string producer_version = 4;
+  TerminalFoldStatus status = 5;
+  string rejection_code = 6;
+  order.v1.OrderState candidate = 7;
+  optional int64 expected_version = 8;
+  common.v1.Decimal unfilled_quantity = 9; // Preserve absence and exact wire representation.
+  TerminalFoldOperation operation = 10;
 }
