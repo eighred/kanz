@@ -12,10 +12,11 @@ the first DNS SAN from the existing registration. The probe requires exactly
 those four attributes with no duplicates/extras, exact URI/hash binding, and
 a bounded DNS-shaped CN matching the first DNS SAN. Four anchored DN rules pin
 the complete uniqueid and fixed C/O, allowing only the bounded CN field to vary.
-The artifact records Go `pkix.Name.String()` order; broker rules use the
-[GnuTLS compatibility DN format](https://gnutls.org/manual/html_node/X509-certificate-API.html)
-called by Seastar (`C,O,CN,uniqueid`). Actual broker ACL outcomes must qualify
-that serialization; Go string equality alone cannot.
+The artifact records Go `pkix.Name.String()` order. The pinned Redpanda image
+actually reports `C=US,O=SPIRE,CN=<dns>,x500UniqueIdentifier=<32hex>` (run
+42120249766); broker rules match only that observed form. This supersedes the
+initial inference from generic GnuTLS source, which incorrectly predicted a
+numeric OID and DER hex. Go string equality alone cannot qualify broker mapping.
 The CN never selects a principal; there is no DEFAULT or catch-all rule.
 A dedicated bootstrap
 identity creates two topics and grants each client only read/write/describe on
@@ -75,3 +76,9 @@ Run 42116497605 passed that SVID validation but failed broker bootstrap, with
 cleanup confirmed. A separate exact-peer TLS handshake and fixed diagnostic
 classes now distinguish TLS, topic creation and ACL creation; raw error text
 is never emitted. This remains failed qualification until a complete run passes.
+
+Run 42118276581 established exact-peer TLS success followed by explicit Kafka
+topic authorization failure (code 29). Run 42120249766 retained the actual public
+broker DN above, with no invalid bootstrap properties or missing bootstrap file.
+The subsequent strict mapping correction still requires all five real cases,
+including renewed TLS connections and final exact records, to pass.

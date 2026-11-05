@@ -1,3 +1,4 @@
+import hashlib
 import copy
 import re
 from pathlib import Path
@@ -93,14 +94,16 @@ class QualificationTests(unittest.TestCase):
         self.assertNotIn('private', str(result))
 
     def test_exact_dn_serializations(self):
+        self.assertIsNotNone(re.fullmatch(qualify.broker_subject_pattern('proof-bootstrap'),
+            'C=US,O=SPIRE,CN=bootstrap-nfkrt,x500UniqueIdentifier=5038771c76e00e553a0eee62370950a6'))
         uid = qualify.subject('proof-a')
         for pattern, value in (
             (qualify.subject_pattern('proof-a'), 'CN=client-a-abcde,O=SPIRE,C=US,' + uid),
-            (qualify.broker_subject_pattern('proof-a'), 'C=US,O=SPIRE,CN=client-a-abcde,' + uid),
+            (qualify.broker_subject_pattern('proof-a'), 'C=US,O=SPIRE,CN=client-a-abcde,x500UniqueIdentifier=' + hashlib.sha256(qualify.identity('proof-a').encode()).digest()[:16].hex()),
         ):
             self.assertIsNotNone(re.fullmatch(pattern, value))
             for bad in (value + ',OU=extra', value + ',' + uid,
-                        value.replace(uid, qualify.subject('proof-b')),
+                        value.replace(uid, qualify.subject('proof-b')) if uid in value else value[:-1] + ('0' if value[-1] != '0' else '1'),
                         value.replace('C=US', 'C=GB'), value.replace('client-a-abcde', 'a,OU=x'),
                         value.replace('client-a-abcde', 'a' * 254)):
                 self.assertIsNone(re.fullmatch(pattern, bad))

@@ -37,9 +37,10 @@ def subject_pattern(sa):
 
 
 def broker_subject_pattern(sa):
-    # Seastar uses gnutls_x509_crt_get_dn: compatibility order follows ASN.1.
-    # Only the pinned uniqueid hash selects the principal; CN is bounded context.
-    return 'C=US,O=SPIRE,CN=[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?,' + subject(sa).replace('.', '[.]')
+    # Pinned Redpanda26.2.6 run42120249766 observed this named/raw-hash form.
+    # Go's reconstructed numeric-OID DER representation is not the broker DN.
+    value = hashlib.sha256(identity(sa).encode()).digest()[:16].hex()
+    return 'C=US,O=SPIRE,CN=[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?,x500UniqueIdentifier=' + value
 
 
 def broker_diagnostics(logs):
