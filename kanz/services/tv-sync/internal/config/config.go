@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"github.com/eighred/kanz/internal/env"
 	"log/slog"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +19,11 @@ import (
 
 // Config is the resolved configuration.
 type Config struct {
+	// Listen is the legacy shared port, or operations-only when APIListen is set.
+	// APIListen opts into the split and must be gateway-only in NetworkPolicy.
+	// Absence preserves deployment compatibility; explicit invalid values refuse startup.
 	Listen       string
+	APIListen    string
 	LogLevel     slog.Level
 	OTLPEndpoint string
 
@@ -138,8 +144,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	apiListen, split := os.LookupEnv("TV_SYNC_API_LISTEN")
+	if split {
+		_, port, err := net.SplitHostPort(apiListen)
+		number, portErr := strconv.Atoi(port)
+		if strings.TrimSpace(apiListen) != apiListen || err != nil || portErr != nil || number < 1 || number > 65535 {
+			return Config{}, errors.New("TV_SYNC_API_LISTEN must be a nonempty host:port address with a numeric port from 1 to 65535")
+		}
+	}
+
 	cfg := Config{
 		Listen:        env.Or("TV_SYNC_LISTEN", ":8091"),
+		APIListen:     apiListen,
 		LogLevel:      env.ParseLevelOr(os.Getenv("TV_SYNC_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint:  os.Getenv("TV_SYNC_OTLP_ENDPOINT"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
