@@ -125,6 +125,22 @@ def policy(allow=False):
             'metadata':{'name':'feed-allow' if allow else 'default-deny','namespace':'kanz-messaging'},'spec':spec}
 
 
+def create_enforcing_cluster(name, scratch):
+    """Shared disposable kind/Cilium setup; accepts no existing context."""
+    if not re.fullmatch(r"(?:feed-proof|cni-proof)-[0-9a-f]{12}", name):
+        raise ValueError("invalid disposable cluster name")
+    kubeconfig = str(scratch/'kubeconfig')
+    def k(*args):
+        return command(['kubectl','--kubeconfig',kubeconfig,'--context','kind-'+name,*args])
+    config = {'kind':'Cluster','apiVersion':'kind.x-k8s.io/v1alpha4','networking':{'disableDefaultCNI':True},'nodes':[{'role':'control-plane'}]}
+    config_path = scratch/'kind.yaml'; config_path.write_text(yaml.safe_dump(config))
+    command(['kind','create','cluster','--name',name,'--image',NODE,'--config',str(config_path),'--kubeconfig',kubeconfig,'--wait','0s'],timeout=300)
+    command(['helm','install','cilium',str(Path(os.environ['RUNNER_TEMP'])/'cilium.tgz'),'--kubeconfig',kubeconfig,'--kube-context','kind-'+name,
+             '--namespace','kube-system','--set','ipam.mode=kubernetes','--set','operator.replicas=1','--wait','--timeout','5m'],timeout=360)
+    k('-n','kube-system','rollout','status','daemonset/cilium','--timeout=180s')
+    k('wait','--for=condition=Ready','node','--all','--timeout=180s')
+
+
 def main():
     name = 'feed-proof-' + uuid.uuid4().hex[:12]
     artifact = Path(os.environ['RUNNER_TEMP']) / 'feed-identity.json'
@@ -152,15 +168,8 @@ def main():
             image = 'kanz-feed-proof:'+sha
             command(['docker','build','-f','tools/feed-identity/Dockerfile','-t',image,'.'],timeout=1200)
             evidence['fixtureDockerID'] = command(['docker','image','inspect','--format','{{.Id}}',image])
-            config = {'kind':'Cluster','apiVersion':'kind.x-k8s.io/v1alpha4','networking':{'disableDefaultCNI':True},'nodes':[{'role':'control-plane'}]}
-            config_path = scratch/'kind.yaml'; config_path.write_text(yaml.safe_dump(config))
-            evidence['stage']='create kind'
-            command(['kind','create','cluster','--name',name,'--image',NODE,'--config',str(config_path),'--kubeconfig',kubeconfig,'--wait','0s'],timeout=300)
-            evidence['stage']='install Cilium'
-            command(['helm','install','cilium',str(Path(os.environ['RUNNER_TEMP'])/'cilium.tgz'),'--kubeconfig',kubeconfig,'--kube-context','kind-'+name,
-                     '--namespace','kube-system','--set','ipam.mode=kubernetes','--set','operator.replicas=1','--wait','--timeout','5m'],timeout=360)
-            k('-n','kube-system','rollout','status','daemonset/cilium','--timeout=180s')
-            k('wait','--for=condition=Ready','node','--all','--timeout=180s')
+            evidence['stage']='create enforcing kind/Cilium cluster'
+            create_enforcing_cluster(name, scratch)
             command(['kind','load','docker-image',image,'--name',name])
             crds=[]
             for path in sorted((ROOT/'kanz/infra/security/spire/crds').glob('*.yaml')):
