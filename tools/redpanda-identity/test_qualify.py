@@ -32,6 +32,8 @@ def boundary(docs, probe, workflow):
     setup=[s for s in wf['jobs']['developmental-redpanda-identity']['steps'] if s.get('uses')=='./.github/actions/setup-buf']
     if len(setup)!=1 or setup[0].get('with',{}).get('version')!='1.69.0':
         raise ValueError('SDK generator must have its required pinned version')
+    for token in ('protoc-gen-go@v1.36.11','protoc-gen-go-grpc@v1.5.1','$(go env GOPATH)/bin:$PATH','make -C kanz generate'):
+        if token not in workflow: raise ValueError('canonical generator dependency missing')
 
 
 class QualificationTests(unittest.TestCase):
@@ -59,6 +61,8 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaises(ValueError): boundary(self.docs,self.probe,self.workflow.replace('packages: read','packages: write'))
         with self.assertRaises(ValueError): boundary(self.docs,self.probe,self.workflow.replace('python3 -B tools/redpanda-identity/qualify.py','true'))
         with self.assertRaises(ValueError): boundary(self.docs,self.probe,self.workflow.replace("version: '1.69.0'", "version: ''"))
+        for token in ('protoc-gen-go@v1.36.11','protoc-gen-go-grpc@v1.5.1','make -C kanz generate'):
+            with self.assertRaises(ValueError): boundary(self.docs,self.probe,self.workflow.replace(token,'REMOVED'))
 
     def test_composer_is_fixture_only(self):
         docs=qualify.spire_objects()
