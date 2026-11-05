@@ -143,7 +143,7 @@ async fn connect(
         )
         .await??;
         let tls = spiffe_rustls::mtls_client(identity.clone())
-            .trust_domain_policy(spiffe_rustls::LocalOnly)
+            .trust_domain_policy(spiffe_rustls::LocalOnly("kanz.internal".try_into()?))
             .authorize(spiffe_rustls::authorizer::exact([
                 "spiffe://kanz.internal/ns/kanz-messaging/sa/nats",
             ])?)
@@ -234,11 +234,14 @@ async fn run(config: Config) -> Result<()> {
     ));
     let mut ops_task = tokio::spawn(operations(listener, health.clone(), cancelled));
     let mut ticker = interval(Duration::from_millis(250));
+    // Keep the signal subscription alive across every feed/ticker iteration.
+    let shutdown_signal = shutdown();
+    tokio::pin!(shutdown_signal);
     let mut anchored = false;
     let mut book_epoch = 0;
     let result: Result<()> = loop {
         tokio::select! {
-            signal = shutdown() => break signal,
+            signal = &mut shutdown_signal => break signal,
             ops = &mut ops_task => break match ops { Ok(Ok(())) => Err("operations server stopped".into()), Ok(Err(e)) => Err(e), Err(e) => Err(e.into()) },
             update = updates.recv() => match update {
                 Some(Event::Reanchoring) => { anchored = false; health.ready.store(false, Ordering::Relaxed); }
@@ -292,13 +295,19 @@ async fn run(config: Config) -> Result<()> {
         ops_task.abort();
         let _ = ops_task.await;
     }
-    let _ = timeout(Duration::from_secs(5), client.drain()).await;
+    let drained = timeout(Duration::from_secs(5), client.drain()).await;
     drop(js);
     drop(client);
     if let Some(identity) = identity {
-        identity.shutdown().await;
+        identity
+            .shutdown_with_timeout(Duration::from_secs(5))
+            .await?;
     }
-    result
+    result?;
+    drained
+        .map_err(|_| "NATS drain timed out")?
+        .map_err(|_| "NATS drain failed")?;
+    Ok(())
 }
 
 #[tokio::main]
