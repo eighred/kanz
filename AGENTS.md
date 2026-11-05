@@ -52,7 +52,8 @@ architecture violation even when tests pass.
 | `kanz-schemas/` | Protobuf + buf; generated Go SDK in `gen/go`. |
 | `kanz-py/` | Python inference service. |
 | `kanz-web/` | Browser client. |
-| `kanz-rs/` | Incremental Rust migration; canonical-schema compatibility kernel first, no production authority until #1413 acceptance. |
+| `kanz-rs/` | Rust feed runtimes, canonical compatibility primitives and diagnostic financial workers; ownership changes require component-specific #1413 acceptance. |
+| `kanz-jl/` | Optional curve-calibration comparison worker; Go remains authoritative. |
 | `kanz/infra/` | Deployment; Kubernetes and SPIFFE/SPIRE workload identity. |
 | `tools/`, `.github/` | Host/operator scripts and CI. |
 
@@ -73,7 +74,7 @@ strategy -> intent -> risk -> compliance -> mandate -> OMS
          -> execution router -> venue adapter -> exchange
 ```
 
-State changes flow as FACTs on the bus, without polling. Services are
+State changes flow as FACTs on the bus, without polling. Go services are
 `package main` under `services/<name>/cmd/<name>/`, with environment configuration
 in `internal/config`. Shared code starts in a service's `internal/`; promote it
 to `kanz/internal/` or `kanz/pkg/` only when a second consumer exists.
@@ -211,7 +212,8 @@ Run the findings CLI on Linux: Windows lacks required no-follow/nonblocking
 flags, which must remain enabled. The imported methodology is pinned and carries
 its MIT notice; Node is a development-time validator dependency only.
 Pricing, portfolio and backtest acceptance requires `financial-verification`;
-production computation stays in its owning service or Go library.
+production computation stays in its owning service or approved domain library;
+diagnostic workers do not acquire financial authority.
 
 ## Windows environment
 
