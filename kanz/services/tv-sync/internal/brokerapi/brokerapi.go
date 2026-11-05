@@ -243,10 +243,11 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 // validates the token, and a NetworkPolicy is what stops anyone else reaching
 // this port — the control pkg/auth/meshheader.go states for the whole estate.
 //
-// The API uses plain HTTP on its gateway-only listener. NetworkPolicy, not
-// mTLS or these headers alone, establishes the caller's identity. Operations
-// runs on a separate listener with no Broker API routes (#232); its scrape
-// grant must never include the API port.
+// The API uses plain HTTP. NetworkPolicy, not mTLS or these headers alone,
+// establishes the caller's identity. Until TV_SYNC_API_LISTEN is explicitly
+// configured, the legacy port still shares Broker routes with operations and
+// retains the monitoring exposure tracked by #232. Split mode separates these
+// routes; coordinated policy promotion must keep the API port unscrapable.
 //
 // EXPOSE THIS SERVICE DIRECTLY TO THE INTERNET AND ANY CALLER CAN NAME ANY
 // TENANT AND READ THAT TENANT'S BOOK — its positions, its orders, its

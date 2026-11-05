@@ -913,12 +913,13 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // off an inbound request and serve the named tenant's data, mapped to the port
 // they serve it on.
 //
-// datamaster and wealth still share their tenant API with their metrics port.
+// datamaster, tv-sync and wealth still deploy their tenant API on the metrics port.
 // Their listener separation and live verification remain under #232. Services
 // that split move to the map below; neither an annotation nor a policy alone
 // proves that the running process separates its routes.
 var tenantHeaderTrustingServices = map[string]int{
 	"datamaster": 8080,
+	"tv-sync":    8091,
 	"wealth":     8080,
 }
 
@@ -938,8 +939,6 @@ var tenantHeaderTrustingServices = map[string]int{
 // allow-observability-scrape's list — so the separation cannot quietly collapse
 // back into one port while the entry keeps claiming otherwise.
 var tenantHeaderTrustingSplitListeners = map[string]int{
-	// #232: the Broker API leaves the scraped operations listener on :8091.
-	"tv-sync": 8113,
 	// The API materializes a rebalance proposal into order commands and takes the
 	// issuer — the field the audit trail records as the person who moved the
 	// capital — from the injected principal. A trading surface is the one place
@@ -1217,10 +1216,12 @@ func scrapePolicyPorts(t *testing.T) map[int]bool {
 	return out
 }
 
-// TestTVSyncSplitListenerPolicy checks the union of ingress policies: a narrow
-// gateway rule does not compensate for another policy admitting the same API.
-// This proves manifest isolation, not enforcement by a deployed CNI.
-func TestTVSyncSplitListenerPolicy(t *testing.T) {
+// TestTVSyncDeploymentListenerMode keeps the exception aligned with the deployed
+// configuration while split-capable source is staged before image promotion.
+// Enabling the API listener must retire the exception and satisfy the union of
+// ingress policies; one narrow policy cannot cancel another policy's grant.
+// Neither mode is evidence of enforcement by a deployed CNI.
+func TestTVSyncDeploymentListenerMode(t *testing.T) {
 	var policies []networkingv1.NetworkPolicy
 	for _, path := range infraYAMLFiles(t) {
 		raw, err := os.ReadFile(path)
@@ -1263,6 +1264,7 @@ func TestTVSyncSplitListenerPolicy(t *testing.T) {
 			t.Errorf("tv-sync operations scrape port = %q, want 8091", got)
 		}
 		foundContainer := false
+		split := false
 		for _, c := range w.Spec.Template.Spec.Containers {
 			if c.Name != "tv-sync" {
 				continue
@@ -1272,19 +1274,70 @@ func TestTVSyncSplitListenerPolicy(t *testing.T) {
 			for _, e := range c.Env {
 				env[e.Name] = e.Value
 			}
-			if env["TV_SYNC_API_LISTEN"] != ":8113" || env["TV_SYNC_LISTEN"] != ":8091" {
-				t.Errorf("tv-sync must explicitly bind API :8113 and operations :8091")
+			if env["TV_SYNC_LISTEN"] != ":8091" {
+				t.Errorf("tv-sync operations listener must remain explicitly bound to :8091")
+			}
+			api, configured := env["TV_SYNC_API_LISTEN"]
+			var err error
+			split, err = tvSyncListenerMode(api, configured, tenantHeaderTrustingServices["tv-sync"], tenantHeaderTrustingSplitListeners["tv-sync"])
+			if err != nil {
+				t.Error(err)
 			}
 		}
 		if !foundContainer {
 			t.Error("tv-sync workload has no tv-sync container: listener configuration was not checked")
 		}
-		for _, problem := range tvSyncIngressProblems(policies, w.Spec.Template.Metadata.Labels) {
-			t.Error(problem)
+		if split {
+			for _, problem := range tvSyncIngressProblems(policies, w.Spec.Template.Metadata.Labels) {
+				t.Error(problem)
+			}
 		}
 	}
 	if !found {
 		t.Fatal("no deployed tv-sync workload: listener isolation was not checked")
+	}
+}
+
+// Missing API_LISTEN deliberately retains the deployed legacy surface until a
+// reviewed image and manifest promotion. An explicit value is never a fallback.
+func tvSyncListenerMode(api string, configured bool, sharedPort, splitPort int) (bool, error) {
+	if !configured {
+		if sharedPort != 8091 || splitPort != 0 {
+			return false, fmt.Errorf("tv-sync legacy deployment must retain only the shared-port :8091 exception under #232")
+		}
+		return false, nil
+	}
+	if api != ":8113" {
+		return false, fmt.Errorf("tv-sync explicit API listener must be :8113, got %q", api)
+	}
+	if splitPort != 8113 || sharedPort != 0 {
+		return true, fmt.Errorf("tv-sync split deployment must retire its shared-port exception and record only API :8113")
+	}
+	return true, nil
+}
+
+func TestTVSyncDeploymentListenerModeTransitions(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		api                  string
+		configured           bool
+		shared, split        int
+		wantSplit, wantError bool
+	}{
+		{name: "staged legacy", shared: 8091},
+		{name: "promoted split", api: ":8113", configured: true, split: 8113, wantSplit: true},
+		{name: "blank explicit listener", configured: true, shared: 8091, wantError: true},
+		{name: "collapsed listener", api: ":8091", configured: true, shared: 8091, wantError: true},
+		{name: "legacy exemption retired early", split: 8113, wantError: true},
+		{name: "split with stale legacy exemption", api: ":8113", configured: true, shared: 8091, wantSplit: true, wantError: true},
+		{name: "both classifications", api: ":8113", configured: true, shared: 8091, split: 8113, wantSplit: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			split, err := tvSyncListenerMode(tc.api, tc.configured, tc.shared, tc.split)
+			if split != tc.wantSplit || (err != nil) != tc.wantError {
+				t.Fatalf("split=%v err=%v, want split=%v error=%v", split, err, tc.wantSplit, tc.wantError)
+			}
+		})
 	}
 }
 

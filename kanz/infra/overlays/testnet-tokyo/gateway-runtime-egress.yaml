@@ -73,7 +73,7 @@ spec:
             matchLabels:
               app: tv-sync
       ports:
-        - { protocol: TCP, port: 8113 }
+        - { protocol: TCP, port: 8091 }
     - to:
         - podSelector:
             matchLabels:

@@ -20,7 +20,6 @@ import (
 	"github.com/eighred/kanz/internal/lifecycle"
 	"github.com/eighred/kanz/internal/marketdata/mark"
 	"github.com/eighred/kanz/internal/pg"
-	"github.com/eighred/kanz/internal/platform/httpserver"
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
@@ -184,10 +183,7 @@ func run() int {
 	readiness := &server.Readiness{}
 	broker := brokerapi.New(proj)
 	api := server.New(readiness, broker, server.WithMetrics(obs.MetricsHandler()))
-	servers := []*http.Server{
-		httpserver.New(cfg.Listen, api.OperationsHandler(), httpserver.Standard()),
-		httpserver.New(cfg.APIListen, api, httpserver.Standard()),
-	}
+	servers := newHTTPServers(cfg, api)
 	listeners, err := bindHTTPListeners(ctx, servers)
 	if err != nil {
 		logger.Error("tv-sync bind failed", "err", err)

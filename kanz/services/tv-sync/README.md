@@ -1,37 +1,48 @@
-# tv-sync HTTP listeners
+# tv-sync listener migration
 
-The Broker API is served on `TV_SYNC_API_LISTEN` (default `:8113`). Only the
-API gateway may reach this port: the handlers trust its injected
-`X-Kanz-Principal-*` identity headers. NetworkPolicy is part of that trust
-boundary; the listener itself does not authenticate a gateway workload.
+This source release supports an opt-in split while keeping existing deployments
+compatible. With `TV_SYNC_API_LISTEN` absent, `TV_SYNC_LISTEN` (default `:8091`)
+continues to serve the Broker API, health, readiness and metrics together. This
+legacy mode retains the monitoring-to-tenant-API exposure tracked in #232; it is
+not an isolation claim. The deployed manifests and the named guard exemption
+remain unchanged until image promotion.
 
-`TV_SYNC_LISTEN` (default `:8091`) serves only `/healthz`, `/readyz` and
-`/metrics`. Monitoring must use this listener. Broker routes are absent from it,
-and operational routes are absent from the API listener. Both sockets must bind
-before startup can report ready, and both drain on shutdown. Existing fact-log
-rehydration and consumer readiness semantics are otherwise unchanged.
+Set `TV_SYNC_API_LISTEN=:8113` to select the split. The Broker API then exists
+only on that listener, while `TV_SYNC_LISTEN` serves only `/healthz`, `/readyz`
+and `/metrics`. Explicit empty or malformed API configuration refuses startup;
+a failed bind never falls back to the legacy listener. All selected sockets
+must bind before readiness and all drain on shutdown.
 
-## Rollout and verification
+Broker handlers trust the gateway's `X-Kanz-Principal-*` headers. NetworkPolicy
+must make the gateway the API listener's only reachable caller; neither the
+headers nor the new listener independently authenticate a gateway workload.
 
-The Deployment is a singleton with `Recreate`; preserve that constraint. A
-listener migration requires a rebuilt, approved image containing the split,
-the two Service ports, gateway URL, and base/overlay NetworkPolicies together.
-The checked-in image digest is not evidence that this source change is deployed.
-Applying the new gateway port to an old binary causes Broker API unavailability.
-Use a controlled maintenance window, and retain the matching prior image and
-manifest revision for rollback. Rolling back restores the old shared-listener
-exposure and must not be described as isolated.
+## Release and promotion order
 
-Before certifying #232 on an enforcing-CNI test cluster, verify:
+1. Merge and verify the source with the existing deployment manifests intact.
+   Both the old binary and this release remain compatible with those manifests.
+2. Publish the reviewed merged revision through the approved signed-image path.
+   Verify its immutable digest, signer identity, SBOM and vulnerability evidence.
+   A passing PR build or unsigned main image is not promotion evidence.
+3. On a controlled enforcing-CNI test cluster, validate the matching image with
+   API 8113 and operations 8091, the two Service ports, gateway URL, and base and
+   environment-specific NetworkPolicies. Keep the singleton `Recreate` strategy.
+4. Promote that verified digest and the listener configuration together in a
+   reviewed manifest change. Move tv-sync's guard entry from the shared-listener
+   map to the split-listener map in that same change. Do not change the gateway
+   port while retaining an image that lacks the split.
 
-- The gateway reaches representative authorized Broker API reads on 8113;
-  absent identity is refused and tenant scoping remains intact.
-- Monitoring reaches metrics and probes on 8091, but Broker routes on that
-  listener return 404 even with forged principal headers.
-- Monitoring and an unrelated pod cannot connect to 8113, including by pod IP.
-- Restart preserves fact-log recovery and the existing single-consumer topology;
-  no second replica is introduced as a rollout shortcut.
+Before promotion, prove authorized gateway reads succeed on 8113, monitoring
+can scrape and probe 8091, Broker routes return 404 on 8091 even with forged
+principal headers, and monitoring/unrelated pods cannot connect to 8113 by
+Service or pod IP. Check missing-identity refusal, tenant scoping, restart and
+fact-log recovery without introducing a second consumer replica.
 
-Local HTTP tests and static policy mutation tests cover the source boundary.
-They do not establish live CNI enforcement, published-image custody or production
-acceptance; #232 remains open until its remaining evidence is recorded.
+Retain the matching prior image and manifests for coordinated rollback. Removing
+`TV_SYNC_API_LISTEN` restores legacy shared routing, including its exposure;
+rolling only the image or only the gateway port can cause an outage. No release
+or rollback changes the capital halt.
+
+Loopback HTTP and static policy tests establish source behavior. They do not
+prove an image was published or a CNI enforced policy. #232 stays open until
+its operational acceptance is observed on the promoted revision.
