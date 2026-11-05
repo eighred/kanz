@@ -19,13 +19,16 @@ julia --startup-file=no --history-file=no --project=kanz-jl kanz-jl/test/runtest
 ```
 
 The runtime command is `julia --startup-file=no --history-file=no
---project=<absolute-kanz-jl> <absolute-kanz-jl>/bin/curve_worker.jl`. It reads one
+--compiled-modules=existing --pkgimages=existing --project=<absolute-kanz-jl>
+<absolute-kanz-jl>/bin/curve_worker.jl`. It reads one
 raw protobuf request through stdin EOF and writes one raw protobuf result before
 exit, each at most 1 MiB. Runtime does not instantiate packages, download data,
 read credentials or open network connections. The supervisor must supply its
-prebuilt dependency depot, scrub the environment, impose a process deadline and
-resource limits, and isolate network access. Package/code loading still reads
-the installed runtime and generated source files.
+prebuilt dependency depot and scrubbed environment. The existing supervisor
+bounds pipes and process duration. Its runtime/project/depot are trusted code;
+it is not an OS or network sandbox. Operational network/resource isolation is
+still required before deployment. Package loading reads the installed runtime
+and generated source files.
 
 Supported conventions are linear interpolation in continuous zero rates with
 flat extrapolation; simple-interest deposits and forwards; annual swap fixed

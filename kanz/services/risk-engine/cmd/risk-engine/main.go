@@ -194,7 +194,11 @@ func hostOrigin() string {
 // when ctx is canceled (signal) or ingestion fails.
 func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider, riskMetrics *engine.Metrics, greekModels *app.GreekModelPosture) error {
 	busMetrics := bus.NewBusMetrics(obs.Registry)
-
+	bondShadow, err := newBondShadow(ctx, cfg, obs.Registry)
+	if err != nil {
+		return err
+	}
+	defer bondShadow.Close()
 	// A HALF-CONFIGURED SHARD RING REFUSES THE START, AND IT DOES SO BEFORE ANY
 	// I/O (#110). The ring is a pure function of two env values, so nothing here
 	// needs a broker, a database or an SVID to know the answer — and checking it
@@ -464,8 +468,9 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 			contractTerms := termsource.NewProvider(terms.NewPostgres(pricePool),
 				termsource.WithMissingTermsObserver(func(string) { fiTermsMissing.Inc() }))
 			compute.RegisterFIRisk(context.Background(), registry, compute.FIProviders{
-				Terms: replay.Bonds{Source: contractTerms},
-				Curve: replay.Curves{Source: curveStore},
+				Terms:      replay.Bonds{Source: contractTerms},
+				Curve:      replay.Curves{Source: curveStore},
+				OnBondRisk: bondShadowCallback(bondShadow),
 				// COUNTED, NOT LABELLED BY INSTRUMENT. An instrument id label is
 				// unbounded cardinality — one series per bond ever held — and the
 				// question an operator has is "are bonds falling out of the rate

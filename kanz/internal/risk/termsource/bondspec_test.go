@@ -1,15 +1,15 @@
 package termsource
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
-	"google.golang.org/protobuf/types/known/timestamppb"
-
+	"github.com/eighred/kanz/internal/risk/pricing"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
-
-	"github.com/eighred/kanz/internal/risk/pricing"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // THE BOND TERMS CONVERSION (#509).
@@ -64,6 +64,23 @@ func TestToBondSpec_MapsEveryField(t *testing.T) {
 	}
 	if !spec.Maturity.After(spec.Issue) {
 		t.Errorf("issue %v is not before maturity %v", spec.Issue, spec.Maturity)
+	}
+}
+
+func TestBondSpecRetainsDetachedCanonicalTerms(t *testing.T) {
+	original := aBond()
+	spec, ok := BondSpecFromTerms(original)
+	if !ok || spec.CanonicalTerms == nil {
+		t.Fatal("resolved terms lost canonical values")
+	}
+	original.FaceValue.Coefficient = 1
+	original.IssueDate.Seconds = 0
+	if spec.CanonicalTerms.FaceValue.Coefficient != 1000 || !spec.CanonicalTerms.IssueDate.AsTime().Equal(bondIssue) {
+		t.Fatal("resolved terms alias provider record")
+	}
+	spec.CanonicalTerms.CouponRate.Coefficient = 9
+	if original.CouponRate.Coefficient != 5 {
+		t.Fatal("canonical diagnostic capture changed source terms")
 	}
 }
 
@@ -197,5 +214,27 @@ func TestToBondSpec_FractionalFaceAndOptionalIssuer(t *testing.T) {
 	}
 	if spec.Face != 1000.50 {
 		t.Errorf("face = %v, want 1000.50", spec.Face)
+	}
+}
+
+func TestOversizedShadowMetadataPreservesPricingTerms(t *testing.T) {
+	terms := aBond()
+	want, ok := toBondSpec(terms)
+	if !ok {
+		t.Fatal("fixture")
+	}
+	unknown := protowire.AppendTag(nil, 100, protowire.BytesType)
+	unknown = protowire.AppendBytes(unknown, make([]byte, pricing.MaxBondTermsBytes))
+	terms.ProtoReflect().SetUnknown(unknown)
+	got, ok := toBondSpec(terms)
+	if !ok {
+		t.Fatal("diagnostic bound made authoritative terms unusable")
+	}
+	if got.CanonicalTerms != nil {
+		t.Fatal("oversized metadata copied")
+	}
+	want.CanonicalTerms = nil
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("diagnostic bound changed numeric terms, conventions, or attribution")
 	}
 }

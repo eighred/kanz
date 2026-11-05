@@ -36,6 +36,8 @@ are tracked in [GitHub Issues](https://github.com/eighred/kanz/issues) and PRs.
 | Path | Contents |
 |---|---|
 | [`kanz/`](kanz/) | Go services, shared libraries, command-line tools, migrations, and architecture tests. |
+| [`kanz-rs/`](kanz-rs/README.md) | Rust market-data runtimes, canonical compatibility primitives, and diagnostic bond-risk and fill-fold workers. |
+| [`kanz-jl/`](kanz-jl/README.md) | Julia curve-calibration worker, compared against the existing Go calculation. |
 | [`kanz-schemas/`](kanz-schemas/README.md) | Protobuf contracts, event specifications, and generated SDK tooling. |
 | [`kanz-web/`](kanz-web/) | Vue operator interface. |
 | [`kanz-py/`](kanz-py/README.md) | Python event-bus client and inference service. |
@@ -47,6 +49,13 @@ are tracked in [GitHub Issues](https://github.com/eighred/kanz/issues) and PRs.
 Keep the Go module and schema directories as siblings: local SDK resolution
 and build contexts depend on that layout. Component runbooks stay beside their
 code.
+
+The migration in [#1413](https://github.com/eighred/kanz/issues/1413) is incremental
+and incomplete. Rust feed runtimes support explicit depth ownership handoff;
+Go retains trades and authoritative financial state. Julia calibration and Rust
+bond-risk/fill-fold comparisons are disabled by default and cannot replace Go
+results, persist financial state, or authorize execution. Source and CI completion
+do not establish production rollout.
 
 ## Development
 

@@ -115,6 +115,14 @@ func rustBoundaryFixtureFiles() []string {
 			out = append(out, name+"/"+file)
 		}
 	}
+	out = append(out, rustBondShadowPath+"/Cargo.toml")
+	for _, file := range rustBondShadowSources {
+		out = append(out, rustBondShadowPath+"/"+file)
+	}
+	out = append(out, rustOMSPath+"/Cargo.toml")
+	for _, file := range rustOMSSources {
+		out = append(out, rustOMSPath+"/"+file)
+	}
 	return out
 }
 func checkRustDepthBoundary(root string) error {

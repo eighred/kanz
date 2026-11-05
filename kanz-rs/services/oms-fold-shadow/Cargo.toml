@@ -1,0 +1,18 @@
+[package]
+name = "kanz-oms-fold-shadow"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+kanz-decimal-compat = { path = "../.." }
+prost = "=0.14.1"
+prost-types = "=0.14.1"
+num-bigint = "=0.4.6"
+num-rational = "=0.4.2"
+num-traits = "=0.2.19"
+
+[build-dependencies]
+prost-build = "=0.14.1"
+protoc-bin-vendored = "=3.2.0"

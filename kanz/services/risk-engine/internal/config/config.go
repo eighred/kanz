@@ -13,15 +13,17 @@ import (
 	"github.com/eighred/kanz/internal/pit"
 	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/pkg/secret"
+	"github.com/eighred/kanz/services/risk-engine/internal/bondshadow"
 	"github.com/eighred/kanz/services/risk-engine/internal/calibrationshadow"
 )
 
 // Config is the risk-engine runtime configuration. Sourced from the
 // environment so it composes with the CSI/Vault secret mounts (SEC-01d).
 type Config struct {
-	JuliaShadow calibrationshadow.Config
-	Listen      string
-	LogLevel    slog.Level
+	RustBondShadow bondshadow.Config
+	JuliaShadow    calibrationshadow.Config
+	Listen         string
+	LogLevel       slog.Level
 
 	// NATSURL is the live spine (EVT-08). Empty ⇒ the service runs
 	// HTTP-only (probes up, no ingestion) — useful for a bare scaffold
@@ -274,6 +276,10 @@ const DefaultCalibrationNightly = 24 * time.Hour
 var DefaultMarketSubjects = []string{"market.>"}
 
 func Load() (Config, error) {
+	bondShadow, err := rustBondShadow()
+	if err != nil {
+		return Config{}, err
+	}
 	shadow, err := juliaShadow()
 	if err != nil {
 		return Config{}, err
@@ -317,6 +323,9 @@ func Load() (Config, error) {
 	marketDataURL, err := secret.Read("RISK_ENGINE_MARKETDATA_DATABASE_URL")
 	if err != nil {
 		return Config{}, err
+	}
+	if bondShadow.Enabled && marketDataURL == "" {
+		return Config{}, fmt.Errorf("Rust bond shadow requires the market-data database for active fixed-income terms")
 	}
 	redisURL, err := secret.Read("RISK_ENGINE_REDIS_URL")
 	if err != nil {
@@ -368,6 +377,7 @@ func Load() (Config, error) {
 
 	return Config{
 		JuliaShadow:      shadow,
+		RustBondShadow:   bondShadow,
 		Listen:           env.Or("RISK_ENGINE_LISTEN", ":8081"),
 		LogLevel:         env.ParseLevelOr(env.Or("RISK_ENGINE_LOG_LEVEL", "info"), slog.LevelInfo),
 		NATSURL:          os.Getenv("RISK_ENGINE_NATS_URL"),

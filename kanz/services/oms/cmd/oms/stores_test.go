@@ -42,7 +42,7 @@ func TestBothBooksShareOneOutboxInTheInMemoryDeployment(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	orders, positions, closeStores, err := openStores(context.Background(),
-		config.Config{BaseCurrency: "USD"}, logger)
+		config.Config{BaseCurrency: "USD"}, logger, nil)
 	if err != nil {
 		t.Fatalf("openStores: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestOpenStoresReturnsBothBooks(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	orders, positions, closeStores, err := openStores(context.Background(),
-		config.Config{BaseCurrency: "USD"}, logger)
+		config.Config{BaseCurrency: "USD"}, logger, nil)
 	if err != nil {
 		t.Fatalf("openStores: %v", err)
 	}

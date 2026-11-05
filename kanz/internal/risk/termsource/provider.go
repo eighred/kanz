@@ -261,7 +261,14 @@ func toBondSpec(b *referencepb.BondTerms) (compute.BondSpec, bool) {
 		Face: face, CouponRate: coupon, Frequency: freq,
 		Issue: issue, Maturity: maturity, DayCount: dc,
 		Currency: b.GetCurrencyCode(), IssuerID: b.GetIssuerId(),
+		CanonicalTerms: pricing.CloneBoundedBondTerms(b),
 	}, true
+}
+
+// BondSpecFromTerms applies the same conversion used by the live terms provider.
+// It returns detached canonical terms alongside the existing analytic values.
+func BondSpecFromTerms(b *referencepb.BondTerms) (compute.BondSpec, bool) {
+	return toBondSpec(b)
 }
 
 // toDayCount maps the wire convention to the pricing one.
