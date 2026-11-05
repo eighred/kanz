@@ -228,15 +228,26 @@ def image_digest(value):
 
 
 def docker_reference(value):
-    # Docker's familiar names omit docker.io and the official-image library.
-    if not isinstance(value, str) or not value:
+    # This harness supports two registries and its own UUID-tagged imports, not
+    # arbitrary URLs. Parse the complete reference before assembling aliases.
+    if not isinstance(value, str):
         raise RuntimeError("invalid Docker image reference")
-    first = value.split("/", 1)[0]
-    if "/" not in value or not ("." in first or ":" in first or first == "localhost"):
-        value = "docker.io/" + value
-    if value.startswith("docker.io/") and "/" not in value[len("docker.io/"):]:
-        value = "docker.io/library/" + value[len("docker.io/"):]
-    return value
+    match = re.fullmatch(
+        r"(?:(?P<registry>docker\.io|ghcr\.io)/)?"
+        r"(?P<path>[a-z0-9]+(?:[_-][a-z0-9]+)*(?:/[a-z0-9]+(?:[_-][a-z0-9]+)*)?)"
+        r"(?P<suffix>@sha256:[0-9a-f]{64}|:kanz-tv-isolation-[0-9a-f]{12})", value)
+    if match is None:
+        raise RuntimeError("unsupported Docker image reference")
+    registry = match["registry"] or "docker.io"
+    parts = match["path"].split("/")
+    if len(parts) == 1:
+        if registry != "docker.io":
+            raise RuntimeError("GHCR image reference requires a namespace")
+        parts.insert(0, "library")
+    suffix = match["suffix"]
+    if suffix[0] == ":" and (registry != "docker.io" or parts[0] != "kanz-isolation"):
+        raise RuntimeError("image tag is not a local isolation fixture")
+    return registry + "/" + "/".join(parts) + suffix
 
 
 def archive_config_digest(archive, local_name):

@@ -16,8 +16,55 @@ MIGRATION_IMAGE = 'ghcr.io/eighred/kanz-migrate@sha256:' + 'c' * 64
 SHA = 'b' * 40
 
 
+class DockerReferenceTests(unittest.TestCase):
+    def test_supported_registry_aliases_preserve_repository_and_digest(self):
+        digest = '@sha256:' + 'a'*64
+        for source, expected in [
+            ('postgres', 'docker.io/library/postgres'),
+            ('nats', 'docker.io/library/nats'),
+            ('library/postgres', 'docker.io/library/postgres'),
+            ('docker.io/postgres', 'docker.io/library/postgres'),
+            ('docker.io/library/postgres', 'docker.io/library/postgres'),
+            ('natsio/nats-box', 'docker.io/natsio/nats-box'),
+            ('ghcr.io/eighred/tv-sync', 'ghcr.io/eighred/tv-sync'),
+            ('ghcr.io/eighred/kanz-migrate', 'ghcr.io/eighred/kanz-migrate'),
+        ]:
+            with self.subTest(source=source):
+                self.assertEqual(isolation.docker_reference(source+digest), expected+digest)
+        local = 'kanz-isolation/postgres:kanz-tv-isolation-0123456789ab'
+        self.assertEqual(isolation.docker_reference(local), 'docker.io/'+local)
+        self.assertEqual(isolation.docker_reference('docker.io/'+local), 'docker.io/'+local)
+        self.assertNotEqual(isolation.docker_reference('other/postgres'+digest),
+                            isolation.docker_reference('postgres'+digest))
+
+    def test_lookalikes_paths_and_unsupported_suffixes_are_refused(self):
+        digest = '@sha256:' + 'a'*64
+        for reference in [
+            'evil.docker.io/library/postgres'+digest,
+            'docker.io.evil/library/postgres'+digest,
+            'evil/ghcr.io/eighred/tv-sync'+digest,
+            'https://docker.io/library/postgres'+digest,
+            'docker.io:443/library/postgres'+digest,
+            'ghcr.io.evil/eighred/tv-sync'+digest,
+            'ghcr.io/tv-sync'+digest,
+            'docker.io//library/postgres'+digest,
+            'docker.io/library/../postgres'+digest,
+            'docker.io/library/postgres/extra'+digest,
+            'docker.io/library%2fpostgres'+digest,
+            'docker.io/library\\postgres'+digest,
+            'postgres'+digest+'\n',
+            'postgres'+digest.upper(),
+            'postgres:latest',
+            'postgres:kanz-tv-isolation-0123456789ab',
+            'ghcr.io/kanz-isolation/postgres:kanz-tv-isolation-0123456789ab',
+            'kanz-isolation/postgres:kanz-tv-isolation-short',
+        ]:
+            with self.subTest(reference=reference), self.assertRaises(RuntimeError):
+                isolation.docker_reference(reference)
+
+
 class ImageIdentityTests(unittest.TestCase):
-    local = 'docker.io/kanz-isolation/postgres:fixture'
+    local = 'docker.io/kanz-isolation/postgres:kanz-tv-isolation-0123456789ab'
     source = 'postgres@sha256:' + 'e' * 64
 
     def archive(self, path, *, modern=False, mutation=None):
@@ -28,11 +75,11 @@ class ImageIdentityTests(unittest.TestCase):
             content = b'[]'
         digest = hashlib.sha256(content).hexdigest()
         config_path = 'blobs/sha256/' + digest if modern else digest + '.json'
-        entry = {'Config': config_path, 'RepoTags': ['kanz-isolation/postgres:fixture']}
+        entry = {'Config': config_path, 'RepoTags': ['kanz-isolation/postgres:kanz-tv-isolation-0123456789ab']}
         if mutation == 'path':
             entry['Config'] = '../' + config_path
         if mutation == 'missing tag':
-            entry['RepoTags'] = ['kanz-isolation/other:fixture']
+            entry['RepoTags'] = ['kanz-isolation/other:kanz-tv-isolation-0123456789ab']
         if mutation == 'repotags-string':
             entry['RepoTags'] = self.local
         if mutation == 'repotags-nonstring':
