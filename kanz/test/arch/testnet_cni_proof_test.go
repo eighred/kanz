@@ -45,7 +45,23 @@ var cniProofRequirements = map[string][]string{
 		"python3 -B -m unittest discover -s tools/cni-proof", "bash tools/feed-identity/install.sh",
 		"python3 -B tools/cni-proof/ci.py", "if-no-files-found: error",
 	},
-	".github/scripts/release_ci.py": {`"testnet-cni-proof.yml": {"disposable-cni"}`},
+	"tools/cni-proof/migration.py": {
+		`r"kanz-cni-migration-[0-9a-f]{24}"`, `any(m["Type"] == "bind"`,
+		`"--cpus=4", "--memory=5g", "--pids-limit=4096", "--log-driver=none"`,
+		`"--cluster-init", "--secrets-encryption"`, `"kubeProxyReplacement=false"`,
+		`def recycle_system(self):`, `def quiesce_system(self):`, `"node_identity_changed"`,
+		`"etcd_state_changed"`, `"persistent_volume_identity_changed"`, `f.storage("fresh-" + phase, nonce, True)`,
+		`for phase in ("flannel", "cilium", "rollback")`, `proof.validate_report(report, source)`,
+		`"cleanup"] == "verified_absent"`, `vol.get("Labels", {}).get(LABEL) != name`,
+		`set -o pipefail; iptables-save`, `"new_pod_not_owned_by_Cilium"`, `"storage_image_digest_mismatch"`,
+		`"unexpected_K3s_version"`, `"Cilium_remains_after_rollback"`, `f.datapath()`,
+	},
+	".github/workflows/k3s-cni-migration.yml": {
+		"disposable-transition:", "persist-credentials: false", "timeout-minutes: 30",
+		"python3 -B tools/cni-proof/migration.py", "bash tools/feed-identity/install.sh",
+		"if-no-files-found: error",
+	},
+	".github/scripts/release_ci.py": {`"testnet-cni-proof.yml": {"disposable-cni"}`, `"k3s-cni-migration.yml": {"disposable-transition"}`},
 }
 
 func checkCNIProofBoundary(files map[string]string) error {
