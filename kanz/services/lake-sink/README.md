@@ -74,9 +74,47 @@ Config (env): `LAKE_SINK_LISTEN` (`:8085`), `LAKE_SINK_BROKERS` (required),
 payloads undecoded), `LAKE_SINK_OUTPUT_DIR` (required), `LAKE_SINK_CONSUMER_GROUP`
 (`lake-sink`), `LAKE_SINK_SOURCE` (`lake-sink`), `LAKE_SINK_OTLP_ENDPOINT`.
 
+Set `SPIFFE_ENDPOINT_SOCKET=unix:///run/spiffe/spire-agent.sock` when using the
+workload-identity Kafka listener (port 9094) with the SPIFFE CSI socket mounted.
+A configured source must initialize successfully before
+Kafka subscriptions start; failure exits nonzero without plaintext fallback.
+Leaving the variable unset retains plaintext local development. The rotating
+identity source stays open until subscriptions and the Kafka client have closed.
+
+The shared mesh policy accepts valid peer SVIDs in `kanz.internal`; this is not
+a Kafka-only peer allowlist. Constructing the Kafka client does not perform a
+broker handshake, and readiness does not prove broker authentication. This
+wiring does not establish Redpanda URI-SAN principal mapping or ACL equivalence;
+those remain production migration acceptance requirements under #1413.
+
+### Coordinated image promotion
+
+The active deployment remains unchanged for this source-first change.
+`broker-identity-patch.yaml` is a staged strategic merge patch outside the GitOps
+resource directories; do not apply it alone. The existing pinned image does not
+consume the new socket configuration, and changing its pod template would
+restart the `Recreate` singleton without enabling this wiring.
+
+Before promotion, verify an immutable image digest containing this source and
+the target workload registration, CSI availability, broker TLS authorization and
+principal/ACL behavior. In one reviewed GitOps change, update the deployment to
+that digest and merge the staged socket environment, mount and volume fields.
+Keep the existing security context, PVC, replica count and `Recreate` strategy.
+Correct the old unauthenticated-listener comment in that same promotion.
+Verify authenticated consumption and durable landing after rollout; HTTP
+readiness alone is insufficient evidence. Account for the singleton restart and
+Kafka retention/catch-up window before scheduling the change.
+
+Rollback restores the previous image digest and its matching pod configuration
+together, including removal of the newly added socket fields. It restores the
+previous configuration, not proof that the old image can authenticate to the
+target broker. Preserve the landing PVC and consumer offsets; do not reset them
+to make a failed rollout appear healthy. Record any remaining recovery or
+authentication blocker under #1413.
+
 ## Tests
 
-`go test ./services/lake-sink/...` — decode round-trip over a real
+`go test -p 1 ./services/lake-sink/...` — decode round-trip over a real
 FileDescriptorSet (`common.v1.Decimal`), transient-vs-permanent resolve
 classification, immutable-ref caching, Hive partition layout + path-segment
 sanitization, and the three CDC decode outcomes (land / ack-envelope-only / NAK).

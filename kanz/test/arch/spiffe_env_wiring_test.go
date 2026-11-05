@@ -42,6 +42,9 @@ func TestEveryServiceIsWiredToTheSpiffeSocketItReads(t *testing.T) {
 	}
 
 	manifests := spiffeWiringByApp(t, root)
+	// Explicitly resolve the staged service even if its config read disappears;
+	// otherwise an unvisited exception could survive forever as a false pass.
+	assertLakeSinkIdentityStaged(t, root, reads["lake-sink"], manifests["lake-sink"])
 	checked := 0
 	for _, svc := range sortedKeys(reads) {
 		wiring, ok := manifests[svc]
@@ -52,6 +55,13 @@ func TestEveryServiceIsWiredToTheSpiffeSocketItReads(t *testing.T) {
 		}
 		checked++
 		want := reads[svc]
+		if svc == "lake-sink" {
+			// #1413 source-first release: this old image does not consume the new
+			// socket. Its entire active manifest stays frozen; the staged patch is
+			// checked below. Retire this exception in the matching digest+config
+			// promotion so the ordinary wiring assertion takes over atomically.
+			continue
+		}
 		if !anyOf(want, wiring.envNames) {
 			t.Errorf("%s reads %v but its manifest sets %v.\n"+
 				"    A SPIFFE variable that is PRESENT AND WRONG is worse than an absent one: the "+
