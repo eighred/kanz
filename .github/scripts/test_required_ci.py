@@ -228,7 +228,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(policy.workflow_jobs(WORKFLOW), policy.CORE_JOBS)
         self.assertIn("fetch-depth: 0", WORKFLOW.split("  release-custody:")[0])
         self.assertIn("python3 -B -m unittest discover -s .github/scripts -p test_required_ci.py", WORKFLOW)
-        self.assertIn("python3 -B -m unittest discover -s .github/scripts -p release_source_test.py", WORKFLOW)
+        self.assertIn("python3 -B -m unittest discover -s .github/scripts -p 'release_*_test.py'", WORKFLOW)
         self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", WORKFLOW)
         self.assertIn("application: ${{ steps.scope.outputs.application }}", WORKFLOW)
 

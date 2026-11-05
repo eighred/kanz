@@ -19,13 +19,14 @@ permissions:
   contents: read
 
 jobs:
-  # This gate validates source identity, not CI completion. Main protection and
+  # This gate validates source identity and exact-source CI. Main protection and
   # owner-controlled, immutable v* tags remain required external controls: a tag
   # can otherwise select an older workflow that predates this guard.
   source-policy:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,6 +35,8 @@ jobs:
       - name: Fetch current reviewed main
         run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
       - name: Verify release tag and reviewed source
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python3 .github/scripts/release_source.py
 
   release:

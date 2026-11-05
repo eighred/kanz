@@ -15,6 +15,7 @@ type releaseSourceStep struct {
 	If              string            `yaml:"if"`
 	ContinueOnError bool              `yaml:"continue-on-error"`
 	With            map[string]string `yaml:"with"`
+	Env             map[string]string `yaml:"env"`
 }
 
 type releaseSourceJob struct {
@@ -31,8 +32,8 @@ type releaseSourceWorkflow struct {
 }
 
 // This guard checks the actual YAML control flow, not words in comments. Tag
-// protection and CI evidence remain external requirements; neither is proved by
-// ancestry or by this guard. In-memory mutations below calibrate its coverage.
+// protection remains external; CI API semantics have offline Python fixtures.
+// In-memory mutations below calibrate the executable workflow wiring coverage.
 func checkReleaseSourcePolicy(workflow releaseSourceWorkflow) error {
 	readOnly := func(permissions map[string]string) bool {
 		return len(permissions) == 1 && permissions["contents"] == "read"
@@ -41,13 +42,14 @@ func checkReleaseSourcePolicy(workflow releaseSourceWorkflow) error {
 		return fmt.Errorf("workflow must default to contents: read only")
 	}
 	gate, ok := workflow.Jobs["source-policy"]
-	if !ok || !readOnly(gate.Permissions) || gate.If != "" || gate.ContinueOnError {
+	if !ok || len(gate.Permissions) != 2 || gate.Permissions["contents"] != "read" || gate.Permissions["actions"] != "read" || gate.If != "" || gate.ContinueOnError {
 		return fmt.Errorf("source-policy must run unconditionally with read-only permissions")
 	}
 	if len(gate.Steps) != 3 || !strings.HasPrefix(gate.Steps[0].Uses, "actions/checkout@") ||
 		gate.Steps[0].With["fetch-depth"] != "0" ||
 		gate.Steps[1].Run != "git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main" ||
-		gate.Steps[2].Run != "python3 .github/scripts/release_source.py" {
+		gate.Steps[2].Run != "python3 .github/scripts/release_source.py" ||
+		len(gate.Steps[2].Env) != 1 || gate.Steps[2].Env["GH_TOKEN"] != "${{ github.token }}" {
 		return fmt.Errorf("source-policy must fetch full history/current main before validating release source")
 	}
 	for _, step := range gate.Steps {
@@ -111,6 +113,11 @@ func TestReleaseSourcePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	mutations := map[string]func(*releaseSourceWorkflow){
+		"gate action write authority": func(w *releaseSourceWorkflow) { w.Jobs["source-policy"].Permissions["actions"] = "write" },
+		"gate missing evidence token": func(w *releaseSourceWorkflow) { delete(w.Jobs["source-policy"].Steps[2].Env, "GH_TOKEN") },
+		"gate substituted token": func(w *releaseSourceWorkflow) {
+			w.Jobs["source-policy"].Steps[2].Env["GH_TOKEN"] = "${{ secrets.PUBLISH_TOKEN }}"
+		},
 		"workflow signing permission":  func(w *releaseSourceWorkflow) { w.Permissions["id-token"] = "write" },
 		"gate signing permission":      func(w *releaseSourceWorkflow) { w.Jobs["source-policy"].Permissions["id-token"] = "write" },
 		"missing gate":                 func(w *releaseSourceWorkflow) { delete(w.Jobs, "source-policy") },

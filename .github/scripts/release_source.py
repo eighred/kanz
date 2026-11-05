@@ -1,14 +1,14 @@
 """Fail closed unless a release tag identifies the checked-out main ancestor.
 
-This is source validation, not evidence of passing CI. Protect main and restrict
-creation of immutable v* tags outside the workflow; the tagged source owns this
-script and cannot establish its own authority to sign production images.
+Protect main and immutable v* tags outside the workflow. Exact-source CI is
+required before publishing; historical signer authority remains separate #1406.
 """
 
 import os
 import re
 import subprocess
 import sys
+from release_ci import EvidenceError, GitHub, verify_ci
 
 
 class SourceError(Exception):
@@ -60,11 +60,14 @@ def verify_source(env):
 def main():
     try:
         ref, sha, reviewed_main = verify_source(os.environ)
-    except (SourceError, OSError, subprocess.TimeoutExpired) as error:
+        evidence = verify_ci(GitHub(os.environ.get("GH_TOKEN", "")), sha)
+    except (SourceError, EvidenceError, OSError, subprocess.TimeoutExpired) as error:
         print(f"Release source rejected: {error}", file=sys.stderr)
         return 1
     print(f"Verified {ref} at {sha}, ancestor of origin/main {reviewed_main}")
-    print("Source identity verified; CI and protected-tag authority are separate controls.")
+    for item in evidence:
+        print(f"Verified exact-source CI {item['workflow']} run {item['run_id']} attempt {item['attempt']}")
+    print("Protected-tag and historical signer authority remain separate controls (#1406).")
     return 0
 
 

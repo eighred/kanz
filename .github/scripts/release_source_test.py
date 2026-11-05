@@ -42,7 +42,10 @@ class ReleaseSourceTests(unittest.TestCase):
 
     def run_gate(self, accepted, **env):
         result = subprocess.run(
-            [sys.executable, str(SCRIPT)], cwd=self.root,
+            [sys.executable, "-B", "-c", "import sys,os; sys.path.insert(0,sys.argv[1]); "
+             "from release_source import verify_source,SourceError; "
+             "\ntry: print(verify_source(os.environ))"
+             "\nexcept (SourceError,OSError) as e: print('Release source rejected:',e,file=sys.stderr); sys.exit(1)", str(SCRIPT.parent)], cwd=self.root,
             env={**self.env, **env}, capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
@@ -55,6 +58,13 @@ class ReleaseSourceTests(unittest.TestCase):
         for event in ("push", "workflow_dispatch"):
             with self.subTest(event=event):
                 self.run_gate(True, GITHUB_EVENT_NAME=event)
+
+    def test_valid_source_cli_still_requires_ci_token(self):
+        result = subprocess.run([sys.executable, "-B", str(SCRIPT)], cwd=self.root,
+            env={**self.env, "GH_TOKEN": ""}, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("read-only GitHub token required", result.stderr)
+        self.assertNotIn("Verified", result.stdout)
 
     def test_annotated_tag_on_older_reviewed_commit(self):
         self.git("tag", "-a", "v1.2.3-rc.1+build.2", "-m", "release candidate")

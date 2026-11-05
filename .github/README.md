@@ -27,8 +27,27 @@ OIDC subject requires coordinated review of the AWS trust policy.
 Release tags use `vMAJOR.MINOR.PATCH` (optional SemVer prerelease/build suffix).
 Before creating one, verify the selected main commit's applicable CI. Release
 source validation, for tags containing the new gate, requires the event, checkout and peeled tag to identify the
-same commit, reachable from current main. This ancestry check alone does not
-prove that CI passed. Tag creation is restricted to repository administrators;
+same commit, reachable from current main. Before any publishing/signing job
+starts, a read-only Actions API gate also requires that exact SHA's latest
+canonical-main push or manual run and latest attempt to have succeeded. It
+requires `kanz-ci.yml` / `kanz-ci-required`, plus the following workflows when
+their files exist in the release source: `architecture-migration.yml` /
+`compatibility`, `julia-calibration.yml` / `shadow-calibration`,
+`rust-bond-shadow.yml` / `bond-shadow`, `rust-oms-fold.yml` / `fill-shadow`, and
+`feed-identity-proof.yml` / `developmental-identity`. Repository, workflow
+ID/path, event, branch, SHA, attempt and required job identities must agree.
+Missing, skipped, pending, failed or cancelled proof refuses release; a previous
+successful attempt, another workflow's check name or an ancestor's green run
+cannot substitute. For path-filtered runtime workflows, dispatch their existing
+read-only workflow on current main and wait for success **before** creating the
+release tag. No ancestor fallback is provided for older source lacking proof.
+API pagination is bounded and fails closed on truncation or changing evidence.
+This is a checked evidence snapshot, not a lock preventing later CI reruns.
+The REST [workflow-run](https://docs.github.com/en/rest/actions/workflow-runs)
+and [attempt-job](https://docs.github.com/en/rest/actions/workflow-jobs) APIs
+require only Actions read permission here.
+
+Tag creation is restricted to repository administrators;
 a separate rule prevents updating or deleting existing release tags without
 an ordinary bypass. An administrator can still change repository policy: record
 exceptional recovery decisions in an Issue before doing so. The tagged workflow
@@ -64,7 +83,7 @@ For CI policy development:
 
 ```sh
 python -B -m unittest discover -s .github/scripts -p test_required_ci.py
-python -B -m unittest discover -s .github/scripts -p release_source_test.py
+python -B -m unittest discover -s .github/scripts -p 'release_*_test.py'
 cd kanz
 go test -mod=readonly -p 1 ./test/arch -count=1
 ```
