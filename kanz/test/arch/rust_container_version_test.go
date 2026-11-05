@@ -33,8 +33,11 @@ func rustContainerVersionBoundary(service, docker, source, runtime string) error
 		return fmt.Errorf("Rust bases must be the reviewed mirrored digest pair")
 	}
 	joined := "\n" + strings.Join(instructions, "\n") + "\n"
-	if !strings.Contains(joined, "\nARG VERSION\n") || !strings.Contains(joined, `RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo build --locked --release --manifest-path kanz-rs/Cargo.toml -p kanz-`+service) {
+	if !strings.Contains(joined, "\nARG VERSION\n") || !strings.Contains(joined, `RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path kanz-rs/Cargo.toml -p kanz-`+service) {
 		return fmt.Errorf("Rust release build must require and compile VERSION")
+	}
+	if !strings.Contains(joined, "\nRUN cargo install --locked --version 0.7.7 cargo-auditable\n") {
+		return fmt.Errorf("Rust build must pin its metadata tool")
 	}
 	if !strings.Contains(joined, "\nUSER 65532:65532\n") {
 		return fmt.Errorf("Rust runtime must retain nonroot identity")
@@ -115,6 +118,9 @@ func TestRustContainerVersionMutationReach(t *testing.T) {
 			{"upstream-builder", "ghcr.io/eighred/base/rust:", "docker.io/library/rust:", 0},
 			{"mutable-runtime", rustRuntimePin, strings.Split(rustRuntimePin, "@")[0], 0},
 			{"wrong-digest", "9dac0a791", "0dac0a791", 0},
+			{"plain-cargo", "cargo auditable build", "cargo build", 0},
+			{"unpinned-metadata-tool", "--version 0.7.7", "", 0},
+			{"unlocked-metadata-tool", "install --locked", "install", 0},
 			{"missing-arg", "ARG VERSION", "# ARG VERSION", 0},
 			{"blank-allowed", `test -n "$VERSION" && `, "", 0},
 			{"stamp-removed", `KANZ_BUILD_VERSION="$VERSION" `, "", 0},

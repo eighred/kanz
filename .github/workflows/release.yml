@@ -31,6 +31,10 @@ jobs:
           # TestReleaseMatrixCoversEveryBuiltService — a release that ships a subset
           # is worse than none, because the gap is invisible until a cluster pulls an
           # unsigned image the admission policy then refuses.
+          - service: binance-depth
+            dockerfile: kanz-rs/services/binance-depth/Dockerfile
+          - service: okx-depth
+            dockerfile: kanz-rs/services/okx-depth/Dockerfile
           - service: inference
             dockerfile: kanz-py/Dockerfile
           - service: risk-engine
@@ -236,6 +240,7 @@ jobs:
           image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: spdx-json
           output-file: sbom.spdx.json
+          syft-version: v1.56.0
 
       # SEC-02b: a machine-readable vuln-scan record attached to the image, so
       # the admission policy can require every image to carry one (an image that
@@ -255,6 +260,25 @@ jobs:
           output: vuln.json
           ignore-unfixed: true
           version: v0.72.0
+
+      - name: Install pinned Rust evidence tools
+        if: matrix.service == 'binance-depth' || matrix.service == 'okx-depth'
+        run: bash .github/scripts/install-rust-audit.sh
+      - name: Require actual Rust image inventory and current RustSec audit
+        if: matrix.service == 'binance-depth' || matrix.service == 'okx-depth'
+        env:
+          RUST_SERVICE: ${{ matrix.service }}
+          RUST_IMAGE: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          python3 -B -m unittest discover -s .github/scripts -p test_rust_release_evidence.py
+          python3 .github/scripts/rust_release_evidence.py --service "$RUST_SERVICE" --image "$RUST_IMAGE" --sbom sbom.spdx.json --output rust-evidence
+      - name: Preserve Rust release audit evidence
+        if: always() && (matrix.service == 'binance-depth' || matrix.service == 'okx-depth')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-evidence-${{ matrix.service }}
+          path: rust-evidence/
+          if-no-files-found: error
 
       - name: Sign + attest SBOM and vuln scan (keyless)
         env:
