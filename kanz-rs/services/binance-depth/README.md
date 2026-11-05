@@ -40,8 +40,7 @@ Required environment:
 
 - `BINANCE_DEPTH_INSTRUMENT_ID`, `BINANCE_DEPTH_SYMBOL`: one canonical instrument
   and its uppercase Binance symbol per process.
-- `BINANCE_DEPTH_TENANT`, `BINANCE_DEPTH_SOURCE` (`service/instance`),
-  `BINANCE_DEPTH_VERSION`: explicit event attribution.
+- `BINANCE_DEPTH_TENANT`, `BINANCE_DEPTH_SOURCE` (`service/instance`): event attribution.
 - `BINANCE_DEPTH_NATS_URL`: broker endpoint without embedded credentials.
 - `SPIFFE_ENDPOINT_SOCKET`: required outside explicit loopback development.
 
@@ -51,6 +50,11 @@ Required environment:
 `BINANCE_DEPTH_DEVELOPMENT=true` permits loopback fixture endpoints via
 `BINANCE_DEPTH_WS_BASE` and `BINANCE_DEPTH_REST_BASE`, and plaintext loopback NATS.
 It does not permit an arbitrary remote plaintext broker.
+
+Container builds require `--build-arg VERSION=<source-revision>` and embed it
+through `KANZ_BUILD_VERSION`; runtime configuration cannot override that stamp.
+Unstamped binaries refuse production startup. Local development builds require
+`BINANCE_DEPTH_VERSION` together with the explicit development setting.
 
 Production uses a rotating SPIFFE source with local trust-domain policy and an
 exact NATS peer allowlist: `spiffe://kanz.internal/ns/kanz-messaging/sa/nats`.

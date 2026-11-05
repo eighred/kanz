@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -145,7 +146,7 @@ func TestEveryGoImageStampsItsVersion(t *testing.T) {
 		body := string(b)
 		// Only Go images are in scope — kanz-py builds no Go binary and has no
 		// linker to pass a flag to.
-		if !strings.Contains(body, "go build") {
+		if !goBuildCommand.MatchString(body) {
 			return nil
 		}
 		goBuilders++
@@ -186,6 +187,26 @@ func TestEveryGoImageStampsItsVersion(t *testing.T) {
 			"  ... -ldflags=\"-s -w %s${VERSION}\"\n"+
 			"and pass --build-arg VERSION=<tag-or-sha> from the workflow that builds it.",
 			strings.Join(unstamped, "\n  "), "unstamped", versionStampFlag)
+	}
+}
+
+// Match the Go executable rather than the suffix of another tool (cargo build).
+var goBuildCommand = regexp.MustCompile(`(?:^|[\s;&|/])go\s+build(?:\s|$)`)
+
+func TestGoVersionGuardDistinguishesCargo(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		want    bool
+	}{
+		{"RUN go build ./cmd/server", true},
+		{"RUN CGO_ENABLED=0 go build ./cmd/server", true},
+		{"RUN /usr/local/go/bin/go build ./cmd/server", true},
+		{"RUN cargo build --release", false},
+		{"RUN cargo build && go build ./cmd/server", true},
+	} {
+		if got := goBuildCommand.MatchString(tc.command); got != tc.want {
+			t.Errorf("%q: Go build=%v, want %v", tc.command, got, tc.want)
+		}
 	}
 }
 

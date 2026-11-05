@@ -580,7 +580,19 @@ mod tests {
             for sequence in [100, 200] {
                 let (mut stream, _) = http_listener.accept().await.unwrap();
                 let mut request = [0; 2048];
-                stream.read(&mut request).await.unwrap();
+                let mut received = 0;
+                loop {
+                    let count = stream.read(&mut request[received..]).await.unwrap();
+                    assert!(count > 0, "HTTP request ended before its headers");
+                    received += count;
+                    if request[..received].windows(4).any(|v| v == b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(
+                        received < request.len(),
+                        "HTTP request exceeds fixture bound"
+                    );
+                }
                 let body = format!(
                     r#"{{"lastUpdateId":{sequence},"bids":[["50000","1"]],"asks":[["50010","2"]]}}"#
                 );

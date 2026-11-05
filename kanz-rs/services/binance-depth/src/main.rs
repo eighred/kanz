@@ -55,6 +55,21 @@ fn required(name: &str) -> Result<String> {
     }
     Ok(value)
 }
+fn producer_version(
+    stamped: Option<&str>,
+    development: bool,
+    fallback: Option<String>,
+) -> Result<String> {
+    match stamped.filter(|value| !value.trim().is_empty()) {
+        Some(value) => Ok(value.to_owned()),
+        None if development => fallback
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                "BINANCE_DEPTH_VERSION required for an unstamped development build".into()
+            }),
+        None => Err("production binary requires a build-time KANZ_BUILD_VERSION".into()),
+    }
+}
 impl Config {
     fn load() -> Result<Self> {
         let development = match env::var("BINANCE_DEPTH_DEVELOPMENT").as_deref() {
@@ -76,7 +91,11 @@ impl Config {
             },
             tenant: required("BINANCE_DEPTH_TENANT")?,
             producer: required("BINANCE_DEPTH_SOURCE")?,
-            version: required("BINANCE_DEPTH_VERSION")?,
+            version: producer_version(
+                option_env!("KANZ_BUILD_VERSION"),
+                development,
+                env::var("BINANCE_DEPTH_VERSION").ok(),
+            )?,
             nats: required("BINANCE_DEPTH_NATS_URL")?,
             socket: env::var("SPIFFE_ENDPOINT_SOCKET").unwrap_or_default(),
             listen: env::var("BINANCE_DEPTH_LISTEN").unwrap_or_else(|_| "0.0.0.0:8088".into()),
@@ -326,6 +345,21 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_version_cannot_be_overridden_and_unstamped_production_refuses() {
+        assert_eq!(
+            producer_version(Some("commit-sha"), false, Some("override".into())).unwrap(),
+            "commit-sha"
+        );
+        assert!(producer_version(None, false, Some("override".into())).is_err());
+        assert!(producer_version(Some(" "), false, None).is_err());
+        assert_eq!(
+            producer_version(None, true, Some("fixture".into())).unwrap(),
+            "fixture"
+        );
+        assert!(producer_version(None, true, None).is_err());
+    }
     #[test]
     fn readiness_rechecks_generation_connection_and_clock_after_ack() {
         let health = Health::default();

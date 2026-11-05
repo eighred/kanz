@@ -40,6 +40,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 env:
   GOFLAGS: -mod=mod
@@ -108,8 +109,14 @@ jobs:
             -count=1 -json | tee "$RUNNER_TEMP/redpanda-tests.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 ../.github/scripts/check_migration_evidence.py "$RUNNER_TEMP/redpanda-tests.jsonl"
+      - name: Authenticate for private mirrored bases
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build the Rust feed container from pinned bases
-        run: docker build --file kanz-rs/services/binance-depth/Dockerfile --tag kanz-binance-depth:verification .
+        run: docker build --build-arg VERSION=${{ github.sha }} --file kanz-rs/services/binance-depth/Dockerfile --tag kanz-binance-depth:verification .
       - name: Preserve broker diagnostics on failure
         if: failure()
         run: docker compose -f kanz/dev/docker-compose.yml logs --no-color kafka nats
