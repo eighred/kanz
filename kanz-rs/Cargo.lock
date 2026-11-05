@@ -813,8 +813,49 @@ dependencies = [
 name = "kanz-binance-depth"
 version = "0.1.0"
 dependencies = [
- "async-nats",
  "futures-util",
+ "kanz-decimal-compat",
+ "kanz-market-feed",
+ "prost",
+ "prost-types",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "kanz-bond-risk-shadow"
+version = "0.1.0"
+dependencies = [
+ "kanz-decimal-compat",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "protoc-bin-vendored",
+]
+
+[[package]]
+name = "kanz-decimal-compat"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kanz-market-feed"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
  "kanz-decimal-compat",
  "num-bigint",
  "num-rational",
@@ -830,19 +871,37 @@ dependencies = [
  "spiffe",
  "spiffe-rustls",
  "tokio",
- "tokio-tungstenite",
  "uuid",
 ]
 
 [[package]]
-name = "kanz-decimal-compat"
+name = "kanz-okx-depth"
 version = "0.1.0"
 dependencies = [
- "prost",
- "prost-build",
- "protoc-bin-vendored",
+ "futures-util",
+ "kanz-decimal-compat",
+ "kanz-market-feed",
+ "prost-types",
+ "rustls",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+]
+
+[[package]]
+name = "kanz-oms-fold-shadow"
+version = "0.1.0"
+dependencies = [
+ "kanz-decimal-compat",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "protoc-bin-vendored",
 ]
 
 [[package]]

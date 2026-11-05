@@ -12,41 +12,12 @@
 # shorthand) jobs plus a `buf lint`+`buf breaking` schema gate.
 name: kanz-ci
 
+# Workflow-level path filters leave required checks pending forever. Scope is
+# evaluated inside the workflow so every PR receives kanz-ci-required.
 on:
   pull_request:
-    paths:
-      - 'kanz/**'
-      - 'kanz-py/**'
-      - 'kanz-web/**'
-      - 'kanz-schemas/proto/**'
-      - 'kanz-schemas/buf.yaml'
-      - 'kanz-schemas/buf.gen.yaml'
-      # sdk-guard: a committed generated tree must trigger the run that rejects it.
-      - 'kanz-schemas/gen/**'
-      - 'tools/*Ecr*.ps1'
-      - 'tools/*ecr*.py'
-      - 'tools/Install-TestnetWorkloads.ps1'
-      - 'tools/Install-TestnetObservability.ps1'
-      - 'tools/Initialize-TestnetPortfolio.ps1'
-      - '.github/workflows/kanz-ci.yml'
-      - '.github/scripts/go_test_evidence.py'
-      - '.github/scripts/test_go_test_evidence.py'
-      - '.github/scripts/go_mod_download.py'
-      - '.github/scripts/test_go_mod_download.py'
   push:
     branches: [main]
-    # DOCS DO NOT BUILD IMAGES.
-    #
-    # The pull_request trigger above is already path-filtered; this one was not, so a
-    # commit touching only markdown ran the full matrix — for kanz-build, that is 19
-    # Docker image builds to record that a board item moved. On a private repo billing per
-    # minute, that is real money for zero signal.
-    #
-    # paths-ignore only skips a push when EVERY changed file matches, so a commit mixing
-    # docs and code still runs the gate.
-    paths-ignore:
-      - '**/*.md'
-      - '.gitignore'
 
 permissions:
   contents: read
@@ -57,7 +28,25 @@ env:
   GOFLAGS: -mod=mod
 
 jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      application: ${{ steps.scope.outputs.application }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Verify CI scope and required-result policy
+        run: python3 -B -m unittest discover -s .github/scripts -p test_required_ci.py
+      - name: Verify release source policy
+        run: python3 -B -m unittest discover -s .github/scripts -p 'release_*_test.py'
+      - name: Select application scope from checked Git history
+        id: scope
+        run: python3 .github/scripts/required_ci.py scope
+
   release-custody:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -68,6 +57,8 @@ jobs:
         run: ./tools/Test-EcrReleaseDigest.ps1
 
   go:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     # A live Postgres for the durable-store integration suites. Without it every
     # test gated on TEST_POSTGRES_URL silently SKIPS — including EXEC-M7c's
@@ -79,14 +70,14 @@ jobs:
       # EXEC-M22 — webhook-ingest's cross-pod nonce store. The `redis` build tag was
       # NEVER COMPILED by this pipeline, so nonces_redis.go and pkg/redisadapter were
       # dead code as far as CI was concerned — and they are what makes the platform's
-      # ENTRANCE safe to run on more than one pod. A real Redis runs here now, and the
+      # ENTRANCE safe to run on more than one pod. A real Valkey runs here now, and the
       # tagged build is compiled, vetted and tested against it.
       redis:
-        image: redis:7-alpine
+        image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
         ports:
           - 6379:6379
         options: >-
-          --health-cmd "redis-cli ping"
+          --health-cmd "valkey-cli ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -486,7 +477,7 @@ jobs:
       # only test that touched RedisNonces drove it against a FAKE, which cannot prove that
       # ClaimNX is really an atomic SET NX PX.
       #
-      # Built, vetted and tested against a REAL Redis, so the tag cannot rot back into dead
+      # Built, vetted and tested against a REAL Valkey, so the tag cannot rot back into dead
       # code the next time someone changes the adapter.
       # THE `anthropic` TAG (AI-M1). copilot's PRODUCTION IMAGE is built with it
       # (build.yml), and this pipeline never vetted, tested or linted it — the same hole
@@ -518,14 +509,15 @@ jobs:
 
       # api-gateway is in the test list because its CROSS-POD IDEMPOTENCY CLAIM (#721)
       # is only exercised under this tag: idempotency_realredis_test.go stands two
-      # independently constructed middleware chains up against one Redis, which is the
+      # independently constructed middleware chains up against one Valkey, which is the
       # only way to prove what `replicas: 2` actually needs. build+vet alone would
       # compile that file and never run it — the precise "dead code that deploys" shape
       # test/arch/build_tag_coverage_test.go exists to prevent.
-      - name: Build + vet + test the `redis` tag (real Redis)
+      - name: Build + vet + test the `redis` tag (real Valkey)
         working-directory: kanz
         env:
           TEST_REDIS_URL: redis://localhost:6379/0
+          TEST_VALKEY_VERSION: 9.1.3
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
           TEST_NATS_URL: nats://localhost:4222
           # This re-runs ./pkg/bus/..., which includes kafka_integration_test.go —
@@ -539,9 +531,13 @@ jobs:
         # rule was written there as prose and nothing carried it here.
         # test/arch/ci_test_parallelism_test.go now enforces it on every invocation.
         run: |
+          set -o pipefail
+          python -m unittest discover -s ../.github/scripts -p test_check_valkey_evidence.py
           go build -tags redis ./...
           go vet -tags redis ./...
           go test -tags redis -p 1 -race -count=1 ./services/webhook-ingest/... ./services/api-gateway/... ./pkg/redisadapter/... ./pkg/bus/...
+          go test -tags redis -p 1 -race -json -count=1 -run "$(python ../.github/scripts/check_valkey_evidence.py --pattern)" ./pkg/redisadapter ./services/webhook-ingest/internal/ingest ./services/api-gateway/internal/middleware | tee "$RUNNER_TEMP/valkey-proof.jsonl"
+          python ../.github/scripts/check_valkey_evidence.py "$RUNNER_TEMP/valkey-proof.jsonl"
 
       - name: OMS log (on failure)
         if: failure()
@@ -592,6 +588,8 @@ jobs:
           args: --timeout=5m --build-tags=anthropic,openrouter,redis
 
   python:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -674,6 +672,8 @@ jobs:
           PYTHONPATH=/tmp/gen /tmp/runtime/bin/python -c "import envelope.v1.envelope_pb2, domain.v1.portfolio_pb2, inference.v1.inference_service_pb2_grpc; print('the shipped gencode imports under the shipped runtime')"
 
   ts:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -763,6 +763,8 @@ jobs:
   # There is no linter step because the repository has no JS/TS linter anywhere;
   # the compiler is the quality gate, exactly as it is for kanz/ts/kanz-bus.
   web:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -804,6 +806,8 @@ jobs:
   # from then on any surviving local kanz-schemas replace fails CI so the module
   # stays pinned to published releases.
   sdk-guard:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -870,6 +874,8 @@ jobs:
   # job needs no database, no broker and no Docker, so it lands in a couple of
   # minutes.
   module-graph:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -965,6 +971,8 @@ jobs:
   # A test harness nobody executes is not a weaker test. It is a claim of
   # coverage with nothing behind it.
   observability:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1104,6 +1112,8 @@ jobs:
           done
 
   buf-breaking:
+    needs: scope
+    if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1129,3 +1139,16 @@ jobs:
       - name: Breaking-change check
         working-directory: kanz-schemas
         run: buf breaking --against '../.git#ref=origin/main,subdir=kanz-schemas'
+
+  # The only application context required by the main ruleset. Missing results,
+  # cancellation, and accidental skips must never masquerade as successful CI.
+  kanz-ci-required:
+    if: ${{ always() }}
+    needs: [scope, release-custody, go, python, ts, web, sdk-guard, module-graph, observability, buf-breaking]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require complete results for the selected application scope
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/required_ci.py aggregate

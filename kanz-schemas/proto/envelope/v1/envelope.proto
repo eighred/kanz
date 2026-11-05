@@ -40,7 +40,7 @@ message Envelope {
   EventClass event_class = 5;
 
   // domain is the owning bounded context (e.g. "market", "risk", "inference").
-  // Aligns with the subject taxonomy and CODEOWNERS subtrees. Required.
+  // Aligns with the subject taxonomy and its review responsibilities. Required.
   string domain = 6;
 
   // --- Time (three clocks; the gaps between them are signals) ---

@@ -1,0 +1,66 @@
+syntax = "proto3";
+package quant.v1;
+
+import "common/v1/decimal.proto";
+import "domain/v1/calibration.proto";
+import "google/protobuf/timestamp.proto";
+import "reference/v1/fixed_income.proto";
+
+// Local shadow request, not admission or curve installation authority.
+// One immutable capture, at most 1 MiB, 1201 payments and 256 curve points.
+message BondRiskRequest {
+  string capture_id = 1;
+  bytes capture_digest = 2; // SHA256 of deterministic request with this field cleared.
+  string instrument_id = 3;
+  google.protobuf.Timestamp as_of = 4;
+  google.protobuf.Timestamp captured_at = 5;
+  reference.v1.BondTerms terms = 6; // Original canonical values; never rebuilt from floats.
+  repeated BondPayment payments = 7;
+  repeated ResolvedCurvePoint curve_points = 8;
+  reference.v1.Interpolation interpolation = 9;
+  domain.v1.CalibrationCoverage coverage = 10; // Absence/zero configured remains UNKNOWN.
+  google.protobuf.Timestamp curve_as_of = 11; // Absent when provider loses record metadata.
+  optional string curve_id = 12; // Absent means UNKNOWN; never fabricate an identifier.
+  string schedule_convention = 13; // Exactly go_bond_schedule_v1.
+  string source_revision = 14; // Capturing Go build revision.
+  string tenant_id = 15;
+}
+
+// Dates are projected by the existing Go schedule. Coupon amount is derived
+// from original BondTerms, avoiding a rounded or floating money wire model.
+message BondPayment {
+  google.protobuf.Timestamp payment_date = 1;
+  bool coupon = 2;
+  bool redemption = 3;
+}
+
+// Exact working analytic curve: same captured values the Go pricer used.
+// These doubles are rate/time analytics, not monetary amounts.
+message ResolvedCurvePoint {
+  double tenor_years = 1;
+  optional double continuous_zero = 2;
+}
+
+message BondRiskValues {
+  common.v1.Decimal dirty_price = 1;
+  common.v1.Decimal dv01 = 2;
+  optional double effective_duration = 3;
+  optional double convexity = 4;
+}
+
+enum BondRiskStatus {
+  BOND_RISK_STATUS_UNSPECIFIED = 0;
+  BOND_RISK_STATUS_OK = 1;
+  BOND_RISK_STATUS_INVALID_INPUT = 2;
+  BOND_RISK_STATUS_UNSUPPORTED_CONVENTION = 3;
+  BOND_RISK_STATUS_NUMERICAL_FAILURE = 4;
+}
+
+message BondRiskResult {
+  string capture_id = 1;
+  bytes capture_digest = 2;
+  BondRiskStatus status = 3;
+  BondRiskValues values = 4; // Present only on OK; matured bonds return measured zeros.
+  string producer_version = 5; // Immutable build stamp.
+  string tenant_id = 6;
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/compute/factor"
 	"github.com/eighred/kanz/internal/risk/factormodel"
 	"github.com/eighred/kanz/internal/risk/liquidity"
+	"github.com/eighred/kanz/internal/risk/pricing"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
 	"github.com/eighred/kanz/internal/risk/publish"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
@@ -114,6 +115,9 @@ func (r Bonds) BondTerms(ctx context.Context, id string, at time.Time) (compute.
 		v, status := r.Source.BondTerms(ctx, id, at)
 		return answer[compute.BondSpec]{Value: v, Status: int(status)}
 	})
+	if a.Value.CanonicalTerms != nil {
+		a.Value.CanonicalTerms = pricing.CloneBoundedBondTerms(a.Value.CanonicalTerms)
+	}
 	return a.Value, compute.TermsResolution(a.Status)
 }
 

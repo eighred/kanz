@@ -7,23 +7,12 @@ use crate::{
 use futures_util::{SinkExt, StreamExt};
 use prost_types::Timestamp;
 use serde::Deserialize;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::Ordering;
+#[cfg(test)]
+use std::sync::{atomic::AtomicU64, Arc};
 use std::{collections::VecDeque, fmt, time::Duration};
 
-/// Independent of the bounded update queue. Zero revokes every queued book.
-pub type Validity = Arc<AtomicU64>;
-pub fn valid_epoch(validity: &AtomicU64, epoch: u64) -> bool {
-    epoch != 0 && validity.load(Ordering::SeqCst) == epoch
-}
-struct InvalidateOnDrop(Validity);
-impl Drop for InvalidateOnDrop {
-    fn drop(&mut self) {
-        self.0.store(0, Ordering::SeqCst);
-    }
-}
+pub use kanz_market_feed::source::{valid_epoch, Event, InvalidateOnDrop, Validity};
 use tokio::{
     net::TcpStream,
     sync::{mpsc, watch},
@@ -51,12 +40,6 @@ pub struct Config {
     pub rest_base: String,
     pub depth_limit: u16,
     pub allow_local_test: bool,
-}
-#[derive(Debug)]
-pub enum Event {
-    Reanchoring,
-    Snapshot(u64, OrderBookSnapshot),
-    Delta(u64, OrderBookDelta),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceError {

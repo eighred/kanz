@@ -15,7 +15,7 @@ const rustRuntimePin = "ghcr.io/eighred/base/distroless-cc-debian12:nonroot@sha2
 // This is a deliberately narrow source-shape guard for the first Rust runtime
 // (#1413), not a Rust semantic verifier. Runtime unit tests prove the helper's
 // behavior; mirror/release jobs prove registry custody. Neither is replaced here.
-func rustContainerVersionBoundary(docker, source string) error {
+func rustContainerVersionBoundary(service, docker, source, runtime string) error {
 	var instructions []string
 	for _, line := range strings.Split(docker, "\n") {
 		line = strings.TrimSpace(line)
@@ -33,17 +33,20 @@ func rustContainerVersionBoundary(docker, source string) error {
 		return fmt.Errorf("Rust bases must be the reviewed mirrored digest pair")
 	}
 	joined := "\n" + strings.Join(instructions, "\n") + "\n"
-	if !strings.Contains(joined, "\nARG VERSION\n") || !strings.Contains(joined, `RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo build --locked --release --manifest-path kanz-rs/Cargo.toml -p kanz-binance-depth`) {
+	if !strings.Contains(joined, "\nARG VERSION\n") || !strings.Contains(joined, `RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path kanz-rs/Cargo.toml -p kanz-`+service) {
 		return fmt.Errorf("Rust release build must require and compile VERSION")
+	}
+	if !strings.Contains(joined, "\nRUN cargo install --locked --version 0.7.7 cargo-auditable\n") {
+		return fmt.Errorf("Rust build must pin its metadata tool")
 	}
 	if !strings.Contains(joined, "\nUSER 65532:65532\n") {
 		return fmt.Errorf("Rust runtime must retain nonroot identity")
 	}
-	start := strings.Index(source, "fn producer_version(")
+	start := strings.Index(runtime, "fn producer_version(")
 	if start < 0 {
 		return fmt.Errorf("missing version helper")
 	}
-	end := strings.Index(source[start:], "impl Config")
+	end := strings.Index(runtime[start:], "impl Config")
 	if end < 0 {
 		return fmt.Errorf("missing version/config boundary")
 	}
@@ -54,21 +57,35 @@ func rustContainerVersionBoundary(docker, source string) error {
  match stamped.filter(|value| !value.trim().is_empty()) {
  Some(value) => Ok(value.to_owned()),
  None if development => fallback.filter(|value| !value.trim().is_empty())
- .ok_or_else(|| { "BINANCE_DEPTH_VERSION required for an unstamped development build".into() }),
+ .ok_or_else(|| "venue VERSION required for an unstamped development build".into()),
  None => Err("production binary requires a build-time KANZ_BUILD_VERSION".into()),
  }
  }`
-	if compact(source[start:start+end]) != compact(expected) {
+	if compact(runtime[start:start+end]) != compact(expected) {
 		return fmt.Errorf("version helper must prefer compiled stamp and restrict fallback to development")
 	}
-	call := `version: producer_version(option_env!("KANZ_BUILD_VERSION"), development, env::var("BINANCE_DEPTH_VERSION").ok())?,`
-	if !strings.Contains(compact(source), compact(call)) {
-		return fmt.Errorf("configuration must use reviewed build-time version helper")
+
+	call := `version: producer_version(build_version, development, env::var(field("VERSION")).ok())?,`
+	if !strings.Contains(compact(runtime), compact(call)) {
+		return fmt.Errorf("configuration must use reviewed version helper")
+	}
+	venue, prefix := "Binance", "BINANCE_DEPTH"
+	if service == "okx-depth" {
+		venue, prefix = "Okx", "OKX_DEPTH"
+	} else if service != "binance-depth" {
+		return fmt.Errorf("unreviewed runtime")
+	}
+	wrapper := fmt.Sprintf(`Config::from_env("%s",Venue::%s,option_env!("KANZ_BUILD_VERSION"))?`, prefix, venue)
+	if !strings.Contains(compact(source), compact(wrapper)) || !strings.Contains(compact(source), `runtime::run(config,`) {
+		return fmt.Errorf("binary must pass its compiled stamp to the shared runtime")
+	}
+	if !strings.Contains(joined, "\nCOPY kanz-rs/ kanz-rs/\n") || !strings.Contains(joined, `ENTRYPOINT ["/kanz-`+service+`"]`) {
+		return fmt.Errorf("build must include complete workspace and launch its own binary")
 	}
 	return nil
 }
 
-func rustBoundaryInputs(t *testing.T) (string, string) {
+func rustBoundaryInputs(t *testing.T, service string) (string, string, string) {
 	t.Helper()
 	root := filepath.Dir(moduleRoot(t))
 	read := func(name string) string {
@@ -78,52 +95,53 @@ func rustBoundaryInputs(t *testing.T) (string, string) {
 		}
 		return string(b)
 	}
-	return read("kanz-rs/services/binance-depth/Dockerfile"), read("kanz-rs/services/binance-depth/src/main.rs")
+	return read("kanz-rs/services/" + service + "/Dockerfile"), read("kanz-rs/services/" + service + "/src/main.rs"), read("kanz-rs/crates/market-feed/src/runtime.rs")
 }
-
 func TestRustContainerVersionBoundary(t *testing.T) {
-	d, s := rustBoundaryInputs(t)
-	if err := rustContainerVersionBoundary(d, s); err != nil {
-		t.Fatal(err)
+	for _, service := range []string{"binance-depth", "okx-depth"} {
+		d, s, r := rustBoundaryInputs(t, service)
+		if err := rustContainerVersionBoundary(service, d, s, r); err != nil {
+			t.Fatalf("%s: %v", service, err)
+		}
 	}
 }
-
 func TestRustContainerVersionMutationReach(t *testing.T) {
-	d, s := rustBoundaryInputs(t)
-	if err := rustContainerVersionBoundary(d, s); err != nil {
-		t.Fatalf("mutation baseline invalid: %v", err)
-	}
-	for _, tc := range []struct {
-		name, old, new string
-		source         bool
-	}{
-		{"upstream-builder", "ghcr.io/eighred/base/rust:", "docker.io/library/rust:", false},
-		{"mutable-runtime", rustRuntimePin, strings.Split(rustRuntimePin, "@")[0], false},
-		{"wrong-digest", "9dac0a791", "0dac0a791", false},
-		{"missing-arg", "ARG VERSION", "# ARG VERSION", false},
-		{"blank-allowed", `test -n "$VERSION" && `, "", false},
-		{"stamp-removed", `KANZ_BUILD_VERSION="$VERSION" `, "", false},
-		{"root-runtime", "USER 65532:65532", "USER 0", false},
-		{"runtime-override", `version: producer_version(`, `version: another_version(`, true},
-		{"nondevelopment-fallback", "None if development =>", "None =>", true},
-		{"stamp-ignored", "Some(value) => Ok(value.to_owned())", "Some(value) => Ok(fallback.unwrap())", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			a, b := d, s
-			if tc.source {
-				b = strings.Replace(b, tc.old, tc.new, 1)
-				if b == s {
+	for _, service := range []string{"binance-depth", "okx-depth"} {
+		d, s, r := rustBoundaryInputs(t, service)
+		if err := rustContainerVersionBoundary(service, d, s, r); err != nil {
+			t.Fatalf("baseline: %v", err)
+		}
+		for _, tc := range []struct {
+			name, old, new string
+			target         int
+		}{
+			{"upstream-builder", "ghcr.io/eighred/base/rust:", "docker.io/library/rust:", 0},
+			{"mutable-runtime", rustRuntimePin, strings.Split(rustRuntimePin, "@")[0], 0},
+			{"wrong-digest", "9dac0a791", "0dac0a791", 0},
+			{"plain-cargo", "cargo auditable build", "cargo build", 0},
+			{"unpinned-metadata-tool", "--version 0.7.7", "", 0},
+			{"unlocked-metadata-tool", "install --locked", "install", 0},
+			{"missing-arg", "ARG VERSION", "# ARG VERSION", 0},
+			{"blank-allowed", `test -n "$VERSION" && `, "", 0},
+			{"stamp-removed", `KANZ_BUILD_VERSION="$VERSION" `, "", 0},
+			{"root-runtime", "USER 65532:65532", "USER 0", 0},
+			{"runtime-override", `version: producer_version(`, `version: another_version(`, 2},
+			{"nondevelopment-fallback", "None if development =>", "None =>", 2},
+			{"stamp-ignored", "Some(value) => Ok(value.to_owned())", "Some(value) => Ok(fallback.unwrap())", 2},
+			{"binary-stamp-missing", `option_env!("KANZ_BUILD_VERSION")`, `None`, 1},
+			{"incomplete-workspace", "COPY kanz-rs/ kanz-rs/", "COPY kanz-rs/src/ kanz-rs/src/", 0},
+		} {
+			t.Run(service+"/"+tc.name, func(t *testing.T) {
+				values := []string{d, s, r}
+				before := values[tc.target]
+				values[tc.target] = strings.Replace(before, tc.old, tc.new, 1)
+				if before == values[tc.target] {
 					t.Fatal("mutation missed")
 				}
-			} else {
-				a = strings.Replace(a, tc.old, tc.new, 1)
-				if a == d {
-					t.Fatal("mutation missed")
+				if rustContainerVersionBoundary(service, values[0], values[1], values[2]) == nil {
+					t.Fatal("mutation accepted")
 				}
-			}
-			if rustContainerVersionBoundary(a, b) == nil {
-				t.Fatal("mutation accepted")
-			}
-		})
+			})
+		}
 	}
 }

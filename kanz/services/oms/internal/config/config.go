@@ -14,13 +14,15 @@ import (
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/pkg/secret"
+	"github.com/eighred/kanz/services/oms/internal/foldshadow"
 	"github.com/eighred/kanz/services/oms/internal/order"
 )
 
 // Config is the oms runtime configuration, sourced from the environment so it
 // composes with the CSI/Vault secret mounts (SEC-01d).
 type Config struct {
-	Listen string
+	FillFoldShadow foldshadow.Config
+	Listen         string
 	// GRPCListen is where the order-history read surface serves (#399). Empty
 	// disables it, which is the shape a deployment that fronts no web app runs
 	// in — an unserved port is better than a read surface nobody asked for.
@@ -369,6 +371,10 @@ func (Config) FillSubjects() []string {
 }
 
 func Load() (Config, error) {
+	foldShadow, err := fillFoldShadow()
+	if err != nil {
+		return Config{}, err
+	}
 	// Resolved before the literal so a declared-but-unreadable secret mount
 	// stops Load HERE. The local helper this replaces answered that case with
 	// the plaintext env var and then with "", so a failed Vault mount and an
@@ -376,6 +382,10 @@ func Load() (Config, error) {
 	databaseURL, err := secret.Read("OMS_DATABASE_URL")
 	if err != nil {
 		return Config{}, err
+	}
+
+	if foldShadow.Enabled && (databaseURL == "" || os.Getenv("OMS_NATS_URL") == "") {
+		return Config{}, fmt.Errorf("OMS Rust fill shadow requires durable OMS database and NATS consumers")
 	}
 
 	// Read HERE rather than at the composition root, so a malformed refresh
@@ -445,7 +455,8 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Listen: env.Or("OMS_LISTEN", ":8090"),
+		FillFoldShadow: foldShadow,
+		Listen:         env.Or("OMS_LISTEN", ":8090"),
 		// NO DEFAULT, DELIBERATELY. A read surface that appears because nobody
 		// set a variable is a port opened by omission; the api-gateway has to be
 		// pointed at it either way, so naming it is one line of config and the

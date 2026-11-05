@@ -9,6 +9,7 @@ import (
 	"github.com/eighred/kanz/internal/risk/domain"
 	"github.com/eighred/kanz/internal/risk/pricing"
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
+	referencepb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
 )
 
 // FI-01d wires real fixed-income rate risk into the RISK-07 measure registry —
@@ -65,6 +66,9 @@ type BondSpec struct {
 	DayCount   pricing.DayCount
 	Currency   string
 	IssuerID   string
+	// CanonicalTerms retains the exact values resolved with this working shape.
+	// Old replay records may omit it; absence cannot be reconstructed from floats.
+	CanonicalTerms *referencepb.BondTerms `json:"canonical_terms,omitempty"`
 }
 
 // TermsResolution is a terms provider's answer about one instrument.
@@ -132,6 +136,10 @@ type CurveProvider interface {
 type FIProviders struct {
 	Terms BondTermsProvider
 	Curve CurveProvider
+	// OnBondRisk receives a detached diagnostic capture after the Go calculation.
+	// It cannot replace a measure. Called only for the DV01 evaluation, avoiding
+	// four shadow jobs for the same bond when all FI measures are requested.
+	OnBondRisk func(BondRiskCapture)
 
 	// OnSkip is called when a position is EXCLUDED from the FI measures for a
 	// reason that is not "it is not a bond". Optional; nil disables it.
@@ -180,6 +188,18 @@ type FIProviders struct {
 	// a gauge built on the latter reading overstates by the measure count, and
 	// silently changes meaning if a fifth FI measure is ever added.
 	OnSkip func(instrumentID, reason string)
+}
+
+// BondRiskCapture carries the actual resolved inputs and authoritative analytic
+// result. Curve is immutable; Terms is detached from the provider/replay record.
+type BondRiskCapture struct {
+	InstrumentID string
+	AsOf         time.Time
+	CapturedAt   time.Time
+	Terms        *referencepb.BondTerms
+	Bond         pricing.Bond
+	Curve        *curve.Curve
+	Result       pricing.CurveRisk
 }
 
 // The reasons a position is excluded from the FI measures.
@@ -238,6 +258,9 @@ func RegisterFIRisk(ctx context.Context, r *Registry, providers FIProviders) {
 // QualityFlagInputsUnresolved — but it now travels with a count of what it could
 // not see.
 func fiMeasure(ctx context.Context, name v1.MeasureName, p FIProviders) MeasureFunc {
+	if name != MeasureDV01 {
+		p.OnBondRisk = nil
+	}
 	return func(port *domain.Portfolio) v1.Measure {
 		asOf := port.AsOf()
 		var dollar, weighted, weight float64
@@ -333,6 +356,13 @@ func positionBondRisk(ctx context.Context, p FIProviders, pos domain.Position, a
 		DayCount:   spec.DayCount,
 	}
 	cr := bond.CurveRisk(asOf, c)
+	if p.OnBondRisk != nil {
+		var canonical *referencepb.BondTerms
+		if spec.CanonicalTerms != nil {
+			canonical = pricing.CloneBoundedBondTerms(spec.CanonicalTerms)
+		}
+		p.OnBondRisk(BondRiskCapture{InstrumentID: string(pos.InstrumentID), AsOf: asOf, CapturedAt: time.Now().UTC(), Terms: canonical, Bond: bond, Curve: c, Result: cr})
+	}
 	qty := decutil.Float64Or(pos.Quantity, 0)
 	mv := decutil.Float64Or(pos.MarketValue.GetAmount(), 0)
 	if mv < 0 {

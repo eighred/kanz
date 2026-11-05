@@ -39,7 +39,7 @@ var rustMigrationCargo = map[string]map[string]string{
 	"build-dependencies": {"prost-build": `"=0.14.1"`, "protoc-bin-vendored": `"=3.2.0"`},
 	"dev-dependencies":   {"serde": `{ version = "=1.0.229", features = ["derive"] }`, "serde_json": `"=1.0.154"`},
 	"profile.release":    {"overflow-checks": `true`},
-	"workspace":          {"members": `["services/binance-depth"]`, "resolver": `"2"`},
+	"workspace":          {"members": `["crates/market-feed", "services/binance-depth", "services/okx-depth", "services/bond-risk-shadow", "services/oms-fold-shadow"]`, "resolver": `"2"`},
 }
 
 // Pin the complete small build recipe: merely finding the canonical path could
@@ -49,9 +49,12 @@ const rustMigrationBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> 
     println!("cargo:rerun-if-changed={schema}");
     let mut config = prost_build::Config::new();
     config.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
-    config.compile_protos(&[schema], &["../kanz-schemas/proto"])?;
+    let money = "../kanz-schemas/proto/common/v1/money.proto";
+    println!("cargo:rerun-if-changed={money}");
+    config.compile_protos(&[schema, money], &["../kanz-schemas/proto"])?;
     Ok(())
-}`
+}
+`
 
 func rustMigrationCompact(s string) string { return strings.Join(strings.Fields(s), "") }
 
@@ -131,7 +134,13 @@ func rustMigrationWithoutComments(source string) (string, error) {
 }
 
 func checkRustMigrationBoundary(root string) error {
-	if err := checkRustDepthBoundary(filepath.Join(root, "services", "binance-depth")); err != nil {
+	if err := checkRustOMSFillShadow(root); err != nil {
+		return err
+	}
+	if err := checkRustBondShadowBoundary(root); err != nil {
+		return err
+	}
+	if err := checkRustDepthBoundary(root); err != nil {
 		return err
 	}
 	raw, err := os.ReadFile(filepath.Join(root, "Cargo.toml"))
@@ -171,7 +180,7 @@ func checkRustMigrationBoundary(root string) error {
 	}
 	build, err := os.ReadFile(filepath.Join(root, "build.rs"))
 	if err != nil || rustMigrationCompact(string(build)) != rustMigrationCompact(rustMigrationBuild) {
-		return fmt.Errorf("Rust build must generate only the canonical common/v1/decimal.proto via the reviewed build recipe")
+		return fmt.Errorf("Rust build must generate only canonical common/v1 Decimal and Money via the reviewed build recipe")
 	}
 
 	// Conservative token checks ignore comments but retain strings. They may ask
@@ -197,7 +206,7 @@ func checkRustMigrationBoundary(root string) error {
 			return fmt.Errorf("Rust source tree symlink requires review: %s", rel)
 		}
 		if d.IsDir() {
-			if rel == "services/binance-depth" {
+			if _, guarded := rustFeedPackages[rel]; guarded || rel == rustBondShadowPath || rel == rustOMSPath {
 				return filepath.SkipDir
 			} // Separately guarded above.
 			if rel == "target" || rel == ".git" {

@@ -19,7 +19,7 @@ import (
 func juliaShadowBoundary(files map[string]string) error {
 	compact := func(s string) string { return regexp.MustCompile(`\s+`).ReplaceAllString(s, "") }
 	for name, source := range files {
-		if !strings.HasPrefix(name, "worker/") {
+		if !strings.HasPrefix(name, "worker/") && !strings.HasPrefix(name, "process/") {
 			continue
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), name, source, 0)
@@ -28,7 +28,7 @@ func juliaShadowBoundary(files map[string]string) error {
 		}
 		for _, imp := range f.Imports {
 			path, _ := strconv.Unquote(imp.Path.Value)
-			if strings.HasPrefix(path, modulePath+"/") && !strings.HasPrefix(path, modulePath+"/kanz-schemas-go/") && path != modulePath+"/internal/risk/pricing/curve" {
+			if strings.HasPrefix(path, modulePath+"/") && !strings.HasPrefix(path, modulePath+"/kanz-schemas-go/") && path != modulePath+"/internal/risk/pricing/curve" && path != modulePath+"/internal/shadowprocess" {
 				return fmt.Errorf("shadow dependency grants authority: %s", path)
 			}
 			if path == "syscall" || strings.HasPrefix(path, "net") {
@@ -61,9 +61,15 @@ func juliaShadowBoundary(files map[string]string) error {
 		}
 	}
 	w := compact(files["worker/worker.go"])
-	for _, required := range []string{`case w.queue <- c: default:`, `runProcess(ctx,c,input,[]string{"--startup-file=no","--history-file=no","--compiled-modules=existing","--pkgimages=existing","--project="+c.Project,c.Script})`, `"JULIA_LOAD_PATH=@"+string(os.PathListSeparator)+"@stdlib"`, `exec.CommandContext(ctx,c.Executable,args...)`, `cmd.Env=[]string{`, `cmd.WaitDelay=time.Second`, `context.WithTimeout(ctx,c.Timeout)`} {
+	for _, required := range []string{`case w.queue <- c: default:`, `runProcess(ctx,c,input,[]string{"--startup-file=no","--history-file=no","--compiled-modules=existing","--pkgimages=existing","--project="+c.Project,c.Script})`, `"JULIA_LOAD_PATH=@"+string(os.PathListSeparator)+"@stdlib"`, `return shadowprocess.Run(ctx,shadowprocess.Config{Executable:c.Executable,Directory:c.Project,Args:args,Timeout:c.Timeout,Environment:[]string{"JULIA_PKG_OFFLINE=true","JULIA_LOAD_PATH=@"+string(os.PathListSeparator)+"@stdlib","JULIA_DEPOT_PATH="+c.Depot,"JULIA_NUM_THREADS=1","OPENBLAS_NUM_THREADS=1"}},input)`} {
 		if !strings.Contains(w, compact(required)) {
 			return fmt.Errorf("missing bounded queue/process seam: %s", required)
+		}
+	}
+	process := compact(files["process/process.go"])
+	for _, required := range []string{`const MaxBytes=1<<20`, `exec.CommandContext(ctx,c.Executable,c.Args...)`, `cmd.Env=append([]string{},c.Environment...)`, `cmd.WaitDelay=time.Second`, `context.WithTimeout(ctx,c.Timeout)`, `out:=&boundedBuffer{limit:MaxBytes,cancel:cancel}`, `stderr:=&boundedBuffer{limit:32<<10,cancel:cancel}`, `if len(p)>b.limit-b.buffer.Len(){b.exceeded=true`, `b.cancel()`, `if len(input)>MaxBytes`, `cmd.Dir=scratch`} {
+		if !strings.Contains(process, compact(required)) {
+			return fmt.Errorf("missing shared subprocess bound: %s", required)
 		}
 	}
 	c := compact(files["calibrate"])
@@ -91,6 +97,16 @@ func juliaBoundarySources(t *testing.T) map[string]string {
 	root := moduleRoot(t)
 	files := map[string]string{}
 	paths := map[string]string{"main": "services/risk-engine/cmd/risk-engine/main.go", "builder": "services/risk-engine/cmd/risk-engine/julia_shadow.go", "calibrate": "internal/risk/pricing/curve/calibrate.go", "ratesource": "internal/risk/pricing/livequote/ratesource.go"}
+	processRoot := "internal/shadowprocess"
+	processEntries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(processRoot)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range processEntries {
+		if strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
+			paths["process/"+e.Name()] = processRoot + "/" + e.Name()
+		}
+	}
 	worker := "services/risk-engine/internal/calibrationshadow"
 	entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(worker)))
 	if err != nil {
@@ -122,8 +138,8 @@ func TestJuliaShadowBoundaryMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ name, file, old, new string }{
-		{"app-env", "worker/worker.go", "cmd.Dir = c.Project", "cmd.Dir = c.Project; cmd.Env = os.Environ()"},
-		{"secret-read", "worker/worker.go", `os.Getenv("SystemRoot")`, `os.Getenv("DATABASE_URL")`},
+		{"app-env", "process/process.go", "cmd.Env = append([]string{}, c.Environment...)", "cmd.Env = os.Environ()"},
+		{"secret-read", "process/process.go", `os.Getenv("SystemRoot")`, `os.Getenv("DATABASE_URL")`},
 		{"authority", "worker/worker.go", "package calibrationshadow", "package calibrationshadow\nimport _ \"github.com/eighred/kanz/pkg/bus\""},
 		{"install-result", "worker/worker.go", "func finite(", "func forbidden(s interface{Put()}) { s.Put() }; func finite("},
 		{"capture-alias", "calibrate", "Strip: strip.clone()", "Strip: strip"},
@@ -132,7 +148,7 @@ func TestJuliaShadowBoundaryMutations(t *testing.T) {
 		{"wrong-observer", "main", "shadow.Enqueue", "shadow.Close"},
 		{"disconnected-builder", "builder", "calibrationshadow.New", "calibrationshadow.Other"},
 		{"unconditional-observer", "main", "if shadow != nil {", "if true {"},
-		{"shell-command", "worker/worker.go", "exec.CommandContext(ctx, c.Executable, args...)", "exec.CommandContext(ctx, \"sh\", args...)"},
+		{"shell-command", "process/process.go", "exec.CommandContext(ctx, c.Executable, c.Args...)", "exec.CommandContext(ctx, \"sh\", c.Args...)"},
 		{"blocking-queue", "worker/worker.go", "case w.queue <- c:\n\tdefault:", "case w.queue <- c:"},
 		{"automatic-precompile", "worker/worker.go", "--compiled-modules=existing", "--compiled-modules=yes"},
 		{"automatic-pkgimages", "worker/worker.go", "--pkgimages=existing", "--pkgimages=yes"},

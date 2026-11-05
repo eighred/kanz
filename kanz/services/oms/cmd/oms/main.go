@@ -239,7 +239,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 	// The two durable stores, over ONE pool: the order store (the admission gate,
 	// EXEC-M7c) and the POSITION BOOK (EXEC-M18). Both are safety choices, not
 	// persistence ones, and both stop being safe the moment there is a second pod.
-	store, book, closeStores, err := openStores(ctx, cfg, logger)
+	store, book, closeStores, err := openStores(ctx, cfg, logger, obs.Registry)
 	if err != nil {
 		return false, err
 	}
@@ -638,6 +638,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		// price source, so a cost measure and a compliance check can never
 		// disagree about what the market showed.
 		order.WithArrivalMarks(marks),
+		order.WithFillFoldObserver(fillFoldObserver(store)),
 		// THE BRAKE. NewService REFUSES to build without it (#635), so this line is
 		// not something a future edit can quietly drop.
 		order.WithHaltGate(haltGate),
@@ -1565,7 +1566,7 @@ func executionAttributionCounter(obs *observability.Provider) *prometheus.Counte
 	return c
 }
 
-func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (order.Store, position.Store, func(), error) {
+func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger, reg prometheus.Registerer) (order.Store, position.Store, func(), error) {
 	if cfg.DatabaseURL == "" {
 		logger.Warn("NO OMS_DATABASE_URL — the order store, the position book AND the outbox are IN-PROCESS. This deployment "+
 			"MUST run exactly ONE replica: two pods would each admit the same order (double trade) and each publish "+
@@ -1584,7 +1585,7 @@ func openStores(ctx context.Context, cfg config.Config, logger *slog.Logger) (or
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return order.NewPostgres(pool), position.NewPostgres(pool, cfg.BaseCurrency), pool.Close, nil
+	return persistentStoresWithShadow(ctx, cfg, pool, logger, reg)
 }
 
 // micsOf lists the configured venue MICs for the startup log.

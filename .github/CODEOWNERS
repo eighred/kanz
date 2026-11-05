@@ -1,0 +1,5 @@
+# GitHub discovers this file from the repository root's .github directory.
+# Current repository custodian; domain responsibilities remain beside the code.
+# Review routing does not provide independent approval: the only maintainer
+# cannot approve their own PR. Add real teams when additional maintainers join.
+* @akifgrape

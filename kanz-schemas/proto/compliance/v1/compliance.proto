@@ -8,8 +8,8 @@ syntax = "proto3";
 //
 // A Mandate is tenant/portfolio-scoped and versioned; a mandate change is a new
 // version carried on a lifecycle.v1.ConfigChanged FACT (COMP-01f), so "which
-// mandate applied when" is point-in-time reconstructable. CODEOWNERS:
-// @eighred/compliance.
+// mandate applied when" is point-in-time reconstructable. Review responsibility:
+// compliance; repository review routing lives in .github/CODEOWNERS.
 //
 // Deny-by-default is the engine invariant, not a schema one: an unknown
 // RuleType or an unparseable rule MUST evaluate to BREACH, never PASS. proto3

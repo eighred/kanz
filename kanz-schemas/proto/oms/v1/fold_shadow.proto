@@ -1,0 +1,38 @@
+syntax = "proto3";
+package oms.v1;
+
+import "google/protobuf/timestamp.proto";
+import "order/v1/order_events.proto";
+
+// Diagnostic-only ApplyFill capture, never permission to save or execute.
+// Canonical deterministic protobuf, <=1MiB; unknown fields are refused.
+message FillFoldRequest {
+  string capture_id = 1;
+  bytes capture_digest = 2; // SHA256 deterministic request with this field cleared.
+  string tenant_id = 3;
+  string source_revision = 4;
+  optional int64 expected_version = 5; // Actual loaded SQL version, not a predicted commit.
+  order.v1.OrderState state = 6; // Exact input to ApplyFill (recovery may normalize it).
+  order.v1.Fill fill = 7;
+  google.protobuf.Timestamp event_time = 8; // Exact time passed to ApplyFill.
+  google.protobuf.Timestamp captured_at = 9;
+  string path = 10; // live, reconcile, or recovery; not a command.
+}
+
+enum FillFoldStatus {
+  FILL_FOLD_STATUS_UNSPECIFIED = 0;
+  FILL_FOLD_STATUS_OK = 1;
+  FILL_FOLD_STATUS_REJECTED = 2; // Existing Go aggregate refusal, code identifies it.
+  FILL_FOLD_STATUS_UNSUPPORTED_INPUT = 3; // Outside bounded shadow domain; no candidate.
+  FILL_FOLD_STATUS_NUMERICAL_FAILURE = 4;
+}
+message FillFoldResult {
+  string capture_id = 1;
+  bytes capture_digest = 2;
+  string tenant_id = 3;
+  string producer_version = 4;
+  FillFoldStatus status = 5;
+  string rejection_code = 6;
+  order.v1.OrderState candidate = 7; // Present only on OK; no persistence authority.
+  optional int64 expected_version = 8;
+}

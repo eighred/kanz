@@ -11,11 +11,11 @@ import (
 	"errors"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
 	"github.com/eighred/kanz/internal/risk/pricing/curve"
+	"github.com/eighred/kanz/internal/shadowprocess"
 	domainpb "github.com/eighred/kanz/kanz-schemas-go/domain/v1"
 	refpb "github.com/eighred/kanz/kanz-schemas-go/reference/v1"
 	researchpb "github.com/eighred/kanz/kanz-schemas-go/research/v1"
@@ -215,60 +215,12 @@ func compare(j *researchpb.CurveCalibrationJob, c curve.CalibrationCapture, r *r
 	return "matched"
 }
 
-type boundedBuffer struct {
-	buffer   bytes.Buffer
-	limit    int
-	cancel   context.CancelFunc
-	exceeded bool
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if len(p) > b.limit-b.buffer.Len() {
-		b.exceeded = true
-		b.cancel()
-		return 0, errors.New("worker output limit")
-	}
-	return b.buffer.Write(p)
-}
-
 func execute(ctx context.Context, c Config, input []byte) ([]byte, string) {
 	return runProcess(ctx, c, input, []string{"--startup-file=no", "--history-file=no", "--compiled-modules=existing", "--pkgimages=existing", "--project=" + c.Project, c.Script})
 }
-
 func runProcess(ctx context.Context, c Config, input []byte, args []string) ([]byte, string) {
-	if len(input) > MaxBytes {
-		return nil, "invalid_input"
-	}
-	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
-	defer cancel()
-	scratch, e := os.MkdirTemp("", "kanz-julia-shadow-")
-	if e != nil {
-		return nil, "worker_failure"
-	}
-	defer os.RemoveAll(scratch)
-	cmd := exec.CommandContext(ctx, c.Executable, args...)
-	cmd.Dir = c.Project
-	cmd.Env = []string{"JULIA_PKG_OFFLINE=true", "JULIA_LOAD_PATH=@" + string(os.PathListSeparator) + "@stdlib", "JULIA_DEPOT_PATH=" + c.Depot, "JULIA_NUM_THREADS=1", "OPENBLAS_NUM_THREADS=1", "HOME=" + scratch, "TMPDIR=" + scratch, "TEMP=" + scratch, "TMP=" + scratch}
-	if v := os.Getenv("SystemRoot"); v != "" {
-		cmd.Env = append(cmd.Env, "SystemRoot="+v)
-	}
-	cmd.Stdin = bytes.NewReader(input)
-	out := &boundedBuffer{limit: MaxBytes, cancel: cancel}
-	stderr := &boundedBuffer{limit: 32 << 10, cancel: cancel}
-	cmd.Stdout = out
-	cmd.Stderr = stderr
-	cmd.WaitDelay = time.Second
-	e = cmd.Run()
-	if out.exceeded || stderr.exceeded {
-		return nil, "output_limit"
-	}
-	if ctx.Err() != nil {
-		return nil, "timeout"
-	}
-	if e != nil {
-		return nil, "worker_failure"
-	}
-	return out.buffer.Bytes(), ""
+	return shadowprocess.Run(ctx, shadowprocess.Config{Executable: c.Executable, Directory: c.Project, Args: args, Timeout: c.Timeout,
+		Environment: []string{"JULIA_PKG_OFFLINE=true", "JULIA_LOAD_PATH=@" + string(os.PathListSeparator) + "@stdlib", "JULIA_DEPOT_PATH=" + c.Depot, "JULIA_NUM_THREADS=1", "OPENBLAS_NUM_THREADS=1"}}, input)
 }
 
 func evaluate(ctx context.Context, cfg Config, c curve.CalibrationCapture) string {
