@@ -7,6 +7,9 @@
 # freshly built test binaries in %TEMP%, so the Makefile points GOTMPDIR here.
 .gotmp/
 
+# Rust migration build output; canonical schemas remain tracked in kanz-schemas.
+/kanz-rs/target/
+
 # Stripped release binaries (`make release`).
 bin/
 

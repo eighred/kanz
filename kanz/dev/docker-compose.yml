@@ -1,6 +1,6 @@
 # DEVX-01a — one-command local stack.
 #
-# The full local platform a developer needs: the NATS spine + a Kafka broker
+# The local smoke stack: the NATS spine + a Kafka-compatible Redpanda broker
 # (durable log) + Postgres (durable state), with the risk-engine and api-gateway
 # wired on top. `make up` brings it up and seeds one portfolio; `make down`
 # tears it down. Auth/signing/quotas are OFF (local paths), upstream is plaintext
@@ -18,22 +18,35 @@ services:
       - "4222:4222"
       - "8222:8222"
 
-  # Single-node KRaft Kafka (no ZooKeeper) — the durable log for local CDC/replay
-  # work. RF1 / no auto-create mirrors EVT-09's posture at dev scale.
+  # One local Redpanda broker replaces the JVM broker, retaining the kafka alias.
+  # No dev-container mode: it enables auto-create and unsafe-bypass-fsync.
+  # This fresh volume never mounts existing Kafka data; no history is migrated.
   kafka:
-    image: bitnami/kafka:3.7
-    environment:
-      KAFKA_CFG_NODE_ID: "1"
-      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
-      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
-      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
-      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
-      ALLOW_PLAINTEXT_LISTENER: "yes"
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.6
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --check=false
+      - --node-id=0
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://kafka:9092,external://127.0.0.1:9092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=kafka:33145
+      - --set=redpanda.auto_create_topics_enabled=false
+      - --set=redpanda.default_topic_replications=1
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:19092"
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "info", "-X", "brokers=127.0.0.1:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   postgres:
     image: postgres:16-alpine
@@ -147,3 +160,6 @@ services:
       # builds the real router and asserts both reachability and backend arrival.
     ports:
       - "8080:8080"
+
+volumes:
+  redpanda-data:
