@@ -29,6 +29,9 @@ def boundary(docs, probe, workflow):
         raise ValueError('workflow authority or refusal changed')
     if 'python3 -B tools/redpanda-identity/qualify.py' not in workflow:
         raise ValueError('actual mandatory fixture missing')
+    setup=[s for s in wf['jobs']['developmental-redpanda-identity']['steps'] if s.get('uses')=='./.github/actions/setup-buf']
+    if len(setup)!=1 or setup[0].get('with',{}).get('version')!='1.69.0':
+        raise ValueError('SDK generator must have its required pinned version')
 
 
 class QualificationTests(unittest.TestCase):
@@ -55,6 +58,7 @@ class QualificationTests(unittest.TestCase):
             with self.assertRaises(ValueError): boundary(self.docs,self.probe.replace(token,'REMOVED'),self.workflow)
         with self.assertRaises(ValueError): boundary(self.docs,self.probe,self.workflow.replace('packages: read','packages: write'))
         with self.assertRaises(ValueError): boundary(self.docs,self.probe,self.workflow.replace('python3 -B tools/redpanda-identity/qualify.py','true'))
+        with self.assertRaises(ValueError): boundary(self.docs,self.probe,self.workflow.replace("version: '1.69.0'", "version: ''"))
 
     def test_composer_is_fixture_only(self):
         docs=qualify.spire_objects()

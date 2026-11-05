@@ -36,6 +36,8 @@ jobs:
           go-version-file: kanz/go.mod
           cache-dependency-path: kanz/go.sum
       - uses: ./.github/actions/setup-buf
+        with:
+          version: '1.69.0'
       - name: Generate existing canonical SDK
         working-directory: kanz-schemas
         run: |
