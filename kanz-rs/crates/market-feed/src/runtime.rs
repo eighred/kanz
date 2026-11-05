@@ -427,3 +427,185 @@ mod tests {
         ));
     }
 }
+
+// Runs only inside the disposable Cilium/SPIRE fixture, never ordinary unit CI.
+#[cfg(test)]
+mod identity_proof {
+    use super::*;
+    use crate::proto::market::v1::{OrderBookSnapshot, PriceLevel};
+    use kanz_decimal_compat::common::v1::Decimal;
+
+    #[tokio::test]
+    #[ignore = "requires the disposable real SPIRE/NATS/Cilium cluster"]
+    async fn real_spire_nats_identity() {
+        install_crypto_provider();
+        let mode = required("IDENTITY_PROOF_MODE").unwrap();
+        let endpoint = required("IDENTITY_PROOF_NATS").unwrap();
+        let address = endpoint.strip_prefix("tls://").unwrap();
+        if mode == "blocked" || mode == "reachable" {
+            let connected = timeout(
+                Duration::from_secs(3),
+                tokio::net::TcpStream::connect(address),
+            )
+            .await;
+            let reachable = matches!(connected, Ok(Ok(_)));
+            assert_eq!(
+                reachable,
+                mode == "reachable",
+                "network policy verdict differs"
+            );
+            println!("IDENTITY_PROOF_PASS:{mode}");
+            return;
+        }
+        let venue = match required("IDENTITY_PROOF_VENUE").unwrap().as_str() {
+            "BINANCE" => Venue::Binance,
+            "OKX" => Venue::Okx,
+            _ => panic!("invalid fixture venue"),
+        };
+        let config = Config {
+            instrument_id: "FIXTURE-BTC-USD".into(),
+            symbol: "FIXTURE".into(),
+            development: false,
+            venue,
+            tenant: "fixture".into(),
+            producer: "fixture/identity".into(),
+            version: "fixture".into(),
+            nats: endpoint.clone(),
+            socket: "unix:///run/spiffe/spire-agent.sock".into(),
+            listen: "127.0.0.1:0".into(),
+        };
+        // Denial must not be a missing Workload API or blocked-network false positive.
+        timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect(address),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let issued = timeout(
+            Duration::from_secs(30),
+            spiffe::X509Source::builder()
+                .endpoint(&config.socket)
+                .build(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            issued.svid().unwrap().spiffe_id().to_string(),
+            required("IDENTITY_PROOF_IDENTITY").unwrap()
+        );
+        let connection = connect(&config, Arc::new(Health::default())).await;
+        if mode == "unregistered" || mode == "wrong-server" {
+            assert!(connection.is_err(), "untrusted identity was accepted");
+            // Test-only control: prove the server's TLS works when its actual
+            // identity is explicitly authorized. Production connect stays unchanged.
+            let peer = if mode == "wrong-server" {
+                "spiffe://kanz.internal/ns/kanz-messaging/sa/nats-wrong"
+            } else {
+                "spiffe://kanz.internal/ns/kanz-messaging/sa/nats"
+            };
+            let tls = spiffe_rustls::mtls_client(issued.clone())
+                .trust_domain_policy(spiffe_rustls::LocalOnly(
+                    "kanz.internal".try_into().unwrap(),
+                ))
+                .authorize(spiffe_rustls::authorizer::exact([peer]).unwrap())
+                .build()
+                .unwrap();
+            let control = async_nats::ConnectOptions::new()
+                .require_tls(true)
+                .tls_client_config(tls)
+                .connection_timeout(Duration::from_secs(5))
+                .connect(&config.nats)
+                .await;
+            if mode == "wrong-server" {
+                control
+                    .expect("positive TLS control for actual broker identity required")
+                    .flush()
+                    .await
+                    .unwrap();
+            } else {
+                assert_eq!(
+                    control
+                        .expect_err("unregistered identity must be denied")
+                        .kind(),
+                    async_nats::ConnectErrorKind::AuthorizationViolation
+                );
+            }
+            println!("IDENTITY_PROOF_PASS:{mode}");
+            return;
+        }
+        let (client, identity) = connection.expect("real mTLS connection required");
+        assert!(identity.is_some());
+        let js = async_nats::jetstream::new(client.clone());
+        match mode.as_str() {
+            "bootstrap" => {
+                js.create_stream(async_nats::jetstream::stream::Config {
+                    name: "FIXTURE".into(),
+                    subjects: vec![
+                        publisher::BOOK_SUBJECT.into(),
+                        publisher::QUOTE_SUBJECT.into(),
+                        "fixture.forbidden".into(),
+                    ],
+                    max_messages: 16,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            }
+            "publish" => {
+                let level = |price| PriceLevel {
+                    price: Some(Decimal {
+                        coefficient: price,
+                        exponent: 0,
+                    }),
+                    size: Some(Decimal {
+                        coefficient: 1,
+                        exponent: 0,
+                    }),
+                };
+                let snapshot = OrderBookSnapshot {
+                    instrument_id: config.instrument_id.clone(),
+                    symbol: config.symbol.clone(),
+                    mic: venue.mic().into(),
+                    event_time: Some(publisher::now()),
+                    last_update_sequence: 1,
+                    bids: vec![level(100)],
+                    asks: vec![level(101)],
+                };
+                let mut framer = Framer::new(
+                    config.tenant,
+                    config.producer,
+                    config.version,
+                    config.instrument_id,
+                    venue,
+                )
+                .unwrap();
+                let frames = framer.frames(&snapshot, publisher::now()).unwrap();
+                assert_eq!(frames.len(), 2);
+                publisher::publish(&js, frames, &AtomicU64::new(1), 1)
+                    .await
+                    .unwrap();
+            }
+            "forbidden" => {
+                // Request also sends a PUB. No reply alone is not authorization
+                // proof: the fixture additionally requires NATS's permission-denial diagnostic.
+                assert!(!matches!(
+                    timeout(
+                        Duration::from_secs(3),
+                        client.request("fixture.forbidden", "fixture".into())
+                    )
+                    .await,
+                    Ok(Ok(_))
+                ));
+            }
+            "verify" => {
+                let mut stream = js.get_stream("FIXTURE").await.unwrap();
+                assert_eq!(stream.info().await.unwrap().state.messages, 4);
+            }
+            _ => panic!("unknown proof mode"),
+        }
+        client.flush().await.unwrap();
+        println!("IDENTITY_PROOF_PASS:{mode}");
+    }
+}

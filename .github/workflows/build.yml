@@ -8,6 +8,7 @@ on:
   pull_request:
     paths:
       - 'kanz/**'
+      - 'kanz-rs/**'
       - 'kanz-schemas/proto/**'
       - 'kanz-schemas/buf.yaml'
       - 'kanz-schemas/buf.gen.yaml'
@@ -72,6 +73,10 @@ jobs:
           # worker, a feature store, an explainer and a model registry — and no entrypoint,
           # no image and no model. It could not be deployed, so it never ran, so the Go
           # prediction seam had no server to call and zero importers.
+          - service: binance-depth
+            dockerfile: kanz-rs/services/binance-depth/Dockerfile
+          - service: okx-depth
+            dockerfile: kanz-rs/services/okx-depth/Dockerfile
           - service: inference
             dockerfile: kanz-py/Dockerfile
           - service: risk-engine
