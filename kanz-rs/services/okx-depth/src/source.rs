@@ -473,7 +473,7 @@ mod tests {
                 1 => v["arg"]["channel"] = "trades".into(),
                 2 => v["action"] = "mystery".into(),
                 3 => v["data"][0]["ts"] = "0".into(),
-                4 => v["data"][0]["asks"][0][0] = "123456789123456789e64".into(),
+                4 => v["data"][0]["asks"][0][0] = "123456789123456789123456789e64".into(),
                 5 => v["data"][0]["bids"][0] = serde_json::json!(["100"]),
                 6 => v["data"][0]["seqId"] = (-2).into(),
                 7 => v["data"][0]["prevSeqId"] = 0.into(),
