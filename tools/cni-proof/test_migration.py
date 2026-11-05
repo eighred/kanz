@@ -75,6 +75,15 @@ class MigrationTests(unittest.TestCase):
         with patch.object(f, "k", return_value=json.dumps(pod)):
             self.assertEqual(f.storage_diagnostic(), {"pod": "Failed", "containers": [{"reason": "Error", "exitCode": 1}]})
 
+    def test_packaged_controller_creation_precedes_rollout_wait(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        with patch.object(f, "k", side_effect=["", "deployment/coredns", "ready", "deployment/local-path-provisioner", "ready"]) as call, \
+                patch.object(migration.time, "sleep"):
+            f.initial_system_ready()
+            self.assertEqual(call.call_args_list[0].args[2], "get")
+            self.assertEqual(call.call_args_list[1].args[2], "get")
+            self.assertEqual(call.call_args_list[2].args[2], "rollout")
+
 
 if __name__ == "__main__":
     unittest.main()

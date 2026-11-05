@@ -120,6 +120,20 @@ class Fixture:
             self.k("-n", "kube-system", "rollout", "status", "deployment/" + deployment,
                    "--timeout=180s", timeout=190)
 
+    def initial_system_ready(self):
+        # Node Ready is not an addon-controller creation barrier in K3s.
+        for deployment in ("coredns", "local-path-provisioner"):
+            self.stage = "system_presence_" + deployment
+            deadline = time.monotonic() + 180
+            while time.monotonic() < deadline:
+                if self.k("-n", "kube-system", "get", "deployment", deployment, "--ignore-not-found", "-o", "name"):
+                    break
+                time.sleep(2)
+            else:
+                raise proof.ProofError("packaged_system_deployment_absent")
+            self.stage = "system_rollout_" + deployment
+            self.k("-n", "kube-system", "rollout", "status", "deployment/" + deployment, "--timeout=180s", timeout=190)
+
     def quiesce_system(self):
         for deployment in ("coredns", "local-path-provisioner"):
             obj = json.loads(self.k("-n", "kube-system", "get", "deployment", deployment, "-o", "json"))
@@ -267,8 +281,7 @@ def main():
         node = f.ready()
         node_uid = node["metadata"]["uid"]
         phase = "initial_system_ready"
-        for deployment in ("coredns", "local-path-provisioner"):
-            f.k("-n", "kube-system", "rollout", "status", "deployment/" + deployment, "--timeout=180s", timeout=190)
+        f.initial_system_ready()
         f.k("create", "namespace", name)
         nonce = uuid.uuid4().hex
         f.k("apply", "-f", "-", value={"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "etcd-marker", "namespace": name}, "data": {"marker": nonce}})
