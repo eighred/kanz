@@ -156,6 +156,18 @@ func transactionCandidate(j *omspb.FillFoldRequest, capture order.FillFoldCaptur
 
 func (f *transactionFixture) candidate(s *orderpb.OrderState, version int64, fill *orderpb.Fill) *orderpb.OrderState {
 	f.t.Helper()
+	return f.fold(s, version, fill).candidate
+}
+
+type transactionObservation struct {
+	candidate *orderpb.OrderState
+	request   *omspb.FillFoldRequest
+	capture   order.FillFoldCapture
+	response  *omspb.FillFoldResult
+}
+
+func (f *transactionFixture) fold(s *orderpb.OrderState, version int64, fill *orderpb.Fill) transactionObservation {
+	f.t.Helper()
 	at := fill.ExecutedAt.AsTime()
 	expected, err := order.ApplyFill(s, fill, at)
 	if err != nil {
@@ -187,7 +199,7 @@ func (f *transactionFixture) candidate(s *orderpb.OrderState, version int64, fil
 	if dec.Cmp(candidate.FilledQuantity, &commonpb.Decimal{Coefficient: 2}) != 0 || dec.Cmp(candidate.LeavesQuantity, &commonpb.Decimal{Coefficient: 8}) != 0 || dec.Cmp(candidate.AverageFillPrice, &commonpb.Decimal{Coefficient: 125}) != 0 || candidate.Status != orderpb.OrderStatus_ORDER_STATUS_PARTIALLY_FILLED || !proto.Equal(candidate.AsOf, fill.ExecutedAt) {
 		f.t.Fatal("independent transaction fixture arithmetic/time mismatch")
 	}
-	return candidate
+	return transactionObservation{candidate: candidate, request: j, capture: capture, response: r}
 }
 
 func (f *transactionFixture) facts(s *orderpb.OrderState, fill *orderpb.Fill) []outbox.Record {
@@ -349,7 +361,8 @@ func TestRustOMSPostgresTransactions(t *testing.T) {
 		f := newTransactionFixture(t)
 		s, v := f.seed()
 		fill := transactionFill()
-		candidate := f.candidate(s, v, fill)
+		afold := f.fold(s, v, fill)
+		candidate := afold.candidate
 		if err := f.store.Save(f.ctx, candidate, v, f.facts(candidate, fill), fill.FillId); err != nil {
 			t.Fatal(err)
 		}
@@ -364,16 +377,6 @@ func TestRustOMSPostgresTransactions(t *testing.T) {
 				t.Fatalf("cross-tenant %s disclosure", table)
 			}
 		}
-		if err := otherStore.Save(f.ctx, candidate, v, f.facts(candidate, fill), fill.FillId); err == nil {
-			t.Fatal("cross-tenant stale state committed")
-		}
-		for _, table := range []string{"orders", "order_fills", "order_executions", "outbox"} {
-			var n int
-			if err := other.QueryRow(f.ctx, "SELECT count(*) FROM "+pgx.Identifier{table}.Sanitize()).Scan(&n); err != nil || n != 0 {
-				t.Fatalf("failed cross-tenant write left %s residue", table)
-			}
-		}
-		f.assertDurable(f.pool, candidate, v+1, 1)
 		// Positive control: the second tenant must be able to use the identical
 		// order/execution IDs, with its own fully bound Rust result and FACT.
 		b := *f
@@ -381,7 +384,21 @@ func TestRustOMSPostgresTransactions(t *testing.T) {
 		b.pool = other
 		b.store = otherStore
 		bs, bv := b.seed()
-		bcandidate := b.candidate(bs, bv, fill)
+		bfold := b.fold(bs, bv, fill)
+		bcandidate := bfold.candidate
+		// Save is a trusted tenant-local upsert, not an identity authority. Its
+		// envelope tenant can differ from its storage tenant (#223/#97). Refuse
+		// the actual A response at the binding boundary before calling SQL.
+		if got, err := transactionCandidate(bfold.request, bfold.capture, afold.response, b.config.ExpectedVersion); err == nil || got != nil {
+			t.Fatal("actual A response accepted for B")
+		}
+		crossed := proto.Clone(bfold.response).(*omspb.FillFoldResult)
+		crossed.Candidate = proto.Clone(candidate).(*orderpb.OrderState)
+		if got, err := transactionCandidate(bfold.request, bfold.capture, crossed, b.config.ExpectedVersion); err == nil || got != nil {
+			t.Fatal("A payload accepted with B response identity")
+		}
+		b.assertDurable(other, bs, bv, 0)
+		f.assertDurable(f.pool, candidate, v+1, 1)
 		if err := b.store.Save(b.ctx, bcandidate, bv, b.facts(bcandidate, fill), fill.FillId); err != nil {
 			t.Fatal("tenant B positive control failed", err)
 		}
@@ -389,6 +406,17 @@ func TestRustOMSPostgresTransactions(t *testing.T) {
 		b.assertDurable(other, bcandidate, bv+1, 1)
 		if proto.Equal(candidate, bcandidate) {
 			t.Fatal("tenant controls must retain distinct portfolio attribution")
+		}
+		for _, fixture := range []*transactionFixture{f, &b} {
+			var envelopeTenant string
+			var raw []byte
+			if err := fixture.pool.QueryRow(f.ctx, `SELECT envelope_tenant_id,payload FROM outbox WHERE partition_key=$1`, s.OrderId).Scan(&envelopeTenant, &raw); err != nil {
+				t.Fatal(err)
+			}
+			fact := new(orderpb.OrderPartiallyFilled)
+			if envelopeTenant != fixture.tenant || proto.Unmarshal(raw, fact) != nil || fact.GetState().GetPortfolioId() != fixture.tenant+"-portfolio" {
+				t.Fatal("crossed tenant outbox envelope/payload")
+			}
 		}
 	})
 }
