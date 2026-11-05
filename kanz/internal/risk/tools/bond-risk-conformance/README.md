@@ -9,8 +9,8 @@ financial authority.
 From `kanz`:
 
 ```sh
-go run ./tools/bond-risk-conformance > /tmp/bond-risk-corpus.json
-go test -p 1 ./tools/bond-risk-conformance -count=1
+go run ./internal/risk/tools/bond-risk-conformance > /tmp/bond-risk-corpus.json
+go test -p 1 ./internal/risk/tools/bond-risk-conformance -count=1
 ```
 
 Fourteen fixtures cover zero and coupon bonds, negative and measured-zero rates,
@@ -42,7 +42,7 @@ For actual Rust process proof, build `kanz-bond-risk-shadow` with a reviewed
 `KANZ_BOND_RISK_VERSION` to that exact embedded stamp. Then run:
 
 ```sh
-go test -p 1 ./tools/bond-risk-conformance -run '^TestRustBondRiskProcessConformance$' -v -count=1
+go test -p 1 ./internal/risk/tools/bond-risk-conformance -run '^TestRustBondRiskProcessConformance$' -v -count=1
 ```
 
 That test executes the real binary with raw protobuf stdin/stdout, verifies all
