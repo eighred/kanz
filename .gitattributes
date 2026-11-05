@@ -16,6 +16,11 @@ kanz/infra/terraform-testnet/user_data.sh.tftpl text eol=lf
 *.go text eol=lf
 *.proto text eol=lf
 
+# Rust formatting and generated build inputs must be stable across Windows/Linux.
+*.rs text eol=lf
+/kanz-rs/*.toml text eol=lf
+/kanz-rs/Cargo.lock text eol=lf
+
 # YAML must keep LF for the same reason, and it bit us. Generated manifests are
 # compared BYTE-FOR-BYTE against their generator's output:
 # test/arch/tenant_compute_test.go re-renders infra/deploy/tenants/<t>/oms-<t>.yaml
