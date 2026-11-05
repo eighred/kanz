@@ -15,8 +15,16 @@ func TestSubjectRequiresCanonicalCompleteIdentity(t *testing.T) {
 	u, _ := url.Parse(id)
 	h := sha256.Sum256([]byte(id))
 	value := hex.EncodeToString(h[:16])
-	cert := &x509.Certificate{URIs: []*url.URL{u}, Subject: pkix.Name{Names: []pkix.AttributeTypeAndValue{{Type: asn1.ObjectIdentifier{2, 5, 4, 45}, Value: value}}}}
-	want := "2.5.4.45=#1320" + hex.EncodeToString([]byte(value))
+	// Literal pinned SPIRE shape: default C/O, first DNS as CN, composer UID.
+	cert := &x509.Certificate{URIs: []*url.URL{u}, DNSNames: []string{"client-a-abcde"}, Subject: pkix.Name{
+		Country: []string{"US"}, Organization: []string{"SPIRE"}, CommonName: "client-a-abcde",
+		Names: []pkix.AttributeTypeAndValue{
+			{Type: asn1.ObjectIdentifier{2, 5, 4, 6}, Value: "US"},
+			{Type: asn1.ObjectIdentifier{2, 5, 4, 10}, Value: "SPIRE"},
+			{Type: asn1.ObjectIdentifier{2, 5, 4, 3}, Value: "client-a-abcde"},
+			{Type: asn1.ObjectIdentifier{2, 5, 4, 45}, Value: value},
+		}}}
+	want := "CN=client-a-abcde,O=SPIRE,C=US,2.5.4.45=#1320" + hex.EncodeToString([]byte(value))
 	if got, err := subject(cert, id); err != nil || got != want {
 		t.Fatalf("DN=%q error=%v", got, err)
 	}
@@ -28,11 +36,22 @@ func TestSubjectRequiresCanonicalCompleteIdentity(t *testing.T) {
 			c.URIs = []*url.URL{v}
 		},
 		func(c *x509.Certificate) { c.Subject.Names[0].Value = "wrong" },
-		func(c *x509.Certificate) { c.Subject.Names[0].Type = asn1.ObjectIdentifier{2, 5, 4, 3} },
+		func(c *x509.Certificate) { c.Subject.Names[3].Value = "wrong-hash" },
+		func(c *x509.Certificate) { c.Subject.Names[0] = c.Subject.Names[3] },
+		func(c *x509.Certificate) { c.Subject.Names[0].Type = asn1.ObjectIdentifier{2, 5, 4, 11} },
 		func(c *x509.Certificate) { c.Subject.Names = append(c.Subject.Names, c.Subject.Names[0]) },
+		func(c *x509.Certificate) { c.DNSNames = nil },
+		func(c *x509.Certificate) { c.DNSNames = []string{"other"} },
+		func(c *x509.Certificate) { c.Subject.CommonName = "other" },
+		func(c *x509.Certificate) {
+			c.Subject.CommonName = "bad,CN=injected"
+			c.DNSNames = []string{c.Subject.CommonName}
+			c.Subject.Names[2].Value = c.Subject.CommonName
+		},
 	} {
 		clone := *cert
 		clone.URIs = append([]*url.URL(nil), cert.URIs...)
+		clone.DNSNames = append([]string(nil), cert.DNSNames...)
 		clone.Subject.Names = append([]pkix.AttributeTypeAndValue(nil), cert.Subject.Names...)
 		mutate(&clone)
 		if _, err := subject(&clone, id); err == nil {

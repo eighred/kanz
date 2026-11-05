@@ -1,4 +1,5 @@
 import copy
+import re
 from pathlib import Path
 import unittest
 import yaml
@@ -16,7 +17,7 @@ def boundary(docs, probe, workflow):
         raise ValueError('client authentication required')
     if config['admin'] != [{'address':'127.0.0.1','port':9644}]:
         raise ValueError('admin must remain loopback only')
-    expected=['RULE:^'+qualify.subject(sa).replace('.','[.]')+'$/'+sa+'/' for sa in qualify.SAS]
+    expected=['RULE:^'+qualify.broker_subject_pattern(sa)+'$/'+sa+'/' for sa in qualify.SAS]
     if bootstrap['kafka_mtls_principal_mapping_rules'] != expected or len(set(expected))!=4:
         raise ValueError('exact unique workload subjects required')
     if bootstrap['kafka_enable_authorization'] is not True or bootstrap['superusers']!=['proof-bootstrap']:
@@ -78,6 +79,19 @@ class QualificationTests(unittest.TestCase):
         self.assertTrue(pod['containers'][0]['securityContext']['readOnlyRootFilesystem'])
         self.assertFalse(any('hostPath' in v for v in pod['volumes']))
         self.assertEqual({e['name'] for e in pod['containers'][0]['env']},{'PROOF_SA','PROOF_MODE'})
+
+    def test_exact_dn_serializations(self):
+        uid = qualify.subject('proof-a')
+        for pattern, value in (
+            (qualify.subject_pattern('proof-a'), 'CN=client-a-abcde,O=SPIRE,C=US,' + uid),
+            (qualify.broker_subject_pattern('proof-a'), 'C=US,O=SPIRE,CN=client-a-abcde,' + uid),
+        ):
+            self.assertIsNotNone(re.fullmatch(pattern, value))
+            for bad in (value + ',OU=extra', value + ',' + uid,
+                        value.replace(uid, qualify.subject('proof-b')),
+                        value.replace('C=US', 'C=GB'), value.replace('client-a-abcde', 'a,OU=x'),
+                        value.replace('client-a-abcde', 'a' * 254)):
+                self.assertIsNone(re.fullmatch(pattern, bad))
 
     def test_exact_subjects_are_distinct_and_bounded(self):
         values=[qualify.subject(sa) for sa in qualify.SAS]

@@ -7,8 +7,17 @@ remains separate and unchanged.
 
 SPIRE's built-in `uniqueid` CredentialComposer adds subject OID `2.5.4.45` from
 the first 128 bits of SHA256 of the complete SPIFFE ID. The URI SAN remains the
-canonical identity. Four exact DN rules map only the fixture identities to
-distinct aliases; there is no DEFAULT or wildcard rule. A dedicated bootstrap
+canonical identity. SPIRE 1.15.3 also issues `C=US,O=SPIRE` and a CN equal to
+the first DNS SAN from the existing registration. The probe requires exactly
+those four attributes with no duplicates/extras, exact URI/hash binding, and
+a bounded DNS-shaped CN matching the first DNS SAN. Four anchored DN rules pin
+the complete uniqueid and fixed C/O, allowing only the bounded CN field to vary.
+The artifact records Go `pkix.Name.String()` order; broker rules use the
+[GnuTLS compatibility DN format](https://gnutls.org/manual/html_node/X509-certificate-API.html)
+called by Seastar (`C,O,CN,uniqueid`). Actual broker ACL outcomes must qualify
+that serialization; Go string equality alone cannot.
+The CN never selects a principal; there is no DEFAULT or catch-all rule.
+A dedicated bootstrap
 identity creates two topics and grants each client only read/write/describe on
 its own topic. The fourth identity has no ACLs. Only bootstrap is a superuser;
 no tested client receives its credentials or ServiceAccount.
@@ -56,3 +65,8 @@ Primary references: [SPIRE uniqueid](https://github.com/spiffe/spire/blob/v1.15.
 [Redpanda DN mapping](https://docs.redpanda.com/streaming/current/manage/security/authentication/),
 [first-start bootstrap](https://docs.redpanda.com/streaming/25.2/deploy/redpanda/manual/production/production-deployment/).
 The CEL composer currently implements JWT composition only and is not used.
+The first Linux qualification (42113920778) reached the broker but correctly
+failed bootstrap SVID validation because the initial probe incorrectly assumed
+a sole-uniqueid subject. The corrected shape follows the pinned SPIRE
+[credential builder](https://github.com/spiffe/spire/blob/v1.15.3/pkg/server/credtemplate/builder.go).
+Operational acceptance still requires the corrected real-broker run to pass.

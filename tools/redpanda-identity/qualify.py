@@ -31,6 +31,17 @@ def subject(sa):
     return '2.5.4.45=#1320' + value.encode().hex()
 
 
+def subject_pattern(sa):
+    # Go pkix.Name.String places unknown attributes after reversed known RDNs.
+    return 'CN=[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?,O=SPIRE,C=US,' + subject(sa).replace('.', '[.]')
+
+
+def broker_subject_pattern(sa):
+    # Seastar uses gnutls_x509_crt_get_dn: compatibility order follows ASN.1.
+    # Only the pinned uniqueid hash selects the principal; CN is bounded context.
+    return 'C=US,O=SPIRE,CN=[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?,' + subject(sa).replace('.', '[.]')
+
+
 def spire_objects():
     docs = shared.spire_objects()
     config = next(d for d in docs if d['kind']=='ConfigMap' and d['metadata']['name']=='spire-server')
@@ -54,7 +65,7 @@ def broker_objects():
                         'cert_file':'/certs/svid.pem','key_file':'/certs/svid_key.pem','truststore_file':'/certs/bundle.pem'}]}}
     bootstrap = {'kafka_enable_authorization':True, 'superusers':['proof-bootstrap'],
       'auto_create_topics_enabled':False,'default_topic_replications':1,
-      'kafka_mtls_principal_mapping_rules':['RULE:^'+subject(sa).replace('.','[.]')+'$/'+sa+'/' for sa in SAS]}
+      'kafka_mtls_principal_mapping_rules':['RULE:^'+broker_subject_pattern(sa)+'$/'+sa+'/' for sa in SAS]}
     helper_config = '\n'.join(['agent_address = "/run/spiffe/spire-agent.sock"','cert_dir = "/certs"',
       'svid_file_name = "svid.pem"','svid_key_file_name = "svid_key.pem"','svid_bundle_file_name = "bundle.pem"'])
     helper = {'name':'svid','image':shared.PINS['ghcr.io/spiffe/spiffe-helper:0.9.0'],
@@ -153,7 +164,10 @@ def main():
                 apply([job(case,sa,mode,image)])
                 k('-n','kanz-services','wait','--for=condition=complete','job/'+case,'--timeout=190s')
                 result=json.loads(k('-n','kanz-services','logs','job/'+case))
-                if result!={'passed':True,'mode':mode,'identity':identity(sa),'subjectDN':subject(sa),'renewed':mode=='publish','sourceVersion':sha}:
+                dn=result.get('subjectDN','')
+                if not isinstance(dn,str) or not re.fullmatch(subject_pattern(sa),dn):
+                    raise ValueError('unexpected observed workload subject')
+                if result!={'passed':True,'mode':mode,'identity':identity(sa),'subjectDN':dn,'renewed':mode=='publish','sourceVersion':sha}:
                     raise ValueError('missing exact positive identity evidence')
                 evidence['observations'].append(dict(result,case=case))
             pods=json.loads(k('get','pods','-A','-o','json'))['items']

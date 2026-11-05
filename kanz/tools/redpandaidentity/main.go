@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/eighred/kanz/internal/version"
@@ -24,15 +25,26 @@ import (
 
 // Only fixed local stage labels may appear in failed probe diagnostics.
 var stage = "configuration"
+var dnsName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
 
 func subject(cert *x509.Certificate, id string) (string, error) {
-	if len(cert.URIs) != 1 || cert.URIs[0].String() != id || len(cert.Subject.Names) != 1 {
+	if len(cert.URIs) != 1 || cert.URIs[0].String() != id || len(cert.Subject.Names) != 4 {
 		return "", errors.New("unexpected SVID identity attributes")
 	}
+	if len(cert.DNSNames) == 0 || cert.Subject.CommonName != cert.DNSNames[0] || !dnsName.MatchString(cert.Subject.CommonName) {
+		return "", errors.New("subject CN does not match first bounded DNS SAN")
+	}
 	h := sha256.Sum256([]byte(id))
-	n := cert.Subject.Names[0]
-	if n.Type.String() != "2.5.4.45" || n.Value != hex.EncodeToString(h[:16]) {
-		return "", errors.New("uniqueid is not bound to the complete SPIFFE ID")
+	expected := map[string]string{"2.5.4.45": hex.EncodeToString(h[:16]), "2.5.4.3": cert.Subject.CommonName, "2.5.4.10": "SPIRE", "2.5.4.6": "US"}
+	for _, n := range cert.Subject.Names {
+		want, ok := expected[n.Type.String()]
+		if !ok || n.Value != want {
+			return "", errors.New("subject attributes are not uniquely bound to pinned issuance and SPIFFE ID")
+		}
+		delete(expected, n.Type.String())
+	}
+	if len(expected) != 0 {
+		return "", errors.New("required subject attribute missing")
 	}
 	return cert.Subject.String(), nil
 }
