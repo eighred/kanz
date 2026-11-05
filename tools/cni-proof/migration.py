@@ -18,10 +18,16 @@ BASE_CONFIG = {"cluster-init": True, "disable": ["traefik", "servicelb", "metric
                "secrets-encryption": True, "write-kubeconfig-mode": "0600"}
 
 
+def cpu_limit():
+    return "--cpus=" + str(min(4, os.cpu_count() or 1))
+
+
 def command(args, data=None, timeout=120):
     # Raw process output can contain a K3s bootstrap token. Never print it.
     result = subprocess.run(args, input=data, capture_output=True, text=True, timeout=timeout)
     if result.returncode or len(result.stdout) > 1 << 20:
+        if "cpus" in result.stderr.lower() and "range" in result.stderr.lower():
+            raise proof.ProofError("fixture_CPU_limit_exceeds_host")
         raise proof.ProofError("fixture_command_failed")
     return result.stdout.strip()
 
@@ -216,23 +222,29 @@ def main():
     phase = "create"
     try:
         command(["docker", "volume", "create", "--label", LABEL + "=" + name, f.volume])
+        phase = "docker_run"
         command(["docker", "run", "-d", "--name", name, "--hostname", name, "--label", LABEL + "=" + name,
-                 "--privileged", "--cpus=4", "--memory=5g", "--pids-limit=4096", "--log-driver=none",
+                 "--privileged", cpu_limit(), "--memory=5g", "--pids-limit=4096", "--log-driver=none",
                  "--tmpfs", "/run", "--tmpfs", "/var/run", "--mount", "type=volume,src=" + f.volume + ",dst=/var/lib/rancher",
                  NODE, "server", "--cluster-init", "--secrets-encryption", "--disable=traefik", "--disable=servicelb", "--disable=metrics-server"], timeout=240)
+        phase = "node_identity"
         container_id = f.ownership()
         evidence["nodeImageID"] = command(["docker", "image", "inspect", NODE, "--format", "{{.Id}}"])
+        phase = "node_version"
         version = f.inside("k3s", "--version").splitlines()[0]
         if not version.startswith("k3s version v1.36.4+k3s1 "):
             raise proof.ProofError("unexpected_K3s_version")
         evidence["nodeVersion"] = version
+        phase = "copy_verified_tools"
         for src, dst in ((shutil.which("helm"), "/bin/helm"), (str(Path(os.environ["RUNNER_TEMP"]) / "cilium.tgz"), "/tmp/cilium.tgz")):
             command(["docker", "cp", src, name + ":" + dst])
+        phase = "initial_node_ready"
         node = f.ready()
         node_uid = node["metadata"]["uid"]
         f.k("create", "namespace", name)
         nonce = uuid.uuid4().hex
         f.k("apply", "-f", "-", value={"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "etcd-marker", "namespace": name}, "data": {"marker": nonce}})
+        phase = "initial_storage"
         original = f.storage("retained", nonce, True)
         config_uid = json.loads(f.k("-n", name, "get", "configmap", "etcd-marker", "-o", "json"))["metadata"]["uid"]
         evidence["preservedIdentities"] = {"node": node_uid, "etcdObject": config_uid,
@@ -256,8 +268,9 @@ def main():
             proof.validate_report(report, source)
             evidence["phases"][phase] = {"state": "preserved", "dns": "PASS", "newPVC": "PASS", "storageImageID": original["imageID"], "policy": report}
         evidence["verdict"] = "PASS"
-    except (OSError, ValueError, RuntimeError, proof.ProofError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, RuntimeError, proof.ProofError, subprocess.TimeoutExpired) as error:
         evidence["failedPhase"] = phase
+        evidence["reason"] = str(error) if isinstance(error, proof.ProofError) else "fixture_transport_or_decode_failure"
     finally:
         try:
             # Names originate only in this process; ownership is checked before

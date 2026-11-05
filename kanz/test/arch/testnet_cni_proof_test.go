@@ -47,7 +47,7 @@ var cniProofRequirements = map[string][]string{
 	},
 	"tools/cni-proof/migration.py": {
 		`r"kanz-cni-migration-[0-9a-f]{24}"`, `any(m["Type"] == "bind"`,
-		`"--cpus=4", "--memory=5g", "--pids-limit=4096", "--log-driver=none"`,
+		`str(min(4, os.cpu_count() or 1))`, `cpu_limit(), "--memory=5g", "--pids-limit=4096", "--log-driver=none"`,
 		`"--cluster-init", "--secrets-encryption"`, `"kubeProxyReplacement=false"`,
 		`def recycle_system(self):`, `def quiesce_system(self):`, `"node_identity_changed"`,
 		`"etcd_state_changed"`, `"persistent_volume_identity_changed"`, `f.storage("fresh-" + phase, nonce, True)`,

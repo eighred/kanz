@@ -9,6 +9,11 @@ import proof
 
 
 class MigrationTests(unittest.TestCase):
+    def test_cpu_bound_follows_host_and_caps_at_four(self):
+        for available, expected in ((None, 1), (1, 1), (2, 2), (16, 4)):
+            with patch.object(migration.os, "cpu_count", return_value=available):
+                self.assertEqual(migration.cpu_limit(), "--cpus=" + str(expected))
+
     def test_target_is_generated_fixture_only(self):
         for name in ("production", "kanz-cni-migration-", "../node", "kanz-cni-migration-" + "0" * 25):
             with self.assertRaises(proof.ProofError):
