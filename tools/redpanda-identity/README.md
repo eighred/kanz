@@ -70,3 +70,8 @@ failed bootstrap SVID validation because the initial probe incorrectly assumed
 a sole-uniqueid subject. The corrected shape follows the pinned SPIRE
 [credential builder](https://github.com/spiffe/spire/blob/v1.15.3/pkg/server/credtemplate/builder.go).
 Operational acceptance still requires the corrected real-broker run to pass.
+
+Run 42116497605 passed that SVID validation but failed broker bootstrap, with
+cleanup confirmed. A separate exact-peer TLS handshake and fixed diagnostic
+classes now distinguish TLS, topic creation and ACL creation; raw error text
+is never emitted. This remains failed qualification until a complete run passes.

@@ -1,11 +1,17 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"github.com/segmentio/kafka-go"
+	"io"
 	"net/url"
 	"testing"
 )
@@ -56,6 +62,23 @@ func TestSubjectRequiresCanonicalCompleteIdentity(t *testing.T) {
 		mutate(&clone)
 		if _, err := subject(&clone, id); err == nil {
 			t.Fatal("accepted changed identity boundary")
+		}
+	}
+}
+
+func TestFailureClassDoesNotExposeErrorText(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("sensitive: %w", kafka.ClusterAuthorizationFailed), "kafka-31"},
+		{&tls.CertificateVerificationError{Err: errors.New("sensitive certificate")}, "tls-certificate"},
+		{context.DeadlineExceeded, "timeout"},
+		{io.EOF, "eof"},
+		{errors.New("private arbitrary error"), "other"},
+	} {
+		if got := failureClass(tc.err); got != tc.want {
+			t.Fatalf("classification=%q want=%q", got, tc.want)
 		}
 	}
 }

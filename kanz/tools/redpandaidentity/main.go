@@ -4,12 +4,14 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"regexp"
 	"time"
@@ -125,6 +127,17 @@ func run() error {
 	stage = "kafka"
 	transport := &kafka.Transport{TLS: tlsconfig.MTLSClientConfig(src, src, tlsconfig.AuthorizeID(spiffeid.RequireFromString("spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda")))}
 	defer transport.CloseIdleConnections()
+	// Establish authenticated TLS independently so broker protocol failures
+	// cannot be mistaken for certificate or exact-peer authorization failures.
+	stage = "tls-handshake"
+	dialer := &tls.Dialer{Config: transport.TLS, NetDialer: &net.Dialer{Timeout: 10 * time.Second}}
+	conn, err := dialer.DialContext(ctx, "tcp", "redpanda.kanz-messaging.svc:9094")
+	if err != nil {
+		return err
+	}
+	if err := conn.Close(); err != nil {
+		return err
+	}
 	c := &kafka.Client{Addr: kafka.TCP("redpanda.kanz-messaging.svc:9094"), Transport: transport, Timeout: 10 * time.Second}
 	var acls []kafka.ACLEntry
 	for _, name := range []string{"proof-a", "proof-b"} {
@@ -134,7 +147,7 @@ func run() error {
 	}
 	switch mode {
 	case "bootstrap":
-		stage = "bootstrap"
+		stage = "bootstrap-topics"
 		if sa != "proof-bootstrap" {
 			return errors.New("bootstrap identity required")
 		}
@@ -147,6 +160,7 @@ func run() error {
 				return err
 			}
 		}
+		stage = "bootstrap-acls"
 		ar, err := c.CreateACLs(ctx, &kafka.CreateACLsRequest{ACLs: acls})
 		if err != nil {
 			return err
@@ -263,11 +277,32 @@ func run() error {
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{"passed": true, "mode": mode, "identity": id, "subjectDN": dn, "renewed": mode == "publish", "sourceVersion": version.String()})
 }
 
+// failureClass emits only fixed categories or the protocol's numeric error code.
+// Error messages may carry broker supplied text and are deliberately excluded.
+func failureClass(err error) string {
+	var code kafka.Error
+	if errors.As(err, &code) {
+		return fmt.Sprintf("kafka-%d", int(code))
+	}
+	var certificate *tls.CertificateVerificationError
+	if errors.As(err, &certificate) {
+		return "tls-certificate"
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, io.EOF) {
+		return "eof"
+	}
+	return "other"
+}
+
 func main() {
 	if err := run(); err != nil {
 		// Broker errors can contain arbitrary diagnostic text. Never forward
 		// raw errors, certificates, keys or workload API payloads to CI logs.
-		fmt.Fprintf(os.Stderr, "PROBE_FAILED_STAGE:%s\n", stage)
+		fmt.Fprintf(os.Stderr, "PROBE_FAILED_STAGE:%s CLASS:%s\n", stage, failureClass(err))
 		os.Exit(1)
 	}
 }
