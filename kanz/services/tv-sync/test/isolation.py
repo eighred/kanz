@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import uuid
@@ -220,6 +221,86 @@ def wait_until(check, description, seconds=180):
     raise RuntimeError(f"timeout waiting for {description}: {last}")
 
 
+def image_digest(value):
+    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise RuntimeError("image identity is not a full SHA-256 digest")
+    return value
+
+
+def docker_reference(value):
+    # This harness supports two registries and its own UUID-tagged imports, not
+    # arbitrary URLs. Parse the complete reference before assembling aliases.
+    if not isinstance(value, str):
+        raise RuntimeError("invalid Docker image reference")
+    match = re.fullmatch(
+        r"(?:(?P<registry>docker\.io|ghcr\.io)/)?"
+        r"(?P<path>[a-z0-9]+(?:[_-][a-z0-9]+)*(?:/[a-z0-9]+(?:[_-][a-z0-9]+)*)?)"
+        r"(?P<suffix>@sha256:[0-9a-f]{64}|:kanz-tv-isolation-[0-9a-f]{12})", value)
+    if match is None:
+        raise RuntimeError("unsupported Docker image reference")
+    registry = match["registry"] or "docker.io"
+    parts = match["path"].split("/")
+    if len(parts) == 1:
+        if registry != "docker.io":
+            raise RuntimeError("GHCR image reference requires a namespace")
+        parts.insert(0, "library")
+    suffix = match["suffix"]
+    if suffix[0] == ":" and (registry != "docker.io" or parts[0] != "kanz-isolation"):
+        raise RuntimeError("image tag is not a local isolation fixture")
+    return registry + "/" + "/".join(parts) + suffix
+
+
+def archive_config_digest(archive, local_name):
+    # Docker's containerd exporter emits manifest.json for compatibility. Read
+    # exact bytes, never extract a tar member or hash reserialized config JSON.
+    with tarfile.open(archive, "r:") as saved:
+        members = {}
+        for member in saved:
+            name = member.name.rstrip("/") if member.isdir() else member.name
+            path = PurePosixPath(name)
+            if (not name or path.is_absolute() or ".." in path.parts or "\\" in name
+                    or ":" in name or str(path) != name or name in members
+                    or not (member.isfile() or member.isdir())):
+                raise RuntimeError("unsafe or duplicate image archive member")
+            members[name] = member
+            if len(members) > 100000:
+                raise RuntimeError("image archive member limit exceeded")
+
+        def read_member(name, limit):
+            member = members.get(name)
+            if member is None or not member.isfile() or member.size < 0 or member.size > limit:
+                raise RuntimeError("missing, nonregular or oversized image metadata")
+            with saved.extractfile(member) as source:
+                data = source.read(limit + 1)
+            if len(data) != member.size:
+                raise RuntimeError("image metadata size mismatch")
+            return data
+
+        manifest = json.loads(read_member("manifest.json", 1024*1024))
+        if not isinstance(manifest, list) or len(manifest) != 1 or not isinstance(manifest[0], dict):
+            raise RuntimeError("image archive must contain exactly one manifest entry")
+        entry = manifest[0]
+        tags = entry.get("RepoTags")
+        if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+            raise RuntimeError("invalid image archive repository tags")
+        if not any(docker_reference(tag) == docker_reference(local_name) for tag in tags):
+            raise RuntimeError("image archive tag is missing")
+        config_path = entry.get("Config")
+        if not isinstance(config_path, str):
+            raise RuntimeError("invalid image archive config reference")
+        match = re.fullmatch(r"(?:blobs/sha256/([0-9a-f]{64})|([0-9a-f]{64})\.json)", config_path)
+        if not match:
+            raise RuntimeError("image config path is not content addressed")
+        content = read_member(config_path, 16*1024*1024)
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        if digest != "sha256:" + (match[1] or match[2]):
+            raise RuntimeError("image config bytes differ from their archive digest")
+        config = json.loads(content)
+        if not isinstance(config, dict) or config.get("os") != "linux" or config.get("architecture") != "amd64":
+            raise RuntimeError("image config platform is not linux/amd64")
+        return digest
+
+
 class Cluster:
     def __init__(self, name):
         self.name = name
@@ -244,19 +325,37 @@ class Cluster:
     def wait_pod(self, ns, label):
         self.k("-n", ns, "wait", "--for=condition=Ready", "pod", "-l", label, "--timeout=180s", timeout=190)
 
-    def load(self, image, local_name, scratch):
+    def load(self, image, local_name, scratch, identity):
+        image_digest(image.rsplit("@", 1)[-1])
+        identity["source"] = image
         run("docker", "pull", "--platform", "linux/amd64", image, timeout=240)
-        original_id = run("docker", "image", "inspect", image, "--format", "{{.Id}}").strip()
+        inspected = json.loads(run("docker", "image", "inspect", image, "--format",
+                                   '{"id":{{json .Id}},"repo_digests":{{json .RepoDigests}}}'))
+        original_id = image_digest(inspected["id"])
+        identity["docker_reference_id"] = original_id
+        repo_digests = inspected.get("repo_digests")
+        if not isinstance(repo_digests, list) or any(not isinstance(ref, str) for ref in repo_digests):
+            raise RuntimeError("invalid pulled image repository digests")
+        if docker_reference(image) not in {docker_reference(ref) for ref in repo_digests}:
+            raise RuntimeError("pulled image lacks the requested repository digest")
         run("docker", "tag", image, local_name)
+        tagged_id = image_digest(run("docker", "image", "inspect", local_name, "--format", "{{.Id}}").strip())
+        identity["tagged_docker_reference_id"] = tagged_id
+        if tagged_id != original_id:
+            raise RuntimeError("local image tag differs from the digest-pulled image")
         archive = scratch / "image.tar"
         run("docker", "save", "-o", str(archive), local_name, timeout=180)
+        config_id = archive_config_digest(archive, local_name)
+        identity["archive_config_digest"] = config_id
         run("docker", "cp", str(archive), f"{self.name}:/tmp/image.tar", timeout=180)
         self.cli("ctr", "images", "import", "/tmp/image.tar", timeout=180)
         imported = json.loads(self.cli("crictl", "inspecti", local_name))
-        if imported["status"]["id"] != original_id:
-            raise RuntimeError("imported image config differs from digest-pulled image")
+        imported_id = image_digest(imported["status"]["id"])
+        identity["imported_cri_config_digest"] = imported_id
+        if imported_id != config_id:
+            raise RuntimeError("imported image config differs from the digest-pulled archive config")
         archive.unlink()
-        return original_id
+        return config_id
 
 
 def pod(name, ns, image, command=None, env=None, app=None):
@@ -342,7 +441,12 @@ def main():
             c.apply([{"apiVersion":"v1","kind":"Namespace","metadata":{"name":ns}} for ns in sorted(namespaces)])
             local={key:"docker.io/kanz-isolation/"+key+":"+name for key in ["postgres","nats","nats-box","tv-sync","migrate"]}
             images={**{k:v for k,v in IMAGES.items() if k!="k3s"},"tv-sync":args.image,"migrate":args.migration_image}
-            evidence["imported_config_ids"]={key:c.load(image,local[key],scratch) for key,image in images.items()}
+            evidence["imported_config_ids"]={}
+            evidence["image_identities"]={}
+            for key,image in images.items():
+                identity={}
+                evidence["image_identities"][key]=identity
+                evidence["imported_config_ids"][key]=c.load(image,local[key],scratch,identity)
             # Build trusted probe source with the canonical principal-header helper.
             probe=scratch/"probe"
             env={**os.environ,"GOOS":"linux","GOARCH":"amd64","CGO_ENABLED":"0"}
@@ -404,7 +508,9 @@ def main():
                 image_id=status["imageID"]
                 evidence["running_image_ids"][role]=image_id
                 running=json.loads(c.cli("crictl","inspecti",image_id))
-                if running["status"]["id"] != evidence["imported_config_ids"][role]:
+                running_id=image_digest(running["status"]["id"])
+                evidence["image_identities"][role]["running_cri_config_digest"]=running_id
+                if running_id != evidence["imported_config_ids"][role]:
                     raise RuntimeError(f"running {role} is not the verified imported release image")
                 if role=="migrate" and status.get("state",{}).get("terminated",{}).get("exitCode")!=0:
                     raise RuntimeError("verified migration image did not complete successfully")

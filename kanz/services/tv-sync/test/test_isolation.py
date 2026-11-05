@@ -1,6 +1,9 @@
 """Offline trust-boundary tests; no Docker, registry, or cluster calls."""
 import copy
 import json
+import hashlib
+import io
+import tarfile
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +14,151 @@ import isolation
 IMAGE = 'ghcr.io/eighred/tv-sync@sha256:' + 'a' * 64
 MIGRATION_IMAGE = 'ghcr.io/eighred/kanz-migrate@sha256:' + 'c' * 64
 SHA = 'b' * 40
+
+
+class DockerReferenceTests(unittest.TestCase):
+    def test_supported_registry_aliases_preserve_repository_and_digest(self):
+        digest = '@sha256:' + 'a'*64
+        for source, expected in [
+            ('postgres', 'docker.io/library/postgres'),
+            ('nats', 'docker.io/library/nats'),
+            ('library/postgres', 'docker.io/library/postgres'),
+            ('docker.io/postgres', 'docker.io/library/postgres'),
+            ('docker.io/library/postgres', 'docker.io/library/postgres'),
+            ('natsio/nats-box', 'docker.io/natsio/nats-box'),
+            ('ghcr.io/eighred/tv-sync', 'ghcr.io/eighred/tv-sync'),
+            ('ghcr.io/eighred/kanz-migrate', 'ghcr.io/eighred/kanz-migrate'),
+        ]:
+            with self.subTest(source=source):
+                self.assertEqual(isolation.docker_reference(source+digest), expected+digest)
+        local = 'kanz-isolation/postgres:kanz-tv-isolation-0123456789ab'
+        self.assertEqual(isolation.docker_reference(local), 'docker.io/'+local)
+        self.assertEqual(isolation.docker_reference('docker.io/'+local), 'docker.io/'+local)
+        self.assertNotEqual(isolation.docker_reference('other/postgres'+digest),
+                            isolation.docker_reference('postgres'+digest))
+
+    def test_lookalikes_paths_and_unsupported_suffixes_are_refused(self):
+        digest = '@sha256:' + 'a'*64
+        for reference in [
+            'evil.docker.io/library/postgres'+digest,
+            'docker.io.evil/library/postgres'+digest,
+            'evil/ghcr.io/eighred/tv-sync'+digest,
+            'https://docker.io/library/postgres'+digest,
+            'docker.io:443/library/postgres'+digest,
+            'ghcr.io.evil/eighred/tv-sync'+digest,
+            'ghcr.io/tv-sync'+digest,
+            'docker.io//library/postgres'+digest,
+            'docker.io/library/../postgres'+digest,
+            'docker.io/library/postgres/extra'+digest,
+            'docker.io/library%2fpostgres'+digest,
+            'docker.io/library\\postgres'+digest,
+            'postgres'+digest+'\n',
+            'postgres'+digest.upper(),
+            'postgres:latest',
+            'postgres:kanz-tv-isolation-0123456789ab',
+            'ghcr.io/kanz-isolation/postgres:kanz-tv-isolation-0123456789ab',
+            'kanz-isolation/postgres:kanz-tv-isolation-short',
+        ]:
+            with self.subTest(reference=reference), self.assertRaises(RuntimeError):
+                isolation.docker_reference(reference)
+
+
+class ImageIdentityTests(unittest.TestCase):
+    local = 'docker.io/kanz-isolation/postgres:kanz-tv-isolation-0123456789ab'
+    source = 'postgres@sha256:' + 'e' * 64
+
+    def archive(self, path, *, modern=False, mutation=None):
+        content = b'{"architecture":"amd64", "os":"linux", "config":{}}'
+        if mutation == 'architecture':
+            content = content.replace(b'amd64', b'arm64')
+        if mutation == 'config-list':
+            content = b'[]'
+        digest = hashlib.sha256(content).hexdigest()
+        config_path = 'blobs/sha256/' + digest if modern else digest + '.json'
+        entry = {'Config': config_path, 'RepoTags': ['kanz-isolation/postgres:kanz-tv-isolation-0123456789ab']}
+        if mutation == 'path':
+            entry['Config'] = '../' + config_path
+        if mutation == 'missing tag':
+            entry['RepoTags'] = ['kanz-isolation/other:kanz-tv-isolation-0123456789ab']
+        if mutation == 'repotags-string':
+            entry['RepoTags'] = self.local
+        if mutation == 'repotags-nonstring':
+            entry['RepoTags'] = [42]
+        if mutation == 'config-nonstring':
+            entry['Config'] = []
+        entries = [entry, entry] if mutation == 'ambiguous' else [entry]
+        if mutation == 'unrelated-entry':
+            entries.append({'RepoTags': ['unrelated:tag'], 'Config': config_path})
+        manifest = json.dumps(entries).encode()
+        with tarfile.open(path, 'w') as saved:
+            def add(name, data, kind=tarfile.REGTYPE):
+                info = tarfile.TarInfo(name)
+                info.type = kind
+                info.size = len(data) if kind == tarfile.REGTYPE else 0
+                if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                    info.linkname = 'private'
+                saved.addfile(info, io.BytesIO(data) if info.size else None)
+            add('manifest.json', manifest)
+            if mutation == 'oversize':
+                content += b' ' * (16*1024*1024)
+            if mutation == 'tamper':
+                content = content.replace(b'linux', b'other')
+            kind = {'symlink': tarfile.SYMTYPE, 'hardlink': tarfile.LNKTYPE}.get(mutation, tarfile.REGTYPE)
+            add(config_path, content, kind)
+            if mutation == 'duplicate':
+                add(config_path, content)
+        return 'sha256:' + digest
+
+    def test_raw_config_hash_handles_both_docker_archive_layouts(self):
+        for modern in (False, True):
+            with self.subTest(modern=modern), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp)/'image.tar'
+                expected = self.archive(path, modern=modern)
+                self.assertEqual(isolation.archive_config_digest(path, self.local), expected)
+
+    def test_unsafe_or_ambiguous_archives_are_refused(self):
+        for mutation in ('tamper', 'ambiguous', 'path', 'symlink', 'hardlink', 'duplicate', 'oversize', 'architecture', 'missing tag', 'repotags-string', 'repotags-nonstring', 'config-nonstring', 'config-list', 'unrelated-entry'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp)/'image.tar'
+                self.archive(path, mutation=mutation)
+                with self.assertRaises(RuntimeError):
+                    isolation.archive_config_digest(path, self.local)
+
+    @patch('isolation.run')
+    def test_load_binds_repository_tag_and_config_without_equating_digest_types(self, command):
+        for modern in (False, True):
+            for failure in (None, 'repository', 'tag', 'config'):
+                with self.subTest(modern=modern, failure=failure), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    config_id = self.archive(root/'expected.tar', modern=modern)
+                    docker_id = 'sha256:' + 'a'*64 if modern else config_id
+                    identity = {}
+                    def execute(*args, **kwargs):
+                        if args[:3] == ('docker', 'image', 'inspect'):
+                            if args[3] == self.source:
+                                refs = ['docker.io/library/' + self.source]
+                                if failure == 'repository':
+                                    refs = ['docker.io/library/other@sha256:' + 'e'*64]
+                                return json.dumps({'id': docker_id, 'repo_digests': refs})
+                            return ('sha256:' + 'b'*64) if failure == 'tag' else docker_id
+                        if args[:2] == ('docker', 'save'):
+                            self.archive(root/'image.tar', modern=modern)
+                        if '/bin/crictl' in args:
+                            return json.dumps({'status': {'id': ('sha256:'+'c'*64) if failure == 'config' else config_id}})
+                        return ''
+                    command.side_effect = execute
+                    if failure:
+                        with self.assertRaises(RuntimeError):
+                            isolation.Cluster('fixture').load(self.source, self.local, root, identity)
+                        self.assertEqual(identity['docker_reference_id'], docker_id)
+                        if failure == 'config':
+                            self.assertEqual(identity['archive_config_digest'], config_id)
+                            self.assertEqual(identity['imported_cri_config_digest'], 'sha256:'+'c'*64)
+                    else:
+                        self.assertEqual(isolation.Cluster('fixture').load(self.source, self.local, root, identity), config_id)
+                        self.assertEqual(identity['archive_config_digest'], identity['imported_cri_config_digest'])
+                    self.assertNotIn('config', identity)
+                    self.assertNotIn('env', identity)
 
 
 class ContainerCLITests(unittest.TestCase):
