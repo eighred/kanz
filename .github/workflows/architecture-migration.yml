@@ -71,7 +71,7 @@ jobs:
           rustup show active-toolchain
       - name: Verify migration boundary even on Rust-only changes
         working-directory: kanz
-        run: go test -p 1 ./test/arch -run 'Test(RustMigration|RustDepth|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
+        run: go test -p 1 ./test/arch -run 'Test(Rust|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
       - name: Rust format, compile and unit tests
         working-directory: kanz-rs
         run: |
