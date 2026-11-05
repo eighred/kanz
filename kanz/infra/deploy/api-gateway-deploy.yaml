@@ -225,7 +225,7 @@ spec:
             # reachable ONLY through this gateway: it authenticates nothing and serves
             # whatever tenant the principal header names, so a direct route to it would
             # let any caller read any tenant's book. Empty ⇒ those routes 503.
-            - { name: API_GATEWAY_TV_SYNC_ADDR, value: "http://tv-sync.kanz-services.svc:8091" }
+            - { name: API_GATEWAY_TV_SYNC_ADDR, value: "http://tv-sync.kanz-services.svc:8113" }
             # The agent-facing MCP read plane (#743) on its API listener, NOT the
             # :8080 that serves its /metrics and is admitted namespace-wide by
             # allow-observability-scrape. Unset until #762: the plane was deployed
