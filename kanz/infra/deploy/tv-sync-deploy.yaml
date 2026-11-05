@@ -48,6 +48,7 @@ spec:
     app: tv-sync
   ports:
     - { name: http, port: 8091, targetPort: 8091 }
+    - { name: api, port: 8113, targetPort: 8113 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -119,8 +120,10 @@ spec:
           image: ghcr.io/eighred/tv-sync@sha256:ba35f653d2b09d8b0234e4bef9014ed0e02ac3ad3ac492ff672092e170dbd1fd
           ports:
             - { containerPort: 8091, name: http }
+            - { containerPort: 8113, name: api }
           env:
             - { name: TV_SYNC_LISTEN, value: ":8091" }
+            - { name: TV_SYNC_API_LISTEN, value: ":8113" }
             - { name: TV_SYNC_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: TV_SYNC_SOURCE, value: "tv-sync" }
             # SEC-01a. The bus is mTLS-ONLY (infra/nats/nats.yaml sets tls.verify).

@@ -17,7 +17,10 @@ import (
 
 // Config is the resolved configuration.
 type Config struct {
+	// Listen retains the operations port; APIListen must be gateway-only in
+	// NetworkPolicy because the Broker API trusts injected principal headers.
 	Listen       string
+	APIListen    string
 	LogLevel     slog.Level
 	OTLPEndpoint string
 
@@ -140,6 +143,7 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		Listen:        env.Or("TV_SYNC_LISTEN", ":8091"),
+		APIListen:     env.Or("TV_SYNC_API_LISTEN", ":8113"),
 		LogLevel:      env.ParseLevelOr(os.Getenv("TV_SYNC_LOG_LEVEL"), slog.LevelInfo),
 		OTLPEndpoint:  os.Getenv("TV_SYNC_OTLP_ENDPOINT"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),

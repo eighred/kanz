@@ -243,15 +243,10 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 // validates the token, and a NetworkPolicy is what stops anyone else reaching
 // this port — the control pkg/auth/meshheader.go states for the whole estate.
 //
-// IT IS NOT "the mesh (mTLS, SVID-authorized)", WHICH IS WHAT THIS SAID (#626).
-// tv-sync serves plain HTTP through httpserver.New; no listener here sets
-// TLSConfig and the gateway dials http://tv-sync.kanz-services.svc:8091. The
-// claim was doubly misleading on THIS file, because tv-sync is one of the three
-// services test/arch/network_policy_coverage_test.go lists in
-// tenantHeaderTrustingServices — its ARM 3c residual says a pod in
-// kanz-observability can reach this very port and name any tenant, since
-// /metrics and this API share it. One guard recorded the exposure while this
-// comment told a reader mTLS had closed it.
+// The API uses plain HTTP on its gateway-only listener. NetworkPolicy, not
+// mTLS or these headers alone, establishes the caller's identity. Operations
+// runs on a separate listener with no Broker API routes (#232); its scrape
+// grant must never include the API port.
 //
 // EXPOSE THIS SERVICE DIRECTLY TO THE INTERNET AND ANY CALLER CAN NAME ANY
 // TENANT AND READ THAT TENANT'S BOOK — its positions, its orders, its

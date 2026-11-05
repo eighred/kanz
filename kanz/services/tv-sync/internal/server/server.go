@@ -1,5 +1,4 @@
-// Package server is tv-sync's HTTP surface: the TradingView Broker-API routes
-// plus health/ready/metrics.
+// Package server separates the gateway-only Broker API from operations routes.
 package server
 
 import (
@@ -18,8 +17,9 @@ func (r *Readiness) Ready() bool    { return r.ready.Load() }
 
 // Server mounts the Broker API.
 type Server struct {
-	readiness *Readiness
-	mux       *http.ServeMux
+	readiness  *Readiness
+	mux        *http.ServeMux
+	operations *http.ServeMux
 }
 
 // Option customizes the server.
@@ -27,16 +27,16 @@ type Option func(*Server)
 
 // WithMetrics mounts a Prometheus /metrics handler.
 func WithMetrics(h http.Handler) Option {
-	return func(s *Server) { s.mux.Handle("GET /metrics", h) }
+	return func(s *Server) { s.operations.Handle("GET /metrics", h) }
 }
 
 // New builds the server over the broker handler.
 func New(readiness *Readiness, broker *brokerapi.Handler, opts ...Option) *Server {
-	s := &Server{readiness: readiness, mux: http.NewServeMux()}
-	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	s := &Server{readiness: readiness, mux: http.NewServeMux(), operations: http.NewServeMux()}
+	s.operations.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	s.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+	s.operations.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if !s.readiness.Ready() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
 			return
@@ -51,6 +51,9 @@ func New(readiness *Readiness, broker *brokerapi.Handler, opts ...Option) *Serve
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+
+// OperationsHandler exposes no tenant data, even when callers supply principal headers.
+func (s *Server) OperationsHandler() http.Handler { return s.operations }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

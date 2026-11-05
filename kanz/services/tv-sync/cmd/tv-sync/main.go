@@ -183,14 +183,25 @@ func run() int {
 
 	readiness := &server.Readiness{}
 	broker := brokerapi.New(proj)
-	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, broker, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
-	go func() {
-		logger.Info("tv-sync listening", "addr", cfg.Listen, "nats", cfg.NATSURL)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("http server failed", "err", err)
-			fatal.Raise(err)
-		}
-	}()
+	api := server.New(readiness, broker, server.WithMetrics(obs.MetricsHandler()))
+	servers := []*http.Server{
+		httpserver.New(cfg.Listen, api.OperationsHandler(), httpserver.Standard()),
+		httpserver.New(cfg.APIListen, api, httpserver.Standard()),
+	}
+	listeners, err := bindHTTPListeners(ctx, servers)
+	if err != nil {
+		logger.Error("tv-sync bind failed", "err", err)
+		return 2
+	}
+	for i, srv := range servers {
+		go func() {
+			logger.Info("tv-sync listening", "addr", srv.Addr)
+			if err := srv.Serve(listeners[i]); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("http server failed", "addr", srv.Addr, "err", err)
+				fatal.Raise(err)
+			}
+		}()
+	}
 
 	// Fold the OMS order/fill FACT stream into the projection, and the market
 	// price spine into the mark source. Each subject is subscribed on its own
@@ -216,8 +227,11 @@ func run() int {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("http shutdown error", "err", err)
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("http shutdown error", "addr", srv.Addr, "err", err)
+			_ = srv.Close()
+		}
 	}
 
 	// The run loop's own error and any fatal raised from a goroutine answer the
