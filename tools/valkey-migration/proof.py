@@ -14,7 +14,7 @@ REDIS_VERSION = "7.4.5"
 LABEL = "io.kanz.valkey-migration"
 KEYS = {"tenant-a:nonce:retained": "claimed", "tenant-b:nonce:retained": "independent",
         "tenant-a:idempotency": 'response:<>&\u2028\n"exact"', "tenant-a:counter": "19"}
-CASES = ["exact_values", "absolute_expiry", "tenant_distinct_keys", "retained_claim_refusal",
+CASES = ["redis_rewrite_preserves_state", "exact_values", "absolute_expiry", "tenant_distinct_keys", "retained_claim_refusal",
          "valkey_written_claim", "counter_update", "valkey_restart", "redis_rollback", "expiry_after_rollback", "authentication"]
 
 
@@ -243,6 +243,14 @@ def main():
         expected = fixture.snapshot(KEYS)
         verify_snapshot(expected, {key: {"value": value, "expires": expires} for key, value in KEYS.items()})
         fixture.rewrite(True)
+        # The pinned Redis 7.4.5 writes an RDB preamble Valkey 9.1.3 refuses.
+        # Convert while Redis still owns the data, then verify exact state before
+        # stopping it. Never repair this by discarding a snapshot or expiry.
+        stage = "redis_prepare_transfer"
+        if fixture.call("CONFIG", "SET", "aof-use-rdb-preamble", "no") != "OK":
+            raise Refused("redis_transfer_configuration_refused")
+        fixture.rewrite(False)
+        verify_snapshot(fixture.snapshot(KEYS), expected)
         fixture.stop()
         stage = "valkey_upgrade"
         report["phases"]["valkey"] = fixture.start(VALKEY, False)

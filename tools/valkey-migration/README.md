@@ -14,8 +14,14 @@ and counter changes survive rollback. It also checks authentication, fsync-alway
 no eviction, loaded image identity, clean shutdown and verified resource removal.
 Only fixed verdicts and image/version identities enter the evidence artifact.
 
-The initial Redis AOF includes its normal RDB preamble. Valkey loads that data,
-then explicitly rewrites its AOF with `aof-use-rdb-preamble no` before rollback.
+The initial Redis 7.4.5 AOF includes its normal RDB preamble. An actual attempt
+to load it in Valkey 9.1.3 failed with `unsupported_rdb_version`
+([run 42130099700](https://github.com/eighred/kanz/actions/runs/42130099700));
+cleanup was verified. Generic Redis protocol compatibility does not imply this
+on-disk format is compatible. Redis must first rewrite its AOF with
+`aof-use-rdb-preamble no` while it still owns the data, with exact state/expiry
+verified afterward. Valkey then loads that command-format AOF and explicitly
+rewrites it with the same setting before rollback.
 The rollback reads the current volume, including Valkey writes; it does not
 restore an old snapshot and silently lose newer claims. This proves only the
 string/counter operations used in this fixture, not arbitrary Redis modules or
