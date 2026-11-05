@@ -95,7 +95,7 @@ func evaluate(f *fixture) error {
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		ctx := conn.CloseRead(r.Context())
 		for _, event := range f.Events {
 			if conn.Write(ctx, websocket.MessageText, []byte(event)) != nil {
