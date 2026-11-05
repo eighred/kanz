@@ -32,6 +32,9 @@ func TestDialKafka_TLSAndSASLReachWriterTransport(t *testing.T) {
 	if tr.SASL == nil {
 		t.Error("writer Transport.SASL not set")
 	}
+	if c.admin.Transport != tr || c.transport != tr {
+		t.Error("metadata/offset administration does not share the authenticated writer transport")
+	}
 	if c.dialer == nil || c.dialer.TLS != tlsCfg || c.dialer.SASLMechanism == nil {
 		t.Errorf("reader dialer missing TLS/SASL: %+v", c.dialer)
 	}
@@ -47,5 +50,8 @@ func TestDialKafka_PlaintextHasNilDialer(t *testing.T) {
 	defer c.Close()
 	if c.dialer != nil {
 		t.Errorf("plaintext dialer = %+v want nil", c.dialer)
+	}
+	if c.transport.TLS != nil || c.admin.Transport != c.transport {
+		t.Error("plaintext metadata transport differs from the writer")
 	}
 }

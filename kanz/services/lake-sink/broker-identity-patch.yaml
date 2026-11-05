@@ -1,0 +1,24 @@
+# Staged strategic merge patch for #1413; not an active GitOps resource.
+# Promote only together with a verified immutable image containing this wiring.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lake-sink
+  namespace: kanz-services
+spec:
+  template:
+    spec:
+      containers:
+        - name: lake-sink
+          env:
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: unix:///run/spiffe/spire-agent.sock
+          volumeMounts:
+            - name: spiffe
+              mountPath: /run/spiffe
+              readOnly: true
+      volumes:
+        - name: spiffe
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

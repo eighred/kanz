@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/eighred/kanz/internal/version"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/pkg/observability"
+	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/lake-sink/internal/cdc"
 	"github.com/eighred/kanz/services/lake-sink/internal/config"
 	"github.com/eighred/kanz/services/lake-sink/internal/decode"
@@ -118,6 +120,13 @@ func run() int {
 // fail-fast, so a broken subscription brings the sink down rather than
 // silently losing the log.
 func runSink(ctx context.Context, cfg config.Config, fileSink sink.Sink, readiness *server.Readiness, logger *slog.Logger, obs *observability.Provider) error {
+	mesh, err := transport.NewMesh(ctx, cfg.SPIFFESocket)
+	if err != nil {
+		return fmt.Errorf("initialize workload identity: %w", err)
+	}
+	// All subscriptions and the Kafka client stop before the SVID source closes.
+	defer func() { _ = mesh.Close() }()
+	logger.Info("bus transport", "mtls", mesh.Enabled())
 	busMetrics := bus.NewBusMetrics(obs.Registry)
 	metrics := cdc.NewMetrics(obs.Registry)
 
@@ -133,7 +142,7 @@ func runSink(ctx context.Context, cfg config.Config, fileSink sink.Sink, readine
 	// is raised by KafkaClient.Subscribe, below bus.Consumer, and it is the only
 	// series that says this sink stopped rather than skip an event it could not
 	// dead-letter (#219). Without it the halt is a single log line on the way out.
-	client, err := bus.DialKafka(bus.KafkaConfig{Brokers: cfg.Brokers, ClientID: cfg.Source, Metrics: busMetrics})
+	client, err := bus.DialKafka(bus.KafkaConfig{Brokers: cfg.Brokers, ClientID: cfg.Source, Metrics: busMetrics, TLSConfig: mesh.Client})
 	if err != nil {
 		return err
 	}
