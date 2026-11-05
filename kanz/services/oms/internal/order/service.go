@@ -45,7 +45,8 @@ import (
 // validation or compliance rejection — is terminal: it is acked (nil) after a
 // REJECTED outcome, so a poison command never blocks the partition.
 type Service struct {
-	fillFoldObserver func(FillFoldCapture)
+	fillFoldObserver     func(FillFoldCapture)
+	terminalFoldObserver func(TerminalFoldCapture)
 	// tenant is the tenant this OMS serves; Handle's cross-tenant refusal
 	// compares the inbound envelope against it (#223).
 	tenant  string
@@ -1646,6 +1647,7 @@ func (s *Service) handleCancel(ctx context.Context, payload []byte) error {
 	// Validate the withdrawal against the aggregate first (the terminal guard), so
 	// a cancel the ledger refuses never reaches the exchange.
 	next, cancelledQty, cerr := Cancel(st, now)
+	observeTerminalFold(ctx, s.terminalFoldObserver, "cancel", "cancel", ver, st, next, cancelledQty, now, cerr)
 	if cerr != nil {
 		var re *RejectError
 		if errors.As(cerr, &re) {
@@ -3400,6 +3402,7 @@ func (s *Service) adoptWithdrawal(ctx context.Context, st *orderpb.OrderState, v
 	switch view.State {
 	case execution.OrderViewCancelled:
 		withdrawn, cancelledQty, cerr := Cancel(st, now)
+		observeTerminalFold(ctx, s.terminalFoldObserver, "cancel", "reconcile", ver, st, withdrawn, cancelledQty, now, cerr)
 		if cerr != nil {
 			// Unreachable: Reconcile refuses a terminal order before ActionAdopt,
 			// adopt() re-checks after the fold, and Cancel checks again. It is the
@@ -3423,6 +3426,7 @@ func (s *Service) adoptWithdrawal(ctx context.Context, st *orderpb.OrderState, v
 
 	case execution.OrderViewExpired:
 		withdrawn, unfilledQty, eerr := Expire(st, now)
+		observeTerminalFold(ctx, s.terminalFoldObserver, "expire", "reconcile", ver, st, withdrawn, unfilledQty, now, eerr)
 		if eerr != nil {
 			return fmt.Errorf("oms: refusing to adopt a venue expiry for order %s: %w",
 				st.GetOrderId(), eerr)

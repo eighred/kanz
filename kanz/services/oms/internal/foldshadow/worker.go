@@ -51,8 +51,12 @@ func identifier(s string) bool {
 type Worker struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
-	queue   chan order.FillFoldCapture
+	queue   chan capturedWork
 	observe func(string)
+}
+type capturedWork struct {
+	fill     *order.FillFoldCapture
+	terminal *order.TerminalFoldCapture
 }
 
 func New(ctx context.Context, c Config, tenant, sourceRevision string, observe func(string)) (*Worker, error) {
@@ -69,7 +73,7 @@ func New(ctx context.Context, c Config, tenant, sourceRevision string, observe f
 		observe = func(string) {}
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	w := &Worker{cancel: cancel, done: make(chan struct{}), queue: make(chan order.FillFoldCapture, 1), observe: observe}
+	w := &Worker{cancel: cancel, done: make(chan struct{}), queue: make(chan capturedWork, 1), observe: observe}
 	go func() {
 		defer close(w.done)
 		for {
@@ -80,7 +84,13 @@ func New(ctx context.Context, c Config, tenant, sourceRevision string, observe f
 				if ctx.Err() != nil {
 					return
 				}
-				w.observe(evaluate(ctx, c, tenant, sourceRevision, capture))
+				if capture.fill != nil {
+					w.observe(evaluate(ctx, c, tenant, sourceRevision, *capture.fill))
+				} else if capture.terminal != nil {
+					w.observe(evaluateTerminal(ctx, c, tenant, sourceRevision, *capture.terminal))
+				} else {
+					w.observe("invalid_input")
+				}
 			}
 		}
 	}()
@@ -108,7 +118,7 @@ func (w *Worker) Submit(c order.FillFoldCapture) {
 		c.Candidate = proto.Clone(c.Candidate).(*orderpb.OrderState)
 	}
 	select {
-	case w.queue <- c:
+	case w.queue <- capturedWork{fill: &c}:
 	default:
 		w.observe("queue_full")
 	}

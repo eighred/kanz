@@ -29,8 +29,9 @@ import (
 // exact base-10 Money/Decimal and `double` is banned on a capital path, so there
 // is no lossless native column (the risk-engine PERS-01 opaque-bytes stance).
 type Postgres struct {
-	fillFoldObserver func(FillFoldCapture)
-	pool             *pgxpool.Pool
+	fillFoldObserver     func(FillFoldCapture)
+	terminalFoldObserver func(TerminalFoldCapture)
+	pool                 *pgxpool.Pool
 	// queue is the outbox over the SAME pool, which is what gives it the same
 	// tenant scope and the same failure domain as the orders it announces.
 	queue *outbox.Postgres

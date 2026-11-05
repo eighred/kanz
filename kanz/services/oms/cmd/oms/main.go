@@ -639,6 +639,7 @@ func runConsumers(ctx context.Context, cfg config.Config, readiness *server.Read
 		// disagree about what the market showed.
 		order.WithArrivalMarks(marks),
 		order.WithFillFoldObserver(fillFoldObserver(store)),
+		order.WithTerminalFoldObserver(terminalFoldObserver(store)),
 		// THE BRAKE. NewService REFUSES to build without it (#635), so this line is
 		// not something a future edit can quietly drop.
 		order.WithHaltGate(haltGate),

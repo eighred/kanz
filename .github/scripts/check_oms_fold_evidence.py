@@ -7,9 +7,12 @@ from check_migration_evidence import verify
 REQUIRED = {
     "services/oms/tools/fill-conformance": {
         "TestFillCorpusIndependentOracle", "TestRustFillFoldProcessConformance",
+        "TestTerminalCorpusIndependentState", "TestRustTerminalFoldProcessConformance",
+        "TestRustFillThenTerminalReplay",
     },
     "services/oms/internal/foldshadow": {
         "TestRustOMSFillShadowActualProcess", "TestRustTransactionCandidateBinding",
+        "TestRustOMSTerminalShadowActualProcess", "TestTerminalResultBindingAndPresence", "TestTerminalSharesBoundedQueue",
         "TestRustOMSPostgresTransactions",
         *{"TestRustOMSPostgresTransactions/" + case for case in (
             "durable-restart-duplicate-conflict", "concurrent-duplicate",
