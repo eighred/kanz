@@ -132,7 +132,7 @@ spec:
       containers:
         - name: lake-sink
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/lake-sink@sha256:054cc186ad68e5745b3aacac650aaef941b9cf80614d3e874b9de8f5e72c8b61
+          image: ghcr.io/eighred/lake-sink@sha256:4631c2a72498e7a87a044fd366861011697bea9a2cd7b6d4644c49d43d5d9817
           ports:
             - { containerPort: 8085, name: http }
           env:

@@ -96,7 +96,7 @@ spec:
         - name: web-bff
           # The canonical image is signed and digest-pinned. The Tokyo overlay
           # rewrites this source to its separately allowlisted ECR mirror.
-          image: ghcr.io/eighred/web-bff@sha256:66771937970d87cf32bf2ba479ad0dc141e25771524289389e1e1e8538e6891f
+          image: ghcr.io/eighred/web-bff@sha256:7e1ff2e9975efb3d2cff99730aa7e526523824daa147ad327e8d41b7e50c39df
           ports:
             - { containerPort: 8084, name: http }
           env:
@@ -172,7 +172,7 @@ spec:
         # hostname — so it is mounted from Vault and never written here, the same
         # stance as every other credential (SEC-01d).
         - name: cloudflared
-          image: ghcr.io/eighred/cloudflared@sha256:028b784b33c17ef355571b10f8c4691012dcdafaa7e1193e93252b3fe396c8c6
+          image: ghcr.io/eighred/cloudflared@sha256:e9780287d3c67e7c3fbae7bd8caccb8d732d077b428ae962464fb49b75bf0bff
           args:
             - tunnel
             - --no-autoupdate

@@ -108,7 +108,7 @@ spec:
       # them, so one applies and the rest exit 0 with nothing to do.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate@sha256:43799cfa71cb4ff6d5c290c2941d2f19d76b458d0c2ec0c110ee9294fc588334
+          image: ghcr.io/eighred/kanz-migrate@sha256:147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24
           args: ["--dir", "/migrations/regulatory"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -123,7 +123,7 @@ spec:
       containers:
         - name: regulatory
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/regulatory@sha256:553df8e6cc8684b8ec788ce198124ea64742b6e0c6ab73f6288fac57125649cd
+          image: ghcr.io/eighred/regulatory@sha256:e4ba3805f2f51582e4b03c672f6ccdf4171f593a21a1be2bf92a57ae4a80910f
           ports:
             - { containerPort: 8103, name: http }
             - { containerPort: 8083, name: metrics }

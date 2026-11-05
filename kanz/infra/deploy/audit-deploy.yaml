@@ -96,7 +96,7 @@ spec:
       # them, so one applies and the rest exit 0 with nothing to do.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate@sha256:43799cfa71cb4ff6d5c290c2941d2f19d76b458d0c2ec0c110ee9294fc588334
+          image: ghcr.io/eighred/kanz-migrate@sha256:147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24
           args: ["--dir", "/migrations/audit"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -111,7 +111,7 @@ spec:
       containers:
         - name: audit
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/audit@sha256:e7068fce73efb8641503b11175f2692bd9423f8f47820697613d01ebeffa0f50
+          image: ghcr.io/eighred/audit@sha256:be9c3e48cdf8aa6cc1ffed5058acaab00ec1b4a7604d82ec078a04e1ae82fbc5
           ports:
             # 8083 serves /metrics and the probes and NOTHING tenant-scoped;
             # allow-observability-scrape admits it. The /v1 compliance reads are
