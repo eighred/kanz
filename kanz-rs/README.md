@@ -1,6 +1,6 @@
 # Rust decimal compatibility foundation
 
-This library is an incremental migration prerequisite, not an execution engine. It has no runtime consumer, transport, persistence, admission authority or venue credentials. Existing Go implementations remain authoritative. Migration scope and acceptance are tracked in [issue #1413](https://github.com/eighred/kanz/issues/1413).
+This workspace contains canonical decimal primitives and the source-first [Binance depth runtime](services/binance-depth/README.md). The decimal library has no transport, persistence, admission authority or venue credentials. Existing Go financial implementations remain authoritative. Migration scope and acceptance are tracked in [issue #1413](https://github.com/eighred/kanz/issues/1413).
 
 The build generates `common.v1.Decimal` directly from `../kanz-schemas/proto/common/v1/decimal.proto` into Cargo OUT_DIR. Generated Rust is not committed. Coefficient and signed exponent semantics remain unchanged. Missing values are in-domain and compare as zero, matching Go `internal/dec`; callers remain responsible for requiredness. Domain validation accepts exponent -64..64 even for zero. Comparison and sign predicates remain total outside that domain and do not authorize conversion.
 

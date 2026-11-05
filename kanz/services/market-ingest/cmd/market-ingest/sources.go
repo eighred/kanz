@@ -33,6 +33,9 @@ import (
 // an error otherwise. An ingest with no mapped symbols publishes NOTHING, loudly,
 // rather than publishing fiction quietly.
 func feeds(cfg config.Config, cov *coverage.Recorder, logger *slog.Logger) ([]alpha.Feed, error) {
+	if err := cfg.ValidateExternalDepth(); err != nil {
+		return nil, err
+	}
 	var out []alpha.Feed
 	for _, instrument := range cfg.Instruments {
 		out = append(out, binanceFeeds(cfg, instrument, cov, logger)...)

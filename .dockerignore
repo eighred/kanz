@@ -6,5 +6,6 @@
 **/node_modules
 **/__pycache__
 **/.pytest_cache
+kanz-rs/target
 kanz-schemas/gen/python
 kanz-schemas/gen/ts

@@ -7,6 +7,9 @@ on:
       - 'kanz-schemas/proto/**'
       - 'kanz/internal/dec/**'
       - 'kanz/tools/decimal-conformance/**'
+      - 'kanz/tools/depth-conformance/**'
+      - 'kanz/pkg/alpha/**'
+      - 'kanz/services/market-ingest/**'
       - 'kanz/dev/**'
       - 'kanz/pkg/bus/**'
       - 'kanz/services/archiver/**'
@@ -22,6 +25,9 @@ on:
       - 'kanz-schemas/proto/**'
       - 'kanz/internal/dec/**'
       - 'kanz/tools/decimal-conformance/**'
+      - 'kanz/tools/depth-conformance/**'
+      - 'kanz/pkg/alpha/**'
+      - 'kanz/services/market-ingest/**'
       - 'kanz/dev/**'
       - 'kanz/pkg/bus/**'
       - 'kanz/services/archiver/**'
@@ -34,6 +40,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 env:
   GOFLAGS: -mod=mod
@@ -41,7 +48,7 @@ env:
 jobs:
   compatibility:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -64,14 +71,15 @@ jobs:
           rustup show active-toolchain
       - name: Verify migration boundary even on Rust-only changes
         working-directory: kanz
-        run: go test -p 1 ./test/arch -run 'Test(RustMigration|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
+        run: go test -p 1 ./test/arch -run 'Test(Rust|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
       - name: Rust format, compile and unit tests
         working-directory: kanz-rs
         run: |
           cargo fmt --all -- --check
-          cargo check --locked --all-targets
-          cargo test --locked --lib
-          cargo clippy --locked --all-targets -- -D warnings
+          cargo check --locked --workspace --all-targets
+          cargo test --locked --workspace --lib --bins
+          cargo build --locked -p kanz-binance-depth
+          cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Differential proof against current Go authority
         env:
           DECIMAL_CONFORMANCE_FIXTURE: ${{ runner.temp }}/kanz-decimal-conformance.json
@@ -79,6 +87,13 @@ jobs:
           (cd kanz && go test -p 1 ./internal/dec ./tools/decimal-conformance -count=1)
           (cd kanz && go run ./tools/decimal-conformance) > "$DECIMAL_CONFORMANCE_FIXTURE"
           cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml --test go_conformance -- --ignored
+      - name: Differential depth proof and ownership handoff tests
+        env:
+          KANZ_DEPTH_CORPUS: ${{ runner.temp }}/kanz-depth-conformance.json
+        run: |
+          (cd kanz && go test -p 1 ./tools/depth-conformance ./internal/marketedge/depth ./internal/marketedge/book ./pkg/alpha ./services/market-ingest/... -count=1)
+          (cd kanz && go run ./tools/depth-conformance) > "$KANZ_DEPTH_CORPUS"
+          cargo +1.90.0 test --locked --manifest-path kanz-rs/Cargo.toml -p kanz-binance-depth --test go_conformance
       - name: Start the actual local Redpanda and NATS configuration
         run: docker compose -f kanz/dev/docker-compose.yml up -d --wait --wait-timeout 120 kafka nats
       - name: Real protocol, archive, drain and replay compatibility
@@ -86,13 +101,22 @@ jobs:
         env:
           TEST_KAFKA_BROKERS: 127.0.0.1:9092
           TEST_NATS_URL: nats://127.0.0.1:4222
+          KANZ_BINANCE_DEPTH_BIN: ${{ github.workspace }}/kanz-rs/target/debug/kanz-binance-depth
         run: |
           set -o pipefail
-          go test -race -p 1 ./pkg/bus ./services/archiver/internal/archive ./tools/replay ./services/lake-sink/internal/cdc \
-            -run '^(TestKafkaPublishSubscribe|TestBacklogPollerReportsKafkaLag|TestKafkaBacklogRefusesToReportZeroForAnUnreachableBroker|TestIntegration_KafkaHandlerFailureWithDeadDLQKeepsTheMessageReachable|TestArchiver_|TestDrain_|TestReaderRange|TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted)' \
+          go test -race -p 1 ./pkg/bus ./services/archiver/internal/archive ./tools/replay ./services/lake-sink/internal/cdc ./tools/depth-conformance \
+            -run '^(TestKafkaPublishSubscribe|TestBacklogPollerReportsKafkaLag|TestKafkaBacklogRefusesToReportZeroForAnUnreachableBroker|TestIntegration_KafkaHandlerFailureWithDeadDLQKeepsTheMessageReachable|TestArchiver_|TestDrain_|TestReaderRange|TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted|TestRustDepthProcessThroughJetStream)' \
             -count=1 -json | tee "$RUNNER_TEMP/redpanda-tests.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 ../.github/scripts/check_migration_evidence.py "$RUNNER_TEMP/redpanda-tests.jsonl"
+      - name: Authenticate for private mirrored bases
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the Rust feed container from pinned bases
+        run: docker build --build-arg VERSION=${{ github.sha }} --file kanz-rs/services/binance-depth/Dockerfile --tag kanz-binance-depth:verification .
       - name: Preserve broker diagnostics on failure
         if: failure()
         run: docker compose -f kanz/dev/docker-compose.yml logs --no-color kafka nats

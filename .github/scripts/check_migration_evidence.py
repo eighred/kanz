@@ -22,6 +22,7 @@ REQUIRED = {
     "services/lake-sink/internal/cdc": {
         "TestCrash_UnflushedRowsAreLostAndOffsetsAreCommitted",
     },
+    "tools/depth-conformance": {"TestRustDepthProcessThroughJetStream"},
 }
 
 
@@ -52,4 +53,4 @@ def verify(events, required=None):
 if __name__ == "__main__":
     with open(sys.argv[1], encoding="utf-8") as source:
         verify(json.loads(line) for line in source)
-    print("All 12 required Redpanda compatibility cases passed in 4 packages")
+    print("All 13 required broker/runtime compatibility cases passed in 5 packages")

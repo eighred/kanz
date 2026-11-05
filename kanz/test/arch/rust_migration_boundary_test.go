@@ -39,6 +39,7 @@ var rustMigrationCargo = map[string]map[string]string{
 	"build-dependencies": {"prost-build": `"=0.14.1"`, "protoc-bin-vendored": `"=3.2.0"`},
 	"dev-dependencies":   {"serde": `{ version = "=1.0.229", features = ["derive"] }`, "serde_json": `"=1.0.154"`},
 	"profile.release":    {"overflow-checks": `true`},
+	"workspace":          {"members": `["services/binance-depth"]`, "resolver": `"2"`},
 }
 
 // Pin the complete small build recipe: merely finding the canonical path could
@@ -130,6 +131,9 @@ func rustMigrationWithoutComments(source string) (string, error) {
 }
 
 func checkRustMigrationBoundary(root string) error {
+	if err := checkRustDepthBoundary(filepath.Join(root, "services", "binance-depth")); err != nil {
+		return err
+	}
 	raw, err := os.ReadFile(filepath.Join(root, "Cargo.toml"))
 	if err != nil {
 		return fmt.Errorf("Rust compatibility manifest missing: %w", err)
@@ -193,6 +197,9 @@ func checkRustMigrationBoundary(root string) error {
 			return fmt.Errorf("Rust source tree symlink requires review: %s", rel)
 		}
 		if d.IsDir() {
+			if rel == "services/binance-depth" {
+				return filepath.SkipDir
+			} // Separately guarded above.
 			if rel == "target" || rel == ".git" {
 				return filepath.SkipDir // Generated Cargo output is not authored source.
 			}
@@ -266,7 +273,7 @@ func TestRustMigrationBoundaryRejectsMutations(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dst := t.TempDir()
-			for _, rel := range []string{"Cargo.toml", "build.rs", "src/lib.rs", "tests/go_conformance.rs"} {
+			for _, rel := range rustBoundaryFixtureFiles() {
 				body, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 				if err != nil {
 					t.Fatal(err)
