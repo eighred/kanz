@@ -46,7 +46,9 @@ pods cannot connect to API8113. Monitoring must receive metrics/health/readiness
 on 8091 and a 404 for Broker routes there. An absent principal must receive 401 on
 the authorized API path. These assertions do not place or cancel orders.
 
-Local syntax and trust-input tests (no Docker/network required):
+Local trust-input tests need no Docker or network. The Go probe uses the canonical
+`pkg/auth` principal-header helper and requires the generated schema SDK; follow
+`kanz-schemas/README.md` before compiling it:
 
 ```sh
 python3 -B -m unittest discover -s kanz/services/tv-sync/test -p 'test_*.py'
@@ -55,7 +57,9 @@ go -C kanz test -p 1 ./services/tv-sync/test/probe
 
 On a disposable Linux runner with Docker, Go, Python/PyYAML 6.0.3 and cosign 3.0.6,
 a trusted main checkout with full Git history (including the candidate commit)
-and registry read authentication:
+and registry read authentication. Generate the SDK from that trusted checkout
+before running the harness. The workflow uses pinned buf 1.69.0 and protoc plugins
+with the existing SDK bootstrap; the probe uses the approved distroless static base:
 
 ```sh
 python3 -B kanz/services/tv-sync/test/isolation.py \

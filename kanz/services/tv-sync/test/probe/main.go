@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/eighred/kanz/pkg/auth"
 )
 
 func main() {
@@ -25,7 +27,7 @@ func main() {
 		os.Exit(2)
 	}
 	if os.Args[2] != "" {
-		req.Header.Set("X-Kanz-Principal-Tenant", os.Args[2])
+		auth.SetPrincipalHeaders(req.Header, "fixture-probe", os.Args[2], nil)
 	}
 	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	result := struct {

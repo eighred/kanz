@@ -336,10 +336,10 @@ def main():
             local={key:"docker.io/kanz-isolation/"+key+":"+name for key in ["postgres","nats","nats-box","tv-sync","migrate"]}
             images={**{k:v for k,v in IMAGES.items() if k!="k3s"},"tv-sync":args.image,"migrate":args.migration_image}
             evidence["imported_config_ids"]={key:c.load(image,local[key],scratch) for key,image in images.items()}
-            # This probe is repository-owned stdlib code, not a downloaded tool.
+            # Build trusted probe source with the canonical principal-header helper.
             probe=scratch/"probe"
             env={**os.environ,"GOOS":"linux","GOARCH":"amd64","CGO_ENABLED":"0"}
-            run("go","build","-o",str(probe),str(Path(__file__).parent/"probe/main.go"),env=env,timeout=180)
+            run("go","-C",str(TRUSTED_ROOT),"build","-o",str(probe),"./services/tv-sync/test/probe",env=env,timeout=180)
             shutil.copyfile(Path(__file__).parent/"probe/Dockerfile",scratch/"Dockerfile")
             probe_image="docker.io/kanz-isolation/probe:"+name
             run("docker","build","-t",probe_image,str(scratch),timeout=120)
