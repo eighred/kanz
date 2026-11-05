@@ -1,4 +1,4 @@
-//! Binance decimal strings only; not the broader Go big.Rat literal grammar.
+//! Public exchange decimal strings only; not the broader Go big.Rat literal grammar.
 use crate::proto::common::v1::Decimal;
 use num_bigint::BigInt;
 use num_rational::BigRational;
