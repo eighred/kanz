@@ -1,0 +1,6 @@
+/gen/
+/depot/
+# This is a reviewed Julia entrypoint, not a compiled bin/ artifact.
+!/bin/
+/bin/*
+!/bin/curve_worker.jl
