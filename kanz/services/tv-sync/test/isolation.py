@@ -224,8 +224,15 @@ class Cluster:
     def __init__(self, name):
         self.name = name
 
+    def cli(self, tool, *args, data=None, timeout=120):
+        # The pinned container bundles cmd/server with argv[0] multicall aliases,
+        # not the standalone cmd/k3s launcher. Invoke the alias directly so the
+        # tool does not receive its own name as an extra subcommand.
+        executable = {"kubectl": "/bin/kubectl", "ctr": "/bin/ctr", "crictl": "/bin/crictl"}[tool]
+        return run("docker", "exec", "-i", self.name, executable, *args, data=data, timeout=timeout)
+
     def k(self, *args, data=None, timeout=120):
-        return run("docker", "exec", "-i", self.name, "k3s", "kubectl", *args, data=data, timeout=timeout)
+        return self.cli("kubectl", *args, data=data, timeout=timeout)
 
     def apply(self, docs):
         self.k("apply", "-f", "-", data=json.dumps({"apiVersion":"v1", "kind":"List", "items":docs}))
@@ -244,8 +251,8 @@ class Cluster:
         archive = scratch / "image.tar"
         run("docker", "save", "-o", str(archive), local_name, timeout=180)
         run("docker", "cp", str(archive), f"{self.name}:/tmp/image.tar", timeout=180)
-        run("docker", "exec", self.name, "k3s", "ctr", "images", "import", "/tmp/image.tar", timeout=180)
-        imported = json.loads(run("docker", "exec", self.name, "k3s", "crictl", "inspecti", local_name))
+        self.cli("ctr", "images", "import", "/tmp/image.tar", timeout=180)
+        imported = json.loads(self.cli("crictl", "inspecti", local_name))
         if imported["status"]["id"] != original_id:
             raise RuntimeError("imported image config differs from digest-pulled image")
         archive.unlink()
@@ -346,7 +353,7 @@ def main():
             # Already local: importing uses the same image-ID check without a pull.
             run("docker","save","-o",str(scratch/"probe.tar"),probe_image,timeout=120)
             run("docker","cp",str(scratch/"probe.tar"),name+":/tmp/probe.tar")
-            run("docker","exec",name,"k3s","ctr","images","import","/tmp/probe.tar")
+            c.cli("ctr","images","import","/tmp/probe.tar")
             c.apply([{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"nats-config","namespace":"kanz-messaging"},"data":{"nats-dev.conf":(TRUSTED_ROOT/"test/backing/nats-dev.conf").read_text(encoding="utf-8")}}])
             nats=pod("nats","kanz-messaging",local["nats"],command=["nats-server","-c","/config/nats-dev.conf"])
             nats["spec"]["containers"][0]["readinessProbe"]={"tcpSocket":{"port":4222},"periodSeconds":2}
@@ -396,7 +403,7 @@ def main():
                 status=next(x for x in target["status"][status_key] if x["name"]==container_name)
                 image_id=status["imageID"]
                 evidence["running_image_ids"][role]=image_id
-                running=json.loads(run("docker","exec",c.name,"k3s","crictl","inspecti",image_id))
+                running=json.loads(c.cli("crictl","inspecti",image_id))
                 if running["status"]["id"] != evidence["imported_config_ids"][role]:
                     raise RuntimeError(f"running {role} is not the verified imported release image")
                 if role=="migrate" and status.get("state",{}).get("terminated",{}).get("exitCode")!=0:
