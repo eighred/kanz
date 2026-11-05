@@ -36,7 +36,7 @@ import (
 func TestRustOKXDepthProcessThroughJetStream(t *testing.T) {
 	binary, endpoint := os.Getenv("KANZ_OKX_DEPTH_BIN"), os.Getenv("TEST_NATS_URL")
 	if binary == "" {
-		t.Skip("set KANZ_OKX_DEPTH_BIN and TEST_NATS_URL for real OKX process integration")
+		t.Skip("KANZ_OKX_DEPTH_BIN not configured; architecture-migration requires this runtime proof")
 	}
 	if endpoint == "" || !filepath.IsAbs(binary) {
 		t.Fatal("configured integration requires NATS and absolute Rust binary")
