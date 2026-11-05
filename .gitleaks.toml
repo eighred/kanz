@@ -40,4 +40,9 @@ regexes = [
   # (internal/migrate). It is a constant the migration runner locks on — public by
   # design, and it is in the source precisely so two runners agree on it.
   '''0x6b616e7a4d494752''',
+  # Public K3s CLI flag, not a credential. generic-api-key reads the preceding
+  # --secrets-encryption flag as an assignment in the disposable CNI fixture.
+  # Default regexTarget is the extracted Secret, so only this exact literal is
+  # exempt; the file, surrounding line, history and scanner self-test stay scanned.
+  '''^--disable=traefik$''',
 ]
