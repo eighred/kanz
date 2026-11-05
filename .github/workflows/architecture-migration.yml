@@ -12,7 +12,7 @@ on:
       - 'kanz/services/archiver/**'
       - 'kanz/services/lake-sink/**'
       - 'kanz/tools/replay/**'
-      - 'kanz/test/arch/rust_migration_boundary_test.go'
+      - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
       - '.github/workflows/architecture-migration.yml'
   push:
@@ -27,7 +27,7 @@ on:
       - 'kanz/services/archiver/**'
       - 'kanz/services/lake-sink/**'
       - 'kanz/tools/replay/**'
-      - 'kanz/test/arch/rust_migration_boundary_test.go'
+      - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
       - '.github/workflows/architecture-migration.yml'
   workflow_dispatch:
@@ -62,6 +62,9 @@ jobs:
         run: |
           rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
           rustup show active-toolchain
+      - name: Verify migration boundary even on Rust-only changes
+        working-directory: kanz
+        run: go test -p 1 ./test/arch -run 'Test(RustMigration|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
       - name: Rust format, compile and unit tests
         working-directory: kanz-rs
         run: |
