@@ -1,16 +1,24 @@
 # Disaster Recovery (DR-01)
 
-Provable cross-region RPO/RTO for the durable log, state stores, and registry —
-**RPO ≤ 1min, RTO ≤ 15min**, validated quarterly by a live drill.
+Recovery targets for the event archive, state stores, and registry are
+**RPO ≤ 1min, RTO ≤ 15min**. They require measurement in a supervised drill;
+the manifests and this runbook do not establish cross-region recovery or PITR
+proof. [#1100](https://github.com/eighred/kanz/issues/1100) and
+[#106](https://github.com/eighred/kanz/issues/106) track the remaining recovery
+acceptance; same-region quiesced restore evidence does not establish recovery
+under load in the destination region.
 
-The design leans on the architecture's existing split: Kafka is the durable log
-of record, NATS is a rebuildable live tier, and only two databases hold
-transactional state. So DR replicates the durable things and *rebuilds* the
-derivable ones.
+NATS JetStream is the primary event spine. One archiver derives the Kafka
+recovery archive from it; Kafka is not a second independent source of truth.
+Recovery can rebuild NATS from the replicated archive only to the verified
+archive checkpoint. Six CloudNativePG recovery clusters are declared: risk,
+registry, books, orders, compliance and identity. Their placement, exclusions
+and live-DSN verification requirements are in the
+[Postgres recovery inventory](postgres/README.md).
 
 | Task | Path | What |
 |---|---|---|
-| DR-01a | `kafka/` | MirrorMaker 2 replicates the Kafka log of record into the DR region (active/passive, identical topic names) |
+| DR-01a | `kafka/` | MirrorMaker 2 replicates the derived Kafka recovery archive into the DR region (active/passive, identical topic names) |
 | DR-01b | `postgres/` | CloudNativePG primaries with continuous WAL archiving + PITR, and DR-region warm-standby replicas |
 | DR-01c | `nats/` | rebuild the live NATS spine from the DR Kafka log (`kanz/tools/natsrebuild`) |
 | DR-01d | `failover.sh` + the region-failover runbook below | ordered, idempotent region cutover (promote DBs → rebuild spine → start services → shift traffic) |
@@ -44,7 +52,7 @@ Severity **page** · rehearsed by `infra/dr/failover.sh`.
 
 
 Cut the platform over to the DR region after a primary-region loss. Target
-**RPO ≤ 1min, RTO ≤ 15min** (validated quarterly by the DR drill below). The
+**RPO ≤ 1min, RTO ≤ 15min** (to be measured by the DR drill below). The
 orchestration is `infra/dr/failover.sh` — this runbook is the human wrapper
 around it.
 
@@ -72,8 +80,8 @@ DR_CTX=<dr-context> ./infra/dr/failover.sh
 
 The steps, in required order:
 
-1. **Promote Postgres** (DR-01b) — `cnpg promote` the risk + registry standbys to
-   writable primaries.
+1. **Promote Postgres** (DR-01b) — `cnpg promote` the six declared risk, registry,
+   books, orders, compliance and identity standbys to writable primaries.
 2. **Messaging** — confirm DR Kafka is present (DR-01a), bring up NATS + provision
    streams.
 3. **Rebuild the NATS spine** (DR-01c) — `nats-rebuild` Job drains the recent
@@ -133,7 +141,7 @@ the drill using the PARITY-05d harness, pointed at the PRIMARY region:
 ```sh
 SEED_PORTFOLIOS=2000 SEED_NATS_URL=nats://<primary>:4222 go run ./test/load/seed
 RATE=2000 DURATION=20m PORTFOLIOS=2000 INGEST_NATS_URL=nats://<primary>:4222 \
-  go run ./test/load/ingest &          # writes flowing across every store during the cut
+  go run ./test/load/ingest &          # event load; verify which stores it exercises
 ```
 
 The in-flight writes are what the RPO measurement below actually bounds — the
@@ -142,42 +150,43 @@ would risk losing.
 
 #### Before (capture the baseline)
 
-Record the replication lag at T0 — this is the **measured RPO** — across **every
-PARITY-02 store** (all three Postgres clusters) and the log:
+Record replication lag at T0 across all six declared Postgres clusters and the
+archive. Lag is a prerequisite, not the measured end-to-end RPO: compare the
+last acknowledged source writes with recovered records, including the
+NATS-to-archiver checkpoint and cross-region replication delay.
 
 ```sh
 # Kafka (DR-01a): now − latest replicated heartbeat timestamp.
 kubectl --context <dr> -n kanz-messaging exec kafka-0 -- \
   /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:9092 \
   --topic heartbeats --from-beginning --timeout-ms 5000 | tail -1
-# Postgres (DR-01b): standby replay lag for each cluster. kanz-risk = risk state;
-# kanz-registry = model/lineage registry; kanz-books = IBOR ledger + alternatives
-# + wealth + datamaster (every PARITY-02b store). A drill that checks only
-# kanz-risk misses the book-of-record — check all three.
-for c in kanz-risk kanz-registry kanz-books; do
+# Postgres (DR-01b): check every declared recovery cluster; inventory in postgres/README.md.
+for c in kanz-risk kanz-registry kanz-books kanz-orders kanz-compliance kanz-identity; do
   echo "== $c =="; kubectl --context <dr> -n kanz-data cnpg status "$c" | grep -i lag
 done
 ```
 
 **Gate:** every lag < 1min, or the drill fails on RPO before you cut over.
 
-> **market-data (price history)** has no dedicated DR cluster by design: it is a
-> projection whose source of truth is the durable Kafka log, so it is
-> *reconstructed* from the rebuilt spine (step 3 below) rather than PITR-restored —
-> the same reconstructable-from-log stance as the NATS spine. Nothing to promote;
-> verify it re-derives (synthetic price query below).
+> **Market-data is not wholly replayable.** Price history can be re-ingested,
+> but bitemporal knowledge and ingestion coverage cannot be reconstructed from
+> today's feed. The [Postgres inventory](postgres/README.md) documents that
+> exclusion and the uncovered browser-session store. A successful price query
+> is not proof of complete recovery, and declared clusters are not proof that
+> live services use their backed-up databases.
 
 #### Run the failover (measure RTO)
 
 Start a timer, then execute the DR-01d procedure:
 
 ```sh
-time ( DR_CTX=<dr> ./infra/dr/failover.sh )   # wall-clock to services-Ready = RTO
+time ( DR_CTX=<dr> ./infra/dr/failover.sh )   # orchestration duration; keep timing through recovery checks
 ```
 
-Then flip a *test* DNS/LB weight (or a drill hostname) to DR and run a synthetic
-transaction **against every PARITY-02 store** — a store that promoted but does not
-serve is a silent DR failure:
+Then flip a *test* DNS/LB weight (or a drill hostname) to DR and verify reads and
+writes against every in-scope recovered store. These legacy synthetic reads
+are examples, not complete six-cluster coverage; add checks for registry,
+orders, compliance and identity before claiming the recovery objective:
 
 ```sh
 GW=https://<dr-drill-host>
@@ -188,8 +197,9 @@ curl -fsS "$GW/v1/prices/AAPL"                          >/dev/null  # market-dat
 curl -fsS "$GW/v1/nav/PF1-0001?as_of=$(date -u +%FT%TZ)" >/dev/null # IBOR ledger (kanz-books)
 ```
 
-**Gate:** wall-clock from declaration to all five synthetic reads succeeding
-≤ 15min. Then confirm the in-flight write stream (still running against the
+**Gate:** wall-clock from declaration to all required recovery checks succeeding
+≤ 15min. Five successful reads alone do not satisfy it. Then confirm the
+in-flight write stream (still running against the
 promoted primary via the DR spine) resumes — a durable write acked in DR proves
 the book-of-record is writable, not just readable.
 
@@ -197,9 +207,9 @@ the book-of-record is writable, not just readable.
 
 | Objective | Measure | Target |
 |---|---|---|
-| RPO | max replication lag at T0 (Kafka + all three Postgres clusters) | ≤ 1min |
-| RTO | declaration → all synthetic reads succeed | ≤ 15min |
-| Store coverage | every PARITY-02 store promoted + serving (5 synthetic txns) | 5/5 |
+| RPO | last acknowledged source writes compared with recovered records across the event path and all six Postgres clusters | ≤ 1min |
+| RTO | declaration → all required recovery checks succeed | ≤ 15min |
+| Store coverage | every in-scope store promoted + serving, with exclusions recorded against the Postgres inventory | Complete declared scope; five legacy reads are insufficient |
 | Writability | a durable write acked post-cutover (ingest stream resumes in DR) | acked |
 | Integrity | post-failover audit chain verify (`/v1/audit/verify`) | 200 / verified |
 | Data | no sequence gap (`kanz_data_gap_missing_total` flat) across cutover | 0 |

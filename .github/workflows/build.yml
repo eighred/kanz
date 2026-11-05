@@ -9,10 +9,15 @@ on:
     paths:
       - 'kanz/**'
       - 'kanz-rs/**'
+      - 'kanz-py/**'
+      - 'kanz-web/**'
       - 'kanz-schemas/proto/**'
       - 'kanz-schemas/buf.yaml'
       - 'kanz-schemas/buf.gen.yaml'
       - '.github/workflows/build.yml'
+      - '.github/actions/**'
+      - '.github/scripts/**'
+      - '.dockerignore'
   push:
     branches: [main]
     # DOCS DO NOT BUILD IMAGES.
@@ -30,13 +35,13 @@ on:
 
 permissions:
   contents: read
-  packages: write   # push to ghcr.io on main
-  id-token: write   # main-only AWS federation; the IAM trust policy pins repo + branch
+  packages: read    # private base-image pulls; PR code cannot publish or mint OIDC
 
 jobs:
   image:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    strategy:
+    strategy: &image-strategy
       fail-fast: false
       # BOUND THE FAN-OUT, BECAUSE THE FLAKE IS A RATE LIMIT WEARING A 403 (#320).
       #
@@ -234,7 +239,7 @@ jobs:
           # own image is not a disaster-recovery path.
           - service: nats-rebuild
             dockerfile: kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile
-    steps:
+    steps: &image-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The image build COPYs kanz-schemas/gen/go (the generated SDK the kanz
@@ -562,3 +567,15 @@ jobs:
           target="${ECR_REGISTRY}/${REPOSITORY}:${IMAGE_TAG}"
           docker tag "${IMAGE_ID}" "${target}"
           docker push "${target}"
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'eighred/kanz'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    # Share the build definition, not its authority. Only this main job can
+    # publish; changing a step condition in PR code cannot mint a write token.
+    strategy: *image-strategy
+    steps: *image-steps

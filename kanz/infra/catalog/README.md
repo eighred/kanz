@@ -1,9 +1,10 @@
 # Data catalog (LIN-01b)
 
-A DataHub catalog over the Kanz datasets: every event type that flows on the bus
-is a dataset, stitched with its lineage, schema, ownership, and PII
-classification. The catalog is the human-facing index; the `lineage` service
-(LIN-01a/c/d) is the live source of truth.
+An optional DataHub ingestion template over Kanz datasets. The intended catalog
+combines lineage, schema, ownership and PII classification; the mappings below
+still need deployment verification ([#1405](https://github.com/eighred/kanz/issues/1405)).
+The catalog is a human-facing index; the `lineage` service (LIN-01a/c/d) owns
+lineage queries and governance enforcement.
 
 ## What a dataset is
 
@@ -17,9 +18,9 @@ key on, so lineage, lakehouse tables, and the catalog all line up.
 | Facet | Source |
 |---|---|
 | **Lineage** (upstream/downstream) | OpenLineage RunEvents the lineage service emits (LIN-01a) → Marquez/DataHub OpenLineage receiver |
-| **Schema** | EVT-16 schema registry, joined via the dataset's `payloadSchemaRef` facet |
-| **Ownership** | `kanz-schemas/CODEOWNERS` — the schema owner is the dataset owner |
-| **Classification** | LIN-01c governance config (PII tags) — DataHub is the read view, the governance config is the enforcement source of truth |
+| **Schema** | Intended EVT-16 registry join via `payloadSchemaRef`; the template does not configure a separate registry ingestion source. |
+| **Ownership** | Explicit DataHub steward mapping in `datahub-recipe.yaml`; the current template assigns `event-platform`. Repository review routing in `.github/CODEOWNERS` is separate and is not imported automatically. |
+| **Classification** | The template adds a static PII tag to every ingested dataset; it does not load LIN-01c governance config. Domain-specific classification needs a validated mapping. The governance config remains the enforcement source of truth. |
 
 ## Files
 

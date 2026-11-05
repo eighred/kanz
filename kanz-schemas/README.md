@@ -89,15 +89,21 @@ observability.model.decision_logged
 The `domain` segment is a closed set. Adding a domain requires architecture
 review (it implies a new bounded context).
 
-| Domain | Bounded context | CODEOWNERS team |
+| Domain | Bounded context | Review responsibility |
 |---|---|---|
-| `market` | Market data ingestion | `@eighred/market-data` |
-| `risk` | Risk engine | `@eighred/risk-engine` |
-| `execution` | Command / order execution | `@eighred/execution` |
-| `inference` | Prediction layer (features, predictions) | `@eighred/quant-ml` |
-| `platform` | System lifecycle, config, mode | `@eighred/platform` |
-| `data` | Data-integrity signals | `@eighred/observability` |
-| `observability` | Metrics, traces, decision logs | `@eighred/observability` |
+| `market` | Market data ingestion | Market data |
+| `risk` | Risk engine | Risk |
+| `execution` | Command / order execution | Execution |
+| `inference` | Prediction layer (features, predictions) | Quantitative models |
+| `platform` | System lifecycle, config, mode | Platform |
+| `data` | Data-integrity signals | Observability |
+| `observability` | Metrics, traces, decision logs | Observability |
+
+These are technical responsibilities, not GitHub teams. Repository-wide
+[CODEOWNERS](../.github/CODEOWNERS) routes reviews to the current maintainer.
+There is no independent human approval while the repository has one maintainer;
+CODEOWNERS alone neither enforces review nor permits self-approval. When real
+teams exist, add their repository-relative paths to that single file.
 
 ### 3. Relationship to the Envelope
 
@@ -242,7 +248,7 @@ kafka}/tenancy.yaml`.
 - CI (EVT-07) enforces the three-segment rule, `lower_snake_case`, and that the
   `domain` segment is in the §2 closed set.
 - The `domain` prefix is the ownership and access-control boundary; it maps to
-  a CODEOWNERS team (§2).
+  a technical review responsibility (§2), independently of GitHub membership.
 - Adding an `entity` or `event_type` is a normal reviewed change; adding a
   `domain` requires architecture review.
 
@@ -313,8 +319,8 @@ Every change to `envelope.proto` requires:
 
 1. A written proposal stating which §2 test the field passes and why §3 does
    not exclude it.
-2. Approval from `@eighred/architecture` (enforced by CODEOWNERS on
-   `/proto/envelope/`).
+2. An explicit architecture review recorded in the PR. The repository's
+   CODEOWNERS routes review; it does not prove an independent reviewer exists.
 3. A passing `buf breaking` check (EVT-07) — which mechanically blocks any
    non-additive change.
 4. An `envelope_version` increment in the same change (§6).
@@ -542,7 +548,7 @@ breaks it cannot see:
 - Promoting an effectively-optional field to effectively-required.
 
 The last three are wire-compatible, so `buf breaking` passes them. They are
-caught **only by CODEOWNERS review** — reviewers of `proto/{domain}/` must
+caught by **semantic review** — reviewers of `proto/{domain}/` must
 check this list, not just trust CI.
 
 Process for a breaking change:
@@ -589,13 +595,13 @@ against the registry.
 | Optional → required | passes* | yes | +1 | new |
 
 \* wire-compatible but semantically breaking — invisible to `buf breaking`,
-caught only by CODEOWNERS review (§5).
+caught by semantic review (§5).
 
 ### 8. Enforcement
 
 - **`buf breaking`** in CI (EVT-07) mechanically blocks every wire-breaking
   change to a `v1` package against its committed baseline.
-- **CODEOWNERS review** on `proto/{domain}/` is the only gate for semantic
+- **Semantic review** on `proto/{domain}/` is the review gate for semantic
   breaks that pass `buf breaking` (§5). Reviewers own that the §7 table was
   applied honestly.
 - **The schema registry** (EVT-16) is the runtime source of truth.
