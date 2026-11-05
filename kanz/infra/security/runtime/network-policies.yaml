@@ -244,15 +244,10 @@ spec:
 # the two disagree in either direction. A new service with a new metrics port now
 # turns a test red instead of vanishing from the dashboards.
 #
-# WHAT THIS DOES NOT FIX, and cannot. audit (:8083) and tv-sync (:8091) serve their
-# TENANT-SCOPED READ APIs on the same plaintext mux and port as /metrics, and both
-# trust X-Kanz-Principal-Tenant — the header the api-gateway injects, sound only
-# because the gateway is their only reachable caller. A port list cannot separate
-# two surfaces that share a port, so a pod in kanz-observability can still send a
-# self-chosen tenant header to /v1/audit/events or /broker/accounts. Closing that
-# needs a SECOND LISTENER (metrics on its own port), which is a code change in each
-# service, not a manifest one. Tracked by #232; the guard named above pins the set
-# of services with a co-located surface so a third cannot be added unnoticed.
+# This port list cannot isolate APIs that share a metrics listener. Datamaster
+# and wealth retain named shared-listener exceptions under #232. Audit and
+# tv-sync have separate gateway-only API ports; never add those ports here.
+# The architecture guard pins both the exceptions and the split listeners.
 #
 # The per-service scrape rules elsewhere in this file are now redundant but harmless
 # (NetworkPolicy is additive). They are left alone rather than deleted: each also
@@ -751,7 +746,7 @@ spec:
             matchLabels:
               app: tv-sync
       ports:
-        - { protocol: TCP, port: 8091 }
+        - { protocol: TCP, port: 8113 }
     - to:
         - podSelector:
             matchExpressions:
@@ -1124,7 +1119,7 @@ spec:
             matchLabels:
               app: api-gateway
       ports:
-        - { protocol: TCP, port: 8091 }
+        - { protocol: TCP, port: 8113 }
     - from:
         - namespaceSelector:
             matchLabels:
@@ -1517,8 +1512,8 @@ spec:
 #
 # And it was the ONLY route in. No rule here selected app: audit, and the gateway
 # did not proxy it, so the surface was dark to every legitimate reader while
-# remaining open to the one namespace that authenticates nothing. For wealth,
-# datamaster and tv-sync a shared port is the price of a surface the gateway
+# remaining open to the one namespace that authenticates nothing. For wealth
+# and datamaster a shared port is the price of a surface the gateway
 # genuinely proxies; here the price bought nothing at all.
 #
 # THE API IS ON 8102 AND ADMITS EXACTLY ONE PEER. 8083 keeps /metrics and the
