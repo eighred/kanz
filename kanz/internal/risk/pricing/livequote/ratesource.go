@@ -72,13 +72,15 @@ func (s *SnapshotRateSource) Currencies() []string {
 // asOf is unused (the cache is always "latest"); the calibrator stamps the
 // curve point-in-time.
 func (s *SnapshotRateSource) RateQuotes(_ context.Context, currency string, _ time.Time) (curve.Strip, error) {
-	strip := curve.Strip{}
+	observations, capturedAt := s.quotes.snapshot()
+	strip := curve.Strip{Capture: &curve.InputCapture{CapturedAt: capturedAt}}
 	for _, in := range s.instruments {
 		if in.Currency != currency {
 			continue
 		}
 		strip.Coverage.Configured++
-		ev, ok := s.quotes.Latest(in.InstrumentID)
+		ev, ok := observations[in.InstrumentID]
+		strip.Capture.Inputs = append(strip.Capture.Inputs, curve.CapturedInput{InstrumentID: in.InstrumentID, Kind: in.Kind, Tenor: in.Tenor, Span: in.Span, Observation: ev})
 		if !ok {
 			strip.Coverage.Missing = append(strip.Coverage.Missing,
 				curve.MissingQuote{InstrumentID: in.InstrumentID, Reason: curve.MissingNoQuote})
@@ -91,6 +93,7 @@ func (s *SnapshotRateSource) RateQuotes(_ context.Context, currency string, _ ti
 			continue
 		}
 		strip.Quotes = append(strip.Quotes, curve.RateQuote{Kind: in.Kind, Tenor: in.Tenor, Span: in.Span, Value: mid})
+		strip.Capture.Inputs[len(strip.Capture.Inputs)-1].ResolvedRate = &mid
 		strip.Coverage.Quoted++
 	}
 	return strip, nil
