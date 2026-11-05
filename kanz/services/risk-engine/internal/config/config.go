@@ -13,13 +13,15 @@ import (
 	"github.com/eighred/kanz/internal/pit"
 	"github.com/eighred/kanz/internal/refdata"
 	"github.com/eighred/kanz/pkg/secret"
+	"github.com/eighred/kanz/services/risk-engine/internal/calibrationshadow"
 )
 
 // Config is the risk-engine runtime configuration. Sourced from the
 // environment so it composes with the CSI/Vault secret mounts (SEC-01d).
 type Config struct {
-	Listen   string
-	LogLevel slog.Level
+	JuliaShadow calibrationshadow.Config
+	Listen      string
+	LogLevel    slog.Level
 
 	// NATSURL is the live spine (EVT-08). Empty ⇒ the service runs
 	// HTTP-only (probes up, no ingestion) — useful for a bare scaffold
@@ -272,6 +274,10 @@ const DefaultCalibrationNightly = 24 * time.Hour
 var DefaultMarketSubjects = []string{"market.>"}
 
 func Load() (Config, error) {
+	shadow, err := juliaShadow()
+	if err != nil {
+		return Config{}, err
+	}
 	// Read HERE so a malformed refresh interval stops Load with every other
 	// configuration error, rather than at the one line that builds the cache.
 	refData, err := refdata.LoadConfig("RISK_ENGINE")
@@ -361,6 +367,7 @@ func Load() (Config, error) {
 	}
 
 	return Config{
+		JuliaShadow:      shadow,
 		Listen:           env.Or("RISK_ENGINE_LISTEN", ":8081"),
 		LogLevel:         env.ParseLevelOr(env.Or("RISK_ENGINE_LOG_LEVEL", "info"), slog.LevelInfo),
 		NATSURL:          os.Getenv("RISK_ENGINE_NATS_URL"),

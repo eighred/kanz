@@ -55,6 +55,7 @@ import (
 	"github.com/eighred/kanz/pkg/observability"
 	"github.com/eighred/kanz/pkg/transport"
 	"github.com/eighred/kanz/services/risk-engine/internal/app"
+	"github.com/eighred/kanz/services/risk-engine/internal/calibrationshadow"
 	"github.com/eighred/kanz/services/risk-engine/internal/config"
 	"github.com/eighred/kanz/services/risk-engine/internal/grpcsrv"
 	"github.com/eighred/kanz/services/risk-engine/internal/replay"
@@ -790,14 +791,12 @@ func runEngine(ctx context.Context, cfg config.Config, readiness *server.Readine
 	// matters most is the one where startCalibration is never called at all —
 	// today, every case: with calibration disabled the old code said nothing
 	// whatsoever, so "no curve either" was indistinguishable from a healthy one.
-	scheduledCalibrations := map[string]string{}
-	if cfg.CalibrationInterval > 0 && cfg.CalibrationRates != "" {
-		if err := startCalibration(ctx, cfg, client, busMetrics, logger, obs.Registry, curveStore, artifacts); err != nil {
-			logger.Error("calibration scheduler disabled", "err", err)
-		} else {
-			scheduledCalibrations["curve"] = "rates"
-		}
+	shadow, err := newJuliaShadow(ctx, cfg, obs.Registry)
+	if err != nil {
+		return err
 	}
+	defer shadow.Close()
+	scheduledCalibrations := startConfiguredCalibration(ctx, cfg, client, busMetrics, logger, obs.Registry, curveStore, artifacts, shadow)
 	app.CalibrationPosture(obs.Registry, logger, scheduledCalibrations)
 
 	// MODEL VALIDATION (#471). The gate is built here and the benchmark evidence
@@ -902,7 +901,7 @@ func registerPortfolioInventory(reg prometheus.Registerer, store *state.Store) {
 // cadence. It returns an error only on a setup failure (bad reference spec /
 // consumer) — the caller logs it and continues, since calibration is auxiliary
 // to core risk ingestion.
-func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSClient, busMetrics *bus.BusMetrics, logger *slog.Logger, reg prometheus.Registerer, store *curve.Store, artifacts *modelRecorder) error {
+func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSClient, busMetrics *bus.BusMetrics, logger *slog.Logger, reg prometheus.Registerer, store *curve.Store, artifacts *modelRecorder, shadow *calibrationshadow.Worker) error {
 	instruments, err := livequote.ParseRateInstruments(cfg.CalibrationRates)
 	if err != nil {
 		return err
@@ -957,6 +956,9 @@ func startCalibration(ctx context.Context, cfg config.Config, client *bus.NATSCl
 		// lives 30 days on risk.portfolio — a number that outlives every input
 		// that produced it.
 		OnCalibrated: artifacts.CurveCalibrated,
+	}
+	if shadow != nil {
+		cal.OnCaptured = shadow.Enqueue
 	}
 	var jobs []schedule.Job
 	for _, ccy := range src.Currencies() {

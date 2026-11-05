@@ -33,6 +33,20 @@ class EvidenceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             verify([])
 
+    def test_selected_worker_requires_execution_and_completion(self):
+        required = {"worker": {"TestActualRuntime"}}
+        events = [
+            {"Action": "pass", "Package": PREFIX + "worker", "Test": "TestActualRuntime"},
+            {"Action": "pass", "Package": PREFIX + "worker"},
+        ]
+        verify(events, required)
+        for partial in ([], events[:1], events[1:]):
+            with self.assertRaises(ValueError):
+                verify(partial, required)
+        for action in ("skip", "fail"):
+            with self.assertRaises(ValueError):
+                verify([{**events[0], "Action": action}, events[1]], required)
+
 
 if __name__ == "__main__":
     unittest.main()
