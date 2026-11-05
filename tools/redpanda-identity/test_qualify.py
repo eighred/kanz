@@ -24,7 +24,7 @@ def boundary(docs, probe, workflow):
     if bootstrap['kafka_enable_authorization'] is not True or bootstrap['superusers']!=['proof-bootstrap']:
         raise ValueError('only dedicated bootstrap has admin authority')
     for required in ('tlsconfig.AuthorizeID(', 'kafka.RequireAll', 'kafka.TopicAuthorizationFailed', 'kafka.ClusterAuthorizationFailed',
-                     'SerialNumber.Cmp(', 'principal changed on renewal', 'Transport: renewedTransport', 'len(values) != 2', '"FORBIDDEN"'):
+                     'SerialNumber.Cmp(', 'principal changed on renewal', 'Transport: renewedTransport', 'len(values) != 2', '"FORBIDDEN"', 'kafka.NewConn(raw, topic, 0)', 'directTopic(ctx, transport.TLS, sa, false, "before-renewal")'):
         if required not in probe: raise ValueError('missing real identity/ACL/renewal proof')
     wf=yaml.safe_load(workflow)
     if wf['permissions']!={'contents':'read','packages':'read'} or 'continue-on-error' in workflow:
@@ -58,7 +58,7 @@ class QualificationTests(unittest.TestCase):
             with self.assertRaises(ValueError): boundary(docs,self.probe,self.workflow)
 
     def test_source_mutations(self):
-        for token in ('tlsconfig.AuthorizeID(', 'kafka.TopicAuthorizationFailed', 'SerialNumber.Cmp(', 'Transport: renewedTransport', 'len(values) != 2'):
+        for token in ('tlsconfig.AuthorizeID(', 'kafka.TopicAuthorizationFailed', 'SerialNumber.Cmp(', 'Transport: renewedTransport', 'len(values) != 2', 'kafka.NewConn(raw, topic, 0)', 'directTopic(ctx, transport.TLS, sa, false, "before-renewal")'):
             with self.assertRaises(ValueError): boundary(self.docs,self.probe.replace(token,'REMOVED'),self.workflow)
         with self.assertRaises(ValueError): boundary(self.docs,self.probe,self.workflow.replace('packages: read','packages: write'))
         with self.assertRaises(ValueError): boundary(self.docs,self.probe,self.workflow.replace('python3 -B tools/redpanda-identity/qualify.py','true'))

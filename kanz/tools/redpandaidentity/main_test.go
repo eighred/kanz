@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/protocol"
+	produceAPI "github.com/segmentio/kafka-go/protocol/produce"
 	"io"
 	"net/url"
 	"testing"
@@ -80,5 +82,36 @@ func TestFailureClassDoesNotExposeErrorText(t *testing.T) {
 		if got := failureClass(tc.err); got != tc.want {
 			t.Fatalf("classification=%q want=%q", got, tc.want)
 		}
+	}
+}
+
+func TestTopicDenialRequiresExactBrokerCode(t *testing.T) {
+	if err := requireTopicDenial(fmt.Errorf("broker supplied detail: %w", kafka.TopicAuthorizationFailed)); err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []error{nil, kafka.UnknownTopicOrPartition, context.DeadlineExceeded, io.EOF, errors.New("local metadata route missing")} {
+		if requireTopicDenial(input) == nil {
+			t.Fatal("non-denial accepted")
+		}
+	}
+	if failureClass(requireTopicDenial(nil)) != "unexpected-success" {
+		t.Fatal("acceptance not distinguished")
+	}
+	if failureClass(requireTopicDenial(kafka.UnknownTopicOrPartition)) != "kafka-3" {
+		t.Fatal("typed cause lost")
+	}
+}
+
+func TestPooledUnknownTopicIsNotBrokerAuthorizationEvidence(t *testing.T) {
+	// Transport calls this router against its filtered Metadata response before
+	// sending Produce. A hidden cross-principal topic therefore never reaches
+	// the broker via this path; it cannot qualify the write ACL.
+	request := &produceAPI.Request{Topics: []produceAPI.RequestTopic{{Topic: "proof-b"}}}
+	_, err := request.Broker(protocol.Cluster{})
+	if err == nil || errors.Is(err, kafka.TopicAuthorizationFailed) {
+		t.Fatal("unexpected pinned routing contract")
+	}
+	if requireTopicDenial(err) == nil {
+		t.Fatal("local metadata error accepted as broker denial")
 	}
 }

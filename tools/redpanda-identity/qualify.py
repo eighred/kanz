@@ -224,8 +224,8 @@ def main():
             if evidence['failureStage'].startswith('probe '):
                 try:
                     logs=k('-n','kanz-services','logs','job/'+case)
-                    match=re.fullmatch(r'PROBE_FAILED_STAGE:([a-z-]+) CLASS:(kafka--?[0-9]{1,5}|tls-certificate|timeout|eof|other)',logs)
-                    allowed={'configuration','svid','kafka','tls-handshake','bootstrap-topics','bootstrap-acls','own-topic','cross-topic-denial','acl-admin-denial','renewal','renewed-topic','ungranted-denial','exact-records'}
+                    match=re.fullmatch(r'PROBE_FAILED_STAGE:([a-z-]+) CLASS:(kafka--?[0-9]{1,5}|tls-certificate|timeout|eof|unexpected-success|other)',logs)
+                    allowed={'configuration','svid','kafka','tls-handshake','bootstrap-topics','bootstrap-acls','own-topic','own-topic-direct','cross-topic-write','cross-topic-read','acl-admin-denial','renewal','renewed-topic','renewed-topic-denial','ungranted-denial','ungranted-write','ungranted-read','exact-records'}
                     if match and match[1] in allowed:
                         evidence['probeFailureStage']=match[1]
                         evidence['probeFailureClass']=match[2]

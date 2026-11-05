@@ -82,3 +82,14 @@ topic authorization failure (code 29). Run 42120249766 retained the actual publi
 broker DN above, with no invalid bootstrap properties or missing bootstrap file.
 The subsequent strict mapping correction still requires all five real cases,
 including renewed TLS connections and final exact records, to pass.
+
+Run 42121721369 passed bootstrap and client-a own-topic publish/read, then failed
+the negative path. The pinned kafka-go Transport routes operations through
+filtered metadata; its [Produce broker selector](https://github.com/segmentio/kafka-go/blob/v0.4.51/protocol/produce/produce.go)
+returns a local missing-topic error before sending a request for a hidden topic.
+That cannot prove broker denial. Negative operations now use `kafka.Conn` to the
+same fixed fixture broker and partition over the same exact-peer SPIFFE TLS,
+with an own-topic readback positive control through that path. Only the actual
+broker's topic-authorization code 29 qualifies; local errors, timeouts, unknown
+topics and accepted operations still fail. Normal positive and renewed writes
+retain the pooled transport, and final reads still require exactly four records.

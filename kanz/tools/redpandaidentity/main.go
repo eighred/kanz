@@ -92,6 +92,55 @@ func fetch(ctx context.Context, c *kafka.Client, topic string) ([]string, error)
 	return values, nil
 }
 
+// directTopic sends the actual operation to the single fixture broker. The
+// pooled Transport cannot route an unauthorized topic absent from its metadata;
+// that local routing error is not broker authorization evidence.
+func directTopic(ctx context.Context, config *tls.Config, topic string, write bool, expectedRead string) error {
+	dialer := &tls.Dialer{Config: config, NetDialer: &net.Dialer{Timeout: 10 * time.Second}}
+	raw, err := dialer.DialContext(ctx, "tcp", "redpanda.kanz-messaging.svc:9094")
+	if err != nil {
+		return err
+	}
+	conn := kafka.NewConn(raw, topic, 0)
+	defer conn.Close()
+	deadline := time.Now().Add(10 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return err
+	}
+	if write {
+		if err := conn.SetRequiredAcks(int(kafka.RequireAll)); err != nil {
+			return err
+		}
+		_, err = conn.WriteMessages(kafka.Message{Value: []byte("FORBIDDEN")})
+	} else {
+		// Skip the preliminary offset lookup so this tests a Fetch denial.
+		if _, err := conn.Seek(0, kafka.SeekAbsolute|kafka.SeekDontCheck); err != nil {
+			return err
+		}
+		var message kafka.Message
+		message, err = conn.ReadMessage(4096)
+		if err == nil && expectedRead != "" && string(message.Value) != expectedRead {
+			return errors.New("direct own-topic readback mismatch")
+		}
+	}
+	return err
+}
+
+var errUnexpectedAcceptance = errors.New("forbidden operation accepted")
+
+func requireTopicDenial(err error) error {
+	if errors.Is(err, kafka.TopicAuthorizationFailed) {
+		return nil
+	}
+	if err == nil {
+		return errUnexpectedAcceptance
+	}
+	return fmt.Errorf("operation did not return explicit topic authorization denial: %w", err)
+}
+
 func run() error {
 	if version.String() == version.Unstamped {
 		return errors.New("fixture executable must identify its source")
@@ -186,12 +235,17 @@ func run() error {
 		if sa == other {
 			other = "proof-b"
 		}
-		stage = "cross-topic-denial"
-		if !errors.Is(produce(ctx, c, other, "FORBIDDEN"), kafka.TopicAuthorizationFailed) {
-			return errors.New("cross-topic write not explicitly denied")
+		stage = "own-topic-direct"
+		if err := directTopic(ctx, transport.TLS, sa, false, "before-renewal"); err != nil {
+			return err
 		}
-		if _, err := fetch(ctx, c, other); !errors.Is(err, kafka.TopicAuthorizationFailed) {
-			return errors.New("cross-topic read not explicitly denied")
+		stage = "cross-topic-write"
+		if err := requireTopicDenial(directTopic(ctx, transport.TLS, other, true, "")); err != nil {
+			return err
+		}
+		stage = "cross-topic-read"
+		if err := requireTopicDenial(directTopic(ctx, transport.TLS, other, false, "")); err != nil {
+			return err
 		}
 		stage = "acl-admin-denial"
 		ar, err := c.CreateACLs(ctx, &kafka.CreateACLsRequest{ACLs: acls})
@@ -242,8 +296,9 @@ func run() error {
 		if err := produce(ctx, c, sa, "after-renewal"); err != nil {
 			return err
 		}
-		if !errors.Is(produce(ctx, c, other, "FORBIDDEN"), kafka.TopicAuthorizationFailed) {
-			return errors.New("renewed client escaped its ACL")
+		stage = "renewed-topic-denial"
+		if err := requireTopicDenial(directTopic(ctx, renewedTransport.TLS, other, true, "")); err != nil {
+			return err
 		}
 	case "ungranted":
 		stage = "ungranted-denial"
@@ -253,11 +308,13 @@ func run() error {
 		// A valid SVID maps to its own unprivileged alias. TLS success alone
 		// grants no topic permission; require explicit Kafka authorization codes.
 		for _, topic := range []string{"proof-a", "proof-b"} {
-			if !errors.Is(produce(ctx, c, topic, "FORBIDDEN"), kafka.TopicAuthorizationFailed) {
-				return errors.New("ungranted write not explicitly denied")
+			stage = "ungranted-write"
+			if err := requireTopicDenial(directTopic(ctx, transport.TLS, topic, true, "")); err != nil {
+				return err
 			}
-			if _, err := fetch(ctx, c, topic); !errors.Is(err, kafka.TopicAuthorizationFailed) {
-				return errors.New("ungranted read not explicitly denied")
+			stage = "ungranted-read"
+			if err := requireTopicDenial(directTopic(ctx, transport.TLS, topic, false, "")); err != nil {
+				return err
 			}
 		}
 	case "verify":
@@ -280,6 +337,9 @@ func run() error {
 // failureClass emits only fixed categories or the protocol's numeric error code.
 // Error messages may carry broker supplied text and are deliberately excluded.
 func failureClass(err error) string {
+	if errors.Is(err, errUnexpectedAcceptance) {
+		return "unexpected-success"
+	}
 	var code kafka.Error
 	if errors.As(err, &code) {
 		return fmt.Sprintf("kafka-%d", int(code))
