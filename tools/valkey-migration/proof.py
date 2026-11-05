@@ -132,7 +132,7 @@ class Fixture:
         return ["docker", "run", "--name", self.name, "--label", LABEL + "=" + self.name,
                 "--network", "none", "--user", "999:999", "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges", "--read-only", "--memory=192m", "--cpus=1",
-                "--pids-limit=64", "--log-driver=local", "--log-opt=max-size=1m", "--log-opt=max-file=1",
+                "--pids-limit=64", "--log-driver=json-file", "--log-opt=max-size=1m", "--log-opt=max-file=1",
                 "--mount", "type=volume,src=" + self.volume + ",dst=/data"]
 
     def start(self, image, preamble):

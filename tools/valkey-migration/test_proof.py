@@ -39,6 +39,9 @@ class MigrationBoundaryTests(unittest.TestCase):
         self.assertEqual(args[args.index("--network") + 1], "none")
         self.assertEqual(args[args.index("--mount") + 1], "type=volume,src=" + NAME + "-data,dst=/data")
         self.assertEqual(args[args.index("--user") + 1], "999:999")
+        self.assertIn("--log-driver=json-file", args)
+        self.assertIn("--log-opt=max-size=1m", args)
+        self.assertIn("--log-opt=max-file=1", args)
         for forbidden in ("--privileged", "-p", "--publish", "--volume", "--env-file"):
             self.assertNotIn(forbidden, args)
 
