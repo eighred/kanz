@@ -387,6 +387,16 @@ jobs:
           cd ../kanz
           go build -o "$RUNNER_TEMP/mfa-web-bff" ./services/web-bff/cmd/web-bff
 
+      - name: Prove tv-sync separate roles and checkpoint recovery
+        working-directory: kanz
+        env:
+          TV_SYNC_TEST_ADMIN_URL: postgres://kanz:kanz@localhost:5432/kanz?sslmode=disable
+        run: |
+          set -o pipefail
+          go test -race -p 1 ./services/tv-sync/internal/projection -run '^TestTokyoTVSyncSeparateRolesAndRecovery$' -count=1 -json | tee "$RUNNER_TEMP/tv-sync-role-proof.jsonl"
+          python3 -B -m unittest discover -s ../.github/scripts -p 'test_check_tv_sync_evidence.py'
+          python3 ../.github/scripts/check_tv_sync_evidence.py "$RUNNER_TEMP/tv-sync-role-proof.jsonl"
+
       - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
         working-directory: kanz
         env:
