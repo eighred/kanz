@@ -272,8 +272,23 @@ func TestRustRepositoryLifecycle(t *testing.T) {
 		// shared lock table. Short IDs keep this below the separate byte cap.
 		for start := 1; start <= 100001; start += 500 {
 			end := min(start+499, 100001)
-			if _, e := f.pool.Exec(f.ctx, `INSERT INTO order_fills (tenant_id,order_id,fill_id) SELECT current_setting('app.tenant_id'),'order',n::text FROM generate_series($1::bigint,$2::bigint)n`, start, end); e != nil {
+			if _, e := f.pool.Exec(f.ctx, `INSERT INTO order_fills (tenant_id,order_id,fill_id,raw_fill_id) SELECT current_setting('app.tenant_id'),'order',n::text,n::text FROM generate_series($1::bigint,$2::bigint)n`, start, end); e != nil {
 				t.Fatal(e)
+			}
+			// Refresh empty-table estimates and invalidate cached trigger plans
+			// across this deliberately large fixture. The canonical alias index,
+			// trigger and original deadline remain enabled.
+			if start == 1 || end%5000 == 0 {
+				if _, e := f.pool.Exec(f.ctx, `ANALYZE order_fills`); e != nil {
+					t.Fatal(e)
+				}
+				var plan []byte
+				if e := f.pool.QueryRow(f.ctx, `EXPLAIN (FORMAT JSON) SELECT 1 FROM order_fills WHERE tenant_id=current_setting('app.tenant_id') AND raw_fill_id=$1 AND fill_id<>$1`, "absent").Scan(&plan); e != nil {
+					t.Fatal(e)
+				}
+				if !bytes.Contains(plan, []byte("order_fills_alias_idx")) || bytes.Contains(plan, []byte("Seq Scan")) {
+					t.Fatal("capacity fixture alias lookup did not use canonical index")
+				}
 			}
 		}
 		readError(t, runResult(t, f.readRequest("applied-fills", "order")), "Capacity")
