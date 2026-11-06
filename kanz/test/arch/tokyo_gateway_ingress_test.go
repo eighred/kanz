@@ -58,6 +58,9 @@ func TestTokyoRenderedGatewayOnlyIngress(t *testing.T) {
 			if !ok || d.Namespace != "kanz-services" || d.Spec.Template.Labels["app"] != target.app {
 				t.Fatal("missing deployed target identity")
 			}
+			if !tokyoGatewayAllows(policies, "kanz-services", target.app, "TCP", int(target.api)) {
+				t.Error("gateway egress blocks the isolated API; both policy directions are required")
+			}
 			for _, problem := range splitAPIIngressProblems(policies, d.Spec.Template.Labels, target.app, target.api, target.ops) {
 				t.Error(problem)
 			}
