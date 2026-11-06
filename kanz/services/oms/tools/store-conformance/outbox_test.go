@@ -198,13 +198,30 @@ func TestRustOutboxQueue(t *testing.T) {
 			req["tenant"] = "tenant-b"
 			expect(t, run(t, req), "RecordNotOwned")
 		}
-		if _, e := f.pool.Exec(f.ctx, "UPDATE outbox SET producer_service='accounting'"); e != nil {
+		tx, e := f.pool.Begin(f.ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer func() { _ = tx.Rollback(f.ctx) }()
+		if e = outbox.Enqueue(f.ctx, tx, outbox.ServiceAccounting, rows[0].Record); e != nil {
+			t.Fatal(e)
+		}
+		if e = tx.Commit(f.ctx); e != nil {
+			t.Fatal(e)
+		}
+		var foreignID int64
+		if e = f.pool.QueryRow(f.ctx, "SELECT id FROM outbox WHERE producer_service='accounting'").Scan(&foreignID); e != nil {
 			t.Fatal(e)
 		}
 		req := f.queueRequest("published")
-		req["expected_version"] = rows[0].ID
+		req["expected_version"] = foreignID
 		expect(t, run(t, req), "RecordNotOwned")
-		if _, e := f.pool.Exec(f.ctx, `ALTER TABLE outbox DROP CONSTRAINT outbox_producer_service_required; UPDATE outbox SET producer_service=NULL; ALTER TABLE outbox ADD CONSTRAINT outbox_producer_service_required CHECK(producer_service IS NOT NULL AND producer_service<>'') NOT VALID`); e != nil {
+		// Model pre-owner migration history without changing any known owner or
+		// disabling the immutable-owner trigger. Restore the canonical constraint.
+		if _, e := f.pool.Exec(f.ctx, `ALTER TABLE outbox DROP CONSTRAINT outbox_producer_service_required;
+		INSERT INTO outbox (envelope_tenant_id,partition_key,subject,event_type,event_class,schema_version,domain,payload_schema_ref,event_time,correlation_id,causation_id,trace_context,payload)
+		VALUES ('tenant-a','legacy','legacy','legacy',1,1,'order','legacy',now(),'','','',''::bytea);
+		ALTER TABLE outbox ADD CONSTRAINT outbox_producer_service_required CHECK(producer_service IS NOT NULL AND producer_service<>'' AND producer_service=btrim(producer_service)) NOT VALID`); e != nil {
 			t.Fatal(e)
 		}
 		for _, mode := range []string{"pending", "keys", "age"} {
