@@ -30,7 +30,9 @@ func TestDataPlaneBootstrapPreservesCredentialGroupsAndGeneratesSigningMaterialI
 set -eu
 printf '%s\n' "$*" >> "$FAKE_VAULT_LOG"
 case "$1 $2" in
-  "token lookup"|"policy write") exit 0 ;;
+  "token lookup") exit 0 ;;
+  "read auth/kubernetes/role/postgres-provisioner") exit 0 ;;
+  "policy write") cat > "$FAKE_VAULT_STATE/$3.policy"; exit 0 ;;
   "audit list") printf '%s\n' '{"file/":{}}'; exit 0 ;;
   "auth list") printf '%s\n' '{"kubernetes/":{}}'; exit 0 ;;
   "secrets list")
@@ -43,12 +45,20 @@ case "$1 $2" in
     field=''; path=''
     for arg in "$@"; do case "$arg" in -field=*) field=${arg#-field=};; kv/*) path=$arg;; esac; done
 	case "$path:$field" in
-	  kv/kanz/api-gateway:signing_secret) test -f "$FAKE_VAULT_STATE/gateway" ;;
-	  kv/kanz/identity:signing_key_pem) test -f "$FAKE_VAULT_STATE/identity" ;;
+	  kv/kanz/api-gateway:signing_secret) test -f "$FAKE_VAULT_STATE/gateway" || { printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1; } ;;
+	  kv/kanz/identity:signing_key_pem) test -f "$FAKE_VAULT_STATE/identity" || { printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1; } ;;
 	  kv/kanz/testnet/postgres:accounting_app) exit 0 ;;
 	  kv/kanz/testnet/postgres:accounting_migrate|kv/kanz/accounting:dsn|kv/kanz/accounting:migrate_dsn)
-	    if [ "${FAKE_PARTIAL:-0}" = 1 ]; then exit 1; fi
+	    if [ "${FAKE_PARTIAL:-0}" = 1 ]; then printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1; fi
 	    exit 0 ;;
+      kv/kanz/tv-sync-runtime:migrate_dsn)
+        if [ "${FAKE_LOOKUP_FAILURE:-0}" = 1 ]; then printf '%s\n' 'permission denied' >&2; exit 2; fi
+        if [ "${FAKE_TV_MIGRATE_DSN:-0}" = 1 ]; then exit 0; fi
+        printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1 ;;
+      kv/kanz/testnet/postgres:tv_sync_app) exit 0 ;;
+      kv/kanz/testnet/postgres:tv_sync_migrate|kv/kanz/tv-sync-runtime:dsn)
+        if [ "${FAKE_PARTIAL_TV:-0}" = 1 ]; then printf 'Field "%s" not present in secret\n' "$field" >&2; exit 1; fi
+        exit 0 ;;
 	  *) exit 0 ;;
     esac
     exit $? ;;
@@ -90,13 +100,29 @@ exit 92
 		"VAULT_BIN="+fakeVault,
 		"VAULT_CACERT="+trust,
 	)
-	cmd := exec.Command("sh", script)
+	cmd := exec.Command("sh", script, "tv-sync")
 	cmd.Env = append(commonEnv,
 		"COMPLETION_MARKER="+marker,
 		"FAKE_VAULT_STATE="+state,
 		"FAKE_VAULT_LOG="+logPath,
 	)
 	cmd.Stdin = strings.NewReader("operator-token\n")
+	base := exec.Command("sh", script)
+	base.Env = cmd.Env
+	base.Stdin = strings.NewReader("operator-token\n")
+	if output, err := base.CombinedOutput(); err != nil {
+		t.Fatalf("ordinary bootstrap: %v\n%s", err, output)
+	}
+	baseLog, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(baseLog), "tv-sync") || strings.Contains(string(baseLog), "tv_sync") {
+		t.Fatal("ordinary bootstrap depends on unactivated tv-sync credentials")
+	}
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bootstrap failed: %v\n%s", err, output)
@@ -117,6 +143,23 @@ exit 92
 		t.Fatal(err)
 	}
 	logText := string(logBody)
+	for _, unrelated := range []string{"kv get -field=accounting", "kv get -field=signing", "write auth/kubernetes/config", "policy write accounting-read"} {
+		if strings.Contains(logText, unrelated) {
+			t.Fatalf("tv preparation reconciled unrelated bootstrap state: %s", unrelated)
+		}
+	}
+	for _, required := range []string{"write auth/kubernetes/role/tv-sync bound_service_account_names=tv-sync bound_service_account_namespaces=kanz-services", "kv get -field=tv_sync_app kv/kanz/testnet/postgres", "kv get -field=dsn kv/kanz/tv-sync-runtime", "token_no_default_policy=true"} {
+		if !strings.Contains(logText, required) {
+			t.Fatalf("tv-sync bootstrap boundary missing: %s", required)
+		}
+	}
+	policy, err := os.ReadFile(filepath.Join(state, "tv-sync-read.policy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(policy), `path "kv/data/kanz/tv-sync-runtime"`) || strings.Contains(string(policy), `path "kv/data/kanz/tv-sync"`) || strings.Contains(string(policy), "kanz/testnet/postgres") || strings.Contains(string(policy), "*") {
+		t.Fatal("runtime policy can expose migration secret records")
+	}
 	if strings.Contains(logText, "_app=-") || strings.Contains(logText, "migrate_dsn=-") || strings.Contains(logText, "redis_dsn=-") {
 		t.Fatalf("existing credential group was changed:\n%s", logText)
 	}
@@ -127,7 +170,7 @@ exit 92
 	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rerun := exec.Command("sh", script)
+	rerun := exec.Command("sh", script, "tv-sync")
 	rerun.Env = cmd.Env
 	rerun.Stdin = strings.NewReader("operator-token\n")
 	if output, err := rerun.CombinedOutput(); err != nil {
@@ -165,4 +208,35 @@ exit 92
 	if _, err := os.Stat(partialMarker); !os.IsNotExist(err) {
 		t.Fatalf("partial bootstrap emitted a completion marker: %v", err)
 	}
+	partialTV := exec.Command("sh", script, "tv-sync")
+	partialTV.Env = append(commonEnv, "FAKE_PARTIAL_TV=1", "FAKE_VAULT_STATE="+partialState, "FAKE_VAULT_LOG="+partialLog, "COMPLETION_MARKER="+partialMarker)
+	partialTV.Stdin = strings.NewReader("operator-token\n")
+	partialTVOutput, err := partialTV.CombinedOutput()
+	if err == nil || !strings.Contains(string(partialTVOutput), "Credential group tv-sync database is partial (1/3 fields)") {
+		t.Fatalf("partial tv-sync group not refused explicitly: %v %s", err, partialTVOutput)
+	}
+	if _, err := os.Stat(partialMarker); !os.IsNotExist(err) {
+		t.Fatal("partial tv-sync bootstrap emitted completion")
+	}
+	leaked := exec.Command("sh", script, "tv-sync")
+	leaked.Env = append(commonEnv, "FAKE_TV_MIGRATE_DSN=1", "FAKE_VAULT_STATE="+partialState, "FAKE_VAULT_LOG="+partialLog, "COMPLETION_MARKER="+partialMarker)
+	leaked.Stdin = strings.NewReader("operator-token\n")
+	leakedOutput, err := leaked.CombinedOutput()
+	if err == nil || !strings.Contains(string(leakedOutput), "runtime KV contains a migration credential") {
+		t.Fatalf("runtime migration credential not refused: %v %s", err, leakedOutput)
+	}
+	if _, err := os.Stat(filepath.Join(partialState, "tv-sync-read.policy")); !os.IsNotExist(err) {
+		t.Fatal("runtime policy published before credential qualification")
+	}
+	unknown := exec.Command("sh", script, "tv-sync")
+	unknown.Env = append(commonEnv, "FAKE_LOOKUP_FAILURE=1", "FAKE_VAULT_STATE="+partialState, "FAKE_VAULT_LOG="+partialLog, "COMPLETION_MARKER="+partialMarker)
+	unknown.Stdin = strings.NewReader("operator-token\n")
+	unknownOutput, err := unknown.CombinedOutput()
+	if err == nil || !strings.Contains(string(unknownOutput), "absence is unverified") {
+		t.Fatalf("unknown Vault result accepted: %v %s", err, unknownOutput)
+	}
+	if _, err := os.Stat(filepath.Join(partialState, "tv-sync-read.policy")); !os.IsNotExist(err) {
+		t.Fatal("runtime policy published after unknown Vault read")
+	}
+
 }

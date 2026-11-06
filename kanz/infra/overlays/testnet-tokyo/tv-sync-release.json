@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "release_tag": "v2026.4.0",
+  "release_sha": "f7217a76b48d9b6075a0683ddf35be50fbdf37cb",
+  "destination_tag": "release-v2026.4.0",
+  "signer_identity": "https://github.com/eighred/kanz/.github/workflows/release.yml@refs/tags/v2026.4.0",
+  "signer_issuer": "https://token.actions.githubusercontent.com",
+  "images": {
+    "tv-sync": {
+      "source": "ghcr.io/eighred/tv-sync@sha256:88e14a7fb596dc6c17670bba3bdcd43dc380f3affea09c1b6aae5d4cc9aeb91e",
+      "destination": "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/tv-sync@sha256:88e14a7fb596dc6c17670bba3bdcd43dc380f3affea09c1b6aae5d4cc9aeb91e"
+    },
+    "kanz-migrate": {
+      "source": "ghcr.io/eighred/kanz-migrate@sha256:147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24",
+      "destination": "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate@sha256:147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24"
+    }
+  }
+}

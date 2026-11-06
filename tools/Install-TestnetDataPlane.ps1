@@ -9,13 +9,38 @@ param(
 
     [string]$Profile = 'kanz-platform',
 
-    [switch]$Apply
+    [switch]$Apply,
+
+    [switch]$PrepareTVSync
 )
 
 $ErrorActionPreference = 'Stop'
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $kubectl = (Get-Command kubectl.exe -ErrorAction Stop).Source
 $overlay = Join-Path $PSScriptRoot '..\kanz\infra\overlays\testnet-tokyo\data'
+
+$repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+& git -C $repoRoot fetch origin main --quiet
+if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main.' }
+$releaseCommit = (& git -C $repoRoot rev-parse origin/main).Trim()
+$headCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
+if ($headCommit -ne $releaseCommit) { throw "Data-plane installation refused: HEAD $headCommit is not exact origin/main $releaseCommit." }
+& git -C $repoRoot diff --quiet $releaseCommit -- 'tools/Install-TestnetDataPlane.ps1' 'tools/Resolve-EcrReleaseDigest.ps1' 'tools/prepare-testnet-tv-sync.sh' 'kanz/infra'
+if ($LASTEXITCODE -ne 0) { throw 'Data-plane installation refused: reviewed source inputs differ.' }
+if ($PrepareTVSync) {
+    if ($InstanceId -cne 'i-0ee1235614219f089') { throw 'TV preparation requires the reviewed Tokyo instance.' }
+    $account = (& $aws sts get-caller-identity --profile $Profile --query Account --output text).Trim()
+    if ($LASTEXITCODE -ne 0 -or $account -cne '012619468098') { throw 'TV preparation account verification failed.' }
+    $overlay = Join-Path $repoRoot 'kanz/infra/overlays/testnet-tokyo/tv-sync-preparation'
+    . (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')
+    $lockPath = Join-Path $repoRoot 'kanz/infra/overlays/testnet-tokyo/tv-sync-release.json'
+    $release = Read-ReviewedTvSyncRelease -LockPath $lockPath
+    foreach ($member in $release.images.PSObject.Properties) {
+        $digest = $member.Value.destination.Split('@')[1]
+        $tag = Resolve-ReviewedTestnetReleaseTag -LockPath $lockPath -Repository $member.Name -SourceCommit $release.release_sha -Digest $digest
+        if ((Resolve-EcrReleaseDigest -Aws $aws -Profile $Profile -Region $Region -Repository $member.Name -ReleaseTag $tag) -cne $digest) { throw 'Reviewed signed-pair destination tag/digest verification failed.' }
+    }
+}
 
 function Invoke-SsmCommands {
     param(
@@ -63,9 +88,11 @@ if ($LASTEXITCODE -ne 0 -or -not $renderedLines) {
 }
 $rendered = ($renderedLines -join "`n") + "`n"
 $resourceCount = ([regex]::Matches($rendered, '(?m)^kind: ')).Count
-if ($resourceCount -ne 37) {
+if (-not $PrepareTVSync -and $resourceCount -ne 37) {
     throw "Expected 37 rendered resources; found $resourceCount. Review the transfer and readiness contract."
 }
+if ($PrepareTVSync -and $resourceCount -ne 4) { throw "Expected four preparation resources; found $resourceCount." }
+if (-not $PrepareTVSync) {
 foreach ($required in @(
     'sync_interval: always', '--appendfsync always',
     'kanz-testnet-postgres', 'name: nats', 'name: redis'
@@ -73,6 +100,7 @@ foreach ($required in @(
     if (-not $rendered.Contains($required)) {
         throw "Rendered data plane is missing required marker: $required"
     }
+}
 }
 if ($rendered -match '(?m)^\s*image:\s+(?!\S+@sha256:[0-9a-f]{64}\s*$)\S+\s*$') {
     throw 'A mutable image tag survived the Tokyo data-plane render.'
@@ -123,6 +151,19 @@ for ($batchStart = 0; $batchStart -lt $chunks.Count; $batchStart += 4) {
 }
 
 $applyFlag = if ($Apply) { '1' } else { '0' }
+if ($PrepareTVSync) {
+    $engine = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'prepare-testnet-tv-sync.sh'))
+    $result = Invoke-SsmCommands -Comment 'Prepare isolated Tokyo tv-sync database prerequisites' -TimeoutSeconds 1500 -Commands @(
+        'set -Eeuo pipefail',
+        "payload='$remotePayload'",
+        "manifest='$remoteManifest'",
+        "apply='$applyFlag'",
+        "expected_hash='$manifestHash'",
+        $engine
+    )
+    $result.Output
+    return
+}
 $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo data plane' -TimeoutSeconds 1200 -Commands @(
     'set -Eeuo pipefail',
     "payload='$remotePayload'",

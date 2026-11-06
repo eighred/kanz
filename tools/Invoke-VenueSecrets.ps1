@@ -6,10 +6,13 @@ param(
     [ValidateSet('Venue', 'DataPlane', 'AccountProof', 'WebEdge')]
     [string]$Target = 'Venue',
 
-    [switch]$StageOnly
+    [switch]$StageOnly,
+
+    [switch]$PrepareTVSync
 )
 
 $ErrorActionPreference = 'Stop'
+if ($PrepareTVSync -and ($Target -ne 'DataPlane' -or $Mode -ne 'Bootstrap')) { throw 'TV preparation requires DataPlane Bootstrap mode.' }
 $profileName = if ($env:KANZ_AWS_PROFILE) { $env:KANZ_AWS_PROFILE } else { 'kanz-platform' }
 $region = 'ap-northeast-1'
 $scriptRoot = $PSScriptRoot
@@ -18,7 +21,7 @@ $terraformRoot = Join-Path $repositoryRoot 'kanz\infra\terraform-testnet'
 $scriptName = if ($Target -eq 'DataPlane') { 'bootstrap-testnet-data-plane.sh' } elseif ($Target -eq 'WebEdge') { 'bootstrap-testnet-web-edge.sh' } else { 'bootstrap-testnet-venues.sh' }
 $bootstrapScript = Join-Path $scriptRoot $scriptName
 $remoteName = switch ($Target) {
-    'DataPlane' { 'testnet-data-plane-secrets' }
+    'DataPlane' { if ($PrepareTVSync) { 'testnet-tv-sync-secrets' } else { 'testnet-data-plane-secrets' } }
     'AccountProof' { 'testnet-venue-account-proof' }
     'WebEdge' { 'testnet-web-edge' }
     default { 'testnet-venue-secrets' }
@@ -49,6 +52,16 @@ if (-not (Get-Command session-manager-plugin.exe -ErrorAction SilentlyContinue))
     $env:Path = "$pluginDirectory;$env:Path"
 }
 
+if ($PrepareTVSync) {
+    & git -C $repositoryRoot fetch origin main --quiet
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot verify merged bootstrap source.' }
+    $main = (& git -C $repositoryRoot rev-parse origin/main).Trim()
+    if ((& git -C $repositoryRoot rev-parse HEAD).Trim() -cne $main) { throw 'TV bootstrap requires exact origin/main.' }
+    & git -C $repositoryRoot diff --quiet $main -- tools/Invoke-VenueSecrets.ps1 tools/bootstrap-testnet-data-plane.sh
+    if ($LASTEXITCODE -ne 0) { throw 'TV bootstrap source differs from reviewed main.' }
+    $account = (& $aws sts get-caller-identity --profile $profileName --query Account --output text).Trim()
+    if ($LASTEXITCODE -ne 0 -or $account -cne '012619468098') { throw 'TV bootstrap account verification failed.' }
+}
 if ($env:KANZ_TESTNET_INSTANCE_ID) {
     $instanceId = $env:KANZ_TESTNET_INSTANCE_ID
 }
@@ -62,6 +75,7 @@ elseif ($terraformPath) {
 else {
     throw 'Terraform is unavailable and KANZ_TESTNET_INSTANCE_ID is not set.'
 }
+if ($PrepareTVSync -and $instanceId -cne 'i-0ee1235614219f089') { throw 'TV bootstrap requires the reviewed Tokyo instance.' }
 if ($instanceId -notmatch '^i-[0-9a-f]+$') {
     throw 'Unable to resolve the testnet EC2 instance from Terraform state.'
 }
@@ -137,7 +151,7 @@ $remoteArgument = switch ($Target) {
     'Venue' { ' ' + $Mode.ToLowerInvariant() }
     'AccountProof' { ' account-proof' }
     'WebEdge' { '' }
-    default { '' }
+    default { if ($PrepareTVSync) { ' tv-sync' } else { '' } }
 }
 $interactiveCommand = "sudo k3s kubectl -n vault exec -it vault-0 -c vault -- /bin/sh $remoteScript$remoteArgument"
 Write-Host 'Sensitive values are entered only in the remote Vault process. Hidden input is expected.'

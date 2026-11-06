@@ -1,0 +1,61 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tv-sync-provisioner
+  namespace: kanz-data
+  labels:
+    app.kubernetes.io/name: postgres-provisioner
+    app.kubernetes.io/part-of: kanz
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-provisioner
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: postgres-provisioner
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 26
+        runAsGroup: 26
+        fsGroup: 26
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provisioner
+          image: ghcr.io/cloudnative-pg/postgresql:16.10-standard-bookworm
+          command: [bash, /scripts/provision.sh, tv-sync]
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+            - { name: bootstrap, mountPath: /run/secrets/bootstrap, readOnly: true }
+            - { name: role-passwords, mountPath: /run/secrets/postgres, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: scripts
+          configMap:
+            name: postgres-provisioner
+            defaultMode: 0555
+        - name: bootstrap
+          secret:
+            secretName: kanz-testnet-postgres-app
+            defaultMode: 0440
+        - name: role-passwords
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: tv-sync-role-passwords
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 32Mi }
