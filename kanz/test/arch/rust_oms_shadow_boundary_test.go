@@ -51,6 +51,7 @@ const rustOMSBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("{root}/oms/v1/fold_shadow.proto"),
             format!("{root}/envelope/v1/event_frame.proto"),
             format!("{root}/domain/v1/portfolio.proto"),
+            format!("{root}/command/v1/command_outcome.proto"),
         ],
         &[root],
     )?;

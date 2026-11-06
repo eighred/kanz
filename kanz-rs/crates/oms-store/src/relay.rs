@@ -413,6 +413,18 @@ mod tests {
         assert_eq!(a.trace_context, r.trace_context);
     }
     #[test]
+    fn command_outcome_descriptor_is_in_the_live_fact_domain() {
+        let mut f = Framer::new("oms/test".into(), "version".into()).unwrap();
+        let mut r = record();
+        r.payload_schema_ref = "command.v1.CommandOutcome:1".into();
+        r.payload = vec![8, 1, 18, 1, b'a'];
+        let frame = f.frame(&r).unwrap();
+        assert_eq!(
+            EventFrame::decode(frame.body.as_slice()).unwrap().payload,
+            r.payload
+        );
+    }
+    #[test]
     fn missing_schema_tenant_class_or_valid_timestamp_refuses() {
         let mut f = Framer::new("oms/test".into(), "version".into()).unwrap();
         let mut r = record();
