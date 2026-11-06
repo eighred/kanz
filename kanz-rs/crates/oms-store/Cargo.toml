@@ -8,8 +8,8 @@ publish = false
 [dependencies]
 kanz-oms-fold-shadow = { path = "../../services/oms-fold-shadow" }
 kanz-decimal-compat = { path = "../.." }
-prost = "=0.14.1"
-prost-types = "=0.14.1"
+prost = "=0.14.4"
+prost-types = "=0.14.4"
 sha2 = "=0.10.9"
 num-bigint = "=0.4.6"
 num-rational = "=0.4.2"
