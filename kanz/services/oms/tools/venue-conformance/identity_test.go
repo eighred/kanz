@@ -304,11 +304,15 @@ func TestRustVenueRotationReconnect(t *testing.T) {
 	second := ca.issue(t, clientID, false)
 	source.set(t, ca, second)
 	server.Stop()
-	_, _ = serveAdapter(t, a, config, endpoint)
+	_, server = serveAdapter(t, a, config, endpoint)
 	deadline := time.Now().Add(10 * time.Second)
 	observed := false
 	for time.Now().Before(deadline) {
-		r = rpc(t, w, "Describe", nil)
+		remaining := min(time.Until(deadline).Milliseconds(), int64(2000))
+		if remaining < 1 {
+			break
+		}
+		r = w.call(map[string]any{"method": "Describe", "timeout_ms": remaining})
 		a.mu.Lock()
 		for _, serial := range a.serials {
 			if serial == second.Certificates[0].SerialNumber.String() {
@@ -319,9 +323,14 @@ func TestRustVenueRotationReconnect(t *testing.T) {
 		if r.Status == "ok" && observed {
 			break
 		}
+		// Workload API streaming has no consumer receipt acknowledgement. A
+		// reconnect that raced delivery may legitimately use the former SVID;
+		// require a later fresh connection to observe the actual new identity.
+		server.Stop()
+		_, server = serveAdapter(t, a, config, endpoint)
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !observed || r.Status != "ok" {
+	if !observed || r.Status != "ok" || !time.Now().Before(deadline) {
 		t.Fatal("fresh identity was not used after actual reconnect")
 	}
 	w.close(source)
@@ -393,4 +402,28 @@ func TestGoVenueFixtureOracle(t *testing.T) {
 		t.Fatal("synthetic mTLS Go oracle unavailable")
 	}
 	exact(t, marshal(t, r.Fills[0]), fill())
+}
+
+func TestRustVenueIPv6RPC(t *testing.T) {
+	binary(t)
+	ca := newCA(t)
+	client := ca.issue(t, clientID, false)
+	source, socket := startWorkload(t, ca, client)
+	a := newAdapter()
+	endpoint, _ := serveAdapter(t, a, serverTLS(ca, ca.issue(t, serverID, false)), "[::1]:0")
+	conn := goConnection(t, endpoint, ca, client)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	want, err := venuepb.NewVenueAdapterServiceClient(conn).Describe(ctx, &venuepb.DescribeRequest{})
+	cancel()
+	if err != nil {
+		t.Fatal("Go IPv6 authenticated control failed")
+	}
+	w, r := startWorker(t, configuration(endpoint, socket))
+	if r.Status != "connected" {
+		t.Fatal("Rust IPv6 authenticated connection failed")
+	}
+	r = rpc(t, w, "Describe", nil)
+	requireOK(t, r)
+	exact(t, r.Response, want)
+	w.close(source)
 }

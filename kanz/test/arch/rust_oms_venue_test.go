@@ -145,7 +145,7 @@ func checkRustVenueBoundary(root string) error {
 func checkRustVenueMarkers(files map[string]string) error {
 	required := map[string][]string{
 		"crates/oms-venue/examples/oms-venue-fixture.rs": {`env!("KANZ_BUILD_VERSION")`, `Some("127.0.0.1"|"localhost"|"[::1]")`, `client.close().await`, `input.read(&mutbyte)`},
-		"crates/oms-venue/src/transport.rs":              {`uri.scheme_str()!=Some("https")`, `starts_with("unix://")`, `spiffe_rustls::mtls_client(source)`, `spiffe_rustls::LocalOnly(domain)`, `spiffe_rustls::authorizer::exact([config.expected_peer.as_str()])`, `.authorize(authorizer)`, `tls.alpn_protocols=vec![b"h2".to_vec()]`, `alpn_protocol()!=Some(b"h2".as_slice())`, `TcpStream::connect`, `tls.connect(server_name,socket).await?`, `a.as_str().contains('@')`, `connect_with_connector(connector)`, `owner.close().await`, `self.owner.close().await`, `fortaskinself.tasks.abort(){let_=task.await;}`, `source.shutdown_with_timeout(Duration::from_secs(2)).await`, `tasks.handles.len()>=64`},
+		"crates/oms-venue/src/transport.rs":              {`connection_host(&uri)?`, `parse::<std::net::Ipv6Addr>()`, `uri.scheme_str()!=Some("https")`, `starts_with("unix://")`, `spiffe_rustls::mtls_client(source)`, `spiffe_rustls::LocalOnly(domain)`, `spiffe_rustls::authorizer::exact([config.expected_peer.as_str()])`, `.authorize(authorizer)`, `tls.alpn_protocols=vec![b"h2".to_vec()]`, `alpn_protocol()!=Some(b"h2".as_slice())`, `TcpStream::connect`, `tls.connect(server_name,socket).await?`, `a.as_str().contains('@')`, `connect_with_connector(connector)`, `owner.close().await`, `self.owner.close().await`, `fortaskinself.tasks.abort(){let_=task.await;}`, `source.shutdown_with_timeout(Duration::from_secs(2)).await`, `tasks.handles.len()>=64`},
 		"crates/oms-venue/src/client.rs":                 {`max_decoding_message_size(kanz_proto_wire::MAX_BYTES)`, `max_encoding_message_size(kanz_proto_wire::MAX_BYTES)`, `request.set_timeout(deadline)`, `tokio::time::timeout(deadline,async`, `error.code()==Code::Unimplemented`, `ViewState::Indeterminate`, `id.mic!=mic||id.account!=account`, `requirements.verified_account&&!id.account_verified`, `requirements.declared_order_types&&id.supported_order_types.is_empty()`},
 		"crates/oms-venue/src/wire.rs":                   {`kanz_proto_wire::normalize(descriptor::<T>()?,raw)`, `value.encoded_len()>kanz_proto_wire::MAX_BYTES`, `src.remaining()>kanz_proto_wire::MAX_BYTES`, `dst.put_slice(item.wire())`, `kanz_proto_wire::put_message(field.number(),state.wire(),&mutout)`, `Canonical::decode(nested)`},
 		"crates/proto-wire/src/lib.rs":                   {`raw.len()>MAX_BYTES`, `out.len()>MAX_BYTES`, `ifdepth>32`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `entries[0].merge(sidecar,&child)?`, `field.is_list()||entries.is_empty()`, `field.is_map()||field.containing_oneof().is_some()`},
@@ -181,6 +181,7 @@ func TestRustVenueClientBoundary(t *testing.T) {
 		{"secure-endpoint", "transport.rs", `uri.scheme_str() != Some("https")`, `false`},
 		{"h2", "transport.rs", `tls.alpn_protocols = vec![b"h2".to_vec()]`, `tls.alpn_protocols = vec![]`},
 		{"tls-required", "transport.rs", `tls.connect(server_name, socket).await?`, `socket`},
+		{"ipv6-host", "transport.rs", `let host = connection_host(&uri)?;`, `let host = uri.host().unwrap().to_owned();`},
 		{"userinfo", "transport.rs", `a.as_str().contains('@')`, `false`},
 		{"exact-peer", "transport.rs", `spiffe_rustls::authorizer::exact([config.expected_peer.as_str()])`, `spiffe_rustls::authorizer::any()`},
 		{"joined-source", "transport.rs", `source.shutdown_with_timeout(Duration::from_secs(2)).await`, `Ok::<(),()>(())`},
@@ -220,7 +221,7 @@ func TestRustVenueActualEvidenceRequired(t *testing.T) {
 				return false
 			}
 		}
-		for _, marker := range []string{"TestRustVenueActualTLSAndRPC/unknown-duplicate-and-noncanonical-wire", "TestRustVenueActualTLSAndRPC/query-three-state-and-unimplemented", "TestRustVenueIdentityRefusals/wrong-peer", "TestRustVenueIdentityRefusals/wrong-trust-domain", "TestRustVenueIdentityRefusals/plaintext-server", "TestRustVenueLifetime/cancel-connect-joins-before-process-exit", "TestRustVenueLifetime/close-joins-live-channel-and-workload-before-exit", "TestRustVenueRotationReconnect", "TestRustVenueHTTP1Refusal"} {
+		for _, marker := range []string{"TestRustVenueActualTLSAndRPC/unknown-duplicate-and-noncanonical-wire", "TestRustVenueActualTLSAndRPC/query-three-state-and-unimplemented", "TestRustVenueIdentityRefusals/wrong-peer", "TestRustVenueIdentityRefusals/wrong-trust-domain", "TestRustVenueIdentityRefusals/plaintext-server", "TestRustVenueLifetime/cancel-connect-joins-before-process-exit", "TestRustVenueLifetime/close-joins-live-channel-and-workload-before-exit", "TestRustVenueRotationReconnect", "TestRustVenueHTTP1Refusal", "TestRustVenueIPv6RPC"} {
 			if !strings.Contains(c, marker) {
 				return false
 			}
@@ -235,7 +236,7 @@ func TestRustVenueActualEvidenceRequired(t *testing.T) {
 			t.Fatal("workflow mutation accepted")
 		}
 	}
-	for _, marker := range []string{"TestRustVenueRotationReconnect", "TestRustVenueHTTP1Refusal", "TestRustVenueIdentityRefusals/wrong-peer"} {
+	for _, marker := range []string{"TestRustVenueRotationReconnect", "TestRustVenueHTTP1Refusal", "TestRustVenueIPv6RPC", "TestRustVenueIdentityRefusals/wrong-peer"} {
 		if check(string(w), strings.ReplaceAll(string(c), marker, "removed")) {
 			t.Fatal("missing actual case accepted")
 		}

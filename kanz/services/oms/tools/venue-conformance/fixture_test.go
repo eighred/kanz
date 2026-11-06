@@ -80,7 +80,7 @@ func (c *certificates) issue(t *testing.T, id string, expired bool) *x509svid.SV
 	if expired {
 		until = time.Now().Add(-time.Minute)
 	}
-	leaf := &x509.Certificate{SerialNumber: serial, URIs: []*url.URL{uri}, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, NotBefore: time.Now().Add(-time.Hour), NotAfter: until}
+	leaf := &x509.Certificate{SerialNumber: serial, URIs: []*url.URL{uri}, BasicConstraintsValid: true, IsCA: false, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, NotBefore: time.Now().Add(-time.Hour), NotAfter: until}
 	raw, err := x509.CreateCertificate(rand.Reader, leaf, c.root, &key.PublicKey, c.key)
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +88,9 @@ func (c *certificates) issue(t *testing.T, id string, expired bool) *x509svid.SV
 	parsed, err := x509.ParseCertificate(raw)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !parsed.BasicConstraintsValid || parsed.IsCA {
+		t.Fatal("synthetic SVID must explicitly declare BasicConstraints CA=false")
 	}
 	return &x509svid.SVID{ID: spiffeid.RequireFromString(id), Certificates: []*x509.Certificate{parsed}, PrivateKey: key}
 }

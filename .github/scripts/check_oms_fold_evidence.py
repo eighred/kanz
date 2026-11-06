@@ -40,6 +40,7 @@ REQUIRED = {
         "TestRustVenueEmptyFillIsNotFailure",
         "TestRustVenueRotationReconnect",
         "TestRustVenueHTTP1Refusal",
+        "TestRustVenueIPv6RPC",
     },
     "services/oms/internal/position": {
         "TestARedeliveredFillIsFoldedOnceByEveryStore",

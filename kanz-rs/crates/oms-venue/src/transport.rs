@@ -17,6 +17,20 @@ pub struct Config {
     pub expected_peer: String,
     pub tenant: String,
 }
+fn connection_host(uri: &http::Uri) -> Result<String, Status> {
+    let host = uri
+        .host()
+        .ok_or_else(|| Status::invalid_argument("missing venue host"))?;
+    // HTTP authorities bracket IPv6; socket and TLS IP parsers require the bare IP.
+    // Keep the original authority on the HTTP/2 endpoint below.
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return inner
+            .parse::<std::net::Ipv6Addr>()
+            .map(|ip| ip.to_string())
+            .map_err(|_| Status::invalid_argument("invalid venue host"));
+    }
+    Ok(host.to_owned())
+}
 #[derive(Default)]
 struct Tasks {
     closed: bool,
@@ -88,10 +102,7 @@ impl Client {
             .parse()
             .map_err(|_| Status::invalid_argument("invalid venue peer"))?;
         let domain = peer.trust_domain().clone();
-        let host = uri
-            .host()
-            .ok_or_else(|| Status::invalid_argument("missing venue host"))?
-            .to_owned();
+        let host = connection_host(&uri)?;
         let port = uri.port_u16().unwrap_or(443);
         let server_name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| Status::invalid_argument("invalid venue host"))?;
@@ -189,6 +200,22 @@ impl Owner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ipv6_normalization_preserves_endpoint_authority() {
+        for (address, expected) in [
+            ("https://[::1]:8443", "::1"),
+            ("https://[2001:db8::1]", "2001:db8::1"),
+            ("https://127.0.0.1", "127.0.0.1"),
+            ("https://venue.internal", "venue.internal"),
+        ] {
+            let uri: http::Uri = address.parse().unwrap();
+            let authority = uri.authority().unwrap().clone();
+            let host = connection_host(&uri).unwrap();
+            assert_eq!(host, expected);
+            assert!(rustls::pki_types::ServerName::try_from(host).is_ok());
+            assert_eq!(uri.authority().unwrap(), &authority);
+        }
+    }
     #[tokio::test]
     async fn close_joins_owned_tasks_and_prevents_later_spawn() {
         let tasks = OwnedExecutor::default();
