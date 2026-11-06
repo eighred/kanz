@@ -115,3 +115,14 @@ Two required Linux secret-reader cases cover bounds and FIFO/CSI behavior.
 Those fixtures qualify the source behavior; they do not
 substitute for observing replay of the actual restored target with its matching
 verified image. No activation manifest is changed by this prerequisite.
+
+Concurrent subject handlers serialize durable append, in-memory fold and delta
+publication in one process. The database wait uses a separate mutex so readers
+and checkpoints can continue to observe the last fully folded prefix. A later
+append cannot overtake an earlier committed insert whose response is delayed;
+otherwise a checkpoint could skip that earlier fact on restart. Mandatory local
+and real-PostgreSQL tests hold that response while taking a checkpoint, then
+verify the recovered position and final watermark. This is not a distributed
+writer lease, complete-history proof or permission to run multiple writers for
+the same tenant. Existing append-error/redelivery behavior is not expanded by
+this ordering change.
