@@ -53,3 +53,58 @@ It requires Docker, the pinned installer artifacts, and a disposable runner.
 There are no dependency-skipping branches. A passing kind/Cilium result is
 developmental policy enforcement evidence, not authorization for a live rollout
 or a claim that every other CNI implementation has been exercised.
+
+## Controlled Tokyo four-policy transaction
+
+`tools/Invoke-TokyoGatewayPolicy.ps1` is a fixed-estate operator entrypoint, not a
+generic Kubernetes apply tool. Its default performs inventory qualification and
+server-side dry runs; `-Apply` requests the four reviewed policy writes. Neither
+mode may run from an unmerged checkout or before the canonical exact-main CI
+policy succeeds. The wrapper fixes Tokyo account, instance, region, operator
+profile/source chain and assumed-role ARN. The engine independently checks the
+existing kube-system UID. Publishing this source does not authorize live use.
+
+The owned set is the three shared API ingress policies and
+`allow-gateway-runtime-egress`. The only accepted older egress shape omits the
+two exact accounting:8101 and audit:8102 peers. The entire services policy union
+must otherwise match the rendered overlay. Policies outside that namespace,
+Services and the seven selected runtime Pods are captured and must remain
+unchanged. A write uses creation or UID/resourceVersion-bound replacement.
+Existing user metadata is retained. An append-only private receipt is fsynced
+before each side effect; a lost response is reconciled against the marker,
+desired object and original UID. Rollback restores semantic original objects
+with current CAS versions, or deletes only newly created objects with both UID
+and resourceVersion preconditions. A concurrent change refuses automatic
+rollback. Private receipts remain under the reported `/var/tmp` directory,
+including on interruption; there is no force/retry or automatic receipt deletion.
+
+Live probe Pods have no service-account token, listener or domain operation.
+They perform TCP connects only, sending no HTTP or principal headers. Their
+custom readiness gate is never satisfied. Before use the engine checks actual
+Running-but-unready state, exact containers and immutable image identity, rejects
+any matching Service with `publishNotReadyAddresses`, and rejects ready/unknown
+EndpointSlice entries for probe IPs. Only required app and ownership labels are
+used, never a ReplicaSet hash. Cleanup checks nonce/UID/resourceVersion and
+verifies Pod/namespace deletion and removal of every probe endpoint address.
+No production Pod is edited and no ephemeral container is installed.
+
+The public image resolver authenticates anonymously for the fixed Python
+repository only. It hashes the fixed root, any selected linux/amd64 child and
+config bytes, then projects digests/platform only. The current pin resolves to a
+direct OCI manifest, not an index. Its config digest is compared with the typed
+CRI image inspection and repository digest, separately from the Pod's imageID.
+No Docker Desktop or credential-helper dependency is introduced. Registry tokens
+and raw config remain subprocess-local. Redirect handling follows the
+[OCI authorization rule](https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md)
+and only the documented [Docker registry/CDN hosts](https://docs.docker.com/desktop/enterprise/allow-list/);
+it never forwards authorization across hosts.
+
+The same required workflow also constructs a second fresh kind/Cilium cluster
+for `transaction_fixture.py`. Fourteen mandatory cases exercise each real API
+write/finalization response-loss boundary, dry-run nonmutation, four-policy
+success, refusal to overwrite a concurrent edit, actual neverReady endpoint
+nonparticipation, actual matching-Service refusal and UID-bound cleanup. Its
+checker binds checkout/tree, run/attempt, rendered union and independently
+resolved image identity. This is developmental transaction evidence, not Tokyo
+rollout acceptance. Linux execution is required; local Windows receipt tests
+explicitly skip unsupported no-follow directory semantics.
