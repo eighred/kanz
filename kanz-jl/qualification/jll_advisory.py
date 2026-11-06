@@ -44,6 +44,13 @@ def manifest(expected):
     return ('\n'.join(lines) + '\n').encode()
 
 
+def project(expected):
+    # Trivy0.72 resolves Manifest packages from Project direct dependencies.
+    # This scanner input is never instantiated or substituted for the worker.
+    return ('[deps]\n' + ''.join(name + ' = ' + json.dumps(item['uuid']) + '\n'
+            for name, item in sorted(expected.items()))).encode()
+
+
 def validate_control(result):
     if not any(v.get('PkgName') == 'OpenSSL_jll' and v.get('PkgID') == OPENSSL_UUID
                and v.get('InstalledVersion') == '3.0.12+0'
@@ -56,6 +63,7 @@ def validate_report(report, native):
     expected = packages(native)
     if (report != {'registryCommit': REGISTRY_COMMIT, 'registrySHA256': REGISTRY_SHA256,
                    'packages': expected, 'scannerManifestSHA256': hashlib.sha256(manifest(expected)).hexdigest(),
+                   'scannerProjectSHA256': hashlib.sha256(project(expected)).hexdigest(),
                    'knownJLLAdvisoryControlPassed': True, 'advisories': [],
                    'scope': 'archive-bound-JLL-metadata-only'}):
         raise ValueError('JLL advisory evidence missing or unbound')
@@ -69,16 +77,19 @@ def qualify(run, flags, scratch, native, manifest_result, validate_packages, rep
     registry_identity(raw, CONTROL)
     control = scratch / 'jll-control'; control.mkdir()
     (control / 'Manifest.toml').write_bytes(manifest(CONTROL))
+    (control / 'Project.toml').write_bytes(project(CONTROL))
     result = manifest_result(json.loads(run(['trivy', 'fs', *flags, '.'], cwd=control)), 'Manifest.toml')
     validate_packages(result, CONTROL)
     validate_control(result)
     directory = scratch / 'jll-inventory'; directory.mkdir()
     encoded = manifest(expected)
     (directory / 'Manifest.toml').write_bytes(encoded)
+    (directory / 'Project.toml').write_bytes(project(expected))
     result = manifest_result(json.loads(run(['trivy', 'fs', *flags, '.'], cwd=directory)), 'Manifest.toml')
     validate_packages(result, expected)
     report.update({'registryCommit': REGISTRY_COMMIT, 'registrySHA256': REGISTRY_SHA256,
               'packages': expected, 'scannerManifestSHA256': hashlib.sha256(encoded).hexdigest(),
+              'scannerProjectSHA256': hashlib.sha256(project(expected)).hexdigest(),
               'knownJLLAdvisoryControlPassed': True, 'advisories': [],
               'scope': 'archive-bound-JLL-metadata-only'})
     report['advisories'] = [{k: v.get(k) for k in ('VulnerabilityID', 'PkgName', 'PkgID', 'InstalledVersion', 'Severity')}

@@ -37,6 +37,7 @@ class JLLTests(unittest.TestCase):
         native=self.native();expected=j.packages(native)
         parsed=tomllib.loads(j.manifest(expected).decode())
         self.assertEqual({n:v[0] for n,v in parsed['deps'].items()},expected)
+        self.assertEqual(tomllib.loads(j.project(expected).decode())['deps'],{n:v['uuid'] for n,v in expected.items()})
         for mutate in [lambda n:n['jll'].pop('Fixture0_jll'),
                        lambda n:n['jll']['Fixture0_jll'].update(name='Wrong_jll'),
                        lambda n:n['jll']['Fixture0_jll'].update(uuid=n['jll']['Fixture1_jll']['uuid']),
@@ -64,7 +65,8 @@ class JLLTests(unittest.TestCase):
                 calls.append(args)
                 if args[0]=='curl':return raw
                 cwd=kwargs['cwd'];p=tomllib.loads((cwd/'Manifest.toml').read_text())
-                self.assertFalse((cwd/'Project.toml').exists())
+                direct=tomllib.loads((cwd/'Project.toml').read_text())['deps']
+                self.assertEqual(direct,{n:v[0]['uuid'] for n,v in p['deps'].items()})
                 if cwd.name=='jll-control':return scan(j.CONTROL,control)
                 self.assertEqual({n:v[0] for n,v in p['deps'].items()},expected)
                 return scan(expected,[{'PkgName':'Fixture0_jll','Severity':'LOW'}] if bad else [])

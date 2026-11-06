@@ -69,7 +69,8 @@ var juliaOCIMarkers = map[string][]string{
 	"kanz-jl/qualification/jll_advisory.py": {
 		"hashlib.sha256(raw).hexdigest() != REGISTRY_SHA256", "len(raw) > 4 << 20",
 		"entry.get('name') != name", "len(result) != 23", "registry_identity(raw, expected)",
-		"registry_identity(raw, CONTROL)", "validate_packages(result, expected)",
+		"registry_identity(raw, CONTROL)", "(control / 'Project.toml').write_bytes(project(CONTROL))",
+		"(directory / 'Project.toml').write_bytes(project(expected))", "validate_packages(result, expected)",
 		"validate_packages(result, CONTROL)", "validate_control(result)",
 		"if report['advisories']:", "known archive-bound JLL advisory refuses qualification",
 		"archive-bound-JLL-metadata-only", "'CVE-2024-5535'", "report != {",

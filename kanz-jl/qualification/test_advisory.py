@@ -139,6 +139,7 @@ class AdvisoryTests(unittest.TestCase):
         packages = jll.packages(q['inventory']['nativeRuntime'])
         report['jllAdvisory'] = {'registryCommit':jll.REGISTRY_COMMIT,'registrySHA256':jll.REGISTRY_SHA256,
             'packages':packages,'scannerManifestSHA256':a.hashlib.sha256(jll.manifest(packages)).hexdigest(),
+            'scannerProjectSHA256':a.hashlib.sha256(jll.project(packages)).hexdigest(),
             'knownJLLAdvisoryControlPassed':True,'advisories':[],'scope':'archive-bound-JLL-metadata-only'}
         a.validate_report(report,q,expected)
         for key in report:

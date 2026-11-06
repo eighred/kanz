@@ -186,17 +186,19 @@ libraries need component-specific advisory mappings and known-vulnerable control
 the native/runtime release blocker is unchanged. No package is imported just to
 query its version and no native library is executed by the host inventory parser.
 
-The advisory lane also derives a **scanner-only** Manifest from the 23 JLL
+The advisory lane also derives a **scanner-only** Project/Manifest pair from the 23 JLL
 UUID/version records already matched against the actual image and the pinned
 Julia archive. It verifies each UUID/name/path against checksum-pinned
 [General registry metadata](https://github.com/JuliaRegistries/General/blob/afacc2e68d6c156d80eb9ff489370bb38d1a61f4/Registry.toml)
-before using Trivy's Julia analyzer. This does not instantiate packages or
+before using Trivy's Julia analyzer. The Project names all 23 UUIDs as direct
+scanner inputs because pinned Trivy resolves Manifest reachability from Project
+dependencies. This does not instantiate packages or
 change the worker's Project/Manifest. The same fresh advisory database must
 identify the manifest-only OpenSSL_jll 3.0.12+0 control for
 [JLSEC-2026-252 / CVE-2024-5535](https://github.com/JuliaLang/SecurityAdvisories.jl/blob/main/advisories/published/2026/JLSEC-2026-252.md).
 Any reported advisory for the actual JLL metadata refuses qualification,
 regardless of severity. Evidence binds the registry commit/checksum, all 23
-UUID/versions, scanner-input checksum and control outcome to the existing
+UUID/versions, both scanner-input checksums and control outcome to the existing
 image/source/database report.
 
 This is partial metadata coverage, not a claim that every native file is owned
