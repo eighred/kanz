@@ -33,7 +33,7 @@ func checkGoCacheProfile(profile string, others []string) error {
 
 func TestGoCICompilerCacheProfileIsExclusive(t *testing.T) {
 	root := filepath.Dir(moduleRoot(t))
-	if strings.TrimSpace(string(mustReadArchFile(t, filepath.Join(root, ".github/go-ci-cache-profile")))) != "kanz-go-race-v1" {
+	if strings.TrimSpace(string(mustReadArchFile(t, filepath.Join(root, ".github/go-ci-cache-profile")))) != "kanz-go-race-v2" {
 		t.Fatal("reviewed compiler profile version changed")
 	}
 	var profile string

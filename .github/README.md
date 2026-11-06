@@ -97,8 +97,15 @@ merely to test repository policy.
 
 ## CI compilation and browser setup
 
-The two Go race runners have separate compiler cache profiles. The tracked
-`go-ci-cache-profile` version names their reviewed workload; the generated shard
+Two Go race runners and a third provider/Valkey/lint runner use isolated stores
+and separate compiler cache profiles. All three share the same fixture setup
+definition; the quality runner also executes the existing mandatory positive
+controls before tagged tests. Tagged build/vet/tests and lint run in parallel
+with the full race package partitions. Matrix success requires all three runners;
+the Go aggregator still requires both complete, disjoint race inventories and
+fresh backing-service/browser evidence. Quality cannot replace a race partition.
+
+The tracked `go-ci-cache-profile` version names their reviewed workload; the generated shard
 marker, Go module inputs, schema definitions and generator configuration remain
 additional key inputs. Bump the profile deliberately when the compilation
 workload changes. Editing unrelated workflow steps does not invalidate every

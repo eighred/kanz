@@ -77,8 +77,8 @@ func checkTVProofCI(data []byte, pattern, envName, envValue string, want []strin
 		if !strings.Contains(step.Run, pattern) {
 			continue
 		}
-		if step.If != "matrix.shard == 0" || step.Continue || step.Env[envName] != envValue {
-			return fmt.Errorf("replay proof must run on mandatory shard zero with real non-superuser PostgreSQL")
+		if step.If != "matrix.shard == 0 || matrix.kind == 'quality'" || step.Continue || step.Env[envName] != envValue {
+			return fmt.Errorf("replay proof must run on mandatory race zero and quality with real non-superuser PostgreSQL")
 		}
 		lines := strings.Split(step.Run, "\n")
 		found := 0
