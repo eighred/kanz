@@ -297,6 +297,18 @@ func (c *NATSClient) Publish(ctx context.Context, msg Message) error {
 	return nil
 }
 
+// DurableConsumerTuning is the effective profile used when this client creates
+// a durable subscription. Return a value copy so validation cannot mutate it.
+func (c *NATSClient) DurableConsumerTuning(subject string) ConsumerTuning {
+	return tuningForDurable(subject, c.cfg.ConsumerTuning)
+}
+func tuningForDurable(subject string, override *ConsumerTuning) ConsumerTuning {
+	if override != nil {
+		return *override
+	}
+	return tuningForSubject(subject)
+}
+
 func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Handler) error {
 	return c.subscribeDurable(ctx, subject, group, h, nil)
 }
@@ -365,10 +377,7 @@ func (c *NATSClient) subscribeDurable(ctx context.Context, subject, group string
 	// goroutine whose ack clock is already running. test/arch's
 	// TestJetStreamConsumersAreExplicitlyTuned fails the build if they go missing
 	// again.
-	tuning := tuningForSubject(subject)
-	if c.cfg.ConsumerTuning != nil {
-		tuning = *c.cfg.ConsumerTuning
-	}
+	tuning := tuningForDurable(subject, c.cfg.ConsumerTuning)
 	want := jetstream.ConsumerConfig{
 		Durable:       durableName(group, subject),
 		AckPolicy:     jetstream.AckExplicitPolicy,

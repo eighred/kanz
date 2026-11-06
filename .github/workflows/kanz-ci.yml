@@ -491,6 +491,7 @@ jobs:
         working-directory: kanz
         env:
           TEST_NATS_URL: nats://localhost:4222
+          TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
         run: |
           set -euo pipefail
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_tv_readiness_evidence.py

@@ -14,8 +14,9 @@ import (
 
 // Readiness gates traffic.
 type Readiness struct {
-	ready atomic.Bool
-	ctx   context.Context
+	ready        atomic.Bool
+	foldFailures foldFailures
+	ctx          context.Context
 }
 
 // NewReadiness binds the startup barrier to the process lifetime. Cancellation
@@ -23,7 +24,9 @@ type Readiness struct {
 func NewReadiness(ctx context.Context) *Readiness { return &Readiness{ctx: ctx} }
 
 func (r *Readiness) Set(ready bool) { r.ready.Store(ready) }
-func (r *Readiness) Ready() bool    { return r.ready.Load() && (r.ctx == nil || r.ctx.Err() == nil) }
+func (r *Readiness) Ready() bool {
+	return r.ready.Load() && !r.foldFailures.blocked.Load() && (r.ctx == nil || r.ctx.Err() == nil)
+}
 
 // Server mounts the Broker API.
 type Server struct {
