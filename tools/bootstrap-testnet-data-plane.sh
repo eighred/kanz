@@ -34,6 +34,7 @@ clear_secrets() {
     vault_token=''
     secret_value=''
     exported_key_json=''
+    field_result=''
     unset VAULT_TOKEN
 }
 trap clear_secrets EXIT HUP INT TERM
@@ -79,7 +80,20 @@ write_field() {
 }
 
 field_exists() {
-    "$VAULT_BIN" kv get -field="$2" "kv/$1" >/dev/null 2>&1
+    # Pinned Vault CLI distinguishes absent field/path from transport or ACL
+    # failure (v1.16.2 command/util.go and command/kv_get.go). Never echo values.
+    if field_result=$("$VAULT_BIN" kv get -field="$2" "kv/$1" 2>&1); then
+        field_result=''
+        return 0
+    fi
+    if [ "$field_result" = "Field \"$2\" not present in secret" ] ||
+       [ "$field_result" = "No value found at kv/data/$1" ]; then
+        field_result=''
+        return 1
+    fi
+    field_result=''
+    printf '%s\n' 'Vault field lookup failed; absence is unverified and bootstrap is refused.' >&2
+    exit 1
 }
 
 # Print complete or absent. A partial credential group is neither: generating
@@ -149,7 +163,8 @@ for mapping in \
     'regulatory:regulatory:regulatory:kanz-compliance-rw' \
     'risk-engine:risk_engine:risk_engine:kanz-risk-rw' \
     'venue-binance:venue_binance:venue_binance:kanz-orders-rw' \
-    'venue-okx:venue_okx:venue_okx:kanz-orders-rw'; do
+    'venue-okx:venue_okx:venue_okx:kanz-orders-rw' \
+    'tv-sync:tv_sync:tv_sync:kanz-books-rw'; do
     old_ifs=$IFS
     IFS=:
     set -- $mapping
@@ -159,22 +174,43 @@ for mapping in \
     stem=$3
     host=$4
 
-    state=$(field_group_state "$service database" \
-        "kanz/testnet/postgres:${stem}_app" \
-        "kanz/testnet/postgres:${stem}_migrate" \
-        "kanz/${service}:dsn" \
-        "kanz/${service}:migrate_dsn")
+    runtime_path="kanz/${service}"
+    if [ "$service" = tv-sync ]; then
+        runtime_path=kanz/tv-sync-runtime
+        # A KV read returns the entire record. Narrowing the CSI projection is
+        # insufficient if this ServiceAccount can read a migration DSN there.
+        if field_exists "$runtime_path" migrate_dsn; then
+            printf '%s\n' 'tv-sync runtime KV contains a migration credential; refusing bootstrap.' >&2
+            exit 1
+        fi
+        state=$(field_group_state "$service database" \
+            "kanz/testnet/postgres:${stem}_app" \
+            "kanz/testnet/postgres:${stem}_migrate" \
+            "${runtime_path}:dsn")
+    else
+        state=$(field_group_state "$service database" \
+            "kanz/testnet/postgres:${stem}_app" \
+            "kanz/testnet/postgres:${stem}_migrate" \
+            "${runtime_path}:dsn" \
+            "${runtime_path}:migrate_dsn")
+    fi
     if [ "$state" = absent ]; then
         app_password=$(random_hex)
         migrate_password=$(random_hex)
         write_field kanz/testnet/postgres "${stem}_app" "$app_password"
         write_field kanz/testnet/postgres "${stem}_migrate" "$migrate_password"
-        write_field "kanz/${service}" dsn "postgresql://${stem}_app:${app_password}@${host}.kanz-data.svc:5432/${database}?sslmode=require"
-        write_field "kanz/${service}" migrate_dsn "postgresql://${stem}_migrate:${migrate_password}@${host}.kanz-data.svc:5432/${database}?sslmode=require"
+        write_field "$runtime_path" dsn "postgresql://${stem}_app:${app_password}@${host}.kanz-data.svc:5432/${database}?sslmode=require"
+        if [ "$service" != tv-sync ]; then
+            write_field "$runtime_path" migrate_dsn "postgresql://${stem}_migrate:${migrate_password}@${host}.kanz-data.svc:5432/${database}?sslmode=require"
+        fi
         app_password=''
         migrate_password=''
     fi
 done
+
+# Publish runtime access only after the separate record and full credential group
+# are qualified. Existing tokens require expiry/revocation before activation.
+write_read_policy tv-sync kanz/tv-sync-runtime kanz-services tv-sync
 
 redis_state=$(field_group_state 'Redis' 'kanz/redis:password' 'kanz/api-gateway:redis_dsn')
 if [ "$redis_state" = absent ]; then
@@ -217,7 +253,7 @@ elif "$VAULT_BIN" secrets list -format=json | grep -q '"bootstrap-transit/"'; th
     "$VAULT_BIN" secrets disable bootstrap-transit >/dev/null
 fi
 
-for path in kanz/testnet/postgres kanz/redis kanz/api-gateway kanz/accounting kanz/audit kanz/identity kanz/oms kanz/regulatory kanz/risk-engine kanz/venue-binance kanz/venue-okx; do
+for path in kanz/testnet/postgres kanz/redis kanz/api-gateway kanz/accounting kanz/audit kanz/identity kanz/oms kanz/regulatory kanz/risk-engine kanz/venue-binance kanz/venue-okx kanz/tv-sync-runtime; do
     "$VAULT_BIN" kv metadata get "kv/${path}" >/dev/null
 done
 "$VAULT_BIN" kv get -field=signing_secret kv/kanz/api-gateway >/dev/null

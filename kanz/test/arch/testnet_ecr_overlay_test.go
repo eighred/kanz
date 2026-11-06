@@ -78,6 +78,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 		"../../deploy/venue-okx-deploy.yaml",
 		"../../deploy/web-bff-deploy.yaml",
 		"account-proof-secret-provider-classes.yaml",
+		"tv-sync-runtime-secret-provider-class.yaml",
 		"governance-network-policies.yaml",
 		"gateway-runtime-egress.yaml",
 		"portfolio-bootstrap-identity.yaml",
@@ -343,26 +344,11 @@ func TestTokyoArmsGovernanceControlsFromIndependentSources(t *testing.T) {
 func TestTokyoTestnetOverlayRetainsExactlyTheVaultClassesItsWorkloadsMount(t *testing.T) {
 	root := moduleRoot(t)
 	overlayDir := filepath.Join(root, "infra", "overlays", "testnet-tokyo")
-	raw := mustReadArchFile(t, filepath.Join(overlayDir, "kustomization.yaml"))
-	var overlay testnetKustomization
-	if err := yaml.UnmarshalStrict(raw, &overlay); err != nil {
-		t.Fatal(err)
+	cmd := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", overlayDir)
+	rendered, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("render complete Tokyo credential graph: %v", err)
 	}
-
-	var deleted *regexp.Regexp
-	for _, patch := range overlay.Patches {
-		if patch.Target.Kind == "SecretProviderClass" && strings.Contains(patch.Patch, "$patch: delete") {
-			var err error
-			deleted, err = regexp.Compile(patch.Target.Name)
-			if err != nil {
-				t.Fatalf("compile SecretProviderClass exclusion: %v", err)
-			}
-		}
-	}
-	if deleted == nil {
-		t.Fatal("Tokyo overlay does not explicitly exclude unmounted canonical Vault classes")
-	}
-
 	type document struct {
 		Kind     string `yaml:"kind"`
 		Metadata struct {
@@ -383,39 +369,29 @@ func TestTokyoTestnetOverlayRetainsExactlyTheVaultClassesItsWorkloadsMount(t *te
 		} `yaml:"spec"`
 	}
 
-	var mounted []string
-	for _, resource := range overlay.Resources {
-		if resource == "../../security/secrets/secretproviderclass.yaml" || resource == "../../deploy/analysis-template.yaml" {
-			continue
-		}
-		body := mustReadArchFile(t, filepath.Clean(filepath.Join(overlayDir, resource)))
-		for _, part := range bytes.Split(body, []byte("\n---")) {
-			var doc document
-			if err := yaml.Unmarshal(part, &doc); err != nil {
-				t.Fatalf("decode %s: %v", resource, err)
-			}
-			for _, volume := range doc.Spec.Template.Spec.Volumes {
-				if name := volume.CSI.VolumeAttributes.SecretProviderClass; name != "" {
-					mounted = append(mounted, name)
-				}
-			}
-		}
-	}
-
-	canonical := mustReadArchFile(t, filepath.Join(root, "infra", "security", "secrets", "secretproviderclass.yaml"))
-	var retained []string
-	for _, part := range bytes.Split(canonical, []byte("\n---")) {
+	var mounted, retained []string
+	for _, part := range bytes.Split(rendered, []byte("\n---")) {
 		var doc document
 		if err := yaml.Unmarshal(part, &doc); err != nil {
-			t.Fatalf("decode canonical Vault class: %v", err)
+			t.Fatal(err)
 		}
-		if doc.Kind == "SecretProviderClass" && !deleted.MatchString(doc.Metadata.Name) {
+		if doc.Kind == "SecretProviderClass" {
 			retained = append(retained, doc.Metadata.Name)
 		}
+		for _, volume := range doc.Spec.Template.Spec.Volumes {
+			if name := volume.CSI.VolumeAttributes.SecretProviderClass; name != "" {
+				mounted = append(mounted, name)
+			}
+		}
 	}
-	assertSameStrings(t, "retained Vault classes versus mounted classes", retained, mounted)
-	if len(retained) != 14 {
-		t.Fatalf("Tokyo minimum graph retained %d Vault classes, want 14", len(retained))
+	assertSameStrings(t, "rendered Vault classes versus actual patched workload mounts", retained, mounted)
+	if len(retained) != 16 {
+		t.Fatalf("Tokyo graph retained %d Vault classes, want 16", len(retained))
+	}
+	for _, name := range retained {
+		if name == "tv-sync-db" {
+			t.Fatal("Tokyo retained legacy shared migration/runtime CSI class")
+		}
 	}
 }
 
@@ -424,8 +400,8 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 67", "Expected 20 rendered container images", "sha256sum --check --status",
-		"-ReleaseTag $imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
+		"resourceCount -ne 67", "Expected 19 rendered container images", "sha256sum --check --status",
+		"-ReleaseTag $custodyTag", "Resolve-ReviewedTestnetReleaseTag", "Tokyo ECR does not retain $repository@$digest under release",
 		"'tools/Resolve-EcrReleaseDigest.ps1'", ". (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",

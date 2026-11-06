@@ -114,6 +114,7 @@ func TestTokyoDatabaseMigrationsRunBeforeCapitalPathAdmission(t *testing.T) {
 	root := moduleRoot(t)
 	dir := filepath.Join(root, "infra", "overlays", "testnet-tokyo", "data")
 	raw := string(mustReadArchFile(t, filepath.Join(dir, "postgres-migrations.yaml")))
+	raw += string(mustReadArchFile(t, filepath.Join(dir, "tv-sync-migration.yaml")))
 	for _, service := range []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx", "tv-sync"} {
 		if !strings.Contains(raw, "name: migrate-"+service) || !strings.Contains(raw, `"/migrations/`+service+`"`) {
 			t.Errorf("migration job does not apply %s's schema", service)
@@ -227,7 +228,7 @@ func TestTokyoDataPlaneInstallerFailsClosedOnRenderAndRuntimeState(t *testing.T)
 	root := moduleRoot(t)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetDataPlane.ps1")))
 	for _, required := range []string{
-		"resourceCount -ne 37", "mutable image tag survived", "sha256sum --check --status",
+		"resourceCount -ne 38", "mutable image tag survived", "sha256sum --check --status",
 		"data-plane-server-dry-run-namespace-substitute=default", "apply --server-side --dry-run=server", "condition=Ready cluster/kanz-testnet-postgres",
 		"condition=complete job/postgres-provisioner", "condition=complete job/postgres-migrations", "condition=complete job/nats-bootstrap",
 		"redis_sa", "not rolsuper and not rolbypassrls", "CONFIG GET appendfsync", "sync_interval: always",

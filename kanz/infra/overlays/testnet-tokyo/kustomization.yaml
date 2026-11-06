@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - account-proof-secret-provider-classes.yaml
+  - tv-sync-runtime-secret-provider-class.yaml
   - portfolio-bootstrap-identity.yaml
   - ../../security/secrets/secretproviderclass.yaml
   - ../../deploy/analysis-template.yaml
@@ -110,7 +111,7 @@ patches:
   # overlay retains only classes mounted by its minimum capital-path graph.
   - target:
       kind: SecretProviderClass
-      name: ^(redis-auth|alternatives-db|copilot-anthropic|datamaster-db|market-data-db|regulatory-db|schema-registry-db|wealth-db|webhook-ingest-config|webhook-ingest-redis)$
+      name: ^(redis-auth|alternatives-db|copilot-anthropic|datamaster-db|market-data-db|regulatory-db|schema-registry-db|tv-sync-db|wealth-db|webhook-ingest-config|webhook-ingest-redis)$
     patch: |-
       apiVersion: secrets-store.csi.x-k8s.io/v1
       kind: SecretProviderClass

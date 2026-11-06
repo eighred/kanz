@@ -117,11 +117,17 @@ func TestTokyoTVSyncSeparateRolesAndRecovery(t *testing.T) {
 		}
 	})
 	log := NewPostgresLog(app)
-	live := New(time.Now, nil, WithLog(log, testTenant))
+	// The fact log's knowledge timestamps use PostgreSQL microsecond precision.
+	// Keep this role/recovery fixture representable; the existing checkpoint
+	// suite separately qualifies sub-microsecond as-of replay boundaries.
+	fixtureTime := time.Unix(1_800_000_000, 123_456_000).UTC()
+	clock := func() time.Time { return fixtureTime }
+	live := New(clock, nil, WithLog(log, testTenant))
 	deliver(t, live, "role-1", evtFilled, filledOrder("role-o1", "fund-alpha", "BTC", orderpb.Side_SIDE_BUY, 2, 100))
 	if err = live.Checkpoint(ctx); err != nil {
 		t.Fatal(err)
 	}
+	fixtureTime = fixtureTime.Add(time.Second)
 	deliver(t, live, "role-2", evtFilled, filledOrder("role-o2", "fund-alpha", "BTC", orderpb.Side_SIDE_SELL, 1, 150))
 	t.Run("CheckpointAndTail", func(t *testing.T) {
 		// New authenticated pool represents a successor process, not reused memory.

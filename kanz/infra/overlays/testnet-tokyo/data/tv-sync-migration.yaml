@@ -1,0 +1,86 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tv-sync-migration
+  namespace: kanz-data
+  labels:
+    app.kubernetes.io/name: postgres-migrations
+    app.kubernetes.io/part-of: kanz
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    kanz.io/release-commit: f7217a76b48d9b6075a0683ddf35be50fbdf37cb
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-migrations
+        app.kubernetes.io/part-of: kanz
+    spec:
+      serviceAccountName: postgres-provisioner
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 26
+        runAsGroup: 26
+        fsGroup: 26
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: build-dsn
+          image: ghcr.io/cloudnative-pg/postgresql:16.10-standard-bookworm
+          command: [bash, -ceu]
+          args:
+            - |
+              host=kanz-testnet-postgres-rw.kanz-data.svc.cluster.local
+              export PGPASSWORD="$(cat /run/secrets/bootstrap/password)"
+              export PGCONNECT_TIMEOUT=5
+              until roles=$(psql --host "${host}" --username kanz_bootstrap --dbname kanz_control --no-psqlrc --tuples-only --no-align --command "select count(*) from pg_roles where rolname IN ('tv_sync_app','tv_sync_migrate') and not rolsuper and not rolbypassrls") && [ "${roles}" = 2 ]; do
+                sleep 2
+              done
+              umask 077
+              password=$(cat /run/secrets/postgres/tv-sync-migrate)
+              test -n "${password}"
+              printf 'postgresql://tv_sync_migrate:%s@%s:5432/tv_sync?sslmode=require' "${password}" "${host}" > /run/migration-dsns/tv-sync
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 96Mi }
+          securityContext: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: bootstrap, mountPath: /run/secrets/bootstrap, readOnly: true }
+            - { name: role-passwords, mountPath: /run/secrets/postgres, readOnly: true }
+            - { name: migration-dsns, mountPath: /run/migration-dsns }
+            - { name: tmp, mountPath: /tmp }
+      containers:
+        - name: migrate-tv-sync
+          image: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate@sha256:147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24
+          args: ["--dir", "/migrations/tv-sync"]
+          env:
+            - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/tv-sync }
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+          securityContext: *restricted
+          volumeMounts:
+            - { name: migration-dsns, mountPath: /run/migration-dsns, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: bootstrap
+          secret:
+            secretName: kanz-testnet-postgres-app
+            defaultMode: 0440
+        - name: role-passwords
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: postgres-role-passwords
+        - name: migration-dsns
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 32Mi }

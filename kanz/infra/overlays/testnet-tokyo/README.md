@@ -198,11 +198,17 @@ running projection. Keep its draft unmerged while any prerequisite below is
 unverified: this overlay auto-syncs from main. It preserves #1410's paired
 v2026.4.0 application/migration images and source `f7217a76`, isolated API 8113
 and operations 8091, one replica and `Recreate`. The specific migration reference
-in `tv-sync-activation.yaml` avoids the older global migration-image override.
+in the dedicated `data/tv-sync-migration.yaml` Job avoids the older global
+migration-image override. Tokyo removes the workload init container.
 
 Before activation, use the existing verified image import/custody process and
 `Resolve-EcrReleaseDigest.ps1` to establish both exact ECR references under their
-source release tag. The references in source do not assert that the registry
+reviewed `release-v2026.4.0` tag. The byte-pinned `tv-sync-release.json` binds
+only this exact source, signer identity/issuer and paired repository/digest tuple;
+it is desired custody constraints, not successful promotion evidence. The
+existing full-SHA migration tag already names a different immutable digest and
+must not be overwritten. Unrelated images retain their full-SHA tag checks.
+The references in source do not assert that the registry
 copy or signature custody has occurred. Do not substitute an index/platform
 digest or advance unrelated services to make the check pass.
 The canonical Terraform `capital_path_images` inventory includes `tv-sync`;
@@ -214,12 +220,34 @@ activation blockers; this source change does not resolve them by itself.
 
 Provision `tv_sync_app` and `tv_sync_migrate` through the data overlay, including
 both password objects in `kv/data/kanz/testnet/postgres`. The runtime Vault role
-`tv-sync` must be bound to `kanz-services/tv-sync`; its existing CSI class reads
-`dsn` and `migrate_dsn` from `kv/data/kanz/tv-sync`. Both DSNs must identify the
-`tv_sync` database and their distinct constrained roles. No service receives the
-bootstrap principal. Verify current and future table/sequence grants, actual
-FORCE RLS, and refusal of runtime DDL. CI's separate-role/checkpoint test uses
-disposable principals; it does not attest the live Vault or database grants.
+`tv-sync` is bound to `kanz-services/tv-sync` with a runtime-only read policy on
+`kv/data/kanz/tv-sync-runtime`. Its Tokyo-only CSI class exposes only `dsn`.
+The full KV record must not contain `migrate_dsn`; bootstrap refuses contamination,
+partial credential groups and unknown lookup failures before publishing that
+runtime policy. Previously issued tokens require expiry/revocation before
+activation. Merely narrowing CSI objects would not isolate an entire readable KV
+record. Other services' legacy layouts are unchanged and require separate review.
+
+Migration credentials remain in the provisioner-only password record. The
+separate `tv-sync-migration` Job constructs its DSN inside a memory volume under
+`kanz-data/postgres-provisioner`; no migration credential enters the application
+Pod or its Vault-readable record. Verify current/future grants, FORCE RLS and
+runtime DDL refusal. CI qualifies disposable roles and source policy behavior;
+it does not attest the live Vault mount or database grants.
+
+Land nonactivating operator/bootstrap/registry prerequisites first. Prepare
+signed custody and Vault records, then install the data overlay before workload
+activation. Its dedicated migration Job is a later PostSync wave within the
+separate data overlay, not a hook waiting on tv-sync workload readiness. Manual
+kubectl does not execute Argo hooks: `Install-TestnetDataPlane.ps1 -Apply
+-RecreateCompletedJobs` explicitly preflights fixed Job completion and owned Pod
+termination, deletes only completed data Jobs with UID preconditions, then
+reapplies and verifies completion and the paired migration's loaded digest.
+Running/pending Jobs refuse recreation. The original eight-service migration
+inventory is preserved; its readiness predicate now counts exactly its original
+sixteen roles so the ninth service cannot deadlock it. The workload installer
+requires completed tv-sync migration before applying the application. Do not
+combine data and application readiness into one PostSync dependency cycle.
 
 Confirm the SPIFFE CSI driver and namespace registration issue the existing
 `spiffe://kanz.internal/ns/kanz-services/sa/tv-sync` identity, and the deployed

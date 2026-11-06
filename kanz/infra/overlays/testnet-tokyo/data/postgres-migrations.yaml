@@ -36,7 +36,7 @@ spec:
             - |
               host=kanz-testnet-postgres-rw.kanz-data.svc.cluster.local
               export PGPASSWORD="$(cat /run/secrets/bootstrap/password)"
-              until roles=$(psql --host "${host}" --username kanz_bootstrap --dbname kanz_control --no-psqlrc --tuples-only --no-align --command "select count(*) from pg_roles where rolname IN ('accounting_app','accounting_migrate','audit_app','audit_migrate','identity_app','identity_migrate','oms_app','oms_migrate','regulatory_app','regulatory_migrate','risk_engine_app','risk_engine_migrate','venue_binance_app','venue_binance_migrate','venue_okx_app','venue_okx_migrate','tv_sync_app','tv_sync_migrate')") && [ "${roles}" = 18 ]; do
+              until roles=$(psql --host "${host}" --username kanz_bootstrap --dbname kanz_control --no-psqlrc --tuples-only --no-align --command "select count(*) from pg_roles where rolname IN ('accounting_app','accounting_migrate','audit_app','audit_migrate','identity_app','identity_migrate','oms_app','oms_migrate','regulatory_app','regulatory_migrate','risk_engine_app','risk_engine_migrate','venue_binance_app','venue_binance_migrate','venue_okx_app','venue_okx_migrate')") && [ "${roles}" = 16 ]; do
                 sleep 2
               done
               umask 077
@@ -52,7 +52,6 @@ spec:
               risk-engine:risk_engine:risk_engine
               venue-binance:venue_binance:venue_binance
               venue-okx:venue_okx:venue_okx
-              tv-sync:tv_sync:tv_sync
               EOF
           resources:
             requests: { cpu: 25m, memory: 32Mi }
@@ -106,11 +105,6 @@ spec:
           name: migrate-venue-okx
           args: ["--dir", "/migrations/venue-okx"]
           env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/venue-okx }]
-        - <<: *migration
-          name: migrate-tv-sync
-          image: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate@sha256:147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24
-          args: ["--dir", "/migrations/tv-sync"]
-          env: [{ name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/migration-dsns/tv-sync }]
       containers:
         - name: verify
           image: ghcr.io/cloudnative-pg/postgresql:16.10-standard-bookworm
@@ -119,7 +113,7 @@ spec:
             - |
               host=kanz-testnet-postgres-rw.kanz-data.svc.cluster.local
               export PGPASSWORD="$(cat /run/secrets/bootstrap/password)"
-              for database in accounting audit identity oms regulatory risk_engine venue_binance venue_okx tv_sync; do
+              for database in accounting audit identity oms regulatory risk_engine venue_binance venue_okx; do
                 applied=$(psql --host "${host}" --username kanz_bootstrap --dbname "${database}" --no-psqlrc --tuples-only --no-align --command 'select count(*) from schema_migrations')
                 unsafe=$(psql --host "${host}" --username kanz_bootstrap --dbname "${database}" --no-psqlrc --tuples-only --no-align --command "select count(*) from pg_class where relkind='r' and relrowsecurity and not relforcerowsecurity")
                 [ "${applied}" -gt 0 ] && [ "${unsafe}" = 0 ]

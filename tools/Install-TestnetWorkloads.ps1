@@ -113,7 +113,7 @@ if ($resourceCount -ne 67) {
     throw "Expected 67 rendered resources; found $resourceCount."
 }
 $images = [regex]::Matches($rendered, '(?m)^\s*image:\s+(\S+)\s*$')
-if ($images.Count -ne 20) { throw "Expected 20 rendered container images; found $($images.Count)." }
+if ($images.Count -ne 19) { throw "Expected 19 rendered container images; found $($images.Count)." }
 foreach ($image in $images) {
     if ($image.Groups[1].Value -notmatch '^012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/[a-z0-9-]+@sha256:[0-9a-f]{64}$') {
         throw "Rendered workload image is outside the immutable Tokyo ECR boundary: $($image.Groups[1].Value)"
@@ -142,7 +142,8 @@ foreach ($provenance in ($imageProvenance | Sort-Object -Unique)) {
     }
     $repository = $Matches.repository
     $digest = $Matches.digest
-    $releaseDigest = Resolve-EcrReleaseDigest -Aws $aws -Profile $Profile -Region $Region -Repository $repository -ReleaseTag $imageReleaseCommit
+    $custodyTag = Resolve-ReviewedTestnetReleaseTag -LockPath (Join-Path $repoRoot 'kanz/infra/overlays/testnet-tokyo/tv-sync-release.json') -Repository $repository -SourceCommit $imageReleaseCommit -Digest $digest
+    $releaseDigest = Resolve-EcrReleaseDigest -Aws $aws -Profile $Profile -Region $Region -Repository $repository -ReleaseTag $custodyTag
     if ($releaseDigest -ne $digest) {
         throw "Tokyo ECR does not retain $repository@$digest under release $imageReleaseCommit."
     }
@@ -155,7 +156,7 @@ foreach ($required in @(
     'address: http://prometheus.kanz-observability.svc:9090',
     'name: accounting-db', 'name: api-gateway-redis', 'name: api-gateway-secrets',
     'name: audit-db', 'name: identity-db', 'name: identity-signing-key',
-    'name: tv-sync-db', 'name: oms-db', 'name: risk-engine-db', 'name: venue-binance-db', 'name: web-bff-secrets',
+    'name: tv-sync-runtime-db', 'name: oms-db', 'name: risk-engine-db', 'name: venue-binance-db', 'name: web-bff-secrets',
     'name: venue-binance-keys', 'name: venue-okx-db', 'name: venue-okx-keys'
 )) {
     if (-not $rendered.Contains($required)) { throw "Rendered workload is missing prerequisite: $required" }
@@ -246,11 +247,12 @@ $verification = Invoke-SsmCommands -Comment 'Verify or install Kanz Tokyo worklo
     'base64 -d "${payload}" | gzip -d > "${manifest}"',
     ("printf '%s  %s\n' '$manifestHash' " + '"${manifest}" | sha256sum --check --status'),
     ('test "$(grep -c ''^kind:'' "${manifest}")" = ''' + $resourceCount + "'"),
-    'test "$(grep -Ec ''^[[:space:]]*image: 012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/[a-z0-9-]+@sha256:[0-9a-f]{64}$'' "${manifest}")" = 20',
+    'test "$(grep -Ec ''^[[:space:]]*image: 012619468098\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/[a-z0-9-]+@sha256:[0-9a-f]{64}$'' "${manifest}")" = 19',
     '! grep -Eq ''ghcr\.io|ghcr-pull|imagePullSecrets:|kubernetes\.io/dockerconfigjson'' "${manifest}"',
     '/usr/local/bin/k3s kubectl get namespace kanz-services >/dev/null',
     '/usr/local/bin/k3s kubectl -n kanz-data wait --for=condition=Ready cluster/kanz-testnet-postgres --timeout=60s >/dev/null',
     '/usr/local/bin/k3s kubectl -n kanz-data wait --for=condition=complete job/postgres-migrations --timeout=60s >/dev/null',
+    '/usr/local/bin/k3s kubectl -n kanz-data wait --for=condition=complete job/tv-sync-migration --timeout=60s >/dev/null',
     '/usr/local/bin/k3s kubectl -n kanz-messaging rollout status statefulset/nats --timeout=60s >/dev/null',
     '/usr/local/bin/k3s kubectl -n kanz-messaging rollout status statefulset/redis --timeout=60s >/dev/null',
     '/usr/local/bin/k3s kubectl -n cnpg-system wait --for=condition=Available deployment/cnpg-controller-manager --timeout=60s >/dev/null',
