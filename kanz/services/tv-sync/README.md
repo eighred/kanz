@@ -105,7 +105,8 @@ database as evidence that an account never traded. This remains tracked under
 [#1410](https://github.com/eighred/kanz/issues/1410) and
 [#1413](https://github.com/eighred/kanz/issues/1413).
 
-CI requires six real-PostgreSQL verifier cases, including restored bytes,
+CI requires seven real-PostgreSQL checkpoint/verifier cases, including an exact
+checkpoint restart with subsequent fills/cancellation and P&L, restored bytes,
 tenant isolation, read-only enforcement and a concurrent append outside the
 captured snapshot and refusal of foreign rows under a permissive RLS policy.
 The precision regression refuses a resident 1e-10 execution rounded to zero by
@@ -115,3 +116,31 @@ Two required Linux secret-reader cases cover bounds and FIFO/CSI behavior.
 Those fixtures qualify the source behavior; they do not
 substitute for observing replay of the actual restored target with its matching
 verified image. No activation manifest is changed by this prerequisite.
+
+### Exact checkpoint encoding and controlled upgrade
+
+New checkpoints use `tvsync.v1.Checkpoint.exact_encoding_version = 1`.
+Retained execution quantities, prices and fees are encoded through
+`dec.ToProtoExact`: every digit survives or checkpoint creation fails before
+writing. Nil remains missing; zero remains present. The existing exact converter
+accepts exponents within ±60 and an int64 coefficient, so some valid incoming
+Decimals at ±61..64 cannot be checkpointed. They are not rounded or replaced;
+checkpoint failure leaves the prior durable checkpoint unchanged. Baseline
+rational strings, order revisions and their ordering are unchanged.
+
+Version 0 checkpoints may already have lost precision through the former
+scale-eight conversion. Version 0 and unknown versions now refuse startup before
+restoring state. Inspecting their decimal values cannot establish which digits
+were lost. Do not relabel, automatically delete, or silently replay past them.
+Recovery requires independently establishing complete raw history, rebuilding the
+projection from that history under a controlled procedure, and verifying the
+result before producing an exact checkpoint. Replay of only currently visible
+facts does not establish archived-history completeness or rule out a missing
+prefix. This source change does not perform that operational recovery.
+
+Use a controlled writer handoff. Old readers ignore the additive marker and old
+writers can overwrite an exact checkpoint with a legacy checkpoint during a
+mixed-version rollout. Stop old writers before starting the new writer or
+restarting against its checkpoint; deploy matching schema, verifier and service
+versions. Protobuf wire compatibility alone does not make a mixed writer rollout
+safe. Existing live images and deployment configuration are unchanged here.

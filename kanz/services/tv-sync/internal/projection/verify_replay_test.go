@@ -31,13 +31,21 @@ func roundedReplayFixtureAt(t *testing.T, now time.Time) (*memLog, replaySnapsho
 	if err := p.Checkpoint(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	// Deliberately corrupt a newly encoded checkpoint to retain the independent
+	// numerical-mismatch control after the production encoder is repaired.
+	var cp tvsyncpb.Checkpoint
+	if err := proto.Unmarshal(log.cp, &cp); err != nil {
+		t.Fatal(err)
+	}
+	cp.Accounts[0].Execs[0].Qty = &commonpb.Decimal{}
+	log.cp = mustMarshal(t, &cp)
 	return log, replaySnapshot{at: now, count: 1, watermark: 1, checkpointSeq: log.cpSeq, checkpoint: log.cp, identity: "rounded-synthetic-snapshot"}
 }
 
 func TestReplayVerifierDoesNotRoundAwayMismatch(t *testing.T) {
 	log, snap := roundedReplayFixture(t)
-	// Production checkpoint encoding rounds 1e-10 to zero. Serializing the full
-	// replay again hides that difference; exact in-memory values must refuse it.
+	// A lossy checkpoint claiming exact encoding must still fail numerical
+	// comparison; the format marker alone is not proof of correct state.
 	var cp tvsyncpb.Checkpoint
 	if err := proto.Unmarshal(snap.checkpoint, &cp); err != nil {
 		t.Fatal(err)
