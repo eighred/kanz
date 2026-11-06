@@ -21,7 +21,8 @@ func checkGoShardMatrix(data []byte) error {
 			If    string
 			Steps []struct {
 				Name, Run, If, Uses string
-				ContinueOnError     bool `yaml:"continue-on-error"`
+				Directory           string `yaml:"working-directory"`
+				ContinueOnError     bool   `yaml:"continue-on-error"`
 				With                map[string]string
 				Env                 map[string]string
 			}
@@ -49,11 +50,13 @@ func checkGoShardMatrix(data []byte) error {
 		return fmt.Errorf("each shard must execute its entire fresh serial race inventory")
 	}
 	qualitySteps := map[string]int{
+		"Build": 0, "Vet": 0,
 		"Build + vet + test the `anthropic,openrouter` tags": 0,
 		"Build + vet + test the `redis` tag (real Valkey)":   0,
 		"golangci-lint": 0,
 	}
 	qualityCommands := map[string][]string{
+		"Build": {"go build ./..."}, "Vet": {"go vet ./..."},
 		"Build + vet + test the `anthropic,openrouter` tags": {
 			"go build -tags anthropic,openrouter ./...",
 			"go vet -tags anthropic,openrouter ./services/copilot/...",
@@ -73,7 +76,12 @@ func checkGoShardMatrix(data []byte) error {
 		if _, ok := qualitySteps[step.Name]; ok {
 			qualitySteps[step.Name]++
 			if step.If != "matrix.kind == 'quality'" || step.ContinueOnError {
-				return fmt.Errorf("tagged checks and lint must execute on the isolated quality runner")
+				return fmt.Errorf("build, vet, tagged checks and lint must execute on the isolated quality runner")
+			}
+			if step.Name == "Build" || step.Name == "Vet" {
+				if step.Directory != "kanz" || step.Uses != "" || strings.TrimSpace(step.Run) != qualityCommands[step.Name][0] {
+					return fmt.Errorf("full base build and vet must retain their exact module commands")
+				}
 			}
 			for _, required := range qualityCommands[step.Name] {
 				found := false
@@ -229,5 +237,52 @@ func TestGoCIShardsExplicitlyPrepareSimulatedOMS(t *testing.T) {
 		if checkGoShardOMSFixture([]byte(changed)) == nil {
 			t.Fatal("incomplete isolated fixture accepted")
 		}
+	}
+}
+
+// These mutations enforce this reviewed source recipe, not arbitrary shell
+// equivalence. The quality row remains a required member of the matrix whose
+// combined result gates the complete fresh race union.
+func TestGoCIBaseBuildVetQualityOnly(t *testing.T) {
+	data := mustReadArchFile(t, filepath.Join(filepath.Dir(moduleRoot(t)), ".github/workflows/kanz-ci.yml"))
+	if err := checkGoShardMatrix(data); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct{ name, command string }{{"Build", "go build ./..."}, {"Vet", "go vet ./..."}} {
+		original := "      - name: " + step.name + "\n        if: matrix.kind == 'quality'\n        working-directory: kanz\n        run: " + step.command + "\n"
+		for _, mutation := range []struct{ name, replacement string }{
+			{"missing-command", strings.Replace(original, step.command, "true", 1)},
+			{"wrong-directory", strings.Replace(original, "working-directory: kanz", "working-directory: kanz/services/oms", 1)},
+			{"wrong-condition", strings.Replace(original, "matrix.kind == 'quality'", "matrix.kind == 'race'", 1)},
+			{"missing-condition", strings.Replace(original, "        if: matrix.kind == 'quality'\n", "", 1)},
+			{"missing-step", ""},
+			{"ignored-failure", strings.Replace(original, "        working-directory:", "        continue-on-error: true\n        working-directory:", 1)},
+			{"skipped-command", strings.Replace(original, "run: "+step.command, "run: |\n          exit 0\n          "+step.command, 1)},
+		} {
+			t.Run(step.name+"/"+mutation.name, func(t *testing.T) {
+				changed := strings.Replace(string(data), original, mutation.replacement, 1)
+				if changed == string(data) {
+					t.Fatal("mutation missed exact base check")
+				}
+				if checkGoShardMatrix([]byte(changed)) == nil {
+					t.Fatal("base quality check bypass accepted")
+				}
+			})
+		}
+	}
+	for _, mutation := range []struct{ name, old, replacement string }{
+		{"quality-row-omitted", "          - { shard: quality, kind: quality }\n", ""},
+		{"quality-dependency-bypassed", "needs: [scope, go-race]", "needs: [scope]"},
+		{"quality-result-ignored", `test "$SHARD_RESULT" = success`, "true"},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			changed := strings.Replace(string(data), mutation.old, mutation.replacement, 1)
+			if changed == string(data) {
+				t.Fatal("mutation missed required quality dependency")
+			}
+			if checkGoShardMatrix([]byte(changed)) == nil {
+				t.Fatal("required quality owner bypass accepted")
+			}
+		})
 	}
 }
