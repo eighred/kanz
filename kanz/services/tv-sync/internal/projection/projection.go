@@ -42,13 +42,18 @@ type MarkSource interface {
 // Projection is the zero-truth, multi-tenant read model. Safe for concurrent
 // folds and reads.
 type Projection struct {
-	mu       sync.RWMutex
-	accounts map[string]map[string]*account // tenant -> accountID -> account
-	now      func() time.Time
-	marks    MarkSource
-	subs     *subscribers
-	log      Log    // durable record of the FACTs folded (EXEC-M21); nil ⇒ memory only
-	tenant   string // the tenant this pod is scoped to, when a log is bound
+	// appendFold serializes the durable log order with the fold order across
+	// subject consumers. Keep database waits outside mu so readers/checkpoints
+	// can still observe the last complete prefix while an append is pending.
+	// This is per-process ordering, not a multi-writer lease.
+	appendFold sync.Mutex
+	mu         sync.RWMutex
+	accounts   map[string]map[string]*account // tenant -> accountID -> account
+	now        func() time.Time
+	marks      MarkSource
+	subs       *subscribers
+	log        Log    // durable record of the FACTs folded (EXEC-M21); nil ⇒ memory only
+	tenant     string // the tenant this pod is scoped to, when a log is bound
 	// bootedFromCheckpoint records whether Rehydrate restored one, so the
 	// composition root can report the posture rather than infer it from a timing.
 	bootedFromCheckpoint bool
@@ -184,9 +189,10 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 	if tenant == "" {
 		return nil // untenanted event — cannot scope; skip (monitor only)
 	}
+	p.appendFold.Lock()
+	defer p.appendFold.Unlock()
 	know := p.now().UTC()
 
-	var appended int64
 	if p.log != nil {
 		if tenant != p.tenant {
 			// Not this pod's tenant. The log is scoped to one tenant (as every durable
@@ -194,34 +200,40 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 			// it into memory only would put it in a book no restart could rebuild.
 			return nil
 		}
-		fresh, seq, err := p.log.Append(ctx, Fact{
+		_, _, err := p.log.Append(ctx, Fact{
 			EventID: env.GetEventId(), EventType: env.GetEventType(),
 			Payload: payload, Knowledge: know,
 		})
 		if err != nil {
-			// NACK. Never fold what we could not durably record: the consumer group would
-			// ack it, never resend it, and the next restart would lose it silently — the
-			// original bug, one layer down.
+			// NACK: failure may mean either rollback or a lost committed response.
+			// Do not fold the incoming bytes or claim the transaction rolled back.
+			// A later successful append resolves the boundary and drains the log.
 			return err
 		}
-		appended = seq
-		if !fresh {
-			// Already folded — a redelivery after a lost ack, or a FACT this pod replayed at
-			// boot. Folding it again would double a fill, and with it the position and the
-			// realized P&L the Broker API reports.
+		// Durable does not mean folded: a committed insert can lose its response.
+		// Every successful append, including duplicate, repairs the missing prefix
+		// from stored payloads and knowledge times, never from redelivery bytes.
+		p.mu.RLock()
+		after := p.seq
+		p.mu.RUnlock()
+		return p.log.Replay(ctx, after, func(f Fact) error {
+			p.mu.Lock()
+			if f.Seq <= p.seq {
+				p.mu.Unlock()
+				return errors.New("tv-sync: non-increasing durable fact sequence")
+			}
+			deltas := p.fold(tenant, f.EventType, f.Payload, f.Knowledge)
+			p.seq = f.Seq
+			p.mu.Unlock()
+			for _, d := range deltas {
+				p.subs.publish(tenant, d)
+			}
 			return nil
-		}
+		})
 	}
 
 	p.mu.Lock()
 	deltas := p.fold(tenant, env.GetEventType(), payload, know)
-	// THE WATERMARK ADVANCES WITH THE FOLD, not with the append. A checkpoint
-	// names a prefix of the log that this view has actually absorbed; recording a
-	// seq for a fact that was appended and not folded would let the next boot skip
-	// it (#809).
-	if appended > 0 {
-		p.seq = appended
-	}
 	p.mu.Unlock()
 
 	for _, d := range deltas {

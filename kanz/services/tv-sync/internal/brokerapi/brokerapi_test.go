@@ -49,7 +49,7 @@ func newHandler(t *testing.T) (*http.ServeMux, *projection.Projection) {
 	t.Helper()
 	p := projection.New(time.Now, nil)
 	mux := http.NewServeMux()
-	New(p).Routes(mux)
+	readyHandler(p).Routes(mux)
 	return mux, p
 }
 
@@ -145,7 +145,7 @@ func TestStream_DeliversDeltas(t *testing.T) {
 	p := projection.New(time.Now, nil)
 	foldFill(t, p, "acme", "fund-alpha", "seed", "BTC", orderpb.Side_SIDE_BUY, 1, 100) // account must exist
 	mux := http.NewServeMux()
-	New(p).Routes(mux)
+	readyHandler(p).Routes(mux)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -209,7 +209,7 @@ func TestStream_SurvivesTheServerWriteTimeout(t *testing.T) {
 	p := projection.New(time.Now, nil)
 	foldFill(t, p, "acme", "fund-alpha", "seed", "BTC", orderpb.Side_SIDE_BUY, 1, 100)
 	mux := http.NewServeMux()
-	New(p).Routes(mux)
+	readyHandler(p).Routes(mux)
 
 	srv := httptest.NewUnstartedServer(mux)
 	srv.Config.WriteTimeout = writeTimeout

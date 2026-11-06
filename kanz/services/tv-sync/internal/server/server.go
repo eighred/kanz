@@ -3,18 +3,44 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/eighred/kanz/services/tv-sync/internal/brokerapi"
 )
 
 // Readiness gates traffic.
-type Readiness struct{ ready atomic.Bool }
+type Readiness struct {
+	streamMu     sync.Mutex
+	generation   *streamGeneration
+	ready        atomic.Bool
+	foldFailures foldFailures
+	ctx          context.Context
+}
 
-func (r *Readiness) Set(ready bool) { r.ready.Store(ready) }
-func (r *Readiness) Ready() bool    { return r.ready.Load() }
+// NewReadiness binds the startup barrier to the process lifetime. Cancellation
+// cannot be undone by a concurrently finishing catch-up callback.
+func NewReadiness(ctx context.Context) *Readiness {
+	r := &Readiness{ctx: ctx}
+	if ctx != nil {
+		context.AfterFunc(ctx, r.revokeStreams)
+	}
+	return r
+}
+
+func (r *Readiness) Set(ready bool) {
+	r.ready.Store(ready)
+	if !ready {
+		r.revokeStreams()
+	}
+}
+func (r *Readiness) Ready() bool {
+	return r.ready.Load() && !r.foldFailures.blocked.Load() && (r.ctx == nil || r.ctx.Err() == nil)
+}
 
 // Server mounts the Broker API.
 type Server struct {
@@ -50,6 +76,7 @@ func New(readiness *Readiness, broker *brokerapi.Handler, opts ...Option) *Serve
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 		})
 	}
+	broker.SetStreamGate(readiness)
 	broker.Routes(s.mux)
 	broker.Routes(s.legacy)
 	for _, opt := range opts {
@@ -58,14 +85,24 @@ func New(readiness *Readiness, broker *brokerapi.Handler, opts ...Option) *Serve
 	return s
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.serveBroker(w, r, s.mux) }
+
+func (s *Server) serveBroker(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	if strings.HasPrefix(r.URL.Path, "/broker/") && !s.readiness.Ready() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
+		return
+	}
+	next.ServeHTTP(w, r)
+}
 
 // OperationsHandler exposes no tenant data, even when callers supply principal headers.
 func (s *Server) OperationsHandler() http.Handler { return s.operations }
 
 // LegacyHandler retains the shared port until deployment explicitly opts into
 // split listeners. Its existing monitoring exposure remains tracked by #232.
-func (s *Server) LegacyHandler() http.Handler { return s.legacy }
+func (s *Server) LegacyHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.serveBroker(w, r, s.legacy) })
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
