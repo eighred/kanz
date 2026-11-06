@@ -53,6 +53,9 @@ type Options struct {
 	OIDC       *oidc.Client
 	Sessions   *session.Manager
 	GatewayURL string
+	// GatewayTransport carries the composition root's explicitly authorized TLS
+	// peer policy. Nil retains the existing local/legacy transport.
+	GatewayTransport http.RoundTripper
 	// SigningSecret is the gateway's API-01d request-signing secret. The
 	// gateway runs its Signing middleware whenever its own secret is set --
 	// which every deployment manifest does -- and rejects an unsigned request
@@ -128,6 +131,9 @@ func New(readiness *Readiness, opts Options) (*Server, error) {
 		metrics:       opts.Metrics,
 		preflight:     newPreflightEvidence(opts.PreflightEvidencePath, opts.PreflightEvidenceMaxAge),
 		mux:           http.NewServeMux(),
+	}
+	if opts.GatewayTransport != nil {
+		s.proxy.Transport = opts.GatewayTransport
 	}
 	s.routes()
 	// The browser-facing origin owns these headers, including proxied errors.

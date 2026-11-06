@@ -6,6 +6,7 @@ import (
 	"github.com/eighred/kanz/internal/env"
 	"github.com/eighred/kanz/internal/identity"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -18,7 +19,10 @@ import (
 type Config struct {
 	MFARequired bool
 	Listen      string
-	LogLevel    slog.Level
+	// BFFTLSListen adds a workload-authenticated browser BFF endpoint. The
+	// existing listener remains available until the paired rollout is accepted.
+	BFFTLSListen string
+	LogLevel     slog.Level
 
 	// Source is the gateway's service identity (logs, metrics, spans).
 	Source string
@@ -363,6 +367,7 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		Listen:             env.Or("API_GATEWAY_LISTEN", ":8080"),
+		BFFTLSListen:       os.Getenv("API_GATEWAY_BFF_TLS_LISTEN"),
 		LogLevel:           env.ParseLevelOr(env.Or("API_GATEWAY_LOG_LEVEL", "info"), slog.LevelInfo),
 		Source:             env.Or("API_GATEWAY_SOURCE", "api-gateway"),
 		OTLPEndpoint:       os.Getenv("API_GATEWAY_OTLP_ENDPOINT"),
@@ -425,6 +430,13 @@ func Load() (Config, error) {
 		cfg.MFARequired = true
 	default:
 		return Config{}, errors.New("API_GATEWAY_MFA_REQUIRED must be true or false")
+	}
+	if cfg.BFFTLSListen != "" {
+		_, port, err := net.SplitHostPort(cfg.BFFTLSListen)
+		p, portErr := strconv.Atoi(port)
+		if err != nil || portErr != nil || p < 1024 || p > 65535 || cfg.BFFTLSListen == cfg.Listen || cfg.SPIFFESocket == "" {
+			return Config{}, errors.New("API_GATEWAY_BFF_TLS_LISTEN requires a distinct unprivileged TCP address and API_GATEWAY_SPIFFE_SOCKET")
+		}
 	}
 	return cfg, nil
 }

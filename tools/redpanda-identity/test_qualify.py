@@ -93,6 +93,21 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(result['invalidProperties'], ['superusers'])
         self.assertNotIn('private', str(result))
 
+    def test_storage_diagnostics_are_numeric_and_do_not_leak_logs(self):
+        logs = 'storage space alert: private mount\nNo space left on device: private'
+        result = qualify.broker_diagnostics(logs)
+        self.assertTrue(result['storageSpaceAlert'])
+        self.assertTrue(result['noSpaceLeftOnDevice'])
+        self.assertNotIn('private', str(result))
+        self.assertFalse(qualify.broker_diagnostics('ordinary log')['storageSpaceAlert'])
+        row = 'Filesystem 1024-blocks Used Available Capacity Mounted on\nprivate 100 60 40 60% /private'
+        self.assertEqual(qualify.storage_capacity(row),
+                         {'totalBytes':102400, 'usedBytes':61440, 'availableBytes':40960})
+        for bad in ('private', row + '\nextra', row.replace('100', '-1'),
+                    row.replace('100', '10'), row.replace('60 40', 'secret 40'), 'x'*4097):
+            with self.assertRaises(ValueError):
+                qualify.storage_capacity(bad)
+
     def test_exact_dn_serializations(self):
         self.assertIsNotNone(re.fullmatch(qualify.broker_subject_pattern('proof-bootstrap'),
             'C=US,O=SPIRE,CN=bootstrap-nfkrt,x500UniqueIdentifier=5038771c76e00e553a0eee62370950a6'))

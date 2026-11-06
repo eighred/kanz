@@ -1342,6 +1342,17 @@ func TestTVSyncDeploymentListenerModeTransitions(t *testing.T) {
 }
 
 func tvSyncIngressProblems(policies []networkingv1.NetworkPolicy, podLabels map[string]string) []string {
+	return splitAPIIngressProblems(policies, podLabels, "tv-sync", 8113, 8091)
+}
+
+// Check the additive ingress union, including policies imported by an overlay.
+// A narrow named rule cannot compensate for a second policy widening its target.
+func splitAPIIngressProblems(policies []networkingv1.NetworkPolicy, podLabels map[string]string, app string, apiPort, opsPort int32) []string {
+	return restrictedIngressProblems(policies, podLabels, app, "api-gateway", apiPort, opsPort)
+}
+
+// opsPort zero means this target has no separately admitted monitoring listener.
+func restrictedIngressProblems(policies []networkingv1.NetworkPolicy, podLabels map[string]string, app, caller string, apiPort, opsPort int32) []string {
 	var problems []string
 	var gateway, monitoring, isolated bool
 	for _, p := range policies {
@@ -1366,43 +1377,46 @@ func tvSyncIngressProblems(policies []networkingv1.NetworkPolicy, podLabels map[
 			isolated = true
 		}
 		for _, rule := range p.Spec.Ingress {
-			api, ops := len(rule.Ports) == 0, len(rule.Ports) == 0
+			api, ops := len(rule.Ports) == 0, opsPort > 0 && len(rule.Ports) == 0
 			for _, port := range rule.Ports {
 				if port.Protocol != nil && *port.Protocol != corev1.ProtocolTCP {
 					continue
 				}
 				if port.Port == nil {
-					api, ops = true, true
+					api, ops = true, opsPort > 0
 					continue
 				}
 				if port.Port.Type == intstr.String {
 					// Named container ports may be renamed independently; refuse an
 					// unresolved name instead of silently excluding it from the union.
-					problems = append(problems, p.Name+": tv-sync ingress uses unresolved named port "+port.Port.StrVal)
+					problems = append(problems, p.Name+": "+app+" ingress uses unresolved named port "+port.Port.StrVal)
 					continue
 				}
 				first, last := port.Port.IntVal, port.Port.IntVal
 				if port.EndPort != nil {
 					last = *port.EndPort
 				}
-				api = api || first <= 8113 && 8113 <= last
-				ops = ops || first <= 8091 && 8091 <= last
+				api = api || first <= apiPort && apiPort <= last
+				ops = ops || opsPort > 0 && first <= opsPort && opsPort <= last
+			}
+			if ops && len(rule.From) == 0 {
+				problems = append(problems, p.Name+": "+app+" operations admit every source")
 			}
 			if api && len(rule.From) == 0 {
-				problems = append(problems, p.Name+": tv-sync API admits every source")
+				problems = append(problems, p.Name+": "+app+" API admits every source")
 			}
 			for _, peer := range rule.From {
 				if api {
 					local := peer.NamespaceSelector == nil || (peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] == "kanz-services")
-					onlyGateway := peer.IPBlock == nil && local && peer.PodSelector != nil && peer.PodSelector.MatchLabels["app"] == "api-gateway"
+					onlyGateway := peer.IPBlock == nil && local && peer.PodSelector != nil && peer.PodSelector.MatchLabels["app"] == caller
 					if !onlyGateway {
-						problems = append(problems, p.Name+": tv-sync API admits a non-gateway peer")
+						problems = append(problems, p.Name+": "+app+" API admits an unauthorized peer")
 						continue
 					}
 					// A restrictive expression must not accidentally remove the sole
 					// authorized caller while the syntax still names it.
 					ps, err := metav1.LabelSelectorAsSelector(peer.PodSelector)
-					if err == nil && ps.Matches(labels.Set{"app": "api-gateway"}) {
+					if err == nil && ps.Matches(labels.Set{"app": caller}) {
 						if peer.NamespaceSelector == nil {
 							gateway = true
 						} else {
@@ -1411,7 +1425,11 @@ func tvSyncIngressProblems(policies []networkingv1.NetworkPolicy, podLabels map[
 						}
 					}
 				}
-				if ops && peer.IPBlock == nil && peer.NamespaceSelector != nil && peer.PodSelector == nil {
+				if ops {
+					if peer.IPBlock != nil || peer.NamespaceSelector == nil || peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "kanz-observability" || peer.PodSelector != nil {
+						problems = append(problems, p.Name+": "+app+" operations admit a non-monitoring peer")
+						continue
+					}
 					ns, err := metav1.LabelSelectorAsSelector(peer.NamespaceSelector)
 					monitoring = monitoring || err == nil && ns.Matches(labels.Set{"kubernetes.io/metadata.name": "kanz-observability"})
 				}
@@ -1419,13 +1437,13 @@ func tvSyncIngressProblems(policies []networkingv1.NetworkPolicy, podLabels map[
 		}
 	}
 	if !isolated {
-		problems = append(problems, "tv-sync has no ingress isolation")
+		problems = append(problems, app+" has no ingress isolation")
 	}
 	if !gateway {
-		problems = append(problems, "tv-sync API :8113 is unreachable by api-gateway")
+		problems = append(problems, fmt.Sprintf("%s API :%d is unreachable by %s", app, apiPort, caller))
 	}
-	if !monitoring {
-		problems = append(problems, "tv-sync operations :8091 are unreachable by monitoring")
+	if opsPort > 0 && !monitoring {
+		problems = append(problems, fmt.Sprintf("%s operations :%d are unreachable by monitoring", app, opsPort))
 	}
 	return problems
 }

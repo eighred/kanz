@@ -18,7 +18,12 @@ var juliaOCIMarkers = map[string][]string{
 		"FROM " + rustRuntimePin,
 		"5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4  /tmp/julia.tar.gz",
 		"sha256sum --check --strict /tmp/locked.sha256",
+		"COPY kanz-jl/qualification/install-native-runtime.sh /tmp/install-native-runtime.sh",
+		"bash /tmp/install-native-runtime.sh /opt/julia /tmp/julia.tar.gz /tmp/openssl.tar.gz /tmp/libcurl.tar.gz",
 		"COPY kanz-schemas/proto/ /opt/kanz-schemas/proto/",
+		"/opt/julia/share/julia/base/JuliaSyntax/docs", "/opt/julia/share/julia/stdlib/v1.13/TOML/docs",
+		"/opt/julia/share/julia/stdlib/v1.13/TOML/benchmark", "/opt/julia/share/julia/stdlib/v1.13/Tar/test",
+		"/opt/julia/share/julia/test; do", `test -d "$path" && test ! -L "$path" && rm -rf -- "$path" && test ! -e "$path" || exit 1`,
 		"JULIA_PKG_OFFLINE=true", "USER 65532:65532",
 		"printf '%s' \"$VERSION\" | grep -Eq '^[0-9a-f]{40}$'",
 		`ENTRYPOINT ["/opt/julia/bin/julia", "--startup-file=no", "--history-file=no", "--compiled-modules=existing", "--pkgimages=existing", "--project=/opt/kanz-jl", "/opt/kanz-jl/bin/curve_worker.jl"]`,
@@ -27,12 +32,34 @@ var juliaOCIMarkers = map[string][]string{
 		"'--network', 'none', '--read-only', '--user', '65532:65532'",
 		"'--memory', '1g', '--memory-swap', '1g', '--pids-limit', '64'",
 		"'--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--cpus', '1'",
-		"container_boundary(info, image, source)", "validate_inventory(inventory, source, runtime_sha256)",
+		"container_boundary(info, image, source)", "validate_inventory(inventory, source, runtime_sha256, native_expected)",
+		"native_inventory.validate(inventory.get('nativeRuntime'), native_expected)",
+		"native_mapping.validate_component(inventory, native_expected)",
+		"openssl_runtime.validate_component(inventory)", "native_expected = openssl_runtime.overlay(",
+		"curl_runtime.validate_component(inventory)", "native_expected = curl_runtime.overlay(native_expected,",
+		"native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz')",
+		"if inventory.get('excludedDevelopmentEnvironments') != EXCLUDED_DEVELOPMENT_ENVIRONMENTS:",
 		"if inventory['generated'] != generated:", "if (inventory['sources'] != sources or",
 		"oracle(scratch, 'verify')", "report['passed'] &= clean",
 		"'juliaAdvisoryCoverage': 'unqualified-release-blocker'",
 	},
 	"kanz-jl/qualification/isolation.jl": {
+		"bounded_hash(path, 768 * 2^20)", "native_total[] <= 2^31",
+		"native_links[relative] = target", "native_jll[name] = info",
+		`"share/julia/compiled"`, `haskey(native_files, relpath(path, "/opt/julia"))`,
+		`haskey(generated_native, relpath(path, "/opt/julia-depot"))`,
+		"@test !isempty(outside)",
+		`open(` + "`$seven_path i`" + `, "r")`, "read(io, 65537)", "length(bytes) <= 65536",
+		"realpath(seven_path) == seven_path && !islink(seven_path)",
+		"a15c6706c64672f07d4cc7358cc7eee3aa0d0f7cfe3fdfcf31deb808d3b0b8ee",
+		`"native7zip"=>seven`,
+		`"nativeOpenSSL"=>openssl`, `Libdl.dlsym(crypto, :OpenSSL_version)`,
+		`OpenSSL 3.5.9 29 Sep 2026`, `@test ssl_context != C_NULL`,
+		`"nativeLibCURL"=>libcurl`, `Libdl.dlsym(curl, :curl_version_info)`,
+		`curl_info.version_num == 0x081700`, `unsafe_string(curl_info.ssl_version) == "OpenSSL/3.5.9"`,
+		"outside[path] = bounded_hash(path, 128 * 2^20)",
+		"@test !ispath(joinpath(\"/opt/julia/share/julia\", path))",
+		"@test !islink(joinpath(\"/opt/julia/share/julia\", path))",
 		"ccall(:geteuid, Cuint, ()) == 65532", "@test isempty(Sockets.getipaddrs())",
 		"@test_throws SystemError open(path, \"w\")", "Pkg.GitTools.tree_hash(root)",
 		`Base.locate_package(Base.PkgId(Base.UUID(entry["uuid"]), name))`,
@@ -44,8 +71,105 @@ var juliaOCIMarkers = map[string][]string{
 		`installed["version"] == entry["version"]`,
 		"@test actual == entry[\"git-tree-sha1\"]",
 	},
+	"kanz-jl/qualification/native_inventory.py": {
+		"hashlib.file_digest(stream, 'sha256').hexdigest() != ARCHIVE_SHA256",
+		"member.size > 768 << 20", "total > MAX_BYTES", "name in seen or len(seen) >= MAX_FILES",
+		"not safe_link(name, member.linkname)", "resolved not in files",
+		"observed[k] != expected[k]", "observed['unassignedFiles'] != sorted(list(expected['files']) + ['depot/' + p for p in generated])",
+		"native-library-advisory-ownership-unqualified", "generated = observed['generatedNativeImages']",
+		"sum(item['size'] for item in generated.values()) > MAX_BYTES",
+	},
+	"kanz-jl/qualification/openssl_runtime.py": {
+		"hashlib.file_digest(stream, 'sha256').hexdigest() != checksum",
+		"return verified_artifact(path, ARCHIVE_SHA256, expected)",
+		"member.name in found or not member.isfile()", "if found != expected:",
+		"base['files'].get(name) != BASE_FILES[name] or name in base['links']",
+		"inventory.get('nativeOpenSSL') != expected", "originalJLLVersion': '3.5.8+0'",
+	},
+	"kanz-jl/qualification/install-native-runtime.sh": {
+		`[[ $(uname -s) == Linux && $# == 4 ]]`, `$(realpath -e -- "$root") == "$root"`,
+		`check 5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4 "$julia_archive"`,
+		`check 8e2c75378726017fc66fb7fbbd10fb53522417c3e45a88af77b8853d46f2b063 "$openssl_archive"`,
+		`check 97a3b0d65c9e03a30bfdc89185ddf1ef0fe14b7e1a95d93d8ffc9cf57fb2a161 "$curl_archive"`,
+		`check "${original[$i]}" "$path"`, `check "${replacement[$i]}" "$file"`,
+		`mv -T -- "${temporary[$i]}" "$root/lib/julia/${names[$i]}"`,
+	},
+	"kanz-jl/qualification/curl_runtime.py": {
+		"openssl_runtime.verified_artifact(path, ARCHIVE_SHA256,",
+		"base['files'].get(PATH) != BASE or PATH in base['links']", "if (item != expected",
+		"'sslBackend': 'OpenSSL/3.5.9'", "'originalJLLVersion': '8.22.0+0'",
+	},
+	"kanz-jl/qualification/curl_advisory.py": {
+		"range_affected(record, target)", "len(control) < 21 or current",
+		"curl_runtime.validate_component(inventory)", "'CURL-CVE-2026-92392'",
+		"'--disable', '--fail'", "libcurl-native-component-only-other-native-ownership-unqualified",
+	},
+	"kanz-jl/qualification/openssl_advisory.py": {
+		"set(records) != set(names)", "json.loads(raw, object_pairs_hook=pairs)",
+		"class Links(HTMLParser):", "for start in range(0, len(names), 8):",
+		"total > 16 << 20 or time.monotonic() >= deadline", "records[name] = raw",
+		"results = [affected(item, target) for item in ranges]",
+		"'CVE-2026-84782' not in control", "or actual or report['advisories'] != actual",
+		"openssl_runtime.validate_component(inventory)", "ThreadPoolExecutor(max_workers=8)",
+		"OpenSSL-native-component-only-other-native-ownership-unqualified",
+	},
+	"kanz-jl/qualification/jll_advisory.py": {
+		"hashlib.sha256(raw).hexdigest() != REGISTRY_SHA256", "len(raw) > 4 << 20",
+		"entry.get('name') != name", "len(result) != 23", "registry_identity(raw, expected)",
+		"registry_identity(raw, CONTROL)", "(control / 'Project.toml').write_bytes(project(CONTROL))",
+		"(directory / 'Project.toml').write_bytes(project(expected))", "validate_packages(result, expected)",
+		"validate_packages(result, CONTROL)", "validate_control(result)",
+		"native_mapping.validate_report(mapping, inventory, scan_time)",
+		"any(not native_mapping.resolves(finding) for finding in findings)",
+		"unmapped JLL finding refuses qualification",
+		"archive-bound-JLL-metadata-only", "'CVE-2024-5535'", "report != {",
+	},
+	"kanz-jl/qualification/native_mapping.py": {
+		"archive.get('files', {}).get(PATH) != FILE", "inventory.get('native7zip') != COMPONENT",
+		"validate_sources({key: value.encode('utf-8') for key, value in report['sourceBytes'].items()})",
+		"hashlib.sha256(raw).hexdigest() != item['sha256']", "vulnStatus') != 'Analyzed'",
+		"json.dumps(cve.get('configurations'), sort_keys=True) != json.dumps(CONFIG, sort_keys=True)",
+		"dt.timedelta(hours=24)", "versionEndExcluding': '26.03'",
+		"not affected('26.02', cve) or affected('26.03', cve)",
+		"finding['PkgID'] == UUID", "finding['InstalledVersion'] == '17.8.3+0'",
+		"fixed-native-version-for-reviewed-advisory", "duplicate advisory JSON key",
+	},
+	"kanz-jl/qualification/install-audit.sh": {
+		"v0.72.0/trivy_0.72.0_Linux-64bit.tar.gz",
+		"bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea",
+		"v1.56.0/syft_1.56.0_linux_amd64.tar.gz",
+		"1c2493cfcf52d3367d6cb25780d9190c111c2219c34c820574c43e8bae15c528",
+		"sha256sum --check --strict",
+	},
+	"kanz-jl/qualification/advisory.py": {
+		"proof.validate_report(qualification, source, digest(Path(shutil.which('julia')).resolve()),",
+		"jll_advisory.qualify(run, flags, scratch,",
+		"native_mapping.qualify(run, qualification['inventory'],",
+		"openssl_advisory.qualify(run, qualification['inventory'],",
+		"openssl_advisory.validate_report(report.get('opensslAdvisory'), qualification['inventory'],",
+		"openssl_runtime.overlay(",
+		"curl_runtime.overlay(openssl_runtime.overlay(",
+		"curl_advisory.qualify(run, qualification['inventory'],",
+		"curl_advisory.validate_report(report.get('curlAdvisory'), qualification['inventory'],",
+		"native_mapping.validate_report(report.get('nativeVersionMapping'), qualification['inventory'],", "jll_advisory.validate_report(report.get(\"jllAdvisory\"),",
+		"validate_control(control_scan)", "validate_image_scan(scan, image, expected)",
+		"validate_spdx(sbom, expected)", "validate_syft(syft, report['archiveConfigDigest'])",
+		"identity.archive_config_digest(archive, alias)", "if tagged != image:",
+		"image_config_digest(image, scratch)",
+		"validate_database(metadata, dt.datetime.now(dt.timezone.utc))",
+		"digest(db / 'trivy.db') != db_hash", "validate_report(report, qualification, expected)",
+		"proof.native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz')",
+		"'--image-src', 'docker', image", "'--ignore-unfixed=false'",
+		"'stdlib-runtime-native-advisory-coverage-unqualified'",
+		"actual != expected", "'known vulnerable Julia control not detected'",
+		"'reviewed General registry package UUID differs'",
+		"'critical actual-image advisory refuses qualification'",
+		"tool_identity(executable, archive)", "digest(executable) != expected",
+		"scan.get('Metadata', {}).get('ImageID') != image",
+	},
 	".github/workflows/julia-calibration.yml": {
 		"packages: read", "name: Authenticate for private mirrored bases",
+		"python3 -m pip install PyYAML==6.0.3",
 		"run: python3 -B kanz-jl/qualification/proof.py", "if-no-files-found: error",
 	},
 }
@@ -84,7 +208,31 @@ func checkJuliaOCI(files map[string]string) error {
 		return fmt.Errorf("mandatory Julia job missing or conditional")
 	}
 	found := 0
+	audit := 0
+	tools := 0
+	nativeHost := 0
 	for _, step := range job.Steps {
+		if strings.Contains(step.Run, "bash kanz-jl/qualification/install-native-runtime.sh") {
+			if step.If != "" || !strings.Contains(step.Run, `bash kanz-jl/qualification/install-native-runtime.sh "$RUNNER_TEMP/julia-1.13.3" "$RUNNER_TEMP/julia.tar.gz" "$RUNNER_TEMP/openssl.tar.gz" "$RUNNER_TEMP/libcurl.tar.gz"`) {
+				return fmt.Errorf("host native repair conditional or substituted")
+			}
+			nativeHost++
+		}
+		if strings.Contains(step.Run, "Pkg.instantiate()") && nativeHost != 1 {
+			return fmt.Errorf("host native repair must precede Pkg network access")
+		}
+		if step.Name == "Install checksum-pinned image advisory tools" {
+			if step.If != "" || step.Run != "bash kanz-jl/qualification/install-audit.sh" {
+				return fmt.Errorf("scanner setup conditional or substituted")
+			}
+			tools++
+		}
+		if step.Name == "Qualify actual image Julia advisories and inventory" {
+			if found != 1 || tools != 1 || step.If != "" || step.Run != "python3 -B kanz-jl/qualification/advisory.py" {
+				return fmt.Errorf("actual image advisory step conditional, reordered or substituted")
+			}
+			audit++
+		}
 		if step.Name == "Qualify the actual Julia image without network or write authority" {
 			if step.If != "" || step.Run != "python3 -B kanz-jl/qualification/proof.py" {
 				return fmt.Errorf("actual OCI step conditional or substituted")
@@ -92,7 +240,7 @@ func checkJuliaOCI(files map[string]string) error {
 			found++
 		}
 	}
-	if found != 1 {
+	if found != 1 || audit != 1 || tools != 1 || nativeHost != 1 {
 		return fmt.Errorf("actual OCI qualification step missing/duplicated")
 	}
 	return nil
@@ -126,6 +274,10 @@ func TestJuliaOCIBoundary(t *testing.T) {
 		}
 	}
 	for _, mutation := range []struct{ old, new string }{
+		{"      - name: Qualify actual image Julia advisories and inventory\n", "      - name: Qualify actual image Julia advisories and inventory\n        if: false\n"},
+		{"      - name: Install the verified Julia runtime\n", "      - name: Install the verified Julia runtime\n        if: false\n"},
+		{"      - name: Install the verified Julia runtime\n", "      - name: Premature dependency access\n        run: julia -e 'using Pkg; Pkg.instantiate()'\n      - name: Install the verified Julia runtime\n"},
+		{"      - name: Install checksum-pinned image advisory tools\n", "      - name: Install checksum-pinned image advisory tools\n        if: false\n"},
 		{"  shadow-calibration:\n", "  shadow-calibration:\n    if: false\n"},
 		{"      - name: Qualify the actual Julia image without network or write authority\n", "      - name: Qualify the actual Julia image without network or write authority\n        if: false\n"},
 	} {

@@ -65,6 +65,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 
 	wantResources := []string{
 		"../../security/secrets/secretproviderclass.yaml",
+		"../../security/runtime/gateway-only-apis.yaml",
 		"../../deploy/analysis-template.yaml",
 		"../../deploy/accounting-deploy.yaml",
 		"../../deploy/api-gateway-deploy.yaml",

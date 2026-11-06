@@ -149,7 +149,7 @@ func TestEveryHeaderTrustJustificationNamesTheRealControl(t *testing.T) {
 	if len(problems) > 0 {
 		sort.Strings(problems)
 		t.Errorf("%d justification(s) of the trusted-header boundary name a control this estate "+
-			"does not implement:\n\n  %s\n\nNo HTTP listener here serves TLS and the gateway dials "+
+			"does not implement:\n\n  %s\n\nThe reviewed BFF-to-gateway listener serves TLS, but the gateway dials "+
 			"every upstream over http://, so a peer SVID protects none of these hops. The only "+
 			"control is the NetworkPolicy, and pkg/auth/meshheader.go says so. A comment promising "+
 			"a second layer is how a reviewer comes to accept a single one (#626).",
@@ -157,19 +157,20 @@ func TestEveryHeaderTrustJustificationNamesTheRealControl(t *testing.T) {
 	}
 }
 
-// THE PREMISE IS ASSERTED, NOT ASSUMED (#626).
-//
-// The guard above forbids a claim of mutual authentication because none exists.
-// The day an HTTP listener does serve TLS, that claim becomes TRUE and the rule
-// above becomes wrong — it would then force an accurate comment to keep citing a
-// NetworkPolicy as though it were still the only control.
-//
-// So the premise is a check of its own. Turning on TLS for an HTTP hop fails this
-// test, with instructions: the two are meant to be revisited together, and a guard
-// whose premise silently rotted would be worse than no guard. This is the same
-// discipline the exemption maps use — a decision that cannot outlive its reason.
+// THE REMAINING HTTP TRUST PREMISE IS ASSERTED (#626).
+// The optional workload-authenticated BFF-to-gateway listener is now real and
+// checked separately. It authenticates the BFF connection, not a trading action
+// and not the gateway's downstream principal-header hops. Those still require
+// the NetworkPolicy explanation above. Every other new TLS serving site must
+// fail here until its actual identity/control boundary has been reviewed.
 func TestNoHTTPListenerServesTLSWhichIsWhatTheClaimGuardAssumes(t *testing.T) {
 	root := moduleRoot(t)
+	// The optional BFF-to-gateway hop does not change the gateway-to-upstream
+	// principal-header boundary. Only its exact reviewed serving site is allowed.
+	if err := checkPairedHTTPRecipes(pairedHTTPFiles(t, root)); err != nil {
+		t.Fatal(err)
+	}
+	reviewedSites := 0
 
 	var serving []string
 	fset := token.NewFileSet()
@@ -184,6 +185,10 @@ func TestNoHTTPListenerServesTLSWhichIsWhatTheClaimGuardAssumes(t *testing.T) {
 				return true
 			}
 			if sel.Sel.Name == "ServeTLS" || sel.Sel.Name == "ListenAndServeTLS" {
+				if rel == gatewayServerFile && pairedTLSCall(call) {
+					reviewedSites++
+					return true
+				}
 				serving = append(serving, fmt.Sprintf("%s:%d calls %s",
 					rel, fset.Position(call.Pos()).Line, sel.Sel.Name))
 			}
@@ -191,6 +196,9 @@ func TestNoHTTPListenerServesTLSWhichIsWhatTheClaimGuardAssumes(t *testing.T) {
 		})
 	})
 
+	if reviewedSites != 1 {
+		t.Fatalf("reviewed paired TLS site count = %d, want 1", reviewedSites)
+	}
 	if len(serving) > 0 {
 		sort.Strings(serving)
 		t.Errorf("an HTTP listener now serves TLS:\n\n  %s\n\nThis is good, and it invalidates the "+
