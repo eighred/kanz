@@ -31,7 +31,8 @@ class API:
         self.jobs = [{"id": 50, "run_id": 2, "run_attempt": 1, "head_sha": SHA,
                       "name": "kanz-ci-required", "status": "completed", "conclusion": "success"}]
         self.calls = []
-        self.jobs[0]["name"] = next(iter(gate.POLICY[filename]))
+        self.jobs = [{**self.jobs[0], "id": 50 + i, "name": name}
+                     for i, name in enumerate(sorted(gate.POLICY[filename]))]
         self.page_size = 100
 
     def get(self, path, **query):
@@ -59,11 +60,14 @@ class EvidenceTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         (self.root / ".github/workflows").mkdir(parents=True)
-        (self.root / ".github/workflows/kanz-ci.yml").write_text("fixture")
+        for filename in gate.MANDATORY:
+            (self.root / ".github/workflows" / filename).write_text("fixture")
+        self.required = {"kanz-ci.yml": gate.POLICY["kanz-ci.yml"]}
         self.api = API()
 
     def verify(self):
-        return gate.verify_ci(self.api, SHA, self.root)
+        with patch.object(gate, "requirements", return_value=self.required):
+            return gate.verify_ci(self.api, SHA, self.root)
 
     def test_exact_success_and_dispatch(self):
         for event in ("push", "workflow_dispatch"):
@@ -161,13 +165,38 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(gate.POLICY["tokyo-messaging-proof.yml"], {"messaging-isolation"})
         self.assertEqual(gate.POLICY["envoy-edge.yml"], {"actual-edge"})
         self.assertEqual(gate.POLICY["gateway-policy-proof.yml"], {"gateway-isolation"})
-        with self.assertRaises(gate.EvidenceError): self.verify()
+        with self.assertRaises(gate.EvidenceError): gate.verify_ci(self.api, SHA, self.root)
         for filename, jobs in gate.POLICY.items():
             with self.subTest(filename=filename), patch.object(gate, "requirements", return_value={filename: jobs}):
+                self.required = {filename: jobs}
                 self.api = API(filename)
                 self.assertEqual(self.verify()[0]["workflow"], filename)
                 self.api.jobs[0]["name"] = "unrelated-success"
                 with self.assertRaises(gate.EvidenceError): self.verify()
+
+    def test_security_and_four_language_proofs_cannot_be_skipped(self):
+        self.assertEqual(len(gate.POLICY), 16)
+        self.assertEqual(gate.POLICY["security.yml"], {"gitleaks", "secret-scan-selftest", "dependency-scan"})
+        self.assertEqual(gate.POLICY["codeql.yml"], {"Analyze (actions)", "Analyze (go)", "Analyze (javascript-typescript)", "Analyze (python)"})
+        self.assertEqual(gate.POLICY["terraform-testnet.yml"], {"terraform-testnet"})
+        for filename in ("security.yml", "codeql.yml", "terraform-testnet.yml"):
+            with patch.object(gate, "requirements", return_value={filename: gate.POLICY[filename]}):
+                self.required = {filename: gate.POLICY[filename]}
+                for name in gate.POLICY[filename]:
+                    for status in ("skipped", "failure", "cancelled"):
+                        self.api = API(filename)
+                        next(j for j in self.api.jobs if j["name"] == name)["conclusion"] = status
+                        with self.subTest(filename=filename, name=name, status=status), self.assertRaises(gate.EvidenceError): self.verify()
+                self.api = API(filename)
+                self.api.current["event"] = self.api.runs[0]["event"] = "workflow_dispatch"
+                self.assertEqual(self.verify()[0]["workflow"], filename)
+
+    def test_deleted_security_workflow_cannot_erase_required_gate(self):
+        for filename in gate.MANDATORY:
+            path = self.root / ".github/workflows" / filename
+            path.unlink()
+            with self.subTest(filename=filename), self.assertRaises(gate.EvidenceError): gate.requirements(self.root)
+            path.write_text("fixture")
 
     def test_duplicate_required_job_names_fail(self):
         self.api.jobs.append({**self.api.jobs[0], "id": 51})

@@ -18,7 +18,7 @@
 # The Job also needs an IDENTITY, not just a binary: it publishes to a
 # verify:true NATS cluster over mTLS, and SPIRE issues an SVID to a POD from
 # its ServiceAccount. Same reason kanz-halt needs an image (SEC-M3c).
-FROM ghcr.io/eighred/base/golang:1.26.8 AS build
+FROM ghcr.io/eighred/base/golang:1.26.10 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
