@@ -203,3 +203,50 @@ does not establish projection completeness. The retained-retry profile currently
 refuses finite-delivery `order.*`; this fix does not change that global profile.
 TV-specific retry/serving failure behavior and actual NATS plus PostgreSQL proof
 remain activation prerequisites tracked in #1410/#1413.
+
+### Retained FACT delivery and serving refusal
+
+TV now uses a dedicated order-FACT NATS client with the existing work timing and
+concurrency budget and unbounded delivery attempts. Its Consumer validates the
+actual effective profile used to create the durable, and retains transient
+failures without DLQ parking or a completed dedup claim. Price subscriptions
+keep their original finite profile; the global order profile and existing audit
+retained-delivery caller are unchanged. Terminal malformed bytes retain the
+existing DLQ policy. This does not extend stream retention or prove history that
+predates the retained source.
+
+The Broker API and readiness require initial durable catch-up, a live process,
+and no unresolved fold failure. Handler execution and readiness outcome update
+are serialized together. A success clears only the same tenant/event failure;
+unrelated delivery or a late catch-up callback cannot reopen serving. The map
+holds only hashed identities, is capped at 4096, and missing identity or overflow
+stays closed for that process. Panic also revokes serving before bus-owned panic
+handling. A connection loss stops the process instead of treating reconnect as
+freshness proof. Restart must rebuild and pass the durable catch-up barrier.
+Operations health remains separate; readiness and Broker responses expose only
+a bounded not-ready status, never event or tenant identifiers.
+
+Price filters require a literal first token disjoint from `order`; wildcard or
+empty roots and `order` roots refuse startup. This preserves the default market
+filters and literal custom price roots while avoiding a second NATS wildcard
+parser. Controlled single-writer handoff, complete-history qualification, and
+recovery of already-invalid checkpoints remain separate prerequisites. No live
+activation or new multi-replica ownership is established here.
+
+`TestTVRetainedFactsRecoverWithNATSAndPostgres` requires actual NATS plus a
+NOSUPERUSER/NOBYPASSRLS PostgreSQL role. It covers a committed append with an
+injected lost response, actual database lock timeout, unacknowledged durable
+restart, no-later-FACT redelivery, Broker 503/200, unchanged single durable fact,
+and a real terminal DLQ positive control. It does not inject a network partition
+into PostgreSQL. Required CI rejects skipped dependencies and requires every
+scenario; local source/unit checks alone are not operational acceptance.
+
+Existing finite TV durables keep the same group/name/filter. The existing bus
+`inspectExistingDurable` + `CreateOrUpdateConsumer` path already logs supported
+tuning drift and updates timing/delivery settings in place; it refuses a changed
+filter. The new code reuses that mechanism, never deletes/recreates a durable or
+falls back to 64. `TestRetainedProfilePreservesExistingDurableCursor` requires an
+actual 64-to-unbounded update with identical name/creation time and preserved ack
+floor, delivering only the pending suffix. Old consumers must be stopped first:
+an old process could reassert 64 on the same durable. This is a controlled source
+handoff requirement, not proof that any deployed estate has performed it.

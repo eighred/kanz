@@ -170,7 +170,14 @@ func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
 		dedup = NewDedupWindow(o.dedupTTL, o.dedupMax)
 	}
 	for subject := range o.retainedRetries {
-		if tuningForSubject(subject).MaxDeliver != -1 {
+		tuning := tuningForSubject(subject)
+		if effective, ok := s.(interface{ DurableConsumerTuning(string) ConsumerTuning }); ok {
+			tuning = effective.DurableConsumerTuning(subject)
+		}
+		if err := tuning.validate(); err != nil {
+			return nil, err
+		}
+		if tuning.MaxDeliver != -1 {
 			return nil, fmt.Errorf("retained retries require an unbounded delivery profile for %q", subject)
 		}
 	}

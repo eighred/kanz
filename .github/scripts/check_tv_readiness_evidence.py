@@ -6,16 +6,28 @@ from check_migration_evidence import verify
 REQUIRED = {
     "pkg/bus": {"TestNATSDurableReadyWaitsForPendingAndAckPending",
                 "TestConsumerDurableReadyPreservesValidationAndDedup",
-                "TestConsumerDurableReadyRefusesUnsupportedTransport"},
+                "TestConsumerDurableReadyRefusesUnsupportedTransport",
+                "TestRetainedRetryValidatesEffectiveDurableProfile",
+                "TestRetainedProfilePreservesExistingDurableCursor",
+                "TestRetainedAuthorityRetriesReleaseClaimsAndKeepTerminalDLQ"},
     "services/tv-sync/cmd/tv-sync": {"TestTVReadinessWaitsForEverySubscription",
                                       "TestTVReadinessRefusesSubscriptionFailureAndEmptySet",
-                                      "TestTVReadinessClosesBeforeSiblingDrain"},
-    "services/tv-sync/internal/server": {"TestBrokerRefusesBeforeReadinessAndAfterCancellation"},
+                                      "TestTVReadinessClosesBeforeSiblingDrain",
+                                      "TestTVRefusesOverlappingPriceFilters",
+                                      "TestTVConsumerRouterSeparatesFactsAndPrices",
+                                      "TestGuardedFoldSerializesOutcomeAndRevokesOnPanic",
+                                      "TestTVRetainedFactsRecoverWithNATSAndPostgres",
+                                      "TestTVRetainedFactsRecoverWithNATSAndPostgres/committed-response",
+                                      "TestTVRetainedFactsRecoverWithNATSAndPostgres/database-timeout",
+                                      "TestTVRetainedFactsRecoverWithNATSAndPostgres/restart-unacked"},
+    "services/tv-sync/internal/server": {"TestBrokerRefusesBeforeReadinessAndAfterCancellation",
+                                                 "TestFoldReadinessRequiresMatchingRecovery",
+                                                 "TestFoldReadinessOverflowAndMissingIdentityStayClosed"},
 }
 if __name__ == "__main__":
     if sys.argv[1] == "--pattern":
-        print("^(" + "|".join(sorted(set.union(*REQUIRED.values()))) + ")$")
+        print("^(" + "|".join(sorted({name.split("/")[0] for name in set.union(*REQUIRED.values())})) + ")$")
     else:
         with open(sys.argv[1], encoding="utf-8") as source:
             verify((json.loads(line) for line in source), required=REQUIRED)
-        print("All 7 durable readiness cases passed in 3 complete packages")
+        print("All 19 required durable readiness outcomes passed in 3 complete packages")
