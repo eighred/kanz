@@ -35,26 +35,36 @@ while time.monotonic()<end:
   except OSError:
    pass
 """
-PROBE = """import errno,ipaddress,json,socket,sys
-ipaddress.ip_address(sys.argv[1])
-result={'outcome':'unknown','reason':'protocol'}
-try:
- s=socket.create_connection((sys.argv[1],8080),timeout=2)
-except TimeoutError:
- result={'outcome':'blocked','reason':'connect_timeout'}
-except OSError as e:
- if e.errno in (errno.ECONNREFUSED,errno.EHOSTUNREACH):
-  result={'outcome':'blocked','reason':'connect_refused'}
+SOCKET_PROBE = """import errno,ipaddress,json,socket,sys,time
+def observe():
+ ipaddress.ip_address(sys.argv[1])
+ result={'outcome':'unknown','reason':'protocol'}
+ try:
+  s=socket.create_connection((sys.argv[1],8080),timeout=2)
+ except TimeoutError:
+  result={'outcome':'blocked','reason':'connect_timeout'}
+ except OSError as e:
+  if e.errno in (errno.ECONNREFUSED,errno.EHOSTUNREACH):
+   result={'outcome':'blocked','reason':'connect_refused'}
+  else:
+   result={'outcome':'unknown','reason':'connect_error'}
  else:
-  result={'outcome':'unknown','reason':'connect_error'}
-else:
- with s:
-  try:
-   s.sendall(sys.argv[2].encode())
-   if s.recv(64)==sys.argv[2].encode(): result={'outcome':'allowed','reason':'echo'}
-  except OSError:
-   pass
-print(json.dumps(result,separators=(',',':')))
+  with s:
+   try:
+    s.sendall(sys.argv[2].encode())
+    if s.recv(64)==sys.argv[2].encode(): result={'outcome':'allowed','reason':'echo'}
+   except OSError:
+    pass
+ return result
+"""
+PROBE = SOCKET_PROBE + "print(json.dumps(observe(),separators=(',',':')))\n"
+# Each observation opens a new socket. Batch only process/CLI startup, never
+# substitute a repeated result for three independently observed connections.
+PROBE_BATCH = SOCKET_PROBE + """observations=[]
+for index in range(3):
+ if index: time.sleep(0.3)
+ observations.append(observe())
+print(json.dumps(observations,separators=(',',':')))
 """
 
 
@@ -154,6 +164,17 @@ def decode_probe(raw):
                      {"outcome": "blocked", "reason": "connect_refused"}):
         raise ProofError("unknown_probe_result")
     return value
+
+
+def decode_batch(raw):
+    try:
+        values = json.loads(raw)
+    except (TypeError, ValueError):
+        raise ProofError("invalid_probe_batch") from None
+    if not isinstance(values, list) or len(values) != 3:
+        raise ProofError("incomplete_probe_batch")
+    # A single malformed/unknown observation invalidates the entire batch.
+    return [decode_probe(json.dumps(value)) for value in values]
 
 
 def validate_report(report, source):
@@ -279,14 +300,19 @@ def run_proof(k, source):
                     deadline = min(started + 240, time.monotonic() + 20)
                     consecutive, result = 0, None
                     while time.monotonic() < deadline:
-                        raw = k("-n", namespace, "exec", client, "--", "python", "-I", "-B", "-c", PROBE, address, nonce)
-                        result = decode_probe(raw)
-                        consecutive = consecutive + 1 if result["outcome"] == expected else 0
+                        raw = k("-n", namespace, "exec", client, "--", "python", "-I", "-B", "-c", PROBE_BATCH, address, nonce)
+                        observations = decode_batch(raw)
+                        if time.monotonic() >= deadline:
+                            result = observations[-1]
+                            failed_observation = result["reason"] if result["outcome"] != expected else "budget_exhausted"
+                            raise ProofError("policy_observation_deadline")
+                        for result in observations:
+                            consecutive = min(3, consecutive + 1) if result["outcome"] == expected else 0
                         if consecutive == 3:
                             break
                         time.sleep(0.3)
                     if consecutive != 3:
-                        failed_observation = result["reason"] if result else "budget_exhausted"
+                        failed_observation = result["reason"] if result and result["outcome"] != expected else "budget_exhausted"
                         raise ProofError("policy_observation_not_stable")
                     evidence["cases"].append({"case": name + "_" + client + "_" + target,
                                               "verdict": "PASS", "observation": result["reason"]})
