@@ -17,7 +17,7 @@ import sys
 
 WORKFLOW = Path(".github/workflows/kanz-ci.yml")
 CORE_JOBS = frozenset({
-    "release-custody", "go", "python", "ts", "web", "sdk-guard",
+    "release-custody", "go", "go-race", "python", "ts", "web", "sdk-guard",
     "module-graph", "observability", "buf-breaking",
 })
 SCOPE_IF = "needs.scope.outputs.application == 'true'"
@@ -104,6 +104,12 @@ def workflow_jobs(text):
     if not CORE_JOBS <= expected or not {"scope", "kanz-ci-required"} <= set(blocks):
         raise ValueError("required application or coordination job removed")
     for name in expected:
+        if name == "go":
+            if blocks[name].count("    needs: [scope, go-race]") != 1 or blocks[name].count(
+                "    if: ${{ always() && needs.scope.outputs.application == 'true' }}"
+            ) != 1 or "go-race" not in expected:
+                raise ValueError("go must aggregate both race runners even after failure")
+            continue
         if blocks[name].count("    needs: scope") != 1 or blocks[name].count(
             f"    if: {SCOPE_IF}"
         ) != 1:

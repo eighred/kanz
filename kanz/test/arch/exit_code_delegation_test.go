@@ -115,6 +115,14 @@ func TestEveryServiceMainDelegatesItsExitCode(t *testing.T) {
 		if _, ok := mainsExemptFromExitDelegation[p.dir]; ok {
 			continue
 		}
+		// The only pre-lifecycle mode is a closed, credential-free config emitter.
+		// Its complete recipe is checked, not a package-wide exemption.
+		if p.dir == "services/web-bff/cmd/web-bff" && reviewedEdgePrelude(p.mainDecl) {
+			if err := checkPairedHTTPRecipes(pairedHTTPFiles(t, root)); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		if reason := exitDelegationDefect(p.mainDecl); reason != "" {
 			violations = append(violations, finding{
 				pkg:    p.dir,

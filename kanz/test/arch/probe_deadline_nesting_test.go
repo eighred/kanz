@@ -363,8 +363,8 @@ func apiGatewayIngressAnnotations(t *testing.T, root string) map[string]string {
 	return nil
 }
 
-// gatewayServerFile declares the bounds of the one server the api-gateway listens
-// on.
+// gatewayServerFile declares equal bounds for the ordinary gateway listener and
+// the optional paired BFF mTLS listener.
 //
 // It no longer writes an http.Server literal — every server in the estate is built
 // by internal/platform/httpserver, which cannot be called with a timeout unset
@@ -416,6 +416,9 @@ const nginxUpstreamKeepaliveDefault = 60 * time.Second
 // layer that reports it.
 func TestGatewayServerBoundsTheConnectionItself(t *testing.T) {
 	root := moduleRoot(t)
+	if err := checkPairedHTTPRecipes(pairedHTTPFiles(t, root)); err != nil {
+		t.Fatal(err)
+	}
 	fields := gatewayTimeoutFields(t, filepath.Join(root, filepath.FromSlash(gatewayServerFile)))
 
 	consequences := map[string]string{
@@ -503,7 +506,7 @@ func TestGatewayServerBoundsTheConnectionItself(t *testing.T) {
 	}
 }
 
-// gatewayTimeoutFields returns each keyed field of the one httpserver.Timeouts literal
+// gatewayTimeoutFields returns the common keyed fields of both httpserver.Timeouts literals
 // in path, mapped to the identifier it is set to — or "" when it is set to anything
 // other than a bare identifier (an inline `105 * time.Second` cannot be ordered against
 // anything, because durationConst has no const to read).
@@ -516,9 +519,8 @@ func TestGatewayServerBoundsTheConnectionItself(t *testing.T) {
 // are the only bounds in the estate that must be ordered against per-route budgets and
 // an ingress annotation.
 //
-// It insists on exactly ONE Timeouts literal. Two would mean this binary listens on two
-// servers and the caller is asserting about whichever the AST reached first, which is how
-// a guard goes green while the served port is bounded by something nobody checked.
+// It requires exactly two equal literals. The paired-boundary guard identifies their
+// constructor sites; neither listener can silently acquire a different deadline.
 func gatewayTimeoutFields(t *testing.T, path string) map[string]string {
 	t.Helper()
 
@@ -528,6 +530,7 @@ func gatewayTimeoutFields(t *testing.T, path string) map[string]string {
 	}
 
 	var literals int
+	var firstLiteral string
 	out := map[string]string{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		lit, ok := n.(*ast.CompositeLit)
@@ -535,6 +538,31 @@ func gatewayTimeoutFields(t *testing.T, path string) map[string]string {
 			return true
 		}
 		literals++
+		normalized := map[string]string{}
+		for _, elt := range lit.Elts {
+			kv, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				t.Fatal("unkeyed timeout")
+			}
+			normalized[bondCloneNode(kv.Key)] = bondCloneNode(kv.Value)
+		}
+		// Compare semantic keyed fields, independent of Go formatting/order.
+		signature := ""
+		for _, key := range []string{"ReadHeader", "Read", "Write", "Idle"} {
+			value, ok := normalized[key]
+			if !ok {
+				t.Fatalf("missing timeout %s", key)
+			}
+			signature += key + "=" + value + ";"
+		}
+		if len(normalized) != 4 {
+			t.Fatal("unexpected timeout field")
+		}
+		if literals == 1 {
+			firstLiteral = signature
+		} else if signature != firstLiteral {
+			t.Fatal("paired gateway listeners have different bounds")
+		}
 		for _, elt := range lit.Elts {
 			kv, ok := elt.(*ast.KeyValueExpr)
 			if !ok {
@@ -553,8 +581,8 @@ func gatewayTimeoutFields(t *testing.T, path string) map[string]string {
 		return true
 	})
 
-	if literals != 1 {
-		t.Fatalf("%s constructs %d httpserver.Timeouts literals, want exactly 1.\n\n"+
+	if literals != 2 {
+		t.Fatalf("%s constructs %d httpserver.Timeouts literals, want exactly 2 equal reviewed listeners.\n\n"+
 			"With none, the gateway has stopped overriding the estate defaults and its "+
 			"WriteTimeout is no longer sized against its own handler budgets or kept under "+
 			"the ingress's proxy-read-timeout — the orderings below would assert nothing. "+

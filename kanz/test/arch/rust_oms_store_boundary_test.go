@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/recovery.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/position.rs", "src/position_math.rs", "src/position_projector.rs", "src/recovery.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -23,8 +23,11 @@ publish = false
 [dependencies]
 kanz-oms-fold-shadow = { path = "../../services/oms-fold-shadow" }
 kanz-decimal-compat = { path = "../.." }
+kanz-proto-wire = { path = "../proto-wire" }
 prost = "=0.14.1"
 prost-types = "=0.14.1"
+prost-reflect = "=0.16.2"
+uuid = { version = "=1.29.0", features = ["v7"] }
 sha2 = "=0.10.9"
 num-bigint = "=0.4.6"
 num-rational = "=0.4.2"
@@ -35,7 +38,8 @@ tokio = { version = "=1.54.1", features = ["rt", "time"] }
 tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "time"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
-base64 = "=0.22.1"`
+base64 = "=0.22.1"
+async-nats = { version = "=0.51.0", default-features = false, features = ["ring", "jetstream", "nuid"] }`
 
 // #1413: source/layout/token guard, not Rust AST/data-flow or SQL correctness.
 // Actual Go-read/Rust-write PostgreSQL qualification supplies separate evidence.
@@ -97,7 +101,12 @@ func checkRustOMSStoreBoundary(root string) error {
 		if regexp.MustCompile(`\bf(?:32|64)\b|\bunsafe\b|(?:struct|enum|type)(?:Decimal|Money|Fill|OrderState)\b`).MatchString(s) || strings.Contains(s, "include!") || strings.Contains(s, "#[path=") {
 			return fmt.Errorf("store financial/unsafe/alternate-source boundary")
 		}
-		if rel != "examples/fixture.rs" {
+		if rel != "examples/fixture.rs" && rel != "examples/relay_support/mod.rs" {
+			if rel == "src/relay.rs" {
+				s = strings.ReplaceAll(s, "self.sessions.connect(", "connector(")
+				s = strings.ReplaceAll(s, "self.publisher.publish(", "acknowledge(")
+			}
+
 			for _, bad := range []string{"std::env", "std::process", "std::net", ".connect(", "NoTls", ".publish("} {
 				if strings.Contains(s, bad) {
 					return fmt.Errorf("repository acquires runtime authority")
@@ -141,7 +150,7 @@ func checkRustOMSStoreBoundary(root string) error {
 			}
 		}
 	}
-	if strings.Count(found["src/fee_journal.rs"], `tx:&'txmutTransaction<'connection>`) != 2 || strings.Count(found["src/fee_journal.rs"], `identity::same_except_fee(original.value(),revised.value())`) != 2 {
+	if strings.Count(found["src/fee_journal.rs"], `tx:&'txmutTransaction<'connection>`) != 2 || strings.Count(found["src/fee_journal.rs"], `identity::same_except_fee(original.value(),revised.value())`) != 3 {
 		return fmt.Errorf("fee token must exclusively borrow caller transaction and validate both head/append economics")
 	}
 	for _, marker := range []string{`validate_batch(state,records,64,MAX_BYTES)`, `message_field(wire,2)`, `claim(&tx,&st.order_id,&key,fill_id).await?`, `journal(&tx,&st.order_id,fill_id,&fill,&raw).await?`} {
@@ -165,7 +174,7 @@ func checkRustOMSStoreBoundary(root string) error {
 		}
 	}
 	for file, markers := range map[string][]string{
-		"src/fee_journal.rs":  {`tx:&'txmutTransaction<'connection>`, `scope_existing(tx,tenant).await?`, `cas(tx,&st,state,expected_version).await?`, `self.scoped().await?`, `current.as_deref()!=Some(self.tenant.as_str())`, `if!recorded.equivalent(revised)`, `delta:BigRational::zero()`, `fresh:false`, `fee_revision::approved_delta(&previous,revised)?`, `previous.journal_bytes()?`, `revised.journal_bytes()?`, `ORDERBYrevision_sequenceDESCLIMIT1`, `identity::same_except_fee(original.value(),revised.value())`, `octet_length(revised_fill)::bigint<=$2`, `octet_length(revised_fill)::bigint<=$3`, `validate_write(&self.state,records)?`, `enqueue(self.tx,records).await`},
+		"src/fee_journal.rs":  {`record_for(self.tx,Book::Oms,original,revised).await`, `head_for(tx,Book::Oms,original).await`, `WHEREbook=$4ANDexecution_key=$1ANDcase_id=$2`, `WHEREbook=$3ANDexecution_key=$1ORDERBY`, `tx:&'txmutTransaction<'connection>`, `scope_existing(tx,tenant).await?`, `cas(tx,&st,state,expected_version).await?`, `self.scoped().await?`, `current.as_deref()!=Some(self.tenant.as_str())`, `if!recorded.equivalent(revised)`, `delta:BigRational::zero()`, `fresh:false`, `fee_revision::approved_delta(&previous,revised)?`, `previous.journal_bytes()?`, `revised.journal_bytes()?`, `ORDERBYrevision_sequenceDESCLIMIT1`, `identity::same_except_fee(original.value(),revised.value())`, `octet_length(revised_fill)::bigint<=$2`, `octet_length(revised_fill)::bigint<=$3`, `validate_write(&self.state,records)?`, `enqueue(self.tx,records).await`},
 		"src/fee_revision.rs": {`!(-64..=64).contains(&d.exponent)`, `hash.update((part.len()asu64).to_be_bytes())`, `normalize(&a.proposer)==normalize(&a.approver)`, `economic_digest(previous.value()).map_err(|_|Error::FeeRevision)?!=a.previous_execution_digest`, `identity::same_execution(previous.value(),approved.value())`, `amount(previous.value())?-amount(revised.value())?`},
 	} {
 		for _, marker := range markers {

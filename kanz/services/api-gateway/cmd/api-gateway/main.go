@@ -373,6 +373,15 @@ func run() int {
 		Write:      gatewayWriteTimeout,
 		Idle:       gatewayIdleTimeout,
 	})
+	bffTLS, err := prepareBFFTLS(ctx, cfg, router, httpserver.Timeouts{
+		ReadHeader: std.ReadHeader, Read: std.Read,
+		Write: gatewayWriteTimeout, Idle: gatewayIdleTimeout,
+	})
+	if err != nil {
+		logger.Error("BFF workload listener initialization failed")
+		return 2
+	}
+	defer bffTLS.close()
 
 	// The serve loop is the only thing that can die AFTER startup has completed
 	// (rule 6, #266): lifecycle.Fatal lets the goroutine that observes the
@@ -425,6 +434,17 @@ func run() int {
 		primeIssuer(ctx, oidcAuth, obs.Registry, cfg.OIDCIssuer, issuerRetryInterval, &ready, logger)
 	}()
 
+	var bffTLSDone chan struct{}
+	if bffTLS != nil {
+		bffTLSDone = make(chan struct{})
+		go func() {
+			defer close(bffTLSDone)
+			if err := bffTLS.server.ServeTLS(bffTLS.listener, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("BFF workload listener failed")
+				fatal.Raise(err)
+			}
+		}()
+	}
 	go func() {
 		if oidcAuth == nil {
 			// The dev HS256 arm validates with a secret already in hand — there is
@@ -444,6 +464,13 @@ func run() int {
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
 		logger.Error("http shutdown error", "err", err)
+	}
+	if bffTLS != nil {
+		if err := bffTLS.server.Shutdown(sctx); err != nil {
+			logger.Error("BFF workload listener shutdown failed")
+			_ = bffTLS.server.Close()
+		}
+		<-bffTLSDone
 	}
 
 	return fatal.Code()

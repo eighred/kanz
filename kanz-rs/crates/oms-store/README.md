@@ -239,3 +239,148 @@ error is likewise not proof of rollback; retry keeps at-least-once semantics.
 
 Real Go/Rust PostgreSQL contention, cancellation, session-loss, raw-byte and mark
 proof is mandatory in `TestRustOutboxQueue`; local skipped tests do not qualify it.
+
+## Held-order proposal repository
+
+`proposals` ports all seven existing OMS ProposalStore persistence operations.
+The original canonical SubmitOrder bytes and row metadata remain in
+`order_proposals`; an unapproved proposal never becomes an order. Put, Claim and
+AnnounceExpiry commit their markers and existing OMS outbox Records together.
+Claim requires a FACT; Put and AnnounceExpiry retain Go's permitted empty batch.
+RecordRefusal changes only the latest refusal on an undecided row. Decisions and
+expiry announcements retain their rows and exclude each other atomically.
+
+This is a repository owner, not the maker/checker authority. The existing Go
+caller authenticates the issuer, checks `dualcontrol.Approve` against the captured
+time and digest, then replays the stored command through the complete admission
+path with `approval.Covers`. Rust keeps the original caller-time SQL predicates;
+it adds no DB-clock expiry policy. SQL lower/btrim remains the final self-approval
+comparison. The separately recorded delayed-admission timing boundary under
+#1413/#796 is not repaired or qualified by this port.
+
+The trusted caller supplies an already connected NOSUPERUSER/NOBYPASSRLS client;
+forced RLS on the proposal table is required in addition to existing store tables.
+Raw commands retain unknown fields. Reads decode corruption but, like Go, do not
+re-run Put validation on stored metadata. Nullable decision/refusal/expiry times
+remain distinct from missing rows. Error or capacity refusal returns no prefix.
+The explicit port bounds are 4096 rows, 1 MiB total dynamic bytes per operation
+and 64 announcement records. Expired pages retain Go's default100 on nonpositive
+limits; over-bound explicit limits refuse. Pending is a complete bounded result,
+not a silently truncated queue. COMMIT errors remain unconfirmed outcomes.
+
+The actual Go `proposalstoretest.Run` is reused against the subprocess adapter;
+the adapter does not validate requests before Rust. Separate real-PostgreSQL
+fixtures compare Go readback, concurrent claim/expiry arbitration, exact raw
+commands and nullable metadata, caller-time boundaries, RLS, whole-result bounds
+and transaction/outbox rollback. The adapter's synthetic approval FACT is built
+independently of the actor under test so invalid actors reach the repository.
+No production caller, service, transport, writer handoff or credential owner is
+introduced; actual Linux no-skip qualification remains required.
+
+## Outbox relay qualification
+
+`relay` composes the existing OMS-owned Queue with a supplied acknowledged
+publisher. It introduces no production connector, deployment or Go handoff.
+`Run`, `DrainOnce` and synchronous `Flush` retain per-key advisory ownership,
+read-after-lock ordering, stop-at-first-failure, background progress on other
+keys and the full-batch Flush stall. Broker acknowledgement precedes
+MarkPublished. Acknowledgement followed by an unconfirmed database result leaves
+at-least-once redelivery possible; it is never proof that publication rolled back.
+Go Record.Event does not persist EventID, so each retry receives a fresh UUIDv7
+and idempotency key while durable payload, timestamp and attribution survive.
+
+Canonical descriptors resolve payload types. Known protobuf fields are normalized
+like Go Unmarshal/Marshal, including duplicate embedded messages. The existing
+fee-wire parser preserves unknown values and group bytes, with canonical tags;
+unknown bytes are reattached in encounter order at each message level. Independent
+Go byte comparisons are required, not semantic equality alone. Reachable payloads
+include OMS order/approval/outcome/attribution/recovery FACTs and the shared OMS
+position projector's domain.v1.PositionState. Current graphs have no maps or
+oneofs; future such fields refuse pending overwrite-semantics qualification.
+
+Explicit limits are 1 MiB record/frame bytes, 32 known-message nesting levels,
+4096 sequence entries (8 MiB total key bytes) and queue rows, a one-hour
+sequence TTL, and ten seconds for
+each broker acknowledgement. Sequence eviction re-baselines at one, like Go;
+its smaller ceiling is a declared port bound. Only FACT class is accepted.
+Missing schema/required envelope fields or malformed payload refuses before the
+publisher. Errors retain the distinction between a key stalled by publication
+and infrastructure/commit failure. The fixture records fixed failure categories,
+not unbounded broker diagnostics or credentials.
+
+Stop prevents starting another record; an in-flight acknowledged publication is
+joined through its mark/unlock before returning. Dedicated session close awaits
+cancellation/driver teardown, and no session goes back to a pool. The trusted
+connector must bound connection and SQL operations; the disposable fixture sets
+a five-second SQL statement timeout. Abruptly dropping the owner still has the
+previous bounded cancellation fallback, not a graceful-shutdown guarantee.
+
+`examples/relay_support` alone connects to a loopback disposable JetStream broker.
+The required real PostgreSQL/NATS fixture compares canonical Go framing, ordered
+draining, contention, poison keys, mark failures, ACK/SQL ambiguity, restart and
+joined stop. This proves neither production SPIFFE/ACL acceptance nor permission
+to replace the Go relay. prost-reflect 0.16.2 declares prost/prost-types ^0.14.0;
+the lock retains the existing exact 0.14.1 versions and advisory checks.
+
+## Position book qualification
+
+`position::apply` and `position::snapshot` implement the existing Go position
+Store boundary against its original tables. The instrument advisory lock, fill
+claim, chronological history/basis, venue lot, cross-venue aggregate, position
+fee journal and Announcer records share one transaction. The synchronous
+Announcer only constructs Records; it cannot publish or perform I/O. Duplicate
+fills still announce the current book. Failed announcements roll back claims,
+history and positions; a failed COMMIT remains unconfirmed. The existing outbox
+owner supplies drainage. No Go caller is switched to Rust.
+
+The arithmetic is exact weighted-average cost and **gross** realized P&L. Fees
+remain separate journal revisions, matching the current OMS reporting convention.
+The snapshot is cost-valued, not a live valuation: cash and log coordinates remain
+absent. It is neither evidence of financial genesis nor a complete bootstrap
+snapshot. Missing price retains the legacy store conversion semantics; upstream
+fill/admission validation is not replaced by this compatibility owner.
+
+The bounded domain accepts canonical Decimal exponents through ±64 and refuses
+unrepresentable output. Stored rational text must be Go RatString integer or
+numerator/positive-denominator form, at most 4096 bytes per field; arithmetic
+intermediates are limited to 16384 bits. Rows/replay are capped at 10000, with
+1MiB aggregate transfer/result budgets and 64 Announcer Records. SQL window
+checks withhold oversized data before transfer. Overflow refuses the entire
+operation/result, never a prefix or fabricated zero. Incomplete legacy history
+cannot accept backdated or recovery executions. These are explicit bounded
+refusals, not a claim of arbitrary big.Rat input compatibility.
+
+Qualification must compare actual Go/Rust PostgreSQL state and raw journals,
+independent rational goldens, cross-writer contention and rollback, recovery/fee
+history, RLS and actual NATS publication ordering. Local Windows formatting or
+skipped tests do not establish this acceptance. Production admission, credentials,
+venue gRPC, halt, DR and single-writer cutover remain separately governed.
+
+
+## Position projector composition
+
+`position_projector::handle` owns the existing Go Projector handler above the
+qualified Store: incoming fill-event decode and decimal-domain validation,
+legacy tenant scope (strict exact attribution for recovery), transaction-local
+aggregate/venue/recovery acknowledgement Records and inline relay Flush.
+It receives the canonical Envelope and original payload; fixtures no longer
+supply Record templates for this owner. The existing normalized wire helper
+merges duplicate embedded fields and preserves unknown raw bytes before the
+original Fill is captured. Consumer lineage uses the incoming event ID as
+causation, not the incoming causation ID.
+
+The input budget is 1MiB combined envelope/payload with depth 32, followed by
+the Store's existing limits. Unknown event types and nil ordinary fills are
+ignored only after tenant validation, matching Go; malformed or unsupported
+inputs refuse. Ordinary missing price/portfolio behavior is retained rather
+than converted into new admission policy. Recovery ACK time is an explicit
+clock input for deterministic qualification. A Flush failure may follow a
+committed fold: PublicationUnconfirmed means retry, not rollback. The same
+claims and outbox support Go restart/rollback without a second ledger.
+
+This is a handler composition, not a deployed consumer. The canonical Consumer
+still owns envelope authentication, durable delivery, DLQ and retry policy;
+production SPIFFE/NATS authorization, startup fencing, readiness and writer
+handoff are not supplied by this library. The real PostgreSQL/NATS differential
+must compare the complete Go handler, durable state and emitted frames before
+acceptance; the older Store template fixture alone is insufficient.

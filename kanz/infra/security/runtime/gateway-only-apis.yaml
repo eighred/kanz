@@ -1,0 +1,92 @@
+# Shared gateway-principal API isolation; imported by the canonical runtime
+# and Tokyo overlay. API access admits only same-namespace api-gateway pods;
+# observability reaches separate operations ports, never those API listeners.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-compliance-mandate
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: compliance
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8095 }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8091 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-accounting
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: accounting
+  policyTypes: [Ingress]
+  ingress:
+    # THE API PORT, AND ONLY THE GATEWAY (#447). 8101 is deliberately absent from
+    # allow-observability-scrape's list, so this is the whole set of callers that
+    # can reach a cash-movement write — which is what makes trusting the
+    # gateway-injected principal on it sound.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8101 }
+    # The scrape reaches :8080, which now serves /metrics and NOTHING else.
+    # allow-observability-scrape already admits it namespace-wide; the arm is kept
+    # here so this policy states the full set of callers accounting expects rather
+    # than depending on a blanket rule elsewhere to keep the pod monitored.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-audit
+  namespace: kanz-services
+  labels:
+    app.kubernetes.io/part-of: kanz
+spec:
+  podSelector:
+    matchLabels:
+      app: audit
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - { protocol: TCP, port: 8102 }
+    # The scrape reaches :8083, which now serves /metrics and the probes and
+    # nothing that reads a tenant header. Stated here rather than left to the
+    # blanket rule, so this policy carries the full set of callers audit expects.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kanz-observability
+      ports:
+        - { protocol: TCP, port: 8083 }

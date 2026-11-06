@@ -88,11 +88,35 @@ jobs:
           cargo test --locked -p kanz-oms-store --all-targets
           cargo clippy --locked -p kanz-oms-store --all-targets -- -D warnings
           cargo build --locked -p kanz-oms-store --example fixture
+          cargo test --locked -p kanz-proto-wire
+          cargo test --locked -p kanz-oms-venue --all-targets
+          cargo clippy --locked -p kanz-oms-venue --all-targets -- -D warnings
+          cargo build --locked -p kanz-oms-venue --example oms-venue-fixture
       - name: Verify source boundaries and Go transition owners
         working-directory: kanz
         run: |
           go test -p 1 ./test/arch -run 'Test(Rust|Julia|BondCanonicalClone|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
           go test -p 1 ./internal/dec ./services/oms/internal/order ./services/oms/internal/config ./services/oms/cmd/oms -count=1
+      - name: Start isolated pinned relay broker
+        run: |
+          docker run -d --name oms-relay-nats --memory=256m --cpus=1 --pids-limit=128 --read-only \
+            --tmpfs /data:rw,noexec,nosuid,size=128m -p 127.0.0.1:4222:4222 \
+            nats:2.12.6-alpine@sha256:1cfc36e2e5e638243d8c722f72c954cd0ec4b15ee82fadbc718ce12e2b3c1652 -js -sd /data
+          for attempt in $(seq 1 30); do
+            if (echo >/dev/tcp/127.0.0.1/4222) 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Bootstrap canonical disposable position streams
+        run: |
+          set -euo pipefail
+          awk '/^  bootstrap\.sh: \|/{f=1;next} f&&/^---/{exit} f{sub(/^    /,"");print}' \
+            kanz/infra/nats/bootstrap-job.yaml > "$RUNNER_TEMP/oms-bootstrap.sh"
+          test -s "$RUNNER_TEMP/oms-bootstrap.sh"
+          docker run --rm -i --network host --memory=256m --cpus=1 --pids-limit=128 \
+            -e NATS_URL=nats://127.0.0.1:4222 -e NATS_REPLICAS=1 \
+            natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c \
+            sh -s < "$RUNNER_TEMP/oms-bootstrap.sh"
       - name: Compare actual stamped worker through the OMS supervisor
         working-directory: kanz
         env:
@@ -100,13 +124,19 @@ jobs:
           KANZ_OMS_FOLD_VERSION: ${{ github.sha }}
           KANZ_OMS_STORE_BIN: ${{ github.workspace }}/kanz-rs/target/debug/examples/fixture
           KANZ_OMS_STORE_VERSION: ${{ github.sha }}
+          KANZ_OMS_VENUE_BIN: ${{ github.workspace }}/kanz-rs/target/debug/examples/oms-venue-fixture
+          KANZ_OMS_VENUE_VERSION: ${{ github.sha }}
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+          TEST_NATS_URL: nats://127.0.0.1:4222
         run: |
           set -o pipefail
-          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/tools/store-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
+          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/internal/position ./services/oms/tools/store-conformance ./services/oms/tools/venue-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_oms_fold_evidence.py
           python3 ../.github/scripts/check_oms_fold_evidence.py "$RUNNER_TEMP/oms-fold.jsonl"
+      - name: Remove isolated relay broker
+        if: always()
+        run: docker rm -f oms-relay-nats
       - name: Preserve transition execution evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

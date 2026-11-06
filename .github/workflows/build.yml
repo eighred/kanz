@@ -522,7 +522,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+          # PR caches cannot be reused by main and can evict its shared layers.
+          # Only main publication warms the durable per-service cache.
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=gha,scope={0},mode=max', matrix.service) || '' }}
 
       # The retry, and the count that keeps the flake visible after it stops being
       # fatal. See .github/scripts/push-with-retry.sh for why it keys on the

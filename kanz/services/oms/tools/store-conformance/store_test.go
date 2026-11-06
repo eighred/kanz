@@ -54,17 +54,26 @@ func run(t *testing.T, input map[string]any) string {
 }
 
 type fixtureResult struct {
-	Pending   []queueRow `json:"pending"`
-	AgeNS     *uint64    `json:"age_ns"`
-	Delta     *string    `json:"delta"`
-	Fresh     *bool      `json:"fresh"`
-	States    [][]byte   `json:"states"`
-	Unindexed *int64     `json:"unindexed"`
-	Status    string     `json:"status"`
-	Version   string     `json:"version"`
-	State     []byte     `json:"state"`
-	DBVersion *int64     `json:"db_version"`
-	Claims    []string   `json:"claims"`
+	Venue          []byte         `json:"venue"`
+	Aggregate      []byte         `json:"aggregate"`
+	SessionsClosed bool           `json:"sessions_closed"`
+	Sent           int            `json:"sent"`
+	Stalled        string         `json:"stalled"`
+	Error          string         `json:"error"`
+	Proposal       *proposalWire  `json:"proposal"`
+	Proposals      []proposalWire `json:"proposals"`
+	Won            *bool          `json:"won"`
+	Pending        []queueRow     `json:"pending"`
+	AgeNS          *uint64        `json:"age_ns"`
+	Delta          *string        `json:"delta"`
+	Fresh          *bool          `json:"fresh"`
+	States         [][]byte       `json:"states"`
+	Unindexed      *int64         `json:"unindexed"`
+	Status         string         `json:"status"`
+	Version        string         `json:"version"`
+	State          []byte         `json:"state"`
+	DBVersion      *int64         `json:"db_version"`
+	Claims         []string       `json:"claims"`
 }
 
 func runResult(t *testing.T, input map[string]any) fixtureResult {
@@ -74,7 +83,7 @@ func runResult(t *testing.T, input map[string]any) fixtureResult {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin)
 	cmd.WaitDelay = time.Second
-	cmd.Env = []string{"TEST_POSTGRES_URL=" + os.Getenv("TEST_POSTGRES_URL")}
+	cmd.Env = []string{"TEST_POSTGRES_URL=" + os.Getenv("TEST_POSTGRES_URL"), "TEST_NATS_URL=" + os.Getenv("TEST_NATS_URL")}
 	cmd.Dir = t.TempDir()
 	cmd.Stdin = bytes.NewReader(encodedJSON(t, input))
 	var stdout, stderr boundedOutput

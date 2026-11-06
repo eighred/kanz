@@ -8,9 +8,15 @@ pub mod fee_wire;
 mod go_unicode;
 pub mod identity;
 pub mod outbox;
+pub mod position;
+mod position_math;
+pub mod position_projector;
+pub mod proposals;
 pub mod queries;
 pub mod recovery;
 pub mod recovery_ack;
+pub mod relay;
+mod relay_wire;
 use identity::{execution_key, same_execution};
 use kanz_oms_fold_shadow::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;
@@ -29,10 +35,20 @@ pub enum Error {
     FillApplied,
     IdentityConflict,
     FeeRevision,
+    PositionHistoryUnknown,
+    PublicationUnconfirmed,
     UnownedOutbox,
     RecordNotOwned,
     Database,
     CommitUnconfirmed,
+}
+impl From<kanz_proto_wire::Error> for Error {
+    fn from(error: kanz_proto_wire::Error) -> Self {
+        match error {
+            kanz_proto_wire::Error::InvalidInput => Self::InvalidInput,
+            kanz_proto_wire::Error::Capacity => Self::Capacity,
+        }
+    }
 }
 impl From<tokio_postgres::Error> for Error {
     fn from(_: tokio_postgres::Error) -> Self {

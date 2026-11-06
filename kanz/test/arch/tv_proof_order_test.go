@@ -71,7 +71,7 @@ func TestTVQualificationRunsAfterSetupBeforeFullRace(t *testing.T) {
 		t.Fatal(err)
 	}
 	var names []string
-	for _, step := range workflow.Jobs["go"].Steps {
+	for _, step := range workflow.Jobs["go-race"].Steps {
 		names = append(names, step.Name)
 	}
 	if err := checkTVProofOrder(names); err != nil {

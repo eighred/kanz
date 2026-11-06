@@ -1,0 +1,286 @@
+//! Generated values plus their canonical Go-compatible wire, including unknowns.
+use bytes::{Buf, BufMut};
+use prost::Message;
+use prost_reflect::{DescriptorPool, MessageDescriptor};
+use std::{marker::PhantomData, sync::OnceLock};
+use tonic::{
+    codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder},
+    Status,
+};
+
+pub trait Schema: Message + Default + Send + 'static {
+    const NAME: &'static str;
+}
+pub(crate) fn descriptor<T: Schema>() -> Result<MessageDescriptor, Status> {
+    static POOL: OnceLock<Result<DescriptorPool, prost_reflect::DescriptorError>> = OnceLock::new();
+    POOL.get_or_init(|| DescriptorPool::decode(crate::proto::FILE_DESCRIPTOR_SET))
+        .as_ref()
+        .map_err(|_| Status::internal("canonical descriptor unavailable"))?
+        .get_message_by_name(T::NAME)
+        .ok_or_else(|| Status::internal("canonical message unavailable"))
+}
+/// Immutable pair: callers cannot mutate the decoded value while retaining stale wire.
+#[derive(Debug, Clone)]
+pub struct Canonical<T> {
+    value: T,
+    wire: Vec<u8>,
+}
+impl<T: Schema> Canonical<T> {
+    pub fn decode(raw: &[u8]) -> Result<Self, Status> {
+        let wire = kanz_proto_wire::normalize(descriptor::<T>()?, raw).map_err(|e| match e {
+            kanz_proto_wire::Error::Capacity => {
+                Status::resource_exhausted("canonical message bound")
+            }
+            kanz_proto_wire::Error::InvalidInput => {
+                Status::invalid_argument("invalid canonical message")
+            }
+        })?;
+        let value = T::decode(wire.as_slice())
+            .map_err(|_| Status::invalid_argument("invalid canonical message"))?;
+        Ok(Self { value, wire })
+    }
+    pub fn from_value(value: T) -> Result<Self, Status> {
+        if value.encoded_len() > kanz_proto_wire::MAX_BYTES {
+            return Err(Status::resource_exhausted("canonical message bound"));
+        }
+        Self::decode(&value.encode_to_vec())
+    }
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+    pub fn wire(&self) -> &[u8] {
+        &self.wire
+    }
+}
+macro_rules! schema {
+    ($ty:path,$name:literal) => {
+        impl Schema for $ty {
+            const NAME: &'static str = $name;
+        }
+    };
+}
+schema!(
+    kanz_oms_fold_shadow::proto::order::v1::OrderState,
+    "order.v1.OrderState"
+);
+schema!(
+    kanz_oms_fold_shadow::proto::order::v1::Fill,
+    "order.v1.Fill"
+);
+schema!(
+    crate::proto::venue::v1::ExecuteRequest,
+    "venue.v1.ExecuteRequest"
+);
+schema!(
+    crate::proto::venue::v1::ExecuteResponse,
+    "venue.v1.ExecuteResponse"
+);
+schema!(
+    crate::proto::venue::v1::CancelOrderRequest,
+    "venue.v1.CancelOrderRequest"
+);
+schema!(
+    crate::proto::venue::v1::CancelOrderResponse,
+    "venue.v1.CancelOrderResponse"
+);
+schema!(
+    crate::proto::venue::v1::DescribeRequest,
+    "venue.v1.DescribeRequest"
+);
+schema!(
+    crate::proto::venue::v1::DescribeResponse,
+    "venue.v1.DescribeResponse"
+);
+schema!(
+    crate::proto::venue::v1::ListInstrumentsRequest,
+    "venue.v1.ListInstrumentsRequest"
+);
+schema!(
+    crate::proto::venue::v1::ListInstrumentsResponse,
+    "venue.v1.ListInstrumentsResponse"
+);
+schema!(
+    crate::proto::venue::v1::QueryOrderRequest,
+    "venue.v1.QueryOrderRequest"
+);
+schema!(
+    crate::proto::venue::v1::QueryOrderResponse,
+    "venue.v1.QueryOrderResponse"
+);
+pub(crate) struct WireCodec<A, B>(PhantomData<(A, B)>);
+impl<A, B> Default for WireCodec<A, B> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+pub(crate) struct WireEncoder<A>(PhantomData<A>);
+pub(crate) struct WireDecoder<B>(PhantomData<B>);
+impl<A: Schema, B: Schema> Codec for WireCodec<A, B> {
+    type Encode = Canonical<A>;
+    type Decode = Canonical<B>;
+    type Encoder = WireEncoder<A>;
+    type Decoder = WireDecoder<B>;
+    fn encoder(&mut self) -> Self::Encoder {
+        WireEncoder(PhantomData)
+    }
+    fn decoder(&mut self) -> Self::Decoder {
+        WireDecoder(PhantomData)
+    }
+}
+impl<A: Schema> Encoder for WireEncoder<A> {
+    type Item = Canonical<A>;
+    type Error = Status;
+    fn encode(&mut self, item: Self::Item, dst: &mut EncodeBuf<'_>) -> Result<(), Status> {
+        dst.put_slice(item.wire());
+        Ok(())
+    }
+}
+impl<B: Schema> Decoder for WireDecoder<B> {
+    type Item = Canonical<B>;
+    type Error = Status;
+    fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, Status> {
+        if src.remaining() > kanz_proto_wire::MAX_BYTES {
+            return Err(Status::resource_exhausted("canonical message bound"));
+        }
+        let raw = src.copy_to_bytes(src.remaining());
+        Canonical::decode(&raw).map(Some)
+    }
+}
+
+/// Replace one generated embedded-message field with its preserved canonical wire.
+/// The descriptor binds the field name/type; no parallel financial wire model.
+pub(crate) fn with_state<T: Schema>(
+    value: T,
+    state: &Canonical<kanz_oms_fold_shadow::proto::order::v1::OrderState>,
+) -> Result<Canonical<T>, Status> {
+    let desc = descriptor::<T>()?;
+    let field = desc
+        .get_field_by_name("state")
+        .ok_or_else(|| Status::internal("state descriptor unavailable"))?;
+    if !matches!(field.kind(),prost_reflect::Kind::Message(ref d) if d.full_name()=="order.v1.OrderState")
+    {
+        return Err(Status::internal("state descriptor mismatch"));
+    }
+    let raw = value.encode_to_vec();
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos < raw.len() {
+        let start = pos;
+        let (n, w) = kanz_proto_wire::key(&raw, &mut pos)
+            .map_err(|_| Status::internal("generated wire invalid"))?;
+        kanz_proto_wire::skip(&raw, &mut pos, n, w)
+            .map_err(|_| Status::internal("generated wire invalid"))?;
+        if n != field.number() {
+            out.extend_from_slice(&raw[start..pos]);
+        }
+    }
+    kanz_proto_wire::put_message(field.number(), state.wire(), &mut out);
+    Canonical::decode(&out)
+}
+/// Extract canonical nested messages after duplicate singular merge normalization.
+pub(crate) fn messages<A: Schema, B: Schema>(
+    value: &Canonical<A>,
+    name: &str,
+) -> Result<Vec<Canonical<B>>, Status> {
+    let field = descriptor::<A>()?
+        .get_field_by_name(name)
+        .ok_or_else(|| Status::internal("field descriptor unavailable"))?;
+    if !matches!(field.kind(),prost_reflect::Kind::Message(ref d) if d.full_name()==B::NAME) {
+        return Err(Status::internal("field descriptor mismatch"));
+    }
+    let raw = value.wire();
+    let mut pos = 0;
+    let mut out = Vec::new();
+    while pos < raw.len() {
+        let (n, w) = kanz_proto_wire::key(raw, &mut pos)
+            .map_err(|_| Status::internal("normalized wire invalid"))?;
+        if n == field.number() && w == 2 {
+            let nested = kanz_proto_wire::payload(raw, &mut pos)
+                .map_err(|_| Status::internal("normalized wire invalid"))?;
+            out.push(Canonical::decode(nested)?);
+        } else {
+            kanz_proto_wire::skip(raw, &mut pos, n, w)
+                .map_err(|_| Status::internal("normalized wire invalid"))?;
+        }
+    }
+    Ok(out)
+}
+
+impl Canonical<crate::proto::venue::v1::ExecuteResponse> {
+    pub fn fills(
+        &self,
+    ) -> Result<Vec<Canonical<kanz_oms_fold_shadow::proto::order::v1::Fill>>, Status> {
+        messages(self, "fills")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::venue::v1::{ExecuteRequest, ExecuteResponse};
+    use kanz_oms_fold_shadow::proto::order::v1::OrderState;
+    #[test]
+    fn nested_request_and_fill_keep_unknown_value_bytes() {
+        let mut raw = OrderState {
+            order_id: "order".into(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        raw.extend([0xa0, 6, 0x81, 0]);
+        let state = Canonical::<OrderState>::decode(&raw).unwrap();
+        let request = with_state(
+            ExecuteRequest {
+                tenant_id: "tenant-a".into(),
+                state: None,
+            },
+            &state,
+        )
+        .unwrap();
+        let states: Vec<Canonical<OrderState>> = messages(&request, "state").unwrap();
+        assert_eq!(states[0].wire(), raw);
+        let mut response = Vec::new();
+        kanz_proto_wire::put_message(1, &[0xa0, 6, 0x81, 0], &mut response);
+        assert_eq!(
+            Canonical::<ExecuteResponse>::decode(&response)
+                .unwrap()
+                .fills()
+                .unwrap()[0]
+                .wire(),
+            [0xa0, 6, 0x81, 0]
+        );
+    }
+    #[test]
+    fn canonical_capacity_precedes_allocation_and_malformed_refuses() {
+        let state = OrderState {
+            order_id: "x".repeat(kanz_proto_wire::MAX_BYTES),
+            ..Default::default()
+        };
+        assert_eq!(
+            Canonical::from_value(state).unwrap_err().code(),
+            tonic::Code::ResourceExhausted
+        );
+        assert!(Canonical::<OrderState>::decode(&[0]).is_err());
+    }
+    #[test]
+    fn generated_rpc_contract_is_exact() {
+        let pool = DescriptorPool::decode(crate::proto::FILE_DESCRIPTOR_SET).unwrap();
+        let service = pool
+            .services()
+            .find(|s| s.full_name() == "venue.v1.VenueAdapterService")
+            .unwrap();
+        let names = service
+            .methods()
+            .map(|m| m.name().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "Execute",
+                "CancelOrder",
+                "Describe",
+                "ListInstruments",
+                "QueryOrder"
+            ]
+        );
+    }
+}

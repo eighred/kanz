@@ -58,6 +58,9 @@ func checkTVReplayCI(data []byte) error {
 }
 
 func checkTVProofCI(data []byte, pattern, envName, envValue string, want []string) error {
+	if err := checkGoShardMatrix(data); err != nil {
+		return err
+	}
 	var workflow struct {
 		Jobs map[string]struct {
 			Steps []struct {
@@ -70,12 +73,12 @@ func checkTVProofCI(data []byte, pattern, envName, envValue string, want []strin
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		return err
 	}
-	for _, step := range workflow.Jobs["go"].Steps {
+	for _, step := range workflow.Jobs["go-race"].Steps {
 		if !strings.Contains(step.Run, pattern) {
 			continue
 		}
-		if step.If != "" || step.Continue || step.Env[envName] != envValue {
-			return fmt.Errorf("replay proof must be unconditional with real non-superuser PostgreSQL")
+		if step.If != "matrix.shard == 0 || matrix.kind == 'quality'" || step.Continue || step.Env[envName] != envValue {
+			return fmt.Errorf("replay proof must run on mandatory race zero and quality with real non-superuser PostgreSQL")
 		}
 		lines := strings.Split(step.Run, "\n")
 		found := 0

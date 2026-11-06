@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 import tempfile
 import uuid
 import yaml
@@ -15,6 +16,9 @@ import proof as shared
 ROOT = shared.ROOT
 REDPANDA = 'docker.redpanda.com/redpandadata/redpanda:v26.2.6@sha256:8b1076e0d61bfceb66594dc01536427ce0b529f8ead35fdab9763ab6085891ce'
 SAS = ('proof-bootstrap', 'proof-a', 'proof-b', 'proof-ungranted')
+CASES = (('bootstrap','proof-bootstrap','bootstrap'), ('client-a','proof-a','publish'),
+         ('client-b','proof-b','publish'), ('ungranted','proof-ungranted','ungranted'),
+         ('verify','proof-bootstrap','verify'))
 
 
 def identity(sa):
@@ -49,7 +53,11 @@ def broker_diagnostics(logs):
     subjects = set()
     invalid = set()
     missing_bootstrap = False
+    storage_alert = False
+    no_space = False
     for line in logs.splitlines():
+        storage_alert |= 'storage space alert:' in line
+        no_space |= 'No space left on device' in line
         if "Can't load config bootstrap file:" in line:
             missing_bootstrap = True
         for key in ('kafka_enable_authorization', 'superusers', 'kafka_mtls_principal_mapping_rules'):
@@ -85,7 +93,83 @@ def broker_diagnostics(logs):
                 if value in (digest, '#1320' + digest.encode().hex(), '#0c20' + digest.encode().hex()):
                     subjects.add(dn)
     return {'unmappedSubjects': sorted(subjects), 'invalidProperties': sorted(invalid),
-            'missingBootstrapFile': missing_bootstrap}
+            'missingBootstrapFile': missing_bootstrap,
+            'storageSpaceAlert': storage_alert, 'noSpaceLeftOnDevice': no_space}
+
+
+def storage_capacity(output):
+    # df is diagnostic only. Retain bounded numeric capacity, never its device,
+    # mount names or arbitrary process output. Failure cannot alter the verdict.
+    if len(output) > 4096:
+        raise ValueError('oversized storage capacity')
+    lines = output.splitlines()
+    if len(lines) != 2:
+        raise ValueError('unexpected storage capacity')
+    fields = lines[1].split()
+    if len(fields) != 6 or not all(re.fullmatch(r'[0-9]{1,16}', n) for n in fields[1:4]):
+        raise ValueError('invalid storage capacity')
+    total, used, available = [int(n) * 1024 for n in fields[1:4]]
+    if not 0 < total < 2**63 or not 0 <= used <= total or not 0 <= available <= total:
+        raise ValueError('out-of-range storage capacity')
+    return {'totalBytes': total, 'usedBytes': used, 'availableBytes': available}
+
+
+# Keep the broker's configured producer reserve intact, plus fixture growth room.
+HEADROOM = 2 << 30
+
+
+def storage_reserve(raw):
+    if not isinstance(raw, str) or len(raw) > 64 or not re.fullmatch(r'[0-9]{1,20}', raw.strip()):
+        raise ValueError('unbounded or nonnumeric broker reserve')
+    value = int(raw.strip())
+    if not 0 < value <= (1 << 63) - 1:
+        raise ValueError('invalid broker reserve')
+    return value
+
+
+def require_capacity(capacity, reserve):
+    if capacity['availableBytes'] <= reserve + HEADROOM:
+        raise ValueError('broker volume lacks configured producer reserve plus fixture headroom')
+
+
+def broker_storage(k):
+    # Read only one property over the existing pod-local admin endpoint. Never
+    # export cluster configuration or change the broker safety threshold.
+    reserve = storage_reserve(k('-n','kanz-messaging','exec','deployment/redpanda','-c','redpanda',
+        '--','rpk','cluster','config','get','storage_min_free_bytes','--ignore-profile',
+        '-X','admin.hosts=127.0.0.1:9644'))
+    capacity = storage_capacity(k('-n','kanz-messaging','exec','deployment/redpanda','-c','redpanda',
+        '--','df','-Pk','/var/lib/redpanda/data'))
+    return dict(capacity, producerReserveBytes=reserve, requiredHeadroomBytes=HEADROOM)
+
+
+def prepare_host(required):
+    # Only the reviewed fixed hosted SDK helper may provision space. Preserve
+    # its closed numeric diagnostics even when provisioning fails.
+    result = subprocess.run([sys.executable, '-B', str(ROOT / 'tools/redpanda-identity/prepare_runner.py'), str(required)],
+                            capture_output=True, text=True, timeout=240, cwd=ROOT)
+    if len(result.stdout) > 4096:
+        raise ValueError('host capacity diagnostic exceeded bound')
+    report = json.loads(result.stdout)
+    if (not isinstance(report, dict) or set(report) != {'beforeBytes', 'afterBytes', 'requiredBytes', 'unrelatedAndroidSDKRemoved'}
+            or any(type(report[k]) is not int or not 0 <= report[k] < (1 << 63) for k in ('beforeBytes', 'afterBytes', 'requiredBytes'))
+            or report['requiredBytes'] != required or type(report['unrelatedAndroidSDKRemoved']) is not bool):
+        raise ValueError('invalid host capacity diagnostic')
+    return report, result.returncode == 0
+
+
+def preflight_storage(k, evidence, case):
+    storage = broker_storage(k)
+    if storage['availableBytes'] <= storage['producerReserveBytes'] + HEADROOM:
+        evidence['preProvisionStorage'] = dict(storage, case=case)
+        prepared, ok = prepare_host(storage['producerReserveBytes'] + HEADROOM)
+        evidence['hostCapacityPreparation'] = prepared
+        if not ok:
+            raise RuntimeError('host capacity preparation failed')
+        # Host free bytes never substitute for actual broker-volume readback.
+        storage = broker_storage(k)
+    require_capacity(storage, storage['producerReserveBytes'])
+    return storage
 
 
 def spire_objects():
@@ -163,9 +247,42 @@ def policies():
     return [deny,allow]
 
 
+def validate_observation(result, sa, mode, sha):
+    dn = result.get('subjectDN', '')
+    if not isinstance(dn, str) or not re.fullmatch(subject_pattern(sa), dn):
+        raise ValueError('unexpected observed workload subject')
+    if result != {'passed':True, 'mode':mode, 'identity':identity(sa), 'subjectDN':dn,
+                  'renewed':mode=='publish', 'boundedReplay':mode=='publish', 'sourceVersion':sha}:
+        raise ValueError('missing exact positive identity evidence')
+
+
+def validate_report(evidence, sha):
+    if (not re.fullmatch(r'[0-9a-f]{40}', sha) or evidence.get('sourceSHA') != sha
+            or evidence.get('passed') is not True or evidence.get('cleanupPassed') is not True
+            or evidence.get('developmentOnly') is not True or evidence.get('brokerImage') != REDPANDA):
+        raise ValueError('missing source-bound complete qualification')
+    observations = evidence.get('observations')
+    storage = evidence.get('storageObservations')
+    if not isinstance(observations, list) or len(observations) != len(CASES) or not isinstance(storage, list) or len(storage) != len(CASES):
+        raise ValueError('missing exact probe or capacity inventory')
+    for (case, sa, mode), result, capacity in zip(CASES, observations, storage):
+        if not isinstance(result, dict) or result.get('case') != case:
+            raise ValueError('probe case mismatch')
+        validate_observation({k:v for k,v in result.items() if k != 'case'}, sa, mode, sha)
+        if not isinstance(capacity, dict) or set(capacity) != {'case', 'totalBytes', 'usedBytes', 'availableBytes', 'producerReserveBytes', 'requiredHeadroomBytes'} or capacity['case'] != case:
+            raise ValueError('capacity case mismatch')
+        values = [v for k,v in capacity.items() if k != 'case']
+        if any(type(v) is not int or not 0 <= v < (1 << 63) for v in values):
+            raise ValueError('invalid numeric capacity evidence')
+        if (capacity['totalBytes'] <= 0 or capacity['usedBytes'] + capacity['availableBytes'] > capacity['totalBytes']
+                or capacity['producerReserveBytes'] <= 0 or capacity['requiredHeadroomBytes'] != HEADROOM):
+            raise ValueError('inconsistent capacity evidence')
+        require_capacity(capacity, capacity['producerReserveBytes'])
+
+
 def main():
     name='redpanda-proof-'+uuid.uuid4().hex[:12]
-    evidence={'passed':False,'developmentOnly':True,'cluster':name,'brokerImage':REDPANDA,'observations':[]}
+    evidence={'passed':False,'developmentOnly':True,'cluster':name,'brokerImage':REDPANDA,'observations':[],'storageObservations':[]}
     artifact=Path(os.environ['RUNNER_TEMP'])/'redpanda-identity.json'
     with tempfile.TemporaryDirectory(prefix='kanz-redpanda-identity-') as directory:
         scratch=Path(directory); kubeconfig=str(scratch/'kubeconfig')
@@ -200,16 +317,15 @@ def main():
             apply(policies())
             k('-n','kanz-messaging','rollout','status','deployment/redpanda','--timeout=240s')
             for sa in SAS: apply([{'apiVersion':'v1','kind':'ServiceAccount','metadata':{'name':sa,'namespace':'kanz-services'}}])
-            for case,sa,mode in [('bootstrap','proof-bootstrap','bootstrap'),('client-a','proof-a','publish'),('client-b','proof-b','publish'),('ungranted','proof-ungranted','ungranted'),('verify','proof-bootstrap','verify')]:
+            for case,sa,mode in CASES:
+                evidence['stage']='storage preflight '+case
+                storage = preflight_storage(k, evidence, case)
+                evidence['storageObservations'].append(dict(storage, case=case))
                 evidence['stage']='probe '+case
                 apply([job(case,sa,mode,image)])
                 k('-n','kanz-services','wait','--for=condition=complete','job/'+case,'--timeout=190s')
                 result=json.loads(k('-n','kanz-services','logs','job/'+case))
-                dn=result.get('subjectDN','')
-                if not isinstance(dn,str) or not re.fullmatch(subject_pattern(sa),dn):
-                    raise ValueError('unexpected observed workload subject')
-                if result!={'passed':True,'mode':mode,'identity':identity(sa),'subjectDN':dn,'renewed':mode=='publish','boundedReplay':mode=='publish','sourceVersion':sha}:
-                    raise ValueError('missing exact positive identity evidence')
+                validate_observation(result, sa, mode, sha)
                 evidence['observations'].append(dict(result,case=case))
             pods=json.loads(k('get','pods','-A','-o','json'))['items']
             evidence['runningImages']=[{'namespace':p['metadata']['namespace'],'pod':p['metadata']['name'],'images':[{'name':c['name'],'imageID':c.get('imageID','')} for c in p.get('status',{}).get('containerStatuses',[])]} for p in pods]
@@ -231,6 +347,16 @@ def main():
                 evidence['brokerDiagnostics']=broker_diagnostics(logs)
             except Exception:
                 pass  # Optional public diagnosis cannot turn a failure into success.
+            try:
+                evidence['brokerStorage'] = broker_storage(k)
+            except Exception:
+                pass  # Optional diagnostic cannot change the failed verdict.
+            try:
+                capacity=k('-n','kanz-messaging','exec','deployment/redpanda','-c','redpanda',
+                           '--','df','-Pk','/var/lib/redpanda/data')
+                evidence['brokerStorageCapacity']=storage_capacity(capacity)
+            except Exception:
+                pass  # Missing diagnostic tooling cannot change the failed verdict.
             raise
         finally:
             try:
@@ -239,8 +365,14 @@ def main():
             except Exception as error:
                 evidence['cleanupPassed']=False; evidence['cleanupErrorType']=type(error).__name__
             evidence['passed'] &= evidence['cleanupPassed']
+            if evidence['passed']:
+                try:
+                    validate_report(evidence, sha)
+                except ValueError:
+                    evidence['passed'] = False
+                    evidence['reportValidationFailed'] = True
             artifact.write_text(json.dumps(evidence,indent=2)+'\n')
-    if not evidence['passed']: raise RuntimeError('qualification failed')
+    validate_report(evidence, sha)
 
 
 if __name__=='__main__': main()
