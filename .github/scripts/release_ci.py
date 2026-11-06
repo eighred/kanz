@@ -23,6 +23,7 @@ POLICY = {
     "redpanda-identity-proof.yml": {"developmental-redpanda-identity"},
     "valkey-migration.yml": {"retained-state"},
     "tokyo-messaging-proof.yml": {"messaging-isolation"},
+    "gateway-policy-proof.yml": {"gateway-isolation"},
 }
 
 

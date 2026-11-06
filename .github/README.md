@@ -35,7 +35,10 @@ their files exist in the release source: `architecture-migration.yml` /
 `compatibility`, `julia-calibration.yml` / `shadow-calibration`,
 `rust-bond-shadow.yml` / `bond-shadow`, `rust-oms-fold.yml` / `fill-shadow`,
 `feed-identity-proof.yml` / `developmental-identity`, and
-`redpanda-identity-proof.yml` / `developmental-redpanda-identity`. Repository, workflow
+`redpanda-identity-proof.yml` / `developmental-redpanda-identity`. The rendered
+Tokyo policy proof also requires `gateway-policy-proof.yml` / `gateway-isolation`
+when present. It verifies synthetic reachability in a disposable Cilium cluster;
+target rollout and application authorization remain separate acceptance. Repository, workflow
 ID/path, event, branch, SHA, attempt and required job identities must agree.
 Missing, skipped, pending, failed or cancelled proof refuses release; a previous
 successful attempt, another workflow's check name or an ancestor's green run
