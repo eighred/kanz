@@ -980,6 +980,7 @@ name = "kanz-oms-fold-shadow"
 version = "0.1.0"
 dependencies = [
  "kanz-decimal-compat",
+ "kanz-order-core",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -996,7 +997,7 @@ dependencies = [
  "async-nats",
  "base64 0.22.1",
  "kanz-decimal-compat",
- "kanz-oms-fold-shadow",
+ "kanz-order-core",
  "kanz-proto-wire",
  "num-bigint",
  "num-rational",
@@ -1022,7 +1023,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "kanz-decimal-compat",
- "kanz-oms-fold-shadow",
+ "kanz-order-core",
  "kanz-proto-wire",
  "prost",
  "prost-build",
@@ -1037,6 +1038,25 @@ dependencies = [
  "tokio-rustls",
  "tonic",
  "tower",
+]
+
+[[package]]
+name = "kanz-order-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "kanz-decimal-compat",
+ "kanz-proto-wire",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "prost",
+ "prost-build",
+ "prost-reflect",
+ "prost-types",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

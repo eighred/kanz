@@ -1,6 +1,6 @@
 //! Exact weighted-average-cost model shared by this position owner and its projections.
 use crate::Error;
-use kanz_oms_fold_shadow::{
+use kanz_order_core::{
     decimal,
     proto::{common::v1::Money, domain::v1::PositionState, order::v1::Fill},
     rational,
@@ -149,7 +149,7 @@ pub(crate) fn state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kanz_oms_fold_shadow::proto::common::v1::Decimal;
+    use kanz_order_core::proto::common::v1::Decimal;
     fn fill(q: i64, p: i64, side: i32) -> Fill {
         Fill {
             quantity: Some(Decimal {

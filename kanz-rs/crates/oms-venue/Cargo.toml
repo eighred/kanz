@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 kanz-decimal-compat = { path = "../.." }
-kanz-oms-fold-shadow = { path = "../../services/oms-fold-shadow" }
+kanz-order-core = { path = "../order-core" }
 kanz-proto-wire = { path = "../proto-wire" }
 prost = "=0.14.1"
 prost-reflect = "=0.16.2"

@@ -7,7 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     config.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
     config.extern_path(".common.v1", "::kanz_decimal_compat::common::v1");
-    config.extern_path(".order.v1", "::kanz_oms_fold_shadow::proto::order::v1");
+    config.extern_path(".order.v1", "::kanz_order_core::proto::order::v1");
     config.compile_protos(&[format!("{root}/venue/v1/venue.proto")], &[root])?;
     Ok(())
 }

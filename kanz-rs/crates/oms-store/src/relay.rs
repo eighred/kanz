@@ -1,7 +1,7 @@
 //! Existing OMS relay algorithm, with no connector, credentials or production caller.
 //! The caller owns transport and must await Run before closing its dependencies.
 use crate::{outbox, Error, Record, MAX_BYTES};
-use kanz_oms_fold_shadow::proto::{
+use kanz_order_core::proto::{
     envelope::v1::{Envelope, EventClass, EventFrame},
     FILE_DESCRIPTOR_SET,
 };

@@ -20,7 +20,7 @@ publish = false
 
 [dependencies]
 kanz-decimal-compat = { path = "../.." }
-kanz-oms-fold-shadow = { path = "../../services/oms-fold-shadow" }
+kanz-order-core = { path = "../order-core" }
 kanz-proto-wire = { path = "../proto-wire" }
 prost = "=0.14.1"
 prost-reflect = "=0.16.2"
@@ -67,7 +67,7 @@ const rustVenueBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     config.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
     config.extern_path(".common.v1", "::kanz_decimal_compat::common::v1");
-    config.extern_path(".order.v1", "::kanz_oms_fold_shadow::proto::order::v1");
+    config.extern_path(".order.v1", "::kanz_order_core::proto::order::v1");
     config.compile_protos(&[format!("{root}/venue/v1/venue.proto")], &[root])?;
     Ok(())
 }
@@ -91,7 +91,7 @@ func checkRustVenueBoundary(root string) error {
 			return fmt.Errorf("unreviewed venue recipe %s", path)
 		}
 	}
-	allowed := map[string]bool{"crates/oms-venue/build.rs": true, "crates/oms-venue/src/lib.rs": true, "crates/oms-venue/src/client.rs": true, "crates/oms-venue/src/transport.rs": true, "crates/oms-venue/src/wire.rs": true, "crates/oms-venue/examples/oms-venue-fixture.rs": true, "crates/proto-wire/src/lib.rs": true}
+	allowed := map[string]bool{"crates/oms-venue/build.rs": true, "crates/oms-venue/src/lib.rs": true, "crates/oms-venue/src/client.rs": true, "crates/oms-venue/src/transport.rs": true, "crates/oms-venue/src/wire.rs": true, "crates/oms-venue/examples/oms-venue-fixture.rs": true, "crates/proto-wire/src/canonical.rs": true, "crates/proto-wire/src/lib.rs": true}
 	files := map[string]string{}
 	for _, dir := range []string{"crates/oms-venue", "crates/proto-wire"} {
 		if e := filepath.WalkDir(filepath.Join(root, filepath.FromSlash(dir)), func(path string, d fs.DirEntry, e error) error {
@@ -147,7 +147,8 @@ func checkRustVenueMarkers(files map[string]string) error {
 		"crates/oms-venue/examples/oms-venue-fixture.rs": {`env!("KANZ_BUILD_VERSION")`, `Some("127.0.0.1"|"localhost"|"[::1]")`, `client.close().await`, `input.read(&mutbyte)`},
 		"crates/oms-venue/src/transport.rs":              {`connection_host(&uri)?`, `parse::<std::net::Ipv6Addr>()`, `uri.scheme_str()!=Some("https")`, `starts_with("unix://")`, `spiffe_rustls::mtls_client(source)`, `spiffe_rustls::LocalOnly(domain)`, `spiffe_rustls::authorizer::exact([config.expected_peer.as_str()])`, `.authorize(authorizer)`, `tls.alpn_protocols=vec![b"h2".to_vec()]`, `alpn_protocol()!=Some(b"h2".as_slice())`, `TcpStream::connect`, `tls.connect(server_name,socket).await?`, `a.as_str().contains('@')`, `connect_with_connector(connector)`, `owner.close().await`, `self.owner.close().await`, `fortaskinself.tasks.abort(){let_=task.await;}`, `source.shutdown_with_timeout(Duration::from_secs(2)).await`, `tasks.handles.len()>=64`},
 		"crates/oms-venue/src/client.rs":                 {`error.is::<tonic::TimeoutExpired>()`, `.map_err(rpc_error)`, `max_decoding_message_size(kanz_proto_wire::MAX_BYTES)`, `max_encoding_message_size(kanz_proto_wire::MAX_BYTES)`, `request.set_timeout(deadline)`, `tokio::time::timeout(deadline,async`, `error.code()==Code::Unimplemented`, `ViewState::Indeterminate`, `id.mic!=mic||id.account!=account`, `requirements.verified_account&&!id.account_verified`, `requirements.declared_order_types&&id.supported_order_types.is_empty()`},
-		"crates/oms-venue/src/wire.rs":                   {`kanz_proto_wire::normalize(descriptor::<T>()?,raw)`, `value.encoded_len()>kanz_proto_wire::MAX_BYTES`, `src.remaining()>kanz_proto_wire::MAX_BYTES`, `dst.put_slice(item.wire())`, `kanz_proto_wire::put_message(field.number(),state.wire(),&mutout)`, `Canonical::decode(nested)`},
+		"crates/oms-venue/src/wire.rs":                   {`kanz_proto_wire::Canonical::decode(raw)`, `kanz_proto_wire::Canonical::from_value(value)`, `src.remaining()>kanz_proto_wire::MAX_BYTES`, `dst.put_slice(item.wire())`, `kanz_proto_wire::put_message(field.number(),state.wire(),&mutout)`, `Canonical::decode(nested)`},
+		"crates/proto-wire/src/canonical.rs":             {`normalize(T::descriptor()?,raw)`, `value.encoded_len()>MAX_BYTES`},
 		"crates/proto-wire/src/lib.rs":                   {`raw.len()>MAX_BYTES`, `out.len()>MAX_BYTES`, `ifdepth>32`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `entries[0].merge(sidecar,&child)?`, `field.is_list()||entries.is_empty()`, `field.is_map()||field.containing_oneof().is_some()`},
 	}
 	for name, markers := range required {
@@ -170,7 +171,7 @@ func TestRustVenueClientBoundary(t *testing.T) {
 		t.Fatal(e)
 	}
 	files := map[string]string{}
-	for _, name := range []string{"crates/oms-venue/src/transport.rs", "crates/oms-venue/src/client.rs", "crates/oms-venue/src/wire.rs", "crates/proto-wire/src/lib.rs", "crates/oms-venue/examples/oms-venue-fixture.rs"} {
+	for _, name := range []string{"crates/oms-venue/src/transport.rs", "crates/oms-venue/src/client.rs", "crates/oms-venue/src/wire.rs", "crates/proto-wire/src/lib.rs", "crates/proto-wire/src/canonical.rs", "crates/oms-venue/examples/oms-venue-fixture.rs"} {
 		raw, e := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
 		if e != nil {
 			t.Fatal(e)

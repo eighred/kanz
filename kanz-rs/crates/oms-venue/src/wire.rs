@@ -1,5 +1,6 @@
 //! Generated values plus their canonical Go-compatible wire, including unknowns.
 use bytes::{Buf, BufMut};
+#[cfg(test)]
 use prost::Message;
 use prost_reflect::{DescriptorPool, MessageDescriptor};
 use std::{marker::PhantomData, sync::OnceLock};
@@ -8,65 +9,62 @@ use tonic::{
     Status,
 };
 
-pub trait Schema: Message + Default + Send + 'static {
-    const NAME: &'static str;
-}
+pub use kanz_proto_wire::Schema;
 pub(crate) fn descriptor<T: Schema>() -> Result<MessageDescriptor, Status> {
+    T::descriptor().map_err(status)
+}
+fn status(error: kanz_proto_wire::Error) -> Status {
+    match error {
+        kanz_proto_wire::Error::Capacity => Status::resource_exhausted("canonical message bound"),
+        kanz_proto_wire::Error::InvalidInput => {
+            Status::invalid_argument("invalid canonical message")
+        }
+    }
+}
+/// Transport facade delegates immutable storage/normalization to the pure owner.
+#[derive(Debug, Clone)]
+pub struct Canonical<T>(kanz_proto_wire::Canonical<T>);
+impl<T: Schema> Canonical<T> {
+    pub fn decode(raw: &[u8]) -> Result<Self, Status> {
+        kanz_proto_wire::Canonical::decode(raw)
+            .map(Self)
+            .map_err(status)
+    }
+    pub fn from_value(value: T) -> Result<Self, Status> {
+        kanz_proto_wire::Canonical::from_value(value)
+            .map(Self)
+            .map_err(status)
+    }
+    pub fn value(&self) -> &T {
+        self.0.value()
+    }
+    pub fn wire(&self) -> &[u8] {
+        self.0.wire()
+    }
+}
+impl<T> From<kanz_proto_wire::Canonical<T>> for Canonical<T> {
+    fn from(value: kanz_proto_wire::Canonical<T>) -> Self {
+        Self(value)
+    }
+}
+fn venue_descriptor(name: &str) -> Result<MessageDescriptor, kanz_proto_wire::Error> {
     static POOL: OnceLock<Result<DescriptorPool, prost_reflect::DescriptorError>> = OnceLock::new();
     POOL.get_or_init(|| DescriptorPool::decode(crate::proto::FILE_DESCRIPTOR_SET))
         .as_ref()
-        .map_err(|_| Status::internal("canonical descriptor unavailable"))?
-        .get_message_by_name(T::NAME)
-        .ok_or_else(|| Status::internal("canonical message unavailable"))
-}
-/// Immutable pair: callers cannot mutate the decoded value while retaining stale wire.
-#[derive(Debug, Clone)]
-pub struct Canonical<T> {
-    value: T,
-    wire: Vec<u8>,
-}
-impl<T: Schema> Canonical<T> {
-    pub fn decode(raw: &[u8]) -> Result<Self, Status> {
-        let wire = kanz_proto_wire::normalize(descriptor::<T>()?, raw).map_err(|e| match e {
-            kanz_proto_wire::Error::Capacity => {
-                Status::resource_exhausted("canonical message bound")
-            }
-            kanz_proto_wire::Error::InvalidInput => {
-                Status::invalid_argument("invalid canonical message")
-            }
-        })?;
-        let value = T::decode(wire.as_slice())
-            .map_err(|_| Status::invalid_argument("invalid canonical message"))?;
-        Ok(Self { value, wire })
-    }
-    pub fn from_value(value: T) -> Result<Self, Status> {
-        if value.encoded_len() > kanz_proto_wire::MAX_BYTES {
-            return Err(Status::resource_exhausted("canonical message bound"));
-        }
-        Self::decode(&value.encode_to_vec())
-    }
-    pub fn value(&self) -> &T {
-        &self.value
-    }
-    pub fn wire(&self) -> &[u8] {
-        &self.wire
-    }
+        .map_err(|_| kanz_proto_wire::Error::InvalidInput)?
+        .get_message_by_name(name)
+        .ok_or(kanz_proto_wire::Error::InvalidInput)
 }
 macro_rules! schema {
     ($ty:path,$name:literal) => {
         impl Schema for $ty {
             const NAME: &'static str = $name;
+            fn descriptor() -> Result<MessageDescriptor, kanz_proto_wire::Error> {
+                venue_descriptor(Self::NAME)
+            }
         }
     };
 }
-schema!(
-    kanz_oms_fold_shadow::proto::order::v1::OrderState,
-    "order.v1.OrderState"
-);
-schema!(
-    kanz_oms_fold_shadow::proto::order::v1::Fill,
-    "order.v1.Fill"
-);
 schema!(
     crate::proto::venue::v1::ExecuteRequest,
     "venue.v1.ExecuteRequest"
@@ -151,7 +149,7 @@ impl<B: Schema> Decoder for WireDecoder<B> {
 /// The descriptor binds the field name/type; no parallel financial wire model.
 pub(crate) fn with_state<T: Schema>(
     value: T,
-    state: &Canonical<kanz_oms_fold_shadow::proto::order::v1::OrderState>,
+    state: &Canonical<kanz_order_core::proto::order::v1::OrderState>,
 ) -> Result<Canonical<T>, Status> {
     let desc = descriptor::<T>()?;
     let field = desc
@@ -207,9 +205,7 @@ pub(crate) fn messages<A: Schema, B: Schema>(
 }
 
 impl Canonical<crate::proto::venue::v1::ExecuteResponse> {
-    pub fn fills(
-        &self,
-    ) -> Result<Vec<Canonical<kanz_oms_fold_shadow::proto::order::v1::Fill>>, Status> {
+    pub fn fills(&self) -> Result<Vec<Canonical<kanz_order_core::proto::order::v1::Fill>>, Status> {
         messages(self, "fills")
     }
 }
@@ -218,7 +214,7 @@ impl Canonical<crate::proto::venue::v1::ExecuteResponse> {
 mod tests {
     use super::*;
     use crate::proto::venue::v1::{ExecuteRequest, ExecuteResponse};
-    use kanz_oms_fold_shadow::proto::order::v1::OrderState;
+    use kanz_order_core::proto::order::v1::OrderState;
     #[test]
     fn nested_request_and_fill_keep_unknown_value_bytes() {
         let mut raw = OrderState {

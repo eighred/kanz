@@ -1,7 +1,7 @@
 //! Interactive synthetic qualification only. No exchange credentials or production configuration.
 use base64::{engine::general_purpose::STANDARD, Engine};
-use kanz_oms_fold_shadow::proto::order::v1::OrderState;
 use kanz_oms_venue::{Canonical, Client, Config, Requirements, ViewState};
+use kanz_order_core::proto::order::v1::OrderState;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Duration;

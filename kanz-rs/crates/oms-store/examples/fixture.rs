@@ -1,11 +1,11 @@
 //! Disposable test adapter only. No service, production configuration or release image.
 mod relay_support;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use kanz_oms_fold_shadow::proto::order::v1::Fill;
 use kanz_oms_store::{
     applied_fills, create, fee_subject, fee_wire::FillWire, identity, load, outbox, queries, save,
     Record,
 };
+use kanz_order_core::proto::order::v1::Fill;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -487,7 +487,7 @@ async fn run(input: Input) -> Result<Value, ()> {
             return Ok(match result{Ok(v)=>v,Err(e)=>json!({"status":e.to_string()})});
         }
         if input.mode=="recovery-ack" {
-            use kanz_oms_fold_shadow::proto::order::v1::ExecutionRecoveryApplied;
+            use kanz_order_core::proto::order::v1::ExecutionRecoveryApplied;
             use kanz_oms_store::recovery_ack::{acknowledge_recovery,Book};
             let raw=bytes(&input.acknowledgement)?;
             if raw.len()>4096 || input.records.len()!=1 { return Err(()); }

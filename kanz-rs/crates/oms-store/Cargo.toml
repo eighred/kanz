@@ -6,7 +6,7 @@ rust-version = "1.90"
 publish = false
 
 [dependencies]
-kanz-oms-fold-shadow = { path = "../../services/oms-fold-shadow" }
+kanz-order-core = { path = "../order-core" }
 kanz-decimal-compat = { path = "../.." }
 kanz-proto-wire = { path = "../proto-wire" }
 prost = "=0.14.1"

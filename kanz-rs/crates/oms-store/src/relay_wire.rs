@@ -9,8 +9,7 @@ mod tests {
     use super::*;
     use prost_reflect::DescriptorPool;
     fn decode(name: &str, raw: &[u8]) -> Vec<u8> {
-        let pool =
-            DescriptorPool::decode(kanz_oms_fold_shadow::proto::FILE_DESCRIPTOR_SET).unwrap();
+        let pool = DescriptorPool::decode(kanz_order_core::proto::FILE_DESCRIPTOR_SET).unwrap();
         normalize(pool.get_message_by_name(name).unwrap(), raw).unwrap()
     }
     #[test]
@@ -42,8 +41,7 @@ mod tests {
     }
     #[test]
     fn malformed_payload_refuses() {
-        let pool =
-            DescriptorPool::decode(kanz_oms_fold_shadow::proto::FILE_DESCRIPTOR_SET).unwrap();
+        let pool = DescriptorPool::decode(kanz_order_core::proto::FILE_DESCRIPTOR_SET).unwrap();
         assert!(normalize(
             pool.get_message_by_name("common.v1.Money").unwrap(),
             &[10, 4, 8]

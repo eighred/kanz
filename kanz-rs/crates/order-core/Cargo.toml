@@ -1,0 +1,25 @@
+[package]
+name = "kanz-order-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+kanz-decimal-compat = { path = "../.." }
+kanz-proto-wire = { path = "../proto-wire" }
+prost-reflect = "=0.16.2"
+prost = "=0.14.1"
+prost-types = "=0.14.1"
+num-bigint = "=0.4.6"
+num-rational = "=0.4.2"
+num-traits = "=0.2.19"
+
+[build-dependencies]
+prost-build = "=0.14.1"
+protoc-bin-vendored = "=3.2.0"
+
+[dev-dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+base64 = "=0.22.1"
