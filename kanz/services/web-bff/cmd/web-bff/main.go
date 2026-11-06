@@ -30,6 +30,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "envoy-config" {
+		os.Exit(runEdgeConfig(os.Args[2:]))
+	}
 	// The lifecycle lives in run() because os.Exit skips defers: every defer
 	// run() registers fires before this line. The non-zero code is what makes a
 	// fatal halt distinguishable from a graceful SIGTERM — both otherwise exit 0

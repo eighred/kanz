@@ -82,3 +82,38 @@ Run real store and separate-process failover tests with a non-superuser test DSN
 `TEST_POSTGRES_URL=... go test -p 1 -count=1 ./services/web-bff/...`.
 The process test builds the production BFF or uses `TEST_MFA_BFF` when provided.
 Keep production singleton manifests pinned until #1288's rollout proof is complete.
+
+## Envoy qualification (#1413)
+
+The `envoy-config` binary mode emits a closed, credential-free configuration for
+`cloudflared -> 127.0.0.1:8083 Envoy -> 127.0.0.1:8084 web-bff` in the existing
+pod. It runs before application configuration and accepts only bounded ports and
+a per-process request budget. The tunnel still preserves the public Host and
+the BFF still trusts `CF-Connecting-IP` only from loopback. The gateway remains
+the principal authority; Envoy removes client principal and retry-control
+headers before the BFF. The local request budget supplements application limits
+and does not decide entitlements.
+
+`.github/workflows/envoy-edge.yml` exercises the actual digest-pinned distroless
+Envoy with the BFF handler, synthetic identity/gateway endpoints, real HTTP,
+signing and cookies. It requires Linux symlink replacement, invalid configuration
+refusal, actual proxy header/path/body preservation, origin denial, no retries,
+quiet-stream behavior plus its negative control, rate enforcement and cleanup.
+Fresh image advisory and SBOM evidence binds the registry index/manifest,
+Docker identity and exported config digest without treating them as equivalent.
+
+This source does not alter a deployed manifest or tunnel route. Promotion must
+first qualify the exact released BFF image's `envoy-config` mode, generate its
+configuration in a dedicated init container without application secret mounts,
+and mount only that output read-only into Envoy. Retain the singleton/Recreate
+pin, same-pod loopback addresses, ingress denial and absence of Service/Ingress.
+Readiness/metrics port 19001 permits only `/ready` and `/stats/prometheus`;
+administrative mutation and config-dump paths are refused. Rollback removes the
+proxy and restores the tunnel's existing loopback BFF origin together.
+
+The fixture proves neither a public tunnel/OIDC-provider flow nor Kubernetes
+policy enforcement. The gateway currently buffers its proxy and does not expose
+the broker SSE route end to end; the narrow stream timer override preserves a
+future canonical transport without activating browser streaming. Network-hop
+mTLS, real tunnel/browser verification and signed target promotion remain
+separate acceptance requirements. Loopback forwarding does not prove mTLS.

@@ -1,0 +1,84 @@
+name: envoy-edge
+
+on:
+  pull_request:
+    paths:
+      - 'kanz/services/web-bff/**'
+      - 'kanz/pkg/auth/**'
+      - 'kanz/internal/gatewaysig/**'
+      - 'kanz/infra/edge/**'
+      - 'kanz/services/tv-sync/test/isolation.py'
+      - 'kanz-jl/qualification/install-audit.sh'
+      - '.github/scripts/*envoy*'
+      - '.github/scripts/check_migration_evidence.py'
+      - '.github/workflows/envoy-edge.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'kanz/services/web-bff/**'
+      - 'kanz/pkg/auth/**'
+      - 'kanz/internal/gatewaysig/**'
+      - 'kanz/infra/edge/**'
+      - 'kanz/services/tv-sync/test/isolation.py'
+      - 'kanz-jl/qualification/install-audit.sh'
+      - '.github/scripts/*envoy*'
+      - '.github/scripts/check_migration_evidence.py'
+      - '.github/workflows/envoy-edge.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=mod
+
+jobs:
+  actual-edge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Generate canonical contracts
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - name: Load the locked actual proxy
+        run: |
+          image=$(python3 -c 'import json; print(json.load(open("kanz/services/web-bff/internal/edgeconfig/image.json"))["reference"])')
+          docker pull --platform linux/amd64 "$image"
+          echo "TEST_ENVOY_IMAGE=$image" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/envoy-edge-evidence"
+      - name: Exercise actual proxy and BFF boundaries
+        working-directory: kanz
+        run: |
+          set -o pipefail
+          go test -race -p 1 ./services/web-bff/internal/edgeconfig ./services/web-bff/cmd/web-bff ./services/web-bff/internal/server -run 'Test(EnvoyEdgeActualBFF|InvalidProfilesDoNotReplaceExistingConfiguration|WriterReplacesFinalSymlinkWithoutFollowingItsTarget|EdgeConfigurationDoesNotLoadApplicationCredentials)$' -count=1 -json | tee "$RUNNER_TEMP/envoy-edge-evidence/tests.jsonl"
+          go vet ./services/web-bff/internal/edgeconfig ./services/web-bff/cmd/web-bff ./services/web-bff/internal/server
+          go build -o "$RUNNER_TEMP/web-bff-edge" ./services/web-bff/cmd/web-bff
+          WEB_BFF_SESSION_MODE=invalid WEB_BFF_SIGNING_SECRET_FILE=/does-not-exist "$RUNNER_TEMP/web-bff-edge" envoy-config --output "$RUNNER_TEMP/envoy-edge-evidence/cli.json" --admin-loopback
+      - name: Install checksum-pinned advisory tools
+        run: |
+          bash kanz-jl/qualification/install-audit.sh
+          python3 -m pip install PyYAML==6.0.3
+      - name: Validate executed cases and fresh image scan
+        env:
+          ENVOY_EVIDENCE: ${{ runner.temp }}/envoy-edge-evidence
+        run: |
+          python3 -B -m unittest discover -s .github/scripts -p 'test_envoy_evidence.py'
+          python3 -B .github/scripts/envoy_evidence.py
+      - name: Preserve projected qualification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: envoy-edge-evidence
+          path: ${{ runner.temp }}/envoy-edge-evidence/
+          if-no-files-found: error
