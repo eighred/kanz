@@ -1,6 +1,7 @@
 //! OMS-owned queue persistence. No broker publication or admission authority.
 use super::{scoped, Error, Record, MAX_BYTES};
 use std::time::{Duration, SystemTime};
+use std::{future::Future, pin::Pin};
 use tokio_postgres::{Client, Transaction};
 
 pub const MAX_PAGE: i64 = 4096;
@@ -149,20 +150,49 @@ pub async fn oldest_pending_age(
 
 /// Dedicated driver ownership is mandatory: dropping Client alone can leave a
 /// queued advisory-lock wait running. This session cannot return to any pool.
+type Cancellation = Pin<Box<dyn Future<Output = Result<(), tokio_postgres::Error>> + Send>>;
+
 pub struct Session {
     client: Client,
-    driver: tokio::task::JoinHandle<bool>,
+    driver: Option<tokio::task::JoinHandle<bool>>,
+    cancellation: Option<Cancellation>,
 }
 impl Session {
     /// The trusted connector must supply this client's own running driver task,
     /// with no independently retained client handle or replacement driver.
-    pub fn new(client: Client, driver: tokio::task::JoinHandle<bool>) -> Self {
-        Self { client, driver }
+    /// The connector supplies its existing TLS policy for PostgreSQL's separate
+    /// CancelRequest connection; this owner does not choose transport or secrets.
+    pub fn new<F, C>(client: Client, driver: tokio::task::JoinHandle<bool>, cancel: F) -> Self
+    where
+        F: FnOnce(tokio_postgres::CancelToken) -> C,
+        C: Future<Output = Result<(), tokio_postgres::Error>> + Send + 'static,
+    {
+        let cancellation = Some(Box::pin(cancel(client.cancel_token())) as Cancellation);
+        Self {
+            client,
+            driver: Some(driver),
+            cancellation,
+        }
     }
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        self.driver.abort();
+        if let Some(driver) = self.driver.take() {
+            // Socket close alone does not interrupt a PostgreSQL backend inside
+            // an advisory-lock wait. Dispatch protocol cancellation while the
+            // runtime is alive; server lock_timeout is the shutdown fallback.
+            if let (Ok(runtime), Some(cancel)) = (
+                tokio::runtime::Handle::try_current(),
+                self.cancellation.take(),
+            ) {
+                runtime.spawn(async move {
+                    let _ = tokio::time::timeout(Duration::from_secs(5), cancel).await;
+                    driver.abort();
+                });
+            } else {
+                driver.abort();
+            }
+        }
     }
 }
 
@@ -193,7 +223,8 @@ impl DrainLock {
 }
 
 /// None means contention (try mode). Dropping this future closes the dedicated
-/// session; the caller controls acquisition deadline. Session-level, not xact,
+/// session; the caller controls a deadline within the five-second server ceiling.
+/// Session-level, not xact,
 /// locking preserves the Go relay's lock lifetime and exact hash namespace.
 pub async fn lock_key(
     mut session: Session,
@@ -205,6 +236,9 @@ pub async fn lock_key(
         return Err(Error::Capacity);
     }
     let tx = scoped(&mut session.client, tenant).await?;
+    // A failed CancelRequest or a runtime already shutting down cannot leave a
+    // blocked backend indefinitely. This bounded port refuses waits above5s.
+    tx.batch_execute("SET LOCAL lock_timeout='5s'").await?;
     let row = tx.query_one(LOCK_IDS, &[&key, &SUFFIX]).await?;
     let scope: i32 = row.try_get(0)?;
     let key: i32 = row.try_get(1)?;

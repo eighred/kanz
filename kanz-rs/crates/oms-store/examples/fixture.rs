@@ -178,6 +178,7 @@ async fn run(input: Input) -> Result<Value, ()> {
             | "outbox-age"
             | "outbox-lock"
             | "outbox-cancel"
+            | "outbox-cancel-fallback"
     ) || !input.schema.starts_with("oms_store_")
         || input.schema.len() > 63
         || !input
@@ -196,7 +197,10 @@ async fn run(input: Input) -> Result<Value, ()> {
     }
     let (mut client, connection) = config.connect(NoTls).await.map_err(|_| ())?;
     let driver = tokio::spawn(async move { connection.await.is_ok() });
-    if matches!(input.mode.as_str(), "outbox-lock" | "outbox-cancel") {
+    if matches!(
+        input.mode.as_str(),
+        "outbox-lock" | "outbox-cancel" | "outbox-cancel-fallback"
+    ) {
         if !(1..=5000).contains(&input.limit) {
             driver.abort();
             return Err(());
@@ -208,9 +212,16 @@ async fn run(input: Input) -> Result<Value, ()> {
             )
             .await
             .map_err(|_| ())?;
-        let session = outbox::Session::new(client, driver);
+        let fallback = input.mode == "outbox-cancel-fallback";
+        let session = outbox::Session::new(client, driver, move |token| async move {
+            if fallback {
+                std::future::pending().await
+            } else {
+                token.cancel_query(NoTls).await
+            }
+        });
         let acquire = outbox::lock_key(session, &input.tenant, &input.order_id, input.rollback);
-        if input.mode == "outbox-cancel" {
+        if input.mode == "outbox-cancel" || fallback {
             return Ok(
                 match tokio::time::timeout(Duration::from_millis(input.limit as u64), acquire).await
                 {
@@ -220,7 +231,7 @@ async fn run(input: Input) -> Result<Value, ()> {
                         let (observer, connection) = config.connect(NoTls).await.map_err(|_| ())?;
                         let observer_driver = tokio::spawn(async move { connection.await.is_ok() });
                         let absent = async {
-                        for _ in 0..100 {
+                        for _ in 0..if fallback {700} else {100} {
                             let count:i64 = observer.query_one("SELECT count(*) FROM pg_stat_activity WHERE application_name=$1", &[&input.schema]).await.map_err(|_| ())?.try_get(0).map_err(|_| ())?;
                             if count==0 { return Ok::<_,()>(true); }
                             tokio::time::sleep(Duration::from_millis(10)).await;

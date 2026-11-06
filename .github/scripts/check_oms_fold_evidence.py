@@ -28,6 +28,7 @@ REQUIRED = {
             "raw-page-mark-age-parity", "owner-tenant-and-legacy-refusal",
             "bounded-page-no-prefix", "mark-deferred-commit-unconfirmed",
             "go-rust-lock-contention-cancel", "rust-go-lock-session-loss",
+            "cancel-transport-server-fallback",
             "rust-enqueue-connected-owner",
         )},
         "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity",

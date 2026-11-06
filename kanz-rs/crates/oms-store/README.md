@@ -179,9 +179,14 @@ This source port does not make Rust an authoritative running OMS.
 
 The session lock uses Go's database/table OID/tenant/service/key namespace.
 Its trusted connector must transfer both the Client and its own driver task to
-Session; cancellation/drop aborts that driver. Only verified unlock returns the
-session. No failed unlock can return a connection to a pool. Acquisition deadlines
-belong to the caller; release has a five-second deadline.
+Session and supply the same connector TLS policy for protocol CancelRequest.
+Cancellation/drop dispatches a bounded CancelRequest and aborts the driver;
+closing a socket alone cannot interrupt a PostgreSQL backend waiting for a lock.
+Only verified unlock returns the session. No failed unlock can return a connection
+to a pool. Caller acquisition deadlines can be shorter; the server lock wait has
+a five-second ceiling so failed cancellation/shutdown cannot strand a backend.
+This is an explicit bounded refusal relative to Go's caller-context-only wait.
+Release also has a five-second deadline.
 
 Explicit compatibility limits: pages above 4096 rows or 1 MiB of combined dynamic
 fields refuse rather than return a prefix. Nonpositive limits retain Go's empty

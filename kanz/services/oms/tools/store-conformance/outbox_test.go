@@ -349,6 +349,22 @@ func TestRustOutboxQueue(t *testing.T) {
 		}
 		release()
 	})
+	t.Run("cancel-transport-server-fallback", func(t *testing.T) {
+		f := newFixture(t)
+		release, won, e := outbox.NewPostgres(f.pool, outbox.ServiceOMS).LockKey(f.ctx, "order", false)
+		if e != nil || !won {
+			t.Fatal("Go lock")
+		}
+		defer release()
+		req := f.queueRequest("cancel-fallback")
+		req["rollback"] = true
+		req["limit"] = 100
+		start := time.Now()
+		expect(t, run(t, req), "canceled")
+		if time.Since(start) < 4*time.Second {
+			t.Fatal("fallback did not exercise blocked cancellation transport")
+		}
+	})
 	t.Run("rust-enqueue-connected-owner", func(t *testing.T) {
 		f := newFixture(t)
 		seedQueue(t, f)
