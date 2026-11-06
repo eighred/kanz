@@ -229,8 +229,10 @@ def run_fixture(artifact):
             # Exercise the exact live-probe constructor on the disposable API.
             # No live target or domain workload is contacted by this fixture.
             identity = public_identity()
-            run(["docker", "pull", rollout_probe.IMAGE])
-            run(["kind", "load", "docker-image", rollout_probe.IMAGE, "--name", cluster])
+            # Use the node's CRI pull path, as the preceding policy proof does.
+            # Host archive import can leave a CRI image record whose containerd
+            # checkpoint lookup fails. The immutable image and subsequent typed
+            # registry/config/CRI identity checks remain mandatory.
             k("create", "namespace", "kanz-observability")
             k("create", "-f", "-", value={"apiVersion": "v1", "kind": "ConfigMap",
               "metadata": {"name": "scripts", "namespace": tx.NAMESPACE},
