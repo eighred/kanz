@@ -3,7 +3,7 @@ use crate::{
     wire::{self, Schema, WireCodec},
     Canonical,
 };
-use kanz_oms_fold_shadow::proto::order::v1::{Fill, OrderState};
+use kanz_order_core::proto::order::v1::{Fill, OrderState};
 use std::time::Duration;
 use tonic::{transport::Channel, Code, Request, Status};
 
@@ -27,17 +27,7 @@ pub struct Client {
     pub(crate) tenant: String,
     pub(crate) owner: crate::transport::Owner,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewState {
-    Indeterminate,
-    Unknown,
-    Working,
-    PartiallyFilled,
-    Filled,
-    Rejected,
-    Cancelled,
-    Expired,
-}
+pub use kanz_order_core::aggregate::ViewState;
 #[derive(Debug)]
 pub struct OrderView {
     pub state: ViewState,

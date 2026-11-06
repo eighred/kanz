@@ -1,96 +1,27 @@
 #![forbid(unsafe_code)]
 //! Diagnostic canonical fill and terminal folds. No storage, network, or execution authority.
 pub mod proto {
-    pub mod domain {
-        pub mod v1 {
-            include!(concat!(env!("OUT_DIR"), "/domain.v1.rs"));
-        }
-    }
-    pub mod envelope {
-        pub mod v1 {
-            include!(concat!(env!("OUT_DIR"), "/envelope.v1.rs"));
-        }
-    }
-    pub const FILE_DESCRIPTOR_SET: &[u8] =
-        include_bytes!(concat!(env!("OUT_DIR"), "/oms-descriptors.bin"));
-    pub use kanz_decimal_compat::common;
-    pub mod command {
-        pub mod v1 {
-            include!(concat!(env!("OUT_DIR"), "/command.v1.rs"));
-        }
-    }
-    pub mod market {
-        pub mod v1 {
-            include!(concat!(env!("OUT_DIR"), "/market.v1.rs"));
-        }
-    }
-    pub mod order {
-        pub mod v1 {
-            include!(concat!(env!("OUT_DIR"), "/order.v1.rs"));
-        }
-    }
+    pub use kanz_order_core::proto::{
+        command, common, domain, envelope, market, order, FILE_DESCRIPTOR_SET,
+    };
     pub mod oms {
         pub mod v1 {
             include!(concat!(env!("OUT_DIR"), "/oms.v1.rs"));
         }
     }
 }
-use num_bigint::BigInt;
-use num_rational::BigRational;
-use num_traits::{Signed, ToPrimitive, Zero};
-use proto::order::v1::OrderStatus;
-use proto::{
-    common::v1::Decimal,
-    oms::v1::{FillFoldRequest, FillFoldResult, FillFoldStatus},
-};
 
-/// Existing Go Decimal conversion, reused by the qualified OMS position owner.
-/// Absent means legacy aggregate zero; this is not an admission-state default.
-pub fn rational(value: Option<&Decimal>) -> Option<BigRational> {
-    let Some(d) = value else {
-        return Some(BigRational::zero());
-    };
-    if !(-64..=64).contains(&d.exponent) {
-        return None;
-    }
-    let pow = BigInt::from(10).pow(d.exponent.unsigned_abs());
-    Some(if d.exponent >= 0 {
-        BigRational::from_integer(BigInt::from(d.coefficient) * pow)
-    } else {
-        BigRational::new(BigInt::from(d.coefficient), pow)
-    })
-}
-fn rounded(n: BigInt, d: &BigInt) -> BigInt {
-    let mut q = &n / d;
-    let rem = &n % d;
-    if rem.abs() * 2 >= d.abs() {
-        if n.is_negative() {
-            q -= 1
-        } else {
-            q += 1
-        }
-    }
-    q
-}
-// Go dec.ToProtoScaled: first round at 1e-8, then repeated half-away /10.
-/// Checked existing Go ToProtoScaled conversion shared with position outputs.
-pub fn decimal(value: BigRational) -> Option<Decimal> {
-    let mut q = rounded(value.numer() * BigInt::from(100_000_000), value.denom());
-    let mut exponent = -8;
-    loop {
-        if let Some(coefficient) = q.to_i64() {
-            return Some(Decimal {
-                coefficient,
-                exponent,
-            });
-        }
-        q = rounded(q, &BigInt::from(10));
-        exponent += 1;
-        if exponent > 64 {
-            return None;
-        }
-    }
-}
+#[cfg(test)]
+use num_bigint::BigInt;
+#[cfg(test)]
+use num_rational::BigRational;
+#[cfg(test)]
+use proto::common::v1::Decimal;
+use proto::oms::v1::{FillFoldRequest, FillFoldResult, FillFoldStatus};
+use proto::order::v1::OrderStatus;
+
+pub use kanz_order_core::{decimal, rational};
+
 fn timestamp(t: &prost_types::Timestamp) -> bool {
     (-62_135_596_800..=253_402_300_799).contains(&t.seconds)
         && (0..1_000_000_000).contains(&t.nanos)
@@ -151,14 +82,15 @@ pub fn evaluate_terminal(
         out.rejection_code = "ORDER_TERMINAL".into();
         return out;
     }
-    // No arithmetic, domain conversion or normalization: Go preserves every
-    // optional Decimal, even absent leaves and extreme wire exponents.
-    let mut candidate = state.clone();
-    candidate.status = target as i32;
-    candidate.as_of = Some(*now);
-    out.unfilled_quantity = state.leaves_quantity;
-    out.candidate = Some(candidate);
-    out.status = TerminalFoldStatus::Ok as i32;
+    // Preserve the diagnostic wrapper's original status/field-presence contract.
+    match kanz_order_core::aggregate::transition_values(state, target, *now) {
+        Ok(candidate) => {
+            out.unfilled_quantity = state.leaves_quantity;
+            out.candidate = Some(candidate);
+            out.status = TerminalFoldStatus::Ok as i32;
+        }
+        Err(_) => return out,
+    }
     out
 }
 pub fn evaluate(r: &FillFoldRequest, version: &str) -> FillFoldResult {
@@ -192,64 +124,20 @@ pub fn evaluate(r: &FillFoldRequest, version: &str) -> FillFoldResult {
     if OrderStatus::try_from(state.status).is_err() {
         return out;
     }
-    if matches!(
-        OrderStatus::try_from(state.status),
-        Ok(OrderStatus::Filled
-            | OrderStatus::Cancelled
-            | OrderStatus::Rejected
-            | OrderStatus::Expired)
-    ) {
-        out.status = FillFoldStatus::Rejected as i32;
-        out.rejection_code = "ORDER_TERMINAL".into();
-        return out;
+    match kanz_order_core::aggregate::apply_fill_values(state, fill, *now) {
+        Ok(candidate) => {
+            out.status = FillFoldStatus::Ok as i32;
+            out.candidate = Some(candidate);
+        }
+        Err(kanz_order_core::aggregate::Error::Rejected(code)) => {
+            out.status = FillFoldStatus::Rejected as i32;
+            out.rejection_code = code.into();
+        }
+        Err(kanz_order_core::aggregate::Error::NumericalFailure) => {
+            out.status = FillFoldStatus::NumericalFailure as i32;
+        }
+        Err(_) => {}
     }
-    if fill.quantity.as_ref().is_none_or(|q| q.coefficient <= 0) {
-        out.status = FillFoldStatus::Rejected as i32;
-        out.rejection_code = "INVALID_FILL".into();
-        return out;
-    }
-    let (Some(q), Some(leaves), Some(old), Some(ordered), Some(avg), Some(price)) = (
-        rational(fill.quantity.as_ref()),
-        rational(state.leaves_quantity.as_ref()),
-        rational(state.filled_quantity.as_ref()),
-        rational(state.ordered_quantity.as_ref()),
-        rational(state.average_fill_price.as_ref()),
-        rational(fill.price.as_ref()),
-    ) else {
-        return out;
-    };
-    if q > leaves {
-        out.status = FillFoldStatus::Rejected as i32;
-        out.rejection_code = "OVERFILL".into();
-        return out;
-    }
-    let filled = &old + &q;
-    let remaining = ordered - &filled;
-    if filled.is_zero() {
-        out.status = FillFoldStatus::NumericalFailure as i32;
-        return out;
-    }
-    let weighted = (old * avg + q * price) / &filled;
-    let (Some(filled_wire), Some(leaves_wire), Some(avg_wire)) = (
-        decimal(filled),
-        decimal(remaining.clone()),
-        decimal(weighted),
-    ) else {
-        out.status = FillFoldStatus::NumericalFailure as i32;
-        return out;
-    };
-    let mut candidate = state.clone();
-    candidate.filled_quantity = Some(filled_wire);
-    candidate.leaves_quantity = Some(leaves_wire);
-    candidate.average_fill_price = Some(avg_wire);
-    candidate.as_of = Some(*now);
-    candidate.status = if remaining.is_zero() {
-        OrderStatus::Filled as i32
-    } else {
-        OrderStatus::PartiallyFilled as i32
-    };
-    out.status = FillFoldStatus::Ok as i32;
-    out.candidate = Some(candidate);
     out
 }
 

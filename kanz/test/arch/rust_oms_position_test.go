@@ -73,7 +73,7 @@ func TestRustOMSPositionMathBoundary(t *testing.T) {
 			return false
 		}
 		code = rustMigrationCompact(code)
-		for _, m := range []string{`kanz_oms_fold_shadow::{decimal,`, `rational,`, `v.numer().bits()>16384||v.denom().bits()>16384`, `s.len()>4096`, `ifd<=BigInt::zero()`, `bound(&out.qty)?`, `bound(&out.realized)?`, `bound(&weight)?`, `bound(&v)?`, `decimal(v).ok_or(Error::Capacity)?`} {
+		for _, m := range []string{`kanz_order_core::{decimal,`, `rational,`, `v.numer().bits()>16384||v.denom().bits()>16384`, `s.len()>4096`, `ifd<=BigInt::zero()`, `bound(&out.qty)?`, `bound(&out.realized)?`, `bound(&weight)?`, `bound(&v)?`, `decimal(v).ok_or(Error::Capacity)?`} {
 			if !strings.Contains(code, m) {
 				return false
 			}

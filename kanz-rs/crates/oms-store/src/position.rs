@@ -8,7 +8,7 @@ use crate::{
     position_math::{self as math, Lot},
     scoped, Error, Record, MAX_BYTES,
 };
-use kanz_oms_fold_shadow::{
+use kanz_order_core::{
     proto::{
         domain::v1::{PortfolioSnapshot, PortfolioState, PositionState},
         order::v1::Fill,

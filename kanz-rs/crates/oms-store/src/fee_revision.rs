@@ -1,7 +1,7 @@
 //! Exact fee revision evidence validation. Authentication and dual-control claiming
 //! remain the caller's responsibility; these terms grant no independent authority.
 use super::{fee_subject::normalize, fee_wire::FillWire, identity, Error};
-use kanz_oms_fold_shadow::proto::{
+use kanz_order_core::proto::{
     common::v1::Decimal,
     order::v1::{Fill, Side},
 };

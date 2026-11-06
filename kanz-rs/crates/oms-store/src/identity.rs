@@ -1,5 +1,5 @@
 use kanz_decimal_compat::{compare, in_domain};
-use kanz_oms_fold_shadow::proto::order::v1::Fill;
+use kanz_order_core::proto::order::v1::Fill;
 use sha2::{Digest, Sha256};
 use std::{cmp::Ordering, fmt::Write};
 

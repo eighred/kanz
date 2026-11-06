@@ -1,6 +1,6 @@
 //! Existing OMS proposal persistence, not maker/checker authentication or admission.
 use super::{enqueue, fee_subject, scoped, Error, Record, MAX_BYTES};
-use kanz_oms_fold_shadow::proto::order::v1::SubmitOrder;
+use kanz_order_core::proto::order::v1::SubmitOrder;
 use prost::Message;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_postgres::{Client, Row, Transaction};

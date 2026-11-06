@@ -18,7 +18,7 @@ pub mod recovery_ack;
 pub mod relay;
 mod relay_wire;
 use identity::{execution_key, same_execution};
-use kanz_oms_fold_shadow::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
+use kanz_order_core::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;
 use std::time::SystemTime;
 use tokio_postgres::{Client, Transaction};

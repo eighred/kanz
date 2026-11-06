@@ -128,6 +128,10 @@ func rustBoundaryFixtureFiles() []string {
 		out = append(out, rustOMSStorePath+"/"+file)
 	}
 	out = append(out, "crates/oms-venue/Cargo.toml", "crates/oms-venue/build.rs", "crates/oms-venue/src/lib.rs", "crates/oms-venue/src/client.rs", "crates/oms-venue/src/wire.rs", "crates/oms-venue/src/transport.rs", "crates/oms-venue/examples/oms-venue-fixture.rs", "crates/proto-wire/Cargo.toml", "crates/proto-wire/src/lib.rs")
+	out = append(out, "crates/order-core/Cargo.toml", "crates/proto-wire/src/canonical.rs")
+	for _, file := range rustOrderCoreSources {
+		out = append(out, "crates/order-core/"+file)
+	}
 	return out
 }
 func checkRustDepthBoundary(root string) error {
