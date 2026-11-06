@@ -1,12 +1,15 @@
 #![forbid(unsafe_code)]
 //! Existing OMS Save transaction semantics; no network listener, runtime configuration,
-//! admission, recovery authorization, fee writer or production caller.
+//! admission, recovery authorization or production caller.
+pub mod fee_journal;
+pub mod fee_revision;
 pub mod fee_subject;
 pub mod fee_wire;
 mod go_unicode;
 pub mod identity;
 pub mod queries;
-use identity::{execution_key, same_except_fee, same_execution};
+pub mod recovery;
+use identity::{execution_key, same_execution};
 use kanz_oms_fold_shadow::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;
 use std::time::SystemTime;
@@ -58,7 +61,10 @@ pub struct Record {
 }
 // Preserve the canonical nested fill bytes as well as the entire FACT. In
 // particular prost decoding must not erase forward-compatible unknown fields.
-fn fill_wire(mut wire: &[u8]) -> Result<Vec<u8>, Error> {
+fn fill_wire(wire: &[u8]) -> Result<Vec<u8>, Error> {
+    message_field(wire, 2)
+}
+fn message_field(mut wire: &[u8], field: u64) -> Result<Vec<u8>, Error> {
     fn varint(wire: &mut &[u8]) -> Result<u64, Error> {
         let mut out = 0u64;
         for i in 0..10 {
@@ -93,7 +99,7 @@ fn fill_wire(mut wire: &[u8]) -> Result<Vec<u8>, Error> {
         if wire.len() < n {
             return Err(Error::InvalidInput);
         }
-        if tag == 18 {
+        if tag == (field << 3 | 2) {
             if found.is_some() {
                 return Err(Error::InvalidInput);
             }
@@ -149,30 +155,26 @@ async fn duplicate(tx: &Transaction<'_>, fill: Option<&Fill>) -> Result<(), Erro
     if raw.len() > MAX_BYTES {
         return Err(Error::InvalidInput);
     }
-    let original = Fill::decode(raw.as_slice()).map_err(|_| Error::InvalidInput)?;
-    if same_execution(&original, fill) {
+    let original = fee_wire::FillWire::decode(&raw)?;
+    if same_execution(original.value(), fill) {
         return Ok(());
     }
-    let key = execution_key(&original);
-    let head=tx.query_opt("SELECT revised_fill FROM execution_fee_revisions WHERE book='oms' AND execution_key=$1 ORDER BY revision_sequence DESC LIMIT 1",&[&key]).await?;
-    let Some(head) = head else {
-        return Err(Error::IdentityConflict);
-    };
-    let raw: Vec<u8> = head.get(0);
-    if raw.len() > MAX_BYTES {
-        return Err(Error::InvalidInput);
-    }
-    let revised = Fill::decode(raw.as_slice()).map_err(|_| Error::InvalidInput)?;
-    if !same_except_fee(&original, &revised) {
-        return Err(Error::FeeRevision);
-    }
-    if !same_execution(&revised, fill) {
+    let revised = fee_journal::head(tx, &original).await?;
+    if !same_execution(revised.value(), fill) {
         return Err(Error::IdentityConflict);
     }
     Ok(())
 }
 
 fn validate_write(state: &[u8], records: &[Record]) -> Result<OrderState, Error> {
+    validate_batch(state, records, 64, MAX_BYTES)
+}
+fn validate_batch(
+    state: &[u8],
+    records: &[Record],
+    max_records: usize,
+    max_bytes: usize,
+) -> Result<OrderState, Error> {
     let bytes = records.iter().try_fold(state.len(), |sum, r| {
         [
             &r.tenant,
@@ -190,7 +192,8 @@ fn validate_write(state: &[u8], records: &[Record]) -> Result<OrderState, Error>
             n.checked_add(s.len())
         })
     });
-    if records.len() > 64 || bytes.is_none_or(|n| n > MAX_BYTES) {
+    if state.len() > MAX_BYTES || records.len() > max_records || bytes.is_none_or(|n| n > max_bytes)
+    {
         return Err(Error::InvalidInput);
     }
     let st = OrderState::decode(state).map_err(|_| Error::InvalidInput)?;
@@ -200,10 +203,15 @@ fn validate_write(state: &[u8], records: &[Record]) -> Result<OrderState, Error>
     Ok(st)
 }
 async fn scoped<'a>(client: &'a mut Client, tenant: &str) -> Result<Transaction<'a>, Error> {
+    let tx = client.transaction().await?;
+    scope_existing(&tx, tenant).await?;
+    Ok(tx)
+}
+async fn scope_existing(tx: &Transaction<'_>, tenant: &str) -> Result<(), Error> {
     if tenant.is_empty() || tenant.len() > 256 {
         return Err(Error::InvalidInput);
     }
-    let role = client
+    let role = tx
         .query_one(
             "SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user",
             &[],
@@ -212,7 +220,6 @@ async fn scoped<'a>(client: &'a mut Client, tenant: &str) -> Result<Transaction<
     if role.get::<_, bool>(0) || role.get::<_, bool>(1) {
         return Err(Error::UnsafeRole);
     }
-    let tx = client.transaction().await?;
     tx.query_one("SELECT set_config('app.tenant_id',$1,true)", &[&tenant])
         .await?;
     // Every write uses the canonical tables, which must retain forced tenant RLS.
@@ -220,7 +227,7 @@ async fn scoped<'a>(client: &'a mut Client, tenant: &str) -> Result<Transaction<
     if tables.get::<_, i64>(0) != 5 {
         return Err(Error::UnsafeRole);
     }
-    Ok(tx)
+    Ok(())
 }
 async fn enqueue(tx: &Transaction<'_>, records: &[Record]) -> Result<(), Error> {
     for r in records {
@@ -347,26 +354,49 @@ pub async fn save(
                 });
             }
         }
-        let count=tx.execute("INSERT INTO order_fills (tenant_id,order_id,fill_id,raw_fill_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3) ON CONFLICT (tenant_id,fill_id) DO NOTHING",&[&st.order_id,&key,&fill_id]).await?;
+        let count = claim(&tx, &st.order_id, &key, fill_id).await?;
         if count == 0 {
             duplicate(&tx, fill.as_ref().map(|f| &f.0)).await?;
             return Err(Error::FillApplied);
         }
         if let Some((fill, raw)) = fill {
-            tx.execute("INSERT INTO order_executions (order_id,fill_id,venue,venue_account_id,instrument_id,venue_execution_id,fill) VALUES ($1,$2,$3,$4,$5,$6,$7)",&[&st.order_id,&fill_id,&fill.venue,&fill.venue_account_id,&fill.instrument_id,&fill.venue_execution_id,&raw]).await?;
+            journal(&tx, &st.order_id, fill_id, &fill, &raw).await?;
         }
     }
+    cas(&tx, &st, state, expected_version).await?;
+    enqueue(&tx, records).await?;
+    commit(tx).await
+}
+async fn cas(
+    tx: &Transaction<'_>,
+    st: &OrderState,
+    state: &[u8],
+    expected_version: i64,
+) -> Result<(), Error> {
     let count=tx.execute("INSERT INTO orders (tenant_id,order_id,status,state,portfolio_id,parent_order_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3,$5,$6) ON CONFLICT (tenant_id,order_id) DO UPDATE SET status=EXCLUDED.status,state=EXCLUDED.state,portfolio_id=EXCLUDED.portfolio_id,parent_order_id=EXCLUDED.parent_order_id,version=orders.version+1,updated_at=now() WHERE orders.version=$4",&[&st.order_id,&st.status,&state,&expected_version,&st.portfolio_id,&st.parent_order_id]).await?;
     if count == 0 {
         return Err(Error::Conflict);
     }
-    enqueue(&tx, records).await?;
-    commit(tx).await
+    Ok(())
 }
 async fn commit(tx: Transaction<'_>) -> Result<(), Error> {
     // Connection loss around COMMIT is not proof of rollback. Callers must
     // reconcile durable state before retrying; never report a fabricated success.
     tx.commit().await.map_err(|_| Error::CommitUnconfirmed)?;
+    Ok(())
+}
+
+async fn claim(tx: &Transaction<'_>, order: &str, key: &str, alias: &str) -> Result<u64, Error> {
+    Ok(tx.execute("INSERT INTO order_fills (tenant_id,order_id,fill_id,raw_fill_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3) ON CONFLICT (tenant_id,fill_id) DO NOTHING",&[&order,&key,&alias]).await?)
+}
+async fn journal(
+    tx: &Transaction<'_>,
+    order: &str,
+    alias: &str,
+    fill: &Fill,
+    raw: &[u8],
+) -> Result<(), Error> {
+    tx.execute("INSERT INTO order_executions (order_id,fill_id,venue,venue_account_id,instrument_id,venue_execution_id,fill) VALUES ($1,$2,$3,$4,$5,$6,$7)",&[&order,&alias,&fill.venue,&fill.venue_account_id,&fill.instrument_id,&fill.venue_execution_id,&raw]).await?;
     Ok(())
 }
 

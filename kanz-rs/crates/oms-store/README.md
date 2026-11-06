@@ -45,7 +45,7 @@ entire claim result, including any rows evaluated before the failure.
 Scoped execution keys reproduce Go JSON escaping before SHA256. Duplicate
 economic equality uses canonical exact Decimal comparison, presence and venue
 time. It recognizes the original execution or the latest validated fee head;
-it does not authorize or write fee corrections. Legacy claims without a journal
+the duplicate-fill path does not authorize or write fee corrections. Legacy claims without a journal
 retain their existing treatment. Unowned pending outbox rows block new FACTs.
 
 `CommitUnconfirmed` means the commit did not return confirmation. It does not
@@ -78,8 +78,8 @@ every actual Rust-write case without skips. Go independently checks durable
 state, raw bytes, versions, claims, journal and outbox. Restart tests restart the
 client process/pool, not the PostgreSQL server.
 
-Unported: admission, venue calls, orchestration, the Store Outbox/Proposals owners, `CommitRecovery` and its wider
-transaction, fee approval/write lifecycle, outbox relay, migrations, production
+Unported: admission, venue calls, orchestration, the Store Outbox/Proposals owners, `CommitRecovery` preparation/orchestration and its wider
+transaction, fee approval/proposal and full recovery lifecycle, outbox relay, migrations, production
 fencing and rollout. Deployment and exclusive writer handoff need separate
 recovery, rollback, capability and latency proof. This library is not a second
 production OMS and does not close the migration.
@@ -115,6 +115,57 @@ Principal normalization uses tables generated from the pinned Go Unicode package
 not Rust full lowercase. CI regenerates the tables byte-for-byte and compares
 normalization of every Unicode scalar with Go through the stamped fixture.
 This is compatibility data, not authentication, approval or a second policy.
-These helpers do not append fee revisions, compute fee deltas, authorize a
-correction, or commit transactions. Those operations still need their complete
-caller-owned transaction and independent financial proof.
+The fee transaction module uses those helpers for the OMS fee journal. The caller
+begins and commits or rolls back its transaction. `cas_order` borrows that
+transaction exclusively, applies the shared tenant/RLS checks and canonical order
+CAS, and returns an opaque token for fee-head reads, revision append and prepared
+outbox insertion. It never opens or commits a separate transaction. Original
+execution provenance, approval authentication, checkpoint updates and the final
+commit remain the caller's responsibility. Any error after CAS requires the caller
+to roll back the entire transaction; a Rust error alone does not undo SQL writes.
+Existing CAS upsert semantics are not
+proof of an observed trade or authorization.
+
+Fee deltas use exact rational arithmetic (previous fee minus revised fee), with
+no Decimal quantization. Economic digests reproduce Go length-prefix hashing,
+rational text and UTC event-time formatting. Same-case replay compares all known
+and retained unknown protobuf fields before consulting the latest head, preserving
+ABA replay. Journal bytes are deterministic, while original execution bytes remain
+unchanged. Only the OMS book is writable through this token; other books retain
+their existing owners. Fee-head and replay reads refuse oversized stored values
+before transferring them to the client.
+
+The actual-process qualification requires independent digest/delta checks and ten
+PostgreSQL cases covering replay, conflicts, CAS races, rollback, deferred commit
+failure, tenant scope, other-book separation and corrupt heads. Local skips do not
+satisfy this evidence. This source primitive adds no production caller, approval
+authority, recovery orchestration or exclusive writer handoff.
+
+
+`commit_prepared_recovery` ports only the durable tail of Go `CommitRecovery`.
+The existing Go owner still establishes complete venue history, verified account
+mapping, posted-history completeness, dual-control approval, terminal-disposition
+folding and the once-rounded complete average. This internal prepared batch is
+not a public transport or authorization capability. It cannot be used as a claim
+that full recovery or its approval/admission path has migrated.
+
+The Rust tail requires exactly one typed recovered FACT for each prepared
+execution and one typed status FACT. Tenant, complete raw state, event time,
+case/provenance, execution digest and checkpoint must agree. The supplied posted
+and missing sets must partition those executions. It binds the stored frozen
+history digest/mapping and updates the matching case metadata/version only from
+investigating/checkpoint zero. All missing claims are ordered by raw fill ID,
+then journaled; order CAS, fee revisions, case CAS, targets and mandatory outbox
+records share one transaction. Empty histories become corrected with zero targets.
+Normal recoveries remain investigating until the existing two-book ACK owner
+confirms completion. The ACK owner is not ported here.
+
+This port caps a prepared batch at 8,000 executions and 4 MiB of state/FACT/posted
+bytes, with 1 MiB per state or FACT. These are explicit refusal limits, not a
+claim that every batch Go can allocate is accepted. No prefix commits on an
+oversized or malformed batch. Nested canonical state/FACT bytes are retained;
+ambiguous duplicate singular protobuf fields/groups remain explicitly refused.
+Source tests compare the entire changed durable projection with Go CommitRecovery,
+including terminal rounded-average and approved-fee cases, then inject missing
+facts, CAS races, target/outbox failures and deferred commit rejection. Actual
+Linux PostgreSQL evidence is required; local dependency skips do not qualify it.

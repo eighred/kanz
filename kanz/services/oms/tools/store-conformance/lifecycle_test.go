@@ -59,7 +59,7 @@ func (f *fixture) rowCounts(orders, outbox int) {
 func readError(t *testing.T, r fixtureResult, want string) {
 	t.Helper()
 	expect(t, r.Status, want)
-	if r.State != nil || r.DBVersion != nil || r.Claims != nil || r.States != nil || r.Unindexed != nil {
+	if r.State != nil || r.DBVersion != nil || r.Claims != nil || r.States != nil || r.Unindexed != nil || r.Delta != nil || r.Fresh != nil {
 		t.Fatal("read failure exposed a partial successful result")
 	}
 }

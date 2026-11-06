@@ -51,6 +51,7 @@ impl Unknowns {
     }
 }
 
+#[derive(Clone)]
 pub struct FillWire {
     value: Fill,
     original: Vec<u8>,
@@ -68,6 +69,44 @@ impl FillWire {
             original: raw.to_vec(),
             unknown,
         })
+    }
+    pub(crate) fn previous_fee(&self) -> Result<Self, Error> {
+        let previous = self
+            .value
+            .recovery
+            .as_ref()
+            .and_then(|r| r.fee_approval.as_ref())
+            .and_then(|a| a.previous_fee.as_ref())
+            .ok_or(Error::FeeRevision)?;
+        let recovery = field_number("order.v1.Fill", "recovery")?;
+        let approval = field_number("order.v1.ExecutionRecoveryProvenance", "fee_approval")?;
+        let previous_number = field_number("order.v1.ExecutionFeeApproval", "previous_fee")?;
+        let fee = field_number("order.v1.Fill", "fee")?;
+        let sidecar = self
+            .unknown
+            .children
+            .get(&recovery)
+            .and_then(|r| r.children.get(&approval))
+            .and_then(|a| a.children.get(&previous_number))
+            .cloned()
+            .unwrap_or_default();
+        let mut result = self.clone();
+        result.value.fee = Some(previous.clone());
+        result.value.recovery = None;
+        result.unknown.children.remove(&recovery);
+        result.unknown.children.insert(fee, sidecar);
+        result.original = result.journal_bytes()?;
+        Ok(result)
+    }
+    pub(crate) fn without_recovery(&self) -> Result<Self, Error> {
+        let mut result = self.clone();
+        result.value.recovery = None;
+        result
+            .unknown
+            .children
+            .remove(&field_number("order.v1.Fill", "recovery")?);
+        result.original = result.journal_bytes()?;
+        Ok(result)
     }
     pub fn value(&self) -> &Fill {
         &self.value
@@ -381,4 +420,20 @@ mod shape_tests {
             assert!(schema_from(files).is_err());
         }
     }
+}
+
+fn field_number(message: &str, field: &str) -> Result<u32, Error> {
+    let files = FileDescriptorSet::decode(FILE_DESCRIPTOR_SET).map_err(|_| Error::InvalidInput)?;
+    for file in &files.file {
+        for m in &file.message_type {
+            if format!("{}.{}", file.package(), m.name()) == message {
+                for f in &m.field {
+                    if f.name() == field {
+                        return u32::try_from(f.number()).map_err(|_| Error::InvalidInput);
+                    }
+                }
+            }
+        }
+    }
+    Err(Error::InvalidInput)
 }
