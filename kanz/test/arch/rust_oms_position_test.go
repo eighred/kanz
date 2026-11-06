@@ -93,3 +93,41 @@ func TestRustOMSPositionMathBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestRustOMSPositionCanonicalBrokerRequired(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(moduleRoot(t)), ".github", "workflows", "rust-oms-fold.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markers := []string{
+		"kanz/infra/nats/bootstrap-job.yaml",
+		"natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c",
+		"-e NATS_REPLICAS=1",
+		"sh -s < \"$RUNNER_TEMP/oms-bootstrap.sh\"",
+		"./services/oms/internal/position",
+	}
+	check := func(s string) bool {
+		for _, marker := range markers {
+			if !strings.Contains(s, marker) {
+				return false
+			}
+		}
+		start := strings.Index(s, "- name: Start isolated pinned relay broker")
+		bootstrap := strings.Index(s, "- name: Bootstrap canonical disposable position streams")
+		compare := strings.Index(s, "- name: Compare actual stamped worker through the OMS supervisor")
+		return start >= 0 && bootstrap > start && compare > bootstrap
+	}
+	s := string(b)
+	if !check(s) {
+		t.Fatal("canonical position broker proof missing or out of order")
+	}
+	for _, marker := range markers {
+		if check(strings.ReplaceAll(s, marker, "removed")) {
+			t.Fatal("missing broker prerequisite accepted")
+		}
+	}
+	reordered := strings.Replace(s, "- name: Bootstrap canonical disposable position streams", "- name: removed", 1)
+	if check(reordered) {
+		t.Fatal("missing bootstrap stage accepted")
+	}
+}

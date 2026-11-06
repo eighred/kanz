@@ -2,6 +2,7 @@ package storeconformance
 
 import (
 	"context"
+	"errors"
 	"github.com/eighred/kanz/internal/bustest"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -289,9 +290,13 @@ func TestRustPositionStoreTransactions(t *testing.T) {
 			t.Fatal(err)
 		}
 		unknown := proto.Clone(late).(*orderpb.Fill)
+		unknown.FillId, unknown.VenueExecutionId = "legacy-history", "legacy-history"
 		unknown.InstrumentId = "instrument"
 		unknown.Venue = "VENUE"
 		before := positionDurable(t, f)
+		if _, err := position.NewPostgres(f.pool, "USD").Apply(f.ctx, "legacy", unknown, at, nil); !errors.Is(err, position.ErrPositionHistoryUnknown) {
+			t.Fatalf("canonical Go legacy history refusal: %v", err)
+		}
 		expect(t, run(t, positionRequest(t, f, "legacy", unknown, at, true)), "PositionHistoryUnknown")
 		if !reflect.DeepEqual(before, positionDurable(t, f)) {
 			t.Fatal("unknown history partially committed")
