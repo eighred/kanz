@@ -18,13 +18,14 @@
 // topic that does not exist in Kafka is one — see natsrebuild.OutcomeMissing);
 // 0 every requested topic existed and was drained.
 //
-// Kafka is read plaintext over the in-cluster listener (kafka:9092), like the
-// provisioning Jobs; NATS publish goes over SEC-01c mTLS when a SPIFFE socket is
-// set (required against a verify:true cluster), plaintext otherwise (dev).
+// NATS publish uses workload mTLS when a SPIFFE socket is set. Kafka mTLS is an
+// explicit coordinated opt-in: the existing Job still names a plaintext Kafka
+// listener. Change its image, protected listener and opt-in together.
 package main
 
 import (
 	"context"
+	"errors"
 	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
@@ -46,6 +47,11 @@ func main() {
 	topics := env.SplitList(os.Getenv("NATS_REBUILD_TOPICS"))
 	stateTopics := env.SplitList(os.Getenv("NATS_REBUILD_STATE_TOPICS"))
 	socket := os.Getenv("NATS_REBUILD_SPIFFE_SOCKET")
+	kafkaMTLS, err := kafkaIdentityRequested(os.Getenv("NATS_REBUILD_KAFKA_MTLS"), socket)
+	if err != nil {
+		logger.Error("invalid Kafka identity configuration")
+		os.Exit(2)
+	}
 	since, err := time.ParseDuration(env.Or("NATS_REBUILD_SINCE", "24h"))
 	if err != nil {
 		logger.Error("invalid NATS_REBUILD_SINCE", "err", err)
@@ -79,19 +85,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	natsCfg := bus.NATSConfig{URL: natsURL, Name: "nats-rebuild"}
-	if socket != "" {
-		src, err := transport.NewSource(ctx, socket)
-		if err != nil {
-			logger.Error("spiffe source", "err", err)
-			os.Exit(1)
-		}
-		defer func() { _ = src.Close() }()
-		natsCfg.TLSConfig = transport.ClientTLSConfig(src, transport.AuthorizeMesh())
-		logger.Info("nats-rebuild: mTLS to NATS enabled", "socket", socket)
-	} else {
-		logger.Warn("nats-rebuild: NATS plaintext (no NATS_REBUILD_SPIFFE_SOCKET)")
+	mesh, err := transport.NewMesh(ctx, socket)
+	if err != nil {
+		logger.Error("workload identity initialization failed")
+		os.Exit(1)
 	}
+	defer func() { _ = mesh.Close() }()
+	natsCfg := bus.NATSConfig{URL: natsURL, Name: "nats-rebuild", TLSConfig: mesh.Client}
+	kafkaSource := natsrebuild.KafkaTopicChecker{Brokers: brokers}
+	if kafkaMTLS {
+		kafkaSource.TLSConfig = mesh.Client
+	}
+	logger.Info("nats-rebuild transports", "nats_mtls", mesh.Enabled(), "kafka_mtls", kafkaMTLS)
 
 	nc, err := bus.DialNATS(ctx, natsCfg)
 	if err != nil {
@@ -103,8 +108,8 @@ func main() {
 	runner := &natsrebuild.Runner{
 		Targets:   targets,
 		Requested: tenants,
-		Checker:   natsrebuild.KafkaTopicChecker{Brokers: brokers},
-		Open:      natsrebuild.KafkaOpen(brokers),
+		Checker:   kafkaSource,
+		Open:      kafkaSource.Open,
 		Publisher: nc,
 		Since:     since,
 		Now:       time.Now(),
@@ -130,4 +135,16 @@ func main() {
 	}
 	logger.Info("nats-rebuild complete", "tenants", report.Requested, "topics", len(targets),
 		"since", since.String(), "published", report.Published())
+}
+
+func kafkaIdentityRequested(value, socket string) (bool, error) {
+	switch value {
+	case "", "false":
+		return false, nil
+	case "true":
+		if socket != "" {
+			return true, nil
+		}
+	}
+	return false, errors.New("Kafka mTLS requires an explicit true/false selection and configured workload source")
 }

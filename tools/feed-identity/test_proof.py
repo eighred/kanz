@@ -33,7 +33,7 @@ class FixtureTests(unittest.TestCase):
     def test_shared_cluster_is_new_private_and_pinned(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'RUNNER_TEMP': directory}):
             scratch = proof.Path(directory)
-            for prefix in ('feed-proof', 'cni-proof', 'redpanda-proof'):
+            for prefix in ('feed-proof', 'cni-proof', 'redpanda-proof', 'messaging-proof'):
                 name = prefix + '-012345abcdef'
                 with patch.object(proof, 'command') as run:
                     proof.create_enforcing_cluster(name, scratch)
@@ -49,7 +49,7 @@ class FixtureTests(unittest.TestCase):
                     self.assertIn('--for=condition=Ready', calls[3])
                     self.assertTrue(proof.yaml.safe_load((scratch / 'kind.yaml').read_text())['networking']['disableDefaultCNI'])
         for name in ('production', 'feed-proof-abc', 'redpanda-proof-ABCDEF012345',
-                     'cni-proof-zzzzzzzzzzzz', '../feed-proof-012345abcdef'):
+                     'cni-proof-zzzzzzzzzzzz', 'messaging-proof-ABCDEF012345', '../feed-proof-012345abcdef'):
             with tempfile.TemporaryDirectory() as directory, patch.object(proof, 'command') as run:
                 scratch = proof.Path(directory)
                 with self.assertRaises(ValueError):

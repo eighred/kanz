@@ -208,7 +208,7 @@ def main():
                 dn=result.get('subjectDN','')
                 if not isinstance(dn,str) or not re.fullmatch(subject_pattern(sa),dn):
                     raise ValueError('unexpected observed workload subject')
-                if result!={'passed':True,'mode':mode,'identity':identity(sa),'subjectDN':dn,'renewed':mode=='publish','sourceVersion':sha}:
+                if result!={'passed':True,'mode':mode,'identity':identity(sa),'subjectDN':dn,'renewed':mode=='publish','boundedReplay':mode=='publish','sourceVersion':sha}:
                     raise ValueError('missing exact positive identity evidence')
                 evidence['observations'].append(dict(result,case=case))
             pods=json.loads(k('get','pods','-A','-o','json'))['items']
@@ -220,7 +220,7 @@ def main():
                 try:
                     logs=k('-n','kanz-services','logs','job/'+case)
                     match=re.fullmatch(r'PROBE_FAILED_STAGE:([a-z-]+) CLASS:(kafka--?[0-9]{1,5}|tls-certificate|timeout|eof|unexpected-success|other)',logs)
-                    allowed={'configuration','svid','kafka','tls-handshake','bootstrap-topics','bootstrap-acls','own-topic','own-topic-direct','cross-topic-write','cross-topic-read','acl-admin-denial','renewal','renewed-topic','renewed-topic-denial','ungranted-denial','ungranted-write','ungranted-read','exact-records'}
+                    allowed={'configuration','svid','kafka','tls-handshake','bootstrap-topics','bootstrap-acls','own-topic','own-topic-direct','cross-topic-write','cross-topic-read','acl-admin-denial','renewal','renewed-topic','renewed-topic-denial','ungranted-denial','ungranted-write','ungranted-read','exact-records','bounded-replay','replay-peer-denial','renewed-bounded-replay'}
                     if match and match[1] in allowed:
                         evidence['probeFailureStage']=match[1]
                         evidence['probeFailureClass']=match[2]

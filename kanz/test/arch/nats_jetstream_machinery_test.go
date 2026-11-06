@@ -254,6 +254,7 @@ func bucketSvcOrCmd(calls []busConsumerCall) map[string]bool {
 // false positives this module contains.
 var natsClientSubscribeMethodArity = map[string]int{
 	"Subscribe":               4,
+	"SubscribeReady":          5,
 	"SubscribeBroadcast":      3,
 	"SubscribeBroadcastReady": 4,
 }

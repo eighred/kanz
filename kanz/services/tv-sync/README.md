@@ -96,22 +96,24 @@ migration Job or `RESTORE_VERIFIED` receipt alone is not this proof.
 
 An empty history or absent checkpoint is **not qualified restored state**. A
 fresh Tokyo database therefore needs a separately reviewed genesis/history
-bootstrap prerequisite. Current service startup marks readiness after launching
-consumers; it does not wait for a historical-backlog watermark. The canonical
-EXECUTION stream retains 24 hours, and durable consumer replay does not prove
+bootstrap prerequisite. Current startup waits for the initial durable pending
+and acknowledgement-pending backlog to drain; unresolved fold failures keep
+serving closed until the matching delivery succeeds. This barrier does not
+establish genesis or complete history. The canonical EXECUTION stream retains
+24 hours, and durable consumer replay does not prove
 coverage before retention. Establish the required source/history coverage and
 bootstrap readiness before activation; do not fabricate facts or use an empty
 database as evidence that an account never traded. This remains tracked under
 [#1410](https://github.com/eighred/kanz/issues/1410) and
 [#1413](https://github.com/eighred/kanz/issues/1413).
 
-CI requires seven real-PostgreSQL checkpoint/verifier cases, including an exact
+CI requires ten real-PostgreSQL checkpoint/verifier cases, including an exact
 checkpoint restart with subsequent fills/cancellation and P&L, restored bytes,
 tenant isolation, read-only enforcement and a concurrent append outside the
 captured snapshot and refusal of foreign rows under a permissive RLS policy.
 The precision regression refuses a resident 1e-10 execution rounded to zero by
-the existing production checkpoint encoder; this command does not repair that
-separately tracked checkpoint behavior.
+the legacy checkpoint encoder. The exact encoder below prevents new lossy
+checkpoints; the verifier cannot repair previously rounded data.
 Two required Linux secret-reader cases cover bounds and FIFO/CSI behavior.
 Those fixtures qualify the source behavior; they do not
 substitute for observing replay of the actual restored target with its matching
@@ -144,3 +146,138 @@ mixed-version rollout. Stop old writers before starting the new writer or
 restarting against its checkpoint; deploy matching schema, verifier and service
 versions. Protobuf wire compatibility alone does not make a mixed writer rollout
 safe. Existing live images and deployment configuration are unchanged here.
+
+### Startup readiness and retained history
+
+Broker endpoints return 503 until every configured OMS FACT and mark subscription
+has reached initial durable catch-up. The existing durable identity, queue group,
+delivery, deduplication, retry/DLQ and shutdown-drain behavior remain in use.
+Readiness waits for both pending and unacknowledged broker deliveries; merely
+launching a consumer or receiving its last message cannot open the API. Process
+cancellation closes readiness even if a catch-up callback races with shutdown.
+
+This is an initial transport barrier, not historical completeness or continuous
+broker-health attestation. Existing DLQ/ignored-monitor-fact behavior is unchanged.
+A drained retained stream cannot prove inception history: EXECUTION retains 24h,
+and an empty local fact log plus an empty stream is not a qualified empty fund.
+Fresh-genesis/history provenance and the serving tenant mapping remain separate
+activation prerequisites under #1410/#1413; this change grants no empty-book
+permission and does not replace the isolated restored-state verifier.
+
+### Append and checkpoint ordering
+
+Concurrent subject handlers serialize durable append, in-memory fold and delta
+publication in one process. The database wait uses a separate mutex so readers
+and checkpoints can continue to observe the last fully folded prefix. A later
+append cannot overtake an earlier committed insert whose response is delayed;
+otherwise a checkpoint could skip that earlier fact on restart. Mandatory local
+and real-PostgreSQL tests hold that response while taking a checkpoint, then
+verify the recovered position and final watermark. This is not a distributed
+writer lease, complete-history proof or permission to run multiple writers for
+the same tenant. The mutex alone cannot resolve an ambiguous append outcome;
+the durable-prefix recovery below supplies that separate boundary.
+
+Durable append uncertainty (#1410/#1413): live appends take a tenant transaction
+advisory lock in a separate statement before sequence allocation, and release it
+only when the transaction resolves. `BIGSERIAL` alone is not commit ordering.
+Every successful append, including duplicate delivery, replays the stored suffix
+after the local folded watermark. Stored bytes and knowledge times are retained;
+a partial replay error returns a retry while retaining only its completed prefix.
+An append error may mean committed: it does not fold or claim rollback. The next
+FACT delivery resolves the append boundary and repairs that prefix without polling.
+
+This is not a multi-writer lease or a repair for an already-invalid checkpoint.
+Stop/drain old append writers before starting this version: they do not take the
+new lock. Unresolved old transactions must finish first. Existing checkpoint
+completeness still requires the restored-history verifier and independently
+established history coverage; do not delete, relabel or trust a checkpoint merely
+because this fix is installed. No production handoff is performed by these tests.
+The PostgreSQL regression wraps a genuinely committed append with a lost-response
+error, and separately tests two database connections, lock timeout, rollback gaps
+and tenant isolation. It does not simulate a real network partition or prove a
+multi-replica deployment safe. All new cases are mandatory in replay CI evidence.
+
+The durable-prefix repair alone recovers on a subsequent successful delivery;
+it does not itself guarantee automatic redelivery. Before the retained-delivery
+change below, TV used `WithDLQ` with a single application attempt, which could
+park a transient error and leave its committed fact unfolded until another FACT
+arrived. The current TV-specific retained client supplies that redelivery path
+and gates serving while failures remain unresolved; actual NATS/PostgreSQL
+qualification is required before activation. Global delivery profiles are unchanged.
+
+### Retained FACT delivery and serving refusal
+
+TV now uses a dedicated order-FACT NATS client with the existing work timing and
+concurrency budget and unbounded delivery attempts. Its Consumer validates the
+actual effective profile used to create the durable, and retains transient
+failures without DLQ parking or a completed dedup claim. Price subscriptions
+keep their original finite profile; the global order profile and existing audit
+retained-delivery caller are unchanged. Terminal malformed bytes retain the
+existing DLQ policy. This does not extend stream retention or prove history that
+predates the retained source.
+
+The Broker API and readiness require initial durable catch-up, a live process,
+and no unresolved fold failure. Handler execution and readiness outcome update
+are serialized together. A success clears only the same tenant/event failure;
+unrelated delivery or a late catch-up callback cannot reopen serving. The map
+holds only hashed identities, is capped at 4096, and missing identity or overflow
+stays closed for that process. Panic also revokes serving before bus-owned panic
+handling. A connection loss stops the process instead of treating reconnect as
+freshness proof. Restart must rebuild and pass the durable catch-up barrier.
+Operations health remains separate; readiness and Broker responses expose only
+a bounded not-ready status, never event or tenant identifiers.
+
+Price filters require a literal first token disjoint from `order`; wildcard or
+empty roots and `order` roots refuse startup. This preserves the default market
+filters and literal custom price roots while avoiding a second NATS wildcard
+parser. Controlled single-writer handoff, complete-history qualification, and
+recovery of already-invalid checkpoints remain separate prerequisites. No live
+activation or new multi-replica ownership is established here.
+
+`TestTVRetainedFactsRecoverWithNATSAndPostgres` requires actual NATS plus a
+NOSUPERUSER/NOBYPASSRLS PostgreSQL role. It covers a committed append with an
+injected lost response, actual database lock timeout, unacknowledged durable
+restart, no-later-FACT redelivery, Broker 503/200, unchanged single durable fact,
+and a real terminal DLQ positive control. It does not inject a network partition
+into PostgreSQL. Required CI rejects skipped dependencies and requires every
+scenario; local source/unit checks alone are not operational acceptance.
+
+Existing finite TV durables keep the same group/name/filter. The existing bus
+`inspectExistingDurable` + `CreateOrUpdateConsumer` path already logs supported
+tuning drift and updates timing/delivery settings in place; it refuses a changed
+filter. The new code reuses that mechanism, never deletes/recreates a durable or
+falls back to 64. `TestRetainedProfilePreservesExistingDurableCursor` requires an
+actual 64-to-unbounded update with identical name/creation time and preserved ack
+floor, delivering only the pending suffix. Old consumers must be stopped first:
+an old process could reassert 64 on the same durable. This is a controlled source
+handoff requirement, not proof that any deployed estate has performed it.
+
+### Established stream revocation
+
+Readiness now lends each SSE response a serving generation. A failure, explicit
+readiness loss or process cancellation closes that generation without polling;
+recovery permits a new connection but never revives an old lease. Headers and
+delta writes recheck the exact lease under the revocation lock, covering a delta
+selected concurrently with failure and a failure/recovery before headers start.
+An unwired stream gate refuses rather than assuming healthy service.
+
+An already-started network write cannot retract bytes already in flight. Active
+writes have a five-second deadline while holding the lease, then clear it so an
+idle healthy stream retains its intended lifetime. Revocation waits for at most
+that bounded active write; new requests already see the closed readiness flag.
+No tenant/event identifiers are added to headers or error responses. Real HTTP
+regressions cover idle stream closure, stale header admission and recovery.
+Controlled callback tests cover old-lease refusal, cancellation and serialization
+with an in-flight write; they do not measure the five-second deadline against a
+slow network peer. This does not establish production rollout, history
+completeness or writer fencing.
+
+The retained-delivery qualification uses `TEST_TV_NATS_URL`, a dedicated real
+JetStream server with the canonical bootstrap and the same image ID as CI's
+shared broker. Ordinary bus and OMS proofs retain their existing broker. Both
+the mandatory TV lane and full race suite supply the dedicated endpoint; neither
+checker accepts a skipped configured proof. This isolates the assertion from
+other services that consume the same canonical subject and can independently
+park the same FACT. The failed shared-broker run observed the exact target FACT
+on DLQ, but did not establish which consumer parked it; isolation must earn a
+fresh actual pass, not retrospectively label that observation harmless.

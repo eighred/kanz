@@ -22,6 +22,15 @@ REQUIRED = {
     },
     "internal/shadowprocess": set(),
     "services/oms/tools/store-conformance": {
+        "TestRustOutboxQueue",
+        *{"TestRustOutboxQueue/" + case for case in (
+            "ordered-pages-and-schema-lock",
+            "raw-page-mark-age-parity", "owner-tenant-and-legacy-refusal",
+            "bounded-page-no-prefix", "mark-deferred-commit-unconfirmed",
+            "go-rust-lock-contention-cancel", "rust-go-lock-session-loss",
+            "cancel-transport-server-fallback",
+            "rust-enqueue-connected-owner",
+        )},
         "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity",
         "TestRustExecutionEconomics", "TestRustRepositoryTransactions",
         "TestRustRepositoryLifecycle",
@@ -35,6 +44,17 @@ REQUIRED = {
             "same-actor", "blank-actor", "case-binding", "malformed-digest", "previous-digest-binding",
             "approval-clock", "bad-nanos", "unknown-price", "currency-change", "unchanged-fee", "outside-decimal-domain",
         )},
+        "TestRustRecoveryAcknowledgements",
+        *{"TestRustRecoveryAcknowledgements/" + case for case in (
+            "go-differential-both-books-restart", "concurrent-last-ack-one-fact", "target-and-record-binding",
+            "outbox-and-commit-rollback", "tenant-same-case-positive", "corrupt-counts-refuse-before-claim", "missing-corrupt-and-unsafe-storage",
+        )},
+        *{"TestRustRecoveryAcknowledgements/target-and-record-binding/" + case for case in (
+            "order", "target", "payload", "execution", "tenant", "class", "schema", "status", "portfolio",
+        )},
+        *{"TestRustRecoveryAcknowledgements/corrupt-counts-refuse-before-claim/" + case for case in ("zero-expected", "extra-target")},
+        *{"TestRustRecoveryAcknowledgements/outbox-and-commit-rollback/" + case for case in ("outbox", "commit")},
+        *{"TestRustRecoveryAcknowledgements/missing-corrupt-and-unsafe-storage/" + case for case in ("state", "oversized-state", "case", "rls")},
         "TestRustRecoveryTransactions",
         *{"TestRustRecoveryTransactions/" + case for case in (
             "go-differential-terminal-restart", "zero-history-corrected", "approved-fee-go-differential",

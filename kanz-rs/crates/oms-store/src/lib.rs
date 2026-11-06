@@ -7,8 +7,10 @@ pub mod fee_subject;
 pub mod fee_wire;
 mod go_unicode;
 pub mod identity;
+pub mod outbox;
 pub mod queries;
 pub mod recovery;
+pub mod recovery_ack;
 use identity::{execution_key, same_execution};
 use kanz_oms_fold_shadow::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;
@@ -28,6 +30,7 @@ pub enum Error {
     IdentityConflict,
     FeeRevision,
     UnownedOutbox,
+    RecordNotOwned,
     Database,
     CommitUnconfirmed,
 }

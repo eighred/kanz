@@ -169,3 +169,73 @@ Source tests compare the entire changed durable projection with Go CommitRecover
 including terminal rounded-average and approved-fee cases, then inject missing
 facts, CAS races, target/outbox failures and deferred commit rejection. Actual
 Linux PostgreSQL evidence is required; local dependency skips do not qualify it.
+
+## Recovery acknowledgement transaction
+
+`recovery_ack::acknowledge_recovery` ports the durable acknowledgement tail of
+Go `order.Postgres.AcknowledgeRecovery`. The trusted caller supplies the canonical
+`ExecutionRecoveryApplied`, a closed `Book::{Ledger,Position}` enum and one
+mandatory typed corrected-status FACT. This is not an acknowledgement admission
+API: the existing Go `HandleRecoveryAck` retains tenant/FACT checks and derives
+book identity from the authenticated subject. A string in a payload must never
+select the book being acknowledged. No production caller, listener, DSN or
+transport switch is added.
+
+The transaction locks the tenant's case, verifies the exact execution target and
+payload/execution digests, inserts the idempotent book acknowledgement and closes
+the case only once the complete expected count is reached. Completion binds the
+prepared status FACT to the stored case and order and commits its outbox row with
+the acknowledgement and case update. The immutable target/execution evidence and
+order bytes remain unchanged. Replays of an already corrected case still require
+the matching target, and cannot emit a second corrected FACT. Stored case strings
+and order bytes are size-checked by SQL before transfer; missing, malformed or
+oversized stored data is an error, never a partial read or success. Shared scoped
+transactions require NOSUPERUSER/NOBYPASSRLS and forced tenant RLS.
+
+`CommitUnconfirmed` retains its existing meaning: transport failure around COMMIT
+is not proof of rollback. Reconcile the durable case, acknowledgement and outbox
+before retry; a deferred-trigger rollback test proves only its injected rejection.
+The fixed disposable fixture mode and independent Go/PostgreSQL comparisons cover
+both-book completion, duplicates, concurrent final acknowledgements, restart,
+tenant isolation, required FACT/target binding, corrupt storage and outbox/commit
+rollback. Linux actual-process evidence is mandatory; locally skipped dependency
+tests are not acceptance. The source-only migration still lacks recovery/admission
+orchestration, production writer fencing, approved handoff and runtime activation.
+
+Corruption refusal is intentionally stricter than the current Go acknowledgement
+owner: Rust checks `expected_ack_count = 2 * checkpoint` and the stored target
+count equals the checkpoint before inserting an acknowledgement. Go currently
+can commit a pending acknowledgement with a zero expected count or extra targets.
+The real differential fixture preserves this distinction explicitly; it does not
+claim malformed stored metadata is compatible or change Go production behavior.
+
+## OMS queue repository
+
+`outbox` implements the six existing Go Queue persistence operations over the
+same `oms` rows and canonical raw Record. Rust Create/Save/recovery enqueue into
+this table; the production Go relay, admission and publisher remain unchanged.
+This source port does not make Rust an authoritative running OMS.
+
+The session lock uses Go's database/table OID/tenant/service/key namespace.
+Its trusted connector must transfer both the Client and its own driver task to
+Session and supply the same connector TLS policy for protocol CancelRequest.
+Cancellation/drop dispatches a bounded CancelRequest and aborts the driver;
+closing a socket alone cannot interrupt a PostgreSQL backend waiting for a lock.
+Only verified unlock returns the session. No failed unlock can return a connection
+to a pool. Caller acquisition deadlines can be shorter; the server lock wait has
+a five-second ceiling so failed cancellation/shutdown cannot strand a backend.
+This is an explicit bounded refusal relative to Go's caller-context-only wait.
+Release also has a five-second deadline.
+
+Explicit compatibility limits: pages above 4096 rows or 1 MiB of combined dynamic
+fields refuse rather than return a prefix. Nonpositive limits retain Go's empty
+success. Failed-cause truncation retains the first 1000 bytes; a split UTF-8 scalar
+is refused, matching PostgreSQL's rejection of Go's resulting invalid string.
+The signed schema-version bits remain unchanged in Record. Missing ownership and
+unsafe RLS/roles refuse. Age distinguishes empty from present and saturates at Go's
+maximum duration. Mark operations use tenant-local transactions; failed COMMIT is
+CommitUnconfirmed, never a general rollback claim. Go's corresponding autocommit
+error is likewise not proof of rollback; retry keeps at-least-once semantics.
+
+Real Go/Rust PostgreSQL contention, cancellation, session-loss, raw-byte and mark
+proof is mandatory in `TestRustOutboxQueue`; local skipped tests do not qualify it.

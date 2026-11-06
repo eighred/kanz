@@ -1,0 +1,12 @@
+# Apply together with the staged policy only after qualification/promotion.
+# Recovery's clone_job_as_runner preserves Job.metadata, not template.metadata.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nats-bootstrap
+  namespace: kanz-messaging
+  labels: {app: nats-bootstrap}
+spec:
+  template:
+    metadata:
+      labels: {app: nats-bootstrap}
