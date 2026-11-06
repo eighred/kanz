@@ -16,6 +16,13 @@ def workflow_boundary(workflow):
 
 
 class MessagingTests(unittest.TestCase):
+    def test_v_prefixed_tool_versions(self):
+        for output in ('nats-server: v2.12.6', 'v2.12.6', '2.12.6'):
+            self.assertEqual(proof.tool_version(output), '2.12.6')
+        for output in ('unknown', '1.2.3 and 4.5.6', 'x' * 128 + '1.2.3'):
+            with self.assertRaises(ValueError):
+                proof.tool_version(output)
+
     def test_diagnostics_are_closed_and_do_not_export_raw_values(self):
         self.assertEqual(proof.nats_failure('', 'Permissions Violation for Publish to "$JS.SNAPSHOT.RESTORE.FIXTURE.random"'),
                          'restore_upload_permission_denied')

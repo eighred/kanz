@@ -144,6 +144,15 @@ def nats_failure(stdout, stderr):
     return 'unclassified_cli_failure'
 
 
+def tool_version(output):
+    # The binaries print v-prefixed versions; a word boundary before the
+    # number would incorrectly reject the normal "v2.x.y" form.
+    matches = re.findall(r'(?<![0-9.])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9.])', output)
+    if len(matches) != 1 or len(output) > 128:
+        raise ValueError('unrecognized pinned tool version')
+    return matches[0]
+
+
 def validate_report(report, source):
     required = {'baseline-unlabelled', 'baseline-redis', 'baseline-monitor', 'trap-control', 'bootstrap', 'nats-publish', 'ungranted-identity', 'backup-restore', 'redis-claim',
                 'unlabelled-nats', 'unlabelled-redis', 'wrong-namespace-nats', 'wrong-namespace-redis',
@@ -297,10 +306,7 @@ def main():
 
             for tool, version in [('server', k('-n', 'kanz-messaging', 'exec', 'nats-0', '-c', 'nats', '--', 'nats-server', '--version')),
                                   ('cli', nats('--version'))]:
-                matches = re.findall(r'\b([0-9]+\.[0-9]+\.[0-9]+)\b', version)
-                if len(matches) != 1 or len(version) > 128:
-                    raise ValueError('unrecognized pinned tool version')
-                report[tool + 'Version'] = matches[0]
+                report[tool + 'Version'] = tool_version(version)
 
             def stream_inventory():
                 names = json.loads(nats('stream', 'ls', '--json', '--all'))
