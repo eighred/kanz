@@ -1,0 +1,51 @@
+# Staged Tokyo singleton policy. Not referenced by any deployment overlay.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: tokyo-messaging-default-deny, namespace: kanz-messaging}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: tokyo-nats-clients, namespace: kanz-messaging}
+spec:
+  podSelector: {matchLabels: {app: nats}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kanz-services}}
+          podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [accounting, api-gateway, audit, compliance, identity, oms, risk-engine, venue-binance, venue-okx, web-bff, kanz-portfolio-bootstrap]
+        - podSelector: {matchLabels: {app: nats-bootstrap}}
+      ports: [{protocol: TCP, port: 4222}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: tokyo-redis-client, namespace: kanz-messaging}
+spec:
+  podSelector: {matchLabels: {app: redis}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kanz-services}}
+          podSelector: {matchLabels: {app: api-gateway}}
+      ports: [{protocol: TCP, port: 6379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: tokyo-bootstrap-egress, namespace: kanz-messaging}
+spec:
+  podSelector: {matchLabels: {app: nats-bootstrap}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app: nats}}
+      ports: [{protocol: TCP, port: 4222}]
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]

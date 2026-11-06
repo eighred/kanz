@@ -18,6 +18,10 @@ use tokio_postgres::{config::Host, NoTls};
 struct Input {
     mode: String,
     #[serde(default)]
+    acknowledgement: String,
+    #[serde(default)]
+    book: String,
+    #[serde(default)]
     case_version: i64,
     #[serde(default)]
     history_digest: String,
@@ -170,6 +174,7 @@ async fn run(input: Input) -> Result<Value, ()> {
             | "list-by-portfolio"
             | "fee-revision"
             | "recovery"
+            | "recovery-ack"
     ) || !input.schema.starts_with("oms_store_")
         || input.schema.len() > 63
         || !input
@@ -196,6 +201,18 @@ async fn run(input: Input) -> Result<Value, ()> {
             )
             .await
             .map_err(|_| ())?;
+        if input.mode=="recovery-ack" {
+            use kanz_oms_fold_shadow::proto::order::v1::ExecutionRecoveryApplied;
+            use kanz_oms_store::recovery_ack::{acknowledge_recovery,Book};
+            let raw=bytes(&input.acknowledgement)?;
+            if raw.len()>4096 || input.records.len()!=1 { return Err(()); }
+            let ack=ExecutionRecoveryApplied::decode(raw.as_slice()).map_err(|_|())?;
+            let book=match input.book.as_str(){"ledger"=>Book::Ledger,"position"=>Book::Position,_=>return Err(())};
+            let corrected=record(input.records.into_iter().next().ok_or(())?)?;
+            return Ok(match acknowledge_recovery(&mut client,&input.tenant,&ack,book,&corrected).await {
+                Ok(())=>json!({"status":"committed"}),Err(e)=>json!({"status":e.to_string()}),
+            });
+        }
         if input.mode=="recovery" {
             let batch=kanz_oms_store::recovery::PreparedRecovery {
                 state:bytes(&input.state)?,order_version:input.expected_version,case_version:input.case_version,

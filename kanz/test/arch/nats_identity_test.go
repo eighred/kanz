@@ -513,7 +513,7 @@ func TestReadOnlyObserversCannotPublish(t *testing.T) {
 // such parameter because it returns a bool, not paths.
 //
 // It matches a *ast.CallExpr whose Fun is a *ast.SelectorExpr with
-// Sel.Name == "Subscribe" AND len(call.Args) == 4.
+// Subscribe with four arguments, or durable SubscribeReady with five.
 //
 // RATIONALE: the bus grouped subscribe signature is
 // Subscribe(ctx, subject, group string, h EventHandler) = 4 args (both
@@ -546,7 +546,7 @@ func groupedSubscribeCallsInDir(t *testing.T, root, dir string) []string {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Subscribe" || len(call.Args) != 4 {
+			if !ok || !((sel.Sel.Name == "Subscribe" && len(call.Args) == 4) || (sel.Sel.Name == "SubscribeReady" && len(call.Args) == 5)) {
 				return true
 			}
 			out = append(out, rel+":"+strconv.Itoa(fset.Position(call.Pos()).Line))

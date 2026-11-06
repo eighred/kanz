@@ -29,7 +29,8 @@ import (
 
 // Handler serves the Broker-API endpoints over a projection.
 type Handler struct {
-	proj *projection.Projection
+	proj       *projection.Projection
+	streamGate StreamGate
 }
 
 // New returns a Handler over the projection.
@@ -158,6 +159,15 @@ func (h *Handler) windowed(tenant, accountID, key string, list any) map[string]a
 // receives order/execution/position/state deltas as they fold. It is scoped to
 // the caller's tenant + the account, so no cross-tenant update ever leaks.
 func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
+	if h.streamGate == nil {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	lease, ready := h.streamGate.AcquireStream()
+	if !ready {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
 	tenant, ok := auth.RequireCallerTenant(w, r)
 	if !ok {
 		return
@@ -169,8 +179,7 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 		writeReadErr(w, err)
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
@@ -208,16 +217,50 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	deltas, cancel := h.proj.Subscribe(tenant, accountID)
 	defer cancel()
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	controller := http.NewResponseController(w)
+	// Each active write is bounded, but idle streaming remains unbounded. Holding
+	// the lease across this write orders it against revocation; bytes already in
+	// flight cannot be retracted. Clear the deadline after each completed write.
+	write := func(body func() error) error {
+		return lease.Write(func() error {
+			if err := r.Context().Err(); err != nil {
+				return err
+			}
+			if err := controller.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				return err
+			}
+			err := body()
+			if err == nil {
+				err = controller.Flush()
+			}
+			resetErr := controller.SetWriteDeadline(time.Time{})
+			if err != nil {
+				return err
+			}
+			return resetErr
+		})
+	}
+	started := false
+	if err := write(func() error {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+		started = true
+		return nil
+	}); err != nil {
+		if !started {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+		}
+		return
+	}
 
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-lease.Done():
 			return
 		case d, open := <-deltas:
 			if !open {
@@ -227,8 +270,9 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", d.Kind, b)
-			flusher.Flush()
+			if err := write(func() error { _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", d.Kind, b); return err }); err != nil {
+				return
+			}
 		}
 	}
 }
