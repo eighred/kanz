@@ -16,6 +16,14 @@ def workflow_boundary(workflow):
 
 
 class MessagingTests(unittest.TestCase):
+    def test_diagnostics_are_closed_and_do_not_export_raw_values(self):
+        self.assertEqual(proof.nats_failure('', 'Permissions Violation for Publish to "$JS.SNAPSHOT.RESTORE.FIXTURE.random"'),
+                         'restore_upload_permission_denied')
+        self.assertEqual(proof.nats_failure('', 'nats: Authorization Violation'), 'principal_authorization_denied')
+        self.assertEqual(proof.nats_failure('', 'Permissions Violation for Publish to "other"'), 'other_subject_permission_denied')
+        self.assertEqual(proof.nats_failure('private unknown diagnostic', ''), 'unclassified_cli_failure')
+        self.assertEqual(proof.nats_failure('', 'x' * 32768 + 'Permissions Violation $JS.SNAPSHOT.RESTORE.X'), 'unclassified_cli_failure')
+
     def test_mandatory_read_only_workflow(self):
         workflow = proof.yaml.safe_load((proof.ROOT / '.github/workflows/tokyo-messaging-proof.yml').read_text())
         workflow_boundary(workflow)

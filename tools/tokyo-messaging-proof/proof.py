@@ -125,6 +125,25 @@ def runner_from_job(job):
     return result
 
 
+def nats_failure(stdout, stderr):
+    # Closed categories only: never return raw diagnostics, upload subjects,
+    # certificate paths or payloads. Unrecognized failures stay failures.
+    message = (stdout[:32768] + '\n' + stderr[:32768]).lower()
+    if 'permissions violation' in message and '$js.snapshot.restore.' in message:
+        return 'restore_upload_permission_denied'
+    if 'authorization violation' in message:
+        return 'principal_authorization_denied'
+    if 'permissions violation' in message:
+        return 'other_subject_permission_denied'
+    if 'already exist' in message or 'exists already' in message:
+        return 'stream_already_exists'
+    if 'expected backup.json' in message:
+        return 'backup_manifest_missing'
+    if 'timeout' in message or 'timed out' in message:
+        return 'operation_timeout'
+    return 'unclassified_cli_failure'
+
+
 def validate_report(report, source):
     required = {'baseline-unlabelled', 'baseline-redis', 'baseline-monitor', 'trap-control', 'bootstrap', 'nats-publish', 'ungranted-identity', 'backup-restore', 'redis-claim',
                 'unlabelled-nats', 'unlabelled-redis', 'wrong-namespace-nats', 'wrong-namespace-redis',
@@ -268,7 +287,20 @@ def main():
             # cluster, S3/KMS custody, or the production recovery orchestrator.
             report['stage'] = 'backup-restore'
             def nats(*args):
-                return k('-n', 'kanz-messaging', 'exec', 'nats-backup-runner', '-c', 'bootstrap', '--', 'nats', *args)
+                result = subprocess.run(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name,
+                    '-n', 'kanz-messaging', 'exec', 'nats-backup-runner', '-c', 'bootstrap', '--', 'nats', *args],
+                    capture_output=True, text=True, timeout=300, cwd=ROOT)
+                if result.returncode:
+                    report['natsFailure'] = nats_failure(result.stdout, result.stderr)
+                    raise RuntimeError('NATS CLI operation refused; sanitized category recorded')
+                return result.stdout.strip()
+
+            for tool, version in [('server', k('-n', 'kanz-messaging', 'exec', 'nats-0', '-c', 'nats', '--', 'nats-server', '--version')),
+                                  ('cli', nats('--version'))]:
+                matches = re.findall(r'\b([0-9]+\.[0-9]+\.[0-9]+)\b', version)
+                if len(matches) != 1 or len(version) > 128:
+                    raise ValueError('unrecognized pinned tool version')
+                report[tool + 'Version'] = matches[0]
 
             def stream_inventory():
                 names = json.loads(nats('stream', 'ls', '--json', '--all'))

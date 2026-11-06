@@ -14,7 +14,8 @@ var messagingStagingMarkers = map[string][]string{
 	"tools/tokyo-messaging-proof/proof.py": {
 		"feed.create_enforcing_cluster(name, scratch)",
 		"return feed.command(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name, *args]", "except TimeoutError:",
-		"subprocess.run(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name,",
+		"refused = subprocess.run(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name,",
+		"result = subprocess.run(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name,",
 		"nats('account', 'restore', '/tmp/fixture-backup')",
 		"if stream_inventory() != before:",
 		"if current['metadata']['uid'] != before_redis['metadata']['uid']:",
