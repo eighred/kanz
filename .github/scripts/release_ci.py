@@ -18,7 +18,9 @@ POLICY = {
     "rust-bond-shadow.yml": {"bond-shadow"},
     "rust-oms-fold.yml": {"fill-shadow"},
     "feed-identity-proof.yml": {"developmental-identity"},
+    "testnet-cni-proof.yml": {"disposable-cni"},
     "redpanda-identity-proof.yml": {"developmental-redpanda-identity"},
+    "valkey-migration.yml": {"retained-state"},
 }
 
 

@@ -30,6 +30,33 @@ def boundary(runtime, docker, workflow):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_shared_cluster_is_new_private_and_pinned(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'RUNNER_TEMP': directory}):
+            scratch = proof.Path(directory)
+            for prefix in ('feed-proof', 'cni-proof', 'redpanda-proof'):
+                name = prefix + '-012345abcdef'
+                with patch.object(proof, 'command') as run:
+                    proof.create_enforcing_cluster(name, scratch)
+                    calls = [call.args[0] for call in run.call_args_list]
+                    self.assertEqual(len(calls), 4)
+                    self.assertEqual(calls[0][:5], ['kind', 'create', 'cluster', '--name', name])
+                    self.assertIn(proof.NODE, calls[0])
+                    for call in calls:
+                        self.assertIn(str(scratch / 'kubeconfig'), call)
+                    for call in calls[1:]:
+                        self.assertIn('kind-' + name, call)
+                    self.assertIn('daemonset/cilium', calls[2])
+                    self.assertIn('--for=condition=Ready', calls[3])
+                    self.assertTrue(proof.yaml.safe_load((scratch / 'kind.yaml').read_text())['networking']['disableDefaultCNI'])
+        for name in ('production', 'feed-proof-abc', 'redpanda-proof-ABCDEF012345',
+                     'cni-proof-zzzzzzzzzzzz', '../feed-proof-012345abcdef'):
+            with tempfile.TemporaryDirectory() as directory, patch.object(proof, 'command') as run:
+                scratch = proof.Path(directory)
+                with self.assertRaises(ValueError):
+                    proof.create_enforcing_cluster(name, scratch)
+                run.assert_not_called()
+                self.assertFalse((scratch / 'kind.yaml').exists())
+
     def test_source_boundary_and_mutations(self):
         values=[(proof.ROOT/path).read_text() for path in (
             'kanz-rs/crates/market-feed/src/runtime.rs','tools/feed-identity/Dockerfile','.github/workflows/feed-identity-proof.yml')]

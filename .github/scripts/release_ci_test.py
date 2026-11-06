@@ -154,7 +154,9 @@ class EvidenceTests(unittest.TestCase):
             (self.root / ".github/workflows" / filename).write_text("fixture")
         self.assertEqual(gate.requirements(self.root), gate.POLICY)
         self.assertEqual(gate.POLICY["rust-bond-shadow.yml"], {"bond-shadow"})
+        self.assertEqual(gate.POLICY["testnet-cni-proof.yml"], {"disposable-cni"})
         self.assertEqual(gate.POLICY["redpanda-identity-proof.yml"], {"developmental-redpanda-identity"})
+        self.assertEqual(gate.POLICY["valkey-migration.yml"], {"retained-state"})
         with self.assertRaises(gate.EvidenceError): self.verify()
         for filename, jobs in gate.POLICY.items():
             with self.subTest(filename=filename), patch.object(gate, "requirements", return_value={filename: jobs}):
