@@ -246,7 +246,8 @@ func (s *Service) retireIfFinished(ctx context.Context, parentSt *orderpb.OrderS
 		return nil // somebody else finished it
 	}
 
-	next, _, err := Expire(st, now)
+	next, pureUnfilled, err := Expire(st, now)
+	observeTerminalFold(ctx, s.terminalFoldObserver, "expire", "schedule", ver, st, next, pureUnfilled, now, err)
 	if err != nil {
 		return err
 	}

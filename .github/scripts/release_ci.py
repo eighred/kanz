@@ -21,6 +21,7 @@ POLICY = {
     "testnet-cni-proof.yml": {"disposable-cni"},
     "k3s-cni-migration.yml": {"disposable-transition"},
     "redpanda-identity-proof.yml": {"developmental-redpanda-identity"},
+    "valkey-migration.yml": {"retained-state"},
 }
 
 

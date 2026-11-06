@@ -11,6 +11,7 @@ on:
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
       - '.github/scripts/check_oms_fold_evidence.py'
+      - '.github/scripts/test_check_oms_fold_evidence.py'
       - '.github/workflows/rust-oms-fold.yml'
   push:
     branches: [main]
@@ -23,6 +24,7 @@ on:
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
       - '.github/scripts/check_oms_fold_evidence.py'
+      - '.github/scripts/test_check_oms_fold_evidence.py'
       - '.github/workflows/rust-oms-fold.yml'
   workflow_dispatch:
 
@@ -36,8 +38,30 @@ jobs:
   fill-shadow:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        # Official postgres:16-alpine OCI index, resolved 2026-11-05 (16.15).
+        image: postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9
+        env:
+          POSTGRES_USER: kanz
+          POSTGRES_PASSWORD: kanz
+          POSTGRES_DB: kanz
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kanz"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Provision disposable non-bypass transaction owner
+        env:
+          PGPASSWORD: kanz
+        run: |
+          psql -h localhost -U kanz -d kanz -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE kanzapp LOGIN PASSWORD 'kanz' NOSUPERUSER NOBYPASSRLS;" \
+            -c "CREATE DATABASE kanzapp OWNER kanzapp;"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: kanz/go.mod
@@ -61,6 +85,9 @@ jobs:
           cargo test --locked -p kanz-oms-fold-shadow
           cargo clippy --locked -p kanz-oms-fold-shadow --all-targets -- -D warnings
           cargo build --locked -p kanz-oms-fold-shadow
+          cargo test --locked -p kanz-oms-store --all-targets
+          cargo clippy --locked -p kanz-oms-store --all-targets -- -D warnings
+          cargo build --locked -p kanz-oms-store --example fixture
       - name: Verify source boundaries and Go transition owners
         working-directory: kanz
         run: |
@@ -71,10 +98,14 @@ jobs:
         env:
           KANZ_OMS_FOLD_BIN: ${{ github.workspace }}/kanz-rs/target/debug/kanz-oms-fold-shadow
           KANZ_OMS_FOLD_VERSION: ${{ github.sha }}
+          KANZ_OMS_STORE_BIN: ${{ github.workspace }}/kanz-rs/target/debug/examples/fixture
+          KANZ_OMS_STORE_VERSION: ${{ github.sha }}
+          TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
         run: |
           set -o pipefail
-          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
+          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/tools/store-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
+          python3 -B -m unittest discover -s ../.github/scripts -p test_check_oms_fold_evidence.py
           python3 ../.github/scripts/check_oms_fold_evidence.py "$RUNNER_TEMP/oms-fold.jsonl"
       - name: Preserve transition execution evidence
         if: always()

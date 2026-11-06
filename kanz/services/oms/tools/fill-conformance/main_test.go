@@ -111,11 +111,11 @@ func (b *limitedOutput) Write(p []byte) (int, error) {
 	}
 	return b.data.Write(p)
 }
-func runWorker(t *testing.T, bin string, input []byte) ([]byte, error) {
+func runWorker(t *testing.T, bin string, input []byte, args ...string) ([]byte, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin)
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = t.TempDir()
 	cmd.Stdin = bytes.NewReader(input)
 	cmd.WaitDelay = time.Second

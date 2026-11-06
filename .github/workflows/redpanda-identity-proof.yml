@@ -1,0 +1,93 @@
+name: redpanda-identity-proof
+on:
+  pull_request:
+    paths:
+      - 'tools/redpanda-identity/**'
+      - 'tools/feed-identity/**'
+      - 'kanz/tools/redpandaidentity/**'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+      - 'kanz/infra/security/spire/**'
+      - '.github/workflows/redpanda-identity-proof.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/redpanda-identity/**'
+      - 'tools/feed-identity/**'
+      - 'kanz/tools/redpandaidentity/**'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+      - 'kanz/infra/security/spire/**'
+      - '.github/workflows/redpanda-identity-proof.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+jobs:
+  developmental-redpanda-identity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: '1.69.0'
+      - name: Generate existing canonical SDK
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - name: Verify probe boundaries
+        working-directory: kanz
+        run: |
+          go test -p 1 ./tools/redpandaidentity -count=1
+          go vet ./tools/redpandaidentity
+          test -z "$(gofmt -l tools/redpandaidentity/*.go)"
+      - name: Lint probe with repository policy
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          install-mode: goinstall
+          version: v2.12.2
+          working-directory: kanz
+          args: --timeout=5m ./tools/redpandaidentity/...
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 -B -m unittest discover -s tools/redpanda-identity -p 'test_*.py'
+      - run: bash tools/feed-identity/install.sh
+      - name: Authenticate private mirrored builder reads
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Qualify real SPIRE subjects and Redpanda ACLs
+        run: python3 -B tools/redpanda-identity/qualify.py
+      - name: Remove disposable clusters after interruption
+        if: always()
+        run: |
+          if command -v kind >/dev/null; then
+            while IFS= read -r cluster; do
+              if [[ "$cluster" =~ ^redpanda-proof-[0-9a-f]{12}$ ]]; then
+                kind delete cluster --name "$cluster"
+              fi
+            done < <(kind get clusters)
+          fi
+      - name: Remove registry authentication
+        if: always()
+        run: docker logout ghcr.io
+      - name: Preserve sanitized developmental evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redpanda-identity-proof
+          path: ${{ runner.temp }}/redpanda-identity.json
+          if-no-files-found: error

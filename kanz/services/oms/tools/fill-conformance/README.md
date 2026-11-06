@@ -1,4 +1,4 @@
-# Fill-fold conformance
+# Aggregate-fold conformance
 
 This diagnostic corpus checks the existing Go `order.ApplyFill` against exact
 rational expectations, then sends fresh canonical protobuf requests to the
@@ -36,3 +36,10 @@ local skip is not Rust execution evidence. Linux CI must require the test to
 finish without skips. Processes have bounded input/output, ten-second deadline,
 scrubbed environment and temporary working directory. This supervises a trusted
 installed test binary; it is not an operating-system sandbox.
+
+Cancel/Expire additionally cover 108 independent status and optional-quantity
+cases, actual fill-to-terminal replay, and closed protocol refusals through
+the same binary's fixed --terminal mode. The evidence checker requires these
+actual-process tests without skips. The PostgreSQL transaction suite continues
+to qualify Rust fill candidates with existing Go cancellation; it does not
+prove terminal Rust candidates were committed or transfer write authority.

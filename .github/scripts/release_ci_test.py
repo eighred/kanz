@@ -157,6 +157,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(gate.POLICY["testnet-cni-proof.yml"], {"disposable-cni"})
         self.assertEqual(gate.POLICY["k3s-cni-migration.yml"], {"disposable-transition"})
         self.assertEqual(gate.POLICY["redpanda-identity-proof.yml"], {"developmental-redpanda-identity"})
+        self.assertEqual(gate.POLICY["valkey-migration.yml"], {"retained-state"})
         with self.assertRaises(gate.EvidenceError): self.verify()
         for filename, jobs in gate.POLICY.items():
             with self.subTest(filename=filename), patch.object(gate, "requirements", return_value={filename: jobs}):

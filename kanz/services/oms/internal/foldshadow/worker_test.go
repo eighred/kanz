@@ -68,13 +68,13 @@ func TestFoldResultBindingAndUnknowns(t *testing.T) {
 func TestQueueDetachedAndBounded(t *testing.T) {
 	c := fixture(t)
 	statuses := []string{}
-	w := &Worker{done: make(chan struct{}), queue: make(chan order.FillFoldCapture, 1), observe: func(s string) { statuses = append(statuses, s) }}
+	w := &Worker{done: make(chan struct{}), queue: make(chan capturedWork, 1), observe: func(s string) { statuses = append(statuses, s) }}
 	w.Submit(c)
 	c.State.OrderId = "mutated"
 	c.Fill.Quantity.Coefficient = 9
 	c.Candidate.OrderId = "mutated"
 	queued := <-w.queue
-	if queued.State.OrderId != "order" || queued.Fill.Quantity.Coefficient != 2 || queued.Candidate.OrderId != "order" {
+	if queued.fill.State.OrderId != "order" || queued.fill.Fill.Quantity.Coefficient != 2 || queued.fill.Candidate.OrderId != "order" {
 		t.Fatal("queue aliases caller")
 	}
 	w.queue <- queued
