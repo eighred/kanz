@@ -16,6 +16,7 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
   schedule:
     - cron: '36 12 * * 2'
 
@@ -136,7 +137,21 @@ jobs:
         echo '  make release'
         exit 1
 
+    - name: Test zero-result verdict boundary
+      run: python3 -m unittest discover -s .github/scripts -p codeql_verdict_test.py
+
     - name: Perform CodeQL Analysis
+      id: analyze
       uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
       with:
         category: "/language:${{matrix.language}}"
+        skip-queries: false
+        wait-for-processing: true
+
+    - name: Require zero CodeQL results from this analysis
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ANALYZE_OUTCOME: ${{ steps.analyze.outcome }}
+        SARIF_DIRECTORY: ${{ steps.analyze.outputs.sarif-output }}
+        SARIF_ID: ${{ steps.analyze.outputs.sarif-id }}
+      run: python3 .github/scripts/codeql_verdict.py --language '${{ matrix.language }}'

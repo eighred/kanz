@@ -45,6 +45,36 @@ successful attempt, another workflow's check name or an ancestor's green run
 cannot substitute. For path-filtered runtime workflows, dispatch their existing
 read-only workflow on current main and wait for success **before** creating the
 release tag. No ancestor fallback is provided for older source lacking proof.
+The policy now enumerates 16 canonical workflows. The core, CodeQL, security and
+Terraform workflow files are mandatory regular files; deleting one refuses release.
+Security additionally requires
+`security.yml` / `gitleaks`, `secret-scan-selftest`, **and** `dependency-scan`;
+run its existing manual dispatch on the exact main SHA before tagging, because
+push runs intentionally skip dependency scanning. `terraform-testnet.yml` /
+`terraform-testnet` retains its existing path-sensitive behavior. `codeql.yml`
+requires all four `Analyze (...)` jobs (actions, Go, JavaScript/TypeScript, Python).
+Skipped/unlicensed CodeQL is missing release evidence, never a clean scan.
+
+Each CodeQL job now applies an explicit **zero reported results** policy, including
+suppressed/dismissed or baseline-absent results. A successful analysis/upload is
+not itself a clean verdict. The bounded checker binds the current pinned action's
+successful outcome, SARIF output digest and upload ID to processed GitHub evidence
+for the same checkout SHA, ref, language and category. It requires the reviewed
+query-pack rule IDs observed with CodeQL 2.27.4 at query revision
+`1be292a1e54696ca543b4ad0f9b4537b9687caa7` (17/34/87/43 rules respectively);
+additional rules are accepted, removed rules require source review. It preserves
+the default query suite and refuses absent, malformed, partial or additional
+reports. JavaScript's canonical report filename is `javascript.sarif`, while the
+workflow category remains `javascript-typescript`. Current output uses extension
+query packs, not driver.rules; GitHub's SARIF projection omits invocations. Actual
+successful pinned-action execution and processed upload supply that boundary;
+local invocation records, when emitted, must also report success. This does not
+prove compiler honesty or grant trust to a fabricated standalone SARIF file.
+Only bounded identities/counts/digests are logged, not findings or source snippets.
+CodeQL's existing security-events permission provides the readback; the release
+job gains no permission. Offline fixtures and current API-shape readback are not
+a substitute for the first actual Linux execution of this new gate.
+
 API pagination is bounded and fails closed on truncation or changing evidence.
 This is a checked evidence snapshot, not a lock preventing later CI reruns.
 The REST [workflow-run](https://docs.github.com/en/rest/actions/workflow-runs)
