@@ -22,6 +22,22 @@ def workflow_boundary(workflow):
 
 
 class MessagingTests(unittest.TestCase):
+    def test_metrics_response_declares_supported_prometheus_protocol(self):
+        with patch('http.server.HTTPServer') as server:
+            exec(proof.METRICS, {})
+        handler_type = server.call_args.args[1]
+        handler = object.__new__(handler_type)
+        headers, status = {}, []
+        handler.send_response = status.append
+        handler.send_header = headers.__setitem__
+        handler.end_headers = lambda: None
+        handler.wfile = io.BytesIO()
+        handler.do_GET()
+        self.assertEqual(status, [200])
+        self.assertEqual(headers['Content-Type'], 'text/plain; version=0.0.4; charset=utf-8')
+        self.assertEqual(handler.wfile.getvalue(), b'# TYPE fixture_ready gauge\nfixture_ready 1\n')
+        self.assertEqual(int(headers['Content-Length']), len(handler.wfile.getvalue()))
+
     def test_shutdown_requires_authenticated_clean_eof_from_separate_client(self):
         class Socket:
             def __init__(self, replies):
