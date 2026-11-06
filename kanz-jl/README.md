@@ -99,3 +99,69 @@ to promote the candidate.
 Primary API/version references: [Julia downloads](https://julialang.org/downloads/),
 [ProtoBuf.jl reference](https://juliaio.github.io/ProtoBuf.jl/dev/reference/),
 [ProtoBuf.jl package](https://github.com/JuliaIO/ProtoBuf.jl).
+
+### Actual-image advisory qualification (source only)
+
+The additive `qualification/advisory.py` step consumes the successful OCI
+qualification's exact local image ID; it neither publishes nor executes another
+worker image. It verifies the reviewed Trivy0.72.0 and Syft1.56.0 release archive
+checksums, records executable hashes, downloads a fresh advisory database and
+records its SHA256 and update/download timestamps. The same database snapshot is
+used throughout the bounded scan; a stale/missing/changed database refuses.
+
+Trivy scans the actual image. Its Julia report and generated SPDX identities must
+contain all seven locked UUID/version pairs, including the three external
+packages whose installed Git trees were independently checked in the isolated
+image. Those three names are additionally bound to their reviewed General
+registry UUIDs. Missing/duplicate/substituted inventory, suppressed findings or
+any known advisory in the worker's Julia dependency closure refuses. Critical
+findings elsewhere in the actual image also refuse; lower-severity findings are
+retained as public projected evidence, never described as absent. A separate
+manifest-only HTTP1.10.15 fixture must detect CVE-2025-52479/JLSEC-2025-1 using the
+same database. No vulnerable package is installed or executed.
+
+Syft must identify the actual Julia1.13.3 binary in that same image and provides
+runtime/OS package inventory. Raw reports can contain image configuration, so
+they remain in a temporary directory; the artifact contains only projected public
+package/advisory/tool/database identities. Scanner subprocesses inherit no GitHub
+or application credentials. Existing images and shared caches remain untouched; only the new private scanner
+scratch directory is removed.
+
+This is partial advisory qualification, **not release clearance**. Trivy's Julia
+source supports Manifest/Project dependency graphs and advisory lookup, while
+Syft1.56's Julia support is a binary classifier, not a Julia dependency cataloger.
+JLSEC covers General registry packages and explicitly warns that artifact/JLL
+advisories are incomplete. Inventory of four bundled stdlibs, the Julia runtime
+and native libraries does not establish complete advisory coverage for them.
+Those coverage limits remain a release blocker under #1413; the standard release
+matrix, signing policy, production transport and Go authority are unchanged.
+
+Primary pinned evidence:
+- [Trivy0.72 Julia support](https://github.com/aquasecurity/trivy/blob/v0.72.0/docs/guide/coverage/language/julia.md)
+- [Trivy0.72 manifest UUID parser](https://github.com/aquasecurity/trivy/blob/v0.72.0/pkg/dependency/parser/julia/manifest/parse.go)
+- [Trivy0.72 Julia advisory driver](https://github.com/aquasecurity/trivy/blob/v0.72.0/pkg/detector/library/driver.go)
+- [Syft1.56 binary classifiers](https://github.com/anchore/syft/blob/v1.56.0/syft/pkg/cataloger/binary/classifiers.go)
+- [JLSEC scope and limitations](https://github.com/JuliaLang/SecurityAdvisories.jl#scope)
+
+Syft's pinned stereoscope provider reports a **config digest**, which is not
+necessarily Docker29's manifest/index image ID. The qualification creates a
+unique local alias only after successful absence readback, verifies its Docker
+ID equals the qualified image ID, then reuses the existing strict Docker-save
+single-manifest/config parser from tv-sync's isolation harness. The exported
+content-addressed config bytes must hash correctly and describe linux/amd64;
+Syft must report that exact config digest. The alias is checked again after
+export. This is not a label-only or cross-kind digest comparison. Only validated
+IDs/version/type are projected for diagnostics; config contents remain private.
+
+The runtime image excludes five complete upstream development directories:
+`share/julia/base/JuliaSyntax/docs`, `share/julia/stdlib/v1.13/TOML/docs`,
+`share/julia/stdlib/v1.13/TOML/benchmark`, `share/julia/stdlib/v1.13/Tar/test`,
+and `share/julia/test`. Their bundled documentation, benchmark and deliberately
+invalid test environments are not the worker environment. The pinned archive's
+runtime source, libraries, standard libraries and license remain; the worker's
+own goldens remain in the qualification image. The actual image probe verifies
+these directories are absent and records the exact set. This changes packaged
+content rather than suppressing scanner results: the whole image still passes
+through the same scan, and any remaining CRITICAL advisory refuses qualification.
+The failed pre-removal scan is retained in PR #1472; its development manifests
+do not by themselves establish that those historical native binaries were loaded.

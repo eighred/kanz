@@ -89,6 +89,7 @@ class QualificationTests(unittest.TestCase):
                          'packages': {'ProtoBuf': {'version': '1.3.0', 'treeSHA1': 'c' * 40}},
                          'generated': {'contract.jl': hashlib.sha256(b'canonical fixture').hexdigest()},
                          'runtimeExecutableSHA256': 'd' * 64,
+                         'excludedDevelopmentEnvironments': proof.EXCLUDED_DEVELOPMENT_ENVIRONMENTS,
                          'sources': {'qualification/isolation.jl': hashlib.sha256(Path(proof.__file__).with_name('isolation.jl').read_bytes()).hexdigest()}}
             with patch.object(proof, 'ROOT', root):
                 self.check_inventory_mutations(inventory)
@@ -107,7 +108,7 @@ class QualificationTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 proof.validate_report(changed, 'b' * 40, 'd' * 64)
         for field in ('runtime', 'sourceSHA', 'projectSHA256', 'manifestSHA256', 'packages',
-                      'sources', 'generated', 'runtimeExecutableSHA256'):
+                      'sources', 'generated', 'runtimeExecutableSHA256', 'excludedDevelopmentEnvironments'):
             for replacement in (None, {}, 'wrong'):
                 changed = copy.deepcopy(report)
                 changed['inventory'][field] = replacement
