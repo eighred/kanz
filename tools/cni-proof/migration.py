@@ -48,6 +48,7 @@ def runtime_diagnostic(message):
     if "not a shared or slave mount" in value or "not a shared mount" in value:
         for path, category in (("/sys/fs/bpf", "bpffs_not_shared"),
                                ("/run/cilium/cgroupv2", "cgroup_not_shared"),
+                               ("/var/run/netns", "netns_not_shared"),
                                ("/run/cilium/netns", "netns_not_shared")):
             if path in value:
                 return category
@@ -75,15 +76,20 @@ def mount_inventory(raw):
 
 
 def private_mount_boundary(before, after=None, new_id=None, *, target="/sys/fs/bpf", filesystem="bpf"):
-    if (target, filesystem) not in {("/sys/fs/bpf", "bpf"), ("/run/cilium/cgroupv2", "cgroup2")}:
+    if (target, filesystem) not in {("/sys/fs/bpf", "bpf"), ("/run/cilium/cgroupv2", "cgroup2"),
+                                     ("/var/run/netns", "tmpfs"), ("/run/netns", "tmpfs")}:
         raise proof.ProofError("unapproved_fixture_mount")
     if not {"/", "/sys"}.issubset({row[0] for row in before.values()}):
         raise proof.ProofError("mount_ancestors_unknown")
     for path, _, tags in before.values():
         if (path == target or target.startswith(path.rstrip("/") + "/")) and tags:
             raise proof.ProofError("mount_ancestor_not_private")
-        if path == target:
+        if path == target or path.startswith(target + "/"):
             raise proof.ProofError("preexisting_fixture_mount_refused")
+    if filesystem == "tmpfs":
+        parent = target.rsplit("/", 1)[0]
+        if len([row for row in before.values() if row == (parent, "tmpfs", frozenset())]) != 1:
+            raise proof.ProofError("netns_parent_not_private_tmpfs")
     if after is None:
         return None
     matches = [(identity, row) for identity, row in after.items() if row[0] == target]
@@ -376,6 +382,30 @@ class Fixture:
         private_mount_boundary(before, shared, identity, target=target, filesystem=filesystem)
         self.ownership()
 
+    def prepare_private_netns(self):
+        # The chart consumes the node's /var/run/netns. Bind only an empty
+        # directory on this fixture's private tmpfs; never hide live handles.
+        self.stage = "cilium_private_netns_preflight"
+        self.ownership()
+        parent = self.inside("readlink", "-f", "/var/run")
+        if parent not in ("/run", "/var/run"):
+            raise proof.ProofError("netns_parent_unexpected")
+        target = parent + "/netns"
+        before = mount_inventory(self.inside("cat", "/proc/self/mountinfo"))
+        private_mount_boundary(before, target=target, filesystem="tmpfs")
+        # Fixed positional path, no interpolation. Refuse symlinks, non-directory
+        # entries and existing namespace handles before creating a self-bind.
+        self.inside("sh", "-ceu", 'test ! -L "$1"; if test -e "$1"; then test -d "$1"; else mkdir "$1"; fi; entries=$(find "$1" -mindepth 1 -maxdepth 1 -print -quit); test -z "$entries"', "netns-preflight", target)
+        self.stage = "cilium_private_netns_mount"
+        self.inside("mount", "--bind", target, target)
+        mounted = mount_inventory(self.inside("cat", "/proc/self/mountinfo"))
+        identity = private_mount_boundary(before, mounted, target=target, filesystem="tmpfs")
+        self.inside("mount", "--make-shared", target)
+        self.stage = "cilium_private_netns_verify"
+        shared = mount_inventory(self.inside("cat", "/proc/self/mountinfo"))
+        private_mount_boundary(before, shared, identity, target=target, filesystem="tmpfs")
+        self.ownership()
+
     def switch_to_cilium(self):
         self.stage = "cilium_quiesce_system"
         self.quiesce_system()
@@ -394,6 +424,7 @@ class Fixture:
         self.inside("sh", "-ceu", "for link in flannel.1 cni0; do if ip link show \"$link\" >/dev/null 2>&1; then ip link delete \"$link\"; fi; done")
         self.prepare_private_mount("/sys/fs/bpf", "bpf")
         self.prepare_private_mount("/run/cilium/cgroupv2", "cgroup2")
+        self.prepare_private_netns()
         self.stage = "cilium_install"
         self.inside("helm", "install", "cilium", "/tmp/cilium.tgz", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml",
                     "--namespace", "kube-system", "--set", "kubeProxyReplacement=false",

@@ -75,6 +75,34 @@ class MigrationTests(unittest.TestCase):
             with self.assertRaisesRegex(proof.ProofError, "unapproved_fixture_mount"):
                 migration.private_mount_boundary(before, target=target, filesystem=filesystem)
 
+    def test_netns_bind_requires_private_tmpfs_and_no_namespace_mounts(self):
+        for parent in ("/run", "/var/run"):
+            before = {"1": ("/", "overlay", frozenset()), "2": ("/sys", "sysfs", frozenset()),
+                      "3": (parent, "tmpfs", frozenset())}
+            target = parent + "/netns"
+            options = {"target": target, "filesystem": "tmpfs"}
+            mounted = {**before, "4": (target, "tmpfs", frozenset())}
+            shared = {**mounted, "4": (target, "tmpfs", frozenset({"shared:44"}))}
+            self.assertEqual(migration.private_mount_boundary(before, mounted, **options), "4")
+            self.assertEqual(migration.private_mount_boundary(before, shared, "4", **options), "4")
+            for changed in (mounted,
+                            {**before, "5": (target + "/existing", "nsfs", frozenset())},
+                            {**before, "3": (parent, "tmpfs", frozenset({"shared:33"}))},
+                            {**before, "3": (parent, "overlay", frozenset())},
+                            {key: row for key, row in before.items() if key != "3"}):
+                with self.assertRaises(proof.ProofError):
+                    migration.private_mount_boundary(changed, **options)
+            with self.assertRaises(proof.ProofError):
+                migration.private_mount_boundary(before, {**shared, "3": (parent, "tmpfs", frozenset({"shared:33"}))}, "4", **options)
+
+    def test_netns_nonempty_directory_refuses_before_any_mount(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        raw = "1 0 0:1 / / rw - overlay overlay rw\n2 1 0:2 / /sys rw - sysfs sysfs rw\n3 1 0:3 / /run rw - tmpfs tmpfs rw"
+        with patch.object(f, "ownership"), patch.object(f, "inside", side_effect=["/run", raw, proof.ProofError("fixture_command_failed")]) as call:
+            with self.assertRaises(proof.ProofError):
+                f.prepare_private_netns()
+            self.assertFalse(any(item.args[0] == "mount" for item in call.call_args_list))
+
     def test_policy_cleanup_requires_successful_nonempty_save(self):
         f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
         for result in ("", proof.ProofError("failed")):
@@ -194,6 +222,7 @@ class MigrationTests(unittest.TestCase):
                  ("path /sys/fs/bpf is not a shared mount: private", "bpffs_not_shared"),
                  ("path /run/cilium/cgroupv2 is not a shared or slave mount: private", "cgroup_not_shared"),
                  ("path /var/run/cilium/netns is not a shared mount: private", "netns_not_shared"),
+                 ("path /var/run/netns is not a shared mount: private", "netns_not_shared"),
                  ("path /private is not a shared mount", "mount_not_shared"),
                  ("AppArmor profile private refused", "apparmor_refused"),
                  ("seccomp private refused", "seccomp_refused"),
