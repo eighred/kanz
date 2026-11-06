@@ -15,6 +15,9 @@ const valkeyProofCommand = `go test -tags redis -p 1 -race -json -count=1 -run "
 const valkeyProofCheck = `python ../.github/scripts/check_valkey_evidence.py "$RUNNER_TEMP/valkey-proof.jsonl"`
 
 func checkValkeyCompatibilityCI(data []byte) error {
+	if err := checkGoShardMatrix(data); err != nil {
+		return err
+	}
 	var workflow struct {
 		Jobs map[string]struct {
 			Services map[string]struct{ Image, Options string }
@@ -29,7 +32,7 @@ func checkValkeyCompatibilityCI(data []byte) error {
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		return err
 	}
-	job := workflow.Jobs["go"]
+	job := workflow.Jobs["go-race"]
 	server := job.Services["redis"]
 	if server.Image != valkeyProofImage || !strings.Contains(server.Options, `--health-cmd "valkey-cli ping"`) {
 		return fmt.Errorf("CI must start and health-check the pinned Valkey dependency")
@@ -45,7 +48,7 @@ func checkValkeyCompatibilityCI(data []byte) error {
 				check = i
 			}
 		}
-		if proof >= 0 && check > proof && step.If == "" && !step.ContinueOnError &&
+		if proof >= 0 && check > proof && step.If == "matrix.shard == 0" && !step.ContinueOnError &&
 			strings.Contains(step.Run, "set -o pipefail\n") &&
 			strings.Contains(step.Run, "python -m unittest discover -s ../.github/scripts -p test_check_valkey_evidence.py") &&
 			step.Env["TEST_REDIS_URL"] == "redis://localhost:6379/0" && step.Env["TEST_VALKEY_VERSION"] == "9.1.3" {
