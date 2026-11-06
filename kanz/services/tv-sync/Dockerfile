@@ -32,11 +32,13 @@ COPY kanz/ ./
 # the image reports "unstamped" rather than a plausible-looking "dev".
 ARG VERSION=
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}"       -o /out/tv-sync ./services/tv-sync/cmd/tv-sync
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/eighred/kanz/internal/version.stamped=${VERSION}"       -o /out/tv-sync-replay ./services/tv-sync/cmd/tv-sync-replay
 
 # Distroless static: no shell, no libc, no package manager. :nonroot runs as uid
 # 65532, matching the pod's runAsUser.
 FROM ghcr.io/eighred/base/distroless-static:nonroot
 COPY --from=build /out/tv-sync /tv-sync
+COPY --from=build /out/tv-sync-replay /tv-sync-replay
 USER nonroot:nonroot
 EXPOSE 8091 8113
 ENTRYPOINT ["/tv-sync"]

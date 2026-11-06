@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -70,11 +71,19 @@ var ErrFactHasNoIdentity = errors.New("projection: FACT has no event_id — it c
 // so every row lands under, and every read is confined to, that tenant — enforced at the
 // engine by RLS, not by this code remembering to filter.
 type PostgresLog struct {
-	pool *pgxpool.Pool
+	db postgresQueries
+}
+
+// A snapshot verifier supplies one read-only transaction; the live log supplies
+// its tenant pool. Both use the same replay/checkpoint SQL.
+type postgresQueries interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 // NewPostgresLog wires a tenant-scoped pool.
-func NewPostgresLog(pool *pgxpool.Pool) *PostgresLog { return &PostgresLog{pool: pool} }
+func NewPostgresLog(pool *pgxpool.Pool) *PostgresLog { return &PostgresLog{db: pool} }
 
 var _ Log = (*PostgresLog)(nil)
 
@@ -92,7 +101,7 @@ func (l *PostgresLog) Append(ctx context.Context, f Fact) (bool, int64, error) {
 	// exactly the fresh=false signal this already reported — pgx.ErrNoRows is the
 	// duplicate, not a failure.
 	var seq int64
-	err := l.pool.QueryRow(ctx, `
+	err := l.db.QueryRow(ctx, `
 		INSERT INTO tv_facts (event_id, event_type, payload, knowledge_at)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (tenant_id, event_id) DO NOTHING
@@ -111,7 +120,7 @@ func (l *PostgresLog) Append(ctx context.Context, f Fact) (bool, int64, error) {
 // folded. The fold is order-dependent — an average-cost basis depends on which fill came
 // first — so a replay that reordered them would rebuild a DIFFERENT book than the pod had.
 func (l *PostgresLog) Replay(ctx context.Context, afterSeq int64, fn func(Fact) error) error {
-	rows, err := l.pool.Query(ctx, `
+	rows, err := l.db.Query(ctx, `
 		SELECT event_id, event_type, payload, knowledge_at, seq
 		FROM tv_facts
 		WHERE seq > $1
@@ -146,7 +155,7 @@ func (l *PostgresLog) Replay(ctx context.Context, afterSeq int64, fn func(Fact) 
 // that seq names a fact already durably in tv_facts, which it does — the caller
 // takes it from a fact it has folded, and folding happens after Append.
 func (l *PostgresLog) SaveCheckpoint(ctx context.Context, seq int64, payload []byte) error {
-	_, err := l.pool.Exec(ctx, `
+	_, err := l.db.Exec(ctx, `
 		INSERT INTO tv_checkpoints (seq, payload, taken_at)
 		VALUES ($1, $2, now())
 		ON CONFLICT (tenant_id) DO UPDATE
@@ -165,7 +174,7 @@ func (l *PostgresLog) SaveCheckpoint(ctx context.Context, seq int64, payload []b
 func (l *PostgresLog) LoadCheckpoint(ctx context.Context) ([]byte, int64, bool, error) {
 	var payload []byte
 	var seq int64
-	err := l.pool.QueryRow(ctx, `
+	err := l.db.QueryRow(ctx, `
 		SELECT payload, seq FROM tv_checkpoints`).Scan(&payload, &seq)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, 0, false, nil
