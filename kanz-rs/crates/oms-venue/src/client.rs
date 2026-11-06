@@ -53,6 +53,16 @@ impl Client {
         value: Canonical<A>,
         deadline: Duration,
     ) -> Result<Canonical<B>, Status> {
+        self.call_budget(method, value, deadline, kanz_proto_wire::Budget::Standard).await
+    }
+    async fn call_budget<A: Schema, B: Schema>(
+        &self, method: &'static str, value: Canonical<A>, deadline: Duration,
+        budget: kanz_proto_wire::Budget,
+    ) -> Result<Canonical<B>, Status> {
+        if budget == kanz_proto_wire::Budget::RecoveryHistory
+            && (method != "/venue.v1.VenueAdapterService/QueryOrder" || B::NAME != "venue.v1.QueryOrderResponse") {
+            return Err(Status::invalid_argument("recovery response scope"));
+        }
         if deadline.is_zero() || deadline > Duration::from_secs(120) {
             return Err(Status::invalid_argument("RPC deadline outside bounds"));
         }
@@ -62,7 +72,7 @@ impl Client {
             .ok_or_else(|| Status::unavailable("venue client closed"))?
             .clone();
         let mut grpc = tonic::client::Grpc::new(channel)
-            .max_decoding_message_size(kanz_proto_wire::MAX_BYTES)
+            .max_decoding_message_size(budget.bytes())
             .max_encoding_message_size(kanz_proto_wire::MAX_BYTES);
         let mut request = Request::new(value);
         request.set_timeout(deadline);
@@ -73,7 +83,10 @@ impl Client {
             grpc.unary(
                 request,
                 http::uri::PathAndQuery::from_static(method),
-                WireCodec::<A, B>::default(),
+                match budget {
+                    kanz_proto_wire::Budget::Standard => WireCodec::<A, B>::default(),
+                    kanz_proto_wire::Budget::RecoveryHistory => WireCodec::<A, B>::recovery_query(),
+                },
             )
             .await
             .map(tonic::Response::into_inner)
@@ -154,6 +167,13 @@ impl Client {
         state: &Canonical<OrderState>,
         deadline: Duration,
     ) -> Result<OrderView, Status> {
+        self.query_order_budget(state, deadline, kanz_proto_wire::Budget::Standard).await
+    }
+    /// Existing complete-history contract: only this QueryOrder response may reach4MiB.
+    pub async fn query_recovery_history(&self, state: &Canonical<OrderState>, deadline: Duration) -> Result<OrderView, Status> {
+        self.query_order_budget(state, deadline, kanz_proto_wire::Budget::RecoveryHistory).await
+    }
+    async fn query_order_budget(&self, state: &Canonical<OrderState>, deadline: Duration, budget: kanz_proto_wire::Budget) -> Result<OrderView, Status> {
         let request = wire::with_state(
             venue::QueryOrderRequest {
                 tenant_id: self.tenant.clone(),
@@ -162,10 +182,11 @@ impl Client {
             state,
         )?;
         let response: Canonical<venue::QueryOrderResponse> = match self
-            .call(
+            .call_budget(
                 "/venue.v1.VenueAdapterService/QueryOrder",
                 request,
                 deadline,
+                budget,
             )
             .await
         {

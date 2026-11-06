@@ -59,3 +59,12 @@ schema!(proto::order::v1::OrderState, "order.v1.OrderState");
 schema!(proto::order::v1::Fill, "order.v1.Fill");
 schema!(proto::order::v1::SubmitOrder, "order.v1.SubmitOrder");
 schema!(proto::order::v1::AmendOrder, "order.v1.AmendOrder");
+
+schema!(proto::order::v1::StateHealed, "order.v1.StateHealed");
+schema!(proto::order::v1::ExecutionRecoveryHistory, "order.v1.ExecutionRecoveryHistory");
+schema!(proto::order::v1::ExecutionRecoveryRecorded, "order.v1.ExecutionRecoveryRecorded");
+schema!(proto::order::v1::ExecutionRecovered, "order.v1.ExecutionRecovered");
+schema!(proto::order::v1::ExecutionRecoveryApplied, "order.v1.ExecutionRecoveryApplied");
+schema!(proto::order::v1::ExecutionFeeCorrectionProposed, "order.v1.ExecutionFeeCorrectionProposed");
+schema!(proto::order::v1::ExecutionFeeCorrectionApproved, "order.v1.ExecutionFeeCorrectionApproved");
+schema!(proto::envelope::v1::Envelope, "envelope.v1.Envelope");

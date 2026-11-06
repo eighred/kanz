@@ -30,6 +30,9 @@ impl<T: Schema> Canonical<T> {
             .map(Self)
             .map_err(status)
     }
+    fn decode_with_budget(raw: &[u8], budget: kanz_proto_wire::Budget) -> Result<Self, Status> {
+        kanz_proto_wire::Canonical::decode_with_budget(raw, budget).map(Self).map_err(status)
+    }
     pub fn from_value(value: T) -> Result<Self, Status> {
         kanz_proto_wire::Canonical::from_value(value)
             .map(Self)
@@ -105,14 +108,17 @@ schema!(
     crate::proto::venue::v1::QueryOrderResponse,
     "venue.v1.QueryOrderResponse"
 );
-pub(crate) struct WireCodec<A, B>(PhantomData<(A, B)>);
+pub(crate) struct WireCodec<A, B>(PhantomData<(A, B)>, kanz_proto_wire::Budget);
 impl<A, B> Default for WireCodec<A, B> {
     fn default() -> Self {
-        Self(PhantomData)
+        Self(PhantomData, kanz_proto_wire::Budget::Standard)
     }
 }
+impl<A,B> WireCodec<A,B> {
+    pub(crate) fn recovery_query() -> Self { Self(PhantomData, kanz_proto_wire::Budget::RecoveryHistory) }
+}
 pub(crate) struct WireEncoder<A>(PhantomData<A>);
-pub(crate) struct WireDecoder<B>(PhantomData<B>);
+pub(crate) struct WireDecoder<B>(PhantomData<B>, kanz_proto_wire::Budget);
 impl<A: Schema, B: Schema> Codec for WireCodec<A, B> {
     type Encode = Canonical<A>;
     type Decode = Canonical<B>;
@@ -122,7 +128,7 @@ impl<A: Schema, B: Schema> Codec for WireCodec<A, B> {
         WireEncoder(PhantomData)
     }
     fn decoder(&mut self) -> Self::Decoder {
-        WireDecoder(PhantomData)
+        WireDecoder(PhantomData, self.1)
     }
 }
 impl<A: Schema> Encoder for WireEncoder<A> {
@@ -137,11 +143,11 @@ impl<B: Schema> Decoder for WireDecoder<B> {
     type Item = Canonical<B>;
     type Error = Status;
     fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, Status> {
-        if src.remaining() > kanz_proto_wire::MAX_BYTES {
+        if src.remaining() > self.1.bytes() {
             return Err(Status::resource_exhausted("canonical message bound"));
         }
         let raw = src.copy_to_bytes(src.remaining());
-        Canonical::decode(&raw).map(Some)
+        Canonical::decode_with_budget(&raw, self.1).map(Some)
     }
 }
 
