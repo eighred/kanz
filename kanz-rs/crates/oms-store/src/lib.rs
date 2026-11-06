@@ -11,6 +11,7 @@ pub mod outbox;
 pub mod proposals;
 pub mod queries;
 pub mod recovery;
+pub mod recovery_ack;
 pub mod relay;
 mod relay_wire;
 use identity::{execution_key, same_execution};

@@ -43,14 +43,16 @@ export function setUnauthenticatedHandler(fn: () => void): void {
   onUnauthenticated = fn
 }
 
-async function request<T>(method: string, path: string, body?: unknown, acceptConflict = false): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, acceptConflict = false, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method,
+    signal,
     credentials: 'same-origin',
     headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
 
+  signal?.throwIfAborted()
   if (res.status === 401) {
     onUnauthenticated?.()
     throw new Unauthenticated()
@@ -68,14 +70,17 @@ async function request<T>(method: string, path: string, body?: unknown, acceptCo
     } catch {
       /* not JSON — keep the generic message */
     }
+    signal?.throwIfAborted()
     throw new ApiError(res.status, message, code)
   }
   if (res.status === 204) return undefined as T
-  return (await res.json()) as T
+  const value = (await res.json()) as T
+  signal?.throwIfAborted()
+  return value
 }
 
 export const api = {
-  get: <T>(path: string, options?: { acceptConflict?: boolean }) => request<T>('GET', path, undefined, options?.acceptConflict),
+  get: <T>(path: string, options?: { acceptConflict?: boolean; signal?: AbortSignal }) => request<T>('GET', path, undefined, options?.acceptConflict, options?.signal),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
 }

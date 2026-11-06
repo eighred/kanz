@@ -170,6 +170,45 @@ including terminal rounded-average and approved-fee cases, then inject missing
 facts, CAS races, target/outbox failures and deferred commit rejection. Actual
 Linux PostgreSQL evidence is required; local dependency skips do not qualify it.
 
+## Recovery acknowledgement transaction
+
+`recovery_ack::acknowledge_recovery` ports the durable acknowledgement tail of
+Go `order.Postgres.AcknowledgeRecovery`. The trusted caller supplies the canonical
+`ExecutionRecoveryApplied`, a closed `Book::{Ledger,Position}` enum and one
+mandatory typed corrected-status FACT. This is not an acknowledgement admission
+API: the existing Go `HandleRecoveryAck` retains tenant/FACT checks and derives
+book identity from the authenticated subject. A string in a payload must never
+select the book being acknowledged. No production caller, listener, DSN or
+transport switch is added.
+
+The transaction locks the tenant's case, verifies the exact execution target and
+payload/execution digests, inserts the idempotent book acknowledgement and closes
+the case only once the complete expected count is reached. Completion binds the
+prepared status FACT to the stored case and order and commits its outbox row with
+the acknowledgement and case update. The immutable target/execution evidence and
+order bytes remain unchanged. Replays of an already corrected case still require
+the matching target, and cannot emit a second corrected FACT. Stored case strings
+and order bytes are size-checked by SQL before transfer; missing, malformed or
+oversized stored data is an error, never a partial read or success. Shared scoped
+transactions require NOSUPERUSER/NOBYPASSRLS and forced tenant RLS.
+
+`CommitUnconfirmed` retains its existing meaning: transport failure around COMMIT
+is not proof of rollback. Reconcile the durable case, acknowledgement and outbox
+before retry; a deferred-trigger rollback test proves only its injected rejection.
+The fixed disposable fixture mode and independent Go/PostgreSQL comparisons cover
+both-book completion, duplicates, concurrent final acknowledgements, restart,
+tenant isolation, required FACT/target binding, corrupt storage and outbox/commit
+rollback. Linux actual-process evidence is mandatory; locally skipped dependency
+tests are not acceptance. The source-only migration still lacks recovery/admission
+orchestration, production writer fencing, approved handoff and runtime activation.
+
+Corruption refusal is intentionally stricter than the current Go acknowledgement
+owner: Rust checks `expected_ack_count = 2 * checkpoint` and the stored target
+count equals the checkpoint before inserting an acknowledgement. Go currently
+can commit a pending acknowledgement with a zero expected count or extra targets.
+The real differential fixture preserves this distinction explicitly; it does not
+claim malformed stored metadata is compatible or change Go production behavior.
+
 ## OMS queue repository
 
 `outbox` implements the six existing Go Queue persistence operations over the

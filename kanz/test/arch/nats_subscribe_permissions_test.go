@@ -235,6 +235,7 @@ func serviceSubscribedSubjects(t *testing.T, rc *resolveCache, root, svc string)
 // checked.
 var subscribeMethods = map[string]bool{
 	"Subscribe":               true,
+	"SubscribeReady":          true,
 	"SubscribeBroadcast":      true,
 	"SubscribeBroadcastReady": true,
 	"SubscribeReplay":         true,

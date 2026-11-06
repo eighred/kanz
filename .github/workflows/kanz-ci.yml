@@ -59,6 +59,9 @@ jobs:
       - name: Verify replay platform resolution refusals
         shell: pwsh
         run: ./tools/Test-TvReplayPlatform.ps1
+      - name: Verify replay wrapper source and old-release preflight
+        shell: pwsh
+        run: ./tools/Test-TvReplayPreflight.ps1
       - name: Verify installer fails closed on registry errors
         shell: pwsh
         run: ./tools/Test-EcrReleaseDigest.ps1
@@ -248,6 +251,31 @@ jobs:
       # OMS_SIM_VENUE_MIC takes both MICs the allocation fans out to: the router
       # matches a leg to the venue whose MIC equals the leg's target, so a
       # single-venue simulator cannot work a multi-venue allocation at all.
+      # Isolate the TV recovery proof from other canonical FACT consumers. The
+      # image is exactly the already-running broker image, not another tag pull.
+      - name: Start dedicated tv-sync proof broker
+        run: |
+          set -euo pipefail
+          image_id=$(docker inspect --format '{{.Image}}' kanz-ci-nats)
+          test -n "$image_id"
+          docker run -d --name kanz-ci-tv-nats -p 127.0.0.1:4224:4222 \
+            -v "$GITHUB_WORKSPACE/kanz/test/backing/nats-dev.conf":/etc/nats/nats-dev.conf:ro \
+            "$image_id" -c /etc/nats/nats-dev.conf
+          test "$(docker inspect --format '{{.Image}}' kanz-ci-tv-nats)" = "$image_id"
+          echo "TV proof broker uses existing NATS image $image_id"
+          ready=false
+          for i in $(seq 1 30); do
+            if docker logs kanz-ci-tv-nats 2>&1 | grep -q 'Server is ready'; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          test -s /tmp/bootstrap.sh
+          bootstrap_image_id=$(docker image inspect --format '{{.Id}}' natsio/nats-box:0.14.5)
+          test -n "$bootstrap_image_id"
+          docker run --rm -i --network host \
+            -e NATS_URL=nats://127.0.0.1:4224 -e NATS_REPLICAS=1 \
+            "$bootstrap_image_id" sh -s < /tmp/bootstrap.sh
+
       - name: Start the OMS on the bus (for the M1 loop certification)
         working-directory: kanz
         env:
@@ -404,11 +432,34 @@ jobs:
           python3 -B -m unittest discover -s ../.github/scripts -p 'test_check_tv_sync_evidence.py'
           python3 ../.github/scripts/check_tv_sync_evidence.py "$RUNNER_TEMP/tv-sync-role-proof.jsonl"
 
+      - name: Prove durable catch-up before tv-sync Broker readiness
+        working-directory: kanz
+        env:
+          TEST_NATS_URL: nats://localhost:4222
+          TEST_TV_NATS_URL: nats://127.0.0.1:4224
+          TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s ../.github/scripts -p test_check_tv_readiness_evidence.py
+          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_readiness_evidence.py --pattern)" ./pkg/bus ./services/tv-sync/cmd/tv-sync ./services/tv-sync/internal/server ./services/tv-sync/internal/brokerapi | tee "$RUNNER_TEMP/tv-readiness-proof.jsonl"
+          python3 ../.github/scripts/check_tv_readiness_evidence.py "$RUNNER_TEMP/tv-readiness-proof.jsonl"
+
+      - name: Qualify restored tv-sync snapshot without writes
+        working-directory: kanz
+        env:
+          TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s ../.github/scripts -p test_check_tv_replay_evidence.py
+          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)" ./services/tv-sync/internal/projection ./pkg/secret | tee "$RUNNER_TEMP/tv-replay-proof.jsonl"
+          python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"
+
       - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
         working-directory: kanz
         env:
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
           TEST_NATS_URL: nats://localhost:4222
+          TEST_TV_NATS_URL: nats://127.0.0.1:4224
           TEST_KAFKA_BROKERS: localhost:9092
           TEST_OMS_ON_BUS: "1"
           TEST_INFERENCE_ON_BUS: "1"
@@ -486,16 +537,6 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s ../.github/scripts -p test_go_test_evidence.py
           python3 ../.github/scripts/go_test_evidence.py --packages "$RUNNER_TEMP/gotest-packages.txt" "$RUNNER_TEMP/gotest.jsonl"
-
-      - name: Qualify restored tv-sync snapshot without writes
-        working-directory: kanz
-        env:
-          TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
-        run: |
-          set -euo pipefail
-          python3 -m unittest discover -s ../.github/scripts -p test_check_tv_replay_evidence.py
-          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)" ./services/tv-sync/internal/projection ./pkg/secret | tee "$RUNNER_TEMP/tv-replay-proof.jsonl"
-          python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"
 
       # THE `redis` BUILD (EXEC-M22). This tag is what webhook-ingest's production image is
       # built with, and it is the ONLY thing that makes `replicas: 2` on the platform's
@@ -613,6 +654,17 @@ jobs:
           # code that deploys. Keep this list in step with the tags the
           # Dockerfiles build with.
           args: --timeout=5m --build-tags=anthropic,openrouter,redis
+
+      - name: Stop dedicated tv-sync proof broker
+        if: always()
+        run: |
+          set -euo pipefail
+          containers=$(timeout 30s docker ps -a --filter 'name=^/kanz-ci-tv-nats$' --format '{{.ID}}')
+          if test -n "$containers"; then
+            timeout 30s docker rm -f kanz-ci-tv-nats
+          fi
+          remaining=$(timeout 30s docker ps -a --filter 'name=^/kanz-ci-tv-nats$' --format '{{.ID}}')
+          test -z "$remaining"
 
   python:
     needs: scope
@@ -818,12 +870,19 @@ jobs:
         working-directory: kanz-web
         run: npm test
 
-      # Build LAST and separately, so a failure here is distinguishable from a
+      # Build separately before browser qualification, so a failure here is distinguishable from a
       # type error above — the BFF serves this output, and a bundle that does
       # not build is a blank operator surface.
       - name: Build
         working-directory: kanz-web
         run: npm run build
+
+      - name: Qualify broker history rendering in Chromium
+        working-directory: kanz-web
+        run: |
+          set -euo pipefail
+          npx --no-install playwright install --with-deps chromium
+          node e2e/broker-history.cjs
 
   # DEBT-01d SDK-hygiene guard (PARITY-07a). First check is always-on: the SDKs
   # are generated and published, never committed (EVT-15a), so any tracked

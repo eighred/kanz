@@ -40,10 +40,10 @@ type Fact struct {
 // holds no opinion about it.
 type Log interface {
 	// Append records one FACT. It reports whether the FACT was FRESH: false means it was
-	// already recorded — a redelivery — and must not be folded a second time.
+	// already recorded. This does not establish whether this process folded it.
 	// It also returns the seq the fact was recorded at, which is the watermark a
 	// checkpoint records (#809). On a redelivery (fresh=false) the seq is zero and
-	// meaningless: nothing was folded, so nothing advanced.
+	// meaningless. Replay after the local fold watermark resolves missing folds.
 	Append(ctx context.Context, f Fact) (fresh bool, seq int64, err error)
 	// Replay walks this tenant's facts in the order they were folded, starting
 	// strictly AFTER afterSeq. Zero replays everything, which is the no-checkpoint
@@ -72,6 +72,8 @@ var ErrFactHasNoIdentity = errors.New("projection: FACT has no event_id — it c
 // engine by RLS, not by this code remembering to filter.
 type PostgresLog struct {
 	db postgresQueries
+	// Only the live log can begin writes. Snapshot verifiers receive db alone.
+	writer *pgxpool.Pool
 }
 
 // A snapshot verifier supplies one read-only transaction; the live log supplies
@@ -83,38 +85,60 @@ type postgresQueries interface {
 }
 
 // NewPostgresLog wires a tenant-scoped pool.
-func NewPostgresLog(pool *pgxpool.Pool) *PostgresLog { return &PostgresLog{db: pool} }
+func NewPostgresLog(pool *pgxpool.Pool) *PostgresLog {
+	return &PostgresLog{db: pool, writer: pool}
+}
 
 var _ Log = (*PostgresLog)(nil)
 
 // Append records the FACT, or reports it as already recorded.
 //
-// ON CONFLICT DO NOTHING on (tenant_id, event_id) is the exactly-once claim: the redelivery
-// that follows a crash between folding and acking inserts nothing, RowsAffected is 0, and
-// the caller skips the fold. Without it a lost ack doubles a fill.
+// The tenant transaction lock orders allocation and commit before another append
+// can proceed. A duplicate only proves durability, not that this process folded
+// the fact; Handle drains the stored prefix after every successful Append.
 func (l *PostgresLog) Append(ctx context.Context, f Fact) (bool, int64, error) {
 	if f.EventID == "" {
 		return false, 0, ErrFactHasNoIdentity
+	}
+	if l.writer == nil {
+		return false, 0, errors.New("projection: read-only fact log")
+	}
+	tx, err := l.writer.Begin(ctx)
+	if err != nil {
+		return false, 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Take the tenant lock BEFORE nextval, in a separate statement. Sequence
+	// allocation alone is not commit order: a later connection could otherwise
+	// commit a higher sequence while an earlier insert is still unresolved.
+	// Hash collisions only serialize unrelated tenants; RLS still scopes rows.
+	if _, err := tx.Exec(ctx, factAppendLockSQL); err != nil {
+		return false, 0, err
 	}
 	// RETURNING seq, so the caller can checkpoint at a fact it has actually folded
 	// (#809). ON CONFLICT DO NOTHING returns NO ROW on a redelivery, which is
 	// exactly the fresh=false signal this already reported — pgx.ErrNoRows is the
 	// duplicate, not a failure.
 	var seq int64
-	err := l.db.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO tv_facts (event_id, event_type, payload, knowledge_at)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (tenant_id, event_id) DO NOTHING
 		RETURNING seq`,
 		f.EventID, f.EventType, f.Payload, f.Knowledge).Scan(&seq)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, 0, nil
-	}
-	if err != nil {
+	fresh := !errors.Is(err, pgx.ErrNoRows)
+	if err != nil && fresh {
 		return false, 0, err
 	}
-	return true, seq, nil
+	if err := tx.Commit(ctx); err != nil {
+		// The outcome can be unknown. A subsequent append (including duplicate)
+		// takes the same lock before the projection drains its durable prefix.
+		return false, 0, err
+	}
+	return fresh, seq, nil
 }
+
+const factAppendLockSQL = `SELECT pg_advisory_xact_lock(hashtext('tv-sync.fact-append'), hashtext(app_current_tenant()))`
 
 // Replay walks the log in fold order (seq), which is the order the facts were originally
 // folded. The fold is order-dependent — an average-cost basis depends on which fill came
@@ -152,7 +176,7 @@ func (l *PostgresLog) Replay(ctx context.Context, afterSeq int64, fn func(Fact) 
 // is a claim about a PREFIX of an append-only log: if the process dies between
 // folding fact N+1 and writing the checkpoint at N, the next boot restores N and
 // replays N+1 onward, which is exactly correct. The only ordering that matters is
-// that seq names a fact already durably in tv_facts, which it does — the caller
+// seq names a committed prefix, not merely an allocated BIGSERIAL. The caller
 // takes it from a fact it has folded, and folding happens after Append.
 func (l *PostgresLog) SaveCheckpoint(ctx context.Context, seq int64, payload []byte) error {
 	_, err := l.db.Exec(ctx, `
