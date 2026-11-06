@@ -7,6 +7,7 @@ a compromise is contained.
 | File | What it does |
 |---|---|
 | `pod-security.yaml` | Pins `kanz-services` to the **restricted** Pod Security Standard (cluster-enforced non-root / no-priv-esc / dropped-caps / seccomp) + the canonical hardened `securityContext` as policy-as-data |
+| `gateway-only-apis.yaml` | Shared accounting, audit and compliance ingress: gateway-only APIs and separate observability operations ports; also imported by Tokyo |
 | `network-policies.yaml` | **Default-deny** ingress+egress in `kanz-services`, then the minimum explicit allows (DNS, NATS/Kafka, OTLP, gateway→risk-engine, ingress→gateway, scrape) |
 
 The per-workload `securityContext` is applied on the actual deployments
@@ -47,7 +48,8 @@ a default (the syscall-interception overhead isn't free).
 
 ```sh
 kubectl apply -f pod-security.yaml      # namespace labels + reference context
-kubectl apply -f network-policies.yaml  # default-deny + allows
+kubectl apply -f gateway-only-apis.yaml # shared API/operations isolation
+kubectl apply -f network-policies.yaml  # default-deny + remaining allows
 ```
 
 Verified by `infra/security/test/` (SEC-02e) and the SRE-01c chaos suite (a pod

@@ -24,6 +24,7 @@ POLICY = {
     "valkey-migration.yml": {"retained-state"},
     "tokyo-messaging-proof.yml": {"messaging-isolation"},
     "envoy-edge.yml": {"actual-edge"},
+    "gateway-policy-proof.yml": {"gateway-isolation"},
 }
 
 

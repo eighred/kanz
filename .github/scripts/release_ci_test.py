@@ -160,6 +160,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(gate.POLICY["valkey-migration.yml"], {"retained-state"})
         self.assertEqual(gate.POLICY["tokyo-messaging-proof.yml"], {"messaging-isolation"})
         self.assertEqual(gate.POLICY["envoy-edge.yml"], {"actual-edge"})
+        self.assertEqual(gate.POLICY["gateway-policy-proof.yml"], {"gateway-isolation"})
         with self.assertRaises(gate.EvidenceError): self.verify()
         for filename, jobs in gate.POLICY.items():
             with self.subTest(filename=filename), patch.object(gate, "requirements", return_value={filename: jobs}):
