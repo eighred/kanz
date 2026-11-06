@@ -24,6 +24,15 @@ REQUIRED = {
     "services/oms/tools/store-conformance": {
         "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity",
         "TestRustExecutionEconomics", "TestRustRepositoryTransactions",
+        "TestRustRepositoryLifecycle",
+        *{"TestRustRepositoryLifecycle/" + case for case in (
+            "concurrent-create-one-fact", "create-restart-load-go-save",
+            "create-invalid-fact-rollback", "create-deferred-commit-rollback",
+            "create-tenant-same-id", "applied-fill-raw-aliases",
+            "read-notfound-unavailable-corruption", "claim-capacity-no-prefix",
+            "claim-read-failure-no-prefix", "load-concurrent-version",
+            "read-oversized-bytes",
+        )},
         *{"TestRustRepositoryTransactions/" + case for case in (
             "durable-restart-exact-bytes", "duplicate-conflict-and-alias",
             "concurrent-duplicate", "fill-wins-cancel", "cancel-wins-fill",

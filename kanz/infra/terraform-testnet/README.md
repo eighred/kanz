@@ -17,14 +17,17 @@ separate restore drill produces a current DR attestation.
 - No inbound security-group rules and no SSH key. Administration is SSM only.
 - k3s `v1.36.4+k3s1`, pinned by version and a SHA-256-verified installer at an
   immutable commit; Traefik and ServiceLB are disabled.
-- Fourteen immutable ECR repositories for the minimum capital-path, governed web edge,
+- Fifteen immutable ECR repositories for the minimum capital-path, governed web edge,
   and canary-observability workloads.
   Kubelet obtains short-lived pull credentials from the node role through the
   upstream AWS credential provider; no `dockerconfigjson` or registry PAT is
   stored in Kubernetes.
 - A GitHub OIDC role restricted to `repo:eighred/kanz` on `refs/heads/main`.
-  Its policy can publish only to those fourteen repositories, including the
+  Its policy can publish only to those fifteen repositories, including the
   manifest read ECR requires during `docker push`.
+  The tv-sync repository is an activation prerequisite: provisioning it does
+  not copy a signed release or deploy the workload. Paired application/migration
+  artifact custody and runtime qualification remain separate promotion gates.
 - Embedded etcd with encrypted Kubernetes secrets and local snapshots every six
   hours; DLM snapshots the data EBS volume daily and retains seven.
 - An Osaka (`ap-northeast-3`) recovery bucket with a dedicated rotation-enabled

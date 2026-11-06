@@ -32,7 +32,7 @@ import (
 type boundedOutput struct{ bytes.Buffer }
 
 func (b *boundedOutput) Write(p []byte) (int, error) {
-	if b.Len()+len(p) > 4096 {
+	if b.Len()+len(p) > 2*1024*1024 {
 		return 0, errors.New("fixture output exceeded bound")
 	}
 	return b.Buffer.Write(p)
@@ -50,6 +50,19 @@ func fixtureBinary(t *testing.T) string {
 }
 func run(t *testing.T, input map[string]any) string {
 	t.Helper()
+	return runResult(t, input).Status
+}
+
+type fixtureResult struct {
+	Status    string   `json:"status"`
+	Version   string   `json:"version"`
+	State     []byte   `json:"state"`
+	DBVersion *int64   `json:"db_version"`
+	Claims    []string `json:"claims"`
+}
+
+func runResult(t *testing.T, input map[string]any) fixtureResult {
+	t.Helper()
 	bin := fixtureBinary(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -64,16 +77,13 @@ func run(t *testing.T, input map[string]any) string {
 	if err := cmd.Run(); err != nil {
 		t.Fatal("actual Rust repository fixture failed (no connection or payload diagnostics)")
 	}
-	var result struct {
-		Status  string `json:"status"`
-		Version string `json:"version"`
-	}
+	var result fixtureResult
 	decoder := json.NewDecoder(&stdout)
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF || result.Version != os.Getenv("KANZ_OMS_STORE_VERSION") {
 		t.Fatal("unbound fixture result")
 	}
-	return result.Status
+	return result
 }
 func wire(t *testing.T, m proto.Message) []byte {
 	t.Helper()

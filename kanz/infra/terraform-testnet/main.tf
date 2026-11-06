@@ -18,6 +18,7 @@ locals {
     "oms",
     "prometheus",
     "risk-engine",
+    "tv-sync",
     "venue-binance",
     "venue-okx",
     "web-bff",
@@ -144,6 +145,15 @@ resource "aws_iam_role_policy" "github_ecr_publish" {
           "ecr:UploadLayerPart",
         ]
         Resource = [for repository in aws_ecr_repository.capital_path : repository.arn]
+      },
+      {
+        # Signed pair promotion must freshly hash destination layer bytes.
+        # #1441 provisions the repositories; this grants no repository creation,
+        # tag deletion, signing authority, or additional OIDC subjects.
+        Sid      = "VerifySignedTVSyncPairLayers"
+        Effect   = "Allow"
+        Action   = ["ecr:GetDownloadUrlForLayer"]
+        Resource = [for name in ["tv-sync", "kanz-migrate"] : "arn:aws:ecr:${var.region}:${data.aws_caller_identity.current.account_id}:repository/${name}"]
       },
     ]
   })

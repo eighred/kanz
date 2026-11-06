@@ -83,7 +83,7 @@ run "cost_and_security_envelope" {
   }
 
   assert {
-    condition     = length(aws_ecr_repository.capital_path) == 14 && alltrue([for repository in aws_ecr_repository.capital_path : repository.image_tag_mutability == "IMMUTABLE"])
+    condition     = length(aws_ecr_repository.capital_path) == 15 && contains(keys(aws_ecr_repository.capital_path), "tv-sync") && alltrue([for repository in aws_ecr_repository.capital_path : repository.image_tag_mutability == "IMMUTABLE"])
     error_message = "Every and only capital-path image repository must reject mutable tags."
   }
 
@@ -122,6 +122,20 @@ run "cost_and_security_envelope" {
       "ecr:GetDownloadUrlForLayer",
     ])
     error_message = "The node role must remain pull-only for capital-path ECR repositories."
+  }
+
+  assert {
+    condition = (
+      length(jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement) == 3 &&
+      jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement[2].Sid == "VerifySignedTVSyncPairLayers" &&
+      jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement[2].Effect == "Allow" &&
+      toset(jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement[2].Action) == toset(["ecr:GetDownloadUrlForLayer"]) &&
+      toset(jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement[2].Resource) == toset([
+        "arn:aws:ecr:ap-northeast-1:${data.aws_caller_identity.current.account_id}:repository/tv-sync",
+        "arn:aws:ecr:ap-northeast-1:${data.aws_caller_identity.current.account_id}:repository/kanz-migrate",
+      ])
+    )
+    error_message = "Signed release verification may add layer reads only for the paired tv-sync and kanz-migrate repositories; main-only trust and all other publisher actions remain unchanged."
   }
 
   assert {

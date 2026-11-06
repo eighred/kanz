@@ -1,6 +1,7 @@
 # OMS repository transaction port
 
-This library implements the existing OMS `Postgres.Save` transaction seam using
+This library implements the existing OMS `Create`, `Save`, `Load` and
+`AppliedFills` repository operations using
 Rust and the canonical Go migrations. It has no production caller, connection
 factory, configuration or network listener. The diagnostic fold worker remains
 database-free. [Migration #1413](https://github.com/eighred/kanz/issues/1413)
@@ -20,6 +21,26 @@ The claim, execution journal, CAS and outbox commit together. Missing rows retai
 the existing tenant-local insert-at-version-zero behavior; an expected version
 does not turn an absent row into a cross-tenant identity check. Storage tenant
 and envelope tenant remain distinct, as in the Go repository.
+
+`Create` inserts once and commits its prepared FACTs atomically. Duplicate
+creation returns `Exists` without changing the row or adding announcements.
+This is storage admission atomicity, not risk/compliance/mandate permission.
+`Load` returns original state bytes and version from one SQL row; `NotFound`
+is distinct from unavailable/corrupt data. `AppliedFills` returns the complete
+set of raw legacy fill aliases where present, otherwise stored claim keys.
+Claims may only suppress replay, never authorize it. Empty results are produced
+only after successful scoped reads (or an explicitly empty order identifier).
+
+All operations reuse tenant/role/RLS transaction setup; both writers reuse
+payload validation, outbox insertion and commit handling. Reads roll back their
+read transaction before returning success. SQL conditional projections prevent
+over-limit BYTEA/TEXT values from being transferred into the client: state has a
+1 MiB byte bound, and claims have a 100,000-row and 1 MiB aggregate text bound.
+Exceeding either returns `Capacity`, never a truncated claim set. These are
+explicit bounded-port limits, not a claim that Go rejects every same-sized read.
+Result-object overhead is additionally bounded by row count; no heap profiling
+or latency qualification is claimed. A mid-read PostgreSQL error discards the
+entire claim result, including any rows evaluated before the failure.
 
 Scoped execution keys reproduce Go JSON escaping before SHA256. Duplicate
 economic equality uses canonical exact Decimal comparison, presence and venue
