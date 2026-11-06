@@ -13,6 +13,7 @@ import (
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/oms/internal/order"
+	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -71,12 +72,19 @@ func TestRustRepositoryLifecycle(t *testing.T) {
 			t.Fatal(e)
 		}
 		readError(t, runResult(t, f.readRequest("load", s.OrderId)), "Capacity")
-		if _, e := f.pool.Exec(f.ctx, `INSERT INTO order_fills (tenant_id,order_id,fill_id,raw_fill_id) VALUES (current_setting('app.tenant_id'),'row-too-large','oversized',repeat('x',1048577)),(current_setting('app.tenant_id'),'aggregate','part-a',repeat('x',600000)),(current_setting('app.tenant_id'),'aggregate','part-b',repeat('y',600000))`); e != nil {
-			t.Fatal(e)
+		// The canonical alias B-tree already refuses this single value. Preserve
+		// that constraint; qualify aggregate read capacity with valid-sized rows.
+		_, err := f.pool.Exec(f.ctx, `INSERT INTO order_fills (tenant_id,order_id,fill_id,raw_fill_id) VALUES (current_setting('app.tenant_id'),'row-too-large','oversized',repeat('x',1048577))`)
+		var pgerr *pgconn.PgError
+		if !errors.As(err, &pgerr) || pgerr.Code != "54000" {
+			t.Fatal("canonical alias index did not refuse oversized singleton")
 		}
-		for _, id := range []string{"row-too-large", "aggregate"} {
-			readError(t, runResult(t, f.readRequest("applied-fills", id)), "Capacity")
+		for start := 1; start <= 2000; start += 500 {
+			if _, e := f.pool.Exec(f.ctx, `INSERT INTO order_fills (tenant_id,order_id,fill_id,raw_fill_id) SELECT current_setting('app.tenant_id'),'aggregate','part-'||n,repeat('x',600)||n FROM generate_series($1::bigint,$2::bigint)n`, start, start+499); e != nil {
+				t.Fatal(e)
+			}
 		}
+		readError(t, runResult(t, f.readRequest("applied-fills", "aggregate")), "Capacity")
 	})
 	t.Run("load-concurrent-version", func(t *testing.T) {
 		f := newFixture(t)
@@ -259,9 +267,14 @@ func TestRustRepositoryLifecycle(t *testing.T) {
 	})
 	t.Run("claim-capacity-no-prefix", func(t *testing.T) {
 		f := newFixture(t)
-		_, e := f.pool.Exec(f.ctx, `INSERT INTO order_fills (tenant_id,order_id,fill_id) SELECT current_setting('app.tenant_id'),'order', 'claim-'||n FROM generate_series(1,100001) n`)
-		if e != nil {
-			t.Fatal(e)
+		// Migration0014 takes an advisory transaction lock for each alias. Seed
+		// in committed batches, not one transaction that exceeds PostgreSQL's
+		// shared lock table. Short IDs keep this below the separate byte cap.
+		for start := 1; start <= 100001; start += 500 {
+			end := min(start+499, 100001)
+			if _, e := f.pool.Exec(f.ctx, `INSERT INTO order_fills (tenant_id,order_id,fill_id) SELECT current_setting('app.tenant_id'),'order',n::text FROM generate_series($1::bigint,$2::bigint)n`, start, end); e != nil {
+				t.Fatal(e)
+			}
 		}
 		readError(t, runResult(t, f.readRequest("applied-fills", "order")), "Capacity")
 	})
