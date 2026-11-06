@@ -47,7 +47,7 @@ class Handler(BaseHTTPRequestHandler):
   self.send_response(200);self.end_headers();self.wfile.write(body)
 HTTPServer(('0.0.0.0',8080),Handler).serve_forever()
 '''
-REDIS_CLAIM = '''import socket,pathlib
+REDIS_AUTH = '''import socket,pathlib
 password=pathlib.Path('/fixture/password').read_bytes()
 def resp(*parts):return b'*'+str(len(parts)).encode()+b'\\r\\n'+b''.join(b'$'+str(len(p)).encode()+b'\\r\\n'+p+b'\\r\\n' for p in parts)
 with socket.create_connection(('redis.kanz-messaging.svc',6379),timeout=3) as s:
@@ -55,10 +55,16 @@ with socket.create_connection(('redis.kanz-messaging.svc',6379),timeout=3) as s:
  def ask(*parts):s.sendall(resp(*parts));return f.readline()
  assert ask(b'PING')==b'-NOAUTH Authentication required.\\r\\n'
  assert ask(b'AUTH',password)==b'+OK\\r\\n'
+'''
+REDIS_CLAIM = REDIS_AUTH + '''\
  assert ask(b'SET',b'fixture:claim',b'owned',b'NX')==b'+OK\\r\\n'
  assert ask(b'SET',b'fixture:claim',b'duplicate',b'NX')==b'$-1\\r\\n'
  assert ask(b'SAVE')==b'+OK\\r\\n'
 print('REDIS_CLAIM_PASS')
+'''
+REDIS_SHUTDOWN = REDIS_AUTH + '''\
+ assert ask(b'SHUTDOWN',b'NOSAVE')==b''
+print('REDIS_SHUTDOWN_PASS')
 '''
 
 
@@ -423,10 +429,13 @@ def main():
             report['cases'].append('backup-restore')
             case('redis-claim', 'kanz-services', 'gateway-probe', REDIS_CLAIM)
             # Verify persisted claim after restarting Redis within the same owned Pod/volume.
+            report['stage'] = 'redis-restart'
             before_redis = json.loads(k('-n', 'kanz-messaging', 'get', 'pod/redis', '-o', 'json'))
             before_restarts = before_redis['status']['containerStatuses'][0]['restartCount']
-            k('-n', 'kanz-messaging', 'exec', 'redis', '-c', 'redis', '--', 'sh', '-ceu',
-              'REDISCLI_AUTH="$(cat /fixture/password)" redis-cli SHUTDOWN NOSAVE')
+            # Keep the client outside the server container it deliberately stops.
+            if k('-n', 'kanz-services', 'exec', 'gateway-probe', '-c', 'probe', '--',
+                 'python3', '-c', REDIS_SHUTDOWN) != 'REDIS_SHUTDOWN_PASS':
+                raise ValueError('authenticated Redis shutdown did not complete')
             for _ in range(60):
                 current = json.loads(k('-n', 'kanz-messaging', 'get', 'pod/redis', '-o', 'json'))
                 status = current['status']['containerStatuses'][0]

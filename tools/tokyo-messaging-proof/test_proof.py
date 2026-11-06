@@ -5,6 +5,8 @@ import io
 import json
 import tarfile
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stdout
 import proof
 
 
@@ -20,6 +22,31 @@ def workflow_boundary(workflow):
 
 
 class MessagingTests(unittest.TestCase):
+    def test_shutdown_requires_authenticated_clean_eof_from_separate_client(self):
+        class Socket:
+            def __init__(self, replies):
+                self.replies = iter(replies)
+                self.sent = []
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def makefile(self, mode): return self
+            def sendall(self, value): self.sent.append(value)
+            def readline(self):
+                result = next(self.replies)
+                if isinstance(result, Exception): raise result
+                return result
+        for last in (b'', b'-ERR refused\r\n', TimeoutError('fixture'), ConnectionResetError('fixture')):
+            sock = Socket([b'-NOAUTH Authentication required.\r\n', b'+OK\r\n', last])
+            output = io.StringIO()
+            with patch('socket.create_connection', return_value=sock), patch('pathlib.Path.read_bytes', return_value=b'synthetic'), redirect_stdout(output):
+                if last == b'':
+                    exec(proof.REDIS_SHUTDOWN, {})
+                    self.assertEqual(output.getvalue(), 'REDIS_SHUTDOWN_PASS\n')
+                else:
+                    with self.assertRaises((AssertionError, TimeoutError, ConnectionResetError)):
+                        exec(proof.REDIS_SHUTDOWN, {})
+            self.assertEqual(sock.sent[-1], b'*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n')
+
     def test_cli_stored_message_requires_exact_payload_and_identity(self):
         record = {'subject': 'audit.authority.decision', 'seq': 1, 'time': '2026-11-06T00:00:00Z',
                   'data': base64.b64encode(b'{"fixture":true}').decode()}
