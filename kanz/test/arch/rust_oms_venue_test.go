@@ -260,14 +260,14 @@ func TestRustVenueWorkspaceBuildStamped(t *testing.T) {
 		if end := strings.Index(s, "\n      - name:"); end >= 0 {
 			s = s[:end]
 		}
-		stamp := strings.Index(s, `export KANZ_BUILD_VERSION="$(git rev-parse HEAD)"`)
-		build := strings.Index(s, "cargo check --locked --workspace --all-targets")
-		return stamp >= 0 && build > stamp
+		return strings.Contains(s, `KANZ_BUILD_VERSION="$(git rev-parse HEAD)" cargo check --locked --workspace --all-targets`) &&
+			strings.Contains(s, `KANZ_BUILD_VERSION="$(git rev-parse HEAD)" cargo clippy --locked --workspace --all-targets`) &&
+			!strings.Contains(s, "export KANZ_BUILD_VERSION")
 	}
 	if !check(string(raw)) {
 		t.Fatal("workspace venue example lacks immutable checkout stamp")
 	}
-	if check(strings.ReplaceAll(string(raw), `export KANZ_BUILD_VERSION="$(git rev-parse HEAD)"`, "")) {
+	if check(strings.ReplaceAll(string(raw), `KANZ_BUILD_VERSION="$(git rev-parse HEAD)"`, "")) {
 		t.Fatal("missing build stamp mutation accepted")
 	}
 }
