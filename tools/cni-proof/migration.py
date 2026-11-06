@@ -14,6 +14,10 @@ import proof
 NODE = "rancher/k3s:v1.36.4-k3s1@sha256:8b3560e0a99b2f22832b2c963550952ed69830320d4ee712693c52026ada7b89"
 LABEL = "io.kanz.cni-migration"
 CNI_DIR = "/var/lib/rancher/k3s/agent/etc/cni/net.d"
+# K3s v1.36.4+k3s1 sets its bundled CNI paths only while Flannel is enabled
+# (pkg/executor/embed/embed.go). With backend=none, containerd uses these defaults.
+CILIUM_CNI_DIR = "/etc/cni/net.d"
+CILIUM_CNI_BIN = "/opt/cni/bin"
 BASE_CONFIG = {"cluster-init": True, "disable": ["traefik", "servicelb", "metrics-server"],
                "secrets-encryption": True, "write-kubeconfig-mode": "0600"}
 
@@ -142,14 +146,17 @@ class Fixture:
         return obj["Id"]
 
     def datapath(self):
-        active = self.inside("sh", "-ceu", "find " + CNI_DIR + " -maxdepth 1 -name '*.conflist' | sort | head -1")
-        if active not in (CNI_DIR + "/05-cilium.conflist", CNI_DIR + "/10-flannel.conflist"):
+        directory = CILIUM_CNI_DIR if self.mode == "cilium" else CNI_DIR
+        active = self.inside("sh", "-ceu", "find " + directory + " -maxdepth 1 -name '*.conflist' | sort | head -1")
+        expected = directory + ("/05-cilium.conflist" if self.mode == "cilium" else "/10-flannel.conflist")
+        if active != expected:
             raise proof.ProofError("unexpected_active_CNI_file")
         conf = json.loads(self.inside("cat", active))
         types = [plugin.get("type") for plugin in conf.get("plugins", [])]
         if self.mode == "cilium":
             if "cilium-cni" not in types or "flannel" in types:
                 raise proof.ProofError("Cilium_not_active_CNI")
+            self.inside("test", "-x", CILIUM_CNI_BIN + "/cilium-cni")
             self.k("-n", "kube-system", "exec", "daemonset/cilium", "-c", "cilium-agent", "--", "cilium-dbg", "status", "--brief")
             config = self.k("-n", "kube-system", "exec", "daemonset/cilium", "-c", "cilium-agent", "--", "cilium-dbg", "config")
             if re.findall(r"(?m)^PolicyEnforcement\s*:\s*(\S+)\s*$", config) != ["default"]:
@@ -429,8 +436,8 @@ class Fixture:
         self.inside("helm", "install", "cilium", "/tmp/cilium.tgz", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml",
                     "--namespace", "kube-system", "--set", "kubeProxyReplacement=false",
                     "--set", "ipam.mode=kubernetes", "--set", "operator.replicas=1",
-                    "--set", "cni.binPath=/var/lib/rancher/k3s/data/cni",
-                    "--set", "cni.confPath=" + CNI_DIR,
+                    "--set", "cni.binPath=" + CILIUM_CNI_BIN,
+                    "--set", "cni.confPath=" + CILIUM_CNI_DIR,
                     "--wait", "--timeout", "5m", timeout=330)
         self.stage = "cilium_node_ready"
         self.ready()
@@ -446,7 +453,7 @@ class Fixture:
         self.inside("helm", "uninstall", "cilium", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml",
                     "--namespace", "kube-system", "--wait", "--timeout", "3m", timeout=200)
         self.inside("/tmp/cilium-dbg", "post-uninstall-cleanup", "--all-state", "--force")
-        self.inside("sh", "-ceu", "rm -f " + CNI_DIR + "/05-cilium.conflist; cp /tmp/original-flannel.conflist " + CNI_DIR + "/10-flannel.conflist")
+        self.inside("sh", "-ceu", "rm -f " + CILIUM_CNI_DIR + "/05-cilium.conflist; cp /tmp/original-flannel.conflist " + CNI_DIR + "/10-flannel.conflist")
         self.configure(False)
         command(["docker", "restart", "--timeout", "30", self.name], timeout=90)
         self.ready()

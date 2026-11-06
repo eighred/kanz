@@ -181,8 +181,39 @@ class MigrationTests(unittest.TestCase):
         f.mode = "cilium"
         with patch.object(f, "inside", side_effect=[migration.CNI_DIR + "/10-flannel.conflist",
                                                    json.dumps({"plugins": [{"type": "flannel"}]})]):
+            with self.assertRaisesRegex(proof.ProofError, "unexpected_active_CNI_file"):
+                f.datapath()
+
+    def test_cilium_uses_custom_runtime_paths_and_rejects_wrong_plugin(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        f.mode = "cilium"
+        active = migration.CILIUM_CNI_DIR + "/05-cilium.conflist"
+        with patch.object(f, "inside", side_effect=[active, json.dumps({"plugins": [{"type": "cilium-cni"}]}), "", ""]) as call, \
+                patch.object(f, "k", side_effect=["ready", "PolicyEnforcement: default"]):
+            f.datapath()
+            self.assertIn("find /etc/cni/net.d ", call.call_args_list[0].args[2])
+            self.assertEqual(call.call_args_list[2].args, ("test", "-x", "/opt/cni/bin/cilium-cni"))
+        with patch.object(f, "inside", side_effect=[active, json.dumps({"plugins": [{"type": "flannel"}]})]):
             with self.assertRaisesRegex(proof.ProofError, "Cilium_not_active_CNI"):
                 f.datapath()
+
+    def test_cilium_install_and_rollback_preserve_separate_CNI_owners(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        with patch.object(f, "inside") as call, patch.object(f, "k"), \
+                patch.object(f, "ownership"), patch.object(f, "quiesce_system"), \
+                patch.object(f, "configure"), patch.object(f, "api_ready"), \
+                patch.object(f, "service_rules_ready"), patch.object(f, "remove_old_policy_rules"), \
+                patch.object(f, "prepare_private_mount"), patch.object(f, "prepare_private_netns"), \
+                patch.object(f, "ready"), patch.object(f, "recycle_system"), patch.object(migration, "command"):
+            f.switch_to_cilium()
+            install = next(item.args for item in call.call_args_list if item.args[:2] == ("helm", "install"))
+            self.assertIn("cni.binPath=/opt/cni/bin", install)
+            self.assertIn("cni.confPath=/etc/cni/net.d", install)
+            self.assertNotIn("cni.confPath=" + migration.CNI_DIR, install)
+            f.rollback()
+            restore = next(item.args[2] for item in call.call_args_list if len(item.args) > 2 and "cp /tmp/original-flannel.conflist" in item.args[2])
+            self.assertIn("rm -f /etc/cni/net.d/05-cilium.conflist", restore)
+            self.assertIn("cp /tmp/original-flannel.conflist " + migration.CNI_DIR + "/10-flannel.conflist", restore)
 
     def test_rollback_rejects_remaining_cilium(self):
         f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
