@@ -81,8 +81,11 @@ func (p *Projection) Checkpoint(ctx context.Context) error {
 	}
 	p.mu.RLock()
 	seq := p.seq
-	cp := p.snapshotLocked()
+	cp, err := p.snapshotLocked()
 	p.mu.RUnlock()
+	if err != nil {
+		return err
+	}
 
 	// NOTHING FOLDED YET, NOTHING TO CHECKPOINT. Writing a seq-0 checkpoint would
 	// be harmless but it would also overwrite a real one with an empty view if the
@@ -99,28 +102,45 @@ func (p *Projection) Checkpoint(ctx context.Context) error {
 
 // snapshotLocked serializes every account under this pod's tenant. Callers hold at
 // least the read lock.
-func (p *Projection) snapshotLocked() *tvsyncpb.Checkpoint {
+func (p *Projection) snapshotLocked() (*tvsyncpb.Checkpoint, error) {
 	cp := &tvsyncpb.Checkpoint{
-		TenantId: p.tenant,
-		Seq:      p.seq,
-		TakenAt:  timestamppb.New(p.now().UTC()),
+		ExactEncodingVersion: 1,
+		TenantId:             p.tenant,
+		Seq:                  p.seq,
+		TakenAt:              timestamppb.New(p.now().UTC()),
 	}
 	for _, a := range p.accounts[p.tenant] {
-		cp.Accounts = append(cp.Accounts, snapshotAccount(a))
+		as, err := snapshotAccount(a)
+		if err != nil {
+			return nil, err
+		}
+		cp.Accounts = append(cp.Accounts, as)
 	}
-	return cp
+	return cp, nil
 }
 
-func snapshotAccount(a *account) *tvsyncpb.AccountSnapshot {
+func snapshotAccount(a *account) (*tvsyncpb.AccountSnapshot, error) {
 	out := &tvsyncpb.AccountSnapshot{
 		TenantId:  a.tenant,
 		AccountId: a.id,
 		Orders:    make(map[string]*tvsyncpb.OrderRevisions, len(a.orders)),
 	}
 	for _, e := range a.execs {
+		qty, err := ratToProto(e.qty)
+		if err != nil {
+			return nil, err
+		}
+		price, err := ratToProto(e.price)
+		if err != nil {
+			return nil, err
+		}
+		fee, err := ratToProto(e.fee)
+		if err != nil {
+			return nil, err
+		}
 		out.Execs = append(out.Execs, &tvsyncpb.Execution{
 			FillId: e.fillID, OrderId: e.orderID, Instrument: e.instrument, Venue: e.venue,
-			Side: e.side, Qty: ratToProto(e.qty), Price: ratToProto(e.price), Fee: ratToProto(e.fee),
+			Side: e.side, Qty: qty, Price: price, Fee: fee,
 			Effective: timestamppb.New(e.effective), Knowledge: logTime(e.knowledge),
 		})
 	}
@@ -147,8 +167,8 @@ func snapshotAccount(a *account) *tvsyncpb.AccountSnapshot {
 		for inst, l := range a.baseline {
 			// RatString, NOT ratToProto — see tvsync.v1.Lot. An average cost and a
 			// realized P&L are derived rationals and routinely non-terminating, so
-			// the scaled Decimal the executions use would move the fund's realized
-			// P&L by its last digit on every restore, and again on the next one.
+			// an exact finite Decimal cannot represent those values. Rounding would
+			// move realized P&L on every restore, and again on the next one.
 			out.Baseline[inst] = &tvsyncpb.Lot{
 				Qty: l.Qty.RatString(), AvgCost: l.AvgCost.RatString(), Realized: l.Realized.RatString(),
 			}
@@ -161,7 +181,7 @@ func snapshotAccount(a *account) *tvsyncpb.AccountSnapshot {
 		// than match the source of truth.
 		out.RetainedFrom = timestamppb.New(a.retainedFrom)
 	}
-	return out
+	return out, nil
 }
 
 // restore rebuilds the accounts from a checkpoint blob. Callers hold the write
@@ -184,6 +204,12 @@ func (p *Projection) restore(blob []byte) error {
 	if cp.GetTenantId() != p.tenant {
 		return fmt.Errorf("%w: checkpoint is for tenant %q, this pod serves %q",
 			ErrCheckpointTenantMismatch, cp.GetTenantId(), p.tenant)
+	}
+	// A legacy checkpoint cannot establish whether digits were already lost.
+	// Refuse before mutating state; rebuilding requires independently verified
+	// complete raw history, never an automatic fallback or marker rewrite.
+	if cp.GetExactEncodingVersion() != 1 {
+		return ErrCheckpointEncodingVersion
 	}
 	for _, as := range cp.GetAccounts() {
 		a, err := restoreAccount(as)
@@ -319,12 +345,15 @@ func logTime(t time.Time) *timestamppb.Timestamp {
 // NIL STAYS NIL. A fee that was never reported and a fee of zero are different
 // facts on a P&L line, and the fold already distinguishes them — collapsing them
 // here would make a restored view disagree with the one it replaced.
-func ratToProto(r *big.Rat) *commonpb.Decimal {
+func ratToProto(r *big.Rat) (*commonpb.Decimal, error) {
 	if r == nil {
-		return nil
+		return nil, nil
 	}
-	d, _ := dec.ToProtoScaled(r)
-	return d
+	d, ok := dec.ToProtoExact(r)
+	if !ok {
+		return nil, ErrCheckpointValueOutOfDomain
+	}
+	return d, nil
 }
 
 // protoToRat reads one back.
@@ -348,7 +377,10 @@ func protoToRat(d *commonpb.Decimal) (*big.Rat, error) {
 // pool, so it is a structural fault rather than an operational one.
 var ErrCheckpointTenantMismatch = errors.New("tv-sync: fold checkpoint belongs to another tenant")
 
-// ErrCheckpointValueOutOfDomain: a stored decimal is not representable. The fold
-// path refuses the same shape on the way in (decodeFact), so this is a corrupted
-// or hand-edited row, not a schema drift.
+// ErrCheckpointValueOutOfDomain refuses invalid stored decimals and retained
+// rationals that the exact encoder cannot represent. The encoder's ±60 bound
+// is intentionally narrower than the incoming Decimal domain of ±64.
 var ErrCheckpointValueOutOfDomain = errors.New("tv-sync: fold checkpoint holds an out-of-domain decimal")
+
+// ErrCheckpointEncodingVersion refuses legacy or unknown precision contracts.
+var ErrCheckpointEncodingVersion = errors.New("tv-sync: checkpoint exact encoding version unsupported; verified history rebuild required")

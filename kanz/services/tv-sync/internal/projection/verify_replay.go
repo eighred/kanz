@@ -240,8 +240,14 @@ func verifyCapturedReplay(ctx context.Context, source Log, tenant string, retent
 	if err != nil {
 		return ReplayProof{}, err
 	}
-	want := canonicalReplayState(full, snap, retention)
-	got := canonicalReplayState(restored, snap, retention)
+	want, err := canonicalReplayState(full, snap, retention)
+	if err != nil {
+		return ReplayProof{}, ErrReplayInput
+	}
+	got, err := canonicalReplayState(restored, snap, retention)
+	if err != nil {
+		return ReplayProof{}, ErrReplayInput
+	}
 	if !proto.Equal(want, got) {
 		return ReplayProof{}, ErrReplayMismatch
 	}
@@ -261,10 +267,13 @@ func verifyCapturedReplay(ctx context.Context, source Log, tenant string, retent
 	return ReplayProof{SchemaVersion: 1, Status: "VERIFIED", TenantSHA256: hex.EncodeToString(tenantHash[:]), SnapshotSHA256: hex.EncodeToString(snapshotHash[:]), InputSHA256: hex.EncodeToString(input.Sum(nil)), StateSHA256: hex.EncodeToString(stateHash), CheckedAt: snap.at.UTC(), RetentionSeconds: int64(retention / time.Second), FactCount: snap.count, Watermark: snap.watermark, CheckpointSeq: snap.checkpointSeq}, nil
 }
 
-func canonicalReplayState(p *Projection, snap replaySnapshot, retention time.Duration) *tvsyncpb.Checkpoint {
+func canonicalReplayState(p *Projection, snap replaySnapshot, retention time.Duration) (*tvsyncpb.Checkpoint, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	cp := p.snapshotLocked()
+	cp, err := p.snapshotLocked()
+	if err != nil {
+		return nil, err
+	}
 	// Watermark is independently bound to the SQL snapshot (checkpoint-only boot
 	// does not advance Rehydrate's private last-tail seq). Compare at one declared
 	// retention horizon, not differing historical eviction scheduler timestamps.
@@ -275,7 +284,7 @@ func canonicalReplayState(p *Projection, snap replaySnapshot, retention time.Dur
 		a.RetainedFrom = timestamppb.New(snap.at.Add(-retention))
 	}
 	sort.Slice(cp.Accounts, func(i, j int) bool { return cp.Accounts[i].AccountId < cp.Accounts[j].AccountId })
-	return cp
+	return cp, nil
 }
 func hashReplayPart(h hash.Hash, data []byte) {
 	var length [8]byte
