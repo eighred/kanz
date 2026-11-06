@@ -35,6 +35,16 @@ REQUIRED = {
             "same-actor", "blank-actor", "case-binding", "malformed-digest", "previous-digest-binding",
             "approval-clock", "bad-nanos", "unknown-price", "currency-change", "unchanged-fee", "outside-decimal-domain",
         )},
+        "TestRustRecoveryTransactions",
+        *{"TestRustRecoveryTransactions/" + case for case in (
+            "go-differential-terminal-restart", "zero-history-corrected", "approved-fee-go-differential",
+            "mandatory-facts-and-provenance", "case-cas-rollback-all-owners", "fee-and-claims-rollback", "order-cas-rollback", "unsafe-recovery-rls",
+            "order-cas-and-push-race", "concurrent-recovery-one-checkpoint", "target-outbox-commit-rollback", "tenant-same-case-and-execution",
+        )},
+        *{"TestRustRecoveryTransactions/mandatory-facts-and-provenance/" + case for case in (
+            "missing-status", "missing-execution", "wrong-tenant", "wrong-class", "wrong-state", "wrong-digest", "duplicate-execution", "wrong-checkpoint",
+        )},
+        *{"TestRustRecoveryTransactions/target-outbox-commit-rollback/" + case for case in ("target", "outbox", "commit")},
         "TestRustFeeJournalTransactions",
         *{"TestRustFeeJournalTransactions/" + case for case in (
             "commit-restart-aba-replay", "case-conflict-stale-head", "concurrent-cas-one-revision",

@@ -18,6 +18,14 @@ use tokio_postgres::{config::Host, NoTls};
 struct Input {
     mode: String,
     #[serde(default)]
+    case_version: i64,
+    #[serde(default)]
+    history_digest: String,
+    #[serde(default)]
+    missing: Vec<String>,
+    #[serde(default)]
+    posted: Vec<String>,
+    #[serde(default)]
     rollback: bool,
     #[serde(default)]
     statuses: Vec<i32>,
@@ -161,6 +169,7 @@ async fn run(input: Input) -> Result<Value, ()> {
             | "list-by-parent"
             | "list-by-portfolio"
             | "fee-revision"
+            | "recovery"
     ) || !input.schema.starts_with("oms_store_")
         || input.schema.len() > 63
         || !input
@@ -187,6 +196,17 @@ async fn run(input: Input) -> Result<Value, ()> {
             )
             .await
             .map_err(|_| ())?;
+        if input.mode=="recovery" {
+            let batch=kanz_oms_store::recovery::PreparedRecovery {
+                state:bytes(&input.state)?,order_version:input.expected_version,case_version:input.case_version,
+                history_digest:input.history_digest,missing:input.missing,
+                posted:input.posted.iter().map(|raw| FillWire::decode(&bytes(raw)?).map_err(|_|())).collect::<Result<Vec<_>,_>>()?,
+                records:input.records.into_iter().map(record).collect::<Result<Vec<_>,_>>()?,
+            };
+            return Ok(match kanz_oms_store::recovery::commit_prepared_recovery(&mut client,&input.tenant,&batch).await {
+                Ok(())=>json!({"status":"committed"}),Err(e)=>json!({"status":e.to_string()}),
+            });
+        }
         if input.mode=="fee-revision" {
             let original=FillWire::decode(&bytes(&input.other)?).map_err(|_|())?;
             let revised=FillWire::decode(&bytes(&input.fill)?).map_err(|_|())?;

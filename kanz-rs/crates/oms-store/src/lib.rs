@@ -8,6 +8,7 @@ pub mod fee_wire;
 mod go_unicode;
 pub mod identity;
 pub mod queries;
+pub mod recovery;
 use identity::{execution_key, same_execution};
 use kanz_oms_fold_shadow::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;
@@ -60,7 +61,10 @@ pub struct Record {
 }
 // Preserve the canonical nested fill bytes as well as the entire FACT. In
 // particular prost decoding must not erase forward-compatible unknown fields.
-fn fill_wire(mut wire: &[u8]) -> Result<Vec<u8>, Error> {
+fn fill_wire(wire: &[u8]) -> Result<Vec<u8>, Error> {
+    message_field(wire, 2)
+}
+fn message_field(mut wire: &[u8], field: u64) -> Result<Vec<u8>, Error> {
     fn varint(wire: &mut &[u8]) -> Result<u64, Error> {
         let mut out = 0u64;
         for i in 0..10 {
@@ -95,7 +99,7 @@ fn fill_wire(mut wire: &[u8]) -> Result<Vec<u8>, Error> {
         if wire.len() < n {
             return Err(Error::InvalidInput);
         }
-        if tag == 18 {
+        if tag == (field << 3 | 2) {
             if found.is_some() {
                 return Err(Error::InvalidInput);
             }
@@ -163,6 +167,14 @@ async fn duplicate(tx: &Transaction<'_>, fill: Option<&Fill>) -> Result<(), Erro
 }
 
 fn validate_write(state: &[u8], records: &[Record]) -> Result<OrderState, Error> {
+    validate_batch(state, records, 64, MAX_BYTES)
+}
+fn validate_batch(
+    state: &[u8],
+    records: &[Record],
+    max_records: usize,
+    max_bytes: usize,
+) -> Result<OrderState, Error> {
     let bytes = records.iter().try_fold(state.len(), |sum, r| {
         [
             &r.tenant,
@@ -180,7 +192,8 @@ fn validate_write(state: &[u8], records: &[Record]) -> Result<OrderState, Error>
             n.checked_add(s.len())
         })
     });
-    if records.len() > 64 || bytes.is_none_or(|n| n > MAX_BYTES) {
+    if state.len() > MAX_BYTES || records.len() > max_records || bytes.is_none_or(|n| n > max_bytes)
+    {
         return Err(Error::InvalidInput);
     }
     let st = OrderState::decode(state).map_err(|_| Error::InvalidInput)?;
@@ -341,13 +354,13 @@ pub async fn save(
                 });
             }
         }
-        let count=tx.execute("INSERT INTO order_fills (tenant_id,order_id,fill_id,raw_fill_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3) ON CONFLICT (tenant_id,fill_id) DO NOTHING",&[&st.order_id,&key,&fill_id]).await?;
+        let count = claim(&tx, &st.order_id, &key, fill_id).await?;
         if count == 0 {
             duplicate(&tx, fill.as_ref().map(|f| &f.0)).await?;
             return Err(Error::FillApplied);
         }
         if let Some((fill, raw)) = fill {
-            tx.execute("INSERT INTO order_executions (order_id,fill_id,venue,venue_account_id,instrument_id,venue_execution_id,fill) VALUES ($1,$2,$3,$4,$5,$6,$7)",&[&st.order_id,&fill_id,&fill.venue,&fill.venue_account_id,&fill.instrument_id,&fill.venue_execution_id,&raw]).await?;
+            journal(&tx, &st.order_id, fill_id, &fill, &raw).await?;
         }
     }
     cas(&tx, &st, state, expected_version).await?;
@@ -390,4 +403,18 @@ mod tests {
             assert_eq!(fill_wire(malformed), Err(Error::InvalidInput));
         }
     }
+}
+
+async fn claim(tx: &Transaction<'_>, order: &str, key: &str, alias: &str) -> Result<u64, Error> {
+    Ok(tx.execute("INSERT INTO order_fills (tenant_id,order_id,fill_id,raw_fill_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3) ON CONFLICT (tenant_id,fill_id) DO NOTHING",&[&order,&key,&alias]).await?)
+}
+async fn journal(
+    tx: &Transaction<'_>,
+    order: &str,
+    alias: &str,
+    fill: &Fill,
+    raw: &[u8],
+) -> Result<(), Error> {
+    tx.execute("INSERT INTO order_executions (order_id,fill_id,venue,venue_account_id,instrument_id,venue_execution_id,fill) VALUES ($1,$2,$3,$4,$5,$6,$7)",&[&order,&alias,&fill.venue,&fill.venue_account_id,&fill.instrument_id,&fill.venue_execution_id,&raw]).await?;
+    Ok(())
 }

@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/recovery.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -143,6 +143,16 @@ func checkRustOMSStoreBoundary(root string) error {
 	if strings.Count(found["src/fee_journal.rs"], `tx:&'txmutTransaction<'connection>`) != 2 || strings.Count(found["src/fee_journal.rs"], `identity::same_except_fee(original.value(),revised.value())`) != 2 {
 		return fmt.Errorf("fee token must exclusively borrow caller transaction and validate both head/append economics")
 	}
+	for _, marker := range []string{`validate_batch(state,records,64,MAX_BYTES)`, `message_field(wire,2)`, `claim(&tx,&st.order_id,&key,fill_id).await?`, `journal(&tx,&st.order_id,fill_id,&fill,&raw).await?`} {
+		if !strings.Contains(found["src/lib.rs"], marker) {
+			return fmt.Errorf("shared repository primitive missing %s", marker)
+		}
+	}
+	for _, marker := range []string{`fnmetadata_and_posted_share_one_byte_budget()`, `constMAX_FILLS:usize=8000`, `constMAX_BATCH:usize=4*MAX_BYTES`, `MAX_BATCH.checked_sub(extra).ok_or(Error::Capacity)?`, `validate_batch(&batch.state,&batch.records,MAX_FILLS+1,budget)`, `r.tenant!=tenant`, `r.event_class!=1`, `r.payload_schema_ref!=schema`, `r.event_time!=at`, `status.checkpointasusize!=count`, `message_field(&r.payload,2)?!=batch.state`, `FillWire::decode(&message_field(&r.payload,1)?)?`, `fill.without_recovery()?.journal_bytes()?`, `p.payload_digest!=batch.history_digest`, `missing.len()+posted.len()!=fills.len()`, `tables.get::<_,i64>(0)!=3`, `relrowsecurityANDrelforcerowsecurity`, `claims.sort_by(|a,b|a.value().fill_id.cmp(&b.value().fill_id))`, `claim(&tx,&st.order_id,&identity::execution_key(f),&f.fill_id).await?`, `duplicate(&tx,Some(f)).await?`, `returnErr(Error::Conflict)`, `journal(&tx,&st.order_id,&f.fill_id,f,&fill.journal_bytes()?).await?`, `fee_journal::cas_order(&muttx,tenant,&batch.state,batch.order_version).await?`, `locked.record_fee_revision(posted.get(key).ok_or(Error::FeeRevision)?,fill).await?`, `version=$7ANDstatus='investigating'ANDcheckpoint=0`, `ifchanged!=1`, `INSERTINTOexecution_recovery_targets`, `enqueue(&tx,&batch.records).await?`, `commit(tx).await`} {
+		if !strings.Contains(found["src/recovery.rs"], marker) {
+			return fmt.Errorf("recovery durable boundary missing %s", marker)
+		}
+	}
 	for _, forbidden := range []string{".transaction(", ".commit(", ".rollback("} {
 		if strings.Contains(found["src/fee_journal.rs"], forbidden) {
 			return fmt.Errorf("fee primitive owns caller transaction lifecycle")
@@ -178,7 +188,7 @@ func TestRustOMSStoreBoundary(t *testing.T) {
 }
 
 func checkRustOMSStoreEvidence(workflow, checker string) error {
-	for _, marker := range []string{"TestFeeEconomicIndependentOracle", "TestRustFeeEconomicCompatibility", "TestRustFeeTermsCompatibility", "TestRustFeeJournalTransactions/", "commit-restart-aba-replay", "case-conflict-stale-head", "concurrent-cas-one-revision", "explicit-rollback", "outbox-failure-atomic", "deferred-commit-atomic", "tenant-same-execution-case", "other-book-not-oms-head", "corrupt-bounded-head", "scope-and-order-refusal", "TestPinnedGoUnicodeTable", "TestRustFeeUnicodeCompatibility", "TestRustFeeWireCompatibility/", "TestRustFeeWireRefusals/", "unknown-value-encoding", "duplicate-embedded-unknown", "known-wrong-wire-is-unknown", "TestRustRepositoryQueries/", "list-status-parent-exact", "portfolio-page-count-backfill", "tenant-same-ids", "corruption-capacity-no-prefix", "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result", "TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
+	for _, marker := range []string{"TestRustRecoveryTransactions/", "go-differential-terminal-restart", "zero-history-corrected", "approved-fee-go-differential", "mandatory-facts-and-provenance", "case-cas-rollback-all-owners", "fee-and-claims-rollback", "order-cas-rollback", "unsafe-recovery-rls", "order-cas-and-push-race", "concurrent-recovery-one-checkpoint", "target-outbox-commit-rollback", "tenant-same-case-and-execution", "TestFeeEconomicIndependentOracle", "TestRustFeeEconomicCompatibility", "TestRustFeeTermsCompatibility", "TestRustFeeJournalTransactions/", "commit-restart-aba-replay", "case-conflict-stale-head", "concurrent-cas-one-revision", "explicit-rollback", "outbox-failure-atomic", "deferred-commit-atomic", "tenant-same-execution-case", "other-book-not-oms-head", "corrupt-bounded-head", "scope-and-order-refusal", "TestPinnedGoUnicodeTable", "TestRustFeeUnicodeCompatibility", "TestRustFeeWireCompatibility/", "TestRustFeeWireRefusals/", "unknown-value-encoding", "duplicate-embedded-unknown", "known-wrong-wire-is-unknown", "TestRustRepositoryQueries/", "list-status-parent-exact", "portfolio-page-count-backfill", "tenant-same-ids", "corruption-capacity-no-prefix", "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result", "TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
 		if !strings.Contains(checker, marker) {
 			return fmt.Errorf("missing lifecycle proof %s", marker)
 		}
@@ -224,6 +234,17 @@ func TestRustOMSStoreEvidenceAndMutations(t *testing.T) {
 func TestRustOMSStoreBoundaryMutations(t *testing.T) {
 	source := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
 	for _, tc := range []struct{ file, from, to string }{
+		{"src/recovery.rs", "MAX_BATCH.checked_sub(extra)", "MAX_BATCH.checked_sub(0)"},
+		{"src/recovery.rs", "r.tenant != tenant", "false"},
+		{"src/recovery.rs", "r.event_class != 1", "false"},
+		{"src/recovery.rs", "status.checkpoint as usize != count", "false"},
+		{"src/recovery.rs", "message_field(&r.payload, 2)? != batch.state", "false"},
+		{"src/recovery.rs", "p.payload_digest != batch.history_digest", "false"},
+		{"src/recovery.rs", "missing.len() + posted.len() != fills.len()", "false"},
+		{"src/recovery.rs", "tables.get::<_, i64>(0) != 3", "false"},
+		{"src/recovery.rs", "claims.sort_by(|a, b| a.value().fill_id.cmp(&b.value().fill_id))", "claims.reverse()"},
+		{"src/recovery.rs", "version=$7 AND status='investigating' AND checkpoint=0", "version=$7"},
+		{"src/recovery.rs", "enqueue(&tx, &batch.records).await?", "Ok::<(), Error>(())?"},
 		{"src/fee_journal.rs", "tx: &'tx mut Transaction<'connection>", "tx: &'tx Transaction<'connection>"},
 		{"src/fee_journal.rs", "scope_existing(tx, tenant).await?", "Ok::<(), Error>(())?"},
 		{"src/fee_journal.rs", "cas(tx, &st, state, expected_version).await?", "Ok::<(), Error>(())?"},
