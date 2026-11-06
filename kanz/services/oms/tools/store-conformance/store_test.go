@@ -54,17 +54,20 @@ func run(t *testing.T, input map[string]any) string {
 }
 
 type fixtureResult struct {
-	Pending   []queueRow `json:"pending"`
-	AgeNS     *uint64    `json:"age_ns"`
-	Delta     *string    `json:"delta"`
-	Fresh     *bool      `json:"fresh"`
-	States    [][]byte   `json:"states"`
-	Unindexed *int64     `json:"unindexed"`
-	Status    string     `json:"status"`
-	Version   string     `json:"version"`
-	State     []byte     `json:"state"`
-	DBVersion *int64     `json:"db_version"`
-	Claims    []string   `json:"claims"`
+	Proposal  *proposalWire  `json:"proposal"`
+	Proposals []proposalWire `json:"proposals"`
+	Won       *bool          `json:"won"`
+	Pending   []queueRow     `json:"pending"`
+	AgeNS     *uint64        `json:"age_ns"`
+	Delta     *string        `json:"delta"`
+	Fresh     *bool          `json:"fresh"`
+	States    [][]byte       `json:"states"`
+	Unindexed *int64         `json:"unindexed"`
+	Status    string         `json:"status"`
+	Version   string         `json:"version"`
+	State     []byte         `json:"state"`
+	DBVersion *int64         `json:"db_version"`
+	Claims    []string       `json:"claims"`
 }
 
 func runResult(t *testing.T, input map[string]any) fixtureResult {

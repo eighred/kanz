@@ -6,7 +6,7 @@ use kanz_oms_store::{
     Record,
 };
 use prost::Message;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
@@ -18,6 +18,10 @@ use tokio_postgres::{config::Host, NoTls};
 #[serde(deny_unknown_fields)]
 struct Input {
     mode: String,
+    #[serde(default)]
+    proposal: Option<ProposalInput>,
+    #[serde(default)]
+    at: Option<Clock>,
     #[serde(default)]
     case_version: i64,
     #[serde(default)]
@@ -54,6 +58,114 @@ struct Input {
     fill: String,
     #[serde(default)]
     other: String,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Clock {
+    seconds: i64,
+    nanos: u32,
+}
+impl Clock {
+    fn time(&self) -> Result<std::time::SystemTime, ()> {
+        if !(-62135596800..=253402300799).contains(&self.seconds) || self.nanos >= 1_000_000_000 {
+            return Err(());
+        }
+        let base = if self.seconds < 0 {
+            UNIX_EPOCH.checked_sub(Duration::from_secs(self.seconds.unsigned_abs()))
+        } else {
+            UNIX_EPOCH.checked_add(Duration::from_secs(self.seconds as u64))
+        };
+        base.and_then(|v| v.checked_add(Duration::from_nanos(self.nanos.into())))
+            .ok_or(())
+    }
+    fn from_time(value: std::time::SystemTime) -> Result<Self, ()> {
+        match value.duration_since(UNIX_EPOCH) {
+            Ok(d) => Ok(Self {
+                seconds: d.as_secs().try_into().map_err(|_| ())?,
+                nanos: d.subsec_nanos(),
+            }),
+            Err(e) => {
+                let d = e.duration();
+                let seconds: i64 = d.as_secs().try_into().map_err(|_| ())?;
+                Ok(if d.subsec_nanos() == 0 {
+                    Self {
+                        seconds: -seconds,
+                        nanos: 0,
+                    }
+                } else {
+                    Self {
+                        seconds: -seconds - 1,
+                        nanos: 1_000_000_000 - d.subsec_nanos(),
+                    }
+                })
+            }
+        }
+    }
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProposalInput {
+    id: String,
+    subject: String,
+    portfolio_id: String,
+    act: String,
+    proposer: String,
+    digest: String,
+    command: String,
+    created_at: Clock,
+    expires_at: Clock,
+    #[serde(default)]
+    approver: String,
+    #[serde(default)]
+    decided_at: Option<Clock>,
+    #[serde(default)]
+    refusal_reason: String,
+    #[serde(default)]
+    refused_by: String,
+    #[serde(default)]
+    refused_at: Option<Clock>,
+    #[serde(default)]
+    expiry_announced_at: Option<Clock>,
+}
+impl ProposalInput {
+    fn proposal(self) -> Result<kanz_oms_store::proposals::Proposal, ()> {
+        Ok(kanz_oms_store::proposals::Proposal {
+            id: self.id,
+            subject: self.subject,
+            portfolio_id: self.portfolio_id,
+            act: self.act,
+            proposer: self.proposer,
+            digest: self.digest,
+            command: bytes(&self.command)?,
+            created_at: self.created_at.time()?,
+            expires_at: self.expires_at.time()?,
+            approver: self.approver,
+            decided_at: self.decided_at.map(|v| v.time()).transpose()?,
+            refusal_reason: self.refusal_reason,
+            refused_by: self.refused_by,
+            refused_at: self.refused_at.map(|v| v.time()).transpose()?,
+            expiry_announced_at: self.expiry_announced_at.map(|v| v.time()).transpose()?,
+        })
+    }
+    fn from_proposal(p: kanz_oms_store::proposals::Proposal) -> Result<Self, ()> {
+        Ok(Self {
+            id: p.id,
+            subject: p.subject,
+            portfolio_id: p.portfolio_id,
+            act: p.act,
+            proposer: p.proposer,
+            digest: p.digest,
+            command: STANDARD.encode(p.command),
+            created_at: Clock::from_time(p.created_at)?,
+            expires_at: Clock::from_time(p.expires_at)?,
+            approver: p.approver,
+            decided_at: p.decided_at.map(Clock::from_time).transpose()?,
+            refusal_reason: p.refusal_reason,
+            refused_by: p.refused_by,
+            refused_at: p.refused_at.map(Clock::from_time).transpose()?,
+            expiry_announced_at: p.expiry_announced_at.map(Clock::from_time).transpose()?,
+        })
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -179,6 +291,13 @@ async fn run(input: Input) -> Result<Value, ()> {
             | "outbox-lock"
             | "outbox-cancel"
             | "outbox-cancel-fallback"
+            | "proposal-put"
+            | "proposal-get"
+            | "proposal-claim"
+            | "proposal-refusal"
+            | "proposal-pending"
+            | "proposal-expired"
+            | "proposal-announce"
     ) || !input.schema.starts_with("oms_store_")
         || input.schema.len() > 63
         || !input
@@ -292,6 +411,23 @@ async fn run(input: Input) -> Result<Value, ()> {
             )
             .await
             .map_err(|_| ())?;
+        if input.mode.starts_with("proposal-") {
+            use kanz_oms_store::proposals;
+            let at=match input.at.as_ref(){Some(at)=>at.time()?,None if matches!(input.mode.as_str(),"proposal-get"|"proposal-put")=>UNIX_EPOCH,None=>return Err(())};
+            let records=input.records.into_iter().map(record).collect::<Result<Vec<_>,_>>()?;
+            let result:Result<Value,kanz_oms_store::Error>=async {
+                Ok(match input.mode.as_str(){
+                    "proposal-put"=>{let p=input.proposal.ok_or(kanz_oms_store::Error::InvalidInput)?.proposal().map_err(|_|kanz_oms_store::Error::InvalidInput)?;proposals::put(&mut client,&input.tenant,&p,&records).await?;json!({"status":"committed"})},
+                    "proposal-get"=>match proposals::get(&mut client,&input.tenant,&input.order_id).await?{Some(p)=>json!({"status":"proposal","proposal":ProposalInput::from_proposal(p).map_err(|_|kanz_oms_store::Error::InvalidInput)?}),None=>json!({"status":"missing"})},
+                    "proposal-pending"|"proposal-expired"=>{let rows=if input.mode=="proposal-pending"{proposals::pending(&mut client,&input.tenant,at).await?}else{proposals::expired_unannounced(&mut client,&input.tenant,at,input.limit).await?};json!({"status":"proposals","proposals":rows.into_iter().map(ProposalInput::from_proposal).collect::<Result<Vec<_>,_>>().map_err(|_|kanz_oms_store::Error::InvalidInput)?})},
+                    "proposal-claim"=>json!({"status":"decision","won":proposals::claim(&mut client,&input.tenant,&input.order_id,&input.other,at,&records).await?}),
+                    "proposal-refusal"=>json!({"status":"decision","won":proposals::record_refusal(&mut client,&input.tenant,&input.order_id,&input.other,&input.fill,at).await?}),
+                    "proposal-announce"=>json!({"status":"decision","won":proposals::announce_expiry(&mut client,&input.tenant,&input.order_id,at,&records).await?}),
+                    _=>return Err(kanz_oms_store::Error::InvalidInput),
+                })
+            }.await;
+            return Ok(match result{Ok(v)=>v,Err(e)=>json!({"status":e.to_string()})});
+        }
         if input.mode.starts_with("outbox-") {
             let result: Result<Value, kanz_oms_store::Error> = async {
                 Ok(match input.mode.as_str() {

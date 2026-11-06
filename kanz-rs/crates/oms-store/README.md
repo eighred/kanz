@@ -200,3 +200,40 @@ error is likewise not proof of rollback; retry keeps at-least-once semantics.
 
 Real Go/Rust PostgreSQL contention, cancellation, session-loss, raw-byte and mark
 proof is mandatory in `TestRustOutboxQueue`; local skipped tests do not qualify it.
+
+## Held-order proposal repository
+
+`proposals` ports all seven existing OMS ProposalStore persistence operations.
+The original canonical SubmitOrder bytes and row metadata remain in
+`order_proposals`; an unapproved proposal never becomes an order. Put, Claim and
+AnnounceExpiry commit their markers and existing OMS outbox Records together.
+Claim requires a FACT; Put and AnnounceExpiry retain Go's permitted empty batch.
+RecordRefusal changes only the latest refusal on an undecided row. Decisions and
+expiry announcements retain their rows and exclude each other atomically.
+
+This is a repository owner, not the maker/checker authority. The existing Go
+caller authenticates the issuer, checks `dualcontrol.Approve` against the captured
+time and digest, then replays the stored command through the complete admission
+path with `approval.Covers`. Rust keeps the original caller-time SQL predicates;
+it adds no DB-clock expiry policy. SQL lower/btrim remains the final self-approval
+comparison. The separately recorded delayed-admission timing boundary under
+#1413/#796 is not repaired or qualified by this port.
+
+The trusted caller supplies an already connected NOSUPERUSER/NOBYPASSRLS client;
+forced RLS on the proposal table is required in addition to existing store tables.
+Raw commands retain unknown fields. Reads decode corruption but, like Go, do not
+re-run Put validation on stored metadata. Nullable decision/refusal/expiry times
+remain distinct from missing rows. Error or capacity refusal returns no prefix.
+The explicit port bounds are 4096 rows, 1 MiB total dynamic bytes per operation
+and 64 announcement records. Expired pages retain Go's default100 on nonpositive
+limits; over-bound explicit limits refuse. Pending is a complete bounded result,
+not a silently truncated queue. COMMIT errors remain unconfirmed outcomes.
+
+The actual Go `proposalstoretest.Run` is reused against the subprocess adapter;
+the adapter does not validate requests before Rust. Separate real-PostgreSQL
+fixtures compare Go readback, concurrent claim/expiry arbitration, exact raw
+commands and nullable metadata, caller-time boundaries, RLS, whole-result bounds
+and transaction/outbox rollback. The adapter's synthetic approval FACT is built
+independently of the actor under test so invalid actors reach the repository.
+No production caller, service, transport, writer handoff or credential owner is
+introduced; actual Linux no-skip qualification remains required.
