@@ -1,0 +1,10 @@
+[package]
+name = "kanz-proto-wire"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+prost = "=0.14.1"
+prost-reflect = "=0.16.2"

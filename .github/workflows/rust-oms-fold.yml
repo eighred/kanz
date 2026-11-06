@@ -88,6 +88,10 @@ jobs:
           cargo test --locked -p kanz-oms-store --all-targets
           cargo clippy --locked -p kanz-oms-store --all-targets -- -D warnings
           cargo build --locked -p kanz-oms-store --example fixture
+          cargo test --locked -p kanz-proto-wire
+          cargo test --locked -p kanz-oms-venue --all-targets
+          cargo clippy --locked -p kanz-oms-venue --all-targets -- -D warnings
+          cargo build --locked -p kanz-oms-venue --example oms-venue-fixture
       - name: Verify source boundaries and Go transition owners
         working-directory: kanz
         run: |
@@ -120,11 +124,13 @@ jobs:
           KANZ_OMS_FOLD_VERSION: ${{ github.sha }}
           KANZ_OMS_STORE_BIN: ${{ github.workspace }}/kanz-rs/target/debug/examples/fixture
           KANZ_OMS_STORE_VERSION: ${{ github.sha }}
+          KANZ_OMS_VENUE_BIN: ${{ github.workspace }}/kanz-rs/target/debug/examples/oms-venue-fixture
+          KANZ_OMS_VENUE_VERSION: ${{ github.sha }}
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
           TEST_NATS_URL: nats://127.0.0.1:4222
         run: |
           set -o pipefail
-          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/internal/position ./services/oms/tools/store-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
+          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/internal/position ./services/oms/tools/store-conformance ./services/oms/tools/venue-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_oms_fold_evidence.py
           python3 ../.github/scripts/check_oms_fold_evidence.py "$RUNNER_TEMP/oms-fold.jsonl"
