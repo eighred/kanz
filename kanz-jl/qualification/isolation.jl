@@ -1,21 +1,27 @@
 # Test-only code run by an explicit OCI entrypoint override, never the worker.
+println(stderr, "KANZ_OCI_STAGE=imports")
 using Test, Sockets, SHA, TOML, Pkg
+println(stderr, "KANZ_OCI_STAGE=runtime")
 @test VERSION == v"1.13.3"
 @test ccall(:geteuid, Cuint, ()) == 65532
 @test ENV["JULIA_DEPOT_PATH"] == "/opt/julia-depot"
 @test ENV["JULIA_LOAD_PATH"] == "@:@stdlib"
 @test ENV["JULIA_PKG_OFFLINE"] == "true"
 @test isempty(Sockets.getipaddrs()) # --network none: no non-loopback interface
+println(stderr, "KANZ_OCI_STAGE=cgroup")
 @test strip(read("/sys/fs/cgroup/memory.max", String)) == "1073741824"
 @test strip(read("/sys/fs/cgroup/pids.max", String)) == "64"
 @test split(strip(read("/sys/fs/cgroup/cpu.max", String))) == ["100000", "100000"]
+println(stderr, "KANZ_OCI_STAGE=process-security")
 status = read("/proc/self/status", String)
 @test occursin(r"(?m)^CapEff:\s+0000000000000000$", status)
 @test occursin(r"(?m)^NoNewPrivs:\s+1$", status)
+println(stderr, "KANZ_OCI_STAGE=write-refusal")
 for path in ("/opt/kanz-jl/refuse-write", "/opt/julia-depot/refuse-write", "/refuse-write")
     @test_throws SystemError open(path, "w")
 end
 @test isfile("/opt/kanz-jl/source.sha")
+println(stderr, "KANZ_OCI_STAGE=installed-packages")
 manifest = TOML.parsefile("/opt/kanz-jl/Manifest.toml")
 packages = Dict{String,Any}()
 for (_, info) in Pkg.dependencies()
@@ -30,6 +36,7 @@ for (_, info) in Pkg.dependencies()
     end
 end
 @test Set(keys(packages)) == Set(["ProtoBuf", "BufferedStreams", "EnumX"])
+println(stderr, "KANZ_OCI_STAGE=inventory")
 generated = Dict{String,String}()
 for (dir, _, files) in walkdir("/opt/kanz-jl/gen")
     for file in files

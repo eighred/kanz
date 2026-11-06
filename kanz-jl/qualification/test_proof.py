@@ -58,6 +58,19 @@ class QualificationTests(unittest.TestCase):
             with self.subTest(source=source), self.assertRaises(RuntimeError):
                 proof.command([sys.executable, '-I', '-c', source], **kwargs)
 
+    def test_diagnostics_export_only_closed_categories(self):
+        for stage in proof.ISOLATION_STAGES:
+            raw = b"private runtime output\nKANZ_OCI_STAGE=" + stage.encode() + b"\nprivate suffix\n"
+            self.assertEqual(proof.isolation_stage(raw), stage)
+        for raw in (b"private", b"prefix KANZ_OCI_STAGE=runtime",
+                    b"KANZ_OCI_STAGE=runtime/private", b"KANZ_OCI_STAGE=runtime\nKANZ_OCI_STAGE=unknown"):
+            self.assertEqual(proof.isolation_stage(raw), "unclassified")
+        diagnostic = {}
+        proof.command([sys.executable, "-I", "-c",
+                       "import sys;sys.stderr.write('private\\nKANZ_OCI_STAGE=cgroup\\n');sys.exit(3)"],
+                      diagnostic=diagnostic)
+        self.assertEqual(diagnostic, {"exitCode": 3, "isolationStage": "cgroup"})
+
     def test_wire_inventory_is_closed(self):
         self.assertEqual(proof.CASES, {'deposit', 'forward', 'swap', 'negative', 'stub', 'missing',
                                      'zero', 'unsupported', 'invalid', 'numerical', 'empty', 'malformed', 'oversize'})

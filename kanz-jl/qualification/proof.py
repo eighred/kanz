@@ -23,7 +23,17 @@ class CommandTimeout(RuntimeError):
     pass
 
 
-def command(args, data=b'', timeout=120, limit=1 << 20, env=None, cwd=ROOT):
+ISOLATION_STAGES = {'imports', 'runtime', 'cgroup', 'process-security',
+                    'write-refusal', 'installed-packages', 'inventory'}
+
+
+def isolation_stage(raw):
+    stages = [line.removeprefix(b'KANZ_OCI_STAGE=').decode('ascii', errors='replace')
+              for line in raw.splitlines() if line.startswith(b'KANZ_OCI_STAGE=')]
+    return stages[-1] if stages and stages[-1] in ISOLATION_STAGES else 'unclassified'
+
+
+def command(args, data=b'', timeout=120, limit=1 << 20, env=None, cwd=ROOT, diagnostic=None):
     process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, cwd=cwd, env=env)
     outputs = [bytearray(), bytearray()]
@@ -70,6 +80,8 @@ def command(args, data=b'', timeout=120, limit=1 << 20, env=None, cwd=ROOT):
             thread.join(timeout=2)
     if overflow.is_set() or any(thread.is_alive() for thread in threads):
         raise RuntimeError('bounded command output exceeded')
+    if diagnostic is not None:
+        diagnostic.update(exitCode=code, isolationStage=isolation_stage(bytes(outputs[1])))
     return code, bytes(outputs[0])
 
 
@@ -203,7 +215,9 @@ def main():
                 info = json.loads(required(['docker', 'inspect', name]))[0]
                 container_boundary(info, image, source)
                 code, wire = command(['docker', 'start', '--attach', '--interactive', name], data=data,
-                                     timeout=2 if timeout_control else 90)
+                                     timeout=2 if timeout_control else 90,
+                                     diagnostic=report.setdefault('isolationDiagnostic', {})
+                                     if script == '/opt/kanz-jl/qualification/isolation.jl' else None)
                 info = json.loads(required(['docker', 'inspect', name]))[0]
                 container_boundary(info, image, source)
                 if info['State']['Running'] or info['State']['OOMKilled'] or info['State']['ExitCode'] != code:
