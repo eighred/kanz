@@ -16,6 +16,13 @@ def workflow_boundary(workflow):
 
 
 class MessagingTests(unittest.TestCase):
+    def test_broker_refusal_projection_binds_source_and_subject(self):
+        line = '[1] 2026/11/06 [ERR] 10.1.2.3:43210 - cid:29 - Publish Violation - Subject "$JS.SNAPSHOT.RESTORE.TEST.abcdef"'
+        self.assertTrue(proof.restore_publish_denied(line, '10.1.2.3'))
+        for changed in (line.replace('10.1.2.3', '10.1.2.4'), line.replace('RESTORE', 'OTHER'),
+                        line.replace('Publish Violation', 'Timeout'), 'x' * 65537 + line):
+            self.assertFalse(proof.restore_publish_denied(changed, '10.1.2.3'))
+
     def test_v_prefixed_tool_versions(self):
         for output in ('nats-server: v2.12.6', 'v2.12.6', '2.12.6'):
             self.assertEqual(proof.tool_version(output), '2.12.6')

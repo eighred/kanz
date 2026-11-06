@@ -1,7 +1,9 @@
 """Disposable Tokyo messaging policy qualification; no existing-context input."""
 import copy
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -153,6 +155,17 @@ def tool_version(output):
     return matches[0]
 
 
+def restore_publish_denied(logs, address):
+    ipaddress.ip_address(address)
+    if len(logs) > 65536:
+        return False
+    # Exact server2.14.5 client.go pubPermissionViolation log, with the
+    # contemporaneous backup Pod address. Raw lines never leave this function.
+    pattern = (r'(?<![0-9.])' + re.escape(address) + r':\d+ - cid:\d+ - '
+               r'Publish Violation - Subject "\$JS\.SNAPSHOT\.RESTORE\.[A-Za-z0-9_-]+\.[A-Za-z0-9]+"')
+    return any(re.search(pattern, line) for line in logs.splitlines())
+
+
 def validate_report(report, source):
     required = {'baseline-unlabelled', 'baseline-redis', 'baseline-monitor', 'trap-control', 'bootstrap', 'nats-publish', 'ungranted-identity', 'backup-restore', 'redis-claim',
                 'unlabelled-nats', 'unlabelled-redis', 'wrong-namespace-nats', 'wrong-namespace-redis',
@@ -295,12 +308,21 @@ def main():
             # This proves the backup runner's network/identity path, not a new
             # cluster, S3/KMS custody, or the production recovery orchestrator.
             report['stage'] = 'backup-restore'
+            backup_ip = k('-n', 'kanz-messaging', 'get', 'pod/nats-backup-runner', '-o', 'jsonpath={.status.podIP}')
+            ipaddress.ip_address(backup_ip)
             def nats(*args):
+                started = datetime.now(timezone.utc).isoformat()
                 result = subprocess.run(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name,
                     '-n', 'kanz-messaging', 'exec', 'nats-backup-runner', '-c', 'bootstrap', '--', 'nats', *args],
                     capture_output=True, text=True, timeout=300, cwd=ROOT)
                 if result.returncode:
                     report['natsFailure'] = nats_failure(result.stdout, result.stderr)
+                    if args[:2] == ('account', 'restore'):
+                        logs = k('-n', 'kanz-messaging', 'logs', 'nats-0', '-c', 'nats',
+                                 '--since-time=' + started, '--tail=100', '--limit-bytes=65536')
+                        report['brokerRestoreUploadDenied'] = restore_publish_denied(logs, backup_ip)
+                        if report['brokerRestoreUploadDenied']:
+                            report['natsFailure'] = 'restore_upload_permission_denied'
                     raise RuntimeError('NATS CLI operation refused; sanitized category recorded')
                 return result.stdout.strip()
 
