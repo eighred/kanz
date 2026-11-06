@@ -1,4 +1,7 @@
 import copy
+import contextlib
+import errno
+import io
 import json
 from pathlib import Path
 import unittest
@@ -79,8 +82,9 @@ class Fixture:
             blocked = client != "server" and "deny-ingress" in self.policies
             if "selected-ingress" in self.policies and client == "selected":
                 blocked = False
-            return json.dumps({"outcome": "blocked" if blocked else "allowed",
-                               "reason": "connect_timeout" if blocked else "echo"})
+            observed = {"outcome": "blocked" if blocked else "allowed",
+                        "reason": "connect_timeout" if blocked else "echo"}
+            return json.dumps([observed] * 3 if proof.PROBE_BATCH in args else observed)
         raise AssertionError(args)
 
 
@@ -117,7 +121,10 @@ class ProofTests(unittest.TestCase):
 
         class SlowFixture(Fixture):
             def __call__(self, *args, **kwargs):
-                elapsed[0] += 3
+                elapsed[0] += 4
+                if proof.PROBE_BATCH in args:
+                    # Include all three socket timeouts and both sample gaps.
+                    elapsed[0] += 6.6 if "deny-ingress" in self.policies else 0.6
                 return super().__call__(*args, **kwargs)
 
         fixture = SlowFixture()
@@ -126,6 +133,67 @@ class ProofTests(unittest.TestCase):
             result = proof.run_proof(fixture, "a" * 40)
         proof.validate_report(result, "a" * 40)
         self.assertIsNone(fixture.namespace)
+
+    def test_batch_executes_three_independent_socket_observations(self):
+        output = io.StringIO()
+        failures = [TimeoutError(), OSError(errno.ECONNREFUSED, "synthetic"), OSError(errno.EACCES, "synthetic")]
+        with patch("socket.create_connection", side_effect=failures) as connect, \
+                patch("sys.argv", ["probe", "127.0.0.1", "synthetic"]), \
+                patch("time.sleep") as sleep, contextlib.redirect_stdout(output):
+            exec(proof.PROBE_BATCH, {})
+        values = json.loads(output.getvalue())
+        self.assertEqual(connect.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual([value["reason"] for value in values], ["connect_timeout", "connect_refused", "connect_error"])
+        with self.assertRaises(proof.ProofError):
+            proof.decode_batch(output.getvalue())
+
+    def test_partial_or_unknown_batch_cannot_be_three_observations(self):
+        allowed = {"outcome": "allowed", "reason": "echo"}
+        for values in (allowed, [], [allowed], [allowed] * 2, [allowed] * 4,
+                       [allowed, {"outcome": "unknown", "reason": "protocol"}, allowed]):
+            with self.subTest(values=values), self.assertRaises(proof.ProofError):
+                proof.decode_batch(json.dumps(values))
+
+    def test_batch_that_finishes_after_deadline_cannot_pass(self):
+        elapsed = [0.0]
+
+        class LateFixture(Fixture):
+            def __call__(self, *args, **kwargs):
+                if proof.PROBE_BATCH in args:
+                    elapsed[0] += 21
+                return super().__call__(*args, **kwargs)
+
+        fixture = LateFixture()
+        with patch.object(proof.time, "monotonic", side_effect=lambda: elapsed[0]), patch.object(proof.time, "sleep"):
+            result = proof.run_proof(fixture, "a" * 40)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["cases"][-1]["observation"], "budget_exhausted")
+        self.assertEqual(result["cleanup"], "verified_absent")
+
+    def test_later_counterexample_resets_a_cross_batch_streak(self):
+        allowed = {"outcome": "allowed", "reason": "echo"}
+        blocked = {"outcome": "blocked", "reason": "connect_timeout"}
+
+        class UnstableFixture(Fixture):
+            batches = 0
+
+            def __call__(self, *args, **kwargs):
+                raw = super().__call__(*args, **kwargs)
+                if proof.PROBE_BATCH in args:
+                    self.batches += 1
+                    # A trailing pair from one batch plus the next first sample
+                    # is followed by a counterexample; it is not stable now.
+                    return json.dumps([blocked, allowed, allowed] if self.batches % 2 else [allowed, blocked, allowed])
+                return raw
+
+        fixture = UnstableFixture()
+        ticks = iter(range(10000))
+        with patch.object(proof.time, "monotonic", side_effect=lambda: next(ticks)), patch.object(proof.time, "sleep"):
+            result = proof.run_proof(fixture, "a" * 40)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["cases"][0]["case"], "baseline_selected_pod")
+        self.assertEqual(result["cleanup"], "verified_absent")
 
     def test_expired_budget_is_not_reported_as_policy_denial(self):
         fixture = Fixture()
