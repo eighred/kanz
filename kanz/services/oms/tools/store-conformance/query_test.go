@@ -61,7 +61,7 @@ func TestRustRepositoryQueries(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			queryStates(t, f.query("list-by-status", map[string]any{"statuses": statuses}), want)
+			queryStates(t, f.query("list-by-status", map[string]any{"statuses": append([]orderpb.OrderStatus{}, statuses...)}), want)
 		}
 		for _, parent := range []string{"parent", "absent", ""} {
 			want, e := store.ListByParent(f.ctx, parent)
@@ -218,7 +218,7 @@ func TestRustRepositoryQueries(t *testing.T) {
 	})
 	t.Run("sql-failure-no-prefix", func(t *testing.T) {
 		f := newFixture(t)
-		if _, e := f.pool.Exec(f.ctx, `INSERT INTO orders(tenant_id,order_id,state) SELECT current_setting('app.tenant_id'),'row-'||n,$1 FROM generate_series(1,9)n`, wire(t, f.initial())); e != nil {
+		if _, e := f.pool.Exec(f.ctx, `INSERT INTO orders(tenant_id,order_id,state,portfolio_id,parent_order_id) SELECT current_setting('app.tenant_id'),'row-'||n,$1,'','' FROM generate_series(1,9)n`, wire(t, f.initial())); e != nil {
 			t.Fatal(e)
 		}
 		if _, e := f.pool.Exec(f.ctx, `CREATE SEQUENCE query_attempt;
