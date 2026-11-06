@@ -214,6 +214,16 @@ def target_digest(account, service, tag):
 def target_available(account, service, tag, expected):
     actual = target_digest(account, service, tag)
     require(actual is None or actual == expected, "destination tag conflicts")
+    return actual
+
+
+def copy_graph(source, target, root, tag, existing):
+    require(existing is None or existing == root, "destination tag conflicts")
+    # ORAS recursively copies missing referrers even when the root exists. An
+    # immutable existing tag needs no new tag PUT; digest destinations suppress
+    # that final write. Fresh graph/signature/tag checks still gate acceptance.
+    destination = target + ("@" + root if existing is not None else ":" + tag)
+    command("oras", "cp", "-r", source + "@" + root, destination, timeout=1200)
 
 
 def promote(account, tag, sha, images):
@@ -242,10 +252,13 @@ def promote(account, tag, sha, images):
         for legacy, identity in observed["legacy"].items():
             target_available(account, service, legacy, identity)
         prepared[service] = (source, target, observed)
-    for source, target, observed in prepared.values():
-        command("oras", "cp", "-r", source + "@" + observed["root"], target + ":" + destination_tag, timeout=1200)
+    for service, (source, target, observed) in prepared.items():
+        root = observed["root"]
+        copy_graph(source, target, root, destination_tag,
+                   target_available(account, service, destination_tag, root))
         for legacy, identity in observed["legacy"].items():
-            command("oras", "cp", "-r", source + "@" + identity, target + ":" + legacy, timeout=1200)
+            copy_graph(source, target, identity, legacy,
+                       target_available(account, service, legacy, identity))
     accepted = {}
     for service, (source, target, observed) in prepared.items():
         root = observed["root"]

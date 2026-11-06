@@ -42,6 +42,11 @@ authorization, wrong identities, missing attestations, and conflicting tags
 fail closed. A failure during copy can leave immutable partial artifacts in ECR;
 it never emits a verified pair. Do not activate from those artifacts. A later
 dispatch may reuse only byte-identical existing tags.
+Before each copy, the destination tag is checked again. A missing tag is created;
+an exact existing tag uses a digest destination so ORAS still reconciles recursive
+referrers without attempting a forbidden immutable retag. Conflicts fail closed.
+Final tag, complete graph and signature verification remain mandatory, including
+when a previous attempt already copied most or all content.
 
 ORAS 1.3.0 copies every platform and recursive OCI referrer without a platform
 filter. The verifier freshly downloads and hashes every referenced manifest,
@@ -95,6 +100,10 @@ graphs differ. Test-only DNS resolution and a temporary TLS proxy
 map the synthetic GHCR name to loopback; production flags remain strict. The
 registry and its children are cleaned up before this fixture reports success.
 This checks real CLI compatibility, not ECR IAM or keyless release signatures.
+The proxy also rejects rewrites of the existing destination root and legacy tags.
+A normal tagged copy must fail that negative control; the production retry helper
+must then copy a newly added child referrer by digest without another tag write,
+and all tags and graph content must still match.
 The manual job must pass fresh registry verification before operational use.
 Its sole successful artifact is `signed-ecr-pair-<run_id>/signed-pair.json`:
 `status=verified-pair`, release tag/SHA, explicit destination tag, trusted workflow
@@ -116,3 +125,7 @@ boundary. No production promotion has been demonstrated by local unit tests.
   digest pulls do not translate manifest bytes.
 - [OCI 1.1.1 subject](https://github.com/opencontainers/image-spec/blob/v1.1.1/manifest.md#image-manifest-property-descriptions)
   defines the relationship represented by referrer discovery.
+- [ORAS 1.3.0 recursive copy](https://github.com/oras-project/oras/blob/v1.3.0/cmd/oras/root/cp.go)
+  skips its final tag operation for a digest destination.
+- [ECR PutImage](https://docs.aws.amazon.com/AmazonECR/latest/APIReference/API_PutImage.html)
+  documents the unchanged-image/tag rejection; retry never relies on a retag succeeding.
