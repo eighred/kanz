@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/recovery.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/recovery.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -25,6 +25,8 @@ kanz-oms-fold-shadow = { path = "../../services/oms-fold-shadow" }
 kanz-decimal-compat = { path = "../.." }
 prost = "=0.14.1"
 prost-types = "=0.14.1"
+prost-reflect = "=0.16.2"
+uuid = { version = "=1.29.0", features = ["v7"] }
 sha2 = "=0.10.9"
 num-bigint = "=0.4.6"
 num-rational = "=0.4.2"
@@ -35,7 +37,8 @@ tokio = { version = "=1.54.1", features = ["rt", "time"] }
 tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "time"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
-base64 = "=0.22.1"`
+base64 = "=0.22.1"
+async-nats = { version = "=0.51.0", default-features = false, features = ["ring", "jetstream", "nuid"] }`
 
 // #1413: source/layout/token guard, not Rust AST/data-flow or SQL correctness.
 // Actual Go-read/Rust-write PostgreSQL qualification supplies separate evidence.
@@ -97,7 +100,12 @@ func checkRustOMSStoreBoundary(root string) error {
 		if regexp.MustCompile(`\bf(?:32|64)\b|\bunsafe\b|(?:struct|enum|type)(?:Decimal|Money|Fill|OrderState)\b`).MatchString(s) || strings.Contains(s, "include!") || strings.Contains(s, "#[path=") {
 			return fmt.Errorf("store financial/unsafe/alternate-source boundary")
 		}
-		if rel != "examples/fixture.rs" {
+		if rel != "examples/fixture.rs" && rel != "examples/relay_support/mod.rs" {
+			if rel == "src/relay.rs" {
+				s = strings.ReplaceAll(s, "self.sessions.connect(", "connector(")
+				s = strings.ReplaceAll(s, "self.publisher.publish(", "acknowledge(")
+			}
+
 			for _, bad := range []string{"std::env", "std::process", "std::net", ".connect(", "NoTls", ".publish("} {
 				if strings.Contains(s, bad) {
 					return fmt.Errorf("repository acquires runtime authority")

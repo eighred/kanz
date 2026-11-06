@@ -219,7 +219,7 @@ fn varint(raw: &[u8], pos: &mut usize) -> Result<u64, Error> {
     }
     Err(Error::InvalidInput)
 }
-fn key(raw: &[u8], pos: &mut usize) -> Result<(u32, u8), Error> {
+pub(crate) fn key(raw: &[u8], pos: &mut usize) -> Result<(u32, u8), Error> {
     let k = varint(raw, pos)?;
     let n = u32::try_from(k >> 3).map_err(|_| Error::InvalidInput)?;
     if n == 0 || n > 0x1fffffff {
@@ -233,11 +233,11 @@ fn slice<'a>(raw: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], Error
     *pos = end;
     Ok(part)
 }
-fn payload<'a>(raw: &'a [u8], pos: &mut usize) -> Result<&'a [u8], Error> {
+pub(crate) fn payload<'a>(raw: &'a [u8], pos: &mut usize) -> Result<&'a [u8], Error> {
     let n = usize::try_from(varint(raw, pos)?).map_err(|_| Error::InvalidInput)?;
     slice(raw, pos, n)
 }
-fn skip(raw: &[u8], pos: &mut usize, n: u32, wire: u8) -> Result<(), Error> {
+pub(crate) fn skip(raw: &[u8], pos: &mut usize, n: u32, wire: u8) -> Result<(), Error> {
     // Unknown groups are scanned iteratively; their complete original wire is retained.
     let mut groups = Vec::new();
     let mut current = (n, wire);
@@ -274,14 +274,14 @@ fn skip(raw: &[u8], pos: &mut usize, n: u32, wire: u8) -> Result<(), Error> {
         current = key(raw, pos)?;
     }
 }
-fn put_varint(mut v: u64, out: &mut Vec<u8>) {
+pub(crate) fn put_varint(mut v: u64, out: &mut Vec<u8>) {
     while v >= 128 {
         out.push((v as u8 & 127) | 128);
         v >>= 7;
     }
     out.push(v as u8);
 }
-fn put_message(n: u32, raw: &[u8], out: &mut Vec<u8>) {
+pub(crate) fn put_message(n: u32, raw: &[u8], out: &mut Vec<u8>) {
     put_varint((u64::from(n) << 3) | 2, out);
     put_varint(raw.len() as u64, out);
     out.extend(raw);

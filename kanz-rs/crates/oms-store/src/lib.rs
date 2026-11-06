@@ -11,6 +11,8 @@ pub mod outbox;
 pub mod proposals;
 pub mod queries;
 pub mod recovery;
+pub mod relay;
+mod relay_wire;
 use identity::{execution_key, same_execution};
 use kanz_oms_fold_shadow::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;

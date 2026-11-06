@@ -152,12 +152,45 @@ pub async fn oldest_pending_age(
 /// queued advisory-lock wait running. This session cannot return to any pool.
 type Cancellation = Pin<Box<dyn Future<Output = Result<(), tokio_postgres::Error>> + Send>>;
 
+// A canceled cleanup future must not detach the connection driver it owns.
+struct ClosingDriver(Option<tokio::task::JoinHandle<bool>>);
+impl Drop for ClosingDriver {
+    fn drop(&mut self) {
+        if let Some(driver) = self.0.as_ref() {
+            driver.abort();
+        }
+    }
+}
+impl ClosingDriver {
+    async fn finish(mut self, cancel: Option<Cancellation>) {
+        if let Some(cancel) = cancel {
+            let _ = tokio::time::timeout(Duration::from_secs(5), cancel).await;
+        }
+        if let Some(driver) = self.0.take() {
+            driver.abort();
+            let _ = driver.await;
+        }
+    }
+}
+
 pub struct Session {
     client: Client,
     driver: Option<tokio::task::JoinHandle<bool>>,
     cancellation: Option<Cancellation>,
 }
 impl Session {
+    pub(crate) fn client(&mut self) -> &mut Client {
+        &mut self.client
+    }
+
+    /// Explicit relay shutdown joins the dedicated driver. No client returns to a pool.
+    pub async fn close(mut self) {
+        if let Some(driver) = self.driver.take() {
+            ClosingDriver(Some(driver))
+                .finish(self.cancellation.take())
+                .await;
+        }
+    }
     /// The trusted connector must supply this client's own running driver task,
     /// with no independently retained client handle or replacement driver.
     /// The connector supplies its existing TLS policy for PostgreSQL's separate
@@ -185,10 +218,7 @@ impl Drop for Session {
                 tokio::runtime::Handle::try_current(),
                 self.cancellation.take(),
             ) {
-                runtime.spawn(async move {
-                    let _ = tokio::time::timeout(Duration::from_secs(5), cancel).await;
-                    driver.abort();
-                });
+                runtime.spawn(ClosingDriver(Some(driver)).finish(Some(cancel)));
             } else {
                 driver.abort();
             }
@@ -202,23 +232,36 @@ pub struct DrainLock {
     key: i32,
 }
 impl DrainLock {
+    pub(crate) fn client(&mut self) -> &mut Client {
+        self.session.client()
+    }
     /// Only a verified unlock returns the session. Timeout, error or cancellation
     /// drops it and aborts its driver, including a possibly still-held lock.
     pub async fn release(self) -> Result<Session, Error> {
-        let unlocked: bool = tokio::time::timeout(
-            Duration::from_secs(5),
-            self.session.client.query_one(
-                "SELECT pg_advisory_unlock($1,$2)",
-                &[&self.scope, &self.key],
-            ),
-        )
-        .await
-        .map_err(|_| Error::Database)??
-        .try_get(0)?;
-        if !unlocked {
-            return Err(Error::Database);
+        let result: Result<bool, Error> = async {
+            let unlocked: bool = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.session.client.query_one(
+                    "SELECT pg_advisory_unlock($1,$2)",
+                    &[&self.scope, &self.key],
+                ),
+            )
+            .await
+            .map_err(|_| Error::Database)??
+            .try_get(0)?;
+            if !unlocked {
+                return Err(Error::Database);
+            }
+            Ok(true)
         }
-        Ok(self.session)
+        .await;
+        match result {
+            Ok(true) => Ok(self.session),
+            other => {
+                self.session.close().await;
+                Err(other.err().unwrap_or(Error::Database))
+            }
+        }
     }
 }
 
@@ -232,36 +275,68 @@ pub async fn lock_key(
     key: &str,
     wait: bool,
 ) -> Result<Option<DrainLock>, Error> {
-    if key.len() > MAX_BYTES {
-        return Err(Error::Capacity);
+    let result: Result<(bool, i32, i32), Error> = async {
+        if key.len() > MAX_BYTES {
+            return Err(Error::Capacity);
+        }
+        let tx = scoped(&mut session.client, tenant).await?;
+        // A failed CancelRequest or a runtime already shutting down cannot leave a
+        // blocked backend indefinitely. This bounded port refuses waits above5s.
+        tx.batch_execute("SET LOCAL lock_timeout='5s'").await?;
+        let row = tx.query_one(LOCK_IDS, &[&key, &SUFFIX]).await?;
+        let scope: i32 = row.try_get(0)?;
+        let key: i32 = row.try_get(1)?;
+        let won = if wait {
+            tx.query_one("SELECT pg_advisory_lock($1,$2)", &[&scope, &key])
+                .await?;
+            true
+        } else {
+            tx.query_one("SELECT pg_try_advisory_lock($1,$2)", &[&scope, &key])
+                .await?
+                .try_get(0)?
+        };
+        tx.rollback().await?;
+        Ok((won, scope, key))
     }
-    let tx = scoped(&mut session.client, tenant).await?;
-    // A failed CancelRequest or a runtime already shutting down cannot leave a
-    // blocked backend indefinitely. This bounded port refuses waits above5s.
-    tx.batch_execute("SET LOCAL lock_timeout='5s'").await?;
-    let row = tx.query_one(LOCK_IDS, &[&key, &SUFFIX]).await?;
-    let scope: i32 = row.try_get(0)?;
-    let key: i32 = row.try_get(1)?;
-    let won = if wait {
-        tx.query_one("SELECT pg_advisory_lock($1,$2)", &[&scope, &key])
-            .await?;
-        true
-    } else {
-        tx.query_one("SELECT pg_try_advisory_lock($1,$2)", &[&scope, &key])
-            .await?
-            .try_get(0)?
-    };
-    tx.rollback().await?;
-    Ok(won.then_some(DrainLock {
-        session,
-        scope,
-        key,
-    }))
+    .await;
+    match result {
+        Ok((true, scope, key)) => Ok(Some(DrainLock {
+            session,
+            scope,
+            key,
+        })),
+        Ok((false, _, _)) => {
+            session.close().await;
+            Ok(None)
+        }
+        Err(error) => {
+            session.close().await;
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn canceled_close_cannot_detach_owned_driver() {
+        let driver = tokio::spawn(std::future::pending::<bool>());
+        let observed = driver.abort_handle();
+        let closing = tokio::spawn(
+            ClosingDriver(Some(driver)).finish(Some(Box::pin(std::future::pending()))),
+        );
+        tokio::task::yield_now().await;
+        closing.abort();
+        let _ = closing.await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !observed.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("canceled close detached its driver");
+    }
     #[test]
     fn cause_matches_go_byte_bound() {
         assert_eq!(cause(None), Ok(""));

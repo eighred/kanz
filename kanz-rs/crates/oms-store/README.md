@@ -237,3 +237,48 @@ and transaction/outbox rollback. The adapter's synthetic approval FACT is built
 independently of the actor under test so invalid actors reach the repository.
 No production caller, service, transport, writer handoff or credential owner is
 introduced; actual Linux no-skip qualification remains required.
+
+## Outbox relay qualification
+
+`relay` composes the existing OMS-owned Queue with a supplied acknowledged
+publisher. It introduces no production connector, deployment or Go handoff.
+`Run`, `DrainOnce` and synchronous `Flush` retain per-key advisory ownership,
+read-after-lock ordering, stop-at-first-failure, background progress on other
+keys and the full-batch Flush stall. Broker acknowledgement precedes
+MarkPublished. Acknowledgement followed by an unconfirmed database result leaves
+at-least-once redelivery possible; it is never proof that publication rolled back.
+Go Record.Event does not persist EventID, so each retry receives a fresh UUIDv7
+and idempotency key while durable payload, timestamp and attribution survive.
+
+Canonical descriptors resolve payload types. Known protobuf fields are normalized
+like Go Unmarshal/Marshal, including duplicate embedded messages. The existing
+fee-wire parser preserves unknown values and group bytes, with canonical tags;
+unknown bytes are reattached in encounter order at each message level. Independent
+Go byte comparisons are required, not semantic equality alone. Reachable payloads
+include OMS order/approval/outcome/attribution/recovery FACTs and the shared OMS
+position projector's domain.v1.PositionState. Current graphs have no maps or
+oneofs; future such fields refuse pending overwrite-semantics qualification.
+
+Explicit limits are 1 MiB record/frame bytes, 32 known-message nesting levels,
+4096 sequence entries (8 MiB total key bytes) and queue rows, a one-hour
+sequence TTL, and ten seconds for
+each broker acknowledgement. Sequence eviction re-baselines at one, like Go;
+its smaller ceiling is a declared port bound. Only FACT class is accepted.
+Missing schema/required envelope fields or malformed payload refuses before the
+publisher. Errors retain the distinction between a key stalled by publication
+and infrastructure/commit failure. The fixture records fixed failure categories,
+not unbounded broker diagnostics or credentials.
+
+Stop prevents starting another record; an in-flight acknowledged publication is
+joined through its mark/unlock before returning. Dedicated session close awaits
+cancellation/driver teardown, and no session goes back to a pool. The trusted
+connector must bound connection and SQL operations; the disposable fixture sets
+a five-second SQL statement timeout. Abruptly dropping the owner still has the
+previous bounded cancellation fallback, not a graceful-shutdown guarantee.
+
+`examples/relay_support` alone connects to a loopback disposable JetStream broker.
+The required real PostgreSQL/NATS fixture compares canonical Go framing, ordered
+draining, contention, poison keys, mark failures, ACK/SQL ambiguity, restart and
+joined stop. This proves neither production SPIFFE/ACL acceptance nor permission
+to replace the Go relay. prost-reflect 0.16.2 declares prost/prost-types ^0.14.0;
+the lock retains the existing exact 0.14.1 versions and advisory checks.

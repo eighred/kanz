@@ -22,6 +22,24 @@ REQUIRED = {
     },
     "internal/shadowprocess": set(),
     "services/oms/tools/store-conformance": {
+        "TestRustRelayFrameCompatibility", "TestRustRelayPostgresNATS",
+        *{"TestRustRelayFrameCompatibility/" + case for case in (
+            "canonical-decimal", "root-empty-lineage-and-key", "fill-fee-missing", "fill-fee-present-zero",
+            "repeated-fee-change-child-unknowns", "noncanonical-unknown-value", "unknown-group",
+            "duplicate-embedded-merge", "noncanonical-known-length",
+            "duplicate-embedded-unknown-only", "malformed-and-unavailable-schema",
+            "order.v1.OrderAccepted", "order.v1.OrderPendingApproval", "order.v1.OrderApproved",
+            "order.v1.OrderRejected", "order.v1.OrderRouted", "order.v1.OrderFilled",
+            "order.v1.OrderPartiallyFilled", "order.v1.OrderExpired",
+            "order.v1.ExecutionAttributionRecorded", "command.v1.CommandOutcome", "domain.v1.PositionState",
+            "order.v1.ExecutionFeeCorrectionProposed", "order.v1.ExecutionFeeCorrectionApproved",
+            "order.v1.ExecutionRecoveryRecorded", "order.v1.ExecutionRecovered", "order.v1.ExecutionRecoveryApplied",
+        )},
+        *{"TestRustRelayPostgresNATS/" + case for case in (
+            "full-batch-is-not-an-empty-queue-proof", "ordered-restart", "fail-first-retry",
+            "poison-key-isolation", "publish-mark-rollback-redelivery", "mark-failed-refusal",
+            "stop-joins-inflight", "competing-go-rust", "tenant-service-isolation", "real-broker-refusal-stops-key",
+        )},
         "TestRustProposalSharedContract", "TestRustProposalTransactions",
         *{"TestRustProposalSharedContract/" + case.replace(" ", "_") for case in (
             'the dual-control record survives the round trip',
