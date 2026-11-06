@@ -186,6 +186,23 @@ class Fixture:
             time.sleep(2)
         raise proof.ProofError("api_not_ready")
 
+    def service_rules_ready(self):
+        # API readiness does not mean kube-proxy has populated the new network
+        # namespace after Docker restart. Never turn an empty save into a pass.
+        self.stage = "cilium_wait_service_rules"
+        self.inside("iptables", "--version", timeout=15)
+        self.inside("iptables-save", "--version", timeout=15)
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            try:
+                self.inside("iptables", "-t", "nat", "-S", "KUBE-SERVICES", timeout=15)
+                if self.inside("iptables-save", timeout=15).strip():
+                    return
+            except proof.ProofError:
+                pass
+            time.sleep(2)
+        raise proof.ProofError("service_rules_not_ready")
+
     def recycle_system(self):
         # Existing pod network namespaces do not become Cilium endpoints merely
         # because CNI config changed. Exercise the actual DNS/storage owners.
@@ -363,6 +380,7 @@ class Fixture:
         command(["docker", "restart", "--timeout", "30", self.name], timeout=90)
         self.stage = "cilium_API_ready"
         self.api_ready()
+        self.service_rules_ready()
         # K3s deliberately retains kube-router rules when disabled. Remove only
         # those rules inside this owned fixture, before Cilium owns enforcement.
         self.remove_old_policy_rules()

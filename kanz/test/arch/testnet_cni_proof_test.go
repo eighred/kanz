@@ -58,6 +58,7 @@ var cniProofRequirements = map[string][]string{
 		`"unexpected_K3s_version"`, `"Cilium_remains_after_rollback"`, `f.datapath()`,
 		`private_bpffs_boundary(before)`, `private_bpffs_boundary(before, mounted)`, `private_bpffs_boundary(before, shared, identity)`,
 		`"unrelated_mount_propagation_changed"`, `"preexisting_bpffs_mount_refused"`, `self.prepare_private_bpffs()`,
+		`self.service_rules_ready()`, `"service_rules_not_ready"`,
 	},
 	".github/workflows/k3s-cni-migration.yml": {
 		"disposable-transition:", "persist-credentials: false", "timeout-minutes: 30",

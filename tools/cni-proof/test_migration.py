@@ -9,6 +9,28 @@ import proof
 
 
 class MigrationTests(unittest.TestCase):
+    def test_service_rule_readiness_requires_chain_and_nonempty_save(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        with patch.object(f, "inside", side_effect=["version", "version", proof.ProofError("chain_absent"), "", "", "", "*nat\nCOMMIT"]) as call, \
+                patch.object(migration.time, "sleep") as sleep:
+            f.service_rules_ready()
+            self.assertEqual(sleep.call_count, 2)
+            self.assertEqual(call.call_args_list[-2].args, ("iptables", "-t", "nat", "-S", "KUBE-SERVICES"))
+            self.assertEqual(call.call_args_list[-1].args, ("iptables-save",))
+
+    def test_service_rule_readiness_timeout_never_mutates_rules(self):
+        f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+        with patch.object(f, "inside", return_value="") as call, \
+                patch.object(migration.time, "monotonic", side_effect=[0, 0, 121]), \
+                patch.object(migration.time, "sleep"):
+            with self.assertRaisesRegex(proof.ProofError, "^service_rules_not_ready$"):
+                f.service_rules_ready()
+            self.assertTrue(all("iptables-restore" not in item.args for item in call.call_args_list))
+        with patch.object(f, "inside", side_effect=proof.ProofError("missing_binary")) as call:
+            with self.assertRaisesRegex(proof.ProofError, "^missing_binary$"):
+                f.service_rules_ready()
+            self.assertEqual(call.call_count, 1)
+
     def test_bpffs_propagation_is_only_new_mount(self):
         before = {"1": ("/", "overlay", frozenset()), "2": ("/sys", "sysfs", frozenset()),
                   "3": ("/sys/fs", "tmpfs", frozenset())}
