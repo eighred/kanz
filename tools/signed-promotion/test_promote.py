@@ -66,6 +66,73 @@ class GraphTests(unittest.TestCase):
         with mock.patch.object(p, "command", side_effect=self.fake), self.assertRaises(p.Refused):
             p.graph("repo", h(self.index))
 
+    def subject_fixture(self, subject=None):
+        body = json.loads(self.artifact)
+        body["subject"] = subject or self.desc(self.manifest, "application/vnd.oci.image.manifest.v1+json")
+        attachment = encoded(body)
+        index = encoded({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+                         "manifests": [self.desc(self.manifest, "application/vnd.oci.image.manifest.v1+json"),
+                                       self.desc(attachment, "application/vnd.oci.image.manifest.v1+json")]})
+        self.raw.update({h(attachment): attachment, h(index): index})
+        return attachment, index
+
+    def subject_command(self, attachment, expose=False, extra=False):
+        def command(*args, **kwargs):
+            if args[:3] == ("oras", "repo", "tags"):
+                return b""
+            result = self.fake(*args, **kwargs)
+            if args[:2] == ("oras", "discover"):
+                body = json.loads(result)
+                body["referrers"] = []
+                if expose and body["digest"] == h(self.manifest):
+                    body["referrers"].append(self.desc(attachment, "application/vnd.oci.image.manifest.v1+json"))
+                if extra and body["digest"] == h(self.manifest):
+                    body["referrers"].append(self.desc(self.artifact, "application/vnd.oci.image.manifest.v1+json"))
+                return encoded(body)
+            return result
+        return command
+
+    def test_included_subject_relation_normalizes_asymmetric_discovery(self):
+        attachment, index = self.subject_fixture()
+        with mock.patch.object(p, "command", side_effect=self.subject_command(attachment)):
+            source = p.graph("source", h(index))
+        with mock.patch.object(p, "command", side_effect=self.subject_command(attachment, expose=True)):
+            destination = p.graph("destination", h(index))
+        self.assertEqual(source, destination)
+        self.assertIn(h(attachment), source["edges"][h(self.manifest)])
+        self.assertIn(h(self.manifest), source["edges"][h(attachment)])
+
+    def test_extra_discovery_still_changes_graph(self):
+        attachment, index = self.subject_fixture()
+        with mock.patch.object(p, "command", side_effect=self.subject_command(attachment)):
+            source = p.graph("source", h(index))
+        with mock.patch.object(p, "command", side_effect=self.subject_command(attachment, expose=True, extra=True)):
+            destination = p.graph("destination", h(index))
+        self.assertNotEqual(source, destination)
+        self.assertIn(h(self.artifact), destination["edges"][h(self.manifest)])
+
+    def test_subject_relation_does_not_invent_undiscovered_content(self):
+        attachment, _ = self.subject_fixture()
+        with mock.patch.object(p, "command", side_effect=self.subject_command(attachment)):
+            source = p.graph("source", h(self.manifest))
+        with mock.patch.object(p, "command", side_effect=self.subject_command(attachment, expose=True)):
+            destination = p.graph("destination", h(self.manifest))
+        self.assertNotEqual(source, destination)
+        self.assertNotIn(h(attachment), source["descriptors"])
+
+    def test_invalid_subject_or_target_content_refused(self):
+        valid = self.desc(self.manifest, "application/vnd.oci.image.manifest.v1+json")
+        for subject in (valid | {"size": len(self.manifest) + 1}, valid | {"mediaType": "blob"},
+                        valid | {"urls": ["https://invalid.example/subject"]}, {"digest": "invalid"}):
+            with self.subTest(subject=subject):
+                attachment, index = self.subject_fixture(subject)
+                with mock.patch.object(p, "command", side_effect=self.subject_command(attachment)), self.assertRaises(p.Refused):
+                    p.graph("source", h(index))
+        attachment, index = self.subject_fixture()
+        self.raw[h(self.manifest)] += b" "
+        with mock.patch.object(p, "command", side_effect=self.subject_command(attachment)), self.assertRaises(p.Refused):
+            p.graph("source", h(index))
+
     def test_destination_legacy_lookup_does_not_require_list_images(self):
         with mock.patch.object(p, "command", side_effect=self.fake) as run:
             result = p.graph("destination", h(self.index),
