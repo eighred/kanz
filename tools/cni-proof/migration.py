@@ -74,27 +74,28 @@ def mount_inventory(raw):
     return result
 
 
-def private_bpffs_boundary(before, after=None, new_id=None):
-    target = "/sys/fs/bpf"
+def private_mount_boundary(before, after=None, new_id=None, *, target="/sys/fs/bpf", filesystem="bpf"):
+    if (target, filesystem) not in {("/sys/fs/bpf", "bpf"), ("/run/cilium/cgroupv2", "cgroup2")}:
+        raise proof.ProofError("unapproved_fixture_mount")
     if not {"/", "/sys"}.issubset({row[0] for row in before.values()}):
         raise proof.ProofError("mount_ancestors_unknown")
     for path, _, tags in before.values():
         if (path == target or target.startswith(path.rstrip("/") + "/")) and tags:
             raise proof.ProofError("mount_ancestor_not_private")
         if path == target:
-            raise proof.ProofError("preexisting_bpffs_mount_refused")
+            raise proof.ProofError("preexisting_fixture_mount_refused")
     if after is None:
         return None
     matches = [(identity, row) for identity, row in after.items() if row[0] == target]
-    if len(matches) != 1 or matches[0][0] in before or matches[0][1][1] != "bpf":
-        raise proof.ProofError("new_bpffs_mount_not_identified")
+    if len(matches) != 1 or matches[0][0] in before or matches[0][1][1] != filesystem:
+        raise proof.ProofError("new_fixture_mount_not_identified")
     identity, (_, _, tags) = matches[0]
     if new_id is None:
         if tags:
-            raise proof.ProofError("new_bpffs_not_private")
+            raise proof.ProofError("new_fixture_mount_not_private")
     elif identity != new_id or not any(tag.startswith("shared:") for tag in tags) or any(tag.startswith("master:") for tag in tags):
-        raise proof.ProofError("new_bpffs_shared_state_not_verified")
-    # The only propagation change allowed is on the newly created bpffs mount.
+        raise proof.ProofError("new_fixture_mount_shared_state_not_verified")
+    # Only the newly created fixture mount may change propagation.
     for other_id, (path, _, other_tags) in after.items():
         if other_id == identity:
             continue
@@ -128,6 +129,7 @@ class Fixture:
         if (obj["Config"]["Labels"].get(LABEL) != self.name or obj["Image"] != expected_id or
                 obj["Config"]["Image"] != NODE or
                 obj.get("HostConfig", {}).get("PidMode", "") not in ("", "private") or
+                obj.get("HostConfig", {}).get("CgroupnsMode") != "private" or
                 obj.get("HostConfig", {}).get("NetworkMode") == "host" or
                 any(m["Type"] == "bind" for m in obj["Mounts"])):
             raise proof.ProofError("disposable_ownership_mismatch")
@@ -353,21 +355,25 @@ class Fixture:
             raise proof.ProofError("old_policy_rules_remain")
         self.rule_diagnostic["status"] = "removed_verified"
 
-    def prepare_private_bpffs(self):
-        # Cilium's supported nested K3s setup needs shared bpffs. Only this new
-        # filesystem propagates to nested Pods; outer mounts remain private.
-        self.stage = "cilium_private_bpffs_preflight"
+    def prepare_private_mount(self, target, filesystem):
+        # Nested Pods need propagation from these new fixture-only mounts.
+        # Never change propagation on an inherited filesystem or its ancestors.
+        self.stage = "cilium_private_" + filesystem + "_preflight"
         self.ownership()
         before = mount_inventory(self.inside("cat", "/proc/self/mountinfo"))
-        private_bpffs_boundary(before)
-        self.stage = "cilium_private_bpffs_mount"
-        self.inside("mount", "-t", "bpf", "bpffs", "/sys/fs/bpf")
+        private_mount_boundary(before, target=target, filesystem=filesystem)
+        if filesystem == "cgroup2":
+            self.inside("test", "!", "-L", "/run/cilium")
+            self.inside("test", "!", "-L", target)
+            self.inside("mkdir", "-p", target)
+        self.stage = "cilium_private_" + filesystem + "_mount"
+        self.inside("mount", "-t", filesystem, "none", target)
         mounted = mount_inventory(self.inside("cat", "/proc/self/mountinfo"))
-        identity = private_bpffs_boundary(before, mounted)
-        self.inside("mount", "--make-shared", "/sys/fs/bpf")
-        self.stage = "cilium_private_bpffs_verify"
+        identity = private_mount_boundary(before, mounted, target=target, filesystem=filesystem)
+        self.inside("mount", "--make-shared", target)
+        self.stage = "cilium_private_" + filesystem + "_verify"
         shared = mount_inventory(self.inside("cat", "/proc/self/mountinfo"))
-        private_bpffs_boundary(before, shared, identity)
+        private_mount_boundary(before, shared, identity, target=target, filesystem=filesystem)
         self.ownership()
 
     def switch_to_cilium(self):
@@ -386,7 +392,8 @@ class Fixture:
         self.remove_old_policy_rules()
         self.stage = "cilium_remove_old_links"
         self.inside("sh", "-ceu", "for link in flannel.1 cni0; do if ip link show \"$link\" >/dev/null 2>&1; then ip link delete \"$link\"; fi; done")
-        self.prepare_private_bpffs()
+        self.prepare_private_mount("/sys/fs/bpf", "bpf")
+        self.prepare_private_mount("/run/cilium/cgroupv2", "cgroup2")
         self.stage = "cilium_install"
         self.inside("helm", "install", "cilium", "/tmp/cilium.tgz", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml",
                     "--namespace", "kube-system", "--set", "kubeProxyReplacement=false",
@@ -426,7 +433,7 @@ def main():
         command(["docker", "volume", "create", "--label", LABEL + "=" + name, f.volume])
         phase = "docker_run"
         command(["docker", "run", "-d", "--name", name, "--hostname", name, "--label", LABEL + "=" + name,
-                 "--privileged", cpu_limit(), "--memory=5g", "--pids-limit=4096", "--log-driver=none",
+                 "--privileged", "--cgroupns=private", cpu_limit(), "--memory=5g", "--pids-limit=4096", "--log-driver=none",
                  "--tmpfs", "/run", "--tmpfs", "/var/run", "--mount", "type=volume,src=" + f.volume + ",dst=/var/lib/rancher",
                  NODE, "server", "--cluster-init", "--secrets-encryption", "--disable=traefik", "--disable=servicelb", "--disable=metrics-server"], timeout=240)
         phase = "node_identity"

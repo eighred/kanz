@@ -35,24 +35,45 @@ class MigrationTests(unittest.TestCase):
         before = {"1": ("/", "overlay", frozenset()), "2": ("/sys", "sysfs", frozenset()),
                   "3": ("/sys/fs", "tmpfs", frozenset())}
         mounted = {**before, "4": ("/sys/fs/bpf", "bpf", frozenset())}
-        self.assertEqual(migration.private_bpffs_boundary(before, mounted), "4")
+        self.assertEqual(migration.private_mount_boundary(before, mounted), "4")
         shared = {**mounted, "4": ("/sys/fs/bpf", "bpf", frozenset({"shared:99"}))}
-        self.assertEqual(migration.private_bpffs_boundary(before, shared, "4"), "4")
+        self.assertEqual(migration.private_mount_boundary(before, shared, "4"), "4")
         for identity in before:
             changed = {**before, identity: (before[identity][0], before[identity][1], frozenset({"master:77"}))}
             with self.assertRaises(proof.ProofError):
-                migration.private_bpffs_boundary(changed)
+                migration.private_mount_boundary(changed)
         for changed in (
                 {**shared, "3": ("/sys/fs", "tmpfs", frozenset({"shared:77"}))},
                 {**shared, "5": ("/unrelated", "tmpfs", frozenset({"shared:77"}))},
                 {**mounted, "4": ("/sys/fs/bpf", "bpf", frozenset({"shared:99", "master:77"}))},
                 {key: value for key, value in shared.items() if key != "3"}):
             with self.assertRaises(proof.ProofError):
-                migration.private_bpffs_boundary(before, changed, "4")
+                migration.private_mount_boundary(before, changed, "4")
         with self.assertRaises(proof.ProofError):
-            migration.private_bpffs_boundary(mounted)
+            migration.private_mount_boundary(mounted)
         with self.assertRaises(proof.ProofError):
-            migration.private_bpffs_boundary(before, shared, "different-mount")
+            migration.private_mount_boundary(before, shared, "different-mount")
+
+    def test_cgroup_mount_is_new_private_and_fixed_target(self):
+        before = {"1": ("/", "overlay", frozenset()), "2": ("/sys", "sysfs", frozenset()),
+                  "3": ("/run", "tmpfs", frozenset()), "4": ("/run/cilium", "tmpfs", frozenset()),
+                  "5": ("/sys/fs/bpf", "bpf", frozenset({"shared:55"}))}
+        options = {"target": "/run/cilium/cgroupv2", "filesystem": "cgroup2"}
+        mounted = {**before, "6": (options["target"], "cgroup2", frozenset())}
+        shared = {**mounted, "6": (options["target"], "cgroup2", frozenset({"shared:66"}))}
+        self.assertEqual(migration.private_mount_boundary(before, mounted, **options), "6")
+        self.assertEqual(migration.private_mount_boundary(before, shared, "6", **options), "6")
+        for changed in (mounted, {**before, "4": ("/run/cilium", "tmpfs", frozenset({"shared:44"}))}):
+            with self.assertRaises(proof.ProofError):
+                migration.private_mount_boundary(changed, **options)
+        for changed in ({**shared, "3": ("/run", "tmpfs", frozenset({"shared:33"}))},
+                        {**shared, "6": (options["target"], "cgroup2", frozenset({"shared:66", "master:9"}))},
+                        {**mounted, "6": (options["target"], "tmpfs", frozenset())}):
+            with self.assertRaises(proof.ProofError):
+                migration.private_mount_boundary(before, changed, "6", **options)
+        for target, filesystem in (("/sys/fs/cgroup", "cgroup2"), ("/", "cgroup2"), (options["target"], "tmpfs")):
+            with self.assertRaisesRegex(proof.ProofError, "unapproved_fixture_mount"):
+                migration.private_mount_boundary(before, target=target, filesystem=filesystem)
 
     def test_policy_cleanup_requires_successful_nonempty_save(self):
         f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
@@ -94,13 +115,15 @@ class MigrationTests(unittest.TestCase):
     def test_no_host_mount_or_wrong_image_or_label(self):
         f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
         valid = {"Config": {"Labels": {migration.LABEL: f.name}, "Image": migration.NODE},
+                 "HostConfig": {"CgroupnsMode": "private"},
                  "Mounts": [{"Type": "volume"}], "Id": "fixed", "Image": "sha256:fixture"}
         with patch.object(migration, "command", side_effect=[json.dumps([valid]), "sha256:fixture"]):
             self.assertEqual(f.ownership(), "fixed")
         for mutate in (lambda x: x["Config"].update(Image="latest"),
                        lambda x: x["Config"].update(Labels={}),
-                       lambda x: x.update(HostConfig={"PidMode": "host"}),
-                       lambda x: x.update(HostConfig={"NetworkMode": "host"}),
+                       lambda x: x["HostConfig"].update(PidMode="host"),
+                       lambda x: x["HostConfig"].update(CgroupnsMode="host"),
+                       lambda x: x["HostConfig"].update(NetworkMode="host"),
                        lambda x: x["Mounts"].append({"Type": "bind"})):
             obj = copy.deepcopy(valid)
             mutate(obj)

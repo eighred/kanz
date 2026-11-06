@@ -56,8 +56,10 @@ var cniProofRequirements = map[string][]string{
 		`rules = self.inside("iptables-save")`, `self.inside("iptables-restore", "--test", data=filtered)`, `self.inside("iptables-restore", data=filtered)`,
 		`"new_pod_not_owned_by_Cilium"`, `"storage_image_digest_mismatch"`,
 		`"unexpected_K3s_version"`, `"Cilium_remains_after_rollback"`, `f.datapath()`,
-		`private_bpffs_boundary(before)`, `private_bpffs_boundary(before, mounted)`, `private_bpffs_boundary(before, shared, identity)`,
-		`"unrelated_mount_propagation_changed"`, `"preexisting_bpffs_mount_refused"`, `self.prepare_private_bpffs()`,
+		`private_mount_boundary(before, target=target, filesystem=filesystem)`, `private_mount_boundary(before, mounted, target=target, filesystem=filesystem)`, `private_mount_boundary(before, shared, identity, target=target, filesystem=filesystem)`,
+		`"unrelated_mount_propagation_changed"`, `"preexisting_fixture_mount_refused"`, `"unapproved_fixture_mount"`,
+		`self.prepare_private_mount("/sys/fs/bpf", "bpf")`, `self.prepare_private_mount("/run/cilium/cgroupv2", "cgroup2")`,
+		`"--cgroupns=private"`, `obj.get("HostConfig", {}).get("CgroupnsMode") != "private"`,
 		`self.service_rules_ready()`, `"service_rules_not_ready"`,
 	},
 	".github/workflows/k3s-cni-migration.yml": {
