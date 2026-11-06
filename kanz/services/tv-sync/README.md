@@ -271,3 +271,13 @@ Controlled callback tests cover old-lease refusal, cancellation and serializatio
 with an in-flight write; they do not measure the five-second deadline against a
 slow network peer. This does not establish production rollout, history
 completeness or writer fencing.
+
+The retained-delivery qualification uses `TEST_TV_NATS_URL`, a dedicated real
+JetStream server with the canonical bootstrap and the same image ID as CI's
+shared broker. Ordinary bus and OMS proofs retain their existing broker. Both
+the mandatory TV lane and full race suite supply the dedicated endpoint; neither
+checker accepts a skipped configured proof. This isolates the assertion from
+other services that consume the same canonical subject and can independently
+park the same FACT. The failed shared-broker run observed the exact target FACT
+on DLQ, but did not establish which consumer parked it; isolation must earn a
+fresh actual pass, not retrospectively label that observation harmless.
