@@ -32,7 +32,7 @@ if ($QualifyTVSync) {
     if ($InstanceId -cne 'i-0ee1235614219f089' -or $Region -cne 'ap-northeast-1' -or $RecoveryBucket -cne 'kanz-testnet-tokyo-recovery-012619468098') { throw 'TV recovery target is not the reviewed Tokyo boundary.' }
     $head = (& git -C $repoRoot rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $head -cne $releaseCommit) { throw 'TV recovery requires exact origin/main HEAD.' }
-    $owned = @('tools/Invoke-TestnetDataPlaneRecovery.ps1', 'tools/testnet-data-plane-recovery.sh', 'tools/tv-sync-restored-proof.sh', 'tools/Resolve-EcrReleaseDigest.ps1', 'tools/Resolve-TvReplayPlatform.ps1', 'kanz/infra/releases/tv-sync-signed-release.json')
+    $owned = @('tools/Invoke-TestnetDataPlaneRecovery.ps1', 'tools/testnet-data-plane-recovery.sh', 'tools/tv-sync-restored-proof.sh', 'tools/Resolve-EcrReleaseDigest.ps1', 'tools/Resolve-TvReplayPlatform.ps1', 'kanz/infra/overlays/testnet-tokyo/tv-sync-release.json')
     foreach ($file in $owned) {
         $local = (& git -C $repoRoot hash-object (Join-Path $repoRoot $file)).Trim()
         if ($LASTEXITCODE -ne 0) { throw 'TV recovery provenance unavailable.' }
@@ -41,7 +41,7 @@ if ($QualifyTVSync) {
     }
     . (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')
     . (Join-Path $PSScriptRoot 'Resolve-TvReplayPlatform.ps1')
-    $lockPath = Join-Path $repoRoot 'kanz/infra/releases/tv-sync-signed-release.json'
+    $lockPath = Join-Path $repoRoot 'kanz/infra/overlays/testnet-tokyo/tv-sync-release.json'
     $pair = Read-ReviewedTvSyncRelease -LockPath $lockPath
     & git -C $repoRoot merge-base --is-ancestor $pair.release_sha $releaseCommit
     if ($LASTEXITCODE -ne 0) { throw 'Replay release source is not an ancestor of reviewed main.' }
