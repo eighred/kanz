@@ -92,17 +92,19 @@ export const broker = {
     const body = object(await api.get<unknown>('/api/v1/broker/accounts'), 'broker accounts')
     return list(body.accounts, parseAccount)
   },
-  async account(id: string): Promise<BrokerAccountDetail> {
+  async account(id: string, signal?: AbortSignal): Promise<BrokerAccountDetail> {
     const base = `/api/v1/broker/accounts/${encodeURIComponent(id)}`
     const [state, positionsBody, ordersBody, executionsBody] = await Promise.all([
-      api.get<unknown>(`${base}/state`), api.get<unknown>(`${base}/positions`),
-      api.get<unknown>(`${base}/orders`), api.get<unknown>(`${base}/executions`),
+      api.get<unknown>(`${base}/state`, { signal }), api.get<unknown>(`${base}/positions`, { signal }),
+      api.get<unknown>(`${base}/orders`, { signal }), api.get<unknown>(`${base}/executions`, { signal }),
     ])
     const positions = object(positionsBody, 'positions')
     const orders = window(ordersBody, 'orders', parseOrder)
     const executions = window(executionsBody, 'executions', parseExecution)
+    const parsedState = parseState(state)
+    if (parsedState.id !== id) throw new Error('Broker account identity differs.')
     return {
-      state: parseState(state), positions: list(positions.positions, parsePosition),
+      state: parsedState, positions: list(positions.positions, parsePosition),
       orders: orders.rows, executions: executions.rows,
       ordersRetainedFrom: orders.retainedFrom, executionsRetainedFrom: executions.retainedFrom,
     }

@@ -2,12 +2,15 @@ package natsrebuild
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl"
 
+	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/tools/replay"
 )
 
@@ -20,6 +23,8 @@ import (
 type KafkaTopicChecker struct {
 	Brokers     []string
 	DialTimeout time.Duration
+	TLSConfig   *tls.Config
+	SASL        sasl.Mechanism
 }
 
 // Exists reports whether topic has any partition on the cluster.
@@ -41,12 +46,24 @@ func (c KafkaTopicChecker) Exists(ctx context.Context, topic string) (bool, erro
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	dialer := &kafka.Dialer{Timeout: timeout}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	dialer := bus.KafkaReaderDialer(bus.KafkaConfig{TLSConfig: c.TLSConfig, SASL: c.SASL})
+	if dialer == nil {
+		dialer = &kafka.Dialer{}
+	}
+	dialer.Timeout = timeout
 	conn, err := dialer.DialContext(ctx, "tcp", c.Brokers[0])
 	if err != nil {
 		return false, fmt.Errorf("dial broker %s: %w", c.Brokers[0], err)
 	}
 	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return false, err
+	}
 
 	parts, err := conn.ReadPartitions(topic)
 	if err != nil {
@@ -73,7 +90,12 @@ func isUnknownTopic(err error) bool {
 // KafkaOpen returns an OpenFunc backed by the read-only replay.Reader (EVT-20),
 // the same bounded, consumer-group-free source the single-tenant path used.
 func KafkaOpen(brokers []string) OpenFunc {
-	return func(_ context.Context, topic string, rng replay.Range) (Source, error) {
-		return replay.NewReader(replay.Config{Brokers: brokers, Topic: topic, Range: rng})
-	}
+	return (KafkaTopicChecker{Brokers: brokers}).Open
+}
+
+// Open uses the same identity as the metadata check. Neither path changes a
+// consumer group or falls back to an unauthenticated connection after failure.
+func (c KafkaTopicChecker) Open(_ context.Context, topic string, rng replay.Range) (Source, error) {
+	return replay.NewReader(replay.Config{Brokers: c.Brokers, Topic: topic, Range: rng,
+		TLSConfig: c.TLSConfig, SASL: c.SASL, PartitionDialTimeout: c.DialTimeout})
 }

@@ -15,6 +15,7 @@ num-bigint = "=0.4.6"
 num-rational = "=0.4.2"
 num-traits = "=0.2.19"
 tokio-postgres = "=0.7.18"
+tokio = { version = "=1.54.1", features = ["rt", "time"] }
 
 [dev-dependencies]
 tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "time"] }

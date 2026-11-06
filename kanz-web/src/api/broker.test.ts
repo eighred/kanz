@@ -34,3 +34,11 @@ describe('broker response boundary', () => {
     expect(describeBroker(new ApiError(404, 'hidden'))).toContain('unavailable')
   })
 })
+
+it('passes cancellation to all reads and refuses a different returned account',async()=>{
+ const controller=new AbortController()
+ const get=vi.spyOn(api,'get').mockResolvedValueOnce(state).mockResolvedValueOnce({positions:[]}).mockResolvedValueOnce({orders:[]}).mockResolvedValueOnce({executions:[]})
+ await expect(broker.account('different',controller.signal)).rejects.toThrow('identity differs')
+ expect(get.mock.calls).toHaveLength(4)
+ for(const call of get.mock.calls) expect(call[1]?.signal).toBe(controller.signal)
+})

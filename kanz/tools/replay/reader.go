@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl"
 
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	"github.com/eighred/kanz/pkg/bus"
@@ -64,6 +66,11 @@ func (r Range) validate() error {
 type Config struct {
 	// Brokers is the Kafka bootstrap list; matches bus.KafkaConfig.Brokers.
 	Brokers []string
+	// TLSConfig and SASL apply to discovery, offset probes and partition reads.
+	// nil retains plaintext development. Configured authentication never falls
+	// back to plaintext. Keep a rotating identity source open until Close returns.
+	TLSConfig *tls.Config
+	SASL      sasl.Mechanism
 	// Topic is the source topic per kanz-schemas/README.md § Subject Taxonomy.
 	Topic string
 	// Range bounds the per-partition read.
@@ -116,13 +123,18 @@ type Event struct {
 // — replays never disturb live consumer positions.
 type Reader struct {
 	cfg       Config
+	dialer    *kafka.Dialer
 	startOnce sync.Once
 	startErr  error
 	out       chan result
-	cancel    context.CancelFunc
+	stopCtx   context.Context
+	stop      context.CancelFunc
 	closeOnce sync.Once
 	closed    chan struct{}
 }
+
+// ErrReaderClosed distinguishes explicit shutdown from a fully read range.
+var ErrReaderClosed = errors.New("replay: reader is closed")
 
 type result struct {
 	ev  Event
@@ -152,7 +164,13 @@ func NewReader(cfg Config) (*Reader, error) {
 	if cfg.PartitionDialTimeout <= 0 {
 		cfg.PartitionDialTimeout = 10 * time.Second
 	}
-	return &Reader{cfg: cfg, closed: make(chan struct{})}, nil
+	dialer := bus.KafkaReaderDialer(bus.KafkaConfig{TLSConfig: cfg.TLSConfig, SASL: cfg.SASL})
+	if dialer == nil {
+		dialer = &kafka.Dialer{}
+	}
+	dialer.Timeout = cfg.PartitionDialTimeout
+	stopCtx, stop := context.WithCancel(context.Background())
+	return &Reader{cfg: cfg, dialer: dialer, stopCtx: stopCtx, stop: stop, closed: make(chan struct{})}, nil
 }
 
 // Next returns the next event. io.EOF means the range is fully drained on
@@ -160,7 +178,12 @@ func NewReader(cfg Config) (*Reader, error) {
 // malformed EventFrame) is surfaced with the Event populated only with Kafka
 // coordinates so the caller can log + skip; bus-level errors abort the read.
 func (r *Reader) Next(ctx context.Context) (Event, error) {
-	r.startOnce.Do(func() { r.startErr = r.start(ctx) })
+	r.startOnce.Do(func() {
+		r.startErr = r.start(ctx)
+		if r.startErr != nil {
+			close(r.closed)
+		}
+	})
 	if r.startErr != nil {
 		return Event{}, r.startErr
 	}
@@ -175,24 +198,31 @@ func (r *Reader) Next(ctx context.Context) (Event, error) {
 	}
 }
 
-// Close cancels in-flight fetchers and waits for them to drain. Safe to call
-// multiple times. Pending Next calls will see io.EOF or ctx.Err().
+// Close cancels discovery/fetchers and waits for them to drain. Safe to call
+// multiple times. Next before startup returns ErrReaderClosed; an active read
+// observes its interrupted operation, context cancellation, or io.EOF.
 func (r *Reader) Close() error {
 	r.closeOnce.Do(func() {
-		if r.cancel != nil {
-			r.cancel()
-		}
+		r.stop()
+		// Close before the first Next must not wait for a worker that was never
+		// started. If startup is running, stopCtx also interrupts its metadata I/O.
+		r.startOnce.Do(func() { r.startErr = ErrReaderClosed; close(r.closed) })
 		<-r.closed
 	})
 	return nil
 }
 
 func (r *Reader) start(parent context.Context) error {
-	parts, err := r.resolvePartitions(parent)
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(r.stopCtx, cancel)
+	finish := func() { stop(); cancel() }
+	parts, err := r.resolvePartitions(ctx)
 	if err != nil {
+		finish()
 		return err
 	}
 	if len(parts) == 0 {
+		finish()
 		// Nothing to read — signal EOF immediately.
 		r.out = make(chan result)
 		close(r.out)
@@ -200,8 +230,6 @@ func (r *Reader) start(parent context.Context) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithCancel(parent)
-	r.cancel = cancel
 	r.out = make(chan result, r.cfg.PerPartitionBuffer*len(parts))
 
 	var wg sync.WaitGroup
@@ -214,6 +242,7 @@ func (r *Reader) start(parent context.Context) error {
 	}
 	go func() {
 		wg.Wait()
+		finish()
 		close(r.out)
 		close(r.closed)
 	}()
@@ -236,12 +265,15 @@ func (r *Reader) resolvePartitions(ctx context.Context) ([]int, error) {
 		sort.Ints(out)
 		return out, nil
 	}
-	dialer := &kafka.Dialer{Timeout: r.cfg.PartitionDialTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", r.cfg.Brokers[0])
+	conn, err := r.dialer.DialContext(ctx, "tcp", r.cfg.Brokers[0])
 	if err != nil {
 		return nil, fmt.Errorf("replay: dial broker: %w", err)
 	}
-	defer conn.Close()
+	closeConn, err := r.boundMetadata(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	defer closeConn()
 	parts, err := conn.ReadPartitions(r.cfg.Topic)
 	if err != nil {
 		return nil, fmt.Errorf("replay: list partitions for %q: %w", r.cfg.Topic, err)
@@ -264,6 +296,7 @@ func (r *Reader) readPartition(ctx context.Context, partition int) {
 		Partition: partition,
 		MinBytes:  1,
 		MaxBytes:  10 << 20,
+		Dialer:    r.dialer,
 		// No GroupID — direct partition read, no consumer-group state mutated.
 	})
 	defer kr.Close()
@@ -372,16 +405,24 @@ func (r *Reader) readPartition(ctx context.Context, partition int) {
 // log. It dials the partition leader directly (the same ListOffsets seam
 // SetOffsetAt already uses) rather than hand-rolling a protocol call.
 func (r *Reader) partitionHighWaterMark(ctx context.Context, partition int) (int64, error) {
-	dialer := &kafka.Dialer{Timeout: r.cfg.PartitionDialTimeout}
 	var lastErr error
 	for _, broker := range r.cfg.Brokers {
-		conn, err := dialer.DialLeader(ctx, "tcp", broker, r.cfg.Topic, partition)
+		probeCtx, cancel := context.WithTimeout(ctx, r.cfg.PartitionDialTimeout)
+		conn, err := r.dialer.DialLeader(probeCtx, "tcp", broker, r.cfg.Topic, partition)
 		if err != nil {
+			cancel()
+			lastErr = err
+			continue
+		}
+		closeConn, err := r.boundMetadata(probeCtx, conn)
+		if err != nil {
+			cancel()
 			lastErr = err
 			continue
 		}
 		hwm, err := conn.ReadLastOffset()
-		conn.Close()
+		closeConn()
+		cancel()
 		if err != nil {
 			lastErr = err
 			continue
@@ -389,6 +430,21 @@ func (r *Reader) partitionHighWaterMark(ctx context.Context, partition int) (int
 		return hwm, nil
 	}
 	return 0, fmt.Errorf("dialing all brokers, last error: %w", lastErr)
+}
+
+// kafka.Conn metadata methods do not take a context. Bound the wire operation,
+// not only the preceding TCP/TLS dial, and interrupt it when Close is called.
+func (r *Reader) boundMetadata(ctx context.Context, conn *kafka.Conn) (func(), error) {
+	deadline := time.Now().Add(r.cfg.PartitionDialTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	return func() { stop(); _ = conn.Close() }, nil
 }
 
 func (r *Reader) seekStart(ctx context.Context, kr *kafka.Reader) error {

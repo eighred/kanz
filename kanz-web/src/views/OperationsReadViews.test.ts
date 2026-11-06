@@ -6,6 +6,8 @@ import CustodyBreaksView from './CustodyBreaksView.vue'
 import { broker } from '../api/broker'
 import { custody } from '../api/custody'
 import { ApiError } from '../api/client'
+import { createPinia } from 'pinia'
+import { useSession } from '../stores/session'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -24,7 +26,9 @@ describe('operations read screens', () => {
       state: { id: 'PF1', currency: 'USD', balance: '0', equity: '0', realizedPl: '0', unrealizedPl: '0', openPositions: 0 },
       positions: [], orders: [], executions: [], ordersRetainedFrom: '2026-01-01T00:00:00Z',
     })
-    const wrapper = mount(BrokerAccountView, { global: { plugins: [await routeFor('/broker-accounts/PF1')] } })
+    const pinia = createPinia()
+    useSession(pinia).identity = { subject: 'reader', tenant: 'tenant', expires_at: '2099-01-01' }
+    const wrapper = mount(BrokerAccountView, { global: { plugins: [pinia, await routeFor('/broker-accounts/PF1')] } })
     await flushPromises()
     expect(wrapper.text()).toContain('freshness cannot be established')
     expect(wrapper.text()).toContain('Earlier orders are not shown')
