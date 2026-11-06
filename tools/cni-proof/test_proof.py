@@ -14,6 +14,7 @@ class Fixture:
         self.namespace = None
         self.policies = set()
         self.calls = []
+        self.pod_reads = 0
 
     def __call__(self, *args, value=None, timeout=25):
         self.calls.append((args, value))
@@ -49,12 +50,21 @@ class Fixture:
             return ""
         if args[2] == "wait":
             return ""
-        if args[2:4] == ("get", "pod"):
-            return json.dumps({"metadata": {"uid": args[4] + "-uid"},
+        if args[2:4] == ("get", "pods"):
+            self.pod_reads += 1
+            items = [{"metadata": {"name": name, "uid": name + "-uid"},
                 "spec": {"containers": [{"image": proof.IMAGE if self.failure != "wrong_image" else "wrong"}]}, "status": {
                 "podIP": "10.42.0.2", "containerStatuses": [{
                     "ready": self.failure != "unhealthy", "restartCount": 0,
-                    "imageID": proof.IMAGE if self.failure != "wrong_loaded_image" else "sha256:wrong"}]}})
+                    "imageID": proof.IMAGE if self.failure != "wrong_loaded_image" else "sha256:wrong"}]}}
+                for name in ("server", "selected", "unselected")]
+            if self.failure == "missing_pod":
+                items.pop()
+            if self.failure == "duplicate_pod":
+                items[-1] = copy.deepcopy(items[0])
+            if self.failure == "identity_change" and self.pod_reads > 1:
+                items[1]["metadata"]["uid"] = "replacement-uid"
+            return json.dumps({"items": items})
         if args[2:4] == ("get", "service"):
             return json.dumps({"spec": {"clusterIP": "10.43.0.2"}})
         if args[2:4] == ("delete", "networkpolicy"):
@@ -95,12 +105,36 @@ class ProofTests(unittest.TestCase):
         self.assertTrue(result["cases"][-1]["case"].startswith("restored_"))
 
     def test_failure_never_becomes_denial_and_cleanup_runs(self):
-        for failure in ("exec_error", "malformed", "unhealthy", "unenforced", "ambiguous_create", "wrong_image", "wrong_loaded_image"):
+        for failure in ("exec_error", "malformed", "unhealthy", "unenforced", "ambiguous_create", "wrong_image", "wrong_loaded_image", "missing_pod", "duplicate_pod", "identity_change"):
             with self.subTest(failure=failure):
                 fixture, result = self.run_fixture(failure)
                 self.assertEqual(result["verdict"], "FAIL")
                 self.assertEqual(result["cleanup"], "verified_absent")
                 self.assertIsNone(fixture.namespace)
+
+    def test_slow_cli_preserves_all_controls_within_existing_budget(self):
+        elapsed = [0.0]
+
+        class SlowFixture(Fixture):
+            def __call__(self, *args, **kwargs):
+                elapsed[0] += 3
+                return super().__call__(*args, **kwargs)
+
+        fixture = SlowFixture()
+        with patch.object(proof.time, "monotonic", side_effect=lambda: elapsed[0]), \
+                patch.object(proof.time, "sleep", side_effect=lambda delay: elapsed.__setitem__(0, elapsed[0] + delay)):
+            result = proof.run_proof(fixture, "a" * 40)
+        proof.validate_report(result, "a" * 40)
+        self.assertIsNone(fixture.namespace)
+
+    def test_expired_budget_is_not_reported_as_policy_denial(self):
+        fixture = Fixture()
+        with patch.object(proof.time, "monotonic", side_effect=[0] + [241] * 10), \
+                patch.object(proof.time, "sleep"):
+            result = proof.run_proof(fixture, "a" * 40)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["cases"][-1]["observation"], "budget_exhausted")
+        self.assertEqual(result["cleanup"], "verified_absent")
 
     def test_cleanup_failure_and_ownership_change_refuse(self):
         for failure in ("cleanup_api", "ownership"):

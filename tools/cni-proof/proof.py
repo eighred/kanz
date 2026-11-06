@@ -221,11 +221,22 @@ def run_proof(k, source):
             raise ProofError("missing_namespace_uid")
         k("-n", namespace, "create", "-f", "-", value=objects(namespace, nonce))
         k("-n", namespace, "wait", "--for=condition=Ready", "pod", "--all", "--timeout=90s", timeout=100)
+        def read_pods():
+            # K3s CLI startup is measurable on the single-node testnet. One
+            # snapshot retains every identity check without four CLI startups.
+            items = json.loads(k("-n", namespace, "get", "pods", "server", "selected", "unselected", "-o", "json"))["items"]
+            if not isinstance(items, list) or len(items) != 3:
+                raise ProofError("incomplete_fixture_pod_inventory")
+            pods = {pod["metadata"]["name"]: pod for pod in items}
+            if set(pods) != {"server", "selected", "unselected"}:
+                raise ProofError("invalid_fixture_pod_inventory")
+            return pods
+
         pod_uids = {}
-        for name in ("server", "selected", "unselected"):
-            pod = json.loads(k("-n", namespace, "get", "pod", name, "-o", "json"))
+        initial_pods = read_pods()
+        for name, pod in initial_pods.items():
             pod_uids[name], evidence["images"][name] = inspect_pod(pod)
-        server = json.loads(k("-n", namespace, "get", "pod", "server", "-o", "json"))
+        server = initial_pods["server"]
         server_uid = server["metadata"]["uid"]
         pod_ip = server["status"]["podIP"]
         service = json.loads(k("-n", namespace, "get", "service", "server", "-o", "json"))
@@ -234,12 +245,13 @@ def run_proof(k, source):
             ipaddress.ip_address(address)
 
         def healthy():
+            pods = read_pods()
             for name in pod_uids:
-                pod = json.loads(k("-n", namespace, "get", "pod", name, "-o", "json"))
+                pod = pods[name]
                 identity = inspect_pod(pod)
                 if identity != (pod_uids[name], evidence["images"][name]):
                     raise ProofError("fixture_pod_identity_changed")
-            current = json.loads(k("-n", namespace, "get", "pod", "server", "-o", "json"))
+            current = pods["server"]
             statuses = current["status"].get("containerStatuses", [])
             if (current["metadata"]["uid"] != server_uid or current["status"].get("podIP") != pod_ip or
                     len(statuses) != 1 or not statuses[0].get("ready") or statuses[0].get("restartCount") != 0):
@@ -267,7 +279,7 @@ def run_proof(k, source):
                             break
                         time.sleep(0.3)
                     if consecutive != 3:
-                        failed_observation = result["reason"] if result else "unknown"
+                        failed_observation = result["reason"] if result else "budget_exhausted"
                         raise ProofError("policy_observation_not_stable")
                     evidence["cases"].append({"case": name + "_" + client + "_" + target,
                                               "verdict": "PASS", "observation": result["reason"]})
