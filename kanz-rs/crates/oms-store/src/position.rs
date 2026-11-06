@@ -363,8 +363,8 @@ async fn verify_duplicate(
         return Ok(());
     }
     let head = fee_journal::head_for(tx, Book::Position, &original).await?;
-    if !identity::same_execution(head.value(), f)
-        && !(f.recovery.is_none() && identity::same_execution(original.value(), f))
+    if !(identity::same_execution(head.value(), f)
+        || f.recovery.is_none() && identity::same_execution(original.value(), f))
     {
         return Err(Error::IdentityConflict);
     }
@@ -392,7 +392,7 @@ pub async fn snapshot(
         let l = math::aggregate(&group)?;
         nav += &l.qty * &l.avg;
         math::bound(&nav)?;
-        let mut st = math::state(&l, portfolio, "", &instrument, &l.avg, at.clone(), ccy)?;
+        let mut st = math::state(&l, portfolio, "", &instrument, &l.avg, at, ccy)?;
         st.unrealized_pnl = None;
         positions.push(st);
     }
