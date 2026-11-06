@@ -155,6 +155,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(gate.requirements(self.root), gate.POLICY)
         self.assertEqual(gate.POLICY["rust-bond-shadow.yml"], {"bond-shadow"})
         self.assertEqual(gate.POLICY["testnet-cni-proof.yml"], {"disposable-cni"})
+        self.assertEqual(gate.POLICY["k3s-cni-migration.yml"], {"disposable-transition"})
         self.assertEqual(gate.POLICY["redpanda-identity-proof.yml"], {"developmental-redpanda-identity"})
         self.assertEqual(gate.POLICY["valkey-migration.yml"], {"retained-state"})
         with self.assertRaises(gate.EvidenceError): self.verify()

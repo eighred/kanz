@@ -160,6 +160,19 @@ becoming Ready and removes the observation surface needed to finish the proof.
 
 ### Disposable CNI capability proof
 
+The separate `k3s-cni-migration` CI fixture tests a possible in-place
+transition: pinned K3s with embedded etcd, Flannel to Cilium and back to Flannel,
+retaining the same disposable node, etcd marker and original PVC/PV. Each phase
+also exercises cluster DNS, fresh local-path provisioning and the canonical
+synthetic policy probe. It recreates CoreDNS and the storage controller after
+each switch. The privileged fixture has no host mounts or operational
+credentials; only sanitized verdicts survive cleanup. This is not an operator
+migration command or evidence of a Tokyo transition. Before live migration,
+fresh application recovery evidence, secure control-plane recovery material,
+an explicit outage/rollback window and measured resource headroom remain
+required under #1413/#232. Kube-proxy and the existing single-node budget remain
+in scope; no node replacement is implied.
+
 `tools/Test-TestnetCNI.ps1` is a separate, explicitly invoked operator check.
 It refuses a checkout that is not exact, unmodified `origin/main`, an unexpected
 AWS account/region/instance, or a different `kube-system` UID. It creates only a

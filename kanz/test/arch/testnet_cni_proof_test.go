@@ -45,7 +45,29 @@ var cniProofRequirements = map[string][]string{
 		"python3 -B -m unittest discover -s tools/cni-proof", "bash tools/feed-identity/install.sh",
 		"python3 -B tools/cni-proof/ci.py", "if-no-files-found: error",
 	},
-	".github/scripts/release_ci.py": {`"testnet-cni-proof.yml": {"disposable-cni"}`},
+	"tools/cni-proof/migration.py": {
+		`r"kanz-cni-migration-[0-9a-f]{24}"`, `any(m["Type"] == "bind"`,
+		`str(min(4, os.cpu_count() or 1))`, `cpu_limit(), "--memory=5g", "--pids-limit=4096", "--log-driver=none"`,
+		`"--cluster-init", "--secrets-encryption"`, `"kubeProxyReplacement=false"`,
+		`def recycle_system(self):`, `def quiesce_system(self):`, `"node_identity_changed"`,
+		`"etcd_state_changed"`, `"persistent_volume_identity_changed"`, `f.storage("fresh-" + phase, nonce, True)`,
+		`for phase in ("flannel", "cilium", "rollback")`, `proof.validate_report(report, source)`,
+		`"cleanup"] == "verified_absent"`, `vol.get("Labels", {}).get(LABEL) != name`,
+		`rules = self.inside("iptables-save")`, `self.inside("iptables-restore", "--test", data=filtered)`, `self.inside("iptables-restore", data=filtered)`,
+		`"new_pod_not_owned_by_Cilium"`, `"storage_image_digest_mismatch"`,
+		`"unexpected_K3s_version"`, `"Cilium_remains_after_rollback"`, `f.datapath()`,
+		`private_mount_boundary(before, target=target, filesystem=filesystem)`, `private_mount_boundary(before, mounted, target=target, filesystem=filesystem)`, `private_mount_boundary(before, shared, identity, target=target, filesystem=filesystem)`,
+		`"unrelated_mount_propagation_changed"`, `"preexisting_fixture_mount_refused"`, `"unapproved_fixture_mount"`,
+		`self.prepare_private_mount("/sys/fs/bpf", "bpf")`, `self.prepare_private_mount("/run/cilium/cgroupv2", "cgroup2")`,
+		`"--cgroupns=private"`, `obj.get("HostConfig", {}).get("CgroupnsMode") != "private"`,
+		`self.service_rules_ready()`, `"service_rules_not_ready"`,
+	},
+	".github/workflows/k3s-cni-migration.yml": {
+		"disposable-transition:", "persist-credentials: false", "timeout-minutes: 30",
+		"python3 -B tools/cni-proof/migration.py", "bash tools/feed-identity/install.sh",
+		"if-no-files-found: error",
+	},
+	".github/scripts/release_ci.py": {`"testnet-cni-proof.yml": {"disposable-cni"}`, `"k3s-cni-migration.yml": {"disposable-transition"}`},
 }
 
 func checkCNIProofBoundary(files map[string]string) error {

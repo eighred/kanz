@@ -76,6 +76,13 @@ class Kubectl:
         except (OSError, subprocess.TimeoutExpired):
             raise ProofError("kubectl_unavailable_or_timeout") from None
         if result.returncode or len(result.stdout) > 1 << 20:
+            # Fixed diagnostic only: raw stderr can contain operational data.
+            # A timeout remains a failed proof, never an observed policy denial.
+            if result.returncode and any(marker in result.stderr.lower() for marker in (
+                    "context deadline exceeded", "timed out waiting for the condition", "client.timeout exceeded")):
+                raise ProofError("kubectl_reported_timeout")
+            if result.returncode and "error from server (notfound)" in result.stderr.lower():
+                raise ProofError("kubectl_reported_not_found")
             raise ProofError("kubectl_failed_or_oversized")
         return result.stdout.strip()
 
