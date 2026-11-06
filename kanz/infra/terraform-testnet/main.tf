@@ -18,6 +18,7 @@ locals {
     "oms",
     "prometheus",
     "risk-engine",
+    "tv-sync",
     "venue-binance",
     "venue-okx",
     "web-bff",
