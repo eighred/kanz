@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/eighred/kanz/services/tv-sync/internal/brokerapi"
@@ -14,6 +15,8 @@ import (
 
 // Readiness gates traffic.
 type Readiness struct {
+	streamMu     sync.Mutex
+	generation   *streamGeneration
 	ready        atomic.Bool
 	foldFailures foldFailures
 	ctx          context.Context
@@ -21,9 +24,20 @@ type Readiness struct {
 
 // NewReadiness binds the startup barrier to the process lifetime. Cancellation
 // cannot be undone by a concurrently finishing catch-up callback.
-func NewReadiness(ctx context.Context) *Readiness { return &Readiness{ctx: ctx} }
+func NewReadiness(ctx context.Context) *Readiness {
+	r := &Readiness{ctx: ctx}
+	if ctx != nil {
+		context.AfterFunc(ctx, r.revokeStreams)
+	}
+	return r
+}
 
-func (r *Readiness) Set(ready bool) { r.ready.Store(ready) }
+func (r *Readiness) Set(ready bool) {
+	r.ready.Store(ready)
+	if !ready {
+		r.revokeStreams()
+	}
+}
 func (r *Readiness) Ready() bool {
 	return r.ready.Load() && !r.foldFailures.blocked.Load() && (r.ctx == nil || r.ctx.Err() == nil)
 }
@@ -62,6 +76,7 @@ func New(readiness *Readiness, broker *brokerapi.Handler, opts ...Option) *Serve
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 		})
 	}
+	broker.SetStreamGate(readiness)
 	broker.Routes(s.mux)
 	broker.Routes(s.legacy)
 	for _, opt := range opts {

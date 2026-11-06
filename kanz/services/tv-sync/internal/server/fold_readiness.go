@@ -22,6 +22,9 @@ type foldFailures struct {
 // durable catch-up; it cannot be cleared by a later unrelated delivery.
 func (r *Readiness) FoldResult(tenant, event string, failed bool) {
 	r.foldFailures.record(tenant, event, failed)
+	if failed || r.foldFailures.blocked.Load() {
+		r.revokeStreams()
+	}
 }
 func (f *foldFailures) record(tenant, event string, failed bool) {
 	f.mu.Lock()

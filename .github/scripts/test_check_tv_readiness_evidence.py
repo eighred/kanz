@@ -11,8 +11,8 @@ class ReadinessEvidenceTests(unittest.TestCase):
             {"Action": "pass", "Package": PREFIX + package}]]
 
     def test_complete(self):
-        self.assertEqual(sum(map(len, REQUIRED.values())), 19)
-        self.assertEqual(len(REQUIRED), 3)
+        self.assertEqual(sum(map(len, REQUIRED.values())), 26)
+        self.assertEqual(len(REQUIRED), 4)
         verify(self.events(), required=REQUIRED)
 
     def test_each_case_and_completion_required(self):

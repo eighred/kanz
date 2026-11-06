@@ -21,8 +21,13 @@ REQUIRED = {
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/database-timeout",
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/restart-unacked"},
     "services/tv-sync/internal/server": {"TestBrokerRefusesBeforeReadinessAndAfterCancellation",
+                                                 "TestServingGenerationRejectsOldLeasesAfterRecovery",
+                                                 "TestServingRevocationOrdersBoundedInflightWrite",
+                                                 "TestEstablishedStreamClosesOnFailureAndRequiresNewGeneration",
+                                                 "TestStreamHeaderAdmissionCannotRaceRevocation",
                                                  "TestFoldReadinessRequiresMatchingRecovery",
                                                  "TestFoldReadinessOverflowAndMissingIdentityStayClosed"},
+    "services/tv-sync/internal/brokerapi": {"TestStreamRefusesUnwiredServingGate", "TestStream_DeliversDeltas", "TestStream_SurvivesTheServerWriteTimeout"},
 }
 if __name__ == "__main__":
     if sys.argv[1] == "--pattern":
@@ -30,4 +35,4 @@ if __name__ == "__main__":
     else:
         with open(sys.argv[1], encoding="utf-8") as source:
             verify((json.loads(line) for line in source), required=REQUIRED)
-        print("All 19 required durable readiness outcomes passed in 3 complete packages")
+        print("All 26 required durable readiness outcomes passed in 4 complete packages")
