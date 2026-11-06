@@ -131,7 +131,16 @@ jobs:
         with:
           # Track the toolchain pinned in go.mod so CI never drifts from local.
           go-version-file: kanz/go.mod
-          cache-dependency-path: kanz/go.sum
+          # setup-go caches are immutable on an exact hit. Give this complete
+          # race/tag job its own profile so a faster build-only job cannot seed
+          # its cache without the race and provider/redis compiler objects.
+          # This is compilation reuse only: every test still uses -count=1.
+          cache-dependency-path: |
+            kanz/go.mod
+            kanz/go.sum
+            .github/workflows/kanz-ci.yml
+            kanz-schemas/buf.gen.yaml
+            kanz-schemas/proto/**/*.proto
 
       - uses: ./.github/actions/setup-buf
         with:
