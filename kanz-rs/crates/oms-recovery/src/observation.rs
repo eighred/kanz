@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio_postgres::Client;
 
 pub(crate) struct Binding {
+    pub tenant: String,
     pub portfolio: String,
     pub mic: String,
     pub account: String,
@@ -89,12 +90,12 @@ pub(crate) async fn observe(
     client: &mut Client,
     venue: &kanz_oms_venue::Client,
     binding: &Binding,
-    tenant: &str,
     env: &Envelope,
     payload: &[u8],
     now: prost_types::Timestamp,
     deadline: Duration,
 ) -> Result<String, Error> {
+    let tenant = binding.tenant.as_str();
     if env.event_type != "order.order.healed"
         || payload.is_empty()
         || payload.len() > repository::HISTORY_BYTES

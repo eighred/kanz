@@ -90,8 +90,9 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
             }
         };
         Ok(Self {
-            tenant,
+            tenant: tenant.clone(),
             binding: observation::Binding {
+                tenant: tenant.clone(),
                 portfolio: config.portfolio,
                 mic: config.mic,
                 account: config.account,
@@ -130,7 +131,6 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
                         client,
                         &self.venue,
                         &self.binding,
-                        &self.tenant,
                         env.value(),
                         payload,
                         now,

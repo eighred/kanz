@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"net"
+	"github.com/eighred/kanz/services/oms/internal/conformancetestkit"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -126,30 +126,11 @@ func (c rawCodec) Marshal(v any) ([]byte, error) {
 func (c rawCodec) Unmarshal(raw []byte, v any) error { return proto.Unmarshal(raw, v.(proto.Message)) }
 func serveAdapter(t *testing.T, a *adapter, config *tls.Config, address string) (string, *grpc.Server) {
 	t.Helper()
-	if address == "" {
-		address = "127.0.0.1:0"
-	}
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		t.Fatal(err)
-	}
 	opts := []grpc.ServerOption{grpc.ForceServerCodec(rawCodec{a}), grpc.StatsHandler(connectionStats{a})}
 	if config != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(config)))
 	}
-	server := grpc.NewServer(opts...)
-	venuepb.RegisterVenueAdapterServiceServer(server, a)
-	done := make(chan struct{})
-	go func() { defer close(done); _ = server.Serve(listener) }()
-	t.Cleanup(func() {
-		server.Stop()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("venue server did not close")
-		}
-	})
-	return listener.Addr().String(), server
+	return conformancetestkit.StartVenue(t, a, address, opts...)
 }
 func state() *orderpb.OrderState {
 	return &orderpb.OrderState{OrderId: "fixture-order", PortfolioId: "fixture-portfolio", InstrumentId: "fixture-instrument", Venue: "MOCK", VenueAccountId: "fixture-account", Side: orderpb.Side_SIDE_BUY, OrderedQuantity: &commonpb.Decimal{Coefficient: 7, Exponent: -10}, LimitPrice: &commonpb.Decimal{Coefficient: 123456789, Exponent: -10}}

@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,17 @@ func TestSyntheticIdentityCannotBecomeRuntimeAuthority(t *testing.T) {
 	if !runtimeSyntheticImport("services/example/main.go", f) || runtimeSyntheticImport("services/example/main_test.go", f) {
 		t.Fatal("synthetic identity import mutation was misclassified")
 	}
+	for _, imported := range []string{"github.com/eighred/kanz/internal/testidentity", "github.com/eighred/kanz/services/oms/internal/conformancetestkit"} {
+		for _, location := range []string{"services/oms/cmd/oms/main.go", "services/oms/internal/order/recovery.go", "cmd/example/main.go"} {
+			mutated, err := parser.ParseFile(token.NewFileSet(), "fixture.go", "package fixture; import _ "+strconv.Quote(imported), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !runtimeSyntheticImport(location, mutated) || runtimeSyntheticImport("services/oms/tools/recovery-conformance/recovery_test.go", mutated) {
+				t.Fatal("synthetic transport production import mutation was misclassified")
+			}
+		}
+	}
 }
 
 func runtimeSyntheticImport(rel string, f *ast.File) bool {
@@ -30,7 +42,8 @@ func runtimeSyntheticImport(rel string, f *ast.File) bool {
 		return false
 	}
 	for _, i := range f.Imports {
-		if strings.Trim(i.Path.Value, `"`) == "github.com/eighred/kanz/internal/testidentity" {
+		path := strings.Trim(i.Path.Value, `"`)
+		if path == "github.com/eighred/kanz/internal/testidentity" || path == "github.com/eighred/kanz/services/oms/internal/conformancetestkit" {
 			return true
 		}
 	}

@@ -147,7 +147,7 @@ func TestRustVenueLifetime(t *testing.T) {
 			t.Fatal("connection failed")
 		}
 		requireOK(t, rpc(t, w, "Describe", nil))
-		if a.active.Load() == 0 || source.active.Load() == 0 {
+		if a.active.Load() == 0 || source.Active() == 0 {
 			t.Fatal("positive owned connections not established")
 		}
 		r = w.call(map[string]any{"method": "Close", "timeout_ms": 2000})
@@ -155,10 +155,10 @@ func TestRustVenueLifetime(t *testing.T) {
 			t.Fatal("Close failed")
 		}
 		deadline := time.Now().Add(2 * time.Second)
-		for (a.active.Load() != 0 || source.active.Load() != 0) && time.Now().Before(deadline) {
+		for (a.active.Load() != 0 || source.Active() != 0) && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
-		if a.active.Load() != 0 || source.active.Load() != 0 {
+		if a.active.Load() != 0 || source.Active() != 0 {
 			t.Fatal("owned connection survived Close")
 		}
 		select {
@@ -212,7 +212,7 @@ func TestRustVenueLifetime(t *testing.T) {
 			t.Fatal("cancellation did not reach actual transport")
 		}
 		defer func() { _ = conn.Close() }()
-		if source.started.Load() == 0 {
+		if source.Started() == 0 {
 			t.Fatal("workload source never acquired")
 		}
 		if err = conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -302,7 +302,7 @@ func TestRustVenueRotationReconnect(t *testing.T) {
 		t.Fatal("initial client identity not observed")
 	}
 	second := ca.issue(t, clientID, false)
-	source.set(t, ca, second)
+	source.Set(t, identity(ca, second))
 	server.Stop()
 	_, server = serveAdapter(t, a, config, endpoint)
 	deadline := time.Now().Add(10 * time.Second)
