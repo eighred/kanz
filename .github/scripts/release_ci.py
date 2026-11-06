@@ -13,6 +13,9 @@ REPO = "eighred/kanz"
 API = "https://api.github.com/repos/" + REPO
 POLICY = {
     "kanz-ci.yml": {"kanz-ci-required"},
+    "codeql.yml": {"Analyze (actions)", "Analyze (go)", "Analyze (javascript-typescript)", "Analyze (python)"},
+    "security.yml": {"gitleaks", "secret-scan-selftest", "dependency-scan"},
+    "terraform-testnet.yml": {"terraform-testnet"},
     "architecture-migration.yml": {"compatibility"},
     "julia-calibration.yml": {"shadow-calibration"},
     "rust-bond-shadow.yml": {"bond-shadow"},
@@ -26,6 +29,9 @@ POLICY = {
     "envoy-edge.yml": {"actual-edge"},
     "gateway-policy-proof.yml": {"gateway-isolation"},
 }
+
+
+MANDATORY = {"kanz-ci.yml", "codeql.yml", "security.yml", "terraform-testnet.yml"}
 
 
 class EvidenceError(Exception):
@@ -97,7 +103,7 @@ def requirements(root):
     result = {}
     for filename, jobs in POLICY.items():
         path = directory / filename
-        if filename == "kanz-ci.yml" or path.exists():
+        if filename in MANDATORY or path.exists():
             if path.is_symlink() or not path.is_file():
                 raise EvidenceError("required workflow is not a regular source file")
             result[filename] = jobs
