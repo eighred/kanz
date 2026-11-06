@@ -16,6 +16,7 @@ pub mod queries;
 pub mod recovery;
 pub mod recovery_ack;
 pub mod recovery_repository;
+pub mod recovery_wire;
 pub mod relay;
 mod relay_wire;
 use identity::{execution_key, same_execution};
@@ -65,6 +66,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Stored FACT metadata, not a new public command or canonical financial model.
+#[derive(Clone)]
 pub struct Record {
     pub tenant: String,
     pub partition_key: String,

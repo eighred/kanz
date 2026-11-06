@@ -23,7 +23,7 @@ impl Unknown {
                     && entry
                         .len()
                         .checked_add(children.len())
-                        .is_none_or(|n| n > 8000)
+                        .is_none_or(|n| n > 8001)
                 {
                     return Err(Error::Capacity);
                 }
@@ -90,6 +90,14 @@ fn bounded_message(n: u32, raw: &[u8], out: &mut Vec<u8>, limit: usize) -> Resul
     put_message(n, raw, out);
     Ok(())
 }
+/// Append one canonical embedded field with exact size preflight and a closed
+/// owner-selected budget; callers cannot silently introduce an arbitrary cap.
+pub fn append_message(n: u32, raw: &[u8], out: &mut Vec<u8>, budget: Budget) -> Result<(), Error> {
+    if n == 0 || n > 0x1fffffff {
+        return Err(Error::InvalidInput);
+    }
+    bounded_message(n, raw, out, budget.bytes())
+}
 fn wire(kind: &Kind) -> u8 {
     match kind {
         Kind::Double | Kind::Fixed64 | Kind::Sfixed64 => 1,
@@ -133,7 +141,7 @@ fn split(
                 bounded_message(number, &clean, &mut known, limit)?;
                 let entries = unknown.children.entry(number).or_default();
                 if field.is_list() || entries.is_empty() {
-                    if limit > MAX_BYTES && entries.len() >= 8000 {
+                    if limit > MAX_BYTES && entries.len() >= 8001 {
                         return Err(Error::Capacity);
                     }
                     entries.push(sidecar)

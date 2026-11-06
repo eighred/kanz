@@ -3,17 +3,15 @@
 use crate::Error;
 use kanz_oms_store::{
     fee_revision, fee_subject, identity,
-    recovery_repository::{Case, FeeEvidence, HISTORY_BYTES, MAX_FILLS},
+    recovery_repository::{Case, FeeEvidence, MAX_FILLS},
 };
 use kanz_order_core::{
     proto::order::v1::{
-        ExecutionFeeApproval, ExecutionFeeChange, ExecutionFeeCorrectionApproved,
-        ExecutionFeeCorrectionProposed, Fill,
+        ExecutionFeeChange, ExecutionFeeCorrectionApproved, ExecutionFeeCorrectionProposed, Fill,
     },
     Canonical,
 };
 use kanz_proto_wire::{Budget, Schema};
-use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -56,8 +54,7 @@ fn hash(tenant: &str, raw: &[u8]) -> String {
 }
 pub(crate) struct ApprovedChanges {
     pub by_execution: BTreeMap<String, usize>,
-    source: Option<Canonical<ExecutionFeeCorrectionApproved>>,
-    case_id: String,
+    source: Option<std::sync::Arc<Canonical<ExecutionFeeCorrectionApproved>>>,
     pub baselines: Vec<(String, Canonical<Fill>)>,
 }
 pub(crate) fn approved(
@@ -71,7 +68,6 @@ pub(crate) fn approved(
             by_execution: BTreeMap::new(),
             baselines: Vec::new(),
             source: None,
-            case_id: case.id.clone(),
         });
     };
     let proposal = Canonical::<ExecutionFeeCorrectionProposed>::decode_with_budget(
@@ -151,66 +147,22 @@ pub(crate) fn approved(
     Ok(ApprovedChanges {
         by_execution: result,
         baselines,
-        source: Some(approval),
-        case_id: case.id.clone(),
+        source: Some(std::sync::Arc::new(approval)),
     })
 }
 
 impl ApprovedChanges {
-    /// Expand one approval at a time; a shared unknown timestamp or actor is
-    /// never copied into a retained vector once per historical execution.
-    pub fn for_execution(
+    pub fn terms(
         &self,
         key: &str,
-    ) -> Result<Option<Canonical<ExecutionFeeApproval>>, Error> {
+    ) -> Result<Option<kanz_oms_store::recovery_wire::FeeTerms>, Error> {
         let Some(index) = self.by_execution.get(key) else {
             return Ok(None);
         };
-        let previous = &self.baselines[*index].1;
         let source = self.source.as_ref().ok_or(Error::FeeRevision)?;
-        let a = source.value();
-        let value = ExecutionFeeApproval {
-            proposal_id: self.case_id.clone(),
-            digest: a.digest.clone(),
-            proposer: a.proposer.clone(),
-            approver: a.approver.clone(),
-            previous_execution_digest: fee_revision::economic_digest(previous.value())?,
-            ..Default::default()
-        };
-        let mut raw = value.encode_to_vec();
-        let desc = ExecutionFeeApproval::descriptor()?;
-        for (name, bytes) in [
-            (
-                "approved_at",
-                source
-                    .message_wire("approved_at")?
-                    .ok_or(Error::FeeRevision)?,
-            ),
-            (
-                "previous_fee",
-                previous.message_wire("fee")?.ok_or(Error::FeeRevision)?,
-            ),
-        ] {
-            if raw
-                .len()
-                .checked_add(bytes.len())
-                .and_then(|n| n.checked_add(10))
-                .is_none_or(|n| n > HISTORY_BYTES)
-            {
-                return Err(Error::Capacity);
-            }
-            kanz_proto_wire::put_message(
-                desc.get_field_by_name(name)
-                    .ok_or(Error::FeeRevision)?
-                    .number(),
-                &bytes,
-                &mut raw,
-            );
-        }
-
-        Ok(Some(Canonical::decode_with_budget(
-            &raw,
-            Budget::RecoveryHistory,
+        Ok(Some(kanz_oms_store::recovery_wire::FeeTerms::new(
+            std::sync::Arc::clone(source),
+            &self.baselines[*index].1,
         )?))
     }
 }

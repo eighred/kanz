@@ -285,6 +285,20 @@ mod tests {
         .unwrap();
         assert_eq!(response.value().fills.len(), 8000);
         kanz_proto_wire::put_message(2, &[], &mut raw);
+        // One sentinel above the accepted history limit reaches CompleteHistory
+        // and its durable blocked outcome; never return an accepted prefix.
+        assert_eq!(
+            Canonical::<QueryOrderResponse>::decode_with_budget(
+                &raw,
+                kanz_proto_wire::Budget::RecoveryHistory
+            )
+            .unwrap()
+            .value()
+            .fills
+            .len(),
+            8001
+        );
+        kanz_proto_wire::put_message(2, &[], &mut raw);
         assert_eq!(
             Canonical::<QueryOrderResponse>::decode_with_budget(
                 &raw,

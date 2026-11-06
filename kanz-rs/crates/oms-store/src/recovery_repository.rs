@@ -56,6 +56,22 @@ pub async fn posted_reader<'a>(
         seen: BTreeSet::new(),
     })
 }
+fn posted_key(f: &kanz_order_core::proto::order::v1::Fill) -> Result<String, Error> {
+    // Validate before execution_key can fall back to cloning a malformed ID.
+    if f.fill_id.len() > 1024
+        || f.venue.is_empty()
+        || f.venue_account_id.is_empty()
+        || f.instrument_id.is_empty()
+        || f.venue_execution_id.is_empty()
+    {
+        return Err(Error::PostedExecutionUnknown);
+    }
+    let key = identity::execution_key(f);
+    if key.len() > 256 {
+        return Err(Error::Capacity);
+    }
+    Ok(key)
+}
 impl PostedReader<'_> {
     pub async fn next(&mut self) -> Result<Option<PostedExecution>, Error> {
         if self.remaining == 0 {
@@ -66,7 +82,7 @@ impl PostedReader<'_> {
         let id: String = row.get::<_, Option<String>>(0).ok_or(Error::Capacity)?;
         let raw: Vec<u8> = row.get::<_, Option<Vec<u8>>>(1).ok_or(Error::Capacity)?;
         let original = super::fee_wire::FillWire::decode(&raw)?;
-        let key = identity::execution_key(original.value());
+        let key = posted_key(original.value())?;
         if !self.seen.insert(key) {
             return Err(Error::PostedExecutionUnknown);
         }
@@ -380,4 +396,38 @@ pub async fn target_matches(
     let matched=tx.query_one("SELECT EXISTS(SELECT 1 FROM execution_recovery_targets WHERE case_id=$1 AND execution_key=$2 AND payload_digest=$3 AND execution_digest=$4)",&[&case,&key,&payload,&execution]).await?.get(0);
     commit(tx).await?;
     Ok(matched)
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+    use kanz_order_core::proto::order::v1::Fill;
+    #[test]
+    fn malformed_identity_cannot_accumulate_unbounded_fallback_keys() {
+        let fill = Fill {
+            fill_id: "x".repeat(MAX_BYTES),
+            ..Default::default()
+        };
+        assert!(matches!(
+            posted_key(&fill),
+            Err(Error::PostedExecutionUnknown)
+        ));
+        let fill = Fill {
+            fill_id: "legacy".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            posted_key(&fill),
+            Err(Error::PostedExecutionUnknown)
+        ));
+        let fill = Fill {
+            fill_id: "fill".into(),
+            venue: "venue".into(),
+            venue_account_id: "account".into(),
+            instrument_id: "instrument".into(),
+            venue_execution_id: "execution".into(),
+            ..Default::default()
+        };
+        assert_eq!(posted_key(&fill).unwrap(), identity::execution_key(&fill));
+    }
 }

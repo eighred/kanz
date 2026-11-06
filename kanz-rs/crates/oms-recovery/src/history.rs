@@ -1,7 +1,6 @@
 //! The existing CompleteHistory contract, preserving canonical nested fill wire.
 use crate::Error;
 use kanz_oms_store::{
-    fee_wire::FillWire,
     identity,
     recovery_repository::{HISTORY_BYTES, MAX_FILLS},
 };
@@ -139,21 +138,9 @@ pub(crate) fn complete(
     Ok(result)
 }
 fn append_message(out: &mut Vec<u8>, number: u32, raw: &[u8]) -> Result<(), Error> {
-    // Ten bytes covers both canonical tag and length for every bounded record.
-    if out
-        .len()
-        .checked_add(raw.len())
-        .and_then(|n| n.checked_add(10))
-        .is_none_or(|n| n > HISTORY_BYTES + 10)
-    {
-        return Err(Error::Capacity);
-    }
-    kanz_proto_wire::put_message(number, raw, out);
-    if out.len() > HISTORY_BYTES {
-        return Err(Error::Capacity);
-    }
-    Ok(())
+    kanz_proto_wire::append_message(number, raw, out, Budget::RecoveryHistory).map_err(Error::from)
 }
+
 /// Canonical history is immutable; revalidate completeness against the current
 /// order on restart without consulting a new venue response.
 pub(crate) fn from_frozen(
@@ -213,11 +200,6 @@ pub(crate) fn freeze_wire(
         Budget::RecoveryHistory,
     )?)
 }
-/// Retain the same unknown-carry journal representation used by the SQL owner.
-pub(crate) fn journal(fill: &Canonical<Fill>) -> Result<Vec<u8>, Error> {
-    Ok(FillWire::decode(fill.wire())?.journal_bytes()?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

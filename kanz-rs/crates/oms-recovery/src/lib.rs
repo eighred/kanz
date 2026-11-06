@@ -1,8 +1,11 @@
 #![forbid(unsafe_code)]
 //! Observation/recovery coordination. No order submission or venue side-effect RPC.
 mod approval;
+mod coordinator;
+pub use coordinator::{Config, Coordinator, Method};
 mod handlers;
 mod history;
+mod observation;
 mod preparation;
 
 #[derive(Debug, PartialEq, Eq)]

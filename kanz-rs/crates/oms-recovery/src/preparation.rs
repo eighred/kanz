@@ -1,20 +1,18 @@
 use crate::{approval::ApprovedChanges, history, Error};
 use kanz_oms_store::{identity, recovery_repository};
-use kanz_order_core::proto::order::v1::{ExecutionRecoveryHistory, ExecutionRecoveryProvenance};
+use kanz_order_core::proto::order::v1::ExecutionRecoveryHistory;
 use kanz_order_core::{
     proto::order::v1::{Fill, OrderState},
     rational, Canonical,
 };
-use kanz_proto_wire::Schema;
 use num_rational::BigRational;
 use num_traits::{Signed, Zero};
-use prost::Message;
 use std::collections::{BTreeMap, BTreeSet};
 use tokio_postgres::Client;
 
 pub(crate) struct Projection {
     pub state: Canonical<OrderState>,
-    pub fills: Vec<Canonical<Fill>>,
+    pub fills: Vec<kanz_oms_store::recovery_wire::Execution>,
     pub missing: BTreeSet<String>,
 }
 pub(crate) enum ProjectionError {
@@ -37,18 +35,6 @@ fn aggregate_error(e: kanz_order_core::aggregate::Error) -> Error {
         _ => Error::PostedHistoryUnknown,
     }
 }
-fn append(out: &mut Vec<u8>, number: u32, bytes: &[u8]) -> Result<(), Error> {
-    if out
-        .len()
-        .checked_add(bytes.len())
-        .and_then(|n| n.checked_add(10))
-        .is_none_or(|n| n > kanz_proto_wire::MAX_BYTES)
-    {
-        return Err(Error::Capacity);
-    }
-    kanz_proto_wire::put_message(number, bytes, out);
-    Ok(())
-}
 pub(crate) fn project(
     state: &Canonical<OrderState>,
     case: &recovery_repository::Case,
@@ -66,40 +52,27 @@ pub(crate) fn project(
     let mut fills = Vec::with_capacity(originals.len());
     let mut missing = BTreeSet::new();
     let mut cost = BigRational::zero();
-    let recovery_number = Fill::descriptor()?
-        .get_field_by_name("recovery")
-        .ok_or(Error::InvalidInput)?
-        .number();
-    let descriptor = ExecutionRecoveryProvenance::descriptor()?;
-    let at_number = descriptor
-        .get_field_by_name("observed_at")
-        .ok_or(Error::InvalidInput)?
-        .number();
-    let approval_number = descriptor
-        .get_field_by_name("fee_approval")
-        .ok_or(Error::InvalidInput)?
-        .number();
+    let context = kanz_oms_store::recovery_wire::Context::new(
+        case.id.clone(),
+        case.mapping_version.clone(),
+        case.source_cursor.clone(),
+        digest.into(),
+        observed,
+    )
+    .map_err(Error::from)?;
     for original in originals {
         let f = original.value();
         let key = identity::execution_key(f);
         cost += rational(f.quantity.as_ref()).ok_or(Error::HistoryIncomplete)?
             * rational(f.price.as_ref()).ok_or(Error::HistoryIncomplete)?;
-        let provenance = ExecutionRecoveryProvenance {
-            case_id: case.id.clone(),
-            mapping_version: case.mapping_version.clone(),
-            source_cursor: case.source_cursor.clone(),
-            payload_digest: digest.into(),
-            execution_digest: recovery_repository::digest(&history::journal(&original)?),
-            ..Default::default()
-        };
-        let mut provenance = provenance.encode_to_vec();
-        append(&mut provenance, at_number, &observed)?;
-        if let Some(approval) = approvals.for_execution(&key)? {
-            append(&mut provenance, approval_number, approval.wire())?;
-        }
-        let mut raw = original.wire().to_vec();
-        append(&mut raw, recovery_number, &provenance)?;
-        let recovered = Canonical::<Fill>::decode(&raw)?;
+        let recipe = kanz_oms_store::recovery_wire::Execution::new(
+            kanz_oms_store::fee_wire::FillWire::decode(original.wire()).map_err(Error::from)?,
+            std::sync::Arc::clone(&context),
+            approvals.terms(&key)?,
+        )
+        .map_err(Error::from)?;
+        let materialized = recipe.materialize().map_err(Error::from)?;
+        let recovered = Canonical::<Fill>::decode(materialized.original())?;
         if !posted.contains(&key) {
             next = kanz_order_core::aggregate::apply_recovered_fill(&next, &recovered, now)
                 .map_err(|e| {
@@ -113,7 +86,7 @@ pub(crate) fn project(
                 })?;
             missing.insert(key);
         }
-        fills.push(original);
+        fills.push(recipe);
     }
     let total = history
         .value()
