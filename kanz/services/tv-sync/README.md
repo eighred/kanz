@@ -96,9 +96,11 @@ migration Job or `RESTORE_VERIFIED` receipt alone is not this proof.
 
 An empty history or absent checkpoint is **not qualified restored state**. A
 fresh Tokyo database therefore needs a separately reviewed genesis/history
-bootstrap prerequisite. Current service startup marks readiness after launching
-consumers; it does not wait for a historical-backlog watermark. The canonical
-EXECUTION stream retains 24 hours, and durable consumer replay does not prove
+bootstrap prerequisite. Current startup waits for the initial durable pending
+and acknowledgement-pending backlog to drain; unresolved fold failures keep
+serving closed until the matching delivery succeeds. This barrier does not
+establish genesis or complete history. The canonical EXECUTION stream retains
+24 hours, and durable consumer replay does not prove
 coverage before retention. Establish the required source/history coverage and
 bootstrap readiness before activation; do not fabricate facts or use an empty
 database as evidence that an account never traded. This remains tracked under
@@ -195,14 +197,13 @@ error, and separately tests two database connections, lock timeout, rollback gap
 and tenant isolation. It does not simulate a real network partition or prove a
 multi-replica deployment safe. All new cases are mandatory in replay CI evidence.
 
-Recovery here means recovery on a subsequent successful delivery, **not guaranteed
-automatic redelivery**. The current TV consumer uses `WithDLQ` with the default
-single attempt: a transient append/replay error can be parked and deduplicated.
-With no later FACT, the missing fold may remain, and transport readiness alone
-does not establish projection completeness. The retained-retry profile currently
-refuses finite-delivery `order.*`; this fix does not change that global profile.
-TV-specific retry/serving failure behavior and actual NATS plus PostgreSQL proof
-remain activation prerequisites tracked in #1410/#1413.
+The durable-prefix repair alone recovers on a subsequent successful delivery;
+it does not itself guarantee automatic redelivery. Before the retained-delivery
+change below, TV used `WithDLQ` with a single application attempt, which could
+park a transient error and leave its committed fact unfolded until another FACT
+arrived. The current TV-specific retained client supplies that redelivery path
+and gates serving while failures remain unresolved; actual NATS/PostgreSQL
+qualification is required before activation. Global delivery profiles are unchanged.
 
 ### Retained FACT delivery and serving refusal
 
@@ -250,3 +251,23 @@ actual 64-to-unbounded update with identical name/creation time and preserved ac
 floor, delivering only the pending suffix. Old consumers must be stopped first:
 an old process could reassert 64 on the same durable. This is a controlled source
 handoff requirement, not proof that any deployed estate has performed it.
+
+### Established stream revocation
+
+Readiness now lends each SSE response a serving generation. A failure, explicit
+readiness loss or process cancellation closes that generation without polling;
+recovery permits a new connection but never revives an old lease. Headers and
+delta writes recheck the exact lease under the revocation lock, covering a delta
+selected concurrently with failure and a failure/recovery before headers start.
+An unwired stream gate refuses rather than assuming healthy service.
+
+An already-started network write cannot retract bytes already in flight. Active
+writes have a five-second deadline while holding the lease, then clear it so an
+idle healthy stream retains its intended lifetime. Revocation waits for at most
+that bounded active write; new requests already see the closed readiness flag.
+No tenant/event identifiers are added to headers or error responses. Real HTTP
+regressions cover idle stream closure, stale header admission and recovery.
+Controlled callback tests cover old-lease refusal, cancellation and serialization
+with an in-flight write; they do not measure the five-second deadline against a
+slow network peer. This does not establish production rollout, history
+completeness or writer fencing.

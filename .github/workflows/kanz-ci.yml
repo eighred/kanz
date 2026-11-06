@@ -495,7 +495,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_tv_readiness_evidence.py
-          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_readiness_evidence.py --pattern)" ./pkg/bus ./services/tv-sync/cmd/tv-sync ./services/tv-sync/internal/server | tee "$RUNNER_TEMP/tv-readiness-proof.jsonl"
+          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_readiness_evidence.py --pattern)" ./pkg/bus ./services/tv-sync/cmd/tv-sync ./services/tv-sync/internal/server ./services/tv-sync/internal/brokerapi | tee "$RUNNER_TEMP/tv-readiness-proof.jsonl"
           python3 ../.github/scripts/check_tv_readiness_evidence.py "$RUNNER_TEMP/tv-readiness-proof.jsonl"
 
       - name: Qualify restored tv-sync snapshot without writes
