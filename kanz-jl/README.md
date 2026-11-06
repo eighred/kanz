@@ -256,3 +256,34 @@ not establish a reachable exploit in the network-disabled calibration worker.
 The fresh catalog and executed repaired image remain mandatory. This additional
 component qualification does not resolve the residual native/runtime coverage
 blocker or authorize standard release publication.
+
+The subsequent native repair replaces the original `libcurl.so.4.8.0` bytes
+(libcurl 8.22.0) with the same ABI member from the pinned official
+[LibCURL 8.23.0 artifact](https://github.com/JuliaBinaryWrappers/LibCURL_jll.jl/blob/c268bc7d6fdaa4ae6514fe42d81e0b7710887b86/Artifacts.toml).
+Its license and independent artifact/member hashes are required; original
+`LibCURL_jll` 8.22.0+0 metadata remains visible. The source build associated with
+the original artifact applies no 8.22 patch and enables HTTP/2/OpenSSL, making
+[CVE-2026-92392](https://curl.se/docs/CVE-2026-92392.html) a known component match.
+This does not establish an exploit path in the network-disabled worker.
+
+The restricted image executes `curl_version_info`, verifies 8.23.0, the linked
+OpenSSL 3.5.9 backend and TLS/HTTP2 feature bits, records bounded protocols, and
+initializes/frees an easy handle without a network request. Fresh complete
+official [8.22.0](https://curl.se/docs/vuln-8.22.0.json) and
+[8.23.0](https://curl.se/docs/vuln-8.23.0.json) version-specific advisory arrays
+must parse successfully. The former must identify the HIGH control; any record
+for the installed version refuses. Empty output, HTTP failure, mismatched
+affected-version lists/ranges and unknown response shapes cannot stand in for
+an empty advisory array. Public responses/hashes and scan-time qualification
+are retained; this is component coverage, not permanent or general clearance.
+
+`qualification/install-native-runtime.sh` is the single fixed recipe used by
+the OCI build and the disposable Linux CI Julia installation **before** Pkg
+network access. It verifies the original runtime and all three archives, checks
+all original library members before replacement, and refuses redirected roots,
+linked targets, mixed installations or repeat application. Original dependency
+metadata stays unchanged. The Windows runtime is never patched. Linux unit
+qualification executes the recipe on an independently archive-derived temporary
+tree and tests prewrite tamper/symlink refusal; those tests require the three
+verified archives in `RUNNER_TEMP`. Partial installer failure stops the build;
+this is not a live installation or transactional rollback mechanism.

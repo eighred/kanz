@@ -1,3 +1,4 @@
+import test_curl as curl
 import test_openssl as ossl
 import copy
 import hashlib
@@ -94,6 +95,9 @@ class QualificationTests(unittest.TestCase):
                          'native7zip': proof.native_mapping.COMPONENT,
                          'nativeRuntime': {'generatedNativeImages': {}, 'files': {proof.native_mapping.PATH: proof.native_mapping.FILE}, 'links': {}, 'jll': {}, 'unassignedFiles': [proof.native_mapping.PATH], 'loadedOutsideArchive': {'/usr/lib/libc.so.6': {'size': 42, 'sha256': 'a' * 64}}, 'coverage': proof.native_inventory.COVERAGE},
                          'sources': {'qualification/isolation.jl': hashlib.sha256(Path(proof.__file__).with_name('isolation.jl').read_bytes()).hexdigest()}}
+            inventory['nativeLibCURL'] = curl.component()
+            inventory['nativeRuntime']['files'][proof.curl_runtime.PATH] = proof.curl_runtime.FILE
+            inventory['nativeRuntime']['jll']['LibCURL_jll'] = {'version': '8.22.0+0'}
             inventory['nativeOpenSSL'] = ossl.component()
             inventory['nativeRuntime']['files'].update(proof.openssl_runtime.FILES)
             inventory['nativeRuntime']['jll']['OpenSSL_jll'] = {'version': '3.5.8+0'}
@@ -115,7 +119,7 @@ class QualificationTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 proof.validate_report(changed, 'b' * 40, 'd' * 64, {k: inventory['nativeRuntime'][k] for k in ('files', 'links', 'jll')})
         for field in ('runtime', 'sourceSHA', 'projectSHA256', 'manifestSHA256', 'packages',
-                      'sources', 'generated', 'runtimeExecutableSHA256', 'excludedDevelopmentEnvironments', 'nativeRuntime', 'native7zip', 'nativeOpenSSL'):
+                      'sources', 'generated', 'runtimeExecutableSHA256', 'excludedDevelopmentEnvironments', 'nativeRuntime', 'native7zip', 'nativeOpenSSL', 'nativeLibCURL'):
             for replacement in (None, {}, 'wrong'):
                 changed = copy.deepcopy(report)
                 changed['inventory'][field] = replacement

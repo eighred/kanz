@@ -18,6 +18,8 @@ import jll_advisory
 import native_mapping
 import openssl_runtime
 import openssl_advisory
+import curl_runtime
+import curl_advisory
 
 ROOT = proof.ROOT
 ARCHIVES = {'trivy': 'bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea',
@@ -184,6 +186,8 @@ def validate_report(report, qualification, expected):
             or report.get('installedPackages') != qualification['inventory']['packages']
             or report.get('juliaManifest') != expected or report.get('spdxPackages') != expected):
         raise ValueError('advisory evidence incomplete or unbound')
+    curl_advisory.validate_report(report.get('curlAdvisory'), qualification['inventory'],
+        dt.datetime.fromisoformat(report['scanTime']))
     openssl_advisory.validate_report(report.get('opensslAdvisory'), qualification['inventory'],
         dt.datetime.fromisoformat(report['scanTime']))
     native_mapping.validate_report(report.get('nativeVersionMapping'), qualification['inventory'],
@@ -220,9 +224,10 @@ def main():
         source = proof.required(['git', 'rev-parse', 'HEAD']).decode().strip()
         qualification = json.loads((directory / 'julia-oci.json').read_text())
         proof.validate_report(qualification, source, digest(Path(shutil.which('julia')).resolve()),
-            openssl_runtime.overlay(
+            curl_runtime.overlay(openssl_runtime.overlay(
                 proof.native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz'),
-                Path(os.environ['RUNNER_TEMP']) / 'openssl.tar.gz'))
+                Path(os.environ['RUNNER_TEMP']) / 'openssl.tar.gz'),
+                Path(os.environ['RUNNER_TEMP']) / 'libcurl.tar.gz'))
         image = qualification['imageID']
         info = json.loads(proof.required(['docker', 'image', 'inspect', image]))[0]
         if info['Id'] != image or info['Config']['Labels']['org.opencontainers.image.revision'] != source:
@@ -274,6 +279,10 @@ def main():
             report['opensslAdvisory'] = {}
             openssl_advisory.qualify(run, qualification['inventory'],
                 lambda: dt.datetime.now(dt.timezone.utc), report['opensslAdvisory'])
+            stage = 'native-libcurl-advisories'
+            report['curlAdvisory'] = {}
+            curl_advisory.qualify(run, qualification['inventory'],
+                lambda: dt.datetime.now(dt.timezone.utc), report['curlAdvisory'])
             stage = 'actual-image-julia-scan'
             scan = json.loads(run(['trivy', 'image', *flags, '--image-src', 'docker', image]))
             validate_image_scan(scan, image, expected)

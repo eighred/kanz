@@ -157,6 +157,54 @@ openssl_license = bytes2hex(sha256(read("/opt/julia/share/licenses/kanz-openssl-
 openssl = Dict("version"=>"3.5.9", "versionAPI"=>"OpenSSL_version(0)",
     "archiveSHA256"=>"8e2c75378726017fc66fb7fbbd10fb53522417c3e45a88af77b8853d46f2b063",
     "files"=>openssl_files, "licenseSHA256"=>openssl_license, "originalJLLVersion"=>native_jll["OpenSSL_jll"]["version"])
+println(stderr, "KANZ_OCI_STAGE=libcurl-version")
+# Stable initial C layout from curl/curl.h; later fields are never dereferenced.
+struct CurlVersionPrefix
+    age::Cint
+    version::Ptr{UInt8}
+    version_num::Cuint
+    host::Ptr{UInt8}
+    features::Cint
+    ssl_version::Ptr{UInt8}
+    ssl_version_num::Clong
+    libz_version::Ptr{UInt8}
+    protocols::Ptr{Ptr{UInt8}}
+end
+@test sizeof(CurlVersionPrefix) == 72
+curl_path = "/opt/julia/lib/julia/libcurl.so.4.8.0"
+@test realpath(curl_path) == curl_path && !islink(curl_path)
+@test native_files["lib/julia/libcurl.so.4.8.0"]["sha256"] == "1d977428a3d57ca07b091b2b8e18881119cb5822162fd345f24e94dae16e5fc2"
+curl = Libdl.dlopen(curl_path)
+@test realpath(Libdl.dlpath(curl)) == curl_path
+@test ccall(Libdl.dlsym(curl, :curl_global_init), Cint, (Clong,), 3) == 0
+curl_info_ptr = ccall(Libdl.dlsym(curl, :curl_version_info), Ptr{CurlVersionPrefix}, (Cint,), 11)
+@test curl_info_ptr != C_NULL
+curl_info = unsafe_load(curl_info_ptr)
+@test unsafe_string(curl_info.version) == "8.23.0" && curl_info.version_num == 0x081700
+@test unsafe_string(curl_info.ssl_version) == "OpenSSL/3.5.9"
+@test curl_info.features & ((1 << 2) | (1 << 16)) == ((1 << 2) | (1 << 16))
+@test curl_info.protocols != C_NULL
+curl_protocols = String[]
+for i in 1:33
+    value = unsafe_load(curl_info.protocols, i)
+    value == C_NULL && break
+    @test i <= 32
+    protocol = unsafe_string(value)
+    @test occursin(r"^[a-z0-9]{1,32}$", protocol)
+    push!(curl_protocols, protocol)
+end
+@test "http" in curl_protocols && "https" in curl_protocols
+@test length(unique(curl_protocols)) == length(curl_protocols)
+curl_easy = ccall(Libdl.dlsym(curl, :curl_easy_init), Ptr{Cvoid}, ())
+@test curl_easy != C_NULL
+ccall(Libdl.dlsym(curl, :curl_easy_cleanup), Cvoid, (Ptr{Cvoid},), curl_easy)
+curl_license = bytes2hex(sha256(read("/opt/julia/share/licenses/kanz-libcurl-runtime/COPYING")))
+@test curl_license == "82f2f4427d6545ee5aaac4f0b80428da6cc8ba41c2cf5da3a03680ec327b9681"
+libcurl = Dict("version"=>"8.23.0", "versionAPI"=>"curl_version_info", "versionNumber"=>Int(curl_info.version_num),
+    "sslBackend"=>unsafe_string(curl_info.ssl_version), "features"=>Int(curl_info.features), "protocols"=>sort!(curl_protocols),
+    "path"=>"lib/julia/libcurl.so.4.8.0", "file"=>native_files["lib/julia/libcurl.so.4.8.0"],
+    "archiveSHA256"=>"97a3b0d65c9e03a30bfdc89185ddf1ef0fe14b7e1a95d93d8ffc9cf57fb2a161",
+    "licenseSHA256"=>curl_license, "originalJLLVersion"=>native_jll["LibCURL_jll"]["version"])
 for loaded in Libdl.dllist()
     loaded == "linux-vdso.so.1" && continue
     path = realpath(loaded)
@@ -172,6 +220,8 @@ for loaded in Libdl.dllist()
     outside[path] = bounded_hash(path, 128 * 2^20)
 end
 @test !isempty(outside)
+ccall(Libdl.dlsym(curl, :curl_global_cleanup), Cvoid, ())
+Libdl.dlclose(curl)
 Libdl.dlclose(ssl)
 Libdl.dlclose(crypto)
 println(stderr, "KANZ_OCI_STAGE=inventory")
@@ -196,4 +246,4 @@ TOML.print(stdout, Dict("sourceSHA"=>read("source.sha",String), "runtime"=>strin
     "projectSHA256"=>bytes2hex(sha256(read("Project.toml"))),
     "manifestSHA256"=>bytes2hex(sha256(read("Manifest.toml"))),
     "runtimeExecutableSHA256"=>bytes2hex(sha256(read("/opt/julia/bin/julia"))),
-    "nativeRuntime"=>native, "native7zip"=>seven, "nativeOpenSSL"=>openssl, "excludedDevelopmentEnvironments"=>excluded_environments, "packages"=>packages, "generated"=>generated, "sources"=>sources))
+    "nativeRuntime"=>native, "native7zip"=>seven, "nativeOpenSSL"=>openssl, "nativeLibCURL"=>libcurl, "excludedDevelopmentEnvironments"=>excluded_environments, "packages"=>packages, "generated"=>generated, "sources"=>sources))

@@ -3,21 +3,11 @@ FROM ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169
 RUN curl --fail --location --retry 3 --output /tmp/julia.tar.gz https://julialang-s3.julialang.org/bin/linux/x64/1.13/julia-1.13.3-linux-x86_64.tar.gz \
  && echo '5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4  /tmp/julia.tar.gz' | sha256sum --check --strict \
  && mkdir /opt/julia && tar -xzf /tmp/julia.tar.gz --strip-components=1 -C /opt/julia
-# Retain Julia's original JLL metadata; qualify this explicit native repair
-# against both independent archives and the executed OpenSSL version API.
-RUN curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output /tmp/openssl.tar.gz https://github.com/JuliaBinaryWrappers/OpenSSL_jll.jl/releases/download/OpenSSL-v3.5.9%2B0/OpenSSL.v3.5.9.x86_64-linux-gnu.tar.gz \
- && echo '8e2c75378726017fc66fb7fbbd10fb53522417c3e45a88af77b8853d46f2b063  /tmp/openssl.tar.gz' | sha256sum --check --strict \
- && test ! -L /opt/julia/lib && test ! -L /opt/julia/lib/julia \
- && test ! -L /opt/julia/lib/julia/libcrypto.so.3 && test ! -L /opt/julia/lib/julia/libssl.so.3 \
- && echo '443c0345cb2a10e55d41c385ef6dbf8af9209b82a2aaaeccf9772c04e398cfae  /opt/julia/lib/julia/libcrypto.so.3' | sha256sum --check --strict \
- && echo '81fd035bfa9f36291cab3c3cfe172dc082a3ba439a3f25ebd125003d66c15602  /opt/julia/lib/julia/libssl.so.3' | sha256sum --check --strict \
- && tar -xOf /tmp/openssl.tar.gz lib/libcrypto.so.3 > /opt/julia/lib/julia/libcrypto.so.3 \
- && tar -xOf /tmp/openssl.tar.gz lib/libssl.so.3 > /opt/julia/lib/julia/libssl.so.3 \
- && echo '09ac6b8640f13b13badf5d2430a8cd326d27ad77668868ad6c9a36de87c4857d  /opt/julia/lib/julia/libcrypto.so.3' | sha256sum --check --strict \
- && echo '044e0615a9f42e6e02298eec073325f528bee55c56901134788220fc5e96a098  /opt/julia/lib/julia/libssl.so.3' | sha256sum --check --strict \
- && mkdir -p /opt/julia/share/licenses/kanz-openssl-runtime \
- && tar -xOf /tmp/openssl.tar.gz share/licenses/OpenSSL/LICENSE.txt > /opt/julia/share/licenses/kanz-openssl-runtime/LICENSE.txt \
- && echo '7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a  /opt/julia/share/licenses/kanz-openssl-runtime/LICENSE.txt' | sha256sum --check --strict
+# One verified native recipe also repairs the host before Pkg network access.
+COPY kanz-jl/qualification/install-native-runtime.sh /tmp/install-native-runtime.sh
+RUN curl --disable --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output /tmp/openssl.tar.gz https://github.com/JuliaBinaryWrappers/OpenSSL_jll.jl/releases/download/OpenSSL-v3.5.9%2B0/OpenSSL.v3.5.9.x86_64-linux-gnu.tar.gz \
+ && curl --disable --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output /tmp/libcurl.tar.gz https://github.com/JuliaBinaryWrappers/LibCURL_jll.jl/releases/download/LibCURL-v8.23.0%2B0/LibCURL.v8.23.0.x86_64-linux-gnu.tar.gz \
+ && bash /tmp/install-native-runtime.sh /opt/julia /tmp/julia.tar.gz /tmp/openssl.tar.gz /tmp/libcurl.tar.gz
 ENV JULIA_DEPOT_PATH=/opt/julia-depot JULIA_LOAD_PATH=@:@stdlib JULIA_CPU_TARGET=generic JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 WORKDIR /opt/kanz-jl
 COPY kanz-jl/Project.toml kanz-jl/Manifest.toml ./
