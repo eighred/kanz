@@ -34,7 +34,14 @@ var juliaOCIMarkers = map[string][]string{
 	},
 	"kanz-jl/qualification/isolation.jl": {
 		"ccall(:geteuid, Cuint, ()) == 65532", "@test isempty(Sockets.getipaddrs())",
-		"@test_throws SystemError open(path, \"w\")", "Pkg.GitTools.tree_hash(info.source)",
+		"@test_throws SystemError open(path, \"w\")", "Pkg.GitTools.tree_hash(root)",
+		`Base.locate_package(Base.PkgId(Base.UUID(entry["uuid"]), name))`,
+		`source = realpath(source)`,
+		`dirname(dirname(root)) == "/opt/julia-depot/packages"`,
+		`basename(dirname(root)) == name`,
+		`root == "/opt/julia/share/julia/stdlib/v1.13/" * name`,
+		`installed["uuid"] == entry["uuid"]`,
+		`installed["version"] == entry["version"]`,
 		"@test actual == entry[\"git-tree-sha1\"]",
 	},
 	".github/workflows/julia-calibration.yml": {

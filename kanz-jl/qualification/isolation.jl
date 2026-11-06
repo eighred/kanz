@@ -24,15 +24,28 @@ end
 println(stderr, "KANZ_OCI_STAGE=installed-packages")
 manifest = TOML.parsefile("/opt/kanz-jl/Manifest.toml")
 packages = Dict{String,Any}()
-for (_, info) in Pkg.dependencies()
-    entry = only(manifest["deps"][info.name])
-    @test string(info.version) == entry["version"]
+# Pkg.dependencies() constructs EnvCache and writes depot usage locks. Resolve
+# installed code through Julia's loader without making the read-only depot writable.
+for (name, entries) in manifest["deps"]
+    entry = only(entries)
+    source = Base.locate_package(Base.PkgId(Base.UUID(entry["uuid"]), name))
+    @test source !== nothing
+    source = realpath(source)
+    root = realpath(dirname(dirname(source)))
+    @test startswith(source, root * "/src/")
     if haskey(entry, "git-tree-sha1")
-        # Pinned Pkg's Git tree implementation hashes installed files, not just
-        # the expected PackageInfo tree_hash metadata.
-        actual = bytes2hex(Pkg.GitTools.tree_hash(info.source))
+        @test dirname(dirname(root)) == "/opt/julia-depot/packages"
+        @test basename(dirname(root)) == name
+    else
+        @test root == "/opt/julia/share/julia/stdlib/v1.13/" * name
+    end
+    installed = TOML.parsefile(joinpath(root, "Project.toml"))
+    @test installed["uuid"] == entry["uuid"]
+    @test installed["version"] == entry["version"]
+    if haskey(entry, "git-tree-sha1")
+        actual = bytes2hex(Pkg.GitTools.tree_hash(root))
         @test actual == entry["git-tree-sha1"]
-        packages[info.name] = Dict("version"=>string(info.version), "treeSHA1"=>actual)
+        packages[name] = Dict("version"=>installed["version"], "treeSHA1"=>actual)
     end
 end
 @test Set(keys(packages)) == Set(["ProtoBuf", "BufferedStreams", "EnumX"])
