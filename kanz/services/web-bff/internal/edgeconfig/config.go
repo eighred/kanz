@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,41 +51,193 @@ func Build(o Options) ([]byte, error) {
 	for i := range remove {
 		remove[i] = strings.ToLower(remove[i])
 	}
-	headers, err := json.Marshal(remove)
-	if err != nil {
-		return nil, err
-	}
 	adminAddress := "0.0.0.0"
 	if o.AdminLoopback {
 		adminAddress = "127.0.0.1"
 	}
 	// No retry, mirroring, body buffering, host rewrite, or request access log is
 	// configured. Encoded identifiers and long-lived SSE retain their BFF shape.
-	raw := fmt.Sprintf(`{
-  "admin":{"access_log_path":"/dev/null","address":{"socket_address":{"address":"%s","port_value":%d}},"allow_paths":[{"exact":"/ready"},{"exact":"/stats/prometheus"}]},
-  "static_resources":{
-    "listeners":[{"name":"web_edge","address":{"socket_address":{"address":"127.0.0.1","port_value":%d}},"filter_chains":[{"filters":[{"name":"envoy.filters.network.http_connection_manager","typed_config":{
-      "@type":"type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-      "stat_prefix":"web_edge","codec_type":"AUTO","use_remote_address":true,"skip_xff_append":true,"internal_address_config":{"cidr_ranges":[]},
-      "forward_client_cert_details":"SANITIZE","max_request_headers_kb":64,"request_headers_timeout":"10s","stream_idle_timeout":"300s",
-      "normalize_path":false,"merge_slashes":false,"path_with_escaped_slashes_action":"KEEP_UNCHANGED",
-      "common_http_protocol_options":{"headers_with_underscores_action":"REJECT_REQUEST","idle_timeout":"300s"},
-      "upgrade_configs":[{"upgrade_type":"websocket"}],
-      "route_config":{"name":"bff_only","request_headers_to_remove":%s,"virtual_hosts":[{"name":"same_origin","domains":["*"],"routes":[
-        {"match":{"safe_regex":{"google_re2":{},"regex":"^/api/v1/broker/accounts/[^/]+/stream$"},"headers":[{"name":":method","string_match":{"exact":"GET"}}]},"route":{"cluster":"bff","timeout":"0s","idle_timeout":"0s"}},
-        {"match":{"prefix":"/"},"route":{"cluster":"bff","timeout":"0s"}}
-      ]}]},
-      "http_filters":[
-        {"name":"envoy.filters.http.local_ratelimit","typed_config":{"@type":"type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit","stat_prefix":"web_edge_budget","token_bucket":{"max_tokens":%d,"tokens_per_fill":%d,"fill_interval":"1s"},"filter_enabled":{"default_value":{"numerator":100,"denominator":"HUNDRED"}},"filter_enforced":{"default_value":{"numerator":100,"denominator":"HUNDRED"}}}},
-        {"name":"envoy.filters.http.router","typed_config":{"@type":"type.googleapis.com/envoy.extensions.filters.http.router.v3.Router","suppress_envoy_headers":true}}
-      ]
-    }}]}]}],
-    "clusters":[{"name":"bff","type":"STATIC","connect_timeout":"2s","load_assignment":{"cluster_name":"bff","endpoints":[{"lb_endpoints":[{"endpoint":{"address":{"socket_address":{"address":"127.0.0.1","port_value":%d}}}}]}]},"circuit_breakers":{"thresholds":[{"max_connections":256,"max_pending_requests":128,"max_requests":1024,"max_retries":0}]}}]
-  }
-}`, adminAddress, o.AdminPort, o.ListenPort, headers, o.RequestsPerSecond, o.RequestsPerSecond, o.BFFPort)
-	var value any
-	if err := json.Unmarshal([]byte(raw), &value); err != nil {
-		return nil, err
+	// Encode strings as JSON values so a future canonical header name cannot
+	// alter the proxy configuration structure.
+	value := map[string]any{
+		"admin": map[string]any{
+			"access_log_path": "/dev/null",
+			"address": map[string]any{
+				"socket_address": map[string]any{
+					"address":    adminAddress,
+					"port_value": o.AdminPort,
+				},
+			},
+			"allow_paths": []any{
+				map[string]any{
+					"exact": "/ready",
+				},
+				map[string]any{
+					"exact": "/stats/prometheus",
+				},
+			},
+		},
+		"static_resources": map[string]any{
+			"listeners": []any{
+				map[string]any{
+					"name": "web_edge",
+					"address": map[string]any{
+						"socket_address": map[string]any{
+							"address":    "127.0.0.1",
+							"port_value": o.ListenPort,
+						},
+					},
+					"filter_chains": []any{
+						map[string]any{
+							"filters": []any{
+								map[string]any{
+									"name": "envoy.filters.network.http_connection_manager",
+									"typed_config": map[string]any{
+										"@type":              "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+										"stat_prefix":        "web_edge",
+										"codec_type":         "AUTO",
+										"use_remote_address": true,
+										"skip_xff_append":    true,
+										"internal_address_config": map[string]any{
+											"cidr_ranges": []any{},
+										},
+										"forward_client_cert_details":      "SANITIZE",
+										"max_request_headers_kb":           64,
+										"request_headers_timeout":          "10s",
+										"stream_idle_timeout":              "300s",
+										"normalize_path":                   false,
+										"merge_slashes":                    false,
+										"path_with_escaped_slashes_action": "KEEP_UNCHANGED",
+										"common_http_protocol_options": map[string]any{
+											"headers_with_underscores_action": "REJECT_REQUEST",
+											"idle_timeout":                    "300s",
+										},
+										"upgrade_configs": []any{
+											map[string]any{
+												"upgrade_type": "websocket",
+											},
+										},
+										"route_config": map[string]any{
+											"name":                      "bff_only",
+											"request_headers_to_remove": remove,
+											"virtual_hosts": []any{
+												map[string]any{
+													"name": "same_origin",
+													"domains": []any{
+														"*",
+													},
+													"routes": []any{
+														map[string]any{
+															"match": map[string]any{
+																"safe_regex": map[string]any{
+																	"google_re2": map[string]any{},
+																	"regex":      "^/api/v1/broker/accounts/[^/]+/stream$",
+																},
+																"headers": []any{
+																	map[string]any{
+																		"name": ":method",
+																		"string_match": map[string]any{
+																			"exact": "GET",
+																		},
+																	},
+																},
+															},
+															"route": map[string]any{
+																"cluster":      "bff",
+																"timeout":      "0s",
+																"idle_timeout": "0s",
+															},
+														},
+														map[string]any{
+															"match": map[string]any{
+																"prefix": "/",
+															},
+															"route": map[string]any{
+																"cluster": "bff",
+																"timeout": "0s",
+															},
+														},
+													},
+												},
+											},
+										},
+										"http_filters": []any{
+											map[string]any{
+												"name": "envoy.filters.http.local_ratelimit",
+												"typed_config": map[string]any{
+													"@type":       "type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit",
+													"stat_prefix": "web_edge_budget",
+													"token_bucket": map[string]any{
+														"max_tokens":      o.RequestsPerSecond,
+														"tokens_per_fill": o.RequestsPerSecond,
+														"fill_interval":   "1s",
+													},
+													"filter_enabled": map[string]any{
+														"default_value": map[string]any{
+															"numerator":   100,
+															"denominator": "HUNDRED",
+														},
+													},
+													"filter_enforced": map[string]any{
+														"default_value": map[string]any{
+															"numerator":   100,
+															"denominator": "HUNDRED",
+														},
+													},
+												},
+											},
+											map[string]any{
+												"name": "envoy.filters.http.router",
+												"typed_config": map[string]any{
+													"@type":                  "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
+													"suppress_envoy_headers": true,
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"clusters": []any{
+				map[string]any{
+					"name":            "bff",
+					"type":            "STATIC",
+					"connect_timeout": "2s",
+					"load_assignment": map[string]any{
+						"cluster_name": "bff",
+						"endpoints": []any{
+							map[string]any{
+								"lb_endpoints": []any{
+									map[string]any{
+										"endpoint": map[string]any{
+											"address": map[string]any{
+												"socket_address": map[string]any{
+													"address":    "127.0.0.1",
+													"port_value": o.BFFPort,
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					"circuit_breakers": map[string]any{
+						"thresholds": []any{
+							map[string]any{
+								"max_connections":      256,
+								"max_pending_requests": 128,
+								"max_requests":         1024,
+								"max_retries":          0,
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 	return json.MarshalIndent(value, "", "  ")
 }
