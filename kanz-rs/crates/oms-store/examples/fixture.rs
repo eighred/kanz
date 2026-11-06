@@ -238,6 +238,7 @@ async fn run(input: Input) -> Result<Value, ()> {
                 match tokio::time::timeout(Duration::from_millis(input.limit as u64), acquire).await
                 {
                     Err(_) => {
+                        let canceled_at = std::time::Instant::now();
                         // Check while this process is still alive: process exit must
                         // not conceal a leaked blocked session after future drop.
                         let (observer, connection) = config.connect(NoTls).await.map_err(|_| ())?;
@@ -252,7 +253,9 @@ async fn run(input: Input) -> Result<Value, ()> {
                     }.await;
                         drop(observer);
                         observer_driver.abort();
-                        if !absent? {
+                        if !absent?
+                            || (!fallback && canceled_at.elapsed() >= Duration::from_secs(2))
+                        {
                             return Err(());
                         }
                         json!({"status":"canceled"})

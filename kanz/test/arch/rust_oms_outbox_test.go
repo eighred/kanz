@@ -88,7 +88,7 @@ func TestRustOMSOutboxCancellationProof(t *testing.T) {
 			return false
 		}
 		code = rustMigrationCompact(code)
-		for _, marker := range []string{`observed=observe_blocked(&config,&input.schema)=>observed?`, `l.locktype='advisory'ANDNOTl.granted`, `if!absent?`, `iffallback{700}else{100}`} {
+		for _, marker := range []string{`observed=observe_blocked(&config,&input.schema)=>observed?`, `l.locktype='advisory'ANDNOTl.granted`, `if!absent?`, `iffallback{700}else{100}`, `!fallback&&canceled_at.elapsed()>=Duration::from_secs(2)`} {
 			if !strings.Contains(code, marker) {
 				return false
 			}
@@ -99,7 +99,7 @@ func TestRustOMSOutboxCancellationProof(t *testing.T) {
 	if !check(source) {
 		t.Fatal("cancellation proof missing live wait/cleanup gate")
 	}
-	for _, marker := range []string{"observe_blocked(&config, &input.schema)", "AND NOT l.granted", "if !absent?"} {
+	for _, marker := range []string{"observe_blocked(&config, &input.schema)", "AND NOT l.granted", "if !absent?", "canceled_at.elapsed()"} {
 		changed := strings.ReplaceAll(source, marker, "removed")
 		if changed == source || check(changed) {
 			t.Fatalf("mutation not rejected: %s", marker)
