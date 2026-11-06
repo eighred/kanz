@@ -114,7 +114,7 @@ jobs:
           TEST_NATS_URL: nats://127.0.0.1:4222
         run: |
           set -o pipefail
-          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/tools/store-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
+          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/internal/position ./services/oms/tools/store-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_oms_fold_evidence.py
           python3 ../.github/scripts/check_oms_fold_evidence.py "$RUNNER_TEMP/oms-fold.jsonl"

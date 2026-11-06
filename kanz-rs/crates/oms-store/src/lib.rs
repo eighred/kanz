@@ -8,6 +8,8 @@ pub mod fee_wire;
 mod go_unicode;
 pub mod identity;
 pub mod outbox;
+pub mod position;
+mod position_math;
 pub mod proposals;
 pub mod queries;
 pub mod recovery;
@@ -32,6 +34,7 @@ pub enum Error {
     FillApplied,
     IdentityConflict,
     FeeRevision,
+    PositionHistoryUnknown,
     UnownedOutbox,
     RecordNotOwned,
     Database,
