@@ -175,6 +175,20 @@ def checked_backup(encoded):
     return base64.b64encode(raw).decode('ascii')
 
 
+def fixture_record(output):
+    # CLI v0.4.0 stream get --json emits jsm api.StoredMsg; --raw is not supported.
+    if not isinstance(output, str) or len(output) > 4096:
+        raise ValueError('invalid synthetic record size')
+    record = json.loads(output)
+    if (not isinstance(record, dict) or set(record) - {'subject', 'seq', 'data', 'time', 'hdrs'} or
+            record.get('subject') != 'audit.authority.decision' or type(record.get('seq')) is not int or
+            record['seq'] != 1 or not isinstance(record.get('time'), str) or not record['time'] or
+            not isinstance(record.get('data'), str) or
+            base64.b64decode(record['data'], validate=True) != b'{"fixture":true}'):
+        raise ValueError('invalid synthetic record')
+    return record
+
+
 def nats_failure(stdout, stderr):
     # Closed categories only: never return raw diagnostics, upload subjects,
     # certificate paths or payloads. Unrecognized failures stay failures.
@@ -381,6 +395,7 @@ def main():
             before = stream_inventory()
             if before['AUTHORITY_AUDIT']['state']['messages'] != 1:
                 raise ValueError('missing acknowledged synthetic record')
+            original_record = fixture_record(nats('stream', 'get', 'AUTHORITY_AUDIT', '1', '--json'))
             nats('account', 'backup', '--check', '--critical-warnings', '--force', '/tmp/fixture-backup')
             encoded = k('-n', 'kanz-messaging', 'exec', 'nats-backup-runner', '-c', 'bootstrap', '--',
                         'sh', '-ceu', 'set -o pipefail; tar -C /tmp -czf - fixture-backup | base64')
@@ -402,7 +417,7 @@ def main():
             restored('account', 'restore', '/restore/fixture-backup')
             if stream_inventory(restored) != before or stream_inventory() != before:
                 raise ValueError('restored account differs')
-            if restored('stream', 'get', 'AUTHORITY_AUDIT', '1', '--raw') != '{"fixture":true}':
+            if fixture_record(restored('stream', 'get', 'AUTHORITY_AUDIT', '1', '--json')) != original_record:
                 raise ValueError('restored synthetic record differs')
             report['restoreMode'] = 'canonical-isolated-loopback'
             report['cases'].append('backup-restore')

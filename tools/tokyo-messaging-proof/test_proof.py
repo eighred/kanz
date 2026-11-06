@@ -2,6 +2,7 @@ import copy
 import base64
 import hashlib
 import io
+import json
 import tarfile
 import unittest
 import proof
@@ -19,6 +20,21 @@ def workflow_boundary(workflow):
 
 
 class MessagingTests(unittest.TestCase):
+    def test_cli_stored_message_requires_exact_payload_and_identity(self):
+        record = {'subject': 'audit.authority.decision', 'seq': 1, 'time': '2026-11-06T00:00:00Z',
+                  'data': base64.b64encode(b'{"fixture":true}').decode()}
+        self.assertEqual(proof.fixture_record(json.dumps(record)), record)
+        for key, value in [('subject', 'other'), ('seq', True), ('seq', 2), ('time', ''),
+                           ('data', 'invalid!'), ('data', base64.b64encode(b'{fixture:true}').decode()),
+                           ('unexpected', 'value')]:
+            changed = dict(record)
+            changed[key] = value
+            with self.assertRaises(ValueError):
+                proof.fixture_record(json.dumps(changed))
+        for output in ('[]', 'null', 'x' * 4097):
+            with self.assertRaises(ValueError):
+                proof.fixture_record(output)
+
     def test_restore_reuses_canonical_isolated_recipe(self):
         pod = proof.restore_pod()
         self.assertEqual(pod['metadata'], {'name': 'nats-restore', 'namespace': 'kanz-recovery-drill', 'labels': {'app': 'nats-restore'}})
