@@ -132,10 +132,15 @@ def fixture():
                         body = response.read(2 * 1024 * 1024 + 1)
                         p.require(len(body) <= 2 * 1024 * 1024, "fixture response bound")
                         changed = False
-                        # Reproduce an older source registry's incomplete discovery
-                        # index without hiding the content-addressed manifest bytes.
-                        hidden_path = "/v2/eighred/fixture-source/referrers/" + (hidden_subject or "")
-                        if self.command == "GET" and response.status == 200 and hidden_referrer and self.path.split("?", 1)[0] == hidden_path:
+                        # ORAS 1.3 / oras-go 2.6 reads discovery through either
+                        # the native API or FetchReference on the mutable fallback
+                        # tag. Distribution 3.0 uses the latter. Never intercept
+                        # /manifests/<digest>: those content-addressed bytes remain
+                        # intact, including the fallback index fetched by digest.
+                        native_path = "/v2/eighred/fixture-source/referrers/" + (hidden_subject or "")
+                        fallback_path = "/v2/eighred/fixture-source/manifests/" + (hidden_subject or "").replace(":", "-", 1)
+                        discovery_path = self.path.split("?", 1)[0]
+                        if self.command == "GET" and response.status == 200 and hidden_referrer and discovery_path in (native_path, fallback_path):
                             index = json.loads(body)
                             entries = index.get("manifests")
                             p.require(isinstance(entries, list), "fixture referrers response shape")
