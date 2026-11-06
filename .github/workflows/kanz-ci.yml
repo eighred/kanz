@@ -317,6 +317,25 @@ jobs:
           done
           echo "the OMS never subscribed:"; cat /tmp/oms.log; exit 1
 
+      # Each disposable runner must establish its own simulated trading posture.
+      # The old single-runner suite accidentally inherited the halt CLI test's
+      # RESUME. Never change the production UNKNOWN/closed startup default.
+      - name: Resume only the disposable simulated OMS fixture
+        working-directory: kanz
+        run: |
+          armed=false
+          for i in $(seq 1 30); do
+            if grep -Fq '"msg":"halt gate armed — this process now hears the platform brake"' /tmp/oms.log; then
+              armed=true
+              break
+            fi
+            sleep 1
+          done
+          test "$armed" = true
+          go run ./cmd/kanz-halt --nats nats://localhost:4222 \
+            --resume --by operator:ci-fixture \
+            --reason 'disposable CI simulated OMS fixture' --tenant __system__
+
       # TEST_KAFKA_BROKERS points at the KRaft broker started above. Until now this
       # was unset, so every Kafka-gated integration test silently skipped:
       # pkg/bus/kafka_integration_test.go (the bus's own real-broker guard),
