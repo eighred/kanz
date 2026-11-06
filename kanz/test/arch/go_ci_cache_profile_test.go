@@ -19,7 +19,7 @@ func checkGoCacheProfile(profile string, others []string) error {
 		sort.Strings(lines)
 		return lines
 	}
-	want := normalize("kanz/.gotmp/go-ci-cache-profile kanz/go.mod kanz/go.sum .github/workflows/kanz-ci.yml kanz-schemas/buf.gen.yaml kanz-schemas/proto/**/*.proto")
+	want := normalize("kanz/.gotmp/go-ci-cache-profile kanz/go.mod kanz/go.sum .github/go-ci-cache-profile kanz-schemas/buf.gen.yaml kanz-schemas/proto/**/*.proto")
 	if !reflect.DeepEqual(normalize(profile), want) {
 		return fmt.Errorf("complete Go job lost its reviewed compiler cache profile")
 	}
@@ -33,6 +33,9 @@ func checkGoCacheProfile(profile string, others []string) error {
 
 func TestGoCICompilerCacheProfileIsExclusive(t *testing.T) {
 	root := filepath.Dir(moduleRoot(t))
+	if strings.TrimSpace(string(mustReadArchFile(t, filepath.Join(root, ".github/go-ci-cache-profile")))) != "kanz-go-race-v1" {
+		t.Fatal("reviewed compiler profile version changed")
+	}
 	var profile string
 	var others []string
 	for _, path := range workflowFiles(t, root) {
