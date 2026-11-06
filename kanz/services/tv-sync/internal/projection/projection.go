@@ -42,13 +42,18 @@ type MarkSource interface {
 // Projection is the zero-truth, multi-tenant read model. Safe for concurrent
 // folds and reads.
 type Projection struct {
-	mu       sync.RWMutex
-	accounts map[string]map[string]*account // tenant -> accountID -> account
-	now      func() time.Time
-	marks    MarkSource
-	subs     *subscribers
-	log      Log    // durable record of the FACTs folded (EXEC-M21); nil ⇒ memory only
-	tenant   string // the tenant this pod is scoped to, when a log is bound
+	// appendFold serializes the durable log order with the fold order across
+	// subject consumers. Keep database waits outside mu so readers/checkpoints
+	// can still observe the last complete prefix while an append is pending.
+	// This is per-process ordering, not a multi-writer lease.
+	appendFold sync.Mutex
+	mu         sync.RWMutex
+	accounts   map[string]map[string]*account // tenant -> accountID -> account
+	now        func() time.Time
+	marks      MarkSource
+	subs       *subscribers
+	log        Log    // durable record of the FACTs folded (EXEC-M21); nil ⇒ memory only
+	tenant     string // the tenant this pod is scoped to, when a log is bound
 	// bootedFromCheckpoint records whether Rehydrate restored one, so the
 	// composition root can report the posture rather than infer it from a timing.
 	bootedFromCheckpoint bool
@@ -184,6 +189,8 @@ func (p *Projection) Handle(ctx context.Context, env *envelopepb.Envelope, paylo
 	if tenant == "" {
 		return nil // untenanted event — cannot scope; skip (monitor only)
 	}
+	p.appendFold.Lock()
+	defer p.appendFold.Unlock()
 	know := p.now().UTC()
 
 	var appended int64

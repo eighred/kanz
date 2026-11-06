@@ -105,7 +105,7 @@ database as evidence that an account never traded. This remains tracked under
 [#1410](https://github.com/eighred/kanz/issues/1410) and
 [#1413](https://github.com/eighred/kanz/issues/1413).
 
-CI requires seven real-PostgreSQL checkpoint/verifier cases, including an exact
+CI requires eight real-PostgreSQL checkpoint/verifier cases, including an exact
 checkpoint restart with subsequent fills/cancellation and P&L, restored bytes,
 tenant isolation, read-only enforcement and a concurrent append outside the
 captured snapshot and refusal of foreign rows under a permissive RLS policy.
@@ -161,3 +161,16 @@ and an empty local fact log plus an empty stream is not a qualified empty fund.
 Fresh-genesis/history provenance and the serving tenant mapping remain separate
 activation prerequisites under #1410/#1413; this change grants no empty-book
 permission and does not replace the isolated restored-state verifier.
+
+### Append and checkpoint ordering
+
+Concurrent subject handlers serialize durable append, in-memory fold and delta
+publication in one process. The database wait uses a separate mutex so readers
+and checkpoints can continue to observe the last fully folded prefix. A later
+append cannot overtake an earlier committed insert whose response is delayed;
+otherwise a checkpoint could skip that earlier fact on restart. Mandatory local
+and real-PostgreSQL tests hold that response while taking a checkpoint, then
+verify the recovered position and final watermark. This is not a distributed
+writer lease, complete-history proof or permission to run multiple writers for
+the same tenant. Existing append-error/redelivery behavior is not expanded by
+this ordering change.

@@ -12,6 +12,8 @@ REQUIRED = {"services/tv-sync/internal/projection": {
     "TestReplayVerifierPostgresRefusesPermissiveRLS",
     "TestReplayVerifierPostgresRefusesRoundedCheckpoint",
     "TestCheckpointExactPostgresRestartAndSubsequentFacts",
+    "TestConcurrentAppendCannotSkipCheckpointPrefix",
+    "TestPostgresConcurrentAppendCannotSkipCheckpointPrefix",
 }, "pkg/secret": {
     "TestReadBounded",
     "TestReadBoundedRejectsFIFOAndPreservesCSISymlinks",
@@ -23,4 +25,4 @@ if __name__ == "__main__":
     else:
         with open(sys.argv[1], encoding="utf-8") as source:
             verify((json.loads(line) for line in source), required=REQUIRED)
-        print("All 7 PostgreSQL checkpoint/verifier and 2 bounded-secret cases passed in 2 complete packages")
+        print("All 8 PostgreSQL, 1 append-order and 2 bounded-secret cases passed in 2 complete packages")

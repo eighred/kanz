@@ -11,7 +11,7 @@ class ReplayEvidenceTests(unittest.TestCase):
             {"Action": "pass", "Package": PREFIX + package}]]
 
     def test_complete(self):
-        self.assertEqual(sum(map(len, REQUIRED.values())), 9)
+        self.assertEqual(sum(map(len, REQUIRED.values())), 11)
         self.assertEqual(len(REQUIRED), 2)
         verify(self.events(), required=REQUIRED)
 
