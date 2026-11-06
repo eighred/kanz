@@ -66,7 +66,11 @@ jobs:
         shell: pwsh
         run: ./tools/Test-EcrReleaseDigest.ps1
 
-  go:
+  go-race:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     needs: scope
     if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
@@ -127,6 +131,13 @@ jobs:
           psql -h localhost -U kanz -d kanz_oms_ci -v ON_ERROR_STOP=1 \
             -c "GRANT ALL ON SCHEMA public TO kanzapp;"
 
+      - name: Select isolated compiler cache profile
+        env:
+          GO_SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p kanz/.gotmp
+          printf '%s\n' "$GO_SHARD" > kanz/.gotmp/go-ci-cache-profile
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # Track the toolchain pinned in go.mod so CI never drifts from local.
@@ -136,6 +147,7 @@ jobs:
           # its cache without the race and provider/redis compiler objects.
           # This is compilation reuse only: every test still uses -count=1.
           cache-dependency-path: |
+            kanz/.gotmp/go-ci-cache-profile
             kanz/go.mod
             kanz/go.sum
             .github/workflows/kanz-ci.yml
@@ -405,6 +417,7 @@ jobs:
           exit 1
 
       - name: Verify Go to Python inference before the full race suite
+        if: matrix.shard == 0
         working-directory: kanz
         env:
           TEST_NATS_URL: nats://localhost:4222
@@ -412,6 +425,7 @@ jobs:
         run: go test -race -p 1 ./services/risk-engine/internal/app -run '^TestIntegration_TheModelScoresTheEnginesFeatures$' -count=1 -v
 
       - name: Verify durable Kafka fixtures across repeated tenant rebuilds
+        if: matrix.shard == 0
         working-directory: kanz
         env:
           TEST_KAFKA_BROKERS: localhost:9092
@@ -432,6 +446,7 @@ jobs:
           go build -o "$RUNNER_TEMP/mfa-web-bff" ./services/web-bff/cmd/web-bff
 
       - name: Prove tv-sync separate roles and checkpoint recovery
+        if: matrix.shard == 0
         working-directory: kanz
         env:
           TV_SYNC_TEST_ADMIN_URL: postgres://kanz:kanz@localhost:5432/kanz?sslmode=disable
@@ -442,6 +457,7 @@ jobs:
           python3 ../.github/scripts/check_tv_sync_evidence.py "$RUNNER_TEMP/tv-sync-role-proof.jsonl"
 
       - name: Prove durable catch-up before tv-sync Broker readiness
+        if: matrix.shard == 0
         working-directory: kanz
         env:
           TEST_NATS_URL: nats://localhost:4222
@@ -454,6 +470,7 @@ jobs:
           python3 ../.github/scripts/check_tv_readiness_evidence.py "$RUNNER_TEMP/tv-readiness-proof.jsonl"
 
       - name: Qualify restored tv-sync snapshot without writes
+        if: matrix.shard == 0
         working-directory: kanz
         env:
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
@@ -525,8 +542,10 @@ jobs:
         # next gate checks the original events, not neighboring text (#1352).
         run: |
           set -euo pipefail
-          go list -race ./... > "$RUNNER_TEMP/gotest-packages.txt"
-          go test -race -p 1 -count=1 -json ./... | tee "$RUNNER_TEMP/gotest.jsonl" \
+          go list -race ./... > "$RUNNER_TEMP/gotest-all-packages.txt"
+          python3 ../.github/scripts/go_shard_evidence.py select --packages "$RUNNER_TEMP/gotest-all-packages.txt" --directory "$RUNNER_TEMP/go-race-proof" --shard "${{ matrix.shard }}"
+          mapfile -t packages < "$RUNNER_TEMP/go-race-proof/packages.txt"
+          go test -race -p 1 -count=1 -json "${packages[@]}" | tee "$RUNNER_TEMP/go-race-proof/events.jsonl" \
             | python3 ../.github/scripts/go_test_evidence.py --render
 
       # A SKIP CITING A BACKING SERVICE THIS JOB PROVIDES IS A FAILURE.
@@ -539,13 +558,14 @@ jobs:
       #
       # if: always() so it still reports when the suite failed for another
       # reason — a skipped gate is worth knowing about on a red run too.
-      - name: Refuse a silently skipped backing-service test
+      - name: Seal shard results for the combined backing-service gate
         if: always()
         working-directory: kanz
         run: |
           set -euo pipefail
           python3 -m unittest discover -s ../.github/scripts -p test_go_test_evidence.py
-          python3 ../.github/scripts/go_test_evidence.py --packages "$RUNNER_TEMP/gotest-packages.txt" "$RUNNER_TEMP/gotest.jsonl"
+          python3 -B -m unittest discover -s ../.github/scripts -p test_go_shard_evidence.py
+          python3 ../.github/scripts/go_shard_evidence.py seal --directory "$RUNNER_TEMP/go-race-proof" --shard "${{ matrix.shard }}"
 
       # THE `redis` BUILD (EXEC-M22). This tag is what webhook-ingest's production image is
       # built with, and it is the ONLY thing that makes `replicas: 2` on the platform's
@@ -578,6 +598,7 @@ jobs:
       #   there is no reason not to run them. The anthropic tag has no tests of its own;
       #   including it here costs nothing and means adding one later is enough.
       - name: Build + vet + test the `anthropic,openrouter` tags
+        if: matrix.shard == 0
         working-directory: kanz
         run: |
           go build -tags anthropic,openrouter ./...
@@ -591,6 +612,7 @@ jobs:
       # compile that file and never run it — the precise "dead code that deploys" shape
       # test/arch/build_tag_coverage_test.go exists to prevent.
       - name: Build + vet + test the `redis` tag (real Valkey)
+        if: matrix.shard == 0
         working-directory: kanz
         env:
           TEST_REDIS_URL: redis://localhost:6379/0
@@ -616,6 +638,15 @@ jobs:
           go test -tags redis -p 1 -race -json -count=1 -run "$(python ../.github/scripts/check_valkey_evidence.py --pattern)" ./pkg/redisadapter ./services/webhook-ingest/internal/ingest ./services/api-gateway/internal/middleware | tee "$RUNNER_TEMP/valkey-proof.jsonl"
           python ../.github/scripts/check_valkey_evidence.py "$RUNNER_TEMP/valkey-proof.jsonl"
 
+      - name: Preserve source-bound race evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-race-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/go-race-proof
+          if-no-files-found: error
+          retention-days: 7
+
       - name: OMS log (on failure)
         if: failure()
         run: cat /tmp/oms.log || true
@@ -627,6 +658,7 @@ jobs:
           if [ -f "$RUNNER_TEMP/inference-ci.pid" ]; then kill "$(cat "$RUNNER_TEMP/inference-ci.pid")" 2>/dev/null || true; fi
 
       - name: golangci-lint
+        if: matrix.shard == 0
         # v7 is REQUIRED for golangci-lint v2: v6 only knows the v1 module path
         # (.../cmd/golangci-lint), and v2 lives behind .../v2/cmd/golangci-lint. That
         # mismatch is exactly why `version: latest` on v6 silently pinned us to v1.
@@ -674,6 +706,42 @@ jobs:
           fi
           remaining=$(timeout 30s docker ps -a --filter 'name=^/kanz-ci-tv-nats$' --format '{{.ID}}')
           test -z "$remaining"
+
+  go:
+    needs: [scope, go-race]
+    if: ${{ always() && needs.scope.outputs.application == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require both isolated race runners
+        env:
+          SHARD_RESULT: ${{ needs.go-race.result }}
+        run: test "$SHARD_RESULT" = success
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Generate canonical SDK for independent package inventory
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: go-race-${{ github.run_id }}-${{ github.run_attempt }}-*
+          path: ${{ runner.temp }}/go-race-artifacts
+      - name: Require complete fresh Go union and backing-service proofs
+        working-directory: kanz
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s ../.github/scripts -p test_go_test_evidence.py
+          python3 -B -m unittest discover -s ../.github/scripts -p test_go_shard_evidence.py
+          go list -race ./... > "$RUNNER_TEMP/gotest-all-packages.txt"
+          python3 ../.github/scripts/go_shard_evidence.py aggregate --packages "$RUNNER_TEMP/gotest-all-packages.txt" --directory "$RUNNER_TEMP/go-race-artifacts"
 
   python:
     needs: scope
@@ -1239,7 +1307,7 @@ jobs:
   # cancellation, and accidental skips must never masquerade as successful CI.
   kanz-ci-required:
     if: ${{ always() }}
-    needs: [scope, release-custody, go, python, ts, web, sdk-guard, module-graph, observability, buf-breaking]
+    needs: [scope, release-custody, go, go-race, python, ts, web, sdk-guard, module-graph, observability, buf-breaking]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

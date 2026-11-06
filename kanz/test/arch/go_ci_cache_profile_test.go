@@ -19,7 +19,7 @@ func checkGoCacheProfile(profile string, others []string) error {
 		sort.Strings(lines)
 		return lines
 	}
-	want := normalize("kanz/go.mod kanz/go.sum .github/workflows/kanz-ci.yml kanz-schemas/buf.gen.yaml kanz-schemas/proto/**/*.proto")
+	want := normalize("kanz/.gotmp/go-ci-cache-profile kanz/go.mod kanz/go.sum .github/workflows/kanz-ci.yml kanz-schemas/buf.gen.yaml kanz-schemas/proto/**/*.proto")
 	if !reflect.DeepEqual(normalize(profile), want) {
 		return fmt.Errorf("complete Go job lost its reviewed compiler cache profile")
 	}
@@ -53,7 +53,7 @@ func TestGoCICompilerCacheProfileIsExclusive(t *testing.T) {
 					continue
 				}
 				value := step.With["cache-dependency-path"]
-				if filepath.Base(path) == "kanz-ci.yml" && job == "go" {
+				if filepath.Base(path) == "kanz-ci.yml" && job == "go-race" {
 					if profile != "" || step.With["cache"] == "false" {
 						t.Fatal("duplicate or disabled complete Go cache")
 					}

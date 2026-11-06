@@ -45,7 +45,7 @@ func TestCILiveOMSDatabaseIsSeparateFromFixtures(t *testing.T) {
 	var live string
 	var fixtures []string
 	var liveReaders []string
-	for _, step := range workflow.Jobs["go"].Steps {
+	for _, step := range workflow.Jobs["go-race"].Steps {
 		if value := step.Env["TEST_POSTGRES_URL"]; value != "" {
 			fixtures = append(fixtures, database("TEST_POSTGRES_URL", value))
 		}
