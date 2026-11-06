@@ -870,12 +870,19 @@ jobs:
         working-directory: kanz-web
         run: npm test
 
-      # Build LAST and separately, so a failure here is distinguishable from a
+      # Build separately before browser qualification, so a failure here is distinguishable from a
       # type error above — the BFF serves this output, and a bundle that does
       # not build is a blank operator surface.
       - name: Build
         working-directory: kanz-web
         run: npm run build
+
+      - name: Qualify broker history rendering in Chromium
+        working-directory: kanz-web
+        run: |
+          set -euo pipefail
+          npx --no-install playwright install --with-deps chromium
+          node e2e/broker-history.cjs
 
   # DEBT-01d SDK-hygiene guard (PARITY-07a). First check is always-on: the SDKs
   # are generated and published, never committed (EVT-15a), so any tracked

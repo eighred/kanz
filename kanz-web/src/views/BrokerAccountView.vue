@@ -1,19 +1,42 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { broker, describeBroker, type BrokerAccountDetail } from '../api/broker'
 
+import { useSession } from '../stores/session'
+import WindowedTable from '../components/WindowedTable.vue'
+
+const session = useSession()
 const route = useRoute()
 const id = computed(() => String(route.params.id ?? ''))
 const data = ref<BrokerAccountDetail | null>(null)
 const loading = ref(true)
 const error = ref('')
 
-onMounted(async () => {
-  try { data.value = await broker.account(id.value) }
-  catch (e) { error.value = describeBroker(e) }
-  finally { loading.value = false }
-})
+// A route/session transition invalidates the whole four-read snapshot. Abort is
+// best effort; generation checks also reject adapters completing after abort.
+let generation = 0
+watch(() => [id.value, session.identity, session.identity?.tenant, session.identity?.subject] as const, async ([account, identity], _, onCleanup) => {
+  const current = ++generation
+  const controller = new AbortController()
+  let active = true
+  onCleanup(() => { active = false; controller.abort() })
+  data.value = null
+  error.value = ''
+  loading.value = true
+  if (!identity) { loading.value = false; error.value = 'Sign in to read broker account data.'; return }
+  try {
+    const result = await broker.account(account, controller.signal)
+    if (!active || current !== generation) return
+    if (result.state.id !== account) throw new Error('Broker account identity differs.')
+    data.value = result
+  } catch (e) {
+    if (active && current === generation) error.value = describeBroker(e)
+  } finally {
+    if (active && current === generation) loading.value = false
+  }
+}, { immediate: true, flush: 'sync' })
+
 </script>
 
 <template>
@@ -39,14 +62,16 @@ onMounted(async () => {
 
     <h2>Orders</h2>
     <p v-if="data.ordersRetainedFrom" class="state-warn">This is a retained window beginning {{ data.ordersRetainedFrom }}. Earlier orders are not shown.</p>
-    <div class="table-scroll"><table><thead><tr><th>Updated</th><th>Order</th><th>Instrument</th><th>Side</th><th>Status</th><th>Quantity</th><th>Filled</th><th>Leaves</th></tr></thead>
-      <tbody><tr v-for="order in data.orders" :key="order.id"><td>{{ order.updatedAt }}</td><td><code>{{ order.id }}</code><span v-if="order.parentOrderId" class="muted"><br />Parent {{ order.parentOrderId }}</span></td><td>{{ order.instrument }}<span v-if="order.venue" class="muted"><br />{{ order.venue }}</span></td><td>{{ order.side }}</td><td>{{ order.status }}</td><td>{{ order.qty }}</td><td>{{ order.filledQty }}</td><td>{{ order.leavesQty }}</td></tr>
-      <tr v-if="data.orders.length === 0"><td colspan="8">No orders are present in the served window.</td></tr></tbody></table></div>
+    <WindowedTable :items="data.orders" :row-key="order => order.id" label="Orders in served window" :columns="8" empty="No orders are present in the served window.">
+      <template #head><tr><th>Updated</th><th>Order</th><th>Instrument</th><th>Side</th><th>Status</th><th>Quantity</th><th>Filled</th><th>Leaves</th></tr></template>
+      <template #row="{ item: order }"><td>{{ order.updatedAt }}</td><td><code>{{ order.id }}</code><span v-if="order.parentOrderId" class="muted"><br />Parent {{ order.parentOrderId }}</span></td><td>{{ order.instrument }}<span v-if="order.venue" class="muted"><br />{{ order.venue }}</span></td><td>{{ order.side }}</td><td>{{ order.status }}</td><td>{{ order.qty }}</td><td>{{ order.filledQty }}</td><td>{{ order.leavesQty }}</td></template>
+    </WindowedTable>
 
     <h2>Executions</h2>
     <p v-if="data.executionsRetainedFrom" class="state-warn">This is a retained window beginning {{ data.executionsRetainedFrom }}. Earlier executions are not shown.</p>
-    <div class="table-scroll"><table><thead><tr><th>Executed</th><th>Fill</th><th>Order</th><th>Instrument</th><th>Venue</th><th>Side</th><th>Quantity</th><th>Price</th><th>Fee</th></tr></thead>
-      <tbody><tr v-for="execution in data.executions" :key="execution.id"><td>{{ execution.time }}</td><td><code>{{ execution.id }}</code></td><td><code>{{ execution.orderId }}</code></td><td>{{ execution.instrument }}</td><td>{{ execution.venue }}</td><td>{{ execution.side }}</td><td>{{ execution.qty }}</td><td>{{ execution.price }}</td><td>{{ execution.fee ?? '—' }}</td></tr>
-      <tr v-if="data.executions.length === 0"><td colspan="9">No executions are present in the served window.</td></tr></tbody></table></div>
+    <WindowedTable :items="data.executions" :row-key="execution => execution.id" label="Executions in served window" :columns="9" empty="No executions are present in the served window.">
+      <template #head><tr><th>Executed</th><th>Fill</th><th>Order</th><th>Instrument</th><th>Venue</th><th>Side</th><th>Quantity</th><th>Price</th><th>Fee</th></tr></template>
+      <template #row="{ item: execution }"><td>{{ execution.time }}</td><td><code>{{ execution.id }}</code></td><td><code>{{ execution.orderId }}</code></td><td>{{ execution.instrument }}</td><td>{{ execution.venue }}</td><td>{{ execution.side }}</td><td>{{ execution.qty }}</td><td>{{ execution.price }}</td><td>{{ execution.fee ?? '—' }}</td></template>
+    </WindowedTable>
   </template>
 </template>
