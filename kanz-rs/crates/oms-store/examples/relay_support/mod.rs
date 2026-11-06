@@ -5,7 +5,10 @@ use kanz_oms_store::{
     Error,
 };
 use serde_json::{json, Value};
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 use tokio_postgres::{Config, NoTls};
 
 struct Connector {
@@ -49,6 +52,7 @@ struct Broker {
     mode: String,
     hold: Duration,
     first: bool,
+    first_ack: Arc<tokio::sync::Notify>,
 }
 impl Publisher for Broker {
     fn publish<'a>(&'a mut self, frame: &'a Frame) -> Task<'a, Result<(), PublishFailure>> {
@@ -68,6 +72,9 @@ impl Publisher for Broker {
                 .map_err(|_| PublishFailure::Broker)?
                 .await
                 .map_err(|_| PublishFailure::Broker)?;
+            if first {
+                self.first_ack.notify_one();
+            }
             if first && self.mode == "block-first" {
                 tokio::time::sleep(self.hold).await;
             }
@@ -97,12 +104,14 @@ pub async fn run(
     let application = format!("oms-relay-{}", uuid::Uuid::now_v7());
     config.application_name(&application);
     config.connect_timeout(Duration::from_secs(5));
+    let first_ack = Arc::new(tokio::sync::Notify::new());
     let mut relay = Relay::new(
         Broker {
             js: async_nats::jetstream::new(nc.clone()),
             mode: input.other.clone(),
             hold: Duration::from_millis(input.relay_hold_ms),
             first: true,
+            first_ack: first_ack.clone(),
         },
         Connector {
             config,
@@ -134,8 +143,16 @@ pub async fn run(
             let stop = relay.stop_handle();
             let wait = Duration::from_millis(input.relay_stop_after_ms);
             let stopper = tokio::spawn(async move {
-                tokio::time::sleep(wait).await;
-                stop.store(true, Ordering::Release)
+                // Start the stop delay only after an actual broker ACK. A cold
+                // database connection must not turn this into a pre-start stop.
+                let entered = tokio::time::timeout(Duration::from_secs(5), first_ack.notified())
+                    .await
+                    .is_ok();
+                if entered {
+                    tokio::time::sleep(wait).await;
+                }
+                stop.store(true, Ordering::Release);
+                entered
             });
             let mut sent = 0;
             let mut error = None;
@@ -148,7 +165,9 @@ pub async fn run(
                     }
                 })
                 .await;
-            stopper.await.map_err(|_| ())?;
+            if !stopper.await.map_err(|_| ())? {
+                return Err(());
+            }
             json!({"status":"drained","sent":sent,"stalled":"Stopped","error":error.unwrap_or_default()})
         }
         _ => return Err(()),
