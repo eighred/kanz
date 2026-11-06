@@ -470,6 +470,16 @@ jobs:
           python3 -m unittest discover -s ../.github/scripts -p test_go_test_evidence.py
           python3 ../.github/scripts/go_test_evidence.py --packages "$RUNNER_TEMP/gotest-packages.txt" "$RUNNER_TEMP/gotest.jsonl"
 
+      - name: Qualify restored tv-sync snapshot without writes
+        working-directory: kanz
+        env:
+          TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s ../.github/scripts -p test_check_tv_replay_evidence.py
+          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)" ./services/tv-sync/internal/projection ./pkg/secret | tee "$RUNNER_TEMP/tv-replay-proof.jsonl"
+          python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"
+
       # THE `redis` BUILD (EXEC-M22). This tag is what webhook-ingest's production image is
       # built with, and it is the ONLY thing that makes `replicas: 2` on the platform's
       # entrance safe rather than a double-trade machine. It was never compiled here, so a
