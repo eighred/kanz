@@ -294,6 +294,9 @@ func TestEnvoyEdgeActualBFF(t *testing.T) {
 		if request(t, p.base, "POST", "/api/v1/proof", "{}", true, map[string]string{"Origin": "https://untrusted.invalid", "Sec-Fetch-Site": "cross-site"}).StatusCode != http.StatusForbidden {
 			t.Fatal("cross-origin unsafe method was admitted")
 		}
+		if request(t, p.base, "POST", "/api/v1/proof", "{}", true, map[string]string{"Origin": p.base}).StatusCode != http.StatusForbidden {
+			t.Fatal("HTTP origin bypassed the HTTPS cookie origin policy")
+		}
 	})
 	t.Run("encoded_identifiers", func(t *testing.T) {
 		for _, value := range []string{"BTC/USD", "X?as_of=other", "X#fragment", "X%2FY"} {
@@ -318,7 +321,7 @@ func TestEnvoyEdgeActualBFF(t *testing.T) {
 	})
 	t.Run("request_body", func(t *testing.T) {
 		body := `{"synthetic":"exact + %2F bytes"}`
-		if request(t, p.base, "POST", "/api/v1/proof", body, true, map[string]string{"Origin": p.base}).StatusCode != http.StatusNoContent {
+		if request(t, p.base, "POST", "/api/v1/proof", body, true, map[string]string{"Origin": strings.Replace(p.base, "http://", "https://", 1)}).StatusCode != http.StatusNoContent {
 			t.Fatal("same-origin body was refused")
 		}
 		x := readObserved(t)
@@ -328,7 +331,7 @@ func TestEnvoyEdgeActualBFF(t *testing.T) {
 	})
 	t.Run("cookies", func(t *testing.T) {
 		resp := request(t, p.base, "POST", "/auth/login", `{"subject":"user:edge-proof","credential":"synthetic"}`, false,
-			map[string]string{"Origin": p.base, "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.7"})
+			map[string]string{"Origin": strings.Replace(p.base, "http://", "https://", 1), "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.7"})
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if err != nil || resp.StatusCode != http.StatusOK || bytes.Contains(body, []byte(heldToken)) || observedIP.Load() != "198.51.100.7" {
 			t.Fatal("login/token isolation or original client attribution changed")
@@ -346,7 +349,7 @@ func TestEnvoyEdgeActualBFF(t *testing.T) {
 		}
 	})
 	t.Run("no_retry", func(t *testing.T) {
-		if request(t, p.base, "POST", "/api/v1/retry-proof", "{}", true, map[string]string{"Origin": p.base, "X-Envoy-Retry-On": "5xx", "X-Envoy-Max-Retries": "5"}).StatusCode != http.StatusServiceUnavailable {
+		if request(t, p.base, "POST", "/api/v1/retry-proof", "{}", true, map[string]string{"Origin": strings.Replace(p.base, "http://", "https://", 1), "X-Envoy-Retry-On": "5xx", "X-Envoy-Max-Retries": "5"}).StatusCode != http.StatusServiceUnavailable {
 			t.Fatal("upstream failure status changed")
 		}
 		if !readObserved(t).clean || retryCalls.Load() != 1 {
