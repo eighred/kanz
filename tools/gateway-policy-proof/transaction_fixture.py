@@ -21,6 +21,26 @@ CASES = ["response_loss_" + str(at) for at in range(1, 9)] + [
     "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"]
 
 
+def runtime_failure_category(message):
+    """Classify bounded runtime text without retaining paths or raw diagnostics."""
+    if not isinstance(message, str) or len(message) > 4096:
+        return "unknown"
+    text = message.lower()
+    for category, markers in (
+        ("disk_exhausted", ("no space left on device", "disk quota exceeded")),
+        ("missing_executable", ("executable file not found", "exec format error")),
+        ("missing_image_content", ("content digest", "failed to get reader", "failed to extract layer")),
+        ("mount_setup", ("failed to mount", "error mounting", "not a shared mount")),
+        ("security_setup", ("seccomp", "apparmor", "selinux")),
+        ("read_only", ("read-only file system",)),
+        ("permission", ("permission denied", "operation not permitted")),
+        ("missing_path", ("no such file or directory",)),
+    ):
+        if any(marker in text for marker in markers):
+            return category
+    return "unknown"
+
+
 def deployment_diagnostic(deployment, pods):
     """Closed status projection only; never messages, events, specs or logs."""
     if not isinstance(pods, list) or len(pods) > 16:
@@ -52,6 +72,7 @@ def deployment_diagnostic(deployment, pods):
                 "running": isinstance(c.get("state", {}).get("running"), dict),
                 "waiting": enum(c.get("state", {}).get("waiting", {}).get("reason"),
                     {"ContainerCreating", "ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff", "CreateContainerConfigError", "CreateContainerError", "RunContainerError"}),
+                "runtimeFailure": runtime_failure_category(c.get("state", {}).get("waiting", {}).get("message")),
                 "exitCode": number(c.get("state", {}).get("terminated", {}).get("exitCode"))} for c in states]})
     return result
 
