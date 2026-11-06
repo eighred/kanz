@@ -8,6 +8,7 @@ pub mod fee_wire;
 mod go_unicode;
 pub mod identity;
 pub mod outbox;
+pub mod proposals;
 pub mod queries;
 pub mod recovery;
 pub mod recovery_ack;
