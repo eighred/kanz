@@ -52,6 +52,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify artifact integrity and credential redirect boundary
         run: python3 -m unittest discover -s tools -p test_ecr_release_recovery.py
+      - name: Verify isolated restored TV proof refusals
+        run: |
+          command -v jq
+          python3 -B -m unittest discover -s tools -p test_tv_sync_restored_proof.py
+      - name: Verify replay platform resolution refusals
+        shell: pwsh
+        run: ./tools/Test-TvReplayPlatform.ps1
       - name: Verify installer fails closed on registry errors
         shell: pwsh
         run: ./tools/Test-EcrReleaseDigest.ps1
