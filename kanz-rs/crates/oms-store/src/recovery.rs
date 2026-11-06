@@ -36,7 +36,7 @@ pub struct PreparedRecovery {
     /// Exactly one recovered FACT per complete-history execution, then one status FACT.
     pub records: Vec<Record>,
 }
-fn time(t: &prost_types::Timestamp) -> Result<SystemTime, Error> {
+pub(super) fn time(t: &prost_types::Timestamp) -> Result<SystemTime, Error> {
     if !identity::timestamp(t) {
         return Err(Error::InvalidInput);
     }
@@ -48,7 +48,7 @@ fn time(t: &prost_types::Timestamp) -> Result<SystemTime, Error> {
     base.and_then(|v| v.checked_add(Duration::from_nanos(t.nanos as u64)))
         .ok_or(Error::InvalidInput)
 }
-fn fact(
+pub(super) fn fact(
     r: &Record,
     tenant: &str,
     order: &str,
