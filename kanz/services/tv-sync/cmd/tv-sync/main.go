@@ -180,7 +180,7 @@ func run() int {
 	// leak with a delay on it.
 	go runRetention(ctx, proj, retentionSweep, logger)
 
-	readiness := &server.Readiness{}
+	readiness := server.NewReadiness(ctx)
 	broker := brokerapi.New(proj)
 	api := server.New(readiness, broker, server.WithMetrics(obs.MetricsHandler()))
 	servers := newHTTPServers(cfg, api)
@@ -211,12 +211,11 @@ func run() int {
 		subs[s] = marks.Handle
 	}
 	go func() {
-		if err := runConsumers(ctx, consumer, subs, cfg.ConsumerGroup); err != nil && ctx.Err() == nil {
+		if err := runConsumers(ctx, consumer, subs, cfg.ConsumerGroup, readiness.Set); err != nil && ctx.Err() == nil {
 			logger.Error("fact consumer failed", "err", err)
 			fatal.Raise(err)
 		}
 	}()
-	readiness.Set(true)
 
 	<-ctx.Done()
 	readiness.Set(false)
@@ -236,7 +235,21 @@ func run() int {
 	return fatal.Code()
 }
 
-func runConsumers(ctx context.Context, consumer *bus.Consumer, subs map[string]bus.EventHandler, group string) error {
+type readyConsumer interface {
+	SubscribeReady(context.Context, string, string, bus.EventHandler, func()) error
+}
+
+// This barrier proves initial durable catch-up only. It cannot establish facts
+// that predate retained source history or qualify a fresh genesis.
+func runConsumers(ctx context.Context, consumer readyConsumer, subs map[string]bus.EventHandler, group string, setReady func(bool)) error {
+	if len(subs) == 0 || setReady == nil {
+		return errors.New("tv-sync: readiness requires subscriptions and callback")
+	}
+	var readinessMu sync.Mutex
+	remaining := len(subs)
+	stopped := false
+	setReady(false)
+	defer func() { readinessMu.Lock(); stopped = true; setReady(false); readinessMu.Unlock() }()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
@@ -245,7 +258,31 @@ func runConsumers(ctx context.Context, consumer *bus.Consumer, subs map[string]b
 		wg.Add(1)
 		go func(subject string, handler bus.EventHandler) {
 			defer wg.Done()
-			if err := consumer.Subscribe(ctx, subject, group, handler); err != nil && ctx.Err() == nil {
+			var once sync.Once
+			caughtUp := func() {
+				once.Do(func() {
+					readinessMu.Lock()
+					defer readinessMu.Unlock()
+					if stopped || ctx.Err() != nil {
+						return
+					}
+					remaining--
+					if remaining == 0 {
+						setReady(true)
+					}
+				})
+			}
+			err := consumer.SubscribeReady(ctx, subject, group, handler, caughtUp)
+			if ctx.Err() == nil {
+				// Revoke before cancellation/drain: another subscription may take
+				// its full drain budget while this one has already stopped.
+				readinessMu.Lock()
+				stopped = true
+				setReady(false)
+				readinessMu.Unlock()
+				if err == nil {
+					err = errors.New("tv-sync: durable subscription stopped unexpectedly")
+				}
 				select {
 				case errCh <- err:
 					cancel()

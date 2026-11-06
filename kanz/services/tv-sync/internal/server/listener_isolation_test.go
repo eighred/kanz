@@ -50,6 +50,8 @@ func TestOperationsListenerCannotServeBrokerRoutes(t *testing.T) {
 		// monitoring socket. This is route isolation, not network-policy proof.
 		get(operationsHTTP.URL, path, "acme", http.StatusNotFound)
 	}
+	get(apiHTTP.URL, "/broker/config", "", http.StatusServiceUnavailable)
+	readiness.Set(true)
 	get(apiHTTP.URL, "/broker/config", "", http.StatusOK)
 	get(apiHTTP.URL, "/broker/accounts", "acme", http.StatusOK)
 	get(apiHTTP.URL, "/broker/accounts", "", http.StatusUnauthorized)
@@ -58,6 +60,7 @@ func TestOperationsListenerCannotServeBrokerRoutes(t *testing.T) {
 	}
 	get(operationsHTTP.URL, "/healthz", "", http.StatusOK)
 	get(operationsHTTP.URL, "/metrics", "", http.StatusOK)
+	readiness.Set(false)
 	get(operationsHTTP.URL, "/readyz", "", http.StatusServiceUnavailable)
 	readiness.Set(true)
 	get(operationsHTTP.URL, "/readyz", "", http.StatusOK)
