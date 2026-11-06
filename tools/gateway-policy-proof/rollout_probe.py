@@ -54,9 +54,41 @@ def equivalent_source_selectors(policies, actual_labels, probe_labels):
                 raise ValueError("minimal probe labels do not represent actual policy selection")
 
 
-def running_unready(actual, desired, verified_runtime_digest):
-    if not isinstance(verified_runtime_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", verified_runtime_digest):
-        raise ValueError("independently resolved runtime image digest required")
+def controller_boundary(controllers, namespace, labels):
+    if not isinstance(controllers, list) or len(controllers) > 512:
+        raise ValueError("controller inventory exceeds bound")
+    for controller in controllers:
+        if controller.get("metadata", {}).get("namespace") != namespace:
+            continue
+        kind = controller.get("kind")
+        if kind not in ("ReplicaSet", "ReplicationController", "StatefulSet", "DaemonSet", "Job"):
+            raise ValueError("unexpected Pod-owning controller")
+        selector = controller.get("spec", {}).get("selector")
+        if not isinstance(selector, dict):
+            raise ValueError("controller selector unavailable")
+        if kind == "ReplicationController":
+            selector = {"matchLabels": selector}
+        if set(selector) - {"matchLabels", "matchExpressions"}:
+            raise ValueError("unknown controller selector")
+        match = all(labels.get(k) == v for k, v in selector.get("matchLabels", {}).items())
+        for expression in selector.get("matchExpressions", []):
+            key, op, values = expression.get("key"), expression.get("operator"), expression.get("values", [])
+            if not isinstance(key, str) or not isinstance(values, list):
+                raise ValueError("invalid controller selector")
+            if op == "In": match &= key in labels and labels[key] in values
+            elif op == "NotIn": match &= key not in labels or labels[key] not in values
+            elif op == "Exists" and not values: match &= key in labels
+            elif op == "DoesNotExist" and not values: match &= key not in labels
+            else: raise ValueError("unsupported controller selector")
+        if match:
+            raise ValueError("existing controller could adopt the probe")
+
+
+def running_unready(actual, desired, verified_image_id):
+    # Caller has inspected this exact CRI reference and compared its typed config
+    # and repository digests; do not infer digest kind from the imageID string.
+    if not isinstance(verified_image_id, str) or not 1 <= len(verified_image_id) <= 256:
+        raise ValueError("independently verified runtime image identity required")
     meta, spec, status = actual.get("metadata", {}), actual.get("spec", {}), actual.get("status", {})
     expected_meta = desired["metadata"]
     if (meta.get("name") != expected_meta["name"] or meta.get("namespace") != expected_meta["namespace"]
@@ -86,8 +118,7 @@ def running_unready(actual, desired, verified_runtime_digest):
         raise ValueError("probe container is not running")
     address = str(ipaddress.ip_address(status["podIP"]))
     image_id = states[0].get("imageID", "")
-    if image_id not in (verified_runtime_digest, "docker.io/library/python@" + verified_runtime_digest,
-                        "docker-pullable://docker.io/library/python@" + verified_runtime_digest):
+    if image_id != verified_image_id:
         raise ValueError("probe image digest differs")
     return address
 
@@ -103,3 +134,75 @@ def endpoint_boundary(slices, addresses, require_absent=False):
             if set(endpoint.get("addresses", [])) & set(addresses):
                 if require_absent or endpoint.get("conditions", {}).get("ready") is not False:
                     raise ValueError("probe may participate in Service routing")
+
+
+def workload_lineage(pod, deployments, replicasets, expected):
+    """Source-pinned specs and controller lineage, not private-registry resolution."""
+    def images(spec):
+        result = {}
+        for key in ("containers", "initContainers"):
+            entries = spec.get(key, [])
+            values = {entry["name"]: entry["image"] for entry in entries}
+            if len(values) != len(entries) or any(not re.fullmatch(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", v) for v in values.values()):
+                raise ValueError("workload image references are not uniquely pinned")
+            result[key] = values
+        if not result["containers"] or spec.get("hostNetwork"):
+            raise ValueError("workload network/image boundary differs")
+        return result
+    def owner(obj, kind, parents):
+        refs = obj["metadata"].get("ownerReferences", [])
+        if len(refs) != 1 or refs[0].get("kind") != kind or refs[0].get("controller") is not True:
+            raise ValueError("workload controller ownership differs")
+        ref = refs[0]
+        matches = [v for v in parents if v["metadata"].get("name") == ref.get("name")
+                   and v["metadata"].get("uid") == ref.get("uid")
+                   and v["metadata"].get("namespace") == pod["metadata"]["namespace"]]
+        if len(matches) != 1 or matches[0]["metadata"].get("deletionTimestamp"):
+            raise ValueError("workload controller UID is unresolved")
+        return matches[0]
+    rs = owner(pod, "ReplicaSet", replicasets)
+    deployment = owner(rs, "Deployment", deployments)
+    name = deployment["metadata"]["name"]
+    if name not in expected:
+        raise ValueError("workload deployment not governed by source")
+    wanted = expected[name]
+    template = deployment["spec"]["template"]
+    if (template["metadata"].get("labels") != wanted["labels"]
+            or deployment["spec"]["selector"] != wanted["selector"]
+            or images(template["spec"]) != wanted["images"]):
+        raise ValueError("live Deployment differs from rendered source")
+    labels = rs["spec"]["template"]["metadata"].get("labels", {})
+    hashed = labels.get("pod-template-hash")
+    if (not isinstance(hashed, str) or not re.fullmatch(r"[a-z0-9]{1,63}", hashed)
+            or labels != {**wanted["labels"], "pod-template-hash": hashed}
+            or rs["spec"]["selector"] != {"matchLabels": {**wanted["selector"]["matchLabels"], "pod-template-hash": hashed}}
+            or pod["metadata"].get("labels") != labels
+            or images(rs["spec"]["template"]["spec"]) != wanted["images"]
+            or images(pod["spec"]) != wanted["images"]):
+        raise ValueError("Pod/ReplicaSet differs from rendered deployment")
+    return {"name": name, "deployment": deployment["metadata"]["uid"], "replicaSet": rs["metadata"]["uid"],
+            "images": wanted["images"], "podOwners": pod["metadata"]["ownerReferences"],
+            "replicaSetOwners": rs["metadata"]["ownerReferences"]}
+
+
+def verify_cri(image_id, inspection, identity):
+    """CRI status.id is the image config digest (same existing TV proof seam).
+
+    image_id is passed unchanged to inspecti by the caller, never interpreted as
+    a manifest/config solely from its text. RepoDigests bind that config to the
+    independently hash-verified public image graph.
+    """
+    if not isinstance(image_id, str) or not re.fullmatch(
+            r"(?:(?:docker-pullable://)?(?:docker.io/library/)?python@)?sha256:[0-9a-f]{64}", image_id):
+        raise ValueError("unexpected pod image identity format")
+    if identity.get("root") != IMAGE.split("@", 1)[1] or identity.get("platform") != "linux/amd64":
+        raise ValueError("unqualified image identity")
+    for key in ("manifest", "config"):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", identity.get(key, "")):
+            raise ValueError("unqualified image digest")
+    status = inspection.get("status", {})
+    digests = status.get("repoDigests")
+    allowed = {"docker.io/library/python@" + identity[key] for key in ("root", "manifest")}
+    if status.get("id") != identity["config"] or not isinstance(digests, list) or not allowed.intersection(digests):
+        raise ValueError("running image config/repository differs")
+    return image_id

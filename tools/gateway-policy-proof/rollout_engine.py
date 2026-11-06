@@ -11,7 +11,6 @@ import tempfile
 import time
 import uuid
 
-from image_identity import verify_cri
 from bounded_process import run as bounded_run
 from policy_client import KubernetesClient
 import rollout_probe as probe
@@ -33,8 +32,12 @@ print(json.dumps(values))
 """
 
 
-def snapshot(k):
+def snapshot(k, governed):
     result = {}
+    deployments = json.loads(k("-n", tx.NAMESPACE, "get", "deployments", "-o", "json"))["items"]
+    replicasets = json.loads(k("-n", tx.NAMESPACE, "get", "replicasets", "-o", "json"))["items"]
+    if len(deployments) > 128 or len(replicasets) > 256:
+        raise tx.Refusal("controller inventory exceeds bound")
     for namespace, names in APPS.items():
         items = json.loads(k("-n", namespace, "get", "pods", "-o", "json"))["items"]
         if len(items) > 128:
@@ -53,6 +56,11 @@ def snapshot(k):
                 "ip": p["status"]["podIP"], "containers": [
                     {key: c.get(key) for key in ("name", "imageID", "ready", "restartCount")}
                     for c in p["status"].get("containerStatuses", [])]}
+            if namespace == tx.NAMESPACE:
+                lineage = probe.workload_lineage(p, deployments, replicasets, governed)
+                if lineage["name"] != app:
+                    raise tx.Refusal("workload application/controller mismatch")
+                result[(namespace, app)]["lineage"] = lineage
             if not result[(namespace, app)]["containers"] or any(not c["ready"] or not c["imageID"] for c in result[(namespace, app)]["containers"]):
                 raise tx.Refusal("workload container readiness unknown")
     return result
@@ -93,6 +101,9 @@ class Probes:
     def endpoints(self):
         return json.loads(self.k("get", "endpointslices", "-A", "-o", "json"))["items"]
 
+    def controllers(self):
+        return json.loads(self.k("get", "replicasets,replicationcontrollers,statefulsets,daemonsets,jobs", "-A", "-o", "json"))["items"]
+
     def create(self):
         # Absence must be distinguished from an API error.
         before = json.loads(self.k("get", "namespace", self.namespace, "--ignore-not-found", "-o", "json") or "null")
@@ -115,6 +126,7 @@ class Probes:
                                      ("outsider", self.namespace, "api-gateway")):
             desired = probe.caller_pod(namespace, app, self.nonce)
             probe.service_boundary(self.services(), namespace, desired["metadata"]["labels"])
+            probe.controller_boundary(self.controllers(), namespace, desired["metadata"]["labels"])
             name = desired["metadata"]["name"]
             if self.k("-n", namespace, "get", "pod", name, "--ignore-not-found", "-o", "name").strip():
                 raise tx.Refusal("probe pod collision")
@@ -137,21 +149,23 @@ class Probes:
                     raise tx.Refusal("probe did not become Running")
                 time.sleep(1)
             image_id = actual["status"]["containerStatuses"][0]["imageID"]
-            verify_cri(image_id, self.inspect(image_id), self.identity)
+            entry["verifiedImageID"] = probe.verify_cri(image_id, self.inspect(image_id), self.identity)
             # The preceding typed CRI proof established this observed identifier.
-            address = probe.running_unready(actual, desired, self.identity["manifest"])
+            address = probe.running_unready(actual, desired, entry["verifiedImageID"])
             self.addresses.append(address)
             self.peers[peer] = entry
         self.check()
 
     def check(self):
         services = self.services()
+        controllers = self.controllers()
         for entry in self.owned:
             obj = json.loads(self.k("-n", entry["namespace"], "get", "pod", entry["name"], "-o", "json"))
             if obj["metadata"]["uid"] != entry["uid"]:
                 raise tx.Refusal("probe pod was replaced")
             probe.service_boundary(services, entry["namespace"], entry["desired"]["metadata"]["labels"])
-            probe.running_unready(obj, entry["desired"], self.identity["manifest"])
+            probe.controller_boundary(controllers, entry["namespace"], entry["desired"]["metadata"]["labels"])
+            probe.running_unready(obj, entry["desired"], entry["verifiedImageID"])
         probe.endpoint_boundary(self.endpoints(), self.addresses)
 
     def tcp(self, peer, address, port, expected):
@@ -220,37 +234,49 @@ def main():
     if len(raw) > 4 << 20:
         raise tx.Refusal("rollout input exceeds bound")
     payload = json.loads(raw)
-    if set(payload) != {"source", "policies", "identity"} or payload["source"] != args.source:
+    if set(payload) != {"source", "policies", "identity", "workloads"} or payload["source"] != args.source:
         raise tx.Refusal("rollout source binding differs")
     desired = [p for p in payload["policies"] if p["metadata"]["name"] in tx.NAMES]
     nonce = uuid.uuid4().hex
-    # Intentionally retained on failure/success; never remove an unresolved receipt.
-    directory = tempfile.mkdtemp(prefix="kanz-gateway-policy-", dir="/var/tmp")
-    receipts = tx.Receipts(directory)
-    environment = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                   "HOME": directory, "TMPDIR": directory, "LANG": "C.UTF-8"}
-    def command(argv, value=None):
-        return bounded_run(argv, data=None if value is None else json.dumps(value),
-                           env=environment, cwd=directory, timeout=100)
-    def k(*argv, value=None):
-        return command(["/usr/local/bin/k3s", "kubectl", *argv], value)
-    client = KubernetesClient(k, CLUSTER_UID)
-    client.check_scope()
-    before = snapshot(k)
-    for app in ("api-gateway", "web-bff"):
-        probe.equivalent_source_selectors(payload["policies"], before[(tx.NAMESPACE, app)]["labels"],
-                                          {"app": app, probe.OWNER: nonce})
-    other_policies = outside_policies(k)
-    original_services = service_snapshot(k)
-    def stable():
-        if snapshot(k) != before or not tx.same_inventory(other_policies, outside_policies(k), exact_version=True) or service_snapshot(k) != original_services:
-            raise tx.Refusal("workload identity/readiness/restart changed")
-    client.check_workloads = stable
-    transaction = tx.Transaction(client, desired, nonce, receipts)
-    probes = Probes(k, lambda image_id: json.loads(command(["/usr/local/bin/k3s", "crictl", "inspecti", image_id])), payload["identity"], nonce, receipts)
+    # Only an apply owns durable receipts. Dry-run scratch is freshly owned and
+    # removed on every exit; it never creates probe resources or policy writes.
+    scratch = None
+    receipts = None
+    probes = None
+    receipt_path = None
     try:
+        if args.apply:
+            directory = tempfile.mkdtemp(prefix="kanz-gateway-policy-", dir="/var/tmp")
+            receipt_path = directory
+            receipts = tx.Receipts(directory)
+            record = receipts
+        else:
+            scratch = tempfile.TemporaryDirectory(prefix="kanz-gateway-dry-run-", dir="/var/tmp")
+            directory = scratch.name
+            record = lambda value: None
+        environment = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                       "HOME": directory, "TMPDIR": directory, "LANG": "C.UTF-8"}
+        def command(argv, value=None):
+            return bounded_run(argv, data=None if value is None else json.dumps(value),
+                               env=environment, cwd=directory, timeout=100)
+        def k(*argv, value=None):
+            return command(["/usr/local/bin/k3s", "kubectl", *argv], value)
+        client = KubernetesClient(k, CLUSTER_UID)
+        client.check_scope()
+        before = snapshot(k, payload["workloads"])
+        for app in ("api-gateway", "web-bff"):
+            probe.equivalent_source_selectors(payload["policies"], before[(tx.NAMESPACE, app)]["labels"],
+                                              {"app": app, probe.OWNER: nonce})
+        other_policies = outside_policies(k)
+        original_services = service_snapshot(k)
+        def stable():
+            if snapshot(k, payload["workloads"]) != before or not tx.same_inventory(other_policies, outside_policies(k), exact_version=True) or service_snapshot(k) != original_services:
+                raise tx.Refusal("workload identity/readiness/restart changed")
+        client.check_workloads = stable
+        transaction = tx.Transaction(client, desired, nonce, record)
         transaction.prepare(lambda actual, target: tx.qualify_rendered_baseline(actual, target, payload["policies"]))
         if args.apply:
+            probes = Probes(k, lambda image_id: json.loads(command(["/usr/local/bin/k3s", "crictl", "inspecti", image_id])), payload["identity"], nonce, record)
             probes.create()
             def verify_and_clean():
                 probes.verify(before, True)
@@ -259,15 +285,19 @@ def main():
             transaction.apply(verify_and_clean)
         print(json.dumps({"format": "kanz-tokyo-gateway-policy-v1", "source": args.source,
                           "mode": "apply" if args.apply else "dry_run", "phase": transaction.receipt["phase"],
-                          "receipt": directory, "cleanup": "verified" if args.apply else "not_created"}))
+                          "receipt": receipt_path, "cleanup": "verified" if args.apply else "not_created"}))
     except Exception:
         try:
-            probes.close()
+            if probes is not None:
+                probes.close()
         finally:
-            print(json.dumps({"source": args.source, "verdict": "REFUSED", "receipt": directory}))
+            print(json.dumps({"source": args.source, "verdict": "REFUSED", "receipt": receipt_path}))
         raise
     finally:
-        receipts.close()
+        if receipts is not None:
+            receipts.close()
+        if scratch is not None:
+            scratch.cleanup()
 
 
 if __name__ == "__main__":

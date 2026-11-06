@@ -47,7 +47,10 @@ def run(argv, *, cwd, env, data=None, timeout=100, stdout_limit=4 << 20, stderr_
         except (BrokenPipeError, OSError):
             stop()
         finally:
-            process.stdin.close()
+            try:
+                process.stdin.close()
+            except OSError:
+                stop()
 
     readers = [threading.Thread(target=read, args=(process.stdout, stdout_limit, True), daemon=True),
                threading.Thread(target=read, args=(process.stderr, stderr_limit, False), daemon=True),

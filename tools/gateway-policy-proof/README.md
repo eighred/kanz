@@ -69,8 +69,14 @@ The owned set is the three shared API ingress policies and
 two exact accounting:8101 and audit:8102 peers. The entire services policy union
 must otherwise match the rendered overlay. Policies outside that namespace,
 Services and the seven selected runtime Pods are captured and must remain
-unchanged. A write uses creation or UID/resourceVersion-bound replacement.
-Existing user metadata is retained. An append-only private receipt is fsynced
+unchanged. The five governed applications must match the rendered Deployment
+container/init-container image pins, template labels and selectors; each live
+Pod is bound through its ReplicaSet to that Deployment's UID. This source/spec
+and controller check does not independently resolve private ECR runtime config
+bytes. NATS/Redis are observed baselines, not source-version qualifications.
+A write uses creation or UID/resourceVersion-bound replacement.
+Dry-run uses transient scratch removed on exit, creates no probes, and reports a null receipt.
+Existing user metadata is retained. For apply, an append-only private receipt is fsynced
 before each side effect; a lost response is reconciled against the marker,
 desired object and original UID. Rollback restores semantic original objects
 with current CAS versions, or deletes only newly created objects with both UID
@@ -100,10 +106,13 @@ and only the documented [Docker registry/CDN hosts](https://docs.docker.com/desk
 it never forwards authorization across hosts.
 
 The same required workflow also constructs a second fresh kind/Cilium cluster
-for `transaction_fixture.py`. Fourteen mandatory cases exercise each real API
-write/finalization response-loss boundary, dry-run nonmutation, four-policy
+for `transaction_fixture.py`. Seventeen mandatory cases exercise each real API
+write/finalization response-loss boundary, dry-run nonmutation, actual Deployment
+UID lineage, zero-replica controller adoption refusal, four-policy
 success, refusal to overwrite a concurrent edit, actual neverReady endpoint
 nonparticipation, actual matching-Service refusal and UID-bound cleanup. Its
+live TCP probe routine also runs against synthetic listeners under the exact
+rendered policies, with successful controls bracketing every timeout denial. Its
 checker binds checkout/tree, run/attempt, rendered union and independently
 resolved image identity. This is developmental transaction evidence, not Tokyo
 rollout acceptance. Linux execution is required; local Windows receipt tests

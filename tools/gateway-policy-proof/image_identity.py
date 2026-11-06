@@ -6,7 +6,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from rollout_probe import IMAGE
+from rollout_probe import IMAGE, verify_cri
 
 ROOT_DIGEST = IMAGE.split("@", 1)[1]
 REGISTRY = "https://registry-1.docker.io/v2/library/python/"
@@ -123,27 +123,6 @@ def public_identity():
         raise ValueError("fixed public image identity refused at " + stage + ": " + reason + " HTTP " + str(code)) from None
 
 
-def verify_cri(image_id, inspection, identity):
-    """CRI status.id is the image config digest (same existing TV proof seam).
-
-    image_id is passed unchanged to inspecti by the caller, never interpreted as
-    a manifest/config solely from its text. RepoDigests bind that config to the
-    independently hash-verified public image graph.
-    """
-    if not isinstance(image_id, str) or not re.fullmatch(
-            r"(?:(?:docker-pullable://)?(?:docker.io/library/)?python@)?sha256:[0-9a-f]{64}", image_id):
-        raise ValueError("unexpected pod image identity format")
-    if identity.get("root") != ROOT_DIGEST or identity.get("platform") != "linux/amd64":
-        raise ValueError("unqualified image identity")
-    for key in ("manifest", "config"):
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", identity.get(key, "")):
-            raise ValueError("unqualified image digest")
-    status = inspection.get("status", {})
-    digests = status.get("repoDigests")
-    allowed = {"docker.io/library/python@" + identity[key] for key in ("root", "manifest")}
-    if status.get("id") != identity["config"] or not isinstance(digests, list) or not allowed.intersection(digests):
-        raise ValueError("running image config/repository differs")
-    return image_id
 
 
 if __name__ == "__main__":
