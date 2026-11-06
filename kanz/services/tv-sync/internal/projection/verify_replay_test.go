@@ -6,11 +6,49 @@ import (
 	"testing"
 	"time"
 
+	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	orderpb "github.com/eighred/kanz/kanz-schemas-go/order/v1"
 	tvsyncpb "github.com/eighred/kanz/kanz-schemas-go/tvsync/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func roundedReplayFixture(t *testing.T) (*memLog, replaySnapshot) {
+	return roundedReplayFixtureAt(t, time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC))
+}
+
+func roundedReplayFixtureAt(t *testing.T, now time.Time) (*memLog, replaySnapshot) {
+	t.Helper()
+	log := newMemLog()
+	p := New(func() time.Time { return now }, nil, WithLog(log, testTenant), WithRetention(7*24*time.Hour))
+	ev := filledOrder("tiny", "fund", "BTC", orderpb.Side_SIDE_BUY, 1, 100)
+	ev.Fill.Quantity = &commonpb.Decimal{Coefficient: 1, Exponent: -10}
+	ev.State.OrderedQuantity = proto.Clone(ev.Fill.Quantity).(*commonpb.Decimal)
+	ev.State.FilledQuantity = proto.Clone(ev.Fill.Quantity).(*commonpb.Decimal)
+	ev.State.AsOf = timestamppb.New(now)
+	ev.Fill.ExecutedAt = timestamppb.New(now)
+	deliver(t, p, "event-tiny", evtFilled, ev)
+	if err := p.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return log, replaySnapshot{at: now, count: 1, watermark: 1, checkpointSeq: log.cpSeq, checkpoint: log.cp, identity: "rounded-synthetic-snapshot"}
+}
+
+func TestReplayVerifierDoesNotRoundAwayMismatch(t *testing.T) {
+	log, snap := roundedReplayFixture(t)
+	// Production checkpoint encoding rounds 1e-10 to zero. Serializing the full
+	// replay again hides that difference; exact in-memory values must refuse it.
+	var cp tvsyncpb.Checkpoint
+	if err := proto.Unmarshal(snap.checkpoint, &cp); err != nil {
+		t.Fatal(err)
+	}
+	if cp.Accounts[0].Execs[0].Qty.Coefficient != 0 {
+		t.Fatal("fixture did not exercise checkpoint rounding")
+	}
+	if _, err := verifyCapturedReplay(context.Background(), log, testTenant, 7*24*time.Hour, snap); !errors.Is(err, ErrReplayMismatch) {
+		t.Fatalf("rounded mismatch qualified: %v", err)
+	}
+}
 
 func replayFixture(t *testing.T) (*memLog, replaySnapshot) {
 	t.Helper()

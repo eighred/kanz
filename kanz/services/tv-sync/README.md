@@ -77,7 +77,10 @@ a claim of a hard filesystem timeout.
 
 Qualification is bounded to 100,000 facts, 64 MiB of aggregate fact payload and
 identity/type bytes, 64 KiB per payload, 1 KiB per identity/type, an 8 MiB
-checkpoint and a 120-second deadline. Unsupported/unknown protobuf fields,
+checkpoint and a 120-second deadline. Exact in-memory execution, baseline and
+live-position rationals are compared before checkpoint serialization, so decimal
+rounding cannot hide a difference; their bounded canonical integer encodings are
+included in the state digest. Unsupported/unknown protobuf fields,
 invalid timestamps, out-of-domain decimals and unsupported checkpoint rationals
 refuse. Exceeding a bound does not return a prefix result. Both reconstructions
 use one declared retention horizon, preserving exact baseline rationals; a
@@ -102,9 +105,12 @@ database as evidence that an account never traded. This remains tracked under
 [#1410](https://github.com/eighred/kanz/issues/1410) and
 [#1413](https://github.com/eighred/kanz/issues/1413).
 
-CI requires five real-PostgreSQL verifier cases, including restored bytes,
+CI requires six real-PostgreSQL verifier cases, including restored bytes,
 tenant isolation, read-only enforcement and a concurrent append outside the
 captured snapshot and refusal of foreign rows under a permissive RLS policy.
+The precision regression refuses a resident 1e-10 execution rounded to zero by
+the existing production checkpoint encoder; this command does not repair that
+separately tracked checkpoint behavior.
 Two required Linux secret-reader cases cover bounds and FIFO/CSI behavior.
 Those fixtures qualify the source behavior; they do not
 substitute for observing replay of the actual restored target with its matching

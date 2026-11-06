@@ -236,6 +236,10 @@ func verifyCapturedReplay(ctx context.Context, source Log, tenant string, retent
 	}
 	full.Evict(snap.at)
 	restored.Evict(snap.at)
+	exactHash, err := compareReplayExact(full, restored)
+	if err != nil {
+		return ReplayProof{}, err
+	}
 	want := canonicalReplayState(full, snap, retention)
 	got := canonicalReplayState(restored, snap, retention)
 	if !proto.Equal(want, got) {
@@ -248,10 +252,13 @@ func verifyCapturedReplay(ctx context.Context, source Log, tenant string, retent
 	if err != nil {
 		return ReplayProof{}, ErrReplayInput
 	}
-	stateHash := sha256.Sum256(state)
+	stateDigest := sha256.New()
+	hashReplayPart(stateDigest, state)
+	hashReplayPart(stateDigest, exactHash[:])
+	stateHash := stateDigest.Sum(nil)
 	tenantHash := sha256.Sum256([]byte(tenant))
 	snapshotHash := sha256.Sum256([]byte(snap.identity))
-	return ReplayProof{SchemaVersion: 1, Status: "VERIFIED", TenantSHA256: hex.EncodeToString(tenantHash[:]), SnapshotSHA256: hex.EncodeToString(snapshotHash[:]), InputSHA256: hex.EncodeToString(input.Sum(nil)), StateSHA256: hex.EncodeToString(stateHash[:]), CheckedAt: snap.at.UTC(), RetentionSeconds: int64(retention / time.Second), FactCount: snap.count, Watermark: snap.watermark, CheckpointSeq: snap.checkpointSeq}, nil
+	return ReplayProof{SchemaVersion: 1, Status: "VERIFIED", TenantSHA256: hex.EncodeToString(tenantHash[:]), SnapshotSHA256: hex.EncodeToString(snapshotHash[:]), InputSHA256: hex.EncodeToString(input.Sum(nil)), StateSHA256: hex.EncodeToString(stateHash), CheckedAt: snap.at.UTC(), RetentionSeconds: int64(retention / time.Second), FactCount: snap.count, Watermark: snap.watermark, CheckpointSeq: snap.checkpointSeq}, nil
 }
 
 func canonicalReplayState(p *Projection, snap replaySnapshot, retention time.Duration) *tvsyncpb.Checkpoint {

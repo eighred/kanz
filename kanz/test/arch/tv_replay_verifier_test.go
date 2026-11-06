@@ -19,6 +19,7 @@ func checkTVReplayVerifier(files map[string]string) error {
 			"foreignFacts != 0", "foreignCheckpoints != 0", "count(*) FILTER (WHERE tenant_id IS DISTINCT FROM $1)",
 			"snap.count == 0", "ErrReplayNoHistory", "checkpointRows == 0", "ErrReplayNoCheckpoint",
 			"full: true", "full.Rehydrate(ctx)", "restored.Rehydrate(ctx)", "!proto.Equal(want, got)", "tx.Rollback(ctx)",
+			"compareReplayExact(full, restored)", "hashReplayPart(stateDigest, exactHash[:])",
 		},
 		"services/tv-sync/internal/projection/verify_replay_validation.go": {
 			"RecursionLimit: 64", "len(m.GetUnknown()) != 0", "boundedReplayRational(s)", "a.TenantId != tenant", "cp.Seq != snap.checkpointSeq",
@@ -27,9 +28,10 @@ func checkTVReplayVerifier(files map[string]string) error {
 			"!version.IsStamped()", "expected != version.String()", `os.Getenv("TV_SYNC_DATABASE_URL") != ""`,
 			`secret.ReadBounded("TV_SYNC_DATABASE_URL", 16<<10)`, "pg.NewTenantPool(ctx, dsn, tenant)", "projection.VerifyPostgresSnapshot(ctx, pool, tenant, retention)",
 		},
-		"pkg/secret/secret.go":              {"io.LimitReader(f, maxBytes+1)", "maxBytes > 1<<20", "!info.Mode().IsRegular()"},
-		"pkg/secret/bounded_mount_linux.go": {"unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK"},
-		"services/tv-sync/Dockerfile":       {"/out/tv-sync-replay ./services/tv-sync/cmd/tv-sync-replay", "COPY --from=build /out/tv-sync-replay /tv-sync-replay"},
+		"pkg/secret/secret.go":                                        {"io.LimitReader(f, maxBytes+1)", "maxBytes > 1<<20", "!info.Mode().IsRegular()"},
+		"pkg/secret/bounded_mount_linux.go":                           {"unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK"},
+		"services/tv-sync/internal/projection/verify_replay_exact.go": {"a.Cmp(b) != 0", "{a.baseline, b.baseline}, {a.live, b.live}", "a.Num().Bytes()", "a.Denom().Bytes()"},
+		"services/tv-sync/Dockerfile":                                 {"/out/tv-sync-replay ./services/tv-sync/cmd/tv-sync-replay", "COPY --from=build /out/tv-sync-replay /tv-sync-replay"},
 	}
 	for path, markers := range required {
 		for _, marker := range markers {
@@ -107,7 +109,7 @@ func TestTVReplayVerifierRequiresActualPostgresEvidence(t *testing.T) {
 }
 
 func TestTVReplayVerifierPreservesReadOnlyCanonicalBoundary(t *testing.T) {
-	paths := []string{"services/tv-sync/internal/projection/verify_replay.go", "services/tv-sync/internal/projection/verify_replay_validation.go", "services/tv-sync/cmd/tv-sync-replay/main.go", "pkg/secret/secret.go", "services/tv-sync/Dockerfile", "pkg/secret/bounded_mount_linux.go"}
+	paths := []string{"services/tv-sync/internal/projection/verify_replay.go", "services/tv-sync/internal/projection/verify_replay_validation.go", "services/tv-sync/cmd/tv-sync-replay/main.go", "pkg/secret/secret.go", "services/tv-sync/Dockerfile", "pkg/secret/bounded_mount_linux.go", "services/tv-sync/internal/projection/verify_replay_exact.go"}
 	files := map[string]string{}
 	for _, path := range paths {
 		b, err := os.ReadFile(filepath.Join(moduleRoot(t), path))
@@ -130,12 +132,15 @@ func TestTVReplayVerifierPreservesReadOnlyCanonicalBoundary(t *testing.T) {
 		{paths[0], "foreignCheckpoints != 0", "false"},
 		{paths[0], "full: true", "full: false"},
 		{paths[0], "!proto.Equal(want, got)", "false"},
+		{paths[0], "compareReplayExact(full, restored)", "compareRounded(full, restored)"},
+		{paths[0], "hashReplayPart(stateDigest, exactHash[:])", "hashReplayPart(stateDigest, nil)"},
 		{paths[1], "len(m.GetUnknown()) != 0", "false"},
 		{paths[1], "boundedReplayRational(s)", "true"},
 		{paths[2], "!version.IsStamped()", "false"},
 		{paths[2], "expected != version.String()", "false"},
 		{paths[3], "io.LimitReader(f, maxBytes+1)", "f"},
 		{paths[5], "|unix.O_NONBLOCK", ""},
+		{paths[6], "a.Cmp(b) != 0", "false"},
 	} {
 		original := files[mutation.path]
 		changed := strings.Replace(original, mutation.from, mutation.to, 1)

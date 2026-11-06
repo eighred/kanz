@@ -18,6 +18,12 @@ func restoredReplayFixture(t *testing.T) *pgxpool.Pool {
 	pool := newPool(t, testTenant)
 	freshSchema(t, pool)
 	log, snap := replayFixture(t)
+	restoreReplayInputs(t, pool, log, snap)
+	return pool
+}
+
+func restoreReplayInputs(t *testing.T, pool *pgxpool.Pool, log *memLog, snap replaySnapshot) {
+	t.Helper()
 	ctx := context.Background()
 	for _, f := range log.facts {
 		if _, err := pool.Exec(ctx, `INSERT INTO tv_facts(event_id,event_type,payload,knowledge_at,seq) VALUES($1,$2,$3,$4,$5)`, f.EventID, f.EventType, f.Payload, f.Knowledge, f.Seq); err != nil {
@@ -27,7 +33,18 @@ func restoredReplayFixture(t *testing.T) *pgxpool.Pool {
 	if err := NewPostgresLog(pool).SaveCheckpoint(ctx, snap.checkpointSeq, snap.checkpoint); err != nil {
 		t.Fatal("restore checkpoint failed")
 	}
-	return pool
+}
+
+func TestReplayVerifierPostgresRefusesRoundedCheckpoint(t *testing.T) {
+	pool := newPool(t, testTenant)
+	freshSchema(t, pool)
+	// Keep the tiny execution resident. Evicting it into exact baseline strings
+	// would accidentally hide the serialization-only verifier's false positive.
+	log, snap := roundedReplayFixtureAt(t, time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond))
+	restoreReplayInputs(t, pool, log, snap)
+	if _, err := VerifyPostgresSnapshot(context.Background(), pool, testTenant, 7*24*time.Hour); !errors.Is(err, ErrReplayMismatch) {
+		t.Fatal("rounded restored checkpoint qualified")
+	}
 }
 
 func TestReplayVerifierPostgresRestoredSnapshot(t *testing.T) {
