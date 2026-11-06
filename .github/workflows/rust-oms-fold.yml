@@ -103,6 +103,16 @@ jobs:
             sleep 1
           done
           exit 1
+      - name: Bootstrap canonical disposable position streams
+        run: |
+          set -euo pipefail
+          awk '/^  bootstrap\.sh: \|/{f=1;next} f&&/^---/{exit} f{sub(/^    /,"");print}' \
+            kanz/infra/nats/bootstrap-job.yaml > "$RUNNER_TEMP/oms-bootstrap.sh"
+          test -s "$RUNNER_TEMP/oms-bootstrap.sh"
+          docker run --rm -i --network host --memory=256m --cpus=1 --pids-limit=128 \
+            -e NATS_URL=nats://127.0.0.1:4222 -e NATS_REPLICAS=1 \
+            natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c \
+            sh -s < "$RUNNER_TEMP/oms-bootstrap.sh"
       - name: Compare actual stamped worker through the OMS supervisor
         working-directory: kanz
         env:
@@ -114,7 +124,7 @@ jobs:
           TEST_NATS_URL: nats://127.0.0.1:4222
         run: |
           set -o pipefail
-          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/tools/store-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
+          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/internal/position ./services/oms/tools/store-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_oms_fold_evidence.py
           python3 ../.github/scripts/check_oms_fold_evidence.py "$RUNNER_TEMP/oms-fold.jsonl"

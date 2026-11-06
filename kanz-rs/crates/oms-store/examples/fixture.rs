@@ -22,6 +22,8 @@ struct Input {
     #[serde(default)]
     relay_hold_ms: u64,
     #[serde(default)]
+    base_currency: String,
+    #[serde(default)]
     relay_stop_after_ms: u64,
     #[serde(default)]
     proposal: Option<ProposalInput>,
@@ -298,6 +300,9 @@ async fn run(input: Input) -> Result<Value, ()> {
     if !matches!(
         input.mode.as_str(),
         "save"
+            | "position-apply"
+            | "position-snapshot"
+            | "position-projector"
             | "relay-once"
             | "relay-flush"
             | "relay-run"
@@ -439,6 +444,30 @@ async fn run(input: Input) -> Result<Value, ()> {
             )
             .await
             .map_err(|_| ())?;
+        if input.mode=="position-projector" { return relay_support::run(config.clone(),&mut client,&input).await; }
+        if input.mode.starts_with("position-") {
+            use kanz_oms_store::position;
+            let at=input.at.as_ref().ok_or(())?.time()?;
+            if input.mode=="position-snapshot" {
+                return Ok(match position::snapshot(&mut client,&input.tenant,&input.portfolio_id,at,&input.base_currency).await {
+                    Ok(value)=>json!({"status":"snapshot","state":STANDARD.encode(value.encode_to_vec())}),Err(e)=>json!({"status":e.to_string()}),
+                });
+            }
+            let fill=bytes(&input.fill)?;
+            let templates=input.records.into_iter().map(record).collect::<Result<Vec<_>,_>>()?;
+            let result=position::apply(&mut client,&input.tenant,&input.portfolio_id,&fill,at,&input.base_currency,|applied|{
+                if input.other=="announce-fail" { return Err(kanz_oms_store::Error::InvalidInput); }
+                if !input.other.is_empty() || (!templates.is_empty() && !(2..=3).contains(&templates.len())) {return Err(kanz_oms_store::Error::InvalidInput);}
+                let mut records=templates;
+                for (r,state) in records.iter_mut().take(2).zip([&applied.aggregate,&applied.venue]) {
+                    r.payload=state.encode_to_vec();
+                    let stamp=state.as_of.as_ref().ok_or(kanz_oms_store::Error::InvalidInput)?;
+                    r.event_time=Clock{seconds:stamp.seconds,nanos:stamp.nanos.try_into().map_err(|_|kanz_oms_store::Error::InvalidInput)?}.time().map_err(|_|kanz_oms_store::Error::InvalidInput)?;
+                }
+                Ok(records)
+            }).await;
+            return Ok(match result {Ok(value)=>json!({"status":"applied","venue":STANDARD.encode(value.venue.encode_to_vec()),"aggregate":STANDARD.encode(value.aggregate.encode_to_vec())}),Err(e)=>json!({"status":e.to_string()})});
+        }
         if input.mode.starts_with("relay-") { return relay_support::run(config.clone(),&mut client,&input).await; }
         if input.mode.starts_with("proposal-") {
             use kanz_oms_store::proposals;

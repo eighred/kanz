@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/recovery.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/position.rs", "src/position_math.rs", "src/position_projector.rs", "src/recovery.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -149,7 +149,7 @@ func checkRustOMSStoreBoundary(root string) error {
 			}
 		}
 	}
-	if strings.Count(found["src/fee_journal.rs"], `tx:&'txmutTransaction<'connection>`) != 2 || strings.Count(found["src/fee_journal.rs"], `identity::same_except_fee(original.value(),revised.value())`) != 2 {
+	if strings.Count(found["src/fee_journal.rs"], `tx:&'txmutTransaction<'connection>`) != 2 || strings.Count(found["src/fee_journal.rs"], `identity::same_except_fee(original.value(),revised.value())`) != 3 {
 		return fmt.Errorf("fee token must exclusively borrow caller transaction and validate both head/append economics")
 	}
 	for _, marker := range []string{`validate_batch(state,records,64,MAX_BYTES)`, `message_field(wire,2)`, `claim(&tx,&st.order_id,&key,fill_id).await?`, `journal(&tx,&st.order_id,fill_id,&fill,&raw).await?`} {
@@ -173,7 +173,7 @@ func checkRustOMSStoreBoundary(root string) error {
 		}
 	}
 	for file, markers := range map[string][]string{
-		"src/fee_journal.rs":  {`tx:&'txmutTransaction<'connection>`, `scope_existing(tx,tenant).await?`, `cas(tx,&st,state,expected_version).await?`, `self.scoped().await?`, `current.as_deref()!=Some(self.tenant.as_str())`, `if!recorded.equivalent(revised)`, `delta:BigRational::zero()`, `fresh:false`, `fee_revision::approved_delta(&previous,revised)?`, `previous.journal_bytes()?`, `revised.journal_bytes()?`, `ORDERBYrevision_sequenceDESCLIMIT1`, `identity::same_except_fee(original.value(),revised.value())`, `octet_length(revised_fill)::bigint<=$2`, `octet_length(revised_fill)::bigint<=$3`, `validate_write(&self.state,records)?`, `enqueue(self.tx,records).await`},
+		"src/fee_journal.rs":  {`record_for(self.tx,Book::Oms,original,revised).await`, `head_for(tx,Book::Oms,original).await`, `WHEREbook=$4ANDexecution_key=$1ANDcase_id=$2`, `WHEREbook=$3ANDexecution_key=$1ORDERBY`, `tx:&'txmutTransaction<'connection>`, `scope_existing(tx,tenant).await?`, `cas(tx,&st,state,expected_version).await?`, `self.scoped().await?`, `current.as_deref()!=Some(self.tenant.as_str())`, `if!recorded.equivalent(revised)`, `delta:BigRational::zero()`, `fresh:false`, `fee_revision::approved_delta(&previous,revised)?`, `previous.journal_bytes()?`, `revised.journal_bytes()?`, `ORDERBYrevision_sequenceDESCLIMIT1`, `identity::same_except_fee(original.value(),revised.value())`, `octet_length(revised_fill)::bigint<=$2`, `octet_length(revised_fill)::bigint<=$3`, `validate_write(&self.state,records)?`, `enqueue(self.tx,records).await`},
 		"src/fee_revision.rs": {`!(-64..=64).contains(&d.exponent)`, `hash.update((part.len()asu64).to_be_bytes())`, `normalize(&a.proposer)==normalize(&a.approver)`, `economic_digest(previous.value()).map_err(|_|Error::FeeRevision)?!=a.previous_execution_digest`, `identity::same_execution(previous.value(),approved.value())`, `amount(previous.value())?-amount(revised.value())?`},
 	} {
 		for _, marker := range markers {

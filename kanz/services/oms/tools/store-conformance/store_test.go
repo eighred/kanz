@@ -54,6 +54,8 @@ func run(t *testing.T, input map[string]any) string {
 }
 
 type fixtureResult struct {
+	Venue          []byte         `json:"venue"`
+	Aggregate      []byte         `json:"aggregate"`
 	SessionsClosed bool           `json:"sessions_closed"`
 	Sent           int            `json:"sent"`
 	Stalled        string         `json:"stalled"`
