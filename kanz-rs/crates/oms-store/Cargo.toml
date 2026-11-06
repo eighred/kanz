@@ -11,6 +11,9 @@ kanz-decimal-compat = { path = "../.." }
 prost = "=0.14.1"
 prost-types = "=0.14.1"
 sha2 = "=0.10.9"
+num-bigint = "=0.4.6"
+num-rational = "=0.4.2"
+num-traits = "=0.2.19"
 tokio-postgres = "=0.7.18"
 
 [dev-dependencies]

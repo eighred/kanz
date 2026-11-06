@@ -18,6 +18,8 @@ use tokio_postgres::{config::Host, NoTls};
 struct Input {
     mode: String,
     #[serde(default)]
+    rollback: bool,
+    #[serde(default)]
     statuses: Vec<i32>,
     #[serde(default)]
     parent_id: String,
@@ -88,6 +90,34 @@ fn record(r: Fact) -> Result<Record, ()> {
     })
 }
 async fn run(input: Input) -> Result<Value, ()> {
+    if matches!(
+        input.mode.as_str(),
+        "fee-digest" | "fee-terms" | "fee-delta"
+    ) {
+        let raw = bytes(&input.fill)?;
+        let other = bytes(&input.other)?;
+        let result: Result<Value, kanz_oms_store::Error> = (|| {
+            let revised = FillWire::decode(&raw)?;
+            match input.mode.as_str() {
+                "fee-digest" => Ok(
+                    json!({"status":kanz_oms_store::fee_revision::economic_digest(revised.value())?}),
+                ),
+                "fee-terms" => Ok(
+                    json!({"status":"terms","state":STANDARD.encode(kanz_oms_store::fee_revision::terms(&revised)?.journal_bytes()?)}),
+                ),
+                _ => {
+                    let previous = FillWire::decode(&other)?;
+                    Ok(
+                        json!({"status":"delta","delta":kanz_oms_store::fee_revision::approved_delta(&previous,&revised)?.to_string()}),
+                    )
+                }
+            }
+        })();
+        return Ok(match result {
+            Ok(v) => v,
+            Err(e) => json!({"status":e.to_string()}),
+        });
+    }
     if input.mode == "fee-wire" {
         let raw = bytes(&input.fill)?;
         let other = bytes(&input.other)?;
@@ -130,6 +160,7 @@ async fn run(input: Input) -> Result<Value, ()> {
             | "list-by-status"
             | "list-by-parent"
             | "list-by-portfolio"
+            | "fee-revision"
     ) || !input.schema.starts_with("oms_store_")
         || input.schema.len() > 63
         || !input
@@ -156,6 +187,29 @@ async fn run(input: Input) -> Result<Value, ()> {
             )
             .await
             .map_err(|_| ())?;
+        if input.mode=="fee-revision" {
+            let original=FillWire::decode(&bytes(&input.other)?).map_err(|_|())?;
+            let revised=FillWire::decode(&bytes(&input.fill)?).map_err(|_|())?;
+            let state=bytes(&input.state)?;
+            let records=input.records.into_iter().map(record).collect::<Result<Vec<_>,_>>()?;
+            let mut tx=client.transaction().await.map_err(|_|())?;
+            let result=async {
+                let mut locked=kanz_oms_store::fee_journal::cas_order(&mut tx,&input.tenant,&state,input.expected_version).await?;
+                let revision=locked.record_fee_revision(&original,&revised).await?;
+                locked.enqueue(&records).await?;
+                Ok::<_,kanz_oms_store::Error>(revision)
+            }.await;
+            return Ok(match result {
+                Err(e)=>{tx.rollback().await.map_err(|_|())?;json!({"status":e.to_string()})},
+                Ok(revision)=>{
+                    if input.rollback {tx.rollback().await.map_err(|_|())?;json!({"status":"rolled_back","delta":revision.delta.to_string(),"fresh":revision.fresh})}
+                    else {match tx.commit().await {
+                        Ok(())=>json!({"status":"committed","delta":revision.delta.to_string(),"fresh":revision.fresh}),
+                        Err(_)=>json!({"status":"CommitUnconfirmed"}),
+                    }}
+                },
+            });
+        }
         if input.mode=="list-by-portfolio" {
             return Ok(match queries::list_by_portfolio(&mut client,&input.tenant,&input.portfolio_id,input.limit).await {
                 Ok(page)=>json!({"status":"orders","states":page.states.iter().map(|s|STANDARD.encode(s)).collect::<Vec<_>>(),"unindexed":page.unindexed}),

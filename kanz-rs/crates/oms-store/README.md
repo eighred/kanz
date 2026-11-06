@@ -45,7 +45,7 @@ entire claim result, including any rows evaluated before the failure.
 Scoped execution keys reproduce Go JSON escaping before SHA256. Duplicate
 economic equality uses canonical exact Decimal comparison, presence and venue
 time. It recognizes the original execution or the latest validated fee head;
-it does not authorize or write fee corrections. Legacy claims without a journal
+the duplicate-fill path does not authorize or write fee corrections. Legacy claims without a journal
 retain their existing treatment. Unowned pending outbox rows block new FACTs.
 
 `CommitUnconfirmed` means the commit did not return confirmation. It does not
@@ -79,7 +79,7 @@ state, raw bytes, versions, claims, journal and outbox. Restart tests restart th
 client process/pool, not the PostgreSQL server.
 
 Unported: admission, venue calls, orchestration, the Store Outbox/Proposals owners, `CommitRecovery` and its wider
-transaction, fee approval/write lifecycle, outbox relay, migrations, production
+transaction, fee approval/proposal and full recovery lifecycle, outbox relay, migrations, production
 fencing and rollout. Deployment and exclusive writer handoff need separate
 recovery, rollback, capability and latency proof. This library is not a second
 production OMS and does not close the migration.
@@ -115,6 +115,28 @@ Principal normalization uses tables generated from the pinned Go Unicode package
 not Rust full lowercase. CI regenerates the tables byte-for-byte and compares
 normalization of every Unicode scalar with Go through the stamped fixture.
 This is compatibility data, not authentication, approval or a second policy.
-These helpers do not append fee revisions, compute fee deltas, authorize a
-correction, or commit transactions. Those operations still need their complete
-caller-owned transaction and independent financial proof.
+The fee transaction module uses those helpers for the OMS fee journal. The caller
+begins and commits or rolls back its transaction. `cas_order` borrows that
+transaction exclusively, applies the shared tenant/RLS checks and canonical order
+CAS, and returns an opaque token for fee-head reads, revision append and prepared
+outbox insertion. It never opens or commits a separate transaction. Original
+execution provenance, approval authentication, checkpoint updates and the final
+commit remain the caller's responsibility. Any error after CAS requires the caller
+to roll back the entire transaction; a Rust error alone does not undo SQL writes.
+Existing CAS upsert semantics are not
+proof of an observed trade or authorization.
+
+Fee deltas use exact rational arithmetic (previous fee minus revised fee), with
+no Decimal quantization. Economic digests reproduce Go length-prefix hashing,
+rational text and UTC event-time formatting. Same-case replay compares all known
+and retained unknown protobuf fields before consulting the latest head, preserving
+ABA replay. Journal bytes are deterministic, while original execution bytes remain
+unchanged. Only the OMS book is writable through this token; other books retain
+their existing owners. Fee-head and replay reads refuse oversized stored values
+before transferring them to the client.
+
+The actual-process qualification requires independent digest/delta checks and ten
+PostgreSQL cases covering replay, conflicts, CAS races, rollback, deferred commit
+failure, tenant scope, other-book separation and corrupt heads. Local skips do not
+satisfy this evidence. This source primitive adds no production caller, approval
+authority, recovery orchestration or exclusive writer handoff.

@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 //! Existing OMS Save transaction semantics; no network listener, runtime configuration,
-//! admission, recovery authorization, fee writer or production caller.
+//! admission, recovery authorization or production caller.
+pub mod fee_journal;
+pub mod fee_revision;
 pub mod fee_subject;
 pub mod fee_wire;
 mod go_unicode;
 pub mod identity;
 pub mod queries;
-use identity::{execution_key, same_except_fee, same_execution};
+use identity::{execution_key, same_execution};
 use kanz_oms_fold_shadow::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;
 use std::time::SystemTime;
@@ -149,24 +151,12 @@ async fn duplicate(tx: &Transaction<'_>, fill: Option<&Fill>) -> Result<(), Erro
     if raw.len() > MAX_BYTES {
         return Err(Error::InvalidInput);
     }
-    let original = Fill::decode(raw.as_slice()).map_err(|_| Error::InvalidInput)?;
-    if same_execution(&original, fill) {
+    let original = fee_wire::FillWire::decode(&raw)?;
+    if same_execution(original.value(), fill) {
         return Ok(());
     }
-    let key = execution_key(&original);
-    let head=tx.query_opt("SELECT revised_fill FROM execution_fee_revisions WHERE book='oms' AND execution_key=$1 ORDER BY revision_sequence DESC LIMIT 1",&[&key]).await?;
-    let Some(head) = head else {
-        return Err(Error::IdentityConflict);
-    };
-    let raw: Vec<u8> = head.get(0);
-    if raw.len() > MAX_BYTES {
-        return Err(Error::InvalidInput);
-    }
-    let revised = Fill::decode(raw.as_slice()).map_err(|_| Error::InvalidInput)?;
-    if !same_except_fee(&original, &revised) {
-        return Err(Error::FeeRevision);
-    }
-    if !same_execution(&revised, fill) {
+    let revised = fee_journal::head(tx, &original).await?;
+    if !same_execution(revised.value(), fill) {
         return Err(Error::IdentityConflict);
     }
     Ok(())
@@ -200,10 +190,15 @@ fn validate_write(state: &[u8], records: &[Record]) -> Result<OrderState, Error>
     Ok(st)
 }
 async fn scoped<'a>(client: &'a mut Client, tenant: &str) -> Result<Transaction<'a>, Error> {
+    let tx = client.transaction().await?;
+    scope_existing(&tx, tenant).await?;
+    Ok(tx)
+}
+async fn scope_existing(tx: &Transaction<'_>, tenant: &str) -> Result<(), Error> {
     if tenant.is_empty() || tenant.len() > 256 {
         return Err(Error::InvalidInput);
     }
-    let role = client
+    let role = tx
         .query_one(
             "SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user",
             &[],
@@ -212,7 +207,6 @@ async fn scoped<'a>(client: &'a mut Client, tenant: &str) -> Result<Transaction<
     if role.get::<_, bool>(0) || role.get::<_, bool>(1) {
         return Err(Error::UnsafeRole);
     }
-    let tx = client.transaction().await?;
     tx.query_one("SELECT set_config('app.tenant_id',$1,true)", &[&tenant])
         .await?;
     // Every write uses the canonical tables, which must retain forced tenant RLS.
@@ -220,7 +214,7 @@ async fn scoped<'a>(client: &'a mut Client, tenant: &str) -> Result<Transaction<
     if tables.get::<_, i64>(0) != 5 {
         return Err(Error::UnsafeRole);
     }
-    Ok(tx)
+    Ok(())
 }
 async fn enqueue(tx: &Transaction<'_>, records: &[Record]) -> Result<(), Error> {
     for r in records {
@@ -356,12 +350,21 @@ pub async fn save(
             tx.execute("INSERT INTO order_executions (order_id,fill_id,venue,venue_account_id,instrument_id,venue_execution_id,fill) VALUES ($1,$2,$3,$4,$5,$6,$7)",&[&st.order_id,&fill_id,&fill.venue,&fill.venue_account_id,&fill.instrument_id,&fill.venue_execution_id,&raw]).await?;
         }
     }
+    cas(&tx, &st, state, expected_version).await?;
+    enqueue(&tx, records).await?;
+    commit(tx).await
+}
+async fn cas(
+    tx: &Transaction<'_>,
+    st: &OrderState,
+    state: &[u8],
+    expected_version: i64,
+) -> Result<(), Error> {
     let count=tx.execute("INSERT INTO orders (tenant_id,order_id,status,state,portfolio_id,parent_order_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3,$5,$6) ON CONFLICT (tenant_id,order_id) DO UPDATE SET status=EXCLUDED.status,state=EXCLUDED.state,portfolio_id=EXCLUDED.portfolio_id,parent_order_id=EXCLUDED.parent_order_id,version=orders.version+1,updated_at=now() WHERE orders.version=$4",&[&st.order_id,&st.status,&state,&expected_version,&st.portfolio_id,&st.parent_order_id]).await?;
     if count == 0 {
         return Err(Error::Conflict);
     }
-    enqueue(&tx, records).await?;
-    commit(tx).await
+    Ok(())
 }
 async fn commit(tx: Transaction<'_>) -> Result<(), Error> {
     // Connection loss around COMMIT is not proof of rollback. Callers must

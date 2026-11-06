@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/fee_wire.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -26,6 +26,9 @@ kanz-decimal-compat = { path = "../.." }
 prost = "=0.14.1"
 prost-types = "=0.14.1"
 sha2 = "=0.10.9"
+num-bigint = "=0.4.6"
+num-rational = "=0.4.2"
+num-traits = "=0.2.19"
 tokio-postgres = "=0.7.18"
 [dev-dependencies]
 tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "time"] }
@@ -137,8 +140,26 @@ func checkRustOMSStoreBoundary(root string) error {
 			}
 		}
 	}
+	if strings.Count(found["src/fee_journal.rs"], `tx:&'txmutTransaction<'connection>`) != 2 || strings.Count(found["src/fee_journal.rs"], `identity::same_except_fee(original.value(),revised.value())`) != 2 {
+		return fmt.Errorf("fee token must exclusively borrow caller transaction and validate both head/append economics")
+	}
+	for _, forbidden := range []string{".transaction(", ".commit(", ".rollback("} {
+		if strings.Contains(found["src/fee_journal.rs"], forbidden) {
+			return fmt.Errorf("fee primitive owns caller transaction lifecycle")
+		}
+	}
 	for file, markers := range map[string][]string{
-		"src/lib.rs":          {`iftenant.is_empty()||tenant.len()>256`, `client.transaction().await?`, `set_config('app.tenant_id',$1,true)`, `rolsuper,rolbypassrls`, `relrowsecurityANDrelforcerowsecurity`, `tables.get::<_,i64>(0)!=5`, `WHEREorders.version=$4`, `ONCONFLICT(tenant_id,fill_id)DONOTHING`, `duplicate(&tx,fill.as_ref().map(|f|&f.0)).await?`, `same_except_fee(&original,&revised)`, `ORDERBYrevision_sequenceDESCLIMIT1`, `producer_serviceISNULL`, `tx.commit().await.map_err(|_|Error::CommitUnconfirmed)?`, `&state`, `&r.payload`, `fill_wire(&r.payload)?`},
+		"src/fee_journal.rs":  {`tx:&'txmutTransaction<'connection>`, `scope_existing(tx,tenant).await?`, `cas(tx,&st,state,expected_version).await?`, `self.scoped().await?`, `current.as_deref()!=Some(self.tenant.as_str())`, `if!recorded.equivalent(revised)`, `delta:BigRational::zero()`, `fresh:false`, `fee_revision::approved_delta(&previous,revised)?`, `previous.journal_bytes()?`, `revised.journal_bytes()?`, `ORDERBYrevision_sequenceDESCLIMIT1`, `identity::same_except_fee(original.value(),revised.value())`, `octet_length(revised_fill)::bigint<=$2`, `octet_length(revised_fill)::bigint<=$3`, `validate_write(&self.state,records)?`, `enqueue(self.tx,records).await`},
+		"src/fee_revision.rs": {`!(-64..=64).contains(&d.exponent)`, `hash.update((part.len()asu64).to_be_bytes())`, `normalize(&a.proposer)==normalize(&a.approver)`, `economic_digest(previous.value()).map_err(|_|Error::FeeRevision)?!=a.previous_execution_digest`, `identity::same_execution(previous.value(),approved.value())`, `amount(previous.value())?-amount(revised.value())?`},
+	} {
+		for _, marker := range markers {
+			if !strings.Contains(found[file], marker) {
+				return fmt.Errorf("fee transaction missing %s: %s", file, marker)
+			}
+		}
+	}
+	for file, markers := range map[string][]string{
+		"src/lib.rs":          {`iftenant.is_empty()||tenant.len()>256`, `client.transaction().await?`, `set_config('app.tenant_id',$1,true)`, `rolsuper,rolbypassrls`, `relrowsecurityANDrelforcerowsecurity`, `tables.get::<_,i64>(0)!=5`, `WHEREorders.version=$4`, `ONCONFLICT(tenant_id,fill_id)DONOTHING`, `duplicate(&tx,fill.as_ref().map(|f|&f.0)).await?`, `fee_journal::head(tx,&original).await?`, `producer_serviceISNULL`, `tx.commit().await.map_err(|_|Error::CommitUnconfirmed)?`, `&state`, `&r.payload`, `fill_wire(&r.payload)?`},
 		"examples/fixture.rs": {`config.get_hostaddrs().is_empty()`, `s=="127.0.0.1"||s=="localhost"||s=="::1"`, `if!local_config(&config)`, `Duration::from_secs(20)`, `option_env!("KANZ_BUILD_VERSION")`, `std::io::stdin().take(2*1024*1024+1)`, `input.schema.starts_with("oms_store_")`},
 	} {
 		for _, marker := range markers {
@@ -157,7 +178,7 @@ func TestRustOMSStoreBoundary(t *testing.T) {
 }
 
 func checkRustOMSStoreEvidence(workflow, checker string) error {
-	for _, marker := range []string{"TestPinnedGoUnicodeTable", "TestRustFeeUnicodeCompatibility", "TestRustFeeWireCompatibility/", "TestRustFeeWireRefusals/", "unknown-value-encoding", "duplicate-embedded-unknown", "known-wrong-wire-is-unknown", "TestRustRepositoryQueries/", "list-status-parent-exact", "portfolio-page-count-backfill", "tenant-same-ids", "corruption-capacity-no-prefix", "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result", "TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
+	for _, marker := range []string{"TestFeeEconomicIndependentOracle", "TestRustFeeEconomicCompatibility", "TestRustFeeTermsCompatibility", "TestRustFeeJournalTransactions/", "commit-restart-aba-replay", "case-conflict-stale-head", "concurrent-cas-one-revision", "explicit-rollback", "outbox-failure-atomic", "deferred-commit-atomic", "tenant-same-execution-case", "other-book-not-oms-head", "corrupt-bounded-head", "scope-and-order-refusal", "TestPinnedGoUnicodeTable", "TestRustFeeUnicodeCompatibility", "TestRustFeeWireCompatibility/", "TestRustFeeWireRefusals/", "unknown-value-encoding", "duplicate-embedded-unknown", "known-wrong-wire-is-unknown", "TestRustRepositoryQueries/", "list-status-parent-exact", "portfolio-page-count-backfill", "tenant-same-ids", "corruption-capacity-no-prefix", "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result", "TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
 		if !strings.Contains(checker, marker) {
 			return fmt.Errorf("missing lifecycle proof %s", marker)
 		}
@@ -193,7 +214,7 @@ func TestRustOMSStoreEvidenceAndMutations(t *testing.T) {
 			t.Fatalf("missing workflow gate %s accepted", marker)
 		}
 	}
-	for _, marker := range []string{"legacy-alias", "fee-head-duplicate-and-corruption", "commit-failure-rollback-reclaim"} {
+	for _, marker := range []string{"legacy-alias", "fee-head-duplicate-and-corruption", "commit-failure-rollback-reclaim", "concurrent-cas-one-revision", "deferred-commit-atomic", "TestRustFeeTermsCompatibility"} {
 		mut := strings.ReplaceAll(string(c), marker, "")
 		if checkRustOMSStoreEvidence(string(w), mut) == nil {
 			t.Fatalf("missing case %s accepted", marker)
@@ -203,6 +224,14 @@ func TestRustOMSStoreEvidenceAndMutations(t *testing.T) {
 func TestRustOMSStoreBoundaryMutations(t *testing.T) {
 	source := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
 	for _, tc := range []struct{ file, from, to string }{
+		{"src/fee_journal.rs", "tx: &'tx mut Transaction<'connection>", "tx: &'tx Transaction<'connection>"},
+		{"src/fee_journal.rs", "scope_existing(tx, tenant).await?", "Ok::<(), Error>(())?"},
+		{"src/fee_journal.rs", "cas(tx, &st, state, expected_version).await?", "Ok::<(), Error>(())?"},
+		{"src/fee_journal.rs", "if !recorded.equivalent(revised)", "if false"},
+		{"src/fee_journal.rs", "octet_length(revised_fill)::bigint<=$3", "true"},
+		{"src/fee_journal.rs", "octet_length(revised_fill)::bigint<=$2", "true"},
+		{"src/fee_revision.rs", "normalize(&a.proposer) == normalize(&a.approver)", "false"},
+		{"src/fee_revision.rs", "identity::same_execution(previous.value(), approved.value())", "true"},
 		{"src/queries.rs", "parent_order_id=$1 AND parent_order_id<>''", "parent_order_id=$1"},
 		{"src/queries.rs", "rows.len() > MAX_ROWS", "false"},
 		{"src/fee_wire.rs", "self.unknown.equivalent(&other.unknown)", "true"},
@@ -222,7 +251,7 @@ func TestRustOMSStoreBoundaryMutations(t *testing.T) {
 		{"src/lib.rs", ".try_get::<_, Option<String>>(0)?", ".try_get::<_, Option<String>>(1)?"},
 		{"src/lib.rs", "tenant.is_empty()", "false"}, {"src/lib.rs", "set_config('app.tenant_id',$1,true)", "set_config('app.tenant_id',$1,false)"},
 		{"src/lib.rs", "relrowsecurity AND relforcerowsecurity", "relrowsecurity"}, {"src/lib.rs", "WHERE orders.version=$4", "WHERE true"},
-		{"src/lib.rs", "Error::CommitUnconfirmed", "Error::Database"}, {"src/lib.rs", "same_except_fee(&original, &revised)", "true"},
+		{"src/lib.rs", "Error::CommitUnconfirmed", "Error::Database"}, {"src/fee_journal.rs", "identity::same_except_fee(original.value(), revised.value())", "true"},
 		{"src/lib.rs", "producer_service IS NULL", "false"}, {"src/lib.rs", "fill_wire(&r.payload)?", "Vec::new()"},
 		{"examples/fixture.rs", "config.get_hostaddrs().is_empty()", "true"}, {"examples/fixture.rs", "if !local_config(&config)", "if false"},
 	} {
