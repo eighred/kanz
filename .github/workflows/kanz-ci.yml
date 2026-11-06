@@ -59,6 +59,9 @@ jobs:
       - name: Verify replay platform resolution refusals
         shell: pwsh
         run: ./tools/Test-TvReplayPlatform.ps1
+      - name: Verify replay wrapper source and old-release preflight
+        shell: pwsh
+        run: ./tools/Test-TvReplayPreflight.ps1
       - name: Verify installer fails closed on registry errors
         shell: pwsh
         run: ./tools/Test-EcrReleaseDigest.ps1
