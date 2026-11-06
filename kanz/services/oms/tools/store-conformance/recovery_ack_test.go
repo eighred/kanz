@@ -187,7 +187,9 @@ func TestRustRecoveryAcknowledgements(t *testing.T) {
 			t.Run(variant, func(t *testing.T) {
 				f := acknowledgementFixture(t)
 				req := f.ackRequest(0, "ledger")
-				query := "UPDATE execution_recovery_cases SET expected_ack_count=0"
+				// Keep canonical version progression while deliberately corrupting only
+				// the derived count; never disable the evidence-preservation trigger.
+				query := "UPDATE execution_recovery_cases SET expected_ack_count=0,version=version+1"
 				if variant == "extra-target" {
 					query = "INSERT INTO execution_recovery_targets(case_id,execution_key,payload_digest,execution_digest) VALUES ('case','extra','digest','execution')"
 				}
