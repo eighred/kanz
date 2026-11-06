@@ -185,6 +185,36 @@ class VerdictTests(unittest.TestCase):
                            ("GITHUB_RUN_ATTEMPT", "0"), ("GITHUB_EVENT_NAME", "pull_request_target")):
             with self.subTest(key=key), self.assertRaises(gate.Refused): gate.source({**env, key:value})
 
+    def test_go_extraction_generates_the_canonical_sdk_first(self):
+        workflow = (Path(__file__).resolve().parents[1]/"workflows/codeql.yml").read_text(encoding="utf8")
+        def valid(text):
+            start = text.find("    - name: Set up canonical Go toolchain")
+            end = text.find("    # Initializes the CodeQL tools for scanning.")
+            if start < 0 or end < start:
+                return False
+            setup = text[start:end]
+            return (setup.count("if: matrix.language == 'go'") == 3
+                    and "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e" in setup
+                    and "go-version-file: kanz/go.mod" in setup
+                    and "uses: ./.github/actions/setup-buf" in setup
+                    and "version: 1.69.0" in setup
+                    and "protoc-gen-go@v1.36.11" in setup
+                    and "protoc-gen-go-grpc@v1.5.1" in setup
+                    and 'export PATH="$(go env GOPATH)/bin:$PATH"' in setup
+                    and "working-directory: kanz-schemas" in setup
+                    and "buf generate" in setup
+                    and "bash bootstrap-go-sdk.sh" in setup
+                    and "continue-on-error" not in setup)
+        self.assertTrue(valid(workflow))
+        for old, new in (("buf generate", "echo skipped"),
+                         ("bash bootstrap-go-sdk.sh", "echo skipped"),
+                         ("protoc-gen-go-grpc@v1.5.1", "protoc-gen-go-grpc@latest"),
+                         ("version: 1.69.0", "version: latest"),
+                         ("if: matrix.language == 'go'", "if: false"),
+                         ("    # Initializes the CodeQL tools for scanning.", "    # removed")):
+            with self.subTest(mutation=old):
+                self.assertFalse(valid(workflow.replace(old, new, 1)))
+
     def test_workflow_wires_current_action_outputs_and_retains_default_queries(self):
         workflow = (Path(__file__).resolve().parents[1]/"workflows/codeql.yml").read_text(encoding="utf8")
         def valid(text):

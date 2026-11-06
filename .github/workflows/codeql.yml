@@ -107,6 +107,29 @@ jobs:
     # - name: Setup runtime (example)
     #   uses: actions/setup-example@v1
 
+    # The canonical SDK is ignored/generated; an extraction without it is incomplete.
+    - name: Set up canonical Go toolchain
+      if: matrix.language == 'go'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: kanz/go.mod
+        cache: false
+    - name: Set up canonical schema generator
+      if: matrix.language == 'go'
+      uses: ./.github/actions/setup-buf
+      with:
+        version: 1.69.0
+    - name: Generate canonical Go SDK before extraction
+      if: matrix.language == 'go'
+      working-directory: kanz-schemas
+      shell: bash
+      run: |
+        go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+        go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+        export PATH="$(go env GOPATH)/bin:$PATH"
+        buf generate
+        bash bootstrap-go-sdk.sh
+
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
       uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
