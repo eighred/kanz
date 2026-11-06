@@ -11,6 +11,11 @@ REQUIRED = {"services/tv-sync/internal/projection": {
     "TestReplayVerifierPostgresBoundsTextBeforeReplay",
     "TestReplayVerifierPostgresRefusesPermissiveRLS",
     "TestReplayVerifierPostgresRefusesRoundedCheckpoint",
+    "TestAmbiguousAppendRepairsDurablePrefix",
+    "TestPostgresAmbiguousAppendRepairsDurablePrefix",
+    "TestPostgresAppendSerializesBeforeSequenceAllocation",
+    "TestReplayFailureRetainsOnlyCompletedPrefix",
+    "TestReadOnlyLogCannotAppend",
     "TestConcurrentAppendCannotSkipCheckpointPrefix",
     "TestPostgresConcurrentAppendCannotSkipCheckpointPrefix",
 }, "pkg/secret": {
@@ -24,4 +29,4 @@ if __name__ == "__main__":
     else:
         with open(sys.argv[1], encoding="utf-8") as source:
             verify((json.loads(line) for line in source), required=REQUIRED)
-        print("All 7 PostgreSQL, 1 append-order and 2 bounded-secret cases passed in 2 complete packages")
+        print("All 9 PostgreSQL, 4 append/replay and 2 bounded-secret cases passed in 2 complete packages")

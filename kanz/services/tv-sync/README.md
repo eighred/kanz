@@ -126,3 +126,32 @@ verify the recovered position and final watermark. This is not a distributed
 writer lease, complete-history proof or permission to run multiple writers for
 the same tenant. Existing append-error/redelivery behavior is not expanded by
 this ordering change.
+
+Durable append uncertainty (#1410/#1413): live appends take a tenant transaction
+advisory lock in a separate statement before sequence allocation, and release it
+only when the transaction resolves. `BIGSERIAL` alone is not commit ordering.
+Every successful append, including duplicate delivery, replays the stored suffix
+after the local folded watermark. Stored bytes and knowledge times are retained;
+a partial replay error returns a retry while retaining only its completed prefix.
+An append error may mean committed: it does not fold or claim rollback. The next
+FACT delivery resolves the append boundary and repairs that prefix without polling.
+
+This is not a multi-writer lease or a repair for an already-invalid checkpoint.
+Stop/drain old append writers before starting this version: they do not take the
+new lock. Unresolved old transactions must finish first. Existing checkpoint
+completeness still requires the restored-history verifier and independently
+established history coverage; do not delete, relabel or trust a checkpoint merely
+because this fix is installed. No production handoff is performed by these tests.
+The PostgreSQL regression wraps a genuinely committed append with a lost-response
+error, and separately tests two database connections, lock timeout, rollback gaps
+and tenant isolation. It does not simulate a real network partition or prove a
+multi-replica deployment safe. All new cases are mandatory in replay CI evidence.
+
+Recovery here means recovery on a subsequent successful delivery, **not guaranteed
+automatic redelivery**. The current TV consumer uses `WithDLQ` with the default
+single attempt: a transient append/replay error can be parked and deduplicated.
+With no later FACT, the missing fold may remain, and transport readiness alone
+does not establish projection completeness. The retained-retry profile currently
+refuses finite-delivery `order.*`; this fix does not change that global profile.
+TV-specific retry/serving failure behavior and actual NATS plus PostgreSQL proof
+remain activation prerequisites tracked in #1410/#1413.
