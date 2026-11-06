@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import ssl
@@ -43,6 +44,31 @@ def stop_proxy(proxy, thread):
     proxy.shutdown()
     thread.join(timeout=5)
     p.require(not thread.is_alive(), "fixture proxy cleanup incomplete")
+
+
+def fixture_references(args):
+    shapes = {
+        ("resolve",): (3, (2,)),
+        ("repo", "tags"): (4, (3,)),
+        ("manifest", "fetch"): (4, (3,)),
+        ("manifest", "push"): (5, (3,)),
+        ("blob", "fetch", "--output", "-"): (6, (5,)),
+        ("discover", "--format", "json", "--depth", "1"): (7, (6,)),
+        ("cp", "-r"): (5, (3, 4)),
+        ("attach", "--artifact-type", "application/vnd.kanz.fixture"): (6, (4,)),
+        ("push", "--config", "image.json:application/vnd.oci.image.config.v1+json"): (6, (4,)),
+        ("push",): (4, (2,)),
+    }
+    p.require(args and args[0] == "oras", "fixture accepts only ORAS")
+    for prefix, (size, positions) in shapes.items():
+        if len(args) == size and tuple(args[1:1 + len(prefix)]) == prefix:
+            refs = [args[i] for i in positions]
+            pattern = r"ghcr\.io/eighred/fixture-(?:source|destination)(?::[A-Za-z0-9_.-]{1,128}|@sha256:[0-9a-f]{64})?"
+            p.require(all(re.fullmatch(pattern, ref) for ref in refs), "nonfixture reference")
+            p.require(all(i in positions or args[i] in ("layer", "index.json", "layer:application/vnd.oci.image.layer.v1.tar")
+                          for i in range(1 + len(prefix), len(args))), "unsupported fixture argument")
+            return refs
+    raise p.Refused("unsupported fixture command")
 
 
 def fixture():
@@ -117,6 +143,7 @@ def fixture():
             proxy = ThreadingHTTPServer(("127.0.0.1", proxy_port), Proxy)
             resources.callback(proxy.server_close)
             tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls.minimum_version = ssl.TLSVersion.TLSv1_2
             tls.load_cert_chain(cert, key)
             proxy.socket = tls.wrap_socket(proxy.socket, server_side=True)
             thread = threading.Thread(target=proxy.serve_forever, daemon=True)
@@ -142,9 +169,7 @@ def fixture():
                 os.chdir(root)
 
                 def local(*args, **kwargs):
-                    p.require(args[0] == "oras", "fixture accepts only ORAS")
-                    refs = [a for a in args if "ghcr.io" in a]
-                    p.require(refs and all(a.startswith("ghcr.io/eighred/fixture-") for a in refs), "nonfixture reference")
+                    fixture_references(args)
                     mapping = "ghcr.io:443:127.0.0.1:" + str(proxy_port)
                     if args[1] == "cp":
                         args += ("--from-resolve", mapping, "--to-resolve", mapping,

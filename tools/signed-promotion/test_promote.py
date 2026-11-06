@@ -275,6 +275,20 @@ class CredentialTests(unittest.TestCase):
 
 
 class FixtureCleanupTests(unittest.TestCase):
+    def test_only_complete_fixture_registry_references_are_allowed(self):
+        import cli_fixture as fixture
+        self.assertEqual(fixture.fixture_references(("oras", "resolve", "ghcr.io/eighred/fixture-source:multi")),
+                         ["ghcr.io/eighred/fixture-source:multi"])
+        for ref in ("evil.invalid/ghcr.io/eighred/fixture-source:multi", "ghcr.io.evil.invalid/eighred/fixture-source:multi",
+                    "ghcr.io/eighred/fixture-source-evil:multi", "ghcr.io/eighred/fixture-source/other:multi",
+                    "ghcr.io/eighred/tv-sync:multi", "ghcr.io/eighred/fixture-source@sha256:bad"):
+            with self.subTest(ref=ref), self.assertRaises(p.Refused):
+                fixture.fixture_references(("oras", "resolve", ref))
+        with self.assertRaises(p.Refused):
+            fixture.fixture_references(("oras", "push", "ghcr.io/eighred/fixture-source:x", "--insecure"))
+        with self.assertRaises(p.Refused):
+            fixture.fixture_references(("oras", "delete", "ghcr.io/eighred/fixture-source:x"))
+
     def test_proxy_initialization_failure_stops_registry(self):
         import cli_fixture as fixture
         backend = mock.Mock()
