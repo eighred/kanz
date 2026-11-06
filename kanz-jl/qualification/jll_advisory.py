@@ -1,0 +1,89 @@
+"""Scanner-only JLL metadata; not a worker environment or full native clearance."""
+import hashlib
+import json
+import re
+import tomllib
+
+REGISTRY_COMMIT = 'afacc2e68d6c156d80eb9ff489370bb38d1a61f4'
+REGISTRY_SHA256 = '96987d7602353122775f08ea65ae9d3ab201c826ddc5eea71f978da45ea23b39'
+REGISTRY_URL = 'https://raw.githubusercontent.com/JuliaRegistries/General/' + REGISTRY_COMMIT + '/Registry.toml'
+OPENSSL_UUID = '458c3c95-2e84-50aa-8efc-19380b2a3a95'
+CONTROL = {'OpenSSL_jll': {'uuid': OPENSSL_UUID, 'version': '3.0.12+0'}}
+
+
+def packages(native):
+    result = {}
+    for name, item in native['jll'].items():
+        if (not re.fullmatch('[A-Za-z][A-Za-z0-9_]*_jll', name)
+                or item['name'] != name
+                or not re.fullmatch('[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}', item['uuid'])
+                or not re.fullmatch('[0-9][0-9A-Za-z.+-]{0,127}', item['version'])):
+            raise ValueError('invalid archive-bound JLL package')
+        result[name] = {k: item[k] for k in ('uuid', 'version')}
+    if len(result) != 23 or len({p['uuid'] for p in result.values()}) != len(result):
+        raise ValueError('reviewed JLL inventory scope differs')
+    return result
+
+
+def registry_identity(raw, expected):
+    if len(raw) > 4 << 20 or hashlib.sha256(raw).hexdigest() != REGISTRY_SHA256:
+        raise ValueError('pinned General registry differs')
+    registered = tomllib.loads(raw.decode())['packages']
+    for name, item in expected.items():
+        entry = registered.get(item['uuid'], {})
+        if entry.get('name') != name or entry.get('path') != 'jll/' + name[0].upper() + '/' + name:
+            raise ValueError('JLL General registry UUID/name differs')
+
+
+def manifest(expected):
+    # No Pkg instantiate or execution: input solely for the pinned Julia analyzer.
+    lines = ['julia_version = "1.13.3"', 'manifest_format = "2.0"']
+    for name, item in sorted(expected.items()):
+        lines += ['[[deps.' + name + ']]', 'uuid = ' + json.dumps(item['uuid']),
+                  'version = ' + json.dumps(item['version'])]
+    return ('\n'.join(lines) + '\n').encode()
+
+
+def validate_control(result):
+    if not any(v.get('PkgName') == 'OpenSSL_jll' and v.get('PkgID') == OPENSSL_UUID
+               and v.get('InstalledVersion') == '3.0.12+0'
+               and (v.get('VulnerabilityID') == 'CVE-2024-5535' or 'JLSEC-2026-252' in v.get('VendorIDs', []))
+               for v in result.get('Vulnerabilities', [])):
+        raise ValueError('known vulnerable JLL control not detected')
+
+
+def validate_report(report, native):
+    expected = packages(native)
+    if (report != {'registryCommit': REGISTRY_COMMIT, 'registrySHA256': REGISTRY_SHA256,
+                   'packages': expected, 'scannerManifestSHA256': hashlib.sha256(manifest(expected)).hexdigest(),
+                   'knownJLLAdvisoryControlPassed': True, 'advisories': [],
+                   'scope': 'archive-bound-JLL-metadata-only'}):
+        raise ValueError('JLL advisory evidence missing or unbound')
+
+
+def qualify(run, flags, scratch, native, manifest_result, validate_packages, report):
+    expected = packages(native)
+    raw = run(['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
+               '--max-time', '60', REGISTRY_URL], limit=4 << 20)
+    registry_identity(raw, expected)
+    registry_identity(raw, CONTROL)
+    control = scratch / 'jll-control'; control.mkdir()
+    (control / 'Manifest.toml').write_bytes(manifest(CONTROL))
+    result = manifest_result(json.loads(run(['trivy', 'fs', *flags, '.'], cwd=control)), 'Manifest.toml')
+    validate_packages(result, CONTROL)
+    validate_control(result)
+    directory = scratch / 'jll-inventory'; directory.mkdir()
+    encoded = manifest(expected)
+    (directory / 'Manifest.toml').write_bytes(encoded)
+    result = manifest_result(json.loads(run(['trivy', 'fs', *flags, '.'], cwd=directory)), 'Manifest.toml')
+    validate_packages(result, expected)
+    report.update({'registryCommit': REGISTRY_COMMIT, 'registrySHA256': REGISTRY_SHA256,
+              'packages': expected, 'scannerManifestSHA256': hashlib.sha256(encoded).hexdigest(),
+              'knownJLLAdvisoryControlPassed': True, 'advisories': [],
+              'scope': 'archive-bound-JLL-metadata-only'})
+    report['advisories'] = [{k: v.get(k) for k in ('VulnerabilityID', 'PkgName', 'PkgID', 'InstalledVersion', 'Severity')}
+                            for v in result.get('Vulnerabilities', [])]
+    if report['advisories']:
+        raise ValueError('known archive-bound JLL advisory refuses qualification')
+    validate_report(report, native)
+    return report

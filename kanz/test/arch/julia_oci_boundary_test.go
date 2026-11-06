@@ -66,6 +66,14 @@ var juliaOCIMarkers = map[string][]string{
 		"native-library-advisory-ownership-unqualified", "generated = observed['generatedNativeImages']",
 		"sum(item['size'] for item in generated.values()) > MAX_BYTES",
 	},
+	"kanz-jl/qualification/jll_advisory.py": {
+		"hashlib.sha256(raw).hexdigest() != REGISTRY_SHA256", "len(raw) > 4 << 20",
+		"entry.get('name') != name", "len(result) != 23", "registry_identity(raw, expected)",
+		"registry_identity(raw, CONTROL)", "validate_packages(result, expected)",
+		"validate_packages(result, CONTROL)", "validate_control(result)",
+		"if report['advisories']:", "known archive-bound JLL advisory refuses qualification",
+		"archive-bound-JLL-metadata-only", "'CVE-2024-5535'", "report != {",
+	},
 	"kanz-jl/qualification/install-audit.sh": {
 		"v0.72.0/trivy_0.72.0_Linux-64bit.tar.gz",
 		"bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea",
@@ -75,6 +83,7 @@ var juliaOCIMarkers = map[string][]string{
 	},
 	"kanz-jl/qualification/advisory.py": {
 		"proof.validate_report(qualification, source, digest(Path(shutil.which('julia')).resolve()),",
+		"jll_advisory.qualify(run, flags, scratch,", "jll_advisory.validate_report(report.get(\"jllAdvisory\"),",
 		"validate_control(control_scan)", "validate_image_scan(scan, image, expected)",
 		"validate_spdx(sbom, expected)", "validate_syft(syft, report['archiveConfigDigest'])",
 		"identity.archive_config_digest(archive, alias)", "if tagged != image:",

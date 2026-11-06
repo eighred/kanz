@@ -133,6 +133,13 @@ class AdvisoryTests(unittest.TestCase):
                             'NextUpdate':(now+dt.timedelta(hours=1)).isoformat(),'DownloadedAt':now.isoformat()},
                 'tools':{n:{'archiveSHA256':h,'executableSHA256':'e'*64}for n,h in a.ARCHIVES.items()},
                 'runtimeAndOSInventory':[{'name':'julia','version':'1.13.3','foundBy':'binary-classifier-cataloger'}],'otherScanFindings':[]}
+        jll = a.jll_advisory
+        q['inventory']['nativeRuntime'] = {'jll': {'Fixture'+str(i)+'_jll': {'name':'Fixture'+str(i)+'_jll',
+            'uuid':'00000000-0000-0000-0000-'+str(i).zfill(12), 'version':'1.0.0'} for i in range(23)}}
+        packages = jll.packages(q['inventory']['nativeRuntime'])
+        report['jllAdvisory'] = {'registryCommit':jll.REGISTRY_COMMIT,'registrySHA256':jll.REGISTRY_SHA256,
+            'packages':packages,'scannerManifestSHA256':a.hashlib.sha256(jll.manifest(packages)).hexdigest(),
+            'knownJLLAdvisoryControlPassed':True,'advisories':[],'scope':'archive-bound-JLL-metadata-only'}
         a.validate_report(report,q,expected)
         for key in report:
             changed=copy.deepcopy(report);del changed[key]
