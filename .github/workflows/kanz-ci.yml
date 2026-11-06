@@ -480,6 +480,16 @@ jobs:
           python3 -m unittest discover -s ../.github/scripts -p test_go_test_evidence.py
           python3 ../.github/scripts/go_test_evidence.py --packages "$RUNNER_TEMP/gotest-packages.txt" "$RUNNER_TEMP/gotest.jsonl"
 
+      - name: Prove durable catch-up before tv-sync Broker readiness
+        working-directory: kanz
+        env:
+          TEST_NATS_URL: nats://localhost:4222
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s ../.github/scripts -p test_check_tv_readiness_evidence.py
+          go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_readiness_evidence.py --pattern)" ./pkg/bus ./services/tv-sync/cmd/tv-sync ./services/tv-sync/internal/server | tee "$RUNNER_TEMP/tv-readiness-proof.jsonl"
+          python3 ../.github/scripts/check_tv_readiness_evidence.py "$RUNNER_TEMP/tv-readiness-proof.jsonl"
+
       - name: Qualify restored tv-sync snapshot without writes
         working-directory: kanz
         env:

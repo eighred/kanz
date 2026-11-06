@@ -196,9 +196,25 @@ func NewConsumer(s Subscriber, opts ...ConsumerOption) (*Consumer, error) {
 // subscribing, with nothing to wire and nothing to forget. See backlog.go for
 // the failure policy, which is the part that matters.
 func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h EventHandler) error {
+	return c.subscribe(ctx, subject, group, h, nil)
+}
+
+// SubscribeReady uses the same durable validation, deduplication and retry/DLQ
+// path as Subscribe. The callback reports transport catch-up, not full history.
+func (c *Consumer) SubscribeReady(ctx context.Context, subject, group string, h EventHandler, ready func()) error {
+	if ready == nil {
+		return errors.New("bus: durable readiness callback is required")
+	}
+	if _, ok := c.subscriber.(ReadySubscriber); !ok {
+		return errors.New("bus: transport lacks durable readiness")
+	}
+	return c.subscribe(ctx, subject, group, h, ready)
+}
+
+func (c *Consumer) subscribe(ctx context.Context, subject, group string, h EventHandler, ready func()) error {
 	stopBacklogPoll := c.startBacklogPoll(ctx, subject, group)
 	defer stopBacklogPoll()
-	return c.subscriber.Subscribe(ctx, subject, group, func(ctx context.Context, msg Message) error {
+	handle := func(ctx context.Context, msg Message) error {
 		// Terminal(), on both: these two failures are about the BYTES, and no
 		// amount of later retrying or redriving turns unframeable bytes into a
 		// valid envelope. Marking them here rather than trusting a handler to is
@@ -301,7 +317,11 @@ func (c *Consumer) Subscribe(ctx context.Context, subject, group string, h Event
 		// be deduped away by our own stranded claim.
 		c.dedup.Release(env.IdempotencyKey)
 		return lastErr
-	})
+	}
+	if ready != nil {
+		return c.subscriber.(ReadySubscriber).SubscribeReady(ctx, subject, group, handle, ready)
+	}
+	return c.subscriber.Subscribe(ctx, subject, group, handle)
 }
 
 // routeToDLQ is the pre-dispatch failure path (unframe/validate). attempts

@@ -115,3 +115,20 @@ Two required Linux secret-reader cases cover bounds and FIFO/CSI behavior.
 Those fixtures qualify the source behavior; they do not
 substitute for observing replay of the actual restored target with its matching
 verified image. No activation manifest is changed by this prerequisite.
+
+### Startup readiness and retained history
+
+Broker endpoints return 503 until every configured OMS FACT and mark subscription
+has reached initial durable catch-up. The existing durable identity, queue group,
+delivery, deduplication, retry/DLQ and shutdown-drain behavior remain in use.
+Readiness waits for both pending and unacknowledged broker deliveries; merely
+launching a consumer or receiving its last message cannot open the API. Process
+cancellation closes readiness even if a catch-up callback races with shutdown.
+
+This is an initial transport barrier, not historical completeness or continuous
+broker-health attestation. Existing DLQ/ignored-monitor-fact behavior is unchanged.
+A drained retained stream cannot prove inception history: EXECUTION retains 24h,
+and an empty local fact log plus an empty stream is not a qualified empty fund.
+Fresh-genesis/history provenance and the serving tenant mapping remain separate
+activation prerequisites under #1410/#1413; this change grants no empty-book
+permission and does not replace the isolated restored-state verifier.

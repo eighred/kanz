@@ -298,6 +298,17 @@ func (c *NATSClient) Publish(ctx context.Context, msg Message) error {
 }
 
 func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Handler) error {
+	return c.subscribeDurable(ctx, subject, group, h, nil)
+}
+
+func (c *NATSClient) SubscribeReady(ctx context.Context, subject, group string, h Handler, ready func()) error {
+	if ready == nil {
+		return errors.New("nats: durable readiness callback is required")
+	}
+	return c.subscribeDurable(ctx, subject, group, h, ready)
+}
+
+func (c *NATSClient) subscribeDurable(ctx context.Context, subject, group string, h Handler, ready func()) error {
 	stream, err := c.streamForSubject(ctx, subject)
 	if err != nil {
 		return err
@@ -475,6 +486,9 @@ func (c *NATSClient) Subscribe(ctx context.Context, subject, group string, h Han
 	)
 	if err != nil {
 		return fmt.Errorf("nats: start consume: %w", err)
+	}
+	if ready != nil {
+		waitInitialCatchup(ctx, cons, ready)
 	}
 	<-ctx.Done()
 
@@ -1139,30 +1153,8 @@ func (c *NATSClient) subscribeEphemeral(
 		return fmt.Errorf("nats: start broadcast consume: %w", err)
 	}
 
-	// ARMED = the replay that existed when we subscribed has been delivered AND acked.
-	// NumPending alone is not enough: the server can have nothing left to send while the
-	// handler is still folding what it already sent, and a caller that opened /readyz then
-	// would act on a half-learned book.
 	if ready != nil {
-		go func() {
-			t := time.NewTicker(50 * time.Millisecond)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					info, err := cons.Info(ctx)
-					if err != nil {
-						continue // transient; keep waiting rather than declare a book we do not have
-					}
-					if info.NumPending == 0 && info.NumAckPending == 0 {
-						ready()
-						return
-					}
-				}
-			}
-		}()
+		waitInitialCatchup(ctx, cons, ready)
 	}
 
 	<-ctx.Done()
@@ -1170,6 +1162,31 @@ func (c *NATSClient) subscribeEphemeral(
 	return nil
 }
 
+// One catch-up implementation for durable and ephemeral subscriptions. Pending
+// alone excludes delivered-but-unacknowledged handlers and can arm too early.
+func waitInitialCatchup(ctx context.Context, cons jetstream.Consumer, ready func()) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			info, err := cons.Info(ctx)
+			if err != nil {
+				continue
+			}
+			if info.NumPending == 0 && info.NumAckPending == 0 {
+				if ctx.Err() == nil {
+					ready()
+				}
+				return
+			}
+		}
+	}
+}
+
+var _ ReadySubscriber = (*NATSClient)(nil)
 var _ BroadcastSubscriber = (*NATSClient)(nil)
 var _ ReplaySubscriber = (*NATSClient)(nil)
 
