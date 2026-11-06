@@ -100,6 +100,7 @@ def fixture():
             accepted, denied = [], []
             hidden_subject, hidden_referrer = None, None
             hidden_discovery = []
+            immutable_tags, rejected_tags = set(), []
             expected_auth = "Basic " + base64.b64encode(b"x-access-token:fixture-token").decode()
 
             class Proxy(BaseHTTPRequestHandler):
@@ -123,6 +124,10 @@ def fixture():
                         self.send_error(413)
                         return
                     accepted.append(self.command)
+                    if self.command == "PUT" and self.path in immutable_tags:
+                        rejected_tags.append(self.path)
+                        self.send_error(409, "fixture immutable tag")
+                        return
                     headers = {k: v for k, v in self.headers.items()
                                if k.lower() not in ("authorization", "connection", "host")}
                     conn = HTTPConnection("127.0.0.1", backend_port, timeout=10)
@@ -261,6 +266,29 @@ def fixture():
                 p.require(attestation in observed["edges"][platform], "verified subject reverse edge missing")
                 p.require(p.graph(source, identity) == observed, "source canonical graph changed")
                 p.require(p.graph(target, identity) == observed, "actual recursive graph copy mismatch")
+                immutable_tags.update({"/v2/eighred/fixture-destination/manifests/multi",
+                                       "/v2/eighred/fixture-destination/manifests/" + legacy})
+                # Prove the registry rejects a retag, then retry via the same
+                # production copy helper against existing immutable identities.
+                try:
+                    local("oras", "cp", "-r", source + "@" + identity, target + ":multi")
+                except p.Refused:
+                    p.require(rejected_tags, "immutable tag negative control missing")
+                else:
+                    raise p.Refused("immutable fixture tag unexpectedly rewritten")
+                local("oras", "attach", "--artifact-type", "application/vnd.in-toto+json",
+                      source + "@" + manifests[1]["digest"], "attestation.json")
+                observed = p.graph(source, identity)
+                p.require(p.graph(target, identity) != observed, "retry missing-referrer control absent")
+                rejected_before = len(rejected_tags)
+                p.copy_graph(source, target, identity, "multi", identity)
+                for tag, value in observed["legacy"].items():
+                    p.copy_graph(source, target, value, tag, value)
+                p.require(len(rejected_tags) == rejected_before, "retry attempted immutable tag write")
+                p.require(p.graph(target, identity) == observed, "digest retry omitted content or referrers")
+                p.require(p.resolve(target + ":multi") == identity and
+                          all(p.resolve(target + ":" + tag) == value for tag, value in observed["legacy"].items()),
+                          "immutable retry changed tag identity")
                 # Canonicalizing a verified subject relation must not conceal a
                 # genuine destination-only artifact. Preserve every discovered edge.
                 local("oras", "attach", "--artifact-type", "application/vnd.kanz.fixture",
@@ -284,7 +312,7 @@ def fixture():
                 os.chdir(saved_cwd)
                 os.environ.clear()
                 os.environ.update(saved_env)
-    print("Actual ORAS 1.3.0 registry/index/asymmetric-referrers/legacy/blob/helper proof passed; no AWS or release signing proof")
+    print("Actual ORAS 1.3.0 registry/index/asymmetric-referrers/immutable-retry/legacy/blob/helper proof passed; no AWS or release signing proof")
 
 
 if __name__ == "__main__":

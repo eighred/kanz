@@ -211,7 +211,36 @@ class PairTests(unittest.TestCase):
 
     def patches(self):
         return mock.patch.multiple(p, command=mock.DEFAULT, graph=mock.DEFAULT,
-                                   verify_release=mock.DEFAULT, resolve=mock.DEFAULT, target_available=mock.DEFAULT)
+                                   verify_release=mock.DEFAULT, resolve=mock.DEFAULT,
+                                   target_available=mock.Mock(return_value=None))
+
+    def test_existing_tag_reuses_digest_without_skipping_recursive_copy(self):
+        with mock.patch.object(p, "command") as run:
+            p.copy_graph("source", "destination", self.identity, "release-v1.2.3", self.identity)
+        run.assert_called_once_with("oras", "cp", "-r", "source@" + self.identity,
+                                    "destination@" + self.identity, timeout=1200)
+
+    def test_missing_tag_is_created_and_conflicting_tag_never_copied(self):
+        with mock.patch.object(p, "command") as run:
+            p.copy_graph("source", "destination", self.identity, "release-v1.2.3", None)
+        run.assert_called_once_with("oras", "cp", "-r", "source@" + self.identity,
+                                    "destination:release-v1.2.3", timeout=1200)
+        with mock.patch.object(p, "command") as run, self.assertRaises(p.Refused):
+            p.copy_graph("source", "destination", self.identity, "release-v1.2.3", "sha256:" + "c" * 64)
+        run.assert_not_called()
+
+    def test_retry_rechecks_tags_and_copies_root_and_legacy_by_digest(self):
+        legacy = self.identity.replace(":", "-") + ".sig"
+        with self.patches() as mocks, mock.patch.object(p, "target_available", return_value=self.identity) as available:
+            mocks["command"].side_effect = self.command
+            mocks["resolve"].return_value = self.identity
+            mocks["graph"].return_value = {"root": self.identity, "legacy": {legacy: self.identity}}
+            result = self.invoke()
+        self.assertEqual(result["status"], "verified-pair")
+        self.assertEqual(available.call_count, 8)  # Both pair preflight and immediate copy lookup.
+        copies = [x for x in self.calls if x[:2] == ("oras", "cp")]
+        self.assertEqual(len(copies), 4)
+        self.assertTrue(all(x[-1].endswith("@" + self.identity) for x in copies))
 
     def test_both_sources_preflight_before_any_copy(self):
         with self.patches() as mocks:
