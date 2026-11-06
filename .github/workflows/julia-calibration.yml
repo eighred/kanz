@@ -61,6 +61,8 @@ jobs:
           tar -xzf "$RUNNER_TEMP/julia.tar.gz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/julia-1.13.3/bin" >> "$GITHUB_PATH"
           echo "JULIA_DEPOT_PATH=$RUNNER_TEMP/julia-depot" >> "$GITHUB_ENV"
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output "$RUNNER_TEMP/openssl.tar.gz" https://github.com/JuliaBinaryWrappers/OpenSSL_jll.jl/releases/download/OpenSSL-v3.5.9%2B0/OpenSSL.v3.5.9.x86_64-linux-gnu.tar.gz
+          echo "8e2c75378726017fc66fb7fbbd10fb53522417c3e45a88af77b8853d46f2b063  $RUNNER_TEMP/openssl.tar.gz" | sha256sum --check --strict
       - name: Instantiate the pinned environment and generate Julia contracts
         run: |
           julia --startup-file=no --history-file=no --project=kanz-jl -e 'using Pkg; Pkg.instantiate()'

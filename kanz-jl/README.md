@@ -120,7 +120,7 @@ retained as public projected evidence, never described as absent. A separate
 manifest-only HTTP1.10.15 fixture must detect CVE-2025-52479/JLSEC-2025-1 using the
 same database. No vulnerable package is installed or executed.
 
-Syft must identify the actual Julia1.13.3 binary in that same image and provides
+Syft must identify the actual Julia 1.13.3 binary in that same image and provides
 runtime/OS package inventory. Raw reports can contain image configuration, so
 they remain in a temporary directory; the artifact contains only projected public
 package/advisory/tool/database identities. Scanner subprocesses inherit no GitHub
@@ -165,3 +165,94 @@ content rather than suppressing scanner results: the whole image still passes
 through the same scan, and any remaining CRITICAL advisory refuses qualification.
 The failed pre-removal scan is retained in PR #1472; its development manifests
 do not by themselves establish that those historical native binaries were loaded.
+
+The stacked native inventory qualification independently hashes the same verified
+Julia archive retained by the host setup, without extracting its members. The
+bounded, read-only image probe inventories all regular files and relative links
+under `/opt/julia/{bin,lib,libexec,share/julia/compiled}` and the bundled JLL Project UUID/version and
+raw metadata bytes. Exact absence/addition/hash/link differences refuse. Loaded
+depot package images are separately inventoried as generated, unqualified bytes.
+Loaded-library closure requires each observed library to belong to the verified
+archive, generated depot image inventory, or separately recorded system paths.
+This loaded set is observed in the qualification probe, not every future worker
+`dlopen` path. System libraries outside the Julia archive are listed with bounded hashes
+under system library paths; these observations do not assign Debian package
+ownership. The existing Syft Debian inventory remains distinct.
+
+The archive inventory conservatively retains every selected runtime file as
+unassigned; a separate, narrowly qualified mapping below binds one component. Exact archive equality proves provenance, not vulnerability
+clearance or reachability. Julia sysimages, bundled patched libraries and system
+libraries need component-specific advisory mappings and known-vulnerable controls;
+the native/runtime release blocker is unchanged. No package is imported just to
+query its version and no native library is executed by the host inventory parser.
+
+The advisory lane also derives a **scanner-only** Project/Manifest pair from the 23 JLL
+UUID/version records already matched against the actual image and the pinned
+Julia archive. It verifies each UUID/name/path against checksum-pinned
+[General registry metadata](https://github.com/JuliaRegistries/General/blob/afacc2e68d6c156d80eb9ff489370bb38d1a61f4/Registry.toml)
+before using Trivy's Julia analyzer. The Project names all 23 UUIDs as direct
+scanner inputs because pinned Trivy resolves Manifest reachability from Project
+dependencies. This does not instantiate packages or
+change the worker's Project/Manifest. The same fresh advisory database must
+identify the manifest-only OpenSSL_jll 3.0.12+0 control for
+[JLSEC-2026-252 / CVE-2024-5535](https://github.com/JuliaLang/SecurityAdvisories.jl/blob/main/advisories/published/2026/JLSEC-2026-252.md).
+Every raw finding for the actual JLL metadata remains in the report. A finding
+refuses qualification unless the separate exact native identity mapping below
+proves that specific installed component is outside the reviewed affected range. Evidence binds the registry commit/checksum, all 23
+UUID/versions, both scanner-input checksums and control outcome to the existing
+image/source/database report.
+
+This is partial metadata coverage, not a claim that every native file is owned
+by a General package or that Julia's patched libraries match upstream release
+semantics. Generated native images, system libraries, Julia runtime code and
+unassigned files retain their explicit ownership/coverage limitations. The
+[Julia advisory database scope](https://github.com/JuliaLang/SecurityAdvisories.jl#scope)
+is incomplete for artifacts. Standard release publication remains blocked on
+that unresolved coverage; no scanner suppression or native clearance is added.
+
+The first qualified native identity is the archive's `libexec/julia/7z`. Julia
+1.13.3 bundles 7-Zip **26.03** while its compatibility `p7zip_jll` metadata says
+17.8.3+0. The unchanged raw Trivy finding for CVE-2026-58052 is retained, not
+suppressed. Qualification requires the exact independently archive-bound binary
+hash, its successful `7z i` banner executed inside the same restricted OCI image,
+checksum-pinned [Julia build metadata](https://github.com/JuliaLang/julia/blob/67ac47b9cd855e02134d41d5428ac9f2a73f2694/deps/p7zip.version)
+and [upstream release history](https://github.com/ip7z/7zip/blob/0766b733fe3e06dd2a7f9a3cfbf2108ac73abd17/DOC/src-history.txt),
+and a newly retrieved, analyzed [NVD record](https://nvd.nist.gov/vuln/detail/CVE-2026-58052).
+The exact CPE/range must identify versions before 26.03 as affected; numerical
+controls must classify 26.02 as affected and 26.03 as fixed. These controls use
+version inputs, not execution of a vulnerable binary. Public source bytes and
+the bounded NVD response/checksum are retained for independent validation.
+Freshness is evaluated at the recorded scan-time qualification window; an old
+passing artifact is not permanent advisory clearance. HTTPS redirects cannot
+downgrade to HTTP.
+Changed ranges, additional CPE conditions, unknown findings, mismatched UUIDs,
+wrapper/native versions, hashes, source bytes or stale advisory snapshots refuse.
+No file or worker dependency is removed. This corrects one component identity;
+it does not clear other native/runtime files, platform reachability, or future
+advisories. Standard release publication remains blocked on residual UNKNOWN
+coverage under #1413.
+
+The OCI runtime explicitly replaces Julia 1.13.3's bundled OpenSSL 3.5.8
+`libcrypto.so.3` and `libssl.so.3` with the two regular library members from the
+checksum-pinned official [OpenSSL 3.5.9 Julia artifact](https://github.com/JuliaBinaryWrappers/OpenSSL_jll.jl/blob/4d127b8384f6a14b3963070f4677730e94407fc5/Artifacts.toml).
+The original `OpenSSL_jll` 3.5.8+0 metadata and worker dependency files remain
+unchanged; evidence distinguishes that metadata from the repaired native bytes.
+This is a two-library runtime overlay, not an assertion that upstream Julia 1.13.3
+already contains the fix. The upstream license is retained. Independent archive
+inventory must match every other selected Julia file exactly and these two files
+must match the independently verified replacement archive. The restricted image
+executes `OpenSSL_version(0)` and initializes/frees an SSL context from that exact
+library pair. Neither operation opens a network connection.
+
+Qualification also retrieves the complete official
+[OpenSSL CNA catalog](https://openssl-library.org/news/secjson/), binds its index
+and every indexed record by hash, and evaluates all recognized affected ranges.
+Unknown shapes, missing records, any affected installed version, or failure to
+detect the 3.5.8/CVE-2026-84782 control refuse qualification. The control uses
+version-range inputs, not a vulnerable executable. The initial complete catalog
+identified 13 advisories affecting 3.5.8, including the HIGH
+[DTLS advisory](https://openssl-library.org/news/secadv/20260929.txt); this does
+not establish a reachable exploit in the network-disabled calibration worker.
+The fresh catalog and executed repaired image remain mandatory. This additional
+component qualification does not resolve the residual native/runtime coverage
+blocker or authorize standard release publication.
