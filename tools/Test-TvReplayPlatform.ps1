@@ -47,4 +47,7 @@ foreach ($mode in @('lookup-failed','duplicate','wrong-platform','invalid-child'
     try { $null = Resolve-TvReplayPlatform -Aws fixture -Profile fixture -RootDigest $rootDigest } catch { $refused = $true }
     if (-not $refused) { throw "platform fixture was not refused: $mode" }
 }
+# The failed-native-command fixture sets this global deliberately. All refusal
+# assertions above have completed; do not leak its simulated status to pwsh CI.
+$global:LASTEXITCODE = 0
 Write-Output 'replay-platform-fixtures=9 PASS'

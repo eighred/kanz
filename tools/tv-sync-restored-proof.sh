@@ -9,11 +9,13 @@ readonly TV_PG_IMAGE='ghcr.io/cloudnative-pg/postgresql@sha256:f231cb87520b2fb75
 tvk() { k --request-timeout=20s "$@"; }
 
 begin_tv_restore_namespace() {
-  local present storage_class
+  local present storage_class volumes
   storage_class=$(tvk get storageclass local-path -o json) || die 'drill storage class unavailable'
   jq -e '.provisioner=="rancher.io/local-path" and .reclaimPolicy=="Delete" and (.volumeBindingMode=="WaitForFirstConsumer" or .volumeBindingMode=="Immediate")' <<<"$storage_class" >/dev/null || die 'drill storage reclamation policy refused'
   present=$(tvk get namespace "$DRILL_NS" --ignore-not-found=true -o json) || die 'drill namespace inventory unavailable'
   [[ -z "$present" ]] || die 'TV drill namespace already exists'
+  volumes=$(tvk get persistentvolumes -o json) || die 'drill storage inventory unavailable'
+  jq -e --arg namespace "$DRILL_NS" 'all(.items[];.spec.claimRef.namespace!=$namespace)' <<<"$volumes" >/dev/null || die 'prior drill storage still exists'
   TV_OWNER_NONCE=$(cat /proc/sys/kernel/random/uuid)
   [[ "$TV_OWNER_NONCE" =~ ^[a-f0-9-]{36}$ ]] || die 'drill owner identity unavailable'
   jq -n --arg ns "$DRILL_NS" --arg owner "$TV_OWNER_NONCE" '{apiVersion:"v1",kind:"Namespace",metadata:{name:$ns,labels:{"kanz.io/purpose":"recovery-drill"},annotations:{"kanz.io/recovery-owner":$owner}}}' | tvk create -f - >/dev/null

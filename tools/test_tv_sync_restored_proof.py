@@ -98,6 +98,18 @@ class RestoredProofTests(unittest.TestCase):
         self.assertEqual(result.returncode, 64)
         self.assertNotIn("MUTATION", result.stdout)
 
+    def test_orphan_prior_volume_refuses_before_namespace_creation(self):
+        result = self.run_helper('''DRILL_NS=kanz-recovery-drill
+ die() { exit 64; }
+ tvk() { case "$*" in
+  "get storageclass "*) printf '%s' '{"provisioner":"rancher.io/local-path","reclaimPolicy":"Delete","volumeBindingMode":"WaitForFirstConsumer"}';;
+  "get namespace "*) return 0;;
+  "get persistentvolumes "*) printf '%s' '{"items":[{"spec":{"claimRef":{"namespace":"kanz-recovery-drill"}}}]}';;
+  *) echo MUTATION; return 99;; esac; }
+ begin_tv_restore_namespace''')
+        self.assertEqual(result.returncode, 64)
+        self.assertNotIn("MUTATION", result.stdout)
+
     def test_unknown_cleanup_inventory_does_not_delete(self):
         result = self.run_helper('''DRILL_NS=kanz-recovery-drill; TV_OWNER_NONCE=fixture; DRILL_UID=fixture
  tvk() { case "$*" in "get namespace "*) return 1;; *) echo MUTATION; return 99;; esac; }
