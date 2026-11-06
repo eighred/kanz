@@ -68,8 +68,6 @@ jobs:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
       - run: python3 -B -m unittest discover -s tools/redpanda-identity -p 'test_*.py'
-      - name: Prepare disposable hosted runner disk capacity
-        run: python3 -B tools/redpanda-identity/prepare_runner.py
       - run: bash tools/feed-identity/install.sh
       - name: Authenticate private mirrored builder reads
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0

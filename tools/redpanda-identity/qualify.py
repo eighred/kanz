@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 import tempfile
 import uuid
 import yaml
@@ -140,6 +141,35 @@ def broker_storage(k):
     capacity = storage_capacity(k('-n','kanz-messaging','exec','deployment/redpanda','-c','redpanda',
         '--','df','-Pk','/var/lib/redpanda/data'))
     return dict(capacity, producerReserveBytes=reserve, requiredHeadroomBytes=HEADROOM)
+
+
+def prepare_host(required):
+    # Only the reviewed fixed hosted SDK helper may provision space. Preserve
+    # its closed numeric diagnostics even when provisioning fails.
+    result = subprocess.run([sys.executable, '-B', str(ROOT / 'tools/redpanda-identity/prepare_runner.py'), str(required)],
+                            capture_output=True, text=True, timeout=240, cwd=ROOT)
+    if len(result.stdout) > 4096:
+        raise ValueError('host capacity diagnostic exceeded bound')
+    report = json.loads(result.stdout)
+    if (not isinstance(report, dict) or set(report) != {'beforeBytes', 'afterBytes', 'requiredBytes', 'unrelatedAndroidSDKRemoved'}
+            or any(type(report[k]) is not int or not 0 <= report[k] < (1 << 63) for k in ('beforeBytes', 'afterBytes', 'requiredBytes'))
+            or report['requiredBytes'] != required or type(report['unrelatedAndroidSDKRemoved']) is not bool):
+        raise ValueError('invalid host capacity diagnostic')
+    return report, result.returncode == 0
+
+
+def preflight_storage(k, evidence, case):
+    storage = broker_storage(k)
+    if storage['availableBytes'] <= storage['producerReserveBytes'] + HEADROOM:
+        evidence['preProvisionStorage'] = dict(storage, case=case)
+        prepared, ok = prepare_host(storage['producerReserveBytes'] + HEADROOM)
+        evidence['hostCapacityPreparation'] = prepared
+        if not ok:
+            raise RuntimeError('host capacity preparation failed')
+        # Host free bytes never substitute for actual broker-volume readback.
+        storage = broker_storage(k)
+    require_capacity(storage, storage['producerReserveBytes'])
+    return storage
 
 
 def spire_objects():
@@ -289,9 +319,8 @@ def main():
             for sa in SAS: apply([{'apiVersion':'v1','kind':'ServiceAccount','metadata':{'name':sa,'namespace':'kanz-services'}}])
             for case,sa,mode in CASES:
                 evidence['stage']='storage preflight '+case
-                storage = broker_storage(k)
+                storage = preflight_storage(k, evidence, case)
                 evidence['storageObservations'].append(dict(storage, case=case))
-                require_capacity(storage, storage['producerReserveBytes'])
                 evidence['stage']='probe '+case
                 apply([job(case,sa,mode,image)])
                 k('-n','kanz-services','wait','--for=condition=complete','job/'+case,'--timeout=190s')

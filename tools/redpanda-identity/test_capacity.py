@@ -12,6 +12,49 @@ import qualify
 
 
 class CapacityTests(unittest.TestCase):
+    def test_host_space_cannot_replace_post_provision_pod_readback(self):
+        low = {'availableBytes': 5 << 30, 'producerReserveBytes': 5 << 30}
+        high = dict(low, availableBytes=9 << 30)
+        host = {'beforeBytes': 5 << 30, 'afterBytes': 50 << 30,
+                'requiredBytes': 7 << 30, 'unrelatedAndroidSDKRemoved': True}
+        for final, passed in ((low, False), (high, True)):
+            evidence = {}
+            with patch.object(qualify, 'broker_storage', side_effect=[low, final]) as observed, \
+                 patch.object(qualify, 'prepare_host', return_value=(host, True)) as prepare:
+                if passed:
+                    self.assertEqual(qualify.preflight_storage(None, evidence, 'bootstrap'), high)
+                else:
+                    with self.assertRaises(ValueError): qualify.preflight_storage(None, evidence, 'bootstrap')
+                self.assertEqual(observed.call_count, 2)
+                prepare.assert_called_once_with(7 << 30)
+                self.assertEqual(evidence['hostCapacityPreparation'], host)
+        with patch.object(qualify, 'broker_storage', return_value=high), \
+             patch.object(qualify, 'prepare_host') as prepare:
+            qualify.preflight_storage(None, {}, 'bootstrap')
+            prepare.assert_not_called()
+
+    def test_failed_preparation_preserves_numeric_diagnostic(self):
+        low = {'availableBytes': 5 << 30, 'producerReserveBytes': 5 << 30}
+        report = {'beforeBytes': 1, 'afterBytes': 2, 'requiredBytes': 7 << 30,
+                  'unrelatedAndroidSDKRemoved': True}
+        evidence = {}
+        with patch.object(qualify, 'broker_storage', return_value=low), \
+             patch.object(qualify, 'prepare_host', return_value=(report, False)):
+            with self.assertRaises(RuntimeError): qualify.preflight_storage(None, evidence, 'bootstrap')
+        self.assertEqual(evidence['hostCapacityPreparation'], report)
+
+    def test_host_diagnostic_closed_shape_and_failure_retention(self):
+        report = {'beforeBytes': 1, 'afterBytes': 2, 'requiredBytes': 7 << 30,
+                  'unrelatedAndroidSDKRemoved': True}
+        result = SimpleNamespace(stdout=json.dumps(report), stderr='unretained private detail', returncode=1)
+        with patch.object(qualify.subprocess, 'run', return_value=result):
+            self.assertEqual(qualify.prepare_host(7 << 30), (report, False))
+        for value in (dict(report, afterBytes=True), dict(report, requiredBytes=1),
+                      dict(report, extra='private')):
+            result.stdout = json.dumps(value)
+            with patch.object(qualify.subprocess, 'run', return_value=result):
+                with self.assertRaises(ValueError): qualify.prepare_host(7 << 30)
+
     def test_report_requires_every_bound_capacity_observation(self):
         sha = 'a' * 40
         evidence = {'sourceSHA': sha, 'passed': True, 'cleanupPassed': True,
@@ -96,14 +139,14 @@ class CapacityTests(unittest.TestCase):
             required = "require_capacity(storage, storage['producerReserveBytes'])"
             if required not in src or src.index(required) > src.index('apply([job(case,sa,mode,image)])'):
                 raise ValueError('capacity must precede each broker probe')
-            prep = 'python3 -B tools/redpanda-identity/prepare_runner.py'
-            if prep not in wf or wf.index(prep) > wf.index('python3 -B tools/redpanda-identity/qualify.py'):
-                raise ValueError('hosted capacity preparation absent')
+            prep = 'storage = preflight_storage(k, evidence, case)'
+            if prep not in src or src.index(prep) > src.index('apply([job(case,sa,mode,image)])'):
+                raise ValueError('actual capacity preparation absent')
         boundary(source, workflow)
         with self.assertRaises(ValueError):
             boundary(source.replace("require_capacity(storage, storage['producerReserveBytes'])", 'pass'), workflow)
         with self.assertRaises(ValueError):
-            boundary(source, workflow.replace('python3 -B tools/redpanda-identity/prepare_runner.py', 'true'))
+            boundary(source.replace('storage = preflight_storage(k, evidence, case)', 'storage = {}'), workflow)
         docs = qualify.broker_objects()
         cm = next(x for x in docs if x['kind'] == 'ConfigMap' and x['metadata']['name'] == 'redpanda-config')
         self.assertNotIn('storage_min_free_bytes', str(cm))
@@ -123,9 +166,9 @@ class CapacityTests(unittest.TestCase):
         with patch.object(prepare_runner, 'hosted'), patch.object(prepare_runner, 'regular_tree_root'), \
              patch.object(prepare_runner, 'verify_sdk') as verified, \
              patch.object(prepare_runner.subprocess, 'run', side_effect=run), \
-             patch.object(prepare_runner.shutil, 'disk_usage', side_effect=[SimpleNamespace(free=1), SimpleNamespace(free=prepare_runner.MIN_FREE)]), \
+             patch.object(prepare_runner.shutil, 'disk_usage', side_effect=[SimpleNamespace(free=1), SimpleNamespace(free=(8 << 30))]), \
              patch.object(prepare_runner.os.path, 'lexists', return_value=False), patch('builtins.print'):
-            prepare_runner.main()
+            prepare_runner.main(7 << 30)
         verified.assert_called_once()
         self.assertEqual(calls[-1], ['sudo', 'timeout', '180', 'rm', '-rf', '--one-file-system',
                                     '--preserve-root=all', '--', str(prepare_runner.SDK)])
@@ -146,7 +189,7 @@ class CapacityTests(unittest.TestCase):
                      patch.object(prepare_runner.subprocess, 'run', side_effect=run), \
                      patch.object(prepare_runner.shutil, 'disk_usage', return_value=SimpleNamespace(free=1)), \
                      patch.object(prepare_runner.os.path, 'lexists', return_value=remains):
-                    with self.assertRaises(ValueError): prepare_runner.main()
+                    with self.assertRaises(ValueError): prepare_runner.main(7 << 30)
                 if nested: self.assertFalse(any(args[0] == 'sudo' for args in calls))
 
 

@@ -95,11 +95,14 @@ topics and accepted operations still fail. Normal positive and renewed writes
 retain the pooled transport, and final reads still require exactly four records.
 
 
-The disposable Linux runner preflight requires 24 GiB free on the verified Docker
-filesystem before building the fixture. If needed it removes only the verified,
+After broker startup, the disposable Linux preflight reads the actual configured
+producer reserve and data-volume capacity. If reserve plus 2 GiB headroom is not
+available, a hosted-only helper removes only the verified,
 unrelated preinstalled Android SDK at `/usr/local/lib/android/sdk` on a
 GitHub-hosted Ubuntu runner. It refuses aliases, nested mounts, unknown installation
-identity, incomplete removal, and insufficient readback. It does not remove caches,
+identity, incomplete removal, and insufficient readback. Numeric host before/after
+observations survive provisioning failure. The broker volume is then read again;
+host free space cannot stand in for that decisive gate. It does not remove caches,
 repositories or container volumes. This preparation is not permitted on local or
 self-hosted machines.
 
@@ -118,3 +121,9 @@ but does not prove the old runtime setting, which was not recorded. The new sour
 requires actual setting and capacity evidence rather than reducing broker safety.
 See [the storage reserve contract](https://docs.redpanda.com/current/reference/properties/cluster-properties/#storage_min_free_bytes)
 and [the hosted Android SDK inventory](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2604-Readme.md).
+
+Run42284210281 refused before broker creation because the initial provisioning
+recipe required an arbitrary24GiB host budget even after verified SDK removal.
+No identity proof ran. The corrected placement provisions only when actual
+broker-volume reserve plus headroom is unavailable, then requires fresh pod
+readback; it does not replace that budget with another guessed threshold.

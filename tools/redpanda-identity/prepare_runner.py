@@ -9,10 +9,10 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 
 SDK = Path('/usr/local/lib/android/sdk')
 DOCKER = Path('/var/lib/docker')
-MIN_FREE = 24 << 30
 
 
 def hosted(env):
@@ -43,7 +43,9 @@ def verify_sdk(env):
         raise ValueError('Android SDK must not be a mounted filesystem')
 
 
-def main():
+def main(required):
+    if type(required) is not int or not 0 < required < (1 << 63):
+        raise ValueError('invalid runtime capacity requirement')
     hosted(os.environ)
     regular_tree_root(DOCKER)
     result = subprocess.run(['docker', 'info', '--format', '{{.DockerRootDir}}'],
@@ -52,34 +54,39 @@ def main():
         raise ValueError('unexpected Docker storage location')
     before = shutil.disk_usage(DOCKER).free
     removed = False
-    if before < MIN_FREE:
-        verify_sdk(os.environ)
-        # Fixed argv and path; refuse nested mounts before bounded one-filesystem
-        # removal. Symlinks inside the SDK are unlinked, never traversed by rm.
-        mounts = subprocess.run(['findmnt', '--json', '--output', 'TARGET'], check=True,
-                                capture_output=True, text=True, timeout=20)
-        if len(mounts.stdout) > 1 << 20:
-            raise ValueError('mount inventory exceeds fixture bound')
-        def check_mounts(items):
-            for item in items:
-                target = item.get('target')
-                if not isinstance(target, str):
-                    raise ValueError('invalid mount inventory')
-                if target == str(SDK) or target.startswith(str(SDK) + '/'):
-                    raise ValueError('mounted SDK content cannot be removed')
-                check_mounts(item.get('children', []))
-        check_mounts(json.loads(mounts.stdout)['filesystems'])
-        subprocess.run(['sudo', 'timeout', '180', 'rm', '-rf', '--one-file-system',
-                        '--preserve-root=all', '--', str(SDK)], check=True, timeout=190)
-        if os.path.lexists(SDK):
-            raise ValueError('SDK removal incomplete')
-        removed = True
-    after = shutil.disk_usage(DOCKER).free
-    if after < MIN_FREE:
+    try:
+        if before <= required:
+            verify_sdk(os.environ)
+            # Fixed argv and path; refuse nested mounts before bounded one-filesystem
+            # removal. Symlinks inside the SDK are unlinked, never traversed by rm.
+            mounts = subprocess.run(['findmnt', '--json', '--output', 'TARGET'], check=True,
+                                    capture_output=True, text=True, timeout=20)
+            if len(mounts.stdout) > 1 << 20:
+                raise ValueError('mount inventory exceeds fixture bound')
+            def check_mounts(items):
+                for item in items:
+                    target = item.get('target')
+                    if not isinstance(target, str):
+                        raise ValueError('invalid mount inventory')
+                    if target == str(SDK) or target.startswith(str(SDK) + '/'):
+                        raise ValueError('mounted SDK content cannot be removed')
+                    check_mounts(item.get('children', []))
+            check_mounts(json.loads(mounts.stdout)['filesystems'])
+            subprocess.run(['sudo', 'timeout', '180', 'rm', '-rf', '--one-file-system',
+                            '--preserve-root=all', '--', str(SDK)], check=True, timeout=190)
+            if os.path.lexists(SDK):
+                raise ValueError('SDK removal incomplete')
+            removed = True
+    finally:
+        # Numeric diagnostics survive insufficient space or removal refusal.
+        after = shutil.disk_usage(DOCKER).free
+        print(json.dumps({'beforeBytes': before, 'afterBytes': after,
+                          'requiredBytes': required, 'unrelatedAndroidSDKRemoved': removed}))
+    if after <= required:
         raise ValueError('insufficient disposable runner capacity')
-    print(json.dumps({'beforeBytes': before, 'afterBytes': after,
-                      'requiredBytes': MIN_FREE, 'unrelatedAndroidSDKRemoved': removed}))
 
 
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) != 2 or not sys.argv[1].isascii() or not sys.argv[1].isdecimal() or len(sys.argv[1]) > 19:
+        raise ValueError('one bounded numeric runtime requirement is mandatory')
+    main(int(sys.argv[1]))

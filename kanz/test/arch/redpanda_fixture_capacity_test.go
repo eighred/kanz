@@ -11,21 +11,21 @@ import (
 // actual disk capacity. The Linux proof must observe the broker's own reserve.
 var redpandaCapacityMarkers = map[string][]string{
 	"tools/redpanda-identity/qualify.py": {
-		"HEADROOM = 2 << 30", "validate_report(evidence, sha)", "capacity['availableBytes'] <= reserve + HEADROOM",
+		"HEADROOM = 2 << 30", "storage = preflight_storage(k, evidence, case)", "storage = broker_storage(k)", "prepared, ok = prepare_host(storage['producerReserveBytes'] + HEADROOM)", "validate_report(evidence, sha)", "capacity['availableBytes'] <= reserve + HEADROOM",
 		"'rpk','cluster','config','get','storage_min_free_bytes','--ignore-profile'",
 		"'admin.hosts=127.0.0.1:9644'", "evidence['storageObservations'].append(dict(storage, case=case))",
 		"require_capacity(storage, storage['producerReserveBytes'])",
 	},
 	"tools/redpanda-identity/prepare_runner.py": {
 		"SDK = Path('/usr/local/lib/android/sdk')", "DOCKER = Path('/var/lib/docker')",
-		"MIN_FREE = 24 << 30", "env.get('RUNNER_ENVIRONMENT') != 'github-hosted'",
+		"env.get('RUNNER_ENVIRONMENT') != 'github-hosted'",
 		"env.get('ImageOS') not in ('ubuntu24', 'ubuntu26')", "regular_tree_root(SDK)",
 		"verify_sdk(os.environ)", "target.startswith(str(SDK) + '/')",
 		"'timeout', '180', 'rm', '-rf', '--one-file-system'", "'--preserve-root=all', '--', str(SDK)",
-		"if os.path.lexists(SDK):", "if after < MIN_FREE:",
+		"if os.path.lexists(SDK):", "if after <= required:",
 	},
 	".github/workflows/redpanda-identity-proof.yml": {
-		"python3 -B tools/redpanda-identity/prepare_runner.py",
+		"python3 -B tools/redpanda-identity/qualify.py",
 		"python3 -B -m unittest discover -s tools/redpanda-identity -p 'test_*.py'",
 	},
 }
