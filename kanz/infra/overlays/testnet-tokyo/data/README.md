@@ -62,7 +62,8 @@ verify the restored PostgreSQL certificate; role provisioning checks isolated
 server logging controls before submitting a generated password. No owner secret,
 SQL error, init log or record contents are exported. Exact main source, release
 root and linux/amd64 child digest, loaded image, archive hash, restored cluster
-UID, tenant hash, retention and snapshot hashes are bound in the result. A fresh
+UID, tenant hash, retention and snapshot hashes are bound in the result. The TV mode requires jq with `have_decnum` support and exact integer
+counters; older parsers refuse before mutation. A fresh
 nonempty checkpoint/history proof is required; genesis is not qualified.
 
 Cleanup uses namespace UID preconditions and requires local-path Delete reclaim

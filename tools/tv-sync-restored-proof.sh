@@ -8,6 +8,10 @@ readonly TV_PG_IMAGE='ghcr.io/cloudnative-pg/postgresql@sha256:f231cb87520b2fb75
 
 tvk() { k --request-timeout=20s "$@"; }
 
+# Older jq builds discard fractional digits while parsing into binary doubles.
+# Refuse them before any TV operation; range checks cannot recover lost input.
+tv_exact_json_available() { jq -ne 'have_decnum' >/dev/null 2>&1; }
+
 begin_tv_restore_namespace() {
   local present storage_class volumes
   storage_class=$(tvk get storageclass local-path -o json) || die 'drill storage class unavailable'
@@ -63,6 +67,7 @@ cleanup_tv_restore_namespace() {
 }
 
 load_tv_restore_pair() {
+  tv_exact_json_available || die 'TV proof requires exact-decimal JSON parsing'
   [[ ${#TV_PAIR_BASE64} -le 16384 && -n "$TV_PAIR_BASE64" ]] || die 'TV release request missing or oversized'
   TV_PAIR=$(printf '%s' "$TV_PAIR_BASE64" | base64 -d) || die 'TV release request encoding invalid'
   jq -e '
@@ -126,8 +131,9 @@ tv_restore_job_manifest() {
 # UTC timestamp freshness is bound to this invocation, not a reusable receipt.
 validate_tv_restore_result() {
   local proof=$1 tenant=$2 started=$3 finished=$4
+  tv_exact_json_available || return 1
   jq -e --arg version "$TV_VERSION" --arg tenant "$tenant" --argjson started "$started" --argjson finished "$finished" '
-    def integer: type=="number" and isfinite and floor==. and .>=0 and .<=9007199254740991;
+    def integer: type=="number" and (tostring|test("^(0|[1-9][0-9]*)$")) and isfinite and floor==. and .>=0 and .<=9007199254740991;
     (.checked_at|sub("\\.[0-9]+Z$";"Z")) as $stamp |
     ($stamp|fromdateiso8601) as $checked |
     ($checked|strftime("%Y-%m-%dT%H:%M:%SZ"))==$stamp and

@@ -33,6 +33,22 @@ class RestoredProofTests(unittest.TestCase):
     def test_valid_exact_receipt(self):
         self.assertEqual(self.validate(self.proof()).returncode, 0)
 
+    def test_raw_fraction_and_exponent_literals_refuse(self):
+        epoch = 1793923200
+        raw = json.dumps(self.proof(), separators=(",", ":"))
+        for literal in ("9007199254740991.1", "9007199254740991.0000000000000001", "3e-1", "3.0"):
+            with self.subTest(literal=literal):
+                candidate = raw.replace('"watermark":3', '"watermark":' + literal)
+                result = self.run_helper(f'TV_VERSION=v9.0.0; proof=$(cat); validate_tv_restore_result "$proof" "{ "a" * 64 }" {epoch} {epoch + 2}', candidate)
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_inexact_json_parser_refuses_before_input_acceptance(self):
+        result = self.run_helper('''TV_VERSION=v9.0.0
+ jq() { if [[ "$*" == "-ne have_decnum" ]]; then return 1; fi; echo PARSED_INPUT; return 0; }
+ validate_tv_restore_result '{}' fixture 0 1''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("PARSED_INPUT", result.stdout)
+
     def test_counter_types_and_bounds_refuse(self):
         for field in ("fact_count", "checkpoint_seq", "watermark"):
             for value in ("3", 1.5, -1, 9007199254740992, None, True):
