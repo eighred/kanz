@@ -95,6 +95,9 @@ jobs:
           # a new entry here AND a Dockerfile change, together.
           - source: docker.io/library/golang:1.26.8
             target: ghcr.io/eighred/base/golang:1.26.8
+          # Populate the patched toolchain before its Docker FROM cutover (#1356).
+          - source: docker.io/library/golang:1.26.10
+            target: ghcr.io/eighred/base/golang:1.26.10
           - source: gcr.io/distroless/static:nonroot
             target: ghcr.io/eighred/base/distroless-static:nonroot
           # Rust migration bases are immutable reviewed inputs (#1413).
