@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,9 +24,11 @@ import (
 	"github.com/eighred/kanz/services/tv-sync/internal/brokerapi"
 	"github.com/eighred/kanz/services/tv-sync/internal/projection"
 	"github.com/eighred/kanz/services/tv-sync/internal/server"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -204,10 +207,15 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 			p, r, stop := launch()
 			defer func() { stop() }()
 			waitTV(t, ctx, func() bool { return r.Ready() }, "initial empty durable did not catch up")
+			eventID, err := uuid.NewV7()
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := targetDLQ{tenant: tenant, eventID: eventID.String()}
 			now := timestamppb.Now()
 			dec := func(n int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: n} }
 			payload := &orderpb.OrderFilled{OrderId: "order", State: &orderpb.OrderState{OrderId: "order", PortfolioId: "fund", InstrumentId: "BTC", Side: orderpb.Side_SIDE_BUY, Status: orderpb.OrderStatus_ORDER_STATUS_FILLED, OrderedQuantity: dec(2), FilledQuantity: dec(2), LeavesQuantity: dec(0), AverageFillPrice: dec(100), AsOf: now}, Fill: &orderpb.Fill{FillId: "fill", OrderId: "order", InstrumentId: "BTC", Side: orderpb.Side_SIDE_BUY, Quantity: dec(2), Price: dec(100), ExecutedAt: now}}
-			if err := producer.Publish(ctx, bus.Event{Subject: subject, EventType: subject, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "order", EventTime: time.Now(), PartitionKey: "order", PayloadSchemaRef: "order.v1.OrderFilled:1", Payload: payload}); err != nil {
+			if err := producer.Publish(ctx, bus.Event{EventID: eventID.String(), Subject: subject, EventType: subject, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, SchemaVersion: 1, Domain: "order", EventTime: time.Now(), PartitionKey: "order", PayloadSchemaRef: "order.v1.OrderFilled:1", Payload: payload}); err != nil {
 				t.Fatal(err)
 			}
 			select {
@@ -229,9 +237,10 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 			if r.Ready() {
 				t.Fatal("unrelated success reopened unresolved fold")
 			}
-			if _, err := dlq.NextMsg(100 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
-				t.Fatalf("transient failure parked: %v", err)
+			if err := target.observe(dlq.NextMsg, 100*time.Millisecond, nil); err != nil {
+				t.Fatal(err)
 			}
+
 			streamName, err := bustest.StreamFor(ctx, js, subject)
 			if err != nil {
 				t.Fatal(err)
@@ -269,14 +278,22 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 			if err := pool.QueryRow(ctx, "SELECT count(*) FROM tv_facts").Scan(&count); err != nil || count != 1 {
 				t.Fatalf("durable facts=%d err=%v", count, err)
 			}
-			// Positive DLQ control on the same actual transport: malformed bytes are terminal.
-			if err := client.Publish(ctx, bus.Message{Subject: subject, Body: []byte("invalid-wire-fixture")}); err != nil {
+			// Same subscription spans the outage and recovery. New durables can
+			// re-park old malformed history before tenant filtering.
+			if err := target.observe(dlq.NextMsg, 100*time.Millisecond, nil); err != nil {
 				t.Fatal(err)
 			}
-			parked, err := dlq.NextMsg(5 * time.Second)
-			if err != nil || string(parked.Data) != "invalid-wire-fixture" {
-				t.Fatalf("terminal bytes not parked on actual DLQ: %v", err)
+			terminal := []byte("invalid-wire-fixture-" + tenant)
+			if err := client.Publish(ctx, bus.Message{Subject: subject, Body: terminal}); err != nil {
+				t.Fatal(err)
 			}
+			if err := target.observe(dlq.NextMsg, 5*time.Second, terminal); err != nil {
+				t.Fatal(err)
+			}
+			if err := target.observe(dlq.NextMsg, 100*time.Millisecond, nil); err != nil {
+				t.Fatal(err)
+			}
+
 		})
 	}
 }
@@ -301,5 +318,84 @@ func checkTVHTTP(t *testing.T, r *server.Readiness, p *projection.Projection, te
 	s.ServeHTTP(response, request)
 	if response.Code != want {
 		t.Fatalf("Broker status%d want%d", response.Code, want)
+	}
+}
+
+// targetDLQ scopes a shared subject to this fixture's canonical identity. No raw
+// payload is logged. A flooded subscription fails closed at a bounded count.
+type targetDLQ struct{ tenant, eventID string }
+
+func (target targetDLQ) observe(next func(time.Duration) (*nats.Msg, error), window time.Duration, terminal []byte) error {
+	deadline := time.Now().Add(window)
+	for n := 0; n < 10000; n++ {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		msg, err := next(remaining)
+		if errors.Is(err, nats.ErrTimeout) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("DLQ observation failed: %w", err)
+		}
+		env, _, decodeErr := bus.Unframe(msg.Data)
+		if decodeErr == nil && env.TenantId == target.tenant && env.EventId == target.eventID {
+			return errors.New("target FACT was parked on DLQ")
+		}
+		if terminal != nil && bytes.Equal(msg.Data, terminal) {
+			return nil
+		}
+		if n == 9999 {
+			return errors.New("DLQ observation exceeded bounded message budget")
+		}
+	}
+	if terminal != nil {
+		return errors.New("unique terminal control not observed on DLQ")
+	}
+	return nil
+}
+
+func TestTargetDLQObservationIsIdentityScoped(t *testing.T) {
+	frame := func(tenant, event string) []byte {
+		b, err := proto.Marshal(&envelopepb.EventFrame{Envelope: &envelopepb.Envelope{TenantId: tenant, EventId: event}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	target := targetDLQ{tenant: "tenant", eventID: "event"}
+	for _, tc := range []struct {
+		name     string
+		messages [][]byte
+		terminal []byte
+		wantErr  bool
+	}{
+		{"old malformed history", [][]byte{[]byte("invalid-wire-fixture")}, nil, false},
+		{"other tenant", [][]byte{frame("other", "event")}, nil, false},
+		{"other event", [][]byte{frame("tenant", "other")}, nil, false},
+		{"target parked", [][]byte{frame("tenant", "event")}, nil, true},
+		{"unique terminal after noise", [][]byte{[]byte("old"), []byte("unique")}, []byte("unique"), false},
+		{"unrelated cannot satisfy control", [][]byte{[]byte("old")}, []byte("unique"), true},
+		{"target before control", [][]byte{frame("tenant", "event"), []byte("unique")}, []byte("unique"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			at := 0
+			next := func(time.Duration) (*nats.Msg, error) {
+				if at == len(tc.messages) {
+					return nil, nats.ErrTimeout
+				}
+				data := tc.messages[at]
+				at++
+				return &nats.Msg{Data: data}, nil
+			}
+			if err := target.observe(next, time.Second, tc.terminal); (err != nil) != tc.wantErr {
+				t.Fatalf("error=%v wantError=%v", err, tc.wantErr)
+			}
+		})
+	}
+	flood := func(time.Duration) (*nats.Msg, error) { return &nats.Msg{Data: []byte("unrelated")}, nil }
+	if err := target.observe(flood, time.Second, nil); err == nil {
+		t.Fatal("unbounded unrelated traffic accepted")
 	}
 }
