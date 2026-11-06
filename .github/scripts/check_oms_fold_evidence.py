@@ -22,6 +22,15 @@ REQUIRED = {
     },
     "internal/shadowprocess": set(),
     "services/oms/tools/store-conformance": {
+        "TestRustOutboxQueue",
+        *{"TestRustOutboxQueue/" + case for case in (
+            "ordered-pages-and-schema-lock",
+            "raw-page-mark-age-parity", "owner-tenant-and-legacy-refusal",
+            "bounded-page-no-prefix", "mark-deferred-commit-unconfirmed",
+            "go-rust-lock-contention-cancel", "rust-go-lock-session-loss",
+            "cancel-transport-server-fallback",
+            "rust-enqueue-connected-owner",
+        )},
         "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity",
         "TestRustExecutionEconomics", "TestRustRepositoryTransactions",
         "TestRustRepositoryLifecycle",
