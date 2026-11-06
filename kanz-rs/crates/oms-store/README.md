@@ -169,3 +169,29 @@ Source tests compare the entire changed durable projection with Go CommitRecover
 including terminal rounded-average and approved-fee cases, then inject missing
 facts, CAS races, target/outbox failures and deferred commit rejection. Actual
 Linux PostgreSQL evidence is required; local dependency skips do not qualify it.
+
+## OMS queue repository
+
+`outbox` implements the six existing Go Queue persistence operations over the
+same `oms` rows and canonical raw Record. Rust Create/Save/recovery enqueue into
+this table; the production Go relay, admission and publisher remain unchanged.
+This source port does not make Rust an authoritative running OMS.
+
+The session lock uses Go's database/table OID/tenant/service/key namespace.
+Its trusted connector must transfer both the Client and its own driver task to
+Session; cancellation/drop aborts that driver. Only verified unlock returns the
+session. No failed unlock can return a connection to a pool. Acquisition deadlines
+belong to the caller; release has a five-second deadline.
+
+Explicit compatibility limits: pages above 4096 rows or 1 MiB of combined dynamic
+fields refuse rather than return a prefix. Nonpositive limits retain Go's empty
+success. Failed-cause truncation retains the first 1000 bytes; a split UTF-8 scalar
+is refused, matching PostgreSQL's rejection of Go's resulting invalid string.
+The signed schema-version bits remain unchanged in Record. Missing ownership and
+unsafe RLS/roles refuse. Age distinguishes empty from present and saturates at Go's
+maximum duration. Mark operations use tenant-local transactions; failed COMMIT is
+CommitUnconfirmed, never a general rollback claim. Go's corresponding autocommit
+error is likewise not proof of rollback; retry keeps at-least-once semantics.
+
+Real Go/Rust PostgreSQL contention, cancellation, session-loss, raw-byte and mark
+proof is mandatory in `TestRustOutboxQueue`; local skipped tests do not qualify it.

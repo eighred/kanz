@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/recovery.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/recovery.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -30,6 +30,7 @@ num-bigint = "=0.4.6"
 num-rational = "=0.4.2"
 num-traits = "=0.2.19"
 tokio-postgres = "=0.7.18"
+tokio = { version = "=1.54.1", features = ["rt", "time"] }
 [dev-dependencies]
 tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "time"] }
 serde = { version = "=1.0.229", features = ["derive"] }

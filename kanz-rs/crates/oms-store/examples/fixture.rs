@@ -2,7 +2,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use kanz_oms_fold_shadow::proto::order::v1::Fill;
 use kanz_oms_store::{
-    applied_fills, create, fee_subject, fee_wire::FillWire, identity, load, queries, save, Record,
+    applied_fills, create, fee_subject, fee_wire::FillWire, identity, load, outbox, queries, save,
+    Record,
 };
 use prost::Message;
 use serde::Deserialize;
@@ -170,6 +171,13 @@ async fn run(input: Input) -> Result<Value, ()> {
             | "list-by-portfolio"
             | "fee-revision"
             | "recovery"
+            | "outbox-keys"
+            | "outbox-pending"
+            | "outbox-published"
+            | "outbox-failed"
+            | "outbox-age"
+            | "outbox-lock"
+            | "outbox-cancel"
     ) || !input.schema.starts_with("oms_store_")
         || input.schema.len() > 63
         || !input
@@ -188,6 +196,68 @@ async fn run(input: Input) -> Result<Value, ()> {
     }
     let (mut client, connection) = config.connect(NoTls).await.map_err(|_| ())?;
     let driver = tokio::spawn(async move { connection.await.is_ok() });
+    if matches!(input.mode.as_str(), "outbox-lock" | "outbox-cancel") {
+        if !(1..=5000).contains(&input.limit) {
+            driver.abort();
+            return Err(());
+        }
+        client
+            .query_one(
+                "SELECT set_config('search_path',$1,false),set_config('application_name',$1,false)",
+                &[&input.schema],
+            )
+            .await
+            .map_err(|_| ())?;
+        let session = outbox::Session::new(client, driver);
+        let acquire = outbox::lock_key(session, &input.tenant, &input.order_id, input.rollback);
+        if input.mode == "outbox-cancel" {
+            return Ok(
+                match tokio::time::timeout(Duration::from_millis(input.limit as u64), acquire).await
+                {
+                    Err(_) => {
+                        // Check while this process is still alive: process exit must
+                        // not conceal a leaked blocked session after future drop.
+                        let (observer, connection) = config.connect(NoTls).await.map_err(|_| ())?;
+                        let observer_driver = tokio::spawn(async move { connection.await.is_ok() });
+                        let absent = async {
+                        for _ in 0..100 {
+                            let count:i64 = observer.query_one("SELECT count(*) FROM pg_stat_activity WHERE application_name=$1", &[&input.schema]).await.map_err(|_| ())?.try_get(0).map_err(|_| ())?;
+                            if count==0 { return Ok::<_,()>(true); }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        Ok(false)
+                    }.await;
+                        drop(observer);
+                        observer_driver.abort();
+                        if !absent? {
+                            return Err(());
+                        }
+                        json!({"status":"canceled"})
+                    }
+                    Ok(Ok(Some(lock))) => {
+                        drop(lock);
+                        json!({"status":"unexpected-lock"})
+                    }
+                    Ok(Ok(None)) => json!({"status":"contended"}),
+                    Ok(Err(e)) => json!({"status":e.to_string()}),
+                },
+            );
+        }
+        return Ok(match acquire.await {
+            Ok(Some(lock)) => {
+                tokio::time::sleep(Duration::from_millis(input.limit as u64)).await;
+                match lock.release().await {
+                    Ok(session) => {
+                        drop(session);
+                        json!({"status":"released"})
+                    }
+                    Err(e) => json!({"status":e.to_string()}),
+                }
+            }
+            Ok(None) => json!({"status":"contended"}),
+            Err(e) => json!({"status":e.to_string()}),
+        });
+    }
     let result = async {
         client
             .query_one(
@@ -196,6 +266,28 @@ async fn run(input: Input) -> Result<Value, ()> {
             )
             .await
             .map_err(|_| ())?;
+        if input.mode.starts_with("outbox-") {
+            let result: Result<Value, kanz_oms_store::Error> = async {
+                Ok(match input.mode.as_str() {
+                    "outbox-keys" => json!({"status":"keys","claims":outbox::pending_keys(&mut client,&input.tenant,input.limit).await?}),
+                    "outbox-pending" => {
+                        let rows=outbox::pending(&mut client,&input.tenant,&input.order_id,input.limit).await?;
+                        let mut output=Vec::new();
+                        for p in rows {
+                            let r=p.record;
+                            let time=r.event_time.duration_since(UNIX_EPOCH).map_err(|_|kanz_oms_store::Error::InvalidInput)?;
+                            output.push(json!({"id":p.id,"attempts":p.attempts,"last_error":p.last_error,"tenant":r.tenant,"partition_key":r.partition_key,"subject":r.subject,"event_type":r.event_type,"event_class":r.event_class,"schema_version":r.schema_version,"domain":r.domain,"payload_schema_ref":r.payload_schema_ref,"event_seconds":time.as_secs(),"event_nanos":time.subsec_nanos(),"correlation_id":r.correlation_id,"causation_id":r.causation_id,"trace_context":r.trace_context,"payload":STANDARD.encode(r.payload)}));
+                        }
+                        json!({"status":"pending","pending":output})
+                    },
+                    "outbox-published" => {outbox::mark_published(&mut client,&input.tenant,input.expected_version).await?;json!({"status":"marked"})},
+                    "outbox-failed" => {outbox::mark_failed(&mut client,&input.tenant,input.expected_version,Some(&input.other)).await?;json!({"status":"marked"})},
+                    "outbox-age" => {let now=UNIX_EPOCH.checked_add(Duration::from_secs(input.expected_version.try_into().map_err(|_|kanz_oms_store::Error::InvalidInput)?)).ok_or(kanz_oms_store::Error::InvalidInput)?;json!({"status":"age","age_ns":outbox::oldest_pending_age(&mut client,&input.tenant,now).await?.map(|a|a.as_nanos() as u64)})},
+                    _ => return Err(kanz_oms_store::Error::InvalidInput),
+                })
+            }.await;
+            return Ok(match result {Ok(value)=>value,Err(e)=>json!({"status":e.to_string()})});
+        }
         if input.mode=="recovery" {
             let batch=kanz_oms_store::recovery::PreparedRecovery {
                 state:bytes(&input.state)?,order_version:input.expected_version,case_version:input.case_version,
