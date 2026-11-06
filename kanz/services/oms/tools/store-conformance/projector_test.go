@@ -74,6 +74,9 @@ func projectorPayload(t *testing.T, kind, portfolio string, f *orderpb.Fill) []b
 }
 func projectorRequest(t *testing.T, f *fixture, e *envelopepb.Envelope, payload []byte) map[string]any {
 	t.Helper()
+	if payload == nil {
+		payload = []byte{}
+	} // JSON raw bytes: empty base64 string, never null.
 	return map[string]any{"mode": "position-projector", "schema": f.schema, "tenant": f.tenant, "state": wire(t, e), "fill": payload, "at": clock(at), "limit": 128}
 }
 func projectorOracle(t *testing.T, f *fixture, capture *projectorCapture) *position.Projector {
@@ -318,13 +321,75 @@ func TestRustPositionProjectorPostgresNATS(t *testing.T) {
 			t.Fatal(err)
 		}
 		delete(request, "other")
+		// POSITION retains only the latest message per subject. Arm a bounded
+		// two-message pull before publication so both acknowledged frames remain
+		// observable even when the next state compacts the first stored record.
+		batches := map[string]jetstream.MessageBatch{}
+		for _, subj := range projectorSubjects(f, portfolio, v)[:2] {
+			consumer := consumers[subj].consumer
+			batch, err := consumer.Fetch(2, jetstream.FetchMaxWait(30*time.Second))
+			if err != nil {
+				t.Fatal(err)
+			}
+			batches[subj] = batch
+			ready, cancel := context.WithTimeout(f.ctx, 5*time.Second)
+			tick := time.NewTicker(10 * time.Millisecond)
+			armed := false
+			for !armed {
+				info, err := consumer.Info(ready)
+				if err != nil {
+					cancel()
+					tick.Stop()
+					t.Fatal(err)
+				}
+				armed = info.NumWaiting > 0
+				if !armed {
+					select {
+					case <-ready.Done():
+						cancel()
+						tick.Stop()
+						t.Fatal("broker pull was not armed")
+					case <-tick.C:
+					}
+				}
+			}
+			cancel()
+			tick.Stop()
+		}
 		since := time.Now()
 		result = runResult(t, request)
 		expect(t, result.Status, "handled")
 		if result.Sent != 4 || !result.SessionsClosed {
 			t.Fatal("restart did not drain old and duplicate announcements")
 		}
-		verifyProjectorRecords(t, capture.records, consumers, since)
+		sequences := map[string]uint64{}
+		for _, record := range capture.records {
+			batch := batches[record.Subject]
+			select {
+			case msg, ok := <-batch.Messages():
+				if !ok {
+					t.Fatal("prefetched broker frame absent", batch.Error())
+				}
+				sequences[record.Subject]++
+				frame := verifyRelayFrame(t, record, msg.Data(), sequences[record.Subject], since)
+				if msg.Headers().Get("Nats-Msg-Id") != frame.Envelope.IdempotencyKey || msg.Headers().Get("Kanz-Partition-Key") != record.PartitionKey {
+					t.Fatal("prefetched broker headers differ")
+				}
+				ack, cancel := context.WithTimeout(f.ctx, 5*time.Second)
+				err := msg.DoubleAck(ack)
+				cancel()
+				if err != nil {
+					t.Fatal("prefetched broker acknowledgement failed")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("prefetched broker frame timed out")
+			}
+		}
+		for _, batch := range batches {
+			if _, more := <-batch.Messages(); more || batch.Error() != nil {
+				t.Fatal("prefetched batch did not complete exactly")
+			}
+		}
 		if f.pool.QueryRow(f.ctx, "SELECT count(*) FROM position_fills").Scan(&claims) != nil || claims != 1 || len(pendingRelay(t, f, key)) != 0 {
 			t.Fatal("redelivery refolded or lost publication")
 		}
