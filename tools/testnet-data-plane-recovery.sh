@@ -9,21 +9,40 @@ readonly OPERATION=${1:-}
 readonly RECOVERY_BUCKET=${2:-}
 readonly RECOVERY_KMS_KEY_ARN=${3:-}
 readonly RELEASE_COMMIT=${4:-unknown}
+readonly TV_MODE=${5:-off}
+readonly TV_PAIR_BASE64=${6:-}
 readonly RECOVERY_REGION=ap-northeast-3
 readonly DATA_NS=kanz-data
 readonly MSG_NS=kanz-messaging
 readonly DRILL_NS=kanz-recovery-drill
 readonly PG_HOST=kanz-testnet-postgres-rw.kanz-data.svc.cluster.local
-readonly -a DATABASES=(accounting audit identity oms regulatory risk_engine venue_binance venue_okx)
+DATABASES=(accounting audit identity oms regulatory risk_engine venue_binance venue_okx)
 readonly PG_IMAGE='ghcr.io/cloudnative-pg/postgresql:16.10-standard-bookworm@sha256:533e45e0a00c156bdab7c4d9a84fffa87259594725a3909c898e8645727d9555'
 readonly REDIS_IMAGE='redis@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08'
 readonly NATS_IMAGE='nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da'
 readonly NATS_BOX_IMAGE='natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c'
 RECOVERY_WORK=''
 RECOVERY_ARCHIVE=''
+DRILL_UID=''
+TV_OWNER_NONCE=''
+TV_PAIR=''
+TV_IMAGE=''
+TV_VERSION=''
+TV_SOURCE=''
 
 k() { k3s kubectl "$@"; }
 die() { printf 'recovery-refused: %s\n' "$*" >&2; exit 2; }
+
+case "$TV_MODE" in
+  off) [[ -z "$TV_PAIR_BASE64" ]] || die 'TV release inputs require explicit qualification' ;;
+  qualify)
+    source "$(dirname "${BASH_SOURCE[0]}")/tv-sync-restored-proof.sh"
+    load_tv_restore_pair
+    DATABASES+=(tv_sync)
+    ;;
+  *) die 'unsupported TV recovery mode' ;;
+esac
+readonly -a DATABASES
 
 require_boundary() {
   [[ "$RECOVERY_BUCKET" == kanz-testnet-tokyo-recovery-* ]] || die 'unexpected recovery bucket'
@@ -31,6 +50,9 @@ require_boundary() {
   aws sts get-caller-identity --query Account --output text | grep -qx '012619468098' || die 'wrong AWS account'
   k get namespace "$DATA_NS" >/dev/null
   k get namespace "$MSG_NS" >/dev/null
+  if [[ "$TV_MODE" == qualify ]]; then
+    [[ "$(tvk get namespace kube-system -o jsonpath='{.metadata.uid}')" == 86ea9839-5806-461d-b2d1-afd1ff5d87ff ]] || die 'TV recovery cluster identity mismatch'
+  fi
 }
 
 refuse_active_writers() {
@@ -151,8 +173,8 @@ backup() {
   jq -n \
     --arg backup_id "$backup_id" --arg created_at "$(date -u +%FT%TZ)" \
     --arg release_commit "$RELEASE_COMMIT" --arg source_region ap-northeast-1 \
-    --arg source_instance i-0ee1235614219f089 \
-    '{format:"kanz-testnet-data-plane-v1",backup_id:$backup_id,created_at:$created_at,release_commit:$release_commit,source_region:$source_region,source_instance:$source_instance,quiesced:true}' \
+    --arg source_instance i-0ee1235614219f089 --arg tv_mode "$TV_MODE" \
+    '{format:"kanz-testnet-data-plane-v1",backup_id:$backup_id,created_at:$created_at,release_commit:$release_commit,source_region:$source_region,source_instance:$source_instance,quiesced:true} + (if $tv_mode=="qualify" then {tv_sync:{tenant:"__system__",retention_seconds:604800,history:"not-yet-qualified"}} else {} end)' \
     >"$work/metadata.json"
   (cd "$work" && find . -type f ! -name MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum >MANIFEST.sha256)
   tar -C "$work" -czf "$archive" .
@@ -189,8 +211,14 @@ restore() {
   RECOVERY_WORK=$work
   RECOVERY_ARCHIVE=$archive
   cleanup_restore() {
-    [[ "$DRILL_NS" == kanz-recovery-drill ]] && k delete namespace "$DRILL_NS" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+    local rc=$?
+    if [[ "$TV_MODE" == qualify ]]; then
+      if ! cleanup_tv_restore_namespace; then printf '%s\n' 'recovery-refused: owned TV drill cleanup unverified' >&2; rc=2; fi
+    else
+      [[ "$DRILL_NS" == kanz-recovery-drill ]] && k delete namespace "$DRILL_NS" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+    fi
     [[ "$RECOVERY_WORK" == /var/tmp/kanz-restore.* ]] && rm -rf -- "$RECOVERY_WORK"
+    exit "$rc"
   }
   trap cleanup_restore EXIT
 
@@ -210,7 +238,31 @@ restore() {
   (cd "$work/extracted" && sha256sum --check --strict MANIFEST.sha256 >/dev/null) || die 'artifact member checksum failed'
   jq -e '.format=="kanz-testnet-data-plane-v1" and .quiesced==true' "$work/extracted/metadata.json" >/dev/null || die 'artifact is incompatible or not quiesced'
 
-  k delete namespace "$DRILL_NS" --ignore-not-found=true --wait=true >/dev/null
+  local owner_posture='ALTER ROLE kanz_restore CREATEDB NOSUPERUSER NOBYPASSRLS'
+  local tv_logging=''
+  if [[ "$TV_MODE" == qualify ]]; then
+    jq -e '.tv_sync=={tenant:"__system__",retention_seconds:604800,history:"not-yet-qualified"}' "$work/extracted/metadata.json" >/dev/null || die 'artifact lacks explicit TV history inventory'
+    [[ "$(cut -d'|' -f1 "$work/extracted/postgres/source.tsv" | LC_ALL=C sort)" == "$(printf '%s\n' "${DATABASES[@]}" | LC_ALL=C sort)" ]] || die 'TV archive database inventory mismatch'
+    for database in "${DATABASES[@]}"; do [[ -s "$work/extracted/postgres/$database.dump" ]] || die 'TV archive database member missing'; done
+    begin_tv_restore_namespace
+    owner_posture='ALTER ROLE kanz_restore CREATEDB CREATEROLE NOSUPERUSER NOBYPASSRLS'
+    # PostgreSQL 16 logging controls: no statement text, including error,
+    # duration and sampled statements, during isolated role provisioning.
+    tv_logging='  postgresql:
+    parameters:
+      log_statement: "none"
+      log_min_error_statement: "panic"
+      log_error_verbosity: "terse"
+      log_min_duration_statement: "-1"
+      log_min_duration_sample: "-1"
+      log_transaction_sample_rate: "0"
+      log_parameter_max_length: "0"
+      log_parameter_max_length_on_error: "0"'
+
+  else
+    k delete namespace "$DRILL_NS" --ignore-not-found=true --wait=true >/dev/null
+  fi
+
   cat <<EOF | k apply -f - >/dev/null
 apiVersion: v1
 kind: Namespace
@@ -245,6 +297,7 @@ spec:
   instances: 1
   imageName: ${PG_IMAGE}
   enableSuperuserAccess: false
+${tv_logging}
   bootstrap:
     initdb:
       database: restore_control
@@ -253,7 +306,7 @@ spec:
       encoding: UTF8
       localeCollate: C
       localeCType: C
-      postInitApplicationSQL: ["ALTER ROLE kanz_restore CREATEDB NOSUPERUSER NOBYPASSRLS"]
+      postInitApplicationSQL: ["${owner_posture}"]
   resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { cpu: "1", memory: 1Gi } }
   storage: { size: 10Gi, storageClass: local-path }
   walStorage: { size: 2Gi, storageClass: local-path }
@@ -371,6 +424,14 @@ EOF
   local elapsed metadata_release
   elapsed=$(( $(date -u +%s) - started ))
   metadata_release=$(jq -r .release_commit "$work/extracted/metadata.json")
+  if [[ "$TV_MODE" == qualify ]]; then
+    local tv_proof
+    tv_proof=$(qualify_tv_restored_snapshot "$archive_sha")
+    cleanup_tv_restore_namespace || die 'TV drill cleanup did not complete'
+    elapsed=$(( $(date -u +%s) - started ))
+    jq -n --arg key "$key" --arg sha256 "$archive_sha" --arg source_release_commit "$metadata_release" --argjson rto_seconds "$elapsed" --argjson replay "$tv_proof" '{status:"RESTORE_VERIFIED",key:$key,sha256:$sha256,source_release_commit:$source_release_commit,databases:9,rto_seconds:$rto_seconds,tv_sync:$replay,cleanup:"verified",scope:"isolated restored archive only; not current target or genesis readiness"}'
+    return
+  fi
   jq -n --arg key "$key" --arg sha256 "$archive_sha" --arg source_release_commit "$metadata_release" --argjson databases "${#DATABASES[@]}" --argjson redis_keys "$restored_redis" --argjson nats_streams "$expected_streams" --argjson nats_consumers "$expected_consumers" --argjson nats_messages "$expected_messages" --argjson rpo_seconds 0 --argjson rto_seconds "$elapsed" '{status:"RESTORE_VERIFIED",key:$key,sha256:$sha256,source_release_commit:$source_release_commit,databases:$databases,redis_keys:$redis_keys,nats_streams:$nats_streams,nats_consumers:$nats_consumers,nats_messages:$nats_messages,rpo_seconds:$rpo_seconds,rto_seconds:$rto_seconds,isolation:"temporary replacement namespace on source-region node"}'
 }
 
