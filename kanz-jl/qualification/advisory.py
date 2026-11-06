@@ -209,7 +209,8 @@ def main():
     try:
         source = proof.required(['git', 'rev-parse', 'HEAD']).decode().strip()
         qualification = json.loads((directory / 'julia-oci.json').read_text())
-        proof.validate_report(qualification, source, digest(Path(shutil.which('julia')).resolve()))
+        proof.validate_report(qualification, source, digest(Path(shutil.which('julia')).resolve()),
+            proof.native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz'))
         image = qualification['imageID']
         info = json.loads(proof.required(['docker', 'image', 'inspect', image]))[0]
         if info['Id'] != image or info['Config']['Labels']['org.opencontainers.image.revision'] != source:

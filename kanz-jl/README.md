@@ -165,3 +165,23 @@ content rather than suppressing scanner results: the whole image still passes
 through the same scan, and any remaining CRITICAL advisory refuses qualification.
 The failed pre-removal scan is retained in PR #1472; its development manifests
 do not by themselves establish that those historical native binaries were loaded.
+
+The stacked native inventory qualification independently hashes the same verified
+Julia archive retained by the host setup, without extracting its members. The
+bounded, read-only image probe inventories all regular files and relative links
+under `/opt/julia/{bin,lib,libexec,share/julia/compiled}` and the bundled JLL Project UUID/version and
+raw metadata bytes. Exact absence/addition/hash/link differences refuse. Loaded
+depot package images are separately inventoried as generated, unqualified bytes.
+Loaded-library closure requires each observed library to belong to the verified
+archive, generated depot image inventory, or separately recorded system paths.
+This loaded set is observed in the qualification probe, not every future worker
+`dlopen` path. System libraries outside the Julia archive are listed with bounded hashes
+under system library paths; these observations do not assign Debian package
+ownership. The existing Syft Debian inventory remains distinct.
+
+Every selected runtime file is explicitly unassigned to a qualified native
+advisory mapping. Exact archive equality proves provenance, not vulnerability
+clearance or reachability. Julia sysimages, bundled patched libraries and system
+libraries need component-specific advisory mappings and known-vulnerable controls;
+the native/runtime release blocker is unchanged. No package is imported just to
+query its version and no native library is executed by the host inventory parser.

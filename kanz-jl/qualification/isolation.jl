@@ -1,6 +1,6 @@
 # Test-only code run by an explicit OCI entrypoint override, never the worker.
 println(stderr, "KANZ_OCI_STAGE=imports")
-using Test, Sockets, SHA, TOML, Pkg
+using Test, Sockets, SHA, TOML, Pkg, Libdl
 println(stderr, "KANZ_OCI_STAGE=runtime")
 @test VERSION == v"1.13.3"
 @test ccall(:geteuid, Cuint, ()) == 65532
@@ -55,6 +55,85 @@ for (name, entries) in manifest["deps"]
     end
 end
 @test Set(keys(packages)) == Set(["ProtoBuf", "BufferedStreams", "EnumX"])
+# Independent host code compares this complete selected runtime inventory with
+# the checksum-verified official archive. No native advisory ownership is inferred.
+println(stderr, "KANZ_OCI_STAGE=native-runtime")
+native_files = Dict{String,Any}()
+native_links = Dict{String,String}()
+native_jll = Dict{String,Any}()
+native_total = Ref(0)
+function bounded_hash(path, maximum)
+    @test isfile(path) && !islink(path)
+    size = filesize(path)
+    @test 0 <= size <= maximum
+    native_total[] += size
+    @test native_total[] <= 2^31
+    Dict("size"=>size, "sha256"=>bytes2hex(open(sha256, path)))
+end
+for directory in ("bin", "lib", "libexec", "share/julia/compiled")
+    @test realpath(joinpath("/opt/julia", directory)) == joinpath("/opt/julia", directory)
+    for (dir, dirs, files) in walkdir(joinpath("/opt/julia", directory); follow_symlinks=false)
+        @test all(!islink(joinpath(dir, d)) for d in dirs)
+        for file in files
+            path = joinpath(dir, file)
+            relative = relpath(path, "/opt/julia")
+            @test length(native_files) + length(native_links) < 4096
+            if islink(path)
+                target = readlink(path)
+                @test !isabspath(target) && !occursin('\\', target)
+                @test startswith(realpath(path), "/opt/julia/")
+                native_links[relative] = target
+            else
+                native_files[relative] = bounded_hash(path, 768 * 2^20)
+            end
+        end
+    end
+end
+for name in readdir("/opt/julia/share/julia/stdlib/v1.13")
+    endswith(name, "_jll") || continue
+    @test length(native_jll) < 128
+    path = joinpath("/opt/julia/share/julia/stdlib/v1.13", name, "Project.toml")
+    @test realpath(path) == path
+    info = bounded_hash(path, 65536)
+    meta = TOML.parsefile(path)
+    @test meta["name"] == name
+    for field in ("name", "uuid", "version")
+        info[field] = meta[field]
+    end
+    native_jll[name] = info
+end
+generated_native = Dict{String,Any}()
+for (dir, dirs, files) in walkdir("/opt/julia-depot/compiled"; follow_symlinks=false)
+    @test all(!islink(joinpath(dir, d)) for d in dirs)
+    for file in files
+        endswith(file, ".so") || continue
+        path = joinpath(dir, file)
+        @test realpath(path) == path
+        @test length(generated_native) < 4096
+        generated_native[relpath(path, "/opt/julia-depot")] = bounded_hash(path, 768 * 2^20)
+    end
+end
+outside = Dict{String,Any}()
+for loaded in Libdl.dllist()
+    loaded == "linux-vdso.so.1" && continue
+    path = realpath(loaded)
+    if startswith(path, "/opt/julia/")
+        @test haskey(native_files, relpath(path, "/opt/julia"))
+        continue
+    elseif startswith(path, "/opt/julia-depot/")
+        @test haskey(generated_native, relpath(path, "/opt/julia-depot"))
+        continue
+    end
+    @test occursin(r"^/(usr/)?lib(64)?/[A-Za-z0-9_./+-]{1,256}$", path)
+    @test length(outside) < 64
+    outside[path] = bounded_hash(path, 128 * 2^20)
+end
+@test !isempty(outside)
+native = Dict("files"=>native_files, "links"=>native_links, "jll"=>native_jll,
+    "generatedNativeImages"=>generated_native,
+    "unassignedFiles"=>sort!(vcat(collect(keys(native_files)), ["depot/" * p for p in keys(generated_native)])),
+    "loadedOutsideArchive"=>outside,
+    "coverage"=>"native-library-advisory-ownership-unqualified")
 println(stderr, "KANZ_OCI_STAGE=inventory")
 generated = Dict{String,String}()
 for (dir, _, files) in walkdir("/opt/kanz-jl/gen")
@@ -77,4 +156,4 @@ TOML.print(stdout, Dict("sourceSHA"=>read("source.sha",String), "runtime"=>strin
     "projectSHA256"=>bytes2hex(sha256(read("Project.toml"))),
     "manifestSHA256"=>bytes2hex(sha256(read("Manifest.toml"))),
     "runtimeExecutableSHA256"=>bytes2hex(sha256(read("/opt/julia/bin/julia"))),
-    "excludedDevelopmentEnvironments"=>excluded_environments, "packages"=>packages, "generated"=>generated, "sources"=>sources))
+    "nativeRuntime"=>native, "excludedDevelopmentEnvironments"=>excluded_environments, "packages"=>packages, "generated"=>generated, "sources"=>sources))

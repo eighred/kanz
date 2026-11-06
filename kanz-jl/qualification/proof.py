@@ -11,6 +11,8 @@ import threading
 import tomllib
 import uuid
 
+import native_inventory
+
 ROOT = Path(__file__).resolve().parents[2]
 FLAGS = ['--startup-file=no', '--history-file=no', '--compiled-modules=existing',
          '--pkgimages=existing', '--project=/opt/kanz-jl']
@@ -24,7 +26,7 @@ class CommandTimeout(RuntimeError):
 
 
 ISOLATION_STAGES = {'imports', 'runtime', 'cgroup', 'process-security',
-                    'write-refusal', 'installed-packages', 'inventory'}
+                    'write-refusal', 'installed-packages', 'native-runtime', 'inventory'}
 
 
 def isolation_stage(raw):
@@ -110,7 +112,8 @@ EXCLUDED_DEVELOPMENT_ENVIRONMENTS = ['base/JuliaSyntax/docs', 'stdlib/v1.13/TOML
     'stdlib/v1.13/TOML/benchmark', 'stdlib/v1.13/Tar/test', 'test']
 
 
-def validate_inventory(inventory, source, runtime_sha256):
+def validate_inventory(inventory, source, runtime_sha256, native_expected):
+    native_inventory.validate(inventory.get('nativeRuntime'), native_expected)
     if inventory.get('excludedDevelopmentEnvironments') != EXCLUDED_DEVELOPMENT_ENVIRONMENTS:
         raise ValueError('packaged development environment boundary differs')
     if inventory['sourceSHA'] != source or inventory['runtime'] != '1.13.3':
@@ -152,7 +155,7 @@ def oracle(directory, phase):
         raise ValueError('OCI oracle incomplete')
 
 
-def validate_report(report, source, runtime_sha256):
+def validate_report(report, source, runtime_sha256, native_expected):
     if (not re.fullmatch('[0-9a-f]{40}', source) or report.get('sourceSHA') != source
             or report.get('localOnly') is not True or report.get('passed') is not True
             or report.get('cleanupPassed') is not True or report.get('isolationPassed') is not True
@@ -166,7 +169,7 @@ def validate_report(report, source, runtime_sha256):
     if not isinstance(report.get('inventory'), dict):
         raise ValueError('missing image inventory')
     try:
-        validate_inventory(report['inventory'], source, runtime_sha256)
+        validate_inventory(report['inventory'], source, runtime_sha256, native_expected)
     except (KeyError, TypeError, AttributeError):
         raise ValueError('malformed image inventory') from None
 
@@ -184,6 +187,7 @@ def main():
     if not runtime:
         raise ValueError('verified host Julia executable missing')
     runtime_sha256 = hashlib.sha256(Path(runtime).read_bytes()).hexdigest()
+    native_expected = native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz')
     report = {'sourceSHA': source, 'localOnly': True, 'passed': False, 'cleanupPassed': False,
               'juliaAdvisoryCoverage': 'unqualified-release-blocker', 'archiveSHA256': ARCHIVE_SHA256, 'cases': []}
     names = []
@@ -235,7 +239,7 @@ def main():
             if code:
                 raise ValueError('actual isolation test refused')
             inventory = tomllib.loads(wire.decode())
-            validate_inventory(inventory, source, runtime_sha256)
+            validate_inventory(inventory, source, runtime_sha256, native_expected)
             report['inventory'] = inventory
             report['isolationPassed'] = True
             stage = 'existing-independent-goldens'
@@ -297,7 +301,7 @@ def main():
         (output / 'julia-oci.json').write_text(json.dumps(report, indent=2) + '\n')
         if not clean:
             raise RuntimeError('owned OCI cleanup incomplete')
-    validate_report(report, source, runtime_sha256)
+    validate_report(report, source, runtime_sha256, native_expected)
     print('Julia OCI qualification PASS: 13 wire cases, existing goldens, isolation, installed dependency identity, cleanup')
 
 
