@@ -56,6 +56,20 @@ spec:
               app: operator
       ports:
         - { protocol: TCP, port: 9090 }
+    # These API peers use the same shared ingress policies as compliance. The
+    # allowance does not configure a gateway upstream or register its routes.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: accounting
+      ports:
+        - { protocol: TCP, port: 8101 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: audit
+      ports:
+        - { protocol: TCP, port: 8102 }
     - to:
         - podSelector:
             matchLabels:
