@@ -133,6 +133,13 @@ func (f *recoveryFixture) approve() {
 	if e != nil {
 		f.t.Fatal(e)
 	}
+	// ProposeFeeCorrection performs an order CAS. Real CommitRecovery reloads
+	// this version before preparing its durable tail; do not reuse the seed CAS.
+	previousVersion := f.version
+	f.state, f.version, e = store.Load(ctx, f.c.OrderID)
+	if e != nil || f.version <= previousVersion {
+		f.t.Fatal("approved fixture did not reload proposal CAS")
+	}
 	for _, change := range proposal.Changes {
 		digest, e := fillfact.EconomicDigest(change.Previous)
 		if e != nil {
