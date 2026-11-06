@@ -17,9 +17,10 @@ func checkGoShardMatrix(data []byte) error {
 				FailFast *bool `yaml:"fail-fast"`
 				Matrix   map[string]any
 			}
-			Needs any
-			If    string
-			Steps []struct {
+			Needs           any
+			If              string
+			ContinueOnError bool `yaml:"continue-on-error"`
+			Steps           []struct {
 				Name, Run, If, Uses string
 				Directory           string `yaml:"working-directory"`
 				ContinueOnError     bool   `yaml:"continue-on-error"`
@@ -37,7 +38,7 @@ func checkGoShardMatrix(data []byte) error {
 		map[string]any{"shard": 1, "kind": "race"},
 		map[string]any{"shard": "quality", "kind": "quality"},
 	}}
-	if race.Strategy.FailFast == nil || *race.Strategy.FailFast || !reflect.DeepEqual(race.Strategy.Matrix, wantMatrix) {
+	if race.ContinueOnError || race.Strategy.FailFast == nil || *race.Strategy.FailFast || !reflect.DeepEqual(race.Strategy.Matrix, wantMatrix) {
 		return fmt.Errorf("matrix must run both isolated race partitions and tagged quality without cancellation")
 	}
 	complete := false
@@ -271,6 +272,7 @@ func TestGoCIBaseBuildVetQualityOnly(t *testing.T) {
 		}
 	}
 	for _, mutation := range []struct{ name, old, replacement string }{
+		{"matrix-failure-ignored", "  go-race:\n", "  go-race:\n    continue-on-error: true\n"},
 		{"quality-row-omitted", "          - { shard: quality, kind: quality }\n", ""},
 		{"quality-dependency-bypassed", "needs: [scope, go-race]", "needs: [scope]"},
 		{"quality-result-ignored", `test "$SHARD_RESULT" = success`, "true"},
