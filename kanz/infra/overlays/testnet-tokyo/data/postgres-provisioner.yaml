@@ -71,6 +71,18 @@ data:
       echo "provisioned ${service} roles and database"
     }
 
+    # Only the explicit preparation Job selects this fixed additional service.
+    # Default invocation retains the original eight credential dependencies.
+    case "${1:-base}" in
+      base) ;;
+      tv-sync)
+        provision_database tv-sync tv_sync tv_sync
+        roles=$(psql --host "${host}" --username kanz_bootstrap --dbname kanz_control --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align --command "select count(*) from pg_roles where rolname IN ('tv_sync_app','tv_sync_migrate') and not rolsuper and not rolbypassrls")
+        [ "${roles}" = 2 ]
+        exit 0 ;;
+      *) printf '%s\n' 'unsupported provisioner mode' >&2; exit 2 ;;
+    esac
+
     provision_database accounting accounting accounting
     provision_database audit audit audit
     provision_database identity identity identity

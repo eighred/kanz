@@ -43,7 +43,7 @@ pub fn execution_key(f: &Fill) -> String {
     encoded.push(']');
     format!("execution:v1:{:x}", Sha256::digest(encoded.as_bytes()))
 }
-fn domain(f: &Fill) -> bool {
+pub(crate) fn domain(f: &Fill) -> bool {
     [
         f.quantity.as_ref(),
         f.price.as_ref(),
@@ -57,7 +57,7 @@ fn domain(f: &Fill) -> bool {
     .into_iter()
     .all(in_domain)
 }
-fn timestamp(t: &prost_types::Timestamp) -> bool {
+pub(crate) fn timestamp(t: &prost_types::Timestamp) -> bool {
     (-62135596800..=253402300799).contains(&t.seconds) && (0..1_000_000_000).contains(&t.nanos)
 }
 pub fn same_execution(a: &Fill, b: &Fill) -> bool {

@@ -8,6 +8,7 @@ import base64
 from contextlib import ExitStack
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -56,6 +57,7 @@ def fixture_references(args):
         ("discover", "--format", "json", "--depth", "1"): (7, (6,)),
         ("cp", "-r"): (5, (3, 4)),
         ("attach", "--artifact-type", "application/vnd.kanz.fixture"): (6, (4,)),
+        ("attach", "--artifact-type", "application/vnd.in-toto+json"): (6, (4,)),
         ("push", "--config", "image.json:application/vnd.oci.image.config.v1+json"): (6, (4,)),
         ("push",): (4, (2,)),
     }
@@ -65,7 +67,7 @@ def fixture_references(args):
             refs = [args[i] for i in positions]
             pattern = r"ghcr\.io/eighred/fixture-(?:source|destination)(?::[A-Za-z0-9_.-]{1,128}|@sha256:[0-9a-f]{64})?"
             p.require(all(re.fullmatch(pattern, ref) for ref in refs), "nonfixture reference")
-            p.require(all(i in positions or args[i] in ("layer", "index.json", "layer:application/vnd.oci.image.layer.v1.tar")
+            p.require(all(i in positions or args[i] in ("layer", "index.json", "attestation.json", "layer:application/vnd.oci.image.layer.v1.tar")
                           for i in range(1 + len(prefix), len(args))), "unsupported fixture argument")
             return refs
     raise p.Refused("unsupported fixture command")
@@ -96,6 +98,8 @@ def fixture():
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             resources.callback(stop_backend, backend)
             accepted, denied = [], []
+            hidden_subject, hidden_referrer = None, None
+            hidden_discovery = []
             expected_auth = "Basic " + base64.b64encode(b"x-access-token:fixture-token").decode()
 
             class Proxy(BaseHTTPRequestHandler):
@@ -127,8 +131,32 @@ def fixture():
                         response = conn.getresponse()
                         body = response.read(2 * 1024 * 1024 + 1)
                         p.require(len(body) <= 2 * 1024 * 1024, "fixture response bound")
+                        changed = False
+                        # ORAS 1.3 / oras-go 2.6 reads discovery through either
+                        # the native API or FetchReference on the mutable fallback
+                        # tag. Distribution 3.0 uses the latter. Never intercept
+                        # /manifests/<digest>: those content-addressed bytes remain
+                        # intact, including the fallback index fetched by digest.
+                        native_path = "/v2/eighred/fixture-source/referrers/" + (hidden_subject or "")
+                        fallback_path = "/v2/eighred/fixture-source/manifests/" + (hidden_subject or "").replace(":", "-", 1)
+                        discovery_path = self.path.split("?", 1)[0]
+                        if self.command == "GET" and response.status == 200 and hidden_referrer and discovery_path in (native_path, fallback_path):
+                            index = json.loads(body)
+                            entries = index.get("manifests")
+                            p.require(isinstance(entries, list), "fixture referrers response shape")
+                            kept = [entry for entry in entries if entry.get("digest") != hidden_referrer]
+                            if len(kept) != len(entries):
+                                p.require(len(entries) - len(kept) == 1, "ambiguous hidden fixture referrer")
+                                index["manifests"] = kept
+                                body = json.dumps(index, separators=(",", ":")).encode()
+                                hidden_discovery.append(True)
+                                changed = True
                         self.send_response(response.status)
                         for name, value in response.getheaders():
+                            if changed and name.lower() == "etag":
+                                continue
+                            if changed and name.lower() == "docker-content-digest":
+                                value = "sha256:" + hashlib.sha256(body).hexdigest()
                             if name.lower() not in ("transfer-encoding", "connection", "content-length"):
                                 self.send_header(name, value)
                         self.send_header("Content-Length", response.getheader("Content-Length", "0") if self.command == "HEAD" else str(len(body)))
@@ -190,6 +218,29 @@ def fixture():
                     raw = local("oras", "manifest", "fetch", source + "@" + identity)
                     manifests.append({"digest": identity, "size": len(raw), "mediaType": json.loads(raw)["mediaType"],
                                       "platform": {"architecture": arch, "os": "linux"}})
+                # This unsigned, dummy in-toto artifact is both an index child
+                # and a referrer of a platform manifest. No signing claim is made.
+                platform = manifests[0]["digest"]
+                (root / "attestation.json").write_text(json.dumps({
+                    "_type": "https://in-toto.io/Statement/v1", "predicateType": "https://example.invalid/fixture",
+                    "subject": [{"name": "fixture-only", "digest": {"sha256": platform.removeprefix("sha256:")}}],
+                    "predicate": {"fixture": True},
+                }))
+                local("oras", "attach", "--artifact-type", "application/vnd.in-toto+json",
+                      source + "@" + platform, "attestation.json")
+                visible = p.document("oras", "discover", "--format", "json", "--depth", "1", source + "@" + platform)
+                refs = [ref for ref in visible["referrers"] if ref.get("artifactType") == "application/vnd.in-toto+json"]
+                p.require(len(refs) == 1, "attestation discovery positive control missing")
+                attestation = refs[0]["digest"]
+                raw = local("oras", "manifest", "fetch", source + "@" + attestation)
+                artifact = json.loads(raw)
+                p.require(artifact.get("subject", {}).get("digest") == platform, "attestation subject missing")
+                manifests.append({"digest": attestation, "size": len(raw), "mediaType": artifact["mediaType"],
+                                  "platform": {"architecture": "unknown", "os": "unknown"}})
+                hidden_subject, hidden_referrer = platform, attestation
+                invisible = p.document("oras", "discover", "--format", "json", "--depth", "1", source + "@" + platform)
+                p.require(hidden_discovery and all(ref["digest"] != attestation for ref in invisible["referrers"]),
+                          "source discovery edge was not hidden")
                 index = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": manifests}
                 (root / "index.json").write_text(json.dumps(index, separators=(",", ":")))
                 local("oras", "manifest", "push", source + ":multi", "index.json")
@@ -198,11 +249,24 @@ def fixture():
                 legacy = identity.replace(":", "-") + ".sig"
                 local("oras", "push", source + ":" + legacy, "layer")
                 observed = p.graph(source, identity)
-                p.require(len(observed["legacy"]) == 1 and len(observed["edges"][identity]) >= 4, "incomplete fixture graph")
+                p.require(len(observed["legacy"]) == 1 and len(observed["edges"][identity]) >= 5, "incomplete fixture graph")
                 local("oras", "cp", "-r", source + "@" + identity, target + ":multi")
                 for tag, value in observed["legacy"].items():
                     local("oras", "cp", "-r", source + "@" + value, target + ":" + tag)
+                source_refs = p.document("oras", "discover", "--format", "json", "--depth", "1", source + "@" + platform)
+                target_refs = p.document("oras", "discover", "--format", "json", "--depth", "1", target + "@" + platform)
+                p.require(all(ref["digest"] != attestation for ref in source_refs["referrers"])
+                          and any(ref["digest"] == attestation for ref in target_refs["referrers"]),
+                          "raw source/destination discovery asymmetry missing")
+                p.require(attestation in observed["edges"][platform], "verified subject reverse edge missing")
+                p.require(p.graph(source, identity) == observed, "source canonical graph changed")
                 p.require(p.graph(target, identity) == observed, "actual recursive graph copy mismatch")
+                # Canonicalizing a verified subject relation must not conceal a
+                # genuine destination-only artifact. Preserve every discovered edge.
+                local("oras", "attach", "--artifact-type", "application/vnd.kanz.fixture",
+                      target + "@" + platform, "layer")
+                p.require(p.graph(target, identity) != observed, "destination-only artifact was ignored")
+                p.require(p.graph(source, identity) == observed, "negative control changed the source graph")
                 p.require(p.resolve(target + ":multi") == identity and accepted, "actual helper/copy missing")
                 before = len(denied)
                 os.environ["GH_TOKEN"] = "wrong-fixture-token"
@@ -220,7 +284,7 @@ def fixture():
                 os.chdir(saved_cwd)
                 os.environ.clear()
                 os.environ.update(saved_env)
-    print("Actual ORAS 1.3.0 registry/index/referrers/legacy/blob/helper proof passed; no AWS or release signing proof")
+    print("Actual ORAS 1.3.0 registry/index/asymmetric-referrers/legacy/blob/helper proof passed; no AWS or release signing proof")
 
 
 if __name__ == "__main__":

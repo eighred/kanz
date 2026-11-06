@@ -1,7 +1,9 @@
 //! Disposable test adapter only. No service, production configuration or release image.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use kanz_oms_fold_shadow::proto::order::v1::Fill;
-use kanz_oms_store::{applied_fills, create, identity, load, save, Record};
+use kanz_oms_store::{
+    applied_fills, create, fee_subject, fee_wire::FillWire, identity, load, queries, save, Record,
+};
 use prost::Message;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -15,6 +17,24 @@ use tokio_postgres::{config::Host, NoTls};
 #[serde(deny_unknown_fields)]
 struct Input {
     mode: String,
+    #[serde(default)]
+    case_version: i64,
+    #[serde(default)]
+    history_digest: String,
+    #[serde(default)]
+    missing: Vec<String>,
+    #[serde(default)]
+    posted: Vec<String>,
+    #[serde(default)]
+    rollback: bool,
+    #[serde(default)]
+    statuses: Vec<i32>,
+    #[serde(default)]
+    parent_id: String,
+    #[serde(default)]
+    portfolio_id: String,
+    #[serde(default)]
+    limit: i64,
     #[serde(default)]
     order_id: String,
     #[serde(default)]
@@ -78,6 +98,57 @@ fn record(r: Fact) -> Result<Record, ()> {
     })
 }
 async fn run(input: Input) -> Result<Value, ()> {
+    if matches!(
+        input.mode.as_str(),
+        "fee-digest" | "fee-terms" | "fee-delta"
+    ) {
+        let raw = bytes(&input.fill)?;
+        let other = bytes(&input.other)?;
+        let result: Result<Value, kanz_oms_store::Error> = (|| {
+            let revised = FillWire::decode(&raw)?;
+            match input.mode.as_str() {
+                "fee-digest" => Ok(
+                    json!({"status":kanz_oms_store::fee_revision::economic_digest(revised.value())?}),
+                ),
+                "fee-terms" => Ok(
+                    json!({"status":"terms","state":STANDARD.encode(kanz_oms_store::fee_revision::terms(&revised)?.journal_bytes()?)}),
+                ),
+                _ => {
+                    let previous = FillWire::decode(&other)?;
+                    Ok(
+                        json!({"status":"delta","delta":kanz_oms_store::fee_revision::approved_delta(&previous,&revised)?.to_string()}),
+                    )
+                }
+            }
+        })();
+        return Ok(match result {
+            Ok(v) => v,
+            Err(e) => json!({"status":e.to_string()}),
+        });
+    }
+    if input.mode == "fee-wire" {
+        let raw = bytes(&input.fill)?;
+        let other = bytes(&input.other)?;
+        let result = (|| {
+            let a = FillWire::decode(&raw)?;
+            let b = FillWire::decode(&other)?;
+            Ok::<_, kanz_oms_store::Error>((a.equivalent(&b), a.journal_bytes()?))
+        })();
+        return Ok(match result {
+            Ok((same, canonical)) => {
+                json!({"status":same.to_string(),"state":STANDARD.encode(canonical)})
+            }
+            Err(e) => json!({"status":e.to_string()}),
+        });
+    }
+    if input.mode == "fee-subject" {
+        return Ok(
+            json!({"status":fee_subject::normalize(&input.fill),"state":STANDARD.encode(fee_subject::normalize(&input.other))}),
+        );
+    }
+    if input.mode == "fee-unicode" {
+        return Ok(json!({"status":fee_subject::scalar_digest()}));
+    }
     if input.mode == "identity" {
         let fill = Fill::decode(bytes(&input.fill)?.as_slice()).map_err(|_| ())?;
         return Ok(json!({"status":identity::execution_key(&fill)}));
@@ -89,7 +160,16 @@ async fn run(input: Input) -> Result<Value, ()> {
     }
     if !matches!(
         input.mode.as_str(),
-        "save" | "create" | "load" | "applied-fills"
+        "save"
+            | "create"
+            | "load"
+            | "applied-fills"
+            | "list"
+            | "list-by-status"
+            | "list-by-parent"
+            | "list-by-portfolio"
+            | "fee-revision"
+            | "recovery"
     ) || !input.schema.starts_with("oms_store_")
         || input.schema.len() > 63
         || !input
@@ -116,6 +196,57 @@ async fn run(input: Input) -> Result<Value, ()> {
             )
             .await
             .map_err(|_| ())?;
+        if input.mode=="recovery" {
+            let batch=kanz_oms_store::recovery::PreparedRecovery {
+                state:bytes(&input.state)?,order_version:input.expected_version,case_version:input.case_version,
+                history_digest:input.history_digest,missing:input.missing,
+                posted:input.posted.iter().map(|raw| FillWire::decode(&bytes(raw)?).map_err(|_|())).collect::<Result<Vec<_>,_>>()?,
+                records:input.records.into_iter().map(record).collect::<Result<Vec<_>,_>>()?,
+            };
+            return Ok(match kanz_oms_store::recovery::commit_prepared_recovery(&mut client,&input.tenant,&batch).await {
+                Ok(())=>json!({"status":"committed"}),Err(e)=>json!({"status":e.to_string()}),
+            });
+        }
+        if input.mode=="fee-revision" {
+            let original=FillWire::decode(&bytes(&input.other)?).map_err(|_|())?;
+            let revised=FillWire::decode(&bytes(&input.fill)?).map_err(|_|())?;
+            let state=bytes(&input.state)?;
+            let records=input.records.into_iter().map(record).collect::<Result<Vec<_>,_>>()?;
+            let mut tx=client.transaction().await.map_err(|_|())?;
+            let result=async {
+                let mut locked=kanz_oms_store::fee_journal::cas_order(&mut tx,&input.tenant,&state,input.expected_version).await?;
+                let revision=locked.record_fee_revision(&original,&revised).await?;
+                locked.enqueue(&records).await?;
+                Ok::<_,kanz_oms_store::Error>(revision)
+            }.await;
+            return Ok(match result {
+                Err(e)=>{tx.rollback().await.map_err(|_|())?;json!({"status":e.to_string()})},
+                Ok(revision)=>{
+                    if input.rollback {tx.rollback().await.map_err(|_|())?;json!({"status":"rolled_back","delta":revision.delta.to_string(),"fresh":revision.fresh})}
+                    else {match tx.commit().await {
+                        Ok(())=>json!({"status":"committed","delta":revision.delta.to_string(),"fresh":revision.fresh}),
+                        Err(_)=>json!({"status":"CommitUnconfirmed"}),
+                    }}
+                },
+            });
+        }
+        if input.mode=="list-by-portfolio" {
+            return Ok(match queries::list_by_portfolio(&mut client,&input.tenant,&input.portfolio_id,input.limit).await {
+                Ok(page)=>json!({"status":"orders","states":page.states.iter().map(|s|STANDARD.encode(s)).collect::<Vec<_>>(),"unindexed":page.unindexed}),
+                Err(e)=>json!({"status":e.to_string()}),
+            });
+        }
+        if matches!(input.mode.as_str(),"list"|"list-by-status"|"list-by-parent") {
+            let result=match input.mode.as_str() {
+                "list"=>queries::list(&mut client,&input.tenant).await,
+                "list-by-status"=>queries::list_by_status(&mut client,&input.tenant,&input.statuses).await,
+                _=>queries::list_by_parent(&mut client,&input.tenant,&input.parent_id).await,
+            };
+            return Ok(match result {
+                Ok(rows)=>json!({"status":"orders","states":rows.iter().map(|s|STANDARD.encode(s)).collect::<Vec<_>>()}),
+                Err(e)=>json!({"status":e.to_string()}),
+            });
+        }
         if input.mode=="load" {
             return Ok(match load(&mut client,&input.tenant,&input.order_id).await {
                 Ok(row)=>json!({"status":"loaded","state":STANDARD.encode(&row.state),"db_version":row.version}),

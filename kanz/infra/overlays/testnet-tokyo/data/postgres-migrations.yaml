@@ -36,7 +36,7 @@ spec:
             - |
               host=kanz-testnet-postgres-rw.kanz-data.svc.cluster.local
               export PGPASSWORD="$(cat /run/secrets/bootstrap/password)"
-              until roles=$(psql --host "${host}" --username kanz_bootstrap --dbname kanz_control --no-psqlrc --tuples-only --no-align --command "select count(*) from pg_roles where rolname ~ '_(app|migrate)$'") && [ "${roles}" = 16 ]; do
+              until roles=$(psql --host "${host}" --username kanz_bootstrap --dbname kanz_control --no-psqlrc --tuples-only --no-align --command "select count(*) from pg_roles where rolname IN ('accounting_app','accounting_migrate','audit_app','audit_migrate','identity_app','identity_migrate','oms_app','oms_migrate','regulatory_app','regulatory_migrate','risk_engine_app','risk_engine_migrate','venue_binance_app','venue_binance_migrate','venue_okx_app','venue_okx_migrate')") && [ "${roles}" = 16 ]; do
                 sleep 2
               done
               umask 077

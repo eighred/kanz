@@ -160,6 +160,19 @@ becoming Ready and removes the observation surface needed to finish the proof.
 
 ### Disposable CNI capability proof
 
+The separate `k3s-cni-migration` CI fixture tests a possible in-place
+transition: pinned K3s with embedded etcd, Flannel to Cilium and back to Flannel,
+retaining the same disposable node, etcd marker and original PVC/PV. Each phase
+also exercises cluster DNS, fresh local-path provisioning and the canonical
+synthetic policy probe. It recreates CoreDNS and the storage controller after
+each switch. The privileged fixture has no host mounts or operational
+credentials; only sanitized verdicts survive cleanup. This is not an operator
+migration command or evidence of a Tokyo transition. Before live migration,
+fresh application recovery evidence, secure control-plane recovery material,
+an explicit outage/rollback window and measured resource headroom remain
+required under #1413/#232. Kube-proxy and the existing single-node budget remain
+in scope; no node replacement is implied.
+
 `tools/Test-TestnetCNI.ps1` is a separate, explicitly invoked operator check.
 It refuses a checkout that is not exact, unmodified `origin/main`, an unexpected
 AWS account/region/instance, or a different `kube-system` UID. It creates only a
@@ -190,3 +203,59 @@ Fixture image: official Python 3.13.18 Alpine linux/amd64 manifest, digest pinne
 `tools/cni-proof/proof.py`; [Python CLI](https://docs.python.org/3.13/using/cmdline.html)
 and [socket outcomes](https://docs.python.org/3.13/library/socket.html) define the
 probe behavior. No third-party Python packages run inside the fixture pods.
+
+## Preparing tv-sync without activating it
+
+`tv-sync-preparation/` is an explicit operator overlay. It is not referenced by
+this workload overlay or the ordinary `data/` overlay. Ordinary data installation
+retains its original 37 resources, eight databases and sixteen roles; ordinary
+Vault bootstrap does not inspect or create tv-sync credentials. The shared
+provisioner script accepts only its default mode and the fixed `tv-sync` mode.
+The latter runs in a separate Job with the existing migration ServiceAccount and
+a dedicated two-password CSI class, using the same SQL grant implementation.
+
+After these source prerequisites are merged, establish the separate registry
+prerequisite and successful signed promotion/custody for the exact v2026.4.0 pair.
+`tv-sync-release.json` is a byte-pinned desired tuple, not evidence of promotion.
+Its explicit `release-v2026.4.0` tag avoids overwriting the existing immutable
+full-SHA migration tag, which identifies a different artifact. Ordinary image
+resolution retains the full-SHA convention. The operator rechecks both paired
+destination tags and digests; retain the independently verified signature,
+attestation and descriptor-graph evidence from promotion as an activation gate.
+
+Use the existing private Vault launcher with `-Target DataPlane -Mode Bootstrap
+-PrepareTVSync`. It verifies merged source, Tokyo account and instance before
+staging, requires the existing Vault baseline and qualifies only an all-or-none
+three-field group: provisioner app and
+migration passwords plus the runtime-only `kv/kanz/tv-sync-runtime` DSN. The
+runtime role receives only that separate record after qualification. Forbidden
+`migrate_dsn`, partial records and unknown lookup errors refuse. This mode neither generates
+unrelated credentials nor rewrites legacy policies/auth config; it records a
+separate tv-sync completion marker. Expire/revoke
+previously issued runtime tokens before eventual activation; other services'
+legacy shared DSN layouts are not changed by this preparation.
+
+`Install-TestnetDataPlane.ps1 -InstanceId i-0ee1235614219f089 -PrepareTVSync`
+performs a dry run against the reviewed cluster UID. Add `-Apply` only for the
+separately authorized preparation operation. It requires existing database and
+base Jobs to be ready/complete with no running owned Pods before changing the
+shared script ConfigMap. It creates only the tv-only CSI class and two fixed
+Jobs, runs provisioning before migration, and verifies current Job UID, owner
+reference, exact image and loaded digest. Existing preparation Jobs must already
+be complete with matching immutable specifications and shared script; changed or
+unfinished Jobs refuse rather than being deleted/recreated. A rerun with the same
+qualified state reuses them.
+
+On failure, cleanup can stop only newly created Jobs carrying this invocation's
+ownership annotation and UID; preexisting Jobs are never deleted. It restores
+the captured ConfigMap with resource-version checks and removes its newly created
+CSI class. Foreign replacements or concurrent changes leave an explicit
+unverified rollback result. This restores Kubernetes configuration, not SQL:
+never drop provisioned databases, roles, fact history or checkpoints as cleanup.
+Synthetic operator tests prove these branches; they do not prove live rollback.
+
+Preparation does not deploy tv-sync, change gateway routes/NetworkPolicy, or
+expose API 8113. Runtime CSI remains unreferenced. Actual Vault/CSI/SPIRE/NATS,
+role/future-grant/RLS, history/checkpoint backup/restore, policy-union/CNI and
+controlled outage/rollback acceptance still precede the separate activation in
+#1440/#1410. No capital permission follows from a successful preparation Job.

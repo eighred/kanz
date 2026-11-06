@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../data/postgres-provisioner.yaml
+  - ../data/tv-sync-migration.yaml
+  - provisioner.yaml
+  - secret-provider-class.yaml
+patches:
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata: { name: postgres-provisioner, namespace: kanz-data }
+  - patch: |-
+      $patch: delete
+      apiVersion: batch/v1
+      kind: Job
+      metadata: { name: postgres-provisioner, namespace: kanz-data }
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata: { name: postgres-provisioner-egress, namespace: kanz-data }
+images:
+  - name: ghcr.io/cloudnative-pg/postgresql
+    newName: ghcr.io/cloudnative-pg/postgresql
+    digest: sha256:533e45e0a00c156bdab7c4d9a84fffa87259594725a3909c898e8645727d9555

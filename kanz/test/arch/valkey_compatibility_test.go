@@ -69,7 +69,7 @@ func TestValkeyCompatibilityUsesRealPinnedServer(t *testing.T) {
 		"mutable tag":           {valkeyProofImage, "valkey/valkey:9.1.3-alpine"},
 		"wrong version":         {"TEST_VALKEY_VERSION: 9.1.3", "TEST_VALKEY_VERSION: 9.1.2"},
 		"missing URL":           {"TEST_REDIS_URL: redis://localhost:6379/0", "TEST_REDIS_URL: ''"},
-		"no identity execution": {"--pattern)", "--unused)"},
+		"no identity execution": {"check_valkey_evidence.py --pattern)", "check_valkey_evidence.py --unused)"},
 		"missing package":       {"./pkg/redisadapter ./services/webhook-ingest", "./services/webhook-ingest"},
 		"no race":               {"-race -json", "-json"},
 		"missing pipefail":      {"          set -o pipefail\n          python -m unittest", "          python -m unittest"},

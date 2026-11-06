@@ -54,6 +54,10 @@ func run(t *testing.T, input map[string]any) string {
 }
 
 type fixtureResult struct {
+	Delta     *string  `json:"delta"`
+	Fresh     *bool    `json:"fresh"`
+	States    [][]byte `json:"states"`
+	Unindexed *int64   `json:"unindexed"`
 	Status    string   `json:"status"`
 	Version   string   `json:"version"`
 	State     []byte   `json:"state"`

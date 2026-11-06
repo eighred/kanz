@@ -28,10 +28,49 @@
 package secret
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
+
+// ReadBounded retains Read's file-first, no-fallback semantics, with a strict
+// allocation ceiling for operator inputs. Errors disclose neither path nor value.
+// Existing callers of Read keep their original behavior.
+func ReadBounded(k string, maxBytes int64) (string, error) {
+	if maxBytes <= 0 || maxBytes > 1<<20 {
+		return "", errors.New("secret: invalid byte limit")
+	}
+	p := os.Getenv(k + "_FILE")
+	if p == "" {
+		value := os.Getenv(k)
+		if int64(len(value)) > maxBytes {
+			return "", errors.New("secret: byte limit exceeded")
+		}
+		return value, nil
+	}
+	f, err := openBoundedMount(p)
+	if err != nil {
+		return "", errors.New("secret: declared mount unreadable")
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return "", errors.New("secret: declared mount is not a regular file")
+	}
+	if info.Size() > maxBytes {
+		return "", errors.New("secret: byte limit exceeded")
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return "", errors.New("secret: declared mount unreadable")
+	}
+	if int64(len(b)) > maxBytes {
+		return "", errors.New("secret: byte limit exceeded")
+	}
+	return strings.TrimSpace(string(b)), nil
+}
 
 // Read returns the value of k, preferring the file at <k>_FILE over the
 // plaintext env var <k> (SEC-01d).

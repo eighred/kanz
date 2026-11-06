@@ -25,6 +25,50 @@ REQUIRED = {
         "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity",
         "TestRustExecutionEconomics", "TestRustRepositoryTransactions",
         "TestRustRepositoryLifecycle",
+        "TestFeeEconomicIndependentOracle", "TestRustFeeEconomicCompatibility", "TestRustFeeTermsCompatibility",
+        *{"TestRustFeeEconomicCompatibility/" + case for case in (
+            "1970-01-01T00:00:01Z", "2000-02-29T12:34:56.123Z", "2100-03-01T00:00:00.000000001Z",
+            "2400-02-29T23:59:59.12Z", "9999-12-31T23:59:59.999999999Z",
+            "fractional-refund", "additional-debit", "rebate-change", "scale-alias", "beyond-int64-delta",
+        )},
+        *{"TestRustFeeTermsCompatibility/" + case for case in (
+            "same-actor", "blank-actor", "case-binding", "malformed-digest", "previous-digest-binding",
+            "approval-clock", "bad-nanos", "unknown-price", "currency-change", "unchanged-fee", "outside-decimal-domain",
+        )},
+        "TestRustRecoveryTransactions",
+        *{"TestRustRecoveryTransactions/" + case for case in (
+            "go-differential-terminal-restart", "zero-history-corrected", "approved-fee-go-differential",
+            "mandatory-facts-and-provenance", "case-cas-rollback-all-owners", "fee-and-claims-rollback", "order-cas-rollback", "unsafe-recovery-rls",
+            "order-cas-and-push-race", "concurrent-recovery-one-checkpoint", "target-outbox-commit-rollback", "tenant-same-case-and-execution",
+        )},
+        *{"TestRustRecoveryTransactions/mandatory-facts-and-provenance/" + case for case in (
+            "missing-status", "missing-execution", "wrong-tenant", "wrong-class", "wrong-state", "wrong-digest", "duplicate-execution", "wrong-checkpoint",
+        )},
+        *{"TestRustRecoveryTransactions/target-outbox-commit-rollback/" + case for case in ("target", "outbox", "commit")},
+        "TestRustFeeJournalTransactions",
+        *{"TestRustFeeJournalTransactions/" + case for case in (
+            "commit-restart-aba-replay", "case-conflict-stale-head", "concurrent-cas-one-revision",
+            "explicit-rollback", "outbox-failure-atomic", "deferred-commit-atomic",
+            "tenant-same-execution-case", "other-book-not-oms-head", "corrupt-bounded-head", "scope-and-order-refusal",
+        )},
+        "TestPinnedGoUnicodeTable", "TestFeeWireIndependentSemantics",
+        "TestRustFeeUnicodeCompatibility", "TestRustFeeWireCompatibility", "TestRustFeeWireRefusals",
+        *{"TestRustFeeWireCompatibility/" + case for case in (
+            "known-field-order", "distinct-unknown-order", "same-unknown-order",
+            "unknown-value-encoding", "unknown-tag-normalized", "nested-unknown-order",
+            "nested-unknown-difference", "duplicate-embedded-merge", "duplicate-embedded-unknown", "duplicate-embedded-unknown-only", "nested-unknown-tag-normalized",
+            "unknown-group", "unknown-group-depth-boundary", "unknown-group-inner-order", "unknown-group-inner-noncanonical-tag", "known-enum-wrong-wire", "known-wrong-wire-is-unknown",
+            "known-wrong-wire-not-dropped", "optional-absent-present", "scalar-default", "duplicate-scalar-last",
+        )},
+        *{"TestRustFeeWireRefusals/" + case for case in (
+            "zero-field", "truncated-varint", "unterminated-group", "unexpected-end-group", "wrong-end-group", "oversized-input", "unknown-group-excess-depth",
+        )},
+        "TestRustRepositoryQueries",
+        *{"TestRustRepositoryQueries/" + case for case in (
+            "list-status-parent-exact", "portfolio-page-count-backfill",
+            "tenant-same-ids", "corruption-capacity-no-prefix",
+            "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result",
+        )},
         *{"TestRustRepositoryLifecycle/" + case for case in (
             "concurrent-create-one-fact", "create-restart-load-go-save",
             "create-invalid-fact-rollback", "create-deferred-commit-rollback",

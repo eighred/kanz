@@ -111,6 +111,7 @@ def graph(repository, root, legacy_lookup=None):
     require(all(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", t) for t in tags), "invalid registry tag")
     tags = set(tags)
     inventory, legacy, edges, pending = {}, {}, {}, [root]
+    subjects = []
     total = 0
     while pending:
         current = digest(pending.pop())
@@ -139,6 +140,9 @@ def graph(repository, root, legacy_lookup=None):
         if "config" in body:
             children.append(body["config"])
         if "subject" in body:
+            subject, metadata = descriptor(body["subject"])
+            require(metadata["mediaType"] in MANIFESTS, "unsupported subject")
+            subjects.append((subject, current))
             children.append(body["subject"])
         edges[current] = []
         for child in children:
@@ -182,7 +186,15 @@ def graph(repository, root, legacy_lookup=None):
                 legacy[tag] = key
                 pending.append(key)
                 edges[current].append(key)
-        edges[current] = sorted(set(edges[current]))
+    # OCI subject bytes define the reverse referrer relation even when an older
+    # registry's discovery index omits it. Both endpoints have been freshly
+    # hash/size-verified above. Defer until traversal finishes so a subject
+    # visited later cannot overwrite the derived edge. Keep all discovered
+    # edges: additional artifacts still make source/destination graphs differ.
+    for subject, referrer in subjects:
+        require(subject in edges, "subject manifest unavailable")
+        edges[subject].append(referrer)
+    edges = {key: sorted(set(values)) for key, values in edges.items()}
     return {"root": root, "descriptors": inventory, "edges": edges, "legacy": legacy}
 
 

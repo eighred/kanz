@@ -1,0 +1,53 @@
+name: k3s-cni-migration
+on:
+  pull_request:
+    paths:
+      - 'tools/cni-proof/**'
+      - 'tools/feed-identity/install.sh'
+      - '.github/workflows/k3s-cni-migration.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/cni-proof/**'
+      - 'tools/feed-identity/install.sh'
+      - '.github/workflows/k3s-cni-migration.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  disposable-transition:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 -B -m unittest discover -s tools/cni-proof -p 'test_*.py'
+      - run: bash tools/feed-identity/install.sh
+      - name: Preserve state through actual Flannel to Cilium and rollback
+        run: python3 -B tools/cni-proof/migration.py
+      - name: Remove only disposable fixture resources after interruption
+        if: always()
+        run: |
+          set -euo pipefail
+          while IFS= read -r name; do
+            if [[ "$name" =~ ^kanz-cni-migration-[0-9a-f]{24}$ ]]; then
+              docker rm -f -v "$name"
+            fi
+          done < <(docker ps -a --filter label=io.kanz.cni-migration --format '{{.Names}}')
+          while IFS= read -r name; do
+            if [[ "$name" =~ ^kanz-cni-migration-[0-9a-f]{24}-data$ ]]; then
+              docker volume rm "$name"
+            fi
+          done < <(docker volume ls --filter label=io.kanz.cni-migration --format '{{.Name}}')
+      - name: Preserve sanitized transition evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: k3s-cni-migration
+          path: ${{ runner.temp }}/k3s-cni-migration.json
+          if-no-files-found: error

@@ -52,6 +52,12 @@ descriptor URLs and unsupported artifact manifest formats are refused. Bounded
 OCI inline `data` is decoded strictly and checked against its digest and size;
 those bytes are freshly read inside the containing hashed manifest. The
 source inventory is read again after copy to detect additions or movement.
+OCI `subject` descriptors in hash-verified manifests also establish the reverse
+referrer edge after every endpoint has been verified. This makes an index-contained
+attestation compare consistently when one registry omits its discovery entry.
+Every discovered edge is retained: extra artifacts, missing content and conflicting
+descriptors still fail exact graph equality. No relationship is inferred from
+unverified annotations or from registry names.
 Destination legacy tags use exact `BatchGetImage` lookups, so no `ListImages`
 permission is needed. AWS documents referrer discovery as using the existing
 `BatchGetImage` permission too; the only added read action is layer download.
@@ -82,7 +88,10 @@ The Linux offline job also runs `cli_fixture.py` with the actual checksum-pinned
 ORAS 1.3.0 and Distribution 3.0.0 binaries. It copies a two-platform index, OCI
 referrer and legacy tag through a loopback-only registry, hashes actual blob
 stdout and exercises the unchanged credential helper with a dummy token and a
-wrong-token negative control. Test-only DNS resolution and a temporary TLS proxy
+wrong-token negative control. An index-contained dummy attestation has its source
+discovery edge hidden by the proxy, while the destination exposes it; canonical
+graphs must still match. A subsequent destination-only attachment must make the
+graphs differ. Test-only DNS resolution and a temporary TLS proxy
 map the synthetic GHCR name to loopback; production flags remain strict. The
 registry and its children are cleaned up before this fixture reports success.
 This checks real CLI compatibility, not ECR IAM or keyless release signatures.
@@ -105,3 +114,5 @@ boundary. No production promotion has been demonstrated by local unit tests.
   recommends ORAS recursive copying; the old copier handles legacy tags only.
 - [ECR manifest formats](https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-manifest-formats.html):
   digest pulls do not translate manifest bytes.
+- [OCI 1.1.1 subject](https://github.com/opencontainers/image-spec/blob/v1.1.1/manifest.md#image-manifest-property-descriptions)
+  defines the relationship represented by referrer discovery.
