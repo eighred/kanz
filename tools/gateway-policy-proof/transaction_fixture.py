@@ -41,6 +41,24 @@ def runtime_failure_category(message):
     return "unknown"
 
 
+def synthetic_runtime_detail(message):
+    """Only the credential-free synthetic container's creation error template.
+
+    Never used by the live operator engine. Variable paths, quoted values,
+    addresses and opaque identifiers are removed before bounded projection.
+    """
+    if not isinstance(message, str) or len(message) > 4096:
+        return "unavailable"
+    text = re.sub(r"https?://\S+|\b\w+://\S+", "<address>", message)
+    text = re.sub(r'''"[^"\n]*"|'[^'\n]*'|`[^`\n]*`''', "<value>", text)
+    text = re.sub(r"(?:[A-Za-z]:)?/[^\s,;:]*", "<path>", text)
+    text = re.sub(r"\b(?:sha256:)?[0-9a-fA-F]{12,}\b|\b[0-9a-fA-F]{8}(?:-[0-9a-fA-F-]+)\b", "<id>", text)
+    text = re.sub(r"\b[\w.-]+=[^\s,;]+", "<assignment>", text)
+    text = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b", "<address>", text)
+    text = re.sub(r"[\x00-\x1f\x7f-\uffff]", " ", text)
+    return text[:512]
+
+
 def deployment_diagnostic(deployment, pods):
     """Closed status projection only; never messages, events, specs or logs."""
     if not isinstance(pods, list) or len(pods) > 16:
@@ -73,6 +91,7 @@ def deployment_diagnostic(deployment, pods):
                 "waiting": enum(c.get("state", {}).get("waiting", {}).get("reason"),
                     {"ContainerCreating", "ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff", "CreateContainerConfigError", "CreateContainerError", "RunContainerError"}),
                 "runtimeFailure": runtime_failure_category(c.get("state", {}).get("waiting", {}).get("message")),
+                "syntheticRuntimeDetail": synthetic_runtime_detail(c.get("state", {}).get("waiting", {}).get("message")),
                 "exitCode": number(c.get("state", {}).get("terminated", {}).get("exitCode"))} for c in states]})
     return result
 

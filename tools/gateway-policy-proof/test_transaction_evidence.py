@@ -4,10 +4,19 @@ import json
 
 import proof
 import rollout_probe
-from transaction_fixture import CASES, validate_report, deployment_diagnostic, runtime_failure_category
+from transaction_fixture import CASES, validate_report, deployment_diagnostic, runtime_failure_category, synthetic_runtime_detail
 
 
 class TransactionEvidenceTests(unittest.TestCase):
+    def test_synthetic_runtime_detail_removes_variables_and_bounds(self):
+        raw = 'failed to resolve image "private-name": https://example.invalid/token /private/path token=secret 127.0.0.1:123 sha256:' + 'a' * 64
+        value = synthetic_runtime_detail(raw)
+        for private in ('private-name', 'example.invalid', '/private', 'secret', '127.0.0.1', 'a' * 64):
+            self.assertNotIn(private, value)
+        self.assertIn('failed to resolve image', value)
+        self.assertLessEqual(len(synthetic_runtime_detail('x' * 4096)), 512)
+        self.assertEqual(synthetic_runtime_detail('x' * 4097), 'unavailable')
+
     def test_runtime_message_only_exports_closed_category(self):
         private = " /private/token/credential=https://example.invalid/secret "
         for text, category in (("no space left on device", "disk_exhausted"),
