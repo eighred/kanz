@@ -1,0 +1,93 @@
+name: signed-ecr-promotion
+
+on:
+  pull_request:
+    paths: ['tools/signed-promotion/**', '.github/workflows/signed-ecr-promotion.yml', 'kanz/infra/terraform-testnet/**']
+  push:
+    branches: [main]
+    paths: ['tools/signed-promotion/**', '.github/workflows/signed-ecr-promotion.yml']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact signed release version tag
+        required: true
+        type: string
+      release_sha:
+        description: Full reviewed release source commit
+        required: true
+        type: string
+      tv_sync_digest:
+        description: Immutable GHCR tv-sync sha256 digest
+        required: true
+        type: string
+      migrate_digest:
+        description: Immutable GHCR kanz-migrate sha256 digest from same release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -B -m unittest discover -s tools/signed-promotion -p 'test_*.py' -v
+      - name: Install checksum-pinned CLI and disposable registry
+        run: bash tools/signed-promotion/install-tools.sh fixture
+      - name: Qualify actual CLI graph copy and fixed credential helper on loopback
+        run: python3 -B tools/signed-promotion/cli_fixture.py
+
+  promote:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'eighred/kanz'
+    needs: offline
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+      id-token: write # Existing main-only AWS role; never sign or attest here.
+    concurrency:
+      group: signed-ecr-promotion
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install checksum-pinned registry graph copier
+        run: bash tools/signed-promotion/install-tools.sh
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+      - name: Obtain existing main-only publisher identity
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_TESTNET_ECR_ROLE_ARN }}
+          aws-region: ap-northeast-1
+          mask-aws-account-id: true
+      - name: Verify, copy and independently verify both release graphs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_ACCOUNT: '012619468098'
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          TV_SYNC_DIGEST: ${{ inputs.tv_sync_digest }}
+          MIGRATE_DIGEST: ${{ inputs.migrate_digest }}
+        run: |
+          set -euo pipefail
+          python3 -B tools/signed-promotion/promote.py \
+            --account "$EXPECTED_ACCOUNT" --release-tag "$RELEASE_TAG" --release-sha "$RELEASE_SHA" \
+            --tv-sync "$TV_SYNC_DIGEST" --kanz-migrate "$MIGRATE_DIGEST" \
+            --evidence "$RUNNER_TEMP/signed-pair.json"
+      - name: Preserve only verified pair metadata
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-ecr-pair-${{ github.run_id }}
+          path: ${{ runner.temp }}/signed-pair.json
+          if-no-files-found: error
+          retention-days: 30

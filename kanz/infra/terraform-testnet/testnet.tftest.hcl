@@ -125,6 +125,20 @@ run "cost_and_security_envelope" {
   }
 
   assert {
+    condition = (
+      length(jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement) == 3 &&
+      jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement[2].Sid == "VerifySignedTVSyncPairLayers" &&
+      jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement[2].Effect == "Allow" &&
+      toset(jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement[2].Action) == toset(["ecr:GetDownloadUrlForLayer"]) &&
+      toset(jsondecode(aws_iam_role_policy.github_ecr_publish.policy).Statement[2].Resource) == toset([
+        "arn:aws:ecr:ap-northeast-1:${data.aws_caller_identity.current.account_id}:repository/tv-sync",
+        "arn:aws:ecr:ap-northeast-1:${data.aws_caller_identity.current.account_id}:repository/kanz-migrate",
+      ])
+    )
+    error_message = "Signed release verification may add layer reads only for the paired tv-sync and kanz-migrate repositories; main-only trust and all other publisher actions remain unchanged."
+  }
+
+  assert {
     condition     = aws_instance.node.root_block_device[0].encrypted && aws_ebs_volume.data.encrypted
     error_message = "Both OS and durable data volumes must be encrypted."
   }
