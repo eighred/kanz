@@ -1,7 +1,11 @@
 #![forbid(unsafe_code)]
 //! Existing OMS Save transaction semantics; no network listener, runtime configuration,
 //! admission, recovery authorization, fee writer or production caller.
+pub mod fee_subject;
+pub mod fee_wire;
+mod go_unicode;
 pub mod identity;
+pub mod queries;
 use identity::{execution_key, same_except_fee, same_execution};
 use kanz_oms_fold_shadow::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;

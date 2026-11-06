@@ -78,8 +78,43 @@ every actual Rust-write case without skips. Go independently checks durable
 state, raw bytes, versions, claims, journal and outbox. Restart tests restart the
 client process/pool, not the PostgreSQL server.
 
-Unported: admission, venue calls, orchestration, `CommitRecovery` and its wider
+Unported: admission, venue calls, orchestration, the Store Outbox/Proposals owners, `CommitRecovery` and its wider
 transaction, fee approval/write lifecycle, outbox relay, migrations, production
 fencing and rollout. Deployment and exclusive writer handoff need separate
 recovery, rollback, capability and latency proof. This library is not a second
 production OMS and does not close the migration.
+
+The query module implements `List`, `ListByStatus`, `ListByParent` and
+`ListByPortfolio` using the existing denormalized columns and canonical indexes.
+It returns the original protobuf bytes, including unknown fields, after decoding
+for validity. General queries refuse more than 100,000 rows or 1 MiB of combined
+state bytes; SQL withholds all state bytes if that selection exceeds the byte
+bound. Errors never return a successful prefix. Status selectors are bounded to
+128 entries; unknown numeric codes retain Go selection semantics.
+
+Portfolio limits clamp to 200 exactly as Go does. Empty parent/portfolio selectors
+do not select unattributed orders. Portfolio pages order by `created_at DESC`
+without a tie-break guarantee. The unindexed count is a separate READ COMMITTED
+statement, matching the actual Go implementation: it is not a simultaneous
+snapshot of the page. Queries add no admission or recovery authority. The query
+qualification compares actual Rust reads with Go and raw bytes, tenant isolation,
+capacity/corruption refusals, and selective plans using existing indexes.
+
+Fee-journal compatibility prerequisites are separate from fee posting. `FillWire`
+uses the canonical descriptor set and generated Fill for known-field semantics,
+and retains unknown fields recursively. Go's decoder normalizes an unknown outer
+tag but retains its value bytes; equality groups those bytes by field number,
+preserving occurrence order for the same number. Journal encoding emits known
+fields deterministically and retained unknown values at each message end. The
+original input bytes remain available separately. Inputs/outputs are capped at
+1 MiB; unknown-group parsing is iterative with Go's 10,001-group boundary.
+The current reachable Fill descriptor graph must remain singular, without
+oneofs/maps/extensions or floating-point fields; unsupported schema drift refuses.
+
+Principal normalization uses tables generated from the pinned Go Unicode package,
+not Rust full lowercase. CI regenerates the tables byte-for-byte and compares
+normalization of every Unicode scalar with Go through the stamped fixture.
+This is compatibility data, not authentication, approval or a second policy.
+These helpers do not append fee revisions, compute fee deltas, authorize a
+correction, or commit transactions. Those operations still need their complete
+caller-owned transaction and independent financial proof.

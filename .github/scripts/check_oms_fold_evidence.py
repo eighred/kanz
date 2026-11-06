@@ -25,6 +25,24 @@ REQUIRED = {
         "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity",
         "TestRustExecutionEconomics", "TestRustRepositoryTransactions",
         "TestRustRepositoryLifecycle",
+        "TestPinnedGoUnicodeTable", "TestFeeWireIndependentSemantics",
+        "TestRustFeeUnicodeCompatibility", "TestRustFeeWireCompatibility", "TestRustFeeWireRefusals",
+        *{"TestRustFeeWireCompatibility/" + case for case in (
+            "known-field-order", "distinct-unknown-order", "same-unknown-order",
+            "unknown-value-encoding", "unknown-tag-normalized", "nested-unknown-order",
+            "nested-unknown-difference", "duplicate-embedded-merge", "duplicate-embedded-unknown", "duplicate-embedded-unknown-only", "nested-unknown-tag-normalized",
+            "unknown-group", "unknown-group-depth-boundary", "unknown-group-inner-order", "unknown-group-inner-noncanonical-tag", "known-enum-wrong-wire", "known-wrong-wire-is-unknown",
+            "known-wrong-wire-not-dropped", "optional-absent-present", "scalar-default", "duplicate-scalar-last",
+        )},
+        *{"TestRustFeeWireRefusals/" + case for case in (
+            "zero-field", "truncated-varint", "unterminated-group", "unexpected-end-group", "wrong-end-group", "oversized-input", "unknown-group-excess-depth",
+        )},
+        "TestRustRepositoryQueries",
+        *{"TestRustRepositoryQueries/" + case for case in (
+            "list-status-parent-exact", "portfolio-page-count-backfill",
+            "tenant-same-ids", "corruption-capacity-no-prefix",
+            "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result",
+        )},
         *{"TestRustRepositoryLifecycle/" + case for case in (
             "concurrent-create-one-fact", "create-restart-load-go-save",
             "create-invalid-fact-rollback", "create-deferred-commit-rollback",
