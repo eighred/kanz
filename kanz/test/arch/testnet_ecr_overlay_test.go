@@ -72,6 +72,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 		"../../deploy/compliance-deploy.yaml",
 		"../../deploy/identity-deploy.yaml",
 		"../../deploy/oms-deploy.yaml",
+		"../../deploy/tv-sync-deploy.yaml",
 		"../../deploy/risk-engine-rollout.yaml",
 		"../../deploy/venue-binance-deploy.yaml",
 		"../../deploy/venue-okx-deploy.yaml",
@@ -86,7 +87,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	const registry = "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/"
 	wantImages := []string{
 		"accounting", "api-gateway", "audit", "compliance", "identity",
-		"kanz-migrate", "oms", "risk-engine", "venue-binance", "venue-okx", "web-bff", "cloudflared",
+		"kanz-migrate", "oms", "tv-sync", "risk-engine", "venue-binance", "venue-okx", "web-bff", "cloudflared",
 	}
 	digestPattern := regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	mapped := make(map[string]struct{}, len(overlay.Images))
@@ -413,8 +414,8 @@ func TestTokyoTestnetOverlayRetainsExactlyTheVaultClassesItsWorkloadsMount(t *te
 		}
 	}
 	assertSameStrings(t, "retained Vault classes versus mounted classes", retained, mounted)
-	if len(retained) != 13 {
-		t.Fatalf("Tokyo minimum graph retained %d Vault classes, want 13", len(retained))
+	if len(retained) != 14 {
+		t.Fatalf("Tokyo minimum graph retained %d Vault classes, want 14", len(retained))
 	}
 }
 
@@ -423,7 +424,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 62", "Expected 18 rendered container images", "sha256sum --check --status",
+		"resourceCount -ne 67", "Expected 20 rendered container images", "sha256sum --check --status",
 		"-ReleaseTag $imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
 		"'tools/Resolve-EcrReleaseDigest.ps1'", ". (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
@@ -437,7 +438,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"prometheus.kanz-observability.svc:9090", "workload-analysis-provider-ready",
 		"update-rollback-started", "rollback_workloads", "update-rollback-complete",
 		"update-rollback-state-exact", "update-rollback-state-mismatch", "cmp -s \"${rollback}\" \"${rollback_verify}\"",
-		"policy_preexisting=0", "networkpolicy allow-gateway-to-oms-query --ignore-not-found=true",
+		"capture_policies()", "rollback_policies()", "networkpolicy/allow-gateway-to-oms-query networkpolicy/allow-gateway-runtime-egress networkpolicy/allow-gateway-to-tv-sync",
 		"web_bff_preexisting=0", "delete deployment/web-bff --ignore-not-found=true --wait=true",
 		"policy_restored=0", "for attempt in 1 2 3 4 5",
 		"deployment_restored()", ".status.observedGeneration >= .metadata.generation",
@@ -448,7 +449,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"capture_workloads()", "sort_by(.kind,.metadata.name)",
 		"apiVersion:\"v1\",kind:\"List\",items:", "pods_ready=0; for attempt in $(seq 1 120)",
 		"-VerifyRollback requires -Apply", "workload-rollback-probe-advanced", "exit 86",
-		"workload rollback probe refused: complete preexisting estate required", "$(jq ''.items | length'' \"${rollback}\")\" != 10",
+		"workload rollback probe refused: complete preexisting estate required", "$(jq ''.items | length'' \"${rollback}\")\" != 11",
 		"set env deployment/identity KANZ_ROLLBACK_PROBE=", "rollout status deployment/identity",
 	} {
 		if !strings.Contains(raw, required) {
@@ -475,8 +476,8 @@ func TestTokyoWorkloadPodVerifierMatchesStatusesByContainerName(t *testing.T) {
 		return "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/" + name + "@" + digest
 	}
 	fixture := func(runtimeDigest string, omitMainStatus bool) []byte {
-		pods := make([]any, 0, 10)
-		for i := 0; i < 10; i++ {
+		pods := make([]any, 0, 11)
+		for i := 0; i < 11; i++ {
 			statuses := []any{}
 			if !omitMainStatus {
 				statuses = append(statuses, map[string]any{

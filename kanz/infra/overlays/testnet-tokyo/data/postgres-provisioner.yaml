@@ -79,16 +79,18 @@ data:
     provision_database risk-engine risk_engine risk_engine
     provision_database venue-binance venue_binance venue_binance
     provision_database venue-okx venue_okx venue_okx
+    provision_database tv-sync tv_sync tv_sync
 
     psql --host "${host}" --username kanz_bootstrap --dbname kanz_control --no-psqlrc \
       --set=ON_ERROR_STOP=1 --tuples-only --no-align <<'SQL'
-    SELECT count(*) = 16 AS roles_ok
+    SELECT count(*) = 18 AS roles_ok
       FROM pg_catalog.pg_roles
      WHERE rolname IN (
        'accounting_app','accounting_migrate','audit_app','audit_migrate',
        'identity_app','identity_migrate','oms_app','oms_migrate',
        'regulatory_app','regulatory_migrate','risk_engine_app','risk_engine_migrate',
-       'venue_binance_app','venue_binance_migrate','venue_okx_app','venue_okx_migrate'
+       'venue_binance_app','venue_binance_migrate','venue_okx_app','venue_okx_migrate',
+       'tv_sync_app','tv_sync_migrate'
      )
        AND rolsuper = false
        AND rolbypassrls = false \gset

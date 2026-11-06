@@ -114,7 +114,7 @@ func TestTokyoDatabaseMigrationsRunBeforeCapitalPathAdmission(t *testing.T) {
 	root := moduleRoot(t)
 	dir := filepath.Join(root, "infra", "overlays", "testnet-tokyo", "data")
 	raw := string(mustReadArchFile(t, filepath.Join(dir, "postgres-migrations.yaml")))
-	for _, service := range []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx"} {
+	for _, service := range []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx", "tv-sync"} {
 		if !strings.Contains(raw, "name: migrate-"+service) || !strings.Contains(raw, `"/migrations/`+service+`"`) {
 			t.Errorf("migration job does not apply %s's schema", service)
 		}
@@ -157,7 +157,7 @@ func TestTokyoPostgresProvisionerKeepsApplicationRolesRLSConstrained(t *testing.
 	if !strings.Contains(text, "GRANT %I TO kanz_bootstrap', :'migrate_role'") || strings.Contains(text, "TO kanz_bootstrap WITH ADMIN OPTION") {
 		t.Fatal("bootstrap needs SET ROLE membership without role-delegation authority")
 	}
-	services := []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx"}
+	services := []string{"accounting", "audit", "identity", "oms", "regulatory", "risk-engine", "venue-binance", "venue-okx", "tv-sync"}
 	for _, service := range services {
 		if !strings.Contains(text, "provision_database "+service+" ") {
 			t.Errorf("migration-owning capital-path service %q has no logical database", service)

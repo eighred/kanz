@@ -1,0 +1,27 @@
+# Source preparation only: the paired release must be mirrored and verified in
+# Tokyo ECR before this auto-synced overlay may be activated. Do not replace the
+# migration image for unrelated services through the global image transformer.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tv-sync
+  namespace: kanz-services
+spec:
+  template:
+    metadata:
+      labels:
+        kanz.io/release: f7217a76b48d9b6075a0683ddf35be50fbdf37cb
+      annotations:
+        kanz.io/release-commit: f7217a76b48d9b6075a0683ddf35be50fbdf37cb
+    spec:
+      initContainers:
+        - name: migrate
+          image: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate@sha256:147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+      containers:
+        - name: tv-sync
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }

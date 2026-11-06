@@ -190,3 +190,57 @@ Fixture image: official Python 3.13.18 Alpine linux/amd64 manifest, digest pinne
 `tools/cni-proof/proof.py`; [Python CLI](https://docs.python.org/3.13/using/cmdline.html)
 and [socket outcomes](https://docs.python.org/3.13/library/socket.html) define the
 probe behavior. No third-party Python packages run inside the fixture pods.
+
+## TradingView projection activation
+
+The tv-sync addition is an initial Tokyo activation, not evidence of a prior
+running projection. Keep its draft unmerged while any prerequisite below is
+unverified: this overlay auto-syncs from main. It preserves #1410's paired
+v2026.4.0 application/migration images and source `f7217a76`, isolated API 8113
+and operations 8091, one replica and `Recreate`. The specific migration reference
+in `tv-sync-activation.yaml` avoids the older global migration-image override.
+
+Before activation, use the existing verified image import/custody process and
+`Resolve-EcrReleaseDigest.ps1` to establish both exact ECR references under their
+source release tag. The references in source do not assert that the registry
+copy or signature custody has occurred. Do not substitute an index/platform
+digest or advance unrelated services to make the check pass.
+The canonical Terraform `capital_path_images` inventory includes `tv-sync`;
+repository creation and existing scoped publisher/node-pull permissions derive
+from that inventory. Do not create the repository outside Terraform. The
+operator's 2026-11-06 read-only check found the Tokyo `tv-sync` repository absent
+and the paired migration digest absent from `kanz-migrate`. These are concrete
+activation blockers; this source change does not resolve them by itself.
+
+Provision `tv_sync_app` and `tv_sync_migrate` through the data overlay, including
+both password objects in `kv/data/kanz/testnet/postgres`. The runtime Vault role
+`tv-sync` must be bound to `kanz-services/tv-sync`; its existing CSI class reads
+`dsn` and `migrate_dsn` from `kv/data/kanz/tv-sync`. Both DSNs must identify the
+`tv_sync` database and their distinct constrained roles. No service receives the
+bootstrap principal. Verify current and future table/sequence grants, actual
+FORCE RLS, and refusal of runtime DDL. CI's separate-role/checkpoint test uses
+disposable principals; it does not attest the live Vault or database grants.
+
+Confirm the SPIFFE CSI driver and namespace registration issue the existing
+`spiffe://kanz.internal/ns/kanz-services/sa/tv-sync` identity, and the deployed
+NATS tenancy grants its existing order FACT/mark subscriptions and ACK/DLQ
+permissions. Verify the exact rendered policy union and measured CNI behavior:
+only the gateway reaches API 8113; monitoring reaches operations 8091 without
+broker routes. Missing principal headers must be refused. This projection adds
+no exchange credentials and does not alter capital admission or halt controls.
+
+The data recovery script now includes `tv_sync`. Establish a fresh verified
+backup/restore and a controlled downtime/rollback window before activation.
+For initial installation, explicitly establish whether historical facts exist:
+an empty new projection is not proof of an empty account. For restarts, preserve
+`tv_facts`, `tv_checkpoints` and the durable consumer position. Startup restores
+checkpoint plus tail before binding HTTP; verify the recovered view and fill
+deduplication against full replay. Roll back workload images/configuration only;
+never drop either table or undo the checkpoint migration. The installer removes
+a newly introduced tv-sync deployment on failed update and restores an existing
+deployment's captured specification without overlapping consumers.
+It also captures and restores the exact OMS-query and tv-sync gateway
+ingress/egress policy specifications, removing only those fixed policies that
+were originally absent, and compares the restored inventory. This rollback
+path still requires actual qualification before activation; a source review is
+not evidence of restoration on the current cluster.
