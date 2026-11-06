@@ -42,6 +42,14 @@ pub enum Error {
     Database,
     CommitUnconfirmed,
 }
+impl From<kanz_proto_wire::Error> for Error {
+    fn from(error: kanz_proto_wire::Error) -> Self {
+        match error {
+            kanz_proto_wire::Error::InvalidInput => Self::InvalidInput,
+            kanz_proto_wire::Error::Capacity => Self::Capacity,
+        }
+    }
+}
 impl From<tokio_postgres::Error> for Error {
     fn from(_: tokio_postgres::Error) -> Self {
         Self::Database

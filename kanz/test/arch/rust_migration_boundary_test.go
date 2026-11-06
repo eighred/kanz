@@ -39,7 +39,7 @@ var rustMigrationCargo = map[string]map[string]string{
 	"build-dependencies": {"prost-build": `"=0.14.1"`, "protoc-bin-vendored": `"=3.2.0"`},
 	"dev-dependencies":   {"serde": `{ version = "=1.0.229", features = ["derive"] }`, "serde_json": `"=1.0.154"`},
 	"profile.release":    {"overflow-checks": `true`},
-	"workspace":          {"members": `["crates/market-feed", "crates/oms-store", "services/binance-depth", "services/okx-depth", "services/bond-risk-shadow", "services/oms-fold-shadow"]`, "resolver": `"2"`},
+	"workspace":          {"members": `["crates/market-feed", "crates/oms-store", "crates/proto-wire", "crates/oms-venue", "services/binance-depth", "services/okx-depth", "services/bond-risk-shadow", "services/oms-fold-shadow"]`, "resolver": `"2"`},
 }
 
 // Pin the complete small build recipe: merely finding the canonical path could
@@ -136,6 +136,9 @@ func rustMigrationWithoutComments(source string) (string, error) {
 }
 
 func checkRustMigrationBoundary(root string) error {
+	if err := checkRustVenueBoundary(root); err != nil {
+		return err
+	}
 	if err := checkRustOMSStoreBoundary(root); err != nil {
 		return err
 	}
@@ -211,7 +214,7 @@ func checkRustMigrationBoundary(root string) error {
 			return fmt.Errorf("Rust source tree symlink requires review: %s", rel)
 		}
 		if d.IsDir() {
-			if _, guarded := rustFeedPackages[rel]; guarded || rel == rustBondShadowPath || rel == rustOMSPath || rel == "crates/oms-store" {
+			if _, guarded := rustFeedPackages[rel]; guarded || rel == rustBondShadowPath || rel == rustOMSPath || rel == "crates/oms-store" || rel == "crates/proto-wire" || rel == "crates/oms-venue" {
 				return filepath.SkipDir
 			} // Separately guarded above.
 			if rel == "target" || rel == ".git" {

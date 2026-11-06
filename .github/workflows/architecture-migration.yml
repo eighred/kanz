@@ -83,6 +83,7 @@ jobs:
       - name: Rust format, compile and unit tests
         working-directory: kanz-rs
         run: |
+          export KANZ_BUILD_VERSION="$(git rev-parse HEAD)"
           cargo fmt --all -- --check
           cargo check --locked --workspace --all-targets
           cargo test --locked --workspace --lib --bins

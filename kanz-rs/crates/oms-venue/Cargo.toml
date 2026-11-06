@@ -1,0 +1,35 @@
+[package]
+name = "kanz-oms-venue"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+kanz-decimal-compat = { path = "../.." }
+kanz-oms-fold-shadow = { path = "../../services/oms-fold-shadow" }
+kanz-proto-wire = { path = "../proto-wire" }
+prost = "=0.14.1"
+prost-reflect = "=0.16.2"
+bytes = "=1.12.1"
+http = "=1.5.0"
+tonic = { version = "=0.14.9", default-features = false, features = ["channel", "codegen"] }
+tokio = { version = "=1.54.1", features = ["macros", "rt", "time", "net", "sync"] }
+
+hyper = "=1.12.0"
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
+tower = { version = "=0.5.3", features = ["util"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+spiffe = { version = "=0.19.0", features = ["x509-source"] }
+spiffe-rustls = "=0.11.0"
+
+[build-dependencies]
+prost-build = "=0.14.1"
+protoc-bin-vendored = "=3.2.0"
+
+[dev-dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+base64 = "=0.22.1"
+tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
