@@ -59,6 +59,18 @@ func TestTVDurableReadinessKeepsSharedDeliveryAndClosedAPI(t *testing.T) {
 }
 
 func checkTVDurableReadinessCI(data []byte) error {
+	data = []byte(strings.ReplaceAll(string(data), "\r\n", "\n"))
+	if err := checkTVProofCI(data, "check_tv_readiness_evidence.py --pattern", "TEST_TV_NATS_URL", "nats://127.0.0.1:4224", nil); err != nil {
+		return err
+	}
+	if strings.Count(string(data), "TEST_TV_NATS_URL: nats://127.0.0.1:4224") != 2 {
+		return fmt.Errorf("dedicated TV broker must be supplied to mandatory and full race lanes")
+	}
+	for _, marker := range []string{"image_id=$(docker inspect --format '{{.Image}}' kanz-ci-nats)", "-p 127.0.0.1:4224:4222", "-e NATS_URL=nats://127.0.0.1:4224 -e NATS_REPLICAS=1", "Stop dedicated tv-sync proof broker\n        if: always()", "docker rm -f kanz-ci-tv-nats", `test -z "$remaining"`} {
+		if !strings.Contains(string(data), marker) {
+			return fmt.Errorf("dedicated broker proof missing %q", marker)
+		}
+	}
 	if err := checkTVProofCI(data, "check_tv_readiness_evidence.py --pattern", "TEST_POSTGRES_URL", "postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable", nil); err != nil {
 		return err
 	}
@@ -75,6 +87,9 @@ func TestTVDurableReadinessRequiresActualBrokerEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, change := range [][2]string{
+		{"TEST_TV_NATS_URL: nats://127.0.0.1:4224", "TEST_TV_NATS_URL: nats://localhost:4222"},
+		{"-p 127.0.0.1:4224:4222", "-p 4224:4222"},
+		{"docker rm -f kanz-ci-tv-nats", "echo no cleanup"},
 		{`-race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_readiness_evidence.py --pattern)"`, `-p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_readiness_evidence.py --pattern)"`},
 		{`python3 ../.github/scripts/check_tv_readiness_evidence.py "$RUNNER_TEMP/tv-readiness-proof.jsonl"`, "echo unchecked"},
 		{"check_tv_readiness_evidence.py --pattern", "check_tv_readiness_evidence.py --unused"},

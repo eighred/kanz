@@ -101,9 +101,9 @@ func retryPool(t *testing.T, ctx context.Context, tenant string) *pgxpool.Pool {
 }
 
 func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
-	url := os.Getenv("TEST_NATS_URL")
+	url := os.Getenv("TEST_TV_NATS_URL")
 	if url == "" {
-		t.Skip("TEST_NATS_URL required")
+		t.Skip("TEST_TV_NATS_URL required (dedicated broker without other service consumers)")
 	}
 	for _, mode := range []string{"committed-response", "database-timeout", "restart-unacked"} {
 		t.Run(mode, func(t *testing.T) {

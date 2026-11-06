@@ -251,6 +251,31 @@ jobs:
       # OMS_SIM_VENUE_MIC takes both MICs the allocation fans out to: the router
       # matches a leg to the venue whose MIC equals the leg's target, so a
       # single-venue simulator cannot work a multi-venue allocation at all.
+      # Isolate the TV recovery proof from other canonical FACT consumers. The
+      # image is exactly the already-running broker image, not another tag pull.
+      - name: Start dedicated tv-sync proof broker
+        run: |
+          set -euo pipefail
+          image_id=$(docker inspect --format '{{.Image}}' kanz-ci-nats)
+          test -n "$image_id"
+          docker run -d --name kanz-ci-tv-nats -p 127.0.0.1:4224:4222 \
+            -v "$GITHUB_WORKSPACE/kanz/test/backing/nats-dev.conf":/etc/nats/nats-dev.conf:ro \
+            "$image_id" -c /etc/nats/nats-dev.conf
+          test "$(docker inspect --format '{{.Image}}' kanz-ci-tv-nats)" = "$image_id"
+          echo "TV proof broker uses existing NATS image $image_id"
+          ready=false
+          for i in $(seq 1 30); do
+            if docker logs kanz-ci-tv-nats 2>&1 | grep -q 'Server is ready'; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          test -s /tmp/bootstrap.sh
+          bootstrap_image_id=$(docker image inspect --format '{{.Id}}' natsio/nats-box:0.14.5)
+          test -n "$bootstrap_image_id"
+          docker run --rm -i --network host \
+            -e NATS_URL=nats://127.0.0.1:4224 -e NATS_REPLICAS=1 \
+            "$bootstrap_image_id" sh -s < /tmp/bootstrap.sh
+
       - name: Start the OMS on the bus (for the M1 loop certification)
         working-directory: kanz
         env:
@@ -411,6 +436,7 @@ jobs:
         working-directory: kanz
         env:
           TEST_NATS_URL: nats://localhost:4222
+          TEST_TV_NATS_URL: nats://127.0.0.1:4224
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
         run: |
           set -euo pipefail
@@ -433,6 +459,7 @@ jobs:
         env:
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
           TEST_NATS_URL: nats://localhost:4222
+          TEST_TV_NATS_URL: nats://127.0.0.1:4224
           TEST_KAFKA_BROKERS: localhost:9092
           TEST_OMS_ON_BUS: "1"
           TEST_INFERENCE_ON_BUS: "1"
@@ -627,6 +654,17 @@ jobs:
           # code that deploys. Keep this list in step with the tags the
           # Dockerfiles build with.
           args: --timeout=5m --build-tags=anthropic,openrouter,redis
+
+      - name: Stop dedicated tv-sync proof broker
+        if: always()
+        run: |
+          set -euo pipefail
+          containers=$(timeout 30s docker ps -a --filter 'name=^/kanz-ci-tv-nats$' --format '{{.ID}}')
+          if test -n "$containers"; then
+            timeout 30s docker rm -f kanz-ci-tv-nats
+          fi
+          remaining=$(timeout 30s docker ps -a --filter 'name=^/kanz-ci-tv-nats$' --format '{{.ID}}')
+          test -z "$remaining"
 
   python:
     needs: scope
