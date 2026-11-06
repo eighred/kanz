@@ -12,7 +12,7 @@ func checkRustOMSRelay(files map[string]string) error {
 	required := map[string][]string{
 		"relay.rs":      {`r.event_class!=EventClass::Factasi32`, `r.schema_version<=0`, `r.tenant.is_empty()`, `DescriptorPool::decode(FILE_DESCRIPTOR_SET)`, `crate::relay_wire::normalize(desc,&r.payload)`, `idempotency_key:id.clone()`, `tenant_id:r.tenant.clone()`, `self.under_lock(lock.client(),key).await`, `lock.release().await`, `session.close().await`, `self.drain_key(&key,false).await`, `self.drain_key(key,true).await`, `stalled:full.then_some(Stall::FullBatch)`, `Stall::Publication(failure)`, `self.publisher.publish(&frame)`, `outbox::mark_published(client,&self.tenant,p.id)`, `outbox::mark_failed(client,&self.tenant,p.id,Some(failure.cause()))`, `Duration::from_secs(10)`, `ifself.stopped()`, `while!self.stopped()`},
 		"relay_wire.rs": {`kanz_proto_wire::normalize(desc,raw).map_err(Into::into)`},
-		"shared_wire":   {`DynamicMessage::decode(desc.clone(),known.as_slice())`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `result.extend_from_slice(&unknown.raw)`, `entries[0].merge(sidecar,&child)?`, `field.is_list()||entries.is_empty()`, `ifdepth>32`, `raw.len()>MAX_BYTES`},
+		"shared_wire":   {`DynamicMessage::decode(desc.clone(),known.as_slice())`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `bounded_append(&mutresult,&unknown.raw,limit)?`, `entries[0].merge(sidecar,&child,limit)?`, `field.is_list()||entries.is_empty()`, `ifdepth>32`, `raw.len()>limit`},
 		"fixture":       {`strip_prefix("nats://127.0.0.1:")`, `"Nats-Msg-Id"`, `"Kanz-Partition-Key"`, `stopper.await`, `ConnectingDriver(Some(tokio::spawn`, `driver.0.take().ok_or(Error::Database)?`, `config.application_name(&application)`, `SELECTcount(*)FROMpg_stat_activityWHEREapplication_name=$1`, `result["sessions_closed"]=json!(true)`, `nc.drain()`, `publish_with_headers(frame.subject.clone(),headers,frame.body.clone().into())`},
 	}
 	for file, markers := range required {
@@ -55,7 +55,7 @@ func TestRustOMSRelayBoundary(t *testing.T) {
 		{"published-mark", "relay.rs", "outbox::mark_published(client, &self.tenant, p.id)", "Ok::<(),Error>(())"},
 		{"failed-mark", "relay.rs", "outbox::mark_failed(client, &self.tenant, p.id, Some(failure.cause()))", "Ok::<(),Error>(())"},
 		{"raw-unknown", "shared_wire", "unknown.raw.extend_from_slice(&raw[value..pos])", "unknown.raw.clear()"},
-		{"nested-unknown", "shared_wire", "entries[0].merge(sidecar, &child)?", "drop(sidecar)"},
+		{"nested-unknown", "shared_wire", "entries[0].merge(sidecar, &child, limit)?", "drop(sidecar)"},
 		{"local-broker", "fixture", "nats://127.0.0.1:", "nats://"},
 		{"partition-header", "fixture", "Kanz-Partition-Key", "Wrong-Partition"},
 	} {

@@ -1,0 +1,142 @@
+package arch
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// Exact source ownership/marker checks, not a Rust data-flow or financial proof.
+const rustRecoveryCargo = `[package]
+name = "kanz-oms-recovery"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+kanz-order-core = { path = "../order-core" }
+kanz-oms-store = { path = "../oms-store" }
+kanz-oms-venue = { path = "../oms-venue" }
+kanz-proto-wire = { path = "../proto-wire" }
+kanz-decimal-compat = { path = "../.." }
+prost = "=0.14.1"
+prost-types = "=0.14.1"
+prost-reflect = "=0.16.2"
+num-bigint = "=0.4.6"
+num-rational = "=0.4.2"
+num-traits = "=0.2.19"
+sha2 = "=0.10.9"
+tokio = { version = "=1.54.1", features = ["macros", "rt", "time", "sync"] }
+tokio-postgres = "=0.7.18"
+
+[dev-dependencies]
+tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "time", "io-std", "io-util"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+base64 = "=0.22.1"
+async-nats = { version = "=0.51.0", default-features = false, features = ["ring", "jetstream", "nuid"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+http = "=1.5.0"
+`
+
+var recoveryMarkers = map[string][]string{
+	"src/coordinator.rs": {`Client::connect_until(config.venue,receiver)`, `verified_account:true`, `declared_order_types:true`, `session.close().await`, `self.relay.flush(&key)`, `outcome.stalled.is_none()`},
+	"src/observation.rs": {`repository::observe(`, `venue.describe(deadline)`, `venue.query_recovery_history(`, `history::complete(`, `repository::freeze(`, `preparation::posted(`, `approval::approved(`, `recovery::commit_streamed_recovery(`, `id.account_verified`, `Error::Conflict`},
+	"src/preparation.rs": {`recovery_repository::posted_reader(`, `cursor.finish().await?`, `identity::same_execution(row.current.value(),previous.value())`, `aggregate::apply_recovered_fill(`, `aggregate::recovery_average(`},
+	"src/approval.rs":    {`actual!=evidence.stored_digest`, `approved>=proposed+ttl`, `fee_subject::normalize(&a.approver)==fee_subject::normalize(&p.proposer)`, `p.history_digest!=history_digest`, `p.mapping_version!=case.mapping_version`},
+	"src/handlers.rs":    {`env.value().tenant_id!=tenant`, `env.value().event_class!=1`, `recovery_ack::acknowledge_recovery(`, `repository::target_matches(`},
+	"src/history.rs":     {`fills.len()>MAX_FILLS`, `sum!=total`, `f.recovery.is_some()`, `decimal_domain(&dynamic,0)?`},
+}
+
+func checkRustRecoveryCoordinator(root string) error {
+	dir := filepath.Join(root, "crates", "oms-recovery")
+	raw, err := os.ReadFile(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		return err
+	}
+	if rustMigrationCompact(string(raw)) != rustMigrationCompact(rustRecoveryCargo) {
+		return fmt.Errorf("unreviewed recovery manifest")
+	}
+	allowed := map[string]bool{"src/lib.rs": true, "src/coordinator.rs": true, "src/observation.rs": true, "src/preparation.rs": true, "src/approval.rs": true, "src/handlers.rs": true, "src/history.rs": true, "examples/recovery-coordinator-fixture.rs": true}
+	if err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, e error) error {
+		if e != nil {
+			return e
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("recovery source symlink")
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, e := filepath.Rel(dir, path)
+		if e != nil {
+			return e
+		}
+		rel = filepath.ToSlash(rel)
+		if filepath.Ext(rel) == ".rs" && !allowed[rel] {
+			return fmt.Errorf("unreviewed recovery source %s", rel)
+		}
+		if filepath.Ext(rel) == ".proto" || d.Name() == "build.rs" || d.Name() == "config.toml" {
+			return fmt.Errorf("parallel recovery model/config")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for name := range allowed {
+		raw, e := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+		if e != nil {
+			return e
+		}
+		code, e := rustMigrationWithoutComments(string(raw))
+		if e != nil {
+			return e
+		}
+		code = rustMigrationCompact(code)
+		for _, marker := range recoveryMarkers[name] {
+			if !strings.Contains(code, marker) {
+				return fmt.Errorf("recovery %s missing %s", name, marker)
+			}
+		}
+		if strings.HasPrefix(name, "src/") {
+			for _, forbidden := range []string{".execute_response(", ".cancel_order(", "AllowAll", "unsafe{", "f64", "f32", "std::env::"} {
+				if strings.Contains(code, forbidden) {
+					return fmt.Errorf("recovery authority/parallel owner %s", forbidden)
+				}
+			}
+		}
+	}
+	return nil
+}
+func TestRustRecoveryCoordinatorBoundary(t *testing.T) {
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	if e := checkRustRecoveryCoordinator(root); e != nil {
+		t.Fatal(e)
+	}
+}
+func TestRustRecoveryCoordinatorMarkerMutations(t *testing.T) {
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates", "oms-recovery")
+	for path, markers := range recoveryMarkers {
+		raw, e := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+		if e != nil {
+			t.Fatal(e)
+		}
+		code, e := rustMigrationWithoutComments(string(raw))
+		if e != nil {
+			t.Fatal(e)
+		}
+		code = rustMigrationCompact(code)
+		for _, marker := range markers {
+			t.Run(path+"/"+marker, func(t *testing.T) {
+				changed := strings.ReplaceAll(code, marker, "removed")
+				if changed == code || strings.Contains(changed, marker) {
+					t.Fatal("required boundary mutation was not discriminating")
+				}
+			})
+		}
+	}
+}
