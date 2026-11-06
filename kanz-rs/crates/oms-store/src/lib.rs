@@ -10,6 +10,7 @@ pub mod identity;
 pub mod outbox;
 pub mod position;
 mod position_math;
+pub mod position_projector;
 pub mod proposals;
 pub mod queries;
 pub mod recovery;
@@ -35,6 +36,7 @@ pub enum Error {
     IdentityConflict,
     FeeRevision,
     PositionHistoryUnknown,
+    PublicationUnconfirmed,
     UnownedOutbox,
     RecordNotOwned,
     Database,

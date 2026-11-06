@@ -302,6 +302,7 @@ async fn run(input: Input) -> Result<Value, ()> {
         "save"
             | "position-apply"
             | "position-snapshot"
+            | "position-projector"
             | "relay-once"
             | "relay-flush"
             | "relay-run"
@@ -443,6 +444,7 @@ async fn run(input: Input) -> Result<Value, ()> {
             )
             .await
             .map_err(|_| ())?;
+        if input.mode=="position-projector" { return relay_support::run(config.clone(),&mut client,&input).await; }
         if input.mode.starts_with("position-") {
             use kanz_oms_store::position;
             let at=input.at.as_ref().ok_or(())?.time()?;

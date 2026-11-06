@@ -60,6 +60,18 @@ REQUIRED = {
     },
     "internal/shadowprocess": set(),
     "services/oms/tools/store-conformance": {
+        "TestRustPositionProjectorPostgresNATS",
+        *{"TestRustPositionProjectorPostgresNATS/" + case for case in (
+            "filled-partial-lineage-and-restart",
+            "unknown-and-nil-fill-ignore-but-foreign-refuses",
+            "unknown-and-duplicate-embedded-wire-journal",
+            "recovery-ack-binding-and-invalid-provenance-rollback",
+            "flush-failure-keeps-committed-book-and-restart-retries",
+            "deep-domain-and-malformed-refuse-without-writes",
+            "commit-rollback-and-go-rust-go-handoff",
+            "whole-input-capacity-refuses-without-prefix",
+            "legacy-system-scope-and-strict-recovery-tenant",
+        )},
         "TestPositionIndependentAccountingOracle", "TestRustPositionStoreTransactions", "TestRustPositionStorePostgresNATS",
         *{"TestRustPositionStoreTransactions/" + case for case in (
             "rational-close-flip-restart-and-snapshot", "go-rust-cross-venue-and-duplicate",

@@ -128,6 +128,30 @@ pub async fn run(
     )
     .map_err(|_| ())?;
     let mut result = match input.mode.as_str() {
+        "position-projector" => {
+            if !input.records.is_empty() {
+                return Err(());
+            }
+            let env = super::bytes(&input.state)?;
+            let payload = super::bytes(&input.fill)?;
+            let now = input.at.as_ref().ok_or(())?.time()?;
+            match kanz_oms_store::position_projector::handle(
+                client,
+                &mut relay,
+                &input.tenant,
+                &env,
+                &payload,
+                now,
+                &input.base_currency,
+            )
+            .await
+            {
+                Ok(out) => {
+                    json!({"status":if out.ignored {"ignored"} else {"handled"},"sent":out.sent})
+                }
+                Err(e) => json!({"status":e.to_string()}),
+            }
+        }
         "relay-flush" => match relay.flush(&input.order_id).await {
             Ok(out) => report(out.sent, out.stalled, None),
             Err(e) => report(e.sent, None, Some(e.error)),
