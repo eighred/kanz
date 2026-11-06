@@ -24,7 +24,7 @@ foreach ($mode in @('changed-bytes','wrong-repository','command-failed')) {
     try { $null = & $reader -Aws Invoke-FixtureAws -Profile fixture -Digest $script:manifestDigest } catch { $refused = $true }
     if (-not $refused) { throw "manifest fixture was not refused: $mode" }
 }
-$script:fixtureMode = 'valid' 
+$script:fixtureMode = 'valid'
 function Get-TvReplayEcrManifest {
     param([string]$Aws, [string]$Profile, [string]$Digest)
     if ($script:fixtureMode -eq 'lookup-failed') { throw 'fixture lookup failure' }
