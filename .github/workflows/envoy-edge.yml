@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - 'kanz/services/web-bff/**'
+      - 'kanz/services/api-gateway/**'
+      - 'kanz/pkg/transport/**'
+      - 'kanz/internal/testidentity/**'
       - 'kanz/pkg/auth/**'
       - 'kanz/internal/gatewaysig/**'
       - 'kanz/infra/edge/**'
@@ -16,6 +19,9 @@ on:
     branches: [main]
     paths:
       - 'kanz/services/web-bff/**'
+      - 'kanz/services/api-gateway/**'
+      - 'kanz/pkg/transport/**'
+      - 'kanz/internal/testidentity/**'
       - 'kanz/pkg/auth/**'
       - 'kanz/internal/gatewaysig/**'
       - 'kanz/infra/edge/**'
@@ -61,8 +67,9 @@ jobs:
         working-directory: kanz
         run: |
           set -o pipefail
-          go test -race -p 1 ./services/web-bff/internal/edgeconfig ./services/web-bff/cmd/web-bff ./services/web-bff/internal/server -run 'Test(EnvoyEdgeActualBFF|InvalidProfilesDoNotReplaceExistingConfiguration|WriterReplacesFinalSymlinkWithoutFollowingItsTarget|EdgeConfigurationDoesNotLoadApplicationCredentials)$' -count=1 -json | tee "$RUNNER_TEMP/envoy-edge-evidence/tests.jsonl"
-          go vet ./services/web-bff/internal/edgeconfig ./services/web-bff/cmd/web-bff ./services/web-bff/internal/server
+          go test -race -p 1 ./services/web-bff/internal/edgeconfig ./services/web-bff/cmd/web-bff ./services/web-bff/internal/server ./services/web-bff/internal/config ./services/api-gateway/cmd/api-gateway ./services/api-gateway/internal/config -run 'Test(EnvoyEdgeActualBFF|InvalidProfilesDoNotReplaceExistingConfiguration|WriterReplacesFinalSymlinkWithoutFollowingItsTarget|EdgeConfigurationDoesNotLoadApplicationCredentials|GatewayWorkloadTransport|GatewayWorkloadConfiguration|BFFWorkloadListener|BFFWorkloadConfiguration)$' -count=1 -json | tee "$RUNNER_TEMP/envoy-edge-evidence/tests.jsonl"
+          go vet ./services/web-bff/internal/edgeconfig ./services/web-bff/cmd/web-bff ./services/web-bff/internal/server ./services/web-bff/internal/config ./services/api-gateway/cmd/api-gateway ./services/api-gateway/internal/config ./internal/testidentity
+          go test -p 1 ./test/arch -run 'Test(SyntheticIdentityCannotBecomeRuntimeAuthority|EveryHeaderTrustJustificationNamesTheRealControl|OnlyThePlatformConstructorBuildsAnHTTPServer|EveryWorkflowGoTestIsSerialised)$' -count=1
           go build -o "$RUNNER_TEMP/web-bff-edge" ./services/web-bff/cmd/web-bff
           WEB_BFF_SESSION_MODE=invalid WEB_BFF_SIGNING_SECRET_FILE=/does-not-exist "$RUNNER_TEMP/web-bff-edge" envoy-config --output "$RUNNER_TEMP/envoy-edge-evidence/cli.json" --admin-loopback
       - name: Install checksum-pinned advisory tools

@@ -27,13 +27,14 @@ import (
 // (#626). This comment used to say the upstream trusts those headers "BECAUSE
 // the connection is mutually authenticated to the gateway's SVID (a non-mesh
 // caller cannot reach the service)". That was never true of this hop. The
-// server-side mTLS helpers have five production call sites and all five feed
-// grpc.NewServer; no HTTP listener in the estate sets TLSConfig or calls
-// ServeTLS, there is no sidecar mesh under infra/, and every
+// deployed HTTP read-upstream listeners still serve plaintext, there is no
+// sidecar mesh under infra/, and every
 // API_GATEWAY_*_ADDR in api-gateway-deploy.yaml is an http:// URL. The client
 // below IS built with transport.ClientTLSConfig at the composition root, which
 // is what made the claim look checked — but a TLS config never reaches the wire
 // on a cleartext URL, so it is armed and inert.
+// The optional BFF-only gateway TLS listener authenticates a different hop;
+// it does not add TLS or change the NetworkPolicy boundary on these upstreams.
 //
 // The single control, stated once for the whole estate, is in pkg/auth's
 // meshheader.go: an upstream may trust these headers ONLY because a

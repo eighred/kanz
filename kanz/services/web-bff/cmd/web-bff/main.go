@@ -83,6 +83,12 @@ func run() int {
 	// relayed by this process would otherwise arrive from this process, and the
 	// identity limiter would key every attempt in the estate together.
 	identityClient := identityclient.New(cfg.IdentityURL, identityForwardHeader, 0)
+	gatewayHTTP, closeGatewayHTTP, err := openGatewayTransport(ctx, cfg)
+	if err != nil {
+		logger.Error("gateway workload transport initialization failed")
+		return 2
+	}
+	defer closeGatewayHTTP()
 
 	ipResolver, err := clientip.NewResolver(cfg.TrustedProxyHeader, cfg.TrustedProxies)
 	if err != nil {
@@ -159,6 +165,7 @@ func run() int {
 		OIDC:                    oidcClient,
 		Sessions:                sessions,
 		GatewayURL:              cfg.GatewayURL,
+		GatewayTransport:        gatewayHTTP,
 		SigningSecret:           cfg.SigningSecret,
 		SecureCookies:           cfg.SecureCookies,
 		Logger:                  logger,

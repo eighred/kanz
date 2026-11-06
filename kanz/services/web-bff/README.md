@@ -117,3 +117,40 @@ the broker SSE route end to end; the narrow stream timer override preserves a
 future canonical transport without activating browser streaming. Network-hop
 mTLS, real tunnel/browser verification and signed target promotion remain
 separate acceptance requirements. Loopback forwarding does not prove mTLS.
+
+## Gateway workload identity
+
+`WEB_BFF_GATEWAY_SPIFFE_SOCKET` enables a dedicated gateway transport using the
+existing rotating SPIFFE workload source. It requires an HTTPS gateway URL and
+authorizes only `spiffe://kanz.internal/ns/kanz-services/sa/api-gateway`.
+The transport does not use ambient HTTP proxies or downgrade after a failed
+identity fetch, handshake or peer check. It closes idle connections before
+closing its workload source. Leaving the socket unset retains the existing
+transport while the paired rollout is qualified.
+
+The gateway's matching `API_GATEWAY_BFF_TLS_LISTEN` (for example `:9443`) requires
+`API_GATEWAY_SPIFFE_SOCKET`, a distinct unprivileged TCP address, and the existing
+gateway router. It accepts only the `web-bff` service SVID in `kanz-services`.
+Identity acquisition and socket binding finish before the existing HTTP server
+starts. Shutdown drains this listener within the shared shutdown budget, closes
+remaining connections if that budget expires, and joins its serving goroutine.
+Both listeners run the same signing, bearer, tenant, role and entitlement chain;
+a valid BFF certificate does not grant a browser principal or a trading action.
+
+The `envoy-edge` proof additionally requires actual TLS connections using
+ephemeral synthetic SVIDs: exact peers, wrong peers/CA, expiration, rotation and
+identity unavailability; actual BFF session/signing forwarding; and the actual
+gateway router's unsigned, missing-bearer and missing-role refusals. Fixture
+authority cannot be imported by production code. These tests do not prove SPIRE
+issuance or certificate rotation on the target cluster. Exact-commit release
+evidence now requires this workflow's `actual-edge` job as well as all prior
+canonical gates, with no ancestor or skipped-proof substitution.
+
+Deployment URLs, workload registration, Services and NetworkPolicies remain
+unchanged in this source slice. A paired promotion must expose the secure
+listener only to the BFF, configure its HTTPS URL and workload socket together,
+verify live peer/tenant refusals and source rotation, and preserve gateway
+health probes. Retire the old application transport only after that evidence.
+Rollback restores the existing BFF URL and socket setting together. Other
+gateway-to-service HTTP hops retain their existing NetworkPolicy boundary; this
+does not qualify them as mutually authenticated.

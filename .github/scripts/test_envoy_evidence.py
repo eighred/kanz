@@ -18,8 +18,11 @@ class EvidenceRefusals(unittest.TestCase):
 
     def test_missing_negative_control_and_cleanup_refuse(self):
         proof.validate_events(self.events(), self.image)
-        for name in ('quiet_stream_negative_control', 'cleanup'):
-            events = [e for e in self.events() if e.get('Test') != 'TestEnvoyEdgeActualBFF/' + name]
+        for name in ('TestEnvoyEdgeActualBFF/quiet_stream_negative_control', 'TestEnvoyEdgeActualBFF/cleanup',
+                     'TestGatewayWorkloadTransport/actual_bff_session_and_signing',
+                     'TestBFFWorkloadListener/workload_does_not_bypass_user_controls/unsigned',
+                     'TestBFFWorkloadListener/workload_does_not_grant_role'):
+            events = [e for e in self.events() if e.get('Test') != name]
             with self.assertRaises(ValueError):
                 proof.validate_events(events, self.image)
 

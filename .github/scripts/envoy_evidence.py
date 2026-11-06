@@ -21,7 +21,25 @@ REQUIRED = {
     'services/web-bff/internal/edgeconfig': {
         'TestInvalidProfilesDoNotReplaceExistingConfiguration',
         'TestWriterReplacesFinalSymlinkWithoutFollowingItsTarget'},
-    'services/web-bff/cmd/web-bff': {'TestEdgeConfigurationDoesNotLoadApplicationCredentials'},
+    'services/web-bff/cmd/web-bff': {'TestEdgeConfigurationDoesNotLoadApplicationCredentials',
+        'TestGatewayWorkloadTransport', *{'TestGatewayWorkloadTransport/' + name for name in (
+            'exact_peers', 'wrong_server', 'wrong_client', 'untrusted_server', 'expired_server',
+            'expired_client', 'identity_rotation_and_unavailability', 'disabled_is_a_nil_interface',
+            'no_plaintext_or_missing_identity', 'actual_bff_session_and_signing')}},
+    'services/web-bff/internal/config': {'TestGatewayWorkloadConfiguration',
+        *{'TestGatewayWorkloadConfiguration/' + name for name in (
+            'legacy', 'workload', 'plaintext', 'credential_url', 'query_url', 'fragment_url')}},
+    'services/api-gateway/internal/config': {'TestBFFWorkloadConfiguration',
+        *{'TestBFFWorkloadConfiguration/' + name for name in (
+            'disabled', 'enabled', 'no_identity', 'same_listener', 'privileged', 'not_tcp', 'no_port')}},
+    'services/api-gateway/cmd/api-gateway': {'TestBFFWorkloadListener',
+        *{'TestBFFWorkloadListener/' + name for name in (
+            'workload_does_not_bypass_user_controls',
+            'workload_does_not_bypass_user_controls/unsigned',
+            'workload_does_not_bypass_user_controls/no_bearer',
+            'workload_does_not_bypass_user_controls/signed_authenticated',
+            'wrong_workload_and_untrusted_certificate', 'missing_client_certificate',
+            'workload_does_not_grant_role', 'missing_router_or_source')}},
     'services/web-bff/internal/server': {'TestEnvoyEdgeActualBFF',
         *{'TestEnvoyEdgeActualBFF/' + name for name in CASES}},
 }
@@ -124,6 +142,7 @@ def main():
             validate_events(events, observed)
             report['testsSHA256'] = digest(path)
             report['requiredCases'] = sorted(CASES)
+            report['requiredTests'] = {package: sorted(names) for package, names in REQUIRED.items()}
             # The subprocess CLI must also have produced a closed static config.
             cli = read_json(directory / 'cli.json', 64 << 10)
             if cli['admin']['address']['socket_address']['address'] != '127.0.0.1' or len(cli['static_resources']['listeners']) != 1:
