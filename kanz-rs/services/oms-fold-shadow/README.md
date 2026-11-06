@@ -1,10 +1,33 @@
-# OMS fill-fold shadow
+# OMS aggregate-fold shadow
 
-This optional worker compares the existing Go OMS `ApplyFill` calculation. It
+This optional worker compares the existing Go OMS `ApplyFill`, `Cancel` and `Expire` calculations. It
 cannot authorize an order, call a venue, save state, claim an execution, or publish
 a fact. The existing SQL version CAS, fill journal, outbox, admission controls,
 recovery decisions and credential-bearing venue adapters remain authoritative.
 The local typed process decision is recorded in #1413.
+
+Cancel/Expire use additive `TerminalFoldRequest`/`TerminalFoldResult` messages
+through the same executable with fixed `--terminal` argv. Default argv retains
+the existing fill protocol. Unsupported modes and noncanonical/unknown wire
+fields refuse. A single worker and capacity-one queue serve all operations;
+overload remains diagnostic and never delays an authoritative decision.
+
+Terminal captures observe the four existing Go callsites before caller-specific
+announcement markers or scheduled-parent attribution. They do not claim a venue
+withdrawal succeeded or a transaction committed. The returned optional leaves
+quantity is preserved exactly, including absence, zero and extreme wire exponents;
+no financial arithmetic or normalization is performed by these two folds.
+Version zero is valid for cancelling a newly admitted order; absence is not.
+The existing default-off configuration controls all comparisons. Existing metric
+names retain `fill_shadow` for compatibility; their help identifies the expanded
+aggregate scope, with the same bounded status labels.
+
+The independent terminal corpus covers 108 cases (two operations, nine declared
+statuses, six optional/numeric representations). Linux CI requires actual worker
+and supervisor execution, fill-to-terminal replay, and the existing six real
+Postgres transaction cases without skips. Local unit success does not substitute
+for those checks. Go retains cancellation budgets, entitlement/quarantine checks,
+venue withdrawal, child handling, FACT construction and storage authority.
 
 Go captures the live, reconciliation and durable recovery folds after the Go
 calculation, including refusals. Each capture binds tenant, exact loaded SQL
@@ -42,3 +65,7 @@ OMS database and NATS consumer configuration. No deployment enables this by defa
 The fresh Go corpus in `services/oms/tools/fill-conformance` checks independent
 rational/state expectations. Linux CI executes that corpus and the actual Go
 supervisor against the stamped Rust binary, separately from SQL/DR/venue proofs.
+
+The PostgreSQL qualification remains Rust fill candidates plus existing Go
+cancellation. Cancel/Expire acceptance in this slice is actual-process,
+differential and replay evidence; it does not establish Rust-owned writes.

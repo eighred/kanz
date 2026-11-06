@@ -20,6 +20,7 @@ POLICY = {
     "feed-identity-proof.yml": {"developmental-identity"},
     "testnet-cni-proof.yml": {"disposable-cni"},
     "redpanda-identity-proof.yml": {"developmental-redpanda-identity"},
+    "valkey-migration.yml": {"retained-state"},
 }
 
 

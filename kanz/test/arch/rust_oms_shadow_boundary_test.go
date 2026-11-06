@@ -48,7 +48,10 @@ const rustOMSBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 `
 const rustOMSMain = `#![forbid(unsafe_code)]
-use kanz_oms_fold_shadow::{evaluate, proto::oms::v1::FillFoldRequest};
+use kanz_oms_fold_shadow::{
+    evaluate, evaluate_terminal,
+    proto::oms::v1::{FillFoldRequest, TerminalFoldRequest},
+};
 use prost::Message;
 use std::io::{Read, Write};
 const LIMIT: usize = 1 << 20;
@@ -63,13 +66,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if wire.is_empty() || wire.len() > LIMIT {
         return Err("input bound".into());
     }
-    let request = FillFoldRequest::decode(wire.as_slice())?;
     // Prost drops unknown fields: refuse any non-canonical input instead of
     // silently dropping metadata from candidate state. Go sends deterministic wire.
-    if request.encode_to_vec() != wire {
-        return Err("unsupported wire metadata".into());
-    }
-    let output = evaluate(&request, version).encode_to_vec();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let output = match args.as_slice() {
+        [] => {
+            let request = FillFoldRequest::decode(wire.as_slice())?;
+            if request.encode_to_vec() != wire {
+                return Err("unsupported wire metadata".into());
+            }
+            evaluate(&request, version).encode_to_vec()
+        }
+        [mode] if mode == "--terminal" => {
+            let request = TerminalFoldRequest::decode(wire.as_slice())?;
+            if request.encode_to_vec() != wire {
+                return Err("unsupported wire metadata".into());
+            }
+            evaluate_terminal(&request, version).encode_to_vec()
+        }
+        _ => return Err("unsupported operation mode".into()),
+    };
     if output.len() > LIMIT {
         return Err("output bound".into());
     }
@@ -138,7 +154,7 @@ func checkRustOMSFillShadow(root string) error {
 	return nil
 }
 
-var omsGoPaths = []string{"services/oms/internal/order/service.go", "services/oms/internal/order/recovery_commit.go", "services/oms/internal/order/fold_shadow.go", "services/oms/internal/foldshadow/worker.go", "services/oms/cmd/oms/fold_shadow.go", "services/oms/cmd/oms/main.go"}
+var omsGoPaths = []string{"services/oms/internal/order/service.go", "services/oms/internal/order/recovery_commit.go", "services/oms/internal/order/fold_shadow.go", "services/oms/internal/foldshadow/worker.go", "services/oms/cmd/oms/fold_shadow.go", "services/oms/cmd/oms/main.go", "services/oms/internal/order/terminal_shadow.go", "services/oms/internal/foldshadow/terminal.go", "services/oms/internal/order/schedule_drive.go"}
 
 func omsGoSources(t *testing.T) map[string]string {
 	t.Helper()
@@ -170,10 +186,17 @@ func checkOMSGoBoundary(files map[string]string) error {
 		"services/oms/internal/order/service.go":         {`next,aerr:=ApplyFill(st,fill,fill.GetExecutedAt().AsTime())ifaerr!=nil{deferobserveFillFold(ctx,s.fillFoldObserver,"live",ver,st,fill,fill.GetExecutedAt().AsTime(),next,aerr)`, `next,aerr:=ApplyFill(st,fill,fill.GetExecutedAt().AsTime())ifaerr!=nil{deferobserveFillFold(ctx,s.fillFoldObserver,"reconcile",ver,st,fill,fill.GetExecutedAt().AsTime(),next,aerr)`},
 		"services/oms/internal/order/recovery_commit.go": {`p.applyRecoveredExecution(ctx,c,next,fill,now,version)`, `next,err:=ApplyFill(working,fill,now)iferr!=nil{deferobserveFillFold(ctx,p.fillFoldObserver,"recovery",expectedVersion,working,fill,now,next,err)`},
 		"services/oms/internal/order/fold_shadow.go":     {`ifobserver==nil{return}`, `proto.Size(state)+proto.Size(fill)+proto.Size(candidate)>shadowprocess.MaxBytes-1024`, `c.Unsupported=trueobserver(c)return`, `proto.Clone(state)`, `proto.Clone(fill)`},
-		"services/oms/internal/foldshadow/worker.go":     {`make(chanorder.FillFoldCapture,1)`, `proto.Size(c.State)+proto.Size(c.Fill)+proto.Size(c.Candidate)>shadowprocess.MaxBytes-1024`, `c.Tenant!=tenant`, `unknown(c.State.ProtoReflect())`, `unknown(c.Fill.ProtoReflect())`, `r.ProducerVersion!=version`, `r.ExpectedVersion==nil`, `r.GetExpectedVersion()!=j.GetExpectedVersion()`, `!bytes.Equal(r.CaptureDigest,j.CaptureDigest)`, `!proto.Equal(c.Candidate,r.Candidate)`, `shadowprocess.Run(ctx,shadowprocess.Config{Executable:c.Executable,Timeout:c.Timeout},wire)`},
-		"services/oms/cmd/oms/fold_shadow.go":            {`results.WithLabelValues(status).Inc()`, `ifworker!=nil{store.SetFillFoldObserver(worker.Submit)}`, `worker.Close();pool.Close()`},
-		"services/oms/cmd/oms/main.go":                   {`order.WithFillFoldObserver(fillFoldObserver(store))`, `returnpersistentStoresWithShadow(ctx,cfg,pool,logger,reg)`},
+		"services/oms/internal/foldshadow/worker.go":     {`make(chancapturedWork,1)`, `evaluateTerminal(ctx,c,tenant,sourceRevision,*capture.terminal)`, `proto.Size(c.State)+proto.Size(c.Fill)+proto.Size(c.Candidate)>shadowprocess.MaxBytes-1024`, `c.Tenant!=tenant`, `unknown(c.State.ProtoReflect())`, `unknown(c.Fill.ProtoReflect())`, `r.ProducerVersion!=version`, `r.ExpectedVersion==nil`, `r.GetExpectedVersion()!=j.GetExpectedVersion()`, `!bytes.Equal(r.CaptureDigest,j.CaptureDigest)`, `!proto.Equal(c.Candidate,r.Candidate)`, `shadowprocess.Run(ctx,shadowprocess.Config{Executable:c.Executable,Timeout:c.Timeout},wire)`},
+		"services/oms/cmd/oms/fold_shadow.go":            {`results.WithLabelValues(status).Inc()`, `ifworker!=nil{store.SetFillFoldObserver(worker.Submit)store.SetTerminalFoldObserver(worker.SubmitTerminal)}`, `worker.Close();pool.Close()`},
+		"services/oms/cmd/oms/main.go":                   {`order.WithFillFoldObserver(fillFoldObserver(store))`, `order.WithTerminalFoldObserver(terminalFoldObserver(store))`, `returnpersistentStoresWithShadow(ctx,cfg,pool,logger,reg)`},
+		"services/oms/internal/order/terminal_shadow.go": {`ifobserver==nil{return}`, `proto.Size(state)+proto.Size(candidate)+proto.Size(quantity)>shadowprocess.MaxBytes-1024`, `proto.Clone(state)`, `proto.Clone(quantity)`},
+		"services/oms/internal/foldshadow/terminal.go":   {`proto.Size(c.State)+proto.Size(c.Candidate)+proto.Size(c.UnfilledQuantity)>shadowprocess.MaxBytes-1024`, `casew.queue<-capturedWork{terminal:&c}:`, `c.Tenant!=tenant`, `unknown(c.State.ProtoReflect())`, `unknown(r.ProtoReflect())`, `r.Operation!=j.Operation`, `r.ProducerVersion!=version`, `r.ExpectedVersion==nil`, `!bytes.Equal(r.CaptureDigest,j.CaptureDigest)`, `!proto.Equal(c.UnfilledQuantity,r.UnfilledQuantity)`, `!proto.Equal(c.Candidate,r.Candidate)`, `Args:[]string{"--terminal"}`},
+		"services/oms/internal/order/schedule_drive.go":  {`next,pureUnfilled,err:=Expire(st,now)observeTerminalFold(ctx,s.terminalFoldObserver,"expire","schedule",ver,st,next,pureUnfilled,now,err)`},
 	}
+	requirements["services/oms/internal/order/service.go"] = append(requirements["services/oms/internal/order/service.go"],
+		`next,cancelledQty,cerr:=Cancel(st,now)observeTerminalFold(ctx,s.terminalFoldObserver,"cancel","cancel",ver,st,next,cancelledQty,now,cerr)`,
+		`withdrawn,cancelledQty,cerr:=Cancel(st,now)observeTerminalFold(ctx,s.terminalFoldObserver,"cancel","reconcile",ver,st,withdrawn,cancelledQty,now,cerr)`,
+		`withdrawn,unfilledQty,eerr:=Expire(st,now)observeTerminalFold(ctx,s.terminalFoldObserver,"expire","reconcile",ver,st,withdrawn,unfilledQty,now,eerr)`)
 	for path, markers := range requirements {
 		for _, marker := range markers {
 			if !strings.Contains(parsed[path], marker) {
@@ -191,7 +214,7 @@ func checkOMSGoBoundary(files map[string]string) error {
 		}
 	}
 	// The worker accepts captures, never an authoritative store or publisher.
-	worker := parsed["services/oms/internal/foldshadow/worker.go"]
+	worker := parsed["services/oms/internal/foldshadow/worker.go"] + parsed["services/oms/internal/foldshadow/terminal.go"]
 	for _, forbidden := range []string{"order.Store", "pgx", "bus.New", ".Save(", ".Publish(", "os.Environ("} {
 		if strings.Contains(worker, forbidden) {
 			return fmt.Errorf("OMS shadow authority access %s", forbidden)
@@ -217,6 +240,9 @@ func TestRustOMSFillShadowBoundaryMutations(t *testing.T) {
 		{omsGoPaths[0], `"live", ver`, `"live", 0`}, {omsGoPaths[0], `"reconcile", ver`, `"reconcile", 0`}, {omsGoPaths[1], `"recovery", expectedVersion`, `"recovery", 0`},
 		{omsGoPaths[2], `proto.Size(state)+proto.Size(fill)+proto.Size(candidate) > shadowprocess.MaxBytes-1024`, `false`},
 		{omsGoPaths[3], `r.ProducerVersion != version`, `false`}, {omsGoPaths[3], `c.Tenant != tenant`, `false`}, {omsGoPaths[3], `r.GetExpectedVersion() != j.GetExpectedVersion()`, `false`}, {omsGoPaths[3], `unknown(c.Fill.ProtoReflect())`, `false`}, {omsGoPaths[3], `!proto.Equal(c.Candidate, r.Candidate)`, `false`},
+		{omsGoPaths[7], `r.Operation != j.Operation`, `false`}, {omsGoPaths[7], `!proto.Equal(c.UnfilledQuantity, r.UnfilledQuantity)`, `false`}, {omsGoPaths[7], `unknown(r.ProtoReflect())`, `false`}, {omsGoPaths[7], `[]string{"--terminal"}`, `[]string{"--other"}`},
+		{omsGoPaths[6], `proto.Size(state)+proto.Size(candidate)+proto.Size(quantity) > shadowprocess.MaxBytes-1024`, `false`},
+		{omsGoPaths[8], `"schedule", ver`, `"schedule", 0`}, {omsGoPaths[0], `"cancel", "cancel", ver`, `"cancel", "cancel", 0`},
 	} {
 		t.Run(tc.from, func(t *testing.T) {
 			m := map[string]string{}
