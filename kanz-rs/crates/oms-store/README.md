@@ -208,3 +208,34 @@ count equals the checkpoint before inserting an acknowledgement. Go currently
 can commit a pending acknowledgement with a zero expected count or extra targets.
 The real differential fixture preserves this distinction explicitly; it does not
 claim malformed stored metadata is compatible or change Go production behavior.
+
+## OMS queue repository
+
+`outbox` implements the six existing Go Queue persistence operations over the
+same `oms` rows and canonical raw Record. Rust Create/Save/recovery enqueue into
+this table; the production Go relay, admission and publisher remain unchanged.
+This source port does not make Rust an authoritative running OMS.
+
+The session lock uses Go's database/table OID/tenant/service/key namespace.
+Its trusted connector must transfer both the Client and its own driver task to
+Session and supply the same connector TLS policy for protocol CancelRequest.
+Cancellation/drop dispatches a bounded CancelRequest and aborts the driver;
+closing a socket alone cannot interrupt a PostgreSQL backend waiting for a lock.
+Only verified unlock returns the session. No failed unlock can return a connection
+to a pool. Caller acquisition deadlines can be shorter; the server lock wait has
+a five-second ceiling so failed cancellation/shutdown cannot strand a backend.
+This is an explicit bounded refusal relative to Go's caller-context-only wait.
+Release also has a five-second deadline.
+
+Explicit compatibility limits: pages above 4096 rows or 1 MiB of combined dynamic
+fields refuse rather than return a prefix. Nonpositive limits retain Go's empty
+success. Failed-cause truncation retains the first 1000 bytes; a split UTF-8 scalar
+is refused, matching PostgreSQL's rejection of Go's resulting invalid string.
+The signed schema-version bits remain unchanged in Record. Missing ownership and
+unsafe RLS/roles refuse. Age distinguishes empty from present and saturates at Go's
+maximum duration. Mark operations use tenant-local transactions; failed COMMIT is
+CommitUnconfirmed, never a general rollback claim. Go's corresponding autocommit
+error is likewise not proof of rollback; retry keeps at-least-once semantics.
+
+Real Go/Rust PostgreSQL contention, cancellation, session-loss, raw-byte and mark
+proof is mandatory in `TestRustOutboxQueue`; local skipped tests do not qualify it.

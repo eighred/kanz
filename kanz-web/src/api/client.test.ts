@@ -95,3 +95,19 @@ describe('refusals', () => {
     expect(err.status).toBe(429)
   })
 })
+
+it('an obsolete aborted read cannot revoke a replacement session on late401',async()=>{
+ const controller=new AbortController();const forget=vi.fn();setUnauthenticatedHandler(forget)
+ let finish!: (response:Response)=>void
+ fetchMock.mockReturnValue(new Promise<Response>(resolve=>{finish=resolve}))
+ const result=api.get('/api/v1/broker/accounts/A/state',{signal:controller.signal}).catch(error=>error)
+ controller.abort();finish(respond(401,{},false))
+ expect(await result).toMatchObject({name:'AbortError'});expect(forget).not.toHaveBeenCalled()
+})
+it('an aborted read cannot return late decoded JSON',async()=>{
+ const controller=new AbortController();let finish!: (value:unknown)=>void
+ fetchMock.mockResolvedValue({status:200,ok:true,json:()=>new Promise(resolve=>{finish=resolve})})
+ const result=api.get('/api/v1/broker/accounts/A/state',{signal:controller.signal}).catch(error=>error)
+ await Promise.resolve();controller.abort();finish({stale:true})
+ expect(await result).toMatchObject({name:'AbortError'})
+})
