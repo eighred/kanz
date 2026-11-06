@@ -129,6 +129,46 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(call.call_args_list[2].args, ("iptables-restore",))
             self.assertEqual(f.rule_diagnostic["status"], "removed_verified")
 
+    def test_synthetic_stale_rules_require_removal_and_sentinel_preservation(self):
+        for status, count, preserve, passes in (("removed_verified", 3, True, True),
+                                                ("no_old_rules", 0, True, False),
+                                                ("removed_verified", 3, False, False)):
+            f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+            sentinel_reads = 0
+
+            def inside(*args):
+                nonlocal sentinel_reads
+                if args == ("iptables-save",):
+                    return "*filter\nCOMMIT"
+                if args == ("iptables", "-S", "KANZ-CNI-KEEP"):
+                    sentinel_reads += 1
+                    return "-N KANZ-CNI-KEEP\n-A KANZ-CNI-KEEP -j RETURN" if preserve or sentinel_reads == 1 else "-N KANZ-CNI-KEEP"
+                return ""
+
+            def cleanup():
+                f.rule_diagnostic = {"status": status, "oldPolicyLines": count}
+
+            with patch.object(f, "inside", side_effect=inside) as call, patch.object(f, "ownership"), \
+                    patch.object(f, "remove_old_policy_rules", side_effect=cleanup):
+                if passes:
+                    f.qualify_stale_policy_cleanup()
+                    self.assertEqual(f.rule_diagnostic["syntheticStaleRules"], "removed_with_unrelated_rules_preserved")
+                    self.assertIn((("iptables", "-C", "INPUT", "-j", "KANZ-CNI-KEEP"),), call.call_args_list)
+                    self.assertIn((("iptables", "-t", "nat", "-S", "KUBE-SERVICES"),), call.call_args_list)
+                else:
+                    with self.assertRaises(proof.ProofError):
+                        f.qualify_stale_policy_cleanup()
+                    self.assertNotIn("syntheticStaleRules", f.rule_diagnostic)
+                self.assertFalse(any("ACCEPT" in item.args or "DROP" in item.args for item in call.call_args_list))
+
+    def test_synthetic_rules_refuse_existing_names_before_mutation(self):
+        for snapshot in ("", "*filter\n:KUBE-ROUTER-KANZ-FIXTURE - [0:0]\nCOMMIT", "*filter\n:KANZ-CNI-KEEP - [0:0]\nCOMMIT"):
+            f = migration.Fixture("kanz-cni-migration-" + "a" * 24)
+            with patch.object(f, "inside", return_value=snapshot) as call, patch.object(f, "ownership"):
+                with self.assertRaisesRegex(proof.ProofError, "synthetic_rule_fixture_not_fresh"):
+                    f.qualify_stale_policy_cleanup()
+                self.assertEqual(call.call_count, 1)
+
     def test_cpu_bound_follows_host_and_caps_at_four(self):
         for available, expected in ((None, 1), (1, 1), (2, 2), (16, 4)):
             with patch.object(migration.os, "cpu_count", return_value=available):
@@ -202,7 +242,7 @@ class MigrationTests(unittest.TestCase):
         with patch.object(f, "inside") as call, patch.object(f, "k"), \
                 patch.object(f, "ownership"), patch.object(f, "quiesce_system"), \
                 patch.object(f, "configure"), patch.object(f, "api_ready"), \
-                patch.object(f, "service_rules_ready"), patch.object(f, "remove_old_policy_rules"), \
+                patch.object(f, "service_rules_ready"), patch.object(f, "qualify_stale_policy_cleanup"), \
                 patch.object(f, "prepare_private_mount"), patch.object(f, "prepare_private_netns"), \
                 patch.object(f, "ready"), patch.object(f, "recycle_system"), patch.object(migration, "command"):
             f.switch_to_cilium()

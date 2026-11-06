@@ -389,6 +389,43 @@ class Fixture:
         private_mount_boundary(before, shared, identity, target=target, filesystem=filesystem)
         self.ownership()
 
+    def qualify_stale_policy_cleanup(self):
+        # Docker restart creates a fresh network namespace. Explicit synthetic
+        # RETURN-only rules qualify the nonempty cleanup branch; they are not
+        # evidence of real residual rules after a host service restart.
+        old = "KUBE-ROUTER-KANZ-FIXTURE"
+        keep = "KANZ-CNI-KEEP"
+        self.stage = "cilium_synthetic_rules_preflight"
+        self.ownership()
+        before = self.inside("iptables-save")
+        if not before.strip() or old in before or keep in before:
+            raise proof.ProofError("synthetic_rule_fixture_not_fresh")
+        self.stage = "cilium_synthetic_rules_create"
+        for chain in (old, keep):
+            self.inside("iptables", "-w", "5", "-N", chain)
+            self.inside("iptables", "-w", "5", "-A", chain, "-j", "RETURN")
+            self.inside("iptables", "-w", "5", "-A", "INPUT", "-j", chain)
+        sentinel = self.inside("iptables", "-S", keep)
+        if sentinel.splitlines() != ["-N " + keep, "-A " + keep + " -j RETURN"]:
+            raise proof.ProofError("synthetic_sentinel_not_identified")
+        self.ownership()
+        self.remove_old_policy_rules()
+        self.stage = "cilium_synthetic_rules_verify"
+        if self.rule_diagnostic.get("status") != "removed_verified" or self.rule_diagnostic.get("oldPolicyLines", 0) < 3:
+            raise proof.ProofError("nonempty_policy_cleanup_not_exercised")
+        if old in self.inside("iptables-save") or self.inside("iptables", "-S", keep) != sentinel:
+            raise proof.ProofError("synthetic_rule_cleanup_mismatch")
+        self.inside("iptables", "-C", "INPUT", "-j", keep)
+        self.inside("iptables", "-t", "nat", "-S", "KUBE-SERVICES")
+        # Remove only our preflight-absent sentinel after proving preservation.
+        self.inside("iptables", "-w", "5", "-D", "INPUT", "-j", keep)
+        self.inside("iptables", "-w", "5", "-D", keep, "-j", "RETURN")
+        self.inside("iptables", "-w", "5", "-X", keep)
+        if keep in self.inside("iptables-save"):
+            raise proof.ProofError("synthetic_sentinel_cleanup_incomplete")
+        self.ownership()
+        self.rule_diagnostic["syntheticStaleRules"] = "removed_with_unrelated_rules_preserved"
+
     def prepare_private_netns(self):
         # The chart consumes the node's /var/run/netns. Bind only an empty
         # directory on this fixture's private tmpfs; never hide live handles.
@@ -426,7 +463,7 @@ class Fixture:
         self.service_rules_ready()
         # K3s deliberately retains kube-router rules when disabled. Remove only
         # those rules inside this owned fixture, before Cilium owns enforcement.
-        self.remove_old_policy_rules()
+        self.qualify_stale_policy_cleanup()
         self.stage = "cilium_remove_old_links"
         self.inside("sh", "-ceu", "for link in flannel.1 cni0; do if ip link show \"$link\" >/dev/null 2>&1; then ip link delete \"$link\"; fi; done")
         self.prepare_private_mount("/sys/fs/bpf", "bpf")
@@ -501,6 +538,10 @@ def main():
         for phase in ("flannel", "cilium", "rollback"):
             if phase == "cilium":
                 f.switch_to_cilium()
+                if (f.rule_diagnostic.get("status") != "removed_verified" or
+                        f.rule_diagnostic.get("oldPolicyLines", 0) < 3 or
+                        f.rule_diagnostic.get("syntheticStaleRules") != "removed_with_unrelated_rules_preserved"):
+                    raise proof.ProofError("synthetic_policy_qualification_missing")
                 evidence["oldPolicyCleanup"] = f.rule_diagnostic
             elif phase == "rollback":
                 f.rollback()
