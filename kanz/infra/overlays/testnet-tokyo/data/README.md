@@ -45,3 +45,33 @@ to execute unless the shell script is the exact blob on origin/main.
 
 The single node, each singleton store, and the local-path volumes are failure
 domains. Loss of any one is an outage, so readiness must never be reported as HA.
+
+### Isolated tv-sync restored-state qualification
+
+The ordinary recovery command retains its eight-database inventory. Explicit
+`-QualifyTVSync` on backup includes `tv_sync`; on restore it requires that exact
+nine-database archive and runs `/tv-sync-replay` against the disposable restored
+CNPG cluster. This is source preparation, not permission to invoke the drill.
+The reviewed signed release pair must contain the exact-state verifier; the
+currently locked v2026.4.0 pair does not, so this mode refuses before SSM until a
+new reviewed signed pair and destination custody are established.
+
+The verifier runs as a new SELECT-only, NOSUPERUSER/NOBYPASSRLS tenant role.
+Only the init container mounts the disposable owner credential. Both connections
+verify the restored PostgreSQL certificate; role provisioning checks isolated
+server logging controls before submitting a generated password. No owner secret,
+SQL error, init log or record contents are exported. Exact main source, release
+root and linux/amd64 child digest, loaded image, archive hash, restored cluster
+UID, tenant hash, retention and snapshot hashes are bound in the result. The TV mode requires jq with `have_decnum` support and exact integer
+counters; older parsers refuse before mutation. A fresh
+nonempty checkpoint/history proof is required; genesis is not qualified.
+
+Cleanup uses namespace UID preconditions and requires local-path Delete reclaim
+policy, PVC/PV identity consistency and namespace/PV-object absence. This proves
+controller-object cleanup, not physical media erasure. Failed cleanup prevents a
+successful receipt. No foreign namespace, PV or finalizer is forcibly removed.
+The result qualifies only that isolated restored archive; it is not a current
+production database receipt, current runtime credential proof, historical-prefix
+completeness proof or activation gate. Existing preparation Job receipts cannot
+substitute for this comparison. Live execution, pinned-CNPG role authority,
+loaded-image readback and restore cleanup still require operational acceptance.

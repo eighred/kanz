@@ -166,4 +166,8 @@ message Checkpoint {
   int64 seq = 2;
   google.protobuf.Timestamp taken_at = 3;
   repeated AccountSnapshot accounts = 4;
+  // 1 preserves retained execution decimals exactly or refuses the checkpoint.
+  // 0 is legacy encoding, which may have rounded values. Never relabel or
+  // restore it without independently establishing complete source history.
+  uint32 exact_encoding_version = 5;
 }

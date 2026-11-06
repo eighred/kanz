@@ -86,7 +86,7 @@ func validateReplayCheckpoint(snap replaySnapshot, tenant string, retention time
 	if _, ok := dec.InDomainDeep(&cp); !ok {
 		return ErrReplayInput
 	}
-	if cp.TenantId != tenant || cp.Seq != snap.checkpointSeq || cp.Seq <= 0 || cp.Seq > snap.watermark || cp.TakenAt == nil || cp.TakenAt.CheckValid() != nil || cp.TakenAt.AsTime().After(snap.at) {
+	if cp.GetExactEncodingVersion() != 1 || cp.TenantId != tenant || cp.Seq != snap.checkpointSeq || cp.Seq <= 0 || cp.Seq > snap.watermark || cp.TakenAt == nil || cp.TakenAt.CheckValid() != nil || cp.TakenAt.AsTime().After(snap.at) {
 		return ErrReplayInput
 	}
 	accounts := make(map[string]bool, len(cp.Accounts))
