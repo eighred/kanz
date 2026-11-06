@@ -73,7 +73,8 @@ class JLLTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp,patch.object(j,'REGISTRY_SHA256',hashlib.sha256(raw).hexdigest()):
                 report={}
                 if bad:
-                    with self.assertRaises(ValueError):j.qualify(run,[],Path(tmp),native,advisory.manifest_result,advisory.validate_packages,report)
+                    j.qualify(run,[],Path(tmp),native,advisory.manifest_result,advisory.validate_packages,report)
+                    with self.assertRaises(ValueError):j.validate_report(report,native)
                     self.assertEqual(report['advisories'][0]['Severity'],'LOW')
                 else:
                     j.qualify(run,[],Path(tmp),native,advisory.manifest_result,advisory.validate_packages,report)

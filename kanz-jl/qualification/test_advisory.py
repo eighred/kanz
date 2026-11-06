@@ -9,6 +9,7 @@ from pathlib import Path
 import unittest
 
 import advisory as a
+import test_native_mapping as nm
 
 
 class AdvisoryTests(unittest.TestCase):
@@ -141,12 +142,17 @@ class AdvisoryTests(unittest.TestCase):
             'packages':packages,'scannerManifestSHA256':a.hashlib.sha256(jll.manifest(packages)).hexdigest(),
             'scannerProjectSHA256':a.hashlib.sha256(jll.project(packages)).hexdigest(),
             'knownJLLAdvisoryControlPassed':True,'advisories':[],'scope':'archive-bound-JLL-metadata-only'}
-        a.validate_report(report,q,expected)
+        mapping, native_inventory = nm.fixture(now)
+        q['inventory']['native7zip'] = native_inventory['native7zip']
+        q['inventory']['nativeRuntime']['files'] = native_inventory['nativeRuntime']['files']
+        report['nativeVersionMapping'] = mapping
+        with patch.object(a.native_mapping, 'SOURCES', nm.SOURCES):
+            a.validate_report(report,q,expected)
         for key in report:
             changed=copy.deepcopy(report);del changed[key]
-            with self.subTest(key=key),self.assertRaises((ValueError,KeyError)):a.validate_report(changed,q,expected)
+            with patch.object(a.native_mapping, 'SOURCES', nm.SOURCES),self.subTest(key=key),self.assertRaises((ValueError,KeyError)):a.validate_report(changed,q,expected)
         changed=copy.deepcopy(report);changed['otherScanFindings']=[{'advisories':[{'severity':'CRITICAL'}]}]
-        with self.assertRaises(ValueError):a.validate_report(changed,q,expected)
+        with patch.object(a.native_mapping, 'SOURCES', nm.SOURCES),self.assertRaises(ValueError):a.validate_report(changed,q,expected)
 
 
 if __name__=='__main__':unittest.main()

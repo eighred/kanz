@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import tomllib
+import native_mapping
 
 REGISTRY_COMMIT = 'afacc2e68d6c156d80eb9ff489370bb38d1a61f4'
 REGISTRY_SHA256 = '96987d7602353122775f08ea65ae9d3ab201c826ddc5eea71f978da45ea23b39'
@@ -59,12 +60,21 @@ def validate_control(result):
         raise ValueError('known vulnerable JLL control not detected')
 
 
-def validate_report(report, native):
+def validate_report(report, native, mapping=None, inventory=None, scan_time=None):
     expected = packages(native)
+    findings = report.get('advisories') if isinstance(report, dict) else None
+    if not isinstance(findings, list) or len(findings) > 4096:
+        raise ValueError('JLL findings absent or unbounded')
+    if findings:
+        if mapping is None:
+            raise ValueError('native identity qualification missing')
+        native_mapping.validate_report(mapping, inventory, scan_time)
+        if any(not native_mapping.resolves(finding) for finding in findings):
+            raise ValueError('unmapped JLL finding refuses qualification')
     if (report != {'registryCommit': REGISTRY_COMMIT, 'registrySHA256': REGISTRY_SHA256,
                    'packages': expected, 'scannerManifestSHA256': hashlib.sha256(manifest(expected)).hexdigest(),
                    'scannerProjectSHA256': hashlib.sha256(project(expected)).hexdigest(),
-                   'knownJLLAdvisoryControlPassed': True, 'advisories': [],
+                   'knownJLLAdvisoryControlPassed': True, 'advisories': findings,
                    'scope': 'archive-bound-JLL-metadata-only'}):
         raise ValueError('JLL advisory evidence missing or unbound')
 
@@ -94,7 +104,6 @@ def qualify(run, flags, scratch, native, manifest_result, validate_packages, rep
               'scope': 'archive-bound-JLL-metadata-only'})
     report['advisories'] = [{k: v.get(k) for k in ('VulnerabilityID', 'PkgName', 'PkgID', 'InstalledVersion', 'Severity')}
                             for v in result.get('Vulnerabilities', [])]
-    if report['advisories']:
-        raise ValueError('known archive-bound JLL advisory refuses qualification')
-    validate_report(report, native)
+    # Raw findings are retained unchanged; the caller must qualify native identity
+    # and apply the closed finding policy before any successful final report.
     return report

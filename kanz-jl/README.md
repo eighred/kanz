@@ -179,8 +179,8 @@ This loaded set is observed in the qualification probe, not every future worker
 under system library paths; these observations do not assign Debian package
 ownership. The existing Syft Debian inventory remains distinct.
 
-Every selected runtime file is explicitly unassigned to a qualified native
-advisory mapping. Exact archive equality proves provenance, not vulnerability
+The archive inventory conservatively retains every selected runtime file as
+unassigned; a separate, narrowly qualified mapping below binds one component. Exact archive equality proves provenance, not vulnerability
 clearance or reachability. Julia sysimages, bundled patched libraries and system
 libraries need component-specific advisory mappings and known-vulnerable controls;
 the native/runtime release blocker is unchanged. No package is imported just to
@@ -196,8 +196,9 @@ dependencies. This does not instantiate packages or
 change the worker's Project/Manifest. The same fresh advisory database must
 identify the manifest-only OpenSSL_jll 3.0.12+0 control for
 [JLSEC-2026-252 / CVE-2024-5535](https://github.com/JuliaLang/SecurityAdvisories.jl/blob/main/advisories/published/2026/JLSEC-2026-252.md).
-Any reported advisory for the actual JLL metadata refuses qualification,
-regardless of severity. Evidence binds the registry commit/checksum, all 23
+Every raw finding for the actual JLL metadata remains in the report. A finding
+refuses qualification unless the separate exact native identity mapping below
+proves that specific installed component is outside the reviewed affected range. Evidence binds the registry commit/checksum, all 23
 UUID/versions, both scanner-input checksums and control outcome to the existing
 image/source/database report.
 
@@ -208,3 +209,25 @@ unassigned files retain their explicit ownership/coverage limitations. The
 [Julia advisory database scope](https://github.com/JuliaLang/SecurityAdvisories.jl#scope)
 is incomplete for artifacts. Standard release publication remains blocked on
 that unresolved coverage; no scanner suppression or native clearance is added.
+
+The first qualified native identity is the archive's `libexec/julia/7z`. Julia
+1.13.3 bundles 7-Zip **26.03** while its compatibility `p7zip_jll` metadata says
+17.8.3+0. The unchanged raw Trivy finding for CVE-2026-58052 is retained, not
+suppressed. Qualification requires the exact independently archive-bound binary
+hash, its successful `7z i` banner executed inside the same restricted OCI image,
+checksum-pinned [Julia build metadata](https://github.com/JuliaLang/julia/blob/67ac47b9cd855e02134d41d5428ac9f2a73f2694/deps/p7zip.version)
+and [upstream release history](https://github.com/ip7z/7zip/blob/0766b733fe3e06dd2a7f9a3cfbf2108ac73abd17/DOC/src-history.txt),
+and a newly retrieved, analyzed [NVD record](https://nvd.nist.gov/vuln/detail/CVE-2026-58052).
+The exact CPE/range must identify versions before 26.03 as affected; numerical
+controls must classify 26.02 as affected and 26.03 as fixed. These controls use
+version inputs, not execution of a vulnerable binary. Public source bytes and
+the bounded NVD response/checksum are retained for independent validation.
+Freshness is evaluated at the recorded scan-time qualification window; an old
+passing artifact is not permanent advisory clearance. HTTPS redirects cannot
+downgrade to HTTP.
+Changed ranges, additional CPE conditions, unknown findings, mismatched UUIDs,
+wrapper/native versions, hashes, source bytes or stale advisory snapshots refuse.
+No file or worker dependency is removed. This corrects one component identity;
+it does not clear other native/runtime files, platform reachability, or future
+advisories. Standard release publication remains blocked on residual UNKNOWN
+coverage under #1413.

@@ -134,6 +134,20 @@ native = Dict("files"=>native_files, "links"=>native_links, "jll"=>native_jll,
     "unassignedFiles"=>sort!(vcat(collect(keys(native_files)), ["depot/" * p for p in keys(generated_native)])),
     "loadedOutsideArchive"=>outside,
     "coverage"=>"native-library-advisory-ownership-unqualified")
+# Execute only the archive-bound installed utility's information command under
+# the same OCI limits. Do not infer native version from the compatibility JLL stub.
+println(stderr, "KANZ_OCI_STAGE=native-version")
+seven_path = "/opt/julia/libexec/julia/7z"
+@test realpath(seven_path) == seven_path && !islink(seven_path)
+@test native_files["libexec/julia/7z"]["sha256"] == "a15c6706c64672f07d4cc7358cc7eee3aa0d0f7cfe3fdfcf31deb808d3b0b8ee"
+seven_output = open(`$seven_path i`, "r") do io
+    bytes = read(io, 65537)
+    @test length(bytes) <= 65536
+    String(bytes)
+end
+@test occursin(r"(?m)^7-Zip \(a\) 26\.03 \(x64\) : Copyright \(c\) 1999-2026 Igor Pavlov : 2026-09-03\r?$", seven_output)
+seven = Dict("path"=>"libexec/julia/7z", "sha256"=>native_files["libexec/julia/7z"]["sha256"],
+    "version"=>"26.03", "versionCommand"=>"i")
 println(stderr, "KANZ_OCI_STAGE=inventory")
 generated = Dict{String,String}()
 for (dir, _, files) in walkdir("/opt/kanz-jl/gen")
@@ -156,4 +170,4 @@ TOML.print(stdout, Dict("sourceSHA"=>read("source.sha",String), "runtime"=>strin
     "projectSHA256"=>bytes2hex(sha256(read("Project.toml"))),
     "manifestSHA256"=>bytes2hex(sha256(read("Manifest.toml"))),
     "runtimeExecutableSHA256"=>bytes2hex(sha256(read("/opt/julia/bin/julia"))),
-    "nativeRuntime"=>native, "excludedDevelopmentEnvironments"=>excluded_environments, "packages"=>packages, "generated"=>generated, "sources"=>sources))
+    "nativeRuntime"=>native, "native7zip"=>seven, "excludedDevelopmentEnvironments"=>excluded_environments, "packages"=>packages, "generated"=>generated, "sources"=>sources))

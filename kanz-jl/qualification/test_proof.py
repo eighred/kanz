@@ -90,7 +90,8 @@ class QualificationTests(unittest.TestCase):
                          'generated': {'contract.jl': hashlib.sha256(b'canonical fixture').hexdigest()},
                          'runtimeExecutableSHA256': 'd' * 64,
                          'excludedDevelopmentEnvironments': proof.EXCLUDED_DEVELOPMENT_ENVIRONMENTS,
-                         'nativeRuntime': {'generatedNativeImages': {}, 'files': {}, 'links': {}, 'jll': {}, 'unassignedFiles': [], 'loadedOutsideArchive': {'/usr/lib/libc.so.6': {'size': 42, 'sha256': 'a' * 64}}, 'coverage': proof.native_inventory.COVERAGE},
+                         'native7zip': proof.native_mapping.COMPONENT,
+                         'nativeRuntime': {'generatedNativeImages': {}, 'files': {proof.native_mapping.PATH: proof.native_mapping.FILE}, 'links': {}, 'jll': {}, 'unassignedFiles': [proof.native_mapping.PATH], 'loadedOutsideArchive': {'/usr/lib/libc.so.6': {'size': 42, 'sha256': 'a' * 64}}, 'coverage': proof.native_inventory.COVERAGE},
                          'sources': {'qualification/isolation.jl': hashlib.sha256(Path(proof.__file__).with_name('isolation.jl').read_bytes()).hexdigest()}}
             with patch.object(proof, 'ROOT', root):
                 self.check_inventory_mutations(inventory)
@@ -101,23 +102,23 @@ class QualificationTests(unittest.TestCase):
                   'timeoutCleanupPassed': True,
                   'juliaAdvisoryCoverage': 'unqualified-release-blocker', 'archiveSHA256': proof.ARCHIVE_SHA256,
                   'cases': sorted(proof.CASES), 'inventory': inventory}
-        proof.validate_report(report, 'b' * 40, 'd' * 64, {'files': {}, 'links': {}, 'jll': {}})
+        proof.validate_report(report, 'b' * 40, 'd' * 64, {'files': {proof.native_mapping.PATH: proof.native_mapping.FILE}, 'links': {}, 'jll': {}})
         for field in ('sourceSHA', 'imageID', 'localOnly', 'passed', 'cleanupPassed', 'isolationPassed',
                       'goldensPassed', 'timeoutCleanupPassed', 'juliaAdvisoryCoverage', 'archiveSHA256', 'cases', 'inventory'):
             changed = copy.deepcopy(report)
             del changed[field]
             with self.subTest(field=field), self.assertRaises(ValueError):
-                proof.validate_report(changed, 'b' * 40, 'd' * 64, {'files': {}, 'links': {}, 'jll': {}})
+                proof.validate_report(changed, 'b' * 40, 'd' * 64, {'files': {proof.native_mapping.PATH: proof.native_mapping.FILE}, 'links': {}, 'jll': {}})
         for field in ('runtime', 'sourceSHA', 'projectSHA256', 'manifestSHA256', 'packages',
-                      'sources', 'generated', 'runtimeExecutableSHA256', 'excludedDevelopmentEnvironments', 'nativeRuntime'):
+                      'sources', 'generated', 'runtimeExecutableSHA256', 'excludedDevelopmentEnvironments', 'nativeRuntime', 'native7zip'):
             for replacement in (None, {}, 'wrong'):
                 changed = copy.deepcopy(report)
                 changed['inventory'][field] = replacement
                 with self.subTest(field=field, replacement=replacement), self.assertRaises(ValueError):
-                    proof.validate_report(changed, 'b' * 40, 'd' * 64, {'files': {}, 'links': {}, 'jll': {}})
+                    proof.validate_report(changed, 'b' * 40, 'd' * 64, {'files': {proof.native_mapping.PATH: proof.native_mapping.FILE}, 'links': {}, 'jll': {}})
         report['cases'].append(report['cases'][0])
         with self.assertRaises(ValueError):
-            proof.validate_report(report, 'b' * 40, 'd' * 64, {'files': {}, 'links': {}, 'jll': {}})
+            proof.validate_report(report, 'b' * 40, 'd' * 64, {'files': {proof.native_mapping.PATH: proof.native_mapping.FILE}, 'links': {}, 'jll': {}})
 
 
 if __name__ == '__main__':

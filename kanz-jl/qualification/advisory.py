@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import proof
 import jll_advisory
+import native_mapping
 
 ROOT = proof.ROOT
 ARCHIVES = {'trivy': 'bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea',
@@ -181,7 +182,10 @@ def validate_report(report, qualification, expected):
             or report.get('installedPackages') != qualification['inventory']['packages']
             or report.get('juliaManifest') != expected or report.get('spdxPackages') != expected):
         raise ValueError('advisory evidence incomplete or unbound')
-    jll_advisory.validate_report(report.get("jllAdvisory"), qualification["inventory"]["nativeRuntime"])
+    native_mapping.validate_report(report.get('nativeVersionMapping'), qualification['inventory'],
+        dt.datetime.fromisoformat(report['scanTime']))
+    jll_advisory.validate_report(report.get("jllAdvisory"), qualification["inventory"]["nativeRuntime"],
+        report['nativeVersionMapping'], qualification['inventory'], dt.datetime.fromisoformat(report['scanTime']))
     for name, checksum in ARCHIVES.items():
         tool = report.get('tools', {}).get(name, {})
         if tool.get('archiveSHA256') != checksum or not re.fullmatch('[0-9a-f]{64}', tool.get('executableSHA256', '')):
@@ -255,6 +259,11 @@ def main():
             report['jllAdvisory'] = {}
             jll_advisory.qualify(run, flags, scratch,
                 qualification['inventory']['nativeRuntime'], manifest_result, validate_packages, report['jllAdvisory'])
+            stage = 'qualified-native-version-mapping'
+            report['nativeVersionMapping'] = native_mapping.qualify(run, qualification['inventory'],
+                lambda: dt.datetime.now(dt.timezone.utc))
+            jll_advisory.validate_report(report['jllAdvisory'], qualification['inventory']['nativeRuntime'],
+                report['nativeVersionMapping'], qualification['inventory'], dt.datetime.fromisoformat(report['scanTime']))
             stage = 'actual-image-julia-scan'
             scan = json.loads(run(['trivy', 'image', *flags, '--image-src', 'docker', image]))
             validate_image_scan(scan, image, expected)

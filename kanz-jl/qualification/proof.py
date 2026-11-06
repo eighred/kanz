@@ -12,6 +12,7 @@ import tomllib
 import uuid
 
 import native_inventory
+import native_mapping
 
 ROOT = Path(__file__).resolve().parents[2]
 FLAGS = ['--startup-file=no', '--history-file=no', '--compiled-modules=existing',
@@ -26,7 +27,7 @@ class CommandTimeout(RuntimeError):
 
 
 ISOLATION_STAGES = {'imports', 'runtime', 'cgroup', 'process-security',
-                    'write-refusal', 'installed-packages', 'native-runtime', 'inventory'}
+                    'write-refusal', 'installed-packages', 'native-runtime', 'native-version', 'inventory'}
 
 
 def isolation_stage(raw):
@@ -114,6 +115,7 @@ EXCLUDED_DEVELOPMENT_ENVIRONMENTS = ['base/JuliaSyntax/docs', 'stdlib/v1.13/TOML
 
 def validate_inventory(inventory, source, runtime_sha256, native_expected):
     native_inventory.validate(inventory.get('nativeRuntime'), native_expected)
+    native_mapping.validate_component(inventory, native_expected)
     if inventory.get('excludedDevelopmentEnvironments') != EXCLUDED_DEVELOPMENT_ENVIRONMENTS:
         raise ValueError('packaged development environment boundary differs')
     if inventory['sourceSHA'] != source or inventory['runtime'] != '1.13.3':
