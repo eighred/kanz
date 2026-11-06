@@ -49,7 +49,11 @@ def broker_diagnostics(logs):
     subjects = set()
     invalid = set()
     missing_bootstrap = False
+    storage_alert = False
+    no_space = False
     for line in logs.splitlines():
+        storage_alert |= 'storage space alert:' in line
+        no_space |= 'No space left on device' in line
         if "Can't load config bootstrap file:" in line:
             missing_bootstrap = True
         for key in ('kafka_enable_authorization', 'superusers', 'kafka_mtls_principal_mapping_rules'):
@@ -85,7 +89,25 @@ def broker_diagnostics(logs):
                 if value in (digest, '#1320' + digest.encode().hex(), '#0c20' + digest.encode().hex()):
                     subjects.add(dn)
     return {'unmappedSubjects': sorted(subjects), 'invalidProperties': sorted(invalid),
-            'missingBootstrapFile': missing_bootstrap}
+            'missingBootstrapFile': missing_bootstrap,
+            'storageSpaceAlert': storage_alert, 'noSpaceLeftOnDevice': no_space}
+
+
+def storage_capacity(output):
+    # df is diagnostic only. Retain bounded numeric capacity, never its device,
+    # mount names or arbitrary process output. Failure cannot alter the verdict.
+    if len(output) > 4096:
+        raise ValueError('oversized storage capacity')
+    lines = output.splitlines()
+    if len(lines) != 2:
+        raise ValueError('unexpected storage capacity')
+    fields = lines[1].split()
+    if len(fields) != 6 or not all(re.fullmatch(r'[0-9]{1,16}', n) for n in fields[1:4]):
+        raise ValueError('invalid storage capacity')
+    total, used, available = [int(n) * 1024 for n in fields[1:4]]
+    if not 0 < total < 2**63 or not 0 <= used <= total or not 0 <= available <= total:
+        raise ValueError('out-of-range storage capacity')
+    return {'totalBytes': total, 'usedBytes': used, 'availableBytes': available}
 
 
 def spire_objects():
@@ -231,6 +253,12 @@ def main():
                 evidence['brokerDiagnostics']=broker_diagnostics(logs)
             except Exception:
                 pass  # Optional public diagnosis cannot turn a failure into success.
+            try:
+                capacity=k('-n','kanz-messaging','exec','deployment/redpanda','-c','redpanda',
+                           '--','df','-Pk','/var/lib/redpanda/data')
+                evidence['brokerStorageCapacity']=storage_capacity(capacity)
+            except Exception:
+                pass  # Missing diagnostic tooling cannot change the failed verdict.
             raise
         finally:
             try:
