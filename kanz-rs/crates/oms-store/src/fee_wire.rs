@@ -363,10 +363,8 @@ mod shape_tests {
             let root = files
                 .file
                 .iter_mut()
-                .find(|f| f.package() == "order.v1")
-                .unwrap()
-                .message_type
-                .iter_mut()
+                .filter(|f| f.package() == "order.v1")
+                .flat_map(|f| f.message_type.iter_mut())
                 .find(|m| m.name() == "Fill")
                 .unwrap();
             match change {
