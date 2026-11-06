@@ -16,6 +16,15 @@ COPY kanz-jl/src/ ./src/
 COPY kanz-jl/bin/ ./bin/
 COPY kanz-jl/test/ ./test/
 COPY kanz-jl/qualification/isolation.jl ./qualification/isolation.jl
+# Upstream documentation/benchmark/test environments are not worker dependencies.
+# Remove their complete directories, not individual manifests or scanner findings.
+RUN for path in /opt/julia/share/julia/base/JuliaSyntax/docs \
+                /opt/julia/share/julia/stdlib/v1.13/TOML/docs \
+                /opt/julia/share/julia/stdlib/v1.13/TOML/benchmark \
+                /opt/julia/share/julia/stdlib/v1.13/Tar/test \
+                /opt/julia/share/julia/test; do \
+      test -d "$path" && test ! -L "$path" && rm -rf -- "$path" && test ! -e "$path" || exit 1; \
+    done
 ARG VERSION
 RUN printf '%s' "$VERSION" | grep -Eq '^[0-9a-f]{40}$' && printf '%s' "$VERSION" > source.sha
 

@@ -106,7 +106,13 @@ def container_boundary(item, image, source):
         raise ValueError('OCI isolation boundary differs')
 
 
+EXCLUDED_DEVELOPMENT_ENVIRONMENTS = ['base/JuliaSyntax/docs', 'stdlib/v1.13/TOML/docs',
+    'stdlib/v1.13/TOML/benchmark', 'stdlib/v1.13/Tar/test', 'test']
+
+
 def validate_inventory(inventory, source, runtime_sha256):
+    if inventory.get('excludedDevelopmentEnvironments') != EXCLUDED_DEVELOPMENT_ENVIRONMENTS:
+        raise ValueError('packaged development environment boundary differs')
     if inventory['sourceSHA'] != source or inventory['runtime'] != '1.13.3':
         raise ValueError('image source/runtime differs')
     for name, key in [('Project.toml', 'projectSHA256'), ('Manifest.toml', 'manifestSHA256')]:

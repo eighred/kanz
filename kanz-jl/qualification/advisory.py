@@ -269,6 +269,7 @@ def main():
                 'advisories': [{'id': v.get('VulnerabilityID'), 'package': v.get('PkgName'),
                     'version': v.get('InstalledVersion'), 'severity': v.get('Severity')} for v in r.get('Vulnerabilities', [])]}
                 for r in scan.get('Results', []) if r.get('Vulnerabilities')]
+            stage = 'actual-image-advisory-policy'
             if any(v.get('Severity') == 'CRITICAL' for r in scan.get('Results', []) for v in r.get('Vulnerabilities', [])):
                 raise ValueError('critical actual-image advisory refuses qualification')
             if digest(db / 'trivy.db') != db_hash:

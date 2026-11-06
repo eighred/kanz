@@ -22,6 +22,12 @@ for path in ("/opt/kanz-jl/refuse-write", "/opt/julia-depot/refuse-write", "/ref
 end
 @test isfile("/opt/kanz-jl/source.sha")
 println(stderr, "KANZ_OCI_STAGE=installed-packages")
+excluded_environments = ["base/JuliaSyntax/docs", "stdlib/v1.13/TOML/docs",
+    "stdlib/v1.13/TOML/benchmark", "stdlib/v1.13/Tar/test", "test"]
+for path in excluded_environments
+    @test !ispath(joinpath("/opt/julia/share/julia", path))
+    @test !islink(joinpath("/opt/julia/share/julia", path))
+end
 manifest = TOML.parsefile("/opt/kanz-jl/Manifest.toml")
 packages = Dict{String,Any}()
 # Pkg.dependencies() constructs EnvCache and writes depot usage locks. Resolve
@@ -71,4 +77,4 @@ TOML.print(stdout, Dict("sourceSHA"=>read("source.sha",String), "runtime"=>strin
     "projectSHA256"=>bytes2hex(sha256(read("Project.toml"))),
     "manifestSHA256"=>bytes2hex(sha256(read("Manifest.toml"))),
     "runtimeExecutableSHA256"=>bytes2hex(sha256(read("/opt/julia/bin/julia"))),
-    "packages"=>packages, "generated"=>generated, "sources"=>sources))
+    "excludedDevelopmentEnvironments"=>excluded_environments, "packages"=>packages, "generated"=>generated, "sources"=>sources))

@@ -152,3 +152,16 @@ content-addressed config bytes must hash correctly and describe linux/amd64;
 Syft must report that exact config digest. The alias is checked again after
 export. This is not a label-only or cross-kind digest comparison. Only validated
 IDs/version/type are projected for diagnostics; config contents remain private.
+
+The runtime image excludes five complete upstream development directories:
+`share/julia/base/JuliaSyntax/docs`, `share/julia/stdlib/v1.13/TOML/docs`,
+`share/julia/stdlib/v1.13/TOML/benchmark`, `share/julia/stdlib/v1.13/Tar/test`,
+and `share/julia/test`. Their bundled documentation, benchmark and deliberately
+invalid test environments are not the worker environment. The pinned archive's
+runtime source, libraries, standard libraries and license remain; the worker's
+own goldens remain in the qualification image. The actual image probe verifies
+these directories are absent and records the exact set. This changes packaged
+content rather than suppressing scanner results: the whole image still passes
+through the same scan, and any remaining CRITICAL advisory refuses qualification.
+The failed pre-removal scan is retained in PR #1472; its development manifests
+do not by themselves establish that those historical native binaries were loaded.
