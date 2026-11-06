@@ -1,0 +1,58 @@
+name: tokyo-messaging-proof
+on:
+  pull_request:
+    paths:
+      - 'tools/tokyo-messaging-proof/**'
+      - 'tools/feed-identity/**'
+      - 'tools/testnet-data-plane-recovery.sh'
+      - 'kanz/infra/nats/**'
+      - 'kanz/infra/security/spire/**'
+      - 'kanz/infra/overlays/testnet-tokyo/**'
+      - '.github/workflows/tokyo-messaging-proof.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/tokyo-messaging-proof/**'
+      - 'tools/feed-identity/**'
+      - 'tools/testnet-data-plane-recovery.sh'
+      - 'kanz/infra/nats/**'
+      - 'kanz/infra/security/spire/**'
+      - 'kanz/infra/overlays/testnet-tokyo/**'
+      - '.github/workflows/tokyo-messaging-proof.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  messaging-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 -B -m unittest discover -s tools/tokyo-messaging-proof -p 'test_*.py'
+      - run: python3 -B -m unittest discover -s tools/feed-identity -p 'test_*.py'
+      - run: bash tools/feed-identity/install.sh
+      - name: Prove staged messaging isolation with real dependencies
+        run: python3 -B tools/tokyo-messaging-proof/proof.py
+      - name: Remove disposable cluster after interruption
+        if: always()
+        run: |
+          if command -v kind >/dev/null; then
+            while IFS= read -r cluster; do
+              if [[ "$cluster" =~ ^messaging-proof-[0-9a-f]{12}$ ]]; then
+                kind delete cluster --name "$cluster"
+              fi
+            done < <(kind get clusters)
+          fi
+      - name: Preserve sanitized developmental evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tokyo-messaging-proof
+          path: ${{ runner.temp }}/tokyo-messaging.json
+          if-no-files-found: error
