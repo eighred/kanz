@@ -1,12 +1,29 @@
 import copy
 import unittest
+import json
 
 import proof
 import rollout_probe
-from transaction_fixture import CASES, validate_report
+from transaction_fixture import CASES, validate_report, deployment_diagnostic
 
 
 class TransactionEvidenceTests(unittest.TestCase):
+    def test_diagnostic_is_closed_and_bounded(self):
+        private = "private-message-https://example.invalid/token"
+        deployment = {"status": {"replicas": 1, "readyReplicas": False, "conditions": [
+            {"type": "Progressing", "status": "False", "reason": "FailedCreate", "message": private},
+            {"type": private, "status": private, "reason": private}]}}
+        pods = [{"metadata": {"name": private}, "status": {"phase": "Pending", "conditions": [
+            {"type": "PodScheduled", "status": "False", "reason": "Unschedulable", "message": private}], "containerStatuses": [
+            {"ready": False, "restartCount": 2, "state": {"waiting": {"reason": "ImagePullBackOff", "message": private}}}]}}]
+        result = deployment_diagnostic(deployment, pods)
+        self.assertNotIn(private, json.dumps(result))
+        self.assertIsNone(result["replicas"]["readyReplicas"])
+        self.assertEqual(result["pods"][0]["containers"][0]["waiting"], "ImagePullBackOff")
+        self.assertEqual(result["pods"][0]["conditions"][0]["reason"], "Unschedulable")
+        for bad in (pods * 17, [{"status": {"containerStatuses": [{}] * 5}}]):
+            with self.assertRaises(ValueError): deployment_diagnostic(deployment, bad)
+
     def test_exact_source_attempt_complete_cases_cleanup_and_identity_required(self):
         report = {"format": "kanz-gateway-policy-transaction-proof-v1", "source": "a" * 40, "tree": "b" * 40,
                   "runID": "123", "runAttempt": "2", "renderSHA256": "c" * 64, "nodeImage": proof.feed.NODE,

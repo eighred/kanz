@@ -21,6 +21,41 @@ CASES = ["response_loss_" + str(at) for at in range(1, 9)] + [
     "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"]
 
 
+def deployment_diagnostic(deployment, pods):
+    """Closed status projection only; never messages, events, specs or logs."""
+    if not isinstance(pods, list) or len(pods) > 16:
+        raise ValueError("diagnostic pod bound")
+    def number(value):
+        return value if type(value) is int and 0 <= value <= 100000 else None
+    def enum(value, allowed):
+        return value if isinstance(value, str) and value in allowed else "other"
+    status = deployment.get("status", {})
+    result = {"replicas": {key: number(status.get(key)) for key in
+              ("replicas", "updatedReplicas", "readyReplicas", "availableReplicas", "observedGeneration")}, "pods": []}
+    conditions = status.get("conditions", [])
+    if not isinstance(conditions, list) or len(conditions) > 16:
+        raise ValueError("diagnostic condition bound")
+    result["conditions"] = [{"type": enum(c.get("type"), {"Available", "Progressing", "ReplicaFailure"}),
+                             "status": enum(c.get("status"), {"True", "False", "Unknown"}),
+                             "reason": enum(c.get("reason"), {"MinimumReplicasUnavailable", "MinimumReplicasAvailable", "ReplicaSetUpdated", "NewReplicaSetAvailable", "ProgressDeadlineExceeded", "FailedCreate"})} for c in conditions]
+    for pod in pods:
+        status = pod.get("status", {})
+        states = status.get("containerStatuses", [])
+        conditions = status.get("conditions", [])
+        if not isinstance(states, list) or len(states) > 4 or not isinstance(conditions, list) or len(conditions) > 16:
+            raise ValueError("diagnostic container bound")
+        result["pods"].append({"phase": enum(status.get("phase"), {"Pending", "Running", "Succeeded", "Failed", "Unknown"}),
+            "conditions": [{"type": enum(c.get("type"), {"PodScheduled", "Initialized", "ContainersReady", "Ready"}),
+                            "status": enum(c.get("status"), {"True", "False", "Unknown"}),
+                            "reason": enum(c.get("reason"), {"Unschedulable", "ContainersNotReady", "PodInitializing", "SchedulingGated", "SchedulerError"})} for c in conditions],
+            "containers": [{"ready": c.get("ready") is True, "restarts": number(c.get("restartCount")),
+                "running": isinstance(c.get("state", {}).get("running"), dict),
+                "waiting": enum(c.get("state", {}).get("waiting", {}).get("reason"),
+                    {"ContainerCreating", "ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff", "CreateContainerConfigError", "CreateContainerError", "RunContainerError"}),
+                "exitCode": number(c.get("state", {}).get("terminated", {}).get("exitCode"))} for c in states]})
+    return result
+
+
 def validate_report(report, source, tree, run_id, attempt, render_hash):
     if (report.get("format") != "kanz-gateway-policy-transaction-proof-v1"
             or report.get("source") != source or report.get("tree") != tree
@@ -170,7 +205,17 @@ def run_fixture(artifact):
                     "spec": {"replicas": 1, "selector": {"matchLabels": {"app": name}},
                              "template": {"metadata": {"labels": {"app": name}}, "spec": template["spec"]}}}
                 k("create", "-f", "-", value=deployment)
-                k("-n", tx.NAMESPACE, "rollout", "status", "deployment/" + name, "--timeout=90s")
+                try:
+                    k("-n", tx.NAMESPACE, "rollout", "status", "deployment/" + name, "--timeout=90s")
+                except Exception:
+                    report["failedTarget"] = name
+                    try:
+                        d = json.loads(k("-n", tx.NAMESPACE, "get", "deployment", name, "-o", "json"))
+                        p = json.loads(k("-n", tx.NAMESPACE, "get", "pods", "-l", "app=" + name, "-o", "json"))["items"]
+                        report["deploymentDiagnostic"] = deployment_diagnostic(d, p)
+                    except Exception:
+                        report["deploymentDiagnostic"] = {"unavailable": True}
+                    raise
                 pods = json.loads(k("-n", tx.NAMESPACE, "get", "pods", "-l", "app=" + name, "-o", "json"))["items"]
                 if len(pods) != 1:
                     raise AssertionError("fixture deployment is not a singleton")
