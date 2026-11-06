@@ -18,13 +18,17 @@ BASE_FILES = {
 
 
 def verified_members(path):
-    if path.stat().st_size > 32 << 20:
-        raise ValueError('oversized OpenSSL archive')
-    with path.open('rb') as stream:
-        if hashlib.file_digest(stream, 'sha256').hexdigest() != ARCHIVE_SHA256:
-            raise ValueError('OpenSSL archive identity differs')
     expected = {name.replace('lib/julia/', 'lib/'): item for name, item in FILES.items()}
     expected['share/licenses/OpenSSL/LICENSE.txt'] = {'size': 10175, 'sha256': LICENSE_SHA256}
+    return verified_artifact(path, ARCHIVE_SHA256, expected)
+
+
+def verified_artifact(path, checksum, expected):
+    if path.stat().st_size > 32 << 20:
+        raise ValueError('oversized native artifact')
+    with path.open('rb') as stream:
+        if hashlib.file_digest(stream, 'sha256').hexdigest() != checksum:
+            raise ValueError('native artifact identity differs')
     found = {}
     # Never extract archive paths or follow their links on the host.
     with tarfile.open(path, 'r:gz') as archive:
@@ -32,11 +36,11 @@ def verified_members(path):
             if member.name not in expected:
                 continue
             if member.name in found or not member.isfile() or member.size != expected[member.name]['size']:
-                raise ValueError('ambiguous OpenSSL artifact member')
+                raise ValueError('ambiguous native artifact member')
             stream = archive.extractfile(member)
             found[member.name] = {'size': member.size, 'sha256': hashlib.file_digest(stream, 'sha256').hexdigest()}
     if found != expected:
-        raise ValueError('OpenSSL artifact members differ')
+        raise ValueError('native artifact members differ')
     return found
 
 

@@ -63,6 +63,8 @@ jobs:
           echo "JULIA_DEPOT_PATH=$RUNNER_TEMP/julia-depot" >> "$GITHUB_ENV"
           curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output "$RUNNER_TEMP/openssl.tar.gz" https://github.com/JuliaBinaryWrappers/OpenSSL_jll.jl/releases/download/OpenSSL-v3.5.9%2B0/OpenSSL.v3.5.9.x86_64-linux-gnu.tar.gz
           echo "8e2c75378726017fc66fb7fbbd10fb53522417c3e45a88af77b8853d46f2b063  $RUNNER_TEMP/openssl.tar.gz" | sha256sum --check --strict
+          curl --disable --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output "$RUNNER_TEMP/libcurl.tar.gz" https://github.com/JuliaBinaryWrappers/LibCURL_jll.jl/releases/download/LibCURL-v8.23.0%2B0/LibCURL.v8.23.0.x86_64-linux-gnu.tar.gz
+          bash kanz-jl/qualification/install-native-runtime.sh "$RUNNER_TEMP/julia-1.13.3" "$RUNNER_TEMP/julia.tar.gz" "$RUNNER_TEMP/openssl.tar.gz" "$RUNNER_TEMP/libcurl.tar.gz"
       - name: Instantiate the pinned environment and generate Julia contracts
         run: |
           julia --startup-file=no --history-file=no --project=kanz-jl -e 'using Pkg; Pkg.instantiate()'

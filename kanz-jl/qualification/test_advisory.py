@@ -1,3 +1,4 @@
+import test_curl as curl
 import test_openssl as ossl
 import copy
 import datetime as dt
@@ -140,6 +141,8 @@ class AdvisoryTests(unittest.TestCase):
             'uuid':'00000000-0000-0000-0000-'+str(i).zfill(12), 'version':'1.0.0'} for i in range(23)}}
         q['inventory']['nativeRuntime']['jll'].pop('Fixture0_jll')
         q['inventory']['nativeRuntime']['jll']['OpenSSL_jll'] = {'name':'OpenSSL_jll', 'uuid':jll.OPENSSL_UUID, 'version':'3.5.8+0'}
+        q['inventory']['nativeRuntime']['jll'].pop('Fixture1_jll')
+        q['inventory']['nativeRuntime']['jll']['LibCURL_jll'] = {'name':'LibCURL_jll', 'uuid':'deac9b47-8bc7-5906-a0fe-35ac56dc84c0', 'version':'8.22.0+0'}
         packages = jll.packages(q['inventory']['nativeRuntime'])
         report['jllAdvisory'] = {'registryCommit':jll.REGISTRY_COMMIT,'registrySHA256':jll.REGISTRY_SHA256,
             'packages':packages,'scannerManifestSHA256':a.hashlib.sha256(jll.manifest(packages)).hexdigest(),
@@ -151,6 +154,9 @@ class AdvisoryTests(unittest.TestCase):
         q['inventory']['nativeOpenSSL'] = ossl.component()
         q['inventory']['nativeRuntime']['files'].update(a.openssl_runtime.FILES)
         report['opensslAdvisory'] = ossl.fixture(now)
+        q['inventory']['nativeLibCURL'] = curl.component()
+        q['inventory']['nativeRuntime']['files'][a.curl_runtime.PATH] = a.curl_runtime.FILE
+        report['curlAdvisory'] = curl.fixture(now)
         report['nativeVersionMapping'] = mapping
         with patch.object(a.native_mapping, 'SOURCES', nm.SOURCES):
             a.validate_report(report,q,expected)
