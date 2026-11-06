@@ -1,16 +1,17 @@
 """Disposable Tokyo messaging policy qualification; no existing-context input."""
+import base64
 import copy
-from datetime import datetime, timezone
 import hashlib
 import importlib.util
-import ipaddress
+import io
 import json
 import os
 import re
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import secrets
 import subprocess
+import tarfile
 import tempfile
 import uuid
 
@@ -127,6 +128,53 @@ def runner_from_job(job):
     return result
 
 
+def restore_pod():
+    # Reuse the canonical recovery server/CLI/volumes rather than give the
+    # live bootstrap principal restore-upload permission it does not own.
+    text = (ROOT / 'tools/testnet-data-plane-recovery.sh').read_text()
+    for key, value in {'NATS_IMAGE': NATS, 'NATS_BOX_IMAGE': BOX}.items():
+        if f"readonly {key}='{value}'" not in text:
+            raise ValueError('canonical recovery image pin changed')
+    start = text.index('apiVersion: v1\nkind: Pod\nmetadata: { name: nats-restore,')
+    text = text[start:text.index('\nEOF', start)]
+    for key, value in {'DRILL_NS': 'kanz-recovery-drill', 'NATS_IMAGE': NATS, 'NATS_BOX_IMAGE': BOX}.items():
+        text = text.replace('${' + key + '}', value)
+    if '${' in text:
+        raise ValueError('unexpected recovery recipe variable')
+    pod = yaml.safe_load(text)
+    pod['spec']['automountServiceAccountToken'] = False
+    # The actual recovery command uses loopback. Restrict this disposable
+    # server's listener to that interface as well; no canonical broker changes.
+    pod['spec']['containers'][0]['args'].append('--addr=127.0.0.1')
+    pod['spec']['containers'][0]['readinessProbe'] = {'exec': {'command': ['sh', '-ceu',
+        'wget -qO- http://127.0.0.1:8222/healthz >/dev/null']}, 'periodSeconds': 1}
+    feed.pin_images(pod)
+    return pod
+
+
+def checked_backup(encoded):
+    if len(encoded) > 12 << 20:
+        raise ValueError('backup transfer exceeds bound')
+    raw = base64.b64decode(''.join(encoded.split()), validate=True)
+    if len(raw) > 8 << 20:
+        raise ValueError('backup exceeds bound')
+    names, total = set(), 0
+    with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as archive:
+        for member in archive:
+            path = PurePosixPath(member.name)
+            if (path.is_absolute() or '..' in path.parts or '\\' in member.name or not path.parts
+                    or path.parts[0] != 'fixture-backup' or member.name.rstrip('/') != str(path) or member.name in names
+                    or not (member.isdir() or member.isfile()) or len(names) >= 4096):
+                raise ValueError('unsafe backup archive member')
+            names.add(member.name)
+            total += member.size
+            if total > 8 << 20:
+                raise ValueError('expanded backup exceeds bound')
+    if not any(name.endswith('/backup.json') for name in names):
+        raise ValueError('backup manifest absent')
+    return base64.b64encode(raw).decode('ascii')
+
+
 def nats_failure(stdout, stderr):
     # Closed categories only: never return raw diagnostics, upload subjects,
     # certificate paths or payloads. Unrecognized failures stay failures.
@@ -155,17 +203,6 @@ def tool_version(output):
     return matches[0]
 
 
-def restore_publish_denied(logs, address):
-    ipaddress.ip_address(address)
-    if len(logs) > 65536:
-        return False
-    # Exact server2.14.5 client.go pubPermissionViolation log, with the
-    # contemporaneous backup Pod address. Raw lines never leave this function.
-    pattern = (r'(?<![0-9.])' + re.escape(address) + r':\d+ - cid:\d+ - '
-               r'Publish Violation - Subject "\$JS\.SNAPSHOT\.RESTORE\.[A-Za-z0-9_-]+\.[A-Za-z0-9]+"')
-    return any(re.search(pattern, line) for line in logs.splitlines())
-
-
 def validate_report(report, source):
     required = {'baseline-unlabelled', 'baseline-redis', 'baseline-monitor', 'trap-control', 'bootstrap', 'nats-publish', 'ungranted-identity', 'backup-restore', 'redis-claim',
                 'unlabelled-nats', 'unlabelled-redis', 'wrong-namespace-nats', 'wrong-namespace-redis',
@@ -177,6 +214,7 @@ def validate_report(report, source):
             or report.get('cleanupPassed') is not True or set(report.get('cases', [])) != required
             or report.get('policyNames') != sorted(p['metadata']['name'] for p in policies)
             or report.get('policyCount') != len(policies)
+            or report.get('restoreMode') != 'canonical-isolated-loopback'
             or report.get('policySHA256') != hashlib.sha256((HERE / 'policies.yaml').read_bytes()).hexdigest()
             or len(report['cases']) != len(required)):
         raise ValueError('incomplete messaging qualification')
@@ -212,6 +250,12 @@ def main():
         try:
             report['sourceSHA'] = feed.command(['git', 'rev-parse', 'HEAD'])
             feed.command(['git', 'diff', '--quiet', 'HEAD', '--'])
+            images = docs('kanz/infra/overlays/testnet-tokyo/data/kustomization.yaml')[0]['images']
+            for image in (NATS, BOX, REDIS):
+                repository, digest = image.split('@')
+                matches = [item for item in images if item['name'] == repository]
+                if len(matches) != 1 or matches[0].get('newName') != repository or matches[0].get('digest') != digest:
+                    raise ValueError('canonical Tokyo image pin changed')
             report['policySHA256'] = hashlib.sha256((HERE / 'policies.yaml').read_bytes()).hexdigest()
             report['stage'] = 'create enforcing cluster'
             feed.create_enforcing_cluster(name, scratch)
@@ -304,25 +348,15 @@ def main():
             k('-n', 'kanz-services', 'exec', 'nats-client', '-c', 'bootstrap', '--',
               'nats', 'pub', '--jetstream', 'audit.authority.decision', '{"fixture":true}')
             report['cases'].append('nats-publish')
-            # Restore into this disposable account after removing its streams.
-            # This proves the backup runner's network/identity path, not a new
-            # cluster, S3/KMS custody, or the production recovery orchestrator.
+            # Preserve canonical source ACLs. The existing recovery mechanism
+            # restores into a separate isolated server through its local CLI.
             report['stage'] = 'backup-restore'
-            backup_ip = k('-n', 'kanz-messaging', 'get', 'pod/nats-backup-runner', '-o', 'jsonpath={.status.podIP}')
-            ipaddress.ip_address(backup_ip)
             def nats(*args):
-                started = datetime.now(timezone.utc).isoformat()
                 result = subprocess.run(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name,
                     '-n', 'kanz-messaging', 'exec', 'nats-backup-runner', '-c', 'bootstrap', '--', 'nats', *args],
                     capture_output=True, text=True, timeout=300, cwd=ROOT)
                 if result.returncode:
                     report['natsFailure'] = nats_failure(result.stdout, result.stderr)
-                    if args[:2] == ('account', 'restore'):
-                        logs = k('-n', 'kanz-messaging', 'logs', 'nats-0', '-c', 'nats',
-                                 '--since-time=' + started, '--tail=100', '--limit-bytes=65536')
-                        report['brokerRestoreUploadDenied'] = restore_publish_denied(logs, backup_ip)
-                        if report['brokerRestoreUploadDenied']:
-                            report['natsFailure'] = 'restore_upload_permission_denied'
                     raise RuntimeError('NATS CLI operation refused; sanitized category recorded')
                 return result.stdout.strip()
 
@@ -330,15 +364,15 @@ def main():
                                   ('cli', nats('--version'))]:
                 report[tool + 'Version'] = tool_version(version)
 
-            def stream_inventory():
-                names = json.loads(nats('stream', 'ls', '--json', '--all'))
+            def stream_inventory(client=nats):
+                names = json.loads(client('stream', 'ls', '--json', '--all'))
                 if not isinstance(names, list) or not 1 <= len(names) <= 128 or len(set(names)) != len(names):
                     raise ValueError('invalid disposable stream inventory')
                 result = {}
                 for stream in names:
                     if not isinstance(stream, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', stream):
                         raise ValueError('invalid disposable stream name')
-                    info = json.loads(nats('stream', 'info', stream, '--json'))
+                    info = json.loads(client('stream', 'info', stream, '--json'))
                     state = info['state']
                     result[stream] = {'config': info['config'], 'state': {key: state[key] for key in
                         ('messages', 'bytes', 'first_seq', 'last_seq', 'consumer_count')}}
@@ -348,15 +382,29 @@ def main():
             if before['AUTHORITY_AUDIT']['state']['messages'] != 1:
                 raise ValueError('missing acknowledged synthetic record')
             nats('account', 'backup', '--check', '--critical-warnings', '--force', '/tmp/fixture-backup')
-            for stream in before:
-                nats('stream', 'rm', stream, '--force')
-            if json.loads(nats('stream', 'ls', '--json', '--all')) not in (None, []):
-                raise ValueError('disposable account not empty before restore')
-            nats('account', 'restore', '/tmp/fixture-backup')
-            if stream_inventory() != before:
+            encoded = k('-n', 'kanz-messaging', 'exec', 'nats-backup-runner', '-c', 'bootstrap', '--',
+                        'sh', '-ceu', 'set -o pipefail; tar -C /tmp -czf - fixture-backup | base64')
+            transfer = checked_backup(encoded)
+            apply([{'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'kanz-recovery-drill'}},
+                   {'apiVersion': 'networking.k8s.io/v1', 'kind': 'NetworkPolicy',
+                    'metadata': {'name': 'default-deny', 'namespace': 'kanz-recovery-drill'},
+                    'spec': {'podSelector': {}, 'policyTypes': ['Ingress', 'Egress']}}, restore_pod()])
+            ready('kanz-recovery-drill', 'pod/nats-restore')
+
+            def restored(*args):
+                return k('-n', 'kanz-recovery-drill', 'exec', 'nats-restore', '-c', 'restore', '--',
+                         'nats', '--server', 'nats://127.0.0.1:4222', *args)
+
+            if json.loads(restored('stream', 'ls', '--json', '--all')) not in (None, []):
+                raise ValueError('fresh recovery server is not empty')
+            k('-n', 'kanz-recovery-drill', 'exec', '-i', 'nats-restore', '-c', 'restore', '--', 'sh', '-ceu',
+              'set -o pipefail; base64 -d | tar -C /restore -xzf -', data=transfer)
+            restored('account', 'restore', '/restore/fixture-backup')
+            if stream_inventory(restored) != before or stream_inventory() != before:
                 raise ValueError('restored account differs')
-            if nats('stream', 'get', 'AUTHORITY_AUDIT', '1', '--raw') != '{"fixture":true}':
+            if restored('stream', 'get', 'AUTHORITY_AUDIT', '1', '--raw') != '{"fixture":true}':
                 raise ValueError('restored synthetic record differs')
+            report['restoreMode'] = 'canonical-isolated-loopback'
             report['cases'].append('backup-restore')
             case('redis-claim', 'kanz-services', 'gateway-probe', REDIS_CLAIM)
             # Verify persisted claim after restarting Redis within the same owned Pod/volume.

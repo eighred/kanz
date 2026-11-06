@@ -4,6 +4,7 @@ on:
     paths:
       - 'tools/tokyo-messaging-proof/**'
       - 'tools/feed-identity/**'
+      - 'tools/testnet-data-plane-recovery.sh'
       - 'kanz/infra/nats/**'
       - 'kanz/infra/security/spire/**'
       - 'kanz/infra/overlays/testnet-tokyo/**'
@@ -13,6 +14,7 @@ on:
     paths:
       - 'tools/tokyo-messaging-proof/**'
       - 'tools/feed-identity/**'
+      - 'tools/testnet-data-plane-recovery.sh'
       - 'kanz/infra/nats/**'
       - 'kanz/infra/security/spire/**'
       - 'kanz/infra/overlays/testnet-tokyo/**'

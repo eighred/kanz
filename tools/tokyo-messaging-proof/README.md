@@ -28,9 +28,14 @@ context input. It loads canonical Tokyo NATS configuration, tenancy and bootstra
 then proves real mTLS publication with the web-bff identity and explicit broker
 authorization refusal for an issued, ungranted identity with the same app label.
 Synthetic data alone
-is used. Account backup is followed by deletion of streams in this disposable
-account and exact restored configuration/count/record comparison. This is logical
-restore in the same disposable server, not a fresh-cluster disaster recovery test.
+is used. Account backup runs under the unchanged bootstrap identity. The fixture
+extracts the canonical `nats-restore` server/CLI recipe from the recovery script,
+uses a separate default-denied namespace with no service token or source identity,
+and restores through loopback into an initially empty broker. Its listener is
+additionally restricted to loopback. A bounded regular-file archive transfer and
+exact restored configuration/count/record comparison are required; the source
+inventory must remain unchanged. This does not grant bootstrap same-account
+restore authority, qualify S3/KMS custody, or run the full recovery orchestrator.
 Authenticated Redis duplicate claims must survive an actual container restart on
 its owned emptyDir. Network tests require three timeout observations for denied
 peers, positive baseline controls, an actual Prometheus scrape and healthy final

@@ -1,5 +1,8 @@
 import copy
+import base64
 import hashlib
+import io
+import tarfile
 import unittest
 import proof
 
@@ -16,12 +19,32 @@ def workflow_boundary(workflow):
 
 
 class MessagingTests(unittest.TestCase):
-    def test_broker_refusal_projection_binds_source_and_subject(self):
-        line = '[1] 2026/11/06 [ERR] 10.1.2.3:43210 - cid:29 - Publish Violation - Subject "$JS.SNAPSHOT.RESTORE.TEST.abcdef"'
-        self.assertTrue(proof.restore_publish_denied(line, '10.1.2.3'))
-        for changed in (line.replace('10.1.2.3', '10.1.2.4'), line.replace('RESTORE', 'OTHER'),
-                        line.replace('Publish Violation', 'Timeout'), 'x' * 65537 + line):
-            self.assertFalse(proof.restore_publish_denied(changed, '10.1.2.3'))
+    def test_restore_reuses_canonical_isolated_recipe(self):
+        pod = proof.restore_pod()
+        self.assertEqual(pod['metadata'], {'name': 'nats-restore', 'namespace': 'kanz-recovery-drill', 'labels': {'app': 'nats-restore'}})
+        self.assertFalse(pod['spec']['automountServiceAccountToken'])
+        self.assertEqual([c['image'] for c in pod['spec']['containers']], [proof.NATS, proof.BOX])
+        self.assertIn('--addr=127.0.0.1', pod['spec']['containers'][0]['args'])
+        self.assertTrue(all('emptyDir' in volume for volume in pod['spec']['volumes']))
+        self.assertFalse(any('secret' in volume or 'csi' in volume for volume in pod['spec']['volumes']))
+
+    def test_backup_archive_requires_bounded_regular_owned_paths(self):
+        def archive(name='fixture-backup/TEST/backup.json', kind=tarfile.REGTYPE, size=2):
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode='w:gz') as tar:
+                item = tarfile.TarInfo(name)
+                item.type = kind
+                item.linkname = 'outside'
+                item.size = size if kind == tarfile.REGTYPE else 0
+                tar.addfile(item, io.BytesIO(b'{}' + b' ' * max(0, size - 2)))
+            return base64.b64encode(buf.getvalue()).decode()
+        encoded = archive()
+        self.assertEqual(proof.checked_backup(encoded), encoded)
+        for encoded in (archive('../escape'), archive('/absolute'), archive('fixture-backup/../escape'),
+                        archive('fixture-backup//TEST/backup.json'), archive(kind=tarfile.SYMTYPE),
+                        archive(kind=tarfile.LNKTYPE), archive(size=(8 << 20) + 1), 'invalid!'):
+            with self.assertRaises((ValueError, proof.base64.binascii.Error)):
+                proof.checked_backup(encoded)
 
     def test_v_prefixed_tool_versions(self):
         for output in ('nats-server: v2.12.6', 'v2.12.6', '2.12.6'):
@@ -113,6 +136,7 @@ class MessagingTests(unittest.TestCase):
     def test_complete_report_and_security_mutations(self):
         source = 'a' * 40
         report = {'sourceSHA': source, 'passed': True, 'cleanupPassed': True, 'developmentOnly': True,
+                  'restoreMode': 'canonical-isolated-loopback',
                   'policyCount': 4,
                   'policyNames': sorted(p['metadata']['name'] for p in proof.staged_policies()),
                   'policySHA256': hashlib.sha256((proof.HERE / 'policies.yaml').read_bytes()).hexdigest(),
@@ -124,6 +148,7 @@ class MessagingTests(unittest.TestCase):
         proof.validate_report(report, source)
         for field, value in [('sourceSHA', 'b' * 40), ('passed', False), ('cleanupPassed', False),
                              ('developmentOnly', False), ('policyCount', 5), ('policySHA256', '0' * 64),
+                             ('restoreMode', 'same-account'),
                              ('policyNames', report['policyNames'] + ['unreviewed']),
                              ('cases', report['cases'] + ['bootstrap'])]:
             with self.subTest(field=field):
