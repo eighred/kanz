@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "examples/fixture.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/fee_wire.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -124,6 +124,19 @@ func checkRustOMSStoreBoundary(root string) error {
 			return fmt.Errorf("query boundary missing %s", marker)
 		}
 	}
+	if strings.Count(found["src/fee_wire.rs"], `raw.len()>MAX_BYTES`) != 2 {
+		return fmt.Errorf("fee input/output bounds required")
+	}
+	for file, markers := range map[string][]string{
+		"src/fee_wire.rs":    {`FileDescriptorSet::decode(FILE_DESCRIPTOR_SET)`, `raw.len()>MAX_BYTES`, `self.value==other.value&&self.unknown.equivalent(&other.unknown)`, `grouped(&self.raw)!=grouped(&other.raw)`, `self.raw.extend(other.raw)`, `Type::Sint64|Type::Sint32`, `f.label()!=prost_types::field_descriptor_proto::Label::Optional`, `!d.oneof_decl.is_empty()`, `unknown.children.entry(n).or_default().merge(sidecar)`, `stored.extend(&raw[value_start..pos])`, `original:raw.to_vec()`},
+		"src/fee_subject.rs": {`SPACE.binary_search`, `LOWER.binary_search_by_key`, `for scalar in 0..=0x10ffff`},
+	} {
+		for _, marker := range markers {
+			if !strings.Contains(found[file], rustMigrationCompact(marker)) {
+				return fmt.Errorf("fee compatibility missing %s", marker)
+			}
+		}
+	}
 	for file, markers := range map[string][]string{
 		"src/lib.rs":          {`iftenant.is_empty()||tenant.len()>256`, `client.transaction().await?`, `set_config('app.tenant_id',$1,true)`, `rolsuper,rolbypassrls`, `relrowsecurityANDrelforcerowsecurity`, `tables.get::<_,i64>(0)!=5`, `WHEREorders.version=$4`, `ONCONFLICT(tenant_id,fill_id)DONOTHING`, `duplicate(&tx,fill.as_ref().map(|f|&f.0)).await?`, `same_except_fee(&original,&revised)`, `ORDERBYrevision_sequenceDESCLIMIT1`, `producer_serviceISNULL`, `tx.commit().await.map_err(|_|Error::CommitUnconfirmed)?`, `&state`, `&r.payload`, `fill_wire(&r.payload)?`},
 		"examples/fixture.rs": {`config.get_hostaddrs().is_empty()`, `s=="127.0.0.1"||s=="localhost"||s=="::1"`, `if!local_config(&config)`, `Duration::from_secs(20)`, `option_env!("KANZ_BUILD_VERSION")`, `std::io::stdin().take(2*1024*1024+1)`, `input.schema.starts_with("oms_store_")`},
@@ -144,7 +157,7 @@ func TestRustOMSStoreBoundary(t *testing.T) {
 }
 
 func checkRustOMSStoreEvidence(workflow, checker string) error {
-	for _, marker := range []string{"TestRustRepositoryQueries/", "list-status-parent-exact", "portfolio-page-count-backfill", "tenant-same-ids", "corruption-capacity-no-prefix", "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result", "TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
+	for _, marker := range []string{"TestPinnedGoUnicodeTable", "TestRustFeeUnicodeCompatibility", "TestRustFeeWireCompatibility/", "TestRustFeeWireRefusals/", "unknown-value-encoding", "duplicate-embedded-unknown", "known-wrong-wire-is-unknown", "TestRustRepositoryQueries/", "list-status-parent-exact", "portfolio-page-count-backfill", "tenant-same-ids", "corruption-capacity-no-prefix", "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result", "TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
 		if !strings.Contains(checker, marker) {
 			return fmt.Errorf("missing lifecycle proof %s", marker)
 		}
@@ -192,6 +205,10 @@ func TestRustOMSStoreBoundaryMutations(t *testing.T) {
 	for _, tc := range []struct{ file, from, to string }{
 		{"src/queries.rs", "parent_order_id=$1 AND parent_order_id<>''", "parent_order_id=$1"},
 		{"src/queries.rs", "rows.len() > MAX_ROWS", "false"},
+		{"src/fee_wire.rs", "self.unknown.equivalent(&other.unknown)", "true"},
+		{"src/fee_wire.rs", "stored.extend(&raw[value_start..pos])", "stored.clear()"},
+		{"src/fee_wire.rs", "raw.len() > MAX_BYTES", "false"},
+		{"src/fee_subject.rs", "LOWER.binary_search_by_key", "SPACE.binary_search_by_key"},
 		{"src/queries.rs", "sum(octet_length(state)) OVER ()<=$1", "true"},
 		{"src/queries.rs", "total > MAX_BYTES", "false"},
 		{"src/queries.rs", "status=ANY($1)", "true"},

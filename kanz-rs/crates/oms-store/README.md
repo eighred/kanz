@@ -99,3 +99,22 @@ statement, matching the actual Go implementation: it is not a simultaneous
 snapshot of the page. Queries add no admission or recovery authority. The query
 qualification compares actual Rust reads with Go and raw bytes, tenant isolation,
 capacity/corruption refusals, and selective plans using existing indexes.
+
+Fee-journal compatibility prerequisites are separate from fee posting. `FillWire`
+uses the canonical descriptor set and generated Fill for known-field semantics,
+and retains unknown fields recursively. Go's decoder normalizes an unknown outer
+tag but retains its value bytes; equality groups those bytes by field number,
+preserving occurrence order for the same number. Journal encoding emits known
+fields deterministically and retained unknown values at each message end. The
+original input bytes remain available separately. Inputs/outputs are capped at
+1 MiB; unknown-group parsing is iterative with Go's 10,001-group boundary.
+The current reachable Fill descriptor graph must remain singular, without
+oneofs/maps/extensions or floating-point fields; unsupported schema drift refuses.
+
+Principal normalization uses tables generated from the pinned Go Unicode package,
+not Rust full lowercase. CI regenerates the tables byte-for-byte and compares
+normalization of every Unicode scalar with Go through the stamped fixture.
+This is compatibility data, not authentication, approval or a second policy.
+These helpers do not append fee revisions, compute fee deltas, authorize a
+correction, or commit transactions. Those operations still need their complete
+caller-owned transaction and independent financial proof.

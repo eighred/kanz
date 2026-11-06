@@ -1,7 +1,9 @@
 //! Disposable test adapter only. No service, production configuration or release image.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use kanz_oms_fold_shadow::proto::order::v1::Fill;
-use kanz_oms_store::{applied_fills, create, identity, load, queries, save, Record};
+use kanz_oms_store::{
+    applied_fills, create, fee_subject, fee_wire::FillWire, identity, load, queries, save, Record,
+};
 use prost::Message;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -86,6 +88,29 @@ fn record(r: Fact) -> Result<Record, ()> {
     })
 }
 async fn run(input: Input) -> Result<Value, ()> {
+    if input.mode == "fee-wire" {
+        let raw = bytes(&input.fill)?;
+        let other = bytes(&input.other)?;
+        let result = (|| {
+            let a = FillWire::decode(&raw)?;
+            let b = FillWire::decode(&other)?;
+            Ok::<_, kanz_oms_store::Error>((a.equivalent(&b), a.journal_bytes()?))
+        })();
+        return Ok(match result {
+            Ok((same, canonical)) => {
+                json!({"status":same.to_string(),"state":STANDARD.encode(canonical)})
+            }
+            Err(e) => json!({"status":e.to_string()}),
+        });
+    }
+    if input.mode == "fee-subject" {
+        return Ok(
+            json!({"status":fee_subject::normalize(&input.fill),"state":STANDARD.encode(fee_subject::normalize(&input.other))}),
+        );
+    }
+    if input.mode == "fee-unicode" {
+        return Ok(json!({"status":fee_subject::scalar_digest()}));
+    }
     if input.mode == "identity" {
         let fill = Fill::decode(bytes(&input.fill)?.as_slice()).map_err(|_| ())?;
         return Ok(json!({"status":identity::execution_key(&fill)}));
