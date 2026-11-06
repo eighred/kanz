@@ -108,6 +108,14 @@ func checkRustOMSStoreBoundary(root string) error {
 	if len(found) != len(allowed) {
 		return fmt.Errorf("missing store source")
 	}
+	if strings.Count(found["src/lib.rs"], `scoped(client,tenant).await?`) != 4 || strings.Count(found["src/lib.rs"], `enqueue(&tx,records).await?`) != 2 || strings.Count(found["src/lib.rs"], `commit(tx).await`) != 2 {
+		return fmt.Errorf("repository owners must reuse scope/outbox/commit")
+	}
+	for _, marker := range []string{`ONCONFLICT(tenant_id,order_id)DONOTHING`, `returnErr(Error::Exists)`, `SELECTCASEWHENoctet_length(state)::bigint<=$2THENstateEND,versionFROMordersWHEREorder_id=$1`, `ok_or(Error::NotFound)?`, `COALESCE(NULLIF(raw_fill_id,''),fill_id)`, `LIMIT100001`, `sum(octet_length(id))OVER()<=$2THENidEND`, `&(MAX_BYTESasi64)`, `rows.len()>100000`, `total>MAX_BYTES`, `row.try_get::<_,Option<String>>(0)?.ok_or(Error::Capacity)?`, `tx.rollback().await?;Ok(claims)`} {
+		if !strings.Contains(found["src/lib.rs"], marker) {
+			return fmt.Errorf("repository lifecycle missing %s", marker)
+		}
+	}
 	for file, markers := range map[string][]string{
 		"src/lib.rs":          {`iftenant.is_empty()||tenant.len()>256`, `client.transaction().await?`, `set_config('app.tenant_id',$1,true)`, `rolsuper,rolbypassrls`, `relrowsecurityANDrelforcerowsecurity`, `tables.get::<_,i64>(0)!=5`, `WHEREorders.version=$4`, `ONCONFLICT(tenant_id,fill_id)DONOTHING`, `duplicate(&tx,fill.as_ref().map(|f|&f.0)).await?`, `same_except_fee(&original,&revised)`, `ORDERBYrevision_sequenceDESCLIMIT1`, `producer_serviceISNULL`, `tx.commit().await.map_err(|_|Error::CommitUnconfirmed)?`, `&state`, `&r.payload`, `fill_wire(&r.payload)?`},
 		"examples/fixture.rs": {`config.get_hostaddrs().is_empty()`, `s=="127.0.0.1"||s=="localhost"||s=="::1"`, `if!local_config(&config)`, `Duration::from_secs(20)`, `option_env!("KANZ_BUILD_VERSION")`, `std::io::stdin().take(2*1024*1024+1)`, `input.schema.starts_with("oms_store_")`},
@@ -128,6 +136,11 @@ func TestRustOMSStoreBoundary(t *testing.T) {
 }
 
 func checkRustOMSStoreEvidence(workflow, checker string) error {
+	for _, marker := range []string{"TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
+		if !strings.Contains(checker, marker) {
+			return fmt.Errorf("missing lifecycle proof %s", marker)
+		}
+	}
 	for _, marker := range []string{"cargo test --locked -p kanz-oms-store --all-targets", "cargo clippy --locked -p kanz-oms-store --all-targets -- -D warnings", "cargo build --locked -p kanz-oms-store --example fixture", "KANZ_OMS_STORE_BIN:", "KANZ_OMS_STORE_VERSION:", "./services/oms/tools/store-conformance", "go test -race -p 1", "check_oms_fold_evidence.py"} {
 		if !strings.Contains(workflow, marker) {
 			return fmt.Errorf("missing Rust SQL execution gate: %s", marker)
@@ -169,6 +182,13 @@ func TestRustOMSStoreEvidenceAndMutations(t *testing.T) {
 func TestRustOMSStoreBoundaryMutations(t *testing.T) {
 	source := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
 	for _, tc := range []struct{ file, from, to string }{
+		{"src/lib.rs", "ON CONFLICT (tenant_id,order_id) DO NOTHING", "ON CONFLICT (tenant_id,order_id) DO UPDATE SET state=EXCLUDED.state"},
+		{"src/lib.rs", "END,version FROM orders WHERE order_id=$1", "END,0 FROM orders WHERE order_id=$1"},
+		{"src/lib.rs", "COALESCE(NULLIF(raw_fill_id,''),fill_id)", "fill_id"},
+		{"src/lib.rs", "rows.len() > 100000", "false"},
+		{"src/lib.rs", "octet_length(state)::bigint<=$2", "true"},
+		{"src/lib.rs", "sum(octet_length(id)) OVER ()<=$2", "true"},
+		{"src/lib.rs", ".try_get::<_, Option<String>>(0)?", ".try_get::<_, Option<String>>(1)?"},
 		{"src/lib.rs", "tenant.is_empty()", "false"}, {"src/lib.rs", "set_config('app.tenant_id',$1,true)", "set_config('app.tenant_id',$1,false)"},
 		{"src/lib.rs", "relrowsecurity AND relforcerowsecurity", "relrowsecurity"}, {"src/lib.rs", "WHERE orders.version=$4", "WHERE true"},
 		{"src/lib.rs", "Error::CommitUnconfirmed", "Error::Database"}, {"src/lib.rs", "same_except_fee(&original, &revised)", "true"},

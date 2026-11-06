@@ -1,9 +1,10 @@
 //! Disposable test adapter only. No service, production configuration or release image.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use kanz_oms_fold_shadow::proto::order::v1::Fill;
-use kanz_oms_store::{identity, save, Record};
+use kanz_oms_store::{applied_fills, create, identity, load, save, Record};
 use prost::Message;
 use serde::Deserialize;
+use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
     time::{Duration, UNIX_EPOCH},
@@ -14,6 +15,8 @@ use tokio_postgres::{config::Host, NoTls};
 #[serde(deny_unknown_fields)]
 struct Input {
     mode: String,
+    #[serde(default)]
+    order_id: String,
     #[serde(default)]
     tenant: String,
     #[serde(default)]
@@ -74,18 +77,20 @@ fn record(r: Fact) -> Result<Record, ()> {
         payload: bytes(&r.payload)?,
     })
 }
-async fn run(input: Input) -> Result<String, ()> {
+async fn run(input: Input) -> Result<Value, ()> {
     if input.mode == "identity" {
         let fill = Fill::decode(bytes(&input.fill)?.as_slice()).map_err(|_| ())?;
-        return Ok(identity::execution_key(&fill));
+        return Ok(json!({"status":identity::execution_key(&fill)}));
     }
     if input.mode == "same" {
         let a = Fill::decode(bytes(&input.fill)?.as_slice()).map_err(|_| ())?;
         let b = Fill::decode(bytes(&input.other)?.as_slice()).map_err(|_| ())?;
-        return Ok(identity::same_execution(&a, &b).to_string());
+        return Ok(json!({"status":identity::same_execution(&a, &b).to_string()}));
     }
-    if input.mode != "save"
-        || !input.schema.starts_with("oms_store_")
+    if !matches!(
+        input.mode.as_str(),
+        "save" | "create" | "load" | "applied-fills"
+    ) || !input.schema.starts_with("oms_store_")
         || input.schema.len() > 63
         || !input
             .schema
@@ -111,26 +116,22 @@ async fn run(input: Input) -> Result<String, ()> {
             )
             .await
             .map_err(|_| ())?;
-        let records = input
-            .records
-            .into_iter()
-            .map(record)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(
-            match save(
-                &mut client,
-                &input.tenant,
-                &bytes(&input.state)?,
-                input.expected_version,
-                &records,
-                &input.fill_id,
-            )
-            .await
-            {
-                Ok(()) => "committed".into(),
-                Err(e) => e.to_string(),
-            },
-        )
+        if input.mode=="load" {
+            return Ok(match load(&mut client,&input.tenant,&input.order_id).await {
+                Ok(row)=>json!({"status":"loaded","state":STANDARD.encode(&row.state),"db_version":row.version}),
+                Err(e)=>json!({"status":e.to_string()}),
+            });
+        }
+        if input.mode=="applied-fills" {
+            return Ok(match applied_fills(&mut client,&input.tenant,&input.order_id).await {
+                Ok(claims)=>json!({"status":"claims","claims":claims}),Err(e)=>json!({"status":e.to_string()}),
+            });
+        }
+        let records=input.records.into_iter().map(record).collect::<Result<Vec<_>,_>>()?;
+        let state=bytes(&input.state)?;
+        let result=if input.mode=="create" {create(&mut client,&input.tenant,&state,&records).await}
+            else {save(&mut client,&input.tenant,&state,input.expected_version,&records,&input.fill_id).await};
+        Ok(json!({"status":match result {Ok(())=>"committed".into(),Err(e)=>e.to_string()}}))
     }
     .await;
     drop(client);
@@ -164,12 +165,16 @@ async fn main() {
             return Err(());
         }
         let input = serde_json::from_slice(&raw).map_err(|_| ())?;
-        let status = tokio::time::timeout(Duration::from_secs(20), run(input))
+        let mut output = tokio::time::timeout(Duration::from_secs(20), run(input))
             .await
             .map_err(|_| ())??;
-        let output = serde_json::json!({"status":status,"version":version});
+        output["version"] = json!(version);
+        let encoded = output.to_string();
+        if encoded.len() > 2 * 1024 * 1024 {
+            return Err(());
+        }
         std::io::stdout()
-            .write_all(output.to_string().as_bytes())
+            .write_all(encoded.as_bytes())
             .map_err(|_| ())
     }
     .await;
