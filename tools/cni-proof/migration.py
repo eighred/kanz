@@ -39,6 +39,29 @@ def validate_name(name):
         raise proof.ProofError("invalid_disposable_name")
 
 
+def runtime_diagnostic(message):
+    # Kubernetes runtime messages can include paths or credentials. Export only
+    # a fixed category; never copy a message, substring, or arbitrary mount path.
+    if not isinstance(message, str) or len(message) > 4096:
+        return "unknown"
+    value = message.lower()
+    if "not a shared or slave mount" in value or "not a shared mount" in value:
+        for path, category in (("/sys/fs/bpf", "bpffs_not_shared"),
+                               ("/run/cilium/cgroupv2", "cgroup_not_shared"),
+                               ("/run/cilium/netns", "netns_not_shared")):
+            if path in value:
+                return category
+        return "mount_not_shared"
+    for marker, category in (("apparmor", "apparmor_refused"),
+                             ("seccomp", "seccomp_refused"),
+                             ("read-only file system", "read_only_filesystem"),
+                             ("permission denied", "permission_denied"),
+                             ("operation not permitted", "operation_not_permitted")):
+        if marker in value:
+            return category
+    return "unknown"
+
+
 def mount_inventory(raw):
     result = {}
     for line in raw.splitlines():
@@ -282,6 +305,7 @@ class Fixture:
                 detail = state.get("waiting", state.get("terminated", {}))
                 states.append({"name": item.get("name") if item.get("name") in names else "Other",
                                "reason": detail.get("reason") if detail.get("reason") in allowed else "Other",
+                               "diagnostic": runtime_diagnostic(detail.get("message")),
                                "running": "running" in state, "ready": item.get("ready") is True,
                                "exitCode": detail.get("exitCode") if isinstance(detail.get("exitCode"), int) else None})
             result.append(states)

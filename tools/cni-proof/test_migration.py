@@ -141,7 +141,22 @@ class MigrationTests(unittest.TestCase):
             "initContainerStatuses": [{"name": "unexpected-private-value", "state": {
                 "terminated": {"reason": "unexpected-private-value", "message": "not-retained", "exitCode": 7}}}]}}]}
         with patch.object(f, "k", return_value=json.dumps(value)):
-            self.assertEqual(f.cilium_diagnostic(), [[{"name": "Other", "reason": "Other", "exitCode": 7, "running": False, "ready": False}]])
+            self.assertEqual(f.cilium_diagnostic(), [[{"name": "Other", "reason": "Other", "diagnostic": "unknown", "exitCode": 7, "running": False, "ready": False}]])
+
+    def test_runtime_diagnostic_is_bounded_closed_projection(self):
+        cases = ((None, "unknown"), ({"token": "private"}, "unknown"),
+                 ("private-token", "unknown"), ("apparmor" + "x" * 4096, "unknown"),
+                 ("path /sys/fs/bpf is not a shared mount: private", "bpffs_not_shared"),
+                 ("path /run/cilium/cgroupv2 is not a shared or slave mount: private", "cgroup_not_shared"),
+                 ("path /var/run/cilium/netns is not a shared mount: private", "netns_not_shared"),
+                 ("path /private is not a shared mount", "mount_not_shared"),
+                 ("AppArmor profile private refused", "apparmor_refused"),
+                 ("seccomp private refused", "seccomp_refused"),
+                 ("private: read-only file system", "read_only_filesystem"),
+                 ("private: permission denied", "permission_denied"),
+                 ("private: operation not permitted", "operation_not_permitted"))
+        for message, expected in cases:
+            self.assertEqual(migration.runtime_diagnostic(message), expected)
 
 
 if __name__ == "__main__":
