@@ -15,12 +15,13 @@ func checkGoShardMatrix(data []byte) error {
 		Jobs map[string]struct {
 			Strategy struct {
 				FailFast *bool `yaml:"fail-fast"`
-				Matrix   struct{ Shard []int }
+				Matrix   map[string]any
 			}
 			Needs any
 			If    string
 			Steps []struct {
 				Name, Run, If, Uses string
+				ContinueOnError     bool `yaml:"continue-on-error"`
 				With                map[string]string
 				Env                 map[string]string
 			}
@@ -30,17 +31,78 @@ func checkGoShardMatrix(data []byte) error {
 		return err
 	}
 	race := workflow.Jobs["go-race"]
-	if race.Strategy.FailFast == nil || *race.Strategy.FailFast || !reflect.DeepEqual(race.Strategy.Matrix.Shard, []int{0, 1}) {
-		return fmt.Errorf("race matrix must run both isolated shards without cancellation")
+	wantMatrix := map[string]any{"include": []any{
+		map[string]any{"shard": 0, "kind": "race"},
+		map[string]any{"shard": 1, "kind": "race"},
+		map[string]any{"shard": "quality", "kind": "quality"},
+	}}
+	if race.Strategy.FailFast == nil || *race.Strategy.FailFast || !reflect.DeepEqual(race.Strategy.Matrix, wantMatrix) {
+		return fmt.Errorf("matrix must run both isolated race partitions and tagged quality without cancellation")
 	}
 	complete := false
 	for _, step := range race.Steps {
 		if step.Name == tvFullRaceStep {
-			complete = step.If == "" && strings.Contains(step.Run, `go test -race -p 1 -count=1 -json "${packages[@]}"`) && strings.Contains(step.Run, `go_shard_evidence.py select`)
+			complete = step.If == "matrix.kind == 'race'" && strings.Contains(step.Run, `go test -race -p 1 -count=1 -json "${packages[@]}"`) && strings.Contains(step.Run, `go_shard_evidence.py select`)
 		}
 	}
 	if !complete {
 		return fmt.Errorf("each shard must execute its entire fresh serial race inventory")
+	}
+	qualitySteps := map[string]int{
+		"Build + vet + test the `anthropic,openrouter` tags": 0,
+		"Build + vet + test the `redis` tag (real Valkey)":   0,
+		"golangci-lint": 0,
+	}
+	qualityCommands := map[string][]string{
+		"Build + vet + test the `anthropic,openrouter` tags": {
+			"go build -tags anthropic,openrouter ./...",
+			"go vet -tags anthropic,openrouter ./services/copilot/...",
+			"go test -tags anthropic,openrouter -p 1 -count=1 ./services/copilot/...",
+		},
+		"Build + vet + test the `redis` tag (real Valkey)": {
+			"go build -tags redis ./...", "go vet -tags redis ./...",
+			"go test -tags redis -p 1 -race -count=1 ./services/webhook-ingest/... ./services/api-gateway/... ./pkg/redisadapter/... ./pkg/bus/...",
+		},
+	}
+	evidenceSteps := map[string]string{
+		"Seal shard results for the combined backing-service gate": "${{ always() && matrix.kind == 'race' }}",
+		"Preserve source-bound race evidence":                      "${{ always() && matrix.kind == 'race' }}",
+		"Preserve isolated quality proof":                          "${{ always() && matrix.kind == 'quality' }}",
+	}
+	for _, step := range race.Steps {
+		if _, ok := qualitySteps[step.Name]; ok {
+			qualitySteps[step.Name]++
+			if step.If != "matrix.kind == 'quality'" || step.ContinueOnError {
+				return fmt.Errorf("tagged checks and lint must execute on the isolated quality runner")
+			}
+			for _, required := range qualityCommands[step.Name] {
+				found := false
+				for _, line := range strings.Split(step.Run, "\n") {
+					found = found || strings.TrimSpace(line) == required
+				}
+				if !found {
+					return fmt.Errorf("tagged check lost its complete fresh command")
+				}
+			}
+			if step.Name == "golangci-lint" && (step.Uses != "golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a" ||
+				step.With["version"] != "v2.12.2" || step.With["args"] != "--timeout=5m --build-tags=anthropic,openrouter,redis") {
+				return fmt.Errorf("quality lint must retain its pinned complete tag profile")
+			}
+		}
+		if condition, ok := evidenceSteps[step.Name]; ok {
+			if step.If != condition {
+				return fmt.Errorf("runner evidence must survive failures with the exact owner")
+			}
+			delete(evidenceSteps, step.Name)
+		}
+	}
+	for _, count := range qualitySteps {
+		if count != 1 {
+			return fmt.Errorf("missing or duplicated quality check")
+		}
+	}
+	if len(evidenceSteps) != 0 {
+		return fmt.Errorf("missing runner evidence")
 	}
 	aggregate := workflow.Jobs["go"]
 	if !reflect.DeepEqual(aggregate.Needs, []any{"scope", "go-race"}) || aggregate.If != "${{ always() && needs.scope.outputs.application == 'true' }}" {
@@ -67,7 +129,19 @@ func TestGoCIShardsRequireCompleteUnion(t *testing.T) {
 	if err := checkGoShardMatrix(data); err != nil {
 		t.Fatal(err)
 	}
-	for _, mutation := range [][2]string{{"shard: [0, 1]", "shard: [0]"}, {"fail-fast: false", "fail-fast: true"}, {"needs: [scope, go-race]", "needs: [scope]"}, {`test "$SHARD_RESULT" = success`, "true"}, {"go_shard_evidence.py aggregate", "go_shard_evidence.py select"}, {`go test -race -p 1 -count=1 -json "${packages[@]}"`, `go test -p 1 -json "${packages[@]}"`}} {
+	for _, mutation := range [][2]string{
+		{"- { shard: 1, kind: race }", "- { shard: 0, kind: race }"},
+		{"- { shard: quality, kind: quality }", "- { shard: omitted, kind: race }"},
+		{"if: matrix.kind == 'quality'", "if: matrix.shard == 0"},
+		{"if: matrix.kind == 'race'", "if: matrix.shard == 0"},
+		{"always() && matrix.kind == 'race'", "success() && matrix.kind == 'race'"},
+		{"always() && matrix.kind == 'quality'", "success() && matrix.kind == 'quality'"},
+		{"name: golangci-lint", "name: omitted-lint"},
+		{"name: golangci-lint", "name: golangci-lint\n        continue-on-error: true"},
+		{"go test -tags anthropic,openrouter -p 1 -count=1", "go test -tags anthropic,openrouter -p 1"},
+		{"go test -tags redis -p 1 -race -count=1", "go test -tags redis -p 1 -count=1"},
+		{"version: v2.12.2", "version: latest"},
+		{"fail-fast: false", "fail-fast: true"}, {"needs: [scope, go-race]", "needs: [scope]"}, {`test "$SHARD_RESULT" = success`, "true"}, {"go_shard_evidence.py aggregate", "go_shard_evidence.py select"}, {`go test -race -p 1 -count=1 -json "${packages[@]}"`, `go test -p 1 -json "${packages[@]}"`}} {
 		changed := strings.Replace(string(data), mutation[0], mutation[1], 1)
 		if changed == string(data) {
 			t.Fatal("mutation missed target")

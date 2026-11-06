@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -42,6 +43,9 @@ type Config struct {
 
 	// GatewayURL is the base URL of the api-gateway edge the BFF proxies to.
 	GatewayURL string
+	// GatewaySPIFFESocket selects a mutually authenticated gateway connection.
+	// A configured socket requires HTTPS; it never falls back to plaintext.
+	GatewaySPIFFESocket string
 
 	// SessionTTL bounds how long a browser session (and its held token) lives
 	// before re-login is required.
@@ -104,17 +108,18 @@ type Config struct {
 // production-safe defaults, and validates the required values.
 func Load() (Config, error) {
 	cfg := Config{
-		AuditDelivery: auditdelivery.Config{NATSURL: os.Getenv("WEB_BFF_AUDIT_NATS_URL"), SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET")},
-		Listen:        env.Or("WEB_BFF_LISTEN", ":8084"),
-		LogLevel:      env.ParseLevelOr(os.Getenv("WEB_BFF_LOG_LEVEL"), slog.LevelInfo),
-		Issuer:        strings.TrimRight(os.Getenv("WEB_BFF_SSO_ISSUER"), "/"),
-		ClientID:      env.Or("WEB_BFF_CLIENT_ID", "kanz-web"),
-		RedirectURL:   os.Getenv("WEB_BFF_REDIRECT_URL"),
-		Scope:         env.Or("WEB_BFF_SCOPE", "openid profile"),
-		GatewayURL:    strings.TrimRight(os.Getenv("WEB_BFF_GATEWAY_URL"), "/"),
-		SessionTTL:    parseDuration(os.Getenv("WEB_BFF_SESSION_TTL"), time.Hour),
-		SecureCookies: os.Getenv("WEB_BFF_INSECURE_COOKIES") == "",
-		OTLPEndpoint:  os.Getenv("WEB_BFF_OTLP_ENDPOINT"),
+		AuditDelivery:       auditdelivery.Config{NATSURL: os.Getenv("WEB_BFF_AUDIT_NATS_URL"), SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET")},
+		Listen:              env.Or("WEB_BFF_LISTEN", ":8084"),
+		LogLevel:            env.ParseLevelOr(os.Getenv("WEB_BFF_LOG_LEVEL"), slog.LevelInfo),
+		Issuer:              strings.TrimRight(os.Getenv("WEB_BFF_SSO_ISSUER"), "/"),
+		ClientID:            env.Or("WEB_BFF_CLIENT_ID", "kanz-web"),
+		RedirectURL:         os.Getenv("WEB_BFF_REDIRECT_URL"),
+		Scope:               env.Or("WEB_BFF_SCOPE", "openid profile"),
+		GatewayURL:          strings.TrimRight(os.Getenv("WEB_BFF_GATEWAY_URL"), "/"),
+		GatewaySPIFFESocket: os.Getenv("WEB_BFF_GATEWAY_SPIFFE_SOCKET"),
+		SessionTTL:          parseDuration(os.Getenv("WEB_BFF_SESSION_TTL"), time.Hour),
+		SecureCookies:       os.Getenv("WEB_BFF_INSECURE_COOKIES") == "",
+		OTLPEndpoint:        os.Getenv("WEB_BFF_OTLP_ENDPOINT"),
 
 		IdentityURL:           strings.TrimRight(os.Getenv("WEB_BFF_IDENTITY_URL"), "/"),
 		TrustedProxyHeader:    os.Getenv("WEB_BFF_TRUSTED_PROXY_HEADER"),
@@ -137,6 +142,12 @@ func Load() (Config, error) {
 	}
 	if cfg.GatewayURL == "" {
 		return Config{}, errors.New("WEB_BFF_GATEWAY_URL is required (the api-gateway base URL)")
+	}
+	if cfg.GatewaySPIFFESocket != "" {
+		u, err := url.Parse(cfg.GatewayURL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return Config{}, errors.New("WEB_BFF_GATEWAY_SPIFFE_SOCKET requires a credential-free HTTPS gateway URL")
+		}
 	}
 	// SSO IS NOW OPTIONAL, AND THAT IS THE POINT OF THIS CHANGE. WEB_BFF_SSO_ISSUER
 	// used to be required, so this service could not START without an Eighred SSO

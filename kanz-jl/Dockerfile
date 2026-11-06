@@ -3,6 +3,11 @@ FROM ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169
 RUN curl --fail --location --retry 3 --output /tmp/julia.tar.gz https://julialang-s3.julialang.org/bin/linux/x64/1.13/julia-1.13.3-linux-x86_64.tar.gz \
  && echo '5c61cb4b40332cb5a3504e7779e2f5dac093caa4a1116ded19f01413f85c63e4  /tmp/julia.tar.gz' | sha256sum --check --strict \
  && mkdir /opt/julia && tar -xzf /tmp/julia.tar.gz --strip-components=1 -C /opt/julia
+# One verified native recipe also repairs the host before Pkg network access.
+COPY kanz-jl/qualification/install-native-runtime.sh /tmp/install-native-runtime.sh
+RUN curl --disable --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output /tmp/openssl.tar.gz https://github.com/JuliaBinaryWrappers/OpenSSL_jll.jl/releases/download/OpenSSL-v3.5.9%2B0/OpenSSL.v3.5.9.x86_64-linux-gnu.tar.gz \
+ && curl --disable --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output /tmp/libcurl.tar.gz https://github.com/JuliaBinaryWrappers/LibCURL_jll.jl/releases/download/LibCURL-v8.23.0%2B0/LibCURL.v8.23.0.x86_64-linux-gnu.tar.gz \
+ && bash /tmp/install-native-runtime.sh /opt/julia /tmp/julia.tar.gz /tmp/openssl.tar.gz /tmp/libcurl.tar.gz
 ENV JULIA_DEPOT_PATH=/opt/julia-depot JULIA_LOAD_PATH=@:@stdlib JULIA_CPU_TARGET=generic JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 WORKDIR /opt/kanz-jl
 COPY kanz-jl/Project.toml kanz-jl/Manifest.toml ./

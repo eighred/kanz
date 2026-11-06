@@ -84,10 +84,10 @@ jobs:
         working-directory: kanz-rs
         run: |
           cargo fmt --all -- --check
-          cargo check --locked --workspace --all-targets
+          KANZ_BUILD_VERSION="$(git rev-parse HEAD)" cargo check --locked --workspace --all-targets
           cargo test --locked --workspace --lib --bins
           cargo build --locked -p kanz-binance-depth -p kanz-okx-depth
-          cargo clippy --locked --workspace --all-targets -- -D warnings
+          KANZ_BUILD_VERSION="$(git rev-parse HEAD)" cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Differential proof against current Go authority
         env:
           DECIMAL_CONFORMANCE_FIXTURE: ${{ runner.temp }}/kanz-decimal-conformance.json

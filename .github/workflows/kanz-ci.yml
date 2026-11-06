@@ -67,10 +67,15 @@ jobs:
         run: ./tools/Test-EcrReleaseDigest.ps1
 
   go-race:
+    # One setup definition, isolated hosted stores. The third runner removes
+    # tagged builds/tests and lint from the full race suite's serial tail.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        include:
+          - { shard: 0, kind: race }
+          - { shard: 1, kind: race }
+          - { shard: quality, kind: quality }
     needs: scope
     if: needs.scope.outputs.application == 'true'
     runs-on: ubuntu-latest
@@ -142,9 +147,8 @@ jobs:
         with:
           # Track the toolchain pinned in go.mod so CI never drifts from local.
           go-version-file: kanz/go.mod
-          # setup-go caches are immutable on an exact hit. Give this complete
-          # race/tag job its own profile so a faster build-only job cannot seed
-          # its cache without the race and provider/redis compiler objects.
+          # setup-go caches are immutable on an exact hit. Each matrix marker
+          # isolates its race or quality compiler workload from minimal jobs.
           # This is compilation reuse only: every test still uses -count=1.
           cache-dependency-path: |
             kanz/.gotmp/go-ci-cache-profile
@@ -436,7 +440,7 @@ jobs:
           exit 1
 
       - name: Verify Go to Python inference before the full race suite
-        if: matrix.shard == 0
+        if: matrix.shard == 0 || matrix.kind == 'quality'
         working-directory: kanz
         env:
           TEST_NATS_URL: nats://localhost:4222
@@ -444,7 +448,7 @@ jobs:
         run: go test -race -p 1 ./services/risk-engine/internal/app -run '^TestIntegration_TheModelScoresTheEnginesFeatures$' -count=1 -v
 
       - name: Verify durable Kafka fixtures across repeated tenant rebuilds
-        if: matrix.shard == 0
+        if: matrix.shard == 0 || matrix.kind == 'quality'
         working-directory: kanz
         env:
           TEST_KAFKA_BROKERS: localhost:9092
@@ -472,7 +476,7 @@ jobs:
           go build -o "$RUNNER_TEMP/mfa-web-bff" ./services/web-bff/cmd/web-bff
 
       - name: Prove tv-sync separate roles and checkpoint recovery
-        if: matrix.shard == 0
+        if: matrix.shard == 0 || matrix.kind == 'quality'
         working-directory: kanz
         env:
           TV_SYNC_TEST_ADMIN_URL: postgres://kanz:kanz@localhost:5432/kanz?sslmode=disable
@@ -483,7 +487,7 @@ jobs:
           python3 ../.github/scripts/check_tv_sync_evidence.py "$RUNNER_TEMP/tv-sync-role-proof.jsonl"
 
       - name: Prove durable catch-up before tv-sync Broker readiness
-        if: matrix.shard == 0
+        if: matrix.shard == 0 || matrix.kind == 'quality'
         working-directory: kanz
         env:
           TEST_NATS_URL: nats://localhost:4222
@@ -496,7 +500,7 @@ jobs:
           python3 ../.github/scripts/check_tv_readiness_evidence.py "$RUNNER_TEMP/tv-readiness-proof.jsonl"
 
       - name: Qualify restored tv-sync snapshot without writes
-        if: matrix.shard == 0
+        if: matrix.shard == 0 || matrix.kind == 'quality'
         working-directory: kanz
         env:
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
@@ -507,6 +511,7 @@ jobs:
           python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"
 
       - name: Test (race) — incl. arch + contract + Postgres + real-bus + M1 loop
+        if: matrix.kind == 'race'
         working-directory: kanz
         env:
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
@@ -585,7 +590,7 @@ jobs:
       # if: always() so it still reports when the suite failed for another
       # reason — a skipped gate is worth knowing about on a red run too.
       - name: Seal shard results for the combined backing-service gate
-        if: always()
+        if: ${{ always() && matrix.kind == 'race' }}
         working-directory: kanz
         run: |
           set -euo pipefail
@@ -624,7 +629,7 @@ jobs:
       #   there is no reason not to run them. The anthropic tag has no tests of its own;
       #   including it here costs nothing and means adding one later is enough.
       - name: Build + vet + test the `anthropic,openrouter` tags
-        if: matrix.shard == 0
+        if: matrix.kind == 'quality'
         working-directory: kanz
         run: |
           go build -tags anthropic,openrouter ./...
@@ -638,7 +643,7 @@ jobs:
       # compile that file and never run it — the precise "dead code that deploys" shape
       # test/arch/build_tag_coverage_test.go exists to prevent.
       - name: Build + vet + test the `redis` tag (real Valkey)
-        if: matrix.shard == 0
+        if: matrix.kind == 'quality'
         working-directory: kanz
         env:
           TEST_REDIS_URL: redis://localhost:6379/0
@@ -665,11 +670,20 @@ jobs:
           python ../.github/scripts/check_valkey_evidence.py "$RUNNER_TEMP/valkey-proof.jsonl"
 
       - name: Preserve source-bound race evidence
-        if: always()
+        if: ${{ always() && matrix.kind == 'race' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: go-race-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/go-race-proof
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Preserve isolated quality proof
+        if: ${{ always() && matrix.kind == 'quality' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-quality-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/valkey-proof.jsonl
           if-no-files-found: error
           retention-days: 7
 
@@ -684,7 +698,7 @@ jobs:
           if [ -f "$RUNNER_TEMP/inference-ci.pid" ]; then kill "$(cat "$RUNNER_TEMP/inference-ci.pid")" 2>/dev/null || true; fi
 
       - name: golangci-lint
-        if: matrix.shard == 0
+        if: matrix.kind == 'quality'
         # v7 is REQUIRED for golangci-lint v2: v6 only knows the v1 module path
         # (.../cmd/golangci-lint), and v2 lives behind .../v2/cmd/golangci-lint. That
         # mismatch is exactly why `version: latest` on v6 silently pinned us to v1.
@@ -739,7 +753,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Require both isolated race runners
+      - name: Require both race runners and isolated tagged quality runner
         env:
           SHARD_RESULT: ${{ needs.go-race.result }}
         run: test "$SHARD_RESULT" = success

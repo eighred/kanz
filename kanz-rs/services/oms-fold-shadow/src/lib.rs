@@ -1,6 +1,11 @@
 #![forbid(unsafe_code)]
 //! Diagnostic canonical fill and terminal folds. No storage, network, or execution authority.
 pub mod proto {
+    pub mod domain {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/domain.v1.rs"));
+        }
+    }
     pub mod envelope {
         pub mod v1 {
             include!(concat!(env!("OUT_DIR"), "/envelope.v1.rs"));
@@ -39,7 +44,9 @@ use proto::{
     oms::v1::{FillFoldRequest, FillFoldResult, FillFoldStatus},
 };
 
-fn rational(value: Option<&Decimal>) -> Option<BigRational> {
+/// Existing Go Decimal conversion, reused by the qualified OMS position owner.
+/// Absent means legacy aggregate zero; this is not an admission-state default.
+pub fn rational(value: Option<&Decimal>) -> Option<BigRational> {
     let Some(d) = value else {
         return Some(BigRational::zero());
     };
@@ -66,7 +73,8 @@ fn rounded(n: BigInt, d: &BigInt) -> BigInt {
     q
 }
 // Go dec.ToProtoScaled: first round at 1e-8, then repeated half-away /10.
-fn decimal(value: BigRational) -> Option<Decimal> {
+/// Checked existing Go ToProtoScaled conversion shared with position outputs.
+pub fn decimal(value: BigRational) -> Option<Decimal> {
     let mut q = rounded(value.numer() * BigInt::from(100_000_000), value.denom());
     let mut exponent = -8;
     loop {

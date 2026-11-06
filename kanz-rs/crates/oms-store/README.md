@@ -321,3 +321,66 @@ draining, contention, poison keys, mark failures, ACK/SQL ambiguity, restart and
 joined stop. This proves neither production SPIFFE/ACL acceptance nor permission
 to replace the Go relay. prost-reflect 0.16.2 declares prost/prost-types ^0.14.0;
 the lock retains the existing exact 0.14.1 versions and advisory checks.
+
+## Position book qualification
+
+`position::apply` and `position::snapshot` implement the existing Go position
+Store boundary against its original tables. The instrument advisory lock, fill
+claim, chronological history/basis, venue lot, cross-venue aggregate, position
+fee journal and Announcer records share one transaction. The synchronous
+Announcer only constructs Records; it cannot publish or perform I/O. Duplicate
+fills still announce the current book. Failed announcements roll back claims,
+history and positions; a failed COMMIT remains unconfirmed. The existing outbox
+owner supplies drainage. No Go caller is switched to Rust.
+
+The arithmetic is exact weighted-average cost and **gross** realized P&L. Fees
+remain separate journal revisions, matching the current OMS reporting convention.
+The snapshot is cost-valued, not a live valuation: cash and log coordinates remain
+absent. It is neither evidence of financial genesis nor a complete bootstrap
+snapshot. Missing price retains the legacy store conversion semantics; upstream
+fill/admission validation is not replaced by this compatibility owner.
+
+The bounded domain accepts canonical Decimal exponents through ±64 and refuses
+unrepresentable output. Stored rational text must be Go RatString integer or
+numerator/positive-denominator form, at most 4096 bytes per field; arithmetic
+intermediates are limited to 16384 bits. Rows/replay are capped at 10000, with
+1MiB aggregate transfer/result budgets and 64 Announcer Records. SQL window
+checks withhold oversized data before transfer. Overflow refuses the entire
+operation/result, never a prefix or fabricated zero. Incomplete legacy history
+cannot accept backdated or recovery executions. These are explicit bounded
+refusals, not a claim of arbitrary big.Rat input compatibility.
+
+Qualification must compare actual Go/Rust PostgreSQL state and raw journals,
+independent rational goldens, cross-writer contention and rollback, recovery/fee
+history, RLS and actual NATS publication ordering. Local Windows formatting or
+skipped tests do not establish this acceptance. Production admission, credentials,
+venue gRPC, halt, DR and single-writer cutover remain separately governed.
+
+
+## Position projector composition
+
+`position_projector::handle` owns the existing Go Projector handler above the
+qualified Store: incoming fill-event decode and decimal-domain validation,
+legacy tenant scope (strict exact attribution for recovery), transaction-local
+aggregate/venue/recovery acknowledgement Records and inline relay Flush.
+It receives the canonical Envelope and original payload; fixtures no longer
+supply Record templates for this owner. The existing normalized wire helper
+merges duplicate embedded fields and preserves unknown raw bytes before the
+original Fill is captured. Consumer lineage uses the incoming event ID as
+causation, not the incoming causation ID.
+
+The input budget is 1MiB combined envelope/payload with depth 32, followed by
+the Store's existing limits. Unknown event types and nil ordinary fills are
+ignored only after tenant validation, matching Go; malformed or unsupported
+inputs refuse. Ordinary missing price/portfolio behavior is retained rather
+than converted into new admission policy. Recovery ACK time is an explicit
+clock input for deterministic qualification. A Flush failure may follow a
+committed fold: PublicationUnconfirmed means retry, not rollback. The same
+claims and outbox support Go restart/rollback without a second ledger.
+
+This is a handler composition, not a deployed consumer. The canonical Consumer
+still owns envelope authentication, durable delivery, DLQ and retry policy;
+production SPIFFE/NATS authorization, startup fencing, readiness and writer
+handoff are not supplied by this library. The real PostgreSQL/NATS differential
+must compare the complete Go handler, durable state and emitted frames before
+acceptance; the older Store template fixture alone is insufficient.

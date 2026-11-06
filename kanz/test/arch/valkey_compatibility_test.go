@@ -48,7 +48,7 @@ func checkValkeyCompatibilityCI(data []byte) error {
 				check = i
 			}
 		}
-		if proof >= 0 && check > proof && step.If == "matrix.shard == 0" && !step.ContinueOnError &&
+		if proof >= 0 && check > proof && step.If == "matrix.kind == 'quality'" && !step.ContinueOnError &&
 			strings.Contains(step.Run, "set -o pipefail\n") &&
 			strings.Contains(step.Run, "python -m unittest discover -s ../.github/scripts -p test_check_valkey_evidence.py") &&
 			step.Env["TEST_REDIS_URL"] == "redis://localhost:6379/0" && step.Env["TEST_VALKEY_VERSION"] == "9.1.3" {
