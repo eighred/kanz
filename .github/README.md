@@ -95,6 +95,26 @@ workflow authority and shared build wiring. Ubuntu CI supplies platform-specific
 coverage unavailable on Windows. No release or deployment should be triggered
 merely to test repository policy.
 
+## CI compilation and browser setup
+
+The two Go race runners have separate compiler cache profiles. The tracked
+`go-ci-cache-profile` version names their reviewed workload; the generated shard
+marker, Go module inputs, schema definitions and generator configuration remain
+additional key inputs. Bump the profile deliberately when the compilation
+workload changes. Editing unrelated workflow steps does not invalidate every
+compiler object. Go still verifies cached compilation inputs, every test uses
+`-count=1`, and the source/run/attempt-bound complete shard union remains required.
+A cache hit never establishes a test result. PR merge-ref caches do not guarantee
+a hit on the first main run; measure cold and warm executions separately.
+
+Before the unchanged Playwright `install --with-deps chromium` command, both Go
+and web jobs select the official HTTPS Ubuntu archive. The bounded helper changes
+only exact recognized `URIs` fields in the runner's `ubuntu.sources`; it preserves
+suites, components, architectures and the explicit Ubuntu archive signing key.
+Unknown formats/URIs refuse instead of omitting dependencies or relaxing apt
+verification. This addresses observed Azure-mirror font download stalls, not
+browser execution time. Compare completed phase timings before claiming savings.
+
 ## Account and production boundaries
 
 Retain the working Enterprise trial until the owner chooses a paid plan.

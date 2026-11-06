@@ -150,7 +150,7 @@ jobs:
             kanz/.gotmp/go-ci-cache-profile
             kanz/go.mod
             kanz/go.sum
-            .github/workflows/kanz-ci.yml
+            .github/go-ci-cache-profile
             kanz-schemas/buf.gen.yaml
             kanz-schemas/proto/**/*.proto
 
@@ -454,6 +454,13 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: kanz-web/.nvmrc
+
+      # Avoid the observed Azure mirror font-download stalls without changing
+      # signed suites/components or Playwright's complete dependency inventory.
+      - name: Select official HTTPS Ubuntu archive for browser dependencies
+        run: |
+          python3 -m unittest discover -s .github/scripts -p test_ci_ubuntu_archive.py
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py
 
       - name: Build the real MFA browser boundary
         run: |
@@ -972,6 +979,13 @@ jobs:
       - name: Build
         working-directory: kanz-web
         run: npm run build
+
+      # Avoid the observed Azure mirror font-download stalls without changing
+      # signed suites/components or Playwright's complete dependency inventory.
+      - name: Select official HTTPS Ubuntu archive for browser dependencies
+        run: |
+          python3 -m unittest discover -s .github/scripts -p test_ci_ubuntu_archive.py
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py
 
       - name: Qualify broker history rendering in Chromium
         working-directory: kanz-web
