@@ -35,11 +35,10 @@ impl Sessions for Connector {
                 }
                 return Err(Error::Database);
             }
-            let config = self.config.clone();
             let session = Session::new(
                 client,
                 driver.0.take().ok_or(Error::Database)?,
-                move |token| async move { token.cancel_query(&config, NoTls).await },
+                move |token| async move { token.cancel_query(NoTls).await },
             );
             Ok(session)
         })
