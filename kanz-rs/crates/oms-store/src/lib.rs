@@ -386,6 +386,20 @@ async fn commit(tx: Transaction<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+async fn claim(tx: &Transaction<'_>, order: &str, key: &str, alias: &str) -> Result<u64, Error> {
+    Ok(tx.execute("INSERT INTO order_fills (tenant_id,order_id,fill_id,raw_fill_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3) ON CONFLICT (tenant_id,fill_id) DO NOTHING",&[&order,&key,&alias]).await?)
+}
+async fn journal(
+    tx: &Transaction<'_>,
+    order: &str,
+    alias: &str,
+    fill: &Fill,
+    raw: &[u8],
+) -> Result<(), Error> {
+    tx.execute("INSERT INTO order_executions (order_id,fill_id,venue,venue_account_id,instrument_id,venue_execution_id,fill) VALUES ($1,$2,$3,$4,$5,$6,$7)",&[&order,&alias,&fill.venue,&fill.venue_account_id,&fill.instrument_id,&fill.venue_execution_id,&raw]).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,18 +417,4 @@ mod tests {
             assert_eq!(fill_wire(malformed), Err(Error::InvalidInput));
         }
     }
-}
-
-async fn claim(tx: &Transaction<'_>, order: &str, key: &str, alias: &str) -> Result<u64, Error> {
-    Ok(tx.execute("INSERT INTO order_fills (tenant_id,order_id,fill_id,raw_fill_id) VALUES (current_setting('app.tenant_id'),$1,$2,$3) ON CONFLICT (tenant_id,fill_id) DO NOTHING",&[&order,&key,&alias]).await?)
-}
-async fn journal(
-    tx: &Transaction<'_>,
-    order: &str,
-    alias: &str,
-    fill: &Fill,
-    raw: &[u8],
-) -> Result<(), Error> {
-    tx.execute("INSERT INTO order_executions (order_id,fill_id,venue,venue_account_id,instrument_id,venue_execution_id,fill) VALUES ($1,$2,$3,$4,$5,$6,$7)",&[&order,&alias,&fill.venue,&fill.venue_account_id,&fill.instrument_id,&fill.venue_execution_id,&raw]).await?;
-    Ok(())
 }
