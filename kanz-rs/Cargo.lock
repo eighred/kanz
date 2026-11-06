@@ -993,6 +993,7 @@ dependencies = [
 name = "kanz-oms-store"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "base64 0.22.1",
  "kanz-decimal-compat",
  "kanz-oms-fold-shadow",
@@ -1000,12 +1001,14 @@ dependencies = [
  "num-rational",
  "num-traits",
  "prost",
+ "prost-reflect",
  "prost-types",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
  "tokio-postgres",
+ "uuid",
 ]
 
 [[package]]
@@ -1411,6 +1414,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "prost-reflect"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89a3ac73ec9a9118131a4594c9d336631a07852220a1d0ae03ee36b04503a063"
+dependencies = [
+ "prost",
+ "prost-types",
 ]
 
 [[package]]

@@ -46,7 +46,14 @@ const rustOMSBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     config.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
     config.extern_path(".common.v1", "::kanz_decimal_compat::common::v1");
-    config.compile_protos(&[format!("{root}/oms/v1/fold_shadow.proto")], &[root])?;
+    config.compile_protos(
+        &[
+            format!("{root}/oms/v1/fold_shadow.proto"),
+            format!("{root}/envelope/v1/event_frame.proto"),
+            format!("{root}/domain/v1/portfolio.proto"),
+        ],
+        &[root],
+    )?;
     Ok(())
 }
 `

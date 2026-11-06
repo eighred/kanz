@@ -93,6 +93,16 @@ jobs:
         run: |
           go test -p 1 ./test/arch -run 'Test(Rust|Julia|BondCanonicalClone|EveryWorkflowGoTestIsSerialised|WorkflowGoTestMatcherDistinguishesCargo)' -count=1
           go test -p 1 ./internal/dec ./services/oms/internal/order ./services/oms/internal/config ./services/oms/cmd/oms -count=1
+      - name: Start isolated pinned relay broker
+        run: |
+          docker run -d --name oms-relay-nats --memory=256m --cpus=1 --pids-limit=128 --read-only \
+            --tmpfs /data:rw,noexec,nosuid,size=128m -p 127.0.0.1:4222:4222 \
+            nats:2.12.6-alpine@sha256:1cfc36e2e5e638243d8c722f72c954cd0ec4b15ee82fadbc718ce12e2b3c1652 -js -sd /data
+          for attempt in $(seq 1 30); do
+            if (echo >/dev/tcp/127.0.0.1/4222) 2>/dev/null; then exit 0; fi
+            sleep 1
+          done
+          exit 1
       - name: Compare actual stamped worker through the OMS supervisor
         working-directory: kanz
         env:
@@ -101,12 +111,16 @@ jobs:
           KANZ_OMS_STORE_BIN: ${{ github.workspace }}/kanz-rs/target/debug/examples/fixture
           KANZ_OMS_STORE_VERSION: ${{ github.sha }}
           TEST_POSTGRES_URL: postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable
+          TEST_NATS_URL: nats://127.0.0.1:4222
         run: |
           set -o pipefail
           go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/tools/store-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_oms_fold_evidence.py
           python3 ../.github/scripts/check_oms_fold_evidence.py "$RUNNER_TEMP/oms-fold.jsonl"
+      - name: Remove isolated relay broker
+        if: always()
+        run: docker rm -f oms-relay-nats
       - name: Preserve transition execution evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

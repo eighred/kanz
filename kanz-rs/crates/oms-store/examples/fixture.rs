@@ -1,4 +1,5 @@
 //! Disposable test adapter only. No service, production configuration or release image.
+mod relay_support;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use kanz_oms_fold_shadow::proto::order::v1::Fill;
 use kanz_oms_store::{
@@ -18,6 +19,10 @@ use tokio_postgres::{config::Host, NoTls};
 #[serde(deny_unknown_fields)]
 struct Input {
     mode: String,
+    #[serde(default)]
+    relay_hold_ms: u64,
+    #[serde(default)]
+    relay_stop_after_ms: u64,
     #[serde(default)]
     proposal: Option<ProposalInput>,
     #[serde(default)]
@@ -215,6 +220,21 @@ fn record(r: Fact) -> Result<Record, ()> {
     })
 }
 async fn run(input: Input) -> Result<Value, ()> {
+    if input.mode == "relay-frame" {
+        if input.records.len() != 1 {
+            return Err(());
+        }
+        let mut framer = kanz_oms_store::relay::Framer::new(
+            "oms/relay-fixture".into(),
+            option_env!("KANZ_BUILD_VERSION").unwrap_or_default().into(),
+        )
+        .map_err(|_| ())?;
+        let record = record(input.records.into_iter().next().ok_or(())?)?;
+        return Ok(match framer.frame(&record) {
+            Ok(frame) => json!({"status":"framed","state":STANDARD.encode(frame.body)}),
+            Err(_) => json!({"status":"InvalidRecord"}),
+        });
+    }
     if matches!(
         input.mode.as_str(),
         "fee-digest" | "fee-terms" | "fee-delta"
@@ -278,6 +298,9 @@ async fn run(input: Input) -> Result<Value, ()> {
     if !matches!(
         input.mode.as_str(),
         "save"
+            | "relay-once"
+            | "relay-flush"
+            | "relay-run"
             | "create"
             | "load"
             | "applied-fills"
@@ -416,6 +439,7 @@ async fn run(input: Input) -> Result<Value, ()> {
             )
             .await
             .map_err(|_| ())?;
+        if input.mode.starts_with("relay-") { return relay_support::run(config.clone(),&mut client,&input).await; }
         if input.mode.starts_with("proposal-") {
             use kanz_oms_store::proposals;
             let at=match input.at.as_ref(){Some(at)=>at.time()?,None if matches!(input.mode.as_str(),"proposal-get"|"proposal-put")=>UNIX_EPOCH,None=>return Err(())};

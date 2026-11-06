@@ -1,6 +1,11 @@
 #![forbid(unsafe_code)]
 //! Diagnostic canonical fill and terminal folds. No storage, network, or execution authority.
 pub mod proto {
+    pub mod envelope {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/envelope.v1.rs"));
+        }
+    }
     pub const FILE_DESCRIPTOR_SET: &[u8] =
         include_bytes!(concat!(env!("OUT_DIR"), "/oms-descriptors.bin"));
     pub use kanz_decimal_compat::common;
