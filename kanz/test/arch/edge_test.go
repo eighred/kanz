@@ -164,7 +164,7 @@ func TestEveryProxiedUpstreamIsReachable(t *testing.T) {
 	// Both ends must exist for a NetworkPolicy to constrain anything: default-deny
 	// covers both directions, so an egress allow with no matching ingress allow is
 	// a connection that is still refused (#232's own lesson, one file over).
-	admitted := ingressAdmitted(t, netpol)
+	admitted := ingressAdmitted(t, netpol+"\n---\n"+read(t, "../../infra/security/runtime/gateway-only-apis.yaml"))
 
 	for _, m := range upstreams {
 		svc := m[1]

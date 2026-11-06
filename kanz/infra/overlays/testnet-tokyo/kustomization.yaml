@@ -17,6 +17,7 @@ resources:
   - ../../deploy/venue-okx-deploy.yaml
   - ../../deploy/web-bff-deploy.yaml
   - governance-network-policies.yaml
+  - ../../security/runtime/gateway-only-apis.yaml
   - gateway-runtime-egress.yaml
 
 commonAnnotations:
