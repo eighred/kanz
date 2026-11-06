@@ -44,6 +44,27 @@ var juliaOCIMarkers = map[string][]string{
 		`installed["version"] == entry["version"]`,
 		"@test actual == entry[\"git-tree-sha1\"]",
 	},
+	"kanz-jl/qualification/install-audit.sh": {
+		"v0.72.0/trivy_0.72.0_Linux-64bit.tar.gz",
+		"bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea",
+		"v1.56.0/syft_1.56.0_linux_amd64.tar.gz",
+		"1c2493cfcf52d3367d6cb25780d9190c111c2219c34c820574c43e8bae15c528",
+		"sha256sum --check --strict",
+	},
+	"kanz-jl/qualification/advisory.py": {
+		"proof.validate_report(qualification, source, digest(Path(shutil.which('julia')).resolve()))",
+		"validate_control(control_scan)", "validate_image_scan(scan, image, expected)",
+		"validate_spdx(sbom, expected)", "validate_syft(syft, image)",
+		"validate_database(metadata, dt.datetime.now(dt.timezone.utc))",
+		"digest(db / 'trivy.db') != db_hash", "validate_report(report, qualification, expected)",
+		"'--image-src', 'docker', image", "'--ignore-unfixed=false'",
+		"'stdlib-runtime-native-advisory-coverage-unqualified'",
+		"actual != expected", "'known vulnerable Julia control not detected'",
+		"'reviewed General registry package UUID differs'",
+		"'critical actual-image advisory refuses qualification'",
+		"tool_identity(executable, archive)", "digest(executable) != expected",
+		"scan.get('Metadata', {}).get('ImageID') != image",
+	},
 	".github/workflows/julia-calibration.yml": {
 		"packages: read", "name: Authenticate for private mirrored bases",
 		"run: python3 -B kanz-jl/qualification/proof.py", "if-no-files-found: error",
@@ -84,7 +105,21 @@ func checkJuliaOCI(files map[string]string) error {
 		return fmt.Errorf("mandatory Julia job missing or conditional")
 	}
 	found := 0
+	audit := 0
+	tools := 0
 	for _, step := range job.Steps {
+		if step.Name == "Install checksum-pinned image advisory tools" {
+			if step.If != "" || step.Run != "bash kanz-jl/qualification/install-audit.sh" {
+				return fmt.Errorf("scanner setup conditional or substituted")
+			}
+			tools++
+		}
+		if step.Name == "Qualify actual image Julia advisories and inventory" {
+			if found != 1 || tools != 1 || step.If != "" || step.Run != "python3 -B kanz-jl/qualification/advisory.py" {
+				return fmt.Errorf("actual image advisory step conditional, reordered or substituted")
+			}
+			audit++
+		}
 		if step.Name == "Qualify the actual Julia image without network or write authority" {
 			if step.If != "" || step.Run != "python3 -B kanz-jl/qualification/proof.py" {
 				return fmt.Errorf("actual OCI step conditional or substituted")
@@ -92,7 +127,7 @@ func checkJuliaOCI(files map[string]string) error {
 			found++
 		}
 	}
-	if found != 1 {
+	if found != 1 || audit != 1 || tools != 1 {
 		return fmt.Errorf("actual OCI qualification step missing/duplicated")
 	}
 	return nil
@@ -126,6 +161,8 @@ func TestJuliaOCIBoundary(t *testing.T) {
 		}
 	}
 	for _, mutation := range []struct{ old, new string }{
+		{"      - name: Qualify actual image Julia advisories and inventory\n", "      - name: Qualify actual image Julia advisories and inventory\n        if: false\n"},
+		{"      - name: Install checksum-pinned image advisory tools\n", "      - name: Install checksum-pinned image advisory tools\n        if: false\n"},
 		{"  shadow-calibration:\n", "  shadow-calibration:\n    if: false\n"},
 		{"      - name: Qualify the actual Julia image without network or write authority\n", "      - name: Qualify the actual Julia image without network or write authority\n        if: false\n"},
 	} {

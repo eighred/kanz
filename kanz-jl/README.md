@@ -99,3 +99,46 @@ to promote the candidate.
 Primary API/version references: [Julia downloads](https://julialang.org/downloads/),
 [ProtoBuf.jl reference](https://juliaio.github.io/ProtoBuf.jl/dev/reference/),
 [ProtoBuf.jl package](https://github.com/JuliaIO/ProtoBuf.jl).
+
+### Actual-image advisory qualification (source only)
+
+The additive `qualification/advisory.py` step consumes the successful OCI
+qualification's exact local image ID; it neither publishes nor executes another
+worker image. It verifies the reviewed Trivy0.72.0 and Syft1.56.0 release archive
+checksums, records executable hashes, downloads a fresh advisory database and
+records its SHA256 and update/download timestamps. The same database snapshot is
+used throughout the bounded scan; a stale/missing/changed database refuses.
+
+Trivy scans the actual image. Its Julia report and generated SPDX identities must
+contain all seven locked UUID/version pairs, including the three external
+packages whose installed Git trees were independently checked in the isolated
+image. Those three names are additionally bound to their reviewed General
+registry UUIDs. Missing/duplicate/substituted inventory, suppressed findings or
+any known advisory in the worker's Julia dependency closure refuses. Critical
+findings elsewhere in the actual image also refuse; lower-severity findings are
+retained as public projected evidence, never described as absent. A separate
+manifest-only HTTP1.10.15 fixture must detect CVE-2025-52479/JLSEC-2025-1 using the
+same database. No vulnerable package is installed or executed.
+
+Syft must identify the actual Julia1.13.3 binary in that same image and provides
+runtime/OS package inventory. Raw reports can contain image configuration, so
+they remain in a temporary directory; the artifact contains only projected public
+package/advisory/tool/database identities. Scanner subprocesses inherit no GitHub
+or application credentials. Existing images and shared caches remain untouched; only the new private scanner
+scratch directory is removed.
+
+This is partial advisory qualification, **not release clearance**. Trivy's Julia
+source supports Manifest/Project dependency graphs and advisory lookup, while
+Syft1.56's Julia support is a binary classifier, not a Julia dependency cataloger.
+JLSEC covers General registry packages and explicitly warns that artifact/JLL
+advisories are incomplete. Inventory of four bundled stdlibs, the Julia runtime
+and native libraries does not establish complete advisory coverage for them.
+Those coverage limits remain a release blocker under #1413; the standard release
+matrix, signing policy, production transport and Go authority are unchanged.
+
+Primary pinned evidence:
+- [Trivy0.72 Julia support](https://github.com/aquasecurity/trivy/blob/v0.72.0/docs/guide/coverage/language/julia.md)
+- [Trivy0.72 manifest UUID parser](https://github.com/aquasecurity/trivy/blob/v0.72.0/pkg/dependency/parser/julia/manifest/parse.go)
+- [Trivy0.72 Julia advisory driver](https://github.com/aquasecurity/trivy/blob/v0.72.0/pkg/detector/library/driver.go)
+- [Syft1.56 binary classifiers](https://github.com/anchore/syft/blob/v1.56.0/syft/pkg/cataloger/binary/classifiers.go)
+- [JLSEC scope and limitations](https://github.com/JuliaLang/SecurityAdvisories.jl#scope)
