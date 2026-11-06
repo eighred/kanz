@@ -66,7 +66,7 @@ func DialKafka(cfg KafkaConfig) (*KafkaClient, error) {
 	addr := kafka.TCP(cfg.Brokers...)
 	return &KafkaClient{
 		cfg:       cfg,
-		dialer:    readerDialer(cfg),
+		dialer:    KafkaReaderDialer(cfg),
 		transport: transport,
 		admin: &kafka.Client{
 			Addr:      addr,
@@ -88,9 +88,11 @@ func DialKafka(cfg KafkaConfig) (*KafkaClient, error) {
 	}, nil
 }
 
-// readerDialer builds the dialer readers share. Returns nil when neither TLS
+// KafkaReaderDialer builds the authenticated transport used by live and bounded
+// archive readers. The caller owns the TLS/SASL sources for the reader lifetime.
+// It returns nil when neither TLS
 // nor SASL is configured so kafka-go falls back to its DefaultDialer.
-func readerDialer(cfg KafkaConfig) *kafka.Dialer {
+func KafkaReaderDialer(cfg KafkaConfig) *kafka.Dialer {
 	if cfg.TLSConfig == nil && cfg.SASL == nil {
 		return nil
 	}

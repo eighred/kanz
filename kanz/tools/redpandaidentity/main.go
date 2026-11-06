@@ -14,15 +14,21 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"sync/atomic"
 	"time"
 
 	"github.com/eighred/kanz/internal/version"
+	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
+	"github.com/eighred/kanz/pkg/bus"
+	"github.com/eighred/kanz/tools/natsrebuild"
+	"github.com/eighred/kanz/tools/replay"
 
 	"github.com/segmentio/kafka-go"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
+	"google.golang.org/protobuf/proto"
 )
 
 // Only fixed local stage labels may appear in failed probe diagnostics.
@@ -52,8 +58,13 @@ func subject(cert *x509.Certificate, id string) (string, error) {
 }
 
 func produce(ctx context.Context, c *kafka.Client, topic, value string) error {
+	// Synthetic transport frames, not financial or admission fixtures.
+	wire, err := proto.Marshal(&envelopepb.EventFrame{Envelope: &envelopepb.Envelope{EventId: value}, Payload: []byte(value)})
+	if err != nil {
+		return err
+	}
 	r, err := c.Produce(ctx, &kafka.ProduceRequest{Topic: topic, RequiredAcks: kafka.RequireAll,
-		Records: kafka.NewRecordReader(kafka.Record{Value: kafka.NewBytes([]byte(value))})})
+		Records: kafka.NewRecordReader(kafka.Record{Value: kafka.NewBytes(wire)})})
 	if err != nil {
 		return err
 	}
@@ -87,7 +98,11 @@ func fetch(ctx context.Context, c *kafka.Client, topic string) ([]string, error)
 		if err != nil {
 			return nil, err
 		}
-		values = append(values, string(value))
+		env, payload, err := bus.Unframe(value)
+		if err != nil || env.GetEventId() != string(payload) {
+			return nil, errors.New("fixture frame mismatch")
+		}
+		values = append(values, string(payload))
 	}
 	return values, nil
 }
@@ -122,11 +137,40 @@ func directTopic(ctx context.Context, config *tls.Config, topic string, write bo
 		}
 		var message kafka.Message
 		message, err = conn.ReadMessage(4096)
-		if err == nil && expectedRead != "" && string(message.Value) != expectedRead {
-			return errors.New("direct own-topic readback mismatch")
+		if err == nil && expectedRead != "" {
+			env, payload, decodeErr := bus.Unframe(message.Value)
+			if decodeErr != nil || string(payload) != expectedRead || env.GetEventId() != expectedRead {
+				return errors.New("direct own-topic readback mismatch")
+			}
 		}
 	}
 	return err
+}
+
+func boundedReplay(ctx context.Context, config *tls.Config, topic string, expected []string) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	source := natsrebuild.KafkaTopicChecker{Brokers: []string{"redpanda.kanz-messaging.svc:9094"}, TLSConfig: config}
+	exists, err := source.Exists(ctx, topic)
+	if err != nil || !exists {
+		return errors.New("authenticated replay metadata unavailable")
+	}
+	end := int64(99) // finite high-water-mark cap, not a tail waiting for offset99
+	r, err := source.Open(ctx, topic, replay.Range{EndOffset: &end})
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	for i, value := range expected {
+		event, err := r.Next(ctx)
+		if err != nil || event.Topic != topic || event.Partition != 0 || event.Offset != int64(i) || event.Envelope.GetEventId() != value || string(event.Payload) != value {
+			return errors.New("authenticated bounded replay differs")
+		}
+	}
+	if _, err := r.Next(ctx); !errors.Is(err, io.EOF) {
+		return errors.New("bounded replay did not end at captured watermark")
+	}
+	return r.Close()
 }
 
 var errUnexpectedAcceptance = errors.New("forbidden operation accepted")
@@ -239,6 +283,29 @@ func run() error {
 		if err := directTopic(ctx, transport.TLS, sa, false, "before-renewal"); err != nil {
 			return err
 		}
+		stage = "bounded-replay"
+		if err := boundedReplay(ctx, transport.TLS, sa, []string{"before-renewal"}); err != nil {
+			return err
+		}
+		stage = "replay-peer-denial"
+		var peerDenied atomic.Bool
+		wrongID := tlsconfig.AuthorizeID(spiffeid.RequireFromString("spiffe://kanz.internal/ns/kanz-messaging/sa/not-redpanda"))
+		wrongPeer := tlsconfig.MTLSClientConfig(src, src, func(id spiffeid.ID, chains [][]*x509.Certificate) error {
+			err := wrongID(id, chains)
+			if err != nil && id.String() == "spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda" {
+				peerDenied.Store(true)
+			}
+			return err
+		})
+		end := int64(99)
+		refused, err := replay.NewReader(replay.Config{Brokers: []string{"redpanda.kanz-messaging.svc:9094"}, Topic: sa, TLSConfig: wrongPeer, Range: replay.Range{EndOffset: &end}})
+		if err != nil {
+			return err
+		}
+		_, refusedErr := refused.Next(ctx)
+		if err := refused.Close(); err != nil || refusedErr == nil || errors.Is(refusedErr, io.EOF) || !peerDenied.Load() {
+			return errors.New("replay peer refusal or cleanup failed")
+		}
 		stage = "cross-topic-write"
 		if err := requireTopicDenial(directTopic(ctx, transport.TLS, other, true, "")); err != nil {
 			return err
@@ -296,6 +363,10 @@ func run() error {
 		if err := produce(ctx, c, sa, "after-renewal"); err != nil {
 			return err
 		}
+		stage = "renewed-bounded-replay"
+		if err := boundedReplay(ctx, renewedTransport.TLS, sa, []string{"before-renewal", "after-renewal"}); err != nil {
+			return err
+		}
 		stage = "renewed-topic-denial"
 		if err := requireTopicDenial(directTopic(ctx, renewedTransport.TLS, other, true, "")); err != nil {
 			return err
@@ -331,7 +402,7 @@ func run() error {
 	default:
 		return errors.New("unknown fixture mode")
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"passed": true, "mode": mode, "identity": id, "subjectDN": dn, "renewed": mode == "publish", "sourceVersion": version.String()})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"passed": true, "mode": mode, "identity": id, "subjectDN": dn, "renewed": mode == "publish", "boundedReplay": mode == "publish", "sourceVersion": version.String()})
 }
 
 // failureClass emits only fixed categories or the protocol's numeric error code.

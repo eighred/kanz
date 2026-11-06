@@ -52,6 +52,14 @@ type Subscriber interface {
 	Subscribe(ctx context.Context, subject, group string, h Handler) error
 }
 
+// ReadySubscriber preserves durable queue-group delivery and reports initial
+// catch-up only after the broker has neither pending nor unacknowledged work.
+// This does not assert historical completeness or reverse existing DLQ policy.
+// Unsupported transports must refuse callers requiring this capability.
+type ReadySubscriber interface {
+	SubscribeReady(ctx context.Context, subject, group string, h Handler, ready func()) error
+}
+
 // BroadcastSubscriber delivers a subject's LATEST message to EVERY subscriber on
 // startup, and every subsequent one — an OPTIONAL capability (NATS/JetStream has it;
 // Kafka's client does not implement it, and callers that need it say so).

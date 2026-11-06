@@ -5,6 +5,9 @@ on:
       - 'tools/redpanda-identity/**'
       - 'tools/feed-identity/**'
       - 'kanz/tools/redpandaidentity/**'
+      - 'kanz/tools/replay/**'
+      - 'kanz/tools/natsrebuild/**'
+      - 'kanz/pkg/bus/**'
       - 'kanz/go.mod'
       - 'kanz/go.sum'
       - 'kanz/infra/security/spire/**'
@@ -15,6 +18,9 @@ on:
       - 'tools/redpanda-identity/**'
       - 'tools/feed-identity/**'
       - 'kanz/tools/redpandaidentity/**'
+      - 'kanz/tools/replay/**'
+      - 'kanz/tools/natsrebuild/**'
+      - 'kanz/pkg/bus/**'
       - 'kanz/go.mod'
       - 'kanz/go.sum'
       - 'kanz/infra/security/spire/**'
@@ -47,8 +53,8 @@ jobs:
       - name: Verify probe boundaries
         working-directory: kanz
         run: |
-          go test -p 1 ./tools/redpandaidentity -count=1
-          go vet ./tools/redpandaidentity
+          go test -race -p 1 ./tools/redpandaidentity ./tools/replay ./tools/natsrebuild/... -count=1
+          go vet ./tools/redpandaidentity ./tools/replay ./tools/natsrebuild/...
           test -z "$(gofmt -l tools/redpandaidentity/*.go)"
       - name: Lint probe with repository policy
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0

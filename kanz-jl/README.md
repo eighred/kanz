@@ -30,6 +30,56 @@ it is not an OS or network sandbox. Operational network/resource isolation is
 still required before deployment. Package loading reads the installed runtime
 and generated source files.
 
+## Source-only OCI qualification
+
+`Dockerfile` packages this same worker and its generated contracts using the
+existing pinned private build/runtime mirrors and the checksum-verified Julia
+1.13.3 Linux archive. The runtime is distroless and runs as UID/GID65532. It does
+not expose a server. The existing Go supervisor still invokes its configured
+local Julia executable; it does not invoke Docker or accept an image reference.
+No active deployment or standard build/release matrix uses this image yet.
+
+The `julia-calibration` CI job builds the image with the exact source SHA, then
+runs `qualification/proof.py`. Each invocation uses the actual image ID with
+network disabled, a read-only root/depot, dropped capabilities, no-new-privileges,
+one CPU,1GiB memory/swap limit,64PIDs and a16MiB noexec temporary filesystem.
+There are no host bind mounts or application credentials. In-image assertions
+check the effective UID, capabilities, cgroup limits, absence of non-loopback
+interfaces, and refusal of writes to the installed project/depot/root. Existing
+independent rational goldens run in the same final image. A test-only generated
+Go protobuf oracle then exercises the unmodified entrypoint with13 success and
+refusal inputs, including missing-versus-zero rates and malformed/oversized wire.
+Pipe sizes and execution deadlines are bounded; owned containers are removed
+and their absence verified before success.
+
+Evidence binds the source SHA and image ID to the runtime archive checksum,
+actual installed package Git-tree hashes, locked Project/Manifest hashes,
+worker/test source hashes and independently generated canonical contract bytes.
+The numerical tolerance remains the existing1e-14/1e-13 discount-factor bound.
+No tolerance is widened for container execution. The artifact contains only
+public source/dependency identities and fixed fixture outcomes, not environment
+variables, application configuration, request contents or raw process errors.
+
+**Release blocker (#1413):** this is package identity evidence, not Julia
+dependency vulnerability clearance. Syft can identify the Julia binary, but
+Julia package advisory coverage has not been qualified. This slice neither
+claims vulnerability absence nor adds signing, registry publication or a
+production transport. Those require a separately reviewed release policy and
+deployment integration. A passing disposable image test is not production
+curve authority, a hardened multi-tenant compute service, or live acceptance.
+
+Local logic checks (actual image execution requires Linux/Docker):
+
+```sh
+python3 -B -m unittest discover -s kanz-jl/qualification -p 'test_*.py'
+cd kanz
+go test -p 1 ./tools/julia-conformance -count=1
+go test -p 1 ./test/arch -run '^TestJulia' -count=1
+```
+
+The unconfigured OCI oracle skips in ordinary Go runs; the dedicated workflow
+sets its fixture directory/phase and rejects every skipped or missing outcome.
+
 Supported conventions are linear interpolation in continuous zero rates with
 flat extrapolation; simple-interest deposits and forwards; annual swap fixed
 coupons with a final stub. Future nonpositive span retains the Go default of

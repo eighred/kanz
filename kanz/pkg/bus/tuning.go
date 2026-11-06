@@ -274,6 +274,15 @@ var workTuning = ConsumerTuning{
 	MaxAckPending: 32,
 }
 
+// RetainedWorkTuning preserves work timing and concurrency while retaining
+// transient failures until successful delivery. This is an explicit client
+// override, not a change to the global order or price delivery profiles.
+func RetainedWorkTuning() ConsumerTuning {
+	tuning := workTuning
+	tuning.MaxDeliver = -1
+	return tuning
+}
+
 // WorkRedeliveryBudget is the WALL-CLOCK window over which one work-class
 // message can keep coming back to a handler: the sum of nakDelay across
 // workTuning's delivery budget — the "MaxDeliver is a TIME budget" the comment

@@ -23,6 +23,10 @@ struct Input {
     #[serde(default)]
     at: Option<Clock>,
     #[serde(default)]
+    acknowledgement: String,
+    #[serde(default)]
+    book: String,
+    #[serde(default)]
     case_version: i64,
     #[serde(default)]
     history_digest: String,
@@ -283,6 +287,7 @@ async fn run(input: Input) -> Result<Value, ()> {
             | "list-by-portfolio"
             | "fee-revision"
             | "recovery"
+            | "recovery-ack"
             | "outbox-keys"
             | "outbox-pending"
             | "outbox-published"
@@ -427,6 +432,18 @@ async fn run(input: Input) -> Result<Value, ()> {
                 })
             }.await;
             return Ok(match result{Ok(v)=>v,Err(e)=>json!({"status":e.to_string()})});
+        }
+        if input.mode=="recovery-ack" {
+            use kanz_oms_fold_shadow::proto::order::v1::ExecutionRecoveryApplied;
+            use kanz_oms_store::recovery_ack::{acknowledge_recovery,Book};
+            let raw=bytes(&input.acknowledgement)?;
+            if raw.len()>4096 || input.records.len()!=1 { return Err(()); }
+            let ack=ExecutionRecoveryApplied::decode(raw.as_slice()).map_err(|_|())?;
+            let book=match input.book.as_str(){"ledger"=>Book::Ledger,"position"=>Book::Position,_=>return Err(())};
+            let corrected=record(input.records.into_iter().next().ok_or(())?)?;
+            return Ok(match acknowledge_recovery(&mut client,&input.tenant,&ack,book,&corrected).await {
+                Ok(())=>json!({"status":"committed"}),Err(e)=>json!({"status":e.to_string()}),
+            });
         }
         if input.mode.starts_with("outbox-") {
             let result: Result<Value, kanz_oms_store::Error> = async {

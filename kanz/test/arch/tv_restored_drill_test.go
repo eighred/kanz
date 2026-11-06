@@ -12,7 +12,7 @@ var tvRestoreMarkers = map[string][]string{
 	"tools/Resolve-TvReplayPlatform.ps1":        {"$actual -cne $Digest", "$platforms.Count -ne 1", "-ceq 'amd64'"},
 	"tools/tv-sync-restored-proof.sh":           {"preconditions:{uid:$uid}", "prior drill storage still exists", ".metadata.uid==$pv.spec.claimRef.uid", "PGSSLMODE=verify-full", "PGSSLROOTCERT=/run/postgres-ca/ca.crt", "current_setting('log_min_error_statement')='panic'", "automountServiceAccountToken:false", "9007199254740991", "have_decnum", "tv_exact_json_available || return 1", "$checked >= $started", ".uid==$uid and .controller==true", "--limit-bytes=8192", "qualify_tv_restored_snapshot()"},
 	"tools/testnet-data-plane-recovery.sh":      {"DATABASES+=(tv_sync)", "86ea9839-5806-461d-b2d1-afd1ff5d87ff", "qualify_tv_restored_snapshot", "cleanup_tv_restore_namespace"},
-	".github/workflows/kanz-ci.yml":             {"test_tv_sync_restored_proof.py", "Test-TvReplayPlatform.ps1", "command -v jq"},
+	".github/workflows/kanz-ci.yml":             {"test_tv_sync_restored_proof.py", "Test-TvReplayPlatform.ps1", "run: ./tools/Test-TvReplayPreflight.ps1", "command -v jq"},
 }
 
 func restoredTVBoundary(files map[string]string) error {

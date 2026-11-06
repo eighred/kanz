@@ -54,6 +54,10 @@ func checkTVReplayVerifier(files map[string]string) error {
 }
 
 func checkTVReplayCI(data []byte) error {
+	return checkTVProofCI(data, "check_tv_replay_evidence.py --pattern", "TEST_POSTGRES_URL", "postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable", []string{"set -euo pipefail", "python3 -m unittest discover -s ../.github/scripts -p test_check_tv_replay_evidence.py", `go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)" ./services/tv-sync/internal/projection ./pkg/secret | tee "$RUNNER_TEMP/tv-replay-proof.jsonl"`, `python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"`})
+}
+
+func checkTVProofCI(data []byte, pattern, envName, envValue string, want []string) error {
 	var workflow struct {
 		Jobs map[string]struct {
 			Steps []struct {
@@ -67,14 +71,13 @@ func checkTVReplayCI(data []byte) error {
 		return err
 	}
 	for _, step := range workflow.Jobs["go"].Steps {
-		if !strings.Contains(step.Run, "check_tv_replay_evidence.py --pattern") {
+		if !strings.Contains(step.Run, pattern) {
 			continue
 		}
-		if step.If != "" || step.Continue || step.Env["TEST_POSTGRES_URL"] != "postgres://kanzapp:kanz@localhost:5432/kanzapp?sslmode=disable" {
+		if step.If != "" || step.Continue || step.Env[envName] != envValue {
 			return fmt.Errorf("replay proof must be unconditional with real non-superuser PostgreSQL")
 		}
 		lines := strings.Split(step.Run, "\n")
-		want := []string{"set -euo pipefail", "python3 -m unittest discover -s ../.github/scripts -p test_check_tv_replay_evidence.py", `go test -race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)" ./services/tv-sync/internal/projection ./pkg/secret | tee "$RUNNER_TEMP/tv-replay-proof.jsonl"`, `python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"`}
 		found := 0
 		for _, line := range lines {
 			if found < len(want) && strings.TrimSpace(line) == want[found] {
@@ -97,7 +100,7 @@ func TestTVReplayVerifierRequiresActualPostgresEvidence(t *testing.T) {
 	if err := checkTVReplayCI(data); err != nil {
 		t.Fatal(err)
 	}
-	for _, change := range [][2]string{{"-race -p 1 -json -count=1 -run", "-p 1 -json -count=1 -run"}, {"python3 -m unittest discover -s ../.github/scripts -p test_check_tv_replay_evidence.py", "echo no-tests"}, {`python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"`, "echo no-proof"}, {"check_tv_replay_evidence.py --pattern", "check_tv_replay_evidence.py --unused"}} {
+	for _, change := range [][2]string{{`-race -p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)"`, `-p 1 -json -count=1 -run "$(python3 ../.github/scripts/check_tv_replay_evidence.py --pattern)"`}, {"python3 -m unittest discover -s ../.github/scripts -p test_check_tv_replay_evidence.py", "echo no-tests"}, {`python3 ../.github/scripts/check_tv_replay_evidence.py "$RUNNER_TEMP/tv-replay-proof.jsonl"`, "echo no-proof"}, {"check_tv_replay_evidence.py --pattern", "check_tv_replay_evidence.py --unused"}} {
 		mutated := strings.Replace(string(data), change[0], change[1], 1)
 		if mutated == string(data) {
 			t.Fatal("mutation missed target")

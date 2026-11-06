@@ -22,6 +22,7 @@ POLICY = {
     "k3s-cni-migration.yml": {"disposable-transition"},
     "redpanda-identity-proof.yml": {"developmental-redpanda-identity"},
     "valkey-migration.yml": {"retained-state"},
+    "tokyo-messaging-proof.yml": {"messaging-isolation"},
 }
 
 
