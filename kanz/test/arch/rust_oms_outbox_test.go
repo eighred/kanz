@@ -75,3 +75,34 @@ func TestRustOMSOutboxBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestRustOMSOutboxCancellationProof(t *testing.T) {
+	path := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs", "crates", "oms-store", "examples", "fixture.rs")
+	raw, e := os.ReadFile(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	check := func(source string) bool {
+		code, e := rustMigrationWithoutComments(source)
+		if e != nil {
+			return false
+		}
+		code = rustMigrationCompact(code)
+		for _, marker := range []string{`observed=observe_blocked(&config,&input.schema)=>observed?`, `l.locktype='advisory'ANDNOTl.granted`, `if!absent?`, `iffallback{700}else{100}`} {
+			if !strings.Contains(code, marker) {
+				return false
+			}
+		}
+		return true
+	}
+	source := string(raw)
+	if !check(source) {
+		t.Fatal("cancellation proof missing live wait/cleanup gate")
+	}
+	for _, marker := range []string{"observe_blocked(&config, &input.schema)", "AND NOT l.granted", "if !absent?"} {
+		changed := strings.ReplaceAll(source, marker, "removed")
+		if changed == source || check(changed) {
+			t.Fatalf("mutation not rejected: %s", marker)
+		}
+	}
+}

@@ -220,8 +220,20 @@ async fn run(input: Input) -> Result<Value, ()> {
                 token.cancel_query(NoTls).await
             }
         });
-        let acquire = outbox::lock_key(session, &input.tenant, &input.order_id, input.rollback);
+        let mut acquire = Box::pin(outbox::lock_key(
+            session,
+            &input.tenant,
+            &input.order_id,
+            input.rollback,
+        ));
         if input.mode == "outbox-cancel" || fallback {
+            // The cancellation clock starts only after PostgreSQL reports this
+            // session actively waiting for the advisory lock. Otherwise a fast
+            // CancelRequest can precede query execution and prove nothing.
+            tokio::select! {
+                _ = &mut acquire => return Err(()),
+                observed = observe_blocked(&config, &input.schema) => observed?,
+            }
             return Ok(
                 match tokio::time::timeout(Duration::from_millis(input.limit as u64), acquire).await
                 {
@@ -371,6 +383,21 @@ async fn run(input: Input) -> Result<Value, ()> {
     drop(client);
     driver.abort();
     let _ = driver.await;
+    result
+}
+async fn observe_blocked(config: &tokio_postgres::Config, schema: &str) -> Result<(), ()> {
+    let (observer, connection) = config.connect(NoTls).await.map_err(|_| ())?;
+    let driver = tokio::spawn(async move { connection.await.is_ok() });
+    let result = async {
+        for _ in 0..500 {
+            let waiting:bool=observer.query_one("SELECT EXISTS(SELECT 1 FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid WHERE a.application_name=$1 AND l.locktype='advisory' AND NOT l.granted)", &[&schema]).await.map_err(|_|())?.try_get(0).map_err(|_|())?;
+            if waiting { return Ok(()); }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Err(())
+    }.await;
+    drop(observer);
+    driver.abort();
     result
 }
 fn local_config(config: &tokio_postgres::Config) -> bool {
