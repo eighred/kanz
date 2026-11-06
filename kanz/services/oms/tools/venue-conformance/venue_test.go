@@ -356,7 +356,7 @@ func TestRustVenueActualTLSAndRPC(t *testing.T) {
 		}
 		r := w.call(map[string]any{"method": "CancelOrder", "state": marshal(t, state()), "timeout_ms": 50})
 		if r.Status != "error" || r.Code != int(codes.DeadlineExceeded) {
-			t.Fatal("ambiguous cancellation was confirmed")
+			t.Fatalf("cancellation deadline classification differs: status=%q code=%d", r.Status, r.Code)
 		}
 		w.close(source)
 	})

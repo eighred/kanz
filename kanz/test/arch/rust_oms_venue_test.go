@@ -146,7 +146,7 @@ func checkRustVenueMarkers(files map[string]string) error {
 	required := map[string][]string{
 		"crates/oms-venue/examples/oms-venue-fixture.rs": {`env!("KANZ_BUILD_VERSION")`, `Some("127.0.0.1"|"localhost"|"[::1]")`, `client.close().await`, `input.read(&mutbyte)`},
 		"crates/oms-venue/src/transport.rs":              {`connection_host(&uri)?`, `parse::<std::net::Ipv6Addr>()`, `uri.scheme_str()!=Some("https")`, `starts_with("unix://")`, `spiffe_rustls::mtls_client(source)`, `spiffe_rustls::LocalOnly(domain)`, `spiffe_rustls::authorizer::exact([config.expected_peer.as_str()])`, `.authorize(authorizer)`, `tls.alpn_protocols=vec![b"h2".to_vec()]`, `alpn_protocol()!=Some(b"h2".as_slice())`, `TcpStream::connect`, `tls.connect(server_name,socket).await?`, `a.as_str().contains('@')`, `connect_with_connector(connector)`, `owner.close().await`, `self.owner.close().await`, `fortaskinself.tasks.abort(){let_=task.await;}`, `source.shutdown_with_timeout(Duration::from_secs(2)).await`, `tasks.handles.len()>=64`},
-		"crates/oms-venue/src/client.rs":                 {`max_decoding_message_size(kanz_proto_wire::MAX_BYTES)`, `max_encoding_message_size(kanz_proto_wire::MAX_BYTES)`, `request.set_timeout(deadline)`, `tokio::time::timeout(deadline,async`, `error.code()==Code::Unimplemented`, `ViewState::Indeterminate`, `id.mic!=mic||id.account!=account`, `requirements.verified_account&&!id.account_verified`, `requirements.declared_order_types&&id.supported_order_types.is_empty()`},
+		"crates/oms-venue/src/client.rs":                 {`error.is::<tonic::TimeoutExpired>()`, `.map_err(rpc_error)`, `max_decoding_message_size(kanz_proto_wire::MAX_BYTES)`, `max_encoding_message_size(kanz_proto_wire::MAX_BYTES)`, `request.set_timeout(deadline)`, `tokio::time::timeout(deadline,async`, `error.code()==Code::Unimplemented`, `ViewState::Indeterminate`, `id.mic!=mic||id.account!=account`, `requirements.verified_account&&!id.account_verified`, `requirements.declared_order_types&&id.supported_order_types.is_empty()`},
 		"crates/oms-venue/src/wire.rs":                   {`kanz_proto_wire::normalize(descriptor::<T>()?,raw)`, `value.encoded_len()>kanz_proto_wire::MAX_BYTES`, `src.remaining()>kanz_proto_wire::MAX_BYTES`, `dst.put_slice(item.wire())`, `kanz_proto_wire::put_message(field.number(),state.wire(),&mutout)`, `Canonical::decode(nested)`},
 		"crates/proto-wire/src/lib.rs":                   {`raw.len()>MAX_BYTES`, `out.len()>MAX_BYTES`, `ifdepth>32`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `entries[0].merge(sidecar,&child)?`, `field.is_list()||entries.is_empty()`, `field.is_map()||field.containing_oneof().is_some()`},
 	}
@@ -186,6 +186,7 @@ func TestRustVenueClientBoundary(t *testing.T) {
 		{"exact-peer", "transport.rs", `spiffe_rustls::authorizer::exact([config.expected_peer.as_str()])`, `spiffe_rustls::authorizer::any()`},
 		{"joined-source", "transport.rs", `source.shutdown_with_timeout(Duration::from_secs(2)).await`, `Ok::<(),()>(())`},
 		{"unknown-not-error", "client.rs", `error.code() == Code::Unimplemented`, `true`},
+		{"typed-timeout-only", "client.rs", `error.is::<tonic::TimeoutExpired>()`, `true`},
 		{"identity", "client.rs", `id.mic != mic || id.account != account`, `false`},
 		{"raw-wire", "wire.rs", `dst.put_slice(item.wire())`, `dst.put_slice(&item.value.encode_to_vec())`},
 	} {
@@ -240,5 +241,33 @@ func TestRustVenueActualEvidenceRequired(t *testing.T) {
 		if check(string(w), strings.ReplaceAll(string(c), marker, "removed")) {
 			t.Fatal("missing actual case accepted")
 		}
+	}
+}
+
+// Workspace all-target checks compile the stamped venue example too.
+func TestRustVenueWorkspaceBuildStamped(t *testing.T) {
+	path := filepath.Join(filepath.Dir(moduleRoot(t)), ".github/workflows/architecture-migration.yml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(s string) bool {
+		start := strings.Index(s, "- name: Rust format, compile and unit tests")
+		if start < 0 {
+			return false
+		}
+		s = s[start:]
+		if end := strings.Index(s, "\n      - name:"); end >= 0 {
+			s = s[:end]
+		}
+		stamp := strings.Index(s, `export KANZ_BUILD_VERSION="$(git rev-parse HEAD)"`)
+		build := strings.Index(s, "cargo check --locked --workspace --all-targets")
+		return stamp >= 0 && build > stamp
+	}
+	if !check(string(raw)) {
+		t.Fatal("workspace venue example lacks immutable checkout stamp")
+	}
+	if check(strings.ReplaceAll(string(raw), `export KANZ_BUILD_VERSION="$(git rev-parse HEAD)"`, "")) {
+		t.Fatal("missing build stamp mutation accepted")
 	}
 }

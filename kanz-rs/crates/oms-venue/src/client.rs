@@ -7,6 +7,20 @@ use kanz_oms_fold_shadow::proto::order::v1::{Fill, OrderState};
 use std::time::Duration;
 use tonic::{transport::Channel, Code, Request, Status};
 
+fn rpc_error(status: Status) -> Status {
+    // Tonic 0.14 maps its local transport timeout to Cancelled. Normalize only
+    // the typed local cause, never a remote status code or message string.
+    let mut cause = std::error::Error::source(&status);
+    for _ in 0..16 {
+        let Some(error) = cause else { break };
+        if error.is::<tonic::TimeoutExpired>() {
+            return Status::deadline_exceeded("venue RPC deadline");
+        }
+        cause = error.source();
+    }
+    status
+}
+
 /// No public arbitrary Channel constructor: only the authenticated connector may build this owner.
 pub struct Client {
     pub(crate) channel: Option<Channel>,
@@ -73,6 +87,7 @@ impl Client {
             )
             .await
             .map(tonic::Response::into_inner)
+            .map_err(rpc_error)
         })
         .await
         .map_err(|_| Status::deadline_exceeded("venue RPC deadline"))?
@@ -231,5 +246,22 @@ impl Client {
             identity,
             instruments,
         })
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    #[test]
+    fn only_typed_local_timeout_is_deadline_exceeded() {
+        let local = Status::from_error(Box::new(tonic::TimeoutExpired(())));
+        assert_eq!(local.code(), Code::Cancelled);
+        assert_eq!(rpc_error(local).code(), Code::DeadlineExceeded);
+        let remote = Status::cancelled(tonic::TimeoutExpired(()).to_string());
+        assert_eq!(rpc_error(remote).code(), Code::Cancelled);
+        assert_eq!(
+            rpc_error(Status::unavailable("fixture")).code(),
+            Code::Unavailable
+        );
     }
 }
