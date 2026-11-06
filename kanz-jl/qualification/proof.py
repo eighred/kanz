@@ -13,6 +13,7 @@ import uuid
 
 import native_inventory
 import native_mapping
+import openssl_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 FLAGS = ['--startup-file=no', '--history-file=no', '--compiled-modules=existing',
@@ -27,7 +28,7 @@ class CommandTimeout(RuntimeError):
 
 
 ISOLATION_STAGES = {'imports', 'runtime', 'cgroup', 'process-security',
-                    'write-refusal', 'installed-packages', 'native-runtime', 'native-version', 'inventory'}
+                    'write-refusal', 'installed-packages', 'native-runtime', 'native-version', 'openssl-version', 'inventory'}
 
 
 def isolation_stage(raw):
@@ -116,6 +117,7 @@ EXCLUDED_DEVELOPMENT_ENVIRONMENTS = ['base/JuliaSyntax/docs', 'stdlib/v1.13/TOML
 def validate_inventory(inventory, source, runtime_sha256, native_expected):
     native_inventory.validate(inventory.get('nativeRuntime'), native_expected)
     native_mapping.validate_component(inventory, native_expected)
+    openssl_runtime.validate_component(inventory)
     if inventory.get('excludedDevelopmentEnvironments') != EXCLUDED_DEVELOPMENT_ENVIRONMENTS:
         raise ValueError('packaged development environment boundary differs')
     if inventory['sourceSHA'] != source or inventory['runtime'] != '1.13.3':
@@ -189,7 +191,9 @@ def main():
     if not runtime:
         raise ValueError('verified host Julia executable missing')
     runtime_sha256 = hashlib.sha256(Path(runtime).read_bytes()).hexdigest()
-    native_expected = native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz')
+    native_expected = openssl_runtime.overlay(
+        native_inventory.expected_archive(Path(os.environ['RUNNER_TEMP']) / 'julia.tar.gz'),
+        Path(os.environ['RUNNER_TEMP']) / 'openssl.tar.gz')
     report = {'sourceSHA': source, 'localOnly': True, 'passed': False, 'cleanupPassed': False,
               'juliaAdvisoryCoverage': 'unqualified-release-blocker', 'archiveSHA256': ARCHIVE_SHA256, 'cases': []}
     names = []

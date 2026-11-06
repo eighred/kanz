@@ -120,7 +120,7 @@ retained as public projected evidence, never described as absent. A separate
 manifest-only HTTP1.10.15 fixture must detect CVE-2025-52479/JLSEC-2025-1 using the
 same database. No vulnerable package is installed or executed.
 
-Syft must identify the actual Julia1.13.3 binary in that same image and provides
+Syft must identify the actual Julia 1.13.3 binary in that same image and provides
 runtime/OS package inventory. Raw reports can contain image configuration, so
 they remain in a temporary directory; the artifact contains only projected public
 package/advisory/tool/database identities. Scanner subprocesses inherit no GitHub
@@ -231,3 +231,28 @@ No file or worker dependency is removed. This corrects one component identity;
 it does not clear other native/runtime files, platform reachability, or future
 advisories. Standard release publication remains blocked on residual UNKNOWN
 coverage under #1413.
+
+The OCI runtime explicitly replaces Julia 1.13.3's bundled OpenSSL 3.5.8
+`libcrypto.so.3` and `libssl.so.3` with the two regular library members from the
+checksum-pinned official [OpenSSL 3.5.9 Julia artifact](https://github.com/JuliaBinaryWrappers/OpenSSL_jll.jl/blob/4d127b8384f6a14b3963070f4677730e94407fc5/Artifacts.toml).
+The original `OpenSSL_jll` 3.5.8+0 metadata and worker dependency files remain
+unchanged; evidence distinguishes that metadata from the repaired native bytes.
+This is a two-library runtime overlay, not an assertion that upstream Julia 1.13.3
+already contains the fix. The upstream license is retained. Independent archive
+inventory must match every other selected Julia file exactly and these two files
+must match the independently verified replacement archive. The restricted image
+executes `OpenSSL_version(0)` and initializes/frees an SSL context from that exact
+library pair. Neither operation opens a network connection.
+
+Qualification also retrieves the complete official
+[OpenSSL CNA catalog](https://openssl-library.org/news/secjson/), binds its index
+and every indexed record by hash, and evaluates all recognized affected ranges.
+Unknown shapes, missing records, any affected installed version, or failure to
+detect the 3.5.8/CVE-2026-84782 control refuse qualification. The control uses
+version-range inputs, not a vulnerable executable. The initial complete catalog
+identified 13 advisories affecting 3.5.8, including the HIGH
+[DTLS advisory](https://openssl-library.org/news/secadv/20260929.txt); this does
+not establish a reachable exploit in the network-disabled calibration worker.
+The fresh catalog and executed repaired image remain mandatory. This additional
+component qualification does not resolve the residual native/runtime coverage
+blocker or authorize standard release publication.

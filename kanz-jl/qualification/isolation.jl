@@ -114,21 +114,6 @@ for (dir, dirs, files) in walkdir("/opt/julia-depot/compiled"; follow_symlinks=f
     end
 end
 outside = Dict{String,Any}()
-for loaded in Libdl.dllist()
-    loaded == "linux-vdso.so.1" && continue
-    path = realpath(loaded)
-    if startswith(path, "/opt/julia/")
-        @test haskey(native_files, relpath(path, "/opt/julia"))
-        continue
-    elseif startswith(path, "/opt/julia-depot/")
-        @test haskey(generated_native, relpath(path, "/opt/julia-depot"))
-        continue
-    end
-    @test occursin(r"^/(usr/)?lib(64)?/[A-Za-z0-9_./+-]{1,256}$", path)
-    @test length(outside) < 64
-    outside[path] = bounded_hash(path, 128 * 2^20)
-end
-@test !isempty(outside)
 native = Dict("files"=>native_files, "links"=>native_links, "jll"=>native_jll,
     "generatedNativeImages"=>generated_native,
     "unassignedFiles"=>sort!(vcat(collect(keys(native_files)), ["depot/" * p for p in keys(generated_native)])),
@@ -148,6 +133,47 @@ end
 @test occursin(r"(?m)^7-Zip \(a\) 26\.03 \(x64\) : Copyright \(c\) 1999-2026 Igor Pavlov : 2026-09-03\r?$", seven_output)
 seven = Dict("path"=>"libexec/julia/7z", "sha256"=>native_files["libexec/julia/7z"]["sha256"],
     "version"=>"26.03", "versionCommand"=>"i")
+println(stderr, "KANZ_OCI_STAGE=openssl-version")
+openssl_files = Dict{String,Any}()
+for (name, expected) in (("libcrypto.so.3", "09ac6b8640f13b13badf5d2430a8cd326d27ad77668868ad6c9a36de87c4857d"),
+                         ("libssl.so.3", "044e0615a9f42e6e02298eec073325f528bee55c56901134788220fc5e96a098"))
+    path = "/opt/julia/lib/julia/" * name
+    @test realpath(path) == path && !islink(path)
+    @test native_files["lib/julia/" * name]["sha256"] == expected
+    openssl_files["lib/julia/" * name] = native_files["lib/julia/" * name]
+end
+crypto = Libdl.dlopen("/opt/julia/lib/julia/libcrypto.so.3")
+ssl = Libdl.dlopen("/opt/julia/lib/julia/libssl.so.3")
+@test realpath(Libdl.dlpath(crypto)) == "/opt/julia/lib/julia/libcrypto.so.3"
+@test realpath(Libdl.dlpath(ssl)) == "/opt/julia/lib/julia/libssl.so.3"
+@test unsafe_string(ccall(Libdl.dlsym(crypto, :OpenSSL_version), Cstring, (Cint,), 0)) == "OpenSSL 3.5.9 29 Sep 2026"
+# Exercise the linked ssl/crypto pair without creating a socket or TLS bypass.
+method = ccall(Libdl.dlsym(ssl, :TLS_method), Ptr{Cvoid}, ())
+ssl_context = ccall(Libdl.dlsym(ssl, :SSL_CTX_new), Ptr{Cvoid}, (Ptr{Cvoid},), method)
+@test ssl_context != C_NULL
+ccall(Libdl.dlsym(ssl, :SSL_CTX_free), Cvoid, (Ptr{Cvoid},), ssl_context)
+openssl_license = bytes2hex(sha256(read("/opt/julia/share/licenses/kanz-openssl-runtime/LICENSE.txt")))
+@test openssl_license == "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+openssl = Dict("version"=>"3.5.9", "versionAPI"=>"OpenSSL_version(0)",
+    "archiveSHA256"=>"8e2c75378726017fc66fb7fbbd10fb53522417c3e45a88af77b8853d46f2b063",
+    "files"=>openssl_files, "licenseSHA256"=>openssl_license, "originalJLLVersion"=>native_jll["OpenSSL_jll"]["version"])
+for loaded in Libdl.dllist()
+    loaded == "linux-vdso.so.1" && continue
+    path = realpath(loaded)
+    if startswith(path, "/opt/julia/")
+        @test haskey(native_files, relpath(path, "/opt/julia"))
+        continue
+    elseif startswith(path, "/opt/julia-depot/")
+        @test haskey(generated_native, relpath(path, "/opt/julia-depot"))
+        continue
+    end
+    @test occursin(r"^/(usr/)?lib(64)?/[A-Za-z0-9_./+-]{1,256}$", path)
+    @test length(outside) < 64
+    outside[path] = bounded_hash(path, 128 * 2^20)
+end
+@test !isempty(outside)
+Libdl.dlclose(ssl)
+Libdl.dlclose(crypto)
 println(stderr, "KANZ_OCI_STAGE=inventory")
 generated = Dict{String,String}()
 for (dir, _, files) in walkdir("/opt/kanz-jl/gen")
@@ -170,4 +196,4 @@ TOML.print(stdout, Dict("sourceSHA"=>read("source.sha",String), "runtime"=>strin
     "projectSHA256"=>bytes2hex(sha256(read("Project.toml"))),
     "manifestSHA256"=>bytes2hex(sha256(read("Manifest.toml"))),
     "runtimeExecutableSHA256"=>bytes2hex(sha256(read("/opt/julia/bin/julia"))),
-    "nativeRuntime"=>native, "native7zip"=>seven, "excludedDevelopmentEnvironments"=>excluded_environments, "packages"=>packages, "generated"=>generated, "sources"=>sources))
+    "nativeRuntime"=>native, "native7zip"=>seven, "nativeOpenSSL"=>openssl, "excludedDevelopmentEnvironments"=>excluded_environments, "packages"=>packages, "generated"=>generated, "sources"=>sources))
