@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "examples/fixture.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "examples/fixture.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -116,6 +116,14 @@ func checkRustOMSStoreBoundary(root string) error {
 			return fmt.Errorf("repository lifecycle missing %s", marker)
 		}
 	}
+	if strings.Count(found["src/queries.rs"], `scoped(client,tenant).await?`) != 4 {
+		return fmt.Errorf("query owners must reuse scope")
+	}
+	for _, marker := range []string{`rows.len()>MAX_ROWS`, `constMAX_ROWS:usize=100000`, `total>MAX_BYTES`, `row.try_get::<_,Option<Vec<u8>>>(0)?.ok_or(Error::Capacity)?`, `sum(octet_length(state))OVER()<=$1THENstateEND`, `sum(octet_length(state))OVER()<=$2THENstateEND`, `sum(octet_length(state))OVER()<=$3THENstateEND`, `LIMIT100001`, `status=ANY($1)`, `parent_order_id=$1ANDparent_order_id<>''`, `ORDERBYorder_id`, `ORDERBYcreated_atDESCLIMIT$2`, `SELECTcount(*)FROMordersWHEREportfolio_id=''`, `OrderState::decode(raw.as_slice())`, `result.push(raw)`} {
+		if !strings.Contains(found["src/queries.rs"], marker) {
+			return fmt.Errorf("query boundary missing %s", marker)
+		}
+	}
 	for file, markers := range map[string][]string{
 		"src/lib.rs":          {`iftenant.is_empty()||tenant.len()>256`, `client.transaction().await?`, `set_config('app.tenant_id',$1,true)`, `rolsuper,rolbypassrls`, `relrowsecurityANDrelforcerowsecurity`, `tables.get::<_,i64>(0)!=5`, `WHEREorders.version=$4`, `ONCONFLICT(tenant_id,fill_id)DONOTHING`, `duplicate(&tx,fill.as_ref().map(|f|&f.0)).await?`, `same_except_fee(&original,&revised)`, `ORDERBYrevision_sequenceDESCLIMIT1`, `producer_serviceISNULL`, `tx.commit().await.map_err(|_|Error::CommitUnconfirmed)?`, `&state`, `&r.payload`, `fill_wire(&r.payload)?`},
 		"examples/fixture.rs": {`config.get_hostaddrs().is_empty()`, `s=="127.0.0.1"||s=="localhost"||s=="::1"`, `if!local_config(&config)`, `Duration::from_secs(20)`, `option_env!("KANZ_BUILD_VERSION")`, `std::io::stdin().take(2*1024*1024+1)`, `input.schema.starts_with("oms_store_")`},
@@ -136,7 +144,7 @@ func TestRustOMSStoreBoundary(t *testing.T) {
 }
 
 func checkRustOMSStoreEvidence(workflow, checker string) error {
-	for _, marker := range []string{"TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
+	for _, marker := range []string{"TestRustRepositoryQueries/", "list-status-parent-exact", "portfolio-page-count-backfill", "tenant-same-ids", "corruption-capacity-no-prefix", "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result", "TestRustRepositoryLifecycle/", "concurrent-create-one-fact", "create-restart-load-go-save", "create-invalid-fact-rollback", "create-deferred-commit-rollback", "create-tenant-same-id", "applied-fill-raw-aliases", "read-notfound-unavailable-corruption", "claim-capacity-no-prefix", "claim-read-failure-no-prefix", "load-concurrent-version", "read-oversized-bytes"} {
 		if !strings.Contains(checker, marker) {
 			return fmt.Errorf("missing lifecycle proof %s", marker)
 		}
@@ -182,6 +190,12 @@ func TestRustOMSStoreEvidenceAndMutations(t *testing.T) {
 func TestRustOMSStoreBoundaryMutations(t *testing.T) {
 	source := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
 	for _, tc := range []struct{ file, from, to string }{
+		{"src/queries.rs", "parent_order_id=$1 AND parent_order_id<>''", "parent_order_id=$1"},
+		{"src/queries.rs", "rows.len() > MAX_ROWS", "false"},
+		{"src/queries.rs", "sum(octet_length(state)) OVER ()<=$1", "true"},
+		{"src/queries.rs", "total > MAX_BYTES", "false"},
+		{"src/queries.rs", "status=ANY($1)", "true"},
+		{"src/queries.rs", "result.push(raw)", "result.push(Vec::new())"},
 		{"src/lib.rs", "ON CONFLICT (tenant_id,order_id) DO NOTHING", "ON CONFLICT (tenant_id,order_id) DO UPDATE SET state=EXCLUDED.state"},
 		{"src/lib.rs", "END,version FROM orders WHERE order_id=$1", "END,0 FROM orders WHERE order_id=$1"},
 		{"src/lib.rs", "COALESCE(NULLIF(raw_fill_id,''),fill_id)", "fill_id"},

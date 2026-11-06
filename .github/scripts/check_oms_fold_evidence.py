@@ -25,6 +25,12 @@ REQUIRED = {
         "TestExecutionKeyIndependentOracle", "TestRustExecutionIdentity",
         "TestRustExecutionEconomics", "TestRustRepositoryTransactions",
         "TestRustRepositoryLifecycle",
+        "TestRustRepositoryQueries",
+        *{"TestRustRepositoryQueries/" + case for case in (
+            "list-status-parent-exact", "portfolio-page-count-backfill",
+            "tenant-same-ids", "corruption-capacity-no-prefix",
+            "row-cap-no-prefix", "canonical-index-plans", "sql-failure-no-prefix", "scope-selector-refusal", "unavailable-no-result",
+        )},
         *{"TestRustRepositoryLifecycle/" + case for case in (
             "concurrent-create-one-fact", "create-restart-load-go-save",
             "create-invalid-fact-rollback", "create-deferred-commit-rollback",

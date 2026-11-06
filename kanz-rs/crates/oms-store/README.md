@@ -78,8 +78,24 @@ every actual Rust-write case without skips. Go independently checks durable
 state, raw bytes, versions, claims, journal and outbox. Restart tests restart the
 client process/pool, not the PostgreSQL server.
 
-Unported: admission, venue calls, orchestration, `CommitRecovery` and its wider
+Unported: admission, venue calls, orchestration, the Store Outbox/Proposals owners, `CommitRecovery` and its wider
 transaction, fee approval/write lifecycle, outbox relay, migrations, production
 fencing and rollout. Deployment and exclusive writer handoff need separate
 recovery, rollback, capability and latency proof. This library is not a second
 production OMS and does not close the migration.
+
+The query module implements `List`, `ListByStatus`, `ListByParent` and
+`ListByPortfolio` using the existing denormalized columns and canonical indexes.
+It returns the original protobuf bytes, including unknown fields, after decoding
+for validity. General queries refuse more than 100,000 rows or 1 MiB of combined
+state bytes; SQL withholds all state bytes if that selection exceeds the byte
+bound. Errors never return a successful prefix. Status selectors are bounded to
+128 entries; unknown numeric codes retain Go selection semantics.
+
+Portfolio limits clamp to 200 exactly as Go does. Empty parent/portfolio selectors
+do not select unattributed orders. Portfolio pages order by `created_at DESC`
+without a tie-break guarantee. The unindexed count is a separate READ COMMITTED
+statement, matching the actual Go implementation: it is not a simultaneous
+snapshot of the page. Queries add no admission or recovery authority. The query
+qualification compares actual Rust reads with Go and raw bytes, tenant isolation,
+capacity/corruption refusals, and selective plans using existing indexes.
