@@ -129,6 +129,7 @@ jobs:
         export PATH="$(go env GOPATH)/bin:$PATH"
         buf generate
         bash bootstrap-go-sdk.sh
+        echo "CODEQL_OVERLAY_DATABASE_MODE=none" >> "$GITHUB_ENV"
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL

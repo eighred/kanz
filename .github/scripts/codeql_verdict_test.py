@@ -1,5 +1,7 @@
 """Offline structural/identity fixtures; no token or network required."""
 import copy
+import contextlib
+import io
 import json
 import os
 import sys
@@ -185,6 +187,30 @@ class VerdictTests(unittest.TestCase):
                            ("GITHUB_RUN_ATTEMPT", "0"), ("GITHUB_EVENT_NAME", "pull_request_target")):
             with self.subTest(key=key), self.assertRaises(gate.Refused): gate.source({**env, key:value})
 
+    def test_only_go_has_explicit_full_analysis_control(self):
+        gate.overlay_mode("go", {"CODEQL_OVERLAY_DATABASE_MODE":"none"})
+        for language in ("actions", "python", "javascript-typescript"):
+            gate.overlay_mode(language, {})
+            with self.assertRaises(gate.Refused):
+                gate.overlay_mode(language, {"CODEQL_OVERLAY_DATABASE_MODE":"none"})
+        for mode in ("", "overlay", "overlay-base", "NONE"):
+            with self.assertRaises(gate.Refused):
+                gate.overlay_mode("go", {"CODEQL_OVERLAY_DATABASE_MODE":mode})
+
+    def test_refusal_diagnostics_never_emit_messages_or_locations(self):
+        notes = [{"level":"error", "descriptor":{"id":"go/diagnostics/extraction-errors"},
+                  "message":{"text":"private-marker"}, "locations":[{"uri":"private-marker"}]},
+                 {"level":"error", "descriptor":{"id":"https://private-marker"}}]
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            gate.diagnostic_summary(notes)
+        self.assertEqual(output.getvalue(), "CodeQL notification errors=2 ids=go/diagnostics/extraction-errors,unclassified\n")
+        self.assertNotIn("private-marker", output.getvalue())
+        notes *= 1000
+        with contextlib.redirect_stderr(io.StringIO()) as output:
+            gate.diagnostic_summary(notes)
+        self.assertLess(len(output.getvalue()), 256)
+
     def test_go_extraction_generates_the_canonical_sdk_first(self):
         workflow = (Path(__file__).resolve().parents[1]/"workflows/codeql.yml").read_text(encoding="utf8")
         def valid(text):
@@ -204,9 +230,11 @@ class VerdictTests(unittest.TestCase):
                     and "working-directory: kanz-schemas" in setup
                     and "buf generate" in setup
                     and "bash bootstrap-go-sdk.sh" in setup
+                    and 'echo "CODEQL_OVERLAY_DATABASE_MODE=none" >> "$GITHUB_ENV"' in setup
                     and "continue-on-error" not in setup)
         self.assertTrue(valid(workflow))
         for old, new in (("buf generate", "echo skipped"),
+                         ("CODEQL_OVERLAY_DATABASE_MODE=none", "CODEQL_OVERLAY_DATABASE_MODE=overlay"),
                          ("bash bootstrap-go-sdk.sh", "echo skipped"),
                          ("protoc-gen-go-grpc@v1.5.1", "protoc-gen-go-grpc@latest"),
                          ("version: 1.69.0", "version: latest"),

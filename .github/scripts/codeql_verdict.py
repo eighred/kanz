@@ -265,6 +265,28 @@ def read_report(directory, language):
     return decode(raw), hashlib.sha256(raw).hexdigest()
 
 
+def diagnostic_summary(notes):
+    # Only fixed-shape diagnostic IDs/counts; never messages, locations or snippets.
+    if not isinstance(notes, list):
+        print("CodeQL notification inventory invalid", file=sys.stderr)
+        return
+    errors = [n for n in notes if not isinstance(n, dict) or n.get("level") == "error"]
+    ids = set()
+    for note in errors:
+        descriptor = note.get("descriptor", {}) if isinstance(note, dict) else {}
+        identifier = descriptor.get("id") if isinstance(descriptor, dict) else None
+        if not isinstance(identifier, str) or not re.fullmatch(r"(?:(?:go|js|py|actions)/[a-z0-9/-]{1,100}|codeql-action/[a-z0-9-]{1,100})", identifier):
+            identifier = "unclassified"
+        if len(ids) < 16:
+            ids.add(identifier)
+    print("CodeQL notification errors=" + str(len(errors)) + " ids=" + ",".join(sorted(ids)), file=sys.stderr)
+
+
+def overlay_mode(language, environment):
+    expected = "none" if language == "go" else ""
+    require(environment.get("CODEQL_OVERLAY_DATABASE_MODE", "") == expected, "unexpected overlay mode")
+
+
 def report(value, language):
     require(isinstance(value, dict) and value.get("version") == "2.1.0", "unsupported SARIF")
     runs = value.get("runs")
@@ -304,8 +326,10 @@ def report(value, language):
             require(type(invocation.get("exitCode", 0)) is int and invocation.get("exitCode", 0) == 0, "query invocation exit failure")
             for key in ("toolExecutionNotifications", "toolConfigurationNotifications"):
                 notes = invocation.get(key, [])
-                require(isinstance(notes, list) and all(isinstance(n, dict) and n.get("level") != "error" for n in notes),
-                        "query execution notification failure")
+                healthy = isinstance(notes, list) and all(isinstance(n, dict) and n.get("level") != "error" for n in notes)
+                if not healthy:
+                    diagnostic_summary(notes)
+                require(healthy, "query execution notification failure")
     return set(ids)
 
 
@@ -380,6 +404,7 @@ def main():
     parser.add_argument("--language", choices=tuple(REQUIRED_RULES), required=True)
     args = parser.parse_args()
     try:
+        overlay_mode(args.language, os.environ)
         sha, ref = source(os.environ)
         head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True, timeout=10).stdout.strip()
         require(head == sha, "checkout/source mismatch")
