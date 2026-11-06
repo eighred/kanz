@@ -53,14 +53,20 @@ impl Client {
         value: Canonical<A>,
         deadline: Duration,
     ) -> Result<Canonical<B>, Status> {
-        self.call_budget(method, value, deadline, kanz_proto_wire::Budget::Standard).await
+        self.call_budget(method, value, deadline, kanz_proto_wire::Budget::Standard)
+            .await
     }
     async fn call_budget<A: Schema, B: Schema>(
-        &self, method: &'static str, value: Canonical<A>, deadline: Duration,
+        &self,
+        method: &'static str,
+        value: Canonical<A>,
+        deadline: Duration,
         budget: kanz_proto_wire::Budget,
     ) -> Result<Canonical<B>, Status> {
         if budget == kanz_proto_wire::Budget::RecoveryHistory
-            && (method != "/venue.v1.VenueAdapterService/QueryOrder" || B::NAME != "venue.v1.QueryOrderResponse") {
+            && (method != "/venue.v1.VenueAdapterService/QueryOrder"
+                || B::NAME != "venue.v1.QueryOrderResponse")
+        {
             return Err(Status::invalid_argument("recovery response scope"));
         }
         if deadline.is_zero() || deadline > Duration::from_secs(120) {
@@ -167,13 +173,24 @@ impl Client {
         state: &Canonical<OrderState>,
         deadline: Duration,
     ) -> Result<OrderView, Status> {
-        self.query_order_budget(state, deadline, kanz_proto_wire::Budget::Standard).await
+        self.query_order_budget(state, deadline, kanz_proto_wire::Budget::Standard)
+            .await
     }
     /// Existing complete-history contract: only this QueryOrder response may reach4MiB.
-    pub async fn query_recovery_history(&self, state: &Canonical<OrderState>, deadline: Duration) -> Result<OrderView, Status> {
-        self.query_order_budget(state, deadline, kanz_proto_wire::Budget::RecoveryHistory).await
+    pub async fn query_recovery_history(
+        &self,
+        state: &Canonical<OrderState>,
+        deadline: Duration,
+    ) -> Result<OrderView, Status> {
+        self.query_order_budget(state, deadline, kanz_proto_wire::Budget::RecoveryHistory)
+            .await
     }
-    async fn query_order_budget(&self, state: &Canonical<OrderState>, deadline: Duration, budget: kanz_proto_wire::Budget) -> Result<OrderView, Status> {
+    async fn query_order_budget(
+        &self,
+        state: &Canonical<OrderState>,
+        deadline: Duration,
+        budget: kanz_proto_wire::Budget,
+    ) -> Result<OrderView, Status> {
         let request = wire::with_state(
             venue::QueryOrderRequest {
                 tenant_id: self.tenant.clone(),
@@ -210,7 +227,7 @@ impl Client {
             Ok(venue::OrderViewState::Expired) => ViewState::Expired,
             _ => ViewState::Indeterminate,
         };
-        let fills = wire::messages(&response, "fills")?;
+        let fills = wire::messages_budget(&response, "fills", budget)?;
         Ok(OrderView {
             state,
             response: Some(response),

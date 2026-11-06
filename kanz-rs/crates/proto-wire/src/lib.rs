@@ -19,7 +19,14 @@ impl Unknown {
             let field = desc.get_field(number).ok_or(Error::InvalidInput)?;
             let entry = self.children.entry(number).or_default();
             if field.is_list() || entry.is_empty() {
-                if limit > MAX_BYTES && entry.len().checked_add(children.len()).is_none_or(|n| n > 8000) { return Err(Error::Capacity); }
+                if limit > MAX_BYTES
+                    && entry
+                        .len()
+                        .checked_add(children.len())
+                        .is_none_or(|n| n > 8000)
+                {
+                    return Err(Error::Capacity);
+                }
                 entry.append(&mut children)
             } else if let Kind::Message(child) = field.kind() {
                 entry[0].merge(children.remove(0), &child, limit)?
@@ -32,31 +39,56 @@ impl Unknown {
 }
 /// Closed budgets: normal consumers remain1MiB; recovery history is the existing4MiB contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Budget { Standard, RecoveryHistory }
+pub enum Budget {
+    Standard,
+    RecoveryHistory,
+}
 impl Budget {
-    pub fn bytes(self) -> usize { match self { Self::Standard => MAX_BYTES, Self::RecoveryHistory => 4 * MAX_BYTES } }
+    pub fn bytes(self) -> usize {
+        match self {
+            Self::Standard => MAX_BYTES,
+            Self::RecoveryHistory => 4 * MAX_BYTES,
+        }
+    }
 }
 pub fn normalize(desc: MessageDescriptor, raw: &[u8]) -> Result<Vec<u8>, Error> {
     normalize_with_budget(desc, raw, Budget::Standard)
 }
-pub fn normalize_with_budget(desc: MessageDescriptor, raw: &[u8], budget: Budget) -> Result<Vec<u8>, Error> {
+pub fn normalize_with_budget(
+    desc: MessageDescriptor,
+    raw: &[u8],
+    budget: Budget,
+) -> Result<Vec<u8>, Error> {
     let limit = budget.bytes();
-    if raw.len() > limit { return Err(Error::Capacity); }
+    if raw.len() > limit {
+        return Err(Error::Capacity);
+    }
     let (known, unknown) = split(&desc, raw, 0, limit)?;
-    let value = DynamicMessage::decode(desc.clone(), known.as_slice()).map_err(|_| Error::InvalidInput)?;
-    if value.encoded_len() > limit { return Err(Error::Capacity); }
+    let value =
+        DynamicMessage::decode(desc.clone(), known.as_slice()).map_err(|_| Error::InvalidInput)?;
+    if value.encoded_len() > limit {
+        return Err(Error::Capacity);
+    }
     let encoded = value.encode_to_vec();
     inject(&desc, &encoded, &unknown, 0, limit)
 }
 fn bounded_append(out: &mut Vec<u8>, raw: &[u8], limit: usize) -> Result<(), Error> {
-    if out.len().checked_add(raw.len()).is_none_or(|n| n > limit) { return Err(Error::Capacity); }
-    out.extend_from_slice(raw); Ok(())
+    if out.len().checked_add(raw.len()).is_none_or(|n| n > limit) {
+        return Err(Error::Capacity);
+    }
+    out.extend_from_slice(raw);
+    Ok(())
 }
 fn bounded_message(n: u32, raw: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<(), Error> {
-    fn width(v: u64) -> usize { (64 - v.leading_zeros() as usize).max(1).div_ceil(7) }
+    fn width(v: u64) -> usize {
+        (64 - v.leading_zeros() as usize).max(1).div_ceil(7)
+    }
     let size = width((u64::from(n) << 3) | 2) + width(raw.len() as u64) + raw.len();
-    if out.len().checked_add(size).is_none_or(|n| n > limit) { return Err(Error::Capacity); }
-    put_message(n, raw, out); Ok(())
+    if out.len().checked_add(size).is_none_or(|n| n > limit) {
+        return Err(Error::Capacity);
+    }
+    put_message(n, raw, out);
+    Ok(())
 }
 fn wire(kind: &Kind) -> u8 {
     match kind {
@@ -70,7 +102,12 @@ fn wire(kind: &Kind) -> u8 {
 pub fn accepts_wire(field: &prost_reflect::FieldDescriptor, w: u8) -> bool {
     w == wire(&field.kind()) || (field.is_list() && w == 2 && wire(&field.kind()) != 2)
 }
-fn split(desc: &MessageDescriptor, raw: &[u8], depth: usize, limit: usize) -> Result<(Vec<u8>, Unknown), Error> {
+fn split(
+    desc: &MessageDescriptor,
+    raw: &[u8],
+    depth: usize,
+    limit: usize,
+) -> Result<(Vec<u8>, Unknown), Error> {
     if depth > 32 {
         return Err(Error::Capacity);
     }
@@ -96,7 +133,9 @@ fn split(desc: &MessageDescriptor, raw: &[u8], depth: usize, limit: usize) -> Re
                 bounded_message(number, &clean, &mut known, limit)?;
                 let entries = unknown.children.entry(number).or_default();
                 if field.is_list() || entries.is_empty() {
-                    if limit > MAX_BYTES && entries.len() >= 8000 { return Err(Error::Capacity); }
+                    if limit > MAX_BYTES && entries.len() >= 8000 {
+                        return Err(Error::Capacity);
+                    }
                     entries.push(sidecar)
                 } else {
                     entries[0].merge(sidecar, &child, limit)?

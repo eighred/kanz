@@ -97,6 +97,62 @@ fn patch(
     append(&mut raw, &changed)?;
     Ok(Canonical::decode(&raw)?)
 }
+
+/// Existing verified-history projection. This pure operation is not evidence
+/// that history is complete or permitted: the recovery coordinator owns that
+/// mandatory validation before calling it and persists refusal before ACK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryFoldError {
+    Evidence,
+    PostedUnknown,
+    Fold(Error),
+    Representation(Error),
+}
+pub fn apply_recovered_fill(
+    st: &Canonical<OrderState>,
+    fill: &Canonical<Fill>,
+    now: Timestamp,
+) -> Result<Canonical<OrderState>, RecoveryFoldError> {
+    if fill.value().recovery.is_none() {
+        return Err(RecoveryFoldError::Evidence);
+    }
+    time(&now).map_err(RecoveryFoldError::Representation)?;
+    let terminal = is_terminal(st.value());
+    let mut working = st.value().clone();
+    if terminal {
+        working.status = OrderStatus::Routed as i32;
+    }
+    let leaves = rational(working.ordered_quantity.as_ref())
+        .ok_or(RecoveryFoldError::PostedUnknown)?
+        - rational(working.filled_quantity.as_ref()).ok_or(RecoveryFoldError::PostedUnknown)?;
+    working.leaves_quantity = Some(decimal(leaves).ok_or(RecoveryFoldError::PostedUnknown)?);
+    let working = patch(st, working, &["status", "leaves_quantity"])
+        .map_err(RecoveryFoldError::Representation)?;
+    // Only failure of the existing ApplyFill fold enters Go's durable BlockRecovery branch.
+    let next = apply_fill(&working, fill, now).map_err(RecoveryFoldError::Fold)?;
+    let mut value = next.value().clone();
+    if terminal {
+        value.status = st.value().status;
+    }
+    value.as_of = Some(now);
+    patch(&next, value, &["status", "as_of"]).map_err(RecoveryFoldError::Representation)
+}
+
+/// One final round from the verified complete journal, never a comparison of
+/// exact history against previously rounded incremental averages.
+pub fn recovery_average(
+    st: &Canonical<OrderState>,
+    cost: num_rational::BigRational,
+    total: &crate::proto::common::v1::Decimal,
+) -> Result<Canonical<OrderState>, Error> {
+    let total = rational(Some(total)).ok_or(Error::UnsupportedInput)?;
+    if total <= num_rational::BigRational::zero() {
+        return Ok(st.clone());
+    }
+    let mut value = st.value().clone();
+    value.average_fill_price = Some(decimal(cost / total).ok_or(Error::NumericalFailure)?);
+    patch(st, value, &["average_fill_price"])
+}
 fn carry<A: Schema>(
     target: Canonical<OrderState>,
     source: &Canonical<A>,

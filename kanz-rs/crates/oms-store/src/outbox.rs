@@ -179,7 +179,9 @@ pub struct Session {
     cancellation: Option<Cancellation>,
 }
 impl Session {
-    pub(crate) fn client(&mut self) -> &mut Client {
+    /// Borrow the dedicated client without transferring driver ownership. The
+    /// coordinator closes this session before returning a handler outcome.
+    pub fn client(&mut self) -> &mut Client {
         &mut self.client
     }
 

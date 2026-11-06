@@ -34,6 +34,37 @@ pub mod aggregate;
 pub mod arithmetic;
 pub use arithmetic::{decimal, rational};
 
+/// Whole-message canonical Decimal domain, shared by projector and recovery
+/// preparation. Unknown fields are retained, never interpreted as money.
+pub fn decimal_domain(
+    message: &prost_reflect::DynamicMessage,
+    depth: usize,
+) -> Result<(), kanz_proto_wire::Error> {
+    use prost_reflect::{ReflectMessage, Value};
+    if depth > 32 {
+        return Err(kanz_proto_wire::Error::Capacity);
+    }
+    if message.descriptor().full_name() == "common.v1.Decimal"
+        && matches!(message.get_field_by_name("exponent").as_deref(),Some(Value::I32(n)) if !(-64..=64).contains(n))
+    {
+        return Err(kanz_proto_wire::Error::InvalidInput);
+    }
+    for (_, value) in message.fields() {
+        match value {
+            Value::Message(m) => decimal_domain(m, depth + 1)?,
+            Value::List(values) => {
+                for value in values {
+                    if let Value::Message(m) = value {
+                        decimal_domain(m, depth + 1)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub use kanz_proto_wire::Canonical;
 use prost_reflect::{DescriptorPool, MessageDescriptor};
 use std::sync::OnceLock;
@@ -61,10 +92,40 @@ schema!(proto::order::v1::SubmitOrder, "order.v1.SubmitOrder");
 schema!(proto::order::v1::AmendOrder, "order.v1.AmendOrder");
 
 schema!(proto::order::v1::StateHealed, "order.v1.StateHealed");
-schema!(proto::order::v1::ExecutionRecoveryHistory, "order.v1.ExecutionRecoveryHistory");
-schema!(proto::order::v1::ExecutionRecoveryRecorded, "order.v1.ExecutionRecoveryRecorded");
-schema!(proto::order::v1::ExecutionRecovered, "order.v1.ExecutionRecovered");
-schema!(proto::order::v1::ExecutionRecoveryApplied, "order.v1.ExecutionRecoveryApplied");
-schema!(proto::order::v1::ExecutionFeeCorrectionProposed, "order.v1.ExecutionFeeCorrectionProposed");
-schema!(proto::order::v1::ExecutionFeeCorrectionApproved, "order.v1.ExecutionFeeCorrectionApproved");
+schema!(
+    proto::order::v1::ExecutionRecoveryHistory,
+    "order.v1.ExecutionRecoveryHistory"
+);
+schema!(
+    proto::order::v1::ExecutionRecoveryRecorded,
+    "order.v1.ExecutionRecoveryRecorded"
+);
+schema!(
+    proto::order::v1::ExecutionRecovered,
+    "order.v1.ExecutionRecovered"
+);
+schema!(
+    proto::order::v1::ExecutionRecoveryApplied,
+    "order.v1.ExecutionRecoveryApplied"
+);
+schema!(
+    proto::order::v1::ExecutionFeeCorrectionProposed,
+    "order.v1.ExecutionFeeCorrectionProposed"
+);
+schema!(
+    proto::order::v1::ExecutionFeeCorrectionApproved,
+    "order.v1.ExecutionFeeCorrectionApproved"
+);
 schema!(proto::envelope::v1::Envelope, "envelope.v1.Envelope");
+schema!(
+    proto::order::v1::ExecutionFeeChange,
+    "order.v1.ExecutionFeeChange"
+);
+schema!(
+    proto::order::v1::ExecutionFeeApproval,
+    "order.v1.ExecutionFeeApproval"
+);
+schema!(
+    proto::order::v1::ExecutionRecoveryProvenance,
+    "order.v1.ExecutionRecoveryProvenance"
+);

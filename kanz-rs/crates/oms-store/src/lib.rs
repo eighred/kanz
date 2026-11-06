@@ -15,6 +15,7 @@ pub mod proposals;
 pub mod queries;
 pub mod recovery;
 pub mod recovery_ack;
+pub mod recovery_repository;
 pub mod relay;
 mod relay_wire;
 use identity::{execution_key, same_execution};
@@ -36,6 +37,7 @@ pub enum Error {
     IdentityConflict,
     FeeRevision,
     PositionHistoryUnknown,
+    PostedExecutionUnknown,
     PublicationUnconfirmed,
     UnownedOutbox,
     RecordNotOwned,
