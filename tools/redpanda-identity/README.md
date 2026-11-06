@@ -93,3 +93,37 @@ with an own-topic readback positive control through that path. Only the actual
 broker's topic-authorization code 29 qualifies; local errors, timeouts, unknown
 topics and accepted operations still fail. Normal positive and renewed writes
 retain the pooled transport, and final reads still require exactly four records.
+
+
+After broker startup, the disposable Linux preflight reads the actual configured
+producer reserve and data-volume capacity. If reserve plus 2 GiB headroom is not
+available, a hosted-only helper removes only the verified,
+unrelated preinstalled Android SDK at `/usr/local/lib/android/sdk` on a
+GitHub-hosted Ubuntu runner. It refuses aliases, nested mounts, unknown installation
+identity, incomplete removal, and insufficient readback. Numeric host before/after
+observations survive provisioning failure. The broker volume is then read again;
+host free space cannot stand in for that decisive gate. It does not remove caches,
+repositories or container volumes. This preparation is not permitted on local or
+self-hosted machines.
+
+Before every broker probe, qualification reads the actual `storage_min_free_bytes`
+through the pod-local admin endpoint and the broker data filesystem capacity. It
+requires available bytes strictly greater than that unchanged reserve plus 2 GiB
+of fixture headroom. Only numeric observations are retained; raw cluster config
+is never exported. The gate cannot establish that free space stays constant after
+its observation, so any later broker refusal still fails the proof.
+
+Run 42275410382 failed the first client-a Produce with Kafka storage code 56;
+bootstrap had passed and cleanup succeeded. Its observed 5,356,982,272 available
+bytes was below the documented default reserve of 5,368,709,120 bytes, although
+log classifiers showed no space alert. That supports a reserve-pressure diagnosis
+but does not prove the old runtime setting, which was not recorded. The new source
+requires actual setting and capacity evidence rather than reducing broker safety.
+See [the storage reserve contract](https://docs.redpanda.com/current/reference/properties/cluster-properties/#storage_min_free_bytes)
+and [the hosted Android SDK inventory](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2604-Readme.md).
+
+Run42284210281 refused before broker creation because the initial provisioning
+recipe required an arbitrary24GiB host budget even after verified SDK removal.
+No identity proof ran. The corrected placement provisions only when actual
+broker-volume reserve plus headroom is unavailable, then requires fresh pod
+readback; it does not replace that budget with another guessed threshold.
