@@ -913,13 +913,12 @@ func TestObservabilityScrapePortsMatchTheAnnotations(t *testing.T) {
 // off an inbound request and serve the named tenant's data, mapped to the port
 // they serve it on.
 //
-// datamaster, tv-sync and wealth still deploy their tenant API on the metrics port.
+// datamaster and wealth still deploy their tenant API on the metrics port.
 // Their listener separation and live verification remain under #232. Services
 // that split move to the map below; neither an annotation nor a policy alone
 // proves that the running process separates its routes.
 var tenantHeaderTrustingServices = map[string]int{
 	"datamaster": 8080,
-	"tv-sync":    8091,
 	"wealth":     8080,
 }
 
@@ -939,6 +938,8 @@ var tenantHeaderTrustingServices = map[string]int{
 // allow-observability-scrape's list — so the separation cannot quietly collapse
 // back into one port while the entry keeps claiming otherwise.
 var tenantHeaderTrustingSplitListeners = map[string]int{
+	// #232: Broker API is gateway-only; operations remain on :8091.
+	"tv-sync": 8113,
 	// The API materializes a rebalance proposal into order commands and takes the
 	// issuer — the field the audit trail records as the person who moved the
 	// capital — from the injected principal. A trading surface is the one place

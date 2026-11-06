@@ -1,0 +1,34 @@
+# Source preparation only: the paired release must be mirrored and verified in
+# Tokyo ECR before this auto-synced overlay may be activated. Do not replace the
+# migration image for unrelated services through the global image transformer.
+# The paired migration now runs only in the data-plane migration Job.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tv-sync
+  namespace: kanz-services
+spec:
+  template:
+    metadata:
+      labels:
+        kanz.io/release: f7217a76b48d9b6075a0683ddf35be50fbdf37cb
+      annotations:
+        kanz.io/release-commit: f7217a76b48d9b6075a0683ddf35be50fbdf37cb
+    spec:
+      # DDL runs under the separate postgres-migrations Job/ServiceAccount.
+      # A Pod's init and app share one SA, so neither gets migration credentials.
+      initContainers:
+        - name: migrate
+          $patch: delete
+      volumes:
+        - name: db
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: tv-sync-runtime-db
+      containers:
+        - name: tv-sync
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }

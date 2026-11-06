@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - account-proof-secret-provider-classes.yaml
+  - tv-sync-runtime-secret-provider-class.yaml
   - portfolio-bootstrap-identity.yaml
   - ../../security/secrets/secretproviderclass.yaml
   - ../../deploy/analysis-template.yaml
@@ -12,6 +13,7 @@ resources:
   - ../../deploy/compliance-deploy.yaml
   - ../../deploy/identity-deploy.yaml
   - ../../deploy/oms-deploy.yaml
+  - ../../deploy/tv-sync-deploy.yaml
   - ../../deploy/risk-engine-rollout.yaml
   - ../../deploy/venue-binance-deploy.yaml
   - ../../deploy/venue-okx-deploy.yaml
@@ -26,6 +28,17 @@ commonAnnotations:
 # Replacement runs after commonAnnotations: identity/gateway and the browser
 # edge advance independently of the rest of the testnet release.
 replacements:
+  - source:
+      kind: Deployment
+      name: tv-sync
+      fieldPath: spec.template.metadata.labels.[kanz.io/release]
+    targets:
+      - select:
+          kind: Deployment
+          name: tv-sync
+        fieldPaths:
+          - metadata.annotations.[kanz.io/release-commit]
+          - spec.template.metadata.annotations.[kanz.io/release-commit]
   - source:
       kind: Deployment
       name: identity
@@ -68,6 +81,9 @@ images:
   - name: ghcr.io/eighred/kanz-migrate
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/kanz-migrate
     digest: sha256:5c21d2142e98c51b02918dbde906b820f139331ea766630e4a6188a6b03b7613
+  - name: ghcr.io/eighred/tv-sync
+    newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/tv-sync
+    digest: sha256:88e14a7fb596dc6c17670bba3bdcd43dc380f3affea09c1b6aae5d4cc9aeb91e
   - name: ghcr.io/eighred/oms
     newName: 012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/oms
     digest: sha256:87759ff1dae5f7f2430bf5da2f9cd58761658a021b36a6cb527ea729985e122b
@@ -88,6 +104,7 @@ images:
     digest: sha256:284fa4235657ee6f2a84c73018e0d142bd3fe69e0ff38e6293d4d3f1fccc576b
 
 patches:
+  - path: tv-sync-activation.yaml
   - path: identity-authority-cutover.yaml
   - path: browser-security-release.yaml
   # The canonical file is the sole owner of Vault paths and role bindings. This
@@ -103,7 +120,7 @@ patches:
       $patch: delete
   - target:
       kind: ServiceAccount
-      name: ^(accounting|api-gateway|audit|compliance|identity|oms|risk-engine|venue-binance|venue-okx|web-bff)$
+      name: ^(accounting|api-gateway|audit|compliance|identity|oms|tv-sync|risk-engine|venue-binance|venue-okx|web-bff)$
     patch: |-
       - op: remove
         path: /imagePullSecrets

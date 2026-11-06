@@ -72,11 +72,13 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 		"../../deploy/compliance-deploy.yaml",
 		"../../deploy/identity-deploy.yaml",
 		"../../deploy/oms-deploy.yaml",
+		"../../deploy/tv-sync-deploy.yaml",
 		"../../deploy/risk-engine-rollout.yaml",
 		"../../deploy/venue-binance-deploy.yaml",
 		"../../deploy/venue-okx-deploy.yaml",
 		"../../deploy/web-bff-deploy.yaml",
 		"account-proof-secret-provider-classes.yaml",
+		"tv-sync-runtime-secret-provider-class.yaml",
 		"governance-network-policies.yaml",
 		"gateway-runtime-egress.yaml",
 		"portfolio-bootstrap-identity.yaml",
@@ -86,7 +88,7 @@ func TestTokyoTestnetOverlayLocksEveryCapitalPathImageToECR(t *testing.T) {
 	const registry = "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/"
 	wantImages := []string{
 		"accounting", "api-gateway", "audit", "compliance", "identity",
-		"kanz-migrate", "oms", "risk-engine", "venue-binance", "venue-okx", "web-bff", "cloudflared",
+		"kanz-migrate", "oms", "tv-sync", "risk-engine", "venue-binance", "venue-okx", "web-bff", "cloudflared",
 	}
 	digestPattern := regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	mapped := make(map[string]struct{}, len(overlay.Images))
@@ -342,26 +344,11 @@ func TestTokyoArmsGovernanceControlsFromIndependentSources(t *testing.T) {
 func TestTokyoTestnetOverlayRetainsExactlyTheVaultClassesItsWorkloadsMount(t *testing.T) {
 	root := moduleRoot(t)
 	overlayDir := filepath.Join(root, "infra", "overlays", "testnet-tokyo")
-	raw := mustReadArchFile(t, filepath.Join(overlayDir, "kustomization.yaml"))
-	var overlay testnetKustomization
-	if err := yaml.UnmarshalStrict(raw, &overlay); err != nil {
-		t.Fatal(err)
+	cmd := exec.Command("kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", overlayDir)
+	rendered, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("render complete Tokyo credential graph: %v", err)
 	}
-
-	var deleted *regexp.Regexp
-	for _, patch := range overlay.Patches {
-		if patch.Target.Kind == "SecretProviderClass" && strings.Contains(patch.Patch, "$patch: delete") {
-			var err error
-			deleted, err = regexp.Compile(patch.Target.Name)
-			if err != nil {
-				t.Fatalf("compile SecretProviderClass exclusion: %v", err)
-			}
-		}
-	}
-	if deleted == nil {
-		t.Fatal("Tokyo overlay does not explicitly exclude unmounted canonical Vault classes")
-	}
-
 	type document struct {
 		Kind     string `yaml:"kind"`
 		Metadata struct {
@@ -382,39 +369,29 @@ func TestTokyoTestnetOverlayRetainsExactlyTheVaultClassesItsWorkloadsMount(t *te
 		} `yaml:"spec"`
 	}
 
-	var mounted []string
-	for _, resource := range overlay.Resources {
-		if resource == "../../security/secrets/secretproviderclass.yaml" || resource == "../../deploy/analysis-template.yaml" {
-			continue
-		}
-		body := mustReadArchFile(t, filepath.Clean(filepath.Join(overlayDir, resource)))
-		for _, part := range bytes.Split(body, []byte("\n---")) {
-			var doc document
-			if err := yaml.Unmarshal(part, &doc); err != nil {
-				t.Fatalf("decode %s: %v", resource, err)
-			}
-			for _, volume := range doc.Spec.Template.Spec.Volumes {
-				if name := volume.CSI.VolumeAttributes.SecretProviderClass; name != "" {
-					mounted = append(mounted, name)
-				}
-			}
-		}
-	}
-
-	canonical := mustReadArchFile(t, filepath.Join(root, "infra", "security", "secrets", "secretproviderclass.yaml"))
-	var retained []string
-	for _, part := range bytes.Split(canonical, []byte("\n---")) {
+	var mounted, retained []string
+	for _, part := range bytes.Split(rendered, []byte("\n---")) {
 		var doc document
 		if err := yaml.Unmarshal(part, &doc); err != nil {
-			t.Fatalf("decode canonical Vault class: %v", err)
+			t.Fatal(err)
 		}
-		if doc.Kind == "SecretProviderClass" && !deleted.MatchString(doc.Metadata.Name) {
+		if doc.Kind == "SecretProviderClass" {
 			retained = append(retained, doc.Metadata.Name)
 		}
+		for _, volume := range doc.Spec.Template.Spec.Volumes {
+			if name := volume.CSI.VolumeAttributes.SecretProviderClass; name != "" {
+				mounted = append(mounted, name)
+			}
+		}
 	}
-	assertSameStrings(t, "retained Vault classes versus mounted classes", retained, mounted)
-	if len(retained) != 13 {
-		t.Fatalf("Tokyo minimum graph retained %d Vault classes, want 13", len(retained))
+	assertSameStrings(t, "rendered Vault classes versus actual patched workload mounts", retained, mounted)
+	if len(retained) != 16 {
+		t.Fatalf("Tokyo graph retained %d Vault classes, want 16", len(retained))
+	}
+	for _, name := range retained {
+		if name == "tv-sync-db" {
+			t.Fatal("Tokyo retained legacy shared migration/runtime CSI class")
+		}
 	}
 }
 
@@ -423,8 +400,8 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 	raw := string(mustReadArchFile(t, filepath.Join(filepath.Dir(root), "tools", "Install-TestnetWorkloads.ps1")))
 	for _, required := range []string{
 		"fetch origin main", "HEAD $headCommit is not exact origin/main", "git -C $repoRoot diff --quiet",
-		"resourceCount -ne 62", "Expected 18 rendered container images", "sha256sum --check --status",
-		"-ReleaseTag $imageReleaseCommit", "Tokyo ECR does not retain $repository@$digest under release",
+		"resourceCount -ne 67", "Expected 19 rendered container images", "sha256sum --check --status",
+		"-ReleaseTag $custodyTag", "Resolve-ReviewedTestnetReleaseTag", "Tokyo ECR does not retain $repository@$digest under release",
 		"'tools/Resolve-EcrReleaseDigest.ps1'", ". (Join-Path $PSScriptRoot 'Resolve-EcrReleaseDigest.ps1')",
 		"name: risk-engine-canary", "name: identity-signing-key", "name: venue-binance-keys", "name: venue-okx-keys",
 		"condition=Ready cluster/kanz-testnet-postgres", "condition=complete job/postgres-migrations",
@@ -437,7 +414,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"prometheus.kanz-observability.svc:9090", "workload-analysis-provider-ready",
 		"update-rollback-started", "rollback_workloads", "update-rollback-complete",
 		"update-rollback-state-exact", "update-rollback-state-mismatch", "cmp -s \"${rollback}\" \"${rollback_verify}\"",
-		"policy_preexisting=0", "networkpolicy allow-gateway-to-oms-query --ignore-not-found=true",
+		"capture_policies()", "rollback_policies()", "networkpolicy/allow-gateway-to-oms-query networkpolicy/allow-gateway-runtime-egress networkpolicy/allow-gateway-to-tv-sync",
 		"web_bff_preexisting=0", "delete deployment/web-bff --ignore-not-found=true --wait=true",
 		"policy_restored=0", "for attempt in 1 2 3 4 5",
 		"deployment_restored()", ".status.observedGeneration >= .metadata.generation",
@@ -448,7 +425,7 @@ func TestTokyoWorkloadInstallerProvesMergedInputsAndRunningDigests(t *testing.T)
 		"capture_workloads()", "sort_by(.kind,.metadata.name)",
 		"apiVersion:\"v1\",kind:\"List\",items:", "pods_ready=0; for attempt in $(seq 1 120)",
 		"-VerifyRollback requires -Apply", "workload-rollback-probe-advanced", "exit 86",
-		"workload rollback probe refused: complete preexisting estate required", "$(jq ''.items | length'' \"${rollback}\")\" != 10",
+		"workload rollback probe refused: complete preexisting estate required", "$(jq ''.items | length'' \"${rollback}\")\" != 11",
 		"set env deployment/identity KANZ_ROLLBACK_PROBE=", "rollout status deployment/identity",
 	} {
 		if !strings.Contains(raw, required) {
@@ -475,8 +452,8 @@ func TestTokyoWorkloadPodVerifierMatchesStatusesByContainerName(t *testing.T) {
 		return "012619468098.dkr.ecr.ap-northeast-1.amazonaws.com/" + name + "@" + digest
 	}
 	fixture := func(runtimeDigest string, omitMainStatus bool) []byte {
-		pods := make([]any, 0, 10)
-		for i := 0; i < 10; i++ {
+		pods := make([]any, 0, 11)
+		for i := 0; i < 11; i++ {
 			statuses := []any{}
 			if !omitMainStatus {
 				statuses = append(statuses, map[string]any{

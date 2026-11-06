@@ -2,6 +2,8 @@
 # is an invalid interpreter on Linux/CI and breaks the SEC-02d pre-commit hook +
 # the SEC-02e self-test scripts. Force LF regardless of core.autocrlf.
 *.sh text eol=lf
+# Reviewed release metadata is byte-pinned before the operator parses JSON.
+kanz/infra/overlays/testnet-tokyo/tv-sync-release.json text eol=lf
 kanz/.githooks/* text eol=lf
 
 # EC2 user data runs as Bash; CRLF breaks its shebang and makes Terraform plan

@@ -20,12 +20,10 @@
 #   Recreate, not RollingUpdate: a rolling update runs two pods at once, which is
 #   the same defect for as long as the overlap lasts.
 #
-# COLD BOOK ON RESTART — a real gap, flagged rather than hidden. Readiness flips
-# true as soon as the consumer goroutine starts, NOT once the backlog is folded, so
-# a fresh pod serves an EMPTY book while reporting Ready. There is no replay-to-
-# current gate. Until there is one, a restart of this service means the Broker API
-# briefly answers from a book that is missing everything before the durable's last
-# ack. Treat a tv-sync restart as a data-visibility event.
+# REBUILD BEFORE SERVING (EXEC-M21): current source restores the projection from
+# its durable fact log/checkpoint before binding either HTTP listener. A failed
+# rebuild refuses startup. Keep the startup probe budget below: replay can delay
+# socket availability, and a second consumer replica is still unsafe.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -48,6 +46,7 @@ spec:
     app: tv-sync
   ports:
     - { name: http, port: 8091, targetPort: 8091 }
+    - { name: api, port: 8113, targetPort: 8113 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -101,7 +100,7 @@ spec:
       # makes FORCE RLS apply to it, and it deliberately cannot create tables.
       initContainers:
         - name: migrate
-          image: ghcr.io/eighred/kanz-migrate@sha256:43799cfa71cb4ff6d5c290c2941d2f19d76b458d0c2ec0c110ee9294fc588334
+          image: ghcr.io/eighred/kanz-migrate@sha256:147db5e4edbb6151f44f1b2c799d14d44437298dc00e19d8ad983d54ab333a24
           args: ["--dir", "/migrations/tv-sync"]
           env:
             - { name: KANZ_MIGRATE_DATABASE_URL_FILE, value: /run/secrets/db/migrate-database-url }
@@ -116,11 +115,13 @@ spec:
       containers:
         - name: tv-sync
           # Pinned to a cosign-signed digest by the GitOps bump (CICD-01d).
-          image: ghcr.io/eighred/tv-sync@sha256:ba35f653d2b09d8b0234e4bef9014ed0e02ac3ad3ac492ff672092e170dbd1fd
+          image: ghcr.io/eighred/tv-sync@sha256:88e14a7fb596dc6c17670bba3bdcd43dc380f3affea09c1b6aae5d4cc9aeb91e
           ports:
             - { containerPort: 8091, name: http }
+            - { containerPort: 8113, name: api }
           env:
             - { name: TV_SYNC_LISTEN, value: ":8091" }
+            - { name: TV_SYNC_API_LISTEN, value: ":8113" }
             - { name: TV_SYNC_NATS_URL, value: "nats://nats.kanz-messaging.svc:4222" }
             - { name: TV_SYNC_SOURCE, value: "tv-sync" }
             # SEC-01a. The bus is mTLS-ONLY (infra/nats/nats.yaml sets tls.verify).
@@ -197,10 +198,9 @@ spec:
 ---
 # INFRA-01d / #234 — tv-sync had no disruption budget at all.
 # SINGLETON — zero allowed voluntary disruptions, deliberately (availability.yaml).
-# The projection is an in-process map with NO replay-to-current gate: a fresh pod
-# reports Ready while serving an EMPTY book (see the COLD BOOK note at the top of this
-# file). An unattended eviction therefore hands a trader a confidently wrong positions
-# answer rather than an error.
+# The projection remains an in-process singleton. Rebuild precedes HTTP binding,
+# so an eviction causes downtime during recovery; preserve the zero-disruption
+# budget rather than overlapping consumers or serving a partially recovered book.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

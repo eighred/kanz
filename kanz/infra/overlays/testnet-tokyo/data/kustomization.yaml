@@ -13,6 +13,7 @@ resources:
   - postgres.yaml
   - postgres-provisioner.yaml
   - postgres-migrations.yaml
+  - tv-sync-migration.yaml
   - postgres-aliases.yaml
   - secret-provider-classes.yaml
 
