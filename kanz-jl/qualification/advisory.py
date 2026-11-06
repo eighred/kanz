@@ -1,6 +1,7 @@
 """Actual-image Julia advisory qualification; never release authorization."""
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import shutil
 import tarfile
 import tempfile
 import tomllib
+import uuid
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import proof
@@ -116,8 +118,42 @@ def validate_spdx(sbom, expected):
         raise ValueError('Julia SPDX UUID/version inventory differs')
 
 
-def validate_syft(sbom, image):
-    if sbom.get('descriptor', {}).get('version') != '1.56.0' or sbom.get('source', {}).get('metadata', {}).get('imageID') != image:
+def image_config_digest(image, scratch):
+    # Reuse the existing strict archive parser; Docker29 may expose a manifest
+    # ID while Syft/stereoscope reports the config digest. Never compare kinds.
+    module_path = ROOT / 'kanz/services/tv-sync/test/isolation.py'
+    spec = importlib.util.spec_from_file_location('kanz_image_identity', module_path)
+    identity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(identity)
+    alias = 'kanz-isolation/julia-advisory:kanz-tv-isolation-' + uuid.uuid4().hex[:12]
+    if proof.required(['docker', 'image', 'ls', '--filter', 'reference=' + alias, '--format', '{{.ID}}']).strip():
+        raise ValueError('local image alias already exists')
+    proof.required(['docker', 'tag', image, alias])
+    tagged = proof.required(['docker', 'image', 'inspect', alias, '--format', '{{.Id}}']).decode().strip()
+    if tagged != image:
+        raise ValueError('local alias Docker identity differs')
+    archive = scratch / 'qualified-image.tar'
+    proof.required(['docker', 'save', '--output', str(archive), alias], timeout=180)
+    config = identity.archive_config_digest(archive, alias)
+    if proof.required(['docker', 'image', 'inspect', alias, '--format', '{{.Id}}']).decode().strip() != image:
+        raise ValueError('local alias changed during export')
+    return config
+
+
+def syft_identity_projection(sbom):
+    metadata = sbom.get('source', {}).get('metadata', {})
+    version = sbom.get('descriptor', {}).get('version')
+    result = {'version': version if isinstance(version, str) and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version) else 'invalid',
+              'type': 'image' if sbom.get('source', {}).get('type') == 'image' else 'invalid'}
+    for key in ('imageID', 'manifestDigest'):
+        value = metadata.get(key, '')
+        result[key] = value if isinstance(value, str) and re.fullmatch('sha256:[0-9a-f]{64}', value) else 'invalid'
+    return result
+
+
+def validate_syft(sbom, config_digest):
+    if (sbom.get('descriptor', {}).get('version') != '1.56.0' or sbom.get('source', {}).get('metadata', {}).get('imageID') != config_digest
+            or sbom.get('source', {}).get('type') != 'image'):
         raise ValueError('Syft image/version differs')
     runtime = [p for p in sbom.get('artifacts', []) if p.get('name') == 'julia' and p.get('version') == '1.13.3'
                and p.get('foundBy') == 'binary-classifier-cataloger']
@@ -148,6 +184,12 @@ def validate_report(report, qualification, expected):
         tool = report.get('tools', {}).get(name, {})
         if tool.get('archiveSHA256') != checksum or not re.fullmatch('[0-9a-f]{64}', tool.get('executableSHA256', '')):
             raise ValueError('scanner identity missing')
+    config = report.get('archiveConfigDigest', '')
+    if (not re.fullmatch('sha256:[0-9a-f]{64}', config)
+            or report.get('syftIdentity', {}).get('imageID') != config
+            or report.get('syftIdentity', {}).get('version') != '1.56.0'
+            or report.get('syftIdentity', {}).get('type') != 'image'):
+        raise ValueError('Syft config identity not archive-bound')
     database = report['database']
     if not re.fullmatch('[0-9a-f]{64}', database.get('sha256', '')):
         raise ValueError('advisory snapshot identity missing')
@@ -217,9 +259,12 @@ def main():
             sbom = json.loads(run(['trivy', 'convert', '--format', 'spdx-json', str(raw)]))
             validate_spdx(sbom, expected)
             report['spdxPackages'] = expected
+            stage = 'actual-image-config-binding'
+            report['archiveConfigDigest'] = image_config_digest(image, scratch)
             stage = 'actual-image-runtime-syft'
             syft = json.loads(run(['syft', 'scan', 'docker:' + image, '--quiet', '-o', 'json']))
-            report['runtimeAndOSInventory'] = validate_syft(syft, image)
+            report['syftIdentity'] = syft_identity_projection(syft)
+            report['runtimeAndOSInventory'] = validate_syft(syft, report['archiveConfigDigest'])
             report['otherScanFindings'] = [{'target': r.get('Target'), 'type': r.get('Type'),
                 'advisories': [{'id': v.get('VulnerabilityID'), 'package': v.get('PkgName'),
                     'version': v.get('InstalledVersion'), 'severity': v.get('Severity')} for v in r.get('Vulnerabilities', [])]}

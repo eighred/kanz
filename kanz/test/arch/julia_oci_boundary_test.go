@@ -54,7 +54,9 @@ var juliaOCIMarkers = map[string][]string{
 	"kanz-jl/qualification/advisory.py": {
 		"proof.validate_report(qualification, source, digest(Path(shutil.which('julia')).resolve()))",
 		"validate_control(control_scan)", "validate_image_scan(scan, image, expected)",
-		"validate_spdx(sbom, expected)", "validate_syft(syft, image)",
+		"validate_spdx(sbom, expected)", "validate_syft(syft, report['archiveConfigDigest'])",
+		"identity.archive_config_digest(archive, alias)", "if tagged != image:",
+		"image_config_digest(image, scratch)",
 		"validate_database(metadata, dt.datetime.now(dt.timezone.utc))",
 		"digest(db / 'trivy.db') != db_hash", "validate_report(report, qualification, expected)",
 		"'--image-src', 'docker', image", "'--ignore-unfixed=false'",
@@ -67,6 +69,7 @@ var juliaOCIMarkers = map[string][]string{
 	},
 	".github/workflows/julia-calibration.yml": {
 		"packages: read", "name: Authenticate for private mirrored bases",
+		"python3 -m pip install PyYAML==6.0.3",
 		"run: python3 -B kanz-jl/qualification/proof.py", "if-no-files-found: error",
 	},
 }

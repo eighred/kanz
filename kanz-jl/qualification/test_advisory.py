@@ -1,6 +1,8 @@
 import copy
 import datetime as dt
 import io
+import json
+from unittest.mock import patch
 import tarfile
 import tempfile
 from pathlib import Path
@@ -81,7 +83,7 @@ class AdvisoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):a.validate_database(changed,now)
 
     def test_syft_runtime_requires_scanned_image_and_actual_binary_classifier(self):
-        s={'descriptor':{'version':'1.56.0'},'source':{'metadata':{'imageID':'image'}},
+        s={'descriptor':{'version':'1.56.0'},'source':{'type':'image','metadata':{'imageID':'image'}},
            'artifacts':[{'name':'julia','version':'1.13.3','foundBy':'binary-classifier-cataloger'}]}
         a.validate_syft(s,'image')
         for mutate in [lambda x:x['source']['metadata'].update(imageID='other'),
@@ -90,12 +92,43 @@ class AdvisoryTests(unittest.TestCase):
             changed=copy.deepcopy(s);mutate(changed)
             with self.assertRaises(ValueError):a.validate_syft(changed,'image')
 
+    def test_docker_manifest_id_is_bound_to_exported_config_before_syft_comparison(self):
+        image='sha256:'+'a'*64
+        config=json.dumps({'os':'linux','architecture':'amd64'}).encode()
+        config_hash='sha256:'+a.hashlib.sha256(config).hexdigest()
+        self.assertNotEqual(image,config_hash)
+        calls=[]
+        def docker(args, **kwargs):
+            calls.append(args)
+            if args[1:3]==['image','inspect']:return image.encode()
+            if args[1]=='save':
+                alias=next(call[-1] for call in calls if call[1]=='tag')
+                with tarfile.open(args[3],'w') as archive:
+                    for name,data in [('manifest.json',json.dumps([{'RepoTags':[alias],'Config':'blobs/sha256/'+config_hash[7:]}]).encode()),
+                                      ('blobs/sha256/'+config_hash[7:],config)]:
+                        member=tarfile.TarInfo(name);member.size=len(data);archive.addfile(member,io.BytesIO(data))
+            return b''
+        with tempfile.TemporaryDirectory() as d,patch.object(a.proof,'required',side_effect=docker):
+            self.assertEqual(a.image_config_digest(image,Path(d)),config_hash)
+        with tempfile.TemporaryDirectory() as d,patch.object(a.proof,'required',side_effect=[b'',b'',b'wrong-id']):
+            with self.assertRaises(ValueError):a.image_config_digest(image,Path(d))
+        sbom={'descriptor':{'version':'1.56.0'},'source':{'type':'image','metadata':{'imageID':config_hash}},
+              'artifacts':[{'name':'julia','version':'1.13.3','foundBy':'binary-classifier-cataloger'}]}
+        a.validate_syft(sbom,config_hash)
+        with self.assertRaises(ValueError):a.validate_syft(sbom,image)
+
+    def test_safe_identity_projection_never_exports_config_or_unbounded_fields(self):
+        sbom={'descriptor':{'version':'private'},'source':{'type':'private','metadata':{'imageID':'private','manifestDigest':'private','config':'private'}}}
+        self.assertEqual(a.syft_identity_projection(sbom),{'version':'invalid','type':'invalid','imageID':'invalid','manifestDigest':'invalid'})
+
     def test_report_requires_inventory_controls_snapshot_and_explicit_limits(self):
         expected=self.expected();now=dt.datetime(2026,11,6,tzinfo=dt.timezone.utc)
         q={'sourceSHA':'b'*40,'imageID':'sha256:'+'a'*64,'inventory':{'packages':{'ProtoBuf':{'treeSHA1':'c'*40}}}}
         report={'passed':True,'localOnly':True,'knownAdvisoryControlPassed':True,'limitations':a.LIMITATIONS,
                 'sourceSHA':q['sourceSHA'],'imageID':q['imageID'],'installedPackages':q['inventory']['packages'],
                 'juliaManifest':expected,'spdxPackages':expected,'scanTime':now.isoformat(),
+                'archiveConfigDigest':'sha256:'+'f'*64,
+                'syftIdentity':{'version':'1.56.0','type':'image','imageID':'sha256:'+'f'*64},
                 'database':{'sha256':'d'*64,'Version':2,'UpdatedAt':(now-dt.timedelta(hours=1)).isoformat(),
                             'NextUpdate':(now+dt.timedelta(hours=1)).isoformat(),'DownloadedAt':now.isoformat()},
                 'tools':{n:{'archiveSHA256':h,'executableSHA256':'e'*64}for n,h in a.ARCHIVES.items()},

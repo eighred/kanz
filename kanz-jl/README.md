@@ -142,3 +142,13 @@ Primary pinned evidence:
 - [Trivy0.72 Julia advisory driver](https://github.com/aquasecurity/trivy/blob/v0.72.0/pkg/detector/library/driver.go)
 - [Syft1.56 binary classifiers](https://github.com/anchore/syft/blob/v1.56.0/syft/pkg/cataloger/binary/classifiers.go)
 - [JLSEC scope and limitations](https://github.com/JuliaLang/SecurityAdvisories.jl#scope)
+
+Syft's pinned stereoscope provider reports a **config digest**, which is not
+necessarily Docker29's manifest/index image ID. The qualification creates a
+unique local alias only after successful absence readback, verifies its Docker
+ID equals the qualified image ID, then reuses the existing strict Docker-save
+single-manifest/config parser from tv-sync's isolation harness. The exported
+content-addressed config bytes must hash correctly and describe linux/amd64;
+Syft must report that exact config digest. The alias is checked again after
+export. This is not a label-only or cross-kind digest comparison. Only validated
+IDs/version/type are projected for diagnostics; config contents remain private.
