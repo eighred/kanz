@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Copy a verified release pair; never build, sign, or deploy an image."""
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -74,7 +75,15 @@ def descriptor(d):
     size = d.get("size")
     require(type(size) is int and 0 <= size <= MAX_BLOB, "invalid descriptor size")
     require(isinstance(d.get("mediaType"), str) and d["mediaType"], "missing media type")
-    require(not d.get("urls") and "data" not in d, "external or embedded content is unsupported")
+    require(not d.get("urls"), "external content is unsupported")
+    if "data" in d:
+        require(isinstance(d["data"], str) and len(d["data"]) <= MAX_META, "embedded content exceeds bound")
+        try:
+            inline = base64.b64decode(d["data"], validate=True)
+        except (ValueError, TypeError):
+            raise Refused("invalid embedded content") from None
+        require(len(inline) == size and "sha256:" + hashlib.sha256(inline).hexdigest() == identity,
+                "embedded content identity mismatch")
     return identity, {"size": size, "mediaType": d["mediaType"]}
 
 
@@ -140,11 +149,14 @@ def graph(repository, root, legacy_lookup=None):
                 inventory[key] = metadata
                 pending.append(key)
             elif key not in inventory:
-                require(total + metadata["size"] <= MAX_GRAPH, "content graph exceeds bound")
-                actual, size = command("oras", "blob", "fetch", "--output", "-", repository + "@" + key,
-                                       hashed=True, limit=metadata["size"], timeout=600)
-                require(actual == key and size == metadata["size"], "blob hash or size mismatch")
-                total += size
+                if "data" not in child:
+                    require(total + metadata["size"] <= MAX_GRAPH, "content graph exceeds bound")
+                    actual, size = command("oras", "blob", "fetch", "--output", "-", repository + "@" + key,
+                                           hashed=True, limit=metadata["size"], timeout=600)
+                    require(actual == key and size == metadata["size"], "blob hash or size mismatch")
+                    total += size
+                # Inline bytes were freshly fetched inside this manifest and
+                # already hash/size-checked by descriptor(), per OCI1.1.
                 inventory[key] = metadata
             require(total <= MAX_GRAPH and len(inventory) <= MAX_NODES, "content graph exceeds bound")
         refs = document("oras", "discover", "--format", "json", "--depth", "1", repository + "@" + current)

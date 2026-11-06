@@ -48,7 +48,9 @@ filter. The verifier freshly downloads and hashes every referenced manifest,
 configuration and layer at source and destination. Legacy Cosign `.sig`, `.att`
 and `.sbom` tags are explicitly enumerated, resolved, copied by digest and
 verified too: recursive OCI copying alone does not cover legacy tags. External
-descriptor URLs and unsupported artifact manifest formats are refused. The
+descriptor URLs and unsupported artifact manifest formats are refused. Bounded
+OCI inline `data` is decoded strictly and checked against its digest and size;
+those bytes are freshly read inside the containing hashed manifest. The
 source inventory is read again after copy to detect additions or movement.
 Destination legacy tags use exact `BatchGetImage` lookups, so no `ListImages`
 permission is needed. AWS documents referrer discovery as using the existing

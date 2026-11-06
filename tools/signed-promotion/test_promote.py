@@ -1,4 +1,5 @@
 import hashlib
+import base64
 import importlib.machinery
 import importlib.util
 import json
@@ -81,6 +82,24 @@ class GraphTests(unittest.TestCase):
         for extra in ({"urls": ["https://example.invalid/blob"]}, {"data": "eA=="}, {"size": True}, {"size": p.MAX_BLOB + 1}):
             with self.subTest(extra=extra), self.assertRaises(p.Refused):
                 p.descriptor(self.desc(self.layer, "layer") | extra)
+
+    def test_inline_content_requires_exact_hash_size_and_base64(self):
+        value = self.desc(b"{}", "application/vnd.oci.empty.v1+json") | {"data": "e30="}
+        self.assertEqual(p.descriptor(value)[0], h(b"{}"))
+        for extra in ({"data": "!!!"}, {"data": "eA=="}, {"size": 3}, {"data": "x" * (p.MAX_META + 1)}):
+            with self.subTest(extra=list(extra)), self.assertRaises(p.Refused):
+                p.descriptor(value | extra)
+
+    def test_inline_blob_is_verified_from_fresh_manifest_bytes(self):
+        body = json.loads(self.manifest)
+        body["config"]["data"] = base64.b64encode(self.config).decode()
+        raw = encoded(body)
+        self.raw[h(raw)] = raw
+        with mock.patch.object(p, "command", side_effect=self.fake) as run:
+            result = p.graph("repo", h(raw))
+        self.assertIn(h(self.config), result["descriptors"])
+        self.assertFalse(any(c.args[:3] == ("oras", "blob", "fetch") and c.args[-1].endswith(h(self.config))
+                             for c in run.call_args_list))
 
     def test_count_and_total_bounds(self):
         for key, value in (("MAX_NODES", 1), ("MAX_GRAPH", 1)):
