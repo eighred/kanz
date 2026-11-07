@@ -64,7 +64,7 @@ async fn witness(typed: bool, affected: u64) {
             .unwrap();
         let _startup = body(&mut stream);
         send(&mut stream, b'R', &[0, 0, 0, 0]);
-        send(&mut stream, b'Z', b'I');
+        send(&mut stream, b'Z', b"I");
         let first = batch(&mut stream);
         // No response has yet been sent to Parse: this is a causal exchange
         // discriminator, not a scheduler/elapsed-time assertion.
@@ -84,13 +84,13 @@ async fn witness(typed: bool, affected: u64) {
         );
         send(&mut stream, b'n', &[]);
         if !typed {
-            send(&mut stream, b'Z', b'I');
+            send(&mut stream, b'Z', b"I");
             assert_eq!(batch(&mut stream), b"BES");
             send(&mut stream, b'2', &[]);
         }
         let tag = format!("INSERT 0 {affected}\0");
         send(&mut stream, b'C', tag.as_bytes());
-        send(&mut stream, b'Z', b'I');
+        send(&mut stream, b'Z', b"I");
         // Closing this owned socket ends the client driver; no detached work.
     });
     let outcome = async {
