@@ -26,7 +26,7 @@ func snapshotLandingReadback(raw []byte) bool {
 	input := bytes.NewReader(raw)
 	reader := tar.NewReader(input)
 	h, err := reader.Next()
-	if err != nil || h.Name != "landing/" || h.Typeflag != tar.TypeDir || h.Mode != 0o700 || h.Uid != 65532 || h.Gid != 65532 || h.Size != 0 || h.Linkname != "" || len(h.PAXRecords) != 0 || len(h.Xattrs) != 0 {
+	if err != nil || h.Name != "landing/" || h.Typeflag != tar.TypeDir || h.Mode != 0o700 || h.Uid != 65532 || h.Gid != 65532 || h.Size != 0 || h.Linkname != "" || len(h.PAXRecords) != 0 {
 		return false
 	}
 	if _, err := reader.Next(); err != io.EOF {
@@ -136,6 +136,21 @@ func TestSnapshotImageLandingProvisioningArchive(t *testing.T) {
 	dw := tar.NewWriter(&daemon)
 	if dw.WriteHeader(&tar.Header{Name: "landing/", Typeflag: tar.TypeDir, Mode: 0o700, Uid: 65532, Gid: 65532, Format: tar.FormatPAX, ModTime: time.Unix(1700000000, 0)}) != nil || dw.Close() != nil || !snapshotLandingReadback(daemon.Bytes()) {
 		t.Fatal("daemon-shaped directory metadata rejected")
+	}
+	// Go's tar.Reader retains SCHILY xattrs in PAXRecords. Rejecting every
+	// PAX record therefore covers capabilities without the deprecated Xattrs API.
+	var capability bytes.Buffer
+	cw := tar.NewWriter(&capability)
+	const capabilityKey = "SCHILY.xattr.security.capability"
+	if cw.WriteHeader(&tar.Header{Name: "landing/", Typeflag: tar.TypeDir, Mode: 0o700, Uid: 65532, Gid: 65532, Format: tar.FormatPAX, PAXRecords: map[string]string{capabilityKey: "fixture-capability"}}) != nil || cw.Close() != nil {
+		t.Fatal("capability PAX fixture encoding failed")
+	}
+	decoded, err := tar.NewReader(bytes.NewReader(capability.Bytes())).Next()
+	if err != nil || decoded.PAXRecords[capabilityKey] != "fixture-capability" {
+		t.Fatal("serialized capability PAX record was not retained")
+	}
+	if snapshotLandingReadback(capability.Bytes()) {
+		t.Fatal("capability PAX archive accepted")
 	}
 	valid := []byte(`{"id":"owned","nonce":"nonce","run":"run","running":false,"status":"created","readonly":true,"mount":{"name":"volume","type":"volume","destination":"/tmp","rw":true}}`)
 	if !snapshotLandingTarget(valid, "owned", "nonce", "run", "volume") {
