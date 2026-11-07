@@ -317,6 +317,12 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Test source-free producer refusals
         run: python3 -B -m unittest discover -s tools/rust-audit-tools -p 'test_*.py'
+      - name: Warm existing mirrored builder for OCI exporter
+        run: .github/scripts/warm-builder.sh ghcr.io/eighred/base/buildkit:buildx-stable-1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.37.1
+          driver-opts: image=ghcr.io/eighred/base/buildkit:buildx-stable-1
       - name: Build empty-context tools and qualify actual behavior
         run: python3 -B tools/rust-audit-tools/qualify.py build "$RUNNER_TEMP/rust-audit-tools"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

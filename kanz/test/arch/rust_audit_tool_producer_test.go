@@ -17,7 +17,7 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 	if fmt.Sprintf("%x", sha256.Sum256([]byte(strings.ReplaceAll(recipe, "\r\n", "\n")))) != "5b6c36ac1369b2ba5d70a6c4144bb7fcde5af4e089836ccbf1e507dcaadbebd4" {
 		return fmt.Errorf("unreviewed source-free recipe")
 	}
-	if strings.Count(script, `"--platform", "linux/amd64"`) != 2 {
+	if strings.Count(script, `"--platform", "linux/amd64"`) != 3 {
 		return fmt.Errorf("both build and readback must select exact platform")
 	}
 	if strings.Contains(script, `"docker", "export"`) || strings.Contains(script, `"docker", "create"`) {
@@ -32,7 +32,8 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 		`"--load", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--tag", workref`,
 		`or config != iid:`,
 		`run(build_command(temp, workref, commit), input=recipe)`,
-		`run(build_command(temp, local_tag(commit) + "-probe", commit), input=recipe)`,
+		`compression=uncompressed,force-compression=true,oci-mediatypes=true,name=`,
+		`raise ValueError("OCI diagnostic only: producer qualification remains required")`,
 		`diagnose(probe, commit)`,
 		`desc.get("digest") != root`,
 		`not 0 < desc["size"] <= 1024 * 1024`,
