@@ -104,7 +104,114 @@ pub async fn commit_prepared_recovery(
     batch: &PreparedRecovery,
 ) -> Result<(), Error> {
     let st = projection(batch)?;
-    let status_record = batch.records.last().ok_or(Error::InvalidInput)?;
+    commit_batch(client, tenant, Batch::Prepared(batch), st).await
+}
+
+/// Concrete immutable recipes retain the bounded input history once and expand
+/// one FACT at a time. This is not a callback, permit, or externally prepared
+/// financial projection. The coordinator owns evidence validation.
+pub struct StreamedRecovery {
+    pub state: Vec<u8>,
+    pub order_version: i64,
+    pub case_version: i64,
+    pub history_digest: String,
+    pub missing: Vec<String>,
+    pub executions: Vec<super::recovery_wire::Execution>,
+    pub status: Record,
+}
+enum Batch<'a> {
+    Prepared(&'a PreparedRecovery),
+    Streamed(&'a StreamedRecovery),
+}
+impl Batch<'_> {
+    fn state(&self) -> &[u8] {
+        match self {
+            Self::Prepared(b) => &b.state,
+            Self::Streamed(b) => &b.state,
+        }
+    }
+    fn status(&self) -> Result<&Record, Error> {
+        match self {
+            Self::Prepared(b) => b.records.last().ok_or(Error::InvalidInput),
+            Self::Streamed(b) => Ok(&b.status),
+        }
+    }
+    fn count(&self) -> usize {
+        match self {
+            Self::Prepared(b) => b.records.len() - 1,
+            Self::Streamed(b) => b.executions.len(),
+        }
+    }
+    fn missing(&self) -> &[String] {
+        match self {
+            Self::Prepared(b) => &b.missing,
+            Self::Streamed(b) => &b.missing,
+        }
+    }
+    fn digest(&self) -> &str {
+        match self {
+            Self::Prepared(b) => &b.history_digest,
+            Self::Streamed(b) => &b.history_digest,
+        }
+    }
+    fn versions(&self) -> (i64, i64) {
+        match self {
+            Self::Prepared(b) => (b.order_version, b.case_version),
+            Self::Streamed(b) => (b.order_version, b.case_version),
+        }
+    }
+    fn record(&self, index: usize) -> Result<std::borrow::Cow<'_, Record>, Error> {
+        match self {
+            Self::Prepared(b) => Ok(std::borrow::Cow::Borrowed(&b.records[index])),
+            Self::Streamed(b) => Ok(std::borrow::Cow::Owned(
+                b.executions[index].record(&b.state, &b.status)?,
+            )),
+        }
+    }
+    fn fill(&self, index: usize) -> Result<FillWire, Error> {
+        match self {
+            Self::Prepared(b) => FillWire::decode(&message_field(&b.records[index].payload, 1)?),
+            Self::Streamed(b) => b.executions[index].materialize(),
+        }
+    }
+}
+pub async fn commit_streamed_recovery(
+    client: &mut Client,
+    tenant: &str,
+    batch: &StreamedRecovery,
+) -> Result<(), Error> {
+    validate_missing_keys(&batch.missing)?;
+    if batch.executions.len() > MAX_FILLS
+        || batch.missing.len() > MAX_FILLS
+        || batch.history_digest.len() != 64
+        || !batch.history_digest.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(Error::InvalidInput);
+    }
+    super::recovery_wire::validate_resident(&batch.executions)?;
+    let st = validate_batch(
+        &batch.state,
+        std::slice::from_ref(&batch.status),
+        1,
+        2 * MAX_BYTES,
+    )?;
+    commit_batch(client, tenant, Batch::Streamed(batch), st).await
+}
+fn validate_missing_keys(missing: &[String]) -> Result<(), Error> {
+    // Preflight before commit_batch clones keys: at most 8000 canonical
+    // execution identities, each at most 256 bytes (2,048,000 bytes total).
+    if missing.len() > MAX_FILLS || missing.iter().any(|key| key.len() > 256) {
+        return Err(Error::Capacity);
+    }
+    Ok(())
+}
+async fn commit_batch(
+    client: &mut Client,
+    tenant: &str,
+    batch: Batch<'_>,
+    st: OrderState,
+) -> Result<(), Error> {
+    let status_record = batch.status()?;
     let status = ExecutionRecoveryRecorded::decode(status_record.payload.as_slice())
         .map_err(|_| Error::InvalidInput)?;
     let at = time(status.recorded_at.as_ref().ok_or(Error::InvalidInput)?)?;
@@ -116,7 +223,7 @@ pub async fn commit_prepared_recovery(
         "order.v1.ExecutionRecoveryRecorded:1",
         at,
     )?;
-    let count = batch.records.len() - 1;
+    let count = batch.count();
     if status.case_id.is_empty()
         || status.case_id.len() > 256
         || status.order_id != st.order_id
@@ -149,7 +256,12 @@ pub async fn commit_prepared_recovery(
         return Err(Error::InvalidInput);
     }
     let mut fills = BTreeMap::new();
-    for r in &batch.records[..count] {
+    for index in 0..count {
+        let r = batch.record(index)?;
+        let r = r.as_ref();
+        if matches!(&batch, Batch::Streamed(_)) {
+            validate_batch(batch.state(), std::slice::from_ref(r), 1, 2 * MAX_BYTES)?;
+        }
         fact(
             r,
             tenant,
@@ -160,7 +272,7 @@ pub async fn commit_prepared_recovery(
         )?;
         let event =
             ExecutionRecovered::decode(r.payload.as_slice()).map_err(|_| Error::InvalidInput)?;
-        if event.state.as_ref() != Some(&st) || message_field(&r.payload, 2)? != batch.state {
+        if event.state.as_ref() != Some(&st) || message_field(&r.payload, 2)? != batch.state() {
             return Err(Error::InvalidInput);
         }
         let fill = FillWire::decode(&message_field(&r.payload, 1)?)?;
@@ -180,7 +292,7 @@ pub async fn commit_prepared_recovery(
             || p.case_id != status.case_id
             || p.mapping_version != status.mapping_version
             || p.source_cursor != status.source_cursor
-            || p.payload_digest != batch.history_digest
+            || p.payload_digest != batch.digest()
             || p.execution_digest
                 != format!(
                     "{:x}",
@@ -193,13 +305,16 @@ pub async fn commit_prepared_recovery(
             fee_revision::terms(&fill)?;
         }
         let key = identity::execution_key(f);
-        if key == f.fill_id || fills.insert(key, fill).is_some() {
+        if key == f.fill_id || fills.insert(key, index).is_some() {
             return Err(Error::IdentityConflict);
         }
     }
-    let missing: BTreeSet<_> = batch.missing.iter().cloned().collect();
+    let missing: BTreeSet<_> = batch.missing().iter().cloned().collect();
     let mut posted = BTreeMap::new();
-    for f in &batch.posted {
+    for f in match &batch {
+        Batch::Prepared(b) => b.posted.as_slice(),
+        Batch::Streamed(_) => &[],
+    } {
         if f.value().order_id != st.order_id
             || posted
                 .insert(identity::execution_key(f.value()), f)
@@ -208,8 +323,8 @@ pub async fn commit_prepared_recovery(
             return Err(Error::IdentityConflict);
         }
     }
-    if missing.len() != batch.missing.len()
-        || missing.len() + posted.len() != fills.len()
+    if missing.len() != batch.missing().len()
+        || (matches!(&batch, Batch::Prepared(_)) && missing.len() + posted.len() != fills.len())
         || missing
             .iter()
             .any(|k| !fills.contains_key(k) || posted.contains_key(k))
@@ -218,7 +333,7 @@ pub async fn commit_prepared_recovery(
         return Err(Error::InvalidInput);
     }
     for (key, previous) in &posted {
-        let next = &fills[key];
+        let next = batch.fill(fills[key])?;
         if !identity::same_execution(previous.value(), next.value())
             && (next
                 .value()
@@ -238,13 +353,19 @@ pub async fn commit_prepared_recovery(
     }
     // Immutable history was validated by the trusted preparer; bind its stored
     // digest and mapping here without re-querying a venue or accepting a new history.
-    let history=tx.query_one("SELECT EXISTS(SELECT 1 FROM execution_recovery_history WHERE case_id=$1 AND mapping_version=$2 AND payload_digest=$3)",&[&status.case_id,&status.mapping_version,&batch.history_digest]).await?;
+    let history=tx.query_one("SELECT EXISTS(SELECT 1 FROM execution_recovery_history WHERE case_id=$1 AND mapping_version=$2 AND payload_digest=$3)",&[&status.case_id,&status.mapping_version,&batch.digest()]).await?;
     if !history.get::<_, bool>(0) {
         return Err(Error::InvalidInput);
     }
-    let mut claims: Vec<_> = missing.iter().map(|k| &fills[k]).collect();
-    claims.sort_by(|a, b| a.value().fill_id.cmp(&b.value().fill_id));
-    for fill in claims {
+    let mut claims = Vec::with_capacity(missing.len());
+    for key in &missing {
+        let index = fills[key];
+        let fill = batch.fill(index)?;
+        claims.push((fill.value().fill_id.clone(), index));
+    }
+    claims.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, index) in claims {
+        let fill = batch.fill(index)?;
         let f = fill.value();
         if claim(&tx, &st.order_id, &identity::execution_key(f), &f.fill_id).await? == 0 {
             duplicate(&tx, Some(f)).await?;
@@ -254,8 +375,27 @@ pub async fn commit_prepared_recovery(
     }
     {
         let mut locked =
-            fee_journal::cas_order(&mut tx, tenant, &batch.state, batch.order_version).await?;
-        for (key, fill) in &fills {
+            fee_journal::cas_order(&mut tx, tenant, batch.state(), batch.versions().0).await?;
+        for (key, index) in &fills {
+            let fill = batch.fill(*index)?;
+            if missing.contains(key) {
+                if fill
+                    .value()
+                    .recovery
+                    .as_ref()
+                    .and_then(|p| p.fee_approval.as_ref())
+                    .is_some()
+                {
+                    return Err(Error::FeeRevision);
+                }
+                continue;
+            }
+            // Re-read the durable fee head after acquiring the order CAS lock.
+            // The readonly preparation snapshot is not a substitute for this fence.
+            let previous = match &batch {
+                Batch::Prepared(_) => (**posted.get(key).ok_or(Error::FeeRevision)?).clone(),
+                Batch::Streamed(_) => locked.execution_head(&fill).await?,
+            };
             if fill
                 .value()
                 .recovery
@@ -263,23 +403,28 @@ pub async fn commit_prepared_recovery(
                 .and_then(|p| p.fee_approval.as_ref())
                 .is_some()
             {
-                locked
-                    .record_fee_revision(posted.get(key).ok_or(Error::FeeRevision)?, fill)
-                    .await?;
+                locked.record_fee_revision(&previous, &fill).await?;
+            } else if !identity::same_execution(previous.value(), fill.value()) {
+                return Err(Error::IdentityConflict);
             }
         }
     }
     let checkpoint = count as i32;
     let acknowledgements = checkpoint * 2;
-    let changed=tx.execute("UPDATE execution_recovery_cases SET checkpoint=$1,expected_ack_count=$2,status=$3,reason=$4,version=version+1,updated_at=$5 WHERE case_id=$6 AND version=$7 AND status='investigating' AND checkpoint=0 AND order_id=$8 AND mapping_version=$9 AND source_cursor=$10 AND payload_digest=$11",&[&checkpoint,&acknowledgements,&status.status,&status.reason,&at,&status.case_id,&batch.case_version,&st.order_id,&status.mapping_version,&status.source_cursor,&status.payload_digest]).await?;
+    let changed=tx.execute("UPDATE execution_recovery_cases SET checkpoint=$1,expected_ack_count=$2,status=$3,reason=$4,version=version+1,updated_at=$5 WHERE case_id=$6 AND version=$7 AND status='investigating' AND checkpoint=0 AND order_id=$8 AND mapping_version=$9 AND source_cursor=$10 AND payload_digest=$11",&[&checkpoint,&acknowledgements,&status.status,&status.reason,&at,&status.case_id,&batch.versions().1,&st.order_id,&status.mapping_version,&status.source_cursor,&status.payload_digest]).await?;
     if changed != 1 {
         return Err(Error::Conflict);
     }
-    for (key, fill) in &fills {
+    for (key, index) in &fills {
+        let fill = batch.fill(*index)?;
         let p = fill.value().recovery.as_ref().ok_or(Error::InvalidInput)?;
-        tx.execute("INSERT INTO execution_recovery_targets (case_id,execution_key,payload_digest,execution_digest) VALUES ($1,$2,$3,$4)",&[&status.case_id,key,&batch.history_digest,&p.execution_digest]).await?;
+        tx.execute("INSERT INTO execution_recovery_targets (case_id,execution_key,payload_digest,execution_digest) VALUES ($1,$2,$3,$4)",&[&status.case_id,key,&batch.digest(),&p.execution_digest]).await?;
     }
-    enqueue(&tx, &batch.records).await?;
+    for index in 0..count {
+        let record = batch.record(index)?;
+        enqueue(&tx, std::slice::from_ref(record.as_ref())).await?;
+    }
+    enqueue(&tx, std::slice::from_ref(status_record)).await?;
     commit(tx).await
 }
 
@@ -287,6 +432,18 @@ pub async fn commit_prepared_recovery(
 mod tests {
     use super::*;
     use kanz_order_core::proto::order::v1::Fill;
+    #[test]
+    fn streamed_missing_keys_are_bounded_before_copy() {
+        assert!(validate_missing_keys(&vec!["k".repeat(256); MAX_FILLS]).is_ok());
+        assert!(matches!(
+            validate_missing_keys(&["k".repeat(257)]),
+            Err(Error::Capacity)
+        ));
+        assert!(matches!(
+            validate_missing_keys(&vec![String::new(); MAX_FILLS + 1]),
+            Err(Error::Capacity)
+        ));
+    }
     #[test]
     fn metadata_and_posted_share_one_byte_budget() {
         let raw = Fill {

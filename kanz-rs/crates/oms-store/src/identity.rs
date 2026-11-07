@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{cmp::Ordering, fmt::Write};
 
 /// Exact Go encoding/json string escaping used by fillfact.ExecutionKey.
-fn quoted(s: &str, out: &mut String) {
+pub(crate) fn quoted(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
         match c {
@@ -82,7 +82,7 @@ pub fn same_execution(a: &Fill, b: &Fill) -> bool {
         && compare(a.price.as_ref(), b.price.as_ref()) == Ordering::Equal
         && compare(aa, ba) == Ordering::Equal
 }
-pub(crate) fn same_except_fee(a: &Fill, b: &Fill) -> bool {
+pub fn same_except_fee(a: &Fill, b: &Fill) -> bool {
     let (Some(af), Some(bf)) = (&a.fee, &b.fee) else {
         return false;
     };

@@ -260,6 +260,73 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
     pub async fn flush(&mut self, key: &str) -> Result<Outcome, Failure> {
         self.drain_key(key, true).await
     }
+    /// One absolute work deadline; cleanup is separately awaited. Only confirmed
+    /// published-and-marked records contribute to sent. An expired suffix remains
+    /// uncertain, even if its broker acknowledgement already arrived.
+    pub async fn flush_before(
+        &mut self,
+        key: &str,
+        expires: tokio::time::Instant,
+    ) -> Result<Outcome, Failure> {
+        work_remaining(Some(expires), 0)?;
+        let connected = tokio::time::timeout_at(expires, self.sessions.connect()).await;
+        let session = match connected {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => return Err(Failure { sent: 0, error }),
+            Err(_) => {
+                return Err(Failure {
+                    sent: 0,
+                    error: Error::PublicationUnconfirmed,
+                })
+            }
+        };
+        if tokio::time::Instant::now() >= expires {
+            session.close().await;
+            return Err(Failure {
+                sent: 0,
+                error: Error::PublicationUnconfirmed,
+            });
+        }
+        let Some(mut lock) = outbox::lock_key_before(session, &self.tenant, key, expires)
+            .await
+            .map_err(|error| Failure { sent: 0, error })?
+        else {
+            return Ok(Outcome {
+                sent: 0,
+                stalled: Some(Stall::Contended),
+            });
+        };
+        let mut confirmed = 0;
+        let result = tokio::time::timeout_at(
+            expires,
+            self.under_lock(lock.client(), key, &mut confirmed, Some(expires)),
+        )
+        .await;
+        if tokio::time::Instant::now() >= expires || result.is_err() {
+            lock.close().await;
+            return Err(Failure {
+                sent: confirmed,
+                error: Error::PublicationUnconfirmed,
+            });
+        }
+        let result = result.expect("checked timeout result");
+        match lock.release().await {
+            Ok(session) => session.close().await,
+            Err(error) => {
+                return Err(Failure {
+                    sent: confirmed,
+                    error,
+                })
+            }
+        }
+        if tokio::time::Instant::now() >= expires {
+            return Err(Failure {
+                sent: confirmed,
+                error: Error::PublicationUnconfirmed,
+            });
+        }
+        result
+    }
     pub async fn drain_once(&mut self, client: &mut Client) -> Result<usize, Failure> {
         let keys = outbox::pending_keys(client, &self.tenant, self.batch)
             .await
@@ -315,7 +382,10 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
                 stalled: Some(Stall::Contended),
             });
         };
-        let result = self.under_lock(lock.client(), key).await;
+        let mut confirmed = 0;
+        let result = self
+            .under_lock(lock.client(), key, &mut confirmed, None)
+            .await;
         // Release even after decode, publish, read or mark failure. Never return a
         // connection to a pool, and join the dedicated session before returning.
         match lock.release().await {
@@ -329,13 +399,46 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
             }),
         }
     }
-    async fn under_lock(&mut self, client: &mut Client, key: &str) -> Result<Outcome, Failure> {
-        let records = outbox::pending(client, &self.tenant, key, self.batch)
-            .await
-            .map_err(|error| Failure { sent: 0, error })?;
-        let full = records.len() == self.batch as usize;
+    async fn under_lock(
+        &mut self,
+        client: &mut Client,
+        key: &str,
+        confirmed: &mut usize,
+        expires: Option<tokio::time::Instant>,
+    ) -> Result<Outcome, Failure> {
+        work_remaining(expires, 0)?;
+        // Keep the whole-page fast path. Capacity alone permits bounded single-row
+        // reads under the same key lock; Queue::pending itself never returns a prefix.
+        // A later bad row can therefore follow acknowledged publications, but its
+        // unresolved suffix always returns failure rather than an empty-queue proof.
+        let (records, streaming) =
+            match outbox::pending(client, &self.tenant, key, self.batch).await {
+                Ok(records) => (records, false),
+                Err(Error::Capacity) => (Vec::new(), true),
+                Err(error) => return Err(Failure { sent: 0, error }),
+            };
+        work_remaining(expires, 0)?;
+        let full = streaming || records.len() == self.batch as usize;
+        let mut records = records.into_iter();
         let mut sent = 0;
-        for p in records {
+        while sent < self.batch as usize {
+            work_remaining(expires, sent)?;
+            let next = if streaming {
+                outbox::pending(client, &self.tenant, key, 1)
+                    .await
+                    .map_err(|error| Failure { sent, error })?
+                    .into_iter()
+                    .next()
+            } else {
+                records.next()
+            };
+            work_remaining(expires, sent)?;
+            let Some(p) = next else {
+                return Ok(Outcome {
+                    sent,
+                    stalled: None,
+                });
+            };
             if self.stopped() {
                 return Ok(Outcome {
                     sent,
@@ -344,12 +447,14 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
             }
             let published = match self.framer.frame(&p.record) {
                 Ok(frame) => {
+                    work_remaining(expires, sent)?;
                     tokio::time::timeout(Duration::from_secs(10), self.publisher.publish(&frame))
                         .await
                         .unwrap_or(Err(PublishFailure::Broker))
                 }
                 Err(e) => Err(e),
             };
+            work_remaining(expires, sent)?;
             if let Err(failure) = published {
                 outbox::mark_failed(client, &self.tenant, p.id, Some(failure.cause()))
                     .await
@@ -363,6 +468,8 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
                 .await
                 .map_err(|error| Failure { sent, error })?;
             sent += 1;
+            *confirmed = sent;
+            work_remaining(expires, sent)?;
         }
         Ok(Outcome {
             sent,
@@ -371,9 +478,70 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
     }
 }
 
+// A timeout future can poll an already-ready inner future first. Check between
+// side effects as well as after the outer future so expiry never starts new work.
+fn work_remaining(expires: Option<tokio::time::Instant>, sent: usize) -> Result<(), Failure> {
+    if expires.is_some_and(|at| tokio::time::Instant::now() >= at) {
+        Err(Failure {
+            sent,
+            error: Error::PublicationUnconfirmed,
+        })
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn expired_ready_inner_preserves_confirmed_prefix_and_refuses_success() {
+        let expires = tokio::time::Instant::now() - Duration::from_secs(1);
+        let ready = tokio::time::timeout_at(expires, std::future::ready(Ok::<_, Error>(()))).await;
+        assert!(matches!(ready, Ok(Ok(()))));
+        let refusal = work_remaining(Some(expires), 3).unwrap_err();
+        assert_eq!(refusal.sent, 3);
+        assert_eq!(refusal.error, Error::PublicationUnconfirmed);
+        assert!(work_remaining(None, 3).is_ok());
+        assert!(work_remaining(
+            Some(tokio::time::Instant::now() + Duration::from_secs(1)),
+            3
+        )
+        .is_ok());
+    }
+    #[tokio::test]
+    async fn already_expired_flush_does_not_open_a_session() {
+        struct NeverPublisher;
+        impl Publisher for NeverPublisher {
+            fn publish<'a>(&'a mut self, _: &'a Frame) -> Task<'a, Result<(), PublishFailure>> {
+                panic!("expired work reached publisher")
+            }
+        }
+        struct CountSessions(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Sessions for CountSessions {
+            fn connect(&mut self) -> Task<'_, Result<outbox::Session, Error>> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { Err(Error::Database) })
+            }
+        }
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut relay = Relay::new(
+            NeverPublisher,
+            CountSessions(calls.clone()),
+            Framer::new("fixture".into(), "version".into()).unwrap(),
+            "tenant".into(),
+            1,
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        let result = relay
+            .flush_before("key", tokio::time::Instant::now() - Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(result.sent, 0);
+        assert_eq!(result.error, Error::PublicationUnconfirmed);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
     fn record() -> Record {
         Record {
             tenant: "tenant-a".into(),

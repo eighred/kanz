@@ -78,11 +78,13 @@ every actual Rust-write case without skips. Go independently checks durable
 state, raw bytes, versions, claims, journal and outbox. Restart tests restart the
 client process/pool, not the PostgreSQL server.
 
-Unported: admission, venue calls, orchestration, the Store Outbox/Proposals owners, `CommitRecovery` preparation/orchestration and its wider
-transaction, fee approval/proposal and full recovery lifecycle, outbox relay, migrations, production
-fencing and rollout. Deployment and exclusive writer handoff need separate
-recovery, rollback, capability and latency proof. This library is not a second
-production OMS and does not close the migration.
+Production admission, orchestration, migrations, fencing and rollout remain
+outside this repository owner. The query, proposal, queue, relay, position and
+recovery-tail ports below do not activate a writer. The separate
+[recovery coordinator](../oms-recovery/README.md) composes observation, verified
+history preparation, persisted fee evidence, ACK/Parked and the shared atomic
+tail. Exclusive writer handoff still needs operational recovery, rollback,
+capacity and funded-lifecycle acceptance; this is not a second production OMS.
 
 The query module implements `List`, `ListByStatus`, `ListByParent` and
 `ListByPortfolio` using the existing denormalized columns and canonical indexes.
@@ -288,6 +290,13 @@ MarkPublished. Acknowledgement followed by an unconfirmed database result leaves
 at-least-once redelivery possible; it is never proof that publication rolled back.
 Go Record.Event does not persist EventID, so each retry receives a fresh UUIDv7
 and idempotency key while durable payload, timestamp and attribution survive.
+
+The normal queue-page read remains unchanged. If its aggregate byte budget refuses
+the page, the relay reads one bounded record at a time under the same key lock,
+up to the configured batch count. This adds SQL round trips only on that fallback.
+A corrupt or oversized later record can follow an acknowledged prefix; the suffix
+remains pending and the result is a failure/stall, never a successful empty queue.
+Queue.Pending itself still refuses the whole page without returning a prefix.
 
 Canonical descriptors resolve payload types. Known protobuf fields are normalized
 like Go Unmarshal/Marshal, including duplicate embedded messages. The existing

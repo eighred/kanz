@@ -103,6 +103,7 @@ REQUIRED = {
         "TestRustVenueActualTLSAndRPC/unknown-duplicate-and-noncanonical-wire",
         "TestRustVenueActualTLSAndRPC/query-three-state-and-unimplemented",
         "TestRustVenueActualTLSAndRPC/cancel-deadline-is-not-confirmed",
+        "TestRustVenueActualTLSAndRPC/remote-cancel-before-deadline-stays-cancelled",
         "TestRustVenueRegistration",
         "TestRustVenueRegistration/identity-and-catalog",
         "TestRustVenueRegistration/wrong-mic",
@@ -223,6 +224,8 @@ REQUIRED = {
             "poison-key-isolation", "publish-mark-rollback-redelivery", "mark-failed-refusal",
             "stop-joins-inflight", "competing-go-rust", "tenant-service-isolation", "real-broker-refusal-stops-key",
         )},
+        "TestRustRelayPageCapacity",
+        *{"TestRustRelayPageCapacity/" + case for case in ("valid", "oversized", "corrupt")},
         "TestRustProposalSharedContract", "TestRustProposalTransactions",
         *{"TestRustProposalSharedContract/" + case.replace(" ", "_") for case in (
             'the dual-control record survives the round trip',

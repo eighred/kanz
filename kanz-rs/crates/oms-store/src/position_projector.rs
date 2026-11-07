@@ -14,7 +14,7 @@ use kanz_order_core::proto::{
     FILE_DESCRIPTOR_SET,
 };
 use prost::Message;
-use prost_reflect::{DescriptorPool, DynamicMessage, ReflectMessage, Value};
+use prost_reflect::{DescriptorPool, DynamicMessage};
 use sha2::{Digest, Sha256};
 use std::{fmt::Write, time::SystemTime};
 use tokio_postgres::Client;
@@ -61,29 +61,9 @@ fn nested_fill(raw: &[u8], field: u32) -> Result<Vec<u8>, Error> {
     found.ok_or(Error::InvalidInput)
 }
 fn domain(msg: &DynamicMessage, depth: usize) -> Result<(), Error> {
-    if depth > 32 {
-        return Err(Error::Capacity);
-    }
-    if msg.descriptor().full_name() == "common.v1.Decimal"
-        && matches!(msg.get_field_by_name("exponent").as_deref(), Some(Value::I32(n)) if !(-64..=64).contains(n))
-    {
-        return Err(Error::InvalidInput);
-    }
-    for (_, v) in msg.fields() {
-        match v {
-            Value::Message(m) => domain(m, depth + 1)?,
-            Value::List(values) => {
-                for v in values {
-                    if let Value::Message(m) = v {
-                        domain(m, depth + 1)?;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    kanz_order_core::decimal_domain(msg, depth).map_err(Error::from)
 }
+
 fn time(t: Option<&prost_types::Timestamp>) -> Result<SystemTime, Error> {
     let value = t.copied().unwrap_or_default();
     if !identity::timestamp(&value) {
@@ -333,6 +313,7 @@ pub async fn handle<P: Publisher, S: Sessions>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost_reflect::Value;
     #[test]
     fn subject_tokens_are_injective() {
         assert_eq!(token(""), "%_EMPTY");

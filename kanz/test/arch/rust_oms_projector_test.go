@@ -16,7 +16,7 @@ func TestRustOMSPositionProjectorBoundary(t *testing.T) {
 		`envelope.len()>MAX_BYTES||payload.len()>MAX_BYTES-envelope.len()`,
 		`tenant.is_empty()||(tenant!="__system__"&&env.tenant_id!=tenant)`,
 		`crate::relay_wire::normalize(desc.clone(),payload)?`, `domain(&dynamic,0)?`,
-		`!(-64..=64).contains(n)`, `env.event_type!=RECOVERED`, `env.event_class!=EventClass::Factasi32`, `env.tenant_id!=tenant`,
+		`kanz_order_core::decimal_domain(msg,depth)`, `env.event_type!=RECOVERED`, `env.event_class!=EventClass::Factasi32`, `env.tenant_id!=tenant`,
 		`fill.order_id!=st.order_id`, `fill.venue_account_id!=st.venue_account_id`, `fill.instrument_id!=st.instrument_id`, `fill.side!=st.side`,
 		`Sha256::digest(wire.without_recovery()?.journal_bytes()?)`, `fee_revision::terms(&wire)?`,
 		`causation_id:env.event_id.clone()`, `trace_context:env.trace_context.clone()`,
