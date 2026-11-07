@@ -7,10 +7,28 @@ import transaction_fixture as fixture
 
 import proof
 import rollout_probe
+from test_network_evidence import complete_record
 from transaction_fixture import CASES, validate_report, deployment_diagnostic, runtime_failure_category, synthetic_runtime_detail
 
 
 class TransactionEvidenceTests(unittest.TestCase):
+    def test_durable_network_evidence_refuses_missing_tampered_or_unfinished(self):
+        record = complete_record()
+        good = {"record": record, "sha256": fixture.tx.fingerprint(record), "durableSequence": 25, "receiptCount": 32}
+        fixture.validate_network_receipt(good)
+        baseline = complete_record(False)
+        bad = {**good, "record": baseline, "sha256": fixture.tx.fingerprint(baseline)}
+        with self.assertRaises(ValueError): fixture.validate_network_receipt(bad)
+        for field, value in (("sha256", "a" * 64), ("durableSequence", 0), ("receiptCount", 25),
+                             ("receiptCount", 65), ("receiptCount", True), ("record", {})):
+            bad = copy.deepcopy(good); bad[field] = value
+            with self.subTest(field=field), self.assertRaises((ValueError, KeyError)):
+                fixture.validate_network_receipt(bad)
+        source = inspect.getsource(fixture.run_fixture)
+        self.assertLess(source.index("durable(value)"), source.index('raw = (receipt_directory'))
+        self.assertIn('if value["format"] == "kanz-gateway-network-v1":', source)
+        self.assertIn('durable.close()', source)
+
     def test_actual_ipv6_control_requires_exact_api_shape_and_refusal(self):
         created = []
         mode = "valid"
@@ -117,7 +135,8 @@ class TransactionEvidenceTests(unittest.TestCase):
         self.assertEqual(CASES[1:9], ["response_loss_" + str(i) for i in range(1, 9)])
 
     def test_exact_source_attempt_complete_cases_cleanup_and_identity_required(self):
-        report = {"format": "kanz-gateway-policy-transaction-proof-v1", "source": "a" * 40, "tree": "b" * 40,
+        network_record = complete_record()
+        report = {"networkReceipt": {"record": network_record, "sha256": fixture.tx.fingerprint(network_record), "durableSequence": 25, "receiptCount": 32}, "format": "kanz-gateway-policy-transaction-proof-v1", "source": "a" * 40, "tree": "b" * 40,
                   "runID": "123", "runAttempt": "2", "renderSHA256": "c" * 64, "nodeImage": proof.feed.NODE,
                   "cluster": "cni-proof-" + "d" * 12, "cases": list(CASES), "passed": True, "cleanupPassed": True,
                   "emptyEndpointSlice": {"serviceUID": "a"*8+"-"+"a"*4+"-"+"a"*4+"-"+"a"*4+"-"+"a"*12,

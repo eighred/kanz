@@ -498,11 +498,36 @@ class Fixture:
         self.mode = "flannel"
 
 
+def rendered_gateway_proof(f, source, phase):
+    # The executor remains bound to this owned K3s container, never a host context.
+    import importlib.util
+    import yaml
+    path = Path(__file__).resolve().parents[1] / 'gateway-policy-proof/proof.py'
+    spec = importlib.util.spec_from_file_location('rendered_gateway_proof', path)
+    gateway = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gateway)
+    policies, labels, rendered = gateway.render(command)
+    report = {'sourceSHA': source, 'sourceTree': command(['git', 'rev-parse', 'HEAD^{tree}']),
+              'runID': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'backend': f.mode, 'phase': phase, 'renderSHA256': rendered, 'observations': {},
+              'policies': [{'name': p['metadata']['name'], 'namespace': p['metadata']['namespace'],
+                            'sha256': gateway.digest(p)} for p in policies]}
+    def k(*args, data=None, timeout=90):
+        values = list(yaml.safe_load_all(data)) if data is not None else []
+        value = ({'apiVersion': 'v1', 'kind': 'List', 'items': values} if len(values) > 1
+                 else values[0] if values else None)
+        return f.k(*args, value=value, timeout=min(timeout, 90))
+    gateway.qualify_union(k, policies, labels, report)
+    gateway.validate_union(report)
+    return report
+
+
 def main():
     name = "kanz-cni-migration-" + uuid.uuid4().hex[:24]
     f = Fixture(name)
     source = command(["git", "rev-parse", "HEAD"])
-    evidence = {"source": source, "nodeImage": NODE, "verdict": "FAIL", "phases": {}, "cleanup": "unknown"}
+    evidence = {"source": source, "tree": command(["git", "rev-parse", "HEAD^{tree}"]),
+                "runID": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "nodeImage": NODE, "verdict": "FAIL", "phases": {}, "cleanup": "unknown"}
     phase = "create"
     try:
         command(["docker", "volume", "create", "--label", LABEL + "=" + name, f.volume])
@@ -557,7 +582,8 @@ def main():
             f.datapath()
             report = proof.run_proof(f.k, source)
             proof.validate_report(report, source)
-            evidence["phases"][phase] = {"state": "preserved", "dns": "PASS", "newPVC": "PASS", "storageImageID": original["imageID"], "policy": report}
+            evidence["phases"][phase] = {"state": "preserved", "dns": "PASS", "newPVC": "PASS", "storageImageID": original["imageID"], "policy": report,
+                                          "gateway": rendered_gateway_proof(f, source, phase)}
         evidence["verdict"] = "PASS"
     except (OSError, ValueError, RuntimeError, proof.ProofError, subprocess.TimeoutExpired) as error:
         evidence["failedPhase"] = phase

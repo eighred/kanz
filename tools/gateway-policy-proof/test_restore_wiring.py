@@ -3,6 +3,7 @@ import ast
 from pathlib import Path
 import re
 import unittest
+from test_network_framing import valid_framing
 
 ROOT = Path(__file__).resolve().parents[2]
 FILES = {"policy_state.py", "policy_client.py", "rollout_scope.py", "recovery_receipts.py",
@@ -13,7 +14,7 @@ def verify(wrapper, source):
     required = ("param()", "user/kanz-operator", "KanzPlatformProvisioner/kanz-platform-cli",
         "-I -B -c $sourceLoader $proofRoot preflight", "-I -B -c $sourceLoader $proofRoot recovery_host $repo",
         "recovery_restore --tokyo-retained-baseline --source $source", "$encoded.Length -gt 20000",
-        "$bytes.Length -gt 524288", "$parameterBytes -gt 30000", "$parameters.Length -gt 30000",
+        "($bytes.Length + $fixedSize) -gt 524288", "$parameterBytes -gt 30000", "$parameters.Length -gt 30000",
         "len(data)>65536", "git -C $repo ls-files --error-unmatch",
         "$report.provenanceSHA256 -cne $provenanceHash", "$report.legacyHistoricalSnapshots -cne 'UNKNOWN'",
         "$report.result -cne 'VERIFIED'", "$report.writeAttempts -cne 1")
@@ -25,8 +26,9 @@ def verify(wrapper, source):
     bootstrap = re.search(r"b=json\.loads\(raw\); names=(\{[^\n]+\})", wrapper)
     if transfer is None or bootstrap is None:
         return False
-    if set(re.findall(r"'([^']+)'", transfer[1])) != FILES or ast.literal_eval(bootstrap[1]) != FILES:
+    if set(re.findall(r"'([^']+)'", transfer[1])) != FILES - {"source_loader.py"} or ast.literal_eval(bootstrap[1]) != FILES - {"source_loader.py"}:
         return False
+    if not valid_framing(wrapper, {"source_loader.py"}): return False
     if any('"$work/' + name + '"' not in wrapper for name in FILES):
         return False
     markers = ('DIRECTORY = "/var/tmp/kanz-gateway-reconcile-nu1ezqwo"',

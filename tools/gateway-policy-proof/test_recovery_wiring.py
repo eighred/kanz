@@ -3,6 +3,7 @@ import ast
 from pathlib import Path
 import re
 import unittest
+from test_network_framing import valid_framing
 
 import yaml
 
@@ -14,7 +15,7 @@ FILES = {"policy_state.py", "policy_client.py", "rollout_scope.py", "recovery_re
 def verify(wrapper, loader, workflow):
     required = ("param()", "user/kanz-operator", "KanzPlatformProvisioner/kanz-platform-cli",
         "-I -B -c $sourceLoader $proofRoot preflight", "-I -B -c $sourceLoader $proofRoot recovery_host $repo",
-        "recovery_plan --tokyo-plan --source $source", "$encoded.Length -gt 20000", "$bytes.Length -gt 524288",
+        "recovery_plan --tokyo-plan --source $source", "$encoded.Length -gt 20000", "($bytes.Length + $fixedSize) -gt 524288",
         "$parameterBytes -gt 30000", "$parameters.Length -gt 30000", "len(data)>65536",
         "git -C $repo ls-files --error-unmatch", "$report.provenanceSHA256 -cne $provenanceHash",
         "$report.legacyHistoricalSnapshots -cne 'UNKNOWN'", "$report.restoreAuthorized -cne $false",
@@ -27,8 +28,9 @@ def verify(wrapper, loader, workflow):
     bootstrap = re.search(r"b=json\.loads\(raw\); names=(\{[^\n]+\})", wrapper)
     if transfer is None or bootstrap is None:
         return False
-    if set(re.findall(r"'([^']+)'", transfer[1])) != FILES or ast.literal_eval(bootstrap[1]) != FILES:
+    if set(re.findall(r"'([^']+)'", transfer[1])) != FILES - {"source_loader.py"} or ast.literal_eval(bootstrap[1]) != FILES - {"source_loader.py"}:
         return False
+    if not valid_framing(wrapper, {"source_loader.py"}): return False
     if any('"$work/' + name + '"' not in wrapper for name in FILES):
         return False
     dependencies = next((n.value for n in ast.walk(ast.parse(loader)) if isinstance(n, ast.Assign)
@@ -36,7 +38,7 @@ def verify(wrapper, loader, workflow):
     expected = {
         "preflight": ("bounded_process",),
         "image_identity": ("policy_state", "transaction", "rollout_scope", "rollout_probe"),
-        "rollout_engine": ("bounded_process", "policy_state", "transaction", "policy_client", "rollout_scope", "rollout_probe"),
+        "rollout_engine": ("network_observation", "bounded_process", "policy_state", "transaction", "policy_client", "rollout_scope", "rollout_probe"),
         "recovery_host": ("bounded_process", "policy_state", "transport_codec", "recovery_receipts", "recovery_provenance"),
         "recovery_plan": ("bounded_process", "policy_state", "policy_client", "rollout_scope", "recovery_receipts"),
         "recovery_restore": ("bounded_process", "policy_state", "policy_client", "rollout_scope", "recovery_receipts", "recovery_plan"),
