@@ -118,7 +118,7 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 	}
 	for _, t := range missing {
 		if ctx.Err() != nil {
-			return r, ErrBroker
+			return r, brokerCause{ctx.Err()}
 		}
 		exists, err := checkTopic(ctx, api, t, p.ClusterID)
 		if err != nil {
@@ -130,11 +130,17 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 		r.TopicAttempts++
 		r.PartialOrUnknown = true
 		result, err := api.CreateTopics(ctx, &kafka.CreateTopicsRequest{Topics: []kafka.TopicConfig{{Topic: t.Name, NumPartitions: t.Partitions, ReplicationFactor: 3, ConfigEntries: []kafka.ConfigEntry{{ConfigName: "cleanup.policy", ConfigValue: t.Cleanup}, {ConfigName: "retention.ms", ConfigValue: strconv.FormatInt(t.Retention, 10)}, {ConfigName: "min.insync.replicas", ConfigValue: "2"}}}}})
-		if err != nil || result == nil || len(result.Errors) != 1 {
+		if err != nil {
+			return r, brokerCause{err}
+		}
+		if result == nil || len(result.Errors) != 1 {
 			return r, ErrBroker
 		}
 		resultErr, ok := result.Errors[t.Name]
-		if !ok || (resultErr != nil && !errors.Is(resultErr, kafka.TopicAlreadyExists)) {
+		if resultErr != nil && !errors.Is(resultErr, kafka.TopicAlreadyExists) {
+			return r, brokerCause{resultErr}
+		}
+		if !ok {
 			return r, ErrBroker
 		}
 	}
@@ -153,17 +159,20 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 	}
 	if len(acls) != 0 {
 		if ctx.Err() != nil {
-			return r, ErrBroker
+			return r, brokerCause{ctx.Err()}
 		}
 		r.ACLAttempts = len(acls)
 		r.PartialOrUnknown = true
 		result, err := api.CreateACLs(ctx, &kafka.CreateACLsRequest{ACLs: acls})
-		if err != nil || result == nil || len(result.Errors) != len(acls) {
+		if err != nil {
+			return r, brokerCause{err}
+		}
+		if result == nil || len(result.Errors) != len(acls) {
 			return r, ErrBroker
 		}
 		for _, e := range result.Errors {
 			if e != nil {
-				return r, ErrBroker
+				return r, brokerCause{e}
 			}
 		}
 	}
@@ -181,7 +190,10 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 
 func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (bool, error) {
 	m, err := api.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{want.Name}})
-	if err != nil || m == nil || len(m.Topics) != 1 || m.Topics[0].Name != want.Name {
+	if err != nil {
+		return false, brokerCause{err}
+	}
+	if m == nil || len(m.Topics) != 1 || m.Topics[0].Name != want.Name {
 		return false, ErrBroker
 	}
 	if m.ClusterID != clusterID || m.ClusterID == "" {
@@ -208,7 +220,7 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (b
 		return false, nil
 	}
 	if t.Error != nil {
-		return false, ErrBroker
+		return false, brokerCause{t.Error}
 	}
 	if t.Internal || len(t.Partitions) != want.Partitions {
 		return false, conflictCause{"topic-shape"}
@@ -240,7 +252,13 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (b
 		seen[p.ID] = true
 	}
 	c, err := api.DescribeConfigs(ctx, &kafka.DescribeConfigsRequest{Resources: []kafka.DescribeConfigRequestResource{{ResourceType: kafka.ResourceTypeTopic, ResourceName: want.Name, ConfigNames: []string{"cleanup.policy", "retention.ms", "min.insync.replicas"}}}})
-	if err != nil || c == nil || len(c.Resources) != 1 || c.Resources[0].Error != nil || c.Resources[0].ResourceName != want.Name || c.Resources[0].ResourceType != int8(kafka.ResourceTypeTopic) {
+	if err != nil {
+		return false, brokerCause{err}
+	}
+	if c != nil && len(c.Resources) == 1 && c.Resources[0].Error != nil {
+		return false, brokerCause{c.Resources[0].Error}
+	}
+	if c == nil || len(c.Resources) != 1 || c.Resources[0].ResourceName != want.Name || c.Resources[0].ResourceType != int8(kafka.ResourceTypeTopic) {
 		return false, ErrBroker
 	}
 	expected := map[string]string{"cleanup.policy": want.Cleanup, "retention.ms": strconv.FormatInt(want.Retention, 10), "min.insync.replicas": "2"}
