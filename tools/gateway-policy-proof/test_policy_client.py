@@ -33,7 +33,7 @@ class PolicyClientTests(unittest.TestCase):
             "dry_run_no_write", "four_policy_success", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
             "ipv6_endpoint_metadata", "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation",
             "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"]
-        self.assertEqual([v for v in fixture.CASES if v != "annotation_transport_preserved"], original)
+        self.assertEqual([v for v in fixture.CASES[:21] if v != "annotation_transport_preserved"], original)
         self.assertEqual(fixture.CASES.index("annotation_transport_preserved"), fixture.CASES.index("four_policy_success") + 1)
         source = inspect.getsource(fixture.run_fixture)
         markers = ['report["annotationTransport"] = annotation_transport_control(k, client)',

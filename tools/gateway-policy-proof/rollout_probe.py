@@ -4,7 +4,7 @@ import re
 
 IMAGE = "python:3.13.18-alpine3.24@sha256:7712cfd23e0501f5cb58faa5e6e0d515c9939bdbce866921799b31e696a1d13c"
 GATE = "kanz.eighred.com/probe-not-serving"
-OWNER = "kanz.eighred.com/gateway-policy-probe"
+from rollout_scope import OWNER, literal_address, endpoint_boundary, workload_lineage
 
 
 def caller_pod(namespace, app, nonce):
@@ -150,96 +150,10 @@ def pod_addresses(actual):
     return addresses
 
 
-def literal_address(value):
-    """Compare IP spellings (including mapped IPv4); never resolve names."""
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
-        return value
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
-    return str(address)
 
 
-def endpoint_boundary(slices, addresses, require_absent=False, owned_uids=()):
-    if not isinstance(slices, list) or len(slices) > 512:
-        raise ValueError("EndpointSlice inventory exceeds bound")
-    observed = {literal_address(value) for value in addresses}
-    for item in slices:
-        if not isinstance(item, dict):
-            raise ValueError("invalid EndpointSlice shape")
-        # discovery/v1 optional nil Endpoints serializes as null (no omitempty).
-        endpoints = item.get("endpoints")
-        if endpoints is None:
-            endpoints = []
-        if not isinstance(endpoints, list) or len(endpoints) > 1000:
-            raise ValueError("invalid EndpointSlice shape")
-        for endpoint in endpoints:
-            if not isinstance(endpoint, dict):
-                raise ValueError("invalid EndpointSlice shape")
-            values = endpoint.get("addresses")
-            conditions = endpoint.get("conditions", {})
-            if (not isinstance(values, list) or not 1 <= len(values) <= 100
-                    or any(not isinstance(v, str) or not 1 <= len(v) <= 253 for v in values)
-                    or not isinstance(conditions, dict)):
-                raise ValueError("invalid EndpointSlice shape")
-            target = endpoint.get("targetRef")
-            if target is not None and not isinstance(target, dict):
-                raise ValueError("invalid endpoint target reference")
-            if require_absent and target is not None and target.get("uid") in owned_uids:
-                raise ValueError("owned Pod still referenced by EndpointSlice")
-            if {literal_address(value) for value in values} & observed:
-                if require_absent or conditions.get("ready") is not False:
-                    raise ValueError("probe may participate in Service routing")
 
 
-def workload_lineage(pod, deployments, replicasets, expected):
-    """Source specs/controller lineage, not private-image verification."""
-    def images(spec):
-        result = {}
-        for key in ("containers", "initContainers"):
-            entries = spec.get(key, [])
-            values = {entry["name"]: entry["image"] for entry in entries}
-            if len(values) != len(entries) or any(not re.fullmatch(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", v) for v in values.values()):
-                raise ValueError("workload image references are not uniquely pinned")
-            result[key] = values
-        if not result["containers"] or spec.get("hostNetwork"):
-            raise ValueError("workload network/image boundary differs")
-        return result
-    def owner(obj, kind, parents):
-        refs = obj["metadata"].get("ownerReferences", [])
-        if len(refs) != 1 or refs[0].get("kind") != kind or refs[0].get("controller") is not True:
-            raise ValueError("workload controller ownership differs")
-        ref = refs[0]
-        matches = [v for v in parents if v["metadata"].get("name") == ref.get("name")
-                   and v["metadata"].get("uid") == ref.get("uid")
-                   and v["metadata"].get("namespace") == pod["metadata"]["namespace"]]
-        if len(matches) != 1 or matches[0]["metadata"].get("deletionTimestamp"):
-            raise ValueError("workload controller UID is unresolved")
-        return matches[0]
-    rs = owner(pod, "ReplicaSet", replicasets)
-    deployment = owner(rs, "Deployment", deployments)
-    name = deployment["metadata"]["name"]
-    if name not in expected:
-        raise ValueError("workload deployment not governed by source")
-    wanted = expected[name]
-    template = deployment["spec"]["template"]
-    if (template["metadata"].get("labels") != wanted["labels"]
-            or deployment["spec"]["selector"] != wanted["selector"]
-            or images(template["spec"]) != wanted["images"]):
-        raise ValueError("live Deployment differs from rendered source")
-    labels = rs["spec"]["template"]["metadata"].get("labels", {})
-    hashed = labels.get("pod-template-hash")
-    if (not isinstance(hashed, str) or not re.fullmatch(r"[a-z0-9]{1,63}", hashed)
-            or labels != {**wanted["labels"], "pod-template-hash": hashed}
-            or rs["spec"]["selector"] != {"matchLabels": {**wanted["selector"]["matchLabels"], "pod-template-hash": hashed}}
-            or pod["metadata"].get("labels") != labels
-            or images(rs["spec"]["template"]["spec"]) != wanted["images"]
-            or images(pod["spec"]) != wanted["images"]):
-        raise ValueError("Pod/ReplicaSet differs from rendered deployment")
-    return {"name": name, "deployment": deployment["metadata"]["uid"], "replicaSet": rs["metadata"]["uid"],
-            "images": wanted["images"], "podOwners": pod["metadata"]["ownerReferences"],
-            "replicaSetOwners": rs["metadata"]["ownerReferences"]}
 
 
 def verify_cri(image_id, inspection, identity):

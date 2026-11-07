@@ -64,10 +64,17 @@ impl Drop for Driver {
         }
     }
 }
+// Zero means no injected fixture delay. Constructing Sleep still enters Tokio's
+// millisecond timer machinery, even for zero; retain it only when requested.
+async fn requested_session_delay(delay: Duration) {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+}
 impl Sessions for Connector {
     fn connect(&mut self) -> Task<'_, Result<Session, Error>> {
         Box::pin(async {
-            tokio::time::sleep(self.delay).await;
+            requested_session_delay(self.delay).await;
             let (client, connection) = self.config.connect(NoTls).await?;
             let mut driver = Driver(Some(tokio::spawn(async move { connection.await.is_ok() })));
             let mut session = Session::new(
@@ -359,6 +366,27 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::count_recovered_ack;
+
+    #[test]
+    fn zero_requested_delay_is_ready_without_runtime() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        use std::time::Duration;
+
+        let mut context = Context::from_waker(Waker::noop());
+        let mut zero = Box::pin(super::requested_session_delay(Duration::ZERO));
+        assert_eq!(zero.as_mut().poll(&mut context), Poll::Ready(()));
+
+        // The previous unconditional path cannot be polled without a runtime:
+        // this distinguishes removal of the timer, not an elapsed-time guess.
+        let old = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut unconditional = Box::pin(async {
+                tokio::time::sleep(Duration::ZERO).await;
+            });
+            unconditional.as_mut().poll(&mut context)
+        }));
+        assert!(old.is_err());
+    }
 
     #[test]
     fn status_ack_does_not_consume_recovered_hold() {

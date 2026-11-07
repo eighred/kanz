@@ -129,7 +129,7 @@ pub async fn acknowledge_recovery(
     if fields[4] == "corrected" {
         return commit(tx).await;
     }
-    tx.execute("INSERT INTO execution_recovery_acks (case_id,execution_key,book) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",&[&ack.case_id,&ack.execution_key,&book.as_str()]).await?;
+    tx.execute_typed("INSERT INTO execution_recovery_acks (case_id,execution_key,book) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",&[(&ack.case_id,Type::TEXT),(&ack.execution_key,Type::TEXT),(&book.as_str(),Type::TEXT)]).await?;
     let received_timer = Timer::new(Stage::AckReceived);
     let received: i64 = tx
         .query_typed_one(

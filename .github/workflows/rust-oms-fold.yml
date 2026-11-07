@@ -1,5 +1,9 @@
 name: rust-oms-fold
 
+# Main image builds seed the shared dependency cache. Qualification branches
+# restore it without creating duplicate compiler caches under each branch ref.
+cache-mode: read
+
 on:
   pull_request:
     paths:
@@ -11,6 +15,7 @@ on:
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
       - '.github/scripts/check_oms_fold_evidence.py'
+      - '.github/scripts/*oms_attribution_evidence.py'
       - '.github/scripts/test_check_oms_fold_evidence.py'
       - '.github/scripts/check_oms_recovery_evidence.py'
       - '.github/scripts/test_check_oms_recovery_evidence.py'
@@ -26,6 +31,7 @@ on:
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
       - '.github/scripts/check_oms_fold_evidence.py'
+      - '.github/scripts/*oms_attribution_evidence.py'
       - '.github/scripts/test_check_oms_fold_evidence.py'
       - '.github/scripts/check_oms_recovery_evidence.py'
       - '.github/scripts/test_check_oms_recovery_evidence.py'
@@ -89,6 +95,7 @@ jobs:
           cargo test --locked -p kanz-order-core --all-targets
           cargo clippy --locked -p kanz-order-core --all-targets -- -D warnings
           cargo build --locked -p kanz-order-core --example order-aggregate-fixture
+          cargo build --locked -p kanz-order-core --example order-attribution-fixture
           cargo test --locked -p kanz-oms-fold-shadow
           cargo clippy --locked -p kanz-oms-fold-shadow --all-targets -- -D warnings
           cargo build --locked -p kanz-oms-fold-shadow
@@ -143,6 +150,26 @@ jobs:
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_oms_fold_evidence.py
           python3 ../.github/scripts/check_oms_fold_evidence.py "$RUNNER_TEMP/oms-fold.jsonl"
+      - name: Qualify pure attribution through the independent Go owner
+        working-directory: kanz
+        env:
+          KANZ_ORDER_ATTRIBUTION_BIN: ${{ github.workspace }}/kanz-rs/target/debug/examples/order-attribution-fixture
+          KANZ_ORDER_ATTRIBUTION_VERSION: ${{ github.sha }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/oms-attribution-evidence"
+          sha256sum "$KANZ_ORDER_ATTRIBUTION_BIN" | cut -d " " -f 1 > "$RUNNER_TEMP/oms-attribution-evidence/binary.sha256"
+          go test -race -p 1 ./services/oms/internal/order -run '^(TestAttribution|TestRustAttribution)' -count=1 -json | tee "$RUNNER_TEMP/oms-attribution-evidence/attribution.jsonl"
+          python3 -B -m unittest discover -s ../.github/scripts -p test_check_oms_attribution_evidence.py
+          python3 ../.github/scripts/check_oms_attribution_evidence.py "$RUNNER_TEMP/oms-attribution-evidence" --create \
+            --source "$GITHUB_SHA" --tree "$(git rev-parse 'HEAD^{tree}')" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Preserve source-bound pure attribution evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oms-attribution-evidence
+          path: ${{ runner.temp }}/oms-attribution-evidence/
+          if-no-files-found: error
       - name: Remove isolated relay broker
         if: always()
         run: docker rm -f oms-relay-nats

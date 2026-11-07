@@ -79,3 +79,41 @@ func TestRustRecoveryFixtureTypedQueries(t *testing.T) {
 		}
 	}
 }
+
+func recoveryFixtureDelay(source, workflow string) bool {
+	compact := strings.Join(strings.Fields(source), "")
+	return strings.Contains(compact, "asyncfnrequested_session_delay(delay:Duration){if!delay.is_zero(){tokio::time::sleep(delay).await;}}") &&
+		strings.Contains(compact, "requested_session_delay(self.delay).await;let(client,connection)=self.config.connect(NoTls).await?;") &&
+		strings.Contains(compact, "fnzero_requested_delay_is_ready_without_runtime()") &&
+		strings.Contains(compact, "assert!(old.is_err());") &&
+		strings.Contains(workflow, "cargo test --locked -p kanz-oms-recovery --all-targets\n")
+}
+func TestRustRecoveryFixtureZeroDelay(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	raw, err := os.ReadFile(filepath.Join(root, "kanz-rs/crates/oms-recovery/examples/recovery-coordinator-fixture.rs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow, err := os.ReadFile(filepath.Join(root, ".github/workflows/rust-oms-fold.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, workflow := string(raw), strings.ReplaceAll(string(flow), "\r\n", "\n")
+	if !recoveryFixtureDelay(source, workflow) {
+		t.Fatal("zero-delay timer refusal or native qualification missing")
+	}
+	for _, mutation := range []struct{ old, replacement string }{
+		{"if !delay.is_zero()", "if true"}, {"if !delay.is_zero()", "if false"},
+		{"tokio::time::sleep(delay).await;", "tokio::time::sleep(Duration::ZERO).await;"},
+		{"requested_session_delay(self.delay).await;", "tokio::time::sleep(self.delay).await;"},
+		{"assert!(old.is_err());", "assert!(true);"},
+	} {
+		changed := strings.Replace(source, mutation.old, mutation.replacement, 1)
+		if changed == source || recoveryFixtureDelay(changed, workflow) {
+			t.Fatal("delay mutation escaped")
+		}
+	}
+	if recoveryFixtureDelay(source, strings.ReplaceAll(workflow, "cargo test --locked -p kanz-oms-recovery --all-targets\n", "")) {
+		t.Fatal("native unit omission escaped")
+	}
+}

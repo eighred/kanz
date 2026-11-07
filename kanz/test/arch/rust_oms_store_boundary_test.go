@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/diagnostics.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/position.rs", "src/position_math.rs", "src/position_projector.rs", "src/recovery.rs", "src/recovery_repository.rs", "src/recovery_wire.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/fee_commands.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/diagnostics.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/position.rs", "src/position_math.rs", "src/position_projector.rs", "src/recovery.rs", "src/recovery_repository.rs", "src/recovery_wire.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/fee_commands.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs", "tests/typed_ack_protocol.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -108,7 +108,12 @@ func checkRustOMSStoreBoundary(root string) error {
 		if regexp.MustCompile(`\bf(?:32|64)\b|\bunsafe\b|(?:struct|enum|type)(?:Decimal|Money|Fill|OrderState)\b`).MatchString(s) || strings.Contains(s, "include!") || strings.Contains(s, "#[path=") {
 			return fmt.Errorf("store financial/unsafe/alternate-source boundary")
 		}
-		if rel != "examples/fixture.rs" && rel != "examples/relay_support/mod.rs" {
+		// #1413: only this immutable native protocol witness may own loopback
+		// test transport. This grants no repository runtime authority.
+		if rel == "tests/typed_ack_protocol.rs" && !reviewedAckProtocol(string(b)) {
+			return fmt.Errorf("unreviewed ACK protocol witness")
+		}
+		if rel != "examples/fixture.rs" && rel != "examples/relay_support/mod.rs" && rel != "tests/typed_ack_protocol.rs" {
 			if rel == "src/relay.rs" {
 				s = strings.ReplaceAll(s, "self.sessions.connect(", "connector(")
 				s = strings.ReplaceAll(s, "self.publisher.publish(", "acknowledge(")

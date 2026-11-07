@@ -1,6 +1,6 @@
 """Bounded policy API adapter; callers own verified cluster/workload scope."""
 import json
-import transaction as tx
+import policy_state as tx
 
 
 class KubernetesClient:
