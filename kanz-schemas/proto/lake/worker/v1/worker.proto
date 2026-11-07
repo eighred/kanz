@@ -28,8 +28,10 @@ message ConvertRows {
   uint32 schema_version = 3;
 }
 
-// ordinal preserves exact captured input order, including duplicate/equal-key
-// rows. Raw frame is never reconstructed; Decimal and unknown wire fields stay
+// ordinal is dense within selected tenant-pure rows in deterministic cut order:
+// sorted owned files, then line order. It preserves duplicates without exposing
+// foreign positions, but does not reconstruct cross-file Kafka arrival order.
+// Raw frame is never reconstructed; Decimal and unknown wire fields stay
 // inside its original bytes. Event time is seconds+nanos, not float/nanosecond
 // epoch conversion. Absent kafka is UNKNOWN, not coordinate zero.
 // The worker independently checks frame SHA-256 and envelope tenant/event/time

@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -190,7 +191,7 @@ func schemaPackages(t *testing.T, protoRoot string) []string {
 		if len(parts) < 3 {
 			return nil // not <domain>/<version>/<file>.proto
 		}
-		seen[parts[0]+"/"+parts[1]] = true
+		seen[strings.Join(parts[:len(parts)-1], "/")] = true
 		return nil
 	})
 	if err != nil {
@@ -307,4 +308,37 @@ func schemaPackageListed(all []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Nested packages remain distinct; importing only the parent cannot prove the
+// private worker contract has a constructor.
+func TestSchemaPackageProducerResolvesNestedPackage(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "proto", "lake", "worker", "v1")
+	if err := os.MkdirAll(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "worker.proto"), []byte("syntax = \"proto3\";"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	packages := schemaPackages(t, filepath.Join(root, "proto"))
+	if len(packages) != 1 || packages[0] != "lake/worker/v1" {
+		t.Fatalf("nested package incorrectly resolved: %v", packages)
+	}
+	path := filepath.Join(root, "owner.go")
+	for _, construct := range []bool{true, false} {
+		body := "package owner\nimport workerpb \"github.com/eighred/kanz/kanz-schemas-go/lake/worker/v1\"\n"
+		if construct {
+			body += "var output = &workerpb.WorkerRequest{}\n"
+		} else {
+			body += "func consume(*workerpb.WorkerRequest) {}\n"
+		}
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		produced, count := schemaPackageProducers(t, root, packages)
+		if produced[packages[0]] != construct || (count > 0) != construct {
+			t.Fatal("constructor removal did not remove producer evidence")
+		}
+	}
 }

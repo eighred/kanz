@@ -42,6 +42,7 @@ what gets read, so it is not allowed to be the stale copy.
 
 | Service | DR status | Cluster / reason |
 |---|---|---|
+| `lake-sink` | NOT COVERED | #1413 / #60: optional finite snapshot registry, accepted requests, persisted cuts and lifecycle outbox require production placement, backup and a coordinated database/immutable-file restore drill. The owner remains disabled; derived Parquet does not replace accepted-resource history. |
 | `web-bff` | NOT COVERED | #1288: optional shared browser authority and session audit require database placement, sizing and a restore drill that invalidates restored cookies and rotates the key. Existing deployment remains memory singleton until that proof. |
 | `risk-engine` | covered | `kanz-risk` |
 | `schema-registry` | covered | `kanz-registry` |

@@ -95,6 +95,15 @@ func scanService(t *testing.T, dir string) (unguarded []string, hasPool, hasHand
 		hasHandler = true
 		if !scopeCall.MatchString(body) {
 			rel, _ := filepath.Rel(dir, path)
+			// Mixed landing is allowed only while its exact file-only composition
+			// and tenant attribution remain independently verified. New handlers
+			// and the optional snapshot/PG owner still follow the default rule.
+			if filepath.Base(dir) == "lake-sink" && filepath.ToSlash(rel) == "internal/cdc/sink.go" {
+				if err := verifyMixedLakeFileLanding(lakeLandingSources(t, dir)); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			}
 			unguarded = append(unguarded, filepath.ToSlash(rel))
 		}
 		return nil

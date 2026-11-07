@@ -158,3 +158,120 @@ No phase resets its deadline. Other modes keep their original shared
 45-second lifecycle deadline. These are disposable
 test budgets, not production SLOs or changes to the Kafka client's session timeout.
 This is fixture qualification, not production activation.
+
+### Optional finite snapshot owner
+
+The snapshot owner is disabled unless `LAKE_SNAPSHOT_ENABLED=true`. It derives a
+finite, tenant-pure inspection object from the **active landing run's currently
+open generated files**. It does not enumerate previous process runs, import old
+NDJSON, establish offset completeness, or replace the NATS archiver, feature
+materializer or financial history. Existing landing files and row output remain
+unchanged. Snapshot capture requires raw custody and generated run identity;
+explicit legacy append identities are not admitted to this mode.
+
+The gateway remains the identity authority. Its optional lake routes require
+explicit `lake.snapshot.create` or `lake.snapshot.read` capability grants and
+forward a typed caller over exact-peer gRPC/mTLS. V1 refuses every nonempty
+portfolio restriction: a tenant-wide grant cannot stand in for portfolio-scoped
+authorization. The lake owner serves only its explicitly configured tenant and
+tenant-RLS pool. A different actor cannot reuse another actor's request ID.
+Create and all idempotent retries return only the original REQUESTED acceptance;
+Get and Query independently require read authority, including for failed objects.
+
+`kanz-lake-snapshot` uses the existing operator gateway authentication/signing
+client. It exposes create, get, list, count and failures operations without SQL,
+worker addresses, file paths, tenant overrides or caller-identity flags. Selection
+uses exact event types and a half-open event-time interval. Returned events contain
+only ID, type, exact seconds/nanos, a dense selected-tenant ordinal and closed
+decode status. Duplicate order follows the finite cut (sorted owned files, then
+line order), not reconstructed cross-file Kafka arrival order; foreign-row positions and raw decode
+error text are not exposed. Raw EventFrames and Decimal encodings remain exact
+inside the private Parquet object rather than being remarshal-derived history.
+
+Accepted creation and each lifecycle transition enqueue canonical typed FACTs in
+the same PostgreSQL transaction. The first cut is persisted once. Retries reopen
+only its exact no-follow owned paths and verify device/inode, prefix length and
+hash; appended suffixes are excluded, and replacement/truncation refuses. The
+session fence and generation CAS govern publication. Output uses unique fixed
+generation names, fsync and no-replace rename before READY commits. A stale output
+can remain an unregistered orphan; it cannot overwrite an accepted generation.
+
+Admission is bounded to 16 retained requests, including failed requests, with at
+most eight pending and three publication generations per request. Each generation
+has at most one 96 MiB Parquet member and one 64 KiB manifest, in either its fixed
+staging or final directory. This bounds those derived file contents to
+4,834,983,936 bytes per configured tenant owner, excluding filesystem metadata,
+database/outbox storage, broker storage, the executable and existing landing
+retention. Cut metadata resides in PostgreSQL; this path does not create private
+landing copies. Exhaustion refuses further admission. No automatic age deletion,
+unknown-path cleanup or operator cleanup capability is implemented.
+
+One nonqueueing operation reservation precedes capture, Parquet reads and protobuf
+encoding and remains owned through actual child and pipe join. Input traversal is
+at most 64 MiB and 100,000 scanned rows, including foreign/unselected rows. Query
+reads at most 96 MiB Parquet and emits at most 1 MiB/1,000 rows. The one-call worker
+receives no identity credentials, paths, URLs or SQL. Linux launch verifies a
+root-owned nonwritable ELF and its configured hash, then executes that same open
+descriptor with no arguments and an empty environment. The worker's own sandbox,
+read-only deployed image, combined parent/child memory budget and actual process
+cleanup require separate Linux qualification; file mode/hash alone do not prove
+filesystem immutability. The existing static lake image is not a qualified image
+for the GNU worker and must not be enabled unchanged.
+
+Broker setup is explicit and offline. `kanz-tenantgen -tenant <existing-account>
+-snapshot-account-candidate` emits a bounded candidate bundle with the preserved
+ConfigMap, exact stream profile and explicit `ARCHIVER_LAKE_SNAPSHOTS=true`
+setting for the existing same-account tenant archiver. Its only added archiver
+permission is the lifecycle subscription; its Kafka dead-letter path is unchanged.
+It never reads live configuration, reloads a
+broker or provisions a user/stream. Only the reviewed hash-bound embedded account
+baseline is parsed. The existing lake SVID may map to exactly one account; all
+unrelated account semantics and the default compute set remain unchanged.
+The workload can publish lifecycle FACTs and consume Requested but cannot create,
+update, purge or delete streams. An administrator must provision the candidate
+and the canonical 720-hour DLQ route; the existing archiver must register its
+native durable before snapshot startup. Enabled snapshot config adds the derived
+`lake.snapshot` landing topic without changing default deployment topics.
+
+Startup requires the authenticated account key and workload user from the broker's
+user-info service, the exact bounded retained stream profile, canonical parking
+custody, and the registered archiver filter/default delivery contract. A registered
+consumer is not proof of a live process, successful Kafka archival or backup. Identical
+profiles in another account do not establish identity. The profile has no age
+expiry, 64 MiB/10,000-message limits and discard-new behavior: full capacity refuses
+publication while retaining older work and the durable outbox. Two consumer slots
+cover the snapshot owner and existing archiver. The latter retains its native
+finite delivery budget; no unlimited archive retry is claimed. Terminal Requested
+poison uses the existing DLQ with original bytes/headers. Parking failure, including
+oversized original headers plus failure metadata, retains the original delivery
+and fails readiness; no bytes are truncated to force parking. Snapshot-only
+connections disable reconnect. Disconnect or publication/handler failure makes
+readiness fail and cancels owner admission/work, including existing gateway
+connections. Restart cannot restore readiness solely by reconnecting: it must
+reprove account/profile identity and confirm bounded owned outbox catch-up.
+This does not promise instantaneous revocation of already-emitted bytes or
+protection against privileged live broker configuration changes.
+
+Actual worker, PostgreSQL and dedicated broker tests are dependency-gated locally.
+Their skips are not compatibility, confinement or deployment evidence. Enabling
+this optional owner requires the dedicated source/binary-bound Linux proof,
+gateway network boundary, scoped broker/PG configuration and qualified resource
+budget; the default deployment is not activated by this source implementation.
+
+The disposable process-crash proof uses one 240-second parent observation context
+and passes that same absolute deadline to child owners and the archiver fixture.
+Its allowance covers two startup ceilings (60 seconds), two work ceilings (60),
+native dead-delivery (60), control observations (20), cleanup observations (20)
+and scheduling margin (20). It neither resets phases nor changes production
+30-second work, five-second cleanup observations or the native 60-second AckWait.
+Cleanup reports success only after process and output-pipe joins; an expired
+ten-second fixture stop observation fails, then kills and joins the owned child.
+These contexts are not a hard operating-system wall-clock guarantee.
+The crash witness blocks only the fixture READY transaction after real worker
+conversion and immutable file publication, kills the owner, verifies its database
+sessions disappeared and READY/Published did not commit, then restarts through
+native redelivery. The unchanged persisted cut must exclude both an appended
+old-file suffix and a new landing run. The separate existing-archiver subprocess
+proof requires exact Kafka bytes/headers, restart continuation and foreign-tenant
+parking followed by a positive next marker; neither fixture establishes deployment
+identity, Kafka ACLs or disaster-recovery coverage.

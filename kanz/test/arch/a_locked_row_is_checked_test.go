@@ -477,7 +477,21 @@ func TestALockedRowIsCheckedAndNotJustLocked(t *testing.T) {
 		literals  int
 		mutations int
 	)
-	for _, src := range forUpdateSources(t, root) {
+	sources := forUpdateSources(t, root)
+	functions := map[string]map[string][]*ast.FuncDecl{}
+	for _, src := range sources {
+		dir := filepath.Dir(src.rel)
+		if functions[dir] == nil {
+			functions[dir] = map[string][]*ast.FuncDecl{}
+		}
+		for _, declaration := range src.file.Decls {
+			if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Recv == nil {
+				functions[dir][fn.Name.Name] = append(functions[dir][fn.Name.Name], fn)
+			}
+		}
+	}
+	for _, src := range sources {
+		scans = append(scans, analyseDelegatedLockedScans(src.fset, src.rel, src.file, functions[filepath.Dir(src.rel)])...)
 		literals += countForUpdateLiterals(src.file)
 		mutations += reviewedLockedMutations(src.rel, src.file)
 		scans = append(scans, analyseLockedScans(src.fset, src.rel, src.file)...)
