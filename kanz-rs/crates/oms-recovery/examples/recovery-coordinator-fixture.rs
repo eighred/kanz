@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tokio_postgres::{config::Host, NoTls};
+use tokio_postgres::{config::Host, types::Type, NoTls};
 const LINE: usize = 8 * 1024 * 1024;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,7 +75,7 @@ impl Sessions for Connector {
                 driver.0.take().ok_or(Error::Database)?,
                 |token| async move { token.cancel_query(NoTls).await },
             );
-            let configured=session.client().query_one("SELECT set_config('search_path',$1,false),set_config('statement_timeout','30000',false)",&[&self.schema]).await;
+            let configured=session.client().query_typed_one("SELECT set_config('search_path',$1,false),set_config('statement_timeout','30000',false)",&[(&self.schema, Type::TEXT)]).await;
             if configured.is_err() {
                 session.close().await;
                 return Err(Error::Database);
@@ -169,9 +169,9 @@ async fn closed(observer: &tokio_postgres::Client, application: &str) -> Result<
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let count: i64 = observer
-                .query_one(
+                .query_typed_one(
                     "SELECT count(*) FROM pg_stat_activity WHERE application_name=$1",
-                    &[&application],
+                    &[(&application, Type::TEXT)],
                 )
                 .await
                 .map_err(|_| ())?
