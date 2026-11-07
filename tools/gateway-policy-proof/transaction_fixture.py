@@ -20,8 +20,66 @@ import rollout_probe
 from bounded_process import run as bounded_run
 
 CASES = ["bounded_xz_transport"] + ["response_loss_" + str(at) for at in range(1, 9)] + [
-    "dry_run_no_write", "four_policy_success", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
+    "dry_run_no_write", "four_policy_success", "annotation_transport_preserved", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
     "ipv6_endpoint_metadata", "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"]
+
+LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
+FIXTURE_ANNOTATIONS = {LAST_APPLIED: '{"fixture":"previous-configuration"}', "fixture.example/custom": "preserved"}
+
+
+def annotation_transport_control(k, client):
+    """Real old-client mutation, then exact raw preservation and CAS controls."""
+    key = (tx.NAMESPACE, tx.NAMES[-1])
+    obj = tx.inventory(client.list_policies())[key]
+    obj["metadata"].setdefault("annotations", {}).update(FIXTURE_ANNOTATIONS)
+    obj["metadata"].setdefault("labels", {})["fixture.example/custom"] = "preserved"
+    client.replace(obj)
+    baseline = tx.inventory(client.list_policies())
+    original = baseline[key]
+    if any(original["metadata"]["annotations"].get(k) != v for k, v in FIXTURE_ANNOTATIONS.items()):
+        raise AssertionError("raw baseline metadata not preserved")
+    client.dry_run(original, True)
+    if not tx.same_inventory(baseline, tx.inventory(client.list_policies()), exact_version=True):
+        raise AssertionError("raw dry-run mutated API")
+    # Deliberately invoke the old adapter against this disposable object only.
+    k("replace", "-f", "-", value=original)
+    changed = tx.inventory(client.list_policies())[key]
+    if changed["metadata"]["annotations"].get(LAST_APPLIED) == original["metadata"]["annotations"][LAST_APPLIED]:
+        raise AssertionError("old kubectl mutation control did not discriminate")
+    expected_annotation = copy.deepcopy(original)
+    del expected_annotation["metadata"]["annotations"][LAST_APPLIED]
+    if json.loads(changed["metadata"]["annotations"][LAST_APPLIED]) != expected_annotation:
+        raise AssertionError("old kubectl mutation is not the expected transformation")
+    restored = copy.deepcopy(original)
+    restored["metadata"]["resourceVersion"] = changed["metadata"]["resourceVersion"]
+    client.replace(restored)
+    baseline = tx.inventory(client.list_policies())
+    if tx.semantic(baseline[key]) != tx.semantic(original):
+        raise AssertionError("raw metadata restoration differs")
+    for field, value in (("resourceVersion", original["metadata"]["resourceVersion"]),
+                         ("uid", "00000000-0000-0000-0000-000000000000")):
+        stale = copy.deepcopy(baseline[key])
+        stale["metadata"][field] = value
+        try:
+            client.replace(stale)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("raw CAS accepted stale identity")
+        if not tx.same_inventory(baseline, tx.inventory(client.list_policies()), exact_version=True):
+            raise AssertionError("refused CAS changed inventory")
+    # A valid request after the negatives prevents transport failure being credited.
+    client.dry_run(baseline[key], True)
+    return {"oldClientMutation": True, "rawMetadataPreserved": True, "dryRunUnchanged": True,
+            "staleRVRefused": True, "wrongUIDRefused": True, "rollbackPreserved": False, "finalizePreserved": False}
+
+
+def validate_annotation_control(control):
+    keys = {"oldClientMutation", "rawMetadataPreserved", "dryRunUnchanged", "staleRVRefused",
+            "wrongUIDRefused", "rollbackPreserved", "finalizePreserved"}
+    if not isinstance(control, dict) or set(control) != keys or any(control[k] is not True for k in keys):
+        raise ValueError("annotation preservation controls incomplete")
+
 
 IPV6_CANONICAL = "2001:db8::1"
 IPV6_EXPANDED = "2001:0db8:0000:0000:0000:0000:0000:0001"
@@ -227,6 +285,7 @@ def validate_report(report, source, tree, run_id, attempt, render_hash):
             or report.get("cases") != CASES or report.get("passed") is not True
             or report.get("cleanupPassed") is not True):
         raise ValueError("transaction evidence incomplete or from another execution")
+    validate_annotation_control(report.get("annotationTransport"))
     validate_empty_slice(report.get("emptyEndpointSlice"))
     validate_ipv6_slice(report.get("ipv6EndpointSlice"))
     identity = report.get("imageIdentity", {})
@@ -284,6 +343,10 @@ def run_fixture(artifact):
             report["cases"].append("bounded_xz_transport")
             rendered, _, report["renderSHA256"] = proof.render(run)
             desired = [p for p in rendered if p["metadata"]["name"] in tx.NAMES]
+            desired = copy.deepcopy(desired)
+            for obj in desired:
+                obj["metadata"].setdefault("annotations", {}).update(FIXTURE_ANNOTATIONS)
+                obj["metadata"].setdefault("labels", {})["fixture.example/custom"] = "preserved"
             baseline = [copy.deepcopy(p) for p in rendered if p["metadata"]["name"] not in tx.NAMES[:3]]
             egress = next(p for p in baseline if p["metadata"]["name"] == tx.NAMES[-1])
             for app, port in (("accounting", 8101), ("audit", 8102)):
@@ -298,6 +361,7 @@ def run_fixture(artifact):
                 k("create", "-f", "-", value=obj)
             cluster_uid = json.loads(k("get", "namespace", "kube-system", "-o", "json"))["metadata"]["uid"]
             client = KubernetesClient(k, cluster_uid)
+            report["annotationTransport"] = annotation_transport_control(k, client)
             original = tx.inventory(client.list_policies())
 
             def qualifier(actual, target):
@@ -317,6 +381,7 @@ def run_fixture(artifact):
                 if not fault.fired or receipts[-1]["rollback"] != "verified" or not tx.same_inventory(original, tx.inventory(client.list_policies())):
                     raise AssertionError("real rollback differs from baseline")
                 report["cases"].append("response_loss_" + str(at))
+            report["annotationTransport"]["rollbackPreserved"] = True
             receipts = []
             transaction = tx.Transaction(client, desired, uuid.uuid4().hex, receipts.append)
             dry_baseline = tx.inventory(client.list_policies())
@@ -329,6 +394,18 @@ def run_fixture(artifact):
             if receipts[-1]["phase"] != "verified":
                 raise AssertionError("transaction did not complete")
             report["cases"].append("four_policy_success")
+            final = tx.inventory(client.list_policies())[(tx.NAMESPACE, tx.NAMES[-1])]
+            if tx.semantic(final)["metadata"] != tx.semantic(original[(tx.NAMESPACE, tx.NAMES[-1])])["metadata"]:
+                raise AssertionError("finalization changed user metadata")
+            installed = tx.inventory(client.list_policies())
+            for obj in desired:
+                key = (tx.NAMESPACE, obj["metadata"]["name"])
+                expected_metadata = tx.semantic(original.get(key, obj))["metadata"]
+                if tx.semantic(installed[key])["metadata"] != expected_metadata:
+                    raise AssertionError("create/finalization changed user metadata")
+            report["annotationTransport"]["finalizePreserved"] = True
+            validate_annotation_control(report["annotationTransport"])
+            report["cases"].append("annotation_transport_preserved")
             # A real API edit with an external field must not be overwritten by
             # automatic rollback. The whole fresh cluster remains disposable.
             receipts = []
