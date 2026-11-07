@@ -15,6 +15,15 @@ import rollout_engine as engine
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def canonical_ast(tree):
+    # Python 3.13+ changed dump's default to omit empty fields. Python 3.12
+    # always includes them; explicitly select that same complete representation.
+    options = {"include_attributes": False}
+    if "show_empty" in inspect.signature(ast.dump).parameters:
+        options["show_empty"] = True
+    return ast.dump(tree, **options)
+
+
 def recipe(wrapper, engine, workflow):
     required = [
         "param([switch]$Apply)", "$bundle = [ordered]@{ files = $files; payload = [ordered]@{ source = $source;", "$rolloutProfile = 'kanz-platform'", "$region = 'ap-northeast-1'",
@@ -43,26 +52,45 @@ def recipe(wrapper, engine, workflow):
 
 
 class RolloutContractTests(unittest.TestCase):
+    def test_canonical_ast_keeps_empty_fields_across_dump_versions(self):
+        tree = ast.Module(body=[ast.Pass()], type_ignores=[])
+        expected = "Module(body=[Pass()], type_ignores=[])"
+        self.assertEqual(canonical_ast(tree), expected)
+        original = ast.dump
+        # Model the old signature with the same complete-field representation.
+        def python312(node, annotate_fields=True, include_attributes=False, *, indent=None):
+            options = {"annotate_fields": annotate_fields, "include_attributes": include_attributes, "indent": indent}
+            if "show_empty" in inspect.signature(original).parameters:
+                options["show_empty"] = True
+            return original(node, **options)
+        with patch.object(ast, "dump", python312):
+            self.assertEqual(canonical_ast(tree), expected)
+        # A newer dump omitting the empty field must not match the pinned shape.
+        omitted = "Module(body=[Pass()])"
+        self.assertNotEqual(hashlib.sha256(expected.encode()).digest(), hashlib.sha256(omitted.encode()).digest())
+        if "show_empty" in inspect.signature(original).parameters:
+            self.assertEqual(original(tree, show_empty=False), omitted)
+
     def test_shared_probe_checks_are_exact_and_keep_public_aliases(self):
         expected = {
-            'literal_address': '9d0b815d84aba06d50ab3fe610d8720f3604edc121a1b64cc2f34635bd3a4e4e',
-            'endpoint_boundary': '3ea25c5ba1fa60fa4f2c142f5c967197b29421513d8b51fd60eaeba8a14e61a3',
-            'workload_lineage': '54d42948895334c49e6564fe9060f65a403022d28195578ab59c3c0ecc2e8a6b',
+            'literal_address': 'c8bca282cebab1f57731b592be4efcf965a59aa2be1368d3af992d4098190c80',
+            'endpoint_boundary': '27dd9daeb64ce63068732cb4a5fa25ff2e017f8e1e0b1c149cb150afdc52e293',
+            'workload_lineage': 'ca7ffcb861739629ddbf492f534adba8198713dc46bb956572a6ff9590096c51',
         }
         for name, digest in expected.items():
             function = getattr(rollout_scope, name)
             self.assertIs(getattr(rollout_probe, name), function)
             tree = ast.parse(inspect.getsource(function)).body[0]
-            self.assertEqual(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest(), digest)
+            self.assertEqual(hashlib.sha256(canonical_ast(tree).encode()).hexdigest(), digest)
         self.assertEqual(rollout_scope.OWNER, "kanz.eighred.com/gateway-policy-probe")
         self.assertEqual(rollout_probe.OWNER, rollout_scope.OWNER)
 
     def test_shared_scope_preserves_reviewed_inventory_checks(self):
         # Pins the unchanged AST extracted from raw-client revision 1e30.
         expected = {
-            "snapshot": "cc9348a170055ac7422fde270b70287d9deb00e3a11dda63da0c9cb505d051ff",
-            "outside_policies": "94e097cf0aade3f7b20617a956dae8975170c2b71f7577401c74e44e2f85648e",
-            "service_snapshot": "1872e03f16ae7538e376e484d4fdd093f64595de0673210867d92e95a5f2eda9",
+            "snapshot": "84fe0c2dd1c560013b6772f5318e9a0a4e964e615078be8a7698915c6309b98e",
+            "outside_policies": "d80c95b2e744eead6dd098969d3f4ae6d9db61065c5419b2cd0dd5c2be332d61",
+            "service_snapshot": "eb6c07b7fe00c65bfdac0d94a252a3cce387c105f497cdbb55ddd1073159676b",
         }
         for name, digest in expected.items():
             function = getattr(rollout_scope, name)
@@ -75,7 +103,7 @@ class RolloutContractTests(unittest.TestCase):
                         return ast.Attribute(value=ast.Name(id="probe", ctx=ast.Load()), attr=node.id, ctx=node.ctx)
                     return node
             tree = OriginalReferences().visit(tree)
-            actual = hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+            actual = hashlib.sha256(canonical_ast(tree).encode()).hexdigest()
             self.assertEqual(actual, digest)
         self.assertEqual(rollout_scope.CLUSTER_UID, "86ea9839-5806-461d-b2d1-afd1ff5d87ff")
         self.assertEqual(rollout_scope.APPS, {"kanz-services": (
