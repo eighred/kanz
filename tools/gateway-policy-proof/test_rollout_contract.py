@@ -3,6 +3,7 @@ import ast
 import hashlib
 import inspect
 import rollout_scope
+import rollout_probe
 from pathlib import Path
 import unittest
 from unittest.mock import patch, Mock
@@ -42,6 +43,20 @@ def recipe(wrapper, engine, workflow):
 
 
 class RolloutContractTests(unittest.TestCase):
+    def test_shared_probe_checks_are_exact_and_keep_public_aliases(self):
+        expected = {
+            'literal_address': '9d0b815d84aba06d50ab3fe610d8720f3604edc121a1b64cc2f34635bd3a4e4e',
+            'endpoint_boundary': '3ea25c5ba1fa60fa4f2c142f5c967197b29421513d8b51fd60eaeba8a14e61a3',
+            'workload_lineage': '54d42948895334c49e6564fe9060f65a403022d28195578ab59c3c0ecc2e8a6b',
+        }
+        for name, digest in expected.items():
+            function = getattr(rollout_scope, name)
+            self.assertIs(getattr(rollout_probe, name), function)
+            tree = ast.parse(inspect.getsource(function)).body[0]
+            self.assertEqual(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest(), digest)
+        self.assertEqual(rollout_scope.OWNER, "kanz.eighred.com/gateway-policy-probe")
+        self.assertEqual(rollout_probe.OWNER, rollout_scope.OWNER)
+
     def test_shared_scope_preserves_reviewed_inventory_checks(self):
         # Pins the unchanged AST extracted from raw-client revision 1e30.
         expected = {
@@ -53,6 +68,13 @@ class RolloutContractTests(unittest.TestCase):
             function = getattr(rollout_scope, name)
             self.assertIs(getattr(engine, name), function)
             tree = ast.parse(inspect.getsource(function)).body[0]
+            # Only qualify the two references redirected from probe to scope.
+            class OriginalReferences(ast.NodeTransformer):
+                def visit_Name(self, node):
+                    if node.id in ("OWNER", "workload_lineage"):
+                        return ast.Attribute(value=ast.Name(id="probe", ctx=ast.Load()), attr=node.id, ctx=node.ctx)
+                    return node
+            tree = OriginalReferences().visit(tree)
             actual = hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
             self.assertEqual(actual, digest)
         self.assertEqual(rollout_scope.CLUSTER_UID, "86ea9839-5806-461d-b2d1-afd1ff5d87ff")

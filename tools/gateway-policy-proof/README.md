@@ -174,3 +174,39 @@ policy, then requires exact custom metadata preservation across raw create,
 replace, finalization and all eight rollback cases, unchanged dry-run inventory,
 and refusal of stale resourceVersion and wrong UID updates. This source repair
 does not reconcile or authorize mutation of any retained live transaction.
+
+### Retained read-only recovery plan
+
+`tools/Invoke-TokyoGatewayPolicyRecoveryPlan.ps1` is a separate, source-bound
+planning entrypoint for the single retained Tokyo failure identified in its
+closed source. It is not a restore or an Apply retry. It requires the same
+exact-main acceptance and operator identity checks as the rollout wrapper.
+The trusted host retrieves the original SSM command and invocation, verifies
+its fixed instance/command recipe, and compares its decoded source bundle with
+the original Git blobs (allowing only exact LF/CRLF checkout representations).
+Only verified compact provenance hashes/context enter the remote planner.
+
+The planner reads the existing private receipts without modifying them. It
+requires one unresolved intent, exact unchanged other policy objects, the
+original target UID and creation timestamp, and exact intended user metadata
+except the independently established kubectl last-applied transformation. That
+annotation must encode the originally submitted object, including its original
+UID/resourceVersion and nonce. Server-managed generation/managedFields are not
+claimed equal to the submitted object; the complete current target object is
+hash-bound in the resulting preconditions.
+
+Fresh canonical workload lineage/readiness, Service and outside-policy checks
+must remain stable across a raw server-side dry-run of the baseline with the
+current target CAS identity. Current policy inventory must remain unchanged.
+Cleanup checks cover all retained observed probe IPs and owned UIDs, not unknown
+historical addresses. Old receipts did not capture historical workload, Service
+or outside-policy snapshots: the result explicitly reports those historical
+snapshots as `UNKNOWN`. Fresh checks do not backfill them.
+
+The plan does not authorize restoration or write observations. No restore code
+is provided. Its hashes describe the observed planning window; any separately
+reviewed recovery operation would need fresh matching preconditions. The new
+reader's root-Linux no-follow controls and the complete wrapper/real API planning
+path still require actual Linux qualification; local pure tests do not establish
+live recovery acceptance. Normal Apply and plan transports retain the existing
+20,000 encoded / 524,288 expanded / 65,536 per-source-byte limits.

@@ -19,6 +19,9 @@ class SourceLoaderTests(unittest.TestCase):
         for entry, dependency in (("preflight", "bounded_process"), ("image_identity", "rollout_probe")):
             with self.subTest(entry=entry), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
+                if entry == "image_identity":
+                    for name in ("transaction", "rollout_scope"):
+                        (root / (name + ".py")).write_bytes((HERE / (name + ".py")).read_bytes())
                 source = (HERE / (dependency + ".py")).read_bytes()
                 path = root / (dependency + ".py")
                 malicious = b'print("CACHE_SENTINEL")\n'
