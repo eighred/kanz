@@ -1,4 +1,8 @@
 import json
+import hashlib
+import os
+import sys
+from unittest.mock import patch
 from pathlib import Path
 import tempfile
 import unittest
@@ -6,6 +10,17 @@ import check_oms_recovery_evidence as proof
 
 class RecoveryEvidenceTests(unittest.TestCase):
     def setUp(self):
+        # Portable tests exercise parsing/binding through a test-only reader.
+        # Actual descriptor/FIFO/symlink safety has separate Linux-only tests.
+        self.reader = proof.read_bounded
+        def portable(path, limit):
+            if not path.is_file() or path.stat().st_size > limit: raise ValueError("test input bound")
+            raw = path.read_bytes()
+            if len(raw) > limit: raise ValueError("test input bound")
+            return raw
+        patcher = patch.object(proof, "read_bounded", side_effect=portable)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -27,9 +42,37 @@ class RecoveryEvidenceTests(unittest.TestCase):
             self.write(filename, events)
     def write(self, filename, events):
         (self.root / filename).write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    def test_oversized_files_refuse_before_parse(self):
+        for name, limit in (("recovery.jsonl", proof.MAX_STREAM_BYTES), ("proof.json", proof.MAX_PROOF_BYTES)):
+            with self.subTest(name=name):
+                path = self.root / name
+                with path.open("wb") as stream: stream.truncate(limit + 1)
+                with self.assertRaises(ValueError): proof.read_bounded(path, limit)
+        path = self.root / "boundary"
+        path.write_bytes(b"x" * 16)
+        self.assertEqual(proof.read_bounded(path, 16), b"x" * 16)
+        with self.assertRaises(ValueError): proof.read_bounded(path, 15)
+        with self.assertRaises((ValueError, OSError)): proof.read_bounded(self.root, 16)
+
+    def test_hashes_bind_the_validated_snapshot_without_reopening(self):
+        original = proof.read_bounded
+        reads = []
+        before = (self.root / "recovery.jsonl").read_bytes()
+        def replace_after_read(path, limit):
+            raw = original(path, limit)
+            reads.append(path.name)
+            if path.name == "recovery.jsonl": path.write_bytes(raw + b"\n")
+            return raw
+        with patch.object(proof, "read_bounded", side_effect=replace_after_read):
+            proof.qualify(self.root, self.binding, True)
+        saved = json.loads((self.root / "proof.json").read_text())
+        self.assertEqual(saved["streams"]["recovery.jsonl"], hashlib.sha256(before).hexdigest())
+        self.assertEqual(reads, list(proof.STREAMS))
+        with self.assertRaises(ValueError): proof.qualify(self.root, self.binding)
+
     def test_complete_bound_proof(self):
         result = proof.qualify(self.root, self.binding, True)
-        self.assertEqual(result["required_passes"], 62)
+        self.assertEqual(result["required_passes"], 68)
         self.assertEqual(proof.qualify(self.root, self.binding), result)
     def test_missing_or_skipped_case(self):
         for mode in ("missing", "skip"):
@@ -40,6 +83,16 @@ class RecoveryEvidenceTests(unittest.TestCase):
                 self.write("large-rust.jsonl", changed)
                 with self.assertRaises(ValueError): proof.checked(self.root)
                 self.write("large-rust.jsonl", original)
+    def test_missing_or_misassigned_artifact_slot(self):
+        go = self.root / "large-go.jsonl"
+        rust = self.root / "large-rust.jsonl"
+        original = go.read_bytes()
+        go.write_bytes(rust.read_bytes())
+        with self.assertRaises(ValueError): proof.checked(self.root)
+        go.write_bytes(original)
+        go.rename(self.root / "unexpected-slot.jsonl")
+        with self.assertRaises((ValueError, OSError)): proof.checked(self.root)
+
     def test_duplicate_child(self):
         events = proof.events(self.root / "large-go.jsonl")
         events.append({"Action": "pass", "Package": proof.PREFIX + proof.PACKAGE, "Test": "TestRustRecoveryComplete8000History/go"})
@@ -65,5 +118,25 @@ class RecoveryEvidenceTests(unittest.TestCase):
         for changed in (raw.replace('"version": 1', '"version": true'), raw.replace('"version": 1', '"version": 1, "version": 1')):
             path.write_text(changed)
             with self.assertRaises(ValueError): proof.qualify(self.root, self.binding)
+
+class RecoveryFileSafetyTests(unittest.TestCase):
+    def test_unsupported_platform_refuses(self):
+        with patch.object(proof.sys, "platform", "win32"), self.assertRaises(ValueError):
+            proof.read_bounded(Path("unused"), 16)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux no-follow/nonblocking file proof")
+    def test_fifo_link_and_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            regular = root / "regular"
+            regular.write_bytes(b"x" * 16)
+            self.assertEqual(proof.read_bounded(regular, 16), b"x" * 16)
+            with self.assertRaises(ValueError): proof.read_bounded(regular, 15)
+            fifo = root / "fifo"
+            os.mkfifo(fifo)
+            with self.assertRaises(ValueError): proof.read_bounded(fifo, 16)
+            linked = root / "linked"
+            linked.symlink_to(regular)
+            with self.assertRaises(ValueError): proof.read_bounded(linked, 16)
 
 if __name__ == "__main__": unittest.main()

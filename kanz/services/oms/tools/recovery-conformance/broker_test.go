@@ -1,6 +1,8 @@
 package recoveryconformance
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"github.com/eighred/kanz/internal/bustest"
 	"github.com/eighred/kanz/internal/fillfact"
@@ -48,8 +50,15 @@ func (f *fixture) recoveredWithin(t *testing.T, count int, wait time.Duration) f
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if js.DeleteConsumer(f.ctx, stream, consumerName) != nil {
-			t.Error("recovery consumer cleanup failed")
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := js.DeleteConsumer(cleanupCtx, stream, consumerName); err != nil {
+			var api *jetstream.APIError
+			if errors.As(err, &api) {
+				t.Errorf("recovery consumer cleanup failed: api_code=%d error_code=%d", api.Code, api.ErrorCode)
+			} else {
+				t.Errorf("recovery consumer cleanup failed: context_canceled=%t deadline=%t", errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded))
+			}
 		}
 	})
 	batch, err := consumer.Fetch(count, jetstream.FetchMaxWait(wait))

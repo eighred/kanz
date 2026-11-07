@@ -50,14 +50,14 @@ func TestRustRecoveryDefaultLockCapacityRefusal(t *testing.T) {
 				err := f.service(t, tr).HandleRecovery(lineage(f.ctx, env), env, payload)
 				var databaseError *pgconn.PgError
 				if !errors.As(err, &databaseError) || databaseError.Code != "53200" {
-					t.Fatal("Go default-capacity control did not establish PostgreSQL resource exhaustion")
+					t.Fatalf("Go default-capacity control did not establish PostgreSQL resource exhaustion: %s", goErrorCategory(err))
 				}
 				t.Log("canonical Go default-capacity SQLSTATE=53200")
 			} else {
 				w := f.start(t, tr)
 				r := w.call(map[string]any{"method": "Observation", "envelope": wire(t, env), "payload": payload, "at": clock(), "timeout_ms": 30000})
 				if r.Status != "error" || r.Error != "Database" || !r.SessionsClosed {
-					t.Fatal("default-capacity fixture did not fail closed at database boundary")
+					t.Fatalf("default-capacity outcome: status=%s error=%s sessions_closed=%t", r.Status, r.Error, r.SessionsClosed)
 				}
 				w.close(tr)
 			}

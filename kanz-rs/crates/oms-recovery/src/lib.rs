@@ -14,6 +14,8 @@ pub enum Error {
     Capacity,
     Conflict,
     EvidenceConflict,
+    RecoveryEvidenceConflict,
+    ApprovalRefused,
     HistoryIncomplete,
     PostedHistoryUnknown,
     FeeRevision,

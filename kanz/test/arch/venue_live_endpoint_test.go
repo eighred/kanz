@@ -431,6 +431,13 @@ func orderPlacingVenueAdapters(t *testing.T, root string) []string {
 			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				return relErr
+			}
+			if syntheticVenueTransportFile(filepath.ToSlash(rel)) {
+				return nil
+			}
 			b, rerr := os.ReadFile(path)
 			if rerr != nil {
 				return rerr

@@ -1,6 +1,8 @@
 package recoveryconformance
 
 import (
+	"errors"
+	"github.com/eighred/kanz/internal/dualcontrol"
 	"github.com/eighred/kanz/internal/execution"
 	"github.com/eighred/kanz/internal/fillfact"
 	"github.com/eighred/kanz/internal/outbox"
@@ -186,7 +188,26 @@ func TestRustRecoveryPersistedFeeApproval(t *testing.T) {
 				if admitted {
 					receive = f.recovered(t, 1)
 				}
-				if !f.invoke(t, owner, tr, "Observation", f.env, f.payload) {
+				approvalRefused := name == "same-actor-approval" || name == "expired-approval" || name == "exact-expiry-approval"
+				if approvalRefused {
+					if owner == "go" {
+						err := f.service(t, tr).HandleRecovery(lineage(f.ctx, f.env), f.env, f.payload)
+						want := dualcontrol.ErrExpired
+						if name == "same-actor-approval" {
+							want = dualcontrol.ErrSelfApproval
+						}
+						if !errors.Is(err, want) {
+							t.Fatalf("Go approval refusal differs: %s", goErrorCategory(err))
+						}
+					} else {
+						w := f.start(t, tr)
+						result := w.call(map[string]any{"method": "Observation", "envelope": wire(t, f.env), "payload": f.payload, "at": clock(), "timeout_ms": 30000})
+						if result.Status != "error" || result.Error != "ApprovalRefused" || !result.SessionsClosed {
+							t.Fatalf("Rust approval refusal: status=%s error=%s sessions_closed=%t", result.Status, result.Error, result.SessionsClosed)
+						}
+						w.close(tr)
+					}
+				} else if !f.invoke(t, owner, tr, "Observation", f.env, f.payload) {
 					t.Fatal("durable fee lifecycle did not acknowledge handler")
 				}
 				after, err := store.RecoveryCase(ctx, c.ID)
@@ -217,6 +238,10 @@ func TestRustRecoveryPersistedFeeApproval(t *testing.T) {
 					var a, b orderpb.Fill
 					if proto.Unmarshal(previous, &a) != nil || proto.Unmarshal(revised, &b) != nil || !fillfact.SameExecution(&a, f.previous) || !fillfact.SameExecution(&b, f.revised) {
 						t.Fatal("fee journal economics differ")
+					}
+				} else if approvalRefused {
+					if after.Status != c.Status || after.Version != c.Version || after.Checkpoint != 0 || revisions != 0 || targets != 0 {
+						t.Fatal("approval refusal changed frozen lifecycle or financial owners")
 					}
 				} else if after.Status != "blocked" || after.Checkpoint != 0 || revisions != expectedRevisions || targets != 0 {
 					t.Fatal("invalid/missing approval altered financial owners")

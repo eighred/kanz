@@ -52,7 +52,7 @@ func TestRustRecoveryOversizedSingleFactRefusal(t *testing.T) {
 				err := f.service(t, tr).HandleRecovery(lineage(f.ctx, env), env, payload)
 				// Broker configuration is observed by ensureBroker, not inferred from the
 				// repository. A handler error here is not evidence of transaction rollback.
-				t.Logf("canonical Go oversized-record handler returned_error=%t", err != nil)
+				t.Logf("canonical Go oversized-record handler category=%s", goErrorCategory(err))
 			}
 			got, version, err := store.Load(f.ctx, st.OrderId)
 			if err != nil {
@@ -74,7 +74,7 @@ func TestRustRecoveryOversizedSingleFactRefusal(t *testing.T) {
 				}
 			} else {
 				if c.Checkpoint != 1 || version != 1 || dec.Cmp(got.FilledQuantity, &commonpb.Decimal{Coefficient: 1}) != 0 {
-					t.Fatal("Go bounded-domain comparison did not reach committed record")
+					t.Fatalf("Go bounded-domain comparison did not reach committed record: version=%d checkpoint=%d", version, c.Checkpoint)
 				}
 				var records int
 				if f.pool.QueryRow(f.ctx, "SELECT count(*) FROM outbox WHERE event_type='order.order.execution_recovered' AND octet_length(payload)>1048576").Scan(&records) != nil || records != 1 {

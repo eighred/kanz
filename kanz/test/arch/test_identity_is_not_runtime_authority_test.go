@@ -4,6 +4,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -48,4 +50,26 @@ func runtimeSyntheticImport(rel string, f *ast.File) bool {
 		}
 	}
 	return false
+}
+
+// This exact shared transport is imported only by conformance tests, enforced
+// above. It accepts a caller-supplied fake service and binds literal loopback;
+// it is not a deployed venue adapter. No directory-wide exemption is granted.
+func syntheticVenueTransportFile(rel string) bool {
+	return rel == "services/oms/internal/conformancetestkit/venue.go"
+}
+func TestSyntheticVenueTransportClassification(t *testing.T) {
+	path := "services/oms/internal/conformancetestkit/venue.go"
+	body, err := os.ReadFile(filepath.Join(moduleRoot(t), filepath.FromSlash(path)))
+	if err != nil || !strings.Contains(string(body), venueServerRegistrar) {
+		t.Fatal("synthetic venue classification has no registrar owner")
+	}
+	if !syntheticVenueTransportFile(path) {
+		t.Fatal("exact synthetic owner unclassified")
+	}
+	for _, other := range []string{"services/oms/internal/conformancetestkit/live.go", "services/oms/cmd/oms/venue.go", "services/venue-other/venue.go", "services/oms/internal/conformancetestkit/nested/venue.go"} {
+		if syntheticVenueTransportFile(other) {
+			t.Fatal("production/extra registrar escaped discovery")
+		}
+	}
 }

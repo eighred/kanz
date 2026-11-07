@@ -32,9 +32,9 @@ func checkRecoveryWorkflow(raw []byte) error {
 	}
 	required := map[string][]string{
 		"Compile the actual recovery owner and fixture":        {"cargo test --locked -p kanz-oms-recovery --all-targets", "cargo clippy --locked -p kanz-oms-recovery --all-targets -- -D warnings", "cargo build --locked -p kanz-oms-recovery --example recovery-coordinator-fixture"},
-		"Start separate owned recovery dependencies":           {"postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9", "--name oms-recovery-pg", "--name oms-recovery-default-pg", "kanz.fixture.run=$GITHUB_RUN_ID", "-c max_locks_per_transaction=1024 -c max_connections=100 -c max_prepared_transactions=0", "127.0.0.1:55432:5432", "127.0.0.1:55433:5432", "NOSUPERUSER NOBYPASSRLS", "kanz/infra/nats/bootstrap-job.yaml"},
-		"Qualify actual recovery and complete large histories": {"set -euo pipefail", "go test -race -p 1 ./services/oms/tools/recovery-conformance -skip '^TestRustRecoveryComplete8000History$' -timeout 20m", "-run '^TestRustRecoveryComplete8000History/go$' -timeout 20m", "-run '^TestRustRecoveryComplete8000History/rust$' -timeout 20m", "check_oms_recovery_evidence.py", "--create --source \"$GITHUB_SHA\" --tree \"$(git rev-parse HEAD^{tree})\" --run \"$GITHUB_RUN_ID\" --attempt \"$GITHUB_RUN_ATTEMPT\""},
-		"Remove only owned recovery dependencies":              {"for container in oms-recovery-pg oms-recovery-default-pg oms-recovery-nats", "docker inspect --format", "kanz.fixture.run", "docker rm -f \"$container\""},
+		"Start separate owned recovery dependencies":           {"postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9", "--name oms-recovery-pg", "--name oms-recovery-default-pg", "kanz.fixture.run=$GITHUB_RUN_ID", "kanz.fixture.attempt=$GITHUB_RUN_ATTEMPT", "-c max_locks_per_transaction=1024 -c max_connections=100 -c max_prepared_transactions=0", "127.0.0.1:55432:5432", "127.0.0.1:55433:5432", "NOSUPERUSER NOBYPASSRLS", "kanz/infra/nats/bootstrap-job.yaml"},
+		"Qualify actual recovery and complete large histories": {"set -euo pipefail", "qualification_status=0", `exit "$qualification_status"`, "go test -race -p 1 ./services/oms/tools/recovery-conformance -skip '^TestRustRecoveryComplete8000History$' -timeout 20m", "-run '^TestRustRecoveryComplete8000History/go$' -timeout 20m", "-run '^TestRustRecoveryComplete8000History/rust$' -timeout 20m", "check_oms_recovery_evidence.py", "--create --source \"$GITHUB_SHA\" --tree \"$(git rev-parse HEAD^{tree})\" --run \"$GITHUB_RUN_ID\" --attempt \"$GITHUB_RUN_ATTEMPT\""},
+		"Remove only owned recovery dependencies":              {"for container in oms-recovery-pg oms-recovery-default-pg oms-recovery-nats", "docker inspect --format", "kanz.fixture.run", "kanz.fixture.attempt", `test -z "$remaining"`, "docker rm -f \"$container\""},
 	}
 	seen := map[string]bool{}
 	for _, step := range job.Steps {
@@ -59,6 +59,18 @@ func checkRecoveryWorkflow(raw []byte) error {
 			}
 		}
 		if step.Name == "Qualify actual recovery and complete large histories" {
+			invocations := 0
+			for _, line := range strings.Split(step.Run, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "go test ") {
+					invocations++
+					if !strings.HasSuffix(strings.TrimSpace(line), "|| qualification_status=1") {
+						return fmt.Errorf("recovery invocation exit ignored")
+					}
+				}
+			}
+			if invocations != 3 || strings.Count(step.Run, "|| qualification_status=1") != 4 {
+				return fmt.Errorf("recovery invocation or checker exit missing")
+			}
 			if !strings.Contains(step.Env["TEST_POSTGRES_URL"], "@127.0.0.1:55432/") || !strings.Contains(step.Env["TEST_POSTGRES_DEFAULT_LOCK_URL"], "@127.0.0.1:55433/") || step.Env["KANZ_OMS_RECOVERY_VERSION"] != "${{ github.sha }}" {
 				return fmt.Errorf("recovery dependency/source binding")
 			}
@@ -78,7 +90,7 @@ func TestRustRecoveryWorkflowCannotSkipActualOwner(t *testing.T) {
 	if e = checkRecoveryWorkflow(raw); e != nil {
 		t.Fatal(e)
 	}
-	for _, marker := range []string{"  recovery-coordinator:", "--name oms-recovery-default-pg", "max_locks_per_transaction=1024", "-run '^TestRustRecoveryComplete8000History/go$'", "-run '^TestRustRecoveryComplete8000History/rust$'", "--attempt \"$GITHUB_RUN_ATTEMPT\"", "NOSUPERUSER NOBYPASSRLS", "kanz.fixture.run=$GITHUB_RUN_ID"} {
+	for _, marker := range []string{`exit "$qualification_status"`, "|| qualification_status=1", "check_oms_recovery_evidence.py", "  recovery-coordinator:", "--name oms-recovery-default-pg", "max_locks_per_transaction=1024", "-run '^TestRustRecoveryComplete8000History/go$'", "-run '^TestRustRecoveryComplete8000History/rust$'", "--attempt \"$GITHUB_RUN_ATTEMPT\"", "NOSUPERUSER NOBYPASSRLS", "kanz.fixture.run=$GITHUB_RUN_ID", "kanz.fixture.attempt=$GITHUB_RUN_ATTEMPT", `test -z "$remaining"`} {
 		t.Run(marker, func(t *testing.T) {
 			changed := strings.ReplaceAll(string(raw), marker, "removed")
 			if changed == string(raw) {

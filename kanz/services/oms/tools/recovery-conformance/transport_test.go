@@ -97,6 +97,7 @@ type transport struct {
 	source           *conformancetestkit.Workload
 	endpoint, socket string
 	goConn           *grpc.ClientConn
+	closeGo          func()
 }
 
 func startTransport(t *testing.T, v *venue) *transport {
@@ -120,12 +121,16 @@ func startTransport(t *testing.T, v *venue) *transport {
 	if err != nil {
 		t.Fatal("Go venue client construction failed")
 	}
-	t.Cleanup(func() {
-		if conn.Close() != nil {
-			t.Error("Go venue client cleanup failed")
-		}
-	})
-	return &transport{v, source, endpoint, socket, conn}
+	var closeOnce sync.Once
+	closeGo := func() {
+		closeOnce.Do(func() {
+			if conn.Close() != nil {
+				t.Error("Go venue client cleanup failed")
+			}
+		})
+	}
+	t.Cleanup(closeGo)
+	return &transport{venue: v, source: source, endpoint: endpoint, socket: socket, goConn: conn, closeGo: closeGo}
 }
 func (f *fixture) start(t *testing.T, tr *transport) *worker {
 	return f.startWithin(t, tr, 180*time.Second)

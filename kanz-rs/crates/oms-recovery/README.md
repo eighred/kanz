@@ -13,6 +13,10 @@ binding must match the stored order and an actual SPIFFE mTLS `Describe` result;
 A durable blocked case can return handler success after its FACT is published,
 matching Go. That response does not mean the financial books recovered. Missing
 or unavailable evidence cannot become a healthy empty history.
+Persisted maker/checker, digest or expiry policy refusals return
+`ApprovalRefused`; they do not manufacture a durable blocked acknowledgement.
+An unmatched order mapping or inconsistent frozen-history digest returns
+`RecoveryEvidenceConflict`, preserving Go's separate refusal path.
 
 Immutable original observation bytes and their hash are retained. The existing
 Go observation, Query history and frozen-history contracts permit 4 MiB, with

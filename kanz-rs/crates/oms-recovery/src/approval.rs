@@ -79,7 +79,6 @@ pub(crate) fn approved(
     let actual = hash(tenant, &without_digest(&proposal)?);
     let proposed = stamp(p.proposed_at.as_ref())?;
     let expiry = stamp(p.expires_at.as_ref())?;
-    let approved = stamp(a.approved_at.as_ref())?;
     // Go time.Sub saturates to int64 duration before Propose adds the TTL.
     // Retain that caller-clock behavior rather than invent a DB-clock policy.
     let ttl = (expiry - proposed).min(i128::from(i64::MAX));
@@ -88,18 +87,22 @@ pub(crate) fn approved(
         || actual != evidence.stored_digest
         || p.digest != actual
         || p.case_id != case.id
-        || p.case_id.trim().is_empty()
+    {
+        return Err(Error::FeeRevision);
+    }
+    // Go's dual-control refusals propagate as errors. They do not enter the
+    // FeeRevision branch that durably blocks and acknowledges the observation.
+    if p.case_id.trim().is_empty()
         || p.order_id.trim().is_empty()
         || fee_subject::normalize(&p.proposer).is_empty()
         || p.digest.trim().is_empty()
         || proposed == zero
         || ttl <= 0
-        || proposed + ttl == zero
-        || fee_subject::normalize(&a.approver).is_empty()
-        || fee_subject::normalize(&a.approver) == fee_subject::normalize(&p.proposer)
-        || a.digest != p.digest
-        || approved >= proposed + ttl
-        || a.proposer != p.proposer
+    {
+        return Err(Error::ApprovalRefused);
+    }
+    let approved = stamp(a.approved_at.as_ref())?;
+    if a.proposer != p.proposer
         || a.order_id != case.order_id
         || a.case_id != case.id
         || a.portfolio_id != p.portfolio_id
@@ -108,6 +111,14 @@ pub(crate) fn approved(
         || p.changes.len() > MAX_FILLS
     {
         return Err(Error::FeeRevision);
+    }
+    if proposed + ttl == zero
+        || fee_subject::normalize(&a.approver).is_empty()
+        || fee_subject::normalize(&a.approver) == fee_subject::normalize(&p.proposer)
+        || a.digest != p.digest
+        || approved >= proposed + ttl
+    {
+        return Err(Error::ApprovalRefused);
     }
     let number = ExecutionFeeCorrectionProposed::descriptor()?
         .get_field_by_name("changes")

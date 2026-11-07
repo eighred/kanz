@@ -174,7 +174,7 @@ func TestRustRecoveryObservation(t *testing.T) {
 					w := f.start(t, tr)
 					r := w.call(map[string]any{"method": "Observation", "envelope": wire(t, env), "payload": payload, "at": clock(), "timeout_ms": 30000})
 					if r.Status != "ok" || !r.SessionsClosed {
-						t.Fatal("Rust recovery handler/SQL owner did not complete")
+						t.Fatalf("Rust recovery handler: status=%s error=%s sessions_closed=%t", r.Status, r.Error, r.SessionsClosed)
 					}
 					w.close(tr)
 				}
@@ -285,20 +285,27 @@ func (f *fixture) invoke(t *testing.T, owner string, tr *transport, method strin
 			t.Fatal("recovery SQL owners not closed")
 		}
 		w.close(tr)
+		if result.Status != "ok" {
+			t.Logf("recovery owner=rust status=%s error=%s sessions_closed=%t", result.Status, result.Error, result.SessionsClosed)
+		}
 		return result.Status == "ok"
 	}
 	svc := f.service(t, tr)
+	var err error
 	switch method {
 	case "Observation":
-		return svc.HandleRecovery(lineage(f.ctx, env), env, payload) == nil
+		err = svc.HandleRecovery(lineage(f.ctx, env), env, payload)
 	case "Ack":
-		return svc.HandleRecoveryAck(lineage(f.ctx, env), env, payload) == nil
+		err = svc.HandleRecoveryAck(lineage(f.ctx, env), env, payload)
 	case "Parked":
-		return svc.HandleRecoveryParked(lineage(f.ctx, env), env, payload) == nil
+		err = svc.HandleRecoveryParked(lineage(f.ctx, env), env, payload)
 	default:
 		t.Fatal("unsupported oracle handler")
 	}
-	return false
+	if err != nil {
+		t.Logf("recovery owner=go category=%s", goErrorCategory(err))
+	}
+	return err == nil
 }
 func (f *fixture) acknowledge(t *testing.T, owner string, tr *transport, records []*orderpb.ExecutionRecovered) {
 	t.Helper()

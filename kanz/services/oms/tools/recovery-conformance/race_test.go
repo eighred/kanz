@@ -62,6 +62,7 @@ func TestRustRecoveryConcurrentGoWriter(t *testing.T) {
 	if retried.Status != "ok" || !retried.SessionsClosed {
 		t.Fatal("cross-writer retry failed")
 	}
+	tr.closeGo() // The independent Go writer must release its own transport first.
 	w.close(tr)
 	records := receive()
 	if len(records) != 2 {

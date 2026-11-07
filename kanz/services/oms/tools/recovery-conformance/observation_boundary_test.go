@@ -115,10 +115,19 @@ func TestRustRecoveryObservationPayloadBoundary(t *testing.T) {
 				if version != 1 || got.Status != orderpb.OrderStatus_ORDER_STATUS_CANCELLED || dec.Cmp(got.FilledQuantity, &commonpb.Decimal{Coefficient: 2}) != 0 || dec.Cmp(got.AverageFillPrice, &commonpb.Decimal{Coefficient: 1005, Exponent: -1}) != 0 {
 					t.Fatal("accepted observation failed independent recovery arithmetic")
 				}
+				var frozen []byte
+				var historyDigest string
+				if f.pool.QueryRow(f.ctx, "SELECT history,payload_digest FROM execution_recovery_history WHERE case_id=$1", env.EventId).Scan(&frozen, &historyDigest) != nil {
+					t.Fatal("frozen history unavailable")
+				}
+				historyHash := sha256.Sum256(frozen)
+				if historyDigest != hex.EncodeToString(historyHash[:]) {
+					t.Fatal("frozen history digest differs from stored bytes")
+				}
 				records := receive()
 				for _, record := range records {
-					if record.Fill.Recovery.PayloadDigest != hex.EncodeToString(digest[:]) || !proto.Equal(record.State, got) {
-						t.Fatal("recovered FACT not bound to original observation bytes")
+					if record.Fill.Recovery.PayloadDigest != historyDigest || !proto.Equal(record.State, got) {
+						t.Fatal("recovered FACT not bound to frozen history bytes")
 					}
 				}
 				if !f.invoke(t, owner, tr, "Observation", env, payload) {

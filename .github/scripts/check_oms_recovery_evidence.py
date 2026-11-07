@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import stat
+import sys
 from check_migration_evidence import verify, PREFIX
 
 PACKAGE = "services/oms/tools/recovery-conformance"
@@ -16,11 +18,13 @@ GROUPS = {
  "TestRustRecoveryAdmissionRefusals": "foreign-tenant missing-tenant command-not-fact wrong-subject empty-payload malformed-payload oversized-observation".split(),
  "TestRustRecoveryDurableTailRollback": ["outbox-insert", "deferred-commit"],
  "TestRustRecoveryObservationPayloadBoundary": ["above-standard-message-bound", "exact-four-mib", "one-byte-over-four-mib"],
- **{name: ["go", "rust"] for name in ("TestRustRecoveryOversizedSingleFactRefusal", "TestRustRecoveryComplete8000History", "TestRustRecovery8001HistoryRefusal", "TestRustRecoveryDefaultLockCapacityRefusal", "TestRustRecoveryMalformedPostedJournal", "TestRustRecoveryTenantIsolation")},
+ **{name: ["go", "rust"] for name in ("TestRustRecoveryOversizedSingleFactRefusal", "TestRustRecoveryComplete8000History", "TestRustRecovery8001HistoryRefusal", "TestRustRecoveryDefaultLockCapacityRefusal", "TestRustRecoveryMalformedPostedJournal", "TestRustRecoveryTenantIsolation", "TestRustRecoveryExplicitZeroHistory", "TestRustRecoveryFrozenMappingAttribution")},
 }
 NAMES = set(GROUPS) | {f"{name}/{child}" for name, children in GROUPS.items() for child in children} | {"TestRustRecoveryConcurrentGoWriter", "TestRustRecoveryCrashDuringHistoryQuery", "TestRecoveryObservationPaddingOracle"}
 REQUIRED = {PACKAGE: NAMES}
 STREAMS = ("recovery.jsonl", "large-go.jsonl", "large-rust.jsonl")
+MAX_STREAM_BYTES = 64 * 1024 * 1024
+MAX_PROOF_BYTES = 64 * 1024
 HEX = re.compile(r"[0-9a-f]{40}\Z")
 
 def strict(pairs):
@@ -30,14 +34,31 @@ def strict(pairs):
         out[key] = value
     return out
 
-def events(path):
-    return [json.loads(line, object_pairs_hook=strict) for line in path.read_text(encoding="utf-8").splitlines() if line]
+def read_bounded(path, limit):
+    # Bound before parsing or hashing; growth after fstat is also refused.
+    if sys.platform != "linux" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK"):
+        raise ValueError("Linux no-follow/nonblocking evidence reader required")
+    if path.is_symlink(): raise ValueError("evidence symlink refused")
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValueError("evidence is not a bounded regular file")
+        raw = stream.read(limit + 1)
+    if len(raw) != info.st_size or len(raw) > limit: raise ValueError("evidence changed during read")
+    return raw
 
-def checked(directory):
+def decode_events(raw):
+    return [json.loads(line, object_pairs_hook=strict) for line in raw.decode("utf-8").splitlines() if line]
+
+def events(path):
+    return decode_events(read_bounded(path, MAX_STREAM_BYTES))
+
+def checked_streams(streams):
     all_events = []
     large = "TestRustRecoveryComplete8000History"
     for filename in STREAMS:
-        batch = events(directory / filename)
+        batch = decode_events(streams[filename])
         required = NAMES - {large, large + "/go", large + "/rust"} if filename == "recovery.jsonl" else {large, large + ("/go" if filename == "large-go.jsonl" else "/rust")}
         verify(batch, {PACKAGE: required})
         all_events += batch
@@ -61,18 +82,22 @@ def checked(directory):
     if not limits or int(limits[1]) <= 0: raise ValueError("missing actual broker limit")
     return {"required_passes": len(NAMES), "peak_rss_kib": int(match[1]), "current_rss_kib": int(match[2])}
 
+def checked(directory):
+    return checked_streams({name: read_bounded(directory / name, MAX_STREAM_BYTES) for name in STREAMS})
+
 def metadata(source, tree, run, attempt):
     if not HEX.fullmatch(source) or not HEX.fullmatch(tree) or not run.isdecimal() or not attempt.isdecimal() or int(run) <= 0 or int(attempt) <= 0: raise ValueError("invalid source/run binding")
     return {"version": 1, "source_sha": source, "tree_sha": tree, "run_id": run, "run_attempt": attempt}
 
 def qualify(directory, expected, create=False):
-    result = checked(directory)
-    bound = {**expected, "streams": {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in STREAMS}, "result": result}
+    streams = {name: read_bounded(directory / name, MAX_STREAM_BYTES) for name in STREAMS}
+    result = checked_streams(streams)
+    bound = {**expected, "streams": {name: hashlib.sha256(raw).hexdigest() for name, raw in streams.items()}, "result": result}
     path = directory / "proof.json"
     if create:
         path.write_text(json.dumps(bound, sort_keys=True) + "\n", encoding="utf-8")
     else:
-        saved = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=strict)
+        saved = json.loads(read_bounded(path, MAX_PROOF_BYTES).decode("utf-8"), object_pairs_hook=strict)
         if not isinstance(saved, dict) or type(saved.get("version")) is not int or not isinstance(saved.get("result"), dict) or any(type(value) is not int for value in saved["result"].values()) or saved != bound:
             raise ValueError("recovery proof source/run/content mismatch")
     return result

@@ -143,7 +143,7 @@ func (w *worker) call(request map[string]any) response {
 			}
 		case "error":
 			switch result.Error {
-			case "InvalidInput", "Capacity", "Conflict", "EvidenceConflict", "HistoryIncomplete", "PostedHistoryUnknown", "FeeRevision", "Database", "CommitUnconfirmed", "PublicationUnconfirmed", "Venue", "UnsupportedAction", "Deadline":
+			case "ApprovalRefused", "RecoveryEvidenceConflict", "InvalidInput", "Capacity", "Conflict", "EvidenceConflict", "HistoryIncomplete", "PostedHistoryUnknown", "FeeRevision", "Database", "CommitUnconfirmed", "PublicationUnconfirmed", "Venue", "UnsupportedAction", "Deadline":
 			default:
 				w.t.Fatal("unknown recovery failure classification")
 			}

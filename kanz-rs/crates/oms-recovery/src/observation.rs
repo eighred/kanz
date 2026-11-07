@@ -47,13 +47,16 @@ async fn prepared(
     let st = Canonical::<OrderState>::decode(&loaded.state)?;
     let (history, digest) = repository::history(client, tenant, &c.id)
         .await
-        .map_err(Error::from)?;
+        .map_err(|error| match error {
+            store::Error::IdentityConflict => Error::RecoveryEvidenceConflict,
+            other => other.into(),
+        })?;
     let fills = history::from_frozen(&st, &history)?;
     if !repository::mapping_matches(client, tenant, &c.mapping_version, st.value())
         .await
         .map_err(Error::from)?
     {
-        return Err(Error::EvidenceConflict.into());
+        return Err(Error::RecoveryEvidenceConflict.into());
     }
     let approvals = match repository::fee_evidence(client, tenant, &c.id).await {
         Ok(evidence) => approval::approved(tenant, c, &digest, evidence),
