@@ -465,7 +465,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_lake_raw_evidence.py
-          go test -race -p 1 -json -count=1 ./services/lake-sink/internal/cdc -run '^TestRawKafkaCustodyAndOffsets$' | tee "$RUNNER_TEMP/lake-raw-proof.jsonl"
+          go test -race -p 1 -json -count=1 ./services/lake-sink/internal/cdc -run '^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff)$' | tee "$RUNNER_TEMP/lake-raw-proof.jsonl"
           python3 ../.github/scripts/check_lake_raw_evidence.py "$RUNNER_TEMP/lake-raw-proof.jsonl"
 
       - name: Preserve raw Kafka custody evidence

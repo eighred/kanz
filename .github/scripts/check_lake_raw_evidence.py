@@ -4,6 +4,7 @@ import sys
 from check_migration_evidence import verify
 
 REQUIRED = {"services/lake-sink/internal/cdc": {
+    "TestRawRestartReadPhaseHandoff",
     "TestRawKafkaCustodyAndOffsets",
     "TestRawKafkaCustodyAndOffsets/process-crash",
     "TestRawKafkaCustodyAndOffsets/flush-failure",
@@ -14,4 +15,4 @@ REQUIRED = {"services/lake-sink/internal/cdc": {
 if __name__ == "__main__":
     with open(sys.argv[1], encoding="utf-8") as source:
         verify((json.loads(line) for line in source), required=REQUIRED)
-    print("All four actual Kafka custody cases passed in one complete package")
+    print("All four actual Kafka custody cases and phase-handoff regression passed in one complete package")

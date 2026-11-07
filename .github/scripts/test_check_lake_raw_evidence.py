@@ -11,7 +11,7 @@ class RawEvidenceTests(unittest.TestCase):
             {"Action": "pass", "Package": PREFIX + package}]]
 
     def test_complete(self):
-        self.assertEqual(sum(map(len, REQUIRED.values())), 5)
+        self.assertEqual(sum(map(len, REQUIRED.values())), 6)
         verify(self.events(), required=REQUIRED)
 
     def test_each_case_and_completion_required(self):
@@ -24,3 +24,11 @@ class RawEvidenceTests(unittest.TestCase):
         for action in ("skip", "fail"):
             with self.subTest(action=action), self.assertRaises(ValueError):
                 verify(self.events() + [{"Action": action}], required=REQUIRED)
+
+    def test_handoff_skip_refuses(self):
+        events = self.events()
+        for event in events:
+            if event.get("Test") == "TestRawRestartReadPhaseHandoff":
+                event["Action"] = "skip"
+        with self.assertRaises(ValueError):
+            verify(events, required=REQUIRED)

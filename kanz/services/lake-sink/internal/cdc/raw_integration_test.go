@@ -252,7 +252,10 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 			}
 			restart := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: topic, GroupID: group, MinBytes: 1, MaxBytes: 1 << 20})
 			defer func() { _ = restart.Close() }()
-			readctx, readcancel := context.WithTimeout(ctx, 5*time.Second)
+			readctx, readcancel, err := rawRestartReadContext(ctx, mode == "process-crash")
+			if err != nil {
+				t.Fatal("raw lifecycle expired before restart read handoff")
+			}
 			defer readcancel()
 			replay, err := restart.FetchMessage(readctx)
 			if committed {
@@ -263,6 +266,75 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 				t.Fatalf("uncommitted original not redelivered: %v", err)
 			}
 		})
+	}
+}
+
+// The crash lifecycle keeps its original 45s for setup, commit, kill, broker
+// membership expiry and marker publication. Only a successful, still-active
+// lifecycle may hand off to the existing 5s positive read. Previously that read
+// inherited the nearly exhausted lifecycle deadline and did not get five seconds.
+// Crash work is therefore bounded by 45s + 5s, excluding fixture cleanup; the
+// other modes retain their original shared lifecycle deadline.
+func rawRestartReadContext(lifecycle context.Context, processCrash bool) (context.Context, context.CancelFunc, error) {
+	if err := lifecycle.Err(); err != nil {
+		return nil, nil, err
+	}
+	deadline, bounded := lifecycle.Deadline()
+	handoff := time.Now()
+	if !bounded || !handoff.Before(deadline) {
+		return nil, nil, context.DeadlineExceeded
+	}
+	parent := lifecycle
+	if processCrash {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithDeadline(parent, handoff.Add(5*time.Second))
+	return ctx, cancel, nil
+}
+
+func TestRawRestartReadPhaseHandoff(t *testing.T) {
+	// Context-only regression: no broker or crash-recovery acceptance is inferred.
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Second)
+	defer cancelParent()
+	read, cancelRead, err := rawRestartReadContext(parent, true)
+	if err != nil {
+		t.Fatal("active lifecycle refused")
+	}
+	defer cancelRead()
+	deadline, _ := read.Deadline()
+	if remaining := time.Until(deadline); remaining < 4*time.Second || remaining > 5*time.Second {
+		t.Fatal("positive read did not receive its fixed independent five-second phase")
+	}
+	cancelParent()
+	if read.Err() != nil {
+		t.Fatal("successful handoff still inherits old lifecycle cancellation")
+	}
+	if _, _, err := rawRestartReadContext(parent, true); !errors.Is(err, context.Canceled) {
+		t.Fatal("cancelled lifecycle was revived")
+	}
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	if _, _, err := rawRestartReadContext(expired, true); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("expired lifecycle was revived")
+	}
+	if _, _, err := rawRestartReadContext(context.Background(), true); err == nil {
+		t.Fatal("unbounded lifecycle accepted")
+	}
+	ordinary, cancelOrdinary := context.WithTimeout(context.Background(), time.Second)
+	defer cancelOrdinary()
+	ordinaryRead, cancelOrdinaryRead, err := rawRestartReadContext(ordinary, false)
+	if err != nil {
+		t.Fatal("ordinary lifecycle refused")
+	}
+	defer cancelOrdinaryRead()
+	want, _ := ordinary.Deadline()
+	got, _ := ordinaryRead.Deadline()
+	if !got.Equal(want) {
+		t.Fatal("non-crash mode gained additional time")
+	}
+	cancelOrdinary()
+	if !errors.Is(ordinaryRead.Err(), context.Canceled) {
+		t.Fatal("non-crash read lost parent cancellation")
 	}
 }
 

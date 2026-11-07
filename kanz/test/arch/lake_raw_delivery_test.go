@@ -143,7 +143,7 @@ func lakeRawProofWorkflow(source string) error {
 			for _, command := range []string{
 				"set -euo pipefail",
 				"python3 -B -m unittest discover -s ../.github/scripts -p test_check_lake_raw_evidence.py",
-				"go test -race -p 1 -json -count=1 ./services/lake-sink/internal/cdc -run '^TestRawKafkaCustodyAndOffsets$' | tee \"$RUNNER_TEMP/lake-raw-proof.jsonl\"",
+				"go test -race -p 1 -json -count=1 ./services/lake-sink/internal/cdc -run '^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff)$' | tee \"$RUNNER_TEMP/lake-raw-proof.jsonl\"",
 				"python3 ../.github/scripts/check_lake_raw_evidence.py \"$RUNNER_TEMP/lake-raw-proof.jsonl\"",
 			} {
 				if !strings.Contains(step.Run, command) {
@@ -170,6 +170,8 @@ func TestLakeRawCustodyRequiresActualKafkaEvidence(t *testing.T) {
 		{"matrix.kind == 'quality'", "false"}, {"working-directory: kanz", "working-directory: elsewhere"},
 		{"TEST_KAFKA_BROKERS: localhost:9092", "TEST_KAFKA_BROKERS: ''"},
 		{"set -euo pipefail", "true"}, {"go test -race -p 1 -json -count=1", "go test -p 1 -json -count=1"},
+		{"^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff)$", "^TestRawKafkaCustodyAndOffsets$"},
+		{"^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff)$", "^TestRawRestartReadPhaseHandoff$"},
 		{"python3 ../.github/scripts/check_lake_raw_evidence.py", "echo"},
 		{"python3 -B -m unittest discover", "echo"},
 		{"        run: |", "        continue-on-error: true\n        run: |"},

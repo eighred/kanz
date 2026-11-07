@@ -145,4 +145,10 @@ The core CI quality runner requires all four real Kafka custody cases: a killed
 consumer process with fsynced raw bytes and a positive next-offset restart marker,
 unparked Flush refusal, failed DLQ publication, and successful original-byte DLQ
 publication. Its JSON evidence checker rejects missing cases, skips, failures and
-an incomplete package. This is fixture qualification, not production activation.
+an incomplete package, and requires the phase-handoff regression. The process-crash
+fixture retains a 45-second lifecycle through commit, kill, membership expiry and
+marker publication. Only a still-active lifecycle may hand off to a separate
+five-second positive restart read: at most 50 seconds of fixture work, excluding
+cleanup. Other modes keep their shared lifecycle deadline. These are disposable
+test budgets, not production SLOs or changes to the Kafka client's session timeout.
+This is fixture qualification, not production activation.
