@@ -163,3 +163,14 @@ and [empty-placeholder controller path](https://github.com/kubernetes/endpointsl
 This is developmental transaction evidence, not Tokyo
 rollout acceptance. Linux execution is required; local Windows receipt tests
 explicitly skip unsupported no-follow directory semantics.
+
+The policy adapter uses fixed, validated raw API POST/PUT paths because ordinary
+kubectl replace rewrites an existing last-applied annotation even without
+`--save-config`. User annotations remain part of exact semantic comparison.
+Raw dry runs use the literal `?dryRun=All` query parameter and verify the returned
+policy; the ordinary CLI dry-run flag does not govern raw requests. The added
+transaction control establishes the old annotation mutation on a disposable
+policy, then requires exact custom metadata preservation across raw create,
+replace, finalization and all eight rollback cases, unchanged dry-run inventory,
+and refusal of stale resourceVersion and wrong UID updates. This source repair
+does not reconcile or authorize mutation of any retained live transaction.

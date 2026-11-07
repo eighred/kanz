@@ -13,6 +13,13 @@ from check_migration_evidence import verify, PREFIX
 
 PACKAGE = "services/oms/tools/recovery-conformance"
 GROUPS = {
+ "TestRustFeeCommandPublicationRestart": ["go", "rust"],
+ "TestRustFeeCommandProposalParity": ["one-change", "sorted-two-changes"],
+ "TestRustFeeCommandConcurrentCommands": ["proposal", "approval"],
+ "TestRustFeeCommandApprovedEvidenceDrift": ["history-attribution-error", "posted-unknown-block", "stale-fee-block"],
+ "TestRustFeeCommandHumanPortfolioBoundary": "foreign-tenant fact-not-command missing-human empty-human wrong-target empty-portfolios wrong-portfolio wrong-case-order".split(),
+ "TestRustFeeCommandApprovalRefusalBlocks": ["same-person", "wrong-digest", "expired"],
+ "TestRustFeeCommandAtomicRollback": ["proposal/outbox-insert", "proposal/deferred-commit", "approval/outbox-insert", "approval/deferred-commit"],
  "TestRustRecoveryCumulativeCommandDeadline": ["cumulative-refusal", "same-phases-positive"],
  "TestRustRecoveryCumulativeStartupDeadline": ["cumulative-refusal", "same-phases-positive"],
  "TestRustRecoveryObservation": "complete-terminal-history complete-raw-observation-unknown complete-large-history-small-facts complete-single-round-weighted-average complete-identical-redelivery-history missing-order-blocked conflicting-observation-blocked incomplete-total-blocked missing-total-blocked unknown-view-blocked duplicate-execution-conflict-blocked".split(),
@@ -22,7 +29,7 @@ GROUPS = {
  "TestRustRecoveryObservationPayloadBoundary": ["above-standard-message-bound", "exact-four-mib", "one-byte-over-four-mib"],
  **{name: ["go", "rust"] for name in ("TestRustRecoveryOversizedSingleFactRefusal", "TestRustRecoveryComplete8000History", "TestRustRecovery8001HistoryRefusal", "TestRustRecoveryDefaultLockCapacityOutcome", "TestRustRecoveryConstrainedLockCapacityRefusal", "TestRustRecoveryMalformedPostedJournal", "TestRustRecoveryTenantIsolation", "TestRustRecoveryExplicitZeroHistory", "TestRustRecoveryFrozenMappingAttribution")},
 }
-NAMES = set(GROUPS) | {f"{name}/{child}" for name, children in GROUPS.items() for child in children} | {"TestRustRecoveryDeadlineAfterBrokerAcknowledgement", "TestRustRecoveryRelayLockDeadline", "TestRustRecoveryConcurrentGoWriter", "TestRustRecoveryCrashDuringHistoryQuery", "TestRecoveryObservationPaddingOracle", "TestRecoveryDrainRetryClassification", "TestWorkerDiagnosticPreservesJoinAndClosedCategories"}
+NAMES = set(GROUPS) | {f"{name}/{child}" for name, children in GROUPS.items() for child in children} | {"TestRustFeeCommandProposalParity", "TestRustFeeCommandApprovalLifecycle", "TestRustRecoveryDeadlineAfterBrokerAcknowledgement", "TestRustRecoveryRelayLockDeadline", "TestRustRecoveryConcurrentGoWriter", "TestRustRecoveryCrashDuringHistoryQuery", "TestRecoveryObservationPaddingOracle", "TestRecoveryDrainRetryClassification", "TestWorkerDiagnosticPreservesJoinAndClosedCategories", "TestWorkerProfileBoundedFailureOnly"}
 REQUIRED = {PACKAGE: NAMES}
 STREAMS = ("recovery.jsonl", "large-go.jsonl", "large-rust.jsonl")
 MAX_STREAM_BYTES = 64 * 1024 * 1024
@@ -106,7 +113,7 @@ def qualify(directory, expected, create=False):
     result = checked_streams(streams)
     binary = read_bounded(directory / "binary.sha256", 65).decode("ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{64}", binary): raise ValueError("invalid executable digest")
-    build = {"profile": "release", "target": "kanz-rs/target/release/examples/recovery-coordinator-fixture", "sha256": binary}
+    build = {"features": ["qualification-diagnostics"], "profile": "release", "target": "kanz-rs/target/release/examples/recovery-coordinator-fixture", "sha256": binary}
     bound = {**expected, "streams": {name: hashlib.sha256(raw).hexdigest() for name, raw in streams.items()}, "result": result, "build": build}
     path = directory / "proof.json"
     if create:

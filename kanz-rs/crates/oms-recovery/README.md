@@ -1,11 +1,13 @@
 # Recovery observation coordinator
 
 This source-first owner composes the existing order aggregate, OMS repository,
-fee journal, typed venue client and relay for three Go handler contracts:
-`HandleRecovery`, `HandleRecoveryAck` and `HandleRecoveryParked`. It has no
+fee journal, typed venue client and relay for the existing Go handler contracts:
+`HandleRecovery`, `HandleRecoveryAck`, `HandleRecoveryParked` and
+`HandleFeeCorrection`. It has no
 production caller. Go remains the authoritative OMS; this library neither
-executes nor cancels orders, redrives orphans, resumes trading, creates fee
-approvals, nor replaces risk/compliance/mandate admission.
+executes nor cancels orders, redrives orphans, resumes trading, nor replaces
+risk/compliance/mandate admission. Fee command compatibility does not activate
+a Rust approval service or authenticate a human caller.
 
 Observation is an investigation trigger. The configured portfolio/account
 binding must match the stored order and an actual SPIFFE mTLS `Describe` result;
@@ -17,6 +19,27 @@ Persisted maker/checker, digest or expiry policy refusals return
 `ApprovalRefused`; they do not manufacture a durable blocked acknowledgement.
 An unmatched order mapping or inconsistent frozen-history digest returns
 `RecoveryEvidenceConflict`, preserving Go's separate refusal path.
+
+Fee commands retain exact serving-tenant attribution, COMMAND class, canonical
+command schemas, delegated `user:` issuer, exact target and nonempty explicit
+portfolio entitlement. The authenticated gateway/Consumer remains responsible
+for binding that metadata; a string prefix is not independent authentication.
+Only the frozen history and current complete posted journal supply changed
+fees. Proposals retain sorted original/revised execution wire and a tenant-bound
+digest, a 24-hour review interval and the existing 512-KiB review bound. Proposal
+insert, unchanged-order CAS and proposed FACT enqueue share one transaction.
+Approval insert, case CAS and approved FACT enqueue share another transaction.
+A committed approval redelivery validates its original signing time, including
+when the retry is after expiry. Same-person, changed-digest and expired new
+approval commands preserve Go's distinct durable blocked reasons; observation
+revalidation still propagates those refusals without synthesizing a block.
+Recovery after approval reuses the existing complete journal/fee transaction;
+no new financial formula or venue side effect is introduced.
+
+Fee-command qualification requires the actual PostgreSQL/NATS differential
+fixture; local compilation and source guards do not supply that evidence.
+Go remains the rollback reader/writer, and any ownership handoff still requires
+complete dependency proof, backup/recovery and explicit human authorization.
 
 Immutable original observation bytes and their hash are retained. The existing
 Go observation, Query history and frozen-history contracts permit 4 MiB, with
@@ -109,3 +132,40 @@ compatibility from [#1316](https://github.com/eighred/kanz/issues/1316), explici
 capacity/concurrency acceptance, recovery/rollback and exclusive writer handoff.
 [#1413](https://github.com/eighred/kanz/issues/1413) owns those decisions. A compiled
 fixture or compatibility pass does not activate recovery or close that issue.
+
+Qualification-only stage diagnostics
+-----------------------------------
+
+The off-by-default `qualification-diagnostics` feature records fixed-size,
+saturating counters and nanoseconds in a task-local command scope. It changes
+no SQL, work budget, session lifetime, ACK count or retry decision. The release
+fixture reports its actual feature identity in each existing private response;
+the Go harness requires that identity and retains aggregates only in memory.
+Only existing worker transport/response failure diagnostics emit these arrays;
+typed command errors reported directly by their callers do not necessarily emit
+a profile. Passing runs do not
+publish stage measurements. A failed command without a complete response is
+excluded: the output explicitly describes completed-command aggregates, never
+the current stage or an observed cause of the failure.
+
+Array order is HandlerConnect, LoadCase, LoadOrder, DurableAck, AckTargets,
+AckReceived, HandlerClose, RelayConnect, RelayAcquire, RelayPending,
+RelayRelease, RelayClose, FixtureAbsence, Total. Durations are nonadditive:
+AckTargets and AckReceived are nested in DurableAck; Total includes the other
+stages. Counts describe executed stage scopes, not successful financial effects.
+The 900-second fixture lifetime, 30-second work budget, all 16,000 ACKs and
+explicit cleanup checks remain mandatory. These observations alone do not
+establish a performance bottleneck or production performance acceptance.
+
+ACK context reads share one explicit READ COMMITTED, read-only transaction.
+The standalone case/order APIs retain their completion behavior; the paired ACK
+read has one rollback after both reads instead of an intermediate case COMMIT
+and a second scope. Case validation still precedes order validation. Role checks
+remain first; tenant configuration and the unchanged five-table FORCE RLS count
+share a catalog-only SELECT, and the count must pass before application SQL.
+The final locked ACK/target/count/CAS/outbox transaction and all sessions, joins
+and work limits remain unchanged. LoadCase/LoadOrder diagnostic scopes now cover
+only their reused row reads; shared read admission/rollback is included in Total,
+so these stage scopes are not comparable with the preceding diagnostic revision.
+Fresh full dependency qualification is required; no latency improvement follows
+from source round-trip counts alone.

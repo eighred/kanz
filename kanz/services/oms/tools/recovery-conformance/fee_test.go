@@ -33,6 +33,9 @@ type feeFixture struct {
 // Synthetic maker/checker subjects qualify durable revalidation, not the live
 // authentication or human-approval boundary, which remains Go-owned.
 func prepareFee(t *testing.T, persistProposal bool) *feeFixture {
+	return prepareFeeCount(t, persistProposal, 1)
+}
+func prepareFeeCount(t *testing.T, persistProposal bool, count int) *feeFixture {
 	t.Helper()
 	f := newFixture(t)
 	ctx := bus.WithTenantID(f.ctx, f.tenant)
@@ -43,27 +46,45 @@ func prepareFee(t *testing.T, persistProposal bool) *feeFixture {
 	if store.Create(ctx, st, nil) != nil {
 		t.Fatal("seed order failed")
 	}
-	old := history(st).Fills[0]
-	next, err := order.ApplyFill(st, old, instant)
+	if count != 1 && count != 2 {
+		t.Fatal("closed fee fixture fill count")
+	}
+	originals := history(st).Fills[:count]
+	if count == 2 && fillfact.ExecutionKey(originals[0]) < fillfact.ExecutionKey(originals[1]) {
+		originals[0].VenueExecutionId, originals[1].VenueExecutionId = originals[1].VenueExecutionId, originals[0].VenueExecutionId
+	}
+	revisedFills := make([]*orderpb.Fill, 0, count)
+	for i, old := range originals {
+		next, err := order.ApplyFill(st, old, instant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fact, err := order.NewEmitter(nil).FillFact(ctx, old, next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if store.Save(ctx, next, int64(i), []outbox.Record{fact}, old.FillId) != nil {
+			t.Fatal("seed execution failed")
+		}
+		st = next
+		revised := proto.Clone(old).(*orderpb.Fill)
+		revised.Fee.Amount.Coefficient = 2
+		revisedFills = append(revisedFills, revised)
+	}
+	var err error
+	st, _, err = order.Cancel(st, instant)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fact, err := order.NewEmitter(nil).FillFact(ctx, old, next)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if store.Save(ctx, next, 0, []outbox.Record{fact}, old.FillId) != nil {
-		t.Fatal("seed execution failed")
-	}
-	st, _, err = order.Cancel(next, instant)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if store.Save(ctx, st, 1, nil, "") != nil {
+	if store.Save(ctx, st, int64(count), nil, "") != nil {
 		t.Fatal("seed terminal state failed")
 	}
-	revised := proto.Clone(old).(*orderpb.Fill)
-	revised.Fee.Amount.Coefficient = 2
+	old, revised := originals[0], revisedFills[0]
+	total := old.Quantity // Preserve the original one-fill fixture bytes.
+	if count == 2 {
+		total = st.FilledQuantity
+		revisedFills[0], revisedFills[1] = revisedFills[1], revisedFills[0]
+	}
 	env := &envelopepb.Envelope{EventId: "observation", TenantId: f.tenant, EventType: execution.SubjectStateHealed, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, CorrelationId: "fixture-correlation"}
 	payload := wire(t, &orderpb.StateHealed{OrderId: st.OrderId, Venue: st.Venue, State: st, Reason: "synthetic fee correction", DetectedAt: timestamppb.New(instant)})
 	c, err := store.ObserveRecovery(ctx, env.EventId, st.OrderId, env.EventId, payload)
@@ -74,7 +95,7 @@ func prepareFee(t *testing.T, persistProposal bool) *feeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if store.FreezeRecoveryHistory(ctx, c, mapping, st, execution.OrderView{State: execution.OrderViewCancelled, ExecutedQuantity: old.Quantity, Fills: []*orderpb.Fill{revised}}, instant) != nil {
+	if store.FreezeRecoveryHistory(ctx, c, mapping, st, execution.OrderView{State: execution.OrderViewCancelled, ExecutedQuantity: total, Fills: revisedFills}, instant) != nil {
 		t.Fatal("freeze authoritative venue history failed")
 	}
 	c, err = store.RecoveryCase(ctx, c.ID)

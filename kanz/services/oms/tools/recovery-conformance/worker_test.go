@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,12 +18,49 @@ import (
 	"time"
 )
 
+const stageCount = 14
+
+type stageProfile struct {
+	Counts      []uint64 `json:"counts"`
+	Nanoseconds []uint64 `json:"nanoseconds"`
+}
+type completedProfile struct {
+	Commands    uint64
+	Counts      [stageCount]uint64
+	Nanoseconds [stageCount]uint64
+}
+
+func saturating(a, b uint64) uint64 {
+	if math.MaxUint64-a < b {
+		return math.MaxUint64
+	}
+	return a + b
+}
+func (p *completedProfile) add(value *stageProfile) bool {
+	if value == nil || len(value.Counts) != stageCount || len(value.Nanoseconds) != stageCount || value.Counts[13] != 1 {
+		return false
+	}
+	for _, count := range value.Counts {
+		if count > 20000 {
+			return false
+		}
+	}
+	p.Commands = saturating(p.Commands, 1)
+	for i := range stageCount {
+		p.Counts[i] = saturating(p.Counts[i], value.Counts[i])
+		p.Nanoseconds[i] = saturating(p.Nanoseconds[i], value.Nanoseconds[i])
+	}
+	return true
+}
+
 type response struct {
-	BuildProfile   string `json:"build_profile"`
-	Version        string `json:"version"`
-	Status         string `json:"status"`
-	Error          string `json:"error"`
-	SessionsClosed bool   `json:"sessions_closed"`
+	DiagnosticsEnabled bool          `json:"diagnostics_enabled"`
+	Diagnostics        *stageProfile `json:"diagnostics"`
+	BuildProfile       string        `json:"build_profile"`
+	Version            string        `json:"version"`
+	Status             string        `json:"status"`
+	Error              string        `json:"error"`
+	SessionsClosed     bool          `json:"sessions_closed"`
 }
 
 type worker struct {
@@ -35,6 +73,7 @@ type worker struct {
 	closed         bool
 	ctx            context.Context
 	successfulACKs int
+	profile        completedProfile
 }
 
 func binary(t *testing.T) string {
@@ -110,7 +149,7 @@ func (w *worker) diagnostic(request map[string]any, phase string) string {
 	method := "Init"
 	if value, ok := request["method"].(string); ok {
 		switch value {
-		case "Observation", "Ack", "Parked", "Close":
+		case "Observation", "Ack", "Parked", "FeeCorrection", "Close":
 			method = value
 		default:
 			method = "unknown"
@@ -132,9 +171,14 @@ func (w *worker) diagnostic(request map[string]any, phase string) string {
 		w.done <- err
 	default:
 	}
-	return fmt.Sprintf("method=%s phase=%s successful_acks=%d context=%s exit=%s", method, phase, w.successfulACKs, state, exit)
+	result := fmt.Sprintf("method=%s phase=%s successful_acks=%d context=%s exit=%s", method, phase, w.successfulACKs, state, exit)
+	if w.profile.Commands > 0 {
+		result += fmt.Sprintf(" profile=completed-commands-only excludes_unobserved_current=true nested_nonadditive=true commands=%d counts=%v nanoseconds=%v", w.profile.Commands, w.profile.Counts, w.profile.Nanoseconds)
+	}
+	return result
 }
 func TestWorkerDiagnosticPreservesJoinAndClosedCategories(t *testing.T) {
+	testFeeLockDiagnostics(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := &worker{ctx: ctx, done: make(chan error, 1), successfulACKs: 7}
@@ -147,6 +191,9 @@ func TestWorkerDiagnosticPreservesJoinAndClosedCategories(t *testing.T) {
 	if <-w.done != exitErr {
 		t.Fatal("diagnostic consumed or replaced join result")
 	}
+	if got := w.diagnostic(map[string]any{"method": "FeeCorrection"}, "read"); got != "method=FeeCorrection phase=read successful_acks=7 context=active exit=pending" {
+		t.Fatal("fee diagnostic category differs")
+	}
 	cancel()
 	if !strings.Contains(w.diagnostic(map[string]any{"method": "Ack"}, "read"), "context=cancelled exit=pending") {
 		t.Fatal("cancelled diagnostic differs")
@@ -158,6 +205,36 @@ func TestWorkerDiagnosticPreservesJoinAndClosedCategories(t *testing.T) {
 		t.Fatal("lifetime diagnostic differs")
 	}
 }
+
+// The private response is retained only in memory; diagnostic() is a failure
+// path. It cannot describe the current command if no response was observed.
+func TestWorkerProfileBoundedFailureOnly(t *testing.T) {
+	p := completedProfile{}
+	if p.add(nil) || p.add(&stageProfile{}) {
+		t.Fatal("missing shape accepted")
+	}
+	sample := &stageProfile{Counts: make([]uint64, stageCount), Nanoseconds: make([]uint64, stageCount)}
+	sample.Counts[13] = 1
+	sample.Counts[0] = 20001
+	if p.add(sample) || p.Commands != 0 {
+		t.Fatal("oversized stage count accepted")
+	}
+	sample.Counts[0] = 1
+	sample.Nanoseconds[0] = 1
+	p.Counts[0] = math.MaxUint64
+	p.Nanoseconds[0] = math.MaxUint64
+	if !p.add(sample) || p.Counts[0] != math.MaxUint64 || p.Nanoseconds[0] != math.MaxUint64 || p.Commands != 1 {
+		t.Fatal("aggregate did not saturate")
+	}
+	w := worker{ctx: context.Background(), done: make(chan error, 1), profile: p}
+	message := w.diagnostic(map[string]any{"method": "Ack"}, "read")
+	for _, marker := range []string{"profile=completed-commands-only", "excludes_unobserved_current=true", "nested_nonadditive=true", "commands=1"} {
+		if !strings.Contains(message, marker) {
+			t.Fatal("profile scope missing")
+		}
+	}
+}
+
 func (w *worker) call(request map[string]any) response {
 	w.t.Helper()
 	raw, err := json.Marshal(request)
@@ -217,6 +294,19 @@ func (w *worker) call(request map[string]any) response {
 			}
 		default:
 			w.t.Fatal("unknown recovery outcome")
+		}
+		if !result.DiagnosticsEnabled {
+			w.t.Fatal("qualification diagnostics feature required")
+		}
+		switch request["method"] {
+		case "Observation", "Ack", "Parked", "FeeCorrection":
+			if !w.profile.add(result.Diagnostics) {
+				w.t.Fatal("invalid bounded stage observations")
+			}
+		default:
+			if result.Diagnostics != nil {
+				w.t.Fatal("unexpected stage observations")
+			}
 		}
 		if request["method"] == "Ack" && result.Status == "ok" && result.SessionsClosed {
 			w.successfulACKs++

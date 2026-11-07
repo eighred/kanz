@@ -1,5 +1,6 @@
 //! Existing OMS relay algorithm, with no connector, credentials or production caller.
 //! The caller owns transport and must await Run before closing its dependencies.
+use crate::diagnostics::{measure, Stage};
 use crate::{outbox, Error, Record, MAX_BYTES};
 use kanz_order_core::proto::{
     envelope::v1::{Envelope, EventClass, EventFrame},
@@ -269,7 +270,11 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
         expires: tokio::time::Instant,
     ) -> Result<Outcome, Failure> {
         work_remaining(Some(expires), 0)?;
-        let connected = tokio::time::timeout_at(expires, self.sessions.connect()).await;
+        let connected = tokio::time::timeout_at(
+            expires,
+            measure(Stage::RelayConnect, self.sessions.connect()),
+        )
+        .await;
         let session = match connected {
             Ok(Ok(session)) => session,
             Ok(Err(error)) => return Err(Failure { sent: 0, error }),
@@ -281,15 +286,18 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
             }
         };
         if tokio::time::Instant::now() >= expires {
-            session.close().await;
+            measure(Stage::RelayClose, session.close()).await;
             return Err(Failure {
                 sent: 0,
                 error: Error::PublicationUnconfirmed,
             });
         }
-        let Some(mut lock) = outbox::lock_key_before(session, &self.tenant, key, expires)
-            .await
-            .map_err(|error| Failure { sent: 0, error })?
+        let Some(mut lock) = measure(
+            Stage::RelayAcquire,
+            outbox::lock_key_before(session, &self.tenant, key, expires),
+        )
+        .await
+        .map_err(|error| Failure { sent: 0, error })?
         else {
             return Ok(Outcome {
                 sent: 0,
@@ -303,15 +311,15 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
         )
         .await;
         if tokio::time::Instant::now() >= expires || result.is_err() {
-            lock.close().await;
+            measure(Stage::RelayClose, lock.close()).await;
             return Err(Failure {
                 sent: confirmed,
                 error: Error::PublicationUnconfirmed,
             });
         }
         let result = result.expect("checked timeout result");
-        match lock.release().await {
-            Ok(session) => session.close().await,
+        match measure(Stage::RelayRelease, lock.release()).await {
+            Ok(session) => measure(Stage::RelayClose, session.close()).await,
             Err(error) => {
                 return Err(Failure {
                     sent: confirmed,
@@ -388,9 +396,9 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
             .await;
         // Release even after decode, publish, read or mark failure. Never return a
         // connection to a pool, and join the dedicated session before returning.
-        match lock.release().await {
+        match measure(Stage::RelayRelease, lock.release()).await {
             Ok(session) => {
-                session.close().await;
+                measure(Stage::RelayClose, session.close()).await;
                 result
             }
             Err(error) => Err(Failure {
@@ -411,12 +419,16 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
         // reads under the same key lock; Queue::pending itself never returns a prefix.
         // A later bad row can therefore follow acknowledged publications, but its
         // unresolved suffix always returns failure rather than an empty-queue proof.
-        let (records, streaming) =
-            match outbox::pending(client, &self.tenant, key, self.batch).await {
-                Ok(records) => (records, false),
-                Err(Error::Capacity) => (Vec::new(), true),
-                Err(error) => return Err(Failure { sent: 0, error }),
-            };
+        let (records, streaming) = match measure(
+            Stage::RelayPending,
+            outbox::pending(client, &self.tenant, key, self.batch),
+        )
+        .await
+        {
+            Ok(records) => (records, false),
+            Err(Error::Capacity) => (Vec::new(), true),
+            Err(error) => return Err(Failure { sent: 0, error }),
+        };
         work_remaining(expires, 0)?;
         let full = streaming || records.len() == self.batch as usize;
         let mut records = records.into_iter();
@@ -424,11 +436,14 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
         while sent < self.batch as usize {
             work_remaining(expires, sent)?;
             let next = if streaming {
-                outbox::pending(client, &self.tenant, key, 1)
-                    .await
-                    .map_err(|error| Failure { sent, error })?
-                    .into_iter()
-                    .next()
+                measure(
+                    Stage::RelayPending,
+                    outbox::pending(client, &self.tenant, key, 1),
+                )
+                .await
+                .map_err(|error| Failure { sent, error })?
+                .into_iter()
+                .next()
             } else {
                 records.next()
             };

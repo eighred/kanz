@@ -305,7 +305,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-evidence-${{ matrix.service }}
-          path: rust-evidence/
+          path: |
+            rust-evidence/
+            ${{ runner.temp }}/rust-audit-tools-installed.json
           if-no-files-found: error
 
       - name: Sign + attest SBOM and vuln scan (keyless)

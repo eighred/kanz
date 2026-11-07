@@ -113,7 +113,7 @@ class TransactionEvidenceTests(unittest.TestCase):
         self.assertTrue(wired(text))
         for part in required:
             with self.subTest(part=part): self.assertFalse(wired(text.replace(part, "removed")))
-        self.assertEqual(len(CASES), 20)
+        self.assertEqual(len(CASES), 21)
         self.assertEqual(CASES[1:9], ["response_loss_" + str(i) for i in range(1, 9)])
 
     def test_exact_source_attempt_complete_cases_cleanup_and_identity_required(self):
@@ -127,6 +127,7 @@ class TransactionEvidenceTests(unittest.TestCase):
                       "serviceAbsent": True, "observedAddress": fixture.IPV6_EXPANDED, "literalComparisonMiss": True, "absenceRefused": True,
                       "shape": {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv6",
                                 "endpoints": [{"addresses": ["2001:db8::1"], "conditions": {"ready": False}}]}},
+                  "annotationTransport": {key: True for key in ("oldClientMutation", "rawMetadataPreserved", "dryRunUnchanged", "staleRVRefused", "wrongUIDRefused", "rollbackPreserved", "finalizePreserved")},
                   "imageIdentity": {"root": rollout_probe.IMAGE.split("@", 1)[1], "manifest": "sha256:" + "e" * 64,
                                     "config": "sha256:" + "f" * 64, "platform": "linux/amd64", "rootMediaType": "application/vnd.oci.image.manifest.v1+json"}}
         def check(value):
@@ -135,10 +136,13 @@ class TransactionEvidenceTests(unittest.TestCase):
         for key, value in (("source", "e" * 40), ("tree", "e" * 40), ("runID", "124"), ("runAttempt", "1"),
                            ("renderSHA256", "d" * 64), ("cases", CASES[:-1]), ("cases", list(reversed(CASES))),
                            ("passed", 1), ("cleanupPassed", False), ("imageIdentity", {}), ("emptyEndpointSlice", None), ("emptyEndpointSlice", {}),
-                           ("ipv6EndpointSlice", None), ("ipv6EndpointSlice", {})):
+                           ("ipv6EndpointSlice", None), ("ipv6EndpointSlice", {}), ("annotationTransport", None), ("annotationTransport", {})):
             bad = copy.deepcopy(report); bad[key] = value
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 check(bad)
+        for key in report["annotationTransport"]:
+            bad = copy.deepcopy(report); bad["annotationTransport"][key] = False
+            with self.subTest(control=key), self.assertRaises(ValueError): check(bad)
         for key, value in (("endpoints", []), ("endpoints", {}), ("endpoints", False), ("addressType", "IPv6")):
             bad = copy.deepcopy(report); bad["emptyEndpointSlice"]["shape"][key] = value
             with self.assertRaises(ValueError): check(bad)

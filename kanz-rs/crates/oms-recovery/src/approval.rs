@@ -1,8 +1,8 @@
 //! Revalidate persisted fee evidence; never originate an approval or infer one
 //! from a flag. SQL stores the canonical proposal/approval under the case.
-use crate::Error;
+use crate::{fee_control, Error};
 use kanz_oms_store::{
-    fee_revision, fee_subject, identity,
+    fee_revision, identity,
     recovery_repository::{Case, FeeEvidence, MAX_FILLS},
 };
 use kanz_order_core::{
@@ -12,46 +12,8 @@ use kanz_order_core::{
     Canonical,
 };
 use kanz_proto_wire::{Budget, Schema};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-fn stamp(t: Option<&prost_types::Timestamp>) -> Result<i128, Error> {
-    let t = t.ok_or(Error::FeeRevision)?;
-    if !(-62135596800..=253402300799).contains(&t.seconds) || !(0..1_000_000_000).contains(&t.nanos)
-    {
-        return Err(Error::FeeRevision);
-    }
-    Ok(i128::from(t.seconds) * 1_000_000_000 + i128::from(t.nanos))
-}
-fn without_digest(proposal: &Canonical<ExecutionFeeCorrectionProposed>) -> Result<Vec<u8>, Error> {
-    let number = ExecutionFeeCorrectionProposed::descriptor()?
-        .get_field_by_name("digest")
-        .ok_or(Error::FeeRevision)?
-        .number();
-    let mut pos = 0;
-    let mut out = Vec::new();
-    while pos < proposal.wire().len() {
-        let start = pos;
-        let (n, w) = kanz_proto_wire::key(proposal.wire(), &mut pos)?;
-        kanz_proto_wire::skip(proposal.wire(), &mut pos, n, w)?;
-        if !(n == number && w == 2) {
-            out.extend_from_slice(&proposal.wire()[start..pos]);
-        }
-    }
-    Ok(out)
-}
-fn hash(tenant: &str, raw: &[u8]) -> String {
-    let mut h = Sha256::new();
-    for part in [
-        b"EXECUTION_FEE_CORRECTION".as_slice(),
-        tenant.as_bytes(),
-        raw,
-    ] {
-        h.update((part.len() as u64).to_be_bytes());
-        h.update(part);
-    }
-    format!("{:x}", h.finalize())
-}
 pub(crate) struct ApprovedChanges {
     pub by_execution: BTreeMap<String, usize>,
     source: Option<std::sync::Arc<Canonical<ExecutionFeeCorrectionApproved>>>,
@@ -76,13 +38,7 @@ pub(crate) fn approved(
     )?;
     let approval = Canonical::<ExecutionFeeCorrectionApproved>::decode(&evidence.approval)?;
     let (p, a) = (proposal.value(), approval.value());
-    let actual = hash(tenant, &without_digest(&proposal)?);
-    let proposed = stamp(p.proposed_at.as_ref())?;
-    let expiry = stamp(p.expires_at.as_ref())?;
-    // Go time.Sub saturates to int64 duration before Propose adds the TTL.
-    // Retain that caller-clock behavior rather than invent a DB-clock policy.
-    let ttl = (expiry - proposed).min(i128::from(i64::MAX));
-    let zero = -62135596800i128 * 1_000_000_000;
+    let actual = fee_control::digest(tenant, &proposal)?;
     if tenant.is_empty()
         || actual != evidence.stored_digest
         || p.digest != actual
@@ -90,18 +46,10 @@ pub(crate) fn approved(
     {
         return Err(Error::FeeRevision);
     }
-    // Go's dual-control refusals propagate as errors. They do not enter the
-    // FeeRevision branch that durably blocks and acknowledges the observation.
-    if p.case_id.trim().is_empty()
-        || p.order_id.trim().is_empty()
-        || fee_subject::normalize(&p.proposer).is_empty()
-        || p.digest.trim().is_empty()
-        || proposed == zero
-        || ttl <= 0
-    {
-        return Err(Error::ApprovalRefused);
-    }
-    let approved = stamp(a.approved_at.as_ref())?;
+    // The same Go control validates fresh commands and persisted signatures.
+    // Observation refuses these errors without durably acknowledging a block.
+    let control = fee_control::Control::new(p)?;
+    let approved = fee_control::stamp(a.approved_at.as_ref())?;
     if a.proposer != p.proposer
         || a.order_id != case.order_id
         || a.case_id != case.id
@@ -112,14 +60,9 @@ pub(crate) fn approved(
     {
         return Err(Error::FeeRevision);
     }
-    if proposed + ttl == zero
-        || fee_subject::normalize(&a.approver).is_empty()
-        || fee_subject::normalize(&a.approver) == fee_subject::normalize(&p.proposer)
-        || a.digest != p.digest
-        || approved >= proposed + ttl
-    {
-        return Err(Error::ApprovalRefused);
-    }
+    control
+        .approve(&a.approver, &a.digest, approved)
+        .map_err(|_| Error::ApprovalRefused)?;
     let number = ExecutionFeeCorrectionProposed::descriptor()?
         .get_field_by_name("changes")
         .ok_or(Error::FeeRevision)?

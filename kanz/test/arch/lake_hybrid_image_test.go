@@ -70,7 +70,8 @@ func lakeHybridCI(raw string) error {
 		"Scan actual hybrid runtime before execution":           {"image-ref": "${{ steps.lake-image.outputs.image }}", "exit-code": "1", "version": "v0.72.0", "format": "json", "output": "snapshot-owner-proof/hybrid-trivy.json", "list-all-pkgs": "true"},
 	}
 	scripts := map[string][]string{
-		"Require hybrid binary provenance and fresh Rust and Go audits": {"set -euo pipefail", "bash .github/scripts/install-rust-audit.sh", "govulncheck@v1.6.0", `rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid`},
+		"Install reviewed hybrid audit tools":                           {"set -euo pipefail", "bash .github/scripts/install-rust-audit.sh", "govulncheck@v1.6.0"},
+		"Require hybrid binary provenance and fresh Rust and Go audits": {"set -euo pipefail", `rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid`},
 		"Actual finite owner on both broker versions without skips":     {"TEST_LAKE_IMAGE_ID=", "TEST_LAKE_IMAGE_VERSION=", "TEST_LAKE_IMAGE_WORKER_SHA256=", `json.load(open("snapshot-owner-proof/hybrid/evidence.json"))["binarySHA256"]`, "TEST_LAKE_REDPANDA_IMAGE_ID="},
 		"Stop owned snapshot fixture dependencies and prove absence":    {"label=kanz.snapshot-image-run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", `test -z "$image_after$image_volumes_after"`, "image_containers_absent", "image_volumes_absent", `^/kanz-lake-image-$nonce-[0-9]+$`, `^kanz-lake-image-$nonce-[0-9]+$`},
 	}
@@ -102,7 +103,7 @@ func lakeHybridCI(raw string) error {
 	if len(seen) != len(fields)+len(scripts) {
 		return fmt.Errorf("missing hybrid qualification step")
 	}
-	if seen["Build actual hybrid lake image without publishing"] >= seen["Require hybrid binary provenance and fresh Rust and Go audits"] || seen["Require hybrid binary provenance and fresh Rust and Go audits"] >= seen["Actual finite owner on both broker versions without skips"] {
+	if seen["Install reviewed hybrid audit tools"] >= seen["Require hybrid binary provenance and fresh Rust and Go audits"] || seen["Build actual hybrid lake image without publishing"] >= seen["Require hybrid binary provenance and fresh Rust and Go audits"] || seen["Require hybrid binary provenance and fresh Rust and Go audits"] >= seen["Actual finite owner on both broker versions without skips"] {
 		return fmt.Errorf("image evidence must precede runtime")
 	}
 	return nil
