@@ -124,6 +124,8 @@ jobs:
             dockerfile: kanz/services/operator/Dockerfile
           - service: kanz-provisioner
             dockerfile: kanz/cmd/kanz-provisioner/Dockerfile
+          - service: kanz-kafka-provision
+            dockerfile: kanz/cmd/kanz-kafka-provision/Dockerfile
           - service: nats-rebuild
             dockerfile: kanz/tools/natsrebuild/cmd/nats-rebuild/Dockerfile
     env:

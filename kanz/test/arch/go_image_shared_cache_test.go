@@ -116,7 +116,7 @@ cp.execFileSync('python', ['.github/scripts/go_image_cache_probe.py', '--source'
 				return fmt.Errorf("build/cache input or authority changed")
 			}
 		}
-		if builds != 1 || len(job.Strategy.Matrix.Include) != 34 {
+		if builds != 1 || len(job.Strategy.Matrix.Include) != 35 {
 			return fmt.Errorf("image inventory changed")
 		}
 		prefix := ""
@@ -168,7 +168,7 @@ cp.execFileSync('python', ['.github/scripts/go_image_cache_probe.py', '--source'
 				return fmt.Errorf("shared dependency fingerprint differs")
 			}
 		}
-		if count != 30 || !seen["accounting"] {
+		if count != 31 || !seen["accounting"] {
 			return fmt.Errorf("Go/cache owner inventory differs")
 		}
 	}

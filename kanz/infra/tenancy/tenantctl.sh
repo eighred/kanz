@@ -140,6 +140,7 @@ esac
 : "${TRUST_DOMAIN:=kanz.internal}"
 : "${MSG_NS:=kanz-messaging}"                         # NATS/Kafka namespace
 : "${RATE_PER_SEC:=50}" "${BURST:=100}" "${MAX_IN_FLIGHT:=64}"
+: "${TENANTCTL_KAFKA_MODE:=legacy}"                   # native is opt-in; offboard unsupported
 : "${KAFKA_JOB_TIMEOUT:=300}"                         # seconds, onboard_kafka Job wait
 
 NS="tenant-${TENANT}"
@@ -161,6 +162,37 @@ MANUAL_STEPS=()
 preflight() {
   local mode="$1"
   local missing=()
+
+  case "${TENANTCTL_KAFKA_MODE}" in
+    legacy) ;;
+    native)
+      [ "${mode}" = "onboard" ] || missing+=("native Kafka offboard is unsupported; no automatic legacy fallback")
+      [[ "${TENANT}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || missing+=("native tenant label invalid")
+      [ "${TRUST_DOMAIN}" = "kanz.internal" ] && [ "${MSG_NS}" = "kanz-messaging" ] && [ "${SVC_NS:-kanz-services}" = "kanz-services" ] || missing+=("native canonical identity scope required")
+      [[ "${NATIVE_KAFKA_IMAGE:-}" =~ ^ghcr\.io/eighred/kanz-kafka-provision@sha256:[0-9a-f]{64}$ ]] || missing+=("native tool image digest required")
+      [[ "${NATIVE_KAFKA_MANIFEST_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || missing+=("native tracked manifest SHA256 required")
+      [[ "${NATIVE_KAFKA_BROKER:-}" =~ ^[a-z0-9][a-z0-9.-]*:[1-9][0-9]{0,4}$ ]] || missing+=("native TLS bootstrap host:port required")
+      [[ "${NATIVE_KAFKA_CLUSTER_ID:-}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || missing+=("native exact expected Kafka ClusterID required")
+      case "${NATIVE_KAFKA_BROKER_SPIFFE_ID:-}" in
+        spiffe://kanz.internal/ns/kanz-messaging/sa/kafka|spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda) ;;
+        *) missing+=("native exact canonical broker SPIFFE ID required") ;;
+      esac
+      local native_sa
+      for native_sa in ${TENANT_SAS} ${COMPUTE_KAFKA_SAS}; do
+        [[ "${native_sa}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || missing+=("native ServiceAccount label invalid")
+      done
+      command -v sha256sum >/dev/null 2>&1 || missing+=("sha256sum required for native manifest custody")
+      NATIVE_KAFKA_MANIFEST="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../kafka" && pwd)/topics-job.yaml"
+      if command -v sha256sum >/dev/null 2>&1 && [ -f "${NATIVE_KAFKA_MANIFEST}" ]; then
+        local observed_manifest
+        observed_manifest="$(sha256sum -- "${NATIVE_KAFKA_MANIFEST}")"
+        [ "${observed_manifest%% *}" = "${NATIVE_KAFKA_MANIFEST_SHA256:-}" ] || missing+=("native tracked manifest digest mismatch")
+      else
+        missing+=("native tracked topic manifest unavailable")
+      fi
+      ;;
+    *) missing+=("TENANTCTL_KAFKA_MODE must be legacy or native") ;;
+  esac
 
   command -v kubectl >/dev/null 2>&1 || missing+=("kubectl not on PATH")
   command -v jq      >/dev/null 2>&1 || missing+=("jq not on PATH (required by the quota step)")
@@ -335,6 +367,10 @@ wait_for_job() {
 # per principal, across both principal shapes.
 kafka_tenant_job() {
   local slug="$1" prin="$2"
+  if [ "${TENANTCTL_KAFKA_MODE}" = "native" ]; then
+    native_kafka_tenant_job "${slug}" "${prin}"
+    return
+  fi
   log kafka "prefixed topics + ACLs for ${prin}"
   local job="kafka-tenant-${TENANT}-${slug}"
   kubectl -n "${MSG_NS}" delete job "${job}" --ignore-not-found
@@ -383,6 +419,63 @@ YAML
     return 1
   fi
   log kafka "job ${job} completed"
+}
+
+# The hash-named input is immutable and create-only. An existing object must
+# match ALL owned data/metadata; never apply over somebody else's ConfigMap.
+native_kafka_manifest() {
+  NATIVE_KAFKA_CONFIGMAP="kafka-native-${NATIVE_KAFKA_MANIFEST_SHA256:0:40}"
+  local existing
+  existing="$(kubectl -n "${MSG_NS}" get configmap "${NATIVE_KAFKA_CONFIGMAP}" --ignore-not-found -o json)" || return 1
+  if [ -z "${existing}" ]; then
+    kubectl -n "${MSG_NS}" create configmap "${NATIVE_KAFKA_CONFIGMAP}" \
+      --from-file="topics-job.yaml=${NATIVE_KAFKA_MANIFEST}" --dry-run=client -o json | \
+      jq --arg sha "${NATIVE_KAFKA_MANIFEST_SHA256}" '.immutable=true | .metadata.annotations={"kanz.internal/native-topic-manifest-sha256":$sha} | .metadata.labels={"app.kubernetes.io/managed-by":"kanz-tenantctl-native"}' | \
+      kubectl create -f - >/dev/null || return 1
+  fi
+  kubectl -n "${MSG_NS}" get configmap "${NATIVE_KAFKA_CONFIGMAP}" -o json | \
+    jq -e --arg name "${NATIVE_KAFKA_CONFIGMAP}" --arg namespace "${MSG_NS}" --arg sha "${NATIVE_KAFKA_MANIFEST_SHA256}" --rawfile manifest "${NATIVE_KAFKA_MANIFEST}" \
+      '.apiVersion=="v1" and .kind=="ConfigMap" and .metadata.name==$name and .metadata.namespace==$namespace and .immutable==true and .metadata.annotations=={"kanz.internal/native-topic-manifest-sha256":$sha} and .metadata.labels=={"app.kubernetes.io/managed-by":"kanz-tenantctl-native"} and .data=={"topics-job.yaml":$manifest} and ((.binaryData // {})=={})' >/dev/null
+}
+
+native_kafka_tenant_job() {
+  local prin="$2" job
+  native_kafka_manifest || { log kafka "FAILED: native immutable manifest custody"; return 1; }
+  # Each explicit attempt creates a new finite Job; never delete/replace an
+  # existing job on labels alone. A lost create response remains a failure.
+  job="$(kubectl create -f - -o jsonpath='{.metadata.name}' <<YAML
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: kafka-native-
+  namespace: ${MSG_NS}
+  labels: { app.kubernetes.io/managed-by: kanz-tenantctl-native }
+  annotations: { kanz.internal/native-topic-manifest-sha256: "${NATIVE_KAFKA_MANIFEST_SHA256}" }
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 270
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: kafka-provisioner
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: tenant
+          image: ${NATIVE_KAFKA_IMAGE}
+          args: ["-mode=apply", "-manifest=/manifest/topics-job.yaml", "-manifest-sha256=${NATIVE_KAFKA_MANIFEST_SHA256}", "-tenant=${TENANT}", "-principal=User:${prin}", "-broker=${NATIVE_KAFKA_BROKER}", "-broker-spiffe-id=${NATIVE_KAFKA_BROKER_SPIFFE_ID}", "-expected-cluster-id=${NATIVE_KAFKA_CLUSTER_ID}", "-workload-socket=unix:///run/spiffe/spire-agent.sock", "-timeout=240s"]
+          securityContext: { readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
+          resources: { requests: { cpu: "100m", memory: "64Mi" }, limits: { cpu: "1", memory: "256Mi" } }
+          volumeMounts:
+            - { name: manifest, mountPath: /manifest/topics-job.yaml, subPath: topics-job.yaml, readOnly: true }
+            - { name: spiffe, mountPath: /run/spiffe, readOnly: true }
+      volumes:
+        - { name: manifest, configMap: { name: ${NATIVE_KAFKA_CONFIGMAP} } }
+        - { name: spiffe, csi: { driver: csi.spiffe.io, readOnly: true } }
+YAML
+)" || return 1
+  [[ "${job}" =~ ^kafka-native-[a-z0-9]+$ ]] || return 1
+  wait_for_job "${MSG_NS}" "${job}" || return 1
+  log kafka "native topic and ACL readback completed"
 }
 
 # Both principal shapes, or the step is a half-grant that looks complete: the

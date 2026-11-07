@@ -82,6 +82,21 @@ class EvidenceTests(unittest.TestCase):
                         if job["name"] == "recovery-coordinator": job["conclusion"] = "skipped"
                 with self.assertRaises(gate.EvidenceError): self.verify()
 
+    def test_native_provision_job_cannot_be_missing_or_skipped(self):
+        filename = "redpanda-identity-proof.yml"
+        self.api = API(filename)
+        self.required = {filename: gate.POLICY[filename]}
+        original = copy.deepcopy(self.api.jobs)
+        for state in ("missing", "skipped"):
+            with self.subTest(state=state):
+                self.api.jobs = copy.deepcopy(original)
+                if state == "missing":
+                    self.api.jobs = [job for job in self.api.jobs if job["name"] != "native-topic-provisioning"]
+                else:
+                    for job in self.api.jobs:
+                        if job["name"] == "native-topic-provisioning": job["conclusion"] = "skipped"
+                with self.assertRaises(gate.EvidenceError): self.verify()
+
     def test_exact_success_and_dispatch(self):
         for event in ("push", "workflow_dispatch"):
             self.api.runs[0]["event"] = event
@@ -174,7 +189,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(gate.POLICY["rust-oms-fold.yml"], {"fill-shadow", "recovery-coordinator"})
         self.assertEqual(gate.POLICY["testnet-cni-proof.yml"], {"disposable-cni"})
         self.assertEqual(gate.POLICY["k3s-cni-migration.yml"], {"disposable-transition"})
-        self.assertEqual(gate.POLICY["redpanda-identity-proof.yml"], {"developmental-redpanda-identity"})
+        self.assertEqual(gate.POLICY["redpanda-identity-proof.yml"], {"developmental-redpanda-identity", "native-topic-provisioning"})
         self.assertEqual(gate.POLICY["valkey-migration.yml"], {"retained-state"})
         self.assertEqual(gate.POLICY["tokyo-messaging-proof.yml"], {"messaging-isolation"})
         self.assertEqual(gate.POLICY["envoy-edge.yml"], {"actual-edge"})

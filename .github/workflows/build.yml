@@ -232,6 +232,8 @@ jobs:
           # into the cluster over SSH. It had no image, so AddNode had nothing to run.
           - service: kanz-provisioner
             dockerfile: kanz/cmd/kanz-provisioner/Dockerfile
+          - service: kanz-kafka-provision
+            dockerfile: kanz/cmd/kanz-kafka-provision/Dockerfile
           # DR-01c. The spine-rebuild Job has referenced this image since it was
           # written and nothing built it, so infra/dr/failover.sh waited 600s on
           # an ImagePullBackOff. A disaster-recovery path that cannot pull its
