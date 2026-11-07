@@ -36,13 +36,25 @@ RUN CGO_ENABLED=0 go build -tags "${GOTAGS}" -trimpath -ldflags="-s -w -X github
 
 # The optional worker is shipped with the existing owner; this does not enable
 # snapshots or supply the operator-required expected executable digest.
-FROM ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS rust-build
+FROM ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS rust-tools
 RUN cargo install --locked --version 0.7.7 cargo-auditable
-WORKDIR /src
-COPY kanz-rs/ kanz-rs/
-COPY kanz-schemas/proto/ kanz-schemas/proto/
+RUN cargo install --locked --version 0.1.78 cargo-chef
+WORKDIR /src/kanz-rs
+
+FROM rust-tools AS rust-planner
+COPY kanz-rs/ ./
+RUN cargo chef prepare --recipe-path /recipe.json
+
+FROM rust-tools AS rust-build
+# Only dependency manifests, lockfile and build configuration reach this layer.
+# VERSION and real source enter afterward; dummy workspace artifacts are removed
+# by chef before the original manifests and build scripts are restored.
+COPY --from=rust-planner /recipe.json /recipe.json
+RUN cargo auditable chef cook --locked --release --recipe-path /recipe.json -p kanz-lake-snapshot
+COPY kanz-rs/ ./
+COPY kanz-schemas/proto/ /src/kanz-schemas/proto/
 ARG VERSION
-RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path kanz-rs/Cargo.toml -p kanz-lake-snapshot
+RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path Cargo.toml -p kanz-lake-snapshot
 
 # GNU worker needs the pinned C/C++ runtime; the Go owner remains fully static.
 # Root-owned, nonwritable worker bytes are required by the verified-FD launcher.

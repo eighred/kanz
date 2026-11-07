@@ -31,11 +31,21 @@ func lakeHybridImageRecipe(raw string) error {
 		}
 		stages[len(stages)-1] = append(stages[len(stages)-1], line)
 	}
+	tools := []string{
+		"FROM ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS rust-tools",
+		"RUN cargo install --locked --version 0.7.7 cargo-auditable",
+		"RUN cargo install --locked --version 0.1.78 cargo-chef", "WORKDIR /src/kanz-rs",
+	}
+	planner := []string{
+		"FROM rust-tools AS rust-planner", "COPY kanz-rs/ ./",
+		"RUN cargo chef prepare --recipe-path /recipe.json",
+	}
 	rust := []string{
-		"FROM ghcr.io/eighred/base/rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS rust-build",
-		"RUN cargo install --locked --version 0.7.7 cargo-auditable", "WORKDIR /src",
-		"COPY kanz-rs/ kanz-rs/", "COPY kanz-schemas/proto/ kanz-schemas/proto/", "ARG VERSION",
-		`RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path kanz-rs/Cargo.toml -p kanz-lake-snapshot`,
+		"FROM rust-tools AS rust-build",
+		"COPY --from=rust-planner /recipe.json /recipe.json",
+		"RUN cargo auditable chef cook --locked --release --recipe-path /recipe.json -p kanz-lake-snapshot",
+		"COPY kanz-rs/ ./", "COPY kanz-schemas/proto/ /src/kanz-schemas/proto/", "ARG VERSION",
+		`RUN test -n "$VERSION" && KANZ_BUILD_VERSION="$VERSION" cargo auditable build --locked --release --manifest-path Cargo.toml -p kanz-lake-snapshot`,
 	}
 	runtime := []string{
 		"FROM ghcr.io/eighred/base/distroless-cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f",
@@ -43,7 +53,7 @@ func lakeHybridImageRecipe(raw string) error {
 		"COPY --from=rust-build --chown=0:0 --chmod=0555 /src/kanz-rs/target/release/kanz-lake-snapshot /kanz-lake-snapshot",
 		"USER nonroot:nonroot", "EXPOSE 8085", `ENTRYPOINT ["/lake-sink"]`,
 	}
-	if len(stages) != 3 || !slices.Equal(stages[1], rust) || !slices.Equal(stages[2], runtime) {
+	if len(stages) != 5 || !slices.Equal(stages[1], tools) || !slices.Equal(stages[2], planner) || !slices.Equal(stages[3], rust) || !slices.Equal(stages[4], runtime) {
 		return fmt.Errorf("lake hybrid image must preserve closed worker and runtime recipe")
 	}
 	return nil
@@ -155,9 +165,16 @@ func TestLakeHybridImageRecipe(t *testing.T) {
 	}
 	for _, mutation := range []struct{ old, replacement string }{
 		{"cargo auditable build --locked", "cargo build --locked"},
+		{"cargo install --locked --version 0.1.78 cargo-chef", "cargo install cargo-chef"},
+		{"cargo auditable chef cook --locked", "cargo chef cook --locked"},
+		{"cargo chef prepare --recipe-path /recipe.json", "cargo chef prepare --bin kanz-lake-snapshot --recipe-path /recipe.json"},
+		{"COPY --from=rust-planner /recipe.json /recipe.json", "COPY kanz-rs/ ./"},
+		{"RUN cargo auditable chef cook", "ARG VERSION\nRUN cargo auditable chef cook"},
+		{"WORKDIR /src/kanz-rs", "WORKDIR /other"},
+		{"RUN cargo auditable chef cook", "RUN --mount=type=cache,target=/src/kanz-rs/target cargo auditable chef cook"},
 		{"--chown=0:0", "--chown=65532:65532"},
 		{"--chmod=0555", "--chmod=0755"},
-		{"COPY kanz-schemas/proto/ kanz-schemas/proto/", ""},
+		{"COPY kanz-schemas/proto/ /src/kanz-schemas/proto/", ""},
 		{"-p kanz-lake-snapshot", "-p kanz-okx-depth"},
 		{"USER nonroot:nonroot", "USER root:root"},
 		{`ENTRYPOINT ["/lake-sink"]`, `ENTRYPOINT ["/kanz-lake-snapshot"]`},
