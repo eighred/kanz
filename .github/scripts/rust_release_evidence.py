@@ -122,7 +122,7 @@ def validate_inventory(data, lock, service, sbom):
 
 
 
-def bounded_command(args, destination, limit, *, cwd=None, env=None, timeout=900):
+def bounded_command(args, destination, limit, *, cwd=None, env=None, timeout=900, capture_stderr=False):
     """Hybrid Linux tools have bounded output and an owned kill/join path."""
     if sys.platform != "linux" or not hasattr(os, "killpg"):
         raise ValueError("hybrid image verification requires Linux process ownership")
@@ -157,7 +157,8 @@ def bounded_command(args, destination, limit, *, cwd=None, env=None, timeout=900
         try:
             process = subprocess.Popen(args, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, start_new_session=True)
-            for stream, sink, bound in ((process.stdout, target, limit), (process.stderr, None, 65536)):
+            captured, discarded = (process.stderr, process.stdout) if capture_stderr else (process.stdout, process.stderr)
+            for stream, sink, bound in ((captured, target, limit), (discarded, None, 65536)):
                 reader = threading.Thread(target=drain, args=(stream, sink, bound), daemon=True)
                 readers.append(reader)
                 reader.start()

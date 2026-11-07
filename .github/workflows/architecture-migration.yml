@@ -170,6 +170,7 @@ jobs:
       - name: Warm the hybrid builder
         run: .github/scripts/warm-builder.sh ghcr.io/eighred/base/buildkit:buildx-stable-1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        id: lake-builder
         with:
           version: v0.37.1
           driver-opts: image=ghcr.io/eighred/base/buildkit:buildx-stable-1
@@ -179,6 +180,7 @@ jobs:
           context: .
           file: kanz/services/lake-sink/Dockerfile
           build-args: VERSION=${{ github.sha }}
+          builder: ${{ steps.lake-builder.outputs.name }}
           tags: kanz-lake-sink:verification
           push: false
           load: true
@@ -190,6 +192,14 @@ jobs:
           image=$(docker image inspect --format '{{.Id}}' kanz-lake-sink:verification)
           printf '%s\n' "$image" > snapshot-owner-proof/lake-image.txt
           echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Prove joint synthetic source and VERSION dependency cache reuse
+        env:
+          LAKE_IMAGE: ${{ steps.lake-image.outputs.image }}
+          LAKE_BUILDER: ${{ steps.lake-builder.outputs.name }}
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s .github/scripts -p test_lake_cache_probe.py
+          python3 .github/scripts/lake_cache_probe.py --source "$(git rev-parse HEAD)" --tree "$(git rev-parse HEAD^{tree})" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --image "$LAKE_IMAGE" --builder "$LAKE_BUILDER" --output snapshot-owner-proof
       - name: Catalog actual hybrid applications and native runtime
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:

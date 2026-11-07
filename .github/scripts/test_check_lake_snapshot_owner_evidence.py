@@ -10,6 +10,7 @@ import hashlib
 from unittest.mock import patch
 
 import check_lake_snapshot_owner_evidence as gate
+import lake_cache_probe as cache
 
 
 def events(version="2.12.6"):
@@ -96,6 +97,18 @@ class EvidenceTests(unittest.TestCase):
         image="sha256:"+"a"*64
         bodies={name:b'{}' for name in gate.HYBRID_FILES}
         bodies['lake-image.txt']=(image+'\n').encode()
+        bodies['source.txt']=("b"*40+"\n"+"f"*40+"\n").encode()
+        bodies['run.txt']=b'1\n2\n'
+        version=cache.digest(("kanz-lake-joint-cache-probe:"+"b"*40).encode())[:40]
+        vertices=[{'digest':'sha256:'+'1'*64,'name':'[rust-build 2/6] RUN '+cache.COOK,'started':'start','completed':'done','cached':True},
+                  {'digest':'sha256:'+'2'*64,'name':'[rust-build 6/6] RUN '+cache.BUILD.replace('$VERSION',version),'started':'start','completed':'done'}]
+        bodies['cache-probe-progress.jsonl']=(json.dumps({'vertexes':vertices})+'\n').encode()
+        probe={'schema':1,'source':'b'*40,'tree':'f'*40,'run':'1','attempt':'2','image':image,'builder':'synthetic',
+               **{k:'d'*64 for k in ('contextSHA256','dockerfileSHA256','sourceBeforeSHA256')},
+               'sourceAfterSHA256':'e'*64,'versionSHA256':cache.digest(version.encode()),
+               'progressSHA256':cache.digest(bodies['cache-probe-progress.jsonl']),**cache.progress(bodies['cache-probe-progress.jsonl'],'b'*40),
+               'jointSourceAndVersion':True,'cookCached':True,'finalBuildExecuted':True,'syntheticOnly':True}
+        bodies['cache-probe.json']=json.dumps(probe).encode()
         bodies['hybrid-trivy.json']=json.dumps({'Trivy':{'Version':'0.72.0'},'Metadata':{'ImageID':image},
             'Results':[{'Class':'os-pkgs','Packages':[{'Name':'synthetic'}]}]}).encode()
         audit={'vulnerabilities':{'found':False,'count':0,'list':[]},'warnings':{},
@@ -128,7 +141,7 @@ class EvidenceTests(unittest.TestCase):
                 raw=values[path.as_posix().removeprefix('proof/')]
                 if len(raw)>limit:raise ValueError('test bound')
                 return raw
-            with patch.object(gate,'read_file',side_effect=read):return gate.image_evidence(Path('proof'),'b'*40)
+            with patch.object(gate,'read_file',side_effect=read), patch.object(gate,'cache_source_hashes',return_value={key:probe[key] for key in cache.SOURCE_HASHES}):return gate.image_evidence(Path('proof'),'b'*40)
         self.assertEqual(check(bodies)['worker'],'c'*64)
         for name in ('hybrid.spdx.json','hybrid/go-buildinfo.json','hybrid/native-inventory.json','hybrid/go-audit.txt','hybrid/go-audit.json'):
             changed=dict(bodies);changed[name]+=b' '
@@ -139,6 +152,9 @@ class EvidenceTests(unittest.TestCase):
         changed=dict(bodies);bad=copy.deepcopy(audit);bad['warnings']={'unmaintained':[{}]}
         changed['hybrid/audit-lock.json']=json.dumps(bad).encode()
         with self.assertRaises(ValueError):check(changed)
+        for key,value in [('source','f'*40),('image','sha256:'+'f'*64),('cookCached',False), *[(key,'f'*64) for key in cache.SOURCE_HASHES]]:
+            changed=dict(bodies);changed['cache-probe.json']=json.dumps({**probe,key:value}).encode()
+            with self.subTest(cache=key),self.assertRaises(ValueError):check(changed)
         # Coherently resealed metadata must still satisfy the native/Go verifier.
         for mode in ('native-owner','go-scanner'):
             changed=dict(bodies);report=copy.deepcopy(evidence)

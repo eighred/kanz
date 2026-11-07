@@ -164,15 +164,19 @@ def check_manifest(proof, sha, tree, run, attempt, hashes):
         raise ValueError("hybrid identity/inventory missing")
 
 
+from lake_cache_probe import validate as validate_cache_probe, source_hashes as cache_source_hashes
+
+
 HYBRID_FILES = ("hybrid.spdx.json", "hybrid-trivy.json", "hybrid/evidence.json", "hybrid/dependencies.json",
     "hybrid/audit-lock.json", "hybrid/audit-binary.json", "hybrid/go-buildinfo.json",
-    "hybrid/native-inventory.json", "hybrid/go-audit.txt", "hybrid/go-audit.json")
+    "hybrid/native-inventory.json", "hybrid/go-audit.txt", "hybrid/go-audit.json", "cache-probe.json", "cache-probe-progress.jsonl")
 
 
-def image_evidence(directory, sha):
+def image_evidence(directory, sha, root=Path(".")):
     bodies, total = {}, 0
     for name in HYBRID_FILES:
-        raw = read_file(directory / name, min(64 << 20, (128 << 20) - total))
+        member_limit = 64 << 10 if name == "cache-probe.json" else 16 << 20 if name == "cache-probe-progress.jsonl" else 64 << 20
+        raw = read_file(directory / name, min(member_limit, (128 << 20) - total))
         total += len(raw)
         bodies[name] = raw
     evidence = json.loads(bodies["hybrid/evidence.json"], object_pairs_hook=strict)
@@ -210,6 +214,11 @@ def image_evidence(directory, sha):
                 or audit.get("database", {}).get("last-commit") != evidence.get(name + "AdvisoryDBCommit")):
             raise ValueError("hybrid Rust audit differs")
     validate_scan(json.loads(bodies["hybrid-trivy.json"], object_pairs_hook=strict), image)
+    run, attempt = read_file(directory / "run.txt", 128).decode("ascii").splitlines()
+    source, tree = read_file(directory / "source.txt", 128).decode("ascii").splitlines()
+    if source != sha: raise ValueError("cache source identity differs")
+    validate_cache_probe(json.loads(bodies["cache-probe.json"], object_pairs_hook=strict),
+                         bodies["cache-probe-progress.jsonl"], source, tree, run, attempt, image, cache_source_hashes(root,source,tree))
     return {"image":image,"worker":evidence.get("binarySHA256"),"files":hashes}
 
 
@@ -254,7 +263,7 @@ def main():
         return
     if not all((args.proof,args.sha,args.tree,args.run,args.attempt)): raise ValueError("incomplete exact source identity")
     hashes = {}
-    hybrid = image_evidence(args.proof, args.sha)
+    hybrid = image_evidence(args.proof, args.sha, args.root)
     for version in VERSIONS:
         raw = read_file(args.proof / (version + ".jsonl"), 64 << 20)
         check_stream(raw, version)

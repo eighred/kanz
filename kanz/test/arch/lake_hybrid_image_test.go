@@ -65,6 +65,8 @@ func lakeHybridCI(raw string) error {
 			Steps []struct {
 				Name     string            `yaml:"name"`
 				Uses     string            `yaml:"uses"`
+				ID       string            `yaml:"id"`
+				Env      map[string]string `yaml:"env"`
 				If       any               `yaml:"if"`
 				Continue any               `yaml:"continue-on-error"`
 				Run      string            `yaml:"run"`
@@ -77,18 +79,30 @@ func lakeHybridCI(raw string) error {
 	}
 	fields := map[string]map[string]string{
 		"Install pinned hybrid signature verifier":              {},
-		"Build actual hybrid lake image without publishing":     {"context": ".", "file": "kanz/services/lake-sink/Dockerfile", "build-args": "VERSION=${{ github.sha }}", "push": "false", "load": "true"},
+		"Build actual hybrid lake image without publishing":     {"context": ".", "file": "kanz/services/lake-sink/Dockerfile", "build-args": "VERSION=${{ github.sha }}", "push": "false", "load": "true", "builder": "${{ steps.lake-builder.outputs.name }}"},
 		"Catalog actual hybrid applications and native runtime": {"image": "docker:${{ steps.lake-image.outputs.image }}", "format": "spdx-json", "syft-version": "v1.56.0", "output-file": "snapshot-owner-proof/hybrid.spdx.json"},
 		"Scan actual hybrid runtime before execution":           {"image-ref": "${{ steps.lake-image.outputs.image }}", "exit-code": "1", "version": "v0.72.0", "format": "json", "output": "snapshot-owner-proof/hybrid-trivy.json", "list-all-pkgs": "true"},
 	}
 	scripts := map[string][]string{
-		"Install reviewed hybrid audit tools":                           {"set -euo pipefail", "bash .github/scripts/install-rust-audit.sh", "govulncheck@v1.6.0"},
-		"Require hybrid binary provenance and fresh Rust and Go audits": {"set -euo pipefail", `rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid`},
-		"Actual finite owner on both broker versions without skips":     {"TEST_LAKE_IMAGE_ID=", "TEST_LAKE_IMAGE_VERSION=", "TEST_LAKE_IMAGE_WORKER_SHA256=", `json.load(open("snapshot-owner-proof/hybrid/evidence.json"))["binarySHA256"]`, "TEST_LAKE_REDPANDA_IMAGE_ID="},
-		"Stop owned snapshot fixture dependencies and prove absence":    {"label=kanz.snapshot-image-run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", `test -z "$image_after$image_volumes_after"`, "image_containers_absent", "image_volumes_absent", `^/kanz-lake-image-$nonce-[0-9]+$`, `^kanz-lake-image-$nonce-[0-9]+$`},
+		"Bind actual hybrid image identity":                               {"image=$(docker image inspect", "echo \"image=$image\" >> \"$GITHUB_OUTPUT\""},
+		"Prove joint synthetic source and VERSION dependency cache reuse": {"set -euo pipefail", "test_lake_cache_probe.py", "lake_cache_probe.py --source", `--image "$LAKE_IMAGE" --builder "$LAKE_BUILDER" --output snapshot-owner-proof`},
+		"Install reviewed hybrid audit tools":                             {"set -euo pipefail", "bash .github/scripts/install-rust-audit.sh", "govulncheck@v1.6.0"},
+		"Require hybrid binary provenance and fresh Rust and Go audits":   {"set -euo pipefail", `rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid`},
+		"Actual finite owner on both broker versions without skips":       {"TEST_LAKE_IMAGE_ID=", "TEST_LAKE_IMAGE_VERSION=", "TEST_LAKE_IMAGE_WORKER_SHA256=", `json.load(open("snapshot-owner-proof/hybrid/evidence.json"))["binarySHA256"]`, "TEST_LAKE_REDPANDA_IMAGE_ID="},
+		"Stop owned snapshot fixture dependencies and prove absence":      {"label=kanz.snapshot-image-run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", `test -z "$image_after$image_volumes_after"`, "image_containers_absent", "image_volumes_absent", `^/kanz-lake-image-$nonce-[0-9]+$`, `^kanz-lake-image-$nonce-[0-9]+$`},
 	}
 	seen := map[string]int{}
+	builderIndex := -1
 	for i, step := range workflow.Jobs["finite-snapshot-owner"].Steps {
+		if step.Uses == "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069" {
+			if builderIndex != -1 || step.ID != "lake-builder" || step.If != nil || step.Continue != nil || step.With["version"] != "v0.37.1" {
+				return fmt.Errorf("hybrid builder identity differs")
+			}
+			builderIndex = i
+		}
+		if step.Name == "Prove joint synthetic source and VERSION dependency cache reuse" && (step.Env["LAKE_IMAGE"] != "${{ steps.lake-image.outputs.image }}" || step.Env["LAKE_BUILDER"] != "${{ steps.lake-builder.outputs.name }}") {
+			return fmt.Errorf("synthetic probe escaped canonical image/builder")
+		}
 		wanted, action := fields[step.Name]
 		markers, script := scripts[step.Name]
 		if !action && !script {
@@ -115,6 +129,9 @@ func lakeHybridCI(raw string) error {
 			}
 		}
 	}
+	if builderIndex < 0 || builderIndex >= seen["Build actual hybrid lake image without publishing"] || seen["Build actual hybrid lake image without publishing"] >= seen["Bind actual hybrid image identity"] || seen["Bind actual hybrid image identity"] >= seen["Prove joint synthetic source and VERSION dependency cache reuse"] || seen["Prove joint synthetic source and VERSION dependency cache reuse"] >= seen["Require hybrid binary provenance and fresh Rust and Go audits"] {
+		return fmt.Errorf("synthetic probe ordering differs")
+	}
 	if len(seen) != len(fields)+len(scripts) {
 		return fmt.Errorf("missing hybrid qualification step")
 	}
@@ -136,6 +153,11 @@ func TestLakeHybridCIWiring(t *testing.T) {
 		t.Fatal("signature verifier after its consumer escaped")
 	}
 	for _, m := range [][2]string{
+		{"name: Prove joint synthetic source and VERSION dependency cache reuse", "name: Missing synthetic cache probe"},
+		{"name: Prove joint synthetic source and VERSION dependency cache reuse", "name: Prove joint synthetic source and VERSION dependency cache reuse\n        if: false"},
+		{"id: lake-builder", "id: unrelated-builder"},
+		{`builder: ${{ steps.lake-builder.outputs.name }}`, "builder: other-builder"},
+		{`LAKE_BUILDER: ${{ steps.lake-builder.outputs.name }}`, "LAKE_BUILDER: other-builder"},
 		{"name: Install pinned hybrid signature verifier", "name: Missing hybrid signature verifier"},
 		{"name: Install pinned hybrid signature verifier", "name: Install pinned hybrid signature verifier\n        if: false"},
 		{"name: Install pinned hybrid signature verifier", "name: Install pinned hybrid signature verifier\n        continue-on-error: true"},
