@@ -42,3 +42,43 @@ The preserved funded lifecycle in #1316/#1317 is not imported or activated here.
 Its additional cancellation contract, sixth venue observation RPC, approved fee
 authority, capital transaction and old-writer activation fence require their own
 compatibility and operational acceptance before a complete Rust OMS handoff.
+
+The local attribution prerequisite measures existing terminal decision state;
+it does not adopt a venue result, schedule a child, bind a tape, or enqueue facts.
+Rational TCA intermediates exclude fees and preserve arrival-notional basis
+points. All three decomposition legs are absent when quotes are incomplete.
+Canonical projection deliberately follows Go's eight-place quantization and
+rescaling, despite older prose describing exact representability. Copied ordered
+quantity and arrival timestamp preserve nested unknown wire metadata; computed
+figures receive fresh Decimal messages. Participation uses the same child
+collection, canonical derived IDs and intervals, retaining missing tape and
+partial coverage rather than replacing unknown observations with zero.
+
+The attribution-only Go-wire candidate conversion shares the rounding core but
+retains Go's i32 output-exponent limit under bounded rational inputs. Every
+existing `decimal` caller still has the original ±64 output domain. A candidate
+outside the whole-message financial Decimal domain is distinctly classified
+`CapturedOutsideCanonicalDomain`, never an approved financial output. The Go
+owner and Producer can capture/frame an exponent-114 candidate from valid ±64
+inputs; that observation establishes neither broker nor downstream financial
+acceptance. The unresolved output contract is tracked in #1413 and blocks a
+production handoff; this pure diagnostic never publishes the candidate.
+
+This prerequisite is not unrestricted Go parity. Existing canonical messages
+and complete child results retain their 1MiB and 100000-row bounds. Deriving
+schedule identities currently refuses more than 100000 declared indices before
+allocation. Go has no equivalent fixed count ceiling, and OrderState has no
+stored inverse of the SHA-derived child ID. The unresolved workload domain is
+tracked in #1413 before general adoption or service handoff. Tape rationals are
+limited to 4096-bit numerator/denominator representations; this exceeds the
+actual canonical candle-sum domain but is narrower than an arbitrary Go big.Rat
+implementation of RealisedVolume. Refusal produces no partial attribution.
+
+The existing OMS workflow builds the stamped `order-attribution-fixture`, runs
+the independent private Go owner oracle, and requires every named outcome with
+no skips. `oms-attribution-evidence` binds the exact JSONL bytes and executable
+hash to the checkout source/tree and run/attempt. It remains separate from the
+retained store, venue, relay and recovery evidence. Default Rust unit tests and
+clippy include the example's ordered tape controls and the long-parent cached
+SHA identity controls. These tests qualify only the stated diagnostic domain;
+neither an artifact nor a passing comparison grants adoption authority.
