@@ -83,3 +83,37 @@ func TestRustAttributionPrimitiveBoundary(t *testing.T) {
 		files[mutation.path] = original
 	}
 }
+
+func TestRustAttributionActualEvidence(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	workflow, err := os.ReadFile(filepath.Join(root, ".github/workflows/rust-oms-fold.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checker, err := os.ReadFile(filepath.Join(root, ".github/scripts/check_oms_attribution_evidence.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markers := []string{"cargo test --locked -p kanz-order-core --all-targets", "cargo clippy --locked -p kanz-order-core --all-targets -- -D warnings", "cargo build --locked -p kanz-order-core --example order-attribution-fixture", "KANZ_ORDER_ATTRIBUTION_BIN:", "KANZ_ORDER_ATTRIBUTION_VERSION:", "go test -race -p 1 ./services/oms/internal/order -run '^(TestAttribution|TestRustAttribution)'", "check_oms_attribution_evidence.py", "sha256sum \"$KANZ_ORDER_ATTRIBUTION_BIN\"", "--source \"$GITHUB_SHA\"", "--attempt \"$GITHUB_RUN_ATTEMPT\"", "name: oms-attribution-evidence"}
+	valid := func(s string) bool {
+		for _, marker := range markers {
+			if !strings.Contains(s, marker) {
+				return false
+			}
+		}
+		return true
+	}
+	if !valid(string(workflow)) {
+		t.Fatal("attribution actual qualification binding missing")
+	}
+	for _, marker := range markers {
+		if valid(strings.ReplaceAll(string(workflow), marker, "removed")) {
+			t.Fatal("missing actual qualification accepted")
+		}
+	}
+	for _, marker := range []string{`e.get("Package") != "github.com/eighred/kanz/" + PACKAGE`, "read_bounded", "Counter", "set(counts) != NAMES", "n != 1", "TestAttributionCanonicalOutputDomainWitness", "long-parent-last-supported-index", "MAX_STREAM = 16 * 1024 * 1024"} {
+		if !strings.Contains(string(checker), marker) {
+			t.Fatal("attribution evidence boundary missing")
+		}
+	}
+}

@@ -73,3 +73,12 @@ tracked in #1413 before general adoption or service handoff. Tape rationals are
 limited to 4096-bit numerator/denominator representations; this exceeds the
 actual canonical candle-sum domain but is narrower than an arbitrary Go big.Rat
 implementation of RealisedVolume. Refusal produces no partial attribution.
+
+The existing OMS workflow builds the stamped `order-attribution-fixture`, runs
+the independent private Go owner oracle, and requires every named outcome with
+no skips. `oms-attribution-evidence` binds the exact JSONL bytes and executable
+hash to the checkout source/tree and run/attempt. It remains separate from the
+retained store, venue, relay and recovery evidence. Default Rust unit tests and
+clippy include the example's ordered tape controls and the long-parent cached
+SHA identity controls. These tests qualify only the stated diagnostic domain;
+neither an artifact nor a passing comparison grants adoption authority.
