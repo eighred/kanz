@@ -230,8 +230,10 @@ unrelated account semantics and the default compute set remain unchanged.
 The workload can publish lifecycle FACTs and consume Requested but cannot create,
 update, purge or delete streams. An administrator must provision the candidate
 and the canonical 720-hour DLQ route; the existing archiver must register its
-native durable before snapshot startup. Enabled snapshot config adds the derived
-`lake.snapshot` landing topic without changing default deployment topics.
+native durable before snapshot startup. Enabled snapshot config uses the canonical
+tenant qualifier to add `<tenant>.lake.snapshot` (the legacy `lake.snapshot` only
+for `__system__`), matching the existing archiver without changing disabled-mode
+landing topics or duplicating an explicitly configured qualified topic.
 
 Startup requires the authenticated account key and workload user from the broker's
 user-info service, the exact bounded retained stream profile, canonical parking
