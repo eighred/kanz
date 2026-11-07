@@ -169,6 +169,7 @@ func TestSubmit_ResumesInterruptedFillAnnouncement_FillFactFails(t *testing.T) {
 			"the outbox: %q.\n\nThat line is what an operator pages on. Firing it on a healthy "+
 			"recovery is how a real lost fill stops being noticed (#292).", line)
 	}
+	assertUnknownFillPublication(t, logs, 1)
 
 	oc := fb.last(EventTypeOutcome).(*commandpb.CommandOutcome)
 	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED {
@@ -252,26 +253,50 @@ func TestResumeDoesNotFabricateAFillForAPreOutboxOrder(t *testing.T) {
 	if oc.GetStatus() != commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED {
 		t.Fatalf("outcome = %v, want EXECUTED", oc.GetStatus())
 	}
-	// AND IT IS SAID OUT LOUD. This is the residual gap #292 does not close for
-	// the pre-outbox population, and it must stay loud — a lost fill nobody is
-	// told about is the failure this whole path exists to end. It is also the
-	// non-vacuity twin of the assertion in the test above that this same line
-	// does NOT fire on a recovery: one of the two proves the matcher matches.
-	if _, found := logs.find(slog.LevelError, "WITHOUT its ORDER_FILLED FACT"); !found {
-		t.Fatalf("no ERROR reported the unrecoverable fill. Logged instead: %v.\n\n"+
-			"For this population there IS no copy of the fill anywhere, so the only thing the "+
-			"platform can do is say so", logs.messages())
-	}
+	// This fixture knows the row predates the outbox. The recovery path sees
+	// only an empty pending queue, which also occurs after a successful publish.
+	// It must report that limit without asserting either delivery or loss.
+	assertUnknownFillPublication(t, logs, 0)
 }
 
-// captureHandler records log records so a test can assert on the SIGNAL, not
-// just the state. It exists because two of the tests in this file turn on
-// whether an ERROR fires: one says a recovered fill must not be reported lost,
-// the other says a genuinely lost one must be. Asserting only the state would
-// let a change silently swap those.
+// captureHandler records the operator-facing evidence as well as state.
 type captureHandler struct {
 	mu      sync.Mutex
 	records []slog.Record
+}
+
+func assertUnknownFillPublication(t *testing.T, logs *captureHandler, flushed int64) {
+	t.Helper()
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	found := false
+	for _, record := range logs.records {
+		for _, claim := range []string{"WITHOUT its ORDER_FILLED FACT", "fill predates the outbox", "nothing was lost"} {
+			if strings.Contains(record.Message, claim) {
+				t.Fatalf("pending queue was treated as publication history: %s", record.Message)
+			}
+		}
+		publication := ""
+		count, hasCount := int64(0), false
+		record.Attrs(func(attr slog.Attr) bool {
+			switch attr.Key {
+			case "fill_fact_publication":
+				publication = attr.Value.String()
+			case "outbox_records_flushed":
+				count, hasCount = attr.Value.Int64(), true
+			}
+			return true
+		})
+		if publication != "" {
+			if record.Level != slog.LevelWarn || publication != "UNKNOWN" || !hasCount || count != flushed {
+				t.Fatalf("incorrect publication evidence: level=%v state=%q count=%d present=%v", record.Level, publication, count, hasCount)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("terminal completion did not report unknown fill publication")
+	}
 }
 
 func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
@@ -296,16 +321,6 @@ func (h *captureHandler) find(level slog.Level, substr string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-func (h *captureHandler) messages() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	out := make([]string, 0, len(h.records))
-	for _, r := range h.records {
-		out = append(out, r.Level.String()+": "+r.Message)
-	}
-	return out
 }
 
 // TestSubmit_InterruptedTrailingOutcomeIsDeferredNotLost covers the other half
