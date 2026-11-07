@@ -125,8 +125,20 @@ func TestNativeKafkaSourceBoundaryAndMutations(t *testing.T) {
 	}
 }
 
+const nativeFullCondition = "${{ !(github.event_name == 'workflow_dispatch' && inputs.mode == 'image-diagnostics' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') }}"
+const nativeDiagnosticCondition = "${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'image-diagnostics' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' }}"
+
 func nativeKafkaQualificationBoundary(raw string) bool {
 	var w struct {
+		On struct {
+			Dispatch struct {
+				Inputs map[string]struct {
+					Type    string   `yaml:"type"`
+					Default string   `yaml:"default"`
+					Options []string `yaml:"options"`
+				} `yaml:"inputs"`
+			} `yaml:"workflow_dispatch"`
+		} `yaml:"on"`
 		Jobs map[string]struct {
 			If       any `yaml:"if"`
 			Continue any `yaml:"continue-on-error"`
@@ -142,10 +154,25 @@ func nativeKafkaQualificationBoundary(raw string) bool {
 		return false
 	}
 	job, ok := w.Jobs["native-topic-provisioning"]
-	if !ok || job.If != nil || job.Continue != nil {
+	if !ok || job.If != nativeFullCondition || job.Continue != nil {
 		return false
 	}
-	if _, ok = w.Jobs["developmental-redpanda-identity"]; !ok {
+	original, ok := w.Jobs["developmental-redpanda-identity"]
+	diagnostic, diagnosticOK := w.Jobs["native-image-diagnostics"]
+	mode := w.On.Dispatch.Inputs["mode"]
+	if !ok || original.If != nativeFullCondition || original.Continue != nil || !diagnosticOK || diagnostic.If != nativeDiagnosticCondition || diagnostic.Continue != nil || mode.Type != "choice" || mode.Default != "full" || strings.Join(mode.Options, ",") != "full,image-diagnostics" {
+		return false
+	}
+	diagnosticRuns := 0
+	for _, step := range diagnostic.Steps {
+		if step.Run == "python3 -B tools/native-kafka-provision/image_diagnostic.py" {
+			if step.If != nil || step.Continue != nil {
+				return false
+			}
+			diagnosticRuns++
+		}
+	}
+	if diagnosticRuns != 1 {
 		return false
 	}
 	seen, cleanup := 0, 0
@@ -176,7 +203,12 @@ func TestNativeKafkaQualificationCannotBeOptional(t *testing.T) {
 		t.Fatal("native proof wiring missing")
 	}
 	for _, mutation := range []struct{ old, new string }{
-		{"  native-topic-provisioning:\n", "  native-topic-provisioning:\n    if: false\n"},
+		{nativeFullCondition, "false"},
+		{nativeDiagnosticCondition, "true"},
+		{"default: full", "default: image-diagnostics"},
+		{"github.event_name == 'workflow_dispatch'", "github.event_name == 'pull_request'"},
+		{"github.ref != 'refs/heads/main'", "true"},
+		{"run: python3 -B tools/native-kafka-provision/image_diagnostic.py", "run: echo skipped"},
 		{"  native-topic-provisioning:\n", "  native-topic-provisioning:\n    continue-on-error: true\n"},
 		{"run: python3 -B tools/native-kafka-provision/qualify.py", "if: false\n        run: python3 -B tools/native-kafka-provision/qualify.py"},
 		{"run: python3 -B tools/native-kafka-provision/qualify.py", "run: echo skipped"},

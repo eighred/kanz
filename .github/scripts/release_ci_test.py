@@ -97,6 +97,24 @@ class EvidenceTests(unittest.TestCase):
                         if job["name"] == "native-topic-provisioning": job["conclusion"] = "skipped"
                 with self.assertRaises(gate.EvidenceError): self.verify()
 
+    def test_image_diagnostic_success_cannot_replace_full_identity_jobs(self):
+        filename = "redpanda-identity-proof.yml"
+        self.api = API(filename)
+        self.required = {filename: gate.POLICY[filename]}
+        original = copy.deepcopy(self.api.jobs)
+        for required in gate.POLICY[filename]:
+            for mode in ("missing", "skipped"):
+                with self.subTest(required=required, mode=mode):
+                    self.api.jobs = copy.deepcopy(original)
+                    diagnostic = {**original[0], "id": 99, "name": "native-image-diagnostics", "conclusion": "success"}
+                    if mode == "missing":
+                        self.api.jobs = [j for j in self.api.jobs if j["name"] != required]
+                    else:
+                        for job in self.api.jobs:
+                            if job["name"] == required: job["conclusion"] = "skipped"
+                    self.api.jobs.append(diagnostic)
+                    with self.assertRaises(gate.EvidenceError): self.verify()
+
     def test_exact_success_and_dispatch(self):
         for event in ("push", "workflow_dispatch"):
             self.api.runs[0]["event"] = event

@@ -61,5 +61,21 @@ class ImageCustodyTest(unittest.TestCase):
         for ref in ('https://host/path','containerd://'+self.cfg,'sha256:bad'):
             with self.assertRaises(ValueError):image.reference_digest(ref)
 
+    def test_closed_predicate_codes_and_progress_do_not_export_content(self):
+        progress={}
+        ref='docker.io/library/import-fixed@'+self.idx
+        inspection={'status':{'id':self.cfg,'repoTags':['docker.io/library/'+self.tag],'repoDigests':[ref]}}
+        with self.assertRaises(image.CustodyError) as caught:
+            image.verify(inspection,self.tag,ref,self.idx,lambda _:b'SECRET',progress)
+        self.assertEqual(caught.exception.code,'image_content_digest_differs')
+        self.assertEqual(progress,{'phase':'pod_graph','contentCount':0,'mediaType':'UNKNOWN'})
+        self.assertNotIn('SECRET',str(caught.exception))
+        self.assertEqual(image.failure(RuntimeError('SECRET')),'collector_failure')
+        self.assertEqual(image.failure(TimeoutError('SECRET')),'observation_timeout')
+        with self.assertRaises(ValueError):image.CustodyError('SECRET')
+        result=image.verify(inspection,self.tag,ref,self.idx,self.blobs.__getitem__,progress)
+        self.assertEqual(progress['phase'],'complete')
+        self.assertEqual(progress['contentCount'],result['contentCount'])
+
 
 if __name__=='__main__': unittest.main()

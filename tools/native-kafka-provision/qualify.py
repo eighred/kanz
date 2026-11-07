@@ -124,6 +124,29 @@ def command(argv, data=None, timeout=300, *, strip=True, stdout_limit=4 << 20):
                                stdout_limit=stdout_limit, stderr_limit=4 << 20, strip=strip)
 
 
+
+def observe_image(pod, desired, built, name, deadline, diagnostic):
+    """Single bounded image observer for full proof and inert diagnostics."""
+    progress={'phase':'pod_reference','contentCount':0,'mediaType':'UNKNOWN'}
+    try:
+        statuses=pod.get('status',{}).get('containerStatuses',[])
+        if len(statuses)!=1: raise image_custody.CustodyError('image_reference_type')
+        observed=statuses[0].get('imageID','')
+        image_custody.reference_digest(observed)
+        requested=desired['spec']['template']['spec']['containers'][0]['image']
+        def node(*args,raw=False):
+            remaining=deadline-time.monotonic()
+            if remaining<=0: raise TimeoutError('job observation expired')
+            return command(['docker','exec',name+'-control-plane',*args],timeout=min(300,remaining),strip=not raw,stdout_limit=1<<20)
+        progress['phase']='cri_lookup'
+        inspection=json.loads(node('crictl','inspecti',requested))
+        return image_custody.verify(inspection,requested,observed,built,
+            lambda digest:node('ctr','--namespace=k8s.io','content','get',digest,raw=True).encode('utf-8'),progress)
+    except Exception as error:
+        diagnostic['imageFailure']={'code':image_custody.failure(error),**progress}
+        raise
+
+
 def job(name, namespace, sa, image, *, args=None, mode=None, cluster=None):
     d = topology.retained.shared.job(name, sa, 'unused', 'unused', image)
     d['metadata']['namespace'] = namespace
@@ -342,18 +365,7 @@ def main():
                         if label=='probe': diagnostic['probe']=probe_diagnostic(logs,jobname,source)
                         artifact.write_text(json.dumps(evidence,sort_keys=True)+'\n',encoding='utf-8')
                         diagnostic['collection']='image'
-                        statuses=pods['items'][0].get('status',{}).get('containerStatuses',[])
-                        if len(statuses)!=1: raise ValueError('runtime image status absent')
-                        observed=statuses[0].get('imageID','')
-                        image_custody.reference_digest(observed)
-                        requested=d['spec']['template']['spec']['containers'][0]['image']
-                        def node(*args,raw=False):
-                            remaining=deadline-time.monotonic()
-                            if remaining<=0: raise TimeoutError('job observation expired')
-                            return command(['docker','exec',name+'-control-plane',*args],timeout=min(300,remaining),strip=not raw,stdout_limit=1<<20)
-                        inspection=json.loads(node('crictl','inspecti',requested))
-                        diagnostic['image']=image_custody.verify(inspection,requested,observed,evidence[label+'Image'],
-                            lambda digest:node('ctr','--namespace=k8s.io','content','get',digest,raw=True).encode('utf-8'))
+                        diagnostic['image']=observe_image(pods['items'][0],d,evidence[label+'Image'],name,deadline,diagnostic)
                         diagnostic['imageVerified']=True
                         diagnostic['container']['imageBound']=True
                         diagnostic['collection']='complete'

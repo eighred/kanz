@@ -141,3 +141,17 @@ Actual Linux qualification, all 35 image builds, and explicit deployment/cutover
 review remain separate from local tests. No production acceptance, disaster
 recovery coverage, or historical migration completeness is conferred by this
 runbook or the disposable proof.
+
+### Imported-image diagnosis (not qualification)
+
+The existing Redpanda workflow has a non-main, manual `image-diagnostics` mode.
+It builds the same two source-stamped images and observes their imported kind/CRI
+content graph using the same bounded verifier. The admin exits on an unsupported
+mode before Workload API setup; the probe explicitly skips without its fixture
+mode. These Jobs have no credentials, identity/manifest mounts or broker inputs;
+no SPIRE or broker is created. Only fixed predicate codes, graph progress and
+owned cleanup observations are retained. Such receipts always carry
+`diagnosticOnly=true` and `qualification=false`; they cannot satisfy the full
+13-case inventory or the two required release jobs. PR, main and default manual
+runs retain both full qualifications. No failed diagnostic authorizes a retry,
+provisioning, or a change to the image identity predicates.
