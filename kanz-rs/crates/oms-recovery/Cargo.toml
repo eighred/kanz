@@ -15,9 +15,9 @@ kanz-oms-store = { path = "../oms-store" }
 kanz-oms-venue = { path = "../oms-venue" }
 kanz-proto-wire = { path = "../proto-wire" }
 kanz-decimal-compat = { path = "../.." }
-prost = "=0.14.1"
-prost-types = "=0.14.1"
-prost-reflect = "=0.16.2"
+prost = "=0.14.4"
+prost-types = "=0.14.4"
+prost-reflect = "=0.16.5"
 num-bigint = "=0.4.6"
 num-rational = "=0.4.2"
 num-traits = "=0.2.19"

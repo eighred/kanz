@@ -6,5 +6,5 @@ rust-version = "1.90"
 publish = false
 
 [dependencies]
-prost = "=0.14.1"
-prost-reflect = "=0.16.2"
+prost = "=0.14.4"
+prost-reflect = "=0.16.5"

@@ -13,9 +13,9 @@ qualification-diagnostics = []
 kanz-order-core = { path = "../order-core" }
 kanz-decimal-compat = { path = "../.." }
 kanz-proto-wire = { path = "../proto-wire" }
-prost = "=0.14.1"
-prost-types = "=0.14.1"
-prost-reflect = "=0.16.2"
+prost = "=0.14.4"
+prost-types = "=0.14.4"
+prost-reflect = "=0.16.5"
 uuid = { version = "=1.29.0", features = ["v7"] }
 sha2 = "=0.10.9"
 num-bigint = "=0.4.6"
