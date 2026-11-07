@@ -23,7 +23,7 @@ use identity::{execution_key, same_execution};
 use kanz_order_core::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;
 use std::time::SystemTime;
-use tokio_postgres::{Client, Transaction};
+use tokio_postgres::{types::Type, Client, Transaction};
 
 pub const MAX_BYTES: usize = 1024 * 1024;
 #[derive(Debug, PartialEq, Eq)]
@@ -243,7 +243,7 @@ async fn scope_existing(tx: &Transaction<'_>, tenant: &str) -> Result<(), Error>
         return Err(Error::InvalidInput);
     }
     let role = tx
-        .query_one(
+        .query_typed_one(
             "SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user",
             &[],
         )
@@ -251,10 +251,13 @@ async fn scope_existing(tx: &Transaction<'_>, tenant: &str) -> Result<(), Error>
     if role.get::<_, bool>(0) || role.get::<_, bool>(1) {
         return Err(Error::UnsafeRole);
     }
-    tx.query_one("SELECT set_config('app.tenant_id',$1,true)", &[&tenant])
-        .await?;
+    tx.query_typed_one(
+        "SELECT set_config('app.tenant_id',$1,true)",
+        &[(&tenant, Type::TEXT)],
+    )
+    .await?;
     // Every write uses the canonical tables, which must retain forced tenant RLS.
-    let tables=tx.query_one("SELECT count(*) FROM pg_class WHERE oid IN ('orders'::regclass,'order_fills'::regclass,'order_executions'::regclass,'outbox'::regclass,'execution_fee_revisions'::regclass) AND relrowsecurity AND relforcerowsecurity",&[]).await?;
+    let tables=tx.query_typed_one("SELECT count(*) FROM pg_class WHERE oid IN ('orders'::regclass,'order_fills'::regclass,'order_executions'::regclass,'outbox'::regclass,'execution_fee_revisions'::regclass) AND relrowsecurity AND relforcerowsecurity",&[]).await?;
     if tables.get::<_, i64>(0) != 5 {
         return Err(Error::UnsafeRole);
     }
@@ -297,9 +300,9 @@ pub struct Loaded {
 pub async fn load(client: &mut Client, tenant: &str, order_id: &str) -> Result<Loaded, Error> {
     let tx = scoped(client, tenant).await?;
     let row = tx
-        .query_opt(
+        .query_typed_opt(
             "SELECT CASE WHEN octet_length(state)::bigint<=$2 THEN state END,version FROM orders WHERE order_id=$1",
-            &[&order_id,&(MAX_BYTES as i64)],
+            &[(&order_id, Type::TEXT), (&(MAX_BYTES as i64), Type::INT8)],
         )
         .await?
         .ok_or(Error::NotFound)?;
