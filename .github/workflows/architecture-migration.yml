@@ -54,6 +54,43 @@ env:
   GOFLAGS: -mod=mod
 
 jobs:
+  finite-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+      - name: Bind snapshot fixture to exact source
+        run: |
+          mkdir -p snapshot-proof
+          echo "KANZ_BUILD_VERSION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git rev-parse HEAD 'HEAD^{tree}' > snapshot-proof/source.txt
+          printf '%s\n%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > snapshot-proof/run.txt
+          rustc +1.90.0 --version > snapshot-proof/toolchain.txt
+      - name: Build overflow-checked worker and separate kernel probe
+        working-directory: kanz-rs
+        run: |
+          cargo +1.90.0 fmt --all -- --check
+          cargo +1.90.0 build --release --locked -p kanz-lake-snapshot --bin kanz-lake-snapshot --example sandbox-probe
+      - name: Execute actual finite queries and process confinement
+        working-directory: kanz-rs
+        run: |
+          set -euo pipefail
+          cargo +1.90.0 test --release --locked -p kanz-lake-snapshot --all-targets -- --test-threads=1 2>&1 | tee ../snapshot-proof/tests.txt
+          cargo +1.90.0 clippy --release --locked -p kanz-lake-snapshot --all-targets -- -D warnings
+      - name: Bind tested binaries and dependency inventory
+        run: |
+          sha256sum kanz-rs/target/release/kanz-lake-snapshot kanz-rs/target/release/examples/sandbox-probe kanz-rs/Cargo.lock > snapshot-proof/sha256.txt
+          cargo +1.90.0 tree --manifest-path kanz-rs/Cargo.toml --locked -p kanz-lake-snapshot -e normal > snapshot-proof/dependencies.txt
+      - name: Retain actual snapshot qualification
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: finite-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: snapshot-proof/
+          if-no-files-found: error
+
   compatibility:
     runs-on: ubuntu-latest
     timeout-minutes: 50
