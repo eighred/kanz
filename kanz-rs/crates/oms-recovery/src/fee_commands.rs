@@ -215,16 +215,20 @@ async fn propose(
     .await
     .map_err(repository_error)
 }
+struct ApprovalInput<'a> {
+    actor: &'a str,
+    digest: &'a str,
+}
 async fn approve(
     client: &mut Client,
     tenant: &str,
     env: &Envelope,
     c: &Case,
     state: &Canonical<OrderState>,
-    actor: &str,
-    digest: &str,
+    input: ApprovalInput<'_>,
     now: prost_types::Timestamp,
 ) -> Result<(), Error> {
+    let ApprovalInput { actor, digest } = input;
     let p = proposal(client, tenant, &c.id)
         .await?
         .ok_or(Error::FeeRevision)?;
@@ -333,7 +337,19 @@ pub(crate) async fn handle(
     if env.event_type == PROPOSE {
         propose(client, tenant, env, &c, &m.issuer, &argument, now).await?;
     } else {
-        let result = approve(client, tenant, env, &c, &state, &m.issuer, &argument, now).await;
+        let result = approve(
+            client,
+            tenant,
+            env,
+            &c,
+            &state,
+            ApprovalInput {
+                actor: &m.issuer,
+                digest: &argument,
+            },
+            now,
+        )
+        .await;
         if c.checkpoint == 0 && c.status != "corrected" {
             let reason = match result.as_ref().err() {
                 Some(Error::SelfApproval) => {
