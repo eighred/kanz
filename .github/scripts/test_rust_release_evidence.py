@@ -128,6 +128,8 @@ class EvidenceTests(unittest.TestCase):
         sbom = {"packages": [{"name": n, "versionInfo": v, "externalRefs": [{"referenceType": "purl",
                  "referenceLocator": "pkg:golang/" + n + ("@" + v if v else "")}]} for n, v in
                  (("example.org/runtime", "v1.2.3"), (sdk, ""))]}
+        # Actual Syft1.56 SPDX shape from failed65cb: the PURL remains versionless.
+        sbom["packages"][1]["versionInfo"] = "UNKNOWN"
         self.assertEqual(gate.validate_go_buildinfo(info, expected, sums, "go1.26.10", sbom), 2)
         for mutation in ("main", "version", "dep", "sdk", "omission", "checksum", "spdx", "settings"):
             bad, catalog, checksums = copy.deepcopy(info), copy.deepcopy(sbom), dict(sums)
@@ -141,6 +143,49 @@ class EvidenceTests(unittest.TestCase):
             if mutation == "settings": bad["Settings"][0]["Value"] = "windows"
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 gate.validate_go_buildinfo(bad, expected, checksums, "go1.26.10", catalog)
+
+        versioned = copy.deepcopy(info)
+        versioned["Deps"][1] = {"Path":sdk,"Version":"v1.2.3","Sum":"h1:versioned"}
+        versioned_graph = {d["Path"]:copy.deepcopy(d) for d in versioned["Deps"]}
+        versioned_sums = {**sums,(sdk,"v1.2.3"):"h1:versioned"}
+        versioned_sbom = copy.deepcopy(sbom)
+        versioned_sbom["packages"][1]["versionInfo"] = "v1.2.3"
+        versioned_sbom["packages"][1]["externalRefs"][0]["referenceLocator"] += "@v1.2.3"
+        self.assertEqual(gate.validate_go_buildinfo(versioned,versioned_graph,versioned_sums,"go1.26.10",versioned_sbom),2)
+        for mutation in ("unknown", "duplicate-identity"):
+            bad = copy.deepcopy(versioned_sbom)
+            if mutation == "unknown": bad["packages"][1]["versionInfo"] = "UNKNOWN"
+            else: bad["packages"].append({**copy.deepcopy(bad["packages"][1]),"name":"example.org/disguised"})
+            with self.subTest(versioned_sdk=mutation),self.assertRaises(ValueError):
+                gate.validate_go_buildinfo(versioned,versioned_graph,versioned_sums,"go1.26.10",bad)
+
+        for mutation in ("sdk-versioned", "sdk-replacement", "sdk-name", "sdk-purl", "sdk-versioned-purl",
+                         "sdk-purl-qualifier", "sdk-duplicate", "sdk-conflict", "sdk-two-purls",
+                         "dependency-unknown", "sdk-empty", "sdk-devel", "sdk-disguised-versioned"):
+            bad, graph, catalog = copy.deepcopy(info), copy.deepcopy(expected), copy.deepcopy(sbom)
+            checksums = dict(sums)
+            row = catalog["packages"][1]
+            if mutation == "sdk-versioned":
+                bad["Deps"][1].pop("Replace"); bad["Deps"][1]["Sum"] = "h1:versioned"
+                graph[sdk] = copy.deepcopy(bad["Deps"][1]); checksums[(sdk,bad["Deps"][1]["Version"])] = "h1:versioned"
+            if mutation == "sdk-replacement":
+                bad["Deps"][1]["Replace"]["Path"] = "../evil"; graph[sdk] = copy.deepcopy(bad["Deps"][1])
+            if mutation == "sdk-name": row["name"] = "example.org/other"
+            if mutation == "sdk-purl": row["externalRefs"][0]["referenceLocator"] = "pkg:golang/example.org/other"
+            if mutation == "sdk-versioned-purl": row["externalRefs"][0]["referenceLocator"] += "@UNKNOWN"
+            if mutation == "sdk-purl-qualifier": row["externalRefs"][0]["referenceLocator"] += "?goos=linux"
+            if mutation == "sdk-duplicate": catalog["packages"].append(copy.deepcopy(row))
+            if mutation == "sdk-conflict": catalog["packages"].append({**copy.deepcopy(row),"versionInfo":"v1.0.0"})
+            if mutation == "sdk-two-purls": row["externalRefs"].append(copy.deepcopy(row["externalRefs"][0]))
+            if mutation == "dependency-unknown": catalog["packages"][0]["versionInfo"] = "UNKNOWN"
+            if mutation == "sdk-empty": row["versionInfo"] = ""
+            if mutation == "sdk-devel": row["versionInfo"] = "(devel)"
+            if mutation == "sdk-disguised-versioned":
+                extra = copy.deepcopy(row); extra["name"] = "example.org/disguised"
+                extra["versionInfo"] = "v1.2.3"; extra["externalRefs"][0]["referenceLocator"] += "@v1.2.3"
+                catalog["packages"].append(extra)
+            with self.subTest(spdx_mutation=mutation), self.assertRaises(ValueError):
+                gate.validate_go_buildinfo(bad, graph, checksums, "go1.26.10", catalog)
 
     def test_go_json_verifies_scan_but_never_substitutes_for_plain_exit(self):
         config = {"protocol_version": "v1.0.0", "scanner_name": "govulncheck", "scanner_version": "v1.6.0",

@@ -235,10 +235,18 @@ def validate_go_buildinfo(info, expected, sums, toolchain, sbom):
     if not isinstance(dependencies, list) or not dependencies or len(dependencies) > 4096:
         raise ValueError("missing or oversized Go module inventory")
     catalog = set()
+    sdk = "github.com/eighred/kanz/kanz-schemas-go"
+    sdk_purl = "pkg:golang/" + sdk
+    sdk_packages = []
     for package in sbom.get("packages", []):
         name, version = package.get("name"), package.get("versionInfo", "")
         if not isinstance(name, str) or not isinstance(version, str):
             continue
+        purls = [ref.get("referenceLocator") for ref in package.get("externalRefs", [])
+                 if ref.get("referenceType") == "purl"]
+        if name == sdk or any(isinstance(purl, str) and
+                              re.split(r"[@?#]", unquote(purl), maxsplit=1)[0] == sdk_purl for purl in purls):
+            sdk_packages.append(package)
         locator = "pkg:golang/" + name + ("@" + version if version else "")
         if any(ref.get("referenceType") == "purl" and
                unquote(ref.get("referenceLocator", "").split("?", 1)[0]) == locator
@@ -253,14 +261,23 @@ def validate_go_buildinfo(info, expected, sums, toolchain, sbom):
         if dep != expected.get(name):
             raise ValueError("binary dependency differs from source-selected module")
         replacement = dep.get("Replace")
+        if name == sdk and len(sdk_packages) != 1:
+            raise ValueError("ambiguous canonical SDK SPDX inventory")
         if replacement is not None:
             if (name != "github.com/eighred/kanz/kanz-schemas-go" or
                     version != "v0.0.0-00010101000000-000000000000" or
                     replacement != {"Path": "../kanz-schemas/gen/go", "Version": "(devel)"}):
                 raise ValueError("unreviewed binary module replacement")
-            # Syft1.56 keeps the original module name for a relative replacement,
-            # removes (devel), and emits a versionless PURL (golang/package.go).
-            pair = (name, "")
+            # Syft1.56 golang/package.go builds the versionless PURL before
+            # package_task_factory.go stubs the empty display version as UNKNOWN.
+            # This representation is valid only for this exact checked replacement;
+            # it supplies no version or provenance for any other module.
+            package = sdk_packages[0]
+            purls = [ref.get("referenceLocator") for ref in package.get("externalRefs", [])
+                     if ref.get("referenceType") == "purl"]
+            if package.get("name") != sdk or package.get("versionInfo") != "UNKNOWN" or purls != [sdk_purl]:
+                raise ValueError("canonical SDK SPDX replacement representation differs")
+            continue
         else:
             if sums.get((name, version)) != dep.get("Sum") or not dep.get("Sum"):
                 raise ValueError("Go module checksum not bound to source go.sum")
