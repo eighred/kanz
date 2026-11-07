@@ -107,12 +107,8 @@ pub(crate) async fn ack(
     };
     let ack = Canonical::<ExecutionRecoveryApplied>::decode(payload)?;
     let ack = ack.value();
-    let mut c = measure(
-        Stage::LoadCase,
-        repository::load_case(client, tenant, &ack.case_id),
-    )
-    .await?;
-    let loaded = measure(Stage::LoadOrder, store::load(client, tenant, &ack.order_id)).await?;
+    let (mut c, loaded) =
+        repository::load_ack_context(client, tenant, &ack.case_id, &ack.order_id).await?;
     let state = Canonical::<OrderState>::decode(&loaded.state)?;
     c.status = "corrected".into();
     c.reason.clear();

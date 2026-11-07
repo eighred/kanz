@@ -133,3 +133,16 @@ stages. Counts describe executed stage scopes, not successful financial effects.
 The 900-second fixture lifetime, 30-second work budget, all 16,000 ACKs and
 explicit cleanup checks remain mandatory. These observations alone do not
 establish a performance bottleneck or production performance acceptance.
+
+ACK context reads share one explicit READ COMMITTED, read-only transaction.
+The standalone case/order APIs retain their completion behavior; the paired ACK
+read has one rollback after both reads instead of an intermediate case COMMIT
+and a second scope. Case validation still precedes order validation. Role checks
+remain first; tenant configuration and the unchanged five-table FORCE RLS count
+share a catalog-only SELECT, and the count must pass before application SQL.
+The final locked ACK/target/count/CAS/outbox transaction and all sessions, joins
+and work limits remain unchanged. LoadCase/LoadOrder diagnostic scopes now cover
+only their reused row reads; shared read admission/rollback is included in Total,
+so these stage scopes are not comparable with the preceding diagnostic revision.
+Fresh full dependency qualification is required; no latency improvement follows
+from source round-trip counts alone.

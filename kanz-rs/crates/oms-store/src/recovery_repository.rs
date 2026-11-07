@@ -191,17 +191,26 @@ impl Mapping<'_> {
 }
 async fn scope<'a>(client: &'a mut Client, tenant: &str) -> Result<Transaction<'a>, Error> {
     let tx = scoped(client, tenant).await?;
+    require_tables(&tx).await?;
+    Ok(tx)
+}
+async fn require_tables(tx: &Transaction<'_>) -> Result<(), Error> {
     let n:i64=tx.query_typed_one("SELECT count(*) FROM pg_class WHERE oid IN ('execution_recovery_cases'::regclass,'execution_account_mappings'::regclass,'execution_recovery_history'::regclass,'execution_recovery_targets'::regclass,'execution_recovery_acks'::regclass,'execution_fee_proposals'::regclass,'execution_fee_approvals'::regclass) AND relrowsecurity AND relforcerowsecurity",&[]).await?.get(0);
     if n != 7 {
         return Err(Error::UnsafeRole);
     }
-    Ok(tx)
+    Ok(())
 }
 pub async fn load_case(client: &mut Client, tenant: &str, id: &str) -> Result<Case, Error> {
     if !text(id, 256) {
         return Err(Error::InvalidInput);
     }
     let tx = scope(client, tenant).await?;
+    let case = load_case_in(&tx, id).await?;
+    commit(tx).await?;
+    Ok(case)
+}
+async fn load_case_in(tx: &Transaction<'_>, id: &str) -> Result<Case, Error> {
     let limit = HISTORY_BYTES as i64;
     // A corrupt restored TEXT/BYTEA must be bounded before transfer, not after
     // decoding. Metadata and observation bytes have independent budgets.
@@ -225,8 +234,41 @@ pub async fn load_case(client: &mut Client, tenant: &str, id: &str) -> Result<Ca
     if c.checkpoint < 0 || c.checkpoint as usize > MAX_FILLS {
         return Err(Error::InvalidInput);
     }
-    commit(tx).await?;
     Ok(c)
+}
+/// Read ACK status inputs in one admitted READ COMMITTED transaction. Each
+/// statement still gets its own snapshot; the final locked ACK transaction
+/// independently revalidates identity, targets and completion before writing.
+/// Unlike load_case's standalone API this read-only pair has no interim COMMIT.
+pub async fn load_ack_context(
+    client: &mut Client,
+    tenant: &str,
+    case_id: &str,
+    order_id: &str,
+) -> Result<(Case, super::Loaded), Error> {
+    if !text(case_id, 256) {
+        return Err(Error::InvalidInput);
+    }
+    let tx = client
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::ReadCommitted)
+        .read_only(true)
+        .start()
+        .await?;
+    super::scope_existing(&tx, tenant).await?;
+    require_tables(&tx).await?;
+    let case = super::diagnostics::measure(
+        super::diagnostics::Stage::LoadCase,
+        load_case_in(&tx, case_id),
+    )
+    .await?;
+    let order = super::diagnostics::measure(
+        super::diagnostics::Stage::LoadOrder,
+        super::load_in(&tx, order_id),
+    )
+    .await?;
+    tx.rollback().await?;
+    Ok((case, order))
 }
 pub async fn observe(
     client: &mut Client,
