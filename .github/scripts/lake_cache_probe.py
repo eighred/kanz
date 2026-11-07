@@ -43,12 +43,24 @@ def progress(raw, source):
     return target_progress(raw, "rust-build", commands)
 
 
-def target_progress(raw, stage, commands):
+def command_name_matches(name, stage, command, canonical_counter=False):
+    if not canonical_counter:
+        # Preserve the original lake predicate, including its exact spacing.
+        return re.fullmatch(r"\[" + re.escape(stage) + r" [1-9][0-9]*/[1-9][0-9]*\] RUN " + re.escape(command), name) is not None
+    # BuildKit v0.33 prefixCommand pads the index to the decimal width of total.
+    match = re.fullmatch(r"\[" + re.escape(stage) + r" ( *[1-9][0-9]*)/([1-9][0-9]*)\] RUN " + re.escape(command), name)
+    if match is None:
+        return False
+    index, total = int(match[1]), int(match[2])
+    return 1 <= index <= total and match[1] == str(index).rjust(len(match[2]))
+
+
+def target_progress(raw, stage, commands, canonical_counter=False):
     """Shared closed vertex parser; each caller supplies exact owned commands."""
     if not raw or len(raw) > LIMIT or not raw.endswith(b"\n"):
         raise ValueError("progress size or termination differs")
     def owned(name):
-        return any(re.fullmatch(r"\[" + re.escape(stage) + r" [1-9][0-9]*/[1-9][0-9]*\] RUN " + re.escape(command), name)
+        return any(command_name_matches(name, stage, command, canonical_counter)
                    for _, command, _ in commands)
     vertices = {}
     lines = raw.splitlines()
@@ -78,7 +90,7 @@ def target_progress(raw, stage, commands):
             if len(vertices) > 4096: raise ValueError("vertex count exceeds bound")
     result = {}
     for label, command, cached in commands:
-        matches = [v for v in vertices.values() if re.fullmatch(r"\[" + re.escape(stage) + r" [1-9][0-9]*/[1-9][0-9]*\] RUN " + re.escape(command), v["name"])]
+        matches = [v for v in vertices.values() if command_name_matches(v["name"], stage, command, canonical_counter)]
         if len(matches) != 1: raise ValueError("exact build vertex missing or duplicated")
         vertex = matches[0]
         if (vertex.get("cached", False) is not cached or not isinstance(vertex.get("started"), str)
