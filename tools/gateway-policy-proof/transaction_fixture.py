@@ -1,5 +1,8 @@
 """Real Kubernetes transaction oracle in a fresh owned kind cluster only."""
 import copy
+import base64
+import lzma
+import transport_codec as codec
 import json
 import os
 from pathlib import Path
@@ -17,8 +20,31 @@ import rollout_probe
 from bounded_process import run as bounded_run
 
 CASES = ["response_loss_" + str(at) for at in range(1, 9)] + [
-    "dry_run_no_write", "four_policy_success", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
+    "bounded_xz_transport", "dry_run_no_write", "four_policy_success", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
     "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"]
+
+
+def qualify_codec():
+    """Same checked codec on actual Linux; no alternate decoder in the oracle."""
+    files = {name: (Path(__file__).parent / name).read_text(encoding="utf-8") for name in
+             ("transaction.py", "policy_client.py", "rollout_probe.py", "rollout_engine.py", "bounded_process.py", "source_loader.py")}
+    raw = json.dumps({"files": files, "payload": {"synthetic": True}}, ensure_ascii=False).encode()
+    encoded = codec.encode(raw)
+    if codec.decode(encoded) != raw:
+        raise ValueError("XZ source roundtrip differs")
+    packed = base64.b64decode(encoded)
+    controls = [packed[:-1], packed + b"x", packed + packed, b"invalid",
+                lzma.compress(b"x" * 524289),
+                lzma.compress(b"control", check=lzma.CHECK_NONE),
+                lzma.compress(b"control", filters=[{"id": lzma.FILTER_LZMA2, "dict_size": 67108864}])]
+    for value in controls:
+        try:
+            codec.decode(base64.b64encode(value).decode("ascii"))
+        except (ValueError, lzma.LZMAError):
+            continue
+        raise ValueError("invalid XZ control accepted")
+    return True
+
 
 
 def runtime_failure_category(message):
@@ -201,6 +227,8 @@ def run_fixture(artifact):
             report["tree"] = run(["git", "rev-parse", "HEAD^{tree}"]).strip()
             report["runID"] = os.environ["GITHUB_RUN_ID"]
             report["runAttempt"] = os.environ["GITHUB_RUN_ATTEMPT"]
+            qualify_codec()
+            report["cases"].append("bounded_xz_transport")
             rendered, _, report["renderSHA256"] = proof.render(run)
             desired = [p for p in rendered if p["metadata"]["name"] in tx.NAMES]
             baseline = [copy.deepcopy(p) for p in rendered if p["metadata"]["name"] not in tx.NAMES[:3]]

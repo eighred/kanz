@@ -94,7 +94,35 @@ class Probes:
     def record(self, phase):
         self.save({"format": "kanz-gateway-policy-probes-v1", "nonce": self.nonce, "phase": phase,
                    "namespace": self.namespace, "namespaceUID": self.namespace_uid_custody,
-                   "pods": [{key: entry.get(key) for key in ("name", "namespace", "uid", "address", "deleted")} for entry in self.owned]})
+                   "pods": [{key: entry.get(key) for key in ("name", "namespace", "uid", "address", "addresses", "addressState", "addressUncertain", "deleted")} for entry in self.owned]})
+
+    def observe(self, entry, actual, cleanup=False):
+        uid, _ = tx.version(actual)
+        if uid != entry["uid"] or actual["metadata"].get("labels", {}).get(probe.OWNER) != self.nonce:
+            raise tx.Refusal("probe observation ownership uncertain")
+        try:
+            values = probe.pod_addresses(actual)
+        except ValueError:
+            entry["addressState"] = "malformed"
+            entry["addressUncertain"] = True
+            self.record("pod_address_observed")
+            if cleanup:
+                return
+            raise
+        old = (entry.get("addressState"), entry.get("addresses", []))
+        entry["addressState"] = "unknown" if values is None else ("observed" if values else "empty")
+        addresses = sorted(set(old[1]) | set(values or []))
+        if len(addresses) > 8:
+            entry["addressState"] = "overflow"
+            entry["addressUncertain"] = True
+            self.record("pod_address_observed")
+            if cleanup:
+                return
+            raise tx.Refusal("probe address history exceeds bound")
+        entry["addresses"] = addresses
+        self.addresses = sorted({a for p in self.owned for a in p.get("addresses", [])})
+        if old != (entry["addressState"], entry["addresses"]):
+            self.record("pod_address_observed")
 
     def services(self):
         return json.loads(self.k("get", "services", "-A", "-o", "json"))["items"]
@@ -140,10 +168,12 @@ class Probes:
                 actual = json.loads(self.k("-n", namespace, "get", "pod", name, "--ignore-not-found", "-o", "json") or "null")
                 if actual and actual["metadata"].get("labels", {}).get(probe.OWNER) == self.nonce:
                     entry["uid"] = actual["metadata"]["uid"]
+                    self.observe(entry, actual)
                 self.record("pod_create_observed")
             end = time.monotonic() + 90
             while True:
                 actual = json.loads(self.k("-n", namespace, "get", "pod", name, "-o", "json"))
+                self.observe(entry, actual)
                 if actual.get("status", {}).get("phase") == "Running":
                     break
                 if time.monotonic() >= end:
@@ -153,7 +183,6 @@ class Probes:
             entry["verifiedImageID"] = probe.verify_cri(image_id, self.inspect(image_id), self.identity)
             address = probe.running_unready(actual, desired, entry["verifiedImageID"])
             entry["address"] = address
-            self.addresses.append(address)
             self.record("pod_running_unready_observed")
             self.peers[peer] = entry
         self.check()
@@ -163,8 +192,7 @@ class Probes:
         controllers = self.controllers()
         for entry in self.owned:
             obj = json.loads(self.k("-n", entry["namespace"], "get", "pod", entry["name"], "-o", "json"))
-            if obj["metadata"]["uid"] != entry["uid"]:
-                raise tx.Refusal("probe pod was replaced")
+            self.observe(entry, obj)
             probe.service_boundary(services, entry["namespace"], entry["desired"]["metadata"]["labels"])
             probe.controller_boundary(controllers, entry["namespace"], entry["desired"]["metadata"]["labels"])
             if probe.running_unready(obj, entry["desired"], entry["verifiedImageID"]) != entry["address"]:
@@ -200,6 +228,7 @@ class Probes:
                 continue
             if actual["metadata"].get("labels", {}).get(probe.OWNER) != self.nonce or actual["metadata"]["uid"] != entry["uid"]:
                 raise tx.Refusal("probe cleanup ownership uncertain")
+            self.observe(entry, actual, cleanup=True)
             self.k("delete", "--raw", "/api/v1/namespaces/" + entry["namespace"] + "/pods/" + entry["name"], "-f", "-",
                    value={"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": entry["uid"], "resourceVersion": actual["metadata"]["resourceVersion"]}, "gracePeriodSeconds": 0})
             self.k("-n", entry["namespace"], "wait", "--for=delete", "pod/" + entry["name"], "--timeout=60s")
@@ -215,12 +244,14 @@ class Probes:
         end = time.monotonic() + 30
         while True:
             try:
-                probe.endpoint_boundary(self.endpoints(), self.addresses, require_absent=True)
+                probe.endpoint_boundary(self.endpoints(), self.addresses, require_absent=True, owned_uids=[p["uid"] for p in self.owned])
                 break
             except ValueError:
                 if time.monotonic() >= end:
                     raise
                 time.sleep(1)
+        if any(p.get("addressUncertain") or p.get("addressState") not in ("observed", "empty") for p in self.owned):
+            raise tx.Refusal("probe address custody remains unknown")
         self.record("probe_cleanup_verified")
 
 

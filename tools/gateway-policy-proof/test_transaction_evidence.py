@@ -84,7 +84,7 @@ class TransactionEvidenceTests(unittest.TestCase):
         self.assertTrue(wired(text))
         for part in required:
             with self.subTest(part=part): self.assertFalse(wired(text.replace(part, "removed")))
-        self.assertEqual(len(CASES), 18)
+        self.assertEqual(len(CASES), 19)
         self.assertEqual(CASES[:8], ["response_loss_" + str(i) for i in range(1, 9)])
 
     def test_exact_source_attempt_complete_cases_cleanup_and_identity_required(self):

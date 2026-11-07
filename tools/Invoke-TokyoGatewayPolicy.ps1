@@ -74,34 +74,43 @@ foreach ($name in @('transaction.py', 'policy_client.py', 'rollout_probe.py', 'r
 $bundle = [ordered]@{ files = $files; payload = [ordered]@{ source = $source; policies = $policies; identity = $identity; workloads = $projection.workloads } } | ConvertTo-Json -Depth 60 -Compress
 $bytes = [Text.Encoding]::UTF8.GetBytes($bundle)
 if ($bytes.Length -gt 524288) { throw 'Rollout bundle exceeds bound.' }
-$memory = New-Object IO.MemoryStream
-$gzip = New-Object IO.Compression.GZipStream($memory, [IO.Compression.CompressionMode]::Compress, $true)
-try { $gzip.Write($bytes, 0, $bytes.Length) } finally { $gzip.Dispose() }
-$encoded = [Convert]::ToBase64String($memory.ToArray())
-$memory.Dispose()
+$codecPath = Join-Path $proofRoot 'transport_codec.py'
+& git -C $repo ls-files --error-unmatch tools/gateway-policy-proof/transport_codec.py *> $null
+$codecInfo = Get-Item -LiteralPath $codecPath
+if ($LASTEXITCODE -ne 0 -or $codecInfo.LinkType -or $codecInfo.PSIsContainer -or $codecInfo.Length -gt 65536) { throw 'Transport codec must be bounded tracked regular source.' }
+$codec = [IO.File]::ReadAllText($codecPath)
+if ([Text.Encoding]::UTF8.GetByteCount($codec) -gt 65536) { throw 'Transport codec exceeds source bound.' }
+$encode = $codec + "`nimport sys`nframed=sys.stdin.buffer.read(699055)`nif len(framed)>699054: raise ValueError('stdin bound')`nraw=base64.b64decode(framed.strip(),validate=True)`nprint(encode(raw))"
+$encodedLines = [Convert]::ToBase64String($bytes) | & $python -I -B -c $encode
+if ($LASTEXITCODE -ne 0 -or @($encodedLines).Count -ne 1) { throw 'Bounded XZ encoding unavailable or refused.' }
+$encoded = [string]$encodedLines
 if ($encoded.Length -gt 20000) { throw 'Rollout transfer exceeds bounded SSM payload.' }
-$bootstrap = @'
-import base64,gzip,io,json,os,pathlib,sys
-raw=gzip.GzipFile(fileobj=io.BytesIO(base64.b64decode(sys.argv[1],validate=True))).read(524289)
-if len(raw)>524288: raise ValueError('bundle bound')
+$bootstrap = $codec + "`n" + @'
+import json,os,pathlib,sys
+raw=decode(sys.argv[1])
 b=json.loads(raw); names={'transaction.py','policy_client.py','rollout_probe.py','rollout_engine.py','bounded_process.py','source_loader.py'}
 if set(b)!={'files','payload'} or set(b['files'])!=names: raise ValueError('bundle shape')
-root=pathlib.Path(sys.argv[2])
+prepared={}
 for name,text in b['files'].items():
  data=text.encode()
  if len(data)>65536: raise ValueError('file bound')
+ prepared[name]=data
+root=pathlib.Path(sys.argv[2])
+for name,data in prepared.items():
  with (root/name).open('xb') as f:f.write(data)
 with (root/'input.json').open('x') as f:json.dump(b['payload'],f)
 '@
 $bootstrapEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
 $applyArg = if ($Apply) { ' --apply' } else { '' }
-$commands = @('set -eu', 'umask 077', 'work=$(mktemp -d /var/tmp/kanz-gateway-source.XXXXXXXX)',
+$commands = @('set -eu', 'python3 -I -B -c ''import lzma; assert lzma.is_check_supported(lzma.CHECK_CRC64)''', 'umask 077', 'work=$(mktemp -d /var/tmp/kanz-gateway-source.XXXXXXXX)',
     'trap ''rm -f "$work/transaction.py" "$work/policy_client.py" "$work/rollout_probe.py" "$work/rollout_engine.py" "$work/bounded_process.py" "$work/source_loader.py" "$work/input.json" "$work/bootstrap.py"; rmdir "$work"'' EXIT',
     ("printf '%s' '$bootstrapEncoded' | base64 -d > `"`$work/bootstrap.py`""),
     ("python3 -I -B `"`$work/bootstrap.py`" '$encoded' `"`$work`""),
     'chmod 400 "$work"/*.py "$work/input.json"',
     ("timeout --signal=TERM --kill-after=180s 1200s env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=`"`$work`" TMPDIR=`"`$work`" LANG=C.UTF-8 python3 -I -B `"`$work/source_loader.py`" `"`$work`" rollout_engine --tokyo --source $source$applyArg < `"`$work/input.json`""))
 $parameters = @{ executionTimeout = @('1500'); commands = $commands } | ConvertTo-Json -Compress -Depth 5
+$parameterBytes = [Text.Encoding]::UTF8.GetByteCount($parameters)
+if ($parameterBytes -gt 30000 -or $parameters.Length -gt 30000) { throw 'Complete SSM parameters exceed native command bound.' }
 $latest = @(& git -C $repo ls-remote origin refs/heads/main)
 if ($LASTEXITCODE -ne 0 -or $latest.Count -ne 1 -or ($latest[0] -split '\s+')[0] -cne $source) { throw 'Canonical main advanced before SSM; repeat source acceptance.' }
 $command = (& $aws ssm send-command --profile $rolloutProfile --region $region --instance-ids $instance --document-name AWS-RunShellScript --comment "Kanz four-policy qualification $source" --parameters $parameters --query Command.CommandId --output text 2>$null).Trim()

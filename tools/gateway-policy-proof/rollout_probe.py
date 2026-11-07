@@ -121,7 +121,36 @@ def running_unready(actual, desired, verified_image_id):
     return address
 
 
-def endpoint_boundary(slices, addresses, require_absent=False):
+def pod_addresses(actual):
+    status = actual.get("status")
+    if not isinstance(status, dict):
+        return None
+    primary = status.get("podIP", "")
+    entries = status.get("podIPs")
+    if entries is None:
+        entries = []
+    if not isinstance(primary, str) or not isinstance(entries, list) or len(entries) > 2:
+        raise ValueError("invalid Pod address inventory")
+    values = []
+    for item in entries:
+        if not isinstance(item, dict) or set(item) != {"ip"}:
+            raise ValueError("invalid Pod address inventory")
+        values.append(item["ip"])
+    if primary:
+        values.append(primary)
+    elif values:
+        raise ValueError("invalid Pod address inventory")
+    if any(not isinstance(v, str) or not 1 <= len(v) <= 45 or "%" in v for v in values):
+        raise ValueError("invalid Pod address inventory")
+    addresses = sorted({str(ipaddress.ip_address(v)) for v in values})
+    if entries and primary not in [item["ip"] for item in entries]:
+        raise ValueError("invalid Pod address inventory")
+    if not addresses and status.get("phase") != "Pending":
+        return None
+    return addresses
+
+
+def endpoint_boundary(slices, addresses, require_absent=False, owned_uids=()):
     if not isinstance(slices, list) or len(slices) > 512:
         raise ValueError("EndpointSlice inventory exceeds bound")
     for item in slices:
@@ -142,6 +171,11 @@ def endpoint_boundary(slices, addresses, require_absent=False):
                     or any(not isinstance(v, str) or not 1 <= len(v) <= 253 for v in values)
                     or not isinstance(conditions, dict)):
                 raise ValueError("invalid EndpointSlice shape")
+            target = endpoint.get("targetRef")
+            if target is not None and not isinstance(target, dict):
+                raise ValueError("invalid endpoint target reference")
+            if require_absent and target is not None and target.get("uid") in owned_uids:
+                raise ValueError("owned Pod still referenced by EndpointSlice")
             if set(values) & set(addresses):
                 if require_absent or conditions.get("ready") is not False:
                     raise ValueError("probe may participate in Service routing")

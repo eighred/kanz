@@ -71,6 +71,24 @@ bytecode caches and local standard-library shadows therefore cannot replace
 those inputs. Existing caches are preserved. The remote six-file bundle retains
 the 20 KB encoded and 512 KiB expansion limits; this is source custody, not an
 operating-system sandbox or attestation of the installed Python toolchain.
+The original JSON/source bytes use one shared XZ codec (LZMA2 preset 6,
+1 MiB dictionary, CRC64). Isolated host and remote Python must provide `lzma`;
+missing support refuses before remote scratch creation, with no installation or
+fallback. The decoder allocation budget is 16 MiB, not a total Python RSS limit.
+Decoding requires complete single-stream
+EOF with no trailing bytes, and retains the 64 KiB per-file limit. The complete
+SSM parameter JSON is also limited to 30,000 UTF-8 bytes/characters to reserve
+space for the Windows native command line. The Linux transaction fixture runs
+the same decoder and malformed-stream controls as a mandatory additional case.
+
+Probe custody binds UID and nonce before associating any observed address,
+including addresses seen before CRI/spec qualification. Receipts retain the
+bounded union of observed canonical addresses and owned UIDs after deletion.
+Malformed or overflowing history remains uncertain even after a later normal
+read. Cleanup still deletes a demonstrably owned Pod by UID/resourceVersion,
+but cannot report verified cleanup with unresolved address custody. Endpoint
+checks cover all observed addresses and owned UID references, not unknowable
+historical addresses. Replacement objects are never deleted.
 
 The owned set is the three shared API ingress policies and
 `allow-gateway-runtime-egress`. The only accepted older egress shape omits the
