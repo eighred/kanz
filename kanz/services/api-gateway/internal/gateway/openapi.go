@@ -6,15 +6,13 @@ import (
 
 // OpenAPIHandler serves the gateway's OpenAPI 3.0 description at /openapi.json
 // (API-01c "OpenAPI emit"). The doc is a static, hand-maintained contract for
-// the four read endpoints — emitted so clients/tooling get a machine-readable
-// surface without the grpc-gateway codegen pipeline. Response schemas are
-// described as opaque objects (the concrete shapes are the query.v1 protos,
-// referenced by name) to keep the doc small and stable.
+// risk read endpoints. Payload schemas come from the same protobuf descriptors
+// used by the REST transcoder; adding a field cannot leave an opaque DTO behind.
 func OpenAPIHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(openAPIDoc))
+		_, _ = w.Write(riskOpenAPIDoc)
 	}
 }
 
@@ -31,11 +29,6 @@ const openAPIDoc = `{
       "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }
     },
     "schemas": {
-      "ExposureResponse": { "type": "object", "description": "query.v1.ExposureResponse (protojson)" },
-      "MeasuresResponse": { "type": "object", "description": "query.v1.MeasuresResponse (protojson)" },
-      "EvaluateScenarioRequest": { "type": "object", "description": "query.v1.EvaluateScenarioRequest (protojson)" },
-      "EvaluateScenarioResponse": { "type": "object", "description": "query.v1.EvaluateScenarioResponse (protojson)" },
-      "HealthResponse": { "type": "object", "description": "query.v1.HealthResponse (protojson)" },
       "Error": { "type": "object", "properties": { "error": { "type": "string" } } }
     }
   },
