@@ -122,7 +122,7 @@ def probe_diagnostic(text, mode, source):
 def admin_diagnostic(text, source):
     """Retain only closed counters/categories, never broker errors or inputs."""
     value=json.loads(text,object_pairs_hook=image_custody.strict)
-    if not isinstance(value,dict) or set(value)!={'version','receipt','error'} or value['version']!=source:
+    if not isinstance(value,dict) or set(value)-{'version','receipt','error','failure_code'} or not {'version','receipt','error'}<=set(value) or value['version']!=source:
         raise ValueError('admin diagnostic identity differs')
     category=value['error']
     if category not in ('input-refused','resource-conflict','resource-missing','broker-unavailable'):
@@ -133,6 +133,11 @@ def admin_diagnostic(text, source):
     if not isinstance(receipt,dict) or set(receipt)!=set(counters+flags+('expected_cluster_id','mode','manifest_sha256')):
         raise ValueError('admin diagnostic receipt shape')
     result={'category':category}
+    if 'failure_code' in value:
+        code=value['failure_code']
+        if not isinstance(code,str) or (code not in ('deadline','cancelled','eof','timeout','network','unknown') and re.fullmatch(r'kafka-(?:-1|[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])',code) is None):
+            raise ValueError('admin failure code refused')
+        result['failure_code']=code
     for key in counters:
         if type(receipt[key]) is not int or not 0<=receipt[key]<=256:
             raise ValueError('admin diagnostic counter bound')

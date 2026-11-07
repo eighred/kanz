@@ -18,6 +18,10 @@ class TopologyTest(unittest.TestCase):
         self.assertEqual(result,dict(category='broker-unavailable',verified_topics=0,missing_topics=60,
                                     verified_acls=0,topic_attempts=1,acl_attempts=0,partial_or_unknown=True,complete=False))
         self.assertNotIn('SECRET',json.dumps(result))
+        coded=dict(value,failure_code='kafka-31')
+        self.assertEqual(qualify.admin_diagnostic(json.dumps(coded),'a'*40)['failure_code'],'kafka-31')
+        for code in ('SECRET','kafka-128','kafka--2',True):
+            with self.assertRaises(ValueError):qualify.admin_diagnostic(json.dumps(dict(value,failure_code=code)),'a'*40)
         for mutate in (lambda x:x.update(error='SECRET'),lambda x:x.update(version='b'*40),
                        lambda x:x['receipt'].update(topic_attempts=True),lambda x:x['receipt'].update(topic_attempts=257),
                        lambda x:x['receipt'].update(complete='SECRET'),lambda x:x['receipt'].update(extra='SECRET')):

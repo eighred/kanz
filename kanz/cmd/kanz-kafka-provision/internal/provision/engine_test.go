@@ -86,6 +86,24 @@ func testPlan(t *testing.T) Plan {
 	return p
 }
 
+func TestBrokerFailureCodeNeverCopiesErrorText(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		code string
+	}{
+		{kafka.ClusterAuthorizationFailed, "kafka-31"}, {context.DeadlineExceeded, "deadline"},
+		{errors.New("secret-error-sentinel"), "unknown"},
+	} {
+		err := brokerCause{tc.err}
+		if FailureCode(err) != tc.code || err.Error() != ErrBroker.Error() || !errors.Is(err, ErrBroker) {
+			t.Fatal("closed broker classification differs")
+		}
+	}
+	if FailureCode(ErrInput) != "" || FailureCode(nil) != "" {
+		t.Fatal("non-broker error classified")
+	}
+}
+
 func TestApplyReadsAllBeforeGrantsAndRerunsWithoutWrites(t *testing.T) {
 	p := testPlan(t)
 	a := &fakeAdmin{clusterID: "cluster-a", topics: map[string]Topic{}}

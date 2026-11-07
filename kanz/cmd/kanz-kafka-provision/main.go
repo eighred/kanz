@@ -25,9 +25,10 @@ import (
 )
 
 type result struct {
-	Version string            `json:"version"`
-	Receipt provision.Receipt `json:"receipt"`
-	Error   string            `json:"error,omitempty"`
+	Version     string            `json:"version"`
+	Receipt     provision.Receipt `json:"receipt"`
+	Error       string            `json:"error,omitempty"`
+	FailureCode string            `json:"failure_code,omitempty"`
 }
 
 // Check the presented identity on every TLS certificate callback, including
@@ -58,7 +59,7 @@ func main() {
 			category = "resource-missing"
 		}
 	}
-	if e := json.NewEncoder(os.Stdout).Encode(result{Version: version.String(), Receipt: r, Error: category}); e != nil {
+	if e := json.NewEncoder(os.Stdout).Encode(result{Version: version.String(), Receipt: r, Error: category, FailureCode: provision.FailureCode(err)}); e != nil {
 		os.Exit(1)
 	}
 	if err != nil {

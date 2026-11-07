@@ -3,10 +3,48 @@ package provision
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"strconv"
 
 	"github.com/segmentio/kafka-go"
 )
+
+// Keep the underlying observation available for closed classification without
+// making a broker's free-form error text part of the public error or receipt.
+type brokerCause struct{ cause error }
+
+func (e brokerCause) Error() string   { return ErrBroker.Error() }
+func (e brokerCause) Unwrap() []error { return []error{ErrBroker, e.cause} }
+
+// FailureCode projects only a bounded protocol code or fixed transport class.
+func FailureCode(err error) string {
+	var cause brokerCause
+	if !errors.As(err, &cause) {
+		return ""
+	}
+	var code kafka.Error
+	if errors.As(cause.cause, &code) && code >= -1 && code <= 127 {
+		return "kafka-" + strconv.Itoa(int(code))
+	}
+	if errors.Is(cause.cause, context.DeadlineExceeded) {
+		return "deadline"
+	}
+	if errors.Is(cause.cause, context.Canceled) {
+		return "cancelled"
+	}
+	if errors.Is(cause.cause, io.EOF) {
+		return "eof"
+	}
+	var network net.Error
+	if errors.As(cause.cause, &network) {
+		if network.Timeout() {
+			return "timeout"
+		}
+		return "network"
+	}
+	return "unknown"
+}
 
 var (
 	ErrBroker   = errors.New("broker observation unavailable")
@@ -212,7 +250,13 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (b
 
 func missingACLs(ctx context.Context, api Admin, p Plan) ([]kafka.ACLEntry, error) {
 	r, err := api.DescribeACLs(ctx, &kafka.DescribeACLsRequest{Filter: kafka.ACLFilter{ResourceTypeFilter: kafka.ResourceTypeAny, ResourcePatternTypeFilter: kafka.PatternTypeAny, PrincipalFilter: p.Principal, Operation: kafka.ACLOperationTypeAny, PermissionType: kafka.ACLPermissionTypeAny}})
-	if err != nil || r == nil || r.Error != nil || len(r.Resources) > 6 {
+	if err != nil {
+		return nil, brokerCause{err}
+	}
+	if r != nil && r.Error != nil {
+		return nil, brokerCause{r.Error}
+	}
+	if r == nil || len(r.Resources) > 6 {
 		return nil, ErrBroker
 	}
 	want := make(map[kafka.ACLEntry]bool)
