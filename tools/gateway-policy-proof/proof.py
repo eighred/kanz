@@ -189,6 +189,8 @@ def qualify_union(k, policies, labels, report):
     against the fresh nonce, then deletes by observed UID/resourceVersion.
     """
     nonce = uuid.uuid4().hex
+    network = network_fixture()
+    network.selector_independent(policies, labels)
     namespaces = (SERVICES, OBS, OUTSIDE)
     for namespace in namespaces:
         if k('get', 'namespace', namespace, '--ignore-not-found', '-o', 'name').strip():
@@ -219,14 +221,14 @@ def qualify_union(k, policies, labels, report):
             objects.extend([{'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': 'scripts', 'namespace': namespace},
                              'data': {p: (HERE / p).read_text(encoding='utf-8') for p in ('listener.py', 'probe.py', 'network_observation.py')}}])
         for target, ports in {**TARGETS, 'api-gateway': (8080,)}.items():
-            objects.append(pod(target, SERVICES, labels[target], ports))
+            objects.append(pod(target, SERVICES, {**labels[target], network.OWNER: nonce}, ports))
             objects.append({'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': target, 'namespace': SERVICES},
                             'spec': {'selector': {'app': target}, 'ports': [
                                 {'name': 'p' + str(port), 'port': port, 'targetPort': port} for port in ports]}})
         for peer, (namespace, podname) in peers.items():
             if peer == 'api-gateway':
                 continue
-            objects.append(pod(podname, namespace, labels.get(peer, {'app': 'api-gateway' if peer == 'spoof-gateway' else peer})))
+            objects.append(pod(podname, namespace, {**labels.get(peer, {'app': 'api-gateway' if peer == 'spoof-gateway' else peer}), network.OWNER: nonce}))
         apply(objects)
         for namespace in (SERVICES, OBS, OUTSIDE):
             k('-n', namespace, 'wait', '--for=condition=Ready', 'pod', '--all', '--timeout=120s')
@@ -275,20 +277,19 @@ def qualify_union(k, policies, labels, report):
                 report['observations'][case] = item
         report['stage'] = 'baseline'
         phase('baseline')
-        network = network_fixture()
         report['networkControls'] = {}
         probe('api-gateway', 'accounting', 'pod', 'api', 'allowed')
         try:
-            report['networkControls']['closed'] = network.qualify(k, peers, endpoints, IMAGE, 'closed')
+            report['networkControls']['closed'] = network.qualify(k, peers, endpoints, IMAGE, 'closed', nonce)
         finally:
             probe('api-gateway', 'accounting', 'pod', 'api', 'allowed')
-        report['networkControls']['no_policy'] = network.qualify(k, peers, endpoints, IMAGE, 'no_policy')
+        report['networkControls']['no_policy'] = network.qualify(k, peers, endpoints, IMAGE, 'no_policy', nonce)
         report['stage'] = 'enforced'
         apply(policies)
         policy_readback(policies)
         report['initialPolicyReadback'] = True
         phase('enforced')
-        report['networkControls']['enforced'] = network.qualify(k, peers, endpoints, IMAGE, 'enforced')
+        report['networkControls']['enforced'] = network.qualify(k, peers, endpoints, IMAGE, 'enforced', nonce)
         report['stage'] = 'removal_control'
         removed = next(p for p in policies if p['metadata']['name'] == POLICY_NAMES['accounting'])
         report['policyRemovalSHA256'] = digest(removed)

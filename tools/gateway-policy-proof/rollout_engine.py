@@ -133,8 +133,25 @@ class Probes:
     def check(self):
         services = self.services()
         controllers = self.controllers()
+        inventory = json.loads(self.k("get", "pods", "-A", "-l", probe.OWNER + "=" + self.nonce, "-o", "json"))
+        items = inventory.get("items") if isinstance(inventory, dict) else None
+        expected = {(p["namespace"], p["name"]) for p in self.owned}
+        if not isinstance(items, list) or len(items) != len(self.owned):
+            raise tx.Refusal("probe inventory count differs")
+        pods = {}
+        for obj in items:
+            meta = obj.get("metadata", {}) if isinstance(obj, dict) else {}
+            if (not isinstance(meta, dict) or not isinstance(meta.get("namespace"), str)
+                    or not isinstance(meta.get("name"), str) or not isinstance(meta.get("labels"), dict)):
+                raise tx.Refusal("malformed probe inventory")
+            key = (meta["namespace"], meta["name"])
+            if key in pods:
+                raise tx.Refusal("duplicate probe inventory key")
+            pods[key] = obj
+        if set(pods) != expected:
+            raise tx.Refusal("probe inventory keys differ")
         for entry in self.owned:
-            obj = json.loads(self.k("-n", entry["namespace"], "get", "pod", entry["name"], "-o", "json"))
+            obj = pods[(entry["namespace"], entry["name"])]
             self.observe(entry, obj)
             probe.service_boundary(services, entry["namespace"], entry["desired"]["metadata"]["labels"])
             probe.controller_boundary(controllers, entry["namespace"], entry["desired"]["metadata"]["labels"])

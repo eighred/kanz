@@ -157,6 +157,15 @@ class NetworkFramingTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             declaration(wrapper, {"source_loader.py": b"\xff"})
 
+    def test_actual_checkout_geometry_is_mandatory(self):
+        source = __import__("inspect").getsource(type(self).test_actual_wrappers_all_96_source_variants)
+        markers = ['["git", "rev-parse", "HEAD"]', 'for variant in [*range(16), "checkout"]:',
+                   'checkout if variant == "checkout" else digest("source")[:40]', 'self.assertEqual(counts, 102)']
+        def valid(value): return all(marker in value for marker in markers)
+        self.assertTrue(valid(source))
+        for marker in markers:
+            self.assertFalse(valid(source.replace(marker, "removed")))
+
     @unittest.skipUnless(os.environ.get("KANZ_REQUIRE_NETWORK_FRAMING") == "1", "dedicated actual PowerShell geometry gate")
     def test_actual_wrappers_all_96_source_variants(self):
         import yaml
@@ -177,6 +186,8 @@ class NetworkFramingTests(unittest.TestCase):
         self.assertEqual(len(workloads), 5)
         self.assertEqual(len(policies), 11)
         def quoted(value): return "'" + str(value).replace("'", "''") + "'"
+        checkout = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, timeout=10).strip()
+        self.assertRegex(checkout, r"^[0-9a-f]{40}$")
         counts = 0
         for mode, filename in WRAPPERS.items():
             wrapper = (ROOT / "tools" / filename).read_text(encoding="utf-8")
@@ -184,7 +195,8 @@ class NetworkFramingTests(unittest.TestCase):
             stage = wrapper[wrapper.index("$bundle ="):wrapper.index("$latest =")]
             maxima = {key: 0 for key in ("encoded", "expanded", "parameters", "characters")}
             for ending in ("\n", "\r\n"):
-                for variant in range(16):
+                # Preserve all 96 synthetic variants and add six actual-checkout cases.
+                for variant in [*range(16), "checkout"]:
                     def digest(label): return hashlib.sha256((str(variant) + label).encode()).hexdigest()
                     ordered_files = re.findall("'([^']+)'", re.search(r"foreach \(\$name in @\((.*?)\)\)", wrapper).group(1))
                     source_files = {name: (HERE / name).read_text(encoding="utf-8").replace("\n", ending) for name in ordered_files}
@@ -197,7 +209,7 @@ class NetworkFramingTests(unittest.TestCase):
                     provenance = {"command": "21d730ab-18c9-43ba-9427-522d557b6f2c", "instance": "i-0ee1235614219f089",
                         "oldSource": "0769d36cf857993284109d03868393a0c7e0d7c8", "directory": "/var/tmp/kanz-gateway-policy-nu1ezqwo",
                         **{key: digest(key) for key in ("commandSHA256", "sourceSHA256", "bundleSHA256", "originalPoliciesSHA256", "originalWorkloadsSHA256")}}
-                    data = {"files": source_files, "source": digest("source")[:40], "policies": policies, "workloads": workloads,
+                    data = {"files": source_files, "source": checkout if variant == "checkout" else digest("source")[:40], "policies": policies, "workloads": workloads,
                             "identity": identity, "provenance": provenance, "literal": literal, "fixedSize": sum(map(len, fixed.values()))}
                     with tempfile.TemporaryDirectory() as directory:
                         inputs = Path(directory) / "inputs.json"
@@ -215,8 +227,8 @@ class NetworkFramingTests(unittest.TestCase):
                             self.assertLessEqual(sizes[key], limit)
                             maxima[key] = max(maxima[key], sizes[key])
                     counts += 1
-            print(json.dumps({"wrapper": mode, "variants": 32, "maxima": maxima}))
-        self.assertEqual(counts, 96)
+            print(json.dumps({"wrapper": mode, "variants": 34, "maxima": maxima}))
+        self.assertEqual(counts, 102)
 
 
 if __name__ == "__main__":

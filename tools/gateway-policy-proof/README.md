@@ -278,5 +278,16 @@ recovery reader and historical provenance remain unchanged. The transaction
 fixture independently reads the actual fsynced aggregate and checks its hash.
 Fixed loader/network source bytes travel in the checked bootstrap while the
 remaining closed module inventory stays compressed. Per-file, combined expanded,
-encoded and native command limits are unchanged; the mandatory 96-variant check
-executes the actual PowerShell serialization for LF and CRLF inputs.
+encoded and native command limits are unchanged; the mandatory check retains all
+96 variants and adds six actual-checkout-SHA cases, executing the PowerShell
+serialization for LF and CRLF inputs. Payload-first serialization and a fixed
+LZMA2 encoder profile preserve exact source bytes and the existing decoder.
+Passing these samples does not guarantee future source will fit: every operator
+invocation still refuses an oversized bundle before sending it.
+
+Each live probe check uses one exact nonce-selected Pod inventory, then applies
+the existing UID/nonce, specification, image and never-ready checks to every Pod.
+Fixture snapshots similarly require exactly eight owned listeners/callers. Their
+ownership label is permitted only when no rendered policy references its key;
+that equivalence check precedes resource creation. Observation cadence and
+individual UID/resourceVersion cleanup are unchanged.
