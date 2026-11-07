@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Source-shape guard; actual readonly registry/signature/ABI proof is separate.
@@ -49,8 +51,43 @@ func rustAuditConsumerBoundary(c, installer, workflow string) error {
 	if strings.Contains(workflow, "packages: write") || strings.Contains(workflow, "id-token: write") {
 		return fmt.Errorf("consumer write authority")
 	}
-	if strings.Index(workflow, "sigstore/cosign-installer@") >= strings.Index(workflow, "name: Install pinned Rust evidence tools") {
-		return fmt.Errorf("cosign setup order")
+	var parsed struct {
+		Jobs map[string]struct {
+			If       any `yaml:"if"`
+			Continue any `yaml:"continue-on-error"`
+			Steps    []struct {
+				Name     string `yaml:"name"`
+				Uses     string `yaml:"uses"`
+				Run      string `yaml:"run"`
+				If       any    `yaml:"if"`
+				Continue any    `yaml:"continue-on-error"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(workflow), &parsed); err != nil {
+		return err
+	}
+	job, ok := parsed.Jobs["compatibility"]
+	if !ok || job.If != nil || job.Continue != nil {
+		return fmt.Errorf("compatibility must be mandatory")
+	}
+	setup, consumer := -1, -1
+	for i, step := range job.Steps {
+		if strings.HasPrefix(step.Uses, "sigstore/cosign-installer@") {
+			if setup != -1 || step.Uses != "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6" || step.If != nil || step.Continue != nil || step.Run != "" {
+				return fmt.Errorf("compatibility cosign setup differs")
+			}
+			setup = i
+		}
+		if step.Name == "Install pinned Rust evidence tools" {
+			if consumer != -1 || step.If != nil || step.Continue != nil || step.Uses != "" || step.Run != "bash .github/scripts/install-rust-audit.sh" {
+				return fmt.Errorf("compatibility consumer differs")
+			}
+			consumer = i
+		}
+	}
+	if setup < 0 || consumer <= setup {
+		return fmt.Errorf("compatibility cosign must precede consumer")
 	}
 	return nil
 }
@@ -92,11 +129,68 @@ func TestRustAuditConsumerBoundary(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := append([]string(nil), inputs...)
-			v[tc.file] = strings.Replace(v[tc.file], tc.old, tc.new, 1)
+			if tc.name == "setup" {
+				// Mutate the owning job, retaining the unrelated owner installer.
+				start := strings.Index(v[2], "\n  compatibility:")
+				if start < 0 {
+					t.Fatal("compatibility missing")
+				}
+				v[2] = v[2][:start] + strings.Replace(v[2][start:], tc.old, tc.new, 1)
+			} else {
+				v[tc.file] = strings.Replace(v[tc.file], tc.old, tc.new, 1)
+			}
 			if v[tc.file] == inputs[tc.file] {
 				t.Fatal("mutation missed")
 			}
 			if rustAuditConsumerBoundary(v[0], v[1], v[2]) == nil {
+				t.Fatal("mutation accepted")
+			}
+		})
+	}
+}
+
+func TestRustAuditConsumerJobComposition(t *testing.T) {
+	root := filepath.Dir(moduleRoot(t))
+	read := func(path string) string {
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.ReplaceAll(string(b), "\r\n", "\n")
+	}
+	c, installer, workflow := read("tools/rust-audit-tools/consume.py"), read(".github/scripts/install-rust-audit.sh"), read(".github/workflows/architecture-migration.yml")
+	start := strings.Index(workflow, "\n  compatibility:")
+	if start < 0 {
+		t.Fatal("compatibility missing")
+	}
+	prefix, job := workflow[:start], workflow[start:]
+	setup := "      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2\n"
+	consumer := "      - name: Install pinned Rust evidence tools\n        run: bash .github/scripts/install-rust-audit.sh\n"
+	if strings.Count(job, setup) != 1 || strings.Count(job, consumer) != 1 {
+		t.Fatal("mutation anchors differ")
+	}
+	// A second unrelated installer is valid but cannot satisfy this job's prerequisite.
+	unrelated := "\n  unrelated:\n    steps:\n" + setup
+	if err := rustAuditConsumerBoundary(c, installer, workflow+unrelated); err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]string{
+		"removed-with-second-installer": strings.Replace(job, setup, "", 1),
+		"reordered":                     strings.Replace(strings.Replace(job, setup, "", 1), consumer, consumer+setup, 1),
+		"setup-if":                      strings.Replace(job, setup, setup+"        if: false\n", 1),
+		"setup-continue":                strings.Replace(job, setup, setup+"        continue-on-error: true\n", 1),
+		"consumer-if":                   strings.Replace(job, consumer, consumer+"        if: false\n", 1),
+		"consumer-continue":             strings.Replace(job, consumer, consumer+"        continue-on-error: true\n", 1),
+		"consumer-command":              strings.Replace(job, "run: bash .github/scripts/install-rust-audit.sh", "run: echo skipped", 1),
+		"job-if":                        strings.Replace(job, "  compatibility:\n", "  compatibility:\n    if: false\n", 1),
+		"job-continue":                  strings.Replace(job, "  compatibility:\n", "  compatibility:\n    continue-on-error: true\n", 1),
+	}
+	for name, mutated := range mutations {
+		t.Run(name, func(t *testing.T) {
+			if mutated == job {
+				t.Fatal("mutation missed")
+			}
+			if rustAuditConsumerBoundary(c, installer, prefix+mutated+unrelated) == nil {
 				t.Fatal("mutation accepted")
 			}
 		})
