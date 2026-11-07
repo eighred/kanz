@@ -28,6 +28,9 @@ def pids_profile(args, env):
 def startup_error(value):
     if not isinstance(value, str) or not value or len(value) > 8192:
         return "unknown"
+    # Moby local/config.go validateConfig: default compression requires rotation.
+    if "compression cannot be enabled when max file count is 1" in value:
+        return "local_log_compression_without_rotation"
     lower = value.lower()
     for category, markers in (
             ("pids_task_limit", ("pids.max", "pids limit", "pids-limit", "task limit", "process limit")),

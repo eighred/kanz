@@ -115,7 +115,10 @@ class StorageSignalTests(unittest.TestCase):
         self.assertEqual(value["errnos"], [])
 
     def test_startup_error_categories_discard_messages_and_bound_numbers(self):
-        cases = (("runc: secret resource temporarily unavailable", "resource_unavailable"),
+        cases = (("failed to initialize logging driver: compression cannot be enabled when max file count is 1 secret", "local_log_compression_without_rotation"),
+                 ("compression cannot be enabled when max file count is 2", "other_runtime_error"),
+                 ("compression enabled max file count 1 secret", "other_runtime_error"),
+                 ("runc: secret resource temporarily unavailable", "resource_unavailable"),
                  ("EAGAIN secret", "resource_unavailable"),
                  ("secret pids.max reached", "pids_task_limit"),
                  ("secret task limit", "pids_task_limit"),
