@@ -17,7 +17,7 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 	if fmt.Sprintf("%x", sha256.Sum256([]byte(strings.ReplaceAll(recipe, "\r\n", "\n")))) != "5b6c36ac1369b2ba5d70a6c4144bb7fcde5af4e089836ccbf1e507dcaadbebd4" {
 		return fmt.Errorf("unreviewed source-free recipe")
 	}
-	if strings.Count(script, `"--platform", "linux/amd64"`) != 3 {
+	if strings.Count(script, `"--platform", "linux/amd64"`) != 2 {
 		return fmt.Errorf("both build and readback must select exact platform")
 	}
 	if strings.Contains(script, `"docker", "export"`) || strings.Contains(script, `"docker", "create"`) {
@@ -27,16 +27,22 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 	if readback < 0 || sign <= readback || verify <= sign {
 		return fmt.Errorf("keyless signing must follow verified registry bytes")
 	}
+	main := script[strings.Index(script, "def main():"):]
+	roundtrip, audit := strings.Index(main, "load_and_check_saved(image_bytes, image, files, temp, commit)"), strings.Index(main, "advisories = exercise(temp)")
+	if roundtrip < 0 || audit <= roundtrip {
+		return fmt.Errorf("read-only roundtrip must precede actual audit qualification")
+	}
 	for _, token := range []string{
-		`"--iidfile", str(iid), "-"]`,
-		`"--load", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--tag", workref`,
-		`or config != iid:`,
-		`run(build_command(temp, workref, commit), input=recipe)`,
+		`"--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata)`,
+		`run(build_command(archive, build_metadata, commit), input=recipe)`,
 		`compression=uncompressed,force-compression=true,oci-mediatypes=true,name=`,
-		`raise ValueError("OCI diagnostic only: producer qualification remains required")`,
-		`diagnose(probe, commit)`,
-		`desc.get("digest") != root`,
-		`not 0 < desc["size"] <= 1024 * 1024`,
+		`local_tag(commit), "-"]`,
+		`md["digest"] != expected_root`,
+		`validate_build_metadata(metadata_bytes, graph_descriptor, image)`,
+		`load_and_check_saved(image_bytes, image, files, temp, commit)`,
+		`extract_saved(read_bounded(saved, MAX_PAYLOAD), image, temp, commit) != (image, files)`,
+		`set(entries) != {"oci-layout", "index.json", name, config_name, layer_name}`,
+		`annotations.get("io.containerd.image.name") != "docker.io/library/" + local_tag(commit)`,
 		`m.get("RepoTags") != [local_tag(commit)]`,
 		`os.environ.get("GITHUB_REF") != "refs/heads/main"`,
 		`proof["image_tar_sha256"] != hashlib.sha256(image_bytes).hexdigest()`,
@@ -60,7 +66,7 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 			return fmt.Errorf("producer control missing: %s", token)
 		}
 	}
-	for _, token := range []string{`"--mount"`, `"--secret"`, `"--cache-to"`, `"--no-fetch"`, `"--offline"`} {
+	for _, token := range []string{`"--iidfile"`, `diagnose(probe`, `"--load"`, `"--mount"`, `"--secret"`, `"--cache-to"`, `"--no-fetch"`, `"--offline"`} {
 		if strings.Contains(script, token) {
 			return fmt.Errorf("producer context/secret/cache/audit bypass")
 		}
@@ -148,12 +154,12 @@ func TestRustAuditToolProducerBoundary(t *testing.T) {
 		{"source-copy", 0, "FROM scratch", "COPY kanz/ /private/\nFROM scratch"},
 		{"version-change", 0, "--version 0.22.2", "--version 0.22.1"},
 		{"source-stamp", 0, "org.opencontainers.image.revision=$SOURCE_SHA", "org.opencontainers.image.revision=unknown"},
-		{"build-identity", 1, `or config != iid:`, `or False:`},
-		{"omit-probe", 1, `diagnose(probe, commit)`, `pass`},
-		{"build-root", 1, `desc.get("digest") != root`, `False`},
+		{"build-identity", 1, `validate_build_metadata(metadata_bytes, graph_descriptor, image)`, `pass`},
+		{"omit-roundtrip", 1, `            load_and_check_saved(image_bytes, image, files, temp, commit)`, `            pass`},
+		{"build-root", 1, `md["digest"] != expected_root`, `False`},
 		{"attestation", 1, `"--provenance=false"`, `"--provenance=true"`},
 		{"saved-tag", 1, `m.get("RepoTags") != [local_tag(commit)]`, `False`},
-		{"repo-context", 1, `"--iidfile", str(iid), "-"`, `"--iidfile", str(iid), "."`},
+		{"repo-context", 1, `local_tag(commit), "-"]`, `local_tag(commit), "."]`},
 		{"mount-source", 1, `"--platform", "linux/amd64"`, `"--mount", "source=.,target=/src"`},
 		{"layer-hash", 1, `"sha256:" + hashlib.sha256(layer).hexdigest()`, `"sha256:" + "0" * 64`},
 		{"multiple-layers", 1, `len(m["Layers"]) != 1`, `False`},

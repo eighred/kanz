@@ -122,16 +122,51 @@ def local_tag(commit):
     return "kanz-rust-audit-tools-local:" + commit
 
 
-def build_identity(raw, iid):
+def validate_config(config, layer, commit):
+    if (config["os"], config["architecture"]) != ("linux", "amd64") or config["config"]["Labels"].get("org.opencontainers.image.revision") != commit:
+        raise ValueError("image platform/source mismatch")
+    diff = "sha256:" + hashlib.sha256(layer).hexdigest()
+    if config["rootfs"] != {"type": "layers", "diff_ids": [diff]}:
+        raise ValueError("uncompressed final layer identity differs")
+    history = [h for h in config["history"] if not h.get("empty_layer", False)]
+    if len(history) != 1 or not history[0]["created_by"].startswith("COPY /payload/ /"):
+        raise ValueError("unexpected nonempty build history")
+    return diff
+
+
+def oci_layer(raw, expected_root, commit):
+    entries = tar_files(raw, 8)
+    if metadata(entries["oci-layout"]) != {"imageLayoutVersion": "1.0.0"}:
+        raise ValueError("unsupported OCI layout")
+    index = metadata(entries["index.json"])
+    if type(index.get("schemaVersion")) is not int or index["schemaVersion"] != 2 or not isinstance(index.get("manifests"), list) or len(index["manifests"]) != 1:
+        raise ValueError("single OCI image required")
+    md = index["manifests"][0]
+    name = descriptor(md, entries, {"application/vnd.oci.image.manifest.v1+json"})
+    if md["digest"] != expected_root:
+        raise ValueError("OCI root identity differs")
+    annotations = md.get("annotations", {})
+    if annotations.get("io.containerd.image.name") != "docker.io/library/" + local_tag(commit) or annotations.get("org.opencontainers.image.ref.name") != commit:
+        raise ValueError("OCI local image name differs")
+    graph = metadata(entries[name])
+    if type(graph.get("schemaVersion")) is not int or graph["schemaVersion"] != 2 or graph.get("mediaType") != "application/vnd.oci.image.manifest.v1+json" or not isinstance(graph.get("layers"), list) or len(graph["layers"]) != 1:
+        raise ValueError("one OCI image layer required")
+    config_name = descriptor(graph["config"], entries, {"application/vnd.oci.image.config.v1+json"})
+    layer_name = descriptor(graph["layers"][0], entries, {"application/vnd.oci.image.layer.v1.tar"})
+    if set(entries) != {"oci-layout", "index.json", name, config_name, layer_name}:
+        raise ValueError("unreachable OCI archive bytes")
+    layer = entries[layer_name]
+    validate_config(metadata(entries[config_name]), layer, commit)
+    return graph["config"]["digest"], layer, {k: md[k] for k in ("digest", "size", "mediaType")}
+
+
+def validate_build_metadata(raw, graph_descriptor, image):
     value = metadata(raw)
-    root, config = value.get("containerimage.digest"), value.get("containerimage.config.digest")
-    valid = [bool(isinstance(v, str) and re.fullmatch("sha256:[0-9a-f]{64}", v)) for v in (root, config, iid)]
-    if not all(valid) or config != iid:
-        raise ValueError("build identity refusal: root_valid=%s config_valid=%s iid_valid=%s root_equals_iid=%s config_equals_iid=%s" % (*valid, root == iid, config == iid))
     desc = value.get("containerimage.descriptor")
-    if not isinstance(desc, dict) or desc.get("digest") != root or desc.get("mediaType") not in {"application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"} or type(desc.get("size")) is not int or not 0 < desc["size"] <= 1024 * 1024:
-        raise ValueError("build manifest descriptor differs")
-    return root, config
+    if not isinstance(desc, dict) or value.get("containerimage.digest") != graph_descriptor["digest"] or any(desc.get(k) != v or type(desc.get(k)) is not type(v) for k, v in graph_descriptor.items()):
+        raise ValueError("build metadata differs from verified OCI graph")
+    if "containerimage.config.digest" in value and value["containerimage.config.digest"] != image:
+        raise ValueError("optional build config identity differs")
 
 
 def saved_layer(raw, expected_image, commit):
@@ -149,14 +184,7 @@ def saved_layer(raw, expected_image, commit):
     if "sha256:" + hashlib.sha256(config_bytes).hexdigest() != expected_image:
         raise ValueError("saved configuration identity differs")
     config = metadata(config_bytes)
-    if (config["os"], config["architecture"]) != ("linux", "amd64") or config["config"]["Labels"].get("org.opencontainers.image.revision") != commit:
-        raise ValueError("image platform/source mismatch")
-    diff = "sha256:" + hashlib.sha256(layer).hexdigest()
-    if config["rootfs"] != {"type": "layers", "diff_ids": [diff]}:
-        raise ValueError("uncompressed final layer identity differs")
-    history = [h for h in config["history"] if not h.get("empty_layer", False)]
-    if len(history) != 1 or not history[0]["created_by"].startswith("COPY /payload/ /"):
-        raise ValueError("unexpected nonempty build history")
+    diff = validate_config(config, layer, commit)
     allowed = {"manifest.json", config_name, layer_name}
     # Current Docker saves may include the equivalent OCI graph. Verify every
     # descriptor and reject extra blobs/images rather than ignoring archive data.
@@ -180,6 +208,10 @@ def saved_layer(raw, expected_image, commit):
 
 def extract_saved(raw, expected_image, target, commit):
     layer = saved_layer(raw, expected_image, commit)
+    return extract_payload(layer, expected_image, target, commit)
+
+
+def extract_payload(layer, expected_image, target, commit):
     files = {}
     with tarfile.open(fileobj=io.BytesIO(layer), mode="r:") as tar:
         total = 0
@@ -268,72 +300,16 @@ def exercise(directory):
     return commits
 
 
-def build_command(temp, workref, commit):
-    iid, build_metadata = temp / "image.id", temp / "build.json"
-    return ["docker", "buildx", "build", "--load", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--tag", workref, "--platform", "linux/amd64", "--build-arg", "SOURCE_SHA=" + commit, "--iidfile", str(iid), "-"]
+def build_command(archive, build_metadata, commit):
+    return ["docker", "buildx", "build", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--platform", "linux/amd64", "--build-arg", "SOURCE_SHA=" + commit, "--output", "type=oci,dest=" + str(archive) + ",compression=uncompressed,force-compression=true,oci-mediatypes=true,name=" + local_tag(commit), "-"]
 
 
-def oci_probe_graph(raw, build_metadata):
-    entries = tar_files(raw, 8)
-    index = metadata(entries["index.json"])
-    manifests = index.get("manifests")
-    print(json.dumps({"diagnostic_only": True, "archive_entries": len(entries),
-                      "index_schema_two": type(index.get("schemaVersion")) is int and index["schemaVersion"] == 2,
-                      "manifest_count": len(manifests) if isinstance(manifests, list) and len(manifests) <= 32 else None}, sort_keys=True), flush=True)
-    if metadata(entries["oci-layout"]) != {"imageLayoutVersion": "1.0.0"} or type(index.get("schemaVersion")) is not int or index["schemaVersion"] != 2 or not isinstance(manifests, list) or len(manifests) != 1:
-        raise ValueError("single OCI probe manifest required")
-    md = manifests[0]
-    manifest_name = descriptor(md, entries, {"application/vnd.oci.image.manifest.v1+json"})
-    graph = metadata(entries[manifest_name])
-    layers = graph.get("layers")
-    print(json.dumps({"diagnostic_only": True,
-                      "manifest_schema_two": type(graph.get("schemaVersion")) is int and graph["schemaVersion"] == 2,
-                      "manifest_media_oci": graph.get("mediaType") == "application/vnd.oci.image.manifest.v1+json",
-                      "layer_count": len(layers) if isinstance(layers, list) and len(layers) <= 32 else None}, sort_keys=True), flush=True)
-    if type(graph.get("schemaVersion")) is not int or graph["schemaVersion"] != 2 or graph.get("mediaType") != "application/vnd.oci.image.manifest.v1+json" or not isinstance(layers, list) or len(layers) != 1:
-        raise ValueError("synthetic one-layer probe required")
-    config_name = descriptor(graph["config"], entries, {"application/vnd.oci.image.config.v1+json"})
-    layer_name = descriptor(layers[0], entries, {"application/vnd.oci.image.layer.v1.tar"})
-    config = metadata(entries[config_name])
-    payload = tar_files(entries[layer_name], 4)
-    expected = {"probe.txt": b"public-exporter-probe\n"}
-    history = config.get("history")
-    history = [h for h in history if not h.get("empty_layer", False)] if isinstance(history, list) else []
-    meta = metadata(build_metadata)
-    root, desc = meta.get("containerimage.digest"), meta.get("containerimage.descriptor")
-    desc = desc if isinstance(desc, dict) else {}
-    media = desc.get("mediaType")
-    media = media if media in {"application/vnd.oci.image.manifest.v1+json", "application/vnd.oci.image.index.v1+json"} else "unknown"
-    size = desc.get("size")
-    size = size if type(size) is int and 0 < size <= 1024 * 1024 else None
-    report = {"diagnostic_only": True, "layer_count": 1,
-              "config_platform_valid": config.get("os") == "linux" and config.get("architecture") == "amd64",
-              "config_diffid_matches": config.get("rootfs") == {"type": "layers", "diff_ids": [layers[0]["digest"]]},
-              "one_copy_history": len(history) == 1 and history[0].get("created_by", "").startswith("COPY "),
-              "exact_public_payload": payload == expected,
-              "closed_archive": set(entries) == {"index.json", "oci-layout", manifest_name, config_name, layer_name},
-              "root_equals_manifest": root == md["digest"],
-              "root_equals_index": root == "sha256:" + hashlib.sha256(entries["index.json"]).hexdigest(),
-              "descriptor_root_equal": desc.get("digest") == root,
-              "descriptor_media": media, "descriptor_size": size,
-              "descriptor_size_matches_manifest": size == len(entries[manifest_name]),
-              "descriptor_size_matches_index": size == len(entries["index.json"]),
-              "optional_config_matches": meta.get("containerimage.config.digest") == graph["config"]["digest"]}
-    print(json.dumps(report, sort_keys=True), flush=True)
-    if not all(report[k] for k in ("config_platform_valid", "config_diffid_matches", "one_copy_history", "exact_public_payload", "closed_archive")):
-        raise ValueError("synthetic probe config/layer/payload differs")
-    return report
-
-
-def diagnose(temp, commit):
-    # Synthetic exporter probe only; it cannot create a qualification receipt.
-    print(output(["docker", "version", "--format", "{{.Client.Version}}/{{.Server.Version}}"]), flush=True)
-    print(output(["docker", "buildx", "version"]), flush=True)
-    recipe = b'FROM scratch\nCOPY <<EOF /probe.txt\npublic-exporter-probe\nEOF\n'
-    archive, build_metadata = temp / "probe.tar", temp / "probe.json"
-    run(["docker", "buildx", "build", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--platform", "linux/amd64", "--output", "type=oci,dest=" + str(archive) + ",compression=uncompressed,force-compression=true,oci-mediatypes=true,name=" + local_tag(commit) + "-probe", "-"], input=recipe)
-    oci_probe_graph(read_bounded(archive, MAX_PAYLOAD), read_bounded(build_metadata, 1024 * 1024))
-    raise ValueError("OCI diagnostic only: producer qualification remains required")
+def load_and_check_saved(image_bytes, image, files, temp, commit):
+    run(["docker", "load"], input=image_bytes)
+    saved = temp / "loaded-image.tar"
+    run(["docker", "save", "--output", str(saved), local_tag(commit)])
+    if extract_saved(read_bounded(saved, MAX_PAYLOAD), image, temp, commit) != (image, files):
+        raise ValueError("loaded OCI payload roundtrip differs")
 
 
 def main():
@@ -347,19 +323,18 @@ def main():
     with tempfile.TemporaryDirectory() as temporary:
         temp = Path(temporary)
         if args.mode == "build":
-            probe = temp / "probe"
-            probe.mkdir()
-            diagnose(probe, commit)
             recipe = Path(__file__).with_name("Dockerfile").read_bytes()
-            iid = temp / "image.id"
             build_metadata = temp / "build.json"
-            workref = local_tag(commit)
+            archive = directory / "image.tar"
             # A text Dockerfile on stdin supplies NO filesystem build context.
-            run(build_command(temp, workref, commit), input=recipe)
-            root, image = build_identity(read_bounded(build_metadata, 1024 * 1024), read_bounded(iid, 128).decode().strip())
-            run(["docker", "save", "--output", str(directory / "image.tar"), workref])
-            image_bytes = read_bounded(directory / "image.tar", MAX_PAYLOAD)
-            image, files = extract_saved(image_bytes, image, temp, commit)
+            run(build_command(archive, build_metadata, commit), input=recipe)
+            metadata_bytes = read_bounded(build_metadata, 1024 * 1024)
+            root = metadata(metadata_bytes).get("containerimage.digest")
+            image_bytes = read_bounded(archive, MAX_PAYLOAD)
+            image, layer, graph_descriptor = oci_layer(image_bytes, root, commit)
+            validate_build_metadata(metadata_bytes, graph_descriptor, image)
+            image, files = extract_payload(layer, image, temp, commit)
+            load_and_check_saved(image_bytes, image, files, temp, commit)
             advisories = exercise(temp)
             proof = {"run": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "source": commit, "tree": output(["git", "rev-parse", "HEAD^{tree}"]), "image": image, "build_root": root, "manifest": manifest(commit), "files": files, "advisory_commits": advisories, "image_tar_sha256": sha(directory / "image.tar")}
             (directory / "proof.json").write_text(json.dumps(proof, sort_keys=True) + "\n", encoding="utf8")
@@ -377,10 +352,11 @@ def main():
             image_bytes = read_bounded(directory / "image.tar", MAX_PAYLOAD)
             if proof["tree"] != output(["git", "rev-parse", "HEAD^{tree}"]) or proof["source"] != commit or proof["manifest"] != manifest(commit) or proof["image_tar_sha256"] != hashlib.sha256(image_bytes).hexdigest():
                 raise ValueError("qualified image binding mismatch")
-            image, files = extract_saved(image_bytes, proof["image"], temp, commit)
-            run(["docker", "load"], input=image_bytes)
-            if files != proof["files"]:
+            image, layer, _ = oci_layer(image_bytes, proof["build_root"], commit)
+            image, files = extract_payload(layer, image, temp, commit)
+            if image != proof["image"] or files != proof["files"]:
                 raise ValueError("qualified payload changed")
+            load_and_check_saved(image_bytes, image, files, temp, commit)
             target = REPOSITORY + ":" + commit
             existing = subprocess.run(["crane", "digest", target], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
             if existing.returncode == 0:

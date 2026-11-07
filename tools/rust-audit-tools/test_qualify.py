@@ -61,8 +61,9 @@ class PayloadTests(unittest.TestCase):
             entries = {}
             c = blob(config_bytes, "application/vnd.oci.image.config.v1+json")
             l = blob(layer, "application/vnd.oci.image.layer.v1.tar")
-            graph = json.dumps({"schemaVersion": 2, "config": c, "layers": [l]}).encode()
+            graph = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": c, "layers": [l]}).encode()
             descriptor = blob(graph, "application/vnd.oci.image.manifest.v1+json")
+            descriptor["annotations"] = {"io.containerd.image.name": "docker.io/library/" + q.local_tag("a" * 40), "org.opencontainers.image.ref.name": "a" * 40}
             if fault == "oci-size": descriptor["size"] += 1
             if fault == "oci-media": descriptor["mediaType"] = "unknown"
             entries["index.json"] = json.dumps({"schemaVersion": 2, "manifests": [descriptor]}).encode()
@@ -115,52 +116,12 @@ class PayloadTests(unittest.TestCase):
         files = self.payload(); files["manifest.json"] = b'{"version":1,"version":1}'
         with self.assertRaises(ValueError): self.inspect(files)
 
-    def test_distinct_build_root_and_config(self):
-        root, config = "sha256:" + "a" * 64, "sha256:" + "b" * 64
-        value = {"containerimage.digest": root, "containerimage.config.digest": config,
-                 "containerimage.descriptor": {"digest": root, "mediaType": "application/vnd.oci.image.manifest.v1+json", "size": 500}}
-        self.assertEqual(q.build_identity(json.dumps(value).encode(), config), (root, config))
-        with self.assertRaises(ValueError): q.build_identity(json.dumps(value).encode(), root)
-        mutations = [
-            lambda m: m.update({"containerimage.digest": config, "containerimage.config.digest": root}),
-            lambda m: m.update({"containerimage.config.digest": "invalid"}),
-            lambda m: m.pop("containerimage.descriptor"),
-            lambda m: m["containerimage.descriptor"].update(digest=config),
-            lambda m: m["containerimage.descriptor"].update(mediaType="application/vnd.oci.image.index.v1+json"),
-            lambda m: m["containerimage.descriptor"].update(mediaType="unknown"),
-            lambda m: m["containerimage.descriptor"].update(size=True),
-            lambda m: m["containerimage.descriptor"].update(size=0),
-            lambda m: m["containerimage.descriptor"].update(size=1024 * 1024 + 1),
-        ]
-        for mutate in mutations:
-            bad = json.loads(json.dumps(value)); mutate(bad)
-            with self.assertRaises(ValueError): q.build_identity(json.dumps(bad).encode(), config)
-
-    def test_identity_diagnostic_is_closed(self):
-        with self.assertRaises(ValueError) as failure:
-            q.build_identity(b'{"containerimage.digest":"arbitrary-private-text"}', "sha256:" + "a" * 64)
-        self.assertEqual(str(failure.exception), "build identity refusal: root_valid=False config_valid=False iid_valid=True root_equals_iid=False config_equals_iid=False")
-
-    def test_synthetic_oci_probe_graph(self):
-        entries = {"oci-layout": b'{"imageLayoutVersion":"1.0.0"}'}
-        def blob(value, media):
-            raw = json.dumps(value).encode()
-            digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-            entries["blobs/sha256/" + digest[7:]] = raw
-            return {"digest": digest, "size": len(raw), "mediaType": media}
-        layer = io.BytesIO()
-        with tarfile.open(fileobj=layer, mode="w") as tar:
-            data = b"public-exporter-probe\n"
-            info = tarfile.TarInfo("probe.txt"); info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-        layer_raw = layer.getvalue()
-        ld = "sha256:" + hashlib.sha256(layer_raw).hexdigest()
-        entries["blobs/sha256/" + ld[7:]] = layer_raw
-        l = {"digest": ld, "size": len(layer_raw), "mediaType": "application/vnd.oci.image.layer.v1.tar"}
-        c = blob({"os": "linux", "architecture": "amd64", "rootfs": {"type": "layers", "diff_ids": [ld]}, "history": [{"created_by": "COPY inline /probe.txt"}]}, "application/vnd.oci.image.config.v1+json")
-        m = blob({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": c, "layers": [l]}, "application/vnd.oci.image.manifest.v1+json")
-        entries["index.json"] = json.dumps({"schemaVersion": 2, "manifests": [m]}).encode()
-        meta = json.dumps({"containerimage.digest": m["digest"], "containerimage.descriptor": m}).encode()
+    def test_verified_oci_and_metadata(self):
+        saved, image = self.archive(self.payload(), oci=True)
+        entries = q.tar_files(saved, 32)
+        del entries["manifest.json"]
+        md = json.loads(entries["index.json"])["manifests"][0]
+        root = md["digest"]
         def archive(values):
             out = io.BytesIO()
             with tarfile.open(fileobj=out, mode="w") as tar:
@@ -168,14 +129,30 @@ class PayloadTests(unittest.TestCase):
                     info = tarfile.TarInfo(name); info.size = len(data)
                     tar.addfile(info, io.BytesIO(data))
             return out.getvalue()
-        report = q.oci_probe_graph(archive(entries), meta)
-        self.assertTrue(report["diagnostic_only"])
-        self.assertTrue(report["root_equals_manifest"])
-        self.assertTrue(report["descriptor_size_matches_manifest"])
-        self.assertFalse(report["optional_config_matches"])
-        for key, value in (("private", b"unreachable"), ("blobs/sha256/" + c["digest"][7:], b"changed"), ("index.json", json.dumps({"schemaVersion": 2, "manifests": [m, m]}).encode())):
+        actual, layer, graph = q.oci_layer(archive(entries), root, "a" * 40)
+        self.assertEqual(actual, image)
+        self.assertNotEqual(root, image)
+        with tempfile.TemporaryDirectory() as temp:
+            _, files = q.extract_payload(layer, image, Path(temp), "a" * 40)
+            self.assertEqual(len(files), 11)
+        good = {"containerimage.digest": root, "containerimage.descriptor": graph}
+        q.validate_build_metadata(json.dumps(good).encode(), graph, image)
+        q.validate_build_metadata(json.dumps({**good, "containerimage.config.digest": image}).encode(), graph, image)
+        for key, value in (("containerimage.digest", image), ("containerimage.descriptor", {**graph, "size": True}), ("containerimage.config.digest", root), ("containerimage.descriptor", {**graph, "mediaType": "unknown"})):
+            with self.assertRaises(ValueError): q.validate_build_metadata(json.dumps({**good, key: value}).encode(), graph, image)
+        with self.assertRaises(ValueError): q.oci_layer(archive(entries), image, "a" * 40)
+        for key, value in (("private", b"unreachable"), ("blobs/sha256/" + image[7:], b"changed"), ("index.json", json.dumps({"schemaVersion": 2, "manifests": [md, md]}).encode()), ("index.json", json.dumps({"schemaVersion": 2, "manifests": [{**md, "annotations": {}}]}).encode()), ("index.json", json.dumps({"schemaVersion": 2, "manifests": [{**md, "size": md["size"] + 1}]}).encode())):
             bad = dict(entries); bad[key] = value
-            with self.assertRaises(ValueError): q.oci_probe_graph(archive(bad), meta)
+            with self.assertRaises(ValueError): q.oci_layer(archive(bad), root, "a" * 40)
+        manifest_name = "blobs/sha256/" + root[7:]
+        for mutate in (lambda g: g["layers"].append(g["layers"][0]), lambda g: g["layers"][0].update(mediaType="application/vnd.oci.image.layer.v1.tar+gzip"), lambda g: g.update(mediaType="unknown"), lambda g: g.update(schemaVersion=True)):
+            bad = dict(entries)
+            value = json.loads(bad.pop(manifest_name)); mutate(value)
+            raw_graph = json.dumps(value).encode()
+            bad_root = "sha256:" + hashlib.sha256(raw_graph).hexdigest()
+            bad["blobs/sha256/" + bad_root[7:]] = raw_graph
+            bad["index.json"] = json.dumps({"schemaVersion": 2, "manifests": [{**md, "digest": bad_root, "size": len(raw_graph)}]}).encode()
+            with self.assertRaises(ValueError): q.oci_layer(archive(bad), bad_root, "a" * 40)
 
     def test_registry_descriptors(self):
         image = "sha256:" + "a" * 64

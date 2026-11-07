@@ -6,25 +6,29 @@ only the binaries, a source/platform/version manifest and bundled public crate
 licensing notices and metadata. No Kanz module, schema, generated SDK, application
 source, application inventory or build cache is an input or published layer.
 
-The host builds using a Dockerfile on stdin with no filesystem context. Explicit
-BuildKit metadata binds the configuration digest to the IID and saved
-configuration bytes. Its separate manifest descriptor must bind the root digest
-with a supported image media type and bounded positive byte size. A fixed source-SHA local tag
-is the load/save work reference; it is not a published trust identity. This
-producer alone disables automatic BuildKit provenance/SBOM attachments to retain
-its closed single-image graph; existing release/SBOM checks are unchanged. The
-receipt retains both build identities. Registry format conversion may change the
-root digest: the published root is independently pinned and signed after the
-same configuration, single layer and payload have been read back. PRs
-qualify the actual binaries, metadata extraction limits, a fresh clean RustSec
-audit and a known-vulnerable refusal. Only canonical main can publish the exact
-qualified image artifact. The saved archive must contain exactly one final COPY layer: configuration and
-uncompressed layer hashes are checked before scanning the closed payload. Container
-runtime injections are never inventoried. Registry readback verifies its immutable digest,
-platform, source label and complete file inventory. Main then keylessly signs that
-exact digest and verifies its source annotation against the fixed workflow identity
-and GitHub OIDC issuer. Only the publisher has OIDC write permission. Package visibility and
-credentials follow the existing private base-image boundary.
+The host builds using a Dockerfile on stdin with no filesystem context and the
+existing mirrored BuildKit container driver. Explicit uncompressed OCI export
+produces one index entry, one image manifest, one configuration and one final
+COPY layer. Every descriptor hash and size is checked; extra blobs are refused.
+Build metadata must bind to the actual manifest bytes. Configuration identity is
+derived from that verified graph, independently of Docker's exporter-specific IID
+semantics. The source/platform label, DiffID and closed payload inventory are
+checked before loading anything into Docker.
+
+Read-only qualification then loads those exact OCI bytes under the fixed
+source-SHA local tag and saves them again. The saved configuration, layer and
+complete payload must pass the same source/platform/inventory checks before ABI,
+metadata extraction bounds and fresh clean/vulnerable RustSec audit controls run.
+Only canonical main can publish the exact qualified OCI artifact. Main repeats
+validation and the local roundtrip, then checks registry descriptors and the
+pulled saved payload. It signs the actual published digest and verifies the source
+annotation, fixed workflow identity and GitHub OIDC issuer. Registry format
+conversion may change the root digest; the configuration and payload must remain
+identical. Only the publisher has OIDC write permission.
+
+This producer alone disables automatic BuildKit provenance/SBOM attachments to
+retain its closed single-image graph; existing release/SBOM checks are unchanged.
+Package visibility and credentials follow the existing private base-image boundary.
 
 The artifact is linux/amd64 only. Copy its verified binaries onto the qualified
 runner; do not use `docker run` on this scratch payload. Registry descriptor checks
