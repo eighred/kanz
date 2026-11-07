@@ -44,7 +44,6 @@ pub(crate) fn status(
     {
         return Err(Error::InvalidInput);
     }
-    let at = SystemTime::try_from(now).map_err(|_| Error::InvalidInput)?;
     let event = ExecutionRecoveryRecorded {
         case_id: c.id.clone(),
         order_id: c.order_id.clone(),
@@ -59,10 +58,27 @@ pub(crate) fn status(
         checkpoint: c.checkpoint as u32,
         recorded_at: Some(now),
     };
-    let payload = event.encode_to_vec();
+    fact(
+        env,
+        &c.order_id,
+        "order.order.recovery_recorded",
+        "order.v1.ExecutionRecoveryRecorded:1",
+        event.encode_to_vec(),
+        now,
+    )
+}
+pub(crate) fn fact(
+    env: &Envelope,
+    order: &str,
+    subject: &str,
+    schema: &str,
+    payload: Vec<u8>,
+    now: prost_types::Timestamp,
+) -> Result<Record, Error> {
+    let at = SystemTime::try_from(now).map_err(|_| Error::InvalidInput)?;
     let metadata = [
         env.tenant_id.as_str(),
-        c.order_id.as_str(),
+        order,
         env.correlation_id.as_str(),
         env.event_id.as_str(),
         env.trace_context.as_str(),
@@ -75,13 +91,13 @@ pub(crate) fn status(
     }
     Ok(Record {
         tenant: env.tenant_id.clone(),
-        partition_key: c.order_id.clone(),
-        subject: "order.order.recovery_recorded".into(),
-        event_type: "order.order.recovery_recorded".into(),
+        partition_key: order.into(),
+        subject: subject.into(),
+        event_type: subject.into(),
         event_class: 1,
         schema_version: 1,
         domain: "order".into(),
-        payload_schema_ref: "order.v1.ExecutionRecoveryRecorded:1".into(),
+        payload_schema_ref: schema.into(),
         event_time: at,
         correlation_id: env.correlation_id.clone(),
         causation_id: env.event_id.clone(),

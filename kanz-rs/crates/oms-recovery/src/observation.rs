@@ -18,7 +18,7 @@ pub(crate) struct Binding {
     pub mic: String,
     pub account: String,
 }
-async fn blocked(
+pub(crate) async fn blocked(
     client: &mut Client,
     tenant: &str,
     env: &Envelope,
@@ -34,7 +34,7 @@ async fn blocked(
     repository::block(client, tenant, c, st, reason, &record).await?;
     Ok(c.order_id.clone())
 }
-async fn prepared(
+pub(crate) async fn prepared(
     client: &mut Client,
     tenant: &str,
     env: &Envelope,

@@ -44,12 +44,14 @@ http = "=1.5.0"
 `
 
 var recoveryMarkers = map[string][]string{
-	"src/coordinator.rs": {`Client::connect_until(config.venue,receiver)`, `verified_account:true`, `declared_order_types:true`, `session.close().await`, `letexpires=tokio::time::Instant::now()+deadline`, `tokio::time::timeout_at(expires,self.sessions.connect())`, `tokio::time::timeout_at(expires,async`, `tokio::time::Instant::now()>=expires`, `self.relay.flush_before(&key,expires)`, `outcome.stalled.is_none()`},
-	"src/observation.rs": {`repository::observe(`, `repository::mapping_matches(`, `latest.version!=loaded.version`, `venue.describe(deadline)`, `venue.query_recovery_history(`, `history::complete(`, `repository::freeze(`, `preparation::posted(`, `approval::approved(`, `recovery::commit_streamed_recovery(`, `id.account_verified`, `Error::Conflict`},
-	"src/preparation.rs": {`recovery_repository::posted_reader(`, `cursor.finish().await?`, `identity::same_execution(row.current.value(),previous.value())`, `aggregate::apply_recovered_fill(`, `aggregate::recovery_average(`},
-	"src/approval.rs":    {`actual!=evidence.stored_digest`, `approved>=proposed+ttl`, `fee_subject::normalize(&a.approver)==fee_subject::normalize(&p.proposer)`, `p.history_digest!=history_digest`, `p.mapping_version!=case.mapping_version`},
-	"src/handlers.rs":    {`env.value().tenant_id!=tenant`, `env.value().event_class!=1`, `recovery_ack::acknowledge_recovery(`, `repository::target_matches(`},
-	"src/history.rs":     {`fills.len()>MAX_FILLS`, `sum!=total`, `f.recovery.is_some()`, `decimal_domain(&dynamic,0)?`},
+	"src/coordinator.rs":  {`Client::connect_until(config.venue,receiver)`, `verified_account:true`, `declared_order_types:true`, `session.close().await`, `letexpires=tokio::time::Instant::now()+deadline`, `tokio::time::timeout_at(expires,self.sessions.connect())`, `tokio::time::timeout_at(expires,async`, `tokio::time::Instant::now()>=expires`, `self.relay.flush_before(&key,expires)`, `outcome.stalled.is_none()`},
+	"src/observation.rs":  {`repository::observe(`, `repository::mapping_matches(`, `latest.version!=loaded.version`, `venue.describe(deadline)`, `venue.query_recovery_history(`, `history::complete(`, `repository::freeze(`, `preparation::posted(`, `approval::approved(`, `recovery::commit_streamed_recovery(`, `id.account_verified`, `Error::Conflict`},
+	"src/preparation.rs":  {`recovery_repository::posted_reader(`, `cursor.finish().await?`, `identity::same_execution(row.current.value(),previous.value())`, `aggregate::apply_recovered_fill(`, `aggregate::recovery_average(`},
+	"src/approval.rs":     {`actual!=evidence.stored_digest`, `fee_control::Control::new(p)?`, `control.approve(&a.approver,&a.digest,approved)`, `p.history_digest!=history_digest`, `p.mapping_version!=case.mapping_version`},
+	"src/fee_control.rs":  {`letttl=(expiry-created).min(i128::from(i64::MAX))`, `actor==fee_subject::normalize(self.proposer)`, `digest!=self.digest`, `now>=self.expires`, `if!(n==number&&w==2)`, `h.update((part.len()asu64).to_be_bytes())`},
+	"src/fee_commands.rs": {`env.value().tenant_id!=tenant`, `env.value().event_class!=2`, `payload.len()>65536`, `m.target_id!=order`, `m.issuer.strip_prefix("user:")`, `!m.principal_portfolios.contains(&state.value().portfolio_id)`, `preparation::posted_with(`, `previous.journal_bytes()?`, `used>repository::PROPOSAL_BYTES`, `control.approve(&old.approver,&old.digest,signed)`, `observation::prepared(`},
+	"src/handlers.rs":     {`env.value().tenant_id!=tenant`, `env.value().event_class!=1`, `recovery_ack::acknowledge_recovery(`, `repository::target_matches(`},
+	"src/history.rs":      {`fills.len()>MAX_FILLS`, `sum!=total`, `f.recovery.is_some()`, `decimal_domain(&dynamic,0)?`},
 }
 
 func checkRustRecoveryCoordinator(root string) error {
@@ -61,7 +63,7 @@ func checkRustRecoveryCoordinator(root string) error {
 	if rustMigrationCompact(string(raw)) != rustMigrationCompact(rustRecoveryCargo) {
 		return fmt.Errorf("unreviewed recovery manifest")
 	}
-	allowed := map[string]bool{"src/lib.rs": true, "src/coordinator.rs": true, "src/observation.rs": true, "src/preparation.rs": true, "src/approval.rs": true, "src/handlers.rs": true, "src/history.rs": true, "examples/recovery-coordinator-fixture.rs": true}
+	allowed := map[string]bool{"src/lib.rs": true, "src/coordinator.rs": true, "src/observation.rs": true, "src/preparation.rs": true, "src/approval.rs": true, "src/handlers.rs": true, "src/history.rs": true, "src/fee_commands.rs": true, "src/fee_control.rs": true, "examples/recovery-coordinator-fixture.rs": true}
 	if err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, e error) error {
 		if e != nil {
 			return e

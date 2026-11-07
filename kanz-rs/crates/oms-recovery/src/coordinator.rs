@@ -1,6 +1,6 @@
-//! Concrete three-handler composition. Transport seams carry SQL sessions and
+//! Concrete existing recovery/fee-handler composition. Transport seams carry SQL sessions and
 //! already committed FACTs only; neither seam can authorize a financial action.
-use crate::{handlers, observation, Error};
+use crate::{fee_commands, handlers, observation, Error};
 use kanz_oms_store::relay::{Framer, Publisher, Relay, Sessions};
 use kanz_oms_venue::{Client, Requirements};
 use std::time::Duration;
@@ -16,6 +16,7 @@ pub enum Method {
     Observation,
     Ack,
     Parked,
+    FeeCorrection,
 }
 pub struct Coordinator<P, S> {
     tenant: String,
@@ -142,7 +143,10 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
             return Err(Error::InvalidInput);
         }
         let expires = tokio::time::Instant::now() + deadline;
-        let env = handlers::envelope(&self.tenant, envelope)?;
+        let env = match method {
+            Method::FeeCorrection => fee_commands::envelope(&self.tenant, envelope)?,
+            _ => handlers::envelope(&self.tenant, envelope)?,
+        };
         if tokio::time::Instant::now() >= expires {
             return Err(Error::Deadline);
         }
@@ -181,6 +185,9 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
                 Method::Ack => handlers::ack(client, &self.tenant, env.value(), payload, now).await,
                 Method::Parked => {
                     handlers::parked(client, &self.tenant, env.value(), payload, now).await
+                }
+                Method::FeeCorrection => {
+                    fee_commands::handle(client, &self.tenant, env.value(), payload, now).await
                 }
             }
         })

@@ -110,7 +110,7 @@ func (w *worker) diagnostic(request map[string]any, phase string) string {
 	method := "Init"
 	if value, ok := request["method"].(string); ok {
 		switch value {
-		case "Observation", "Ack", "Parked", "Close":
+		case "Observation", "Ack", "Parked", "FeeCorrection", "Close":
 			method = value
 		default:
 			method = "unknown"

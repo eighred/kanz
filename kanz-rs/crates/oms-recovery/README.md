@@ -1,11 +1,13 @@
 # Recovery observation coordinator
 
 This source-first owner composes the existing order aggregate, OMS repository,
-fee journal, typed venue client and relay for three Go handler contracts:
-`HandleRecovery`, `HandleRecoveryAck` and `HandleRecoveryParked`. It has no
+fee journal, typed venue client and relay for the existing Go handler contracts:
+`HandleRecovery`, `HandleRecoveryAck`, `HandleRecoveryParked` and
+`HandleFeeCorrection`. It has no
 production caller. Go remains the authoritative OMS; this library neither
-executes nor cancels orders, redrives orphans, resumes trading, creates fee
-approvals, nor replaces risk/compliance/mandate admission.
+executes nor cancels orders, redrives orphans, resumes trading, nor replaces
+risk/compliance/mandate admission. Fee command compatibility does not activate
+a Rust approval service or authenticate a human caller.
 
 Observation is an investigation trigger. The configured portfolio/account
 binding must match the stored order and an actual SPIFFE mTLS `Describe` result;
@@ -17,6 +19,27 @@ Persisted maker/checker, digest or expiry policy refusals return
 `ApprovalRefused`; they do not manufacture a durable blocked acknowledgement.
 An unmatched order mapping or inconsistent frozen-history digest returns
 `RecoveryEvidenceConflict`, preserving Go's separate refusal path.
+
+Fee commands retain exact serving-tenant attribution, COMMAND class, canonical
+command schemas, delegated `user:` issuer, exact target and nonempty explicit
+portfolio entitlement. The authenticated gateway/Consumer remains responsible
+for binding that metadata; a string prefix is not independent authentication.
+Only the frozen history and current complete posted journal supply changed
+fees. Proposals retain sorted original/revised execution wire and a tenant-bound
+digest, a 24-hour review interval and the existing 512-KiB review bound. Proposal
+insert, unchanged-order CAS and proposed FACT enqueue share one transaction.
+Approval insert, case CAS and approved FACT enqueue share another transaction.
+A committed approval redelivery validates its original signing time, including
+when the retry is after expiry. Same-person, changed-digest and expired new
+approval commands preserve Go's distinct durable blocked reasons; observation
+revalidation still propagates those refusals without synthesizing a block.
+Recovery after approval reuses the existing complete journal/fee transaction;
+no new financial formula or venue side effect is introduced.
+
+Fee-command qualification requires the actual PostgreSQL/NATS differential
+fixture; local compilation and source guards do not supply that evidence.
+Go remains the rollback reader/writer, and any ownership handoff still requires
+complete dependency proof, backup/recovery and explicit human authorization.
 
 Immutable original observation bytes and their hash are retained. The existing
 Go observation, Query history and frozen-history contracts permit 4 MiB, with

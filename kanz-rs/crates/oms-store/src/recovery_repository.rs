@@ -189,7 +189,10 @@ impl Mapping<'_> {
         Ok(digest(json.as_bytes()))
     }
 }
-async fn scope<'a>(client: &'a mut Client, tenant: &str) -> Result<Transaction<'a>, Error> {
+pub(crate) async fn scope<'a>(
+    client: &'a mut Client,
+    tenant: &str,
+) -> Result<Transaction<'a>, Error> {
     let tx = scoped(client, tenant).await?;
     let n:i64=tx.query_typed_one("SELECT count(*) FROM pg_class WHERE oid IN ('execution_recovery_cases'::regclass,'execution_account_mappings'::regclass,'execution_recovery_history'::regclass,'execution_recovery_targets'::regclass,'execution_recovery_acks'::regclass,'execution_fee_proposals'::regclass,'execution_fee_approvals'::regclass) AND relrowsecurity AND relforcerowsecurity",&[]).await?.get(0);
     if n != 7 {

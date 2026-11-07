@@ -25,6 +25,9 @@ func (f *fixture) recovered(t *testing.T, count int) func() []*orderpb.Execution
 }
 
 func (f *fixture) recoveredWithin(t *testing.T, count int, wait time.Duration) func() []*orderpb.ExecutionRecovered {
+	return f.recoveredFrom(t, count, wait, "observation")
+}
+func (f *fixture) recoveredFrom(t *testing.T, count int, wait time.Duration, causation string) func() []*orderpb.ExecutionRecovered {
 	t.Helper()
 	endpoint := brokerURL(t)
 	if endpoint == "" {
@@ -99,7 +102,7 @@ func (f *fixture) recoveredWithin(t *testing.T, count int, wait time.Duration) f
 				failure = fmt.Errorf("actual recovery frame invalid")
 				break
 			}
-			if env.TenantId != f.tenant || env.CausationId != "observation" || env.CorrelationId != "fixture-correlation" || env.EventType != fillfact.SubjectRecovered {
+			if env.TenantId != f.tenant || env.CausationId != causation || env.CorrelationId != "fixture-correlation" || env.EventType != fillfact.SubjectRecovered {
 				failure = fmt.Errorf("actual recovery lineage differs")
 				break
 			}
