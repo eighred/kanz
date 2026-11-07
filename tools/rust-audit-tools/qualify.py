@@ -275,22 +275,30 @@ def build_command(temp, workref, commit):
 
 def oci_probe_graph(raw, build_metadata):
     entries = tar_files(raw, 8)
-    if metadata(entries["oci-layout"]) != {"imageLayoutVersion": "1.0.0"}:
-        raise ValueError("unsupported probe layout")
     index = metadata(entries["index.json"])
-    if type(index.get("schemaVersion")) is not int or index["schemaVersion"] != 2 or len(index["manifests"]) != 1:
-        raise ValueError("single probe manifest required")
-    md = index["manifests"][0]
+    manifests = index.get("manifests")
+    print(json.dumps({"diagnostic_only": True, "archive_entries": len(entries),
+                      "index_schema_two": type(index.get("schemaVersion")) is int and index["schemaVersion"] == 2,
+                      "manifest_count": len(manifests) if isinstance(manifests, list) and len(manifests) <= 32 else None}, sort_keys=True), flush=True)
+    if metadata(entries["oci-layout"]) != {"imageLayoutVersion": "1.0.0"} or type(index.get("schemaVersion")) is not int or index["schemaVersion"] != 2 or not isinstance(manifests, list) or len(manifests) != 1:
+        raise ValueError("single OCI probe manifest required")
+    md = manifests[0]
     manifest_name = descriptor(md, entries, {"application/vnd.oci.image.manifest.v1+json"})
     graph = metadata(entries[manifest_name])
-    if type(graph.get("schemaVersion")) is not int or graph["schemaVersion"] != 2 or graph.get("mediaType") != "application/vnd.oci.image.manifest.v1+json" or graph.get("layers") != []:
-        raise ValueError("synthetic zero-layer probe required")
+    layers = graph.get("layers")
+    print(json.dumps({"diagnostic_only": True,
+                      "manifest_schema_two": type(graph.get("schemaVersion")) is int and graph["schemaVersion"] == 2,
+                      "manifest_media_oci": graph.get("mediaType") == "application/vnd.oci.image.manifest.v1+json",
+                      "layer_count": len(layers) if isinstance(layers, list) and len(layers) <= 32 else None}, sort_keys=True), flush=True)
+    if type(graph.get("schemaVersion")) is not int or graph["schemaVersion"] != 2 or graph.get("mediaType") != "application/vnd.oci.image.manifest.v1+json" or not isinstance(layers, list) or len(layers) != 1:
+        raise ValueError("synthetic one-layer probe required")
     config_name = descriptor(graph["config"], entries, {"application/vnd.oci.image.config.v1+json"})
+    layer_name = descriptor(layers[0], entries, {"application/vnd.oci.image.layer.v1.tar"})
     config = metadata(entries[config_name])
-    if config.get("rootfs") != {"type": "layers", "diff_ids": []} or config.get("os") != "linux" or config.get("architecture") != "amd64":
-        raise ValueError("synthetic probe config differs")
-    if set(entries) != {"index.json", "oci-layout", manifest_name, config_name}:
-        raise ValueError("unreachable probe archive bytes")
+    payload = tar_files(entries[layer_name], 4)
+    expected = {"probe.txt": b"public-exporter-probe\n"}
+    history = config.get("history")
+    history = [h for h in history if not h.get("empty_layer", False)] if isinstance(history, list) else []
     meta = metadata(build_metadata)
     root, desc = meta.get("containerimage.digest"), meta.get("containerimage.descriptor")
     desc = desc if isinstance(desc, dict) else {}
@@ -298,24 +306,33 @@ def oci_probe_graph(raw, build_metadata):
     media = media if media in {"application/vnd.oci.image.manifest.v1+json", "application/vnd.oci.image.index.v1+json"} else "unknown"
     size = desc.get("size")
     size = size if type(size) is int and 0 < size <= 1024 * 1024 else None
-    return {"diagnostic_only": True, "archive_graph_verified": True, "layer_count": 0,
-            "root_equals_manifest": root == md["digest"],
-            "root_equals_index": root == "sha256:" + hashlib.sha256(entries["index.json"]).hexdigest(),
-            "descriptor_root_equal": desc.get("digest") == root,
-            "descriptor_media": media, "descriptor_size": size,
-            "descriptor_size_matches_manifest": size == len(entries[manifest_name]),
-            "descriptor_size_matches_index": size == len(entries["index.json"]),
-            "optional_config_matches": meta.get("containerimage.config.digest") == graph["config"]["digest"]}
+    report = {"diagnostic_only": True, "layer_count": 1,
+              "config_platform_valid": config.get("os") == "linux" and config.get("architecture") == "amd64",
+              "config_diffid_matches": config.get("rootfs") == {"type": "layers", "diff_ids": [layers[0]["digest"]]},
+              "one_copy_history": len(history) == 1 and history[0].get("created_by", "").startswith("COPY "),
+              "exact_public_payload": payload == expected,
+              "closed_archive": set(entries) == {"index.json", "oci-layout", manifest_name, config_name, layer_name},
+              "root_equals_manifest": root == md["digest"],
+              "root_equals_index": root == "sha256:" + hashlib.sha256(entries["index.json"]).hexdigest(),
+              "descriptor_root_equal": desc.get("digest") == root,
+              "descriptor_media": media, "descriptor_size": size,
+              "descriptor_size_matches_manifest": size == len(entries[manifest_name]),
+              "descriptor_size_matches_index": size == len(entries["index.json"]),
+              "optional_config_matches": meta.get("containerimage.config.digest") == graph["config"]["digest"]}
+    print(json.dumps(report, sort_keys=True), flush=True)
+    if not all(report[k] for k in ("config_platform_valid", "config_diffid_matches", "one_copy_history", "exact_public_payload", "closed_archive")):
+        raise ValueError("synthetic probe config/layer/payload differs")
+    return report
 
 
 def diagnose(temp, commit):
     # Synthetic exporter probe only; it cannot create a qualification receipt.
     print(output(["docker", "version", "--format", "{{.Client.Version}}/{{.Server.Version}}"]), flush=True)
     print(output(["docker", "buildx", "version"]), flush=True)
-    recipe = b'FROM scratch\nLABEL org.opencontainers.image.title="public-exporter-probe"\n'
+    recipe = b'FROM scratch\nCOPY <<EOF /probe.txt\npublic-exporter-probe\nEOF\n'
     archive, build_metadata = temp / "probe.tar", temp / "probe.json"
     run(["docker", "buildx", "build", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--platform", "linux/amd64", "--output", "type=oci,dest=" + str(archive) + ",compression=uncompressed,force-compression=true,oci-mediatypes=true,name=" + local_tag(commit) + "-probe", "-"], input=recipe)
-    print(json.dumps(oci_probe_graph(read_bounded(archive, MAX_PAYLOAD), read_bounded(build_metadata, 1024 * 1024)), sort_keys=True), flush=True)
+    oci_probe_graph(read_bounded(archive, MAX_PAYLOAD), read_bounded(build_metadata, 1024 * 1024))
     raise ValueError("OCI diagnostic only: producer qualification remains required")
 
 

@@ -148,8 +148,17 @@ class PayloadTests(unittest.TestCase):
             digest = "sha256:" + hashlib.sha256(raw).hexdigest()
             entries["blobs/sha256/" + digest[7:]] = raw
             return {"digest": digest, "size": len(raw), "mediaType": media}
-        c = blob({"os": "linux", "architecture": "amd64", "rootfs": {"type": "layers", "diff_ids": []}}, "application/vnd.oci.image.config.v1+json")
-        m = blob({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": c, "layers": []}, "application/vnd.oci.image.manifest.v1+json")
+        layer = io.BytesIO()
+        with tarfile.open(fileobj=layer, mode="w") as tar:
+            data = b"public-exporter-probe\n"
+            info = tarfile.TarInfo("probe.txt"); info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        layer_raw = layer.getvalue()
+        ld = "sha256:" + hashlib.sha256(layer_raw).hexdigest()
+        entries["blobs/sha256/" + ld[7:]] = layer_raw
+        l = {"digest": ld, "size": len(layer_raw), "mediaType": "application/vnd.oci.image.layer.v1.tar"}
+        c = blob({"os": "linux", "architecture": "amd64", "rootfs": {"type": "layers", "diff_ids": [ld]}, "history": [{"created_by": "COPY inline /probe.txt"}]}, "application/vnd.oci.image.config.v1+json")
+        m = blob({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": c, "layers": [l]}, "application/vnd.oci.image.manifest.v1+json")
         entries["index.json"] = json.dumps({"schemaVersion": 2, "manifests": [m]}).encode()
         meta = json.dumps({"containerimage.digest": m["digest"], "containerimage.descriptor": m}).encode()
         def archive(values):
