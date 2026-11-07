@@ -40,8 +40,15 @@ def progress(raw, source):
         raise ValueError("progress size or termination differs")
     version = digest(("kanz-lake-joint-cache-probe:" + source).encode())[:40]
     commands = (("cook", COOK, True), ("build", BUILD.replace("$VERSION", version), False))
+    return target_progress(raw, "rust-build", commands)
+
+
+def target_progress(raw, stage, commands):
+    """Shared closed vertex parser; each caller supplies exact owned commands."""
+    if not raw or len(raw) > LIMIT or not raw.endswith(b"\n"):
+        raise ValueError("progress size or termination differs")
     def owned(name):
-        return any(re.fullmatch(r"\[rust-build [1-9][0-9]*/[1-9][0-9]*\] RUN " + re.escape(command), name)
+        return any(re.fullmatch(r"\[" + re.escape(stage) + r" [1-9][0-9]*/[1-9][0-9]*\] RUN " + re.escape(command), name)
                    for _, command, _ in commands)
     vertices = {}
     lines = raw.splitlines()
@@ -71,14 +78,14 @@ def progress(raw, source):
             if len(vertices) > 4096: raise ValueError("vertex count exceeds bound")
     result = {}
     for label, command, cached in commands:
-        matches = [v for v in vertices.values() if re.fullmatch(r"\[rust-build [1-9][0-9]*/[1-9][0-9]*\] RUN " + re.escape(command), v["name"])]
+        matches = [v for v in vertices.values() if re.fullmatch(r"\[" + re.escape(stage) + r" [1-9][0-9]*/[1-9][0-9]*\] RUN " + re.escape(command), v["name"])]
         if len(matches) != 1: raise ValueError("exact build vertex missing or duplicated")
         vertex = matches[0]
         if (vertex.get("cached", False) is not cached or not isinstance(vertex.get("started"), str)
                 or not isinstance(vertex.get("completed"), str) or not vertex["started"] or not vertex["completed"]):
             raise ValueError("build vertex did not prove required execution/cache state")
         result[label] = vertex["digest"]
-    if result["cook"] == result["build"]: raise ValueError("ambiguous build vertices")
+    if len(set(result.values())) != len(commands): raise ValueError("ambiguous build vertices")
     return result
 
 
