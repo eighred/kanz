@@ -105,6 +105,19 @@ def metadata(raw):
     return json.loads(raw, object_pairs_hook=strict)
 
 
+def registry_manifest(value, image):
+    if type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 2 or value.get("mediaType") not in {"application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"}:
+        raise ValueError("unsupported registry image manifest")
+    config, layers = value.get("config"), value.get("layers")
+    if not isinstance(config, dict) or not isinstance(layers, list) or len(layers) != 1:
+        raise ValueError("one registry image layer required")
+    for desc, media in ((config, {"application/vnd.oci.image.config.v1+json", "application/vnd.docker.container.image.v1+json"}), (layers[0], {"application/vnd.oci.image.layer.v1.tar", "application/vnd.oci.image.layer.v1.tar+gzip", "application/vnd.oci.image.layer.v1.tar+zstd", "application/vnd.docker.image.rootfs.diff.tar.gzip"})):
+        if not isinstance(desc, dict) or desc.get("mediaType") not in media or not isinstance(desc.get("digest"), str) or not re.fullmatch("sha256:[0-9a-f]{64}", desc["digest"]) or type(desc.get("size")) is not int or not 0 < desc["size"] <= MAX_PAYLOAD:
+            raise ValueError("invalid registry descriptor")
+    if config["digest"] != image:
+        raise ValueError("registry configuration identity differs")
+
+
 def saved_layer(raw, expected_image, commit):
     entries = tar_files(raw, 32)
     manifests = metadata(entries["manifest.json"])
@@ -280,9 +293,8 @@ def main():
             target = REPOSITORY + ":" + commit
             existing = subprocess.run(["crane", "digest", target], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
             if existing.returncode == 0:
-                prior = json.loads(output(["crane", "manifest", target]))
-                if prior.get("config", {}).get("digest") != image:
-                    raise ValueError("existing source tag differs")
+                prior = metadata(output(["crane", "manifest", target]).encode())
+                registry_manifest(prior, image)
             elif not any(code in existing.stderr for code in (b"MANIFEST_UNKNOWN", b"NAME_UNKNOWN")):
                 raise ValueError("unknown registry lookup failure")
             run(["docker", "tag", image, target])
@@ -291,9 +303,8 @@ def main():
             if not re.fullmatch("sha256:[0-9a-f]{64}", digest):
                 raise ValueError("invalid published digest")
             pinned = REPOSITORY + "@" + digest
-            registry = json.loads(output(["crane", "manifest", pinned]))
-            if registry.get("config", {}).get("digest") != image:
-                raise ValueError("registry readback differs")
+            registry = metadata(output(["crane", "manifest", pinned]).encode())
+            registry_manifest(registry, image)
             run(["docker", "pull", "--platform", "linux/amd64", pinned])
             check = temp / "readback"
             check.mkdir()

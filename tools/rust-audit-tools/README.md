@@ -17,7 +17,10 @@ exact digest and verifies its source annotation against the fixed workflow ident
 and GitHub OIDC issuer. Only the publisher has OIDC write permission. Package visibility and
 credentials follow the existing private base-image boundary.
 
-The artifact is linux/amd64 only. Tool extraction must be qualified on the actual
+The artifact is linux/amd64 only. Copy its verified binaries onto the qualified
+runner; do not use `docker run` on this scratch payload. Registry descriptor checks
+precede Docker pull and saved-layer validation; this is not an independent blob
+download implementation. Tool extraction must be qualified on the actual
 runner ABI; the scratch payload is not itself a runnable application image.
 The existing source installer remains authoritative. A future consumer change
 must pin an actually published and verified digest and preserve fresh audits;

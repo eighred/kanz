@@ -109,6 +109,15 @@ class PayloadTests(unittest.TestCase):
         files = self.payload(); files["manifest.json"] = b'{"version":1,"version":1}'
         with self.assertRaises(ValueError): self.inspect(files)
 
+    def test_registry_descriptors(self):
+        image = "sha256:" + "a" * 64
+        good = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": {"digest": image, "size": 100, "mediaType": "application/vnd.oci.image.config.v1+json"}, "layers": [{"digest": "sha256:" + "b" * 64, "size": 200, "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"}]}
+        q.registry_manifest(good, image)
+        mutations = [lambda m: m.update(schemaVersion=True), lambda m: m.update(mediaType="unknown"), lambda m: m["layers"].append(m["layers"][0]), lambda m: m["config"].update(digest="sha256:" + "c" * 64), lambda m: m["layers"][0].update(digest="invalid"), lambda m: m["layers"][0].update(mediaType="unknown"), lambda m: m["layers"][0].update(size=True), lambda m: m["layers"][0].update(size=0), lambda m: m["layers"][0].update(size=q.MAX_PAYLOAD + 1)]
+        for mutate in mutations:
+            value = json.loads(json.dumps(good)); mutate(value)
+            with self.assertRaises(ValueError): q.registry_manifest(value, image)
+
     @unittest.skipUnless(sys.platform == "linux", "actual Linux opener required")
     def test_linux_regular_fifo_symlink_and_size(self):
         with tempfile.TemporaryDirectory() as directory:
