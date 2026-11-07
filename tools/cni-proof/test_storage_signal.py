@@ -47,19 +47,10 @@ def diagnostic_seam(value):
 
 
 class StorageSignalTests(unittest.TestCase):
-    def test_experimental_profile_is_fixed_and_diagnostic_only(self):
-        env = {"GITHUB_JOB": "storage-pid1-diagnostic", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/diagnostic"}
-        self.assertEqual(storage_signal.pids_profile([], {}), 8)
-        self.assertEqual(storage_signal.pids_profile(["--diagnostic-pids32"], env), 32)
-        for args in (["--pids-limit=32"], ["--diagnostic-pids64"], ["--diagnostic-pids32", "extra"]):
-            with self.assertRaises(ValueError): storage_signal.pids_profile(args, env)
-        for key, value in (("GITHUB_JOB", "disposable-transition"), ("GITHUB_JOB", ""),
-                           ("GITHUB_EVENT_NAME", "push"), ("GITHUB_EVENT_NAME", "pull_request"),
-                           ("GITHUB_REF", "refs/heads/main"), ("GITHUB_REF", "refs/tags/test"),
-                           ("GITHUB_REF", "refs/heads/"), ("GITHUB_REF", "")):
-            changed = {**env, key: value}
-            with self.assertRaises(ValueError): storage_signal.pids_profile(["--diagnostic-pids32"], changed)
-            self.assertEqual(storage_signal.pids_profile([], changed), 8)
+    def test_no_runtime_resource_override(self):
+        storage_signal.require_no_arguments([])
+        for args in (["--diagnostic-pids32"], ["--pids-limit=32"], ["extra"]):
+            with self.assertRaises(ValueError): storage_signal.require_no_arguments(args)
 
     def test_diagnostic_mode_is_not_release_evidence(self):
         root = Path(__file__).resolve().parents[2]
@@ -205,6 +196,10 @@ class StorageSignalTests(unittest.TestCase):
                         patch.object(migration, "command", side_effect=replies) as call:
                     with self.assertRaises((ValueError, proof.ProofError)):
                         storage_signal.case(False, progress)
+                create = call.call_args_list[1].args[0]
+                for option in ("--pids-limit=8", "--memory=64m", "--cpus=0.1", "--log-driver=local",
+                               "--log-opt=max-size=16k", "--log-opt=max-file=1", "--log-opt=compress=false"):
+                    self.assertEqual(create.count(option), 1)
                 removals = [item.args[0] for item in call.call_args_list if item.args[0][:2] == ["docker", "rm"]]
                 if mode == "owned":
                     self.assertEqual(removals, [["docker", "rm", "-f", identity]])
