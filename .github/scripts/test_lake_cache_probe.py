@@ -25,6 +25,14 @@ def wire(value):
 
 
 class CacheProbeTests(unittest.TestCase):
+    def test_synthetic_solve_imports_only_named_read_cache(self):
+        args=gate.build_args('owned-builder',Path('/owned-context'),'a'*40)
+        self.assertEqual([arg for arg in args if arg.startswith('--cache-')],
+                         ['--cache-from=type=gha,scope=lake-sink'])
+        self.assertIn('--output=type=cacheonly',args)
+        self.assertEqual(args[args.index('--target')+1],'rust-build')
+        self.assertEqual(args[args.index('--build-arg')+1],'VERSION='+'a'*40)
+
     @unittest.skipUnless(sys.platform == "linux", "actual Linux no-follow Git source custody required")
     def test_actual_tracked_context_refuses_changed_bytes_and_links(self):
         with tempfile.TemporaryDirectory() as directory:

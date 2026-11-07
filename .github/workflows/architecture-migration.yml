@@ -343,14 +343,27 @@ jobs:
           test -z "$pg_after$compose_after$volumes_after$networks_after"
           mkdir -p snapshot-owner-proof
           python3 -c 'import json,os,pathlib; pathlib.Path("snapshot-owner-proof/cleanup.json").write_text(json.dumps({"run":os.environ["GITHUB_RUN_ID"],"attempt":os.environ["GITHUB_RUN_ATTEMPT"],"postgres_absent":True,"compose_absent":True,"image_containers_absent":True,"image_volumes_absent":True})+"\n")'
+      - name: Verify synthetic cache probe controls
+        run: python3 -B -m unittest discover -s .github/scripts -p test_lake_cache_probe.py
       - name: Prove joint synthetic source and VERSION dependency cache reuse
         env:
           LAKE_IMAGE: ${{ steps.lake-image.outputs.image }}
           LAKE_BUILDER: ${{ steps.lake-builder.outputs.name }}
-        run: |
-          set -euo pipefail
-          python3 -B -m unittest discover -s .github/scripts -p test_lake_cache_probe.py
-          python3 .github/scripts/lake_cache_probe.py --source "$(git rev-parse HEAD)" --tree "$(git rev-parse HEAD^{tree})" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --image "$LAKE_IMAGE" --builder "$LAKE_BUILDER" --output snapshot-owner-proof
+          PROBE_SOURCE: ${{ github.sha }}
+          PROBE_RUN: ${{ github.run_id }}
+          PROBE_ATTEMPT: ${{ github.run_attempt }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const cp = require('node:child_process');
+            const tree = cp.execFileSync('git', ['rev-parse', 'HEAD^{tree}'], {encoding: 'utf8', maxBuffer: 4096, timeout: 10000}).trim();
+            const env = {};
+            for (const key of ['PATH', 'HOME', 'DOCKER_CONFIG', 'RUNNER_TEMP', 'TMPDIR', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_SERVICE_V2', 'ACTIONS_CACHE_MODE']) {
+              const value = process.env[key];
+              if (value !== undefined) { if (value.length > 16384) throw new Error('cache environment bound exceeded'); env[key] = value; }
+            }
+            if (!env.PATH || !env.HOME || !env.ACTIONS_RUNTIME_TOKEN || !env.ACTIONS_RESULTS_URL || env.ACTIONS_CACHE_MODE !== 'read') throw new Error('read-only cache environment missing');
+            cp.execFileSync('python3', ['.github/scripts/lake_cache_probe.py', '--source', process.env.PROBE_SOURCE, '--tree', tree, '--run', process.env.PROBE_RUN, '--attempt', process.env.PROBE_ATTEMPT, '--image', process.env.LAKE_IMAGE, '--builder', process.env.LAKE_BUILDER, '--output', 'snapshot-owner-proof'], {stdio: 'inherit', env});
       - name: Verify complete source-bound owner evidence
         run: |
           set -euo pipefail

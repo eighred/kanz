@@ -224,12 +224,22 @@ def copy_context(root, destination):
     return hashes
 
 
+def build_args(builder, context, version):
+    # Each BuildKit solve must import the external cache. A prior whole-image
+    # hit need not materialize intermediate dependency layers in this builder.
+    return ["docker", "buildx", "build", "--builder", builder, "--target", "rust-build",
+            "--progress=rawjson", "--output=type=cacheonly", "--cache-from=type=gha,scope=lake-sink",
+            "--build-arg", "VERSION=" + version, "--file", str(context / DOCKERFILE), str(context)]
+
+
 def main():
     if sys.platform != "linux" or not all(hasattr(os, flag) for flag in ("O_NOFOLLOW", "O_NONBLOCK")):
         raise ValueError("cache probe requires Linux file and process ownership")
     parser = argparse.ArgumentParser()
     for name in ("source", "tree", "run", "attempt", "image", "builder", "output"): parser.add_argument("--" + name, required=True)
     args = parser.parse_args()
+    if not os.environ.get("ACTIONS_RUNTIME_TOKEN") or not os.environ.get("ACTIONS_RESULTS_URL") or os.environ.get("ACTIONS_CACHE_MODE") != "read":
+        raise ValueError("read-only cache environment missing")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image): raise ValueError("canonical image must be immutable")
     root = Path.cwd()
     if subprocess.check_output(["git", "rev-parse", "HEAD", "HEAD^{tree}"], text=True, timeout=10).splitlines() != [args.source, args.tree]:
@@ -249,8 +259,7 @@ def main():
         log = output / "cache-probe-progress.jsonl"
         remaining = deadline-time.monotonic()
         if remaining <= 0: raise ValueError("synthetic probe observation budget expired")
-        bounded_command(["docker", "buildx", "build", "--builder", args.builder, "--target", "rust-build", "--progress=rawjson", "--output=type=cacheonly",
-                         "--build-arg", "VERSION=" + version, "--file", str(context / DOCKERFILE), str(context)],
+        bounded_command(build_args(args.builder, context, version),
                         log, LIMIT, timeout=remaining, capture_stderr=True)
         raw = log.read_bytes()
         report = {"schema":1, "source":args.source, "tree":args.tree, "run":args.run, "attempt":args.attempt,
