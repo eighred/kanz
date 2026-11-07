@@ -11,7 +11,7 @@ use kanz_proto_wire::{Budget, Canonical};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use tokio_postgres::{Client, Transaction};
+use tokio_postgres::{types::Type, Client, Transaction};
 
 /// Bounded one-row cursor over a single read snapshot. It neither retains all
 /// raw journal bytes nor truncates a page and calls that complete history.
@@ -191,7 +191,7 @@ impl Mapping<'_> {
 }
 async fn scope<'a>(client: &'a mut Client, tenant: &str) -> Result<Transaction<'a>, Error> {
     let tx = scoped(client, tenant).await?;
-    let n:i64=tx.query_one("SELECT count(*) FROM pg_class WHERE oid IN ('execution_recovery_cases'::regclass,'execution_account_mappings'::regclass,'execution_recovery_history'::regclass,'execution_recovery_targets'::regclass,'execution_recovery_acks'::regclass,'execution_fee_proposals'::regclass,'execution_fee_approvals'::regclass) AND relrowsecurity AND relforcerowsecurity",&[]).await?.get(0);
+    let n:i64=tx.query_typed_one("SELECT count(*) FROM pg_class WHERE oid IN ('execution_recovery_cases'::regclass,'execution_account_mappings'::regclass,'execution_recovery_history'::regclass,'execution_recovery_targets'::regclass,'execution_recovery_acks'::regclass,'execution_fee_proposals'::regclass,'execution_fee_approvals'::regclass) AND relrowsecurity AND relforcerowsecurity",&[]).await?.get(0);
     if n != 7 {
         return Err(Error::UnsafeRole);
     }
@@ -205,7 +205,7 @@ pub async fn load_case(client: &mut Client, tenant: &str, id: &str) -> Result<Ca
     let limit = HISTORY_BYTES as i64;
     // A corrupt restored TEXT/BYTEA must be bounded before transfer, not after
     // decoding. Metadata and observation bytes have independent budgets.
-    let row=tx.query_opt("SELECT CASE WHEN octet_length(case_id)::bigint+octet_length(order_id)+octet_length(COALESCE(mapping_version,''))+octet_length(source_cursor)+octet_length(payload_digest)+octet_length(status)+octet_length(reason)<=8192 THEN ARRAY[case_id,order_id,COALESCE(mapping_version,''),source_cursor,payload_digest,status,reason] END,CASE WHEN octet_length(evidence)::bigint<=$2 THEN evidence END,checkpoint,version FROM execution_recovery_cases WHERE case_id=$1",&[&id,&limit]).await?.ok_or(Error::NotFound)?;
+    let row=tx.query_typed_opt("SELECT CASE WHEN octet_length(case_id)::bigint+octet_length(order_id)+octet_length(COALESCE(mapping_version,''))+octet_length(source_cursor)+octet_length(payload_digest)+octet_length(status)+octet_length(reason)<=8192 THEN ARRAY[case_id,order_id,COALESCE(mapping_version,''),source_cursor,payload_digest,status,reason] END,CASE WHEN octet_length(evidence)::bigint<=$2 THEN evidence END,checkpoint,version FROM execution_recovery_cases WHERE case_id=$1",&[(&id, Type::TEXT), (&limit, Type::INT8)]).await?.ok_or(Error::NotFound)?;
     let f: Vec<String> = row
         .get::<_, Option<Vec<String>>>(0)
         .ok_or(Error::Capacity)?;
