@@ -14,6 +14,17 @@ LABEL = "io.kanz.storage-signal"
 BODY = "import os,time;print('pid1' if os.getpid()==1 else 'non_pid1',flush=True);assert os.getpid()==1;print('pid1_ready',flush=True);time.sleep(120)"
 
 
+def pids_profile(args, env):
+    if not args:
+        return 8
+    if (args != ["--diagnostic-pids32"] or env.get("GITHUB_JOB") != "storage-pid1-diagnostic"
+            or env.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or not env.get("GITHUB_REF", "").startswith("refs/heads/")
+            or env["GITHUB_REF"] in ("refs/heads/", "refs/heads/main")):
+        raise ValueError("experimental PID profile requires non-main diagnostic dispatch")
+    return 32
+
+
 def startup_error(value):
     if not isinstance(value, str) or not value or len(value) > 8192:
         return "unknown"
@@ -92,7 +103,9 @@ def owned(name, nonce, identity=None):
     return obj
 
 
-def case(repaired, progress):
+def case(repaired, progress, pids=8):
+    if pids not in (8, 32) or type(pids) is not int:
+        raise ValueError("unknown PID profile")
     nonce = uuid.uuid4().hex
     name = "kanz-storage-signal-" + nonce
     identity = None
@@ -106,7 +119,7 @@ def case(repaired, progress):
         identity = migration.command([
             "docker", "create", "--name", name, "--label", LABEL + "=" + nonce,
             "--network=none", "--read-only", "--user=65532:65532", "--cap-drop=ALL", "--init=false",
-            "--security-opt=no-new-privileges", "--memory=64m", "--cpus=0.1", "--pids-limit=8",
+            "--security-opt=no-new-privileges", "--memory=64m", "--cpus=0.1", "--pids-limit=" + str(pids),
             "--log-driver=local", "--log-opt=max-size=16k", "--log-opt=max-file=1",
             proof.IMAGE, "python3", "-I", "-B", "-c",
             (migration.STORAGE_SHUTDOWN if repaired else "") + BODY], timeout=60)
@@ -162,6 +175,8 @@ def case(repaired, progress):
 def main():
     progress = {"format": "kanz-storage-pid1-v1", "case": "startup", "stage": "platform", "cleanup": "not_created", "passed": False}
     try:
+        pids = pids_profile(sys.argv[1:], os.environ)
+        progress.update(profile="default_pids8" if pids == 8 else "experimental_pids32", requestedPids=pids)
         source = migration.command(["git", "rev-parse", "HEAD"], timeout=10)
         tree = migration.command(["git", "rev-parse", "HEAD^{tree}"], timeout=10)
         run, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
@@ -179,7 +194,7 @@ def main():
         progress["imageStopSignal"] = "TERM"
         for repaired in (False, True):
             progress["case"] = "registered" if repaired else "default"
-            case(repaired, progress)
+            case(repaired, progress, pids)
         progress.update(stage="complete", passed=True, oldTerm="running", registeredTerm="exit0")
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, migration.subprocess.TimeoutExpired, proof.ProofError):
         # No raw Docker output, exception message, arguments or paths escape.

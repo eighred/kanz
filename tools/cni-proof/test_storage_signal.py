@@ -36,6 +36,9 @@ def diagnostic_seam(value):
             or full["timeout-minutes"] != 30 or diag["timeout-minutes"] != 5
             or value["permissions"] != {"contents": "read"}):
         raise ValueError("diagnostic job boundary differs")
+    commands = [step.get("run") for step in diag["steps"] if step.get("name") == "Prove storage PID1 graceful termination"]
+    if commands != ["python3 -B tools/cni-proof/storage_signal.py --diagnostic-pids32"]:
+        raise ValueError("diagnostic experiment profile differs")
     for job in (full, diag):
         if "permissions" in job or "continue-on-error" in job:
             raise ValueError("diagnostic job authority differs")
@@ -44,6 +47,20 @@ def diagnostic_seam(value):
 
 
 class StorageSignalTests(unittest.TestCase):
+    def test_experimental_profile_is_fixed_and_diagnostic_only(self):
+        env = {"GITHUB_JOB": "storage-pid1-diagnostic", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/diagnostic"}
+        self.assertEqual(storage_signal.pids_profile([], {}), 8)
+        self.assertEqual(storage_signal.pids_profile(["--diagnostic-pids32"], env), 32)
+        for args in (["--pids-limit=32"], ["--diagnostic-pids64"], ["--diagnostic-pids32", "extra"]):
+            with self.assertRaises(ValueError): storage_signal.pids_profile(args, env)
+        for key, value in (("GITHUB_JOB", "disposable-transition"), ("GITHUB_JOB", ""),
+                           ("GITHUB_EVENT_NAME", "push"), ("GITHUB_EVENT_NAME", "pull_request"),
+                           ("GITHUB_REF", "refs/heads/main"), ("GITHUB_REF", "refs/tags/test"),
+                           ("GITHUB_REF", "refs/heads/"), ("GITHUB_REF", "")):
+            changed = {**env, key: value}
+            with self.assertRaises(ValueError): storage_signal.pids_profile(["--diagnostic-pids32"], changed)
+            self.assertEqual(storage_signal.pids_profile([], changed), 8)
+
     def test_diagnostic_mode_is_not_release_evidence(self):
         root = Path(__file__).resolve().parents[2]
         source = root / ".github/scripts/release_ci.py"
