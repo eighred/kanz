@@ -136,6 +136,23 @@ jobs:
           psql -h localhost -U kanz -d kanz_oms_ci -v ON_ERROR_STOP=1 \
             -c "GRANT ALL ON SCHEMA public TO kanzapp;"
 
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: kanz-web/.nvmrc
+
+      # Complete native browser installation before restoring any Go outputs.
+      # The compiler cache binds the resulting full package fingerprint.
+      - name: Select official HTTPS Ubuntu archive for browser dependencies
+        run: |
+          python3 -m unittest discover -s .github/scripts -p test_ci_ubuntu_archive.py
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py
+
+      - name: Prepare complete MFA browser dependencies before compiler cache
+        run: |
+          cd kanz-web
+          npm ci --no-audit --no-fund
+          npx --no-install playwright install --with-deps chromium
+
       - name: Select isolated compiler cache profile
         env:
           GO_SHARD: ${{ matrix.shard }}
@@ -164,7 +181,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.compiler_cache_meta.outputs.paths }}
-          key: kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'kanz-schemas/buf.gen.yaml', 'kanz-schemas/proto/**/*.proto') }}
+          key: kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'kanz-schemas/buf.gen.yaml', 'kanz-schemas/proto/**/*.proto', '.github/scripts/go_shard_evidence.py') }}
           restore-keys: |
             kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-
 
@@ -487,22 +504,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: kanz-web/.nvmrc
-
-      # Avoid the observed Azure mirror font-download stalls without changing
-      # signed suites/components or Playwright's complete dependency inventory.
-      - name: Select official HTTPS Ubuntu archive for browser dependencies
-        run: |
-          python3 -m unittest discover -s .github/scripts -p test_ci_ubuntu_archive.py
-          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 .github/scripts/ci_ubuntu_archive.py
-
       - name: Build the real MFA browser boundary
         run: |
           cd kanz-web
-          npm ci --no-audit --no-fund
-          npx --no-install playwright install --with-deps chromium
           npm run build
           cd ../kanz
           go build -o "$RUNNER_TEMP/mfa-web-bff" ./services/web-bff/cmd/web-bff

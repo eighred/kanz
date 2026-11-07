@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -46,7 +48,10 @@ class CompilerIdentityTests(unittest.TestCase):
                 output = Path(directory) / "output"
                 env = dict(self.env, GITHUB_OUTPUT=str(output), EXPECTED_FINGERPRINT=expected, HOME=str(Path.home()), USERPROFILE=str(Path.home()))
                 with patch.dict(os.environ, env, clear=True), patch.object(cache.sys, "argv", ["go_ci_cache.py", "check"]), patch.object(cache.subprocess, "check_output", side_effect=OSError("unknown") if fail else [json.dumps(self.go).encode(), "libc=1"]):
-                    cache.main()
+                    # Synthetic negative controls must not annotate the actual
+                    # workflow as a changed or unknown native environment.
+                    with redirect_stdout(io.StringIO()):
+                        cache.main()
                 self.assertIn("stable=" + stable + "\n", output.read_text())
                 self.assertNotIn("enabled=true", output.read_text())
 

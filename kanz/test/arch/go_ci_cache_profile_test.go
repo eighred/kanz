@@ -11,10 +11,11 @@ import (
 
 const goCacheAction = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 const goCachePrefix = "kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-"
-const goCacheInputs = "${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'kanz-schemas/buf.gen.yaml', 'kanz-schemas/proto/**/*.proto') }}"
+const goCacheInputs = "${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'kanz-schemas/buf.gen.yaml', 'kanz-schemas/proto/**/*.proto', '.github/scripts/go_shard_evidence.py') }}"
 const goCacheWriter = "success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.compiler_cache_meta.outputs.enabled == 'true'"
 
 type goCacheStep struct {
+	Name    string            `yaml:"name"`
 	ID      string            `yaml:"id"`
 	Uses    string            `yaml:"uses"`
 	If      string            `yaml:"if"`
@@ -34,14 +35,20 @@ func checkGoCacheProfile(data []byte) error {
 		return err
 	}
 	steps := workflow.Jobs["go-race"].Steps
-	meta, restore, final, save, setup := -1, -1, -1, -1, 0
+	meta, restore, final, save, setup, native, setupAt := -1, -1, -1, -1, 0, -1, -1
 	for i, step := range steps {
 		switch {
 		case strings.HasPrefix(step.Uses, "actions/setup-go@"):
 			setup++
+			setupAt = i
 			if step.With["cache"] != "false" || step.With["cache-dependency-path"] != "" {
 				return fmt.Errorf("implicit compiler cache writer enabled")
 			}
+		case step.Name == "Prepare complete MFA browser dependencies before compiler cache":
+			if native != -1 || step.If != "" || strings.TrimSpace(step.Run) != "cd kanz-web\nnpm ci --no-audit --no-fund\nnpx --no-install playwright install --with-deps chromium" {
+				return fmt.Errorf("native dependencies no longer fully prepared")
+			}
+			native = i
 		case step.ID == "compiler_cache_meta":
 			if meta != -1 || step.WorkDir != "kanz" || strings.TrimSpace(step.Run) != "python3 -B -m unittest discover -s ../.github/scripts -p test_go_ci_cache.py\npython3 ../.github/scripts/go_ci_cache.py" || step.If != "" {
 				return fmt.Errorf("compiler metadata no longer checked")
@@ -66,7 +73,7 @@ func checkGoCacheProfile(data []byte) error {
 			return fmt.Errorf("unexpected compiler cache action")
 		}
 	}
-	if setup != 1 || meta < 0 || restore <= meta || final <= restore || save != len(steps)-1 || final != save-1 {
+	if setup != 1 || native < 0 || setupAt <= native || meta <= setupAt || restore <= meta || final <= restore || save != len(steps)-1 || final != save-1 {
 		return fmt.Errorf("compiler cache authority/order incomplete")
 	}
 	for job, config := range workflow.Jobs {
@@ -101,12 +108,14 @@ func TestGoCICompilerCacheProfileIsExclusive(t *testing.T) {
 		{"${{ steps.compiler_cache_meta.outputs.paths }}", "${{ github.workspace }}"},
 		{"${{ steps.compiler_cache.outputs.cache-primary-key }}", "shared"},
 		{"python3 ../.github/scripts/go_ci_cache.py check", "true"},
+		{"name: Prepare complete MFA browser dependencies before compiler cache", "name: Omitted native preparation"},
+		{"npx --no-install playwright install --with-deps chromium", "npx --no-install playwright install chromium"},
 		{goCachePrefix + "\n", strings.TrimSuffix(goCachePrefix, "-") + "\n"},
 	}
 	for _, input := range []string{"runner.os", "runner.arch", "steps.compiler_cache_meta.outputs.version", "steps.compiler_cache_meta.outputs.image", "steps.compiler_cache_meta.outputs.fingerprint", "matrix.kind", "matrix.shard"} {
 		mutations = append(mutations, [2]string{"${{ " + input + " }}", "shared"})
 	}
-	for _, input := range []string{"kanz/.gotmp/go-ci-cache-profile", "kanz/go.mod", "kanz/go.sum", ".github/go-ci-cache-profile", "kanz-schemas/buf.gen.yaml", "kanz-schemas/proto/**/*.proto"} {
+	for _, input := range []string{"kanz/.gotmp/go-ci-cache-profile", "kanz/go.mod", "kanz/go.sum", ".github/go-ci-cache-profile", "kanz-schemas/buf.gen.yaml", "kanz-schemas/proto/**/*.proto", ".github/scripts/go_shard_evidence.py"} {
 		mutations = append(mutations, [2]string{"'" + input + "'", "'removed'"})
 	}
 	for _, mutation := range mutations {

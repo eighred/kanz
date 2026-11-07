@@ -10,6 +10,13 @@ import subprocess
 from go_test_evidence import check, events
 
 COUNT = 2
+# Keep these integration workloads with the architecture runner instead of
+# clustering them with the archive/landing suites. Routing changes ownership
+# only: the same complete inventory and fresh serial tests remain mandatory.
+SHARD_OWNERS = {
+    "github.com/eighred/kanz/pkg/bus": 0,
+    "github.com/eighred/kanz/services/risk-engine/internal/app": 0,
+}
 MAX_PACKAGES = 10000
 MAX_INVENTORY = 4 * 1024 * 1024
 MAX_EVENTS = 256 * 1024 * 1024
@@ -37,7 +44,12 @@ def inventory(text):
 def partition(packages, shard):
     if type(shard) is not int or shard not in range(COUNT):
         raise ValueError("invalid shard")
-    return [p for p in packages if int(hashlib.sha256(p.encode()).hexdigest(), 16) % COUNT == shard]
+    return [p for p in packages if SHARD_OWNERS.get(p, int(hashlib.sha256(p.encode()).hexdigest(), 16) % COUNT) == shard]
+
+
+def require_routed_owners(packages):
+    if set(SHARD_OWNERS) - set(packages) or any(type(s) is not int or s not in range(COUNT) for s in SHARD_OWNERS.values()):
+        raise ValueError("routed package disappeared or has an invalid shard")
 
 
 def identity():
@@ -98,6 +110,7 @@ def seal(directory, shard, source):
 
 
 def combine(root, packages, source):
+    require_routed_owners(packages)
     combined, seen = [], set()
     names = {f"go-race-{source['run']}-{source['attempt']}-{s}" for s in range(COUNT)}
     if set(p.name for p in root.iterdir()) != names:
@@ -138,7 +151,9 @@ def main():
     args = parser.parse_args()
     source = identity()
     if args.mode == "select":
-        selected = partition(inventory(bounded_bytes(args.packages, MAX_INVENTORY).decode()), args.shard)
+        packages = inventory(bounded_bytes(args.packages, MAX_INVENTORY).decode())
+        require_routed_owners(packages)
+        selected = partition(packages, args.shard)
         if not selected:
             raise ValueError("empty shard")
         args.directory.mkdir(parents=True, exist_ok=True)
