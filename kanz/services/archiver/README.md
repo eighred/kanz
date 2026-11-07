@@ -39,3 +39,34 @@ conditional on that mode; the active source-first deployment is not changed by
 these definitions. Default `nats-rebuild` does not restore this optional journal.
 Registry, derived-file and journal disaster recovery remain unverified under
 #1413/#60. No live rollout or backup acceptance follows from source checks.
+
+### Disposable lake snapshot archiver fixture
+
+The parent lake qualification compiles the actual archive package test binary,
+records its SHA256, and invokes only `-test.run=^TestLakeSnapshotArchiverSubprocess$`
+with `KANZ_LAKE_ARCHIVER_CHILD=1`. `TEST_LAKE_ARCHIVER_TEST_BIN` selects that
+binary in the parent. A single newline JSON initialization (maximum 64 KiB)
+carries loopback endpoints and ephemeral synthetic SVID/bundle bytes over stdin;
+credentials are not environment variables or files. The helper uses `config.Load`
+with `ARCHIVER_LAKE_SNAPSHOTS=true`, only `lake.snapshot.>`, and the existing
+`archive.New`/`Run`/`Handle`, native NATS durable subscription and Kafka publisher.
+It does not implement a second archival path.
+
+`connected` means the native durable is registered and initially caught up, not
+that a Kafka write has succeeded. The parent independently observes the consumer
+and exact Kafka bytes, keys, tenant routing and DLQ/retry behavior. NATS requires
+the exact synthetic archiver and broker SPIFFE identities; Kafka is restricted
+to the disposable loopback fixture. This is not SPIRE issuance or Kafka ACL proof.
+The native poison-message path remains Kafka `dlq.archiver`.
+
+EOF cancels the 90-second helper context. `closed` is emitted only after Run,
+both transports and the input reader have joined; lifetime expiry fails instead.
+Native drain behavior is unchanged (five seconds plus two seconds stop slack).
+The parent's separate cleanup observation allowance must accommodate that drain;
+expiry requires failed cleanup and explicit process kill/join, never a successful
+shutdown assertion. Logs are discarded and failure text is a fixed category.
+
+`ExpectedAccount` is a fixture allowlist assertion only. It does not establish
+the authenticated broker account; the parent must independently prove account
+identity and same-account durable registration. Trailing input other than EOF
+refuses after joined cleanup.
