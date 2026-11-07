@@ -143,7 +143,7 @@ func lakeRawProofWorkflow(source string) error {
 			for _, command := range []string{
 				"set -euo pipefail",
 				"python3 -B -m unittest discover -s ../.github/scripts -p test_check_lake_raw_evidence.py",
-				"go test -race -p 1 -json -count=1 ./services/lake-sink/internal/cdc -run '^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff)$' | tee \"$RUNNER_TEMP/lake-raw-proof.jsonl\"",
+				"go test -race -p 1 -json -count=1 ./services/lake-sink/internal/cdc -run '^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff|TestRawCrashRecoveryPhaseHandoff)$' | tee \"$RUNNER_TEMP/lake-raw-proof.jsonl\"",
 				"python3 ../.github/scripts/check_lake_raw_evidence.py \"$RUNNER_TEMP/lake-raw-proof.jsonl\"",
 			} {
 				if !strings.Contains(step.Run, command) {
@@ -170,8 +170,9 @@ func TestLakeRawCustodyRequiresActualKafkaEvidence(t *testing.T) {
 		{"matrix.kind == 'quality'", "false"}, {"working-directory: kanz", "working-directory: elsewhere"},
 		{"TEST_KAFKA_BROKERS: localhost:9092", "TEST_KAFKA_BROKERS: ''"},
 		{"set -euo pipefail", "true"}, {"go test -race -p 1 -json -count=1", "go test -p 1 -json -count=1"},
-		{"^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff)$", "^TestRawKafkaCustodyAndOffsets$"},
-		{"^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff)$", "^TestRawRestartReadPhaseHandoff$"},
+		{"^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff|TestRawCrashRecoveryPhaseHandoff)$", "^TestRawKafkaCustodyAndOffsets$"},
+		{"^(TestRawKafkaCustodyAndOffsets|TestRawRestartReadPhaseHandoff|TestRawCrashRecoveryPhaseHandoff)$", "^TestRawRestartReadPhaseHandoff$"},
+		{"|TestRawCrashRecoveryPhaseHandoff", ""},
 		{"python3 ../.github/scripts/check_lake_raw_evidence.py", "echo"},
 		{"python3 -B -m unittest discover", "echo"},
 		{"        run: |", "        continue-on-error: true\n        run: |"},
@@ -186,5 +187,92 @@ func TestLakeRawCustodyRequiresActualKafkaEvidence(t *testing.T) {
 	}
 	if lakeRawProofWorkflow(source[:start]+source[end:]) == nil {
 		t.Fatal("missing step escaped")
+	}
+}
+
+func lakeRawCrashPhases(source string) error {
+	f, err := parser.ParseFile(token.NewFileSet(), "raw_integration_test.go", source, 0)
+	if err != nil {
+		return err
+	}
+	var problem error
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "TestRawKafkaCustodyAndOffsets" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if goStmt, ok := n.(*ast.GoStmt); ok {
+				ast.Inspect(goStmt, func(child ast.Node) bool {
+					if id, ok := child.(*ast.Ident); ok && (id.Name == "ctx" || id.Name == "workCtx") {
+						problem = fmt.Errorf("goroutine captures mutable phase context")
+					}
+					return true
+				})
+			}
+			if assign, ok := n.(*ast.AssignStmt); ok && assign.Tok != token.DEFINE {
+				for _, lhs := range assign.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name == "ctx" {
+						problem = fmt.Errorf("setup context reassigned")
+					}
+				}
+			}
+			return true
+		})
+	}
+	if problem != nil {
+		return problem
+	}
+	position := 0
+	for _, marker := range []string{
+		"ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)",
+		"subctx, stop := context.WithCancel(ctx)",
+		"fetched.Topics[topic][0].CommittedOffset == independent.Offset+1",
+		`membership.GroupState != "Stable" || len(membership.Members) != 1`,
+		"recovery, cancelRecovery, err := rawIndependentPhase(ctx, 45*time.Second)",
+		"workCtx = recovery",
+		"child.Process.Kill()",
+		"rawKilledProcessJoined(workCtx, done)",
+		"describeRawCrashGroup(t, workCtx, brokers, group, diagnostic)",
+		`membership.GroupState == "Empty" && len(membership.Members) == 0`,
+		"client.Publish(workCtx, bus.Message{Subject: topic, Body: nextMarker})",
+		`rawRestartReadContext(workCtx, mode == "process-crash")`,
+		"restart := kafka.NewReader(",
+		"restart.FetchMessage(readctx)",
+	} {
+		i := strings.Index(source[position:], marker)
+		if i < 0 {
+			return fmt.Errorf("crash phase wiring missing or reordered")
+		}
+		position += i + len(marker)
+	}
+	return nil
+}
+
+func TestLakeRawCrashPhaseWiring(t *testing.T) {
+	source := string(mustReadArchFile(t, filepath.Join(moduleRoot(t), "services/lake-sink/internal/cdc/raw_integration_test.go")))
+	if err := lakeRawCrashPhases(source); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range [][2]string{
+		{"rawIndependentPhase(ctx, 45*time.Second)", "rawIndependentPhase(ctx, 60*time.Second)"},
+		{"rawKilledProcessJoined(workCtx, done)", "rawKilledProcessJoined(context.Background(), done)"},
+		{"workCtx = recovery", "workCtx = ctx"},
+		{"workCtx = recovery", "ctx = recovery"},
+		{"consumer.SubscribeDelivery(subctx,", "consumer.SubscribeDelivery(workCtx,"},
+		{"client.Publish(workCtx,", "client.Publish(ctx,"},
+		{`rawRestartReadContext(workCtx, mode == "process-crash")`, "rawRestartReadContext(workCtx, true)"},
+	} {
+		mutated := strings.Replace(source, change[0], change[1], 1)
+		if mutated == source || lakeRawCrashPhases(mutated) == nil {
+			t.Fatal("phase weakening mutation escaped")
+		}
+	}
+	constructor := "restart := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: topic, GroupID: group, MinBytes: 1, MaxBytes: 1 << 20})"
+	handoff := `readctx, readcancel, err := rawRestartReadContext(workCtx, mode == "process-crash")`
+	mutated := strings.Replace(source, constructor, "", 1)
+	mutated = strings.Replace(mutated, handoff, constructor+"\n"+handoff, 1)
+	if mutated == source || lakeRawCrashPhases(mutated) == nil {
+		t.Fatal("reader creation before active phase handoff escaped")
 	}
 }

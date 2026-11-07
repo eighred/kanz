@@ -47,6 +47,9 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
+			// Only this parent test goroutine advances workCtx. Subscriber and
+			// process goroutines retain subctx; ctx itself is never reassigned.
+			workCtx := ctx
 			deadline, _ := ctx.Deadline()
 			diagnostic := newRawCrashDiagnostic(deadline)
 			if mode == "process-crash" {
@@ -166,25 +169,34 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 					if membership.GroupState != "Stable" || len(membership.Members) != 1 {
 						t.Fatal("crash helper lacks exclusive active group membership")
 					}
+					recovery, cancelRecovery, err := rawIndependentPhase(ctx, 45*time.Second)
+					if err != nil {
+						t.Fatal("setup expired before crash-recovery handoff")
+					}
+					defer cancelRecovery()
+					workCtx = recovery
+					diagnostic.deadline, _ = recovery.Deadline()
+					diagnostic.Phase = "crash-recovery"
 					// Abrupt process termination: no FileSink.Flush/Close or deferred cleanup.
-					diagnostic.Kill = rawCrashPhaseBudget(deadline, time.Now())
+					diagnostic.Kill = rawCrashPhaseBudget(diagnostic.deadline, time.Now())
 					if err := child.Process.Kill(); err != nil {
 						t.Fatal("crash helper kill failed")
 					}
-					if err := <-done; err == nil {
-						t.Fatal("crash helper exited cleanly")
+					if err := rawKilledProcessJoined(workCtx, done); err != nil {
+						t.Fatal("crash helper did not confirm nonzero join within recovery phase")
 					}
 					diagnostic.KillConfirmed = true
 					// SIGKILL cannot send LeaveGroup. The pinned kafka-go consumer
 					// uses a 30s session timeout. Observe coordinator expiry inside
-					// the original case budget before the unchanged 5s read below.
+					// this independent 45s recovery phase, without shortening the
+					// production session timeout or reviving failed setup.
 					for {
-						membership = describeRawCrashGroup(t, ctx, brokers, group, diagnostic)
+						membership = describeRawCrashGroup(t, workCtx, brokers, group, diagnostic)
 						if membership.GroupState == "Empty" && len(membership.Members) == 0 {
 							break
 						}
 						select {
-						case <-ctx.Done():
+						case <-workCtx.Done():
 							t.Fatal("killed consumer membership did not expire")
 						case <-time.After(100 * time.Millisecond):
 						}
@@ -246,17 +258,17 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := client.Publish(ctx, bus.Message{Subject: topic, Body: nextMarker}); err != nil {
+				if err := client.Publish(workCtx, bus.Message{Subject: topic, Body: nextMarker}); err != nil {
 					t.Fatal("next marker publish failed")
 				}
 			}
-			restart := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: topic, GroupID: group, MinBytes: 1, MaxBytes: 1 << 20})
-			defer func() { _ = restart.Close() }()
-			readctx, readcancel, err := rawRestartReadContext(ctx, mode == "process-crash")
+			readctx, readcancel, err := rawRestartReadContext(workCtx, mode == "process-crash")
 			if err != nil {
 				t.Fatal("raw lifecycle expired before restart read handoff")
 			}
 			defer readcancel()
+			restart := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: topic, GroupID: group, MinBytes: 1, MaxBytes: 1 << 20})
+			defer func() { _ = restart.Close() }()
 			replay, err := restart.FetchMessage(readctx)
 			if committed {
 				if err != nil || replay.Offset != independent.Offset+1 || !bytes.Equal(replay.Value, nextMarker) {
@@ -269,13 +281,14 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 	}
 }
 
-// The crash lifecycle keeps its original 45s for setup, commit, kill, broker
-// membership expiry and marker publication. Only a successful, still-active
-// lifecycle may hand off to the existing 5s positive read. Previously that read
-// inherited the nearly exhausted lifecycle deadline and did not get five seconds.
-// Crash work is therefore bounded by 45s + 5s, excluding fixture cleanup; the
-// other modes retain their original shared lifecycle deadline.
-func rawRestartReadContext(lifecycle context.Context, processCrash bool) (context.Context, context.CancelFunc, error) {
+// Each successful active phase hands off once. Setup 45s + recovery 45s + read 5s
+// gives a 95s configured context-budget envelope, not a hard process wall-clock
+// bound: synchronous disk I/O, cleanup and scheduling are not preempted here.
+// Production Kafka keeps its 30s session; setup cannot consume expiry allowance.
+func rawIndependentPhase(lifecycle context.Context, budget time.Duration) (context.Context, context.CancelFunc, error) {
+	if budget != 45*time.Second && budget != 5*time.Second {
+		return nil, nil, errors.New("unsupported fixture phase budget")
+	}
 	if err := lifecycle.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -284,12 +297,68 @@ func rawRestartReadContext(lifecycle context.Context, processCrash bool) (contex
 	if !bounded || !handoff.Before(deadline) {
 		return nil, nil, context.DeadlineExceeded
 	}
-	parent := lifecycle
-	if processCrash {
-		parent = context.Background()
-	}
-	ctx, cancel := context.WithDeadline(parent, handoff.Add(5*time.Second))
+	ctx, cancel := context.WithDeadline(context.Background(), handoff.Add(budget))
 	return ctx, cancel, nil
+}
+
+func rawRestartReadContext(lifecycle context.Context, processCrash bool) (context.Context, context.CancelFunc, error) {
+	if processCrash {
+		return rawIndependentPhase(lifecycle, 5*time.Second)
+	}
+	ctx, cancel := context.WithTimeout(lifecycle, 5*time.Second)
+	return ctx, cancel, nil
+}
+
+func rawKilledProcessJoined(ctx context.Context, done <-chan error) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == nil {
+			return errors.New("killed helper exited cleanly")
+		}
+		return nil
+	}
+}
+
+func TestRawCrashRecoveryPhaseHandoff(t *testing.T) {
+	setup, cancelSetup := context.WithTimeout(context.Background(), time.Second)
+	defer cancelSetup()
+	recovery, cancelRecovery, err := rawIndependentPhase(setup, 45*time.Second)
+	if err != nil {
+		t.Fatal("active setup refused")
+	}
+	defer cancelRecovery()
+	deadline, _ := recovery.Deadline()
+	if left := time.Until(deadline); left < 44*time.Second || left > 45*time.Second {
+		t.Fatal("crash recovery did not receive exactly its own bounded phase")
+	}
+	cancelSetup()
+	if recovery.Err() != nil {
+		t.Fatal("recovery inherited exhausted setup")
+	}
+	if _, _, err := rawIndependentPhase(setup, 45*time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatal("failed setup revived")
+	}
+	done := make(chan error, 1)
+	done <- errors.New("controlled nonzero exit")
+	if rawKilledProcessJoined(recovery, done) != nil {
+		t.Fatal("nonzero join refused")
+	}
+	done <- nil
+	if rawKilledProcessJoined(recovery, done) == nil {
+		t.Fatal("clean exit accepted as kill")
+	}
+	cancelRecovery()
+	if !errors.Is(rawKilledProcessJoined(recovery, done), context.Canceled) {
+		t.Fatal("blocked join ignored phase deadline")
+	}
+	if _, _, err := rawRestartReadContext(recovery, true); !errors.Is(err, context.Canceled) {
+		t.Fatal("failed recovery revived for positive read")
+	}
 }
 
 func TestRawRestartReadPhaseHandoff(t *testing.T) {
@@ -376,6 +445,7 @@ func TestRawKafkaCrashChild(t *testing.T) {
 func describeRawCrashGroup(t *testing.T, ctx context.Context, brokers []string, group string, diagnostic *rawCrashDiagnostic) kafka.DescribeGroupsResponseGroup {
 	t.Helper()
 	diagnostic.Polls++
+	diagnostic.LastPollPhase = diagnostic.Phase
 	diagnostic.LastPoll = rawCrashPhaseBudget(diagnostic.deadline, time.Now())
 	admin := kafka.Client{Addr: kafka.TCP(brokers...)}
 	result, err := admin.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: []string{group}})
@@ -384,6 +454,7 @@ func describeRawCrashGroup(t *testing.T, ctx context.Context, brokers []string, 
 		t.Fatal("exact crash group membership unavailable")
 	}
 	diagnostic.LastObserved = rawCrashPhaseBudget(diagnostic.deadline, time.Now())
+	diagnostic.LastObservedPhase = diagnostic.Phase
 	diagnostic.State = rawCrashGroupState(result.Groups[0].GroupState)
 	diagnostic.Members = len(result.Groups[0].Members)
 	return result.Groups[0]
@@ -397,21 +468,24 @@ type rawCrashBudget struct {
 }
 
 type rawCrashDiagnostic struct {
-	deadline      time.Time
-	Commit        rawCrashBudget `json:"commit"`
-	Kill          rawCrashBudget `json:"kill_attempt"`
-	KillConfirmed bool           `json:"kill_confirmed"`
-	LastPoll      rawCrashBudget `json:"last_poll"`
-	LastObserved  rawCrashBudget `json:"last_observed"`
-	State         string         `json:"last_group_state"`
-	Members       int            `json:"last_member_count"`
-	Polls         int            `json:"poll_count"`
-	QueryFailures int            `json:"query_failures"`
+	deadline          time.Time
+	Phase             string         `json:"membership_phase"`
+	LastPollPhase     string         `json:"last_poll_phase"`
+	LastObservedPhase string         `json:"last_observed_phase"`
+	Commit            rawCrashBudget `json:"commit"`
+	Kill              rawCrashBudget `json:"kill_attempt"`
+	KillConfirmed     bool           `json:"kill_confirmed"`
+	LastPoll          rawCrashBudget `json:"last_poll"`
+	LastObserved      rawCrashBudget `json:"last_observed"`
+	State             string         `json:"last_group_state"`
+	Members           int            `json:"last_member_count"`
+	Polls             int            `json:"poll_count"`
+	QueryFailures     int            `json:"query_failures"`
 }
 
 func newRawCrashDiagnostic(deadline time.Time) *rawCrashDiagnostic {
 	missing := rawCrashBudget{-1, -1}
-	return &rawCrashDiagnostic{deadline: deadline, Commit: missing, Kill: missing, LastPoll: missing, LastObserved: missing, State: "unobserved", Members: -1}
+	return &rawCrashDiagnostic{deadline: deadline, Phase: "setup", Commit: missing, Kill: missing, LastPoll: missing, LastObserved: missing, State: "unobserved", Members: -1}
 }
 
 func rawCrashPhaseBudget(deadline, now time.Time) rawCrashBudget {
