@@ -2,6 +2,9 @@
 import ast
 from pathlib import Path
 import hashlib
+import json
+import re
+import tomllib
 import unittest
 
 import policy_state
@@ -38,7 +41,49 @@ def declarations(source):
     return result
 
 
+# Semantic config before the one public digest exception; comments/formatting
+# are irrelevant, but another path, rule, regex or default change must refuse.
+GITLEAKS_BASELINE = "564d0f299dd300d32379bf5a7acc3c9fadc12e8a5118beacd87332d6b5d0600d"
+PUBLIC_DECLARATION = 'TOKEN = "kanz.eighred.com/gateway-policy-transaction"'
+
+
+def exact_public_digest_exception(text):
+    try:
+        config = tomllib.loads(text)
+        expected = "^" + hashlib.sha256(PUBLIC_DECLARATION.encode("utf-8")).hexdigest() + "$"
+        regexes = config["allowlist"]["regexes"]
+        if regexes.count(expected) != 1:
+            return False
+        regexes.remove(expected)
+        encoded = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest() == GITLEAKS_BASELINE
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+
 class PolicyStateTests(unittest.TestCase):
+    def test_public_digest_exception_preserves_scanner_scope(self):
+        text = (HERE.parents[1] / ".gitleaks.toml").read_text(encoding="utf-8")
+        digest = hashlib.sha256(PUBLIC_DECLARATION.encode("utf-8")).hexdigest()
+        self.assertEqual(digest, ORIGINAL["TOKEN"])
+        self.assertEqual(declarations((HERE / "policy_state.py").read_text(encoding="utf-8"))["TOKEN"],
+                         PUBLIC_DECLARATION)
+        pattern = "^" + digest + "$"
+        self.assertTrue(exact_public_digest_exception(text))
+        self.assertIsNotNone(re.search(pattern, digest))
+        for other in (digest[:-1] + "1", "x" + digest, digest + "x", digest[:32]):
+            self.assertIsNone(re.search(pattern, other))
+        for changed in (text.replace(pattern, digest), text.replace(pattern, "^.*$"),
+                        text.replace(pattern, "^[0-9a-f]{64}$"), text.replace(pattern, "^" + digest[:-1] + "1$"),
+                        text.replace("useDefault = true", "useDefault = false"),
+                        text.replace("paths = [", "paths = [\n  '.*',"),
+                        text + '\n[[rules]]\nid = "generic-api-key"\nregex = "never-match-this"\n',
+                        text + '\n[[allowlists]]\nregexes = [".*"]\n',
+                        text.replace("regexes = [", 'regexTarget = "line"\nregexes = [')):
+            with self.subTest(config=changed[-120:]):
+                self.assertFalse(exact_public_digest_exception(changed))
+
+
     def test_exact_original_bodies_and_public_alias_identity(self):
         shared = declarations((HERE / "policy_state.py").read_text(encoding="utf-8"))
         current = declarations((HERE / "transaction.py").read_text(encoding="utf-8"))
