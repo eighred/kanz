@@ -101,13 +101,21 @@ impl Publisher for Broker {
                 .map_err(|_| PublishFailure::Broker)?
                 .await
                 .map_err(|_| PublishFailure::Broker)?;
-            self.acknowledgements += 1;
-            if self.hold_after != 0 && self.acknowledgements == self.hold_after {
+            if count_recovered_ack(&frame.subject, &mut self.acknowledgements, self.hold_after) {
                 tokio::time::sleep(self.hold).await;
             }
             Ok(())
         })
     }
+}
+// Freeze emits a status FACT first. The controlled hold targets the second
+// recovered execution ACK, not the second publication of any subject.
+fn count_recovered_ack(subject: &str, acknowledgements: &mut u64, hold_after: u64) -> bool {
+    if subject != "order.order.execution_recovered" {
+        return false;
+    }
+    *acknowledgements += 1;
+    hold_after != 0 && *acknowledgements == hold_after
 }
 async fn line(reader: &mut tokio::io::BufReader<tokio::io::Stdin>) -> Result<Option<Vec<u8>>, ()> {
     let mut out = Vec::new();
@@ -333,5 +341,42 @@ async fn main() {
         Ok(Ok(()))
     ) {
         std::process::exit(1);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::count_recovered_ack;
+
+    #[test]
+    fn status_ack_does_not_consume_recovered_hold() {
+        let mut count = 0;
+        assert!(!count_recovered_ack(
+            "order.order.recovery_recorded",
+            &mut count,
+            2
+        ));
+        assert_eq!(count, 0);
+        assert!(!count_recovered_ack(
+            "order.order.execution_recovered",
+            &mut count,
+            2
+        ));
+        assert!(count_recovered_ack(
+            "order.order.execution_recovered",
+            &mut count,
+            2
+        ));
+        // The count advances before the held await: cancellation cannot rearm it.
+        assert_eq!(count, 2);
+        assert!(!count_recovered_ack(
+            "order.order.execution_recovered",
+            &mut count,
+            2
+        ));
+        assert!(!count_recovered_ack(
+            "order.order.execution_recovered",
+            &mut count,
+            0
+        ));
     }
 }

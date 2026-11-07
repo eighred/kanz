@@ -217,8 +217,11 @@ func TestRustRecoveryDeadlineAfterBrokerAcknowledgement(t *testing.T) {
 	assertNoOwnedSessions(t, f, w)
 	before := assertCommittedDeadlineState(t, f, st)
 	var marked, pending int
-	if f.pool.QueryRow(f.ctx, "SELECT count(*) FILTER(WHERE published_at IS NOT NULL),count(*) FILTER(WHERE published_at IS NULL) FROM outbox WHERE event_type=$1", fillfact.SubjectRecovered).Scan(&marked, &pending) != nil || marked != 1 || pending != 1 {
-		t.Fatal("held second ACK did not preserve marked prefix and uncertain suffix")
+	if f.pool.QueryRow(f.ctx, "SELECT count(*) FILTER(WHERE published_at IS NOT NULL),count(*) FILTER(WHERE published_at IS NULL) FROM outbox WHERE event_type=$1", fillfact.SubjectRecovered).Scan(&marked, &pending) != nil {
+		t.Fatal("held second ACK prefix query failed")
+	}
+	if marked != 1 || pending != 1 {
+		t.Fatalf("held second ACK did not preserve marked prefix and uncertain suffix: marked=%d pending=%d", marked, pending)
 	}
 	var records []*orderpb.ExecutionRecovered
 	var events []*envelopepb.Envelope

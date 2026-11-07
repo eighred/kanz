@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,13 +26,15 @@ type response struct {
 }
 
 type worker struct {
-	t      *testing.T
-	cmd    *exec.Cmd
-	input  io.WriteCloser
-	lines  chan []byte
-	done   chan error
-	cancel context.CancelFunc
-	closed bool
+	t              *testing.T
+	cmd            *exec.Cmd
+	input          io.WriteCloser
+	lines          chan []byte
+	done           chan error
+	cancel         context.CancelFunc
+	closed         bool
+	ctx            context.Context
+	successfulACKs int
 }
 
 func binary(t *testing.T) string {
@@ -65,7 +70,7 @@ func startWorkerWithin(t *testing.T, config map[string]any, lifetime time.Durati
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &worker{t: t, cmd: cmd, input: in, lines: make(chan []byte, 1), done: make(chan error, 1), cancel: cancel}
+	w := &worker{t: t, cmd: cmd, input: in, lines: make(chan []byte, 1), done: make(chan error, 1), cancel: cancel, ctx: ctx}
 	if err = cmd.Start(); err != nil {
 		cancel()
 		t.Fatal("Rust process start failed")
@@ -98,6 +103,61 @@ func startWorkerWithin(t *testing.T, config map[string]any, lifetime time.Durati
 	})
 	return w, w.call(config)
 }
+
+// Diagnostics contain only closed protocol categories and completed outcomes.
+// Peeking at exit must preserve the result for the existing cleanup/join owner.
+func (w *worker) diagnostic(request map[string]any, phase string) string {
+	method := "Init"
+	if value, ok := request["method"].(string); ok {
+		switch value {
+		case "Observation", "Ack", "Parked", "Close":
+			method = value
+		default:
+			method = "unknown"
+		}
+	}
+	state := "active"
+	if errors.Is(w.ctx.Err(), context.DeadlineExceeded) {
+		state = "lifetime-expired"
+	} else if w.ctx.Err() != nil {
+		state = "cancelled"
+	}
+	exit := "pending"
+	select {
+	case err := <-w.done:
+		exit = "success"
+		if err != nil {
+			exit = "failure"
+		}
+		w.done <- err
+	default:
+	}
+	return fmt.Sprintf("method=%s phase=%s successful_acks=%d context=%s exit=%s", method, phase, w.successfulACKs, state, exit)
+}
+func TestWorkerDiagnosticPreservesJoinAndClosedCategories(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &worker{ctx: ctx, done: make(chan error, 1), successfulACKs: 7}
+	exitErr := errors.New("private exit detail")
+	w.done <- exitErr
+	got := w.diagnostic(map[string]any{"method": "private method detail"}, "read")
+	if got != "method=unknown phase=read successful_acks=7 context=active exit=failure" {
+		t.Fatal("diagnostic category or completed count differs")
+	}
+	if <-w.done != exitErr {
+		t.Fatal("diagnostic consumed or replaced join result")
+	}
+	cancel()
+	if !strings.Contains(w.diagnostic(map[string]any{"method": "Ack"}, "read"), "context=cancelled exit=pending") {
+		t.Fatal("cancelled diagnostic differs")
+	}
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	w.ctx = expired
+	if !strings.Contains(w.diagnostic(nil, "read"), "method=Init phase=read successful_acks=7 context=lifetime-expired") {
+		t.Fatal("lifetime diagnostic differs")
+	}
+}
 func (w *worker) call(request map[string]any) response {
 	w.t.Helper()
 	raw, err := json.Marshal(request)
@@ -115,23 +175,24 @@ func (w *worker) call(request map[string]any) response {
 	select {
 	case err := <-written:
 		if err != nil {
-			w.t.Fatal("Rust fixture request failed")
+			w.t.Fatalf("Rust fixture request failed: %s", w.diagnostic(request, "write"))
 		}
 	case <-observation.C:
+		diagnostic := w.diagnostic(request, "write-timeout")
 		w.cancel()
 		_ = w.input.Close()
-		w.t.Fatal("Rust fixture input timed out")
+		w.t.Fatalf("Rust fixture input timed out: %s", diagnostic)
 	}
 	select {
 	case line, ok := <-w.lines:
 		if !ok {
-			w.t.Fatal("Rust fixture response missing")
+			w.t.Fatalf("Rust fixture response missing: %s", w.diagnostic(request, "read"))
 		}
 		var result response
 		decoder := json.NewDecoder(bytes.NewReader(line))
 		decoder.DisallowUnknownFields()
 		if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF {
-			w.t.Fatal("invalid Rust fixture response")
+			w.t.Fatalf("invalid Rust fixture response: %s", w.diagnostic(request, "decode"))
 		}
 		if result.BuildProfile != "release" {
 			w.t.Fatal("Rust recovery fixture must use measured release build profile")
@@ -157,9 +218,12 @@ func (w *worker) call(request map[string]any) response {
 		default:
 			w.t.Fatal("unknown recovery outcome")
 		}
+		if request["method"] == "Ack" && result.Status == "ok" && result.SessionsClosed {
+			w.successfulACKs++
+		}
 		return result
 	case <-observation.C:
-		w.t.Fatal("Rust fixture response timed out")
+		w.t.Fatalf("Rust fixture response timed out: %s", w.diagnostic(request, "read-timeout"))
 	}
 	return response{}
 }

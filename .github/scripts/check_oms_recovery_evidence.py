@@ -22,7 +22,7 @@ GROUPS = {
  "TestRustRecoveryObservationPayloadBoundary": ["above-standard-message-bound", "exact-four-mib", "one-byte-over-four-mib"],
  **{name: ["go", "rust"] for name in ("TestRustRecoveryOversizedSingleFactRefusal", "TestRustRecoveryComplete8000History", "TestRustRecovery8001HistoryRefusal", "TestRustRecoveryDefaultLockCapacityOutcome", "TestRustRecoveryConstrainedLockCapacityRefusal", "TestRustRecoveryMalformedPostedJournal", "TestRustRecoveryTenantIsolation", "TestRustRecoveryExplicitZeroHistory", "TestRustRecoveryFrozenMappingAttribution")},
 }
-NAMES = set(GROUPS) | {f"{name}/{child}" for name, children in GROUPS.items() for child in children} | {"TestRustRecoveryDeadlineAfterBrokerAcknowledgement", "TestRustRecoveryRelayLockDeadline", "TestRustRecoveryConcurrentGoWriter", "TestRustRecoveryCrashDuringHistoryQuery", "TestRecoveryObservationPaddingOracle", "TestRecoveryDrainRetryClassification"}
+NAMES = set(GROUPS) | {f"{name}/{child}" for name, children in GROUPS.items() for child in children} | {"TestRustRecoveryDeadlineAfterBrokerAcknowledgement", "TestRustRecoveryRelayLockDeadline", "TestRustRecoveryConcurrentGoWriter", "TestRustRecoveryCrashDuringHistoryQuery", "TestRecoveryObservationPaddingOracle", "TestRecoveryDrainRetryClassification", "TestWorkerDiagnosticPreservesJoinAndClosedCategories"}
 REQUIRED = {PACKAGE: NAMES}
 STREAMS = ("recovery.jsonl", "large-go.jsonl", "large-rust.jsonl")
 MAX_STREAM_BYTES = 64 * 1024 * 1024

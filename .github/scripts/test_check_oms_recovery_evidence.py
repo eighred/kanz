@@ -100,7 +100,7 @@ class RecoveryEvidenceTests(unittest.TestCase):
 
     def test_complete_bound_proof(self):
         result = proof.qualify(self.root, self.binding, True)
-        self.assertEqual(result["required_passes"], 80)
+        self.assertEqual(result["required_passes"], 81)
         self.assertEqual(proof.qualify(self.root, self.binding), result)
     def test_missing_or_skipped_case(self):
         for mode in ("missing", "skip"):
@@ -122,7 +122,7 @@ class RecoveryEvidenceTests(unittest.TestCase):
         with self.assertRaises((ValueError, OSError)): proof.checked(self.root)
 
     def test_every_deadline_control_is_required(self):
-        names = {"TestRustRecoveryDeadlineAfterBrokerAcknowledgement", "TestRustRecoveryRelayLockDeadline"}
+        names = {"TestRustRecoveryDeadlineAfterBrokerAcknowledgement", "TestRustRecoveryRelayLockDeadline", "TestWorkerDiagnosticPreservesJoinAndClosedCategories"}
         for parent in ("TestRustRecoveryCumulativeCommandDeadline", "TestRustRecoveryCumulativeStartupDeadline"):
             names.update((parent, parent + "/cumulative-refusal", parent + "/same-phases-positive"))
         self.assertTrue(names <= proof.NAMES)

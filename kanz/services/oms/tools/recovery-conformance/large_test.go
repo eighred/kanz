@@ -157,7 +157,7 @@ func TestRustRecoveryComplete8000History(t *testing.T) {
 					} else {
 						r := w.call(map[string]any{"method": "Ack", "envelope": wire(t, ackEnv), "payload": ack.Payload, "at": clock(), "timeout_ms": 30000})
 						if r.Status != "ok" || !r.SessionsClosed {
-							t.Fatal("Rust large-history ACK failed")
+							t.Fatalf("Rust large-history ACK failed: status=%s error=%s sessions_closed=%t successful_acks=%d", r.Status, r.Error, r.SessionsClosed, w.successfulACKs)
 						}
 					}
 					if index == 7999 {
