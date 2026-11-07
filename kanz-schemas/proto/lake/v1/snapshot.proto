@@ -1,0 +1,175 @@
+syntax = "proto3";
+
+package lake.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// LakeSnapshotService inspects finite landed-row snapshots. It does not assert
+// complete archive ranges or authorize financial actions. Only the authenticated
+// gateway may delegate a caller over the exact-peer mTLS channel.
+service LakeSnapshotService {
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+  rpc QuerySnapshot(QuerySnapshotRequest) returns (QuerySnapshotResponse);
+}
+
+// GatewayCaller is required on every RPC. The gateway constructs it from its
+// authenticated principal, never from the external business request. Empty
+// subject/tenant refuses; v1 refuses every nonempty portfolio restriction.
+message GatewayCaller {
+  string subject = 1;
+  string tenant = 2;
+  repeated string roles = 3;
+  repeated string portfolios = 4;
+}
+
+// SnapshotSelection is a closed event-type selection and [from, until) event
+// time interval. Both timestamps are required and retain seconds/nanoseconds.
+// It selects within a captured landing cut, not a complete Kafka source range.
+message SnapshotSelection {
+  repeated string event_types = 1;
+  google.protobuf.Timestamp event_time_from = 2;
+  google.protobuf.Timestamp event_time_until = 3;
+}
+
+// Resource creation through an authenticated RPC, not an order-path COMMAND.
+// Actor and authorization provenance are persisted from GatewayCaller by the
+// owner, never asserted by this external business input.
+message CreateSnapshotInput {
+  string request_id = 1;
+  SnapshotSelection selection = 2;
+}
+
+message CreateSnapshotRequest {
+  GatewayCaller caller = 1;
+  CreateSnapshotInput input = 2;
+}
+
+message CreateSnapshotResponse {
+  Snapshot snapshot = 1;
+}
+
+message GetSnapshotRequest {
+  GatewayCaller caller = 1;
+  string snapshot_id = 2;
+}
+
+message GetSnapshotResponse {
+  Snapshot snapshot = 1;
+}
+
+message QuerySnapshotRequest {
+  GatewayCaller caller = 1;
+  string snapshot_id = 2;
+  SnapshotQuery query = 3;
+}
+
+message QuerySnapshotResponse {
+  SnapshotQueryResult result = 1;
+}
+
+enum SnapshotState {
+  SNAPSHOT_STATE_UNSPECIFIED = 0;
+  SNAPSHOT_STATE_REQUESTED = 1;
+  SNAPSHOT_STATE_CAPTURING = 2;
+  SNAPSHOT_STATE_READY = 3;
+  SNAPSHOT_STATE_FAILED = 4;
+}
+
+enum SnapshotCustody {
+  SNAPSHOT_CUSTODY_UNSPECIFIED = 0;
+  SNAPSHOT_CUSTODY_LANDED_ROWS_ONLY = 1;
+}
+
+// Scope is deliberately finite: only handles created by the current landing
+// run participate. Prior runs and closed files are preserved, not imported.
+enum SnapshotSourceScope {
+  SNAPSHOT_SOURCE_SCOPE_UNSPECIFIED = 0;
+  SNAPSHOT_SOURCE_SCOPE_ACTIVE_LANDING_RUN = 1;
+}
+
+enum SnapshotFailure {
+  SNAPSHOT_FAILURE_UNSPECIFIED = 0;
+  SNAPSHOT_FAILURE_INPUT_UNAVAILABLE = 1;
+  SNAPSHOT_FAILURE_INVALID_CUSTODY = 2;
+  SNAPSHOT_FAILURE_CAPACITY = 3;
+  SNAPSHOT_FAILURE_WORKER = 4;
+  SNAPSHOT_FAILURE_STORAGE = 5;
+}
+
+message Snapshot {
+  string snapshot_id = 1;
+  SnapshotState state = 2;
+  SnapshotSelection selection = 3;
+  bytes manifest_sha256 = 4;
+  uint64 row_count = 5;
+  uint64 parquet_bytes = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp sealed_at = 8;
+  SnapshotCustody custody = 9;
+  SnapshotFailure failure = 10;
+  SnapshotSourceScope source_scope = 11;
+}
+
+enum SnapshotQueryOperation {
+  SNAPSHOT_QUERY_OPERATION_UNSPECIFIED = 0;
+  SNAPSHOT_QUERY_OPERATION_LIST_EVENTS = 1;
+  SNAPSHOT_QUERY_OPERATION_COUNT_BY_EVENT_TYPE = 2;
+  SNAPSHOT_QUERY_OPERATION_DECODE_FAILURES = 3;
+}
+
+// after_ordinal is an exclusive cursor, not a source offset. Presence matters:
+// ordinal zero is valid. page_size is required, at most 1000; no arbitrary SQL.
+// COUNT_BY_EVENT_TYPE refuses a cursor and refuses more groups than page_size;
+// it never silently truncates groups or invents an ordinal cursor for them.
+// LIST_EVENTS and DECODE_FAILURES order by original ordinal, preserving ties
+// and duplicates; next_ordinal is the last returned ordinal when more remain.
+message SnapshotQuery {
+  SnapshotQueryOperation operation = 1;
+  optional uint64 after_ordinal = 2;
+  uint32 page_size = 3;
+}
+
+enum SnapshotDecodeStatus {
+  SNAPSHOT_DECODE_STATUS_UNSPECIFIED = 0;
+  SNAPSHOT_DECODE_STATUS_DECODED = 1;
+  SNAPSHOT_DECODE_STATUS_UNAVAILABLE = 2;
+  SNAPSHOT_DECODE_STATUS_FAILED = 3;
+}
+
+// Projection deliberately excludes raw decoder errors, raw frames and payloads.
+message SnapshotEvent {
+  uint64 ordinal = 1;
+  string event_id = 2;
+  string event_type = 3;
+  google.protobuf.Timestamp event_time = 4;
+  SnapshotDecodeStatus decode_status = 5;
+}
+
+message SnapshotEventCount {
+  string event_type = 1;
+  uint64 count = 2;
+}
+
+message SnapshotQueryResult {
+  repeated SnapshotEvent events = 1;
+  repeated SnapshotEventCount counts = 2;
+  optional uint64 next_ordinal = 3;
+  // exhausted means this query has no further page, never complete source history.
+  bool exhausted = 4;
+}
+
+// SnapshotLifecycle is a FACT committed with the registry change via the
+// canonical transactional outbox. Tenant/causation remain on the bus envelope.
+// It contains no filesystem paths, credentials or unprojected failure strings.
+message SnapshotLifecycle {
+  string snapshot_id = 1;
+  SnapshotState state = 2;
+  bytes request_sha256 = 3;
+  bytes manifest_sha256 = 4;
+  uint64 row_count = 5;
+  uint64 generation = 6;
+  google.protobuf.Timestamp at = 7;
+  SnapshotFailure failure = 8;
+  SnapshotSourceScope source_scope = 9;
+}
