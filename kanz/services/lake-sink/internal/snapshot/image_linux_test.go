@@ -133,6 +133,31 @@ func TestSnapshotActualHybridImageEntrypointAndAutomaticLifecycleLanding(t *test
 		args = append(args, "--env", key+"="+value)
 	}
 	container := owned.start(t, ctx, image, args)
+	ready, healthReachable, healthStatus := false, false, 0
+	defer func() {
+		if ready {
+			return
+		}
+		// Observation only: this cannot extend or satisfy the failed startup.
+		diagnostic, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		projection := `{"id":{{json .Id}},"nonce":{{json (index .Config.Labels "kanz.snapshot-image")}},"run":{{json (index .Config.Labels "kanz.snapshot-image-run")}},"running":{{.State.Running}},"exit":{{.State.ExitCode}},"oom":{{.State.OOMKilled}}}`
+		raw, err := owned.dockerResult(diagnostic, "inspect", "--format", projection, container)
+		state, valid := snapshotImageDiagnostic(raw, container, owned.label, owned.run)
+		valid = valid && err == nil
+		messages := snapshotStartupMessages{Unknown: true, HistoryUnknown: true}
+		if err == nil {
+			messages = snapshotOwnedStartupMessages(raw, container, owned.label, owned.run, func() snapshotStartupMessages {
+				cmd := exec.CommandContext(diagnostic, "docker", "logs", "--tail", "64", container)
+				var capture snapshotStartupCapture
+				cmd.Stdout, cmd.Stderr = &capture, &capture
+				cmd.WaitDelay = 5 * time.Second
+				return capture.finish(cmd.Run() == nil)
+			})
+		}
+		t.Logf("actual image startup categories: bits=%d counts=%v collection_complete=%t unknown=%t history_unknown=%t", messages.Bits, messages.Counts, messages.Complete, messages.Unknown, messages.HistoryUnknown)
+		t.Logf("actual image startup diagnostic: state_valid=%t running=%t exit=%d oom=%t health_reachable=%t health_status=%d wapi_started=%d wapi_active=%d", valid, state.Running, state.Exit, state.OOM, healthReachable, healthStatus, wapi.Started(), wapi.Active())
+	}()
 	imageWait(t, ctx, func() bool {
 		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+healthAddress+"/readyz", nil)
 		response, err := (&http.Client{Timeout: time.Second}).Do(request)
@@ -140,8 +165,10 @@ func TestSnapshotActualHybridImageEntrypointAndAutomaticLifecycleLanding(t *test
 			return false
 		}
 		defer response.Body.Close()
+		healthReachable, healthStatus = true, response.StatusCode
 		return response.StatusCode == http.StatusOK && wapi.Active() > 0
 	})
+	ready = true
 	row := custodyRow(t, "tenant-a")
 	writer := &kafka.Writer{Addr: kafka.TCP(plain), Topic: dataTopic, RequiredAcks: kafka.RequireAll, WriteTimeout: 5 * time.Second}
 	defer writer.Close()
