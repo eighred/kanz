@@ -28,9 +28,12 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 		return fmt.Errorf("keyless signing must follow verified registry bytes")
 	}
 	for _, token := range []string{
-		`"--iidfile", str(iid), "-"], input=recipe)`,
+		`"--iidfile", str(iid), "-"]`,
 		`"--load", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--tag", workref`,
 		`or config != iid:`,
+		`run(build_command(temp, workref, commit), input=recipe)`,
+		`run(build_command(temp, local_tag(commit) + "-probe", commit), input=recipe)`,
+		`diagnose(probe, commit)`,
 		`desc.get("digest") != root`,
 		`not 0 < desc["size"] <= 1024 * 1024`,
 		`m.get("RepoTags") != [local_tag(commit)]`,
@@ -145,6 +148,7 @@ func TestRustAuditToolProducerBoundary(t *testing.T) {
 		{"version-change", 0, "--version 0.22.2", "--version 0.22.1"},
 		{"source-stamp", 0, "org.opencontainers.image.revision=$SOURCE_SHA", "org.opencontainers.image.revision=unknown"},
 		{"build-identity", 1, `or config != iid:`, `or False:`},
+		{"omit-probe", 1, `diagnose(probe, commit)`, `pass`},
 		{"build-root", 1, `desc.get("digest") != root`, `False`},
 		{"attestation", 1, `"--provenance=false"`, `"--provenance=true"`},
 		{"saved-tag", 1, `m.get("RepoTags") != [local_tag(commit)]`, `False`},

@@ -136,6 +136,11 @@ class PayloadTests(unittest.TestCase):
             bad = json.loads(json.dumps(value)); mutate(bad)
             with self.assertRaises(ValueError): q.build_identity(json.dumps(bad).encode(), config)
 
+    def test_identity_diagnostic_is_closed(self):
+        with self.assertRaises(ValueError) as failure:
+            q.build_identity(b'{"containerimage.digest":"arbitrary-private-text"}', "sha256:" + "a" * 64)
+        self.assertEqual(str(failure.exception), "build identity refusal: root_valid=False config_valid=False iid_valid=True root_equals_iid=False config_equals_iid=False")
+
     def test_registry_descriptors(self):
         image = "sha256:" + "a" * 64
         good = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": {"digest": image, "size": 100, "mediaType": "application/vnd.oci.image.config.v1+json"}, "layers": [{"digest": "sha256:" + "b" * 64, "size": 200, "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip"}]}

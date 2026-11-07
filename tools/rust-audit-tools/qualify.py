@@ -125,8 +125,9 @@ def local_tag(commit):
 def build_identity(raw, iid):
     value = metadata(raw)
     root, config = value.get("containerimage.digest"), value.get("containerimage.config.digest")
-    if not all(isinstance(v, str) and re.fullmatch("sha256:[0-9a-f]{64}", v) for v in (root, config)) or config != iid:
-        raise ValueError("build root/config identity mismatch")
+    valid = [bool(isinstance(v, str) and re.fullmatch("sha256:[0-9a-f]{64}", v)) for v in (root, config, iid)]
+    if not all(valid) or config != iid:
+        raise ValueError("build identity refusal: root_valid=%s config_valid=%s iid_valid=%s root_equals_iid=%s config_equals_iid=%s" % (*valid, root == iid, config == iid))
     desc = value.get("containerimage.descriptor")
     if not isinstance(desc, dict) or desc.get("digest") != root or desc.get("mediaType") not in {"application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"} or type(desc.get("size")) is not int or not 0 < desc["size"] <= 1024 * 1024:
         raise ValueError("build manifest descriptor differs")
@@ -267,6 +268,32 @@ def exercise(directory):
     return commits
 
 
+def build_command(temp, workref, commit):
+    iid, build_metadata = temp / "image.id", temp / "build.json"
+    return ["docker", "buildx", "build", "--load", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--tag", workref, "--platform", "linux/amd64", "--build-arg", "SOURCE_SHA=" + commit, "--iidfile", str(iid), "-"]
+
+
+def diagnose(temp, commit):
+    # Synthetic exporter probe only; it cannot create a qualification receipt.
+    print(output(["docker", "version", "--format", "{{.Client.Version}}/{{.Server.Version}}"]), flush=True)
+    print(output(["docker", "buildx", "version"]), flush=True)
+    recipe = b'FROM scratch\nLABEL org.opencontainers.image.title="public-exporter-probe"\n'
+    run(build_command(temp, local_tag(commit) + "-probe", commit), input=recipe)
+    raw = read_bounded(temp / "build.json", 1024 * 1024)
+    iid = read_bounded(temp / "image.id", 128).decode().strip()
+    value = metadata(raw)
+    root, config = value.get("containerimage.digest"), value.get("containerimage.config.digest")
+    desc = value.get("containerimage.descriptor")
+    desc = desc if isinstance(desc, dict) else {}
+    valid = lambda v: bool(isinstance(v, str) and re.fullmatch("sha256:[0-9a-f]{64}", v))
+    media = desc.get("mediaType")
+    media = media if media in {"application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json", "application/vnd.oci.image.index.v1+json"} else "unknown"
+    size = desc.get("size")
+    size = size if type(size) is int and 0 < size <= 1024 * 1024 else None
+    print(json.dumps({"diagnostic_only": True, "root_valid": valid(root), "config_valid": valid(config), "iid_valid": valid(iid), "root_equals_iid": root == iid, "config_equals_iid": config == iid, "descriptor_root_equal": desc.get("digest") == root, "descriptor_media": media, "descriptor_size": size}, sort_keys=True), flush=True)
+    build_identity(raw, iid)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("build", "publish"))
@@ -278,12 +305,15 @@ def main():
     with tempfile.TemporaryDirectory() as temporary:
         temp = Path(temporary)
         if args.mode == "build":
+            probe = temp / "probe"
+            probe.mkdir()
+            diagnose(probe, commit)
             recipe = Path(__file__).with_name("Dockerfile").read_bytes()
             iid = temp / "image.id"
             build_metadata = temp / "build.json"
             workref = local_tag(commit)
             # A text Dockerfile on stdin supplies NO filesystem build context.
-            run(["docker", "buildx", "build", "--load", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--tag", workref, "--platform", "linux/amd64", "--build-arg", "SOURCE_SHA=" + commit, "--iidfile", str(iid), "-"], input=recipe)
+            run(build_command(temp, workref, commit), input=recipe)
             root, image = build_identity(read_bounded(build_metadata, 1024 * 1024), read_bounded(iid, 128).decode().strip())
             run(["docker", "save", "--output", str(directory / "image.tar"), workref])
             image_bytes = read_bounded(directory / "image.tar", MAX_PAYLOAD)
