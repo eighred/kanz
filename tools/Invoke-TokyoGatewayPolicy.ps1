@@ -20,7 +20,10 @@ if ($source -cnotmatch '^[0-9a-f]{40}$' -or $head -cne $source) { throw 'Rollout
 if ($LASTEXITCODE -ne 0) { throw 'Rollout source differs from main.' }
 $untracked = @(& git -C $repo ls-files --others --exclude-standard -- @inputs)
 if ($LASTEXITCODE -ne 0 -or $untracked.Count -ne 0) { throw 'Rollout inputs contain untracked files.' }
-$acceptance = & $python -E -s -B (Join-Path $PSScriptRoot 'gateway-policy-proof/preflight.py') --source $source 2>$null
+$proofRoot = Join-Path $PSScriptRoot 'gateway-policy-proof'
+$sourceLoader = [IO.File]::ReadAllText((Join-Path $proofRoot 'source_loader.py'))
+if ([Text.Encoding]::UTF8.GetByteCount($sourceLoader) -gt 65536) { throw 'Source loader exceeds bound.' }
+$acceptance = & $python -I -B -c $sourceLoader $proofRoot preflight --source $source 2>$null
 if ($LASTEXITCODE -ne 0 -or -not (($acceptance -join "`n") | ConvertFrom-Json).accepted) { throw 'Exact-main canonical workflow acceptance is incomplete.' }
 $role = (& $aws configure get role_arn --profile $rolloutProfile).Trim()
 $parentProfile = (& $aws configure get source_profile --profile $rolloutProfile).Trim()
@@ -34,7 +37,7 @@ if ($LASTEXITCODE -ne 0 -or $node.Id -cne $instance -or $node.State -cne 'runnin
 
 # Only verified public digest/platform fields leave this resolver; anonymous
 # registry tokens and OCI config bodies remain in its subprocess memory.
-$identityRaw = & $python -E -s -B (Join-Path $PSScriptRoot 'gateway-policy-proof/image_identity.py') 2>$null
+$identityRaw = & $python -I -B -c $sourceLoader $proofRoot image_identity 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Public probe image identity could not be qualified.' }
 $identity = ($identityRaw -join "`n") | ConvertFrom-Json
 $render = & $kubectl kustomize --load-restrictor=LoadRestrictionsNone (Join-Path $repo 'kanz/infra/overlays/testnet-tokyo') 2>$null
@@ -60,7 +63,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Rendered policy/workload projection failed.' }
 $projection = ($projectionRaw -join "`n") | ConvertFrom-Json
 $policies = $projection.policies
 $files = [ordered]@{}
-foreach ($name in @('transaction.py', 'policy_client.py', 'rollout_probe.py', 'rollout_engine.py', 'bounded_process.py')) {
+foreach ($name in @('transaction.py', 'policy_client.py', 'rollout_probe.py', 'rollout_engine.py', 'bounded_process.py', 'source_loader.py')) {
     $relative = "tools/gateway-policy-proof/$name"
     & git -C $repo ls-files --error-unmatch $relative *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Rollout engine is not tracked.' }
@@ -81,7 +84,7 @@ $bootstrap = @'
 import base64,gzip,io,json,os,pathlib,sys
 raw=gzip.GzipFile(fileobj=io.BytesIO(base64.b64decode(sys.argv[1],validate=True))).read(524289)
 if len(raw)>524288: raise ValueError('bundle bound')
-b=json.loads(raw); names={'transaction.py','policy_client.py','rollout_probe.py','rollout_engine.py','bounded_process.py'}
+b=json.loads(raw); names={'transaction.py','policy_client.py','rollout_probe.py','rollout_engine.py','bounded_process.py','source_loader.py'}
 if set(b)!={'files','payload'} or set(b['files'])!=names: raise ValueError('bundle shape')
 root=pathlib.Path(sys.argv[2])
 for name,text in b['files'].items():
@@ -93,11 +96,11 @@ with (root/'input.json').open('x') as f:json.dump(b['payload'],f)
 $bootstrapEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
 $applyArg = if ($Apply) { ' --apply' } else { '' }
 $commands = @('set -eu', 'umask 077', 'work=$(mktemp -d /var/tmp/kanz-gateway-source.XXXXXXXX)',
-    'trap ''rm -f "$work/transaction.py" "$work/policy_client.py" "$work/rollout_probe.py" "$work/rollout_engine.py" "$work/bounded_process.py" "$work/input.json" "$work/bootstrap.py"; rmdir "$work"'' EXIT',
+    'trap ''rm -f "$work/transaction.py" "$work/policy_client.py" "$work/rollout_probe.py" "$work/rollout_engine.py" "$work/bounded_process.py" "$work/source_loader.py" "$work/input.json" "$work/bootstrap.py"; rmdir "$work"'' EXIT',
     ("printf '%s' '$bootstrapEncoded' | base64 -d > `"`$work/bootstrap.py`""),
     ("python3 -I -B `"`$work/bootstrap.py`" '$encoded' `"`$work`""),
     'chmod 400 "$work"/*.py "$work/input.json"',
-    ("timeout --signal=TERM --kill-after=180s 1200s env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=`"`$work`" TMPDIR=`"`$work`" LANG=C.UTF-8 python3 -E -s -B `"`$work/rollout_engine.py`" --tokyo --source $source$applyArg < `"`$work/input.json`""))
+    ("timeout --signal=TERM --kill-after=180s 1200s env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=`"`$work`" TMPDIR=`"`$work`" LANG=C.UTF-8 python3 -I -B `"`$work/source_loader.py`" `"`$work`" rollout_engine --tokyo --source $source$applyArg < `"`$work/input.json`""))
 $parameters = @{ executionTimeout = @('1500'); commands = $commands } | ConvertTo-Json -Compress -Depth 5
 $latest = @(& git -C $repo ls-remote origin refs/heads/main)
 if ($LASTEXITCODE -ne 0 -or $latest.Count -ne 1 -or ($latest[0] -split '\s+')[0] -cne $source) { throw 'Canonical main advanced before SSM; repeat source acceptance.' }
