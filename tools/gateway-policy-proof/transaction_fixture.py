@@ -1,5 +1,8 @@
 """Real Kubernetes transaction oracle in a fresh owned kind cluster only."""
 import copy
+import base64
+import lzma
+import transport_codec as codec
 import json
 import os
 from pathlib import Path
@@ -17,8 +20,31 @@ import rollout_probe
 from bounded_process import run as bounded_run
 
 CASES = ["response_loss_" + str(at) for at in range(1, 9)] + [
-    "dry_run_no_write", "four_policy_success", "concurrent_change_refuses_rollback",
+    "bounded_xz_transport", "dry_run_no_write", "four_policy_success", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
     "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"]
+
+
+def qualify_codec():
+    """Same checked codec on actual Linux; no alternate decoder in the oracle."""
+    files = {name: (Path(__file__).parent / name).read_text(encoding="utf-8") for name in
+             ("transaction.py", "policy_client.py", "rollout_probe.py", "rollout_engine.py", "bounded_process.py", "source_loader.py")}
+    raw = json.dumps({"files": files, "payload": {"synthetic": True}}, ensure_ascii=False).encode()
+    encoded = codec.encode(raw)
+    if codec.decode(encoded) != raw:
+        raise ValueError("XZ source roundtrip differs")
+    packed = base64.b64decode(encoded)
+    controls = [packed[:-1], packed + b"x", packed + packed, b"invalid",
+                lzma.compress(b"x" * 524289),
+                lzma.compress(b"control", check=lzma.CHECK_NONE),
+                lzma.compress(b"control", filters=[{"id": lzma.FILTER_LZMA2, "dict_size": 67108864}])]
+    for value in controls:
+        try:
+            codec.decode(base64.b64encode(value).decode("ascii"))
+        except (ValueError, lzma.LZMAError):
+            continue
+        raise ValueError("invalid XZ control accepted")
+    return True
+
 
 
 def runtime_failure_category(message):
@@ -96,6 +122,48 @@ def deployment_diagnostic(deployment, pods):
     return result
 
 
+def validate_empty_slice(control):
+    if (not isinstance(control, dict) or set(control) != {"serviceUID", "sliceUID", "shape"}
+            or any(not isinstance(control.get(k), str) or not re.fullmatch(r"[0-9a-f-]{36}", control[k]) for k in ("serviceUID", "sliceUID"))
+            or control["serviceUID"] == control["sliceUID"]
+            or control["shape"] != {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv4", "endpoints": None}):
+        raise ValueError("actual null EndpointSlice evidence missing")
+
+
+def empty_slice_control(k):
+    name = "empty-endpoint-control"
+    selector = "empty-endpoint-control=" + uuid.uuid4().hex
+    if json.loads(k("-n", tx.NAMESPACE, "get", "pods", "-l", selector, "-o", "json"))["items"]:
+        raise AssertionError("empty Service selector has Pods")
+    key, value = selector.split("=")
+    service = {"apiVersion": "v1", "kind": "Service", "metadata": {"name": name, "namespace": tx.NAMESPACE},
+               "spec": {"selector": {key: value}, "ports": [{"port": 8080, "targetPort": 8080}]}}
+    k("create", "-f", "-", value=service)
+    actual = json.loads(k("-n", tx.NAMESPACE, "get", "service", name, "-o", "json"))
+    if actual["spec"]["selector"] != service["spec"]["selector"]:
+        raise AssertionError("empty Service selector changed")
+    end = time.monotonic() + 30
+    while True:
+        items = json.loads(k("-n", tx.NAMESPACE, "get", "endpointslices", "-l", "kubernetes.io/service-name=" + name, "-o", "json"))["items"]
+        if not isinstance(items, list) or len(items) > 1:
+            raise AssertionError("empty Service slice inventory differs")
+        if items:
+            item = items[0]
+            owners = item.get("metadata", {}).get("ownerReferences", [])
+            if (item["metadata"].get("namespace") != tx.NAMESPACE or len(owners) != 1
+                    or owners[0].get("kind") != "Service" or owners[0].get("name") != name
+                    or owners[0].get("uid") != actual["metadata"]["uid"] or owners[0].get("controller") is not True):
+                raise AssertionError("empty slice controller ownership differs")
+            control = {"serviceUID": actual["metadata"]["uid"], "sliceUID": item["metadata"]["uid"],
+                       "shape": {key: item[key] for key in ("apiVersion", "kind", "addressType", "endpoints")}}
+            validate_empty_slice(control)
+            rollout_probe.endpoint_boundary(items, [], require_absent=True)
+            return control
+        if time.monotonic() >= end:
+            raise AssertionError("controller null EndpointSlice not observed")
+        time.sleep(1)
+
+
 def validate_report(report, source, tree, run_id, attempt, render_hash):
     if (report.get("format") != "kanz-gateway-policy-transaction-proof-v1"
             or report.get("source") != source or report.get("tree") != tree
@@ -107,6 +175,7 @@ def validate_report(report, source, tree, run_id, attempt, render_hash):
             or report.get("cases") != CASES or report.get("passed") is not True
             or report.get("cleanupPassed") is not True):
         raise ValueError("transaction evidence incomplete or from another execution")
+    validate_empty_slice(report.get("emptyEndpointSlice"))
     identity = report.get("imageIdentity", {})
     if set(identity) != {"root", "rootMediaType", "manifest", "config", "platform"} or identity.get("root") != rollout_probe.IMAGE.split("@", 1)[1] or identity.get("platform") != "linux/amd64":
         raise ValueError("transaction image identity missing")
@@ -158,6 +227,8 @@ def run_fixture(artifact):
             report["tree"] = run(["git", "rev-parse", "HEAD^{tree}"]).strip()
             report["runID"] = os.environ["GITHUB_RUN_ID"]
             report["runAttempt"] = os.environ["GITHUB_RUN_ATTEMPT"]
+            qualify_codec()
+            report["cases"].append("bounded_xz_transport")
             rendered, _, report["renderSHA256"] = proof.render(run)
             desired = [p for p in rendered if p["metadata"]["name"] in tx.NAMES]
             baseline = [copy.deepcopy(p) for p in rendered if p["metadata"]["name"] not in tx.NAMES[:3]]
@@ -226,6 +297,8 @@ def run_fixture(artifact):
             if receipts[-1]["rollback"] != "unresolved" or not tx.same_inventory(foreign, tx.inventory(client.list_policies()), exact_version=True):
                 raise AssertionError("rollback modified another owner's policy")
             report["cases"].append("concurrent_change_refuses_rollback")
+            report["emptyEndpointSlice"] = empty_slice_control(k)
+            report["cases"].append("empty_endpoint_slice_null")
             # Exercise the exact live-probe constructor on the disposable API.
             # No live target or domain workload is contacted by this fixture.
             identity = public_identity()
@@ -308,7 +381,8 @@ def run_fixture(artifact):
                 end = time.monotonic() + 30
                 while True:
                     slices = probes.endpoints()
-                    matching = [e for item in slices for e in item.get("endpoints", [])
+                    rollout_probe.endpoint_boundary(slices, probes.addresses)
+                    matching = [e for item in slices for e in (item.get("endpoints") or [])
                                 if set(e.get("addresses", [])) & set(probes.addresses)]
                     if matching:
                         rollout_probe.endpoint_boundary(slices, probes.addresses)
