@@ -137,6 +137,10 @@ func rustBoundaryFixtureFiles() []string {
 	for _, file := range rustLakeSources {
 		out = append(out, rustLakePath+"/"+file)
 	}
+	out = append(out, browserRenderPath+"/Cargo.toml")
+	for _, file := range browserRenderFileNames() {
+		out = append(out, browserRenderPath+"/"+file)
+	}
 	return out
 }
 func checkRustDepthBoundary(root string) error {

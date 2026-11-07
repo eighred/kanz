@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'kanz-rs/**'
+      - 'kanz-web/.nvmrc'
       - 'kanz-schemas/proto/**'
       - 'kanz/internal/dec/**'
       - 'kanz/tools/decimal-conformance/**'
@@ -40,6 +41,7 @@ on:
     branches: [main]
     paths:
       - 'kanz-rs/**'
+      - 'kanz-web/.nvmrc'
       - 'kanz-schemas/proto/**'
       - 'kanz/internal/dec/**'
       - 'kanz/tools/decimal-conformance/**'
@@ -284,6 +286,26 @@ jobs:
           cargo test --locked --workspace --lib --bins
           cargo build --locked -p kanz-binance-depth -p kanz-okx-depth
           KANZ_BUILD_VERSION="$(git rev-parse HEAD)" cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Select pinned Node for actual WASM qualification
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: kanz-web/.nvmrc
+      - name: Qualify actual browser rendering WASM
+        working-directory: kanz-rs
+        run: |
+          set -euo pipefail
+          cargo +1.90.0 test --locked --release -p kanz-browser-render
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
+          bash crates/browser-render/tests/build-wasm.sh | tee "$RUNNER_TEMP/browser-render.json"
+      - name: Preserve actual Node WASM evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-render-wasm
+          path: |
+            ${{ runner.temp }}/browser-render.json
+            kanz-rs/target/wasm32-unknown-unknown/release/kanz_browser_render.wasm
+          if-no-files-found: error
+          retention-days: 7
       - name: Differential proof against current Go authority
         env:
           DECIMAL_CONFORMANCE_FIXTURE: ${{ runner.temp }}/kanz-decimal-conformance.json

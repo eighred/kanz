@@ -6,7 +6,7 @@ rust-version = "1.90"
 publish = false
 
 [workspace]
-members = ["crates/oms-recovery", "crates/order-core", "crates/market-feed", "crates/oms-store", "crates/proto-wire", "crates/oms-venue", "services/binance-depth", "services/okx-depth", "services/bond-risk-shadow", "services/oms-fold-shadow", "services/lake-snapshot"]
+members = ["crates/oms-recovery", "crates/order-core", "crates/market-feed", "crates/oms-store", "crates/proto-wire", "crates/oms-venue", "services/binance-depth", "services/okx-depth", "services/bond-risk-shadow", "services/oms-fold-shadow", "services/lake-snapshot", "crates/browser-render"]
 resolver = "2"
 
 [dependencies]
