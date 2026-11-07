@@ -19,7 +19,7 @@ class Evidence(unittest.TestCase):
 
     def test_inventory(self):
         events = self.events()
-        self.assertEqual(check.checked(self.raw(events))["required"], 7)
+        self.assertEqual(check.checked(self.raw(events))["required"], 8)
         bad = [events[:-1], events + [events[0]], events + [{"Action": "pass", "Package": "foreign"}]]
         for action in ("skip", "fail"):
             changed = copy.deepcopy(events)
@@ -39,7 +39,7 @@ class Evidence(unittest.TestCase):
         with patch.object(check, "inventory", return_value=hashes), patch.object(check, "read_bounded", side_effect=reader):
             proof = check.qualify(Path("proof"), Path("bin"), expected)
             self.assertEqual(proof["tests_sha256"], hashlib.sha256(raw).hexdigest())
-            self.assertEqual(proof["result"], {"required": 7, "skipped": 0, "packages": 1})
+            self.assertEqual(proof["result"], {"required": 8, "skipped": 0, "packages": 1})
             for key in ("source", "tree", "run", "attempt", "kind", "binaries"):
                 original = manifest[key]
                 manifest[key] = {} if key == "binaries" else "wrong"

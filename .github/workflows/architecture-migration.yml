@@ -361,7 +361,7 @@ jobs:
           KANZ_FEED_HANDOFF_VERSION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          go tool test2json -t -p github.com/eighred/kanz/tools/depth-conformance "$RUNNER_TEMP/feed-handoff-bin/handoff.test" -test.v=test2json -test.count=1 -test.timeout=8m -test.run '^TestFeedRuntimeControlledHandoff$' | tee "$RUNNER_TEMP/feed-handoff-proof/tests.jsonl"
+          go tool test2json -t -p github.com/eighred/kanz/tools/depth-conformance "$RUNNER_TEMP/feed-handoff-bin/handoff.test" -test.v=test2json -test.count=1 -test.timeout=8m -test.run '^TestFeed(RuntimeControlledHandoff|HandoffExactRepeatControl)$' | tee "$RUNNER_TEMP/feed-handoff-proof/tests.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_feed_handoff_evidence.py
           python3 ../.github/scripts/check_feed_handoff_evidence.py --root .. --proof "$RUNNER_TEMP/feed-handoff-proof" --binaries "$RUNNER_TEMP/feed-handoff-bin" --sha "$(git rev-parse HEAD)" --tree "$(git rev-parse 'HEAD^{tree}')" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
       - name: Retain exact-source controlled feed rehearsal evidence

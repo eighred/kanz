@@ -12,7 +12,7 @@ from check_oms_recovery_evidence import read_bounded, decode_events, strict
 
 PACKAGE = "tools/depth-conformance"
 TOP = "TestFeedRuntimeControlledHandoff"
-NAMES = {TOP} | {f"{TOP}/{v}" for v in ("binance", "okx")} | {
+NAMES = {TOP, "TestFeedHandoffExactRepeatControl"} | {f"{TOP}/{v}" for v in ("binance", "okx")} | {
     f"{TOP}/{v}/{case}" for v in ("binance", "okx")
     for case in ("authenticated-publish-denied", "duplicate-external-assignment-refused")
 }

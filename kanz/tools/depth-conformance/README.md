@@ -34,7 +34,7 @@ The shared CI workflow and mandatory evidence inventory must separately require
 actual Linux passes before this rehearsal is qualified.
 The compatibility job builds three separately stamped service binaries and a
 race-enabled test binary, records all four SHA-256 values with source/tree and
-run/attempt, and requires all seven named parent/child outcomes without skips.
+run/attempt, and requires all seven named process outcomes plus the exact-repeat control without skips.
 The original development-binary and broker tests remain separate and unchanged.
 The 150-second child lifetime is fixed; refusal observation allows up to 35
 seconds for the existing runtime's publication failure and joined shutdown,
@@ -54,6 +54,13 @@ compatibility; production ownership still needs preservation or explicitly
 approved consumer compatibility. Repeated retained trade pairs also validate
 the exact prior pair's second-bucket bar before the newly requested bucket,
 including all OHLC values, volume, count and bucket boundaries.
+The Rust runtime periodically republishes its current fresh book. Each observer
+permits only the immediately preceding validated Rust payload and venue time to
+repeat, with strictly increasing producer sequence and unchanged source/header
+bindings. A single ten-second observation deadline and 10,000-record bound cover
+other sources, exact repeats and the requested target together. Altered repeats,
+older history and late targets refuse; target sequence and economics remain exact.
+The pure control exercises those refusals separately from the process rehearsal.
 
 Use `go run ./tools/depth-conformance --okx` for the OKX corpus, generated through
 the public Go OKX source and book using local websocket frames. It covers positive
