@@ -37,7 +37,7 @@ def diagnostic_seam(value):
             or value["permissions"] != {"contents": "read"}):
         raise ValueError("diagnostic job boundary differs")
     commands = [step.get("run") for step in diag["steps"] if step.get("name") == "Prove storage PID1 graceful termination"]
-    if commands != ["python3 -B tools/cni-proof/storage_signal.py --diagnostic-pids32"]:
+    if commands != ["python3 -B tools/cni-proof/storage_signal.py"]:
         raise ValueError("diagnostic experiment profile differs")
     for job in (full, diag):
         if "permissions" in job or "continue-on-error" in job:
@@ -98,6 +98,22 @@ class StorageSignalTests(unittest.TestCase):
                      {"Init": False, "PidMode": "container:secret"}, {"Init": False, "PidMode": "unknown"}):
             with self.assertRaises(ValueError): storage_signal.runtime_preconditions({"HostConfig": host})
 
+    def test_runtime_details_emit_only_closed_tags_and_explicit_codes(self):
+        raw = "secret /private/path OCI runc init cgroup mount seccomp exec pipe EOF log invalid argument not supported child pid thread namespace user read-only file system: exit status 128 errno 22 https://private.example"
+        value = storage_signal.runtime_details(raw)
+        self.assertEqual(value, {"observed": True, "tags": ["oci", "runc", "init", "cgroup", "mount", "seccomp", "exec", "pipe", "eof", "log", "invalid_argument", "not_supported", "child_pid", "thread", "namespace", "user", "readonly"], "exitStatuses": [128], "errnos": [22]})
+        for forbidden in ("secret", "private", "https", "path", "example"):
+            self.assertNotIn(forbidden, json.dumps(value))
+        for raw in (None, {"error": "OCI"}, "", "OCI" + "secret" * 1400):
+            self.assertEqual(storage_signal.runtime_details(raw), {"observed": False, "tags": [], "exitStatuses": [], "errnos": []})
+        self.assertEqual(storage_signal.runtime_details("no such file or directory secret")["tags"], [])
+        value = storage_signal.runtime_details("exit status 1 exit status 1 exit status 255 exit status 999 errno 22 errno 4095 errno 9999")
+        self.assertEqual(value["exitStatuses"], [1, 255])
+        self.assertEqual(value["errnos"], [22, 4095])
+        value = storage_signal.runtime_details(" ".join("exit status " + str(i) + " errno " + str(i) for i in range(5)))
+        self.assertEqual(value["exitStatuses"], [])
+        self.assertEqual(value["errnos"], [])
+
     def test_startup_error_categories_discard_messages_and_bound_numbers(self):
         cases = (("runc: secret resource temporarily unavailable", "resource_unavailable"),
                  ("EAGAIN secret", "resource_unavailable"),
@@ -125,7 +141,7 @@ class StorageSignalTests(unittest.TestCase):
         obj = {"State": {"Status": "exited", "Running": False, "ExitCode": 1, "OOMKilled": False, "Error": "secret"},
                "HostConfig": {"Init": False, "PidMode": "", "Secret": "secret"}}
         value = storage_signal.state_projection(obj)
-        self.assertEqual(value, {"status": "exited", "running": False, "exitCode": 1, "oomKilled": False, "init": False, "pidMode": "private", "startupError": "other_runtime_error", "pidsLimit": None, "memory": None, "nanoCpus": None})
+        self.assertEqual(value, {"status": "exited", "running": False, "exitCode": 1, "oomKilled": False, "init": False, "pidMode": "private", "startupError": "other_runtime_error", "runtimeDetails": {"observed": True, "tags": [], "exitStatuses": [], "errnos": []}, "pidsLimit": None, "memory": None, "nanoCpus": None})
         for mode in ("", "private"):
             obj["HostConfig"]["PidMode"] = mode
             self.assertEqual(storage_signal.state_projection(obj)["pidMode"], "private")

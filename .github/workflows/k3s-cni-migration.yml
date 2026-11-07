@@ -89,7 +89,7 @@ jobs:
       - run: python3 -m pip install PyYAML==6.0.3
       - run: python3 -B -m unittest discover -s tools/cni-proof -p 'test_*.py'
       - name: Prove storage PID1 graceful termination
-        run: python3 -B tools/cni-proof/storage_signal.py --diagnostic-pids32
+        run: python3 -B tools/cni-proof/storage_signal.py
       - name: Retain closed PID1 diagnostic
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

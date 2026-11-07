@@ -45,6 +45,30 @@ def bounded_number(value, maximum):
     return value if type(value) is int and 0 <= value <= maximum else None
 
 
+def runtime_details(value):
+    result = {"observed": False, "tags": [], "exitStatuses": [], "errnos": []}
+    if not isinstance(value, str) or not value or len(value) > 8192:
+        return result
+    result["observed"] = True
+    # Fixed names and fixed ordering only; never preserve source tokens or text.
+    for tag, pattern in (
+            ("oci", r"\boci\b"), ("runc", r"\brunc\b"), ("init", r"\binit\b"),
+            ("cgroup", r"\bcgroups?\b"), ("mount", r"\bmount(?:ing)?\b"),
+            ("seccomp", r"\bseccomp\b"), ("exec", r"\bexec(?:ve)?\b"),
+            ("pipe", r"\bpipe\b"), ("eof", r"\beof\b"), ("log", r"\blogs?\b"),
+            ("invalid_argument", r"\binvalid argument\b"), ("not_supported", r"\bnot supported\b"),
+            ("child_pid", r"\bchild(?: process)? pid\b"), ("thread", r"\bthreads?\b"),
+            ("namespace", r"\bnamespaces?\b"), ("user", r"\buser\b"),
+            ("readonly", r"\bread-only file system\b")):
+        if re.search(pattern, value, re.IGNORECASE):
+            result["tags"].append(tag)
+    for key, pattern, maximum in (("exitStatuses", r"\bexit status ([0-9]{1,3})\b", 255),
+                                  ("errnos", r"\berrno ([0-9]{1,4})\b", 4095)):
+        codes = sorted({int(code) for code in re.findall(pattern, value, re.IGNORECASE) if int(code) <= maximum})
+        result[key] = codes if len(codes) <= 4 else []
+    return result
+
+
 def state_projection(obj):
     state = obj.get("State", {})
     host = obj.get("HostConfig", {})
@@ -57,6 +81,7 @@ def state_projection(obj):
             "init": host.get("Init") if type(host.get("Init")) is bool else None,
             "pidMode": "private" if pid_mode in ("", "private") else "host" if pid_mode == "host" else "unknown",
             "startupError": startup_error(state.get("Error")),
+            "runtimeDetails": runtime_details(state.get("Error")),
             "pidsLimit": bounded_number(host.get("PidsLimit"), 65536),
             "memory": bounded_number(host.get("Memory"), 1 << 40),
             "nanoCpus": bounded_number(host.get("NanoCpus"), 1024 * 10**9)}
