@@ -119,6 +119,30 @@ def probe_diagnostic(text, mode, source):
     return value
 
 
+def admin_diagnostic(text, source):
+    """Retain only closed counters/categories, never broker errors or inputs."""
+    value=json.loads(text,object_pairs_hook=image_custody.strict)
+    if not isinstance(value,dict) or set(value)!={'version','receipt','error'} or value['version']!=source:
+        raise ValueError('admin diagnostic identity differs')
+    category=value['error']
+    if category not in ('input-refused','resource-conflict','resource-missing','broker-unavailable'):
+        raise ValueError('admin diagnostic category refused')
+    receipt=value['receipt']
+    counters=('verified_topics','missing_topics','verified_acls','topic_attempts','acl_attempts')
+    flags=('partial_or_unknown','complete')
+    if not isinstance(receipt,dict) or set(receipt)!=set(counters+flags+('expected_cluster_id','mode','manifest_sha256')):
+        raise ValueError('admin diagnostic receipt shape')
+    result={'category':category}
+    for key in counters:
+        if type(receipt[key]) is not int or not 0<=receipt[key]<=256:
+            raise ValueError('admin diagnostic counter bound')
+        result[key]=receipt[key]
+    for key in flags:
+        if type(receipt[key]) is not bool: raise ValueError('admin diagnostic flag type')
+        result[key]=receipt[key]
+    return result
+
+
 def command(argv, data=None, timeout=300, *, strip=True, stdout_limit=4 << 20):
     return bounded_process.run(argv, cwd=ROOT, env=dict(os.environ), data=data, timeout=timeout,
                                stdout_limit=stdout_limit, stderr_limit=4 << 20, strip=strip)
@@ -370,6 +394,8 @@ def main():
                         diagnostic['container']['imageBound']=True
                         diagnostic['collection']='complete'
                         if terminal != ['Failed' if failed else 'Complete']:
+                            if label=='admin' and terminal==['Failed']:
+                                diagnostic['adminFailure']=admin_diagnostic(logs,source)
                             raise ValueError('unexpected actual job outcome')
                         return logs
                     time.sleep(1)

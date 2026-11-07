@@ -9,6 +9,22 @@ import json
 
 
 class TopologyTest(unittest.TestCase):
+    def test_admin_failure_projects_only_closed_category_and_counters(self):
+        receipt=dict(expected_cluster_id='SECRET',mode='SECRET',manifest_sha256='SECRET',
+                     verified_topics=0,missing_topics=60,verified_acls=0,topic_attempts=1,
+                     acl_attempts=0,partial_or_unknown=True,complete=False)
+        value={'version':'a'*40,'receipt':receipt,'error':'broker-unavailable'}
+        result=qualify.admin_diagnostic(json.dumps(value),'a'*40)
+        self.assertEqual(result,dict(category='broker-unavailable',verified_topics=0,missing_topics=60,
+                                    verified_acls=0,topic_attempts=1,acl_attempts=0,partial_or_unknown=True,complete=False))
+        self.assertNotIn('SECRET',json.dumps(result))
+        for mutate in (lambda x:x.update(error='SECRET'),lambda x:x.update(version='b'*40),
+                       lambda x:x['receipt'].update(topic_attempts=True),lambda x:x['receipt'].update(topic_attempts=257),
+                       lambda x:x['receipt'].update(complete='SECRET'),lambda x:x['receipt'].update(extra='SECRET')):
+            bad=copy.deepcopy(value);mutate(bad)
+            with self.assertRaises(ValueError):qualify.admin_diagnostic(json.dumps(bad),'a'*40)
+        with self.assertRaises(ValueError):qualify.admin_diagnostic(json.dumps(value)[:-1]+',"error":"broker-unavailable"}','a'*40)
+
     def test_cluster_grammar_preserves_exact_initialized_pin(self):
         for value in ('cluster-a','Ab_09-x','redpanda.12345678-1234-1234-1234-123456789abc','redpanda.safe_custom-1'):
             self.assertTrue(qualify.valid_cluster_id(value))
