@@ -3,3 +3,8 @@
 # truth for what the app is, and it goes stale silently.
 dist/
 node_modules/
+
+# Generated only by the pinned shared Rust asset recipe.
+src/generated/browser-render.*.wasm
+src/generated/browser-render.ts
+src/generated/.browser-render-*.tmp

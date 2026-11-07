@@ -203,12 +203,13 @@ historical addresses. Old receipts did not capture historical workload, Service
 or outside-policy snapshots: the result explicitly reports those historical
 snapshots as `UNKNOWN`. Fresh checks do not backfill them.
 
-The plan does not authorize restoration or write observations. No restore code
-is provided. Its hashes describe the observed planning window; any separately
-reviewed recovery operation would need fresh matching preconditions. The new
-reader's root-Linux no-follow controls and the complete wrapper/real API planning
-path still require actual Linux qualification; local pure tests do not establish
-live recovery acceptance. Normal Apply and plan transports retain the existing
+The plan does not authorize restoration or write observations. The planner has
+no restore operation; the separately gated reconciliation entrypoint below
+recomputes fresh matching preconditions. Plan hashes describe only the observed
+planning window. The reader's root-Linux no-follow controls have disposable Linux
+qualification; the complete live wrapper/API planning path still requires
+exact-target acceptance. Local pure tests do not establish live recovery
+acceptance. Normal Apply and plan transports retain the existing
 20,000 encoded / 524,288 expanded / 65,536 per-source-byte limits.
 
 

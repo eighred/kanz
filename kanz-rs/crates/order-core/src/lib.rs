@@ -32,6 +32,9 @@ pub mod proto {
 }
 pub mod aggregate;
 pub mod arithmetic;
+pub mod attribution;
+pub mod attribution_projection;
+pub mod schedule_identity;
 pub use arithmetic::{decimal, rational};
 
 /// Whole-message canonical Decimal domain, shared by projector and recovery
@@ -90,6 +93,10 @@ schema!(proto::order::v1::OrderState, "order.v1.OrderState");
 schema!(proto::order::v1::Fill, "order.v1.Fill");
 schema!(proto::order::v1::SubmitOrder, "order.v1.SubmitOrder");
 schema!(proto::order::v1::AmendOrder, "order.v1.AmendOrder");
+schema!(
+    proto::order::v1::ExecutionAttributionRecorded,
+    "order.v1.ExecutionAttributionRecorded"
+);
 
 schema!(proto::order::v1::StateHealed, "order.v1.StateHealed");
 schema!(

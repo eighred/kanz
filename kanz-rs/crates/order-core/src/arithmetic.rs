@@ -33,8 +33,18 @@ fn rounded(n: BigInt, d: &BigInt) -> BigInt {
 // Go dec.ToProtoScaled: first round at 1e-8, then repeated half-away /10.
 /// Checked existing Go ToProtoScaled conversion shared with position outputs.
 pub fn decimal(value: BigRational) -> Option<Decimal> {
+    decimal_fit(value, 64)
+}
+
+/// Diagnostic Go-wire candidate only. The caller bounds rational inputs and
+/// separately classifies financial-domain refusal; no existing caller uses this.
+pub(crate) fn attribution_go_wire_decimal(value: BigRational) -> Option<Decimal> {
+    decimal_fit(value, i32::MAX)
+}
+
+fn decimal_fit(value: BigRational, maximum_exponent: i32) -> Option<Decimal> {
     let mut q = rounded(value.numer() * BigInt::from(100_000_000), value.denom());
-    let mut exponent = -8;
+    let mut exponent: i32 = -8;
     loop {
         if let Some(coefficient) = q.to_i64() {
             return Some(Decimal {
@@ -43,9 +53,35 @@ pub fn decimal(value: BigRational) -> Option<Decimal> {
             });
         }
         q = rounded(q, &BigInt::from(10));
-        exponent += 1;
-        if exponent > 64 {
+        exponent = exponent.checked_add(1)?;
+        if exponent > maximum_exponent {
             return None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn go_wire_candidate_does_not_expand_existing_financial_output_domain() {
+        let cost = BigRational::from_integer(BigInt::from(10).pow(132) - BigInt::from(10_000));
+        assert!(decimal(cost.clone()).is_none());
+        let candidate = attribution_go_wire_decimal(cost).unwrap();
+        assert_eq!(
+            (candidate.coefficient, candidate.exponent),
+            (1_000_000_000_000_000_000, 114)
+        );
+        assert!(!kanz_decimal_compat::in_domain(Some(&candidate)));
+        for (numerator, expected) in [(1, 33_333_333), (-1, -33_333_333)] {
+            let value = BigRational::new(numerator.into(), 3.into());
+            assert_eq!(decimal(value.clone()), attribution_go_wire_decimal(value));
+            assert_eq!(
+                decimal(BigRational::new(numerator.into(), 3.into()))
+                    .unwrap()
+                    .coefficient,
+                expected
+            );
         }
     }
 }

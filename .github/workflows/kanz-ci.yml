@@ -504,12 +504,42 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Install pinned Rust WASM target for browser rendering
+        run: rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
+
       - name: Build the real MFA browser boundary
         run: |
           cd kanz-web
           npm run build
           cd ../kanz
           go build -o "$RUNNER_TEMP/mfa-web-bff" ./services/web-bff/cmd/web-bff
+
+      - name: Qualify WASM rendering through real BFF and Chromium
+        if: matrix.kind == 'quality'
+        working-directory: kanz
+        env:
+          TEST_RENDER_BROWSER_SCRIPT: ${{ github.workspace }}/kanz-web/e2e/browser-renderer.cjs
+          TEST_MFA_STATIC_DIR: ${{ github.workspace }}/kanz-web/dist
+          TEST_MFA_PLAYWRIGHT: ${{ github.workspace }}/kanz-web/node_modules/playwright
+          TEST_MFA_NODE: node
+        run: |
+          set -o pipefail
+          go test -p 1 ./services/web-bff/internal/server -run '^TestBrowserRendererProductionBundle$' -count=1 -json | tee "$RUNNER_TEMP/browser-renderer-proof.jsonl"
+          python3 -B -m unittest discover -s ../.github/scripts -p test_check_browser_renderer_evidence.py
+          python3 ../.github/scripts/check_browser_renderer_evidence.py "$RUNNER_TEMP/browser-renderer-proof.jsonl" "$RUNNER_TEMP/browser-renderer-proof.json"
+
+      - name: Preserve actual browser renderer evidence
+        if: always() && matrix.kind == 'quality'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-renderer-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/browser-renderer-proof.jsonl
+            ${{ runner.temp }}/browser-renderer-proof.json
+            kanz-web/src/generated/browser-render.ts
+            kanz-web/dist/assets/*.wasm
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Prove tv-sync separate roles and checkpoint recovery
         if: matrix.shard == 0 || matrix.kind == 'quality'
@@ -1031,6 +1061,13 @@ jobs:
       - name: Install
         working-directory: kanz-web
         run: npm ci --no-audit --no-fund
+
+      - name: Install pinned Rust WASM target for browser rendering
+        run: rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
+
+      - name: Prepare checked browser rendering asset
+        working-directory: kanz-web
+        run: npm run prebuild
 
       - name: Typecheck
         working-directory: kanz-web

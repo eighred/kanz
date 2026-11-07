@@ -15,7 +15,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WEB="$ROOT/kanz-web"
 BFF_INTERNAL_PORT="${BFF_INTERNAL_PORT:-8084}"
 
-command -v npm >/dev/null 2>&1 || { echo "FAIL: npm is required (Node 20+)"; exit 1; }
+# The shared npm prebuild refuses missing Rust/target or stale assets. Install
+# the pinned prerequisites explicitly; this helper never downloads a fallback.
+command -v rustup >/dev/null 2>&1 || { echo "FAIL: Rustup with Rust 1.90.0 and wasm32-unknown-unknown is required"; exit 1; }
+command -v npm >/dev/null 2>&1 || { echo "FAIL: npm is required (Node 24, as pinned in kanz-web/.nvmrc)"; exit 1; }
 
 echo "==> installing kanz-web dependencies"
 ( cd "$WEB" && npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund )

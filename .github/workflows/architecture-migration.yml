@@ -1,5 +1,9 @@
 name: architecture-migration
 
+# Main image builds seed the shared dependency cache. Qualification branches
+# restore it without creating duplicate compiler caches under each branch ref.
+cache-mode: read
+
 on:
   pull_request:
     paths:
@@ -351,10 +355,8 @@ jobs:
         with:
           version: v0.37.1
           driver-opts: image=ghcr.io/eighred/base/buildkit:buildx-stable-1
-      # Import the image workflow's dependency layers as well as this proof's
-      # cache. Export into a separate scope so qualification cannot replace
-      # the publication cache. Only main warms shared caches; disposable PR
-      # exports would evict them. VERSION still invalidates final compilation.
+      # Import publication layers and any remaining older proof cache. The
+      # image workflow owns cache exports; VERSION still invalidates compilation.
       - name: Build the Binance feed container from pinned bases
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -367,7 +369,6 @@ jobs:
           cache-from: |
             type=gha,scope=binance-depth
             type=gha,scope=qualification-binance-depth
-          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,scope=qualification-binance-depth,mode=max' || '' }}
       - name: Build the OKX feed container from pinned bases
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -380,7 +381,6 @@ jobs:
           cache-from: |
             type=gha,scope=okx-depth
             type=gha,scope=qualification-okx-depth
-          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,scope=qualification-okx-depth,mode=max' || '' }}
       - name: Bind loaded image identities to fresh qualification
         id: rust-images
         run: |
