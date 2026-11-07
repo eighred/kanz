@@ -3,10 +3,11 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 
-def main():
-    marker = Path(os.environ['RUNNER_TEMP']) / 'gateway-policy.cluster'
+def main(transaction=False):
+    marker = Path(os.environ['RUNNER_TEMP']) / ('gateway-policy-transaction.cluster' if transaction else 'gateway-policy.cluster')
     if not marker.exists():
         return
     if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 64:
@@ -24,4 +25,6 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if sys.argv[1:] not in ([], ['--transaction']):
+        raise ValueError('unsupported cleanup scope')
+    main(sys.argv[1:] == ['--transaction'])

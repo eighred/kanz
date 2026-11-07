@@ -35,12 +35,16 @@ import (
 // A real commit with an injected lost response, not a claimed network partition.
 type responseFaultLog struct {
 	projection.Log
-	fail    atomic.Bool
-	release chan struct{}
+	simulateAmbiguous                             bool
+	ambiguous                                     atomic.Bool
+	fail                                          atomic.Bool
+	release                                       chan struct{}
+	fresh, duplicate, appendError, held, injected atomic.Uint64
 }
 
 func (l *responseFaultLog) Append(ctx context.Context, f projection.Fact) (bool, int64, error) {
 	if l.fail.Load() {
+		l.held.Add(1)
 		select {
 		case <-l.release:
 		case <-ctx.Done():
@@ -48,7 +52,20 @@ func (l *responseFaultLog) Append(ctx context.Context, f projection.Fact) (bool,
 		}
 	}
 	fresh, seq, err := l.Log.Append(ctx, f)
-	if err == nil && fresh && l.fail.CompareAndSwap(false, true) {
+	if err != nil {
+		l.appendError.Add(1)
+	} else if fresh {
+		l.fresh.Add(1)
+	} else {
+		l.duplicate.Add(1)
+	}
+	// A real committed first insert can lose its response. The next confirmed
+	// duplicate still proves durability and must arm the injected outage.
+	if err == nil && fresh && l.simulateAmbiguous && l.ambiguous.CompareAndSwap(false, true) {
+		return false, 0, errors.New("injected ambiguous first commit response")
+	}
+	if err == nil && l.fail.CompareAndSwap(false, true) {
+		l.injected.Add(1)
 		return false, 0, errors.New("injected lost committed response")
 	}
 	return fresh, seq, err
@@ -105,7 +122,7 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 	if url == "" {
 		t.Skip("TEST_TV_NATS_URL required (dedicated broker without other service consumers)")
 	}
-	for _, mode := range []string{"committed-response", "database-timeout", "restart-unacked"} {
+	for _, mode := range []string{"committed-response", "ambiguous-committed-response", "database-timeout", "restart-unacked"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
@@ -143,7 +160,7 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 			}
 			source := projection.NewPostgresLog(pool)
 			var log projection.Log = source
-			fault := &responseFaultLog{Log: source, release: make(chan struct{})}
+			fault := &responseFaultLog{Log: source, release: make(chan struct{}), simulateAmbiguous: mode == "ambiguous-committed-response"}
 			if mode != "database-timeout" {
 				log = fault
 			}
@@ -164,7 +181,9 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 				unlock = func() { once.Do(func() { close(fault.release) }) }
 				defer unlock()
 			}
-			failed := make(chan struct{}, 4)
+			failed := make(chan bool, 4)
+			var targetID atomic.Value
+			var handlerSuccess, handlerError atomic.Uint64
 			launch := func() (*projection.Projection, *server.Readiness, func()) {
 				p := projection.New(time.Now, nil, projection.WithLog(log, tenant))
 				if err := p.Rehydrate(ctx); err != nil {
@@ -183,9 +202,16 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 					attempt, end := context.WithTimeout(c, 200*time.Millisecond)
 					defer end()
 					err := p.Handle(attempt, e, b)
-					if err != nil {
+					if id, ok := targetID.Load().(string); ok && e.EventId == id {
+						if err != nil {
+							handlerError.Add(1)
+						} else {
+							handlerSuccess.Add(1)
+						}
+					}
+					if err != nil && (mode == "database-timeout" || fault.fail.Load()) {
 						select {
-						case failed <- struct{}{}:
+						case failed <- (fault.injected.Load() == 1 && fault.held.Load() > 0):
 						default:
 						}
 					}
@@ -197,10 +223,12 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 				}()
 				return p, r, func() {
 					stop()
+					drain, endDrain := context.WithTimeout(context.Background(), 3*time.Second)
+					defer endDrain()
 					select {
 					case <-done:
-					case <-ctx.Done():
-						t.Error("consumer failed to drain")
+					case <-drain.Done():
+						t.Error("consumer failed to drain within independent cleanup budget")
 					}
 				}
 			}
@@ -212,6 +240,42 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 				t.Fatal(err)
 			}
 			target := targetDLQ{tenant: tenant, eventID: eventID.String()}
+			targetID.Store(target.eventID)
+			defer func() {
+				if !t.Failed() {
+					return
+				}
+				diagnostic, endDiagnostic := context.WithTimeout(context.Background(), 3*time.Second)
+				defer endDiagnostic()
+				t.Logf("retained diagnostic: ambiguous=%t injected=%d fresh=%d duplicate=%d append_error=%d held=%d target_handler_success=%d target_handler_error=%d ready=%t", fault.ambiguous.Load(), fault.injected.Load(), fault.fresh.Load(), fault.duplicate.Load(), fault.appendError.Load(), fault.held.Load(), handlerSuccess.Load(), handlerError.Load(), r.Ready())
+				err := target.observe(dlq.NextMsg, 100*time.Millisecond, nil)
+				result := "no_target_observed"
+				if errors.Is(err, errTargetParked) {
+					result = "target_parked"
+				} else if err != nil {
+					result = "observation_failed"
+				}
+				t.Logf("retained diagnostic: dlq=%s", result)
+				streamName, err := bustest.StreamFor(diagnostic, js, subject)
+				if err != nil {
+					t.Log("retained diagnostic: stream_lookup_failed")
+					return
+				}
+				st, err := js.Stream(diagnostic, streamName)
+				if err != nil {
+					t.Log("retained diagnostic: stream_open_failed")
+					return
+				}
+				found := 0
+				listing := st.ListConsumers(diagnostic)
+				for info := range listing.Info() {
+					if info.Config.FilterSubject == subject && info.Config.Durable == tenant+"-order_order_filled" {
+						found++
+						t.Logf("retained diagnostic: max_deliver=%d ack_pending=%d redelivered=%d pending=%d delivered=%d ack_floor=%d", info.Config.MaxDeliver, info.NumAckPending, info.NumRedelivered, info.NumPending, info.Delivered.Consumer, info.AckFloor.Consumer)
+					}
+				}
+				t.Logf("retained diagnostic: matching_durables=%d listing_failed=%t", found, listing.Err() != nil)
+			}()
 			now := timestamppb.Now()
 			dec := func(n int64) *commonpb.Decimal { return &commonpb.Decimal{Coefficient: n} }
 			payload := &orderpb.OrderFilled{OrderId: "order", State: &orderpb.OrderState{OrderId: "order", PortfolioId: "fund", InstrumentId: "BTC", Side: orderpb.Side_SIDE_BUY, Status: orderpb.OrderStatus_ORDER_STATUS_FILLED, OrderedQuantity: dec(2), FilledQuantity: dec(2), LeavesQuantity: dec(0), AverageFillPrice: dec(100), AsOf: now}, Fill: &orderpb.Fill{FillId: "fill", OrderId: "order", InstrumentId: "BTC", Side: orderpb.Side_SIDE_BUY, Quantity: dec(2), Price: dec(100), ExecutedAt: now}}
@@ -227,10 +291,17 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 			checkTVHTTP(t, r, p, tenant, http.StatusServiceUnavailable)
 			// Keep the fault in place across an actual broker redelivery. An
 			// application retry alone or a profile flag cannot satisfy this.
+			var postInjection bool
 			select {
-			case <-failed:
+			case postInjection = <-failed:
 			case <-ctx.Done():
-				t.Fatal("failed delivery was parked instead of redelivered while outage remained")
+				t.Fatal("second handler failure not observed before test deadline; see bounded diagnostics")
+			}
+			if mode != "database-timeout" && !postInjection {
+				t.Fatal("required post-injection failed broker retry not established; see bounded diagnostics")
+			}
+			if mode == "ambiguous-committed-response" && (!fault.ambiguous.Load() || fault.fresh.Load() != 1 || fault.duplicate.Load() < 1) {
+				t.Fatal("real committed insert then confirmed duplicate not established")
 			}
 			r.Set(true)
 			r.FoldResult(tenant, "unrelated", false)
@@ -277,6 +348,14 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 			var count int
 			if err := pool.QueryRow(ctx, "SELECT count(*) FROM tv_facts").Scan(&count); err != nil || count != 1 {
 				t.Fatalf("durable facts=%d err=%v", count, err)
+			}
+			storedPayload, err := proto.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recorded []byte
+			if err := pool.QueryRow(ctx, "SELECT payload FROM tv_facts WHERE event_id=$1", target.eventID).Scan(&recorded); err != nil || !bytes.Equal(recorded, storedPayload) {
+				t.Fatal("durable original payload changed")
 			}
 			// Same subscription spans the outage and recovery. New durables can
 			// re-park old malformed history before tenant filtering.
@@ -325,6 +404,8 @@ func checkTVHTTP(t *testing.T, r *server.Readiness, p *projection.Projection, te
 // payload is logged. A flooded subscription fails closed at a bounded count.
 type targetDLQ struct{ tenant, eventID string }
 
+var errTargetParked = errors.New("target FACT was parked on DLQ")
+
 func (target targetDLQ) observe(next func(time.Duration) (*nats.Msg, error), window time.Duration, terminal []byte) error {
 	deadline := time.Now().Add(window)
 	for n := 0; n < 10000; n++ {
@@ -341,7 +422,7 @@ func (target targetDLQ) observe(next func(time.Duration) (*nats.Msg, error), win
 		}
 		env, _, decodeErr := bus.Unframe(msg.Data)
 		if decodeErr == nil && env.TenantId == target.tenant && env.EventId == target.eventID {
-			return errors.New("target FACT was parked on DLQ")
+			return errTargetParked
 		}
 		if terminal != nil && bytes.Equal(msg.Data, terminal) {
 			return nil
@@ -397,5 +478,72 @@ func TestTargetDLQObservationIsIdentityScoped(t *testing.T) {
 	flood := func(time.Duration) (*nats.Msg, error) { return &nats.Msg{Data: []byte("unrelated")}, nil }
 	if err := target.observe(flood, time.Second, nil); err == nil {
 		t.Fatal("unbounded unrelated traffic accepted")
+	}
+}
+
+// These outcome counters distinguish an injected lost response from an actual
+// Append error followed by a confirmed duplicate that also arms injection.
+// Neither case implies DLQ parking.
+type diagnosticAppendLog struct {
+	projection.Log
+	fresh bool
+	err   error
+}
+
+func (l *diagnosticAppendLog) Append(context.Context, projection.Fact) (bool, int64, error) {
+	return l.fresh, 1, l.err
+}
+
+func TestResponseFaultDiagnosticsDistinguishInjection(t *testing.T) {
+	for _, injected := range []bool{false, true} {
+		t.Run(fmt.Sprint(injected), func(t *testing.T) {
+			base := &diagnosticAppendLog{fresh: injected}
+			if !injected {
+				base.err = context.DeadlineExceeded
+			}
+			fault := &responseFaultLog{Log: base, release: make(chan struct{})}
+			if _, _, err := fault.Append(context.Background(), projection.Fact{}); err == nil {
+				t.Fatal("first error missing")
+			}
+			if injected {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				if _, _, err := fault.Append(ctx, projection.Fact{}); !errors.Is(err, context.Canceled) {
+					t.Fatal("held retry not observed")
+				}
+				if fault.injected.Load() != 1 || fault.fresh.Load() != 1 || fault.held.Load() != 1 || fault.appendError.Load() != 0 {
+					t.Fatal("injection counters differ")
+				}
+			} else {
+				base.err = nil
+				if fresh, _, err := fault.Append(context.Background(), projection.Fact{}); err == nil || fresh {
+					t.Fatal("confirmed duplicate did not inject response loss")
+				}
+				if fault.injected.Load() != 1 || fault.appendError.Load() != 1 || fault.duplicate.Load() != 1 || !fault.fail.Load() {
+					t.Fatal("confirmed duplicate injection misclassified")
+				}
+			}
+		})
+	}
+}
+
+func TestAmbiguousResponseRequiresConfirmedDuplicateBeforeFault(t *testing.T) {
+	base := &diagnosticAppendLog{fresh: true}
+	fault := &responseFaultLog{Log: base, release: make(chan struct{}), simulateAmbiguous: true}
+	if _, _, err := fault.Append(context.Background(), projection.Fact{}); err == nil || !fault.ambiguous.Load() || fault.fail.Load() || fault.injected.Load() != 0 {
+		t.Fatal("ambiguous first response counted as confirmed injection")
+	}
+	base.fresh = false
+	if _, _, err := fault.Append(context.Background(), projection.Fact{}); err == nil || fault.injected.Load() != 1 || fault.duplicate.Load() != 1 {
+		t.Fatal("confirmed duplicate did not arm loss")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := fault.Append(ctx, projection.Fact{}); !errors.Is(err, context.Canceled) || fault.held.Load() != 1 {
+		t.Fatal("post-injection retry not held")
+	}
+	close(fault.release)
+	if _, _, err := fault.Append(context.Background(), projection.Fact{}); err != nil || fault.injected.Load() != 1 {
+		t.Fatal("release reinjected or refused")
 	}
 }
