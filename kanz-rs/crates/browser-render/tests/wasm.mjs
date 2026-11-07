@@ -24,7 +24,7 @@ if (localDiagnostic) {
   assert.match(process.env.GITHUB_RUN_ATTEMPT ?? '', /^[1-9][0-9]*$/)
   assert.equal(process.versions.node.split('.')[0], readFileSync(resolve(root, 'kanz-web/.nvmrc'), 'utf8').trim())
 }
-const sourceNames = ['kanz-rs/Cargo.toml', 'kanz-rs/Cargo.lock', 'kanz-rs/crates/browser-render/Cargo.toml', 'kanz-rs/crates/browser-render/src/lib.rs', 'kanz-rs/crates/browser-render/tests/kernel.rs', 'kanz-rs/crates/browser-render/tests/oracle.ts', 'kanz-rs/crates/browser-render/tests/wasm.mjs', 'kanz-rs/crates/browser-render/tests/build-wasm.sh', 'kanz-web/.nvmrc']
+const sourceNames = ['kanz-rs/Cargo.toml', 'kanz-rs/Cargo.lock', 'kanz-rs/crates/browser-render/Cargo.toml', 'kanz-rs/crates/browser-render/src/lib.rs', 'kanz-rs/crates/browser-render/tests/kernel.rs', 'kanz-rs/crates/browser-render/tests/oracle.ts', 'kanz-rs/crates/browser-render/tests/wasm.mjs', 'kanz-rs/crates/browser-render/tests/build-wasm.sh', 'kanz-web/.nvmrc', 'kanz-rs/rust-toolchain.toml', 'kanz-web/scripts/build-renderer.mjs', 'kanz-web/scripts/build-renderer.test.mjs']
 const trackedDirty = git('status', '--porcelain', '--untracked-files=no', '--', ...sourceNames) !== ''
 if (!localDiagnostic) {
   assert.equal(trackedDirty, false)

@@ -335,6 +335,9 @@ jobs:
           node-version-file: kanz-web/.nvmrc
           cache: npm
           cache-dependency-path: kanz-web/package-lock.json
+      - name: Install pinned Rust WASM target for BFF asset
+        if: matrix.service == 'web-bff'
+        run: rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
       - name: Compile kanz-web into dist
         if: matrix.service == 'web-bff'
         working-directory: kanz-web
