@@ -5,8 +5,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -93,7 +95,11 @@ func (x *handoffExchange) serve(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer c.CloseNow()
+	defer func() {
+		if err := c.CloseNow(); err != nil && !errors.Is(err, net.ErrClosed) {
+			x.t.Error("exchange websocket cleanup failed")
+		}
+	}()
 	x.mu.Lock()
 	if x.closing {
 		x.mu.Unlock()
