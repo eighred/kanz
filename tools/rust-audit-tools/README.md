@@ -6,7 +6,15 @@ only the binaries, a source/platform/version manifest and bundled public crate
 licensing notices and metadata. No Kanz module, schema, generated SDK, application
 source, application inventory or build cache is an input or published layer.
 
-The host builds using a Dockerfile on stdin with no filesystem context. PRs
+The host builds using a Dockerfile on stdin with no filesystem context. Explicit
+BuildKit metadata binds the manifest root to the IID and separately binds the
+configuration digest to saved configuration bytes. A fixed source-SHA local tag
+is the load/save work reference; it is not a published trust identity. This
+producer alone disables automatic BuildKit provenance/SBOM attachments to retain
+its closed single-image graph; existing release/SBOM checks are unchanged. The
+receipt retains both build identities. Registry format conversion may change the
+root digest: the published root is independently pinned and signed after the
+same configuration, single layer and payload have been read back. PRs
 qualify the actual binaries, metadata extraction limits, a fresh clean RustSec
 audit and a known-vulnerable refusal. Only canonical main can publish the exact
 qualified image artifact. The saved archive must contain exactly one final COPY layer: configuration and

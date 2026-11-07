@@ -118,12 +118,26 @@ def registry_manifest(value, image):
         raise ValueError("registry configuration identity differs")
 
 
+def local_tag(commit):
+    return "kanz-rust-audit-tools-local:" + commit
+
+
+def build_identity(raw, iid):
+    value = metadata(raw)
+    root, config = value.get("containerimage.digest"), value.get("containerimage.config.digest")
+    if not all(isinstance(v, str) and re.fullmatch("sha256:[0-9a-f]{64}", v) for v in (root, config)) or root != iid:
+        raise ValueError("build root/config identity mismatch")
+    return root, config
+
+
 def saved_layer(raw, expected_image, commit):
     entries = tar_files(raw, 32)
     manifests = metadata(entries["manifest.json"])
     if not isinstance(manifests, list) or len(manifests) != 1:
         raise ValueError("single saved image required")
     m = manifests[0]
+    if m.get("RepoTags") != [local_tag(commit)]:
+        raise ValueError("unexpected saved local tag")
     if len(m["Layers"]) != 1:
         raise ValueError("one final scratch COPY layer required")
     config_name, layer_name = m["Config"], m["Layers"][0]
@@ -152,7 +166,7 @@ def saved_layer(raw, expected_image, commit):
             raise ValueError("saved OCI and Docker graphs differ")
         allowed.update(("index.json", "oci-layout", name))
     if "repositories" in entries:
-        if metadata(entries["repositories"]) != {}:
+        if metadata(entries["repositories"]) != {"kanz-rust-audit-tools-local": {commit: diff[7:]}}:
             raise ValueError("unexpected saved tag inventory")
         allowed.add("repositories")
     if set(entries) != allowed:
@@ -263,26 +277,28 @@ def main():
         if args.mode == "build":
             recipe = Path(__file__).with_name("Dockerfile").read_bytes()
             iid = temp / "image.id"
+            build_metadata = temp / "build.json"
+            workref = local_tag(commit)
             # A text Dockerfile on stdin supplies NO filesystem build context.
-            run(["docker", "build", "--platform", "linux/amd64", "--build-arg", "SOURCE_SHA=" + commit, "--iidfile", str(iid), "-"], input=recipe)
-            image = iid.read_text().strip()
-            if not re.fullmatch("sha256:[0-9a-f]{64}", image):
-                raise ValueError("invalid image identity")
-            run(["docker", "save", "--output", str(directory / "image.tar"), image])
+            run(["docker", "buildx", "build", "--load", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--tag", workref, "--platform", "linux/amd64", "--build-arg", "SOURCE_SHA=" + commit, "--iidfile", str(iid), "-"], input=recipe)
+            root, image = build_identity(read_bounded(build_metadata, 1024 * 1024), read_bounded(iid, 128).decode().strip())
+            run(["docker", "save", "--output", str(directory / "image.tar"), workref])
             image_bytes = read_bounded(directory / "image.tar", MAX_PAYLOAD)
             image, files = extract_saved(image_bytes, image, temp, commit)
             advisories = exercise(temp)
-            proof = {"run": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "source": commit, "tree": output(["git", "rev-parse", "HEAD^{tree}"]), "image": image, "manifest": manifest(commit), "files": files, "advisory_commits": advisories, "image_tar_sha256": sha(directory / "image.tar")}
+            proof = {"run": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "source": commit, "tree": output(["git", "rev-parse", "HEAD^{tree}"]), "image": image, "build_root": root, "manifest": manifest(commit), "files": files, "advisory_commits": advisories, "image_tar_sha256": sha(directory / "image.tar")}
             (directory / "proof.json").write_text(json.dumps(proof, sort_keys=True) + "\n", encoding="utf8")
             print("source-free tool payload, ABI, extraction limits and fresh audit controls PASS")
         else:
             if os.environ.get("GITHUB_REPOSITORY") != "eighred/kanz" or os.environ.get("GITHUB_REF") != "refs/heads/main" or os.environ.get("GITHUB_EVENT_NAME") not in ("push", "workflow_dispatch", "schedule"):
                 raise ValueError("publication requires canonical main")
             proof = json.loads(read_bounded(directory / "proof.json", 4 * 1024 * 1024), object_pairs_hook=strict)
-            if set(proof) != {"run", "attempt", "source", "tree", "image", "manifest", "files", "advisory_commits", "image_tar_sha256"} or len(proof["advisory_commits"]) != 2 or not all(re.fullmatch("[0-9a-f]{40}", c) for c in proof["advisory_commits"]):
+            if set(proof) != {"run", "attempt", "source", "tree", "image", "build_root", "manifest", "files", "advisory_commits", "image_tar_sha256"} or len(proof["advisory_commits"]) != 2 or not all(re.fullmatch("[0-9a-f]{40}", c) for c in proof["advisory_commits"]):
                 raise ValueError("invalid qualification receipt")
             if (proof["run"], proof["attempt"]) != (os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]):
                 raise ValueError("qualification run identity mismatch")
+            if not isinstance(proof["build_root"], str) or not re.fullmatch("sha256:[0-9a-f]{64}", proof["build_root"]):
+                raise ValueError("invalid qualified build root")
             image_bytes = read_bounded(directory / "image.tar", MAX_PAYLOAD)
             if proof["tree"] != output(["git", "rev-parse", "HEAD^{tree}"]) or proof["source"] != commit or proof["manifest"] != manifest(commit) or proof["image_tar_sha256"] != hashlib.sha256(image_bytes).hexdigest():
                 raise ValueError("qualified image binding mismatch")
@@ -297,7 +313,7 @@ def main():
                 registry_manifest(prior, image)
             elif not any(code in existing.stderr for code in (b"MANIFEST_UNKNOWN", b"NAME_UNKNOWN")):
                 raise ValueError("unknown registry lookup failure")
-            run(["docker", "tag", image, target])
+            run(["docker", "tag", local_tag(commit), target])
             run(["docker", "push", target])
             digest = output(["crane", "digest", target])
             if not re.fullmatch("sha256:[0-9a-f]{64}", digest):
@@ -309,14 +325,15 @@ def main():
             check = temp / "readback"
             check.mkdir()
             readback = check / "image.tar"
-            run(["docker", "save", "--output", str(readback), image])
+            run(["docker", "tag", pinned, local_tag(commit)])
+            run(["docker", "save", "--output", str(readback), local_tag(commit)])
             if extract_saved(read_bounded(readback, MAX_PAYLOAD), image, check, commit) != (image, files):
                 raise ValueError("registry payload readback differs")
             run(["cosign", "sign", "--yes", "-a", "source_sha=" + commit, pinned])
             verified = json.loads(output(["cosign", "verify", "--certificate-oidc-issuer", ISSUER, "--certificate-identity", SIGNER, "-a", "source_sha=" + commit, pinned]))
             if not verified:
                 raise ValueError("signature readback missing")
-            (directory / "published.json").write_text(json.dumps({"run": proof["run"], "attempt": proof["attempt"], "source": commit, "image": pinned, "config": image, "files": files, "signer": SIGNER, "issuer": ISSUER, "source_annotation": commit}, sort_keys=True) + "\n", encoding="utf8")
+            (directory / "published.json").write_text(json.dumps({"run": proof["run"], "attempt": proof["attempt"], "source": commit, "image": pinned, "config": image, "build_root": proof["build_root"], "files": files, "signer": SIGNER, "issuer": ISSUER, "source_annotation": commit}, sort_keys=True) + "\n", encoding="utf8")
             print("published tool payload registry readback PASS: " + pinned)
 
 

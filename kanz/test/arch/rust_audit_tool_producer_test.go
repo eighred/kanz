@@ -29,6 +29,9 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 	}
 	for _, token := range []string{
 		`"--iidfile", str(iid), "-"], input=recipe)`,
+		`"--load", "--provenance=false", "--sbom=false", "--metadata-file", str(build_metadata), "--tag", workref`,
+		`or root != iid:`,
+		`m.get("RepoTags") != [local_tag(commit)]`,
 		`os.environ.get("GITHUB_REF") != "refs/heads/main"`,
 		`proof["image_tar_sha256"] != hashlib.sha256(image_bytes).hexdigest()`,
 		`registry_manifest(prior, image)`,
@@ -139,6 +142,9 @@ func TestRustAuditToolProducerBoundary(t *testing.T) {
 		{"source-copy", 0, "FROM scratch", "COPY kanz/ /private/\nFROM scratch"},
 		{"version-change", 0, "--version 0.22.2", "--version 0.22.1"},
 		{"source-stamp", 0, "org.opencontainers.image.revision=$SOURCE_SHA", "org.opencontainers.image.revision=unknown"},
+		{"build-identity", 1, `or root != iid:`, `or False:`},
+		{"attestation", 1, `"--provenance=false"`, `"--provenance=true"`},
+		{"saved-tag", 1, `m.get("RepoTags") != [local_tag(commit)]`, `False`},
 		{"repo-context", 1, `"--iidfile", str(iid), "-"`, `"--iidfile", str(iid), "."`},
 		{"mount-source", 1, `"--platform", "linux/amd64"`, `"--mount", "source=.,target=/src"`},
 		{"layer-hash", 1, `"sha256:" + hashlib.sha256(layer).hexdigest()`, `"sha256:" + "0" * 64`},

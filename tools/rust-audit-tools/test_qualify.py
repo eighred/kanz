@@ -43,12 +43,15 @@ class PayloadTests(unittest.TestCase):
         if fault == "history": config["history"] = [{"created_by": "RUN hidden source"}]
         config_bytes = json.dumps(config).encode()
         image = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
-        m = [{"Config": "config.json", "Layers": ["layer.tar"], "RepoTags": None}]
+        m = [{"Config": "config.json", "Layers": ["layer.tar"], "RepoTags": [q.local_tag("a" * 40)]}]
+        if fault == "tag": m[0]["RepoTags"] = ["untrusted:latest"]
         if fault == "layers": m[0]["Layers"].append("layer.tar")
         if fault == "manifests": m.append(m[0])
         entries = {"manifest.json": json.dumps(m).encode(), "config.json": config_bytes, "layer.tar": layer}
         if fault == "config": entries["config.json"] += b" "
         if fault == "layer": entries["layer.tar"] += b" "
+        if fault == "repositories": entries["repositories"] = json.dumps({"untrusted": {"latest": "0" * 64}}).encode()
+        if fault == "repositories-valid": entries["repositories"] = json.dumps({"kanz-rust-audit-tools-local": {"a" * 40: hashlib.sha256(layer).hexdigest()}}).encode()
         if fault == "unreachable": entries["hidden-source.tar"] = b"private"
         if oci:
             def blob(data, media):
@@ -64,7 +67,7 @@ class PayloadTests(unittest.TestCase):
             if fault == "oci-media": descriptor["mediaType"] = "unknown"
             entries["index.json"] = json.dumps({"schemaVersion": 2, "manifests": [descriptor]}).encode()
             entries["oci-layout"] = b'{"imageLayoutVersion":"1.0.0"}'
-            entries["manifest.json"] = json.dumps([{"Config": "blobs/sha256/" + c["digest"][7:], "Layers": ["blobs/sha256/" + l["digest"][7:]], "RepoTags": None}]).encode()
+            entries["manifest.json"] = json.dumps([{"Config": "blobs/sha256/" + c["digest"][7:], "Layers": ["blobs/sha256/" + l["digest"][7:]], "RepoTags": [q.local_tag("a" * 40)]}]).encode()
         outer = io.BytesIO()
         with tarfile.open(fileobj=outer, mode="w") as tar:
             for name, data in entries.items():
@@ -84,9 +87,12 @@ class PayloadTests(unittest.TestCase):
                 self.inspect(self.payload(), oci=True, fault=fault)
 
     def test_saved_graph_refusals(self):
-        for fault in ("config", "layer", "diffid", "layers", "manifests", "history", "unreachable"):
+        for fault in ("tag", "config", "layer", "diffid", "layers", "manifests", "history", "unreachable", "repositories"):
             with self.subTest(fault=fault), self.assertRaises(ValueError):
                 self.inspect(self.payload(), fault=fault)
+
+    def test_closed_repository_tag(self):
+        self.inspect(self.payload(), fault="repositories-valid")
 
     def test_actual_inventory_parser(self):
         _, files = self.inspect(self.payload())
@@ -108,6 +114,15 @@ class PayloadTests(unittest.TestCase):
             with self.assertRaises(ValueError): self.inspect(files)
         files = self.payload(); files["manifest.json"] = b'{"version":1,"version":1}'
         with self.assertRaises(ValueError): self.inspect(files)
+
+    def test_distinct_build_root_and_config(self):
+        root, config = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+        value = {"containerimage.digest": root, "containerimage.config.digest": config}
+        self.assertEqual(q.build_identity(json.dumps(value).encode(), root), (root, config))
+        with self.assertRaises(ValueError): q.build_identity(json.dumps(value).encode(), config)
+        for field in value:
+            bad = dict(value); bad[field] = "invalid"
+            with self.assertRaises(ValueError): q.build_identity(json.dumps(bad).encode(), root)
 
     def test_registry_descriptors(self):
         image = "sha256:" + "a" * 64
