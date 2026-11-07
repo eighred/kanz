@@ -30,6 +30,8 @@ type Message struct {
 	Body []byte
 	// Headers is free-form transport metadata (trace ids, schema refs, …).
 	Headers map[string]string
+	// Kafka is receive-only provenance; publishers ignore it. Nil means unavailable.
+	Kafka *KafkaDelivery `json:"-"`
 }
 
 // Publisher publishes one message at a time, synchronously. Errors are
@@ -152,3 +154,31 @@ type Client interface {
 	Subscriber
 	Close() error
 }
+
+// KafkaDelivery contains coordinates observed on the actual received record.
+// These are not a cluster, topic UUID or source-incarnation identity.
+type KafkaDelivery struct {
+	Topic     string
+	Partition int
+	Offset    int64
+}
+
+// Delivery preserves the original serialized EventFrame, not a remarshaled model.
+// Each delivery-aware handler attempt receives its own mutable copy.
+type Delivery struct {
+	Frame []byte
+	Kafka *KafkaDelivery
+}
+
+func (d Delivery) clone() Delivery {
+	d.Frame = append([]byte(nil), d.Frame...)
+	if d.Kafka != nil {
+		k := *d.Kafka
+		d.Kafka = &k
+	}
+	return d
+}
+
+// MaxDeliveryFrameBytes bounds additional raw-custody copies in SubscribeDelivery.
+// It is not a transport fetch limit or a total process-memory bound.
+const MaxDeliveryFrameBytes = 16 << 20

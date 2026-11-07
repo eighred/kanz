@@ -30,6 +30,7 @@ type Row struct {
 	SchemaRef     string          `json:"payload_schema_ref,omitempty"`
 	IngestedAt    time.Time       `json:"ingested_at"`
 	Payload       json.RawMessage `json:"payload,omitempty"`
+	RawCapture    *RawCapture     `json:"raw_capture,omitempty"`
 	DecodeError   string          `json:"decode_error,omitempty"`
 }
 
@@ -41,4 +42,27 @@ type Sink interface {
 	Write(ctx context.Context, row Row) error
 	Flush() error
 	Close() error
+}
+
+// RawCapture is custody for this landed row, not complete offset coverage.
+// Unknown source identity is explicit; coordinates do not identify an incarnation.
+type RawCapture struct {
+	Frame          []byte            `json:"frame"`
+	SHA256         string            `json:"sha256"`
+	Kafka          *KafkaCoordinates `json:"kafka"`
+	SourceIdentity *SourceIdentity   `json:"source_identity"`
+}
+
+// KafkaCoordinates are observed receive coordinates, including valid zero values.
+type KafkaCoordinates struct {
+	Topic     string `json:"topic"`
+	Partition int    `json:"partition"`
+	Offset    int64  `json:"offset"`
+}
+
+// SourceIdentity is unavailable from the current transport. No values are inferred.
+type SourceIdentity struct {
+	ClusterID   string `json:"cluster_id"`
+	TopicID     string `json:"topic_id"`
+	Incarnation string `json:"incarnation"`
 }
