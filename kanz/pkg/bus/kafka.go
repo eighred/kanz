@@ -157,7 +157,7 @@ func (k *KafkaClient) Subscribe(ctx context.Context, topic, group string, h Hand
 			}
 			return fmt.Errorf("kafka fetch: %w", err)
 		}
-		out := Message{Subject: m.Topic, Key: m.Key, Body: m.Value}
+		out := Message{Subject: m.Topic, Key: m.Key, Body: m.Value, Kafka: &KafkaDelivery{Topic: m.Topic, Partition: m.Partition, Offset: m.Offset}}
 		if len(m.Headers) > 0 {
 			headers := make(map[string]string, len(m.Headers))
 			for _, hh := range m.Headers {

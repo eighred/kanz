@@ -118,3 +118,31 @@ authentication blocker under #1413.
 FileDescriptorSet (`common.v1.Decimal`), transient-vs-permanent resolve
 classification, immutable-ref caching, Hive partition layout + path-segment
 sanitization, and the three CDC decode outcomes (land / ack-envelope-only / NAK).
+
+### Optional raw custody for landed rows
+
+`LAKE_SINK_RETAIN_RAW_FRAME=true` adds `raw_capture` to each successfully
+landed NDJSON row. The default is disabled and leaves existing row JSON unchanged.
+Capture contains base64 original EventFrame bytes, their SHA-256 and observed Kafka
+topic/partition/offset (zero is valid). `source_identity: null` explicitly means
+cluster identity, topic UUID and incarnation are unavailable; these are not inferred.
+The same row Write/Flush/fsync barrier covers the raw bytes and decoded columns.
+
+This is not complete physical-offset history: normal validation, deduplication,
+retry and DLQ behavior remain unchanged. A deduplicated delivery never dispatches;
+a successfully parked failure can commit its offset without landing a row. Existing
+NDJSON lacks original bytes and cannot be retroactively labeled raw custody. No
+catalog transaction, source-incarnation proof, new archiver or financial materializer
+is introduced. Received frame/provenance copies are isolated between attempts.
+
+Raw mode accepts original frames up to 16 MiB; larger frames are unsupported by
+this opt-in capture mode and follow existing handler retry/DLQ policy. The copy
+is taken only after validation and a successful dedup claim. This bound limits
+additional custody copies, not Kafka fetch allocation or total process memory.
+An explicitly empty enablement variable is invalid; omit it to select the default.
+
+The core CI quality runner requires all four real Kafka custody cases: a killed
+consumer process with fsynced raw bytes and a positive next-offset restart marker,
+unparked Flush refusal, failed DLQ publication, and successful original-byte DLQ
+publication. Its JSON evidence checker rejects missing cases, skips, failures and
+an incomplete package. This is fixture qualification, not production activation.

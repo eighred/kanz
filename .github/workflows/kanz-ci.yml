@@ -455,6 +455,26 @@ jobs:
           TEST_NATS_URL: nats://localhost:4222
         run: go test -race -p 1 ./tools/natsrebuild -run '^TestIntegration_RebuildRestoresEveryTenantsPrefixedTopic$' -count=5 -v
 
+      - name: Prove landed raw Kafka custody and crash offsets
+        if: matrix.kind == 'quality'
+        working-directory: kanz
+        env:
+          TEST_KAFKA_BROKERS: localhost:9092
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s ../.github/scripts -p test_check_lake_raw_evidence.py
+          go test -race -p 1 -json -count=1 ./services/lake-sink/internal/cdc -run '^TestRawKafkaCustodyAndOffsets$' | tee "$RUNNER_TEMP/lake-raw-proof.jsonl"
+          python3 ../.github/scripts/check_lake_raw_evidence.py "$RUNNER_TEMP/lake-raw-proof.jsonl"
+
+      - name: Preserve raw Kafka custody evidence
+        if: ${{ always() && matrix.kind == 'quality' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lake-raw-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: ${{ runner.temp }}/lake-raw-proof.jsonl
+          if-no-files-found: error
+          retention-days: 7
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: kanz-web/.nvmrc

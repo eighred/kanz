@@ -166,7 +166,12 @@ func runSink(ctx context.Context, cfg config.Config, fileSink sink.Sink, readine
 		go func(topic string) {
 			defer wg.Done()
 			logger.Info("lake-sink subscribing", "topic", topic, "group", cfg.ConsumerGroup)
-			err := consumer.Subscribe(ctx, topic, cfg.ConsumerGroup, eventSink.Handle)
+			var err error
+			if cfg.RetainRawFrame {
+				err = consumer.SubscribeDelivery(ctx, topic, cfg.ConsumerGroup, eventSink.HandleDelivery)
+			} else {
+				err = consumer.Subscribe(ctx, topic, cfg.ConsumerGroup, eventSink.Handle)
+			}
 			if err != nil && !errors.Is(err, context.Canceled) {
 				once.Do(func() {
 					firstErr = err
