@@ -15,13 +15,13 @@ def recipe(wrapper, engine, workflow):
     required = [
         "param([switch]$Apply)", "$rolloutProfile = 'kanz-platform'", "$region = 'ap-northeast-1'",
         "$account = '012619468098'", "$instance = 'i-0ee1235614219f089'",
-        "gateway-policy-proof/preflight.py", "KanzPlatformProvisioner/kanz-platform-cli",
+        "-I -B -c $sourceLoader $proofRoot preflight", "KanzPlatformProvisioner/kanz-platform-cli",
         "'kanz-operator-process'", "git -C $repo diff --quiet $source", "git -C $repo ls-remote origin refs/heads/main",
         "user/kanz-operator", "--profile $parentProfile", "'.github/workflows'", "ssm send-command", "--signal=TERM --kill-after=180s 1200s", "env -i PATH=",
     ]
     if not all(part in wrapper for part in required):
         return False
-    if not wrapper.index("gateway-policy-proof/preflight.py") < wrapper.index("sts get-caller-identity") < wrapper.index("ssm send-command"):
+    if not wrapper.index("-I -B -c $sourceLoader $proofRoot preflight") < wrapper.index("sts get-caller-identity") < wrapper.index("ssm send-command"):
         return False
     if "--force" in wrapper or "--force" in engine:
         return False
@@ -113,7 +113,7 @@ class RolloutContractTests(unittest.TestCase):
         engine = (ROOT / "tools/gateway-policy-proof/rollout_engine.py").read_text()
         workflow = (ROOT / ".github/workflows/gateway-policy-proof.yml").read_text()
         self.assertTrue(recipe(wrapper, engine, workflow))
-        for value in ("gateway-policy-proof/preflight.py", "KanzPlatformProvisioner/kanz-platform-cli", "'kanz-operator-process'",
+        for value in ("-I -B -c $sourceLoader $proofRoot preflight", "KanzPlatformProvisioner/kanz-platform-cli", "'kanz-operator-process'",
                       "git -C $repo diff --quiet $source", "git -C $repo ls-remote origin refs/heads/main", "env -i PATH=", "user/kanz-operator", "--profile $parentProfile", "'.github/workflows'"):
             with self.subTest(value=value):
                 self.assertFalse(recipe(wrapper.replace(value, "removed"), engine, workflow))

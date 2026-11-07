@@ -64,6 +64,14 @@ policy succeeds. The wrapper fixes Tokyo account, instance, region, operator
 profile/source chain and assumed-role ARN. The engine independently checks the
 existing kube-system UID. Publishing this source does not authorize live use.
 
+Host acceptance/image resolution and the remote engine launch Python in isolated
+mode. A closed loader compiles the approved repository modules from checked
+source bytes; repository directories never enter the import search path. Ignored
+bytecode caches and local standard-library shadows therefore cannot replace
+those inputs. Existing caches are preserved. The remote six-file bundle retains
+the 20 KB encoded and 512 KiB expansion limits; this is source custody, not an
+operating-system sandbox or attestation of the installed Python toolchain.
+
 The owned set is the three shared API ingress policies and
 `allow-gateway-runtime-egress`. The only accepted older egress shape omits the
 two exact accounting:8101 and audit:8102 peers. The entire services policy union
