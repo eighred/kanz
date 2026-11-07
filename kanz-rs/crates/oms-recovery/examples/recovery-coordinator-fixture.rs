@@ -265,6 +265,13 @@ async fn run() -> Result<(), ()> {
         Ok(owner) => owner,
         Err(e) => {
             report(version, "error", &format!("{e:?}"), true).await?;
+            // Keep the failed-start process alive for independent transport
+            // cleanup observation. No command can run without an owner.
+            if line(&mut reader).await?.is_some() {
+                return Err(());
+            }
+            drop(observer);
+            drop(observer_driver);
             return Ok(());
         }
     };

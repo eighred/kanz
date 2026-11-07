@@ -70,15 +70,16 @@ publication-unconfirmed; only broker-acknowledged and SQL-marked records count a
 a confirmed prefix, and the unresolved suffix is retried idempotently.
 
 Cleanup is separately awaited: a held relay lock closes its dedicated session
-on expiry (up to5s protocol cancellation grace); normal release allows up to5s
-unlock plus up to5s cancellation before aborting/joining the owned driver.
-The fixture then allows3s to observe SQL session absence. Its45s response wait
-observes the30s work budget plus this cleanup; it does not extend financial work
+on expiry (up to 5s protocol cancellation grace); normal release allows up to 5s
+unlock plus up to 5s cancellation before aborting/joining the owned driver.
+The fixture then allows 3s to observe SQL session absence. Its 45s response wait
+observes the 30s work budget plus this cleanup; it does not extend financial work
 and is not a hard operating-system scheduling bound. Cancellation before a
 connector returns its Session still uses the connector's abort-on-drop fallback,
 not a claim of explicitly joined pre-Session shutdown. Existing general relay
-APIs retain their semantics; the coordinator uses the owned deadline variant. Actual runtime qualification uses the
-optimized release binary with workspace overflow checks enabled; debug unit tests
+APIs retain their semantics; the coordinator uses the owned deadline variant.
+
+Actual runtime qualification uses the optimized release binary with workspace overflow checks enabled; debug unit tests
 and Clippy remain separate. Each response reports its compiled assertion profile,
 and evidence binds the immutable source, release target path and executable hash.
 The earlier debug-profile 8,000-fill Deadline remains a failed result, not release

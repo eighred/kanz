@@ -509,6 +509,39 @@ mod tests {
         )
         .is_ok());
     }
+    #[tokio::test]
+    async fn already_expired_flush_does_not_open_a_session() {
+        struct NeverPublisher;
+        impl Publisher for NeverPublisher {
+            fn publish<'a>(&'a mut self, _: &'a Frame) -> Task<'a, Result<(), PublishFailure>> {
+                panic!("expired work reached publisher")
+            }
+        }
+        struct CountSessions(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Sessions for CountSessions {
+            fn connect(&mut self) -> Task<'_, Result<outbox::Session, Error>> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { Err(Error::Database) })
+            }
+        }
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut relay = Relay::new(
+            NeverPublisher,
+            CountSessions(calls.clone()),
+            Framer::new("fixture".into(), "version".into()).unwrap(),
+            "tenant".into(),
+            1,
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        let result = relay
+            .flush_before("key", tokio::time::Instant::now() - Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(result.sent, 0);
+        assert_eq!(result.error, Error::PublicationUnconfirmed);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
     fn record() -> Record {
         Record {
             tenant: "tenant-a".into(),
