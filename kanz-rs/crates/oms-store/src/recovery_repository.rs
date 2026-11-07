@@ -269,6 +269,23 @@ pub async fn record_mapping(client: &mut Client, mapping: &Mapping<'_>) -> Resul
     commit(tx).await?;
     Ok(version)
 }
+/// Revalidate the immutable mapping against the currently loaded order before
+/// preparing a recovery. A frozen history alone is not proof that the mapping
+/// survived restoration or still attributes this order.
+pub async fn mapping_matches(
+    client: &mut Client,
+    tenant: &str,
+    version: &str,
+    state: &OrderState,
+) -> Result<bool, Error> {
+    if !text(version, 256) {
+        return Err(Error::InvalidInput);
+    }
+    let tx = scope(client, tenant).await?;
+    let matched = tx.query_one("SELECT EXISTS(SELECT 1 FROM execution_account_mappings WHERE version=$1 AND portfolio_id=$2 AND venue=$3 AND venue_account_id=$4)", &[&version, &state.portfolio_id, &state.venue, &state.venue_account_id]).await?.get(0);
+    commit(tx).await?;
+    Ok(matched)
+}
 fn status_record(c: &Case, st: &OrderState, r: &Record, tenant: &str) -> Result<(), Error> {
     validate_batch(&st.encode_to_vec(), std::slice::from_ref(r), 1, MAX_BYTES)?;
     let v =

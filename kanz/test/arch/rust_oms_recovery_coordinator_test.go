@@ -45,7 +45,7 @@ http = "=1.5.0"
 
 var recoveryMarkers = map[string][]string{
 	"src/coordinator.rs": {`Client::connect_until(config.venue,receiver)`, `verified_account:true`, `declared_order_types:true`, `session.close().await`, `self.relay.flush(&key)`, `outcome.stalled.is_none()`},
-	"src/observation.rs": {`repository::observe(`, `venue.describe(deadline)`, `venue.query_recovery_history(`, `history::complete(`, `repository::freeze(`, `preparation::posted(`, `approval::approved(`, `recovery::commit_streamed_recovery(`, `id.account_verified`, `Error::Conflict`},
+	"src/observation.rs": {`repository::observe(`, `repository::mapping_matches(`, `latest.version!=loaded.version`, `venue.describe(deadline)`, `venue.query_recovery_history(`, `history::complete(`, `repository::freeze(`, `preparation::posted(`, `approval::approved(`, `recovery::commit_streamed_recovery(`, `id.account_verified`, `Error::Conflict`},
 	"src/preparation.rs": {`recovery_repository::posted_reader(`, `cursor.finish().await?`, `identity::same_execution(row.current.value(),previous.value())`, `aggregate::apply_recovered_fill(`, `aggregate::recovery_average(`},
 	"src/approval.rs":    {`actual!=evidence.stored_digest`, `approved>=proposed+ttl`, `fee_subject::normalize(&a.approver)==fee_subject::normalize(&p.proposer)`, `p.history_digest!=history_digest`, `p.mapping_version!=case.mapping_version`},
 	"src/handlers.rs":    {`env.value().tenant_id!=tenant`, `env.value().event_class!=1`, `recovery_ack::acknowledge_recovery(`, `repository::target_matches(`},
@@ -135,6 +135,65 @@ func TestRustRecoveryCoordinatorMarkerMutations(t *testing.T) {
 				changed := strings.ReplaceAll(code, marker, "removed")
 				if changed == code || strings.Contains(changed, marker) {
 					t.Fatal("required boundary mutation was not discriminating")
+				}
+			})
+		}
+	}
+}
+
+// The closed budget remains shared; these markers bind each approved caller
+// and keep the ordinary decoder/RPC path at its original one-MiB default.
+var recoverySharedMarkers = map[string][]string{
+	"crates/proto-wire/src/lib.rs":                {`pubenumBudget{Standard,RecoveryHistory,}`, `Self::Standard=>MAX_BYTES`, `Self::RecoveryHistory=>4*MAX_BYTES`, `normalize_with_budget(desc,raw,Budget::Standard)`, `raw.len()>limit`, `value.encoded_len()>limit`, `out.len().checked_add(raw.len()).is_none_or(|n|n>limit)`, `ifdepth>32`},
+	"crates/proto-wire/src/canonical.rs":          {`Self::decode_with_budget(raw,Budget::Standard)`, `value.encoded_len()>MAX_BYTES`},
+	"crates/oms-venue/src/client.rs":              {`self.call_budget(method,value,deadline,kanz_proto_wire::Budget::Standard)`, `method!="/venue.v1.VenueAdapterService/QueryOrder"`, `B::NAME!="venue.v1.QueryOrderResponse"`, `max_encoding_message_size(kanz_proto_wire::MAX_BYTES)`},
+	"crates/oms-venue/src/wire.rs":                {`A::NAME!="venue.v1.QueryOrderResponse"`, `B::NAME!="order.v1.Fill"`, `name!="fills"`, `src.remaining()>self.1.bytes()`},
+	"crates/oms-store/src/recovery_repository.rs": {`IsolationLevel::RepeatableRead`, `.read_only(true)`, `ORDERBYfill_idLIMIT1`, `octet_length(fill)::bigint<=$3`, `f.fill_id.len()>1024`, `!self.seen.insert(key)`, `self.remaining!=0`, `!self.seen.contains(&key)`},
+	"crates/oms-store/src/recovery.rs":            {`validate_resident(&batch.executions)?`, `validate_missing_keys(&batch.missing)?`, `key.len()>256`, `Batch::Streamed(_)=>locked.execution_head(&fill).await?`, `letrecord=batch.record(index)?`, `enqueue(&tx,std::slice::from_ref(record.as_ref())).await?`, `commit(tx).await`},
+	"crates/oms-store/src/fee_journal.rs":         {`octet_length(fill)::bigint<=$6`, `head(self.tx,&original).await`, `self.scoped().await?`},
+}
+
+func checkRecoveryShared(files map[string]string) error {
+	for path, markers := range recoverySharedMarkers {
+		code, e := rustMigrationWithoutComments(files[path])
+		if e != nil {
+			return e
+		}
+		code = rustMigrationCompact(code)
+		for _, marker := range markers {
+			if !strings.Contains(code, marker) {
+				return fmt.Errorf("recovery shared %s missing %s", path, marker)
+			}
+		}
+	}
+	return nil
+}
+func TestRustRecoveryClosedBudgetAndStreamingBoundaries(t *testing.T) {
+	root := filepath.Join(filepath.Dir(moduleRoot(t)), "kanz-rs")
+	files := map[string]string{}
+	for path := range recoverySharedMarkers {
+		raw, e := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+		if e != nil {
+			t.Fatal(e)
+		}
+		files[path] = string(raw)
+	}
+	if e := checkRecoveryShared(files); e != nil {
+		t.Fatal(e)
+	}
+	for path, markers := range recoverySharedMarkers {
+		for _, marker := range markers {
+			t.Run(path+"/"+marker, func(t *testing.T) {
+				original := files[path]
+				code, e := rustMigrationWithoutComments(original)
+				if e != nil {
+					t.Fatal(e)
+				}
+				code = rustMigrationCompact(code)
+				files[path] = strings.ReplaceAll(code, marker, "removed")
+				defer func() { files[path] = original }()
+				if e := checkRecoveryShared(files); e == nil {
+					t.Fatal("shared boundary mutation accepted")
 				}
 			})
 		}

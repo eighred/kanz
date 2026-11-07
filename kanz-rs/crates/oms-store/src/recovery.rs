@@ -180,6 +180,7 @@ pub async fn commit_streamed_recovery(
     tenant: &str,
     batch: &StreamedRecovery,
 ) -> Result<(), Error> {
+    validate_missing_keys(&batch.missing)?;
     if batch.executions.len() > MAX_FILLS
         || batch.missing.len() > MAX_FILLS
         || batch.history_digest.len() != 64
@@ -195,6 +196,14 @@ pub async fn commit_streamed_recovery(
         2 * MAX_BYTES,
     )?;
     commit_batch(client, tenant, Batch::Streamed(batch), st).await
+}
+fn validate_missing_keys(missing: &[String]) -> Result<(), Error> {
+    // Preflight before commit_batch clones keys: at most 8000 canonical
+    // execution identities, each at most 256 bytes (2,048,000 bytes total).
+    if missing.len() > MAX_FILLS || missing.iter().any(|key| key.len() > 256) {
+        return Err(Error::Capacity);
+    }
+    Ok(())
 }
 async fn commit_batch(
     client: &mut Client,
@@ -423,6 +432,18 @@ async fn commit_batch(
 mod tests {
     use super::*;
     use kanz_order_core::proto::order::v1::Fill;
+    #[test]
+    fn streamed_missing_keys_are_bounded_before_copy() {
+        assert!(validate_missing_keys(&vec!["k".repeat(256); MAX_FILLS]).is_ok());
+        assert!(matches!(
+            validate_missing_keys(&["k".repeat(257)]),
+            Err(Error::Capacity)
+        ));
+        assert!(matches!(
+            validate_missing_keys(&vec![String::new(); MAX_FILLS + 1]),
+            Err(Error::Capacity)
+        ));
+    }
     #[test]
     fn metadata_and_posted_share_one_byte_budget() {
         let raw = Fill {

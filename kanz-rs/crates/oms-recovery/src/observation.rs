@@ -49,11 +49,36 @@ async fn prepared(
         .await
         .map_err(Error::from)?;
     let fills = history::from_frozen(&st, &history)?;
-    let evidence = repository::fee_evidence(client, tenant, &c.id)
+    if !repository::mapping_matches(client, tenant, &c.mapping_version, st.value())
         .await
-        .map_err(Error::from)?;
-    let approvals = approval::approved(tenant, c, &digest, evidence)?;
-    let posted = preparation::posted(client, tenant, &st, &fills, &approvals).await?;
+        .map_err(Error::from)?
+    {
+        return Err(Error::EvidenceConflict.into());
+    }
+    let approvals = match repository::fee_evidence(client, tenant, &c.id).await {
+        Ok(evidence) => approval::approved(tenant, c, &digest, evidence),
+        Err(error) => Err(error.into()),
+    };
+    // Posted-state validity precedes approval refusal in the Go owner. Retain
+    // a parsed approval failure until that snapshot has been checked.
+    let posted =
+        match preparation::posted(client, tenant, &st, &fills, approvals.as_ref().ok()).await {
+            Ok(posted) => posted,
+            Err(preparation::PostedError::Snapshot(error)) => {
+                // Match Go's optimistic snapshot retry: a concurrently advanced
+                // order must not be durably blocked by evidence read against its
+                // previous version. Failed reload retains the original error.
+                if store::load(client, tenant, &c.order_id)
+                    .await
+                    .is_ok_and(|latest| latest.version != loaded.version)
+                {
+                    return Err(Error::Conflict.into());
+                }
+                return Err(error.into());
+            }
+            Err(preparation::PostedError::Evidence(error)) => return Err(error.into()),
+        };
+    let approvals = approvals?;
     let projected = preparation::project(&st, c, &history, &digest, &approvals, &posted, now)?;
     let mut next = c.clone();
     next.checkpoint = projected.fills.len() as i32;

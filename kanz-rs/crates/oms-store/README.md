@@ -78,11 +78,13 @@ every actual Rust-write case without skips. Go independently checks durable
 state, raw bytes, versions, claims, journal and outbox. Restart tests restart the
 client process/pool, not the PostgreSQL server.
 
-Unported: admission, venue calls, orchestration, the Store Outbox/Proposals owners, `CommitRecovery` preparation/orchestration and its wider
-transaction, fee approval/proposal and full recovery lifecycle, outbox relay, migrations, production
-fencing and rollout. Deployment and exclusive writer handoff need separate
-recovery, rollback, capability and latency proof. This library is not a second
-production OMS and does not close the migration.
+Production admission, orchestration, migrations, fencing and rollout remain
+outside this repository owner. The query, proposal, queue, relay, position and
+recovery-tail ports below do not activate a writer. The separate
+[recovery coordinator](../oms-recovery/README.md) composes observation, verified
+history preparation, persisted fee evidence, ACK/Parked and the shared atomic
+tail. Exclusive writer handoff still needs operational recovery, rollback,
+capacity and funded-lifecycle acceptance; this is not a second production OMS.
 
 The query module implements `List`, `ListByStatus`, `ListByParent` and
 `ListByPortfolio` using the existing denormalized columns and canonical indexes.
