@@ -28,11 +28,17 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 			"info.State.FirstSeq != 1", "info.State.Msgs != info.State.LastSeq", "info.State.NumDeleted != 0",
 			"authenticated-publish-denied", "deniedBroker.denied.publish.Load() > beforeDenials", "denied publisher produced accepted facts",
 			"duplicate-external-assignment-refused", "instrument+\",\"+instrument", "invalid static assignment reached feed side effects",
-			"rustSource := venue + \"-depth/handoff\"", "depth(rustSource, symbol)", "depth(\"go-original\", instrument)", "depth(\"go-rollback\", instrument)", "Durable: consumer", "nats.Bind(\"HANDOFF\", consumer)",
+			"rustSource := venue + \"-depth/handoff\"", "depth(rustSource, symbol, 101)", "depth(\"go-original\", instrument, 101)", "depth(\"go-rollback\", instrument, 101)", "Durable: consumer", "nats.Bind(\"HANDOFF\", consumer)",
 			"broker.js.DeleteConsumer(\"HANDOFF\", consumer)", "!errors.Is(err, nats.ErrConsumerNotFound)", "handoffBrokerError(consumerErr)",
+			"depth(rustSource, symbol, 102)", "depth(rustSource, symbol, 105)", "depth(rustSource, symbol, 106)",
+			"requests, release := exchange.holdAnchor(104)", "exchange.anchorRequests() == requests+1", "exchange.connections(\"depth\") != connections", "exchange.resetAnchor()",
+			"book.LastUpdateSequence != sequence", "event.SourceSequence != sequence",
+			"handoffStatus(t, rustAddress, http.StatusServiceUnavailable)\n\t\t\t\trelease()",
 			"expected = append(expected, previous)", "expected = append(expected, bucket)", "carryover[source] = bucket.Add(time.Minute)", "!b.OpenTime.AsTime().Equal(want)",
 		},
 		"handoff_exchange_linux_test.go": {
+			"x.wg.Add(1)\n\t\tdefer x.wg.Done()\n\t\tx.restRequests++", "sequence, gate := x.restSequence, x.restGate", "x.restRequests++", "timer := time.NewTimer(5 * time.Second)", "case <-r.Context().Done():", "case <-timer.C:",
+			"x.t.Cleanup(release)", "once.Do(func() { close(gate) })",
 			"if snapshot {\n\t\t\taction = \"snapshot\"\n\t\t\tprevious = -1\n\t\t}",
 		},
 	}

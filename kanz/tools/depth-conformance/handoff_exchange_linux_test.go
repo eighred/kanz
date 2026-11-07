@@ -20,22 +20,48 @@ import (
 // This serves public exchange protocol frames only. Both production binaries
 // still perform their own decoding, book recovery and canonical publication.
 type handoffExchange struct {
-	t        *testing.T
-	venue    string
-	server   *httptest.Server
-	mu       sync.Mutex
-	clients  map[*websocket.Conn]string
-	accepted map[string]int
-	wg       sync.WaitGroup
-	closing  bool
+	t            *testing.T
+	venue        string
+	server       *httptest.Server
+	mu           sync.Mutex
+	clients      map[*websocket.Conn]string
+	accepted     map[string]int
+	wg           sync.WaitGroup
+	closing      bool
+	restSequence int64
+	restRequests int
+	restGate     <-chan struct{}
 }
 
 func startHandoffExchange(t *testing.T, venue string) *handoffExchange {
 	t.Helper()
-	x := &handoffExchange{t: t, venue: venue, clients: make(map[*websocket.Conn]string), accepted: make(map[string]int)}
+	x := &handoffExchange{t: t, venue: venue, clients: make(map[*websocket.Conn]string), accepted: make(map[string]int), restSequence: 100}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v3/depth", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"lastUpdateId":100,"bids":[["50000","3"]],"asks":[["50001","2"]]}`)
+	mux.HandleFunc("/api/v3/depth", func(w http.ResponseWriter, r *http.Request) {
+		x.mu.Lock()
+		if x.closing {
+			x.mu.Unlock()
+			http.Error(w, "fixture closing", http.StatusServiceUnavailable)
+			return
+		}
+		x.wg.Add(1)
+		defer x.wg.Done()
+		x.restRequests++
+		sequence, gate := x.restSequence, x.restGate
+		x.mu.Unlock()
+		if gate != nil {
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-gate:
+			case <-r.Context().Done():
+				return
+			case <-timer.C:
+				http.Error(w, "fixture anchor gate expired", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"lastUpdateId":%d,"bids":[["50000","3"]],"asks":[["50001","2"]]}`, sequence))
 	})
 	mux.HandleFunc("/ws/", x.serve)
 	x.server = httptest.NewUnstartedServer(mux)
@@ -127,6 +153,32 @@ func (x *handoffExchange) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// Hold the next real REST response until the caller has observed invalidation.
+// Cleanup releases the gate even when an assertion aborts the rehearsal.
+func (x *handoffExchange) holdAnchor(sequence int64) (int, func()) {
+	x.mu.Lock()
+	gate := make(chan struct{})
+	x.restSequence, x.restGate = sequence, gate
+	before := x.restRequests
+	x.mu.Unlock()
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	x.t.Cleanup(release)
+	return before, release
+}
+
+func (x *handoffExchange) anchorRequests() int {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return x.restRequests
+}
+
+func (x *handoffExchange) resetAnchor() {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.restSequence, x.restGate = 100, nil
 }
 
 func (x *handoffExchange) count(kind string) int {
