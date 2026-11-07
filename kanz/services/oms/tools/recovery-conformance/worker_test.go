@@ -149,7 +149,7 @@ func (w *worker) diagnostic(request map[string]any, phase string) string {
 	method := "Init"
 	if value, ok := request["method"].(string); ok {
 		switch value {
-		case "Observation", "Ack", "Parked", "Close":
+		case "Observation", "Ack", "Parked", "FeeCorrection", "Close":
 			method = value
 		default:
 			method = "unknown"
@@ -178,6 +178,7 @@ func (w *worker) diagnostic(request map[string]any, phase string) string {
 	return result
 }
 func TestWorkerDiagnosticPreservesJoinAndClosedCategories(t *testing.T) {
+	testFeeLockDiagnostics(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := &worker{ctx: ctx, done: make(chan error, 1), successfulACKs: 7}
@@ -189,6 +190,9 @@ func TestWorkerDiagnosticPreservesJoinAndClosedCategories(t *testing.T) {
 	}
 	if <-w.done != exitErr {
 		t.Fatal("diagnostic consumed or replaced join result")
+	}
+	if got := w.diagnostic(map[string]any{"method": "FeeCorrection"}, "read"); got != "method=FeeCorrection phase=read successful_acks=7 context=active exit=pending" {
+		t.Fatal("fee diagnostic category differs")
 	}
 	cancel()
 	if !strings.Contains(w.diagnostic(map[string]any{"method": "Ack"}, "read"), "context=cancelled exit=pending") {
@@ -295,7 +299,7 @@ func (w *worker) call(request map[string]any) response {
 			w.t.Fatal("qualification diagnostics feature required")
 		}
 		switch request["method"] {
-		case "Observation", "Ack", "Parked":
+		case "Observation", "Ack", "Parked", "FeeCorrection":
 			if !w.profile.add(result.Diagnostics) {
 				w.t.Fatal("invalid bounded stage observations")
 			}

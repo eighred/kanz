@@ -309,6 +309,13 @@ func (f *fixture) invoke(t *testing.T, owner string, tr *transport, method strin
 }
 func (f *fixture) acknowledge(t *testing.T, owner string, tr *transport, records []*orderpb.ExecutionRecovered) {
 	t.Helper()
+	f.acknowledgeWithQueries(t, owner, tr, records, 1)
+}
+
+// Observation recovery queries once; fee commands consume already persisted
+// history. Both paths must keep their exact initial query count through ACKs.
+func (f *fixture) acknowledgeWithQueries(t *testing.T, owner string, tr *transport, records []*orderpb.ExecutionRecovered, queries int32) {
+	t.Helper()
 	store := order.NewPostgres(f.pool)
 	parked := &envelopepb.Envelope{EventId: "parked", TenantId: f.tenant, EventType: fillfact.SubjectRecovered, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT}
 	for range 2 {
@@ -371,7 +378,7 @@ func (f *fixture) acknowledge(t *testing.T, owner string, tr *transport, records
 	if err != nil || after.Status != "corrected" || after.Version != corrected.Version {
 		t.Fatal("late parked event reopened closed recovery")
 	}
-	if tr.venue.queries.Load() != 1 || tr.venue.writes.Load() != 0 {
+	if tr.venue.queries.Load() != queries || tr.venue.writes.Load() != 0 {
 		t.Fatal("restart/ACK/parked re-queried or traded")
 	}
 }

@@ -189,7 +189,10 @@ impl Mapping<'_> {
         Ok(digest(json.as_bytes()))
     }
 }
-async fn scope<'a>(client: &'a mut Client, tenant: &str) -> Result<Transaction<'a>, Error> {
+pub(crate) async fn scope<'a>(
+    client: &'a mut Client,
+    tenant: &str,
+) -> Result<Transaction<'a>, Error> {
     let tx = scoped(client, tenant).await?;
     require_tables(&tx).await?;
     Ok(tx)

@@ -314,6 +314,7 @@ async fn run() -> Result<(), ()> {
             "Observation" => Method::Observation,
             "Ack" => Method::Ack,
             "Parked" => Method::Parked,
+            "FeeCorrection" => Method::FeeCorrection,
             _ => return Err(()),
         };
         let env = STANDARD.decode(command.envelope).map_err(|_| ())?;

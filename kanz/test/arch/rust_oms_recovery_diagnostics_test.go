@@ -12,7 +12,7 @@ func diagnosticBoundary(files map[string]string) bool {
 		"kanz-rs/crates/oms-store/Cargo.toml":                                  {"default = []", "qualification-diagnostics = []"},
 		"kanz-rs/crates/oms-recovery/Cargo.toml":                               {"default = []", "qualification-diagnostics = [\"kanz-oms-store/qualification-diagnostics\"]"},
 		"kanz-rs/crates/oms-store/src/diagnostics.rs":                          {"pub const STAGES: usize = 14;", "pub counts: [u64; STAGES]", "pub nanoseconds: [u64; STAGES]", "saturating_add(1)", "saturating_add(elapsed)", "#[cfg(feature = \"qualification-diagnostics\")]", "CURRENT", "Snapshot::default()"},
-		"kanz/services/oms/tools/recovery-conformance/worker_test.go":          {"const stageCount = 14", "profile=completed-commands-only excludes_unobserved_current=true nested_nonadditive=true", "qualification diagnostics feature required", "w.profile.add(result.Diagnostics)", "TestWorkerProfileBoundedFailureOnly"},
+		"kanz/services/oms/tools/recovery-conformance/worker_test.go":          {"const stageCount = 14", "profile=completed-commands-only excludes_unobserved_current=true nested_nonadditive=true", "qualification diagnostics feature required", "w.profile.add(result.Diagnostics)", "TestWorkerProfileBoundedFailureOnly", `case "Observation", "Ack", "Parked", "FeeCorrection":`},
 		"kanz-rs/crates/oms-recovery/examples/recovery-coordinator-fixture.rs": {"cfg!(feature=\"qualification-diagnostics\")", "diagnostics::capture", "Stage::Total"},
 	}
 	for path, markers := range required {
@@ -57,6 +57,7 @@ func TestRustRecoveryDiagnosticBoundary(t *testing.T) {
 		{paths[2], "saturating_add(elapsed)", "wrapping_add(elapsed)"},
 		{paths[3], "excludes_unobserved_current=true", "current=true"},
 		{paths[3], "nested_nonadditive=true", "additive=true"},
+		{paths[3], `case "Observation", "Ack", "Parked", "FeeCorrection":`, `case "Observation", "Ack", "Parked":`},
 		{paths[3], "w.t.Fatalf(\"Rust fixture request failed: %s\", w.diagnostic(request,", "w.t.Logf(\"Rust fixture request failed: %s\", w.diagnostic(request,"},
 	} {
 		original := files[mutation.path]

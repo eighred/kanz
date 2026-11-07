@@ -116,6 +116,14 @@ schema!(
     proto::order::v1::ExecutionFeeCorrectionApproved,
     "order.v1.ExecutionFeeCorrectionApproved"
 );
+schema!(
+    proto::order::v1::ProposeExecutionFeeCorrection,
+    "order.v1.ProposeExecutionFeeCorrection"
+);
+schema!(
+    proto::order::v1::ApproveExecutionFeeCorrection,
+    "order.v1.ApproveExecutionFeeCorrection"
+);
 schema!(proto::envelope::v1::Envelope, "envelope.v1.Envelope");
 schema!(
     proto::order::v1::ExecutionFeeChange,
