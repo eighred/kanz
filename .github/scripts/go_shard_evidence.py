@@ -10,11 +10,11 @@ import subprocess
 from go_test_evidence import check, events
 
 COUNT = 2
-# Keep these integration workloads with the architecture runner instead of
-# clustering them with the archive/landing suites. Routing changes ownership
-# only: the same complete inventory and fresh serial tests remain mandatory.
+# Distribute these integration workloads across the serial race runners.
+# Routing changes ownership only: the same complete inventory and fresh
+# serial tests remain mandatory.
 SHARD_OWNERS = {
-    "github.com/eighred/kanz/pkg/bus": 0,
+    "github.com/eighred/kanz/pkg/bus": 1,
     "github.com/eighred/kanz/services/risk-engine/internal/app": 0,
 }
 MAX_PACKAGES = 10000
