@@ -13,6 +13,10 @@ import proof
 
 NODE = "rancher/k3s:v1.36.4-k3s1@sha256:8b3560e0a99b2f22832b2c963550952ed69830320d4ee712693c52026ada7b89"
 LABEL = "io.kanz.cni-migration"
+# Linux PID-namespace init ignores default TERM; an installed handler permits
+# Kubernetes' ordinary graceful deletion without waiting for forced termination.
+# https://man7.org/linux/man-pages/man7/pid_namespaces.7.html
+STORAGE_SHUTDOWN = "import signal,sys;signal.signal(signal.SIGTERM,lambda *_:sys.exit(0));"
 CNI_DIR = "/var/lib/rancher/k3s/agent/etc/cni/net.d"
 # K3s v1.36.4+k3s1 sets its bundled CNI paths only while Flannel is enabled
 # (pkg/executor/embed/embed.go). With backend=none, containerd uses these defaults.
@@ -257,7 +261,7 @@ class Fixture:
                    "metadata": {"name": claim, "namespace": self.name},
                    "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": "local-path",
                             "resources": {"requests": {"storage": "16Mi"}}}})
-        script = ("from pathlib import Path;import socket,time;"
+        script = (STORAGE_SHUTDOWN + "from pathlib import Path;import socket,time;"
                   "socket.getaddrinfo('kubernetes.default.svc.cluster.local',443);"
                   + ("Path('/state/marker').write_text('" + marker + "');" if create else "")
                   + "assert Path('/state/marker').read_text()=='" + marker + "';time.sleep(120)")
