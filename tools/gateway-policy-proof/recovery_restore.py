@@ -16,6 +16,24 @@ from policy_client import KubernetesClient
 
 DIRECTORY = "/var/tmp/kanz-gateway-reconcile-nu1ezqwo"
 PUT = ("replace", "--raw", "/apis/networking.k8s.io/v1/namespaces/kanz-services/networkpolicies/allow-gateway-runtime-egress", "-f", "-")
+GET = ("get", "--raw", PUT[2])
+
+
+def target_projection(value):
+    # Pinned K3s JSONYamlPrintFlags wraps OmitManagedFieldsPrinter by default.
+    # This projection is only for comparing this target's raw object with the
+    # existing list representation; raw metadata remains independently bound.
+    result = copy.deepcopy(value)
+    result["metadata"].pop("managedFields", None)
+    return result
+
+
+def read_target(k, projected):
+    raw = receipts.document(k(*GET).encode("utf-8"))
+    if set(state.inventory([raw])) != {receipts.TARGET} or target_projection(raw) != projected:
+        raise state.Refusal("raw target differs from exact list projection")
+    state.version(raw)
+    return raw
 
 
 class PutOnce:
@@ -92,6 +110,7 @@ def reconcile(k, put_once, payload, read_receipts, save):
         before = observation(k, payload, custody, nonce)
         current = state.inventory(before["policies"])
         target = receipts.target_matches(current, baseline, entry, nonce)
+        raw_target = read_target(k, target)
         if (state.fingerprint(before["policies"]) != plan["policyInventorySHA256"]
                 or state.fingerprint(target) != plan["fullCurrentTargetSHA256"]
                 or state.fingerprint({key: before[key] for key in ("workloads", "services", "outsidePolicies")}) != plan["freshScopeSHA256"]):
@@ -103,6 +122,7 @@ def reconcile(k, put_once, payload, read_receipts, save):
         journal.update(nonce=nonce, receiptSHA256=receipt_hash,
                        provenanceSHA256=state.fingerprint(payload["provenance"]),
                        plan=plan, observation=before, originalBaseline=baseline[receipts.TARGET],
+                       rawCurrentTarget=raw_target, rawCurrentTargetSHA256=state.fingerprint(raw_target),
                        originalIntent=entry, cleanupCustody={"namespaceUID": custody[1],
                            "pods": sorted(custody[2].items()), "observedAddresses": custody[3]})
         phase = "observation_recorded"
@@ -112,6 +132,8 @@ def reconcile(k, put_once, payload, read_receipts, save):
             _, current_hash = read_receipts()
             if current_hash != receipt_hash or observation(k, payload, custody, nonce) != before:
                 raise state.Refusal("restore preconditions changed")
+            if read_target(k, target) != raw_target:
+                raise state.Refusal("full raw target changed before restoration")
 
         stable()
         phase = "restore_intent"
@@ -128,8 +150,11 @@ def reconcile(k, put_once, payload, read_receipts, save):
         save({**journal, "phase": phase})
         after = observation(k, payload, custody, nonce)
         policies = state.inventory(after["policies"])
-        if policies.keys() != current.keys() or policies[receipts.TARGET] != response:
+        if policies.keys() != current.keys() or policies[receipts.TARGET] != target_projection(response):
             raise state.Refusal("restore readback differs from acknowledgment")
+        raw_after = read_target(k, policies[receipts.TARGET])
+        if raw_after != response:
+            raise state.Refusal("full raw readback differs from acknowledgment")
         if any(policies[key] != current[key] for key in current if key != receipts.TARGET):
             raise state.Refusal("unowned policy changed during restoration")
         if any(after[key] != before[key] for key in ("workloads", "services", "outsidePolicies")):
@@ -138,11 +163,12 @@ def reconcile(k, put_once, payload, read_receipts, save):
         if final_hash != receipt_hash:
             raise state.Refusal("original receipts changed during restoration")
         phase = "verified"
-        save({**journal, "phase": phase, "after": after})
+        save({**journal, "phase": phase, "after": after, "rawReadbackSHA256": state.fingerprint(raw_after)})
         return {"format": "kanz-tokyo-retained-restore-result-v1", "source": payload["source"],
                 "command": receipts.COMMAND, "receiptSHA256": receipt_hash,
                 "provenanceSHA256": journal["provenanceSHA256"],
                 "beforeSHA256": state.fingerprint(before), "afterSHA256": state.fingerprint(after),
+                "rawBeforeSHA256": state.fingerprint(raw_target), "rawAfterSHA256": state.fingerprint(raw_after),
                 "targetUID": state.version(response)[0], "targetResourceVersion": state.version(response)[1],
                 "result": "VERIFIED", "writeAttempts": 1, "legacyHistoricalSnapshots": "UNKNOWN"}
     except Exception:

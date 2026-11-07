@@ -88,11 +88,11 @@ class RestoreTests(unittest.TestCase):
         receipts.retained(built)
         valid = {"cases": list(restore_fixture.CASES), "syntheticLegacyReceipts": True,
                  "historicalProvenanceQualified": False, "actualAppendOnlyJournals": True,
-                 "singleAttemptEnforced": True}
+                 "singleAttemptEnforced": True, "actualManagedFieldsProjection": True}
         restore_fixture.validate(valid)
         for key, value in (("cases", valid["cases"][:-1]), ("cases", list(reversed(valid["cases"]))),
                            ("syntheticLegacyReceipts", False), ("historicalProvenanceQualified", True),
-                           ("actualAppendOnlyJournals", False), ("singleAttemptEnforced", 1)):
+                           ("actualManagedFieldsProjection", False), ("actualAppendOnlyJournals", False), ("singleAttemptEnforced", 1)):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 restore_fixture.validate({**valid, key: value})
 
@@ -119,6 +119,31 @@ class RestoreTests(unittest.TestCase):
             with self.assertRaises(state.Refusal): restore.PutOnce({}, "/private")(wrong)
             run.assert_not_called()
 
+    def test_raw_target_projection_removes_only_documented_field(self):
+        _, _, _, current, _ = fixture()
+        projected = current[receipts.TARGET]
+        raw = copy.deepcopy(projected)
+        raw["metadata"]["managedFields"] = [{"manager": "synthetic"}]
+        self.assertEqual(restore.read_target(lambda *a: json.dumps(raw), projected), raw)
+        self.assertNotEqual(raw, projected)
+        for section, key, value in (("metadata", "generation", 99),
+                                    ("metadata", "creationTimestamp", "1900-01-01T00:00:00Z"),
+                                    ("metadata", "annotations", {"unexpected": "value"}),
+                                    ("spec", "podSelector", {"matchLabels": {"unexpected": "value"}})):
+            changed = copy.deepcopy(raw)
+            changed[section][key] = value
+            with self.subTest(key=key), self.assertRaises(state.Refusal):
+                restore.read_target(lambda *a: json.dumps(changed), projected)
+        with patch.object(restore.planner, "bounded_run", return_value="{}") as run:
+            restore.planner.inventory_command(restore.GET, None, {}, "/private")
+            self.assertEqual(run.call_count, 1)
+        for argv in (restore.GET + ("-o", "json"), ("get", "--raw", restore.GET[2] + "?watch=true"),
+                     ("get", "--raw", restore.GET[2].replace("kanz-services", "default")),
+                     ("get", "--raw", restore.GET[2] + "/proxy")):
+            with patch.object(restore.planner, "bounded_run") as run, self.assertRaises(state.Refusal):
+                restore.planner.inventory_command(argv, None, {}, "/private")
+            run.assert_not_called()
+
     def execute(self, mode):
         baseline, entry, _, current, records = fixture()
         desired = [copy.deepcopy(entry["intended"])]
@@ -132,6 +157,7 @@ class RestoreTests(unittest.TestCase):
             **{key: "d" * 64 for key in ("commandSHA256", "sourceSHA256", "bundleSHA256")}}
         journal, writes = [], []
         receipt_hash, scope_state = ["e" * 64], [{}]
+        managed = [{"manager": "synthetic", "operation": "Update"}]
         def read():
             return copy.deepcopy(records), receipt_hash[0]
         def save(value):
@@ -139,6 +165,7 @@ class RestoreTests(unittest.TestCase):
             if value["phase"] == "restore_acknowledged" and mode == "ack_fsync":
                 raise OSError("synthetic acknowledgment fsync failure")
             if value["phase"] == "restore_intent":
+                if mode == "raw_drift": managed.append({"manager": "concurrent"})
                 if mode == "target_drift": current[receipts.TARGET]["metadata"]["resourceVersion"] = "19"
                 if mode == "receipt_drift": receipt_hash[0] = "0" * 64
                 if mode == "scope_drift": scope_state[0] = {"changed": True}
@@ -148,6 +175,10 @@ class RestoreTests(unittest.TestCase):
                 return json.dumps({"metadata": {"uid": restore.scope.CLUSTER_UID}})
             if argv == ("-n", state.NAMESPACE, "get", "networkpolicies", "-o", "json"):
                 return json.dumps({"items": list(current.values())})
+            if argv == restore.GET:
+                raw = copy.deepcopy(current[receipts.TARGET])
+                raw["metadata"]["managedFields"] = copy.deepcopy(managed)
+                return json.dumps(raw)
             if argv[0] == "get": return '{"items":[]}'
             if argv != restore.PUT:
                 self.assertEqual(argv[2], restore.PUT[2] + "?dryRun=All")
@@ -161,6 +192,8 @@ class RestoreTests(unittest.TestCase):
             current[receipts.TARGET] = actual
             if mode == "response_loss": raise OSError("synthetic response loss after real model mutation")
             response = copy.deepcopy(actual)
+            response["metadata"]["managedFields"] = copy.deepcopy(managed)
+            if mode == "raw_after": managed.append({"manager": "changed-after-ack"})
             if mode == "same_rv": response["metadata"]["resourceVersion"] = "11"
             if mode == "wrong_uid": response["metadata"]["uid"] = "9" * 36
             if mode == "annotation": response["metadata"]["annotations"]["custom"] = "changed"
@@ -175,12 +208,15 @@ class RestoreTests(unittest.TestCase):
             if mode == "success":
                 result = restore.reconcile(k, lambda value: k(*restore.PUT, value=value), payload, read, save)
                 self.assertEqual(result["result"], "VERIFIED")
+                self.assertNotEqual(journal[2]["response"], current[receipts.TARGET])
+                self.assertEqual(restore.target_projection(journal[2]["response"]), current[receipts.TARGET])
+                self.assertEqual(result["rawBeforeSHA256"], journal[0]["rawCurrentTargetSHA256"])
                 self.assertEqual(result["legacyHistoricalSnapshots"], "UNKNOWN")
                 self.assertEqual(state.semantic(current[receipts.TARGET]), state.semantic(baseline[receipts.TARGET]))
                 self.assertEqual([x["phase"] for x in journal], ["observation_recorded", "restore_intent", "restore_acknowledged", "verified"])
             else:
                 with self.assertRaises(state.Refusal): restore.reconcile(k, lambda value: k(*restore.PUT, value=value), payload, read, save)
-                prewrite = mode in ("target_drift", "receipt_drift", "scope_drift", "intent_fsync")
+                prewrite = mode in ("raw_drift", "target_drift", "receipt_drift", "scope_drift", "intent_fsync")
                 self.assertEqual(journal[-1]["phase"], "refused" if prewrite else "unknown")
                 self.assertFalse(any(x["phase"] == "verified" for x in journal))
                 self.assertEqual(len(writes), 0 if prewrite else 1)
@@ -191,7 +227,7 @@ class RestoreTests(unittest.TestCase):
         self.assertLessEqual(len(writes), 1)
 
     def test_single_write_and_all_ambiguities_refuse_without_retry(self):
-        for mode in ("success", "target_drift", "receipt_drift", "scope_drift", "intent_fsync",
+        for mode in ("success", "raw_drift", "raw_after", "target_drift", "receipt_drift", "scope_drift", "intent_fsync",
                      "stale_cas", "response_loss", "same_rv", "wrong_uid", "annotation", "readback",
                      "receipt_after", "scope_after", "ack_fsync"):
             with self.subTest(mode=mode): self.execute(mode)

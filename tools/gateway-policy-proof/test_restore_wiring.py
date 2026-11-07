@@ -34,15 +34,18 @@ def verify(wrapper, source):
         'phase = "restore_intent"\n        journal["intended"] = proposed\n        save({**journal, "phase": phase})',
         'stable()\n        attempted = True', 'response = acknowledged(put_once(proposed), proposed, target)',
         'journal["response"] = response\n        phase = "restore_acknowledged"\n        save({**journal, "phase": phase})\n        after = observation(',
-        'policies[receipts.TARGET] != response', 'current_hash != receipt_hash',
-        'final_hash != receipt_hash', '"unknown" if attempted else "refused"',
+        'policies[receipts.TARGET] != target_projection(response)', 'current_hash != receipt_hash',
+        'final_hash != receipt_hash', 'raw_after != response', 'read_target(k, target) != raw_target', '"unknown" if attempted else "refused"',
         'os.mkdir(os.path.basename(directory), 0o700, dir_fd=parent)', 'os.fsync(parent)', 'journal = create_journal(DIRECTORY)',
         'return planner.inventory_command(argv, value, environment, directory)',
         'reconcile(k, PutOnce(environment, directory), payload, receipts.read_receipts, journal)',
         'rv == old_rv', 'state.semantic(obj) != state.semantic(intended)')
     if not all(marker in source for marker in markers): return False
     functions = {n.name: n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)}
-    if set(functions) != {"observation", "acknowledged", "reconcile", "create_journal", "main"}: return False
+    if set(functions) != {"target_projection", "read_target", "observation", "acknowledged", "reconcile", "create_journal", "main"}: return False
+    projection = ast.parse('def target_projection(value):\n    result = copy.deepcopy(value)\n    result["metadata"].pop("managedFields", None)\n    return result').body[0]
+    if ast.dump(functions["target_projection"], include_attributes=False) != ast.dump(projection, include_attributes=False):
+        return False
     reconcile = ast.get_source_segment(source, functions["reconcile"])
     if reconcile.count("put_once(proposed)") != 1 or "rollback(" in source: return False
     main = ast.get_source_segment(source, functions["main"])
@@ -62,8 +65,9 @@ class RestoreWiringTests(unittest.TestCase):
                 self.assertFalse(verify(wrapper.replace(old, "removed"), source))
         for old in ('self.attempted = True', 'stable()\n        attempted = True',
                     'journal["response"] = response', 'phase = "restore_acknowledged"',
-                    'policies[receipts.TARGET] != response', 'final_hash != receipt_hash',
-                    'os.fsync(parent)', 'rv == old_rv', 'journal = create_journal(DIRECTORY)'):
+                    'policies[receipts.TARGET] != target_projection(response)', 'final_hash != receipt_hash', 'raw_after != response', 'read_target(k, target) != raw_target',
+                    'os.fsync(parent)', 'rv == old_rv', 'journal = create_journal(DIRECTORY)',
+                    'result["metadata"].pop("managedFields", None)'):
             with self.subTest(source=old):
                 self.assertFalse(verify(wrapper, source.replace(old, "pass")))
 

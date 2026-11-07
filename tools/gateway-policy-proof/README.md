@@ -247,3 +247,14 @@ scope/receipt/metadata negatives. The immutable birth negative deliberately alte
 a read projection; it does not claim Kubernetes allowed changing creationTimestamp.
 Synthetic Ready messaging listeners provide health observations, not broker or
 financial behavior. No fixture accesses the retained Tokyo directories or AWS.
+
+Retained restoration distinguishes the normal kubectl JSON projection from the
+raw API object. The existing plan `fullCurrentTargetSHA256` binds the complete
+observed kubectl projection, not historical managed-fields data. The new journal
+records the fresh raw target and hash before intent, rechecks that complete raw
+object before the single PUT, and requires the durable server ACK to equal an
+independent raw GET. Its normal list readback must equal that ACK with only
+`metadata.managedFields` omitted, matching the pinned kubectl JSON printer.
+Other policy comparisons and historical receipt interpretation remain unchanged.
+The disposable positive control requires this actual API/printer distinction;
+it does not establish any historical raw metadata or authorize a live restore.

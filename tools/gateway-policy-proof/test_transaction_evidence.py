@@ -128,7 +128,7 @@ class TransactionEvidenceTests(unittest.TestCase):
                       "shape": {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv6",
                                 "endpoints": [{"addresses": ["2001:db8::1"], "conditions": {"ready": False}}]}},
                   "retainedRestore": {"cases": list(fixture.restore_fixture.CASES), "syntheticLegacyReceipts": True,
-                      "historicalProvenanceQualified": False, "actualAppendOnlyJournals": True, "singleAttemptEnforced": True},
+                      "historicalProvenanceQualified": False, "actualAppendOnlyJournals": True, "singleAttemptEnforced": True, "actualManagedFieldsProjection": True},
                   "annotationTransport": {key: True for key in ("oldClientMutation", "rawMetadataPreserved", "dryRunUnchanged", "staleRVRefused", "wrongUIDRefused", "rollbackPreserved", "finalizePreserved")},
                   "imageIdentity": {"root": rollout_probe.IMAGE.split("@", 1)[1], "manifest": "sha256:" + "e" * 64,
                                     "config": "sha256:" + "f" * 64, "platform": "linux/amd64", "rootMediaType": "application/vnd.oci.image.manifest.v1+json"}}

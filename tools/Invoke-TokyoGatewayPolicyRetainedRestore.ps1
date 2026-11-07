@@ -126,9 +126,9 @@ do {
 if (-not $result -or $result.Status -ne 'Success') { throw "Retained restoration unverified. Preserve both receipt directories; do not retry, force rollback or delete the journal. SSM command: $command" }
 $report = $result.Output.Trim() | ConvertFrom-Json
 if ($report.provenanceSHA256 -cne $provenanceHash -or $report.format -cne 'kanz-tokyo-retained-restore-result-v1' -or $report.source -cne $source -or $report.command -cne '21d730ab-18c9-43ba-9427-522d557b6f2c' -or $report.legacyHistoricalSnapshots -cne 'UNKNOWN' -or $report.result -cne 'VERIFIED' -or $report.writeAttempts -cne 1) { throw 'Retained restoration result violates its bounded contract.' }
-$fields = @('format','source','command','receiptSHA256','provenanceSHA256','beforeSHA256','afterSHA256','targetUID','targetResourceVersion','result','writeAttempts','legacyHistoricalSnapshots')
+$fields = @('format','source','command','receiptSHA256','provenanceSHA256','beforeSHA256','afterSHA256','rawBeforeSHA256','rawAfterSHA256','targetUID','targetResourceVersion','result','writeAttempts','legacyHistoricalSnapshots')
 if (Compare-Object ($fields | Sort-Object) ($report.PSObject.Properties.Name | Sort-Object)) { throw 'Unexpected restoration report fields.' }
-foreach ($field in @('receiptSHA256','provenanceSHA256','beforeSHA256','afterSHA256')) {
+foreach ($field in @('receiptSHA256','provenanceSHA256','beforeSHA256','afterSHA256','rawBeforeSHA256','rawAfterSHA256')) {
     if ($report.$field -cnotmatch '^[0-9a-f]{64}$') { throw 'Restoration evidence hash missing.' }
 }
 if ($report.targetUID -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or $report.targetResourceVersion -cnotmatch '^[0-9]{1,30}$') { throw 'Restoration target CAS identity missing.' }

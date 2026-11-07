@@ -154,6 +154,7 @@ def plan(k, payload, records, receipt_hash):
 
 def inventory_command(argv, value, environment, directory):
     reads = {
+        ("get", "--raw", "/apis/networking.k8s.io/v1/namespaces/kanz-services/networkpolicies/allow-gateway-runtime-egress"),
         ("get", "namespace", "kube-system", "-o", "json"),
         ("-n", "kanz-services", "get", "networkpolicies", "-o", "json"),
         ("-n", "kanz-services", "get", "deployments", "-o", "json"),

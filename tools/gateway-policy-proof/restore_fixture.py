@@ -60,9 +60,10 @@ def durable_save(journal, value, progress):
 
 def validate(value):
     if (not isinstance(value, dict) or set(value) != {"cases", "syntheticLegacyReceipts",
-            "historicalProvenanceQualified", "actualAppendOnlyJournals", "singleAttemptEnforced"}
+            "historicalProvenanceQualified", "actualAppendOnlyJournals", "singleAttemptEnforced", "actualManagedFieldsProjection"}
             or value["cases"] != list(CASES) or value["syntheticLegacyReceipts"] is not True
             or value["historicalProvenanceQualified"] is not False
+            or value["actualManagedFieldsProjection"] is not True
             or value["actualAppendOnlyJournals"] is not True or value["singleAttemptEnforced"] is not True):
         raise ValueError("retained restoration controls incomplete")
 
@@ -219,6 +220,15 @@ def qualify(k, cluster_uid, source, rendered, governed, probe_records, scratch, 
                     raise AssertionError("actual baseline not restored")
                 if case == "retained_restore_verified" and not acknowledged_before_read:
                     raise AssertionError("server ACK not durable before after-observation")
+                if case == "retained_restore_verified":
+                    ack = next(r["response"] for r in saved if r["phase"] == "restore_acknowledged")
+                    raw_after = json.loads(k(*restore.GET))
+                    if (not isinstance(ack["metadata"].get("managedFields"), list)
+                            or not ack["metadata"]["managedFields"]
+                            or "managedFields" in after[receipts.TARGET]["metadata"]
+                            or ack == after[receipts.TARGET] or raw_after != ack
+                            or restore.target_projection(ack) != after[receipts.TARGET]):
+                        raise AssertionError("actual raw versus printed metadata control differs")
             elif case == "retained_restore_stale_cas":
                 if len(concurrent_state) != 1 or after != concurrent_state[0]:
                     raise AssertionError("stale CAS overwrote concurrent metadata")
@@ -234,4 +244,4 @@ def qualify(k, cluster_uid, source, rendered, governed, probe_records, scratch, 
         finally:
             journal.close()
     return {"cases": results, "syntheticLegacyReceipts": True, "historicalProvenanceQualified": False,
-            "actualAppendOnlyJournals": True, "singleAttemptEnforced": True}
+            "actualAppendOnlyJournals": True, "singleAttemptEnforced": True, "actualManagedFieldsProjection": True}
