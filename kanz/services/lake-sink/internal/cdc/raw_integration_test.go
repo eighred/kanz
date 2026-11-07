@@ -156,12 +156,30 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 					}
 				}
 				if child != nil {
+					membership := describeRawCrashGroup(t, ctx, brokers, group)
+					if membership.GroupState != "Stable" || len(membership.Members) != 1 {
+						t.Fatal("crash helper lacks exclusive active group membership")
+					}
 					// Abrupt process termination: no FileSink.Flush/Close or deferred cleanup.
 					if err := child.Process.Kill(); err != nil {
 						t.Fatal("crash helper kill failed")
 					}
 					if err := <-done; err == nil {
 						t.Fatal("crash helper exited cleanly")
+					}
+					// SIGKILL cannot send LeaveGroup. The pinned kafka-go consumer
+					// uses a 30s session timeout. Observe coordinator expiry inside
+					// the original case budget before the unchanged 5s read below.
+					for {
+						membership = describeRawCrashGroup(t, ctx, brokers, group)
+						if membership.GroupState == "Empty" && len(membership.Members) == 0 {
+							break
+						}
+						select {
+						case <-ctx.Done():
+							t.Fatal("killed consumer membership did not expire")
+						case <-time.After(100 * time.Millisecond):
+						}
 					}
 				} else {
 					stop()
@@ -273,4 +291,14 @@ func TestRawKafkaCrashChild(t *testing.T) {
 		t.Fatal("child subscription ended")
 	}
 	t.Fatal("child must be killed before its deadline")
+}
+
+func describeRawCrashGroup(t *testing.T, ctx context.Context, brokers []string, group string) kafka.DescribeGroupsResponseGroup {
+	t.Helper()
+	admin := kafka.Client{Addr: kafka.TCP(brokers...)}
+	result, err := admin.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: []string{group}})
+	if err != nil || result == nil || len(result.Groups) != 1 || result.Groups[0].GroupID != group || result.Groups[0].Error != nil {
+		t.Fatal("exact crash group membership unavailable")
+	}
+	return result.Groups[0]
 }
