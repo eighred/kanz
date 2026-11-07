@@ -18,14 +18,38 @@ class KubernetesClient:
     def list_policies(self):
         return json.loads(self.k("-n", tx.NAMESPACE, "get", "networkpolicies", "-o", "json"))["items"]
 
+    def write(self, obj, replacing, dry_run=False):
+        # Ordinary kubectl replace rewrites an existing last-applied annotation.
+        # Raw requests preserve user metadata and still use API UID/RV CAS.
+        objects = tx.inventory([obj])
+        key = next(iter(objects))
+        if key[0] != tx.NAMESPACE or key[1] not in tx.NAMES:
+            raise tx.Refusal("write outside owned policies")
+        if replacing:
+            tx.version(obj)
+        elif any(field in obj["metadata"] for field in ("uid", "resourceVersion")):
+            raise tx.Refusal("create contains server identity")
+        path = "/apis/networking.k8s.io/v1/namespaces/" + tx.NAMESPACE + "/networkpolicies"
+        if replacing:
+            path += "/" + key[1]
+        # --dry-run is not consulted by kubectl's raw HTTP path.
+        if dry_run:
+            path += "?dryRun=All"
+        result = self.k("replace" if replacing else "create", "--raw", path, "-f", "-", value=obj)
+        if dry_run:
+            actual = json.loads(result)
+            tx.inventory([actual])
+            if tx.semantic(actual) != tx.semantic(obj):
+                raise tx.Refusal("server dry-run changed intended policy")
+
     def dry_run(self, obj, replacing):
-        self.k("replace" if replacing else "create", "--dry-run=server", "-f", "-", value=obj)
+        self.write(obj, replacing, dry_run=True)
 
     def create(self, obj):
-        self.k("create", "-f", "-", value=obj)
+        self.write(obj, False)
 
     def replace(self, obj):
-        self.k("replace", "-f", "-", value=obj)
+        self.write(obj, True)
 
     def delete(self, key, uid, rv):
         if key[0] != tx.NAMESPACE or key[1] not in tx.NAMES:
