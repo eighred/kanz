@@ -147,16 +147,26 @@ jobs:
         with:
           # Track the toolchain pinned in go.mod so CI never drifts from local.
           go-version-file: kanz/go.mod
-          # setup-go caches are immutable on an exact hit. Each matrix marker
-          # isolates its race or quality compiler workload from minimal jobs.
-          # This is compilation reuse only: every test still uses -count=1.
-          cache-dependency-path: |
-            kanz/.gotmp/go-ci-cache-profile
-            kanz/go.mod
-            kanz/go.sum
-            .github/go-ci-cache-profile
-            kanz-schemas/buf.gen.yaml
-            kanz-schemas/proto/**/*.proto
+          # Explicit restore/save permits bounded prefix reuse and makes PRs
+          # read-only cache consumers. Every test still uses -count=1.
+          cache: false
+
+      - name: Identify isolated Go compiler cache
+        id: compiler_cache_meta
+        working-directory: kanz
+        run: |
+          python3 -B -m unittest discover -s ../.github/scripts -p test_go_ci_cache.py
+          python3 ../.github/scripts/go_ci_cache.py
+
+      - name: Restore isolated Go compilation inputs
+        id: compiler_cache
+        if: steps.compiler_cache_meta.outputs.enabled == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.compiler_cache_meta.outputs.paths }}
+          key: kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'kanz-schemas/buf.gen.yaml', 'kanz-schemas/proto/**/*.proto') }}
+          restore-keys: |
+            kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-
 
       - uses: ./.github/actions/setup-buf
         with:
@@ -768,6 +778,23 @@ jobs:
           fi
           remaining=$(timeout 30s docker ps -a --filter 'name=^/kanz-ci-tv-nats$' --format '{{.ID}}')
           test -z "$remaining"
+
+      - name: Recheck native compiler inputs before cache save
+        id: compiler_cache_final
+        if: success() && steps.compiler_cache_meta.outputs.enabled == 'true'
+        working-directory: kanz
+        env:
+          EXPECTED_FINGERPRINT: ${{ steps.compiler_cache_meta.outputs.fingerprint }}
+        run: python3 ../.github/scripts/go_ci_cache.py check
+
+      # A complete successful main run is the only writer. PRs can restore
+      # main's inputs, but cannot displace them with partial/minimal profiles.
+      - name: Save complete Go compilation inputs
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.compiler_cache_meta.outputs.enabled == 'true' && steps.compiler_cache_final.outputs.stable == 'true' && steps.compiler_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.compiler_cache_meta.outputs.paths }}
+          key: ${{ steps.compiler_cache.outputs.cache-primary-key }}
 
   go:
     needs: [scope, go-race]
