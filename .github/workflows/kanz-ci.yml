@@ -182,8 +182,12 @@ jobs:
         with:
           path: ${{ steps.compiler_cache_meta.outputs.paths }}
           key: kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'kanz-schemas/buf.gen.yaml', 'kanz-schemas/proto/**/*.proto', '.github/scripts/go_shard_evidence.py') }}
+          # An absent shard cache may reuse another shard's compiler inputs.
+          # Host/native/toolchain identity and race/quality remain exact;
+          # fresh -count=1 tests and complete shard evidence are unchanged.
           restore-keys: |
             kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-
+            kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-
 
       - uses: ./.github/actions/setup-buf
         with:
