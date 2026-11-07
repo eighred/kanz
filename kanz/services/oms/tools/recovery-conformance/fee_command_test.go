@@ -195,9 +195,9 @@ func concurrentFeeCommand(t *testing.T, operation string) {
 			if snapshot.score() > report.best.score() {
 				report.best = snapshot
 			}
-			// Preserve the original direct-holder requirement. Transitive counts
-			// only diagnose a failure; they cannot turn it into an accepted overlap.
-			if snapshot.direct >= 2 && snapshot.owners[0].direct > 0 && snapshot.owners[1].direct > 0 {
+			// Soft queue blockers are valid only when both named active Lock
+			// waiters have an observed path to this still-held transaction.
+			if snapshot.overlapped() {
 				report.observed = true
 				break
 			}
@@ -232,7 +232,7 @@ func concurrentFeeCommand(t *testing.T, operation string) {
 	if !joined {
 		t.Fatal("Go concurrent proposal did not join")
 	}
-	if !report.observed || report.releaseError != "none" {
+	if !report.observed || report.queryError != "none" || report.releaseError != "none" {
 		t.Fatal("both independent proposal CAS operations did not reach held row")
 	}
 	if !result.SessionsClosed || (result.Status != "ok" && (result.Status != "error" || result.Error != "Conflict")) {
