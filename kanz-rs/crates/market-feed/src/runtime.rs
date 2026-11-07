@@ -377,7 +377,6 @@ mod tests {
                 last_update_sequence: 101,
                 bids: vec![level(50000)],
                 asks: vec![level(50001)],
-                ..Default::default()
             };
             book.apply_snapshot(&source).unwrap();
             assert_eq!(source.symbol, wire_symbol);
