@@ -1,4 +1,4 @@
-"""Network-only caller pods which must never enter a Service's ready endpoints."""
+"""Network-only probes excluded from ready Service endpoints."""
 import ipaddress
 import re
 
@@ -85,8 +85,6 @@ def controller_boundary(controllers, namespace, labels):
 
 
 def running_unready(actual, desired, verified_image_id):
-    # Caller has inspected this exact CRI reference and compared its typed config
-    # and repository digests; do not infer digest kind from the imageID string.
     if not isinstance(verified_image_id, str) or not 1 <= len(verified_image_id) <= 256:
         raise ValueError("independently verified runtime image identity required")
     meta, spec, status = actual.get("metadata", {}), actual.get("spec", {}), actual.get("status", {})
@@ -127,17 +125,30 @@ def endpoint_boundary(slices, addresses, require_absent=False):
     if not isinstance(slices, list) or len(slices) > 512:
         raise ValueError("EndpointSlice inventory exceeds bound")
     for item in slices:
-        endpoints = item.get("endpoints", [])
-        if len(endpoints) > 1000:
-            raise ValueError("EndpointSlice endpoint bound exceeded")
+        if not isinstance(item, dict):
+            raise ValueError("invalid EndpointSlice shape")
+        # discovery/v1 optional nil Endpoints serializes as null (no omitempty).
+        endpoints = item.get("endpoints")
+        if endpoints is None:
+            endpoints = []
+        if not isinstance(endpoints, list) or len(endpoints) > 1000:
+            raise ValueError("invalid EndpointSlice shape")
         for endpoint in endpoints:
-            if set(endpoint.get("addresses", [])) & set(addresses):
-                if require_absent or endpoint.get("conditions", {}).get("ready") is not False:
+            if not isinstance(endpoint, dict):
+                raise ValueError("invalid EndpointSlice shape")
+            values = endpoint.get("addresses")
+            conditions = endpoint.get("conditions", {})
+            if (not isinstance(values, list) or not 1 <= len(values) <= 100
+                    or any(not isinstance(v, str) or not 1 <= len(v) <= 253 for v in values)
+                    or not isinstance(conditions, dict)):
+                raise ValueError("invalid EndpointSlice shape")
+            if set(values) & set(addresses):
+                if require_absent or conditions.get("ready") is not False:
                     raise ValueError("probe may participate in Service routing")
 
 
 def workload_lineage(pod, deployments, replicasets, expected):
-    """Source-pinned specs and controller lineage, not private-registry resolution."""
+    """Source specs/controller lineage, not private-image verification."""
     def images(spec):
         result = {}
         for key in ("containers", "initContainers"):
@@ -186,12 +197,7 @@ def workload_lineage(pod, deployments, replicasets, expected):
 
 
 def verify_cri(image_id, inspection, identity):
-    """CRI status.id is the image config digest (same existing TV proof seam).
-
-    image_id is passed unchanged to inspecti by the caller, never interpreted as
-    a manifest/config solely from its text. RepoDigests bind that config to the
-    independently hash-verified public image graph.
-    """
+    """Bind inspected CRI config/repo digests; never infer type from image_id."""
     if not isinstance(image_id, str) or not re.fullmatch(
             r"(?:(?:docker-pullable://)?(?:docker.io/library/)?python@)?sha256:[0-9a-f]{64}", image_id):
         raise ValueError("unexpected pod image identity format")

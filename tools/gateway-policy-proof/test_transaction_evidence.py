@@ -2,6 +2,9 @@ import copy
 import unittest
 import json
 
+import inspect
+import transaction_fixture as fixture
+
 import proof
 import rollout_probe
 from transaction_fixture import CASES, validate_report, deployment_diagnostic, runtime_failure_category, synthetic_runtime_detail
@@ -45,10 +48,52 @@ class TransactionEvidenceTests(unittest.TestCase):
         for bad in (pods * 17, [{"status": {"containerStatuses": [{}] * 5}}]):
             with self.assertRaises(ValueError): deployment_diagnostic(deployment, bad)
 
+    def test_actual_null_control_shape_ownership_and_wiring(self):
+        service_uid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        item = {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv4", "endpoints": None,
+                "metadata": {"namespace": fixture.tx.NAMESPACE, "uid": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                             "ownerReferences": [{"kind": "Service", "name": "empty-endpoint-control", "uid": service_uid, "controller": True}]}}
+        created = []
+        def k(*args, value=None):
+            if args[0] == "create":
+                created.append(copy.deepcopy(value)); return ""
+            if args[3] == "pods": return '{"items":[]}'
+            if args[3] == "service":
+                return json.dumps({"metadata": {"uid": service_uid}, "spec": created[-1]["spec"]})
+            if args[3] == "endpointslices": return json.dumps({"items": [item]})
+            raise AssertionError("unexpected operation")
+        result = fixture.empty_slice_control(k)
+        self.assertIn("endpoints", result["shape"])
+        self.assertIsNone(result["shape"]["endpoints"])
+        for change in ("array", "missing", "owner"):
+            bad = copy.deepcopy(item)
+            if change == "array": bad["endpoints"] = []
+            elif change == "missing": del bad["endpoints"]
+            else: bad["metadata"]["ownerReferences"][0]["uid"] = "foreign"
+            original = item
+            item = bad
+            with self.subTest(change=change), self.assertRaises((ValueError, KeyError, AssertionError)):
+                fixture.empty_slice_control(k)
+            item = original
+        text = inspect.getsource(fixture.run_fixture)
+        required = ('report["emptyEndpointSlice"] = empty_slice_control(k)',
+                    'report["cases"].append("empty_endpoint_slice_null")',
+                    'rollout_probe.endpoint_boundary(slices, probes.addresses)')
+        def wired(source):
+            return all(source.count(part) >= 1 for part in required) and source.index(required[0]) < source.index("probes.create()")
+        self.assertTrue(wired(text))
+        for part in required:
+            with self.subTest(part=part): self.assertFalse(wired(text.replace(part, "removed")))
+        self.assertEqual(len(CASES), 18)
+        self.assertEqual(CASES[:8], ["response_loss_" + str(i) for i in range(1, 9)])
+
     def test_exact_source_attempt_complete_cases_cleanup_and_identity_required(self):
         report = {"format": "kanz-gateway-policy-transaction-proof-v1", "source": "a" * 40, "tree": "b" * 40,
                   "runID": "123", "runAttempt": "2", "renderSHA256": "c" * 64, "nodeImage": proof.feed.NODE,
                   "cluster": "cni-proof-" + "d" * 12, "cases": list(CASES), "passed": True, "cleanupPassed": True,
+                  "emptyEndpointSlice": {"serviceUID": "a"*8+"-"+"a"*4+"-"+"a"*4+"-"+"a"*4+"-"+"a"*12,
+                      "sliceUID": "b"*8+"-"+"b"*4+"-"+"b"*4+"-"+"b"*4+"-"+"b"*12,
+                      "shape": {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv4", "endpoints": None}},
                   "imageIdentity": {"root": rollout_probe.IMAGE.split("@", 1)[1], "manifest": "sha256:" + "e" * 64,
                                     "config": "sha256:" + "f" * 64, "platform": "linux/amd64", "rootMediaType": "application/vnd.oci.image.manifest.v1+json"}}
         def check(value):
@@ -56,10 +101,15 @@ class TransactionEvidenceTests(unittest.TestCase):
         check(report)
         for key, value in (("source", "e" * 40), ("tree", "e" * 40), ("runID", "124"), ("runAttempt", "1"),
                            ("renderSHA256", "d" * 64), ("cases", CASES[:-1]), ("cases", list(reversed(CASES))),
-                           ("passed", 1), ("cleanupPassed", False), ("imageIdentity", {})):
+                           ("passed", 1), ("cleanupPassed", False), ("imageIdentity", {}), ("emptyEndpointSlice", None), ("emptyEndpointSlice", {})):
             bad = copy.deepcopy(report); bad[key] = value
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 check(bad)
+        for key, value in (("endpoints", []), ("endpoints", {}), ("endpoints", False), ("addressType", "IPv6")):
+            bad = copy.deepcopy(report); bad["emptyEndpointSlice"]["shape"][key] = value
+            with self.assertRaises(ValueError): check(bad)
+        bad = copy.deepcopy(report); del bad["emptyEndpointSlice"]["shape"]["endpoints"]
+        with self.assertRaises(ValueError): check(bad)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Fixed Tokyo entrypoint. No arbitrary context, cluster or policy target option."""
+"""Fixed Tokyo policy entrypoint."""
 import argparse
 import copy
 import json
@@ -88,12 +88,13 @@ class Probes:
         self.peers = {}
         self.namespace = "gateway-policy-" + nonce
         self.ns_uid = None
+        self.namespace_uid_custody = None
         self.save = save
 
     def record(self, phase):
         self.save({"format": "kanz-gateway-policy-probes-v1", "nonce": self.nonce, "phase": phase,
-                   "namespace": self.namespace, "namespaceUID": self.ns_uid,
-                   "pods": [{key: entry.get(key) for key in ("name", "namespace", "uid")} for entry in self.owned]})
+                   "namespace": self.namespace, "namespaceUID": self.namespace_uid_custody,
+                   "pods": [{key: entry.get(key) for key in ("name", "namespace", "uid", "address", "deleted")} for entry in self.owned]})
 
     def services(self):
         return json.loads(self.k("get", "services", "-A", "-o", "json"))["items"]
@@ -105,7 +106,6 @@ class Probes:
         return json.loads(self.k("get", "replicasets,replicationcontrollers,statefulsets,daemonsets,jobs", "-A", "-o", "json"))["items"]
 
     def create(self):
-        # Absence must be distinguished from an API error.
         before = json.loads(self.k("get", "namespace", self.namespace, "--ignore-not-found", "-o", "json") or "null")
         if before is not None:
             raise tx.Refusal("probe namespace collision")
@@ -117,6 +117,7 @@ class Probes:
             observed = json.loads(self.k("get", "namespace", self.namespace, "--ignore-not-found", "-o", "json") or "null")
             if observed and observed["metadata"].get("labels", {}).get(probe.OWNER) == self.nonce:
                 self.ns_uid = observed["metadata"]["uid"]
+                self.namespace_uid_custody = self.ns_uid
             self.record("namespace_create_observed")
         if self.ns_uid is None:
             raise tx.Refusal("probe namespace creation unknown")
@@ -150,9 +151,10 @@ class Probes:
                 time.sleep(1)
             image_id = actual["status"]["containerStatuses"][0]["imageID"]
             entry["verifiedImageID"] = probe.verify_cri(image_id, self.inspect(image_id), self.identity)
-            # The preceding typed CRI proof established this observed identifier.
             address = probe.running_unready(actual, desired, entry["verifiedImageID"])
+            entry["address"] = address
             self.addresses.append(address)
+            self.record("pod_running_unready_observed")
             self.peers[peer] = entry
         self.check()
 
@@ -165,7 +167,8 @@ class Probes:
                 raise tx.Refusal("probe pod was replaced")
             probe.service_boundary(services, entry["namespace"], entry["desired"]["metadata"]["labels"])
             probe.controller_boundary(controllers, entry["namespace"], entry["desired"]["metadata"]["labels"])
-            probe.running_unready(obj, entry["desired"], entry["verifiedImageID"])
+            if probe.running_unready(obj, entry["desired"], entry["verifiedImageID"]) != entry["address"]:
+                raise tx.Refusal("probe address changed")
         probe.endpoint_boundary(self.endpoints(), self.addresses)
 
     def tcp(self, peer, address, port, expected):
@@ -192,13 +195,16 @@ class Probes:
         for entry in reversed(self.owned):
             actual = json.loads(self.k("-n", entry["namespace"], "get", "pod", entry["name"], "--ignore-not-found", "-o", "json") or "null")
             if actual is None:
+                entry["deleted"] = True
+                self.record("pod_absence_observed")
                 continue
             if actual["metadata"].get("labels", {}).get(probe.OWNER) != self.nonce or actual["metadata"]["uid"] != entry["uid"]:
                 raise tx.Refusal("probe cleanup ownership uncertain")
             self.k("delete", "--raw", "/api/v1/namespaces/" + entry["namespace"] + "/pods/" + entry["name"], "-f", "-",
                    value={"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": entry["uid"], "resourceVersion": actual["metadata"]["resourceVersion"]}, "gracePeriodSeconds": 0})
             self.k("-n", entry["namespace"], "wait", "--for=delete", "pod/" + entry["name"], "--timeout=60s")
-        self.owned.clear()
+            entry["deleted"] = True
+            self.record("pod_absence_observed")
         if self.ns_uid:
             actual = json.loads(self.k("get", "namespace", self.namespace, "-o", "json"))
             if actual["metadata"]["uid"] != self.ns_uid or actual["metadata"].get("labels", {}).get(probe.OWNER) != self.nonce:
@@ -238,8 +244,7 @@ def main():
         raise tx.Refusal("rollout source binding differs")
     desired = [p for p in payload["policies"] if p["metadata"]["name"] in tx.NAMES]
     nonce = uuid.uuid4().hex
-    # Only an apply owns durable receipts. Dry-run scratch is freshly owned and
-    # removed on every exit; it never creates probe resources or policy writes.
+    # Dry-run owns scratch only; apply owns durable receipts.
     scratch = None
     receipts = None
     probes = None

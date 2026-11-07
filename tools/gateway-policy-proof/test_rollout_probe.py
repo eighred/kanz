@@ -81,6 +81,25 @@ class ProbeBoundaryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             probe.endpoint_boundary(slices, ["10.0.0.5"], require_absent=True)
 
+    def test_empty_endpoint_slice_serializations_do_not_hide_active_slices(self):
+        for empty in ({}, {"endpoints": None}, {"endpoints": []}):
+            for absent in (False, True):
+                probe.endpoint_boundary([empty], ["10.0.0.5"], require_absent=absent)
+            active = {"endpoints": [{"addresses": ["10.0.0.5"], "conditions": {"ready": True}}]}
+            for slices in ([empty, active], [active, empty]):
+                with self.assertRaises(ValueError):
+                    probe.endpoint_boundary(slices, ["10.0.0.5"])
+        for inventory in (None, {}, "", [None], [{"endpoints": {}}], [{"endpoints": ""}],
+                          [{"endpoints": False}], [{"endpoints": [None]}]):
+            with self.subTest(inventory=inventory), self.assertRaises(ValueError):
+                probe.endpoint_boundary(inventory, ["10.0.0.5"])
+        for endpoint in ({}, {"addresses": None}, {"addresses": []}, {"addresses": "10.0.0.5"},
+                         {"addresses": [None]}, {"addresses": ["10.0.0.5"], "conditions": None},
+                         {"addresses": ["10.0.0.5"], "conditions": {"ready": "false"}},
+                         {"addresses": ["10.0.0.5"], "conditions": {"ready": 0}}):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                probe.endpoint_boundary([{"endpoints": [endpoint]}], ["10.0.0.5"])
+
     def test_minimal_labels_must_match_actual_policy_selection(self):
         policies = [{"spec": {"podSelector": {"matchLabels": {"app": "api-gateway"}}}}]
         real = {"app": "api-gateway", "pod-template-hash": "controller", "tenant": "fixture"}

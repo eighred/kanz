@@ -114,7 +114,7 @@ and only the documented [Docker registry/CDN hosts](https://docs.docker.com/desk
 it never forwards authorization across hosts.
 
 The same required workflow also constructs a second fresh kind/Cilium cluster
-for `transaction_fixture.py`. Seventeen mandatory cases exercise each real API
+for `transaction_fixture.py`. Eighteen mandatory cases exercise each real API
 write/finalization response-loss boundary, dry-run nonmutation, actual Deployment
 UID lineage, zero-replica controller adoption refusal, four-policy
 success, refusal to overwrite a concurrent edit, actual neverReady endpoint
@@ -122,6 +122,13 @@ nonparticipation, actual matching-Service refusal and UID-bound cleanup. Its
 live TCP probe routine also runs against synthetic listeners under the exact
 rendered policies, with successful controls bracketing every timeout denial. Its
 checker binds checkout/tree, run/attempt, rendered union and independently
-resolved image identity. This is developmental transaction evidence, not Tokyo
+resolved image identity. A fixture-only empty Service must produce a controller-owned
+EndpointSlice whose actual API JSON contains `endpoints: null`; its UID bindings
+and exact projected shape are mandatory evidence. The slice remains present while
+real probe checks and cleanup execute. Malformed inventories and unknown readiness
+for any matching probe still refuse. The nullable list matches the pinned
+[Kubernetes API type](https://github.com/kubernetes/api/blob/v0.36.4/discovery/v1/types.go#L49-L54)
+and [empty-placeholder controller path](https://github.com/kubernetes/endpointslice/blob/v0.36.4/reconciler.go#L241-L254).
+This is developmental transaction evidence, not Tokyo
 rollout acceptance. Linux execution is required; local Windows receipt tests
 explicitly skip unsupported no-follow directory semantics.

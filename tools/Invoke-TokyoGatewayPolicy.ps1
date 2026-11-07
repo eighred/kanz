@@ -71,7 +71,7 @@ foreach ($name in @('transaction.py', 'policy_client.py', 'rollout_probe.py', 'r
     if ([Text.Encoding]::UTF8.GetByteCount($text) -gt 65536) { throw 'Rollout source file exceeds bound.' }
     $files[$name] = $text
 }
-$bundle = @{ files = $files; payload = @{ source = $source; policies = $policies; identity = $identity; workloads = $projection.workloads } } | ConvertTo-Json -Depth 60 -Compress
+$bundle = [ordered]@{ files = $files; payload = [ordered]@{ source = $source; policies = $policies; identity = $identity; workloads = $projection.workloads } } | ConvertTo-Json -Depth 60 -Compress
 $bytes = [Text.Encoding]::UTF8.GetBytes($bundle)
 if ($bytes.Length -gt 524288) { throw 'Rollout bundle exceeds bound.' }
 $memory = New-Object IO.MemoryStream
