@@ -1,5 +1,9 @@
 name: rust-oms-fold
 
+# Main image builds seed the shared dependency cache. Qualification branches
+# restore it without creating duplicate compiler caches under each branch ref.
+cache-mode: read
+
 on:
   pull_request:
     paths:
