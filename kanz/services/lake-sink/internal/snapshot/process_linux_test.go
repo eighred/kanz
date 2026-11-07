@@ -104,7 +104,7 @@ func TestSnapshotOwnerSubprocess(t *testing.T) {
 		t.Fatal("owner database requires loopback")
 	}
 	broker, err := url.Parse(in.NATS)
-	if err != nil || broker.Scheme != "nats" || broker.User != nil || net.ParseIP(broker.Hostname()) == nil || !net.ParseIP(broker.Hostname()).IsLoopback() {
+	if err != nil || broker.Scheme != "nats" || broker.User != nil || broker.Path != "" || broker.RawQuery != "" || broker.Fragment != "" || broker.Port() == "" || net.ParseIP(broker.Hostname()) == nil || !net.ParseIP(broker.Hostname()).IsLoopback() {
 		t.Fatal("owner broker requires literal loopback")
 	}
 	for _, path := range []string{in.Landing, in.Output, in.Policy, in.Worker} {

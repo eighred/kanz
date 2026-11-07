@@ -59,7 +59,10 @@ the exact synthetic archiver and broker SPIFFE identities; Kafka is restricted
 to the disposable loopback fixture. This is not SPIRE issuance or Kafka ACL proof.
 The native poison-message path remains Kafka `dlq.archiver`.
 
-EOF cancels the 90-second helper context. `closed` is emitted only after Run,
+The parent supplies one absolute deadline, at most 240 seconds from helper
+startup; past or excessive deadlines refuse. This disposable fixture allowance
+includes two owner startups/work phases and unchanged native dead-delivery, not
+a production SLO or a phase reset. EOF cancels it. `closed` is emitted only after Run,
 both transports and the input reader have joined; lifetime expiry fails instead.
 Native drain behavior is unchanged (five seconds plus two seconds stop slack).
 The parent's separate cleanup observation allowance must accommodate that drain;

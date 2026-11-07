@@ -76,6 +76,7 @@ func snapshotStores(t *testing.T) (*Store, *Store) {
 	if err := poolA.QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relname IN ('lake_snapshots','outbox') AND relrowsecurity AND relforcerowsecurity`).Scan(&forced); err != nil || forced != 2 {
 		t.Fatal("both owner tables must have actual FORCE RLS")
 	}
+	t.Log("actual snapshot PostgreSQL role: NOSUPERUSER NOBYPASSRLS; FORCE RLS tables: 2")
 	authorizer := auth.NewPolicyAuthorizer(&auth.Policy{Roles: map[string][]auth.Action{"creator": {ActionCreate}, "reader": {ActionRead}}})
 	a, err := NewStore(poolA, "tenant-a", authorizer)
 	if err != nil {

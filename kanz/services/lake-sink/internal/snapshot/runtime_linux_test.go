@@ -170,7 +170,9 @@ func TestSnapshotActualRuntimeDurablePublicationQueryAndEstablishedChannelFailur
 			_, callErr = client.QuerySnapshot(attempt, &lakepb.QuerySnapshotRequest{Caller: reader, SnapshotId: initial.SnapshotId, Query: &lakepb.SnapshotQuery{Operation: lakepb.SnapshotQueryOperation_SNAPSHOT_QUERY_OPERATION_LIST_EVENTS, PageSize: 10}})
 		}
 		stop()
-		if status.Code(callErr) != codes.DeadlineExceeded || ready.Load() {
+		// Serve is withheld: this proves refusal, not completed TLS authentication.
+		code := status.Code(callErr)
+		if (code != codes.DeadlineExceeded && code != codes.Unavailable) || ready.Load() {
 			t.Fatalf("pre-barrier %s admitted or incorrectly ready: %s", operation, status.Code(callErr))
 		}
 	}

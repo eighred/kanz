@@ -15,6 +15,19 @@ func TestWorkerResultClosedProjectionAndPaging(t *testing.T) {
 	if err := ValidateResult(query, valid, 2); err != nil {
 		t.Fatal(err)
 	}
+	// Dense selected ordinals must stay inside the authorized manifest's count.
+	last := proto.Clone(valid).(*lakepb.SnapshotQueryResult)
+	last.Exhausted, last.NextOrdinal = true, nil
+	if err := ValidateResult(query, last, 1); err != nil {
+		t.Fatal("valid last ordinal refused", err)
+	}
+	for _, ordinal := range []uint64{1, ^uint64(0)} {
+		invalid := proto.Clone(last).(*lakepb.SnapshotQueryResult)
+		invalid.Events[0].Ordinal = ordinal
+		if ValidateResult(query, invalid, 1) == nil {
+			t.Fatal("out-of-range ordinal accepted")
+		}
+	}
 	for name, mutate := range map[string]func(*lakepb.SnapshotQueryResult){
 		"unknown-time-wire": func(r *lakepb.SnapshotQueryResult) {
 			r.Events[0].EventTime.ProtoReflect().SetUnknown([]byte{0x1a, 1, 'x'})

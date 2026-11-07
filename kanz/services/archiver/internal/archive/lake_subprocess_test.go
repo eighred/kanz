@@ -22,6 +22,7 @@ import (
 )
 
 type lakeArchiverInit struct {
+	Deadline                                      time.Time
 	NATSURL, KafkaBroker, Tenant, ExpectedAccount string
 	Cert, Key, Bundle                             []byte
 	ArchiverID, BrokerID                          string
@@ -62,7 +63,8 @@ func TestLakeSnapshotArchiverSubprocess(t *testing.T) {
 	oldLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer slog.SetDefault(oldLogger)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	maximumDeadline := time.Now().Add(240 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), maximumDeadline)
 	defer cancel()
 	reader := bufio.NewReaderSize(os.Stdin, 64*1024+1)
 	initLine := make(chan []byte, 1)
@@ -93,6 +95,11 @@ func TestLakeSnapshotArchiverSubprocess(t *testing.T) {
 	if dec.Decode(&in) != nil || dec.Decode(new(any)) != io.EOF {
 		t.Fatal("archiver init refused")
 	}
+	if !in.Deadline.After(time.Now()) || in.Deadline.After(maximumDeadline) {
+		t.Fatal("archiver parent deadline refused")
+	}
+	ctx, stopDeadline := context.WithDeadline(ctx, in.Deadline)
+	defer stopDeadline()
 	u, err := url.Parse(in.NATSURL)
 	if err != nil || u.Scheme != "tls" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || !lakeLoopback(u.Host) || !lakeLoopback(in.KafkaBroker) {
 		t.Fatal("archiver endpoint refused")

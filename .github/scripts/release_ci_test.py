@@ -179,7 +179,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(gate.POLICY["tokyo-messaging-proof.yml"], {"messaging-isolation"})
         self.assertEqual(gate.POLICY["envoy-edge.yml"], {"actual-edge"})
         self.assertEqual(gate.POLICY["gateway-policy-proof.yml"], {"gateway-isolation"})
-        self.assertEqual(gate.POLICY["architecture-migration.yml"], {"compatibility", "finite-snapshot"})
+        self.assertEqual(gate.POLICY["architecture-migration.yml"], {"compatibility", "finite-snapshot", "finite-snapshot-owner"})
         with self.assertRaises(gate.EvidenceError): gate.verify_ci(self.api, SHA, self.root)
         for filename, jobs in gate.POLICY.items():
             with self.subTest(filename=filename), patch.object(gate, "requirements", return_value={filename: jobs}):

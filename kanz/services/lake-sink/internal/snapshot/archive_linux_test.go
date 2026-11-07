@@ -92,7 +92,7 @@ func TestSnapshotActualCanonicalArchiverFourFactsRestartAndTenantRefusal(t *test
 	client := &kafka.Client{Addr: kafka.TCP(broker), Timeout: 5 * time.Second}
 	owned := []string{topic, "dlq.archiver"}
 	metadata, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: owned})
-	if err != nil {
+	if err != nil || len(metadata.Topics) != 2 {
 		t.Fatal("Kafka inventory unavailable")
 	}
 	for _, entry := range metadata.Topics {
@@ -100,15 +100,11 @@ func TestSnapshotActualCanonicalArchiverFourFactsRestartAndTenantRefusal(t *test
 			t.Fatal("fixture topic already exists or absence unknown")
 		}
 	}
-	created, err := client.CreateTopics(ctx, &kafka.CreateTopicsRequest{Topics: []kafka.TopicConfig{{Topic: topic, NumPartitions: 1, ReplicationFactor: 1}, {Topic: "dlq.archiver", NumPartitions: 1, ReplicationFactor: 1}}})
-	if err != nil || len(created.Errors) != 2 || created.Errors[topic] != nil || created.Errors["dlq.archiver"] != nil {
-		t.Fatal("owned Kafka topic provisioning failed")
-	}
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
 		deleted, e := client.DeleteTopics(cleanup, &kafka.DeleteTopicsRequest{Topics: owned})
-		if e != nil || len(deleted.Errors) != 2 || deleted.Errors[topic] != nil || deleted.Errors["dlq.archiver"] != nil {
+		if e != nil || len(deleted.Errors) != 2 || (deleted.Errors[topic] != nil && !errors.Is(deleted.Errors[topic], kafka.UnknownTopicOrPartition)) || (deleted.Errors["dlq.archiver"] != nil && !errors.Is(deleted.Errors["dlq.archiver"], kafka.UnknownTopicOrPartition)) {
 			t.Error("owned Kafka topic removal failed")
 			return
 		}
@@ -131,6 +127,11 @@ func TestSnapshotActualCanonicalArchiverFourFactsRestartAndTenantRefusal(t *test
 			}
 		}
 	})
+	created, err := client.CreateTopics(ctx, &kafka.CreateTopicsRequest{Topics: []kafka.TopicConfig{{Topic: topic, NumPartitions: 1, ReplicationFactor: 1}, {Topic: "dlq.archiver", NumPartitions: 1, ReplicationFactor: 1}}})
+	if err != nil || len(created.Errors) != 2 || created.Errors[topic] != nil || created.Errors["dlq.archiver"] != nil {
+		t.Fatal("owned Kafka topic provisioning failed")
+	}
+
 	for {
 		md, e := client.Metadata(ctx, &kafka.MetadataRequest{Topics: owned})
 		ready := e == nil && len(md.Topics) == 2

@@ -34,7 +34,7 @@ func ValidateResult(query *lakepb.SnapshotQuery, result *lakepb.SnapshotQueryRes
 		if event == nil || !boundedText(event.EventId, 256) || !boundedText(event.EventType, 256) || event.EventTime == nil || len(event.EventTime.ProtoReflect().GetUnknown()) != 0 || event.EventTime.CheckValid() != nil || event.DecodeStatus < 1 || event.DecodeStatus > 3 || len(event.ProtoReflect().GetUnknown()) != 0 {
 			return ErrWorker
 		}
-		if (i > 0 && event.Ordinal <= previous) || (query.AfterOrdinal != nil && event.Ordinal <= *query.AfterOrdinal) {
+		if event.Ordinal >= rowCount || (i > 0 && event.Ordinal <= previous) || (query.AfterOrdinal != nil && event.Ordinal <= *query.AfterOrdinal) {
 			return ErrWorker
 		}
 		if query.Operation == lakepb.SnapshotQueryOperation_SNAPSHOT_QUERY_OPERATION_DECODE_FAILURES && event.DecodeStatus != lakepb.SnapshotDecodeStatus_SNAPSHOT_DECODE_STATUS_FAILED {
