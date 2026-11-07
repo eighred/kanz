@@ -14,6 +14,19 @@ on:
       - 'kanz/pkg/bus/**'
       - 'kanz/services/archiver/**'
       - 'kanz/services/lake-sink/**'
+      - 'kanz/services/api-gateway/**'
+      - 'kanz/cmd/kanz-lake-snapshot/**'
+      - 'kanz/cmd/kanz-tenantgen/**'
+      - 'kanz/infra/nats/**'
+      - 'kanz/internal/lake/**'
+      - 'kanz/internal/outbox/**'
+      - 'kanz/internal/pg/**'
+      - 'kanz/pkg/auth/**'
+      - 'kanz/pkg/transport/**'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+      - '.github/scripts/*lake_snapshot_owner*'
+      - '.github/scripts/release_ci*.py'
       - 'kanz/tools/replay/**'
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
@@ -37,6 +50,19 @@ on:
       - 'kanz/pkg/bus/**'
       - 'kanz/services/archiver/**'
       - 'kanz/services/lake-sink/**'
+      - 'kanz/services/api-gateway/**'
+      - 'kanz/cmd/kanz-lake-snapshot/**'
+      - 'kanz/cmd/kanz-tenantgen/**'
+      - 'kanz/infra/nats/**'
+      - 'kanz/internal/lake/**'
+      - 'kanz/internal/outbox/**'
+      - 'kanz/internal/pg/**'
+      - 'kanz/pkg/auth/**'
+      - 'kanz/pkg/transport/**'
+      - 'kanz/go.mod'
+      - 'kanz/go.sum'
+      - '.github/scripts/*lake_snapshot_owner*'
+      - '.github/scripts/release_ci*.py'
       - 'kanz/tools/replay/**'
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
@@ -56,6 +82,174 @@ env:
   GOFLAGS: -mod=mod
 
 jobs:
+  finite-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+      - name: Bind snapshot fixture to exact source
+        run: |
+          mkdir -p snapshot-proof
+          echo "KANZ_BUILD_VERSION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git rev-parse HEAD 'HEAD^{tree}' > snapshot-proof/source.txt
+          printf '%s\n%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > snapshot-proof/run.txt
+          rustc +1.90.0 --version > snapshot-proof/toolchain.txt
+      - name: Build overflow-checked worker and separate kernel probe
+        working-directory: kanz-rs
+        run: |
+          cargo +1.90.0 fmt --all -- --check
+          cargo +1.90.0 build --release --locked -p kanz-lake-snapshot --bin kanz-lake-snapshot --example sandbox-probe
+      - name: Execute actual finite queries and process confinement
+        working-directory: kanz-rs
+        run: |
+          set -euo pipefail
+          cargo +1.90.0 test --release --locked -p kanz-lake-snapshot --all-targets -- --test-threads=1 2>&1 | tee ../snapshot-proof/tests.txt
+          cargo +1.90.0 clippy --release --locked -p kanz-lake-snapshot --all-targets -- -D warnings
+      - name: Bind tested binaries and dependency inventory
+        run: |
+          sha256sum kanz-rs/target/release/kanz-lake-snapshot kanz-rs/target/release/examples/sandbox-probe kanz-rs/Cargo.lock > snapshot-proof/sha256.txt
+          cargo +1.90.0 tree --manifest-path kanz-rs/Cargo.toml --locked -p kanz-lake-snapshot -e normal > snapshot-proof/dependencies.txt
+      - name: Retain actual snapshot qualification
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: finite-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: snapshot-proof/
+          if-no-files-found: error
+
+  finite-snapshot-owner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: kanz/go.mod
+          cache-dependency-path: kanz/go.sum
+      - uses: ./.github/actions/setup-buf
+        with:
+          version: 1.69.0
+      - name: Generate canonical snapshot SDK
+        run: |
+          set -euo pipefail
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          make -C kanz generate
+      - name: Build source-bound owner worker gateway archiver and CLI once
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/lake-bin" snapshot-owner-proof
+          git rev-parse HEAD 'HEAD^{tree}' > snapshot-owner-proof/source.txt
+          printf '%s\n%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > snapshot-owner-proof/run.txt
+          rustup toolchain install 1.90.0 --profile minimal
+          KANZ_BUILD_VERSION="$(git rev-parse HEAD)" cargo +1.90.0 build --release --locked --manifest-path kanz-rs/Cargo.toml -p kanz-lake-snapshot --bin kanz-lake-snapshot
+          sudo install -o root -g root -m 0555 kanz-rs/target/release/kanz-lake-snapshot "$RUNNER_TEMP/lake-bin/worker"
+          sudo install -o root -g root -m 0555 kanz-rs/target/release/kanz-lake-snapshot "$RUNNER_TEMP/lake-bin/worker-swap"
+          cd kanz
+          stamp="-X github.com/eighred/kanz/internal/version.stamped=$(git rev-parse HEAD)"
+          go test -p 1 -c -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/owner.test" ./services/lake-sink/internal/snapshot
+          go test -p 1 -c -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/gateway.test" ./services/api-gateway/cmd/api-gateway
+          go test -p 1 -c -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/archiver.test" ./services/archiver/internal/archive
+          go build -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/kanz-lake-snapshot" ./cmd/kanz-lake-snapshot
+          go vet ./services/lake-sink/... ./services/api-gateway/... ./services/archiver/... ./cmd/kanz-lake-snapshot ./infra/nats
+      - name: Install two checksum-pinned native brokers
+        run: |
+          set -euo pipefail
+          for version in 2.12.6 2.14.5; do
+            case "$version" in
+              2.12.6) expected=77fe7dd69ff5144126026b78355900be0ab0bb4339dc61a7621dcc9b9e9d07a6 ;;
+              2.14.5) expected=5e3b603d47c447bda1f77f9ac16dbf91c90aac4ff3681f8fbbc7201e4ed99355 ;;
+              *) exit 1 ;;
+            esac
+            archive="$RUNNER_TEMP/nats-$version.tgz"
+            curl --fail --location --proto '=https' --tlsv1.2 --retry 2 --max-time 60 "https://github.com/nats-io/nats-server/releases/download/v$version/nats-server-v$version-linux-amd64.tar.gz" -o "$archive"
+            printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --status
+            mkdir "$RUNNER_TEMP/nats-$version"
+            tar -xzf "$archive" -C "$RUNNER_TEMP/nats-$version"
+            install -m 0555 "$RUNNER_TEMP/nats-$version/nats-server-v$version-linux-amd64/nats-server" "$RUNNER_TEMP/lake-bin/nats-$version"
+            test "$("$RUNNER_TEMP/lake-bin/nats-$version" --version)" = "nats-server: v$version"
+          done
+          python3 .github/scripts/check_lake_snapshot_owner_evidence.py --binary-inventory --binaries "$RUNNER_TEMP/lake-bin" --proof snapshot-owner-proof
+      - name: Provision disposable scoped PostgreSQL and canonical Redpanda
+        run: |
+          set -euo pipefail
+          pg="kanz-lake-pg-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          project="kanz-lake-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          pg_before=$(timeout 10 docker ps -a --filter "name=^/$pg$" --format '{{.ID}}')
+          compose_before=$(timeout 10 docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.ID}}')
+          volumes_before=$(timeout 10 docker volume ls --filter "label=com.docker.compose.project=$project" --format '{{.Name}}')
+          networks_before=$(timeout 10 docker network ls --filter "label=com.docker.compose.project=$project" --format '{{.ID}}')
+          test -z "$pg_before$compose_before$volumes_before$networks_before"
+          python3 -c 'import json,os; f=open("snapshot-owner-proof/owned.json","x"); json.dump({"run":os.environ["GITHUB_RUN_ID"],"attempt":os.environ["GITHUB_RUN_ATTEMPT"]},f); f.close()'
+          docker run -d --name "$pg" --label "kanz.snapshot-run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" -p 127.0.0.1:5432:5432 -e POSTGRES_USER=fixture -e POSTGRES_PASSWORD=fixture -e POSTGRES_DB=fixture postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9
+          ready=false
+          for attempt in $(seq 1 60); do
+            if test "$(timeout 3 docker exec -e PGPASSWORD=fixture "$pg" psql -X -w -h 127.0.0.1 -U fixture -d fixture -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' 2>/dev/null)" = 1; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          timeout 10 docker exec -e PGPASSWORD=fixture "$pg" psql -X -w -h 127.0.0.1 -U fixture -d fixture -v ON_ERROR_STOP=1 -c "CREATE ROLE snapshot_fixture LOGIN PASSWORD 'snapshot_fixture' NOSUPERUSER NOBYPASSRLS; GRANT CREATE ON DATABASE fixture TO snapshot_fixture;"
+          timeout 150 docker compose -p "$project" -f kanz/dev/docker-compose.yml up -d --wait --wait-timeout 120 kafka
+          docker inspect --format '{{.Image}}' "$pg" > snapshot-owner-proof/postgres-image.txt
+          kafka_id=$(docker compose -p "$project" -f kanz/dev/docker-compose.yml ps -q kafka)
+          test -n "$kafka_id"
+          docker inspect --format '{{.Image}}' "$kafka_id" > snapshot-owner-proof/redpanda-image.txt
+      - name: Actual finite owner on both broker versions without skips
+        env:
+          TEST_POSTGRES_URL: postgres://snapshot_fixture:snapshot_fixture@127.0.0.1:5432/fixture?sslmode=disable
+          TEST_LAKE_KAFKA_BROKER: 127.0.0.1:9092
+          TEST_LAKE_WORKER_PATH: ${{ runner.temp }}/lake-bin/worker
+          TEST_LAKE_WORKER_SWAP_PATH: ${{ runner.temp }}/lake-bin/worker-swap
+          TEST_LAKE_GATEWAY_TEST_BIN: ${{ runner.temp }}/lake-bin/gateway.test
+          TEST_LAKE_ARCHIVER_TEST_BIN: ${{ runner.temp }}/lake-bin/archiver.test
+          TEST_LAKE_CLI_BIN: ${{ runner.temp }}/lake-bin/kanz-lake-snapshot
+        run: |
+          set -euo pipefail
+          export TEST_LAKE_WORKER_SHA256="$(sha256sum "$TEST_LAKE_WORKER_PATH" | cut -d' ' -f1)"
+          selection=$(python3 .github/scripts/check_lake_snapshot_owner_evidence.py --regex --root .)
+          result=0
+          for version in 2.12.6 2.14.5; do
+            export TEST_LAKE_NATS_VERSION="$version" TEST_LAKE_NATS_SERVER="$RUNNER_TEMP/lake-bin/nats-$version"
+            (cd kanz/services/lake-sink/internal/snapshot && go tool test2json -t -p github.com/eighred/kanz/services/lake-sink/internal/snapshot "$RUNNER_TEMP/lake-bin/owner.test" -test.v=test2json -test.count=1 -test.timeout=20m -test.run "$selection") | tee "snapshot-owner-proof/$version.jsonl" || result=1
+          done
+          exit "$result"
+      - name: Stop owned snapshot fixture dependencies and prove absence
+        if: always()
+        run: |
+          set -euo pipefail
+          pg="kanz-lake-pg-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          project="kanz-lake-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if ! test -f snapshot-owner-proof/owned.json; then exit 0; fi
+          python3 -c 'import json,os; assert json.load(open("snapshot-owner-proof/owned.json")) == {"run":os.environ["GITHUB_RUN_ID"],"attempt":os.environ["GITHUB_RUN_ATTEMPT"]}'
+          found=$(timeout 10 docker ps -a --filter "name=^/$pg$" --format '{{.ID}}')
+          if test -n "$found"; then
+            test "$(docker inspect --format '{{index .Config.Labels "kanz.snapshot-run"}}' "$pg")" = "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            timeout 20 docker rm -f "$pg"
+          fi
+          timeout 30 docker compose -p "$project" -f kanz/dev/docker-compose.yml down --volumes
+          pg_after=$(timeout 10 docker ps -a --filter "name=^/$pg$" --format '{{.ID}}')
+          compose_after=$(timeout 10 docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.ID}}')
+          volumes_after=$(timeout 10 docker volume ls --filter "label=com.docker.compose.project=$project" --format '{{.Name}}')
+          networks_after=$(timeout 10 docker network ls --filter "label=com.docker.compose.project=$project" --format '{{.ID}}')
+          test -z "$pg_after$compose_after$volumes_after$networks_after"
+          mkdir -p snapshot-owner-proof
+          python3 -c 'import json,os,pathlib; pathlib.Path("snapshot-owner-proof/cleanup.json").write_text(json.dumps({"run":os.environ["GITHUB_RUN_ID"],"attempt":os.environ["GITHUB_RUN_ATTEMPT"],"postgres_absent":True,"compose_absent":True})+"\n")'
+      - name: Verify complete source-bound owner evidence
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s .github/scripts -p test_check_lake_snapshot_owner_evidence.py
+          python3 .github/scripts/check_lake_snapshot_owner_evidence.py --seal --root . --proof snapshot-owner-proof --binaries "$RUNNER_TEMP/lake-bin" --sha "$(git rev-parse HEAD)" --tree "$(git rev-parse 'HEAD^{tree}')" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Retain source-bound finite owner proof
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: finite-snapshot-owner-${{ github.run_id }}-${{ github.run_attempt }}
+          path: snapshot-owner-proof/
+          if-no-files-found: error
+
   compatibility:
     runs-on: ubuntu-latest
     timeout-minutes: 50

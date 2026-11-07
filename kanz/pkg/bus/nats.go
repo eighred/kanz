@@ -46,7 +46,11 @@ type NATSConfig struct {
 	ConnectTimeout time.Duration // default 10s
 	ReconnectWait  time.Duration // default 2s
 	MaxReconnects  int           // default -1 (forever); set finite for fail-fast
-	PublishTimeout time.Duration // default 5s
+	// DisableReconnect is opt-in for owners whose account authorization is bound
+	// to one authenticated connection epoch. Restart must revalidate that epoch.
+	// Existing callers retain their original reconnect policy.
+	DisableReconnect bool
+	PublishTimeout   time.Duration // default 5s
 	// DrainGrace bounds Subscribe's shutdown drain window (default 5s). See
 	// Subscribe for why shutdown drains rather than stops.
 	DrainGrace time.Duration
@@ -196,6 +200,9 @@ func DialNATS(_ context.Context, cfg NATSConfig) (*NATSClient, error) {
 		nats.Timeout(cfg.ConnectTimeout),
 		nats.ReconnectWait(cfg.ReconnectWait),
 		nats.MaxReconnects(cfg.MaxReconnects),
+	}
+	if cfg.DisableReconnect {
+		opts = append(opts, nats.NoReconnect())
 	}
 	// THE HANDLERS ARE UNCONDITIONAL (#636). They used to be installed only when
 	// the caller supplied OnDisconnect, and 23 of 24 composition roots supplied

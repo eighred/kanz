@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	natsconfig "github.com/eighred/kanz/infra/nats"
 	"github.com/eighred/kanz/internal/tenantgen"
 )
 
@@ -47,11 +48,23 @@ func run(args []string) error {
 	tenant := fs.String("tenant", "", "tenant id (lowercase, dns-safe) — required")
 	service := fs.String("service", "", "render only this declared service (default: all of them)")
 	root := fs.String("root", ".", "module root the base paths are resolved against")
+	snapshotAccount := fs.Bool("snapshot-account-candidate", false, "print an offline ConfigMap and stream-profile bundle mapping the existing lake SVID to this existing tenant account; never apply")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *tenant == "" {
 		return fmt.Errorf("-tenant is required")
+	}
+	if *snapshotAccount {
+		if *service != "" || *root != "." || fs.NArg() != 0 {
+			return fmt.Errorf("snapshot account candidate accepts only its explicit tenant; configuration input is embedded")
+		}
+		candidate, err := natsconfig.SnapshotBundle(*tenant)
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(candidate)
+		return err
 	}
 
 	services := tenantgen.Services
