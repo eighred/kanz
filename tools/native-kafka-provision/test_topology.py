@@ -9,8 +9,22 @@ import json
 
 
 class TopologyTest(unittest.TestCase):
+    def test_quorum_control_keeps_kafka_reachable_and_revokes_only_replication(self):
+        for connected in (topology.BROKERS,topology.BROKERS[:2],()):
+            client,replication=topology.policies(connected)
+            self.assertEqual(client['spec']['ingress'][0]['ports'],[{'protocol':'TCP','port':9094}])
+            if connected:
+                selector=replication['spec']['podSelector']
+                self.assertEqual(selector['matchExpressions'][0]['values'],list(connected))
+                self.assertEqual(replication['spec']['ingress'][0]['from'],[{'podSelector':selector}])
+                self.assertEqual(replication['spec']['ingress'][0]['ports'],[{'protocol':'TCP','port':33145}])
+            else:
+                self.assertEqual(replication['spec']['ingress'],[])
+                self.assertEqual(replication['spec']['podSelector'],{})
+        with self.assertRaises(ValueError):topology.policies(('foreign',))
+
     def test_admin_failure_projects_only_closed_category_and_counters(self):
-        receipt=dict(expected_cluster_id='SECRET',mode='SECRET',manifest_sha256='SECRET',
+        receipt=dict(expected_cluster_id='SECRET',mode='SECRET',manifest_sha256='SECRET',durability_profile='SECRET',
                      verified_topics=0,missing_topics=60,verified_acls=0,topic_attempts=1,
                      acl_attempts=0,partial_or_unknown=True,complete=False)
         value={'version':'a'*40,'receipt':receipt,'error':'broker-unavailable'}
@@ -87,6 +101,7 @@ class TopologyTest(unittest.TestCase):
             spec = d['spec']['template']['spec']
             self.assertEqual(spec['serviceAccountName'], 'redpanda')
             self.assertEqual(next(c for c in spec['containers'] if c['name'] == 'redpanda')['image'], topology.retained.REDPANDA)
+            self.assertIn('--unsafe-bypass-fsync=false',next(c for c in spec['containers'] if c['name']=='redpanda')['args'])
             self.assertEqual(next(v for v in spec['volumes'] if v['name'] == 'data'), {'name':'data','emptyDir':{'sizeLimit':'2Gi'}})
         configs = [d for d in docs if d['kind'] == 'ConfigMap' and d['metadata']['name'] in topology.BROKERS]
         self.assertEqual(len(configs), 3)
@@ -99,6 +114,7 @@ class TopologyTest(unittest.TestCase):
             bootstrap = yaml.safe_load(cm['data']['.bootstrap.yaml'])
             self.assertEqual(bootstrap['superusers'], [r'spiffe:\/\/kanz.internal\/ns\/kanz-messaging\/sa\/kafka-provisioner'])
             self.assertEqual(bootstrap['default_topic_replications'], 3)
+            self.assertEqual(bootstrap['write_caching_default'],'false')
             self.assertFalse(bootstrap['auto_create_topics_enabled'])
             self.assertEqual(bootstrap['kafka_mtls_principal_mapping_rules'], [topology.mapping(x) for x in topology.IDENTITIES])
 
@@ -132,17 +148,17 @@ class TopologyTest(unittest.TestCase):
                'storage':[{'broker':b,'totalBytes':20<<30,'usedBytes':1<<30,'availableBytes':19<<30,'producerReserveBytes':5<<30} for b in topology.BROKERS]}
         for item in value['cases']:
             case=item['case']
-            if case in ('discover','tenant-a','tenant-b','compute-a','ungranted','partial'):
-                identity=topology.ADMIN_ID if case in ('discover','partial') else 'spiffe://kanz.internal/ns/'+'/sa/'.join(topology.CLIENTS[case])
+            if case in qualify.PROBES:
+                identity=topology.ADMIN_ID if case in qualify.ADMIN_PROBES else 'spiffe://kanz.internal/ns/'+'/sa/'.join(topology.CLIENTS[case])
                 item['observation']={'version':'a'*40,'mode':case,'cluster_id':'real-cluster','identity':identity,'unique_id':True,'passed':True,'renewed':case in ('tenant-a','tenant-b','compute-a')}
             else:
                 wrong=case=='wrong-cluster'
-                item['receipt']={'expected_cluster_id':'deliberately-wrong' if wrong else 'real-cluster','mode':'verify' if case.endswith('verify') else 'apply',
+                item['receipt']={'expected_cluster_id':'deliberately-wrong' if wrong else 'real-cluster','mode':'verify' if case.endswith('verify') else 'apply','durability_profile':'redpanda-raft',
                                  'manifest_sha256':digest,'verified_topics':0 if wrong else count,'missing_topics':0,'verified_acls':0 if wrong else 6,
                                  'topic_attempts':count if case in ('acme-apply','bravo-apply') else 0,'acl_attempts':6 if case in ('acme-apply','bravo-apply','compute-apply') else 0,'partial_or_unknown':False,'complete':not wrong}
         value['diagnostics']=[]
         for case in qualify.CASES:
-            probe=case in ('discover','tenant-a','tenant-b','compute-a','ungranted','partial')
+            probe=case in qualify.PROBES
             observation=next(x['observation'] for x in value['cases'] if x['case']==case) if probe else None
             value['diagnostics'].append({'case':case,'jobState':'Failed' if case=='wrong-cluster' else 'Complete','custody':True,'collection':'complete','imageVerified':True,
                 'container':{'state':'terminated','exitCode':1 if case=='wrong-cluster' else 0,'reason':'Error' if case=='wrong-cluster' else 'Completed','imageBound':True},

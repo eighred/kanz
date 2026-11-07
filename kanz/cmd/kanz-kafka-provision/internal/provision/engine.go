@@ -73,28 +73,29 @@ type Admin interface {
 // failed write/readback leaves PartialOrUnknown true, including response loss.
 // No automatic delete or retention rollback can safely undo broker operations.
 type Receipt struct {
-	ClusterID        string `json:"expected_cluster_id"`
-	Mode             string `json:"mode"`
-	ManifestSHA      string `json:"manifest_sha256"`
-	VerifiedTopics   int    `json:"verified_topics"`
-	MissingTopics    int    `json:"missing_topics"`
-	VerifiedACLs     int    `json:"verified_acls"`
-	TopicAttempts    int    `json:"topic_attempts"`
-	ACLAttempts      int    `json:"acl_attempts"`
-	PartialOrUnknown bool   `json:"partial_or_unknown"`
-	Complete         bool   `json:"complete"`
+	DurabilityProfile string `json:"durability_profile"`
+	ClusterID         string `json:"expected_cluster_id"`
+	Mode              string `json:"mode"`
+	ManifestSHA       string `json:"manifest_sha256"`
+	VerifiedTopics    int    `json:"verified_topics"`
+	MissingTopics     int    `json:"missing_topics"`
+	VerifiedACLs      int    `json:"verified_acls"`
+	TopicAttempts     int    `json:"topic_attempts"`
+	ACLAttempts       int    `json:"acl_attempts"`
+	PartialOrUnknown  bool   `json:"partial_or_unknown"`
+	Complete          bool   `json:"complete"`
 }
 
 func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
-	r := Receipt{Mode: mode, ManifestSHA: p.ManifestSHA, ClusterID: p.ClusterID}
-	if (mode != "plan" && mode != "apply" && mode != "verify") || !ValidClusterID(p.ClusterID) || p.BrokerPrincipal == "" || api == nil || len(p.Topics) == 0 || len(p.Topics) > 256 || len(p.ACLs) != 6 {
+	r := Receipt{Mode: mode, ManifestSHA: p.ManifestSHA, ClusterID: p.ClusterID, DurabilityProfile: p.DurabilityProfile}
+	if (mode != "plan" && mode != "apply" && mode != "verify") || (p.DurabilityProfile != "kafka-min-isr" && p.DurabilityProfile != "redpanda-raft") || !ValidClusterID(p.ClusterID) || p.BrokerPrincipal == "" || api == nil || len(p.Topics) == 0 || len(p.Topics) > 256 || len(p.ACLs) != 6 {
 		return r, ErrInput
 	}
 	var missing []Topic
 	// Observe EVERY existing topic and all target-principal ACLs before the
 	// first mutation. Unknown observations cannot be converted into absence.
 	for _, t := range p.Topics {
-		exists, err := checkTopic(ctx, api, t, p.ClusterID)
+		exists, err := checkTopic(ctx, api, t, p.ClusterID, p.DurabilityProfile)
 		if err != nil {
 			return r, err
 		}
@@ -120,7 +121,7 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 		if ctx.Err() != nil {
 			return r, brokerCause{ctx.Err()}
 		}
-		exists, err := checkTopic(ctx, api, t, p.ClusterID)
+		exists, err := checkTopic(ctx, api, t, p.ClusterID, p.DurabilityProfile)
 		if err != nil {
 			return r, err
 		}
@@ -129,7 +130,7 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 		}
 		r.TopicAttempts++
 		r.PartialOrUnknown = true
-		result, err := api.CreateTopics(ctx, &kafka.CreateTopicsRequest{Topics: []kafka.TopicConfig{{Topic: t.Name, NumPartitions: t.Partitions, ReplicationFactor: 3, ConfigEntries: []kafka.ConfigEntry{{ConfigName: "cleanup.policy", ConfigValue: t.Cleanup}, {ConfigName: "retention.ms", ConfigValue: strconv.FormatInt(t.Retention, 10)}, {ConfigName: "min.insync.replicas", ConfigValue: "2"}}}}})
+		result, err := api.CreateTopics(ctx, &kafka.CreateTopicsRequest{Topics: []kafka.TopicConfig{{Topic: t.Name, NumPartitions: t.Partitions, ReplicationFactor: 3, ConfigEntries: topicConfigs(t, p.DurabilityProfile)}}})
 		if err != nil {
 			return r, brokerCause{err}
 		}
@@ -148,7 +149,7 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 	// readback refuses grants; a later explicit invocation can retry safely.
 	r.VerifiedTopics = 0
 	for _, t := range p.Topics {
-		exists, err := checkTopic(ctx, api, t, p.ClusterID)
+		exists, err := checkTopic(ctx, api, t, p.ClusterID, p.DurabilityProfile)
 		if err != nil {
 			return r, err
 		}
@@ -188,7 +189,7 @@ func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 	return r, nil
 }
 
-func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (bool, error) {
+func checkTopic(ctx context.Context, api Admin, want Topic, clusterID, profile string) (bool, error) {
 	m, err := api.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{want.Name}})
 	if err != nil {
 		return false, brokerCause{err}
@@ -251,7 +252,13 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (b
 		}
 		seen[p.ID] = true
 	}
-	c, err := api.DescribeConfigs(ctx, &kafka.DescribeConfigsRequest{Resources: []kafka.DescribeConfigRequestResource{{ResourceType: kafka.ResourceTypeTopic, ResourceName: want.Name, ConfigNames: []string{"cleanup.policy", "retention.ms", "min.insync.replicas"}}}})
+	expected := make(map[string]string)
+	var names []string
+	for _, entry := range topicConfigs(want, profile) {
+		expected[entry.ConfigName] = entry.ConfigValue
+		names = append(names, entry.ConfigName)
+	}
+	c, err := api.DescribeConfigs(ctx, &kafka.DescribeConfigsRequest{Resources: []kafka.DescribeConfigRequestResource{{ResourceType: kafka.ResourceTypeTopic, ResourceName: want.Name, ConfigNames: names}}})
 	if err != nil {
 		return false, brokerCause{err}
 	}
@@ -261,7 +268,6 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (b
 	if c == nil || len(c.Resources) != 1 || c.Resources[0].ResourceName != want.Name || c.Resources[0].ResourceType != int8(kafka.ResourceTypeTopic) {
 		return false, ErrBroker
 	}
-	expected := map[string]string{"cleanup.policy": want.Cleanup, "retention.ms": strconv.FormatInt(want.Retention, 10), "min.insync.replicas": "2"}
 	if len(c.Resources[0].ConfigEntries) != len(expected) {
 		return false, conflictCause{"config-count"}
 	}
@@ -276,6 +282,8 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (b
 				code = "config-retention"
 			case "min.insync.replicas":
 				code = "config-min-isr"
+			case "write.caching":
+				code = "config-write-caching"
 			}
 			return false, conflictCause{code}
 		}

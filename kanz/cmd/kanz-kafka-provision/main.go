@@ -84,6 +84,7 @@ func run(parent context.Context, args []string) (provision.Receipt, error) {
 	tenant := fs.String("tenant", "", "one non-system tenant")
 	principal := fs.String("principal", "", "existing tenant workload principal")
 	encoding := fs.String("principal-encoding", "spiffe-uri", "explicit broker principal encoding")
+	durability := fs.String("durability-profile", "kafka-min-isr", "explicit broker durability capability profile")
 	broker := fs.String("broker", "", "TLS bootstrap host:port")
 	clusterID := fs.String("expected-cluster-id", "", "exact expected Kafka estate identity")
 	peer := fs.String("broker-spiffe-id", "", "exact broker identity")
@@ -113,6 +114,10 @@ func run(parent context.Context, args []string) (provision.Receipt, error) {
 		return empty, err
 	}
 	p, err = provision.WithPrincipalEncoding(p, *encoding, *peer)
+	if err != nil {
+		return empty, err
+	}
+	p, err = provision.WithDurabilityProfile(p, *durability, *peer)
 	if err != nil {
 		return empty, err
 	}

@@ -2,6 +2,7 @@ package provision
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/eighred/kanz/internal/tenantgen"
@@ -23,13 +24,14 @@ func ValidClusterID(id string) bool {
 }
 
 type Plan struct {
-	ClusterID       string
-	Tenant          string
-	Principal       string
-	BrokerPrincipal string
-	ManifestSHA     string
-	Topics          []Topic
-	ACLs            []kafka.ACLEntry
+	ClusterID         string
+	Tenant            string
+	Principal         string
+	BrokerPrincipal   string
+	DurabilityProfile string
+	ManifestSHA       string
+	Topics            []Topic
+	ACLs              []kafka.ACLEntry
 }
 
 // NewPlan accepts the existing two tenant principal shapes. System topics can
@@ -58,7 +60,7 @@ func NewPlan(raw []byte, digest, tenant, principal, clusterID string) (Plan, err
 	if err != nil {
 		return Plan{}, err
 	}
-	p := Plan{ClusterID: clusterID, Tenant: tenant, Principal: principal, BrokerPrincipal: principal, ManifestSHA: digest, Topics: topics}
+	p := Plan{ClusterID: clusterID, Tenant: tenant, Principal: principal, BrokerPrincipal: principal, DurabilityProfile: "kafka-min-isr", ManifestSHA: digest, Topics: topics}
 	for _, op := range []kafka.ACLOperationType{kafka.ACLOperationTypeWrite, kafka.ACLOperationTypeRead, kafka.ACLOperationTypeDescribe, kafka.ACLOperationTypeCreate} {
 		p.ACLs = append(p.ACLs, kafka.ACLEntry{ResourceType: kafka.ResourceTypeTopic, ResourceName: tenant + ".", ResourcePatternType: kafka.PatternTypePrefixed, Principal: principal, Host: "*", Operation: op, PermissionType: kafka.ACLPermissionTypeAllow})
 	}
@@ -95,4 +97,24 @@ func WithPrincipalEncoding(p Plan, encoding, peer string) (Plan, error) {
 		p.ACLs[i].Principal = p.BrokerPrincipal
 	}
 	return p, nil
+}
+
+// WithDurabilityProfile requires an explicit backend capability assertion.
+// Redpanda does not implement Kafka's min.insync.replicas setting: its distinct
+// Raft profile requires RF3, observed ISR >=2 and write caching disabled. The
+// release fixture separately proves majority progress and minority refusal.
+func WithDurabilityProfile(p Plan, profile, peer string) (Plan, error) {
+	if profile != "kafka-min-isr" && (profile != "redpanda-raft" || peer != "spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda") {
+		return Plan{}, ErrInput
+	}
+	p.DurabilityProfile = profile
+	return p, nil
+}
+
+func topicConfigs(t Topic, profile string) []kafka.ConfigEntry {
+	entries := []kafka.ConfigEntry{{ConfigName: "cleanup.policy", ConfigValue: t.Cleanup}, {ConfigName: "retention.ms", ConfigValue: strconv.FormatInt(t.Retention, 10)}}
+	if profile == "redpanda-raft" {
+		return append(entries, kafka.ConfigEntry{ConfigName: "write.caching", ConfigValue: "false"})
+	}
+	return append(entries, kafka.ConfigEntry{ConfigName: "min.insync.replicas", ConfigValue: "2"})
 }

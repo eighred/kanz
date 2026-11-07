@@ -63,6 +63,7 @@ def broker_objects():
         rp['advertised_kafka_api'][0]['address'] = name + '.kanz-messaging.svc'
         bootstrap = {'kafka_enable_authorization': True, 'superusers': [broker_principal(ADMIN_ID)],
                      'auto_create_topics_enabled': False, 'default_topic_replications': 3,
+                     'write_caching_default': 'false',
                      'kafka_mtls_principal_mapping_rules': [mapping(x) for x in IDENTITIES]}
         cm = copy.deepcopy(base)
         cm['metadata']['name'] = name
@@ -72,6 +73,7 @@ def broker_objects():
         pod['spec']['selector']['matchLabels'] = {'native-broker': name}
         pod['spec']['template']['metadata']['labels'] = {'native-broker': name, 'app': name}
         spec = pod['spec']['template']['spec']
+        next(c for c in spec['containers'] if c['name']=='redpanda')['args'].append('--unsafe-bypass-fsync=false')
         next(v for v in spec['volumes'] if v['name'] == 'config')['configMap']['name'] = name
         # Each pod has its own existing bounded emptyDir; no shared PVC/history.
         svc = {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': name, 'namespace': 'kanz-messaging'},
@@ -81,13 +83,20 @@ def broker_objects():
     return docs
 
 
-def policies():
+def policies(connected=BROKERS):
     # Auth remains actual mTLS/ACL. Cilium permits only the fixture namespaces
     # plus broker-to-broker replication; no production NetworkPolicy claim.
+    if not isinstance(connected,tuple) or len(set(connected))!=len(connected) or any(b not in BROKERS for b in connected):
+        raise ValueError('unowned replication membership')
     peers = [{'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': ns}}}
              for ns in ('kanz-messaging', 'kanz-services', 'tenant-acme', 'tenant-bravo')]
     return [{'apiVersion': 'networking.k8s.io/v1', 'kind': 'NetworkPolicy',
              'metadata': {'name': 'native-broker-ingress', 'namespace': 'kanz-messaging'},
              'spec': {'podSelector': {}, 'policyTypes': ['Ingress'], 'ingress': [
-                 {'from': peers, 'ports': [{'protocol': 'TCP', 'port': 9094}]},
-                 {'from': [{'podSelector': {}}], 'ports': [{'protocol': 'TCP', 'port': 33145}]}]}}]
+                 {'from': peers, 'ports': [{'protocol': 'TCP', 'port': 9094}]}]}},
+            {'apiVersion':'networking.k8s.io/v1','kind':'NetworkPolicy',
+             'metadata':{'name':'native-replication','namespace':'kanz-messaging'},
+             'spec':{'podSelector':{'matchExpressions':[{'key':'native-broker','operator':'In','values':list(connected)}]} if connected else {},
+                     'policyTypes':['Ingress'],
+                     'ingress':[{'from':[{'podSelector':{'matchExpressions':[{'key':'native-broker','operator':'In','values':list(connected)}]}}],
+                                 'ports':[{'protocol':'TCP','port':33145}]}] if connected else []}}]

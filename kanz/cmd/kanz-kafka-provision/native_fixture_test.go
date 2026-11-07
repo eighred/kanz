@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,10 @@ type nativeDiagnostic struct {
 }
 
 func nativeErrorCategory(err error) string {
+	var code kafka.Error
+	if errors.As(err, &code) && code >= -1 && code <= 127 {
+		return "kafka-" + strconv.Itoa(int(code))
+	}
 	switch {
 	case err == nil:
 		return "ok"
@@ -94,6 +99,7 @@ func TestNativeDiagnosticCategories(t *testing.T) {
 		err  error
 		want string
 	}{{nil, "ok"}, {context.DeadlineExceeded, "deadline"}, {context.Canceled, "cancelled"},
+		{kafka.RequestTimedOut, "kafka-7"},
 		{provision.ErrInput, "input"}, {provision.ErrBroker, "broker"}, {provision.ErrConflict, "conflict"},
 		{errors.New("secret-error-sentinel"), "unknown"}} {
 		if got := nativeErrorCategory(tc.err); got != tc.want {
@@ -111,6 +117,9 @@ func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDia
 		"tenant-b":  "spiffe://kanz.internal/ns/tenant-bravo/sa/risk-engine",
 		"compute-a": "spiffe://kanz.internal/ns/kanz-services/sa/archiver-acme",
 		"ungranted": "spiffe://kanz.internal/ns/tenant-acme/sa/ungranted",
+	}
+	for _, name := range []string{"quorum-healthy", "quorum-majority", "quorum-minority", "quorum-restored"} {
+		identities[name] = "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner"
 	}
 	id, ok := identities[mode]
 	if !ok {
@@ -160,6 +169,15 @@ func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDia
 	diagnostic.Phase = "estate"
 	if meta.ClusterID != os.Getenv("KANZ_NATIVE_EXPECTED_CLUSTER") {
 		return out, provision.ErrConflict
+	}
+	if strings.HasPrefix(mode, "quorum-") {
+		diagnostic.Phase = "quorum"
+		if err = nativeQuorum(ctx, client, mode); err != nil {
+			return out, err
+		}
+		out.Passed = true
+		diagnostic.Phase = "complete"
+		return out, nil
 	}
 	if mode == "partial" {
 		diagnostic.Phase = "partial"
@@ -247,6 +265,67 @@ func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDia
 	out.Renewed, out.Passed = true, true
 	diagnostic.Phase = "complete"
 	return out, nil
+}
+
+func nativeQuorum(ctx context.Context, c *kafka.Client, mode string) error {
+	const topic = "acme.order.order"
+	if mode == "quorum-majority" {
+		// Only metadata is retried while the two connected brokers elect a
+		// leader. No failed/unknown produce is reissued or called absent.
+		wait, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		tick := time.NewTicker(250 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			m, err := c.Metadata(wait, &kafka.MetadataRequest{Topics: []string{topic}})
+			if err == nil && m != nil {
+				if m.ClusterID != os.Getenv("KANZ_NATIVE_EXPECTED_CLUSTER") {
+					return provision.ErrConflict
+				}
+				if len(m.Topics) == 1 && m.Topics[0].Error == nil && len(m.Topics[0].Partitions) > 0 {
+					p := m.Topics[0].Partitions[0]
+					if p.ID == 0 && p.Error == nil && (p.Leader.ID == 0 || p.Leader.ID == 1) {
+						break
+					}
+				}
+			}
+			select {
+			case <-wait.Done():
+				return wait.Err()
+			case <-tick.C:
+			}
+		}
+	}
+	if mode == "quorum-minority" {
+		// Metadata/TLS above must still work. No quorum must prevent an
+		// acks=all success; a timeout remains unknown effects, never rollback.
+		probe, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		err := nativeProduce(probe, c, topic, "quorum-unacknowledged-unknown")
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, kafka.RequestTimedOut) ||
+			errors.Is(err, kafka.NotEnoughReplicas) || errors.Is(err, kafka.NotEnoughReplicasAfterAppend) ||
+			errors.Is(err, kafka.NotLeaderForPartition) || errors.Is(err, kafka.LeaderNotAvailable) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return provision.ErrConflict
+	}
+	if mode != "quorum-healthy" {
+		if err := nativeReadContains(ctx, c, topic, "quorum-healthy"); err != nil {
+			return err
+		}
+	}
+	if mode == "quorum-restored" {
+		if err := nativeReadContains(ctx, c, topic, "quorum-majority"); err != nil {
+			return err
+		}
+	}
+	if err := nativeProduce(ctx, c, topic, mode); err != nil {
+		return err
+	}
+	return nativeReadContains(ctx, c, topic, mode)
 }
 
 func nativeProduce(ctx context.Context, c *kafka.Client, topic, value string) error {
@@ -362,6 +441,10 @@ func nativePartial(ctx context.Context, c *kafka.Client, cluster string) error {
 		return e
 	}
 	p, e = provision.WithPrincipalEncoding(p, "redpanda-rule-escaped-uri", nativePeer)
+	if e != nil {
+		return e
+	}
+	p, e = provision.WithDurabilityProfile(p, "redpanda-raft", nativePeer)
 	if e != nil {
 		return e
 	}

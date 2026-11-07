@@ -38,6 +38,7 @@ Native `tenantctl` requires the existing onboarding prerequisites plus:
 | `NATIVE_KAFKA_BROKER_SPIFFE_ID` | Exact `spiffe://kanz.internal/ns/kanz-messaging/sa/kafka` or `/sa/redpanda` |
 | `NATIVE_KAFKA_CLUSTER_ID` | Independently selected exact Kafka ClusterID |
 | `NATIVE_KAFKA_PRINCIPAL_ENCODING` | `spiffe-uri` (default), or explicitly qualified `redpanda-rule-escaped-uri` with the exact Redpanda peer |
+| `NATIVE_KAFKA_DURABILITY_PROFILE` | `kafka-min-isr` (default), or explicitly qualified `redpanda-raft` with the exact Redpanda peer |
 
 The CLI's `-principal` always accepts the canonical full SPIFFE principal.
 `-principal-encoding` selects only its broker ACL representation. The pinned
@@ -49,6 +50,22 @@ escaped identity, adds a wildcard, adopts an observed principal, or rewrites
 existing grants. Select the profile from independently reviewed broker rules;
 it is not inferred from a successful TLS handshake or an authorization failure.
 The actual two-tenant/SPIRE fixture must qualify this mapping before use.
+
+Durability is also explicit. `kafka-min-isr` requires the existing Kafka setting
+`min.insync.replicas=2`. Redpanda treats that setting as a no-op, so
+`redpanda-raft` instead requires exact `write.caching=false` readback; it does not
+invent a value for the absent Kafka property. Both profiles require RF3, at least
+two distinct observed ISR members and valid leader membership. The Redpanda
+release fixture additionally proves `acks=all` progress with two connected
+replicas, no acknowledgment with all replicas isolated, and recovery of prior
+acknowledged history. It keeps client TLS reachable during replication isolation
+and disables unsafe fsync bypass. A refused produce remains unknown effects,
+not proof of rollback or absence. This is disposable qualification, not backup,
+power-loss or production disaster-recovery acceptance.
+
+Sources: [Redpanda's no-op Kafka properties](https://github.com/redpanda-data/redpanda/blob/dev/src/v/kafka/server/handlers/topics/types.h),
+[producer acknowledgment semantics](https://docs.redpanda.com/streaming/current/develop/produce-data/configure-producers/),
+and [write caching](https://docs.redpanda.com/streaming/current/reference/properties/topic-properties/#writecaching).
 
 The caller keeps the canonical `kanz.internal`, `kanz-messaging`, and
 `kanz-services` identity scope. It creates or exactly reads back an immutable,
@@ -82,6 +99,8 @@ args=(
   '-manifest-sha256=<exact-64-hex-manifest-digest>'
   '-tenant=<tenant>'
   '-principal=User:spiffe://kanz.internal/ns/tenant-<tenant>/sa/<service-account>'
+  '-principal-encoding=spiffe-uri'
+  '-durability-profile=kafka-min-isr'
   '-broker=<bootstrap-host>:<port>'
   '-broker-spiffe-id=spiffe://kanz.internal/ns/kanz-messaging/sa/kafka'
   '-expected-cluster-id=<independently-selected-cluster-id>'
@@ -106,8 +125,8 @@ Job. These are configured bounds, not a hard OS termination guarantee.
 
 All existing selected topics/configuration and target-principal ACLs are checked
 before the first mutation. RF3, ISR of at least two distinct known replicas,
-valid leader membership, partition count, cleanup, retention, and minimum ISR
-must match. Unexpected ACLs or unknown observations refuse. The tool never
+valid leader membership, partition count, cleanup, retention, and the selected
+profile's exact durability setting must match. Unexpected ACLs or unknown observations refuse. The tool never
 alters retention/configuration, removes ACLs, deletes topics, or expands partitions.
 
 Every explicit Metadata response must match the selected nonempty ClusterID;
@@ -164,6 +183,6 @@ mode. These Jobs have no credentials, identity/manifest mounts or broker inputs;
 no SPIRE or broker is created. Only fixed predicate codes, graph progress and
 owned cleanup observations are retained. Such receipts always carry
 `diagnosticOnly=true` and `qualification=false`; they cannot satisfy the full
-13-case inventory or the two required release jobs. PR, main and default manual
+17-case inventory or the two required release jobs. PR, main and default manual
 runs retain both full qualifications. No failed diagnostic authorizes a retry,
 provisioning, or a change to the image identity predicates.

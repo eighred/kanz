@@ -92,8 +92,11 @@ func checkNativeKafkaOwner(files map[string]string) bool {
 		return false
 	}
 	encoding := strings.Index(main, "provision.WithPrincipalEncoding(p, *encoding, *peer)")
+	durability := strings.Index(main, "provision.WithDurabilityProfile(p, *durability, *peer)")
 	if encoding < 0 || encoding > strings.Index(main, "transport.NewSource(ctx, *socket)") ||
+		durability < 0 || durability > strings.Index(main, "transport.NewSource(ctx, *socket)") ||
 		!strings.Contains(engine, "PrincipalFilter: p.BrokerPrincipal") ||
+		!strings.Contains(shell, "-durability-profile=${NATIVE_KAFKA_DURABILITY_PROFILE}") ||
 		!strings.Contains(shell, "-principal-encoding=${NATIVE_KAFKA_PRINCIPAL_ENCODING}") {
 		return false
 	}
@@ -132,6 +135,7 @@ func TestNativeKafkaSourceBoundaryAndMutations(t *testing.T) {
 		t.Fatal("native owner boundary changed")
 	}
 	for _, m := range []struct{ key, old, new string }{
+		{"main", "provision.WithDurabilityProfile(p, *durability, *peer)", "provision.WithDurabilityProfile(p, \"redpanda-raft\", *peer)"},
 		{"main", "provision.WithPrincipalEncoding(p, *encoding, *peer)", "provision.WithPrincipalEncoding(p, \"spiffe-uri\", *peer)"},
 		{"engine", "PrincipalFilter: p.BrokerPrincipal", "PrincipalFilter: p.Principal"},
 		{"main", "transport.AuthorizeServices(peerID)", "transport.AuthorizeMesh()"},

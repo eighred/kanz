@@ -11,6 +11,7 @@ import (
 
 // This fake proves ordering and refusal, never actual broker acceptance.
 type fakeAdmin struct {
+	configs           map[string]map[string]string
 	filteredPrincipal string
 	clusterID         string
 	mutateMetadata    func(*kafka.MetadataResponse)
@@ -45,6 +46,15 @@ func (a *fakeAdmin) Metadata(_ context.Context, r *kafka.MetadataRequest) (*kafk
 }
 func (a *fakeAdmin) DescribeConfigs(_ context.Context, r *kafka.DescribeConfigsRequest) (*kafka.DescribeConfigsResponse, error) {
 	t := a.topics[r.Resources[0].ResourceName]
+	if config, ok := a.configs[t.Name]; ok {
+		var entries []kafka.DescribeConfigResponseConfigEntry
+		for _, name := range r.Resources[0].ConfigNames {
+			if value, exists := config[name]; exists {
+				entries = append(entries, kafka.DescribeConfigResponseConfigEntry{ConfigName: name, ConfigValue: value})
+			}
+		}
+		return &kafka.DescribeConfigsResponse{Resources: []kafka.DescribeConfigResponseResource{{ResourceType: int8(kafka.ResourceTypeTopic), ResourceName: t.Name, ConfigEntries: entries}}}, nil
+	}
 	return &kafka.DescribeConfigsResponse{Resources: []kafka.DescribeConfigResponseResource{{ResourceType: int8(kafka.ResourceTypeTopic), ResourceName: t.Name, ConfigEntries: []kafka.DescribeConfigResponseConfigEntry{{ConfigName: "cleanup.policy", ConfigValue: t.Cleanup}, {ConfigName: "retention.ms", ConfigValue: strconv.FormatInt(t.Retention, 10)}, {ConfigName: "min.insync.replicas", ConfigValue: "2"}}}}}, nil
 }
 func (a *fakeAdmin) DescribeACLs(_ context.Context, request *kafka.DescribeACLsRequest) (*kafka.DescribeACLsResponse, error) {
@@ -58,8 +68,13 @@ func (a *fakeAdmin) DescribeACLs(_ context.Context, request *kafka.DescribeACLsR
 func (a *fakeAdmin) CreateTopics(_ context.Context, r *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error) {
 	a.creates++
 	x := r.Topics[0]
+	if a.configs == nil {
+		a.configs = make(map[string]map[string]string)
+	}
+	a.configs[x.Topic] = make(map[string]string)
 	t := Topic{Name: x.Topic, Partitions: x.NumPartitions}
 	for _, c := range x.ConfigEntries {
+		a.configs[x.Topic][c.ConfigName] = c.ConfigValue
 		switch c.ConfigName {
 		case "cleanup.policy":
 			t.Cleanup = c.ConfigValue

@@ -19,7 +19,9 @@ import bounded_process
 ROOT = topology.ROOT
 CASES = ('discover', 'acme-apply', 'acme-idempotent', 'bravo-apply', 'compute-apply',
          'wrong-cluster', 'tenant-a', 'tenant-b', 'compute-a', 'ungranted', 'partial',
-         'acme-verify', 'bravo-verify')
+         'acme-verify', 'bravo-verify', 'quorum-healthy', 'quorum-majority', 'quorum-minority', 'quorum-restored')
+ADMIN_PROBES = ('discover','partial','quorum-healthy','quorum-majority','quorum-minority','quorum-restored')
+PROBES = ADMIN_PROBES + tuple(topology.CLIENTS)
 
 
 def valid_cluster_id(value):
@@ -111,10 +113,11 @@ def probe_diagnostic(text, mode, source):
     value = json.loads(rows[0], object_pairs_hook=lambda x: pairs.extend(x) or dict(x))
     if len(pairs) != len(value) or set(value) != {'version', 'mode', 'expected_identity', 'phase', 'category'}:
         raise ValueError('diagnostic shape refused')
-    identity = topology.ADMIN_ID if mode in ('discover', 'partial') else 'spiffe://kanz.internal/ns/' + '/sa/'.join(topology.CLIENTS[mode])
+    identity = topology.ADMIN_ID if mode in ADMIN_PROBES else 'spiffe://kanz.internal/ns/' + '/sa/'.join(topology.CLIENTS[mode])
     if value['version'] != source or value['mode'] != mode or value['expected_identity'] != identity:
         raise ValueError('diagnostic identity differs')
-    if value['phase'] not in ('workload_api', 'identity', 'uniqueid', 'metadata', 'estate', 'partial', 'acl', 'renewal', 'reconnect', 'complete') or value['category'] not in ('ok', 'input', 'broker', 'conflict', 'deadline', 'cancelled', 'unknown'):
+    category=value['category']
+    if value['phase'] not in ('workload_api', 'identity', 'uniqueid', 'metadata', 'estate', 'partial', 'acl', 'renewal', 'reconnect', 'quorum', 'complete') or not isinstance(category,str) or (category not in ('ok', 'input', 'broker', 'conflict', 'deadline', 'cancelled', 'unknown') and re.fullmatch(r'kafka-(?:-1|[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])',category) is None):
         raise ValueError('diagnostic category refused')
     return value
 
@@ -130,14 +133,14 @@ def admin_diagnostic(text, source):
     receipt=value['receipt']
     counters=('verified_topics','missing_topics','verified_acls','topic_attempts','acl_attempts')
     flags=('partial_or_unknown','complete')
-    if not isinstance(receipt,dict) or set(receipt)!=set(counters+flags+('expected_cluster_id','mode','manifest_sha256')):
+    if not isinstance(receipt,dict) or set(receipt)!=set(counters+flags+('expected_cluster_id','mode','manifest_sha256','durability_profile')):
         raise ValueError('admin diagnostic receipt shape')
     result={'category':category}
     if 'failure_code' in value:
         code=value['failure_code']
         if not isinstance(code,str) or (code not in ('deadline','cancelled','eof','timeout','network','unknown',
                 'estate','broker-count','broker-shape','broker-duplicate','topic-shape','partition-shape',
-                'replica-shape','isr-shape','leader-shape','config-count','config-key','config-cleanup','config-retention','config-min-isr') and re.fullmatch(r'kafka-(?:-1|[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])',code) is None):
+                'replica-shape','isr-shape','leader-shape','config-count','config-key','config-cleanup','config-retention','config-min-isr','config-write-caching') and re.fullmatch(r'kafka-(?:-1|[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])',code) is None):
             raise ValueError('admin failure code refused')
         result['failure_code']=code
     for key in counters:
@@ -203,7 +206,7 @@ def parse_probe(text, mode, source, cluster=None):
     if len(rows) != 1:
         raise ValueError('missing closed probe observation')
     value = json.loads(rows[0])
-    identity = topology.ADMIN_ID if mode in ('discover','partial') else 'spiffe://kanz.internal/ns/' + '/sa/'.join(topology.CLIENTS[mode])
+    identity = topology.ADMIN_ID if mode in ADMIN_PROBES else 'spiffe://kanz.internal/ns/' + '/sa/'.join(topology.CLIENTS[mode])
     expected = {'version':source, 'mode':mode, 'cluster_id':value.get('cluster_id'),
                 'identity':identity,'unique_id':True,'passed':True,
                 'renewed':mode in ('tenant-a','tenant-b','compute-a')}
@@ -240,13 +243,13 @@ def canonical_count(raw):
 
 
 def validate_receipt(receipt, case, cluster, digest, count):
-    keys={'expected_cluster_id','mode','manifest_sha256','verified_topics','missing_topics',
+    keys={'expected_cluster_id','mode','manifest_sha256','durability_profile','verified_topics','missing_topics',
           'verified_acls','topic_attempts','acl_attempts','partial_or_unknown','complete'}
     if not isinstance(receipt,dict) or set(receipt)!=keys:
         raise ValueError('receipt shape')
     expected='deliberately-wrong' if case=='wrong-cluster' else cluster
     mode='verify' if case.endswith('verify') else 'apply'
-    if receipt['expected_cluster_id']!=expected or receipt['manifest_sha256']!=digest or receipt['mode']!=mode:
+    if receipt['expected_cluster_id']!=expected or receipt['manifest_sha256']!=digest or receipt['mode']!=mode or receipt['durability_profile']!='redpanda-raft':
         raise ValueError('receipt resource differs')
     for key in ('verified_topics','missing_topics','verified_acls','topic_attempts','acl_attempts'):
         if type(receipt[key]) is not int or not 0<=receipt[key]<=256:
@@ -302,7 +305,7 @@ def validate_diagnostics(value, source):
             if (kind=='config' and identity!=graph['config']) or (kind=='manifest' and identity!=manifest):
                 raise ValueError('typed graph identity differs')
         if (graph['podIdentityType']==graph['dockerIdentityType']=='config') != (manifest is None): raise ValueError('platform graph absent')
-        probe=case in ('discover','tenant-a','tenant-b','compute-a','ungranted','partial')
+        probe=case in PROBES
         if graph['dockerIdentity']!=value.get('probeImage' if probe else 'adminImage'):
             raise ValueError('built image identity differs')
         if probe:
@@ -334,7 +337,7 @@ def validate_report(value, source, tree, run, attempt, manifest):
     validate_diagnostics(value,source)
     for item in value['cases']:
         case=item['case']
-        if case in ('discover','tenant-a','tenant-b','compute-a','ungranted','partial'):
+        if case in PROBES:
             if set(item)!={'case','passed','observation'}: raise ValueError('observation missing')
             parse_probe('NATIVE_PROOF:'+json.dumps(item['observation']),case,source,value.get('clusterID'))
         else:
@@ -382,7 +385,7 @@ def main():
                         diagnostic['jobState']=terminal[0] if len(terminal)==1 else 'UNKNOWN'
                         diagnostic['collection']='pod'
                         pods=json.loads(observe('-n',ns,'get','pods','-l','batch.kubernetes.io/controller-uid='+uid,'-o','json'))
-                        label='probe' if jobname in ('discover','tenant-a','tenant-b','compute-a','ungranted','partial') else 'admin'
+                        label='probe' if jobname in PROBES else 'admin'
                         pod_custody(pods.get('items'),d,uid)
                         diagnostic['container']=pod_diagnostic(pods.get('items'),d,uid)
                         # Self-reported phase is advisory until the image graph is
@@ -461,7 +464,7 @@ def main():
             def cli(case,tenant,principal,mode,wrong=False):
                 evidence['stage']=case
                 expected='deliberately-wrong' if wrong else cluster
-                args=['-mode='+mode,'-manifest=/manifest/topics-job.yaml','-manifest-sha256='+digest,'-tenant='+tenant,'-principal='+principal,'-principal-encoding=redpanda-rule-escaped-uri',
+                args=['-mode='+mode,'-manifest=/manifest/topics-job.yaml','-manifest-sha256='+digest,'-tenant='+tenant,'-principal='+principal,'-principal-encoding=redpanda-rule-escaped-uri','-durability-profile=redpanda-raft',
                       '-broker=native-redpanda-0.kanz-messaging.svc:9094','-broker-spiffe-id='+topology.BROKER_ID,'-expected-cluster-id='+expected,
                       '-workload-socket=unix:///run/spiffe/spire-agent.sock','-timeout=240s']
                 result=json.loads(execute(job(case,'kanz-messaging','kafka-provisioner',images['admin'],args=args),failed=wrong))
@@ -489,6 +492,14 @@ def main():
                 evidence['cases'].append({'case':case,'passed':True,'observation':observation})
             cli('acme-verify','acme',principals['acme'],'verify')
             cli('bravo-verify','bravo',principals['bravo'],'verify')
+            # Revoke only the owned inter-broker replication policy; Kafka TLS
+            # remains reachable. Pods and their retained volumes never restart.
+            for case,connected in (('quorum-healthy',topology.BROKERS),('quorum-majority',topology.BROKERS[:2]),
+                                   ('quorum-minority',()),('quorum-restored',topology.BROKERS)):
+                evidence['stage']=case
+                apply(topology.policies(connected))
+                observation=parse_probe(execute(job(case,'kanz-messaging','kafka-provisioner',images['probe'],mode=case,cluster=cluster)),case,source,cluster)
+                evidence['cases'].append({'case':case,'passed':True,'observation':observation})
             evidence['passed']=True
         except Exception as error:
             evidence['errorCategory']=type(error).__name__ if isinstance(error,(ValueError,RuntimeError,TimeoutError)) else 'unexpected'

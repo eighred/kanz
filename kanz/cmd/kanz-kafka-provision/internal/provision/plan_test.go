@@ -102,3 +102,47 @@ func TestExplicitRedpandaEncodingPreservesCanonicalIdentityAndExactACLs(t *testi
 		t.Fatal("default wire encoding changed")
 	}
 }
+
+func TestDurabilityProfilesRequireExactReadbackAndNeverDefaultUnknown(t *testing.T) {
+	const peer = "spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda"
+	p, err := WithDurabilityProfile(testPlan(t), "redpanda-raft", peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeAdmin{clusterID: p.ClusterID, topics: map[string]Topic{}}
+	if r, err := Run(context.Background(), api, p, "apply"); err != nil || !r.Complete || r.DurabilityProfile != "redpanda-raft" {
+		t.Fatal("explicit profile failed")
+	}
+	config := api.configs[p.Topics[0].Name]
+	if config["write.caching"] != "false" {
+		t.Fatal("write cache not disabled")
+	}
+	if _, ok := config["min.insync.replicas"]; ok {
+		t.Fatal("unsupported Kafka setting claimed")
+	}
+	for _, value := range []string{"true", "disabled", "unknown"} {
+		config["write.caching"] = value
+		if _, err := Run(context.Background(), api, p, "verify"); !errors.Is(err, ErrConflict) {
+			t.Fatal("mismatched cache state accepted")
+		}
+	}
+	delete(config, "write.caching")
+	if _, err := Run(context.Background(), api, p, "verify"); !errors.Is(err, ErrConflict) {
+		t.Fatal("missing durability state accepted")
+	}
+	for _, pair := range [][2]string{{"", peer}, {"unknown", peer}, {"redpanda-raft", "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka"}} {
+		if _, err := WithDurabilityProfile(testPlan(t), pair[0], pair[1]); !errors.Is(err, ErrInput) {
+			t.Fatal("unbound durability accepted")
+		}
+	}
+	p.DurabilityProfile = ""
+	before := api.metadataCalls
+	if _, err := Run(context.Background(), api, p, "apply"); !errors.Is(err, ErrInput) || api.metadataCalls != before {
+		t.Fatal("unknown profile reached broker")
+	}
+	kafka := testPlan(t)
+	entries := topicConfigs(kafka.Topics[0], kafka.DurabilityProfile)
+	if entries[2].ConfigName != "min.insync.replicas" || entries[2].ConfigValue != "2" {
+		t.Fatal("Kafka invariant changed")
+	}
+}
