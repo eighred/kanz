@@ -104,7 +104,7 @@ func (s venueStats) HandleRPC(context.Context, stats.RPCStats)                  
 
 type transport struct {
 	venue            *venue
-	source           *conformancetestkit.Workload
+	source           *testidentity.Workload
 	endpoint, socket string
 	goConn           *grpc.ClientConn
 	closeGo          func()
@@ -125,7 +125,7 @@ func startTransport(t *testing.T, v *venue) *transport {
 		return source
 	}
 	client, server := issue(clientID), issue(serverID)
-	source, socket := conformancetestkit.StartWorkload(t, client)
+	source, socket := testidentity.StartWorkload(t, client)
 	endpoint, _ := conformancetestkit.StartVenue(t, v, "", grpc.Creds(credentials.NewTLS(tlsconfig.MTLSServerConfig(server, server, tlsconfig.AuthorizeID(spiffeid.RequireFromString(clientID))))), grpc.StatsHandler(venueStats{v}), grpc.MaxSendMsgSize(4<<20), grpc.MaxRecvMsgSize(1<<20))
 	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(credentials.NewTLS(tlsconfig.MTLSClientConfig(client, client, tlsconfig.AuthorizeID(spiffeid.RequireFromString(serverID))))), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(4<<20)))
 	if err != nil {

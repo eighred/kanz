@@ -1,5 +1,6 @@
-// Package conformancetestkit provides disposable transport fixtures, never runtime identity.
-package conformancetestkit
+// Disposable Workload API transport for independently authenticated test processes.
+// Production must never import this package; the architecture guard enforces that boundary.
+package testidentity
 
 import (
 	"crypto/x509"
