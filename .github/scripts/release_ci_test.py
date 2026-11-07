@@ -69,6 +69,19 @@ class EvidenceTests(unittest.TestCase):
         with patch.object(gate, "requirements", return_value=self.required):
             return gate.verify_ci(self.api, SHA, self.root)
 
+    def test_recovery_job_cannot_be_missing_or_skipped(self):
+        self.api = API("rust-oms-fold.yml")
+        self.required = {"rust-oms-fold.yml": gate.POLICY["rust-oms-fold.yml"]}
+        original = copy.deepcopy(self.api.jobs)
+        for state in ("missing", "skipped"):
+            with self.subTest(state=state):
+                self.api.jobs = copy.deepcopy(original)
+                if state == "missing": self.api.jobs = [job for job in self.api.jobs if job["name"] != "recovery-coordinator"]
+                else:
+                    for job in self.api.jobs:
+                        if job["name"] == "recovery-coordinator": job["conclusion"] = "skipped"
+                with self.assertRaises(gate.EvidenceError): self.verify()
+
     def test_exact_success_and_dispatch(self):
         for event in ("push", "workflow_dispatch"):
             self.api.runs[0]["event"] = event
@@ -158,6 +171,7 @@ class EvidenceTests(unittest.TestCase):
             (self.root / ".github/workflows" / filename).write_text("fixture")
         self.assertEqual(gate.requirements(self.root), gate.POLICY)
         self.assertEqual(gate.POLICY["rust-bond-shadow.yml"], {"bond-shadow"})
+        self.assertEqual(gate.POLICY["rust-oms-fold.yml"], {"fill-shadow", "recovery-coordinator"})
         self.assertEqual(gate.POLICY["testnet-cni-proof.yml"], {"disposable-cni"})
         self.assertEqual(gate.POLICY["k3s-cni-migration.yml"], {"disposable-transition"})
         self.assertEqual(gate.POLICY["redpanda-identity-proof.yml"], {"developmental-redpanda-identity"})

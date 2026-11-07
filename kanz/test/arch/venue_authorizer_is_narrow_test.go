@@ -53,7 +53,7 @@ func TestEveryVenueAdapterNamesWhoMayTrade(t *testing.T) {
 		}
 		// The registrar's own declaration lives in the generated SDK; skip it and
 		// anything under test/arch (this file names it in prose).
-		if strings.HasPrefix(f.rel, "test/arch/") {
+		if strings.HasPrefix(f.rel, "test/arch/") || syntheticVenueTransportFile(f.rel) {
 			continue
 		}
 		adapters[filepath.Dir(f.rel)] = f.rel

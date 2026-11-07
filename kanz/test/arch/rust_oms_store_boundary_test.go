@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/position.rs", "src/position_math.rs", "src/position_projector.rs", "src/recovery.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/position.rs", "src/position_math.rs", "src/position_projector.rs", "src/recovery.rs", "src/recovery_repository.rs", "src/recovery_wire.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -161,7 +161,7 @@ func checkRustOMSStoreBoundary(root string) error {
 			return fmt.Errorf("shared repository primitive missing %s", marker)
 		}
 	}
-	for _, marker := range []string{`fnmetadata_and_posted_share_one_byte_budget()`, `constMAX_FILLS:usize=8000`, `constMAX_BATCH:usize=4*MAX_BYTES`, `MAX_BATCH.checked_sub(extra).ok_or(Error::Capacity)?`, `validate_batch(&batch.state,&batch.records,MAX_FILLS+1,budget)`, `r.tenant!=tenant`, `r.event_class!=1`, `r.payload_schema_ref!=schema`, `r.event_time!=at`, `status.checkpointasusize!=count`, `message_field(&r.payload,2)?!=batch.state`, `FillWire::decode(&message_field(&r.payload,1)?)?`, `fill.without_recovery()?.journal_bytes()?`, `p.payload_digest!=batch.history_digest`, `missing.len()+posted.len()!=fills.len()`, `tables.get::<_,i64>(0)!=3`, `relrowsecurityANDrelforcerowsecurity`, `claims.sort_by(|a,b|a.value().fill_id.cmp(&b.value().fill_id))`, `claim(&tx,&st.order_id,&identity::execution_key(f),&f.fill_id).await?`, `duplicate(&tx,Some(f)).await?`, `returnErr(Error::Conflict)`, `journal(&tx,&st.order_id,&f.fill_id,f,&fill.journal_bytes()?).await?`, `fee_journal::cas_order(&muttx,tenant,&batch.state,batch.order_version).await?`, `locked.record_fee_revision(posted.get(key).ok_or(Error::FeeRevision)?,fill).await?`, `version=$7ANDstatus='investigating'ANDcheckpoint=0`, `ifchanged!=1`, `INSERTINTOexecution_recovery_targets`, `enqueue(&tx,&batch.records).await?`, `commit(tx).await`} {
+	for _, marker := range []string{`fnmetadata_and_posted_share_one_byte_budget()`, `constMAX_FILLS:usize=8000`, `constMAX_BATCH:usize=4*MAX_BYTES`, `MAX_BATCH.checked_sub(extra).ok_or(Error::Capacity)?`, `validate_batch(&batch.state,&batch.records,MAX_FILLS+1,budget)`, `r.tenant!=tenant`, `r.event_class!=1`, `r.payload_schema_ref!=schema`, `r.event_time!=at`, `status.checkpointasusize!=count`, `message_field(&r.payload,2)?!=batch.state()`, `FillWire::decode(&message_field(&r.payload,1)?)?`, `fill.without_recovery()?.journal_bytes()?`, `p.payload_digest!=batch.digest()`, `missing.len()+posted.len()!=fills.len()`, `tables.get::<_,i64>(0)!=3`, `relrowsecurityANDrelforcerowsecurity`, `claims.sort_by(|a,b|a.0.cmp(&b.0))`, `claim(&tx,&st.order_id,&identity::execution_key(f),&f.fill_id).await?`, `duplicate(&tx,Some(f)).await?`, `returnErr(Error::Conflict)`, `journal(&tx,&st.order_id,&f.fill_id,f,&fill.journal_bytes()?).await?`, `fee_journal::cas_order(&muttx,tenant,batch.state(),batch.versions().0).await?`, `locked.record_fee_revision(&previous,&fill).await?`, `version=$7ANDstatus='investigating'ANDcheckpoint=0`, `ifchanged!=1`, `INSERTINTOexecution_recovery_targets`, `enqueue(&tx,std::slice::from_ref(record.as_ref())).await?`, `commit(tx).await`} {
 		if !strings.Contains(found["src/recovery.rs"], marker) {
 			return fmt.Errorf("recovery durable boundary missing %s", marker)
 		}
@@ -263,13 +263,13 @@ func TestRustOMSStoreBoundaryMutations(t *testing.T) {
 		{"src/recovery.rs", "r.tenant != tenant", "false"},
 		{"src/recovery.rs", "r.event_class != 1", "false"},
 		{"src/recovery.rs", "status.checkpoint as usize != count", "false"},
-		{"src/recovery.rs", "message_field(&r.payload, 2)? != batch.state", "false"},
-		{"src/recovery.rs", "p.payload_digest != batch.history_digest", "false"},
+		{"src/recovery.rs", "message_field(&r.payload, 2)? != batch.state()", "false"},
+		{"src/recovery.rs", "p.payload_digest != batch.digest()", "false"},
 		{"src/recovery.rs", "missing.len() + posted.len() != fills.len()", "false"},
 		{"src/recovery.rs", "tables.get::<_, i64>(0) != 3", "false"},
-		{"src/recovery.rs", "claims.sort_by(|a, b| a.value().fill_id.cmp(&b.value().fill_id))", "claims.reverse()"},
+		{"src/recovery.rs", "claims.sort_by(|a, b| a.0.cmp(&b.0))", "claims.reverse()"},
 		{"src/recovery.rs", "version=$7 AND status='investigating' AND checkpoint=0", "version=$7"},
-		{"src/recovery.rs", "enqueue(&tx, &batch.records).await?", "Ok::<(), Error>(())?"},
+		{"src/recovery.rs", "enqueue(&tx, std::slice::from_ref(record.as_ref())).await?", "Ok::<(), Error>(())?"},
 		{"src/fee_journal.rs", "tx: &'tx mut Transaction<'connection>", "tx: &'tx Transaction<'connection>"},
 		{"src/fee_journal.rs", "scope_existing(tx, tenant).await?", "Ok::<(), Error>(())?"},
 		{"src/fee_journal.rs", "cas(tx, &st, state, expected_version).await?", "Ok::<(), Error>(())?"},

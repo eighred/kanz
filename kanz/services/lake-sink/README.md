@@ -1,12 +1,12 @@
 # lake-sink (LAKE-01a)
 
-Schema-evolution-aware CDC sink: streams the durable Kafka log (EVT-09, the
-system of record) and lands every event into the lakehouse, decoding each
+Schema-evolution-aware CDC sink: reads the derived Kafka archive produced by
+the sole NATS archiver and lands accepted events as NDJSON, decoding each
 payload against the EVT-16 schema registry so the table columns track the
 *published* schema rather than a compiled-in type.
 
 Because the decode is dynamic (registry descriptor → `dynamicpb` → JSON), a field
-added additively to a payload schema surfaces as a new column with **no redeploy**
+added additively to a payload schema surfaces in the payload JSON with **no redeploy**
 of this service — the LAKE-01a "schema-evolution-aware" property. This is the
 analytical-store half of the backtest-ready design (EVT-21d replay determinism +
 PRED-11 point-in-time store); LAKE-01b/c build the point-in-time materialization
@@ -35,11 +35,12 @@ Kafka topic {domain}.{entity}  ──▶  decode (EVT-16 registry)  ──▶  S
 One row per event: the stable envelope columns + the decoded `payload` as a
 nested object. `entity` is the schema ref's message name
 (`market.v1.MarketDataEvent:7` → `MarketDataEvent`), `dt` partitions by
-`event_time`. Each process writes its own `part-{instance}` file so concurrent
-replicas never interleave. This NDJSON staging is the layer a lakehouse catalog
-ingest (Iceberg/Delta via Trino/Spark) commits as a table — concrete table-format
-commits (manifests, snapshot isolation) plug in behind the `Sink` interface, so
-the binary carries no heavy table-format dependency.
+`event_time`. The service requests a generated hostname/PID/random run identity
+for part files, keeping event `Source` unchanged. Explicit constructor identifiers
+reopen their historical append path and must be distinct among concurrent writers.
+Existing files remain in place. Snapshot sealing, catalog commits, object-store
+authorization and multi-replica deployment acceptance remain separate work;
+the deployed singleton/RWO bound is retained.
 
 ## Delivery semantics
 
@@ -118,3 +119,42 @@ authentication blocker under #1413.
 FileDescriptorSet (`common.v1.Decimal`), transient-vs-permanent resolve
 classification, immutable-ref caching, Hive partition layout + path-segment
 sanitization, and the three CDC decode outcomes (land / ack-envelope-only / NAK).
+
+### Optional raw custody for landed rows
+
+`LAKE_SINK_RETAIN_RAW_FRAME=true` adds `raw_capture` to each successfully
+landed NDJSON row. The default is disabled and leaves existing row JSON unchanged.
+Capture contains base64 original EventFrame bytes, their SHA-256 and observed Kafka
+topic/partition/offset (zero is valid). `source_identity: null` explicitly means
+cluster identity, topic UUID and incarnation are unavailable; these are not inferred.
+The same row Write/Flush/fsync barrier covers the raw bytes and decoded columns.
+
+This is not complete physical-offset history: normal validation, deduplication,
+retry and DLQ behavior remain unchanged. A deduplicated delivery never dispatches;
+a successfully parked failure can commit its offset without landing a row. Existing
+NDJSON lacks original bytes and cannot be retroactively labeled raw custody. No
+catalog transaction, source-incarnation proof, new archiver or financial materializer
+is introduced. Received frame/provenance copies are isolated between attempts.
+
+Raw mode accepts original frames up to 16 MiB; larger frames are unsupported by
+this opt-in capture mode and follow existing handler retry/DLQ policy. The copy
+is taken only after validation and a successful dedup claim. This bound limits
+additional custody copies, not Kafka fetch allocation or total process memory.
+An explicitly empty enablement variable is invalid; omit it to select the default.
+
+The core CI quality runner requires all four real Kafka custody cases: a killed
+consumer process with fsynced raw bytes and a positive next-offset restart marker,
+unparked Flush refusal, failed DLQ publication, and successful original-byte DLQ
+publication. Its JSON evidence checker rejects missing cases, skips, failures and
+an incomplete package, and requires both phase-handoff regressions. The process-crash
+fixture retains 45 seconds for setup, actual commit and exclusive Stable membership.
+Only still-active successful setup may hand off immediately before kill to a separate
+45-second crash-recovery phase covering kill/join, membership expiry, disk custody
+and marker publication. Only successful active recovery may hand off to the
+five-second positive restart read. The configured context-budget envelope is
+45 + 45 + 5 seconds, not a hard whole-process wall-clock guarantee: synchronous
+disk I/O, cleanup and scheduling are not preempted by these contexts.
+No phase resets its deadline. Other modes keep their original shared
+45-second lifecycle deadline. These are disposable
+test budgets, not production SLOs or changes to the Kafka client's session timeout.
+This is fixture qualification, not production activation.

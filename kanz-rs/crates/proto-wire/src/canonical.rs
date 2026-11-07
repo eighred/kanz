@@ -1,5 +1,5 @@
 //! Immutable generated value and its Go-compatible canonical wire.
-use crate::{normalize, Error, MAX_BYTES};
+use crate::{normalize_with_budget, Budget, Error, MAX_BYTES};
 use prost::Message;
 use prost_reflect::MessageDescriptor;
 
@@ -15,10 +15,13 @@ pub struct Canonical<T> {
 }
 impl<T: Schema> Canonical<T> {
     pub fn decode(raw: &[u8]) -> Result<Self, Error> {
-        let wire = normalize(T::descriptor()?, raw)?;
+        Self::decode_with_budget(raw, Budget::Standard)
+    }
+    pub fn decode_with_budget(raw: &[u8], budget: Budget) -> Result<Self, Error> {
+        let wire = normalize_with_budget(T::descriptor()?, raw, budget)?;
         // Prost rejects some Go-valid unknown encodings sharing a known number.
         // Decode only descriptor-known bytes; the complete wire remains immutable.
-        let (known, _) = crate::split(&T::descriptor()?, &wire, 0)?;
+        let (known, _) = crate::split(&T::descriptor()?, &wire, 0, budget.bytes())?;
         let value = T::decode(known.as_slice()).map_err(|_| Error::InvalidInput)?;
         Ok(Self { value, wire })
     }

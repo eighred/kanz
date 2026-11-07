@@ -218,7 +218,23 @@ func (c *Consumer) SubscribeReady(ctx context.Context, subject, group string, h 
 	return c.subscribe(ctx, subject, group, h, ready)
 }
 
+// DeliveryHandler has the same validation, attribution, dedup and retry semantics
+// as EventHandler. Skipped/parked deliveries are not successful handler results.
+type DeliveryHandler func(context.Context, *envelopepb.Envelope, []byte, Delivery) error
+
+// SubscribeDelivery exposes original received bytes only on normal dispatch.
+func (c *Consumer) SubscribeDelivery(ctx context.Context, subject, group string, h DeliveryHandler) error {
+	if h == nil {
+		return errors.New("bus: delivery handler is required")
+	}
+	return c.subscribeDelivery(ctx, subject, group, nil, nil, h)
+}
+
 func (c *Consumer) subscribe(ctx context.Context, subject, group string, h EventHandler, ready func()) error {
+	return c.subscribeDelivery(ctx, subject, group, h, ready, nil)
+}
+
+func (c *Consumer) subscribeDelivery(ctx context.Context, subject, group string, h EventHandler, ready func(), deliveryHandler DeliveryHandler) error {
 	stopBacklogPoll := c.startBacklogPoll(ctx, subject, group)
 	defer stopBacklogPoll()
 	handle := func(ctx context.Context, msg Message) error {
@@ -245,6 +261,19 @@ func (c *Consumer) subscribe(ctx context.Context, subject, group string, h Event
 		// or Release it, or the event is stranded until the lease expires.
 		if !c.dedup.Claim(env.IdempotencyKey) {
 			return nil // duplicate within window — ack and skip (not a dispatch)
+		}
+		attemptHandler := h
+		if deliveryHandler != nil {
+			if len(msg.Body) > MaxDeliveryFrameBytes {
+				attemptHandler = func(context.Context, *envelopepb.Envelope, []byte) error {
+					return Terminal(errors.New("bus: raw delivery exceeds custody byte bound"))
+				}
+			} else {
+				original := (Delivery{Frame: msg.Body, Kafka: msg.Kafka}).clone()
+				attemptHandler = func(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+					return deliveryHandler(ctx, env, payload, original.clone())
+				}
+			}
 		}
 		ctx = WithCorrelationID(ctx, env.CorrelationId)
 		ctx = WithCausationID(ctx, env.EventId)
@@ -274,7 +303,7 @@ func (c *Consumer) subscribe(ctx context.Context, subject, group string, h Event
 		attemptsMade := 0
 		for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
 			attemptsMade = attempt
-			if err := dispatchEvent(ctx, h, env, payload); err == nil {
+			if err := dispatchEvent(ctx, attemptHandler, env, payload); err == nil {
 				c.dedup.Commit(env.IdempotencyKey) // done — hold for the full window
 				endSpan(span, nil)
 				c.metrics.observeConsume(subject, group, time.Since(start), nil)

@@ -19,7 +19,11 @@ SPIFFE supervisor. Dropping a client or cancelled future aborts owned work but i
 not equivalent evidence of a completed explicit join. SPIFFE's dependency-owned
 transport cleanup is additionally observed by the actual fixture.
 
-Every RPC has an explicit nonzero deadline, capped at 120 seconds. Messages are
+Every RPC has an explicit nonzero deadline, capped at 120 seconds. The owner
+checks its monotonic absolute expiry after the awaited RPC as well as through
+the timer: a ready inner future cannot return success after the budget expires.
+A remote Cancelled response received before that expiry stays Cancelled; no peer
+error text is interpreted as proof of a local timeout. Messages are
 bounded to 1 MiB and known message nesting to 32 levels. These are named bounded
 refusals, not a claim of parity for arbitrarily large Go messages. Generated types
 come from the canonical venue schema and reuse the existing canonical OrderState,

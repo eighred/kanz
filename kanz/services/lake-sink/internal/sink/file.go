@@ -3,6 +3,7 @@ package sink
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,16 +14,9 @@ import (
 
 // FileSink lands rows as Hive-partitioned newline-delimited JSON under a root
 // directory: {root}/{domain}/{entity}/dt=YYYY-MM-DD/part-{instance}.ndjson. This
-// is the staging layout a lakehouse catalog ingest (Iceberg/Delta via
-// Trino/Spark) commits as a table — the columns evolve as the decoded payload
-// does, which is the LAKE-01a schema-evolution property. Each process writes its
-// own part-file (keyed by instance) so concurrent replicas never interleave into
-// one file.
-//
-// Concrete Iceberg/Delta catalog commits (manifest writes, snapshot isolation)
-// are a deployment concern that plugs in behind the Sink interface; the
-// NDJSON-on-object-store landing keeps that boundary clean and avoids a heavy
-// table-format dependency in the service binary.
+// is appendable staging data. Generated default IDs separate runs; explicit IDs
+// preserve historical append paths and must not be shared by concurrent writers.
+// Snapshot sealing, catalog commits and object-store access are separate work.
 type FileSink struct {
 	root       string
 	instanceID string
@@ -37,7 +31,8 @@ type partWriter struct {
 }
 
 // NewFileSink creates the landing root. instanceID disambiguates this process's
-// part-files from sibling replicas'; empty ⇒ hostname+pid.
+// part-files from sibling replicas'; empty generates hostname+pid+random run ID.
+// An explicit ID retains its existing append/reopen path for compatibility.
 func NewFileSink(root, instanceID string) (*FileSink, error) {
 	if instanceID == "" {
 		instanceID = defaultInstanceID()
@@ -166,5 +161,7 @@ func defaultInstanceID() string {
 	if err != nil || host == "" {
 		host = "host"
 	}
-	return fmt.Sprintf("%s-%d", host, os.Getpid())
+	// Hostname/PID can repeat across container restarts or multiple sinks in one
+	// process. A fresh suffix separates runs without changing event Source.
+	return fmt.Sprintf("%s-%d-%s", host, os.Getpid(), rand.Text())
 }

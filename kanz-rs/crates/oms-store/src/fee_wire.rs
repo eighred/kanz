@@ -98,7 +98,7 @@ impl FillWire {
         result.original = result.journal_bytes()?;
         Ok(result)
     }
-    pub(crate) fn without_recovery(&self) -> Result<Self, Error> {
+    pub fn without_recovery(&self) -> Result<Self, Error> {
         let mut result = self.clone();
         result.value.recovery = None;
         result

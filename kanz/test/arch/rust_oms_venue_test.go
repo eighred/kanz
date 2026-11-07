@@ -146,10 +146,10 @@ func checkRustVenueMarkers(files map[string]string) error {
 	required := map[string][]string{
 		"crates/oms-venue/examples/oms-venue-fixture.rs": {`env!("KANZ_BUILD_VERSION")`, `Some("127.0.0.1"|"localhost"|"[::1]")`, `client.close().await`, `input.read(&mutbyte)`},
 		"crates/oms-venue/src/transport.rs":              {`connection_host(&uri)?`, `parse::<std::net::Ipv6Addr>()`, `uri.scheme_str()!=Some("https")`, `starts_with("unix://")`, `spiffe_rustls::mtls_client(source)`, `spiffe_rustls::LocalOnly(domain)`, `spiffe_rustls::authorizer::exact([config.expected_peer.as_str()])`, `.authorize(authorizer)`, `tls.alpn_protocols=vec![b"h2".to_vec()]`, `alpn_protocol()!=Some(b"h2".as_slice())`, `TcpStream::connect`, `tls.connect(server_name,socket).await?`, `a.as_str().contains('@')`, `connect_with_connector(connector)`, `owner.close().await`, `self.owner.close().await`, `fortaskinself.tasks.abort(){let_=task.await;}`, `source.shutdown_with_timeout(Duration::from_secs(2)).await`, `tasks.handles.len()>=64`},
-		"crates/oms-venue/src/client.rs":                 {`error.is::<tonic::TimeoutExpired>()`, `.map_err(rpc_error)`, `max_decoding_message_size(kanz_proto_wire::MAX_BYTES)`, `max_encoding_message_size(kanz_proto_wire::MAX_BYTES)`, `request.set_timeout(deadline)`, `tokio::time::timeout(deadline,async`, `error.code()==Code::Unimplemented`, `ViewState::Indeterminate`, `id.mic!=mic||id.account!=account`, `requirements.verified_account&&!id.account_verified`, `requirements.declared_order_types&&id.supported_order_types.is_empty()`},
-		"crates/oms-venue/src/wire.rs":                   {`kanz_proto_wire::Canonical::decode(raw)`, `kanz_proto_wire::Canonical::from_value(value)`, `src.remaining()>kanz_proto_wire::MAX_BYTES`, `dst.put_slice(item.wire())`, `kanz_proto_wire::put_message(field.number(),state.wire(),&mutout)`, `Canonical::decode(nested)`},
-		"crates/proto-wire/src/canonical.rs":             {`normalize(T::descriptor()?,raw)`, `value.encoded_len()>MAX_BYTES`},
-		"crates/proto-wire/src/lib.rs":                   {`raw.len()>MAX_BYTES`, `out.len()>MAX_BYTES`, `ifdepth>32`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `entries[0].merge(sidecar,&child)?`, `field.is_list()||entries.is_empty()`, `field.is_map()||field.containing_oneof().is_some()`},
+		"crates/oms-venue/src/client.rs":                 {`error.is::<tonic::TimeoutExpired>()`, `.map_err(rpc_error)`, `max_decoding_message_size(budget.bytes())`, `max_encoding_message_size(kanz_proto_wire::MAX_BYTES)`, `request.set_timeout(deadline)`, `tokio::time::timeout_at(expires,async`, `letexpires=tokio::time::Instant::now()+deadline`, `before_deadline(expires,result)`, `tokio::time::Instant::now()>=expires`, `error.code()==Code::Unimplemented`, `ViewState::Indeterminate`, `id.mic!=mic||id.account!=account`, `requirements.verified_account&&!id.account_verified`, `requirements.declared_order_types&&id.supported_order_types.is_empty()`},
+		"crates/oms-venue/src/wire.rs":                   {`kanz_proto_wire::Canonical::decode(raw)`, `kanz_proto_wire::Canonical::from_value(value)`, `src.remaining()>self.1.bytes()`, `dst.put_slice(item.wire())`, `kanz_proto_wire::put_message(field.number(),state.wire(),&mutout)`, `Canonical::decode_with_budget(nested,budget)`},
+		"crates/proto-wire/src/canonical.rs":             {`normalize_with_budget(T::descriptor()?,raw,budget)`, `value.encoded_len()>MAX_BYTES`},
+		"crates/proto-wire/src/lib.rs":                   {`raw.len()>limit`, `out.len().checked_add(raw.len()).is_none_or(|n|n>limit)`, `ifdepth>32`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `entries[0].merge(sidecar,&child,limit)?`, `field.is_list()||entries.is_empty()`, `field.is_map()||field.containing_oneof().is_some()`},
 	}
 	for name, markers := range required {
 		code, e := rustMigrationWithoutComments(files[name])
@@ -187,6 +187,8 @@ func TestRustVenueClientBoundary(t *testing.T) {
 		{"exact-peer", "transport.rs", `spiffe_rustls::authorizer::exact([config.expected_peer.as_str()])`, `spiffe_rustls::authorizer::any()`},
 		{"joined-source", "transport.rs", `source.shutdown_with_timeout(Duration::from_secs(2)).await`, `Ok::<(),()>(())`},
 		{"unknown-not-error", "client.rs", `error.code() == Code::Unimplemented`, `true`},
+		{"own-deadline", "client.rs", `tokio::time::Instant::now() >= expires`, `false`},
+		{"late-result", "client.rs", `before_deadline(expires, result)`, `result`},
 		{"typed-timeout-only", "client.rs", `error.is::<tonic::TimeoutExpired>()`, `true`},
 		{"identity", "client.rs", `id.mic != mic || id.account != account`, `false`},
 		{"raw-wire", "wire.rs", `dst.put_slice(item.wire())`, `dst.put_slice(&item.value.encode_to_vec())`},
