@@ -133,34 +133,52 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 				})
 				return p
 			}
+			carryover := make(map[string]time.Time)
 			bar := func(source string, id int) {
 				// Real trades in adjacent, already elapsed buckets close a bar through
 				// the existing Go collector. No clock or derived event is injected.
 				bucket := time.Now().UTC().Truncate(time.Minute).Add(time.Duration(id-12) * time.Minute)
 				exchange.trade(bucket.Add(time.Second), id)
 				exchange.trade(bucket.Add(time.Minute), id+1)
-				frame := handoffFrame(t, broker, subs["market.crypto.bar"], source, version, instrument)
-				event := new(marketpb.MarketDataEvent)
-				if proto.Unmarshal(frame.Payload, event) != nil || event.GetBar() == nil {
-					t.Fatal("retained trade did not produce a canonical bar")
+				expected := []time.Time{}
+				if previous, ok := carryover[source]; ok {
+					// The previous pair's second trade remains in its own bucket.
+					// It must be validated before the new bucket, never skipped.
+					expected = append(expected, previous)
 				}
-				b := event.GetBar()
-				if event.InstrumentId != instrument || event.Mic != mic || b.TradeCount != 1 || !b.OpenTime.AsTime().Equal(bucket) || !b.CloseTime.AsTime().Equal(bucket.Add(time.Minute)) || dec.FromProto(b.Volume).Cmp(big.NewRat(2, 1)) != 0 || dec.FromProto(b.Close).Cmp(big.NewRat(50000, 1)) != 0 {
-					t.Fatal("retained trade/bar semantics differ")
+				expected = append(expected, bucket)
+				for _, want := range expected {
+					frame := handoffFrame(t, broker, subs["market.crypto.bar"], source, version, instrument)
+					event := new(marketpb.MarketDataEvent)
+					if proto.Unmarshal(frame.Payload, event) != nil || event.GetBar() == nil {
+						t.Fatal("retained trade did not produce a canonical bar")
+					}
+					b := event.GetBar()
+					if event.InstrumentId != instrument || event.Mic != mic || b.TradeCount != 1 || !b.OpenTime.AsTime().Equal(want) || !b.CloseTime.AsTime().Equal(want.Add(time.Minute)) || dec.FromProto(b.Volume).Cmp(big.NewRat(2, 1)) != 0 || dec.FromProto(b.Open).Cmp(big.NewRat(50000, 1)) != 0 || dec.FromProto(b.High).Cmp(big.NewRat(50000, 1)) != 0 || dec.FromProto(b.Low).Cmp(big.NewRat(50000, 1)) != 0 || dec.FromProto(b.Close).Cmp(big.NewRat(50000, 1)) != 0 {
+						t.Fatal("retained trade/bar or exact carryover semantics differ")
+					}
 				}
+				carryover[source] = bucket.Add(time.Minute)
 			}
-			depth := func(source string) {
+			// Advisory Symbol currently differs by owner; no producer is changed
+			// or payload normalized here. InstrumentID and all economic values
+			// retain common expectations. #1413 owns the remaining compatibility.
+			depth := func(source, expectedSymbol string) {
 				for _, subject := range []string{"market.book.snapshot", "market.crypto.quote"} {
 					frame := handoffFrame(t, broker, subs[subject], source, version, instrument)
 					if subject == "market.book.snapshot" {
 						book := new(marketpb.OrderBookSnapshot)
-						if proto.Unmarshal(frame.Payload, book) != nil || book.InstrumentId != instrument || book.Mic != mic || book.Symbol != symbol || book.LastUpdateSequence != 101 || len(book.Bids) != 1 || len(book.Asks) != 1 || dec.FromProto(book.Bids[0].Price).Cmp(big.NewRat(50000, 1)) != 0 || dec.FromProto(book.Bids[0].Size).Cmp(big.NewRat(4, 1)) != 0 || dec.FromProto(book.Asks[0].Price).Cmp(big.NewRat(50001, 1)) != 0 || dec.FromProto(book.Asks[0].Size).Cmp(big.NewRat(2, 1)) != 0 {
-							t.Fatal("canonical handoff book differs")
+						decoded := proto.Unmarshal(frame.Payload, book) == nil
+						levels := len(book.Bids) == 1 && len(book.Asks) == 1
+						economics := levels && dec.FromProto(book.Bids[0].Price).Cmp(big.NewRat(50000, 1)) == 0 && dec.FromProto(book.Bids[0].Size).Cmp(big.NewRat(4, 1)) == 0 && dec.FromProto(book.Asks[0].Price).Cmp(big.NewRat(50001, 1)) == 0 && dec.FromProto(book.Asks[0].Size).Cmp(big.NewRat(2, 1)) == 0
+						if !decoded || book.InstrumentId != instrument || book.Mic != mic || book.Symbol != expectedSymbol || book.LastUpdateSequence != 101 || !economics {
+							t.Fatalf("canonical handoff book differs: decoded=%t instrument=%t mic=%t symbol=%t sequence=%t levels=%t economics=%t", decoded, book.InstrumentId == instrument, book.Mic == mic, book.Symbol == expectedSymbol, book.LastUpdateSequence == 101, levels, economics)
 						}
 					} else {
 						event := new(marketpb.MarketDataEvent)
-						if proto.Unmarshal(frame.Payload, event) != nil || event.InstrumentId != instrument || event.Mic != mic || event.Symbol != symbol || event.SourceSequence != 101 || event.GetQuote() == nil {
-							t.Fatal("canonical handoff quote differs")
+						decoded := proto.Unmarshal(frame.Payload, event) == nil
+						if !decoded || event.InstrumentId != instrument || event.Mic != mic || event.Symbol != expectedSymbol || event.SourceSequence != 101 || event.GetQuote() == nil {
+							t.Fatalf("canonical handoff quote differs: decoded=%t instrument=%t mic=%t symbol=%t sequence=%t quote=%t", decoded, event.InstrumentId == instrument, event.Mic == mic, event.Symbol == expectedSymbol, event.SourceSequence == 101, event.GetQuote() != nil)
 						}
 						q := event.GetQuote()
 						if dec.FromProto(q.BidPrice).Cmp(big.NewRat(50000, 1)) != 0 || dec.FromProto(q.BidSize).Cmp(big.NewRat(4, 1)) != 0 || dec.FromProto(q.AskPrice).Cmp(big.NewRat(50001, 1)) != 0 || dec.FromProto(q.AskSize).Cmp(big.NewRat(2, 1)) != 0 {
@@ -171,7 +189,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			}
 			original := startGo("go-original", false)
 			exchange.depth(true, 101, 100)
-			depth("go-original")
+			depth("go-original", instrument)
 			bar("go-original", 1)
 			original.stop()
 			handoffWait(t, 5*time.Second, "old exchange sockets survived join", func() bool { return exchange.count("depth") == 0 && exchange.count("trade") == 0 })
@@ -184,7 +202,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			rust.waitStarted(exchange, "rust-startup", func() bool { return len(broker.connections(rustID)) == 1 && exchange.count("depth") == 1 })
 			handoffStatus(t, rustAddress, http.StatusServiceUnavailable)
 			exchange.depth(true, 101, 100)
-			depth(rustSource)
+			depth(rustSource, symbol)
 			handoffStatus(t, rustAddress, http.StatusOK)
 			bar("go-retained", 5)
 			// Source age, not a healthy broker alone, controls readiness.
@@ -217,7 +235,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			handoffWait(t, 5*time.Second, "retained trades survived join", func() bool { return exchange.count("trade") == 0 })
 			rollback := startGo("go-rollback", false)
 			exchange.depth(true, 101, 100)
-			depth("go-rollback")
+			depth("go-rollback", instrument)
 			bar("go-rollback", 7)
 			rollback.stop()
 			info, err := broker.js.StreamInfo("HANDOFF")

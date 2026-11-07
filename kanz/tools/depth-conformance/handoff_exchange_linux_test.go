@@ -175,6 +175,7 @@ func (x *handoffExchange) depth(snapshot bool, sequence, previous int64) int64 {
 		action := "update"
 		if snapshot {
 			action = "snapshot"
+			previous = -1
 		}
 		x.send("depth", fmt.Sprintf(`{"arg":{"channel":"books","instId":"BTC-USDT"},"action":%q,"data":[{"bids":[["50000","4","0","1"]],"asks":[["50001","2","0","1"]],"ts":"%d","seqId":%d,"prevSeqId":%d}]}`, action, stamp, sequence, previous))
 	}

@@ -45,6 +45,15 @@ ephemerals whose inactivity expiry can erase a reader between process phases.
 Cleanup deletes each consumer and requires typed consumer-not-found readback.
 Failure-only diagnostics expose closed transport/exit categories and numeric
 workload/principal/exchange/stream counts, never raw child logs or credentials.
+The existing producers differ in advisory `Symbol`: the Go alpha runner sets
+it to the canonical instrument ID, while Rust uses the venue symbol. The test
+asserts each exact existing value and does not normalize either payload.
+Common authoritative instrument/MIC/sequence and economic values remain exact.
+This known metadata gap is tracked in #1413 and prevents claiming full producer
+compatibility; production ownership still needs preservation or explicitly
+approved consumer compatibility. Repeated retained trade pairs also validate
+the exact prior pair's second-bucket bar before the newly requested bucket,
+including all OHLC values, volume, count and bucket boundaries.
 
 Use `go run ./tools/depth-conformance --okx` for the OKX corpus, generated through
 the public Go OKX source and book using local websocket frames. It covers positive

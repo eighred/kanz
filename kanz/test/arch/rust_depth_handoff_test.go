@@ -28,8 +28,12 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 			"info.State.FirstSeq != 1", "info.State.Msgs != info.State.LastSeq", "info.State.NumDeleted != 0",
 			"authenticated-publish-denied", "deniedBroker.denied.publish.Load() > beforeDenials", "denied publisher produced accepted facts",
 			"duplicate-external-assignment-refused", "instrument+\",\"+instrument", "invalid static assignment reached feed side effects",
-			"rustSource := venue + \"-depth/handoff\"", "depth(rustSource)", "Durable: consumer", "nats.Bind(\"HANDOFF\", consumer)",
+			"rustSource := venue + \"-depth/handoff\"", "depth(rustSource, symbol)", "depth(\"go-original\", instrument)", "depth(\"go-rollback\", instrument)", "Durable: consumer", "nats.Bind(\"HANDOFF\", consumer)",
 			"broker.js.DeleteConsumer(\"HANDOFF\", consumer)", "!errors.Is(err, nats.ErrConsumerNotFound)", "handoffBrokerError(consumerErr)",
+			"expected = append(expected, previous)", "expected = append(expected, bucket)", "carryover[source] = bucket.Add(time.Minute)", "!b.OpenTime.AsTime().Equal(want)",
+		},
+		"handoff_exchange_linux_test.go": {
+			"if snapshot {\n\t\t\taction = \"snapshot\"\n\t\t\tprevious = -1\n\t\t}",
 		},
 	}
 	root := filepath.Join(moduleRoot(t), "tools", "depth-conformance")
@@ -49,15 +53,16 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 			}
 			return nil
 		}
-		if err := check(string(body)); err != nil {
+		normalized := strings.ReplaceAll(string(body), "\r\n", "\n")
+		if err := check(normalized); err != nil {
 			t.Fatal(err)
 		}
 		for _, marker := range required {
-			if check(strings.ReplaceAll(string(body), marker, "removed-boundary")) == nil {
+			if check(strings.ReplaceAll(normalized, marker, "removed-boundary")) == nil {
 				t.Fatalf("%s mutation escaped", file)
 			}
 		}
-		if check(string(body)+"\n// os.Environ()") == nil {
+		if check(normalized+"\n// os.Environ()") == nil {
 			t.Fatal("ambient environment mutation escaped")
 		}
 	}
