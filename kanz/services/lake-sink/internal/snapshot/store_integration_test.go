@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -17,10 +19,68 @@ import (
 	"github.com/eighred/kanz/services/lake-sink/internal/sink"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// ConnConfig.ConnString returns the original input, not subsequent RuntimeParams
+// edits. Bind owned scope into the URL consumed by the real tenant-pool owner.
+func snapshotFixtureDSN(dsn, schema, application string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Opaque != "" || u.Fragment != "" || u.Port() == "" || u.Path == "" {
+		return "", ErrDenied
+	}
+	// Exact existing CI alias only; no resolver or arbitrary hostname access.
+	if u.Hostname() == "localhost" {
+		u.Host = net.JoinHostPort("127.0.0.1", u.Port())
+	}
+	if net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() {
+		return "", ErrDenied
+	}
+	if !regexp.MustCompile(`^lake_fixture_[a-f0-9]{32}$`).MatchString(schema) || !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,63}$`).MatchString(application) {
+		return "", ErrDenied
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil || q.Get("sslmode") != "disable" {
+		return "", ErrDenied
+	}
+	for key, values := range q {
+		if len(values) != 1 || (key != "sslmode" && key != "search_path" && key != "application_name") {
+			return "", ErrDenied
+		}
+	}
+	q.Set("search_path", schema)
+	q.Set("application_name", application)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func TestSnapshotFixtureDSNPreservesExplicitScope(t *testing.T) {
+	schema := "lake_fixture_0123456789abcdef0123456789abcdef"
+	dsn, err := snapshotFixtureDSN("postgres://fixture@127.0.0.1:5432/fixture?sslmode=disable", schema, "fixture-owner")
+	if err != nil {
+		t.Fatal("valid fixture URL refused")
+	}
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil || cfg.RuntimeParams["search_path"] != schema || cfg.RuntimeParams["application_name"] != "fixture-owner" {
+		t.Fatal("fixture scope lost on parse")
+	}
+	again, err := pgx.ParseConfig(cfg.ConnString())
+	if err != nil || again.RuntimeParams["search_path"] != schema || again.RuntimeParams["application_name"] != "fixture-owner" {
+		t.Fatal("fixture scope lost on owner handoff")
+	}
+	alias, err := snapshotFixtureDSN("postgres://fixture@localhost:5432/fixture?sslmode=disable", schema, "fixture-owner")
+	if err != nil || alias != dsn {
+		t.Fatal("exact fixture alias did not normalize to literal loopback")
+	}
+	for _, invalid := range []string{"postgres://fixture@remote:5432/fixture?sslmode=disable", "postgres://fixture@127.0.0.1:5432/fixture?sslmode=disable&host=remote", "postgres://fixture@127.0.0.1:5432/fixture?sslmode=disable&search_path=a&search_path=b"} {
+		if _, err := snapshotFixtureDSN(invalid, schema, "fixture-owner"); err == nil {
+			t.Fatal("unscoped fixture URL accepted")
+		}
+	}
+}
 
 func snapshotStores(t *testing.T) (*Store, *Store) {
 	t.Helper()
@@ -28,7 +88,13 @@ func snapshotStores(t *testing.T) (*Store, *Store) {
 	if dsn == "" {
 		t.Skip("TEST_POSTGRES_URL is required for real snapshot PostgreSQL proof")
 	}
-	cfg, err := pgxpool.ParseConfig(dsn)
+	schema := "lake_fixture_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	application := "lake-fixture-" + strings.TrimPrefix(schema, "lake_fixture_")
+	scopedDSN, err := snapshotFixtureDSN(dsn, schema, application)
+	if err != nil {
+		t.Fatal("fixture scoped URL unavailable")
+	}
+	cfg, err := pgxpool.ParseConfig(scopedDSN)
 	if err != nil || net.ParseIP(cfg.ConnConfig.Host) == nil || !net.ParseIP(cfg.ConnConfig.Host).IsLoopback() {
 		t.Fatal("snapshot PostgreSQL fixture requires literal loopback")
 	}
@@ -43,7 +109,6 @@ func snapshotStores(t *testing.T) (*Store, *Store) {
 	if err := admin.QueryRow(ctx, `SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=current_user`).Scan(&unsafe); err != nil || unsafe {
 		t.Fatal("fixture role must be NOSUPERUSER and NOBYPASSRLS")
 	}
-	schema := "lake_fixture_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	if _, err := admin.Exec(ctx, `CREATE SCHEMA `+pgx.Identifier{schema}.Sanitize()); err != nil {
 		t.Fatal("fixture schema unavailable")
 	}
@@ -54,24 +119,35 @@ func snapshotStores(t *testing.T) (*Store, *Store) {
 			t.Error("owned fixture schema cleanup failed")
 		}
 	})
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	poolA, err := pg.NewTenantPool(ctx, cfg.ConnConfig.ConnString(), "tenant-a")
+	poolA, err := pg.NewTenantPool(ctx, scopedDSN, "tenant-a")
 	if err != nil {
 		t.Fatal("tenant A pool unavailable")
 	}
 	t.Cleanup(poolA.Close)
+	var actualSchema, actualApplication string
+	if poolA.QueryRow(ctx, `SELECT current_schema(),current_setting('application_name')`).Scan(&actualSchema, &actualApplication) != nil || actualSchema != schema || actualApplication != application {
+		t.Fatal("actual fixture schema/application differs")
+	}
 	ddl, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0001_snapshots.sql"))
 	if err != nil {
 		t.Fatal("canonical migration unavailable")
 	}
 	if _, err := poolA.Exec(ctx, string(ddl)); err != nil {
-		t.Fatal("canonical snapshot migration failed")
+		code := "non-postgres"
+		var databaseError *pgconn.PgError
+		if errors.As(err, &databaseError) && regexp.MustCompile(`^[0-9A-Z]{5}$`).MatchString(databaseError.Code) {
+			code = databaseError.Code
+		}
+		t.Fatalf("canonical snapshot migration failed: SQLSTATE=%s", code)
 	}
-	poolB, err := pg.NewTenantPool(ctx, cfg.ConnConfig.ConnString(), "tenant-b")
+	poolB, err := pg.NewTenantPool(ctx, scopedDSN, "tenant-b")
 	if err != nil {
 		t.Fatal("tenant B pool unavailable")
 	}
 	t.Cleanup(poolB.Close)
+	if poolB.QueryRow(ctx, `SELECT current_schema(),current_setting('application_name')`).Scan(&actualSchema, &actualApplication) != nil || actualSchema != schema || actualApplication != application {
+		t.Fatal("actual second-tenant fixture schema/application differs")
+	}
 	var forced int
 	if err := poolA.QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relname IN ('lake_snapshots','outbox') AND relrowsecurity AND relforcerowsecurity`).Scan(&forced); err != nil || forced != 2 {
 		t.Fatal("both owner tables must have actual FORCE RLS")

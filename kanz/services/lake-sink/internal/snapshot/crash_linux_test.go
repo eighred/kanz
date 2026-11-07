@@ -70,14 +70,16 @@ func TestSnapshotActualOwnerKillReplaysPersistedCut(t *testing.T) {
 		t.Fatal("fixture trust encoding failed")
 	}
 	row := custodyRow(t, "tenant-a")
-	childDB := a.pool.Config().ConnConfig.Copy()
 	var schema string
 	if a.pool.QueryRow(ctx, `SELECT current_schema()`).Scan(&schema) != nil {
 		t.Fatal("owned schema unavailable")
 	}
 	application := "lake-crash-" + schema
-	childDB.RuntimeParams["application_name"] = application
-	in := snapshotOwnerInput{Address: address, Database: childDB.ConnString(), NATS: "nats://" + b.address, Landing: landingRoot, Output: outputRoot, Policy: policy, Worker: worker, WorkerSHA: workerHash, Cert: cert, Key: key, Bundle: trust, Rows: []sink.Row{row, custodyRow(t, "tenant-b"), row}}
+	childDSN, err := snapshotFixtureDSN(a.pool.Config().ConnConfig.ConnString(), schema, application)
+	if err != nil {
+		t.Fatal("child scoped database URL unavailable")
+	}
+	in := snapshotOwnerInput{Address: address, Database: childDSN, NATS: "nats://" + b.address, Landing: landingRoot, Output: outputRoot, Policy: policy, Worker: worker, WorkerSHA: workerHash, Cert: cert, Key: key, Bundle: trust, Rows: []sink.Row{row, custodyRow(t, "tenant-b"), row}}
 	// A fixture-only trigger blocks the real READY transaction after immutable
 	// filesystem publication. No owner hook fabricates completion or rollback.
 	if _, err = a.pool.Exec(ctx, `CREATE FUNCTION fixture_hold_ready() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state=3 THEN PERFORM pg_advisory_xact_lock(hashtextextended(current_schema() || '/fixture-ready',0)); END IF; RETURN NEW; END $$; CREATE TRIGGER fixture_ready BEFORE UPDATE ON lake_snapshots FOR EACH ROW EXECUTE FUNCTION fixture_hold_ready()`); err != nil {
@@ -132,7 +134,7 @@ func TestSnapshotActualOwnerKillReplaysPersistedCut(t *testing.T) {
 	}
 	var ownerPID int
 	wait(func() bool {
-		return a.pool.QueryRow(ctx, `SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock' AND wait_event='advisory'`, blockerPID).Scan(&ownerPID) == nil
+		return a.pool.QueryRow(ctx, `SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND application_name=$2 AND wait_event_type='Lock' AND wait_event='advisory'`, blockerPID, application).Scan(&ownerPID) == nil
 	})
 	var beforeCut []byte
 	var state, generation int

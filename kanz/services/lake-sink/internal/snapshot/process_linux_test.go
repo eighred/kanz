@@ -122,6 +122,20 @@ func TestSnapshotOwnerSubprocess(t *testing.T) {
 	}
 	ctx, stopDeadline := context.WithDeadline(ctx, in.Deadline)
 	defer stopDeadline()
+	expectedSchema, expectedApplication := pgcfg.ConnConfig.RuntimeParams["search_path"], pgcfg.ConnConfig.RuntimeParams["application_name"]
+	if _, err := snapshotFixtureDSN(in.Database, expectedSchema, expectedApplication); err != nil {
+		t.Fatal("child scope parameters absent or invalid")
+	}
+	probe, err := pgxpool.NewWithConfig(ctx, pgcfg)
+	if err != nil {
+		t.Fatal("child scoped database unavailable")
+	}
+	var actualSchema, actualApplication string
+	probeErr := probe.QueryRow(ctx, `SELECT current_schema(),current_setting('application_name')`).Scan(&actualSchema, &actualApplication)
+	probe.Close()
+	if probeErr != nil || actualSchema != expectedSchema || actualApplication != expectedApplication {
+		t.Fatal("actual child schema/application differs")
+	}
 	landing, err := sink.NewFileSink(in.Landing, "", sink.EnableActiveRunCapture)
 	if err != nil {
 		t.Fatal("owner landing unavailable")

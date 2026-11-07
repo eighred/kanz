@@ -14,14 +14,11 @@ import (
 	"time"
 
 	"github.com/eighred/kanz/internal/lake/snapshotprofile"
-	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
 	lakepb "github.com/eighred/kanz/kanz-schemas-go/lake/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/segmentio/kafka-go"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func startActualSnapshotArchiver(t *testing.T, ctx context.Context, b *snapshotBroker, broker, tenant string) *snapshotOwnerProcess {
@@ -180,21 +177,23 @@ func TestSnapshotActualCanonicalArchiverFourFactsRestartAndTenantRefusal(t *test
 	}()
 	publish := func(state lakepb.SnapshotState, scope string) []byte {
 		t.Helper()
-		fact := &lakepb.SnapshotLifecycle{SnapshotId: "fixture-snapshot", State: state, SourceScope: lakepb.SnapshotSourceScope_SNAPSHOT_SOURCE_SCOPE_ACTIVE_LANDING_RUN, RequestSha256: bytes.Repeat([]byte{1}, 32)}
-		subject := map[lakepb.SnapshotState]string{1: "lake.snapshot.requested", 2: "lake.snapshot.capturing", 3: "lake.snapshot.published", 4: "lake.snapshot.failed"}[state]
-		now := timestamppb.Now()
-		env := &envelopepb.Envelope{EventId: uuid.NewString(), TenantId: scope, EventType: subject, EventClass: envelopepb.EventClass_EVENT_CLASS_FACT, Domain: "lake", SchemaVersion: 1, EnvelopeVersion: 1, EventTime: now, IngestionTime: now, PublishTime: now, CorrelationId: "fixture", Source: "fixture", ProducerVersion: "fixture", IdempotencyKey: uuid.NewString(), PayloadSchemaRef: "lake.v1.SnapshotLifecycle:1", PartitionKey: "fixture-snapshot"}
-		if bus.Validate(env) != nil {
-			t.Fatal("canonical fixture envelope refused")
-		}
-		payload, e := proto.Marshal(fact)
+		// Canonical Producer owns FACT identity/stamping. The capture is only an
+		// encoder; broker ACK and archival bytes are verified independently below.
+		capture := &lifecycleCapture{}
+		producer, e := bus.NewProducer(capture, bus.ProducerConfig{Source: Service, ProducerVersion: "fixture", Tenant: scope})
 		if e != nil {
-			t.Fatal("fixture payload encoding failed")
+			t.Fatal("canonical fixture producer unavailable")
 		}
-		wire, e := proto.Marshal(&envelopepb.EventFrame{Envelope: env, Payload: payload})
+		record, e := lifecycleRecord(ctx, scope, &lakepb.Snapshot{SnapshotId: "fixture-snapshot", State: state, SourceScope: lakepb.SnapshotSourceScope_SNAPSHOT_SOURCE_SCOPE_ACTIVE_LANDING_RUN}, bytes.Repeat([]byte{1}, 32), 0, time.Now())
 		if e != nil {
-			t.Fatal("fixture frame encoding failed")
+			t.Fatal("canonical fixture lifecycle unavailable")
 		}
+		event, e := record.Event()
+		if e != nil || producer.Publish(ctx, event) != nil || len(capture.messages) != 1 {
+			t.Fatal("canonical fixture framing refused")
+		}
+		subject := capture.messages[0].Subject
+		wire := bytes.Clone(capture.messages[0].Body)
 		// Extra outer unknown field and noncanonical varint must survive verbatim.
 		wire = append(wire, 0xa0, 0x06, 0x81, 0x00)
 		if _, e = js.Publish(ctx, subject, wire); e != nil {

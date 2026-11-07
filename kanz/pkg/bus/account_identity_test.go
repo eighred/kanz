@@ -15,9 +15,18 @@ func TestNATSDisableReconnectAppliesNativeConnectionOption(t *testing.T) {
 		t.Skip("TEST_NATS_URL required for real connection option proof")
 	}
 	u, err := url.Parse(endpoint)
-	if err != nil || net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() {
+	if err != nil || u.Scheme != "nats" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Port() == "" {
+		t.Fatal("fixture broker requires a plain scoped endpoint")
+	}
+	// Existing core CI spells its disposable broker localhost. Normalize that
+	// exact fixture alias without DNS; other names remain unsupported.
+	if u.Hostname() == "localhost" {
+		u.Host = net.JoinHostPort("127.0.0.1", u.Port())
+	}
+	if net.ParseIP(u.Hostname()) == nil || !net.ParseIP(u.Hostname()).IsLoopback() {
 		t.Fatal("fixture broker must be literal loopback")
 	}
+	endpoint = u.String()
 	for _, disabled := range []bool{false, true} {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		client, err := DialNATS(ctx, NATSConfig{URL: endpoint, Name: "snapshot-option-fixture", DisableReconnect: disabled})
