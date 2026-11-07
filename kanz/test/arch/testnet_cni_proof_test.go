@@ -50,16 +50,20 @@ var cniProofRequirements = map[string][]string{
 		"python3 -B tools/cni-proof/ci.py", "if-no-files-found: error",
 	},
 	"tools/cni-proof/storage_signal.py": {
-		`progress["imageStopSignal"] = image_stop_signal()`,
+		`progress["imageID"] = image_stop_signal()`,
 		`values[0]["Config"].get("StopSignal", "") not in ("", "SIGTERM", "15")`,
-		`if sys.platform != "linux":`, "            case(repaired, progress)", `for repaired in (False, True):`,
+		`if sys.platform != "linux":`, `"--init=false"`,
+		"        runtime_preconditions(obj)", `host.get("Init") is not False or host.get("PidMode") not in ("", "private")`,
+		`progress["stage"] = "start"`, `progress["stage"] = "readiness_log"`, `progress["stage"] = "readiness_state"`,
+		`progress["container"] = state_projection(owned(name, nonce, identity))`,
+		`source != os.environ.get("GITHUB_SHA")`, `"storage-pid1.json").open("x", encoding="utf-8")`, "            case(repaired, progress)", `for repaired in (False, True):`,
 		`migration.STORAGE_SHUTDOWN if repaired else ""`, `assert os.getpid()==1`,
 		`"--network=none", "--read-only", "--user=65532:65532", "--cap-drop=ALL"`,
 		`"--memory=64m", "--cpus=0.1", "--pids-limit=8"`,
 		`"docker", "kill", "--signal=TERM", identity`, `"docker", "wait", identity`,
 		`state["ExitCode"] != 0 or state["OOMKilled"]`,
 		`obj["Id"] != identity`, `get(LABEL) != nonce`, `obj.get("Name") != "/" + name`,
-		`obj = owned(name, nonce, identity)`, `"signal container cleanup incomplete"`,
+		"            obj = owned(name, nonce, identity)", `"signal container cleanup incomplete"`,
 	},
 	"tools/cni-proof/migration.py": {
 		`STORAGE_SHUTDOWN = "import signal,sys;signal.signal(signal.SIGTERM,lambda *_:sys.exit(0));"`,
@@ -132,6 +136,18 @@ var cniProofRequirements = map[string][]string{
 }
 
 func checkCNIProofBoundary(files map[string]string) error {
+	// Both paths must retain their own proof, checkout credential boundary and
+	// artifact refusal; the separate diagnostic job cannot mask a deletion.
+	workflow := files[".github/workflows/k3s-cni-migration.yml"]
+	for marker, expected := range map[string]int{
+		"python3 -B tools/cni-proof/storage_signal.py": 2,
+		"persist-credentials: false":                   2,
+		"if-no-files-found: error":                     3,
+	} {
+		if strings.Count(workflow, marker) != expected {
+			return fmt.Errorf("K3s full/diagnostic boundary count differs for %q", marker)
+		}
+	}
 	for path, markers := range cniProofRequirements {
 		for _, marker := range markers {
 			if !strings.Contains(files[path], marker) {
