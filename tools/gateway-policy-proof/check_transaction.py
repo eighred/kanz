@@ -6,7 +6,7 @@ import sys
 import tempfile
 
 import proof
-from transaction_fixture import validate_report
+from transaction_fixture import CASES, validate_report
 from image_identity import public_identity
 from bounded_process import run as bounded_run
 
@@ -25,7 +25,7 @@ def main(path):
         _, _, render_hash = proof.render(run)
         validate_report(report, run(["git", "rev-parse", "HEAD"]), run(["git", "rev-parse", "HEAD^{tree}"]),
                         os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"], render_hash)
-    print("All 15 owned-cluster policy transaction/probe cases and cleanup passed")
+    print(f"All {len(CASES)} owned-cluster policy transaction/probe cases and cleanup passed")
 
 
 if __name__ == "__main__":

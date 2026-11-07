@@ -55,6 +55,24 @@ impl OrderCas<'_, '_> {
         }
         head(self.tx, original).await
     }
+    /// One bounded original journal row plus its current fee head, while the
+    /// order CAS lock prevents a competing writer from changing the baseline.
+    pub(crate) async fn execution_head(&self, expected: &FillWire) -> Result<FillWire, Error> {
+        self.scoped().await?;
+        let f = expected.value();
+        if f.order_id != self.order_id {
+            return Err(Error::FeeRevision);
+        }
+        let row=self.tx.query_opt("SELECT CASE WHEN octet_length(fill)::bigint<=$6 THEN fill END FROM order_executions WHERE order_id=$1 AND venue=$2 AND venue_account_id=$3 AND instrument_id=$4 AND venue_execution_id=$5", &[&self.order_id,&f.venue,&f.venue_account_id,&f.instrument_id,&f.venue_execution_id,&(MAX_BYTES as i64)]).await?.ok_or(Error::PostedExecutionUnknown)?;
+        let raw: Vec<u8> = row
+            .try_get::<_, Option<Vec<u8>>>(0)?
+            .ok_or(Error::Capacity)?;
+        let original = FillWire::decode(&raw)?;
+        if !identity::same_except_fee(original.value(), f) {
+            return Err(Error::IdentityConflict);
+        }
+        head(self.tx, &original).await
+    }
     pub async fn record_fee_revision(
         &mut self,
         original: &FillWire,

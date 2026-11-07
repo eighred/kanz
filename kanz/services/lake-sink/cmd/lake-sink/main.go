@@ -1,8 +1,6 @@
-// lake-sink binary entrypoint (LAKE-01a). Streams the durable Kafka log (EVT-09,
-// the system of record) and lands every event into the lakehouse, decoding each
-// payload against the EVT-16 schema registry so the table columns track the
-// published schema — schema-evolution-aware CDC. The default sink writes
-// Hive-partitioned NDJSON a catalog ingest (Iceberg/Delta) commits as tables.
+// lake-sink consumes validated events from the derived Kafka archive, decoding
+// payloads against the EVT-16 schema registry into Hive-partitioned NDJSON.
+// Catalog/snapshot commits require their own implementation and qualification.
 package main
 
 import (
@@ -72,7 +70,7 @@ func run() int {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	fileSink, err := sink.NewFileSink(cfg.OutputDir, cfg.Source)
+	fileSink, err := sink.NewFileSink(cfg.OutputDir, "")
 	if err != nil {
 		logger.Error("sink open failed", "err", err)
 		return 2
@@ -166,7 +164,12 @@ func runSink(ctx context.Context, cfg config.Config, fileSink sink.Sink, readine
 		go func(topic string) {
 			defer wg.Done()
 			logger.Info("lake-sink subscribing", "topic", topic, "group", cfg.ConsumerGroup)
-			err := consumer.Subscribe(ctx, topic, cfg.ConsumerGroup, eventSink.Handle)
+			var err error
+			if cfg.RetainRawFrame {
+				err = consumer.SubscribeDelivery(ctx, topic, cfg.ConsumerGroup, eventSink.HandleDelivery)
+			} else {
+				err = consumer.Subscribe(ctx, topic, cfg.ConsumerGroup, eventSink.Handle)
+			}
 			if err != nil && !errors.Is(err, context.Canceled) {
 				once.Do(func() {
 					firstErr = err

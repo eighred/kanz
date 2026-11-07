@@ -21,6 +21,20 @@ fn rpc_error(status: Status) -> Status {
     status
 }
 
+// Tokio and tonic poll the inner future before their timeout timer. A ready
+// response can therefore arrive at an already expired local deadline. Classify
+// that using our own monotonic clock, never the peer's status text/code.
+fn before_deadline<T>(
+    expires: tokio::time::Instant,
+    result: Result<T, Status>,
+) -> Result<T, Status> {
+    if tokio::time::Instant::now() >= expires {
+        Err(Status::deadline_exceeded("venue RPC deadline"))
+    } else {
+        result
+    }
+}
+
 /// No public arbitrary Channel constructor: only the authenticated connector may build this owner.
 pub struct Client {
     pub(crate) channel: Option<Channel>,
@@ -53,6 +67,22 @@ impl Client {
         value: Canonical<A>,
         deadline: Duration,
     ) -> Result<Canonical<B>, Status> {
+        self.call_budget(method, value, deadline, kanz_proto_wire::Budget::Standard)
+            .await
+    }
+    async fn call_budget<A: Schema, B: Schema>(
+        &self,
+        method: &'static str,
+        value: Canonical<A>,
+        deadline: Duration,
+        budget: kanz_proto_wire::Budget,
+    ) -> Result<Canonical<B>, Status> {
+        if budget == kanz_proto_wire::Budget::RecoveryHistory
+            && (method != "/venue.v1.VenueAdapterService/QueryOrder"
+                || B::NAME != "venue.v1.QueryOrderResponse")
+        {
+            return Err(Status::invalid_argument("recovery response scope"));
+        }
         if deadline.is_zero() || deadline > Duration::from_secs(120) {
             return Err(Status::invalid_argument("RPC deadline outside bounds"));
         }
@@ -62,25 +92,30 @@ impl Client {
             .ok_or_else(|| Status::unavailable("venue client closed"))?
             .clone();
         let mut grpc = tonic::client::Grpc::new(channel)
-            .max_decoding_message_size(kanz_proto_wire::MAX_BYTES)
+            .max_decoding_message_size(budget.bytes())
             .max_encoding_message_size(kanz_proto_wire::MAX_BYTES);
         let mut request = Request::new(value);
         request.set_timeout(deadline);
-        tokio::time::timeout(deadline, async {
+        let expires = tokio::time::Instant::now() + deadline;
+        let result = tokio::time::timeout_at(expires, async {
             grpc.ready()
                 .await
                 .map_err(|_| Status::unavailable("venue transport unavailable"))?;
             grpc.unary(
                 request,
                 http::uri::PathAndQuery::from_static(method),
-                WireCodec::<A, B>::default(),
+                match budget {
+                    kanz_proto_wire::Budget::Standard => WireCodec::<A, B>::default(),
+                    kanz_proto_wire::Budget::RecoveryHistory => WireCodec::<A, B>::recovery_query(),
+                },
             )
             .await
             .map(tonic::Response::into_inner)
             .map_err(rpc_error)
         })
         .await
-        .map_err(|_| Status::deadline_exceeded("venue RPC deadline"))?
+        .map_err(|_| Status::deadline_exceeded("venue RPC deadline"))?;
+        before_deadline(expires, result)
     }
     pub async fn execute(
         &self,
@@ -154,6 +189,24 @@ impl Client {
         state: &Canonical<OrderState>,
         deadline: Duration,
     ) -> Result<OrderView, Status> {
+        self.query_order_budget(state, deadline, kanz_proto_wire::Budget::Standard)
+            .await
+    }
+    /// Existing complete-history contract: only this QueryOrder response may reach4MiB.
+    pub async fn query_recovery_history(
+        &self,
+        state: &Canonical<OrderState>,
+        deadline: Duration,
+    ) -> Result<OrderView, Status> {
+        self.query_order_budget(state, deadline, kanz_proto_wire::Budget::RecoveryHistory)
+            .await
+    }
+    async fn query_order_budget(
+        &self,
+        state: &Canonical<OrderState>,
+        deadline: Duration,
+        budget: kanz_proto_wire::Budget,
+    ) -> Result<OrderView, Status> {
         let request = wire::with_state(
             venue::QueryOrderRequest {
                 tenant_id: self.tenant.clone(),
@@ -162,10 +215,11 @@ impl Client {
             state,
         )?;
         let response: Canonical<venue::QueryOrderResponse> = match self
-            .call(
+            .call_budget(
                 "/venue.v1.VenueAdapterService/QueryOrder",
                 request,
                 deadline,
+                budget,
             )
             .await
         {
@@ -189,7 +243,7 @@ impl Client {
             Ok(venue::OrderViewState::Expired) => ViewState::Expired,
             _ => ViewState::Indeterminate,
         };
-        let fills = wire::messages(&response, "fills")?;
+        let fills = wire::messages_budget(&response, "fills", budget)?;
         Ok(OrderView {
             state,
             response: Some(response),
@@ -242,6 +296,43 @@ impl Client {
 #[cfg(test)]
 mod deadline_tests {
     use super::*;
+    #[test]
+    fn own_expiry_refuses_late_success_and_error_without_reclassifying_early_peer() {
+        let past = tokio::time::Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            before_deadline(past, Ok(())).unwrap_err().code(),
+            Code::DeadlineExceeded
+        );
+        assert_eq!(
+            before_deadline::<()>(past, Err(Status::cancelled("peer")))
+                .unwrap_err()
+                .code(),
+            Code::DeadlineExceeded
+        );
+        let future = tokio::time::Instant::now() + Duration::from_secs(60);
+        assert_eq!(
+            before_deadline::<()>(future, Err(Status::cancelled("peer")))
+                .unwrap_err()
+                .code(),
+            Code::Cancelled
+        );
+        assert!(before_deadline(future, Ok(())).is_ok());
+    }
+
+    #[tokio::test]
+    async fn ready_inner_future_cannot_bypass_expired_owned_timer() {
+        let expires = tokio::time::Instant::now() - Duration::from_secs(1);
+        // Pinned Tokio polls ready inner work before the timer, even when past.
+        let ready = tokio::time::timeout_at(expires, std::future::ready(Ok::<_, Status>(())))
+            .await
+            .unwrap();
+        assert!(ready.is_ok());
+        assert_eq!(
+            before_deadline(expires, ready).unwrap_err().code(),
+            Code::DeadlineExceeded
+        );
+    }
+
     #[test]
     fn only_typed_local_timeout_is_deadline_exceeded() {
         let local = Status::from_error(Box::new(tonic::TimeoutExpired(())));

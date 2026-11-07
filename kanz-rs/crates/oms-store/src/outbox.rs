@@ -2,7 +2,7 @@
 use super::{scoped, Error, Record, MAX_BYTES};
 use std::time::{Duration, SystemTime};
 use std::{future::Future, pin::Pin};
-use tokio_postgres::{Client, Transaction};
+use tokio_postgres::{types::Type, Client, Transaction};
 
 pub const MAX_PAGE: i64 = 4096;
 const SUFFIX: &str = "/oms/outbox";
@@ -16,7 +16,7 @@ pub struct Pending {
 }
 
 async fn owned(tx: &Transaction<'_>) -> Result<(), Error> {
-    if tx.query_one("SELECT EXISTS(SELECT 1 FROM outbox WHERE published_at IS NULL AND producer_service IS NULL)", &[]).await?.try_get::<_,bool>(0)? {
+    if tx.query_typed_one("SELECT EXISTS(SELECT 1 FROM outbox WHERE published_at IS NULL AND producer_service IS NULL)", &[]).await?.try_get::<_,bool>(0)? {
         return Err(Error::UnownedOutbox);
     }
     Ok(())
@@ -67,7 +67,7 @@ pub async fn pending(
     owned(&tx).await?;
     // Each dynamic field is withheld when the whole requested page exceeds the
     // byte budget. A failed page never returns an apparently complete prefix.
-    let rows = tx.query("WITH selected AS (SELECT * FROM outbox WHERE published_at IS NULL AND partition_key=$1 AND producer_service='oms' ORDER BY id LIMIT $2), bounded AS (SELECT *,sum(octet_length(envelope_tenant_id)+octet_length(partition_key)+octet_length(subject)+octet_length(event_type)+octet_length(domain)+octet_length(payload_schema_ref)+octet_length(correlation_id)+octet_length(causation_id)+octet_length(trace_context)+octet_length(payload)+octet_length(last_error)) OVER () <= $3 AS fits FROM selected) SELECT id,attempts,event_class,schema_version,event_time,CASE WHEN fits THEN ARRAY[envelope_tenant_id,partition_key,subject,event_type,domain,payload_schema_ref,correlation_id,causation_id,trace_context,last_error] END,CASE WHEN fits THEN payload END FROM bounded ORDER BY id", &[&key,&limit,&(MAX_BYTES as i64)]).await?;
+    let rows = tx.query_typed("WITH selected AS (SELECT * FROM outbox WHERE published_at IS NULL AND partition_key=$1 AND producer_service='oms' ORDER BY id LIMIT $2), bounded AS (SELECT *,sum(octet_length(envelope_tenant_id)+octet_length(partition_key)+octet_length(subject)+octet_length(event_type)+octet_length(domain)+octet_length(payload_schema_ref)+octet_length(correlation_id)+octet_length(causation_id)+octet_length(trace_context)+octet_length(payload)+octet_length(last_error)) OVER () <= $3 AS fits FROM selected) SELECT id,attempts,event_class,schema_version,event_time,CASE WHEN fits THEN ARRAY[envelope_tenant_id,partition_key,subject,event_type,domain,payload_schema_ref,correlation_id,causation_id,trace_context,last_error] END,CASE WHEN fits THEN payload END FROM bounded ORDER BY id", &[(&key, Type::TEXT), (&limit, Type::INT8), (&(MAX_BYTES as i64), Type::INT8)]).await?;
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
         let fields = row
@@ -179,7 +179,9 @@ pub struct Session {
     cancellation: Option<Cancellation>,
 }
 impl Session {
-    pub(crate) fn client(&mut self) -> &mut Client {
+    /// Borrow the dedicated client without transferring driver ownership. The
+    /// coordinator closes this session before returning a handler outcome.
+    pub fn client(&mut self) -> &mut Client {
         &mut self.client
     }
 
@@ -232,6 +234,10 @@ pub struct DrainLock {
     key: i32,
 }
 impl DrainLock {
+    /// Close a possibly held lock by canceling and joining its dedicated session.
+    pub(crate) async fn close(self) {
+        self.session.close().await;
+    }
     pub(crate) fn client(&mut self) -> &mut Client {
         self.session.client()
     }
@@ -241,9 +247,9 @@ impl DrainLock {
         let result: Result<bool, Error> = async {
             let unlocked: bool = tokio::time::timeout(
                 Duration::from_secs(5),
-                self.session.client.query_one(
+                self.session.client.query_typed_one(
                     "SELECT pg_advisory_unlock($1,$2)",
-                    &[&self.scope, &self.key],
+                    &[(&self.scope, Type::INT4), (&self.key, Type::INT4)],
                 ),
             )
             .await
@@ -275,30 +281,7 @@ pub async fn lock_key(
     key: &str,
     wait: bool,
 ) -> Result<Option<DrainLock>, Error> {
-    let result: Result<(bool, i32, i32), Error> = async {
-        if key.len() > MAX_BYTES {
-            return Err(Error::Capacity);
-        }
-        let tx = scoped(&mut session.client, tenant).await?;
-        // A failed CancelRequest or a runtime already shutting down cannot leave a
-        // blocked backend indefinitely. This bounded port refuses waits above5s.
-        tx.batch_execute("SET LOCAL lock_timeout='5s'").await?;
-        let row = tx.query_one(LOCK_IDS, &[&key, &SUFFIX]).await?;
-        let scope: i32 = row.try_get(0)?;
-        let key: i32 = row.try_get(1)?;
-        let won = if wait {
-            tx.query_one("SELECT pg_advisory_lock($1,$2)", &[&scope, &key])
-                .await?;
-            true
-        } else {
-            tx.query_one("SELECT pg_try_advisory_lock($1,$2)", &[&scope, &key])
-                .await?
-                .try_get(0)?
-        };
-        tx.rollback().await?;
-        Ok((won, scope, key))
-    }
-    .await;
+    let result = acquire_key(&mut session, tenant, key, wait).await;
     match result {
         Ok((true, scope, key)) => Ok(Some(DrainLock {
             session,
@@ -312,6 +295,77 @@ pub async fn lock_key(
         Err(error) => {
             session.close().await;
             Err(error)
+        }
+    }
+}
+
+// Borrow the session so cancellation cannot drop its owner before explicit close.
+async fn acquire_key(
+    session: &mut Session,
+    tenant: &str,
+    key: &str,
+    wait: bool,
+) -> Result<(bool, i32, i32), Error> {
+    if key.len() > MAX_BYTES {
+        return Err(Error::Capacity);
+    }
+    let tx = scoped(&mut session.client, tenant).await?;
+    // A failed CancelRequest or a runtime already shutting down cannot leave a
+    // blocked backend indefinitely. This bounded port refuses waits above5s.
+    tx.batch_execute("SET LOCAL lock_timeout='5s'").await?;
+    let row = tx
+        .query_typed_one(LOCK_IDS, &[(&key, Type::TEXT), (&SUFFIX, Type::TEXT)])
+        .await?;
+    let scope: i32 = row.try_get(0)?;
+    let key: i32 = row.try_get(1)?;
+    let won = if wait {
+        tx.query_typed_one(
+            "SELECT pg_advisory_lock($1,$2)",
+            &[(&scope, Type::INT4), (&key, Type::INT4)],
+        )
+        .await?;
+        true
+    } else {
+        tx.query_typed_one(
+            "SELECT pg_try_advisory_lock($1,$2)",
+            &[(&scope, Type::INT4), (&key, Type::INT4)],
+        )
+        .await?
+        .try_get(0)?
+    };
+    tx.rollback().await?;
+    Ok((won, scope, key))
+}
+
+pub(crate) async fn lock_key_before(
+    mut session: Session,
+    tenant: &str,
+    key: &str,
+    expires: tokio::time::Instant,
+) -> Result<Option<DrainLock>, Error> {
+    if tokio::time::Instant::now() >= expires {
+        session.close().await;
+        return Err(Error::PublicationUnconfirmed);
+    }
+    let result =
+        tokio::time::timeout_at(expires, acquire_key(&mut session, tenant, key, true)).await;
+    if tokio::time::Instant::now() >= expires {
+        session.close().await;
+        return Err(Error::PublicationUnconfirmed);
+    }
+    match result {
+        Ok(Ok((true, scope, key))) => Ok(Some(DrainLock {
+            session,
+            scope,
+            key,
+        })),
+        other => {
+            session.close().await;
+            match other {
+                Ok(Ok(_)) => Ok(None),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(Error::PublicationUnconfirmed),
+            }
         }
     }
 }

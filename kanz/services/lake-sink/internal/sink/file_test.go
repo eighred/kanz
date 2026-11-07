@@ -76,6 +76,66 @@ func TestFileSinkSanitizesPathSegments(t *testing.T) {
 	}
 }
 
+func TestFileSinkDefaultInstancesHaveDistinctPartFiles(t *testing.T) {
+	root := t.TempDir()
+	for _, id := range []string{"first-run", "second-run"} {
+		writer, err := sink.NewFileSink(root, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := sink.Row{EventID: id, Domain: "market", Entity: "bar", Source: "lake-sink", EventTime: time.Unix(0, 0).UTC()}
+		if err := writer.Write(context.Background(), row); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parts, err := filepath.Glob(filepath.Join(root, "market", "bar", "dt=1970-01-01", "part-*.ndjson"))
+	if err != nil || len(parts) != 2 {
+		t.Fatalf("default sink instances shared a part file: count=%d err=%v", len(parts), err)
+	}
+	seen := map[string]bool{}
+	for _, part := range parts {
+		ids := readEventIDs(t, part)
+		if len(ids) != 1 || seen[ids[0]] {
+			t.Fatal("part files lost or combined run rows")
+		}
+		seen[ids[0]] = true
+		data, err := os.ReadFile(part)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var row sink.Row
+		if err := json.Unmarshal(data, &row); err != nil || row.Source != "lake-sink" {
+			t.Fatal("file identity changed canonical event Source")
+		}
+	}
+	if !seen["first-run"] || !seen["second-run"] {
+		t.Fatal("default run identity lost a row")
+	}
+}
+
+func TestFileSinkExplicitIdentityRetainsHistoricalAppendPath(t *testing.T) {
+	root := t.TempDir()
+	for _, id := range []string{"before-restart", "after-restart"} {
+		writer, err := sink.NewFileSink(root, "legacy-instance")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Write(context.Background(), sink.Row{EventID: id, Domain: "market", Entity: "bar", EventTime: time.Unix(0, 0).UTC()}); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := readEventIDs(t, filepath.Join(root, "market", "bar", "dt=1970-01-01", "part-legacy-instance.ndjson"))
+	if len(ids) != 2 || ids[0] != "before-restart" || ids[1] != "after-restart" {
+		t.Fatalf("explicit historical append identity changed: %v", ids)
+	}
+}
+
 func readEventIDs(t *testing.T, path string) []string {
 	t.Helper()
 	f, err := os.Open(path)

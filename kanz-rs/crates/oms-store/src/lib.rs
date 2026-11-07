@@ -15,13 +15,15 @@ pub mod proposals;
 pub mod queries;
 pub mod recovery;
 pub mod recovery_ack;
+pub mod recovery_repository;
+pub mod recovery_wire;
 pub mod relay;
 mod relay_wire;
 use identity::{execution_key, same_execution};
 use kanz_order_core::proto::order::v1::{Fill, OrderFilled, OrderPartiallyFilled, OrderState};
 use prost::Message;
 use std::time::SystemTime;
-use tokio_postgres::{Client, Transaction};
+use tokio_postgres::{types::Type, Client, Transaction};
 
 pub const MAX_BYTES: usize = 1024 * 1024;
 #[derive(Debug, PartialEq, Eq)]
@@ -36,10 +38,12 @@ pub enum Error {
     IdentityConflict,
     FeeRevision,
     PositionHistoryUnknown,
+    PostedExecutionUnknown,
     PublicationUnconfirmed,
     UnownedOutbox,
     RecordNotOwned,
     Database,
+    DatabaseMemory,
     CommitUnconfirmed,
 }
 impl From<kanz_proto_wire::Error> for Error {
@@ -51,8 +55,15 @@ impl From<kanz_proto_wire::Error> for Error {
     }
 }
 impl From<tokio_postgres::Error> for Error {
-    fn from(_: tokio_postgres::Error) -> Self {
-        Self::Database
+    fn from(error: tokio_postgres::Error) -> Self {
+        database_error(error.code().map(|code| code.code()))
+    }
+}
+// Preserve only the owning resource code, never database messages or SQL.
+fn database_error(code: Option<&str>) -> Error {
+    match code {
+        Some("53200") => Error::DatabaseMemory,
+        _ => Error::Database,
     }
 }
 impl std::fmt::Display for Error {
@@ -63,6 +74,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Stored FACT metadata, not a new public command or canonical financial model.
+#[derive(Clone)]
 pub struct Record {
     pub tenant: String,
     pub partition_key: String,
@@ -231,7 +243,7 @@ async fn scope_existing(tx: &Transaction<'_>, tenant: &str) -> Result<(), Error>
         return Err(Error::InvalidInput);
     }
     let role = tx
-        .query_one(
+        .query_typed_one(
             "SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user",
             &[],
         )
@@ -239,10 +251,13 @@ async fn scope_existing(tx: &Transaction<'_>, tenant: &str) -> Result<(), Error>
     if role.get::<_, bool>(0) || role.get::<_, bool>(1) {
         return Err(Error::UnsafeRole);
     }
-    tx.query_one("SELECT set_config('app.tenant_id',$1,true)", &[&tenant])
-        .await?;
+    tx.query_typed_one(
+        "SELECT set_config('app.tenant_id',$1,true)",
+        &[(&tenant, Type::TEXT)],
+    )
+    .await?;
     // Every write uses the canonical tables, which must retain forced tenant RLS.
-    let tables=tx.query_one("SELECT count(*) FROM pg_class WHERE oid IN ('orders'::regclass,'order_fills'::regclass,'order_executions'::regclass,'outbox'::regclass,'execution_fee_revisions'::regclass) AND relrowsecurity AND relforcerowsecurity",&[]).await?;
+    let tables=tx.query_typed_one("SELECT count(*) FROM pg_class WHERE oid IN ('orders'::regclass,'order_fills'::regclass,'order_executions'::regclass,'outbox'::regclass,'execution_fee_revisions'::regclass) AND relrowsecurity AND relforcerowsecurity",&[]).await?;
     if tables.get::<_, i64>(0) != 5 {
         return Err(Error::UnsafeRole);
     }
@@ -285,9 +300,9 @@ pub struct Loaded {
 pub async fn load(client: &mut Client, tenant: &str, order_id: &str) -> Result<Loaded, Error> {
     let tx = scoped(client, tenant).await?;
     let row = tx
-        .query_opt(
+        .query_typed_opt(
             "SELECT CASE WHEN octet_length(state)::bigint<=$2 THEN state END,version FROM orders WHERE order_id=$1",
-            &[&order_id,&(MAX_BYTES as i64)],
+            &[(&order_id, Type::TEXT), (&(MAX_BYTES as i64), Type::INT8)],
         )
         .await?
         .ok_or(Error::NotFound)?;
@@ -422,6 +437,19 @@ async fn journal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_out_of_memory_has_a_specific_database_refusal() {
+        assert_eq!(database_error(Some("53200")), Error::DatabaseMemory);
+        for code in [
+            None,
+            Some("53300"),
+            Some("57014"),
+            Some("40001"),
+            Some("unknown"),
+        ] {
+            assert_eq!(database_error(code), Error::Database);
+        }
+    }
     #[test]
     fn nested_wire_preservation_and_ambiguity() {
         let bytes = [18, 3, 0x78, 0x81, 1];

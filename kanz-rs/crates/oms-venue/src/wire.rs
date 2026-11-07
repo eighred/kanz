@@ -30,6 +30,11 @@ impl<T: Schema> Canonical<T> {
             .map(Self)
             .map_err(status)
     }
+    fn decode_with_budget(raw: &[u8], budget: kanz_proto_wire::Budget) -> Result<Self, Status> {
+        kanz_proto_wire::Canonical::decode_with_budget(raw, budget)
+            .map(Self)
+            .map_err(status)
+    }
     pub fn from_value(value: T) -> Result<Self, Status> {
         kanz_proto_wire::Canonical::from_value(value)
             .map(Self)
@@ -105,14 +110,19 @@ schema!(
     crate::proto::venue::v1::QueryOrderResponse,
     "venue.v1.QueryOrderResponse"
 );
-pub(crate) struct WireCodec<A, B>(PhantomData<(A, B)>);
+pub(crate) struct WireCodec<A, B>(PhantomData<(A, B)>, kanz_proto_wire::Budget);
 impl<A, B> Default for WireCodec<A, B> {
     fn default() -> Self {
-        Self(PhantomData)
+        Self(PhantomData, kanz_proto_wire::Budget::Standard)
+    }
+}
+impl<A, B> WireCodec<A, B> {
+    pub(crate) fn recovery_query() -> Self {
+        Self(PhantomData, kanz_proto_wire::Budget::RecoveryHistory)
     }
 }
 pub(crate) struct WireEncoder<A>(PhantomData<A>);
-pub(crate) struct WireDecoder<B>(PhantomData<B>);
+pub(crate) struct WireDecoder<B>(PhantomData<B>, kanz_proto_wire::Budget);
 impl<A: Schema, B: Schema> Codec for WireCodec<A, B> {
     type Encode = Canonical<A>;
     type Decode = Canonical<B>;
@@ -122,7 +132,7 @@ impl<A: Schema, B: Schema> Codec for WireCodec<A, B> {
         WireEncoder(PhantomData)
     }
     fn decoder(&mut self) -> Self::Decoder {
-        WireDecoder(PhantomData)
+        WireDecoder(PhantomData, self.1)
     }
 }
 impl<A: Schema> Encoder for WireEncoder<A> {
@@ -137,11 +147,11 @@ impl<B: Schema> Decoder for WireDecoder<B> {
     type Item = Canonical<B>;
     type Error = Status;
     fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, Status> {
-        if src.remaining() > kanz_proto_wire::MAX_BYTES {
+        if src.remaining() > self.1.bytes() {
             return Err(Status::resource_exhausted("canonical message bound"));
         }
         let raw = src.copy_to_bytes(src.remaining());
-        Canonical::decode(&raw).map(Some)
+        Canonical::decode_with_budget(&raw, self.1).map(Some)
     }
 }
 
@@ -180,6 +190,20 @@ pub(crate) fn messages<A: Schema, B: Schema>(
     value: &Canonical<A>,
     name: &str,
 ) -> Result<Vec<Canonical<B>>, Status> {
+    messages_budget(value, name, kanz_proto_wire::Budget::Standard)
+}
+pub(crate) fn messages_budget<A: Schema, B: Schema>(
+    value: &Canonical<A>,
+    name: &str,
+    budget: kanz_proto_wire::Budget,
+) -> Result<Vec<Canonical<B>>, Status> {
+    if budget == kanz_proto_wire::Budget::RecoveryHistory
+        && (A::NAME != "venue.v1.QueryOrderResponse"
+            || B::NAME != "order.v1.Fill"
+            || name != "fills")
+    {
+        return Err(Status::invalid_argument("recovery nested response scope"));
+    }
     let field = descriptor::<A>()?
         .get_field_by_name(name)
         .ok_or_else(|| Status::internal("field descriptor unavailable"))?;
@@ -195,7 +219,7 @@ pub(crate) fn messages<A: Schema, B: Schema>(
         if n == field.number() && w == 2 {
             let nested = kanz_proto_wire::payload(raw, &mut pos)
                 .map_err(|_| Status::internal("normalized wire invalid"))?;
-            out.push(Canonical::decode(nested)?);
+            out.push(Canonical::decode_with_budget(nested, budget)?);
         } else {
             kanz_proto_wire::skip(raw, &mut pos, n, w)
                 .map_err(|_| Status::internal("normalized wire invalid"))?;
@@ -213,6 +237,78 @@ impl Canonical<crate::proto::venue::v1::ExecuteResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_query_budget_reaches_nested_fill_only() {
+        use crate::proto::venue::v1::QueryOrderResponse;
+        use kanz_order_core::proto::order::v1::Fill;
+        let mut fill = Fill {
+            fill_id: "known".into(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        kanz_proto_wire::put_message(199, &vec![b'x'; kanz_proto_wire::MAX_BYTES + 1], &mut fill);
+        let mut raw = Vec::new();
+        kanz_proto_wire::put_message(2, &fill, &mut raw);
+        assert_eq!(
+            Canonical::<QueryOrderResponse>::decode(&raw)
+                .unwrap_err()
+                .code(),
+            tonic::Code::ResourceExhausted
+        );
+        let response = Canonical::<QueryOrderResponse>::decode_with_budget(
+            &raw,
+            kanz_proto_wire::Budget::RecoveryHistory,
+        )
+        .unwrap();
+        let nested: Vec<Canonical<Fill>> =
+            messages_budget(&response, "fills", kanz_proto_wire::Budget::RecoveryHistory).unwrap();
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].wire(), fill);
+        assert!(messages::<_, Fill>(&response, "fills").is_err());
+        assert!(Canonical::<QueryOrderResponse>::decode_with_budget(
+            &vec![0; 4 * kanz_proto_wire::MAX_BYTES + 1],
+            kanz_proto_wire::Budget::RecoveryHistory
+        )
+        .is_err());
+    }
+    #[test]
+    fn recovery_count_bound_is_complete_or_refused() {
+        use crate::proto::venue::v1::QueryOrderResponse;
+        let mut raw = Vec::new();
+        for _ in 0..8000 {
+            kanz_proto_wire::put_message(2, &[], &mut raw);
+        }
+        let response = Canonical::<QueryOrderResponse>::decode_with_budget(
+            &raw,
+            kanz_proto_wire::Budget::RecoveryHistory,
+        )
+        .unwrap();
+        assert_eq!(response.value().fills.len(), 8000);
+        kanz_proto_wire::put_message(2, &[], &mut raw);
+        // One sentinel above the accepted history limit reaches CompleteHistory
+        // and its durable blocked outcome; never return an accepted prefix.
+        assert_eq!(
+            Canonical::<QueryOrderResponse>::decode_with_budget(
+                &raw,
+                kanz_proto_wire::Budget::RecoveryHistory
+            )
+            .unwrap()
+            .value()
+            .fills
+            .len(),
+            8001
+        );
+        kanz_proto_wire::put_message(2, &[], &mut raw);
+        assert_eq!(
+            Canonical::<QueryOrderResponse>::decode_with_budget(
+                &raw,
+                kanz_proto_wire::Budget::RecoveryHistory
+            )
+            .unwrap_err()
+            .code(),
+            tonic::Code::ResourceExhausted
+        );
+    }
     use crate::proto::venue::v1::{ExecuteRequest, ExecuteResponse};
     use kanz_order_core::proto::order::v1::OrderState;
     #[test]

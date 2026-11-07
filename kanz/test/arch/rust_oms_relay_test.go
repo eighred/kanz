@@ -10,9 +10,9 @@ import (
 
 func checkRustOMSRelay(files map[string]string) error {
 	required := map[string][]string{
-		"relay.rs":      {`r.event_class!=EventClass::Factasi32`, `r.schema_version<=0`, `r.tenant.is_empty()`, `DescriptorPool::decode(FILE_DESCRIPTOR_SET)`, `crate::relay_wire::normalize(desc,&r.payload)`, `idempotency_key:id.clone()`, `tenant_id:r.tenant.clone()`, `self.under_lock(lock.client(),key).await`, `lock.release().await`, `session.close().await`, `self.drain_key(&key,false).await`, `self.drain_key(key,true).await`, `stalled:full.then_some(Stall::FullBatch)`, `Stall::Publication(failure)`, `self.publisher.publish(&frame)`, `outbox::mark_published(client,&self.tenant,p.id)`, `outbox::mark_failed(client,&self.tenant,p.id,Some(failure.cause()))`, `Duration::from_secs(10)`, `ifself.stopped()`, `while!self.stopped()`},
+		"relay.rs":      {`r.event_class!=EventClass::Factasi32`, `r.schema_version<=0`, `r.tenant.is_empty()`, `DescriptorPool::decode(FILE_DESCRIPTOR_SET)`, `crate::relay_wire::normalize(desc,&r.payload)`, `idempotency_key:id.clone()`, `tenant_id:r.tenant.clone()`, `self.under_lock(lock.client(),key,&mutconfirmed,None).await`, `lock.release().await`, `session.close().await`, `self.drain_key(&key,false).await`, `self.drain_key(key,true).await`, `stalled:full.then_some(Stall::FullBatch)`, `Stall::Publication(failure)`, `self.publisher.publish(&frame)`, `outbox::mark_published(client,&self.tenant,p.id)`, `outbox::mark_failed(client,&self.tenant,p.id,Some(failure.cause()))`, `Duration::from_secs(10)`, `ifself.stopped()`, `while!self.stopped()`, `Err(Error::Capacity)=>(Vec::new(),true)`, `whilesent<self.batchasusize`, `outbox::pending(client,&self.tenant,key,1)`, `.map_err(|error|Failure{sent,error})?`},
 		"relay_wire.rs": {`kanz_proto_wire::normalize(desc,raw).map_err(Into::into)`},
-		"shared_wire":   {`DynamicMessage::decode(desc.clone(),known.as_slice())`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `result.extend_from_slice(&unknown.raw)`, `entries[0].merge(sidecar,&child)?`, `field.is_list()||entries.is_empty()`, `ifdepth>32`, `raw.len()>MAX_BYTES`},
+		"shared_wire":   {`DynamicMessage::decode(desc.clone(),known.as_slice())`, `unknown.raw.extend_from_slice(&raw[value..pos])`, `bounded_append(&mutresult,&unknown.raw,limit)?`, `entries[0].merge(sidecar,&child,limit)?`, `field.is_list()||entries.is_empty()`, `ifdepth>32`, `raw.len()>limit`},
 		"fixture":       {`strip_prefix("nats://127.0.0.1:")`, `"Nats-Msg-Id"`, `"Kanz-Partition-Key"`, `stopper.await`, `ConnectingDriver(Some(tokio::spawn`, `driver.0.take().ok_or(Error::Database)?`, `config.application_name(&application)`, `SELECTcount(*)FROMpg_stat_activityWHEREapplication_name=$1`, `result["sessions_closed"]=json!(true)`, `nc.drain()`, `publish_with_headers(frame.subject.clone(),headers,frame.body.clone().into())`},
 	}
 	for file, markers := range required {
@@ -46,16 +46,18 @@ func TestRustOMSRelayBoundary(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, m := range []struct{ name, file, from, to string }{
+		{"bounded-fallback", "relay.rs", "while sent < self.batch as usize", "loop"},
+		{"capacity-only-fallback", "relay.rs", "Err(Error::Capacity) => (Vec::new(), true)", "Err(_) => (Vec::new(), true)"},
 		{"fact-class", "relay.rs", "r.event_class != EventClass::Fact as i32", "false"},
 		{"tenant", "relay.rs", "r.tenant.is_empty()", "false"},
 		{"canonical-payload", "relay.rs", "crate::relay_wire::normalize(desc, &r.payload)", "Ok(r.payload.clone())"},
-		{"locked-read", "relay.rs", "self.under_lock(lock.client(), key).await", "Ok(Outcome { sent: 0, stalled: None })"},
+		{"locked-read", "relay.rs", ".under_lock(lock.client(), key, &mut confirmed, None)", "Ok(Outcome { sent: 0, stalled: None })"},
 		{"join-session", "relay.rs", "session.close().await", "drop(session)"},
 		{"full-batch", "relay.rs", "full.then_some(Stall::FullBatch)", "None"},
 		{"published-mark", "relay.rs", "outbox::mark_published(client, &self.tenant, p.id)", "Ok::<(),Error>(())"},
 		{"failed-mark", "relay.rs", "outbox::mark_failed(client, &self.tenant, p.id, Some(failure.cause()))", "Ok::<(),Error>(())"},
 		{"raw-unknown", "shared_wire", "unknown.raw.extend_from_slice(&raw[value..pos])", "unknown.raw.clear()"},
-		{"nested-unknown", "shared_wire", "entries[0].merge(sidecar, &child)?", "drop(sidecar)"},
+		{"nested-unknown", "shared_wire", "entries[0].merge(sidecar, &child, limit)?", "drop(sidecar)"},
 		{"local-broker", "fixture", "nats://127.0.0.1:", "nats://"},
 		{"partition-header", "fixture", "Kanz-Partition-Key", "Wrong-Partition"},
 	} {
@@ -90,7 +92,7 @@ func TestRustOMSRelayActualEvidenceRequired(t *testing.T) {
 				return false
 			}
 		}
-		for _, m := range []string{"TestRustRelayFrameCompatibility", "TestRustRelayPostgresNATS", "publish-mark-rollback-redelivery", "stop-joins-inflight", "competing-go-rust"} {
+		for _, m := range []string{"TestRustRelayFrameCompatibility", "TestRustRelayPostgresNATS", "TestRustRelayPageCapacity", "publish-mark-rollback-redelivery", "stop-joins-inflight", "competing-go-rust"} {
 			if !strings.Contains(c, m) {
 				return false
 			}

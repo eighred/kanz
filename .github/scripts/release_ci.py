@@ -19,7 +19,7 @@ POLICY = {
     "architecture-migration.yml": {"compatibility"},
     "julia-calibration.yml": {"shadow-calibration"},
     "rust-bond-shadow.yml": {"bond-shadow"},
-    "rust-oms-fold.yml": {"fill-shadow"},
+    "rust-oms-fold.yml": {"fill-shadow", "recovery-coordinator"},
     "feed-identity-proof.yml": {"developmental-identity"},
     "testnet-cni-proof.yml": {"disposable-cni"},
     "k3s-cni-migration.yml": {"disposable-transition"},

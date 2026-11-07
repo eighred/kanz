@@ -11,30 +11,24 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"github.com/eighred/kanz/services/oms/internal/conformancetestkit"
+	"google.golang.org/protobuf/proto"
 	"io"
 	"math/big"
-	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
-	workload "github.com/spiffe/go-spiffe/v2/proto/spiffe/workload"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 const clientID = "spiffe://kanz.internal/ns/kanz-services/sa/oms"
@@ -108,78 +102,11 @@ func identity(ca *certificates, s *x509svid.SVID) staticIdentity {
 	return staticIdentity{s, x509bundle.FromX509Authorities(spiffeid.RequireTrustDomainFromString("kanz.internal"), []*x509.Certificate{ca.root})}
 }
 
-type workloadServer struct {
-	workload.UnimplementedSpiffeWorkloadAPIServer
-	mu      sync.Mutex
-	value   *workload.X509SVIDResponse
-	changed chan struct{}
-	active  atomic.Int32
-	started atomic.Int32
-}
+type workloadServer = conformancetestkit.Workload
 
-func (s *workloadServer) set(t *testing.T, ca *certificates, id *x509svid.SVID) {
-	t.Helper()
-	key, err := x509.MarshalPKCS8PrivateKey(id.PrivateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var chain []byte
-	for _, cert := range id.Certificates {
-		chain = append(chain, cert.Raw...)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.value = &workload.X509SVIDResponse{Svids: []*workload.X509SVID{{SpiffeId: id.ID.String(), X509Svid: chain, X509SvidKey: key, Bundle: ca.root.Raw}}}
-	if s.changed != nil {
-		close(s.changed)
-	}
-	s.changed = make(chan struct{})
-}
-func (s *workloadServer) FetchX509SVID(_ *workload.X509SVIDRequest, stream grpc.ServerStreamingServer[workload.X509SVIDResponse]) error {
-	md, _ := metadata.FromIncomingContext(stream.Context())
-	if values := md.Get("workload.spiffe.io"); len(values) != 1 || values[0] != "true" {
-		return status.Error(codes.InvalidArgument, "workload metadata missing")
-	}
-	s.active.Add(1)
-	s.started.Add(1)
-	defer s.active.Add(-1)
-	for {
-		s.mu.Lock()
-		value := proto.Clone(s.value).(*workload.X509SVIDResponse)
-		changed := s.changed
-		s.mu.Unlock()
-		if err := stream.Send(value); err != nil {
-			return err
-		}
-		select {
-		case <-stream.Context().Done():
-			return stream.Context().Err()
-		case <-changed:
-		}
-	}
-}
 func startWorkload(t *testing.T, ca *certificates, svid *x509svid.SVID) (*workloadServer, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "workload.sock")
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := &workloadServer{}
-	s.set(t, ca, svid)
-	server := grpc.NewServer()
-	workload.RegisterSpiffeWorkloadAPIServer(server, s)
-	done := make(chan struct{})
-	go func() { defer close(done); _ = server.Serve(listener) }()
-	t.Cleanup(func() {
-		server.Stop()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("workload server did not close")
-		}
-	})
-	return s, "unix://" + path
+	return conformancetestkit.StartWorkload(t, identity(ca, svid))
 }
 func serverTLS(ca *certificates, svid *x509svid.SVID) *tls.Config {
 	s := identity(ca, svid)
@@ -320,10 +247,10 @@ func (w *worker) close(source *workloadServer) {
 		w.t.Fatal("owner cleanup not confirmed")
 	}
 	deadline := time.Now().Add(3 * time.Second)
-	for source.active.Load() != 0 && time.Now().Before(deadline) {
+	for source.Active() != 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if source.active.Load() != 0 {
+	if source.Active() != 0 {
 		w.t.Fatal("workload stream survived Close before process exit")
 	}
 	if err := w.input.Close(); err != nil {

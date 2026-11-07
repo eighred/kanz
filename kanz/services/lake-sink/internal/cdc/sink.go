@@ -6,7 +6,10 @@ package cdc
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"github.com/eighred/kanz/pkg/bus"
 	"log/slog"
 	"strings"
 	"time"
@@ -59,6 +62,23 @@ func NewEventSink(decoder *decode.Decoder, s sink.Sink, now func() time.Time, lo
 // not commit and the broker redelivers, which is safe because a duplicate
 // write is resolved by downstream compaction (see the Sink doc comment).
 func (e *EventSink) Handle(ctx context.Context, env *envelopepb.Envelope, payload []byte) error {
+	return e.handle(ctx, env, payload, nil)
+}
+
+// HandleDelivery retains exact original bytes in the same flushed NDJSON row.
+func (e *EventSink) HandleDelivery(ctx context.Context, env *envelopepb.Envelope, payload []byte, delivery bus.Delivery) error {
+	if len(delivery.Frame) == 0 || len(delivery.Frame) > bus.MaxDeliveryFrameBytes {
+		return errors.New("lake-sink: original frame unavailable or exceeds custody byte bound")
+	}
+	sum := sha256.Sum256(delivery.Frame)
+	raw := &sink.RawCapture{Frame: append([]byte(nil), delivery.Frame...), SHA256: hex.EncodeToString(sum[:])}
+	if delivery.Kafka != nil {
+		raw.Kafka = &sink.KafkaCoordinates{Topic: delivery.Kafka.Topic, Partition: delivery.Kafka.Partition, Offset: delivery.Kafka.Offset}
+	}
+	return e.handle(ctx, env, payload, raw)
+}
+
+func (e *EventSink) handle(ctx context.Context, env *envelopepb.Envelope, payload []byte, raw *sink.RawCapture) error {
 	ref := env.GetPayloadSchemaRef()
 	domain := env.GetDomain()
 	entity := entityFrom(ref, env.GetEventType())
@@ -76,6 +96,7 @@ func (e *EventSink) Handle(ctx context.Context, env *envelopepb.Envelope, payloa
 	}
 
 	row := sink.Row{
+		RawCapture:    raw,
 		EventID:       env.GetEventId(),
 		CorrelationID: env.GetCorrelationId(),
 		CausationID:   env.GetCausationId(),

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def recipe(wrapper, engine, workflow):
     required = [
-        "param([switch]$Apply)", "$rolloutProfile = 'kanz-platform'", "$region = 'ap-northeast-1'",
+        "param([switch]$Apply)", "$bundle = [ordered]@{ files = $files; payload = [ordered]@{ source = $source;", "$rolloutProfile = 'kanz-platform'", "$region = 'ap-northeast-1'",
         "$account = '012619468098'", "$instance = 'i-0ee1235614219f089'",
         "-I -B -c $sourceLoader $proofRoot preflight", "KanzPlatformProvisioner/kanz-platform-cli",
         "'kanz-operator-process'", "git -C $repo diff --quiet $source", "git -C $repo ls-remote origin refs/heads/main",
@@ -80,6 +80,181 @@ class RolloutContractTests(unittest.TestCase):
                 self.assertIsNone(json.loads(output.getvalue())["receipt"])
                 self.assertEqual(list(Path(parent).iterdir()), [])
 
+    def test_probe_receipt_preserves_uid_address_on_check_and_cleanup_failure(self):
+        import copy
+        pods, records = {}, []
+        namespace = None
+        def kubectl(*args, value=None):
+            nonlocal namespace
+            if args[:2] in (("get", "services"), ("get", "replicasets,replicationcontrollers,statefulsets,daemonsets,jobs")):
+                return '{"items":[]}'
+            if args[:2] == ("get", "endpointslices"):
+                return '{"items":[{"endpoints":"malformed"}]}'
+            if args[:2] == ("get", "namespace"):
+                return json.dumps(namespace)
+            if args[0] == "create":
+                obj = copy.deepcopy(value)
+                obj["metadata"]["uid"] = "aaaaaaaa-aaaa-aaaa-aaaa-" + str(len(pods)).zfill(12)
+                obj["metadata"]["resourceVersion"] = "1"
+                if obj["kind"] == "Namespace": namespace = obj
+                else:
+                    obj["status"] = {"phase": "Running", "podIP": "10.0.0." + str(len(pods)+1),
+                        "conditions": [{"type": "Ready", "status": "False"}],
+                        "containerStatuses": [{"name": "probe", "imageID": "fixture-image", "state": {"running": {}}}]}
+                    pods[(obj["metadata"]["namespace"], obj["metadata"]["name"])] = obj
+                return ""
+            if args[0] == "-n" and args[2] == "get":
+                obj = pods.get((args[1], args[4]))
+                if args[-1] == "name": return "" if obj is None else "present"
+                return json.dumps(obj)
+            if args[:2] == ("delete", "--raw"):
+                parts = args[2].split("/")
+                if "pods" in parts: pods.pop((parts[4], parts[6]))
+                else: namespace = None
+                return ""
+            if "wait" in args: return ""
+            raise AssertionError("unexpected fixture operation")
+        owned = engine.Probes(kubectl, Mock(), {}, "a"*32, records.append)
+        with patch.object(engine.probe, "verify_cri", return_value="fixture-image"):
+            with self.assertRaises(ValueError): owned.create()
+        observed = records[-1]
+        self.assertEqual(observed["phase"], "pod_running_unready_observed")
+        self.assertEqual(len(observed["pods"]), 5)
+        self.assertTrue(all(p["uid"] and p["address"] for p in observed["pods"]))
+        with patch.object(owned, "endpoints", return_value=[{"endpoints": None}]):
+            owned.check()
+            first = next(iter(pods.values()))
+            address = first["status"]["podIP"]
+            first["status"]["podIP"] = "10.0.0.99"
+            with self.assertRaises(engine.tx.Refusal): owned.check()
+            first["status"]["podIP"] = address
+        with patch.object(engine.time, "monotonic", side_effect=[0, 31]):
+            with self.assertRaises(ValueError): owned.close()
+        self.assertFalse(pods)
+        self.assertIsNone(namespace)
+        receipt = records[-1]
+        self.assertNotEqual(receipt["phase"], "probe_cleanup_verified")
+        self.assertEqual(len(receipt["pods"]), 5)
+        self.assertTrue(all(p["deleted"] and p["uid"] and p["address"] for p in receipt["pods"]))
+        self.assertEqual(receipt["namespaceUID"], observed["namespaceUID"])
+        self.assertFalse(any(r["phase"] == "probe_cleanup_verified" for r in records))
+        with patch.object(owned, "endpoints", return_value=[{"endpoints": None}]):
+            owned.close()
+        self.assertEqual(records[-1]["phase"], "probe_cleanup_verified")
+        self.assertEqual(records[-1]["pods"], receipt["pods"])
+
+    def test_replacement_between_create_and_running_never_acquires_probe_custody(self):
+        nonce = "a" * 32
+        uid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        def obj(value, status=None):
+            result = {"metadata": {"uid": value, "resourceVersion": "1",
+                      "labels": {engine.probe.OWNER: nonce}}}
+            if status is not None: result["status"] = status
+            return json.dumps(result)
+        replacement = obj("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                          {"phase": "Running", "podIP": "10.0.0.99"})
+        api = Mock(side_effect=["null", "", obj(uid), "", "",
+                               obj(uid, {"phase": "Pending"}), replacement])
+        records = []
+        probes = engine.Probes(api, Mock(), {}, nonce, records.append)
+        with patch.object(probes, "services", return_value=[]), \
+             patch.object(probes, "controllers", return_value=[]), \
+             patch.object(engine.probe, "verify_cri") as verify:
+            with self.assertRaises(engine.tx.Refusal): probes.create()
+            verify.assert_not_called()
+        self.assertEqual(probes.owned[0]["uid"], uid)
+        self.assertEqual(probes.owned[0]["addresses"], [])
+        self.assertEqual(probes.addresses, [])
+        self.assertEqual(probes.peers, {})
+        api.side_effect = None
+        api.return_value = replacement
+        with self.assertRaises(engine.tx.Refusal): probes.close()
+        self.assertFalse(any(call.args[0] == "delete" for call in api.call_args_list))
+        self.assertFalse(any(r["phase"] == "probe_cleanup_verified" for r in records))
+
+    def test_cleanup_custody_is_uid_bound_and_never_invents_unknown_addresses(self):
+        import copy
+        uid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        nonce = "a" * 32
+        def owner(status):
+            return {"metadata": {"uid": uid, "resourceVersion": "1",
+                    "labels": {engine.probe.OWNER: nonce}}, "status": status}
+        for status, accepted in (({"phase": "Pending"}, True),
+                                 ({"phase": "Running", "podIP": "10.0.0.7"}, True),
+                                 ({"phase": "Running"}, False),
+                                 ({"phase": "Running", "podIP": "invalid"}, False)):
+            with self.subTest(status=status):
+                records, deletes = [], []
+                current = owner(status)
+                def api(*args, value=None):
+                    nonlocal current
+                    if args[:2] == ("get", "endpointslices"):
+                        return '{"items":[]}'
+                    if args[0] == "-n" and args[2] == "get":
+                        return json.dumps(current)
+                    if args[:2] == ("delete", "--raw"):
+                        deletes.append(value)
+                        current = None
+                    return ""
+                probes = engine.Probes(api, Mock(), {}, nonce, records.append)
+                entry = {"namespace": "fixture", "name": "owned", "uid": uid}
+                probes.owned.append(entry)
+                # No CRI/spec qualification has occurred; cleanup alone observes custody.
+                if accepted:
+                    probes.close()
+                    self.assertEqual(records[-1]["phase"], "probe_cleanup_verified")
+                    self.assertEqual(deletes[0]["preconditions"]["uid"], uid)
+                else:
+                    with self.assertRaises((ValueError, engine.tx.Refusal)): probes.close()
+                    self.assertFalse(any(r["phase"] == "probe_cleanup_verified" for r in records))
+                    self.assertIsNone(current)
+                    self.assertEqual(len(deletes), 1)
+                self.assertNotIn("address", entry)
+                self.assertEqual(probes.peers, {})
+
+        records = []
+        probes = engine.Probes(Mock(return_value="null"), Mock(), {}, nonce, records.append)
+        entry = {"namespace": "fixture", "name": "owned", "uid": uid}
+        probes.owned.append(entry)
+        replacement = owner({"phase": "Running", "podIP": "10.0.0.99"})
+        replacement["metadata"]["uid"] = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        with self.assertRaises(engine.tx.Refusal): probes.observe(entry, replacement)
+        self.assertNotIn("addresses", entry)
+        probes.k.return_value = json.dumps(replacement)
+        with self.assertRaises(engine.tx.Refusal): probes.close()
+        self.assertFalse(any(c.args[0] == "delete" for c in probes.k.call_args_list))
+        probes.k.return_value = "null"
+        with patch.object(probes, "endpoints", return_value=[]):
+            with self.assertRaises(engine.tx.Refusal): probes.close()
+        self.assertFalse(any(r["phase"] == "probe_cleanup_verified" for r in records))
+
+        with self.assertRaises(ValueError):
+            probes.observe(entry, owner({"phase": "Running", "podIP": "10.0.0.77", "podIPs": "malformed"}))
+        probes.observe(entry, owner({"phase": "Running", "podIP": "10.0.0.1"}))
+        self.assertTrue(entry["addressUncertain"])
+        with patch.object(probes, "endpoints", return_value=[]):
+            with self.assertRaises(engine.tx.Refusal): probes.close()
+        self.assertFalse(any(r["phase"] == "probe_cleanup_verified" for r in records))
+
+        for last in range(1, 9):
+            probes.observe(entry, owner({"phase": "Running", "podIP": f"10.0.0.{last}"}))
+        self.assertEqual(len(probes.addresses), 8)
+        with self.assertRaises(engine.tx.Refusal):
+            probes.observe(entry, owner({"phase": "Running", "podIP": "10.0.0.9"}))
+        self.assertEqual(len(entry["addresses"]), 8)
+        self.assertTrue(records[-1]["pods"][0]["addressUncertain"])
+        probes.k.reset_mock()
+        probes.k.side_effect = [json.dumps(owner({"phase": "Running", "podIP": "10.0.0.9"})), "", ""]
+        with patch.object(probes, "endpoints", return_value=[]):
+            with self.assertRaises(engine.tx.Refusal): probes.close()
+        self.assertTrue(any(c.args[0] == "delete" for c in probes.k.call_args_list))
+        self.assertTrue(entry["deleted"])
+        probes.k.side_effect = None
+        probes.observe(entry, owner({"phase": "Pending"}))
+        with patch.object(probes, "endpoints", return_value=[]):
+            with self.assertRaises(engine.tx.Refusal): probes.close()
+        self.assertFalse(any(r["phase"] == "probe_cleanup_verified" for r in records))
+
     def test_release_gate_executes_source_not_cached_bytecode(self):
         import marshal
         import importlib.util
@@ -113,7 +288,7 @@ class RolloutContractTests(unittest.TestCase):
         engine = (ROOT / "tools/gateway-policy-proof/rollout_engine.py").read_text()
         workflow = (ROOT / ".github/workflows/gateway-policy-proof.yml").read_text()
         self.assertTrue(recipe(wrapper, engine, workflow))
-        for value in ("-I -B -c $sourceLoader $proofRoot preflight", "KanzPlatformProvisioner/kanz-platform-cli", "'kanz-operator-process'",
+        for value in ("$bundle = [ordered]@{ files = $files; payload = [ordered]@{ source = $source;", "-I -B -c $sourceLoader $proofRoot preflight", "KanzPlatformProvisioner/kanz-platform-cli", "'kanz-operator-process'",
                       "git -C $repo diff --quiet $source", "git -C $repo ls-remote origin refs/heads/main", "env -i PATH=", "user/kanz-operator", "--profile $parentProfile", "'.github/workflows'"):
             with self.subTest(value=value):
                 self.assertFalse(recipe(wrapper.replace(value, "removed"), engine, workflow))

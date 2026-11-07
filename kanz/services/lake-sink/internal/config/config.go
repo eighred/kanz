@@ -5,6 +5,7 @@ import (
 	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -12,8 +13,9 @@ import (
 // it composes with the CSI/Vault secret mounts (SEC-01d). Mirrors the audit /
 // risk-engine config shape.
 type Config struct {
-	Listen   string
-	LogLevel slog.Level
+	RetainRawFrame bool
+	Listen         string
+	LogLevel       slog.Level
 
 	// Brokers is the Kafka cluster — the durable log of record (EVT-09) the sink
 	// reads as its CDC source. Required: the sink streams the durable log, not the
@@ -56,6 +58,13 @@ func Load() (Config, error) {
 		OutputDir:     os.Getenv("LAKE_SINK_OUTPUT_DIR"),
 		OTLPEndpoint:  os.Getenv("LAKE_SINK_OTLP_ENDPOINT"),
 		SPIFFESocket:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+	}
+	if value, configured := os.LookupEnv("LAKE_SINK_RETAIN_RAW_FRAME"); configured {
+		var err error
+		cfg.RetainRawFrame, err = strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, errors.New("LAKE_SINK_RETAIN_RAW_FRAME must be a boolean")
+		}
 	}
 	if len(cfg.Brokers) == 0 {
 		return Config{}, errors.New("LAKE_SINK_BROKERS is required")

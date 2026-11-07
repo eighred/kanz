@@ -141,10 +141,10 @@ func TestGoCIShardsRequireCompleteUnion(t *testing.T) {
 	for _, mutation := range [][2]string{
 		{"- { shard: 1, kind: race }", "- { shard: 0, kind: race }"},
 		{"- { shard: quality, kind: quality }", "- { shard: omitted, kind: race }"},
-		{"if: matrix.kind == 'quality'", "if: matrix.shard == 0"},
+		{"name: Build + vet + test the `anthropic,openrouter` tags\n        if: matrix.kind == 'quality'", "name: Build + vet + test the `anthropic,openrouter` tags\n        if: matrix.shard == 0"},
 		{"if: matrix.kind == 'race'", "if: matrix.shard == 0"},
 		{"always() && matrix.kind == 'race'", "success() && matrix.kind == 'race'"},
-		{"always() && matrix.kind == 'quality'", "success() && matrix.kind == 'quality'"},
+		{"name: Preserve isolated quality proof\n        if: ${{ always() && matrix.kind == 'quality' }}", "name: Preserve isolated quality proof\n        if: ${{ success() && matrix.kind == 'quality' }}"},
 		{"name: golangci-lint", "name: omitted-lint"},
 		{"name: golangci-lint", "name: golangci-lint\n        continue-on-error: true"},
 		{"go test -tags anthropic,openrouter -p 1 -count=1", "go test -tags anthropic,openrouter -p 1"},
