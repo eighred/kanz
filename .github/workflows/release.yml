@@ -290,10 +290,13 @@ jobs:
           version: v0.72.0
 
       - name: Install pinned Rust evidence tools
-        if: matrix.service == 'binance-depth' || matrix.service == 'okx-depth'
+        if: matrix.service == 'binance-depth' || matrix.service == 'okx-depth' || matrix.service == 'lake-sink'
         run: bash .github/scripts/install-rust-audit.sh
+      - name: Install pinned Go binary audit for hybrid lake image
+        if: matrix.service == 'lake-sink'
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
       - name: Require actual Rust image inventory and current RustSec audit
-        if: matrix.service == 'binance-depth' || matrix.service == 'okx-depth'
+        if: matrix.service == 'binance-depth' || matrix.service == 'okx-depth' || matrix.service == 'lake-sink'
         env:
           RUST_SERVICE: ${{ matrix.service }}
           RUST_IMAGE: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
@@ -301,7 +304,7 @@ jobs:
           python3 -B -m unittest discover -s .github/scripts -p test_rust_release_evidence.py
           python3 .github/scripts/rust_release_evidence.py --service "$RUST_SERVICE" --image "$RUST_IMAGE" --sbom sbom.spdx.json --output rust-evidence
       - name: Preserve Rust release audit evidence
-        if: always() && (matrix.service == 'binance-depth' || matrix.service == 'okx-depth')
+        if: always() && (matrix.service == 'binance-depth' || matrix.service == 'okx-depth' || matrix.service == 'lake-sink')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-evidence-${{ matrix.service }}

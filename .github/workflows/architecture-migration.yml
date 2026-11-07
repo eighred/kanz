@@ -24,6 +24,7 @@ on:
       - 'kanz/cmd/kanz-tenantgen/**'
       - 'kanz/infra/nats/**'
       - 'kanz/internal/lake/**'
+      - 'kanz/internal/testidentity/**'
       - 'kanz/internal/outbox/**'
       - 'kanz/internal/pg/**'
       - 'kanz/pkg/auth/**'
@@ -31,6 +32,7 @@ on:
       - 'kanz/go.mod'
       - 'kanz/go.sum'
       - '.github/scripts/*lake_snapshot_owner*'
+      - '.github/scripts/envoy_evidence.py'
       - '.github/scripts/release_ci*.py'
       - 'kanz/tools/replay/**'
       - 'kanz/test/arch/**'
@@ -61,6 +63,7 @@ on:
       - 'kanz/cmd/kanz-tenantgen/**'
       - 'kanz/infra/nats/**'
       - 'kanz/internal/lake/**'
+      - 'kanz/internal/testidentity/**'
       - 'kanz/internal/outbox/**'
       - 'kanz/internal/pg/**'
       - 'kanz/pkg/auth/**'
@@ -68,6 +71,7 @@ on:
       - 'kanz/go.mod'
       - 'kanz/go.sum'
       - '.github/scripts/*lake_snapshot_owner*'
+      - '.github/scripts/envoy_evidence.py'
       - '.github/scripts/release_ci*.py'
       - 'kanz/tools/replay/**'
       - 'kanz/test/arch/**'
@@ -161,6 +165,70 @@ jobs:
           go test -p 1 -c -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/archiver.test" ./services/archiver/internal/archive
           go build -ldflags "$stamp" -o "$RUNNER_TEMP/lake-bin/kanz-lake-snapshot" ./cmd/kanz-lake-snapshot
           go vet ./services/lake-sink/... ./services/api-gateway/... ./services/archiver/... ./cmd/kanz-lake-snapshot ./infra/nats
+      - name: Authenticate existing private image mirrors
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned hybrid signature verifier
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Install reviewed hybrid audit tools
+        run: |
+          set -euo pipefail
+          bash .github/scripts/install-rust-audit.sh
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+      - name: Warm the hybrid builder
+        run: .github/scripts/warm-builder.sh ghcr.io/eighred/base/buildkit:buildx-stable-1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        id: lake-builder
+        with:
+          version: v0.37.1
+          driver-opts: image=ghcr.io/eighred/base/buildkit:buildx-stable-1
+      - name: Build actual hybrid lake image without publishing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: kanz/services/lake-sink/Dockerfile
+          build-args: VERSION=${{ github.sha }}
+          builder: ${{ steps.lake-builder.outputs.name }}
+          tags: kanz-lake-sink:verification
+          push: false
+          load: true
+          cache-from: type=gha,scope=lake-sink
+      - name: Bind actual hybrid image identity
+        id: lake-image
+        run: |
+          set -euo pipefail
+          image=$(docker image inspect --format '{{.Id}}' kanz-lake-sink:verification)
+          printf '%s\n' "$image" > snapshot-owner-proof/lake-image.txt
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Catalog actual hybrid applications and native runtime
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: docker:${{ steps.lake-image.outputs.image }}
+          format: spdx-json
+          output-file: snapshot-owner-proof/hybrid.spdx.json
+          syft-version: v1.56.0
+          upload-artifact: false
+      - name: Scan actual hybrid runtime before execution
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.lake-image.outputs.image }}
+          format: json
+          output: snapshot-owner-proof/hybrid-trivy.json
+          exit-code: '1'
+          severity: CRITICAL
+          list-all-pkgs: true
+          ignore-unfixed: true
+          version: v0.72.0
+      - name: Require hybrid binary provenance and fresh Rust and Go audits
+        env:
+          LAKE_IMAGE: ${{ steps.lake-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s .github/scripts -p test_rust_release_evidence.py
+          python3 .github/scripts/rust_release_evidence.py --local --service lake-sink --image "$LAKE_IMAGE" --sbom snapshot-owner-proof/hybrid.spdx.json --output snapshot-owner-proof/hybrid
       - name: Install two checksum-pinned native brokers
         run: |
           set -euo pipefail
@@ -215,6 +283,10 @@ jobs:
         run: |
           set -euo pipefail
           export TEST_LAKE_WORKER_SHA256="$(sha256sum "$TEST_LAKE_WORKER_PATH" | cut -d' ' -f1)"
+          export TEST_LAKE_IMAGE_ID="$(cat snapshot-owner-proof/lake-image.txt)"
+          export TEST_LAKE_IMAGE_VERSION="$(git rev-parse HEAD)"
+          export TEST_LAKE_IMAGE_WORKER_SHA256="$(python3 -c 'import json; print(json.load(open("snapshot-owner-proof/hybrid/evidence.json"))["binarySHA256"])')"
+          export TEST_LAKE_REDPANDA_IMAGE_ID="$(cat snapshot-owner-proof/redpanda-image.txt)"
           selection=$(python3 .github/scripts/check_lake_snapshot_owner_evidence.py --regex --root .)
           result=0
           for version in 2.12.6 2.14.5; do
@@ -236,13 +308,47 @@ jobs:
             timeout 20 docker rm -f "$pg"
           fi
           timeout 30 docker compose -p "$project" -f kanz/dev/docker-compose.yml down --volumes
+          # Exact run/attempt and per-case nonce ownership also reconciles a
+          # Docker create that succeeded before its CLI reply was lost.
+          image_resources=$(timeout 10 docker ps -a --filter "label=kanz.snapshot-image-run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --format '{{.ID}}')
+          test "$(printf '%s\n' "$image_resources" | sed '/^$/d' | wc -l)" -le 8
+          while IFS= read -r id; do
+            test -n "$id" || continue
+            nonce=$(docker inspect --format '{{index .Config.Labels "kanz.snapshot-image"}}' "$id")
+            [[ "$nonce" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+            test "$(docker inspect --format '{{index .Config.Labels "kanz.snapshot-image-run"}}' "$id")" = "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            name=$(docker inspect --format '{{.Name}}' "$id")
+            [[ "$name" =~ ^/kanz-lake-image-$nonce-[0-9]+$ ]]
+            timeout 20 docker rm -f -v "$id"
+          done <<< "$image_resources"
+          image_volumes=$(timeout 10 docker volume ls --filter "label=kanz.snapshot-image-run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --format '{{.Name}}')
+          test "$(printf '%s\n' "$image_volumes" | sed '/^$/d' | wc -l)" -le 8
+          while IFS= read -r name; do
+            test -n "$name" || continue
+            nonce=$(docker volume inspect --format '{{index .Labels "kanz.snapshot-image"}}' "$name")
+            [[ "$nonce" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+            test "$(docker volume inspect --format '{{index .Labels "kanz.snapshot-image-run"}}' "$name")" = "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            [[ "$name" =~ ^kanz-lake-image-$nonce-[0-9]+$ ]]
+            timeout 15 docker volume rm "$name"
+          done <<< "$image_volumes"
+          image_after=$(timeout 10 docker ps -a --filter "label=kanz.snapshot-image-run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --format '{{.ID}}')
+          image_volumes_after=$(timeout 10 docker volume ls --filter "label=kanz.snapshot-image-run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --format '{{.Name}}')
+          test -z "$image_after$image_volumes_after"
           pg_after=$(timeout 10 docker ps -a --filter "name=^/$pg$" --format '{{.ID}}')
           compose_after=$(timeout 10 docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.ID}}')
           volumes_after=$(timeout 10 docker volume ls --filter "label=com.docker.compose.project=$project" --format '{{.Name}}')
           networks_after=$(timeout 10 docker network ls --filter "label=com.docker.compose.project=$project" --format '{{.ID}}')
           test -z "$pg_after$compose_after$volumes_after$networks_after"
           mkdir -p snapshot-owner-proof
-          python3 -c 'import json,os,pathlib; pathlib.Path("snapshot-owner-proof/cleanup.json").write_text(json.dumps({"run":os.environ["GITHUB_RUN_ID"],"attempt":os.environ["GITHUB_RUN_ATTEMPT"],"postgres_absent":True,"compose_absent":True})+"\n")'
+          python3 -c 'import json,os,pathlib; pathlib.Path("snapshot-owner-proof/cleanup.json").write_text(json.dumps({"run":os.environ["GITHUB_RUN_ID"],"attempt":os.environ["GITHUB_RUN_ATTEMPT"],"postgres_absent":True,"compose_absent":True,"image_containers_absent":True,"image_volumes_absent":True})+"\n")'
+      - name: Prove joint synthetic source and VERSION dependency cache reuse
+        env:
+          LAKE_IMAGE: ${{ steps.lake-image.outputs.image }}
+          LAKE_BUILDER: ${{ steps.lake-builder.outputs.name }}
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s .github/scripts -p test_lake_cache_probe.py
+          python3 .github/scripts/lake_cache_probe.py --source "$(git rev-parse HEAD)" --tree "$(git rev-parse HEAD^{tree})" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --image "$LAKE_IMAGE" --builder "$LAKE_BUILDER" --output snapshot-owner-proof
       - name: Verify complete source-bound owner evidence
         run: |
           set -euo pipefail
