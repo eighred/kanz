@@ -53,6 +53,25 @@ class ImageCustodyTest(unittest.TestCase):
             bad=copy.deepcopy(self.index);mutate(bad)
             with self.assertRaises(ValueError):self.verify(node=self.add(bad))
 
+    def test_nested_import_index_preserves_exact_leaf_and_bounds(self):
+        wrapper={'schemaVersion':2,'mediaType':self.index['mediaType'],
+                 'manifests':[self.desc(self.idx,self.index['mediaType'])]}
+        root=self.add(wrapper)
+        value=self.verify(node=root)
+        self.assertEqual(value['config'],self.cfg)
+        self.assertEqual(value['platformManifest'],self.man)
+        self.assertEqual(value['contentCount'],4)
+        for mutation in ('duplicate','size','media','depth','wrong-platform'):
+            bad=copy.deepcopy(wrapper)
+            if mutation=='duplicate':bad['manifests'].append(self.desc(self.man,self.manifest['mediaType']) | {'platform':{'os':'linux','architecture':'amd64'}})
+            if mutation=='size':bad['manifests'][0]['size']+=1
+            if mutation=='media':bad['manifests'][0]['mediaType']='application/vnd.docker.distribution.manifest.list.v2+json'
+            if mutation=='wrong-platform':bad['manifests'][0]['platform']={'os':'linux','architecture':'arm64'}
+            if mutation=='depth':
+                for _ in range(3):
+                    bad={'schemaVersion':2,'mediaType':self.index['mediaType'],'manifests':[self.desc(self.add(bad),self.index['mediaType'])]}
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):self.verify(node=self.add(bad))
+
     def test_source_tag_cri_and_pod_reference_must_agree(self):
         good={'status':{'id':self.cfg,'repoTags':['docker.io/library/'+self.tag],'repoDigests':['docker.io/library/import-fixed@'+self.idx]}}
         for mutate in (lambda x:x['status'].update(id=self.man),lambda x:x['status'].update(repoTags=['docker.io/library/kanz-native-probe:'+'b'*40]),lambda x:x['status'].update(repoDigests=[])):

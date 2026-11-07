@@ -125,19 +125,32 @@ def verify(inspection, requested, observed, docker_id, read, progress=None):
         if not isinstance(diffs,list) or not 1<=len(diffs)<=128 or any(not isinstance(x,str) or not DIGEST.fullmatch(x) for x in diffs):
             raise CustodyError('configuration_layer_identity_absent')
         return digest
+    def select_manifest(value, depth=0):
+        # OCI indexes may contain nested indexes (including a platform-less
+        # import wrapper). Verify every traversed descriptor before selecting
+        # one platform leaf; never treat a tag or an index as a config digest.
+        if depth>=3: raise CustodyError('image_graph_exceeds_bound')
+        if value.get('schemaVersion')!=2: raise CustodyError('index_version')
+        entries=value.get('manifests')
+        if not isinstance(entries,list) or not 1<=len(entries)<=8: raise CustodyError('index_bound')
+        selected=[]
+        for entry in entries:
+            digest,size=descriptor(entry,MANIFEST | INDEX)
+            platform=entry.get('platform',{})
+            if not isinstance(platform,dict): raise CustodyError('ambiguous_platform')
+            match=platform.get('os')=='linux' and platform.get('architecture')=='amd64' and not platform.get('variant')
+            if entry['mediaType'] in INDEX and (not platform or match):
+                child=content(digest,size)
+                if child.get('mediaType')!=entry['mediaType']: raise CustodyError('manifest_media_type_differs')
+                selected.extend(select_manifest(child,depth+1))
+            elif entry['mediaType'] in MANIFEST and match:
+                selected.append(entry)
+        return selected
     def chain(root):
         value=content(root);kind=value.get('mediaType');manifest=None
         progress['mediaType']='index' if kind in INDEX else 'manifest' if kind in MANIFEST else 'absent' if kind is None else 'UNKNOWN'
         if kind in INDEX:
-            if value.get('schemaVersion')!=2: raise CustodyError('index_version')
-            entries=value.get('manifests')
-            if not isinstance(entries,list) or not 1<=len(entries)<=8: raise CustodyError('index_bound')
-            selected=[]
-            for entry in entries:
-                descriptor(entry,MANIFEST)
-                platform=entry.get('platform',{})
-                if platform.get('os')=='linux' and platform.get('architecture')=='amd64' and not platform.get('variant'):
-                    selected.append(entry)
+            selected=select_manifest(value)
             if len(selected)!=1: raise CustodyError('ambiguous_platform')
             manifest,size=descriptor(selected[0],MANIFEST);value=content(manifest,size)
             if value.get('mediaType')!=selected[0]['mediaType']: raise CustodyError('manifest_media_type_differs')
