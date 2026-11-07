@@ -8,6 +8,7 @@ import (
 	"github.com/eighred/kanz/internal/env"
 	"log/slog"
 	"os"
+	"slices"
 )
 
 // DefaultSubjects is what DATA-M1 archives: every stream carrying history that
@@ -46,6 +47,27 @@ var DefaultSubjects = []string{
 	"inference.>",
 	"platform.>",
 	"data.>",
+}
+
+// LakeSnapshotSubject is an opt-in consume route on the existing tenant archiver.
+// Its separate retained stream must be provisioned before enabling this route.
+const LakeSnapshotSubject = "lake.snapshot.>"
+
+func snapshotSubjects(enabled string, subjects []string) ([]string, error) {
+	switch enabled {
+	case "", "false":
+		if slices.Contains(subjects, LakeSnapshotSubject) {
+			return nil, errors.New("lake snapshot archival requires ARCHIVER_LAKE_SNAPSHOTS=true")
+		}
+		return subjects, nil
+	case "true":
+		if slices.Contains(subjects, LakeSnapshotSubject) {
+			return subjects, nil
+		}
+		return append(slices.Clone(subjects), LakeSnapshotSubject), nil
+	default:
+		return nil, errors.New("ARCHIVER_LAKE_SNAPSHOTS must be true or false")
+	}
 }
 
 // Config is the archiver's runtime configuration.
@@ -94,7 +116,12 @@ func Load() (Config, error) {
 		SPIFFESocket: os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}
 	if len(cfg.Subjects) == 0 {
-		cfg.Subjects = DefaultSubjects
+		cfg.Subjects = slices.Clone(DefaultSubjects)
+	}
+	var err error
+	cfg.Subjects, err = snapshotSubjects(os.Getenv("ARCHIVER_LAKE_SNAPSHOTS"), cfg.Subjects)
+	if err != nil {
+		return Config{}, err
 	}
 	if cfg.Tenant == "" {
 		return Config{}, errors.New("ARCHIVER_TENANT is required: an archiver that does not know its tenant cannot route an event")
