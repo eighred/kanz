@@ -22,7 +22,7 @@ GROUPS = {
  "TestRustRecoveryObservationPayloadBoundary": ["above-standard-message-bound", "exact-four-mib", "one-byte-over-four-mib"],
  **{name: ["go", "rust"] for name in ("TestRustRecoveryOversizedSingleFactRefusal", "TestRustRecoveryComplete8000History", "TestRustRecovery8001HistoryRefusal", "TestRustRecoveryDefaultLockCapacityOutcome", "TestRustRecoveryConstrainedLockCapacityRefusal", "TestRustRecoveryMalformedPostedJournal", "TestRustRecoveryTenantIsolation", "TestRustRecoveryExplicitZeroHistory", "TestRustRecoveryFrozenMappingAttribution")},
 }
-NAMES = set(GROUPS) | {f"{name}/{child}" for name, children in GROUPS.items() for child in children} | {"TestRustRecoveryDeadlineAfterBrokerAcknowledgement", "TestRustRecoveryRelayLockDeadline", "TestRustRecoveryConcurrentGoWriter", "TestRustRecoveryCrashDuringHistoryQuery", "TestRecoveryObservationPaddingOracle", "TestRecoveryDrainRetryClassification", "TestWorkerDiagnosticPreservesJoinAndClosedCategories"}
+NAMES = set(GROUPS) | {f"{name}/{child}" for name, children in GROUPS.items() for child in children} | {"TestRustRecoveryDeadlineAfterBrokerAcknowledgement", "TestRustRecoveryRelayLockDeadline", "TestRustRecoveryConcurrentGoWriter", "TestRustRecoveryCrashDuringHistoryQuery", "TestRecoveryObservationPaddingOracle", "TestRecoveryDrainRetryClassification", "TestWorkerDiagnosticPreservesJoinAndClosedCategories", "TestWorkerProfileBoundedFailureOnly"}
 REQUIRED = {PACKAGE: NAMES}
 STREAMS = ("recovery.jsonl", "large-go.jsonl", "large-rust.jsonl")
 MAX_STREAM_BYTES = 64 * 1024 * 1024
@@ -106,7 +106,7 @@ def qualify(directory, expected, create=False):
     result = checked_streams(streams)
     binary = read_bounded(directory / "binary.sha256", 65).decode("ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{64}", binary): raise ValueError("invalid executable digest")
-    build = {"profile": "release", "target": "kanz-rs/target/release/examples/recovery-coordinator-fixture", "sha256": binary}
+    build = {"features": ["qualification-diagnostics"], "profile": "release", "target": "kanz-rs/target/release/examples/recovery-coordinator-fixture", "sha256": binary}
     bound = {**expected, "streams": {name: hashlib.sha256(raw).hexdigest() for name, raw in streams.items()}, "result": result, "build": build}
     path = directory / "proof.json"
     if create:

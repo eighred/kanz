@@ -180,8 +180,11 @@ jobs:
           rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
           cargo fmt --all -- --check
           cargo test --locked -p kanz-oms-recovery --all-targets
+          cargo test --locked -p kanz-oms-store --features qualification-diagnostics diagnostics::tests
           cargo clippy --locked -p kanz-oms-recovery --all-targets -- -D warnings
           cargo build --release --locked -p kanz-oms-recovery --example recovery-coordinator-fixture
+          cargo clippy --locked -p kanz-oms-recovery --all-targets --features qualification-diagnostics -- -D warnings
+          cargo build --release --locked -p kanz-oms-recovery --example recovery-coordinator-fixture --features qualification-diagnostics
       - name: Verify recovery source and evidence guards
         working-directory: kanz
         run: |

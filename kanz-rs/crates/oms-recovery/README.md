@@ -109,3 +109,27 @@ compatibility from [#1316](https://github.com/eighred/kanz/issues/1316), explici
 capacity/concurrency acceptance, recovery/rollback and exclusive writer handoff.
 [#1413](https://github.com/eighred/kanz/issues/1413) owns those decisions. A compiled
 fixture or compatibility pass does not activate recovery or close that issue.
+
+Qualification-only stage diagnostics
+-----------------------------------
+
+The off-by-default `qualification-diagnostics` feature records fixed-size,
+saturating counters and nanoseconds in a task-local command scope. It changes
+no SQL, work budget, session lifetime, ACK count or retry decision. The release
+fixture reports its actual feature identity in each existing private response;
+the Go harness requires that identity and retains aggregates only in memory.
+Only existing worker transport/response failure diagnostics emit these arrays;
+typed command errors reported directly by their callers do not necessarily emit
+a profile. Passing runs do not
+publish stage measurements. A failed command without a complete response is
+excluded: the output explicitly describes completed-command aggregates, never
+the current stage or an observed cause of the failure.
+
+Array order is HandlerConnect, LoadCase, LoadOrder, DurableAck, AckTargets,
+AckReceived, HandlerClose, RelayConnect, RelayAcquire, RelayPending,
+RelayRelease, RelayClose, FixtureAbsence, Total. Durations are nonadditive:
+AckTargets and AckReceived are nested in DurableAck; Total includes the other
+stages. Counts describe executed stage scopes, not successful financial effects.
+The 900-second fixture lifetime, 30-second work budget, all 16,000 ACKs and
+explicit cleanup checks remain mandatory. These observations alone do not
+establish a performance bottleneck or production performance acceptance.

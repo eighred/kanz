@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 //! Existing OMS Save transaction semantics; no network listener, runtime configuration,
 //! admission, recovery authorization or production caller.
+pub mod diagnostics;
 pub mod fee_journal;
 pub mod fee_revision;
 pub mod fee_subject;

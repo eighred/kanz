@@ -5,6 +5,10 @@ edition = "2021"
 rust-version = "1.90"
 publish = false
 
+[features]
+default = []
+qualification-diagnostics = []
+
 [dependencies]
 kanz-order-core = { path = "../order-core" }
 kanz-decimal-compat = { path = "../.." }

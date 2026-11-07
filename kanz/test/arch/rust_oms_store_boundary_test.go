@@ -12,7 +12,7 @@ import (
 
 const rustOMSStorePath = "crates/oms-store"
 
-var rustOMSStoreSources = []string{"src/lib.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/position.rs", "src/position_math.rs", "src/position_projector.rs", "src/recovery.rs", "src/recovery_repository.rs", "src/recovery_wire.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs"}
+var rustOMSStoreSources = []string{"src/lib.rs", "src/diagnostics.rs", "src/identity.rs", "src/queries.rs", "src/outbox.rs", "src/proposals.rs", "src/position.rs", "src/position_math.rs", "src/position_projector.rs", "src/recovery.rs", "src/recovery_repository.rs", "src/recovery_wire.rs", "src/recovery_ack.rs", "src/fee_wire.rs", "src/fee_revision.rs", "src/fee_journal.rs", "src/fee_subject.rs", "src/go_unicode.rs", "examples/fixture.rs", "examples/relay_support/mod.rs", "src/relay.rs", "src/relay_wire.rs"}
 
 const rustOMSStoreCargo = `[package]
 name = "kanz-oms-store"
@@ -20,6 +20,10 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
 publish = false
+
+[features]
+default = []
+qualification-diagnostics = []
 
 [dependencies]
 kanz-order-core = { path = "../order-core" }

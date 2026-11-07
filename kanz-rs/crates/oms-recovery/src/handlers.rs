@@ -1,6 +1,7 @@
 //! Durable handler phases. The coordinator closes SQL sessions before relay
 //! Flush; a successful blocked-status commit is not financial recovery success.
 use crate::{history, Error};
+use kanz_oms_store::diagnostics::{measure, Stage};
 use kanz_oms_store::{
     self as store, fee_revision,
     fee_wire::FillWire,
@@ -106,13 +107,21 @@ pub(crate) async fn ack(
     };
     let ack = Canonical::<ExecutionRecoveryApplied>::decode(payload)?;
     let ack = ack.value();
-    let mut c = repository::load_case(client, tenant, &ack.case_id).await?;
-    let loaded = store::load(client, tenant, &ack.order_id).await?;
+    let mut c = measure(
+        Stage::LoadCase,
+        repository::load_case(client, tenant, &ack.case_id),
+    )
+    .await?;
+    let loaded = measure(Stage::LoadOrder, store::load(client, tenant, &ack.order_id)).await?;
     let state = Canonical::<OrderState>::decode(&loaded.state)?;
     c.status = "corrected".into();
     c.reason.clear();
     let record = status(env, &c, state.value(), now)?;
-    recovery_ack::acknowledge_recovery(client, tenant, ack, book, &record).await?;
+    measure(
+        Stage::DurableAck,
+        recovery_ack::acknowledge_recovery(client, tenant, ack, book, &record),
+    )
+    .await?;
     Ok(ack.order_id.clone())
 }
 pub(crate) async fn parked(
