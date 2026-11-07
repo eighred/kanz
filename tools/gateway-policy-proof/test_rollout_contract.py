@@ -26,7 +26,7 @@ def canonical_ast(tree):
 
 def recipe(wrapper, engine, workflow):
     required = [
-        "param([switch]$Apply)", "$bundle = [ordered]@{ files = $files; payload = [ordered]@{ source = $source;", "$rolloutProfile = 'kanz-platform'", "$region = 'ap-northeast-1'",
+        "param([switch]$Apply)", "$bundle = [ordered]@{ payload = [ordered]@{ source = $source;", "$rolloutProfile = 'kanz-platform'", "$region = 'ap-northeast-1'",
         "$account = '012619468098'", "$instance = 'i-0ee1235614219f089'",
         "-I -B -c $sourceLoader $proofRoot preflight", "KanzPlatformProvisioner/kanz-platform-cli",
         "'kanz-operator-process'", "git -C $repo diff --quiet $source", "git -C $repo ls-remote origin refs/heads/main",
@@ -157,6 +157,9 @@ class RolloutContractTests(unittest.TestCase):
         namespace = None
         def kubectl(*args, value=None):
             nonlocal namespace
+            if args[:2] == ("get", "pods"):
+                self.assertEqual(args, ("get", "pods", "-A", "-l", engine.probe.OWNER + "=" + "a" * 32, "-o", "json"))
+                return json.dumps({"items": list(pods.values())})
             if args[:2] in (("get", "services"), ("get", "replicasets,replicationcontrollers,statefulsets,daemonsets,jobs")):
                 return '{"items":[]}'
             if args[:2] == ("get", "endpointslices"):
@@ -359,7 +362,7 @@ class RolloutContractTests(unittest.TestCase):
         engine = (ROOT / "tools/gateway-policy-proof/rollout_engine.py").read_text()
         workflow = (ROOT / ".github/workflows/gateway-policy-proof.yml").read_text()
         self.assertTrue(recipe(wrapper, engine, workflow))
-        for value in ("$bundle = [ordered]@{ files = $files; payload = [ordered]@{ source = $source;", "-I -B -c $sourceLoader $proofRoot preflight", "KanzPlatformProvisioner/kanz-platform-cli", "'kanz-operator-process'",
+        for value in ("$bundle = [ordered]@{ payload = [ordered]@{ source = $source;", "-I -B -c $sourceLoader $proofRoot preflight", "KanzPlatformProvisioner/kanz-platform-cli", "'kanz-operator-process'",
                       "git -C $repo diff --quiet $source", "git -C $repo ls-remote origin refs/heads/main", "env -i PATH=", "user/kanz-operator", "--profile $parentProfile", "'.github/workflows'"):
             with self.subTest(value=value):
                 self.assertFalse(recipe(wrapper.replace(value, "removed"), engine, workflow))

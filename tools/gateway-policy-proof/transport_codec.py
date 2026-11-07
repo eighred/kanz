@@ -14,7 +14,8 @@ def encode(raw):
     if not isinstance(raw, bytes) or len(raw) > EXPANDED_LIMIT:
         raise ValueError("bundle bound")
     packed = lzma.compress(raw, format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64,
-                          filters=[{"id": lzma.FILTER_LZMA2, "preset": 6, "dict_size": 1048576}])
+                          filters=[{"id": lzma.FILTER_LZMA2, "preset": 6, "dict_size": 1048576,
+                                    "pb": 0, "lc": 3, "nice_len": 80, "depth": 64}])
     result = base64.b64encode(packed).decode("ascii")
     if len(result) > ENCODED_LIMIT:
         raise ValueError("encoded bundle bound")

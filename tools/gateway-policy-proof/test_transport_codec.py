@@ -16,6 +16,25 @@ from transaction_fixture import qualify_codec, run_fixture, CASES
 
 
 class TransportCodecTests(unittest.TestCase):
+    def test_fixed_encoder_and_legacy_decoder(self):
+        from unittest.mock import patch
+        import ast
+        import hashlib
+        source = inspect.getsource(codec)
+        decoder = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "decode")
+        # Frozen 0769 decoder AST; encoder tuning cannot broaden input acceptance.
+        options = {"show_empty": True} if "show_empty" in inspect.signature(ast.dump).parameters else {}
+        self.assertEqual(hashlib.sha256(ast.dump(decoder, include_attributes=False, **options).encode()).hexdigest(), "76068d99d95d5035e326ebf09a82f7f66cdba98e64d9de5ab8a5ac80f277a1e8")
+        raw = "legacy and current UTF8 λ\r\n".encode()
+        with patch.object(lzma, "compress", wraps=lzma.compress) as compress:
+            self.assertEqual(codec.decode(codec.encode(raw)), raw)
+            self.assertEqual(compress.call_args.kwargs, {"format": lzma.FORMAT_XZ, "check": lzma.CHECK_CRC64,
+                "filters": [{"id": lzma.FILTER_LZMA2, "preset": 6, "dict_size": 1048576,
+                             "pb": 0, "lc": 3, "nice_len": 80, "depth": 64}]})
+        legacy = lzma.compress(raw, format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64,
+                              filters=[{"id": lzma.FILTER_LZMA2, "preset": 6, "dict_size": 1048576}])
+        self.assertEqual(codec.decode(base64.b64encode(legacy).decode()), raw)
+
     def test_linux_fixture_requires_codec_before_acceptance(self):
         source = inspect.getsource(run_fixture)
         marker = 'qualify_codec()\n            report["cases"].append("bounded_xz_transport")'

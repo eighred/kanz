@@ -14,31 +14,69 @@ def load(name):
     return module
 
 
-def qualify(k, peers, endpoints, image, mode):
+OWNER = "kanz.io/gateway-proof"
+
+
+def selector_independent(policies, labels):
+    # Reject any reference, including expression keys, before creating resources.
+    # Adding this otherwise unreferenced label cannot alter a rendered selector.
+    def visit(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == OWNER:
+                    raise ValueError("fixture ownership label affects policy")
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif value == OWNER:
+            raise ValueError("fixture ownership label affects policy")
+    visit(policies)
+    if any(OWNER in value for value in labels.values()):
+        raise ValueError("fixture ownership label already configured")
+
+
+def snapshot(query, expected, image, nonce):
+    inventory = json.loads(query("get", "pods", "-A", "-l", OWNER + "=" + nonce, "-o", "json"))
+    items = inventory.get("items") if isinstance(inventory, dict) else None
+    if len(expected) != 8 or not isinstance(items, list) or len(items) != 8:
+        raise ValueError("fixture inventory differs")
+    result = {}
+    for pod in items:
+        if not isinstance(pod, dict) or not isinstance(pod.get("metadata"), dict):
+            raise ValueError("malformed fixture pod")
+        meta = pod["metadata"]
+        if (not isinstance(meta.get("namespace"), str) or not isinstance(meta.get("name"), str)
+                or not isinstance(meta.get("labels"), dict) or meta["labels"].get(OWNER) != nonce):
+            raise ValueError("fixture ownership differs")
+        key = (meta["namespace"], meta["name"])
+        if key not in expected or key in result:
+            raise ValueError("fixture pod inventory differs")
+        status = pod["status"]
+        if (status.get("phase") != "Running" or not any(c.get("type") == "Ready" and c.get("status") == "True" for c in status.get("conditions", []))
+                or len(pod["spec"]["containers"]) != 1 or pod["spec"]["containers"][0]["image"] != image
+                or len(status.get("containerStatuses", [])) != 1 or status["containerStatuses"][0].get("restartCount") != 0):
+            raise ValueError("fixture workload changed")
+        identity = (meta["uid"], status["podIP"], status["containerStatuses"][0]["imageID"])
+        if not all(isinstance(value, str) and value for value in identity):
+            raise ValueError("fixture identity unavailable")
+        result[key] = identity
+    if set(result) != set(expected):
+        raise ValueError("fixture inventory keys differ")
+    return result
+
+
+def qualify(k, peers, endpoints, image, mode, nonce):
     # Same checked production gate, with a fixture-specific ownership check:
     # these synthetic HTTP servers intentionally are ready Service endpoints.
     for name in ("network_observation", "bounded_process", "policy_state", "transaction", "policy_client", "rollout_scope", "rollout_probe"):
         load(name)
     engine = load("rollout_engine")
     evidence = load("network_evidence")
-    identities = {}
-    def snapshot(query=k):
-        result = {}
-        for namespace in sorted({namespace for namespace, _ in peers.values()}):
-            pods = json.loads(query("-n", namespace, "get", "pods", "-o", "json"))["items"]
-            if len(pods) > 16:
-                raise ValueError("fixture inventory exceeds bound")
-            for pod in pods:
-                meta, status = pod["metadata"], pod["status"]
-                if (status.get("phase") != "Running" or not any(c.get("type") == "Ready" and c.get("status") == "True" for c in status.get("conditions", []))
-                        or len(pod["spec"]["containers"]) != 1 or pod["spec"]["containers"][0]["image"] != image
-                        or len(status.get("containerStatuses", [])) != 1 or status["containerStatuses"][0].get("restartCount") != 0):
-                    raise ValueError("fixture workload changed")
-                result[(namespace, meta["name"])] = (meta["uid"], status["podIP"], status["containerStatuses"][0]["imageID"])
-        return result
-    identities = snapshot()
+    expected = set(peers.values()) | {("kanz-services", app) for app in endpoints}
+    identities = snapshot(k, expected, image, nonce)
     def check():
-        if snapshot(probes.k) != identities:
+        if snapshot(probes.k, expected, image, nonce) != identities:
             raise ValueError("fixture identity changed")
     def transport(*args, value=None, timeout=100):
         return k(*args, data=None if value is None else json.dumps(value), timeout=min(timeout, 90))

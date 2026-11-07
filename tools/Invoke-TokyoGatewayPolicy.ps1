@@ -102,7 +102,7 @@ print('fixed='+repr(fixed))
 $literalLines = ($fixed | ConvertTo-Json -Compress) | & $python -I -B -c $literalBuilder
 if ($LASTEXITCODE -ne 0 -or @($literalLines).Count -ne 1) { throw 'Fixed UTF8 source literal refused.' }
 $fixedDeclaration = [string]$literalLines
-$bundle = [ordered]@{ files = $files; payload = [ordered]@{ source = $source; policies = $policies; identity = $identity; workloads = $projection.workloads } } | ConvertTo-Json -Depth 60 -Compress
+$bundle = [ordered]@{ payload = [ordered]@{ source = $source; policies = $policies; identity = $identity; workloads = $projection.workloads }; files = $files } | ConvertTo-Json -Depth 60 -Compress
 $bytes = [Text.Encoding]::UTF8.GetBytes($bundle)
 if (($bytes.Length + $fixedSize) -gt 524288) { throw 'Rollout bundle exceeds bound.' }
 $codecPath = Join-Path $proofRoot 'transport_codec.py'

@@ -78,11 +78,26 @@ var cniProofRequirements = map[string][]string{
 		`evidence.get("runAttempt") != attempt`, `report.get("tree") != tree`, `evidence.get("backend") != backend`, `evidence.get("renderSHA256") != render_hash`,
 	},
 	"tools/gateway-policy-proof/rollout_engine.py": {
+		`self.k("get", "pods", "-A", "-l", probe.OWNER + "=" + self.nonce, "-o", "json")`,
+		`len(items) != len(self.owned)`, `if key in pods:`, `self.observe(entry, obj)`,
+		`if set(pods) != expected:`, `obj = pods[(entry["namespace"], entry["name"])]`,
 		`TCP_BATCH as TCP`, `or "unknown" in values:`, `for _ in range(6)`,
 		`consecutive = consecutive + 1 if accepted else 0`, `if consecutive >= 3`,
 		`final_end = min(self.started + 420, time.monotonic() + 180)`,
 		`active_end = min(final_end, time.monotonic() + 10)`,
 		`"format": "kanz-gateway-network-v1"`, `"isolated": isolated`, `if type(isolated) is not bool:`, `"network_verified" if passed else "network_refused"`,
+	},
+	"tools/gateway-policy-proof/network_fixture.py": {
+		`OWNER = "kanz.io/gateway-proof"`, `def selector_independent(policies, labels):`,
+		`if key == OWNER:`, `elif value == OWNER:`, `if any(OWNER in value for value in labels.values()):`,
+		`query("get", "pods", "-A", "-l", OWNER + "=" + nonce, "-o", "json")`,
+		`len(expected) != 8`, `len(items) != 8`, `key not in expected or key in result`,
+		`meta["labels"].get(OWNER) != nonce`, `if set(result) != set(expected):`,
+		`if snapshot(probes.k, expected, image, nonce) != identities:`,
+	},
+	"tools/gateway-policy-proof/proof.py": {
+		`network.selector_independent(policies, labels)`, `{**labels[target], network.OWNER: nonce}`,
+		`IMAGE, 'closed', nonce)`, `IMAGE, 'no_policy', nonce)`, `IMAGE, 'enforced', nonce)`,
 	},
 	"tools/gateway-policy-proof/network_observation.py": {
 		`errno.ECONNREFUSED`, `errno.EHOSTUNREACH`, `ipaddress.ip_address(address)`,
