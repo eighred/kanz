@@ -9,10 +9,10 @@ def launch(root, entry, arguments):
         raise ValueError("isolated Python required")
     dependencies = {
         "preflight": ("bounded_process",),
-        "recovery_host": ("bounded_process", "transaction", "transport_codec", "recovery_receipts", "recovery_provenance"),
-        "recovery_plan": ("bounded_process", "transaction", "policy_client", "rollout_scope", "recovery_receipts"),
-        "image_identity": ("transaction", "rollout_scope", "rollout_probe"),
-        "rollout_engine": ("bounded_process", "transaction", "policy_client", "rollout_scope", "rollout_probe"),
+        "recovery_host": ("bounded_process", "policy_state", "transport_codec", "recovery_receipts", "recovery_provenance"),
+        "recovery_plan": ("bounded_process", "policy_state", "policy_client", "rollout_scope", "recovery_receipts"),
+        "image_identity": ("policy_state", "transaction", "rollout_scope", "rollout_probe"),
+        "rollout_engine": ("bounded_process", "policy_state", "transaction", "policy_client", "rollout_scope", "rollout_probe"),
     }
     if entry not in dependencies:
         raise ValueError("unapproved source entrypoint")

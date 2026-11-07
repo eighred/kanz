@@ -8,7 +8,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 READER = "test_recovery_plan.RecoveryTests.test_linux_receipt_reader_rejects_links_fifo_and_inventory_changes"
-FILES = {"transaction.py", "policy_client.py", "rollout_scope.py", "recovery_receipts.py", "recovery_plan.py", "bounded_process.py", "source_loader.py"}
+FILES = {"policy_state.py", "policy_client.py", "rollout_scope.py", "recovery_receipts.py", "recovery_plan.py", "bounded_process.py", "source_loader.py"}
 
 
 def verify(wrapper, loader, workflow):
@@ -35,10 +35,10 @@ def verify(wrapper, loader, workflow):
         and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.targets[0].id == "dependencies"), None)
     expected = {
         "preflight": ("bounded_process",),
-        "image_identity": ("transaction", "rollout_scope", "rollout_probe"),
-        "rollout_engine": ("bounded_process", "transaction", "policy_client", "rollout_scope", "rollout_probe"),
-        "recovery_host": ("bounded_process", "transaction", "transport_codec", "recovery_receipts", "recovery_provenance"),
-        "recovery_plan": ("bounded_process", "transaction", "policy_client", "rollout_scope", "recovery_receipts"),
+        "image_identity": ("policy_state", "transaction", "rollout_scope", "rollout_probe"),
+        "rollout_engine": ("bounded_process", "policy_state", "transaction", "policy_client", "rollout_scope", "rollout_probe"),
+        "recovery_host": ("bounded_process", "policy_state", "transport_codec", "recovery_receipts", "recovery_provenance"),
+        "recovery_plan": ("bounded_process", "policy_state", "policy_client", "rollout_scope", "recovery_receipts"),
     }
     if dependencies is None or ast.literal_eval(dependencies) != expected:
         return False

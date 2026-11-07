@@ -65,7 +65,7 @@ $provenance = ($provenanceRaw -join "`n") | ConvertFrom-Json
 $provenanceHash = ($provenanceRaw -join "`n") | & $python -I -B -c 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(sys.stdin),sort_keys=True,separators=(",",":")).encode()).hexdigest())'
 if ($LASTEXITCODE -ne 0 -or $provenanceHash -cnotmatch '^[0-9a-f]{64}$') { throw 'Verified provenance hash missing.' }
 $files = [ordered]@{}
-foreach ($name in @('transaction.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'bounded_process.py', 'source_loader.py')) {
+foreach ($name in @('policy_state.py', 'policy_client.py', 'rollout_scope.py', 'recovery_receipts.py', 'recovery_plan.py', 'bounded_process.py', 'source_loader.py')) {
     $relative = "tools/gateway-policy-proof/$name"
     & git -C $repo ls-files --error-unmatch $relative *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Rollout engine is not tracked.' }
@@ -90,7 +90,7 @@ if ($encoded.Length -gt 20000) { throw 'Rollout transfer exceeds bounded SSM pay
 $bootstrap = $codec + "`n" + @'
 import json,os,pathlib,sys
 raw=decode(sys.argv[1])
-b=json.loads(raw); names={'transaction.py','policy_client.py','rollout_scope.py','recovery_receipts.py','recovery_plan.py','bounded_process.py','source_loader.py'}
+b=json.loads(raw); names={'policy_state.py','policy_client.py','rollout_scope.py','recovery_receipts.py','recovery_plan.py','bounded_process.py','source_loader.py'}
 if set(b)!={'files','payload'} or set(b['files'])!=names: raise ValueError('bundle shape')
 prepared={}
 for name,text in b['files'].items():
@@ -104,7 +104,7 @@ with (root/'input.json').open('x') as f:json.dump(b['payload'],f)
 '@
 $bootstrapEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
 $commands = @('set -eu', 'python3 -I -B -c ''import lzma; assert lzma.is_check_supported(lzma.CHECK_CRC64)''', 'umask 077', 'work=$(mktemp -d /var/tmp/kanz-gateway-source.XXXXXXXX)',
-    'trap ''rm -f "$work/transaction.py" "$work/policy_client.py" "$work/rollout_scope.py" "$work/recovery_receipts.py" "$work/recovery_plan.py" "$work/bounded_process.py" "$work/source_loader.py" "$work/input.json" "$work/bootstrap.py"; rmdir "$work"'' EXIT',
+    'trap ''rm -f "$work/policy_state.py" "$work/policy_client.py" "$work/rollout_scope.py" "$work/recovery_receipts.py" "$work/recovery_plan.py" "$work/bounded_process.py" "$work/source_loader.py" "$work/input.json" "$work/bootstrap.py"; rmdir "$work"'' EXIT',
     ("printf '%s' '$bootstrapEncoded' | base64 -d > `"`$work/bootstrap.py`""),
     ("python3 -I -B `"`$work/bootstrap.py`" '$encoded' `"`$work`""),
     'chmod 400 "$work"/*.py "$work/input.json"',

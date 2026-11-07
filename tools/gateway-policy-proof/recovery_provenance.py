@@ -6,7 +6,7 @@ import json
 import re
 
 import recovery_receipts as receipt
-import transaction as tx
+import policy_state as tx
 import transport_codec as codec
 
 INSTANCE = "i-0ee1235614219f089"

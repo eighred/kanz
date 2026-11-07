@@ -8,7 +8,7 @@ import sys
 from bounded_process import run
 import recovery_provenance as provenance
 import recovery_receipts as receipts
-import transaction as tx
+import policy_state as tx
 
 
 def main():

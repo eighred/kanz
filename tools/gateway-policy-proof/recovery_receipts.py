@@ -7,7 +7,7 @@ import re
 import stat
 import sys
 
-import transaction as tx
+import policy_state as tx
 
 DIRECTORY = "/var/tmp/kanz-gateway-policy-nu1ezqwo"
 OLD_SOURCE = "0769d36cf857993284109d03868393a0c7e0d7c8"

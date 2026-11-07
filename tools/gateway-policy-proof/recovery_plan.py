@@ -12,7 +12,7 @@ from bounded_process import run as bounded_run
 from policy_client import KubernetesClient
 import recovery_receipts as receipts
 import rollout_scope as scope
-import transaction as tx
+import policy_state as tx
 
 
 def cleanup_custody(records, nonce):

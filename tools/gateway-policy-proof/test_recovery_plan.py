@@ -211,7 +211,7 @@ class RecoveryTests(unittest.TestCase):
                 return json.dumps(value)
             # Existing rendered-baseline/lineage implementations have their own
             # real fixture; isolate this planner's no-write and stable-CAS seam.
-            with patch.object(tx, "qualify_rendered_baseline"), patch.object(p.scope, "snapshot", return_value={}), patch.object(p.scope, "service_snapshot", return_value={}), patch.object(p.scope, "outside_policies", return_value={}):
+            with patch.object(p.tx, "qualify_rendered_baseline"), patch.object(p.scope, "snapshot", return_value={}), patch.object(p.scope, "service_snapshot", return_value={}), patch.object(p.scope, "outside_policies", return_value={}):
                 if mutate:
                     with self.assertRaises(tx.Refusal): p.plan(k, payload, records, "e" * 64)
                 else:

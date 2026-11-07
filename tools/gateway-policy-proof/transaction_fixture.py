@@ -137,7 +137,7 @@ def ipv6_slice_control(k):
 def qualify_codec():
     """Same checked codec on actual Linux; no alternate decoder in the oracle."""
     files = {name: (Path(__file__).parent / name).read_text(encoding="utf-8") for name in
-             ("transaction.py", "policy_client.py", "rollout_probe.py", "rollout_scope.py", "rollout_engine.py", "bounded_process.py", "source_loader.py")}
+             ("policy_state.py", "transaction.py", "policy_client.py", "rollout_probe.py", "rollout_scope.py", "rollout_engine.py", "bounded_process.py", "source_loader.py")}
     raw = json.dumps({"files": files, "payload": {"synthetic": True}}, ensure_ascii=False).encode()
     encoded = codec.encode(raw)
     if codec.decode(encoded) != raw:

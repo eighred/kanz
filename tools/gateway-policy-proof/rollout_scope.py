@@ -3,7 +3,7 @@ import json
 import ipaddress
 import re
 
-import transaction as tx
+import policy_state as tx
 
 CLUSTER_UID = "86ea9839-5806-461d-b2d1-afd1ff5d87ff"
 APPS = {"kanz-services": ("accounting", "audit", "compliance", "api-gateway", "web-bff"),
