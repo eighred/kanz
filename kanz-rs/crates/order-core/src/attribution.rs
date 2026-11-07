@@ -15,9 +15,13 @@ pub struct Slice {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    Capacity,
     NoArrival,
     NoFills,
     MissingFillPrice,
+}
+fn bounded(value: &Rat) -> bool {
+    value.numer().bits() <= 4096 && value.denom().bits() <= 4096
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +47,16 @@ pub struct Decomposition {
 /// Matches Go Attribute, including its existing non-SELL sign convention.
 /// This is not an order-side admission validator. Fees are not in this measure.
 pub fn attribute(side: i32, arrival: Option<&Rat>, slices: &[Slice]) -> Result<Attribution, Error> {
+    if slices.len() > 100_000
+        || arrival.is_some_and(|n| !bounded(n))
+        || slices.iter().any(|s| {
+            [&s.filled, &s.average, &s.release, &s.bid, &s.ask]
+                .iter()
+                .any(|n| n.as_ref().is_some_and(|v| !bounded(v)))
+        })
+    {
+        return Err(Error::Capacity);
+    }
     let arrival = arrival
         .filter(|n| n.is_positive())
         .ok_or(Error::NoArrival)?;
@@ -72,6 +86,12 @@ pub fn attribute(side: i32, arrival: Option<&Rat>, slices: &[Slice]) -> Result<A
                 drift_cost += q * &sign * (mark - arrival);
             }
         }
+        if [&quantity, &notional, &spread_cost, &drift_cost]
+            .iter()
+            .any(|n| !bounded(n))
+        {
+            return Err(Error::Capacity);
+        }
     }
     if quantity.is_zero() {
         return Err(Error::NoFills);
@@ -80,10 +100,19 @@ pub fn attribute(side: i32, arrival: Option<&Rat>, slices: &[Slice]) -> Result<A
     let denominator = &quantity * arrival;
     let bps = |cost: Rat| cost / &denominator * Rat::from_integer(10_000.into());
     let shortfall_bps = bps((&average - arrival) * &sign * &quantity);
+    if [&average, &shortfall_bps].iter().any(|n| !bounded(n)) {
+        return Err(Error::Capacity);
+    }
     let decomposition = if measured == traded {
         let spread_bps = bps(spread_cost);
         let timing_bps = bps(drift_cost);
         let impact_bps = &shortfall_bps - &spread_bps - &timing_bps;
+        if [&spread_bps, &timing_bps, &impact_bps]
+            .iter()
+            .any(|n| !bounded(n))
+        {
+            return Err(Error::Capacity);
+        }
         Some(Decomposition {
             spread_bps,
             impact_bps,
@@ -143,7 +172,16 @@ impl Participation {
     }
 }
 
-pub fn participation(intervals: &[ParticipationInterval]) -> Participation {
+pub fn participation(intervals: &[ParticipationInterval]) -> Result<Participation, Error> {
+    if intervals.len() > 100_000
+        || intervals.iter().any(|i| {
+            [&i.filled, &i.volume]
+                .iter()
+                .any(|n| n.as_ref().is_some_and(|v| !bounded(v)))
+        })
+    {
+        return Err(Error::Capacity);
+    }
     let mut out = Participation {
         quality: ParticipationQuality::NotWorked,
         intervals: 0,
@@ -169,7 +207,13 @@ pub fn participation(intervals: &[ParticipationInterval]) -> Participation {
         out.measured += 1;
         filled += q;
         printed += volume;
+        if !bounded(&filled) || !bounded(&printed) {
+            return Err(Error::Capacity);
+        }
         let rate = q / volume;
+        if !bounded(&rate) {
+            return Err(Error::Capacity);
+        }
         if out.maximum.as_ref().is_none_or(|old| &rate > old) {
             out.maximum = Some(rate);
             out.maximum_index = interval.index;
@@ -186,9 +230,13 @@ pub fn participation(intervals: &[ParticipationInterval]) -> Participation {
         ParticipationQuality::Partial
     };
     if out.measured != 0 {
-        out.overall = Some(filled / printed);
+        let overall = filled / printed;
+        if !bounded(&overall) {
+            return Err(Error::Capacity);
+        }
+        out.overall = Some(overall);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -264,7 +312,7 @@ mod tests {
                 volume: Some(n(20)),
             },
         ];
-        let p = participation(&rows);
+        let p = participation(&rows).unwrap();
         assert_eq!(p.quality, ParticipationQuality::Partial);
         assert_eq!((p.intervals, p.measured, p.maximum_index), (3, 2, 2));
         assert_eq!(p.overall, Some(Rat::new(1.into(), 5.into())));
