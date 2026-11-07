@@ -178,10 +178,12 @@ jobs:
           python3 ../.github/scripts/go_mod_download.py
 
       - name: Build
+        if: matrix.kind == 'quality'
         working-directory: kanz
         run: go build ./...
 
       - name: Vet
+        if: matrix.kind == 'quality'
         working-directory: kanz
         run: go vet ./...
 
