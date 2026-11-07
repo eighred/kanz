@@ -85,7 +85,7 @@ class TransactionEvidenceTests(unittest.TestCase):
         for part in required:
             with self.subTest(part=part): self.assertFalse(wired(text.replace(part, "removed")))
         self.assertEqual(len(CASES), 19)
-        self.assertEqual(CASES[:8], ["response_loss_" + str(i) for i in range(1, 9)])
+        self.assertEqual(CASES[1:9], ["response_loss_" + str(i) for i in range(1, 9)])
 
     def test_exact_source_attempt_complete_cases_cleanup_and_identity_required(self):
         report = {"format": "kanz-gateway-policy-transaction-proof-v1", "source": "a" * 40, "tree": "b" * 40,

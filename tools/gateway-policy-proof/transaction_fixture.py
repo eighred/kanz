@@ -19,8 +19,8 @@ from rollout_engine import Probes
 import rollout_probe
 from bounded_process import run as bounded_run
 
-CASES = ["response_loss_" + str(at) for at in range(1, 9)] + [
-    "bounded_xz_transport", "dry_run_no_write", "four_policy_success", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
+CASES = ["bounded_xz_transport"] + ["response_loss_" + str(at) for at in range(1, 9)] + [
+    "dry_run_no_write", "four_policy_success", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
     "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"]
 
 
