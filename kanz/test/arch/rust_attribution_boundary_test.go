@@ -13,7 +13,7 @@ func attributionPrimitiveBoundary(files map[string]string) bool {
 		"src/attribution.rs":                    {"measured == traded", "ok_or(Error::NoArrival)?", "Err(Error::NoFills)", "interval.to_nanos <= interval.from_nanos", "q / volume", "c.is_positive()"},
 		"src/attribution_projection.rs":         {"!aggregate::is_terminal(st)", "!st.parent_order_id.is_empty()", "children.len() > 100_000", "bytes > MAX_BYTES", "!seen.insert", "count > 100_000", "v.numer().bits() > 4096", "v.denom().bits() > 4096", "parent.message_wire(name)?", "value.ordered_quantity = None", "value.arrival_at = None", "let identities = schedule_identity::ChildIds::new(&st.order_id);", ".map(|i| (identities.at(i64::from(i)), i))", "schedule_identity::interval", "Outcome::Unrepresentable", "Outcome::CapturedOutsideCanonicalDomain", "crate::decimal_domain(&dynamic, 0).is_ok()", "value.numer().bits() > 4096"},
 		"src/schedule_identity.rs":              {"prefix.update(parent.as_bytes());", `prefix.update(b":");`, "let mut state = self.0.clone();", "state.update(index.to_string().as_bytes());", "&sum[..16]", ".min(i64::MAX as i128)", "span * i as u128 / slices as u128"},
-		"examples/order-attribution-fixture.rs": {"struct Tape(BTreeMap<String, BTreeMap<String, Intervals>>)", "Entry::Occupied(_) => Err(Error::InvalidInput)", ".get(instrument)", "venues.get(venue)", "intervals.get(&(from, to))"},
+		"examples/order-attribution-fixture.rs": {"struct Tape(BTreeMap<String, BTreeMap<String, Intervals>>)", "Entry::Occupied(_) => Err(Error::InvalidInput)", "self.0.get(instrument)", "std::ptr::eq(instrument, self.instrument)", "self.tape.0.get(instrument)", "t.for_instrument(&parent.value().instrument_id)", "venues.get(venue)", "intervals.get(&(from, to))"},
 	}
 	for path, markers := range required {
 		source := strings.SplitN(files[path], "#[cfg(test)]", 2)[0]
@@ -28,6 +28,12 @@ func attributionPrimitiveBoundary(files map[string]string) bool {
 				return false
 			}
 		}
+	}
+	fixture := strings.SplitN(files["examples/order-attribution-fixture.rs"], "#[cfg(test)]", 2)[0]
+	resolve := strings.Index(fixture, "t.for_instrument(&parent.value().instrument_id)")
+	measure := strings.Index(fixture, "let result = projection::measure(")
+	if resolve < 0 || measure < 0 || resolve >= measure {
+		return false
 	}
 	projection := files["src/attribution_projection.rs"]
 	prefix := strings.Index(projection, "let identities = schedule_identity::ChildIds::new(&st.order_id);")
@@ -61,6 +67,9 @@ func TestRustAttributionPrimitiveBoundary(t *testing.T) {
 		{"examples/order-attribution-fixture.rs", "Entry::Occupied(_) => Err(Error::InvalidInput)", "Entry::Occupied(_) => Ok(())"},
 		{"examples/order-attribution-fixture.rs", "intervals.get(&(from, to))", "intervals.values().next()"},
 		{"src/attribution_projection.rs", "let identities = schedule_identity::ChildIds::new(&st.order_id);", ""},
+		{"examples/order-attribution-fixture.rs", "std::ptr::eq(instrument, self.instrument)", "instrument == self.instrument"},
+		{"examples/order-attribution-fixture.rs", "t.for_instrument(&parent.value().instrument_id)", "unresolved"},
+		{"examples/order-attribution-fixture.rs", "self.tape.0.get(instrument)", "self.venues"},
 		{"src/arithmetic.rs", "decimal_fit(value, 64)", "decimal_fit(value, i32::MAX)"},
 		{"src/attribution_projection.rs", "crate::decimal_domain(&dynamic, 0).is_ok()", "true"},
 		{"src/attribution.rs", "measured == traded", "measured > 0"},
