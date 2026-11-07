@@ -35,6 +35,8 @@ import (
 // A real commit with an injected lost response, not a claimed network partition.
 type responseFaultLog struct {
 	projection.Log
+	simulateAmbiguous                             bool
+	ambiguous                                     atomic.Bool
 	fail                                          atomic.Bool
 	release                                       chan struct{}
 	fresh, duplicate, appendError, held, injected atomic.Uint64
@@ -57,7 +59,12 @@ func (l *responseFaultLog) Append(ctx context.Context, f projection.Fact) (bool,
 	} else {
 		l.duplicate.Add(1)
 	}
-	if err == nil && fresh && l.fail.CompareAndSwap(false, true) {
+	// A real committed first insert can lose its response. The next confirmed
+	// duplicate still proves durability and must arm the injected outage.
+	if err == nil && fresh && l.simulateAmbiguous && l.ambiguous.CompareAndSwap(false, true) {
+		return false, 0, errors.New("injected ambiguous first commit response")
+	}
+	if err == nil && l.fail.CompareAndSwap(false, true) {
 		l.injected.Add(1)
 		return false, 0, errors.New("injected lost committed response")
 	}
@@ -115,7 +122,7 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 	if url == "" {
 		t.Skip("TEST_TV_NATS_URL required (dedicated broker without other service consumers)")
 	}
-	for _, mode := range []string{"committed-response", "database-timeout", "restart-unacked"} {
+	for _, mode := range []string{"committed-response", "ambiguous-committed-response", "database-timeout", "restart-unacked"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
@@ -153,7 +160,7 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 			}
 			source := projection.NewPostgresLog(pool)
 			var log projection.Log = source
-			fault := &responseFaultLog{Log: source, release: make(chan struct{})}
+			fault := &responseFaultLog{Log: source, release: make(chan struct{}), simulateAmbiguous: mode == "ambiguous-committed-response"}
 			if mode != "database-timeout" {
 				log = fault
 			}
@@ -202,7 +209,7 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 							handlerSuccess.Add(1)
 						}
 					}
-					if err != nil {
+					if err != nil && (mode == "database-timeout" || fault.fail.Load()) {
 						select {
 						case failed <- (fault.injected.Load() == 1 && fault.held.Load() > 0):
 						default:
@@ -240,7 +247,7 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 				}
 				diagnostic, endDiagnostic := context.WithTimeout(context.Background(), 3*time.Second)
 				defer endDiagnostic()
-				t.Logf("retained diagnostic: injected=%d fresh=%d duplicate=%d append_error=%d held=%d target_handler_success=%d target_handler_error=%d ready=%t", fault.injected.Load(), fault.fresh.Load(), fault.duplicate.Load(), fault.appendError.Load(), fault.held.Load(), handlerSuccess.Load(), handlerError.Load(), r.Ready())
+				t.Logf("retained diagnostic: ambiguous=%t injected=%d fresh=%d duplicate=%d append_error=%d held=%d target_handler_success=%d target_handler_error=%d ready=%t", fault.ambiguous.Load(), fault.injected.Load(), fault.fresh.Load(), fault.duplicate.Load(), fault.appendError.Load(), fault.held.Load(), handlerSuccess.Load(), handlerError.Load(), r.Ready())
 				err := target.observe(dlq.NextMsg, 100*time.Millisecond, nil)
 				result := "no_target_observed"
 				if errors.Is(err, errTargetParked) {
@@ -293,6 +300,9 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 			if mode != "database-timeout" && !postInjection {
 				t.Fatal("required post-injection failed broker retry not established; see bounded diagnostics")
 			}
+			if mode == "ambiguous-committed-response" && (!fault.ambiguous.Load() || fault.fresh.Load() != 1 || fault.duplicate.Load() < 1) {
+				t.Fatal("real committed insert then confirmed duplicate not established")
+			}
 			r.Set(true)
 			r.FoldResult(tenant, "unrelated", false)
 			if r.Ready() {
@@ -338,6 +348,14 @@ func TestTVRetainedFactsRecoverWithNATSAndPostgres(t *testing.T) {
 			var count int
 			if err := pool.QueryRow(ctx, "SELECT count(*) FROM tv_facts").Scan(&count); err != nil || count != 1 {
 				t.Fatalf("durable facts=%d err=%v", count, err)
+			}
+			storedPayload, err := proto.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recorded []byte
+			if err := pool.QueryRow(ctx, "SELECT payload FROM tv_facts WHERE event_id=$1", target.eventID).Scan(&recorded); err != nil || !bytes.Equal(recorded, storedPayload) {
+				t.Fatal("durable original payload changed")
 			}
 			// Same subscription spans the outage and recovery. New durables can
 			// re-park old malformed history before tenant filtering.
@@ -464,7 +482,8 @@ func TestTargetDLQObservationIsIdentityScoped(t *testing.T) {
 }
 
 // These outcome counters distinguish an injected lost response from an actual
-// Append error followed by a duplicate. Neither case implies DLQ parking.
+// Append error followed by a confirmed duplicate that also arms injection.
+// Neither case implies DLQ parking.
 type diagnosticAppendLog struct {
 	projection.Log
 	fresh bool
@@ -497,13 +516,34 @@ func TestResponseFaultDiagnosticsDistinguishInjection(t *testing.T) {
 				}
 			} else {
 				base.err = nil
-				if fresh, _, err := fault.Append(context.Background(), projection.Fact{}); err != nil || fresh {
-					t.Fatal("duplicate outcome differs")
+				if fresh, _, err := fault.Append(context.Background(), projection.Fact{}); err == nil || fresh {
+					t.Fatal("confirmed duplicate did not inject response loss")
 				}
-				if fault.injected.Load() != 0 || fault.appendError.Load() != 1 || fault.duplicate.Load() != 1 || fault.fail.Load() {
-					t.Fatal("uninjected error misclassified")
+				if fault.injected.Load() != 1 || fault.appendError.Load() != 1 || fault.duplicate.Load() != 1 || !fault.fail.Load() {
+					t.Fatal("confirmed duplicate injection misclassified")
 				}
 			}
 		})
+	}
+}
+
+func TestAmbiguousResponseRequiresConfirmedDuplicateBeforeFault(t *testing.T) {
+	base := &diagnosticAppendLog{fresh: true}
+	fault := &responseFaultLog{Log: base, release: make(chan struct{}), simulateAmbiguous: true}
+	if _, _, err := fault.Append(context.Background(), projection.Fact{}); err == nil || !fault.ambiguous.Load() || fault.fail.Load() || fault.injected.Load() != 0 {
+		t.Fatal("ambiguous first response counted as confirmed injection")
+	}
+	base.fresh = false
+	if _, _, err := fault.Append(context.Background(), projection.Fact{}); err == nil || fault.injected.Load() != 1 || fault.duplicate.Load() != 1 {
+		t.Fatal("confirmed duplicate did not arm loss")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := fault.Append(ctx, projection.Fact{}); !errors.Is(err, context.Canceled) || fault.held.Load() != 1 {
+		t.Fatal("post-injection retry not held")
+	}
+	close(fault.release)
+	if _, _, err := fault.Append(context.Background(), projection.Fact{}); err != nil || fault.injected.Load() != 1 {
+		t.Fatal("release reinjected or refused")
 	}
 }
