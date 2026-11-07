@@ -117,12 +117,24 @@ class PayloadTests(unittest.TestCase):
 
     def test_distinct_build_root_and_config(self):
         root, config = "sha256:" + "a" * 64, "sha256:" + "b" * 64
-        value = {"containerimage.digest": root, "containerimage.config.digest": config}
-        self.assertEqual(q.build_identity(json.dumps(value).encode(), root), (root, config))
-        with self.assertRaises(ValueError): q.build_identity(json.dumps(value).encode(), config)
-        for field in value:
-            bad = dict(value); bad[field] = "invalid"
-            with self.assertRaises(ValueError): q.build_identity(json.dumps(bad).encode(), root)
+        value = {"containerimage.digest": root, "containerimage.config.digest": config,
+                 "containerimage.descriptor": {"digest": root, "mediaType": "application/vnd.oci.image.manifest.v1+json", "size": 500}}
+        self.assertEqual(q.build_identity(json.dumps(value).encode(), config), (root, config))
+        with self.assertRaises(ValueError): q.build_identity(json.dumps(value).encode(), root)
+        mutations = [
+            lambda m: m.update({"containerimage.digest": config, "containerimage.config.digest": root}),
+            lambda m: m.update({"containerimage.config.digest": "invalid"}),
+            lambda m: m.pop("containerimage.descriptor"),
+            lambda m: m["containerimage.descriptor"].update(digest=config),
+            lambda m: m["containerimage.descriptor"].update(mediaType="application/vnd.oci.image.index.v1+json"),
+            lambda m: m["containerimage.descriptor"].update(mediaType="unknown"),
+            lambda m: m["containerimage.descriptor"].update(size=True),
+            lambda m: m["containerimage.descriptor"].update(size=0),
+            lambda m: m["containerimage.descriptor"].update(size=1024 * 1024 + 1),
+        ]
+        for mutate in mutations:
+            bad = json.loads(json.dumps(value)); mutate(bad)
+            with self.assertRaises(ValueError): q.build_identity(json.dumps(bad).encode(), config)
 
     def test_registry_descriptors(self):
         image = "sha256:" + "a" * 64

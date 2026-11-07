@@ -125,8 +125,11 @@ def local_tag(commit):
 def build_identity(raw, iid):
     value = metadata(raw)
     root, config = value.get("containerimage.digest"), value.get("containerimage.config.digest")
-    if not all(isinstance(v, str) and re.fullmatch("sha256:[0-9a-f]{64}", v) for v in (root, config)) or root != iid:
+    if not all(isinstance(v, str) and re.fullmatch("sha256:[0-9a-f]{64}", v) for v in (root, config)) or config != iid:
         raise ValueError("build root/config identity mismatch")
+    desc = value.get("containerimage.descriptor")
+    if not isinstance(desc, dict) or desc.get("digest") != root or desc.get("mediaType") not in {"application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"} or type(desc.get("size")) is not int or not 0 < desc["size"] <= 1024 * 1024:
+        raise ValueError("build manifest descriptor differs")
     return root, config
 
 

@@ -7,8 +7,9 @@ licensing notices and metadata. No Kanz module, schema, generated SDK, applicati
 source, application inventory or build cache is an input or published layer.
 
 The host builds using a Dockerfile on stdin with no filesystem context. Explicit
-BuildKit metadata binds the manifest root to the IID and separately binds the
-configuration digest to saved configuration bytes. A fixed source-SHA local tag
+BuildKit metadata binds the configuration digest to the IID and saved
+configuration bytes. Its separate manifest descriptor must bind the root digest
+with a supported image media type and bounded positive byte size. A fixed source-SHA local tag
 is the load/save work reference; it is not a published trust identity. This
 producer alone disables automatic BuildKit provenance/SBOM attachments to retain
 its closed single-image graph; existing release/SBOM checks are unchanged. The
