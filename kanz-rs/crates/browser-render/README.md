@@ -1,7 +1,7 @@
 # Browser exact-rendering kernel
 
-Local qualification source only; the Vue client still calls its existing
-TypeScript implementation. This library formats existing values, not prices,
+The Vue adapter uses this kernel after validating its build-owned WASM asset,
+with the existing TypeScript renderer as fallback. This library formats values, not prices,
 portfolio state, risk decisions or commands. It has no dependencies or host I/O.
 
 Decimal input is the existing coefficient string plus exponent, with an explicit
@@ -9,7 +9,7 @@ Decimal input is the existing coefficient string plus exponent, with an explicit
 canonical common.v1.Decimal sint64 values. The previous TypeScript renderer also
 accepted unbounded, noncanonical digit strings: this is intentionally not a claim
 of compatibility with those inputs. Missing-object/default-field semantics stay
-in the eventual TypeScript adapter, which is not implemented here.
+in the TypeScript adapter; oversized Decimal coefficients retain the legacy path.
 
 RatString input preserves the existing separate 128-character numerator and
 denominator limits (257 bytes including slash). No fraction reduction is added:
@@ -26,7 +26,8 @@ output. Out-of-range output reads return 256. Buffers are fixed at 257 input and
 is accepted; the module is single-instance, non-reentrant presentation work.
 
 Actual compiled WASM, bounded linear memory, source/asset binding and Chromium
-execution remain required. The existing TypeScript source is frozen under tests
+execution are separate required checks. The existing TypeScript source is frozen under tests
 as the differential oracle, alongside independent rational/string goldens.
-Production Vite loading, CSP, unavailable-module rendering and browser caller
-proofs are not yet implemented or qualified. No UI or authority cutover is made.
+The shared build helper owns production Vite assets and the qualification recipe.
+The BFF/Chromium fixture covers loading, CSP and unavailable-module fallback; its
+Linux CI result is required before delivery. No financial authority is transferred.

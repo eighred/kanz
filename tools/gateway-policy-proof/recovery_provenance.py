@@ -83,10 +83,16 @@ def verify(command, invocation, git_file, policies, workloads):
         raise tx.Refusal("original probe image pin unavailable")
     expected_root = images[0].split("@", 1)[1]
     identity = payload["identity"]
+    # Frozen OLD_SOURCE resolve() accepts both an index/list and a direct
+    # manifest. A direct root is the selected manifest, not an index identity.
+    indexes = ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json")
+    manifests = ("application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json")
     if (not isinstance(identity, dict) or set(identity) != {"root", "rootMediaType", "manifest", "config", "platform"}
             or identity["platform"] != "linux/amd64" or identity["root"] != expected_root
-            or identity["rootMediaType"] != "application/vnd.oci.image.index.v1+json"
-            or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", identity.get(key, "")) for key in ("root", "manifest", "config"))):
+            or identity["rootMediaType"] not in indexes + manifests
+            or any(not isinstance(identity[key], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", identity[key])
+                   for key in ("root", "manifest", "config"))
+            or (identity["rootMediaType"] in manifests) != (identity["root"] == identity["manifest"])):
         raise tx.Refusal("original image identity shape differs")
     return {"command": receipt.COMMAND, "instance": INSTANCE, "oldSource": receipt.OLD_SOURCE,
             "directory": receipt.DIRECTORY, "commandSHA256": tx.fingerprint(parameters),

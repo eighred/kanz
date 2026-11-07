@@ -1,3 +1,5 @@
+import { renderBrowserValue } from './browser-renderer'
+
 // Rendering common.v1.Decimal in a browser (#399).
 //
 // A Decimal is {coefficient, exponent} and it is NOT a number here. protojson
@@ -50,6 +52,9 @@ export function formatDecimal(d: Decimal | undefined | null): string | null {
 
   if (!/^-?\d+$/.test(raw)) return null
   if (!Number.isInteger(exponent) || Math.abs(exponent) > MAX_SAFE_EXPONENT) return null
+
+  const rendered = renderBrowserValue(1, raw, exponent)
+  if (rendered.handled) return rendered.value
 
   const negative = raw.startsWith('-')
   let digits = negative ? raw.slice(1) : raw
@@ -136,6 +141,9 @@ export function formatRational(s: string | undefined | null): string | null {
   // rendered with the wrong sign.
   if (!/^-?\d+$/.test(numerator) || !/^\d+$/.test(denominator)) return null
   if (numerator.length > MAX_RAT_DIGITS || denominator.length > MAX_RAT_DIGITS) return null
+
+  const rendered = renderBrowserValue(2, s)
+  if (rendered.handled) return rendered.value
 
   let den = BigInt(denominator)
   if (den === 0n) return null
