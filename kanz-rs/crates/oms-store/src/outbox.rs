@@ -234,6 +234,10 @@ pub struct DrainLock {
     key: i32,
 }
 impl DrainLock {
+    /// Close a possibly held lock by canceling and joining its dedicated session.
+    pub(crate) async fn close(self) {
+        self.session.close().await;
+    }
     pub(crate) fn client(&mut self) -> &mut Client {
         self.session.client()
     }
@@ -277,30 +281,7 @@ pub async fn lock_key(
     key: &str,
     wait: bool,
 ) -> Result<Option<DrainLock>, Error> {
-    let result: Result<(bool, i32, i32), Error> = async {
-        if key.len() > MAX_BYTES {
-            return Err(Error::Capacity);
-        }
-        let tx = scoped(&mut session.client, tenant).await?;
-        // A failed CancelRequest or a runtime already shutting down cannot leave a
-        // blocked backend indefinitely. This bounded port refuses waits above5s.
-        tx.batch_execute("SET LOCAL lock_timeout='5s'").await?;
-        let row = tx.query_one(LOCK_IDS, &[&key, &SUFFIX]).await?;
-        let scope: i32 = row.try_get(0)?;
-        let key: i32 = row.try_get(1)?;
-        let won = if wait {
-            tx.query_one("SELECT pg_advisory_lock($1,$2)", &[&scope, &key])
-                .await?;
-            true
-        } else {
-            tx.query_one("SELECT pg_try_advisory_lock($1,$2)", &[&scope, &key])
-                .await?
-                .try_get(0)?
-        };
-        tx.rollback().await?;
-        Ok((won, scope, key))
-    }
-    .await;
+    let result = acquire_key(&mut session, tenant, key, wait).await;
     match result {
         Ok((true, scope, key)) => Ok(Some(DrainLock {
             session,
@@ -314,6 +295,69 @@ pub async fn lock_key(
         Err(error) => {
             session.close().await;
             Err(error)
+        }
+    }
+}
+
+// Borrow the session so cancellation cannot drop its owner before explicit close.
+async fn acquire_key(
+    session: &mut Session,
+    tenant: &str,
+    key: &str,
+    wait: bool,
+) -> Result<(bool, i32, i32), Error> {
+    if key.len() > MAX_BYTES {
+        return Err(Error::Capacity);
+    }
+    let tx = scoped(&mut session.client, tenant).await?;
+    // A failed CancelRequest or a runtime already shutting down cannot leave a
+    // blocked backend indefinitely. This bounded port refuses waits above5s.
+    tx.batch_execute("SET LOCAL lock_timeout='5s'").await?;
+    let row = tx.query_one(LOCK_IDS, &[&key, &SUFFIX]).await?;
+    let scope: i32 = row.try_get(0)?;
+    let key: i32 = row.try_get(1)?;
+    let won = if wait {
+        tx.query_one("SELECT pg_advisory_lock($1,$2)", &[&scope, &key])
+            .await?;
+        true
+    } else {
+        tx.query_one("SELECT pg_try_advisory_lock($1,$2)", &[&scope, &key])
+            .await?
+            .try_get(0)?
+    };
+    tx.rollback().await?;
+    Ok((won, scope, key))
+}
+
+pub(crate) async fn lock_key_before(
+    mut session: Session,
+    tenant: &str,
+    key: &str,
+    expires: tokio::time::Instant,
+) -> Result<Option<DrainLock>, Error> {
+    if tokio::time::Instant::now() >= expires {
+        session.close().await;
+        return Err(Error::PublicationUnconfirmed);
+    }
+    let result =
+        tokio::time::timeout_at(expires, acquire_key(&mut session, tenant, key, true)).await;
+    if tokio::time::Instant::now() >= expires {
+        session.close().await;
+        return Err(Error::PublicationUnconfirmed);
+    }
+    match result {
+        Ok(Ok((true, scope, key))) => Ok(Some(DrainLock {
+            session,
+            scope,
+            key,
+        })),
+        other => {
+            session.close().await;
+            match other {
+                Ok(Ok(_)) => Ok(None),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(Error::PublicationUnconfirmed),
+            }
         }
     }
 }

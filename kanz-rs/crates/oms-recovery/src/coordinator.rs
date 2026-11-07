@@ -47,33 +47,51 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
         {
             return Err(Error::InvalidInput);
         }
+        let expires = tokio::time::Instant::now() + deadline;
         let tenant = config.venue.tenant.clone();
         let (stop, receiver) = tokio::sync::watch::channel(false);
         let connect = Client::connect_until(config.venue, receiver);
         tokio::pin!(connect);
-        let mut venue = tokio::select! {
-            result=&mut connect=>result.map_err(|_|Error::Venue)?,
-            _=tokio::time::sleep(deadline)=>{
+        let connected = tokio::select! {
+            result=&mut connect=>result,
+            _=tokio::time::sleep_until(expires)=>{
                 let _=stop.send(true);
                 if let Ok(venue)=connect.await { venue.close().await; }
                 return Err(Error::Deadline);
             }
         };
-        if venue
-            .register(
+        let mut venue = connected.map_err(|_| {
+            if tokio::time::Instant::now() >= expires {
+                Error::Deadline
+            } else {
+                Error::Venue
+            }
+        })?;
+        if tokio::time::Instant::now() >= expires {
+            venue.close().await;
+            return Err(Error::Deadline);
+        }
+        let registered = tokio::time::timeout_at(
+            expires,
+            venue.register(
                 &config.mic,
                 &config.account,
                 Requirements {
                     verified_account: true,
                     declared_order_types: true,
                 },
-                deadline,
-            )
-            .await
-            .is_err()
-        {
+                expires.saturating_duration_since(tokio::time::Instant::now()),
+            ),
+        )
+        .await;
+        let expired = tokio::time::Instant::now() >= expires;
+        if expired || !matches!(registered, Ok(Ok(_))) {
             venue.close().await;
-            return Err(Error::Venue);
+            return Err(if expired || registered.is_err() {
+                Error::Deadline
+            } else {
+                Error::Venue
+            });
         }
         let relay = match Relay::new(
             publisher,
@@ -89,6 +107,10 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
                 return Err(e.into());
             }
         };
+        if tokio::time::Instant::now() >= expires {
+            venue.close().await;
+            return Err(Error::Deadline);
+        }
         Ok(Self {
             tenant: tenant.clone(),
             binding: observation::Binding {
@@ -119,11 +141,29 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
         {
             return Err(Error::InvalidInput);
         }
+        let expires = tokio::time::Instant::now() + deadline;
         let env = handlers::envelope(&self.tenant, envelope)?;
-        let mut session = tokio::time::timeout(deadline, self.sessions.connect())
-            .await
-            .map_err(|_| Error::Deadline)??;
-        let phase = tokio::time::timeout(deadline, async {
+        if tokio::time::Instant::now() >= expires {
+            return Err(Error::Deadline);
+        }
+        let connected = tokio::time::timeout_at(expires, self.sessions.connect()).await;
+        let mut session = match connected {
+            Ok(Ok(session)) => session,
+            other => {
+                if tokio::time::Instant::now() >= expires {
+                    return Err(Error::Deadline);
+                }
+                return Err(match other {
+                    Ok(Err(error)) => error.into(),
+                    _ => Error::Deadline,
+                });
+            }
+        };
+        if tokio::time::Instant::now() >= expires {
+            session.close().await;
+            return Err(Error::Deadline);
+        }
+        let phase = tokio::time::timeout_at(expires, async {
             let client = session.client();
             match method {
                 Method::Observation => {
@@ -134,7 +174,7 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
                         env.value(),
                         payload,
                         now,
-                        deadline,
+                        expires.saturating_duration_since(tokio::time::Instant::now()),
                     )
                     .await
                 }
@@ -145,13 +185,28 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
             }
         })
         .await;
-        // Explicitly join the dedicated driver on every normal error/timeout.
-        // Dropping the entire future retains Session's cancellation-safe fallback.
+        let phase_expired = tokio::time::Instant::now() >= expires;
+        // The work clock continues during cleanup. A timed-out transaction may
+        // have committed: Deadline is not a rollback receipt. Retain explicit
+        // session ownership until cancellation and the driver have been joined.
         session.close().await;
-        let key = phase.map_err(|_| Error::Deadline)??;
-        let result = tokio::time::timeout(deadline, self.relay.flush(&key))
-            .await
-            .map_err(|_| Error::PublicationUnconfirmed)?;
+        let key = match phase {
+            Ok(Ok(key)) => key,
+            Ok(Err(error)) => {
+                return Err(if phase_expired {
+                    Error::Deadline
+                } else {
+                    error
+                })
+            }
+            Err(_) => return Err(Error::Deadline),
+        };
+        // The successful handler may have committed financial state. Never begin
+        // another phase after expiry or label its publication as confirmed.
+        if tokio::time::Instant::now() >= expires {
+            return Err(Error::PublicationUnconfirmed);
+        }
+        let result = self.relay.flush_before(&key, expires).await;
         match result {
             Ok(outcome) if outcome.stalled.is_none() => Ok(()),
             _ => Err(Error::PublicationUnconfirmed),

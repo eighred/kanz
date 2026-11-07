@@ -24,6 +24,12 @@ struct Init {
     portfolio: String,
     schema: String,
     timeout_ms: u64,
+    #[serde(default)]
+    session_delay_ms: u64,
+    #[serde(default)]
+    hold_after_ack: u64,
+    #[serde(default)]
+    ack_hold_ms: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +53,7 @@ struct Command {
 struct Connector {
     config: tokio_postgres::Config,
     schema: String,
+    delay: Duration,
 }
 struct Driver(Option<tokio::task::JoinHandle<bool>>);
 impl Drop for Driver {
@@ -59,6 +66,7 @@ impl Drop for Driver {
 impl Sessions for Connector {
     fn connect(&mut self) -> Task<'_, Result<Session, Error>> {
         Box::pin(async {
+            tokio::time::sleep(self.delay).await;
             let (client, connection) = self.config.connect(NoTls).await?;
             let mut driver = Driver(Some(tokio::spawn(async move { connection.await.is_ok() })));
             let mut session = Session::new(
@@ -75,19 +83,28 @@ impl Sessions for Connector {
         })
     }
 }
-struct Broker(async_nats::jetstream::Context);
+struct Broker {
+    context: async_nats::jetstream::Context,
+    acknowledgements: u64,
+    hold_after: u64,
+    hold: Duration,
+}
 impl Publisher for Broker {
     fn publish<'a>(&'a mut self, frame: &'a Frame) -> Task<'a, Result<(), PublishFailure>> {
         Box::pin(async move {
             let mut headers = async_nats::HeaderMap::new();
             headers.insert("Nats-Msg-Id", frame.event_id.as_str());
             headers.insert("Kanz-Partition-Key", frame.partition_key.as_str());
-            self.0
+            self.context
                 .publish_with_headers(frame.subject.clone(), headers, frame.body.clone().into())
                 .await
                 .map_err(|_| PublishFailure::Broker)?
                 .await
                 .map_err(|_| PublishFailure::Broker)?;
+            self.acknowledgements += 1;
+            if self.hold_after != 0 && self.acknowledgements == self.hold_after {
+                tokio::time::sleep(self.hold).await;
+            }
             Ok(())
         })
     }
@@ -162,7 +179,11 @@ async fn run() -> Result<(), ()> {
     let init: Init =
         serde_json::from_slice(&line(&mut reader).await?.ok_or(())?).map_err(|_| ())?;
     let uri: http::Uri = init.endpoint.parse().map_err(|_| ())?;
-    if uri.scheme_str() != Some("https")
+    if init.session_delay_ms > 2000
+        || !matches!(init.hold_after_ack, 0 | 2)
+        || init.ack_hold_ms > 2000
+        || (init.hold_after_ack == 0) != (init.ack_hold_ms == 0)
+        || uri.scheme_str() != Some("https")
         || !matches!(uri.host(), Some("127.0.0.1" | "[::1]"))
         || uri.authority().is_none_or(|a| a.as_str().contains('@'))
         || !init.schema.starts_with("oms_recovery_")
@@ -228,8 +249,14 @@ async fn run() -> Result<(), ()> {
         Connector {
             config: pg,
             schema: init.schema,
+            delay: Duration::from_millis(init.session_delay_ms),
         },
-        Broker(async_nats::jetstream::new(nc.clone())),
+        Broker {
+            context: async_nats::jetstream::new(nc.clone()),
+            acknowledgements: 0,
+            hold_after: init.hold_after_ack,
+            hold: Duration::from_millis(init.ack_hold_ms),
+        },
         Framer::new("oms/recovery-fixture".into(), version.into()).map_err(|_| ())?,
         deadline(init.timeout_ms)?,
     )

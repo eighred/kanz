@@ -44,7 +44,7 @@ http = "=1.5.0"
 `
 
 var recoveryMarkers = map[string][]string{
-	"src/coordinator.rs": {`Client::connect_until(config.venue,receiver)`, `verified_account:true`, `declared_order_types:true`, `session.close().await`, `self.relay.flush(&key)`, `outcome.stalled.is_none()`},
+	"src/coordinator.rs": {`Client::connect_until(config.venue,receiver)`, `verified_account:true`, `declared_order_types:true`, `session.close().await`, `letexpires=tokio::time::Instant::now()+deadline`, `tokio::time::timeout_at(expires,self.sessions.connect())`, `tokio::time::timeout_at(expires,async`, `tokio::time::Instant::now()>=expires`, `self.relay.flush_before(&key,expires)`, `outcome.stalled.is_none()`},
 	"src/observation.rs": {`repository::observe(`, `repository::mapping_matches(`, `latest.version!=loaded.version`, `venue.describe(deadline)`, `venue.query_recovery_history(`, `history::complete(`, `repository::freeze(`, `preparation::posted(`, `approval::approved(`, `recovery::commit_streamed_recovery(`, `id.account_verified`, `Error::Conflict`},
 	"src/preparation.rs": {`recovery_repository::posted_reader(`, `cursor.finish().await?`, `identity::same_execution(row.current.value(),previous.value())`, `aggregate::apply_recovered_fill(`, `aggregate::recovery_average(`},
 	"src/approval.rs":    {`actual!=evidence.stored_digest`, `approved>=proposed+ttl`, `fee_subject::normalize(&a.approver)==fee_subject::normalize(&p.proposer)`, `p.history_digest!=history_digest`, `p.mapping_version!=case.mapping_version`},
@@ -144,6 +144,8 @@ func TestRustRecoveryCoordinatorMarkerMutations(t *testing.T) {
 // The closed budget remains shared; these markers bind each approved caller
 // and keep the ordinary decoder/RPC path at its original one-MiB default.
 var recoverySharedMarkers = map[string][]string{
+	"crates/oms-store/src/relay.rs":               {`outbox::lock_key_before(session,&self.tenant,key,expires)`, `self.under_lock(lock.client(),key,&mutconfirmed,Some(expires))`, `lock.close().await`, `*confirmed=sent`, `work_remaining(expires,sent)?`, `Ok(frame)=>{work_remaining(expires,sent)?;tokio::time::timeout`, `sent:confirmed,error:Error::PublicationUnconfirmed`},
+	"crates/oms-store/src/outbox.rs":              {`acquire_key(&mutsession,tenant,key,true)`, `tokio::time::Instant::now()>=expires`, `session.close().await`, `self.session.close().await`},
 	"crates/proto-wire/src/lib.rs":                {`pubenumBudget{Standard,RecoveryHistory,}`, `Self::Standard=>MAX_BYTES`, `Self::RecoveryHistory=>4*MAX_BYTES`, `normalize_with_budget(desc,raw,Budget::Standard)`, `raw.len()>limit`, `value.encoded_len()>limit`, `out.len().checked_add(raw.len()).is_none_or(|n|n>limit)`, `ifdepth>32`},
 	"crates/proto-wire/src/canonical.rs":          {`Self::decode_with_budget(raw,Budget::Standard)`, `value.encoded_len()>MAX_BYTES`},
 	"crates/oms-venue/src/client.rs":              {`self.call_budget(method,value,deadline,kanz_proto_wire::Budget::Standard)`, `method!="/venue.v1.VenueAdapterService/QueryOrder"`, `B::NAME!="venue.v1.QueryOrderResponse"`, `max_encoding_message_size(kanz_proto_wire::MAX_BYTES)`},

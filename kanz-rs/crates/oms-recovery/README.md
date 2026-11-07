@@ -62,7 +62,22 @@ adapter. It accepts loopback test databases/broker and an authenticated syntheti
 venue, inherits only explicit test environment, emits closed status codes, and
 never prints DSNs, financial payloads or raw SQL errors. Its bounded JSON is not
 a production service boundary. It has a 15-minute lifetime and per-command
-30-second maximum; it does not batch ACKs. Actual runtime qualification uses the
+30-second absolute work budget across connection, handler and relay; it does not
+batch ACKs. That clock continues while the handler session is closed, and no
+relay phase starts after expiry. Deadline is not a rollback receipt: a commit or
+broker acknowledgement can already have occurred. Post-handler/relay expiry is
+publication-unconfirmed; only broker-acknowledged and SQL-marked records count as
+a confirmed prefix, and the unresolved suffix is retried idempotently.
+
+Cleanup is separately awaited: a held relay lock closes its dedicated session
+on expiry (up to5s protocol cancellation grace); normal release allows up to5s
+unlock plus up to5s cancellation before aborting/joining the owned driver.
+The fixture then allows3s to observe SQL session absence. Its45s response wait
+observes the30s work budget plus this cleanup; it does not extend financial work
+and is not a hard operating-system scheduling bound. Cancellation before a
+connector returns its Session still uses the connector's abort-on-drop fallback,
+not a claim of explicitly joined pre-Session shutdown. Existing general relay
+APIs retain their semantics; the coordinator uses the owned deadline variant. Actual runtime qualification uses the
 optimized release binary with workspace overflow checks enabled; debug unit tests
 and Clippy remain separate. Each response reports its compiled assertion profile,
 and evidence binds the immutable source, release target path and executable hash.
