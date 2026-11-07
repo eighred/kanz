@@ -20,6 +20,12 @@ ID from DNS, reuse an ID solely because another estate has the same SVID, or
 pipe a discovery result directly into apply. This tool has no discovery or
 automatic identity-adoption mode; even `plan` requires the selected expected ID.
 
+The supported ID subset is ASCII letters, digits, `_` and `-`, optionally
+preceded by the exact `redpanda.` prefix, with a total limit of 128 bytes.
+`redpanda.initializing` and `redpanda.unknown` refuse. Redpanda allows broader
+configured strings upstream; those are unsupported here, not normalized into an
+accepted ID. Every broker observation must still equal the caller's exact pin.
+
 Native `tenantctl` requires the existing onboarding prerequisites plus:
 
 | Input | Required value |

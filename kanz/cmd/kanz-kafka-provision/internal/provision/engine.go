@@ -40,7 +40,7 @@ type Receipt struct {
 
 func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 	r := Receipt{Mode: mode, ManifestSHA: p.ManifestSHA, ClusterID: p.ClusterID}
-	if (mode != "plan" && mode != "apply" && mode != "verify") || !clusterIdentity.MatchString(p.ClusterID) || api == nil || len(p.Topics) == 0 || len(p.Topics) > 256 || len(p.ACLs) != 6 {
+	if (mode != "plan" && mode != "apply" && mode != "verify") || !ValidClusterID(p.ClusterID) || api == nil || len(p.Topics) == 0 || len(p.Topics) > 256 || len(p.ACLs) != 6 {
 		return r, ErrInput
 	}
 	var missing []Topic

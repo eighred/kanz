@@ -29,6 +29,30 @@ func TestNativeKafkaOffboardRefusesBeforeAnyLifecycleStep(t *testing.T) {
 	}
 }
 
+func TestNativeKafkaTenantctlClusterGrammarBeforeEffects(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal("bash required")
+	}
+	for _, tc := range []struct {
+		id    string
+		valid bool
+	}{
+		{"cluster-a", true}, {"redpanda.safe_custom-1", true}, {"", false},
+		{"redpanda.initializing", false}, {"redpanda.unknown", false}, {"redpanda.x.y", false}, {"redpanda.$(id)", false},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cmd := exec.CommandContext(ctx, bash, "infra/tenancy/tenantctl.sh", "onboard")
+		cmd.Dir = moduleRoot(t)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TENANT=native-probe", "TENANTCTL_KAFKA_MODE=native", "NATIVE_KAFKA_CLUSTER_ID=" + tc.id, "KUBECONFIG=" + filepath.Join(t.TempDir(), "never-created")}
+		out, runErr := cmd.CombinedOutput()
+		cancel()
+		if runErr == nil || strings.Contains(string(out), ">> [") || strings.Contains(string(out), "unbound variable") || strings.Contains(string(out), "native exact expected Kafka ClusterID required") == tc.valid {
+			t.Fatal("tenantctl cluster preflight did not discriminate before effects")
+		}
+	}
+}
+
 func checkNativeKafkaOwner(files map[string]string) bool {
 	main := files["main"]
 	engine := files["engine"]

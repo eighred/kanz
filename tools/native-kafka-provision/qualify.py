@@ -11,6 +11,7 @@ import uuid
 
 import yaml
 import topology
+import image_custody
 
 sys.path.insert(0, str(topology.ROOT / 'tools/gateway-policy-proof'))
 import bounded_process
@@ -19,6 +20,12 @@ ROOT = topology.ROOT
 CASES = ('discover', 'acme-apply', 'acme-idempotent', 'bravo-apply', 'compute-apply',
          'wrong-cluster', 'tenant-a', 'tenant-b', 'compute-a', 'ungranted', 'partial',
          'acme-verify', 'bravo-verify')
+
+
+def valid_cluster_id(value):
+    return (isinstance(value,str) and 0<len(value)<=128 and
+            re.fullmatch(r'(?:redpanda\.)?[A-Za-z0-9_-]+',value) is not None and
+            value not in ('redpanda.initializing','redpanda.unknown'))
 
 
 def source_identity(source, tree, run, attempt, expected):
@@ -71,7 +78,7 @@ def pod_custody(items, desired, uid, pod_uid=None):
     return pod
 
 
-def pod_diagnostic(items, desired, uid, image_id, inspection=None):
+def pod_diagnostic(items, desired, uid):
     pod=pod_custody(items,desired,uid)
     wanted=desired['spec']['template']['spec']
     statuses = pod.get('status', {}).get('containerStatuses', [])
@@ -81,15 +88,6 @@ def pod_diagnostic(items, desired, uid, image_id, inspection=None):
     if len(statuses) != 1 or statuses[0].get('name') != wanted['containers'][0]['name']:
         raise ValueError('pod container differs')
     status = statuses[0]
-    actual_image = status.get('imageID', '')
-    if actual_image not in (image_id, 'docker://' + image_id, 'containerd://' + image_id):
-        # kind import may expose a repository manifest reference, not the Docker
-        # configuration digest. Bind both through actual CRI image readback.
-        cri = (inspection or {}).get('status', {})
-        if (cri.get('id') != image_id or not isinstance(cri.get('repoDigests'), list) or
-                not 1 <= len(cri['repoDigests']) <= 16 or actual_image not in cri['repoDigests']):
-            raise ValueError('pod image identity differs')
-    result['imageBound'] = True
     state = status.get('state', {})
     if len(state) != 1 or next(iter(state)) not in ('running', 'waiting', 'terminated'):
         raise ValueError('pod state unknown')
@@ -121,9 +119,9 @@ def probe_diagnostic(text, mode, source):
     return value
 
 
-def command(argv, data=None, timeout=300):
+def command(argv, data=None, timeout=300, *, strip=True, stdout_limit=4 << 20):
     return bounded_process.run(argv, cwd=ROOT, env=dict(os.environ), data=data, timeout=timeout,
-                               stdout_limit=4 << 20, stderr_limit=4 << 20)
+                               stdout_limit=stdout_limit, stderr_limit=4 << 20, strip=strip)
 
 
 def job(name, namespace, sa, image, *, args=None, mode=None, cluster=None):
@@ -155,7 +153,7 @@ def parse_probe(text, mode, source, cluster=None):
     expected = {'version':source, 'mode':mode, 'cluster_id':value.get('cluster_id'),
                 'identity':identity,'unique_id':True,'passed':True,
                 'renewed':mode in ('tenant-a','tenant-b','compute-a')}
-    if value != expected or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', value.get('cluster_id','')):
+    if value != expected or not valid_cluster_id(value.get('cluster_id','')):
         raise ValueError('probe identity or result differs')
     if cluster is not None and value['cluster_id'] != cluster:
         raise ValueError('probe changed estate')
@@ -217,6 +215,49 @@ def validate_receipt(receipt, case, cluster, digest, count):
             raise ValueError('initial grant inventory differs')
 
 
+def validate_diagnostics(value, source):
+    diagnostics=value.get('diagnostics')
+    if not isinstance(diagnostics,list) or len(diagnostics)!=len(CASES):
+        raise ValueError('diagnostic inventory missing')
+    for case,item in zip(CASES,diagnostics):
+        if not isinstance(item,dict) or set(item)!={'case','jobState','custody','collection','probe','container','imageVerified','image'}:
+            raise ValueError('diagnostic shape differs')
+        if (item['case']!=case or item['jobState']!=('Failed' if case=='wrong-cluster' else 'Complete') or
+                item['custody'] is not True or item['collection']!='complete' or item['imageVerified'] is not True):
+            raise ValueError('diagnostic custody incomplete')
+        state=item['container']
+        if (not isinstance(state,dict) or set(state)!={'state','exitCode','reason','imageBound'} or
+                state['state']!='terminated' or state['imageBound'] is not True or
+                type(state['exitCode']) is not int or not 0<=state['exitCode']<=255 or
+                (state['exitCode']!=0)!=(case=='wrong-cluster') or state['reason'] not in ('Completed','Error','UNKNOWN')):
+            raise ValueError('container outcome differs')
+        graph=item['image']
+        if not isinstance(graph,dict) or set(graph)!={'verified','dockerIdentityType','podIdentityType','dockerIdentity','podIdentity','config','platformManifest','contentCount'}:
+            raise ValueError('image graph summary missing')
+        if (graph['verified'] is not True or graph['dockerIdentityType'] not in ('config','manifest','index') or
+                graph['podIdentityType'] not in ('config','manifest','index') or
+                type(graph['contentCount']) is not int or not 1<=graph['contentCount']<=6):
+            raise ValueError('image graph summary invalid')
+        for field in ('dockerIdentity','podIdentity','config'):
+            if not isinstance(graph[field],str) or not image_custody.DIGEST.fullmatch(graph[field]): raise ValueError('image graph digest absent')
+        manifest=graph['platformManifest']
+        if manifest is not None and (not isinstance(manifest,str) or not image_custody.DIGEST.fullmatch(manifest)):
+            raise ValueError('platform manifest invalid')
+        for side in ('docker','pod'):
+            kind=graph[side+'IdentityType'];identity=graph[side+'Identity']
+            if (kind=='config' and identity!=graph['config']) or (kind=='manifest' and identity!=manifest):
+                raise ValueError('typed graph identity differs')
+        if (graph['podIdentityType']==graph['dockerIdentityType']=='config') != (manifest is None): raise ValueError('platform graph absent')
+        probe=case in ('discover','tenant-a','tenant-b','compute-a','ungranted','partial')
+        if graph['dockerIdentity']!=value.get('probeImage' if probe else 'adminImage'):
+            raise ValueError('built image identity differs')
+        if probe:
+            closed=probe_diagnostic('NATIVE_DIAGNOSTIC:'+json.dumps(item['probe']),case,source)
+            if closed.get('phase')!='complete' or closed.get('category')!='ok': raise ValueError('probe did not complete')
+        elif item['probe']!={'state':'UNKNOWN'}:
+            raise ValueError('unexpected CLI probe projection')
+
+
 def validate_report(value, source, tree, run, attempt, manifest):
     source_identity(source, tree, run, attempt, source)
     digest,count=canonical_count(manifest)
@@ -236,6 +277,7 @@ def validate_report(value, source, tree, run, attempt, manifest):
         raise ValueError('incomplete native proof')
     if not all(x.get('passed') is True for x in value['cases']):
         raise ValueError('case refused')
+    validate_diagnostics(value,source)
     for item in value['cases']:
         case=item['case']
         if case in ('discover','tenant-a','tenant-b','compute-a','ungranted','partial'):
@@ -248,7 +290,7 @@ def validate_report(value, source, tree, run, attempt, manifest):
     for name in ('adminImage','probeImage'):
         if not re.fullmatch(r'sha256:[0-9a-f]{64}',value.get(name,'')):
             raise ValueError('image custody absent')
-    if not re.fullmatch(r'[0-9a-f]{64}',value.get('manifestSHA','')) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',value.get('clusterID','')):
+    if not re.fullmatch(r'[0-9a-f]{64}',value.get('manifestSHA','')) or not valid_cluster_id(value.get('clusterID','')):
         raise ValueError('resource custody absent')
 
 
@@ -288,25 +330,32 @@ def main():
                         pods=json.loads(observe('-n',ns,'get','pods','-l','batch.kubernetes.io/controller-uid='+uid,'-o','json'))
                         label='probe' if jobname in ('discover','tenant-a','tenant-b','compute-a','ungranted','partial') else 'admin'
                         pod_custody(pods.get('items'),d,uid)
-                        statuses=pods['items'][0].get('status',{}).get('containerStatuses',[])
-                        inspection=None
-                        if len(statuses)==1:
-                            diagnostic['collection']='image'
-                            observed=statuses[0].get('imageID','')
-                            if not re.fullmatch(r'(?:[a-z0-9][a-z0-9./:_-]{0,255}@)?sha256:[0-9a-f]{64}',observed):
-                                raise ValueError('runtime image reference unknown')
-                            remaining=deadline-time.monotonic()
-                            if remaining<=0: raise TimeoutError('job observation expired')
-                            inspection=json.loads(command(['docker','exec',name+'-control-plane','crictl','inspecti',observed],timeout=min(300,remaining)))
-                        diagnostic['container']=pod_diagnostic(pods.get('items'),d,uid,evidence[label+'Image'],inspection)
-                        # Read only the custody-checked pod; bounded raw bytes stay
-                        # private and only a closed projection reaches artifacts.
+                        diagnostic['container']=pod_diagnostic(pods.get('items'),d,uid)
+                        # Self-reported phase is advisory until the image graph is
+                        # verified. Persist it even if the collector later fails.
+                        diagnostic['imageVerified']=False
                         diagnostic['collection']='closed-probe'
                         selected=pods['items'][0]['metadata']
                         logs=observe('-n',ns,'logs',selected['name'],'-c','probe','--limit-bytes=65536')
                         after=json.loads(observe('-n',ns,'get','pod',selected['name'],'-o','json'))
                         pod_custody([after],d,uid,selected['uid'])
                         if label=='probe': diagnostic['probe']=probe_diagnostic(logs,jobname,source)
+                        artifact.write_text(json.dumps(evidence,sort_keys=True)+'\n',encoding='utf-8')
+                        diagnostic['collection']='image'
+                        statuses=pods['items'][0].get('status',{}).get('containerStatuses',[])
+                        if len(statuses)!=1: raise ValueError('runtime image status absent')
+                        observed=statuses[0].get('imageID','')
+                        image_custody.reference_digest(observed)
+                        requested=d['spec']['template']['spec']['containers'][0]['image']
+                        def node(*args,raw=False):
+                            remaining=deadline-time.monotonic()
+                            if remaining<=0: raise TimeoutError('job observation expired')
+                            return command(['docker','exec',name+'-control-plane',*args],timeout=min(300,remaining),strip=not raw,stdout_limit=1<<20)
+                        inspection=json.loads(node('crictl','inspecti',requested))
+                        diagnostic['image']=image_custody.verify(inspection,requested,observed,evidence[label+'Image'],
+                            lambda digest:node('ctr','--namespace=k8s.io','content','get',digest,raw=True).encode('utf-8'))
+                        diagnostic['imageVerified']=True
+                        diagnostic['container']['imageBound']=True
                         diagnostic['collection']='complete'
                         if terminal != ['Failed' if failed else 'Complete']:
                             raise ValueError('unexpected actual job outcome')

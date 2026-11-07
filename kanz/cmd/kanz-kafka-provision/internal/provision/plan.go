@@ -12,7 +12,15 @@ import (
 
 // Plan retains the exact requested settings. No apply path changes existing
 // retention, partitions, replicas or unrelated grants to make this plan fit.
-var clusterIdentity = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+var clusterIdentity = regexp.MustCompile(`^(redpanda\.)?[A-Za-z0-9_-]+$`)
+
+// ValidClusterID supports Kafka's safe identifier form and Redpanda's explicit
+// prefix with the same bounded safe suffix. Other configured Redpanda strings
+// are unsupported; no normalization changes the caller's exact estate pin.
+func ValidClusterID(id string) bool {
+	return len(id) > 0 && len(id) <= 128 && clusterIdentity.MatchString(id) &&
+		id != "redpanda.initializing" && id != "redpanda.unknown"
+}
 
 type Plan struct {
 	ClusterID   string
@@ -27,7 +35,7 @@ type Plan struct {
 // be parsed for inventory parity, but this tenant-onboarding slice cannot grant
 // a prefix for the unprefixed system namespace.
 func NewPlan(raw []byte, digest, tenant, principal, clusterID string) (Plan, error) {
-	if !clusterIdentity.MatchString(clusterID) || !tenantName.MatchString(tenant) || !strings.HasPrefix(principal, "User:") {
+	if !ValidClusterID(clusterID) || !tenantName.MatchString(tenant) || !strings.HasPrefix(principal, "User:") {
 		return Plan{}, ErrInput
 	}
 	id, err := spiffeid.FromString(strings.TrimPrefix(principal, "User:"))

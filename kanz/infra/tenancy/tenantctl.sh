@@ -172,7 +172,7 @@ preflight() {
       [[ "${NATIVE_KAFKA_IMAGE:-}" =~ ^ghcr\.io/eighred/kanz-kafka-provision@sha256:[0-9a-f]{64}$ ]] || missing+=("native tool image digest required")
       [[ "${NATIVE_KAFKA_MANIFEST_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || missing+=("native tracked manifest SHA256 required")
       [[ "${NATIVE_KAFKA_BROKER:-}" =~ ^[a-z0-9][a-z0-9.-]*:[1-9][0-9]{0,4}$ ]] || missing+=("native TLS bootstrap host:port required")
-      [[ "${NATIVE_KAFKA_CLUSTER_ID:-}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || missing+=("native exact expected Kafka ClusterID required")
+      [[ "${NATIVE_KAFKA_CLUSTER_ID:-}" =~ ^(redpanda\.)?[A-Za-z0-9_-]+$ && ${#NATIVE_KAFKA_CLUSTER_ID} -le 128 && "$NATIVE_KAFKA_CLUSTER_ID" != redpanda.initializing && "$NATIVE_KAFKA_CLUSTER_ID" != redpanda.unknown ]] || missing+=("native exact expected Kafka ClusterID required")
       case "${NATIVE_KAFKA_BROKER_SPIFFE_ID:-}" in
         spiffe://kanz.internal/ns/kanz-messaging/sa/kafka|spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda) ;;
         *) missing+=("native exact canonical broker SPIFFE ID required") ;;

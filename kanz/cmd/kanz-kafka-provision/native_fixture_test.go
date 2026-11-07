@@ -148,7 +148,7 @@ func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDia
 	client := &kafka.Client{Addr: kafka.TCP(nativeAddress), Transport: tr}
 	diagnostic.Phase = "metadata"
 	meta, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{}})
-	if err != nil || meta == nil || meta.ClusterID == "" || len(meta.ClusterID) > 128 || len(meta.Brokers) != 3 {
+	if err != nil || meta == nil || !provision.ValidClusterID(meta.ClusterID) || len(meta.Brokers) != 3 {
 		return out, provision.ErrBroker
 	}
 	out.ClusterID = meta.ClusterID
