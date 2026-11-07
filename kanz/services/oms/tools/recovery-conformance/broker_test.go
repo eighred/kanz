@@ -45,7 +45,7 @@ func (f *fixture) recoveredWithin(t *testing.T, count int, wait time.Duration) f
 		t.Fatal(err)
 	}
 	consumerName := f.schema + "_" + f.tenant
-	consumer, err := js.CreateConsumer(f.ctx, stream, jetstream.ConsumerConfig{Name: consumerName, FilterSubject: fillfact.SubjectRecovered, DeliverPolicy: jetstream.DeliverNewPolicy, AckPolicy: jetstream.AckExplicitPolicy})
+	consumer, err := js.CreateConsumer(f.ctx, stream, jetstream.ConsumerConfig{Name: consumerName, Durable: consumerName, FilterSubject: fillfact.SubjectRecovered, DeliverPolicy: jetstream.DeliverNewPolicy, AckPolicy: jetstream.AckExplicitPolicy})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +59,10 @@ func (f *fixture) recoveredWithin(t *testing.T, count int, wait time.Duration) f
 			} else {
 				t.Errorf("recovery consumer cleanup failed: context_canceled=%t deadline=%t", errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded))
 			}
+			return
+		}
+		if _, err := js.Consumer(cleanupCtx, stream, consumerName); !errors.Is(err, jetstream.ErrConsumerNotFound) {
+			t.Error("recovery consumer absence not established after deletion")
 		}
 	})
 	batch, err := consumer.Fetch(count, jetstream.FetchMaxWait(wait))

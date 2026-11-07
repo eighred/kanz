@@ -71,11 +71,15 @@ func TestRustRecoveryComplete8000History(t *testing.T) {
 			}
 			observe := func() bool {
 				if w == nil {
-					return svc.HandleRecovery(lineage(f.ctx, env), env, payload) == nil
+					err := svc.HandleRecovery(lineage(f.ctx, env), env, payload)
+					if err != nil && !isFullBatchStall(err, st.OrderId) {
+						t.Fatalf("large-history Go failed before publication drain: category=%s", goErrorCategory(err))
+					}
+					return err == nil
 				}
 				r := w.call(map[string]any{"method": "Observation", "envelope": wire(t, env), "payload": payload, "at": clock(), "timeout_ms": 30000})
 				if !r.SessionsClosed || (r.Status != "ok" && (r.Status != "error" || r.Error != "PublicationUnconfirmed")) {
-					t.Fatal("large-history owner failed before bounded publication drain")
+					t.Fatalf("large-history owner failed before bounded publication drain: status=%s error=%s sessions_closed=%t", r.Status, r.Error, r.SessionsClosed)
 				}
 				return r.Status == "ok"
 			}

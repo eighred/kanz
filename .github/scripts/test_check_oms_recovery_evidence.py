@@ -72,7 +72,7 @@ class RecoveryEvidenceTests(unittest.TestCase):
 
     def test_complete_bound_proof(self):
         result = proof.qualify(self.root, self.binding, True)
-        self.assertEqual(result["required_passes"], 68)
+        self.assertEqual(result["required_passes"], 69)
         self.assertEqual(proof.qualify(self.root, self.binding), result)
     def test_missing_or_skipped_case(self):
         for mode in ("missing", "skip"):

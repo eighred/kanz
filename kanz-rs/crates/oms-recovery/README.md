@@ -68,7 +68,8 @@ actual PostgreSQL, NATS and synthetic rotating SPIFFE mTLS. Large Go and Rust
 8,000-fill cases run separately and exercise all 16,000 book ACKs. The dedicated
 primary PostgreSQL fixture explicitly provisions `max_locks_per_transaction=1024`,
 `max_connections=100`, `max_prepared_transactions=0`; a second unchanged-default
-64/100/0 instance proves lock-capacity failure without a financial prefix. Both
+64/100/0 instance is a separate capacity-refusal control whose actual failure
+cause and absence of a financial prefix must be qualified. Both
 use NOSUPERUSER/NOBYPASSRLS and twelve FORCE-RLS owner tables. This is disposable
 capacity qualification, not production tuning or a concurrency guarantee.
 Observed process RSS is retained as measurement, not an accepted resource ceiling.

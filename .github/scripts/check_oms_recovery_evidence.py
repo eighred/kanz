@@ -20,7 +20,7 @@ GROUPS = {
  "TestRustRecoveryObservationPayloadBoundary": ["above-standard-message-bound", "exact-four-mib", "one-byte-over-four-mib"],
  **{name: ["go", "rust"] for name in ("TestRustRecoveryOversizedSingleFactRefusal", "TestRustRecoveryComplete8000History", "TestRustRecovery8001HistoryRefusal", "TestRustRecoveryDefaultLockCapacityRefusal", "TestRustRecoveryMalformedPostedJournal", "TestRustRecoveryTenantIsolation", "TestRustRecoveryExplicitZeroHistory", "TestRustRecoveryFrozenMappingAttribution")},
 }
-NAMES = set(GROUPS) | {f"{name}/{child}" for name, children in GROUPS.items() for child in children} | {"TestRustRecoveryConcurrentGoWriter", "TestRustRecoveryCrashDuringHistoryQuery", "TestRecoveryObservationPaddingOracle"}
+NAMES = set(GROUPS) | {f"{name}/{child}" for name, children in GROUPS.items() for child in children} | {"TestRustRecoveryConcurrentGoWriter", "TestRustRecoveryCrashDuringHistoryQuery", "TestRecoveryObservationPaddingOracle", "TestRecoveryDrainRetryClassification"}
 REQUIRED = {PACKAGE: NAMES}
 STREAMS = ("recovery.jsonl", "large-go.jsonl", "large-rust.jsonl")
 MAX_STREAM_BYTES = 64 * 1024 * 1024

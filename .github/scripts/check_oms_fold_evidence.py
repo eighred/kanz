@@ -223,6 +223,8 @@ REQUIRED = {
             "poison-key-isolation", "publish-mark-rollback-redelivery", "mark-failed-refusal",
             "stop-joins-inflight", "competing-go-rust", "tenant-service-isolation", "real-broker-refusal-stops-key",
         )},
+        "TestRustRelayPageCapacity",
+        *{"TestRustRelayPageCapacity/" + case for case in ("valid", "oversized", "corrupt")},
         "TestRustProposalSharedContract", "TestRustProposalTransactions",
         *{"TestRustProposalSharedContract/" + case.replace(" ", "_") for case in (
             'the dual-control record survives the round trip',

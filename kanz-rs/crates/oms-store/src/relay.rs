@@ -330,12 +330,35 @@ impl<P: Publisher, S: Sessions> Relay<P, S> {
         }
     }
     async fn under_lock(&mut self, client: &mut Client, key: &str) -> Result<Outcome, Failure> {
-        let records = outbox::pending(client, &self.tenant, key, self.batch)
-            .await
-            .map_err(|error| Failure { sent: 0, error })?;
-        let full = records.len() == self.batch as usize;
+        // Keep the whole-page fast path. Capacity alone permits bounded single-row
+        // reads under the same key lock; Queue::pending itself never returns a prefix.
+        // A later bad row can therefore follow acknowledged publications, but its
+        // unresolved suffix always returns failure rather than an empty-queue proof.
+        let (records, streaming) =
+            match outbox::pending(client, &self.tenant, key, self.batch).await {
+                Ok(records) => (records, false),
+                Err(Error::Capacity) => (Vec::new(), true),
+                Err(error) => return Err(Failure { sent: 0, error }),
+            };
+        let full = streaming || records.len() == self.batch as usize;
+        let mut records = records.into_iter();
         let mut sent = 0;
-        for p in records {
+        while sent < self.batch as usize {
+            let next = if streaming {
+                outbox::pending(client, &self.tenant, key, 1)
+                    .await
+                    .map_err(|error| Failure { sent, error })?
+                    .into_iter()
+                    .next()
+            } else {
+                records.next()
+            };
+            let Some(p) = next else {
+                return Ok(Outcome {
+                    sent,
+                    stalled: None,
+                });
+            };
             if self.stopped() {
                 return Ok(Outcome {
                     sent,

@@ -291,6 +291,13 @@ at-least-once redelivery possible; it is never proof that publication rolled bac
 Go Record.Event does not persist EventID, so each retry receives a fresh UUIDv7
 and idempotency key while durable payload, timestamp and attribution survive.
 
+The normal queue-page read remains unchanged. If its aggregate byte budget refuses
+the page, the relay reads one bounded record at a time under the same key lock,
+up to the configured batch count. This adds SQL round trips only on that fallback.
+A corrupt or oversized later record can follow an acknowledged prefix; the suffix
+remains pending and the result is a failure/stall, never a successful empty queue.
+Queue.Pending itself still refuses the whole page without returning a prefix.
+
 Canonical descriptors resolve payload types. Known protobuf fields are normalized
 like Go Unmarshal/Marshal, including duplicate embedded messages. The existing
 fee-wire parser preserves unknown values and group bytes, with canonical tags;
