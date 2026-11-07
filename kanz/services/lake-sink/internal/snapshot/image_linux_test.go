@@ -132,7 +132,7 @@ func TestSnapshotActualHybridImageEntrypointAndAutomaticLifecycleLanding(t *test
 	for key, value := range environment {
 		args = append(args, "--env", key+"="+value)
 	}
-	container := owned.start(t, ctx, image, args)
+	container := owned.startPrepared(t, ctx, image, args, func(id string) { owned.prepareLanding(t, ctx, id, volume) })
 	ready, healthReachable, healthStatus := false, false, 0
 	defer func() {
 		if ready {
@@ -370,6 +370,10 @@ func (o *snapshotImageOwner) volume(t *testing.T, ctx context.Context) string {
 }
 
 func (o *snapshotImageOwner) start(t *testing.T, ctx context.Context, image string, args []string, entryArgs ...string) string {
+	return o.startPrepared(t, ctx, image, args, nil, entryArgs...)
+}
+
+func (o *snapshotImageOwner) startPrepared(t *testing.T, ctx context.Context, image string, args []string, prepare func(string), entryArgs ...string) string {
 	t.Helper()
 	name := fmt.Sprintf("kanz-lake-image-%s-%d", o.label, len(o.containers))
 	if len(bytes.TrimSpace(o.docker(t, ctx, "ps", "-a", "--filter", "name=^/"+name+"$", "--format", "{{.Names}}"))) != 0 {
@@ -386,6 +390,9 @@ func (o *snapshotImageOwner) start(t *testing.T, ctx context.Context, image stri
 	}
 	if strings.TrimSpace(string(o.docker(t, ctx, "inspect", "--format", `{{.Id}}|{{index .Config.Labels "kanz.snapshot-image"}}|{{index .Config.Labels "kanz.snapshot-image-run"}}`, name))) != id+"|"+o.label+"|"+o.run {
 		t.Fatal("created container ownership differs")
+	}
+	if prepare != nil {
+		prepare(id)
 	}
 	o.docker(t, ctx, "start", id)
 	return id
@@ -529,4 +536,30 @@ func (o *snapshotImageOwner) proveRuntime(t *testing.T, ctx context.Context, id,
 		t.Fatal("actual cgroup limits differ")
 	}
 	t.Logf("actual hybrid cgroup: memory_max=%d memory_peak=%d pids_max=%d", values["memory.max"], values["memory.peak"], values["pids.max"])
+}
+
+// The capture owner intentionally requires an existing root. Provision only this
+// disposable volume directory; do not relax production no-follow/open semantics.
+func (o *snapshotImageOwner) prepareLanding(t *testing.T, ctx context.Context, id, volume string) {
+	t.Helper()
+	projection := `{"id":{{json .Id}},"nonce":{{json (index .Config.Labels "kanz.snapshot-image")}},"run":{{json (index .Config.Labels "kanz.snapshot-image-run")}},"running":{{.State.Running}},"status":{{json .State.Status}},"readonly":{{.HostConfig.ReadonlyRootfs}},"mount":{{range .Mounts}}{{if eq .Destination "/tmp"}}{"name":{{json .Name}},"type":{{json .Type}},"destination":{{json .Destination}},"rw":{{.RW}}}{{end}}{{end}}}`
+	if !snapshotLandingTarget(o.docker(t, ctx, "inspect", "--format", projection, id), id, o.label, o.run, volume) {
+		t.Fatal("landing target is not the owned stopped application volume")
+	}
+	if strings.TrimSpace(string(o.docker(t, ctx, "volume", "inspect", "--format", `{{index .Labels "kanz.snapshot-image"}}|{{index .Labels "kanz.snapshot-image-run"}}`, volume))) != o.label+"|"+o.run {
+		t.Fatal("landing volume ownership differs")
+	}
+	call, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(call, "docker", "cp", "--archive", "-", id+":/tmp")
+	cmd.Stdin = bytes.NewReader(snapshotLandingArchive())
+	var output snapshotProcessOutput
+	cmd.Stdout, cmd.Stderr = &output, io.Discard
+	cmd.WaitDelay = 5 * time.Second
+	if cmd.Run() != nil {
+		t.Fatal("owned landing provisioning failed")
+	}
+	if !snapshotLandingReadback(o.docker(t, ctx, "cp", id+":/tmp/landing", "-")) {
+		t.Fatal("owned landing metadata readback differs")
+	}
 }
