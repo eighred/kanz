@@ -160,11 +160,9 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 				}
 				carryover[source] = bucket.Add(time.Minute)
 			}
-			// Advisory Symbol currently differs by owner; no producer is changed
-			// or payload normalized here. InstrumentID and all economic values
-			// retain common expectations. #1413 owns the remaining compatibility.
+			// All full-process owners preserve the authoritative Go book metadata.
 			previous := make(map[string]*handoffPrevious)
-			depth := func(source, expectedSymbol string, sequence uint64, phase string) {
+			depth := func(source string, sequence uint64, phase string) {
 				switch phase {
 				case "initial", "refresh", "reanchor", "reconnect", "rollback":
 				default:
@@ -208,14 +206,14 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 							decoded := proto.Unmarshal(frame.Payload, book) == nil
 							levels := len(book.Bids) == 1 && len(book.Asks) == 1
 							economics := levels && dec.FromProto(book.Bids[0].Price).Cmp(big.NewRat(50000, 1)) == 0 && dec.FromProto(book.Bids[0].Size).Cmp(big.NewRat(4, 1)) == 0 && dec.FromProto(book.Asks[0].Price).Cmp(big.NewRat(50001, 1)) == 0 && dec.FromProto(book.Asks[0].Size).Cmp(big.NewRat(2, 1)) == 0
-							if !decoded || book.InstrumentId != instrument || book.Mic != mic || book.Symbol != expectedSymbol || book.LastUpdateSequence != sequence || !economics {
-								t.Fatalf("canonical handoff book differs: decoded=%t instrument=%t mic=%t symbol=%t sequence=%t levels=%t economics=%t", decoded, book.InstrumentId == instrument, book.Mic == mic, book.Symbol == expectedSymbol, book.LastUpdateSequence == sequence, levels, economics)
+							if !decoded || book.InstrumentId != instrument || book.Mic != mic || book.Symbol != instrument || book.LastUpdateSequence != sequence || !economics {
+								t.Fatalf("canonical handoff book differs: decoded=%t instrument=%t mic=%t symbol=%t sequence=%t levels=%t economics=%t", decoded, book.InstrumentId == instrument, book.Mic == mic, book.Symbol == instrument, book.LastUpdateSequence == sequence, levels, economics)
 							}
 						} else {
 							event := new(marketpb.MarketDataEvent)
 							decoded := proto.Unmarshal(frame.Payload, event) == nil
-							if !decoded || event.InstrumentId != instrument || event.Mic != mic || event.Symbol != expectedSymbol || event.SourceSequence != sequence || event.GetQuote() == nil {
-								t.Fatalf("canonical handoff quote differs: decoded=%t instrument=%t mic=%t symbol=%t sequence=%t quote=%t", decoded, event.InstrumentId == instrument, event.Mic == mic, event.Symbol == expectedSymbol, event.SourceSequence == sequence, event.GetQuote() != nil)
+							if !decoded || event.InstrumentId != instrument || event.Mic != mic || event.Symbol != instrument || event.SourceSequence != sequence || event.GetQuote() == nil {
+								t.Fatalf("canonical handoff quote differs: decoded=%t instrument=%t mic=%t symbol=%t sequence=%t quote=%t", decoded, event.InstrumentId == instrument, event.Mic == mic, event.Symbol == instrument, event.SourceSequence == sequence, event.GetQuote() != nil)
 							}
 							q := event.GetQuote()
 							if dec.FromProto(q.BidPrice).Cmp(big.NewRat(50000, 1)) != 0 || dec.FromProto(q.BidSize).Cmp(big.NewRat(4, 1)) != 0 || dec.FromProto(q.AskPrice).Cmp(big.NewRat(50001, 1)) != 0 || dec.FromProto(q.AskSize).Cmp(big.NewRat(2, 1)) != 0 {
@@ -234,7 +232,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			}
 			original := startGo("go-original", false)
 			exchange.depth(true, 101, 100)
-			depth("go-original", instrument, 101, "initial")
+			depth("go-original", 101, "initial")
 			bar("go-original", 1)
 			original.stop()
 			handoffWait(t, 5*time.Second, "old exchange sockets survived join", func() bool { return exchange.count("depth") == 0 && exchange.count("trade") == 0 })
@@ -247,13 +245,13 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			rust.waitStarted(exchange, "rust-startup", func() bool { return len(broker.connections(rustID)) == 1 && exchange.count("depth") == 1 })
 			handoffStatus(t, rustAddress, http.StatusServiceUnavailable)
 			exchange.depth(true, 101, 100)
-			depth(rustSource, symbol, 101, "initial")
+			depth(rustSource, 101, "initial")
 			handoffStatus(t, rustAddress, http.StatusOK)
 			bar("go-retained", 5)
 			// Source age, not a healthy broker alone, controls readiness.
 			handoffStatus(t, rustAddress, http.StatusServiceUnavailable)
 			exchange.depth(false, 102, 101)
-			depth(rustSource, symbol, 102, "refresh")
+			depth(rustSource, 102, "refresh")
 			handoffStatus(t, rustAddress, http.StatusOK)
 			// Binance refreshes REST on the same stream; OKX opens a new stream.
 			// Both must revoke readiness before a fresh anchor can be accepted.
@@ -264,7 +262,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 				handoffWait(t, 5*time.Second, "gap did not request a fresh REST anchor", func() bool { return exchange.anchorRequests() == requests+1 })
 				handoffStatus(t, rustAddress, http.StatusServiceUnavailable)
 				release()
-				depth(rustSource, symbol, 105, "reanchor")
+				depth(rustSource, 105, "reanchor")
 				if exchange.connections("depth") != connections || exchange.count("depth") != 1 {
 					t.Fatal("Binance REST reanchor replaced the expected live stream")
 				}
@@ -273,7 +271,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 				handoffWait(t, 10*time.Second, "gap did not reanchor", func() bool { return exchange.connections("depth") > connections && exchange.count("depth") == 1 })
 				handoffStatus(t, rustAddress, http.StatusServiceUnavailable)
 				exchange.depth(true, 101, 100)
-				depth(rustSource, symbol, 101, "reanchor")
+				depth(rustSource, 101, "reanchor")
 			}
 			handoffStatus(t, rustAddress, http.StatusOK)
 			// Broker disconnect must be recovered with the same authenticated
@@ -288,10 +286,10 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			handoffWait(t, 10*time.Second, "broker reconnect absent", func() bool { now := broker.connections(rustID); return len(now) == 1 && now[0] != ids[0] })
 			if venue == "binance" {
 				exchange.depth(false, 106, 105)
-				depth(rustSource, symbol, 106, "reconnect")
+				depth(rustSource, 106, "reconnect")
 			} else {
 				exchange.depth(false, 102, 101)
-				depth(rustSource, symbol, 102, "reconnect")
+				depth(rustSource, 102, "reconnect")
 			}
 			handoffStatus(t, rustAddress, http.StatusOK)
 			rust.stop()
@@ -301,7 +299,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			exchange.resetAnchor()
 			rollback := startGo("go-rollback", false)
 			exchange.depth(true, 101, 100)
-			depth("go-rollback", instrument, 101, "rollback")
+			depth("go-rollback", 101, "rollback")
 			bar("go-rollback", 7)
 			rollback.stop()
 			info, err := broker.js.StreamInfo("HANDOFF")

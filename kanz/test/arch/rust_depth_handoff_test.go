@@ -28,9 +28,9 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 			"info.State.FirstSeq != 1", "info.State.Msgs != info.State.LastSeq", "info.State.NumDeleted != 0",
 			"authenticated-publish-denied", "deniedBroker.denied.publish.Load() > beforeDenials", "denied publisher produced accepted facts",
 			"duplicate-external-assignment-refused", "instrument+\",\"+instrument", "invalid static assignment reached feed side effects",
-			"rustSource := venue + \"-depth/handoff\"", "depth(rustSource, symbol, 101, \"initial\")", "depth(\"go-original\", instrument, 101, \"initial\")", "depth(\"go-rollback\", instrument, 101, \"rollback\")", "Durable: consumer", "nats.Bind(\"HANDOFF\", consumer)",
+			"rustSource := venue + \"-depth/handoff\"", "depth(rustSource, 101, \"initial\")", "depth(\"go-original\", 101, \"initial\")", "depth(\"go-rollback\", 101, \"rollback\")", "Durable: consumer", "nats.Bind(\"HANDOFF\", consumer)",
 			"broker.js.DeleteConsumer(\"HANDOFF\", consumer)", "!errors.Is(err, nats.ErrConsumerNotFound)", "handoffBrokerError(consumerErr)",
-			"depth(rustSource, symbol, 102, \"refresh\")", "depth(rustSource, symbol, 105, \"reanchor\")", "depth(rustSource, symbol, 106, \"reconnect\")",
+			"depth(rustSource, 102, \"refresh\")", "depth(rustSource, 105, \"reanchor\")", "depth(rustSource, 106, \"reconnect\")",
 			"requests, release := exchange.holdAnchor(104)", "exchange.anchorRequests() == requests+1", "exchange.connections(\"depth\") != connections", "exchange.resetAnchor()",
 			"handoffFrameBefore(t, broker, subs[subject], source, version, instrument, &observation)", "state.classify(frame, actual, sequence, time.Now(), observation.deadline)", "state.remember(frame, actual)", "for observation.take(time.Now())", "time.Until(observation.deadline)", "book.LastUpdateSequence != sequence", "event.SourceSequence != sequence",
 			"handoffStatus(t, rustAddress, http.StatusServiceUnavailable)\n\t\t\t\trelease()",
@@ -109,6 +109,41 @@ func TestRustFeedHandoffQualificationRecipe(t *testing.T) {
 	for _, marker := range markers {
 		if check(strings.ReplaceAll(string(body), marker, "removed")) {
 			t.Fatal("qualification removal mutation escaped")
+		}
+	}
+}
+
+// The composition chooses emitted metadata; venue decoders and generic books
+// retain their own contracts. The actual process oracle still proves execution.
+func TestRustFeedRuntimeSymbolParity(t *testing.T) {
+	root := filepath.Dir(moduleRoot(t))
+	raw, err := os.ReadFile(filepath.Join(root, "kanz-rs/crates/market-feed/src/runtime.rs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markers := []string{
+		"let mut book = runtime_book(&config.instrument_id, config.venue);",
+		"fn runtime_book(instrument_id: &str, venue: Venue) -> Book {\n    Book::new(\n        instrument_id.into(),\n        instrument_id.into(),\n        venue.mic().into(),\n    )\n}",
+		"fn runtime_book_preserves_go_emitted_symbol_for_both_venues()",
+		"assert_eq!(emitted_book.symbol, source.instrument_id);",
+		"assert_eq!(emitted_quote.symbol, source.instrument_id);",
+		"assert_eq!(source.symbol, wire_symbol);",
+	}
+	valid := func(body string) bool {
+		for _, marker := range markers {
+			if !strings.Contains(body, marker) {
+				return false
+			}
+		}
+		return true
+	}
+	body := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if !valid(body) {
+		t.Fatal("runtime metadata composition/regression absent")
+	}
+	for _, marker := range markers {
+		if valid(strings.Replace(body, marker, "removed", 1)) {
+			t.Fatal("runtime metadata mutation escaped")
 		}
 	}
 }
