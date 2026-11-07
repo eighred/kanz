@@ -181,7 +181,7 @@ jobs:
           cargo fmt --all -- --check
           cargo test --locked -p kanz-oms-recovery --all-targets
           cargo clippy --locked -p kanz-oms-recovery --all-targets -- -D warnings
-          cargo build --locked -p kanz-oms-recovery --example recovery-coordinator-fixture
+          cargo build --release --locked -p kanz-oms-recovery --example recovery-coordinator-fixture
       - name: Verify recovery source and evidence guards
         working-directory: kanz
         run: |
@@ -204,7 +204,13 @@ jobs:
             --tmpfs /var/lib/postgresql/data:rw,nosuid,size=512m \
             -e POSTGRES_USER=fixture -e POSTGRES_PASSWORD=fixture -e POSTGRES_DB=fixture \
             -p 127.0.0.1:55433:5432 "$image"
-          for container in oms-recovery-pg oms-recovery-default-pg; do
+          docker run -d --name oms-recovery-constrained-pg --label "kanz.fixture.run=$GITHUB_RUN_ID" --label "kanz.fixture.attempt=$GITHUB_RUN_ATTEMPT" \
+            --memory=1g --cpus=1 --pids-limit=256 --shm-size=128m \
+            --tmpfs /var/lib/postgresql/data:rw,nosuid,size=512m \
+            -e POSTGRES_USER=fixture -e POSTGRES_PASSWORD=fixture -e POSTGRES_DB=fixture \
+            -p 127.0.0.1:55434:5432 "$image" \
+            -c max_locks_per_transaction=10 -c max_connections=100 -c max_prepared_transactions=0
+          for container in oms-recovery-pg oms-recovery-default-pg oms-recovery-constrained-pg; do
             ready=false
             for attempt in $(seq 1 60); do
               if docker exec "$container" pg_isready -U fixture >/dev/null 2>&1; then ready=true; break; fi
@@ -235,14 +241,16 @@ jobs:
       - name: Qualify actual recovery and complete large histories
         working-directory: kanz
         env:
-          KANZ_OMS_RECOVERY_BIN: ${{ github.workspace }}/kanz-rs/target/debug/examples/recovery-coordinator-fixture
+          KANZ_OMS_RECOVERY_BIN: ${{ github.workspace }}/kanz-rs/target/release/examples/recovery-coordinator-fixture
           KANZ_OMS_RECOVERY_VERSION: ${{ github.sha }}
           TEST_POSTGRES_URL: postgres://recoveryapp:fixture@127.0.0.1:55432/recoveryapp?sslmode=disable
           TEST_POSTGRES_DEFAULT_LOCK_URL: postgres://recoveryapp:fixture@127.0.0.1:55433/recoveryapp?sslmode=disable
+          TEST_POSTGRES_CONSTRAINED_LOCK_URL: postgres://recoveryapp:fixture@127.0.0.1:55434/recoveryapp?sslmode=disable
           TEST_NATS_URL: nats://127.0.0.1:44222
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/oms-recovery-evidence"
+          sha256sum "$KANZ_OMS_RECOVERY_BIN" | cut -d " " -f 1 > "$RUNNER_TEMP/oms-recovery-evidence/binary.sha256"
           qualification_status=0
           go test -race -p 1 ./services/oms/tools/recovery-conformance -skip '^TestRustRecoveryComplete8000History$' -timeout 20m -count=1 -json | tee "$RUNNER_TEMP/oms-recovery-evidence/recovery.jsonl" || qualification_status=1
           go test -race -p 1 ./services/oms/tools/recovery-conformance -run '^TestRustRecoveryComplete8000History/go$' -timeout 20m -count=1 -json | tee "$RUNNER_TEMP/oms-recovery-evidence/large-go.jsonl" || qualification_status=1
@@ -254,7 +262,7 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          for container in oms-recovery-pg oms-recovery-default-pg oms-recovery-nats; do
+          for container in oms-recovery-pg oms-recovery-default-pg oms-recovery-constrained-pg oms-recovery-nats; do
             found=$(docker ps -aq --filter "name=^/$container$")
             if test -z "$found"; then continue; fi
             test "$(docker inspect --format '{{ index .Config.Labels "kanz.fixture.run" }}' "$container")" = "$GITHUB_RUN_ID"

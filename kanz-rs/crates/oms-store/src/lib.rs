@@ -43,6 +43,7 @@ pub enum Error {
     UnownedOutbox,
     RecordNotOwned,
     Database,
+    DatabaseMemory,
     CommitUnconfirmed,
 }
 impl From<kanz_proto_wire::Error> for Error {
@@ -54,8 +55,15 @@ impl From<kanz_proto_wire::Error> for Error {
     }
 }
 impl From<tokio_postgres::Error> for Error {
-    fn from(_: tokio_postgres::Error) -> Self {
-        Self::Database
+    fn from(error: tokio_postgres::Error) -> Self {
+        database_error(error.code().map(|code| code.code()))
+    }
+}
+// Preserve only the owning resource code, never database messages or SQL.
+fn database_error(code: Option<&str>) -> Error {
+    match code {
+        Some("53200") => Error::DatabaseMemory,
+        _ => Error::Database,
     }
 }
 impl std::fmt::Display for Error {
@@ -426,6 +434,19 @@ async fn journal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_out_of_memory_has_a_specific_database_refusal() {
+        assert_eq!(database_error(Some("53200")), Error::DatabaseMemory);
+        for code in [
+            None,
+            Some("53300"),
+            Some("57014"),
+            Some("40001"),
+            Some("unknown"),
+        ] {
+            assert_eq!(database_error(code), Error::Database);
+        }
+    }
     #[test]
     fn nested_wire_preservation_and_ambiguity() {
         let bytes = [18, 3, 0x78, 0x81, 1];

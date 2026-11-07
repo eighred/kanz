@@ -66,6 +66,7 @@ func TestRustRecoveryComplete8000History(t *testing.T) {
 			var svc *order.Service
 			if owner == "rust" {
 				w = f.startWithin(t, tr, 15*time.Minute)
+				t.Log("actual Rust recovery build profile: release")
 			} else {
 				svc = f.service(t, tr)
 			}

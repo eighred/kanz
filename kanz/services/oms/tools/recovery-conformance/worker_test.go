@@ -15,6 +15,7 @@ import (
 )
 
 type response struct {
+	BuildProfile   string `json:"build_profile"`
 	Version        string `json:"version"`
 	Status         string `json:"status"`
 	Error          string `json:"error"`
@@ -129,6 +130,9 @@ func (w *worker) call(request map[string]any) response {
 		if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF {
 			w.t.Fatal("invalid Rust fixture response")
 		}
+		if result.BuildProfile != "release" {
+			w.t.Fatal("Rust recovery fixture must use measured release build profile")
+		}
 		if result.Version != os.Getenv("KANZ_OMS_RECOVERY_VERSION") {
 			w.t.Fatal("Rust fixture source stamp differs")
 		}
@@ -143,7 +147,7 @@ func (w *worker) call(request map[string]any) response {
 			}
 		case "error":
 			switch result.Error {
-			case "ApprovalRefused", "RecoveryEvidenceConflict", "InvalidInput", "Capacity", "Conflict", "EvidenceConflict", "HistoryIncomplete", "PostedHistoryUnknown", "FeeRevision", "Database", "CommitUnconfirmed", "PublicationUnconfirmed", "Venue", "UnsupportedAction", "Deadline":
+			case "DatabaseMemory", "ApprovalRefused", "RecoveryEvidenceConflict", "InvalidInput", "Capacity", "Conflict", "EvidenceConflict", "HistoryIncomplete", "PostedHistoryUnknown", "FeeRevision", "Database", "CommitUnconfirmed", "PublicationUnconfirmed", "Venue", "UnsupportedAction", "Deadline":
 			default:
 				w.t.Fatal("unknown recovery failure classification")
 			}

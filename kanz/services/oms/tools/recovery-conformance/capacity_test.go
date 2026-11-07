@@ -1,7 +1,6 @@
 package recoveryconformance
 
 import (
-	"github.com/eighred/kanz/internal/dec"
 	"github.com/eighred/kanz/internal/execution"
 	commonpb "github.com/eighred/kanz/kanz-schemas-go/common/v1"
 	envelopepb "github.com/eighred/kanz/kanz-schemas-go/envelope/v1"
@@ -14,10 +13,9 @@ import (
 	"testing"
 )
 
-// This is an explicit bounded-domain difference, not a Go rollback-parity
-// claim. Go can commit a >1MiB recovered FACT before transport refusal. Rust
-// refuses this record before its financial transaction, even though the full
-// venue history is a valid response inside the recovery-only4MiB receive bound.
+// A valid recovery Query can contain a fill above the downstream recovered-FACT
+// bound. Both owners must refuse before financial commit: canonical Go invokes
+// DecodeRecovery while constructing its execution journal, before CAS/outbox.
 func TestRustRecoveryOversizedSingleFactRefusal(t *testing.T) {
 	for _, owner := range []string{"go", "rust"} {
 		t.Run(owner, func(t *testing.T) {
@@ -50,9 +48,10 @@ func TestRustRecoveryOversizedSingleFactRefusal(t *testing.T) {
 				w.close(tr)
 			} else {
 				err := f.service(t, tr).HandleRecovery(lineage(f.ctx, env), env, payload)
-				// Broker configuration is observed by ensureBroker, not inferred from the
-				// repository. A handler error here is not evidence of transaction rollback.
-				t.Logf("canonical Go oversized-record handler category=%s", goErrorCategory(err))
+				if goErrorCategory(err) != "RecoveredPayloadBound" {
+					t.Fatalf("canonical Go oversized-record refusal differs: category=%s", goErrorCategory(err))
+				}
+				t.Log("canonical Go oversized-record handler category=RecoveredPayloadBound")
 			}
 			got, version, err := store.Load(f.ctx, st.OrderId)
 			if err != nil {
@@ -62,23 +61,13 @@ func TestRustRecoveryOversizedSingleFactRefusal(t *testing.T) {
 			if err != nil {
 				t.Fatal("durable case unavailable")
 			}
-			if owner == "rust" {
-				if version != 0 || !proto.Equal(got, st) || c.Checkpoint != 0 {
-					t.Fatal("bounded refusal changed financial state")
-				}
-				for _, query := range []string{"SELECT count(*) FROM order_fills", "SELECT count(*) FROM order_executions", "SELECT count(*) FROM execution_fee_revisions", "SELECT count(*) FROM execution_recovery_targets", "SELECT count(*) FROM execution_recovery_acks", "SELECT count(*) FROM outbox WHERE event_type='order.order.execution_recovered'"} {
-					var n int
-					if f.pool.QueryRow(f.ctx, query).Scan(&n) != nil || n != 0 {
-						t.Fatal("oversized-record refusal partially committed")
-					}
-				}
-			} else {
-				if c.Checkpoint != 1 || version != 1 || dec.Cmp(got.FilledQuantity, &commonpb.Decimal{Coefficient: 1}) != 0 {
-					t.Fatalf("Go bounded-domain comparison did not reach committed record: version=%d checkpoint=%d", version, c.Checkpoint)
-				}
-				var records int
-				if f.pool.QueryRow(f.ctx, "SELECT count(*) FROM outbox WHERE event_type='order.order.execution_recovered' AND octet_length(payload)>1048576").Scan(&records) != nil || records != 1 {
-					t.Fatal("Go oversized durable FACT absent")
+			if version != 0 || !proto.Equal(got, st) || c.Checkpoint != 0 {
+				t.Fatal("bounded refusal changed financial state")
+			}
+			for _, query := range []string{"SELECT count(*) FROM order_fills", "SELECT count(*) FROM order_executions", "SELECT count(*) FROM execution_fee_revisions", "SELECT count(*) FROM execution_recovery_targets", "SELECT count(*) FROM execution_recovery_acks", "SELECT count(*) FROM outbox WHERE event_type='order.order.execution_recovered'"} {
+				var n int
+				if f.pool.QueryRow(f.ctx, query).Scan(&n) != nil || n != 0 {
+					t.Fatal("oversized-record refusal partially committed")
 				}
 			}
 			if v.queries.Load() != 1 || v.writes.Load() != 0 {

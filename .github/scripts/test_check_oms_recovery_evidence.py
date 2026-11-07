@@ -24,6 +24,7 @@ class RecoveryEvidenceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        (self.root / "binary.sha256").write_bytes(b"c" * 64 + b"\n")
         self.binding = proof.metadata("a" * 40, "b" * 40, "123", "1")
         large = "TestRustRecoveryComplete8000History"
         for filename in proof.STREAMS:
@@ -34,10 +35,13 @@ class RecoveryEvidenceTests(unittest.TestCase):
                 text = "actual recovery broker limits: server_max_payload=1048576 stream_max_msg_size=-1\n"
                 if name.startswith(large + "/"):
                     text += "actual PostgreSQL lock settings: max_locks_per_transaction=1024 max_connections=100 max_prepared_transactions=0\nactual PostgreSQL role: nosuperuser=true nobypassrls=true\nactual PostgreSQL recovery owner tables: forced_rls=12 expected=12\n"
-                if name == large + "/rust": text += "actual Rust recovery process memory: peak_rss_kib=1024 current_rss_kib=512\n"
-                if name.startswith("TestRustRecoveryDefaultLockCapacityRefusal/"):
+                if name == large + "/rust": text += "actual Rust recovery build profile: release\nactual Rust recovery process memory: peak_rss_kib=1024 current_rss_kib=512\n"
+                if name.startswith("TestRustRecoveryDefaultLockCapacityOutcome/"):
                     text += "actual default PostgreSQL lock settings: max_locks_per_transaction=64 max_connections=100 max_prepared_transactions=0\n"
-                if name == "TestRustRecoveryDefaultLockCapacityRefusal/go": text += "canonical Go default-capacity SQLSTATE=53200\n"
+                if name.startswith("TestRustRecoveryDefaultLockCapacityOutcome/"): text += "actual default capacity committed complete 8000-execution financial inventory\n"
+                if name.startswith("TestRustRecoveryConstrainedLockCapacityRefusal/"):
+                    prefix = "canonical Go" if name.endswith("/go") else "actual Rust"
+                    text += "actual constrained PostgreSQL lock settings: max_locks_per_transaction=10 max_connections=100 max_prepared_transactions=0\n" + prefix + " constrained-capacity SQLSTATE=53200\n"
                 events.append({"Action": "output", "Package": proof.PREFIX + proof.PACKAGE, "Test": name, "Output": text})
             self.write(filename, events)
     def write(self, filename, events):
@@ -67,12 +71,36 @@ class RecoveryEvidenceTests(unittest.TestCase):
             proof.qualify(self.root, self.binding, True)
         saved = json.loads((self.root / "proof.json").read_text())
         self.assertEqual(saved["streams"]["recovery.jsonl"], hashlib.sha256(before).hexdigest())
-        self.assertEqual(reads, list(proof.STREAMS))
+        self.assertEqual(reads, list(proof.STREAMS) + ["binary.sha256"])
         with self.assertRaises(ValueError): proof.qualify(self.root, self.binding)
+
+    def test_capacity_and_runtime_observations_are_not_inferred(self):
+        for filename, before, after in (
+            ("recovery.jsonl", "constrained-capacity SQLSTATE=53200", "constrained-capacity SQLSTATE=53300"),
+            ("recovery.jsonl", "max_locks_per_transaction=10 max_connections=100", "max_locks_per_transaction=64 max_connections=100"),
+            ("recovery.jsonl", "actual default capacity committed complete 8000-execution financial inventory", "unknown failure"),
+            ("large-rust.jsonl", "actual Rust recovery build profile: release", "actual Rust recovery build profile: debug"),
+        ):
+            with self.subTest(before=before):
+                path = self.root / filename
+                original = path.read_bytes()
+                self.assertIn(before.encode(), original)
+                path.write_bytes(original.replace(before.encode(), after.encode()))
+                with self.assertRaises(ValueError): proof.qualify(self.root, self.binding, True)
+                path.write_bytes(original)
+
+    def test_executable_identity_is_bound(self):
+        proof.qualify(self.root, self.binding, True)
+        saved = json.loads((self.root / "proof.json").read_text())
+        self.assertEqual(saved["build"]["profile"], "release")
+        (self.root / "binary.sha256").write_bytes(b"d" * 64 + b"\n")
+        with self.assertRaises(ValueError): proof.qualify(self.root, self.binding)
+        (self.root / "binary.sha256").write_text("invalid")
+        with self.assertRaises(ValueError): proof.qualify(self.root, self.binding, True)
 
     def test_complete_bound_proof(self):
         result = proof.qualify(self.root, self.binding, True)
-        self.assertEqual(result["required_passes"], 69)
+        self.assertEqual(result["required_passes"], 72)
         self.assertEqual(proof.qualify(self.root, self.binding), result)
     def test_missing_or_skipped_case(self):
         for mode in ("missing", "skip"):

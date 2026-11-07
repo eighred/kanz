@@ -20,6 +20,7 @@ pub enum Error {
     PostedHistoryUnknown,
     FeeRevision,
     Database,
+    DatabaseMemory,
     CommitUnconfirmed,
     PublicationUnconfirmed,
     Venue,
@@ -39,6 +40,7 @@ impl From<kanz_oms_store::Error> for Error {
         use kanz_oms_store::Error as E;
         match e {
             E::Capacity => Self::Capacity,
+            E::DatabaseMemory => Self::DatabaseMemory,
             E::Conflict => Self::Conflict,
             E::IdentityConflict => Self::EvidenceConflict,
             E::FeeRevision => Self::FeeRevision,

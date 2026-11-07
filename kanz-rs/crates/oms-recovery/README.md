@@ -38,10 +38,12 @@ financial commit batching. Any late serialization, target, outbox or SQL error
 rolls back that transaction; earlier observation/mapping/frozen-history commits
 are not rolled back or misrepresented as absent.
 
-An individual emitted FACT remains bounded to 1 MiB. A larger individual record
-is an explicit unsupported Rust domain and refuses before the financial commit;
-Go may instead enqueue it and later encounter broker limits. It is not universal
-Go wire/operational parity. Broker maximum payload and stream size are read back
+An individual emitted FACT remains bounded to 1 MiB. The Go journal owner also
+invokes DecodeRecovery before its financial CAS and rejects recovered payloads
+larger than 1 MiB; this refusal is verified with unchanged financial tables, not
+misclassified as a postcommit broker failure. Rust additionally bounds complete
+record/frame metadata, so this is not universal wire/operational parity. Broker
+maximum payload and stream size are read back
 in the real fixture. `CommitUnconfirmed` does not prove rollback, and a relay
 stall (including a full bounded batch) returns `PublicationUnconfirmed` while
 preserving committed pending records for at-least-once retry. Separate position
@@ -60,7 +62,12 @@ adapter. It accepts loopback test databases/broker and an authenticated syntheti
 venue, inherits only explicit test environment, emits closed status codes, and
 never prints DSNs, financial payloads or raw SQL errors. Its bounded JSON is not
 a production service boundary. It has a 15-minute lifetime and per-command
-30-second maximum; it does not batch ACKs.
+30-second maximum; it does not batch ACKs. Actual runtime qualification uses the
+optimized release binary with workspace overflow checks enabled; debug unit tests
+and Clippy remain separate. Each response reports its compiled assertion profile,
+and evidence binds the immutable source, release target path and executable hash.
+The earlier debug-profile 8,000-fill Deadline remains a failed result, not release
+performance evidence.
 
 The separate `recovery-coordinator` job in the existing `rust-oms-fold` workflow
 retains every original seven-package OMS proof. Its independent Go oracle runs
@@ -68,9 +75,13 @@ actual PostgreSQL, NATS and synthetic rotating SPIFFE mTLS. Large Go and Rust
 8,000-fill cases run separately and exercise all 16,000 book ACKs. The dedicated
 primary PostgreSQL fixture explicitly provisions `max_locks_per_transaction=1024`,
 `max_connections=100`, `max_prepared_transactions=0`; a second unchanged-default
-64/100/0 instance is a separate capacity-refusal control whose actual failure
-cause and absence of a financial prefix must be qualified. Both
-use NOSUPERUSER/NOBYPASSRLS and twelve FORCE-RLS owner tables. This is disposable
+64/100/0 instance records actual complete commit or independently identified
+resource refusal. This shared setting is not a per-transaction lock ceiling. A
+third isolated 10/100/0 server requires actual SQLSTATE53200 (out of memory) and complete financial
+rollback, retaining connection availability and post-error database usability.
+The closed DatabaseMemory error identifies that SQLSTATE, not an inferred cause
+for every query. This fixture observes it under the lock-heavy atomic transaction.
+All use NOSUPERUSER/NOBYPASSRLS and twelve FORCE-RLS owner tables. This is disposable
 capacity qualification, not production tuning or a concurrency guarantee.
 Observed process RSS is retained as measurement, not an accepted resource ceiling.
 The source/tree/run/attempt-bound artifact requires every named test, both large

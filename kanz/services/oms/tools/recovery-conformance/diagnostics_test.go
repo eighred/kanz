@@ -44,6 +44,8 @@ func goErrorCategory(err error) string {
 
 	for current, depth := err, 0; current != nil && depth < 16; current, depth = errors.Unwrap(current), depth+1 {
 		switch current.Error() {
+		case "recovered execution exceeds payload bound":
+			return "RecoveredPayloadBound"
 		case "oms: invalid recovery history scope":
 			return "HistoryScope"
 		case "oms: recovery history exceeds storage bound":
@@ -68,6 +70,10 @@ func isFullBatchStall(err error, key string) bool {
 }
 
 func TestRecoveryDrainRetryClassification(t *testing.T) {
+	if goErrorCategory(errors.New("recovered execution exceeds payload bound")) != "RecoveredPayloadBound" {
+		t.Fatal("known precommit bound not classified")
+	}
+
 	const key = "fixture-order"
 	if !isFullBatchStall(fmt.Errorf("outbox: %s still has records beyond the 256-record batch", key), key) {
 		t.Fatal("canonical full batch refused")

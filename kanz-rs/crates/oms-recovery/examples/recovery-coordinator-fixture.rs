@@ -116,7 +116,7 @@ async fn line(reader: &mut tokio::io::BufReader<tokio::io::Stdin>) -> Result<Opt
 }
 async fn report(version: &str, status: &str, error: &str, closed: bool) -> Result<(), ()> {
     let mut out = serde_json::to_vec(
-        &json!({"version":version,"status":status,"error":error,"sessions_closed":closed}),
+        &json!({"version":version,"build_profile":if cfg!(debug_assertions) {"debug"} else {"release"},"status":status,"error":error,"sessions_closed":closed}),
     )
     .map_err(|_| ())?;
     if out.len() > 16384 {

@@ -18,7 +18,7 @@ GROUPS = {
  "TestRustRecoveryAdmissionRefusals": "foreign-tenant missing-tenant command-not-fact wrong-subject empty-payload malformed-payload oversized-observation".split(),
  "TestRustRecoveryDurableTailRollback": ["outbox-insert", "deferred-commit"],
  "TestRustRecoveryObservationPayloadBoundary": ["above-standard-message-bound", "exact-four-mib", "one-byte-over-four-mib"],
- **{name: ["go", "rust"] for name in ("TestRustRecoveryOversizedSingleFactRefusal", "TestRustRecoveryComplete8000History", "TestRustRecovery8001HistoryRefusal", "TestRustRecoveryDefaultLockCapacityRefusal", "TestRustRecoveryMalformedPostedJournal", "TestRustRecoveryTenantIsolation", "TestRustRecoveryExplicitZeroHistory", "TestRustRecoveryFrozenMappingAttribution")},
+ **{name: ["go", "rust"] for name in ("TestRustRecoveryOversizedSingleFactRefusal", "TestRustRecoveryComplete8000History", "TestRustRecovery8001HistoryRefusal", "TestRustRecoveryDefaultLockCapacityOutcome", "TestRustRecoveryConstrainedLockCapacityRefusal", "TestRustRecoveryMalformedPostedJournal", "TestRustRecoveryTenantIsolation", "TestRustRecoveryExplicitZeroHistory", "TestRustRecoveryFrozenMappingAttribution")},
 }
 NAMES = set(GROUPS) | {f"{name}/{child}" for name, children in GROUPS.items() for child in children} | {"TestRustRecoveryConcurrentGoWriter", "TestRustRecoveryCrashDuringHistoryQuery", "TestRecoveryObservationPaddingOracle", "TestRecoveryDrainRetryClassification"}
 REQUIRED = {PACKAGE: NAMES}
@@ -70,17 +70,27 @@ def checked_streams(streams):
         return "".join(e.get("Output", "") for e in all_events if e.get("Test") == test and e.get("Action") == "output")
     for owner in ("go", "rust"):
         if "max_locks_per_transaction=1024 max_connections=100 max_prepared_transactions=0" not in output(large + "/" + owner): raise ValueError("missing explicit large lock capacity")
-        if "max_locks_per_transaction=64 max_connections=100 max_prepared_transactions=0" not in output("TestRustRecoveryDefaultLockCapacityRefusal/" + owner): raise ValueError("missing default lock capacity")
+        if "max_locks_per_transaction=64 max_connections=100 max_prepared_transactions=0" not in output("TestRustRecoveryDefaultLockCapacityOutcome/" + owner): raise ValueError("missing default lock capacity")
     match = re.search(r"peak_rss_kib=([0-9]+) current_rss_kib=([0-9]+)", output(large + "/rust"))
     if not match or not 0 < int(match[2]) <= int(match[1]): raise ValueError("missing measured process memory")
     for owner in ("go", "rust"):
         if "actual PostgreSQL role: nosuperuser=true nobypassrls=true" not in output(large + "/" + owner): raise ValueError("missing runtime role proof")
         if "actual PostgreSQL recovery owner tables: forced_rls=12 expected=12" not in output(large + "/" + owner): raise ValueError("missing exact runtime RLS proof")
-    if "canonical Go default-capacity SQLSTATE=53200" not in output("TestRustRecoveryDefaultLockCapacityRefusal/go"): raise ValueError("missing exact default-capacity cause")
+    if "actual Rust recovery build profile: release" not in output(large + "/rust"): raise ValueError("missing actual release profile")
+    default_committed = {}
+    for owner, prefix in (("go", "canonical Go"), ("rust", "actual Rust")):
+        default_output = output("TestRustRecoveryDefaultLockCapacityOutcome/" + owner)
+        committed = "actual default capacity committed complete 8000-execution financial inventory" in default_output
+        exhausted = prefix + " default-capacity SQLSTATE=53200" in default_output
+        if committed == exhausted: raise ValueError("missing or ambiguous actual default capacity outcome")
+        default_committed["default_" + owner + "_committed"] = int(committed)
+        constrained = output("TestRustRecoveryConstrainedLockCapacityRefusal/" + owner)
+        if "max_locks_per_transaction=10 max_connections=100 max_prepared_transactions=0" not in constrained or prefix + " constrained-capacity SQLSTATE=53200" not in constrained:
+            raise ValueError("missing actual constrained exhaustion cause/settings")
     broker = "".join(e.get("Output", "") for e in all_events)
     limits = re.search(r"actual recovery broker limits: server_max_payload=([0-9]+) stream_max_msg_size=(-?[0-9]+)", broker)
     if not limits or int(limits[1]) <= 0: raise ValueError("missing actual broker limit")
-    return {"required_passes": len(NAMES), "peak_rss_kib": int(match[1]), "current_rss_kib": int(match[2])}
+    return {**default_committed, "required_passes": len(NAMES), "peak_rss_kib": int(match[1]), "current_rss_kib": int(match[2])}
 
 def checked(directory):
     return checked_streams({name: read_bounded(directory / name, MAX_STREAM_BYTES) for name in STREAMS})
@@ -92,7 +102,10 @@ def metadata(source, tree, run, attempt):
 def qualify(directory, expected, create=False):
     streams = {name: read_bounded(directory / name, MAX_STREAM_BYTES) for name in STREAMS}
     result = checked_streams(streams)
-    bound = {**expected, "streams": {name: hashlib.sha256(raw).hexdigest() for name, raw in streams.items()}, "result": result}
+    binary = read_bounded(directory / "binary.sha256", 65).decode("ascii").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", binary): raise ValueError("invalid executable digest")
+    build = {"profile": "release", "target": "kanz-rs/target/release/examples/recovery-coordinator-fixture", "sha256": binary}
+    bound = {**expected, "streams": {name: hashlib.sha256(raw).hexdigest() for name, raw in streams.items()}, "result": result, "build": build}
     path = directory / "proof.json"
     if create:
         path.write_text(json.dumps(bound, sort_keys=True) + "\n", encoding="utf-8")
