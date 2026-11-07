@@ -18,6 +18,7 @@ REQUIRED = {
                                       "TestGuardedFoldSerializesOutcomeAndRevokesOnPanic",
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres",
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/committed-response",
+                                      "TestTVRetainedFactsRecoverWithNATSAndPostgres/ambiguous-committed-response",
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/database-timeout",
                                       "TestTVRetainedFactsRecoverWithNATSAndPostgres/restart-unacked"},
     "services/tv-sync/internal/server": {"TestBrokerRefusesBeforeReadinessAndAfterCancellation",
