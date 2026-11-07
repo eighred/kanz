@@ -37,7 +37,7 @@ class TransportCodecTests(unittest.TestCase):
         wrapper = (here.parent / "Invoke-TokyoGatewayPolicy.ps1").read_text()
         body = re.search(r"\$bootstrap = \$codec \+ \"`n\" \+ @'\n(.*?)\n'@", wrapper, re.S).group(1)
         source = (here / "transport_codec.py").read_text() + "\n" + body
-        names = ("transaction.py", "policy_client.py", "rollout_probe.py", "rollout_engine.py", "bounded_process.py", "source_loader.py")
+        names = ("transaction.py", "policy_client.py", "rollout_probe.py", "rollout_scope.py", "rollout_engine.py", "bounded_process.py", "source_loader.py")
         bundle = {"files": {n: "# exact UTF8 λ\r\n" for n in names}, "payload": {"source": "a" * 40}}
         for mode in ("valid", "truncated", "extra", "oversized_file", "missing_lzma", "unsupported_crc64"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:

@@ -68,7 +68,7 @@ Host acceptance/image resolution and the remote engine launch Python in isolated
 mode. A closed loader compiles the approved repository modules from checked
 source bytes; repository directories never enter the import search path. Ignored
 bytecode caches and local standard-library shadows therefore cannot replace
-those inputs. Existing caches are preserved. The remote six-file bundle retains
+those inputs. Existing caches are preserved. The remote seven-file bundle retains
 the 20 KB encoded and 512 KiB expansion limits; this is source custody, not an
 operating-system sandbox or attestation of the installed Python toolchain.
 The original JSON/source bytes use one shared XZ codec (LZMA2 preset 6,

@@ -52,7 +52,7 @@ class SourceLoaderTests(unittest.TestCase):
     def test_remote_dependency_closure_ignores_cache_and_shadow(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ("bounded_process", "transaction", "policy_client", "rollout_probe"):
+            for name in ("bounded_process", "transaction", "policy_client", "rollout_probe", "rollout_scope"):
                 (root / (name + ".py")).write_text((HERE / (name + ".py")).read_text())
             (root / "rollout_engine.py").write_text('import policy_client, rollout_probe, json\nprint("REMOTE_SOURCE")\n')
             (root / "json.py").write_text('raise RuntimeError("SHADOW_SENTINEL")\n')

@@ -10,7 +10,7 @@ def launch(root, entry, arguments):
     dependencies = {
         "preflight": ("bounded_process",),
         "image_identity": ("rollout_probe",),
-        "rollout_engine": ("bounded_process", "transaction", "policy_client", "rollout_probe"),
+        "rollout_engine": ("bounded_process", "transaction", "policy_client", "rollout_probe", "rollout_scope"),
     }
     if entry not in dependencies:
         raise ValueError("unapproved source entrypoint")

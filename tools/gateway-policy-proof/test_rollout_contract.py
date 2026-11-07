@@ -1,5 +1,8 @@
 """Bounded source recipe checks, not whole-program control-flow proofs."""
 import ast
+import hashlib
+import inspect
+import rollout_scope
 from pathlib import Path
 import unittest
 from unittest.mock import patch, Mock
@@ -39,6 +42,24 @@ def recipe(wrapper, engine, workflow):
 
 
 class RolloutContractTests(unittest.TestCase):
+    def test_shared_scope_preserves_reviewed_inventory_checks(self):
+        # Pins the unchanged AST extracted from raw-client revision 1e30.
+        expected = {
+            "snapshot": "cc9348a170055ac7422fde270b70287d9deb00e3a11dda63da0c9cb505d051ff",
+            "outside_policies": "94e097cf0aade3f7b20617a956dae8975170c2b71f7577401c74e44e2f85648e",
+            "service_snapshot": "1872e03f16ae7538e376e484d4fdd093f64595de0673210867d92e95a5f2eda9",
+        }
+        for name, digest in expected.items():
+            function = getattr(rollout_scope, name)
+            self.assertIs(getattr(engine, name), function)
+            tree = ast.parse(inspect.getsource(function)).body[0]
+            actual = hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+            self.assertEqual(actual, digest)
+        self.assertEqual(rollout_scope.CLUSTER_UID, "86ea9839-5806-461d-b2d1-afd1ff5d87ff")
+        self.assertEqual(rollout_scope.APPS, {"kanz-services": (
+            "accounting", "audit", "compliance", "api-gateway", "web-bff"),
+            "kanz-messaging": ("nats", "redis")})
+
     def test_dry_run_never_opens_durable_receipts_or_constructs_probes(self):
         source = "a" * 40
         payload = {"source": source, "policies": [], "identity": {}, "workloads": {}}
