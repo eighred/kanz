@@ -1,3 +1,4 @@
+import { initializeBrowserRenderer } from './api/browser-renderer-loader'
 import './styles.css'
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
@@ -29,3 +30,4 @@ setUnauthenticatedHandler(() => {
 })
 
 app.mount('#app')
+void initializeBrowserRenderer()

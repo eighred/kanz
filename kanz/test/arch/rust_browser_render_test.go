@@ -2,6 +2,7 @@ package arch
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -137,12 +138,22 @@ func TestRustBrowserRenderBoundary(t *testing.T) {
 	}
 }
 
+func browserAssetHooks(raw string) bool {
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if json.Unmarshal([]byte(raw), &pkg) != nil {
+		return false
+	}
+	return pkg.Scripts["prebuild"] == "node scripts/build-renderer.mjs" && pkg.Scripts["predev"] == "node scripts/build-renderer.mjs"
+}
+
 // Build recipe is shared with the production asset, not a second compiler path.
 func TestBrowserRenderAssetBuildClosure(t *testing.T) {
 	root := filepath.Dir(moduleRoot(t))
 	sources := map[string]string{
-		"kanz-web/scripts/build-renderer.mjs":      "d6afaefff85658c9d005bc23ab8da7b83d76d884d25d9dccb6b3757dda727586",
-		"kanz-web/scripts/build-renderer.test.mjs": "e40b8bbc3145a1abff0b2841574dde3e9fe3abdea359461957b7efac880ba02f",
+		"kanz-web/scripts/build-renderer.mjs":      "0ee042397b965439daa2a781935075901faa60e666226e378f8bbab7c00d4477",
+		"kanz-web/scripts/build-renderer.test.mjs": "ef3dcab1681352e85e34b91727c401aeca7c8a342aee9158c1a174b2ca9d4d6e",
 	}
 	for name, expected := range sources {
 		raw, err := os.ReadFile(filepath.Join(root, name))
@@ -162,10 +173,12 @@ func TestBrowserRenderAssetBuildClosure(t *testing.T) {
 		}
 		return string(raw)
 	}
-	pkg := read("kanz-web/package.json")
-	for _, hook := range []string{`"prebuild": "node scripts/build-renderer.mjs"`, `"predev": "node scripts/build-renderer.mjs"`} {
-		if !strings.Contains(pkg, hook) {
-			t.Fatal("missing shared browser build hook")
+	if !browserAssetHooks(read("kanz-web/package.json")) {
+		t.Fatal("missing shared browser build hook")
+	}
+	for _, bad := range []string{`{"scripts":{"prebuild":"node scripts/build-renderer.mjs"},"nested":{"predev":"node scripts/build-renderer.mjs"}}`, `{"nested":{"scripts":{"prebuild":"node scripts/build-renderer.mjs","predev":"node scripts/build-renderer.mjs"}}}`, `{"scripts":{"prebuild":"true","predev":"node scripts/build-renderer.mjs"}}`} {
+		if browserAssetHooks(bad) {
+			t.Fatal("nested/missing/bypassed hook accepted")
 		}
 	}
 	receipt := read("kanz-rs/crates/browser-render/tests/wasm.mjs")

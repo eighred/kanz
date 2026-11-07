@@ -68,7 +68,7 @@ test('untracked Cargo config and ambient compiler overrides fail closed', t => {
   const cargoHome = join(parent, 'cargo-home'), cwd = join(parent, 'workspace')
   fs.mkdirSync(cargoHome); fs.mkdirSync(cwd)
   checkCompilerConfiguration(cwd, cargoHome, {})
-  for (const name of ['RUSTFLAGS', 'RUSTC_WRAPPER', 'CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS']) {
+  for (const name of ['RUSTFLAGS', 'RUSTC_WRAPPER', 'CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS', 'RUSTC_BOOTSTRAP', 'CARGO_PROFILE_RELEASE_OPT_LEVEL', 'CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS', 'CARGO_PROFILE_RELEASE_PANIC']) {
     assert.throws(() => checkCompilerConfiguration(cwd, cargoHome, { [name]: 'unreviewed' }))
   }
   fs.writeFileSync(join(cargoHome, 'config.toml'), '[build]\nrustflags=[]\n')

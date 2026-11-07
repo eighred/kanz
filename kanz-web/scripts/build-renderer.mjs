@@ -51,7 +51,7 @@ export function checkCompilerConfiguration(start, cargoHome, environment) {
   }
   for (const name of ['config', 'config.toml']) assert.equal(statOrMissing(resolve(cargoHome, name)), null)
   for (const name of Object.keys(environment)) {
-    if (/^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTFLAGS|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER|CARGO_TARGET_.*_(RUSTFLAGS|LINKER|RUNNER))$/.test(name)) {
+    if (/^CARGO_PROFILE_/.test(name) || /^(RUSTC_BOOTSTRAP|RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTFLAGS|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER|CARGO_TARGET_.*_(RUSTFLAGS|LINKER|RUNNER))$/.test(name)) {
       assert(!environment[name], 'ambient compiler configuration is unsupported')
     }
   }
@@ -110,6 +110,8 @@ export function build() {
   }))
   if (process.env.GITHUB_ACTIONS === 'true') {
     assert.equal(source, process.env.GITHUB_SHA)
+    assert.match(process.env.GITHUB_RUN_ID || '', /^[1-9][0-9]{0,19}$/)
+    assert.match(process.env.GITHUB_RUN_ATTEMPT || '', /^[1-9][0-9]{0,19}$/)
     assert.equal(process.versions.node.split('.')[0], readFileSync(resolve(root, 'kanz-web/.nvmrc'), 'utf8').trim())
   }
   command(process.execPath, ['--test', resolve(root, 'kanz-web/scripts/build-renderer.test.mjs')])
@@ -125,6 +127,8 @@ export function build() {
   checkCompilerConfiguration(resolve(root, 'kanz-rs'), process.env.CARGO_HOME || resolve(homedir(), '.cargo'), process.env)
   const descriptor = { format: 'kanz-browser-render-asset-v1', abi: 1, source, tree,
     sourceKind: process.env.GITHUB_ACTIONS === 'true' ? 'committed-ci' : 'local-build',
+    run: process.env.GITHUB_ACTIONS === 'true' ? process.env.GITHUB_RUN_ID : null,
+    attempt: process.env.GITHUB_ACTIONS === 'true' ? process.env.GITHUB_RUN_ATTEMPT : null,
     sources, moduleSHA256, moduleBytes: bytes.length, maxMemoryBytes: 2097152 }
   publishAsset(resolve(root, 'kanz-web/src/generated'), bytes, descriptor)
   return descriptor
