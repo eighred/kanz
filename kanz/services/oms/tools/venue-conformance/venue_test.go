@@ -326,6 +326,21 @@ func TestRustVenueActualTLSAndRPC(t *testing.T) {
 		}
 		w.close(source)
 	})
+	t.Run("remote-cancel-before-deadline-stays-cancelled", func(t *testing.T) {
+		a, w, source, conn := setup(t)
+		a.configure(func() { a.fail["CancelOrder"] = codes.Canceled })
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err := execution.NewGRPCVenue("MOCK", "fixture-account", conn, "fixture-tenant").CancelOrder(ctx, state())
+		if status.Code(err) != codes.Canceled {
+			t.Fatal("Go remote cancellation oracle differs")
+		}
+		r := w.call(map[string]any{"method": "CancelOrder", "state": marshal(t, state()), "timeout_ms": 2000})
+		if r.Status != "error" || r.Code != int(codes.Canceled) {
+			t.Fatalf("remote cancellation was reclassified: status=%q code=%d", r.Status, r.Code)
+		}
+		w.close(source)
+	})
 	t.Run("cancel-deadline-is-not-confirmed", func(t *testing.T) {
 		a, w, source, conn := setup(t)
 		a.configure(func() { a.wait["CancelOrder"] = true })

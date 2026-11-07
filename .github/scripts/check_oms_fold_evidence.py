@@ -103,6 +103,7 @@ REQUIRED = {
         "TestRustVenueActualTLSAndRPC/unknown-duplicate-and-noncanonical-wire",
         "TestRustVenueActualTLSAndRPC/query-three-state-and-unimplemented",
         "TestRustVenueActualTLSAndRPC/cancel-deadline-is-not-confirmed",
+        "TestRustVenueActualTLSAndRPC/remote-cancel-before-deadline-stays-cancelled",
         "TestRustVenueRegistration",
         "TestRustVenueRegistration/identity-and-catalog",
         "TestRustVenueRegistration/wrong-mic",

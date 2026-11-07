@@ -21,6 +21,20 @@ fn rpc_error(status: Status) -> Status {
     status
 }
 
+// Tokio and tonic poll the inner future before their timeout timer. A ready
+// response can therefore arrive at an already expired local deadline. Classify
+// that using our own monotonic clock, never the peer's status text/code.
+fn before_deadline<T>(
+    expires: tokio::time::Instant,
+    result: Result<T, Status>,
+) -> Result<T, Status> {
+    if tokio::time::Instant::now() >= expires {
+        Err(Status::deadline_exceeded("venue RPC deadline"))
+    } else {
+        result
+    }
+}
+
 /// No public arbitrary Channel constructor: only the authenticated connector may build this owner.
 pub struct Client {
     pub(crate) channel: Option<Channel>,
@@ -82,7 +96,8 @@ impl Client {
             .max_encoding_message_size(kanz_proto_wire::MAX_BYTES);
         let mut request = Request::new(value);
         request.set_timeout(deadline);
-        tokio::time::timeout(deadline, async {
+        let expires = tokio::time::Instant::now() + deadline;
+        let result = tokio::time::timeout_at(expires, async {
             grpc.ready()
                 .await
                 .map_err(|_| Status::unavailable("venue transport unavailable"))?;
@@ -99,7 +114,8 @@ impl Client {
             .map_err(rpc_error)
         })
         .await
-        .map_err(|_| Status::deadline_exceeded("venue RPC deadline"))?
+        .map_err(|_| Status::deadline_exceeded("venue RPC deadline"))?;
+        before_deadline(expires, result)
     }
     pub async fn execute(
         &self,
@@ -280,6 +296,43 @@ impl Client {
 #[cfg(test)]
 mod deadline_tests {
     use super::*;
+    #[test]
+    fn own_expiry_refuses_late_success_and_error_without_reclassifying_early_peer() {
+        let past = tokio::time::Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            before_deadline(past, Ok(())).unwrap_err().code(),
+            Code::DeadlineExceeded
+        );
+        assert_eq!(
+            before_deadline::<()>(past, Err(Status::cancelled("peer")))
+                .unwrap_err()
+                .code(),
+            Code::DeadlineExceeded
+        );
+        let future = tokio::time::Instant::now() + Duration::from_secs(60);
+        assert_eq!(
+            before_deadline::<()>(future, Err(Status::cancelled("peer")))
+                .unwrap_err()
+                .code(),
+            Code::Cancelled
+        );
+        assert!(before_deadline(future, Ok(())).is_ok());
+    }
+
+    #[tokio::test]
+    async fn ready_inner_future_cannot_bypass_expired_owned_timer() {
+        let expires = tokio::time::Instant::now() - Duration::from_secs(1);
+        // Pinned Tokio polls ready inner work before the timer, even when past.
+        let ready = tokio::time::timeout_at(expires, std::future::ready(Ok::<_, Status>(())))
+            .await
+            .unwrap();
+        assert!(ready.is_ok());
+        assert_eq!(
+            before_deadline(expires, ready).unwrap_err().code(),
+            Code::DeadlineExceeded
+        );
+    }
+
     #[test]
     fn only_typed_local_timeout_is_deadline_exceeded() {
         let local = Status::from_error(Box::new(tonic::TimeoutExpired(())));
