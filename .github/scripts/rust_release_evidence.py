@@ -193,7 +193,9 @@ def bounded_command(args, destination, limit, *, cwd=None, env=None, timeout=900
 
 def export_inventory(image, temp, label):
     archive = temp / (label + ".tar")
-    container = output(["docker", "create", image])
+    # Bare runtime bases have no command. This fixed placeholder is never run:
+    # the owned container is only created, exported, then removed by exact ID.
+    container = output(["docker", "create", "--entrypoint", "/__kanz_inventory_not_executed__", image])
     if not re.fullmatch(r"[0-9a-f]{64}", container):
         raise ValueError("invalid owned inventory container identity")
     try:

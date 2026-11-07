@@ -24,6 +24,38 @@ def fixture(service="binance-depth"):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_inventory_create_never_starts_and_cleans_owned_container(self):
+        image = gate.CC_RUNTIME
+        container = "a" * 64
+        for failure in (None, "export", "remove", "identity"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                temp = Path(directory); calls = []
+                def create(args):
+                    calls.append(args)
+                    self.assertEqual(args,["docker","create","--entrypoint","/__kanz_inventory_not_executed__",image])
+                    return "invalid" if failure == "identity" else container
+                def export(args, destination, limit):
+                    calls.append(args)
+                    self.assertEqual(args,["docker","export",container])
+                    self.assertEqual(destination,temp/"base.tar")
+                    self.assertEqual(limit,2*1024**3)
+                    if failure == "export": raise ValueError("synthetic export refusal")
+                    destination.write_bytes(b"bounded synthetic archive")
+                def remove(args):
+                    calls.append(args)
+                    self.assertEqual(args,["docker","rm","-f",container])
+                    if failure == "remove": raise ValueError("synthetic removal refusal")
+                with patch.object(gate,"output",side_effect=create), patch.object(gate,"bounded_command",side_effect=export), \
+                     patch.object(gate,"run",side_effect=remove), patch.object(gate,"elf_inventory",return_value={"verified":"fixture"}) as inventory:
+                    if failure is None:
+                        self.assertEqual(gate.export_inventory(image,temp,"base"),{"verified":"fixture"})
+                        inventory.assert_called_once_with(temp/"base.tar")
+                        self.assertFalse((temp/"base.tar").exists())
+                    else:
+                        with self.assertRaises(ValueError):gate.export_inventory(image,temp,"base")
+                        inventory.assert_not_called()
+                self.assertEqual([c[1] for c in calls],["create"] if failure=="identity" else ["create","export","rm"])
+
     def test_closed_hybrid_recipe_requires_exact_paths(self):
         recipe = gate.image_recipe("lake-sink")
         self.assertEqual(recipe.rust_path, "/kanz-lake-snapshot")
