@@ -32,6 +32,8 @@ pub mod proto {
 }
 pub mod aggregate;
 pub mod arithmetic;
+pub mod attribution;
+pub mod schedule_identity;
 pub use arithmetic::{decimal, rational};
 
 /// Whole-message canonical Decimal domain, shared by projector and recovery
