@@ -14,7 +14,7 @@ import (
 // confinement. Real gateway/PG/NATS/worker fixtures remain independently required.
 func snapshotBoundaryWiring(files map[string]string) error {
 	required := map[string][]string{
-		"services/lake-sink/internal/config/config.go": {`if cfg.Snapshot != nil && !slices.Contains(cfg.Topics, "lake.snapshot") {`, `cfg.Topics = append(cfg.Topics, "lake.snapshot")`},
+		"services/lake-sink/internal/config/config.go": {`if cfg.Snapshot != nil {`, `lifecycleTopic := topic.Qualify(cfg.Snapshot.Tenant, "lake.snapshot")`, `if !slices.Contains(cfg.Topics, lifecycleTopic) {`, `cfg.Topics = append(cfg.Topics, lifecycleTopic)`},
 		"services/lake-sink/cmd/lake-sink/main.go": {
 			"if cfg.Snapshot != nil {\n\t\tfileOptions = append(fileOptions, sink.EnableActiveRunCapture)\n\t}",
 			`sink.NewFileSink(cfg.OutputDir, "", fileOptions...)`,
@@ -166,8 +166,11 @@ func TestLakeSnapshotBoundaryWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, mutation := range []struct{ path, old, replacement string }{
-		{paths[6], `if cfg.Snapshot != nil && !slices.Contains(cfg.Topics, "lake.snapshot") {`, `if true {`},
-		{paths[6], `cfg.Topics = append(cfg.Topics, "lake.snapshot")`, `cfg.Topics = cfg.Topics`},
+		{paths[6], `if cfg.Snapshot != nil {`, `if true {`},
+		{paths[6], `topic.Qualify(cfg.Snapshot.Tenant, "lake.snapshot")`, `"lake.snapshot"`},
+		{paths[6], `topic.Qualify(cfg.Snapshot.Tenant, "lake.snapshot")`, `topic.Qualify("__system__", "lake.snapshot")`},
+		{paths[6], `if !slices.Contains(cfg.Topics, lifecycleTopic) {`, `if true {`},
+		{paths[6], `cfg.Topics = append(cfg.Topics, lifecycleTopic)`, `cfg.Topics = cfg.Topics`},
 		{paths[0], "if cfg.Snapshot != nil {\n\t\tfileOptions", "if true {\n\t\tfileOptions"},
 		{paths[0], "readiness.RequireSnapshot()", "readiness.SetSnapshot(true)"},
 		{paths[1], "DisableReconnect: true", "DisableReconnect: false"},

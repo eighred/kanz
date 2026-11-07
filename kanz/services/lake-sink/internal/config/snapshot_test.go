@@ -40,23 +40,32 @@ func TestSnapshotRequiresExplicitCompleteConfiguration(t *testing.T) {
 	t.Setenv("LAKE_SINK_OUTPUT_DIR", base.OutputDir)
 	t.Setenv("LAKE_SINK_RETAIN_RAW_FRAME", "true")
 	t.Setenv("SPIFFE_ENDPOINT_SOCKET", base.SPIFFESocket)
-	for _, enabled := range []string{"false", "true"} {
-		t.Run("topics-"+enabled, func(t *testing.T) {
-			t.Setenv("LAKE_SNAPSHOT_ENABLED", enabled)
-			loaded, err := Load()
-			want := []string{"order.order", "market.trade"}
-			if enabled == "true" {
-				want = append(want, "lake.snapshot")
+	for _, tenant := range []string{"fixture-tenant", "__system__"} {
+		t.Run(tenant, func(t *testing.T) {
+			t.Setenv("LAKE_SNAPSHOT_TENANT", tenant)
+			lifecycleTopic := "fixture-tenant.lake.snapshot"
+			if tenant == "__system__" {
+				lifecycleTopic = "lake.snapshot"
 			}
-			if err != nil || !slices.Equal(loaded.Topics, want) {
-				t.Fatal("optional topic changed legacy landing or was omitted")
-			}
-			if enabled == "true" {
-				t.Setenv("LAKE_SINK_TOPICS", "order.order,market.trade,lake.snapshot")
-				loaded, err = Load()
-				if err != nil || !slices.Equal(loaded.Topics, want) {
-					t.Fatal("optional topic duplicated")
-				}
+			for _, enabled := range []string{"false", "true"} {
+				t.Run("topics-"+enabled, func(t *testing.T) {
+					t.Setenv("LAKE_SNAPSHOT_ENABLED", enabled)
+					loaded, err := Load()
+					want := []string{"order.order", "market.trade"}
+					if enabled == "true" {
+						want = append(want, lifecycleTopic)
+					}
+					if err != nil || !slices.Equal(loaded.Topics, want) {
+						t.Fatal("optional topic differs from canonical tenant archival route")
+					}
+					if enabled == "true" {
+						t.Setenv("LAKE_SINK_TOPICS", "order.order,market.trade,"+lifecycleTopic)
+						loaded, err = Load()
+						if err != nil || !slices.Equal(loaded.Topics, want) {
+							t.Fatal("optional topic duplicated")
+						}
+					}
+				})
 			}
 		})
 	}

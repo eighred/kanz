@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/internal/topic"
 	"log/slog"
 	"os"
 	"slices"
@@ -82,8 +83,11 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if cfg.Snapshot != nil && !slices.Contains(cfg.Topics, "lake.snapshot") {
-		cfg.Topics = append(cfg.Topics, "lake.snapshot")
+	if cfg.Snapshot != nil {
+		lifecycleTopic := topic.Qualify(cfg.Snapshot.Tenant, "lake.snapshot")
+		if !slices.Contains(cfg.Topics, lifecycleTopic) {
+			cfg.Topics = append(cfg.Topics, lifecycleTopic)
+		}
 	}
 	return cfg, nil
 }
