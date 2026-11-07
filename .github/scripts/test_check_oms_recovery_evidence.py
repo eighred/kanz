@@ -100,7 +100,7 @@ class RecoveryEvidenceTests(unittest.TestCase):
 
     def test_complete_bound_proof(self):
         result = proof.qualify(self.root, self.binding, True)
-        self.assertEqual(result["required_passes"], 72)
+        self.assertEqual(result["required_passes"], 80)
         self.assertEqual(proof.qualify(self.root, self.binding), result)
     def test_missing_or_skipped_case(self):
         for mode in ("missing", "skip"):
@@ -120,6 +120,18 @@ class RecoveryEvidenceTests(unittest.TestCase):
         go.write_bytes(original)
         go.rename(self.root / "unexpected-slot.jsonl")
         with self.assertRaises((ValueError, OSError)): proof.checked(self.root)
+
+    def test_every_deadline_control_is_required(self):
+        names = {"TestRustRecoveryDeadlineAfterBrokerAcknowledgement", "TestRustRecoveryRelayLockDeadline"}
+        for parent in ("TestRustRecoveryCumulativeCommandDeadline", "TestRustRecoveryCumulativeStartupDeadline"):
+            names.update((parent, parent + "/cumulative-refusal", parent + "/same-phases-positive"))
+        self.assertTrue(names <= proof.NAMES)
+        original = proof.events(self.root / "recovery.jsonl")
+        for name in names:
+            with self.subTest(name=name):
+                self.write("recovery.jsonl", [e for e in original if not (e.get("Action") == "pass" and e.get("Test") == name)])
+                with self.assertRaises(ValueError): proof.checked(self.root)
+        self.write("recovery.jsonl", original)
 
     def test_duplicate_child(self):
         events = proof.events(self.root / "large-go.jsonl")

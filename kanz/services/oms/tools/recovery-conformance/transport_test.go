@@ -33,25 +33,35 @@ type venue struct {
 	tenant, orderID                    string
 	queryCode                          codes.Code
 	queryWait                          bool
+	queryDelay, describeDelay          time.Duration
 	queryRelease                       <-chan struct{}
 	queries, describes, writes, active atomic.Int32
 }
 
-func (v *venue) Describe(context.Context, *venuepb.DescribeRequest) (*venuepb.DescribeResponse, error) {
+func (v *venue) Describe(ctx context.Context, _ *venuepb.DescribeRequest) (*venuepb.DescribeResponse, error) {
 	v.describes.Add(1)
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	return proto.Clone(v.description).(*venuepb.DescribeResponse), nil
+	description := proto.Clone(v.description).(*venuepb.DescribeResponse)
+	delay := v.describeDelay
+	v.mu.Unlock()
+	if err := syntheticDelay(ctx, delay); err != nil {
+		return nil, err
+	}
+	return description, nil
 }
 func (v *venue) QueryOrder(ctx context.Context, request *venuepb.QueryOrderRequest) (*venuepb.QueryOrderResponse, error) {
 	v.queries.Add(1)
 	v.mu.Lock()
 	matched := request.GetTenantId() == v.tenant && request.GetState().GetOrderId() == v.orderID
 	wait, code, release := v.queryWait, v.queryCode, v.queryRelease
+	delay := v.queryDelay
 	history := proto.Clone(v.history).(*venuepb.QueryOrderResponse)
 	v.mu.Unlock()
 	if !matched {
 		return nil, status.Error(codes.PermissionDenied, "synthetic query attribution differs")
+	}
+	if err := syntheticDelay(ctx, delay); err != nil {
+		return nil, err
 	}
 	if wait {
 		<-ctx.Done()
@@ -142,4 +152,21 @@ func (f *fixture) startWithin(t *testing.T, tr *transport, lifetime time.Duratio
 		t.Fatal("actual recovery owner refused verified fixture")
 	}
 	return w
+}
+
+func syntheticDelay(ctx context.Context, delay time.Duration) error {
+	if delay < 0 || delay > 2*time.Second {
+		return status.Error(codes.InvalidArgument, "synthetic delay outside bound")
+	}
+	if delay == 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return status.FromContextError(ctx.Err()).Err()
+	}
 }

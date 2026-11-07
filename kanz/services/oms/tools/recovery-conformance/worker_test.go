@@ -107,6 +107,9 @@ func (w *worker) call(request map[string]any) response {
 	if len(raw) > 8<<20 {
 		w.t.Fatal("recovery fixture input exceeds bound")
 	}
+	// One observation allowance covers input delivery, owner work and bounded cleanup.
+	observation := time.NewTimer(45 * time.Second)
+	defer observation.Stop()
 	written := make(chan error, 1)
 	go func() { _, err := w.input.Write(append(raw, '\n')); written <- err }()
 	select {
@@ -114,7 +117,7 @@ func (w *worker) call(request map[string]any) response {
 		if err != nil {
 			w.t.Fatal("Rust fixture request failed")
 		}
-	case <-time.After(35 * time.Second):
+	case <-observation.C:
 		w.cancel()
 		_ = w.input.Close()
 		w.t.Fatal("Rust fixture input timed out")
@@ -155,7 +158,7 @@ func (w *worker) call(request map[string]any) response {
 			w.t.Fatal("unknown recovery outcome")
 		}
 		return result
-	case <-time.After(35 * time.Second):
+	case <-observation.C:
 		w.t.Fatal("Rust fixture response timed out")
 	}
 	return response{}

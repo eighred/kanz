@@ -27,11 +27,12 @@ type Identity interface {
 
 type Workload struct {
 	workload.UnimplementedSpiffeWorkloadAPIServer
-	mu      sync.Mutex
-	value   *workload.X509SVIDResponse
-	changed chan struct{}
-	active  atomic.Int32
-	started atomic.Int32
+	mu           sync.Mutex
+	value        *workload.X509SVIDResponse
+	changed      chan struct{}
+	active       atomic.Int32
+	started      atomic.Int32
+	initialDelay time.Duration
 }
 
 func (s *Workload) Set(t *testing.T, source Identity) {
@@ -72,6 +73,18 @@ func (s *Workload) FetchX509SVID(_ *workload.X509SVIDRequest, stream grpc.Server
 	s.active.Add(1)
 	s.started.Add(1)
 	defer s.active.Add(-1)
+	s.mu.Lock()
+	delay := s.initialDelay
+	s.mu.Unlock()
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
+	}
 	for {
 		s.mu.Lock()
 		value := proto.Clone(s.value).(*workload.X509SVIDResponse)
@@ -113,3 +126,14 @@ func StartWorkload(t *testing.T, source Identity) (*Workload, string) {
 
 func (s *Workload) Active() int32  { return s.active.Load() }
 func (s *Workload) Started() int32 { return s.started.Load() }
+
+// SetInitialDelay delays only the synthetic first WAPI response, before any client connects.
+func (s *Workload) SetInitialDelay(t *testing.T, delay time.Duration) {
+	t.Helper()
+	if delay < 0 || delay > 2*time.Second || s.Started() != 0 {
+		t.Fatal("invalid synthetic initial-response delay")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.initialDelay = delay
+}
