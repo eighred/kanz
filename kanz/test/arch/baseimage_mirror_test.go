@@ -61,6 +61,11 @@ func TestEveryDockerfileBaseImageComesFromTheMirror(t *testing.T) {
 	seenExempt := map[string]bool{}
 
 	for _, f := range froms {
+		// Docker scratch has no upstream registry. Only the source-free payload
+		// recipe guarded by TestRustAuditToolProducerBoundary uses it (#1413).
+		if f.image == "scratch" && f.file == "tools/rust-audit-tools/Dockerfile" {
+			continue
+		}
 		if strings.HasPrefix(f.image, mirrorPrefix) {
 			continue
 		}
