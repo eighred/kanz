@@ -1,6 +1,7 @@
 //! Disposable loopback qualifier; no deployment binary or production connector.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use kanz_oms_recovery::{Config, Coordinator, Method};
+use kanz_oms_store::diagnostics::{self, Snapshot, Stage, Timer};
 use kanz_oms_store::{
     outbox::Session,
     relay::{Frame, Framer, PublishFailure, Publisher, Sessions, Task},
@@ -139,9 +140,15 @@ async fn line(reader: &mut tokio::io::BufReader<tokio::io::Stdin>) -> Result<Opt
         }
     }
 }
-async fn report(version: &str, status: &str, error: &str, closed: bool) -> Result<(), ()> {
+async fn report(
+    version: &str,
+    status: &str,
+    error: &str,
+    closed: bool,
+    profile: Option<Snapshot>,
+) -> Result<(), ()> {
     let mut out = serde_json::to_vec(
-        &json!({"version":version,"build_profile":if cfg!(debug_assertions) {"debug"} else {"release"},"status":status,"error":error,"sessions_closed":closed}),
+        &json!({"version":version,"build_profile":if cfg!(debug_assertions) {"debug"} else {"release"},"status":status,"error":error,"sessions_closed":closed,"diagnostics_enabled":cfg!(feature="qualification-diagnostics"),"diagnostics":profile.map(|s| json!({"counts":s.counts,"nanoseconds":s.nanoseconds}))}),
     )
     .map_err(|_| ())?;
     if out.len() > 16384 {
@@ -272,7 +279,7 @@ async fn run() -> Result<(), ()> {
     {
         Ok(owner) => owner,
         Err(e) => {
-            report(version, "error", &format!("{e:?}"), true).await?;
+            report(version, "error", &format!("{e:?}"), true, None).await?;
             // Keep the failed-start process alive for independent transport
             // cleanup observation. No command can run without an owner.
             if line(&mut reader).await?.is_some() {
@@ -283,7 +290,7 @@ async fn run() -> Result<(), ()> {
             return Ok(());
         }
     };
-    report(version, "connected", "", true).await?;
+    report(version, "connected", "", true, None).await?;
     for _ in 0..20000 {
         let Some(raw) = line(&mut reader).await? else {
             owner.close().await;
@@ -294,7 +301,7 @@ async fn run() -> Result<(), ()> {
             owner.close().await;
             closed(&observer, &application).await?;
             nc.flush().await.map_err(|_| ())?;
-            report(version, "closed", "", true).await?;
+            report(version, "closed", "", true, None).await?;
             // Remain alive so Go can observe transport/session closure before EOF.
             if line(&mut reader).await?.is_some() {
                 return Err(());
@@ -312,22 +319,27 @@ async fn run() -> Result<(), ()> {
         let env = STANDARD.decode(command.envelope).map_err(|_| ())?;
         let payload = STANDARD.decode(command.payload).map_err(|_| ())?;
         let at = command.at.ok_or(())?;
-        let result = owner
-            .handle(
-                method,
-                &env,
-                &payload,
-                prost_types::Timestamp {
-                    seconds: at.seconds,
-                    nanos: at.nanos,
-                },
-                deadline(command.timeout_ms)?,
-            )
-            .await;
-        closed(&observer, &application).await?;
-        match result {
-            Ok(()) => report(version, "ok", "", true).await?,
-            Err(e) => report(version, "error", &format!("{e:?}"), true).await?,
+        let (completed, profile) = diagnostics::capture(async {
+            let _total = Timer::new(Stage::Total);
+            let result = owner
+                .handle(
+                    method,
+                    &env,
+                    &payload,
+                    prost_types::Timestamp {
+                        seconds: at.seconds,
+                        nanos: at.nanos,
+                    },
+                    deadline(command.timeout_ms)?,
+                )
+                .await;
+            diagnostics::measure(Stage::FixtureAbsence, closed(&observer, &application)).await?;
+            Ok::<_, ()>(result)
+        })
+        .await;
+        match completed? {
+            Ok(()) => report(version, "ok", "", true, Some(profile)).await?,
+            Err(e) => report(version, "error", &format!("{e:?}"), true, Some(profile)).await?,
         }
     }
     owner.close().await;
