@@ -12,6 +12,9 @@ import (
 // and its executable CI proof; the Python tests exercise failure classification.
 var cniProofRequirements = map[string][]string{
 	"tools/Test-TestnetCNI.ps1": {
+		"tools/cni-proof/proof.py tools/gateway-policy-proof/network_observation.py *> $null", "$verifierBytes.Length + $networkBytes.Length",
+		"$networkBytes.Length) -gt 24576", "[Text.UTF8Encoding]::new($false, $true)", "'set -C'",
+		"rmdir", `base64 -d > "$work/gateway-policy-proof/network_observation.py"`, "$parameters.Length -gt 30000",
 		"fetch origin main --quiet", "$headCommit -ne $releaseCommit",
 		"git -C $repoRoot ls-files --error-unmatch tools/Test-TestnetCNI.ps1 tools/cni-proof/proof.py",
 		"git -C $repoRoot diff --quiet $releaseCommit -- tools/Test-TestnetCNI.ps1 tools/cni-proof/proof.py",
@@ -23,6 +26,7 @@ var cniProofRequirements = map[string][]string{
 		"--verify-report --source $releaseCommit",
 	},
 	"tools/cni-proof/proof.py": {
+		`network_observation.py`, `compile(_network_source`, `CONNECT_SOURCE`,
 		`PREFIX = "kanz-cni-proof-"`, `r"[0-9a-f]{32}"`, `"86ea9839-5806-461d-b2d1-afd1ff5d87ff"`,
 		`"automountServiceAccountToken": False`, `"readOnlyRootFilesystem": True`,
 		`"allowPrivilegeEscalation": False`, `"capabilities": {"drop": ["ALL"]}`,
@@ -45,7 +49,30 @@ var cniProofRequirements = map[string][]string{
 		"python3 -B -m unittest discover -s tools/cni-proof", "bash tools/feed-identity/install.sh",
 		"python3 -B tools/cni-proof/ci.py", "if-no-files-found: error",
 	},
+	"tools/cni-proof/storage_signal.py": {
+		`require_no_arguments(sys.argv[1:])`, `if args:`,
+		`progress.update(profile="default_pids8", requestedPids=8)`,
+		`"--log-opt=max-size=16k", "--log-opt=max-file=1", "--log-opt=compress=false"`,
+		`progress["imageID"] = image_stop_signal()`,
+		`values[0]["Config"].get("StopSignal", "") not in ("", "SIGTERM", "15")`,
+		`if sys.platform != "linux":`, `"--init=false"`,
+		"        runtime_preconditions(obj)", `host.get("Init") is not False or host.get("PidMode") not in ("", "private")`,
+		`progress["stage"] = "start"`, `progress["stage"] = "readiness_log"`, `progress["stage"] = "readiness_state"`,
+		`progress["container"] = state_projection(owned(name, nonce, identity))`,
+		`source != os.environ.get("GITHUB_SHA")`, `"storage-pid1.json").open("x", encoding="utf-8")`, "            case(repaired, progress)", `for repaired in (False, True):`,
+		`migration.STORAGE_SHUTDOWN if repaired else ""`, `assert os.getpid()==1`,
+		`"--network=none", "--read-only", "--user=65532:65532", "--cap-drop=ALL"`,
+		`"--memory=64m", "--cpus=0.1", "--pids-limit=8"`,
+		`"docker", "kill", "--signal=TERM", identity`, `"docker", "wait", identity`,
+		`state["ExitCode"] != 0 or state["OOMKilled"]`,
+		`obj["Id"] != identity`, `get(LABEL) != nonce`, `obj.get("Name") != "/" + name`,
+		"            obj = owned(name, nonce, identity)", `"signal container cleanup incomplete"`,
+	},
 	"tools/cni-proof/migration.py": {
+		`STORAGE_SHUTDOWN = "import signal,sys;signal.signal(signal.SIGTERM,lambda *_:sys.exit(0));"`,
+		`script = (STORAGE_SHUTDOWN + "from pathlib import Path;import socket,time;"`,
+		`"delete", "pod/storage-check", "--wait=true", "--timeout=60s", timeout=70`,
+		`"gateway": rendered_gateway_proof(f, source, phase)`, `gateway.qualify_union`, `gateway.validate_union`,
 		`r"kanz-cni-migration-[0-9a-f]{24}"`, `any(m["Type"] == "bind"`,
 		`str(min(4, os.cpu_count() or 1))`, `cpu_limit(), "--memory=5g", "--pids-limit=4096", "--log-driver=none"`,
 		`"--cluster-init", "--secrets-encryption"`, `"kubeProxyReplacement=false"`,
@@ -63,14 +90,67 @@ var cniProofRequirements = map[string][]string{
 		`self.service_rules_ready()`, `"service_rules_not_ready"`,
 	},
 	".github/workflows/k3s-cni-migration.yml": {
+		`python3 -B tools/cni-proof/check_migration.py`, `python3 -B tools/cni-proof/storage_signal.py`,
 		"disposable-transition:", "persist-credentials: false", "timeout-minutes: 30",
 		"python3 -B tools/cni-proof/migration.py", "bash tools/feed-identity/install.sh",
 		"if-no-files-found: error",
+	},
+	"tools/cni-proof/check_migration.py": {
+		`{"flannel", "cilium", "rollback"}`, `gateway.validate_union`, `proof.validate_report`,
+		`evidence.get("runAttempt") != attempt`, `report.get("tree") != tree`, `evidence.get("backend") != backend`, `evidence.get("renderSHA256") != render_hash`,
+	},
+	"tools/gateway-policy-proof/rollout_engine.py": {
+		`self.k("get", "pods", "-A", "-l", probe.OWNER + "=" + self.nonce, "-o", "json")`,
+		`len(items) != len(self.owned)`, `if key in pods:`, `self.observe(entry, obj)`,
+		`if set(pods) != expected:`, `obj = pods[(entry["namespace"], entry["name"])]`,
+		`TCP_BATCH as TCP`, `or "unknown" in values:`, `for _ in range(6)`,
+		`consecutive = consecutive + 1 if accepted else 0`, `if consecutive >= 3`,
+		`final_end = min(self.started + 420, time.monotonic() + 180)`,
+		`active_end = min(final_end, time.monotonic() + 10)`,
+		`"format": "kanz-gateway-network-v1"`, `"isolated": isolated`, `if type(isolated) is not bool:`, `"network_verified" if passed else "network_refused"`,
+	},
+	"tools/gateway-policy-proof/network_fixture.py": {
+		`OWNER = "kanz.io/gateway-proof"`, `def selector_independent(policies, labels):`,
+		`if key == OWNER:`, `elif value == OWNER:`, `if any(OWNER in value for value in labels.values()):`,
+		`query("get", "pods", "-A", "-l", OWNER + "=" + nonce, "-o", "json")`,
+		`len(expected) != 8`, `len(items) != 8`, `key not in expected or key in result`,
+		`meta["labels"].get(OWNER) != nonce`, `if set(result) != set(expected):`,
+		`if snapshot(probes.k, expected, image, nonce) != identities:`,
+	},
+	"tools/gateway-policy-proof/proof.py": {
+		`network.selector_independent(policies, labels)`, `{**labels[target], network.OWNER: nonce}`,
+		`IMAGE, 'closed', nonce)`, `IMAGE, 'no_policy', nonce)`, `IMAGE, 'enforced', nonce)`,
+	},
+	"tools/gateway-policy-proof/network_observation.py": {
+		`errno.ECONNREFUSED`, `errno.EHOSTUNREACH`, `ipaddress.ip_address(address)`,
+		`return None,'unknown'`, `type(port) is not int`,
+	},
+	"tools/gateway-policy-proof/transaction_fixture.py": {
+		`durable(value)`, `raw != tx.encoded(value) + b"\n"`, `validate_network_receipt(report["networkReceipt"])`,
+		`durable.close()`,
+	},
+	".github/workflows/gateway-policy-proof.yml": {
+		`name: Measure all actual operator wrappers across 96 variants`,
+		`name: Measure actual isolated CNI wrapper across 32 variants`,
+		`python3 -B -m unittest test_network_framing.NetworkFramingTests.test_actual_wrappers_all_96_source_variants`,
+		`python3 -B -m unittest test_transfer.CNITransferTests.test_actual_powershell_32_cni_variants`,
 	},
 	".github/scripts/release_ci.py": {`"testnet-cni-proof.yml": {"disposable-cni"}`, `"k3s-cni-migration.yml": {"disposable-transition"}`},
 }
 
 func checkCNIProofBoundary(files map[string]string) error {
+	// Both paths must retain their own proof, checkout credential boundary and
+	// artifact refusal; the separate diagnostic job cannot mask a deletion.
+	workflow := files[".github/workflows/k3s-cni-migration.yml"]
+	for marker, expected := range map[string]int{
+		"python3 -B tools/cni-proof/storage_signal.py": 2,
+		"persist-credentials: false":                   2,
+		"if-no-files-found: error":                     3,
+	} {
+		if strings.Count(workflow, marker) != expected {
+			return fmt.Errorf("K3s full/diagnostic boundary count differs for %q", marker)
+		}
+	}
 	for path, markers := range cniProofRequirements {
 		for _, marker := range markers {
 			if !strings.Contains(files[path], marker) {

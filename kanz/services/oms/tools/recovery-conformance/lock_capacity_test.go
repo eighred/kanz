@@ -96,6 +96,14 @@ func recoveryLockCapacity(t *testing.T, variable string, expectedLocks int, must
 				exhausted = r.Status == "error" && r.Error == "DatabaseMemory"
 				unconfirmed = r.Status == "error" && r.Error == "PublicationUnconfirmed"
 				if !r.SessionsClosed || (!exhausted && !unconfirmed && r.Status != "ok") {
+					t.Logf("unexpected lock-capacity outcome: status=%s error=%s sessions_closed=%t", r.Status, r.Error, r.SessionsClosed)
+					t.Log(w.diagnostic(map[string]any{"method": "Observation"}, "unexpected-outcome"))
+					// Keep the pre-close witness even if cleanup fails. Neither
+					// observation admits the unexpected command outcome.
+					d := observeLockOutcome(f, st, env.EventId)
+					t.Log(d.summary("before_close"))
+					w.close(tr)
+					t.Log(observeLockOutcome(f, st, env.EventId).summary("after_joined_close"))
 					t.Fatalf("lock-capacity outcome: status=%s error=%s sessions_closed=%t", r.Status, r.Error, r.SessionsClosed)
 				}
 				if exhausted {

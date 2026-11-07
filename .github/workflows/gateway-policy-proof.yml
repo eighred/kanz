@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'tools/gateway-policy-proof/**'
+      - 'tools/cni-proof/**'
       - 'tools/Invoke-TokyoGatewayPolicy.ps1'
       - 'tools/Invoke-TokyoGatewayPolicyRecoveryPlan.ps1'
       - 'tools/Invoke-TokyoGatewayPolicyRetainedRestore.ps1'
@@ -14,6 +15,7 @@ on:
     branches: [main]
     paths:
       - 'tools/gateway-policy-proof/**'
+      - 'tools/cni-proof/**'
       - 'tools/Invoke-TokyoGatewayPolicy.ps1'
       - 'tools/Invoke-TokyoGatewayPolicyRecoveryPlan.ps1'
       - 'tools/Invoke-TokyoGatewayPolicyRetainedRestore.ps1'
@@ -49,6 +51,16 @@ jobs:
           '
       - run: python3 -B -m unittest discover -s tools/feed-identity -p 'test_*.py'
       - run: bash tools/feed-identity/install.sh
+      - name: Measure all actual operator wrappers across 96 variants
+        working-directory: tools/gateway-policy-proof
+        env:
+          KANZ_REQUIRE_NETWORK_FRAMING: '1'
+        run: python3 -B -m unittest test_network_framing.NetworkFramingTests.test_actual_wrappers_all_96_source_variants
+      - name: Measure actual isolated CNI wrapper across 32 variants
+        working-directory: tools/cni-proof
+        env:
+          KANZ_REQUIRE_NETWORK_FRAMING: '1'
+        run: python3 -B -m unittest test_transfer.CNITransferTests.test_actual_powershell_32_cni_variants
       - name: Qualify actual rendered gateway-only policies
         run: python3 -B tools/gateway-policy-proof/proof.py
       - name: Validate exact source and attempt evidence

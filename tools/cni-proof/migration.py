@@ -13,6 +13,10 @@ import proof
 
 NODE = "rancher/k3s:v1.36.4-k3s1@sha256:8b3560e0a99b2f22832b2c963550952ed69830320d4ee712693c52026ada7b89"
 LABEL = "io.kanz.cni-migration"
+# Linux PID-namespace init ignores default TERM; an installed handler permits
+# Kubernetes' ordinary graceful deletion without waiting for forced termination.
+# https://man7.org/linux/man-pages/man7/pid_namespaces.7.html
+STORAGE_SHUTDOWN = "import signal,sys;signal.signal(signal.SIGTERM,lambda *_:sys.exit(0));"
 CNI_DIR = "/var/lib/rancher/k3s/agent/etc/cni/net.d"
 # K3s v1.36.4+k3s1 sets its bundled CNI paths only while Flannel is enabled
 # (pkg/executor/embed/embed.go). With backend=none, containerd uses these defaults.
@@ -257,7 +261,7 @@ class Fixture:
                    "metadata": {"name": claim, "namespace": self.name},
                    "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": "local-path",
                             "resources": {"requests": {"storage": "16Mi"}}}})
-        script = ("from pathlib import Path;import socket,time;"
+        script = (STORAGE_SHUTDOWN + "from pathlib import Path;import socket,time;"
                   "socket.getaddrinfo('kubernetes.default.svc.cluster.local',443);"
                   + ("Path('/state/marker').write_text('" + marker + "');" if create else "")
                   + "assert Path('/state/marker').read_text()=='" + marker + "';time.sleep(120)")
@@ -498,11 +502,36 @@ class Fixture:
         self.mode = "flannel"
 
 
+def rendered_gateway_proof(f, source, phase):
+    # The executor remains bound to this owned K3s container, never a host context.
+    import importlib.util
+    import yaml
+    path = Path(__file__).resolve().parents[1] / 'gateway-policy-proof/proof.py'
+    spec = importlib.util.spec_from_file_location('rendered_gateway_proof', path)
+    gateway = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gateway)
+    policies, labels, rendered = gateway.render(command)
+    report = {'sourceSHA': source, 'sourceTree': command(['git', 'rev-parse', 'HEAD^{tree}']),
+              'runID': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'backend': f.mode, 'phase': phase, 'renderSHA256': rendered, 'observations': {},
+              'policies': [{'name': p['metadata']['name'], 'namespace': p['metadata']['namespace'],
+                            'sha256': gateway.digest(p)} for p in policies]}
+    def k(*args, data=None, timeout=90):
+        values = list(yaml.safe_load_all(data)) if data is not None else []
+        value = ({'apiVersion': 'v1', 'kind': 'List', 'items': values} if len(values) > 1
+                 else values[0] if values else None)
+        return f.k(*args, value=value, timeout=min(timeout, 90))
+    gateway.qualify_union(k, policies, labels, report)
+    gateway.validate_union(report)
+    return report
+
+
 def main():
     name = "kanz-cni-migration-" + uuid.uuid4().hex[:24]
     f = Fixture(name)
     source = command(["git", "rev-parse", "HEAD"])
-    evidence = {"source": source, "nodeImage": NODE, "verdict": "FAIL", "phases": {}, "cleanup": "unknown"}
+    evidence = {"source": source, "tree": command(["git", "rev-parse", "HEAD^{tree}"]),
+                "runID": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "nodeImage": NODE, "verdict": "FAIL", "phases": {}, "cleanup": "unknown"}
     phase = "create"
     try:
         command(["docker", "volume", "create", "--label", LABEL + "=" + name, f.volume])
@@ -557,7 +586,8 @@ def main():
             f.datapath()
             report = proof.run_proof(f.k, source)
             proof.validate_report(report, source)
-            evidence["phases"][phase] = {"state": "preserved", "dns": "PASS", "newPVC": "PASS", "storageImageID": original["imageID"], "policy": report}
+            evidence["phases"][phase] = {"state": "preserved", "dns": "PASS", "newPVC": "PASS", "storageImageID": original["imageID"], "policy": report,
+                                          "gateway": rendered_gateway_proof(f, source, phase)}
         evidence["verdict"] = "PASS"
     except (OSError, ValueError, RuntimeError, proof.ProofError, subprocess.TimeoutExpired) as error:
         evidence["failedPhase"] = phase

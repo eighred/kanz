@@ -277,3 +277,21 @@ old-file suffix and a new landing run. The separate existing-archiver subprocess
 proof requires exact Kafka bytes/headers, restart continuation and foreign-tenant
 parking followed by a positive next marker; neither fixture establishes deployment
 identity, Kafka ACLs or disaster-recovery coverage.
+
+The hybrid image retains `/lake-sink` as its Go entrypoint and adds the immutable,
+root-owned mode-0555 `/kanz-lake-snapshot` executable on the pinned GNU runtime.
+Packaging does not enable snapshots. Release evidence must cover both actual
+application binaries, the exact pinned base ELF/link inventory, fresh Rust audits,
+and the Go binary's plain-mode vulnerability verdict plus structured report.
+An SBOM alone is not complete native provenance or an absence-of-malice claim.
+
+The dedicated image case runs that entrypoint with a read-only root filesystem,
+nonroot identity, a 1536 MiB cgroup memory limit and 64-process limit. Synthetic
+Workload API and dual-listener Kafka fixtures qualify composition through real
+TLS, the existing archiver, automatically qualified lifecycle landing and the
+authenticated gateway/CLI. The test records actual cgroup peak memory for its
+small workload; it does not qualify maximum snapshot concurrency/capacity or the
+existing deployment resource budget. Host-worker tests remain separate, and the
+image-worker hash is extracted from the actual image rather than substituted
+from the host build. Deployment still requires its own identity, network, storage,
+resource and recovery acceptance.

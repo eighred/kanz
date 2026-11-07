@@ -50,6 +50,16 @@ pub struct Config {
     socket: String,
     listen: String,
 }
+// Match the authoritative Go alpha runner's emitted advisory Symbol. Venue
+// symbols remain on Config and the source decoder for exchange protocol binding.
+fn runtime_book(instrument_id: &str, venue: Venue) -> Book {
+    Book::new(
+        instrument_id.into(),
+        instrument_id.into(),
+        venue.mic().into(),
+    )
+}
+
 pub fn required(name: &str) -> Result<String> {
     let value = env::var(name).map_err(|_| format!("{name} is required"))?;
     if value.trim().is_empty() {
@@ -240,11 +250,7 @@ where
         config.instrument_id.clone(),
         config.venue,
     )?;
-    let mut book = Book::new(
-        config.instrument_id.clone(),
-        config.symbol.clone(),
-        config.venue.mic().into(),
-    );
+    let mut book = runtime_book(&config.instrument_id, config.venue);
     let (stop, cancelled) = watch::channel(false);
     let (sender, mut updates) = mpsc::channel(8);
     let mut source_task = tokio::spawn(source_fn(
@@ -343,6 +349,65 @@ pub fn install_crypto_provider() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn runtime_book_preserves_go_emitted_symbol_for_both_venues() {
+        use crate::proto::market::v1::{MarketDataEvent, OrderBookSnapshot, PriceLevel};
+        use kanz_decimal_compat::common::v1::Decimal;
+        use prost::Message;
+        for (venue, wire_symbol) in [(Venue::Binance, "BTCUSDT"), (Venue::Okx, "BTC-USDT")] {
+            let mut book = runtime_book("canonical/BTC-USD", venue);
+            let level = |price| PriceLevel {
+                price: Some(Decimal {
+                    coefficient: price,
+                    exponent: 0,
+                }),
+                size: Some(Decimal {
+                    coefficient: 2,
+                    exponent: 0,
+                }),
+            };
+            let source = OrderBookSnapshot {
+                instrument_id: "canonical/BTC-USD".into(),
+                symbol: wire_symbol.into(),
+                mic: venue.mic().into(),
+                event_time: Some(prost_types::Timestamp {
+                    seconds: 100,
+                    nanos: 0,
+                }),
+                last_update_sequence: 101,
+                bids: vec![level(50000)],
+                asks: vec![level(50001)],
+            };
+            book.apply_snapshot(&source).unwrap();
+            assert_eq!(source.symbol, wire_symbol);
+            let snapshot = book.snapshot(100);
+            assert_eq!(snapshot.symbol, "canonical/BTC-USD");
+            assert_eq!(snapshot.instrument_id, source.instrument_id);
+            let mut framer = Framer::new(
+                "tenant".into(),
+                "fixture/runtime".into(),
+                "test".into(),
+                source.instrument_id.clone(),
+                venue,
+            )
+            .unwrap();
+            let frames = framer
+                .frames(
+                    &snapshot,
+                    prost_types::Timestamp {
+                        seconds: 100,
+                        nanos: 0,
+                    },
+                )
+                .unwrap();
+            let emitted_book = OrderBookSnapshot::decode(frames[0].1.payload.as_slice()).unwrap();
+            let emitted_quote = MarketDataEvent::decode(frames[1].1.payload.as_slice()).unwrap();
+            assert_eq!(emitted_book.symbol, source.instrument_id);
+            assert_eq!(emitted_quote.symbol, source.instrument_id);
+            assert_eq!(emitted_book.last_update_sequence, 101);
+            assert_eq!(emitted_quote.source_sequence, 101);
+        }
+    }
     #[test]
     fn image_version_cannot_be_overridden_and_unstamped_production_refuses() {
         assert_eq!(

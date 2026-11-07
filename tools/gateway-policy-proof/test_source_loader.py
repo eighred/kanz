@@ -24,7 +24,7 @@ class SourceLoaderTests(unittest.TestCase):
                     for name in ("policy_state", "transaction", "rollout_scope"):
                         (root / (name + ".py")).write_bytes((HERE / (name + ".py")).read_bytes())
                 if entry in ("recovery_host", "recovery_plan", "recovery_restore"):
-                    for name in ("bounded_process", "policy_state", "transaction", "transport_codec", "policy_client", "rollout_scope", "recovery_provenance", "recovery_plan"):
+                    for name in ("network_observation", "bounded_process", "policy_state", "transaction", "transport_codec", "policy_client", "rollout_scope", "recovery_provenance", "recovery_plan"):
                         (root / (name + ".py")).write_bytes((HERE / (name + ".py")).read_bytes())
                     (root / "json.py").write_text('raise RuntimeError("SHADOW_SENTINEL")\n')
                 source = (HERE / (dependency + ".py")).read_bytes()
@@ -60,7 +60,7 @@ class SourceLoaderTests(unittest.TestCase):
     def test_remote_dependency_closure_ignores_cache_and_shadow(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ("bounded_process", "policy_state", "transaction", "policy_client", "rollout_probe", "rollout_scope"):
+            for name in ("network_observation", "bounded_process", "policy_state", "transaction", "policy_client", "rollout_probe", "rollout_scope"):
                 (root / (name + ".py")).write_text((HERE / (name + ".py")).read_text())
             (root / "rollout_engine.py").write_text('import policy_client, rollout_probe, json\nprint("REMOTE_SOURCE")\n')
             (root / "json.py").write_text('raise RuntimeError("SHADOW_SENTINEL")\n')

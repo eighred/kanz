@@ -1,4 +1,5 @@
 import copy
+import errno
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +12,7 @@ import check
 import cleanup
 import probe
 import proof
+from test_network_evidence import complete_controls
 
 
 def objects():
@@ -28,7 +30,7 @@ def complete():
     policies, _, rendered = proof.render(lambda _: yaml.safe_dump_all(objects()))
     return {'sourceSHA': 'a' * 40, 'sourceTree': 'b' * 40, 'runID': '123', 'runAttempt': '1',
             'developmentOnly': True, 'passed': True, 'cleanupPassed': True, 'restoredExact': True,
-            'initialPolicyReadback': True, 'nodeImage': proof.feed.NODE, 'fixtureImage': proof.IMAGE,
+            'initialPolicyReadback': True, 'unionCleanupPassed': True, 'networkControls': complete_controls(), 'nodeImage': proof.feed.NODE, 'fixtureImage': proof.IMAGE,
             'cluster': 'cni-proof-' + 'c' * 12, 'renderSHA256': rendered,
             'policyRemovalSHA256': 'd' * 64, 'policyRestoreSHA256': 'd' * 64,
             'policies': [{'name': p['metadata']['name'], 'namespace': proof.SERVICES, 'sha256': proof.digest(p)} for p in policies],
@@ -130,22 +132,25 @@ class EvidenceTests(unittest.TestCase):
                 path.write_text(json.dumps(report))
                 with self.assertRaises(ValueError): check.check(path, 'a' * 40, 'b' * 40, '123', '1')
 
-    def test_connection_refusal_is_not_denial(self):
+    def test_untyped_connection_error_is_unknown(self):
         with patch.object(probe.socket, 'create_connection', side_effect=ConnectionRefusedError):
-            with self.assertRaises(ConnectionRefusedError): probe.observe('fixture', 8101, 'blocked')
+            with self.assertRaisesRegex(ValueError, "unknown connection observation"): probe.observe('192.0.2.1', 8101, 'blocked')
 
-    def test_only_connect_timeout_is_denial(self):
+    def test_finite_connect_denials_but_not_protocol_errors(self):
         with patch.object(probe.socket, 'create_connection', side_effect=TimeoutError), patch.object(probe.time, 'sleep'):
-            self.assertEqual(probe.observe('fixture', 8101, 'blocked'), ['blocked'] * 3)
+            self.assertEqual(probe.observe('192.0.2.1', 8101, 'blocked'), ['blocked'] * 3)
+        for code in (errno.ECONNREFUSED, errno.EHOSTUNREACH):
+            with patch.object(probe.socket, 'create_connection', side_effect=OSError(code, 'private')), patch.object(probe.time, 'sleep'):
+                self.assertEqual(probe.observe('192.0.2.1', 8101, 'blocked'), ['blocked'] * 3)
         connection = MagicMock(); connection.__enter__.return_value = connection; connection.recv.side_effect = TimeoutError
         with patch.object(probe.socket, 'create_connection', return_value=connection):
-            with self.assertRaises(TimeoutError): probe.observe('fixture', 8101, 'blocked')
+            with self.assertRaises(TimeoutError): probe.observe('192.0.2.1', 8101, 'blocked')
 
     def test_positive_requires_exact_http_body(self):
         connection = MagicMock(); connection.__enter__.return_value = connection
         connection.recv.side_effect = [b'HTTP/1.0 200 OK\r\n\r\nfixture-port=9999\n', b'']
         with patch.object(probe.socket, 'create_connection', return_value=connection):
-            with self.assertRaises(ValueError): probe.observe('fixture', 8101, 'allowed')
+            with self.assertRaises(ValueError): probe.observe('192.0.2.1', 8101, 'allowed')
 
     def test_cleanup_owns_exact_nonce(self):
         with tempfile.TemporaryDirectory() as temporary, patch.dict(cleanup.os.environ, {'RUNNER_TEMP': temporary}):
@@ -163,3 +168,42 @@ class EvidenceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NamespaceCustodyTests(unittest.TestCase):
+    def test_collision_lost_create_and_replacement_custody(self):
+        for mode in ("collision", "lost_create", "setup_failure", "replacement"):
+            objects, deleted = {}, []
+            failed = False
+            def k(*args, data=None, **kwargs):
+                nonlocal failed
+                if args[0] == "get":
+                    name = args[2]
+                    if mode == "collision" and args[-1] == "name": return name
+                    obj = objects.get(name)
+                    if obj is not None and mode == "replacement" and failed:
+                        obj = copy.deepcopy(obj); obj["metadata"]["uid"] = "foreign"
+                    return json.dumps(obj) if args[-1] == "json" and obj else ""
+                if args[0] == "create":
+                    obj = json.loads(data); name = obj["metadata"]["name"]
+                    obj["metadata"].update(uid="owned-" + name, resourceVersion="1")
+                    objects[name] = obj
+                    if mode == "lost_create":
+                        failed = True; raise RuntimeError("synthetic lost create response")
+                    return ""
+                if args[0] == "apply":
+                    failed = True; raise RuntimeError("synthetic setup failure")
+                if args[0] == "delete":
+                    name = args[2].rsplit("/", 1)[1]
+                    control = json.loads(data)["preconditions"]
+                    self.assertEqual(control, {"uid": objects[name]["metadata"]["uid"], "resourceVersion": "1"})
+                    deleted.append(name); del objects[name]; return ""
+                if args[0] == "wait": return ""
+                raise AssertionError("unexpected fixture operation")
+            labels = {name: {"app": name} for name in (*proof.TARGETS, "api-gateway", "web-bff")}
+            with self.subTest(mode=mode), self.assertRaises((RuntimeError, ValueError)):
+                proof.qualify_union(k, [], labels, {})
+            if mode in ("collision", "replacement"):
+                self.assertEqual(deleted, [])
+            else:
+                self.assertTrue(deleted); self.assertEqual(objects, {})

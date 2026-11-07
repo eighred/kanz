@@ -3,19 +3,31 @@ on:
   pull_request:
     paths:
       - 'tools/cni-proof/**'
+      - 'tools/gateway-policy-proof/**'
+      - 'kanz/infra/overlays/testnet-tokyo/**'
+      - 'kanz/infra/security/runtime/**'
       - 'tools/feed-identity/install.sh'
       - '.github/workflows/k3s-cni-migration.yml'
   push:
     branches: [main]
     paths:
       - 'tools/cni-proof/**'
+      - 'tools/gateway-policy-proof/**'
+      - 'kanz/infra/overlays/testnet-tokyo/**'
+      - 'kanz/infra/security/runtime/**'
       - 'tools/feed-identity/install.sh'
       - '.github/workflows/k3s-cni-migration.yml'
   workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        default: full
+        options: [full, storage-pid1-diagnostic]
 permissions:
   contents: read
 jobs:
   disposable-transition:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'storage-pid1-diagnostic'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -27,9 +39,20 @@ jobs:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
       - run: python3 -B -m unittest discover -s tools/cni-proof -p 'test_*.py'
+      - name: Prove storage PID1 graceful termination
+        run: python3 -B tools/cni-proof/storage_signal.py
+      - name: Retain closed PID1 diagnostic
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: storage-pid1-diagnostic
+          path: ${{ runner.temp }}/storage-pid1.json
+          if-no-files-found: error
       - run: bash tools/feed-identity/install.sh
       - name: Preserve state through actual Flannel to Cilium and rollback
         run: python3 -B tools/cni-proof/migration.py
+      - name: Verify exact source and all three rendered gateway phases
+        run: python3 -B tools/cni-proof/check_migration.py "$RUNNER_TEMP/k3s-cni-migration.json"
       - name: Remove only disposable fixture resources after interruption
         if: always()
         run: |
@@ -50,4 +73,27 @@ jobs:
         with:
           name: k3s-cni-migration
           path: ${{ runner.temp }}/k3s-cni-migration.json
+          if-no-files-found: error
+
+  storage-pid1-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'storage-pid1-diagnostic' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 -B -m unittest discover -s tools/cni-proof -p 'test_*.py'
+      - name: Prove storage PID1 graceful termination
+        run: python3 -B tools/cni-proof/storage_signal.py
+      - name: Retain closed PID1 diagnostic
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: storage-pid1-diagnostic
+          path: ${{ runner.temp }}/storage-pid1.json
           if-no-files-found: error

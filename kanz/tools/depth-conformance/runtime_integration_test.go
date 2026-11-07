@@ -207,7 +207,7 @@ func TestRustDepthProcessThroughJetStream(t *testing.T) {
 				if err := proto.Unmarshal(frame.Payload, book); err != nil {
 					t.Fatal(err)
 				}
-				if book.InstrumentId != instrument || book.LastUpdateSequence != 101 || book.EventTime.AsTime().UnixMilli() != eventMS || book.Mic != "BINANCE" || book.Symbol != "BTCUSDT" {
+				if book.InstrumentId != instrument || book.LastUpdateSequence != 101 || book.EventTime.AsTime().UnixMilli() != eventMS || book.Mic != "BINANCE" || book.Symbol != instrument {
 					t.Fatal("book identity/sequence/clock mismatch")
 				}
 				if len(book.Bids) != 1 || len(book.Asks) != 1 || dec.FromProto(book.Bids[0].Price).Cmp(big.NewRat(50000, 1)) != 0 || dec.FromProto(book.Bids[0].Size).Cmp(big.NewRat(4, 1)) != 0 || dec.FromProto(book.Asks[0].Price).Cmp(big.NewRat(50001, 1)) != 0 || dec.FromProto(book.Asks[0].Size).Cmp(big.NewRat(2, 1)) != 0 {
@@ -221,7 +221,7 @@ func TestRustDepthProcessThroughJetStream(t *testing.T) {
 				if err := proto.Unmarshal(frame.Payload, quote); err != nil {
 					t.Fatal(err)
 				}
-				if quote.InstrumentId != instrument || quote.Symbol != "BTCUSDT" || quote.Mic != "BINANCE" || quote.SourceSequence != 101 || quote.EventTime.AsTime().UnixMilli() != eventMS || quote.GetQuote() == nil {
+				if quote.InstrumentId != instrument || quote.Symbol != instrument || quote.Mic != "BINANCE" || quote.SourceSequence != 101 || quote.EventTime.AsTime().UnixMilli() != eventMS || quote.GetQuote() == nil {
 					t.Fatal("quote identity/sequence/clock mismatch")
 				}
 				if err := marks.Handle(ctx, env, frame.Payload); err != nil {

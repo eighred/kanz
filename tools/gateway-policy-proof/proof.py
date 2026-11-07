@@ -125,6 +125,23 @@ def validate_report(report, source, tree, run_id, attempt):
             or report.get('nodeImage') != feed.NODE or report.get('fixtureImage') != IMAGE
             or not re.fullmatch(r'cni-proof-[0-9a-f]{12}', report.get('cluster', ''))):
         raise ValueError('missing source/cleanup/boundary evidence')
+    validate_union(report)
+
+
+def network_fixture():
+    path = HERE / "network_fixture.py"
+    spec = importlib.util.spec_from_file_location("gateway_network_fixture", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate_union(report):
+    if (report.get('unionCleanupPassed') is not True or report.get('restoredExact') is not True
+            or report.get('initialPolicyReadback') is not True
+            or report.get('policyRemovalSHA256') != report.get('policyRestoreSHA256')):
+        raise ValueError('missing rendered union lifecycle')
+    network_fixture().validate(report.get('networkControls'))
     inventory = report.get('policies')
     if not isinstance(inventory, list) or not 3 <= len(inventory) <= 64:
         raise ValueError('missing full policy inventory')
@@ -165,6 +182,144 @@ def pod(name, namespace, labels, ports=()):
                      'containers': [container], 'volumes': [{'name': 'scripts', 'configMap': {'name': 'scripts'}}]}}
 
 
+def qualify_union(k, policies, labels, report):
+    """Same actual rendered objects on a caller-owned disposable cluster.
+
+    Namespace absence precedes ownership. Cleanup reconciles response loss only
+    against the fresh nonce, then deletes by observed UID/resourceVersion.
+    """
+    nonce = uuid.uuid4().hex
+    network = network_fixture()
+    network.selector_independent(policies, labels)
+    namespaces = (SERVICES, OBS, OUTSIDE)
+    for namespace in namespaces:
+        if k('get', 'namespace', namespace, '--ignore-not-found', '-o', 'name').strip():
+            raise ValueError('rendered_namespace_collision')
+    def apply(items):
+        k('apply', '-f', '-', data=yaml.safe_dump_all(items))
+    def policy_readback(policies):
+        actual = json.loads(k('-n', SERVICES, 'get', 'networkpolicy', '-o', 'json'))['items']
+        same_policy_union(actual, policies)
+    created = {}
+    try:
+        for namespace in namespaces:
+            desired = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': namespace, 'labels': {'kanz.io/gateway-proof': nonce}}}
+            try:
+                k('create', '-f', '-', data=json.dumps(desired))
+            finally:
+                actual = json.loads(k('get', 'namespace', namespace, '--ignore-not-found', '-o', 'json') or 'null')
+                if actual is not None and actual['metadata'].get('labels', {}).get('kanz.io/gateway-proof') == nonce:
+                    created[namespace] = actual['metadata']['uid']
+            if namespace not in created:
+                raise ValueError('rendered_namespace_create_unknown')
+        report['stage'] = 'synthetic_listeners'
+        peers = {'api-gateway': (SERVICES, 'api-gateway'), 'web-bff': (SERVICES, 'web-bff'),
+                 'untrusted': (SERVICES, 'untrusted'), 'observer': (OBS, 'observer'),
+                 'spoof-gateway': (OUTSIDE, 'spoof-gateway')}
+        objects = []
+        for namespace in (SERVICES, OBS, OUTSIDE):
+            objects.extend([{'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': 'scripts', 'namespace': namespace},
+                             'data': {p: (HERE / p).read_text(encoding='utf-8') for p in ('listener.py', 'probe.py', 'network_observation.py')}}])
+        for target, ports in {**TARGETS, 'api-gateway': (8080,)}.items():
+            objects.append(pod(target, SERVICES, {**labels[target], network.OWNER: nonce}, ports))
+            objects.append({'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': target, 'namespace': SERVICES},
+                            'spec': {'selector': {'app': target}, 'ports': [
+                                {'name': 'p' + str(port), 'port': port, 'targetPort': port} for port in ports]}})
+        for peer, (namespace, podname) in peers.items():
+            if peer == 'api-gateway':
+                continue
+            objects.append(pod(podname, namespace, {**labels.get(peer, {'app': 'api-gateway' if peer == 'spoof-gateway' else peer}), network.OWNER: nonce}))
+        apply(objects)
+        for namespace in (SERVICES, OBS, OUTSIDE):
+            k('-n', namespace, 'wait', '--for=condition=Ready', 'pod', '--all', '--timeout=120s')
+        endpoints = {}
+        for target in [*TARGETS, 'api-gateway']:
+            endpoints[target] = {'pod': json.loads(k('-n', SERVICES, 'get', 'pod', target, '-o', 'json'))['status']['podIP'],
+                                 'service': json.loads(k('-n', SERVICES, 'get', 'service', target, '-o', 'json'))['spec']['clusterIP']}
+        def sample(peer, target, route, kind, outcome):
+            namespace, podname = peers[peer]
+            port = 8080 if target == 'api-gateway' else TARGETS[target][kind == 'ops']
+            raw = k('-n', namespace, 'exec', podname, '--', 'python3', '-B', '/fixture/probe.py',
+                    endpoints[target][route], str(port), outcome)
+            value = json.loads(raw)
+            if not isinstance(value, list) or len(value) != 3 or any(v not in ('allowed', 'blocked') for v in value):
+                raise ValueError('unknown_probe')
+            return value
+        def probe(peer, target, route, kind, outcome):
+            deadline = time.monotonic() + 20
+            consecutive = 0
+            trail = []
+            for _ in range(6):
+                values = sample(peer, target, route, kind, outcome)
+                if time.monotonic() >= deadline:
+                    break
+                trail = (trail + values)[-3:]
+                for value in values:
+                    consecutive = consecutive + 1 if value == outcome else 0
+                if consecutive >= 3:
+                    return trail
+            raise ValueError('network_not_converged')
+        def phase(selected):
+            for case, outcome in cases().items():
+                prefix, target, route, peer, kind = case.split('/')
+                if prefix != selected:
+                    continue
+                item = {}
+                report['observations'][case] = item
+                control = 'web-bff' if target == 'api-gateway' else 'api-gateway'
+                if outcome == 'blocked':
+                    item['before'] = probe(control, target, route, kind, 'allowed')
+                try:
+                    item['result'] = probe(peer, target, route, kind, outcome)
+                finally:
+                    if outcome == 'blocked':
+                        item['after'] = probe(control, target, route, kind, 'allowed')
+                report['observations'][case] = item
+        report['stage'] = 'baseline'
+        phase('baseline')
+        report['networkControls'] = {}
+        probe('api-gateway', 'accounting', 'pod', 'api', 'allowed')
+        try:
+            report['networkControls']['closed'] = network.qualify(k, peers, endpoints, IMAGE, 'closed', nonce)
+        finally:
+            probe('api-gateway', 'accounting', 'pod', 'api', 'allowed')
+        report['networkControls']['no_policy'] = network.qualify(k, peers, endpoints, IMAGE, 'no_policy', nonce)
+        report['stage'] = 'enforced'
+        apply(policies)
+        policy_readback(policies)
+        report['initialPolicyReadback'] = True
+        phase('enforced')
+        report['networkControls']['enforced'] = network.qualify(k, peers, endpoints, IMAGE, 'enforced', nonce)
+        report['stage'] = 'removal_control'
+        removed = next(p for p in policies if p['metadata']['name'] == POLICY_NAMES['accounting'])
+        report['policyRemovalSHA256'] = digest(removed)
+        k('-n', SERVICES, 'delete', 'networkpolicy', removed['metadata']['name'], '--wait=true')
+        policy_readback([p for p in policies if p is not removed])
+        phase('removed')
+        report['stage'] = 'exact_restore'
+        apply([removed])
+        policy_readback(policies)
+        report['policyRestoreSHA256'] = digest(removed)
+        phase('restored')
+        report['restoredExact'] = True
+    finally:
+        for namespace in reversed(list(created)):
+            actual = json.loads(k('get', 'namespace', namespace, '--ignore-not-found', '-o', 'json') or 'null')
+            if actual is None:
+                continue
+            if (actual['metadata'].get('labels', {}).get('kanz.io/gateway-proof') != nonce
+                    or actual['metadata']['uid'] != created[namespace]):
+                raise ValueError('rendered_namespace_ownership')
+            meta = actual['metadata']
+            k('delete', '--raw', '/api/v1/namespaces/' + namespace, '-f', '-', data=json.dumps({
+                'apiVersion': 'v1', 'kind': 'DeleteOptions',
+                'preconditions': {'uid': meta['uid'], 'resourceVersion': meta['resourceVersion']}}))
+            k('wait', '--for=delete', 'namespace/' + namespace, '--timeout=60s')
+            if k('get', 'namespace', namespace, '--ignore-not-found', '-o', 'name').strip():
+                raise ValueError('rendered_namespace_not_absent')
+        report['unionCleanupPassed'] = True
+
+
 def main():
     artifact = Path(os.environ['RUNNER_TEMP']) / 'gateway-policy.json'
     name = 'cni-proof-' + uuid.uuid4().hex[:12]
@@ -186,8 +341,8 @@ def main():
             return result.stdout.strip()
         feed.command = run
         kubeconfig = str(scratch / 'kubeconfig')
-        def k(*args, data=None):
-            return run(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name, *args], data=data, timeout=90)
+        def k(*args, data=None, timeout=90):
+            return run(['kubectl', '--kubeconfig', kubeconfig, '--context', 'kind-' + name, *args], data=data, timeout=min(timeout, 90))
         def apply(items):
             k('apply', '-f', '-', data=yaml.safe_dump_all(items))
         def policy_readback(policies):
@@ -204,89 +359,7 @@ def main():
             claim_cluster(name, scratch, artifact, run)
             owned = True
             feed.create_enforcing_cluster(name, scratch)
-            report['stage'] = 'synthetic_listeners'
-            peers = {'api-gateway': (SERVICES, 'api-gateway'), 'web-bff': (SERVICES, 'web-bff'),
-                     'untrusted': (SERVICES, 'untrusted'), 'observer': (OBS, 'observer'),
-                     'spoof-gateway': (OUTSIDE, 'spoof-gateway')}
-            objects = []
-            for namespace in (SERVICES, OBS, OUTSIDE):
-                objects.extend([{'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': namespace}},
-                                {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': 'scripts', 'namespace': namespace},
-                                 'data': {p: (HERE / p).read_text() for p in ('listener.py', 'probe.py')}}])
-            for target, ports in {**TARGETS, 'api-gateway': (8080,)}.items():
-                objects.append(pod(target, SERVICES, labels[target], ports))
-                objects.append({'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': target, 'namespace': SERVICES},
-                                'spec': {'selector': {'app': target}, 'ports': [
-                                    {'name': 'p' + str(port), 'port': port, 'targetPort': port} for port in ports]}})
-            for peer, (namespace, podname) in peers.items():
-                if peer == 'api-gateway':
-                    continue
-                objects.append(pod(podname, namespace, labels.get(peer, {'app': 'api-gateway' if peer == 'spoof-gateway' else peer})))
-            apply(objects)
-            for namespace in (SERVICES, OBS, OUTSIDE):
-                k('-n', namespace, 'wait', '--for=condition=Ready', 'pod', '--all', '--timeout=120s')
-            endpoints = {}
-            for target in [*TARGETS, 'api-gateway']:
-                endpoints[target] = {'pod': json.loads(k('-n', SERVICES, 'get', 'pod', target, '-o', 'json'))['status']['podIP'],
-                                     'service': json.loads(k('-n', SERVICES, 'get', 'service', target, '-o', 'json'))['spec']['clusterIP']}
-            def probe(peer, target, route, kind, outcome):
-                namespace, podname = peers[peer]
-                port = 8080 if target == 'api-gateway' else TARGETS[target][kind == 'ops']
-                raw = k('-n', namespace, 'exec', podname, '--', 'python3', '-B', '/fixture/probe.py',
-                        endpoints[target][route], str(port), outcome)
-                value = json.loads(raw)
-                if value != [outcome] * 3:
-                    raise ValueError('incomplete_probe')
-                return value
-            def phase(selected):
-                for case, outcome in cases().items():
-                    prefix, target, route, peer, kind = case.split('/')
-                    if prefix != selected:
-                        continue
-                    item = {}
-                    control = 'web-bff' if target == 'api-gateway' else 'api-gateway'
-                    if outcome == 'blocked':
-                        item['before'] = probe(control, target, route, kind, 'allowed')
-                    item['result'] = probe(peer, target, route, kind, outcome)
-                    if outcome == 'blocked':
-                        item['after'] = probe(control, target, route, kind, 'allowed')
-                    report['observations'][case] = item
-            def settle(peer, target, outcome):
-                # Kubernetes policy updates are asynchronous. Only the subsequent
-                # strict three-observation cases count as evidence.
-                deadline = time.monotonic() + 30
-                while True:
-                    try:
-                        probe(peer, target, 'pod', 'api', outcome)
-                        return
-                    except (RuntimeError, ValueError):
-                        if time.monotonic() >= deadline:
-                            raise
-                        time.sleep(0.5)
-            report['stage'] = 'baseline'
-            phase('baseline')
-            report['stage'] = 'enforced'
-            apply(policies)
-            policy_readback(policies)
-            report['initialPolicyReadback'] = True
-            for target in TARGETS:
-                settle('untrusted', target, 'blocked')
-            settle('untrusted', 'api-gateway', 'blocked')
-            phase('enforced')
-            report['stage'] = 'removal_control'
-            removed = next(p for p in policies if p['metadata']['name'] == POLICY_NAMES['accounting'])
-            report['policyRemovalSHA256'] = digest(removed)
-            k('-n', SERVICES, 'delete', 'networkpolicy', removed['metadata']['name'], '--wait=true')
-            policy_readback([p for p in policies if p is not removed])
-            settle('untrusted', 'accounting', 'allowed')
-            phase('removed')
-            report['stage'] = 'exact_restore'
-            apply([removed])
-            policy_readback(policies)
-            report['policyRestoreSHA256'] = digest(removed)
-            settle('untrusted', 'accounting', 'blocked')
-            phase('restored')
-            report['restoredExact'] = True
+            qualify_union(k, policies, labels, report)
             report['passed'] = True
         except Exception:
             report['failure'] = 'qualification_failed'

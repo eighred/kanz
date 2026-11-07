@@ -10,7 +10,8 @@ import (
 )
 
 const goCacheAction = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
-const goCachePrefix = "kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-${{ matrix.shard }}-"
+const goCacheKindPrefix = "kanz-go-complete-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler_cache_meta.outputs.version }}-${{ steps.compiler_cache_meta.outputs.image }}-${{ steps.compiler_cache_meta.outputs.fingerprint }}-${{ matrix.kind }}-"
+const goCachePrefix = goCacheKindPrefix + "${{ matrix.shard }}-"
 const goCacheInputs = "${{ hashFiles('kanz/.gotmp/go-ci-cache-profile', 'kanz/go.mod', 'kanz/go.sum', '.github/go-ci-cache-profile', 'kanz-schemas/buf.gen.yaml', 'kanz-schemas/proto/**/*.proto', '.github/scripts/go_shard_evidence.py') }}"
 const goCacheWriter = "success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.compiler_cache_meta.outputs.enabled == 'true'"
 
@@ -55,7 +56,7 @@ func checkGoCacheProfile(data []byte) error {
 			}
 			meta = i
 		case step.ID == "compiler_cache":
-			if restore != -1 || step.Uses != "actions/cache/restore@"+goCacheAction || step.If != "steps.compiler_cache_meta.outputs.enabled == 'true'" || len(step.With) != 3 || step.With["path"] != "${{ steps.compiler_cache_meta.outputs.paths }}" || step.With["key"] != goCachePrefix+goCacheInputs || strings.TrimSpace(step.With["restore-keys"]) != goCachePrefix {
+			if restore != -1 || step.Uses != "actions/cache/restore@"+goCacheAction || step.If != "steps.compiler_cache_meta.outputs.enabled == 'true'" || len(step.With) != 3 || step.With["path"] != "${{ steps.compiler_cache_meta.outputs.paths }}" || step.With["key"] != goCachePrefix+goCacheInputs || strings.TrimSpace(step.With["restore-keys"]) != goCachePrefix+"\n"+goCacheKindPrefix {
 				return fmt.Errorf("compiler restore lost isolated complete profile")
 			}
 			restore = i
@@ -99,6 +100,7 @@ func TestGoCICompilerCacheProfileIsExclusive(t *testing.T) {
 		t.Fatal(err)
 	}
 	mutations := [][2]string{
+		{goCacheKindPrefix + "\n", "kanz-go-complete-v3-\n"},
 		{"cache: false", "cache: true"},
 		{"actions/cache/restore@" + goCacheAction, "actions/cache@" + goCacheAction},
 		{"actions/cache/save@" + goCacheAction, "actions/cache/save@main"},

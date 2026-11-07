@@ -3,6 +3,7 @@
 import argparse
 import ipaddress
 import json
+from pathlib import Path
 import re
 import signal
 import subprocess
@@ -35,20 +36,26 @@ while time.monotonic()<end:
   except OSError:
    pass
 """
-SOCKET_PROBE = """import errno,ipaddress,json,socket,sys,time
+_network_path = Path(__file__).resolve().parents[1] / "gateway-policy-proof/network_observation.py"
+if _network_path.is_symlink() or not _network_path.is_file() or _network_path.stat().st_size > 65536:
+    raise ValueError("invalid shared network source")
+with _network_path.open('rb') as _stream:
+    _network_source = _stream.read(65537)
+if len(_network_source) > 65536:
+    raise ValueError("shared network source exceeds bound")
+_network = {}
+exec(compile(_network_source, str(_network_path), "exec"), _network)
+SOCKET_PROBE = _network["CONNECT_SOURCE"] + """import json,sys,time
 def observe():
- ipaddress.ip_address(sys.argv[1])
  result={'outcome':'unknown','reason':'protocol'}
- try:
-  s=socket.create_connection((sys.argv[1],8080),timeout=2)
- except TimeoutError:
+ s,category=connect_literal(sys.argv[1],8080,2)
+ if category=='timeout':
   result={'outcome':'blocked','reason':'connect_timeout'}
- except OSError as e:
-  if e.errno in (errno.ECONNREFUSED,errno.EHOSTUNREACH):
-   result={'outcome':'blocked','reason':'connect_refused'}
-  else:
-   result={'outcome':'unknown','reason':'connect_error'}
- else:
+ elif category in ('refused','host_unreachable'):
+  result={'outcome':'blocked','reason':'connect_refused'}
+ elif category=='unknown':
+  result={'outcome':'unknown','reason':'connect_error'}
+ elif s is not None:
   with s:
    try:
     s.sendall(sys.argv[2].encode())

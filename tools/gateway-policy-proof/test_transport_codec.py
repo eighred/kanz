@@ -9,12 +9,32 @@ import sys
 import tempfile
 import inspect
 import transport_codec as codec
+from test_network_framing import bootstrap as actual_bootstrap
 
 
 from transaction_fixture import qualify_codec, run_fixture, CASES
 
 
 class TransportCodecTests(unittest.TestCase):
+    def test_fixed_encoder_and_legacy_decoder(self):
+        from unittest.mock import patch
+        import ast
+        import hashlib
+        source = inspect.getsource(codec)
+        decoder = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "decode")
+        # Frozen 0769 decoder AST; encoder tuning cannot broaden input acceptance.
+        options = {"show_empty": True} if "show_empty" in inspect.signature(ast.dump).parameters else {}
+        self.assertEqual(hashlib.sha256(ast.dump(decoder, include_attributes=False, **options).encode()).hexdigest(), "76068d99d95d5035e326ebf09a82f7f66cdba98e64d9de5ab8a5ac80f277a1e8")
+        raw = "legacy and current UTF8 λ\r\n".encode()
+        with patch.object(lzma, "compress", wraps=lzma.compress) as compress:
+            self.assertEqual(codec.decode(codec.encode(raw)), raw)
+            self.assertEqual(compress.call_args.kwargs, {"format": lzma.FORMAT_XZ, "check": lzma.CHECK_CRC64,
+                "filters": [{"id": lzma.FILTER_LZMA2, "preset": 6, "dict_size": 1048576,
+                             "pb": 0, "lc": 3, "nice_len": 80, "depth": 64}]})
+        legacy = lzma.compress(raw, format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64,
+                              filters=[{"id": lzma.FILTER_LZMA2, "preset": 6, "dict_size": 1048576}])
+        self.assertEqual(codec.decode(base64.b64encode(legacy).decode()), raw)
+
     def test_linux_fixture_requires_codec_before_acceptance(self):
         source = inspect.getsource(run_fixture)
         marker = 'qualify_codec()\n            report["cases"].append("bounded_xz_transport")'
@@ -37,9 +57,8 @@ class TransportCodecTests(unittest.TestCase):
     def test_exact_bootstrap_refuses_before_source_writes(self):
         here = Path(__file__).parent
         wrapper = (here.parent / "Invoke-TokyoGatewayPolicy.ps1").read_text()
-        body = re.search(r"\$bootstrap = \$codec \+ \"`n\" \+ @'\n(.*?)\n'@", wrapper, re.S).group(1)
-        source = (here / "transport_codec.py").read_text() + "\n" + body
-        names = ("policy_state.py", "transaction.py", "policy_client.py", "rollout_probe.py", "rollout_scope.py", "rollout_engine.py", "bounded_process.py", "source_loader.py")
+        source = actual_bootstrap(wrapper, {"source_loader.py": b"# fixed source\n", "network_observation.py": b"# fixed source\n"})
+        names = ("policy_state.py", "transaction.py", "policy_client.py", "rollout_probe.py", "rollout_scope.py", "rollout_engine.py", "bounded_process.py")
         bundle = {"files": {n: "# exact UTF8 λ\r\n" for n in names}, "payload": {"source": "a" * 40}}
         for mode in ("valid", "truncated", "extra", "oversized_file", "missing_lzma", "unsupported_crc64"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
@@ -76,7 +95,7 @@ class TransportCodecTests(unittest.TestCase):
         markers = ["$encode = $codec +", "$bootstrap = $codec +", "raw=decode(sys.argv[1])",
                    "-I -B -c $encode", "ls-files --error-unmatch tools/gateway-policy-proof/transport_codec.py",
                    "$codecInfo.LinkType", "$codecInfo.PSIsContainer", "$codecInfo.Length -gt 65536", "$encoded.Length -gt 20000",
-                   "$bytes.Length -gt 524288", "len(data)>65536", "$parameterBytes -gt 30000"]
+                   "($bytes.Length + $fixedSize) -gt 524288", "len(data)>65536", "$parameterBytes -gt 30000"]
         def valid(text): return all(marker in text for marker in markers)
         self.assertTrue(valid(wrapper))
         for marker in markers:

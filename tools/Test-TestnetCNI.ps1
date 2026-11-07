@@ -6,6 +6,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $aws = (Get-Command aws.exe -ErrorAction Stop).Source
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $verifierPath = Join-Path $PSScriptRoot 'cni-proof/proof.py'
+$networkPath = Join-Path $PSScriptRoot 'gateway-policy-proof/network_observation.py'
 $Region = 'ap-northeast-1'
 $InstanceId = 'i-0ee1235614219f089'
 $AccountId = '012619468098'
@@ -17,9 +18,9 @@ $headCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($headCommit -ne $releaseCommit) {
     throw 'CNI proof is refused: HEAD is not exact origin/main.'
 }
-& git -C $repoRoot ls-files --error-unmatch tools/Test-TestnetCNI.ps1 tools/cni-proof/proof.py *> $null
+& git -C $repoRoot ls-files --error-unmatch tools/Test-TestnetCNI.ps1 tools/cni-proof/proof.py tools/gateway-policy-proof/network_observation.py *> $null
 if ($LASTEXITCODE -ne 0) { throw 'CNI verifier inputs must be tracked.' }
-& git -C $repoRoot diff --quiet $releaseCommit -- tools/Test-TestnetCNI.ps1 tools/cni-proof/proof.py
+& git -C $repoRoot diff --quiet $releaseCommit -- tools/Test-TestnetCNI.ps1 tools/cni-proof/proof.py tools/gateway-policy-proof/network_observation.py
 if ($LASTEXITCODE -ne 0) { throw 'CNI verifier inputs differ from merged origin/main.' }
 
 # No SSM command is issued before source and fixed estate identity checks.
@@ -30,19 +31,33 @@ $instance = & $aws ec2 describe-instances --profile $Profile --region $Region --
 if ($LASTEXITCODE -ne 0 -or $instance.Id -ne $InstanceId -or $instance.State -ne 'running') {
     throw 'The fixed Tokyo instance is not running in the expected account and region.'
 }
-$verifier = Get-Content -LiteralPath $verifierPath -Raw
-if ([Text.Encoding]::UTF8.GetByteCount($verifier) -gt 24576) { throw 'CNI verifier exceeds the transfer bound.' }
+foreach ($path in @($verifierPath, $networkPath)) {
+    $info = Get-Item -LiteralPath $path
+    if ($info.LinkType -or $info.PSIsContainer -or $info.Length -gt 24576) { throw 'CNI source must be bounded regular bytes.' }
+}
+$verifierBytes = [IO.File]::ReadAllBytes($verifierPath)
+$networkBytes = [IO.File]::ReadAllBytes($networkPath)
+$utf8 = [Text.UTF8Encoding]::new($false, $true)
+$verifier = $utf8.GetString($verifierBytes)
+$null = $utf8.GetString($networkBytes)
+if (($verifierBytes.Length + $networkBytes.Length) -gt 24576) { throw 'CNI verifier exceeds the transfer bound.' }
 $expectedImage = [regex]::Match($verifier, '(?m)^IMAGE = "([^"]+)"\r?$').Groups[1].Value
 if ($expectedImage -notmatch '^python:[a-zA-Z0-9.-]+@sha256:[0-9a-f]{64}$') { throw 'CNI image pin is absent.' }
-$payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($verifier))
+$payload = [Convert]::ToBase64String($verifierBytes)
+$networkPayload = [Convert]::ToBase64String($networkBytes)
 $parameters = @{ executionTimeout = @('540'); commands = @(
     'set -eu',
     'umask 077',
-    'engine=$(mktemp /var/tmp/kanz-cni-verifier.XXXXXXXX.py)',
-    'trap ''rm -f "$engine"'' EXIT',
+    'work=$(mktemp -d /var/tmp/kanz-cni-verifier.XXXXXXXX)',
+    'trap ''rm -f "$work/cni-proof/proof.py" "$work/gateway-policy-proof/network_observation.py"; rmdir "$work/cni-proof" "$work/gateway-policy-proof" "$work"'' EXIT',
+    'mkdir "$work/cni-proof" "$work/gateway-policy-proof"',
+    'engine="$work/cni-proof/proof.py"',
+    'set -C',
+    ('printf ''%s'' ''' + $networkPayload + ''' | base64 -d > "$work/gateway-policy-proof/network_observation.py"'),
     ('printf ''%s'' ''' + $payload + ''' | base64 -d > "$engine"'),
     ('timeout --signal=TERM --kill-after=70s 400s python3 -I -B "$engine" --tokyo --source ' + $releaseCommit)
 ) } | ConvertTo-Json -Compress -Depth 4
+if ([Text.Encoding]::UTF8.GetByteCount($parameters) -gt 30000 -or $parameters.Length -gt 30000) { throw 'CNI complete command exceeds native bound.' }
 $commandId = (& $aws ssm send-command --profile $Profile --region $Region --instance-ids $InstanceId `
     --document-name AWS-RunShellScript --comment "Kanz isolated CNI proof $releaseCommit" `
     --parameters $parameters --query Command.CommandId --output text 2>$null).Trim()

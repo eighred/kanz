@@ -63,7 +63,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Rendered policy/workload projection failed.' }
 $projection = ($projectionRaw -join "`n") | ConvertFrom-Json
 $policies = $projection.policies
 $files = [ordered]@{}
-foreach ($name in @('policy_state.py', 'transaction.py', 'policy_client.py', 'rollout_probe.py', 'rollout_scope.py', 'rollout_engine.py', 'bounded_process.py', 'source_loader.py')) {
+foreach ($name in @('policy_state.py', 'transaction.py', 'policy_client.py', 'rollout_probe.py', 'rollout_scope.py', 'rollout_engine.py', 'bounded_process.py')) {
     $relative = "tools/gateway-policy-proof/$name"
     & git -C $repo ls-files --error-unmatch $relative *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Rollout engine is not tracked.' }
@@ -71,9 +71,40 @@ foreach ($name in @('policy_state.py', 'transaction.py', 'policy_client.py', 'ro
     if ([Text.Encoding]::UTF8.GetByteCount($text) -gt 65536) { throw 'Rollout source file exceeds bound.' }
     $files[$name] = $text
 }
-$bundle = [ordered]@{ files = $files; payload = [ordered]@{ source = $source; policies = $policies; identity = $identity; workloads = $projection.workloads } } | ConvertTo-Json -Depth 60 -Compress
+$fixedNames = @('source_loader.py', 'network_observation.py')
+$fixed = [ordered]@{}
+$fixedSize = 0
+foreach ($name in $fixedNames) {
+    $relative = "tools/gateway-policy-proof/$name"
+    & git -C $repo ls-files --error-unmatch $relative *> $null
+    $path = Join-Path $repo $relative
+    $info = Get-Item -LiteralPath $path
+    if ($LASTEXITCODE -ne 0 -or $info.LinkType -or $info.PSIsContainer -or $info.Length -gt 65536) { throw 'Fixed source must be bounded tracked regular bytes.' }
+    $raw = [IO.File]::ReadAllBytes($path)
+    if ($raw.Length -gt 65536) { throw 'Fixed source exceeds bound.' }
+    $fixedSize += $raw.Length
+    $fixed[$name] = [Convert]::ToBase64String($raw)
+}
+$literalBuilder = @'
+import base64,hashlib,json,sys
+raw=sys.stdin.buffer.read(262145)
+if len(raw)>262144: raise ValueError('fixed source input bound')
+values=json.loads(raw)
+if set(values)!={'network_observation.py', 'source_loader.py'}: raise ValueError('fixed source inventory')
+fixed={}
+for name,value in values.items():
+ data=base64.b64decode(value,validate=True)
+ if len(data)>65536: raise ValueError('fixed source size')
+ data.decode('utf-8',errors='strict')
+ fixed[name]=(data,hashlib.sha256(data).hexdigest())
+print('fixed='+repr(fixed))
+'@
+$literalLines = ($fixed | ConvertTo-Json -Compress) | & $python -I -B -c $literalBuilder
+if ($LASTEXITCODE -ne 0 -or @($literalLines).Count -ne 1) { throw 'Fixed UTF8 source literal refused.' }
+$fixedDeclaration = [string]$literalLines
+$bundle = [ordered]@{ payload = [ordered]@{ source = $source; policies = $policies; identity = $identity; workloads = $projection.workloads }; files = $files } | ConvertTo-Json -Depth 60 -Compress
 $bytes = [Text.Encoding]::UTF8.GetBytes($bundle)
-if ($bytes.Length -gt 524288) { throw 'Rollout bundle exceeds bound.' }
+if (($bytes.Length + $fixedSize) -gt 524288) { throw 'Rollout bundle exceeds bound.' }
 $codecPath = Join-Path $proofRoot 'transport_codec.py'
 & git -C $repo ls-files --error-unmatch tools/gateway-policy-proof/transport_codec.py *> $null
 $codecInfo = Get-Item -LiteralPath $codecPath
@@ -85,12 +116,16 @@ $encodedLines = [Convert]::ToBase64String($bytes) | & $python -I -B -c $encode
 if ($LASTEXITCODE -ne 0 -or @($encodedLines).Count -ne 1) { throw 'Bounded XZ encoding unavailable or refused.' }
 $encoded = [string]$encodedLines
 if ($encoded.Length -gt 20000) { throw 'Rollout transfer exceeds bounded SSM payload.' }
-$bootstrap = $codec + "`n" + @'
-import json,os,pathlib,sys
+$bootstrap = $codec + "`n" + $fixedDeclaration + "`n" + @'
+import hashlib,json,os,pathlib,sys
+if set(fixed)!={'network_observation.py', 'source_loader.py'}: raise ValueError('fixed source inventory')
+for data,sha in fixed.values():
+ if not isinstance(data,bytes) or len(data)>65536 or hashlib.sha256(data).hexdigest()!=sha: raise ValueError('fixed source binding')
 raw=decode(sys.argv[1])
-b=json.loads(raw); names={'policy_state.py','transaction.py','policy_client.py','rollout_probe.py','rollout_scope.py','rollout_engine.py','bounded_process.py','source_loader.py'}
+if len(raw)+sum(len(v[0]) for v in fixed.values())>524288: raise ValueError('combined source bound')
+b=json.loads(raw); names={'policy_state.py','transaction.py','policy_client.py','rollout_probe.py','rollout_scope.py','rollout_engine.py','bounded_process.py'}
 if set(b)!={'files','payload'} or set(b['files'])!=names: raise ValueError('bundle shape')
-prepared={}
+prepared={name:value[0] for name,value in fixed.items()}
 for name,text in b['files'].items():
  data=text.encode()
  if len(data)>65536: raise ValueError('file bound')
@@ -103,7 +138,7 @@ with (root/'input.json').open('x') as f:json.dump(b['payload'],f)
 $bootstrapEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
 $applyArg = if ($Apply) { ' --apply' } else { '' }
 $commands = @('set -eu', 'python3 -I -B -c ''import lzma; assert lzma.is_check_supported(lzma.CHECK_CRC64)''', 'umask 077', 'work=$(mktemp -d /var/tmp/kanz-gateway-source.XXXXXXXX)',
-    'trap ''rm -f "$work/policy_state.py" "$work/transaction.py" "$work/policy_client.py" "$work/rollout_probe.py" "$work/rollout_scope.py" "$work/rollout_engine.py" "$work/bounded_process.py" "$work/source_loader.py" "$work/input.json" "$work/bootstrap.py"; rmdir "$work"'' EXIT',
+    'trap ''rm -f "$work/network_observation.py" "$work/policy_state.py" "$work/transaction.py" "$work/policy_client.py" "$work/rollout_probe.py" "$work/rollout_scope.py" "$work/rollout_engine.py" "$work/bounded_process.py" "$work/source_loader.py" "$work/input.json" "$work/bootstrap.py"; rmdir "$work"'' EXIT',
     ("printf '%s' '$bootstrapEncoded' | base64 -d > `"`$work/bootstrap.py`""),
     ("python3 -I -B `"`$work/bootstrap.py`" '$encoded' `"`$work`""),
     'chmod 400 "$work"/*.py "$work/input.json"',

@@ -18,6 +18,7 @@ from image_identity import public_identity
 from rollout_engine import Probes
 import rollout_probe
 import restore_fixture
+import network_evidence
 from bounded_process import run as bounded_run
 
 CASES = ["bounded_xz_transport"] + ["response_loss_" + str(at) for at in range(1, 9)] + [
@@ -275,6 +276,17 @@ def empty_slice_control(k):
         time.sleep(1)
 
 
+def validate_network_receipt(value):
+    if not isinstance(value, dict) or set(value) != {"record", "sha256", "durableSequence", "receiptCount"}:
+        raise ValueError("network receipt evidence missing")
+    network_evidence.validate(value["record"], value["record"].get("nonce"))
+    if (value["record"]["isolated"] is not True or value["record"]["phase"] != "network_verified"
+            or value["sha256"] != tx.fingerprint(value["record"])
+            or type(value["durableSequence"]) is not int or type(value["receiptCount"]) is not int
+            or not 1 <= value["durableSequence"] < value["receiptCount"] <= 64):
+        raise ValueError("network durable receipt evidence differs")
+
+
 def validate_report(report, source, tree, run_id, attempt, render_hash):
     if (report.get("format") != "kanz-gateway-policy-transaction-proof-v1"
             or report.get("source") != source or report.get("tree") != tree
@@ -286,6 +298,7 @@ def validate_report(report, source, tree, run_id, attempt, render_hash):
             or report.get("cases") != CASES or report.get("passed") is not True
             or report.get("cleanupPassed") is not True):
         raise ValueError("transaction evidence incomplete or from another execution")
+    validate_network_receipt(report.get("networkReceipt"))
     restore_fixture.validate(report.get("retainedRestore"))
     validate_annotation_control(report.get("annotationTransport"))
     validate_empty_slice(report.get("emptyEndpointSlice"))
@@ -332,9 +345,9 @@ def run_fixture(artifact):
         def run(argv, data=None, timeout=180):
             return bounded_run(argv, cwd=proof.ROOT, env=env, data=data, timeout=timeout)
 
-        def k(*args, value=None):
+        def k(*args, value=None, timeout=180):
             return run(["kubectl", "--kubeconfig", str(scratch / "kubeconfig"), "--context", "kind-" + cluster, *args],
-                       None if value is None else json.dumps(value))
+                       None if value is None else json.dumps(value), timeout=timeout)
 
         try:
             report["source"] = run(["git", "rev-parse", "HEAD"]).strip()
@@ -512,7 +525,22 @@ def run_fixture(artifact):
                 raise AssertionError("zero-replica controller created a Pod")
             report["cases"].append("controller_adoption_refusal")
             probe_history = []
-            probes = Probes(k, lambda image_id: json.loads(run(["docker", "exec", cluster + "-control-plane", "crictl", "inspecti", image_id])), identity, uuid.uuid4().hex, lambda value: probe_history.append(copy.deepcopy(value)))
+            receipt_directory = scratch / "network-receipts"
+            receipt_directory.mkdir(mode=0o700)
+            durable = tx.Receipts(receipt_directory)
+            def save_probe(value):
+                durable(value)  # Actual file and directory fsync precede observation.
+                if value["format"] == "kanz-gateway-network-v1":
+                    raw = (receipt_directory / ("receipt-%04d.json" % durable.count)).read_bytes()
+                    if raw != tx.encoded(value) + b"\n":
+                        raise AssertionError("durable network aggregate differs")
+                    report["networkReceipt"] = {"record": json.loads(raw), "sha256": tx.fingerprint(value),
+                                                "durableSequence": durable.count, "receiptCount": durable.count}
+                else:
+                    # The legacy fixture constructs its original 39-record history
+                    # solely from probe custody records, never new network records.
+                    probe_history.append(copy.deepcopy(value))
+            probes = Probes(k, lambda image_id: json.loads(run(["docker", "exec", cluster + "-control-plane", "crictl", "inspecti", image_id])), identity, uuid.uuid4().hex, save_probe)
             try:
                 probes.create()
                 end = time.monotonic() + 30
@@ -541,7 +569,13 @@ def run_fixture(artifact):
                 probes.verify(endpoints, True)
                 report["cases"].append("actual_tcp_policy_controls")
             finally:
-                probes.close()
+                try:
+                    probes.close()
+                    if "networkReceipt" in report:
+                        report["networkReceipt"]["receiptCount"] = durable.count
+                finally:
+                    durable.close()
+            validate_network_receipt(report["networkReceipt"])
             report["cases"].append("probe_uid_cleanup")
             # Additional synthetic workloads supply the same seven-workload
             # health snapshot, without running NATS/Redis or contacting domains.

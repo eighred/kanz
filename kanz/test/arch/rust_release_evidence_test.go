@@ -30,8 +30,8 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 	if err := yaml.Unmarshal([]byte(release), &rel); err != nil {
 		return err
 	}
-	const condition = "matrix.service == 'binance-depth' || matrix.service == 'okx-depth'"
-	gate, sign, setup, sbom := -1, -1, -1, -1
+	const condition = "matrix.service == 'binance-depth' || matrix.service == 'okx-depth' || matrix.service == 'lake-sink'"
+	gate, sign, setup, sbom, goAudit := -1, -1, -1, -1, -1
 	for i, s := range rel.Jobs["release"].Steps {
 		if strings.Contains(s.Run, "cosign sign") || strings.Contains(s.Run, "cosign attest") {
 			if s.If != "" || s.Continue {
@@ -53,6 +53,12 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 			}
 			setup = i
 		}
+		if s.Name == "Install pinned Go binary audit for hybrid lake image" {
+			if s.If != "matrix.service == 'lake-sink'" || s.Run != "go install golang.org/x/vuln/cmd/govulncheck@v1.6.0" || s.Continue {
+				return fmt.Errorf("hybrid Go auditor must be pinned and mandatory")
+			}
+			goAudit = i
+		}
 		if s.Name == "Require actual Rust image inventory and current RustSec audit" {
 			const expected = "python3 -B -m unittest discover -s .github/scripts -p test_rust_release_evidence.py\npython3 .github/scripts/rust_release_evidence.py --service \"$RUST_SERVICE\" --image \"$RUST_IMAGE\" --sbom sbom.spdx.json --output rust-evidence"
 			if strings.TrimSpace(s.Run) != expected || s.If != condition || s.Continue || s.Env["RUST_SERVICE"] != "${{ matrix.service }}" || s.Env["RUST_IMAGE"] != "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" {
@@ -61,7 +67,7 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 			gate = i
 		}
 	}
-	if setup < 0 || sbom < 0 || gate <= setup || gate <= sbom || sign <= gate {
+	if setup < 0 || sbom < 0 || goAudit < 0 || gate <= goAudit || gate <= setup || gate <= sbom || sign <= gate {
 		return fmt.Errorf("Rust evidence must precede signing")
 	}
 	for _, token := range []string{"set -euo pipefail", "rustup toolchain install 1.90.0 --profile minimal", "python3 -B tools/rust-audit-tools/consume.py"} {
@@ -131,6 +137,8 @@ func TestRustReleaseEvidenceMutations(t *testing.T) {
 		{"missing-okx", 1, "service: okx-depth", "service: absent"},
 		{"missing-rust-trigger", 1, "- 'kanz-rs/**'", "- 'other/**'"},
 		{"missing-ci-okx", 2, "--local --service okx-depth", "--local --service other"},
+		{"missing-hybrid-gate", 0, " || matrix.service == 'lake-sink'", ""},
+		{"unpinned-go-audit", 0, "govulncheck@v1.6.0", "govulncheck@latest"},
 		{"floating-syft", 0, "syft-version: v1.56.0", "syft-version: latest"},
 		{"missing-consumer", 3, "tools/rust-audit-tools/consume.py", "missing.py"},
 		{"installer-fallback", 3, "consume.py", "consume.py || cargo install cargo-audit"},

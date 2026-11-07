@@ -1,5 +1,67 @@
 # Depth compatibility oracle
 
+`TestFeedRuntimeControlledHandoff/{binance,okx}` is a Linux-only controlled
+process rehearsal. It requires absolute `KANZ_MARKET_INGEST_BIN`,
+`KANZ_BINANCE_DEPTH_BIN`, `KANZ_OKX_DEPTH_BIN` paths and an exact 40-hex
+`KANZ_FEED_HANDOFF_VERSION` shared by the built binaries. It launches the actual
+service entrypoints, loopback exchange protocol servers, a disposable JetStream
+server, and ephemeral workload API identities. Broker connections authenticate
+the distinct Go, Rust and observer SPIFFE principals. Rust development endpoint
+selection still uses the real mTLS path when its workload socket is supplied;
+the same configuration without that identity must refuse this broker.
+The observer can issue JetStream API/ACK requests and receive inbox replies,
+but cannot publish market facts; an actual denied publish checks that boundary.
+An independently owned deny-publish broker authenticates the Rust runtime and
+then refuses its real publication: the test requires a server-side denial,
+unready status, failed process exit and zero accepted facts. A duplicate Go
+external-depth assignment must refuse startup before any exchange connections
+or accepted facts; the valid process path is its positive control.
+
+The controller joins the Go full-depth process before starting its retained
+trade-only mode and the Rust depth process. Actual exchange trades close prior
+minute buckets through Go's existing bar collector. Canonical broker frames,
+source/version/tenant binding, sequence-gap reanchor, stale readiness and broker
+reconnection are checked. Rollback joins Rust and retained Go before restarting
+the Go full-depth owner; workload streams and authenticated broker connections
+must disappear before the next owner starts. A final bounded broker inventory
+rejects selected depth emitted by the retained Go process.
+
+This fixture is not a distributed publisher fence, production SPIRE or broker
+ACL qualification, live exchange/capacity proof, or authorization to activate
+Rust feeds. Local cross-compilation does not execute the process cases. This
+fixture does not prove downstream mark consumption or cross-process fencing.
+The shared CI workflow and mandatory evidence inventory must separately require
+actual Linux passes before this rehearsal is qualified.
+The compatibility job builds three separately stamped service binaries and a
+race-enabled test binary, records all four SHA-256 values with source/tree and
+run/attempt, and requires all seven named process outcomes plus the exact-repeat control without skips.
+The original development-binary and broker tests remain separate and unchanged.
+The 150-second child lifetime is fixed; refusal observation allows up to 35
+seconds for the existing runtime's publication failure and joined shutdown,
+rather than treating a still-draining process as successful cleanup.
+Rust uses the existing required `service/instance` producer-source format.
+Observers are explicitly owned durable pull consumers bound to `HANDOFF`, not
+ephemerals whose inactivity expiry can erase a reader between process phases.
+Cleanup deletes each consumer and requires typed consumer-not-found readback.
+Failure-only diagnostics expose closed transport/exit categories and numeric
+workload/principal/exchange/stream counts, never raw child logs or credentials.
+The full-process Symbol golden is shared across Go, Rust and Go rollback:
+it preserves the authoritative Go alpha runner's canonical instrument ID in
+this advisory field. The Rust runtime chooses that emitted book metadata while
+venue decoding/configuration retain their venue symbol. Generic book callers
+and historical fact bytes are unchanged. This narrows the recorded #1413 Symbol
+compatibility gap; fresh successor runtime qualification is required, and it
+does not establish universal producer or deployment compatibility. Repeated retained trade pairs also validate
+the exact prior pair's second-bucket bar before the newly requested bucket,
+including all OHLC values, volume, count and bucket boundaries.
+The Rust runtime periodically republishes its current fresh book. Each observer
+permits only the immediately preceding validated Rust payload and venue time to
+repeat, with strictly increasing producer sequence and unchanged source/header
+bindings. A single ten-second observation deadline and 10,000-record bound cover
+other sources, exact repeats and the requested target together. Altered repeats,
+older history and late targets refuse; target sequence and economics remain exact.
+The pure control exercises those refusals separately from the process rehearsal.
+
 Use `go run ./tools/depth-conformance --okx` for the OKX corpus, generated through
 the public Go OKX source and book using local websocket frames. It covers positive
 sequence snapshots/updates, sorting, equivalent prices, deletion and decimal

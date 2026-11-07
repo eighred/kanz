@@ -236,7 +236,7 @@ func TestRustOKXDepthProcessThroughJetStream(t *testing.T) {
 					if err := proto.Unmarshal(frame.Payload, book); err != nil {
 						t.Fatal(err)
 					}
-					if env.GetPayloadSchemaRef() != "market.v1.OrderBookSnapshot:1" || book.InstrumentId != instrument || book.Symbol != "BTC-USDT" || book.Mic != "OKX" || book.LastUpdateSequence != sequence || book.EventTime.AsTime().UnixMilli() != ms || len(book.Bids) != 1 || len(book.Asks) != 1 {
+					if env.GetPayloadSchemaRef() != "market.v1.OrderBookSnapshot:1" || book.InstrumentId != instrument || book.Symbol != instrument || book.Mic != "OKX" || book.LastUpdateSequence != sequence || book.EventTime.AsTime().UnixMilli() != ms || len(book.Bids) != 1 || len(book.Asks) != 1 {
 						t.Fatal("snapshot identity/sequence mismatch")
 					}
 					if dec.FromProto(book.Bids[0].Price).Cmp(big.NewRat(wantBid, 1)) != 0 || dec.FromProto(book.Bids[0].Size).Cmp(big.NewRat(wantSize, 1)) != 0 || dec.FromProto(book.Asks[0].Price).Cmp(big.NewRat(50001, 1)) != 0 || dec.FromProto(book.Asks[0].Size).Cmp(big.NewRat(2, 1)) != 0 {
@@ -250,7 +250,7 @@ func TestRustOKXDepthProcessThroughJetStream(t *testing.T) {
 					if ev.EventTime == nil || ev.EventTime.CheckValid() != nil || ev.EventTime.AsTime().UnixMilli() != ms || !proto.Equal(ev.EventTime, env.EventTime) {
 						t.Fatal("quote payload must carry the exact venue/envelope timestamp")
 					}
-					if env.GetPayloadSchemaRef() != "market.v1.MarketDataEvent:1" || ev.SourceSequence != sequence || ev.InstrumentId != instrument || ev.Symbol != "BTC-USDT" || ev.Mic != "OKX" || ev.GetQuote() == nil {
+					if env.GetPayloadSchemaRef() != "market.v1.MarketDataEvent:1" || ev.SourceSequence != sequence || ev.InstrumentId != instrument || ev.Symbol != instrument || ev.Mic != "OKX" || ev.GetQuote() == nil {
 						t.Fatal("quote identity/sequence mismatch")
 					}
 					quote := ev.GetQuote()

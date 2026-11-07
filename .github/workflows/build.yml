@@ -5,6 +5,7 @@
 name: kanz-build
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - 'kanz/**'
@@ -524,10 +525,47 @@ jobs:
           load: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.service }}
+          # Reuse the existing accounting dependency prefix without exporting to
+          # a shared scope. BuildKit still keys every layer by its full inputs.
+          cache-from: |
+            type=gha,scope=${{ matrix.service }}
+            ${{ startsWith(matrix.dockerfile, 'kanz/') && matrix.service != 'cloudflared' && 'type=gha,scope=accounting' || '' }}
           # PR caches cannot be reused by main and can evict its shared layers.
           # Only main publication warms the durable per-service cache.
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=gha,scope={0},mode=max', matrix.service) || '' }}
+
+      - name: Verify shared-cache controls (manual only)
+        if: matrix.cache_probe == true
+        run: |
+          python -m unittest discover -s .github/scripts -p test_go_image_cache_probe.py
+          python -m unittest discover -s .github/scripts -p test_lake_cache_probe.py
+
+      - name: Qualify shared Go dependency cache (manual only)
+        if: matrix.cache_probe == true
+        env:
+          PROBE_SOURCE: ${{ github.sha }}
+          PROBE_RUN: ${{ github.run_id }}
+          PROBE_ATTEMPT: ${{ github.run_attempt }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const cp = require('node:child_process');
+            const tree = cp.execFileSync('git', ['rev-parse', 'HEAD^{tree}'], {encoding: 'utf8', maxBuffer: 4096, timeout: 10000}).trim();
+            const env = {};
+            for (const key of ['PATH', 'HOME', 'DOCKER_CONFIG', 'RUNNER_TEMP', 'TMPDIR', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL', 'ACTIONS_CACHE_SERVICE_V2', 'ACTIONS_CACHE_MODE']) {
+              const value = process.env[key];
+              if (value !== undefined) { if (value.length > 16384) throw new Error('cache environment bound exceeded'); env[key] = value; }
+            }
+            if (!env.PATH || !env.HOME || !env.ACTIONS_RUNTIME_TOKEN || !env.ACTIONS_RESULTS_URL || env.ACTIONS_CACHE_MODE !== 'read') throw new Error('read-only cache environment missing');
+            cp.execFileSync('python', ['.github/scripts/go_image_cache_probe.py', '--source', process.env.PROBE_SOURCE, '--tree', tree, '--run', process.env.PROBE_RUN, '--attempt', process.env.PROBE_ATTEMPT, '--output', process.env.RUNNER_TEMP + '/go-cache-proof'], {stdio: 'inherit', env});
+
+      - name: Retain manual shared-cache evidence
+        if: always() && matrix.cache_probe == true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-cache-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/go-cache-proof/
+          if-no-files-found: error
 
       # The retry, and the count that keeps the flake visible after it stops being
       # fatal. See .github/scripts/push-with-retry.sh for why it keys on the
@@ -581,4 +619,20 @@ jobs:
     # Share the build definition, not its authority. Only this main job can
     # publish; changing a step condition in PR code cannot mint a write token.
     strategy: *image-strategy
+    steps: *image-steps
+
+  go-cache-qualification:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    cache-mode: read
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: regulatory
+            dockerfile: kanz/services/regulatory/Dockerfile
+            cache_probe: true
     steps: *image-steps

@@ -179,6 +179,7 @@ func (w *worker) diagnostic(request map[string]any, phase string) string {
 }
 func TestWorkerDiagnosticPreservesJoinAndClosedCategories(t *testing.T) {
 	testFeeLockDiagnostics(t)
+	testLockOutcomeDiagnostics(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := &worker{ctx: ctx, done: make(chan error, 1), successfulACKs: 7}

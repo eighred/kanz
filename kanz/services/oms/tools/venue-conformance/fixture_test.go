@@ -11,7 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
-	"github.com/eighred/kanz/services/oms/internal/conformancetestkit"
+	"github.com/eighred/kanz/internal/testidentity"
 	"google.golang.org/protobuf/proto"
 	"io"
 	"math/big"
@@ -102,11 +102,11 @@ func identity(ca *certificates, s *x509svid.SVID) staticIdentity {
 	return staticIdentity{s, x509bundle.FromX509Authorities(spiffeid.RequireTrustDomainFromString("kanz.internal"), []*x509.Certificate{ca.root})}
 }
 
-type workloadServer = conformancetestkit.Workload
+type workloadServer = testidentity.Workload
 
 func startWorkload(t *testing.T, ca *certificates, svid *x509svid.SVID) (*workloadServer, string) {
 	t.Helper()
-	return conformancetestkit.StartWorkload(t, identity(ca, svid))
+	return testidentity.StartWorkload(t, identity(ca, svid))
 }
 func serverTLS(ca *certificates, svid *x509svid.SVID) *tls.Config {
 	s := identity(ca, svid)
