@@ -9,19 +9,25 @@ import consume as c
 
 class Consumer(unittest.TestCase):
     def claims(self):
-        return [{"critical": {"image": {"docker-manifest-digest": c.DIGEST},
-                 "identity": {"docker-reference": c.q.REPOSITORY}},
+        return [{"critical": {"type": "https://sigstore.dev/cosign/sign/v1", "image": {"docker-manifest-digest": c.DIGEST},
+                 "identity": {"docker-reference": c.IMAGE}},
                  "optional": {"source_sha": c.PRODUCER_SOURCE}}]
 
     def test_signature_bindings(self):
         c.signature_claims(json.dumps(self.claims()))
-        for field, replacement in (("docker-manifest-digest", "sha256:" + "0" * 64),
-                                   ("docker-reference", "ghcr.io/other/tools"),
-                                   ("source_sha", "0" * 40)):
-            raw = json.dumps(self.claims())
-            old = c.DIGEST if field == "docker-manifest-digest" else c.q.REPOSITORY if field == "docker-reference" else c.PRODUCER_SOURCE
-            with self.assertRaises(ValueError):
-                c.signature_claims(raw.replace(old, replacement))
+        for path, replacement in (
+                (("critical", "image", "docker-manifest-digest"), "sha256:" + "0" * 64),
+                (("critical", "identity", "docker-reference"), c.q.REPOSITORY),
+                (("critical", "identity", "docker-reference"), "ghcr.io/other/tools@" + c.DIGEST),
+                (("critical", "identity", "docker-reference"), c.q.REPOSITORY + "@sha256:" + "0" * 64),
+                (("critical", "type"), "cosign container image signature"),
+                (("critical", "type"), "unreviewed"),
+                (("optional", "source_sha"), "0" * 40)):
+            claims = self.claims()
+            target = claims[0]
+            for key in path[:-1]: target = target[key]
+            target[path[-1]] = replacement
+            with self.assertRaises(ValueError): c.signature_claims(json.dumps(claims))
         for raw in ('[]', '{}', '[{"optional":{"source_sha":"a","source_sha":"b"}}]'):
             with self.assertRaises(ValueError): c.signature_claims(raw)
 

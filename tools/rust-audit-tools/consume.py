@@ -19,8 +19,9 @@ def signature_claims(raw):
     if not isinstance(claims, list) or not claims:
         raise ValueError("verified producer signature missing")
     for claim in claims:
-        if (claim.get("critical", {}).get("image", {}).get("docker-manifest-digest") != DIGEST
-                or claim.get("critical", {}).get("identity", {}).get("docker-reference") != q.REPOSITORY
+        if (claim.get("critical", {}).get("type") != "https://sigstore.dev/cosign/sign/v1"
+                or claim.get("critical", {}).get("image", {}).get("docker-manifest-digest") != DIGEST
+                or claim.get("critical", {}).get("identity", {}).get("docker-reference") != IMAGE
                 or claim.get("optional", {}).get("source_sha") != PRODUCER_SOURCE):
             raise ValueError("verified producer signature binding differs")
 
