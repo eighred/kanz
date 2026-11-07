@@ -135,7 +135,9 @@ def admin_diagnostic(text, source):
     result={'category':category}
     if 'failure_code' in value:
         code=value['failure_code']
-        if not isinstance(code,str) or (code not in ('deadline','cancelled','eof','timeout','network','unknown') and re.fullmatch(r'kafka-(?:-1|[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])',code) is None):
+        if not isinstance(code,str) or (code not in ('deadline','cancelled','eof','timeout','network','unknown',
+                'estate','broker-count','broker-shape','broker-duplicate','topic-shape','partition-shape',
+                'replica-shape','isr-shape','leader-shape','config-count','config-key','config-cleanup','config-retention','config-min-isr') and re.fullmatch(r'kafka-(?:-1|[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])',code) is None):
             raise ValueError('admin failure code refused')
         result['failure_code']=code
     for key in counters:

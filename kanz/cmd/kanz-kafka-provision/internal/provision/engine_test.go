@@ -89,6 +89,10 @@ func testPlan(t *testing.T) Plan {
 }
 
 func TestBrokerFailureCodeNeverCopiesErrorText(t *testing.T) {
+	conflict := conflictCause{"config-count"}
+	if FailureCode(conflict) != "config-count" || conflict.Error() != ErrConflict.Error() || !errors.Is(conflict, ErrConflict) {
+		t.Fatal("conflict classification changed refusal")
+	}
 	for _, tc := range []struct {
 		err  error
 		code string

@@ -14,11 +14,20 @@ import (
 // making a broker's free-form error text part of the public error or receipt.
 type brokerCause struct{ cause error }
 
+type conflictCause struct{ code string }
+
+func (e conflictCause) Error() string { return ErrConflict.Error() }
+func (e conflictCause) Unwrap() error { return ErrConflict }
+
 func (e brokerCause) Error() string   { return ErrBroker.Error() }
 func (e brokerCause) Unwrap() []error { return []error{ErrBroker, e.cause} }
 
 // FailureCode projects only a bounded protocol code or fixed transport class.
 func FailureCode(err error) string {
+	var conflict conflictCause
+	if errors.As(err, &conflict) {
+		return conflict.code
+	}
 	var cause brokerCause
 	if !errors.As(err, &cause) {
 		return ""
@@ -176,21 +185,21 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (b
 		return false, ErrBroker
 	}
 	if m.ClusterID != clusterID || m.ClusterID == "" {
-		return false, ErrConflict
+		return false, conflictCause{"estate"}
 	}
 	// kafka-go resolves partition IDs through the response broker map; an
 	// unknown leader/replica becomes a zero Broker. Require full known entries,
 	// not counts or ID zero alone (zero is a legitimate broker ID).
 	if len(m.Brokers) < 3 || len(m.Brokers) > 1024 {
-		return false, ErrConflict
+		return false, conflictCause{"broker-count"}
 	}
 	brokers := make(map[int]kafka.Broker, len(m.Brokers))
 	for _, broker := range m.Brokers {
 		if broker.ID < 0 || broker.Host == "" || len(broker.Host) > 512 || broker.Port < 1 || broker.Port > 65535 {
-			return false, ErrConflict
+			return false, conflictCause{"broker-shape"}
 		}
 		if _, exists := brokers[broker.ID]; exists {
-			return false, ErrConflict
+			return false, conflictCause{"broker-duplicate"}
 		}
 		brokers[broker.ID] = broker
 	}
@@ -202,31 +211,31 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (b
 		return false, ErrBroker
 	}
 	if t.Internal || len(t.Partitions) != want.Partitions {
-		return false, ErrConflict
+		return false, conflictCause{"topic-shape"}
 	}
 	seen := make(map[int]bool)
 	for _, p := range t.Partitions {
 		if p.Error != nil || p.ID < 0 || p.ID >= want.Partitions || seen[p.ID] || len(p.Replicas) != 3 || len(p.Isr) < 2 || len(p.Isr) > 3 {
-			return false, ErrConflict
+			return false, conflictCause{"partition-shape"}
 		}
 		replicas, isr := make(map[int]bool), make(map[int]bool)
 		for _, broker := range p.Replicas {
 			known, exists := brokers[broker.ID]
 			if !exists || known != broker || replicas[broker.ID] {
-				return false, ErrConflict
+				return false, conflictCause{"replica-shape"}
 			}
 			replicas[broker.ID] = true
 		}
 		for _, broker := range p.Isr {
 			known, exists := brokers[broker.ID]
 			if !exists || known != broker || !replicas[broker.ID] || isr[broker.ID] {
-				return false, ErrConflict
+				return false, conflictCause{"isr-shape"}
 			}
 			isr[broker.ID] = true
 		}
 		leader, exists := brokers[p.Leader.ID]
 		if !exists || leader != p.Leader || !replicas[p.Leader.ID] || !isr[p.Leader.ID] {
-			return false, ErrConflict
+			return false, conflictCause{"leader-shape"}
 		}
 		seen[p.ID] = true
 	}
@@ -236,12 +245,21 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (b
 	}
 	expected := map[string]string{"cleanup.policy": want.Cleanup, "retention.ms": strconv.FormatInt(want.Retention, 10), "min.insync.replicas": "2"}
 	if len(c.Resources[0].ConfigEntries) != len(expected) {
-		return false, ErrConflict
+		return false, conflictCause{"config-count"}
 	}
 	for _, e := range c.Resources[0].ConfigEntries {
 		v, ok := expected[e.ConfigName]
 		if !ok || e.IsSensitive || e.ConfigValue != v {
-			return false, ErrConflict
+			code := "config-key"
+			switch e.ConfigName {
+			case "cleanup.policy":
+				code = "config-cleanup"
+			case "retention.ms":
+				code = "config-retention"
+			case "min.insync.replicas":
+				code = "config-min-isr"
+			}
+			return false, conflictCause{code}
 		}
 		delete(expected, e.ConfigName)
 	}
