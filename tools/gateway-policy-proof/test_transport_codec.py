@@ -18,8 +18,18 @@ class TransportCodecTests(unittest.TestCase):
     def test_linux_fixture_requires_codec_before_acceptance(self):
         source = inspect.getsource(run_fixture)
         marker = 'qualify_codec()\n            report["cases"].append("bounded_xz_transport")'
-        self.assertIn("bounded_xz_transport", CASES)
+        # Independent actual execution order: codec runs before cluster creation
+        # and therefore before every real API transaction. Membership alone hid
+        # the first Linux run's evidence-order mismatch.
+        self.assertEqual(CASES, ["bounded_xz_transport", "response_loss_1", "response_loss_2",
+            "response_loss_3", "response_loss_4", "response_loss_5", "response_loss_6",
+            "response_loss_7", "response_loss_8", "dry_run_no_write", "four_policy_success",
+            "concurrent_change_refuses_rollback", "empty_endpoint_slice_null", "deployment_uid_lineage",
+            "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal",
+            "actual_tcp_policy_controls", "probe_uid_cleanup"])
         self.assertIn(marker, source)
+        self.assertLess(source.index(marker), source.index("proof.claim_cluster("))
+        self.assertLess(source.index(marker), source.index("for at in range(1, 9):"))
         self.assertNotIn(marker, source.replace("qualify_codec()", "pass"))
 
     def test_exact_bootstrap_refuses_before_source_writes(self):
