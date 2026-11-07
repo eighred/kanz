@@ -27,11 +27,11 @@ crate-type = ["cdylib", "rlib"]`
 // alternate source or frontend activation can enter this reviewed local kernel.
 // Digests normalize only checkout line endings; they do not prove arithmetic.
 var browserRenderSources = map[string]string{
-	"tests/build-wasm.sh": "c44d5e22f1341f91fe3031ed8dcf0d0237b9eb88f7b55ea5292768263f678546",
+	"tests/build-wasm.sh": "e6533f275385afeba9d1d76b7bdf6b8463860e0962e7b0b81fa08c6e2cfe5f81",
 	"src/lib.rs":          "48a1c581f891ab3df8e32d8b0218427f60ca2617714953792e504474ec0e2e37",
 	"tests/kernel.rs":     "dea7cd95e81117924dfb753af7d6d7b25d5835055141d4ba87b265ca95915ae7",
 	"tests/oracle.ts":     "a72c54727aafd9b6e9325f5631a9f1a0235d5cc66cb70d93c9f21003bdd9441b",
-	"tests/wasm.mjs":      "1730e66681d641981081629d2e7b5ce6db56a914076cf6060e74672831ede4eb",
+	"tests/wasm.mjs":      "29201476520b74b1d6770de1caeaee2e8f12e89ff68d801e2139faa5a5093cca",
 }
 
 func checkBrowserRender(root string) error {
@@ -136,6 +136,50 @@ func TestRustBrowserRenderBoundary(t *testing.T) {
 		}
 	}
 }
+
+// Build recipe is shared with the production asset, not a second compiler path.
+func TestBrowserRenderAssetBuildClosure(t *testing.T) {
+	root := filepath.Dir(moduleRoot(t))
+	sources := map[string]string{
+		"kanz-web/scripts/build-renderer.mjs":      "d6afaefff85658c9d005bc23ab8da7b83d76d884d25d9dccb6b3757dda727586",
+		"kanz-web/scripts/build-renderer.test.mjs": "e40b8bbc3145a1abff0b2841574dde3e9fe3abdea359461957b7efac880ba02f",
+	}
+	for name, expected := range sources {
+		raw, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		actual := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.ReplaceAll(string(raw), "\r\n", "\n"))))
+		if actual != expected {
+			t.Fatalf("unreviewed browser asset recipe: %s", name)
+		}
+	}
+	read := func(name string) string {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	pkg := read("kanz-web/package.json")
+	for _, hook := range []string{`"prebuild": "node scripts/build-renderer.mjs"`, `"predev": "node scripts/build-renderer.mjs"`} {
+		if !strings.Contains(pkg, hook) {
+			t.Fatal("missing shared browser build hook")
+		}
+	}
+	receipt := read("kanz-rs/crates/browser-render/tests/wasm.mjs")
+	for _, name := range []string{"kanz-rs/rust-toolchain.toml", "kanz-web/scripts/build-renderer.mjs", "kanz-web/scripts/build-renderer.test.mjs"} {
+		if !strings.Contains(receipt, "'"+name+"'") {
+			t.Fatal("build receipt omits shared compiler input")
+		}
+	}
+	recipe := read("kanz-rs/crates/browser-render/tests/build-wasm.sh")
+	if !strings.Contains(recipe, "node ../kanz-web/scripts/build-renderer.mjs") || strings.Contains(recipe, "cargo +1.90.0 rustc") {
+		t.Fatal("qualification bypasses shared recipe")
+	}
+}
+
 func browserRenderFileNames() []string {
 	var out []string
 	for name := range browserRenderSources {
