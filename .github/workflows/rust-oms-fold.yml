@@ -213,11 +213,14 @@ jobs:
           for container in oms-recovery-pg oms-recovery-default-pg oms-recovery-constrained-pg; do
             ready=false
             for attempt in $(seq 1 60); do
-              if docker exec "$container" pg_isready -U fixture >/dev/null 2>&1; then ready=true; break; fi
+              # The image's temporary init server is Unix-only; server readiness
+              # alone does not prove that the requested database exists yet.
+              if test "$(docker exec -e PGPASSWORD=fixture -e PGCONNECT_TIMEOUT=2 -e 'PGOPTIONS=-c statement_timeout=2000' "$container" \
+                psql -X -w -h 127.0.0.1 -U fixture -d fixture -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' 2>/dev/null)" = 1; then ready=true; break; fi
               sleep 1
             done
             test "$ready" = true
-            docker exec "$container" psql -U fixture -d fixture -v ON_ERROR_STOP=1 \
+            docker exec -e PGPASSWORD=fixture -e PGCONNECT_TIMEOUT=2 "$container" psql -X -w -h 127.0.0.1 -U fixture -d fixture -v ON_ERROR_STOP=1 \
               -c "CREATE ROLE recoveryapp LOGIN PASSWORD 'fixture' NOSUPERUSER NOBYPASSRLS;" \
               -c "CREATE DATABASE recoveryapp OWNER recoveryapp;"
           done
