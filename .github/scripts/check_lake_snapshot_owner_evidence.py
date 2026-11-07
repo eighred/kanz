@@ -90,6 +90,10 @@ NAMES |= {"TestSnapshotActualRequestedParkingPreservesOriginalOrRetainsFailure"}
     "TestSnapshotActualRequestedParkingPreservesOriginalOrRetainsFailure/" + mode
     for mode in ("terminal-poison", "parking-refused", "transient-retained")
 }
+NAMES |= {"TestWorkerPipeJoinPrecedesWait",
+          "TestWorkerPipeJoinPrecedesWait/joined-before-wait",
+          "TestWorkerPipeJoinPrecedesWait/old-wait-closes-unread-stderr",
+          "TestWorkerPipeJoinCancellationRetainsUnjoinedTasks"}
 TOP_LEVEL = {name for name in NAMES if "/" not in name}
 BINARIES = ("worker", "worker-swap", "owner.test", "gateway.test", "archiver.test", "kanz-lake-snapshot", "nats-2.12.6", "nats-2.14.5")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
