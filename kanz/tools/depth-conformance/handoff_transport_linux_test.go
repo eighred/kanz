@@ -235,6 +235,33 @@ func (p *handoffProcess) stop() {
 	handoffWait(p.t, 5*time.Second, "old owner transport still active", func() bool { return p.source.Active() == 0 && len(p.broker.connections(p.principal)) == 0 })
 }
 
+func (p *handoffProcess) waitStarted(exchange *handoffExchange, phase string, predicate func() bool) {
+	p.t.Helper()
+	if phase != "denied-startup" && phase != "go-startup" && phase != "rust-startup" {
+		p.t.Fatal("unknown fixture phase")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if predicate() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	exit := "pending"
+	select {
+	case err := <-p.done:
+		p.done <- err // Preserve the one Wait result for the cleanup join.
+		if err == nil {
+			exit = "success"
+		} else {
+			exit = "failure"
+		}
+	default:
+	}
+	p.t.Fatalf("feed startup refused: phase=%s exit=%s wapi_started=%d wapi_active=%d principal_connections=%d depth_connections=%d trade_connections=%d",
+		phase, exit, p.source.Started(), p.source.Active(), len(p.broker.connections(p.principal)), exchange.count("depth"), exchange.count("trade"))
+}
+
 func (p *handoffProcess) refused() {
 	p.t.Helper()
 	select {

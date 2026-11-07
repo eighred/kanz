@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -42,12 +43,27 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			mic := strings.ToUpper(venue)
 			subs := make(map[string]*nats.Subscription)
 			for _, subject := range []string{"market.book.snapshot", "market.crypto.quote", "market.crypto.bar"} {
-				sub, err := broker.js.PullSubscribe(subject, "", nats.DeliverAll(), nats.AckExplicit())
+				consumer := "handoff-" + strings.ReplaceAll(subject, ".", "-")
+				if _, err := broker.js.AddConsumer("HANDOFF", &nats.ConsumerConfig{Durable: consumer, FilterSubject: subject, DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy}); err != nil {
+					t.Fatal("owned durable observer creation failed")
+				}
+				sub, err := broker.js.PullSubscribe(subject, consumer, nats.Bind("HANDOFF", consumer))
 				if err != nil {
 					t.Fatal("observer subscription failed")
 				}
 				subs[subject] = sub
-				t.Cleanup(func() { _ = sub.Unsubscribe() })
+				t.Cleanup(func() {
+					if err := sub.Unsubscribe(); err != nil {
+						t.Error("observer local subscription close failed")
+					}
+					if err := broker.js.DeleteConsumer("HANDOFF", consumer); err != nil {
+						t.Error("owned observer deletion failed")
+						return
+					}
+					if _, err := broker.js.ConsumerInfo("HANDOFF", consumer); !errors.Is(err, nats.ErrConsumerNotFound) {
+						t.Error("owned observer absence unconfirmed")
+					}
+				})
 			}
 			goEnv := func(source string, external bool) []string {
 				env := []string{"MARKET_INGEST_LISTEN=" + handoffAddress(t), "MARKET_INGEST_NATS_URL=" + broker.url, "MARKET_INGEST_SOURCE=" + source, "MARKET_INGEST_TENANT=handoff-tenant", "MARKET_INGEST_INSTRUMENTS=" + instrument, "MARKET_INGEST_" + mic + "_SYMBOLS=" + instrument + "=" + symbol}
@@ -64,7 +80,8 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			}
 			rustAddress := handoffAddress(t)
 			rustPrefix := mic + "_DEPTH_"
-			rustEnv := []string{rustPrefix + "DEVELOPMENT=true", rustPrefix + "INSTRUMENT_ID=" + instrument, rustPrefix + "SYMBOL=" + symbol, rustPrefix + "TENANT=handoff-tenant", rustPrefix + "SOURCE=rust-owner", rustPrefix + "NATS_URL=" + broker.url, rustPrefix + "LISTEN=" + rustAddress}
+			rustSource := venue + "-depth/handoff"
+			rustEnv := []string{rustPrefix + "DEVELOPMENT=true", rustPrefix + "INSTRUMENT_ID=" + instrument, rustPrefix + "SYMBOL=" + symbol, rustPrefix + "TENANT=handoff-tenant", rustPrefix + "SOURCE=" + rustSource, rustPrefix + "NATS_URL=" + broker.url, rustPrefix + "LISTEN=" + rustAddress}
 			ws := strings.Replace(exchange.server.URL, "http://", "ws://", 1)
 			if venue == "binance" {
 				rustEnv = append(rustEnv, rustPrefix+"WS_BASE="+ws, rustPrefix+"REST_BASE="+exchange.server.URL)
@@ -88,7 +105,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 					}
 				}
 				p := startHandoffProcess(t, deniedBroker, rustBinary, rustID, env, true)
-				handoffWait(t, 10*time.Second, "denied publisher did not authenticate", func() bool { return len(deniedBroker.connections(rustID)) == 1 && exchange.count("depth") == 1 })
+				p.waitStarted(exchange, "denied-startup", func() bool { return len(deniedBroker.connections(rustID)) == 1 && exchange.count("depth") == 1 })
 				handoffStatus(t, address, http.StatusServiceUnavailable)
 				exchange.depth(true, 101, 100)
 				handoffWait(t, 5*time.Second, "actual broker publish denial absent", func() bool { return deniedBroker.denied.publish.Load() > beforeDenials })
@@ -111,7 +128,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			})
 			startGo := func(source string, external bool) *handoffProcess {
 				p := startHandoffProcess(t, broker, goBinary, feedGoID, goEnv(source, external), true)
-				handoffWait(t, 10*time.Second, "Go authenticated feed did not connect", func() bool {
+				p.waitStarted(exchange, "go-startup", func() bool {
 					return len(broker.connections(feedGoID)) == 1 && exchange.count("trade") == 1 && (external || exchange.count("depth") == 1)
 				})
 				return p
@@ -122,7 +139,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 				bucket := time.Now().UTC().Truncate(time.Minute).Add(time.Duration(id-12) * time.Minute)
 				exchange.trade(bucket.Add(time.Second), id)
 				exchange.trade(bucket.Add(time.Minute), id+1)
-				frame := handoffFrame(t, subs["market.crypto.bar"], source, version, instrument)
+				frame := handoffFrame(t, broker, subs["market.crypto.bar"], source, version, instrument)
 				event := new(marketpb.MarketDataEvent)
 				if proto.Unmarshal(frame.Payload, event) != nil || event.GetBar() == nil {
 					t.Fatal("retained trade did not produce a canonical bar")
@@ -134,7 +151,7 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 			}
 			depth := func(source string) {
 				for _, subject := range []string{"market.book.snapshot", "market.crypto.quote"} {
-					frame := handoffFrame(t, subs[subject], source, version, instrument)
+					frame := handoffFrame(t, broker, subs[subject], source, version, instrument)
 					if subject == "market.book.snapshot" {
 						book := new(marketpb.OrderBookSnapshot)
 						if proto.Unmarshal(frame.Payload, book) != nil || book.InstrumentId != instrument || book.Mic != mic || book.Symbol != symbol || book.LastUpdateSequence != 101 || len(book.Bids) != 1 || len(book.Asks) != 1 || dec.FromProto(book.Bids[0].Price).Cmp(big.NewRat(50000, 1)) != 0 || dec.FromProto(book.Bids[0].Size).Cmp(big.NewRat(4, 1)) != 0 || dec.FromProto(book.Asks[0].Price).Cmp(big.NewRat(50001, 1)) != 0 || dec.FromProto(book.Asks[0].Size).Cmp(big.NewRat(2, 1)) != 0 {
@@ -164,10 +181,10 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 				t.Fatal("external-depth Go retained a depth connection")
 			}
 			rust := startHandoffProcess(t, broker, rustBinary, rustID, rustEnv, true)
-			handoffWait(t, 10*time.Second, "Rust authenticated feed did not connect", func() bool { return len(broker.connections(rustID)) == 1 && exchange.count("depth") == 1 })
+			rust.waitStarted(exchange, "rust-startup", func() bool { return len(broker.connections(rustID)) == 1 && exchange.count("depth") == 1 })
 			handoffStatus(t, rustAddress, http.StatusServiceUnavailable)
 			exchange.depth(true, 101, 100)
-			depth("rust-owner")
+			depth(rustSource)
 			handoffStatus(t, rustAddress, http.StatusOK)
 			bar("go-retained", 5)
 			// Source age, not a healthy broker alone, controls readiness.
@@ -224,13 +241,19 @@ func TestFeedRuntimeControlledHandoff(t *testing.T) {
 	}
 }
 
-func handoffFrame(t *testing.T, sub *nats.Subscription, source, version, instrument string) *envelopepb.EventFrame {
+func handoffFrame(t *testing.T, broker *handoffBroker, sub *nats.Subscription, source, version, instrument string) *envelopepb.EventFrame {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		msgs, err := sub.Fetch(1, nats.MaxWait(time.Until(deadline)))
 		if err != nil {
-			t.Fatal("canonical frame missing")
+			_, consumerErr := sub.ConsumerInfo()
+			info, streamErr := broker.js.StreamInfo("HANDOFF")
+			var messages, first, last uint64
+			if streamErr == nil {
+				messages, first, last = info.State.Msgs, info.State.FirstSeq, info.State.LastSeq
+			}
+			t.Fatalf("canonical frame missing: fetch=%s consumer=%s stream=%s messages=%d first=%d last=%d", handoffBrokerError(err), handoffBrokerError(consumerErr), handoffBrokerError(streamErr), messages, first, last)
 		}
 		m := msgs[0]
 		frame := new(envelopepb.EventFrame)
@@ -264,4 +287,26 @@ func handoffStatus(t *testing.T, address string, want int) {
 		_ = response.Body.Close()
 		return response.StatusCode == want
 	})
+}
+
+func handoffBrokerError(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	for _, item := range []struct {
+		err  error
+		name string
+	}{
+		{nats.ErrConsumerNotFound, "consumer-not-found"}, {nats.ErrConsumerDeleted, "consumer-deleted"},
+		{nats.ErrTimeout, "timeout"}, {nats.ErrConnectionClosed, "connection-closed"}, {nats.ErrPermissionViolation, "permission-denied"},
+	} {
+		if errors.Is(err, item.err) {
+			return item.name
+		}
+	}
+	var api *nats.APIError
+	if errors.As(err, &api) {
+		return fmt.Sprintf("api-%d-%d", api.Code, api.ErrorCode)
+	}
+	return "other"
 }

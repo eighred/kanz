@@ -39,6 +39,12 @@ The original development-binary and broker tests remain separate and unchanged.
 The 150-second child lifetime is fixed; refusal observation allows up to 35
 seconds for the existing runtime's publication failure and joined shutdown,
 rather than treating a still-draining process as successful cleanup.
+Rust uses the existing required `service/instance` producer-source format.
+Observers are explicitly owned durable pull consumers bound to `HANDOFF`, not
+ephemerals whose inactivity expiry can erase a reader between process phases.
+Cleanup deletes each consumer and requires typed consumer-not-found readback.
+Failure-only diagnostics expose closed transport/exit categories and numeric
+workload/principal/exchange/stream counts, never raw child logs or credentials.
 
 Use `go run ./tools/depth-conformance --okx` for the OKX corpus, generated through
 the public Go OKX source and book using local websocket frames. It covers positive

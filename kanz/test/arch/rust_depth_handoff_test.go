@@ -18,6 +18,7 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 			"p.done <- cmd.Wait()", "p.source.Active() == 0 && len(p.broker.connections(p.principal)) == 0", "cmd.Env = []string{",
 			"Username: feedObserverID, Permissions: permissions(\"$JS.API.>\", \"$JS.ACK.>\")", "observer-must-not-publish",
 			"rustPermissions.Publish = &ns.SubjectPermission{Deny: []string{\">\"}}", "strings.HasSuffix(format, \"Publish Violation - Subject %q\")",
+			"p.done <- err // Preserve the one Wait result", "phase != \"denied-startup\" && phase != \"go-startup\" && phase != \"rust-startup\"",
 		},
 		"handoff_integration_linux_test.go": {
 			"TestFeedRuntimeControlledHandoff", "KANZ_MARKET_INGEST_BIN", "KANZ_BINANCE_DEPTH_BIN", "KANZ_OKX_DEPTH_BIN",
@@ -27,6 +28,8 @@ func TestRustFeedHandoffFixtureBoundary(t *testing.T) {
 			"info.State.FirstSeq != 1", "info.State.Msgs != info.State.LastSeq", "info.State.NumDeleted != 0",
 			"authenticated-publish-denied", "deniedBroker.denied.publish.Load() > beforeDenials", "denied publisher produced accepted facts",
 			"duplicate-external-assignment-refused", "instrument+\",\"+instrument", "invalid static assignment reached feed side effects",
+			"rustSource := venue + \"-depth/handoff\"", "depth(rustSource)", "Durable: consumer", "nats.Bind(\"HANDOFF\", consumer)",
+			"broker.js.DeleteConsumer(\"HANDOFF\", consumer)", "!errors.Is(err, nats.ErrConsumerNotFound)", "handoffBrokerError(consumerErr)",
 		},
 	}
 	root := filepath.Join(moduleRoot(t), "tools", "depth-conformance")
