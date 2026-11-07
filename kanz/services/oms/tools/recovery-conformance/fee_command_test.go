@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	venuepb "github.com/eighred/kanz/kanz-schemas-go/venue/v1"
 	"github.com/eighred/kanz/pkg/bus"
 	"github.com/eighred/kanz/services/oms/internal/order"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -125,8 +127,19 @@ func concurrentFeeCommand(t *testing.T, operation string) {
 	f := prepareFee(t, false)
 	ctx := bus.WithTenantID(f.ctx, f.tenant)
 	tr := f.feeTransport(t)
-	svc := f.service(t, tr)
+	goConfig := f.pool.Config().Copy()
+	goName := "fee-go-" + f.schema
+	goConfig.ConnConfig.RuntimeParams["application_name"] = goName
+	goPool, err := pgxpool.NewWithConfig(f.ctx, goConfig)
+	if err != nil {
+		t.Fatal("named Go oracle pool unavailable")
+	}
+	t.Cleanup(goPool.Close)
+	goFixture := *f.fixture
+	goFixture.pool = goPool
+	svc := goFixture.service(t, tr)
 	w := f.start(t, tr)
+	rustName := fmt.Sprintf("oms-recovery-%d", w.cmd.Process.Pid)
 	store := order.NewPostgres(f.pool)
 	subject, fact, table := order.SubjectFeePropose, order.SubjectFeeProposed, "execution_fee_proposals"
 	var cmd proto.Message = &orderpb.ProposeExecutionFeeCorrection{Metadata: f.feeMetadata("user:maker"), OrderId: f.state.OrderId, CaseId: f.env.EventId, Reason: "synthetic concurrent review"}
@@ -165,18 +178,27 @@ func concurrentFeeCommand(t *testing.T, operation string) {
 	payload := wire(t, cmd)
 	goDone := make(chan error, 1)
 	go func() { goDone <- svc.HandleFeeCorrection(lineage(f.ctx, env), env, payload) }()
-	overlapped := make(chan bool, 1)
+	overlapped := make(chan feeLockReport, 1)
 	go func() {
 		watch, cancel := context.WithTimeout(f.ctx, 10*time.Second)
 		defer cancel()
-		observed := false
+		report := feeLockReport{queryError: "none", releaseError: "none"}
 		for watch.Err() == nil {
-			var waiting int
-			if f.pool.QueryRow(watch, "SELECT count(*) FROM pg_stat_activity WHERE $1::integer=ANY(pg_blocking_pids(pid))", barrierPID).Scan(&waiting) != nil {
+			snapshot, err := observeFeeLocks(watch, f.pool, barrierPID, goName, rustName)
+			report.polls++
+			if err != nil {
+				report.queryError = goErrorCategory(err)
 				break
 			}
-			if waiting >= 2 {
-				observed = true
+			report.last = snapshot
+			report.samples++
+			if snapshot.score() > report.best.score() {
+				report.best = snapshot
+			}
+			// Preserve the original direct-holder requirement. Transitive counts
+			// only diagnose a failure; they cannot turn it into an accepted overlap.
+			if snapshot.direct >= 2 && snapshot.owners[0].direct > 0 && snapshot.owners[1].direct > 0 {
+				report.observed = true
 				break
 			}
 			select {
@@ -188,24 +210,36 @@ func concurrentFeeCommand(t *testing.T, operation string) {
 		release, cancelRelease := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelRelease()
 		err := gate.Commit(release)
-		overlapped <- observed && err == nil
+		report.releaseError = goErrorCategory(err)
+		overlapped <- report
 	}()
 	at := time.Now().UTC()
 	request := map[string]any{"method": "FeeCorrection", "envelope": wire(t, env), "payload": payload, "at": map[string]any{"seconds": at.Unix(), "nanos": at.Nanosecond()}, "timeout_ms": 30000}
 	result := w.call(request)
-	if !<-overlapped {
+	report := <-overlapped
+	var goResult error
+	joined := false
+	select {
+	case goResult = <-goDone:
+		joined = true
+	case <-time.After(35 * time.Second):
+	}
+	goOutcome := "not_joined"
+	if joined {
+		goOutcome = goErrorCategory(goResult)
+	}
+	t.Logf("fee contention polls=%d samples=%d observed=%t query=%s release=%s go_joined=%t go_outcome=%s rust_outcome=%s rust_sessions_closed=%t last={%s} best={%s}", report.polls, report.samples, report.observed, report.queryError, report.releaseError, joined, goOutcome, feeRustOutcome(result), result.SessionsClosed, report.last.text(), report.best.text())
+	if !joined {
+		t.Fatal("Go concurrent proposal did not join")
+	}
+	if !report.observed || report.releaseError != "none" {
 		t.Fatal("both independent proposal CAS operations did not reach held row")
 	}
 	if !result.SessionsClosed || (result.Status != "ok" && (result.Status != "error" || result.Error != "Conflict")) {
 		t.Fatal("Rust concurrent proposal outcome differs")
 	}
-	select {
-	case err := <-goDone:
-		if err != nil && !errors.Is(err, order.ErrConflict) {
-			t.Fatal("Go concurrent proposal outcome differs")
-		}
-	case <-time.After(35 * time.Second):
-		t.Fatal("Go concurrent proposal did not join")
+	if goResult != nil && !errors.Is(goResult, order.ErrConflict) {
+		t.Fatal("Go concurrent proposal outcome differs")
 	}
 	if retry := w.call(request); retry.Status != "ok" || !retry.SessionsClosed {
 		t.Fatal("proposal loser cannot resolve committed evidence")
@@ -432,9 +466,12 @@ func TestRustFeeCommandHumanPortfolioBoundary(t *testing.T) {
 				case "wrong-portfolio":
 					cmd.Metadata.PrincipalPortfolios = []string{"another-portfolio"}
 				case "wrong-case-order":
-					if _, err := f.pool.Exec(f.ctx, "UPDATE execution_recovery_cases SET order_id='another-order'"); err != nil {
-						t.Fatal("install synthetic mismatched case")
+					other := proto.Clone(f.state).(*orderpb.OrderState)
+					other.OrderId = "another-order"
+					if order.NewPostgres(f.pool).Save(bus.WithTenantID(f.ctx, f.tenant), other, 0, nil, "") != nil {
+						t.Fatal("seed independent order for mismatched case")
 					}
+					cmd.OrderId, cmd.Metadata.TargetId = other.OrderId, other.OrderId
 				}
 				if f.feeCommand(t, owner, tr, env, cmd, instant.Add(time.Minute)) {
 					t.Fatal("unattributed fee command accepted")
@@ -524,7 +561,7 @@ func TestRustFeeCommandApprovalLifecycle(t *testing.T) {
 		if revisions != 1 || approvals != 1 || facts != 1 {
 			t.Fatal("approval replay duplicated durable financial effects")
 		}
-		f.acknowledge(t, owner, tr, records)
+		f.acknowledgeWithQueries(t, owner, tr, records, 0)
 	}
 }
 

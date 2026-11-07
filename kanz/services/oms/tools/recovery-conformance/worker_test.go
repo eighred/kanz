@@ -135,6 +135,7 @@ func (w *worker) diagnostic(request map[string]any, phase string) string {
 	return fmt.Sprintf("method=%s phase=%s successful_acks=%d context=%s exit=%s", method, phase, w.successfulACKs, state, exit)
 }
 func TestWorkerDiagnosticPreservesJoinAndClosedCategories(t *testing.T) {
+	testFeeLockDiagnostics(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := &worker{ctx: ctx, done: make(chan error, 1), successfulACKs: 7}
