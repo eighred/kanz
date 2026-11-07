@@ -44,7 +44,14 @@ func TestNativeBrokerQualification(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	observation, err := nativeQualification(ctx, mode)
+	diagnostic := nativeDiagnostic{Version: version.String(), Mode: mode, Phase: "workload_api"}
+	observation, err := nativeQualification(ctx, mode, &diagnostic)
+	diagnostic.Category = nativeErrorCategory(err)
+	closed, encodingErr := json.Marshal(diagnostic)
+	if encodingErr != nil {
+		t.Fatal("closed diagnostic encoding")
+	}
+	fmt.Printf("NATIVE_DIAGNOSTIC:%s\n", closed)
 	if err != nil {
 		t.Fatal("native broker qualification refused")
 	}
@@ -55,7 +62,47 @@ func TestNativeBrokerQualification(t *testing.T) {
 	fmt.Printf("NATIVE_PROOF:%s\n", raw)
 }
 
-func nativeQualification(ctx context.Context, mode string) (nativeObservation, error) {
+type nativeDiagnostic struct {
+	Version          string `json:"version"`
+	Mode             string `json:"mode"`
+	ExpectedIdentity string `json:"expected_identity"`
+	Phase            string `json:"phase"`
+	Category         string `json:"category"`
+}
+
+func nativeErrorCategory(err error) string {
+	switch {
+	case err == nil:
+		return "ok"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, provision.ErrInput):
+		return "input"
+	case errors.Is(err, provision.ErrBroker):
+		return "broker"
+	case errors.Is(err, provision.ErrConflict):
+		return "conflict"
+	default:
+		return "unknown"
+	}
+}
+
+func TestNativeDiagnosticCategories(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{{nil, "ok"}, {context.DeadlineExceeded, "deadline"}, {context.Canceled, "cancelled"},
+		{provision.ErrInput, "input"}, {provision.ErrBroker, "broker"}, {provision.ErrConflict, "conflict"},
+		{errors.New("secret-error-sentinel"), "unknown"}} {
+		if got := nativeErrorCategory(tc.err); got != tc.want {
+			t.Fatalf("closed diagnostic category: got %s want %s", got, tc.want)
+		}
+	}
+}
+
+func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDiagnostic) (nativeObservation, error) {
 	out := nativeObservation{Version: version.String(), Mode: mode}
 	identities := map[string]string{
 		"discover":  "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka-provisioner",
@@ -69,15 +116,18 @@ func nativeQualification(ctx context.Context, mode string) (nativeObservation, e
 	if !ok {
 		return out, provision.ErrInput
 	}
+	diagnostic.ExpectedIdentity = id
 	source, err := transport.NewSource(ctx, "unix:///run/spiffe/spire-agent.sock")
 	if err != nil {
 		return out, err
 	}
 	defer source.Close()
+	diagnostic.Phase = "identity"
 	svid, err := source.GetX509SVID()
 	if err != nil || svid.ID.String() != id || len(svid.Certificates) == 0 {
 		return out, provision.ErrInput
 	}
+	diagnostic.Phase = "uniqueid"
 	// Require the actual uniqueid composer attribute, never synthesize a CN leaf.
 	expected := sha256.Sum256([]byte(id))
 	unique := false
@@ -96,6 +146,7 @@ func nativeQualification(ctx context.Context, mode string) (nativeObservation, e
 	tr := &kafka.Transport{TLS: config}
 	defer tr.CloseIdleConnections()
 	client := &kafka.Client{Addr: kafka.TCP(nativeAddress), Transport: tr}
+	diagnostic.Phase = "metadata"
 	meta, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{}})
 	if err != nil || meta == nil || meta.ClusterID == "" || len(meta.ClusterID) > 128 || len(meta.Brokers) != 3 {
 		return out, provision.ErrBroker
@@ -103,18 +154,23 @@ func nativeQualification(ctx context.Context, mode string) (nativeObservation, e
 	out.ClusterID = meta.ClusterID
 	if mode == "discover" {
 		out.Passed = true
+		diagnostic.Phase = "complete"
 		return out, nil
 	}
+	diagnostic.Phase = "estate"
 	if meta.ClusterID != os.Getenv("KANZ_NATIVE_EXPECTED_CLUSTER") {
 		return out, provision.ErrConflict
 	}
 	if mode == "partial" {
+		diagnostic.Phase = "partial"
 		if err = nativePartial(ctx, client, meta.ClusterID); err != nil {
 			return out, err
 		}
 		out.Passed = true
+		diagnostic.Phase = "complete"
 		return out, nil
 	}
+	diagnostic.Phase = "acl"
 	tenant, foreign := "acme", "bravo"
 	if mode == "tenant-b" {
 		tenant, foreign = foreign, tenant
@@ -125,6 +181,7 @@ func nativeQualification(ctx context.Context, mode string) (nativeObservation, e
 			return out, err
 		}
 		out.Passed = true
+		diagnostic.Phase = "complete"
 		return out, nil
 	}
 	value := "native-transport-" + mode
@@ -159,6 +216,7 @@ func nativeQualification(ctx context.Context, mode string) (nativeObservation, e
 	}
 	// The real short-lived SPIRE leaf must rotate; close pooled sockets to require
 	// a new authenticated connection and repeat positive and negative operations.
+	diagnostic.Phase = "renewal"
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -175,6 +233,7 @@ func nativeQualification(ctx context.Context, mode string) (nativeObservation, e
 		case <-ticker.C:
 		}
 	}
+	diagnostic.Phase = "reconnect"
 	tr.CloseIdleConnections()
 	if err = nativeProduce(ctx, client, topic, value+"-renewed"); err != nil {
 		return out, err
@@ -186,6 +245,7 @@ func nativeQualification(ctx context.Context, mode string) (nativeObservation, e
 		return out, err
 	}
 	out.Renewed, out.Passed = true, true
+	diagnostic.Phase = "complete"
 	return out, nil
 }
 

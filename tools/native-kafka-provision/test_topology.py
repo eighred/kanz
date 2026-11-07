@@ -9,6 +9,56 @@ import json
 
 
 class TopologyTest(unittest.TestCase):
+    def test_source_identity_before_effects(self):
+        qualify.source_identity('a'*40,'b'*40,'1','2','a'*40)
+        for source,run,attempt,expected in [('a'*40,'1','1',''),('a'*40,'1','1','c'*40),('a'*40,'0','1','a'*40),('a'*40,'1','0','a'*40),('a'*40,'١','1','a'*40),('a'*40,'+1','1','a'*40)]:
+            with self.assertRaises(ValueError): qualify.source_identity(source,'b'*40,run,attempt,expected)
+        import inspect
+        body=inspect.getsource(qualify.main)
+        self.assertLess(body.index('source_identity('),body.index('TemporaryDirectory('))
+        self.assertIn("os.environ.get('GITHUB_SHA', '')",body)
+
+    def test_owned_job_and_pod_projection(self):
+        wanted=qualify.job('discover','kanz-messaging','kafka-provisioner','fixture:source',mode='discover')
+        uid='12345678-1234-1234-1234-123456789abc'
+        actual=copy.deepcopy(wanted);actual['metadata']['uid']=uid
+        self.assertEqual(qualify.job_custody(actual,wanted),uid)
+        for mutate in (lambda x:x['metadata'].update(uid='other'),lambda x:x['metadata'].update(name='foreign'),lambda x:x['spec']['template']['spec'].update(serviceAccountName='other'),lambda x:x['spec']['template']['spec']['containers'][0].update(image='other')):
+            bad=copy.deepcopy(actual);mutate(bad)
+            with self.assertRaises(ValueError):qualify.job_custody(bad,wanted)
+        digest='sha256:'+'a'*64
+        pod={'metadata':{'uid':'87654321-1234-1234-1234-123456789abc','namespace':'kanz-messaging','name':'discover-owned','ownerReferences':[{'uid':uid,'name':'discover','kind':'Job','controller':True}]},'spec':copy.deepcopy(wanted['spec']['template']['spec']),
+             'status':{'containerStatuses':[{'name':'probe','imageID':digest,'state':{'terminated':{'exitCode':1,'reason':'Error','message':'SECRET'}}}]}}
+        result=qualify.pod_diagnostic([pod],wanted,uid,digest)
+        self.assertEqual(result,{'state':'terminated','exitCode':1,'reason':'Error','imageBound':True})
+        self.assertNotIn('SECRET',json.dumps(result))
+        replaced=copy.deepcopy(pod);replaced['metadata']['uid']=uid
+        with self.assertRaises(ValueError):qualify.pod_custody([replaced],wanted,uid,pod['metadata']['uid'])
+        imported=copy.deepcopy(pod)
+        ref='docker.io/library/import-date@sha256:'+'c'*64
+        imported['status']['containerStatuses'][0]['imageID']=ref
+        self.assertTrue(qualify.pod_diagnostic([imported],wanted,uid,digest,{'status':{'id':digest,'repoDigests':[ref]}})['imageBound'])
+        for cri in ({'status':{'id':'sha256:'+'b'*64,'repoDigests':[ref]}},{'status':{'id':digest,'repoDigests':[]}}):
+            with self.assertRaises(ValueError):qualify.pod_diagnostic([imported],wanted,uid,digest,cri)
+        for mutate in (lambda x:x['metadata']['ownerReferences'][0].update(uid='other'),lambda x:x['spec'].update(serviceAccountName='other'),lambda x:x['status']['containerStatuses'][0].update(imageID='sha256:'+'b'*64)):
+            bad=copy.deepcopy(pod);mutate(bad)
+            with self.assertRaises(ValueError):qualify.pod_diagnostic([bad],wanted,uid,digest)
+        for key,replacement in [('args',['foreign']),('command',['foreign']),('env',[]),('name','other')]:
+            bad=copy.deepcopy(pod);bad['spec']['containers'][0][key]=replacement
+            with self.assertRaises(ValueError):qualify.pod_diagnostic([bad],wanted,uid,digest)
+        for key,replacement in [('uid',''),('uid','malformed'),('name','../foreign')]:
+            bad=copy.deepcopy(pod);bad['metadata'][key]=replacement
+            with self.assertRaises(ValueError):qualify.pod_diagnostic([bad],wanted,uid,digest)
+
+    def test_closed_probe_diagnostic_never_copies_error(self):
+        value={'version':'a'*40,'mode':'discover','expected_identity':topology.ADMIN_ID,'phase':'metadata','category':'broker'}
+        raw='NATIVE_DIAGNOSTIC:'+json.dumps(value)
+        self.assertEqual(qualify.probe_diagnostic(raw,'discover','a'*40),value)
+        self.assertEqual(qualify.probe_diagnostic('SECRET','discover','a'*40),{'state':'UNKNOWN'})
+        for key,replacement in [('version','b'*40),('expected_identity',topology.IDENTITIES[1]),('phase','SECRET'),('category','SECRET')]:
+            bad=dict(value);bad[key]=replacement
+            with self.assertRaises(ValueError):qualify.probe_diagnostic('NATIVE_DIAGNOSTIC:'+json.dumps(bad),'discover','a'*40)
+        with self.assertRaises(ValueError):qualify.probe_diagnostic(raw[:-1]+',"category":"broker"}','discover','a'*40)
     def test_three_distinct_real_brokers_and_full_principals(self):
         docs = topology.broker_objects()
         deployments = [d for d in docs if d['kind'] == 'Deployment']

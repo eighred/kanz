@@ -21,6 +21,106 @@ CASES = ('discover', 'acme-apply', 'acme-idempotent', 'bravo-apply', 'compute-ap
          'acme-verify', 'bravo-verify')
 
 
+def source_identity(source, tree, run, attempt, expected):
+    if source != expected or not re.fullmatch(r'[0-9a-f]{40}', source) or not re.fullmatch(r'[0-9a-f]{40}', tree):
+        raise ValueError('source identity differs')
+    if not re.fullmatch(r'[1-9][0-9]*', run) or not re.fullmatch(r'[1-9][0-9]*', attempt):
+        raise ValueError('positive run identity required')
+
+
+def job_custody(actual, desired, uid=None):
+    meta = actual.get('metadata', {})
+    expected = desired['metadata']
+    identity = meta.get('uid', '')
+    if (meta.get('name') != expected['name'] or meta.get('namespace') != expected['namespace'] or
+            not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', identity) or
+            (uid is not None and identity != uid)):
+        raise ValueError('job custody refused')
+    pod = actual.get('spec', {}).get('template', {}).get('spec', {})
+    wanted = desired['spec']['template']['spec']
+    if pod.get('serviceAccountName') != wanted['serviceAccountName'] or len(pod.get('containers', [])) != 1:
+        raise ValueError('job principal refused')
+    container = pod['containers'][0]
+    target = wanted['containers'][0]
+    if any(container.get(k, []) != target.get(k, []) for k in ('name', 'image', 'args', 'command', 'env')):
+        raise ValueError('job executable differs')
+    return identity
+
+
+def pod_custody(items, desired, uid, pod_uid=None):
+    # Only the exact owned Job's sole pod can contribute observations. Unknown
+    # messages/reasons, container logs and runtime identifiers are never exported.
+    if not isinstance(items, list) or len(items) != 1:
+        raise ValueError('pod inventory unknown')
+    pod = items[0]
+    meta = pod.get('metadata', {})
+    owners = meta.get('ownerReferences', [])
+    if (not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',meta.get('uid','')) or
+            (pod_uid is not None and meta.get('uid') != pod_uid) or
+            not re.fullmatch(r'[a-z0-9](?:[-a-z0-9]{0,251}[a-z0-9])?',meta.get('name','')) or
+            meta.get('namespace') != desired['metadata']['namespace'] or len(owners) != 1 or
+            owners[0].get('uid') != uid or owners[0].get('kind') != 'Job' or
+            owners[0].get('name') != desired['metadata']['name'] or owners[0].get('controller') is not True):
+        raise ValueError('pod owner differs')
+    spec = pod.get('spec', {})
+    wanted = desired['spec']['template']['spec']
+    if spec.get('serviceAccountName') != wanted['serviceAccountName'] or len(spec.get('containers', [])) != 1:
+        raise ValueError('pod principal differs')
+    if any(spec['containers'][0].get(k, []) != wanted['containers'][0].get(k, []) for k in ('name','image','args','command','env')):
+        raise ValueError('pod executable differs')
+    return pod
+
+
+def pod_diagnostic(items, desired, uid, image_id, inspection=None):
+    pod=pod_custody(items,desired,uid)
+    wanted=desired['spec']['template']['spec']
+    statuses = pod.get('status', {}).get('containerStatuses', [])
+    result = {'state': 'UNKNOWN', 'exitCode': None, 'reason': 'UNKNOWN', 'imageBound': False}
+    if not statuses:
+        return result
+    if len(statuses) != 1 or statuses[0].get('name') != wanted['containers'][0]['name']:
+        raise ValueError('pod container differs')
+    status = statuses[0]
+    actual_image = status.get('imageID', '')
+    if actual_image not in (image_id, 'docker://' + image_id, 'containerd://' + image_id):
+        # kind import may expose a repository manifest reference, not the Docker
+        # configuration digest. Bind both through actual CRI image readback.
+        cri = (inspection or {}).get('status', {})
+        if (cri.get('id') != image_id or not isinstance(cri.get('repoDigests'), list) or
+                not 1 <= len(cri['repoDigests']) <= 16 or actual_image not in cri['repoDigests']):
+            raise ValueError('pod image identity differs')
+    result['imageBound'] = True
+    state = status.get('state', {})
+    if len(state) != 1 or next(iter(state)) not in ('running', 'waiting', 'terminated'):
+        raise ValueError('pod state unknown')
+    kind = next(iter(state)); result['state'] = kind
+    detail = state[kind]
+    if kind == 'terminated':
+        code = detail.get('exitCode')
+        if type(code) is not int or not 0 <= code <= 255:
+            raise ValueError('exit code unknown')
+        result['exitCode'] = code
+    if detail.get('reason') in ('Completed', 'Error', 'OOMKilled', 'ContainerCannotRun', 'CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull', 'ContainerCreating'):
+        result['reason'] = detail['reason']
+    return result
+
+
+def probe_diagnostic(text, mode, source):
+    rows = [line[len('NATIVE_DIAGNOSTIC:'):] for line in text.splitlines() if line.startswith('NATIVE_DIAGNOSTIC:')]
+    if len(rows) != 1:
+        return {'state': 'UNKNOWN'}
+    pairs = []
+    value = json.loads(rows[0], object_pairs_hook=lambda x: pairs.extend(x) or dict(x))
+    if len(pairs) != len(value) or set(value) != {'version', 'mode', 'expected_identity', 'phase', 'category'}:
+        raise ValueError('diagnostic shape refused')
+    identity = topology.ADMIN_ID if mode in ('discover', 'partial') else 'spiffe://kanz.internal/ns/' + '/sa/'.join(topology.CLIENTS[mode])
+    if value['version'] != source or value['mode'] != mode or value['expected_identity'] != identity:
+        raise ValueError('diagnostic identity differs')
+    if value['phase'] not in ('workload_api', 'identity', 'uniqueid', 'metadata', 'estate', 'partial', 'acl', 'renewal', 'reconnect', 'complete') or value['category'] not in ('ok', 'input', 'broker', 'conflict', 'deadline', 'cancelled', 'unknown'):
+        raise ValueError('diagnostic category refused')
+    return value
+
+
 def command(argv, data=None, timeout=300):
     return bounded_process.run(argv, cwd=ROOT, env=dict(os.environ), data=data, timeout=timeout,
                                stdout_limit=4 << 20, stderr_limit=4 << 20)
@@ -118,6 +218,7 @@ def validate_receipt(receipt, case, cluster, digest, count):
 
 
 def validate_report(value, source, tree, run, attempt, manifest):
+    source_identity(source, tree, run, attempt, source)
     digest,count=canonical_count(manifest)
     if value.get("manifestSHA")!=digest: raise ValueError("canonical manifest differs")
     if value.get("brokerImage")!=topology.retained.REDPANDA: raise ValueError("broker image differs")
@@ -154,9 +255,8 @@ def validate_report(value, source, tree, run, attempt, manifest):
 def main():
     source=command(['git','rev-parse','HEAD']); tree=command(['git','rev-parse','HEAD^{tree}'])
     run=os.environ['GITHUB_RUN_ID']; attempt=os.environ['GITHUB_RUN_ATTEMPT']
-    if not re.fullmatch(r'[0-9a-f]{40}',source) or not re.fullmatch(r'[0-9a-f]{40}',tree) or not run.isdecimal() or not attempt.isdecimal():
-        raise ValueError('source/run identity required')
-    evidence={'source':source,'tree':tree,'run':run,'attempt':attempt,'passed':False,'cleanup':False,'cases':[], 'brokerImage':topology.retained.REDPANDA}
+    source_identity(source, tree, run, attempt, os.environ.get('GITHUB_SHA', ''))
+    evidence={'source':source,'tree':tree,'run':run,'attempt':attempt,'passed':False,'cleanup':False,'cases':[], 'diagnostics':[], 'cause':'UNKNOWN', 'brokerImage':topology.retained.REDPANDA}
     artifact=Path(os.environ['RUNNER_TEMP'])/'native-kafka-provision.json'
     name='redpanda-proof-'+uuid.uuid4().hex[:12]
     with tempfile.TemporaryDirectory(prefix='native-kafka-proof-') as directory:
@@ -166,18 +266,56 @@ def main():
         def apply(docs):
             return k('apply','-f','-',data=yaml.safe_dump_all(docs))
         def execute(d, failed=False):
-            apply([d]); ns=d['metadata']['namespace']; jobname=d['metadata']['name']
+            ns=d['metadata']['namespace']; jobname=d['metadata']['name']
+            diagnostic={'case':jobname,'jobState':'UNKNOWN','custody':False,'collection':'job','probe':{'state':'UNKNOWN'}}
+            evidence['diagnostics'].append(diagnostic)
             deadline=time.monotonic()+250
-            while time.monotonic()<deadline:
-                state=json.loads(k('-n',ns,'get','job',jobname,'-o','json'))
-                conditions=state.get('status',{}).get('conditions',[])
-                terminal=[c['type'] for c in conditions if c.get('status')=='True' and c.get('type') in ('Complete','Failed')]
-                if terminal:
-                    if terminal != ['Failed' if failed else 'Complete']:
-                        raise ValueError('unexpected actual job outcome')
-                    return k('-n',ns,'logs','job/'+jobname,'--limit-bytes=65536')
-                time.sleep(1)
-            raise TimeoutError('fixture job did not terminate')
+            def observe(*args,data=None):
+                remaining=deadline-time.monotonic()
+                if remaining<=0: raise TimeoutError('job observation expired')
+                return k(*args,data=data,timeout=min(300,remaining))
+            uid=None
+            try:
+                observe('apply','-f','-',data=yaml.safe_dump_all([d]))
+                while time.monotonic()<deadline:
+                    state=json.loads(observe('-n',ns,'get','job',jobname,'-o','json'))
+                    uid=job_custody(state,d,uid); diagnostic['custody']=True
+                    conditions=state.get('status',{}).get('conditions',[])
+                    terminal=[c['type'] for c in conditions if c.get('status')=='True' and c.get('type') in ('Complete','Failed')]
+                    if terminal:
+                        diagnostic['jobState']=terminal[0] if len(terminal)==1 else 'UNKNOWN'
+                        diagnostic['collection']='pod'
+                        pods=json.loads(observe('-n',ns,'get','pods','-l','batch.kubernetes.io/controller-uid='+uid,'-o','json'))
+                        label='probe' if jobname in ('discover','tenant-a','tenant-b','compute-a','ungranted','partial') else 'admin'
+                        pod_custody(pods.get('items'),d,uid)
+                        statuses=pods['items'][0].get('status',{}).get('containerStatuses',[])
+                        inspection=None
+                        if len(statuses)==1:
+                            diagnostic['collection']='image'
+                            observed=statuses[0].get('imageID','')
+                            if not re.fullmatch(r'(?:[a-z0-9][a-z0-9./:_-]{0,255}@)?sha256:[0-9a-f]{64}',observed):
+                                raise ValueError('runtime image reference unknown')
+                            remaining=deadline-time.monotonic()
+                            if remaining<=0: raise TimeoutError('job observation expired')
+                            inspection=json.loads(command(['docker','exec',name+'-control-plane','crictl','inspecti',observed],timeout=min(300,remaining)))
+                        diagnostic['container']=pod_diagnostic(pods.get('items'),d,uid,evidence[label+'Image'],inspection)
+                        # Read only the custody-checked pod; bounded raw bytes stay
+                        # private and only a closed projection reaches artifacts.
+                        diagnostic['collection']='closed-probe'
+                        selected=pods['items'][0]['metadata']
+                        logs=observe('-n',ns,'logs',selected['name'],'-c','probe','--limit-bytes=65536')
+                        after=json.loads(observe('-n',ns,'get','pod',selected['name'],'-o','json'))
+                        pod_custody([after],d,uid,selected['uid'])
+                        if label=='probe': diagnostic['probe']=probe_diagnostic(logs,jobname,source)
+                        diagnostic['collection']='complete'
+                        if terminal != ['Failed' if failed else 'Complete']:
+                            raise ValueError('unexpected actual job outcome')
+                        return logs
+                    time.sleep(1)
+                raise TimeoutError('fixture job did not terminate')
+            finally:
+                # Persist even the failing case before owned cluster cleanup.
+                artifact.write_text(json.dumps(evidence,sort_keys=True)+'\n',encoding='utf-8')
         try:
             evidence['stage']='build'
             images={}
