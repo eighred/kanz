@@ -1,5 +1,45 @@
 # Depth compatibility oracle
 
+`TestFeedRuntimeControlledHandoff/{binance,okx}` is a Linux-only controlled
+process rehearsal. It requires absolute `KANZ_MARKET_INGEST_BIN`,
+`KANZ_BINANCE_DEPTH_BIN`, `KANZ_OKX_DEPTH_BIN` paths and an exact 40-hex
+`KANZ_FEED_HANDOFF_VERSION` shared by the built binaries. It launches the actual
+service entrypoints, loopback exchange protocol servers, a disposable JetStream
+server, and ephemeral workload API identities. Broker connections authenticate
+the distinct Go, Rust and observer SPIFFE principals. Rust development endpoint
+selection still uses the real mTLS path when its workload socket is supplied;
+the same configuration without that identity must refuse this broker.
+The observer can issue JetStream API/ACK requests and receive inbox replies,
+but cannot publish market facts; an actual denied publish checks that boundary.
+An independently owned deny-publish broker authenticates the Rust runtime and
+then refuses its real publication: the test requires a server-side denial,
+unready status, failed process exit and zero accepted facts. A duplicate Go
+external-depth assignment must refuse startup before any exchange connections
+or accepted facts; the valid process path is its positive control.
+
+The controller joins the Go full-depth process before starting its retained
+trade-only mode and the Rust depth process. Actual exchange trades close prior
+minute buckets through Go's existing bar collector. Canonical broker frames,
+source/version/tenant binding, sequence-gap reanchor, stale readiness and broker
+reconnection are checked. Rollback joins Rust and retained Go before restarting
+the Go full-depth owner; workload streams and authenticated broker connections
+must disappear before the next owner starts. A final bounded broker inventory
+rejects selected depth emitted by the retained Go process.
+
+This fixture is not a distributed publisher fence, production SPIRE or broker
+ACL qualification, live exchange/capacity proof, or authorization to activate
+Rust feeds. Local cross-compilation does not execute the process cases. This
+fixture does not prove downstream mark consumption or cross-process fencing.
+The shared CI workflow and mandatory evidence inventory must separately require
+actual Linux passes before this rehearsal is qualified.
+The compatibility job builds three separately stamped service binaries and a
+race-enabled test binary, records all four SHA-256 values with source/tree and
+run/attempt, and requires all seven named parent/child outcomes without skips.
+The original development-binary and broker tests remain separate and unchanged.
+The 150-second child lifetime is fixed; refusal observation allows up to 35
+seconds for the existing runtime's publication failure and joined shutdown,
+rather than treating a still-draining process as successful cleanup.
+
 Use `go run ./tools/depth-conformance --okx` for the OKX corpus, generated through
 the public Go OKX source and book using local websocket frames. It covers positive
 sequence snapshots/updates, sorting, equivalent prices, deletion and decimal

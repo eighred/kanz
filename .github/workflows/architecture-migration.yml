@@ -31,6 +31,7 @@ on:
       - 'kanz/tools/replay/**'
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
+      - '.github/scripts/*feed_handoff_evidence.py'
       - '.github/scripts/*rust*audit*'
       - 'tools/rust-audit-tools/**'
       - '.github/scripts/*rust_release_evidence.py'
@@ -68,6 +69,7 @@ on:
       - 'kanz/tools/replay/**'
       - 'kanz/test/arch/**'
       - '.github/scripts/*migration_evidence.py'
+      - '.github/scripts/*feed_handoff_evidence.py'
       - '.github/scripts/*rust*audit*'
       - 'tools/rust-audit-tools/**'
       - '.github/scripts/*rust_release_evidence.py'
@@ -339,6 +341,37 @@ jobs:
             -count=1 -json | tee "$RUNNER_TEMP/redpanda-tests.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 ../.github/scripts/check_migration_evidence.py "$RUNNER_TEMP/redpanda-tests.jsonl"
+      - name: Build exact-source full feed handoff processes
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/feed-handoff-bin" "$RUNNER_TEMP/feed-handoff-proof"
+          source=$(git rev-parse HEAD)
+          (cd kanz && go build -trimpath -ldflags "-X github.com/eighred/kanz/internal/version.stamped=$source" -o "$RUNNER_TEMP/feed-handoff-bin/market-ingest" ./services/market-ingest/cmd/market-ingest)
+          (cd kanz && go test -race -p 1 -c -o "$RUNNER_TEMP/feed-handoff-bin/handoff.test" ./tools/depth-conformance)
+          KANZ_BUILD_VERSION="$source" CARGO_TARGET_DIR="$RUNNER_TEMP/feed-handoff-target" cargo +1.90.0 build --locked --manifest-path kanz-rs/Cargo.toml -p kanz-binance-depth -p kanz-okx-depth
+          cp "$RUNNER_TEMP/feed-handoff-target/debug/kanz-binance-depth" "$RUNNER_TEMP/feed-handoff-bin/kanz-binance-depth"
+          cp "$RUNNER_TEMP/feed-handoff-target/debug/kanz-okx-depth" "$RUNNER_TEMP/feed-handoff-bin/kanz-okx-depth"
+          python3 .github/scripts/check_feed_handoff_evidence.py --prepare --root . --proof "$RUNNER_TEMP/feed-handoff-proof" --binaries "$RUNNER_TEMP/feed-handoff-bin" --sha "$source" --tree "$(git rev-parse 'HEAD^{tree}')" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Qualify authenticated full-process feed handoff and rollback
+        working-directory: kanz
+        env:
+          KANZ_MARKET_INGEST_BIN: ${{ runner.temp }}/feed-handoff-bin/market-ingest
+          KANZ_BINANCE_DEPTH_BIN: ${{ runner.temp }}/feed-handoff-bin/kanz-binance-depth
+          KANZ_OKX_DEPTH_BIN: ${{ runner.temp }}/feed-handoff-bin/kanz-okx-depth
+          KANZ_FEED_HANDOFF_VERSION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          go tool test2json -t -p github.com/eighred/kanz/tools/depth-conformance "$RUNNER_TEMP/feed-handoff-bin/handoff.test" -test.v=test2json -test.count=1 -test.timeout=8m -test.run '^TestFeedRuntimeControlledHandoff$' | tee "$RUNNER_TEMP/feed-handoff-proof/tests.jsonl"
+          python3 -B -m unittest discover -s ../.github/scripts -p test_check_feed_handoff_evidence.py
+          python3 ../.github/scripts/check_feed_handoff_evidence.py --root .. --proof "$RUNNER_TEMP/feed-handoff-proof" --binaries "$RUNNER_TEMP/feed-handoff-bin" --sha "$(git rev-parse HEAD)" --tree "$(git rev-parse 'HEAD^{tree}')" --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Retain exact-source controlled feed rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: feed-runtime-handoff
+          path: ${{ runner.temp }}/feed-handoff-proof/
+          if-no-files-found: error
+          retention-days: 7
       - name: Authenticate for private mirrored bases
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
