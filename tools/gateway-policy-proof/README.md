@@ -14,9 +14,11 @@ include pre-policy connectivity from each subsequently denied peer, gateway API
 access, observability ops access, denied direct BFF/untrusted/observability API
 access, and a gateway label in the wrong namespace. BFF-to-gateway access remains
 allowed while an unrelated caller is denied. Each negative requires three
-independent connect timeouts, bracketed by successful HTTP controls on the same
-destination and port. Connection refusal, reset, or a timeout after connection
-is established is not accepted as a policy denial.
+independent known connect denials (timeout, ECONNREFUSED or EHOSTUNREACH),
+bracketed by successful HTTP controls on the same destination and port. Other
+errors, resets, or timeouts after connection are UNKNOWN and refuse qualification.
+The shared literal-IP classifier sends no protocol bytes; the existing HTTP and
+canonical CNI echo consumers retain their respective payload checks.
 
 BFF-to-upstream denial is a whole-union result: the rendered BFF egress rule can
 also block that path. Untrusted same-namespace and cross-namespace callers have
@@ -27,9 +29,9 @@ and requires the formerly denied caller to succeed. It then restores the exact
 captured object, verifies the full additive policy spec inventory, and requires
 denial again. Readback normalizes only empty ingress/egress slice omission and
 the Kubernetes TCP port default; selector presence and all policy names/specs
-remain compared. Kubernetes policy convergence has a bounded settling phase; its
-observations do not count as acceptance. Recorded cases always use three fresh
-observations. Namespace-wide policy gaps outside these selected services are
+remain compared. Each case has bounded convergence with three consecutive independent samples;
+a connection resets denial convergence and UNKNOWN fails immediately. Both
+positive brackets remain required even when the negative case fails. Namespace-wide policy gaps outside these selected services are
 unchanged; this does not establish HTTP authentication, financial authorization,
 RLS, actual service recovery or safety against a principal permitted to relabel
 pods. No real tenant API requests are made.
@@ -259,3 +261,22 @@ independent raw GET. Its normal list readback must equal that ACK with only
 Other policy comparisons and historical receipt interpretation remain unchanged.
 The disposable positive control requires this actual API/printer distinction;
 it does not establish any historical raw metadata or authorize a live restore.
+
+The same rendered union and operator TCP gate also run in all three owned K3s
+migration phases (Flannel, Cilium, and rollback). Each phase binds its own report
+to the checkout tree, run/attempt, backend, and unchanged rendered inventory.
+Known-open/no-policy and known-closed-listener controls distinguish denial from
+a dead listener. These fixtures do not establish the cause of earlier live
+failures whose TCP outcomes were discarded.
+
+Operator verification writes one bounded `kanz-gateway-network-v1` aggregate
+before rollback, including failure observations and both positive brackets.
+An exact boolean identifies the closed baseline (7 observations) or isolated
+(43 observations) mode; enforcing fixtures require isolated mode.
+The existing 64-receipt/2 MiB bounds remain; the original 39-record retained
+recovery reader and historical provenance remain unchanged. The transaction
+fixture independently reads the actual fsynced aggregate and checks its hash.
+Fixed loader/network source bytes travel in the checked bootstrap while the
+remaining closed module inventory stays compressed. Per-file, combined expanded,
+encoded and native command limits are unchanged; the mandatory 96-variant check
+executes the actual PowerShell serialization for LF and CRLF inputs.

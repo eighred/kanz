@@ -19,16 +19,7 @@ import transaction as tx
 from rollout_scope import CLUSTER_UID, APPS, snapshot, outside_policies, service_snapshot
 
 PORTS = {"accounting": (8101, 8080), "audit": (8102, 8083), "compliance": (8095, 8091)}
-TCP = """import socket,sys,time,json
-values=[]
-for _ in range(3):
- try:
-  s=socket.create_connection((sys.argv[1],int(sys.argv[2])),timeout=1); s.close(); values.append('connected')
- except TimeoutError: values.append('timeout')
- except OSError: values.append('error')
- time.sleep(.2)
-print(json.dumps(values))
-"""
+from network_observation import TCP_BATCH as TCP, DENIALS, batch
 
 
 class Probes:
@@ -41,6 +32,7 @@ class Probes:
         self.ns_uid = None
         self.namespace_uid_custody = None
         self.save = save
+        self.started = time.monotonic()
 
     def record(self, phase):
         self.save({"format": "kanz-gateway-policy-probes-v1", "nonce": self.nonce, "phase": phase,
@@ -150,24 +142,78 @@ class Probes:
                 raise tx.Refusal("probe address changed")
         probe.endpoint_boundary(self.endpoints(), self.addresses)
 
-    def tcp(self, peer, address, port, expected):
-        self.check()
-        entry = self.peers[peer]
-        result = json.loads(self.k("-n", entry["namespace"], "exec", entry["name"], "--", "python3", "-I", "-B", "-c", TCP, address, str(port)))
-        if result != [expected] * 3:
-            raise tx.Refusal("network-only probe did not establish expected connectivity")
+    def tcp(self, peer, address, port, expected, target, observations, deadline):
+        item = {"target": target, "peer": peer, "port": port, "expected": expected,
+                "batches": [], "result": "unknown"}
+        if len(observations) >= 48:
+            raise tx.Refusal("network observation bound")
+        observations.append(item)
+        consecutive = 0
+        end = min(deadline, time.monotonic() + 20)
+        for _ in range(6):
+            if time.monotonic() >= end:
+                break
+            self.check()
+            entry = self.peers[peer]
+            values = batch(json.loads(self.k("-n", entry["namespace"], "exec", entry["name"], "--",
+                                            "python3", "-I", "-B", "-c", TCP, address, str(port),
+                                            timeout=min(10, max(.001, end - time.monotonic())))))
+            item["batches"].append(values)
+            if time.monotonic() >= end or "unknown" in values:
+                raise tx.Refusal("network observation unknown or late")
+            for value in values:
+                accepted = value == "connected" if expected == "connected" else value in DENIALS
+                consecutive = consecutive + 1 if accepted else 0
+            if consecutive >= 3:
+                item["result"] = "verified"
+                return
+        item["result"] = "not_converged"
+        raise tx.Refusal("network observation did not converge")
 
     def verify(self, workloads, isolated):
-        for app, (api, ops) in PORTS.items():
-            address = workloads[(tx.NAMESPACE, app)]["ip"]
-            self.tcp("gateway", address, api, "connected")
-            self.tcp("observer", address, ops, "connected")
-            if isolated:
-                for peer in ("untrusted", "bff", "observer", "outsider"):
-                    self.tcp("gateway", address, api, "connected")
-                    self.tcp(peer, address, api, "timeout")
-                    self.tcp("gateway", address, api, "connected")
-        self.tcp("bff", workloads[(tx.NAMESPACE, "api-gateway")]["ip"], 8080, "connected")
+        if type(isolated) is not bool:
+            raise tx.Refusal("invalid isolation mode")
+        observations = []
+        passed = False
+        original = self.k
+        # Work fits inside the existing 450-second caller lifetime. Reserve a
+        # separate ten seconds for the mandatory post-negative positive control.
+        final_end = min(self.started + 420, time.monotonic() + 180)
+        work_end = final_end - 10
+        active_end = work_end
+        def bounded_k(*args, value=None, timeout=100):
+            remaining = active_end - time.monotonic()
+            if remaining <= 0:
+                raise tx.Refusal("network observation deadline")
+            return original(*args, value=value, timeout=min(timeout, remaining, 100))
+        self.k = bounded_k
+        def observe(peer, target, port, expected):
+            self.tcp(peer, workloads[(tx.NAMESPACE, target)]["ip"], port, expected,
+                     target, observations, active_end)
+        try:
+            for app, (api, ops) in PORTS.items():
+                observe("gateway", app, api, "connected")
+                observe("observer", app, ops, "connected")
+                if isolated:
+                    for peer in ("untrusted", "bff", "observer", "outsider"):
+                        observe("gateway", app, api, "connected")
+                        try:
+                            observe(peer, app, api, "denied")
+                        finally:
+                            active_end = min(final_end, time.monotonic() + 10)
+                            try:
+                                observe("gateway", app, api, "connected")
+                            finally:
+                                active_end = work_end
+            observe("bff", "api-gateway", 8080, "connected")
+            passed = True
+        finally:
+            self.k = original
+            # One bounded aggregate per verification, including failures, reaches
+            # durable storage before Transaction.apply can start rollback.
+            self.save({"format": "kanz-gateway-network-v1", "nonce": self.nonce,
+                       "phase": "network_verified" if passed else "network_refused", "isolated": isolated,
+                       "observations": observations})
 
     def close(self):
         self.record("probe_cleanup_intent")
@@ -243,11 +289,11 @@ def main():
             record = lambda value: None
         environment = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                        "HOME": directory, "TMPDIR": directory, "LANG": "C.UTF-8"}
-        def command(argv, value=None):
+        def command(argv, value=None, timeout=100):
             return bounded_run(argv, data=None if value is None else json.dumps(value),
-                               env=environment, cwd=directory, timeout=100)
-        def k(*argv, value=None):
-            return command(["/usr/local/bin/k3s", "kubectl", *argv], value)
+                               env=environment, cwd=directory, timeout=min(timeout, 100))
+        def k(*argv, value=None, timeout=100):
+            return command(["/usr/local/bin/k3s", "kubectl", *argv], value, timeout)
         client = KubernetesClient(k, CLUSTER_UID)
         client.check_scope()
         before = snapshot(k, payload["workloads"])

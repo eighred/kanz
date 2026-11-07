@@ -3,12 +3,18 @@ on:
   pull_request:
     paths:
       - 'tools/cni-proof/**'
+      - 'tools/gateway-policy-proof/**'
+      - 'kanz/infra/overlays/testnet-tokyo/**'
+      - 'kanz/infra/security/runtime/**'
       - 'tools/feed-identity/install.sh'
       - '.github/workflows/k3s-cni-migration.yml'
   push:
     branches: [main]
     paths:
       - 'tools/cni-proof/**'
+      - 'tools/gateway-policy-proof/**'
+      - 'kanz/infra/overlays/testnet-tokyo/**'
+      - 'kanz/infra/security/runtime/**'
       - 'tools/feed-identity/install.sh'
       - '.github/workflows/k3s-cni-migration.yml'
   workflow_dispatch:
@@ -30,6 +36,8 @@ jobs:
       - run: bash tools/feed-identity/install.sh
       - name: Preserve state through actual Flannel to Cilium and rollback
         run: python3 -B tools/cni-proof/migration.py
+      - name: Verify exact source and all three rendered gateway phases
+        run: python3 -B tools/cni-proof/check_migration.py "$RUNNER_TEMP/k3s-cni-migration.json"
       - name: Remove only disposable fixture resources after interruption
         if: always()
         run: |

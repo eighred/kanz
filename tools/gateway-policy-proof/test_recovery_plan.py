@@ -117,7 +117,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn("recovery_plan --tokyo-plan --source $source", wrapper)
         self.assertLess(wrapper.index("recovery_host $repo"), wrapper.index("ssm send-command"))
         for marker in ("user/kanz-operator", "KanzPlatformProvisioner/kanz-platform-cli", "-I -B -c $sourceLoader $proofRoot preflight",
-                       "$encoded.Length -gt 20000", "$bytes.Length -gt 524288", "$parameterBytes -gt 30000", "len(data)>65536"):
+                       "$encoded.Length -gt 20000", "($bytes.Length + $fixedSize) -gt 524288", "$parameterBytes -gt 30000", "len(data)>65536"):
             self.assertIn(marker, wrapper)
         self.assertNotIn("rollout_engine.py", wrapper)
 

@@ -14,7 +14,7 @@ def launch(root, entry, arguments):
         "recovery_plan": recovery,
         "recovery_restore": (*recovery, "recovery_plan"),
         "image_identity": ("policy_state", "transaction", "rollout_scope", "rollout_probe"),
-        "rollout_engine": ("bounded_process", "policy_state", "transaction", "policy_client", "rollout_scope", "rollout_probe"),
+        "rollout_engine": ("network_observation", "bounded_process", "policy_state", "transaction", "policy_client", "rollout_scope", "rollout_probe"),
     }
     if entry not in dependencies:
         raise ValueError("unapproved source entrypoint")
