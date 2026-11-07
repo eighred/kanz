@@ -53,6 +53,32 @@ func TestNativeKafkaTenantctlClusterGrammarBeforeEffects(t *testing.T) {
 	}
 }
 
+func TestNativeKafkaPrincipalEncodingRefusesBeforeEffects(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal("bash required")
+	}
+	for _, tc := range []struct {
+		encoding, peer string
+		refused        bool
+	}{
+		{"spiffe-uri", "kafka", false}, {"redpanda-rule-escaped-uri", "redpanda", false},
+		{"redpanda-rule-escaped-uri", "kafka", true}, {"unknown", "redpanda", true},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cmd := exec.CommandContext(ctx, bash, "infra/tenancy/tenantctl.sh", "onboard")
+		cmd.Dir = moduleRoot(t)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TENANT=native-probe", "TENANTCTL_KAFKA_MODE=native",
+			"NATIVE_KAFKA_PRINCIPAL_ENCODING=" + tc.encoding, "NATIVE_KAFKA_BROKER_SPIFFE_ID=spiffe://kanz.internal/ns/kanz-messaging/sa/" + tc.peer,
+			"KUBECONFIG=" + filepath.Join(t.TempDir(), "never-created")}
+		out, runErr := cmd.CombinedOutput()
+		cancel()
+		if runErr == nil || strings.Contains(string(out), ">> [") || strings.Contains(string(out), "native principal encoding") != tc.refused {
+			t.Fatal("encoding preflight did not discriminate before effects")
+		}
+	}
+}
+
 func checkNativeKafkaOwner(files map[string]string) bool {
 	main := files["main"]
 	engine := files["engine"]
@@ -63,6 +89,12 @@ func checkNativeKafkaOwner(files map[string]string) bool {
 		}
 	}
 	if strings.Contains(main, "AuthorizeMesh") || strings.Contains(main, "InsecureSkipVerify") {
+		return false
+	}
+	encoding := strings.Index(main, "provision.WithPrincipalEncoding(p, *encoding, *peer)")
+	if encoding < 0 || encoding > strings.Index(main, "transport.NewSource(ctx, *socket)") ||
+		!strings.Contains(engine, "PrincipalFilter: p.BrokerPrincipal") ||
+		!strings.Contains(shell, "-principal-encoding=${NATIVE_KAFKA_PRINCIPAL_ENCODING}") {
 		return false
 	}
 	if !strings.Contains(engine, `m.ClusterID != clusterID || m.ClusterID == ""`) {
@@ -100,6 +132,8 @@ func TestNativeKafkaSourceBoundaryAndMutations(t *testing.T) {
 		t.Fatal("native owner boundary changed")
 	}
 	for _, m := range []struct{ key, old, new string }{
+		{"main", "provision.WithPrincipalEncoding(p, *encoding, *peer)", "provision.WithPrincipalEncoding(p, \"spiffe-uri\", *peer)"},
+		{"engine", "PrincipalFilter: p.BrokerPrincipal", "PrincipalFilter: p.Principal"},
 		{"main", "transport.AuthorizeServices(peerID)", "transport.AuthorizeMesh()"},
 		{"main", "brokerIdentity(*peer)", "spiffeid.FromString(*peer)"},
 		{"main", "transport.ClientTLSConfig(pinned,", "transport.ClientTLSConfig(source,"},

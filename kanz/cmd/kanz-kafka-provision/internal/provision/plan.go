@@ -23,12 +23,13 @@ func ValidClusterID(id string) bool {
 }
 
 type Plan struct {
-	ClusterID   string
-	Tenant      string
-	Principal   string
-	ManifestSHA string
-	Topics      []Topic
-	ACLs        []kafka.ACLEntry
+	ClusterID       string
+	Tenant          string
+	Principal       string
+	BrokerPrincipal string
+	ManifestSHA     string
+	Topics          []Topic
+	ACLs            []kafka.ACLEntry
 }
 
 // NewPlan accepts the existing two tenant principal shapes. System topics can
@@ -57,12 +58,41 @@ func NewPlan(raw []byte, digest, tenant, principal, clusterID string) (Plan, err
 	if err != nil {
 		return Plan{}, err
 	}
-	p := Plan{ClusterID: clusterID, Tenant: tenant, Principal: principal, ManifestSHA: digest, Topics: topics}
+	p := Plan{ClusterID: clusterID, Tenant: tenant, Principal: principal, BrokerPrincipal: principal, ManifestSHA: digest, Topics: topics}
 	for _, op := range []kafka.ACLOperationType{kafka.ACLOperationTypeWrite, kafka.ACLOperationTypeRead, kafka.ACLOperationTypeDescribe, kafka.ACLOperationTypeCreate} {
 		p.ACLs = append(p.ACLs, kafka.ACLEntry{ResourceType: kafka.ResourceTypeTopic, ResourceName: tenant + ".", ResourcePatternType: kafka.PatternTypePrefixed, Principal: principal, Host: "*", Operation: op, PermissionType: kafka.ACLPermissionTypeAllow})
 	}
 	for _, op := range []kafka.ACLOperationType{kafka.ACLOperationTypeRead, kafka.ACLOperationTypeDescribe} {
 		p.ACLs = append(p.ACLs, kafka.ACLEntry{ResourceType: kafka.ResourceTypeGroup, ResourceName: tenant + ".", ResourcePatternType: kafka.PatternTypePrefixed, Principal: principal, Host: "*", Operation: op, PermissionType: kafka.ACLPermissionTypeAllow})
+	}
+	return p, nil
+}
+
+// WithPrincipalEncoding selects a wire representation without changing the
+// canonical workload identity. Redpanda's rule replacement preserves escaped
+// slashes; this profile must match the independently configured broker rules.
+// No profile probes the broker, adopts its response, or changes an existing ACL.
+func WithPrincipalEncoding(p Plan, encoding, peer string) (Plan, error) {
+	if p.Principal == "" || p.BrokerPrincipal != p.Principal || len(p.ACLs) != 6 {
+		return Plan{}, ErrInput
+	}
+	switch encoding {
+	case "spiffe-uri":
+		return p, nil
+	case "redpanda-rule-escaped-uri":
+		if peer != "spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda" {
+			return Plan{}, ErrInput
+		}
+	default:
+		return Plan{}, ErrInput
+	}
+	p.BrokerPrincipal = strings.ReplaceAll(p.Principal, "/", `\/`)
+	p.ACLs = append([]kafka.ACLEntry(nil), p.ACLs...)
+	for i := range p.ACLs {
+		if p.ACLs[i].Principal != p.Principal {
+			return Plan{}, ErrInput
+		}
+		p.ACLs[i].Principal = p.BrokerPrincipal
 	}
 	return p, nil
 }

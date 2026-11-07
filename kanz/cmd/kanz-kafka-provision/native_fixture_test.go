@@ -361,6 +361,10 @@ func nativePartial(ctx context.Context, c *kafka.Client, cluster string) error {
 	if e != nil {
 		return e
 	}
+	p, e = provision.WithPrincipalEncoding(p, "redpanda-rule-escaped-uri", nativePeer)
+	if e != nil {
+		return e
+	}
 	wrapper := &nativeLostAck{Client: c}
 	receipt, e := provision.Run(ctx, wrapper, p, "apply")
 	if !errors.Is(e, provision.ErrBroker) || !wrapper.lost || !receipt.PartialOrUnknown || receipt.TopicAttempts != 1 || receipt.ACLAttempts != 0 || receipt.Complete {

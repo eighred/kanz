@@ -62,3 +62,43 @@ func TestPlanBindsBothExistingTenantPrincipalShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestExplicitRedpandaEncodingPreservesCanonicalIdentityAndExactACLs(t *testing.T) {
+	p := testPlan(t)
+	const peer = "spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda"
+	const wire = `User:spiffe:\/\/kanz.internal\/ns\/tenant-acme\/sa\/risk-engine`
+	encoded, err := WithPrincipalEncoding(p, "redpanda-rule-escaped-uri", peer)
+	if err != nil || encoded.Principal != p.Principal || encoded.BrokerPrincipal != wire || p.BrokerPrincipal != p.Principal {
+		t.Fatal("canonical identity or wire encoding changed")
+	}
+	for i, acl := range encoded.ACLs {
+		want := p.ACLs[i]
+		if want.Principal != p.Principal {
+			t.Fatal("input plan mutated")
+		}
+		want.Principal = wire
+		if acl != want {
+			t.Fatal("encoding changed an ACL permission or resource")
+		}
+	}
+	api := &fakeAdmin{clusterID: p.ClusterID, topics: map[string]Topic{}}
+	if r, err := Run(context.Background(), api, encoded, "apply"); err != nil || !r.Complete {
+		t.Fatal("encoded readback incomplete")
+	}
+	if api.filteredPrincipal != wire {
+		t.Fatal("ACL inventory did not use exact wire principal")
+	}
+	api.acls[0].Principal = p.Principal
+	if _, err := Run(context.Background(), api, encoded, "verify"); !errors.Is(err, ErrConflict) {
+		t.Fatal("mixed encoding accepted")
+	}
+	for _, pair := range [][2]string{{"", peer}, {"unknown", peer}, {"redpanda-rule-escaped-uri", "spiffe://kanz.internal/ns/kanz-messaging/sa/kafka"}} {
+		if _, err := WithPrincipalEncoding(p, pair[0], pair[1]); !errors.Is(err, ErrInput) {
+			t.Fatal("unbound encoding accepted")
+		}
+	}
+	plain, err := WithPrincipalEncoding(p, "spiffe-uri", peer)
+	if err != nil || plain.BrokerPrincipal != p.Principal {
+		t.Fatal("default wire encoding changed")
+	}
+}

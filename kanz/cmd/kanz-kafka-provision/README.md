@@ -37,6 +37,18 @@ Native `tenantctl` requires the existing onboarding prerequisites plus:
 | `NATIVE_KAFKA_BROKER` | Intended TLS bootstrap `host:port` |
 | `NATIVE_KAFKA_BROKER_SPIFFE_ID` | Exact `spiffe://kanz.internal/ns/kanz-messaging/sa/kafka` or `/sa/redpanda` |
 | `NATIVE_KAFKA_CLUSTER_ID` | Independently selected exact Kafka ClusterID |
+| `NATIVE_KAFKA_PRINCIPAL_ENCODING` | `spiffe-uri` (default), or explicitly qualified `redpanda-rule-escaped-uri` with the exact Redpanda peer |
+
+The CLI's `-principal` always accepts the canonical full SPIFFE principal.
+`-principal-encoding` selects only its broker ACL representation. The pinned
+Redpanda DN rule parser retains the slash escapes in the replacement; its actual
+principal therefore contains `\/` for each `/`. The explicit Redpanda profile
+uses that same representation for ACL inventory, creation and readback. The
+fixture's superuser uses it too. It never changes the SPIFFE SAN, hashes an
+escaped identity, adds a wildcard, adopts an observed principal, or rewrites
+existing grants. Select the profile from independently reviewed broker rules;
+it is not inferred from a successful TLS handshake or an authorization failure.
+The actual two-tenant/SPIRE fixture must qualify this mapping before use.
 
 The caller keeps the canonical `kanz.internal`, `kanz-messaging`, and
 `kanz-services` identity scope. It creates or exactly reads back an immutable,

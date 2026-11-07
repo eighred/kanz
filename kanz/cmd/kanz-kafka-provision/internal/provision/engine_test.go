@@ -11,14 +11,15 @@ import (
 
 // This fake proves ordering and refusal, never actual broker acceptance.
 type fakeAdmin struct {
-	clusterID       string
-	mutateMetadata  func(*kafka.MetadataResponse)
-	metadataCalls   int
-	changeAt        int
-	topics          map[string]Topic
-	acls            []kafka.ACLEntry
-	creates, grants int
-	lostCreate      bool
+	filteredPrincipal string
+	clusterID         string
+	mutateMetadata    func(*kafka.MetadataResponse)
+	metadataCalls     int
+	changeAt          int
+	topics            map[string]Topic
+	acls              []kafka.ACLEntry
+	creates, grants   int
+	lostCreate        bool
 }
 
 func (a *fakeAdmin) Metadata(_ context.Context, r *kafka.MetadataRequest) (*kafka.MetadataResponse, error) {
@@ -46,7 +47,8 @@ func (a *fakeAdmin) DescribeConfigs(_ context.Context, r *kafka.DescribeConfigsR
 	t := a.topics[r.Resources[0].ResourceName]
 	return &kafka.DescribeConfigsResponse{Resources: []kafka.DescribeConfigResponseResource{{ResourceType: int8(kafka.ResourceTypeTopic), ResourceName: t.Name, ConfigEntries: []kafka.DescribeConfigResponseConfigEntry{{ConfigName: "cleanup.policy", ConfigValue: t.Cleanup}, {ConfigName: "retention.ms", ConfigValue: strconv.FormatInt(t.Retention, 10)}, {ConfigName: "min.insync.replicas", ConfigValue: "2"}}}}}, nil
 }
-func (a *fakeAdmin) DescribeACLs(_ context.Context, _ *kafka.DescribeACLsRequest) (*kafka.DescribeACLsResponse, error) {
+func (a *fakeAdmin) DescribeACLs(_ context.Context, request *kafka.DescribeACLsRequest) (*kafka.DescribeACLsResponse, error) {
+	a.filteredPrincipal = request.Filter.PrincipalFilter
 	r := &kafka.DescribeACLsResponse{}
 	for _, x := range a.acls {
 		r.Resources = append(r.Resources, kafka.ACLResource{ResourceType: x.ResourceType, ResourceName: x.ResourceName, PatternType: x.ResourcePatternType, ACLs: []kafka.ACLDescription{{Principal: x.Principal, Host: x.Host, Operation: x.Operation, PermissionType: x.PermissionType}}})

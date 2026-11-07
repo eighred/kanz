@@ -177,6 +177,13 @@ preflight() {
         spiffe://kanz.internal/ns/kanz-messaging/sa/kafka|spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda) ;;
         *) missing+=("native exact canonical broker SPIFFE ID required") ;;
       esac
+      NATIVE_KAFKA_PRINCIPAL_ENCODING="${NATIVE_KAFKA_PRINCIPAL_ENCODING:-spiffe-uri}"
+      case "${NATIVE_KAFKA_PRINCIPAL_ENCODING}" in
+        spiffe-uri) ;;
+        redpanda-rule-escaped-uri)
+          [ "${NATIVE_KAFKA_BROKER_SPIFFE_ID:-}" = spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda ] || missing+=("native principal encoding requires exact Redpanda peer") ;;
+        *) missing+=("native principal encoding unsupported") ;;
+      esac
       local native_sa
       for native_sa in ${TENANT_SAS} ${COMPUTE_KAFKA_SAS}; do
         [[ "${native_sa}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || missing+=("native ServiceAccount label invalid")
@@ -462,7 +469,7 @@ spec:
       containers:
         - name: tenant
           image: ${NATIVE_KAFKA_IMAGE}
-          args: ["-mode=apply", "-manifest=/manifest/topics-job.yaml", "-manifest-sha256=${NATIVE_KAFKA_MANIFEST_SHA256}", "-tenant=${TENANT}", "-principal=User:${prin}", "-broker=${NATIVE_KAFKA_BROKER}", "-broker-spiffe-id=${NATIVE_KAFKA_BROKER_SPIFFE_ID}", "-expected-cluster-id=${NATIVE_KAFKA_CLUSTER_ID}", "-workload-socket=unix:///run/spiffe/spire-agent.sock", "-timeout=240s"]
+          args: ["-mode=apply", "-manifest=/manifest/topics-job.yaml", "-manifest-sha256=${NATIVE_KAFKA_MANIFEST_SHA256}", "-tenant=${TENANT}", "-principal=User:${prin}", "-principal-encoding=${NATIVE_KAFKA_PRINCIPAL_ENCODING}", "-broker=${NATIVE_KAFKA_BROKER}", "-broker-spiffe-id=${NATIVE_KAFKA_BROKER_SPIFFE_ID}", "-expected-cluster-id=${NATIVE_KAFKA_CLUSTER_ID}", "-workload-socket=unix:///run/spiffe/spire-agent.sock", "-timeout=240s"]
           securityContext: { readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
           resources: { requests: { cpu: "100m", memory: "64Mi" }, limits: { cpu: "1", memory: "256Mi" } }
           volumeMounts:

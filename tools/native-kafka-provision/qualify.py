@@ -459,7 +459,7 @@ def main():
             def cli(case,tenant,principal,mode,wrong=False):
                 evidence['stage']=case
                 expected='deliberately-wrong' if wrong else cluster
-                args=['-mode='+mode,'-manifest=/manifest/topics-job.yaml','-manifest-sha256='+digest,'-tenant='+tenant,'-principal='+principal,
+                args=['-mode='+mode,'-manifest=/manifest/topics-job.yaml','-manifest-sha256='+digest,'-tenant='+tenant,'-principal='+principal,'-principal-encoding=redpanda-rule-escaped-uri',
                       '-broker=native-redpanda-0.kanz-messaging.svc:9094','-broker-spiffe-id='+topology.BROKER_ID,'-expected-cluster-id='+expected,
                       '-workload-socket=unix:///run/spiffe/spire-agent.sock','-timeout=240s']
                 result=json.loads(execute(job(case,'kanz-messaging','kafka-provisioner',images['admin'],args=args),failed=wrong))

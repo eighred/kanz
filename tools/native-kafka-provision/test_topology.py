@@ -97,7 +97,7 @@ class TopologyTest(unittest.TestCase):
             self.assertEqual(config['advertised_rpc_api']['address'], topology.BROKERS[i] + '.kanz-messaging.svc')
             self.assertTrue(config['kafka_api_tls'][0]['require_client_auth'])
             bootstrap = yaml.safe_load(cm['data']['.bootstrap.yaml'])
-            self.assertEqual(bootstrap['superusers'], [topology.ADMIN_ID])
+            self.assertEqual(bootstrap['superusers'], [r'spiffe:\/\/kanz.internal\/ns\/kanz-messaging\/sa\/kafka-provisioner'])
             self.assertEqual(bootstrap['default_topic_replications'], 3)
             self.assertFalse(bootstrap['auto_create_topics_enabled'])
             self.assertEqual(bootstrap['kafka_mtls_principal_mapping_rules'], [topology.mapping(x) for x in topology.IDENTITIES])

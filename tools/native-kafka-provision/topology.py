@@ -25,13 +25,20 @@ IDENTITIES = (ADMIN_ID,) + tuple('spiffe://kanz.internal/ns/' + ns + '/sa/' + sa
 BROKERS = tuple('native-redpanda-' + str(i) for i in range(3))
 
 
-def mapping(identity):
+def broker_principal(identity):
     if identity not in IDENTITIES:
         raise ValueError('unowned fixture principal')
+    # The rule parser retains replacement escapes, and std::regex_replace
+    # preserves them. This is a wire encoding, not a different SPIFFE identity.
+    return identity.replace('/', r'\/')
+
+
+def mapping(identity):
+    replacement=broker_principal(identity)
     # SPIRE CredentialComposer uniqueid binds the complete URI, not a caller CN.
     unique = hashlib.sha256(identity.encode()).digest()[:16].hex()
     dn = 'C=US,O=SPIRE,CN=[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?,x500UniqueIdentifier=' + unique
-    return 'RULE:^' + dn + '$/' + identity.replace('/', r'\/') + '/'
+    return 'RULE:^' + dn + '$/' + replacement + '/'
 
 
 def broker_objects():
@@ -54,7 +61,7 @@ def broker_objects():
         rp['rpc_server'] = {'address': '0.0.0.0', 'port': 33145}
         rp['advertised_rpc_api'] = {'address': name + '.kanz-messaging.svc', 'port': 33145}
         rp['advertised_kafka_api'][0]['address'] = name + '.kanz-messaging.svc'
-        bootstrap = {'kafka_enable_authorization': True, 'superusers': [ADMIN_ID],
+        bootstrap = {'kafka_enable_authorization': True, 'superusers': [broker_principal(ADMIN_ID)],
                      'auto_create_topics_enabled': False, 'default_topic_replications': 3,
                      'kafka_mtls_principal_mapping_rules': [mapping(x) for x in IDENTITIES]}
         cm = copy.deepcopy(base)

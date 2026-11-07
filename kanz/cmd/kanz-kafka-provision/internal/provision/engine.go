@@ -78,7 +78,7 @@ type Receipt struct {
 
 func Run(ctx context.Context, api Admin, p Plan, mode string) (Receipt, error) {
 	r := Receipt{Mode: mode, ManifestSHA: p.ManifestSHA, ClusterID: p.ClusterID}
-	if (mode != "plan" && mode != "apply" && mode != "verify") || !ValidClusterID(p.ClusterID) || api == nil || len(p.Topics) == 0 || len(p.Topics) > 256 || len(p.ACLs) != 6 {
+	if (mode != "plan" && mode != "apply" && mode != "verify") || !ValidClusterID(p.ClusterID) || p.BrokerPrincipal == "" || api == nil || len(p.Topics) == 0 || len(p.Topics) > 256 || len(p.ACLs) != 6 {
 		return r, ErrInput
 	}
 	var missing []Topic
@@ -249,7 +249,7 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID string) (b
 }
 
 func missingACLs(ctx context.Context, api Admin, p Plan) ([]kafka.ACLEntry, error) {
-	r, err := api.DescribeACLs(ctx, &kafka.DescribeACLsRequest{Filter: kafka.ACLFilter{ResourceTypeFilter: kafka.ResourceTypeAny, ResourcePatternTypeFilter: kafka.PatternTypeAny, PrincipalFilter: p.Principal, Operation: kafka.ACLOperationTypeAny, PermissionType: kafka.ACLPermissionTypeAny}})
+	r, err := api.DescribeACLs(ctx, &kafka.DescribeACLsRequest{Filter: kafka.ACLFilter{ResourceTypeFilter: kafka.ResourceTypeAny, ResourcePatternTypeFilter: kafka.PatternTypeAny, PrincipalFilter: p.BrokerPrincipal, Operation: kafka.ACLOperationTypeAny, PermissionType: kafka.ACLPermissionTypeAny}})
 	if err != nil {
 		return nil, brokerCause{err}
 	}
