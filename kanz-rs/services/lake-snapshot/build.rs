@@ -4,6 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for file in [
         "lake/worker/v1/worker.proto",
         "lake/v1/snapshot.proto",
+        "envelope/v1/event_frame.proto",
         "envelope/v1/envelope.proto",
         "envelope/v1/event_class.proto",
     ] {
@@ -14,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.compile_protos(
         &[
             format!("{root}/lake/worker/v1/worker.proto"),
-            format!("{root}/envelope/v1/envelope.proto"),
+            format!("{root}/envelope/v1/event_frame.proto"),
         ],
         &[root],
     )?;
