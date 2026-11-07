@@ -68,7 +68,7 @@ Host acceptance/image resolution and the remote engine launch Python in isolated
 mode. A closed loader compiles the approved repository modules from checked
 source bytes; repository directories never enter the import search path. Ignored
 bytecode caches and local standard-library shadows therefore cannot replace
-those inputs. Existing caches are preserved. The remote six-file bundle retains
+those inputs. Existing caches are preserved. The remote seven-file bundle retains
 the 20 KB encoded and 512 KiB expansion limits; this is source custody, not an
 operating-system sandbox or attestation of the installed Python toolchain.
 The original JSON/source bytes use one shared XZ codec (LZMA2 preset 6,
@@ -174,3 +174,87 @@ policy, then requires exact custom metadata preservation across raw create,
 replace, finalization and all eight rollback cases, unchanged dry-run inventory,
 and refusal of stale resourceVersion and wrong UID updates. This source repair
 does not reconcile or authorize mutation of any retained live transaction.
+
+### Retained read-only recovery plan
+
+`tools/Invoke-TokyoGatewayPolicyRecoveryPlan.ps1` is a separate, source-bound
+planning entrypoint for the single retained Tokyo failure identified in its
+closed source. It is not a restore or an Apply retry. It requires the same
+exact-main acceptance and operator identity checks as the rollout wrapper.
+The trusted host retrieves the original SSM command and invocation, verifies
+its fixed instance/command recipe, and compares its decoded source bundle with
+the original Git blobs (allowing only exact LF/CRLF checkout representations).
+Only verified compact provenance hashes/context enter the remote planner.
+
+The planner reads the existing private receipts without modifying them. It
+requires one unresolved intent, exact unchanged other policy objects, the
+original target UID and creation timestamp, and exact intended user metadata
+except the independently established kubectl last-applied transformation. That
+annotation must encode the originally submitted object, including its original
+UID/resourceVersion and nonce. Server-managed generation/managedFields are not
+claimed equal to the submitted object; the complete current target object is
+hash-bound in the resulting preconditions.
+
+Fresh canonical workload lineage/readiness, Service and outside-policy checks
+must remain stable across a raw server-side dry-run of the baseline with the
+current target CAS identity. Current policy inventory must remain unchanged.
+Cleanup checks cover all retained observed probe IPs and owned UIDs, not unknown
+historical addresses. Old receipts did not capture historical workload, Service
+or outside-policy snapshots: the result explicitly reports those historical
+snapshots as `UNKNOWN`. Fresh checks do not backfill them.
+
+The plan does not authorize restoration or write observations. No restore code
+is provided. Its hashes describe the observed planning window; any separately
+reviewed recovery operation would need fresh matching preconditions. The new
+reader's root-Linux no-follow controls and the complete wrapper/real API planning
+path still require actual Linux qualification; local pure tests do not establish
+live recovery acceptance. Normal Apply and plan transports retain the existing
+20,000 encoded / 524,288 expanded / 65,536 per-source-byte limits.
+
+
+### One-shot retained-baseline reconciliation
+
+`tools/Invoke-TokyoGatewayPolicyRetainedRestore.ps1` is a separate fixed-target
+entrypoint. It requires the same exact-main workflow acceptance, operator chain,
+instance and original SSM/Git provenance as the read-only planner. It has no
+resource argument, Apply switch, retry, roll-forward or automatic rollback.
+Source presence and a disposable fixture pass do not authorize a live invocation.
+
+The engine recomputes the plan, validates the immutable 39 old receipts, and
+creates `/var/tmp/kanz-gateway-reconcile-nu1ezqwo` exclusively. An existing path
+refuses reuse. Even a prewrite refusal after creation leaves this new journal and
+requires separate review; it never chooses another directory. The original
+`/var/tmp/kanz-gateway-policy-nu1ezqwo` is read-only. The new directory and each
+append-only receipt are fsynced. A full observation and baseline intent precede
+a final check of old receipt hashes, target UID/resourceVersion/birth/full object,
+all other policies, current workload/service/outside-policy scope, and observed
+probe UID/IP absence. Only then may one raw CAS PUT restore the original baseline.
+
+The validated server acknowledgment is durably recorded before independent
+readback. Its resourceVersion must be new and equal to that readback. Other
+policies and fresh scope must remain unchanged. Any uncertain response or later
+failure leaves UNKNOWN attribution and the journal, even if baseline state is
+observable. It never retries or claims to reconstruct missing historical workload
+snapshots. Only the complete acknowledgment, readback and evidence checks produce
+VERIFIED.
+
+The existing disposable fixture retains its 21 ordered transaction controls and
+76 separate policy observations, then adds eight reconciliation controls. These
+use explicitly synthetic legacy receipts, the fresh owned kind UID, and dummy
+provenance hashes. They exercise actual append-only journals, raw API writes,
+response loss after a server mutation, stale CAS, exclusive journal refusal, and
+scope/receipt/metadata negatives. The immutable birth negative deliberately alters
+a read projection; it does not claim Kubernetes allowed changing creationTimestamp.
+Synthetic Ready messaging listeners provide health observations, not broker or
+financial behavior. No fixture accesses the retained Tokyo directories or AWS.
+
+Retained restoration distinguishes the normal kubectl JSON projection from the
+raw API object. The existing plan `fullCurrentTargetSHA256` binds the complete
+observed kubectl projection, not historical managed-fields data. The new journal
+records the fresh raw target and hash before intent, rechecks that complete raw
+object before the single PUT, and requires the durable server ACK to equal an
+independent raw GET. Its normal list readback must equal that ACK with only
+`metadata.managedFields` omitted, matching the pinned kubectl JSON printer.
+Other policy comparisons and historical receipt interpretation remain unchanged.
+The disposable positive control requires this actual API/printer distinction;
+it does not establish any historical raw metadata or authorize a live restore.

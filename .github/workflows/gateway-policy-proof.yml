@@ -4,6 +4,8 @@ on:
     paths:
       - 'tools/gateway-policy-proof/**'
       - 'tools/Invoke-TokyoGatewayPolicy.ps1'
+      - 'tools/Invoke-TokyoGatewayPolicyRecoveryPlan.ps1'
+      - 'tools/Invoke-TokyoGatewayPolicyRetainedRestore.ps1'
       - 'tools/feed-identity/**'
       - 'kanz/infra/overlays/testnet-tokyo/**'
       - 'kanz/infra/security/runtime/**'
@@ -13,6 +15,8 @@ on:
     paths:
       - 'tools/gateway-policy-proof/**'
       - 'tools/Invoke-TokyoGatewayPolicy.ps1'
+      - 'tools/Invoke-TokyoGatewayPolicyRecoveryPlan.ps1'
+      - 'tools/Invoke-TokyoGatewayPolicyRetainedRestore.ps1'
       - 'tools/feed-identity/**'
       - 'kanz/infra/overlays/testnet-tokyo/**'
       - 'kanz/infra/security/runtime/**'
@@ -33,6 +37,16 @@ jobs:
           python-version: '3.12'
       - run: python3 -m pip install PyYAML==6.0.3
       - run: python3 -B -m unittest discover -s tools/gateway-policy-proof -p 'test_*.py'
+      - name: Qualify retained receipt reader on root Linux
+        working-directory: tools/gateway-policy-proof
+        run: |
+          timeout --kill-after=5s 30s sudo -- env -i PATH="$PATH" HOME="$RUNNER_TEMP" TMPDIR="$RUNNER_TEMP" LANG=C.UTF-8 python3 -B -c '
+          import os,sys,unittest
+          assert sys.platform == "linux" and os.geteuid() == 0
+          suite = unittest.defaultTestLoader.loadTestsFromName("test_recovery_plan.RecoveryTests.test_linux_receipt_reader_rejects_links_fifo_and_inventory_changes")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          assert result.testsRun == 1 and not result.skipped and result.wasSuccessful()
+          '
       - run: python3 -B -m unittest discover -s tools/feed-identity -p 'test_*.py'
       - run: bash tools/feed-identity/install.sh
       - name: Qualify actual rendered gateway-only policies

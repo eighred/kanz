@@ -5,7 +5,7 @@ import os
 import signal
 
 
-def run(argv, *, cwd, env, data=None, timeout=100, stdout_limit=4 << 20, stderr_limit=65536):
+def run(argv, *, cwd, env, data=None, timeout=100, stdout_limit=4 << 20, stderr_limit=65536, strip=True):
     input_bytes = None if data is None else data.encode()
     if input_bytes is not None and len(input_bytes) > 4 << 20:
         raise ValueError("command input exceeds bound")
@@ -68,7 +68,8 @@ def run(argv, *, cwd, env, data=None, timeout=100, stdout_limit=4 << 20, stderr_
             thread.join(timeout=5)
         if failed.is_set() or any(thread.is_alive() for thread in readers) or status:
             raise RuntimeError("bounded command failed or exceeded output limits")
-        return output.decode("utf-8").strip()
+        decoded = output.decode("utf-8")
+        return decoded.strip() if strip else decoded
     finally:
         if process.poll() is None or any(thread.is_alive() for thread in readers):
             stop()

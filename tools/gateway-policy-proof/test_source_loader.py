@@ -16,9 +16,17 @@ class SourceLoaderTests(unittest.TestCase):
                               text=True, timeout=10, check=True).stdout
 
     def test_valid_dependency_cache_executes_with_B_but_not_source_loader(self):
-        for entry, dependency in (("preflight", "bounded_process"), ("image_identity", "rollout_probe")):
+        for entry, dependency in (("preflight", "bounded_process"), ("image_identity", "rollout_probe"),
+                                  ("recovery_host", "recovery_receipts"), ("recovery_plan", "recovery_receipts"), ("recovery_restore", "recovery_receipts")):
             with self.subTest(entry=entry), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
+                if entry == "image_identity":
+                    for name in ("policy_state", "transaction", "rollout_scope"):
+                        (root / (name + ".py")).write_bytes((HERE / (name + ".py")).read_bytes())
+                if entry in ("recovery_host", "recovery_plan", "recovery_restore"):
+                    for name in ("bounded_process", "policy_state", "transaction", "transport_codec", "policy_client", "rollout_scope", "recovery_provenance", "recovery_plan"):
+                        (root / (name + ".py")).write_bytes((HERE / (name + ".py")).read_bytes())
+                    (root / "json.py").write_text('raise RuntimeError("SHADOW_SENTINEL")\n')
                 source = (HERE / (dependency + ".py")).read_bytes()
                 path = root / (dependency + ".py")
                 malicious = b'print("CACHE_SENTINEL")\n'
@@ -52,7 +60,7 @@ class SourceLoaderTests(unittest.TestCase):
     def test_remote_dependency_closure_ignores_cache_and_shadow(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ("bounded_process", "transaction", "policy_client", "rollout_probe"):
+            for name in ("bounded_process", "policy_state", "transaction", "policy_client", "rollout_probe", "rollout_scope"):
                 (root / (name + ".py")).write_text((HERE / (name + ".py")).read_text())
             (root / "rollout_engine.py").write_text('import policy_client, rollout_probe, json\nprint("REMOTE_SOURCE")\n')
             (root / "json.py").write_text('raise RuntimeError("SHADOW_SENTINEL")\n')
@@ -68,7 +76,7 @@ class SourceLoaderTests(unittest.TestCase):
 
     def test_actual_entrypoint_import_closures_without_external_calls(self):
         with tempfile.TemporaryDirectory() as directory:
-            for entry in ("preflight", "rollout_engine"):
+            for entry in ("preflight", "rollout_engine", "recovery_plan", "recovery_restore"):
                 output = self.run_python(["-I", "-B", "-c", LOADER, str(HERE), entry, "--help"], directory)
                 self.assertIn("usage:", output)
             for args in (["-B", "-c", LOADER, str(HERE), "preflight"],

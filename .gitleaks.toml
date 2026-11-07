@@ -45,4 +45,10 @@ regexes = [
   # Default regexTarget is the extracted Secret, so only this exact literal is
   # exempt; the file, surrounding line, history and scanner self-test stay scanned.
   '''^--disable=traefik$''',
+  # Public SHA256 of the exact declaration bytes (without trailing newline):
+  # TOKEN = "kanz.eighred.com/gateway-policy-transaction"
+  # Frozen source 72a4903b, tools/gateway-policy-proof/transaction.py.
+  # This is a declaration-integrity digest, never a credential. Match only the
+  # extracted Secret; keep surrounding files, rules and history scanned.
+  '''^c272fc12f3da4ed257692b353031a17e565c29b66119d548b5b5e1b7f98c29e0$''',
 ]
