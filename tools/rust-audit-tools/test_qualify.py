@@ -1,13 +1,12 @@
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import qualify as q
 
@@ -24,7 +23,7 @@ class PayloadTests(unittest.TestCase):
             files["notices/rust-1.90.0/" + name] = b"public Rust notice"
         return files
 
-    def inspect(self, files, platform="amd64", linked=False):
+    def archive(self, files, platform="amd64", linked=False, fault=None, oci=False):
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w") as tar:
             for name, data in files.items():
@@ -35,21 +34,66 @@ class PayloadTests(unittest.TestCase):
                 else:
                     item.size = len(data)
                 tar.addfile(item, io.BytesIO(data))
-        info = [{"Os": "linux", "Architecture": platform, "Id": "sha256:" + "b" * 64,
-                 "Config": {"Labels": {"org.opencontainers.image.revision": "a" * 40}}}]
-        def invoke(args, **kwargs):
-            if args[1] == "export":
-                kwargs["stdout"].write(buffer.getvalue())
-            return subprocess.CompletedProcess(args, 0)
-        with tempfile.TemporaryDirectory() as directory, patch.object(q, "output", side_effect=[json.dumps(info), "c" * 64]), patch.object(q, "run", side_effect=invoke):
-            return q.extract("image", Path(directory), "a" * 40)
+        layer = buffer.getvalue()
+        config = {"os": "linux", "architecture": platform,
+                  "config": {"Labels": {"org.opencontainers.image.revision": "a" * 40}},
+                  "rootfs": {"type": "layers", "diff_ids": ["sha256:" + hashlib.sha256(layer).hexdigest()]},
+                  "history": [{"created_by": "COPY /payload/ / # buildkit"}]}
+        if fault == "diffid": config["rootfs"]["diff_ids"] = ["sha256:" + "0" * 64]
+        if fault == "history": config["history"] = [{"created_by": "RUN hidden source"}]
+        config_bytes = json.dumps(config).encode()
+        image = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+        m = [{"Config": "config.json", "Layers": ["layer.tar"], "RepoTags": None}]
+        if fault == "layers": m[0]["Layers"].append("layer.tar")
+        if fault == "manifests": m.append(m[0])
+        entries = {"manifest.json": json.dumps(m).encode(), "config.json": config_bytes, "layer.tar": layer}
+        if fault == "config": entries["config.json"] += b" "
+        if fault == "layer": entries["layer.tar"] += b" "
+        if fault == "unreachable": entries["hidden-source.tar"] = b"private"
+        if oci:
+            def blob(data, media):
+                digest = hashlib.sha256(data).hexdigest()
+                entries["blobs/sha256/" + digest] = data
+                return {"digest": "sha256:" + digest, "size": len(data), "mediaType": media}
+            entries = {}
+            c = blob(config_bytes, "application/vnd.oci.image.config.v1+json")
+            l = blob(layer, "application/vnd.oci.image.layer.v1.tar")
+            graph = json.dumps({"schemaVersion": 2, "config": c, "layers": [l]}).encode()
+            descriptor = blob(graph, "application/vnd.oci.image.manifest.v1+json")
+            if fault == "oci-size": descriptor["size"] += 1
+            if fault == "oci-media": descriptor["mediaType"] = "unknown"
+            entries["index.json"] = json.dumps({"schemaVersion": 2, "manifests": [descriptor]}).encode()
+            entries["oci-layout"] = b'{"imageLayoutVersion":"1.0.0"}'
+            entries["manifest.json"] = json.dumps([{"Config": "blobs/sha256/" + c["digest"][7:], "Layers": ["blobs/sha256/" + l["digest"][7:]], "RepoTags": None}]).encode()
+        outer = io.BytesIO()
+        with tarfile.open(fileobj=outer, mode="w") as tar:
+            for name, data in entries.items():
+                item = tarfile.TarInfo(name); item.size = len(data)
+                tar.addfile(item, io.BytesIO(data))
+        return outer.getvalue(), image
+
+    def inspect(self, files, **kwargs):
+        raw, image = self.archive(files, **kwargs)
+        with tempfile.TemporaryDirectory() as directory:
+            return q.extract_saved(raw, image, Path(directory), "a" * 40)
+
+    def test_oci_saved_graph(self):
+        self.inspect(self.payload(), oci=True)
+        for fault in ("oci-size", "oci-media"):
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                self.inspect(self.payload(), oci=True, fault=fault)
+
+    def test_saved_graph_refusals(self):
+        for fault in ("config", "layer", "diffid", "layers", "manifests", "history", "unreachable"):
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                self.inspect(self.payload(), fault=fault)
 
     def test_actual_inventory_parser(self):
         _, files = self.inspect(self.payload())
         self.assertEqual(len(files), 11)
 
     def test_leaks_links_platform_and_source_refuse(self):
-        for name in ("kanz/go.mod", "notices/hidden/private.rs", ".cargo/registry/source", "../private", "/absolute"):
+        for name in ("kanz/go.mod", "notices/hidden/private.rs", "notices/pkg/.wh.LICENSE", ".cargo/registry/source", "../private", "/absolute"):
             with self.subTest(name=name):
                 files = self.payload(); files[name] = b"private"
                 with self.assertRaises(ValueError): self.inspect(files)

@@ -20,15 +20,29 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 	if strings.Count(script, `"--platform", "linux/amd64"`) != 2 {
 		return fmt.Errorf("both build and readback must select exact platform")
 	}
+	if strings.Contains(script, `"docker", "export"`) || strings.Contains(script, `"docker", "create"`) {
+		return fmt.Errorf("inventory must read image layers, not runtime containers")
+	}
+	readback, sign, verify := strings.Index(script, `extract_saved(read_bounded(readback, MAX_PAYLOAD), image, check, commit)`), strings.Index(script, `run(["cosign", "sign"`), strings.Index(script, `output(["cosign", "verify"`)
+	if readback < 0 || sign <= readback || verify <= sign {
+		return fmt.Errorf("keyless signing must follow verified registry bytes")
+	}
 	for _, token := range []string{
 		`"--iidfile", str(iid), "-"], input=recipe)`,
 		`os.environ.get("GITHUB_REF") != "refs/heads/main"`,
 		`proof["image_tar_sha256"] != hashlib.sha256(image_bytes).hexdigest()`,
 		`registry.get("config", {}).get("digest") != image`,
-		`extract(pinned, check, commit) != (image, files)`,
+		`extract_saved(read_bounded(readback, MAX_PAYLOAD), image, check, commit) != (image, files)`,
 		`"--platform", "linux/amd64"`,
-		`info["Config"]["Labels"].get("org.opencontainers.image.revision") != commit`,
+		`config["config"]["Labels"].get("org.opencontainers.image.revision") != commit`,
 		`if actual != metadata:`,
+		`config["rootfs"] != {"type": "layers", "diff_ids": [diff]}`,
+		`len(m["Layers"]) != 1`,
+		`"sha256:" + hashlib.sha256(layer).hexdigest()`,
+		`run(["cosign", "sign", "--yes", "-a", "source_sha=" + commit, pinned])`,
+		`"--certificate-oidc-issuer", ISSUER, "--certificate-identity", SIGNER`,
+		`SIGNER = "https://github.com/eighred/kanz/.github/workflows/base-image-mirror.yml@refs/heads/main"`,
+		`ISSUER = "https://token.actions.githubusercontent.com"`,
 		`"--deny", "warnings", "--json", "--file"`,
 		`"Linux no-follow/nonblocking file reader required"`,
 	} {
@@ -67,8 +81,17 @@ func auditToolProducerBoundary(recipe, script, workflow string) error {
 	if q.Permissions["contents"] != "read" || q.Permissions["packages"] != "read" || len(q.Permissions) != 2 {
 		return fmt.Errorf("PR qualifier cannot publish")
 	}
-	if p.If != "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && !inputs.dry_run" || p.Needs != "rust-audit-tools" || p.Permissions["packages"] != "write" {
+	if p.If != "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && !inputs.dry_run && github.repository == 'eighred/kanz'" || p.Needs != "rust-audit-tools" || p.Permissions["packages"] != "write" || p.Permissions["id-token"] != "write" || len(p.Permissions) != 3 {
 		return fmt.Errorf("publication must follow qualification on main")
+	}
+	setup := 0
+	for _, step := range p.Steps {
+		if step.Uses == "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6" && !step.Continue && step.If == "" {
+			setup++
+		}
+	}
+	if setup != 1 {
+		return fmt.Errorf("publisher must install pinned signing tool")
 	}
 	if m.If != "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'" {
 		return fmt.Errorf("legacy mirror cannot publish from PR")
@@ -117,6 +140,10 @@ func TestRustAuditToolProducerBoundary(t *testing.T) {
 		{"source-stamp", 0, "org.opencontainers.image.revision=$SOURCE_SHA", "org.opencontainers.image.revision=unknown"},
 		{"repo-context", 1, `"--iidfile", str(iid), "-"`, `"--iidfile", str(iid), "."`},
 		{"mount-source", 1, `"--platform", "linux/amd64"`, `"--mount", "source=.,target=/src"`},
+		{"layer-hash", 1, `"sha256:" + hashlib.sha256(layer).hexdigest()`, `"sha256:" + "0" * 64`},
+		{"multiple-layers", 1, `len(m["Layers"]) != 1`, `False`},
+		{"early-sign", 1, `readback = check / "image.tar"`, `run(["cosign", "sign", "--yes", "-a", "source_sha=" + commit, pinned]); readback = check / "image.tar"`},
+		{"unsigned", 1, `run(["cosign", "sign", "--yes", "-a", "source_sha=" + commit, pinned])`, `pass`},
 		{"digest-readback", 1, `registry.get("config", {}).get("digest") != image`, `False`},
 		{"platform-check", 1, `"--platform", "linux/amd64"`, `"--platform", "linux/arm64"`},
 		{"PR-write", 2, "packages: read", "packages: write"},

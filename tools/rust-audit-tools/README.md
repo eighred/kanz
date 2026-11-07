@@ -9,8 +9,12 @@ source, application inventory or build cache is an input or published layer.
 The host builds using a Dockerfile on stdin with no filesystem context. PRs
 qualify the actual binaries, metadata extraction limits, a fresh clean RustSec
 audit and a known-vulnerable refusal. Only canonical main can publish the exact
-qualified image artifact. Registry readback verifies its immutable digest,
-platform, source label and complete file inventory. Package visibility and
+qualified image artifact. The saved archive must contain exactly one final COPY layer: configuration and
+uncompressed layer hashes are checked before scanning the closed payload. Container
+runtime injections are never inventoried. Registry readback verifies its immutable digest,
+platform, source label and complete file inventory. Main then keylessly signs that
+exact digest and verifies its source annotation against the fixed workflow identity
+and GitHub OIDC issuer. Only the publisher has OIDC write permission. Package visibility and
 credentials follow the existing private base-image boundary.
 
 The artifact is linux/amd64 only. Tool extraction must be qualified on the actual

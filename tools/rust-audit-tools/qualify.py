@@ -1,6 +1,7 @@
 """Build/qualify a source-free tool payload; consumers remain unchanged."""
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -14,6 +15,8 @@ import tomllib
 import zlib
 
 REPOSITORY = "ghcr.io/eighred/base/rust-audit-tools"
+SIGNER = "https://github.com/eighred/kanz/.github/workflows/base-image-mirror.yml@refs/heads/main"
+ISSUER = "https://token.actions.githubusercontent.com"
 TOOLS = {"cargo-audit": "0.22.2", "rust-audit-info": "0.5.4"}
 MAX_PAYLOAD = 256 * 1024 * 1024
 
@@ -63,31 +66,99 @@ def manifest(commit):
     return {"version": 1, "source_sha": commit, "platform": "linux/amd64", "rust": "1.90.0", **TOOLS}
 
 
-def extract(image, target, commit):
-    info = json.loads(output(["docker", "image", "inspect", image]))[0]
-    if (info["Os"], info["Architecture"]) != ("linux", "amd64") or info["Config"]["Labels"].get("org.opencontainers.image.revision") != commit:
+def tar_files(raw, maximum):
+    if len(raw) > MAX_PAYLOAD:
+        raise ValueError("oversized archive")
+    entries = {}
+    total = 0
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+        for item in archive:
+            name = item.name.removeprefix("./")
+            path = PurePosixPath(name)
+            if len(name) > 512 or path.is_absolute() or ".." in path.parts or any(p.startswith(".wh.") for p in path.parts) or item.issym() or item.islnk():
+                raise ValueError("unsafe archive entry")
+            if item.isdir():
+                continue
+            total += item.size
+            if not item.isfile() or name in entries or len(entries) >= maximum or total > MAX_PAYLOAD:
+                raise ValueError("invalid archive inventory")
+            entries[name] = archive.extractfile(item).read()
+    return entries
+
+
+def descriptor(desc, entries, media):
+    if desc.get("mediaType") not in media:
+        raise ValueError("unsupported archive media type")
+    digest = desc["digest"]
+    if not re.fullmatch("sha256:[0-9a-f]{64}", digest):
+        raise ValueError("invalid archive descriptor")
+    path = "blobs/sha256/" + digest[7:]
+    raw = entries[path]
+    if type(desc["size"]) is not int or len(raw) != desc["size"] or "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("archive descriptor bytes differ")
+    return path
+
+
+def metadata(raw):
+    if len(raw) > 1024 * 1024:
+        raise ValueError("oversized image metadata")
+    return json.loads(raw, object_pairs_hook=strict)
+
+
+def saved_layer(raw, expected_image, commit):
+    entries = tar_files(raw, 32)
+    manifests = metadata(entries["manifest.json"])
+    if not isinstance(manifests, list) or len(manifests) != 1:
+        raise ValueError("single saved image required")
+    m = manifests[0]
+    if len(m["Layers"]) != 1:
+        raise ValueError("one final scratch COPY layer required")
+    config_name, layer_name = m["Config"], m["Layers"][0]
+    config_bytes, layer = entries[config_name], entries[layer_name]
+    if "sha256:" + hashlib.sha256(config_bytes).hexdigest() != expected_image:
+        raise ValueError("saved configuration identity differs")
+    config = metadata(config_bytes)
+    if (config["os"], config["architecture"]) != ("linux", "amd64") or config["config"]["Labels"].get("org.opencontainers.image.revision") != commit:
         raise ValueError("image platform/source mismatch")
-    container = output(["docker", "create", image])
-    if not re.fullmatch("[0-9a-f]{64}", container):
-        raise ValueError("invalid owned container")
-    archive = target / "rootfs.tar"
-    try:
-        with archive.open("wb") as destination:
-            run(["docker", "export", container], stdout=destination)
-    finally:
-        run(["docker", "rm", container], stdout=subprocess.DEVNULL)
-    if archive.stat().st_size > MAX_PAYLOAD:
-        raise ValueError("oversized tool payload")
+    diff = "sha256:" + hashlib.sha256(layer).hexdigest()
+    if config["rootfs"] != {"type": "layers", "diff_ids": [diff]}:
+        raise ValueError("uncompressed final layer identity differs")
+    history = [h for h in config["history"] if not h.get("empty_layer", False)]
+    if len(history) != 1 or not history[0]["created_by"].startswith("COPY /payload/ /"):
+        raise ValueError("unexpected nonempty build history")
+    allowed = {"manifest.json", config_name, layer_name}
+    # Current Docker saves may include the equivalent OCI graph. Verify every
+    # descriptor and reject extra blobs/images rather than ignoring archive data.
+    if "index.json" in entries:
+        index = metadata(entries["index.json"])
+        if index.get("schemaVersion") != 2 or len(index["manifests"]) != 1 or metadata(entries["oci-layout"]) != {"imageLayoutVersion": "1.0.0"}:
+            raise ValueError("invalid saved OCI index")
+        name = descriptor(index["manifests"][0], entries, {"application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"})
+        graph = metadata(entries[name])
+        if graph.get("schemaVersion") != 2 or len(graph["layers"]) != 1 or descriptor(graph["config"], entries, {"application/vnd.oci.image.config.v1+json", "application/vnd.docker.container.image.v1+json"}) != config_name or descriptor(graph["layers"][0], entries, {"application/vnd.oci.image.layer.v1.tar", "application/vnd.docker.image.rootfs.diff.tar"}) != layer_name:
+            raise ValueError("saved OCI and Docker graphs differ")
+        allowed.update(("index.json", "oci-layout", name))
+    if "repositories" in entries:
+        if metadata(entries["repositories"]) != {}:
+            raise ValueError("unexpected saved tag inventory")
+        allowed.add("repositories")
+    if set(entries) != allowed:
+        raise ValueError("unreachable saved image data")
+    return layer
+
+
+def extract_saved(raw, expected_image, target, commit):
+    layer = saved_layer(raw, expected_image, commit)
     files = {}
-    with tarfile.open(archive) as tar:
+    with tarfile.open(fileobj=io.BytesIO(layer), mode="r:") as tar:
         total = 0
         for item in tar:
             name = item.name.removeprefix("./")
             path = PurePosixPath(name)
-            if len(name) > 512 or len(files) >= 10000 or path.is_absolute() or ".." in path.parts or item.issym() or item.islnk():
+            if len(name) > 512 or len(files) >= 10000 or path.is_absolute() or ".." in path.parts or any(p.startswith(".wh.") for p in path.parts) or item.issym() or item.islnk():
                 raise ValueError("unsafe image entry")
             if item.isdir():
-                if name not in ("tools", "notices") and not name.startswith("notices/"):
+                if name not in ("", ".", "tools", "notices") and not name.startswith("notices/"):
                     raise ValueError("unexpected image directory")
                 continue
             notice = name.startswith("notices/") and (path.name == "package.toml" or any(word in path.name.lower() for word in ("license", "copying", "notice", "copyright")) or name.startswith("notices/rust-1.90.0/licenses/"))
@@ -98,7 +169,7 @@ def extract(image, target, commit):
             data = tar.extractfile(item).read()
             files[name] = hashlib.sha256(data).hexdigest()
             if name == "manifest.json":
-                decoded = json.loads(data, object_pairs_hook=strict)
+                decoded = metadata(data)
                 if type(decoded.get("version")) is not int or decoded != manifest(commit):
                     raise ValueError("tool manifest mismatch")
             elif name.startswith("tools/"):
@@ -106,6 +177,8 @@ def extract(image, target, commit):
                 dest.write_bytes(data)
                 dest.chmod(0o755)
             elif path.name == "package.toml":
+                if len(data) > 1024 * 1024:
+                    raise ValueError("oversized package metadata")
                 package = tomllib.loads(data.decode())["package"]
                 if package["name"] in TOOLS and package.get("version") != TOOLS[package["name"]]:
                     raise ValueError("public tool package version mismatch")
@@ -121,7 +194,7 @@ def extract(image, target, commit):
     for name in ("COPYRIGHT.html", "COPYRIGHT-library.html", "licenses/Apache-2.0.txt", "licenses/MIT.txt"):
         if "notices/rust-1.90.0/" + name not in files:
             raise ValueError("missing Rust distribution notices")
-    return info["Id"], files
+    return expected_image, files
 
 
 def exercise(directory):
@@ -182,14 +255,15 @@ def main():
             image = iid.read_text().strip()
             if not re.fullmatch("sha256:[0-9a-f]{64}", image):
                 raise ValueError("invalid image identity")
-            image, files = extract(image, temp, commit)
-            advisories = exercise(temp)
             run(["docker", "save", "--output", str(directory / "image.tar"), image])
+            image_bytes = read_bounded(directory / "image.tar", MAX_PAYLOAD)
+            image, files = extract_saved(image_bytes, image, temp, commit)
+            advisories = exercise(temp)
             proof = {"run": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "source": commit, "tree": output(["git", "rev-parse", "HEAD^{tree}"]), "image": image, "manifest": manifest(commit), "files": files, "advisory_commits": advisories, "image_tar_sha256": sha(directory / "image.tar")}
             (directory / "proof.json").write_text(json.dumps(proof, sort_keys=True) + "\n", encoding="utf8")
             print("source-free tool payload, ABI, extraction limits and fresh audit controls PASS")
         else:
-            if os.environ.get("GITHUB_REF") != "refs/heads/main" or os.environ.get("GITHUB_EVENT_NAME") not in ("push", "workflow_dispatch", "schedule"):
+            if os.environ.get("GITHUB_REPOSITORY") != "eighred/kanz" or os.environ.get("GITHUB_REF") != "refs/heads/main" or os.environ.get("GITHUB_EVENT_NAME") not in ("push", "workflow_dispatch", "schedule"):
                 raise ValueError("publication requires canonical main")
             proof = json.loads(read_bounded(directory / "proof.json", 4 * 1024 * 1024), object_pairs_hook=strict)
             if set(proof) != {"run", "attempt", "source", "tree", "image", "manifest", "files", "advisory_commits", "image_tar_sha256"} or len(proof["advisory_commits"]) != 2 or not all(re.fullmatch("[0-9a-f]{40}", c) for c in proof["advisory_commits"]):
@@ -199,8 +273,8 @@ def main():
             image_bytes = read_bounded(directory / "image.tar", MAX_PAYLOAD)
             if proof["tree"] != output(["git", "rev-parse", "HEAD^{tree}"]) or proof["source"] != commit or proof["manifest"] != manifest(commit) or proof["image_tar_sha256"] != hashlib.sha256(image_bytes).hexdigest():
                 raise ValueError("qualified image binding mismatch")
+            image, files = extract_saved(image_bytes, proof["image"], temp, commit)
             run(["docker", "load"], input=image_bytes)
-            image, files = extract(proof["image"], temp, commit)
             if files != proof["files"]:
                 raise ValueError("qualified payload changed")
             target = REPOSITORY + ":" + commit
@@ -223,9 +297,15 @@ def main():
             run(["docker", "pull", "--platform", "linux/amd64", pinned])
             check = temp / "readback"
             check.mkdir()
-            if extract(pinned, check, commit) != (image, files):
+            readback = check / "image.tar"
+            run(["docker", "save", "--output", str(readback), image])
+            if extract_saved(read_bounded(readback, MAX_PAYLOAD), image, check, commit) != (image, files):
                 raise ValueError("registry payload readback differs")
-            (directory / "published.json").write_text(json.dumps({"run": proof["run"], "attempt": proof["attempt"], "source": commit, "image": pinned, "config": image, "files": files}, sort_keys=True) + "\n", encoding="utf8")
+            run(["cosign", "sign", "--yes", "-a", "source_sha=" + commit, pinned])
+            verified = json.loads(output(["cosign", "verify", "--certificate-oidc-issuer", ISSUER, "--certificate-identity", SIGNER, "-a", "source_sha=" + commit, pinned]))
+            if not verified:
+                raise ValueError("signature readback missing")
+            (directory / "published.json").write_text(json.dumps({"run": proof["run"], "attempt": proof["attempt"], "source": commit, "image": pinned, "config": image, "files": files, "signer": SIGNER, "issuer": ISSUER, "source_annotation": commit}, sort_keys=True) + "\n", encoding="utf8")
             print("published tool payload registry readback PASS: " + pinned)
 
 
