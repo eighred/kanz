@@ -47,6 +47,11 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
+			deadline, _ := ctx.Deadline()
+			diagnostic := newRawCrashDiagnostic(deadline)
+			if mode == "process-crash" {
+				defer func() { t.Log(diagnostic.summary()) }()
+			}
 			topic := fmt.Sprintf("raw-custody-%d", time.Now().UnixNano())
 			group := topic + "-group"
 			for _, name := range []string{topic, "dlq." + topic} {
@@ -156,22 +161,25 @@ func TestRawKafkaCustodyAndOffsets(t *testing.T) {
 					}
 				}
 				if child != nil {
-					membership := describeRawCrashGroup(t, ctx, brokers, group)
+					diagnostic.Commit = rawCrashPhaseBudget(deadline, time.Now())
+					membership := describeRawCrashGroup(t, ctx, brokers, group, diagnostic)
 					if membership.GroupState != "Stable" || len(membership.Members) != 1 {
 						t.Fatal("crash helper lacks exclusive active group membership")
 					}
 					// Abrupt process termination: no FileSink.Flush/Close or deferred cleanup.
+					diagnostic.Kill = rawCrashPhaseBudget(deadline, time.Now())
 					if err := child.Process.Kill(); err != nil {
 						t.Fatal("crash helper kill failed")
 					}
 					if err := <-done; err == nil {
 						t.Fatal("crash helper exited cleanly")
 					}
+					diagnostic.KillConfirmed = true
 					// SIGKILL cannot send LeaveGroup. The pinned kafka-go consumer
 					// uses a 30s session timeout. Observe coordinator expiry inside
 					// the original case budget before the unchanged 5s read below.
 					for {
-						membership = describeRawCrashGroup(t, ctx, brokers, group)
+						membership = describeRawCrashGroup(t, ctx, brokers, group, diagnostic)
 						if membership.GroupState == "Empty" && len(membership.Members) == 0 {
 							break
 						}
@@ -293,12 +301,103 @@ func TestRawKafkaCrashChild(t *testing.T) {
 	t.Fatal("child must be killed before its deadline")
 }
 
-func describeRawCrashGroup(t *testing.T, ctx context.Context, brokers []string, group string) kafka.DescribeGroupsResponseGroup {
+func describeRawCrashGroup(t *testing.T, ctx context.Context, brokers []string, group string, diagnostic *rawCrashDiagnostic) kafka.DescribeGroupsResponseGroup {
 	t.Helper()
+	diagnostic.Polls++
+	diagnostic.LastPoll = rawCrashPhaseBudget(diagnostic.deadline, time.Now())
 	admin := kafka.Client{Addr: kafka.TCP(brokers...)}
 	result, err := admin.DescribeGroups(ctx, &kafka.DescribeGroupsRequest{GroupIDs: []string{group}})
 	if err != nil || result == nil || len(result.Groups) != 1 || result.Groups[0].GroupID != group || result.Groups[0].Error != nil {
+		diagnostic.QueryFailures++
 		t.Fatal("exact crash group membership unavailable")
 	}
+	diagnostic.LastObserved = rawCrashPhaseBudget(diagnostic.deadline, time.Now())
+	diagnostic.State = rawCrashGroupState(result.Groups[0].GroupState)
+	diagnostic.Members = len(result.Groups[0].Members)
 	return result.Groups[0]
+}
+
+// Diagnostics contain only fixed categories and numeric observations. They do not
+// alter the case deadline, coordinator queries, or custody/restart assertions.
+type rawCrashBudget struct {
+	ElapsedMS   int64 `json:"elapsed_ms"`
+	RemainingMS int64 `json:"remaining_ms"`
+}
+
+type rawCrashDiagnostic struct {
+	deadline      time.Time
+	Commit        rawCrashBudget `json:"commit"`
+	Kill          rawCrashBudget `json:"kill_attempt"`
+	KillConfirmed bool           `json:"kill_confirmed"`
+	LastPoll      rawCrashBudget `json:"last_poll"`
+	LastObserved  rawCrashBudget `json:"last_observed"`
+	State         string         `json:"last_group_state"`
+	Members       int            `json:"last_member_count"`
+	Polls         int            `json:"poll_count"`
+	QueryFailures int            `json:"query_failures"`
+}
+
+func newRawCrashDiagnostic(deadline time.Time) *rawCrashDiagnostic {
+	missing := rawCrashBudget{-1, -1}
+	return &rawCrashDiagnostic{deadline: deadline, Commit: missing, Kill: missing, LastPoll: missing, LastObserved: missing, State: "unobserved", Members: -1}
+}
+
+func rawCrashPhaseBudget(deadline, now time.Time) rawCrashBudget {
+	remaining := deadline.Sub(now)
+	if remaining < 0 {
+		remaining = 0
+	}
+	if remaining > 45*time.Second {
+		remaining = 45 * time.Second
+	}
+	elapsed := now.Sub(deadline.Add(-45 * time.Second))
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return rawCrashBudget{ElapsedMS: elapsed.Milliseconds(), RemainingMS: remaining.Milliseconds()}
+}
+
+func rawCrashGroupState(state string) string {
+	switch state {
+	case "Stable", "Empty", "PreparingRebalance", "CompletingRebalance", "Dead":
+		return state
+	default:
+		return "other"
+	}
+}
+
+func (d *rawCrashDiagnostic) summary() string {
+	encoded, _ := json.Marshal(d) // Fixed fields contain no unsupported JSON values.
+	return "raw_crash_diagnostic=" + string(encoded)
+}
+
+func TestRawCrashDiagnosticProjection(t *testing.T) {
+	deadline := time.Unix(100, 0)
+	for _, tc := range []struct {
+		now                time.Time
+		elapsed, remaining int64
+	}{
+		{deadline.Add(-45 * time.Second), 0, 45000},
+		{deadline.Add(-12 * time.Second), 33000, 12000},
+		{deadline.Add(time.Second), 46000, 0},
+	} {
+		got := rawCrashPhaseBudget(deadline, tc.now)
+		if got.ElapsedMS != tc.elapsed || got.RemainingMS != tc.remaining {
+			t.Fatal("incorrect bounded phase budget")
+		}
+	}
+	for _, state := range []string{"Stable", "Empty", "PreparingRebalance", "CompletingRebalance", "Dead"} {
+		if rawCrashGroupState(state) != state {
+			t.Fatal("known state lost")
+		}
+	}
+	d := newRawCrashDiagnostic(deadline)
+	d.State = rawCrashGroupState("private-topic-or-error")
+	encoded := d.summary()
+	if strings.Contains(encoded, "private-topic-or-error") || strings.Contains(encoded, "1970") || len(encoded) > 512 {
+		t.Fatal("diagnostic escaped its closed projection")
+	}
+	if !strings.Contains(encoded, `"last_group_state":"other"`) || !strings.Contains(encoded, `"last_member_count":-1`) {
+		t.Fatal("unobserved membership or unknown state fabricated")
+	}
 }
