@@ -151,6 +151,18 @@ pub(crate) fn from_frozen(
     if h.order_id != state.value().order_id || h.fills.len() > MAX_FILLS {
         return Err(Error::HistoryIncomplete);
     }
+    complete(
+        state,
+        ViewState::Cancelled,
+        h.executed_quantity.as_ref(),
+        frozen_fills(history)?,
+    )
+}
+/// Extract immutable nested wire without imposing a new proposal-time economic
+/// check. CommitRecovery separately revalidates complete history against state.
+pub(crate) fn frozen_fills(
+    history: &Canonical<ExecutionRecoveryHistory>,
+) -> Result<Vec<Canonical<Fill>>, Error> {
     let descriptor = ExecutionRecoveryHistory::descriptor()?;
     let number = descriptor
         .get_field_by_name("fills")
@@ -170,12 +182,7 @@ pub(crate) fn from_frozen(
             kanz_proto_wire::skip(history.wire(), &mut pos, n, w)?;
         }
     }
-    complete(
-        state,
-        ViewState::Cancelled,
-        h.executed_quantity.as_ref(),
-        fills,
-    )
+    Ok(fills)
 }
 pub(crate) fn freeze_wire(
     order: &str,

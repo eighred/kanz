@@ -119,7 +119,9 @@ var commitThenPublishByDesign = map[string]string{
 		"being reachable from a method that also writes — a refactor of the helper, not of this " +
 		"transition.",
 
-	"resume": "BY DESIGN: the RECOVERY path, with no pair of its own. It Saves venue_ack_at on the " +
+	// The claimed body moved from resume to resumeClaimed in #1516. The same
+	// branch-disjoint exception follows that body; the dead resume entry retires.
+	"resumeClaimed": "BY DESIGN: the RECOVERY path, with no pair of its own. It Saves venue_ack_at on the " +
 		"ActionLeave branch and reaches publishes through reannounceAccepted and " +
 		"completeTerminalOutcome on OTHER branches — both compensators for rows with no outbox " +
 		"record. Its other two callees no longer publish at all: work() and adopt() commit every " +

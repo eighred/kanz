@@ -31,7 +31,7 @@ func checkRecoveryWorkflow(raw []byte) error {
 		return fmt.Errorf("recovery job absent or conditional")
 	}
 	required := map[string][]string{
-		"Compile the actual recovery owner and fixture":        {"cargo test --locked -p kanz-oms-recovery --all-targets", "cargo clippy --locked -p kanz-oms-recovery --all-targets -- -D warnings", "cargo build --release --locked -p kanz-oms-recovery --example recovery-coordinator-fixture"},
+		"Compile the actual recovery owner and fixture":        {"cargo test --locked -p kanz-oms-recovery --all-targets", "cargo test --locked -p kanz-oms-store --features qualification-diagnostics diagnostics::tests", "cargo clippy --locked -p kanz-oms-recovery --all-targets -- -D warnings", "cargo build --release --locked -p kanz-oms-recovery --example recovery-coordinator-fixture", "cargo clippy --locked -p kanz-oms-recovery --all-targets --features qualification-diagnostics -- -D warnings", "cargo build --release --locked -p kanz-oms-recovery --example recovery-coordinator-fixture --features qualification-diagnostics"},
 		"Start separate owned recovery dependencies":           {`docker exec -e PGPASSWORD=fixture -e PGCONNECT_TIMEOUT=2 "$container" psql -X -w -h 127.0.0.1 -U fixture -d fixture -v ON_ERROR_STOP=1`, `PGCONNECT_TIMEOUT=2`, `PGOPTIONS=-c statement_timeout=2000`, `psql -X -w -h 127.0.0.1 -U fixture -d fixture -v ON_ERROR_STOP=1 -Atqc 'SELECT 1'`, `2>/dev/null)" = 1; then ready=true; break; fi`, "postgres:16-alpine@sha256:1fb72075a1de85a1d39de23c2da81baef1b71bf5c0b61a14cbbfdb072a6246d9", "--name oms-recovery-pg", "--name oms-recovery-default-pg", "--name oms-recovery-constrained-pg", "-c max_locks_per_transaction=10 -c max_connections=100 -c max_prepared_transactions=0", "127.0.0.1:55434:5432", "kanz.fixture.run=$GITHUB_RUN_ID", "kanz.fixture.attempt=$GITHUB_RUN_ATTEMPT", "-c max_locks_per_transaction=1024 -c max_connections=100 -c max_prepared_transactions=0", "127.0.0.1:55432:5432", "127.0.0.1:55433:5432", "NOSUPERUSER NOBYPASSRLS", "kanz/infra/nats/bootstrap-job.yaml"},
 		"Qualify actual recovery and complete large histories": {"set -euo pipefail", "qualification_status=0", `sha256sum "$KANZ_OMS_RECOVERY_BIN"`, `exit "$qualification_status"`, "go test -race -p 1 ./services/oms/tools/recovery-conformance -skip '^TestRustRecoveryComplete8000History$' -timeout 20m", "-run '^TestRustRecoveryComplete8000History/go$' -timeout 20m", "-run '^TestRustRecoveryComplete8000History/rust$' -timeout 20m", "check_oms_recovery_evidence.py", "--create --source \"$GITHUB_SHA\" --tree \"$(git rev-parse HEAD^{tree})\" --run \"$GITHUB_RUN_ID\" --attempt \"$GITHUB_RUN_ATTEMPT\""},
 		"Remove only owned recovery dependencies":              {"for container in oms-recovery-pg oms-recovery-default-pg oms-recovery-constrained-pg oms-recovery-nats", "docker inspect --format", "kanz.fixture.run", "kanz.fixture.attempt", `test -z "$remaining"`, "docker rm -f \"$container\""},
@@ -54,6 +54,17 @@ func checkRecoveryWorkflow(raw []byte) error {
 			return fmt.Errorf("conditional recovery proof")
 		}
 		for _, marker := range markers {
+			if step.Name == "Compile the actual recovery owner and fixture" {
+				exact := false
+				for _, line := range strings.Split(step.Run, "\n") {
+					if strings.TrimSpace(line) == marker {
+						exact = true
+					}
+				}
+				if !exact {
+					return fmt.Errorf("missing exact compile command %s", marker)
+				}
+			}
 			if !strings.Contains(step.Run, marker) {
 				return fmt.Errorf("recovery step %s missing %s", step.Name, marker)
 			}
@@ -87,10 +98,11 @@ func TestRustRecoveryWorkflowCannotSkipActualOwner(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	raw = []byte(strings.ReplaceAll(string(raw), "\r\n", "\n"))
 	if e = checkRecoveryWorkflow(raw); e != nil {
 		t.Fatal(e)
 	}
-	for _, marker := range []string{`docker exec -e PGPASSWORD=fixture -e PGCONNECT_TIMEOUT=2 "$container" psql -X -w -h 127.0.0.1 -U fixture -d fixture -v ON_ERROR_STOP=1`, "PGCONNECT_TIMEOUT=2", "PGOPTIONS=-c statement_timeout=2000", "-Atqc 'SELECT 1'", "-h 127.0.0.1 -U fixture -d fixture", "cargo build --release --locked", "target/release/examples/recovery-coordinator-fixture", "--name oms-recovery-constrained-pg", "max_locks_per_transaction=10 -c", `sha256sum "$KANZ_OMS_RECOVERY_BIN"`, `exit "$qualification_status"`, "|| qualification_status=1", "check_oms_recovery_evidence.py", "  recovery-coordinator:", "--name oms-recovery-default-pg", "max_locks_per_transaction=1024", "-run '^TestRustRecoveryComplete8000History/go$'", "-run '^TestRustRecoveryComplete8000History/rust$'", "--attempt \"$GITHUB_RUN_ATTEMPT\"", "NOSUPERUSER NOBYPASSRLS", "kanz.fixture.run=$GITHUB_RUN_ID", "kanz.fixture.attempt=$GITHUB_RUN_ATTEMPT", `test -z "$remaining"`} {
+	for _, marker := range []string{"          cargo clippy --locked -p kanz-oms-recovery --all-targets -- -D warnings\n", "          cargo build --release --locked -p kanz-oms-recovery --example recovery-coordinator-fixture\n", "--features qualification-diagnostics -- -D warnings", `docker exec -e PGPASSWORD=fixture -e PGCONNECT_TIMEOUT=2 "$container" psql -X -w -h 127.0.0.1 -U fixture -d fixture -v ON_ERROR_STOP=1`, "PGCONNECT_TIMEOUT=2", "PGOPTIONS=-c statement_timeout=2000", "-Atqc 'SELECT 1'", "-h 127.0.0.1 -U fixture -d fixture", "cargo build --release --locked", "target/release/examples/recovery-coordinator-fixture", "--name oms-recovery-constrained-pg", "max_locks_per_transaction=10 -c", `sha256sum "$KANZ_OMS_RECOVERY_BIN"`, `exit "$qualification_status"`, "|| qualification_status=1", "check_oms_recovery_evidence.py", "  recovery-coordinator:", "--name oms-recovery-default-pg", "max_locks_per_transaction=1024", "-run '^TestRustRecoveryComplete8000History/go$'", "-run '^TestRustRecoveryComplete8000History/rust$'", "--attempt \"$GITHUB_RUN_ATTEMPT\"", "NOSUPERUSER NOBYPASSRLS", "kanz.fixture.run=$GITHUB_RUN_ID", "kanz.fixture.attempt=$GITHUB_RUN_ATTEMPT", `test -z "$remaining"`} {
 		t.Run(marker, func(t *testing.T) {
 			changed := strings.ReplaceAll(string(raw), marker, "removed")
 			if changed == string(raw) {

@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 //! Existing OMS Save transaction semantics; no network listener, runtime configuration,
 //! admission, recovery authorization or production caller.
+pub mod diagnostics;
+pub mod fee_commands;
 pub mod fee_journal;
 pub mod fee_revision;
 pub mod fee_subject;
@@ -251,13 +253,9 @@ async fn scope_existing(tx: &Transaction<'_>, tenant: &str) -> Result<(), Error>
     if role.get::<_, bool>(0) || role.get::<_, bool>(1) {
         return Err(Error::UnsafeRole);
     }
-    tx.query_typed_one(
-        "SELECT set_config('app.tenant_id',$1,true)",
-        &[(&tenant, Type::TEXT)],
-    )
-    .await?;
-    // Every write uses the canonical tables, which must retain forced tenant RLS.
-    let tables=tx.query_typed_one("SELECT count(*) FROM pg_class WHERE oid IN ('orders'::regclass,'order_fills'::regclass,'order_executions'::regclass,'outbox'::regclass,'execution_fee_revisions'::regclass) AND relrowsecurity AND relforcerowsecurity",&[]).await?;
+    // Role refusal remains first. The only other expression reads pg_class;
+    // no application SQL runs until forced RLS admission has succeeded.
+    let tables=tx.query_typed_one("SELECT (SELECT count(*) FROM pg_class WHERE oid IN ('orders'::regclass,'order_fills'::regclass,'order_executions'::regclass,'outbox'::regclass,'execution_fee_revisions'::regclass) AND relrowsecurity AND relforcerowsecurity),set_config('app.tenant_id',$1,true)",&[(&tenant, Type::TEXT)]).await?;
     if tables.get::<_, i64>(0) != 5 {
         return Err(Error::UnsafeRole);
     }
@@ -299,6 +297,12 @@ pub struct Loaded {
 }
 pub async fn load(client: &mut Client, tenant: &str, order_id: &str) -> Result<Loaded, Error> {
     let tx = scoped(client, tenant).await?;
+    let loaded = load_in(&tx, order_id).await?;
+    tx.rollback().await?;
+    Ok(loaded)
+}
+// Reused only inside an already admitted store transaction.
+async fn load_in(tx: &Transaction<'_>, order_id: &str) -> Result<Loaded, Error> {
     let row = tx
         .query_typed_opt(
             "SELECT CASE WHEN octet_length(state)::bigint<=$2 THEN state END,version FROM orders WHERE order_id=$1",
@@ -314,7 +318,6 @@ pub async fn load(client: &mut Client, tenant: &str, order_id: &str) -> Result<L
         return Err(Error::Capacity);
     }
     OrderState::decode(state.as_slice()).map_err(|_| Error::InvalidInput)?;
-    tx.rollback().await?;
     Ok(Loaded { state, version })
 }
 /// Claims are only permission to skip a fold. Any read failure/capacity error

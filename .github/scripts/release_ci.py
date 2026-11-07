@@ -16,7 +16,7 @@ POLICY = {
     "codeql.yml": {"Analyze (actions)", "Analyze (go)", "Analyze (javascript-typescript)", "Analyze (python)"},
     "security.yml": {"gitleaks", "secret-scan-selftest", "dependency-scan"},
     "terraform-testnet.yml": {"terraform-testnet"},
-    "architecture-migration.yml": {"compatibility"},
+    "architecture-migration.yml": {"compatibility", "finite-snapshot", "finite-snapshot-owner"},
     "julia-calibration.yml": {"shadow-calibration"},
     "rust-bond-shadow.yml": {"bond-shadow"},
     "rust-oms-fold.yml": {"fill-shadow", "recovery-coordinator"},

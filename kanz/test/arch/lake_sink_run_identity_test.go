@@ -48,9 +48,18 @@ func lakeSinkRunIdentity(source string) error {
 			return true
 		}
 		count++
-		if len(call.Args) != 2 {
+		if len(call.Args) != 2 && len(call.Args) != 3 {
 			problem = fmt.Errorf("landing constructor shape changed")
 			return false
+		}
+		// The optional snapshot mode adds only the separately guarded options
+		// slice; it never supplies or replaces the per-run identity argument.
+		if len(call.Args) == 3 {
+			options, ok := call.Args[2].(*ast.Ident)
+			if !ok || options.Name != "fileOptions" || !call.Ellipsis.IsValid() {
+				problem = fmt.Errorf("unresolved landing options")
+				return false
+			}
 		}
 		literal, ok := call.Args[1].(*ast.BasicLit)
 		if !ok || literal.Kind != token.STRING {
@@ -78,7 +87,7 @@ func TestLakeSinkRequestsRunIdentityForPartFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, argument := range []string{"cfg.Source", `"lake-sink"`} {
-		mutated := strings.Replace(source, `sink.NewFileSink(cfg.OutputDir, "")`, "sink.NewFileSink(cfg.OutputDir, "+argument+")", 1)
+		mutated := strings.Replace(source, `sink.NewFileSink(cfg.OutputDir, ""`, "sink.NewFileSink(cfg.OutputDir, "+argument, 1)
 		if mutated == source || lakeSinkRunIdentity(mutated) == nil {
 			t.Fatal("fixed service identity escaped the executable wiring guard")
 		}

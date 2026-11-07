@@ -2,6 +2,8 @@
 //! Observation/recovery coordination. No order submission or venue side-effect RPC.
 mod approval;
 mod coordinator;
+mod fee_commands;
+mod fee_control;
 pub use coordinator::{Config, Coordinator, Method};
 mod handlers;
 mod history;
@@ -16,6 +18,10 @@ pub enum Error {
     EvidenceConflict,
     RecoveryEvidenceConflict,
     ApprovalRefused,
+    SelfApproval,
+    PayloadChanged,
+    ApprovalExpired,
+    RecoveryBlocked,
     HistoryIncomplete,
     PostedHistoryUnknown,
     FeeRevision,

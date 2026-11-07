@@ -26,6 +26,7 @@ import (
 	"github.com/eighred/kanz/services/lake-sink/internal/decode"
 	"github.com/eighred/kanz/services/lake-sink/internal/server"
 	"github.com/eighred/kanz/services/lake-sink/internal/sink"
+	"github.com/eighred/kanz/services/lake-sink/internal/snapshot"
 )
 
 func main() {
@@ -70,13 +71,20 @@ func run() int {
 		_ = obs.Shutdown(shutCtx)
 	}()
 
-	fileSink, err := sink.NewFileSink(cfg.OutputDir, "")
+	var fileOptions []sink.FileOption
+	if cfg.Snapshot != nil {
+		fileOptions = append(fileOptions, sink.EnableActiveRunCapture)
+	}
+	fileSink, err := sink.NewFileSink(cfg.OutputDir, "", fileOptions...)
 	if err != nil {
 		logger.Error("sink open failed", "err", err)
 		return 2
 	}
 
 	readiness := &server.Readiness{}
+	if cfg.Snapshot != nil {
+		readiness.RequireSnapshot()
+	}
 	httpSrv := httpserver.New(cfg.Listen, server.New(readiness, logger, server.WithMetrics(obs.MetricsHandler())), httpserver.Standard())
 	go func() {
 		logger.Info("lake-sink listening", "addr", cfg.Listen)
@@ -159,6 +167,19 @@ func runSink(ctx context.Context, cfg config.Config, fileSink sink.Sink, readine
 		once     sync.Once
 		firstErr error
 	)
+	if cfg.Snapshot != nil {
+		landing, ok := fileSink.(*sink.FileSink)
+		if !ok {
+			return errors.New("snapshot requires the owning active-run file sink")
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := snapshot.Run(ctx, *cfg.Snapshot, mesh.Source, landing, cfg.OutputDir, logger, busMetrics, readiness.SetSnapshot); err != nil && ctx.Err() == nil {
+				once.Do(func() { firstErr = err; cancel() })
+			}
+		}()
+	}
 	for _, topic := range cfg.Topics {
 		wg.Add(1)
 		go func(topic string) {

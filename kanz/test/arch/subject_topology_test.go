@@ -56,13 +56,14 @@ func TestEverySubjectIsCarriedByAStream(t *testing.T) {
 		t.Fatal("no ensure_stream lines found in the bootstrap ConfigMap — has the format changed?")
 	}
 	subjects := declaredSubjects(t, root)
+	optional := optionalSnapshotSubjects(t, root)
 	if len(subjects) == 0 {
 		t.Fatal("no subjects found in the source — this test would pass vacuously")
 	}
 
 	var unbound []string
 	for _, s := range subjects {
-		if !covered(s, patterns) {
+		if !covered(s, patterns) && !covered(s, optional) {
 			unbound = append(unbound, s)
 		}
 	}
@@ -73,7 +74,7 @@ func TestEverySubjectIsCarriedByAStream(t *testing.T) {
 			"service's consumer group down with it. Provisioned streams: %v",
 			strings.Join(unbound, "\n  "), patterns)
 	}
-	t.Logf("%d subjects, all carried by one of: %v", len(subjects), patterns)
+	t.Logf("%d subjects resolved; default bootstrap: %v; exact opt-in profile with separate mandatory proof: %v", len(subjects), patterns, optional)
 }
 
 // streamSubjects reads the subject patterns the production bootstrap provisions:
@@ -259,7 +260,12 @@ func TestEverySubjectResolvesOnARealBroker(t *testing.T) {
 	}
 
 	subjects := declaredSubjects(t, moduleRoot(t))
+	optional := optionalSnapshotSubjects(t, moduleRoot(t))
+	t.Logf("Default broker probe excludes only validated optional subjects %v; finite-snapshot-owner must independently prove both pinned broker versions", optional)
 	for _, s := range subjects {
+		if covered(s, optional) {
+			continue
+		}
 		if _, err := js.StreamNameBySubject(ctx, s); err != nil {
 			t.Errorf("no stream carries %q on this broker: %v\n"+
 				"    A consumer on it would 404 at startup and take its service's ENTIRE consumer group down; "+
