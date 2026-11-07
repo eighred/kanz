@@ -26,6 +26,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	lakepb "github.com/eighred/kanz/kanz-schemas-go/lake/v1"
 	querypb "github.com/eighred/kanz/kanz-schemas-go/query/v1"
 	"math"
 	"strconv"
@@ -41,6 +42,8 @@ import (
 // It depends on the generated client INTERFACE, so tests inject a fake and the
 // real gateway injects an mTLS-dialed client (main).
 type Handler struct {
+	lake       lakepb.LakeSnapshotServiceClient
+	lakeTenant string
 	// orders is the OMS read surface, or nil when this deployment fronts none.
 	orders orderpb.OrderQueryServiceClient
 	// approveRole is the deployment's approver (API_GATEWAY_APPROVE_ROLE). EMPTY ⇒
@@ -101,6 +104,7 @@ func New(client querypb.RiskQueryServiceClient, orders orderpb.OrderQueryService
 // a scenario is a POST, but it computes a what-if and moves no capital — the HTTP verb is
 // not the authority on effect.
 func (h *Handler) Routes(mux *authz.Mux) {
+	h.lakeRoutes(mux)
 	mux.Handle(authz.Read, "GET /v1/portfolios", h.listPortfolios)
 	if h.orders != nil {
 		mux.Handle(authz.Read, "GET /v1/portfolios/{id}/execution-recoveries/{case}/fee-correction", h.getFeeCorrection)

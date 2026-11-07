@@ -3,8 +3,10 @@ package config
 import (
 	"errors"
 	"github.com/eighred/kanz/internal/env"
+	"github.com/eighred/kanz/internal/topic"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -13,6 +15,7 @@ import (
 // it composes with the CSI/Vault secret mounts (SEC-01d). Mirrors the audit /
 // risk-engine config shape.
 type Config struct {
+	Snapshot       *Snapshot
 	RetainRawFrame bool
 	Listen         string
 	LogLevel       slog.Level
@@ -74,6 +77,17 @@ func Load() (Config, error) {
 	}
 	if cfg.OutputDir == "" {
 		return Config{}, errors.New("LAKE_SINK_OUTPUT_DIR is required")
+	}
+	var err error
+	cfg.Snapshot, err = loadSnapshot(cfg)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.Snapshot != nil {
+		lifecycleTopic := topic.Qualify(cfg.Snapshot.Tenant, "lake.snapshot")
+		if !slices.Contains(cfg.Topics, lifecycleTopic) {
+			cfg.Topics = append(cfg.Topics, lifecycleTopic)
+		}
 	}
 	return cfg, nil
 }

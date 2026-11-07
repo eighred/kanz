@@ -9,10 +9,20 @@ import (
 
 // Readiness gates traffic: starts NOT ready, flips once the sink is open and the
 // subscription is live; shutdown clears it.
-type Readiness struct{ ready atomic.Bool }
+type Readiness struct {
+	ready            atomic.Bool
+	snapshotRequired atomic.Bool
+	snapshotReady    atomic.Bool
+}
 
 func (r *Readiness) Set(ready bool) { r.ready.Store(ready) }
-func (r *Readiness) Ready() bool    { return r.ready.Load() }
+func (r *Readiness) Ready() bool {
+	return r.ready.Load() && (!r.snapshotRequired.Load() || r.snapshotReady.Load())
+}
+
+// RequireSnapshot is called before listeners start for the opt-in owner only.
+func (r *Readiness) RequireSnapshot()       { r.snapshotRequired.Store(true) }
+func (r *Readiness) SetSnapshot(ready bool) { r.snapshotReady.Store(ready) }
 
 type Server struct {
 	readiness *Readiness

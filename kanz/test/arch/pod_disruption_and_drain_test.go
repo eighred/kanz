@@ -437,6 +437,12 @@ type shutdownSite struct {
 // and on any entry here the walk can no longer find — so neither a new budget
 // nor a deleted one can go unnoticed.
 var serviceShutdownExtras = map[string][]shutdownSite{
+	"services/lake-sink/cmd/lake-sink/main.go": {
+		{file: "services/lake-sink/internal/snapshot/lease.go", name: "ctx",
+			why: "Optional snapshot lease connection close has an independent five-second cleanup context after cancellation. Count it conservatively even though the feature is disabled in current deployments; it does not prove an OS-level child join bound."},
+		{file: "services/lake-sink/internal/snapshot/store.go", name: "cleanup",
+			why: "Optional snapshot Create rollback has an independent five-second cleanup context and can overlap shutdown. Count it additively rather than assuming overlap; existing manifest grace is not evidence that the optional image/resources or worker lifecycle are qualified."},
+	},
 	"services/risk-engine/cmd/risk-engine/main.go": {{
 		file:         "services/risk-engine/internal/app/lifecycle.go",
 		name:         "DefaultShutdownTimeout",

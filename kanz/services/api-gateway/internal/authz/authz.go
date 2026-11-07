@@ -40,6 +40,10 @@ type Capability string
 const (
 	// Read: query the fund's state. Exposure, positions, orders, executions, prices.
 	Read Capability = "read"
+	// Snapshot custody is a separate optional tenant-wide grant. Neither
+	// ordinary Read nor Operate implies access or durable snapshot creation.
+	LakeSnapshotCreate Capability = "lake.snapshot.create"
+	LakeSnapshotRead   Capability = "lake.snapshot.read"
 	// Trade: MOVE CAPITAL. Submit or cancel an order at a live exchange.
 	Trade Capability = "trade"
 	// Operate: RUN THE PLATFORM. Provision, cordon, drain and relabel nodes; write the

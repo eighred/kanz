@@ -16,6 +16,7 @@ const (
 	ServiceOMS        = "oms"
 	ServiceAccounting = "accounting"
 	ServiceDatamaster = "datamaster"
+	ServiceLakeSink   = "lake-sink"
 )
 
 var (
