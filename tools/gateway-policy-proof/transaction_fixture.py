@@ -552,8 +552,13 @@ def run_fixture(artifact):
             for name, port in (("nats", 4222), ("redis", 6379)):
                 k("create", "-f", "-", value=proof.pod("synthetic-" + name, "kanz-messaging", {"app": name}, (port,)))
                 k("-n", "kanz-messaging", "wait", "--for=condition=Ready", "pod/synthetic-" + name, "--timeout=90s")
-            report["retainedRestore"] = restore_fixture.qualify(k, cluster_uid, report["source"], rendered,
-                                                                 governed, probe_history, scratch)
+            restore_progress = {}
+            try:
+                report["retainedRestore"] = restore_fixture.qualify(k, cluster_uid, report["source"], rendered,
+                                                                     governed, probe_history, scratch, restore_progress)
+            except Exception as error:
+                report["retainedRestoreFailure"] = restore_fixture.failure_projection(error, restore_progress)
+                raise
             restore_fixture.validate(report["retainedRestore"])
             report["cases"].extend(report["retainedRestore"]["cases"])
             k("delete", "namespace", "kanz-messaging", "--wait=true", "--timeout=60s")

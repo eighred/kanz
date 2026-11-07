@@ -14,6 +14,59 @@ from test_recovery_plan import fixture
 
 
 class RestoreTests(unittest.TestCase):
+    def test_diagnostic_counts_only_confirmed_durable_appends(self):
+        class Journal:
+            count = 0
+            def __call__(self, _value):
+                self.count += 1
+                if self.count == 1:
+                    raise OSError("synthetic first fsync refusal")
+        journal = Journal()
+        progress = {"receiptCount": 0, "phase": "none"}
+        with self.assertRaises(OSError):
+            restore_fixture.durable_save(journal, {"phase": "restore_intent", "writeAttempted": False}, progress)
+        self.assertEqual(progress, {"receiptCount": 0, "phase": "none"})
+        restore_fixture.durable_save(journal, {"phase": "unknown", "writeAttempted": True}, progress)
+        self.assertEqual(journal.count, 2)
+        self.assertEqual(progress["receiptCount"], 1)
+        self.assertEqual(progress["phase"], "unknown")
+
+    def test_fixture_failure_projection_is_closed_and_bounded(self):
+        secret = "DO_NOT_PROJECT_message_path_local_or_argument"
+        namespace = {}
+        exec(compile("def fail(value):\n    local=value\n    raise ValueError(local)\n",
+                     "/private/" + secret + "/recovery_plan.py", "exec"), namespace)
+        try:
+            try:
+                namespace["fail"](secret)
+            except ValueError:
+                raise state.Refusal(secret) from None
+        except state.Refusal as error:
+            report = restore_fixture.failure_projection(error, {"case": restore_fixture.CASES[0],
+                "phase": "refused", "failedPhase": "preflight", "writeAttempted": False, "receiptCount": 1})
+            self.assertEqual([c["category"] for c in report["contexts"]], ["refusal", "value"])
+            self.assertIn({"module": "recovery_plan.py", "line": 3}, report["contexts"][1]["frames"])
+            self.assertNotIn(secret, json.dumps(report))
+            self.assertFalse(report["truncated"])
+            chain = error
+            for _ in range(20):
+                outer = RuntimeError(secret)
+                outer.__context__ = chain
+                outer.__traceback__ = error.__context__.__traceback__
+                chain = outer
+            bounded = restore_fixture.failure_projection(chain, {"case": secret, "phase": {},
+                "failedPhase": secret, "writeAttempted": secret, "receiptCount": 65})
+            self.assertEqual(len(bounded["contexts"]), 8)
+            self.assertLessEqual(sum(len(c["frames"]) for c in bounded["contexts"]), 16)
+            self.assertTrue(bounded["truncated"])
+            self.assertIsNone(bounded["durableReceiptCount"])
+            self.assertIsNone(bounded["writeAttempted"])
+            self.assertNotIn(secret, json.dumps(bounded))
+            chain.__context__ = chain
+            cyclic = restore_fixture.failure_projection(chain, {})
+            self.assertEqual(len(cyclic["contexts"]), 1)
+            self.assertTrue(cyclic["truncated"])
+
     @unittest.skipUnless(sys.platform == "linux", "requires real Linux directory and fsync semantics")
     def test_actual_exclusive_append_only_journal(self):
         with tempfile.TemporaryDirectory() as directory:

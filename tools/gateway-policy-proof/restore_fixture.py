@@ -15,6 +15,49 @@ CASES = ("retained_restore_verified", "retained_restore_response_loss", "retaine
          "retained_restore_scope_refusal", "retained_restore_receipt_refusal", "retained_restore_exclusive_journal")
 
 
+def failure_projection(error, progress):
+    """Synthetic fixture diagnostics only: no exception text or frame values."""
+    modules = {"restore_fixture.py", "recovery_restore.py", "recovery_plan.py", "recovery_receipts.py",
+               "rollout_scope.py", "policy_state.py", "policy_client.py", "bounded_process.py", "transaction_fixture.py"}
+    classes = {state.Refusal: "refusal", ValueError: "value", TypeError: "type", KeyError: "key",
+               AssertionError: "assertion", RuntimeError: "runtime", OSError: "os", TimeoutError: "timeout"}
+    phases = {"none", "preflight", "observation_recorded", "restore_intent", "put_response",
+              "restore_acknowledged", "verified", "refused", "unknown"}
+    contexts, seen, frame_count = [], set(), 0
+    truncated = False
+    while error is not None and len(contexts) < 8 and id(error) not in seen:
+        seen.add(id(error))
+        frames, tb = [], error.__traceback__
+        while tb is not None and frame_count < 16:
+            frame_count += 1
+            name = Path(tb.tb_frame.f_code.co_filename).name
+            line = tb.tb_lineno
+            if name in modules and type(line) is int and 1 <= line <= 1000000:
+                frames.append({"module": name, "line": line})
+            tb = tb.tb_next
+        truncated = truncated or tb is not None
+        contexts.append({"category": classes.get(type(error), "other"), "frames": frames})
+        error = error.__context__
+    truncated = truncated or error is not None
+    count = progress.get("receiptCount")
+    def closed(value, allowed):
+        return value if type(value) is str and value in allowed else "unknown"
+    return {"case": closed(progress.get("case"), CASES),
+            "lastDurablePhase": closed(progress.get("phase"), phases),
+            "failedPhase": closed(progress.get("failedPhase"), phases),
+            "writeAttempted": progress.get("writeAttempted") if type(progress.get("writeAttempted")) is bool else None,
+            "durableReceiptCount": count if type(count) is int and 0 <= count <= 64 else None,
+            "contexts": contexts, "truncated": truncated}
+
+
+def durable_save(journal, value, progress):
+    journal(value)
+    # A failed append can consume a sequence ordinal. Count only confirmed
+    # append+fsync completions, not the journal's next-file sequence number.
+    progress.update(phase=value["phase"], failedPhase=value.get("failedPhase", "none"),
+                    writeAttempted=value["writeAttempted"], receiptCount=progress["receiptCount"] + 1)
+
+
 def validate(value):
     if (not isinstance(value, dict) or set(value) != {"cases", "syntheticLegacyReceipts",
             "historicalProvenanceQualified", "actualAppendOnlyJournals", "singleAttemptEnforced"}
@@ -55,13 +98,15 @@ def legacy_records(baseline, intended, nonce, desired, probe_records):
     return result
 
 
-def qualify(k, cluster_uid, source, rendered, governed, probe_records, scratch):
+def qualify(k, cluster_uid, source, rendered, governed, probe_records, scratch, progress):
     """k is exclusively the fresh owned-kind executor supplied by run_fixture."""
     client = KubernetesClient(k, cluster_uid)
     desired = [p for p in rendered if p["metadata"]["name"] in state.NAMES]
     nonce = probe_records[-1]["nonce"]
     results = []
     for index, case in enumerate(CASES):
+        progress.clear()
+        progress.update(case=case, phase="none", failedPhase="none", writeAttempted=False, receiptCount=0)
         # Reset only the disposable owned policy resources. This setup is not
         # reconciliation and never runs against the fixed operator context.
         for obj in client.list_policies():
@@ -125,7 +170,9 @@ def qualify(k, cluster_uid, source, rendered, governed, probe_records, scratch):
                 return json.dumps(result)
             return raw
         def save(value):
-            journal(value)
+            # Update only after the actual append and fsync complete. A failure
+            # while saving therefore leaves the last confirmed durable phase.
+            durable_save(journal, value, progress)
             if value["phase"] == "restore_intent":
                 if case == "retained_restore_receipt_refusal":
                     with (old_dir / "receipt-0001.json").open("ab") as output: output.write(b" ")
