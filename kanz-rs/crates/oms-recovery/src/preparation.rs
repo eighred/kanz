@@ -124,6 +124,22 @@ pub(crate) async fn posted(
     observed: &[Canonical<Fill>],
     approvals: Option<&ApprovedChanges>,
 ) -> Result<BTreeSet<String>, PostedError> {
+    posted_with(client, tenant, state, observed, approvals, |_, _| Ok(())).await
+}
+/// The proposal owner visits current fee heads while using this same complete
+/// posted-history validation. Visitor refusals are retained until the SQL
+/// snapshot has been checked; they cannot hide an incomplete journal.
+pub(crate) async fn posted_with<F>(
+    client: &mut Client,
+    tenant: &str,
+    state: &Canonical<OrderState>,
+    observed: &[Canonical<Fill>],
+    approvals: Option<&ApprovedChanges>,
+    mut visit: F,
+) -> Result<BTreeSet<String>, PostedError>
+where
+    F: FnMut(&str, &kanz_oms_store::fee_wire::FillWire) -> Result<(), Error>,
+{
     let st = state.value();
     let observed: BTreeMap<_, _> = observed
         .iter()
@@ -172,6 +188,9 @@ pub(crate) async fn posted(
                     evidence_error.get_or_insert(Error::FeeRevision);
                 }
             }
+        }
+        if let Err(error) = visit(&key, &row.current) {
+            evidence_error.get_or_insert(error);
         }
         quantity += q;
         seen.insert(key);

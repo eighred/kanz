@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package lake.worker.v1;
+
+import "google/protobuf/timestamp.proto";
+import "lake/v1/snapshot.proto";
+
+// Private one-call stdin/stdout protocol, not an RPC or identity authority.
+// A u32 big-endian length prefixes WorkerRequest. Convert is <=64 MiB encoded
+// and <=100000 rows. Query control is <=64 KiB, followed by exactly
+// parquet_bytes bytes (<=96 MiB), then EOF. No trailing bytes are accepted.
+// Output is one length-prefixed WorkerResponse then EOF; query output <=1 MiB.
+message WorkerRequest {
+  // Required value 1. Unknown versions refuse before operation execution.
+  uint32 protocol_version = 1;
+  oneof operation {
+    ConvertRows convert = 2;
+    QueryControl query = 3;
+  }
+}
+
+// The Go owner has already authenticated, selected and validated these rows.
+// No caller credentials, file paths, object URLs or SQL are accepted.
+message ConvertRows {
+  string tenant = 1;
+  repeated CapturedRow rows = 2;
+  // Required value 1; unknown versions refuse rather than infer a schema.
+  uint32 schema_version = 3;
+}
+
+// ordinal is dense within selected tenant-pure rows in deterministic cut order:
+// sorted owned files, then line order. It preserves duplicates without exposing
+// foreign positions, but does not reconstruct cross-file Kafka arrival order.
+// Raw frame is never reconstructed; Decimal and unknown wire fields stay
+// inside its original bytes. Event time is seconds+nanos, not float/nanosecond
+// epoch conversion. Absent kafka is UNKNOWN, not coordinate zero.
+// The worker independently checks frame SHA-256 and envelope tenant/event/time
+// equality. Go's bus.Validate remains the full canonical envelope validator.
+message CapturedRow {
+  uint64 ordinal = 1;
+  bytes raw_frame = 2;
+  bytes raw_sha256 = 3;
+  string event_id = 4;
+  string event_type = 5;
+  google.protobuf.Timestamp event_time = 6;
+  KafkaCoordinates kafka = 7;
+  lake.v1.SnapshotDecodeStatus decode_status = 8;
+}
+
+message KafkaCoordinates {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+}
+
+message QueryControl {
+  uint64 parquet_bytes = 1;
+  bytes parquet_sha256 = 2;
+  lake.v1.SnapshotQuery query = 3;
+  string expected_tenant = 4;
+  uint64 expected_row_count = 5;
+  uint32 schema_version = 6;
+}
+
+message WorkerResponse {
+  // Required value 1, including closed failure responses.
+  uint32 protocol_version = 1;
+  oneof outcome {
+    Converted converted = 2;
+    lake.v1.SnapshotQueryResult query = 3;
+    WorkerFailure failure = 4;
+  }
+}
+
+// parquet is <=96 MiB; the response permits at most 64 KiB framing/message
+// overhead above that cap. The receiver checks the length before allocation.
+message Converted {
+  bytes parquet = 1;
+  uint64 row_count = 2;
+  bytes sha256 = 3;
+}
+
+enum WorkerFailureCode {
+  WORKER_FAILURE_CODE_UNSPECIFIED = 0;
+  WORKER_FAILURE_CODE_INVALID_INPUT = 1;
+  WORKER_FAILURE_CODE_CAPACITY = 2;
+  WORKER_FAILURE_CODE_INVALID_PARQUET = 3;
+  WORKER_FAILURE_CODE_QUERY = 4;
+}
+
+message WorkerFailure {
+  WorkerFailureCode code = 1;
+}

@@ -1,5 +1,6 @@
 //! Durable acknowledgement only. Go owns authenticated FACT/subject-to-book admission.
 use super::{commit, enqueue, recovery, scoped, validate_batch, Error, Record, MAX_BYTES};
+use crate::diagnostics::{Stage, Timer};
 use kanz_order_core::proto::order::v1::{
     ExecutionRecoveryApplied, ExecutionRecoveryRecorded, OrderState,
 };
@@ -93,6 +94,7 @@ pub async fn acknowledge_recovery(
     }
     // Canonical preparation writes one target per checkpoint and two books per
     // target. Corrupt counts must not become an indefinitely pending success.
+    let target_timer = Timer::new(Stage::AckTargets);
     let targets: i64 = tx
         .query_typed_one(
             "SELECT count(*) FROM execution_recovery_targets WHERE case_id=$1",
@@ -100,6 +102,7 @@ pub async fn acknowledge_recovery(
         )
         .await?
         .get(0);
+    drop(target_timer);
     if checkpoint == 0 || expected != checkpoint * 2 || targets != i64::from(checkpoint) {
         return Err(Error::IdentityConflict);
     }
@@ -127,6 +130,7 @@ pub async fn acknowledge_recovery(
         return commit(tx).await;
     }
     tx.execute("INSERT INTO execution_recovery_acks (case_id,execution_key,book) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",&[&ack.case_id,&ack.execution_key,&book.as_str()]).await?;
+    let received_timer = Timer::new(Stage::AckReceived);
     let received: i64 = tx
         .query_typed_one(
             "SELECT count(*) FROM execution_recovery_acks WHERE case_id=$1",
@@ -134,6 +138,7 @@ pub async fn acknowledge_recovery(
         )
         .await?
         .get(0);
+    drop(received_timer);
     if expected == 0 || received != i64::from(expected) {
         return commit(tx).await;
     }

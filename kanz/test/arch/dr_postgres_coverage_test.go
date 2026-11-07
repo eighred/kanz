@@ -315,6 +315,7 @@ type drClassification struct {
 // where an operator looks during a failover and the README is not what fails a
 // build.
 var drPosture = map[string]drClassification{
+	"lake-sink":       {status: drUnresolved, reason: "#1413 / #60: optional finite snapshot registry, immutable accepted requests, persisted cuts and transactional lifecycle outbox have no qualified production placement, backup or coordinated DB/files restore drill. The owner remains disabled; derived output is not a substitute for recovering its accepted resource/history."},
 	"web-bff":         {status: drUnresolved, reason: "#1288: optional shared browser authority and immutable audit have no production placement or revocation-safe restore drill; memory singleton remains deployed until verified."},
 	"risk-engine":     {status: drCovered, cluster: "kanz-risk", reason: "PERS-01 portfolio positions and risk state"},
 	"schema-registry": {status: drCovered, cluster: "kanz-registry", reason: "EVT-16 registered payload schemas"},

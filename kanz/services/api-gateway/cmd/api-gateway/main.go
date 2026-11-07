@@ -202,6 +202,12 @@ func run() int {
 	}
 
 	handler := gateway.New(querypb.NewRiskQueryServiceClient(conn), ordersRead, instrumentsRead, cfg.ApproveRole, logger)
+	closeLake, err := bindLake(ctx, cfg, handler)
+	if err != nil {
+		logger.Error("api-gateway: lake snapshot boundary unavailable")
+		return 2
+	}
+	defer closeLake()
 
 	// PER-TENANT RISK ENGINES (#668). risk-engine holds its positions per
 	// deployment (pg.NewTenantPool with cfg.Tenant, #97), so a tenant with its
@@ -1177,6 +1183,10 @@ func buildRouter(cfg config.Config, h *gateway.Handler, o *orders.Handler, p *pr
 	// system it is auditing.
 	if cfg.AuditRole != "" {
 		grants[cfg.AuditRole] = []authz.Capability{authz.Read, authz.Audit}
+	}
+	if cfg.LakeSnapshot != nil {
+		grants[cfg.LakeSnapshot.CreateRole] = append(grants[cfg.LakeSnapshot.CreateRole], []authz.Capability{authz.LakeSnapshotCreate}...)
+		grants[cfg.LakeSnapshot.ReadRole] = append(grants[cfg.LakeSnapshot.ReadRole], []authz.Capability{authz.LakeSnapshotRead}...)
 	}
 	gwMux := authz.NewMux(grants, recorder, authz.WithMFARequired(cfg.MFARequired))
 	gwMux.Handle(authz.Read, "GET /v1/permissions", gwMux.Permissions)

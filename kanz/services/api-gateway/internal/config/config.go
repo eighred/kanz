@@ -17,8 +17,9 @@ import (
 // Config is the api-gateway runtime configuration, sourced from the
 // environment so it composes with the CSI/Vault secret mounts (SEC-01d).
 type Config struct {
-	MFARequired bool
-	Listen      string
+	LakeSnapshot *LakeSnapshot
+	MFARequired  bool
+	Listen       string
 	// BFFTLSListen adds a workload-authenticated browser BFF endpoint. The
 	// existing listener remains available until the paired rollout is accepted.
 	BFFTLSListen string
@@ -437,6 +438,10 @@ func Load() (Config, error) {
 		if err != nil || portErr != nil || p < 1024 || p > 65535 || cfg.BFFTLSListen == cfg.Listen || cfg.SPIFFESocket == "" {
 			return Config{}, errors.New("API_GATEWAY_BFF_TLS_LISTEN requires a distinct unprivileged TCP address and API_GATEWAY_SPIFFE_SOCKET")
 		}
+	}
+	cfg.LakeSnapshot, err = loadLakeSnapshot(cfg.SPIFFESocket)
+	if err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }

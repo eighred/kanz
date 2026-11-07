@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/eighred/kanz/services/archiver/internal/config"
@@ -15,9 +16,11 @@ func setEnv(t *testing.T, kv map[string]string) {
 
 func valid() map[string]string {
 	return map[string]string{
-		"ARCHIVER_TENANT":        "acme",
-		"ARCHIVER_NATS_URL":      "nats://localhost:4222",
-		"ARCHIVER_KAFKA_BROKERS": "localhost:9092",
+		"ARCHIVER_TENANT":         "acme",
+		"ARCHIVER_SUBJECTS":       "",
+		"ARCHIVER_LAKE_SNAPSHOTS": "",
+		"ARCHIVER_NATS_URL":       "nats://localhost:4222",
+		"ARCHIVER_KAFKA_BROKERS":  "localhost:9092",
 	}
 }
 
@@ -60,5 +63,37 @@ func TestLoad_FailsClosed(t *testing.T) {
 				t.Fatalf("Load succeeded without %s — a silently non-archiving archiver reports healthy", missing)
 			}
 		})
+	}
+}
+
+func TestLoad_SnapshotRouteRequiresExplicitOptIn(t *testing.T) {
+	setEnv(t, valid())
+	t.Setenv("ARCHIVER_SUBJECTS", "")
+	original := slices.Clone(config.DefaultSubjects)
+	for _, setting := range []string{"", "false"} {
+		t.Setenv("ARCHIVER_LAKE_SNAPSHOTS", setting)
+		cfg, err := config.Load()
+		if err != nil || slices.Contains(cfg.Subjects, config.LakeSnapshotSubject) {
+			t.Fatalf("unexpected optional route: %v", err)
+		}
+	}
+	t.Setenv("ARCHIVER_LAKE_SNAPSHOTS", "true")
+	cfg, err := config.Load()
+	if err != nil || !slices.Contains(cfg.Subjects, config.LakeSnapshotSubject) {
+		t.Fatalf("missing explicit route: %v", err)
+	}
+	if !slices.Equal(config.DefaultSubjects, original) {
+		t.Fatal("enabling snapshots mutated default consume set")
+	}
+	t.Setenv("ARCHIVER_SUBJECTS", "order.>,lake.snapshot.>")
+	cfg, err = config.Load()
+	if err != nil || len(cfg.Subjects) != 2 {
+		t.Fatalf("duplicated explicit route: %+v, %v", cfg.Subjects, err)
+	}
+	for _, setting := range []string{"", "false", "yes", " true"} {
+		t.Setenv("ARCHIVER_LAKE_SNAPSHOTS", setting)
+		if _, err := config.Load(); err == nil {
+			t.Fatalf("accepted snapshot route setting %q", setting)
+		}
 	}
 }

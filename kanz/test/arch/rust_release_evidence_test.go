@@ -64,10 +64,13 @@ func rustReleaseEvidenceBoundary(release, build, migration, installer string) er
 	if setup < 0 || sbom < 0 || gate <= setup || gate <= sbom || sign <= gate {
 		return fmt.Errorf("Rust evidence must precede signing")
 	}
-	for _, token := range []string{"cargo +1.90.0 install --locked --version 0.22.2 --root \"$tools\" cargo-audit", "cargo +1.90.0 install --locked --version 0.5.4 --root \"$tools\" rust-audit-info", "set -euo pipefail"} {
+	for _, token := range []string{"set -euo pipefail", "rustup toolchain install 1.90.0 --profile minimal", "python3 -B tools/rust-audit-tools/consume.py"} {
 		if !strings.Contains(installer, token) {
-			return fmt.Errorf("pinned Rust audit tools required")
+			return fmt.Errorf("signed immutable Rust audit tools required")
 		}
+	}
+	if strings.Contains(installer, "cargo ") || strings.Contains(installer, "||") {
+		return fmt.Errorf("source-build fallback refused")
 	}
 	if !strings.Contains(build, "- 'kanz-rs/**'") {
 		return fmt.Errorf("Rust-only PRs must build images")
@@ -129,8 +132,8 @@ func TestRustReleaseEvidenceMutations(t *testing.T) {
 		{"missing-rust-trigger", 1, "- 'kanz-rs/**'", "- 'other/**'"},
 		{"missing-ci-okx", 2, "--local --service okx-depth", "--local --service other"},
 		{"floating-syft", 0, "syft-version: v1.56.0", "syft-version: latest"},
-		{"floating-auditor", 3, "--version 0.22.2", ""},
-		{"unlocked-extractor", 3, "--locked --version 0.5.4", "--version 0.5.4"},
+		{"missing-consumer", 3, "tools/rust-audit-tools/consume.py", "missing.py"},
+		{"installer-fallback", 3, "consume.py", "consume.py || cargo install cargo-audit"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := rustReleaseInputs(t)

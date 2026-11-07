@@ -4,8 +4,7 @@ use crate::go_unicode::{LOWER, SPACE};
 use sha2::{Digest, Sha256};
 
 pub fn normalize(subject: &str) -> String {
-    subject
-        .trim_matches(|c: char| SPACE.binary_search(&(c as u32)).is_ok())
+    trim(subject)
         .chars()
         .map(
             |c| match LOWER.binary_search_by_key(&(c as u32), |&(key, _)| key) {
@@ -14,6 +13,10 @@ pub fn normalize(subject: &str) -> String {
             },
         )
         .collect()
+}
+/// Pinned Go strings.TrimSpace, shared by command and maker/checker validation.
+pub fn trim(subject: &str) -> &str {
+    subject.trim_matches(|c: char| SPACE.binary_search(&(c as u32)).is_ok())
 }
 /// Test evidence over every Unicode scalar; no subject values are logged.
 pub fn scalar_digest() -> String {

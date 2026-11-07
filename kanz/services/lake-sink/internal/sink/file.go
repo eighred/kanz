@@ -23,6 +23,8 @@ type FileSink struct {
 
 	mu      sync.Mutex
 	writers map[string]*partWriter
+	capture *captureRoot
+	closed  bool
 }
 
 type partWriter struct {
@@ -33,9 +35,26 @@ type partWriter struct {
 // NewFileSink creates the landing root. instanceID disambiguates this process's
 // part-files from sibling replicas'; empty generates hostname+pid+random run ID.
 // An explicit ID retains its existing append/reopen path for compatibility.
-func NewFileSink(root, instanceID string) (*FileSink, error) {
+func NewFileSink(root, instanceID string, options ...FileOption) (*FileSink, error) {
+	var capture bool
+	for _, option := range options {
+		if option != EnableActiveRunCapture {
+			return nil, ErrCapture
+		}
+		capture = true
+	}
+	if capture && instanceID != "" {
+		return nil, ErrCapture
+	}
 	if instanceID == "" {
 		instanceID = defaultInstanceID()
+	}
+	if capture {
+		owned, err := openCaptureRoot(root)
+		if err != nil {
+			return nil, err
+		}
+		return &FileSink{root: root, instanceID: sanitize(instanceID), writers: map[string]*partWriter{}, capture: owned}, nil
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
@@ -52,6 +71,9 @@ func (s *FileSink) Write(_ context.Context, row Row) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return ErrCapture
+	}
 	pw, err := s.writerFor(dir)
 	if err != nil {
 		return err
@@ -89,6 +111,12 @@ func (s *FileSink) Close() error {
 		}
 		delete(s.writers, dir)
 	}
+	if s.capture != nil && !s.closed {
+		s.closed = true
+		if err := s.capture.close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
 }
 
@@ -103,6 +131,19 @@ func (pw *partWriter) flush() error {
 // directory. Caller holds s.mu.
 func (s *FileSink) writerFor(dir string) (*partWriter, error) {
 	if pw, ok := s.writers[dir]; ok {
+		return pw, nil
+	}
+	if s.capture != nil {
+		rel, err := filepath.Rel(s.root, filepath.Join(dir, "part-"+s.instanceID+".ndjson"))
+		if err != nil {
+			return nil, ErrCapture
+		}
+		f, err := s.capture.create(filepath.ToSlash(rel))
+		if err != nil {
+			return nil, err
+		}
+		pw := &partWriter{f: f, bw: bufio.NewWriter(f)}
+		s.writers[dir] = pw
 		return pw, nil
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {

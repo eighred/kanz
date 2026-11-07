@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from go_shard_evidence import bounded_bytes, combine, inventory, partition, seal, validate_events
+from go_shard_evidence import SHARD_OWNERS, bounded_bytes, combine, inventory, partition, require_routed_owners, seal, validate_events
 from go_test_evidence import BROWSER_PROOF
 
 
@@ -14,6 +15,7 @@ class ShardEvidenceTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.source = {"sha": "a" * 40, "tree": "b" * 40, "run": "123", "attempt": "2"}
         self.packages = [f"github.com/eighred/kanz/pkg/p{i}" for i in range(12)]
+        self.packages.extend(SHARD_OWNERS)
         self.packages.sort()
         for shard in range(2):
             d = self.directory(shard)
@@ -34,9 +36,25 @@ class ShardEvidenceTests(unittest.TestCase):
         return self.root / f"go-race-123-2-{shard}"
 
     def test_complete_disjoint_union(self):
-        self.assertEqual(combine(self.root, self.packages, self.source), (12, 0))
+        self.assertEqual(combine(self.root, self.packages, self.source), (len(self.packages), 0))
         self.assertEqual(set(partition(self.packages, 0)) | set(partition(self.packages, 1)), set(self.packages))
         self.assertFalse(set(partition(self.packages, 0)) & set(partition(self.packages, 1)))
+
+    def test_routed_work_is_present_once_and_cannot_become_a_dead_entry(self):
+        routed = {"github.com/eighred/kanz/pkg/bus", "github.com/eighred/kanz/services/risk-engine/internal/app"}
+        self.assertEqual(set(SHARD_OWNERS), routed)
+        self.assertTrue(routed.issubset(partition(self.packages, 0)))
+        self.assertTrue(routed.isdisjoint(partition(self.packages, 1)))
+        for package in routed:
+            incomplete = [p for p in self.packages if p != package]
+            with self.assertRaisesRegex(ValueError, "routed package disappeared"):
+                require_routed_owners(incomplete)
+            with self.assertRaisesRegex(ValueError, "routed package disappeared"):
+                combine(self.root, incomplete, self.source)
+        for invalid in (True, -1, 2, "0"):
+            with patch.dict(SHARD_OWNERS, {next(iter(routed)): invalid}):
+                with self.assertRaisesRegex(ValueError, "invalid shard"):
+                    require_routed_owners(self.packages)
 
     def test_source_run_attempt_shard_binding(self):
         p = self.directory(0) / "manifest.json"

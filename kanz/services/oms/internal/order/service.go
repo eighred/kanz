@@ -1038,17 +1038,18 @@ func (s *Service) submit(ctx context.Context, env *envelopepb.Envelope, payload 
 	}
 	defer release()
 
-	// VERSION 0, AND THERE IS NO LONGER A WRITE BETWEEN HERE AND work().
-	//
-	// store.Create landed this order at version 0 (migrations/0005 default) and
-	// this delivery won the admission gate, so 0 is the version nobody else can
-	// have written past yet. #238 spent an extra UPDATE here stamping
-	// accepted_announced_at, because the FACT had already gone out on its own
-	// and the marker was the only record that it had. The marker now rides the
-	// INSERT (see the admission block above), so that UPDATE is gone: one fewer
-	// round trip on the admission path, and one fewer window in which the order
-	// exists at a version the next writer has to guess at.
-	var ver int64
+	// Admission commits before this claim. A redelivery can acquire and release
+	// the claim in that gap, so even the creator must reload under it. Advanced
+	// state follows the same reconciliation path as a resumed delivery; working
+	// the original version-zero snapshot would conflict with that completed work.
+	fresh, ver, err := s.store.Load(ctx, st.GetOrderId())
+	if err != nil {
+		return err
+	}
+	if ver != 0 || fresh.GetStatus() != st.GetStatus() || fresh.GetQuarantine() != nil {
+		return s.resumeClaimed(ctx, fresh, ver)
+	}
+	st = fresh
 
 	// Work the order if a router is wired; otherwise it rests at PENDING_NEW.
 	st, ver, err = s.work(ctx, st, ver)
@@ -2759,6 +2760,13 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 	if err != nil {
 		return err
 	}
+	return s.resumeClaimed(ctx, fresh, ver)
+}
+
+// resumeClaimed owns no lock itself. Both callers hold this order's claim and
+// supply the state and version loaded under it, preserving one reconciliation
+// path for creators overtaken after admission and for ordinary redeliveries.
+func (s *Service) resumeClaimed(ctx context.Context, fresh *orderpb.OrderState, ver int64) error {
 	// The two branches that decide this delivery has nothing to say, decided
 	// AGAIN under the claim because the goroutine we just raced for it may have
 	// finished between our first read and this one. They come before the flush
@@ -2801,7 +2809,7 @@ func (s *Service) resume(ctx context.Context, st *orderpb.OrderState) error {
 	if IsTerminal(fresh) {
 		return s.completeTerminalOutcome(ctx, fresh, ver, flushed)
 	}
-	st = fresh
+	st := fresh
 
 	// PENDING_NEW: admitted but never routed. Nothing reached a venue, so there
 	// is nothing to reconcile and nothing to be careful about — work it. This sits
@@ -3053,15 +3061,11 @@ func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderSta
 // outcome_announced_at, order_events.proto). It is resume()'s completion
 // of that interrupted announcement.
 //
-// WHAT IT CAN NOW DO THAT IT COULD NOT (#292). The fill fold commits its
-// ORDER_FILLED FACT to the outbox in the same transaction as the state, so for
-// an order filled by an outbox build the FACT is not lost — it is in the table,
-// and resume() flushes that table before calling this. announced is how many
-// records that flush published: a non-zero value means the real FACT, with the
-// real fill_id and price, has just gone out, and this function is completing an
-// announcement rather than apologising for one. That is the difference between
-// "recovered" and "gone", and it is why the log below branches on it instead of
-// reporting a lost fill on every successful recovery.
+// The fill fold commits its ORDER_FILLED FACT to the outbox with the state
+// (#292), and resume flushes pending records before calling this. announced
+// counts all records that flush published, not specifically fills. Neither a
+// positive count nor an empty pending queue establishes past fill publication:
+// work may already have published the fill before its caller was interrupted.
 //
 // WHAT IT STILL CANNOT DO, AND WHY. The stored OrderState carries only the order's
 // current AGGREGATE view — status, cumulative filled_quantity, leaves_quantity,
@@ -3080,11 +3084,9 @@ func (s *Service) markOutcomeAnnounced(ctx context.Context, st *orderpb.OrderSta
 // What CAN be reconstructed, honestly, from the terminal OrderState alone is
 // the CommandOutcome for the original SubmitOrder command — its status
 // follows directly from st.status, with no other input needed. That is what
-// this publishes. Where announced is zero the missing lifecycle FACT is a
-// residual, KNOWN LIMIT: tv-sync, accounting, and audit still never see it.
-// What this removes is the worse failure — a completed trade or a permanent
-// rejection whose command outcome the caller was never told, with no recovery
-// path at all.
+// this publishes. A legacy lifecycle FACT may still be absent, but this pending
+// queue inspection does not establish that history. No fill is reconstructed
+// from aggregate state to complete the command outcome.
 func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.OrderState, ver int64, announced int) error {
 	now := s.now().UTC()
 	var status commandpb.CommandOutcomeStatus
@@ -3093,22 +3095,8 @@ func (s *Service) completeTerminalOutcome(ctx context.Context, st *orderpb.Order
 	case orderpb.OrderStatus_ORDER_STATUS_FILLED:
 		status = commandpb.CommandOutcomeStatus_COMMAND_OUTCOME_STATUS_EXECUTED
 		reason = "order filled (outcome re-announced after an interrupted delivery)"
-		if announced > 0 {
-			// THE FILL WAS RECOVERED, NOT LOST. resume()'s flush just published
-			// the committed ORDER_FILLED FACT — the real fill_id, the real price
-			// — so this is a completed announcement, not a hole in the record.
-			// Still logged, because the interruption itself is worth seeing.
-			s.logger.Warn("oms: completing an interrupted FILLED announcement — the ORDER_FILLED FACT was "+
-				"committed to the outbox with the fill and has just been published from it, so nothing "+
-				"was lost; only the trailing command outcome was outstanding (#292)",
-				"order_id", st.GetOrderId(), "facts_recovered", announced)
-			break
-		}
-		s.logger.Error("oms: completing an interrupted FILLED announcement WITHOUT its ORDER_FILLED FACT — "+
-			"nothing was queued for this order, so the fill predates the outbox (migration 0006) and is "+
-			"not recoverable from the stored OrderState; only the command outcome is re-published, and "+
-			"tv-sync, accounting, and audit will never see this fill's FACT",
-			"order_id", st.GetOrderId())
+		s.logger.Warn("oms: completing an interrupted FILLED command outcome; pending outbox inspection does not establish prior fill publication",
+			"order_id", st.GetOrderId(), "fill_fact_publication", "UNKNOWN", "outbox_records_flushed", announced)
 	default:
 		// REJECTED, and EXPIRED for a row this build did not write. Both callers
 		// of Expire — a scheduled parent finishing its window, and a venue expiry

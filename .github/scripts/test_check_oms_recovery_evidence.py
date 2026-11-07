@@ -100,7 +100,7 @@ class RecoveryEvidenceTests(unittest.TestCase):
 
     def test_complete_bound_proof(self):
         result = proof.qualify(self.root, self.binding, True)
-        self.assertEqual(result["required_passes"], 81)
+        self.assertEqual(result["required_passes"], 114)
         self.assertEqual(proof.qualify(self.root, self.binding), result)
     def test_missing_or_skipped_case(self):
         for mode in ("missing", "skip"):
@@ -111,6 +111,31 @@ class RecoveryEvidenceTests(unittest.TestCase):
                 self.write("large-rust.jsonl", changed)
                 with self.assertRaises(ValueError): proof.checked(self.root)
                 self.write("large-rust.jsonl", original)
+    def test_fee_command_controls_are_mandatory(self):
+        names = {"TestRustFeeCommandProposalParity", "TestRustFeeCommandApprovalLifecycle"}
+        for parent, children in {
+            "TestRustFeeCommandPublicationRestart": ["go", "rust"],
+            "TestRustFeeCommandProposalParity": ["one-change", "sorted-two-changes"],
+            "TestRustFeeCommandConcurrentCommands": ["proposal", "approval"],
+            "TestRustFeeCommandApprovedEvidenceDrift": ["history-attribution-error", "posted-unknown-block", "stale-fee-block"],
+            "TestRustFeeCommandHumanPortfolioBoundary": "foreign-tenant fact-not-command missing-human empty-human wrong-target empty-portfolios wrong-portfolio wrong-case-order".split(),
+            "TestRustFeeCommandApprovalRefusalBlocks": ["same-person", "wrong-digest", "expired"],
+            "TestRustFeeCommandAtomicRollback": ["proposal/outbox-insert", "proposal/deferred-commit", "approval/outbox-insert", "approval/deferred-commit"],
+        }.items():
+            names.add(parent)
+            names.update(parent + "/" + child for child in children)
+        self.assertEqual(len(names), 32)
+        self.assertTrue(names <= proof.NAMES)
+        original = proof.events(self.root / "recovery.jsonl")
+        for name in names:
+            for mode in ("missing", "skip"):
+                with self.subTest(name=name, mode=mode):
+                    changed = [e for e in original if not (e.get("Action") == "pass" and e.get("Test") == name)]
+                    if mode == "skip": changed.append({"Action": "skip", "Package": proof.PREFIX + proof.PACKAGE, "Test": name})
+                    self.write("recovery.jsonl", changed)
+                    with self.assertRaises(ValueError): proof.checked(self.root)
+        self.write("recovery.jsonl", original)
+
     def test_missing_or_misassigned_artifact_slot(self):
         go = self.root / "large-go.jsonl"
         rust = self.root / "large-rust.jsonl"

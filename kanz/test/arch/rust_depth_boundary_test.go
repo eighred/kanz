@@ -132,7 +132,15 @@ func rustBoundaryFixtureFiles() []string {
 	for _, file := range rustOrderCoreSources {
 		out = append(out, "crates/order-core/"+file)
 	}
-	out = append(out, "crates/oms-recovery/Cargo.toml", "crates/oms-recovery/src/lib.rs", "crates/oms-recovery/src/coordinator.rs", "crates/oms-recovery/src/observation.rs", "crates/oms-recovery/src/preparation.rs", "crates/oms-recovery/src/approval.rs", "crates/oms-recovery/src/handlers.rs", "crates/oms-recovery/src/history.rs", "crates/oms-recovery/examples/recovery-coordinator-fixture.rs")
+	out = append(out, "crates/oms-recovery/Cargo.toml", "crates/oms-recovery/src/lib.rs", "crates/oms-recovery/src/coordinator.rs", "crates/oms-recovery/src/observation.rs", "crates/oms-recovery/src/preparation.rs", "crates/oms-recovery/src/approval.rs", "crates/oms-recovery/src/fee_control.rs", "crates/oms-recovery/src/fee_commands.rs", "crates/oms-recovery/src/handlers.rs", "crates/oms-recovery/src/history.rs", "crates/oms-recovery/examples/recovery-coordinator-fixture.rs")
+	out = append(out, rustLakePath+"/Cargo.toml")
+	for _, file := range rustLakeSources {
+		out = append(out, rustLakePath+"/"+file)
+	}
+	out = append(out, browserRenderPath+"/Cargo.toml")
+	for _, file := range browserRenderFileNames() {
+		out = append(out, browserRenderPath+"/"+file)
+	}
 	return out
 }
 func checkRustDepthBoundary(root string) error {

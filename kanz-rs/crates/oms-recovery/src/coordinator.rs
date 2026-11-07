@@ -1,6 +1,7 @@
-//! Concrete three-handler composition. Transport seams carry SQL sessions and
+//! Concrete existing recovery/fee-handler composition. Transport seams carry SQL sessions and
 //! already committed FACTs only; neither seam can authorize a financial action.
-use crate::{handlers, observation, Error};
+use crate::{fee_commands, handlers, observation, Error};
+use kanz_oms_store::diagnostics::{measure, Stage};
 use kanz_oms_store::relay::{Framer, Publisher, Relay, Sessions};
 use kanz_oms_venue::{Client, Requirements};
 use std::time::Duration;
@@ -16,6 +17,7 @@ pub enum Method {
     Observation,
     Ack,
     Parked,
+    FeeCorrection,
 }
 pub struct Coordinator<P, S> {
     tenant: String,
@@ -142,11 +144,18 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
             return Err(Error::InvalidInput);
         }
         let expires = tokio::time::Instant::now() + deadline;
-        let env = handlers::envelope(&self.tenant, envelope)?;
+        let env = match method {
+            Method::FeeCorrection => fee_commands::envelope(&self.tenant, envelope)?,
+            _ => handlers::envelope(&self.tenant, envelope)?,
+        };
         if tokio::time::Instant::now() >= expires {
             return Err(Error::Deadline);
         }
-        let connected = tokio::time::timeout_at(expires, self.sessions.connect()).await;
+        let connected = tokio::time::timeout_at(
+            expires,
+            measure(Stage::HandlerConnect, self.sessions.connect()),
+        )
+        .await;
         let mut session = match connected {
             Ok(Ok(session)) => session,
             other => {
@@ -160,7 +169,7 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
             }
         };
         if tokio::time::Instant::now() >= expires {
-            session.close().await;
+            measure(Stage::HandlerClose, session.close()).await;
             return Err(Error::Deadline);
         }
         let phase = tokio::time::timeout_at(expires, async {
@@ -182,6 +191,9 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
                 Method::Parked => {
                     handlers::parked(client, &self.tenant, env.value(), payload, now).await
                 }
+                Method::FeeCorrection => {
+                    fee_commands::handle(client, &self.tenant, env.value(), payload, now).await
+                }
             }
         })
         .await;
@@ -189,7 +201,7 @@ impl<P: Publisher, S: Sessions + Clone> Coordinator<P, S> {
         // The work clock continues during cleanup. A timed-out transaction may
         // have committed: Deadline is not a rollback receipt. Retain explicit
         // session ownership until cancellation and the driver have been joined.
-        session.close().await;
+        measure(Stage::HandlerClose, session.close()).await;
         let key = match phase {
             Ok(Ok(key)) => key,
             Ok(Err(error)) => {
