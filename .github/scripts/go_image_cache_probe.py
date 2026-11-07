@@ -21,7 +21,7 @@ import tempfile
 import time
 
 from rust_release_evidence import bounded_command
-from lake_cache_probe import strict, target_progress
+from lake_cache_probe import strict, target_progress, command_name_matches
 
 DOCKERFILE = "kanz/services/regulatory/Dockerfile"
 SOURCE = "kanz/services/regulatory/cmd/regulatory/main.go"
@@ -125,7 +125,7 @@ def variant(name, source):
 
 def witnesses(raw, name, source):
     _, version = variant(name, source)
-    return target_progress(raw,"build",(("download",DOWNLOAD,name in CASES[:2]),("compile",COMPILE.format(version=version),False)))
+    return target_progress(raw,"build",(("download",DOWNLOAD,name in CASES[:2]),("compile",COMPILE.format(version=version),False)),canonical_counter=True)
 
 
 def closed_progress(raw, name, source):
@@ -166,7 +166,7 @@ def projected_witnesses(raw,name,source):
             if not isinstance(vertex["digest"],str) or not re.fullmatch(r"sha256:[0-9a-f]{64}",vertex["digest"]) or not isinstance(vertex["name"],str) or type(vertex["cached"]) is not bool:raise ValueError("projected identity shape")
             if not isinstance(vertex["inputs"],list) or len(vertex["inputs"])>4096 or any(not isinstance(x,str) or not re.fullmatch(r"sha256:[0-9a-f]{64}",x) for x in vertex["inputs"]):raise ValueError("projected graph shape")
             _,version=variant(name,source)
-            if vertex["name"]!="internal" and not any(re.fullmatch(r"\[build [1-9][0-9]*/[1-9][0-9]*\] RUN "+re.escape(cmd),vertex["name"]) for cmd in (DOWNLOAD,COMPILE.format(version=version))):raise ValueError("unprojected vertex name")
+            if vertex["name"]!="internal" and not any(command_name_matches(vertex["name"],"build",cmd,canonical_counter=True) for cmd in (DOWNLOAD,COMPILE.format(version=version))):raise ValueError("unprojected vertex name")
             for field in ("started","completed"):
                 if field in vertex and (not isinstance(vertex[field],str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})",vertex[field])):raise ValueError("projected timestamp shape")
             item={k:v for k,v in vertex.items() if k!="errorPresent"};converted.append(item);latest[vertex["digest"]]=item

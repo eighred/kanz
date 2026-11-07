@@ -17,9 +17,9 @@ class CacheControls(unittest.TestCase):
     def raw(self, case):
         _, version = p.variant(case, self.source)
         return (json.dumps({"vertexes": [
-            {"digest": "sha256:" + "1" * 64, "name": "[build 8/12] RUN " + p.DOWNLOAD,
+            {"digest": "sha256:" + "1" * 64, "name": "[build  7/10] RUN " + p.DOWNLOAD,
              "started": "2026-11-07T00:00:00Z", "completed": "2026-11-07T00:00:01Z", "cached": case in p.CASES[:2]},
-            {"digest": "sha256:" + "2" * 64, "name": "[build 12/12] RUN " + p.COMPILE.format(version=version),
+            {"digest": "sha256:" + "2" * 64, "name": "[build 10/10] RUN " + p.COMPILE.format(version=version),
              "started": "2026-11-07T00:00:00Z", "completed": "2026-11-07T00:00:01Z", "cached": False},
         ]}) + "\n").encode()
 
@@ -157,6 +157,19 @@ class CacheControls(unittest.TestCase):
                         if path:self.assertEqual((owned/path).read_bytes(),b"original\n"+p.COMMENT)
                         raise RuntimeError("controlled abort")
                 for file in (p.SOURCE,p.MODULE,p.SDK_MODULE):self.assertEqual((owned/file).read_bytes(),b"original\n")
+
+    def test_actual_padded_counter_and_closed_negative_labels(self):
+        # Exact retained c9 regulatory128481084988 DOWNLOAD custom name.
+        good="[build  7/10] RUN "+p.DOWNLOAD
+        self.assertTrue(p.command_name_matches(good,"build",p.DOWNLOAD,canonical_counter=True))
+        self.assertFalse(p.command_name_matches(good,"build",p.DOWNLOAD))
+        self.assertTrue(p.command_name_matches("[build 7/10] RUN "+p.DOWNLOAD,"build",p.DOWNLOAD))
+        for label in ("[build 7/10]", "[build   7/10]", "[build 07/10]", "[build  0/10]", "[build 11/10]", "[build  7/010]", "[build\t7/10]", "[build 7/0]", "[other  7/10]"):
+            bad=json.loads(self.raw("baseline"));bad["vertexes"][0]["name"]=label+" RUN "+p.DOWNLOAD
+            with self.subTest(label=label),self.assertRaises(ValueError):p.closed_progress((json.dumps(bad)+"\n").encode(),"baseline",self.source)
+        for command in (p.DOWNLOAD+" && true", "true", p.DOWNLOAD.replace("go-mod", "other-mod")):
+            self.assertFalse(p.command_name_matches("[build  7/10] RUN "+command,"build",p.DOWNLOAD,canonical_counter=True))
+        self.assertEqual(json.loads(p.closed_progress(self.raw("baseline"),"baseline",self.source))["vertexes"][0]["name"],good)
 
     def test_only_read_import_real_compile_target(self):
         argv=p.build_args("owned",Path("/owned"),self.source)
