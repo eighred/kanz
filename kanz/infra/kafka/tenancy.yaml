@@ -116,6 +116,8 @@ data:
     risk.curve                 3   delete   2592000000  yes
     risk.factor                3   delete   2592000000  yes
     alternatives.commitment    3   delete   604800000   yes
+    # #1413: same optional snapshot FACT topic/policy as the system table.
+    lake.snapshot              3   delete   2592000000  yes
     platform.authz             3   delete   2592000000  yes
     # WHAT AN AGENT WAS SHOWN (#971). Beside platform.authz above, and on the same
     # 30d retention, because they are two halves of one request: the authz decision

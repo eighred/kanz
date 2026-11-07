@@ -187,6 +187,13 @@ const minReasonLength = 60
 var reasonProvenance = regexp.MustCompile(`\d{4}-\d{2}-\d{2}|[A-Z]{3,}-M?\d+[a-z]?`)
 
 var notArchivedByDesign = map[string]string{
+	"lake.snapshot": "Owner decision 2026-11-07 (#1413, DR #60): this is absent from the DEFAULT " +
+		"archiver consume set because its retained NATS stream is opt-in. The existing tenant " +
+		"archiver must explicitly enable ARCHIVER_LAKE_SNAPSHOTS before the snapshot owner starts. " +
+		"TestOptionalLakeArchiveRouteIsClosed pins that executable opt-in; actual archival and " +
+		"broker-consumer evidence are required separately. Default nats-rebuild does not restore " +
+		"this optional lifecycle journal. Its registry, derived files and journal DR remain " +
+		"unverified under #1413/#60; this declaration does not establish a backup or live cutover.",
 	"market.book": "DATA-M1 scope: L2 depth is the highest-volume stream in the estate and is " +
 		"re-fetchable from the venue, unlike a fill. Archiving it is its own capacity and cost " +
 		"decision. After a failover the book is cold until the venue feeds refill it.",
