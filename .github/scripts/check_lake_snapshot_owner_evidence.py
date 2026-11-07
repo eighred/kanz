@@ -10,6 +10,8 @@ import stat
 import subprocess
 import sys
 from check_migration_evidence import verify, PREFIX
+from envoy_evidence import validate_scan
+from rust_release_evidence import image_recipe, validate_go_audit, validate_hybrid_native
 
 PACKAGE = "services/lake-sink/internal/snapshot"
 VERSIONS = ("2.12.6", "2.14.5")
@@ -94,6 +96,8 @@ NAMES |= {"TestWorkerPipeJoinPrecedesWait",
           "TestWorkerPipeJoinPrecedesWait/joined-before-wait",
           "TestWorkerPipeJoinPrecedesWait/old-wait-closes-unread-stderr",
           "TestWorkerPipeJoinCancellationRetainsUnjoinedTasks"}
+IMAGE_CASE = "TestSnapshotActualHybridImageEntrypointAndAutomaticLifecycleLanding"
+NAMES.add(IMAGE_CASE)
 TOP_LEVEL = {name for name in NAMES if "/" not in name}
 BINARIES = ("worker", "worker-swap", "owner.test", "gateway.test", "archiver.test", "kanz-lake-snapshot", "nats-2.12.6", "nats-2.14.5")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -133,7 +137,7 @@ def check_stream(raw, version):
     output = "".join(e.get("Output", "") for e in events)
     if "(cached)" in output: raise ValueError("cached proof refused")
     for name in TOP_LEVEL:
-        if name.startswith("TestSnapshotActual") and any(word in name for word in ("Broker", "Archiver", "Runtime", "OwnerKill", "Parking")):
+        if name == IMAGE_CASE or (name.startswith("TestSnapshotActual") and any(word in name for word in ("Broker", "Archiver", "Runtime", "OwnerKill", "Parking"))):
             body = "".join(e.get("Output", "") for e in events if e.get("Test") == name or e.get("Test", "").startswith(name + "/"))
             if "actual snapshot broker version: " + version not in body: raise ValueError("missing exact broker execution")
     if "actual snapshot PostgreSQL role: NOSUPERUSER NOBYPASSRLS; FORCE RLS tables: 2" not in output:
@@ -141,17 +145,82 @@ def check_stream(raw, version):
 
 
 def check_manifest(proof, sha, tree, run, attempt, hashes):
-    if set(proof) != {"schema", "source", "tree", "run", "attempt", "versions", "binaries", "streams", "cleanup", "dependencies"}:
+    if set(proof) != {"schema", "source", "tree", "run", "attempt", "versions", "binaries", "streams", "cleanup", "dependencies", "hybrid"}:
         raise ValueError("unexpected manifest shape")
-    if proof["schema"] != 1 or type(proof["schema"]) is not int or proof["source"] != sha or proof["tree"] != tree or proof["run"] != run or proof["attempt"] != attempt or proof["versions"] != list(VERSIONS):
+    if proof["schema"] != 2 or type(proof["schema"]) is not int or proof["source"] != sha or proof["tree"] != tree or proof["run"] != run or proof["attempt"] != attempt or proof["versions"] != list(VERSIONS):
         raise ValueError("source/run/attempt/version mismatch")
     if not HEX40.fullmatch(sha) or not HEX40.fullmatch(tree) or not re.fullmatch(r"[1-9][0-9]*",run) or not re.fullmatch(r"[1-9][0-9]*",attempt): raise ValueError("invalid identity")
     if set(proof["binaries"]) != set(BINARIES) or any(not isinstance(v,str) or not HEX64.fullmatch(v) for v in proof["binaries"].values()): raise ValueError("missing binary identity")
     if proof["binaries"]["worker"] != proof["binaries"]["worker-swap"]: raise ValueError("different swap executable")
     if set(proof["dependencies"]) != {"postgres", "redpanda"} or any(not isinstance(v,str) or not re.fullmatch(r"sha256:[0-9a-f]{64}",v) for v in proof["dependencies"].values()): raise ValueError("missing actual dependency image identity")
-    if proof["streams"] != hashes or proof["cleanup"] != {"run":run,"attempt":attempt,"postgres_absent":True,"compose_absent":True}:
+    if proof["streams"] != hashes or proof["cleanup"] != {"run":run,"attempt":attempt,"postgres_absent":True,"compose_absent":True,"image_containers_absent":True,"image_volumes_absent":True}:
         raise ValueError("stream/cleanup mismatch")
-    if any(type(proof["cleanup"][k]) is not bool for k in ("postgres_absent","compose_absent")): raise ValueError("invalid cleanup verdict")
+    if any(type(proof["cleanup"][k]) is not bool for k in ("postgres_absent","compose_absent","image_containers_absent","image_volumes_absent")): raise ValueError("invalid cleanup verdict")
+    hybrid = proof["hybrid"]
+    if (not isinstance(hybrid, dict) or set(hybrid) != {"image", "worker", "files"}
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", hybrid["image"])
+            or not HEX64.fullmatch(hybrid["worker"]) or set(hybrid["files"]) != set(HYBRID_FILES)
+            or any(not HEX64.fullmatch(value) for value in hybrid["files"].values())):
+        raise ValueError("hybrid identity/inventory missing")
+
+
+HYBRID_FILES = ("hybrid.spdx.json", "hybrid-trivy.json", "hybrid/evidence.json", "hybrid/dependencies.json",
+    "hybrid/audit-lock.json", "hybrid/audit-binary.json", "hybrid/go-buildinfo.json",
+    "hybrid/native-inventory.json", "hybrid/go-audit.txt", "hybrid/go-audit.json")
+
+
+def image_evidence(directory, sha):
+    bodies, total = {}, 0
+    for name in HYBRID_FILES:
+        raw = read_file(directory / name, min(64 << 20, (128 << 20) - total))
+        total += len(raw)
+        bodies[name] = raw
+    evidence = json.loads(bodies["hybrid/evidence.json"], object_pairs_hook=strict)
+    image = read_file(directory / "lake-image.txt", 128).decode("ascii").strip()
+    if (evidence.get("passed") is not True or evidence.get("localOnly") is not True
+            or evidence.get("sourceSHA") != sha or evidence.get("image") != image or evidence.get("imageId") != image
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", image)):
+        raise ValueError("hybrid audit/source/image verdict differs")
+    hashes = {name: hashlib.sha256(raw).hexdigest() for name, raw in bodies.items()}
+    if evidence.get("sbomSHA256") != hashes["hybrid.spdx.json"]: raise ValueError("hybrid SBOM changed")
+    for field, name in (("goBuildinfoSHA256", "go-buildinfo.json"), ("nativeInventorySHA256", "native-inventory.json"),
+                        ("goPlainAuditSHA256", "go-audit.txt"), ("goJSONAuditSHA256", "go-audit.json")):
+        if evidence.get("hybrid", {}).get(field) != hashes["hybrid/" + name]: raise ValueError("hybrid evidence member changed")
+    hybrid = evidence["hybrid"]
+    pinned = image_recipe("lake-sink").native_base
+    repository, digest = pinned.split("@")
+    canonical = repository.rsplit(":", 1)[0] + "@" + digest
+    if hybrid.get("nativeBase") != canonical: raise ValueError("hybrid native base differs")
+    native = json.loads(bodies["hybrid/native-inventory.json"], object_pairs_hook=strict)
+    if set(native) != {"base", "image"}: raise ValueError("native inventory shape differs")
+    count = validate_hybrid_native(native["base"], native["image"], hybrid.get("goBinarySHA256"), evidence.get("binarySHA256"))
+    if hybrid.get("nativeELFs") != count: raise ValueError("native inventory count differs")
+    build = json.loads(bodies["hybrid/go-buildinfo.json"], object_pairs_hook=strict)
+    if build.get("GoVersion") != hybrid.get("goVersion"): raise ValueError("Go toolchain binding differs")
+    modules = {("github.com/eighred/kanz", "(devel)"), ("stdlib", build["GoVersion"])}
+    for dep in build["Deps"]:
+        effective = dep.get("Replace", dep)
+        modules.add((effective["Path"], effective["Version"]))
+    if validate_go_audit(bodies["hybrid/go-audit.json"].decode(), build["GoVersion"], modules) != hybrid.get("goAudit"):
+        raise ValueError("Go audit projection differs")
+    for name in ("lock", "binary"):
+        audit = json.loads(bodies["hybrid/audit-" + name + ".json"], object_pairs_hook=strict)
+        if (audit.get("vulnerabilities") != {"found":False,"count":0,"list":[]} or audit.get("warnings") != {}
+                or audit.get("settings", {}).get("ignore") != []
+                or audit.get("database", {}).get("last-commit") != evidence.get(name + "AdvisoryDBCommit")):
+            raise ValueError("hybrid Rust audit differs")
+    validate_scan(json.loads(bodies["hybrid-trivy.json"], object_pairs_hook=strict), image)
+    return {"image":image,"worker":evidence.get("binarySHA256"),"files":hashes}
+
+
+def image_stream(raw, hybrid, source):
+    events = [json.loads(line, object_pairs_hook=strict) for line in raw.decode().splitlines() if line]
+    output = "".join(e.get("Output", "") for e in events if e.get("Test") == IMAGE_CASE)
+    expected = "actual hybrid identity: image=" + hybrid["image"] + " worker=" + hybrid["worker"] + " source=" + source
+    if output.count(expected) != 1: raise ValueError("executed hybrid identity differs")
+    values = re.findall(r"actual hybrid cgroup: memory_max=([0-9]+) memory_peak=([0-9]+) pids_max=([0-9]+)", output)
+    if len(values) != 1 or int(values[0][0]) != 1536 << 20 or not 0 < int(values[0][1]) <= int(values[0][0]) or int(values[0][2]) != 64:
+        raise ValueError("actual hybrid cgroup observation missing")
 
 
 def check_source_inventory(root):
@@ -185,9 +254,11 @@ def main():
         return
     if not all((args.proof,args.sha,args.tree,args.run,args.attempt)): raise ValueError("incomplete exact source identity")
     hashes = {}
+    hybrid = image_evidence(args.proof, args.sha)
     for version in VERSIONS:
         raw = read_file(args.proof / (version + ".jsonl"), 64 << 20)
         check_stream(raw, version)
+        image_stream(raw, hybrid, args.sha)
         hashes[version + ".jsonl"] = hashlib.sha256(raw).hexdigest()
     cleanup = json.loads(read_file(args.proof / "cleanup.json", 4096), object_pairs_hook=strict)
     dependencies = {name:read_file(args.proof/(name+"-image.txt"),128).decode("ascii").strip() for name in ("postgres","redpanda")}
@@ -198,13 +269,13 @@ def main():
         if actual != [args.sha,args.tree]: raise ValueError("checkout source differs")
         binary_hashes = {name: hashlib.sha256(read_file(args.binaries/name, 256<<20)).hexdigest() for name in BINARIES}
         if binary_hashes != before: raise ValueError("tested binary changed")
-        proof = {"schema":1,"source":args.sha,"tree":args.tree,"run":args.run,"attempt":args.attempt,"versions":list(VERSIONS),"binaries":binary_hashes,"streams":hashes,"cleanup":cleanup,"dependencies":dependencies}
+        proof = {"schema":2,"source":args.sha,"tree":args.tree,"run":args.run,"attempt":args.attempt,"versions":list(VERSIONS),"binaries":binary_hashes,"streams":hashes,"cleanup":cleanup,"dependencies":dependencies,"hybrid":hybrid}
         check_manifest(proof,args.sha,args.tree,args.run,args.attempt,hashes)
         (args.proof/"proof.json").write_text(json.dumps(proof,sort_keys=True)+"\n")
     else:
         proof = json.loads(read_file(args.proof/"proof.json",64<<10),object_pairs_hook=strict)
         check_manifest(proof,args.sha,args.tree,args.run,args.attempt,hashes)
-        if cleanup != proof["cleanup"] or dependencies != proof["dependencies"] or before != proof["binaries"]: raise ValueError("retained receipt differs")
+        if cleanup != proof["cleanup"] or dependencies != proof["dependencies"] or before != proof["binaries"] or hybrid != proof["hybrid"]: raise ValueError("retained receipt differs")
     print("Finite snapshot owner: exact inventories, both broker versions and cleanup verified")
 
 
