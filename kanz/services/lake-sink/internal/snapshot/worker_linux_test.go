@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -73,7 +74,23 @@ func TestSnapshotActualWorkerConvertAndQuery(t *testing.T) {
 	query := &workerpb.WorkerRequest{ProtocolVersion: ProtocolVersion, Operation: &workerpb.WorkerRequest_Query{Query: &workerpb.QueryControl{ParquetBytes: uint64(len(c.Parquet)), ParquetSha256: c.Sha256, Query: q, ExpectedTenant: request.GetConvert().Tenant, ExpectedRowCount: 2, SchemaVersion: SchemaVersion}}}
 	first, err := w.Invoke(ctx, query, c.Parquet)
 	if err != nil || len(first.GetQuery().GetEvents()) != 1 || first.GetQuery().Exhausted || first.GetQuery().NextOrdinal == nil {
-		t.Fatal("actual bounded first page failed")
+		category := "shape"
+		var failure *workerFailure
+		switch {
+		case errors.As(err, &failure):
+			category = failure.phase
+		case errors.Is(err, ErrBusy):
+			category = "busy"
+		case errors.Is(err, ErrInvalid):
+			category = "invalid"
+		case errors.Is(err, ErrCapacity):
+			category = "capacity"
+		case errors.Is(err, ErrWorker):
+			category = "worker"
+		case err != nil:
+			category = "other"
+		}
+		t.Fatalf("actual bounded first page failed: category=%s", category)
 	}
 	e := first.GetQuery().Events[0]
 	want := request.GetConvert().Rows[0]

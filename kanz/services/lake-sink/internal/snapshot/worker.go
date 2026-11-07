@@ -20,6 +20,41 @@ import (
 var ErrWorker = errors.New("snapshot worker refused or unavailable")
 var ErrBusy = errors.New("snapshot operation busy")
 
+type workerFailure struct{ phase string }
+
+func (e *workerFailure) Error() string { return "snapshot worker refused: " + e.phase }
+func (e *workerFailure) Unwrap() error { return ErrWorker }
+
+type workerPipeJoins struct {
+	write, stderr       bool
+	writeErr, stderrErr error
+}
+
+// Both pipe tasks already run concurrently. Normal Wait must not close a pipe
+// whose reader/writer has not finished; cancellation retains their ownership.
+func joinWorkerPipes(ctx context.Context, write, stderr <-chan error) workerPipeJoins {
+	var joined workerPipeJoins
+	for write != nil || stderr != nil {
+		select {
+		case joined.writeErr = <-write:
+			joined.write = true
+			write = nil
+			if joined.writeErr != nil {
+				return joined
+			}
+		case joined.stderrErr = <-stderr:
+			joined.stderr = true
+			stderr = nil
+			if joined.stderrErr != nil {
+				return joined
+			}
+		case <-ctx.Done():
+			return joined
+		}
+	}
+	return joined
+}
+
 // Worker invokes only the configured, digest-verified executable. The binary
 // installs its own reviewed Linux sandbox before reading this private protocol.
 // No caller may choose a program, arguments, environment, SQL or object path.
@@ -267,6 +302,12 @@ func (op *Operation) Invoke(ctx context.Context, request *workerpb.WorkerRequest
 	if output.err != nil {
 		cancel()
 	}
+	// os/exec.Wait closes StderrPipe as well as StdoutPipe. Observe all pipe
+	// tasks before normal Wait, not just the response reader.
+	pipes := joinWorkerPipes(workCtx, writeDone, errorDone)
+	if !pipes.write || !pipes.stderr || pipes.writeErr != nil || pipes.stderrErr != nil {
+		cancel()
+	}
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
 	join := time.NewTimer(5 * time.Second)
@@ -285,8 +326,12 @@ func (op *Operation) Invoke(ctx context.Context, request *workerpb.WorkerRequest
 			if !readJoined {
 				<-readDone
 			}
-			<-writeDone
-			<-errorDone
+			if !pipes.write {
+				<-writeDone
+			}
+			if !pipes.stderr {
+				<-errorDone
+			}
 			op.childJoined()
 			op.release()
 		}()
@@ -295,10 +340,21 @@ func (op *Operation) Invoke(ctx context.Context, request *workerpb.WorkerRequest
 	if !readJoined {
 		<-readDone
 	}
-	writeErr := <-writeDone
-	stderrErr := <-errorDone
-	if output.err != nil || waitErr != nil || writeErr != nil || stderrErr != nil || workCtx.Err() != nil {
-		return nil, ErrWorker
+	if !pipes.write {
+		pipes.writeErr = <-writeDone
+	}
+	if !pipes.stderr {
+		pipes.stderrErr = <-errorDone
+	}
+	for _, failure := range []struct {
+		phase string
+		err   error
+	}{
+		{"stdout", output.err}, {"wait", waitErr}, {"stdin", pipes.writeErr}, {"stderr", pipes.stderrErr}, {"context", workCtx.Err()},
+	} {
+		if failure.err != nil {
+			return nil, &workerFailure{phase: failure.phase}
+		}
 	}
 	var response workerpb.WorkerResponse
 	if proto.Unmarshal(output.body, &response) != nil || len(response.ProtoReflect().GetUnknown()) != 0 || response.ProtocolVersion != ProtocolVersion || response.GetFailure() != nil {
