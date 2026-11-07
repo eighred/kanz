@@ -1,11 +1,9 @@
 use crate::proto::{envelope::v1::EventFrame, lake::worker::v1 as worker};
 use crate::{Failure, MAX_PARQUET_BYTES, MAX_RAW_FRAME, MAX_ROWS};
+use arrow_array::RecordBatch;
+use arrow_array::{Array, ArrayRef, BinaryArray, Int32Array, Int64Array, StringArray, UInt64Array};
+use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
-use datafusion::arrow::array::{
-    Array, ArrayRef, BinaryArray, Int32Array, Int64Array, StringArray, UInt64Array,
-};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
-use datafusion::arrow::record_batch::RecordBatch;
 use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
 use parquet::basic::Compression;
 use parquet::file::{metadata::KeyValue, properties::WriterProperties};
@@ -205,7 +203,7 @@ pub fn convert(input: worker::ConvertRows) -> Result<worker::Converted, Failure>
 pub fn read_parquet(
     control: &worker::QueryControl,
     body: Vec<u8>,
-) -> Result<Vec<RecordBatch>, Failure> {
+) -> Result<Vec<datafusion::arrow::record_batch::RecordBatch>, Failure> {
     if control.schema_version != 1
         || !valid_text(&control.expected_tenant)
         || control.expected_row_count > MAX_ROWS as u64
@@ -283,6 +281,7 @@ pub fn read_parquet(
     let mut previous = None;
     let mut rows = 0u64;
     let mut memory = 0usize;
+    let mut projection_bytes = 0usize;
     for batch in reader {
         let batch = batch.map_err(|_| Failure::InvalidParquet)?;
         memory = memory
@@ -310,13 +309,10 @@ pub fn read_parquet(
             valid_row(&row, &control.expected_tenant)?;
             previous = Some(row.ordinal);
         }
-        // The exact tenant-bound stored metadata was checked above. Rebind
-        // only that known schema metadata for the private in-memory table;
-        // all arrays, field definitions and original bytes remain unchanged.
-        batches.push(
-            RecordBatch::try_new(schema(), batch.columns().to_vec())
-                .map_err(|_| Failure::InvalidParquet)?,
-        );
+        // Every stored field and original frame was validated before this
+        // version boundary. Copy only the public six-column projection; raw
+        // frames, hashes, tenant and Kafka coordinates never enter computation.
+        batches.push(project_batch(&batch, &mut projection_bytes)?);
     }
     if rows != control.expected_row_count {
         return Err(Failure::InvalidParquet);
@@ -392,4 +388,84 @@ fn captured_row(batch: &RecordBatch, row: usize) -> Result<worker::CapturedRow, 
         raw_sha256: digest.to_vec(),
         kafka,
     })
+}
+
+pub fn query_schema() -> Arc<datafusion::arrow::datatypes::Schema> {
+    use datafusion::arrow::datatypes::{DataType as T, Field as F, Schema as S};
+    Arc::new(S::new(vec![
+        F::new("ordinal", T::UInt64, false),
+        F::new("event_id", T::Utf8, false),
+        F::new("event_type", T::Utf8, false),
+        F::new("event_seconds", T::Int64, false),
+        F::new("event_nanos", T::Int32, false),
+        F::new("decode_status", T::Int32, false),
+    ]))
+}
+
+fn project_batch(
+    batch: &RecordBatch,
+    total_bytes: &mut usize,
+) -> Result<datafusion::arrow::record_batch::RecordBatch, Failure> {
+    use datafusion::arrow::{array as compute, record_batch::RecordBatch as ComputeBatch};
+    macro_rules! column {
+        ($index:expr, $kind:ty) => {{
+            let array = batch
+                .column($index)
+                .as_any()
+                .downcast_ref::<$kind>()
+                .ok_or(Failure::InvalidParquet)?;
+            if array.null_count() != 0 {
+                return Err(Failure::InvalidParquet);
+            }
+            array
+        }};
+    }
+    let ordinal = column!(0, UInt64Array);
+    let id = column!(2, StringArray);
+    let event_type = column!(3, StringArray);
+    let seconds = column!(4, Int64Array);
+    let nanos = column!(5, Int32Array);
+    let status = column!(6, Int32Array);
+    // Count fixed-width values, both offset arrays and UTF8 bytes before any
+    // cross-version allocation. This 64MiB logical total is separate from 96MiB stored
+    // arrays and DataFusion's pool; all still share the unchanged OS AS limit.
+    let mut bytes = batch
+        .num_rows()
+        .checked_mul(32)
+        .and_then(|n| n.checked_add(8))
+        .ok_or(Failure::Capacity)?;
+    for row in 0..batch.num_rows() {
+        bytes = bytes
+            .checked_add(id.value(row).len())
+            .and_then(|n| n.checked_add(event_type.value(row).len()))
+            .ok_or(Failure::Capacity)?;
+    }
+    let next = total_bytes.checked_add(bytes).ok_or(Failure::Capacity)?;
+    if next > 64 * 1024 * 1024 {
+        return Err(Failure::Capacity);
+    }
+    let columns: Vec<compute::ArrayRef> = vec![
+        Arc::new(compute::UInt64Array::from_iter_values(
+            ordinal.values().iter().copied(),
+        )),
+        Arc::new(compute::StringArray::from_iter_values(
+            (0..batch.num_rows()).map(|i| id.value(i)),
+        )),
+        Arc::new(compute::StringArray::from_iter_values(
+            (0..batch.num_rows()).map(|i| event_type.value(i)),
+        )),
+        Arc::new(compute::Int64Array::from_iter_values(
+            seconds.values().iter().copied(),
+        )),
+        Arc::new(compute::Int32Array::from_iter_values(
+            nanos.values().iter().copied(),
+        )),
+        Arc::new(compute::Int32Array::from_iter_values(
+            status.values().iter().copied(),
+        )),
+    ];
+    let result =
+        ComputeBatch::try_new(query_schema(), columns).map_err(|_| Failure::InvalidParquet)?;
+    *total_bytes = next;
+    Ok(result)
 }

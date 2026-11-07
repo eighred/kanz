@@ -43,7 +43,7 @@ pub async fn execute(
     );
     // This table is constructed only from validated in-memory batches. SQL and
     // Parquet/object-store table registration are absent from this interface.
-    let table = datafusion::datasource::MemTable::try_new(snapshot::schema(), vec![batches])
+    let table = datafusion::datasource::MemTable::try_new(snapshot::query_schema(), vec![batches])
         .map_err(|_| Failure::Query)?;
     let mut frame = context
         .read_table(Arc::new(table))

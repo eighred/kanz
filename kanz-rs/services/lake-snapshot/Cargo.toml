@@ -6,9 +6,11 @@ rust-version = "1.90"
 publish = false
 
 [dependencies]
+arrow-array = "=59.3.2"
+arrow-schema = "=59.3.2"
 bytes = "=1.12.1"
 datafusion = { version = "=54.1.0", default-features = false }
-parquet = { version = "=58.4.1", default-features = false, features = ["arrow"] }
+parquet = { version = "=59.3.2", default-features = false, features = ["arrow"] }
 prost = "=0.14.1"
 prost-types = "=0.14.1"
 sha2 = "=0.10.9"

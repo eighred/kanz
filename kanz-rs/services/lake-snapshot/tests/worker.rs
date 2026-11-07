@@ -167,7 +167,7 @@ fn query(control: worker::QueryControl, body: &[u8]) -> lake::SnapshotQueryResul
 
 #[test]
 fn actual_sandbox_convert_preserves_exact_wire_and_unknown_coordinates() {
-    use datafusion::arrow::array::{Array, BinaryArray, Int32Array, Int64Array, StringArray};
+    use arrow_array::{Array, BinaryArray, Int32Array, Int64Array, StringArray};
     let first = row(0, "market.snapshot.test");
     let mut second = first.clone();
     second.ordinal = 7;
@@ -350,5 +350,117 @@ fn actual_worker_refuses_scope_hash_projection_order_and_query_capacity() {
             ),
             "custody mutation {kind}"
         );
+    }
+}
+
+#[test]
+fn actual_maximum_row_snapshot_crosses_checked_arrow_versions() {
+    use kanz_lake_snapshot::MAX_ROWS;
+    let rows = (0..MAX_ROWS)
+        .map(|i| row(i as u64, "market.snapshot.bound"))
+        .collect();
+    let converted = convert(rows);
+    assert_eq!(converted.row_count, MAX_ROWS as u64);
+    let counts = query(
+        control(
+            &converted,
+            lake::SnapshotQueryOperation::CountByEventType,
+            None,
+            1,
+        ),
+        &converted.parquet,
+    );
+    assert_eq!(counts.counts.len(), 1);
+    assert_eq!(counts.counts[0].count, MAX_ROWS as u64);
+    let tail = query(
+        control(
+            &converted,
+            lake::SnapshotQueryOperation::ListEvents,
+            Some((MAX_ROWS - 2) as u64),
+            1,
+        ),
+        &converted.parquet,
+    );
+    assert_eq!(tail.events[0].ordinal, (MAX_ROWS - 1) as u64);
+    assert_eq!(tail.events[0].event_time.unwrap().nanos, 999_999_999);
+    assert!(tail.exhausted);
+}
+
+#[test]
+fn actual_worker_refuses_hash_bound_wrong_storage_type_and_row_tenant() {
+    use arrow_array::{Int64Array, RecordBatch, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
+    use parquet::basic::Compression;
+    use parquet::file::{metadata::KeyValue, properties::WriterProperties};
+    use std::sync::Arc;
+    let original = convert(vec![row(0, "market.snapshot.a")]);
+    for mutation in 0..3 {
+        let batch =
+            ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(original.parquet.clone()))
+                .unwrap()
+                .build()
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+        let mut fields = batch.schema().fields().to_vec();
+        let mut columns = batch.columns().to_vec();
+        if mutation == 1 {
+            fields[0] = Arc::new(Field::new("ordinal", DataType::Int64, false));
+            columns[0] = Arc::new(Int64Array::from(vec![0]));
+        } else if mutation == 2 {
+            columns[1] = Arc::new(StringArray::from(vec!["tenant-b"]));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let altered = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_max_row_group_row_count(Some(1024))
+            .set_key_value_metadata(Some(vec![
+                KeyValue::new("kanz.snapshot.schema".to_owned(), "1".to_owned()),
+                KeyValue::new("kanz.snapshot.tenant".to_owned(), "tenant-a".to_owned()),
+            ]))
+            .build();
+        let mut body = Vec::new();
+        {
+            let mut writer = ArrowWriter::try_new(&mut body, schema, Some(properties)).unwrap();
+            writer.write(&altered).unwrap();
+            writer.close().unwrap();
+        }
+        let altered = worker::Converted {
+            sha256: Sha256::digest(&body).to_vec(),
+            parquet: body,
+            row_count: 1,
+        };
+        let response = invoke(
+            worker::WorkerRequest {
+                protocol_version: 1,
+                operation: Some(worker::worker_request::Operation::Query(control(
+                    &altered,
+                    lake::SnapshotQueryOperation::ListEvents,
+                    None,
+                    1,
+                ))),
+            },
+            &altered.parquet,
+        );
+        if mutation == 0 {
+            match response.outcome.unwrap() {
+                worker::worker_response::Outcome::Query(result) => {
+                    assert_eq!(result.events.len(), 1);
+                    assert_eq!(result.events[0].ordinal, 0);
+                    assert_eq!(result.events[0].event_type, "market.snapshot.a");
+                    assert!(result.exhausted);
+                }
+                other => panic!("unchanged parent rewrite refused: {other:?}"),
+            }
+        } else {
+            assert!(
+                matches!(response.outcome, Some(worker::worker_response::Outcome::Failure(failure))
+                if failure.code == worker::WorkerFailureCode::InvalidParquet as i32),
+                "storage mutation {mutation}"
+            );
+        }
     }
 }

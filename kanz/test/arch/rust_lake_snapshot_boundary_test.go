@@ -24,9 +24,11 @@ rust-version = "1.90"
 publish = false
 
 [dependencies]
+arrow-array = "=59.3.2"
+arrow-schema = "=59.3.2"
 bytes = "=1.12.1"
 datafusion = { version = "=54.1.0", default-features = false }
-parquet = { version = "=58.4.1", default-features = false, features = ["arrow"] }
+parquet = { version = "=59.3.2", default-features = false, features = ["arrow"] }
 prost = "=0.14.1"
 prost-types = "=0.14.1"
 sha2 = "=0.10.9"
@@ -49,7 +51,7 @@ var rustLakePinned = map[string]string{
 	"src/proto.rs":              "002b6f86d61dedc8a1ac2b7d2cbe9ed64fdec7cd1078c03c4f8c27cf09983c87",
 	"src/sandbox.rs":            "6b7a3ba9feea625754b58c4b3080a7137df12cb9ec58c64b72925ec50d4ead3e",
 	"tests/sandbox_process.rs":  "d33d493b172347bf213516d18e8712edb698418aa273de389667fff45889ea18",
-	"tests/worker.rs":           "75d0bff5c239eabc404694ece753f7d07194869850f5bd1907635eb0c3c98567",
+	"tests/worker.rs":           "0f8a7076552ab5915601277c119822e98a4cd258b5cd1e931de5fca9a71b04ef",
 }
 var rustLakeSources = []string{"build.rs", "src/lib.rs", "src/proto.rs", "src/main.rs", "src/query.rs", "src/snapshot.rs", "src/sandbox.rs", "examples/sandbox-probe.rs", "tests/sandbox_process.rs", "tests/worker.rs"}
 

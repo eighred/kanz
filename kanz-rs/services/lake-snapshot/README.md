@@ -54,3 +54,12 @@ qualified read-only image, launched by a nonroot Go owner through its verified
 descriptor. Filesystem ownership/manifest hashes alone do not prevent privileged
 same-inode mutation. Go service wiring, registry/outbox, broker/network policy,
 actual deployment and retained-history migration require their own acceptance.
+
+Storage uses Parquet/Arrow 59.3.2, which removes the unmaintained `paste`
+dependency. DataFusion 54.1 retains its Arrow 58 compute interface and Rust 1.90
+compatibility. After all stored fields, tenant identity and original frames are
+validated, six public columns cross that version boundary through checked typed
+values. No FFI, layout cast or IPC coercion is used. Raw frames and Kafka fields
+are excluded from the compute table. Projection values have a separate
+64MiB aggregate logical byte cap before copying; stored-array, query-pool and unchanged
+512MiB process address-space limits still apply together.
