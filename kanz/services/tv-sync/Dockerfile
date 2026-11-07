@@ -14,9 +14,9 @@ FROM ghcr.io/eighred/base/golang:1.26.10 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 
-# Dependency layer: go.mod/go.sum + the generated SDK the replace points at,
-# so `go mod download` is cached across source-only changes.
-COPY kanz-schemas/gen/go/ ./kanz-schemas/gen/go/
+# Dependency layer: consumer and generated SDK module metadata only,
+# so schema source changes preserve the verified dependency download layer.
+COPY kanz-schemas/gen/go/go.mod kanz-schemas/gen/go/go.sum ./kanz-schemas/gen/go/
 COPY kanz/go.mod kanz/go.sum ./kanz/
 WORKDIR /src/kanz
 # The download is retried (#776): the module proxy and checksum database drop
@@ -26,6 +26,7 @@ WORKDIR /src/kanz
 COPY kanz/build/go-mod-download.sh /usr/local/bin/go-mod-download.sh
 RUN sh /usr/local/bin/go-mod-download.sh
 
+COPY kanz-schemas/gen/go/ /src/kanz-schemas/gen/go/
 COPY kanz/ ./
 # CGO off ⇒ a fully static binary, which is what distroless/static requires.
 # VERSION is stamped into the binary (internal/version, #143). Unset here means
