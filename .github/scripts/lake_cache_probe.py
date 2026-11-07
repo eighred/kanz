@@ -38,6 +38,11 @@ def digest(raw):
 def progress(raw, source):
     if not raw or len(raw) > LIMIT or not raw.endswith(b"\n"):
         raise ValueError("progress size or termination differs")
+    version = digest(("kanz-lake-joint-cache-probe:" + source).encode())[:40]
+    commands = (("cook", COOK, True), ("build", BUILD.replace("$VERSION", version), False))
+    def owned(name):
+        return any(re.fullmatch(r"\[rust-build [1-9][0-9]*/[1-9][0-9]*\] RUN " + re.escape(command), name)
+                   for _, command, _ in commands)
     vertices = {}
     lines = raw.splitlines()
     if len(lines) > 20000: raise ValueError("progress event count exceeds bound")
@@ -57,12 +62,15 @@ def progress(raw, source):
             key = vertex["digest"]
             old = vertices.get(key)
             if old and old["name"] != vertex["name"]: raise ValueError("vertex identity changed")
-            if old and old.get("completed") and old != vertex: raise ValueError("completed vertex changed")
+            # BuildKit v0.33 vertexStream.append forwards successive same-digest
+            # observations, including restarted frontend/context operations. Only
+            # our exact cook/build witnesses require immutable completed state.
+            if old and owned(vertex["name"]) and old.get("completed") and old != vertex:
+                raise ValueError("completed owned vertex changed")
             vertices[key] = vertex
             if len(vertices) > 4096: raise ValueError("vertex count exceeds bound")
     result = {}
-    version = digest(("kanz-lake-joint-cache-probe:" + source).encode())[:40]
-    for label, command, cached in (("cook", COOK, True), ("build", BUILD.replace("$VERSION", version), False)):
+    for label, command, cached in commands:
         matches = [v for v in vertices.values() if re.fullmatch(r"\[rust-build [1-9][0-9]*/[1-9][0-9]*\] RUN " + re.escape(command), v["name"])]
         if len(matches) != 1: raise ValueError("exact build vertex missing or duplicated")
         vertex = matches[0]

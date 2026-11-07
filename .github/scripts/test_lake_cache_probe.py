@@ -70,6 +70,35 @@ class CacheProbeTests(unittest.TestCase):
         for raw in (wire(events()).rstrip(), b"x"*(gate.LIMIT+1), b'{"vertexes":[],"vertexes":[]}\n', b'{}\n'):
             with self.assertRaises(ValueError): gate.progress(raw, SOURCE)
 
+    def test_restarted_internal_vertices_preserve_owned_witnesses(self):
+        # Normalized from failed run42374756725 artifact13575722853: internal
+        # Dockerfile/context/frontend vertices restart after a completed update.
+        data = events()
+        for i, name in enumerate(("[internal] load build definition from Dockerfile",
+                                  "[internal] load .dockerignore", "[internal] load build context",
+                                  "docker-image://docker.io/docker/dockerfile:1@sha256:"+"f"*64)):
+            first = {"digest":"sha256:"+str(i+3)*64,"name":name,
+                     "started":"2026-11-07T00:00:00Z","completed":"2026-11-07T00:00:01Z"}
+            restarted = {**first,"started":"2026-11-07T00:00:02Z","cached":True}
+            restarted.pop("completed")
+            data += [{"vertexes":[first]}, {"vertexes":[restarted]},
+                     {"vertexes":[{**restarted,"completed":"2026-11-07T00:00:03Z"}]}]
+        self.assertEqual(gate.progress(wire(data),SOURCE),gate.progress(wire(events()),SOURCE))
+        for index in (0,1):
+            for mutation in ("reopen","cached","error"):
+                bad=copy.deepcopy(data); changed=copy.deepcopy(bad[0]["vertexes"][index])
+                if mutation=="reopen":changed.pop("completed")
+                if mutation=="cached":changed["cached"]=not changed.get("cached",False)
+                if mutation=="error":changed["error"]="closed synthetic failure"
+                bad.append({"vertexes":[changed]})
+                with self.subTest(target=index,mutation=mutation),self.assertRaises(ValueError):gate.progress(wire(bad),SOURCE)
+        for mutation in ("error","identity"):
+            bad=copy.deepcopy(data);changed=copy.deepcopy(bad[-1]["vertexes"][0])
+            if mutation=="error":changed["error"]="closed synthetic failure"
+            if mutation=="identity":changed["name"]="different internal operation"
+            bad.append({"vertexes":[changed]})
+            with self.subTest(internal=mutation),self.assertRaises(ValueError):gate.progress(wire(bad),SOURCE)
+
     def test_closed_report_binds_source_image_and_progress(self):
         raw = wire(events()); version = gate.digest(("kanz-lake-joint-cache-probe:"+SOURCE).encode())[:40]
         report = {"schema":1,"source":SOURCE,"tree":"b"*40,"run":"1","attempt":"2","image":"sha256:"+"c"*64,"builder":"builder-fixed",

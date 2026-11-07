@@ -84,6 +84,7 @@ func lakeHybridCI(raw string) error {
 		"Scan actual hybrid runtime before execution":           {"image-ref": "${{ steps.lake-image.outputs.image }}", "exit-code": "1", "version": "v0.72.0", "format": "json", "output": "snapshot-owner-proof/hybrid-trivy.json", "list-all-pkgs": "true"},
 	}
 	scripts := map[string][]string{
+		"Verify complete source-bound owner evidence":                     {"check_lake_snapshot_owner_evidence.py --seal"},
 		"Bind actual hybrid image identity":                               {"image=$(docker image inspect", "echo \"image=$image\" >> \"$GITHUB_OUTPUT\""},
 		"Prove joint synthetic source and VERSION dependency cache reuse": {"set -euo pipefail", "test_lake_cache_probe.py", "lake_cache_probe.py --source", `--image "$LAKE_IMAGE" --builder "$LAKE_BUILDER" --output snapshot-owner-proof`},
 		"Install reviewed hybrid audit tools":                             {"set -euo pipefail", "bash .github/scripts/install-rust-audit.sh", "govulncheck@v1.6.0"},
@@ -129,14 +130,26 @@ func lakeHybridCI(raw string) error {
 			}
 		}
 	}
-	if builderIndex < 0 || builderIndex >= seen["Build actual hybrid lake image without publishing"] || seen["Build actual hybrid lake image without publishing"] >= seen["Bind actual hybrid image identity"] || seen["Bind actual hybrid image identity"] >= seen["Prove joint synthetic source and VERSION dependency cache reuse"] || seen["Prove joint synthetic source and VERSION dependency cache reuse"] >= seen["Require hybrid binary provenance and fresh Rust and Go audits"] {
-		return fmt.Errorf("synthetic probe ordering differs")
-	}
 	if len(seen) != len(fields)+len(scripts) {
 		return fmt.Errorf("missing hybrid qualification step")
 	}
-	if seen["Install pinned hybrid signature verifier"] >= seen["Install reviewed hybrid audit tools"] || seen["Install reviewed hybrid audit tools"] >= seen["Require hybrid binary provenance and fresh Rust and Go audits"] || seen["Build actual hybrid lake image without publishing"] >= seen["Require hybrid binary provenance and fresh Rust and Go audits"] || seen["Require hybrid binary provenance and fresh Rust and Go audits"] >= seen["Actual finite owner on both broker versions without skips"] {
-		return fmt.Errorf("image evidence must precede runtime")
+	order := []string{
+		"Install pinned hybrid signature verifier", "Install reviewed hybrid audit tools",
+		"Build actual hybrid lake image without publishing", "Bind actual hybrid image identity",
+		"Catalog actual hybrid applications and native runtime", "Scan actual hybrid runtime before execution",
+		"Require hybrid binary provenance and fresh Rust and Go audits",
+		"Actual finite owner on both broker versions without skips",
+		"Stop owned snapshot fixture dependencies and prove absence",
+		"Prove joint synthetic source and VERSION dependency cache reuse",
+		"Verify complete source-bound owner evidence",
+	}
+	for i := 1; i < len(order); i++ {
+		if seen[order[i-1]] >= seen[order[i]] {
+			return fmt.Errorf("hybrid prerequisite/evidence ordering differs")
+		}
+	}
+	if builderIndex < 0 || builderIndex >= seen["Build actual hybrid lake image without publishing"] {
+		return fmt.Errorf("builder ordering differs")
 	}
 	return nil
 }
@@ -151,6 +164,32 @@ func TestLakeHybridCIWiring(t *testing.T) {
 	late := strings.Replace(without, "      - name: Require hybrid binary provenance and fresh Rust and Go audits\n", installer+"      - name: Require hybrid binary provenance and fresh Rust and Go audits\n", 1)
 	if without == raw || late == without || lakeHybridCI(without) == nil || lakeHybridCI(late) == nil {
 		t.Fatal("signature verifier after its consumer escaped")
+	}
+	moveBefore := func(name, before string) string {
+		marker := "      - name: " + name + "\n"
+		start := strings.Index(raw, marker)
+		if start < 0 {
+			t.Fatal("step anchor missing")
+		}
+		next := strings.Index(raw[start+len(marker):], "      - ")
+		if next < 0 {
+			t.Fatal("step end missing")
+		}
+		end := start + len(marker) + next
+		block := raw[start:end]
+		remaining := raw[:start] + raw[end:]
+		return strings.Replace(remaining, "      - name: "+before+"\n", block+"      - name: "+before+"\n", 1)
+	}
+	for _, pair := range [][2]string{
+		{"Build actual hybrid lake image without publishing", "Install reviewed hybrid audit tools"},
+		{"Actual finite owner on both broker versions without skips", "Require hybrid binary provenance and fresh Rust and Go audits"},
+		{"Prove joint synthetic source and VERSION dependency cache reuse", "Actual finite owner on both broker versions without skips"},
+		{"Prove joint synthetic source and VERSION dependency cache reuse", "Stop owned snapshot fixture dependencies and prove absence"},
+		{"Verify complete source-bound owner evidence", "Prove joint synthetic source and VERSION dependency cache reuse"},
+	} {
+		if changed := moveBefore(pair[0], pair[1]); changed == raw || lakeHybridCI(changed) == nil {
+			t.Fatal("hybrid order mutation escaped")
+		}
 	}
 	for _, m := range [][2]string{
 		{"name: Prove joint synthetic source and VERSION dependency cache reuse", "name: Missing synthetic cache probe"},
