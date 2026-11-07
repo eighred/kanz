@@ -15,7 +15,7 @@ func checkRustOMSProposals(source, contract string) error {
 	}
 	code = rustMigrationCompact(code)
 	for _, marker := range []string{
-		`kanz_oms_fold_shadow::proto::order::v1::SubmitOrder`, `constMAX_PROPOSALS:usize=4096`,
+		`kanz_order_core::proto::order::v1::SubmitOrder`, `constMAX_PROPOSALS:usize=4096`,
 		`fee_subject::normalize(value).is_empty()`, `p.id!=p.subject`, `command.order_id!=p.id`,
 		`p.expires_at<=p.created_at`, `zero(p.created_at)`, `zero(p.expires_at)`,
 		`scoped(client,tenant).await?`, `'order_proposals'::regclass`, `relrowsecurityANDrelforcerowsecurity`,

@@ -1,7 +1,7 @@
 //! Go protobuf equality and deterministic journal representation for canonical Fill.
 //! Known fields use generated types; descriptors identify raw unknown fields.
 use super::{Error, MAX_BYTES};
-use kanz_oms_fold_shadow::proto::{order::v1::Fill, FILE_DESCRIPTOR_SET};
+use kanz_order_core::proto::{order::v1::Fill, FILE_DESCRIPTOR_SET};
 use prost::Message;
 use prost_types::{DescriptorProto, FileDescriptorSet};
 use std::{collections::BTreeMap, sync::OnceLock};

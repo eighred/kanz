@@ -11,7 +11,7 @@
 # The pre-trade mandate authority. It publishes compliance.mandate.changed, which
 # THE OMS CONSUMES — and a consumer on a subject nothing ever publishes to is a
 # mandate set that never changes.
-FROM ghcr.io/eighred/base/golang:1.26.8 AS build
+FROM ghcr.io/eighred/base/golang:1.26.10 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 

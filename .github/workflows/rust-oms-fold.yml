@@ -82,6 +82,9 @@ jobs:
         run: |
           rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
           cargo fmt --all -- --check
+          cargo test --locked -p kanz-order-core --all-targets
+          cargo clippy --locked -p kanz-order-core --all-targets -- -D warnings
+          cargo build --locked -p kanz-order-core --example order-aggregate-fixture
           cargo test --locked -p kanz-oms-fold-shadow
           cargo clippy --locked -p kanz-oms-fold-shadow --all-targets -- -D warnings
           cargo build --locked -p kanz-oms-fold-shadow
@@ -120,6 +123,8 @@ jobs:
       - name: Compare actual stamped worker through the OMS supervisor
         working-directory: kanz
         env:
+          KANZ_ORDER_AGGREGATE_BIN: ${{ github.workspace }}/kanz-rs/target/debug/examples/order-aggregate-fixture
+          KANZ_ORDER_AGGREGATE_VERSION: ${{ github.sha }}
           KANZ_OMS_FOLD_BIN: ${{ github.workspace }}/kanz-rs/target/debug/kanz-oms-fold-shadow
           KANZ_OMS_FOLD_VERSION: ${{ github.sha }}
           KANZ_OMS_STORE_BIN: ${{ github.workspace }}/kanz-rs/target/debug/examples/fixture
@@ -130,7 +135,7 @@ jobs:
           TEST_NATS_URL: nats://127.0.0.1:4222
         run: |
           set -o pipefail
-          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/internal/position ./services/oms/tools/store-conformance ./services/oms/tools/venue-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
+          go test -race -p 1 ./services/oms/tools/fill-conformance ./services/oms/internal/foldshadow ./internal/shadowprocess ./services/oms/internal/position ./services/oms/tools/store-conformance ./services/oms/tools/venue-conformance ./services/oms/tools/aggregate-conformance -count=1 -json | tee "$RUNNER_TEMP/oms-fold.jsonl"
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_migration_evidence.py
           python3 -B -m unittest discover -s ../.github/scripts -p test_check_oms_fold_evidence.py
           python3 ../.github/scripts/check_oms_fold_evidence.py "$RUNNER_TEMP/oms-fold.jsonl"

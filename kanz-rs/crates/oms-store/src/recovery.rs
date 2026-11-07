@@ -5,7 +5,7 @@ use super::{
     journal, message_field, scoped, validate_batch, Error, Record, MAX_BYTES,
 };
 use kanz_decimal_compat::{in_domain, is_positive};
-use kanz_oms_fold_shadow::proto::order::v1::{
+use kanz_order_core::proto::order::v1::{
     ExecutionRecovered, ExecutionRecoveryRecorded, OrderState,
 };
 use prost::Message;
@@ -286,7 +286,7 @@ pub async fn commit_prepared_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kanz_oms_fold_shadow::proto::order::v1::Fill;
+    use kanz_order_core::proto::order::v1::Fill;
     #[test]
     fn metadata_and_posted_share_one_byte_budget() {
         let raw = Fill {

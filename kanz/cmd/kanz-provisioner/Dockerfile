@@ -3,7 +3,7 @@
 # kanz-provisioner: the one-shot node-join Job (S2a). The SOLE binary importing
 # crypto/ssh. Distroless static. Build context is the repo ROOT:
 #   docker build -f kanz/cmd/kanz-provisioner/Dockerfile .
-FROM ghcr.io/eighred/base/golang:1.26.8 AS build
+FROM ghcr.io/eighred/base/golang:1.26.10 AS build
 WORKDIR /src
 ENV GOFLAGS=-mod=mod
 

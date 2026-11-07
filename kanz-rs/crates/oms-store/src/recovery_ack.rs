@@ -1,6 +1,6 @@
 //! Durable acknowledgement only. Go owns authenticated FACT/subject-to-book admission.
 use super::{commit, enqueue, recovery, scoped, validate_batch, Error, Record, MAX_BYTES};
-use kanz_oms_fold_shadow::proto::order::v1::{
+use kanz_order_core::proto::order::v1::{
     ExecutionRecoveryApplied, ExecutionRecoveryRecorded, OrderState,
 };
 use prost::Message;

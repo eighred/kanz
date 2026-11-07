@@ -4,6 +4,8 @@
 use prost::Message;
 use prost_reflect::{DynamicMessage, Kind, MessageDescriptor};
 use std::collections::BTreeMap;
+mod canonical;
+pub use canonical::{Canonical, Schema};
 
 #[derive(Default)]
 struct Unknown {
@@ -49,6 +51,10 @@ fn wire(kind: &Kind) -> u8 {
         _ => 0,
     }
 }
+/// Protobuf-known wire types; other encodings with this number remain unknown.
+pub fn accepts_wire(field: &prost_reflect::FieldDescriptor, w: u8) -> bool {
+    w == wire(&field.kind()) || (field.is_list() && w == 2 && wire(&field.kind()) != 2)
+}
 fn split(desc: &MessageDescriptor, raw: &[u8], depth: usize) -> Result<(Vec<u8>, Unknown), Error> {
     if depth > 32 {
         return Err(Error::Capacity);
@@ -61,9 +67,7 @@ fn split(desc: &MessageDescriptor, raw: &[u8], depth: usize) -> Result<(Vec<u8>,
         let (number, w) = key(raw, &mut pos)?;
         let value = pos;
         let field = desc.get_field(number);
-        let supported = field.as_ref().is_some_and(|f| {
-            w == wire(&f.kind()) || (f.is_list() && w == 2 && wire(&f.kind()) != 2)
-        });
+        let supported = field.as_ref().is_some_and(|f| accepts_wire(f, w));
         if supported {
             let field = field.ok_or(Error::InvalidInput)?;
             // Current OMS FACT graphs have neither maps nor oneofs. Refuse a

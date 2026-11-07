@@ -25,6 +25,7 @@ rust-version = "1.90"
 publish = false
 
 [dependencies]
+kanz-order-core = { path = "../../crates/order-core" }
 kanz-decimal-compat = { path = "../.." }
 prost = "=0.14.1"
 prost-types = "=0.14.1"
@@ -46,15 +47,8 @@ const rustOMSBuild = `fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     config.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
     config.extern_path(".common.v1", "::kanz_decimal_compat::common::v1");
-    config.compile_protos(
-        &[
-            format!("{root}/oms/v1/fold_shadow.proto"),
-            format!("{root}/envelope/v1/event_frame.proto"),
-            format!("{root}/domain/v1/portfolio.proto"),
-            format!("{root}/command/v1/command_outcome.proto"),
-        ],
-        &[root],
-    )?;
+    config.extern_path(".order.v1", "::kanz_order_core::proto::order::v1");
+    config.compile_protos(&[format!("{root}/oms/v1/fold_shadow.proto")], &[root])?;
     Ok(())
 }
 `
@@ -157,7 +151,7 @@ func checkRustOMSFillShadow(root string) error {
 	if regexp.MustCompile(`\b(?:f32|f64|unsafe|extern|TcpStream|Command|File)\b|std::(?:net|fs|process)|struct\s+(?:Decimal|Money)\b`).MatchString(strings.ReplaceAll(source, "forbid(unsafe_code)", "")) {
 		return fmt.Errorf("OMS kernel has unauthorized runtime or financial model")
 	}
-	for _, required := range []string{"pub use kanz_decimal_compat::common;", "FillFoldStatus::UnsupportedInput", "FillFoldStatus::Rejected", "let mut candidate = state.clone();", "(-64..=64).contains", "OrderStatus::Filled", "OrderStatus::PartiallyFilled"} {
+	for _, required := range []string{"pub use kanz_order_core::proto", "FillFoldStatus::UnsupportedInput", "FillFoldStatus::Rejected", "kanz_order_core::aggregate::apply_fill_values", "kanz_order_core::aggregate::transition_values", "pub use kanz_order_core::{decimal, rational}"} {
 		if !strings.Contains(source, required) {
 			return fmt.Errorf("OMS kernel missing invariant %s", required)
 		}

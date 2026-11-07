@@ -20,8 +20,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
 publish = false
+
 [dependencies]
-kanz-oms-fold-shadow = { path = "../../services/oms-fold-shadow" }
+kanz-order-core = { path = "../order-core" }
 kanz-decimal-compat = { path = "../.." }
 kanz-proto-wire = { path = "../proto-wire" }
 prost = "=0.14.1"
@@ -34,12 +35,14 @@ num-rational = "=0.4.2"
 num-traits = "=0.2.19"
 tokio-postgres = "=0.7.18"
 tokio = { version = "=1.54.1", features = ["rt", "time"] }
+
 [dev-dependencies]
 tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "time"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 base64 = "=0.22.1"
-async-nats = { version = "=0.51.0", default-features = false, features = ["ring", "jetstream", "nuid"] }`
+async-nats = { version = "=0.51.0", default-features = false, features = ["ring", "jetstream", "nuid"] }
+`
 
 // #1413: source/layout/token guard, not Rust AST/data-flow or SQL correctness.
 // Actual Go-read/Rust-write PostgreSQL qualification supplies separate evidence.

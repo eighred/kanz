@@ -7,7 +7,7 @@ use crate::{
     relay::{Publisher, Relay, Sessions},
     Error, Record, MAX_BYTES,
 };
-use kanz_oms_fold_shadow::proto::{
+use kanz_order_core::proto::{
     domain::v1::PositionState,
     envelope::v1::{Envelope, EventClass},
     order::v1::{ExecutionRecovered, ExecutionRecoveryApplied, OrderFilled, OrderPartiallyFilled},
