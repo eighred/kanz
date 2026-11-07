@@ -35,10 +35,30 @@ runner; do not use `docker run` on this scratch payload. Registry descriptor che
 precede Docker pull and saved-layer validation; this is not an independent blob
 download implementation. Tool extraction must be qualified on the actual
 runner ABI; the scratch payload is not itself a runnable application image.
-The existing source installer remains authoritative. A future consumer change
-must pin an actually published and verified digest and preserve fresh audits;
-producer qualification alone does not authorize a consumer switch.
+The consumer below pins an actually published and verified digest and retains
+fresh audits. Producer qualification is separate from actual consumer ABI and
+read-only registry qualification.
 
 Top-level tools use MIT OR Apache-2.0. Bundled dependency license files and public
 package metadata are retained under `/notices`; this metadata describes public
 tooling, not the application. No audit verdict or advisory database is cached.
+
+## Signed immutable consumer
+
+The shared release/architecture installer consumes the reviewed main producer at
+`ghcr.io/eighred/base/rust-audit-tools@sha256:0579c6075afce18b98b97864a056d0e553d0281e6d12c598ab8e3042ae88de71`.
+`consume.py` binds producer source `a2dbaf41fd77da6dc30380f133e80802488fe7c2`,
+config `sha256:e523902a82786dd3dfb6aa9c5b155b9516c11fd22f86cbb7db6d9bb36f762532`,
+the main base-image-mirror workflow certificate identity, GitHub OIDC issuer and
+source annotation. Cosign verification precedes pull, extraction and execution.
+The local source tag only names the verified digest for strict SAVE readback;
+it is never a registry lookup or mutable fallback.
+
+The consumer retains its own `GITHUB_SHA`; the install receipt records both
+source identities and its validated GitHub run/attempt. Linux nofollow/nonblocking bounded reading and the existing
+one-layer/config/payload/notice checks precede execution. Actual ABI, extraction
+limits and fresh clean/vulnerable advisory controls precede PATH publication.
+Per-image fresh lock/binary audits, SPDX and cargo-auditable remain unchanged.
+Architecture qualification uses existing read-only package access. There is no
+source-build or mutable-tag fallback. Windows parser tests do not qualify the
+Linux opener or registry access.
