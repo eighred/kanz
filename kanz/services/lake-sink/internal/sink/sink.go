@@ -1,7 +1,6 @@
 // Package sink is the lakehouse landing layer (LAKE-01a). Sink is the seam a
-// concrete table format (Iceberg/Delta) plugs into; the default FileSink lands
-// Hive-partitioned NDJSON that a catalog ingest (Trino/Spark) commits as a
-// table.
+// concrete table format can plug into; the default FileSink lands appendable
+// Hive-partitioned NDJSON. Catalog/snapshot commits are not implemented here.
 package sink
 
 import (
