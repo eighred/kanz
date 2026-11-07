@@ -1,12 +1,12 @@
 # lake-sink (LAKE-01a)
 
-Schema-evolution-aware CDC sink: streams the durable Kafka log (EVT-09, the
-system of record) and lands every event into the lakehouse, decoding each
+Schema-evolution-aware CDC sink: reads the derived Kafka archive produced by
+the sole NATS archiver and lands accepted events as NDJSON, decoding each
 payload against the EVT-16 schema registry so the table columns track the
 *published* schema rather than a compiled-in type.
 
 Because the decode is dynamic (registry descriptor → `dynamicpb` → JSON), a field
-added additively to a payload schema surfaces as a new column with **no redeploy**
+added additively to a payload schema surfaces in the payload JSON with **no redeploy**
 of this service — the LAKE-01a "schema-evolution-aware" property. This is the
 analytical-store half of the backtest-ready design (EVT-21d replay determinism +
 PRED-11 point-in-time store); LAKE-01b/c build the point-in-time materialization
@@ -35,11 +35,12 @@ Kafka topic {domain}.{entity}  ──▶  decode (EVT-16 registry)  ──▶  S
 One row per event: the stable envelope columns + the decoded `payload` as a
 nested object. `entity` is the schema ref's message name
 (`market.v1.MarketDataEvent:7` → `MarketDataEvent`), `dt` partitions by
-`event_time`. Each process writes its own `part-{instance}` file so concurrent
-replicas never interleave. This NDJSON staging is the layer a lakehouse catalog
-ingest (Iceberg/Delta via Trino/Spark) commits as a table — concrete table-format
-commits (manifests, snapshot isolation) plug in behind the `Sink` interface, so
-the binary carries no heavy table-format dependency.
+`event_time`. The service requests a generated hostname/PID/random run identity
+for part files, keeping event `Source` unchanged. Explicit constructor identifiers
+reopen their historical append path and must be distinct among concurrent writers.
+Existing files remain in place. Snapshot sealing, catalog commits, object-store
+authorization and multi-replica deployment acceptance remain separate work;
+the deployed singleton/RWO bound is retained.
 
 ## Delivery semantics
 
