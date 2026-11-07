@@ -113,7 +113,7 @@ class TransactionEvidenceTests(unittest.TestCase):
         self.assertTrue(wired(text))
         for part in required:
             with self.subTest(part=part): self.assertFalse(wired(text.replace(part, "removed")))
-        self.assertEqual(len(CASES), 21)
+        self.assertEqual(len(CASES), 29)
         self.assertEqual(CASES[1:9], ["response_loss_" + str(i) for i in range(1, 9)])
 
     def test_exact_source_attempt_complete_cases_cleanup_and_identity_required(self):
@@ -127,6 +127,8 @@ class TransactionEvidenceTests(unittest.TestCase):
                       "serviceAbsent": True, "observedAddress": fixture.IPV6_EXPANDED, "literalComparisonMiss": True, "absenceRefused": True,
                       "shape": {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv6",
                                 "endpoints": [{"addresses": ["2001:db8::1"], "conditions": {"ready": False}}]}},
+                  "retainedRestore": {"cases": list(fixture.restore_fixture.CASES), "syntheticLegacyReceipts": True,
+                      "historicalProvenanceQualified": False, "actualAppendOnlyJournals": True, "singleAttemptEnforced": True},
                   "annotationTransport": {key: True for key in ("oldClientMutation", "rawMetadataPreserved", "dryRunUnchanged", "staleRVRefused", "wrongUIDRefused", "rollbackPreserved", "finalizePreserved")},
                   "imageIdentity": {"root": rollout_probe.IMAGE.split("@", 1)[1], "manifest": "sha256:" + "e" * 64,
                                     "config": "sha256:" + "f" * 64, "platform": "linux/amd64", "rootMediaType": "application/vnd.oci.image.manifest.v1+json"}}
@@ -136,7 +138,7 @@ class TransactionEvidenceTests(unittest.TestCase):
         for key, value in (("source", "e" * 40), ("tree", "e" * 40), ("runID", "124"), ("runAttempt", "1"),
                            ("renderSHA256", "d" * 64), ("cases", CASES[:-1]), ("cases", list(reversed(CASES))),
                            ("passed", 1), ("cleanupPassed", False), ("imageIdentity", {}), ("emptyEndpointSlice", None), ("emptyEndpointSlice", {}),
-                           ("ipv6EndpointSlice", None), ("ipv6EndpointSlice", {}), ("annotationTransport", None), ("annotationTransport", {})):
+                           ("ipv6EndpointSlice", None), ("ipv6EndpointSlice", {}), ("annotationTransport", None), ("annotationTransport", {}), ("retainedRestore", None), ("retainedRestore", {})):
             bad = copy.deepcopy(report); bad[key] = value
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 check(bad)

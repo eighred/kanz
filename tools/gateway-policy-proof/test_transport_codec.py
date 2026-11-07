@@ -26,7 +26,9 @@ class TransportCodecTests(unittest.TestCase):
             "response_loss_7", "response_loss_8", "dry_run_no_write", "four_policy_success",
             "annotation_transport_preserved", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null", "ipv6_endpoint_metadata", "deployment_uid_lineage",
             "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal",
-            "actual_tcp_policy_controls", "probe_uid_cleanup"])
+            "actual_tcp_policy_controls", "probe_uid_cleanup", "retained_restore_verified", "retained_restore_response_loss",
+            "retained_restore_stale_cas", "retained_restore_metadata_refusal", "retained_restore_birth_projection_refusal",
+            "retained_restore_scope_refusal", "retained_restore_receipt_refusal", "retained_restore_exclusive_journal"])
         self.assertIn(marker, source)
         self.assertLess(source.index(marker), source.index("proof.claim_cluster("))
         self.assertLess(source.index(marker), source.index("for at in range(1, 9):"))

@@ -7,10 +7,12 @@ import types
 def launch(root, entry, arguments):
     if not sys.flags.isolated:
         raise ValueError("isolated Python required")
+    recovery = ("bounded_process", "policy_state", "policy_client", "rollout_scope", "recovery_receipts")
     dependencies = {
         "preflight": ("bounded_process",),
         "recovery_host": ("bounded_process", "policy_state", "transport_codec", "recovery_receipts", "recovery_provenance"),
-        "recovery_plan": ("bounded_process", "policy_state", "policy_client", "rollout_scope", "recovery_receipts"),
+        "recovery_plan": recovery,
+        "recovery_restore": (*recovery, "recovery_plan"),
         "image_identity": ("policy_state", "transaction", "rollout_scope", "rollout_probe"),
         "rollout_engine": ("bounded_process", "policy_state", "transaction", "policy_client", "rollout_scope", "rollout_probe"),
     }

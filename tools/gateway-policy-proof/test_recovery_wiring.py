@@ -39,9 +39,24 @@ def verify(wrapper, loader, workflow):
         "rollout_engine": ("bounded_process", "policy_state", "transaction", "policy_client", "rollout_scope", "rollout_probe"),
         "recovery_host": ("bounded_process", "policy_state", "transport_codec", "recovery_receipts", "recovery_provenance"),
         "recovery_plan": ("bounded_process", "policy_state", "policy_client", "rollout_scope", "recovery_receipts"),
+        "recovery_restore": ("bounded_process", "policy_state", "policy_client", "rollout_scope", "recovery_receipts", "recovery_plan"),
     }
-    if dependencies is None or ast.literal_eval(dependencies) != expected:
+    recovery = next((n.value for n in ast.walk(ast.parse(loader)) if isinstance(n, ast.Assign)
+        and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.targets[0].id == "recovery"), None)
+    if recovery is None or ast.literal_eval(recovery) != expected["recovery_plan"]:
         return False
+    def closed_tuple(node):
+        if isinstance(node, ast.Name) and node.id == "recovery": return ast.literal_eval(recovery)
+        if not isinstance(node, ast.Tuple): raise ValueError("unclosed dependency")
+        result = ()
+        for item in node.elts:
+            result += closed_tuple(item.value) if isinstance(item, ast.Starred) else (ast.literal_eval(item),)
+        return result
+    if not isinstance(dependencies, ast.Dict): return False
+    try:
+        actual = {ast.literal_eval(k): closed_tuple(v) for k, v in zip(dependencies.keys, dependencies.values)}
+    except (ValueError, TypeError): return False
+    if len(actual) != len(dependencies.keys) or actual != expected: return False
     if "if not sys.flags.isolated:" not in loader or "exec(compile(source, str(path)," not in loader:
         return False
     document = yaml.load(workflow, Loader=yaml.BaseLoader)
@@ -51,7 +66,7 @@ def verify(wrapper, loader, workflow):
     if job.get("if") or job.get("continue-on-error") or job.get("runs-on") != "ubuntu-latest":
         return False
     for event in ("pull_request", "push"):
-        if "tools/Invoke-TokyoGatewayPolicyRecoveryPlan.ps1" not in document["on"][event]["paths"]:
+        if not {"tools/Invoke-TokyoGatewayPolicyRecoveryPlan.ps1", "tools/Invoke-TokyoGatewayPolicyRetainedRestore.ps1"}.issubset(document["on"][event]["paths"]):
             return False
     steps = job["steps"]
     pure = [s for s in steps if s.get("run") == "python3 -B -m unittest discover -s tools/gateway-policy-proof -p 'test_*.py'"]
@@ -88,7 +103,7 @@ class RecoveryWiringTests(unittest.TestCase):
             (0, "len(data)>65536", "len(data)>131072"),
             (0, "$parameterBytes -gt 30000", "$parameterBytes -gt 40000"),
             (0, "'recovery_plan.py',", "'rollout_engine.py',"),
-            (1, '"recovery_receipts"),', '"recovery_receipts", "extra"),'),
+            (1, '"recovery_receipts")', '"recovery_receipts", "extra")'),
             (1, "if not sys.flags.isolated:", "if False:"),
             (2, "    runs-on: ubuntu-latest", "    if: false\n    runs-on: ubuntu-latest"),
             (2, "contents: read", "contents: write"),

@@ -17,11 +17,12 @@ from policy_client import KubernetesClient
 from image_identity import public_identity
 from rollout_engine import Probes
 import rollout_probe
+import restore_fixture
 from bounded_process import run as bounded_run
 
 CASES = ["bounded_xz_transport"] + ["response_loss_" + str(at) for at in range(1, 9)] + [
     "dry_run_no_write", "four_policy_success", "annotation_transport_preserved", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
-    "ipv6_endpoint_metadata", "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"]
+    "ipv6_endpoint_metadata", "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"] + list(restore_fixture.CASES)
 
 LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
 FIXTURE_ANNOTATIONS = {LAST_APPLIED: '{"fixture":"previous-configuration"}', "fixture.example/custom": "preserved"}
@@ -285,6 +286,7 @@ def validate_report(report, source, tree, run_id, attempt, render_hash):
             or report.get("cases") != CASES or report.get("passed") is not True
             or report.get("cleanupPassed") is not True):
         raise ValueError("transaction evidence incomplete or from another execution")
+    restore_fixture.validate(report.get("retainedRestore"))
     validate_annotation_control(report.get("annotationTransport"))
     validate_empty_slice(report.get("emptyEndpointSlice"))
     validate_ipv6_slice(report.get("ipv6EndpointSlice"))
@@ -443,6 +445,7 @@ def run_fixture(artifact):
               "metadata": {"name": "scripts", "namespace": tx.NAMESPACE},
               "data": {"listener.py": (proof.HERE / "listener.py").read_text()}})
             endpoints = {}
+            governed = {}
             for name, ports in {**proof.TARGETS, "api-gateway": (8080,), "web-bff": (8080,)}.items():
                 template = proof.pod("target-" + name, tx.NAMESPACE, {"app": name}, ports)
                 template["spec"]["restartPolicy"] = "Always"
@@ -470,6 +473,7 @@ def run_fixture(artifact):
                 expected = {name: {"labels": {"app": name}, "selector": deployment["spec"]["selector"],
                             "images": {key: {c["name"]: c["image"] for c in template["spec"].get(key, [])}
                                        for key in ("containers", "initContainers")}}}
+                governed.update(expected)
                 deployments = json.loads(k("-n", tx.NAMESPACE, "get", "deployments", "-o", "json"))["items"]
                 replicasets = json.loads(k("-n", tx.NAMESPACE, "get", "replicasets", "-o", "json"))["items"]
                 if rollout_probe.workload_lineage(actual, deployments, replicasets, expected)["name"] != name:
@@ -507,7 +511,8 @@ def run_fixture(artifact):
             if json.loads(k("-n", tx.NAMESPACE, "get", "pods", "-l", "app=policy-untrusted", "-o", "json"))["items"]:
                 raise AssertionError("zero-replica controller created a Pod")
             report["cases"].append("controller_adoption_refusal")
-            probes = Probes(k, lambda image_id: json.loads(run(["docker", "exec", cluster + "-control-plane", "crictl", "inspecti", image_id])), identity, uuid.uuid4().hex)
+            probe_history = []
+            probes = Probes(k, lambda image_id: json.loads(run(["docker", "exec", cluster + "-control-plane", "crictl", "inspecti", image_id])), identity, uuid.uuid4().hex, lambda value: probe_history.append(copy.deepcopy(value)))
             try:
                 probes.create()
                 end = time.monotonic() + 30
@@ -538,6 +543,22 @@ def run_fixture(artifact):
             finally:
                 probes.close()
             report["cases"].append("probe_uid_cleanup")
+            # Additional synthetic workloads supply the same seven-workload
+            # health snapshot, without running NATS/Redis or contacting domains.
+            k("create", "namespace", "kanz-messaging")
+            k("create", "-f", "-", value={"apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": "scripts", "namespace": "kanz-messaging"},
+                "data": {"listener.py": (proof.HERE / "listener.py").read_text(encoding="utf-8")}})
+            for name, port in (("nats", 4222), ("redis", 6379)):
+                k("create", "-f", "-", value=proof.pod("synthetic-" + name, "kanz-messaging", {"app": name}, (port,)))
+                k("-n", "kanz-messaging", "wait", "--for=condition=Ready", "pod/synthetic-" + name, "--timeout=90s")
+            report["retainedRestore"] = restore_fixture.qualify(k, cluster_uid, report["source"], rendered,
+                                                                 governed, probe_history, scratch)
+            restore_fixture.validate(report["retainedRestore"])
+            report["cases"].extend(report["retainedRestore"]["cases"])
+            k("delete", "namespace", "kanz-messaging", "--wait=true", "--timeout=60s")
+            if k("get", "namespace", "kanz-messaging", "--ignore-not-found", "-o", "name").strip():
+                raise AssertionError("synthetic messaging namespace remained")
             report["imageIdentity"] = identity
             report["passed"] = True
         finally:

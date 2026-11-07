@@ -210,3 +210,40 @@ reader's root-Linux no-follow controls and the complete wrapper/real API plannin
 path still require actual Linux qualification; local pure tests do not establish
 live recovery acceptance. Normal Apply and plan transports retain the existing
 20,000 encoded / 524,288 expanded / 65,536 per-source-byte limits.
+
+
+### One-shot retained-baseline reconciliation
+
+`tools/Invoke-TokyoGatewayPolicyRetainedRestore.ps1` is a separate fixed-target
+entrypoint. It requires the same exact-main workflow acceptance, operator chain,
+instance and original SSM/Git provenance as the read-only planner. It has no
+resource argument, Apply switch, retry, roll-forward or automatic rollback.
+Source presence and a disposable fixture pass do not authorize a live invocation.
+
+The engine recomputes the plan, validates the immutable 39 old receipts, and
+creates `/var/tmp/kanz-gateway-reconcile-nu1ezqwo` exclusively. An existing path
+refuses reuse. Even a prewrite refusal after creation leaves this new journal and
+requires separate review; it never chooses another directory. The original
+`/var/tmp/kanz-gateway-policy-nu1ezqwo` is read-only. The new directory and each
+append-only receipt are fsynced. A full observation and baseline intent precede
+a final check of old receipt hashes, target UID/resourceVersion/birth/full object,
+all other policies, current workload/service/outside-policy scope, and observed
+probe UID/IP absence. Only then may one raw CAS PUT restore the original baseline.
+
+The validated server acknowledgment is durably recorded before independent
+readback. Its resourceVersion must be new and equal to that readback. Other
+policies and fresh scope must remain unchanged. Any uncertain response or later
+failure leaves UNKNOWN attribution and the journal, even if baseline state is
+observable. It never retries or claims to reconstruct missing historical workload
+snapshots. Only the complete acknowledgment, readback and evidence checks produce
+VERIFIED.
+
+The existing disposable fixture retains its 21 ordered transaction controls and
+76 separate policy observations, then adds eight reconciliation controls. These
+use explicitly synthetic legacy receipts, the fresh owned kind UID, and dummy
+provenance hashes. They exercise actual append-only journals, raw API writes,
+response loss after a server mutation, stale CAS, exclusive journal refusal, and
+scope/receipt/metadata negatives. The immutable birth negative deliberately alters
+a read projection; it does not claim Kubernetes allowed changing creationTimestamp.
+Synthetic Ready messaging listeners provide health observations, not broker or
+financial behavior. No fixture accesses the retained Tokyo directories or AWS.
