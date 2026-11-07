@@ -14,6 +14,26 @@ LABEL = "io.kanz.storage-signal"
 BODY = "import os,time;print('pid1' if os.getpid()==1 else 'non_pid1',flush=True);assert os.getpid()==1;print('pid1_ready',flush=True);time.sleep(120)"
 
 
+def startup_error(value):
+    if not isinstance(value, str) or not value or len(value) > 8192:
+        return "unknown"
+    lower = value.lower()
+    for category, markers in (
+            ("pids_task_limit", ("pids.max", "pids limit", "pids-limit", "task limit", "process limit")),
+            ("resource_unavailable", ("resource temporarily unavailable", "eagain")),
+            ("permission_denied", ("permission denied", "operation not permitted")),
+            ("readonly", ("read-only file system",)),
+            ("no_space", ("no space left on device",)),
+            ("missing_executable", ("executable file not found",))):
+        if any(marker in lower for marker in markers):
+            return category
+    return "other_runtime_error"
+
+
+def bounded_number(value, maximum):
+    return value if type(value) is int and 0 <= value <= maximum else None
+
+
 def state_projection(obj):
     state = obj.get("State", {})
     host = obj.get("HostConfig", {})
@@ -24,7 +44,11 @@ def state_projection(obj):
             "exitCode": state.get("ExitCode") if type(state.get("ExitCode")) is int and 0 <= state["ExitCode"] <= 255 else None,
             "oomKilled": state.get("OOMKilled") if type(state.get("OOMKilled")) is bool else None,
             "init": host.get("Init") if type(host.get("Init")) is bool else None,
-            "pidMode": "private" if pid_mode in ("", "private") else "host" if pid_mode == "host" else "unknown"}
+            "pidMode": "private" if pid_mode in ("", "private") else "host" if pid_mode == "host" else "unknown",
+            "startupError": startup_error(state.get("Error")),
+            "pidsLimit": bounded_number(host.get("PidsLimit"), 65536),
+            "memory": bounded_number(host.get("Memory"), 1 << 40),
+            "nanoCpus": bounded_number(host.get("NanoCpus"), 1024 * 10**9)}
 
 
 def runtime_preconditions(obj):

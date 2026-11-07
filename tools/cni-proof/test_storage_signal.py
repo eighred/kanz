@@ -81,11 +81,34 @@ class StorageSignalTests(unittest.TestCase):
                      {"Init": False, "PidMode": "container:secret"}, {"Init": False, "PidMode": "unknown"}):
             with self.assertRaises(ValueError): storage_signal.runtime_preconditions({"HostConfig": host})
 
+    def test_startup_error_categories_discard_messages_and_bound_numbers(self):
+        cases = (("runc: secret resource temporarily unavailable", "resource_unavailable"),
+                 ("EAGAIN secret", "resource_unavailable"),
+                 ("secret pids.max reached", "pids_task_limit"),
+                 ("secret task limit", "pids_task_limit"),
+                 ("secret permission denied", "permission_denied"),
+                 ("secret read-only file system", "readonly"),
+                 ("secret no space left on device", "no_space"),
+                 ("secret executable file not found", "missing_executable"),
+                 ("secret no such file or directory", "other_runtime_error"),
+                 ("secret", "other_runtime_error"), (None, "unknown"), ("", "unknown"),
+                 ({"message": "secret"}, "unknown"), ("EAGAIN" + "secret" * 1400, "unknown"))
+        for message, expected in cases:
+            value = storage_signal.state_projection({"State": {"Error": message},
+                    "HostConfig": {"PidsLimit": 8, "Memory": 64 << 20, "NanoCpus": 100000000}})
+            self.assertEqual(value["startupError"], expected)
+            self.assertNotIn("secret", json.dumps(value))
+            self.assertEqual((value["pidsLimit"], value["memory"], value["nanoCpus"]), (8, 64 << 20, 100000000))
+        for field, maximum in (("PidsLimit", 65536), ("Memory", 1 << 40), ("NanoCpus", 1024 * 10**9)):
+            for invalid in (None, True, -1, maximum + 1, "secret", 1.5):
+                self.assertIsNone(storage_signal.bounded_number(invalid, maximum))
+            self.assertEqual(storage_signal.bounded_number(maximum, maximum), maximum)
+
     def test_closed_diagnostic_projection(self):
         obj = {"State": {"Status": "exited", "Running": False, "ExitCode": 1, "OOMKilled": False, "Error": "secret"},
                "HostConfig": {"Init": False, "PidMode": "", "Secret": "secret"}}
         value = storage_signal.state_projection(obj)
-        self.assertEqual(value, {"status": "exited", "running": False, "exitCode": 1, "oomKilled": False, "init": False, "pidMode": "private"})
+        self.assertEqual(value, {"status": "exited", "running": False, "exitCode": 1, "oomKilled": False, "init": False, "pidMode": "private", "startupError": "other_runtime_error", "pidsLimit": None, "memory": None, "nanoCpus": None})
         for mode in ("", "private"):
             obj["HostConfig"]["PidMode"] = mode
             self.assertEqual(storage_signal.state_projection(obj)["pidMode"], "private")
