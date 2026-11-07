@@ -1,6 +1,7 @@
 import copy
 import unittest
 import uuid
+from unittest.mock import patch
 
 import rollout_probe as probe
 
@@ -116,6 +117,28 @@ class ProbeBoundaryTests(unittest.TestCase):
             probe.endpoint_boundary([{"endpoints": [endpoint]}], [], True, ["owned"])
         endpoint["targetRef"] = {"uid": "other"}
         probe.endpoint_boundary([{"endpoints": [endpoint]}], [], True, ["owned"])
+
+    def test_endpoint_literal_ip_equivalence_preserves_cleanup_and_readiness(self):
+        pairs = [("2001:db8::1", "2001:0DB8:0000:0000:0000:0000:0000:0001"),
+                 ("192.0.2.1", "::ffff:192.0.2.1"),
+                 ("192.0.2.1", "0000:0000:0000:0000:0000:ffff:c000:0201")]
+        for left, right in pairs:
+            for observed, endpoint in ((left, right), (right, left)):
+                for ready in (False, True, None):
+                    with self.subTest(observed=observed, endpoint=endpoint, ready=ready):
+                        slices = [{"endpoints": [{"addresses": [endpoint], "conditions": {"ready": ready}}]}]
+                        with self.assertRaises(ValueError):
+                            probe.endpoint_boundary(slices, [observed], require_absent=True)
+                        if ready is False:
+                            probe.endpoint_boundary(slices, [observed])
+                        else:
+                            with self.assertRaises(ValueError): probe.endpoint_boundary(slices, [observed])
+        slices = [{"endpoints": [{"addresses": ["2001:db8::2", "fixture.example"], "conditions": {}}]}]
+        probe.endpoint_boundary(slices, ["2001:db8::1"], require_absent=True)
+        with self.assertRaises(ValueError): probe.endpoint_boundary(slices, ["fixture.example"], True)
+        # FQDN values retain literal-only handling; no DNS lookup or alias inference.
+        with patch("socket.getaddrinfo", side_effect=AssertionError("DNS is forbidden")):
+            probe.endpoint_boundary(slices, ["alias.example"], require_absent=True)
 
     def test_minimal_labels_must_match_actual_policy_selection(self):
         policies = [{"spec": {"podSelector": {"matchLabels": {"app": "api-gateway"}}}}]

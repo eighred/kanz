@@ -21,7 +21,59 @@ from bounded_process import run as bounded_run
 
 CASES = ["bounded_xz_transport"] + ["response_loss_" + str(at) for at in range(1, 9)] + [
     "dry_run_no_write", "four_policy_success", "concurrent_change_refuses_rollback", "empty_endpoint_slice_null",
-    "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"]
+    "ipv6_endpoint_metadata", "deployment_uid_lineage", "controller_adoption_refusal", "never_ready_endpoint_nonparticipation", "publish_unready_refusal", "actual_tcp_policy_controls", "probe_uid_cleanup"]
+
+IPV6_CANONICAL = "2001:db8::1"
+IPV6_EXPANDED = "2001:0db8:0000:0000:0000:0000:0000:0001"
+
+
+def validate_ipv6_slice(control):
+    if (not isinstance(control, dict)
+            or set(control) != {"sliceUID", "serviceName", "serviceAbsent", "shape", "observedAddress", "literalComparisonMiss", "absenceRefused"}
+            or not isinstance(control.get("sliceUID"), str) or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", control["sliceUID"])
+            or not isinstance(control.get("serviceName"), str) or not re.fullmatch(r"ipv6-control-[0-9a-f]{32}", control["serviceName"])
+            or control["serviceAbsent"] is not True or control["absenceRefused"] is not True
+            or control["literalComparisonMiss"] is not True
+            or control["observedAddress"] != IPV6_EXPANDED
+            or control["shape"] != {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv6",
+                                    "endpoints": [{"addresses": [IPV6_CANONICAL], "conditions": {"ready": False}}]}):
+        raise ValueError("actual IPv6 metadata control missing")
+
+
+def ipv6_slice_control(k):
+    """API metadata only: no Service, targetRef, Pod or IPv6 data-plane traffic."""
+    name = "ipv6-control-" + uuid.uuid4().hex
+    def absent():
+        if k("-n", tx.NAMESPACE, "get", "service", name, "--ignore-not-found", "-o", "name").strip():
+            raise AssertionError("IPv6 control Service exists")
+    absent()
+    desired = {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv6",
+               "metadata": {"name": name, "namespace": tx.NAMESPACE, "labels": {"kubernetes.io/service-name": name}},
+               "endpoints": [{"addresses": [IPV6_CANONICAL], "conditions": {"ready": False}}], "ports": []}
+    k("create", "-f", "-", value=desired)
+    actual = json.loads(k("-n", tx.NAMESPACE, "get", "endpointslice", name, "-o", "json"))
+    metadata = actual.get("metadata", {})
+    if (metadata.get("name") != name or metadata.get("namespace") != tx.NAMESPACE
+            or metadata.get("labels", {}).get("kubernetes.io/service-name") != name
+            or metadata.get("ownerReferences")):
+        raise AssertionError("IPv6 metadata custody differs")
+    absent()
+    control = {"sliceUID": metadata.get("uid"), "serviceName": name, "serviceAbsent": True,
+               "shape": {key: actual.get(key) for key in ("apiVersion", "kind", "addressType", "endpoints")},
+               "observedAddress": IPV6_EXPANDED, "literalComparisonMiss": False, "absenceRefused": False}
+    # Establish the exact shape before a refusal could be credited to malformed data.
+    validate_ipv6_slice({**control, "absenceRefused": True, "literalComparisonMiss": True})
+    # The old literal intersection misses this actual canonical API readback.
+    if set(actual["endpoints"][0]["addresses"]) & {IPV6_EXPANDED}:
+        raise AssertionError("IPv6 metadata control did not discriminate literal comparison")
+    control["literalComparisonMiss"] = True
+    rollout_probe.endpoint_boundary([actual], [IPV6_EXPANDED])
+    try:
+        rollout_probe.endpoint_boundary([actual], [IPV6_EXPANDED], require_absent=True)
+    except ValueError:
+        control["absenceRefused"] = True
+    validate_ipv6_slice(control)
+    return control
 
 
 def qualify_codec():
@@ -176,6 +228,7 @@ def validate_report(report, source, tree, run_id, attempt, render_hash):
             or report.get("cleanupPassed") is not True):
         raise ValueError("transaction evidence incomplete or from another execution")
     validate_empty_slice(report.get("emptyEndpointSlice"))
+    validate_ipv6_slice(report.get("ipv6EndpointSlice"))
     identity = report.get("imageIdentity", {})
     if set(identity) != {"root", "rootMediaType", "manifest", "config", "platform"} or identity.get("root") != rollout_probe.IMAGE.split("@", 1)[1] or identity.get("platform") != "linux/amd64":
         raise ValueError("transaction image identity missing")
@@ -299,6 +352,8 @@ def run_fixture(artifact):
             report["cases"].append("concurrent_change_refuses_rollback")
             report["emptyEndpointSlice"] = empty_slice_control(k)
             report["cases"].append("empty_endpoint_slice_null")
+            report["ipv6EndpointSlice"] = ipv6_slice_control(k)
+            report["cases"].append("ipv6_endpoint_metadata")
             # Exercise the exact live-probe constructor on the disposable API.
             # No live target or domain workload is contacted by this fixture.
             identity = public_identity()

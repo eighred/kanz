@@ -90,6 +90,19 @@ but cannot report verified cleanup with unresolved address custody. Endpoint
 checks cover all observed addresses and owned UID references, not unknowable
 historical addresses. Replacement objects are never deleted.
 
+The IPv6 control creates a canonical RFC 3849 address in an EndpointSlice for a
+fresh nonce Service name whose absence is checked before and after the API
+readback. It has no targetRef or Service and sends no IPv6 traffic. The actual
+canonical metadata must refuse cleanup against an equivalent expanded observed
+input, while explicit unready metadata passes the nonparticipation check. The
+artifact binds the slice UID, absent Service, exact observed shape and literal
+comparison counterexample as the twentieth ordered case; all prior nineteen
+cases and seventy-six policy observations remain mandatory.
+Expanded *stored* addresses and mapped forms are unit/legacy coverage only:
+[pinned discovery validation](https://github.com/kubernetes/kubernetes/blob/v1.36.4/pkg/apis/discovery/validation/validation.go)
+uses [strict canonical IPv6 validation](https://github.com/kubernetes/apimachinery/blob/v0.36.4/pkg/util/validation/ip.go)
+for new slices. This control makes no dual-stack, IPv6 Cilium or live-estate claim.
+
 The owned set is the three shared API ingress policies and
 `allow-gateway-runtime-egress`. The only accepted older egress shape omits the
 two exact accounting:8101 and audit:8102 peers. The entire services policy union

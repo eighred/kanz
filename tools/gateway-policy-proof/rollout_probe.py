@@ -150,9 +150,21 @@ def pod_addresses(actual):
     return addresses
 
 
+def literal_address(value):
+    """Compare IP spellings (including mapped IPv4); never resolve names."""
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return value
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return str(address)
+
+
 def endpoint_boundary(slices, addresses, require_absent=False, owned_uids=()):
     if not isinstance(slices, list) or len(slices) > 512:
         raise ValueError("EndpointSlice inventory exceeds bound")
+    observed = {literal_address(value) for value in addresses}
     for item in slices:
         if not isinstance(item, dict):
             raise ValueError("invalid EndpointSlice shape")
@@ -176,7 +188,7 @@ def endpoint_boundary(slices, addresses, require_absent=False, owned_uids=()):
                 raise ValueError("invalid endpoint target reference")
             if require_absent and target is not None and target.get("uid") in owned_uids:
                 raise ValueError("owned Pod still referenced by EndpointSlice")
-            if set(values) & set(addresses):
+            if {literal_address(value) for value in values} & observed:
                 if require_absent or conditions.get("ready") is not False:
                     raise ValueError("probe may participate in Service routing")
 

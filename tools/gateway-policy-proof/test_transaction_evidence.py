@@ -11,6 +11,35 @@ from transaction_fixture import CASES, validate_report, deployment_diagnostic, r
 
 
 class TransactionEvidenceTests(unittest.TestCase):
+    def test_actual_ipv6_control_requires_exact_api_shape_and_refusal(self):
+        created = []
+        mode = "valid"
+        def k(*args, value=None):
+            if args[0] == "create":
+                created.append(copy.deepcopy(value)); return ""
+            if args[3] == "service": return "present" if mode == "service" else ""
+            item = copy.deepcopy(created[-1])
+            item["metadata"]["uid"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            if mode == "expanded": item["endpoints"][0]["addresses"] = [fixture.IPV6_EXPANDED]
+            if mode == "target": item["endpoints"][0]["targetRef"] = {"uid": "other"}
+            if mode == "unknown": item["endpoints"][0]["conditions"] = {}
+            return json.dumps(item)
+        control = fixture.ipv6_slice_control(k)
+        self.assertTrue(control["absenceRefused"])
+        self.assertEqual(control["shape"]["endpoints"][0]["addresses"], ["2001:db8::1"])
+        for mode in ("service", "expanded", "target", "unknown"):
+            with self.subTest(mode=mode), self.assertRaises((ValueError, AssertionError)):
+                fixture.ipv6_slice_control(k)
+        mode = "valid"
+        from unittest.mock import patch
+        with patch.object(fixture.rollout_probe, "endpoint_boundary", return_value=None):
+            with self.assertRaises(ValueError): fixture.ipv6_slice_control(k)
+        source = inspect.getsource(fixture.run_fixture)
+        call = 'report["ipv6EndpointSlice"] = ipv6_slice_control(k)'
+        self.assertLess(source.index('report["cases"].append("empty_endpoint_slice_null")'), source.index(call))
+        self.assertLess(source.index(call), source.index('report["cases"].append("ipv6_endpoint_metadata")'))
+        self.assertLess(source.index(call), source.index("probes.create()"))
+
     def test_synthetic_runtime_detail_removes_variables_and_bounds(self):
         raw = 'failed to resolve image "private-name": https://example.invalid/token /private/path token=secret 127.0.0.1:123 sha256:' + 'a' * 64
         value = synthetic_runtime_detail(raw)
@@ -84,7 +113,7 @@ class TransactionEvidenceTests(unittest.TestCase):
         self.assertTrue(wired(text))
         for part in required:
             with self.subTest(part=part): self.assertFalse(wired(text.replace(part, "removed")))
-        self.assertEqual(len(CASES), 19)
+        self.assertEqual(len(CASES), 20)
         self.assertEqual(CASES[1:9], ["response_loss_" + str(i) for i in range(1, 9)])
 
     def test_exact_source_attempt_complete_cases_cleanup_and_identity_required(self):
@@ -94,6 +123,10 @@ class TransactionEvidenceTests(unittest.TestCase):
                   "emptyEndpointSlice": {"serviceUID": "a"*8+"-"+"a"*4+"-"+"a"*4+"-"+"a"*4+"-"+"a"*12,
                       "sliceUID": "b"*8+"-"+"b"*4+"-"+"b"*4+"-"+"b"*4+"-"+"b"*12,
                       "shape": {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv4", "endpoints": None}},
+                  "ipv6EndpointSlice": {"sliceUID": "cccccccc-cccc-cccc-cccc-cccccccccccc", "serviceName": "ipv6-control-" + "a"*32,
+                      "serviceAbsent": True, "observedAddress": fixture.IPV6_EXPANDED, "literalComparisonMiss": True, "absenceRefused": True,
+                      "shape": {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "addressType": "IPv6",
+                                "endpoints": [{"addresses": ["2001:db8::1"], "conditions": {"ready": False}}]}},
                   "imageIdentity": {"root": rollout_probe.IMAGE.split("@", 1)[1], "manifest": "sha256:" + "e" * 64,
                                     "config": "sha256:" + "f" * 64, "platform": "linux/amd64", "rootMediaType": "application/vnd.oci.image.manifest.v1+json"}}
         def check(value):
@@ -101,7 +134,8 @@ class TransactionEvidenceTests(unittest.TestCase):
         check(report)
         for key, value in (("source", "e" * 40), ("tree", "e" * 40), ("runID", "124"), ("runAttempt", "1"),
                            ("renderSHA256", "d" * 64), ("cases", CASES[:-1]), ("cases", list(reversed(CASES))),
-                           ("passed", 1), ("cleanupPassed", False), ("imageIdentity", {}), ("emptyEndpointSlice", None), ("emptyEndpointSlice", {})):
+                           ("passed", 1), ("cleanupPassed", False), ("imageIdentity", {}), ("emptyEndpointSlice", None), ("emptyEndpointSlice", {}),
+                           ("ipv6EndpointSlice", None), ("ipv6EndpointSlice", {})):
             bad = copy.deepcopy(report); bad[key] = value
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 check(bad)
@@ -110,6 +144,11 @@ class TransactionEvidenceTests(unittest.TestCase):
             with self.assertRaises(ValueError): check(bad)
         bad = copy.deepcopy(report); del bad["emptyEndpointSlice"]["shape"]["endpoints"]
         with self.assertRaises(ValueError): check(bad)
+        for key, value in (("serviceAbsent", False), ("absenceRefused", False), ("literalComparisonMiss", False),
+                           ("observedAddress", "2001:db8::1"), ("sliceUID", "unknown"), ("sliceUID", "-" * 36),
+                           ("serviceName", "other")):
+            bad = copy.deepcopy(report); bad["ipv6EndpointSlice"][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError): check(bad)
 
 
 if __name__ == "__main__":
