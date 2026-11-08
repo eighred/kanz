@@ -15,25 +15,43 @@ def evidence():
     n=0
     for case,count,code in zip(lifecycle.CASES,(2,2,0,1,2,1,0),(3,3,1,1,3,1,2)):
         jobs=[]
-        for _ in range(count):
+        for i in range(count):
             n+=1
             jobs.append({'uid':f'{n:08x}-1234-1234-1234-123456789abc','version':'a'*40,
-                         'image':'sha256:'+'c'*64,'complete':case!='wrong-cluster','topicAttempts':0,'aclAttempts':0})
+                         'image':'sha256:'+'c'*64,'complete':case!='wrong-cluster','topicAttempts':0,'aclAttempts':0,
+                         'principal':lifecycle.PRINCIPALS[i],'verifiedTopics':0 if case=='wrong-cluster' else 60,'verifiedACLs':0 if case=='wrong-cluster' else 6})
         rows.append({'case':case,'passed':True,'exit':code,'jobs':jobs,'quotaUnchanged':True})
     return rows
 
 
 class LifecycleTest(unittest.TestCase):
+    def test_runner_keeps_legacy_default_and_bounded_native_observation(self):
+        docs=topology.retained.shared.manifests('kanz/infra/tenancy/onboard-job.yaml')
+        lifecycle.runner_contract(docs)
+        for mutation in ('scope','write','subject','default','mount'):
+            bad=copy.deepcopy(docs)
+            role=next(d for d in bad if d['kind']=='Role')
+            binding=next(d for d in bad if d['kind']=='RoleBinding')
+            spec=next(d for d in bad if d['kind']=='Job')['spec']['template']['spec']
+            if mutation=='scope':role['metadata']['namespace']='tenant-bravo'
+            if mutation=='write':role['rules'][0]['verbs'].append('delete')
+            if mutation=='subject':binding['subjects'][0]['name']='other'
+            if mutation=='default':spec['containers'][0]['env'].append({'name':'TENANTCTL_KAFKA_MODE','value':'native'})
+            if mutation=='mount':spec['containers'][0]['volumeMounts'].pop()
+            with self.assertRaises(ValueError):lifecycle.runner_contract(bad)
+
     def test_evidence_requires_every_case_and_distinct_attempt(self):
         value=evidence()
-        lifecycle.validate(value,'a'*40,'sha256:'+'c'*64)
+        lifecycle.validate(value,'a'*40,'sha256:'+'c'*64,60)
         for mutation in (lambda v:v.pop(),lambda v:v.reverse(),lambda v:v[0].update(exit=0),
                          lambda v:v[0].update(quotaUnchanged=False),lambda v:v[3].update(jobs=[]),
                          lambda v:v[4]['jobs'][0].update(uid=v[0]['jobs'][0]['uid']),
                          lambda v:v[4]['jobs'][0].update(topicAttempts=1),
+                         lambda v:v[0]['jobs'][0].update(principal=lifecycle.PRINCIPALS[1]),
+                         lambda v:v[0]['jobs'][0].update(verifiedTopics=59),
                          lambda v:v[5]['jobs'][0].update(complete=True)):
             bad=copy.deepcopy(value);mutation(bad)
-            with self.assertRaises(ValueError): lifecycle.validate(bad,'a'*40,'sha256:'+'c'*64)
+            with self.assertRaises(ValueError): lifecycle.validate(bad,'a'*40,'sha256:'+'c'*64,60)
 
     def test_receipt_validator_refuses_incomplete_foreign_and_multiple_results(self):
         jq=shutil.which('jq')
