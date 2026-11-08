@@ -6,6 +6,7 @@ import qualify
 import owned_cleanup as cleanup
 import copy
 import json
+from test_lifecycle import evidence as lifecycle_evidence
 
 
 class TopologyTest(unittest.TestCase):
@@ -189,6 +190,7 @@ class TopologyTest(unittest.TestCase):
                'adminImage':'sha256:'+'c'*64,'probeImage':'sha256:'+'d'*64,'manifestSHA':digest,'clusterID':'real-cluster','brokerImage':topology.retained.REDPANDA,
                'storage':[{'broker':b,'totalBytes':20<<30,'usedBytes':1<<30,'availableBytes':19<<30,'producerReserveBytes':5<<30,'segmentAllocationBytes':topology.FALLOC_BYTES} for b in topology.BROKERS]}
         value['fixtureCapacity']=qualify.fixture_capacity(qualify.canonical_inventory(manifest)[2])
+        value['lifecycle']=lifecycle_evidence()
         value['brokerPodsBefore']={b:str(i)+'2345678-1234-1234-1234-123456789abc' for i,b in enumerate(topology.BROKERS)}
         value['brokerPodsAfter']=dict(value['brokerPodsBefore'])
         for item in value['cases']:
@@ -210,7 +212,7 @@ class TopologyTest(unittest.TestCase):
                 'probe':{'version':'a'*40,'mode':case,'expected_identity':observation['identity'],'phase':'complete','category':'ok'} if probe else {'state':'UNKNOWN'},
                 'image':{'verified':True,'dockerIdentityType':'index','podIdentityType':'manifest','dockerIdentity':value['probeImage' if probe else 'adminImage'],'podIdentity':'sha256:'+'e'*64,'config':'sha256:'+'f'*64,'platformManifest':'sha256:'+'e'*64,'contentCount':3}})
         qualify.validate_report(value,'a'*40,'b'*40,'1','1',manifest)
-        for key in ('fixtureCapacity','brokerPodsBefore','brokerPodsAfter'):
+        for key in ('fixtureCapacity','brokerPodsBefore','brokerPodsAfter','lifecycle'):
             bad=copy.deepcopy(value);bad.pop(key)
             with self.assertRaises(ValueError):qualify.validate_report(bad,'a'*40,'b'*40,'1','1',manifest)
         for mutate in (lambda x:x.pop('diagnostics'),lambda x:x['diagnostics'].pop(),lambda x:x['diagnostics'].reverse(),

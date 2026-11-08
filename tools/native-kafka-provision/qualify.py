@@ -13,6 +13,7 @@ import yaml
 import topology
 import image_custody
 import runtime_diagnostic
+import lifecycle
 
 sys.path.insert(0, str(topology.ROOT / 'tools/gateway-policy-proof'))
 import bounded_process
@@ -332,6 +333,7 @@ def validate_diagnostics(value, source):
 
 def validate_report(value, source, tree, run, attempt, manifest):
     source_identity(source, tree, run, attempt, source)
+    lifecycle.validate(value.get('lifecycle'), source, value.get('adminImage'))
     digest,count,partitions=canonical_inventory(manifest)
     if value.get('fixtureCapacity')!=fixture_capacity(partitions): raise ValueError('fixture capacity differs')
     before,after=value.get('brokerPodsBefore'),value.get('brokerPodsAfter')
@@ -564,6 +566,8 @@ def main():
                 evidence['cases'].append({'case':case,'passed':True,'observation':observation})
             cli('acme-verify','acme',principals['acme'],'verify')
             cli('bravo-verify','bravo',principals['bravo'],'verify')
+            evidence['stage']='tenantctl-lifecycle'
+            evidence['lifecycle']=lifecycle.qualify(k,scratch,name,images,source,digest,cluster,evidence['adminImage'],command,observe_image)
             # Revoke only the owned inter-broker replication policy; Kafka TLS
             # remains reachable. Pods and their retained volumes never restart.
             for case,connected in (('quorum-healthy',topology.BROKERS),('quorum-majority',topology.BROKERS[:2]),

@@ -172,6 +172,9 @@ preflight() {
       [[ "${NATIVE_KAFKA_IMAGE:-}" =~ ^ghcr\.io/eighred/kanz-kafka-provision@sha256:[0-9a-f]{64}$ ]] || missing+=("native tool image digest required")
       [[ "${NATIVE_KAFKA_MANIFEST_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || missing+=("native tracked manifest SHA256 required")
       [[ "${NATIVE_KAFKA_BROKER:-}" =~ ^[a-z0-9][a-z0-9.-]*:[1-9][0-9]{0,4}$ ]] || missing+=("native TLS bootstrap host:port required")
+      if [[ "${NATIVE_KAFKA_BROKER:-}" =~ :([1-9][0-9]{0,4})$ ]]; then
+        [ "${BASH_REMATCH[1]}" -le 65535 ] || missing+=("native TLS bootstrap port exceeds 65535")
+      fi
       [[ "${NATIVE_KAFKA_CLUSTER_ID:-}" =~ ^(redpanda\.)?[A-Za-z0-9_-]+$ && ${#NATIVE_KAFKA_CLUSTER_ID} -le 128 && "$NATIVE_KAFKA_CLUSTER_ID" != redpanda.initializing && "$NATIVE_KAFKA_CLUSTER_ID" != redpanda.unknown ]] || missing+=("native exact expected Kafka ClusterID required")
       case "${NATIVE_KAFKA_BROKER_SPIFFE_ID:-}" in
         spiffe://kanz.internal/ns/kanz-messaging/sa/kafka|spiffe://kanz.internal/ns/kanz-messaging/sa/redpanda) ;;
@@ -185,6 +188,8 @@ preflight() {
         *) missing+=("native principal encoding unsupported") ;;
       esac
       local native_sa
+      [ "${#NS}" -le 63 ] || missing+=("native tenant namespace exceeds 63 characters")
+      [[ "${KAFKA_JOB_TIMEOUT}" =~ ^[1-9][0-9]{0,2}$ ]] && [ "${KAFKA_JOB_TIMEOUT}" -le 300 ] || missing+=("native Job timeout must be 1..300 seconds")
       NATIVE_KAFKA_DURABILITY_PROFILE="${NATIVE_KAFKA_DURABILITY_PROFILE:-kafka-min-isr}"
       case "${NATIVE_KAFKA_DURABILITY_PROFILE}" in
         kafka-min-isr) ;;
@@ -195,6 +200,11 @@ preflight() {
       for native_sa in ${TENANT_SAS} ${COMPUTE_KAFKA_SAS}; do
         [[ "${native_sa}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || missing+=("native ServiceAccount label invalid")
       done
+      for native_sa in ${COMPUTE_KAFKA_SAS}; do
+        [ "${native_sa}" = archiver ] && [ "${#native_sa}" -le $((62 - ${#TENANT})) ] || missing+=("native compute principal must be the canonical archiver ServiceAccount")
+      done
+      NATIVE_KAFKA_VALIDATOR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/native-receipt.jq"
+      [ -f "${NATIVE_KAFKA_VALIDATOR}" ] || missing+=("native receipt validator unavailable")
       command -v sha256sum >/dev/null 2>&1 || missing+=("sha256sum required for native manifest custody")
       NATIVE_KAFKA_MANIFEST="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../kafka" && pwd)/topics-job.yaml"
       if command -v sha256sum >/dev/null 2>&1 && [ -f "${NATIVE_KAFKA_MANIFEST}" ]; then
@@ -453,11 +463,11 @@ native_kafka_manifest() {
 }
 
 native_kafka_tenant_job() {
-  local prin="$2" job
+  local prin="$2" job created uid
   native_kafka_manifest || { log kafka "FAILED: native immutable manifest custody"; return 1; }
   # Each explicit attempt creates a new finite Job; never delete/replace an
   # existing job on labels alone. A lost create response remains a failure.
-  job="$(kubectl create -f - -o jsonpath='{.metadata.name}' <<YAML
+  created="$(kubectl --request-timeout=15s create -f - -o json <<YAML
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -487,9 +497,47 @@ spec:
         - { name: spiffe, csi: { driver: csi.spiffe.io, readOnly: true } }
 YAML
 )" || return 1
+  jq -e --arg image "${NATIVE_KAFKA_IMAGE}" --arg principal "User:${prin}" --arg tenant "${TENANT}" --arg digest "${NATIVE_KAFKA_MANIFEST_SHA256}" --arg cluster "${NATIVE_KAFKA_CLUSTER_ID}" --arg broker "${NATIVE_KAFKA_BROKER}" --arg peer "${NATIVE_KAFKA_BROKER_SPIFFE_ID}" --arg encoding "${NATIVE_KAFKA_PRINCIPAL_ENCODING}" --arg profile "${NATIVE_KAFKA_DURABILITY_PROFILE}" '
+    .spec.backoffLimit==0 and .spec.activeDeadlineSeconds==270 and
+    (.spec.template.spec | .serviceAccountName=="kafka-provisioner" and .restartPolicy=="Never" and
+      (.containers | length)==1 and (.containers[0] | .name=="tenant" and .image==$image and
+        (.command // [])==[] and (.env // [])==[] and
+        .args==["-mode=apply", "-manifest=/manifest/topics-job.yaml", "-manifest-sha256="+$digest, "-tenant="+$tenant, "-principal="+$principal, "-principal-encoding="+$encoding, "-durability-profile="+$profile, "-broker="+$broker, "-broker-spiffe-id="+$peer, "-expected-cluster-id="+$cluster, "-workload-socket=unix:///run/spiffe/spire-agent.sock", "-timeout=240s"]))' <<<"${created}" >/dev/null || return 1
+  job="$(jq -er '.metadata.name' <<<"${created}")" || return 1
+  uid="$(jq -er '.metadata.uid' <<<"${created}")" || return 1
   [[ "${job}" =~ ^kafka-native-[a-z0-9]+$ ]] || return 1
-  wait_for_job "${MSG_NS}" "${job}" || return 1
+  [[ "${uid}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || return 1
+  # Retain this exact attempt for investigation/recovery, including timeouts.
+  # Never dump arbitrary container logs or delete/retry an ambiguous write.
+  log kafka "native attempt ${job} uid=${uid}"
+  native_kafka_observe "${job}" "${uid}" "${created}" || { log kafka "FAILED: native attempt ${job}; retained for explicit recovery"; return 1; }
   log kafka "native topic and ACL readback completed"
+}
+
+native_kafka_observe() {
+  local job="$1" uid="$2" created="$3" state pods pod pod_uid receipt after
+  local deadline=$((SECONDS + KAFKA_JOB_TIMEOUT))
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    state="$(kubectl --request-timeout=10s -n "${MSG_NS}" get job "${job}" -o json)" || return 1
+    jq -e --arg uid "${uid}" --argjson created "${created}" \
+      '.metadata.uid==$uid and .spec.template.spec==$created.spec.template.spec' <<<"${state}" >/dev/null || return 1
+    if jq -e 'any(.status.conditions[]?; .type=="Failed" and .status=="True")' <<<"${state}" >/dev/null; then return 1; fi
+    if jq -e 'any(.status.conditions[]?; .type=="Complete" and .status=="True")' <<<"${state}" >/dev/null; then
+      pods="$(kubectl --request-timeout=10s -n "${MSG_NS}" get pods -l "batch.kubernetes.io/controller-uid=${uid}" -o json)" || return 1
+      jq -e --arg phase pod --arg uid "${uid}" --arg job "${job}" --argjson created "${created}" --arg cluster '' --arg digest '' --arg profile '' -f "${NATIVE_KAFKA_VALIDATOR}" <<<"${pods}" >/dev/null || return 1
+      pod="$(jq -er '.items[0].metadata.name' <<<"${pods}")" || return 1
+      pod_uid="$(jq -er '.items[0].metadata.uid' <<<"${pods}")" || return 1
+      receipt="$(kubectl --request-timeout=10s -n "${MSG_NS}" logs "${pod}" -c tenant --limit-bytes=16384)" || return 1
+      jq -se --arg phase receipt --arg uid '' --arg job '' --argjson created '{}' --arg cluster "${NATIVE_KAFKA_CLUSTER_ID}" --arg digest "${NATIVE_KAFKA_MANIFEST_SHA256}" --arg profile "${NATIVE_KAFKA_DURABILITY_PROFILE}" -f "${NATIVE_KAFKA_VALIDATOR}" <<<"${receipt}" >/dev/null || return 1
+      after="$(kubectl --request-timeout=10s -n "${MSG_NS}" get pod "${pod}" -o json)" || return 1
+      jq -e --arg uid "${pod_uid}" --argjson before "${pods}" '.metadata.uid==$uid and .spec==$before.items[0].spec and .status.phase=="Succeeded"' <<<"${after}" >/dev/null || return 1
+      state="$(kubectl --request-timeout=10s -n "${MSG_NS}" get job "${job}" -o json)" || return 1
+      jq -e --arg uid "${uid}" --argjson created "${created}" '.metadata.uid==$uid and .spec.template.spec==$created.spec.template.spec and any(.status.conditions[]?; .type=="Complete" and .status=="True")' <<<"${state}" >/dev/null || return 1
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 # Both principal shapes, or the step is a half-grant that looks complete: the
