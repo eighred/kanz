@@ -118,7 +118,7 @@ def probe_diagnostic(text, mode, source):
     if value['version'] != source or value['mode'] != mode or value['expected_identity'] != identity:
         raise ValueError('diagnostic identity differs')
     category=value['category']
-    if value['phase'] not in ('workload_api', 'identity', 'uniqueid', 'metadata', 'estate', 'partial', 'acl', 'renewal', 'reconnect', 'quorum', 'complete') or not isinstance(category,str) or (category not in ('ok', 'input', 'broker', 'conflict', 'deadline', 'cancelled', 'unknown') and re.fullmatch(r'kafka-(?:-1|[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])',category) is None):
+    if value['phase'] not in ('workload_api', 'identity', 'uniqueid', 'metadata', 'estate', 'partial', 'acl', 'own-topic', 'foreign-topic', 'own-group', 'foreign-group', 'admin-denial', 'renewal', 'reconnect', 'quorum', 'complete') or not isinstance(category,str) or (category not in ('ok', 'input', 'broker', 'conflict', 'deadline', 'cancelled', 'unknown') and re.fullmatch(r'kafka-(?:-1|[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])',category) is None):
         raise ValueError('diagnostic category refused')
     return value
 

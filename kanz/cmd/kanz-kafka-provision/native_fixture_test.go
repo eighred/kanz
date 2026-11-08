@@ -203,21 +203,26 @@ func nativeQualification(ctx context.Context, mode string, diagnostic *nativeDia
 		return out, nil
 	}
 	value := "native-transport-" + mode
+	diagnostic.Phase = "own-topic"
 	if err = nativeProduce(ctx, client, topic, value); err != nil {
 		return out, err
 	}
 	if err = nativeReadContains(ctx, client, topic, value); err != nil {
 		return out, err
 	}
+	diagnostic.Phase = "foreign-topic"
 	if err = nativeDeniedTopic(ctx, config, foreign+".order.order"); err != nil {
 		return out, err
 	}
+	diagnostic.Phase = "own-group"
 	if err = nativeGroup(ctx, client, tenant+".fixture", topic, false); err != nil {
 		return out, err
 	}
+	diagnostic.Phase = "foreign-group"
 	if err = nativeGroup(ctx, client, foreign+".fixture", topic, true); err != nil {
 		return out, err
 	}
+	diagnostic.Phase = "admin-denial"
 	denied, err := client.CreateACLs(ctx, &kafka.CreateACLsRequest{ACLs: []kafka.ACLEntry{{ResourceType: kafka.ResourceTypeTopic, ResourceName: foreign + ".", ResourcePatternType: kafka.PatternTypePrefixed, Principal: "User:" + id, Host: "*", Operation: kafka.ACLOperationTypeRead, PermissionType: kafka.ACLPermissionTypeAllow}}})
 	if err != nil {
 		if !errors.Is(err, kafka.ClusterAuthorizationFailed) {
@@ -401,6 +406,11 @@ func nativeDeniedTopic(ctx context.Context, config *tls.Config, topic string) er
 	return nil
 }
 func nativeGroup(ctx context.Context, c *kafka.Client, group, topic string, deny bool) error {
+	if !deny {
+		if err := nativeGroupReady(ctx, c, group, topic); err != nil {
+			return err
+		}
+	}
 	r, e := c.OffsetCommit(ctx, &kafka.OffsetCommitRequest{GroupID: group, GenerationID: -1, Topics: map[string][]kafka.OffsetCommit{topic: {{Partition: 0, Offset: 1}}}})
 	if e == nil {
 		if r == nil || len(r.Topics) != 1 || len(r.Topics[topic]) != 1 {
@@ -415,6 +425,61 @@ func nativeGroup(ctx context.Context, c *kafka.Client, group, topic string, deny
 		return nil
 	}
 	return e
+}
+
+type nativeGroupReader interface {
+	FindCoordinator(context.Context, *kafka.FindCoordinatorRequest) (*kafka.FindCoordinatorResponse, error)
+	OffsetFetch(context.Context, *kafka.OffsetFetchRequest) (*kafka.OffsetFetchResponse, error)
+}
+
+// kafka-go's automatic group routing discards FindCoordinator's broker error.
+// Wait using read-only discovery/fetch before the single positive offset commit;
+// never interpret NotCoordinator as authorization evidence or retry a write.
+func nativeGroupReady(ctx context.Context, c nativeGroupReader, group, topic string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		coordinator, err := c.FindCoordinator(ctx, &kafka.FindCoordinatorRequest{Key: group, KeyType: kafka.CoordinatorKeyTypeConsumer})
+		if err == nil {
+			if coordinator == nil {
+				return provision.ErrBroker
+			}
+			err = coordinator.Error
+			if err == nil {
+				b := coordinator.Coordinator
+				if b == nil || b.NodeID < 0 || b.NodeID > 2 || b.Host != fmt.Sprintf("native-redpanda-%d.kanz-messaging.svc", b.NodeID) || b.Port != 9094 {
+					return provision.ErrConflict
+				}
+				var offsets *kafka.OffsetFetchResponse
+				offsets, err = c.OffsetFetch(ctx, &kafka.OffsetFetchRequest{GroupID: group, Topics: map[string][]int{topic: {0}}})
+				if err == nil {
+					if offsets == nil {
+						return provision.ErrBroker
+					}
+					err = offsets.Error
+					if err == nil {
+						if len(offsets.Topics) != 1 || len(offsets.Topics[topic]) != 1 || offsets.Topics[topic][0].Partition != 0 {
+							return provision.ErrBroker
+						}
+						err = offsets.Topics[topic][0].Error
+					}
+				}
+			}
+		}
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, kafka.GroupCoordinatorNotAvailable) && !errors.Is(err, kafka.GroupLoadInProgress) && !errors.Is(err, kafka.NotCoordinatorForGroup) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
 }
 
 type nativeLostAck struct {
