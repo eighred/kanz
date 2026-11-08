@@ -28,3 +28,12 @@ def collection_error(error):
     if isinstance(error,ValueError): return 'shape'
     if isinstance(error,RuntimeError): return 'command'
     return 'unexpected'
+
+
+def eviction(status):
+    if status.get('reason')!='Evicted': return 'not-observed'
+    message=status.get('message','')
+    if not isinstance(message,str) or len(message)>4096: return 'UNKNOWN'
+    if 'ephemeral-storage' in message or 'EmptyDir' in message: return 'storage'
+    if 'memory' in message: return 'memory'
+    return 'UNKNOWN'

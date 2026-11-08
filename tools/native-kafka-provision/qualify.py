@@ -219,7 +219,7 @@ def parse_probe(text, mode, source, cluster=None):
     return value
 
 
-def canonical_count(raw):
+def canonical_inventory(raw):
     # Independent fixture expectation from the existing data table, never a
     # copied topic inventory or execution of its surrounding shell program.
     if not isinstance(raw,bytes) or not 0<len(raw)<=128<<10: raise ValueError('manifest bound')
@@ -227,7 +227,7 @@ def canonical_count(raw):
     if lines.count("    done <<'EOF'")!=1 or lines.count('    EOF')!=1: raise ValueError('table boundary')
     start,end=lines.index("    done <<'EOF'"),lines.index('    EOF')
     if start>=end: raise ValueError('table order')
-    expanded=set(); rows=set()
+    expanded={}; rows=set()
     for line in lines[start+1:end]:
         if not line.strip() or line.strip().startswith('#'): continue
         fields=line.split()
@@ -239,9 +239,22 @@ def canonical_count(raw):
         if name=='dlq.archiver': continue # existing sole system-only exemption
         for topic in [name]+(['dlq.'+name] if dlq=='yes' else []):
             if topic in expanded: raise ValueError('duplicate expanded topic')
-            expanded.add(topic)
+            expanded[topic]=int(partitions) if topic==name else 3
     if 'order.order' not in rows or not 0<len(expanded)<=256: raise ValueError('table inventory')
-    return hashlib.sha256(raw).hexdigest(),len(expanded)
+    return hashlib.sha256(raw).hexdigest(),len(expanded),sum(expanded.values())
+
+
+def canonical_count(raw):
+    return canonical_inventory(raw)[:2]
+
+
+def fixture_capacity(partitions):
+    if type(partitions) is not int or partitions<=0: raise ValueError('partition capacity shape')
+    replicas=3*partitions # acme, bravo and partial; compute reuses acme.
+    if replicas*(2<<20)>topology.BROKER_MEMORY_BYTES or replicas*topology.FALLOC_BYTES+(256<<20)>=topology.DATA_VOLUME_BYTES:
+        raise ValueError('full fixture exceeds broker memory or volume budget')
+    return {'replicasPerBroker':replicas,'brokerMemoryBytes':topology.BROKER_MEMORY_BYTES,
+            'volumeBytes':topology.DATA_VOLUME_BYTES,'segmentAllocationBytes':topology.FALLOC_BYTES}
 
 
 def validate_receipt(receipt, case, cluster, digest, count):
@@ -319,13 +332,20 @@ def validate_diagnostics(value, source):
 
 def validate_report(value, source, tree, run, attempt, manifest):
     source_identity(source, tree, run, attempt, source)
-    digest,count=canonical_count(manifest)
+    digest,count,partitions=canonical_inventory(manifest)
+    if value.get('fixtureCapacity')!=fixture_capacity(partitions): raise ValueError('fixture capacity differs')
+    before,after=value.get('brokerPodsBefore'),value.get('brokerPodsAfter')
+    if not isinstance(before,dict) or set(before)!=set(topology.BROKERS) or after!=before or len(set(before.values()))!=3:
+        raise ValueError('broker continuity missing')
+    if any(not isinstance(uid,str) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',uid) for uid in before.values()):
+        raise ValueError('broker continuity shape')
     if value.get("manifestSHA")!=digest: raise ValueError("canonical manifest differs")
     if value.get("brokerImage")!=topology.retained.REDPANDA: raise ValueError("broker image differs")
     storage=value.get("storage")
     if not isinstance(storage,list) or len(storage)!=3 or {x.get("broker") for x in storage}!=set(topology.BROKERS): raise ValueError("broker storage inventory")
     for observation in storage:
-        if set(observation)!={"broker","totalBytes","usedBytes","availableBytes","producerReserveBytes"}: raise ValueError("storage shape")
+        if set(observation)!={"broker","totalBytes","usedBytes","availableBytes","producerReserveBytes","segmentAllocationBytes"}: raise ValueError("storage shape")
+        if type(observation['segmentAllocationBytes']) is not int or observation['segmentAllocationBytes']!=topology.FALLOC_BYTES: raise ValueError('allocation readback differs')
         for key in ("totalBytes","usedBytes","availableBytes","producerReserveBytes"):
             if type(observation[key]) is not int or not 0<=observation[key]<2**63: raise ValueError("storage bound")
         if not 0<observation["totalBytes"] or observation["usedBytes"]>observation["totalBytes"] or observation["availableBytes"]>observation["totalBytes"] or observation["producerReserveBytes"]==0: raise ValueError("storage values")
@@ -366,7 +386,7 @@ def broker_health(broker, items):
     statuses=pod.get('status',{}).get('containerStatuses',[])
     if not isinstance(statuses,list) or len(statuses)>2 or len({s.get('name') for s in statuses})!=len(statuses) or any(s.get('name') not in ('redpanda','svid') for s in statuses):
         raise ValueError('broker status shape')
-    result={'broker':broker,'collection':'complete','containers':[]}
+    result={'broker':broker,'collection':'complete','containers':[], 'eviction':runtime_diagnostic.eviction(pod.get('status',{}))}
     reasons=('Completed','Error','OOMKilled','ContainerCannotRun','CrashLoopBackOff','ImagePullBackOff','ErrImagePull','ContainerCreating')
     for status in statuses:
         count=status.get('restartCount')
@@ -382,11 +402,25 @@ def broker_health(broker, items):
     return result
 
 
+def stable_broker(broker,items,expected=None):
+    health=broker_health(broker,items)
+    uid=items[0].get('metadata',{}).get('uid','')
+    if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',uid) or (expected is not None and uid!=expected):
+        raise ValueError('broker pod replaced')
+    if health['eviction']!='not-observed' or len(health['containers'])!=2 or any(c['restarts']!=0 or c['state']!='running' or c['ready'] is not True for c in health['containers']):
+        raise ValueError('broker continuity unavailable')
+    return uid
+
+
 def main():
     source=command(['git','rev-parse','HEAD']); tree=command(['git','rev-parse','HEAD^{tree}'])
     run=os.environ['GITHUB_RUN_ID']; attempt=os.environ['GITHUB_RUN_ATTEMPT']
     source_identity(source, tree, run, attempt, os.environ.get('GITHUB_SHA', ''))
     evidence={'source':source,'tree':tree,'run':run,'attempt':attempt,'passed':False,'cleanup':False,'cases':[], 'diagnostics':[], 'cause':'UNKNOWN', 'brokerImage':topology.retained.REDPANDA}
+    raw=(ROOT/'kanz/infra/kafka/topics-job.yaml').read_bytes()
+    digest,count,partitions=canonical_inventory(raw)
+    evidence['manifestSHA']=digest
+    evidence['fixtureCapacity']=fixture_capacity(partitions)
     artifact=Path(os.environ['RUNNER_TEMP'])/'native-kafka-provision.json'
     name='redpanda-proof-'+uuid.uuid4().hex[:12]
     with tempfile.TemporaryDirectory(prefix='native-kafka-proof-') as directory:
@@ -480,17 +514,20 @@ def main():
                 evidence['nodeMemoryBefore']=runtime_diagnostic.memory_events(command(['docker','exec',name+'-control-plane','cat','/sys/fs/cgroup/memory.events'],timeout=5,stdout_limit=4096))
             except Exception as error:
                 evidence['nodeMemoryBefore']={'collectionError':runtime_diagnostic.collection_error(error)}
-            raw=(ROOT/'kanz/infra/kafka/topics-job.yaml').read_bytes()
-            if not 0<len(raw)<=128<<10: raise ValueError('manifest bound')
-            digest,count=canonical_count(raw); evidence['manifestSHA']=digest
+            evidence['brokerPodsBefore']={}
+            for broker in topology.BROKERS:
+                pods=json.loads(k('-n','kanz-messaging','get','pods','-l','native-broker='+broker,'-o','json'))
+                evidence['brokerPodsBefore'][broker]=stable_broker(broker,pods.get('items'))
             for ns in ('kanz-messaging','kanz-services','tenant-acme','tenant-bravo'):
                 apply([{'apiVersion':'v1','kind':'ConfigMap','metadata':{'name':'native-topics','namespace':ns},'immutable':True,'data':{'topics-job.yaml':raw.decode()}}])
             evidence['storage']=[]
             for broker in topology.BROKERS:
+                allocation=k('-n','kanz-messaging','exec','deployment/'+broker,'-c','redpanda','--','rpk','cluster','config','get','segment_fallocation_step','--ignore-profile','-X','admin.hosts=127.0.0.1:9644')
+                if allocation!=str(topology.FALLOC_BYTES): raise ValueError('fixture segment allocation readback differs')
                 reserve=topology.retained.storage_reserve(k('-n','kanz-messaging','exec','deployment/'+broker,'-c','redpanda','--','rpk','cluster','config','get','storage_min_free_bytes','--ignore-profile','-X','admin.hosts=127.0.0.1:9644'))
                 capacity=topology.retained.storage_capacity(k('-n','kanz-messaging','exec','deployment/'+broker,'-c','redpanda','--','df','-Pk','/var/lib/redpanda/data'))
                 topology.retained.require_capacity(capacity,reserve)
-                evidence['storage'].append(dict(capacity,broker=broker,producerReserveBytes=reserve))
+                evidence['storage'].append(dict(capacity,broker=broker,producerReserveBytes=reserve,segmentAllocationBytes=int(allocation)))
             evidence['stage']='discover'
             observation=parse_probe(execute(job('discover','kanz-messaging','kafka-provisioner',images['probe'],mode='discover')),'discover',source)
             cluster=observation['cluster_id']; evidence['clusterID']=cluster
@@ -535,6 +572,10 @@ def main():
                 apply(topology.policies(connected))
                 observation=parse_probe(execute(job(case,'kanz-messaging','kafka-provisioner',images['probe'],mode=case,cluster=cluster)),case,source,cluster)
                 evidence['cases'].append({'case':case,'passed':True,'observation':observation})
+            evidence['brokerPodsAfter']={}
+            for broker in topology.BROKERS:
+                pods=json.loads(k('-n','kanz-messaging','get','pods','-l','native-broker='+broker,'-o','json'))
+                evidence['brokerPodsAfter'][broker]=stable_broker(broker,pods.get('items'),evidence['brokerPodsBefore'][broker])
             evidence['passed']=True
         except Exception as error:
             evidence['errorCategory']=type(error).__name__ if isinstance(error,(ValueError,RuntimeError,TimeoutError)) else 'unexpected'
@@ -543,7 +584,9 @@ def main():
                 for broker in topology.BROKERS:
                     try:
                         pods=json.loads(k('-n','kanz-messaging','get','pods','-l','native-broker='+broker,'-o','json',timeout=5))
-                        evidence['brokerHealth'].append(broker_health(broker,pods.get('items')))
+                        items=pods.get('items')
+                        if not isinstance(items,list) or not 0<len(items)<=4: raise ValueError('broker pod inventory bound')
+                        evidence['brokerHealth'].append({'broker':broker,'pods':[broker_health(broker,[pod]) for pod in items]})
                     except Exception as diagnostic_error:
                         evidence['brokerHealth'].append({'broker':broker,'collection':'unavailable','collectionError':runtime_diagnostic.collection_error(diagnostic_error)})
                 try:

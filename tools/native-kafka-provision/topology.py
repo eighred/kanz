@@ -23,6 +23,9 @@ CLIENTS = {
 }
 IDENTITIES = (ADMIN_ID,) + tuple('spiffe://kanz.internal/ns/' + ns + '/sa/' + sa for ns, sa in CLIENTS.values())
 BROKERS = tuple('native-redpanda-' + str(i) for i in range(3))
+BROKER_MEMORY_BYTES = 2 << 30
+DATA_VOLUME_BYTES = 2 << 30
+FALLOC_BYTES = 1 << 20
 
 
 def broker_principal(identity):
@@ -64,6 +67,7 @@ def broker_objects():
         bootstrap = {'kafka_enable_authorization': True, 'superusers': [broker_principal(ADMIN_ID)],
                      'auto_create_topics_enabled': False, 'default_topic_replications': 3,
                      'write_caching_default': 'false',
+                     'segment_fallocation_step': FALLOC_BYTES,
                      'kafka_mtls_principal_mapping_rules': [mapping(x) for x in IDENTITIES]}
         cm = copy.deepcopy(base)
         cm['metadata']['name'] = name
@@ -73,9 +77,15 @@ def broker_objects():
         pod['spec']['selector']['matchLabels'] = {'native-broker': name}
         pod['spec']['template']['metadata']['labels'] = {'native-broker': name, 'app': name}
         spec = pod['spec']['template']['spec']
-        next(c for c in spec['containers'] if c['name']=='redpanda')['args'].append('--unsafe-bypass-fsync=false')
+        broker=next(c for c in spec['containers'] if c['name']=='redpanda')
+        broker['args'].append('--unsafe-bypass-fsync=false')
+        broker['args'][broker['args'].index('--memory')+1]='2G'
+        broker['resources']['requests']['memory']='2Gi'
+        broker['resources']['limits']['memory']='3Gi'
         next(v for v in spec['volumes'] if v['name'] == 'config')['configMap']['name'] = name
-        # Each pod has its own existing bounded emptyDir; no shared PVC/history.
+        # The full table creates 693 replicas per broker across three tenants.
+        # Reserve memory for them and use small allocation steps for the sparse
+        # functional fixture; retain the finite volume and all durability gates.
         svc = {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': name, 'namespace': 'kanz-messaging'},
                'spec': {'selector': {'native-broker': name}, 'publishNotReadyAddresses': True,
                         'ports': [{'name': 'kafka', 'port': 9094}, {'name': 'rpc', 'port': 33145}]}}

@@ -9,6 +9,27 @@ import json
 
 
 class TopologyTest(unittest.TestCase):
+    def test_full_inventory_fits_finite_fixture(self):
+        raw=(topology.ROOT/'kanz/infra/kafka/topics-job.yaml').read_bytes()
+        _,count,partitions=qualify.canonical_inventory(raw)
+        self.assertEqual((count,partitions),(60,231))
+        self.assertEqual(qualify.fixture_capacity(partitions)['replicasPerBroker'],693)
+        for bad in (True,0,1000):
+            with self.assertRaises(ValueError):qualify.fixture_capacity(bad)
+
+    def test_broker_continuity_refuses_replacement_restart_and_eviction(self):
+        broker=topology.BROKERS[0]; uid='12345678-1234-1234-1234-123456789abc'
+        pod={'metadata':{'uid':uid,'labels':{'native-broker':broker}},'spec':{'containers':[
+            {'name':'redpanda','image':topology.retained.REDPANDA},{'name':'svid','image':'unused'}]},
+            'status':{'containerStatuses':[{'name':name,'ready':True,'restartCount':0,'state':{'running':{}}} for name in ('redpanda','svid')]}}
+        self.assertEqual(qualify.stable_broker(broker,[pod]),uid)
+        for mutate in (lambda x:x['metadata'].update(uid='87654321-1234-1234-1234-123456789abc'),
+                       lambda x:x['status']['containerStatuses'][0].update(restartCount=1),
+                       lambda x:x['status'].update(reason='Evicted',message='Usage of EmptyDir volume SECRET')):
+            bad=copy.deepcopy(pod);mutate(bad)
+            with self.assertRaises(ValueError):qualify.stable_broker(broker,[bad],uid)
+        with self.assertRaises(ValueError):qualify.stable_broker(broker,[pod,pod],uid)
+
     def test_broker_failure_health_never_retains_messages(self):
         broker=topology.BROKERS[0]
         pod={'metadata':{'labels':{'native-broker':broker}},'spec':{'containers':[
@@ -118,6 +139,10 @@ class TopologyTest(unittest.TestCase):
             self.assertEqual(spec['serviceAccountName'], 'redpanda')
             self.assertEqual(next(c for c in spec['containers'] if c['name'] == 'redpanda')['image'], topology.retained.REDPANDA)
             self.assertIn('--unsafe-bypass-fsync=false',next(c for c in spec['containers'] if c['name']=='redpanda')['args'])
+            broker=next(c for c in spec['containers'] if c['name']=='redpanda')
+            self.assertEqual(broker['args'][broker['args'].index('--memory')+1],'2G')
+            self.assertEqual(broker['resources']['requests']['memory'],'2Gi')
+            self.assertEqual(broker['resources']['limits']['memory'],'3Gi')
             self.assertEqual(next(v for v in spec['volumes'] if v['name'] == 'data'), {'name':'data','emptyDir':{'sizeLimit':'2Gi'}})
         configs = [d for d in docs if d['kind'] == 'ConfigMap' and d['metadata']['name'] in topology.BROKERS]
         self.assertEqual(len(configs), 3)
@@ -131,6 +156,7 @@ class TopologyTest(unittest.TestCase):
             self.assertEqual(bootstrap['superusers'], [r'spiffe:\/\/kanz.internal\/ns\/kanz-messaging\/sa\/kafka-provisioner'])
             self.assertEqual(bootstrap['default_topic_replications'], 3)
             self.assertEqual(bootstrap['write_caching_default'],'false')
+            self.assertEqual(bootstrap['segment_fallocation_step'],topology.FALLOC_BYTES)
             self.assertFalse(bootstrap['auto_create_topics_enabled'])
             self.assertEqual(bootstrap['kafka_mtls_principal_mapping_rules'], [topology.mapping(x) for x in topology.IDENTITIES])
 
@@ -161,7 +187,10 @@ class TopologyTest(unittest.TestCase):
         value={'source':'a'*40,'tree':'b'*40,'run':'1','attempt':'1','passed':True,'cleanup':True,
                'cases':[{'case':case,'passed':True} for case in qualify.CASES],
                'adminImage':'sha256:'+'c'*64,'probeImage':'sha256:'+'d'*64,'manifestSHA':digest,'clusterID':'real-cluster','brokerImage':topology.retained.REDPANDA,
-               'storage':[{'broker':b,'totalBytes':20<<30,'usedBytes':1<<30,'availableBytes':19<<30,'producerReserveBytes':5<<30} for b in topology.BROKERS]}
+               'storage':[{'broker':b,'totalBytes':20<<30,'usedBytes':1<<30,'availableBytes':19<<30,'producerReserveBytes':5<<30,'segmentAllocationBytes':topology.FALLOC_BYTES} for b in topology.BROKERS]}
+        value['fixtureCapacity']=qualify.fixture_capacity(qualify.canonical_inventory(manifest)[2])
+        value['brokerPodsBefore']={b:str(i)+'2345678-1234-1234-1234-123456789abc' for i,b in enumerate(topology.BROKERS)}
+        value['brokerPodsAfter']=dict(value['brokerPodsBefore'])
         for item in value['cases']:
             case=item['case']
             if case in qualify.PROBES:
@@ -181,6 +210,9 @@ class TopologyTest(unittest.TestCase):
                 'probe':{'version':'a'*40,'mode':case,'expected_identity':observation['identity'],'phase':'complete','category':'ok'} if probe else {'state':'UNKNOWN'},
                 'image':{'verified':True,'dockerIdentityType':'index','podIdentityType':'manifest','dockerIdentity':value['probeImage' if probe else 'adminImage'],'podIdentity':'sha256:'+'e'*64,'config':'sha256:'+'f'*64,'platformManifest':'sha256:'+'e'*64,'contentCount':3}})
         qualify.validate_report(value,'a'*40,'b'*40,'1','1',manifest)
+        for key in ('fixtureCapacity','brokerPodsBefore','brokerPodsAfter'):
+            bad=copy.deepcopy(value);bad.pop(key)
+            with self.assertRaises(ValueError):qualify.validate_report(bad,'a'*40,'b'*40,'1','1',manifest)
         for mutate in (lambda x:x.pop('diagnostics'),lambda x:x['diagnostics'].pop(),lambda x:x['diagnostics'].reverse(),
                        lambda x:x['diagnostics'][0].update(imageVerified=False),lambda x:x['diagnostics'][0].update(collection='image'),
                        lambda x:x['diagnostics'][0]['container'].update(imageBound=False),lambda x:x['diagnostics'][0]['container'].update(exitCode=1),

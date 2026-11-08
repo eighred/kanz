@@ -11,7 +11,7 @@ func nativeDurabilityBoundary(files map[string]string) bool {
 	for key, anchors := range map[string][]string{
 		"plan":      {`ConfigName: "write.caching", ConfigValue: "false"`, `ConfigName: "min.insync.replicas", ConfigValue: "2"`},
 		"fixture":   {"RequiredAcks: kafka.RequireAll", "nativeQuorum(ctx, client, mode)", `nativeReadContains(ctx, c, topic, "quorum-majority")`},
-		"qualifier": {"('quorum-minority',())", "('quorum-majority',topology.BROKERS[:2])", "apply(topology.policies(connected))", "-durability-profile=redpanda-raft"},
+		"qualifier": {"('quorum-minority',())", "('quorum-majority',topology.BROKERS[:2])", "apply(topology.policies(connected))", "-durability-profile=redpanda-raft", "stable_broker(broker,pods.get('items'),evidence['brokerPodsBefore'][broker])", "allocation!=str(topology.FALLOC_BYTES)"},
 		"topology":  {"--unsafe-bypass-fsync=false", "'write_caching_default': 'false'"},
 	} {
 		for _, anchor := range anchors {
@@ -46,6 +46,8 @@ func TestNativeDurabilityQualificationAndMutations(t *testing.T) {
 		{"fixture", `nativeReadContains(ctx, c, topic, "quorum-majority")`, `nativeReadContains(ctx, c, topic, "unrelated")`},
 		{"qualifier", "('quorum-minority',())", "('quorum-minority',topology.BROKERS)"},
 		{"qualifier", "apply(topology.policies(connected))", "apply(topology.policies())"},
+		{"qualifier", "stable_broker(broker,pods.get('items'),evidence['brokerPodsBefore'][broker])", "stable_broker(broker,pods.get('items'))"},
+		{"qualifier", "allocation!=str(topology.FALLOC_BYTES)", "False"},
 		{"topology", "--unsafe-bypass-fsync=false", "--unsafe-bypass-fsync=true"},
 		{"plan", `ConfigName: "write.caching", ConfigValue: "false"`, `ConfigName: "write.caching", ConfigValue: "true"`},
 		{"plan", `ConfigName: "min.insync.replicas", ConfigValue: "2"`, `ConfigName: "min.insync.replicas", ConfigValue: "1"`},

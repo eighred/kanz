@@ -21,3 +21,8 @@ class RuntimeDiagnosticTest(unittest.TestCase):
         self.assertEqual(diagnostic.collection_error(ValueError('SECRET')),'shape')
         self.assertEqual(diagnostic.collection_error(RuntimeError('SECRET')),'command')
         self.assertEqual(diagnostic.collection_error(Exception('SECRET')),'unexpected')
+
+    def test_eviction_drops_status_message(self):
+        self.assertEqual(diagnostic.eviction({'reason':'Evicted','message':'Usage of EmptyDir volume SECRET exceeds limit'}),'storage')
+        self.assertEqual(diagnostic.eviction({'reason':'Evicted','message':'node low on memory SECRET'}),'memory')
+        self.assertEqual(diagnostic.eviction({'reason':'Evicted','message':'SECRET'}),'UNKNOWN')

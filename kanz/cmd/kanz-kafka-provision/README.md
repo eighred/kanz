@@ -171,6 +171,19 @@ source, manifest, images, ClusterID, complete case inventory, and three broker
 capacity observations. Unsupported mapping or insufficient storage refuses;
 synthetic CN certificates and relaxed broker reserves are not substitutes.
 
+The full table expands to 231 partitions per tenant, or 693 replicas per broker
+for acme, bravo and the partial-recovery tenant. Each disposable broker receives
+2 GiB of process memory within a 3 GiB container limit. The sparse functional
+fixture explicitly uses a 1 MiB `segment_fallocation_step`, with exact broker
+configuration readback, so unused segment preallocation fits its finite 2 GiB
+data volume. The manifest-derived capacity check refuses growth beyond those
+budgets. Broker reserve thresholds, RF3, fsync and `acks=all` remain enforced.
+The same three pod UIDs and zero container restarts must survive all cases;
+replacement or eviction cannot confer acceptance. These settings qualify
+functional behavior, not production capacity or throughput. See Redpanda's
+[sizing guidance](https://docs.redpanda.com/streaming/current/deploy/redpanda/manual/sizing/)
+and [segment allocation property](https://docs.redpanda.com/streaming/current/reference/properties/cluster-properties/#segment_fallocation_step).
+
 Missing/skipped native qualification cannot satisfy the release requirement.
 Actual Linux qualification, all 35 image builds, and explicit deployment/cutover
 review remain separate from local tests. No production acceptance, disaster
