@@ -296,8 +296,14 @@ func checkTopic(ctx context.Context, api Admin, want Topic, clusterID, profile s
 		if p.Error != nil && !errors.Is(p.Error, kafka.LeaderNotAvailable) {
 			return false, brokerCause{p.Error}
 		}
-		if p.ID < 0 || p.ID >= want.Partitions || seen[p.ID] || len(p.Replicas) != 3 || len(p.Isr) > 3 {
-			return false, conflictCause{"partition-shape"}
+		if p.ID < 0 || p.ID >= want.Partitions || seen[p.ID] {
+			return false, conflictCause{"partition-id"}
+		}
+		if len(p.Replicas) != 3 {
+			return false, conflictCause{"replication-factor"}
+		}
+		if len(p.Isr) > 3 {
+			return false, conflictCause{"isr-count"}
 		}
 		replicas, isr := make(map[int]bool), make(map[int]bool)
 		for _, broker := range p.Replicas {
