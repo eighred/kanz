@@ -12,6 +12,7 @@ import uuid
 import yaml
 import topology
 import image_custody
+import runtime_diagnostic
 
 sys.path.insert(0, str(topology.ROOT / 'tools/gateway-policy-proof'))
 import bounded_process
@@ -475,6 +476,10 @@ def main():
             evidence['stage']='brokers'
             apply(topology.broker_objects()); apply(topology.policies())
             for broker in topology.BROKERS: k('-n','kanz-messaging','rollout','status','deployment/'+broker,'--timeout=240s')
+            try:
+                evidence['nodeMemoryBefore']=runtime_diagnostic.memory_events(command(['docker','exec',name+'-control-plane','cat','/sys/fs/cgroup/memory.events'],timeout=5,stdout_limit=4096))
+            except Exception as error:
+                evidence['nodeMemoryBefore']={'collectionError':runtime_diagnostic.collection_error(error)}
             raw=(ROOT/'kanz/infra/kafka/topics-job.yaml').read_bytes()
             if not 0<len(raw)<=128<<10: raise ValueError('manifest bound')
             digest,count=canonical_count(raw); evidence['manifestSHA']=digest
@@ -539,8 +544,19 @@ def main():
                     try:
                         pods=json.loads(k('-n','kanz-messaging','get','pods','-l','native-broker='+broker,'-o','json',timeout=5))
                         evidence['brokerHealth'].append(broker_health(broker,pods.get('items')))
-                    except Exception:
-                        evidence['brokerHealth'].append({'broker':broker,'collection':'unavailable'})
+                    except Exception as diagnostic_error:
+                        evidence['brokerHealth'].append({'broker':broker,'collection':'unavailable','collectionError':runtime_diagnostic.collection_error(diagnostic_error)})
+                try:
+                    evidence['nodeMemoryAfter']=runtime_diagnostic.memory_events(command(['docker','exec',name+'-control-plane','cat','/sys/fs/cgroup/memory.events'],timeout=5,stdout_limit=4096))
+                except Exception as diagnostic_error:
+                    evidence['nodeMemoryAfter']={'collectionError':runtime_diagnostic.collection_error(diagnostic_error)}
+                evidence['brokerLogClasses']=[]
+                for broker in topology.BROKERS:
+                    try:
+                        raw=k('-n','kanz-messaging','logs','deployment/'+broker,'-c','redpanda','--tail=100','--limit-bytes=32768',timeout=5)
+                        evidence['brokerLogClasses'].append({'broker':broker,**runtime_diagnostic.broker_log(raw)})
+                    except Exception as diagnostic_error:
+                        evidence['brokerLogClasses'].append({'broker':broker,'collectionError':runtime_diagnostic.collection_error(diagnostic_error)})
             raise RuntimeError('native qualification failed') from None
         finally:
             if owned:
